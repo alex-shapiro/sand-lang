@@ -1,0 +1,279 @@
+//! A minimal Amazon S3 client using AWS Signature Version 4.
+//!
+//! Supports PutObject, GetObject, HeadObject, DeleteObject and
+//! ListObjectsV2 (with pagination), against AWS or any S3-compatible
+//! endpoint (path-style addressing).
+
+import crypto
+import http
+import regex
+import time
+import uri
+
+pub struct Credentials {
+    access_key: str
+    secret_key: str
+    session_token: str? = None
+}
+
+pub struct Client {
+    region: str
+    credentials: Credentials
+    /// e.g. `https://s3.amazonaws.com` or `http://127.0.0.1:9000`
+    endpoint: str = "https://s3.amazonaws.com"
+    /// Use `endpoint/bucket/key` instead of `bucket.endpoint/key`.
+    path_style: bool = false
+    timeout: duration = 30s
+
+    pub fn put_object(
+        self,
+        bucket: str,
+        key: str,
+        body: bytes,
+        content_type: str = "application/octet-stream",
+    ) -> Result<()> {
+        let resp = self.send("PUT", bucket, key, [], ["content-type": content_type], body)?
+        check(resp)?
+        Ok(())
+    }
+
+    pub fn get_object(self, bucket: str, key: str) -> Result<bytes> {
+        let resp = self.send("GET", bucket, key, [], [:], b"")?
+        Ok(check(resp)?.body)
+    }
+
+    pub fn head_object(self, bucket: str, key: str) -> Result<ObjectInfo?> {
+        let resp = self.send("HEAD", bucket, key, [], [:], b"")?
+        if resp.status == 404 {
+            return Ok(None)
+        }
+        let r = check(resp)?
+        Ok(Some(ObjectInfo {
+            key,
+            size: r.header("content-length").and_then(s => s.parse_int()) ?? 0,
+            etag: (r.header("etag") ?? "").replace("\"", ""),
+            last_modified: r.header("last-modified") ?? "",
+        }))
+    }
+
+    pub fn delete_object(self, bucket: str, key: str) -> Result<()> {
+        let resp = self.send("DELETE", bucket, key, [], [:], b"")?
+        check(resp)?
+        Ok(())
+    }
+
+    /// Lists all objects under `prefix`, following continuation tokens.
+    pub fn list_objects(self, bucket: str, prefix: str = "") -> Result<[ObjectInfo]> {
+        let objects = []
+        var token: str? = None
+        loop {
+            let query = [("list-type", "2"), ("prefix", prefix)]
+            if let Some(t) = token {
+                query.push(("continuation-token", t))
+            }
+            let resp = check(self.send("GET", bucket, "", query, [:], b"")?)?
+            let xml = resp.text()?
+            for block in xml_blocks(xml, "Contents") {
+                objects.push(ObjectInfo {
+                    key: xml_unescape(xml_text(block, "Key") ?? ""),
+                    size: xml_text(block, "Size").and_then(s => s.parse_int()) ?? 0,
+                    etag: (xml_text(block, "ETag") ?? "").replace("&quot;", "").replace("\"", ""),
+                    last_modified: xml_text(block, "LastModified") ?? "",
+                })
+            }
+            if xml_text(xml, "IsTruncated") != Some("true") {
+                break
+            }
+            token = xml_text(xml, "NextContinuationToken")
+            if token.is_none() {
+                break
+            }
+        }
+        Ok(objects)
+    }
+
+    fn send(
+        self,
+        method: str,
+        bucket: str,
+        key: str,
+        query: [(str, str)],
+        extra: [str: str],
+        body: bytes,
+    ) -> Result<http.Response> {
+        let base = uri.parse(self.endpoint)?
+        let host_base = base.authority() ?? ""
+        let (host, path) = if self.path_style {
+            (host_base, "/" + bucket + (if key.is_empty() { "" } else { "/" + key }))
+        } else {
+            ("{bucket}.{host_base}", "/" + key)
+        }
+        let request = SignedRequest {
+            method,
+            host,
+            path,
+            query,
+            headers: extra,
+            payload: body,
+        }
+        let headers = sign(request, self.credentials, self.region, time.now())
+        var url = "{base.scheme}://{host}{uri.encode_path(path)}"
+        if not query.is_empty() {
+            url += "?" + canonical_query(query)
+        }
+        http.request(
+            method,
+            url,
+            headers: headers,
+            body: body,
+            timeout: self.timeout,
+            follow_redirects: false,
+        )
+    }
+}
+
+pub struct ObjectInfo {
+    key: str
+    size: int
+    etag: str
+    last_modified: str
+}
+
+pub struct SignedRequest {
+    method: str
+    host: str
+    path: str
+    query: [(str, str)]
+    headers: [str: str]
+    payload: bytes
+}
+
+fn check(resp: http.Response) -> Result<http.Response> {
+    if resp.ok() {
+        return Ok(resp)
+    }
+    let text = resp.text() ?? ""
+    let code = xml_text(text, "Code") ?? "HTTP{resp.status}"
+    let message = xml_text(text, "Message") ?? "request failed with status {resp.status}"
+    Err(error("{code}: {message}", kind: "http"))
+}
+
+fn hex_sha256(data: bytes) -> str { crypto.sha256(data).to_hex() }
+
+fn hmac(key: bytes, msg: str) -> bytes { crypto.hmac_sha256(key, msg.bytes()) }
+
+pub fn canonical_query(query: [(str, str)]) -> str {
+    query
+        .map(p => (uri.encode_component(p.0), uri.encode_component(p.1)))
+        .sorted()
+        .map(p => "{p.0}={p.1}")
+        .join("&")
+}
+
+/// Computes the SigV4 headers (including `authorization`) for a request.
+pub fn sign(req: SignedRequest, creds: Credentials, region: str, now: time.DateTime) -> [str: str] {
+    let amz_date = now.format("%Y%m%dT%H%M%SZ")
+    let date = now.format("%Y%m%d")
+    let payload_hash = hex_sha256(req.payload)
+
+    let headers: [str: str] = [:]
+    for (k, v) in req.headers {
+        headers[k.to_lower()] = v.trim()
+    }
+    headers["host"] = req.host
+    headers["x-amz-date"] = amz_date
+    headers["x-amz-content-sha256"] = payload_hash
+    if let Some(token) = creds.session_token {
+        headers["x-amz-security-token"] = token
+    }
+
+    let names = headers.keys().sorted()
+    let canonical_headers = names.map(n => "{n}:{headers[n]}\n").join()
+    let signed_headers = ";".join(names)
+    let canonical_request = "\n".join([
+        req.method,
+        uri.encode_path(req.path),
+        canonical_query(req.query),
+        canonical_headers,
+        signed_headers,
+        payload_hash,
+    ])
+
+    let scope = "{date}/{region}/s3/aws4_request"
+    let string_to_sign = "\n".join([
+        "AWS4-HMAC-SHA256",
+        amz_date,
+        scope,
+        hex_sha256(canonical_request.bytes()),
+    ])
+
+    let k_date = hmac("AWS4{creds.secret_key}".bytes(), date)
+    let k_region = hmac(k_date, region)
+    let k_service = hmac(k_region, "s3")
+    let k_signing = hmac(k_service, "aws4_request")
+    let signature = hmac(k_signing, string_to_sign).to_hex()
+
+    headers["authorization"] = "AWS4-HMAC-SHA256 Credential={creds.access_key}/{scope}, SignedHeaders={signed_headers}, Signature={signature}"
+    headers.remove("host")
+    headers
+}
+
+// ---------------------------------------------------------------------------
+// Just enough XML for S3 responses.
+
+fn xml_blocks(xml: str, tag: str) -> [str] {
+    let re = regex.new("(?s)<{tag}>(.*?)</{tag}>").unwrap()
+    re.captures_all(xml).filter_map(c => c.text(1))
+}
+
+fn xml_text(xml: str, tag: str) -> str? {
+    xml_blocks(xml, tag).first()
+}
+
+fn xml_unescape(s: str) -> str {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+}
+
+// ---------------------------------------------------------------------------
+
+test "signature matches the AWS documentation example" {
+    // https://docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-header-based-auth.html
+    let creds = Credentials {
+        access_key: "AKIAIOSFODNN7EXAMPLE",
+        secret_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    }
+    let req = SignedRequest {
+        method: "GET",
+        host: "examplebucket.s3.amazonaws.com",
+        path: "/test.txt",
+        query: [],
+        headers: ["Range": "bytes=0-9"],
+        payload: b"",
+    }
+    let now = time.parse("2013-05-24T00:00:00Z").unwrap()
+    let headers = sign(req, creds, "us-east-1", now)
+    let auth = headers["authorization"]
+    assert(
+        auth.starts_with("AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request"),
+    )
+    assert(auth.contains("SignedHeaders=host;range;x-amz-content-sha256;x-amz-date"))
+    assert(
+        auth.ends_with("Signature=f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41"),
+        auth,
+    )
+    assert(headers["x-amz-date"] == "20130524T000000Z")
+}
+
+test "canonical query is sorted and encoded" {
+    assert(canonical_query([("prefix", "a b"), ("list-type", "2")]) == "list-type=2&prefix=a%20b")
+}
+
+test "xml helpers" {
+    let xml = "<R><Contents><Key>a&amp;b</Key></Contents><Contents><Key>c</Key></Contents></R>"
+    assert(xml_blocks(xml, "Contents").len() == 2)
+    assert(xml_unescape(xml_text(xml, "Key").unwrap()) == "a&b")
+}

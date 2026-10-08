@@ -1,0 +1,183 @@
+=== clean code has no warnings
+fn add(a: int, b: int) -> int { a + b }
+print(add(1, 2))
+--- lint
+
+=== unused variable
+fn f() -> int {
+    let unused = 5
+    let _ignored = 6
+    1
+}
+print(f())
+--- lint
+2: unused-variable
+
+=== unused parameter
+fn f(a: int, _b: int, c: int) -> int { a }
+print(f(1, 2, 3))
+--- lint
+1: unused-variable
+
+=== unused import
+import math
+import json
+print(math.pi)
+--- lint
+2: unused-import
+
+=== unused private function
+fn helper() -> int { 1 }
+pub fn api() -> int { 2 }
+fn used() -> int { 3 }
+print(used())
+--- lint
+1: unused-function
+
+=== unnecessary var
+var x = 1
+var y = 1
+y += 1
+print(x + y)
+--- lint
+1: unnecessary-var
+
+=== unused result
+import fs
+fn f() -> Result<int> { Ok(1) }
+f()
+fs.write_text("x.txt", "data")
+let r = f()
+r.unwrap()
+--- lint
+3: unused-result
+4: unused-result
+
+=== unreachable code
+fn f(x: int) -> int {
+    return x
+    print("never")
+}
+fn g() {
+    for i in 0..3 {
+        break
+        print(i)
+    }
+}
+print(f(1))
+g()
+--- lint
+3: unreachable-code
+8: unreachable-code
+
+=== naming conventions
+struct bad_name { x: int }
+enum Good { lower_variant }
+fn BadFn() {}
+let BadVar = 1
+print(BadVar)
+BadFn()
+print(bad_name { x: 1 })
+print(Good.lower_variant)
+--- lint
+1: naming
+2: naming
+3: naming
+4: naming
+
+=== bool comparison
+let ok = true
+if ok == true { print("yes") }
+if false != ok { print("no") }
+--- lint
+2: bool-comparison
+3: bool-comparison
+
+=== self assignment
+var x = 1
+x = x
+print(x)
+--- lint
+2: self-assignment
+
+=== len zero
+let xs = [1]
+if xs.len() == 0 { print("empty") }
+if "s".len() == 0 { print("empty") }
+--- lint
+2: len-zero
+3: len-zero
+
+=== empty block
+let x = 1
+if x > 0 {
+} else {
+    print("x")
+}
+while false {}
+--- lint
+2: empty-block
+6: empty-block
+
+=== todo
+fn f() -> int { todo() }
+print(f())
+--- lint
+1: todo
+
+=== suppression comments
+// lint: allow(unused-variable)
+let a = 1
+let b = 2
+--- lint
+3: unused-variable
+
+=== file level suppression
+//! lint: allow(unused-variable, naming)
+let A = 1
+let b = 2
+--- lint
+
+=== shadowed variable with different type
+let x = 1
+print(x)
+let x = "one"
+print(x)
+--- lint
+3: shadowed-variable
+
+=== shadowing with same type is fine
+let x = 1
+let x = x + 1
+print(x)
+--- lint
+
+=== unused variable in pattern
+let (a, b) = (1, 2)
+print(a)
+match Some(3) {
+    Some(v) => print("some")
+    None => print("none")
+}
+--- lint
+1: unused-variable
+4: unused-variable
+
+=== variables used in closures count as used
+let n = 2
+let f = x => x * n
+print(f(1))
+--- lint
+
+=== multiple lints in one function
+fn f() {
+    var count = 0
+    let unused = 1
+    return
+    print(count)
+}
+f()
+--- lint
+2: unnecessary-var
+3: unused-variable
+5: unreachable-code

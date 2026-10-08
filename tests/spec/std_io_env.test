@@ -1,0 +1,61 @@
+=== read lines from stdin
+import io
+while let Some(line) = io.read_line()? {
+    print("got: {line}")
+}
+--- stdin
+first
+second
+--- stdout
+got: first
+got: second
+
+=== read all stdin
+import io
+let text = io.read_all()?
+print(text.lines().len())
+--- stdin
+a
+b
+c
+--- stdout
+3
+
+=== write without newline
+import io
+io.write("a")
+io.write("b\n")
+io.ewrite("err\n")
+--- stdout
+ab
+--- stderr
+err
+
+=== eprint writes to stderr
+eprint("to stderr")
+print("to stdout")
+--- stdout
+to stdout
+--- stderr
+to stderr
+
+=== environment variables
+import env
+print(env.get("GREETING"))
+print(env.get("MISSING"))
+print(env.vars())
+--- env
+GREETING=hello
+OTHER=x
+--- stdout
+Some("hello")
+None
+["GREETING": "hello", "OTHER": "x"]
+
+=== script arguments
+import env
+print(env.args())
+--- args
+one two
+--- stdout
+["one", "two"]

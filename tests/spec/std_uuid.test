@@ -1,0 +1,45 @@
+=== v4 format
+import uuid
+import regex
+let id = uuid.v4()
+let r = regex.new(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")?
+print(r.is_match(id))
+print(uuid.version(id))
+print(uuid.v4() != uuid.v4())
+--- stdout
+true
+Some(4)
+true
+
+=== v7 is time ordered
+import uuid
+let a = uuid.v7()
+task.sleep(2ms)
+let b = uuid.v7()
+print(a < b)
+print(uuid.version(a))
+print(uuid.is_valid(a))
+--- stdout
+true
+Some(7)
+true
+
+=== parse and validate
+import uuid
+print(uuid.nil())
+print(uuid.parse("67E55044-10B1-426F-9247-BB680E5FE0C8"))
+print(uuid.parse("67e5504410b1426f9247bb680e5fe0c8"))
+print(uuid.parse("\{67e55044-10b1-426f-9247-bb680e5fe0c8\}"))
+print(uuid.parse("urn:uuid:67e55044-10b1-426f-9247-bb680e5fe0c8"))
+print(uuid.parse("not-a-uuid").is_err())
+print(uuid.is_valid("67e55044-10b1-426f-9247-bb680e5fe0c"))
+print(uuid.version("67e55044-10b1-426f-9247-bb680e5fe0c8"))
+--- stdout
+00000000-0000-0000-0000-000000000000
+Ok("67e55044-10b1-426f-9247-bb680e5fe0c8")
+Ok("67e55044-10b1-426f-9247-bb680e5fe0c8")
+Ok("67e55044-10b1-426f-9247-bb680e5fe0c8")
+Ok("67e55044-10b1-426f-9247-bb680e5fe0c8")
+true
+false
+Some(4)

@@ -1,0 +1,127 @@
+//! JSON (RFC 8259): parsing, printing, and conversion between JSON and typed
+//! Sand values.
+
+/// A JSON value. Numbers are floats; object keys keep insertion order.
+pub enum Json {
+    Null
+    Bool(bool)
+    Num(float)
+    Str(str)
+    Arr([Json])
+    Obj([str: Json])
+
+    /// The member `key` of an object; `None` for other values.
+    pub fn get(self, key: str) -> Json? {
+        match self {
+            Obj(fields) => fields.get(key)
+            _ => None
+        }
+    }
+
+    /// The element at index `i` of an array; `None` for other values.
+    pub fn at(self, i: int) -> Json? {
+        match self {
+            Arr(items) => items.get(i)
+            _ => None
+        }
+    }
+
+    /// The text of a string.
+    pub fn as_str(self) -> str? {
+        match self {
+            Str(s) => Some(s)
+            _ => None
+        }
+    }
+
+    /// The value of a number.
+    pub fn as_float(self) -> float? {
+        match self {
+            Num(n) => Some(n)
+            _ => None
+        }
+    }
+
+    /// The value of a number that is integral and fits in an `int`.
+    pub fn as_int(self) -> int? {
+        match self {
+            Num(n) if n == n.floor() and n >= -9223372036854775808.0 and n < 9223372036854775808.0 => Some(
+                n.to_int(),
+            )
+            _ => None
+        }
+    }
+
+    /// The value of a boolean.
+    pub fn as_bool(self) -> bool? {
+        match self {
+            Bool(b) => Some(b)
+            _ => None
+        }
+    }
+
+    /// The elements of an array.
+    pub fn as_list(self) -> [Json]? {
+        match self {
+            Arr(items) => Some(items)
+            _ => None
+        }
+    }
+
+    /// The members of an object.
+    pub fn as_map(self) -> [str: Json]? {
+        match self {
+            Obj(fields) => Some(fields)
+            _ => None
+        }
+    }
+
+    /// True for `null`.
+    pub fn is_null(self) -> bool {
+        match self {
+            Null => true
+            _ => false
+        }
+    }
+
+    /// Follows a dot-separated path of object keys and array indices, e.g.
+    /// `"items.0.name"`. An empty path returns the value itself.
+    pub fn path(self, p: str) -> Json? {
+        if p.is_empty() {
+            return Some(self)
+        }
+        var cur = self
+        for part in p.split(".") {
+            cur = match cur {
+                Arr(items) => items.get(part.parse_int()?)?
+                _ => cur.get(part)?
+            }
+        }
+        Some(cur)
+    }
+}
+
+/// Parses JSON text. Errors have kind `"parse"` and give the line and
+/// column. Nesting deeper than 512 arrays/objects is rejected.
+pub native fn parse(text: str) -> Result<Json>
+
+/// Prints JSON: compact for `indent == 0`, otherwise pretty-printed with
+/// `indent` spaces per level. Non-finite numbers print as `null`.
+pub native fn stringify(value: Json, indent: int = 0) -> str
+
+/// Encodes any value as JSON text (see `to_json` for the mapping). Panics on
+/// values that have no JSON form (functions, tasks, channels).
+pub native fn encode<T>(value: T, indent: int = 0) -> str
+
+/// Decodes JSON text into a value of type `T`, which must be known at the
+/// call site. Missing struct fields take their constant default or `None`;
+/// mismatches fail with kind `"parse"` and a path such as
+/// `$.items[2].name: expected str`.
+pub native fn decode<reflect T>(text: str) -> Result<T>
+
+/// Converts a value to `Json`: numbers, strings and booleans map directly,
+/// `()` and `None` to `null`, `Some(x)` to `x`, lists, sets and tuples to
+/// arrays, maps and structs to objects, payload-less enum variants to their
+/// name and others to `{"Variant": payload}`, bytes to base64 and durations
+/// to nanoseconds.
+pub native fn to_json<T>(value: T) -> Json

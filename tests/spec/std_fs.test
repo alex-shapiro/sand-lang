@@ -1,0 +1,96 @@
+=== write and read text
+import fs
+fs.write_text("hello.txt", "hi there\nline 2\n")?
+print(fs.read_text("hello.txt")?)
+print(fs.read_lines("hello.txt")?)
+print(fs.exists("hello.txt")?)
+print(fs.exists("nope.txt")?)
+--- stdout
+hi there
+line 2
+
+["hi there", "line 2"]
+true
+false
+
+=== bytes and append
+import fs
+fs.write_bytes("data.bin", b"\x00\x01")?
+fs.append_text("log.txt", "a")?
+fs.append_text("log.txt", "b")?
+print(fs.read_bytes("data.bin")?)
+print(fs.read_text("log.txt")?)
+--- stdout
+b"\x00\x01"
+ab
+
+=== missing file is a not_found error
+import fs
+let r = fs.read_text("missing.txt")
+print(r.is_err())
+print(r.unwrap_err().kind)
+--- stdout
+true
+not_found
+
+=== directories
+import fs
+fs.create_dir("a/b/c", recursive: true)?
+fs.write_text("a/b/one.txt", "1")?
+fs.write_text("a/b/two.txt", "2")?
+print(fs.list_dir("a/b")?)
+print(fs.is_dir("a/b")?)
+print(fs.is_file("a/b/one.txt")?)
+fs.remove_file("a/b/one.txt")?
+print(fs.list_dir("a/b")?)
+print(fs.remove_dir("a").unwrap_err().kind)
+fs.remove_dir("a", recursive: true)?
+print(fs.exists("a")?)
+--- stdout
+["c", "one.txt", "two.txt"]
+true
+true
+["c", "two.txt"]
+io
+false
+
+=== rename copy and metadata
+import fs
+fs.write_text("x.txt", "12345")?
+fs.copy("x.txt", "y.txt")?
+fs.rename("x.txt", "z.txt")?
+print(fs.exists("x.txt")?)
+print(fs.read_text("y.txt")?)
+let m = fs.metadata("z.txt")?
+print(m.size)
+print(m.is_file)
+print(m.is_dir)
+print(m.modified.is_some())
+--- stdout
+false
+12345
+5
+true
+false
+true
+
+=== path helpers
+import fs
+print(fs.join(["a", "b", "c.txt"]))
+print(fs.basename("/x/y/file.tar.gz"))
+print(fs.dirname("/x/y/file.tar.gz"))
+print(fs.extension("/x/y/file.tar.gz"))
+print(fs.extension("/x/y/noext"))
+--- stdout
+a/b/c.txt
+file.tar.gz
+/x/y
+Some("gz")
+None
+
+=== invalid utf8 when reading text
+import fs
+fs.write_bytes("bad.txt", bytes.from_list([255, 254]))?
+print(fs.read_text("bad.txt").unwrap_err().kind)
+--- stdout
+invalid

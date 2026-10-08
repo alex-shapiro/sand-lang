@@ -1,0 +1,212 @@
+//! An HTTP/1.1 client and a minimal HTTP/1.1 server.
+//!
+//! Requests need the `Net(host:port)` capability (checked again for every
+//! redirect hop); `serve` needs `NetListen(addr)`. `https` URLs use TLS when
+//! the engine is built with the `tls` feature. Response bodies larger than
+//! the `max_http_body` limit fail with kind `"limit"`.
+
+import json
+import net
+
+/// Redirects followed before a request fails with "too many redirects".
+let MAX_REDIRECTS = 10
+
+/// An HTTP response. Header names are lower-cased.
+pub struct Response {
+    status: int
+    headers: [str: str]
+    body: bytes
+    /// The URL that produced this response (after redirects).
+    url: str
+
+    /// The body decoded as UTF-8.
+    fn text(self) -> Result<str> {
+        self.body.to_str()
+    }
+
+    /// The body parsed as JSON.
+    fn json(self) -> Result<json.Json> {
+        json.parse(self.text()?)
+    }
+
+    /// True for a 2xx status.
+    fn ok(self) -> bool {
+        self.status >= 200 and self.status <= 299
+    }
+
+    /// The value of header `name` (case-insensitive).
+    fn header(self, name: str) -> str? {
+        self.headers.get(name.to_lower())
+    }
+}
+
+/// Sends a `GET` request, following redirects.
+pub fn get(url: str, headers: [str: str] = [:], timeout: duration = 30s) -> Result<Response> {
+    request("GET", url, headers: headers, timeout: timeout)
+}
+
+/// Sends a `POST` request with `body`, following redirects.
+pub fn post(
+    url: str,
+    body: bytes,
+    headers: [str: str] = [:],
+    timeout: duration = 30s,
+) -> Result<Response> {
+    request("POST", url, headers: headers, body: body, timeout: timeout)
+}
+
+/// Sends a request. `timeout` applies to each connection (including every
+/// redirect hop). Redirects (301, 302, 303, 307, 308) are followed up to 10
+/// times unless `follow_redirects` is false; a 303 turns the request into a
+/// `GET` without a body. Non-2xx statuses are not errors.
+pub fn request(
+    method: str,
+    url: str,
+    headers: [str: str] = [:],
+    body: bytes = b"",
+    timeout: duration = 30s,
+    follow_redirects: bool = true,
+) -> Result<Response> {
+    var current_url = url
+    var current_method = method
+    var current_headers = headers
+    var current_body = body
+    var redirects = 0
+    loop {
+        let (status, resp_headers, resp_body) = send(
+            current_method,
+            current_url,
+            current_headers,
+            current_body,
+            timeout,
+        )?
+        let response = Response { status, headers: resp_headers, body: resp_body, url: current_url }
+        if not follow_redirects or not [301, 302, 303, 307, 308].contains(status) {
+            return Ok(response)
+        }
+        let Some(location) = resp_headers.get("location") else { return Ok(response) }
+        if redirects == MAX_REDIRECTS {
+            return Err(error("too many redirects", kind: "http"))
+        }
+        redirects += 1
+        let next = resolve(current_url, location)?
+        if not same_origin(current_url, next) {
+            // Never leak credentials to another origin.
+            current_headers = current_headers.filter(
+                (k, _) => not ["authorization", "cookie", "host"].contains(k.to_lower()),
+            )
+        }
+        if status == 303 and current_method != "HEAD" {
+            current_method = "GET"
+            current_body = b""
+            current_headers = current_headers.filter(
+                (k, _) => not k.to_lower().starts_with("content-"),
+            )
+        }
+        current_url = next
+    }
+}
+
+/// Performs one request/response exchange: `(status, headers, body)`.
+native fn send(
+    method: str,
+    url: str,
+    headers: [str: str],
+    body: bytes,
+    timeout: duration,
+) -> Result<(int, [str: str], bytes)>
+
+/// Resolves a `Location` header against the URL that returned it.
+native fn resolve(base: str, location: str) -> Result<str>
+
+/// True if both URLs have the same scheme, host and port.
+native fn same_origin(a: str, b: str) -> bool
+
+/// Starts an HTTP server listening on `addr` (`host:port`; port `0` picks a
+/// free port).
+pub fn serve(addr: str) -> Result<Server> {
+    Ok(Server { listener: net.listen(addr)? })
+}
+
+/// An HTTP/1.1 server. Each connection carries one request and is closed
+/// after the response.
+pub struct Server {
+    listener: net.Listener
+
+    /// Waits for the next request. Connections that do not send a valid
+    /// request are answered with `400 Bad Request` and skipped.
+    fn accept(self) -> Result<Request> {
+        loop {
+            let conn = self.listener.accept()?
+            match read_request(conn) {
+                Ok((method, path, query, headers, body)) => {
+                    return Ok(Request { method, path, query, headers, body, conn })
+                }
+                Err(e) => {
+                    if e.kind != "closed" {
+                        let _ = conn.write(
+                            encode_response(400, "{e.message}\n".bytes(), [:], true) ?? b"",
+                        )
+                    }
+                    conn.close()
+                }
+            }
+        }
+    }
+
+    /// The local address (`host:port`) the server listens on.
+    fn addr(self) -> str {
+        self.listener.addr()
+    }
+
+    /// Stops accepting connections.
+    fn close(self) {
+        self.listener.close()
+    }
+}
+
+/// A request received by a `Server`. Header names are lower-cased; `path`
+/// and `query` are the parts of the request target before and after `?`.
+pub struct Request {
+    method: str
+    path: str
+    query: str
+    headers: [str: str]
+    body: bytes
+    /// The client connection, closed by `respond`.
+    conn: net.Conn
+
+    /// Sends the response and closes the connection.
+    fn respond(self, status: int, body: bytes, headers: [str: str] = [:]) -> Result<()> {
+        let data = encode_response(status, body, headers, self.method != "HEAD")?
+        let sent = self.conn.write(data)
+        self.conn.close()
+        sent
+    }
+
+    /// The body decoded as UTF-8.
+    fn text(self) -> Result<str> {
+        self.body.to_str()
+    }
+
+    /// The body parsed as JSON.
+    fn json(self) -> Result<json.Json> {
+        json.parse(self.text()?)
+    }
+
+    /// The value of header `name` (case-insensitive).
+    fn header(self, name: str) -> str? {
+        self.headers.get(name.to_lower())
+    }
+}
+
+/// Reads one request from `conn`: `(method, path, query, headers, body)`.
+native fn read_request(conn: net.Conn) -> Result<(str, str, str, [str: str], bytes)>
+
+/// Serialises a response (with `content-length` and `connection: close`).
+native fn encode_response(
+    status: int,
+    body: bytes,
+    headers: [str: str],
+    include_body: bool,
+) -> Result<bytes>

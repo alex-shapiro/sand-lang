@@ -1,0 +1,77 @@
+=== central tendency
+import statistics as st
+let xs = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]
+print(st.mean(xs))
+print(st.median(xs))
+print(st.median([3.0, 1.0, 2.0]))
+print(st.mode(xs))
+print(st.sum(xs))
+print(st.min(xs))
+print(st.max(xs))
+print(st.mean_int([1, 2, 4]))
+--- stdout
+Some(5.0)
+Some(4.5)
+Some(2.0)
+Some(4.0)
+40.0
+Some(2.0)
+Some(9.0)
+Some(2.3333333333333335)
+
+=== spread
+import statistics as st
+let xs = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]
+print(st.pvariance(xs))
+print(st.pstdev(xs))
+print(st.variance(xs))
+print(st.stdev([1.0, 2.0, 3.0, 4.0]))
+print(st.variance([1.0]))
+--- stdout
+Some(4.0)
+Some(2.0)
+Some(4.571428571428571)
+Some(1.2909944487358056)
+None
+
+=== empty inputs
+import statistics as st
+let e: [float] = []
+print(st.mean(e))
+print(st.median(e))
+print(st.mode(e))
+print(st.sum(e))
+--- stdout
+None
+None
+None
+0.0
+
+=== quantiles
+import statistics as st
+let xs = [1.0, 2.0, 3.0, 4.0, 5.0]
+print(st.quantile(xs, 0.0))
+print(st.quantile(xs, 0.25))
+print(st.quantile(xs, 0.5))
+print(st.quantile(xs, 1.0))
+print(st.quantile(xs, 1.5))
+--- stdout
+Some(1.0)
+Some(2.0)
+Some(3.0)
+Some(5.0)
+None
+
+=== correlation and regression
+import statistics as st
+let xs = [1.0, 2.0, 3.0, 4.0]
+let ys = [2.0, 4.0, 6.0, 8.0]
+print(st.correlation(xs, ys))
+print(st.linear_regression(xs, ys))
+print(st.correlation(xs, [1.0, 1.0, 1.0, 1.0]))
+print(st.linear_regression(xs, [1.0]))
+--- stdout
+Some(1.0)
+Some((2.0, 0.0))
+None
+None

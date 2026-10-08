@@ -1,0 +1,103 @@
+=== parse components
+import uri
+let u = uri.parse("https://user:pw@example.com:8443/a/b?x=1&y=two#frag")?
+print(u.scheme)
+print(u.userinfo)
+print(u.host)
+print(u.port)
+print(u.path)
+print(u.query)
+print(u.fragment)
+print(u.authority())
+print(u.to_str())
+--- stdout
+https
+Some("user:pw")
+Some("example.com")
+Some(8443)
+/a/b
+Some("x=1&y=two")
+Some("frag")
+Some("user:pw@example.com:8443")
+https://user:pw@example.com:8443/a/b?x=1&y=two#frag
+
+=== minimal uris
+import uri
+let u = uri.parse("mailto:someone@example.com")?
+print(u.scheme)
+print(u.host)
+print(u.path)
+let h = uri.parse("http://example.com")?
+print(h.path)
+print(h.port)
+print(h.default_port())
+print(uri.parse("https://x.org/")?.default_port())
+print(uri.parse("http://[::1]:8080/p")?.host)
+--- stdout
+mailto
+None
+someone@example.com
+
+None
+Some(80)
+Some(443)
+Some("::1")
+
+=== invalid uris
+import uri
+print(uri.parse("no scheme here").is_err())
+print(uri.parse("http://host:99999999/").is_err())
+print(uri.parse("1http://x").is_err())
+--- stdout
+true
+true
+true
+
+=== percent encoding
+import uri
+print(uri.encode_component("a b&c=d/é~"))
+print(uri.encode_path("/a b/c"))
+print(uri.decode_component("a%20b%26c%3Dd%2F%C3%A9~"))
+print(uri.decode_component("%zz").is_err())
+print(uri.decode_component("%ff").is_err())
+--- stdout
+a%20b%26c%3Dd%2F%C3%A9~
+/a%20b/c
+Ok("a b&c=d/é~")
+true
+true
+
+=== query strings
+import uri
+print(uri.parse_query("a=1&b=two+words&c&d=%26"))
+print(uri.build_query([("q", "a b"), ("x", "&=")]))
+print(uri.parse("http://h/p?k=v&k2=v2")?.query_pairs())
+--- stdout
+[("a", "1"), ("b", "two words"), ("c", ""), ("d", "&")]
+q=a%20b&x=%26%3D
+[("k", "v"), ("k2", "v2")]
+
+=== reference resolution
+import uri
+let base = uri.parse("http://a/b/c/d;p?q")?
+for r in ["g", "./g", "g/", "/g", "//g", "?y", "g?y", "#s", "g#s", "..", "../g", "../..", "../../g", "../../../g", "./../g", "g/./h", "g/../h"] {
+    print("{r} -> {base.join(r)?.to_str()}")
+}
+--- stdout
+g -> http://a/b/c/g
+./g -> http://a/b/c/g
+g/ -> http://a/b/c/g/
+/g -> http://a/g
+//g -> http://g
+?y -> http://a/b/c/d;p?y
+g?y -> http://a/b/c/g?y
+#s -> http://a/b/c/d;p?q#s
+g#s -> http://a/b/c/g#s
+.. -> http://a/b/
+../g -> http://a/b/g
+../.. -> http://a/
+../../g -> http://a/g
+../../../g -> http://a/g
+./../g -> http://a/b/g
+g/./h -> http://a/b/c/g/h
+g/../h -> http://a/b/c/h

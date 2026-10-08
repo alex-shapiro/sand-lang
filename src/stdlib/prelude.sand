@@ -1,0 +1,760 @@
+//! The prelude: types and functions that are always in scope.
+
+/// An optional value: `Some(value)` or `None`. Written `T?`.
+pub enum Option<T> {
+    Some(T)
+    None
+
+    /// True if this is `Some`.
+    pub fn is_some(self) -> bool {
+        match self {
+            Some(_) => true
+            None => false
+        }
+    }
+
+    /// True if this is `None`.
+    pub fn is_none(self) -> bool {
+        match self {
+            Some(_) => false
+            None => true
+        }
+    }
+
+    /// The payload; panics on `None`.
+    pub fn unwrap(self) -> T {
+        match self {
+            Some(x) => x
+            None => panic("unwrap on None")
+        }
+    }
+
+    /// The payload; panics with `msg` on `None`.
+    pub fn expect(self, msg: str) -> T {
+        match self {
+            Some(x) => x
+            None => panic(msg)
+        }
+    }
+
+    /// The payload, or `default` on `None`.
+    pub fn unwrap_or(self, default: T) -> T {
+        match self {
+            Some(x) => x
+            None => default
+        }
+    }
+
+    /// Applies `f` to the payload.
+    pub fn map<U>(self, f: fn(T) -> U) -> U? {
+        match self {
+            Some(x) => Some(f(x))
+            None => None
+        }
+    }
+
+    /// Applies `f` to the payload and flattens.
+    pub fn and_then<U>(self, f: fn(T) -> U?) -> U? {
+        match self {
+            Some(x) => f(x)
+            None => None
+        }
+    }
+
+    /// Returns `self` if it is `Some`, otherwise the result of `f`.
+    pub fn or_else(self, f: fn() -> T?) -> T? {
+        match self {
+            Some(x) => Some(x)
+            None => f()
+        }
+    }
+
+    /// Converts to a `Result`, using `err` for `None`.
+    pub fn ok_or<E>(self, err: E) -> Result<T, E> {
+        match self {
+            Some(x) => Ok(x)
+            None => Err(err)
+        }
+    }
+
+    /// Keeps the payload only if `f` returns true.
+    pub fn filter(self, f: fn(T) -> bool) -> T? {
+        match self {
+            Some(x) if f(x) => Some(x)
+            _ => None
+        }
+    }
+}
+
+/// The result of an operation that may fail: `Ok(value)` or `Err(error)`.
+/// `Result<T>` means `Result<T, Error>`.
+pub enum Result<T, E> {
+    Ok(T)
+    Err(E)
+
+    /// True if this is `Ok`.
+    pub fn is_ok(self) -> bool {
+        match self {
+            Ok(_) => true
+            Err(_) => false
+        }
+    }
+
+    /// True if this is `Err`.
+    pub fn is_err(self) -> bool {
+        match self {
+            Ok(_) => false
+            Err(_) => true
+        }
+    }
+
+    /// The `Ok` payload; panics on `Err`.
+    pub fn unwrap(self) -> T {
+        match self {
+            Ok(x) => x
+            Err(e) => panic("unwrap on Err: {e}")
+        }
+    }
+
+    /// The `Ok` payload; panics with `msg` on `Err`.
+    pub fn expect(self, msg: str) -> T {
+        match self {
+            Ok(x) => x
+            Err(e) => panic("{msg}: {e}")
+        }
+    }
+
+    /// The `Ok` payload, or `default`.
+    pub fn unwrap_or(self, default: T) -> T {
+        match self {
+            Ok(x) => x
+            Err(_) => default
+        }
+    }
+
+    /// The `Err` payload; panics on `Ok`.
+    pub fn unwrap_err(self) -> E {
+        match self {
+            Ok(x) => panic("unwrap_err on Ok: {x.debug()}")
+            Err(e) => e
+        }
+    }
+
+    /// Applies `f` to the `Ok` payload.
+    pub fn map<U>(self, f: fn(T) -> U) -> Result<U, E> {
+        match self {
+            Ok(x) => Ok(f(x))
+            Err(e) => Err(e)
+        }
+    }
+
+    /// Applies `f` to the `Err` payload.
+    pub fn map_err<F>(self, f: fn(E) -> F) -> Result<T, F> {
+        match self {
+            Ok(x) => Ok(x)
+            Err(e) => Err(f(e))
+        }
+    }
+
+    /// Chains another fallible operation.
+    pub fn and_then<U>(self, f: fn(T) -> Result<U, E>) -> Result<U, E> {
+        match self {
+            Ok(x) => f(x)
+            Err(e) => Err(e)
+        }
+    }
+
+    /// The `Ok` payload as an Option.
+    pub fn ok(self) -> T? {
+        match self {
+            Ok(x) => Some(x)
+            Err(_) => None
+        }
+    }
+
+    /// The `Err` payload as an Option.
+    pub fn err(self) -> E? {
+        match self {
+            Ok(_) => None
+            Err(e) => Some(e)
+        }
+    }
+}
+
+/// The standard error type. `kind` is a short machine-readable tag such as
+/// `"not_found"` or `"permission_denied"`.
+pub struct Error {
+    kind: str
+    message: str
+}
+
+/// Constructs an `Error`.
+pub fn error(message: str, kind: str = "error") -> Error {
+    Error { kind, message }
+}
+
+/// A concurrently running computation, created with `spawn`.
+pub native type Task<T>
+
+extend<T> Task<T> {
+    /// Waits for the task and returns its result.
+    pub native fn wait(self) -> T
+    /// True if the task has finished or was cancelled.
+    pub native fn is_done(self) -> bool
+    /// Cancels the task if it is still running.
+    pub native fn cancel(self)
+}
+
+/// A queue for passing messages between tasks.
+pub native type Channel<T>
+
+extend<T> Channel<T> {
+    /// Sends a value; suspends while a bounded channel is full. False if closed.
+    pub native fn send(self, value: T) -> bool
+    /// Receives a value; suspends while empty. `None` once closed and drained.
+    pub native fn recv(self) -> T?
+    /// Receives without suspending.
+    pub native fn try_recv(self) -> T?
+    /// Closes the channel.
+    pub native fn close(self)
+    /// Number of queued messages.
+    pub native fn len(self) -> int
+    /// True if the channel was closed.
+    pub native fn is_closed(self) -> bool
+}
+
+/// Prints the display form of `x` and a newline to standard output.
+pub native fn print<T>(x: T)
+
+/// Prints the display form of `x` and a newline to standard error.
+pub native fn eprint<T>(x: T)
+
+/// Stops the program with an error message.
+pub native fn panic(message: str) -> never
+
+/// Panics with `message` unless `cond` is true.
+pub fn assert(cond: bool, message: str = "assertion failed") {
+    if not cond {
+        panic(message)
+    }
+}
+
+/// Marks unfinished code; panics when reached.
+pub fn todo() -> never {
+    panic("not yet implemented")
+}
+
+/// Stops the program with an exit code.
+pub native fn exit(code: int) -> never
+
+/// Builds a set from a list.
+pub native fn set<T: Hash>(items: [T] = []) -> Set<T>
+
+extend int {
+    /// Absolute value.
+    pub fn abs(self) -> int {
+        if self < 0 { -self } else { self }
+    }
+
+    /// `self` raised to the power `e`.
+    pub fn pow(self, e: int) -> int {
+        self ** e
+    }
+
+    /// The smaller of `self` and `other`.
+    pub fn min(self, other: int) -> int {
+        if self < other { self } else { other }
+    }
+
+    /// The larger of `self` and `other`.
+    pub fn max(self, other: int) -> int {
+        if self > other { self } else { other }
+    }
+
+    /// Restricts `self` to `lo..=hi`.
+    pub fn clamp(self, lo: int, hi: int) -> int {
+        if self < lo { lo } else if self > hi { hi } else { self }
+    }
+
+    /// -1, 0 or 1.
+    pub fn sign(self) -> int {
+        if self > 0 { 1 } else if self < 0 { -1 } else { 0 }
+    }
+
+    pub fn is_even(self) -> bool {
+        self % 2 == 0
+    }
+
+    pub fn is_odd(self) -> bool {
+        self % 2 != 0
+    }
+
+    /// Converts to a float.
+    pub native fn to_float(self) -> float
+    /// Formats in the given radix (2..36).
+    pub native fn to_str_radix(self, radix: int) -> str
+    /// The one-character string for a Unicode scalar value.
+    pub native fn to_char(self) -> str?
+    /// Parses an integer.
+    pub native fn parse(text: str, radix: int = 10) -> int?
+
+    /// The largest int.
+    pub fn max_value() -> int {
+        9223372036854775807
+    }
+
+    /// The smallest int.
+    pub fn min_value() -> int {
+        -9223372036854775808
+    }
+}
+
+extend float {
+    pub native fn abs(self) -> float
+    pub native fn floor(self) -> float
+    pub native fn ceil(self) -> float
+    /// Rounds half away from zero.
+    pub native fn round(self) -> float
+    pub native fn trunc(self) -> float
+    pub native fn sqrt(self) -> float
+    pub native fn pow(self, e: float) -> float
+    pub native fn min(self, other: float) -> float
+    pub native fn max(self, other: float) -> float
+    pub native fn is_nan(self) -> bool
+    pub native fn is_finite(self) -> bool
+    pub native fn is_infinite(self) -> bool
+    /// Truncates toward zero; panics on NaN or out of range.
+    pub native fn to_int(self) -> int
+    /// Formats with a fixed number of digits after the point.
+    pub native fn to_str_fixed(self, digits: int) -> str
+    /// Parses a float.
+    pub native fn parse(text: str) -> float?
+
+    /// Restricts `self` to `lo..=hi`.
+    pub fn clamp(self, lo: float, hi: float) -> float {
+        self.max(lo).min(hi)
+    }
+}
+
+extend str {
+    /// Length in bytes.
+    pub native fn len(self) -> int
+    pub native fn is_empty(self) -> bool
+    /// Unicode scalar values as one-character strings.
+    pub native fn chars(self) -> [str]
+    pub native fn char_count(self) -> int
+    pub native fn codepoints(self) -> [int]
+    /// The UTF-8 encoding.
+    pub native fn bytes(self) -> bytes
+    pub native fn contains(self, sub: str) -> bool
+    pub native fn starts_with(self, prefix: str) -> bool
+    pub native fn ends_with(self, suffix: str) -> bool
+    /// Byte offset of the first occurrence.
+    pub native fn find(self, sub: str) -> int?
+    /// Byte offset of the last occurrence.
+    pub native fn rfind(self, sub: str) -> int?
+    /// Replaces all occurrences.
+    pub native fn replace(self, pattern: str, replacement: str) -> str
+    pub native fn split(self, sep: str) -> [str]
+    pub native fn split_once(self, sep: str) -> (str, str)?
+    pub native fn split_whitespace(self) -> [str]
+    pub native fn lines(self) -> [str]
+    pub native fn trim(self) -> str
+    pub native fn trim_start(self) -> str
+    pub native fn trim_end(self) -> str
+    pub native fn strip_prefix(self, prefix: str) -> str?
+    pub native fn strip_suffix(self, suffix: str) -> str?
+    pub native fn to_upper(self) -> str
+    pub native fn to_lower(self) -> str
+    pub native fn repeat(self, n: int) -> str
+    /// Pads on the left to `width` characters.
+    pub native fn pad_start(self, width: int, fill: str = " ") -> str
+    /// Pads on the right to `width` characters.
+    pub native fn pad_end(self, width: int, fill: str = " ") -> str
+    pub native fn parse_int(self) -> int?
+    pub native fn parse_float(self) -> float?
+    pub native fn is_digit(self) -> bool
+    pub native fn is_alpha(self) -> bool
+    pub native fn is_alnum(self) -> bool
+    pub native fn is_space(self) -> bool
+    pub native fn is_upper(self) -> bool
+    pub native fn is_lower(self) -> bool
+    /// The character starting at byte offset `i`.
+    pub native fn char_at(self, i: int) -> str?
+    /// The scalar value of a one-character string.
+    pub native fn ord(self) -> int
+    pub native fn reversed(self) -> str
+    /// Joins `items` with `self` as separator.
+    pub native fn join(self, items: [str]) -> str
+}
+
+extend bytes {
+    pub native fn len(self) -> int
+    pub native fn is_empty(self) -> bool
+    pub native fn get(self, i: int) -> int?
+    pub native fn to_list(self) -> [int]
+    /// Decodes strict UTF-8.
+    pub native fn to_str(self) -> Result<str, Error>
+    /// Decodes UTF-8, replacing invalid sequences.
+    pub native fn to_str_lossy(self) -> str
+    pub native fn to_hex(self) -> str
+    pub native fn contains(self, needle: bytes) -> bool
+    pub native fn find(self, needle: bytes) -> int?
+    pub native fn from_list(items: [int]) -> bytes
+    pub native fn from_hex(text: str) -> bytes?
+}
+
+extend duration {
+    pub native fn nanos(self) -> int
+    pub native fn micros(self) -> int
+    pub native fn millis(self) -> int
+    pub native fn secs(self) -> float
+    pub native fn abs(self) -> duration
+    pub native fn from_nanos(n: int) -> duration
+    pub native fn from_millis(n: int) -> duration
+    pub native fn from_secs(s: float) -> duration
+}
+
+extend<T> [T] {
+    pub native fn len(self) -> int
+    pub native fn is_empty(self) -> bool
+    /// Appends to the end.
+    pub native fn push(self, x: T)
+    /// Removes and returns the last element.
+    pub native fn pop(self) -> T?
+    pub native fn insert(self, i: int, x: T)
+    pub native fn remove(self, i: int) -> T
+    pub native fn extend(self, items: [T])
+    pub native fn clear(self)
+    pub native fn get(self, i: int) -> T?
+    pub native fn first(self) -> T?
+    pub native fn last(self) -> T?
+    pub native fn contains(self, x: T) -> bool where T: Eq
+    pub native fn index_of(self, x: T) -> int? where T: Eq
+    /// Reverses in place.
+    pub native fn reverse(self)
+    pub native fn reversed(self) -> [T]
+    /// Sorts in place (stable).
+    pub native fn sort(self) where T: Ord
+    pub native fn sorted(self) -> [T] where T: Ord
+    /// A shallow copy.
+    pub native fn copy(self) -> [T]
+    pub native fn swap(self, i: int, j: int)
+    pub native fn take(self, n: int) -> [T]
+    pub native fn skip(self, n: int) -> [T]
+    pub native fn chunks(self, n: int) -> [[T]]
+    pub native fn windows(self, n: int) -> [[T]]
+    pub native fn enumerate(self) -> [(int, T)]
+    pub native fn zip<U>(self, other: [U]) -> [(T, U)]
+    /// Removes consecutive duplicates.
+    pub native fn dedup(self) -> [T] where T: Eq
+    /// First occurrences of each distinct element.
+    pub native fn unique(self) -> [T] where T: Hash
+    pub native fn to_set(self) -> Set<T> where T: Hash
+    pub native fn sum(self) -> T where T: Num
+    pub native fn product(self) -> T where T: Num
+    pub native fn min(self) -> T? where T: Ord
+    pub native fn max(self) -> T? where T: Ord
+    native fn sort_by_keys<K>(self, keys: [K])
+
+    /// Applies `f` to every element.
+    pub fn map<U>(self, f: fn(T) -> U) -> [U] {
+        let out = []
+        for x in self {
+            out.push(f(x))
+        }
+        out
+    }
+
+    /// Elements for which `f` returns true.
+    pub fn filter(self, f: fn(T) -> bool) -> [T] {
+        let out = []
+        for x in self {
+            if f(x) {
+                out.push(x)
+            }
+        }
+        out
+    }
+
+    /// Applies `f` and keeps the `Some` results.
+    pub fn filter_map<U>(self, f: fn(T) -> U?) -> [U] {
+        let out = []
+        for x in self {
+            if let Some(y) = f(x) {
+                out.push(y)
+            }
+        }
+        out
+    }
+
+    /// Applies `f` and concatenates the results.
+    pub fn flat_map<U>(self, f: fn(T) -> [U]) -> [U] {
+        let out = []
+        for x in self {
+            out.extend(f(x))
+        }
+        out
+    }
+
+    /// Calls `f` on every element.
+    pub fn each(self, f: fn(T)) {
+        for x in self {
+            f(x)
+        }
+    }
+
+    /// Combines elements from the left, starting with `init`.
+    pub fn fold<A>(self, init: A, f: fn(A, T) -> A) -> A {
+        var acc = init
+        for x in self {
+            acc = f(acc, x)
+        }
+        acc
+    }
+
+    /// Combines elements from the left; `None` if empty.
+    pub fn reduce(self, f: fn(T, T) -> T) -> T? {
+        var acc = self.first()?
+        for x in self.skip(1) {
+            acc = f(acc, x)
+        }
+        Some(acc)
+    }
+
+    /// True if `f` is true for any element.
+    pub fn any(self, f: fn(T) -> bool) -> bool {
+        for x in self {
+            if f(x) {
+                return true
+            }
+        }
+        false
+    }
+
+    /// True if `f` is true for every element.
+    pub fn all(self, f: fn(T) -> bool) -> bool {
+        for x in self {
+            if not f(x) {
+                return false
+            }
+        }
+        true
+    }
+
+    /// The first element for which `f` is true.
+    pub fn find(self, f: fn(T) -> bool) -> T? {
+        for x in self {
+            if f(x) {
+                return Some(x)
+            }
+        }
+        None
+    }
+
+    /// The index of the first element for which `f` is true.
+    pub fn find_index(self, f: fn(T) -> bool) -> int? {
+        var i = 0
+        for x in self {
+            if f(x) {
+                return Some(i)
+            }
+            i += 1
+        }
+        None
+    }
+
+    /// Number of elements for which `f` is true.
+    pub fn count(self, f: fn(T) -> bool) -> int {
+        var n = 0
+        for x in self {
+            if f(x) {
+                n += 1
+            }
+        }
+        n
+    }
+
+    /// The longest prefix for which `f` is true.
+    pub fn take_while(self, f: fn(T) -> bool) -> [T] {
+        let out = []
+        for x in self {
+            if not f(x) {
+                break
+            }
+            out.push(x)
+        }
+        out
+    }
+
+    /// Everything after the longest prefix for which `f` is true.
+    pub fn skip_while(self, f: fn(T) -> bool) -> [T] {
+        var i = 0
+        for x in self {
+            if not f(x) {
+                break
+            }
+            i += 1
+        }
+        self.skip(i)
+    }
+
+    /// Groups elements by key, in order of first appearance.
+    pub fn group_by<K: Hash>(self, key: fn(T) -> K) -> [K: [T]] {
+        let out: [K: [T]] = [:]
+        for x in self {
+            out.get_or_insert(key(x), []).push(x)
+        }
+        out
+    }
+
+    /// Splits into (matching, not matching).
+    pub fn partition(self, f: fn(T) -> bool) -> ([T], [T]) {
+        let yes = []
+        let no = []
+        for x in self {
+            if f(x) {
+                yes.push(x)
+            } else {
+                no.push(x)
+            }
+        }
+        (yes, no)
+    }
+
+    /// The first element with the smallest key.
+    pub fn min_by<K: Ord>(self, key: fn(T) -> K) -> T? {
+        var best = self.first()?
+        var best_key = key(best)
+        for x in self.skip(1) {
+            let k = key(x)
+            if k < best_key {
+                best = x
+                best_key = k
+            }
+        }
+        Some(best)
+    }
+
+    /// The first element with the largest key.
+    pub fn max_by<K: Ord>(self, key: fn(T) -> K) -> T? {
+        var best = self.first()?
+        var best_key = key(best)
+        for x in self.skip(1) {
+            let k = key(x)
+            if k > best_key {
+                best = x
+                best_key = k
+            }
+        }
+        Some(best)
+    }
+
+    /// Sorts in place by a key (stable).
+    pub fn sort_by<K: Ord>(self, key: fn(T) -> K) {
+        self.sort_by_keys(self.map(key))
+    }
+
+    /// A sorted copy, by a key (stable).
+    pub fn sorted_by<K: Ord>(self, key: fn(T) -> K) -> [T] {
+        let out = self.copy()
+        out.sort_by_keys(out.map(key))
+        out
+    }
+}
+
+extend [str] {
+    /// Concatenates with `sep` between elements.
+    pub native fn join(self, sep: str = "") -> str
+}
+
+extend<K: Hash, V> [K: V] {
+    pub native fn len(self) -> int
+    pub native fn is_empty(self) -> bool
+    pub native fn get(self, key: K) -> V?
+    pub native fn get_or(self, key: K, default: V) -> V
+    pub native fn contains(self, key: K) -> bool
+    /// Inserts; returns the previous value.
+    pub native fn insert(self, key: K, value: V) -> V?
+    pub native fn remove(self, key: K) -> V?
+    pub native fn keys(self) -> [K]
+    pub native fn values(self) -> [V]
+    pub native fn entries(self) -> [(K, V)]
+    pub native fn clear(self)
+    pub native fn copy(self) -> [K: V]
+    pub native fn extend(self, other: [K: V])
+    /// Inserts `default` if `key` is absent; returns the stored value.
+    pub native fn get_or_insert(self, key: K, default: V) -> V
+
+    /// A new map with `f` applied to every value.
+    pub fn map_values<W>(self, f: fn(V) -> W) -> [K: W] {
+        let out: [K: W] = [:]
+        for (k, v) in self {
+            out[k] = f(v)
+        }
+        out
+    }
+
+    /// Entries for which `f` returns true.
+    pub fn filter(self, f: fn(K, V) -> bool) -> [K: V] {
+        let out: [K: V] = [:]
+        for (k, v) in self {
+            if f(k, v) {
+                out[k] = v
+            }
+        }
+        out
+    }
+}
+
+extend<T: Hash> Set<T> {
+    pub native fn len(self) -> int
+    pub native fn is_empty(self) -> bool
+    /// Adds; true if newly added.
+    pub native fn add(self, x: T) -> bool
+    /// Removes; true if it was present.
+    pub native fn remove(self, x: T) -> bool
+    pub native fn contains(self, x: T) -> bool
+    pub native fn to_list(self) -> [T]
+    pub native fn union(self, other: Set<T>) -> Set<T>
+    pub native fn intersection(self, other: Set<T>) -> Set<T>
+    pub native fn difference(self, other: Set<T>) -> Set<T>
+    pub native fn is_subset(self, other: Set<T>) -> bool
+    pub native fn copy(self) -> Set<T>
+    pub native fn clear(self)
+}
+
+extend Range {
+    pub native fn start(self) -> int
+    /// The exclusive end.
+    pub native fn end(self) -> int
+    pub native fn len(self) -> int
+    pub native fn contains(self, i: int) -> bool
+    pub native fn to_list(self) -> [int]
+    pub native fn step_by(self, step: int) -> [int]
+    pub native fn reversed(self) -> [int]
+
+    pub fn map<U>(self, f: fn(int) -> U) -> [U] {
+        let out = []
+        for i in self.to_list() {
+            out.push(f(i))
+        }
+        out
+    }
+
+    pub fn filter(self, f: fn(int) -> bool) -> [int] {
+        let out = []
+        for i in self.to_list() {
+            if f(i) {
+                out.push(i)
+            }
+        }
+        out
+    }
+
+    pub fn each(self, f: fn(int)) {
+        for i in self.to_list() {
+            f(i)
+        }
+    }
+}

@@ -1,0 +1,384 @@
+=== integer basics
+print(1 + 2)
+print(10 - 3)
+print(6 * 7)
+print(7 / 2)
+print(7 % 3)
+print(2 ** 10)
+print(-5)
+print(--5)
+--- stdout
+3
+7
+42
+3
+1
+1024
+-5
+5
+
+=== floor division and modulo
+print(-7 / 2)
+print(-7 % 2)
+print(7 / -2)
+print(7 % -2)
+print(-7 / -2)
+print(-7 % -2)
+print(-8 / 2)
+--- stdout
+-4
+1
+-4
+-1
+3
+-1
+-4
+
+=== float arithmetic
+print(1.5 + 2.25)
+print(0.1 + 0.2)
+print(7.0 / 2.0)
+print(-7.5 % 2.0)
+print(2.0 ** 0.5)
+print(1.0 / 0.0)
+print(-1.0 / 0.0)
+print((0.0 / 0.0).is_nan())
+--- stdout
+3.75
+0.30000000000000004
+3.5
+0.5
+1.4142135623730951
+inf
+-inf
+true
+
+=== precedence
+print(1 + 2 * 3)
+print((1 + 2) * 3)
+print(2 ** 3 ** 2)
+print(-2 ** 2)
+print(10 - 4 - 3)
+print(100 / 10 / 5)
+print(1 + 2 == 3)
+print(1 << 2 + 1)
+print(6 & 3 | 8)
+print(not 1 == 2)
+--- stdout
+7
+9
+512
+-4
+3
+2
+true
+8
+10
+true
+
+=== comparisons
+print(1 < 2)
+print(2 <= 2)
+print(3 > 4)
+print(4 >= 5)
+print(1 == 1)
+print(1 != 1)
+print(1.5 < 2.5)
+print("abc" < "abd")
+print("B" < "a")
+print(true > false)
+print(1s < 2s)
+--- stdout
+true
+true
+false
+false
+true
+false
+true
+true
+true
+true
+true
+
+=== comparison chaining is rejected
+print(1 < 2 < 3)
+--- error
+1: comparison operators cannot be chained
+
+=== nan comparisons
+let n = 0.0 / 0.0
+print(n == n)
+print(n < 1.0)
+print(n > 1.0)
+--- stdout
+false
+false
+false
+
+=== bitwise
+print(12 & 10)
+print(12 | 10)
+print(12 ^ 10)
+print(~0)
+print(1 << 62)
+print(-16 >> 2)
+print(5 >> 1)
+--- stdout
+8
+14
+6
+-1
+4611686018427387904
+-4
+2
+
+=== shift out of range panics
+let n = 64
+print(1 << n)
+--- panic
+shift out of range
+
+=== negative shift panics
+let n = -1
+print(1 >> n)
+--- panic
+shift out of range
+
+=== addition overflow panics
+let x = 9223372036854775807
+print(x + 1)
+--- panic
+integer overflow
+
+=== subtraction overflow panics
+let x = -9223372036854775807
+print(x - 2)
+--- panic
+integer overflow
+
+=== multiplication overflow panics
+let x = 4611686018427387904
+print(x * 2)
+--- panic
+integer overflow
+
+=== power overflow panics
+print(2 ** 63)
+--- panic
+integer overflow
+
+=== negation overflow panics
+let x = -9223372036854775807 - 1
+print(-x)
+--- panic
+integer overflow
+
+=== min int divided by minus one overflows
+let x = -9223372036854775807 - 1
+print(x / -1)
+--- panic
+integer overflow
+
+=== division by zero panics
+let z = 0
+print(10 / z)
+--- panic
+division by zero
+
+=== modulo by zero panics
+let z = 0
+print(10 % z)
+--- panic
+division by zero
+
+=== negative exponent panics
+let e = -1
+print(2 ** e)
+--- panic
+negative exponent
+
+=== mixing int and float is a type error
+print(1 + 2.0)
+--- error
+1: type mismatch
+
+=== explicit conversions
+print(1.to_float() + 2.0)
+print(3.99.to_int())
+print(-3.99.to_int())
+print((-3.99).to_int())
+print(2.5.round())
+print((-2.5).round())
+print(2.7.floor())
+print(2.2.ceil())
+--- stdout
+3.0
+3
+-3
+-3
+3.0
+-3.0
+2.0
+3.0
+
+=== float to int panics on nan
+let n = 0.0 / 0.0
+print(n.to_int())
+--- panic
+cannot convert
+
+=== logical operators short circuit
+fn boom() -> bool { panic("evaluated") }
+print(false and boom())
+print(true or boom())
+print(true and false)
+print(false or true)
+print(not true)
+--- stdout
+false
+true
+false
+true
+false
+
+=== logical operators require bool
+print(1 and 2)
+--- error
+1: type mismatch
+
+=== compound assignment
+var x = 10
+x += 5
+x -= 3
+x *= 2
+x /= 4
+x %= 4
+print(x)
+var f = 1.5
+f *= 2.0
+print(f)
+var s = "a"
+s += "b"
+print(s)
+--- stdout
+2
+3.0
+ab
+
+=== int methods
+print((-5).abs())
+print(3.pow(4))
+print(5.min(3))
+print(5.max(3))
+print(15.clamp(0, 10))
+print(255.to_str_radix(16))
+print((-3).sign())
+print(4.is_even())
+print(4.is_odd())
+print(65.to_char())
+print(int.parse("42"))
+print(int.parse("x"))
+print(int.parse("ff", radix: 16))
+print(int.max_value())
+print(int.min_value())
+--- stdout
+5
+81
+3
+5
+10
+ff
+-1
+true
+false
+Some("A")
+Some(42)
+None
+Some(255)
+9223372036854775807
+-9223372036854775808
+
+=== float methods
+print(2.0.sqrt())
+print((-1.5).abs())
+print(1.5.min(0.5))
+print(2.0.pow(3.0))
+print(3.7.trunc())
+print(3.14159.to_str_fixed(2))
+print(float.parse("2.5"))
+print(float.parse("nope"))
+print((1.0 / 0.0).is_infinite())
+print(1.0.is_finite())
+print(5.5.clamp(0.0, 1.0))
+--- stdout
+1.4142135623730951
+1.5
+0.5
+8.0
+3.0
+3.14
+Some(2.5)
+None
+true
+true
+1.0
+
+=== duration arithmetic
+let d = 1s + 500ms
+print(d)
+print(d * 2)
+print(d / 3)
+print(d - 2s)
+print(-d)
+print(3s / 2s)
+print(d.millis())
+print(d.secs())
+print(d.nanos())
+print(duration.from_millis(250))
+print(duration.from_secs(0.5))
+--- stdout
+1.5s
+3s
+500ms
+-500ms
+-1.5s
+1.5
+1500
+1.5
+1500000000
+250ms
+500ms
+
+=== unary minus on float and bitwise not
+print(-1.5)
+print(~5)
+--- stdout
+-1.5
+-6
+
+=== equality of composite values
+print([1, 2] == [1, 2])
+print([1, 2] != [2, 1])
+print((1, "a") == (1, "a"))
+print(["a": 1] == ["a": 1])
+print(Some(1) == Some(1))
+print(Some(1) == None)
+--- stdout
+true
+true
+true
+true
+true
+false
+
+=== ordering of composite values
+print([1, 2] < [1, 3])
+print([1, 2] < [1, 2, 0])
+print((2, "a") > (1, "z"))
+print(Some(1) < None)
+--- stdout
+true
+true
+true
+true

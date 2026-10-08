@@ -1,0 +1,70 @@
+//! Conway's Game of Life on a toroidal grid.
+//!
+//! Usage: sand run examples/life.sand -- [generations]
+
+import env
+
+struct Board {
+    width: int
+    height: int
+    var cells: [[bool]]
+
+    /// Parses a board where `#` is alive and anything else is dead.
+    fn parse(text: str) -> Board {
+        let rows = text.trim().lines().map(line => line.trim().chars().map(c => c == "#"))
+        Board { width: rows[0].len(), height: rows.len(), cells: rows }
+    }
+
+    fn alive(self, r: int, c: int) -> bool {
+        // Floor modulo wraps negative coordinates around the edges.
+        self.cells[r % self.height][c % self.width]
+    }
+
+    fn neighbors(self, r: int, c: int) -> int {
+        var n = 0
+        for dr in -1..=1 {
+            for dc in -1..=1 {
+                if (dr != 0 or dc != 0) and self.alive(r + dr, c + dc) {
+                    n += 1
+                }
+            }
+        }
+        n
+    }
+
+    fn next_state(self, r: int, c: int) -> bool {
+        match (self.cells[r][c], self.neighbors(r, c)) {
+            (true, 2) | (_, 3) => true
+            _ => false
+        }
+    }
+
+    fn step(self) {
+        self.cells = [[self.next_state(r, c) for c in 0..self.width] for r in 0..self.height]
+    }
+
+    fn population(self) -> int {
+        self.cells.map(row => row.count(alive => alive)).sum()
+    }
+
+    fn render(self) -> str {
+        self.cells.map(row => row.map(c => if c { "#" } else { "." }).join()).join("\n")
+    }
+}
+
+let glider = """
+    .#......
+    ..#.....
+    ###.....
+    ........
+    ........
+    ........
+    """
+
+let generations = env.args().first().and_then(a => a.parse_int()) ?? 4
+let board = Board.parse(glider)
+for _ in 0..generations {
+    board.step()
+}
+print("generation {generations}, population {board.population()}")
+print(board.render())

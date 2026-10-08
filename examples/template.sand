@@ -1,0 +1,409 @@
+//! A small Jinja-style template engine.
+//!
+//! Usage: sand run examples/template.sand -- TEMPLATE DATA.json
+//!
+//! Supported syntax:
+//!
+//!     {{ user.name | upper }}            output with filters
+//!     {{ missing | default("n/a") }}     filter arguments
+//!     {% for item in items %}...{% endfor %}   with loop.index, loop.first, loop.last
+//!     {% if cond %}...{% elif cond %}...{% else %}...{% endif %}
+//!     {# comments #}
+//!
+//! Conditions may be `path`, `not cond`, or `path OP literal-or-path` with
+//! OP one of == != < <= > >=.
+
+import env
+import fs
+import io
+import json
+import regex
+
+from json import Json
+
+struct Filter {
+    name: str
+    args: [Json]
+}
+
+struct Expr {
+    value: Operand
+    filters: [Filter]
+}
+
+enum Operand {
+    Path([str])
+    Literal(Json)
+}
+
+enum Cond {
+    Truthy(Expr)
+    Not(Cond)
+    Compare(op: str, left: Expr, right: Expr)
+}
+
+enum Node {
+    Text(str)
+    Output(Expr)
+    For(name: str, iterable: Expr, body: [Node])
+    If(branches: [(Cond, [Node])], otherwise: [Node])
+}
+
+enum Tok {
+    Text(str)
+    Out(str)
+    Tag(str)
+}
+
+// ---------------------------------------------------------------------------
+// Lexing
+
+fn lex(src: str) -> Result<[Tok]> {
+    let re = regex.new(r"(?s)\{\{(.*?)\}\}|\{%(.*?)%\}|\{#.*?#\}")?
+    let toks = []
+    var last = 0
+    for caps in re.captures_all(src) {
+        let whole = caps.get(0).unwrap()
+        if whole.start > last {
+            toks.push(Tok.Text(src[last..whole.start]))
+        }
+        if let Some(m) = caps.get(1) {
+            toks.push(Tok.Out(m.text.trim()))
+        } else if let Some(m) = caps.get(2) {
+            toks.push(Tok.Tag(m.text.trim()))
+        }
+        last = whole.end
+    }
+    if last < src.len() {
+        toks.push(Tok.Text(src[last..]))
+    }
+    Ok(toks)
+}
+
+// ---------------------------------------------------------------------------
+// Parsing
+
+fn parse_literal(text: str) -> Json? {
+    let t = text.trim()
+    if t.len() >= 2 and (t.starts_with("\"") and t.ends_with("\"") or t.starts_with("'") and t.ends_with("'")) {
+        return Some(Json.Str(t[1..t.len() - 1]))
+    }
+    if let Some(n) = t.parse_float() {
+        return Some(Json.Num(n))
+    }
+    match t {
+        "true" => Some(Json.Bool(true))
+        "false" => Some(Json.Bool(false))
+        "none" | "null" => Some(Json.Null)
+        _ => None
+    }
+}
+
+fn parse_operand(text: str) -> Result<Operand> {
+    if let Some(lit) = parse_literal(text) {
+        return Ok(Operand.Literal(lit))
+    }
+    let parts = text.trim().split(".")
+    if parts.any(p => p.is_empty() or not p.replace("_", "a").is_alnum()) {
+        return Err(error("invalid expression `{text}`", kind: "parse"))
+    }
+    Ok(Operand.Path(parts))
+}
+
+/// Splits on `sep` outside of quotes.
+fn split_outside_quotes(text: str, sep: str) -> [str] {
+    let parts = []
+    var current = ""
+    var quote = ""
+    for c in text.chars() {
+        if quote != "" {
+            if c == quote { quote = "" }
+            current += c
+        } else if c == "\"" or c == "'" {
+            quote = c
+            current += c
+        } else if c == sep {
+            parts.push(current)
+            current = ""
+        } else {
+            current += c
+        }
+    }
+    parts.push(current)
+    parts
+}
+
+fn parse_expr(text: str) -> Result<Expr> {
+    let pieces = split_outside_quotes(text, "|")
+    let value = parse_operand(pieces[0])?
+    let filters = []
+    for piece in pieces[1..] {
+        let p = piece.trim()
+        match p.split_once("(") {
+            Some((name, rest)) => {
+                let Some(inner) = rest.strip_suffix(")") else {
+                    return Err(error("unclosed filter arguments in `{p}`", kind: "parse"))
+                }
+                let args = []
+                for a in split_outside_quotes(inner, ",") {
+                    let Some(lit) = parse_literal(a) else {
+                        return Err(error("filter arguments must be literals: `{a}`", kind: "parse"))
+                    }
+                    args.push(lit)
+                }
+                filters.push(Filter { name: name.trim(), args })
+            }
+            None => filters.push(Filter { name: p, args: [] })
+        }
+    }
+    Ok(Expr { value, filters })
+}
+
+fn parse_cond(text: str) -> Result<Cond> {
+    let t = text.trim()
+    if let Some(rest) = t.strip_prefix("not ") {
+        return Ok(Cond.Not(parse_cond(rest)?))
+    }
+    for op in ["==", "!=", "<=", ">=", "<", ">"] {
+        if let Some((l, r)) = t.split_once(" {op} ") {
+            return Ok(Cond.Compare(op, parse_expr(l)?, parse_expr(r)?))
+        }
+    }
+    Ok(Cond.Truthy(parse_expr(t)?))
+}
+
+struct Parser {
+    toks: [Tok]
+    var pos: int = 0
+
+    /// Parses nodes until one of `stops` is reached; returns the nodes and the stop tag.
+    fn nodes(self, stops: [str]) -> Result<([Node], str)> {
+        let out = []
+        while self.pos < self.toks.len() {
+            let tok = self.toks[self.pos]
+            self.pos += 1
+            match tok {
+                Text(t) => out.push(Node.Text(t))
+                Out(e) => out.push(Node.Output(parse_expr(e)?))
+                Tag(tag) => {
+                    let word = tag.split_whitespace().first() ?? ""
+                    if stops.contains(word) {
+                        return Ok((out, tag))
+                    }
+                    out.push(self.block(tag, word)?)
+                }
+            }
+        }
+        if stops.is_empty() {
+            Ok((out, ""))
+        } else {
+            Err(error("unexpected end of template, expected one of {stops}", kind: "parse"))
+        }
+    }
+
+    fn block(self, tag: str, word: str) -> Result<Node> {
+        match word {
+            "for" => {
+                let parts = tag.split_whitespace()
+                if parts.len() != 4 or parts[2] != "in" {
+                    return Err(error("malformed for tag `{tag}`", kind: "parse"))
+                }
+                let (body, _) = self.nodes(["endfor"])?
+                Ok(Node.For(parts[1], parse_expr(parts[3])?, body))
+            }
+            "if" => {
+                let branches = []
+                var cond = parse_cond(tag[2..])?
+                loop {
+                    let (body, stop) = self.nodes(["elif", "else", "endif"])?
+                    branches.push((cond, body))
+                    if stop.starts_with("elif") {
+                        cond = parse_cond(stop[4..])?
+                    } else if stop == "else" {
+                        let (otherwise, _) = self.nodes(["endif"])?
+                        return Ok(Node.If(branches, otherwise))
+                    } else {
+                        return Ok(Node.If(branches, []))
+                    }
+                }
+            }
+            _ => Err(error("unknown tag `{tag}`", kind: "parse"))
+        }
+    }
+}
+
+pub fn compile(src: str) -> Result<[Node]> {
+    let parser = Parser { toks: lex(src)? }
+    let (nodes, _) = parser.nodes([])?
+    Ok(nodes)
+}
+
+// ---------------------------------------------------------------------------
+// Rendering
+
+struct Scope {
+    frames: [[str: Json]]
+
+    fn lookup(self, path: [str]) -> Json {
+        var current: Json? = None
+        for frame in self.frames.reversed() {
+            if let Some(v) = frame.get(path[0]) {
+                current = Some(v)
+                break
+            }
+        }
+        var value = current ?? Json.Null
+        for key in path[1..] {
+            value = match value {
+                Obj(fields) => fields.get(key) ?? Json.Null
+                Arr(items) => key.parse_int().and_then(i => items.get(i)) ?? Json.Null
+                _ => Json.Null
+            }
+        }
+        value
+    }
+}
+
+fn truthy(v: Json) -> bool {
+    match v {
+        Null => false
+        Bool(b) => b
+        Num(n) => n != 0.0
+        Str(s) => not s.is_empty()
+        Arr(items) => not items.is_empty()
+        Obj(fields) => not fields.is_empty()
+    }
+}
+
+fn display(v: Json) -> str {
+    match v {
+        Null => ""
+        Bool(b) => b.to_str()
+        Num(n) => if n == n.round() and n.abs() < 1e15 { n.to_int().to_str() } else { n.to_str() }
+        Str(s) => s
+        other => json.stringify(other)
+    }
+}
+
+fn escape_html(s: str) -> str {
+    s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;")
+}
+
+fn apply_filter(v: Json, f: Filter) -> Result<Json> {
+    let arg = f.args.first()
+    match f.name {
+        "upper" => Ok(Json.Str(display(v).to_upper()))
+        "lower" => Ok(Json.Str(display(v).to_lower()))
+        "title" => Ok(Json.Str(display(v).split(" ").map(w => match w.char_at(0) {
+            Some(c) => c.to_upper() + w[c.len()..]
+            None => w
+        }).join(" ")))
+        "length" => Ok(Json.Num(match v {
+            Str(s) => s.char_count().to_float()
+            Arr(items) => items.len().to_float()
+            Obj(fields) => fields.len().to_float()
+            _ => 0.0
+        }))
+        "default" => Ok(if truthy(v) { v } else { arg ?? Json.Str("") })
+        "join" => {
+            let sep = arg.and_then(a => a.as_str()) ?? ""
+            Ok(Json.Str((v.as_list() ?? []).map(display).join(sep)))
+        }
+        "escape" => Ok(Json.Str(escape_html(display(v))))
+        "trim" => Ok(Json.Str(display(v).trim()))
+        _ => Err(error("unknown filter `{f.name}`", kind: "invalid"))
+    }
+}
+
+fn eval_expr(e: Expr, scope: Scope) -> Result<Json> {
+    var v = match e.value {
+        Path(p) => scope.lookup(p)
+        Literal(j) => j
+    }
+    for f in e.filters {
+        v = apply_filter(v, f)?
+    }
+    Ok(v)
+}
+
+fn compare(op: str, a: Json, b: Json) -> bool {
+    match (a, b) {
+        (Num(x), Num(y)) => match op {
+            "==" => x == y
+            "!=" => x != y
+            "<" => x < y
+            "<=" => x <= y
+            ">" => x > y
+            _ => x >= y
+        }
+        _ => match op {
+            "==" => display(a) == display(b)
+            "!=" => display(a) != display(b)
+            "<" => display(a) < display(b)
+            "<=" => display(a) <= display(b)
+            ">" => display(a) > display(b)
+            _ => display(a) >= display(b)
+        }
+    }
+}
+
+fn eval_cond(c: Cond, scope: Scope) -> Result<bool> {
+    match c {
+        Truthy(e) => Ok(truthy(eval_expr(e, scope)?))
+        Not(inner) => Ok(not eval_cond(inner, scope)?)
+        Compare(op, l, r) => Ok(compare(op, eval_expr(l, scope)?, eval_expr(r, scope)?))
+    }
+}
+
+fn render_nodes(nodes: [Node], scope: Scope, out: [str]) -> Result<()> {
+    for node in nodes {
+        match node {
+            Text(t) => out.push(t)
+            Output(e) => out.push(display(eval_expr(e, scope)?))
+            For(name, iterable, body) => {
+                let items = eval_expr(iterable, scope)?.as_list() ?? []
+                for (i, item) in items.enumerate() {
+                    let loop_info = Json.Obj([
+                        "index": Json.Num((i + 1).to_float()),
+                        "first": Json.Bool(i == 0),
+                        "last": Json.Bool(i == items.len() - 1),
+                    ])
+                    scope.frames.push([name: item, "loop": loop_info])
+                    render_nodes(body, scope, out)?
+                    scope.frames.pop()
+                }
+            }
+            If(branches, otherwise) => {
+                var done = false
+                for (cond, body) in branches {
+                    if eval_cond(cond, scope)? {
+                        render_nodes(body, scope, out)?
+                        done = true
+                        break
+                    }
+                }
+                if not done {
+                    render_nodes(otherwise, scope, out)?
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn render(template: str, data: Json) -> Result<str> {
+    let nodes = compile(template)?
+    let root = data.as_map() ?? [:]
+    let out = []
+    render_nodes(nodes, Scope { frames: [root] }, out)?
+    Ok(out.join())
+}
+
+let args = env.args()
+if args.len() != 2 {
+    eprint("usage: template.sand TEMPLATE DATA.json")
+    exit(2)
+}
+let template = fs.read_text(args[0])?
+let data = json.parse(fs.read_text(args[1])?)?
+io.write(render(template, data)?)

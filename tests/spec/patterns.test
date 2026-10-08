@@ -1,0 +1,248 @@
+=== tuple patterns
+let pairs = [(1, "a"), (2, "b")]
+for (n, s) in pairs {
+    print("{n}{s}")
+}
+match (1, (2, 3)) {
+    (a, (b, c)) => print(a + b + c)
+}
+--- stdout
+1a
+2b
+6
+
+=== struct patterns
+struct P { x: int, y: int }
+fn where_is(p: P) -> str {
+    match p {
+        P { x: 0, y: 0 } => "origin"
+        P { x: 0, .. } => "on y axis"
+        P { y: 0, x } => "on x axis at {x}"
+        P { x, y } => "at {x},{y}"
+    }
+}
+print(where_is(P { x: 0, y: 0 }))
+print(where_is(P { x: 0, y: 5 }))
+print(where_is(P { x: 3, y: 0 }))
+print(where_is(P { x: 1, y: 2 }))
+let P { x, y } = P { x: 7, y: 8 }
+print(x * y)
+--- stdout
+origin
+on y axis
+on x axis at 3
+at 1,2
+56
+
+=== struct pattern missing fields without rest is an error
+struct P { x: int, y: int }
+match (P { x: 1, y: 2 }) {
+    P { x } => print(x)
+}
+--- error
+3: missing field `y`
+
+=== list patterns
+fn describe(xs: [int]) -> str {
+    match xs {
+        [] => "empty"
+        [x] => "one: {x}"
+        [a, b] => "two: {a} {b}"
+        [first, ..rest] => "first {first}, {rest.len()} more"
+    }
+}
+print(describe([]))
+print(describe([1]))
+print(describe([1, 2]))
+print(describe([1, 2, 3, 4]))
+fn last(xs: [str]) -> str {
+    match xs {
+        [.., l] => l
+        [] => "none"
+    }
+}
+print(last(["a", "b"]))
+print(last([]))
+--- stdout
+empty
+one: 1
+two: 1 2
+first 1, 3 more
+b
+none
+
+=== nested enum patterns
+enum Expr {
+    Num(int)
+    Add(Expr, Expr)
+    Mul(Expr, Expr)
+}
+fn simplify(e: Expr) -> Expr {
+    match e {
+        Add(Num(0), x) | Add(x, Num(0)) => simplify(x)
+        Mul(Num(1), x) | Mul(x, Num(1)) => simplify(x)
+        Mul(Num(0), _) | Mul(_, Num(0)) => Expr.Num(0)
+        Add(a, b) => Expr.Add(simplify(a), simplify(b))
+        Mul(a, b) => Expr.Mul(simplify(a), simplify(b))
+        Num(n) => Expr.Num(n)
+    }
+}
+print(simplify(Expr.Add(Expr.Num(0), Expr.Mul(Expr.Num(1), Expr.Num(7)))))
+--- stdout
+Num(7)
+
+=== or patterns must bind the same names
+match Some(1) {
+    Some(x) | None => print("x")
+}
+--- error
+2: must bind the same
+
+=== non exhaustive enum match
+enum C { R, G, B }
+fn f(c: C) -> int {
+    match c {
+        R => 1
+        G => 2
+    }
+}
+--- error
+3: non-exhaustive match: missing `B`
+
+=== non exhaustive option match
+fn f(o: int?) -> int {
+    match o {
+        Some(x) => x
+    }
+}
+--- error
+2: non-exhaustive match: missing `None`
+
+=== non exhaustive bool match
+fn f(b: bool) -> int {
+    match b {
+        true => 1
+    }
+}
+--- error
+2: missing `false`
+
+=== non exhaustive int match
+fn f(n: int) -> int {
+    match n {
+        0 => 1
+        1 => 2
+    }
+}
+--- error
+2: non-exhaustive match: missing `_`
+
+=== non exhaustive nested match
+fn f(p: (bool, bool)) -> int {
+    match p {
+        (true, _) => 1
+        (false, true) => 2
+    }
+}
+--- error
+2: missing `(false, false)`
+
+=== non exhaustive list match
+fn f(xs: [int]) -> int {
+    match xs {
+        [] => 0
+        [x] => x
+    }
+}
+--- error
+2: missing `[_, _, ..]`
+
+=== guards do not count for exhaustiveness
+fn f(n: int?) -> int {
+    match n {
+        Some(x) if x > 0 => x
+        None => 0
+    }
+}
+--- error
+2: non-exhaustive match
+
+=== unreachable pattern is an error
+fn f(o: int?) -> int {
+    match o {
+        _ => 0
+        Some(x) => x
+    }
+}
+--- error
+4: unreachable pattern
+
+=== bool and string literal patterns
+fn f(b: bool, s: str) -> str {
+    match (b, s) {
+        (true, "x") => "tx"
+        (true, _) => "t"
+        (false, _) => "f"
+    }
+}
+print(f(true, "x"))
+print(f(true, "y"))
+print(f(false, "x"))
+--- stdout
+tx
+t
+f
+
+=== negative literal and range patterns
+fn f(n: int) -> str {
+    match n {
+        -1 => "minus one"
+        -10..=-2 => "negative"
+        _ => "other"
+    }
+}
+print(f(-1))
+print(f(-5))
+print(f(3))
+--- stdout
+minus one
+negative
+other
+
+=== pattern type mismatch
+match 1 {
+    "a" => print("a")
+    _ => print("b")
+}
+--- error
+2: type mismatch
+
+=== wildcard cannot be read
+let _ = 5
+print(_)
+--- error
+2: `_`
+
+=== result patterns
+fn show(r: Result<int, str>) -> str {
+    match r {
+        Ok(v) if v > 10 => "big {v}"
+        Ok(v) => "ok {v}"
+        Err(e) => "err {e}"
+    }
+}
+print(show(Ok(50)))
+print(show(Ok(5)))
+print(show(Err("bad")))
+--- stdout
+big 50
+ok 5
+err bad
+
+=== pattern binding in for loop with struct
+struct Item { name: str, qty: int }
+for Item { name, qty } in [Item { name: "a", qty: 2 }] {
+    print("{name} x{qty}")
+}
+--- stdout
+a x2

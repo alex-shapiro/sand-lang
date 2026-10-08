@@ -1,0 +1,116 @@
+//! Mathematical constants and functions on `float` and `int`.
+
+/// The ratio of a circle's circumference to its diameter.
+pub let pi = 3.141592653589793
+
+/// Euler's number, the base of the natural logarithm.
+pub let e = 2.718281828459045
+
+/// The full turn, `2 * pi`.
+pub let tau = 6.283185307179586
+
+/// Positive infinity.
+pub let inf = 1.0 / 0.0
+
+/// A quiet NaN ("not a number").
+pub let nan = 0.0 / 0.0
+
+/// Square root (`NaN` for negative inputs).
+pub native fn sqrt(x: float) -> float
+/// Cube root.
+pub native fn cbrt(x: float) -> float
+/// `e` raised to the power `x`.
+pub native fn exp(x: float) -> float
+/// Natural logarithm.
+pub native fn ln(x: float) -> float
+/// Base-2 logarithm.
+pub native fn log2(x: float) -> float
+/// Base-10 logarithm.
+pub native fn log10(x: float) -> float
+/// Logarithm of `x` in the given `base`.
+pub native fn log(x: float, base: float) -> float
+/// Sine of `x` (radians).
+pub native fn sin(x: float) -> float
+/// Cosine of `x` (radians).
+pub native fn cos(x: float) -> float
+/// Tangent of `x` (radians).
+pub native fn tan(x: float) -> float
+/// Arcsine, in radians.
+pub native fn asin(x: float) -> float
+/// Arccosine, in radians.
+pub native fn acos(x: float) -> float
+/// Arctangent, in radians.
+pub native fn atan(x: float) -> float
+/// The angle of the point `(x, y)` in radians, in `-pi..=pi`.
+pub native fn atan2(y: float, x: float) -> float
+/// Hyperbolic sine.
+pub native fn sinh(x: float) -> float
+/// Hyperbolic cosine.
+pub native fn cosh(x: float) -> float
+/// Hyperbolic tangent.
+pub native fn tanh(x: float) -> float
+/// `sqrt(x * x + y * y)` without intermediate overflow.
+pub native fn hypot(x: float, y: float) -> float
+/// Largest integral value not greater than `x`.
+pub native fn floor(x: float) -> float
+/// Smallest integral value not less than `x`.
+pub native fn ceil(x: float) -> float
+/// Nearest integral value, rounding half away from zero.
+pub native fn round(x: float) -> float
+/// Integral part of `x` (rounds toward zero).
+pub native fn trunc(x: float) -> float
+/// Absolute value.
+pub native fn abs(x: float) -> float
+/// `x` raised to the power `y`.
+pub native fn pow(x: float, y: float) -> float
+/// The smaller of `a` and `b` (a NaN argument is ignored).
+pub native fn min(a: float, b: float) -> float
+/// The larger of `a` and `b` (a NaN argument is ignored).
+pub native fn max(a: float, b: float) -> float
+/// Converts degrees to radians.
+pub native fn to_radians(degrees: float) -> float
+/// Converts radians to degrees.
+pub native fn to_degrees(radians: float) -> float
+
+/// Restricts `x` to `lo..=hi`.
+pub fn clamp(x: float, lo: float, hi: float) -> float {
+    x.max(lo).min(hi)
+}
+
+/// True if `a` and `b` are equal within a relative tolerance (scaled by the
+/// larger magnitude) or an absolute tolerance. Infinities are close only to
+/// themselves; NaN is close to nothing.
+pub fn is_close(a: float, b: float, rel_tol: float = 1e-9, abs_tol: float = 0.0) -> bool {
+    if a == b {
+        return true
+    }
+    if a.is_infinite() or b.is_infinite() {
+        return false
+    }
+    let diff = (a - b).abs()
+    diff <= rel_tol * a.abs().max(b.abs()) or diff <= abs_tol
+}
+
+/// Greatest common divisor (always non-negative; `gcd(0, 0) == 0`).
+pub native fn gcd(a: int, b: int) -> int
+
+/// Least common multiple (always non-negative; `0` if either is `0`).
+pub native fn lcm(a: int, b: int) -> int
+
+/// The largest integer whose square is at most `n`; panics if `n` is negative.
+pub native fn isqrt(n: int) -> int
+
+/// Absolute value of an integer; panics on overflow.
+pub fn abs_int(n: int) -> int {
+    n.abs()
+}
+
+/// The smaller of two integers.
+pub fn min_int(a: int, b: int) -> int {
+    a.min(b)
+}
+
+/// The larger of two integers.
+pub fn max_int(a: int, b: int) -> int {
+    a.max(b)
+}

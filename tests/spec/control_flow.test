@@ -1,0 +1,313 @@
+=== if else expression
+let x = 7
+let kind = if x % 2 == 0 { "even" } else { "odd" }
+print(kind)
+if x > 5 {
+    print("big")
+} else if x > 2 {
+    print("medium")
+} else {
+    print("small")
+}
+--- stdout
+odd
+big
+
+=== if without else has unit type
+let x = 1
+let r = if x > 0 { print("pos") }
+print(r)
+--- stdout
+pos
+()
+
+=== if branches must agree when used as a value
+let v = if true { 1 } else { "one" }
+--- error
+1: type mismatch
+
+=== if branches may differ when used as a statement
+fn noop() -> int { 1 }
+if true { noop() } else { print("x") }
+print("ok")
+--- stdout
+ok
+
+=== if condition must be bool
+if 1 { print("x") }
+--- error
+1: expected bool
+
+=== blocks are expressions
+let v = {
+    let a = 2
+    let b = 3
+    a * b
+}
+print(v)
+let u = {}
+print(u)
+--- stdout
+6
+()
+
+=== while loops
+var i = 0
+var sum = 0
+while i < 5 {
+    sum += i
+    i += 1
+}
+print(sum)
+--- stdout
+10
+
+=== break and continue
+var out = []
+for i in 0..10 {
+    if i == 7 { break }
+    if i % 2 == 0 { continue }
+    out.push(i)
+}
+print(out)
+var n = 0
+while true {
+    n += 1
+    if n >= 3 { break }
+}
+print(n)
+--- stdout
+[1, 3, 5]
+3
+
+=== loop with break value
+var i = 1
+let first_big = loop {
+    i *= 3
+    if i > 50 { break i }
+}
+print(first_big)
+--- stdout
+81
+
+=== break outside a loop is an error
+break
+--- error
+1: break outside of a loop
+
+=== continue outside a loop is an error
+fn f() { continue }
+--- error
+1: continue outside of a loop
+
+=== break with value in while is an error
+while true { break 1 }
+--- error
+1: break with a value
+
+=== nested loops break innermost
+for i in 0..3 {
+    for j in 0..3 {
+        if j == 1 { break }
+        print("{i}{j}")
+    }
+}
+--- stdout
+00
+10
+20
+
+=== match on integers and strings
+fn describe(n: int) -> str {
+    match n {
+        0 => "zero"
+        1 | 2 => "small"
+        3..=9 => "medium"
+        _ => "large"
+    }
+}
+print(describe(0))
+print(describe(2))
+print(describe(5))
+print(describe(42))
+let cmd = "go"
+match cmd {
+    "stop" => print("stopping")
+    "go" => print("going")
+    other => print("unknown {other}")
+}
+--- stdout
+zero
+small
+medium
+large
+going
+
+=== match with guards
+fn classify(n: int) -> str {
+    match n {
+        x if x < 0 => "negative"
+        0 => "zero"
+        x if x % 2 == 0 => "even"
+        _ => "odd"
+    }
+}
+print([-3, 0, 4, 7].map(classify))
+--- stdout
+["negative", "zero", "even", "odd"]
+
+=== match arms separated by commas on one line
+let v = match 2 { 1 => "a", 2 => "b", _ => "c" }
+print(v)
+--- stdout
+b
+
+=== return from nested loops
+fn find(grid: [[int]], target: int) -> (int, int)? {
+    for (r, row) in grid.enumerate() {
+        for (c, v) in row.enumerate() {
+            if v == target { return Some((r, c)) }
+        }
+    }
+    None
+}
+print(find([[1, 2], [3, 4]], 4))
+print(find([[1]], 9))
+--- stdout
+Some((1, 1))
+None
+
+=== never type in match arms
+fn get(o: int?) -> int {
+    let v = match o {
+        Some(x) => x
+        None => return -1
+    }
+    v * 2
+}
+print(get(Some(4)))
+print(get(None))
+--- stdout
+8
+-1
+
+=== if let and while let
+let maybe = Some(3)
+if let Some(v) = maybe {
+    print("got {v}")
+} else {
+    print("nothing")
+}
+let stack = [1, 2, 3]
+while let Some(top) = stack.pop() {
+    print(top)
+}
+--- stdout
+got 3
+3
+2
+1
+
+=== let else
+fn parse_pair(s: str) -> (int, int)? {
+    let Some((a, b)) = s.split_once(",") else { return None }
+    let Some(x) = a.parse_int() else { return None }
+    let Some(y) = b.parse_int() else { return None }
+    Some((x, y))
+}
+print(parse_pair("3,4"))
+print(parse_pair("3"))
+print(parse_pair("a,4"))
+--- stdout
+Some((3, 4))
+None
+None
+
+=== let else must diverge
+let opt = Some(1)
+let Some(x) = opt else { print("no") }
+--- error
+2: must diverge
+
+=== refutable pattern in plain let is an error
+let opt = Some(1)
+let Some(x) = opt
+--- error
+2: refutable pattern
+
+=== shadowing
+let x = 1
+let x = x + 1
+{
+    let x = "inner"
+    print(x)
+}
+print(x)
+--- stdout
+inner
+2
+
+=== assignment to let binding is an error
+let x = 1
+x = 2
+--- error
+2: cannot assign to immutable binding `x`
+
+=== compound assignment to let binding is an error
+let x = 1
+x += 2
+--- error
+2: cannot assign
+
+=== undefined variable
+print(nope)
+--- error
+1: undefined name `nope`
+
+=== variable scope ends with block
+{
+    let inner = 1
+}
+print(inner)
+--- error
+4: undefined name `inner`
+
+=== exit stops the program with a code
+print("before")
+exit(3)
+print("after")
+--- stdout
+before
+--- exit 3
+
+=== exit with zero
+print("done")
+exit(0)
+--- exit 0
+
+=== unreachable code after return still type checks
+fn f() -> int {
+    return 1
+    "not an int"
+}
+--- error
+3: type mismatch
+
+=== for over non-iterable is an error
+for x in 5 { print(x) }
+--- error
+1: not iterable
+
+=== struct literal not allowed in if condition without parens
+struct P { x: int }
+let p = P { x: 1 }
+if p == P { x: 1 } { print("eq") }
+--- error
+3: expected
+
+=== struct literal allowed in parens in condition
+struct P { x: int }
+let p = P { x: 1 }
+if p == (P { x: 1 }) { print("eq") }
+--- stdout
+eq

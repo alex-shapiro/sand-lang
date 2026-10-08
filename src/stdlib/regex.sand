@@ -1,0 +1,60 @@
+//! Regular expressions with the syntax of Rust's `regex` crate: matching takes
+//! linear time and there are no backreferences or look-around. Offsets are
+//! byte offsets into the searched text. Write patterns and replacements as raw
+//! strings (`r"\d{4}"`, `r"${name}"`) so that `{` and `\` are not
+//! interpreted by Sand's string syntax.
+
+/// A match: the matched `text` and its byte range `start..end`.
+pub struct Match {
+    text: str
+    start: int
+    end: int
+}
+
+/// A compiled regular expression, created with `regex.new`.
+pub native type Regex
+
+/// The capture groups of one match. Group 0 is the whole match.
+pub native type Captures
+
+/// Compiles `pattern`; errors have kind `"parse"` (invalid syntax) or
+/// `"limit"` (the compiled program would be too large).
+pub native fn new(pattern: str) -> Result<Regex>
+
+/// True if `pattern` matches somewhere in `text`.
+pub fn is_match(pattern: str, text: str) -> Result<bool> {
+    Ok(new(pattern)?.is_match(text))
+}
+
+extend Regex {
+    /// True if the regex matches somewhere in `text`.
+    pub native fn is_match(self, text: str) -> bool
+    /// The leftmost-first match.
+    pub native fn find(self, text: str) -> Match?
+    /// All non-overlapping matches, left to right.
+    pub native fn find_all(self, text: str) -> [Match]
+    /// The capture groups of the leftmost-first match.
+    pub native fn captures(self, text: str) -> Captures?
+    /// The capture groups of all non-overlapping matches.
+    pub native fn captures_all(self, text: str) -> [Captures]
+    /// Replaces the first match with `rep`, in which `$1` or `${1}` stands
+    /// for a numbered group, `${name}` for a named group and `$$` for `$`.
+    pub native fn replace(self, text: str, rep: str) -> str
+    /// Replaces every non-overlapping match with `rep` (expanded as in `replace`).
+    pub native fn replace_all(self, text: str, rep: str) -> str
+    /// The pieces of `text` between matches.
+    pub native fn split(self, text: str) -> [str]
+    /// The source pattern.
+    pub native fn pattern(self) -> str
+}
+
+extend Captures {
+    /// Group `i`; `None` if it did not participate or does not exist.
+    pub native fn get(self, i: int) -> Match?
+    /// The group called `n`; `None` if it did not participate or does not exist.
+    pub native fn name(self, n: str) -> Match?
+    /// The number of groups, including group 0.
+    pub native fn len(self) -> int
+    /// The text of group `i`.
+    pub native fn text(self, i: int) -> str?
+}

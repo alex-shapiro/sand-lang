@@ -1,0 +1,91 @@
+//! URIs (RFC 3986): parsing, recomposition, reference resolution, percent
+//! encoding and query strings.
+
+/// A parsed URI. `host` is `Some` exactly when the URI has an authority
+/// (`//...`); IPv6 literals are stored without brackets. `path` may be empty.
+pub struct Uri {
+    scheme: str
+    userinfo: str?
+    host: str?
+    port: int?
+    path: str
+    query: str?
+    fragment: str?
+
+    /// The URI as text (RFC 3986 §5.3 recomposition).
+    pub fn to_str(self) -> str {
+        var s = self.scheme + ":"
+        if let Some(a) = self.authority() {
+            s += "//" + a
+        }
+        s += self.path
+        if let Some(q) = self.query {
+            s += "?" + q
+        }
+        if let Some(f) = self.fragment {
+            s += "#" + f
+        }
+        s
+    }
+
+    /// Resolves `reference` (absolute or relative) against this URI as the
+    /// base, following RFC 3986 §5.2.
+    pub native fn join(self, reference: str) -> Result<Uri>
+
+    /// The query string decoded into key/value pairs (see `parse_query`).
+    pub fn query_pairs(self) -> [(str, str)] {
+        match self.query {
+            Some(q) => parse_query(q)
+            None => []
+        }
+    }
+
+    /// The authority `userinfo@host:port`, or `None` if there is none.
+    pub fn authority(self) -> str? {
+        let host = self.host?
+        var s = if host.contains(":") { "[" + host + "]" } else { host }
+        if let Some(u) = self.userinfo {
+            s = u + "@" + s
+        }
+        if let Some(p) = self.port {
+            s += ":" + p.to_str()
+        }
+        Some(s)
+    }
+
+    /// The well-known port of the scheme: http 80, https 443, ws 80,
+    /// wss 443, ftp 21.
+    pub fn default_port(self) -> int? {
+        match self.scheme {
+            "http" | "ws" => Some(80)
+            "https" | "wss" => Some(443)
+            "ftp" => Some(21)
+            _ => None
+        }
+    }
+}
+
+/// Parses an absolute URI (with a scheme). The scheme is lower-cased.
+/// Fails with kind `"parse"` on invalid syntax, characters or ports.
+pub native fn parse(text: str) -> Result<Uri>
+
+/// Percent-encodes every byte except the unreserved characters
+/// `A-Z a-z 0-9 - . _ ~`.
+pub native fn encode_component(s: str) -> str
+
+/// Like `encode_component`, but also keeps `/`.
+pub native fn encode_path(s: str) -> str
+
+/// Decodes `%XX` escapes. Fails on malformed escapes or if the result is not
+/// valid UTF-8. `+` is left unchanged.
+pub native fn decode_component(s: str) -> Result<str>
+
+/// Splits a query string into key/value pairs: `&`-separated, `=` between key
+/// and value (a missing `=` gives an empty value), `+` decodes to a space and
+/// `%XX` escapes are decoded leniently.
+pub native fn parse_query(q: str) -> [(str, str)]
+
+/// Builds a query string from key/value pairs, percent-encoding both.
+pub fn build_query(pairs: [(str, str)]) -> str {
+    "&".join(pairs.map(p => encode_component(p.0) + "=" + encode_component(p.1)))
+}

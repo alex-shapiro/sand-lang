@@ -1,0 +1,121 @@
+=== unix conversions
+import time
+print(time.from_unix(0).to_iso())
+print(time.from_unix(1700000000).to_iso())
+print(time.from_unix(-1).to_iso())
+print(time.from_unix_millis(1500).to_iso())
+print(time.from_unix(1700000000).unix())
+print(time.from_unix_millis(1700000000123).unix_millis())
+--- stdout
+1970-01-01T00:00:00Z
+2023-11-14T22:13:20Z
+1969-12-31T23:59:59Z
+1970-01-01T00:00:01.5Z
+1700000000
+1700000000123
+
+=== date components
+import time
+let t = time.date(2024, 2, 29, hour: 13, minute: 5, second: 9)?
+print(t.to_iso())
+print(t.unix())
+print(t.year())
+print(t.month())
+print(t.day())
+print(t.hour())
+print(t.minute())
+print(t.second())
+print(t.weekday())
+print(t.day_of_year())
+--- stdout
+2024-02-29T13:05:09Z
+1709211909
+2024
+2
+29
+13
+5
+9
+4
+60
+
+=== invalid dates are errors
+import time
+print(time.date(2023, 2, 29).is_err())
+print(time.date(2024, 13, 1).is_err())
+print(time.date(2024, 1, 1, hour: 24).is_err())
+--- stdout
+true
+true
+true
+
+=== arithmetic
+import time
+let t = time.date(2024, 2, 29, hour: 13, minute: 5, second: 9)?
+let later = t.add(36h)
+print(later.to_iso())
+print(later.since(t))
+print(t.sub(1s).to_iso())
+print(later > t)
+--- stdout
+2024-03-02T01:05:09Z
+36h
+2024-02-29T13:05:08Z
+true
+
+=== formatting
+import time
+let t = time.date(2024, 2, 29, hour: 13, minute: 5, second: 9)?.add(123ms)
+print(t.format("%Y-%m-%d %H:%M:%S"))
+print(t.format("%a %A %b %B %y %e %j"))
+print(t.format("%Z %z %s %%"))
+print(t.format("%3f %6f %9f"))
+print(t.to_iso())
+--- stdout
+2024-02-29 13:05:09
+Thu Thursday Feb February 24 29 060
+UTC +0000 1709211909 %
+123 123000 123000000
+2024-02-29T13:05:09.123Z
+
+=== parsing
+import time
+print(time.parse("2024-02-29T13:05:09Z")?.unix())
+print(time.parse("2024-02-29T13:05:09.5Z")?.unix_millis())
+print(time.parse("2024-02-29T15:05:09+02:00")?.to_iso())
+print(time.parse("2024-02-29")?.to_iso())
+print(time.parse("2024-02-29 13:05:09")?.to_iso())
+print(time.parse("garbage").is_err())
+print(time.parse("2024-02-30T00:00:00Z").is_err())
+--- stdout
+1709211909
+1709211909500
+2024-02-29T13:05:09Z
+2024-02-29T00:00:00Z
+2024-02-29T13:05:09Z
+true
+true
+
+=== now and monotonic
+import time
+let a = time.now()
+let b = time.now()
+print(b >= a)
+print(a.year() >= 2024)
+let m = time.monotonic()
+task.sleep(5ms)
+print(m.elapsed() >= 5ms)
+print(time.monotonic().since(m) > 0s)
+--- stdout
+true
+true
+true
+true
+
+=== sleep in time module
+import time
+let m = time.monotonic()
+time.sleep(10ms)
+print(m.elapsed() >= 10ms)
+--- stdout
+true

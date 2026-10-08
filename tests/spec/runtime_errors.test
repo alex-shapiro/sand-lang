@@ -1,0 +1,77 @@
+=== panic reports message
+fn inner() { panic("deep problem") }
+fn outer() { inner() }
+outer()
+--- panic
+deep problem
+
+=== integer overflow inside nested call
+fn f(x: int) -> int { x * x }
+print(f(4000000000))
+print(f(4000000000))
+--- panic
+integer overflow
+
+=== index error message includes index and length
+let xs = [1, 2]
+let i = 5
+print(xs[i])
+--- panic
+index out of bounds: index 5, length 2
+
+=== key error message includes key
+let m = ["a": 1]
+print(m["zz"])
+--- panic
+key not found: "zz"
+
+=== list remove out of range panics
+let xs = [1]
+xs.remove(3)
+--- panic
+index out of bounds
+
+=== list insert out of range panics
+let xs = [1]
+xs.insert(5, 1)
+--- panic
+index out of bounds
+
+=== chunks with zero panics
+print([1].chunks(0))
+--- panic
+must be positive
+
+=== random int empty range panics
+import random
+print(random.int(5, 5))
+--- panic
+empty range
+
+=== race on empty list panics
+let ts: [Task<int>] = []
+print(task.race(ts))
+--- panic
+empty
+
+=== printing extremely deep values panics instead of crashing
+enum L { Cons(L), Nil }
+var l = L.Nil
+for i in 0..100000 { l = L.Cons(l) }
+print(l)
+--- panic
+too deeply nested
+
+=== hashing extremely deep values panics instead of crashing
+enum L { Cons(L), Nil }
+var l = L.Nil
+for i in 0..100000 { l = L.Cons(l) }
+let m = [l: 1]
+--- panic
+too deeply nested
+
+=== error after output keeps the output
+print("partial")
+panic("then fail")
+--- panic
+then fail

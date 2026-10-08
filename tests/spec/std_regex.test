@@ -1,0 +1,76 @@
+=== match and find
+import regex
+let r = regex.new("[0-9]+")?
+print(r.is_match("abc 123"))
+print(r.is_match("abc"))
+let m = r.find("ab 42 cd 7").unwrap()
+print(m.text)
+print(m.start)
+print(m.end)
+print(r.find_all("ab 42 cd 7").map(m => m.text))
+print(r.find("none"))
+print(r.pattern())
+--- stdout
+true
+false
+42
+3
+5
+["42", "7"]
+None
+[0-9]+
+
+=== captures
+import regex
+let r = regex.new("(?P<key>\\w+)=(?P<value>\\w*)")?
+let c = r.captures("a=1 b=").unwrap()
+print(c.len())
+print(c.text(0))
+print(c.text(1))
+print(c.name("value").unwrap().text)
+print(c.get(5))
+let all = r.captures_all("a=1 b=2")
+print(all.map(c => c.text(2).unwrap()))
+--- stdout
+3
+Some("a=1")
+Some("a")
+1
+None
+["1", "2"]
+
+=== replace and split
+import regex
+let r = regex.new("\\s+")?
+print(r.split("a  b \t c"))
+print(r.replace("a  b  c", "_"))
+print(r.replace_all("a  b  c", "_"))
+let swap = regex.new("(\\w+)@(\\w+)")?
+print(swap.replace_all("x@y and p@q", "$2@$1"))
+--- stdout
+["a", "b", "c"]
+a_b  c
+a_b_c
+y@x and q@p
+
+=== invalid pattern is an error
+import regex
+let r = regex.new("(unclosed")
+print(r.is_err())
+print(r.unwrap_err().kind)
+--- stdout
+true
+parse
+
+=== convenience is_match
+import regex
+print(regex.is_match("^h", "hello"))
+--- stdout
+Ok(true)
+
+=== unicode aware
+import regex
+let r = regex.new(r"\p{L}+")?
+print(r.find_all("héllo wörld 123").map(m => m.text))
+--- stdout
+["héllo", "wörld"]

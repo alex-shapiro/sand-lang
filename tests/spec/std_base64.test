@@ -1,0 +1,50 @@
+=== encode and decode
+import base64
+print(base64.encode(b"hello"))
+print(base64.encode_str("hi"))
+print(base64.encode(b""))
+print(base64.decode("aGVsbG8="))
+print(base64.decode("aGVsbG8=").unwrap().to_str())
+--- stdout
+aGVsbG8=
+aGk=
+
+Ok(b"hello")
+Ok("hello")
+
+=== url safe alphabet
+import base64
+let data = bytes.from_list([251, 255, 191])
+print(base64.encode(data))
+print(base64.encode_url(data))
+print(base64.encode_url(b"hi"))
+print(base64.decode_url("aGk"))
+print(base64.decode_url("aGk="))
+print(base64.decode_url("-_-_") == Ok(data))
+--- stdout
++/+/
+-_-_
+aGk
+Ok(b"hi")
+Ok(b"hi")
+true
+
+=== invalid input is an error
+import base64
+let r = base64.decode("not base64!")
+print(r.is_err())
+print(r.unwrap_err().kind)
+print(base64.decode("aGk").is_err())
+--- stdout
+true
+parse
+true
+
+=== roundtrip all byte values
+import base64
+let all = bytes.from_list((0..256).to_list())
+print(base64.decode(base64.encode(all)) == Ok(all))
+print(base64.decode_url(base64.encode_url(all)) == Ok(all))
+--- stdout
+true
+true

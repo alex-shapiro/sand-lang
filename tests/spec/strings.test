@@ -1,0 +1,273 @@
+=== length and emptiness
+print("héllo".len())
+print("héllo".char_count())
+print("".is_empty())
+print("a".is_empty())
+--- stdout
+6
+5
+true
+false
+
+=== concatenation
+let a = "foo"
+let b = a + "bar"
+print(b)
+print(a)
+--- stdout
+foobar
+foo
+
+=== chars and codepoints
+print("héy".chars())
+print("AB".codepoints())
+print("é".bytes().len())
+--- stdout
+["h", "é", "y"]
+[65, 66]
+2
+
+=== searching
+let s = "hello world, hello"
+print(s.contains("world"))
+print(s.starts_with("hell"))
+print(s.ends_with("lo"))
+print(s.find("hello"))
+print(s.rfind("hello"))
+print(s.find("xyz"))
+--- stdout
+true
+true
+true
+Some(0)
+Some(13)
+None
+
+=== replace and split
+print("a-b-c".replace("-", "+"))
+print("a,b,,c".split(","))
+print("".split(","))
+print("key=value=x".split_once("="))
+print("novalue".split_once("="))
+print("  many   spaces here ".split_whitespace())
+print("l1\nl2\r\nl3\n".lines())
+--- stdout
+a+b+c
+["a", "b", "", "c"]
+[""]
+Some(("key", "value=x"))
+None
+["many", "spaces", "here"]
+["l1", "l2", "l3"]
+
+=== split with empty separator panics
+print("abc".split(""))
+--- panic
+empty separator
+
+=== trimming
+print("[" + "  x  ".trim() + "]")
+print("[" + "  x  ".trim_start() + "]")
+print("[" + "  x  ".trim_end() + "]")
+print("prefix-body".strip_prefix("prefix-"))
+print("prefix-body".strip_prefix("nope"))
+print("file.txt".strip_suffix(".txt"))
+--- stdout
+[x]
+[x  ]
+[  x]
+Some("body")
+None
+Some("file")
+
+=== case conversion
+print("Hello Wörld".to_upper())
+print("Hello Wörld".to_lower())
+--- stdout
+HELLO WÖRLD
+hello wörld
+
+=== repeat and padding
+print("ab".repeat(3))
+print("7".pad_start(3, "0"))
+print("x".pad_end(4, ".") + "|")
+print("long".pad_start(2))
+print("é".pad_start(3) + "|")
+--- stdout
+ababab
+007
+x...|
+long
+  é|
+
+=== parsing numbers
+print("42".parse_int())
+print("-17".parse_int())
+print(" 42".parse_int())
+print("4x".parse_int())
+print("3.5".parse_float())
+print("1e3".parse_float())
+print("abc".parse_float())
+--- stdout
+Some(42)
+Some(-17)
+None
+None
+Some(3.5)
+Some(1000.0)
+None
+
+=== character classes
+print("123".is_digit())
+print("12a".is_digit())
+print("".is_digit())
+print("abc".is_alpha())
+print("ab1".is_alnum())
+print(" \t\n".is_space())
+print("ABC".is_upper())
+print("abc".is_lower())
+--- stdout
+true
+false
+false
+true
+true
+true
+true
+true
+
+=== char_at and ord
+let s = "aé"
+print(s.char_at(0))
+print(s.char_at(1))
+print(s.char_at(2))
+print(s.char_at(9))
+print("A".ord())
+print("é".ord())
+--- stdout
+Some("a")
+Some("é")
+None
+None
+65
+233
+
+=== ord on multi-char string panics
+print("ab".ord())
+--- panic
+ord
+
+=== reversed and join
+print("abc".reversed())
+print(", ".join(["a", "b", "c"]))
+print(["x", "y"].join("-"))
+print(["x", "y"].join())
+--- stdout
+cba
+a, b, c
+x-y
+xy
+
+=== slicing by byte offset
+let s = "hello world"
+print(s[0..5])
+print(s[6..])
+print(s[..5])
+print(s[0..=4])
+--- stdout
+hello
+world
+hello
+hello
+
+=== slicing out of range panics
+let s = "abc"
+print(s[1..10])
+--- panic
+out of range
+
+=== slicing inside a character panics
+let s = "é"
+print(s[0..1])
+--- panic
+character boundary
+
+=== indexing a string is rejected
+let s = "abc"
+print(s[0])
+--- error
+2: cannot index
+
+=== string comparison
+print("apple" < "banana")
+print("a" == "a")
+print("Z" < "a")
+--- stdout
+true
+true
+true
+
+=== to_str and debug
+print(42.to_str() + "!")
+print("hi".debug())
+print("a\"b\n".debug())
+print([1.5].to_str())
+--- stdout
+42!
+"hi"
+"a\"b\n"
+[1.5]
+
+=== strings in collections print quoted
+print(["a", "b"])
+print(("x", 1))
+print(Some("s"))
+--- stdout
+["a", "b"]
+("x", 1)
+Some("s")
+
+=== bytes methods
+let b = "hé".bytes()
+print(b.len())
+print(b.get(0))
+print(b.get(10))
+print(b.to_hex())
+print(b.to_str())
+print(bytes.from_list([255, 0]).to_str().is_err())
+print(bytes.from_list([104, 105]).to_str_lossy())
+print(bytes.from_hex("6869"))
+print(bytes.from_hex("zz"))
+print(b"abc" + b"def")
+print(b"hello"[1..3])
+print(b"hello".find(b"ll"))
+print(b"hello".contains(b"x"))
+--- stdout
+3
+Some(104)
+None
+68c3a9
+Ok("hé")
+true
+hi
+Some(b"hi")
+None
+b"abcdef"
+b"el"
+Some(2)
+false
+
+=== bytes from_list out of range panics
+print(bytes.from_list([256]))
+--- panic
+byte out of range
+
+=== strings are immutable values
+var a = "x"
+let b = a
+a += "y"
+print(a)
+print(b)
+--- stdout
+xy
+x

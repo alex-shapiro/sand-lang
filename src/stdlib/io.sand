@@ -1,0 +1,17 @@
+//! Standard input and output streams.
+
+/// Reads a line from standard input (without its terminator); `None` at the end.
+/// Requires the `Stdin` capability.
+pub native fn read_line() -> Result<str?>
+
+/// Reads the rest of standard input. Requires the `Stdin` capability.
+pub native fn read_all() -> Result<str>
+
+/// Writes `s` to standard output, without a newline.
+pub native fn write(s: str)
+
+/// Writes `s` to standard error, without a newline.
+pub native fn ewrite(s: str)
+
+/// Flushes standard output and standard error.
+pub native fn flush()

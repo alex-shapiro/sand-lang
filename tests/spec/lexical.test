@@ -1,0 +1,276 @@
+=== hello world
+print("hello, world")
+--- stdout
+hello, world
+
+=== line and block comments
+// a comment
+print(1) // trailing
+/* block
+   /* nested */ still comment */
+print(2)
+--- stdout
+1
+2
+
+=== doc comments are ignored at runtime
+/// Adds one.
+fn inc(x: int) -> int { x + 1 }
+print(inc(1))
+--- stdout
+2
+
+=== integer literal forms
+print(42)
+print(1_000_000)
+print(0xff)
+print(0xFF)
+print(0b1010)
+print(0o777)
+print(-9223372036854775808)
+print(9223372036854775807)
+--- stdout
+42
+1000000
+255
+255
+10
+511
+-9223372036854775808
+9223372036854775807
+
+=== integer literal too large
+print(9223372036854775808)
+--- error
+1: integer literal out of range
+
+=== float literal forms
+print(1.0)
+print(0.5)
+print(1e9)
+print(2.5e-3)
+print(1_000.5)
+print(1e100)
+print(123456789.0)
+--- stdout
+1.0
+0.5
+1000000000.0
+0.0025
+1000.5
+1e100
+123456789.0
+
+=== duration literals
+print(250ms)
+print(1.5s)
+print(2h)
+print(90s)
+print(10us)
+print(7ns)
+print(0s)
+print(1m)
+--- stdout
+250ms
+1.5s
+2h
+1.5m
+10us
+7ns
+0s
+1m
+
+=== string escapes
+print("tab:\tend")
+print("quote:\" backslash:\\")
+print("brace:\{x\}")
+print("unicode:\u{48}\u{49} \u{1F600}")
+print("a\nb")
+--- stdout
+tab:	end
+quote:" backslash:\
+brace:{x}
+unicode:HI 😀
+a
+b
+
+=== invalid escape
+print("\q")
+--- error
+1: invalid escape
+
+=== unterminated string
+print("abc
+--- error
+unterminated string
+
+=== interpolation
+let name = "world"
+let n = 3
+print("hello {name}, {n} + 1 = {n + 1}")
+print("nested {"inner {n}"}")
+print("list {[1, 2]} map {["a": 1]}")
+--- stdout
+hello world, 3 + 1 = 4
+nested inner 3
+list [1, 2] map ["a": 1]
+
+=== interpolation with method calls and quotes
+let xs = ["a", "b"]
+print("{xs.len()} items: {", ".join(xs)}")
+--- stdout
+2 items: a, b
+
+=== raw strings
+print(r"no \n escapes {here}")
+print(r#"has "quotes" inside"#)
+--- stdout
+no \n escapes {here}
+has "quotes" inside
+
+=== multiline strings strip indentation
+fn f() -> str {
+    """
+    line one
+      indented
+    line three
+    """
+}
+print(f() + "|")
+--- stdout
+line one
+  indented
+line three
+|
+
+=== multiline string interpolation
+let who = "x"
+let s = """
+    hi {who}
+    bye"""
+print(s)
+--- stdout
+hi x
+bye
+
+=== bytes literals
+let b = b"ab\x00\xff"
+print(b.len())
+print(b)
+print(b"hi".to_list())
+--- stdout
+4
+b"ab\x00\xff"
+[104, 105]
+
+=== newline terminates statements
+let a = 1
+let b = 2
+print(a + b)
+--- stdout
+3
+
+=== semicolons separate statements
+let a = 1; let b = 2; print(a * b)
+--- stdout
+2
+
+=== newlines inside parens and brackets are ignored
+let xs = [
+    1,
+    2,
+    3
+]
+let total = (
+    xs[0] +
+    xs[1]
+)
+print(total)
+print(xs.len(
+))
+--- stdout
+3
+3
+
+=== leading dot continues the previous line
+let r = [3, 1, 2]
+    .sorted()
+    .map(x => x * 10)
+print(r)
+--- stdout
+[10, 20, 30]
+
+=== leading binary operator continues the previous line
+let total = 1
+    + 2
+    + 3
+let ok = true
+    and false
+print(total)
+print(ok)
+--- stdout
+6
+false
+
+=== leading minus starts a new statement
+var x = 1
+-x
+print(x)
+--- stdout
+1
+
+=== pipe continues across lines
+fn double(x: int) -> int { x * 2 }
+let r = 5
+    |> double
+    |> double
+print(r)
+--- stdout
+20
+
+=== else on next line continues if
+let x = 5
+let y = if x > 3 {
+    "big"
+}
+else {
+    "small"
+}
+print(y)
+--- stdout
+big
+
+=== identifiers with underscores and digits
+let _ignored = 1
+let snake_case_2 = 2
+print(snake_case_2)
+--- stdout
+2
+
+=== keywords cannot be identifiers
+let match = 1
+--- error
+1: expected
+
+=== non-ascii identifier is rejected
+let café = 1
+--- error
+1: unexpected character
+
+=== byte order mark is ignored
+﻿print("bom ok")
+--- stdout
+bom ok
+
+=== unterminated block comment
+/* never closed
+print(1)
+--- error
+unterminated block comment
+
+=== duration literal with float precision
+print(1.25ms)
+print(0.5us)
+--- stdout
+1.25ms
+500ns

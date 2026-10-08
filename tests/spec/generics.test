@@ -1,0 +1,105 @@
+=== generic identity
+fn id<T>(x: T) -> T { x }
+print(id(1))
+print(id("s"))
+print(id([true]))
+--- stdout
+1
+s
+[true]
+
+=== generic with bounds
+fn largest<T: Ord>(xs: [T]) -> T? {
+    var best = xs.first()?
+    for x in xs {
+        if x > best { best = x }
+    }
+    Some(best)
+}
+print(largest([3, 9, 2]))
+print(largest(["b", "c", "a"]))
+print(largest([1.5, 0.5]))
+--- stdout
+Some(9)
+Some("c")
+Some(1.5)
+
+=== missing bound on generic comparison
+fn bigger<T>(a: T, b: T) -> T { if a > b { a } else { b } }
+--- error
+1: Ord
+
+=== bound violation at instantiation
+fn key<T: Hash>(x: T) -> [T: int] { [x: 1] }
+print(key(1.5))
+--- error
+2: float does not satisfy Hash
+
+=== num bound arithmetic
+fn sum_all<T: Num>(xs: [T], zero: T) -> T {
+    var acc = zero
+    for x in xs { acc = acc + x }
+    acc
+}
+print(sum_all([1, 2, 3], 0))
+print(sum_all([0.5, 0.25], 0.0))
+--- stdout
+6
+0.75
+
+=== arithmetic on unbounded type parameter is an error
+fn add<T>(a: T, b: T) -> T { a + b }
+--- error
+1: Num
+
+=== generic functions taking functions
+fn map_pair<A, B>(p: (A, A), f: fn(A) -> B) -> (B, B) {
+    (f(p.0), f(p.1))
+}
+print(map_pair((1, 2), x => x.to_str() + "!"))
+--- stdout
+("1!", "2!")
+
+=== explicit equality bound
+fn count<T: Eq>(xs: [T], t: T) -> int {
+    xs.count(x => x == t)
+}
+print(count([1, 2, 1], 1))
+print(count(["a"], "b"))
+--- stdout
+2
+0
+
+=== generic type mismatch between arguments
+fn same<T>(a: T, b: T) -> bool { true }
+print(same(1, "x"))
+--- error
+2: type mismatch
+
+=== generic struct methods with bounds
+struct Bag<T: Ord> {
+    items: [T]
+    fn biggest(self) -> T? { self.items.max() }
+}
+print(Bag { items: [4, 7, 1] }.biggest())
+--- stdout
+Some(7)
+
+=== multiple bounds
+fn uniq_sorted<T: Ord + Hash>(xs: [T]) -> [T] { xs.unique().sorted() }
+print(uniq_sorted([3, 1, 3, 2]))
+--- stdout
+[1, 2, 3]
+
+=== unknown bound is an error
+fn f<T: Fancy>(x: T) -> T { x }
+--- error
+1: unknown bound `Fancy`
+
+=== generic polymorphic recursion through instantiation
+fn wrap<T>(x: T, n: int) -> [T] {
+    if n == 0 { [x] } else { wrap(x, n - 1) + [x] }
+}
+print(wrap("z", 2))
+--- stdout
+["z", "z", "z"]

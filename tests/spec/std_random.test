@@ -1,0 +1,78 @@
+=== seeded engine prng is deterministic
+import random
+random.seed(7)
+let a = [random.int(0, 1000) for _ in 0..5]
+random.seed(7)
+let b = [random.int(0, 1000) for _ in 0..5]
+print(a == b)
+print(a.all(x => x >= 0 and x < 1000))
+--- stdout
+true
+true
+
+=== ranges and distributions
+import random
+let xs = [random.int(-3, 3) for _ in 0..2000]
+print(xs.all(x => x >= -3 and x < 3))
+print(xs.to_set().len())
+let fs = [random.float() for _ in 0..2000]
+print(fs.all(f => f >= 0.0 and f < 1.0))
+let mean = fs.sum() / 2000.0
+print(mean > 0.4 and mean < 0.6)
+let bools = [random.bool() for _ in 0..200]
+print(bools.contains(true) and bools.contains(false))
+let normals = [random.normal(mean: 10.0, stdev: 2.0) for _ in 0..4000]
+let nm = normals.sum() / 4000.0
+print(nm > 9.8 and nm < 10.2)
+--- stdout
+true
+6
+true
+true
+true
+true
+
+=== choice shuffle sample bytes
+import random
+let xs = [1, 2, 3, 4, 5]
+print(xs.contains(random.choice(xs).unwrap()))
+let empty: [int] = []
+print(random.choice(empty))
+let ys = xs.copy()
+random.shuffle(ys)
+print(ys.sorted() == xs)
+let s = random.sample(xs, 3)
+print(s.len())
+print(s.unique().len())
+print(random.sample(xs, 10).len())
+print(random.bytes(16).len())
+--- stdout
+true
+None
+true
+3
+3
+5
+16
+
+=== independent rngs
+import random
+let r1 = random.rng(99)
+let r2 = random.rng(99)
+let a = [r1.int(0, 100) for _ in 0..10]
+let b = [r2.int(0, 100) for _ in 0..10]
+print(a == b)
+let r3 = random.rng(100)
+print([r3.int(0, 1000000) for _ in 0..10] != [random.rng(99).int(0, 1000000) for _ in 0..10])
+print(r1.float() < 1.0)
+--- stdout
+true
+true
+true
+
+=== known sequence for a seed
+import random
+let r = random.rng(1)
+print([r.int(0, 10) for _ in 0..10].len())
+--- stdout
+10

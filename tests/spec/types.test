@@ -1,0 +1,145 @@
+=== let annotation mismatch
+let x: int = "hi"
+--- error
+1: type mismatch: expected int, found str
+
+=== inference through later use
+let xs = []
+let m = [:]
+xs.push(1)
+m["k"] = xs
+print(m)
+--- stdout
+["k": [1]]
+
+=== unknown type
+let x: Foo = 1
+--- error
+1: unknown type `Foo`
+
+=== wrong number of type arguments
+let x: Option<int, str> = None
+--- error
+1: expected 1 type argument
+
+=== list element type mismatch on push
+let xs = [1]
+xs.push("a")
+--- error
+2: type mismatch: expected int, found str
+
+=== map key type mismatch
+let m = ["a": 1]
+print(m[1])
+--- error
+2: type mismatch
+
+=== method on wrong type
+print(5.len())
+--- error
+1: no method `len` on type int
+
+=== field on non struct
+let x = 5
+print(x.foo)
+--- error
+2: no field `foo` on type int
+
+=== tuple and function type display in errors
+let t: (int, str) = (1, 2)
+--- error
+1: expected (int, str), found (int, int)
+
+=== option display in errors
+let x: str? = Some(1)
+--- error
+1: expected str?, found int?
+
+=== map and list display in errors
+let m: [str: [int]] = ["a": ["b"]]
+--- error
+1: expected [str: [int]], found [str: [str]]
+
+=== never unifies with anything
+fn f(x: int) -> str {
+    let s: str = if x > 0 { "pos" } else { panic("neg") }
+    s
+}
+print(f(1))
+--- stdout
+pos
+
+=== several errors are reported
+let a: int = "x"
+let b: str = 1
+--- error
+1: type mismatch
+2: type mismatch
+
+=== type of comparison is bool
+let b: bool = 1 < 2
+print(b)
+--- stdout
+true
+
+=== cannot compare different types
+print(1 == "1")
+--- error
+1: type mismatch
+
+=== string plus int is an error
+print("a" + 1)
+--- error
+1: type mismatch
+
+=== interpolation accepts any type
+print("{1} {1.5} {true} {[1]} {()}")
+--- stdout
+1 1.5 true [1] ()
+
+=== unused generic return requires annotation
+fn empty<T>() -> [T] { [] }
+let e = empty()
+--- error
+2: cannot infer type
+
+=== annotated generic return
+fn empty<T>() -> [T] { [] }
+let e: [str] = empty()
+print(e.len())
+--- stdout
+0
+
+=== global variables are typed
+var counter = 0
+fn bump() { counter += 1 }
+bump()
+bump()
+print(counter)
+--- stdout
+2
+
+=== global used before initialization panics
+fn read() -> int { late }
+print(read())
+let late = 5
+--- panic
+global used before initialization
+
+=== unit type annotation
+fn f() -> () { }
+let u: () = f()
+print(u)
+--- stdout
+()
+
+=== duration type
+let d: duration = 5s
+print(d > 1s)
+--- stdout
+true
+
+=== duration and int are distinct
+let d: duration = 5
+--- error
+1: expected duration, found int

@@ -1,0 +1,29 @@
+=== log levels
+import log
+log.debug("hidden by default")
+log.info("starting")
+log.warn("careful", fields: ["user": "ann", "id": "7"])
+log.error("failed")
+--- stderr
+INFO starting
+WARN careful user=ann id=7
+ERROR failed
+
+=== set level
+import log
+log.set_level("debug")
+log.debug("now visible")
+log.set_level("error")
+log.warn("hidden")
+log.error("shown")
+log.set_level("off")
+log.error("hidden too")
+--- stderr
+DEBUG now visible
+ERROR shown
+
+=== field values with spaces are quoted
+import log
+log.info("msg", fields: ["path": "a b"])
+--- stderr
+INFO msg path="a b"

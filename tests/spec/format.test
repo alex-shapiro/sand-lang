@@ -1,0 +1,119 @@
+=== float precision
+let pi = 3.14159
+print("{pi:.2}")
+print("{pi:.0}")
+print("{2.5:.3}")
+--- stdout
+3.14
+3
+2.500
+
+=== width and alignment
+print("[{42:>5}]")
+print("[{42:<5}]")
+print("[{42:^6}]")
+print("[{42:5}]")
+print("[{"ab":5}]")
+print("[{"ab":>5}]")
+print("[{"ab":*^6}]")
+--- stdout
+[   42]
+[42   ]
+[  42  ]
+[   42]
+[ab   ]
+[   ab]
+[**ab**]
+
+=== zero padding and sign
+print("{7:03}")
+print("{-7:04}")
+print("{7:+}")
+print("{1.5:+.1}")
+print("{3.14159:08.3}")
+--- stdout
+007
+-007
++7
++1.5
+0003.142
+
+=== integer bases
+print("{255:x}")
+print("{255:X}")
+print("{5:b}")
+print("{8:o}")
+print("{255:#>6x}")
+--- stdout
+ff
+FF
+101
+10
+####ff
+
+=== scientific notation
+print("{1234.5:e}")
+print("{0.00012:.2e}")
+--- stdout
+1.2345e3
+1.20e-4
+
+=== debug format
+print("{"hi":?}")
+print("{[1]:?}")
+--- stdout
+"hi"
+[1]
+
+=== string precision truncates
+print("{"abcdef":.3}")
+--- stdout
+abc
+
+=== format spec colon inside nested expression
+let m = ["a": 1]
+print("{m["a"]:>3}")
+print("{[1, 2].map(x => x * 2)}")
+--- stdout
+  1
+[2, 4]
+
+=== invalid format spec
+print("{1:q}")
+--- error
+1: invalid format spec
+
+=== hex format on float is a type error
+print("{1.5:x}")
+--- error
+1: format spec
+
+=== display forms of all values
+struct P { x: int, name: str }
+enum E { A, B(int, str) }
+print(())
+print(true)
+print(P { x: 1, name: "n" })
+print(E.A)
+print(E.B(2, "s"))
+print(set([1, 2]))
+print([:])
+print(0..3)
+print(0..=3)
+print(error("boom"))
+print(error("gone", kind: "not_found").debug())
+fn f() {}
+print(f)
+--- stdout
+()
+true
+P { x: 1, name: "n" }
+A
+B(2, "s")
+Set([1, 2])
+[:]
+0..3
+0..=3
+error: boom
+Error { kind: "not_found", message: "gone" }
+<fn f>

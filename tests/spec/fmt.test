@@ -1,0 +1,266 @@
+=== spacing around operators and commas
+let x=1+2*3
+let ys=[1,2,3]
+print(x,)
+--- fmt
+let x = 1 + 2 * 3
+let ys = [1, 2, 3]
+print(x)
+
+=== indentation is four spaces
+fn f(a:int)->int{
+  if a>0{
+        return a
+  }
+  0
+}
+--- fmt
+fn f(a: int) -> int {
+    if a > 0 {
+        return a
+    }
+    0
+}
+
+=== semicolons become newlines
+let a = 1; let b = 2; print(a + b)
+--- fmt
+let a = 1
+let b = 2
+print(a + b)
+
+=== blank lines are collapsed
+let a = 1
+
+
+
+let b = 2
+--- fmt
+let a = 1
+
+let b = 2
+
+=== items are separated by one blank line
+fn a() {}
+fn b() {}
+struct S { x: int }
+--- fmt
+fn a() {}
+
+fn b() {}
+
+struct S { x: int }
+
+=== comments are preserved
+// leading comment
+let a = 1 // trailing comment
+
+/* block */
+fn f() {
+    // inside
+    print(a)
+}
+--- fmt
+// leading comment
+let a = 1 // trailing comment
+
+/* block */
+fn f() {
+    // inside
+    print(a)
+}
+
+=== doc comments stay attached
+/// Docs for f.
+/// Second line.
+fn f() {}
+--- fmt
+/// Docs for f.
+/// Second line.
+fn f() {}
+
+=== short inline blocks stay inline
+fn add(a: int, b: int) -> int { a + b }
+let v = if a { 1 } else { 2 }
+--- fmt
+fn add(a: int, b: int) -> int { a + b }
+
+let v = if a { 1 } else { 2 }
+
+=== long calls are broken one argument per line
+let result = some_function_with_a_long_name(first_argument_value, second_argument_value, third_argument)
+--- fmt
+let result = some_function_with_a_long_name(
+    first_argument_value,
+    second_argument_value,
+    third_argument,
+)
+
+=== multi-line list literals stay multi-line
+let grid = [
+    [1, 0],
+    [0, 1]]
+--- fmt
+let grid = [
+    [1, 0],
+    [0, 1],
+]
+
+=== struct and enum declarations
+struct Point{x:float,y:float
+fn norm(self)->float{self.x}}
+enum Shape{Circle(radius:float),Empty}
+--- fmt
+struct Point {
+    x: float
+    y: float
+
+    fn norm(self) -> float { self.x }
+}
+
+enum Shape {
+    Circle(radius: float)
+    Empty
+}
+
+=== match arms one per line
+match x {
+  1=>"a",
+  _=>"b"
+}
+--- fmt
+match x {
+    1 => "a"
+    _ => "b"
+}
+
+=== inline match stays inline when it fits
+let v = match x { 1 => "a", _ => "b" }
+--- fmt
+let v = match x { 1 => "a", _ => "b" }
+
+=== string literals and interpolation are preserved verbatim
+let s = "a  {x+1}  b"
+let r = r"raw\n"
+--- fmt
+let s = "a  {x+1}  b"
+let r = r"raw\n"
+
+=== lambdas and pipes
+let f = (a,b)=>a+b
+let g = x=>x*2
+let y = 3|>g
+--- fmt
+let f = (a, b) => a + b
+let g = x => x * 2
+let y = 3 |> g
+
+=== method chains that are too long are broken
+let total = items.filter(item => item.price > 100).map(item => item.price * item.quantity).sum()
+--- fmt
+let total = items
+    .filter(item => item.price > 100)
+    .map(item => item.price * item.quantity)
+    .sum()
+
+=== imports and generics
+import json
+from "./a.sand" import X,Y
+fn id<T:Ord+Hash>(x:T)->T{x}
+--- fmt
+import json
+from "./a.sand" import X, Y
+
+fn id<T: Ord + Hash>(x: T) -> T { x }
+
+=== types are formatted
+let m:[str:[int]]=[:]
+let o:int?=None
+let f:fn(int,str)->bool=g
+--- fmt
+let m: [str: [int]] = [:]
+let o: int? = None
+let f: fn(int, str) -> bool = g
+
+=== patterns are formatted
+match p {
+    Point{x:0,..}=>1
+    [a,..rest]|[a]=>2
+    (a,b)if a>b=>3
+}
+--- fmt
+match p {
+    Point { x: 0, .. } => 1
+    [a, ..rest] | [a] => 2
+    (a, b) if a > b => 3
+}
+
+=== keywords and control flow
+for (k,v) in m{print(k)}
+while let Some(x)=xs.pop(){print(x)}
+let Some(y)=o else{return}
+--- fmt
+for (k, v) in m { print(k) }
+while let Some(x) = xs.pop() { print(x) }
+let Some(y) = o else { return }
+
+=== test blocks and spawn
+test "it works"{assert(true)}
+let t=spawn f(1)
+--- fmt
+test "it works" { assert(true) }
+
+let t = spawn f(1)
+
+=== parentheses are preserved
+let a = (1 + 2) * 3
+let b = (x)
+--- fmt
+let a = (1 + 2) * 3
+let b = (x)
+
+=== unary and range operators
+let a = - 1
+let b = not  x
+let r = 0 .. 10
+let s = xs[1..]
+--- fmt
+let a = -1
+let b = not x
+let r = 0..10
+let s = xs[1..]
+
+=== already formatted code is unchanged
+fn main() {
+    let xs = [1, 2, 3]
+    for x in xs {
+        print(x * 2)
+    }
+}
+--- fmt
+fn main() {
+    let xs = [1, 2, 3]
+    for x in xs {
+        print(x * 2)
+    }
+}
+
+=== var fields and defaults and pub
+pub struct C{var n:int=0
+name:str}
+--- fmt
+pub struct C {
+    var n: int = 0
+    name: str
+}
+
+=== struct literals and comprehensions
+let p=Point{x:1,..q}
+let ys=[x*2 for x in xs if x>0]
+let m=[k:v for (k,v) in pairs]
+let e=[:]
+--- fmt
+let p = Point { x: 1, ..q }
+let ys = [x * 2 for x in xs if x > 0]
+let m = [k: v for (k, v) in pairs]
+let e = [:]

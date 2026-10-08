@@ -2,5 +2,44 @@
 name = "sandlang"
 version = "0.1.0"
 edition = "2024"
+description = "Sand: a sandboxed, statically typed scripting language with a fast bytecode VM"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "sandlang"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sand"
+path = "src/main.rs"
+
+[features]
+default = ["tls"]
+# HTTPS / TLS support via rustls (pulls in `ring`, which contains C and assembly).
+tls = ["dep:rustls", "dep:tokio-rustls", "dep:webpki-roots"]
 
 [dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "fs", "io-util", "io-std", "sync", "macros"] }
+regex = "1"
+rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", optional = true, default-features = false, features = ["ring", "tls12"] }
+webpki-roots = { version = "1", optional = true }
+
+[dev-dependencies]
+proptest = "1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "io-util", "macros"] }
+
+[[bench]]
+name = "vm"
+harness = false
+
+[profile.release]
+debug = 1
+lto = "thin"
+codegen-units = 4
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.test]
+opt-level = 1

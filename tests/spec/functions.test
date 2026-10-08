@@ -1,0 +1,291 @@
+=== simple function
+fn add(a: int, b: int) -> int {
+    a + b
+}
+print(add(2, 3))
+--- stdout
+5
+
+=== explicit return
+fn sign(x: int) -> str {
+    if x < 0 { return "neg" }
+    "nonneg"
+}
+print(sign(-1))
+print(sign(1))
+--- stdout
+neg
+nonneg
+
+=== unit function discards final value
+fn log(x: int) {
+    print(x)
+    x + 1
+}
+print(log(5))
+--- stdout
+5
+()
+
+=== functions can be used before definition
+print(later(2))
+fn later(x: int) -> int { x * 10 }
+--- stdout
+20
+
+=== recursion
+fn fib(n: int) -> int {
+    if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+}
+print(fib(20))
+--- stdout
+6765
+
+=== mutual recursion
+fn is_even(n: int) -> bool { if n == 0 { true } else { is_odd(n - 1) } }
+fn is_odd(n: int) -> bool { if n == 0 { false } else { is_even(n - 1) } }
+print(is_even(10))
+print(is_odd(7))
+--- stdout
+true
+true
+
+=== default parameters
+fn greet(name: str, greeting: str = "Hello", punct: str = "!") -> str {
+    "{greeting}, {name}{punct}"
+}
+print(greet("ann"))
+print(greet("bob", "Hi"))
+print(greet("cy", punct: "?"))
+print(greet(greeting: "Yo", name: "di"))
+--- stdout
+Hello, ann!
+Hi, bob!
+Hello, cy?
+Yo, di!
+
+=== default may refer to earlier parameters
+fn rng(lo: int, hi: int = lo + 10) -> (int, int) { (lo, hi) }
+print(rng(5))
+print(rng(5, 6))
+--- stdout
+(5, 15)
+(5, 6)
+
+=== defaults are evaluated per call
+fn add_to(x: int, xs: [int] = []) -> [int] {
+    xs.push(x)
+    xs
+}
+print(add_to(1))
+print(add_to(2))
+--- stdout
+[1]
+[2]
+
+=== missing argument is an error
+fn f(a: int, b: int) -> int { a + b }
+print(f(1))
+--- error
+2: missing argument `b`
+
+=== too many arguments is an error
+fn f(a: int) -> int { a }
+print(f(1, 2))
+--- error
+2: expected 1 argument
+
+=== unknown named argument is an error
+fn f(a: int) -> int { a }
+print(f(b: 1))
+--- error
+2: no parameter named `b`
+
+=== duplicate argument is an error
+fn f(a: int) -> int { a }
+print(f(1, a: 2))
+--- error
+2: given more than once
+
+=== argument type mismatch
+fn f(a: int) -> int { a }
+print(f("x"))
+--- error
+2: type mismatch: expected int, found str
+
+=== return type mismatch
+fn f() -> int { "x" }
+--- error
+1: type mismatch: expected int, found str
+
+=== missing return value
+fn f(x: int) -> int {
+    if x > 0 { return 1 }
+}
+--- error
+2: type mismatch
+
+=== parameters require annotations
+fn f(a) -> int { 1 }
+--- error
+1: expected `:`
+
+=== defaults must follow required parameters
+fn f(a: int = 1, b: int) -> int { a + b }
+--- error
+1: parameter without default after parameter with default
+
+=== functions are values
+fn double(x: int) -> int { x * 2 }
+let f = double
+print(f(4))
+let fs = [double, x => x + 1]
+print(fs.map(g => g(10)))
+--- stdout
+8
+[20, 11]
+
+=== higher order function parameters
+fn apply_twice(f: fn(int) -> int, x: int) -> int { f(f(x)) }
+print(apply_twice(x => x * 3, 2))
+fn compose(f: fn(int) -> int, g: fn(int) -> int) -> fn(int) -> int {
+    x => g(f(x))
+}
+let h = compose(x => x + 1, x => x * 10)
+print(h(1))
+--- stdout
+18
+20
+
+=== named arguments not allowed through function values
+fn f(a: int) -> int { a }
+let g = f
+print(g(a: 1))
+--- error
+3: named arguments
+
+=== local functions
+fn outer(n: int) -> int {
+    fn helper(x: int) -> int { x * n }
+    helper(2) + helper(3)
+}
+print(outer(10))
+--- stdout
+50
+
+=== local recursive and mutually recursive functions
+fn run() -> (bool, int) {
+    fn ev(n: int) -> bool { if n == 0 { true } else { od(n - 1) } }
+    fn od(n: int) -> bool { if n == 0 { false } else { ev(n - 1) } }
+    fn fact(n: int) -> int { if n <= 1 { 1 } else { n * fact(n - 1) } }
+    (ev(10), fact(5))
+}
+print(run())
+--- stdout
+(true, 120)
+
+=== deep recursion within limit
+fn depth(n: int) -> int { if n == 0 { 0 } else { 1 + depth(n - 1) } }
+print(depth(5000))
+--- stdout
+5000
+
+=== stack overflow panics
+fn forever(n: int) -> int { 1 + forever(n + 1) }
+print(forever(0))
+--- panic
+stack overflow
+
+=== tail calls do not grow the stack
+fn count(n: int, acc: int) -> int {
+    if n == 0 { return acc }
+    count(n - 1, acc + 1)
+}
+print(count(1000000, 0))
+--- stdout
+1000000
+
+=== pipe operator
+fn double(x: int) -> int { x * 2 }
+fn add(x: int, y: int) -> int { x + y }
+print(3 |> double)
+print(3 |> add(4))
+print([1, 2, 3] |> double_all)
+fn double_all(xs: [int]) -> [int] { xs.map(double) }
+print(" hi " |> str_trim)
+fn str_trim(s: str) -> str { s.trim() }
+--- stdout
+6
+7
+[2, 4, 6]
+hi
+
+=== pipe into module function
+import math
+print(16.0 |> math.sqrt)
+--- stdout
+4.0
+
+=== static methods on builtin types
+print(int.parse("12"))
+print(float.parse("1.5"))
+--- stdout
+Some(12)
+Some(1.5)
+
+=== calling a non-function is an error
+let x = 1
+x(2)
+--- error
+2: not a function
+
+=== function equality is rejected
+fn f() {}
+print(f == f)
+--- error
+2: Eq
+
+=== print accepts any type
+print(1)
+print("s")
+print([Some(1)])
+--- stdout
+1
+s
+[Some(1)]
+
+=== panic and assert
+assert(1 + 1 == 2)
+assert(true, "fine")
+assert(false, "custom message")
+--- panic
+custom message
+
+=== assert default message
+assert(1 > 2)
+--- panic
+assertion failed
+
+=== todo panics
+fn later() -> int { todo() }
+print(later())
+--- panic
+not yet implemented
+
+=== panic message
+panic("something broke")
+--- panic
+something broke
+
+=== argument evaluation order is left to right
+fn t(label: str, v: int) -> int {
+    print(label)
+    v
+}
+fn f(a: int, b: int, c: int) -> int { a + b + c }
+print(f(t("a", 1), t("b", 2), t("c", 3)))
+--- stdout
+a
+b
+c
+6

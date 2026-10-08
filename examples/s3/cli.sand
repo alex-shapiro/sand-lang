@@ -1,0 +1,91 @@
+//! Command line S3 client.
+//!
+//! Usage: sand run --allow-net=... --allow-env=AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,S3_ENDPOINT \
+//!            examples/s3/cli.sand -- COMMAND ARGS...
+//!
+//! Commands:
+//!     ls BUCKET [PREFIX]
+//!     put BUCKET KEY FILE
+//!     get BUCKET KEY [FILE]
+//!     cat BUCKET KEY
+//!     rm BUCKET KEY
+//!     stat BUCKET KEY
+
+import env
+import fs
+import io
+import "./s3.sand"
+
+fn client() -> Result<s3.Client> {
+    let access_key = env.get("AWS_ACCESS_KEY_ID")
+        .ok_or(error("AWS_ACCESS_KEY_ID is not set", kind: "invalid"))?
+    let secret_key = env.get("AWS_SECRET_ACCESS_KEY")
+        .ok_or(error("AWS_SECRET_ACCESS_KEY is not set", kind: "invalid"))?
+    let credentials = s3.Credentials {
+        access_key,
+        secret_key,
+        session_token: env.get("AWS_SESSION_TOKEN"),
+    }
+    let region = env.get("AWS_REGION") ?? "us-east-1"
+    Ok(match env.get("S3_ENDPOINT") {
+        Some(endpoint) => s3.Client { region, credentials, endpoint, path_style: true }
+        None => s3.Client { region, credentials }
+    })
+}
+
+fn human(n: int) -> str {
+    if n < 1024 { return "{n}B" }
+    var size = n.to_float()
+    for unit in ["K", "M", "G", "T"] {
+        size = size / 1024.0
+        if size < 1024.0 { return "{size:.1}{unit}" }
+    }
+    "{size:.1}P"
+}
+
+fn run(args: [str]) -> Result<()> {
+    let c = client()?
+    match args {
+        ["ls", bucket, ..] => {
+            let prefix = args.get(2) ?? ""
+            let objects = c.list_objects(bucket, prefix: prefix)?
+            for o in objects {
+                print("{o.last_modified:<24} {human(o.size):>8}  {o.key}")
+            }
+            print("{objects.len()} objects, {human(objects.map(o => o.size).sum())}")
+        }
+        ["put", bucket, key, file] => {
+            let data = fs.read_bytes(file)?
+            c.put_object(bucket, key, data)?
+            print("uploaded {file} to s3://{bucket}/{key} ({human(data.len())})")
+        }
+        ["get", bucket, key] => io.write(c.get_object(bucket, key)?.to_str_lossy())
+        ["get", bucket, key, file] => {
+            let data = c.get_object(bucket, key)?
+            fs.write_bytes(file, data)?
+            print("downloaded s3://{bucket}/{key} to {file} ({human(data.len())})")
+        }
+        ["cat", bucket, key] => io.write(c.get_object(bucket, key)?.to_str()?)
+        ["rm", bucket, key] => {
+            c.delete_object(bucket, key)?
+            print("deleted s3://{bucket}/{key}")
+        }
+        ["stat", bucket, key] => match c.head_object(bucket, key)? {
+            Some(info) => print("{info.key}: {info.size} bytes, etag {info.etag}, modified {info.last_modified}")
+            None => print("not found: s3://{bucket}/{key}")
+        }
+        _ => {
+            eprint("usage: cli.sand (ls BUCKET [PREFIX] | put BUCKET KEY FILE | get BUCKET KEY [FILE] | cat BUCKET KEY | rm BUCKET KEY | stat BUCKET KEY)")
+            exit(2)
+        }
+    }
+    Ok(())
+}
+
+match run(env.args()) {
+    Ok(_) => {}
+    Err(e) => {
+        eprint("error: {e}")
+        exit(1)
+    }
+}

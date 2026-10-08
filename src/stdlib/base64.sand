@@ -1,0 +1,19 @@
+//! Base64 encoding (RFC 4648) with the standard and URL-safe alphabets.
+
+/// Encodes `data` with the standard alphabet (`+`, `/`) and `=` padding.
+pub native fn encode(data: bytes) -> str
+
+/// Decodes standard base64. Padding is required; any other character,
+/// a wrong length or non-zero trailing bits fail with kind `"parse"`.
+pub native fn decode(text: str) -> Result<bytes>
+
+/// Encodes `data` with the URL-safe alphabet (`-`, `_`) and no padding.
+pub native fn encode_url(data: bytes) -> str
+
+/// Decodes URL-safe base64. Padding is optional but must be correct if present.
+pub native fn decode_url(text: str) -> Result<bytes>
+
+/// Encodes the UTF-8 bytes of `text` with the standard alphabet.
+pub fn encode_str(text: str) -> str {
+    encode(text.bytes())
+}

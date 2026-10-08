@@ -1,0 +1,50 @@
+//! Descriptive statistics on lists of floats.
+//!
+//! Functions return `None` for empty input (`variance` and `stdev` need at
+//! least two values), except `sum`, which is `0.0`.
+
+/// Arithmetic mean.
+pub native fn mean(xs: [float]) -> float?
+
+/// Arithmetic mean of integers.
+pub native fn mean_int(xs: [int]) -> float?
+
+/// The middle value; the mean of the two middle values for even lengths.
+pub native fn median(xs: [float]) -> float?
+
+/// The most common value; the first to occur on ties.
+pub native fn mode(xs: [float]) -> float?
+
+/// Sample variance (divides by `n - 1`).
+pub native fn variance(xs: [float]) -> float?
+
+/// Sample standard deviation.
+pub native fn stdev(xs: [float]) -> float?
+
+/// Population variance (divides by `n`).
+pub native fn pvariance(xs: [float]) -> float?
+
+/// Population standard deviation.
+pub native fn pstdev(xs: [float]) -> float?
+
+/// The smallest value.
+pub native fn min(xs: [float]) -> float?
+
+/// The largest value.
+pub native fn max(xs: [float]) -> float?
+
+/// Sum of the values (compensated, so rounding errors do not accumulate).
+pub native fn sum(xs: [float]) -> float
+
+/// The `q`-quantile (`0 <= q <= 1`) with linear interpolation between the
+/// closest ranks; `None` if `xs` is empty or `q` is out of range.
+pub native fn quantile(xs: [float], q: float) -> float?
+
+/// Pearson correlation coefficient; `None` unless both lists have the same
+/// length of at least two and neither is constant.
+pub native fn correlation(xs: [float], ys: [float]) -> float?
+
+/// Ordinary least-squares fit `y = slope * x + intercept`, returned as
+/// `(slope, intercept)`; `None` unless both lists have the same length of at
+/// least two and `xs` is not constant.
+pub native fn linear_regression(xs: [float], ys: [float]) -> (float, float)?

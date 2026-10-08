@@ -1,0 +1,242 @@
+=== struct definition and literal
+struct Point {
+    x: float
+    y: float
+}
+let p = Point { x: 1.0, y: 2.0 }
+print(p.x)
+print(p)
+--- stdout
+1.0
+Point { x: 1.0, y: 2.0 }
+
+=== fields separated by commas
+struct Pair { a: int, b: str }
+print(Pair { a: 1, b: "x" })
+--- stdout
+Pair { a: 1, b: "x" }
+
+=== field shorthand and update syntax
+struct P { x: int, y: int, z: int }
+let x = 1
+let y = 2
+let a = P { x, y, z: 3 }
+let b = P { z: 30, ..a }
+print(a)
+print(b)
+--- stdout
+P { x: 1, y: 2, z: 3 }
+P { x: 1, y: 2, z: 30 }
+
+=== missing field is an error
+struct P { x: int, y: int }
+let p = P { x: 1 }
+--- error
+2: missing field `y`
+
+=== unknown field is an error
+struct P { x: int }
+let p = P { x: 1, q: 2 }
+--- error
+2: no field `q`
+
+=== field defaults
+struct Config {
+    host: str = "localhost"
+    port: int = 8080
+    debug: bool = false
+}
+print(Config {})
+print(Config { port: 9000 })
+--- stdout
+Config { host: "localhost", port: 8080, debug: false }
+Config { host: "localhost", port: 9000, debug: false }
+
+=== methods
+struct Rect {
+    w: float
+    h: float
+
+    fn area(self) -> float { self.w * self.h }
+    fn scale(self, k: float) -> Rect { Rect { w: self.w * k, h: self.h * k } }
+    fn square(side: float) -> Rect { Rect { w: side, h: side } }
+}
+let r = Rect { w: 2.0, h: 3.0 }
+print(r.area())
+print(r.scale(2.0).area())
+print(Rect.square(4.0).area())
+--- stdout
+6.0
+24.0
+16.0
+
+=== Self type inside struct body
+struct V {
+    x: int
+    fn add(self, o: Self) -> Self { V { x: self.x + o.x } }
+}
+print(V { x: 1 }.add(V { x: 2 }))
+--- stdout
+V { x: 3 }
+
+=== var fields can be mutated
+struct Counter {
+    name: str
+    var count: int = 0
+
+    fn bump(self) { self.count += 1 }
+}
+let c = Counter { name: "c" }
+c.bump()
+c.bump()
+c.count += 10
+print(c.count)
+--- stdout
+12
+
+=== immutable fields cannot be assigned
+struct P { x: int }
+let p = P { x: 1 }
+p.x = 2
+--- error
+3: cannot assign to immutable field `x`
+
+=== structs have reference semantics
+struct Box { var v: int }
+let a = Box { v: 1 }
+let b = a
+b.v = 2
+print(a.v)
+--- stdout
+2
+
+=== struct equality is structural
+struct P { x: int, y: int }
+print(P { x: 1, y: 2 } == P { x: 1, y: 2 })
+print(P { x: 1, y: 2 } == P { x: 2, y: 1 })
+--- stdout
+true
+false
+
+=== struct ordering
+struct V { major: int, minor: int }
+let vs = [V { major: 1, minor: 5 }, V { major: 0, minor: 9 }, V { major: 1, minor: 2 }]
+print(vs.sorted().map(v => "{v.major}.{v.minor}"))
+--- stdout
+["0.9", "1.2", "1.5"]
+
+=== structs as map keys
+struct K { a: int, b: str }
+let m = [K { a: 1, b: "x" }: "first"]
+print(m[K { a: 1, b: "x" }])
+--- stdout
+first
+
+=== structs with var fields cannot be map keys
+struct K { var a: int }
+let m = [K { a: 1 }: 1]
+--- error
+2: Hash
+
+=== generic structs
+struct Pair<A, B> {
+    first: A
+    second: B
+    fn swap(self) -> Pair<B, A> { Pair { first: self.second, second: self.first } }
+}
+let p = Pair { first: 1, second: "one" }
+print(p.swap())
+let q: Pair<str, [int]> = Pair { first: "xs", second: [] }
+print(q)
+--- stdout
+Pair { first: "one", second: 1 }
+Pair { first: "xs", second: [] }
+
+=== extend adds methods
+struct P { x: int }
+extend P {
+    fn twice(self) -> int { self.x * 2 }
+}
+print(P { x: 4 }.twice())
+--- stdout
+8
+
+=== extending builtin types is not allowed in scripts
+extend str {
+    fn shout(self) -> str { self.to_upper() }
+}
+--- error
+1: cannot extend
+
+=== unknown method
+struct P { x: int }
+P { x: 1 }.nope()
+--- error
+2: no method `nope` on type P
+
+=== unknown field access
+struct P { x: int }
+print(P { x: 1 }.y)
+--- error
+2: no field `y` on type P
+
+=== function-typed fields can be called
+struct Handler {
+    name: str
+    run: fn(int) -> int
+}
+let h = Handler { name: "dbl", run: x => x * 2 }
+print(h.run(21))
+--- stdout
+42
+
+=== recursive struct through option and list
+struct Node {
+    value: int
+    children: [Node]
+}
+fn total(n: Node) -> int { n.value + n.children.map(total).sum() }
+let tree = Node { value: 1, children: [Node { value: 2, children: [] }, Node { value: 3, children: [Node { value: 4, children: [] }] }] }
+print(total(tree))
+--- stdout
+10
+
+=== duplicate type definition is an error
+struct A { x: int }
+struct A { y: int }
+--- error
+2: `A` is already defined
+
+=== type aliases
+type Grid = [[bool]]
+fn count_alive(g: Grid) -> int {
+    g.map(row => row.count(c => c)).sum()
+}
+print(count_alive([[true, false], [true, true]]))
+type Pair<T> = (T, T)
+let p: Pair<int> = (1, 2)
+print(p)
+--- stdout
+3
+(1, 2)
+
+=== methods calling other methods and static constructors
+struct Stack<T> {
+    items: [T]
+
+    fn new() -> Stack<T> { Stack { items: [] } }
+    fn push(self, x: T) { self.items.push(x) }
+    fn pop(self) -> T? { self.items.pop() }
+    fn peek(self) -> T? { self.items.last() }
+    fn size(self) -> int { self.items.len() }
+}
+let s = Stack.new()
+s.push("a")
+s.push("b")
+print(s.peek())
+print(s.pop())
+print(s.size())
+--- stdout
+Some("b")
+Some("b")
+1

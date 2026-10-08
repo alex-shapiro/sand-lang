@@ -1,0 +1,101 @@
+//! Files and directories.
+//!
+//! Relative paths are resolved against the engine's working directory; every
+//! access is checked against the policy.
+
+import time
+
+/// Information about a file or directory.
+pub struct Metadata {
+    /// Size in bytes.
+    size: int
+    is_file: bool
+    is_dir: bool
+    /// Last modification time, if the platform records it.
+    modified: time.DateTime?
+}
+
+/// Reads a whole file as UTF-8 text (kind `invalid` if it is not UTF-8).
+pub native fn read_text(path: str) -> Result<str>
+
+/// Reads a whole file as bytes.
+pub native fn read_bytes(path: str) -> Result<bytes>
+
+/// Reads a UTF-8 text file as a list of lines (without line terminators).
+pub fn read_lines(path: str) -> Result<[str]> {
+    Ok(read_text(path)?.lines())
+}
+
+/// Writes `text` to a file, creating or truncating it.
+pub native fn write_text(path: str, text: str) -> Result<()>
+
+/// Writes `data` to a file, creating or truncating it.
+pub native fn write_bytes(path: str, data: bytes) -> Result<()>
+
+/// Appends `text` to a file, creating it if needed.
+pub native fn append_text(path: str, text: str) -> Result<()>
+
+/// Whether a file or directory exists at `path`.
+pub native fn exists(path: str) -> Result<bool>
+
+/// Whether `path` is a regular file (following symlinks).
+pub native fn is_file(path: str) -> Result<bool>
+
+/// Whether `path` is a directory (following symlinks).
+pub native fn is_dir(path: str) -> Result<bool>
+
+/// The names of the entries of a directory, sorted.
+pub native fn list_dir(path: str) -> Result<[str]>
+
+/// Creates a directory.
+/// With `recursive`, also creates missing parents, and an existing directory
+/// is not an error.
+pub native fn create_dir(path: str, recursive: bool = false) -> Result<()>
+
+/// Removes a file (or a symlink, not its target).
+pub native fn remove_file(path: str) -> Result<()>
+
+/// Removes an empty directory, or with `recursive` a directory and its contents.
+/// Every entry is checked against the policy before it is removed; symlinks
+/// are removed, never followed.
+pub fn remove_dir(path: str, recursive: bool = false) -> Result<()> {
+    if recursive and entry_type(path)? == "dir" {
+        for name in list_dir(path)? {
+            let child = join([path, name])
+            if entry_type(child)? == "dir" {
+                remove_dir(child, recursive: true)?
+            } else {
+                remove_file(child)?
+            }
+        }
+    }
+    remove_empty_dir(path)
+}
+
+/// Renames or moves a file or directory, replacing `dst` if it is a file.
+pub native fn rename(src: str, dst: str) -> Result<()>
+
+/// Copies the contents of file `src` to `dst`.
+pub native fn copy(src: str, dst: str) -> Result<()>
+
+/// Size, kind and modification time of a file or directory.
+pub native fn metadata(path: str) -> Result<Metadata>
+
+/// Joins path components with the platform separator.
+/// An absolute component replaces everything before it.
+pub native fn join(parts: [str]) -> str
+
+/// The final component of a path (`""` if there is none).
+pub native fn basename(path: str) -> str
+
+/// The path without its final component (`""` if there is none).
+pub native fn dirname(path: str) -> str
+
+/// The extension of the final component, without the dot.
+pub native fn extension(path: str) -> str?
+
+/// `"file"`, `"dir"`, `"symlink"` or `"other"` (a final symlink is not followed).
+native fn entry_type(path: str) -> Result<str>
+
+/// Removes an empty directory.
+native fn remove_empty_dir(path: str) -> Result<()>

@@ -1,0 +1,1732 @@
+//! Recursive-descent parser with precedence climbing for expressions.
+
+use super::ast::*;
+use super::lexer::{Comment, CommentKind, StrPart, Tok, Token, lex, lex_range};
+use crate::diag::{Diag, FileId, Span};
+
+/// Maximum syntactic nesting depth (expressions, types, patterns, blocks).
+pub const MAX_DEPTH: usize = 256;
+
+pub struct ParseResult {
+    pub module: Module,
+    pub comments: Vec<Comment>,
+    pub errors: Vec<Diag>,
+}
+
+pub fn parse_module(src: &str, file: FileId) -> ParseResult {
+    let lexed = lex(src, file);
+    let mut p = Parser::new(src, file, lexed.tokens, &lexed.comments);
+    p.errors = lexed.errors;
+    let module = p.module();
+    let mut errors = p.errors;
+    errors.sort_by_key(|d| d.span.lo);
+    ParseResult { module, comments: lexed.comments, errors }
+}
+
+struct Parser<'a> {
+    src: &'a str,
+    file: FileId,
+    toks: Vec<Token>,
+    pos: usize,
+    comments: &'a [Comment],
+    errors: Vec<Diag>,
+    next_id: u32,
+    no_struct: bool,
+    /// In a match guard: `x => ...` ends the guard rather than starting a lambda.
+    in_guard: bool,
+    depth: usize,
+    fatal: bool,
+}
+
+type PResult<T> = Result<T, ()>;
+
+impl<'a> Parser<'a> {
+    fn new(src: &'a str, file: FileId, toks: Vec<Token>, comments: &'a [Comment]) -> Parser<'a> {
+        Parser {
+            src,
+            file,
+            toks,
+            pos: 0,
+            comments,
+            errors: Vec::new(),
+            next_id: 0,
+            no_struct: false,
+            in_guard: false,
+            depth: 0,
+            fatal: false,
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Token helpers
+
+    fn tok(&self) -> &Tok {
+        &self.toks[self.pos].tok
+    }
+    fn peek_tok(&self, n: usize) -> &Tok {
+        let i = (self.pos + n).min(self.toks.len() - 1);
+        &self.toks[i].tok
+    }
+    fn at(&self, t: &Tok) -> bool {
+        std::mem::discriminant(self.tok()) == std::mem::discriminant(t)
+    }
+    fn span_here(&self) -> Span {
+        let t = &self.toks[self.pos];
+        Span::new(self.file, t.lo, t.hi)
+    }
+    fn prev_hi(&self) -> u32 {
+        if self.pos == 0 { 0 } else { self.toks[self.pos - 1].hi }
+    }
+    fn lo(&self) -> u32 {
+        self.toks[self.pos].lo
+    }
+    fn span_from(&self, lo: u32) -> Span {
+        Span::new(self.file, lo, self.prev_hi().max(lo))
+    }
+    fn bump(&mut self) -> Token {
+        let t = self.toks[self.pos].clone();
+        if self.pos + 1 < self.toks.len() {
+            self.pos += 1;
+        }
+        t
+    }
+    fn eat(&mut self, t: &Tok) -> bool {
+        if self.at(t) {
+            self.bump();
+            true
+        } else {
+            false
+        }
+    }
+    fn text(&self, t: &Token) -> &'a str {
+        &self.src[t.lo as usize..t.hi as usize]
+    }
+    fn error_here(&mut self, msg: impl Into<String>) {
+        let span = self.span_here();
+        self.errors.push(Diag::error(span, msg));
+    }
+    fn expected(&mut self, what: &str) {
+        let found = self.tok().describe();
+        self.error_here(format!("expected {what}, found {found}"));
+    }
+    fn expect(&mut self, t: &Tok, what: &str) -> PResult<()> {
+        if self.eat(t) {
+            Ok(())
+        } else {
+            self.expected(what);
+            Err(())
+        }
+    }
+    fn skip_semis(&mut self) {
+        while self.at(&Tok::Semi) {
+            self.bump();
+        }
+    }
+    fn new_id(&mut self) -> ExprId {
+        self.next_id += 1;
+        ExprId(self.next_id)
+    }
+    fn mk(&mut self, kind: ExprKind, span: Span) -> Expr {
+        let id = self.new_id();
+        Expr { kind, span, id }
+    }
+    fn ident(&mut self, what: &str) -> PResult<Ident> {
+        if self.at(&Tok::Ident) {
+            let t = self.bump();
+            Ok(Ident { name: self.text(&t).to_string(), span: Span::new(self.file, t.lo, t.hi) })
+        } else {
+            self.expected(what);
+            Err(())
+        }
+    }
+    /// An identifier, also accepting keywords (for function and member names).
+    fn name_or_keyword(&mut self, what: &str) -> PResult<Ident> {
+        let t = self.toks[self.pos].clone();
+        let is_kw = !t.tok.text().is_empty() && t.tok.text().chars().all(|c| c.is_ascii_alphabetic()) && t.tok != Tok::SelfLower;
+        if self.at(&Tok::Ident) || is_kw {
+            self.bump();
+            Ok(Ident { name: self.text(&t).to_string(), span: Span::new(self.file, t.lo, t.hi) })
+        } else {
+            self.expected(what);
+            Err(())
+        }
+    }
+
+    fn enter(&mut self) -> PResult<()> {
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            if !self.fatal {
+                self.error_here("nesting too deep");
+            }
+            self.fatal = true;
+        }
+        if self.fatal { Err(()) } else { Ok(()) }
+    }
+    fn leave(&mut self) {
+        self.depth -= 1;
+    }
+    fn line_of(&self, pos: u32) -> usize {
+        self.src[..pos as usize].bytes().filter(|&b| b == b'\n').count()
+    }
+
+    /// Doc comment (`///`) immediately preceding byte offset `lo`.
+    fn doc_before(&self, lo: u32) -> Option<String> {
+        let idx = self.comments.partition_point(|c| c.hi <= lo);
+        let mut lines = Vec::new();
+        let mut boundary = lo;
+        let mut i = idx;
+        while i > 0 {
+            let c = &self.comments[i - 1];
+            if c.kind != CommentKind::Doc {
+                break;
+            }
+            let between = &self.src[c.hi as usize..boundary as usize];
+            if !between.trim().is_empty() || between.matches('\n').count() > 1 {
+                break;
+            }
+            let t = c.text.trim_start_matches("///");
+            lines.push(t.strip_prefix(' ').unwrap_or(t).to_string());
+            boundary = c.lo;
+            i -= 1;
+        }
+        if lines.is_empty() {
+            return None;
+        }
+        lines.reverse();
+        Some(lines.join("\n"))
+    }
+
+    /// Skips to the next statement boundary after an error.
+    fn recover(&mut self) {
+        let mut depth = 0i32;
+        loop {
+            match self.tok() {
+                Tok::Eof => return,
+                Tok::LParen | Tok::LBracket | Tok::LBrace => depth += 1,
+                Tok::RParen | Tok::RBracket => depth -= 1,
+                Tok::RBrace => {
+                    if depth <= 0 {
+                        return;
+                    }
+                    depth -= 1;
+                }
+                Tok::Semi if depth <= 0 => {
+                    self.bump();
+                    return;
+                }
+                _ => {}
+            }
+            self.bump();
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Module and items
+
+    fn module(&mut self) -> Module {
+        let mut items = Vec::new();
+        let doc: Vec<String> = self
+            .comments
+            .iter()
+            .take_while(|c| c.kind == CommentKind::ModuleDoc || c.kind == CommentKind::Line)
+            .filter(|c| c.kind == CommentKind::ModuleDoc)
+            .map(|c| {
+                let t = c.text.trim_start_matches("//!");
+                t.strip_prefix(' ').unwrap_or(t).to_string()
+            })
+            .collect();
+        loop {
+            self.skip_semis();
+            if self.at(&Tok::Eof) || self.fatal {
+                break;
+            }
+            let start = self.pos;
+            match self.item() {
+                Ok(item) => items.push(item),
+                Err(()) => {
+                    if self.fatal {
+                        break;
+                    }
+                    if self.pos == start {
+                        self.bump();
+                    }
+                    self.recover();
+                    // A stray closing brace at the top level.
+                    if self.at(&Tok::RBrace) {
+                        self.error_here("unexpected `}`");
+                        self.bump();
+                    }
+                }
+            }
+        }
+        let span = Span::new(self.file, 0, self.src.len() as u32);
+        Module { items, doc: if doc.is_empty() { None } else { Some(doc.join("\n")) }, span }
+    }
+
+    fn end_of_item(&mut self) -> PResult<()> {
+        if self.eat(&Tok::Semi) || self.at(&Tok::Eof) || self.at(&Tok::RBrace) || self.toks[self.pos].newline_before {
+            Ok(())
+        } else {
+            self.expected("newline or `;`");
+            Err(())
+        }
+    }
+
+    fn item(&mut self) -> PResult<Item> {
+        let lo = self.lo();
+        let doc = self.doc_before(lo);
+        let kind = match self.tok() {
+            Tok::Import => ItemKind::Import(self.import()?),
+            Tok::From => ItemKind::Import(self.selective_import()?),
+            Tok::Pub => {
+                self.bump();
+                match self.tok() {
+                    Tok::Native if matches!(self.peek_tok(1), Tok::Type) => ItemKind::NativeType(self.native_type(true, doc)?),
+                    Tok::Fn | Tok::Native => ItemKind::Fn(self.fn_decl(true, doc)?),
+                    Tok::Struct => ItemKind::Struct(self.struct_decl(true, doc)?),
+                    Tok::Enum => ItemKind::Enum(self.enum_decl(true, doc)?),
+                    Tok::Type => ItemKind::TypeAlias(self.type_alias(true, doc)?),
+                    Tok::Let | Tok::Var => {
+                        let mut s = self.let_stmt()?;
+                        if let StmtKind::Let { is_pub, doc: d, .. } = &mut s.kind {
+                            *is_pub = true;
+                            *d = doc;
+                        }
+                        self.end_of_item()?;
+                        ItemKind::Stmt(s)
+                    }
+                    _ => {
+                        self.expected("`fn`, `struct`, `enum`, `type`, `let` or `var` after `pub`");
+                        return Err(());
+                    }
+                }
+            }
+            Tok::Fn if matches!(self.peek_tok(1), Tok::Ident) => ItemKind::Fn(self.fn_decl(false, doc)?),
+            Tok::Native if matches!(self.peek_tok(1), Tok::Type) => ItemKind::NativeType(self.native_type(false, doc)?),
+            Tok::Native => ItemKind::Fn(self.fn_decl(false, doc)?),
+            Tok::Struct => ItemKind::Struct(self.struct_decl(false, doc)?),
+            Tok::Enum => ItemKind::Enum(self.enum_decl(false, doc)?),
+            Tok::Extend => ItemKind::Extend(self.extend_decl()?),
+            Tok::Type if matches!(self.peek_tok(1), Tok::Ident) => ItemKind::TypeAlias(self.type_alias(false, doc)?),
+            Tok::Ident if self.text(&self.toks[self.pos].clone()) == "test" && matches!(self.peek_tok(1), Tok::Str(_)) => {
+                self.bump();
+                let t = self.bump();
+                let name = match &t.tok {
+                    Tok::Str(parts) => parts
+                        .iter()
+                        .map(|p| match p {
+                            StrPart::Text(s) => s.clone(),
+                            StrPart::Expr { .. } => String::new(),
+                        })
+                        .collect(),
+                    _ => unreachable!(),
+                };
+                let body = self.block()?;
+                ItemKind::Test(TestDecl { name, name_span: Span::new(self.file, t.lo, t.hi), body })
+            }
+            _ => {
+                let mut s = self.stmt()?;
+                if let StmtKind::Let { doc: d, .. } = &mut s.kind {
+                    *d = doc;
+                }
+                self.end_of_item()?;
+                ItemKind::Stmt(s)
+            }
+        };
+        if !matches!(kind, ItemKind::Stmt(_) | ItemKind::Import(_)) {
+            // Items end at a newline or `;` like statements.
+            if !(self.eat(&Tok::Semi) || self.at(&Tok::Eof) || self.at(&Tok::RBrace) || self.toks[self.pos].newline_before) {
+                self.expected("newline or `;`");
+                return Err(());
+            }
+        }
+        Ok(Item { kind, span: self.span_from(lo) })
+    }
+
+    fn import_source(&mut self) -> PResult<ImportSource> {
+        match self.tok().clone() {
+            Tok::Ident => Ok(ImportSource::Name(self.ident("module name")?)),
+            Tok::Str(parts) => {
+                let t = self.bump();
+                let span = Span::new(self.file, t.lo, t.hi);
+                match parts.as_slice() {
+                    [StrPart::Text(s)] => Ok(ImportSource::Path(s.clone(), span)),
+                    _ => {
+                        self.errors.push(Diag::error(span, "import path must be a plain string"));
+                        Err(())
+                    }
+                }
+            }
+            _ => {
+                self.expected("module name or path string");
+                Err(())
+            }
+        }
+    }
+
+    fn import(&mut self) -> PResult<Import> {
+        self.bump();
+        let source = self.import_source()?;
+        let alias = if self.eat(&Tok::As) { Some(self.ident("alias")?) } else { None };
+        self.end_of_item()?;
+        Ok(Import { source, alias, names: None })
+    }
+
+    fn selective_import(&mut self) -> PResult<Import> {
+        self.bump();
+        let source = self.import_source()?;
+        self.expect(&Tok::Import, "`import`")?;
+        let mut names = vec![self.ident("name to import")?];
+        while self.eat(&Tok::Comma) {
+            names.push(self.ident("name to import")?);
+        }
+        self.end_of_item()?;
+        Ok(Import { source, alias: None, names: Some(names) })
+    }
+
+    fn generics(&mut self) -> PResult<Vec<GenericParam>> {
+        let mut out = Vec::new();
+        if !self.eat(&Tok::Lt) {
+            return Ok(out);
+        }
+        loop {
+            let mut reflect = false;
+            if self.at(&Tok::Ident) && self.text(&self.toks[self.pos].clone()) == "reflect" && matches!(self.peek_tok(1), Tok::Ident) {
+                self.bump();
+                reflect = true;
+            }
+            let name = self.ident("type parameter")?;
+            let mut bounds = Vec::new();
+            if self.eat(&Tok::Colon) {
+                bounds.push(self.ident("bound")?);
+                while self.eat(&Tok::Plus) {
+                    bounds.push(self.ident("bound")?);
+                }
+            }
+            out.push(GenericParam { name, bounds, reflect });
+            if self.eat(&Tok::Comma) {
+                continue;
+            }
+            self.expect_gt()?;
+            break;
+        }
+        Ok(out)
+    }
+
+    /// Expects `>`, splitting `>>` and `>=` tokens when needed.
+    fn expect_gt(&mut self) -> PResult<()> {
+        match self.tok() {
+            Tok::Gt => {
+                self.bump();
+                Ok(())
+            }
+            Tok::Shr => {
+                self.toks[self.pos].tok = Tok::Gt;
+                self.toks[self.pos].lo += 1;
+                Ok(())
+            }
+            Tok::Ge => {
+                self.toks[self.pos].tok = Tok::Eq;
+                self.toks[self.pos].lo += 1;
+                Ok(())
+            }
+            _ => {
+                self.expected("`>`");
+                Err(())
+            }
+        }
+    }
+
+    fn fn_decl(&mut self, is_pub: bool, doc: Option<String>) -> PResult<FnDecl> {
+        let lo = self.lo();
+        let is_native = self.eat(&Tok::Native);
+        self.expect(&Tok::Fn, "`fn`")?;
+        let name = self.name_or_keyword("function name")?;
+        let generics = self.generics()?;
+        self.expect(&Tok::LParen, "`(`")?;
+        let mut params = Vec::new();
+        let mut seen_default = false;
+        while !self.at(&Tok::RParen) {
+            let plo = self.lo();
+            if self.at(&Tok::SelfLower) {
+                let t = self.bump();
+                params.push(Param {
+                    name: Ident { name: "self".into(), span: Span::new(self.file, t.lo, t.hi) },
+                    ty: None,
+                    default: None,
+                    span: self.span_from(plo),
+                });
+            } else {
+                let pname = self.ident("parameter name")?;
+                self.expect(&Tok::Colon, "`:`")?;
+                let ty = self.ty()?;
+                let default = if self.eat(&Tok::Eq) {
+                    seen_default = true;
+                    Some(self.expr()?)
+                } else {
+                    if seen_default {
+                        self.errors.push(Diag::error(pname.span, "parameter without default after parameter with default"));
+                    }
+                    None
+                };
+                params.push(Param { name: pname, ty: Some(ty), default, span: self.span_from(plo) });
+            }
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        self.expect(&Tok::RParen, "`)`")?;
+        let ret = if self.eat(&Tok::Arrow) { Some(self.ty()?) } else { None };
+        let mut where_clause = Vec::new();
+        if self.at(&Tok::Ident) && self.text(&self.toks[self.pos].clone()) == "where" {
+            self.bump();
+            loop {
+                let name = self.ident("type parameter")?;
+                self.expect(&Tok::Colon, "`:`")?;
+                let mut bounds = vec![self.ident("bound")?];
+                while self.eat(&Tok::Plus) {
+                    bounds.push(self.ident("bound")?);
+                }
+                where_clause.push(WherePredicate { name, bounds });
+                if !self.eat(&Tok::Comma) {
+                    break;
+                }
+            }
+        }
+        let body = if is_native {
+            None
+        } else if self.at(&Tok::LBrace) {
+            Some(self.block()?)
+        } else {
+            self.expected("`{`");
+            return Err(());
+        };
+        Ok(FnDecl { name, generics, params, ret, where_clause, body, is_pub, is_native, doc, span: self.span_from(lo) })
+    }
+
+    fn struct_decl(&mut self, is_pub: bool, doc: Option<String>) -> PResult<StructDecl> {
+        let lo = self.lo();
+        self.bump();
+        let name = self.ident("struct name")?;
+        let generics = self.generics()?;
+        self.expect(&Tok::LBrace, "`{`")?;
+        let mut fields = Vec::new();
+        let mut methods = Vec::new();
+        loop {
+            while self.eat(&Tok::Semi) || self.eat(&Tok::Comma) {}
+            if self.at(&Tok::RBrace) || self.at(&Tok::Eof) {
+                break;
+            }
+            let mlo = self.lo();
+            let mdoc = self.doc_before(mlo);
+            if self.at(&Tok::Fn) || self.at(&Tok::Native) || (self.at(&Tok::Pub) && matches!(self.peek_tok(1), Tok::Fn | Tok::Native)) {
+                let p = self.eat(&Tok::Pub);
+                methods.push(self.fn_decl(p, mdoc)?);
+                continue;
+            }
+            let mutable = self.eat(&Tok::Var);
+            let fname = self.ident("field name")?;
+            self.expect(&Tok::Colon, "`:`")?;
+            let ty = self.ty()?;
+            let default = if self.eat(&Tok::Eq) { Some(self.expr()?) } else { None };
+            fields.push(FieldDecl { name: fname, ty, default, mutable, doc: mdoc, span: self.span_from(mlo) });
+            // A type ending in `>` is not followed by an automatic terminator.
+            if !(self.at(&Tok::Semi) || self.at(&Tok::Comma) || self.at(&Tok::RBrace) || self.toks[self.pos].newline_before) {
+                self.expected("`,`, newline or `}`");
+                return Err(());
+            }
+        }
+        let close = self.lo();
+        self.expect(&Tok::RBrace, "`}`")?;
+        let inline = self.line_of(lo) == self.line_of(close);
+        Ok(StructDecl { name, generics, fields, methods, is_pub, doc, inline })
+    }
+
+    fn enum_decl(&mut self, is_pub: bool, doc: Option<String>) -> PResult<EnumDecl> {
+        let lo = self.lo();
+        self.bump();
+        let name = self.ident("enum name")?;
+        let generics = self.generics()?;
+        self.expect(&Tok::LBrace, "`{`")?;
+        let mut variants = Vec::new();
+        let mut methods = Vec::new();
+        loop {
+            while self.eat(&Tok::Semi) || self.eat(&Tok::Comma) {}
+            if self.at(&Tok::RBrace) || self.at(&Tok::Eof) {
+                break;
+            }
+            let vlo = self.lo();
+            let vdoc = self.doc_before(vlo);
+            if self.at(&Tok::Fn) || self.at(&Tok::Native) || (self.at(&Tok::Pub) && matches!(self.peek_tok(1), Tok::Fn | Tok::Native)) {
+                let p = self.eat(&Tok::Pub);
+                methods.push(self.fn_decl(p, vdoc)?);
+                continue;
+            }
+            let vname = self.ident("variant name")?;
+            let mut fields = Vec::new();
+            if self.eat(&Tok::LParen) {
+                while !self.at(&Tok::RParen) {
+                    let fname = if self.at(&Tok::Ident) && matches!(self.peek_tok(1), Tok::Colon) {
+                        let n = self.ident("field name")?;
+                        self.bump();
+                        Some(n)
+                    } else {
+                        None
+                    };
+                    let ty = self.ty()?;
+                    fields.push(VariantField { name: fname, ty });
+                    if !self.eat(&Tok::Comma) {
+                        break;
+                    }
+                }
+                self.expect(&Tok::RParen, "`)`")?;
+            }
+            variants.push(VariantDecl { name: vname, fields, doc: vdoc, span: self.span_from(vlo) });
+            if !(self.at(&Tok::Semi) || self.at(&Tok::Comma) || self.at(&Tok::RBrace) || self.toks[self.pos].newline_before) {
+                self.expected("`,`, newline or `}`");
+                return Err(());
+            }
+        }
+        let close = self.lo();
+        self.expect(&Tok::RBrace, "`}`")?;
+        let inline = self.line_of(lo) == self.line_of(close);
+        Ok(EnumDecl { name, generics, variants, methods, is_pub, doc, inline })
+    }
+
+    fn extend_decl(&mut self) -> PResult<ExtendDecl> {
+        self.bump();
+        let generics = self.generics()?;
+        let target = self.ty()?;
+        self.expect(&Tok::LBrace, "`{`")?;
+        let mut methods = Vec::new();
+        loop {
+            self.skip_semis();
+            if self.at(&Tok::RBrace) || self.at(&Tok::Eof) {
+                break;
+            }
+            let mdoc = self.doc_before(self.lo());
+            let p = self.eat(&Tok::Pub);
+            if !(self.at(&Tok::Fn) || self.at(&Tok::Native)) {
+                self.expected("`fn`");
+                return Err(());
+            }
+            methods.push(self.fn_decl(p, mdoc)?);
+        }
+        self.expect(&Tok::RBrace, "`}`")?;
+        Ok(ExtendDecl { generics, target, methods })
+    }
+
+    fn native_type(&mut self, is_pub: bool, doc: Option<String>) -> PResult<NativeTypeDecl> {
+        self.bump();
+        self.bump();
+        let name = self.ident("type name")?;
+        let generics = self.generics()?;
+        Ok(NativeTypeDecl { name, generics, is_pub, doc })
+    }
+
+    fn type_alias(&mut self, is_pub: bool, doc: Option<String>) -> PResult<TypeAlias> {
+        self.bump();
+        let name = self.ident("type name")?;
+        let generics = self.generics()?;
+        self.expect(&Tok::Eq, "`=`")?;
+        let ty = self.ty()?;
+        Ok(TypeAlias { name, generics, ty, is_pub, doc })
+    }
+
+    // ------------------------------------------------------------------
+    // Types
+
+    fn ty(&mut self) -> PResult<TypeExpr> {
+        self.enter()?;
+        let r = self.ty_inner();
+        self.leave();
+        r
+    }
+
+    fn ty_inner(&mut self) -> PResult<TypeExpr> {
+        let lo = self.lo();
+        let mut t = match self.tok().clone() {
+            Tok::LBracket => {
+                self.bump();
+                let a = self.ty()?;
+                if self.eat(&Tok::Colon) {
+                    let b = self.ty()?;
+                    self.expect(&Tok::RBracket, "`]`")?;
+                    TypeExpr { kind: TypeExprKind::Map(Box::new(a), Box::new(b)), span: self.span_from(lo) }
+                } else {
+                    self.expect(&Tok::RBracket, "`]`")?;
+                    TypeExpr { kind: TypeExprKind::List(Box::new(a)), span: self.span_from(lo) }
+                }
+            }
+            Tok::LParen => {
+                self.bump();
+                if self.eat(&Tok::RParen) {
+                    TypeExpr { kind: TypeExprKind::Unit, span: self.span_from(lo) }
+                } else {
+                    let first = self.ty()?;
+                    if self.eat(&Tok::RParen) {
+                        first
+                    } else {
+                        let mut items = vec![first];
+                        while self.eat(&Tok::Comma) {
+                            if self.at(&Tok::RParen) {
+                                break;
+                            }
+                            items.push(self.ty()?);
+                        }
+                        self.expect(&Tok::RParen, "`)`")?;
+                        TypeExpr { kind: TypeExprKind::Tuple(items), span: self.span_from(lo) }
+                    }
+                }
+            }
+            Tok::Fn => {
+                self.bump();
+                self.expect(&Tok::LParen, "`(`")?;
+                let mut params = Vec::new();
+                while !self.at(&Tok::RParen) {
+                    params.push(self.ty()?);
+                    if !self.eat(&Tok::Comma) {
+                        break;
+                    }
+                }
+                self.expect(&Tok::RParen, "`)`")?;
+                let ret = if self.eat(&Tok::Arrow) { Some(Box::new(self.ty()?)) } else { None };
+                TypeExpr { kind: TypeExprKind::Fn(params, ret), span: self.span_from(lo) }
+            }
+            Tok::Ident | Tok::SelfUpper => {
+                let mut path = Vec::new();
+                if self.at(&Tok::SelfUpper) {
+                    let t = self.bump();
+                    path.push(Ident { name: "Self".into(), span: Span::new(self.file, t.lo, t.hi) });
+                } else {
+                    path.push(self.ident("type")?);
+                    while self.at(&Tok::Dot) && matches!(self.peek_tok(1), Tok::Ident) {
+                        self.bump();
+                        path.push(self.ident("type")?);
+                    }
+                }
+                let mut args = Vec::new();
+                if self.eat(&Tok::Lt) {
+                    loop {
+                        args.push(self.ty()?);
+                        if !self.eat(&Tok::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect_gt()?;
+                }
+                TypeExpr { kind: TypeExprKind::Named { path, args }, span: self.span_from(lo) }
+            }
+            _ => {
+                self.expected("type");
+                return Err(());
+            }
+        };
+        while self.at(&Tok::Question) || self.at(&Tok::QQ) {
+            let double = self.at(&Tok::QQ);
+            self.bump();
+            t = TypeExpr { kind: TypeExprKind::Option(Box::new(t)), span: self.span_from(lo) };
+            if double {
+                t = TypeExpr { kind: TypeExprKind::Option(Box::new(t)), span: self.span_from(lo) };
+            }
+        }
+        Ok(t)
+    }
+
+    // ------------------------------------------------------------------
+    // Statements and blocks
+
+    fn block(&mut self) -> PResult<Block> {
+        self.enter()?;
+        let r = self.block_inner();
+        self.leave();
+        r
+    }
+
+    fn block_inner(&mut self) -> PResult<Block> {
+        let lo = self.lo();
+        self.expect(&Tok::LBrace, "`{`")?;
+        let saved = std::mem::replace(&mut self.no_struct, false);
+        let mut stmts = Vec::new();
+        loop {
+            self.skip_semis();
+            if self.at(&Tok::RBrace) || self.at(&Tok::Eof) || self.fatal {
+                break;
+            }
+            let start = self.pos;
+            match self.stmt() {
+                Ok(s) => {
+                    stmts.push(s);
+                    if !(self.eat(&Tok::Semi) || self.at(&Tok::RBrace)) {
+                        self.expected("newline or `;`");
+                        self.recover();
+                    }
+                }
+                Err(()) => {
+                    if self.fatal {
+                        break;
+                    }
+                    if self.pos == start {
+                        self.bump();
+                    }
+                    self.recover();
+                }
+            }
+        }
+        self.no_struct = saved;
+        let close = self.lo();
+        self.expect(&Tok::RBrace, "`}`")?;
+        let inline = self.line_of(lo) == self.line_of(close);
+        Ok(Block { stmts, span: self.span_from(lo), inline })
+    }
+
+    fn let_stmt(&mut self) -> PResult<Stmt> {
+        let lo = self.lo();
+        let mutable = self.at(&Tok::Var);
+        self.bump();
+        let pattern = self.pattern()?;
+        let ty = if self.eat(&Tok::Colon) { Some(self.ty()?) } else { None };
+        self.expect(&Tok::Eq, "`=`")?;
+        let value = self.expr()?;
+        let else_block = if self.at(&Tok::Else) {
+            self.bump();
+            Some(self.block()?)
+        } else {
+            None
+        };
+        Ok(Stmt { kind: StmtKind::Let { pattern, ty, value, else_block, mutable, is_pub: false, doc: None }, span: self.span_from(lo) })
+    }
+
+    fn stmt(&mut self) -> PResult<Stmt> {
+        let lo = self.lo();
+        match self.tok() {
+            Tok::Let | Tok::Var => self.let_stmt(),
+            Tok::Fn if matches!(self.peek_tok(1), Tok::Ident) => {
+                let doc = self.doc_before(lo);
+                let f = self.fn_decl(false, doc)?;
+                Ok(Stmt { kind: StmtKind::Fn(f), span: self.span_from(lo) })
+            }
+            _ => {
+                let e = self.expr()?;
+                let op = match self.tok() {
+                    Tok::Eq => Some(AssignOp::Assign),
+                    Tok::PlusEq => Some(AssignOp::Add),
+                    Tok::MinusEq => Some(AssignOp::Sub),
+                    Tok::StarEq => Some(AssignOp::Mul),
+                    Tok::SlashEq => Some(AssignOp::Div),
+                    Tok::PercentEq => Some(AssignOp::Rem),
+                    _ => None,
+                };
+                if let Some(op) = op {
+                    self.bump();
+                    let value = self.expr()?;
+                    return Ok(Stmt { kind: StmtKind::Assign { target: e, op, value }, span: self.span_from(lo) });
+                }
+                Ok(Stmt { kind: StmtKind::Expr(e), span: self.span_from(lo) })
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Expressions
+
+    pub fn expr(&mut self) -> PResult<Expr> {
+        self.enter()?;
+        let r = self.expr_bp(0);
+        self.leave();
+        r
+    }
+
+    fn expr_no_struct(&mut self) -> PResult<Expr> {
+        let saved = std::mem::replace(&mut self.no_struct, true);
+        let r = self.expr();
+        self.no_struct = saved;
+        r
+    }
+
+    /// Binding powers: (left, right). Higher binds tighter.
+    fn infix_bp(&self) -> Option<(u8, u8)> {
+        Some(match self.tok() {
+            Tok::PipeGt => (2, 3),
+            Tok::QQ => (5, 4),
+            Tok::Or => (6, 7),
+            Tok::And => (8, 9),
+            Tok::EqEq | Tok::NotEq | Tok::Lt | Tok::Le | Tok::Gt | Tok::Ge => (12, 13),
+            Tok::Pipe => (14, 15),
+            Tok::Caret => (16, 17),
+            Tok::Amp => (18, 19),
+            Tok::Shl | Tok::Shr => (20, 21),
+            Tok::DotDot | Tok::DotDotEq => (22, 23),
+            Tok::Plus | Tok::Minus => (24, 25),
+            Tok::Star | Tok::Slash | Tok::Percent => (26, 27),
+            _ => return None,
+        })
+    }
+
+    fn expr_bp(&mut self, min_bp: u8) -> PResult<Expr> {
+        let lo = self.lo();
+        let mut lhs = self.prefix(min_bp)?;
+        let mut chain = 0usize;
+        while let Some((lbp, rbp)) = self.infix_bp() {
+            if lbp < min_bp {
+                break;
+            }
+            chain += 1;
+            if self.depth + chain > MAX_DEPTH * 4 {
+                if !self.fatal {
+                    self.error_here("expression too long or nesting too deep");
+                }
+                self.fatal = true;
+                return Err(());
+            }
+            let op_tok = self.bump();
+            let kind = match op_tok.tok {
+                Tok::PipeGt => {
+                    let rhs = self.expr_bp(rbp)?;
+                    ExprKind::Pipe(Box::new(lhs), Box::new(rhs))
+                }
+                Tok::QQ => {
+                    let rhs = self.expr_bp(rbp)?;
+                    ExprKind::Coalesce(Box::new(lhs), Box::new(rhs))
+                }
+                Tok::DotDot | Tok::DotDotEq => {
+                    let inclusive = op_tok.tok == Tok::DotDotEq;
+                    let end = if self.range_end_absent() { None } else { Some(Box::new(self.expr_bp(rbp)?)) };
+                    let e = ExprKind::Range { start: Some(Box::new(lhs)), end, inclusive };
+                    let ex = self.mk(e, self.span_from(lo));
+                    if matches!(self.tok(), Tok::DotDot | Tok::DotDotEq) {
+                        self.error_here("range operators cannot be chained");
+                        return Err(());
+                    }
+                    lhs = ex;
+                    continue;
+                }
+                ref t => {
+                    let op = match t {
+                        Tok::Or => BinOp::Or,
+                        Tok::And => BinOp::And,
+                        Tok::EqEq => BinOp::Eq,
+                        Tok::NotEq => BinOp::Ne,
+                        Tok::Lt => BinOp::Lt,
+                        Tok::Le => BinOp::Le,
+                        Tok::Gt => BinOp::Gt,
+                        Tok::Ge => BinOp::Ge,
+                        Tok::Pipe => BinOp::BitOr,
+                        Tok::Caret => BinOp::BitXor,
+                        Tok::Amp => BinOp::BitAnd,
+                        Tok::Shl => BinOp::Shl,
+                        Tok::Shr => BinOp::Shr,
+                        Tok::Plus => BinOp::Add,
+                        Tok::Minus => BinOp::Sub,
+                        Tok::Star => BinOp::Mul,
+                        Tok::Slash => BinOp::Div,
+                        Tok::Percent => BinOp::Rem,
+                        _ => unreachable!(),
+                    };
+                    let rhs = self.expr_bp(rbp)?;
+                    if op.is_comparison() {
+                        if let ExprKind::Binary(prev, ..) = &lhs.kind
+                            && prev.is_comparison()
+                            && !matches!(lhs.kind, ExprKind::Paren(_))
+                        {
+                            self.errors.push(Diag::error(self.span_from(lo), "comparison operators cannot be chained"));
+                        }
+                        if matches!(self.tok(), Tok::EqEq | Tok::NotEq | Tok::Lt | Tok::Le | Tok::Gt | Tok::Ge) {
+                            self.error_here("comparison operators cannot be chained");
+                            return Err(());
+                        }
+                    }
+                    ExprKind::Binary(op, Box::new(lhs), Box::new(rhs))
+                }
+            };
+            lhs = self.mk(kind, self.span_from(lo));
+        }
+        Ok(lhs)
+    }
+
+    fn range_end_absent(&self) -> bool {
+        matches!(self.tok(), Tok::RBracket | Tok::RParen | Tok::Comma | Tok::Semi | Tok::Eof | Tok::RBrace | Tok::LBrace)
+    }
+
+    /// Prefix operators, `not`, `spawn` and lambdas; then postfix.
+    fn prefix(&mut self, min_bp: u8) -> PResult<Expr> {
+        let lo = self.lo();
+        match self.tok() {
+            Tok::Not => {
+                self.bump();
+                self.enter()?;
+                // `not` binds looser than comparisons.
+                let e = self.expr_bp(10.max(min_bp));
+                self.leave();
+                let e = e?;
+                Ok(self.mk(ExprKind::Unary(UnOp::Not, Box::new(e)), self.span_from(lo)))
+            }
+            Tok::Minus | Tok::Tilde => {
+                let op = if self.at(&Tok::Minus) { UnOp::Neg } else { UnOp::BitNot };
+                self.bump();
+                self.enter()?;
+                let e = self.prefix(28);
+                self.leave();
+                let e = e?;
+                // Fold `-<literal>` so that i64::MIN is expressible.
+                if op == UnOp::Neg
+                    && let ExprKind::IntOverflow(true) = e.kind
+                    && !self.at(&Tok::StarStar)
+                {
+                    return Ok(self.mk(ExprKind::Int(i64::MIN), self.span_from(lo)));
+                }
+                let un = self.mk(ExprKind::Unary(op, Box::new(e)), self.span_from(lo));
+                Ok(un)
+            }
+            Tok::DotDot | Tok::DotDotEq => {
+                let inclusive = self.at(&Tok::DotDotEq);
+                self.bump();
+                let end = if self.range_end_absent() { None } else { Some(Box::new(self.expr_bp(23)?)) };
+                Ok(self.mk(ExprKind::Range { start: None, end, inclusive }, self.span_from(lo)))
+            }
+            Tok::Spawn => {
+                self.bump();
+                let e = self.expr()?;
+                Ok(self.mk(ExprKind::Spawn(Box::new(e)), self.span_from(lo)))
+            }
+            _ => {
+                let base = self.postfix()?;
+                if self.at(&Tok::StarStar) {
+                    self.bump();
+                    self.enter()?;
+                    let rhs = self.prefix(28);
+                    self.leave();
+                    let rhs = rhs?;
+                    return Ok(self.mk(ExprKind::Binary(BinOp::Pow, Box::new(base), Box::new(rhs)), self.span_from(lo)));
+                }
+                Ok(base)
+            }
+        }
+    }
+
+    fn args(&mut self) -> PResult<Vec<Arg>> {
+        // Assumes `(` was consumed.
+        let saved = std::mem::replace(&mut self.no_struct, false);
+        let saved_guard = std::mem::replace(&mut self.in_guard, false);
+        let mut args = Vec::new();
+        let mut seen_named = false;
+        while !self.at(&Tok::RParen) {
+            let name = if self.at(&Tok::Ident) && matches!(self.peek_tok(1), Tok::Colon) {
+                let n = self.ident("argument name")?;
+                self.bump();
+                seen_named = true;
+                Some(n)
+            } else {
+                if seen_named {
+                    self.error_here("positional argument after named argument");
+                }
+                None
+            };
+            let value = self.expr()?;
+            args.push(Arg { name, value });
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        self.no_struct = saved;
+        self.in_guard = saved_guard;
+        self.expect(&Tok::RParen, "`)`")?;
+        Ok(args)
+    }
+
+    fn postfix(&mut self) -> PResult<Expr> {
+        let lo = self.lo();
+        let mut e = self.primary()?;
+        let mut chain = 0usize;
+        loop {
+            chain += 1;
+            if self.depth + chain > MAX_DEPTH * 4 {
+                if !self.fatal {
+                    self.error_here("expression too long or nesting too deep");
+                }
+                self.fatal = true;
+                return Err(());
+            }
+            match self.tok().clone() {
+                Tok::LParen => {
+                    self.bump();
+                    let args = self.args()?;
+                    e = self.mk(ExprKind::Call { callee: Box::new(e), args }, self.span_from(lo));
+                }
+                Tok::LBracket => {
+                    self.bump();
+                    let saved = std::mem::replace(&mut self.no_struct, false);
+                    let idx = self.expr();
+                    self.no_struct = saved;
+                    let idx = idx?;
+                    self.expect(&Tok::RBracket, "`]`")?;
+                    e = self.mk(ExprKind::Index(Box::new(e), Box::new(idx)), self.span_from(lo));
+                }
+                Tok::Question => {
+                    self.bump();
+                    e = self.mk(ExprKind::Try(Box::new(e)), self.span_from(lo));
+                }
+                Tok::Dot => {
+                    self.bump();
+                    match self.tok().clone() {
+                        t if t == Tok::Ident || (!t.text().is_empty() && t.text().chars().all(|c| c.is_ascii_alphabetic())) => {
+                            let name = self.name_or_keyword("field or method name")?;
+                            if self.at(&Tok::LParen) {
+                                self.bump();
+                                let args = self.args()?;
+                                e = self.mk(ExprKind::MethodCall { receiver: Box::new(e), method: name, args }, self.span_from(lo));
+                            } else {
+                                e = self.mk(ExprKind::Field(Box::new(e), name), self.span_from(lo));
+                            }
+                        }
+                        Tok::Int(i) => {
+                            let t = self.bump();
+                            e = self.mk(ExprKind::TupleField(Box::new(e), i as u32, Span::new(self.file, t.lo, t.hi)), self.span_from(lo));
+                        }
+                        Tok::Float(_) => {
+                            // `t.0.1` lexes as `t` `.` `0.1`.
+                            let t = self.bump();
+                            let text = self.text(&t);
+                            let mut parts = text.split('.');
+                            for part in parts.by_ref() {
+                                match part.parse::<u32>() {
+                                    Ok(i) => {
+                                        e = self
+                                            .mk(ExprKind::TupleField(Box::new(e), i, Span::new(self.file, t.lo, t.hi)), self.span_from(lo));
+                                    }
+                                    Err(_) => {
+                                        self.errors.push(Diag::error(Span::new(self.file, t.lo, t.hi), "invalid tuple index"));
+                                        return Err(());
+                                    }
+                                }
+                            }
+                        }
+                        _ => {
+                            self.expected("field or method name");
+                            return Err(());
+                        }
+                    }
+                }
+                Tok::LBrace if !self.no_struct && self.is_struct_lit_start(&e) => {
+                    e = self.struct_lit(e, lo)?;
+                }
+                _ => break,
+            }
+        }
+        Ok(e)
+    }
+
+    fn path_of(e: &Expr) -> Option<Vec<Ident>> {
+        match &e.kind {
+            ExprKind::Ident(id) => Some(vec![id.clone()]),
+            ExprKind::SelfType => Some(vec![Ident { name: "Self".into(), span: e.span }]),
+            ExprKind::Field(base, name) => {
+                let mut p = Self::path_of(base)?;
+                p.push(name.clone());
+                Some(p)
+            }
+            _ => None,
+        }
+    }
+
+    fn is_struct_lit_start(&self, e: &Expr) -> bool {
+        if Self::path_of(e).is_none() {
+            return false;
+        }
+        match self.peek_tok(1) {
+            Tok::RBrace | Tok::DotDot => true,
+            Tok::Ident => matches!(self.peek_tok(2), Tok::Colon | Tok::Comma | Tok::RBrace | Tok::Semi),
+            Tok::Semi => {
+                // `Name {` followed by a newline: look at what follows.
+                let mut i = 1;
+                while matches!(self.peek_tok(i), Tok::Semi) {
+                    i += 1;
+                }
+                match self.peek_tok(i) {
+                    Tok::RBrace | Tok::DotDot => true,
+                    Tok::Ident => matches!(self.peek_tok(i + 1), Tok::Colon | Tok::Comma | Tok::RBrace | Tok::Semi),
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
+    fn struct_lit(&mut self, path_expr: Expr, lo: u32) -> PResult<Expr> {
+        let path = Self::path_of(&path_expr).unwrap();
+        self.expect(&Tok::LBrace, "`{`")?;
+        let saved = std::mem::replace(&mut self.no_struct, false);
+        let mut fields = Vec::new();
+        let mut base = None;
+        loop {
+            while self.eat(&Tok::Semi) || self.eat(&Tok::Comma) {}
+            if self.at(&Tok::RBrace) || self.at(&Tok::Eof) {
+                break;
+            }
+            if self.eat(&Tok::DotDot) {
+                base = Some(Box::new(self.expr()?));
+                while self.eat(&Tok::Semi) || self.eat(&Tok::Comma) {}
+                break;
+            }
+            let name = self.ident("field name")?;
+            let value = if self.eat(&Tok::Colon) { Some(self.expr()?) } else { None };
+            fields.push(FieldInit { name, value });
+            if !(self.at(&Tok::Comma) || self.at(&Tok::Semi) || self.at(&Tok::RBrace)) {
+                self.expected("`,` or `}`");
+                self.no_struct = saved;
+                return Err(());
+            }
+        }
+        self.no_struct = saved;
+        self.expect(&Tok::RBrace, "`}`")?;
+        Ok(self.mk(ExprKind::StructLit { path, fields, base }, self.span_from(lo)))
+    }
+
+    /// True if the tokens starting at the current `(` form a lambda parameter list.
+    fn paren_is_lambda(&self) -> bool {
+        let mut depth = 0usize;
+        let mut i = self.pos;
+        while i < self.toks.len() {
+            match self.toks[i].tok {
+                Tok::LParen | Tok::LBracket | Tok::LBrace => depth += 1,
+                Tok::RParen | Tok::RBracket | Tok::RBrace => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return matches!(self.toks.get(i + 1).map(|t| &t.tok), Some(Tok::FatArrow));
+                    }
+                }
+                Tok::Eof => return false,
+                _ => {}
+            }
+            i += 1;
+        }
+        false
+    }
+
+    fn lambda(&mut self, lo: u32) -> PResult<Expr> {
+        let mut params = Vec::new();
+        let parens = self.at(&Tok::LParen);
+        if parens {
+            self.bump();
+            while !self.at(&Tok::RParen) {
+                let name = if self.at(&Tok::Ident) {
+                    self.ident("parameter")?
+                } else {
+                    self.expected("parameter name");
+                    return Err(());
+                };
+                let ty = if self.eat(&Tok::Colon) { Some(self.ty()?) } else { None };
+                params.push(LambdaParam { name, ty });
+                if !self.eat(&Tok::Comma) {
+                    break;
+                }
+            }
+            self.expect(&Tok::RParen, "`)`")?;
+        } else {
+            let name = self.ident("parameter")?;
+            params.push(LambdaParam { name, ty: None });
+        }
+        self.expect(&Tok::FatArrow, "`=>`")?;
+        let saved = std::mem::replace(&mut self.no_struct, false);
+        let body = self.expr();
+        self.no_struct = saved;
+        let body = body?;
+        Ok(self.mk(ExprKind::Lambda { params, body: Box::new(body), parens }, self.span_from(lo)))
+    }
+
+    fn cond(&mut self) -> PResult<Cond> {
+        if self.eat(&Tok::Let) {
+            let p = self.pattern()?;
+            self.expect(&Tok::Eq, "`=`")?;
+            let e = self.expr_no_struct()?;
+            Ok(Cond::Let(Box::new(p), Box::new(e)))
+        } else {
+            Ok(Cond::Expr(Box::new(self.expr_no_struct()?)))
+        }
+    }
+
+    fn primary(&mut self) -> PResult<Expr> {
+        let lo = self.lo();
+        let t = self.tok().clone();
+        match t {
+            Tok::Int(v) => {
+                self.bump();
+                Ok(self.mk(ExprKind::Int(v), self.span_from(lo)))
+            }
+            Tok::IntOverflow(exact) => {
+                self.bump();
+                Ok(self.mk(ExprKind::IntOverflow(exact), self.span_from(lo)))
+            }
+            Tok::Float(v) => {
+                self.bump();
+                Ok(self.mk(ExprKind::Float(v), self.span_from(lo)))
+            }
+            Tok::Duration(v) => {
+                self.bump();
+                Ok(self.mk(ExprKind::Duration(v), self.span_from(lo)))
+            }
+            Tok::True | Tok::False => {
+                self.bump();
+                Ok(self.mk(ExprKind::Bool(t == Tok::True), self.span_from(lo)))
+            }
+            Tok::Str(parts) => {
+                self.bump();
+                let segs = self.string_segments(parts)?;
+                Ok(self.mk(ExprKind::Str(segs), self.span_from(lo)))
+            }
+            Tok::Bytes(b) => {
+                self.bump();
+                Ok(self.mk(ExprKind::Bytes(b), self.span_from(lo)))
+            }
+            Tok::Ident => {
+                if matches!(self.peek_tok(1), Tok::FatArrow) && !self.in_guard {
+                    return self.lambda(lo);
+                }
+                let id = self.ident("expression")?;
+                Ok(self.mk(ExprKind::Ident(id), self.span_from(lo)))
+            }
+            Tok::SelfLower => {
+                self.bump();
+                Ok(self.mk(ExprKind::SelfValue, self.span_from(lo)))
+            }
+            Tok::SelfUpper => {
+                self.bump();
+                Ok(self.mk(ExprKind::SelfType, self.span_from(lo)))
+            }
+            Tok::LParen => {
+                if !self.in_guard && self.paren_is_lambda() {
+                    return self.lambda(lo);
+                }
+                self.bump();
+                if self.eat(&Tok::RParen) {
+                    return Ok(self.mk(ExprKind::Unit, self.span_from(lo)));
+                }
+                let saved = std::mem::replace(&mut self.no_struct, false);
+                let first = self.expr();
+                let first = match first {
+                    Ok(f) => f,
+                    Err(()) => {
+                        self.no_struct = saved;
+                        return Err(());
+                    }
+                };
+                if self.eat(&Tok::RParen) {
+                    self.no_struct = saved;
+                    return Ok(self.mk(ExprKind::Paren(Box::new(first)), self.span_from(lo)));
+                }
+                let mut items = vec![first];
+                while self.eat(&Tok::Comma) {
+                    if self.at(&Tok::RParen) {
+                        break;
+                    }
+                    items.push(self.expr()?);
+                }
+                self.no_struct = saved;
+                self.expect(&Tok::RParen, "`)` or `,`")?;
+                if items.len() == 1 {
+                    let only = items.pop().unwrap();
+                    return Ok(self.mk(ExprKind::Paren(Box::new(only)), self.span_from(lo)));
+                }
+                Ok(self.mk(ExprKind::Tuple(items), self.span_from(lo)))
+            }
+            Tok::LBracket => self.bracket(lo),
+            Tok::LBrace => {
+                let b = self.block()?;
+                Ok(self.mk(ExprKind::Block(b), self.span_from(lo)))
+            }
+            Tok::If => self.if_expr(),
+            Tok::Match => {
+                self.bump();
+                let scrutinee = self.expr_no_struct()?;
+                self.expect(&Tok::LBrace, "`{`")?;
+                let saved = std::mem::replace(&mut self.no_struct, false);
+                let mut arms = Vec::new();
+                loop {
+                    while self.eat(&Tok::Semi) || self.eat(&Tok::Comma) {}
+                    if self.at(&Tok::RBrace) || self.at(&Tok::Eof) {
+                        break;
+                    }
+                    let alo = self.lo();
+                    let pattern = self.pattern()?;
+                    let guard = if self.eat(&Tok::If) {
+                        let saved = std::mem::replace(&mut self.in_guard, true);
+                        let g = self.expr();
+                        self.in_guard = saved;
+                        Some(g?)
+                    } else {
+                        None
+                    };
+                    self.expect(&Tok::FatArrow, "`=>`")?;
+                    let body = self.expr()?;
+                    arms.push(MatchArm { pattern, guard, body, span: self.span_from(alo) });
+                    if !(self.at(&Tok::Semi) || self.at(&Tok::Comma) || self.at(&Tok::RBrace)) {
+                        self.expected("`,`, newline or `}`");
+                        self.no_struct = saved;
+                        return Err(());
+                    }
+                }
+                self.no_struct = saved;
+                let close = self.lo();
+                self.expect(&Tok::RBrace, "`}`")?;
+                let inline = self.line_of(lo) == self.line_of(close);
+                Ok(self.mk(ExprKind::Match { scrutinee: Box::new(scrutinee), arms, inline }, self.span_from(lo)))
+            }
+            Tok::Loop => {
+                self.bump();
+                let b = self.block()?;
+                Ok(self.mk(ExprKind::Loop(b), self.span_from(lo)))
+            }
+            Tok::While => {
+                self.bump();
+                let cond = self.cond()?;
+                let body = self.block()?;
+                Ok(self.mk(ExprKind::While { cond, body }, self.span_from(lo)))
+            }
+            Tok::For => {
+                self.bump();
+                let pattern = self.pattern()?;
+                self.expect(&Tok::In, "`in`")?;
+                let iter = self.expr_no_struct()?;
+                let body = self.block()?;
+                Ok(self.mk(ExprKind::For { pattern, iter: Box::new(iter), body }, self.span_from(lo)))
+            }
+            Tok::Return => {
+                self.bump();
+                let v = if self.expr_follows() { Some(Box::new(self.expr()?)) } else { None };
+                Ok(self.mk(ExprKind::Return(v), self.span_from(lo)))
+            }
+            Tok::Break => {
+                self.bump();
+                let v = if self.expr_follows() { Some(Box::new(self.expr()?)) } else { None };
+                Ok(self.mk(ExprKind::Break(v), self.span_from(lo)))
+            }
+            Tok::Continue => {
+                self.bump();
+                Ok(self.mk(ExprKind::Continue, self.span_from(lo)))
+            }
+            Tok::Spawn | Tok::Not | Tok::Minus | Tok::Tilde | Tok::DotDot | Tok::DotDotEq => self.prefix(0),
+            _ => {
+                self.expected("expression");
+                Err(())
+            }
+        }
+    }
+
+    fn expr_follows(&self) -> bool {
+        !matches!(self.tok(), Tok::Semi | Tok::RBrace | Tok::RParen | Tok::RBracket | Tok::Comma | Tok::Eof | Tok::Else)
+    }
+
+    fn if_expr(&mut self) -> PResult<Expr> {
+        let lo = self.lo();
+        self.bump();
+        let cond = self.cond()?;
+        let then = self.block()?;
+        let else_ = if self.eat(&Tok::Else) {
+            if self.at(&Tok::If) {
+                self.enter()?;
+                let e = self.if_expr();
+                self.leave();
+                Some(Box::new(e?))
+            } else {
+                let blo = self.lo();
+                let b = self.block()?;
+                Some(Box::new(self.mk(ExprKind::Block(b), self.span_from(blo))))
+            }
+        } else {
+            None
+        };
+        Ok(self.mk(ExprKind::If { cond, then, else_ }, self.span_from(lo)))
+    }
+
+    fn comp_clauses(&mut self) -> PResult<Vec<CompClause>> {
+        let mut clauses = Vec::new();
+        loop {
+            if self.eat(&Tok::For) {
+                let p = self.pattern()?;
+                self.expect(&Tok::In, "`in`")?;
+                let e = self.expr()?;
+                clauses.push(CompClause::For(p, e));
+            } else if self.eat(&Tok::If) {
+                clauses.push(CompClause::If(self.expr()?));
+            } else {
+                break;
+            }
+        }
+        Ok(clauses)
+    }
+
+    fn bracket(&mut self, lo: u32) -> PResult<Expr> {
+        self.bump();
+        let saved = std::mem::replace(&mut self.no_struct, false);
+        let r = self.bracket_inner(lo);
+        self.no_struct = saved;
+        r
+    }
+
+    fn bracket_inner(&mut self, lo: u32) -> PResult<Expr> {
+        if self.eat(&Tok::RBracket) {
+            return Ok(self.mk(ExprKind::List(vec![]), self.span_from(lo)));
+        }
+        if self.at(&Tok::Colon) && matches!(self.peek_tok(1), Tok::RBracket) {
+            self.bump();
+            self.bump();
+            return Ok(self.mk(ExprKind::Map(vec![]), self.span_from(lo)));
+        }
+        let first = self.expr()?;
+        if self.eat(&Tok::Colon) {
+            let v = self.expr()?;
+            if self.at(&Tok::For) {
+                let clauses = self.comp_clauses()?;
+                self.expect(&Tok::RBracket, "`]`")?;
+                return Ok(self.mk(ExprKind::MapComp(Box::new(first), Box::new(v), clauses), self.span_from(lo)));
+            }
+            let mut pairs = vec![(first, v)];
+            while self.eat(&Tok::Comma) {
+                if self.at(&Tok::RBracket) {
+                    break;
+                }
+                let k = self.expr()?;
+                self.expect(&Tok::Colon, "`:`")?;
+                let v = self.expr()?;
+                pairs.push((k, v));
+            }
+            self.expect(&Tok::RBracket, "`]`")?;
+            return Ok(self.mk(ExprKind::Map(pairs), self.span_from(lo)));
+        }
+        if self.eat(&Tok::Semi) {
+            let n = self.expr()?;
+            self.expect(&Tok::RBracket, "`]`")?;
+            return Ok(self.mk(ExprKind::Repeat(Box::new(first), Box::new(n)), self.span_from(lo)));
+        }
+        if self.at(&Tok::For) {
+            let clauses = self.comp_clauses()?;
+            self.expect(&Tok::RBracket, "`]`")?;
+            return Ok(self.mk(ExprKind::ListComp(Box::new(first), clauses), self.span_from(lo)));
+        }
+        let mut items = vec![first];
+        while self.eat(&Tok::Comma) {
+            if self.at(&Tok::RBracket) {
+                break;
+            }
+            items.push(self.expr()?);
+        }
+        self.expect(&Tok::RBracket, "`]`")?;
+        Ok(self.mk(ExprKind::List(items), self.span_from(lo)))
+    }
+
+    fn string_segments(&mut self, parts: Vec<StrPart>) -> PResult<Vec<StrSeg>> {
+        let mut segs = Vec::new();
+        for part in parts {
+            match part {
+                StrPart::Text(t) => segs.push(StrSeg::Text(t)),
+                StrPart::Expr { lo, hi, spec } => {
+                    let span = Span::new(self.file, lo, hi);
+                    if self.src[lo as usize..hi as usize].trim().is_empty() {
+                        self.errors.push(Diag::error(span, "empty interpolation; write `\\{` for a literal brace"));
+                        return Err(());
+                    }
+                    let lexed = lex_range(self.src, self.file, lo as usize, hi as usize);
+                    let mut toks = lexed.tokens;
+                    toks.retain(|t| t.tok != Tok::Semi);
+                    let mut sub = Parser::new(self.src, self.file, toks, &[]);
+                    sub.errors = lexed.errors;
+                    sub.next_id = self.next_id;
+                    sub.depth = self.depth;
+                    let e = sub.expr();
+                    if e.is_ok() && !sub.at(&Tok::Eof) {
+                        sub.expected("end of interpolated expression");
+                    }
+                    self.next_id = sub.next_id;
+                    let failed = !sub.errors.is_empty();
+                    self.fatal |= sub.fatal;
+                    self.errors.append(&mut sub.errors);
+                    let e = match e {
+                        Ok(e) if !failed => e,
+                        _ => return Err(()),
+                    };
+                    let spec = spec.map(|(text, at)| FormatSpecAst { span: Span::new(self.file, at, at + text.len() as u32), text });
+                    segs.push(StrSeg::Expr(Box::new(e), spec));
+                }
+            }
+        }
+        Ok(segs)
+    }
+
+    // ------------------------------------------------------------------
+    // Patterns
+
+    fn pattern(&mut self) -> PResult<Pattern> {
+        self.enter()?;
+        let r = self.pattern_or();
+        self.leave();
+        r
+    }
+
+    fn pattern_or(&mut self) -> PResult<Pattern> {
+        let lo = self.lo();
+        let first = self.pattern_atom()?;
+        if !self.at(&Tok::Pipe) {
+            return Ok(first);
+        }
+        let mut alts = vec![first];
+        while self.eat(&Tok::Pipe) {
+            alts.push(self.pattern_atom()?);
+        }
+        Ok(Pattern { kind: PatternKind::Or(alts), span: self.span_from(lo) })
+    }
+
+    fn int_lit_pattern(&mut self) -> PResult<i64> {
+        let neg = self.eat(&Tok::Minus);
+        match self.tok().clone() {
+            Tok::Int(v) => {
+                self.bump();
+                Ok(if neg { -v } else { v })
+            }
+            Tok::IntOverflow(true) if neg => {
+                self.bump();
+                Ok(i64::MIN)
+            }
+            _ => {
+                self.expected("integer");
+                Err(())
+            }
+        }
+    }
+
+    fn pattern_atom(&mut self) -> PResult<Pattern> {
+        let lo = self.lo();
+        let kind = match self.tok().clone() {
+            Tok::Int(_) | Tok::Minus | Tok::IntOverflow(_) => {
+                let a = self.int_lit_pattern()?;
+                if self.eat(&Tok::DotDotEq) {
+                    let b = self.int_lit_pattern()?;
+                    PatternKind::Range(a, b)
+                } else if self.at(&Tok::DotDot) {
+                    self.error_here("exclusive range patterns are not supported; use `..=`");
+                    return Err(());
+                } else {
+                    PatternKind::Literal(PatLit::Int(a))
+                }
+            }
+            Tok::Str(parts) => {
+                self.bump();
+                match parts.as_slice() {
+                    [StrPart::Text(s)] => PatternKind::Literal(PatLit::Str(s.clone())),
+                    _ => {
+                        self.errors.push(Diag::error(self.span_from(lo), "string patterns cannot contain interpolation"));
+                        return Err(());
+                    }
+                }
+            }
+            Tok::True | Tok::False => {
+                let b = self.at(&Tok::True);
+                self.bump();
+                PatternKind::Literal(PatLit::Bool(b))
+            }
+            Tok::LParen => {
+                self.bump();
+                if self.eat(&Tok::RParen) {
+                    PatternKind::Literal(PatLit::Unit)
+                } else {
+                    let first = self.pattern()?;
+                    if self.eat(&Tok::RParen) {
+                        return Ok(first);
+                    }
+                    let mut items = vec![first];
+                    while self.eat(&Tok::Comma) {
+                        if self.at(&Tok::RParen) {
+                            break;
+                        }
+                        items.push(self.pattern()?);
+                    }
+                    self.expect(&Tok::RParen, "`)`")?;
+                    PatternKind::Tuple(items)
+                }
+            }
+            Tok::LBracket => {
+                self.bump();
+                let mut before = Vec::new();
+                let mut after = Vec::new();
+                let mut rest = None;
+                while !self.at(&Tok::RBracket) {
+                    if self.at(&Tok::DotDot) {
+                        if rest.is_some() {
+                            self.error_here("only one `..` is allowed in a list pattern");
+                            return Err(());
+                        }
+                        self.bump();
+                        let name = if self.at(&Tok::Ident) { Some(self.ident("name")?) } else { None };
+                        rest = Some(name);
+                    } else if rest.is_some() {
+                        after.push(self.pattern()?);
+                    } else {
+                        before.push(self.pattern()?);
+                    }
+                    if !self.eat(&Tok::Comma) {
+                        break;
+                    }
+                }
+                self.expect(&Tok::RBracket, "`]`")?;
+                PatternKind::List { before, rest, after }
+            }
+            Tok::Ident | Tok::SelfUpper => {
+                let mut path = Vec::new();
+                if self.at(&Tok::SelfUpper) {
+                    let t = self.bump();
+                    path.push(Ident { name: "Self".into(), span: Span::new(self.file, t.lo, t.hi) });
+                } else {
+                    path.push(self.ident("pattern")?);
+                }
+                while self.at(&Tok::Dot) && matches!(self.peek_tok(1), Tok::Ident) {
+                    self.bump();
+                    path.push(self.ident("name")?);
+                }
+                if self.at(&Tok::LParen) {
+                    self.bump();
+                    let mut args = Vec::new();
+                    while !self.at(&Tok::RParen) {
+                        args.push(self.pattern()?);
+                        if !self.eat(&Tok::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(&Tok::RParen, "`)`")?;
+                    PatternKind::Variant { path, args: Some(args) }
+                } else if self.at(&Tok::LBrace) {
+                    self.bump();
+                    let mut fields = Vec::new();
+                    let mut rest = false;
+                    loop {
+                        while self.eat(&Tok::Semi) || self.eat(&Tok::Comma) {}
+                        if self.at(&Tok::RBrace) {
+                            break;
+                        }
+                        if self.eat(&Tok::DotDot) {
+                            rest = true;
+                            while self.eat(&Tok::Semi) || self.eat(&Tok::Comma) {}
+                            break;
+                        }
+                        let name = self.ident("field name")?;
+                        let pattern = if self.eat(&Tok::Colon) { Some(self.pattern()?) } else { None };
+                        fields.push(FieldPat { name, pattern });
+                        if !(self.at(&Tok::Comma) || self.at(&Tok::Semi) || self.at(&Tok::RBrace)) {
+                            self.expected("`,` or `}`");
+                            return Err(());
+                        }
+                    }
+                    self.expect(&Tok::RBrace, "`}`")?;
+                    PatternKind::Struct { path, fields, rest }
+                } else if path.len() == 1 {
+                    if path[0].name == "_" { PatternKind::Wildcard } else { PatternKind::Binding(path.pop().unwrap()) }
+                } else {
+                    PatternKind::Variant { path, args: None }
+                }
+            }
+            _ => {
+                self.expected("pattern");
+                return Err(());
+            }
+        };
+        Ok(Pattern { kind, span: self.span_from(lo) })
+    }
+}

@@ -1,0 +1,42 @@
+=== doc of user function
+import help
+/// Doubles a number.
+/// Works for any int.
+fn double(x: int) -> int { x * 2 }
+fn undocumented() {}
+print(help.doc(double))
+print(help.doc(undocumented) == "")
+--- stdout
+Doubles a number.
+Works for any int.
+true
+
+=== signature of functions
+import help
+import json
+fn f(a: int, b: str = "x") -> [str] { [] }
+print(help.signature(f))
+print(help.signature(json.parse))
+print(help.signature((x: int) => x > 0))
+--- stdout
+fn f(a: int, b: str = ...) -> [str]
+fn parse(text: str) -> Result<Json, Error>
+fn(int) -> bool
+
+=== doc of stdlib function
+import help
+import base64
+print(help.doc(base64.encode).len() > 0)
+--- stdout
+true
+
+=== module summaries
+import help
+let s = help.module("base64").unwrap()
+print(s.contains("fn encode(data: bytes) -> str"))
+print(help.module("nope"))
+print(help.modules().contains("json"))
+--- stdout
+true
+None
+true

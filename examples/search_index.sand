@@ -1,0 +1,177 @@
+//! A persisted inverted index for full-text search.
+//!
+//! Usage:
+//!     sand run examples/search_index.sand -- index INDEX_FILE DIR
+//!     sand run examples/search_index.sand -- add INDEX_FILE FILE...
+//!     sand run examples/search_index.sand -- search INDEX_FILE QUERY...
+//!     sand run examples/search_index.sand -- stats INDEX_FILE
+//!
+//! Documents are ranked by TF-IDF. All query terms are OR-ed, so documents
+//! matching more (and rarer) terms rank higher.
+
+import env
+import fs
+import json
+import math
+
+struct Posting {
+    doc: int
+    /// Positions of the term within the document.
+    positions: [int]
+}
+
+struct Doc {
+    path: str
+    length: int
+}
+
+struct Index {
+    version: int = 1
+    docs: [Doc]
+    postings: [str: [Posting]]
+
+    fn empty() -> Index { Index { docs: [], postings: [:] } }
+
+    fn load(path: str) -> Result<Index> {
+        if not fs.exists(path)? {
+            return Ok(Index.empty())
+        }
+        json.decode(fs.read_text(path)?)
+    }
+
+    fn save(self, path: str) -> Result<()> {
+        // Write to a temporary file first so a crash never leaves a torn index.
+        let tmp = path + ".tmp"
+        fs.write_text(tmp, json.encode(self))?
+        fs.rename(tmp, path)
+    }
+
+    fn add(self, path: str, text: str) {
+        // Re-indexing a document replaces its old postings.
+        if let Some(old) = self.docs.find_index(d => d.path == path) {
+            self.remove_doc(old)
+        }
+        let id = self.docs.len()
+        let tokens = tokenize(text)
+        self.docs.push(Doc { path, length: tokens.len() })
+        let positions: [str: [int]] = [:]
+        for (i, t) in tokens.enumerate() {
+            positions.get_or_insert(t, []).push(i)
+        }
+        for (term, ps) in positions {
+            self.postings.get_or_insert(term, []).push(Posting { doc: id, positions: ps })
+        }
+    }
+
+    fn remove_doc(self, id: int) {
+        for (term, list) in self.postings.entries() {
+            let kept = list.filter(p => p.doc != id)
+            if kept.is_empty() {
+                self.postings.remove(term)
+            } else {
+                self.postings[term] = kept
+            }
+        }
+        // Keep ids stable by blanking the slot.
+        self.docs[id] = Doc { path: "", length: 0 }
+    }
+
+    fn live_docs(self) -> int { self.docs.count(d => d.path != "") }
+
+    fn search(self, query: str, limit: int = 10) -> [(str, float)] {
+        let n = self.live_docs().to_float()
+        let scores: [int: float] = [:]
+        for term in tokenize(query).unique() {
+            let Some(list) = self.postings.get(term) else { continue }
+            let idf = math.ln(1.0 + n / list.len().to_float())
+            for p in list {
+                let doc = self.docs[p.doc]
+                let tf = p.positions.len().to_float() / doc.length.max(1).to_float()
+                scores[p.doc] = scores.get_or(p.doc, 0.0) + tf * idf
+            }
+        }
+        scores.entries()
+            .sorted_by(e => (-e.1, self.docs[e.0].path))
+            .take(limit)
+            .map(e => (self.docs[e.0].path, e.1))
+    }
+}
+
+let STOP_WORDS = set(["a", "an", "and", "the", "of", "to", "in", "is", "it", "on", "for"])
+
+pub fn tokenize(text: str) -> [str] {
+    let words = []
+    var current = ""
+    for c in text.to_lower().chars() {
+        if c.is_alnum() {
+            current += c
+        } else if not current.is_empty() {
+            words.push(current)
+            current = ""
+        }
+    }
+    if not current.is_empty() {
+        words.push(current)
+    }
+    words.filter(w => not STOP_WORDS.contains(w))
+}
+
+fn index_dir(index: Index, dir: str) -> Result<int> {
+    var count = 0
+    for name in fs.list_dir(dir)? {
+        let path = fs.join([dir, name])
+        if fs.is_dir(path)? {
+            count += index_dir(index, path)?
+        } else if fs.extension(path) == Some("txt") or fs.extension(path) == Some("md") {
+            index.add(path, fs.read_text(path)?)
+            count += 1
+        }
+    }
+    Ok(count)
+}
+
+fn usage() -> never {
+    eprint("usage: search_index.sand (index INDEX DIR | add INDEX FILE... | search INDEX QUERY... | stats INDEX)")
+    exit(2)
+}
+
+let args = env.args()
+if args.len() < 2 { usage() }
+let index_path = args[1]
+let index = Index.load(index_path)?
+
+match args[0] {
+    "index" => {
+        if args.len() != 3 { usage() }
+        let n = index_dir(index, args[2])?
+        index.save(index_path)?
+        print("indexed {n} documents, {index.postings.len()} terms")
+    }
+    "add" => {
+        for path in args[2..] {
+            index.add(path, fs.read_text(path)?)
+        }
+        index.save(index_path)?
+        print("added {args.len() - 2} documents")
+    }
+    "search" => {
+        let query = " ".join(args[2..])
+        let results = index.search(query)
+        if results.is_empty() {
+            print("no results for \"{query}\"")
+        }
+        for (path, score) in results {
+            print("{score:.4}  {path}")
+        }
+    }
+    "stats" => {
+        print("documents: {index.live_docs()}")
+        print("terms: {index.postings.len()}")
+        let top = index.postings.entries()
+            .sorted_by(e => (-e.1.len(), e.0))
+            .take(5)
+            .map(e => "{e.0}({e.1.len()})")
+        print("most common: {", ".join(top)}")
+    }
+    _ => usage()
+}

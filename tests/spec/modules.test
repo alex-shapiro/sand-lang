@@ -1,0 +1,169 @@
+=== import a script module
+import "./geometry.sand"
+print(geometry.area(2.0, 3.0))
+print(geometry.UNIT)
+--- file geometry.sand
+pub fn area(w: float, h: float) -> float { w * h }
+pub let UNIT = "m2"
+--- stdout
+6.0
+m2
+
+=== import without extension and with alias
+import "lib/util" as u
+print(u.shout("hi"))
+--- file lib/util.sand
+pub fn shout(s: str) -> str { s.to_upper() + "!" }
+--- stdout
+HI!
+
+=== from import
+from "./shapes.sand" import Shape, area
+print(area(Shape.Square(3.0)))
+--- file shapes.sand
+pub enum Shape { Square(float), Circle(float) }
+pub fn area(s: Shape) -> float {
+    match s {
+        Square(x) => x * x
+        Circle(r) => 3.0 * r * r
+    }
+}
+--- stdout
+9.0
+
+=== qualified types from modules
+import "./model.sand"
+let u = model.User { name: "ann", age: 30 }
+print(u.greeting())
+fn older(u: model.User) -> model.User { model.User { age: u.age + 1, ..u } }
+print(older(u).age)
+--- file model.sand
+pub struct User {
+    name: str
+    age: int
+    fn greeting(self) -> str { "hello {self.name}" }
+}
+--- stdout
+hello ann
+31
+
+=== private items are not visible
+import "./m.sand"
+print(m.secret())
+--- file m.sand
+fn secret() -> int { 42 }
+pub fn open() -> int { secret() }
+--- error
+2: `secret` is private
+
+=== importing missing name
+from "./m.sand" import nothing
+--- file m.sand
+pub fn something() {}
+--- error
+1: module `m` has no public item `nothing`
+
+=== missing module file
+import "./missing.sand"
+--- error
+1: cannot load module
+
+=== module top level runs once in dependency order
+import "./a.sand"
+import "./b.sand"
+print("main")
+--- file a.sand
+import "./b.sand"
+print("a")
+pub let A = 1
+--- file b.sand
+print("b")
+pub let B = 2
+--- stdout
+b
+a
+main
+
+=== import cycles are rejected
+import "./x.sand"
+--- file x.sand
+import "./y.sand"
+pub let X = 1
+--- file y.sand
+import "./x.sand"
+pub let Y = 1
+--- error
+import cycle
+
+=== module paths cannot escape the module root
+import "../outside.sand"
+--- error
+1: outside the module root
+
+=== nested relative imports resolve from the importing file
+import "pkg/a.sand"
+print(a.value())
+--- file pkg/a.sand
+import "./b.sand"
+pub fn value() -> int { b.base() + 1 }
+--- file pkg/b.sand
+pub fn base() -> int { 41 }
+--- stdout
+42
+
+=== stdlib module import and alias
+import math as m
+from math import sqrt
+print(m.sqrt(9.0))
+print(sqrt(16.0))
+--- stdout
+3.0
+4.0
+
+=== unknown stdlib module
+import nosuchmodule
+--- error
+1: unknown module `nosuchmodule`
+
+=== module vars are read only to importers
+import "./state.sand"
+state.count = 5
+--- file state.sand
+pub var count = 0
+--- error
+2: cannot assign
+
+=== module functions can mutate their own vars
+import "./state.sand"
+state.bump()
+state.bump()
+print(state.count)
+--- file state.sand
+pub var count = 0
+pub fn bump() { count += 1 }
+--- stdout
+2
+
+=== type errors in imported modules are reported with file name
+import "./bad.sand"
+--- file bad.sand
+pub let X: int = "no"
+--- error
+1: type mismatch
+
+=== question mark at top level of imported module is an error
+import "./q.sand"
+--- file q.sand
+let v = Ok(1)?
+--- error
+1: `?`
+
+=== unused module name collision
+import "./dup.sand"
+import "./other/dup.sand"
+--- file dup.sand
+pub let A = 1
+--- file other/dup.sand
+pub let B = 1
+--- error
+2: `dup` is already defined

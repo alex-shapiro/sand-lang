@@ -1,0 +1,97 @@
+=== constants
+import math
+print(math.pi)
+print(math.e)
+print(math.tau)
+print(math.inf)
+print(math.nan.is_nan())
+--- stdout
+3.141592653589793
+2.718281828459045
+6.283185307179586
+inf
+true
+
+=== functions
+import math
+print(math.sqrt(2.0))
+print(math.cbrt(27.0))
+print(math.exp(0.0))
+print(math.ln(math.e))
+print(math.log2(8.0))
+print(math.log10(1000.0))
+print(math.log(81.0, 3.0))
+print(math.sin(0.0))
+print(math.cos(0.0))
+print(math.atan2(1.0, 1.0) * 4.0)
+print(math.hypot(3.0, 4.0))
+print(math.floor(-1.5))
+print(math.ceil(-1.5))
+print(math.round(2.5))
+print(math.trunc(-2.7))
+print(math.abs(-3.0))
+print(math.pow(2.0, 10.0))
+print(math.min(1.0, 2.0))
+print(math.max(1.0, 2.0))
+print(math.clamp(5.0, 0.0, 1.0))
+print(math.to_degrees(math.pi))
+print(math.to_radians(180.0))
+--- stdout
+1.4142135623730951
+3.0
+1.0
+1.0
+3.0
+3.0
+4.0
+0.0
+1.0
+3.141592653589793
+5.0
+-2.0
+-1.0
+3.0
+-2.0
+3.0
+1024.0
+1.0
+2.0
+1.0
+180.0
+3.141592653589793
+
+=== is_close
+import math
+print(math.is_close(0.1 + 0.2, 0.3))
+print(math.is_close(1.0, 1.1))
+print(math.is_close(1.0, 1.05, rel_tol: 0.1))
+print(math.is_close(0.0, 1e-12, abs_tol: 1e-9))
+--- stdout
+true
+false
+true
+true
+
+=== integer helpers
+import math
+print(math.gcd(12, 18))
+print(math.gcd(-4, 6))
+print(math.lcm(4, 6))
+print(math.isqrt(17))
+print(math.abs_int(-4))
+print(math.min_int(3, -3))
+print(math.max_int(3, -3))
+--- stdout
+6
+2
+12
+4
+4
+-3
+3
+
+=== isqrt of negative panics
+import math
+print(math.isqrt(-1))
+--- panic
+negative

@@ -1,0 +1,223 @@
+=== parse and navigate
+import json
+let doc = json.parse(r#"{"name": "sand", "tags": ["a", "b"], "n": 3, "pi": 3.5, "ok": true, "none": null}"#)?
+print(doc.get("name"))
+print(doc.get("name").unwrap().as_str())
+print(doc.get("tags").unwrap().at(1))
+print(doc.get("n").unwrap().as_int())
+print(doc.get("pi").unwrap().as_int())
+print(doc.get("pi").unwrap().as_float())
+print(doc.get("ok").unwrap().as_bool())
+print(doc.get("none").unwrap().is_null())
+print(doc.get("missing"))
+print(doc.path("tags.0"))
+print(doc.get("tags").unwrap().as_list().unwrap().len())
+print(doc.as_map().unwrap().keys())
+--- stdout
+Some(Str("sand"))
+Some("sand")
+Some(Str("b"))
+Some(3)
+None
+Some(3.5)
+Some(true)
+true
+None
+Some(Str("a"))
+2
+["name", "tags", "n", "pi", "ok", "none"]
+
+=== match on json values
+import json
+fn describe(j: json.Json) -> str {
+    match j {
+        Null => "null"
+        Bool(b) => "bool {b}"
+        Num(n) => "num {n}"
+        Str(s) => "str {s}"
+        Arr(items) => "arr of {items.len()}"
+        Obj(fields) => "obj with {fields.len()}"
+    }
+}
+for text in ["null", "true", "1.5", "\"x\"", "[1,2]", "\{\"a\":1\}"] {
+    print(describe(json.parse(text)?))
+}
+--- stdout
+null
+bool true
+num 1.5
+str x
+arr of 2
+obj with 1
+
+=== stringify compact and pretty
+import json
+let j = json.parse(r#"{"b": [1, 2.5, "x"], "a": {"c": null}}"#)?
+print(json.stringify(j))
+print(json.stringify(j, indent: 2))
+--- stdout
+{"b":[1,2.5,"x"],"a":{"c":null}}
+{
+  "b": [
+    1,
+    2.5,
+    "x"
+  ],
+  "a": {
+    "c": null
+  }
+}
+
+=== string escapes roundtrip
+import json
+let j = json.Json.Str("quote \" backslash \\ newline \n tab \t unicode é \u{1}")
+let text = json.stringify(j)
+print(text)
+print(json.parse(text)? == j)
+print(json.parse("\"\\u00e9\\ud83d\\ude00\"")?)
+--- stdout
+"quote \" backslash \\ newline \n tab \t unicode é \u0001"
+true
+Str("é😀")
+
+=== parse errors
+import json
+for bad in ["", "\{", "[1,]", "\{\"a\" 1\}", "tru", "\"unterminated", "1 2", "01", "\"\\x\""] {
+    let r = json.parse(bad)
+    print(r.is_err() and r.unwrap_err().kind == "parse")
+}
+--- stdout
+true
+true
+true
+true
+true
+true
+true
+true
+true
+
+=== parse error messages have positions
+import json
+print(json.parse("[1, 2,\n x]").unwrap_err().message)
+--- stdout
+unexpected character `x` at line 2, column 2
+
+=== deep nesting is rejected
+import json
+let deep = "[".repeat(1000) + "]".repeat(1000)
+print(json.parse(deep).unwrap_err().message)
+--- stdout
+nesting too deep at line 1, column 513
+
+=== numbers
+import json
+print(json.stringify(json.parse("[0, -1, 1e3, 1.5e-2, 123456789012]")?))
+print(json.stringify(json.Json.Num(0.0 / 0.0)))
+--- stdout
+[0,-1,1000,0.015,123456789012]
+null
+
+=== encode arbitrary values
+import json
+struct User { name: str, age: int, tags: [str], email: str? }
+enum Status { Active, Banned(reason: str), Pair(int, int) }
+let u = User { name: "ann", age: 30, tags: ["x"], email: None }
+print(json.encode(u))
+print(json.encode([Status.Active, Status.Banned("spam"), Status.Pair(1, 2)]))
+print(json.encode(["k": 1.5]))
+print(json.encode((1, "a", true, ())))
+print(json.encode(b"hi"))
+print(json.encode(set([1])))
+print(json.encode([1: "a"]))
+print(json.encode(Some(3)))
+print(json.encode(u, indent: 2))
+--- stdout
+{"name":"ann","age":30,"tags":["x"],"email":null}
+["Active",{"Banned":{"reason":"spam"}},{"Pair":[1,2]}]
+{"k":1.5}
+[1,"a",true,null]
+"aGk="
+[1]
+{"1":"a"}
+3
+{
+  "name": "ann",
+  "age": 30,
+  "tags": [
+    "x"
+  ],
+  "email": null
+}
+
+=== decode into typed values
+import json
+struct Item { name: str, price: float, qty: int = 1 }
+struct Order { id: int, items: [Item], note: str?, meta: [str: int] }
+let text = r#"{"id": 7, "items": [{"name": "pen", "price": 1.5}, {"name": "ink", "price": 4, "qty": 3}], "meta": {"a": 1}}"#
+let order: Order = json.decode(text)?
+print(order.id)
+print(order.items[1])
+print(order.items[0].qty)
+print(order.note)
+print(order.meta)
+let nums: [int] = json.decode("[1, 2, 3]")?
+print(nums.sum())
+--- stdout
+7
+Item { name: "ink", price: 4.0, qty: 3 }
+1
+None
+["a": 1]
+6
+
+=== decode errors name the path
+import json
+struct Item { name: str }
+struct Order { items: [Item] }
+let r: Result<Order> = json.decode(r#"{"items": [{"name": "a"}, {"name": 5}]}"#)
+print(r.unwrap_err().message)
+let r2: Result<[int]> = json.decode("[1, 2.5]")
+print(r2.unwrap_err().message)
+let r3: Result<Item> = json.decode("\{\}")
+print(r3.unwrap_err().message)
+--- stdout
+$.items[1].name: expected str
+$[1]: expected int
+$: missing field `name`
+
+=== decode enums
+import json
+enum Shape { Dot, Circle(radius: float), Line(int, int) }
+let shapes: [Shape] = json.decode(r#"["Dot", {"Circle": {"radius": 2}}, {"Line": [1, 2]}]"#)?
+print(shapes)
+--- stdout
+[Dot, Circle(2.0), Line(1, 2)]
+
+=== decode requires a known type
+import json
+let x = json.decode("1")
+--- error
+2: cannot infer type
+
+=== encode decode roundtrip
+import json
+struct P { x: int, y: [float], name: str, ok: bool }
+let p = P { x: -5, y: [1.5, 2.0], name: "q\"", ok: true }
+let back: P = json.decode(json.encode(p))?
+print(back == p)
+--- stdout
+true
+
+=== to_json
+import json
+let j = json.to_json(["a": [1, 2]])
+print(j.path("a.1"))
+--- stdout
+Some(Num(2.0))
+
+=== json values print readably
+import json
+print(json.parse("[1, \{\"a\": null\}]")?)
+--- stdout
+Arr([Num(1.0), Obj(["a": Null])])

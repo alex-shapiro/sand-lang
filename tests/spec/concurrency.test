@@ -1,0 +1,234 @@
+=== spawn and wait
+let t = spawn 1 + 2
+print(t.wait())
+--- stdout
+3
+
+=== spawned tasks run concurrently with sleeps
+fn worker(name: str, delay: duration) -> str {
+    task.sleep(delay)
+    print("done {name}")
+    name
+}
+let a = spawn worker("slow", 60ms)
+let b = spawn worker("fast", 10ms)
+print(a.wait() + b.wait())
+--- stdout
+done fast
+done slow
+slowfast
+
+=== spawn with block
+var shared = 0
+let t = spawn {
+    shared += 5
+    shared * 2
+}
+print(t.wait())
+print(shared)
+--- stdout
+10
+5
+
+=== tasks start at the next scheduling point
+let t = spawn print("in task")
+print("before wait")
+t.wait()
+--- stdout
+before wait
+in task
+
+=== waiting twice returns the same value
+let t = spawn [1, 2]
+print(t.wait())
+print(t.wait())
+print(t.is_done())
+--- stdout
+[1, 2]
+[1, 2]
+true
+
+=== task all
+let ts = [3, 1, 2].map(n => spawn {
+    task.sleep(n * 5ms)
+    n * 10
+})
+print(task.all(ts))
+--- stdout
+[30, 10, 20]
+
+=== task race returns first and cancels the rest
+var finished = []
+let a = spawn {
+    task.sleep(50ms)
+    finished.push("a")
+    "a"
+}
+let b = spawn {
+    task.sleep(5ms)
+    finished.push("b")
+    "b"
+}
+print(task.race([a, b]))
+task.sleep(80ms)
+print(finished)
+print(a.is_done())
+--- stdout
+b
+["b"]
+true
+
+=== task timeout
+let fast = task.timeout(100ms, () => "quick")
+let slow = task.timeout(10ms, () => {
+    task.sleep(1s)
+    "late"
+})
+print(fast)
+print(slow)
+--- stdout
+Some("quick")
+None
+
+=== waiting on cancelled task panics
+let t = spawn {
+    task.sleep(1s)
+    1
+}
+t.cancel()
+print(t.wait())
+--- panic
+task cancelled
+
+=== channels
+let ch = task.channel()
+let producer = spawn {
+    for i in 0..3 {
+        ch.send(i)
+    }
+    ch.close()
+}
+for v in ch {
+    print(v)
+}
+print(ch.recv())
+--- stdout
+0
+1
+2
+None
+
+=== bounded channel applies backpressure
+let ch = task.channel(capacity: 1)
+var log = []
+let p = spawn {
+    for i in 0..3 {
+        ch.send(i)
+        log.push("sent {i}")
+    }
+}
+task.sleep(10ms)
+log.push("recv {ch.recv().unwrap()}")
+task.sleep(10ms)
+log.push("recv {ch.recv().unwrap()}")
+log.push("recv {ch.recv().unwrap()}")
+p.wait()
+print(log)
+--- stdout
+["sent 0", "recv 0", "sent 1", "recv 1", "recv 2", "sent 2"]
+
+=== channel try_recv and len
+let ch: Channel<str> = task.channel()
+print(ch.try_recv())
+ch.send("a")
+ch.send("b")
+print(ch.len())
+print(ch.try_recv())
+ch.close()
+print(ch.is_closed())
+print(ch.send("c"))
+print(ch.recv())
+print(ch.recv())
+--- stdout
+None
+2
+Some("a")
+true
+false
+Some("b")
+None
+
+=== deadlock is detected
+let ch: Channel<int> = task.channel()
+print(ch.recv())
+--- panic
+deadlock
+
+=== busy tasks are preempted
+var stop = false
+let spinner = spawn {
+    var n = 0
+    while not stop { n += 1 }
+    n > 0
+}
+task.sleep(20ms)
+stop = true
+print(spinner.wait())
+--- stdout
+true
+
+=== panics in tasks abort the run
+let t = spawn panic("task failed")
+task.sleep(10ms)
+print("unreachable")
+--- panic
+task failed
+
+=== main finishing cancels other tasks
+let t = spawn {
+    task.sleep(10s)
+    print("never")
+}
+print("main done")
+--- stdout
+main done
+
+=== yield_now interleaves tasks
+var order = []
+let t = spawn {
+    for i in 0..3 {
+        order.push("t{i}")
+        task.yield_now()
+    }
+}
+for i in 0..3 {
+    order.push("m{i}")
+    task.yield_now()
+}
+t.wait()
+print(order)
+--- stdout
+["m0", "t0", "m1", "t1", "m2", "t2"]
+
+=== many tasks
+let ts = (0..1000).map(i => spawn i * 2)
+print(task.all(ts).sum())
+--- stdout
+999000
+
+=== io functions suspend inside higher order functions
+let results = [30ms, 10ms, 20ms].map(d => {
+    task.sleep(d)
+    d.millis()
+})
+print(results)
+--- stdout
+[30, 10, 20]
+
+=== sleep timing is honored
+import time
+let start = time.monotonic()
+task.sleep(30ms)
+print(start.elapsed() >= 30ms)
+--- stdout
+true

@@ -1,0 +1,47 @@
+//! TCP networking: listening sockets and connections.
+//!
+//! Connecting requires the `Net(host:port)` capability, listening the
+//! `NetListen(addr)` capability. Sockets count against the
+//! `max_open_resources` limit until they are closed (or collected).
+
+/// Starts listening for TCP connections on `addr` (`host:port`; port `0`
+/// picks a free port).
+pub native fn listen(addr: str) -> Result<Listener>
+
+/// Opens a TCP connection to `addr` (`host:port`), failing with kind
+/// `"timeout"` if it is not established within `timeout`.
+pub native fn connect(addr: str, timeout: duration = 30s) -> Result<Conn>
+
+/// Opens a TLS connection to `host:port`, verifying the server certificate
+/// against the bundled web PKI roots (requires the `tls` feature).
+pub native fn connect_tls(host: str, port: int) -> Result<Conn>
+
+/// A listening TCP socket.
+pub native type Listener
+
+extend Listener {
+    /// Waits for the next incoming connection.
+    pub native fn accept(self) -> Result<Conn>
+    /// The local address (`host:port`) the listener is bound to.
+    pub native fn addr(self) -> str
+    /// Stops listening. Pending and later `accept` calls fail with kind `"closed"`.
+    pub native fn close(self)
+}
+
+/// A TCP (or TLS) connection. One task may read while another writes.
+pub native type Conn
+
+extend Conn {
+    /// Reads up to `max` bytes as soon as some are available; empty at end of stream.
+    pub native fn read(self, max: int = 65536) -> Result<bytes>
+    /// Reads one line without its `\n` / `\r\n` terminator; `None` at end of stream.
+    pub native fn read_line(self) -> Result<str?>
+    /// Writes all of `data`.
+    pub native fn write(self, data: bytes) -> Result<()>
+    /// Writes all of `text` as UTF-8.
+    pub native fn write_str(self, text: str) -> Result<()>
+    /// The remote address (`host:port`).
+    pub native fn peer_addr(self) -> str
+    /// Closes the connection. Pending and later operations fail with kind `"closed"`.
+    pub native fn close(self)
+}

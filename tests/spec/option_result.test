@@ -1,0 +1,181 @@
+=== option methods
+let a = Some(5)
+let n: int? = None
+print(a.is_some())
+print(n.is_none())
+print(a.unwrap())
+print(n.unwrap_or(0))
+print(a.map(x => x * 2))
+print(n.map(x => x * 2))
+print(a.and_then(x => if x > 3 { Some(x) } else { None }))
+print(n.or_else(() => Some(9)))
+print(a.ok_or("missing"))
+print(n.ok_or("missing"))
+print(a.filter(x => x > 10))
+print(a.expect("needed"))
+--- stdout
+true
+true
+5
+0
+Some(10)
+None
+Some(5)
+Some(9)
+Ok(5)
+Err("missing")
+None
+5
+
+=== unwrap on none panics
+let n: int? = None
+print(n.unwrap())
+--- panic
+unwrap on None
+
+=== expect on none panics with message
+let n: str? = None
+print(n.expect("config value"))
+--- panic
+config value
+
+=== result methods
+let ok: Result<int, str> = Ok(2)
+let bad: Result<int, str> = Err("nope")
+print(ok.is_ok())
+print(bad.is_err())
+print(ok.unwrap())
+print(bad.unwrap_or(0))
+print(bad.unwrap_err())
+print(ok.map(x => x + 1))
+print(bad.map_err(e => e.len()))
+print(ok.and_then(x => if x > 1 { Ok(x * 10) } else { Err("small") }))
+print(ok.ok())
+print(bad.ok())
+print(bad.err())
+--- stdout
+true
+true
+2
+0
+nope
+Ok(3)
+Err(4)
+Ok(20)
+Some(2)
+None
+Some("nope")
+
+=== unwrap on err panics with error
+let r: Result<int> = Err(error("disk full"))
+print(r.unwrap())
+--- panic
+unwrap on Err: error: disk full
+
+=== question mark on option
+fn first_even(xs: [int]) -> int? {
+    let x = xs.find(x => x % 2 == 0)?
+    Some(x * 100)
+}
+print(first_even([1, 4]))
+print(first_even([1, 3]))
+--- stdout
+Some(400)
+None
+
+=== question mark on result
+fn parse(s: str) -> Result<int, str> {
+    match s.parse_int() {
+        Some(v) => Ok(v)
+        None => Err("not a number: {s}")
+    }
+}
+fn sum2(a: str, b: str) -> Result<int, str> {
+    let x = parse(a)?
+    let y = parse(b)?
+    Ok(x + y)
+}
+print(sum2("1", "2"))
+print(sum2("1", "x"))
+--- stdout
+Ok(3)
+Err("not a number: x")
+
+=== question mark error types must match
+fn a() -> Result<int, str> { Ok(1) }
+fn b() -> Result<int, int> {
+    let v = a()?
+    Ok(v)
+}
+--- error
+3: type mismatch
+
+=== question mark in function returning non option
+fn f() -> int {
+    let v = Some(1)?
+    v
+}
+--- error
+2: `?`
+
+=== question mark at top level aborts on err
+fn fails() -> Result<int> { Err(error("bad input", kind: "parse")) }
+print("start")
+let v = fails()?
+print("unreachable")
+--- stdout
+start
+--- exit 1
+
+=== top level question mark reports the error on stderr
+let v: int = Err(error("bad input", kind: "parse"))?
+--- stderr
+error: parse: bad input
+--- exit 1
+
+=== coalesce operator
+let n: int? = None
+print(n ?? 7)
+print(Some(1) ?? 7)
+let r: Result<str, str> = Err("e")
+print(r ?? "default")
+let chain: int? = None
+print(chain ?? n ?? 3)
+--- stdout
+7
+1
+default
+3
+
+=== coalesce is lazy
+fn boom() -> int { panic("evaluated") }
+print(Some(1) ?? boom())
+--- stdout
+1
+
+=== option shorthand type
+fn find(xs: [str], t: str) -> int? {
+    xs.index_of(t)
+}
+let r: int? = find(["a"], "a")
+print(r)
+--- stdout
+Some(0)
+
+=== nested options
+let x: int?? = Some(None)
+print(x)
+print(x.unwrap().is_none())
+--- stdout
+Some(None)
+true
+
+=== error construction and fields
+let e = error("missing file", kind: "not_found")
+print(e.kind)
+print(e.message)
+print(e)
+--- stdout
+not_found
+missing file
+not_found: missing file

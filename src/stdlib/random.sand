@@ -1,0 +1,58 @@
+//! Pseudo-random numbers (xoshiro256**). Not suitable for cryptography.
+//!
+//! The module-level functions use the engine's generator, which is seeded
+//! from host entropy unless the host (or `seed`) sets a seed. `rng(seed)`
+//! creates an independent generator with the same methods.
+
+/// Reseeds the engine's generator, making later results reproducible.
+pub native fn seed(s: int)
+
+/// A uniformly distributed integer in `lo..hi`; panics if the range is empty.
+pub native fn int(lo: int, hi: int) -> int
+
+/// A uniformly distributed float in `[0, 1)`.
+pub native fn float() -> float
+
+/// `true` or `false` with equal probability.
+pub native fn bool() -> bool
+
+/// A uniformly chosen element; `None` if `xs` is empty.
+pub native fn choice<T>(xs: [T]) -> T?
+
+/// Shuffles `xs` in place; every permutation is equally likely.
+pub native fn shuffle<T>(xs: [T])
+
+/// `k` distinct elements (by position) of `xs` in random order; all of them
+/// if `k` exceeds the length.
+pub native fn sample<T>(xs: [T], k: int) -> [T]
+
+/// `n` random bytes.
+pub native fn bytes(n: int) -> bytes
+
+/// A normally distributed float.
+pub native fn normal(mean: float = 0.0, stdev: float = 1.0) -> float
+
+/// A new generator seeded with `seed`, independent of the engine's.
+pub native fn rng(seed: int) -> Rng
+
+/// An independent pseudo-random generator, created with `random.rng(seed)`.
+pub native type Rng
+
+extend Rng {
+    /// A uniformly distributed integer in `lo..hi`; panics if the range is empty.
+    pub native fn int(self, lo: int, hi: int) -> int
+    /// A uniformly distributed float in `[0, 1)`.
+    pub native fn float(self) -> float
+    /// `true` or `false` with equal probability.
+    pub native fn bool(self) -> bool
+    /// A uniformly chosen element; `None` if `xs` is empty.
+    pub native fn choice<T>(self, xs: [T]) -> T?
+    /// Shuffles `xs` in place.
+    pub native fn shuffle<T>(self, xs: [T])
+    /// `k` distinct elements (by position) of `xs` in random order.
+    pub native fn sample<T>(self, xs: [T], k: int) -> [T]
+    /// `n` random bytes.
+    pub native fn bytes(self, n: int) -> bytes
+    /// A normally distributed float.
+    pub native fn normal(self, mean: float = 0.0, stdev: float = 1.0) -> float
+}

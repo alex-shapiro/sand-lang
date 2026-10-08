@@ -1,0 +1,143 @@
+=== enum definition and matching
+enum Shape {
+    Circle(radius: float)
+    Rect(w: float, h: float)
+    Empty
+}
+fn area(s: Shape) -> float {
+    match s {
+        Circle(r) => 3.0 * r * r
+        Rect(w, h) => w * h
+        Empty => 0.0
+    }
+}
+print(area(Shape.Circle(1.0)))
+print(area(Shape.Rect(2.0, 3.0)))
+print(area(Shape.Empty))
+print(Shape.Rect(w: 1.0, h: 2.0))
+--- stdout
+3.0
+6.0
+0.0
+Rect(1.0, 2.0)
+
+=== enum methods
+enum Dir {
+    North, East, South, West
+
+    fn turn_right(self) -> Dir {
+        match self {
+            North => Dir.East
+            East => Dir.South
+            South => Dir.West
+            West => Dir.North
+        }
+    }
+}
+print(Dir.North.turn_right().turn_right())
+--- stdout
+South
+
+=== qualified variant patterns
+enum T { A(int), B }
+let v = T.A(3)
+match v {
+    T.A(n) => print(n)
+    T.B => print("b")
+}
+--- stdout
+3
+
+=== enum equality and ordering
+enum Level { Low, Mid, High }
+print(Level.Low == Level.Low)
+print(Level.Low < Level.High)
+print([Level.High, Level.Low, Level.Mid].sorted())
+--- stdout
+true
+true
+[Low, Mid, High]
+
+=== enums as map keys
+enum Color { Red, Green }
+let m = [Color.Red: "r", Color.Green: "g"]
+print(m[Color.Green])
+--- stdout
+g
+
+=== generic recursive enums
+enum Tree<T> {
+    Leaf
+    Node(left: Tree<T>, value: T, right: Tree<T>)
+}
+fn insert(t: Tree<int>, v: int) -> Tree<int> {
+    match t {
+        Leaf => Tree.Node(Tree.Leaf, v, Tree.Leaf)
+        Node(l, x, r) => if v < x {
+            Tree.Node(insert(l, v), x, r)
+        } else {
+            Tree.Node(l, x, insert(r, v))
+        }
+    }
+}
+fn to_list(t: Tree<int>) -> [int] {
+    match t {
+        Leaf => []
+        Node(l, x, r) => to_list(l) + [x] + to_list(r)
+    }
+}
+var t = Tree.Leaf
+for v in [5, 2, 8, 1, 9, 3] {
+    t = insert(t, v)
+}
+print(to_list(t))
+--- stdout
+[1, 2, 3, 5, 8, 9]
+
+=== variant arity mismatch
+enum T { A(int, int) }
+let v = T.A(1)
+--- error
+2: expected 2 arguments
+
+=== unknown variant
+enum T { A }
+let v = T.B
+--- error
+2: no variant `B`
+
+=== payload-less variant called with arguments is an error
+enum T { A }
+let v = T.A(1)
+--- error
+2: not a function
+
+=== variant used as a function value
+enum W { Wrap(int) }
+print([1, 2].map(W.Wrap))
+print([1, 2].map(Some))
+--- stdout
+[Wrap(1), Wrap(2)]
+[Some(1), Some(2)]
+
+=== builtin enums option and result
+let a: int? = Some(1)
+let b: Option<int> = None
+let c: Result<int, str> = Ok(2)
+let d: Result<int> = Err(error("bad"))
+print(a)
+print(b)
+print(c)
+print(d)
+--- stdout
+Some(1)
+None
+Ok(2)
+Err(Error { kind: "error", message: "bad" })
+
+=== enum values are immutable
+enum E { A(int) }
+let e = E.A(1)
+match e { A(x) => { x = 2 } }
+--- error
+3: cannot assign

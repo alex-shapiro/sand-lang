@@ -1,0 +1,258 @@
+//! A tiny interpreter for a calculator language.
+//!
+//! Reads one statement per line from standard input:
+//!
+//!     let r = 2
+//!     pi * r ^ 2
+//!     max(1, sqrt(16)) + -3
+//!
+//! Supports + - * / % ^, parentheses, unary minus, variables and
+//! built-in functions.
+
+import io
+import math
+
+enum Token {
+    Num(float)
+    Ident(str)
+    Op(str)
+    LParen
+    RParen
+    Comma
+    Assign
+    Let
+}
+
+struct Lexer {
+    src: [str]
+    var pos: int = 0
+
+    fn tokens(self) -> Result<[Token], str> {
+        let out = []
+        while self.pos < self.src.len() {
+            let c = self.src[self.pos]
+            if c.is_space() {
+                self.pos += 1
+            } else if c.is_digit() or c == "." {
+                out.push(Token.Num(self.number()?))
+            } else if c.is_alpha() or c == "_" {
+                let word = self.word()
+                out.push(if word == "let" { Token.Let } else { Token.Ident(word) })
+            } else {
+                self.pos += 1
+                out.push(match c {
+                    "(" => Token.LParen
+                    ")" => Token.RParen
+                    "," => Token.Comma
+                    "=" => Token.Assign
+                    "+" | "-" | "*" | "/" | "%" | "^" => Token.Op(c)
+                    _ => return Err("unexpected character `{c}` at {self.pos}")
+                })
+            }
+        }
+        Ok(out)
+    }
+
+    fn number(self) -> Result<float, str> {
+        let start = self.pos
+        while self.pos < self.src.len() and (self.src[self.pos].is_digit() or self.src[self.pos] == ".") {
+            self.pos += 1
+        }
+        let text = self.src[start..self.pos].join()
+        text.parse_float().ok_or("bad number `{text}`")
+    }
+
+    fn word(self) -> str {
+        let start = self.pos
+        while self.pos < self.src.len() and (self.src[self.pos].is_alnum() or self.src[self.pos] == "_") {
+            self.pos += 1
+        }
+        self.src[start..self.pos].join()
+    }
+}
+
+enum Expr {
+    Num(float)
+    Var(str)
+    Neg(Expr)
+    Bin(op: str, left: Expr, right: Expr)
+    Call(name: str, args: [Expr])
+}
+
+enum Stmt {
+    Let(str, Expr)
+    Eval(Expr)
+}
+
+struct Parser {
+    tokens: [Token]
+    var pos: int = 0
+
+    fn peek(self) -> Token? { self.tokens.get(self.pos) }
+
+    fn advance(self) -> Token? {
+        let t = self.peek()
+        self.pos += 1
+        t
+    }
+
+    fn expect(self, want: Token, what: str) -> Result<(), str> {
+        match self.advance() {
+            Some(t) if t == want => Ok(())
+            Some(t) => Err("expected {what}, found {t}")
+            None => Err("expected {what}, found end of input")
+        }
+    }
+
+    fn statement(self) -> Result<Stmt, str> {
+        let stmt = match self.peek() {
+            Some(Let) => {
+                self.pos += 1
+                let Some(Ident(name)) = self.advance() else {
+                    return Err("expected a name after `let`")
+                }
+                self.expect(Token.Assign, "`=`")?
+                Stmt.Let(name, self.expr(0)?)
+            }
+            _ => Stmt.Eval(self.expr(0)?)
+        }
+        match self.peek() {
+            None => Ok(stmt)
+            Some(t) => Err("unexpected {t}")
+        }
+    }
+
+    /// Precedence climbing.
+    fn expr(self, min_prec: int) -> Result<Expr, str> {
+        var left = self.unary()?
+        loop {
+            let Some(Op(op)) = self.peek() else { break }
+            let prec = precedence(op)
+            if prec < min_prec { break }
+            self.pos += 1
+            // `^` is right associative, everything else left associative.
+            let next = if op == "^" { prec } else { prec + 1 }
+            let right = self.expr(next)?
+            left = Expr.Bin(op, left, right)
+        }
+        Ok(left)
+    }
+
+    fn unary(self) -> Result<Expr, str> {
+        match self.peek() {
+            Some(Op("-")) => {
+                self.pos += 1
+                Ok(Expr.Neg(self.unary()?))
+            }
+            _ => self.primary()
+        }
+    }
+
+    fn primary(self) -> Result<Expr, str> {
+        match self.advance() {
+            Some(Num(n)) => Ok(Expr.Num(n))
+            Some(Ident(name)) => {
+                if self.peek() != Some(Token.LParen) {
+                    return Ok(Expr.Var(name))
+                }
+                self.pos += 1
+                let args = []
+                if self.peek() != Some(Token.RParen) {
+                    loop {
+                        args.push(self.expr(0)?)
+                        if self.peek() == Some(Token.Comma) {
+                            self.pos += 1
+                        } else {
+                            break
+                        }
+                    }
+                }
+                self.expect(Token.RParen, "`)`")?
+                Ok(Expr.Call(name, args))
+            }
+            Some(LParen) => {
+                let e = self.expr(0)?
+                self.expect(Token.RParen, "`)`")?
+                Ok(e)
+            }
+            Some(t) => Err("unexpected {t}")
+            None => Err("unexpected end of input")
+        }
+    }
+}
+
+fn precedence(op: str) -> int {
+    match op {
+        "+" | "-" => 1
+        "*" | "/" | "%" => 2
+        _ => 3
+    }
+}
+
+struct Interpreter {
+    vars: [str: float] = ["pi": math.pi, "e": math.e]
+
+    fn eval(self, e: Expr) -> Result<float, str> {
+        match e {
+            Num(n) => Ok(n)
+            Var(name) => self.vars.get(name).ok_or("unknown variable `{name}`")
+            Neg(inner) => Ok(-self.eval(inner)?)
+            Bin(op, l, r) => {
+                let a = self.eval(l)?
+                let b = self.eval(r)?
+                match op {
+                    "+" => Ok(a + b)
+                    "-" => Ok(a - b)
+                    "*" => Ok(a * b)
+                    "/" => if b == 0.0 { Err("division by zero") } else { Ok(a / b) }
+                    "%" => Ok(a % b)
+                    _ => Ok(a ** b)
+                }
+            }
+            Call(name, args) => {
+                let vals = []
+                for a in args {
+                    vals.push(self.eval(a)?)
+                }
+                call(name, vals)
+            }
+        }
+    }
+
+    fn run(self, line: str) -> Result<str, str> {
+        let tokens = Lexer { src: line.chars() }.tokens()?
+        let parser = Parser { tokens }
+        match parser.statement()? {
+            Let(name, e) => {
+                let v = self.eval(e)?
+                self.vars[name] = v
+                Ok("{name} = {fmt_num(v)}")
+            }
+            Eval(e) => Ok(fmt_num(self.eval(e)?))
+        }
+    }
+}
+
+fn call(name: str, args: [float]) -> Result<float, str> {
+    match (name, args) {
+        ("sqrt", [x]) => Ok(math.sqrt(x))
+        ("abs", [x]) => Ok(x.abs())
+        ("max", [first, ..rest]) => Ok(rest.fold(first, (a, b) => a.max(b)))
+        ("min", [first, ..rest]) => Ok(rest.fold(first, (a, b) => a.min(b)))
+        ("sqrt", _) | ("abs", _) => Err("`{name}` takes 1 argument")
+        _ => Err("unknown function `{name}`")
+    }
+}
+
+fn fmt_num(v: float) -> str {
+    if v == v.round() and v.abs() < 1e15 { v.to_int().to_str() } else { v.to_str() }
+}
+
+let interp = Interpreter {}
+while let Some(line) = io.read_line()? {
+    if line.trim().is_empty() { continue }
+    match interp.run(line) {
+        Ok(out) => print(out)
+        Err(msg) => print("error: {msg}")
+    }
+}
