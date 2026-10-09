@@ -26,6 +26,30 @@
 //!   remembered: the minor collection scans just the stored indices and the
 //!   pushed tail (`DirtyList`) instead of the whole list. Any other mutation,
 //!   or too many scattered stores, makes the remembered entry a full one.
+//!
+//! Major collections of large heaps are **incremental**: instead of marking
+//! and sweeping the whole heap in one pause, a *cycle* does the work in
+//! steps paced by allocation, while minor collections go on as usual:
+//!
+//! * **Marking** uses separate mark bits (`cmarks`) and a gray worklist
+//!   (objects marked but not yet scanned; big lists, maps and sets are
+//!   scanned in chunks). The cycle starts by shading the roots; each step
+//!   scans a budget of values.
+//! * **Barrier** (incremental update, Dijkstra-style): while marking, the
+//!   accessors that know the value they store (`get_mut_storing`,
+//!   `list_mut_storing`, `list_push`) shade it; `get_mut`, whose stores are
+//!   unknown, puts a marked object back on the worklist (to be rescanned).
+//!   New objects are allocated unmarked, so minor collections can still free
+//!   young garbage (they drop freed objects from the worklist). Fiber stacks
+//!   and globals have no barrier: the final step rescans them.
+//! * **Final step**: shades the roots again and drains the worklist; the
+//!   marked objects are exactly the reachable ones. They all become old
+//!   (`marks` = `cmarks`), so the remembered set and the young list restart
+//!   empty.
+//! * **Sweeping** frees unmarked objects a budget of slots at a time.
+//!   Objects allocated meanwhile get a cycle mark so the sweep keeps them.
+//! * A forced collection (before a memory limit error) abandons the cycle
+//!   and collects everything at once, which is always safe.
 
 use super::iomem::IoMemory;
 use super::value::*;
@@ -46,6 +70,11 @@ pub struct GcStats {
     pub max_major_pause: Duration,
     /// Longest minor collection.
     pub max_minor_pause: Duration,
+    /// Steps of incremental major collections (each completed cycle also
+    /// counts as one collection and one major collection).
+    pub steps: u64,
+    /// Longest step of an incremental major collection.
+    pub max_step_pause: Duration,
 }
 
 impl GcStats {
@@ -60,6 +89,22 @@ impl GcStats {
             self.max_minor_pause = self.max_minor_pause.max(pause);
         }
     }
+
+    /// Records a step of an incremental major collection.
+    pub fn record_step(&mut self, pause: Duration) {
+        self.steps += 1;
+        self.total_pause += pause;
+        self.max_pause = self.max_pause.max(pause);
+        self.max_step_pause = self.max_step_pause.max(pause);
+    }
+}
+
+/// The state of the incremental major collection (see the module docs).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+    Idle,
+    Marking,
+    Sweeping,
 }
 use std::sync::Arc;
 
@@ -103,6 +148,27 @@ pub struct Heap {
     pub io_memory: Arc<IoMemory>,
     worklist: Vec<u32>,
     pub stats: GcStats,
+    phase: Phase,
+    /// Mark bits of the incremental cycle.
+    cmarks: Vec<u64>,
+    /// Set for objects with a pending full scan on `gray`.
+    gray_bits: Vec<u64>,
+    /// Objects to scan in the incremental marking, with the first child to
+    /// scan (chunks of big containers).
+    gray: Vec<(u32, u32)>,
+    /// The next slot to sweep.
+    sweep_at: usize,
+    /// `bytes` when the cycle's last step ran (steps are paced by allocation).
+    step_bytes: usize,
+    /// Live bytes when the cycle started.
+    cycle_live: usize,
+    /// Run the next minor collection when `bytes` exceeds this.
+    minor_at: usize,
+    /// Counts collections under stress testing, which interleaves minor
+    /// collections, incremental steps and full collections.
+    stress_tick: u64,
+    /// Major collections of large heaps are incremental (on by default).
+    pub incremental: bool,
 }
 
 /// The parts of an old list that may hold young values.
@@ -120,8 +186,22 @@ const MAX_DIRTY_INDICES: usize = 1024;
 
 const NONE: u32 = u32::MAX;
 const MIN_GC: usize = 4 << 20;
-/// Bytes allocated between minor collections.
+/// Bytes allocated between minor collections, at most (a quarter of the
+/// major collection threshold, at least `MIN_NURSERY`).
 const NURSERY: usize = 8 << 20;
+const MIN_NURSERY: usize = 1 << 20;
+/// Major collections are incremental from this heap size on.
+const INCREMENTAL_MIN: usize = 8 << 20;
+/// Bytes allocated between steps of an incremental collection.
+const STEP_BYTES: usize = 256 << 10;
+/// Marking does this many units of work (values scanned) per 16 bytes
+/// allocated, so a cycle marks the whole heap while allocating about a
+/// quarter of its live size.
+const MARK_PACE: usize = 4;
+const MIN_MARK_WORK: usize = 16 << 10;
+const MIN_SWEEP_SLOTS: usize = 32 << 10;
+/// Children of a container scanned per chunk.
+const SCAN_CHUNK: usize = 4096;
 
 impl Default for Heap {
     fn default() -> Self {
@@ -152,6 +232,16 @@ impl Heap {
             io_memory: IoMemory::new(limit),
             worklist: Vec::new(),
             stats: GcStats::default(),
+            phase: Phase::Idle,
+            cmarks: Vec::new(),
+            gray_bits: Vec::new(),
+            gray: Vec::new(),
+            sweep_at: 0,
+            step_bytes: 0,
+            cycle_live: 0,
+            minor_at: MIN_GC,
+            stress_tick: 0,
+            incremental: true,
         }
     }
 
@@ -180,9 +270,15 @@ impl Heap {
                 self.remembered_bits.push(0);
                 self.partial_bits.push(0);
                 self.tail_bits.push(0);
+                self.cmarks.push(0);
+                self.gray_bits.push(0);
             }
             (self.objs.len() - 1) as u32
         };
+        if self.phase == Phase::Sweeping {
+            // Keep it from the sweep.
+            set_bit(&mut self.cmarks, h);
+        }
         self.young.push(h);
         Value::Obj(h)
     }
@@ -195,7 +291,7 @@ impl Heap {
 
     /// Whether the next collection should be a major one.
     pub fn wants_major(&self) -> bool {
-        self.bytes > self.major_at
+        self.phase == Phase::Idle && self.bytes > self.major_at
     }
 
     /// The write barrier: remembers `h` (in full) if it is old.
@@ -307,6 +403,9 @@ impl Heap {
         match v {
             Value::Obj(h) => {
                 self.barrier(h);
+                if self.phase == Phase::Marking {
+                    self.regray(h);
+                }
                 &mut self.objs[h as usize]
             }
             _ => panic!("internal error: not an object"),
@@ -322,6 +421,9 @@ impl Heap {
             Value::Obj(h) => {
                 if stored.iter().any(|s| s.handle().is_some_and(|c| !self.is_marked(c))) {
                     self.barrier(h);
+                }
+                if self.phase == Phase::Marking {
+                    stored.iter().for_each(|&s| self.shade(s));
                 }
                 &mut self.objs[h as usize]
             }
@@ -403,6 +505,9 @@ impl Heap {
         if stored.handle().is_some_and(|c| !self.is_marked(c)) {
             self.list_barrier(h, index, false);
         }
+        if self.phase == Phase::Marking {
+            self.shade(stored);
+        }
         match &mut self.objs[h as usize] {
             Obj::List(l) => Some(l),
             _ => None,
@@ -414,6 +519,9 @@ impl Heap {
         if v.handle().is_some_and(|c| !self.is_marked(c)) {
             let len = self.list(list).len();
             self.list_barrier(h, len, true);
+        }
+        if self.phase == Phase::Marking {
+            self.shade(v);
         }
         let Obj::List(l) = &mut self.objs[h as usize] else { return };
         let before = l.capacity();
@@ -551,6 +659,9 @@ impl Heap {
         self.objs[i] = Obj::Free(self.free_head);
         self.free_head = h;
         self.live_objects -= 1;
+        // Free slots have clear mark bits (of both kinds).
+        clear_bit(&mut self.cmarks, h);
+        clear_bit(&mut self.gray_bits, h);
         size
     }
 
@@ -559,6 +670,7 @@ impl Heap {
     /// are dropped, which closes them.
     pub fn collect(&mut self, roots: impl IntoIterator<Item = Value>, major: bool) {
         if major {
+            self.abandon_cycle();
             self.marks.iter_mut().for_each(|m| *m = 0);
         }
         for r in roots {
@@ -605,6 +717,11 @@ impl Heap {
             }
             self.young = young;
             self.bytes = self.bytes.saturating_sub(freed);
+            if self.phase == Phase::Marking {
+                // Freed objects leave the worklist (their slots may be reused).
+                let objs = &self.objs;
+                self.gray.retain(|&(h, _)| !matches!(objs[h as usize], Obj::Free(_)));
+            }
         }
         self.young.clear();
         self.set_thresholds(major);
@@ -648,6 +765,230 @@ impl Heap {
                 }
             }
         }
-        self.next_gc = if self.stress { 0 } else { self.bytes.saturating_add(NURSERY).min(self.major_at) };
+        // Small heaps get a small nursery, so that they see minor
+        // collections between major ones.
+        let nursery = (self.major_at / 4).clamp(MIN_NURSERY, NURSERY);
+        self.minor_at = self.bytes.saturating_add(nursery);
+        self.update_next_gc();
+    }
+
+    fn update_next_gc(&mut self) {
+        self.next_gc = if self.stress {
+            0
+        } else if self.phase == Phase::Idle {
+            self.minor_at.min(self.major_at)
+        } else {
+            self.minor_at.min(self.bytes.saturating_add(STEP_BYTES))
+        };
+    }
+
+    // ------------------------------------------------------------------
+    // Incremental major collection
+
+    /// Whether an incremental major collection is under way.
+    pub fn cycle_active(&self) -> bool {
+        self.phase != Phase::Idle
+    }
+
+    /// Whether a minor collection is due (during an incremental cycle).
+    pub fn minor_due(&mut self) -> bool {
+        if self.stress {
+            self.stress_tick += 1;
+            return self.stress_tick.is_multiple_of(3);
+        }
+        self.bytes > self.minor_at
+    }
+
+    /// Whether the major collection due should be incremental. Under stress
+    /// testing, every other one is.
+    pub fn major_is_incremental(&self) -> bool {
+        self.incremental && if self.stress { self.stats.collections.is_multiple_of(16) } else { self.bytes >= INCREMENTAL_MIN }
+    }
+
+    /// Starts an incremental major collection: shades the roots.
+    pub fn start_cycle(&mut self, roots: impl IntoIterator<Item = Value>) {
+        self.cmarks.iter_mut().for_each(|m| *m = 0);
+        self.gray_bits.iter_mut().for_each(|m| *m = 0);
+        self.gray.clear();
+        self.phase = Phase::Marking;
+        for r in roots {
+            self.shade(r);
+        }
+        self.cycle_live = self.bytes;
+        self.step_bytes = self.bytes;
+        self.update_next_gc();
+    }
+
+    /// Runs one step of the incremental collection. Returns true if marking
+    /// is complete and `finish_marking` must run (it needs the roots).
+    pub fn cycle_step(&mut self) -> bool {
+        let allocated = self.bytes.saturating_sub(self.step_bytes).max(STEP_BYTES);
+        self.step_bytes = self.bytes;
+        match self.phase {
+            Phase::Marking => {
+                // (Under stress testing, cycles take a few steps, so that
+                // they interleave with mutation but leave most safe points
+                // to minor and full collections.)
+                let budget = if self.stress { (self.live_objects / 8).max(64) } else { (allocated / 16 * MARK_PACE).max(MIN_MARK_WORK) };
+                self.mark_some(budget);
+                self.gray.is_empty()
+            }
+            Phase::Sweeping => {
+                // Sweep the arena while allocating a quarter of the live size.
+                let slots = self.objs.len();
+                let budget = if self.stress {
+                    (slots / 8).max(64)
+                } else {
+                    let share = (allocated as u128 * MARK_PACE as u128 * slots as u128 / self.cycle_live.max(1) as u128) as usize;
+                    share.max(MIN_SWEEP_SLOTS)
+                };
+                self.sweep_some(budget);
+                false
+            }
+            Phase::Idle => false,
+        }
+    }
+
+    /// Completes the marking: shades the roots again (fiber stacks and
+    /// globals have no write barrier) and drains the worklist. Everything
+    /// marked is reachable and becomes old; sweeping starts.
+    pub fn finish_marking(&mut self, roots: impl IntoIterator<Item = Value>) {
+        for r in roots {
+            self.shade(r);
+        }
+        self.mark_some(usize::MAX);
+        // Survivors are old; with no young objects left, nothing old points
+        // to a young object, so the remembered set restarts empty.
+        self.marks.copy_from_slice(&self.cmarks);
+        for &h in &self.remembered {
+            let (w, b) = ((h / 64) as usize, 1u64 << (h % 64));
+            self.remembered_bits[w] &= !b;
+            self.partial_bits[w] &= !b;
+            self.tail_bits[w] &= !b;
+        }
+        self.remembered.clear();
+        self.dirty.clear();
+        self.young.clear();
+        self.phase = Phase::Sweeping;
+        self.sweep_at = 0;
+        self.update_next_gc();
+    }
+
+    /// Abandons the incremental collection (a full collection follows).
+    fn abandon_cycle(&mut self) {
+        self.phase = Phase::Idle;
+        self.gray.clear();
+    }
+
+    /// Shades `v`: marks it and queues it for scanning, if not yet marked.
+    #[inline]
+    fn shade(&mut self, v: Value) {
+        if let Some(h) = v.handle()
+            && !test_bit(&self.cmarks, h)
+        {
+            set_bit(&mut self.cmarks, h);
+            set_bit(&mut self.gray_bits, h);
+            self.gray.push((h, 0));
+        }
+    }
+
+    /// The barrier of `get_mut` while marking: an object that was marked
+    /// (and maybe scanned) is scanned again, as its new contents are unknown.
+    #[cold]
+    #[inline(never)]
+    fn regray(&mut self, h: u32) {
+        if test_bit(&self.cmarks, h) && !test_bit(&self.gray_bits, h) {
+            set_bit(&mut self.gray_bits, h);
+            self.gray.push((h, 0));
+        }
+    }
+
+    /// Scans gray objects for about `budget` units of work (values).
+    fn mark_some(&mut self, mut budget: usize) {
+        let mut children = Vec::new();
+        while budget > 0 {
+            let Some((h, start)) = self.gray.pop() else { break };
+            if start == 0 {
+                clear_bit(&mut self.gray_bits, h);
+            }
+            children.clear();
+            let next = chunk_children(&self.objs[h as usize], start as usize, &mut children);
+            budget = budget.saturating_sub(children.len() + 1);
+            if let Some(k) = next {
+                self.gray.push((h, k as u32));
+            }
+            for &c in &children {
+                self.shade(c);
+            }
+        }
+    }
+
+    /// Sweeps `budget` slots; finishes the cycle at the end of the arena.
+    fn sweep_some(&mut self, budget: usize) {
+        let end = self.sweep_at.saturating_add(budget).min(self.objs.len());
+        let mut freed = 0;
+        for i in self.sweep_at..end {
+            if !matches!(self.objs[i], Obj::Free(_)) && !test_bit(&self.cmarks, i as u32) {
+                freed += self.free(i as u32);
+            }
+        }
+        self.bytes = self.bytes.saturating_sub(freed);
+        self.sweep_at = end;
+        if end == self.objs.len() {
+            self.phase = Phase::Idle;
+            self.stats.collections += 1;
+            self.stats.majors += 1;
+            self.set_thresholds(true);
+        }
+    }
+}
+
+#[inline]
+fn test_bit(bits: &[u64], h: u32) -> bool {
+    bits[(h / 64) as usize] & (1 << (h % 64)) != 0
+}
+
+#[inline]
+fn set_bit(bits: &mut [u64], h: u32) {
+    bits[(h / 64) as usize] |= 1 << (h % 64);
+}
+
+#[inline]
+fn clear_bit(bits: &mut [u64], h: u32) {
+    bits[(h / 64) as usize] &= !(1 << (h % 64));
+}
+
+/// Appends the children of `obj` from child `start` on to `out`, at most
+/// `SCAN_CHUNK` of them for big containers; returns where to continue.
+fn chunk_children(obj: &Obj, start: usize, out: &mut Vec<Value>) -> Option<usize> {
+    let chunk = |len: usize| {
+        let end = start.saturating_add(SCAN_CHUNK).min(len);
+        (start.min(end)..end, (end < len).then_some(end))
+    };
+    match obj {
+        Obj::List(l) => {
+            let (r, next) = chunk(l.len());
+            out.extend_from_slice(&l[r]);
+            next
+        }
+        Obj::Map(m) => {
+            let (r, next) = chunk(m.entries.len());
+            for (k, v) in m.entries[r].iter().flatten() {
+                out.push(*k);
+                out.push(*v);
+            }
+            next
+        }
+        Obj::Set(s) => {
+            let (r, next) = chunk(s.entries.len());
+            out.extend(s.entries[r].iter().flatten());
+            next
+        }
+        _ => {
+            if start == 0 {
+                obj.children(|v| out.push(v));
+            }
+            None
+        }
     }
 }

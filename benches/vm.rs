@@ -139,6 +139,12 @@ const BENCHES: &[Bench] = &[
         ops: 10_000_000,
     },
     Bench {
+        name: "gc: 4M live (200MB), mutated + 10M churn",
+        source: "struct P {\n    x: int\n    y: int\n}\nlet live = [P { x: i, y: i } for i in 0..3000000]\nlet m: [int: str] = [:]\nfor i in 0..1000000 { m[i] = \"v{i}\" }\nvar t = 0\nfor i in 0..10000000 {\n    let p = P { x: i, y: 1 }\n    if i % 100 == 0 { live[i % 3000000] = p }\n    if i % 1000 == 0 { m[i % 1000000] = \"w{i}\" }\n    t += p.y\n}\nprint(t + live.len() + m.len())",
+        expected: "14000000\n",
+        ops: 10_000_000,
+    },
+    Bench {
         name: "gc: 1M live, mutated + 5M churn",
         source: "struct P {\n    x: int\n    y: int\n}\nlet live = [P { x: i, y: i } for i in 0..1000000]\nvar t = 0\nfor i in 0..5000000 {\n    let p = P { x: i, y: 1 }\n    if i % 100 == 0 { live[i % 1000000] = p }\n    t += p.y\n}\nprint(t + live.len())",
         expected: "6000000\n",

@@ -889,8 +889,12 @@ impl Vm {
         self.collect_garbage_with(current, true);
     }
 
-    fn collect_garbage_with(&mut self, current: Option<&mut Fiber>, force_major: bool) {
-        let start = std::time::Instant::now();
+    /// The GC roots: globals, constants, pinned values and the fibers' live
+    /// stack windows, closures, tasks and race lists. Also clears the dead
+    /// slots of the stacks (so that they never hold handles to objects freed
+    /// later), shrinks stacks left large by deep recursion and recounts
+    /// `heap.fiber_bytes`.
+    fn gc_roots(&mut self, current: Option<&mut Fiber>) -> Vec<Value> {
         let mut roots: Vec<Value> = Vec::with_capacity(1024);
         roots.extend(self.globals.iter().copied());
         roots.extend(self.consts.iter().copied());
@@ -898,9 +902,6 @@ impl Vm {
         let prog = &self.prog;
         let mut fiber_bytes = 0;
         let mut add_fiber = |f: &mut Fiber, roots: &mut Vec<Value>| {
-            // Only the live part of the stack is scanned. Dead slots are
-            // cleared so that they never hold handles to freed objects, and
-            // a stack left large by deep recursion is shrunk.
             let top = f.live_top(prog);
             roots.extend(f.stack[..top].iter().copied());
             if f.stack.len() > 2 * top + 4096 {
@@ -921,27 +922,58 @@ impl Vm {
         }
         fiber_bytes += self.spare_fibers.iter().map(|f| f.footprint()).sum::<usize>();
         self.heap.fiber_bytes = fiber_bytes;
-        // Major collections when the old generation has grown enough (and
-        // regularly under stress testing); minor ones otherwise.
-        let mut major = force_major || self.heap.wants_major() || (self.heap.stress && self.heap.stats.collections.is_multiple_of(8));
+        roots
+    }
+
+    fn collect_garbage_with(&mut self, mut current: Option<&mut Fiber>, force_major: bool) {
+        let start = std::time::Instant::now();
+        let mut full = force_major;
         if force_major {
             self.free_spare_fibers();
-        }
-        if !major {
-            self.heap.collect(roots.iter().copied(), false);
-            // Unreachable old objects may be what keeps us over the limit.
-            if self.heap.over_limit() {
-                self.free_spare_fibers();
-                major = self.heap.over_limit();
+        } else if self.heap.cycle_active() {
+            // A step of an incremental major collection, after a minor
+            // collection if one is due.
+            if self.heap.minor_due() {
+                let roots = self.gc_roots(current.as_deref_mut());
+                self.heap.collect(roots, false);
+                self.heap.stats.record(start.elapsed(), false);
+            }
+            let step = std::time::Instant::now();
+            if self.heap.cycle_step() {
+                let roots = self.gc_roots(current.as_deref_mut());
+                self.heap.finish_marking(roots);
+            }
+            self.heap.stats.record_step(step.elapsed());
+        } else {
+            let roots = self.gc_roots(current.as_deref_mut());
+            // Major collections when the old generation has grown enough
+            // (and regularly under stress testing); minor ones otherwise.
+            let major = self.heap.wants_major() || (self.heap.stress && self.heap.stats.collections.is_multiple_of(8));
+            if !major {
+                self.heap.collect(roots, false);
+                self.heap.stats.record(start.elapsed(), false);
+            } else if self.heap.major_is_incremental() {
+                self.heap.start_cycle(roots);
+                self.heap.stats.record_step(start.elapsed());
+            } else {
+                full = true;
             }
         }
-        if major {
-            self.heap.collect(roots, true);
-        }
-        if self.heap.over_limit() {
+        // Unreachable old objects may be what keeps us over the limit: only
+        // a full collection decides.
+        if !full && self.heap.over_limit() {
             self.free_spare_fibers();
+            full = self.heap.over_limit();
         }
-        self.heap.stats.record(start.elapsed(), major);
+        if full {
+            let start = std::time::Instant::now();
+            let roots = self.gc_roots(current);
+            self.heap.collect(roots, true);
+            if self.heap.over_limit() {
+                self.free_spare_fibers();
+            }
+            self.heap.stats.record(start.elapsed(), true);
+        }
     }
 
     pub fn trace_of(&self, fiber: &Fiber, ip: Option<u32>) -> Vec<TraceEntry> {
