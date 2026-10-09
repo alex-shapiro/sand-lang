@@ -2,6 +2,7 @@
 
 mod reflect;
 
+use crate::check::budget::CompileBudget;
 use crate::check::{CheckedProgram, FnKind};
 use crate::diag::{Diag, SourceMap, Span};
 use crate::hir::*;
@@ -15,10 +16,16 @@ pub struct CompileInput<'a> {
     pub native_lookup: &'a dyn Fn(&str) -> Option<u32>,
     pub native_help: Vec<HelpEntry>,
     pub native_argc: Vec<u16>,
+    /// Charged one unit per expression compiled, instruction emitted and
+    /// node visited by an analysis. Once it is exhausted the compiler skips
+    /// the rest of the code (callers check `budget.stopped()` and discard
+    /// the result).
+    pub budget: &'a CompileBudget,
 }
 
 struct Compiler<'a> {
     cp: &'a CheckedProgram,
+    budget: &'a CompileBudget,
     sm: &'a SourceMap,
     prog: &'a mut Program,
     fn_protos: Vec<Option<u32>>,
@@ -179,6 +186,7 @@ pub(crate) fn compile_more(input: CompileInput, prog: &mut Program, inc: &mut In
     let cp = input.checked;
     let mut c = Compiler {
         cp,
+        budget: input.budget,
         sm: input.sm,
         prog,
         fn_protos: std::mem::take(&mut inc.fn_protos),
@@ -453,6 +461,7 @@ impl<'a> Compiler<'a> {
     // Emission helpers
 
     fn emit(&mut self, f: &mut FnState, op: Op) -> usize {
+        self.budget.charge(1);
         f.code.push(op);
         f.lines.push(f.line);
         f.code.len() - 1
@@ -903,6 +912,9 @@ impl<'a> Compiler<'a> {
     }
 
     fn expr_to(&mut self, f: &mut FnState, e: &HExpr, dst: Reg) {
+        if !self.budget.charge(1) {
+            return;
+        }
         self.set_line(f, e.span);
         if !f.hoisting
             && matches!(e.kind, HKind::Loop(_) | HKind::While { .. } | HKind::WhileLet { .. } | HKind::ForRange { .. } | HKind::For { .. })
@@ -1997,6 +2009,10 @@ impl<'a> Compiler<'a> {
         let mark = f.next_reg;
         f.hoisting = true;
         let (cands, has_lambda, nodes) = self.hoist_candidates(e);
+        if !self.budget.charge(nodes as u64) {
+            f.hoisting = false;
+            return;
+        }
         let cands: Vec<HoistKey> = cands.into_iter().take(MAX_HOISTED).collect();
         if cands.is_empty() || f.next_reg + cands.len() as u32 > HOIST_REG_BUDGET {
             self.expr_to(f, e, dst);
@@ -2353,13 +2369,22 @@ impl<'a> Compiler<'a> {
         // Free locals: referenced inside but declared outside the lambda.
         let mut inner_lambdas = HashSet::new();
         inner_lambdas.insert(lam.id);
-        collect_lambda_ids(&lam.body, &mut inner_lambdas);
         let mut refs = Vec::new();
-        collect_local_refs(&lam.body, &mut refs);
+        let mut nodes = 0;
+        walk(&lam.body, &mut |x| {
+            nodes += 1;
+            if let HKind::Lambda(l) = &x.kind {
+                inner_lambdas.insert(l.id);
+            }
+            local_refs(x, &mut refs);
+        });
+        // (Nested lambdas are walked again for each enclosing one.)
+        self.budget.charge(nodes);
         let mut free: Vec<LocalId> = Vec::new();
+        let mut seen = HashSet::new();
         for l in refs {
             let owner = f.locals[l as usize].owner;
-            if !inner_lambdas.contains(&owner) && !free.contains(&l) {
+            if !inner_lambdas.contains(&owner) && seen.insert(l) {
                 free.push(l);
             }
         }
@@ -2492,23 +2517,16 @@ fn cmp_op(op: CmpOp, ty: &Type, dst: Reg, a: Reg, b: Reg) -> Op {
     }
 }
 
-fn collect_lambda_ids(e: &HExpr, out: &mut HashSet<u32>) {
-    walk(e, &mut |x| {
-        if let HKind::Lambda(l) = &x.kind {
-            out.insert(l.id);
-        }
-    });
-}
-
-fn collect_local_refs(e: &HExpr, out: &mut Vec<LocalId>) {
-    walk(e, &mut |x| match &x.kind {
+/// Appends the locals `x` itself refers to (not its sub-expressions).
+fn local_refs(x: &HExpr, out: &mut Vec<LocalId>) {
+    match &x.kind {
         HKind::Local(l) => out.push(*l),
         HKind::Assign { place: Place::Local(l), .. } => out.push(*l),
         HKind::PushLocal { list, .. } => out.push(*list),
         HKind::InsertLocal { map, .. } => out.push(*map),
         HKind::LocalFns { locals, .. } => out.extend(locals.iter().copied()),
         _ => {}
-    });
+    }
 }
 
 /// Pre-order traversal of every expression (including inside lambdas, places and args).

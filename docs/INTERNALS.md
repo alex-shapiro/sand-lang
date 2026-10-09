@@ -136,6 +136,18 @@ vm.charge_slow_bytes(data.len())?; // 1 unit per 8 bytes of byte-at-a-time work
   budget and the CPU/wall deadlines the scheduler computed for the slice, and
   `charge` returns `Err(Ctl::Interrupted)` or `Err(Ctl::Limit(kind))`.
   Propagate with `?`; `call_native` turns them into the run's error.
+* The instruction limit is exact for natives. The meter's next checkpoint
+  (`check_at`) is never later than the point where the fuel used exceeds
+  `max_instructions`: `start_slice` knows the fuel used before the slice and
+  the interpreter's fuel for it, and the interpreter reports the fuel it has
+  left before each native call (`Meter::sync_bytecode`, one store and a
+  compare in the `native_call!` macro), so the comparison in `charge` stays
+  the only cost on the hot path. Near the limit the scheduler also shortens
+  the interpreter's slice to the remaining budget plus one unit. The
+  interpreter's own heavy operations (deep comparison, concatenation, ...)
+  see the bytecode fuel as of the last native call, so they may overrun by
+  the bytecode spent since (less than a slice); `tests/metering.rs`
+  (`natives_stop_exactly_at_the_instruction_limit`) checks the bound.
 * **Charge as you go** in loops that can be long (per element, per chunk of
   4 KiB, per match), so the call can be stopped midway. Work that cannot be
   split (one regex search, one `std` call) is charged **before** it starts,
@@ -248,8 +260,15 @@ being established, an accepted connection, an HTTP request's socket) holds
 an `iomem::ResourceSlot` (`net::resource_slot(vm)` checks the limit and takes
 one) from when the operation starts until it fails, finishes or is
 cancelled, or until the finisher turns it into a heap object
-(`net::alloc_resource` drops the slot right before allocating). Unreachable
-objects are dropped by the GC, which closes them.
+(`net::alloc_resource` drops the slot right before allocating). The fixed
+buffers of a connection are reserved with its slot: `net::conn_slot(vm,
+bytes)` takes a slot and reserves `bytes` (`net::CONN_BUFFER`, 8 KiB, the
+read buffer; plus `net::TLS_BUFFERS`, an estimate of a TLS session's
+buffers; HTTP server connections have two read buffers), failing with kind
+`limit` if they do not fit; `Conn::size()` then counts them while the
+connection is open, and `Conn.close` accounts for their release
+(`vm.heap.account`). Unreachable objects are dropped by the GC, which closes
+them.
 `size()` should report the memory the object owns (`max_memory` counts it);
 an object whose memory grows after allocation (a compiled regex's search
 cache) reports its new size and the native accounts the change with
@@ -560,6 +579,28 @@ interrupted); callers then bail out cheaply (return `Type::Error`, `err(..)`,
 assume success) and the engine reports the stop instead of the diagnostics.
 Currently charged: every expression (`infer_inner`), unification and occurs
 steps, bound checks, type nodes zonked or measured, and exhaustiveness work.
+The bytecode compiler gets the same budget (`CompileInput::budget`): it
+charges every expression compiled (`expr_to`, which returns at once when the
+budget is exhausted, so the rest of the program is skipped; deferred code
+copied to every exit and loops compiled twice for hoisting are charged per
+copy), every instruction emitted, and the nodes walked by its analyses
+(hoisting candidates, lambda captures); callers check `budget.stopped()`
+after `compile`/`compile_more` and report the stop instead of the result.
+
+The formatter (`fmt::format_source_with`) and the linter (`lint.rs`) use a
+`CompileBudget` too. Standalone (`sand fmt`, `sand lint`, `format_source`,
+`lint_file`, `lint_source`) it is `budget::tool_fuel(len)`: 64 units per
+byte of source, at least `DEFAULT_COMPILE_FUEL`, so that their time (and the
+formatter's output, charged per byte) stays linear in the source size
+whatever its shape. The formatter charges syntax tree nodes, layout nodes
+examined by `needs_break`, `contains_hard`, `mark_hug`, `fits` and `render`,
+text measured and output printed; the linter charges syntax tree nodes and
+the re-scans of loop bodies (`breaks_to`, `uses_label`). Once stopped they
+skip the rest and return `source too complex to format`/`lint` (or the time
+or interrupt error). Per-binding lookups are kept constant time instead
+(`SourceFile::line_col` finds columns from per-256-byte character counts;
+the linter's shadowing check keeps a map of the bindings in scope), and the
+parser finds line numbers by binary search.
 Local limits with precise diagnostics: `limit_type_size` (types of
 expressions and aliases, `MAX_TYPE_SIZE` components), the per-`match`
 pattern work (`start_pattern_check`/`pattern_step`, `MAX_PATTERN_WORK`),
@@ -836,12 +877,19 @@ through the closures.
 * `cargo test --test spec_runner <file>` runs `tests/spec/<file>.test`;
   `SPEC_FILTER=substring` limits it to matching cases.
 * API, sandbox, network and example tests live in `tests/*.rs`.
-* `tests/cli.rs` runs the built `sand` binary. The terminal prompter cannot be
-  driven portably from a test, so its dialogue (`prompt_dialogue`, generic over
-  the reader and writer) is unit-tested in `src/main.rs`, and the CLI tests use
-  the hidden `sand run --prompt-stdin` option, which asks the same questions on
-  standard error and reads the answers from standard input (the script then
-  gets no standard input).
+* `tests/cli.rs` runs the built `sand` binary. The prompt dialogue
+  (`prompt_dialogue`, generic over the reader and writer) is unit-tested in
+  `src/main.rs`; most CLI tests use the hidden `sand run --prompt-stdin`
+  option, which asks the same questions on standard error and reads the
+  answers from standard input (the script then gets no standard input).
+* `tests/prompt_tty.rs` drives the real `--prompt` path on a pseudo-terminal
+  (the `portable-pty` dev-dependency): on Unix a pty that becomes the child's
+  controlling terminal, so `sand` opens it as `/dev/tty`; on Windows a ConPTY
+  pseudo console, which `CONIN$`/`CONOUT$` open. The test waits for each
+  question on the terminal, types the answer and checks the script's results
+  and the terminal marker line (which `--prompt-stdin` does not print). It
+  passes with a message if no pseudo-terminal can be opened. (The Windows
+  variant has only been compiled, not run: CI has not run on Windows yet.)
 * `tests/fuzz.rs` holds randomised robustness tests and, in
   `fuzz_regressions`, every reproducer found by the `cargo fuzz` targets in
   `fuzz/` (`cargo +nightly fuzz run compile|run|fmt`).

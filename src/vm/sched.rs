@@ -202,13 +202,17 @@ impl Vm {
                     continue;
                 }
                 self.current = fid;
-                let mut fuel = SLICE_FUEL;
+                // Near the instruction limit, the slice ends one unit past it.
+                let l = &self.host.limits;
+                let slice = l
+                    .max_instructions
+                    .map_or(SLICE_FUEL, |m| m.saturating_sub(self.fuel_used).saturating_add(1).min(SLICE_FUEL as u64) as i64);
+                let mut fuel = slice;
                 let t0 = now;
                 // Deadlines let long natives check the time limits mid-call.
-                let l = &self.host.limits;
                 let cpu_deadline = l.max_cpu_time.and_then(|m| t0.checked_add(m.saturating_sub(cpu)));
                 let wall_deadline = l.max_wall_time.and_then(|m| start.checked_add(paused.saturating_add(m)));
-                self.meter.start_slice(fuel, self.fuel_used, cpu_deadline, wall_deadline);
+                self.meter.start_slice(SLICE_FUEL, slice, self.fuel_used, cpu_deadline, wall_deadline);
                 // A Rust panic in the interpreter or a native (a bug) ends
                 // the run as a panic instead of unwinding into the host;
                 // caught per slice, which costs nothing per native call.
@@ -219,7 +223,7 @@ impl Vm {
                         Err(Trap::Panic { message: format!("internal error: {msg}"), trace: self.trace_of(&f, None) })
                     }
                 };
-                let spent = (SLICE_FUEL - fuel).max(0) as u64 + self.meter.spent();
+                let spent = (slice - fuel).max(0) as u64 + self.meter.spent();
                 self.fuel_used += spent;
                 unclocked_slices += 1;
                 unclocked_fuel += spent;

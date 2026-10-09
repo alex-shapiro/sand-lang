@@ -221,6 +221,44 @@ fn host_natives_can_charge_and_be_stopped() {
     assert!(matches!(r, Err(Error::Limit(LimitKind::Instructions))), "{r:?}");
 }
 
+#[test]
+fn natives_stop_exactly_at_the_instruction_limit() {
+    // A native that charges one unit at a time and counts the units it was
+    // granted (its last charge fails).
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let granted = Arc::new(AtomicU64::new(0));
+    let mut m = NativeModule::new("busy");
+    m.source("pub native fn spin() -> int");
+    let g = granted.clone();
+    m.raw_function("spin", move |vm: &mut Vm, _: &[Value]| {
+        loop {
+            vm.charge(1)?;
+            g.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+    let max = 100_000;
+    let spin_after = |iterations: u64| {
+        granted.store(0, Ordering::Relaxed);
+        let config = limits(|l| l.max_instructions = Some(max)).module(m.clone());
+        let src = format!("import busy\nvar t = 0\nfor i in 0..{iterations} {{ t += i }}\nprint(busy.spin() + t)");
+        let (r, _) = run(config, &src);
+        assert!(matches!(r, Err(Error::Limit(LimitKind::Instructions))), "{r:?}");
+        granted.load(Ordering::Relaxed)
+    };
+    // The native gets what is left of the budget: no more (the overrun used
+    // to be up to 20,000 units), and no less than that minus the few units
+    // the program spends besides its loop.
+    for iterations in [0, 1_000, 15_000, 19_990, 30_000, 99_000] {
+        let n = spin_after(iterations);
+        assert!(n + iterations <= max, "{iterations} loop iterations, then {n} units in the native");
+        assert!(n + iterations >= max - 100, "{iterations} loop iterations, then only {n} units in the native");
+    }
+    // A program whose bytecode alone exceeds the budget stops within a unit
+    // of it (before the native is called).
+    assert_eq!(spin_after(max), 0);
+}
+
 // ---------------------------------------------------------------------------
 // Scratch space counts against the memory limit
 

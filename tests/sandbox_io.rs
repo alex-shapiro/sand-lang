@@ -672,16 +672,16 @@ print(results.recv())
 #[test]
 fn pending_socket_buffers_count_against_the_memory_limit() {
     // Each pending read holds its buffer (up to 1 MiB); 64 of them exceed 32 MB.
+    // (The connections are opened first: their own buffers count too.)
     let src = r#"
 import net
 let listener = net.listen("127.0.0.1:0")?
 let addr = listener.addr()
-var readers = []
+var conns = []
 for _ in 0..64 {
-    let c = net.connect(addr)?
-    let _ = listener.accept()?
-    readers.push(spawn c.read(max: 1048576))
+    conns.push((net.connect(addr)?, listener.accept()?))
 }
+let readers = conns.map(p => spawn p.0.read(max: 1048576))
 task.sleep(100ms)
 // Reads whose buffer did not fit are done (failed); the others still wait.
 let failed = readers.filter(t => t.is_done()).map(t => t.wait().unwrap_err().kind)

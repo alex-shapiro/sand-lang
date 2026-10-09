@@ -334,6 +334,7 @@ impl Vm {
         // writing the result to absolute slot `slot`.
         macro_rules! native_call {
             ($n:expr, $start:expr, $argc:expr, $slot:expr) => {{
+                self.meter.sync_bytecode(fuel.left);
                 match self.call_native(&natives, fiber, $n, $start, $argc, $slot, ip) {
                     Ok(None) => reload!(),
                     Ok(Some(exit)) => return Ok(exit),

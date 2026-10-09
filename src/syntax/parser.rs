@@ -38,6 +38,8 @@ struct Parser<'a> {
     fatal: bool,
     /// Inside a `trait` body: methods may omit their body.
     in_trait: bool,
+    /// Offsets of the source's line breaks (for `line_of`).
+    newlines: Vec<u32>,
 }
 
 type PResult<T> = Result<T, ()>;
@@ -57,6 +59,7 @@ impl<'a> Parser<'a> {
             depth: 0,
             fatal: false,
             in_trait: false,
+            newlines: src.bytes().enumerate().filter(|&(_, b)| b == b'\n').map(|(i, _)| i as u32).collect(),
         }
     }
 
@@ -168,9 +171,14 @@ impl<'a> Parser<'a> {
     fn leave(&mut self) {
         self.depth -= 1;
     }
-    /// Whether `lo..hi` lies on one line (no newline between them).
+    /// The number of line breaks before `pos`.
+    fn line_of(&self, pos: u32) -> usize {
+        self.newlines.partition_point(|&nl| nl < pos)
+    }
+
+    /// Whether `lo` and `hi` are on the same line.
     fn same_line(&self, lo: u32, hi: u32) -> bool {
-        !self.src.as_bytes()[lo as usize..hi.max(lo) as usize].contains(&b'\n')
+        self.line_of(lo) == self.line_of(hi)
     }
 
     /// Doc comment (`///`) immediately preceding byte offset `lo`.

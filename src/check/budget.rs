@@ -86,6 +86,19 @@ pub const POLL_INTERVAL: u64 = 1 << 16;
 /// compiler's memory to roughly a gigabyte.
 pub const DEFAULT_COMPILE_FUEL: u64 = 10_000_000;
 
+/// Fuel per byte of source in the default budget of the formatter and the
+/// linter ([`tool_fuel`]).
+pub const TOOL_FUEL_PER_BYTE: u64 = 64;
+
+/// The default budget for formatting or linting `len` bytes of source when
+/// they run on their own (`sand fmt`, `sand lint`): [`TOOL_FUEL_PER_BYTE`]
+/// units per byte (ordinary code needs one or two), and at least
+/// [`DEFAULT_COMPILE_FUEL`]. This keeps their time and the formatter's
+/// output linear in the size of the source, whatever its shape.
+pub fn tool_fuel(len: usize) -> u64 {
+    DEFAULT_COMPILE_FUEL.max(TOOL_FUEL_PER_BYTE.saturating_mul(len as u64))
+}
+
 /// Why compilation was stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stop {
@@ -159,6 +172,11 @@ impl CompileBudget {
     /// Checks the deadline and interrupt flag now (between compiler phases).
     pub fn check(&self) -> bool {
         self.stop.get().is_none() && self.poll()
+    }
+
+    /// The fuel left (`u64::MAX` if unlimited and nothing was charged).
+    pub fn remaining(&self) -> u64 {
+        self.fuel.get()
     }
 
     /// Why compilation was stopped, if it was.

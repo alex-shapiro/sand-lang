@@ -1,11 +1,14 @@
-//! The compile budget: hostile programs must fail to compile quickly
-//! instead of stalling (or crashing) the host before any runtime limit
-//! applies.
+//! The compile budget: hostile programs must fail to compile (or to be
+//! formatted or linted) quickly instead of stalling (or crashing) the host
+//! before any runtime limit applies.
 
 mod common;
 
 use common::{TempDir, rt};
+use sandlang::check::budget::CompileBudget;
 use sandlang::{Config, Engine, Error, LimitKind, Limits, MemorySink, Policy};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 /// Generous: each of these took minutes, hours or gigabytes before.
@@ -153,6 +156,101 @@ fn compile_fuel_is_configurable() {
     r.unwrap();
     // The default stops a program whose checking is merely slow.
     rejects(&slow_program(), "program too complex to compile");
+}
+
+/// A program that is cheap to type check but expensive to compile: deferred
+/// code is compiled again at every exit (each function stays under the
+/// per-function limit on deferred code).
+fn deferred_copies(functions: usize, returns: usize) -> String {
+    let mut src = String::new();
+    let sum = vec!["x"; 500].join(" + ");
+    for i in 0..functions {
+        src += &format!("fn f{i}(x: int) -> int {{\n    defer {{ print({sum}) }}\n");
+        for r in 0..returns {
+            src += &format!("    if x == {r} {{ return {r} }}\n");
+        }
+        src += "    0\n}\n";
+    }
+    src
+}
+
+#[test]
+fn many_blocks_parse_quickly() {
+    // Parsing used to count the lines before every block (quadratic time).
+    let src = format!("fn f(x: int) -> int {{\n{}    0\n}}\nprint(f(3))\n", "    if x == 1 { return 1 }\n".repeat(100_000));
+    let (r, took) = check(Config::new(), &src);
+    r.unwrap();
+    assert!(took < FAST, "took {took:?}");
+}
+
+#[test]
+fn code_generation_is_covered_by_the_compile_budget() {
+    let src = deferred_copies(40, 900);
+    let (r, took) = check(limits(|l| l.max_compile_fuel = None), &deferred_copies(1, 900));
+    r.unwrap();
+    assert!(took < FAST, "took {took:?}");
+    rejects(&src, "program too complex to compile");
+    // Also when the time limit is reached first.
+    let timed = limits(|l| {
+        l.max_compile_fuel = None;
+        l.max_wall_time = Some(Duration::from_millis(100));
+    });
+    let (r, took) = check(timed, &src);
+    assert!(matches!(r, Err(Error::Limit(LimitKind::WallTime))), "{r:?}");
+    assert!(took < FAST, "took {took:?}");
+}
+
+#[test]
+fn the_formatter_is_bounded() {
+    use sandlang::fmt::{format_source, format_source_with};
+    // Deep indentation makes the output far larger than the source.
+    let src = format!("let x = {}g(\n{}){}\n", "f(".repeat(200), "    1,\n".repeat(30_000), ")".repeat(200));
+    let start = Instant::now();
+    let e = format_source(&src).unwrap_err();
+    assert!(e.contains("source too complex to format"), "{e}");
+    assert!(start.elapsed() < FAST, "took {:?}", start.elapsed());
+    // A larger budget allows it.
+    let out = format_source_with(&src, &CompileBudget::new(Some(100_000_000), None, None)).unwrap();
+    assert!(out.len() > 20 * src.len());
+    // Ordinary sources are far from the default budget.
+    assert_eq!(format_source("let  x = [1,2]\n").unwrap(), "let x = [1, 2]\n");
+    // Deadlines and interrupts stop it too.
+    let e = format_source_with(&src, &CompileBudget::new(None, Some(Instant::now()), None)).unwrap_err();
+    assert!(e.starts_with("time limit exceeded"), "{e}");
+    let interrupted = CompileBudget::new(None, None, Some(Arc::new(AtomicBool::new(true))));
+    assert_eq!(format_source_with("let x = 1\n", &interrupted).unwrap_err(), "interrupted");
+}
+
+#[test]
+fn the_linter_is_bounded() {
+    // Each labeled loop is searched for uses of its label, and each `loop`
+    // statement for a `break` (once per enclosing loop).
+    let nested = |depth: usize| {
+        let mut src = String::from("var x = 0\n");
+        for i in 0..depth {
+            src += &format!("@l{i} loop {{\n");
+        }
+        src += &"x = x + 1\n".repeat(20_000);
+        for i in (0..depth).rev() {
+            src += &format!("break @l{i}\n}}\nx = 2\n");
+        }
+        src
+    };
+    let start = Instant::now();
+    let e = sandlang::lint::lint_source("main.sand", &nested(120)).unwrap_err();
+    assert!(e.contains("source too complex to lint"), "{e}");
+    assert!(start.elapsed() < FAST, "took {:?}", start.elapsed());
+    assert_eq!(sandlang::lint::lint_source("main.sand", &nested(20)).unwrap(), vec![]);
+    // Programs that are too complex to check are reported as such.
+    let e = sandlang::lint::lint_source("main.sand", &slow_program()).unwrap_err();
+    assert!(e.contains("program too complex to compile"), "{e}");
+    // Bindings and columns are looked up in constant time: a long line with
+    // many bindings (after a multibyte character) lints quickly.
+    let lets: String = (0..20_000).map(|i| format!("let _v{i} = {i}; ")).collect();
+    let src = format!("// \u{e9}\nfn f() {{ {lets}}}\nf()\n");
+    let start = Instant::now();
+    assert_eq!(sandlang::lint::lint_source("main.sand", &src).unwrap(), vec![]);
+    assert!(start.elapsed() < FAST, "took {:?}", start.elapsed());
 }
 
 #[test]

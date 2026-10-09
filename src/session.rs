@@ -7,6 +7,7 @@
 //! ([`compile_more`]), and run in the session's VM, whose heap, globals and
 //! tasks persist. See `docs/INTERNALS.md` ("REPL sessions").
 
+use crate::check::budget::CompileBudget;
 use crate::check::{Checker, ModKind, ParsedModule};
 use crate::compile::{CompileInput, Incremental, ProgramMark, compile_more};
 use crate::diag::{Diag, Span};
@@ -507,7 +508,8 @@ impl Session {
             let (native_help, native_argc) = native_info(&cp, &registry);
             let mut prog = Program::default();
             let mut compiler = Incremental::default();
-            let input = CompileInput { checked: &cp, sm, native_lookup: &lookup, native_help, native_argc };
+            let budget = CompileBudget::default();
+            let input = CompileInput { checked: &cp, sm, native_lookup: &lookup, native_help, native_argc, budget: &budget };
             prog.entry = compile_more(input, &mut prog, &mut compiler, &cp.module_inits)
                 .map_err(|ds| Error::Compile(ds.iter().map(|d| sm.resolve(d)).collect()))?;
             prog.available_modules = registry.sources.keys().filter(|k| k.as_str() != "prelude").cloned().collect();
@@ -630,8 +632,12 @@ impl Session {
                     let cp = checker.take_checked(added > 0);
                     let (native_help, native_argc) = if added > 0 { native_info(&cp, &registry) } else { (Vec::new(), Vec::new()) };
                     let mut compiler = compiler.clone();
-                    let input = CompileInput { checked: &cp, sm, native_lookup: &lookup, native_help, native_argc };
-                    let entry = compile_more(input, Arc::make_mut(prog), &mut compiler, &inits).map_err(resolve)?;
+                    let input = CompileInput { checked: &cp, sm, native_lookup: &lookup, native_help, native_argc, budget: &budget };
+                    let entry = compile_more(input, Arc::make_mut(prog), &mut compiler, &inits);
+                    if let Some(stop) = budget.stopped() {
+                        return Err(budget_error(stop, sm, file));
+                    }
+                    let entry = entry.map_err(resolve)?;
                     checker.restore_checked(cp);
                     checker.release_bodies();
                     Ok((checker.detach(), compiler, entry, value))

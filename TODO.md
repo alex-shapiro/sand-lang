@@ -15,18 +15,14 @@ Follow-up work, roughly in priority order.
 - [ ] **HTTP server fairness.** `accept` reads up to 64 pending connections
       at once; 64+ idle connections can still delay a new request by up to
       30s, and a waiting `accept` holds up to half the free resource slots.
-- [ ] **Small accounting gaps.** Fixed 8 KiB per-connection buffers aren't
-      counted against `max_memory`; checks made inside a native may overrun
-      `max_instructions` by up to one slice (20,000 units); the bytecode
-      compiler, linter and formatter are not covered by the compile budget.
 
 ### Test coverage
 
 - [ ] Run the CI workflow (`.github/workflows/ci.yml`) on Windows and Linux:
       nothing has run there yet (Windows is only cross-checked with
-      `--no-default-features`; `ring` needs a Windows C toolchain).
-- [ ] An automated test of the real `/dev/tty` / `CONIN$` prompter (the
-      dialogue is unit tested and `--prompt-stdin` is tested end to end).
+      `--no-default-features`; `ring` needs a Windows C toolchain). This
+      includes the ConPTY variant of `tests/prompt_tty.rs`, which has only
+      been compiled.
 
 ### Tooling
 
@@ -42,8 +38,6 @@ Follow-up work, roughly in priority order.
       on call-heavy benchmarks from unrelated edits). Consider splitting cold
       opcodes into separate functions systematically, or a threaded-dispatch
       design.
-- [ ] Incremental (not just generational) GC: major collections still pause
-      in proportion to the heap; heaps under 8 MB only get major collections.
 
 ### Language
 

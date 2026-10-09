@@ -465,6 +465,80 @@ for i in 0..2 {
 }
 
 #[test]
+fn connection_buffers_count_against_the_memory_limit() {
+    // Each open connection counts its 8 KiB read buffer: connecting (and
+    // accepting) fails with kind "limit" once they fill the memory limit, and
+    // closing connections makes room again.
+    let src = r#"
+import net
+let listener = net.listen("127.0.0.1:0")?
+let addr = listener.addr()
+let server = spawn {
+    var accepted: [net.Conn] = []
+    while let Ok(c) = listener.accept() { accepted.push(c) }
+    accepted.len()
+}
+var conns: [net.Conn] = []
+var err = ""
+while conns.len() < 1000 {
+    match net.connect(addr) {
+        Ok(c) => conns.push(c)
+        Err(e) => {
+            err = "{e.kind}: {e.message}"
+            break
+        }
+    }
+}
+print(err)
+print(conns.len())
+for c in conns[0..10] { c.close() }
+print(net.connect(addr).is_ok())
+listener.close()
+print(server.wait() > 0)
+"#;
+    let limits = Limits { max_memory: Some(1 << 20), ..Limits::default() };
+    let r = run_with(src, |c| c.policy(Policy::allow_all()).limits(limits));
+    let out = r.ok_stdout();
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(lines[0].starts_with("limit: cannot open a connection"), "{out}");
+    // At most 8 KiB per connection (16 KiB once the server task accepts it).
+    let n: usize = lines[1].parse().unwrap();
+    assert!((20..=128).contains(&n), "{n} connections");
+    assert_eq!(&lines[2..], ["true", "true"]);
+
+    // An HTTP server answers connections whose buffers do not fit with 503.
+    let src = r#"
+import http
+let server = http.serve("127.0.0.1:0")?
+print("ready {server.addr()}")
+let req = server.accept()?
+req.respond(200, "served".bytes())?
+"#;
+    let limits = Limits { max_memory: Some(768 << 10), max_wall_time: Some(Duration::from_secs(25)), ..Limits::default() };
+    let (addr, handle) = start_server_script(src, limits);
+    let mut idle: Vec<_> = (0..60).map(|_| std::net::TcpStream::connect(&addr).unwrap()).collect();
+    std::thread::sleep(Duration::from_millis(500));
+    let mut refused = 0;
+    for s in &mut idle {
+        s.set_read_timeout(Some(Duration::from_millis(20))).unwrap();
+        let mut resp = String::new();
+        if s.read_to_string(&mut resp).is_ok() {
+            assert!(resp.starts_with("HTTP/1.1 503 Service Unavailable\r\n"), "{resp}");
+            refused += 1;
+        }
+    }
+    assert!((1..60).contains(&refused), "{refused} refused");
+    drop(idle);
+    std::thread::sleep(Duration::from_millis(200));
+    let mut s = std::net::TcpStream::connect(&addr).unwrap();
+    write!(s, "GET / HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+    let mut resp = String::new();
+    s.read_to_string(&mut resp).unwrap();
+    assert!(resp.starts_with("HTTP/1.1 200") && resp.ends_with("served"), "{resp}");
+    handle.join().unwrap().unwrap();
+}
+
+#[test]
 fn unlimited_http_bodies() {
     // `max_http_body = usize::MAX` must not overflow when reading bodies.
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
