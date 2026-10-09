@@ -1210,9 +1210,12 @@ fn rust_panics_in_natives_do_not_unwind_into_the_host() {
     dir.write("t.sand", "import buggy\ntest \"bad\" {\n    buggy.boom(9)\n}\ntest \"good\" {\n    assert(buggy.boom(2) == 2)\n}\n");
     let report = rt().block_on(Engine::new(Config::new().module(module())).run_tests(dir.path().join("t.sand"))).unwrap();
     assert_eq!((report.passed(), report.failed()), (1, 1));
+    // A session is reset (its VM may be inconsistent) and keeps working.
     let mut session = Engine::new(Config::new().module(module())).session();
     assert!(rt().block_on(session.eval("import buggy\nbuggy.boom(7)")).is_err());
-    assert_eq!(rt().block_on(session.eval("buggy.boom(2) + 1")).unwrap().as_deref(), Some("3"));
+    assert!(session.was_reset());
+    assert!(matches!(rt().block_on(session.eval("buggy.boom(2)")), Err(Error::Compile(_))));
+    assert_eq!(rt().block_on(session.eval("import buggy\nbuggy.boom(2) + 1")).unwrap().as_deref(), Some("3"));
 }
 
 #[test]

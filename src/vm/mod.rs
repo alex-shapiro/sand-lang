@@ -302,6 +302,10 @@ pub struct Vm {
     /// Runs the inputs of a REPL session: a top-level `?` that meets an
     /// `Err` panics (aborting the input) instead of ending the program.
     pub session: bool,
+    /// Set when a Rust panic (a bug) was caught in the interpreter, a native
+    /// or an I/O finisher: the VM is memory safe but may be inconsistent, so
+    /// a REPL session discards it.
+    pub(crate) caught_panic: bool,
 }
 
 pub const SLICE_FUEL: i64 = 20_000;
@@ -392,6 +396,7 @@ impl Vm {
             pinned: Vec::new(),
             pending_race: None,
             session: false,
+            caught_panic: false,
         };
         vm.load_program();
         vm

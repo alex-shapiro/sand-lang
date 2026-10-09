@@ -345,6 +345,8 @@ pub struct Checker<'a> {
     /// checked is its value, and then (after checking) the value's type.
     pub(crate) want_cell_value: bool,
     pub(crate) cell_value: Option<Type>,
+    /// Set while checking an expression for `Session::type_of`.
+    pub(crate) type_query: Option<TypeQuery>,
     /// The prelude's private trait `Num` (static `zero` and `one`): the
     /// evidence that a type satisfies the built-in bound `Num`.
     pub(crate) num_trait: Option<TraitId>,
@@ -395,6 +397,7 @@ impl<'a> Checker<'a> {
             session: None,
             want_cell_value: false,
             cell_value: None,
+            type_query: None,
             budget: Arc::new(CompileBudget::default()),
             num_trait: None,
             iter_trait: None,
@@ -457,6 +460,122 @@ impl<'a> Checker<'a> {
     pub fn show(&self, t: &Type) -> String {
         let z = self.zonk(t);
         self.printer().show(&z)
+    }
+
+    /// Shows the types of a type mismatch. Distinct types that would look
+    /// the same (`expected Point, found Point`, e.g. after a session input
+    /// defined `Point` again) are told apart by where they are defined.
+    pub fn show_pair(&self, a: &Type, b: &Type) -> (String, String) {
+        let (za, zb) = (self.zonk(a), self.zonk(b));
+        // Names of the type definitions mentioned, with their ids.
+        let mut seen: Vec<TypeDefId> = Vec::new();
+        for t in [&za, &zb] {
+            t.walk(&mut |t| {
+                if let Type::Named(d, _) = t
+                    && !seen.contains(d)
+                {
+                    seen.push(*d);
+                }
+            });
+        }
+        let name = |d: TypeDefId| self.types[d as usize].name.as_str();
+        let clashing: Vec<TypeDefId> = seen.iter().copied().filter(|&d| seen.iter().any(|&e| e != d && name(e) == name(d))).collect();
+        if clashing.is_empty() {
+            let p = self.printer();
+            return (p.show(&za), p.show(&zb));
+        }
+        let mut tags: Vec<(TypeDefId, String)> = clashing.iter().map(|&d| (d, self.def_origin(d, false))).collect();
+        if tags.iter().any(|(d, t)| tags.iter().any(|(e, u)| e != d && u == t && name(*e) == name(*d))) {
+            tags = clashing.iter().map(|&d| (d, self.def_origin(d, true))).collect();
+        }
+        let tag = |d: TypeDefId| tags.iter().find(|(e, _)| *e == d).map(|(_, t)| t.clone());
+        let p = self.printer();
+        (p.show_tagged(&za, &tag), p.show_tagged(&zb, &tag))
+    }
+
+    /// Where type `d` is defined, for diagnostics: "defined in input 3" (of a
+    /// session) or "defined in module geo"; `exact` adds the position.
+    fn def_origin(&self, d: TypeDefId, exact: bool) -> String {
+        let def = &self.types[d as usize];
+        let file = self.sm.files.get(def.span.file as usize);
+        let name = file.map_or("", |f| f.name.as_str());
+        let place = match name.strip_prefix("<input ").and_then(|f| f.strip_suffix('>')) {
+            Some(n) => format!("input {n}"),
+            None if Some(def.module) == self.prelude => "the prelude".to_string(),
+            None => format!("module {}", def.module_name),
+        };
+        if exact && let Some(f) = file {
+            let (line, col) = f.line_col(def.span.lo);
+            format!("defined in {place}, at {name}:{line}:{col}")
+        } else {
+            format!("defined in {place}")
+        }
+    }
+
+    /// Shows the type of a session input's value (`Session::type_of`). A
+    /// function type whose inference variables are left open is shown as a
+    /// generic one, named after the type parameters they instantiate (if
+    /// recorded in `type_query`): `fn<T>(T) -> T`, `fn<T: Ord>([T]) -> [T]`.
+    pub(crate) fn show_value_type(&self, t: &Type) -> String {
+        let z = self.zonk(t);
+        if !matches!(z, Type::Fn(..)) || !z.has_vars() {
+            return self.printer().show(&z);
+        }
+        let mut vars: Vec<VarId> = Vec::new();
+        z.walk(&mut |t| {
+            if let Type::Var(v) = t
+                && !vars.contains(v)
+            {
+                vars.push(*v);
+            }
+        });
+        let origin = |v: VarId| {
+            let q = self.type_query.as_ref()?;
+            q.origins.iter().find(|(o, _)| self.zonk(&Type::Var(*o)) == Type::Var(v)).map(|&(_, p)| p)
+        };
+        // Names: those of the parameters first, then T, U, ... for the others.
+        let mut names: Vec<Option<String>> = vec![None; vars.len()];
+        let mut used: Vec<String> = Vec::new();
+        let take = |base: &str, used: &mut Vec<String>| {
+            let mut name = base.to_string();
+            let mut k = 2;
+            while used.contains(&name) {
+                name = format!("{base}{k}");
+                k += 1;
+            }
+            used.push(name.clone());
+            name
+        };
+        for (i, &v) in vars.iter().enumerate() {
+            if let Some(p) = origin(v) {
+                names[i] = Some(take(&self.params[p as usize].name, &mut used));
+            }
+        }
+        for name in names.iter_mut().filter(|n| n.is_none()) {
+            let base = ["T", "U", "V", "W"].into_iter().find(|n| !used.iter().any(|u| u == n)).unwrap_or("T");
+            *name = Some(take(base, &mut used));
+        }
+        let mut params = self.params.clone();
+        let mut map: HashMap<VarId, Type> = HashMap::new();
+        let mut generics = Vec::new();
+        for (&v, name) in vars.iter().zip(names) {
+            let name = name.unwrap_or_default();
+            let mut bounds: Vec<String> = Vec::new();
+            let declared = origin(v).map(|p| &self.params[p as usize]);
+            let required = self.type_query.iter().flat_map(|q| &q.bounds).filter(|(t, _)| self.zonk(t) == Type::Var(v)).map(|(_, b)| *b);
+            let builtin = required.chain(declared.into_iter().flat_map(|p| p.bounds.clone()));
+            for b in builtin {
+                if !bounds.iter().any(|x| x == b.name()) {
+                    bounds.push(b.name().to_string());
+                }
+            }
+            bounds.extend(declared.into_iter().flat_map(|p| p.traits.iter().map(|tr| self.show_trait(tr))));
+            generics.push(if bounds.is_empty() { name.clone() } else { format!("{name}: {}", bounds.join(" + ")) });
+            params.push(ParamInfo { name, bounds: Vec::new(), traits: Vec::new(), reflect: false });
+            map.insert(v, Type::Param((params.len() - 1) as ParamId));
+        }
+        let shown = TypePrinter { defs: &self.types, params: &params, wk: self.wk }.show(&replace_vars(&z, &map));
+        format!("fn<{}>{}", generics.join(", "), shown.strip_prefix("fn").unwrap_or(&shown))
     }
 
     pub fn new_param(&mut self, name: &str, bounds: Vec<Bound>, reflect: bool) -> ParamId {
@@ -673,6 +792,7 @@ impl<'a> Checker<'a> {
             session,
             want_cell_value,
             cell_value,
+            type_query: _,
             budget: _,
             num_trait,
             iter_trait,
@@ -715,6 +835,7 @@ impl<'a> Checker<'a> {
             session,
             want_cell_value,
             cell_value,
+            type_query: None,
             // Each input gets its own budget (see `attach`).
             budget: Arc::new(CompileBudget::default()),
             num_trait,
@@ -1789,6 +1910,9 @@ impl<'a> Checker<'a> {
         // Trait evidence first: resolving it may determine types.
         self.resolve_holes(&mut body);
         let obligations = std::mem::take(&mut self.fs.obligations);
+        if let Some(q) = &mut self.type_query {
+            q.bounds.extend(obligations.iter().map(|(t, b, _)| (t.clone(), *b)));
+        }
         for (t, b, sp) in obligations {
             self.check_bound(&t, b, sp, true);
         }
@@ -2157,4 +2281,29 @@ pub(crate) fn names_used_in_functions(m: &ast::Module) -> HashSet<String> {
         }
     }
     out
+}
+
+/// What `Session::type_of` needs to show a type with open inference
+/// variables as a generic one.
+#[derive(Clone, Default)]
+pub(crate) struct TypeQuery {
+    /// The variables made for the type parameters of instantiated functions.
+    pub origins: Vec<(VarId, ParamId)>,
+    /// The built-in bounds required of types.
+    pub bounds: Vec<(Type, Bound)>,
+}
+
+/// `t` with the inference variables in `map` replaced.
+fn replace_vars(t: &Type, map: &HashMap<VarId, Type>) -> Type {
+    let r = |t: &Type| replace_vars(t, map);
+    match t {
+        Type::Var(v) => map.get(v).cloned().unwrap_or(Type::Var(*v)),
+        Type::List(t) => Type::List(Box::new(r(t))),
+        Type::Set(t) => Type::Set(Box::new(r(t))),
+        Type::Map(k, v) => Type::Map(Box::new(r(k)), Box::new(r(v))),
+        Type::Tuple(ts) => Type::Tuple(ts.iter().map(r).collect()),
+        Type::Named(d, ts) => Type::Named(*d, ts.iter().map(r).collect()),
+        Type::Fn(ps, ret) => Type::Fn(ps.iter().map(r).collect(), Box::new(r(ret))),
+        other => other.clone(),
+    }
 }

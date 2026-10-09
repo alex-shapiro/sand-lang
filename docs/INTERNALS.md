@@ -109,8 +109,9 @@ A missing registration is a compile error: `no native implementation registered 
   error: ...`); the public `run_*`/`Session` futures are wrapped in
   `unwind::CatchUnwind`, which turns any other panic into
   `Error::Runtime { message: "internal error: ..." }`.
-  The VM may be left inconsistent after such a panic (it is memory safe, but
-  a session that continues may misbehave).
+  The VM may be left inconsistent after such a panic (it is memory safe), so
+  the scheduler sets `Vm::caught_panic` and a session resets itself (see
+  "REPL sessions").
 
 ### Metering: charging fuel and checking limits
 
@@ -645,7 +646,8 @@ rejected input.
 Each input's entry runs as the main task (`run_main`) of the session's VM,
 whose heap, globals, fibers and policy decisions persist. After it finishes,
 `release_main` frees its fiber; other tasks stay in the scheduler and run
-whenever a later input runs. If the input fails (panic, limit, interruption,
+whenever a later input runs, or the front end idles (below). If the input
+fails (panic, limit, interruption,
 `exit`), `abandon_tasks` drops every fiber and pending I/O operation and marks
 their tasks cancelled; heap and globals are kept. `fuel_used` and
 `output_bytes` are reset per input, and `run_main` measures CPU and wall time
@@ -653,10 +655,70 @@ per call, so those limits are per input. `Vm::session` makes a failed
 top-level `?` panic instead of ending the program. "Always" answers are
 shared with the engine (`prepare_run`/`finish_run`).
 
+### Tasks between inputs
+
+`Session::run_tasks_until(until, on_error)` drives the VM while a front end
+waits for input. The scheduler only runs while `run_main` runs, so an idle
+run is a `run_main` of a hidden entry (`State::idle_proto`, appended to the
+program when the session starts) that calls a host native (`<session
+idle>`, appended to the session VM's copy of the native table; no `native
+fn` can name it) which suspends on a `Gate`. The method polls `until` and
+the run together; when `until` completes it opens the gate, the idle main
+task finishes at the next scheduling point (within a slice and the 2 ms I/O
+poll), and `release_main` frees it. The VM and the scheduler needed no
+changes. When no task is ready and no I/O is pending, nothing can progress
+and `until` is simply awaited.
+
+During an idle run the session swaps in idle settings, restored from the
+engine's configuration by the next `run`: no wall-time limit
+(`host.limits.max_wall_time`; fuel, CPU time and output count from zero as
+for an input), and a `DeferredPrompter` that waits for the gate before asking
+the real prompter, so a background task's prompt never competes with the
+front end for the terminal (no script code runs while a prompt is pending,
+as always). It also holds the stdin mutex (`try_lock_owned`; skipped if a
+read is already in progress), so script reads of standard input wait too.
+Failures and `exit` are concluded as for inputs (`conclude`). If an idle
+future is dropped, `State::recover` opens its gate on the next call: the
+idle main task then finishes as an ordinary task (`main_fiber` has moved on),
+and the other tasks are kept; a dropped `eval` (`running`) still cancels
+all tasks.
+
+### Internal errors
+
+A Rust panic caught by the scheduler (in a slice or a finisher) sets
+`Vm::caught_panic`; one caught anywhere else in a session call
+(`CatchUnwind` around `eval`, `run_tests` and the idle run, `unwind::catch`
+around `type_of`) means the session's own state may be half-updated. Either
+way `Session::settle` resets the session (`reset`, which first records the
+VM's "always" answers with the engine, as `finish_run` would have) and
+appends `RESET_NOTE` to the error; `run_tests` stops at the test that hit
+it. Panics in the checker or compiler (on the compile thread) need no reset:
+they work on clones that are discarded, and the program is truncated
+(`ProgramMark`), so they just fail the input (`internal compiler error`).
+
+### Front end
+
 The CLI (`cmd_repl` in `src/main.rs`) reads lines on a thread, one per
 request, so it can wait for a line and for Ctrl-C (`tokio::signal::ctrl_c`)
 at once without reading ahead of a prompter that uses standard input;
-`Session::is_complete` (lexer based) decides when an input is complete.
+`Session::is_complete` (lexer based) decides when an input is complete. It
+waits for each line inside `run_tasks_until`. The scripts' standard output
+and error go through `ReplSink`s that share a `PromptLine`: while a prompt is
+shown, output first moves to a new line and is followed by the prompt again
+(text the user had typed stays in the terminal's line buffer but is not
+redrawn). Ctrl-C at an empty prompt calls `cancel_tasks`.
+
+### Types in messages
+
+`Session::type_of` checks with `Checker::type_query` set: `instantiate_fn_with`
+records which inference variables stand for which type parameters, and
+`finish_fn` the built-in bounds required of types. `show_value_type` then
+shows a function type whose variables remain open as generic, named after
+those parameters (or `T`, `U`, ...), with their bounds: `fn<T: Ord>([T]) ->
+T?`. Type mismatches are shown with `Checker::show_pair`, which, when two
+distinct type definitions with the same name occur, tags each with where it
+is defined (`TypePrinter::show_tagged`): `Point (defined in input 3)`, or
+`(defined in module geo)`, with the position if that is still ambiguous.
 
 ## Control flow: labels and `defer`
 

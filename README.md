@@ -79,8 +79,10 @@ sand repl --allow-read=.               # interactive session (run options apply)
 ```
 
 The REPL runs each input once in a persistent VM: definitions, globals and
-tasks carry over to later inputs, which may redefine names. `:type EXPR`,
-`:test`, `:reset` and `:help` are available; Ctrl-C interrupts a running input.
+tasks carry over to later inputs, which may redefine names; spawned tasks keep
+running while the REPL waits for input. `:type EXPR`, `:test`, `:reset` and
+`:help` are available; Ctrl-C interrupts a running input (or, at an empty
+prompt, cancels background tasks).
 
 Limits: `--max-memory=256M --max-time=10s --max-cpu=2s --max-instructions=N --max-compile-fuel=N`.
 Exit codes: the script's exit code; 1 runtime error; 2 compile error; 3 limit.

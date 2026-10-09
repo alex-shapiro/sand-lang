@@ -134,7 +134,13 @@ impl Vm {
                 continue;
             }
             // A Rust panic in the finisher (a bug) becomes a script panic.
-            let r = crate::unwind::catch(|| fin(self)).unwrap_or_else(|msg| Err(Ctl::Panic(format!("internal error: {msg}"))));
+            let r = match crate::unwind::catch(|| fin(self)) {
+                Ok(r) => r,
+                Err(msg) => {
+                    self.caught_panic = true;
+                    Err(Ctl::Panic(format!("internal error: {msg}")))
+                }
+            };
             match r {
                 Ok(v) => {
                     self.deliver(fid, wgen, v);
@@ -208,7 +214,10 @@ impl Vm {
                 // caught per slice, which costs nothing per native call.
                 let r = match crate::unwind::catch(|| self.interp(&mut f, &mut fuel)) {
                     Ok(r) => r,
-                    Err(msg) => Err(Trap::Panic { message: format!("internal error: {msg}"), trace: self.trace_of(&f, None) }),
+                    Err(msg) => {
+                        self.caught_panic = true;
+                        Err(Trap::Panic { message: format!("internal error: {msg}"), trace: self.trace_of(&f, None) })
+                    }
                 };
                 let spent = (SLICE_FUEL - fuel).max(0) as u64 + self.meter.spent();
                 self.fuel_used += spent;
