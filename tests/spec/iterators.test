@@ -427,3 +427,24 @@ print((t, (0..4).map(i => i * i), (0..10).filter(i => i % 4 == 0)))
 [[3, 6], [1, 2], [4, 8], [1, 2], [5, 10]]
 [3, 1, 0, 1, 0]
 (10, [0, 1, 4, 9], [0, 4, 8])
+
+=== for loops over enumerate keep its snapshot
+// `for (i, x) in xs.enumerate()` runs without building the pairs, over the
+// elements as they were when `enumerate` was called.
+let xs = ["a", "b", "c"]
+for (i, x) in xs.enumerate() {
+    if i == 0 { xs.push("d") }
+    if i == 1 { xs[2] = "z" }
+    if x == "b" { continue }
+    print("{i}{x}")
+}
+print(xs)
+for (i, (n, s)) in [(1, "p"), (2, "q")].enumerate() { print("{i} {n}{s}") }
+print([i * 10 + x for (i, x) in [5, 6, 7].enumerate() if i != 1])
+--- stdout
+0a
+2c
+["a", "b", "z", "d"]
+0 1p
+1 2q
+[5, 27]

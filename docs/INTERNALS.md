@@ -964,6 +964,10 @@ at the HIR level, while the enclosing function is being checked):
   `filter`, `each`) are one-stage pipelines with a consumer (`xs.map(f)` is
   `xs.iter().map(f).to_list()`; the prelude implements them with exactly
   that loop), so they are lowered the same way.
+* **`enumerate` loops**: `for (i, x) in xs.enumerate()` (also in
+  comprehensions) runs over a copy of `xs` with a counter instead of
+  building the list of pairs `[T].enumerate` returns (`enumerate_for`): the
+  same elements (those of the call) without an allocation per element.
 * **Inlining**: a lambda literal passed to a fused adapter or consumer is
   called at exactly one place of the loop, so it is inlined there (its
   parameters become `let`s; its locals are re-owned by the enclosing

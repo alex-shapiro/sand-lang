@@ -2241,6 +2241,7 @@ impl Checker<'_> {
     /// The loop over `ih` that binds `pat` to each element and runs `body`.
     fn iter_loop(&mut self, plan: IterPlan, ih: HExpr, pat: HPat, body: HExpr, span: Span) -> HExpr {
         match plan {
+            IterPlan::Builtin(IterKind::List) if self.is_enumerate_for(&ih, &pat) => self.enumerate_for(ih, pat, body, span),
             IterPlan::Builtin(kind) => mk(HKind::For { pat, iter: Box::new(ih), kind, body: Box::new(body) }, Type::Unit, span),
             // `{ let it = ih; while let Some(pat) = <next> { body } }`, or a
             // fused pipeline (see `fuse`).

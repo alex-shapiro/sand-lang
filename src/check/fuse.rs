@@ -83,6 +83,8 @@ enum Role {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FuseFns {
     roles: HashMap<FnId, Role>,
+    /// The native id of `[T].enumerate` (see `enumerate_for`).
+    list_enumerate: Option<u32>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -166,10 +168,14 @@ impl Checker<'_> {
 
     fn find_fuse_fns(&self) -> FuseFns {
         let mut roles = HashMap::new();
-        let (Some(iter), Some(prelude)) = (self.iter_struct, self.prelude) else { return FuseFns { roles } };
+        let mut list_enumerate = None;
+        let (Some(iter), Some(prelude)) = (self.iter_struct, self.prelude) else { return FuseFns { roles, list_enumerate } };
         for (id, fi) in self.fns.iter().enumerate() {
             if fi.module != prelude || !fi.has_self {
                 continue;
+            }
+            if let (Some(Ctor::List), "enumerate", super::FnKind::Native(n)) = (&fi.owner, fi.name.as_str(), &fi.kind) {
+                list_enumerate = Some(*n);
             }
             let eager = |range: bool, stage: Option<Adapter>, consumer: Consumer| Role::Eager { range, stage, consumer };
             let role = match (&fi.owner, fi.name.as_str()) {
@@ -218,7 +224,7 @@ impl Checker<'_> {
             };
             roles.insert(id as FnId, role);
         }
-        FuseFns { roles }
+        FuseFns { roles, list_enumerate }
     }
 
     /// The element type of an `Iter<T>` type.
@@ -494,6 +500,52 @@ impl Checker<'_> {
 
     fn none_rt(&self) -> u32 {
         self.types[self.wk.option as usize].variants()[1].rt_id
+    }
+
+    /// Whether a loop over `iter` binding `pat` is `for (i, x) in
+    /// xs.enumerate()`, which `enumerate_for` lowers.
+    pub(crate) fn is_enumerate_for(&mut self, iter: &HExpr, pat: &HPat) -> bool {
+        if self.fuse_fns.is_none() {
+            // (Finds the tables; any prelude function will do.)
+            let _ = self.fuse_role(0);
+        }
+        let enumerate = self.fuse_fns.as_ref().and_then(|t| t.list_enumerate);
+        matches!(&iter.kind, HKind::CallNative { native, args, .. } if Some(*native) == enumerate && matches!(args[..], [HArg::Expr(_)]))
+            && matches!(&pat.kind, HPatKind::Tuple(ps) if ps.len() == 2)
+    }
+
+    /// `for (i, x) in xs.enumerate() { body }` (see `is_enumerate_for`)
+    /// without building the list of pairs: the loop runs over a copy of
+    /// `xs` (as `enumerate` copies its elements when called) with a counter.
+    pub(crate) fn enumerate_for(&mut self, iter: HExpr, pat: HPat, body: HExpr, span: Span) -> HExpr {
+        let HKind::CallNative { args, .. } = iter.kind else { unreachable!() };
+        let Some(HArg::Expr(list)) = args.into_iter().next() else { unreachable!() };
+        let HPatKind::Tuple(mut ps) = pat.kind else { unreachable!() };
+        let (px, pi) = (ps.pop().unwrap(), ps.pop().unwrap());
+        let mut stmts = Vec::new();
+        let list_ty = list.ty.clone();
+        let copy =
+            mk(HKind::Slice { obj: Box::new(list), start: None, end: None, inclusive: false, kind: SeqKind::List }, list_ty.clone(), span);
+        let snap = self.bind_tmp(copy, &mut stmts);
+        let n = self.bind_tmp(int(0, span), &mut stmts);
+        let x = self.hidden_local(px.ty.clone(), span);
+        let x_ty = px.ty.clone();
+        let body = block(
+            vec![
+                mk(HKind::Let { pat: pi, init: Box::new(local(n, Type::Int, span)), else_: None }, Type::Unit, span),
+                add_assign(n, 1, span),
+                mk(HKind::Let { pat: px, init: Box::new(local(x, x_ty.clone(), span)), else_: None }, Type::Unit, span),
+                body,
+            ],
+            span,
+        );
+        let lp = mk(
+            HKind::For { pat: bind(x, x_ty, span), iter: Box::new(local(snap, list_ty, span)), kind: IterKind::List, body: Box::new(body) },
+            Type::Unit,
+            span,
+        );
+        stmts.push(lp);
+        block(stmts, span)
     }
 
     /// Whether `iter` is a pipeline that `fuse_for` can fuse.
