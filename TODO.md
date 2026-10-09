@@ -17,9 +17,6 @@ Follow-up work, roughly in priority order.
 - [ ] **HTTP server fairness.** `accept` reads up to 64 pending connections
       at once; 64+ idle connections can still delay a new request by up to
       30s, and a waiting `accept` holds up to half the free resource slots.
-- [ ] **Caught Rust panics in sessions.** After an internal panic is caught,
-      the VM is memory safe but may be inconsistent; a session should be
-      reset automatically.
 - [ ] **Small accounting gaps.** Fixed 8 KiB per-connection buffers aren't
       counted against `max_memory`; checks made inside a native may overrun
       `max_instructions` by up to one slice (20,000 units); the bytecode
@@ -35,9 +32,11 @@ Follow-up work, roughly in priority order.
 
 ### Tooling
 
-- [ ] REPL: background tasks only progress while an input runs; `:type` on
-      generic functions shows inference variables; redefining a type can give
-      messages like "expected Point, found Point".
+- [ ] REPL line editing: output of background tasks re-prints the prompt but
+      not the text typed after it (it stays in the terminal's line buffer);
+      a line editor (history, redraw) would fix this. A script read of
+      standard input started during an input and still pending between
+      inputs competes with the REPL for lines.
 
 ### Performance
 

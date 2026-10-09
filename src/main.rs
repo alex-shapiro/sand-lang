@@ -529,8 +529,10 @@ const REPL_HELP: &str = "\
 Enter statements, expressions and declarations; each input runs once, in the
 context of the previous ones. The value of a final expression is shown (end
 the input with `;` to hide it). Input continues on `...` lines while brackets,
-strings or comments are open. Ctrl-C interrupts a running input (or discards
-a partial one); Ctrl-D or :quit exits.
+strings or comments are open. Tasks spawned by an input keep running, also
+while the REPL waits for input. Ctrl-C interrupts a running input (and cancels
+all tasks), discards a partial input, or at an empty prompt cancels the tasks
+left running; Ctrl-D or :quit exits.
 
 COMMANDS:
     :help          show this help
@@ -548,25 +550,50 @@ fn cmd_repl(args: &[String]) -> Result<u8, String> {
         return Err(format!("unexpected argument `{}` (`sand repl` takes options only)", f.display()));
     }
     let rt = runtime()?;
-    let mut session = Engine::new(opts.config).session();
+    let prompt = PromptLine::default();
+    let config =
+        opts.config.stdout(ReplSink { prompt: prompt.clone(), stderr: false }).stderr(ReplSink { prompt: prompt.clone(), stderr: true });
+    let mut session = Engine::new(config).session();
     println!("sand {} — :help for help, :quit to exit", env!("CARGO_PKG_VERSION"));
-    Ok(rt.block_on(repl(&mut session)))
+    Ok(rt.block_on(repl(&mut session, &prompt)))
 }
 
-async fn repl(session: &mut sandlang::Session) -> u8 {
+async fn repl(session: &mut sandlang::Session, prompt: &PromptLine) -> u8 {
     let mut lines = LineReader::new();
     let mut input = String::new();
     loop {
-        print!("{}", if input.is_empty() { "> " } else { "... " });
-        let _ = std::io::stdout().flush();
-        let line = tokio::select! {
-            line = lines.next() => line,
-            Ok(()) = tokio::signal::ctrl_c() => {
-                // Discard the partial input.
-                println!();
-                input.clear();
-                continue;
+        prompt.show(if input.is_empty() { "> " } else { "... " });
+        // Background tasks run while the REPL waits for a line (or Ctrl-C).
+        let next = async {
+            tokio::select! {
+                line = lines.next() => Some(line),
+                Ok(()) = tokio::signal::ctrl_c() => None,
             }
+        };
+        let on_error = |e: Error| {
+            prompt.output(|| {
+                report_repl_error(&e, "");
+                eprintln!("(in a background task; all tasks were cancelled)");
+            })
+        };
+        let got = session.run_tasks_until(next, on_error).await;
+        prompt.hide();
+        let Some(got) = got else {
+            // A background task called `exit`.
+            return exit_status(session.exit_code().unwrap_or(0));
+        };
+        let Some(line) = got else {
+            // Ctrl-C: discard the partial input, or cancel the tasks left running.
+            println!();
+            if input.is_empty() {
+                match session.cancel_tasks() {
+                    0 => {}
+                    1 => eprintln!("cancelled 1 task"),
+                    n => eprintln!("cancelled {n} tasks"),
+                }
+            }
+            input.clear();
+            continue;
         };
         let Some(line) = line else {
             // End of input: run what was entered.
@@ -647,6 +674,91 @@ fn report_repl_error(e: &Error, input: &str) {
             }
         }
         _ => eprintln!("{e}"),
+    }
+}
+
+/// The REPL's prompt, while it waits for input: output written meanwhile (by
+/// background tasks) starts on a new line, and the prompt is shown again
+/// after it. (Text typed after the prompt stays in the terminal's line buffer,
+/// but is not shown again.)
+#[derive(Clone, Default)]
+struct PromptLine(std::sync::Arc<std::sync::Mutex<PromptState>>);
+
+#[derive(Default)]
+struct PromptState {
+    /// The prompt, while waiting for input.
+    prompt: Option<&'static str>,
+    /// Whether the prompt ends the output so far.
+    visible: bool,
+}
+
+impl PromptLine {
+    fn state(&self) -> std::sync::MutexGuard<'_, PromptState> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Prints `prompt` and waits for input.
+    fn show(&self, prompt: &'static str) {
+        let mut st = self.state();
+        let mut out = std::io::stdout().lock();
+        let _ = out.write_all(prompt.as_bytes());
+        let _ = out.flush();
+        *st = PromptState { prompt: Some(prompt), visible: true };
+    }
+
+    /// Stops waiting for input.
+    fn hide(&self) {
+        *self.state() = PromptState::default();
+    }
+
+    /// Writes output with `write`, which ends a line if `ends_line`.
+    fn write<R>(&self, ends_line: bool, write: impl FnOnce() -> R) -> R {
+        let mut st = self.state();
+        if st.visible {
+            let mut out = std::io::stdout().lock();
+            let _ = out.write_all(b"\n");
+            let _ = out.flush();
+            st.visible = false;
+        }
+        let r = write();
+        if let Some(prompt) = st.prompt
+            && ends_line
+        {
+            let mut out = std::io::stdout().lock();
+            let _ = out.write_all(prompt.as_bytes());
+            let _ = out.flush();
+            st.visible = true;
+        }
+        r
+    }
+
+    /// Writes whole lines with `write`.
+    fn output(&self, write: impl FnOnce()) {
+        self.write(true, write)
+    }
+}
+
+/// Standard output or error of the REPL's scripts (see [`PromptLine`]).
+struct ReplSink {
+    prompt: PromptLine,
+    stderr: bool,
+}
+
+impl sandlang::OutputSink for ReplSink {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<()> {
+        self.prompt.write(data.ends_with(b"\n"), || {
+            if self.stderr {
+                std::io::stderr().lock().write_all(data)
+            } else {
+                let mut out = std::io::stdout().lock();
+                out.write_all(data)?;
+                out.flush()
+            }
+        })
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if self.stderr { std::io::stderr().flush() } else { std::io::stdout().flush() }
     }
 }
 

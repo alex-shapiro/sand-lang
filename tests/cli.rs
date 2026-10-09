@@ -10,7 +10,7 @@
 mod common;
 
 use common::TempDir;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -493,12 +493,13 @@ fn repl_reports_errors_and_continues() {
 #[test]
 fn repl_commands() {
     let dir = TempDir::new("repl-commands");
-    let input = ":help\nlet xs = [1, 2]\n:type xs.map(x => x.to_float())\n:type undefined_name\n:type let z = 1\n\
+    let input = ":help\nlet xs = [1, 2]\n:type xs.map(x => x.to_float())\nfn id<T>(x: T) -> T { x }\n:type id\n:type undefined_name\n:type let z = 1\n\
                  test \"len\" { assert(xs.len() == 2) }\ntest \"bad\" { assert(false, \"nope\") }\n:test\n:reset\nxs\n:nope\n:q\n1\n";
     let o = sand_in(dir.path(), &["repl"], input, &[]);
     assert_eq!(o.code, 0, "{o:?}");
     assert!(o.stdout.contains(":type EXPR"), "{o:?}");
     assert!(o.stdout.contains("> [float]\n"), "{o:?}");
+    assert!(o.stdout.contains("> fn<T>(T) -> T\n"), "{o:?}");
     assert!(o.stdout.contains("ok len\nFAIL bad: nope\n1 passed, 1 failed\n"), "{o:?}");
     assert!(o.stderr.contains("undefined name `undefined_name`"), "{o:?}");
     assert!(o.stderr.contains("expected an expression"), "{o:?}");
@@ -567,4 +568,117 @@ fn repl_ctrl_c_interrupts_the_input() {
     assert_eq!(repl_shown(&o.stdout), ["true", "42"], "{o:?}");
     assert!(o.stderr.contains("interrupted"), "{o:?}");
     assert!(o.stderr.contains("undefined name `half_done`"), "{o:?}");
+}
+
+/// A running `sand repl` whose standard output and error are collected as
+/// they arrive.
+struct LiveRepl {
+    child: std::process::Child,
+    input: Option<std::process::ChildStdin>,
+    /// Standard output and error so far.
+    streams: [std::sync::Arc<std::sync::Mutex<String>>; 2],
+    readers: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl LiveRepl {
+    fn start(dir: &Path) -> LiveRepl {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_sand"))
+            .arg("repl")
+            .current_dir(dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("cannot start sand");
+        let input = child.stdin.take();
+        let streams: [std::sync::Arc<std::sync::Mutex<String>>; 2] = Default::default();
+        let sources: [Box<dyn std::io::Read + Send>; 2] = [Box::new(child.stdout.take().unwrap()), Box::new(child.stderr.take().unwrap())];
+        let readers = sources
+            .into_iter()
+            .zip(streams.clone())
+            .map(|(mut source, collected)| {
+                std::thread::spawn(move || {
+                    let mut buf = [0u8; 4096];
+                    while let Ok(n @ 1..) = source.read(&mut buf) {
+                        collected.lock().unwrap().push_str(&String::from_utf8_lossy(&buf[..n]));
+                    }
+                })
+            })
+            .collect();
+        LiveRepl { child, input, streams, readers }
+    }
+
+    fn send(&mut self, text: &str) {
+        self.input.as_mut().unwrap().write_all(text.as_bytes()).unwrap();
+    }
+
+    /// Waits until standard output (0) or error (1) contains `text`.
+    fn wait_for(&self, stream: usize, text: &str) {
+        let start = std::time::Instant::now();
+        while !self.streams[stream].lock().unwrap().contains(text) {
+            assert!(start.elapsed() < std::time::Duration::from_secs(20), "no {text:?} in {:?}", self.streams[stream].lock().unwrap());
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// Waits for the REPL to end by itself (standard input stays open).
+    fn wait_exit(&mut self) {
+        let start = std::time::Instant::now();
+        while self.child.try_wait().unwrap().is_none() {
+            assert!(start.elapsed() < std::time::Duration::from_secs(20), "sand did not exit");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// Closes standard input and waits for the REPL to end.
+    fn finish(mut self) -> Out {
+        drop(self.input.take());
+        let status = self.child.wait().unwrap();
+        for r in self.readers {
+            r.join().unwrap();
+        }
+        let [stdout, stderr] = self.streams.map(|s| s.lock().unwrap().clone());
+        Out { code: status.code().expect("sand was killed by a signal"), stdout, stderr }
+    }
+}
+
+/// Tasks keep running while the REPL waits for input; their output starts on
+/// a line of its own and is followed by the prompt again.
+#[test]
+fn repl_runs_tasks_while_waiting_for_input() {
+    let dir = TempDir::new("repl-background");
+    let mut repl = LiveRepl::start(dir.path());
+    repl.send("var n = 0\nlet t = spawn {\ntask.sleep(200ms)\nn = 1\nprint(\"tick\")\n}\n");
+    repl.wait_for(0, "tick\n");
+    repl.send("n\nspawn { task.sleep(100ms)\npanic(\"bad task\") };\n");
+    repl.wait_for(1, "(in a background task; all tasks were cancelled)\n");
+    repl.send("spawn { task.sleep(100ms)\nexit(3) };\n");
+    repl.wait_exit();
+    let o = repl.finish();
+    assert_eq!(o.code, 3, "{o:?}");
+    assert!(o.stdout.contains("> \ntick\n> "), "{o:?}");
+    assert_eq!(repl_shown(&o.stdout), ["tick", "1"], "{o:?}");
+    assert!(
+        o.stderr.contains("panic: bad task\n    at <spawn> (<input 4>:2)\n(in a background task; all tasks were cancelled)\n"),
+        "{o:?}"
+    );
+}
+
+/// Ctrl-C at an empty prompt cancels the tasks left running.
+#[cfg(unix)]
+#[test]
+fn repl_ctrl_c_cancels_tasks() {
+    let dir = TempDir::new("repl-sigint-tasks");
+    let mut repl = LiveRepl::start(dir.path());
+    repl.send("let t = spawn { while true { task.yield_now() } }\n1 + 1\n");
+    repl.wait_for(0, "2\n> ");
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let sent = Command::new("kill").args(["-INT", &repl.child.id().to_string()]).status().is_ok_and(|s| s.success());
+    assert!(sent, "cannot send SIGINT");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    repl.send("t.wait()\n");
+    let o = repl.finish();
+    assert_eq!(o.code, 0, "{o:?}");
+    assert!(o.stderr.contains("cancelled 1 task\n"), "{o:?}");
+    assert!(o.stderr.contains("task cancelled"), "{o:?}");
 }

@@ -100,7 +100,8 @@ impl Checker<'_> {
         if self.unify(expected, found) {
             return true;
         }
-        let msg = format!("type mismatch: expected {}, found {}", self.show(expected), self.show(found));
+        let (e, f) = self.show_pair(expected, found);
+        let msg = format!("type mismatch: expected {e}, found {f}");
         self.error(span, msg);
         false
     }

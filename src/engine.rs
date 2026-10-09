@@ -668,7 +668,7 @@ impl Engine {
     // Loading and compiling
 
     /// Records "always" answers given during a run.
-    fn remember_always(&self, answers: &HashMap<Capability, bool>) {
+    pub(crate) fn remember_always(&self, answers: &HashMap<Capability, bool>) {
         if !answers.is_empty() {
             self.always.lock().unwrap_or_else(|e| e.into_inner()).extend(answers.iter().map(|(c, d)| (c.clone(), *d)));
         }

@@ -249,12 +249,26 @@ pub struct TypePrinter<'a> {
 
 impl TypePrinter<'_> {
     pub fn show(&self, t: &Type) -> String {
-        let mut s = String::new();
-        self.write(&mut s, t);
-        s
+        self.show_tagged(t, &|_| None)
     }
 
+    /// Like `show`, adding `tag(d)` (if any) in parentheses after the name
+    /// of each type definition `d`.
+    pub fn show_tagged(&self, t: &Type, tag: &dyn Fn(TypeDefId) -> Option<String>) -> String {
+        let mut s = String::new();
+        Tagged { p: self, tag }.write(&mut s, t);
+        s
+    }
+}
+
+struct Tagged<'p, 'a> {
+    p: &'p TypePrinter<'a>,
+    tag: &'p dyn Fn(TypeDefId) -> Option<String>,
+}
+
+impl Tagged<'_, '_> {
     fn write(&self, s: &mut String, t: &Type) {
+        let TypePrinter { defs, params, wk } = self.p;
         match t {
             Type::Int => s.push_str("int"),
             Type::Float => s.push_str("float"),
@@ -267,7 +281,7 @@ impl TypePrinter<'_> {
             Type::Range => s.push_str("Range"),
             Type::Error => s.push_str("{error}"),
             Type::Var(_) => s.push('_'),
-            Type::Param(p) => s.push_str(self.params.get(*p as usize).map(|p| p.name.as_str()).unwrap_or("?")),
+            Type::Param(p) => s.push_str(params.get(*p as usize).map(|p| p.name.as_str()).unwrap_or("?")),
             Type::List(t) => {
                 s.push('[');
                 self.write(s, t);
@@ -310,7 +324,9 @@ impl TypePrinter<'_> {
                 }
             }
             Type::Named(d, args) => {
-                if *d == self.wk.option && args.len() == 1 {
+                // (`Option<Point (defined in ...)>` rather than a `?` after the tag.)
+                let tagged = matches!(&args[..], [Type::Named(e, _)] if (self.tag)(*e).is_some());
+                if *d == wk.option && args.len() == 1 && !tagged {
                     let needs_parens = matches!(args[0], Type::Fn(..));
                     if needs_parens {
                         s.push('(');
@@ -322,7 +338,7 @@ impl TypePrinter<'_> {
                     s.push('?');
                     return;
                 }
-                let name = self.defs.get(*d as usize).map(|d| d.name.as_str()).unwrap_or("?");
+                let name = defs.get(*d as usize).map(|d| d.name.as_str()).unwrap_or("?");
                 s.push_str(name);
                 if !args.is_empty() {
                     s.push('<');
@@ -334,10 +350,15 @@ impl TypePrinter<'_> {
                     }
                     s.push('>');
                 }
+                if let Some(tag) = (self.tag)(*d) {
+                    let _ = write!(s, " ({tag})");
+                }
             }
         }
     }
+}
 
+impl TypePrinter<'_> {
     /// `fn name(a: int, b: str = ...) -> T`
     pub fn signature(&self, name: &str, params: &[(String, Type, bool)], ret: &Type) -> String {
         let mut s = format!("fn {name}(");

@@ -2160,7 +2160,8 @@ let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 
   operation or a prompter) does not unwind into the host: it ends the run
   (or session input, or test) like a script panic, with `Error::Runtime`
   whose message starts with `internal error:`. This requires panics to
-  unwind (the default `panic = "unwind"`).
+  unwind (the default `panic = "unwind"`). A session in which this happens
+  is reset (below).
 
 **Sessions.** `Engine::session()` returns a `Session`, which runs inputs one
 at a time with the semantics of `sand repl` (§17.6), using the engine's
@@ -2183,6 +2184,22 @@ assert_eq!(session.eval("hit() + hit()").await?, Some("3".to_string()));
   far, against the current state.
 - `reset()` forgets all inputs. `interrupt_handle()` interrupts the input being
   run (the engine's own handle does not affect sessions).
+- `run_tasks_until(until, on_error) -> Option<T>` runs the tasks that earlier
+  inputs left running until the future `until` completes, and returns its
+  output; a front end calls it while waiting for the next input, so that
+  tasks keep running between inputs (§17.6). The instruction, CPU time and
+  output limits apply to each call as to an input; the wall-time limit does
+  not apply. Permission prompts and reads of standard input wait until
+  `until` has completed. If a task fails (panic, limit, interruption), all
+  tasks are cancelled and the error is passed to `on_error` at once; the call
+  then goes on waiting. If a task calls `exit`, it returns `None` at once.
+  `cancel_tasks()` cancels the tasks left running.
+- After an internal error (a caught Rust panic, see above) in `eval`,
+  `run_tests`, `type_of` or `run_tasks_until`, the session's state may be
+  inconsistent, so it is reset as by `reset()`: the error's message ends with
+  `" (the session was reset)"` (`sandlang::session::RESET_NOTE`), and
+  `was_reset()` returns true until the next call. "Always" answers given
+  before are kept.
 - `Session::is_complete(source)` tells whether a line-based front end should
   read more lines before evaluating (§17.6).
 - `Session: Send`; its futures are `Send`. A session shares the "always"
@@ -2334,13 +2351,21 @@ and run **exactly once**; state persists between inputs.
   had not initialised yet remain uninitialised (reading them panics, §3.1). A
   top-level `?` that meets an `Err` aborts the input like a panic whose
   message is the error.
-- Tasks spawned by an input keep running while later inputs run (nothing runs
-  between inputs) and can be awaited by them. A panic in any task fails the
-  input being run. After a failed input, all tasks are cancelled.
+- Tasks spawned by an input keep running while later inputs run, and while
+  the REPL waits for input, and can be awaited by later inputs. A panic in
+  any task fails the input being run (or, between inputs, is reported as
+  such). After a failed input or task, all tasks are cancelled. While the
+  REPL waits for input, the tasks' output starts on a new line and the
+  prompt is shown again after it; their permission prompts and reads of
+  standard input wait until a line has been entered.
 - `exit(code)` ends the session with exit code `code`.
 - The instruction, CPU time, wall time and output limits apply to each input
-  separately; the memory limit applies to the session's heap. "Always"
-  answers to prompts apply to the rest of the session.
+  separately; the memory limit applies to the session's heap. Between
+  inputs, the instruction, CPU time and output limits apply to the tasks'
+  work during each wait for input; the wall-time limit does not apply then.
+  "Always" answers to prompts apply to the rest of the session.
+- After an internal error (a bug in the engine or in a host native, §16) the
+  session is reset, as by `:reset`, and the error says so.
 - `test` blocks are checked but not run when entered.
 
 Input lines are read until the input is complete: while brackets, a string or
@@ -2348,7 +2373,8 @@ a block comment are open, or the last token is a binary operator, `=`, `,`,
 `.`, `:`, `=>`, `->`, `else` or a similar token that cannot end a statement,
 or the last line is a doc comment (`///`, which belongs to the next item), the
 REPL prompts with `...` for more. Ctrl-C interrupts the input being run
-(the session continues) or discards a partially entered input; end of input
+(the session continues), discards a partially entered input, or, at an empty
+prompt, cancels the tasks left running; end of input
 (Ctrl-D) ends the session, running any partial input first. Results are
 printed on standard output, diagnostics and errors on standard error. The
 REPL's input is also the scripts' standard input (`--allow-stdin`); when it is
@@ -2359,7 +2385,7 @@ Commands (on a line of their own):
 | Command      | Effect                                                         |
 | ------------ | -------------------------------------------------------------- |
 | `:help`      | show the commands                                              |
-| `:type EXPR` | show the type of an expression without running it             |
+| `:type EXPR` | show the type of an expression without running it (a generic function as `fn<T: Ord>([T]) -> T?`) |
 | `:test`      | run the `test` blocks entered so far, against the current state (the last block of each name; effects persist), and print a report as `sand test` does |
 | `:reset`     | forget all inputs and start a fresh session ("always" answers are kept) |
 | `:quit`, `:q` | end the session (exit code 0)                                 |
@@ -2378,6 +2404,12 @@ error[E0308]: type mismatch: expected int, found str
  3 | let x: int = "hi"
    |              ^^^^
 ```
+
+When a type mismatch involves distinct types of the same name (from two
+modules, or a type a REPL input defined again), each is followed by where it
+is defined: `expected Point (defined in input 3), found Point (defined in
+input 1)`, `... (defined in module geo)`; an optional such type is shown as
+`Option<Point (defined in ...)>`.
 
 The checker continues after errors where possible and reports up to 50 errors
 per run. Parse errors stop checking of the affected module.

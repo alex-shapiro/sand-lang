@@ -68,7 +68,8 @@ impl Checker<'_> {
     pub(crate) fn check_expr(&mut self, e: &Expr, expected: &Type) -> HExpr {
         let h = self.infer_inner(e, Some(expected), true);
         if !self.unify(expected, &h.ty) {
-            let msg = format!("type mismatch: expected {}, found {}", self.show(expected), self.show(&h.ty));
+            let (want, got) = self.show_pair(expected, &h.ty);
+            let msg = format!("type mismatch: expected {want}, found {got}");
             self.error(e.span, msg);
         }
         h
@@ -947,6 +948,12 @@ impl Checker<'_> {
     pub(crate) fn instantiate_fn_with(&mut self, f: FnId, span: Span, pre: &[(ParamId, Type)]) -> Instance {
         let fi = self.fns[f as usize].clone();
         let fresh: Vec<Type> = fi.generics.iter().map(|_| self.fresh()).collect();
+        if let Some(q) = &mut self.type_query {
+            q.origins.extend(fi.generics.iter().zip(&fresh).filter_map(|(&g, v)| match v {
+                Type::Var(v) => Some((*v, g)),
+                _ => None,
+            }));
+        }
         for (p, t) in pre {
             if let Some(i) = fi.generics.iter().position(|g| g == p) {
                 self.unify(&fresh[i], t);
@@ -1888,7 +1895,8 @@ impl Checker<'_> {
             };
         }
         if !self.unify(&l, &r) {
-            let msg = format!("type mismatch: expected {}, found {}", self.show(&l), self.show(&r));
+            let (e, f) = self.show_pair(&l, &r);
+            let msg = format!("type mismatch: expected {e}, found {f}");
             self.error(span, msg);
             return Type::Error;
         }
