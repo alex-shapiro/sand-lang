@@ -168,8 +168,9 @@ impl<'a> Parser<'a> {
     fn leave(&mut self) {
         self.depth -= 1;
     }
-    fn line_of(&self, pos: u32) -> usize {
-        self.src[..pos as usize].bytes().filter(|&b| b == b'\n').count()
+    /// Whether `lo..hi` lies on one line (no newline between them).
+    fn same_line(&self, lo: u32, hi: u32) -> bool {
+        !self.src.as_bytes()[lo as usize..hi.max(lo) as usize].contains(&b'\n')
     }
 
     /// Doc comment (`///`) immediately preceding byte offset `lo`.
@@ -572,7 +573,7 @@ impl<'a> Parser<'a> {
         }
         let close = self.lo();
         self.expect(&Tok::RBrace, "`}`")?;
-        let inline = self.line_of(lo) == self.line_of(close);
+        let inline = self.same_line(lo, close);
         Ok(StructDecl { name, generics, fields, methods, is_pub, doc, inline })
     }
 
@@ -623,7 +624,7 @@ impl<'a> Parser<'a> {
         }
         let close = self.lo();
         self.expect(&Tok::RBrace, "`}`")?;
-        let inline = self.line_of(lo) == self.line_of(close);
+        let inline = self.same_line(lo, close);
         Ok(EnumDecl { name, generics, variants, methods, is_pub, doc, inline })
     }
 
@@ -856,7 +857,7 @@ impl<'a> Parser<'a> {
         self.no_struct = saved;
         let close = self.lo();
         self.expect(&Tok::RBrace, "`}`")?;
-        let inline = self.line_of(lo) == self.line_of(close);
+        let inline = self.same_line(lo, close);
         Ok(Block { stmts, span: self.span_from(lo), inline })
     }
 
@@ -1453,7 +1454,7 @@ impl<'a> Parser<'a> {
                 self.no_struct = saved;
                 let close = self.lo();
                 self.expect(&Tok::RBrace, "`}`")?;
-                let inline = self.line_of(lo) == self.line_of(close);
+                let inline = self.same_line(lo, close);
                 Ok(self.mk(ExprKind::Match { scrutinee: Box::new(scrutinee), arms, inline }, self.span_from(lo)))
             }
             Tok::At => {

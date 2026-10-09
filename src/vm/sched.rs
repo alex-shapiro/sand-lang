@@ -94,6 +94,9 @@ impl IoTable {
     }
 }
 
+/// Slices run between clock readings at most (see `Vm::run_main`).
+const CLOCK_SLICES: u32 = 32;
+
 /// Result of running the program's main task.
 pub enum RunEnd {
     Finished(Value),
@@ -174,7 +177,14 @@ impl Vm {
         let start = Instant::now();
         let mut paused = Duration::ZERO;
         let mut cpu = Duration::ZERO;
-        let mut last_yield = Instant::now();
+        // CPU time is measured from `now`, the last clock reading. Short
+        // slices (tasks that finish or block quickly) do not read the clock
+        // each: it is read after `CLOCK_SLICES` slices or `SLICE_FUEL` units
+        // of fuel, and before and after anything that waits, so CPU time is
+        // never more than about one slice behind.
+        let mut now = Instant::now();
+        let mut last_yield = now;
+        let (mut unclocked_slices, mut unclocked_fuel) = (0u32, 0u64);
         // Where an instruction was retried after a memory limit error, until
         // the task makes progress.
         let mut gc_retried: Option<(u32, usize, u32)> = None;
@@ -187,7 +197,7 @@ impl Vm {
                 }
                 self.current = fid;
                 let mut fuel = SLICE_FUEL;
-                let t0 = Instant::now();
+                let t0 = now;
                 // Deadlines let long natives check the time limits mid-call.
                 let l = &self.host.limits;
                 let cpu_deadline = l.max_cpu_time.and_then(|m| t0.checked_add(m.saturating_sub(cpu)));
@@ -200,8 +210,15 @@ impl Vm {
                     Ok(r) => r,
                     Err(msg) => Err(Trap::Panic { message: format!("internal error: {msg}"), trace: self.trace_of(&f, None) }),
                 };
-                cpu += t0.elapsed();
-                self.fuel_used += (SLICE_FUEL - fuel).max(0) as u64 + self.meter.spent();
+                let spent = (SLICE_FUEL - fuel).max(0) as u64 + self.meter.spent();
+                self.fuel_used += spent;
+                unclocked_slices += 1;
+                unclocked_fuel += spent;
+                if unclocked_slices >= CLOCK_SLICES || unclocked_fuel >= SLICE_FUEL as u64 {
+                    now = Instant::now();
+                    cpu += now.saturating_duration_since(t0);
+                    (unclocked_slices, unclocked_fuel) = (0, 0);
+                }
                 self.current = u32::MAX;
                 let exit = match r {
                     Ok(e) => {
@@ -258,11 +275,14 @@ impl Vm {
                         self.ready.push_front(fid);
                         let prompter = self.host.prompter.clone();
                         let t = Instant::now();
+                        cpu += t.saturating_duration_since(now);
+                        (unclocked_slices, unclocked_fuel) = (0, 0);
                         let answer = match prompter {
                             Some(p) => p.prompt(cap.clone()).await,
                             None => PromptAnswer::DenyOnce,
                         };
-                        paused += t.elapsed();
+                        now = Instant::now();
+                        paused += now.saturating_duration_since(t);
                         self.apply_answer(cap, answer);
                     }
                     Exit::Terminate(c) => return Ok(RunEnd::Exit(c)),
@@ -281,12 +301,15 @@ impl Vm {
                 }
                 self.check_limits(start, paused, cpu)?;
                 // Keep I/O flowing and let other host tasks run.
-                if last_yield.elapsed() > Duration::from_millis(2) {
+                if now.saturating_duration_since(last_yield) > Duration::from_millis(2) {
                     self.heap.io_memory.publish_heap(self.heap.used());
                     let done = self.io.poll_ready(None);
                     self.apply_completions(done)?;
+                    cpu += Instant::now().saturating_duration_since(now);
                     tokio::task::yield_now().await;
-                    last_yield = Instant::now();
+                    now = Instant::now();
+                    last_yield = now;
+                    (unclocked_slices, unclocked_fuel) = (0, 0);
                 }
             }
             // Nothing is ready: wait for I/O.
@@ -297,6 +320,8 @@ impl Vm {
                 };
                 return Err(Trap::Panic { message: "deadlock: all tasks are blocked".into(), trace });
             }
+            cpu += Instant::now().saturating_duration_since(now);
+            (unclocked_slices, unclocked_fuel) = (0, 0);
             let remaining = self.host.limits.max_wall_time.map(|m| m.saturating_sub(start.elapsed().saturating_sub(paused)));
             let mut sleep = remaining.map(|r| Box::pin(tokio::time::sleep(r)));
             let interrupt = self.host.interrupt.clone();
@@ -320,7 +345,8 @@ impl Vm {
             .await;
             self.apply_completions(done)?;
             self.check_limits(start, paused, cpu)?;
-            last_yield = Instant::now();
+            now = Instant::now();
+            last_yield = now;
         }
     }
 }

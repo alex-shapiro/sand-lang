@@ -17,6 +17,7 @@ struct Bench {
 }
 
 const BENCHES: &[Bench] = &[
+    Bench { name: "startup (empty program)", source: "print(1)", expected: "1\n", ops: 0 },
     Bench {
         name: "fib(30) recursive calls",
         source: "fn fib(n: int) -> int { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }\nprint(fib(30))",

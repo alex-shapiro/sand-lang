@@ -113,6 +113,13 @@ pub const MAX_STACK_SLOTS: usize = 64 * 1024 * 1024;
 /// Initial number of stack slots of a new fiber.
 const INITIAL_STACK_SLOTS: usize = 64;
 
+/// At most this many finished fibers are kept for reuse, and only those
+/// whose stack and frame list are small (a few MB at most, counted against
+/// the memory limit and freed before a memory limit error is reported).
+const MAX_SPARE_FIBERS: usize = 4096;
+const MAX_SPARE_STACK_SLOTS: usize = 1024;
+const MAX_SPARE_FRAMES: usize = 64;
+
 /// Lists of waiting fibers (task waiters, channel receivers) are pruned of
 /// stale entries (cancelled waits) once they reach this length, and then
 /// again at twice their length after pruning.
@@ -271,6 +278,8 @@ pub struct Vm {
     pub consts: Vec<Value>,
     pub fibers: Vec<Option<Box<Fiber>>>,
     pub free_fibers: Vec<u32>,
+    /// Finished fibers kept for reuse by `spawn_fiber` (see `recycle_fiber`).
+    spare_fibers: Vec<Box<Fiber>>,
     pub ready: VecDeque<u32>,
     pub current: u32,
     pub main_fiber: u32,
@@ -366,6 +375,7 @@ impl Vm {
             consts,
             fibers: Vec::new(),
             free_fibers: Vec::new(),
+            spare_fibers: Vec::new(),
             ready: VecDeque::new(),
             current: 0,
             main_fiber: 0,
@@ -684,26 +694,42 @@ impl Vm {
         };
         let nregs = self.prog.protos[proto as usize].nregs as usize;
         let Value::Obj(closure) = closure else { return panic("spawn: not a closure") };
-        let mut frames = Vec::with_capacity(8);
-        frames.push(Frame { proto, ip: 0, base: 0, ret: 0, closure });
-        let stack = nregs.max(INITIAL_STACK_SLOTS);
-        if self.heap.would_exceed(stack * std::mem::size_of::<Value>()) {
-            return Err(Ctl::Limit(crate::LimitKind::Memory));
-        }
-        let fiber = Box::new(Fiber {
-            stack: vec![Value::Unit; stack],
-            frames,
-            task,
-            state: FiberState::Ready,
-            wgen: 0,
-            result_slot: 0,
-            race: vec![],
-            waiters: vec![],
-            waiters_prune_at: MIN_PRUNE,
-            io: None,
-            pending_panic: None,
-        });
-        self.heap.fiber_bytes += fiber.footprint();
+        let frame = Frame { proto, ip: 0, base: 0, ret: 0, closure };
+        let fiber = match self.spare_fibers.pop() {
+            // A recycled fiber is already counted in `fiber_bytes`, and its
+            // stack is all `Unit` (see `recycle_fiber`).
+            Some(mut f) if f.stack.len() >= nregs => {
+                f.frames.push(frame);
+                f.task = task;
+                f
+            }
+            spare => {
+                if let Some(f) = spare {
+                    self.heap.fiber_bytes = self.heap.fiber_bytes.saturating_sub(f.footprint());
+                }
+                let stack = nregs.max(INITIAL_STACK_SLOTS);
+                if self.heap.would_exceed(stack * std::mem::size_of::<Value>()) {
+                    return Err(Ctl::Limit(crate::LimitKind::Memory));
+                }
+                let mut frames = Vec::with_capacity(8);
+                frames.push(frame);
+                let fiber = Box::new(Fiber {
+                    stack: vec![Value::Unit; stack],
+                    frames,
+                    task,
+                    state: FiberState::Ready,
+                    wgen: 0,
+                    result_slot: 0,
+                    race: vec![],
+                    waiters: vec![],
+                    waiters_prune_at: MIN_PRUNE,
+                    io: None,
+                    pending_panic: None,
+                });
+                self.heap.fiber_bytes += fiber.footprint();
+                fiber
+            }
+        };
         let id = match self.free_fibers.pop() {
             Some(id) => {
                 self.fibers[id as usize] = Some(fiber);
@@ -716,6 +742,40 @@ impl Vm {
         };
         self.ready.push_back(id);
         Ok(id)
+    }
+
+    /// Keeps the allocations of a finished fiber for a later `spawn_fiber`,
+    /// if it is small; otherwise frees it. Pooled fibers stay counted in
+    /// `heap.fiber_bytes`. Their stacks are cleared: a reused fiber's live
+    /// window is a GC root before the new task writes every slot of it, so
+    /// it must not hold handles of objects freed since.
+    fn recycle_fiber(&mut self, mut f: Box<Fiber>) {
+        let small = f.stack.capacity() <= MAX_SPARE_STACK_SLOTS && f.frames.capacity() <= MAX_SPARE_FRAMES;
+        if self.spare_fibers.len() >= MAX_SPARE_FIBERS || !small || !f.race.is_empty() || f.waiters.capacity() > MIN_PRUNE {
+            self.heap.fiber_bytes = self.heap.fiber_bytes.saturating_sub(f.footprint());
+            return;
+        }
+        // (The final return truncated the stack.)
+        let slots = f.stack.capacity();
+        f.stack.clear();
+        f.stack.resize(slots, Value::Unit);
+        f.frames.clear();
+        f.task = Value::Unit;
+        f.state = FiberState::Ready;
+        f.wgen = 0;
+        f.result_slot = 0;
+        f.waiters.clear();
+        f.waiters_prune_at = MIN_PRUNE;
+        f.io = None;
+        f.pending_panic = None;
+        self.spare_fibers.push(f);
+    }
+
+    /// Frees the spare fibers (before a memory limit error is reported).
+    fn free_spare_fibers(&mut self) {
+        let spare: usize = self.spare_fibers.iter().map(|f| f.footprint()).sum();
+        self.heap.fiber_bytes = self.heap.fiber_bytes.saturating_sub(spare);
+        self.spare_fibers = Vec::new();
     }
 
     /// Spawns a new task running `closure`; returns the task handle.
@@ -774,9 +834,10 @@ impl Vm {
         }
         self.free_fibers.push(fid);
         self.live_tasks = self.live_tasks.saturating_sub(1);
-        for (w, g) in f.waiters {
+        for &(w, g) in &f.waiters {
             self.deliver(w, g, result);
         }
+        self.recycle_fiber(f);
     }
 
     /// Cancels a task (no-op if already finished).
@@ -851,17 +912,27 @@ impl Vm {
         if let Some(f) = current {
             add_fiber(f, &mut roots);
         }
+        fiber_bytes += self.spare_fibers.iter().map(|f| f.footprint()).sum::<usize>();
         self.heap.fiber_bytes = fiber_bytes;
         // Major collections when the old generation has grown enough (and
         // regularly under stress testing); minor ones otherwise.
         let mut major = force_major || self.heap.wants_major() || (self.heap.stress && self.heap.stats.collections.is_multiple_of(8));
+        if force_major {
+            self.free_spare_fibers();
+        }
         if !major {
             self.heap.collect(roots.iter().copied(), false);
             // Unreachable old objects may be what keeps us over the limit.
-            major = self.heap.over_limit();
+            if self.heap.over_limit() {
+                self.free_spare_fibers();
+                major = self.heap.over_limit();
+            }
         }
         if major {
             self.heap.collect(roots, true);
+        }
+        if self.heap.over_limit() {
+            self.free_spare_fibers();
         }
         self.heap.stats.record(start.elapsed(), major);
     }
