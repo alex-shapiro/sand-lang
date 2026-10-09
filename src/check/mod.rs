@@ -278,13 +278,72 @@ pub(crate) enum CtxKind {
     TopLevel { main: bool },
 }
 
+/// The local names in scope in a function: a stack of scopes, indexed by
+/// name so that a lookup does not scan every binding in scope (that made
+/// functions with many locals quadratic to check). A name bound again in
+/// the same scope replaces its binding there: the older one could never be
+/// seen again.
+#[derive(Default, Clone)]
+pub(crate) struct Scopes {
+    /// Per scope, innermost last: name -> local.
+    scopes: Vec<HashMap<String, LocalId>>,
+    /// Per name: the scopes binding it (indices into `scopes`), innermost last.
+    by_name: HashMap<String, Vec<u32>>,
+}
+
+impl Scopes {
+    pub(crate) fn push(&mut self) {
+        self.scopes.push(HashMap::new());
+    }
+
+    pub(crate) fn pop(&mut self) {
+        for name in self.scopes.pop().unwrap_or_default().into_keys() {
+            self.unbind(&name);
+        }
+    }
+
+    /// Binds `name` to `id` in the innermost scope.
+    pub(crate) fn declare(&mut self, name: &str, id: LocalId) {
+        let depth = self.scopes.len() as u32 - 1;
+        if self.scopes.last_mut().unwrap().insert(name.to_string(), id).is_none() {
+            self.by_name.entry(name.to_string()).or_default().push(depth);
+        }
+    }
+
+    pub(crate) fn find(&self, name: &str) -> Option<LocalId> {
+        let depth = *self.by_name.get(name)?.last()?;
+        self.scopes[depth as usize].get(name).copied()
+    }
+
+    /// Removes the binding of `name` from the innermost scope, if any.
+    pub(crate) fn remove(&mut self, name: &str) -> Option<LocalId> {
+        let id = self.scopes.last_mut().unwrap().remove(name)?;
+        self.unbind(name);
+        Some(id)
+    }
+
+    /// Drops the innermost entry of `name`'s list of scopes.
+    fn unbind(&mut self, name: &str) {
+        if let Some(depths) = self.by_name.get_mut(name) {
+            depths.pop();
+            if depths.is_empty() {
+                self.by_name.remove(name);
+            }
+        }
+    }
+}
+
 #[derive(Default, Clone)]
 pub(crate) struct FnState {
     pub locals: Vec<LocalInfo>,
     pub data: Vec<LocalData>,
-    pub scopes: Vec<Vec<(String, LocalId)>>,
+    pub scopes: Scopes,
     pub ctx: Vec<FnCtx>,
     pub next_lambda: u32,
+    /// For each lambda (by id, from 1): the number of locals when it was
+    /// started, so that its own locals are found without a scan of all
+    /// (see `fuse.rs`, which re-owns the locals of inlined lambdas).
+    pub lambda_first_local: Vec<LocalId>,
     pub obligations: Vec<(Type, Bound, Span)>,
     pub reflect_checks: Vec<(Type, Span)>,
     pub infer_checks: Vec<(Type, Span)>,
@@ -1810,7 +1869,7 @@ impl<'a> Checker<'a> {
         self.loop_breaks.clear();
         self.fs.generics = generics;
         self.fs.self_ty = self_ty;
-        self.fs.scopes.push(Vec::new());
+        self.fs.scopes.push();
     }
 
     fn check_fn_body(&mut self, id: FnId, decl: &FnDeclRef) {
@@ -1975,7 +2034,7 @@ impl<'a> Checker<'a> {
         self.fs.data.push(LocalData { ty, scheme: vec![], used: false, assigned: false, is_param, decl_span: span });
         let id = (self.fs.locals.len() - 1) as LocalId;
         if name != "_" {
-            self.fs.scopes.last_mut().unwrap().push((name.to_string(), id));
+            self.fs.scopes.declare(name, id);
         }
         id
     }
@@ -1988,18 +2047,18 @@ impl<'a> Checker<'a> {
     }
 
     pub(crate) fn find_local(&self, name: &str) -> Option<LocalId> {
-        for scope in self.fs.scopes.iter().rev() {
-            for (n, id) in scope.iter().rev() {
-                if n == name {
-                    return Some(*id);
-                }
-            }
-        }
-        None
+        self.fs.scopes.find(name)
     }
 
     pub(crate) fn push_scope(&mut self) {
-        self.fs.scopes.push(Vec::new());
+        self.fs.scopes.push();
+    }
+
+    /// A new lambda id for the function being checked.
+    pub(crate) fn new_lambda(&mut self) -> u32 {
+        self.fs.next_lambda += 1;
+        self.fs.lambda_first_local.push(self.fs.locals.len() as LocalId);
+        self.fs.next_lambda
     }
     pub(crate) fn pop_scope(&mut self) {
         self.fs.scopes.pop();

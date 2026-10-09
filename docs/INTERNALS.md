@@ -117,10 +117,20 @@ A missing registration is a compile error: `no native implementation registered 
 
 The interpreter spends one unit of fuel per call, loop iteration and backward
 jump, and the scheduler checks the limits between slices of `SLICE_FUEL`
-units. A native runs inside a single instruction, so **any native whose work
-grows with its inputs must charge for that work**, or a script could make one
-call do unbounded work invisible to `max_instructions`, `max_cpu_time`,
-`max_wall_time` and the interrupt handle (SPEC §15.2 gives the cost model):
+units. Between two of those safe points bytecode only moves forward, so it
+runs at most the instructions of the loop (a back edge's span) or of the
+function entered; `meter::code_fuel` charges one more unit per 64 of them
+(`Op::Loop` by its offset, `meter::loop_fuel`, which is why `thread_jumps`
+keeps every `Loop` backward; calls, tail calls and `spawn` by the callee's
+code length; `MakeClosure` per 64 captures, the only instruction whose work
+is not proportional to the instructions before it). Without that, one unit could
+stand for the hundreds of thousands of instructions of a long loop body or
+function, and the scheduler would check the limits and the interrupt flag
+only every few seconds. A native runs inside a single instruction, so **any
+native whose work grows with its inputs must charge for that work**, or a
+script could make one call do unbounded work invisible to
+`max_instructions`, `max_cpu_time`, `max_wall_time` and the interrupt handle
+(SPEC §15.2 gives the cost model):
 
 ```rust
 vm.charge(items.len() as u64)?;   // 1 unit per element visited/compared/produced
@@ -152,6 +162,11 @@ vm.charge_slow_bytes(data.len())?; // 1 unit per 8 bytes of byte-at-a-time work
   4 KiB, per match), so the call can be stopped midway. Work that cannot be
   split (one regex search, one `std` call) is charged **before** it starts,
   so it fails fast when the budget cannot cover it.
+* Charge for **every argument** the work scans, not just `self`: preparing
+  a substring search scans the needle, `strip_prefix` compares the prefix,
+  and copying a separator or fill copies it, so `"a".find(big)` costs the
+  size of `big`. Avoid copying an argument that the result needs only part
+  of (`pad` reads only the fill characters it uses).
 * Work whose cost cannot be predicted from its size is also charged by time:
   regex searches may scan far beyond the text they report or fall back to a
   slower engine, so `stdlib/regex.rs` (`Scan`) raises each call's charge to
@@ -172,10 +187,21 @@ vm.charge_slow_bytes(data.len())?; // 1 unit per 8 bytes of byte-at-a-time work
 * Sort with `compare::try_sort_by`, a stable merge sort whose comparator may
   fail (charge per comparison). The standard library's sorts cannot be stopped
   midway, and may panic if a comparator becomes inconsistent.
+* Hash table operations are charged a unit or so (plus the key's bytes),
+  which assumes that keys spread over the table. Scripts choose keys, so
+  tables keyed by script data must use `value::FxHashMap` (or another
+  seeded hasher): its `FxHasher` mixes each word in with a folded multiply
+  from a random per-process seed, which scripts cannot observe (iteration
+  orders never depend on hashes). With plain FxHash, whose bucket bits
+  depend only on the keys' low bits, multiples of 2^32 (or any keys
+  computed in advance) made every operation scan all the others.
 * A native that spends more than the slice's native fuel preempts its task
   when it returns (other tasks run, the scheduler checks the limits).
 * Host modules: typed `NativeModule::function`s are charged for converting
-  their arguments; `raw_function`s receive `&mut Vm` and should call
+  their arguments, and check the memory the conversion allocates
+  (`FromValue::alloc_size`: strings, bytes, vector and map elements) against
+  the limit before converting (a list holding one big string many times
+  converts to many copies); `raw_function`s receive `&mut Vm` and should call
   `vm.charge` like built-in natives.
 
 ### Scratch memory
@@ -199,7 +225,12 @@ allocate far beyond the limit:
   (`render_metered`, JSON encoding and regex iteration do this).
 * Beware of shared structure: a value whose nodes reuse the same child has
   a display form, JSON text or hash key exponentially larger than its heap
-  size.
+  size, and two such values far more pairs of nodes than nodes (the set of
+  container pairs a deep comparison remembers, `compare::Seen`, is checked
+  as it grows).
+* Messages quote script text through `stdlib::truncate` (a few dozen
+  characters): debug-escaping a whole string makes a message up to six
+  times its size, built outside the limit.
 
 ### Values
 
@@ -336,7 +367,8 @@ enforced there).
   `res.ensure(total)` (`MemoryLimit` converts into `NetError` and
   `io::Error`, which become errors of kind `"limit"`), move it into the
   finisher and drop it right before `vm.reserve(len)?` and allocating the
-  value. Never reserve a size a peer merely announces (e.g.
+  value. Finishers charge the meter like natives (they run between slices;
+  `apply_completions` adds their fuel to the run's). Never reserve a size a peer merely announces (e.g.
   `Content-Length`) before the data arrives. Reserved bytes count in
   `Heap::would_exceed` / `over_limit`; the scheduler publishes the heap size
   for checks made off the VM thread.
@@ -540,6 +572,10 @@ which turns the buffer into an ordinary `Obj::Str` in place (same handle).
 So a buffer never reaches another register, object, closure or native, and
 appending can never change a value seen elsewhere. The buffer's capacity
 counts against `max_memory`; freezing gives back the unused part.
+`AppendStr` is charged for what it copies (`Heap::append_copies`): the
+appended text when it appends in place, but all of the string when the
+local holds a frozen string (it was read since the last append), which is
+copied into a new buffer.
 
 ### Fibers, frames and stacks
 
@@ -607,8 +643,12 @@ collection are young and listed in `Heap::young`.
 * Card marking for lists: an old list that only receives young values
   through `Heap::list_mut_storing` (index stores) and `Heap::list_push` is
   *partially* remembered; the minor collection scans only the stored indices
-  and the pushed tail (`DirtyList`). Any other mutation, or more than
-  max(1024, len / 8) stored indices, turns it into a full rescan.
+  and the pushed tail (`DirtyList`). Any other mutation, or more than one
+  stored index per 8 elements (`ELEMS_PER_DIRTY_INDEX`, at least one),
+  turns it into a full rescan. The index lists are not counted against the
+  memory limit (and storing allocates nothing, so no collection empties
+  them), which is why they stay proportional to the lists. Maps and sets
+  are card-marked the same way, by entry.
 * Accounting: `bytes` grows on allocation and container growth; minor
   collections subtract the sizes of freed young objects, major collections
   recompute it exactly. Maps and sets count the bytes their key index owns

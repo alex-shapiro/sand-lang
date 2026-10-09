@@ -2,7 +2,7 @@
 
 use super::compare::{values_eq, values_eq_metered, values_le, values_le_metered, values_lt, values_lt_metered, with_keyref_metered};
 use super::display;
-use super::meter::{MemoryLimit, ctl_message, message_ctl};
+use super::meter::{MemoryLimit, code_fuel, ctl_message, loop_fuel, message_ctl};
 use super::*;
 use crate::LimitKind;
 
@@ -383,11 +383,12 @@ impl Vm {
                 ip = (ip as isize + $off as isize) as usize
             };
         }
-        // A safe point: consumes fuel; collects garbage or preempts (the
-        // slow path is out of line). The fiber resumes at `$resume`.
+        // A safe point: consumes `$cost` units of fuel; collects garbage or
+        // preempts (the slow path is out of line). The fiber resumes at
+        // `$resume`.
         macro_rules! safe_point {
-            ($resume:expr) => {
-                fuel.left -= 1;
+            ($resume:expr, $cost:expr) => {
+                fuel.left -= $cost;
                 if fuel.left <= 0 || self.heap.wants_gc() {
                     if let Some(exit) = self.safe_point(fiber, fuel.left, $resume) {
                         return exit;
@@ -396,16 +397,11 @@ impl Vm {
                 }
             };
         }
-        macro_rules! tick {
-            () => {
-                safe_point!(ip)
-            };
-        }
-        // Like `tick!` but for call instructions: on preemption the call is
+        // A safe point of a call instruction: on preemption the call is
         // re-executed when the fiber resumes.
         macro_rules! tick_call {
             () => {
-                safe_point!(ip - 1)
+                safe_point!(ip - 1, 1)
             };
         }
         // Calls native `n` with `argc` arguments at absolute slot `start`,
@@ -448,6 +444,10 @@ impl Vm {
                 }
                 fiber.frames.push(Frame { proto: $proto, ip: 0, base: nb as u32, ret: $ret as u32, closure: $closure });
                 code = &p.code;
+                // Long functions cost more (`meter::code_fuel`).
+                if code.len() >= 64 {
+                    fuel.left -= code_fuel(code.len());
+                }
                 ip = 0;
                 base = nb;
                 reload!();
@@ -540,7 +540,9 @@ impl Vm {
                 }
                 Op::MakeClosure { dst, proto } => {
                     let clo = closure!();
-                    r!(dst) = self.make_closure(&protos[proto as usize], proto, regs, clo);
+                    let p = &protos[proto as usize];
+                    fuel.left -= code_fuel(p.captures.len());
+                    r!(dst) = self.make_closure(p, proto, regs, clo);
                 }
 
                 // ---------------- integer arithmetic
@@ -659,7 +661,8 @@ impl Vm {
                 Op::Jmp { off } => jump!(off),
                 Op::Loop { off } => {
                     jump!(off);
-                    tick!();
+                    // Long loops cost more (`meter::loop_fuel`).
+                    safe_point!(ip, loop_fuel(off));
                 }
                 Op::JmpIf { cond, off } => {
                     if r!(cond).as_bool() {
@@ -797,6 +800,7 @@ impl Vm {
                     top.proto = proto;
                     top.closure = NO_CLOSURE;
                     code = &p.code;
+                    fuel.left -= code_fuel(code.len());
                     ip = 0;
                 }
                 Op::TailCall { base: b, argc } => {
@@ -822,6 +826,7 @@ impl Vm {
                             top.proto = proto;
                             top.closure = h;
                             code = &pr.code;
+                            fuel.left -= code_fuel(code.len());
                             ip = 0;
                         }
                         Obj::NativeFn(n) => {
@@ -975,7 +980,7 @@ impl Vm {
                 Op::IntToFloat { dst, src } => r!(dst) = Value::Float(int!(src) as f64),
                 Op::AppendStr { local, src } => {
                     let add = r!(src);
-                    if let Err(c) = self.meter.charge_bytes(self.heap.str(add).len()) {
+                    if let Err(c) = self.meter.charge_bytes(self.heap.append_copies(r!(local), add)) {
                         fail_ctl!(c);
                     }
                     match self.heap.append_str(r!(local), add) {
@@ -1454,17 +1459,14 @@ impl Vm {
                 if c.closed {
                     return Ok(Some(Value::Bool(false)));
                 }
-                // Hand directly to a waiting receiver.
-                let receivers: Vec<(u32, u64)> = c.receivers.drain(..).collect();
-                let mut rest = receivers.into_iter();
-                for (rf, rg) in rest.by_ref() {
-                    let alive = matches!(self.fibers.get(rf as usize), Some(Some(f)) if f.state == FiberState::Waiting && f.wgen == rg);
-                    if alive {
+                // Hand directly to a waiting receiver, dropping the stale
+                // waits of cancelled tasks met on the way (one at a time:
+                // copying the whole list made each send cost as many steps
+                // as there are receivers).
+                while let Some((rf, rg)) = c.receivers.pop_front() {
+                    if wait_is_live(&self.fibers, (rf, rg)) {
                         let some = self.some(v);
                         self.deliver(rf, rg, some);
-                        if let Obj::Channel(c) = self.heap.get_mut(ch) {
-                            c.receivers.extend(rest);
-                        }
                         return Ok(Some(Value::Bool(true)));
                     }
                 }
@@ -1704,7 +1706,12 @@ impl Vm {
             return Err(format!("slice {a}..{b} out of range for length {len}"));
         }
         let (a, b) = (a as usize, b as usize);
-        let cost = if let Obj::List(_) = self.heap.get(o) { (b - a) as u64 } else { ((b - a) / super::meter::BYTES_PER_UNIT) as u64 };
+        let list = matches!(self.heap.get(o), Obj::List(_));
+        let cost = if list { (b - a) as u64 } else { ((b - a) / super::meter::BYTES_PER_UNIT) as u64 };
+        // The copy may be as large as the heap: check it first, as `+` does.
+        if self.heap.would_exceed(if list { (b - a) * std::mem::size_of::<Value>() } else { b - a }) {
+            return Err(ctl_message(Ctl::Limit(LimitKind::Memory)));
+        }
         self.meter.charge(cost).map_err(ctl_message)?;
         Ok(match self.heap.get(o) {
             Obj::List(l) => {

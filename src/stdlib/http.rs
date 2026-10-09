@@ -77,7 +77,7 @@ struct Url {
 }
 
 fn parse_error(text: &str, why: &str) -> NetError {
-    NetError::new("parse", format!("invalid URL {text:?}: {why}"))
+    NetError::new("parse", format!("invalid URL {:?}: {why}", super::truncate(text, 200)))
 }
 
 fn default_port(scheme: &str) -> Option<u16> {
@@ -106,7 +106,10 @@ impl Url {
         let Some(rest) = rest.strip_prefix("//") else { return Err(parse_error(text, "missing `//` after the scheme")) };
         let scheme = scheme.to_ascii_lowercase();
         let Some(default) = default_port(&scheme) else {
-            return Err(NetError::new("invalid", format!("unsupported URL scheme {scheme:?} (expected http or https)")));
+            return Err(NetError::new(
+                "invalid",
+                format!("unsupported URL scheme {:?} (expected http or https)", super::truncate(&scheme, 64)),
+            ));
         };
         if scheme == "https" && !cfg!(feature = "tls") {
             return Err(NetError::new("invalid", "https is not supported: TLS support is not enabled in this build"));
@@ -368,7 +371,7 @@ fn header_pairs(vm: &Vm, map: Value) -> Result<Vec<(String, String)>, String> {
     for (k, v) in m.entries.iter().flatten() {
         let (k, v) = (vm.str(*k), vm.str(*v));
         if !valid_header(k, v) {
-            return Err(format!("invalid header {k:?}: {v:?}"));
+            return Err(format!("invalid header {:?}: {:?}", super::truncate(k, 64), super::truncate(v, 64)));
         }
         pairs.push((k.to_string(), v.to_string()));
     }
@@ -403,7 +406,7 @@ fn send(vm: &mut Vm, a: &[Value]) -> NResult {
         Err(e) => return Ok(vm.err_value(e.kind, &e.message)),
     };
     if !is_token(&method) {
-        return Ok(vm.err_value("invalid", &format!("invalid HTTP method {method:?}")));
+        return Ok(vm.err_value("invalid", &format!("invalid HTTP method {:?}", super::truncate(&method, 64))));
     }
     let headers = match header_pairs(vm, a[2]) {
         Ok(h) => h,

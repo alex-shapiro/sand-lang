@@ -295,10 +295,12 @@ fn register_str(r: &mut Registry) {
         let b = t.as_bytes().to_vec();
         Ok(vm.heap.new_bytes(b))
     });
+    // Searches charge for the needle too: preparing the search scans it,
+    // however short the text searched.
     r.add_builtin("str.contains", |vm, a| {
-        let t = vm.str(a[0]);
-        vm.charge_bytes(t.len())?;
-        Ok(Value::Bool(t.contains(vm.str(a[1]))))
+        let (t, p) = (vm.str(a[0]), vm.str(a[1]));
+        vm.charge_bytes(t.len().saturating_add(p.len()))?;
+        Ok(Value::Bool(t.contains(p)))
     });
     r.add_builtin("str.starts_with", |vm, a| {
         let p = vm.str(a[1]);
@@ -311,15 +313,15 @@ fn register_str(r: &mut Registry) {
         Ok(Value::Bool(vm.str(a[0]).ends_with(p)))
     });
     r.add_builtin("str.find", |vm, a| {
-        let t = vm.str(a[0]);
-        vm.charge_bytes(t.len())?;
-        let v = t.find(vm.str(a[1])).map(|i| Value::Int(i as i64));
+        let (t, p) = (vm.str(a[0]), vm.str(a[1]));
+        vm.charge_bytes(t.len().saturating_add(p.len()))?;
+        let v = t.find(p).map(|i| Value::Int(i as i64));
         Ok(vm.option(v))
     });
     r.add_builtin("str.rfind", |vm, a| {
-        let t = vm.str(a[0]);
-        vm.charge_bytes(t.len())?;
-        let v = t.rfind(vm.str(a[1])).map(|i| Value::Int(i as i64));
+        let (t, p) = (vm.str(a[0]), vm.str(a[1]));
+        vm.charge_bytes(t.len().saturating_add(p.len()))?;
+        let v = t.rfind(p).map(|i| Value::Int(i as i64));
         Ok(vm.option(v))
     });
     r.add_builtin("str.replace", |vm, a| {
@@ -328,7 +330,7 @@ fn register_str(r: &mut Registry) {
             return Ok(a[0]);
         }
         // Count the matches first so the output size is known exactly.
-        vm.charge_bytes(t.len())?;
+        vm.charge_bytes(t.len().saturating_add(from.len()))?;
         let n = t.matches(from).count();
         let len = t.len() - n * from.len() + n.saturating_mul(to.len());
         copy_bytes(vm, len)?;
@@ -339,11 +341,11 @@ fn register_str(r: &mut Registry) {
         if vm.str(a[1]).is_empty() {
             return panic("split with an empty separator");
         }
-        let (t, sep) = (owned_str(vm, a[0])?, vm.str(a[1]).to_string());
+        let (t, sep) = (owned_str(vm, a[0])?, owned_str(vm, a[1])?);
         split_list(vm, &t, |t| t.split(sep.as_str()))
     });
     r.add_builtin("str.split_once", |vm, a| {
-        vm.charge_bytes(vm.str(a[0]).len())?;
+        vm.charge_bytes(vm.str(a[0]).len().saturating_add(vm.str(a[1]).len()))?;
         let parts = vm.str(a[0]).split_once(vm.str(a[1])).map(|(x, y)| (x.to_string(), y.to_string()));
         match parts {
             Some((x, y)) => {
@@ -378,6 +380,8 @@ fn register_str(r: &mut Registry) {
     r.add_builtin("str.trim_start", |vm, a| substr(vm, a[0], str::trim_start));
     r.add_builtin("str.trim_end", |vm, a| substr(vm, a[0], str::trim_end));
     r.add_builtin("str.strip_prefix", |vm, a| {
+        // Comparing the prefix costs its length.
+        vm.charge_bytes(vm.str(a[1]).len())?;
         let s = vm.str(a[0]).strip_prefix(vm.str(a[1]));
         copy_bytes(vm, s.map_or(0, str::len))?;
         let s = s.map(String::from);
@@ -385,6 +389,7 @@ fn register_str(r: &mut Registry) {
         Ok(vm.option(v))
     });
     r.add_builtin("str.strip_suffix", |vm, a| {
+        vm.charge_bytes(vm.str(a[1]).len())?;
         let s = vm.str(a[0]).strip_suffix(vm.str(a[1]));
         copy_bytes(vm, s.map_or(0, str::len))?;
         let s = s.map(String::from);
@@ -417,15 +422,18 @@ fn register_str(r: &mut Registry) {
     });
     fn pad(vm: &mut Vm, a: &[Value], start: bool) -> NResult {
         let width = int(a[1]).max(0) as usize;
-        let fill = vm.str(a[2]).to_string();
-        let t = owned_str(vm, a[0])?;
+        let (t, fill) = (vm.str(a[0]), vm.str(a[2]));
+        vm.charge_bytes(t.len())?;
         let n = t.chars().count();
         if n >= width || fill.is_empty() {
             return Ok(a[0]);
         }
-        copy_bytes(vm, (width - n).saturating_mul(fill.len()).saturating_add(t.len()))?;
-        let padding: String = fill.chars().cycle().take(width - n).collect();
-        let s = if start { padding + &t } else { t + &padding };
+        // Only the first `width - n` characters of the (repeated) fill are
+        // read and copied, however long the fill is.
+        let chars = width - n;
+        copy_bytes(vm, chars.saturating_mul(fill.len().min(4)).saturating_add(t.len()))?;
+        let padding: String = fill.chars().cycle().take(chars).collect();
+        let s = if start { padding + t } else { format!("{t}{padding}") };
         Ok(vm.new_str(s))
     }
     r.add_builtin("str.pad_start", |vm, a| pad(vm, a, true));
@@ -462,7 +470,7 @@ fn register_str(r: &mut Registry) {
         let mut it = t.chars();
         match (it.next(), it.next()) {
             (Some(c), None) => Ok(Value::Int(c as i64)),
-            _ => panic(format!("ord requires a one-character string, found {t:?}")),
+            _ => panic(format!("ord requires a one-character string, found {:?}", super::truncate(t, 64))),
         }
     });
     r.add_builtin("str.reversed", |vm, a| {

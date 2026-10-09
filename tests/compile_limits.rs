@@ -385,3 +385,47 @@ fn reflected_types_too_large_to_describe() {
     }
     rejects(&src, "type too large to describe at runtime");
 }
+
+// ---------------------------------------------------------------------------
+// Audit: quadratic compile paths
+
+/// Compiles the sources `source(n)` and `source(4 * n)` (whatever the result) and
+/// asserts that the larger takes about four times as long, not sixteen.
+fn compiles_in_linear_time(what: &str, n: usize, source: impl Fn(usize) -> String) {
+    let (_, small) = check(Config::new(), &source(n));
+    let (_, large) = check(Config::new(), &source(4 * n));
+    assert!(large < small * 7 + Duration::from_millis(500), "{what}: {n}: {small:?}, {}: {large:?}", 4 * n);
+}
+
+#[test]
+fn interpolations_parse_in_linear_time() {
+    // Each `{x}` got a sub-parser that indexed the lines of the whole source.
+    compiles_in_linear_time("interpolations", 25_000, |n| format!("let x = 1\nlet s = \"{}\"\nprint(s.len())\n", "{x}".repeat(n)));
+}
+
+#[test]
+fn many_loop_constants_compile_in_linear_time() {
+    // Each operand constant of a loop was looked up among the hoisting
+    // candidates found so far, one by one.
+    compiles_in_linear_time("loop constants", 25_000, |n| {
+        let body: String = (0..n).map(|i| format!("        x = x * {}\n", i + 100_000)).collect();
+        format!("fn main() {{\n    var x = 0\n    while x < 1 {{\n{body}        x += 1\n    }}\n    print(x)\n}}\nmain()\n")
+    });
+}
+
+#[test]
+fn many_locals_resolve_in_linear_time() {
+    // Each name was looked up among all the locals in scope, one by one.
+    compiles_in_linear_time("locals", 25_000, |n| {
+        format!("fn main() {{\n    let x = 1\n{}    print(a)\n}}\nmain()\n", "    let a = x\n".repeat(n))
+    });
+}
+
+#[test]
+fn many_inlined_lambdas_compile_in_linear_time() {
+    // Inlining each lambda of a fused pipeline scanned all the locals of the
+    // function.
+    compiles_in_linear_time("inlined lambdas", 25_000, |n| {
+        format!("fn main() {{\n    var xs = [1, 2, 3]\n{}    print(xs)\n}}\nmain()\n", "    xs = xs.map(x => x + 1)\n".repeat(n))
+    });
+}

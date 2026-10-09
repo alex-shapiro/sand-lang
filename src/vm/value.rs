@@ -2,8 +2,8 @@
 
 use std::any::Any;
 use std::collections::{HashMap, VecDeque};
-use std::hash::{BuildHasherDefault, Hasher};
-use std::sync::Arc;
+use std::hash::{BuildHasher, Hasher};
+use std::sync::{Arc, OnceLock};
 
 /// A runtime value. Immediate values are stored inline; everything else is a
 /// handle into the engine's heap.
@@ -142,18 +142,46 @@ impl VariantRef<'_> {
     }
 }
 
-/// A fast, deterministic hasher (FxHash).
-#[derive(Default, Clone, Copy)]
+/// The fast hasher of map and set keys (and of the engine's other tables):
+/// FxHash's word-at-a-time structure, but each 8-byte word is mixed in with
+/// a folded multiply (the two halves of a 128-bit product XORed, as in
+/// foldhash), starting from a random per-process seed.
+///
+/// Scripts choose map and set keys, so they must not be able to choose keys
+/// that collide: in a table full of collisions every operation, charged as
+/// a unit or so, scans all the colliding keys. Plain FxHash failed both
+/// ways: the low bits of its product, which pick the bucket, depend only on
+/// the low bits of the key (so all multiples of 2^32 collided), and any set
+/// of colliding keys could be computed in advance. The folded multiply
+/// makes every bit of the key affect the low bits, and the seed, which
+/// scripts cannot observe (no iteration order depends on hashes), keeps
+/// collisions from being computed in advance.
+#[derive(Clone, Copy)]
 pub struct FxHasher {
     hash: u64,
 }
 
-const SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+const MULTIPLIER: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+
+/// The random seed of this process's hashes.
+fn hash_seed() -> u64 {
+    static SEED: OnceLock<u64> = OnceLock::new();
+    *SEED.get_or_init(|| std::collections::hash_map::RandomState::new().hash_one(0x5eed_u64))
+}
+
+impl Default for FxHasher {
+    /// A hasher starting from the process's seed (see [`FxBuild`], which
+    /// reads it once per table, not once per hash).
+    fn default() -> Self {
+        FxHasher { hash: hash_seed() }
+    }
+}
 
 impl FxHasher {
     #[inline]
     fn add(&mut self, w: u64) {
-        self.hash = (self.hash.rotate_left(5) ^ w).wrapping_mul(SEED);
+        let p = ((self.hash ^ w) as u128).wrapping_mul(MULTIPLIER as u128);
+        self.hash = (p as u64) ^ ((p >> 64) as u64);
     }
 }
 
@@ -197,7 +225,26 @@ impl Hasher for FxHasher {
     }
 }
 
-pub type FxBuild = BuildHasherDefault<FxHasher>;
+/// Builds [`FxHasher`]s: holds the process's seed, read once per table.
+#[derive(Clone, Copy)]
+pub struct FxBuild {
+    seed: u64,
+}
+
+impl Default for FxBuild {
+    fn default() -> Self {
+        FxBuild { seed: hash_seed() }
+    }
+}
+
+impl BuildHasher for FxBuild {
+    type Hasher = FxHasher;
+    #[inline]
+    fn build_hasher(&self) -> FxHasher {
+        FxHasher { hash: self.seed }
+    }
+}
+
 pub type FxHashMap<K, V> = HashMap<K, V, FxBuild>;
 
 /// An owned, hashable copy of a key value.

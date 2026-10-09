@@ -470,7 +470,7 @@ pub(crate) async fn tcp_connect(policy: &Policy, host: &str, port: u16, timeout:
 fn connect(vm: &mut Vm, a: &[Value]) -> NResult {
     let addr = vm.str(a[0]).to_string();
     let Some((host, port)) = split_host_port(&addr) else {
-        return Ok(vm.err_value("invalid", &format!("invalid address {addr:?} (expected host:port)")));
+        return Ok(vm.err_value("invalid", &format!("invalid address {:?} (expected host:port)", super::truncate(&addr, 200))));
     };
     if let Some(denied) = check_permission(vm, Capability::Net { host: host.clone(), port })? {
         return Ok(denied);
@@ -720,8 +720,8 @@ pub(crate) mod tls {
 
     /// Performs a TLS handshake over `tcp`, verifying the certificate for `host`.
     pub async fn connect(settings: &TlsSettings, host: &str, tcp: TcpStream) -> Result<TlsStream<TcpStream>, NetError> {
-        let name =
-            ServerName::try_from(host.to_string()).map_err(|_| NetError::new("invalid", format!("invalid TLS server name {host:?}")))?;
+        let name = ServerName::try_from(host.to_string())
+            .map_err(|_| NetError::new("invalid", format!("invalid TLS server name {:?}", crate::stdlib::truncate(host, 200))))?;
         connector(settings)?.connect(name, tcp).await.map_err(|e| {
             let e = NetError::from(e);
             NetError::new(e.kind, format!("TLS handshake with {host} failed: {}", e.message))

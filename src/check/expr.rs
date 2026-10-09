@@ -270,10 +270,11 @@ impl Checker<'_> {
             Some(b) => {
                 // Bindings are not visible in the else block.
                 let names = self.pattern_names(&hp);
-                let saved: Vec<(String, LocalId)> = self.fs.scopes.last().unwrap().clone();
-                self.fs.scopes.last_mut().unwrap().retain(|(n, _)| !names.contains(n));
+                let hidden: Vec<(&String, LocalId)> = names.iter().filter_map(|n| Some((n, self.fs.scopes.remove(n)?))).collect();
                 let h = self.check_block(b, None, false);
-                *self.fs.scopes.last_mut().unwrap() = saved;
+                for (n, id) in hidden {
+                    self.fs.scopes.declare(n, id);
+                }
                 if !self.resolve(&h.ty).is_never() {
                     self.error(b.span, "the `else` block of `let ... else` must diverge (return, break, continue or panic)");
                 }
@@ -291,7 +292,9 @@ impl Checker<'_> {
             // Bindings of a top-level destructuring pattern become globals.
             let bound = self.pattern_bindings(&hp);
             let names: Vec<String> = bound.iter().map(|(n, _)| n.clone()).collect();
-            self.fs.scopes.last_mut().unwrap().retain(|(n, _)| !names.contains(n));
+            for n in &names {
+                self.fs.scopes.remove(n);
+            }
             for (name, l) in bound {
                 let lty = self.fs.data[l as usize].ty.clone();
                 let g = self.globals.len() as GlobalId;
@@ -511,8 +514,7 @@ impl Checker<'_> {
         let mut lambdas = Vec::new();
         for (f, (ptys, ret, scope, fty)) in group.iter().zip(sigs) {
             let saved_generics = std::mem::replace(&mut self.fs.generics, scope);
-            self.fs.next_lambda += 1;
-            let id = self.fs.next_lambda;
+            let id = self.new_lambda();
             self.fs.ctx.push(FnCtx { ret: ret.clone(), kind: CtxKind::Lambda, loops: vec![], lambda: id, in_defer: None });
             self.push_scope();
             let mut params = Vec::new();
@@ -794,8 +796,7 @@ impl Checker<'_> {
                 mk(HKind::Continue { depth }, Type::Never, span)
             }
             ExprKind::Spawn(inner) => {
-                self.fs.next_lambda += 1;
-                let id = self.fs.next_lambda;
+                let id = self.new_lambda();
                 let ret = self.fresh();
                 self.fs.ctx.push(FnCtx { ret: ret.clone(), kind: CtxKind::Lambda, loops: vec![], lambda: id, in_defer: None });
                 self.push_scope();
@@ -2460,8 +2461,7 @@ impl Checker<'_> {
             _ => None,
         };
         let ret = hinted.as_ref().map(|(_, r)| r.clone()).unwrap_or_else(|| self.fresh());
-        self.fs.next_lambda += 1;
-        let id = self.fs.next_lambda;
+        let id = self.new_lambda();
         self.fs.ctx.push(FnCtx { ret: ret.clone(), kind: CtxKind::Lambda, loops: vec![], lambda: id, in_defer: None });
         self.push_scope();
         let mut locals = Vec::new();
