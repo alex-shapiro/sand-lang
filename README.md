@@ -123,8 +123,9 @@ Signature V4.
 
 ```
 cargo test                      # spec, API, sandbox, examples, property and fuzz tests
-cargo bench                     # VM benchmarks
+cargo bench                     # VM benchmarks (with a geometric mean to compare builds)
 cargo +nightly fuzz run compile # coverage-guided fuzzing (fuzz/)
+python3.14 bench/examples/run.py  # the examples against CPython ports (after cargo build --release)
 ```
 
 CI (`.github/workflows/ci.yml`) runs `cargo fmt --check`, `cargo clippy` and

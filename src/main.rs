@@ -401,7 +401,8 @@ fn cmd_run(args: &[String]) -> Result<u8, String> {
     let opts = run_options(args)?;
     let file = opts.file.ok_or("missing FILE to run")?;
     let _ = opts.script_args;
-    let mut engine = Engine::new(opts.config);
+    // The process ends with the run: no need to free the heap.
+    let mut engine = Engine::new(opts.config.exit_after_run(true));
     let rt = runtime()?;
     match rt.block_on(engine.run_file(&file)) {
         Ok(o) => Ok(exit_status(o.exit_code)),

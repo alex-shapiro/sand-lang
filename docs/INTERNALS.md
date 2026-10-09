@@ -517,9 +517,12 @@ not have.
 
 The compiler reduces the number of instructions dispatched: fused
 compare-and-branch instructions (also for `or` and `not` of integer
-comparisons, `cond_jump_true`), `JNotSome` (test and payload of `Some` in
-one), calls writing their result straight to the destination register
-(`CallDirectTo`, `CallNativeTo`, `Call`'s `dst`), one-argument natives and
+comparisons, `cond_jump_true`, and character-class tests, `JStrClass`),
+`JNotSome` (test and payload of `Some` in one; after a call of an
+`Obj::IterFn`, `CallR` performs a following `JNotSome` itself), calls
+writing their result straight to the destination register (`CallDirectTo`,
+`CallNativeTo`, `Call`'s `dst`), calls of a function already in a register
+without moving it into the call's base (`CallR`), one-argument natives and
 single-payload variants reading their argument in place, statements not
 materialising unit, captures loaded once per closure call, inline
 instructions for small natives (`Len`, `ListPush`, `IntToFloat`,

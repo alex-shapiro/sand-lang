@@ -240,6 +240,7 @@ pub struct Config {
     pub(crate) env: Option<Vec<(String, String)>>,
     pub(crate) seed: Option<u64>,
     pub(crate) gc_stress: bool,
+    pub(crate) exit_after_run: bool,
     pub(crate) tls: crate::stdlib::TlsSettings,
 }
 
@@ -265,6 +266,7 @@ impl Config {
             env: None,
             seed: None,
             gc_stress: std::env::var_os("SAND_GC_STRESS").is_some(),
+            exit_after_run: false,
             tls: Default::default(),
         }
     }
@@ -328,6 +330,16 @@ impl Config {
     #[doc(hidden)]
     pub fn gc_stress(mut self, on: bool) -> Self {
         self.gc_stress = on;
+        self
+    }
+    /// The process exits right after `run_file`/`run_source` returns (the
+    /// CLI): the run's VM is not freed, as the operating system reclaims its
+    /// memory faster (freeing a large heap object by object can take longer
+    /// than the program took to build it). Never use it for an engine that
+    /// runs more than once: every run leaks its heap.
+    #[doc(hidden)]
+    pub fn exit_after_run(mut self, on: bool) -> Self {
+        self.exit_after_run = on;
         self
     }
     /// Trusts additional root certificates (DER-encoded X.509) for TLS
@@ -696,6 +708,9 @@ impl Engine {
         let r = vm.run_main(prog.entry).await;
         self.finish_run(&vm);
         self.gc_stats = vm.heap.stats;
+        if self.config.exit_after_run {
+            std::mem::forget(vm);
+        }
         match r {
             Ok(RunEnd::Finished(_)) => Ok(crate::Outcome { exit_code: 0 }),
             Ok(RunEnd::Exit(c)) => Ok(crate::Outcome { exit_code: c }),

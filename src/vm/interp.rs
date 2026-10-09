@@ -752,7 +752,24 @@ impl Vm {
                             let nb = base + b as usize;
                             enter!(p, nb, base + dst as usize, h);
                         }
-                        Obj::IterFn(_) => r!(dst) = self.iter_step(callee),
+                        Obj::IterFn(_) => {
+                            let v = self.iter_step(callee);
+                            r!(dst) = v;
+                            // `while let Some(x) = next()`: the test that
+                            // follows runs here (one dispatch less).
+                            if let Some(&Op::JNotSome { src, dst: d, off }) = code.get(ip)
+                                && src == dst
+                            {
+                                ip += 1;
+                                match v.as_inline_variant() {
+                                    Some((id, p)) if id == prog.ids.some => r!(d) = p,
+                                    _ => match self.heap.payload_if(v, prog.ids.some) {
+                                        Some(p) => r!(d) = p,
+                                        None => jump!(off),
+                                    },
+                                }
+                            }
+                        }
                         Obj::NativeFn(n) => {
                             let n = *n;
                             native_call!(n, base + b as usize, argc as usize, base + dst as usize);

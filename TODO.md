@@ -34,10 +34,18 @@ Follow-up work, roughly in priority order.
 
 ### Performance
 
-- [ ] The interpreter's dispatch loop is sensitive to code layout (±10-25%
-      on call-heavy benchmarks from unrelated edits). Consider splitting cold
-      opcodes into separate functions systematically, or a threaded-dispatch
-      design.
+- [ ] Dispatch loop: the loop now keeps its state minimal and its cold
+      paths out of line (docs/INTERNALS.md "Dispatch loop"), and `cargo bench`
+      prints a geometric mean to compare builds, but the cost of individual
+      instructions still shifts by up to ±15% between builds as LLVM
+      reallocates registers (a full split of cold instructions was measured
+      and is slower). A threaded design (one function per instruction with
+      guaranteed tail calls, Rust's `become`) would remove the shared
+      register allocation once it is stable.
+- [ ] CPython parity (`bench/examples/run.py`): every workload is at parity
+      or faster except `search_index_index` (about 1.1x), dominated by a
+      character-by-character lazy tokenizer (`chars_iter`, `is_alnum`,
+      string appends): about 40 ns per character against CPython's 25.
 
 ### Language
 
