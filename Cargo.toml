@@ -24,6 +24,8 @@ rustls = { version = "0.23", optional = true, default-features = false, features
 tokio-rustls = { version = "0.26", optional = true, default-features = false, features = ["ring", "tls12"] }
 webpki-roots = { version = "1", optional = true }
 unicode-normalization = "0.1"
+# SHA-256 with the CPU's SHA instructions where available (pure Rust).
+sha2 = { version = "0.11", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", default-features = false, features = ["fs", "std"] }
