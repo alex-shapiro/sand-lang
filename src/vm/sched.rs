@@ -11,6 +11,9 @@ use std::time::{Duration, Instant};
 #[derive(Default)]
 pub struct IoShared {
     ready: Mutex<Vec<u64>>,
+    /// Set when `ready` may be non-empty (checked without the lock while
+    /// waiting briefly for a file operation, see `FS_SPIN`).
+    any_ready: std::sync::atomic::AtomicBool,
     waker: Mutex<Option<Waker>>,
 }
 
@@ -42,6 +45,7 @@ impl Wake for IdWaker {
     }
     fn wake_by_ref(self: &Arc<Self>) {
         self.shared.ready.lock().unwrap_or_else(|e| e.into_inner()).push(self.id);
+        self.shared.any_ready.store(true, Ordering::Release);
         self.shared.wake();
     }
 }
@@ -84,7 +88,11 @@ impl IoTable {
         if let Some(w) = task_waker {
             self.shared.set_waker(w);
         }
-        let ids: Vec<u64> = std::mem::take(&mut *self.shared.ready.lock().unwrap_or_else(|e| e.into_inner()));
+        let ids: Vec<u64> = {
+            let mut ready = self.shared.ready.lock().unwrap_or_else(|e| e.into_inner());
+            self.shared.any_ready.store(false, Ordering::Relaxed);
+            std::mem::take(&mut *ready)
+        };
         let mut done = Vec::new();
         for id in ids {
             let Some(entry) = self.futures.get_mut(&id) else { continue };
@@ -98,6 +106,9 @@ impl IoTable {
         done
     }
 }
+
+/// How long the scheduler waits for a file operation before parking.
+const FS_SPIN: Duration = Duration::from_micros(100);
 
 /// Slices run between clock readings at most (see `Vm::run_main`).
 const CLOCK_SLICES: u32 = 32;
@@ -373,6 +384,23 @@ impl Vm {
                     _ => vec![],
                 };
                 return Err(Trap::Panic { message: "deadlock: all tasks are blocked".into(), trace });
+            }
+            // A file operation on the hot worker (`stdlib::fs::FsWorker`)
+            // usually finishes within microseconds: wait for it briefly
+            // rather than parking the thread (a wake-up costs more). Other
+            // I/O (network, timers) does not spin.
+            let mut done = self.io.poll_ready(None);
+            if done.is_empty() && crate::stdlib::fs_worker_busy() {
+                let until = Instant::now() + FS_SPIN;
+                while !self.io.shared.any_ready.load(Ordering::Acquire) && crate::stdlib::fs_worker_busy() && Instant::now() < until {
+                    std::hint::spin_loop();
+                }
+                done = self.io.poll_ready(None);
+            }
+            if !done.is_empty() {
+                self.apply_completions(done)?;
+                self.check_limits(start, paused, cpu)?;
+                continue;
             }
             cpu += Instant::now().saturating_duration_since(now);
             (unclocked_slices, unclocked_fuel) = (0, 0);

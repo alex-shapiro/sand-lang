@@ -340,9 +340,90 @@ fn protected_tree(vm: &mut Vm, shown: &str, path: &Path) -> Option<Value> {
     protected.then(|| vm.err_value("permission_denied", &format!("permission denied: {shown} contains paths protected by the policy")))
 }
 
-/// Runs the blocking file system operation `op` on tokio's blocking pool.
+/// Runs the blocking file system operation `op` off the VM thread: on the
+/// process's hot file system worker if it is idle (see [`FsWorker`]),
+/// otherwise on tokio's blocking pool.
 async fn blocking<T: Send + 'static>(op: impl FnOnce() -> io::Result<T> + Send + 'static) -> io::Result<T> {
-    tokio::task::spawn_blocking(op).await.unwrap_or_else(|e| Err(io::Error::other(e)))
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let job: Box<dyn FnOnce() + Send> = Box::new(move || {
+        let _ = tx.send(op());
+    });
+    match FsWorker::get().try_run(job) {
+        Ok(()) => rx.await.unwrap_or_else(|e| Err(io::Error::other(e))),
+        Err(job) => {
+            tokio::task::spawn_blocking(job).await.map_err(io::Error::other)?;
+            rx.await.unwrap_or_else(|e| Err(io::Error::other(e)))
+        }
+    }
+}
+
+/// A thread that runs file system operations one at a time and, after each,
+/// stays awake (spinning) for [`FsWorker::LINGER`] waiting for the next:
+/// a script doing many small file operations in a row then pays no thread
+/// wake-up per operation, which costs more than the operation itself
+/// (`stat` or reading a small file takes a few microseconds). It only takes
+/// a job when idle, so operations never queue behind a slow one (one on a
+/// hung network file system holds it, and later ones go to tokio's
+/// blocking pool), and engines keep running operations in parallel.
+pub(crate) struct FsWorker {
+    jobs: std::sync::Mutex<std::sync::mpsc::Sender<Box<dyn FnOnce() + Send>>>,
+    /// A job was handed over and has not finished.
+    busy: std::sync::atomic::AtomicBool,
+}
+
+impl FsWorker {
+    const LINGER: std::time::Duration = std::time::Duration::from_micros(50);
+
+    fn get() -> &'static FsWorker {
+        static WORKER: std::sync::OnceLock<FsWorker> = std::sync::OnceLock::new();
+        WORKER.get_or_init(|| {
+            let (tx, rx) = std::sync::mpsc::channel::<Box<dyn FnOnce() + Send>>();
+            let spawned = std::thread::Builder::new().name("sand-fs".into()).spawn(move || {
+                let worker = FsWorker::get();
+                while let Ok(mut job) = rx.recv() {
+                    loop {
+                        job();
+                        worker.busy.store(false, std::sync::atomic::Ordering::Release);
+                        // Linger: the next operation usually follows at once.
+                        let until = std::time::Instant::now() + FsWorker::LINGER;
+                        let next = loop {
+                            match rx.try_recv() {
+                                Ok(j) => break Some(j),
+                                Err(_) if std::time::Instant::now() < until => std::hint::spin_loop(),
+                                Err(_) => break None,
+                            }
+                        };
+                        match next {
+                            Some(j) => job = j,
+                            None => break,
+                        }
+                    }
+                }
+            });
+            // Without a worker every job goes to the blocking pool.
+            let busy = std::sync::atomic::AtomicBool::new(spawned.is_err());
+            FsWorker { jobs: std::sync::Mutex::new(tx), busy }
+        })
+    }
+
+    /// Hands `job` to the worker if it is idle; gives it back otherwise.
+    fn try_run(&self, job: Box<dyn FnOnce() + Send>) -> Result<(), Box<dyn FnOnce() + Send>> {
+        use std::sync::atomic::Ordering;
+        if self.busy.compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed).is_err() {
+            return Err(job);
+        }
+        let jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        jobs.send(job).map_err(|e| {
+            self.busy.store(false, Ordering::Release);
+            e.0
+        })
+    }
+
+    /// Whether the worker is running a job (the VM waits for it briefly
+    /// before parking its thread).
+    pub(crate) fn busy() -> bool {
+        FsWorker::get().busy.load(std::sync::atomic::Ordering::Acquire)
+    }
 }
 
 /// Runs `op` on the I/O runtime; `finish` converts its result on the VM

@@ -91,3 +91,9 @@ pub(crate) fn resolve_path(vm: &crate::vm::Vm, p: &str) -> std::path::PathBuf {
     let joined = if path.is_absolute() { path.to_path_buf() } else { vm.host.cwd.join(path) };
     crate::policy::normalize_path(&joined)
 }
+
+/// Whether the file system worker is running an operation (see
+/// `fs::FsWorker`).
+pub(crate) fn fs_worker_busy() -> bool {
+    fs::FsWorker::busy()
+}

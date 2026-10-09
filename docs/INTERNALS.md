@@ -322,7 +322,13 @@ enforced there).
   followed; use `policy::normalize_entry_path` for operations on a directory
   entry itself), check `Capability::FsRead`/`FsWrite` with `vm.permit` (or
   `vm.permit_entry` for entry operations), then perform the I/O only through
-  `stdlib::fs_safe` on the blocking pool. Never use path-based `std::fs` /
+  `stdlib::fs_safe` off the VM thread (`fs::blocking`: on the process's hot
+  file system worker, `FsWorker`, when it is idle, otherwise on tokio's
+  blocking pool). The worker stays awake for 50 µs after each operation and
+  the scheduler waits up to 100 µs for its result before parking
+  (`FS_SPIN`), so a run of small file operations pays no thread wake-ups
+  (which cost more than a `stat`); a slow or hung operation only occupies
+  the worker, and later ones go to the pool. Never use path-based `std::fs` /
   `tokio::fs` calls on script paths: `fs_safe` opens every directory without
   following symlinks (`openat` + `O_NOFOLLOW` per component, `O_PATH` on
   Linux, one `O_NOFOLLOW_ANY` open on macOS; on Windows `NtCreateFile`
