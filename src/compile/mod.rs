@@ -1367,7 +1367,10 @@ impl<'a> Compiler<'a> {
             HKind::Continue { depth } => {
                 let target = f.loops.len().checked_sub(1 + *depth as usize);
                 self.emit_defers(f, target.map_or(f.defers.len(), |i| f.loops[i].defer_depth));
-                let j = self.emit_jump(f);
+                // A backward jump to the loop's start: like the loop's own
+                // back edge, it consumes fuel (a loop that only continues
+                // must still be preempted and stopped by the limits).
+                let j = self.emit(f, Op::Loop { off: 0 });
                 if let Some(i) = target {
                     f.loops[i].continues.push(j);
                 }
@@ -2701,9 +2704,16 @@ fn thread_jumps(code: &mut [Op]) {
         code[i] = match code.get(t as usize) {
             Some(&Op::Loop { off }) => Op::Loop { off: (t + 1 + off as i64 - (i as i64 + 1)) as i32 },
             Some(&op @ (Op::Ret { .. } | Op::RetUnit)) => op,
+            // Every backward jump consumes fuel (see `Op::Loop`), so that no
+            // loop escapes the limits.
+            _ if t <= i as i64 => Op::Loop { off: (t - (i as i64 + 1)) as i32 },
             _ => Op::Jmp { off: (t - (i as i64 + 1)) as i32 },
         };
     }
+    debug_assert!(
+        code.iter().all(|op| !matches!(op, Op::JmpIf { off, .. } | Op::JmpIfNot { off, .. } if *off < 0)),
+        "conditional backward jump (it would not consume fuel)"
+    );
 }
 
 /// The string locals of a function body that `+=` appends to and no

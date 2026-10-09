@@ -94,6 +94,27 @@ fn string_and_json_natives_are_metered() {
 }
 
 #[test]
+fn loops_that_only_continue_are_metered() {
+    // `continue` jumps back to the loop's start without reaching its back
+    // edge: it must consume fuel too, or such a loop escapes every limit.
+    let cases = [
+        "while true { continue }",
+        "var i = 0\nwhile true {\n    i += 1\n    continue\n}",
+        "loop { continue }",
+        "@outer loop {\n    for x in 0..10 { continue @outer }\n}",
+        "for x in 0..9223372036854775807 { if x >= 0 { continue } }",
+        // The filter of a fused pipeline skips elements with `continue`.
+        "for x in Iter.repeat(1).filter(x => x > 1) { print(x) }",
+        "print(Iter.count_from(0).filter(x => x < 0).count())",
+    ];
+    for src in cases {
+        expect_stop(limits(|l| l.max_instructions = Some(1_000_000)), src, is_limit(LimitKind::Instructions), Duration::from_secs(10));
+        let wall = limits(|l| l.max_wall_time = Some(Duration::from_millis(200)));
+        expect_stop(wall, src, is_limit(LimitKind::WallTime), Duration::from_secs(10));
+    }
+}
+
+#[test]
 fn deep_comparison_is_metered() {
     // `==` on composite values is a single instruction doing unbounded work.
     let src = format!("{DAG}print(a == b)");
