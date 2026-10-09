@@ -496,34 +496,59 @@ impl Vm {
 
     /// A function value (`fn() -> T?`) producing the elements of `src`.
     pub fn iter_fn(&mut self, src: IterSrc) -> Value {
-        self.heap.alloc(Obj::IterFn(Box::new(src)))
+        self.heap.alloc(Obj::IterFn(src))
     }
 
     /// Calls the iterator function `it` (an [`Obj::IterFn`]): the next
     /// element, or `None`.
     #[inline(never)]
     pub(crate) fn iter_step(&mut self, it: Value) -> Value {
-        let Obj::IterFn(src) = self.heap.get(it) else { return self.none() };
-        let (next, state) = match **src {
-            IterSrc::List { list, i, n } => match self.heap.list(list).get(i as usize) {
+        let next = self.iter_next(it);
+        self.option(next)
+    }
+
+    /// [`Vm::iter_step`] without wrapping the element in `Some`.
+    #[inline(never)]
+    pub(crate) fn iter_next(&mut self, it: Value) -> Option<Value> {
+        let Obj::IterFn(src) = self.heap.get(it) else { return None };
+        // The characters of a string, one ASCII byte at a time (the common
+        // case): no decoding, and the state updated in place.
+        if let IterSrc::Chars { s, i } = *src
+            && let Some(&b) = self.heap.str(Value::Obj(s)).as_bytes().get(i as usize)
+            && b.is_ascii()
+        {
+            if let Some(IterSrc::Chars { i, .. }) = self.heap.iter_src_mut(it) {
+                *i += 1;
+            }
+            return Some(self.ascii_str(b));
+        }
+        let (next, state) = match *src {
+            IterSrc::List { list, i, n } => match self.heap.list(Value::Obj(list)).get(i as usize) {
                 Some(&x) if i < n => (Some(x), IterSrc::List { list, i: i + 1, n }),
                 _ => (None, IterSrc::List { list, i: n, n }),
             },
             IterSrc::Range { i, end } if i < end => (Some(Value::Int(i)), IterSrc::Range { i: i + 1, end }),
-            IterSrc::Range { .. } => return self.none(),
-            IterSrc::Chars { s, i } => match self.heap.str(s).get(i as usize..).and_then(|t| t.chars().next()) {
-                Some(c) => {
-                    let state = IterSrc::Chars { s, i: i + c.len_utf8() as i64 };
-                    (Some(self.short_str(c.encode_utf8(&mut [0; 4]))), state)
-                }
-                None => return self.none(),
-            },
+            IterSrc::Range { .. } => return None,
+            IterSrc::Chars { s, i } => {
+                let c = self.heap.str(Value::Obj(s)).get(i as usize..).and_then(|t| t.chars().next())?;
+                let state = IterSrc::Chars { s, i: i + c.len_utf8() as i64 };
+                (Some(self.short_str(c.encode_utf8(&mut [0; 4]))), state)
+            }
         };
         // The state holds no new object: no write barrier is needed.
-        if let Obj::IterFn(src) = self.heap.get_mut_storing(it, &[]) {
-            **src = state;
+        if let Some(src) = self.heap.iter_src_mut(it) {
+            *src = state;
         }
-        self.option(next)
+        next
+    }
+
+    /// The shared string of one ASCII character `b` (see `short_str`).
+    #[inline]
+    fn ascii_str(&mut self, b: u8) -> Value {
+        match self.ascii_strs.get(b as usize) {
+            Some(&v @ Value::Obj(_)) => v,
+            _ => self.short_str(std::str::from_utf8(&[b]).unwrap_or("?")),
+        }
     }
 
     /// A string equal to `s`, which may be shared: strings of one ASCII
@@ -570,6 +595,7 @@ impl Vm {
         self.heap.new_variant(id, &[v])
     }
 
+    #[inline]
     pub fn option(&mut self, v: Option<Value>) -> Value {
         match v {
             Some(v) => self.some(v),

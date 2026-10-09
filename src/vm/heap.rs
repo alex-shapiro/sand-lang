@@ -487,6 +487,26 @@ impl Heap {
             && let Obj::StrBuf(buf) = &self.objs[h as usize]
         {
             let (len, cap) = (buf.len(), buf.capacity());
+            if len < cap
+                && let &[b] = self.str(add).as_bytes()
+                && b.is_ascii()
+            {
+                // One ASCII character: the commonest piece.
+                if let Obj::StrBuf(buf) = &mut self.objs[h as usize] {
+                    buf.push(b as char);
+                }
+                return Ok(cur);
+            }
+            if len + extra <= cap && extra <= 16 {
+                // The common case (a short piece that fits): copied through
+                // a small buffer, as `add` is in the same arena.
+                let mut piece = [0u8; 16];
+                piece[..extra].copy_from_slice(self.str(add).as_bytes());
+                if let (Obj::StrBuf(buf), Ok(piece)) = (&mut self.objs[h as usize], std::str::from_utf8(&piece[..extra])) {
+                    buf.push_str(piece);
+                }
+                return Ok(cur);
+            }
             let grow = if len + extra > cap { (len + extra).max(2 * cap) - cap } else { 0 };
             if grow > 0 && self.would_exceed(grow) {
                 return Err(LimitKind::Memory);
@@ -593,6 +613,19 @@ impl Heap {
         }
         match &mut self.objs[h as usize] {
             Obj::List(l) => Some(l),
+            _ => None,
+        }
+    }
+
+    /// The state of iterator function `v` (an `Obj::IterFn`), to update it:
+    /// it holds no new object, so no write barrier is needed.
+    #[inline]
+    pub fn iter_src_mut(&mut self, v: Value) -> Option<&mut IterSrc> {
+        match v {
+            Value::Obj(h) => match &mut self.objs[h as usize] {
+                Obj::IterFn(src) => Some(src),
+                _ => None,
+            },
             _ => None,
         }
     }

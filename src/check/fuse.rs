@@ -60,6 +60,7 @@ enum Consumer {
     Any,
     All,
     Find,
+    FindIndex,
     Sum,
 }
 
@@ -188,6 +189,7 @@ impl Checker<'_> {
                         "any" => eager(range, None, Consumer::Any),
                         "all" => eager(range, None, Consumer::All),
                         "find" => eager(range, None, Consumer::Find),
+                        "find_index" => eager(range, None, Consumer::FindIndex),
                         _ => continue,
                     }
                 }
@@ -208,6 +210,7 @@ impl Checker<'_> {
                     "any" => Role::Consumer(Consumer::Any),
                     "all" => Role::Consumer(Consumer::All),
                     "find" => Role::Consumer(Consumer::Find),
+                    "find_index" => Role::Consumer(Consumer::FindIndex),
                     "sum" => Role::Consumer(Consumer::Sum),
                     _ => continue,
                 },
@@ -624,6 +627,20 @@ impl Checker<'_> {
                     let wrapped = mk(HKind::MakeVariant { rt_id: some, args: vec![x] }, opt_ty, span);
                     let found = block(vec![assign(r, wrapped, span), break_(span)], span);
                     vec![if_(test, found, span)]
+                });
+                (r, stmts)
+            }
+            Consumer::FindIndex => {
+                let f = self.func(rest.next().unwrap(), &mut extra);
+                let r = self.bind_tmp(mk(HKind::Tag(self.none_rt()), ty.clone(), span), &mut extra);
+                let n = self.bind_tmp(int(0, span), &mut extra);
+                let some = self.some_rt();
+                let opt_ty = ty.clone();
+                let stmts = self.fused_loop(chain, extra, span, |s, x| {
+                    let test = s.apply(f, vec![x], Type::Bool, span);
+                    let wrapped = mk(HKind::MakeVariant { rt_id: some, args: vec![local(n, Type::Int, span)] }, opt_ty, span);
+                    let found = block(vec![assign(r, wrapped, span), break_(span)], span);
+                    vec![if_(test, found, span), add_assign(n, 1, span)]
                 });
                 (r, stmts)
             }

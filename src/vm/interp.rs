@@ -6,6 +6,32 @@ use super::meter::{MemoryLimit, code_fuel, ctl_message, loop_fuel, message_ctl};
 use super::*;
 use crate::LimitKind;
 
+/// Why metered work stopped (the errors of `Meter::charge`), small enough to
+/// be returned in a register by the interpreter's helpers.
+#[derive(Clone, Copy)]
+enum Stop {
+    Interrupted,
+    Limit(LimitKind),
+}
+
+impl From<Ctl> for Stop {
+    fn from(c: Ctl) -> Stop {
+        match c {
+            Ctl::Limit(k) => Stop::Limit(k),
+            _ => Stop::Interrupted,
+        }
+    }
+}
+
+impl From<Stop> for Ctl {
+    fn from(s: Stop) -> Ctl {
+        match s {
+            Stop::Limit(k) => Ctl::Limit(k),
+            Stop::Interrupted => Ctl::Interrupted,
+        }
+    }
+}
+
 /// Why a fiber stopped running.
 pub enum Exit {
     /// The fiber's outermost function returned.
@@ -756,20 +782,17 @@ impl Vm {
                             enter!(p, nb, base + dst as usize, h);
                         }
                         Obj::IterFn(_) => {
-                            let v = self.iter_step(callee);
-                            r!(dst) = v;
+                            let next = self.iter_next(callee);
+                            r!(dst) = self.option(next);
                             // `while let Some(x) = next()`: the test that
                             // follows runs here (one dispatch less).
                             if let Some(&Op::JNotSome { src, dst: d, off }) = code.get(ip)
                                 && src == dst
                             {
                                 ip += 1;
-                                match v.as_inline_variant() {
-                                    Some((id, p)) if id == prog.ids.some => r!(d) = p,
-                                    _ => match self.heap.payload_if(v, prog.ids.some) {
-                                        Some(p) => r!(d) = p,
-                                        None => jump!(off),
-                                    },
+                                match next {
+                                    Some(x) => r!(d) = x,
+                                    None => jump!(off),
                                 }
                             }
                         }
@@ -1012,11 +1035,11 @@ impl Vm {
                             jump!(off)
                         }
                     }
-                    Err(c) => fail_ctl!(c),
+                    Err(c) => fail_ctl!(c.into()),
                 },
                 Op::StrClass { dst, src, class } => match self.str_class(r!(src), class) {
                     Ok(b) => r!(dst) = Value::Bool(b),
-                    Err(c) => fail_ctl!(c),
+                    Err(c) => fail_ctl!(c.into()),
                 },
                 Op::ForList { elem, base: b, off } => {
                     let i = int!(b + 1);
@@ -1293,7 +1316,7 @@ impl Vm {
 
     /// `Op::StrClass`: the character-class tests of strings.
     #[inline(never)]
-    fn str_class(&self, v: Value, class: u8) -> Result<bool, Ctl> {
+    fn str_class(&self, v: Value, class: u8) -> Result<bool, Stop> {
         let t = self.heap.str(v);
         if let &[b] = t.as_bytes()
             && b.is_ascii()
@@ -1309,7 +1332,7 @@ impl Vm {
                 _ => b.is_ascii_lowercase(),
             });
         }
-        self.meter.charge_bytes(t.len())?;
+        self.meter.charge_bytes(t.len()).map_err(Stop::from)?;
         let f: fn(char) -> bool = match class {
             0 => |c| c.is_ascii_digit(),
             1 => char::is_alphabetic,

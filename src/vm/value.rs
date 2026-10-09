@@ -495,13 +495,14 @@ impl std::fmt::Debug for TypeDesc {
 /// The state of an [`Obj::IterFn`].
 #[derive(Debug, Clone, Copy)]
 pub enum IterSrc {
-    /// The indices of `list` below `n` (its length when the iterator was
-    /// made), stopping early if it shrinks; `i` is the next one.
-    List { list: Value, i: i64, n: i64 },
+    /// The indices of list `list` (a heap handle) below `n` (its length
+    /// when the iterator was made), stopping early if it shrinks; `i` is
+    /// the next one.
+    List { list: u32, i: i64, n: i64 },
     /// The integers from `i` below `end`.
     Range { i: i64, end: i64 },
-    /// The characters of string `s` from byte offset `i`.
-    Chars { s: Value, i: i64 },
+    /// The characters of string `s` (a heap handle) from byte offset `i`.
+    Chars { s: u32, i: i64 },
 }
 
 pub enum Obj {
@@ -522,7 +523,7 @@ pub enum Obj {
     NativeFn(u32),
     /// The `next` function of the iterator of a list, range or string: a
     /// function value (`fn() -> T?`) that the interpreter steps directly.
-    IterFn(Box<IterSrc>),
+    IterFn(IterSrc),
     Cell(Value),
     Range(i64, i64, bool),
     Task(Box<TaskObj>),
@@ -559,6 +560,9 @@ impl std::fmt::Debug for Obj {
 
 const VALUE_SIZE: usize = std::mem::size_of::<Value>();
 
+// Objects are kept small: the heap is an array of them.
+const _: () = assert!(std::mem::size_of::<Obj>() == 32);
+
 /// Fixed cost of an entry of a map's or set's key index (the key's own
 /// allocations are counted in `key_bytes`).
 pub const INDEX_ENTRY_SIZE: usize = 48;
@@ -576,7 +580,7 @@ impl Obj {
             Obj::Map(m) => m.entries.capacity() * (2 * VALUE_SIZE + 8) + m.index.len() * INDEX_ENTRY_SIZE + m.key_bytes,
             Obj::Set(s) => s.entries.capacity() * (VALUE_SIZE + 8) + s.index.len() * INDEX_ENTRY_SIZE + s.key_bytes,
             Obj::Tuple(t) | Obj::Struct(_, t) | Obj::Variant(_, t) | Obj::Closure(_, t) => t.len() * VALUE_SIZE,
-            Obj::IterFn(_) => std::mem::size_of::<IterSrc>(),
+            Obj::IterFn(_) => 0,
             Obj::Task(_) => 32,
             Obj::Channel(c) => {
                 64 + c.queue.capacity() * VALUE_SIZE
@@ -602,8 +606,8 @@ impl Obj {
             Obj::Set(s) => s.entries.iter().flatten().for_each(|v| f(*v)),
             Obj::Tuple(t) | Obj::Struct(_, t) | Obj::Variant(_, t) | Obj::Closure(_, t) => t.iter().for_each(|v| f(*v)),
             Obj::Cell(v) => f(*v),
-            Obj::IterFn(it) => match **it {
-                IterSrc::List { list: v, .. } | IterSrc::Chars { s: v, .. } => f(v),
+            Obj::IterFn(it) => match *it {
+                IterSrc::List { list: h, .. } | IterSrc::Chars { s: h, .. } => f(Value::Obj(h)),
                 IterSrc::Range { .. } => {}
             },
             Obj::Task(t) => f(t.result),

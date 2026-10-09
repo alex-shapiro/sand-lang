@@ -457,7 +457,7 @@ fn register_str(r: &mut Registry) {
     r.add_builtin("str.is_space", |vm, a| char_class(vm, a[0], char::is_whitespace));
     r.add_builtin("str.is_upper", |vm, a| char_class(vm, a[0], char::is_uppercase));
     r.add_builtin("str.is_lower", |vm, a| char_class(vm, a[0], char::is_lowercase));
-    r.add_builtin("str.chars_iter_next", |vm, a| Ok(vm.iter_fn(IterSrc::Chars { s: a[0], i: 0 })));
+    r.add_builtin("str.chars_iter_next", |vm, a| Ok(vm.iter_fn(IterSrc::Chars { s: a[0].handle().unwrap_or(0), i: 0 })));
     r.add_builtin("str.char_at", |vm, a| {
         let t = vm.str(a[0]);
         let i = int(a[1]);
@@ -656,7 +656,7 @@ fn register_list(r: &mut Registry) {
     });
     r.add_builtin("List.iter_next", |vm, a| {
         let n = list_len(vm, a[0]) as i64;
-        Ok(vm.iter_fn(IterSrc::List { list: a[0], i: 0, n }))
+        Ok(vm.iter_fn(IterSrc::List { list: a[0].handle().unwrap_or(0), i: 0, n }))
     });
     r.add_builtin("List.pop", |vm, a| {
         let v = vm.heap.list_shrink(a[0]).and_then(Vec::pop);
