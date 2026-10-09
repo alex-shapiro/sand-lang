@@ -36,6 +36,8 @@ struct Parser<'a> {
     in_guard: bool,
     depth: usize,
     fatal: bool,
+    /// Inside a `trait` body: methods may omit their body.
+    in_trait: bool,
 }
 
 type PResult<T> = Result<T, ()>;
@@ -54,6 +56,7 @@ impl<'a> Parser<'a> {
             in_guard: false,
             depth: 0,
             fatal: false,
+            in_trait: false,
         }
     }
 
@@ -286,6 +289,7 @@ impl<'a> Parser<'a> {
                     Tok::Struct => ItemKind::Struct(self.struct_decl(true, doc)?),
                     Tok::Enum => ItemKind::Enum(self.enum_decl(true, doc)?),
                     Tok::Type => ItemKind::TypeAlias(self.type_alias(true, doc)?),
+                    Tok::Trait => ItemKind::Trait(self.trait_decl(true, doc)?),
                     Tok::Let | Tok::Var => {
                         let mut s = self.let_stmt()?;
                         if let StmtKind::Let { is_pub, doc: d, .. } = &mut s.kind {
@@ -296,7 +300,7 @@ impl<'a> Parser<'a> {
                         ItemKind::Stmt(s)
                     }
                     _ => {
-                        self.expected("`fn`, `struct`, `enum`, `type`, `let` or `var` after `pub`");
+                        self.expected("`fn`, `struct`, `enum`, `trait`, `type`, `let` or `var` after `pub`");
                         return Err(());
                     }
                 }
@@ -307,6 +311,8 @@ impl<'a> Parser<'a> {
             Tok::Struct => ItemKind::Struct(self.struct_decl(false, doc)?),
             Tok::Enum => ItemKind::Enum(self.enum_decl(false, doc)?),
             Tok::Extend => ItemKind::Extend(self.extend_decl()?),
+            Tok::Trait => ItemKind::Trait(self.trait_decl(false, doc)?),
+            Tok::Impl => ItemKind::Impl(self.impl_decl()?),
             Tok::Type if matches!(self.peek_tok(1), Tok::Ident) => ItemKind::TypeAlias(self.type_alias(false, doc)?),
             Tok::Ident if self.text(&self.toks[self.pos].clone()) == "test" && matches!(self.peek_tok(1), Tok::Str(_)) => {
                 self.bump();
@@ -396,19 +402,60 @@ impl<'a> Parser<'a> {
                 reflect = true;
             }
             let name = self.ident("type parameter")?;
-            let mut bounds = Vec::new();
-            if self.eat(&Tok::Colon) {
-                bounds.push(self.ident("bound")?);
-                while self.eat(&Tok::Plus) {
-                    bounds.push(self.ident("bound")?);
-                }
-            }
+            let bounds = if self.eat(&Tok::Colon) { self.bounds()? } else { Vec::new() };
             out.push(GenericParam { name, bounds, reflect });
             if self.eat(&Tok::Comma) {
                 continue;
             }
             self.expect_gt()?;
             break;
+        }
+        Ok(out)
+    }
+
+    /// `B1 + B2 + ...` where each bound is `Name`, `module.Name` or `Name<Args>`.
+    fn bounds(&mut self) -> PResult<Vec<TypeExpr>> {
+        let mut out = vec![self.bound()?];
+        while self.eat(&Tok::Plus) {
+            out.push(self.bound()?);
+        }
+        Ok(out)
+    }
+
+    fn bound(&mut self) -> PResult<TypeExpr> {
+        let lo = self.lo();
+        let mut path = vec![self.ident("bound")?];
+        while self.at(&Tok::Dot) && matches!(self.peek_tok(1), Tok::Ident) {
+            self.bump();
+            path.push(self.ident("bound")?);
+        }
+        let mut args = Vec::new();
+        if self.eat(&Tok::Lt) {
+            loop {
+                args.push(self.ty()?);
+                if !self.eat(&Tok::Comma) {
+                    break;
+                }
+            }
+            self.expect_gt()?;
+        }
+        Ok(TypeExpr { kind: TypeExprKind::Named { path, args }, span: self.span_from(lo) })
+    }
+
+    /// An optional `where T: B, U: C` clause.
+    fn where_clause(&mut self) -> PResult<Vec<WherePredicate>> {
+        let mut out = Vec::new();
+        if self.at(&Tok::Ident) && self.text(&self.toks[self.pos].clone()) == "where" {
+            self.bump();
+            loop {
+                let name = self.ident("type parameter")?;
+                self.expect(&Tok::Colon, "`:`")?;
+                let bounds = self.bounds()?;
+                out.push(WherePredicate { name, bounds });
+                if !self.eat(&Tok::Comma) {
+                    break;
+                }
+            }
         }
         Ok(out)
     }
@@ -438,6 +485,8 @@ impl<'a> Parser<'a> {
     }
 
     fn fn_decl(&mut self, is_pub: bool, doc: Option<String>) -> PResult<FnDecl> {
+        // Only the trait method itself may omit its body, not local functions inside it.
+        let bodyless_ok = std::mem::replace(&mut self.in_trait, false);
         let lo = self.lo();
         let is_native = self.eat(&Tok::Native);
         self.expect(&Tok::Fn, "`fn`")?;
@@ -477,23 +526,8 @@ impl<'a> Parser<'a> {
         }
         self.expect(&Tok::RParen, "`)`")?;
         let ret = if self.eat(&Tok::Arrow) { Some(self.ty()?) } else { None };
-        let mut where_clause = Vec::new();
-        if self.at(&Tok::Ident) && self.text(&self.toks[self.pos].clone()) == "where" {
-            self.bump();
-            loop {
-                let name = self.ident("type parameter")?;
-                self.expect(&Tok::Colon, "`:`")?;
-                let mut bounds = vec![self.ident("bound")?];
-                while self.eat(&Tok::Plus) {
-                    bounds.push(self.ident("bound")?);
-                }
-                where_clause.push(WherePredicate { name, bounds });
-                if !self.eat(&Tok::Comma) {
-                    break;
-                }
-            }
-        }
-        let body = if is_native {
+        let where_clause = self.where_clause()?;
+        let body = if is_native || (bodyless_ok && !self.at(&Tok::LBrace)) {
             None
         } else if self.at(&Tok::LBrace) {
             Some(self.block()?)
@@ -614,6 +648,52 @@ impl<'a> Parser<'a> {
         }
         self.expect(&Tok::RBrace, "`}`")?;
         Ok(ExtendDecl { generics, target, methods })
+    }
+
+    /// Methods of a `trait` or `impl` body: doc comments and `fn` declarations.
+    fn trait_body(&mut self, in_trait: bool) -> PResult<Vec<FnDecl>> {
+        self.expect(&Tok::LBrace, "`{`")?;
+        let mut methods = Vec::new();
+        loop {
+            self.skip_semis();
+            if self.at(&Tok::RBrace) || self.at(&Tok::Eof) {
+                break;
+            }
+            let mdoc = self.doc_before(self.lo());
+            if self.at(&Tok::Pub) {
+                let what = if in_trait { "trait" } else { "impl" };
+                self.error_here(format!("`pub` is not allowed on {what} methods; they are public if the trait is"));
+                self.bump();
+            }
+            if !self.at(&Tok::Fn) {
+                self.expected("`fn`");
+                return Err(());
+            }
+            self.in_trait = in_trait;
+            methods.push(self.fn_decl(false, mdoc)?);
+        }
+        self.expect(&Tok::RBrace, "`}`")?;
+        Ok(methods)
+    }
+
+    fn trait_decl(&mut self, is_pub: bool, doc: Option<String>) -> PResult<TraitDecl> {
+        self.bump();
+        let name = self.ident("trait name")?;
+        let generics = self.generics()?;
+        let supers = if self.eat(&Tok::Colon) { self.bounds()? } else { Vec::new() };
+        let methods = self.trait_body(true)?;
+        Ok(TraitDecl { name, generics, supers, methods, is_pub, doc })
+    }
+
+    fn impl_decl(&mut self) -> PResult<ImplDecl> {
+        self.bump();
+        let generics = self.generics()?;
+        let trait_ref = self.bound()?;
+        self.expect(&Tok::For, "`for`")?;
+        let target = self.ty()?;
+        let where_clause = self.where_clause()?;
+        let methods = self.trait_body(false)?;
+        Ok(ImplDecl { generics, trait_ref, target, where_clause, methods })
     }
 
     fn native_type(&mut self, is_pub: bool, doc: Option<String>) -> PResult<NativeTypeDecl> {
@@ -801,6 +881,11 @@ impl<'a> Parser<'a> {
         let lo = self.lo();
         match self.tok() {
             Tok::Let | Tok::Var => self.let_stmt(),
+            Tok::Defer => {
+                self.bump();
+                let e = self.expr()?;
+                Ok(Stmt { kind: StmtKind::Defer(e), span: self.span_from(lo) })
+            }
             Tok::Fn if matches!(self.peek_tok(1), Tok::Ident) => {
                 let doc = self.doc_before(lo);
                 let f = self.fn_decl(false, doc)?;
@@ -1371,25 +1456,15 @@ impl<'a> Parser<'a> {
                 let inline = self.line_of(lo) == self.line_of(close);
                 Ok(self.mk(ExprKind::Match { scrutinee: Box::new(scrutinee), arms, inline }, self.span_from(lo)))
             }
-            Tok::Loop => {
-                self.bump();
-                let b = self.block()?;
-                Ok(self.mk(ExprKind::Loop(b), self.span_from(lo)))
+            Tok::At => {
+                let label = self.label()?;
+                if !matches!(self.tok(), Tok::Loop | Tok::While | Tok::For) {
+                    self.expected("`loop`, `while` or `for` after a label");
+                    return Err(());
+                }
+                self.loop_expr(lo, Some(label))
             }
-            Tok::While => {
-                self.bump();
-                let cond = self.cond()?;
-                let body = self.block()?;
-                Ok(self.mk(ExprKind::While { cond, body }, self.span_from(lo)))
-            }
-            Tok::For => {
-                self.bump();
-                let pattern = self.pattern()?;
-                self.expect(&Tok::In, "`in`")?;
-                let iter = self.expr_no_struct()?;
-                let body = self.block()?;
-                Ok(self.mk(ExprKind::For { pattern, iter: Box::new(iter), body }, self.span_from(lo)))
-            }
+            Tok::Loop | Tok::While | Tok::For => self.loop_expr(lo, None),
             Tok::Return => {
                 self.bump();
                 let v = if self.expr_follows() { Some(Box::new(self.expr()?)) } else { None };
@@ -1397,12 +1472,14 @@ impl<'a> Parser<'a> {
             }
             Tok::Break => {
                 self.bump();
-                let v = if self.expr_follows() { Some(Box::new(self.expr()?)) } else { None };
-                Ok(self.mk(ExprKind::Break(v), self.span_from(lo)))
+                let label = if self.at(&Tok::At) { Some(self.label()?) } else { None };
+                let value = if self.expr_follows() { Some(Box::new(self.expr()?)) } else { None };
+                Ok(self.mk(ExprKind::Break { label, value }, self.span_from(lo)))
             }
             Tok::Continue => {
                 self.bump();
-                Ok(self.mk(ExprKind::Continue, self.span_from(lo)))
+                let label = if self.at(&Tok::At) { Some(self.label()?) } else { None };
+                Ok(self.mk(ExprKind::Continue(label), self.span_from(lo)))
             }
             Tok::Spawn | Tok::Not | Tok::Minus | Tok::Tilde | Tok::DotDot | Tok::DotDotEq => self.prefix(0),
             _ => {
@@ -1410,6 +1487,34 @@ impl<'a> Parser<'a> {
                 Err(())
             }
         }
+    }
+
+    /// `@name` (the label's span covers the name only).
+    fn label(&mut self) -> PResult<Ident> {
+        self.expect(&Tok::At, "`@`")?;
+        if !self.at(&Tok::Ident) || self.toks[self.pos].lo != self.prev_hi() {
+            self.expected("a label name directly after `@`");
+            return Err(());
+        }
+        self.ident("label")
+    }
+
+    /// `loop`, `while` or `for`, with an optional label already parsed.
+    fn loop_expr(&mut self, lo: u32, label: Option<Ident>) -> PResult<Expr> {
+        let kind = match self.bump().tok {
+            Tok::Loop => ExprKind::Loop { label, body: self.block()? },
+            Tok::While => {
+                let cond = self.cond()?;
+                ExprKind::While { label, cond, body: self.block()? }
+            }
+            _ => {
+                let pattern = Box::new(self.pattern()?);
+                self.expect(&Tok::In, "`in`")?;
+                let iter = self.expr_no_struct()?;
+                ExprKind::For { label, pattern, iter: Box::new(iter), body: self.block()? }
+            }
+        };
+        Ok(self.mk(kind, self.span_from(lo)))
     }
 
     fn expr_follows(&self) -> bool {

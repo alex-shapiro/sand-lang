@@ -99,10 +99,20 @@ test "reverse twice is identity" {
 test "false property" {
     test.property("small", rng => 5, x => x < 0, cases: 10)
 }
+test "seed controls inputs" {
+    let a = []
+    let b = []
+    let c = []
+    test.property("a", rng => rng.int(0, 1000000), x => { a.push(x); true }, cases: 5, seed: 7)
+    test.property("b", rng => rng.int(0, 1000000), x => { b.push(x); true }, cases: 5, seed: 7)
+    test.property("c", rng => rng.int(0, 1000000), x => { c.push(x); true }, cases: 5, seed: 8)
+    assert(a.len() == 5 and a == b and a != c)
+}
 --- test
 ok reverse twice is identity
 FAIL false property: property `small` failed for input: 5
-1 passed, 1 failed
+ok seed controls inputs
+2 passed, 1 failed
 
 === tests can use tasks
 test "async" {

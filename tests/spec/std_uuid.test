@@ -43,3 +43,11 @@ Ok("67e55044-10b1-426f-9247-bb680e5fe0c8")
 true
 false
 Some(4)
+
+=== parse does not slice inside a character
+import uuid
+print(uuid.parse("urn:uuidé0000").is_err())
+print(uuid.is_valid("é"))
+--- stdout
+true
+false

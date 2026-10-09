@@ -8,27 +8,39 @@ use crate::vm::{NResult, Vm, panic};
 pub fn register(r: &mut Registry) {
     r.source("uri", ModKind::Std, include_str!("uri.sand"));
     r.add_builtin("uri.parse", |vm, a| {
+        let n = vm.str(a[0]).len();
+        vm.reserve(2 * n)?;
+        vm.charge_slow_bytes(n)?;
         let parsed = parse(vm.str(a[0]), true);
         result(vm, parsed)
     });
     r.add_builtin("uri.Uri.join", |vm, a| {
+        let n = vm.str(a[1]).len() + vm.heap.fields(a[0]).iter().map(|f| vm.str(*f).len()).sum::<usize>();
+        vm.reserve(3 * n)?;
+        vm.charge_slow_bytes(n)?;
         let base = from_value(vm, a[0]);
         let resolved = parse(vm.str(a[1]), false).map(|r| resolve(&base, r));
         result(vm, resolved)
     });
     r.add_builtin("uri.encode_component", |vm, a| encode_native(vm, a[0], b""));
     r.add_builtin("uri.encode_path", |vm, a| encode_native(vm, a[0], b"/"));
-    r.add_builtin("uri.decode_component", |vm, a| match decode_component(vm.str(a[0])) {
-        Ok(s) => {
-            let s = vm.new_str(s);
-            Ok(vm.ok(s))
+    r.add_builtin("uri.decode_component", |vm, a| {
+        vm.reserve(vm.str(a[0]).len())?;
+        vm.charge_slow_bytes(vm.str(a[0]).len())?;
+        match decode_component(vm.str(a[0])) {
+            Ok(s) => {
+                let s = vm.new_str(s);
+                Ok(vm.ok(s))
+            }
+            Err(msg) => Ok(vm.err_value("parse", &msg)),
         }
-        Err(msg) => Ok(vm.err_value("parse", &msg)),
     });
     r.add_builtin("uri.parse_query", |vm, a| {
         let q = vm.str(a[0]);
         vm.reserve(q.len() * 4)?;
+        vm.charge_slow_bytes(q.len())?;
         let pairs = parse_query(q);
+        vm.charge(pairs.len() as u64)?;
         let mut items = Vec::with_capacity(pairs.len());
         for (k, v) in pairs {
             let k = vm.new_str(k);
@@ -268,6 +280,7 @@ fn remove_dot_segments(path: &str) -> String {
 
 fn encode_native(vm: &mut Vm, s: Value, keep: &[u8]) -> NResult {
     vm.reserve(vm.str(s).len() * 3)?;
+    vm.charge_slow_bytes(vm.str(s).len())?;
     let out = encode(vm.str(s), keep);
     Ok(vm.new_str(out))
 }

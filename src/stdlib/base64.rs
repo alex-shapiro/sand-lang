@@ -18,12 +18,14 @@ pub fn register(r: &mut Registry) {
 
 fn encode_native(vm: &mut Vm, data: Value, url: bool) -> NResult {
     vm.reserve(vm.heap.bytes_of(data).len() / 3 * 4 + 4)?;
+    vm.charge_slow_bytes(vm.heap.bytes_of(data).len())?;
     let s = encode(vm.heap.bytes_of(data), url);
     Ok(vm.new_str(s))
 }
 
 fn decode_native(vm: &mut Vm, text: Value, url: bool) -> NResult {
     vm.reserve(vm.str(text).len() / 4 * 3 + 3)?;
+    vm.charge_slow_bytes(vm.str(text).len())?;
     match decode(vm.str(text), url) {
         Ok(bytes) => {
             let b = vm.heap.new_bytes(bytes);

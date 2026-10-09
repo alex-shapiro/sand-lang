@@ -73,6 +73,24 @@ fn check_source_does_not_run() {
 }
 
 #[test]
+fn deferred_code_copies_are_bounded() {
+    // Each `defer` is compiled into every exit of its block: 1500 defers and
+    // 1500 returns would be millions of copies, so compilation stops early.
+    let mut src = String::from("fn f(n: int) -> int {\n");
+    for i in 0..1500 {
+        src.push_str(&format!("    defer print(\"{i}\")\n    if n == {i} {{ return {i} }}\n"));
+    }
+    src.push_str("    0\n}\nprint(f(3))\n");
+    let start = std::time::Instant::now();
+    let (r, _, _) = run_src(Config::new(), &src);
+    match r {
+        Err(Error::Compile(d)) => assert!(d.iter().any(|d| d.message.contains("too much deferred code")), "{d:?}"),
+        other => panic!("expected a compile error, got {other:?}"),
+    }
+    assert!(start.elapsed() < std::time::Duration::from_secs(20));
+}
+
+#[test]
 fn runtime_errors_have_stack_traces() {
     // Non-tail calls, so every frame appears in the trace.
     let src = "fn a() -> int { panic(\"boom\") }\nfn b() -> int { a() + 1 }\nprint(b())\n";
@@ -212,6 +230,73 @@ pub native fn scale(x: float, k: float) -> float
     let (r, out, _) = run_src(Config::new().module(m), src);
     r.unwrap();
     assert_eq!(out, "9.0\n");
+}
+
+#[test]
+fn native_module_declares_traits_for_builtin_types() {
+    let mut m = NativeModule::new("units");
+    m.source(
+        r#"
+/// Values with a unit.
+pub trait Unit {
+    /// The unit's symbol.
+    fn symbol() -> str
+    fn show(self) -> str { "{self.magnitude()}{Self.symbol()}" }
+    fn magnitude(self) -> float
+}
+impl Unit for duration {
+    fn symbol() -> str { "s" }
+    fn magnitude(self) -> float { self.secs() }
+}
+impl<T: Unit> Unit for [T] {
+    fn symbol() -> str { T.symbol() }
+    fn magnitude(self) -> float { self.map(x => x.magnitude()).sum() }
+}
+pub fn total<T: Unit>(xs: [T]) -> str { xs.show() }
+"#,
+    );
+    let src = r#"
+import help
+import units
+struct Metres { m: float }
+impl units.Unit for Metres {
+    fn symbol() -> str { "m" }
+    fn magnitude(self) -> float { self.m }
+}
+print(1500ms.show())
+print(units.total([1s, 2s]))
+print(units.total([Metres { m: 2.0 }, Metres { m: 0.5 }]))
+print(help.module("units") ?? "")
+"#;
+    let (r, out, _) = run_src(Config::new().module(m), src);
+    r.unwrap();
+    assert_eq!(
+        out,
+        "1.5s\n3.0s\n2.5m\ntrait Unit\n    Values with a unit.\n    fn symbol() -> str\n    fn show(self) -> str\n    fn magnitude(self) -> float\nfn total(xs: [T]) -> str\n"
+    );
+}
+
+#[test]
+fn help_summarises_modules_that_are_not_imported() {
+    let mut shapes = NativeModule::new("shapes");
+    shapes.source(
+        "/// A square.\npub struct Square { side: float }\n/// Area of a square.\npub fn area(s: Square) -> float { s.side * s.side }\n",
+    );
+    // A host module that does not type check must not break `help` for the others.
+    let mut broken = NativeModule::new("broken");
+    broken.source("pub fn bad() -> int { \"not an int\" }\n");
+    let src = r#"import help
+let s = help.module("shapes").unwrap()
+print(s)
+print(help.module("shapes") == Some(s))
+print(help.module("json").unwrap().contains("fn parse(text: str) -> Result<Json, Error>"))
+print(help.module("broken"))
+print(help.module("nope"))
+print(help.modules().contains("shapes"))
+"#;
+    let (r, out, _) = run_src(Config::new().module(shapes).module(broken), src);
+    r.unwrap();
+    assert_eq!(out, "struct Square\n    A square.\nfn area(s: Square) -> float\n    Area of a square.\ntrue\ntrue\nNone\nNone\ntrue\n");
 }
 
 #[test]
@@ -442,6 +527,168 @@ print(env.get("ANY").is_some() or true)
 }
 
 // ---------------------------------------------------------------------------
+// Prompts for imports (checked at compile time)
+// ---------------------------------------------------------------------------
+
+/// A prompter answering from a script (then `DenyOnce`), recording what it was asked.
+#[derive(Clone, Default)]
+struct ScriptedPrompter {
+    asked: Arc<Mutex<Vec<Capability>>>,
+    answers: Arc<Mutex<Vec<PromptAnswer>>>,
+}
+
+impl ScriptedPrompter {
+    fn new(answers: &[PromptAnswer]) -> ScriptedPrompter {
+        ScriptedPrompter { asked: Arc::default(), answers: Arc::new(Mutex::new(answers.to_vec())) }
+    }
+    fn asked(&self) -> Vec<Capability> {
+        std::mem::take(&mut *self.asked.lock().unwrap())
+    }
+    fn config(&self, policy: Policy) -> Config {
+        let p = self.clone();
+        Config::new().policy(policy).stdout(MemorySink::new()).prompter(move |cap: Capability| {
+            p.asked.lock().unwrap().push(cap);
+            let mut answers = p.answers.lock().unwrap();
+            let answer = if answers.is_empty() { PromptAnswer::DenyOnce } else { answers.remove(0) };
+            async move { answer }
+        })
+    }
+}
+
+fn prompt_for_imports() -> Policy {
+    Policy::custom(|cap: &Capability| if matches!(cap, Capability::Import(_)) { Decision::Prompt } else { Decision::Allow })
+}
+
+fn import_cap(dir: &TempDir, rel: &str) -> Capability {
+    Capability::Import(sandlang::policy::normalize_path(&rel.split('/').fold(dir.path().to_path_buf(), |p, part| p.join(part))))
+}
+
+fn assert_import_denied(r: Result<sandlang::Outcome, Error>, import: &str) {
+    match r {
+        Err(Error::Compile(d)) => {
+            assert!(d.iter().any(|d| d.message == format!("cannot import `{import}`: permission denied")), "{d:?}")
+        }
+        other => panic!("expected a denied import, got {other:?}"),
+    }
+}
+
+#[test]
+fn import_prompt_allow_once_asks_on_every_compile() {
+    let dir = TempDir::new("impallowonce");
+    dir.write("lib.sand", "pub let X = 1");
+    let main = dir.write("main.sand", "import \"./lib.sand\"\nprint(lib.X)");
+    let prompter = ScriptedPrompter::new(&[PromptAnswer::AllowOnce, PromptAnswer::AllowOnce]);
+    let mut engine = Engine::new(prompter.config(prompt_for_imports()));
+    rt().block_on(engine.run_file(&main)).unwrap();
+    assert_eq!(prompter.asked(), vec![import_cap(&dir, "lib.sand")]);
+    rt().block_on(engine.run_file(&main)).unwrap();
+    assert_eq!(prompter.asked(), vec![import_cap(&dir, "lib.sand")]);
+}
+
+#[test]
+fn import_prompt_allow_always_is_remembered_by_the_engine() {
+    let dir = TempDir::new("impallowalways");
+    dir.write("lib.sand", "pub let X = 1");
+    let main = dir.write("main.sand", "import \"./lib.sand\"\nprint(lib.X)");
+    let prompter = ScriptedPrompter::new(&[PromptAnswer::AllowAlways]);
+    let mut engine = Engine::new(prompter.config(prompt_for_imports()));
+    rt().block_on(engine.run_file(&main)).unwrap();
+    assert_eq!(prompter.asked(), vec![import_cap(&dir, "lib.sand")]);
+    // Not asked again for later compilations by the same engine...
+    rt().block_on(engine.run_file(&main)).unwrap();
+    engine.check_file(&main).unwrap();
+    assert_eq!(prompter.asked(), vec![]);
+    // ...but a different module is a different request.
+    dir.write("other.sand", "pub let Y = 2");
+    let main2 = dir.write("main2.sand", "import \"./other.sand\"\nimport \"./lib.sand\"\nprint(other.Y + lib.X)");
+    assert_import_denied(rt().block_on(engine.run_file(&main2)), "./other.sand");
+    assert_eq!(prompter.asked(), vec![import_cap(&dir, "other.sand")]);
+    // A fresh engine asks again.
+    let mut fresh = Engine::new(prompter.config(prompt_for_imports()));
+    assert_import_denied(rt().block_on(fresh.run_file(&main)), "./lib.sand");
+    assert_eq!(prompter.asked(), vec![import_cap(&dir, "lib.sand")]);
+}
+
+#[test]
+fn import_prompt_deny_once_and_deny_always() {
+    let dir = TempDir::new("impdeny");
+    dir.write("lib.sand", "pub let X = 1");
+    let main = dir.write("main.sand", "import \"./lib.sand\"\nprint(lib.X)");
+    let prompter = ScriptedPrompter::new(&[PromptAnswer::DenyOnce, PromptAnswer::DenyAlways, PromptAnswer::AllowAlways]);
+    let mut engine = Engine::new(prompter.config(prompt_for_imports()));
+    assert_import_denied(rt().block_on(engine.run_file(&main)), "./lib.sand");
+    assert_eq!(prompter.asked().len(), 1);
+    // `DenyOnce` is not remembered; `DenyAlways` is.
+    assert_import_denied(rt().block_on(engine.run_file(&main)), "./lib.sand");
+    assert_eq!(prompter.asked().len(), 1);
+    assert_import_denied(rt().block_on(engine.run_file(&main)), "./lib.sand");
+    assert!(engine.check_file(&main).is_err());
+    assert_eq!(prompter.asked(), vec![]);
+}
+
+#[test]
+fn import_prompt_without_prompter_denies() {
+    let dir = TempDir::new("impnoprompter");
+    dir.write("lib.sand", "pub let X = 1");
+    let main = dir.write("main.sand", "import \"./lib.sand\"\nprint(lib.X)");
+    let mut engine = Engine::new(Config::new().policy(prompt_for_imports()));
+    assert_import_denied(rt().block_on(engine.run_file(&main)), "./lib.sand");
+    // Standard modules are not script imports and are never prompted for.
+    let prompter = ScriptedPrompter::new(&[]);
+    let mut engine = Engine::new(prompter.config(prompt_for_imports()));
+    rt().block_on(engine.run_source("main.sand", "import json\nprint(json.stringify(json.Json.Null))")).unwrap();
+    assert_eq!(prompter.asked(), vec![]);
+}
+
+#[test]
+fn nested_imports_are_prompted_with_resolved_paths() {
+    let dir = TempDir::new("impnested");
+    dir.write("lib/a.sand", "import \"./b.sand\"\nfrom \"../c\" import Z\npub let X = b.Y + Z");
+    dir.write("lib/b.sand", "pub let Y = 2");
+    dir.write("c.sand", "pub let Z = 3");
+    let main = dir.write("main.sand", "import \"lib/a.sand\"\nimport \"./c.sand\"\nprint(a.X + c.Z)");
+    let prompter = ScriptedPrompter::new(&[PromptAnswer::AllowOnce; 3]);
+    let out = MemorySink::new();
+    let mut engine = Engine::new(prompter.config(prompt_for_imports()).stdout(out.clone()));
+    rt().block_on(engine.run_file(&main)).unwrap();
+    assert_eq!(out.contents(), "8\n");
+    // Depth-first, each module once (c.sand is shared), with paths resolved
+    // relative to the importing module.
+    assert_eq!(prompter.asked(), vec![import_cap(&dir, "lib/a.sand"), import_cap(&dir, "lib/b.sand"), import_cap(&dir, "c.sand")]);
+
+    // Denying a nested import reports it in the importing module, and modules
+    // after it are not loaded.
+    let prompter = ScriptedPrompter::new(&[PromptAnswer::AllowOnce, PromptAnswer::DenyOnce]);
+    let mut engine = Engine::new(prompter.config(prompt_for_imports()));
+    match rt().block_on(engine.run_file(&main)) {
+        Err(Error::Compile(d)) => {
+            let denied: Vec<_> = d.iter().filter(|d| d.message.contains("permission denied")).collect();
+            assert_eq!(denied.len(), 1, "{d:?}");
+            assert_eq!(denied[0].message, "cannot import `./b.sand`: permission denied");
+            assert_eq!((denied[0].file.replace('\\', "/").as_str(), denied[0].line), ("lib/a.sand", 1));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(prompter.asked(), vec![import_cap(&dir, "lib/a.sand"), import_cap(&dir, "lib/b.sand")]);
+}
+
+#[test]
+fn runtime_always_answers_last_for_the_engine() {
+    let dir = TempDir::new("alwaysruntime");
+    dir.write("a.txt", "A");
+    let prompter = ScriptedPrompter::new(&[PromptAnswer::AllowAlways, PromptAnswer::DenyAlways]);
+    let policy = Policy::rules(RulePolicy::new().fallback(Decision::Prompt));
+    let out = MemorySink::new();
+    let mut engine = Engine::new(prompter.config(policy).cwd(dir.path()).stdout(out.clone()));
+    let src = "import fs\nimport env\nprint(fs.read_text(\"a.txt\").is_ok())\nprint(env.get(\"SAND_TEST_UNSET_VAR\"))";
+    rt().block_on(engine.run_source("main.sand", src)).unwrap();
+    assert_eq!(prompter.asked().len(), 2);
+    rt().block_on(engine.run_source("main.sand", src)).unwrap();
+    assert_eq!(prompter.asked(), vec![], "always answers must be remembered across runs of one engine");
+    assert_eq!(out.contents(), "true\nNone\ntrue\nNone\n");
+}
+
+// ---------------------------------------------------------------------------
 // Resource limits
 // ---------------------------------------------------------------------------
 
@@ -450,6 +697,20 @@ fn instruction_limit() {
     let config = Config::new().limits(Limits { max_instructions: Some(100_000), ..Limits::default() });
     let (r, _, _) = run_src(config, "var i = 0\nwhile true { i += 1 }");
     assert!(matches!(r, Err(Error::Limit(LimitKind::Instructions))), "{r:?}");
+}
+
+#[test]
+fn infinite_iterators_run_out_of_fuel() {
+    // Iterators are plain Sand code: every element costs calls, so endless
+    // sources are stopped by the instruction limit (or the memory limit).
+    for src in ["print(Iter.repeat(1).count())", "print(Iter.count_from(0).filter(x => x < 0).first())"] {
+        let config = Config::new().limits(Limits { max_instructions: Some(100_000), ..Limits::default() });
+        let (r, _, _) = run_src(config, src);
+        assert!(matches!(r, Err(Error::Limit(LimitKind::Instructions))), "{src}: {r:?}");
+    }
+    let config = Config::new().limits(Limits { max_memory: Some(8 << 20), ..Limits::default() });
+    let (r, _, _) = run_src(config, "print(Iter.repeat(\"x\").map(s => s.repeat(100)).to_list().len())");
+    assert!(matches!(r, Err(Error::Limit(LimitKind::Memory))), "{r:?}");
 }
 
 #[test]
@@ -502,6 +763,190 @@ fn call_depth_limit() {
         Err(Error::Runtime { message, .. }) => assert!(message.contains("stack overflow")),
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn returned_frames_do_not_keep_garbage_alive() {
+    // Each call leaves a 10 MB string in a dead register at a different stack
+    // depth; those slots must not be GC roots once the call has returned.
+    let config = Config::new().limits(Limits { max_memory: Some(48 << 20), ..Limits::default() });
+    let src = "fn alloc_at(depth: int) -> int {\n    if depth == 0 { \"x\".repeat(10000000).len() } else { alloc_at(depth - 1) + 0 }\n}\nvar t = 0\nfor d in 0..12 { t += alloc_at(11 - d) }\nprint(t)";
+    let (r, out, _) = run_src(config, src);
+    r.unwrap();
+    assert_eq!(out, "120000000\n");
+}
+
+#[test]
+fn deep_recursion_then_garbage_churn() {
+    // The stack grows for deep recursion and is shrunk again by the GC; values
+    // in live frames must survive collections triggered deep in the recursion.
+    let src = "fn deep(n: int, acc: [str]) -> int {\n    if n == 0 { return acc.len() }\n    let s = \"v{n}\"\n    let r = deep(n - 1, acc + [s])\n    if r % 1000 == 0 { let _junk = (0..1000).map(i => i.to_str()) }\n    r + s.len() - s.len()\n}\nvar total = 0\nfor round in 0..3 {\n    total += deep(3000, [])\n    var junk = 0\n    for i in 0..200000 { junk += [i].len() }\n    total += junk\n}\nprint(total)";
+    let (r, out, _) = run_src(Config::new(), src);
+    r.unwrap();
+    assert_eq!(out, "609000\n");
+}
+
+#[test]
+fn objects_reachable_only_through_inline_variants_survive_gc() {
+    // `Some(obj)`, `Ok(obj)` etc. are stored inline (no heap allocation of
+    // their own); the payload objects must still be traced from every kind
+    // of root and container.
+    let src = r#"
+struct Holder {
+    v: str?
+}
+let in_list = [Some("list {i}") for i in 0..1000]
+let in_map: [int: Result<str, int>] = [:]
+for i in 0..1000 { in_map[i] = Ok("map {i}") }
+let in_struct = Holder { v: Some("struct field") }
+let captured = Some(["captured", "list"])
+let closure = () => captured.unwrap().len()
+let ch = task.channel(capacity: 10)
+ch.send(Some("queued"))
+let t = spawn { Some("task result") }
+t.wait()
+var churn = 0
+for i in 0..300000 { churn += [i, i + 1].len() }
+let local = Some("local {churn}")
+for i in 0..300000 { churn += [i].len() }
+var total = 0
+for x in in_list { total += x.unwrap().len() }
+for (k, v) in in_map { total += v.unwrap().len() }
+print(total)
+print(in_struct.v)
+print(closure())
+print(ch.recv())
+print(t.wait())
+print(local)
+"#;
+    let (r, out, _) = run_src(Config::new(), src);
+    r.unwrap();
+    assert_eq!(out, "14780\nSome(\"struct field\")\n2\nSome(Some(\"queued\"))\nSome(\"task result\")\nSome(\"local 600000\")\n");
+}
+
+/// Under GC stress every container is promoted to the old generation almost
+/// immediately, so each mutation below stores a young object into an old one
+/// and relies on the write barrier.
+const BARRIER_PROGRAM: &str = r#"
+struct Node {
+    name: str
+    var next: Node?
+}
+let xs: [str] = []
+let ys = ["", "", ""]
+let m: [str: [int]] = [:]
+let s: Set<str> = set()
+var head: Node? = None
+let node = Node { name: "root", next: None }
+let ch = task.channel(capacity: 100)
+var captured = "c0"
+let bump = (i: int) => {
+    captured = "c{i}"
+}
+for i in 0..60 {
+    xs.push("p{i}")
+    ys[i % 3] = "y{i}"
+    m["k{i % 7}"] = [i, i * 2]
+    s.add("s{i % 11}")
+    head = Some(Node { name: "n{i}", next: head })
+    node.next = Some(Node { name: "child{i}", next: None })
+    ch.send("msg{i}")
+    bump(i)
+    xs.insert(0, "front{i}")
+    xs.extend(["e{i}"])
+    if i % 5 == 0 {
+        xs.sort()
+        xs.swap(0, xs.len() - 1)
+        m.remove("k{(i + 3) % 7}")
+        m.insert("ins{i}", [i])
+        let _ = m.get_or_insert("goi{i}", [i, i])
+    }
+}
+let t = spawn { ["task", "result"].map(x => x + "!") }
+t.wait()
+for i in 0..200 { let _ = [i].map(x => x.to_str()) }
+var total = 0
+for x in xs { total += x.len() }
+for y in ys { total += y.len() }
+for (k, v) in m { total += k.len() + v.len() }
+for x in s { total += x.len() }
+var n = head
+while let Some(nd) = n {
+    total += nd.name.len()
+    n = nd.next
+}
+total += node.next.unwrap().name.len()
+while let Some(msg) = ch.try_recv() { total += msg.len() }
+total += captured.len()
+print(total)
+print(t.wait())
+print("{xs[0]} {xs[xs.len() - 1]} {ys} {s.len()}")
+"#;
+
+#[test]
+fn write_barrier_under_gc_stress() {
+    let (r, normal, _) = run_src(Config::new(), BARRIER_PROGRAM);
+    r.unwrap();
+    let (r, stressed, _) = run_src(Config::new().gc_stress(true), BARRIER_PROGRAM);
+    r.unwrap();
+    assert_eq!(normal, stressed);
+}
+
+#[test]
+fn old_lists_receiving_young_values_between_minor_collections() {
+    // Large old lists get young strings stored at scattered indices (more
+    // than the partial-remembering limit per collection) and pushed, with
+    // enough allocation in between for several minor collections.
+    const N: usize = 300_000;
+    let src = format!(
+        r#"
+let xs: [str] = ["" for _ in 0..{N}]
+let few: [str] = ["" for _ in 0..{N}]
+let tail: [str] = []
+for round in 0..6 {{
+    for i in 0..{N} {{
+        if i % 7 == round {{
+            xs[i] = "r{{round}}i{{i}}"
+        }}
+    }}
+    few[round * 1000] = "few{{round}}"
+    for i in 0..3000 {{ tail.push("t{{round}}.{{i}}") }}
+    var junk = 0
+    for j in 0..150000 {{ junk += [j, j].len() }}
+    if round == 3 {{
+        tail.insert(0, "front")
+    }}
+}}
+var total = 0
+for x in xs {{ total += x.len() }}
+for x in few {{ total += x.len() }}
+for x in tail {{ total += x.len() }}
+print(total)
+print(tail[0])
+print(few[5000])
+"#
+    );
+    let digits = |i: usize| i.to_string().len();
+    let xs: usize = (0..N).filter(|i| i % 7 < 6).map(|i| 3 + digits(i)).sum();
+    let tail: usize = 5 + 6 * (0..3000).map(|i| 3 + digits(i)).sum::<usize>();
+    let (mut engine, out, _) = engine_with(Config::new());
+    rt().block_on(engine.run_source("main.sand", &src)).unwrap();
+    assert_eq!(out.contents(), format!("{}\nfront\nfew5\n", xs + 6 * 4 + tail));
+    let stats = engine.gc_stats();
+    assert!(stats.collections - stats.majors >= 3, "{stats:?}");
+}
+
+#[test]
+fn gc_stats_report_minor_and_major_collections() {
+    // A large live structure plus allocation churn: most collections are
+    // minor ones that do not scan the old generation.
+    let src = "let live = [[i] for i in 0..300000]\nvar t = 0\nfor i in 0..2000000 { t += [i, i].len() }\nprint(t + live.len())";
+    let (mut engine, out, _) = engine_with(Config::new());
+    rt().block_on(engine.run_source("main.sand", src)).unwrap();
+    assert_eq!(out.contents(), "4300000\n");
+    let stats = engine.gc_stats();
+    assert!(stats.collections > stats.majors, "{stats:?}");
+    assert!(stats.majors >= 1, "{stats:?}");
 }
 
 #[test]
@@ -711,4 +1156,148 @@ fn implementation_has_no_unsafe_or_process_access() {
     }
     let lib = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs")).unwrap();
     assert!(lib.contains("#![forbid(unsafe_code)]"));
+}
+
+// ---------------------------------------------------------------------------
+// Hardening: script-controlled text never passes for an engine signal
+// ---------------------------------------------------------------------------
+
+#[test]
+fn panic_messages_cannot_impersonate_limits_or_interrupts() {
+    let srcs = [
+        r#"panic("\u{0}memory")"#,
+        r#"panic("\u{0}interrupted")"#,
+        r#"assert(false, "\u{0}instructions")"#,
+        "let x: int? = None\nlet y = x.expect(\"\\u{0}cpu\")",
+        "let t = spawn { panic(\"\\u{0}wall\") }\nt.wait()",
+    ];
+    for src in srcs {
+        let (r, _, _) = run_src(Config::new(), src);
+        match r {
+            Err(Error::Runtime { message, .. }) => assert!(message.contains('\u{0}'), "{src}: {message:?}"),
+            other => panic!("{src}: {other:?}"),
+        }
+    }
+    // A failed top-level `?` in a session panics with the error's text.
+    let mut session = Engine::new(Config::new()).session();
+    let r = rt().block_on(session.eval("let r: Result<int> = Err(error(\"\\u{0}memory\"))\nr?"));
+    assert!(matches!(r, Err(Error::Runtime { .. })), "{r:?}");
+}
+
+#[test]
+fn rust_panics_in_natives_do_not_unwind_into_the_host() {
+    let module = || {
+        let mut m = NativeModule::new("buggy");
+        m.function("boom", |n: i64| -> i64 {
+            if n > 2 {
+                panic!("native bug {n}");
+            }
+            n
+        });
+        m
+    };
+    let src = "import buggy\nprint(buggy.boom(1))\nprint(buggy.boom(3))\nprint(\"unreachable\")";
+    let (r, out, _) = run_src(Config::new().module(module()), src);
+    match r {
+        Err(Error::Runtime { message, .. }) => assert!(message.contains("internal error") && message.contains("native bug 3"), "{message}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(out, "1\n");
+    // In a task, in tests, and in a session (which keeps working).
+    let (r, _, _) = run_src(Config::new().module(module()), "import buggy\nlet t = spawn { buggy.boom(5) }\nprint(t.wait())");
+    assert!(matches!(r, Err(Error::Runtime { ref message, .. }) if message.contains("native bug 5")), "{r:?}");
+    let dir = TempDir::new("panic-tests");
+    dir.write("t.sand", "import buggy\ntest \"bad\" {\n    buggy.boom(9)\n}\ntest \"good\" {\n    assert(buggy.boom(2) == 2)\n}\n");
+    let report = rt().block_on(Engine::new(Config::new().module(module())).run_tests(dir.path().join("t.sand"))).unwrap();
+    assert_eq!((report.passed(), report.failed()), (1, 1));
+    let mut session = Engine::new(Config::new().module(module())).session();
+    assert!(rt().block_on(session.eval("import buggy\nbuggy.boom(7)")).is_err());
+    assert_eq!(rt().block_on(session.eval("buggy.boom(2) + 1")).unwrap().as_deref(), Some("3"));
+}
+
+#[test]
+fn rust_panics_in_host_code_become_internal_errors() {
+    // A prompter is host code that runs inside the engine's future.
+    let config = Config::new().policy(Policy::rules(RulePolicy::new().fallback(Decision::Prompt))).prompter(|_cap: Capability| async {
+        panic!("prompter bug");
+        #[allow(unreachable_code)]
+        PromptAnswer::DenyOnce
+    });
+    let (r, _, _) = run_src(config, "import env\nprint(env.get(\"HOME\"))");
+    assert!(matches!(r, Err(Error::Runtime { ref message, .. }) if message.contains("internal error: prompter bug")), "{r:?}");
+}
+
+#[test]
+fn module_discovery_is_bounded() {
+    let dir = TempDir::new("discovery");
+    // A huge import path is refused at once (it used to take seconds before
+    // the compile budget even existed).
+    let main = dir.write("main.sand", &format!("import \"{}b\"\nprint(1)", "a/".repeat(400_000)));
+    let start = Instant::now();
+    let r = rt().block_on(Engine::new(Config::new()).run_file(&main));
+    match r {
+        Err(Error::Compile(d)) => assert!(d[0].message.contains("too long"), "{d:?}"),
+        other => panic!("{other:?}"),
+    }
+    assert!(start.elapsed() < Duration::from_secs(5), "{:?}", start.elapsed());
+    // Many failing imports: discovery stops early.
+    let src: String = (0..20_000).map(|i| format!("import \"missing{i}\"\n")).collect();
+    let main = dir.write("many.sand", &src);
+    let r = rt().block_on(Engine::new(Config::new()).run_file(&main));
+    match r {
+        Err(Error::Compile(d)) => assert!(d.len() <= 100, "{}", d.len()),
+        other => panic!("{other:?}"),
+    }
+    // And it can be interrupted.
+    let engine = Engine::new(Config::new().limits(Limits { max_wall_time: Some(Duration::ZERO), ..Limits::default() }));
+    let mut engine = engine;
+    let r = rt().block_on(engine.run_file(&main));
+    assert!(matches!(r, Err(Error::Limit(LimitKind::WallTime))), "{r:?}");
+}
+
+#[test]
+fn once_answers_apply_only_to_the_call_that_asked() {
+    let dir = TempDir::new("once");
+    dir.write("a.txt", "A");
+    let asked = Arc::new(Mutex::new(Vec::<String>::new()));
+    let answers =
+        Arc::new(Mutex::new(vec![PromptAnswer::AllowOnce, PromptAnswer::AllowOnce, PromptAnswer::DenyOnce, PromptAnswer::DenyOnce]));
+    let (asked2, answers2) = (asked.clone(), answers.clone());
+    let config = Config::new().policy(Policy::rules(RulePolicy::new().fallback(Decision::Prompt))).cwd(dir.path()).prompter(
+        move |cap: Capability| {
+            asked2.lock().unwrap().push(cap.to_string());
+            let answer = answers2.lock().unwrap().remove(0);
+            async move { answer }
+        },
+    );
+    // `copy` asks for both capabilities; the first answer stays valid while
+    // the call is retried for the second.
+    let src = r#"
+import fs
+print(fs.copy("a.txt", "c.txt").is_ok())
+print(fs.write_text("c.txt", "overwritten").is_ok())
+print(fs.copy("a.txt", "d.txt").is_ok())
+"#;
+    let (r, out, _) = run_src(config, src);
+    r.unwrap();
+    assert_eq!(out, "true\nfalse\nfalse\n");
+    let asked = asked.lock().unwrap();
+    assert_eq!(asked.len(), 4, "{asked:?}");
+    assert!(asked[0].starts_with("read") && asked[1].starts_with("write") && asked[2].starts_with("write"), "{asked:?}");
+    assert!(asked[3].starts_with("read"), "{asked:?}");
+    assert_eq!(std::fs::read_to_string(dir.path().join("c.txt")).unwrap(), "A");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_main_file_imports_from_its_own_directory() {
+    let dir = TempDir::new("symlinked-main");
+    dir.write("proj/lib.sand", "pub fn hello() -> str { \"hello from lib\" }");
+    dir.write("proj/main.sand", "import \"./lib\"\nprint(lib.hello())");
+    std::fs::create_dir_all(dir.path().join("bin")).unwrap();
+    std::os::unix::fs::symlink(dir.path().join("proj/main.sand"), dir.path().join("bin/tool.sand")).unwrap();
+    let out = MemorySink::new();
+    let mut engine = Engine::new(Config::new().policy(Policy::allow_all()).stdout(out.clone()));
+    rt().block_on(engine.run_file(dir.path().join("bin/tool.sand"))).unwrap();
+    assert_eq!(out.contents(), "hello from lib\n");
 }

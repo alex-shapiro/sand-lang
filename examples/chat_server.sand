@@ -31,6 +31,13 @@ fn broadcast(sender: int, text: str) {
 }
 
 fn handle(c: Client) {
+    // However the loop below ends, the client leaves.
+    defer {
+        clients.remove(c.id)
+        c.conn.close()
+        broadcast(c.id, "* {c.name} left")
+        log.info("client left", fields: ["name": c.name])
+    }
     send(c, "welcome {c.name}")
     broadcast(c.id, "* {c.name} joined")
     while let Ok(Some(line)) = c.conn.read_line() {
@@ -51,14 +58,11 @@ fn handle(c: Client) {
             broadcast(c.id, "{c.name}: {text}")
         }
     }
-    clients.remove(c.id)
-    c.conn.close()
-    broadcast(c.id, "* {c.name} left")
-    log.info("client left", fields: ["name": c.name])
 }
 
 let addr = env.args().first() ?? "127.0.0.1:7000"
 let listener = net.listen(addr)?
+defer listener.close()
 print("listening on {listener.addr()}")
 
 loop {

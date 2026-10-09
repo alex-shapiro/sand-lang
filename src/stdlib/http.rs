@@ -4,12 +4,19 @@
 //! Redirects are followed in Sand (`http.sand`) so that every hop goes
 //! through `send`, which checks the policy before connecting.
 
-use super::net::{self, NetError, check_permission, conn_handle, finish, read_line_bytes, strip_eol, suspend};
+use super::net::{self, NetError, TlsSettings, check_permission, finish, read_line_bytes, read_to_end_reserved, strip_eol, suspend};
 use crate::check::ModKind;
 use crate::engine::Registry;
-use crate::policy::Capability;
-use crate::vm::value::{Obj, Value};
+use crate::policy::{Capability, Policy};
+use crate::vm::iomem::{IoMemory, Reservation, ResourceSlot};
+use crate::vm::value::{NativeObject, Obj, Value};
 use crate::vm::{Ctl, NResult, Vm};
+use std::any::Any;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::Poll;
 use std::time::Duration;
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
@@ -40,7 +47,18 @@ pub fn register(r: &mut Registry) {
         };
         Ok(Value::Bool(same))
     });
-    r.add_builtin("http.read_request", read_request);
+    r.add_builtin("http.new_pending", |vm, _| {
+        let pending = PendingRequests { shared: Arc::new(PendingShared::default()) };
+        Ok(vm.heap.alloc(Obj::Native(Box::new(pending))))
+    });
+    r.add_builtin("http.next_request", next_request);
+    r.add_builtin("http.close_pending", |vm, a| {
+        let p = vm.heap.native_mut::<PendingRequests>(a[0]).ok_or_else(|| Ctl::Panic("not a request queue".into()))?;
+        // The connections are dropped (closed) with the last reference to
+        // the old state: now, or when a pending `next_request` ends.
+        p.shared = Arc::new(PendingShared::default());
+        Ok(Value::Unit)
+    });
     r.add_builtin("http.encode_response", encode_response);
 }
 
@@ -212,11 +230,11 @@ fn valid_header(name: &str, value: &str) -> bool {
 
 /// Reads `name: value` header lines up to the blank line ending the head,
 /// after the start line. Names are lower-cased; repeated headers are joined
-/// with `", "`.
-async fn read_head<R: AsyncBufRead + Unpin>(r: &mut R) -> Result<(String, Vec<(String, String)>), NetError> {
+/// with `", "`. The lines are reserved in `res`.
+async fn read_head<R: AsyncBufRead + Unpin>(r: &mut R, res: &mut Reservation) -> Result<(String, Vec<(String, String)>), NetError> {
     let mut budget = MAX_HEAD;
-    let mut next_line = async |budget: &mut usize| -> Result<Option<String>, NetError> {
-        let line = read_line_bytes(&mut *r, *budget).await.map_err(|e| match e.kind {
+    let mut next_line = async |budget: &mut usize, res: &mut Reservation| -> Result<Option<String>, NetError> {
+        let line = read_line_bytes(&mut *r, *budget, res).await.map_err(|e| match e.kind {
             "limit" => NetError::new("http", "message head too large"),
             _ => e,
         })?;
@@ -227,7 +245,7 @@ async fn read_head<R: AsyncBufRead + Unpin>(r: &mut R) -> Result<(String, Vec<(S
     };
     // Tolerate blank lines before the start line (RFC 9112 §2.2).
     let start = loop {
-        match next_line(&mut budget).await? {
+        match next_line(&mut budget, res).await? {
             None => return Err(NetError::closed()),
             Some(l) if l.is_empty() => continue,
             Some(l) => break l,
@@ -235,7 +253,7 @@ async fn read_head<R: AsyncBufRead + Unpin>(r: &mut R) -> Result<(String, Vec<(S
     };
     let mut headers: Vec<(String, String)> = Vec::new();
     loop {
-        let Some(line) = next_line(&mut budget).await? else {
+        let Some(line) = next_line(&mut budget, res).await? else {
             return Err(NetError::new("http", "connection closed in the middle of the message head"));
         };
         if line.is_empty() {
@@ -265,17 +283,18 @@ fn too_large(max: usize) -> NetError {
 
 /// Reads a message body framed by `headers`. Without `Content-Length` or
 /// chunked encoding the body extends to the end of the stream if
-/// `read_to_close`, otherwise it is empty.
+/// `read_to_close`, otherwise it is empty. The body is reserved in `res`.
 async fn read_body<R: AsyncBufRead + Unpin>(
     r: &mut R,
     headers: &[(String, String)],
     max: usize,
     read_to_close: bool,
+    res: &mut Reservation,
 ) -> Result<Vec<u8>, NetError> {
     let chunked = header(headers, "transfer-encoding")
         .is_some_and(|te| te.rsplit(',').next().is_some_and(|last| last.trim().eq_ignore_ascii_case("chunked")));
     if chunked {
-        return read_chunked(r, max).await;
+        return read_chunked(r, max, res).await;
     }
     if let Some(len) = header(headers, "content-length") {
         // Repeated identical values were joined with ", " by `read_head`.
@@ -287,13 +306,18 @@ async fn read_body<R: AsyncBufRead + Unpin>(
         if len > max {
             return Err(too_large(max));
         }
-        let mut body = vec![0; len];
-        r.read_exact(&mut body).await?;
+        // Reserved as it arrives: the peer's length alone does not claim memory.
+        let mut body = Vec::new();
+        read_to_end_reserved(&mut (&mut *r).take(len as u64), &mut body, res, len).await?;
+        if body.len() < len {
+            return Err(NetError::new("io", "connection closed in the middle of the message body"));
+        }
         return Ok(body);
     }
     let mut body = Vec::new();
     if read_to_close {
-        r.take(max as u64 + 1).read_to_end(&mut body).await?;
+        let cap = max.saturating_add(1);
+        read_to_end_reserved(&mut r.take(u64::try_from(cap).unwrap_or(u64::MAX)), &mut body, res, cap).await?;
         if body.len() > max {
             return Err(too_large(max));
         }
@@ -301,18 +325,19 @@ async fn read_body<R: AsyncBufRead + Unpin>(
     Ok(body)
 }
 
-async fn read_chunked<R: AsyncBufRead + Unpin>(r: &mut R, max: usize) -> Result<Vec<u8>, NetError> {
+async fn read_chunked<R: AsyncBufRead + Unpin>(r: &mut R, max: usize, res: &mut Reservation) -> Result<Vec<u8>, NetError> {
     let truncated = || NetError::new("http", "connection closed in the middle of a chunked body");
     let mut body = Vec::new();
     loop {
-        let mut line = read_line_bytes(&mut *r, 1024).await?.ok_or_else(truncated)?;
+        // Size and trailer lines are released as soon as they are parsed.
+        let mut line = read_line_bytes(&mut *r, 1024, &mut res.sibling()).await?.ok_or_else(truncated)?;
         strip_eol(&mut line);
         let text = String::from_utf8_lossy(&line);
         let size = text.split(';').next().unwrap_or("").trim();
         let size = usize::from_str_radix(size, 16).map_err(|_| NetError::new("http", format!("invalid chunk size {size:?}")))?;
         if size == 0 {
             // Skip trailer fields up to the final blank line.
-            while let Some(mut line) = read_line_bytes(&mut *r, MAX_HEAD).await? {
+            while let Some(mut line) = read_line_bytes(&mut *r, MAX_HEAD, &mut res.sibling()).await? {
                 strip_eol(&mut line);
                 if line.is_empty() {
                     break;
@@ -324,9 +349,11 @@ async fn read_chunked<R: AsyncBufRead + Unpin>(r: &mut R, max: usize) -> Result<
             return Err(too_large(max));
         }
         let start = body.len();
-        body.resize(start + size, 0);
-        r.read_exact(&mut body[start..]).await?;
-        let mut end = read_line_bytes(&mut *r, 2).await?.ok_or_else(truncated)?;
+        read_to_end_reserved(&mut (&mut *r).take(size as u64), &mut body, res, start + size).await?;
+        if body.len() < start + size {
+            return Err(truncated());
+        }
+        let mut end = read_line_bytes(&mut *r, 2, &mut res.sibling()).await?.ok_or_else(truncated)?;
         strip_eol(&mut end);
         if !end.is_empty() {
             return Err(NetError::new("http", "missing CRLF after a chunk"));
@@ -354,7 +381,7 @@ fn header_map(vm: &mut Vm, headers: Vec<(String, String)>) -> NResult {
     for (k, v) in headers {
         let k = vm.new_str(k);
         let v = vm.new_str(v);
-        vm.map_insert(map, k, v).map_err(Ctl::Panic)?;
+        vm.map_insert(map, k, v).map_err(crate::vm::meter::ctl_from_message)?;
     }
     Ok(map)
 }
@@ -385,19 +412,40 @@ fn send(vm: &mut Vm, a: &[Value]) -> NResult {
     if let Some(denied) = check_permission(vm, Capability::Net { host: url.host.clone(), port: url.port })? {
         return Ok(denied);
     }
+    // The request is held, and the response buffered, outside the heap.
+    let mut res = match vm.reserve_io(vm.heap.bytes_of(a[3]).len()) {
+        Ok(r) => r,
+        Err(e) => return Ok(e),
+    };
     let body = vm.heap.bytes_of(a[3]);
     let request = encode_request(&method, &url, &headers, body);
+    if let Err(e) = res.ensure(request.len()) {
+        return Ok(vm.err_value("limit", &format!("cannot buffer the request: {e}")));
+    }
+    // The request's socket counts as an open resource while it is in use.
+    let slot = match net::resource_slot(vm) {
+        Ok(s) => s,
+        Err(e) => return Ok(e),
+    };
     let timeout = Duration::from_nanos(a[4].as_int().max(0) as u64);
     let head_only = method.eq_ignore_ascii_case("HEAD");
     let max_body = vm.host.limits.max_http_body;
+    let policy = vm.host.policy.clone();
+    let tls = vm.host.tls.clone();
     suspend(
         async move {
-            match tokio::time::timeout(timeout, fetch(&url, &request, head_only, max_body)).await {
-                Ok(r) => r,
+            let mut response_res = res.sibling();
+            let exchange = fetch(&policy, &tls, &url, &request, head_only, max_body, &mut response_res);
+            let r = match tokio::time::timeout(timeout, exchange).await {
+                Ok(r) => r.map(|resp| (resp, response_res)),
                 Err(_) => Err(NetError::new("timeout", format!("request to {text} timed out"))),
-            }
+            };
+            // The socket was closed when the exchange ended.
+            drop(slot);
+            r
         },
-        |vm, resp: RawResponse| {
+        |vm, (resp, res): (RawResponse, Reservation)| {
+            drop(res);
             vm.reserve(resp.body.len())?;
             let headers = header_map(vm, resp.headers)?;
             let body = vm.heap.new_bytes(resp.body);
@@ -430,14 +478,22 @@ fn encode_request(method: &str, url: &Url, headers: &[(String, String)], body: &
     out
 }
 
-/// Connects to `url` and performs one exchange.
-async fn fetch(url: &Url, request: &[u8], head_only: bool, max_body: usize) -> Result<RawResponse, NetError> {
+/// Connects to `url` (at an address the policy allows) and performs one exchange.
+async fn fetch(
+    policy: &Policy,
+    tls: &TlsSettings,
+    url: &Url,
+    request: &[u8],
+    head_only: bool,
+    max_body: usize,
+    res: &mut Reservation,
+) -> Result<RawResponse, NetError> {
     // The overall timeout is applied by the caller.
-    let tcp = TcpStream::connect((url.host.as_str(), url.port)).await?;
+    let tcp = net::connect_checked(policy, &url.host, url.port).await?;
     if url.scheme == "https" {
-        exchange(net::tls::connect(&url.host, tcp).await?, request, head_only, max_body).await
+        exchange(net::tls::connect(tls, &url.host, tcp).await?, request, head_only, max_body, res).await
     } else {
-        exchange(tcp, request, head_only, max_body).await
+        exchange(tcp, request, head_only, max_body, res).await
     }
 }
 
@@ -446,12 +502,15 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
     request: &[u8],
     head_only: bool,
     max_body: usize,
+    res: &mut Reservation,
 ) -> Result<RawResponse, NetError> {
     let mut stream = BufReader::new(stream);
     stream.write_all(request).await?;
     stream.flush().await?;
     loop {
-        let (start, headers) = read_head(&mut stream).await.map_err(|e| match e.kind {
+        // Interim responses are discarded with their reservation.
+        let mut head_res = res.sibling();
+        let (start, headers) = read_head(&mut stream, &mut head_res).await.map_err(|e| match e.kind {
             "closed" => NetError::new("io", "connection closed before a response was received"),
             _ => e,
         })?;
@@ -466,7 +525,8 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
             continue;
         }
         let no_body = head_only || status < 200 || status == 204 || status == 304;
-        let body = if no_body { vec![] } else { read_body(&mut stream, &headers, max_body, true).await? };
+        let body = if no_body { vec![] } else { read_body(&mut stream, &headers, max_body, true, res).await? };
+        res.absorb(head_res);
         return Ok(RawResponse { status, headers, body });
     }
 }
@@ -474,54 +534,191 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
 // ----------------------------------------------------------------------
 // Server
 
+/// Connections whose requests one server reads at the same time.
+const MAX_READING: usize = 64;
+
 /// A request as read by the server: method, path, query, headers, body.
 type RawRequest = (String, String, String, Vec<(String, String)>, Vec<u8>);
 
-fn read_request(vm: &mut Vm, a: &[Value]) -> NResult {
-    let h = match conn_handle(vm, a[0])? {
-        Ok(h) => h,
-        Err(e) => return Ok(e),
+/// A request read completely, with its connection.
+struct Received {
+    request: RawRequest,
+    conn: net::Conn,
+    /// The request's buffers, until they become values.
+    res: Reservation,
+    /// Counts the connection until it becomes a `net.Conn` object.
+    slot: ResourceSlot,
+}
+
+/// Reading the request of one accepted connection. If it does not deliver a
+/// valid request, it is answered with 400 where possible and closed, and
+/// its slot is returned for the next connection.
+type Reading = Pin<Box<dyn Future<Output = Result<Received, ResourceSlot>> + Send>>;
+
+#[derive(Default)]
+struct PendingShared {
+    /// Locked by the `next_request` call that drives the readings.
+    reads: tokio::sync::Mutex<Vec<Reading>>,
+    /// `reads.len()`, readable without the lock.
+    count: AtomicUsize,
+}
+
+/// The `http.PendingRequests` type: connections accepted by a server whose
+/// requests are still being read. Their sockets are counted against
+/// `max_open_resources` by their [`ResourceSlot`]s.
+struct PendingRequests {
+    shared: Arc<PendingShared>,
+}
+
+impl NativeObject for PendingRequests {
+    fn type_name(&self) -> &'static str {
+        "PendingRequests"
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+/// `next_request(listener, pending)`: accepts connections and reads their
+/// requests concurrently (each within `REQUEST_TIMEOUT` of being accepted)
+/// until one is complete. Readings still in progress when it returns (or
+/// when the calling task is cancelled) stay in `pending` and continue with
+/// the next call.
+fn next_request(vm: &mut Vm, a: &[Value]) -> NResult {
+    let Some((socket, closed)) = net::listener_socket(vm, a[0])? else { return Ok(vm.err_value("closed", "listener closed")) };
+    let shared = match vm.heap.native::<PendingRequests>(a[1]) {
+        Some(p) => p.shared.clone(),
+        None => return Err(Ctl::Panic("not a request queue".into())),
     };
+    // Slots for the connections this call may accept: up to MAX_READING
+    // read at once, and at most half of what the open-resource limit has
+    // left, so that a waiting server does not starve other tasks' sockets.
+    let reading = shared.count.load(Ordering::Relaxed);
+    let max = vm.host.limits.max_open_resources;
+    let available = max.saturating_sub(vm.heap.open_resources.saturating_add(vm.heap.io_memory.pending_resources()));
+    let grant = MAX_READING.saturating_sub(reading).min(available.div_ceil(2));
+    if grant == 0 && reading == 0 {
+        return Ok(vm.err_value("limit", &format!("too many open resources (limit {max})")));
+    }
+    let mem = vm.heap.io_memory.clone();
+    let mut slots: Vec<ResourceSlot> = (0..grant).map(|_| ResourceSlot::new(&mem)).collect();
     let max_body = vm.host.limits.max_http_body;
-    let read = async move {
-        let mut reader = h.reader.lock().await;
-        let (start, headers) = read_head(&mut *reader).await?;
-        let parts: Vec<&str> = start.split(' ').collect();
-        let [method, target, version] = parts[..] else {
-            return Err(NetError::new("http", format!("malformed request line {start:?}")));
-        };
-        if !is_token(method) || !version.starts_with("HTTP/1.") || target.is_empty() {
-            return Err(NetError::new("http", format!("malformed request line {start:?}")));
-        }
-        // Absolute-form targets (`GET http://host/path`) carry the path after the authority.
-        let target = match split_scheme(target).and_then(|(_, rest)| rest.strip_prefix("//")) {
-            Some(rest) => rest.find(['/', '?']).map_or("/", |i| &rest[i..]),
-            None => target,
-        };
-        let (path, query) = target.split_once('?').unwrap_or((target, ""));
-        if header(&headers, "expect").is_some_and(|e| e.eq_ignore_ascii_case("100-continue")) {
-            let mut writer = h.writer.lock().await;
-            writer.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await?;
-            writer.flush().await?;
-        }
-        let body = read_body(&mut *reader, &headers, max_body, false).await?;
-        Ok((method.to_string(), path.to_string(), query.to_string(), headers, body))
-    };
-    let read = async move {
-        match tokio::time::timeout(REQUEST_TIMEOUT, read).await {
-            Ok(r) => r,
-            Err(_) => Err(NetError::new("timeout", "timed out reading the request")),
-        }
+    let serve = async move {
+        let mut reads = shared.reads.lock().await;
+        std::future::poll_fn(|cx| {
+            loop {
+                let mut progress = false;
+                if !slots.is_empty() && reads.len() < MAX_READING {
+                    match socket.poll_accept(cx) {
+                        Poll::Ready(Ok((stream, _))) => {
+                            let slot = slots.pop().expect("a free slot");
+                            reads.push(Box::pin(read_connection(stream, max_body, mem.clone(), slot)));
+                            progress = true;
+                        }
+                        Poll::Ready(Err(e)) => return Poll::Ready(Err(NetError::from(e))),
+                        Poll::Pending => {}
+                    }
+                }
+                let mut i = 0;
+                while i < reads.len() {
+                    match reads[i].as_mut().poll(cx) {
+                        Poll::Ready(done) => {
+                            drop(reads.swap_remove(i));
+                            shared.count.store(reads.len(), Ordering::Relaxed);
+                            match done {
+                                Ok(r) => return Poll::Ready(Ok(r)),
+                                Err(slot) => slots.push(slot),
+                            }
+                            progress = true;
+                        }
+                        Poll::Pending => i += 1,
+                    }
+                }
+                shared.count.store(reads.len(), Ordering::Relaxed);
+                if !progress {
+                    return Poll::Pending;
+                }
+            }
+        })
+        .await
     };
     Err(Ctl::Async(Box::pin(async move {
-        finish(h.closed.guard(read).await, |vm, (method, path, query, headers, body): RawRequest| {
+        finish(closed.guard(serve).await, |vm, received: Received| {
+            let Received { request: (method, path, query, headers, body), conn, res, slot } = received;
+            drop(res);
             vm.reserve(body.len())?;
             let fields = [method, path, query].map(|s| vm.new_str(s));
             let headers = header_map(vm, headers)?;
             let body = vm.heap.new_bytes(body);
-            Ok(vm.heap.new_tuple(vec![fields[0], fields[1], fields[2], headers, body]))
+            let conn = net::alloc_resource(vm, Box::new(conn), slot);
+            Ok(vm.heap.new_tuple(vec![fields[0], fields[1], fields[2], headers, body, conn]))
         })
     })))
+}
+
+/// Reads the request of an accepted connection (see [`Reading`]).
+async fn read_connection(stream: TcpStream, max_body: usize, mem: Arc<IoMemory>, slot: ResourceSlot) -> Result<Received, ResourceSlot> {
+    let Ok(peer) = stream.peer_addr().map(|a| a.to_string()) else { return Err(slot) };
+    let (r, mut w) = stream.into_split();
+    let mut reader = BufReader::new(r);
+    let mut res = Reservation::new(&mem);
+    let read = read_request(&mut reader, &mut w, max_body, &mut res);
+    let result = match tokio::time::timeout(REQUEST_TIMEOUT, read).await {
+        Ok(r) => r,
+        Err(_) => Err(NetError::new("timeout", "timed out reading the request")),
+    };
+    match result {
+        Ok(request) => Ok(Received { request, conn: net::Conn::new(Box::new(reader), Box::new(w), peer), res, slot }),
+        Err(e) => {
+            drop(res);
+            if e.kind != "closed" {
+                let body = format!("{}\n", e.message);
+                let response = format!("HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                let send = async {
+                    w.write_all(response.as_bytes()).await?;
+                    w.flush().await
+                };
+                // Best effort: a client that does not read cannot hold the slot.
+                let _ = tokio::time::timeout(Duration::from_secs(5), send).await;
+            }
+            // Closed before the slot can be reused.
+            drop((reader, w));
+            Err(slot)
+        }
+    }
+}
+
+/// Reads one request (head and body) from `reader`; `writer` receives a
+/// `100 Continue` if the client asks for one.
+async fn read_request<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin>(
+    reader: &mut R,
+    writer: &mut W,
+    max_body: usize,
+    res: &mut Reservation,
+) -> Result<RawRequest, NetError> {
+    let (start, headers) = read_head(&mut *reader, res).await?;
+    let parts: Vec<&str> = start.split(' ').collect();
+    let [method, target, version] = parts[..] else {
+        return Err(NetError::new("http", format!("malformed request line {start:?}")));
+    };
+    if !is_token(method) || !version.starts_with("HTTP/1.") || target.is_empty() {
+        return Err(NetError::new("http", format!("malformed request line {start:?}")));
+    }
+    // Absolute-form targets (`GET http://host/path`) carry the path after the authority.
+    let target = match split_scheme(target).and_then(|(_, rest)| rest.strip_prefix("//")) {
+        Some(rest) => rest.find(['/', '?']).map_or("/", |i| &rest[i..]),
+        None => target,
+    };
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    if header(&headers, "expect").is_some_and(|e| e.eq_ignore_ascii_case("100-continue")) {
+        writer.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await?;
+        writer.flush().await?;
+    }
+    let body = read_body(&mut *reader, &headers, max_body, false, res).await?;
+    Ok((method.to_string(), path.to_string(), query.to_string(), headers, body))
 }
 
 fn reason_phrase(status: i64) -> &'static str {
@@ -617,7 +814,10 @@ mod tests {
         assert_eq!(resolve(base, "?z").unwrap(), "http://h:81/a/b/c?z");
         assert_eq!(resolve(base, "").unwrap(), "http://h:81/a/b/c?q=1");
         assert_eq!(resolve(base, "//other/p").unwrap(), "http://other/p");
+        #[cfg(feature = "tls")]
         assert_eq!(resolve(base, "https://o.example/x#f").unwrap(), "https://o.example/x");
+        #[cfg(not(feature = "tls"))]
+        assert_eq!(resolve(base, "https://o.example/x#f").unwrap_err().kind, "invalid");
         assert_eq!(resolve(base, "./").unwrap(), "http://h:81/a/b/");
     }
 }

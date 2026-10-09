@@ -2,66 +2,61 @@
 
 Follow-up work, roughly in priority order.
 
-## Sandbox hardening
+## Open
 
-These matter most when running untrusted scripts.
+### Sandbox
 
-- [ ] **Meter native work.** CPU and instruction limits only count bytecode.
-      A huge `sort`, regex match or `json.parse` runs to completion and blocks the
-      engine's thread. Long-running natives should charge fuel, or check limits and
-      yield partway through.
-- [ ] **Bound compile time.** Type checking runs before any limit applies, and
-      exhaustiveness checking can blow up on large or-patterns over tuples, so a
-      hostile script can stall the host during compilation. Add a compile budget.
-- [ ] **Check resolved addresses, not just hostnames.** `--allow-net=example.com`
-      checks the name, but nothing stops that name from resolving to `127.0.0.1` or
-      another internal address. Check the resolved IP, with an option to block
-      private ranges.
-- [ ] **Close filesystem check-then-use races.** Paths are canonicalized and
-      checked, then opened, so a symlink swapped in between could slip through.
-- [ ] **Check deny rules inside renamed directories.** Renaming a whole
-      directory only checks the two top-level paths, not deny rules on its
-      subdirectories.
-- [ ] **Tighten memory accounting.** Buffers held by pending I/O and Rust-side
-      scratch space aren't counted until they become values.
+- [ ] **Windows file system races.** Windows still uses path-based file
+      operations, so the symlink-swap race closed on Unix (`fs_safe.rs`)
+      remains there. Use handle-relative opens (`NtCreateFile` with a root
+      directory handle, via a safe wrapper crate) or verify handles after
+      opening.
+- [ ] **Symlink names in deny rules.** A symlink's own final name is matched
+      by the folded (case/Unicode-insensitive) comparison, but not converted
+      to its stored spelling like other entries.
+- [ ] **HTTP server fairness.** `accept` reads up to 64 pending connections
+      at once; 64+ idle connections can still delay a new request by up to
+      30s, and a waiting `accept` holds up to half the free resource slots.
+- [ ] **Caught Rust panics in sessions.** After an internal panic is caught,
+      the VM is memory safe but may be inconsistent; a session should be
+      reset automatically.
+- [ ] **Small accounting gaps.** Fixed 8 KiB per-connection buffers aren't
+      counted against `max_memory`; checks made inside a native may overrun
+      `max_instructions` by up to one slice (20,000 units); the bytecode
+      compiler, linter and formatter are not covered by the compile budget.
 
-## Test coverage
+### Test coverage
 
-- [ ] Tests for the `sand` CLI: flags, exit codes, the terminal prompter.
-- [ ] TLS/HTTPS tests against a local TLS server (currently verified by hand
-      against example.com only).
-- [ ] Tests for permission prompts during `import`.
-- [ ] Run on Windows (paths, `/dev/tty` prompter).
-- [ ] Run the `cargo fuzz` targets in `fuzz/` (needs nightly).
+- [ ] Run the CI workflow (`.github/workflows/ci.yml`) on Windows and Linux:
+      nothing has run there yet (Windows is only cross-checked with
+      `--no-default-features`; `ring` needs a Windows C toolchain).
+- [ ] An automated test of the real `/dev/tty` / `CONIN$` prompter (the
+      dialogue is unit tested and `--prompt-stdin` is tested end to end).
 
-## Tooling
+### Tooling
 
-- [ ] **Real REPL.** It currently re-runs the whole session for each input, so
-      side effects repeat. Needs incremental checking with a persistent VM.
-- [ ] **Linter precision.** `shadowed-variable` can flag same-named `let`s in
-      sibling blocks; `unused-function` is name-based and misses unused methods.
-- [ ] **Lazy `help` summaries.** Importing `help` compiles every stdlib module.
+- [ ] REPL: background tasks only progress while an input runs; `:type` on
+      generic functions shows inference variables; redefining a type can give
+      messages like "expected Point, found Point".
 
-## Performance
+### Performance
 
-- [ ] Reduce call overhead (about 35ns per call): leaner frames, fewer stack
-      resizes.
-- [ ] Incremental or generational GC; the current mark-sweep pauses grow with
-      heap size.
-- [ ] Avoid heap allocation for `Some(x)` and small enum payloads.
-- [ ] Hoist loop-invariant constants in the compiler.
+- [ ] Lazy iterator chains cost about 2x eager ones per element (closure
+      call overhead); consider fusing adapters or cheaper closure calls.
+- [ ] The interpreter's dispatch loop is sensitive to code layout (±10-25%
+      on call-heavy benchmarks from unrelated edits). Consider splitting cold
+      opcodes into separate functions systematically, or a threaded-dispatch
+      design.
+- [ ] Task spawn/wait got slower during the sandbox fixes (5k tasks: 2.5ms
+      -> 4.5ms, about 0.4µs per task), probably from per-task stack and
+      wait-list accounting; profile and trim.
+- [ ] Incremental (not just generational) GC: major collections still pause
+      in proportion to the heap; heaps under 8 MB only get major collections.
 
-## Language and spec
+### Language
 
-- [ ] **User-defined interfaces/traits.** Generic code is limited to the
-      built-in bounds (`Eq`, `Ord`, `Hash`, `Num`). This is the biggest gap in the
-      language.
-- [ ] Consider lazy iterators, labeled `break`, and `defer`-style resource
-      cleanup.
-- [ ] Reconcile `docs/SPEC.md` with implementation decisions:
-  - `http.Request` has an extra `conn` field used by `respond`.
-  - `test.property` uses a fixed seed.
-  - `fs` acts on symlinks themselves (`remove_file`, `rename`), but policy
-    checks also require permission on the link target.
-- [ ] Document the `"{...}"` interpolation trap more prominently: JSON literals
-      and regex quantifiers like `{8}` need raw strings (`r"..."`) or `\{`.
+- [ ] Trait objects (`dyn Trait`), associated types and constants, and
+      blanket impls (`impl<T> X for T`). The dictionary layout was chosen so
+      trait objects can be a (value, dictionary) pair.
+- [ ] Trait bounds on struct/enum type parameters.
+- [ ] Natives implementing trait methods; non-constant trait method defaults.

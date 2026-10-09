@@ -28,6 +28,8 @@ pub enum ItemKind {
     Struct(StructDecl),
     Enum(EnumDecl),
     Extend(ExtendDecl),
+    Trait(TraitDecl),
+    Impl(ImplDecl),
     TypeAlias(TypeAlias),
     /// `native type Name<T>`: an opaque type implemented by a native module.
     NativeType(NativeTypeDecl),
@@ -62,7 +64,9 @@ pub enum Bound {
 #[derive(Clone, Debug)]
 pub struct GenericParam {
     pub name: Ident,
-    pub bounds: Vec<Ident>,
+    /// Built-in bounds (`Ord`) and traits (`Describe`, `geo.Shape`, `Into<str>`),
+    /// written like named types.
+    pub bounds: Vec<TypeExpr>,
     pub reflect: bool,
 }
 
@@ -78,7 +82,7 @@ pub struct Param {
 #[derive(Clone, Debug)]
 pub struct WherePredicate {
     pub name: Ident,
-    pub bounds: Vec<Ident>,
+    pub bounds: Vec<TypeExpr>,
 }
 
 #[derive(Clone, Debug)]
@@ -155,6 +159,29 @@ pub struct ExtendDecl {
     pub methods: Vec<FnDecl>,
 }
 
+/// `trait Name<T>: Super + Eq { fn required(self) -> T  fn provided(self) { ... } }`
+#[derive(Clone, Debug)]
+pub struct TraitDecl {
+    pub name: Ident,
+    pub generics: Vec<GenericParam>,
+    pub supers: Vec<TypeExpr>,
+    /// Required methods have no body; default methods do.
+    pub methods: Vec<FnDecl>,
+    pub is_pub: bool,
+    pub doc: Option<String>,
+}
+
+/// `impl<T: B> Trait<Args> for Type where T: C { methods }`
+#[derive(Clone, Debug)]
+pub struct ImplDecl {
+    pub generics: Vec<GenericParam>,
+    /// The trait, written like a named type.
+    pub trait_ref: TypeExpr,
+    pub target: TypeExpr,
+    pub where_clause: Vec<WherePredicate>,
+    pub methods: Vec<FnDecl>,
+}
+
 #[derive(Clone, Debug)]
 pub struct TypeAlias {
     pub name: Ident,
@@ -226,10 +253,24 @@ pub enum AssignOp {
 
 #[derive(Clone, Debug)]
 pub enum StmtKind {
-    Let { pattern: Pattern, ty: Option<TypeExpr>, value: Expr, else_block: Option<Block>, mutable: bool, is_pub: bool, doc: Option<String> },
-    Assign { target: Expr, op: AssignOp, value: Expr },
+    Let {
+        pattern: Pattern,
+        ty: Option<TypeExpr>,
+        value: Expr,
+        else_block: Option<Block>,
+        mutable: bool,
+        is_pub: bool,
+        doc: Option<String>,
+    },
+    Assign {
+        target: Expr,
+        op: AssignOp,
+        value: Expr,
+    },
     Expr(Expr),
     Fn(FnDecl),
+    /// `defer expr`: runs `expr` when the enclosing block exits.
+    Defer(Expr),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -413,13 +454,19 @@ pub enum ExprKind {
         inline: bool,
     },
     Block(Block),
-    Loop(Block),
+    /// Loops may be labeled (`@outer loop { ... }`) for `break @outer`.
+    Loop {
+        label: Option<Ident>,
+        body: Block,
+    },
     While {
+        label: Option<Ident>,
         cond: Cond,
         body: Block,
     },
     For {
-        pattern: Pattern,
+        label: Option<Ident>,
+        pattern: Box<Pattern>,
         iter: Box<Expr>,
         body: Block,
     },
@@ -429,8 +476,12 @@ pub enum ExprKind {
         parens: bool,
     },
     Return(Option<Box<Expr>>),
-    Break(Option<Box<Expr>>),
-    Continue,
+    /// `break`, `break value`, `break @label`, `break @label value`.
+    Break {
+        label: Option<Ident>,
+        value: Option<Box<Expr>>,
+    },
+    Continue(Option<Ident>),
     Spawn(Box<Expr>),
     /// Placeholder produced after a parse error.
     Error,

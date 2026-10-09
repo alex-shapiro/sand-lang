@@ -39,8 +39,10 @@ fn record(vm: &mut Vm, level: u8, a: &[Value]) -> NResult {
         let quote = value.is_empty() || value.chars().any(|c| c.is_whitespace() || c.is_control() || c == '"' || c == '=');
         let value = if quote { vm.debug(v)? } else { value.to_string() };
         line.push_str(&format!(" {}={value}", vm.str(k)));
+        vm.reserve(line.len())?;
     }
     line.push('\n');
+    vm.charge_bytes(line.len())?;
     vm.write_stream(2, line.as_bytes())?;
     Ok(Value::Unit)
 }

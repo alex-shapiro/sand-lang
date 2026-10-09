@@ -99,21 +99,26 @@ struct Index {
 
 let STOP_WORDS = set(["a", "an", "and", "the", "of", "to", "in", "is", "it", "on", "for"])
 
-pub fn tokenize(text: str) -> [str] {
-    let words = []
-    var current = ""
-    for c in text.to_lower().chars() {
-        if c.is_alnum() {
-            current += c
-        } else if not current.is_empty() {
-            words.push(current)
-            current = ""
+/// The lower-cased words of `text`, produced lazily: each call of `next`
+/// resumes reading the characters where the previous one stopped.
+fn words(text: str) -> Iter<str> {
+    let chars = text.to_lower().chars_iter()
+    fn next() -> str? {
+        var current = ""
+        for c in chars {
+            if c.is_alnum() {
+                current += c
+            } else if not current.is_empty() {
+                return Some(current)
+            }
         }
+        if current.is_empty() { None } else { Some(current) }
     }
-    if not current.is_empty() {
-        words.push(current)
-    }
-    words.filter(w => not STOP_WORDS.contains(w))
+    Iter { next }
+}
+
+pub fn tokenize(text: str) -> [str] {
+    words(text).filter(w => not STOP_WORDS.contains(w)).to_list()
 }
 
 fn index_dir(index: Index, dir: str) -> Result<int> {

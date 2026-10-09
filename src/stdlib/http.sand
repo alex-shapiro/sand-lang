@@ -125,33 +125,23 @@ native fn same_origin(a: str, b: str) -> bool
 /// Starts an HTTP server listening on `addr` (`host:port`; port `0` picks a
 /// free port).
 pub fn serve(addr: str) -> Result<Server> {
-    Ok(Server { listener: net.listen(addr)? })
+    Ok(Server { listener: net.listen(addr)?, pending: new_pending() })
 }
 
 /// An HTTP/1.1 server. Each connection carries one request and is closed
 /// after the response.
 pub struct Server {
     listener: net.Listener
+    /// Connections accepted whose requests are still being read.
+    pending: PendingRequests
 
-    /// Waits for the next request. Connections that do not send a valid
-    /// request are answered with `400 Bad Request` and skipped.
+    /// Waits for the next request. Requests are read from several
+    /// connections at once, so a slow or idle client does not delay the
+    /// others. Connections that do not send a valid request within 30
+    /// seconds are answered with `400 Bad Request` and closed.
     fn accept(self) -> Result<Request> {
-        loop {
-            let conn = self.listener.accept()?
-            match read_request(conn) {
-                Ok((method, path, query, headers, body)) => {
-                    return Ok(Request { method, path, query, headers, body, conn })
-                }
-                Err(e) => {
-                    if e.kind != "closed" {
-                        let _ = conn.write(
-                            encode_response(400, "{e.message}\n".bytes(), [:], true) ?? b"",
-                        )
-                    }
-                    conn.close()
-                }
-            }
-        }
+        let (method, path, query, headers, body, conn) = next_request(self.listener, self.pending)?
+        Ok(Request { method, path, query, headers, body, conn })
     }
 
     /// The local address (`host:port`) the server listens on.
@@ -159,9 +149,11 @@ pub struct Server {
         self.listener.addr()
     }
 
-    /// Stops accepting connections.
+    /// Stops accepting connections; connections whose requests were still
+    /// being read are closed.
     fn close(self) {
         self.listener.close()
+        close_pending(self.pending)
     }
 }
 
@@ -173,7 +165,8 @@ pub struct Request {
     query: str
     headers: [str: str]
     body: bytes
-    /// The client connection, closed by `respond`.
+    /// The client connection. `respond` writes the response to it and closes
+    /// it; a script may instead write a response to it directly.
     conn: net.Conn
 
     /// Sends the response and closes the connection.
@@ -200,8 +193,20 @@ pub struct Request {
     }
 }
 
-/// Reads one request from `conn`: `(method, path, query, headers, body)`.
-native fn read_request(conn: net.Conn) -> Result<(str, str, str, [str: str], bytes)>
+/// Connections accepted by a `Server` whose requests are being read.
+native type PendingRequests
+
+native fn new_pending() -> PendingRequests
+
+/// Accepts connections on `listener` and reads their requests concurrently
+/// until one is complete: `(method, path, query, headers, body, conn)`.
+native fn next_request(
+    listener: net.Listener,
+    pending: PendingRequests,
+) -> Result<(str, str, str, [str: str], bytes, net.Conn)>
+
+/// Closes the connections whose requests are being read.
+native fn close_pending(pending: PendingRequests)
 
 /// Serialises a response (with `content-length` and `connection: close`).
 native fn encode_response(

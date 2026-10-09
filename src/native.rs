@@ -4,6 +4,7 @@
 use crate::check::ModKind;
 use crate::engine::Registry;
 use crate::policy::Capability;
+use crate::vm::meter::ctl_message;
 use crate::vm::value::{Obj, Value};
 use crate::vm::{Ctl, Finisher, HostFn, NResult, NativeImpl, Vm};
 use std::collections::{BTreeMap, HashMap};
@@ -84,7 +85,10 @@ impl IntoValue for bool {
 impl FromValue for String {
     fn from_value(vm: &Vm, v: Value) -> Result<Self, String> {
         match vm.heap.get(v) {
-            Obj::Str(s) => Ok(s.to_string()),
+            Obj::Str(s) => {
+                vm.charge_bytes(s.len()).map_err(ctl_message)?;
+                Ok(s.to_string())
+            }
             _ => Err("expected str".into()),
         }
     }
@@ -118,7 +122,10 @@ impl SandType for Vec<u8> {
 impl FromValue for Vec<u8> {
     fn from_value(vm: &Vm, v: Value) -> Result<Self, String> {
         match vm.heap.get(v) {
-            Obj::Bytes(b) => Ok(b.to_vec()),
+            Obj::Bytes(b) => {
+                vm.charge_bytes(b.len()).map_err(ctl_message)?;
+                Ok(b.to_vec())
+            }
             _ => Err("expected bytes".into()),
         }
     }
@@ -136,6 +143,7 @@ macro_rules! vec_of {
         }
         impl FromValue for Vec<$t> {
             fn from_value(vm: &Vm, v: Value) -> Result<Self, String> {
+                vm.charge(vm.heap.list(v).len() as u64).map_err(ctl_message)?;
                 vm.heap.list(v).iter().map(|x| <$t as FromValue>::from_value(vm, *x)).collect()
             }
         }
@@ -208,6 +216,7 @@ impl<T: SandType> SandType for BTreeMap<String, T> {
 fn read_map<T: FromValue>(vm: &Vm, v: Value) -> Result<Vec<(String, T)>, String> {
     match vm.heap.get(v) {
         Obj::Map(m) => {
+            vm.charge(m.live as u64).map_err(ctl_message)?;
             let mut out = Vec::new();
             for (k, val) in m.entries.iter().flatten() {
                 out.push((String::from_value(vm, *k)?, T::from_value(vm, *val)?));
@@ -307,7 +316,7 @@ macro_rules! host_fn_impls {
             fn into_host(self) -> HostFn {
                 Arc::new(move |vm: &mut Vm, args: &[Value]| -> NResult {
                     let mut it = args.iter();
-                    $(let $a = $a::from_value(vm, *it.next().ok_or_else(|| Ctl::Panic("missing argument".into()))?).map_err(Ctl::Panic)?;)*
+                    $(let $a = $a::from_value(vm, *it.next().ok_or_else(|| Ctl::Panic("missing argument".into()))?).map_err(crate::vm::meter::ctl_from_message)?;)*
                     let r = self($($a),*);
                     Ok(r.into_value(vm))
                 })
@@ -331,7 +340,7 @@ macro_rules! host_fn_impls {
             fn into_host(self) -> HostFn {
                 Arc::new(move |vm: &mut Vm, args: &[Value]| -> NResult {
                     let mut it = args.iter();
-                    $(let $a = $a::from_value(vm, *it.next().ok_or_else(|| Ctl::Panic("missing argument".into()))?).map_err(Ctl::Panic)?;)*
+                    $(let $a = $a::from_value(vm, *it.next().ok_or_else(|| Ctl::Panic("missing argument".into()))?).map_err(crate::vm::meter::ctl_from_message)?;)*
                     let fut = self($($a),*);
                     Err(Ctl::Async(Box::pin(async move {
                         let r = fut.await;
@@ -405,7 +414,7 @@ impl NativeModule {
         let decl = Self::signature(name, &[A::sand_type()], &format!("Result<{}, Error>", R::sand_type()));
         self.decls.push((name.to_string(), decl));
         let host: HostFn = Arc::new(move |vm: &mut Vm, args: &[Value]| -> NResult {
-            let a = A::from_value(vm, args[0]).map_err(Ctl::Panic)?;
+            let a = A::from_value(vm, args[0]).map_err(crate::vm::meter::ctl_from_message)?;
             let cap = guard(&a);
             if !vm.permit(&cap)? {
                 return Ok(vm.err_value("permission_denied", &format!("permission denied: {cap}")));

@@ -181,3 +181,239 @@ f()
 2: unnecessary-var
 3: unused-variable
 5: unreachable-code
+
+=== shadowing in sibling scopes is not flagged
+fn f(flag: bool) {
+    if flag {
+        let x = 1
+        print(x)
+    } else {
+        let x = "one"
+        print(x)
+    }
+    for i in 0..2 {
+        let y = i
+        print(y)
+    }
+    for _ in 0..2 {
+        let y = "two"
+        print(y)
+    }
+    match flag {
+        true => {
+            let z = 1
+            print(z)
+        }
+        false => {
+            let z = "z"
+            print(z)
+        }
+    }
+    [1].each(n => {
+        let w = n
+        print(w)
+    })
+    [1].each(_ => {
+        let w = "w"
+        print(w)
+    })
+    {
+        let v = 1
+        print(v)
+    }
+    let v = "v"
+    print(v)
+}
+f(true)
+--- lint
+
+=== shadowing a binding that is still in scope
+fn f(s: str, xs: [int]) {
+    let s = s.len()
+    print(s)
+    for x in xs {
+        let x = "item {x}"
+        print(x)
+    }
+    let (a, b) = (1, 2)
+    let a = "{a}{b}"
+    print(a)
+    if let Some(v) = xs.first() {
+        let v = "{v}"
+        print(v)
+    }
+    let g = (n: int) => {
+        let n = "{n}"
+        n.len()
+    }
+    print(g(1))
+}
+f("x", [1])
+--- lint
+2: shadowed-variable
+5: shadowed-variable
+9: shadowed-variable
+12: shadowed-variable
+16: shadowed-variable
+
+=== tests and functions do not shadow top-level bindings
+let x = 1
+print(x)
+fn f() {
+    let x = "s"
+    print(x)
+}
+f()
+test "t" {
+    let x = "s"
+    print(x)
+}
+--- lint
+
+=== unused functions are found by reachability
+fn only_recursive(n: int) -> int { if n > 0 { only_recursive(n - 1) } else { 0 } }
+fn ping(n: int) -> int { if n > 0 { pong(n - 1) } else { 0 } }
+fn pong(n: int) -> int { ping(n) }
+fn called_by_unused() -> int { 1 }
+fn unused_caller() -> int { called_by_unused() }
+fn piped(n: int) -> int { n + 1 }
+fn as_value(n: int) -> int { n * 2 }
+fn in_default() -> int { 4 }
+fn with_default(n: int = in_default()) -> int { n }
+fn by_test() -> int { 3 }
+fn recursive_used(n: int) -> int { if n > 0 { recursive_used(n - 1) } else { 0 } }
+pub fn api() -> int { 0 }
+print(1 |> piped)
+let f = as_value
+print(f(1) + with_default() + recursive_used(2))
+test "uses a helper" {
+    assert(by_test() == 3)
+}
+--- lint
+1: unused-function
+2: unused-function
+3: unused-function
+4: unused-function
+5: unused-function
+
+=== unused methods of private types
+struct Hidden {
+    v: int
+
+    fn used(self) -> int { self.v }
+    fn unused(self) -> int { self.v }
+    fn make() -> Hidden { Hidden { v: 1 } }
+    fn unused_static() -> Hidden { Hidden { v: 2 } }
+}
+extend Hidden {
+    fn ext_unused(self) -> int { 0 }
+    fn ext_used(self) -> int { 0 }
+}
+enum Kind {
+    A
+
+    fn describe(self) -> str { "a" }
+}
+pub struct Shown {
+    v: int
+
+    fn public_api(self) -> int { self.v }
+}
+extend Shown {
+    fn also_public(self) -> int { 0 }
+}
+let h = Hidden.make()
+print(h.used() + h.ext_used())
+print(Kind.A)
+print(Shown { v: 1 }.v)
+--- lint
+5: unused-function
+7: unused-function
+10: unused-function
+16: unused-function
+
+=== unused method suppression
+struct Hidden {
+    v: int
+
+    // lint: allow(unused-function)
+    fn unused(self) -> int { self.v }
+}
+print(Hidden { v: 1 }.v)
+--- lint
+
+=== trait and impl methods are not unused functions
+trait Greet {
+    fn hello(self) -> str
+    fn twice(self) -> str { self.hello() + self.hello() }
+    fn make() -> Self
+}
+struct P { v: int }
+impl Greet for P {
+    fn hello(self) -> str { "hi" }
+    fn make() -> P { P { v: 0 } }
+}
+fn helper() -> int { 1 }
+print(P { v: 2 }.v)
+--- lint
+11: unused-function
+
+=== interpolated literals
+let n = 3
+print("[0-9]{4}")
+print("{n} {2.5:.1} {r"{4}"}")
+print("{1.5}")
+--- lint
+2: interpolated-literal
+4: interpolated-literal
+
+=== label lints
+@Rows for i in 0..3 {
+    if i > 1 { break @Rows }
+}
+@unused for i in 0..3 {
+    print(i)
+}
+@outer for i in 0..3 {
+    @inner for j in 0..3 {
+        if j > i { continue @outer }
+        print(j)
+    }
+}
+--- lint
+1: naming
+4: unused-label
+8: unused-label
+
+=== loops nothing breaks out of never complete
+fn f() {
+    @outer loop {
+        loop {
+            break @outer
+        }
+    }
+    print("reachable")
+    loop {
+        for x in 0..3 {
+            if x > 1 { break }
+        }
+        [1].each(x => {
+            if x > 0 { return }
+        })
+    }
+    print("unreachable")
+}
+f()
+--- lint
+16: unreachable-code
+
+=== statements after a labeled break are unreachable
+@outer for _ in 0..3 {
+    for j in 0..3 {
+        break @outer
+        print(j)
+    }
+}
+--- lint
+4: unreachable-code
+

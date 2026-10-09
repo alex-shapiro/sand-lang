@@ -44,6 +44,7 @@ const ALL_EXAMPLES: &[&str] = &[
     "chat_server.sand",
     "adventure.sand",
     "search_index.sand",
+    "ledger.sand",
     "s3/s3.sand",
     "s3/cli.sand",
 ];
@@ -76,6 +77,23 @@ fn game_of_life() {
     // A glider returns to its shape every 4 generations; after 32 it has wrapped around fully.
     let o = run_example("life.sand", &["32"], Config::new());
     assert!(ok(&o).starts_with("generation 32, population 5\n"));
+}
+
+#[test]
+fn ledger_report_with_traits() {
+    let o = run_example("ledger.sand", &["food"], Config::new());
+    assert_eq!(
+        ok(&o),
+        "== by category: count, total, largest\n  \
+         food      4           $164.75     max $61.05\n  \
+         rent      2           $1900.00    max $950.00\n  \
+         travel    1           $38.40      max $38.40\n\
+         == by month: total\n  \
+         2024-01   $1011.70\n  \
+         2024-02   $1091.45\n\
+         == overall: 7           $2103.15    max $950.00\n\
+         == food: groceries, cafe, groceries, restaurant\n"
+    );
 }
 
 #[test]
@@ -183,6 +201,42 @@ fn persisted_inverted_index() {
     );
     assert_eq!(o.result.as_ref().unwrap().exit_code, 1);
     assert!(o.stderr.contains("permission_denied"), "{}", o.stderr);
+}
+
+/// Runs the CPU-bound examples with a garbage collection at every safe point
+/// and checks that the output is unchanged.
+#[test]
+fn examples_are_unchanged_under_gc_stress() {
+    let dir = TempDir::new("gcstress");
+    dir.write("docs/a.txt", "The quick brown fox jumps over the lazy dog");
+    dir.write("docs/b.txt", "A quick brown dog outpaces a quick red fox");
+    let tmpl = dir
+        .write("page.tmpl", "{% for u in users %}{{ loop.index }}. {{ u.name | title }}{% if u.admin %} (admin){% endif %}\n{% endfor %}");
+    let data = dir.write("data.json", r#"{"users": [{"name": "ann lee", "admin": true}, {"name": "bob"}]}"#);
+    let (tmpl, data) = (tmpl.to_str().unwrap().to_string(), data.to_str().unwrap().to_string());
+    let stdin = |s: &str| Config::new().policy(Policy::rules(RulePolicy::new().allow_stdin())).stdin_bytes(s.as_bytes().to_vec());
+    let files = || Config::new().cwd(dir.path()).policy(Policy::rules(RulePolicy::new().allow_read(dir.path()).allow_write(dir.path())));
+    type MakeConfig<'a> = Box<dyn Fn() -> Config + 'a>;
+    let runs: Vec<(&str, Vec<&str>, MakeConfig)> = vec![
+        ("life.sand", vec!["8"], Box::new(Config::new)),
+        ("calc.sand", vec![], Box::new(move || stdin("1 + 2 * 3\nlet r = 2\npi * r ^ 2\nmax(1, sqrt(16), 3)\n10 / 0\nfoo(1)\n"))),
+        (
+            "adventure.sand",
+            vec![],
+            Box::new(move || stdin("look\ntake lamp\ngo north\ne\nuse key\ns\ne\ntake key\ni\nw\nn\nuse key\neast\n")),
+        ),
+        ("template.sand", vec![&tmpl, &data], Box::new(files)),
+        ("search_index.sand", vec!["index", "idx.json", "docs"], Box::new(files)),
+        ("search_index.sand", vec!["search", "idx.json", "quick", "fox"], Box::new(files)),
+    ];
+    for (rel, args, config) in &runs {
+        let normal = run_example(rel, args, config());
+        let stressed = run_example(rel, args, config().gc_stress(true));
+        ok(&normal);
+        assert_eq!(normal.stdout, stressed.stdout, "{rel} {args:?}: stdout differs under GC stress");
+        assert_eq!(normal.stderr, stressed.stderr, "{rel} {args:?}: stderr differs under GC stress");
+        assert_eq!(format!("{:?}", normal.result), format!("{:?}", stressed.result), "{rel} {args:?}");
+    }
 }
 
 #[test]

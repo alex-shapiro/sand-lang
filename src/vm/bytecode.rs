@@ -43,6 +43,13 @@ pub enum Op {
         g: u32,
         src: Reg,
     },
+    /// Loads global `g` into `dst` before a loop that uses it; jumps if the
+    /// global is not initialised yet (to an unhoisted copy of the loop).
+    HoistGlobal {
+        dst: Reg,
+        g: u16,
+        off: i16,
+    },
     LoadCapture {
         dst: Reg,
         idx: u16,
@@ -599,6 +606,8 @@ pub enum Const {
     Native(u32),
     Spec(FormatSpec),
     TypeDesc(Arc<TypeDesc>),
+    /// An immutable tuple of earlier constants (constant trait dictionaries).
+    Tuple(Vec<u32>),
 }
 
 #[derive(Clone, Debug)]
@@ -646,8 +655,9 @@ pub struct HelpEntry {
     pub signature: String,
 }
 
-/// A compiled program: immutable once built and shared by `Arc`.
-#[derive(Debug, Default)]
+/// A compiled program, shared by `Arc`. It is immutable once built, except
+/// that a REPL session appends to it between inputs (never renumbering).
+#[derive(Clone, Debug, Default)]
 pub struct Program {
     pub protos: Vec<Proto>,
     pub consts: Vec<Const>,
@@ -667,6 +677,8 @@ pub struct Program {
     pub specs: Vec<FormatSpec>,
     /// Names of all standard and host modules available to `import`.
     pub available_modules: Vec<String>,
+    /// Summaries of modules not compiled into this program (for `help.module`).
+    pub help_index: Option<Arc<crate::engine::ModuleHelp>>,
     /// Native id of `task.spawn`-style helpers used by the compiler.
     pub recv_native: Option<u32>,
 }

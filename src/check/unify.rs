@@ -1,6 +1,6 @@
 //! Unification, bounds and zonking.
 
-use super::{Checker, zonk_with};
+use super::{Checker, zonk_budget};
 use crate::diag::Span;
 use crate::hir::*;
 use crate::types::*;
@@ -25,10 +25,22 @@ impl Checker<'_> {
     }
 
     pub fn zonk(&self, t: &Type) -> Type {
-        zonk_with(&self.subst, t)
+        zonk_budget(&self.subst, t, &self.budget)
+    }
+
+    /// Whether the (unresolved) variable `v` occurs in `t`.
+    pub(crate) fn occurs_in(&self, v: &Type, t: &Type) -> bool {
+        match self.resolve(v) {
+            Type::Var(x) => self.occurs(x, t),
+            _ => false,
+        }
     }
 
     fn occurs(&self, v: VarId, t: &Type) -> bool {
+        if !self.budget.charge(1) {
+            // Out of budget: refuse the binding rather than risk a cycle.
+            return true;
+        }
         let t = self.resolve(t);
         match &t {
             Type::Var(w) => *w == v,
@@ -41,6 +53,10 @@ impl Checker<'_> {
     }
 
     pub fn unify(&mut self, a: &Type, b: &Type) -> bool {
+        if !self.budget.charge(1) {
+            // Out of budget: compilation fails anyway; avoid cascading errors.
+            return true;
+        }
         let a = self.resolve(a);
         let b = self.resolve(b);
         match (&a, &b) {
@@ -52,6 +68,9 @@ impl Checker<'_> {
                     return false;
                 }
                 self.subst[*x as usize] = Some(t.clone());
+                if let Some(log) = &mut self.unify_log {
+                    log.push(*x);
+                }
                 true
             }
             (Type::Int, Type::Int)
@@ -107,6 +126,9 @@ impl Checker<'_> {
     }
 
     fn satisfies_inner(&self, t: &Type, b: Bound, visiting: &mut HashSet<(TypeDefId, Bound)>) -> Option<bool> {
+        if !self.budget.charge(1) {
+            return Some(true);
+        }
         let t = self.resolve(t);
         let all = |c: &Checker, ts: &[Type], visiting: &mut HashSet<(TypeDefId, Bound)>| -> Option<bool> {
             let mut unknown = false;
@@ -283,12 +305,19 @@ impl Checker<'_> {
                 self.zonk_expr(end);
                 self.zonk_expr(body);
             }
-            HKind::Break(x) | HKind::Return(x) => {
+            HKind::Break { value: x, .. } | HKind::Return(x) => {
                 if let Some(x) = x {
                     self.zonk_expr(x)
                 }
             }
-            HKind::Call { args, .. } => self.zonk_args(args),
+            HKind::Call { args, .. } | HKind::CallTrait { args, .. } => self.zonk_args(args),
+            HKind::Evidence(b) => {
+                b.ty = self.zonk(&b.ty);
+                for t in &mut b.tr.args {
+                    *t = self.zonk(t);
+                }
+            }
+            HKind::Dict { args, .. } => args.iter_mut().for_each(|x| self.zonk_expr(x)),
             HKind::CallNative { args, reflect, .. } => {
                 self.zonk_args(args);
                 for t in reflect {
@@ -329,7 +358,7 @@ impl Checker<'_> {
                     self.zonk_expr(x)
                 }
             }
-            HKind::Unary { e, .. } | HKind::ToStr(e) | HKind::Debug(e) | HKind::Spawn(e) => self.zonk_expr(e),
+            HKind::Unary { e, .. } | HKind::ToStr(e) | HKind::Debug(e) | HKind::Spawn(e) | HKind::Defer(e) => self.zonk_expr(e),
             HKind::Try { e, .. } => self.zonk_expr(e),
             HKind::Arith { l, r, .. } | HKind::Cmp { l, r, .. } | HKind::And(l, r) | HKind::Or(l, r) | HKind::Coalesce { l, r, .. } => {
                 self.zonk_expr(l);
@@ -359,7 +388,7 @@ impl Checker<'_> {
             | HKind::FnValue(_)
             | HKind::VariantFn { .. }
             | HKind::Tag(_)
-            | HKind::Continue
+            | HKind::Continue { .. }
             | HKind::Error => {}
         }
     }

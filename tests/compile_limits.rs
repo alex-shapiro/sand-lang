@@ -1,0 +1,289 @@
+//! The compile budget: hostile programs must fail to compile quickly
+//! instead of stalling (or crashing) the host before any runtime limit
+//! applies.
+
+mod common;
+
+use common::{TempDir, rt};
+use sandlang::{Config, Engine, Error, LimitKind, Limits, MemorySink, Policy};
+use std::time::{Duration, Instant};
+
+/// Generous: each of these took minutes, hours or gigabytes before.
+const FAST: Duration = Duration::from_secs(10);
+
+fn check(config: Config, src: &str) -> (Result<(), Error>, Duration) {
+    let mut engine = Engine::new(config.stdout(MemorySink::new()));
+    let start = Instant::now();
+    let r = engine.check_source("main.sand", src).map(|_| ());
+    (r, start.elapsed())
+}
+
+/// Asserts that `src` fails to compile, quickly, with an error containing `msg`.
+fn rejects(src: &str, msg: &str) {
+    rejects_with(Config::new(), src, msg)
+}
+
+fn rejects_with(config: Config, src: &str, msg: &str) {
+    let (r, took) = check(config, src);
+    match r {
+        Err(Error::Compile(ds)) => {
+            assert!(ds.iter().any(|d| d.message.contains(msg)), "expected `{msg}`, got {ds:?}")
+        }
+        other => panic!("expected a compile error `{msg}`, got {other:?}"),
+    }
+    assert!(took < FAST, "took {took:?}");
+}
+
+fn limits(f: impl FnOnce(&mut Limits)) -> Config {
+    let mut l = Limits::default();
+    f(&mut l);
+    Config::new().limits(l)
+}
+
+#[test]
+fn or_patterns_over_tuples() {
+    // Proving the second arm unreachable explores 2^30 combinations.
+    let n = 30;
+    let src = format!(
+        "enum E {{ A, B, C }}\nfn f(t: ({})) -> int {{\n    match t {{\n        ({}) => 0\n        ({}) => 1\n    }}\n}}\n",
+        vec!["E"; n].join(", "),
+        vec!["_"; n].join(", "),
+        vec!["A | B"; n].join(", "),
+    );
+    rejects(&src, "pattern too complex to check for exhaustiveness");
+    // Also in irrefutability checks (`let`, `for`).
+    let src = format!(
+        "enum E {{ A, B }}\nfn f(t: ({})) -> int {{\n    let ({}) = t\n    1\n}}\n",
+        vec!["E"; n].join(", "),
+        vec!["A | B"; n].join(", "),
+    );
+    rejects(&src, "pattern too complex to check for exhaustiveness");
+}
+
+#[test]
+fn large_matches_are_still_checked() {
+    let n = 1000;
+    let variants: Vec<String> = (0..n).map(|i| format!("V{i}")).collect();
+    let arms: Vec<String> = (0..n).map(|i| format!("        V{i} => {i}")).collect();
+    let src = format!(
+        "enum E {{ {} }}\nfn f(e: E) -> int {{\n    match e {{\n{}\n    }}\n}}\nprint(f(E.V7))\n",
+        variants.join(", "),
+        arms.join("\n")
+    );
+    let (r, took) = check(Config::new(), &src);
+    r.unwrap();
+    assert!(took < FAST, "took {took:?}");
+    // Exhaustiveness errors are still reported normally.
+    let src = src.replace("        V999 => 999\n", "");
+    rejects(&src, "non-exhaustive match: missing `V999`");
+}
+
+#[test]
+fn types_that_double_in_size() {
+    // Inference: each line doubles the type.
+    let mut src = String::from("let a0 = 1\n");
+    for i in 1..60 {
+        src += &format!("let a{i} = (a{}, a{})\n", i - 1, i - 1);
+    }
+    rejects(&src, "type too large");
+    // Aliases.
+    let mut src = String::from("type T0 = int\n");
+    for i in 1..60 {
+        src += &format!("type T{i} = (T{}, T{})\n", i - 1, i - 1);
+    }
+    src += "fn f(x: T59) -> int { 1 }\n";
+    rejects(&src, "type too large");
+    // Generic instantiation.
+    let src = format!("fn dup<T>(x: T) -> (T, T) {{ (x, x) }}\nlet a = {}1{}\n", "dup(".repeat(60), ")".repeat(60));
+    rejects(&src, "type too large");
+}
+
+#[test]
+fn bound_checks_on_structs_sharing_field_types() {
+    let mut src = String::from("struct S0 { x: int }\n");
+    for i in 1..60 {
+        src += &format!("struct S{i} {{ a: S{}, b: S{} }}\n", i - 1, i - 1);
+    }
+    src += "fn same<T: Eq>(a: T, b: T) -> bool { a == b }\nfn f(x: S59) -> bool { same(x, x) }\n";
+    rejects(&src, "program too complex to compile");
+    // Runtime type descriptions (`json.decode`) share the descriptions of
+    // such structs, so they stay small (see `reflected_types_are_shared`).
+    let mut src = String::from("import json\nstruct S0 { x: int }\n");
+    for i in 1..60 {
+        src += &format!("struct S{i} {{ a: S{}, b: S{} }}\n", i - 1, i - 1);
+    }
+    src += "let r: Result<S59> = json.decode(\"1\")\n";
+    let (r, took) = check(Config::new(), &src);
+    r.unwrap();
+    assert!(took < FAST, "took {took:?}");
+}
+
+#[test]
+fn deeply_nested_string_interpolation() {
+    // Used to overflow the host stack in the lexer (aborting the process).
+    let n = 100_000;
+    let src = format!("let s = {}1{}\n", "\"{".repeat(n), "}\"".repeat(n));
+    rejects(&src, "strings nested too deeply");
+    // Moderate nesting still works.
+    let src = "let x = 1\nprint(\"a{\"b{\"c{x}\"}\"}\")\n";
+    let out = MemorySink::new();
+    let mut engine = Engine::new(Config::new().stdout(out.clone()));
+    rt().block_on(engine.run_source("main.sand", src)).unwrap();
+    assert_eq!(out.contents(), "abc1\n");
+}
+
+/// A program that is slow to check, but only polynomially (so it finishes
+/// eventually when unlimited): many matches near the pattern work limit.
+fn slow_program() -> String {
+    let n = 18;
+    let m =
+        format!("    match t {{\n        ({}) => 0\n        ({}) => 1\n    }}\n", vec!["_"; n].join(", "), vec!["A | B"; n].join(", "),);
+    let mut src = String::from("enum E { A, B, C }\n");
+    for i in 0..200 {
+        src += &format!("fn f{i}(t: ({})) -> int {{\n{m}}}\n", vec!["E"; n].join(", "));
+    }
+    src
+}
+
+#[test]
+fn compile_fuel_is_configurable() {
+    let src = "fn f(x: int) -> int { x + 1 }\nprint(f(1))\n";
+    rejects_with(limits(|l| l.max_compile_fuel = Some(100)), src, "program too complex to compile");
+    let (r, _) = check(limits(|l| l.max_compile_fuel = None), src);
+    r.unwrap();
+    // The default stops a program whose checking is merely slow.
+    rejects(&slow_program(), "program too complex to compile");
+}
+
+#[test]
+fn wall_time_and_interrupts_stop_compilation() {
+    let src = slow_program();
+    let unlimited = || limits(|l| l.max_compile_fuel = None);
+    let timed = limits(|l| {
+        l.max_compile_fuel = None;
+        l.max_wall_time = Some(Duration::from_millis(100));
+    });
+    let (r, took) = check(timed, &src);
+    assert!(matches!(r, Err(Error::Limit(LimitKind::WallTime))), "{r:?}");
+    assert!(took < FAST, "took {took:?}");
+
+    let mut engine = Engine::new(unlimited().stdout(MemorySink::new()));
+    let handle = engine.interrupt_handle();
+    let t = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        handle.interrupt();
+    });
+    let start = Instant::now();
+    let r = rt().block_on(engine.run_source("main.sand", &src));
+    t.join().unwrap();
+    assert!(matches!(r, Err(Error::Interrupted)), "{r:?}");
+    assert!(start.elapsed() < FAST, "took {:?}", start.elapsed());
+}
+
+#[test]
+fn source_size_limit_covers_imports() {
+    let dir = TempDir::new("imports");
+    let body = format!("pub fn f() -> int {{ 1 }}\n// {}\n", "x".repeat(200));
+    dir.write("a.sand", &body);
+    dir.write("b.sand", &body);
+    let main = dir.write("main.sand", "import \"a\"\nimport \"b\"\nprint(a.f() + b.f())\n");
+    let config = |max: usize| {
+        Config::new()
+            .policy(Policy::allow_all())
+            .cwd(dir.path())
+            .stdout(MemorySink::new())
+            .limits(Limits { max_source_bytes: max, ..Limits::default() })
+    };
+    // Each file fits, but not all of them together.
+    let mut engine = Engine::new(config(400));
+    match rt().block_on(engine.run_file(&main)) {
+        Err(Error::Compile(ds)) => assert!(ds.iter().any(|d| d.message.contains("source too large")), "{ds:?}"),
+        other => panic!("{other:?}"),
+    }
+    let mut engine = Engine::new(config(1000));
+    rt().block_on(engine.run_file(&main)).unwrap();
+}
+
+/// Runs the script `main` (with the script modules `files` beside it),
+/// returning its output.
+fn run_files(files: &[(&str, &str)], main: &str) -> Result<String, Error> {
+    let dir = TempDir::new("reflect");
+    for (name, body) in files {
+        dir.write(name, body);
+    }
+    let main = dir.write("main.sand", main);
+    let out = MemorySink::new();
+    let mut engine = Engine::new(Config::new().policy(Policy::allow_all()).cwd(dir.path()).stdout(out.clone()));
+    rt().block_on(engine.run_file(&main))?;
+    Ok(out.contents())
+}
+
+#[test]
+fn reflected_types_are_described_once() {
+    // Struct descriptions that double at each level, used by many call
+    // sites: each struct is described once and shared, within a
+    // description and by every call site (this took gigabytes).
+    let mut src = String::from("import json\nstruct S0 { x: int }\n");
+    for i in 1..40 {
+        src += &format!("struct S{i} {{ a: S{}, b: S{} }}\n", i - 1, i - 1);
+    }
+    for i in 0..400 {
+        src += &format!("let r{i}: Result<S39> = json.decode(\"1\")\n");
+    }
+    src += r#"let s: S2 = json.decode("\{\"a\": \{\"a\": \{\"x\": 1\}, \"b\": \{\"x\": 2\}\}, \"b\": \{\"a\": \{\"x\": 3\}, \"b\": \{\"x\": 4\}\}\}").unwrap()
+print(s.a.b.x * 10 + s.b.a.x)
+"#;
+    let start = Instant::now();
+    assert_eq!(run_files(&[], &src).unwrap(), "23\n");
+    assert!(start.elapsed() < FAST, "took {:?}", start.elapsed());
+}
+
+#[test]
+fn shared_reflected_types_with_back_references() {
+    // Shared descriptions that refer back to an enclosing type, and
+    // recursive enums.
+    let src = r#"import json
+struct S0 { x: int, up: Root? }
+struct S1 { a: S0, b: S0 }
+struct Root { a: S1, b: S1, n: int }
+enum Tree { Leaf(int), Node(Tree, Tree) }
+let leaf = "\{\"x\": 1\}"
+let s1 = "\{\"a\": {leaf}, \"b\": {leaf}\}"
+let inner = "\{\"a\": {s1}, \"b\": {s1}, \"n\": 7\}"
+let s1b = "\{\"a\": {leaf}, \"b\": \{\"x\": 5, \"up\": {inner}\}\}"
+let r: Root = json.decode("\{\"a\": {s1}, \"b\": {s1b}, \"n\": 3\}").unwrap()
+print("{r.n} {r.b.b.up.unwrap().n} {r.b.b.x}")
+let t: (Tree, Tree) = json.decode("[\{\"Node\": [\{\"Leaf\": [1]\}, \{\"Leaf\": [2]\}]\}, \{\"Leaf\": [3]\}]").unwrap()
+print(t)
+"#;
+    assert_eq!(run_files(&[], src).unwrap(), "3 7 5\n(Node(Leaf(1), Leaf(2)), Leaf(3))\n");
+}
+
+#[test]
+fn reflected_types_with_the_same_name() {
+    // Two structs named `Config` in different modules are different types
+    // (recursive references used to be resolved by name, decoding the inner
+    // one as the outer one).
+    let files = [("a.sand", "pub struct Config { p: int, q: int, r: int }\n")];
+    let src = r#"import json
+import "./a.sand"
+struct Config { inner: a.Config? }
+let c: Config = json.decode("\{\"inner\": \{\"p\": 1, \"q\": 2, \"r\": 3\}\}").unwrap()
+print(c.inner.unwrap().r)
+let bad: Result<Config> = json.decode("\{\"inner\": \{\"inner\": null\}\}")
+print(bad.is_err())
+"#;
+    assert_eq!(run_files(&files, src).unwrap(), "3\ntrue\n");
+}
+
+#[test]
+fn reflected_types_too_large_to_describe() {
+    // Polymorphic recursion: `P<int>` contains `P<[int]>`, which contains
+    // `P<[[int]]>`, ... (each new). Many call sites stay cheap: the work of
+    // all descriptions of a compilation is bounded too.
+    let mut src = String::from("import json\nstruct P<T> { v: T, next: P<[T]>? }\n");
+    for i in 0..300 {
+        src += &format!("struct Q{i} {{ x: int }}\nlet r{i}: Result<P<Q{i}>> = json.decode(\"1\")\n");
+    }
+    rejects(&src, "type too large to describe at runtime");
+}

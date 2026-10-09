@@ -264,3 +264,44 @@ let p = Point { x: 1, ..q }
 let ys = [x * 2 for x in xs if x > 0]
 let m = [k: v for (k, v) in pairs]
 let e = [:]
+
+=== trailing comment containing a closing brace stays after the declaration
+struct Item { name: str }// }
+enum E { A } // x }
+extend Item {
+    fn f(self) {}
+} // }
+--- fmt
+struct Item { name: str } // }
+
+enum E { A } // x }
+
+extend Item {
+    fn f(self) {}
+} // }
+
+=== repeated try keeps a space so it does not lex as ??
+fn f(x: int??) -> int? {
+    Some(x ? ?)
+}
+let y = l ? ?
+--- fmt
+fn f(x: int??) -> int? {
+    Some(x? ?)
+}
+
+let y = l? ?
+
+=== labeled loops
+@outer   for x in xs {
+    @inner while x>0 {  continue  @outer }
+    let v=@l loop { break  @l  x+1 }
+    break @outer
+}
+--- fmt
+@outer for x in xs {
+    @inner while x > 0 { continue @outer }
+    let v = @l loop { break @l x + 1 }
+    break @outer
+}
+

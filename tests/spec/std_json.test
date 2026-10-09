@@ -221,3 +221,92 @@ import json
 print(json.parse("[1, \{\"a\": null\}]")?)
 --- stdout
 Arr([Num(1.0), Obj(["a": Null])])
+
+=== json with options, single-payload enums and nested variants
+import json
+
+enum Shape {
+    Circle(float)
+    Label(str)
+    Pair(int, int)
+    Nested(Shape)
+    Empty
+}
+
+struct Doc {
+    name: str
+    tag: str?
+    shape: Shape
+    shapes: [Shape]
+    count: int?
+    flags: [bool?]
+}
+
+let d = Doc { name: "d", tag: Some("t"), shape: Shape.Nested(Shape.Circle(1.5)), shapes: [Shape.Label("x"), Shape.Pair(1, 2), Shape.Empty, Shape.Nested(Shape.Empty)], count: None, flags: [Some(true), None] }
+let text = json.encode(d)
+print(text)
+let back: Result<Doc> = json.decode(text)
+print(back)
+print(back.unwrap() == d)
+print(json.encode(Some(Some(3))))
+print(json.encode([Shape.Circle(1.0), Shape.Label("q")]))
+let j = json.parse(r#"{"a": [1, 2.5, "s", true, null, {"b": []}], "c": {"d": null}}"#).unwrap()
+print(j)
+print(json.stringify(j))
+print(json.stringify(j, indent: 2))
+match j {
+    json.Json.Obj(m) => {
+        match m["a"] {
+            json.Json.Arr(items) => {
+                for it in items {
+                    match it {
+                        json.Json.Num(n) => print("num {n}")
+                        json.Json.Str(s) => print("str {s}")
+                        json.Json.Bool(b) => print("bool {b}")
+                        json.Json.Null => print("null")
+                        other => print("other {other}")
+                    }
+                }
+            }
+            _ => print("?")
+        }
+    }
+    _ => print("?")
+}
+let xs: Result<[int?]> = json.decode("[1, null, 3]")
+print(xs)
+let sh: Result<Shape> = json.decode(r#"{"Nested": [{"Circle": [2.0]}]}"#)
+print(sh)
+print(json.to_json(Some([1, 2])))
+--- stdout
+{"name":"d","tag":"t","shape":{"Nested":[{"Circle":[1.5]}]},"shapes":[{"Label":["x"]},{"Pair":[1,2]},"Empty",{"Nested":["Empty"]}],"count":null,"flags":[true,null]}
+Ok(Doc { name: "d", tag: Some("t"), shape: Nested(Circle(1.5)), shapes: [Label("x"), Pair(1, 2), Empty, Nested(Empty)], count: None, flags: [Some(true), None] })
+true
+3
+[{"Circle":[1]},{"Label":["q"]}]
+Obj(["a": Arr([Num(1.0), Num(2.5), Str("s"), Bool(true), Null, Obj(["b": Arr([])])]), "c": Obj(["d": Null])])
+{"a":[1,2.5,"s",true,null,{"b":[]}],"c":{"d":null}}
+{
+  "a": [
+    1,
+    2.5,
+    "s",
+    true,
+    null,
+    {
+      "b": []
+    }
+  ],
+  "c": {
+    "d": null
+  }
+}
+num 1.0
+num 2.5
+str s
+bool true
+null
+other Obj(["b": Arr([])])
+Ok([Some(1), None, Some(3)])
+Ok(Nested(Circle(2.0)))
+Arr([Num(1.0), Num(2.0)])

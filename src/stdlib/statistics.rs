@@ -2,23 +2,27 @@
 
 use crate::check::ModKind;
 use crate::engine::Registry;
+use crate::vm::compare::try_sort_by;
 use crate::vm::value::Value;
-use crate::vm::{NResult, Vm};
+use crate::vm::{Ctl, NResult, Vm};
 use std::collections::HashMap;
 
 pub fn register(r: &mut Registry) {
     r.source("statistics", ModKind::Std, include_str!("statistics.sand"));
 
     r.add_builtin("statistics.mean", |vm, a| {
-        let xs = floats(vm, a[0]);
+        let xs = floats(vm, a[0])?;
         float_opt(vm, mean(&xs))
     });
     r.add_builtin("statistics.mean_int", |vm, a| {
-        let xs: Vec<f64> = vm.heap.list(a[0]).iter().map(|v| v.as_int() as f64).collect();
+        let items = vm.heap.list(a[0]);
+        vm.reserve(items.len() * std::mem::size_of::<f64>())?;
+        vm.charge(items.len() as u64)?;
+        let xs: Vec<f64> = items.iter().map(|v| v.as_int() as f64).collect();
         float_opt(vm, mean(&xs))
     });
     r.add_builtin("statistics.median", |vm, a| {
-        let xs = sorted(vm, a[0]);
+        let xs = sorted(vm, a[0])?;
         let n = xs.len();
         let m = match n {
             0 => None,
@@ -28,7 +32,8 @@ pub fn register(r: &mut Registry) {
         float_opt(vm, m)
     });
     r.add_builtin("statistics.mode", |vm, a| {
-        let xs = floats(vm, a[0]);
+        let xs = floats(vm, a[0])?;
+        vm.reserve(xs.len() * 32)?;
         // Count by bit pattern (with -0.0 folded into 0.0); remember the
         // first index of each value so ties go to the earliest.
         let mut counts: HashMap<u64, (usize, usize)> = HashMap::new();
@@ -40,32 +45,32 @@ pub fn register(r: &mut Registry) {
         float_opt(vm, best.map(|&(_, i)| xs[i]))
     });
     r.add_builtin("statistics.variance", |vm, a| {
-        let xs = floats(vm, a[0]);
+        let xs = floats(vm, a[0])?;
         float_opt(vm, variance(&xs, 1))
     });
     r.add_builtin("statistics.stdev", |vm, a| {
-        let xs = floats(vm, a[0]);
+        let xs = floats(vm, a[0])?;
         float_opt(vm, variance(&xs, 1).map(f64::sqrt))
     });
     r.add_builtin("statistics.pvariance", |vm, a| {
-        let xs = floats(vm, a[0]);
+        let xs = floats(vm, a[0])?;
         float_opt(vm, variance(&xs, 0))
     });
     r.add_builtin("statistics.pstdev", |vm, a| {
-        let xs = floats(vm, a[0]);
+        let xs = floats(vm, a[0])?;
         float_opt(vm, variance(&xs, 0).map(f64::sqrt))
     });
     r.add_builtin("statistics.min", |vm, a| {
-        let m = floats(vm, a[0]).into_iter().reduce(f64::min);
+        let m = floats(vm, a[0])?.into_iter().reduce(f64::min);
         float_opt(vm, m)
     });
     r.add_builtin("statistics.max", |vm, a| {
-        let m = floats(vm, a[0]).into_iter().reduce(f64::max);
+        let m = floats(vm, a[0])?.into_iter().reduce(f64::max);
         float_opt(vm, m)
     });
-    r.add_builtin("statistics.sum", |vm, a| Ok(Value::Float(sum(floats(vm, a[0])))));
+    r.add_builtin("statistics.sum", |vm, a| Ok(Value::Float(sum(floats(vm, a[0])?))));
     r.add_builtin("statistics.quantile", |vm, a| {
-        let xs = sorted(vm, a[0]);
+        let xs = sorted(vm, a[0])?;
         let q = a[1].as_float();
         if xs.is_empty() || !(0.0..=1.0).contains(&q) {
             return Ok(vm.none());
@@ -77,7 +82,7 @@ pub fn register(r: &mut Registry) {
         float_opt(vm, Some(xs[lo] + (xs[hi] - xs[lo]) * frac))
     });
     r.add_builtin("statistics.correlation", |vm, a| {
-        let (xs, ys) = (floats(vm, a[0]), floats(vm, a[1]));
+        let (xs, ys) = (floats(vm, a[0])?, floats(vm, a[1])?);
         let r = moments(&xs, &ys).and_then(|m| {
             let denom = (m.sxx * m.syy).sqrt();
             (denom > 0.0 && denom.is_finite()).then(|| (m.sxy / denom).clamp(-1.0, 1.0))
@@ -85,7 +90,7 @@ pub fn register(r: &mut Registry) {
         float_opt(vm, r)
     });
     r.add_builtin("statistics.linear_regression", |vm, a| {
-        let (xs, ys) = (floats(vm, a[0]), floats(vm, a[1]));
+        let (xs, ys) = (floats(vm, a[0])?, floats(vm, a[1])?);
         let fit = moments(&xs, &ys).filter(|m| m.sxx > 0.0).map(|m| {
             let slope = m.sxy / m.sxx;
             (slope, m.mean_y - slope * m.mean_x)
@@ -100,14 +105,21 @@ pub fn register(r: &mut Registry) {
     });
 }
 
-fn floats(vm: &Vm, list: Value) -> Vec<f64> {
-    vm.heap.list(list).iter().map(|v| v.as_float()).collect()
+/// The numbers of a list as floats, charging one unit per element (the
+/// statistics are linear passes over them).
+fn floats(vm: &Vm, list: Value) -> Result<Vec<f64>, Ctl> {
+    let items = vm.heap.list(list);
+    vm.reserve(items.len() * std::mem::size_of::<f64>())?;
+    vm.charge(items.len() as u64)?;
+    Ok(items.iter().map(|v| v.as_float()).collect())
 }
 
-fn sorted(vm: &Vm, list: Value) -> Vec<f64> {
-    let mut xs = floats(vm, list);
-    xs.sort_by(f64::total_cmp);
-    xs
+/// Sorted floats; each comparison is charged, so huge sorts can be stopped.
+fn sorted(vm: &Vm, list: Value) -> Result<Vec<f64>, Ctl> {
+    let mut xs = floats(vm, list)?;
+    vm.reserve(xs.len() * std::mem::size_of::<f64>())?;
+    try_sort_by(&mut xs, |a, b| vm.charge(1).map(|()| a.total_cmp(b)))?;
+    Ok(xs)
 }
 
 fn float_opt(vm: &mut Vm, x: Option<f64>) -> NResult {

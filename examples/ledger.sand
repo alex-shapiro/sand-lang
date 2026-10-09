@@ -1,0 +1,151 @@
+//! An expense report built from two small traits.
+//!
+//! `Monoid` values can be combined, so counts, totals and maxima per
+//! category, per month and overall all come from one generic `summarize`
+//! function. `Render` turns any of those results into text. Generic and
+//! conditional impls (`(A, B)`, `Max<T>`, `[T]`) compose the pieces.
+//!
+//! Usage: sand run examples/ledger.sand [CATEGORY]
+
+import env
+
+/// Values with an identity and an associative way to combine them.
+pub trait Monoid {
+    /// The identity: `x.combine(Self.empty())` is `x`.
+    fn empty() -> Self
+    fn combine(self, other: Self) -> Self
+
+    /// Combines all values of a list (the identity if it is empty).
+    fn concat(xs: [Self]) -> Self { xs.fold(Self.empty(), (acc, x) => acc.combine(x)) }
+}
+
+/// Values that can be shown in the report.
+pub trait Render {
+    fn render(self) -> str
+
+    /// The rendering, padded to `width` characters.
+    fn cell(self, width: int) -> str { self.render().pad_end(width) }
+}
+
+/// An amount of money in cents.
+struct Money { cents: int }
+
+impl Monoid for Money {
+    fn empty() -> Money { Money { cents: 0 } }
+
+    fn combine(self, other: Money) -> Money { Money { cents: self.cents + other.cents } }
+}
+
+impl Render for Money {
+    fn render(self) -> str { "${self.cents / 100}.{self.cents % 100:02}" }
+}
+
+/// The largest value combined so far, if any.
+struct Max<T> { value: T? }
+
+impl<T: Ord> Monoid for Max<T> {
+    fn empty() -> Max<T> { Max { value: None } }
+
+    fn combine(self, other: Max<T>) -> Max<T> {
+        match (self.value, other.value) {
+            (Some(a), Some(b)) => Max { value: Some(if a >= b { a } else { b }) }
+            (a, None) => Max { value: a }
+            (None, b) => Max { value: b }
+        }
+    }
+}
+
+impl<T: Render> Render for Max<T> {
+    fn render(self) -> str {
+        match self.value {
+            Some(v) => "max " + v.render()
+            None => "-"
+        }
+    }
+}
+
+impl Monoid for int {
+    fn empty() -> int { 0 }
+
+    fn combine(self, other: int) -> int { self + other }
+}
+
+impl Render for int {
+    fn render(self) -> str { "{self}" }
+}
+
+impl Render for str {
+    fn render(self) -> str { self }
+}
+
+impl<A: Monoid, B: Monoid> Monoid for (A, B) {
+    fn empty() -> (A, B) { (A.empty(), B.empty()) }
+
+    fn combine(self, other: (A, B)) -> (A, B) { (self.0.combine(other.0), self.1.combine(other.1)) }
+}
+
+impl<A: Render, B: Render> Render for (A, B) {
+    fn render(self) -> str { self.0.cell(12) + self.1.render() }
+}
+
+impl<T: Render> Render for [T] {
+    fn render(self) -> str { self.map(x => x.render()).join(", ") }
+}
+
+struct Expense {
+    month: str
+    category: str
+    what: str
+    amount: Money
+}
+
+/// Per expense: (count, (total, largest)).
+type Stats = (int, (Money, Max<Money>))
+
+fn stats(e: Expense) -> Stats { (1, (e.amount, Max { value: Some(e.amount) })) }
+
+/// Groups values by key, combining each group.
+fn summarize<K: Hash, V: Monoid>(pairs: [(K, V)]) -> [K: V] {
+    let out: [K: V] = [:]
+    for (k, v) in pairs {
+        out[k] = (out.get(k) ?? V.empty()).combine(v)
+    }
+    out
+}
+
+fn section<K: Render + Ord + Hash, V: Render>(title: str, rows: [K: V]) {
+    print("== {title}")
+    for k in rows.keys().sorted() {
+        print("  " + k.cell(10) + rows[k].render())
+    }
+}
+
+fn parse(line: str) -> Expense? {
+    let parts = line.split(",").map(p => p.trim())
+    let [month, category, what, amount] = parts else { return None }
+    let (whole, frac) = amount.split_once(".") ?? (amount, "0")
+    let cents = whole.parse_int()? * 100 + frac.pad_end(2, "0")[..2].parse_int()?
+    Some(Expense { month, category, what, amount: Money { cents } })
+}
+
+let data = """
+    2024-01, food, groceries, 54.20
+    2024-01, rent, january, 950.00
+    2024-01, food, cafe, 7.5
+    2024-02, food, groceries, 61.05
+    2024-02, travel, train, 38.40
+    2024-02, rent, february, 950.00
+    2024-02, food, restaurant, 42.00
+    """
+let expenses = data.lines().filter_map(parse)
+
+section("by category: count, total, largest", summarize(expenses.map(e => (e.category, stats(e)))))
+section("by month: total", summarize(expenses.map(e => (e.month, e.amount))))
+let overall: Stats = Monoid.concat(expenses.map(stats))
+print("== overall: {overall.render()}")
+
+// An optional argument picks one category.
+if let Some(wanted) = env.args().first() {
+    let items = expenses.filter(e => e.category == wanted).map(e => e.what)
+    print("== {wanted}: " + (if items.is_empty() { "none" } else { items.render() }))
+}

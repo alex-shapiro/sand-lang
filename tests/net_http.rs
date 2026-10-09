@@ -171,6 +171,30 @@ print(start.elapsed() < 350ms)
 }
 
 #[test]
+fn http_server_requests_expose_their_connection() {
+    let src = r#"
+import http
+let server = http.serve("127.0.0.1:0")?
+let addr = server.addr()
+let client = spawn http.get("http://{addr}/stream?x=1")
+let req = server.accept()?
+print("{req.method} {req.path} {req.query} {req.header("Host").is_some()}")
+// Stream a chunked response by hand instead of using `respond`.
+req.conn.write_str("HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n")?
+for part in ["streamed ", "by ", "hand"] {
+    req.conn.write_str("{part.len():x}\r\n{part}\r\n")?
+}
+req.conn.write_str("0\r\n\r\n")?
+req.conn.close()
+print(client.wait()?.text()?)
+print(req.respond(200, b"again").unwrap_err().kind)
+server.close()
+print(server.accept().unwrap_err().kind)
+"#;
+    assert_eq!(run_net(src), "GET /stream x=1 true\nstreamed by hand\nclosed\nclosed\n");
+}
+
+#[test]
 fn http_server_api() {
     let out = MemorySink::new();
     let src = r#"
@@ -219,21 +243,49 @@ let listener = net.listen("127.0.0.1:0")?
 let addr = listener.addr()
 let server = spawn {
     let conn = listener.accept().unwrap()
+    var lines: [str] = []
+    var echo = true
     while let Some(line) = conn.read_line().unwrap() {
-        conn.write_str(line.to_upper() + "\n").unwrap()
+        // Stop answering at "bye": the client closes after sending it, and
+        // writing to a closed peer makes it answer with a reset.
+        echo = echo and line != "bye"
+        if echo {
+            conn.write_str(line.to_upper() + "\n").unwrap()
+        }
+        lines.push(line)
     }
     conn.close()
-    "server done"
+    lines
 }
 let client = net.connect(addr)?
 client.write_str("hello\nworld\n")?
 print(client.read_line()?)
 print(client.read_line()?)
-client.write(b"partial")?
+client.write(b"bye\npartial")?
 client.close()
 print(server.wait())
 "#;
-    assert_eq!(run_net(src), "Some(\"HELLO\")\nSome(\"WORLD\")\nserver done\n");
+    assert_eq!(run_net(src), "Some(\"HELLO\")\nSome(\"WORLD\")\n[\"hello\", \"world\", \"bye\", \"partial\"]\n");
+}
+
+#[test]
+fn reads_after_end_of_stream_keep_returning_eof() {
+    // Writing to a peer that has closed makes it answer with a reset; on some
+    // platforms the next read would then fail even though EOF was already seen.
+    let src = r#"
+import net
+let listener = net.listen("127.0.0.1:0")?
+let client = net.connect(listener.addr())?
+let conn = listener.accept()?
+client.write(b"last")?
+client.close()
+print(conn.read_line()?)
+print(conn.write_str("too late\n").is_ok())
+task.sleep(50ms)
+print(conn.read_line()?)
+print(conn.read()?)
+"#;
+    assert_eq!(run_net(src), "Some(\"last\")\ntrue\nNone\nb\"\"\n");
 }
 
 #[test]
@@ -300,4 +352,134 @@ fn errors_are_distinguishable() {
     }
     assert!(r.stderr.contains("error:"));
     let _ = Error::Interrupted;
+}
+
+/// A TCP server that accepts connections and never reads or answers them.
+#[cfg(feature = "tls")]
+fn silent_server() -> std::net::SocketAddr {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for s in listener.incoming() {
+            held.push(s);
+        }
+    });
+    addr
+}
+
+// Uses TLS handshakes that never complete.
+#[cfg(feature = "tls")]
+#[test]
+fn sockets_of_pending_operations_count_as_open_resources() {
+    // Connections being established (a TLS handshake that never completes)
+    // and HTTP requests in flight hold sockets: they count against
+    // `max_open_resources` until they end, fail or are cancelled.
+    let addr = silent_server();
+    let port = addr.port();
+    let src = format!(
+        r#"
+import http
+import net
+let handshakes = (0..2).map(_ => spawn net.connect_tls("127.0.0.1", {port}, timeout: 30s))
+let requests = (0..2).map(_ => spawn http.get("http://{addr}/", timeout: 30s))
+task.sleep(200ms)
+print(net.listen("127.0.0.1:0").unwrap_err().kind)
+print(net.connect("{addr}").unwrap_err().kind)
+print(http.get("http://{addr}/").unwrap_err().kind)
+for t in handshakes {{ t.cancel() }}
+for t in requests {{ t.cancel() }}
+let l = net.listen("127.0.0.1:0")?
+print("listening on a released slot")
+let pending = spawn l.accept()
+task.sleep(50ms)
+let others = (0..3).map(_ => net.listen("127.0.0.1:0"))
+print(others.filter(r => r.is_ok()).len())
+pending.cancel()
+"#
+    );
+    let limits = Limits { max_open_resources: 4, max_wall_time: Some(Duration::from_secs(20)), ..Limits::default() };
+    let r = run_with(&src, |c| c.policy(Policy::allow_all()).limits(limits));
+    // The listener and the pending accept leave two of the four slots.
+    assert_eq!(r.ok_stdout(), "limit\nlimit\nlimit\nlistening on a released slot\n2\n");
+}
+
+#[cfg(feature = "tls")]
+#[test]
+fn tls_handshakes_time_out() {
+    let addr = silent_server();
+    let src = format!("import net\nlet e = net.connect_tls(\"127.0.0.1\", {}, timeout: 200ms).unwrap_err()\nprint(e.kind)", addr.port());
+    let start = Instant::now();
+    let r = run_with(&src, |c| c.policy(Policy::allow_all()));
+    assert_eq!(r.ok_stdout(), "timeout\n");
+    assert!(start.elapsed() < Duration::from_secs(10));
+}
+
+/// Runs a server script that prints `ready ADDR` first; returns the address
+/// and the run's thread.
+fn start_server_script(src: &'static str, limits: Limits) -> (String, std::thread::JoinHandle<Result<sandlang::Outcome, Error>>) {
+    let out = MemorySink::new();
+    let config = Config::new().policy(Policy::allow_all()).limits(limits).stdout(out.clone());
+    let mut engine = Engine::new(config);
+    let handle = std::thread::spawn(move || common::rt().block_on(engine.run_source("server.sand", src)));
+    let start = Instant::now();
+    let addr = loop {
+        if let Some(l) = out.contents().lines().next() {
+            break l.trim_start_matches("ready ").to_string();
+        }
+        assert!(start.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    (addr, handle)
+}
+
+#[test]
+fn idle_connections_do_not_delay_http_requests() {
+    let src = r#"
+import http
+let server = http.serve("127.0.0.1:0")?
+print("ready {server.addr()}")
+for i in 0..2 {
+    let req = server.accept()?
+    req.respond(200, "served {req.path}".bytes())?
+}
+"#;
+    let limits = Limits { max_wall_time: Some(Duration::from_secs(25)), ..Limits::default() };
+    let (addr, handle) = start_server_script(src, limits);
+    // Idle connections, and one that stops in the middle of its request.
+    let idle: Vec<_> = (0..3).map(|_| std::net::TcpStream::connect(&addr).unwrap()).collect();
+    let mut partial = std::net::TcpStream::connect(&addr).unwrap();
+    write!(partial, "GET /partial HT").unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    for path in ["/one", "/two"] {
+        let start = Instant::now();
+        let mut s = std::net::TcpStream::connect(&addr).unwrap();
+        write!(s, "GET {path} HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        let mut resp = String::new();
+        s.read_to_string(&mut resp).unwrap();
+        assert!(resp.ends_with(&format!("served {path}")), "{resp}");
+        assert!(start.elapsed() < Duration::from_secs(5), "{:?}", start.elapsed());
+    }
+    handle.join().unwrap().unwrap();
+    drop((idle, partial));
+}
+
+#[test]
+fn unlimited_http_bodies() {
+    // `max_http_body = usize::MAX` must not overflow when reading bodies.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for s in listener.incoming() {
+            let mut s = s.unwrap();
+            let mut req = [0u8; 1024];
+            let _ = s.read(&mut req);
+            // A body delimited by the end of the connection.
+            let _ = s.write_all(b"HTTP/1.1 200 OK\r\n\r\nto the end");
+        }
+    });
+    let src = format!("import http\nprint(http.get(\"http://{addr}/\")?.text()?)");
+    let limits = Limits { max_http_body: usize::MAX, ..Limits::default() };
+    let r = run_with(&src, |c| c.policy(Policy::allow_all()).limits(limits));
+    assert_eq!(r.ok_stdout(), "to the end\n");
 }

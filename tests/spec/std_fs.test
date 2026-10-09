@@ -76,7 +76,8 @@ true
 
 === path helpers
 import fs
-print(fs.join(["a", "b", "c.txt"]))
+// `join` uses the platform's separator (`\` on Windows).
+print(fs.join(["a", "b", "c.txt"]).replace("\\", "/"))
 print(fs.basename("/x/y/file.tar.gz"))
 print(fs.dirname("/x/y/file.tar.gz"))
 print(fs.extension("/x/y/file.tar.gz"))
@@ -94,3 +95,14 @@ fs.write_bytes("bad.txt", bytes.from_list([255, 254]))?
 print(fs.read_text("bad.txt").unwrap_err().kind)
 --- stdout
 invalid
+
+=== create_dir where a file exists
+import fs
+fs.write_text("f.txt", "x")?
+print(fs.create_dir("f.txt", recursive: true).unwrap_err().kind)
+print(fs.create_dir("f.txt").unwrap_err().kind)
+print(fs.create_dir("f.txt/sub", recursive: true).unwrap_err().kind)
+--- stdout
+already_exists
+already_exists
+io

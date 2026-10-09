@@ -44,6 +44,23 @@ print(9223372036854775808)
 --- error
 1: integer literal out of range
 
+=== duration literal too large
+let a = 9223372036854775807ns
+let b = 3333333333333333333333333333333333333333h
+let c = 9223372036854775808ns
+let d = 2562048h
+--- error
+2: duration literal out of range
+3: duration literal out of range
+4: duration literal out of range
+
+=== largest duration literals
+print(9223372036854775807ns.nanos())
+print(2562047h > 0s)
+--- stdout
+9223372036854775807
+true
+
 === float literal forms
 print(1.0)
 print(0.5)
@@ -274,3 +291,10 @@ print(0.5us)
 --- stdout
 1.25ms
 500ns
+
+=== hex escape cut short by a multi-byte character
+print(b"\x0П")
+print(b"\xП")
+--- error
+1: invalid escape: expected two hex digits after \x
+2: invalid escape: expected two hex digits after \x

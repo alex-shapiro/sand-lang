@@ -68,7 +68,10 @@ fn format_uuid(b: &[u8; 16]) -> String {
 
 /// Parses the hyphenated, simple, braced and URN forms.
 fn parse(s: &str) -> Option<[u8; 16]> {
-    let s = if s.len() > 9 && s[..9].eq_ignore_ascii_case("urn:uuid:") { &s[9..] } else { s };
+    let s = match (s.get(..9), s.get(9..)) {
+        (Some(p), Some(rest)) if p.eq_ignore_ascii_case("urn:uuid:") => rest,
+        _ => s,
+    };
     let s = s.strip_prefix('{').and_then(|t| t.strip_suffix('}')).unwrap_or(s);
     let hex: Vec<u8> = match s.len() {
         32 => s.bytes().collect(),

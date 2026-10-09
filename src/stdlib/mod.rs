@@ -7,6 +7,7 @@ mod base64;
 mod core;
 mod crypto;
 mod fs;
+mod fs_safe;
 mod help;
 mod http;
 mod io;
@@ -23,6 +24,7 @@ mod uri;
 mod uuid;
 
 use crate::engine::Registry;
+pub(crate) use net::TlsSettings;
 
 pub(crate) fn register(r: &mut Registry) {
     core::register(r);
@@ -54,8 +56,22 @@ pub(crate) fn io_kind(e: &std::io::Error) -> &'static str {
         AlreadyExists => "already_exists",
         TimedOut | WouldBlock => "timeout",
         InvalidData | InvalidInput => "invalid",
+        // I/O buffers that do not fit in the memory limit (see `vm::iomem`).
+        OutOfMemory => "limit",
         _ => "io",
     }
+}
+
+/// Reads a script module (at most `max + 1` bytes, so that oversized sources
+/// are detected without reading them whole) without following symlinks.
+pub(crate) fn read_source(path: &std::path::Path, max: usize) -> std::io::Result<String> {
+    use std::io::{Error, ErrorKind, Read};
+    let mut data = Vec::new();
+    fs_safe::open_read(path)?.take(max as u64 + 1).read_to_end(&mut data)?;
+    if data.len() > max {
+        return Err(Error::new(ErrorKind::InvalidData, "source too large"));
+    }
+    String::from_utf8(data).map_err(|_| Error::new(ErrorKind::InvalidData, "source is not valid UTF-8"))
 }
 
 /// Resolves a script-supplied path against the engine's working directory.

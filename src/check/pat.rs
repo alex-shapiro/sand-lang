@@ -417,25 +417,45 @@ impl Checker<'_> {
         }
     }
 
-    pub(crate) fn pattern_irrefutable(&self, p: &HPat) -> bool {
+    pub(crate) fn pattern_irrefutable(&mut self, p: &HPat) -> bool {
         let row = vec![self.simplify(p)];
         let ty = self.zonk(&p.ty);
-        self.useful(&[row], &[SPat::Wild], &[ty]).is_none()
+        if matches!(ty, Type::Never | Type::Error) {
+            return true;
+        }
+        self.budget.start_pattern_check();
+        let irrefutable = self.useful(&[row], &[SPat::Wild], &[ty]).is_none();
+        if self.budget.pattern_too_complex() {
+            self.error(p.span, "pattern too complex to check for exhaustiveness");
+            return true;
+        }
+        irrefutable
     }
 
     pub(crate) fn check_exhaustive(&mut self, ty: &Type, arms: &[HArm], span: Span) {
         let ty = self.zonk(ty);
+        // No values (`never`), or an error has been reported already.
+        if matches!(ty, Type::Never | Type::Error) {
+            return;
+        }
         let mut rows: Vec<Vec<SPat>> = Vec::new();
+        self.budget.start_pattern_check();
         for arm in arms {
+            if self.budget.pattern_too_complex() {
+                break;
+            }
             let sp = self.simplify(&arm.pat);
-            if self.useful(&rows, std::slice::from_ref(&sp), std::slice::from_ref(&ty)).is_none() {
+            if self.useful(&rows, std::slice::from_ref(&sp), std::slice::from_ref(&ty)).is_none() && !self.budget.pattern_too_complex() {
                 self.error(arm.pat.span, "unreachable pattern");
             }
             if arm.guard.is_none() {
                 rows.push(vec![sp]);
             }
         }
-        if let Some(w) = self.useful(&rows, &[SPat::Wild], std::slice::from_ref(&ty)) {
+        let missing = if self.budget.pattern_too_complex() { None } else { self.useful(&rows, &[SPat::Wild], std::slice::from_ref(&ty)) };
+        if self.budget.pattern_too_complex() {
+            self.error(span, "pattern too complex to check for exhaustiveness");
+        } else if let Some(w) = missing {
             let text = self.show_witness(&w[0]);
             self.error(span, format!("non-exhaustive match: missing `{text}`"));
         }
@@ -573,7 +593,10 @@ impl Checker<'_> {
                 }
                 _ => {
                     if rc == c {
-                        args.clone()
+                        // Same length as `arity` unless the type did not determine it.
+                        let mut a = args.clone();
+                        a.resize(arity, SPat::Wild);
+                        a
                     } else {
                         return None;
                     }
@@ -586,14 +609,19 @@ impl Checker<'_> {
         Some(out)
     }
 
-    fn expand_or(rows: &[Vec<SPat>]) -> Vec<Vec<SPat>> {
+    /// Expands or-patterns in the first column. Each row produced costs a
+    /// unit of pattern work; expansion stops when the check is too complex.
+    fn expand_or(&self, rows: &[Vec<SPat>]) -> Vec<Vec<SPat>> {
         let mut out = Vec::new();
         for r in rows {
+            if !self.budget.pattern_step(r.len() as u64) {
+                break;
+            }
             if let Some(SPat::Or(alts)) = r.first() {
                 for a in alts {
                     let mut nr = vec![a.clone()];
                     nr.extend(r[1..].iter().cloned());
-                    out.extend(Self::expand_or(&[nr]));
+                    out.extend(self.expand_or(&[nr]));
                 }
             } else {
                 out.push(r.clone());
@@ -603,7 +631,12 @@ impl Checker<'_> {
     }
 
     /// Returns a witness vector if `v` matches something no row in `rows` matches.
+    /// Gives up (returning `None`) once the check is too complex.
     fn useful(&self, rows: &[Vec<SPat>], v: &[SPat], tys: &[Type]) -> Option<Vec<Witness>> {
+        // Each row is cloned or specialized below: O(width) work per row.
+        if !self.budget.pattern_step(1 + (rows.len() * v.len()) as u64) {
+            return None;
+        }
         if v.is_empty() {
             return if rows.is_empty() { Some(vec![]) } else { None };
         }
@@ -617,12 +650,15 @@ impl Checker<'_> {
             }
             return None;
         }
-        let rows = Self::expand_or(rows);
+        let rows = self.expand_or(rows);
         let ty = &tys[0];
         let try_ctor = |c: &SCtor, vhead: Vec<SPat>| -> Option<Vec<Witness>> {
             let args = self.ctor_args(c, ty);
             let arity = match c {
                 SCtor::ListAtLeast(n, 0) if vhead.is_empty() => *n,
+                // The type does not determine the fields (a `never` or erroneous
+                // type, e.g. a variant pattern on `panic(..)`): the pattern does.
+                _ if !vhead.is_empty() => vhead.len(),
                 _ => args.len(),
             };
             let arg_tys: Vec<Type> = if args.len() == arity { args } else { vec![args.first().cloned().unwrap_or(Type::Error); arity] };

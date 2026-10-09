@@ -8,6 +8,7 @@ use crate::syntax::ast::{Arg, AssignOp, BinOp, Block, CompClause, Cond, Expr, Ex
 pub(crate) enum Ns {
     Module(ModId),
     Type(Type),
+    Trait(TraitId),
 }
 
 struct CallArgs<'e> {
@@ -29,7 +30,25 @@ impl<'e> CallArgs<'e> {
     }
 }
 
-fn mk(kind: HKind, ty: Type, span: Span) -> HExpr {
+/// How a `for` loop or comprehension clause iterates.
+pub(crate) enum IterPlan {
+    /// Ranges, lists, maps, sets and channels, with dedicated instructions.
+    Builtin(IterKind),
+    /// An `Iterator`: the value is kept in a hidden local, and `next` (a call
+    /// of type `T?` on it) runs before each iteration.
+    Lazy { local: LocalId, next: Box<HExpr> },
+}
+
+/// An instantiated function signature.
+pub(crate) struct Instance {
+    pub fresh: Vec<Type>,
+    pub params: Vec<Type>,
+    pub ret: Type,
+    /// Evidence needed for the hidden dictionary parameters.
+    pub dicts: Vec<(Type, TraitRef)>,
+}
+
+pub(crate) fn mk(kind: HKind, ty: Type, span: Span) -> HExpr {
     HExpr { kind, ty, span }
 }
 
@@ -136,7 +155,7 @@ impl Checker<'_> {
                     ExprKind::If { .. }
                         | ExprKind::Match { .. }
                         | ExprKind::Block(_)
-                        | ExprKind::Loop(_)
+                        | ExprKind::Loop { .. }
                         | ExprKind::While { .. }
                         | ExprKind::For { .. }
                 ) {
@@ -151,6 +170,31 @@ impl Checker<'_> {
                 vec![self.check_assign(target, *op, value, s.span)]
             }
             StmtKind::Fn(f) => vec![self.check_local_fns(&[f])],
+            StmtKind::Defer(e) => vec![self.check_defer(e, s.span)],
+        }
+    }
+
+    /// `defer e`: `e` must have type `()` and cannot leave the deferred
+    /// expression (with `return`, `?`, or `break`/`continue` to an outer loop).
+    fn check_defer(&mut self, e: &Expr, span: Span) -> HExpr {
+        let ctx = self.fs.ctx.last_mut().unwrap();
+        let saved = ctx.in_defer.replace(ctx.loops.len());
+        let saved_top = std::mem::replace(&mut self.fs.top_level, false);
+        let h = self.infer(e, Some(&Type::Unit));
+        self.fs.top_level = saved_top;
+        self.fs.ctx.last_mut().unwrap().in_defer = saved;
+        let t = self.resolve(&h.ty);
+        if !t.is_never() && !self.unify(&Type::Unit, &t) {
+            let msg = format!("a deferred expression must have type (), found {}; discard the value with `let _ = ...`", self.show(&t));
+            self.error(e.span, msg);
+        }
+        mk(HKind::Defer(Box::new(h)), Type::Unit, span)
+    }
+
+    /// Reports `return` or `?` inside a deferred expression.
+    fn check_not_in_defer(&mut self, what: &str, span: Span) {
+        if self.fs.ctx.last().is_some_and(|c| c.in_defer.is_some()) {
+            self.error(span, format!("{what} cannot be used in a deferred expression"));
         }
     }
 
@@ -182,10 +226,11 @@ impl Checker<'_> {
         };
         let vty = annotated.clone().unwrap_or_else(|| init.ty.clone());
         // Top-level bindings only need global slots if functions (or other
-        // modules) can see them; otherwise they are initialiser locals.
+        // modules, or later session inputs) can see them; otherwise they are
+        // initialiser locals.
         let mut bound = Vec::new();
         pattern.bindings(&mut bound);
-        let needs_global = is_pub || bound.iter().any(|b| self.fn_names.contains(&b.name));
+        let needs_global = is_pub || self.in_session() || bound.iter().any(|b| self.fn_names.contains(&b.name));
         let top = self.fs.top_level && needs_global;
         if is_pub && !self.fs.top_level {
             self.error(s.span, "`pub` is only allowed at the top level");
@@ -428,14 +473,15 @@ impl Checker<'_> {
         let mut sigs = Vec::new();
         for f in group {
             let mut scope = self.fs.generics.clone();
-            let mut own = Vec::new();
-            for g in &f.generics {
-                let bounds = self.parse_bounds(&g.bounds);
-                let p = self.new_param(&g.name.name, bounds, false);
-                scope.push((g.name.name.clone(), p));
-                own.push(p);
-            }
             let self_ty = self.fs.self_ty.clone();
+            let own = self.declare_params(&f.generics, &scope, self_ty.as_ref());
+            for (g, &p) in f.generics.iter().zip(&own) {
+                scope.push((g.name.name.clone(), p));
+                if !self.params[p as usize].traits.is_empty() {
+                    self.error(g.name.span, "local functions cannot have trait bounds; declare the function at the top level");
+                    self.params[p as usize].traits.clear();
+                }
+            }
             let mut ptys = Vec::new();
             for p in &f.params {
                 let t = match &p.ty {
@@ -464,7 +510,7 @@ impl Checker<'_> {
             let saved_generics = std::mem::replace(&mut self.fs.generics, scope);
             self.fs.next_lambda += 1;
             let id = self.fs.next_lambda;
-            self.fs.ctx.push(FnCtx { ret: ret.clone(), kind: CtxKind::Lambda, loops: vec![], lambda: id });
+            self.fs.ctx.push(FnCtx { ret: ret.clone(), kind: CtxKind::Lambda, loops: vec![], lambda: id, in_defer: None });
             self.push_scope();
             let mut params = Vec::new();
             for (p, t) in f.params.iter().zip(&ptys) {
@@ -506,7 +552,18 @@ impl Checker<'_> {
     // ------------------------------------------------------------------
     // Expressions
 
+    /// Checks an expression within the compile budget: each expression costs
+    /// fuel, and its type may not grow beyond `MAX_TYPE_SIZE` nodes.
     fn infer_inner(&mut self, e: &Expr, hint: Option<&Type>, want: bool) -> HExpr {
+        if !self.budget.charge(1) {
+            return err(e.span);
+        }
+        let mut h = self.infer_kind(e, hint, want);
+        self.limit_type_size(&mut h.ty, e.span);
+        h
+    }
+
+    fn infer_kind(&mut self, e: &Expr, hint: Option<&Type>, want: bool) -> HExpr {
         let span = e.span;
         match &e.kind {
             ExprKind::Error => err(span),
@@ -666,24 +723,20 @@ impl Checker<'_> {
             ExprKind::If { cond, then, else_ } => self.check_if(cond, then, else_.as_deref(), hint, want, span),
             ExprKind::Match { scrutinee, arms, .. } => self.check_match(scrutinee, arms, hint, want, span),
             ExprKind::Block(b) => self.check_block(b, hint, want),
-            ExprKind::Loop(b) => {
+            ExprKind::Loop { label, body: b } => {
                 let bt = self.fresh();
-                self.fs.ctx.last_mut().unwrap().loops.push(LoopCtx { break_ty: Some(bt.clone()) });
-                self.loop_breaks.push(false);
+                self.enter_loop(label.as_ref(), Some(bt.clone()));
                 let body = self.check_block(b, None, false);
-                self.fs.ctx.last_mut().unwrap().loops.pop();
-                let broke = self.loop_breaks.pop().unwrap();
+                let broke = self.leave_loop();
                 let ty = if broke { bt } else { Type::Never };
                 mk(HKind::Loop(Box::new(body)), ty, span)
             }
-            ExprKind::While { cond, body } => {
+            ExprKind::While { label, cond, body } => {
                 self.push_scope();
                 let (c, pat) = self.check_cond(cond);
-                self.fs.ctx.last_mut().unwrap().loops.push(LoopCtx { break_ty: None });
-                self.loop_breaks.push(false);
+                self.enter_loop(label.as_ref(), None);
                 let b = self.check_block(body, None, false);
-                self.fs.ctx.last_mut().unwrap().loops.pop();
-                self.loop_breaks.pop();
+                self.leave_loop();
                 self.pop_scope();
                 let kind = match pat {
                     Some(p) => HKind::WhileLet { pat: p, value: Box::new(c), body: Box::new(b) },
@@ -691,9 +744,10 @@ impl Checker<'_> {
                 };
                 mk(kind, Type::Unit, span)
             }
-            ExprKind::For { pattern, iter, body } => self.check_for(pattern, iter, body, span),
+            ExprKind::For { label, pattern, iter, body } => self.check_for(label.as_ref(), pattern, iter, body, span),
             ExprKind::Lambda { params, body, .. } => self.check_lambda(params, body, hint, span),
             ExprKind::Return(v) => {
+                self.check_not_in_defer("`return`", span);
                 let ret = self.fs.ctx.last().map(|c| c.ret.clone()).unwrap_or(Type::Unit);
                 if let Some(CtxKind::TopLevel { .. }) = self.fs.ctx.last().map(|c| c.kind) {
                     self.error(span, "`return` is not allowed at the top level; use `exit`");
@@ -707,15 +761,17 @@ impl Checker<'_> {
                 };
                 mk(HKind::Return(vh), Type::Never, span)
             }
-            ExprKind::Break(v) => {
-                let Some(lp) = self.fs.ctx.last().and_then(|c| c.loops.last()) else {
-                    self.error(span, "break outside of a loop");
-                    return mk(HKind::Break(None), Type::Never, span);
+            ExprKind::Break { label, value: v } => {
+                let Some(depth) = self.loop_target(label.as_ref(), "break", span) else {
+                    if let Some(v) = v {
+                        self.infer(v, None);
+                    }
+                    return mk(HKind::Break { value: None, depth: 0 }, Type::Never, span);
                 };
-                let bt = lp.break_ty.clone();
-                if let Some(b) = self.loop_breaks.last_mut() {
-                    *b = true;
-                }
+                let loops = &self.fs.ctx.last().unwrap().loops;
+                let bt = loops[loops.len() - 1 - depth as usize].break_ty.clone();
+                let n = self.loop_breaks.len();
+                self.loop_breaks[n - 1 - depth as usize] = true;
                 let vh = match (v, bt) {
                     (Some(v), Some(bt)) => Some(Box::new(self.check_expr(v, &bt))),
                     (Some(v), None) => {
@@ -728,19 +784,17 @@ impl Checker<'_> {
                     }
                     (None, None) => None,
                 };
-                mk(HKind::Break(vh), Type::Never, span)
+                mk(HKind::Break { value: vh, depth }, Type::Never, span)
             }
-            ExprKind::Continue => {
-                if self.fs.ctx.last().and_then(|c| c.loops.last()).is_none() {
-                    self.error(span, "continue outside of a loop");
-                }
-                mk(HKind::Continue, Type::Never, span)
+            ExprKind::Continue(label) => {
+                let depth = self.loop_target(label.as_ref(), "continue", span).unwrap_or(0);
+                mk(HKind::Continue { depth }, Type::Never, span)
             }
             ExprKind::Spawn(inner) => {
                 self.fs.next_lambda += 1;
                 let id = self.fs.next_lambda;
                 let ret = self.fresh();
-                self.fs.ctx.push(FnCtx { ret: ret.clone(), kind: CtxKind::Lambda, loops: vec![], lambda: id });
+                self.fs.ctx.push(FnCtx { ret: ret.clone(), kind: CtxKind::Lambda, loops: vec![], lambda: id, in_defer: None });
                 self.push_scope();
                 let body = self.infer(inner, None);
                 self.join(&ret, &body.ty, inner.span);
@@ -846,6 +900,10 @@ impl Checker<'_> {
         }
         match self.lookup_global(&id.name) {
             Some(def) => self.def_value(def, &id.name, hint, span),
+            None if self.fs.generics.iter().any(|(n, _)| *n == id.name) => {
+                self.error(span, format!("`{}` is a type parameter, not a value", id.name));
+                err(span)
+            }
             None => {
                 self.error(span, format!("undefined name `{}`", id.name));
                 err(span)
@@ -871,25 +929,47 @@ impl Checker<'_> {
                 self.error(span, format!("`{name}` is a module, not a value"));
                 err(span)
             }
+            Def::Trait(_) => {
+                self.error(span, format!("`{name}` is a trait, not a value"));
+                err(span)
+            }
         }
     }
 
     fn instantiate_fn(&mut self, f: FnId, span: Span) -> (Vec<Type>, Vec<Type>, Type) {
+        let inst = self.instantiate_fn_with(f, span, &[]);
+        (inst.fresh, inst.params, inst.ret)
+    }
+
+    /// Instantiates `f` with fresh type variables, first unifying those of
+    /// the parameters in `pre` with the given types. Built-in bounds become
+    /// obligations; the trait evidence the call needs is returned in `dicts`.
+    pub(crate) fn instantiate_fn_with(&mut self, f: FnId, span: Span, pre: &[(ParamId, Type)]) -> Instance {
         let fi = self.fns[f as usize].clone();
         let fresh: Vec<Type> = fi.generics.iter().map(|_| self.fresh()).collect();
-        let sub = |t: &Type| t.subst_params(&|p| fi.generics.iter().position(|&g| g == p).map(|i| fresh[i].clone()));
-        let params: Vec<Type> = fi.params.iter().map(|p| sub(&p.ty)).collect();
-        let ret = sub(&fi.ret);
+        for (p, t) in pre {
+            if let Some(i) = fi.generics.iter().position(|g| g == p) {
+                self.unify(&fresh[i], t);
+            }
+        }
+        let map = |p: ParamId| fi.generics.iter().position(|&g| g == p).map(|i| fresh[i].clone());
+        let params: Vec<Type> = fi.params.iter().map(|p| p.ty.subst_params(&map)).collect();
+        let ret = fi.ret.subst_params(&map);
+        let dicts = fi.dicts.iter().map(|(t, tr)| (t.subst_params(&map), tr.subst_params(&map))).collect();
         for (g, v) in fi.generics.iter().zip(&fresh) {
             let bounds = self.params[*g as usize].bounds.clone();
             for b in bounds {
                 self.require_bound(v, b, span);
             }
         }
-        (fresh, params, ret)
+        Instance { fresh, params, ret, dicts }
     }
 
     fn fn_value(&mut self, f: FnId, span: Span) -> HExpr {
+        if !self.fns[f as usize].dicts.is_empty() {
+            // Partially apply the dictionaries.
+            return self.wrapper_value(f, &[], span);
+        }
         let (_, params, ret) = self.instantiate_fn(f, span);
         let t = Type::func(params, ret);
         mk(HKind::FnValue(f), t, span)
@@ -936,9 +1016,13 @@ impl Checker<'_> {
                 if self.find_local(&id.name).is_some() {
                     return None;
                 }
+                if let Some((_, p)) = self.fs.generics.iter().rev().find(|(n, _)| *n == id.name) {
+                    return Some(Ns::Type(Type::Param(*p)));
+                }
                 match self.lookup_global(&id.name)? {
                     Def::Module(m) => Some(Ns::Module(m)),
                     Def::Type(r) => Some(Ns::Type(self.tyref_open(r, id.span, &id.name))),
+                    Def::Trait(t) => Some(Ns::Trait(t)),
                     _ => None,
                 }
             }
@@ -954,10 +1038,11 @@ impl Checker<'_> {
                     let found = self.mods[m as usize].scope.get(&name.name).cloned();
                     match found {
                         Some((Def::Type(r), true, _)) => Some(Ns::Type(self.tyref_open(r, name.span, &name.name))),
+                        Some((Def::Trait(t), true, _)) => Some(Ns::Trait(t)),
                         _ => None,
                     }
                 }
-                Ns::Type(_) => None,
+                Ns::Type(_) | Ns::Trait(_) => None,
             },
             _ => None,
         }
@@ -1026,6 +1111,11 @@ impl Checker<'_> {
                 {
                     return self.fn_value(fs[0], span);
                 }
+                match self.find_trait_method(&t, &name.name, name.span) {
+                    Ok(Some((tr, slot))) => return self.trait_method_value(tr, slot, t, span),
+                    Ok(None) => {}
+                    Err(()) => return err(span),
+                }
                 if t == Type::Error {
                     return err(span);
                 }
@@ -1036,6 +1126,16 @@ impl Checker<'_> {
                 };
                 self.error(name.span, msg);
                 return err(span);
+            }
+            Some(Ns::Trait(t)) => {
+                return match self.trait_method_slot(t, &name.name, name.span) {
+                    Some(slot) => {
+                        let tr = self.fresh_trait_ref(t);
+                        let self_ty = self.fresh();
+                        self.trait_method_value(tr, slot, self_ty, span)
+                    }
+                    None => err(span),
+                };
             }
             None => {}
         }
@@ -1051,7 +1151,8 @@ impl Checker<'_> {
                 err(span)
             }
             other => {
-                let has_method = ctor_of(&other).map(|c| self.methods.contains_key(&(c, name.name.clone()))).unwrap_or(false);
+                let has_method = ctor_of(&other).map(|c| self.methods.contains_key(&(c, name.name.clone()))).unwrap_or(false)
+                    || self.has_trait_method(&other, &name.name);
                 let msg = if has_method {
                     format!("`{}` is a method; call it with `()`", name.name)
                 } else {
@@ -1204,16 +1305,34 @@ impl Checker<'_> {
 
     /// Calls a known function `f`, optionally with a receiver for `self`.
     fn call_fn(&mut self, f: FnId, recv: Option<HExpr>, args: &[Arg], span: Span) -> HExpr {
+        self.call_fn_with(f, recv, args, span, &[])
+    }
+
+    /// Calls `f` with some of its type parameters fixed (see [`Self::instantiate_fn_with`]).
+    pub(crate) fn call_fn_with(&mut self, f: FnId, recv: Option<HExpr>, args: &[Arg], span: Span, pre: &[(ParamId, Type)]) -> HExpr {
         let fi = self.fns[f as usize].clone();
-        let (fresh, ptys, ret) = self.instantiate_fn(f, span);
+        let Instance { fresh, params: ptys, ret, dicts } = self.instantiate_fn_with(f, span, pre);
         let names: Vec<String> = fi.params.iter().map(|p| p.name.clone()).collect();
         let defaults: Vec<Option<DefaultArg>> = fi.params.iter().map(|p| p.default.clone()).collect();
         let what = format!("`{}`", fi.name);
         let ca = CallArgs::from(args);
-        let Some(hargs) = self.bind_args(&what, &names, &ptys, &defaults, recv, &ca, span, true) else {
+        let Some(mut hargs) = self.bind_args(&what, &names, &ptys, &defaults, recv, &ca, span, true) else {
             return mk(HKind::Error, ret, span);
         };
+        if !dicts.is_empty() {
+            // Dictionaries are passed first; default helpers receive them too.
+            let k = dicts.len();
+            for a in &mut hargs {
+                if let HArg::Default { inputs, .. } = a {
+                    *inputs = (0..k).chain(inputs.iter().map(|i| i + k)).collect();
+                }
+            }
+            let mut all: Vec<HArg> = dicts.into_iter().map(|(t, tr)| HArg::Expr(self.evidence_hole(t, tr, span))).collect();
+            all.extend(hargs);
+            hargs = all;
+        }
         match fi.kind {
+            FnKind::TraitMethod(trait_id, slot) => mk(HKind::CallTrait { trait_id, slot, args: hargs, impl_id: None }, ret, span),
             FnKind::Native(n) => {
                 let mut reflect = Vec::new();
                 for (g, t) in fi.generics.iter().zip(&fresh) {
@@ -1360,6 +1479,10 @@ impl Checker<'_> {
                         self.error(name.span, format!("`{}` is a module, not a function", name.name));
                         err(span)
                     }
+                    Some(Def::Trait(_)) => {
+                        self.error(name.span, format!("`{}` is a trait, not a function", name.name));
+                        err(span)
+                    }
                     None => {
                         for a in args {
                             self.infer(&a.value, None);
@@ -1380,6 +1503,16 @@ impl Checker<'_> {
                 {
                     return self.call_fn(fs[0], None, args, span);
                 }
+                match self.find_trait_method(&t, &name.name, name.span) {
+                    Ok(Some((tr, slot))) => return self.call_trait_method(tr, slot, t, None, args, span),
+                    Ok(None) => {}
+                    Err(()) => {
+                        for a in args {
+                            self.infer(&a.value, None);
+                        }
+                        return err(span);
+                    }
+                }
                 if t == Type::Error {
                     return err(span);
                 }
@@ -1391,6 +1524,20 @@ impl Checker<'_> {
                 self.error(name.span, msg);
                 err(span)
             }
+            Ns::Trait(t) => match self.trait_method_slot(t, &name.name, name.span) {
+                // `Trait.method(x, ...)`: the implementing type is inferred.
+                Some(slot) => {
+                    let tr = self.fresh_trait_ref(t);
+                    let self_ty = self.fresh();
+                    self.call_trait_method(tr, slot, self_ty, None, args, span)
+                }
+                None => {
+                    for a in args {
+                        self.infer(&a.value, None);
+                    }
+                    err(span)
+                }
+            },
         }
     }
 
@@ -1442,13 +1589,42 @@ impl Checker<'_> {
             let _ = fi;
             return self.call_fn(f, Some(r), args, span);
         }
+        // Trait methods: through the bounds of a type parameter, or the impls of a type.
+        match self.find_trait_method(&rt, &method.name, method.span) {
+            Ok(Some((tr, slot))) => {
+                let sig = self.traits[tr.trait_id as usize].methods[slot as usize].sig;
+                if !self.fns[sig as usize].has_self {
+                    let msg = format!("`{}` is a static method of `{}`; call it on the type", method.name, self.show_trait(&tr));
+                    self.error(method.span, msg);
+                    for a in args {
+                        self.infer(&a.value, None);
+                    }
+                    return err(span);
+                }
+                return self.call_trait_method(tr, slot, rt, Some(r), args, span);
+            }
+            Ok(None) => {}
+            Err(()) => {
+                for a in args {
+                    self.infer(&a.value, None);
+                }
+                return err(span);
+            }
+        }
         match method.name.as_str() {
             "to_str" | "debug" if args.is_empty() => {
                 let kind = if method.name == "to_str" { HKind::ToStr(Box::new(r)) } else { HKind::Debug(Box::new(r)) };
                 mk(kind, Type::Str, span)
             }
             _ => {
-                let msg = format!("no method `{}` on type {}", method.name, self.show(&rt));
+                let mut msg = format!("no method `{}` on type {}", method.name, self.show(&rt));
+                if let Some(t) = self.trait_with_method(&method.name) {
+                    if let Type::Param(_) = rt {
+                        msg.push_str(&format!("; add a bound `{}: {t}`", self.show(&rt)));
+                    } else {
+                        msg.push_str(&format!(" (the trait `{t}` has it but is not implemented for {})", self.show(&rt)));
+                    }
+                }
                 self.error(method.span, msg);
                 for a in args {
                     self.infer(&a.value, None);
@@ -1850,6 +2026,7 @@ impl Checker<'_> {
     }
 
     fn check_try(&mut self, inner: &Expr, span: Span) -> HExpr {
+        self.check_not_in_defer("`?`", span);
         let h = self.infer(inner, None);
         let t = self.resolve(&h.ty);
         let ctx_kind = self.fs.ctx.last().map(|c| c.kind).unwrap_or(CtxKind::Function);
@@ -2002,27 +2179,125 @@ impl Checker<'_> {
         mk(HKind::Match { scrut: Box::new(s), arms: harms }, ty, span)
     }
 
-    fn iter_elem(&mut self, t: &Type, span: Span) -> Option<(IterKind, Type)> {
-        match self.resolve(t) {
-            Type::Range => Some((IterKind::Range, Type::Int)),
-            Type::List(e) => Some((IterKind::List, *e)),
-            Type::Map(k, v) => Some((IterKind::Map, Type::Tuple(vec![*k, *v]))),
-            Type::Set(e) => Some((IterKind::Set, *e)),
-            Type::Named(d, args) if d == self.wk.channel => Some((IterKind::Channel, args[0].clone())),
-            Type::Error => None,
+    /// How a `for` loop or comprehension clause iterates over `ih`, and the
+    /// element type.
+    fn iter_plan(&mut self, ih: &HExpr, span: Span) -> (IterPlan, Type) {
+        let builtin = |k: IterKind, t: Type| (IterPlan::Builtin(k), t);
+        let ty = self.resolve(&ih.ty);
+        match ty.clone() {
+            Type::Range => builtin(IterKind::Range, Type::Int),
+            Type::List(e) => builtin(IterKind::List, *e),
+            Type::Map(k, v) => builtin(IterKind::Map, Type::Tuple(vec![*k, *v])),
+            Type::Set(e) => builtin(IterKind::Set, *e),
+            Type::Named(d, args) if Some(d) == self.iter_struct => {
+                // `Iter<T>`: call its `next` function directly.
+                let elem = args[0].clone();
+                let local = self.hidden_local(ty.clone(), span);
+                let obj = Box::new(mk(HKind::Local(local), ty, span));
+                let opt = self.option_of(elem.clone());
+                let callee = Box::new(mk(HKind::Field { obj, index: 0 }, Type::func(vec![], opt.clone()), span));
+                let next = mk(HKind::CallValue { callee, args: vec![] }, opt, span);
+                (IterPlan::Lazy { local, next: Box::new(next) }, elem)
+            }
+            Type::Named(d, args) if d == self.wk.channel => builtin(IterKind::Channel, args[0].clone()),
+            Type::Error => builtin(IterKind::List, Type::Error),
             Type::Var(_) => {
                 self.error(span, "type annotation needed before iterating");
-                None
+                builtin(IterKind::List, Type::Error)
             }
-            other => {
-                let msg = format!("type {} is not iterable", self.show(&other));
-                self.error(span, msg);
-                None
+            other => match self.iter_trait.filter(|&t| self.implements_trait(&other, t)) {
+                // Any other `Iterator<T>`: call its `next` method.
+                Some(t) => {
+                    let elem = self.fresh();
+                    let local = self.hidden_local(ty.clone(), span);
+                    let recv = mk(HKind::Local(local), ty.clone(), span);
+                    let slot = self.traits[t as usize].methods.iter().position(|m| m.name == "next").unwrap_or(0) as u32;
+                    let tr = TraitRef { trait_id: t, args: vec![elem.clone()] };
+                    let next = self.call_trait_method(tr, slot, ty, Some(recv), &[], span);
+                    (IterPlan::Lazy { local, next: Box::new(next) }, elem)
+                }
+                None => {
+                    let msg = format!("type {} is not iterable (it does not implement `Iterator`)", self.show(&other));
+                    self.error(span, msg);
+                    builtin(IterKind::List, Type::Error)
+                }
+            },
+        }
+    }
+
+    /// The loop over `ih` that binds `pat` to each element and runs `body`.
+    fn iter_loop(&mut self, plan: IterPlan, ih: HExpr, pat: HPat, body: HExpr, span: Span) -> HExpr {
+        match plan {
+            IterPlan::Builtin(kind) => mk(HKind::For { pat, iter: Box::new(ih), kind, body: Box::new(body) }, Type::Unit, span),
+            // `{ let it = ih; while let Some(pat) = <next> { body } }`
+            IterPlan::Lazy { local, next } => {
+                let it = HPat { kind: HPatKind::Bind(local), ty: ih.ty.clone(), span };
+                let init = mk(HKind::Let { pat: it, init: Box::new(ih), else_: None }, Type::Unit, span);
+                let some = self.types[self.wk.option as usize].variants()[0].rt_id;
+                let pat = HPat { kind: HPatKind::Variant { rt_id: some, args: vec![pat] }, ty: next.ty.clone(), span };
+                let lp = mk(HKind::WhileLet { pat, value: next, body: Box::new(body) }, Type::Unit, span);
+                mk(HKind::Block(vec![init, lp]), Type::Unit, span)
             }
         }
     }
 
-    fn check_for(&mut self, pattern: &ast::Pattern, iter: &Expr, body: &Block, span: Span) -> HExpr {
+    /// Enters a loop (checking its label) for the `break`s and `continue`s in its body.
+    fn enter_loop(&mut self, label: Option<&ast::Ident>, break_ty: Option<Type>) {
+        let ctx = self.fs.ctx.last_mut().unwrap();
+        if let Some(l) = label
+            && ctx.loops.iter().any(|x| x.label.as_deref() == Some(l.name.as_str()))
+        {
+            let msg = format!("label `@{}` is already used by an enclosing loop", l.name);
+            self.error(l.span, msg);
+        }
+        let ctx = self.fs.ctx.last_mut().unwrap();
+        ctx.loops.push(LoopCtx { break_ty, label: label.map(|l| l.name.clone()), hidden: false });
+        self.loop_breaks.push(false);
+    }
+
+    /// Enters the loop of a comprehension clause.
+    fn enter_hidden_loop(&mut self) {
+        self.fs.ctx.last_mut().unwrap().loops.push(LoopCtx { break_ty: None, label: None, hidden: true });
+        self.loop_breaks.push(false);
+    }
+
+    /// Leaves a loop; returns whether a `break` targets it.
+    fn leave_loop(&mut self) -> bool {
+        self.fs.ctx.last_mut().unwrap().loops.pop();
+        self.loop_breaks.pop().unwrap_or(false)
+    }
+
+    /// The loop a `break` or `continue` refers to, as a depth (0 = innermost).
+    /// Labels name loops of the current function or lambda only.
+    fn loop_target(&mut self, label: Option<&ast::Ident>, what: &str, span: Span) -> Option<u32> {
+        let ctx = self.fs.ctx.last().unwrap();
+        let (loops, floor) = (&ctx.loops, ctx.in_defer.unwrap_or(0));
+        let found = match label {
+            None => loops.iter().rposition(|x| !x.hidden),
+            Some(l) => loops.iter().rposition(|x| x.label.as_deref() == Some(l.name.as_str())),
+        };
+        if let Some(i) = found {
+            if i < floor {
+                self.error(span, format!("`{what}` cannot leave a deferred expression"));
+                return None;
+            }
+            return Some((loops.len() - 1 - i) as u32);
+        }
+        let Some(l) = label else {
+            self.error(span, format!("{what} outside of a loop"));
+            return None;
+        };
+        let outside = self.fs.ctx.iter().rev().skip(1).any(|c| c.loops.iter().any(|x| x.label.as_deref() == Some(l.name.as_str())));
+        let msg = if outside {
+            format!("`{what} @{}` cannot leave the enclosing lambda or function", l.name)
+        } else {
+            format!("unknown label `@{}`", l.name)
+        };
+        self.error(l.span, msg);
+        None
+    }
+
+    fn check_for(&mut self, label: Option<&ast::Ident>, pattern: &ast::Pattern, iter: &Expr, body: &Block, span: Span) -> HExpr {
         // Literal ranges are iterated without allocating.
         if let ExprKind::Range { start: Some(s), end: Some(e), inclusive } = &iter.kind {
             let sh = self.check_expr(s, &Type::Int);
@@ -2032,11 +2307,9 @@ impl Checker<'_> {
             if !self.pattern_irrefutable(&pat) {
                 self.error(pattern.span, "refutable pattern in `for` loop");
             }
-            self.fs.ctx.last_mut().unwrap().loops.push(LoopCtx { break_ty: None });
-            self.loop_breaks.push(false);
+            self.enter_loop(label, None);
             let b = self.check_block(body, None, false);
-            self.fs.ctx.last_mut().unwrap().loops.pop();
-            self.loop_breaks.pop();
+            self.leave_loop();
             self.pop_scope();
             return mk(
                 HKind::ForRange { pat, start: Box::new(sh), end: Box::new(eh), inclusive: *inclusive, body: Box::new(b) },
@@ -2045,22 +2318,17 @@ impl Checker<'_> {
             );
         }
         let ih = self.infer(iter, None);
-        let (kind, elem) = match self.iter_elem(&ih.ty, iter.span) {
-            Some(x) => x,
-            None => (IterKind::List, Type::Error),
-        };
+        let (plan, elem) = self.iter_plan(&ih, iter.span);
         self.push_scope();
         let pat = self.check_pattern(pattern, &elem, false);
         if !self.pattern_irrefutable(&pat) {
             self.error(pattern.span, "refutable pattern in `for` loop");
         }
-        self.fs.ctx.last_mut().unwrap().loops.push(LoopCtx { break_ty: None });
-        self.loop_breaks.push(false);
+        self.enter_loop(label, None);
         let b = self.check_block(body, None, false);
-        self.fs.ctx.last_mut().unwrap().loops.pop();
-        self.loop_breaks.pop();
+        self.leave_loop();
         self.pop_scope();
-        mk(HKind::For { pat, iter: Box::new(ih), kind, body: Box::new(b) }, Type::Unit, span)
+        self.iter_loop(plan, ih, pat, b, span)
     }
 
     fn check_comprehension(
@@ -2138,7 +2406,9 @@ impl Checker<'_> {
                     let eh = self.check_expr(e, &Type::Int);
                     self.push_scope();
                     let pat = self.check_pattern(p, &Type::Int, false);
+                    self.enter_hidden_loop();
                     let inner = self.comp_clauses(rest, a, b, acc, et, vt, span);
+                    self.leave_loop();
                     self.pop_scope();
                     return mk(
                         HKind::ForRange { pat, start: Box::new(sh), end: Box::new(eh), inclusive: *inclusive, body: Box::new(inner) },
@@ -2147,15 +2417,17 @@ impl Checker<'_> {
                     );
                 }
                 let ih = self.infer(it, None);
-                let (kind, elem) = self.iter_elem(&ih.ty, it.span).unwrap_or((IterKind::List, Type::Error));
+                let (plan, elem) = self.iter_plan(&ih, it.span);
                 self.push_scope();
                 let pat = self.check_pattern(p, &elem, false);
                 if !self.pattern_irrefutable(&pat) {
                     self.error(p.span, "refutable pattern in comprehension");
                 }
+                self.enter_hidden_loop();
                 let inner = self.comp_clauses(rest, a, b, acc, et, vt, span);
+                self.leave_loop();
                 self.pop_scope();
-                mk(HKind::For { pat, iter: Box::new(ih), kind, body: Box::new(inner) }, Type::Unit, span)
+                self.iter_loop(plan, ih, pat, inner, span)
             }
         }
     }
@@ -2168,7 +2440,7 @@ impl Checker<'_> {
         let ret = hinted.as_ref().map(|(_, r)| r.clone()).unwrap_or_else(|| self.fresh());
         self.fs.next_lambda += 1;
         let id = self.fs.next_lambda;
-        self.fs.ctx.push(FnCtx { ret: ret.clone(), kind: CtxKind::Lambda, loops: vec![], lambda: id });
+        self.fs.ctx.push(FnCtx { ret: ret.clone(), kind: CtxKind::Lambda, loops: vec![], lambda: id, in_defer: None });
         self.push_scope();
         let mut locals = Vec::new();
         let mut ptys = Vec::new();

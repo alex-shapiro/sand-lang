@@ -9,6 +9,8 @@ pub type VarId = u32;
 pub type FnId = u32;
 pub type ModId = u32;
 pub type GlobalId = u32;
+pub type TraitId = u32;
+pub type ImplId = u32;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Type {
@@ -120,10 +122,27 @@ impl Bound {
     }
 }
 
+/// A user-defined trait applied to type arguments (`Into<str>`); the
+/// implementing type is given separately.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TraitRef {
+    pub trait_id: TraitId,
+    pub args: Vec<Type>,
+}
+
+impl TraitRef {
+    pub fn subst_params(&self, f: &impl Fn(ParamId) -> Option<Type>) -> TraitRef {
+        TraitRef { trait_id: self.trait_id, args: self.args.iter().map(|t| t.subst_params(f)).collect() }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ParamInfo {
     pub name: String,
+    /// Built-in bounds, including those implied by the supertraits of `traits`.
     pub bounds: Vec<Bound>,
+    /// User-defined trait bounds.
+    pub traits: Vec<TraitRef>,
     pub reflect: bool,
 }
 

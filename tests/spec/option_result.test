@@ -179,3 +179,139 @@ print(e)
 not_found
 missing file
 not_found: missing file
+
+=== inline and nested variant representations
+enum E {
+    A(int)
+    B(str)
+    C(E)
+    D(int, int)
+    F
+    G(float)
+    H(bool)
+    I(duration)
+    J(())
+}
+
+let vals = [E.A(1), E.B("x"), E.C(E.A(2)), E.C(E.F), E.C(E.C(E.F)), E.D(1, 2), E.F, E.G(1.5), E.H(true), E.I(2s), E.J(())]
+for v in vals {
+    print(v)
+}
+print(vals == [E.A(1), E.B("x"), E.C(E.A(2)), E.C(E.F), E.C(E.C(E.F)), E.D(1, 2), E.F, E.G(1.5), E.H(true), E.I(2s), E.J(())])
+print(E.C(E.A(2)) == E.C(E.A(3)))
+print(E.C(E.F) == E.C(E.A(1)))
+print(E.A(1) == E.G(1.0))
+
+let nested = [Some(Some(1)), Some(None), None, Some(Some(2))]
+print(nested)
+let deeper = [Some(Some(None)), Some(Some(Some(3))), None, Some(None)]
+print(deeper)
+let n2: int?? = Some(None)
+print(n2 == None)
+print(n2.unwrap() == None)
+match Some(Some(Some(3))) {
+    Some(Some(Some(x))) => print("deep {x}")
+    _ => print("no")
+}
+let r: Result<int?, str> = Ok(Some(4))
+match r {
+    Ok(Some(x)) => print("ok some {x}")
+    Ok(None) => print("ok none")
+    Err(e) => print("err {e}")
+}
+let e2: Result<Result<int, str>, str> = Err("outer")
+print(e2)
+let e3: Result<Result<int, str>, str> = Ok(Err("inner"))
+print(e3)
+print(e3.unwrap().unwrap_err())
+
+// Ordering: variants order by declaration, then payload.
+print([Some(3), None, Some(1), Some(-2)].sorted())
+print([E.G(2.0), E.A(5), E.F, E.A(-1), E.C(E.A(1)), E.C(E.F), E.B("b"), E.B("a")].sorted())
+print([Some(Some(2)), Some(None), Some(Some(1)), None].sorted())
+
+// Hashing: inline and heap variants as keys.
+let m = [Some(1): "one", None: "none", Some(2): "two"]
+print(m[Some(1)])
+print(m.get(Some(3)))
+enum K {
+    A(int)
+    C(K)
+    F
+}
+let s = set([K.A(1), K.A(1), K.C(K.F), K.C(K.F), K.C(K.A(1)), K.C(K.A(1)), K.F])
+print(s.len())
+print(s.contains(K.C(K.A(1))))
+print(s.contains(K.C(K.A(2))))
+let mm = [Some(Some(1)): 1]
+print(mm.get(Some(Some(1))))
+print([Some("a"), Some("a"), None, Some("b")].unique())
+
+// Captured, stored and passed around.
+let label = Some("captured")
+let f = () => label.unwrap() + "!"
+print(f())
+struct Box {
+    v: str?
+}
+let b = Box { v: Some("in struct") }
+print(b.v ?? "none")
+fn first_even(xs: [int]) -> int? {
+    for x in xs {
+        if x % 2 == 0 {
+            return Some(x)
+        }
+    }
+    None
+}
+fn sum_evens(a: [int], b: [int]) -> int? {
+    let x = first_even(a)?
+    let y = first_even(b)?
+    Some(x + y)
+}
+print(sum_evens([1, 2], [3, 4]))
+print(sum_evens([1, 3], [4]))
+print("{Some(1.5)} {Some(true)} {Some(())}")
+let okv: Result<str, str> = Ok("s")
+print("{okv} {okv:?}")
+--- stdout
+A(1)
+B("x")
+C(A(2))
+C(F)
+C(C(F))
+D(1, 2)
+F
+G(1.5)
+H(true)
+I(2s)
+J(())
+true
+false
+false
+false
+[Some(Some(1)), Some(None), None, Some(Some(2))]
+[Some(Some(None)), Some(Some(Some(3))), None, Some(None)]
+false
+true
+deep 3
+ok some 4
+Err("outer")
+Ok(Err("inner"))
+inner
+[Some(-2), Some(1), Some(3), None]
+[A(-1), A(5), B("a"), B("b"), C(A(1)), C(F), F, G(2.0)]
+[Some(Some(1)), Some(Some(2)), Some(None), None]
+one
+None
+4
+true
+false
+Some(1)
+[Some("a"), None, Some("b")]
+captured!
+in struct
+Some(6)
+None
+Some(1.5) Some(true) Some(())
+Ok("s") Ok("s")

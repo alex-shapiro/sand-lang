@@ -7,6 +7,15 @@ use std::sync::Arc;
 
 /// A runtime value. Immediate values are stored inline; everything else is a
 /// handle into the engine's heap.
+///
+/// Enum variants with exactly one payload are stored inline (`VUnit` ..
+/// `VObj`: runtime variant id, then the payload) whenever the payload is not
+/// itself an inline variant; e.g. `Some(1)` is `VInt(some, 1)`, `Ok("x")` is
+/// `VObj(ok, handle)` and `Some(None)` is `VTag(some, none)`, while
+/// `Some(Some(1))` is a heap `Obj::Variant`. This representation is
+/// canonical: always build variants with `Value::variant1`/`Heap::new_variant`
+/// (or `Vm::some`/`ok`/`err`), and inspect them with `Heap::variant`,
+/// `Heap::variant_id` and `Heap::field`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Value {
     Unit,
@@ -20,9 +29,69 @@ pub enum Value {
     Obj(u32),
     /// A global that has not been initialised yet.
     Uninit,
+    /// `variant(())`.
+    VUnit(u32),
+    /// `variant(bool)`.
+    VBool(u32, bool),
+    /// `variant(int)`.
+    VInt(u32, i64),
+    /// `variant(float)`.
+    VFloat(u32, f64),
+    /// `variant(duration)`.
+    VDur(u32, i64),
+    /// `variant(tag)` where the payload is a payload-less variant.
+    VTag(u32, u32),
+    /// `variant(object)`: the payload is the heap object with this handle.
+    VObj(u32, u32),
 }
 
+// The inline variants pack the discriminant, the u32 variant id and an
+// 8-byte payload into the same 16 bytes as the other values.
+const _: () = assert!(std::mem::size_of::<Value>() == 16);
+
 impl Value {
+    /// The single-payload variant `id(payload)` stored inline, or `None` if
+    /// the payload cannot be stored inline (it is itself an inline variant)
+    /// and the variant must be heap-allocated.
+    #[inline]
+    pub fn variant1(id: u32, payload: Value) -> Option<Value> {
+        Some(match payload {
+            Value::Unit => Value::VUnit(id),
+            Value::Bool(b) => Value::VBool(id, b),
+            Value::Int(i) => Value::VInt(id, i),
+            Value::Float(f) => Value::VFloat(id, f),
+            Value::Dur(d) => Value::VDur(id, d),
+            Value::Tag(t) => Value::VTag(id, t),
+            Value::Obj(h) => Value::VObj(id, h),
+            _ => return None,
+        })
+    }
+
+    /// For an inline variant: its runtime variant id and payload.
+    #[inline]
+    pub fn as_inline_variant(self) -> Option<(u32, Value)> {
+        Some(match self {
+            Value::VUnit(id) => (id, Value::Unit),
+            Value::VBool(id, b) => (id, Value::Bool(b)),
+            Value::VInt(id, i) => (id, Value::Int(i)),
+            Value::VFloat(id, f) => (id, Value::Float(f)),
+            Value::VDur(id, d) => (id, Value::Dur(d)),
+            Value::VTag(id, t) => (id, Value::Tag(t)),
+            Value::VObj(id, h) => (id, Value::Obj(h)),
+            _ => return None,
+        })
+    }
+
+    /// The heap object this value refers to directly (an `Obj` handle or the
+    /// payload of a `VObj`), for the garbage collector.
+    #[inline]
+    pub fn handle(self) -> Option<u32> {
+        match self {
+            Value::Obj(h) | Value::VObj(_, h) => Some(h),
+            _ => None,
+        }
+    }
+
     #[inline]
     pub fn as_int(self) -> i64 {
         match self {
@@ -42,6 +111,34 @@ impl Value {
     #[inline]
     pub fn as_bool(self) -> bool {
         matches!(self, Value::Bool(true))
+    }
+}
+
+/// A view of an enum variant value, independent of its representation
+/// (`Value::Tag`, an inline variant or a heap `Obj::Variant`).
+#[derive(Clone, Copy, Debug)]
+pub enum VariantRef<'a> {
+    /// A payload-less variant or an inline single-payload variant.
+    Inline(u32, Option<Value>),
+    Heap(u32, &'a [Value]),
+}
+
+impl VariantRef<'_> {
+    /// The runtime variant id.
+    #[inline]
+    pub fn id(&self) -> u32 {
+        match self {
+            VariantRef::Inline(id, _) | VariantRef::Heap(id, _) => *id,
+        }
+    }
+
+    /// The payload fields.
+    #[inline]
+    pub fn fields(&self) -> &[Value] {
+        match self {
+            VariantRef::Inline(_, p) => p.as_slice(),
+            VariantRef::Heap(_, f) => f,
+        }
     }
 }
 
@@ -136,6 +233,9 @@ pub struct MapObj {
     pub index: KeyIndex,
     pub entries: Vec<Option<(Value, Value)>>,
     pub live: usize,
+    /// Bytes owned by the copies of the keys in `index` (strings, nested
+    /// key nodes), besides a fixed per-entry cost.
+    pub key_bytes: usize,
 }
 
 /// An insertion-ordered hash set.
@@ -144,6 +244,8 @@ pub struct SetObj {
     pub index: KeyIndex,
     pub entries: Vec<Option<Value>>,
     pub live: usize,
+    /// See [`MapObj::key_bytes`].
+    pub key_bytes: usize,
 }
 
 /// Key lookup argument: borrowed for the fast paths.
@@ -254,6 +356,8 @@ pub struct ChannelObj {
     pub closed: bool,
     /// Fibers blocked in `recv`: (fiber, wait generation).
     pub receivers: VecDeque<(u32, u64)>,
+    /// Stale `receivers` (of cancelled tasks) are pruned when it reaches this length.
+    pub receivers_prune_at: usize,
     /// Fibers blocked in `send`, with their pending values.
     pub senders: VecDeque<(u32, u64, Value)>,
 }
@@ -274,13 +378,16 @@ pub trait NativeObject: Any + Send {
 }
 
 /// A struct field: name, type and constant default.
-pub type FieldDesc = (String, TypeDesc, Option<crate::types::ConstVal>);
+pub type FieldDesc = (String, Arc<TypeDesc>, Option<crate::types::ConstVal>);
 
 /// An enum variant: name, runtime id, payload types and payload field names.
-pub type VariantDesc = (String, u32, Vec<TypeDesc>, Option<Vec<String>>);
+pub type VariantDesc = (String, u32, Vec<Arc<TypeDesc>>, Option<Vec<String>>);
 
-/// A runtime description of a type, for `reflect` type parameters.
-#[derive(Clone, Debug, PartialEq)]
+/// A runtime description of a type, for `reflect` type parameters (built by
+/// `compile::reflect`). Descriptions are DAGs: the description of a struct
+/// or enum instance is shared by every place that uses it, so walking one as
+/// a tree can take exponential time. `Debug` shows structs and enums by name.
+#[derive(Clone)]
 pub enum TypeDesc {
     Int,
     Float,
@@ -289,24 +396,52 @@ pub enum TypeDesc {
     Bytes,
     Duration,
     Unit,
-    List(Box<TypeDesc>),
-    Map(Box<TypeDesc>, Box<TypeDesc>),
-    Set(Box<TypeDesc>),
-    Tuple(Vec<TypeDesc>),
-    Option(Box<TypeDesc>),
+    List(Arc<TypeDesc>),
+    Map(Arc<TypeDesc>, Arc<TypeDesc>),
+    Set(Arc<TypeDesc>),
+    Tuple(Vec<Arc<TypeDesc>>),
+    Option(Arc<TypeDesc>),
     Struct {
+        /// Identifies the struct instance (definition and type arguments)
+        /// for `Recur`.
+        id: u32,
         def: u32,
         name: String,
         fields: Vec<FieldDesc>,
     },
     Enum {
+        id: u32,
         name: String,
         variants: Vec<VariantDesc>,
     },
     Json,
-    /// Recursive reference to an enclosing struct/enum by nesting depth.
-    Recur(String),
+    /// Recursive reference to the enclosing struct or enum with this `id`.
+    Recur(u32),
     Unsupported(String),
+}
+
+impl std::fmt::Debug for TypeDesc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TypeDesc::Int => write!(f, "Int"),
+            TypeDesc::Float => write!(f, "Float"),
+            TypeDesc::Bool => write!(f, "Bool"),
+            TypeDesc::Str => write!(f, "Str"),
+            TypeDesc::Bytes => write!(f, "Bytes"),
+            TypeDesc::Duration => write!(f, "Duration"),
+            TypeDesc::Unit => write!(f, "Unit"),
+            TypeDesc::List(e) => write!(f, "List({e:?})"),
+            TypeDesc::Map(k, v) => write!(f, "Map({k:?}, {v:?})"),
+            TypeDesc::Set(e) => write!(f, "Set({e:?})"),
+            TypeDesc::Tuple(ts) => f.debug_tuple("Tuple").field(ts).finish(),
+            TypeDesc::Option(e) => write!(f, "Option({e:?})"),
+            TypeDesc::Struct { id, name, .. } => write!(f, "Struct({name} #{id})"),
+            TypeDesc::Enum { id, name, .. } => write!(f, "Enum({name} #{id})"),
+            TypeDesc::Json => write!(f, "Json"),
+            TypeDesc::Recur(id) => write!(f, "Recur(#{id})"),
+            TypeDesc::Unsupported(name) => write!(f, "Unsupported({name})"),
+        }
+    }
 }
 
 pub enum Obj {
@@ -355,6 +490,10 @@ impl std::fmt::Debug for Obj {
 
 const VALUE_SIZE: usize = std::mem::size_of::<Value>();
 
+/// Fixed cost of an entry of a map's or set's key index (the key's own
+/// allocations are counted in `key_bytes`).
+pub const INDEX_ENTRY_SIZE: usize = 48;
+
 impl Obj {
     /// Approximate memory footprint in bytes.
     pub fn size(&self) -> usize {
@@ -364,11 +503,15 @@ impl Obj {
             Obj::Str(s) => s.len(),
             Obj::Bytes(b) => b.len(),
             Obj::List(l) => l.capacity() * VALUE_SIZE,
-            Obj::Map(m) => m.entries.capacity() * (2 * VALUE_SIZE + 8) + m.index.len() * 48,
-            Obj::Set(s) => s.entries.capacity() * (VALUE_SIZE + 8) + s.index.len() * 48,
+            Obj::Map(m) => m.entries.capacity() * (2 * VALUE_SIZE + 8) + m.index.len() * INDEX_ENTRY_SIZE + m.key_bytes,
+            Obj::Set(s) => s.entries.capacity() * (VALUE_SIZE + 8) + s.index.len() * INDEX_ENTRY_SIZE + s.key_bytes,
             Obj::Tuple(t) | Obj::Struct(_, t) | Obj::Variant(_, t) | Obj::Closure(_, t) => t.len() * VALUE_SIZE,
             Obj::Task(_) => 32,
-            Obj::Channel(c) => 64 + c.queue.capacity() * VALUE_SIZE,
+            Obj::Channel(c) => {
+                64 + c.queue.capacity() * VALUE_SIZE
+                    + c.receivers.capacity() * std::mem::size_of::<(u32, u64)>()
+                    + c.senders.capacity() * std::mem::size_of::<(u32, u64, Value)>()
+            }
             Obj::Native(n) => n.size(),
             Obj::TypeDesc(_) => 64,
         }

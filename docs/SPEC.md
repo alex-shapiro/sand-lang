@@ -86,7 +86,8 @@ terminator (`;`) when the last token on the line is one of:
 
 and the newline is **not** inside a `(...)` or `[...]` group. Inside `{...}`
 newlines are significant again, even when that brace is nested inside
-parentheses.
+parentheses. (So `break @outer` ends a statement at the end of a line, and a
+loop label `@outer` must be on the same line as its loop, §6.9.)
 
 A terminator is **not** inserted if the first token on the next non-blank line is
 `.`, `|>`, `?.`, `else`, `and`, `or`, `=>` or a binary operator other than `-`
@@ -111,17 +112,17 @@ ident = [A-Za-z_][A-Za-z0-9_]*
 Reserved keywords:
 
 ```
-and as break continue else enum extend false fn for from if import in let
-loop match native not or pub return self Self spawn struct true type
-var while
+and as break continue defer else enum extend false fn for from if impl import
+in let loop match native not or pub return self Self spawn struct trait true
+type var while
 ```
 
 `test` is a contextual keyword: it begins a test block only when followed by a
 string literal at the top level of a module.
 
-By convention (enforced by the linter): types, enum variants and type
-parameters are `UpperCamelCase`; functions, variables, fields, and modules are
-`snake_case`; top-level `let` constants may also be `SCREAMING_SNAKE_CASE`. The identifier `_` is a wildcard and may not be read.
+By convention (enforced by the linter): types, traits, enum variants and type
+parameters are `UpperCamelCase`; functions, variables, fields, modules and loop
+labels are `snake_case`; top-level `let` constants may also be `SCREAMING_SNAKE_CASE`. The identifier `_` is a wildcard and may not be read.
 
 ### 2.5 Literals
 
@@ -148,6 +149,15 @@ inserts its display form (§10.9). `{expr:spec}` applies a format specification
 (§10.10). The expression may contain nested strings and brackets; the format
 spec begins at the first `:` that is not nested inside `()`, `[]`, `{}` or a
 string.
+
+> **Beware literal braces.** Because every `{` in a non-raw string starts an
+> interpolation, text that merely *contains* braces changes meaning silently or
+> fails to compile. A regex quantifier such as `"[0-9]{4}"` evaluates `4` and
+> produces the pattern `[0-9]4`; JSON text such as `"{\"a\": 1}"` is parsed as
+> an interpolation and rejected. Write such text as a raw string
+> (`r"[0-9]{4}"`, `r#"{"a": 1}"#`) or escape the braces (`"[0-9]\{4\}"`). The
+> linter reports interpolations whose expression is a literal
+> (`interpolated-literal`, §17.2), which catches the regex case.
 
 **Multi-line strings**: `"""` starts a block string that ends at the next
 `"""`. If the opening `"""` is followed by a newline, that newline is removed.
@@ -189,6 +199,10 @@ module is executed exactly once, before the first module that imports it,
 following a depth-first order of `import` declarations. Import cycles are a
 compile-time error.
 
+A session (`sand repl`, §17.6) is a main module whose items arrive one input
+at a time; each input is checked and run when it arrives, and may shadow the
+names of earlier inputs.
+
 ### 3.2 Imports
 
 ```
@@ -203,7 +217,8 @@ from "./shapes.sand" import Shape, area
 Script paths are resolved relative to the directory of the importing module; the
 `.sand` extension may be omitted. The resolved path must lie within the
 **module root** (the directory of the main module, unless the host configures
-otherwise). Every script import is checked against the policy as
+otherwise; a symlinked main file's imports and module root are those of the
+file it links to). Every script import is checked against the policy as
 `Import(path)` (§14).
 
 A module name (`json`) refers first to a host-registered native module, then to a
@@ -216,9 +231,11 @@ written `module.Type`.
 
 ### 3.3 Visibility
 
-`pub` may precede `fn`, `struct`, `enum`, `type`, `let` and `var` at the top
-level. Fields and methods of a public type are public. Top-level `var`s are
-exported read-only: importers may read but not assign them.
+`pub` may precede `fn`, `struct`, `enum`, `trait`, `type`, `let` and `var` at
+the top level. Fields and methods of a public type are public, as are the
+methods of a public trait. Impls have no visibility of their own (§4.9).
+Top-level `var`s are exported read-only: importers may read but not assign
+them.
 
 ---
 
@@ -245,10 +262,12 @@ fn greet(name: str, greeting: str = "Hello") {
 - The body is a block. The value of the block is the return value. In a function
   returning `()`, the value of the final expression is discarded.
 - Type parameters are listed in `<...>` with optional bounds `T: Ord + Hash`.
-  Bounds are `Eq`, `Ord`, `Hash` and `Num` (§5.6). Bounds may also be given
-  in a trailing `where` clause (`fn sum(self) -> T where T: Num`), which may
-  also constrain the type parameters of an enclosing generic `extend` block for
-  that one method.
+  Bounds are the built-in bounds `Eq`, `Ord`, `Hash` and `Num` (§5.6) and
+  traits (§4.9), possibly module-qualified or with type arguments:
+  `T: Ord + Describe`, `T: geo.Shape`, `T: Into<str>`. Bounds may also be
+  given in a trailing `where` clause (`fn sum(self) -> T where T: Num`), which
+  may also constrain the type parameters of an enclosing generic `extend`
+  block, struct or enum for that one method.
 - Functions may be declared inside blocks; such local functions may capture
   enclosing variables and may call themselves recursively. Local functions
   declared consecutively in the same block may call each other.
@@ -327,7 +346,9 @@ extend Point {
 
 An `extend` block adds methods to a struct or enum declared in the **same
 module**. Only the prelude and native module declarations may extend built-in
-types (`extend str { ... }`, `extend<T> [T] { ... }`).
+types (`extend str { ... }`, `extend<T> [T] { ... }`). Any module may add
+methods to built-in types by implementing one of its own traits for them
+(§4.9).
 
 ### 4.5 Type aliases
 
@@ -374,6 +395,154 @@ test "addition is commutative" {
 ```
 
 Test blocks are ignored by `run` and executed by the test runner (§17.4).
+
+### 4.9 Traits and impls
+
+A **trait** names a set of methods that types can implement. Generic code
+bounded by a trait can call its methods.
+
+```
+/// Things with a textual description.
+pub trait Describe {
+    fn describe(self) -> str                // required method
+    /// A default method; it may call the trait's other methods.
+    fn shout(self) -> str { self.describe().to_upper() }
+}
+
+pub trait Monoid {
+    fn empty() -> Self                      // static method: no `self`
+    fn combine(self, other: Self) -> Self
+}
+
+pub trait Shape: Describe + Eq {            // supertraits
+    fn area(self) -> float
+}
+
+pub trait Into<T> {                         // a trait with a type parameter
+    fn into(self) -> T
+}
+
+impl Describe for Point {
+    fn describe(self) -> str { "({self.x}, {self.y})" }
+}
+impl<T: Describe> Describe for [T] {        // conditional (generic) impl
+    fn describe(self) -> str { "[" + self.map(x => x.describe()).join(", ") + "]" }
+}
+impl Monoid for int {
+    fn empty() -> int { 0 }
+    fn combine(self, other: int) -> int { self + other }
+}
+
+fn concat_all<T: Monoid>(xs: [T]) -> T {
+    xs.fold(T.empty(), (acc, x) => acc.combine(x))
+}
+fn show_all<T>(xs: [T]) -> str where T: Describe { xs.describe() }
+```
+
+**Trait declarations.**
+
+- A trait body contains method declarations, optionally preceded by doc
+  comments. A method without a body is **required**; a method with a body is
+  a **default** method, used by impls that do not define it. Methods whose
+  first parameter is `self` are instance methods; the others are static
+  methods. Trait methods are not marked `pub` (they are public if the trait
+  is) and cannot be `native`.
+- Inside the trait, `Self` is a type parameter standing for the implementing
+  type. It is bounded by the trait itself, so default methods may call any
+  method of the trait (`self.describe()`, `Self.empty()`) and of its
+  supertraits.
+- A trait may have type parameters (`trait Into<T>`); they may not have
+  bounds. Trait methods may have type parameters of their own, with bounds;
+  `where` clauses in trait methods may only constrain those.
+- Default values of trait method parameters must be constants (literals,
+  `[]`, `[:]`, `None`).
+- **Supertraits** follow a `:` and may be traits or built-in bounds:
+  `trait Shape: Describe + Eq`. A bound `T: Shape` implies `T: Describe` and
+  `T: Eq`. A trait may not be its own supertrait, directly or indirectly.
+- Traits share the namespace of types. `Eq`, `Ord`, `Hash` and `Num` cannot
+  be redefined.
+
+**Impls.** `impl<P...> Trait<Args> for Type where ... { methods }`
+implements a trait for a type.
+
+- The type must have a type constructor: a struct, an enum (including
+  `Option`, `Result`), `Error`, an opaque type, or a built-in type: `int`,
+  `float`, `bool`, `str`, `bytes`, `duration`, `()`, `Range`, `[T]`,
+  `[K: V]`, `Set<T>`, `Task<T>`, `Channel<T>` or a tuple (tuples of different
+  lengths are different constructors). Function types and bare type
+  parameters (`impl<T> Trait for T`) are not allowed. The type's arguments may
+  be fixed (`impl Describe for [int]`).
+- Each type parameter of the impl must occur in the type or in the trait
+  arguments. The impl's bounds (in `<...>` or in a `where` clause after the
+  type) are required wherever the impl is used: `impl<T: Describe> Describe
+  for [T]` makes `[T]` implement `Describe` exactly when `T` does.
+- The impl defines each required method of the trait, may override default
+  methods, and may not define other methods. Each method's signature must
+  equal the trait's after replacing `Self` by the impl's type and the trait's
+  type parameters by the impl's trait arguments (method type parameters may
+  be renamed but must have the same bounds). Impl methods take no `pub`, no
+  default values (those of the trait apply) and may not add bounds to the
+  impl's type parameters. Within the impl, `Self` is the impl's type.
+- **Supertraits:** the impl's type must implement every supertrait of the
+  trait (possibly through conditional impls, under the impl's bounds) and
+  satisfy its built-in supertraits.
+- **Coherence:** a trait has at most one impl per type constructor and trait
+  arguments. Two impls of a trait for the same constructor conflict when
+  their trait arguments can be unified: `impl Into<str> for int` and
+  `impl Into<float> for int` coexist, but `impl Describe for [int]` and
+  `impl Describe for [str]` conflict.
+- **Orphan rule:** an impl must be declared in the module that declares the
+  trait or in the module that declares the type. Built-in types count as
+  declared by the prelude, so other modules can implement only their own
+  traits for them.
+- Impls have no names and no visibility: once their module is loaded they
+  apply throughout the program.
+
+**Bounds.** A trait bound `T: Trait<Args>` is satisfied by a type with a
+matching impl whose own bounds are satisfied (recursively: `[[Point]]:
+Describe` needs `[Point]: Describe`, which needs `Point: Describe`), by a
+type parameter bounded by the trait or by a trait that has it as a
+supertrait, and by `Self` inside the trait. Bounds are checked at every
+instantiation; an unsatisfied bound is reported as, for example, `the trait
+Describe is not implemented for str (required for [str] to implement
+Describe)`. Trait bounds may appear on functions, methods, `where` clauses
+and impls, but not on the type parameters of structs, enums, type aliases,
+traits, local functions or native functions.
+
+**Method calls.** `e.m(args)` where the type of `e` is
+
+- a type parameter: finds `m` among the traits of its bounds and their
+  supertraits;
+- any other type: after function-typed fields and inherent methods (§9),
+  finds `m` among the traits that are public or declared in the current
+  module and have an impl for the type's constructor. The trait does not
+  need to be imported.
+
+An inherent method takes precedence over a trait method of the same name.
+If several traits provide `m`, the call is ambiguous and an error. Every
+trait method can also be called in qualified form:
+
+```
+Describe.describe(p)          // Self is inferred from the arguments
+geo.Shape.area(c)             // a module-qualified trait
+Point.describe(p)             // through the type
+T.empty()                     // a static method through a bounded type parameter
+Self.empty()                  // in traits and impls
+let m: [str] = Monoid.empty() // Self is inferred from the expected type
+```
+
+Static methods cannot be called on a value. A call's trait arguments are
+inferred from the bound, from the impl when the trait has a single impl for
+the type's constructor, or from the expected type; when several impls remain
+possible the call needs a type annotation.
+
+Trait methods (`Point.describe`, `Describe.describe`, `T.empty`) and
+generic functions with trait bounds can be used as function values; the
+bounds are resolved where the value is created.
+
+A trait is not a type: there are no trait objects (`dyn Trait`), so a list
+holding values of different types that implement the same trait needs an
+enum.
 
 ---
 
@@ -429,6 +598,9 @@ pub struct Error { kind: str, message: str }
 `"error"`, `"not_found"`, `"permission_denied"`, `"already_exists"`, `"io"`,
 `"timeout"`, `"parse"`, `"invalid"`, `"http"`, `"closed"`, `"limit"`.
 
+The prelude also defines the lazy iterator struct `Iter<T>` and the trait
+`Iterator<T>` (§12.13).
+
 Standard library modules define further nominal types (e.g. `json.Json`,
 `http.Response`, `net.Conn`). Some are _opaque_: they have no fields, cannot be
 constructed with a literal, and are manipulated only by methods.
@@ -448,7 +620,26 @@ error. Use `x.to_float()` or `f.to_int()`.
 | `Hash` | `int`, `bool`, `str`, `bytes`, `duration`, `()`, and tuples, `Option`, `Result`, enums and structs **without `var` fields** all of whose components are `Hash` |
 | `Num`  | `int`, `float`                                                                                                                                                 |
 
-Map keys and set elements must be `Hash`.
+Map keys and set elements must be `Hash`. Built-in bounds are satisfied
+structurally and cannot be implemented. Traits (§4.9) are user-defined bounds;
+a trait whose supertraits include a built-in bound implies it.
+
+A type parameter bounded by `Num` (directly, in a `where` clause, or through a
+trait with `Num` as a supertrait) also has the static methods `T.zero()` and
+`T.one()`, the additive and multiplicative identities (`0`/`1` for `int`,
+`0.0`/`1.0` for `float`). They are available even when no value of type `T`
+exists, so generic code can, for example, sum an empty list:
+
+```
+fn total<T: Num>(xs: [T]) -> T {
+    xs.fold(T.zero(), (a, b) => a + b)
+}
+let none: [float] = []
+print(total(none))            // 0.0
+```
+
+(Runtime values do not carry their static types, so this information is
+passed to generic code as hidden evidence, like trait dictionaries.)
 
 ---
 
@@ -572,6 +763,7 @@ f(1, 2)
 f(1, scale: 2.0)              // named argument
 point.norm()                  // method call
 Point.origin()                // static method
+Describe.describe(p)          // trait method in qualified form (§4.9)
 http.get(url, timeout: 5s)    // module function with named argument
 ```
 
@@ -633,9 +825,40 @@ for x in iterable { ... }
   the length when the loop starts (stopping early if the list shrinks), reading
   each element when it is visited; so elements pushed during the loop are not
   visited. Maps and sets are iterated over a snapshot of their entries taken
-  when the loop starts. Channels are consumed live.
+  when the loop starts. Channels are consumed live. `for` also iterates over
+  any value whose type implements the prelude trait `Iterator<T>` (§12.13),
+  such as the lazy `Iter<T>`, calling its `next()` before each iteration until
+  it returns `None` (the call is static for concrete types and goes through
+  the dictionary for a bounded type parameter). Comprehension `for` clauses
+  accept the same values.
 - `break` and `continue` refer to the innermost loop. `return e` returns from
   the innermost function or lambda. All three have type `never`.
+- **Labels.** A loop may be labeled by writing `@name` before `loop`, `while`
+  or `for`, on the same line; `break @name` and `continue @name` then refer to
+  that loop from anywhere in its body, including nested loops:
+
+  ```
+  @rows for row in grid {
+      for x in row {
+          if x < 0 { break @rows }       // leaves both loops
+          if x == 0 { continue @rows }   // next row
+      }
+  }
+  let found = @search loop {
+      for p in candidates() {
+          if good(p) { break @search p }
+      }
+  }
+  ```
+
+  `break @name value` is allowed only when `@name` labels a `loop` (whose
+  value it gives, as for an unlabeled `break`); `continue @name` may target any
+  loop (for `loop`, it restarts the body). Labels name loops of the current
+  function or lambda only: `break` and `continue` cannot leave a lambda or a
+  local function, labeled or not. Using an unknown label, or a label that is
+  already used by an enclosing loop of the same function, is a compile error.
+  Labels are not values and have no other use. The label must directly follow
+  the `@` (no space).
 
 ### 6.10 Lambdas
 
@@ -681,6 +904,7 @@ xs[i] = v                     // list element assignment
 m[k] = v                      // map insert/overwrite
 p.count += 1                  // `var` field assignment
 expr                          // expression statement
+defer conn.close()            // run when the enclosing block exits (§7.1)
 ```
 
 - Rebinding a name with `let` in the same block shadows it.
@@ -689,6 +913,53 @@ expr                          // expression statement
 - `let ... else` requires the `else` block to have type `never`.
 - An expression statement whose value has type `Result<_, _>` and is unused
   is reported by the linter (`unused-result`).
+
+### 7.1 `defer`
+
+`defer e` (usually `defer { ... }` or `defer x.close()`) schedules `e` to run
+when the **enclosing block** exits, however it exits:
+
+```
+fn copy(src: str, dst: str) -> Result<()> {
+    let conn = net.connect(dst)?
+    defer conn.close()                  // runs on every exit below
+    for line in fs.read_lines(src)? {
+        conn.write_str(line + "\n")?    // an error returns, closing conn
+    }
+    Ok(())
+}
+```
+
+- **When.** The deferred expressions of a block run when control leaves the
+  block: by falling off its end (after its value is computed), by `break` or
+  `continue` (labeled or not) to a loop outside the block, by `return`, by
+  `?` propagating an error or `None`, or through the diverging `else` of
+  `let ... else`. A `defer` statement that was not reached does not run; a
+  `defer` in a loop body runs at the end of each iteration that reached it.
+  The blocks of function bodies, lambdas, `spawn` expressions, `test` blocks
+  and the top level of a module are blocks too: top-level defers run when the
+  module's top-level code finishes (or when a top-level `?` stops the
+  program).
+- **Order.** Defers run in reverse order of declaration (last first); when an
+  exit leaves several blocks, the innermost block's defers run first.
+- **Values.** A block's value, a `break` value and a `return` value are
+  computed first, then the defers run, then control leaves: `return f()`
+  calls `f()` before the defers (so it is not a tail call), and a defer that
+  assigns a variable does not change a value already computed from it.
+- **Variables.** The deferred expression sees the variables in scope at the
+  `defer` statement and reads them when it runs (not when it is declared):
+  `var s = 1; defer print(s); s = 2` prints `2`.
+- **Restrictions.** The deferred expression must have type `()` (write
+  `defer { let _ = f() }` to discard a value), and must not leave itself:
+  `return`, `?`, and `break`/`continue` to a loop outside it are compile
+  errors (loops, lambdas and `let ... else` inside it are fine). Deferred
+  code is compiled into every exit of its block, so a function with very many
+  defers and exits can exceed a compile-time limit (§15.3).
+- **Panics and cancellation.** A panic aborts the run (§10.3) without running
+  defers, as does `exit`. A cancelled task (§11.2) stops at a suspension point
+  and does not run its pending defers; nor does a task cut short because the
+  run ends. Deferred code may itself suspend (perform I/O, wait on tasks or
+  channels) like any other code.
 
 ---
 
@@ -729,7 +1000,11 @@ must match. Types with infinitely many values (`int`, `str`, lists, ...) require
 a wildcard or binding arm (list patterns `[]` + `[_, .._]` are exhaustive). A
 non-exhaustive match is a compile error that lists a missing pattern. An arm
 that can never match because earlier arms cover it is a compile error
-(`unreachable pattern`).
+(`unreachable pattern`). Checking is exponential in the worst case (e.g.
+or-patterns in many tuple positions); a `match` (or refutability check of a
+`let`, `for` or comprehension pattern) whose check exceeds a fixed amount of
+work is rejected with `pattern too complex to check for exhaustiveness`
+(§15.3).
 
 ---
 
@@ -747,15 +1022,25 @@ that can never match because earlier arms cover it is a compile error
 needed`).
 - Method resolution: for `e.m(...)`, the type constructor of `e` determines the
   candidate methods. If the type is a struct with a function-typed field named
-  `m`, `e.m(...)` calls the field's value. Every type also has the universal
-  methods `to_str() -> str` (display form) and `debug() -> str` (debug form).
+  `m`, `e.m(...)` calls the field's value; otherwise an inherent method (declared
+  in the type or an `extend` block) is used; otherwise a trait method (§4.9),
+  which for a type parameter comes from its bounds. Every type also has the
+  universal methods `to_str() -> str` (display form) and `debug() -> str`
+  (debug form), unless a trait method of the same name applies.
 - Integer and float literals have types `int` and `float` respectively; there
   is no literal polymorphism.
 - At the end of checking a function, every type variable must be resolved,
   except those bound to the function's own type parameters. Unresolved
   variables are errors (`cannot infer type`).
-- Bounds on type parameters are checked at instantiation.
+- Bounds on type parameters are checked at instantiation. Trait bounds are
+  checked once the function's types are inferred: each needs an impl (§4.9),
+  a bound of an enclosing type parameter, or `Self` in a trait.
 - An expression of type `never` unifies with any type.
+- Every type, after inference variables are resolved, has at most 10,000
+  components (type constructors and leaves); larger types, which can only
+  arise by doubling (`let b = (a, a)` repeatedly, or similar aliases or
+  generic calls), are rejected with `type too large`. See §15.3 for the other
+  compile-time limits.
 
 ---
 
@@ -784,7 +1069,8 @@ overflow, division by zero, index/key/slice errors, `panic(msg)`, failed
 `assert`, `unwrap`/`expect` on `None`/`Err`, unreachable code, use of a global
 before initialisation, stack overflow, deep nesting during value printing,
 comparison or hashing (beyond 2,000 levels), and waiting on a cancelled task.
-Panics cannot be caught by scripts. (The test runner isolates panics per test.)
+Panics cannot be caught by scripts and do not run deferred expressions
+(§7.1). (The test runner isolates panics per test.)
 
 ### 10.4 Exit
 
@@ -796,7 +1082,8 @@ code. It does not terminate the host process.
 Calls are by value (references for reference types). Recursion depth is bounded
 by the `max_call_depth` limit (default 10,000); exceeding it panics with
 `stack overflow`. Tail calls (`return f(x)` or a call in tail position of the
-function body) do not consume stack depth.
+function body) do not consume stack depth, except while deferred expressions
+(§7.1) are pending, since they run after the call returns.
 
 ### 10.6 Maps and sets
 
@@ -894,7 +1181,8 @@ t.cancel()                        // cancels if still running
   with `task cancelled`. Waiting on a task more than once returns the same
   value.
 - Cancelling a task stops it at its next suspension point or instruction
-  boundary; pending I/O is dropped.
+  boundary; pending I/O is dropped and its pending deferred expressions
+  (§7.1) do not run.
 - A panic in any task aborts the run (§10.3).
 
 ### 11.3 The `task` module (prelude-visible as `task`)
@@ -918,6 +1206,7 @@ t.cancel()                        // cancels if still running
 | `ch.close()`             | close; pending and future `recv` drain then get `None`                       |
 | `ch.len() -> int`        | number of queued messages                                                    |
 | `ch.is_closed() -> bool` |                                                                              |
+| `ch.iter() -> Iter<T>`   | lazy iterator receiving messages until the channel is closed and empty       |
 
 ### 11.5 Prompts suspend everything
 
@@ -992,6 +1281,7 @@ int) -> str`. Static: `float.parse(s: str) -> float?`.
 | `ord() -> int`                                                                     | scalar value of a one-char string (panics otherwise)                                  |
 | `reversed() -> str`                                                                | by scalars                                                                            |
 | `join(items: [str]) -> str`                                                        | `", ".join(xs)`                                                                       |
+| `chars_iter() -> Iter<str>`                                                        | lazy iterator over the scalars (§12.13)                                               |
 
 `[str].join(sep: str = "")` is also available on lists.
 
@@ -1032,7 +1322,7 @@ element outside `0..=255`), `bytes.from_hex(s: str) -> bytes?`.
 | `any(f: fn(T) -> bool)`, `all(f: fn(T) -> bool)`                                |                               |
 | `find(f: fn(T) -> bool) -> T?`, `find_index(f: fn(T) -> bool) -> int?`          |                               |
 | `count(f: fn(T) -> bool) -> int`                                                |                               |
-| `sum() -> T`, `product() -> T`                                                  | `T: Num`; `[].sum() == 0`     |
+| `sum() -> T`, `product() -> T`                                                  | `T: Num`; empty: `T.zero()` / `T.one()` |
 | `min() -> T?`, `max() -> T?`                                                    | `T: Ord`                      |
 | `min_by<K: Ord>(key: fn(T) -> K) -> T?`, `max_by<K: Ord>(...)`                  | first minimal / first maximal |
 | `enumerate() -> [(int, T)]`                                                     |                               |
@@ -1048,6 +1338,7 @@ element outside `0..=255`), `bytes.from_hex(s: str) -> bytes?`.
 | `swap(i: int, j: int)`                                                          |                               |
 | `join(sep: str = "") -> str`                                                    | `T = str` only                |
 | `to_set() -> Set<T>`                                                            | `T: Hash`                     |
+| `iter() -> Iter<T>`                                                             | lazy iterator (§12.13)        |
 
 ### 12.9 `[K: V]`
 
@@ -1056,13 +1347,14 @@ element outside `0..=255`), `bytes.from_hex(s: str) -> bytes?`.
 `keys() -> [K]`, `values() -> [V]`, `entries() -> [(K, V)]`, `clear()`,
 `copy()`, `map_values<W>(f: fn(V) -> W) -> [K: W]`, `filter(f: fn(K, V) -> bool)
 -> [K: V]`, `extend(other: [K: V])`, `get_or_insert(k, default: V) -> V` (inserts
-when absent and returns the stored value).
+when absent and returns the stored value), `iter() -> Iter<(K, V)>` (§12.13).
 
 ### 12.10 `Set<T>`
 
 `len`, `is_empty`, `add(x) -> bool` (true if newly added), `remove(x) -> bool`,
 `contains(x)`, `to_list() -> [T]`, `union(o)`, `intersection(o)`,
-`difference(o)`, `is_subset(o)`, `copy()`, `clear()`.
+`difference(o)`, `is_subset(o)`, `copy()`, `clear()`, `iter() -> Iter<T>`
+(§12.13).
 
 ### 12.11 `Option<T>` and `Result<T, E>`
 
@@ -1081,7 +1373,110 @@ Result: `is_ok`, `is_err`, `unwrap() -> T` (panics `unwrap on Err: <err>`),
 
 `start() -> int`, `end() -> int` (exclusive), `len() -> int`, `contains(i: int)
 -> bool`, `to_list() -> [int]`, `map`, `filter`, `each`, `step_by(n: int) -> [int]`,
-`reversed() -> [int]`.
+`reversed() -> [int]`, `iter() -> Iter<int>` (§12.13).
+
+### 12.13 Iterators
+
+The methods of lists, maps and ranges above are **eager**: `xs.map(f)` calls
+`f` on every element at once and builds a new list. **Lazy iterators** do the
+work only when elements are requested, one at a time, so pipelines build no
+intermediate lists, can stop early, and can draw from endless sources:
+
+```
+let firsts = Iter.count_from(1).map(n => n * n).filter(n => n % 3 == 0).take(3)
+print(firsts.to_list())                       // [9, 36, 81]
+for (i, line) in text.lines().iter().enumerate().skip(1) { ... }
+```
+
+**The trait.** The prelude declares
+
+```
+pub trait Iterator<T> {
+    fn next(self) -> T?                 // the next element; None once exhausted
+    fn iter(self) -> Iter<T> { ... }    // a lazy Iter over the remaining elements
+}
+```
+
+`for` loops and comprehensions iterate over any value whose type implements
+`Iterator<T>` (§6.9). User types implement it like any trait (§4.9):
+
+```
+struct Countdown { var n: int }
+impl Iterator<int> for Countdown {
+    fn next(self) -> int? {
+        if self.n <= 0 { return None }
+        self.n -= 1
+        Some(self.n + 1)
+    }
+}
+for x in (Countdown { n: 3 }) { print(x) }          // 3, 2, 1
+print(Countdown { n: 3 }.iter().map(x => x * 2).to_list())  // [6, 4, 2]
+fn total<I: Iterator<int>>(it: I) -> int { it.iter().sum() }
+```
+
+**The `Iter<T>` struct** is the prelude's lazy iterator: `pub struct Iter<T>
+{ next: fn() -> T? }`, a function producing the next element, which
+implements `Iterator<T>` (its `iter()` returns the iterator itself). It is
+obtained with `iter()` from lists, maps (`(key, value)` pairs), sets, ranges,
+channels and any `Iterator`, with `chars_iter()` from strings, or from these
+static sources:
+
+| Source                                                     | Elements                                                |
+| ---------------------------------------------------------- | ------------------------------------------------------- |
+| `Iter.from_fn(f: fn() -> T?)`                              | the results of `f` until it returns `None` (also `Iter { next: f }`) |
+| `Iter.empty()`                                             | none                                                    |
+| `Iter.once(x: T)`                                          | `x`                                                     |
+| `Iter.repeat(x: T)`                                        | `x` forever                                             |
+| `Iter.count_from(start: int, step: int = 1) -> Iter<int>`  | `start`, `start + step`, ... forever                    |
+| `Iter.successors(first: T?, f: fn(T) -> T?)`               | `first`, then `f` of the previous element until `None`  |
+
+**Adapters** return a new `Iter` and do no work until it is consumed:
+`map<U>(f: fn(T) -> U)`, `filter(f: fn(T) -> bool)`, `filter_map<U>(f: fn(T) ->
+U?)`, `flat_map<U>(f: fn(T) -> Iter<U>)`, `enumerate() -> Iter<(int, T)>`,
+`zip<U>(other: Iter<U>) -> Iter<(T, U)>` (ends with the shorter), `chain(other:
+Iter<T>)`, `take(n: int)` (pulls at most `n` elements from its source),
+`skip(n: int)`, `take_while(f)`, `skip_while(f)`, `step_by(n: int)` (the first
+element, then every `n`-th; panics if `n <= 0`), `inspect(f: fn(T))` (calls `f`
+on each element as it passes).
+
+**Consumers** pull elements: `to_list() -> [T]`, `to_set() -> Set<T>` (`T:
+Hash`), `to_map() -> [K: V]` (for `Iter<(K, V)>`, `K: Hash`; a repeated key
+keeps its last value), `join(sep: str = "") -> str` (for `Iter<str>`),
+`each(f: fn(T))`, `fold<A>(init: A, f: fn(A, T) -> A) -> A`, `reduce(f: fn(T, T)
+-> T) -> T?`, `sum() -> T` and `product() -> T` (`T: Num`; `T.zero()` /
+`T.one()` when empty), `count() -> int` (the number of remaining elements), `any(f)`
+and `all(f)` (stop at the first decisive element), `find(f) -> T?`,
+`find_index(f) -> int?`, `first() -> T?` (the next element), `last() -> T?`,
+`nth(n: int) -> T?` (the element `n` positions on, from 0), `min()`/`max() ->
+T?` (`T: Ord`; the first minimal/maximal), `min_by`/`max_by<K: Ord>(key: fn(T)
+-> K) -> T?`. A `for` loop over an `Iter` is a consumer too.
+
+**Semantics.**
+
+- **Laziness.** Creating an iterator or applying an adapter calls no
+  function; each element is produced when a consumer asks for it, passing
+  through the whole pipeline before the next one is requested. Adapters
+  request only what they need: `Iter.repeat(1).take(3).sum()` terminates.
+- **Single pass.** An iterator is a reference to its state: elements taken
+  by any consumer (or by `next()` on any copy of the iterator, including one
+  wrapped by an adapter) are gone. Consuming an exhausted iterator yields no
+  elements. Use the list (or call `iter()` again) to iterate twice.
+- **Exhaustion.** The iterators of lists, ranges, maps, sets, strings and
+  channels keep returning `None` once they have; `Iter.from_fn` iterators
+  return whatever their function returns.
+- **Mutation.** A list iterator behaves like a `for` loop (§6.9): it visits
+  the indices below the length the list had when `iter()` was called, reading
+  each element when it is reached, and stops early if the list shrinks;
+  elements pushed meanwhile are not visited. The iterators of maps and sets
+  work on a snapshot of the entries taken by `iter()`. A channel iterator
+  receives live (and suspends while the channel is empty).
+- **Limits.** Iterators are ordinary Sand code: every element costs at least
+  one function call (one unit of fuel, §15.2), so endless iterators are
+  bounded by the instruction, time and memory limits (§15) like any loop.
+- **Cost** _(informative)_. Each adapter adds about one function call per
+  element besides the user function it applies, so eager list methods are
+  usually faster per element; iterators avoid building intermediate lists and
+  can stop early.
 
 ---
 
@@ -1122,13 +1517,55 @@ directory (configured by the host; default: the module root).
 | `is_file(path)`, `is_dir(path) -> Result<bool>`                                  | `FsRead`                          |
 | `list_dir(path) -> Result<[str]>` (sorted names)                                 | `FsRead`                          |
 | `create_dir(path, recursive: bool = false) -> Result<()>`                        | `FsWrite`                         |
-| `remove_file(path)`, `remove_dir(path, recursive: bool = false)`                 | `FsWrite`                         |
-| `rename(from, to) -> Result<()>`                                                 | `FsWrite` on both                 |
+| `remove_file(path)`, `remove_dir(path, recursive: bool = false)`                 | `FsWrite` (entry)                 |
+| `rename(from, to) -> Result<()>`                                                 | `FsWrite` on both (entries)       |
 | `copy(from, to) -> Result<()>`                                                   | `FsRead` on from, `FsWrite` on to |
 | `metadata(path) -> Result<Metadata>`                                             | `FsRead`                          |
 | `join(parts: [str]) -> str`, `basename(p)`, `dirname(p)`, `extension(p) -> str?` | none                              |
 
 `struct Metadata { size: int, is_file: bool, is_dir: bool, modified: time.DateTime? }`.
+
+Paths may use `/` as the separator on every platform (on Windows `\` is also
+a separator). `join` inserts the platform's separator (`\` on Windows) and a
+part that is an absolute path replaces the parts before it; `basename`,
+`dirname` and `extension` are purely lexical. Paths in capabilities and
+prompts are absolute and normalised (§14.1); on Windows they use the plain
+`C:\...` form rather than the `\\?\` form. Permission errors name the path
+as the script spelled it (`permission denied: read data/x.txt`), so that
+they reveal neither symlink targets nor the stored spelling of names the
+script may not access. A path longer than 4096 bytes, or containing a NUL
+character, fails with kind `"invalid"` before anything else is done.
+
+Symbolic links (§14.1):
+
+- Most functions follow symlinks: the path is resolved first and the policy
+  is checked for the resolved location (the link's target), which the
+  operation then accesses **without following any symlink**. If a symlink
+  appears in the path between the check and the operation, or the path names
+  a dangling symlink (one whose target did not exist when the path was
+  resolved), the operation fails with kind `"permission_denied"`;
+  `exists`, `is_file` and `is_dir` return `false` instead.
+- `remove_file`, `remove_dir` and `rename` act on the directory entry
+  itself: a final symlink is removed or renamed, never its target, and the
+  capability ("entry") is checked for the link's own path (its directory
+  resolved), so no permission for the target is needed.
+- `rename` fails with `"permission_denied"` if a deny rule of the policy
+  protects a path inside the tree being moved or the tree being replaced at
+  `to`; `remove_dir(path, recursive: true)` checks the same for `path`
+  before removing anything, and checks each entry before removing it.
+
+Reading, writing and copying accept regular files only (kind `"invalid"`
+otherwise, e.g. for directories and FIFOs). `copy` copies the contents
+only: a new file gets the default permissions (never the source's execute
+or setuid bits). `create_dir(path, recursive: true)` checks `FsWrite` for
+every directory it creates, not just `path`, and creates none of the
+directories whose existence was assumed when it checked.
+
+Hard links are not symlinks: a hard link to an outside file that someone
+else placed inside an allowed directory is the same file, and accessing it
+is allowed. The engine cannot tell such links apart from ordinary files in
+general; do not allow access to directories that untrusted parties can write
+hard links into.
 
 ### 13.4 `help`
 
@@ -1155,18 +1592,45 @@ TLS when the engine is built with the `tls` feature (default). Redirects
 against the policy. Responses with `Content-Length`, chunked encoding, or
 read-until-close bodies are supported; bodies larger than the
 `max_http_body` limit fail with kind `"limit"`. Non-2xx statuses are **not**
-errors. Capability: `Net(host:port)`.
+errors. Capability: `Net(host:port)`, then `NetAddr` for the resolved
+addresses (§14.6), for every hop.
 
 Server:
 
 ```
 pub fn serve(addr: str) -> Result<Server>        // capability NetListen(addr)
+pub struct Server { listener: net.Listener, pending: PendingRequests }
 server.accept() -> Result<Request>
 server.addr() -> str
-struct Request { method: str, path: str, query: str, headers: [str: str], body: bytes }
+server.close()
+pub struct Request { method: str, path: str, query: str, headers: [str: str], body: bytes, conn: net.Conn }
 request.respond(status: int, body: bytes, headers: [str: str] = [:]) -> Result<()>
 request.text() -> Result<str>
+request.json() -> Result<json.Json>
+request.header(name: str) -> str?                 // case-insensitive
 ```
+
+Each connection carries one request (no keep-alive). While `accept` waits,
+it accepts connections and reads their requests concurrently (up to 64
+connections at a time, and at most half of the sockets `max_open_resources`
+still allows), returning the first request that is complete, so idle or
+slow clients do not delay others. Connections whose requests are being read
+count against `max_open_resources`; reading continues with the next
+`accept` call, and `close` closes them. `accept` answers connections that
+do not deliver a valid request — malformed, not complete within 30 seconds
+of being accepted, or with a body larger than `max_http_body` — with
+`400 Bad Request` and closes them. `pending` (of a private type) holds the
+connections being read; a `Server` is only obtained from `serve`. `path` and `query`
+are the parts of the request target before and after `?`; header names are
+lower-cased.
+
+`conn` is the client connection the request arrived on (fields of public
+types are public, §3.3). `respond` writes a response with `content-length`
+and `connection: close` headers (and no body for `HEAD` requests or statuses
+without one) to `conn` and then closes it; a script may instead write to
+`conn` itself, e.g. to stream a response, in which case it produces the
+HTTP framing and closes the connection. Constructing a `Request` value
+directly is allowed but has no special meaning.
 
 ### 13.6 `io`
 
@@ -1196,6 +1660,9 @@ pub native fn to_json<T>(value: T) -> Json
 values only), `as_bool() -> bool?`, `as_list() -> [Json]?`,
 `as_map() -> [str: Json]?`, `is_null() -> bool`, `path(p: str) -> Json?`
 (dot-separated keys and indices: `"items.0.name"`).
+
+JSON text embedded in source must be a raw string (`json.parse(r#"{"a": 1}"#)`),
+since `{` starts an interpolation in ordinary strings (§2.5).
 
 `stringify` emits compact JSON for `indent == 0`, otherwise pretty-prints with
 `indent` spaces. Object keys keep insertion order. Non-finite numbers encode as
@@ -1251,9 +1718,21 @@ conn.peer_addr() -> str
 conn.close()
 ```
 
+Connections are made only to resolved addresses the policy allows (§14.6).
 Reading and writing on the same connection from different tasks is allowed.
-Upgrading a connection to TLS: `net.connect_tls(host: str, port: int) ->
-Result<Conn>` (feature `tls`).
+Listeners and connections count against `max_open_resources` until they are
+closed (or collected), and so do sockets of operations still in progress:
+connections being established, pending `accept` calls and HTTP requests in
+flight; when the limit is reached, such operations fail with kind `"limit"`.
+Once the peer has finished sending, `read` keeps returning empty bytes and
+`read_line` keeps returning `None`.
+TLS client connections: `net.connect_tls(host: str, port: int, timeout:
+duration = 30s) -> Result<Conn>` (feature `tls`); `timeout` bounds
+connecting and the TLS handshake together (kind `"timeout"`). The server certificate is verified for `host`
+against the bundled web PKI roots plus any roots the host added
+(`Config::tls_root_certificates`, §16); a verification or handshake failure
+is an error (kind `"invalid"` for certificate problems), never a panic. The
+same applies to `https` requests.
 
 ### 13.12 `random`
 
@@ -1284,7 +1763,13 @@ Captures: get(i: int) -> Match?, name(n: str) -> Match?, len() -> int, text(i: i
 ```
 
 Syntax is that of the Rust `regex` crate (linear-time, no backreferences).
-Compiled program size is limited to protect the host.
+Write patterns as raw strings (`r"\d{4}-\d{2}"`): in ordinary strings `\d` is an
+invalid escape and `{4}` is an interpolation (§2.5).
+Compiled programs are limited in size (each automaton to a few MiB; larger
+patterns, such as `\w{150}`, fail with kind `"limit"`). A compiled regex
+counts against `max_memory` with the memory of its automata and of its search
+cache, which grows as it is used (up to a few MiB), so a script cannot hold
+more compiled regexes than the limit allows.
 
 ### 13.14 `statistics`
 
@@ -1303,8 +1788,11 @@ empty input (variance/stdev need at least two values). Also `mean_int([int])
 `assert_close(a: float, b: float, tol: float = 1e-9)`,
 `assert_err<T, E>(r: Result<T, E>)`, `assert_ok`, `fail(msg: str) -> never`,
 `property<T>(name: str, gen: fn(random.Rng) -> T, prop: fn(T) -> bool,
-cases: int = 100)` (runs `prop` on generated values; on failure panics with the
-failing input's debug form). Failure messages for `assert_eq` have the form
+cases: int = 100, seed: int = 20240611)` (runs `prop` on `cases` values produced by
+`gen` from a `random.Rng` seeded with `seed`; on failure panics with the
+failing input's debug form). The default seed is fixed, so property tests are
+deterministic and failures reproducible; pass a different `seed` (for example
+one derived from `random.int`) to explore other inputs. Failure messages for `assert_eq` have the form
 `assertion failed: left == right\n  left: <debug>\n right: <debug>`.
 
 ### 13.16 `time`
@@ -1374,7 +1862,13 @@ forms; returns lower-case hyphenated), `is_valid(s: str) -> bool`,
   or `mmap`, and never executes generated machine code.
 - Paths are normalised lexically (`.`/`..` resolved) and, when they exist,
   canonicalised (symlinks resolved) before being checked, so a script cannot
-  escape an allowed directory via `..` or symlinks.
+  escape an allowed directory via `..` or symlinks. The checked location is
+  then accessed without following symlinks (directories are opened one
+  component at a time with no-follow semantics), so a symlink swapped into
+  the path after the check cannot redirect the access (§13.3). On non-Unix
+  platforms accesses are path-based and this race remains. On Windows, paths
+  are compared case-insensitively and use the plain `C:\...` /
+  `\\server\share\...` form (not `\\?\...`).
 
 ### 14.2 Capabilities
 
@@ -1382,7 +1876,8 @@ forms; returns lower-case hyphenated), `is_valid(s: str) -> bool`,
 | --------------------------- | ------------------------------------------ |
 | `FsRead(path)`              | reading files, listing dirs, metadata      |
 | `FsWrite(path)`             | creating, writing, removing, renaming      |
-| `Net(host, port)`           | outgoing TCP/HTTP connections              |
+| `Net(host, port)`           | outgoing TCP/HTTP/TLS connections          |
+| `NetAddr(host, addr)`       | each address `host` resolved to (§14.6)    |
 | `NetListen(addr)`           | listening sockets                          |
 | `Env(name)`                 | environment variable reads (`"*"` for all) |
 | `Stdin`, `Stdout`, `Stderr` | standard streams                           |
@@ -1394,8 +1889,17 @@ forms; returns lower-case hyphenated), `is_valid(s: str) -> bool`,
 A policy maps a request to `Allow`, `Deny` or `Prompt`. On `Prompt` the engine
 calls the host's prompter, suspending **all** script execution until it
 answers `AllowOnce`, `AllowAlways`, `DenyOnce` or `DenyAlways`. "Always" answers
-are remembered for the identical request for the lifetime of the engine. If no
-prompter is configured, `Prompt` behaves as `Deny`.
+are remembered for the identical request for the lifetime of the engine (across
+all its runs and compilations); "once" answers apply to the single request
+only: a library function that needs several capabilities (`fs.copy`) is
+retried after each prompt, and the "once" answers given meanwhile apply to
+that call alone, never to a later one. If no prompter is configured,
+`Prompt` behaves as `Deny`.
+
+`Import` requests are decided while the program is compiled (also by `check`
+and `lint`), one per script module, depth-first in import order, with the
+module's resolved absolute path. A module imported by several modules is
+requested once.
 
 ### 14.4 Effects of a denial
 
@@ -1403,41 +1907,210 @@ prompter is configured, `Prompt` behaves as `Deny`.
 - `env.get` returns `None`.
 - `print`, `eprint` and `io.write` panic with `permission denied: stdout` /
   `stderr`.
-- A denied `Import` is a compile-time error.
+- A denied `Import` is a compile-time error. Compilation stops there, so no
+  further imports are requested.
 
 ### 14.5 Built-in policies
 
 - `Policy::deny_all()` — everything denied except `Stdout` and `Stderr`.
 - `Policy::allow_all()` — everything allowed (for trusted scripts).
 - `RulePolicy` — a rule list: allowed/denied read paths, write paths, network
-  hosts (`host`, `host:port`, `*.example.com`), listen addresses, environment
-  variable names, streams, imports, and a fallback decision for unmatched
-  requests (`Deny` or `Prompt`). Deny rules take precedence over allow rules.
+  destinations, listen addresses, environment variable names, streams,
+  imports, and a fallback decision for unmatched requests (`Deny` or
+  `Prompt`). Deny rules take precedence over allow rules. Network patterns
+  are `host`, `*.example.com` (strict subdomains), `*`, an IP address
+  (`127.0.0.1`, `::1`) or a CIDR range (`10.0.0.0/8`, `fc00::/7`), each
+  optionally followed by a port (`host:443`, `[::1]:8080`,
+  `10.0.0.0/8:443`, `[fc00::/7]:443`). Host names are ASCII and compared
+  case-insensitively, ignoring a trailing dot. IP and range patterns match IP
+  literals used by scripts and resolved addresses (§14.6); IPv4-mapped IPv6
+  addresses are compared as IPv4. IP and range deny patterns also match
+  other spellings of the addresses they cover: the unspecified address
+  (`0.0.0.0`, `::`, which connect to the local host) is matched as
+  `127.0.0.1` and `::1`, and IPv6 addresses embedding an IPv4 address
+  (IPv4-compatible, IPv4-translated, NAT64 `64:ff9b::/96`, 6to4
+  `2002::/16`) also as that address. A malformed pattern matches nothing
+  (`policy::is_valid_net_pattern` checks one; the CLI rejects them).
+  `deny_private_networks()` additionally denies private and internal
+  destinations (§14.6). A path deny rule also protects the directories
+  containing it from being renamed, replaced or recursively removed as a
+  whole (`Policy::denies_under`); custom policies are only asked about the
+  top-level paths of such operations. Path rules are compared after
+  normalisation (§14.1), which names existing files and directories with
+  their stored spelling (on case- or normalisation-insensitive file systems
+  `data/ſecrets` or `data/SECRETS` may name `data/secrets`). Allow rules
+  compare paths exactly (ignoring case on Windows). Deny rules, on every
+  platform, compare paths caselessly and normalisation-insensitively
+  (canonical decomposition, full case folding, default-ignorable characters
+  removed), so a deny rule also covers other spellings of a path, including
+  a not-yet-existing one (`data/ſecrets`, `café` with a precomposed or a
+  combining accent). This only ever denies more.
+- For operations on a directory entry itself (§13.3), the engine uses
+  `Policy::check_entry`, which for a `RulePolicy` does not resolve a final
+  symlink in the path; `Policy::check` always resolves it.
+
+### 14.6 Network destinations
+
+An outgoing connection (`net.connect`, `net.connect_tls`, every `http`
+request and redirect hop) is checked in two stages:
+
+1. `Net(host, port)` for the host name or IP literal the script used. This
+   request may be prompted.
+2. The name is resolved **once**. Each resolved address is checked as
+   `NetAddr(host, addr)`; the connection is then attempted only to the
+   allowed addresses, in resolver order, and the name is never resolved
+   again. (An IP literal "resolves" to itself.) If every address is denied,
+   the operation fails with kind `"permission_denied"` and a message naming
+   the address. `NetAddr` requests are never prompted: a `Prompt` decision
+   counts as `Allow`, since the user already decided the `Net` request.
+
+`Policy::AllowAll` allows and `Policy::DenyAll` denies `NetAddr`; custom
+policies are called with it (and can use `sandlang::policy::is_private_address`).
+A `RulePolicy` denies a resolved address that matches an IP or range
+`deny_net` pattern. With `deny_private_networks()` it also treats as
+internal every address that is not public unicast — unspecified,
+`0.0.0.0/8`, loopback, RFC 1918, shared/CGNAT `100.64.0.0/10`, link-local
+(`169.254.0.0/16`, `fe80::/10`), unique-local `fc00::/7`, site-local,
+multicast, broadcast and other reserved, documentation and benchmarking
+ranges, with IPv6 forms embedding an IPv4 address (IPv4-mapped,
+IPv4-compatible, NAT64 `64:ff9b::/96`, 6to4) classified by that address —
+and then:
+
+- an internal IP literal, or `localhost`, is allowed at stage 1 only by an
+  explicit pattern (not `*` or `*.domain`) or a prompt answer; `localhost`
+  must then resolve to loopback addresses;
+- an internal address reached by resolving any other name is denied unless
+  an IP or range `allow_net` pattern matches it.
+
+Without `deny_private_networks()`, a `RulePolicy` allows every resolved
+address not matched by a deny range. The `sand` command line enables it by
+default (§17.5).
 
 ---
 
 ## 15. Resource limits
 
+### 15.1 Limits
+
 Configurable per engine:
 
-| Limit                | Default   | Effect when exceeded                                                                                            |
-| -------------------- | --------- | --------------------------------------------------------------------------------------------------------------- |
-| `max_memory`         | 512 MiB   | run fails: `memory limit exceeded`                                                                              |
-| `max_instructions`   | unlimited | run fails: `instruction limit exceeded` (counted in fuel units: one per call, loop iteration and backward jump) |
-| `max_cpu_time`       | unlimited | run fails: `cpu time limit exceeded` (time spent executing, excluding waits and prompts)                        |
-| `max_wall_time`      | unlimited | run fails: `time limit exceeded`                                                                                |
-| `max_call_depth`     | 10,000    | panic: `stack overflow`                                                                                         |
-| `max_tasks`          | 10,000    | `spawn` panics: `task limit exceeded`                                                                           |
-| `max_open_resources` | 1,024     | open/connect/listen fail with kind `"limit"`                                                                    |
-| `max_output_bytes`   | unlimited | writes fail: `output limit exceeded`                                                                            |
-| `max_http_body`      | 64 MiB    | HTTP read fails with kind `"limit"`                                                                             |
-| `max_source_bytes`   | 16 MiB    | compile error                                                                                                   |
+| Limit                | Default    | Effect when exceeded                                                                                                     |
+| -------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `max_memory`         | 512 MiB    | run fails: `memory limit exceeded` (I/O whose buffers do not fit fails with kind `"limit"`)                              |
+| `max_instructions`   | unlimited  | run fails: `instruction limit exceeded` (counted in fuel units, §15.2)                                                   |
+| `max_cpu_time`       | unlimited  | run fails: `cpu time limit exceeded` (time spent executing, excluding waits and prompts)                                 |
+| `max_wall_time`      | unlimited  | run fails: `time limit exceeded`; also bounds compilation, counted from its start                                        |
+| `max_call_depth`     | 10,000     | panic: `stack overflow`                                                                                                  |
+| `max_tasks`          | 10,000     | `spawn` panics: `task limit exceeded`                                                                                    |
+| `max_open_resources` | 1,024      | open/connect/listen/accept and HTTP requests fail with kind `"limit"` (pending operations' sockets count, §13.11)          |
+| `max_output_bytes`   | unlimited  | writes fail: `output limit exceeded`                                                                                     |
+| `max_http_body`      | 64 MiB     | HTTP read fails with kind `"limit"`                                                                                      |
+| `max_source_bytes`   | 16 MiB     | compile error: `source too large` (the main file and all imported scripts together; the standard library is not counted) |
+| `max_compile_fuel`   | 10,000,000 | compile error: `program too complex to compile` (§15.3)                                                                  |
 
 Memory is measured as the engine's accounting of live heap objects (including
-their buffers) and is enforced after garbage collection. Limit violations are
-reported to the host as distinct error variants and cannot be intercepted by
-scripts. The host may also interrupt a running engine from another thread with
-an `InterruptHandle`.
+their buffers and the copies of map and set keys held by their indexes) and
+of the tasks themselves (call stacks, and the lists of tasks waiting for a
+task or a channel), and is enforced after garbage collection. A call that
+would grow a task's stack beyond the limit fails with the memory limit. It also includes the
+buffers of pending I/O operations — file and socket reads, HTTP requests and
+responses in transfer, standard input, and copies of data being written —
+from when the operation starts until its result becomes a value. An
+operation whose buffers would not fit fails with kind `"limit"` instead,
+before allocating them, and the run continues (so a peer sending a huge
+line or body cannot end a server script); files are checked by their size
+before they are read, while network data is counted as it arrives. Small
+fixed per-connection buffers (8 KiB) are not counted. In a session (§16,
+§17.6), the instruction, CPU time, wall time and output limits apply to each
+input; the memory limit applies to the session's heap, which persists. Library functions
+also check the Rust-side scratch space they use while building a result
+(output strings and lists, display and JSON text, sort buffers, hash keys)
+against the limit before or while it grows, so a script cannot make the host
+allocate much beyond `max_memory`. Garbage is collected before such a check
+reports the limit. Limit violations are reported to the host as
+distinct error variants and cannot be intercepted by scripts. The host may
+also interrupt a running engine from another thread with an
+`InterruptHandle`; this stops compilation, bytecode and long-running library
+functions alike.
+
+### 15.2 Fuel
+
+Execution is measured in _fuel units_. The interpreter spends one unit per
+function call, loop iteration and backward jump. Work done in one step by a
+library function or a generic operation is charged in proportion to its size,
+roughly one unit per simple loop iteration's worth of work (a few to a few
+tens of nanoseconds):
+
+| Work                                                                                        | Cost                        |
+| ------------------------------------------------------------------------------------------- | --------------------------- |
+| element visited, compared, hashed, copied or produced                                       | 1 unit                      |
+| byte copied, compared or scanned (strings, bytes, output text)                              | 1/64 unit                   |
+| byte processed one at a time (hashing, regex search, encodings, case conversion, JSON text) | 1/8 unit                    |
+| compiling a regex                                                                           | 1,000 + 16 per pattern byte, + 1/8 unit per byte of compiled program |
+| regex work (compiling, searching, iterating), at least                                      | 1 unit per microsecond it takes |
+
+Elements include list, map and set elements, the components of values being
+compared, hashed, displayed or encoded, JSON values, regex matches and sort
+comparisons. Constant-time operations are free. For example, sorting a list of
+n numbers costs about n·log₂(n) units, `==` on two lists of n integers about n
+units, and `json.parse` about one unit per value plus one per 8 bytes of
+text.
+
+The work of a regex search is not always proportional to its text: with
+leftmost-first semantics a search may look far past the match it returns
+(iterating over the matches of `[a-z]*X|[a-z]` in a long run of letters scans
+the rest of the text for every match), and a search the lazy DFA cannot handle
+falls back to an engine whose cost per byte grows with the size of the
+pattern. The engine does not report the bytes it examined, so a regex
+function's charge is raised to one unit per microsecond of the time it has
+taken (measured as it runs, and charged between matches when iterating).
+Ordinary searches take a few to a hundred nanoseconds per unit of their
+deterministic charge, so their fuel does not depend on timing; only work
+that the per-byte cost underestimates by an order of magnitude or more is
+charged by time.
+
+Fuel counts against `max_instructions`. Long operations check the limits while
+they run: once a scheduling slice's fuel is spent, they check the instruction
+budget, the CPU and wall-clock limits and the interrupt flag at least every
+20,000 units, so a single library call or comparison of huge values is
+stopped promptly. (Instruction checks made inside a call may let it overrun
+`max_instructions` by up to one slice, 20,000 units; the check between slices
+is exact.) Operations that cannot be interrupted internally (a single regex
+search) are charged before they start, so they fail immediately when the
+remaining budget cannot cover them. A task whose library calls use up its
+slice is preempted when the call returns, letting other tasks run.
+
+### 15.3 Compile-time limits
+
+Checking a program happens before it runs, so it is bounded separately:
+
+- **Compile fuel.** Type checking spends about one unit per expression
+  checked, unification step, type component examined or produced, and pattern
+  row examined. Ordinary programs need less than one unit per byte of source
+  (a `match` with 1,000 arms on an enum about a million). When
+  `max_compile_fuel` is exhausted, compilation fails with `program too complex
+  to compile`. `None` means unlimited.
+- **Time and interrupts.** Compilation stops with `time limit exceeded` once
+  `max_wall_time` has elapsed since it started, and with an interrupt error
+  when the host interrupts the engine.
+- **Local limits**, reported at the offending construct: syntactic nesting of
+  expressions, types, patterns and blocks is limited to 256 levels (`nesting
+  too deep`); strings nested inside string interpolations to 32 levels
+  (`strings nested too deeply inside string interpolations`); types to 10,000
+  components (`type too large`); the exhaustiveness check of one `match` to a
+  fixed amount of work (`pattern too complex to check for exhaustiveness`);
+  runtime type descriptions of `reflect` type arguments (e.g. the target
+  type of `json.decode`). A description expands struct and enum definitions,
+  describing each struct or enum instance (a definition with its type
+  arguments) once and sharing it wherever it occurs, and each distinct type
+  is described once per program, however many call sites use it. Building
+  one description may take at most 100,000 units of work (about one per
+  component built or type component examined), and all the descriptions of
+  a compilation together at most 1,000,000 (`type too large to describe at
+  runtime`); a polymorphically recursive type such as `struct P<T> { next:
+  P<[T]>? }` cannot be described. Finally, the copies of deferred code
+  (§7.1) in one function are limited to about a million instructions (`too
+  much deferred code`).
 
 ---
 
@@ -1463,6 +2136,16 @@ let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 
   number may run concurrently on different threads or tasks.
 - `run_source(name, source)`, `run_file(path)`, `check_source`, `run_tests`.
 - Captured streams: `Config::stdout(Box<dyn OutputSink>)`, `stderr`, `stdin`.
+- `Config::tls_root_certificates(Vec<Vec<u8>>)` trusts additional
+  DER-encoded root certificates for TLS (e.g. a private CA), in addition to
+  the bundled web PKI roots; calls accumulate. An invalid certificate makes
+  TLS connections fail with kind `"io"`. Without the `tls` feature it has no
+  effect.
+- Policies (§14): `Policy::check(&Capability)`, `Policy::check_entry` (for
+  operations on a directory entry itself), `Policy::denies_under(path)`;
+  `RulePolicy::{allow_net, deny_net, deny_private_networks, ...}`;
+  `sandlang::policy::{is_private_address, normalize_path,
+  normalize_entry_path}` for hosts writing their own policies or natives.
 - `NativeModule::function` accepts closures whose argument and return types
   implement `FromValue`/`IntoValue`: `i64`, `f64`, `bool`, `String`, `Vec<u8>`
   (as `bytes`), `()`, `Vec<T>`, `Option<T>`, `Result<T, E: Display>` (as
@@ -1473,6 +2156,39 @@ let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 
   `NativeModule::raw_function`).
 - `Outcome { exit_code: i32 }`; errors are `Error::Compile(diagnostics)`,
   `Error::Runtime { message, trace }`, `Error::Limit(kind)`, `Error::Interrupted`.
+- A Rust panic inside the engine (a bug in a library or host native, an I/O
+  operation or a prompter) does not unwind into the host: it ends the run
+  (or session input, or test) like a script panic, with `Error::Runtime`
+  whose message starts with `internal error:`. This requires panics to
+  unwind (the default `panic = "unwind"`).
+
+**Sessions.** `Engine::session()` returns a `Session`, which runs inputs one
+at a time with the semantics of `sand repl` (§17.6), using the engine's
+configuration (policy, prompter, limits, streams, host modules, module root
+and working directory):
+
+```rust
+let mut session = Engine::new(config).session();
+session.eval("var hits = 0\nfn hit() -> int { hits += 1\n hits }").await?;   // Ok(None)
+assert_eq!(session.eval("hit() + hit()").await?, Some("3".to_string()));
+```
+
+- `eval(source) -> Result<Option<String>, Error>` checks, compiles and runs
+  one input; `Some` holds the debug form of its value. After `exit(code)`,
+  `eval` returns `Ok(None)` and `exit_code()` returns `Some(code)` (until the
+  next input); the session remains usable.
+- `type_of(expr) -> Result<String, Error>` checks an expression without
+  running it or changing the session.
+- `run_tests() -> Result<TestReport, Error>` runs the `test` blocks entered so
+  far, against the current state.
+- `reset()` forgets all inputs. `interrupt_handle()` interrupts the input being
+  run (the engine's own handle does not affect sessions).
+- `Session::is_complete(source)` tells whether a line-based front end should
+  read more lines before evaluating (§17.6).
+- `Session: Send`; its futures are `Send`. A session shares the "always"
+  answers of its engine (§14.3). Dropping an `eval` future before it
+  completes (e.g. on a host timeout) is like interrupting the input; if it
+  was still loading imports, the input has no effect.
 
 ---
 
@@ -1480,27 +2196,55 @@ let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 
 
 ### 17.1 `sand check FILE...`
 
-Parses and type checks; prints diagnostics; exit code 1 on errors.
+Parses and type checks; prints diagnostics; exit code 1 on errors (2 if a file
+cannot be read).
+
+All subcommands exit with code 2, after a message on standard error, for usage
+errors: an unknown subcommand or option, a missing file argument, or an option
+value that cannot be parsed.
 
 ### 17.2 `sand lint FILE...`
 
-Reports warnings (exit code 1 if any, unless `--allow-warnings`):
+Reports warnings (exit code 1 if any, unless `--allow-warnings`; 2 if a file
+cannot be read or has errors):
 
 | Lint                | Description                                                                      |
 | ------------------- | -------------------------------------------------------------------------------- |
 | `unused-variable`   | local binding or parameter never read (names starting with `_` are exempt)       |
 | `unused-import`     | import never referenced                                                          |
-| `unused-function`   | private top-level function never referenced                                      |
+| `unused-function`   | private function or method not reachable from the module's public items, top-level code or tests (see below) |
 | `unnecessary-var`   | `var` never reassigned (use `let`)                                               |
 | `unused-result`     | a `Result` value is discarded                                                    |
-| `unreachable-code`  | statement after `return`, `break`, `continue`, `panic`, `exit`                   |
+| `unreachable-code`  | statement after `return`, `break`, `continue`, `panic`, `exit`, or after a `loop` that no `break` leaves (labeled breaks from nested loops count) |
+| `unused-label`      | loop label that no `break` or `continue` refers to                               |
 | `naming`            | violates naming conventions (§2.4)                                               |
 | `bool-comparison`   | comparing with `true`/`false` literal                                            |
 | `self-assignment`   | `x = x`                                                                          |
 | `len-zero`          | `x.len() == 0` (use `is_empty()`)                                                |
 | `empty-block`       | empty `if`/`else`/loop body                                                      |
 | `todo`              | call to `todo()`                                                                 |
-| `shadowed-variable` | `let` re-binding a name already bound in the same function with a different type |
+| `interpolated-literal` | `{4}` in a string: a number literal interpolated without a format spec (usually meant as literal braces, §2.5) |
+| `shadowed-variable` | `let`/`var` binding a name that is already bound, with a different type, by a binding of the same function that is still in scope (see below) |
+
+`unused-function` applies to the module being linted. Its public items are
+`pub` top-level functions and all methods of `pub` types; every other function
+and method is private. A private function counts as used only if it is
+reachable, through calls (including method calls and pipes), function values
+and default arguments, from top-level code, a `test` block or a public item.
+So a function referenced only by itself (recursion) or by other unused
+functions is reported.
+
+For `shadowed-variable`, the earlier binding may be a parameter, a `let`/`var`
+(including destructuring), a loop variable, or a `match`/`if let`/`while let`/
+lambda/comprehension binding, and must still be in scope at the new `let`:
+bindings in sibling blocks (two branches of an `if`, two loops, two `match`
+arms) do not shadow each other. A lambda belongs to its enclosing function (a
+`let` in a lambda body may shadow a binding of the enclosing function), but
+each named function and each `test` block is checked on its own, so a
+function or test re-binding a top-level name is not reported.
+
+Parameters of trait and impl methods are exempt from `unused-variable`, since
+the trait dictates them; the names of impl methods are checked at the trait.
 
 A lint can be suppressed for the next line with `// lint: allow(name)`, or for
 a file with `//! lint: allow(name)`.
@@ -1514,28 +2258,111 @@ line between statements, at most two consecutive blank lines never, items
 separated by exactly one blank line, line width 100 (calls, lists, maps and
 parameter lists that do not fit are broken one element per line), comments
 preserved. Formatting is idempotent: `fmt(fmt(x)) == fmt(x)`, and formatting
-never changes the parse tree (modulo spans).
+never changes the parse tree (modulo spans). With `--check`, files are not
+written; the exit code is 1 if any file is not formatted. Exit code 2 if a file
+cannot be read or parsed. Trait and impl bodies are laid out like struct
+bodies: one method per line, with a blank line around methods that have a body.
 
-### 17.4 `sand test FILE...`
+### 17.4 `sand test FILE... [OPTIONS]`
 
 Runs the module's top-level code with output captured, then every `test` block
 as a separate task with a fresh view of top-level state _as initialised_. Each
 test passes if it completes without panicking. Output: one line per test
-(`ok name` / `FAIL name: message`) and a summary `N passed, M failed`.
+(`ok name` / `FAIL name: message`) and a summary `N passed, M failed`. Exit
+code 1 if any test failed, 2 for compile errors.
+
+Tests are untrusted code like any script: `sand test` takes the policy and
+limit options of `sand run` (§17.5, except `--` and script arguments) and,
+like `run`, denies everything that is not allowed by them. A test that
+exceeds a limit fails with the limit's message.
 
 ### 17.5 `sand run FILE [-- ARGS...]`
 
 Options: `--allow-read=PATHS`, `--allow-write=PATHS`, `--allow-net=HOSTS`,
-`--allow-listen=ADDRS`, `--allow-env=NAMES`, `--allow-stdin`, `--allow-all`,
+`--deny-net=HOSTS`, `--allow-private-net`, `--allow-listen=ADDRS`,
+`--allow-env=NAMES`, `--allow-stdin`, `--allow-all`,
 `--prompt` (prompt on the terminal for unmatched requests), `--max-memory=BYTES`
 (suffixes K, M, G), `--max-time=DURATION`, `--max-cpu=DURATION`,
-`--max-instructions=N`, `--seed=N`. Exit code: the script's exit code, 1 for a
-runtime error or `?` failure, 2 for compile errors, 3 for limit violations.
+`--max-instructions=N`, `--max-compile-fuel=N`, `--seed=N`. Arguments after `--`, and positional
+arguments after `FILE`, are passed to the script. Exit code: the script's exit
+code (codes outside `0..=255` exit with 255), 1 for a runtime error or `?`
+failure, 2 for compile errors, 3 for limit violations.
 
-### 17.6 `sand repl`
+`--prompt` asks on the controlling terminal (`/dev/tty`; the console on
+Windows), never on the script's standard streams, so piped input cannot answer
+prompts. The answers are `y` (allow once), `a` (always), `n` or an empty line
+(deny once) and `N` (never); end of input denies, and an unrecognised answer is
+asked again up to three times before denying. Control characters in the
+request are escaped, as are Unicode format characters (such as
+bidirectional overrides), line and paragraph separators, spaces other than
+U+0020 and combining marks. Before each question the terminal's rendition is
+reset (a soft terminal reset and an SGR reset, on a fresh line) and a marker
+line is shown, so output the script left concealed or styled cannot hide or
+imitate the question. Without a terminal, prompted requests are denied.
 
-Interactive read-eval-print loop. Each input is checked and run in the
-context of the previous inputs.
+Unless `--allow-private-net` (or `--allow-all`) is given, the policy denies
+private and internal network destinations (§14.6): `--allow-net=*` does not
+reach `localhost` or `10.0.0.5`, but `--allow-net=localhost:8080`,
+`--allow-net=127.0.0.1` or `--allow-net=10.0.0.0/8` do. Malformed network
+patterns are rejected.
+
+### 17.6 `sand repl [OPTIONS]`
+
+Interactive read-eval-print loop, taking the options of `sand run` (§17.5;
+`--prompt` asks on the terminal as for `run`). It runs a session (§16): each
+input is type checked in the context of the previous inputs, then compiled
+and run **exactly once**; state persists between inputs.
+
+- An input is any mix of what a module may contain (§3.1): statements,
+  expressions and declarations, including `import`, `trait`, `impl` and
+  `test` blocks. The input's names join the session's single module scope.
+- If the input's last item is an expression statement, its value is printed
+  in debug form (§10.9), unless it has type `()` or the input ends with `;`.
+- Top-level `let`/`var` bindings are globals that later inputs may read; a
+  `var` declared by an earlier input may be assigned. Within one input, names
+  must be unique as in a module; a later input may define any name again (as
+  any kind of item), which shadows the earlier definition for later inputs.
+  Code checked earlier keeps referring to what it referred to then (a
+  function calls the function it was checked against, not a later one of the
+  same name). Methods (`extend`) and impls (§4.9) of a later input likewise
+  replace those of earlier inputs with the same name or for the same type.
+- A top-level variable's type must be inferred within the input that declares
+  it.
+- An input that fails to compile has no effect. An input that panics, exceeds
+  a limit or is interrupted keeps its declarations and every effect that
+  happened before the failure, including assignments to globals; globals it
+  had not initialised yet remain uninitialised (reading them panics, §3.1). A
+  top-level `?` that meets an `Err` aborts the input like a panic whose
+  message is the error.
+- Tasks spawned by an input keep running while later inputs run (nothing runs
+  between inputs) and can be awaited by them. A panic in any task fails the
+  input being run. After a failed input, all tasks are cancelled.
+- `exit(code)` ends the session with exit code `code`.
+- The instruction, CPU time, wall time and output limits apply to each input
+  separately; the memory limit applies to the session's heap. "Always"
+  answers to prompts apply to the rest of the session.
+- `test` blocks are checked but not run when entered.
+
+Input lines are read until the input is complete: while brackets, a string or
+a block comment are open, or the last token is a binary operator, `=`, `,`,
+`.`, `:`, `=>`, `->`, `else` or a similar token that cannot end a statement,
+or the last line is a doc comment (`///`, which belongs to the next item), the
+REPL prompts with `...` for more. Ctrl-C interrupts the input being run
+(the session continues) or discards a partially entered input; end of input
+(Ctrl-D) ends the session, running any partial input first. Results are
+printed on standard output, diagnostics and errors on standard error. The
+REPL's input is also the scripts' standard input (`--allow-stdin`); when it is
+not a terminal, a script that reads it may consume input meant for the REPL.
+
+Commands (on a line of their own):
+
+| Command      | Effect                                                         |
+| ------------ | -------------------------------------------------------------- |
+| `:help`      | show the commands                                              |
+| `:type EXPR` | show the type of an expression without running it             |
+| `:test`      | run the `test` blocks entered so far, against the current state (the last block of each name; effects persist), and print a report as `sand test` does |
+| `:reset`     | forget all inputs and start a fresh session ("always" answers are kept) |
+| `:quit`, `:q` | end the session (exit code 0)                                 |
 
 ---
 

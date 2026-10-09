@@ -66,6 +66,11 @@ impl IoTable {
         self.futures.is_empty()
     }
 
+    /// Cancels every pending operation.
+    pub fn clear(&mut self) {
+        self.futures.clear();
+    }
+
     /// Polls futures that were woken. Returns completed operations.
     pub fn poll_ready(&mut self, task_waker: Option<&Waker>) -> Vec<(u32, u64, Finisher)> {
         if let Some(w) = task_waker {
@@ -125,7 +130,9 @@ impl Vm {
             if !still_waiting {
                 continue;
             }
-            match fin(self) {
+            // A Rust panic in the finisher (a bug) becomes a script panic.
+            let r = crate::unwind::catch(|| fin(self)).unwrap_or_else(|msg| Err(Ctl::Panic(format!("internal error: {msg}"))));
+            match r {
                 Ok(v) => {
                     self.deliver(fid, wgen, v);
                 }
@@ -137,6 +144,7 @@ impl Vm {
                     return Err(Trap::Panic { message: m, trace });
                 }
                 Err(Ctl::Limit(k)) => return Err(Trap::Limit(k)),
+                Err(Ctl::Interrupted) => return Err(Trap::Interrupted),
                 Err(Ctl::Exit(c)) => return Err(Trap::Exit(c)),
                 Err(other) => {
                     return Err(Trap::Panic {
@@ -154,9 +162,10 @@ impl Vm {
     pub async fn run_main(&mut self, proto: u32) -> Result<RunEnd, Trap> {
         let closure = self.heap.alloc(Obj::Closure(proto, Box::new([])));
         let task = self.heap.alloc(Obj::Task(Box::new(TaskObj { fiber: 0, state: TaskState::Running, result: Value::Unit })));
-        let fid = self
-            .spawn_fiber(closure, task)
-            .map_err(|_| Trap::Panic { message: "internal error: cannot start main task".into(), trace: vec![] })?;
+        let fid = self.spawn_fiber(closure, task).map_err(|c| match c {
+            Ctl::Limit(k) => Trap::Limit(k),
+            _ => Trap::Panic { message: "internal error: cannot start main task".into(), trace: vec![] },
+        })?;
         if let Obj::Task(t) = self.heap.get_mut(task) {
             t.fiber = fid;
         }
@@ -166,6 +175,9 @@ impl Vm {
         let mut paused = Duration::ZERO;
         let mut cpu = Duration::ZERO;
         let mut last_yield = Instant::now();
+        // Where an instruction was retried after a memory limit error, until
+        // the task makes progress.
+        let mut gc_retried: Option<(u32, usize, u32)> = None;
         loop {
             while let Some(fid) = self.ready.pop_front() {
                 let Some(mut f) = self.fibers.get_mut(fid as usize).and_then(|f| f.take()) else { continue };
@@ -176,12 +188,41 @@ impl Vm {
                 self.current = fid;
                 let mut fuel = SLICE_FUEL;
                 let t0 = Instant::now();
-                let r = self.interp(&mut f, &mut fuel);
+                // Deadlines let long natives check the time limits mid-call.
+                let l = &self.host.limits;
+                let cpu_deadline = l.max_cpu_time.and_then(|m| t0.checked_add(m.saturating_sub(cpu)));
+                let wall_deadline = l.max_wall_time.and_then(|m| start.checked_add(paused.saturating_add(m)));
+                self.meter.start_slice(fuel, self.fuel_used, cpu_deadline, wall_deadline);
+                // A Rust panic in the interpreter or a native (a bug) ends
+                // the run as a panic instead of unwinding into the host;
+                // caught per slice, which costs nothing per native call.
+                let r = match crate::unwind::catch(|| self.interp(&mut f, &mut fuel)) {
+                    Ok(r) => r,
+                    Err(msg) => Err(Trap::Panic { message: format!("internal error: {msg}"), trace: self.trace_of(&f, None) }),
+                };
                 cpu += t0.elapsed();
-                self.fuel_used += (SLICE_FUEL - fuel).max(0) as u64;
+                self.fuel_used += (SLICE_FUEL - fuel).max(0) as u64 + self.meter.spent();
                 self.current = u32::MAX;
                 let exit = match r {
-                    Ok(e) => e,
+                    Ok(e) => {
+                        gc_retried = None;
+                        e
+                    }
+                    Err(Trap::Limit(LimitKind::Memory)) if std::mem::take(&mut self.gc_retry) => {
+                        // Memory checks count uncollected garbage: collect and
+                        // run the failed instruction once more (unless that
+                        // is what just failed).
+                        let at = (fid, f.frames.len(), f.frames.last().map_or(0, |fr| fr.ip));
+                        if gc_retried == Some(at) {
+                            return Err(Trap::Limit(LimitKind::Memory));
+                        }
+                        gc_retried = Some(at);
+                        self.collect_all_garbage(Some(&mut f));
+                        f.state = FiberState::Ready;
+                        self.fibers[fid as usize] = Some(f);
+                        self.ready.push_front(fid);
+                        continue;
+                    }
                     Err(Trap::Exit(c)) => return Ok(RunEnd::Exit(c)),
                     Err(t) => return Err(t),
                 };
@@ -241,6 +282,7 @@ impl Vm {
                 self.check_limits(start, paused, cpu)?;
                 // Keep I/O flowing and let other host tasks run.
                 if last_yield.elapsed() > Duration::from_millis(2) {
+                    self.heap.io_memory.publish_heap(self.heap.used());
                     let done = self.io.poll_ready(None);
                     self.apply_completions(done)?;
                     tokio::task::yield_now().await;
@@ -258,6 +300,8 @@ impl Vm {
             let remaining = self.host.limits.max_wall_time.map(|m| m.saturating_sub(start.elapsed().saturating_sub(paused)));
             let mut sleep = remaining.map(|r| Box::pin(tokio::time::sleep(r)));
             let interrupt = self.host.interrupt.clone();
+            // Pending I/O checks its buffers against the heap's current size.
+            self.heap.io_memory.publish_heap(self.heap.used());
             let done = std::future::poll_fn(|cx| {
                 let done = self.io.poll_ready(Some(cx.waker()));
                 if !done.is_empty() {

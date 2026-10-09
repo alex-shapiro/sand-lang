@@ -23,6 +23,10 @@
 //! * `--- test`: run with the test runner; expected report.
 //! * `--- args`: whitespace-separated script arguments.
 //! * `--- env`: `NAME=value` lines forming the script's environment.
+//!
+//! Every file is also run a second time with `Config::gc_stress`, which
+//! collects garbage at every safe point (alternating minor and major
+//! collections), to check that the collector never frees live values.
 
 mod common;
 
@@ -93,7 +97,7 @@ fn parse_cases(text: &str) -> Vec<Case> {
     cases
 }
 
-fn run_case(case: &Case) -> Result<(), String> {
+fn run_case(case: &Case, gc_stress: bool) -> Result<(), String> {
     let get = |name: &str| case.sections.iter().find(|(h, _)| h == name).map(|(_, b)| b.clone());
     let dir = TempDir::new(&case.name);
     for (h, body) in &case.sections {
@@ -133,7 +137,8 @@ fn run_case(case: &Case) -> Result<(), String> {
     let main = dir.write("main.sand", &case.source);
     let out = MemorySink::new();
     let err = MemorySink::new();
-    let mut config = Config::new().policy(Policy::allow_all()).cwd(dir.path()).stdout(out.clone()).stderr(err.clone()).seed(42);
+    let mut config =
+        Config::new().policy(Policy::allow_all()).cwd(dir.path()).stdout(out.clone()).stderr(err.clone()).seed(42).gc_stress(gc_stress);
     if let Some(stdin) = get("stdin") {
         config = config.stdin_bytes(stdin.into_bytes());
     }
@@ -227,7 +232,7 @@ fn run_case(case: &Case) -> Result<(), String> {
     Ok(())
 }
 
-fn run_file(name: &str) {
+fn run_file(name: &str, gc_stress: bool) {
     let path = format!("{}/tests/spec/{name}.test", env!("CARGO_MANIFEST_DIR"));
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
     let cases = parse_cases(&text);
@@ -242,11 +247,11 @@ fn run_file(name: &str) {
             continue;
         }
         ran += 1;
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_case(case)));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_case(case, gc_stress)));
         match outcome {
             Ok(Ok(())) => {}
-            Ok(Err(msg)) => failures.push(format!("[{name}.test:{}] {}\n{msg}", case.line, case.name)),
-            Err(_) => failures.push(format!("[{name}.test:{}] {}\nHARNESS PANIC", case.line, case.name)),
+            Ok(Err(msg)) => failures.push(format!("[{name}.test:{}] {}{}\n{msg}", case.line, case.name, stress_note(gc_stress))),
+            Err(_) => failures.push(format!("[{name}.test:{}] {}{}\nHARNESS PANIC", case.line, case.name, stress_note(gc_stress))),
         }
     }
     if !failures.is_empty() {
@@ -254,14 +259,26 @@ fn run_file(name: &str) {
     }
 }
 
+fn stress_note(gc_stress: bool) -> &'static str {
+    if gc_stress { " (under GC stress)" } else { "" }
+}
+
 macro_rules! spec_files {
     ($($name:ident),* $(,)?) => {
         $(
             #[test]
             fn $name() {
-                run_file(stringify!($name));
+                run_file(stringify!($name), false);
             }
         )*
+        mod gc_stress {
+            $(
+                #[test]
+                fn $name() {
+                    super::run_file(stringify!($name), true);
+                }
+            )*
+        }
     };
 }
 
@@ -272,6 +289,7 @@ spec_files!(
     format,
     collections,
     control_flow,
+    defer,
     functions,
     closures,
     structs,
@@ -279,6 +297,8 @@ spec_files!(
     patterns,
     option_result,
     generics,
+    iterators,
+    traits,
     types,
     modules,
     concurrency,

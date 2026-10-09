@@ -93,6 +93,8 @@ const TOKENS: &[&str] = &[
     "return",
     "break",
     "continue",
+    "defer",
+    "@outer",
     "spawn",
     "import",
     "from",
@@ -100,6 +102,8 @@ const TOKENS: &[&str] = &[
     "test",
     "type",
     "extend",
+    "trait",
+    "impl",
     "native",
     "and",
     "or",
@@ -200,7 +204,7 @@ fn corpus() -> Vec<String> {
             }
         }
     }
-    for ex in ["life.sand", "calc.sand", "template.sand", "adventure.sand", "search_index.sand", "s3/s3.sand"] {
+    for ex in ["life.sand", "calc.sand", "template.sand", "adventure.sand", "search_index.sand", "ledger.sand", "s3/s3.sand"] {
         out.push(std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples").join(ex)).unwrap());
     }
     out
@@ -363,4 +367,92 @@ fn random_json_and_uri_inputs() {
     let r = rt().block_on(engine.run_source("fuzz.sand", &src));
     assert!(r.is_ok(), "{r:?}");
     assert_eq!(out.contents(), "true\n");
+}
+
+/// Reproducers found by the coverage-guided targets in `fuzz/` (`cargo +nightly fuzz run ...`).
+/// Each must be handled by the front end, formatter and VM without a host panic, and
+/// the formatter must stay idempotent on it.
+#[test]
+fn fuzz_regressions() {
+    let cases: &[&str] = &[
+        // Integer duration literal whose value times the unit overflowed i128 in the lexer.
+        "fn f(b: bool) -> int {\n    match 33333333333333333333333333333333333333333333333333333333333333333333333333h b {\n        true => 1\n    }\n}\n",
+        "let d = 3333333333333333333333333333333333333333h",
+        // Variant patterns on a scrutinee whose type has no fields to offer (error
+        // type, `never`) indexed past the end of the column types in pat.rs.
+        "let tasks = urks.map(u => spawn fetch(u))\nfor (url, t) in urls.zip(tasks) {\n    match t.wait() {\n        Ok(page) => print(page)\n        Err(e) => print(\"{url}: {e}\")\n    }\n}\n",
+        "fn f() -> int {\n    match panic(\"x\") {\n        Some(v) => v\n        None => 0\n    }\n}\nprint(f())\n",
+        "fn f() -> int {\n    match [panic(\"x\")] {\n        [Ok(Some((a, b)))] => a + b\n        _ => 0\n    }\n}\nprint(f())\n",
+        // A trailing comment ending in `}` after a one-line declaration was taken
+        // for the declaration's closing brace (formatter not idempotent).
+        "import json\nstruct Item { name: str }//\0\0\0\0e name: str }//\0\0\0\0e mOrdson.decodesth.\u{19}\u{12}\0\0e",
+        "enum E { A } // }",
+        // Two `?` in a row were printed as `??`, the coalescing operator.
+        "l ? ?",
+        // A `\x` escape followed by a multi-byte character sliced a `str` mid-character.
+        "let maybe = Some(3)\nprint(b\"\\x0П\")\nprint(b\"\\xП\")\nlet x = b\"\\x",
+    ];
+    for src in cases {
+        check_only(src);
+        exercise(src);
+        if let Ok(once) = sandlang::fmt::format_source(src) {
+            let twice = sandlang::fmt::format_source(&once).expect("formatted output must parse");
+            assert_eq!(once, twice, "formatter not idempotent for:\n{src}");
+        }
+    }
+}
+
+#[test]
+fn hostile_native_work_is_contained() {
+    // Single operations doing unbounded work: each must be stopped by a
+    // limit while it runs, not after.
+    let dag = "enum T { Leaf(int), Node(T, T) }\nvar a = T.Leaf(1)\nvar b = T.Leaf(1)\nfor i in 0..60 {\n    a = T.Node(a, a)\n    b = T.Node(b, b)\n}\n";
+    let programs = [
+        format!("{dag}print(a == b)"),
+        format!("{dag}print(a < b)"),
+        format!("{dag}print(a)"),
+        format!("{dag}print(\"{{a:?}}\")"),
+        format!("{dag}print([a, b, a, b].sorted().len())"),
+        format!("{dag}print([a].contains(b))"),
+        format!("{dag}print(set([a]).len())"),
+        format!("{dag}let m = [a: 1]\nprint(m.len())"),
+        format!("import json\n{dag}print(json.encode(a).len())"),
+        "let s = \"x\".repeat(20000000)\nvar n = 0\nwhile true { n += s.len() + s.find(\"y\").unwrap_or(0) }".into(),
+        "let s = \"x\".repeat(20000000)\nlet m = [s: 1]\nwhile true { m.contains(s) }".into(),
+        "let xs = (0..1000000).to_list()\nwhile true { xs.sorted() }".into(),
+        "import crypto\nlet b = \"x\".repeat(20000000).bytes()\nwhile true { crypto.sha256(b) }".into(),
+        "import regex\nlet s = \"a\".repeat(20000000)\nlet r = regex.new(\"a\")?\nwhile true { r.find_all(s) }".into(),
+        "let s = \"ab,\".repeat(5000000)\nwhile true { s.split(\",\") }".into(),
+    ];
+    for src in &programs {
+        let start = std::time::Instant::now();
+        exercise(src);
+        assert!(start.elapsed() < Duration::from_secs(10), "took too long: {src}");
+    }
+}
+
+#[test]
+fn hostile_compile_inputs_are_contained() {
+    let n = 40;
+    let mut doubling = String::from("let a0 = 1\n");
+    for i in 1..n {
+        doubling += &format!("let a{i} = (a{}, a{})\n", i - 1, i - 1);
+    }
+    let programs = [
+        doubling,
+        format!(
+            "enum E {{ A, B, C }}\nfn f(t: ({})) -> int {{\n    match t {{\n        ({}) => 0\n        ({}) => 1\n    }}\n}}\n",
+            vec!["E"; n].join(", "),
+            vec!["_"; n].join(", "),
+            vec!["A | B"; n].join(", ")
+        ),
+        format!("fn dup<T>(x: T) -> (T, T) {{ (x, x) }}\nlet a = {}1{}\n", "dup(".repeat(n), ")".repeat(n)),
+        format!("let s = {}1{}\n", "\"{".repeat(200_000), "}\"".repeat(200_000)),
+    ];
+    for src in &programs {
+        let start = std::time::Instant::now();
+        check_only(src);
+        exercise(src);
+        assert!(start.elapsed() < Duration::from_secs(10), "took too long: {}", &src[..src.len().min(200)]);
+    }
 }

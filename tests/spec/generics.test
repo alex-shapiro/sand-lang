@@ -47,6 +47,80 @@ print(sum_all([0.5, 0.25], 0.0))
 6
 0.75
 
+=== sums of empty lists have the element type
+let fs: [float] = []
+print(fs.sum() + 1.0)
+print(fs.product() * 2.0)
+let ns: [int] = []
+print((ns.sum(), ns.product()))
+print(([0.5, 0.25].sum(), [2, 3].product()))
+--- stdout
+1.0
+2.0
+(0, 1)
+(0.75, 6)
+
+=== Num bounds provide zero and one
+fn total<T: Num>(xs: [T]) -> T {
+    xs.sum()
+}
+fn identities<T>() -> (T, T) where T: Num {
+    (T.zero(), T.one())
+}
+let empty: [float] = []
+print(total(empty) / 2.0)
+print(total([4, 5]))
+let p: (float, float) = identities()
+let q: (int, int) = identities()
+print((p, q))
+--- stdout
+0.0
+9
+((0.0, 1.0), (0, 1))
+
+=== Num evidence through traits and generic impls
+trait Shape: Num {
+    fn area(self) -> float
+}
+impl Shape for float {
+    fn area(self) -> float { self }
+}
+trait Measure {
+    fn total(self) -> float
+}
+impl<T: Shape> Measure for [T] {
+    fn total(self) -> float {
+        let sum = self.sum()
+        sum.area()
+    }
+}
+let none: [float] = []
+print(none.total())
+print([1.5, 2.0].total())
+struct Pair<T: Num> {
+    a: T
+    b: T
+
+    fn sum_with(self, xs: [T]) -> T { xs.sum() + self.a + self.b }
+}
+print(Pair { a: 0.5, b: 0.25 }.sum_with([]))
+print(Pair { a: 1, b: 2 }.sum_with([3]))
+--- stdout
+0.0
+3.5
+0.75
+6
+
+=== the Num evidence trait is not visible
+fn f<T: Num>() -> T { T.zero() }
+let s: str = f()
+print(int.zero())
+print(Num.one())
+--- error
+2: str does not satisfy Num
+3: no method `zero` on type int
+4: undefined name `Num`
+
 === arithmetic on unbounded type parameter is an error
 fn add<T>(a: T, b: T) -> T { a + b }
 --- error

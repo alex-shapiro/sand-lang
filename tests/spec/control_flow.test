@@ -311,3 +311,257 @@ let p = P { x: 1 }
 if p == (P { x: 1 }) { print("eq") }
 --- stdout
 eq
+
+=== loops with invariant constants, immutable and mutable globals and cells
+let K = 3
+let NAME = "kk"
+var counter = 0
+
+fn bump() {
+    counter += 1
+}
+
+// Immutable globals and constants in a loop: hoisted.
+fn uses_consts(n: int) -> int {
+    var t = 0
+    for i in 0..n {
+        t += K * i + NAME.len() + i % 7
+        if i % 2 == 0 {
+            continue
+        }
+        if t > 1000000 {
+            break
+        }
+        t -= 1
+    }
+    t
+}
+
+// A mutable global changes during the loop: never hoisted.
+fn reads_var() -> int {
+    var t = 0
+    for i in 0..5 {
+        bump()
+        t += counter
+    }
+    t
+}
+
+// A captured mutable local (a cell) changes during the loop.
+fn reads_cell() -> int {
+    var k = 1
+    let inc = () => {
+        k += 1
+    }
+    var t = 0
+    for i in 0..3 {
+        inc()
+        t += k * K
+    }
+    t
+}
+
+// Locals declared inside a loop that is compiled twice (fast/slow copies).
+fn patterns(pairs: [(int, str)]) -> str {
+    var out = ""
+    for (n, s) in pairs {
+        let doubled = n * K
+        match doubled {
+            6 => { out = out + "six," }
+            _ => { out = out + "{s}{doubled}," }
+        }
+    }
+    var i = 0
+    let r = loop {
+        i += 1
+        if i * K > 10 {
+            break i
+        }
+    }
+    var xs = [1, 2, 3]
+    while let Some(x) = xs.pop() {
+        out = out + "{x * K}"
+    }
+    "{out} {r}"
+}
+
+fn early(n: int) -> int {
+    for i in 0..n {
+        if i * K > 7 {
+            return i
+        }
+    }
+    -1
+}
+
+fn nested() -> int {
+    var t = 0
+    for a in 0..4 {
+        for b in 0..4 {
+            if (a + b) % 3 == 0 {
+                t += K
+            } else {
+                t += 1
+            }
+        }
+    }
+    t
+}
+
+fn float_and_strings() -> str {
+    var x = 0.0
+    let m = ["a": 1, "b": 2]
+    var s = 0
+    for i in 0..10 {
+        x = x * 0.5 + 1.5
+        s += m["a"] + m["b"]
+        if x > 2.5 {
+            s += 100
+        }
+    }
+    "{x} {s}"
+}
+
+print(uses_consts(50))
+print(reads_var())
+print(counter)
+print(reads_cell())
+print(patterns([(1, "a"), (2, "b"), (3, "c")]))
+print(early(10))
+print(nested())
+print(float_and_strings())
+--- stdout
+3897
+15
+5
+27
+a3,six,c9,963 4
+3
+28
+2.9970703125 830
+
+=== labeled break and continue
+let grid = [[1, 2, 3], [4, 0, 6], [7, -1, 9], [10]]
+let seen = []
+@rows for row in grid {
+    for x in row {
+        if x < 0 { break @rows }
+        if x == 0 { continue @rows }
+        seen.push(x)
+    }
+}
+print(seen)
+var n = 0
+@outer while n < 10 {
+    n += 1
+    for _ in 0..3 {
+        if n % 2 == 0 { continue @outer }
+        if n > 6 { break @outer }
+    }
+}
+print(n)
+var count = 0
+@outer for (i, j) in [(1, 2), (3, 4)] {
+    @inner loop {
+        count += i + j
+        if count > 5 { break @outer }
+        break @inner
+    }
+}
+print(count)
+--- stdout
+[1, 2, 3, 4, 7]
+7
+10
+
+=== labeled loop values
+var i = 0
+let found = @search loop {
+    var j = 0
+    while j < 4 {
+        if i * j == 6 { break @search (i, j) }
+        j += 1
+    }
+    i += 1
+}
+print(found)
+let first = @a loop {
+    loop {
+        break @a "out"
+    }
+}
+print(first)
+let unit = @l loop { break @l
+}
+print(unit)
+--- stdout
+(2, 3)
+out
+()
+
+=== labeled continue to a loop restarts its body
+var k = 0
+var log = []
+@top loop {
+    k += 1
+    if k > 3 { break }
+    for x in 0..5 {
+        if x == 1 { continue @top }
+        log.push((k, x))
+    }
+}
+print(log)
+--- stdout
+[(1, 0), (2, 0), (3, 0)]
+
+=== label errors
+@a for i in 0..3 {
+    @a for j in 0..3 { break @a }
+    break @nope
+    [1].each(x => {
+        if x > 0 { continue @a }
+    })
+    fn f() { break @a }
+}
+@w while true { break @w 5 }
+continue @a
+--- error
+2: label `@a` is already used by an enclosing loop
+3: unknown label `@nope`
+5: `continue @a` cannot leave the enclosing lambda or function
+7: `break @a` cannot leave the enclosing lambda or function
+9: break with a value is only allowed inside `loop`
+10: unknown label `@a`
+
+=== labels must label loops on the same line
+@a
+for i in 0..3 { }
+--- error
+1: expected `loop`, `while` or `for` after a label
+
+=== labels are written without a space
+@ a for i in 0..3 { }
+--- error
+1: expected a label name directly after `@`
+
+=== labels apply only to loops
+let x = @a { 1 }
+--- error
+1: expected `loop`, `while` or `for` after a label
+
+=== break and continue in comprehensions refer to the enclosing loop
+var rows = []
+for i in 0..4 {
+    if i == 1 { continue }
+    rows.push([if x > 4 - i { break } else { x * 10 + i } for x in 0..3])
+}
+print(rows)
+var out = []
+@outer for i in 0..3 {
+    out.push([if x == i { continue @outer } else { x } for x in 0..3])
+}
+print(out)
+--- stdout
+[[0, 10, 20], [2, 12, 22]]
+[]
+

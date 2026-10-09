@@ -3,33 +3,42 @@
 
 use crate::check::ModKind;
 use crate::engine::Registry;
+use crate::vm::Ctl;
+use crate::vm::meter::{Budget, SLOW_BYTES_PER_UNIT};
 use crate::vm::value::Value;
 
 pub fn register(r: &mut Registry) {
     r.source("crypto", ModKind::Std, include_str!("crypto.sand"));
     r.add_builtin("crypto.sha256", |vm, a| {
-        let d = sha256(vm.heap.bytes_of(a[0]));
+        let d = sha256_parts(&[vm.heap.bytes_of(a[0])], &vm.meter)?;
         Ok(vm.heap.new_bytes(d.to_vec()))
     });
     r.add_builtin("crypto.sha1", |vm, a| {
-        let d = sha1(vm.heap.bytes_of(a[0]));
+        let d = sha1(vm.heap.bytes_of(a[0]), &vm.meter)?;
         Ok(vm.heap.new_bytes(d.to_vec()))
     });
     r.add_builtin("crypto.md5", |vm, a| {
-        let d = md5(vm.heap.bytes_of(a[0]));
+        let d = md5(vm.heap.bytes_of(a[0]), &vm.meter)?;
         Ok(vm.heap.new_bytes(d.to_vec()))
     });
     r.add_builtin("crypto.hmac_sha256", |vm, a| {
-        let d = hmac_sha256(vm.heap.bytes_of(a[0]), vm.heap.bytes_of(a[1]));
+        let d = hmac_sha256(vm.heap.bytes_of(a[0]), vm.heap.bytes_of(a[1]), &vm.meter)?;
         Ok(vm.heap.new_bytes(d.to_vec()))
     });
-    r.add_builtin("crypto.constant_time_eq", |vm, a| Ok(Value::Bool(constant_time_eq(vm.heap.bytes_of(a[0]), vm.heap.bytes_of(a[1])))));
+    r.add_builtin("crypto.constant_time_eq", |vm, a| {
+        vm.charge_bytes(vm.heap.bytes_of(a[0]).len())?;
+        Ok(Value::Bool(constant_time_eq(vm.heap.bytes_of(a[0]), vm.heap.bytes_of(a[1]))))
+    });
 }
+
+/// Blocks hashed between charges to the budget (4 KiB).
+const BLOCKS_PER_CHARGE: usize = 64;
 
 /// Merkle–Damgård padding shared by SHA-1, SHA-256 and MD5: the message
 /// (the concatenation of `parts`), `0x80`, zeros, and the bit length (big-
-/// or little-endian) filling 64-byte blocks. Calls `block` for each block.
-fn md_blocks(parts: &[&[u8]], big_endian: bool, mut block: impl FnMut(&[u8; 64])) {
+/// or little-endian) filling 64-byte blocks. Calls `block` for each block,
+/// charging `budget` as it goes so that hashing huge inputs can be stopped.
+fn md_blocks(parts: &[&[u8]], big_endian: bool, budget: &impl Budget, mut block: impl FnMut(&[u8; 64])) -> Result<(), Ctl> {
     let mut buf = [0u8; 64];
     let mut filled = 0;
     let mut len: u64 = 0;
@@ -47,7 +56,10 @@ fn md_blocks(parts: &[&[u8]], big_endian: bool, mut block: impl FnMut(&[u8; 64])
             block(&buf);
         }
         let (blocks, rem) = rest.as_chunks::<64>();
-        blocks.iter().for_each(&mut block);
+        for chunk in blocks.chunks(BLOCKS_PER_CHARGE) {
+            budget.charge((chunk.len() * 64 / SLOW_BYTES_PER_UNIT) as u64)?;
+            chunk.iter().for_each(&mut block);
+        }
         buf[..rem.len()].copy_from_slice(rem);
         filled = rem.len();
     }
@@ -59,6 +71,7 @@ fn md_blocks(parts: &[&[u8]], big_endian: bool, mut block: impl FnMut(&[u8; 64])
     let len_bytes = if big_endian { bit_len.to_be_bytes() } else { bit_len.to_le_bytes() };
     tail[total - 8..total].copy_from_slice(&len_bytes);
     tail[..total].as_chunks::<64>().0.iter().for_each(block);
+    Ok(())
 }
 
 const SHA256_K: [u32; 64] = [
@@ -70,15 +83,10 @@ const SHA256_K: [u32; 64] = [
     0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
-/// SHA-256 (FIPS 180-4).
-pub(crate) fn sha256(data: &[u8]) -> [u8; 32] {
-    sha256_parts(&[data])
-}
-
-/// SHA-256 of the concatenation of `parts`.
-fn sha256_parts(parts: &[&[u8]]) -> [u8; 32] {
+/// SHA-256 (FIPS 180-4) of the concatenation of `parts`.
+pub(crate) fn sha256_parts(parts: &[&[u8]], budget: &impl Budget) -> Result<[u8; 32], Ctl> {
     let mut h: [u32; 8] = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
-    md_blocks(parts, true, |block| {
+    md_blocks(parts, true, budget, |block| {
         let mut w = [0u32; 64];
         for (i, word) in block.as_chunks::<4>().0.iter().enumerate() {
             w[i] = u32::from_be_bytes(*word);
@@ -108,18 +116,18 @@ fn sha256_parts(parts: &[&[u8]]) -> [u8; 32] {
         for (x, y) in h.iter_mut().zip([a, b, c, d, e, f, g, hh]) {
             *x = x.wrapping_add(y);
         }
-    });
+    })?;
     let mut out = [0u8; 32];
     for (o, x) in out.as_chunks_mut::<4>().0.iter_mut().zip(h) {
         *o = x.to_be_bytes();
     }
-    out
+    Ok(out)
 }
 
 /// SHA-1 (FIPS 180-4).
-pub(crate) fn sha1(data: &[u8]) -> [u8; 20] {
+pub(crate) fn sha1(data: &[u8], budget: &impl Budget) -> Result<[u8; 20], Ctl> {
     let mut h: [u32; 5] = [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0];
-    md_blocks(&[data], true, |block| {
+    md_blocks(&[data], true, budget, |block| {
         let mut w = [0u32; 80];
         for (i, word) in block.as_chunks::<4>().0.iter().enumerate() {
             w[i] = u32::from_be_bytes(*word);
@@ -145,12 +153,12 @@ pub(crate) fn sha1(data: &[u8]) -> [u8; 20] {
         for (x, y) in h.iter_mut().zip([a, b, c, d, e]) {
             *x = x.wrapping_add(y);
         }
-    });
+    })?;
     let mut out = [0u8; 20];
     for (o, x) in out.as_chunks_mut::<4>().0.iter_mut().zip(h) {
         *o = x.to_be_bytes();
     }
-    out
+    Ok(out)
 }
 
 const MD5_S: [u32; 64] = [
@@ -159,11 +167,11 @@ const MD5_S: [u32; 64] = [
 ];
 
 /// MD5 (RFC 1321).
-pub(crate) fn md5(data: &[u8]) -> [u8; 16] {
+pub(crate) fn md5(data: &[u8], budget: &impl Budget) -> Result<[u8; 16], Ctl> {
     // K[i] = floor(abs(sin(i + 1)) * 2^32).
     let k: [u32; 64] = std::array::from_fn(|i| ((i as f64 + 1.0).sin().abs() * 4294967296.0) as u32);
     let mut h: [u32; 4] = [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476];
-    md_blocks(&[data], false, |block| {
+    md_blocks(&[data], false, budget, |block| {
         let mut m = [0u32; 16];
         for (i, word) in block.as_chunks::<4>().0.iter().enumerate() {
             m[i] = u32::from_le_bytes(*word);
@@ -185,26 +193,26 @@ pub(crate) fn md5(data: &[u8]) -> [u8; 16] {
         for (x, y) in h.iter_mut().zip([a, b, c, d]) {
             *x = x.wrapping_add(y);
         }
-    });
+    })?;
     let mut out = [0u8; 16];
     for (o, x) in out.as_chunks_mut::<4>().0.iter_mut().zip(h) {
         *o = x.to_le_bytes();
     }
-    out
+    Ok(out)
 }
 
 /// HMAC-SHA256 (RFC 2104).
-pub(crate) fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
+pub(crate) fn hmac_sha256(key: &[u8], data: &[u8], budget: &impl Budget) -> Result<[u8; 32], Ctl> {
     let mut k = [0u8; 64];
     if key.len() > 64 {
-        k[..32].copy_from_slice(&sha256(key));
+        k[..32].copy_from_slice(&sha256_parts(&[key], budget)?);
     } else {
         k[..key.len()].copy_from_slice(key);
     }
     let ipad = k.map(|b| b ^ 0x36);
     let opad = k.map(|b| b ^ 0x5c);
-    let inner = sha256_parts(&[&ipad, data]);
-    sha256_parts(&[&opad, &inner])
+    let inner = sha256_parts(&[&ipad, data], budget)?;
+    sha256_parts(&[&opad, &inner], budget)
 }
 
 /// Equality whose running time does not depend on where the inputs differ.
@@ -219,6 +227,11 @@ pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vm::meter::Unmetered;
+
+    fn sha256(data: &[u8]) -> [u8; 32] {
+        sha256_parts(&[data], &Unmetered).unwrap()
+    }
 
     fn hex(b: &[u8]) -> String {
         b.iter().map(|x| format!("{x:02x}")).collect()
@@ -229,25 +242,28 @@ mod tests {
         // NIST two-block message.
         let m = b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
         assert_eq!(hex(&sha256(m)), "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
-        assert_eq!(hex(&sha1(m)), "84983e441c3bd26ebaae4aa1f95129e5e54670f1");
+        assert_eq!(hex(&sha1(m, &Unmetered).unwrap()), "84983e441c3bd26ebaae4aa1f95129e5e54670f1");
         assert_eq!(
-            hex(&md5(b"12345678901234567890123456789012345678901234567890123456789012345678901234567890")),
+            hex(&md5(b"12345678901234567890123456789012345678901234567890123456789012345678901234567890", &Unmetered).unwrap()),
             "57edf4a22be3c955ac49da2e2107b67a"
         );
         // Splitting the input must not change the digest.
         let data: Vec<u8> = (0..300u32).map(|i| i as u8).collect();
         for cut in [0, 1, 55, 63, 64, 65, 200, 300] {
-            assert_eq!(sha256_parts(&[&data[..cut], &data[cut..]]), sha256(&data));
+            assert_eq!(sha256_parts(&[&data[..cut], &data[cut..]], &Unmetered).unwrap(), sha256(&data));
         }
     }
 
     #[test]
     fn hmac_rfc4231() {
         let key = [0x0bu8; 20];
-        assert_eq!(hex(&hmac_sha256(&key, b"Hi There")), "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7");
+        assert_eq!(
+            hex(&hmac_sha256(&key, b"Hi There", &Unmetered).unwrap()),
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+        );
         let long_key = [0xaau8; 131];
         assert_eq!(
-            hex(&hmac_sha256(&long_key, b"Test Using Larger Than Block-Size Key - Hash Key First")),
+            hex(&hmac_sha256(&long_key, b"Test Using Larger Than Block-Size Key - Hash Key First", &Unmetered).unwrap()),
             "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
         );
     }

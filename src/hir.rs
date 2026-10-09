@@ -3,7 +3,7 @@
 //! bound, and syntactic sugar is removed.
 
 use crate::diag::Span;
-use crate::types::{FnId, GlobalId, Type, TypeDefId};
+use crate::types::{FnId, GlobalId, ImplId, TraitId, TraitRef, Type, TypeDefId};
 
 pub type LocalId = u32;
 
@@ -125,6 +125,17 @@ pub struct HArm {
     pub body: HExpr,
 }
 
+/// The evidence an [`HKind::Evidence`] placeholder stands for: `ty: tr`.
+#[derive(Clone, Debug)]
+pub struct EvidenceReq {
+    pub ty: Type,
+    pub tr: TraitRef,
+    /// Set for the dictionaries of a function value whose parameter types
+    /// mention `ty`: if `ty` remains unknown, no argument of that type can
+    /// exist, so the function is never called and a placeholder suffices.
+    pub lenient: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct HLambda {
     pub id: u32,
@@ -214,8 +225,14 @@ pub enum HKind {
         inclusive: bool,
         body: Box<HExpr>,
     },
-    Break(Option<Box<HExpr>>),
-    Continue,
+    /// Leaves the loop `depth` loops out from the innermost (0) enclosing one.
+    Break {
+        value: Option<Box<HExpr>>,
+        depth: u32,
+    },
+    Continue {
+        depth: u32,
+    },
     Return(Option<Box<HExpr>>),
     Call {
         func: FnId,
@@ -228,6 +245,26 @@ pub enum HKind {
     },
     CallValue {
         callee: Box<HExpr>,
+        args: Vec<HExpr>,
+    },
+    /// Calls method `slot` of trait `trait_id` through the dictionary passed
+    /// as the first argument.
+    CallTrait {
+        trait_id: TraitId,
+        slot: u32,
+        args: Vec<HArg>,
+        /// The impl the dictionary comes from, when known statically (the
+        /// compiler then calls its method directly).
+        impl_id: Option<ImplId>,
+    },
+    /// Evidence that a type implements a trait, needed by a call. Replaced by
+    /// a dictionary expression (a hidden parameter, a projection of one, or a
+    /// [`HKind::Dict`]) when the enclosing function has been checked.
+    Evidence(Box<EvidenceReq>),
+    /// The dictionary of an impl: the trait's methods, followed by `args`
+    /// (supertrait dictionaries, then the dictionaries for the impl's bounds).
+    Dict {
+        impl_id: ImplId,
         args: Vec<HExpr>,
     },
     MakeVariant {
@@ -304,6 +341,8 @@ pub enum HKind {
         inclusive: bool,
     },
     Spawn(Box<HExpr>),
+    /// `defer e` (a statement of a block): `e` runs when the block exits.
+    Defer(Box<HExpr>),
     /// Universal methods.
     ToStr(Box<HExpr>),
     Debug(Box<HExpr>),
@@ -341,6 +380,144 @@ pub enum HPatKind {
         after: Vec<HPat>,
     },
     Or(Vec<HPat>),
+}
+
+impl HExpr {
+    /// Pre-order traversal of every expression (including inside lambdas,
+    /// places and arguments) that may replace nodes.
+    pub fn visit_mut(&mut self, f: &mut impl FnMut(&mut HExpr)) {
+        f(self);
+        match &mut self.kind {
+            HKind::Let { init, else_, .. } => {
+                init.visit_mut(f);
+                if let Some(x) = else_ {
+                    x.visit_mut(f);
+                }
+            }
+            HKind::LocalFns { lambdas, .. } => lambdas.iter_mut().for_each(|x| x.visit_mut(f)),
+            HKind::Assign { place, value, .. } => {
+                match place {
+                    Place::Field { obj, .. } => obj.visit_mut(f),
+                    Place::Index { obj, index, .. } => {
+                        obj.visit_mut(f);
+                        index.visit_mut(f);
+                    }
+                    _ => {}
+                }
+                value.visit_mut(f);
+            }
+            HKind::Block(xs)
+            | HKind::Tuple(xs)
+            | HKind::List(xs)
+            | HKind::MakeVariant { args: xs, .. }
+            | HKind::MakeStruct { fields: xs, .. }
+            | HKind::Dict { args: xs, .. } => xs.iter_mut().for_each(|x| x.visit_mut(f)),
+            HKind::If { cond, then, else_ } => {
+                cond.visit_mut(f);
+                then.visit_mut(f);
+                if let Some(x) = else_ {
+                    x.visit_mut(f);
+                }
+            }
+            HKind::IfLet { value, then, else_, .. } => {
+                value.visit_mut(f);
+                then.visit_mut(f);
+                if let Some(x) = else_ {
+                    x.visit_mut(f);
+                }
+            }
+            HKind::Match { scrut, arms } => {
+                scrut.visit_mut(f);
+                for a in arms {
+                    if let Some(g) = &mut a.guard {
+                        g.visit_mut(f);
+                    }
+                    a.body.visit_mut(f);
+                }
+            }
+            HKind::Loop(b) => b.visit_mut(f),
+            HKind::While { cond: a, body: b } | HKind::WhileLet { value: a, body: b, .. } | HKind::For { iter: a, body: b, .. } => {
+                a.visit_mut(f);
+                b.visit_mut(f);
+            }
+            HKind::ForRange { start, end, body, .. } => {
+                start.visit_mut(f);
+                end.visit_mut(f);
+                body.visit_mut(f);
+            }
+            HKind::Break { value: x, .. } | HKind::Return(x) => {
+                if let Some(x) = x {
+                    x.visit_mut(f);
+                }
+            }
+            HKind::Call { args, .. } | HKind::CallNative { args, .. } | HKind::CallTrait { args, .. } => {
+                for a in args {
+                    if let HArg::Expr(x) = a {
+                        x.visit_mut(f);
+                    }
+                }
+            }
+            HKind::CallValue { callee, args } => {
+                callee.visit_mut(f);
+                args.iter_mut().for_each(|x| x.visit_mut(f));
+            }
+            HKind::Map(kvs) => {
+                for (k, v) in kvs {
+                    k.visit_mut(f);
+                    v.visit_mut(f);
+                }
+            }
+            HKind::Repeat { elem: a, count: b } | HKind::InsertLocal { key: a, value: b, .. } | HKind::Index { obj: a, index: b, .. } => {
+                a.visit_mut(f);
+                b.visit_mut(f);
+            }
+            HKind::PushLocal { value: x, .. } | HKind::Field { obj: x, .. } => x.visit_mut(f),
+            HKind::Slice { obj, start, end, .. } => {
+                obj.visit_mut(f);
+                if let Some(x) = start {
+                    x.visit_mut(f);
+                }
+                if let Some(x) = end {
+                    x.visit_mut(f);
+                }
+            }
+            HKind::Unary { e, .. } | HKind::ToStr(e) | HKind::Debug(e) | HKind::Spawn(e) | HKind::Defer(e) | HKind::Try { e, .. } => {
+                e.visit_mut(f)
+            }
+            HKind::Arith { l, r, .. }
+            | HKind::Cmp { l, r, .. }
+            | HKind::And(l, r)
+            | HKind::Or(l, r)
+            | HKind::Coalesce { l, r, .. }
+            | HKind::Range { start: l, end: r, .. } => {
+                l.visit_mut(f);
+                r.visit_mut(f);
+            }
+            HKind::Lambda(l) => l.body.visit_mut(f),
+            HKind::Interp(parts) => {
+                for p in parts {
+                    if let InterpPart::Expr(x, _) = p {
+                        x.visit_mut(f);
+                    }
+                }
+            }
+            HKind::Unit
+            | HKind::Bool(_)
+            | HKind::Int(_)
+            | HKind::Float(_)
+            | HKind::Dur(_)
+            | HKind::Str(_)
+            | HKind::Bytes(_)
+            | HKind::Local(_)
+            | HKind::Global(_)
+            | HKind::FnValue(_)
+            | HKind::VariantFn { .. }
+            | HKind::Tag(_)
+            | HKind::Continue { .. }
+            | HKind::Evidence(_)
+            | HKind::Error => {}
+        }
+    }
 }
 
 impl HPat {

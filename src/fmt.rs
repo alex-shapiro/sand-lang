@@ -77,7 +77,12 @@ enum Doc {
     /// A `strict` group is printed flat only if all of it fits on the line. It is
     /// used for constructs kept on one line because they were on one line in the
     /// source, which must not end up spanning several lines.
-    Group { doc: Box<Doc>, force: bool, hug: bool, strict: bool },
+    Group {
+        doc: Box<Doc>,
+        force: bool,
+        hug: bool,
+        strict: bool,
+    },
     Concat(Vec<Doc>),
 }
 
@@ -325,7 +330,12 @@ impl Member<'_> {
         match self {
             Member::Item(i) => match &i.kind {
                 ItemKind::Fn(f) => f.body.is_some(),
-                ItemKind::Struct(_) | ItemKind::Enum(_) | ItemKind::Extend(_) | ItemKind::Test(_) => true,
+                ItemKind::Struct(_)
+                | ItemKind::Enum(_)
+                | ItemKind::Extend(_)
+                | ItemKind::Trait(_)
+                | ItemKind::Impl(_)
+                | ItemKind::Test(_) => true,
                 _ => false,
             },
             Member::Method(f, _) => f.body.is_some(),
@@ -415,7 +425,7 @@ fn ends_open(e: &Expr) -> bool {
             | ExprKind::Coalesce(_, x)
             | ExprKind::Unary(_, x)
             | ExprKind::Return(Some(x))
-            | ExprKind::Break(Some(x))
+            | ExprKind::Break { value: Some(x), .. }
             | ExprKind::Spawn(x) => x,
             ExprKind::Lambda { body, .. } => body,
             _ => return false,
@@ -423,11 +433,16 @@ fn ends_open(e: &Expr) -> bool {
     }
 }
 
+/// `@name ` before a labeled loop.
+fn label_prefix(label: &Option<Ident>) -> String {
+    label.as_ref().map(|l| format!("@{} ", l.name)).unwrap_or_default()
+}
+
 fn stmt_ends_open(s: &Stmt) -> bool {
     match &s.kind {
         StmtKind::Let { value, else_block: None, .. } => ends_open(value),
         StmtKind::Assign { value, .. } => ends_open(value),
-        StmtKind::Expr(e) => ends_open(e),
+        StmtKind::Expr(e) | StmtKind::Defer(e) => ends_open(e),
         _ => false,
     }
 }
@@ -436,7 +451,12 @@ fn stmt_ends_open(s: &Stmt) -> bool {
 fn is_block_like(e: &Expr) -> bool {
     matches!(
         e.kind,
-        ExprKind::Block(_) | ExprKind::Match { .. } | ExprKind::If { .. } | ExprKind::Loop(_) | ExprKind::While { .. } | ExprKind::For { .. }
+        ExprKind::Block(_)
+            | ExprKind::Match { .. }
+            | ExprKind::If { .. }
+            | ExprKind::Loop { .. }
+            | ExprKind::While { .. }
+            | ExprKind::For { .. }
     )
 }
 
@@ -532,10 +552,7 @@ impl<'a> Formatter<'a> {
     /// Position of the first token at or after `pos` of the same kind as `tok`.
     fn find_tok(&self, pos: u32, tok: &Tok) -> u32 {
         let start = self.tokens.partition_point(|t| t.lo < pos);
-        self.tokens[start..]
-            .iter()
-            .find(|t| std::mem::discriminant(&t.tok) == std::mem::discriminant(tok))
-            .map_or(pos, |t| t.lo)
+        self.tokens[start..].iter().find(|t| std::mem::discriminant(&t.tok) == std::mem::discriminant(tok)).map_or(pos, |t| t.lo)
     }
 
     /// Position of the token just before `pos`.
@@ -712,9 +729,10 @@ impl<'a> Formatter<'a> {
             parts.push(self.member(m));
             let next = members.get(i + 1);
             if let Some(&next) = next
-                && let Some(sep) = self.separator(kind, m, next) {
-                    parts.push(sep);
-                }
+                && let Some(sep) = self.separator(kind, m, next)
+            {
+                parts.push(sep);
+            }
             let limit = next.map_or(close, |n| n.lo());
             let (end, h) = self.element_comments(at, self.token_end(m.hi()), limit, mark, &mut parts);
             hard |= h;
@@ -881,6 +899,8 @@ impl<'a> Formatter<'a> {
             ItemKind::Struct(s) => self.struct_decl(s, item.span),
             ItemKind::Enum(e) => self.enum_decl(e, item.span),
             ItemKind::Extend(x) => self.extend_decl(x, item.span),
+            ItemKind::Trait(t) => self.trait_decl(t, item.span),
+            ItemKind::Impl(i) => self.impl_decl(i, item.span),
             ItemKind::TypeAlias(t) => {
                 let vis = if t.is_pub { "pub " } else { "" };
                 let generics = self.generics(&t.generics);
@@ -918,19 +938,43 @@ impl<'a> Formatter<'a> {
         if gs.is_empty() {
             return text("");
         }
-        let params: Vec<String> = gs
-            .iter()
-            .map(|g| {
-                let mut s = if g.reflect { format!("reflect {}", g.name.name) } else { g.name.name.clone() };
-                if !g.bounds.is_empty() {
-                    let bounds: Vec<&str> = g.bounds.iter().map(|b| b.name.as_str()).collect();
-                    s.push_str(": ");
-                    s.push_str(&bounds.join(" + "));
-                }
-                s
-            })
-            .collect();
-        text(format!("<{}>", params.join(", ")))
+        let mut parts = vec![text("<")];
+        for (i, g) in gs.iter().enumerate() {
+            if i > 0 {
+                parts.push(text(", "));
+            }
+            parts.push(text(if g.reflect { format!("reflect {}", g.name.name) } else { g.name.name.clone() }));
+            if !g.bounds.is_empty() {
+                parts.push(text(": "));
+                parts.push(self.bounds(&g.bounds));
+            }
+        }
+        parts.push(text(">"));
+        cat(parts)
+    }
+
+    /// `A + B<T> + m.C`
+    fn bounds(&mut self, bs: &'a [TypeExpr]) -> Doc {
+        let mut parts = Vec::new();
+        for (i, b) in bs.iter().enumerate() {
+            if i > 0 {
+                parts.push(text(" + "));
+            }
+            parts.push(self.ty(b));
+        }
+        cat(parts)
+    }
+
+    fn where_clause(&mut self, preds: &'a [WherePredicate]) -> Doc {
+        let mut parts = vec![text(" where ")];
+        for (i, w) in preds.iter().enumerate() {
+            if i > 0 {
+                parts.push(text(", "));
+            }
+            parts.push(text(format!("{}: ", w.name.name)));
+            parts.push(self.bounds(&w.bounds));
+        }
+        cat(parts)
     }
 
     fn fn_decl(&mut self, f: &'a FnDecl) -> Doc {
@@ -953,15 +997,7 @@ impl<'a> Formatter<'a> {
             parts.push(self.ty(ret));
         }
         if !f.where_clause.is_empty() {
-            let preds: Vec<String> = f
-                .where_clause
-                .iter()
-                .map(|w| {
-                    let bounds: Vec<&str> = w.bounds.iter().map(|b| b.name.as_str()).collect();
-                    format!("{}: {}", w.name.name, bounds.join(" + "))
-                })
-                .collect();
-            parts.push(text(format!(" where {}", preds.join(", "))));
+            parts.push(self.where_clause(&f.where_clause));
         }
         if let Some(body) = &f.body {
             parts.push(text(" "));
@@ -982,9 +1018,17 @@ impl<'a> Formatter<'a> {
         cat(parts)
     }
 
-    /// Position of the closing brace of a declaration spanning `span`.
+    /// Position of the closing brace of a declaration spanning `span`. The span
+    /// may extend over a trailing comment, whose braces do not count.
     fn closing_brace(&self, span: Span) -> u32 {
-        self.src[..span.hi as usize].rfind('}').map_or(span.hi, |i| i as u32)
+        let mut hi = span.hi as usize;
+        while let Some(i) = self.src[..hi].rfind('}') {
+            match self.comments.iter().find(|c| c.lo as usize <= i && i < c.hi as usize) {
+                Some(c) => hi = c.lo as usize,
+                None => return i as u32,
+            }
+        }
+        span.hi
     }
 
     fn struct_decl(&mut self, s: &'a StructDecl, span: Span) -> Doc {
@@ -1039,6 +1083,30 @@ impl<'a> Formatter<'a> {
         cat(vec![head, strict_group(!flat, body)])
     }
 
+    fn trait_decl(&mut self, t: &'a TraitDecl, span: Span) -> Doc {
+        let vis = if t.is_pub { "pub " } else { "" };
+        let mut head = vec![text(format!("{vis}trait {}", t.name.name)), self.generics(&t.generics)];
+        if !t.supers.is_empty() {
+            head.push(text(": "));
+            head.push(self.bounds(&t.supers));
+        }
+        head.push(text(" "));
+        let members: Vec<Member> = t.methods.iter().map(|f| Member::Method(f, self.fn_lo(f))).collect();
+        let (body, flat) = self.braced(ListKind::Body, &members, self.closing_brace(span), false);
+        cat(vec![cat(head), strict_group(!flat, body)])
+    }
+
+    fn impl_decl(&mut self, i: &'a ImplDecl, span: Span) -> Doc {
+        let mut head = vec![text("impl"), self.generics(&i.generics), text(" "), self.ty(&i.trait_ref), text(" for "), self.ty(&i.target)];
+        if !i.where_clause.is_empty() {
+            head.push(self.where_clause(&i.where_clause));
+        }
+        head.push(text(" "));
+        let members: Vec<Member> = i.methods.iter().map(|f| Member::Method(f, self.fn_lo(f))).collect();
+        let (body, flat) = self.braced(ListKind::Body, &members, self.closing_brace(span), false);
+        cat(vec![cat(head), strict_group(!flat, body)])
+    }
+
     // ------------------------------------------------------------------
     // Statements and blocks
 
@@ -1063,6 +1131,7 @@ impl<'a> Formatter<'a> {
             StmtKind::Assign { target, op, value } => cat(vec![self.expr(target), text(assign_op_text(*op)), self.expr(value)]),
             StmtKind::Expr(e) => self.expr(e),
             StmtKind::Fn(f) => self.fn_decl(f),
+            StmtKind::Defer(e) => cat(vec![text("defer "), self.expr(e)]),
         }
     }
 
@@ -1159,11 +1228,18 @@ impl<'a> Formatter<'a> {
                 cat(vec![head, strict_group(!flat, body)])
             }
             ExprKind::Block(b) => self.block(b),
-            ExprKind::Loop(b) => cat(vec![text("loop "), self.block(b)]),
-            ExprKind::While { cond, body } => cat(vec![text("while "), self.cond(cond), text(" "), self.block(body)]),
-            ExprKind::For { pattern, iter, body } => {
-                cat(vec![text("for "), self.pat(pattern), text(" in "), self.expr(iter), text(" "), self.block(body)])
+            ExprKind::Loop { label, body } => cat(vec![text(format!("{}loop ", label_prefix(label))), self.block(body)]),
+            ExprKind::While { label, cond, body } => {
+                cat(vec![text(format!("{}while ", label_prefix(label))), self.cond(cond), text(" "), self.block(body)])
             }
+            ExprKind::For { label, pattern, iter, body } => cat(vec![
+                text(format!("{}for ", label_prefix(label))),
+                self.pat(pattern),
+                text(" in "),
+                self.expr(iter),
+                text(" "),
+                self.block(body),
+            ]),
             ExprKind::Lambda { params, body, parens } => {
                 let params = if *parens {
                     let ps = self.join(params, |f, p| match &p.ty {
@@ -1177,13 +1253,19 @@ impl<'a> Formatter<'a> {
                 cat(vec![params, text(" => "), self.expr(body)])
             }
             ExprKind::Return(v) => self.keyword_value("return", v.as_deref()),
-            ExprKind::Break(v) => self.keyword_value("break", v.as_deref()),
-            ExprKind::Continue => text("continue"),
+            ExprKind::Break { label, value } => match label {
+                Some(l) => self.keyword_value(&format!("break @{}", l.name), value.as_deref()),
+                None => self.keyword_value("break", value.as_deref()),
+            },
+            ExprKind::Continue(label) => text(match label {
+                Some(l) => format!("continue @{}", l.name),
+                None => "continue".into(),
+            }),
             ExprKind::Spawn(x) => cat(vec![text("spawn "), self.expr(x)]),
         }
     }
 
-    fn keyword_value(&mut self, kw: &'static str, value: Option<&'a Expr>) -> Doc {
+    fn keyword_value(&mut self, kw: &str, value: Option<&'a Expr>) -> Doc {
         match value {
             Some(v) => cat(vec![text(format!("{kw} ")), self.expr(v)]),
             None => text(kw),
@@ -1362,7 +1444,8 @@ impl<'a> Formatter<'a> {
             ExprKind::Field(_, name) => text(format!(".{}", name.name)),
             ExprKind::TupleField(_, i, _) => text(format!(".{i}")),
             ExprKind::Index(_, idx) => cat(vec![text("["), self.expr(idx), text("]")]),
-            ExprKind::Try(_) => text("?"),
+            // `x??` would lex as the `??` operator.
+            ExprKind::Try(x) => text(if matches!(x.kind, ExprKind::Try(_)) { " ?" } else { "?" }),
             _ => self.expr(op),
         }
     }

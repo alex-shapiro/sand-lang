@@ -75,3 +75,9 @@ print("partial")
 panic("then fail")
 --- panic
 then fail
+
+=== duration division overflow is a panic, not a host crash
+let d = duration.from_nanos(int.min_value())
+print(d / -1)
+--- panic
+duration overflow

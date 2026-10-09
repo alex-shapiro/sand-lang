@@ -221,6 +221,12 @@ extend<T> Channel<T> {
     pub native fn len(self) -> int
     /// True if the channel was closed.
     pub native fn is_closed(self) -> bool
+
+    /// A lazy iterator receiving messages (suspending while the channel is
+    /// empty) until the channel is closed and drained.
+    pub fn iter(self) -> Iter<T> {
+        Iter { next: () => self.recv() }
+    }
 }
 
 /// Prints the display form of `x` and a newline to standard output.
@@ -249,6 +255,26 @@ pub native fn exit(code: int) -> never
 
 /// Builds a set from a list.
 pub native fn set<T: Hash>(items: [T] = []) -> Set<T>
+
+/// The evidence behind the built-in bound `Num`: generic code with `T: Num`
+/// receives it as a hidden dictionary, so it can call `T.zero()` and
+/// `T.one()` even when no value of type `T` is at hand (`[].sum()`).
+trait Num {
+    /// The additive identity.
+    fn zero() -> Self
+    /// The multiplicative identity.
+    fn one() -> Self
+}
+
+impl Num for int {
+    fn zero() -> int { 0 }
+    fn one() -> int { 1 }
+}
+
+impl Num for float {
+    fn zero() -> float { 0.0 }
+    fn one() -> float { 1.0 }
+}
 
 extend int {
     /// Absolute value.
@@ -386,6 +412,19 @@ extend str {
     pub native fn reversed(self) -> str
     /// Joins `items` with `self` as separator.
     pub native fn join(self, items: [str]) -> str
+
+    /// A lazy iterator over the characters (as one-character strings).
+    pub fn chars_iter(self) -> Iter<str> {
+        var i = 0
+        fn next() -> str? {
+            let c = self.char_at(i)
+            if let Some(s) = c {
+                i += s.len()
+            }
+            c
+        }
+        Iter { next }
+    }
 }
 
 extend bytes {
@@ -451,11 +490,40 @@ extend<T> [T] {
     /// First occurrences of each distinct element.
     pub native fn unique(self) -> [T] where T: Hash
     pub native fn to_set(self) -> Set<T> where T: Hash
-    pub native fn sum(self) -> T where T: Num
-    pub native fn product(self) -> T where T: Num
+    native fn sum_from(self, init: T) -> T
+    native fn product_from(self, init: T) -> T
     pub native fn min(self) -> T? where T: Ord
     pub native fn max(self) -> T? where T: Ord
     native fn sort_by_keys<K>(self, keys: [K])
+
+    /// A lazy iterator over the elements. Like a `for` loop, it visits the
+    /// indices below the length the list has now, reading each element when
+    /// it is reached, and stops early if the list shrinks.
+    pub fn iter(self) -> Iter<T> {
+        var i = 0
+        let n = self.len()
+        fn next() -> T? {
+            if i < n and i < self.len() {
+                let x = self[i]
+                i += 1
+                Some(x)
+            } else {
+                i = n
+                None
+            }
+        }
+        Iter { next }
+    }
+
+    /// The sum of the elements; zero for an empty list.
+    pub fn sum(self) -> T where T: Num {
+        self.sum_from(T.zero())
+    }
+
+    /// The product of the elements; one for an empty list.
+    pub fn product(self) -> T where T: Num {
+        self.product_from(T.one())
+    }
 
     /// Applies `f` to every element.
     pub fn map<U>(self, f: fn(T) -> U) -> [U] {
@@ -686,6 +754,11 @@ extend<K: Hash, V> [K: V] {
     /// Inserts `default` if `key` is absent; returns the stored value.
     pub native fn get_or_insert(self, key: K, default: V) -> V
 
+    /// A lazy iterator over the (key, value) entries as they are now.
+    pub fn iter(self) -> Iter<(K, V)> {
+        self.entries().iter()
+    }
+
     /// A new map with `f` applied to every value.
     pub fn map_values<W>(self, f: fn(V) -> W) -> [K: W] {
         let out: [K: W] = [:]
@@ -722,6 +795,11 @@ extend<T: Hash> Set<T> {
     pub native fn is_subset(self, other: Set<T>) -> bool
     pub native fn copy(self) -> Set<T>
     pub native fn clear(self)
+
+    /// A lazy iterator over the elements as they are now.
+    pub fn iter(self) -> Iter<T> {
+        self.to_list().iter()
+    }
 }
 
 extend Range {
@@ -733,6 +811,20 @@ extend Range {
     pub native fn to_list(self) -> [int]
     pub native fn step_by(self, step: int) -> [int]
     pub native fn reversed(self) -> [int]
+
+    /// A lazy iterator over the integers of the range.
+    pub fn iter(self) -> Iter<int> {
+        var i = self.start()
+        let end = self.end()
+        fn next() -> int? {
+            if i >= end {
+                return None
+            }
+            i += 1
+            Some(i - 1)
+        }
+        Iter { next }
+    }
 
     pub fn map<U>(self, f: fn(int) -> U) -> [U] {
         let out = []
@@ -756,5 +848,506 @@ extend Range {
         for i in self.to_list() {
             f(i)
         }
+    }
+}
+
+/// A source of elements produced one at a time. `for` loops iterate over any
+/// type that implements it, and `iter()` turns it into an `Iter`, whose lazy
+/// adapters (`map`, `filter`, ...) and consumers (`to_list`, `sum`, ...) work
+/// for every iterator.
+pub trait Iterator<T> {
+    /// The next element, or `None` once there are no more.
+    fn next(self) -> T?
+
+    /// A lazy `Iter` over the remaining elements.
+    fn iter(self) -> Iter<T> {
+        Iter { next: () => self.next() }
+    }
+}
+
+/// A lazy iterator: a function producing the next element, `None` once the
+/// iterator is exhausted. Adapters (`map`, `filter`, `take`, ...) build new
+/// iterators without doing any work; consumers (`to_list`, `fold`, `sum`,
+/// a `for` loop, ...) pull the elements. An iterator is single-pass: the
+/// elements a consumer takes are gone, for every copy of the iterator.
+pub struct Iter<T> {
+    /// Produces the next element; `None` once the iterator is exhausted.
+    next: fn() -> T?
+
+    /// An iterator over the results of `f`, until it returns `None`.
+    pub fn from_fn(f: fn() -> T?) -> Iter<T> {
+        Iter { next: f }
+    }
+
+    /// An iterator without elements.
+    pub fn empty() -> Iter<T> {
+        Iter { next: () => None }
+    }
+
+    /// An iterator yielding `x` once.
+    pub fn once(x: T) -> Iter<T> {
+        var done = false
+        fn next() -> T? {
+            if done {
+                return None
+            }
+            done = true
+            Some(x)
+        }
+        Iter { next }
+    }
+
+    /// An endless iterator yielding `x` again and again.
+    pub fn repeat(x: T) -> Iter<T> {
+        Iter { next: () => Some(x) }
+    }
+
+    /// `first`, then `f` applied to the previous element, until `f` returns `None`.
+    pub fn successors(first: T?, f: fn(T) -> T?) -> Iter<T> {
+        var cur = first
+        fn next() -> T? {
+            let r = cur
+            if let Some(x) = r {
+                cur = f(x)
+            }
+            r
+        }
+        Iter { next }
+    }
+
+    // Lazy adapters.
+
+    /// `f` applied to each element.
+    pub fn map<U>(self, f: fn(T) -> U) -> Iter<U> {
+        let next = self.next
+        fn step() -> U? {
+            match next() {
+                Some(x) => Some(f(x))
+                None => None
+            }
+        }
+        Iter { next: step }
+    }
+
+    /// The elements for which `f` is true.
+    pub fn filter(self, f: fn(T) -> bool) -> Iter<T> {
+        let next = self.next
+        fn step() -> T? {
+            loop {
+                let r = next()
+                match r {
+                    Some(x) => if f(x) {
+                        return r
+                    }
+                    None => return None
+                }
+            }
+        }
+        Iter { next: step }
+    }
+
+    /// The `Some` results of `f` applied to each element.
+    pub fn filter_map<U>(self, f: fn(T) -> U?) -> Iter<U> {
+        let next = self.next
+        fn step() -> U? {
+            while let Some(x) = next() {
+                let r = f(x)
+                if r.is_some() {
+                    return r
+                }
+            }
+            None
+        }
+        Iter { next: step }
+    }
+
+    /// The elements of the iterators `f` returns for each element, in order.
+    pub fn flat_map<U>(self, f: fn(T) -> Iter<U>) -> Iter<U> {
+        let next = self.next
+        var inner: fn() -> U? = () => None
+        fn step() -> U? {
+            loop {
+                let r = inner()
+                if r.is_some() {
+                    return r
+                }
+                let Some(x) = next() else { return None }
+                inner = f(x).next
+            }
+        }
+        Iter { next: step }
+    }
+
+    /// Pairs of a counter (from 0) and each element.
+    pub fn enumerate(self) -> Iter<(int, T)> {
+        let next = self.next
+        var i = -1
+        fn step() -> (int, T)? {
+            let x = next()?
+            i += 1
+            Some((i, x))
+        }
+        Iter { next: step }
+    }
+
+    /// Pairs of elements of both iterators; ends when either does.
+    pub fn zip<U>(self, other: Iter<U>) -> Iter<(T, U)> {
+        let a = self.next
+        let b = other.next
+        fn step() -> (T, U)? {
+            let x = a()?
+            let y = b()?
+            Some((x, y))
+        }
+        Iter { next: step }
+    }
+
+    /// The elements of `self`, then those of `other`.
+    pub fn chain(self, other: Iter<T>) -> Iter<T> {
+        let a = self.next
+        let b = other.next
+        var first = true
+        fn step() -> T? {
+            if first {
+                let r = a()
+                if r.is_some() {
+                    return r
+                }
+                first = false
+            }
+            b()
+        }
+        Iter { next: step }
+    }
+
+    /// At most the first `n` elements (it pulls no more than `n`).
+    pub fn take(self, n: int) -> Iter<T> {
+        let next = self.next
+        var left = n
+        fn step() -> T? {
+            if left <= 0 {
+                return None
+            }
+            left -= 1
+            next()
+        }
+        Iter { next: step }
+    }
+
+    /// The elements after the first `n`.
+    pub fn skip(self, n: int) -> Iter<T> {
+        let next = self.next
+        var left = n
+        fn step() -> T? {
+            while left > 0 {
+                left -= 1
+                let _ = next()
+            }
+            next()
+        }
+        Iter { next: step }
+    }
+
+    /// The elements up to (not including) the first for which `f` is false.
+    pub fn take_while(self, f: fn(T) -> bool) -> Iter<T> {
+        let next = self.next
+        var done = false
+        fn step() -> T? {
+            if done {
+                return None
+            }
+            let r = next()
+            match r {
+                Some(x) if f(x) => r
+                _ => {
+                    done = true
+                    None
+                }
+            }
+        }
+        Iter { next: step }
+    }
+
+    /// The elements from the first for which `f` is false on.
+    pub fn skip_while(self, f: fn(T) -> bool) -> Iter<T> {
+        let next = self.next
+        var skipping = true
+        fn step() -> T? {
+            if skipping {
+                skipping = false
+                loop {
+                    let r = next()
+                    match r {
+                        Some(x) if f(x) => {}
+                        _ => return r
+                    }
+                }
+            }
+            next()
+        }
+        Iter { next: step }
+    }
+
+    /// The first element and then every `step`-th; panics if `step <= 0`.
+    pub fn step_by(self, step: int) -> Iter<T> {
+        if step <= 0 {
+            panic("step must be positive, found {step}")
+        }
+        let next = self.next
+        var first = true
+        fn advance() -> T? {
+            if first {
+                first = false
+            } else {
+                for _ in 1..step {
+                    let _ = next()
+                }
+            }
+            next()
+        }
+        Iter { next: advance }
+    }
+
+    /// The same elements, calling `f` on each as it passes.
+    pub fn inspect(self, f: fn(T)) -> Iter<T> {
+        let next = self.next
+        fn step() -> T? {
+            let r = next()
+            if let Some(x) = r {
+                f(x)
+            }
+            r
+        }
+        Iter { next: step }
+    }
+
+    // Consumers.
+
+    /// The remaining elements as a list.
+    pub fn to_list(self) -> [T] {
+        let out = []
+        for x in self {
+            out.push(x)
+        }
+        out
+    }
+
+    /// The remaining elements as a set.
+    pub fn to_set(self) -> Set<T> where T: Hash {
+        let out: Set<T> = set()
+        for x in self {
+            out.add(x)
+        }
+        out
+    }
+
+    /// Calls `f` on every remaining element.
+    pub fn each(self, f: fn(T)) {
+        for x in self {
+            f(x)
+        }
+    }
+
+    /// Combines the elements from the left, starting with `init`.
+    pub fn fold<A>(self, init: A, f: fn(A, T) -> A) -> A {
+        var acc = init
+        for x in self {
+            acc = f(acc, x)
+        }
+        acc
+    }
+
+    /// Combines the elements from the left; `None` if there are none.
+    pub fn reduce(self, f: fn(T, T) -> T) -> T? {
+        var acc = self.next()?
+        for x in self {
+            acc = f(acc, x)
+        }
+        Some(acc)
+    }
+
+    /// The sum of the elements; zero if there are none.
+    pub fn sum(self) -> T where T: Num {
+        var acc = T.zero()
+        for x in self {
+            acc = acc + x
+        }
+        acc
+    }
+
+    /// The product of the elements; one if there are none.
+    pub fn product(self) -> T where T: Num {
+        var acc = T.one()
+        for x in self {
+            acc = acc * x
+        }
+        acc
+    }
+
+    /// The number of remaining elements.
+    pub fn count(self) -> int {
+        var n = 0
+        for _ in self {
+            n += 1
+        }
+        n
+    }
+
+    /// True if `f` is true for some element (it stops at the first).
+    pub fn any(self, f: fn(T) -> bool) -> bool {
+        for x in self {
+            if f(x) {
+                return true
+            }
+        }
+        false
+    }
+
+    /// True if `f` is true for every element (it stops at the first false).
+    pub fn all(self, f: fn(T) -> bool) -> bool {
+        for x in self {
+            if not f(x) {
+                return false
+            }
+        }
+        true
+    }
+
+    /// The first element for which `f` is true.
+    pub fn find(self, f: fn(T) -> bool) -> T? {
+        for x in self {
+            if f(x) {
+                return Some(x)
+            }
+        }
+        None
+    }
+
+    /// The position of the first element for which `f` is true.
+    pub fn find_index(self, f: fn(T) -> bool) -> int? {
+        var i = 0
+        for x in self {
+            if f(x) {
+                return Some(i)
+            }
+            i += 1
+        }
+        None
+    }
+
+    /// The next element.
+    pub fn first(self) -> T? {
+        self.next()
+    }
+
+    /// The last element (it consumes them all).
+    pub fn last(self) -> T? {
+        var last = None
+        for x in self {
+            last = Some(x)
+        }
+        last
+    }
+
+    /// The element at position `n` (from 0) of the remaining ones.
+    pub fn nth(self, n: int) -> T? {
+        if n < 0 {
+            return None
+        }
+        self.skip(n).next()
+    }
+
+    /// The first smallest element.
+    pub fn min(self) -> T? where T: Ord {
+        var best = self.next()?
+        for x in self {
+            if x < best {
+                best = x
+            }
+        }
+        Some(best)
+    }
+
+    /// The first largest element.
+    pub fn max(self) -> T? where T: Ord {
+        var best = self.next()?
+        for x in self {
+            if x > best {
+                best = x
+            }
+        }
+        Some(best)
+    }
+
+    /// The first element with the smallest key.
+    pub fn min_by<K: Ord>(self, key: fn(T) -> K) -> T? {
+        var best = self.next()?
+        var best_key = key(best)
+        for x in self {
+            let k = key(x)
+            if k < best_key {
+                best = x
+                best_key = k
+            }
+        }
+        Some(best)
+    }
+
+    /// The first element with the largest key.
+    pub fn max_by<K: Ord>(self, key: fn(T) -> K) -> T? {
+        var best = self.next()?
+        var best_key = key(best)
+        for x in self {
+            let k = key(x)
+            if k > best_key {
+                best = x
+                best_key = k
+            }
+        }
+        Some(best)
+    }
+}
+
+impl<T> Iterator<T> for Iter<T> {
+    fn next(self) -> T? {
+        self.next()
+    }
+
+    fn iter(self) -> Iter<T> {
+        self
+    }
+}
+
+extend Iter<int> {
+    /// The endless iterator `start`, `start + step`, `start + 2 * step`, ...
+    pub fn count_from(start: int, step: int = 1) -> Iter<int> {
+        var i = start
+        var started = false
+        fn next() -> int? {
+            if started {
+                i += step
+            }
+            started = true
+            Some(i)
+        }
+        Iter { next }
+    }
+}
+
+extend Iter<str> {
+    /// Concatenates the elements with `sep` between them.
+    pub fn join(self, sep: str = "") -> str {
+        self.to_list().join(sep)
+    }
+}
+
+extend<K: Hash, V> Iter<(K, V)> {
+    /// A map of the remaining (key, value) pairs; a repeated key keeps the last value.
+    pub fn to_map(self) -> [K: V] {
+        let out: [K: V] = [:]
+        for (k, v) in self {
+            out[k] = v
+        }
+        out
     }
 }

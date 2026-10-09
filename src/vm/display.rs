@@ -1,8 +1,10 @@
 //! Display and debug forms of values, and format specifications.
 
+use super::Ctl;
 use super::bytecode::Program;
 use super::compare::MAX_DEPTH;
 use super::heap::Heap;
+use super::meter::{BYTES_PER_UNIT, Budget, Scratch, Unmetered, ctl_message};
 use super::value::*;
 use crate::hir::FormatSpec;
 use std::fmt::Write as _;
@@ -77,27 +79,97 @@ pub fn escape_bytes(b: &[u8], out: &mut String) {
     out.push('"');
 }
 
+/// Pending output of `render`.
 enum Work {
     Val(Value, usize, bool),
     Text(&'static str),
-    Owned(String),
+    /// Elements `i..` of a list or the fields of a tuple, struct or variant
+    /// (with field names for structs), then `close`.
+    Seq {
+        obj: Value,
+        i: usize,
+        depth: usize,
+        names: Option<u32>,
+        close: &'static str,
+    },
+    /// Entries `i..` of a map (`key: value`) or set, then `close`.
+    Entries {
+        obj: Value,
+        i: usize,
+        depth: usize,
+        close: &'static str,
+    },
 }
+
+/// Output beyond this size fails even without a memory limit.
+const MAX_OUTPUT: usize = 1 << 30;
 
 /// Renders a value. `debug` selects the debug form at the top level; nested
 /// values always use the debug form.
 pub fn render(prog: &Program, heap: &Heap, v: Value, debug: bool, out: &mut String) -> Result<(), String> {
+    render_metered(prog, heap, &Unmetered, v, debug, out).map_err(ctl_message)
+}
+
+/// [`render`], charging `budget` one unit per value plus the bytes written,
+/// and checking the output and work stack against the memory limit as they
+/// grow. Scratch space grows with the nesting depth, not the size of the value.
+pub fn render_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Value, debug: bool, out: &mut String) -> Result<(), Ctl> {
     let mut work = vec![Work::Val(v, 0, debug)];
+    let mut scratch = Scratch::new();
+    let mut charged = out.len();
     while let Some(w) = work.pop() {
+        if out.len() - charged >= BYTES_PER_UNIT {
+            budget.charge_bytes(out.len() - charged)?;
+            charged = out.len();
+        }
+        scratch.check(heap, out.len() + work.len() * std::mem::size_of::<Work>())?;
         match w {
             Work::Text(t) => out.push_str(t),
-            Work::Owned(t) => out.push_str(&t),
+            Work::Seq { obj, i, depth, names, close } => {
+                let items = heap.fields(obj);
+                let items = if items.is_empty() { heap.list(obj) } else { items };
+                if i >= items.len() {
+                    out.push_str(close);
+                    continue;
+                }
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                if let Some(def) = names {
+                    out.push_str(&prog.types[def as usize].fields[i]);
+                    out.push_str(": ");
+                }
+                work.push(Work::Seq { obj, i: i + 1, depth, names, close });
+                work.push(Work::Val(items[i], depth, true));
+            }
+            Work::Entries { obj, i, depth, close } => {
+                let next = match heap.get(obj) {
+                    Obj::Map(m) => m.entries.iter().enumerate().skip(i).find_map(|(j, e)| e.map(|(k, v)| (j, k, Some(v)))),
+                    Obj::Set(s) => s.entries.iter().enumerate().skip(i).find_map(|(j, e)| e.map(|k| (j, k, None))),
+                    _ => None,
+                };
+                let Some((j, k, v)) = next else {
+                    out.push_str(close);
+                    continue;
+                };
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                work.push(Work::Entries { obj, i: j + 1, depth, close });
+                if let Some(v) = v {
+                    work.push(Work::Val(v, depth, true));
+                    work.push(Work::Text(": "));
+                }
+                work.push(Work::Val(k, depth, true));
+            }
             Work::Val(v, depth, debug) => {
                 if depth > MAX_DEPTH {
-                    return Err("value too deeply nested to display".into());
+                    return Err(Ctl::Panic("value too deeply nested to display".into()));
                 }
-                if out.len() > 1 << 30 {
-                    return Err("value too large to display".into());
+                if out.len() > MAX_OUTPUT {
+                    return Err(Ctl::Panic("value too large to display".into()));
                 }
+                budget.charge(1)?;
                 match v {
                     Value::Unit => out.push_str("()"),
                     Value::Bool(b) => out.push_str(if b { "true" } else { "false" }),
@@ -108,49 +180,49 @@ pub fn render(prog: &Program, heap: &Heap, v: Value, debug: bool, out: &mut Stri
                     Value::Dur(d) => out.push_str(&fmt_duration(d)),
                     Value::Uninit => out.push_str("<uninit>"),
                     Value::Tag(t) => out.push_str(prog.variants.get(t as usize).map(|v| v.name.as_str()).unwrap_or("?")),
+                    Value::VUnit(_)
+                    | Value::VBool(..)
+                    | Value::VInt(..)
+                    | Value::VFloat(..)
+                    | Value::VDur(..)
+                    | Value::VTag(..)
+                    | Value::VObj(..) => {
+                        let (id, payload) = v.as_inline_variant().unwrap_or((u32::MAX, Value::Unit));
+                        out.push_str(prog.variants.get(id as usize).map(|v| v.name.as_str()).unwrap_or("?"));
+                        out.push('(');
+                        work.push(Work::Text(")"));
+                        work.push(Work::Val(payload, depth + 1, true));
+                    }
                     Value::Obj(_) => {
                         let d = depth + 1;
-                        // Pushes items in reverse with separators.
-                        let push_seq = |work: &mut Vec<Work>, items: &[Value], open: &'static str, close: &'static str| {
-                            work.push(Work::Text(close));
-                            for (i, x) in items.iter().enumerate().rev() {
-                                work.push(Work::Val(*x, d, true));
-                                if i > 0 {
-                                    work.push(Work::Text(", "));
-                                }
-                            }
-                            work.push(Work::Text(open));
-                        };
                         match heap.get(v) {
                             Obj::Str(s) => {
-                                if debug {
-                                    escape_str_debug(s, out)
-                                } else {
-                                    out.push_str(s)
-                                }
+                                // Reserve before copying a large string.
+                                scratch.check(heap, out.len() + s.len())?;
+                                if debug { escape_str_debug(s, out) } else { out.push_str(s) }
                             }
-                            Obj::Bytes(b) => escape_bytes(b, out),
-                            Obj::List(l) => push_seq(&mut work, l, "[", "]"),
-                            Obj::Tuple(t) => push_seq(&mut work, t, "(", ")"),
-                            Obj::Set(s) => {
-                                let items: Vec<Value> = s.entries.iter().flatten().copied().collect();
-                                push_seq(&mut work, &items, "Set([", "])");
+                            Obj::Bytes(b) => {
+                                scratch.check(heap, out.len() + b.len())?;
+                                escape_bytes(b, out)
+                            }
+                            Obj::List(_) => {
+                                out.push('[');
+                                work.push(Work::Seq { obj: v, i: 0, depth: d, names: None, close: "]" });
+                            }
+                            Obj::Tuple(_) => {
+                                out.push('(');
+                                work.push(Work::Seq { obj: v, i: 0, depth: d, names: None, close: ")" });
+                            }
+                            Obj::Set(_) => {
+                                out.push_str("Set([");
+                                work.push(Work::Entries { obj: v, i: 0, depth: d, close: "])" });
                             }
                             Obj::Map(m) => {
                                 if m.live == 0 {
                                     out.push_str("[:]");
                                 } else {
-                                    work.push(Work::Text("]"));
-                                    let entries: Vec<(Value, Value)> = m.entries.iter().flatten().copied().collect();
-                                    for (i, (k, val)) in entries.iter().enumerate().rev() {
-                                        work.push(Work::Val(*val, d, true));
-                                        work.push(Work::Text(": "));
-                                        work.push(Work::Val(*k, d, true));
-                                        if i > 0 {
-                                            work.push(Work::Text(", "));
-                                        }
-                                    }
-                                    work.push(Work::Text("["));
+                                    out.push('[');
+                                    work.push(Work::Entries { obj: v, i: 0, depth: d, close: "]" });
                                 }
                             }
                             Obj::Struct(def, fields) => {
@@ -159,6 +231,7 @@ pub fn render(prog: &Program, heap: &Heap, v: Value, debug: bool, out: &mut Stri
                                     // Error displays as `kind: message`.
                                     let kind = heap.str(fields[0]);
                                     let msg = heap.str(fields[1]);
+                                    scratch.check(heap, out.len() + kind.len() + msg.len())?;
                                     let _ = write!(out, "{kind}: {msg}");
                                     continue;
                                 }
@@ -166,26 +239,14 @@ pub fn render(prog: &Program, heap: &Heap, v: Value, debug: bool, out: &mut Stri
                                     let _ = write!(out, "{} {{}}", rt.name);
                                     continue;
                                 }
-                                work.push(Work::Text(" }"));
-                                for (i, x) in fields.iter().enumerate().rev() {
-                                    work.push(Work::Val(*x, d, true));
-                                    work.push(Work::Owned(format!("{}: ", rt.fields[i])));
-                                    if i > 0 {
-                                        work.push(Work::Text(", "));
-                                    }
-                                }
-                                work.push(Work::Owned(format!("{} {{ ", rt.name)));
+                                let _ = write!(out, "{} {{ ", rt.name);
+                                work.push(Work::Seq { obj: v, i: 0, depth: d, names: Some(*def), close: " }" });
                             }
-                            Obj::Variant(id, fields) => {
-                                let name = prog.variants.get(*id as usize).map(|v| v.name.clone()).unwrap_or_default();
-                                work.push(Work::Text(")"));
-                                for (i, x) in fields.iter().enumerate().rev() {
-                                    work.push(Work::Val(*x, d, true));
-                                    if i > 0 {
-                                        work.push(Work::Text(", "));
-                                    }
-                                }
-                                work.push(Work::Owned(format!("{name}(")));
+                            Obj::Variant(id, _) => {
+                                let name = prog.variants.get(*id as usize).map(|v| v.name.as_str()).unwrap_or_default();
+                                out.push_str(name);
+                                out.push('(');
+                                work.push(Work::Seq { obj: v, i: 0, depth: d, names: None, close: ")" });
                             }
                             Obj::Closure(p, _) => {
                                 let name = &prog.protos[*p as usize].name;
@@ -217,10 +278,16 @@ pub fn render(prog: &Program, heap: &Heap, v: Value, debug: bool, out: &mut Stri
             }
         }
     }
+    budget.charge_bytes(out.len() - charged)?;
     Ok(())
 }
 
 pub fn to_display(prog: &Program, heap: &Heap, v: Value) -> Result<String, String> {
+    to_display_metered(prog, heap, &Unmetered, v).map_err(ctl_message)
+}
+
+/// [`to_display`], charging `budget` (see [`render_metered`]).
+pub fn to_display_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Value) -> Result<String, Ctl> {
     // Fast paths for scalars.
     match v {
         Value::Int(i) => return Ok(i.to_string()),
@@ -231,24 +298,40 @@ pub fn to_display(prog: &Program, heap: &Heap, v: Value) -> Result<String, Strin
     if let Value::Obj(_) = v
         && let Obj::Str(s) = heap.get(v)
     {
+        budget.charge_bytes(s.len())?;
         return Ok(s.to_string());
     }
     let mut s = String::new();
-    render(prog, heap, v, false, &mut s)?;
+    render_metered(prog, heap, budget, v, false, &mut s)?;
     Ok(s)
 }
 
 pub fn to_debug(prog: &Program, heap: &Heap, v: Value) -> Result<String, String> {
+    to_debug_metered(prog, heap, &Unmetered, v).map_err(ctl_message)
+}
+
+/// [`to_debug`], charging `budget` (see [`render_metered`]).
+pub fn to_debug_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Value) -> Result<String, Ctl> {
     let mut s = String::new();
-    render(prog, heap, v, true, &mut s)?;
+    render_metered(prog, heap, budget, v, true, &mut s)?;
     Ok(s)
 }
 
 /// Applies a format specification.
 pub fn format_value(prog: &Program, heap: &Heap, v: Value, spec: &FormatSpec) -> Result<String, String> {
+    format_value_metered(prog, heap, &Unmetered, v, spec).map_err(ctl_message)
+}
+
+/// [`format_value`], charging `budget` and checking large precisions and
+/// widths against the memory limit before allocating.
+pub fn format_value_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Value, spec: &FormatSpec) -> Result<String, Ctl> {
     let numeric = matches!(v, Value::Int(_) | Value::Float(_));
+    if let (Value::Float(_), Some(p)) = (v, spec.precision) {
+        // `{x:.1000000000}` would print a billion digits.
+        reserve(heap, budget, p)?;
+    }
     let mut body = match (v, spec.kind) {
-        (_, Some('?')) => to_debug(prog, heap, v)?,
+        (_, Some('?')) => to_debug_metered(prog, heap, budget, v)?,
         (Value::Int(i), Some(k @ ('x' | 'X' | 'b' | 'o'))) => {
             let mag = i.unsigned_abs();
             let digits = match k {
@@ -268,7 +351,7 @@ pub fn format_value(prog: &Program, heap: &Heap, v: Value, spec: &FormatSpec) ->
             _ => fmt_float(f),
         },
         _ => {
-            let s = to_display(prog, heap, v)?;
+            let s = to_display_metered(prog, heap, budget, v)?;
             match spec.precision {
                 Some(p) if !numeric => s.chars().take(p).collect(),
                 _ => s,
@@ -284,6 +367,7 @@ pub fn format_value(prog: &Program, heap: &Heap, v: Value, spec: &FormatSpec) ->
         return Ok(body);
     }
     let pad = width - len;
+    reserve(heap, budget, body.len().saturating_add(pad.saturating_mul(spec.fill.len_utf8())))?;
     if spec.zero && numeric && spec.align.is_none() {
         let (sign, digits) = if body.starts_with('-') || body.starts_with('+') { body.split_at(1) } else { ("", body.as_str()) };
         return Ok(format!("{sign}{}{digits}", "0".repeat(pad)));
@@ -298,4 +382,12 @@ pub fn format_value(prog: &Program, heap: &Heap, v: Value, spec: &FormatSpec) ->
             format!("{}{body}{}", fill.repeat(left), fill.repeat(pad - left))
         }
     })
+}
+
+/// Charges for and checks the memory limit before building `n` bytes of output.
+fn reserve(heap: &Heap, budget: &impl Budget, n: usize) -> Result<(), Ctl> {
+    if n > MAX_OUTPUT || heap.would_exceed(n) {
+        return Err(Ctl::Limit(crate::LimitKind::Memory));
+    }
+    budget.charge_bytes(n)
 }

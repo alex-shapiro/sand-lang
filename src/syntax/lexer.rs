@@ -29,6 +29,7 @@ pub enum Tok {
     As,
     Break,
     Continue,
+    Defer,
     Else,
     Enum,
     Extend,
@@ -37,6 +38,7 @@ pub enum Tok {
     For,
     From,
     If,
+    Impl,
     Import,
     In,
     Let,
@@ -52,6 +54,7 @@ pub enum Tok {
     Spawn,
     Struct,
     Test,
+    Trait,
     True,
     Type,
     Var,
@@ -127,6 +130,7 @@ impl Tok {
             As => "as",
             Break => "break",
             Continue => "continue",
+            Defer => "defer",
             Else => "else",
             Enum => "enum",
             Extend => "extend",
@@ -135,6 +139,7 @@ impl Tok {
             For => "for",
             From => "from",
             If => "if",
+            Impl => "impl",
             Import => "import",
             In => "in",
             Let => "let",
@@ -150,6 +155,7 @@ impl Tok {
             Spawn => "spawn",
             Struct => "struct",
             Test => "test",
+            Trait => "trait",
             True => "true",
             Type => "type",
             Var => "var",
@@ -208,6 +214,7 @@ pub fn keyword(s: &str) -> Option<Tok> {
         "as" => As,
         "break" => Break,
         "continue" => Continue,
+        "defer" => Defer,
         "else" => Else,
         "enum" => Enum,
         "extend" => Extend,
@@ -216,6 +223,7 @@ pub fn keyword(s: &str) -> Option<Tok> {
         "for" => For,
         "from" => From,
         "if" => If,
+        "impl" => Impl,
         "import" => Import,
         "in" => In,
         "let" => Let,
@@ -230,6 +238,7 @@ pub fn keyword(s: &str) -> Option<Tok> {
         "Self" => SelfUpper,
         "spawn" => Spawn,
         "struct" => Struct,
+        "trait" => Trait,
         "true" => True,
         "type" => Type,
         "var" => Var,
@@ -279,7 +288,16 @@ struct Lexer<'a> {
     comments: Vec<Comment>,
     errors: Vec<Diag>,
     newline_pending: bool,
+    /// Strings nested inside interpolations being skipped (recursion depth).
+    nesting: usize,
+    /// Where strings were nested too deeply, if they were.
+    too_deep: Option<usize>,
 }
+
+/// Maximum nesting of strings inside string interpolations. Each level is
+/// lexed again when its interpolation is parsed, so deep nesting would also
+/// make lexing quadratic.
+const MAX_STRING_NESTING: usize = 32;
 
 /// Lexes `src[lo..hi]` (positions are absolute within the file).
 pub fn lex_range(src: &str, file: FileId, lo: usize, hi: usize) -> Lexed {
@@ -293,11 +311,18 @@ pub fn lex_range(src: &str, file: FileId, lo: usize, hi: usize) -> Lexed {
         comments: Vec::new(),
         errors: Vec::new(),
         newline_pending: false,
+        nesting: 0,
+        too_deep: None,
     };
     if lx.src[lo..].starts_with('\u{feff}') {
         lx.pos += 3;
     }
     lx.run();
+    if let Some(at) = lx.too_deep {
+        // Lexing gave up at that point; other errors are consequences.
+        lx.errors.clear();
+        lx.error(at, at + 1, "strings nested too deeply inside string interpolations");
+    }
     let tokens = insert_terminators(lx.tokens);
     Lexed { tokens, comments: lx.comments, errors: lx.errors }
 }
@@ -506,23 +531,19 @@ impl<'a> Lexer<'a> {
             self.pos = suffix_end;
             match unit {
                 Some(mult) => {
-                    let nanos = if is_float {
-                        let v: f64 = text.parse().unwrap_or(0.0);
-                        v * mult
+                    let nanos: Option<i64> = if is_float {
+                        let v = text.parse::<f64>().unwrap_or(0.0) * mult;
+                        (v.is_finite() && v.abs() <= i64::MAX as f64).then_some(v as i64)
                     } else {
-                        match text.parse::<i128>() {
-                            Ok(v) => (v * mult as i128) as f64,
-                            Err(_) => f64::INFINITY,
-                        }
+                        // Exact integer arithmetic; huge literals must not overflow.
+                        text.parse::<i128>().ok().and_then(|v| v.checked_mul(mult as i128)).and_then(|n| i64::try_from(n).ok())
                     };
-                    if !nanos.is_finite() || nanos.abs() > i64::MAX as f64 {
-                        self.error(lo, self.pos, "duration literal out of range");
-                        self.push(Tok::Duration(0), lo);
-                    } else if is_float {
-                        self.push(Tok::Duration(nanos as i64), lo);
-                    } else {
-                        let v: i128 = text.parse().unwrap_or(0);
-                        self.push(Tok::Duration((v * mult as i128) as i64), lo);
+                    match nanos {
+                        Some(n) => self.push(Tok::Duration(n), lo),
+                        None => {
+                            self.error(lo, self.pos, "duration literal out of range");
+                            self.push(Tok::Duration(0), lo);
+                        }
                     }
                 }
                 None => {
@@ -570,8 +591,10 @@ impl<'a> Lexer<'a> {
             b'}' => '}',
             b'\'' => '\'',
             b'x' if allow_hex => {
-                let h = &self.src[self.pos..(self.pos + 2).min(self.end)];
-                if h.len() == 2 && h.bytes().all(|b| b.is_ascii_hexdigit()) {
+                // Checked byte-wise: the next two bytes may split a character.
+                let (hi, lo_digit) = (self.peek(0), self.peek(1));
+                if hi.is_ascii_hexdigit() && lo_digit.is_ascii_hexdigit() {
+                    let h = &self.src[self.pos..self.pos + 2];
                     self.pos += 2;
                     return Some(Err(u8::from_str_radix(h, 16).unwrap()));
                 }
@@ -736,6 +759,17 @@ impl<'a> Lexer<'a> {
 
     /// Skips over a nested string literal inside an interpolation.
     fn skip_string(&mut self) {
+        if self.nesting >= MAX_STRING_NESTING {
+            self.too_deep.get_or_insert(self.pos);
+            self.pos = self.end;
+            return;
+        }
+        self.nesting += 1;
+        self.skip_string_inner();
+        self.nesting -= 1;
+    }
+
+    fn skip_string_inner(&mut self) {
         let errs = self.errors.len();
         if self.peek(1) == b'"' && self.peek(2) == b'"' {
             let before = self.tokens.len();

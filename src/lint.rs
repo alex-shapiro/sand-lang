@@ -1,8 +1,11 @@
 //! The linter: style and correctness warnings on top of the type checker.
 
+use crate::check::{CheckedProgram, Ctor, FnInfo, FnKind};
 use crate::engine::{Engine, ResolvedFacts};
+use crate::hir::{HArg, HKind};
 use crate::syntax::ast::*;
 use crate::syntax::lexer::CommentKind;
+use crate::types::FnId;
 use crate::{Config, Policy};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -57,7 +60,8 @@ struct Linter<'a> {
     facts: &'a ResolvedFacts,
     /// Types of bindings by (line, column), from the checker.
     types: HashMap<(usize, usize), String>,
-    /// `let` bindings in enclosing scopes of the current function: name -> type.
+    /// Bindings (with known types) in the scopes enclosing the current point of
+    /// the current function, innermost last: name -> type.
     let_scopes: Vec<Vec<(String, String)>>,
 }
 
@@ -81,7 +85,7 @@ fn run_lints(src: &str, facts: &ResolvedFacts) -> Result<Vec<LintWarning>, Strin
         let_scopes: vec![vec![]],
     };
     l.module(&parsed.module);
-    l.fact_lints(&parsed.module);
+    l.fact_lints();
 
     // Suppressions.
     let mut file_allow: HashSet<String> = HashSet::new();
@@ -126,11 +130,90 @@ fn is_screaming(s: &str) -> bool {
 
 fn diverges(e: &Expr) -> bool {
     match &e.kind {
-        ExprKind::Return(_) | ExprKind::Break(_) | ExprKind::Continue => true,
+        ExprKind::Return(_) | ExprKind::Break { .. } | ExprKind::Continue(_) => true,
         ExprKind::Call { callee, .. } => {
             matches!(&callee.kind, ExprKind::Ident(id) if matches!(id.name.as_str(), "panic" | "exit" | "todo"))
         }
+        // A `loop` that nothing breaks out of never completes.
+        ExprKind::Loop { label, body } => !block_any(body, &mut |x| breaks_to(x, label.as_ref(), 0)),
         _ => false,
+    }
+}
+
+/// Calls `f` on the direct subexpressions of `e`, including the statements of
+/// its blocks, but not the bodies of nested function declarations. Stops
+/// (returning true) as soon as `f` returns true.
+fn any_sub_expr(e: &Expr, f: &mut dyn FnMut(&Expr) -> bool) -> bool {
+    fn cond(c: &Cond) -> &Expr {
+        match c {
+            Cond::Expr(x) | Cond::Let(_, x) => x,
+        }
+    }
+    match &e.kind {
+        ExprKind::Block(b) | ExprKind::Loop { body: b, .. } => block_any(b, f),
+        ExprKind::While { cond: c, body, .. } => f(cond(c)) || block_any(body, f),
+        ExprKind::For { iter, body, .. } => f(iter) || block_any(body, f),
+        ExprKind::If { cond: c, then, else_ } => f(cond(c)) || block_any(then, f) || else_.as_deref().is_some_and(&mut *f),
+        ExprKind::Match { scrutinee, arms, .. } => f(scrutinee) || arms.iter().any(|a| a.guard.as_ref().is_some_and(&mut *f) || f(&a.body)),
+        ExprKind::Str(segs) => segs.iter().any(|s| matches!(s, StrSeg::Expr(x, _) if f(x))),
+        ExprKind::List(xs) | ExprKind::Tuple(xs) => xs.iter().any(&mut *f),
+        ExprKind::Repeat(a, b) | ExprKind::Pipe(a, b) | ExprKind::Coalesce(a, b) | ExprKind::Index(a, b) | ExprKind::Binary(_, a, b) => {
+            f(a) || f(b)
+        }
+        ExprKind::Map(kvs) => kvs.iter().any(|(k, v)| f(k) || f(v)),
+        ExprKind::ListComp(x, cs) => f(x) || clauses_any(cs, f),
+        ExprKind::MapComp(k, v, cs) => f(k) || f(v) || clauses_any(cs, f),
+        ExprKind::StructLit { fields, base, .. } => {
+            fields.iter().any(|x| x.value.as_ref().is_some_and(&mut *f)) || base.as_deref().is_some_and(&mut *f)
+        }
+        ExprKind::Unary(_, x)
+        | ExprKind::Paren(x)
+        | ExprKind::Try(x)
+        | ExprKind::Spawn(x)
+        | ExprKind::Field(x, _)
+        | ExprKind::TupleField(x, _, _)
+        | ExprKind::Lambda { body: x, .. } => f(x),
+        ExprKind::Range { start, end, .. } => start.as_deref().is_some_and(&mut *f) || end.as_deref().is_some_and(&mut *f),
+        ExprKind::Call { callee, args } => f(callee) || args.iter().any(|a| f(&a.value)),
+        ExprKind::MethodCall { receiver, args, .. } => f(receiver) || args.iter().any(|a| f(&a.value)),
+        ExprKind::Return(Some(x)) | ExprKind::Break { value: Some(x), .. } => f(x),
+        _ => false,
+    }
+}
+
+fn block_any(b: &Block, f: &mut dyn FnMut(&Expr) -> bool) -> bool {
+    b.stmts.iter().any(|s| match &s.kind {
+        StmtKind::Let { value, else_block, .. } => f(value) || else_block.as_ref().is_some_and(|b| block_any(b, f)),
+        StmtKind::Assign { target, value, .. } => f(target) || f(value),
+        StmtKind::Expr(x) | StmtKind::Defer(x) => f(x),
+        StmtKind::Fn(_) => false,
+    })
+}
+
+fn clauses_any(cs: &[CompClause], f: &mut dyn FnMut(&Expr) -> bool) -> bool {
+    cs.iter().any(|c| match c {
+        CompClause::For(_, x) | CompClause::If(x) => f(x),
+    })
+}
+
+/// Whether `e` contains a `break` leaving the loop labeled `label` that is
+/// `depth` loops out (labels and loops do not reach into lambdas).
+fn breaks_to(e: &Expr, label: Option<&Ident>, depth: usize) -> bool {
+    match &e.kind {
+        ExprKind::Break { label: Some(l), .. } if label.is_some_and(|x| x.name == l.name) => true,
+        ExprKind::Break { label: None, .. } if depth == 0 => true,
+        ExprKind::Lambda { .. } => false,
+        ExprKind::Loop { .. } | ExprKind::While { .. } | ExprKind::For { .. } => any_sub_expr(e, &mut |x| breaks_to(x, label, depth + 1)),
+        _ => any_sub_expr(e, &mut |x| breaks_to(x, label, depth)),
+    }
+}
+
+/// Whether `e` contains a `break @name` or `continue @name` (outside lambdas).
+fn uses_label(e: &Expr, name: &str) -> bool {
+    match &e.kind {
+        ExprKind::Break { label: Some(l), .. } | ExprKind::Continue(Some(l)) if l.name == name => true,
+        ExprKind::Lambda { .. } => false,
+        _ => any_sub_expr(e, &mut |x| uses_label(x, name)),
     }
 }
 
@@ -194,6 +277,20 @@ impl<'a> Linter<'a> {
                         self.fn_decl(m);
                     }
                 }
+                ItemKind::Trait(t) => {
+                    self.name(&t.name, is_upper_camel(&t.name.name), "trait", "UpperCamelCase");
+                    self.generics(&t.generics);
+                    for m in &t.methods {
+                        self.fn_decl(m);
+                    }
+                }
+                ItemKind::Impl(i) => {
+                    self.generics(&i.generics);
+                    // Method names are dictated by the trait (and linted there).
+                    for m in &i.methods {
+                        self.fn_parts(m);
+                    }
+                }
                 ItemKind::TypeAlias(a) => self.name(&a.name, is_upper_camel(&a.name.name), "type", "UpperCamelCase"),
                 ItemKind::NativeType(n) => self.name(&n.name, is_upper_camel(&n.name.name), "type", "UpperCamelCase"),
                 ItemKind::Import(imp) => {
@@ -202,9 +299,10 @@ impl<'a> Linter<'a> {
                     }
                 }
                 ItemKind::Test(t) => {
-                    self.let_scopes.push(vec![]);
+                    // A test is a separate function: top-level bindings are not shadowed by it.
+                    let saved = std::mem::take(&mut self.let_scopes);
                     self.block(&t.body);
-                    self.let_scopes.pop();
+                    self.let_scopes = saved;
                 }
                 ItemKind::Stmt(s) => self.stmt(s, true),
             }
@@ -222,6 +320,10 @@ impl<'a> Linter<'a> {
 
     fn fn_decl(&mut self, f: &FnDecl) {
         self.name(&f.name, is_snake(&f.name.name), "function", "snake_case");
+        self.fn_parts(f);
+    }
+
+    fn fn_parts(&mut self, f: &FnDecl) {
         self.generics(&f.generics);
         for p in &f.params {
             if p.name.name != "self" {
@@ -233,8 +335,57 @@ impl<'a> Linter<'a> {
         }
         if let Some(b) = &f.body {
             let saved = std::mem::replace(&mut self.let_scopes, vec![vec![]]);
+            for p in &f.params {
+                if p.name.name != "self" {
+                    self.bind(&p.name);
+                }
+            }
             self.block(b);
             self.let_scopes = saved;
+        }
+    }
+
+    /// The checker's type of the binding introduced at `id`, if known.
+    fn binding_type(&self, id: &Ident) -> Option<String> {
+        let pos = (self.line_of(id.span.lo as usize), self.col_of(id.span.lo as usize));
+        self.types.get(&pos).filter(|t| !t.is_empty()).cloned()
+    }
+
+    /// Brings a binding into the innermost scope. Names without a checker type
+    /// (e.g. variant names in patterns) are not bindings and are skipped.
+    fn bind(&mut self, id: &Ident) {
+        if let Some(ty) = self.binding_type(id)
+            && let Some(scope) = self.let_scopes.last_mut()
+        {
+            scope.push((id.name.clone(), ty));
+        }
+    }
+
+    fn bind_pattern(&mut self, p: &Pattern) {
+        let mut ids = Vec::new();
+        p.bindings(&mut ids);
+        for id in &ids {
+            self.bind(id);
+        }
+    }
+
+    /// `shadowed-variable`: a `let`/`var` binding whose name is bound, with a
+    /// different type, by a binding of the same function that is still in scope.
+    fn check_shadowing(&mut self, p: &Pattern) {
+        let mut ids = Vec::new();
+        p.bindings(&mut ids);
+        for id in &ids {
+            let Some(ty) = self.binding_type(id) else { continue };
+            let prior = self.let_scopes.iter().rev().flat_map(|sc| sc.iter().rev()).find(|(n, _)| *n == id.name).map(|(_, t)| t.clone());
+            if let Some(prev_ty) = prior
+                && prev_ty != ty
+            {
+                self.warn(
+                    id.span.lo,
+                    "shadowed-variable",
+                    format!("`{}` shadows a binding of a different type ({prev_ty} vs {ty})", id.name),
+                );
+            }
         }
     }
 
@@ -290,26 +441,8 @@ impl<'a> Linter<'a> {
                     self.block(b);
                 }
                 self.pattern_names(pattern, top && !mutable);
-                if let PatternKind::Binding(id) = &pattern.kind {
-                    let pos = (self.line_of(id.span.lo as usize), self.col_of(id.span.lo as usize));
-                    let ty = self.types.get(&pos).cloned().unwrap_or_default();
-                    let prior =
-                        self.let_scopes.iter().rev().flat_map(|sc| sc.iter().rev()).find(|(n, _)| *n == id.name).map(|(_, t)| t.clone());
-                    if let Some(prev_ty) = prior
-                        && !prev_ty.is_empty()
-                        && !ty.is_empty()
-                        && prev_ty != ty
-                    {
-                        self.warn(
-                            id.span.lo,
-                            "shadowed-variable",
-                            format!("`{}` shadows a binding of a different type ({prev_ty} vs {ty})", id.name),
-                        );
-                    }
-                    if let Some(scope) = self.let_scopes.last_mut() {
-                        scope.push((id.name.clone(), ty));
-                    }
-                }
+                self.check_shadowing(pattern);
+                self.bind_pattern(pattern);
             }
             StmtKind::Assign { target, op, value } => {
                 if *op == AssignOp::Assign
@@ -321,7 +454,7 @@ impl<'a> Linter<'a> {
                 self.expr(target);
                 self.expr(value);
             }
-            StmtKind::Expr(e) => self.expr(e),
+            StmtKind::Expr(e) | StmtKind::Defer(e) => self.expr(e),
             StmtKind::Fn(f) => self.fn_decl(f),
         }
     }
@@ -332,6 +465,7 @@ impl<'a> Linter<'a> {
             Cond::Let(p, e) => {
                 self.pattern_names_in(p, false, false);
                 self.expr(e);
+                self.bind_pattern(p);
             }
         }
     }
@@ -369,9 +503,12 @@ impl<'a> Linter<'a> {
                 }
             }
             ExprKind::If { cond, then, else_ } => {
+                // `if let` bindings are in scope in the `then` block only.
+                self.let_scopes.push(vec![]);
                 self.cond(cond);
                 self.empty_block(then);
                 self.block(then);
+                self.let_scopes.pop();
                 if let Some(x) = else_ {
                     if let ExprKind::Block(b) = &x.kind {
                         self.empty_block(b);
@@ -379,30 +516,41 @@ impl<'a> Linter<'a> {
                     self.expr(x);
                 }
             }
-            ExprKind::While { cond, body } => {
+            ExprKind::While { label, cond, body } => {
+                self.label(label.as_ref(), body);
+                self.let_scopes.push(vec![]);
                 self.cond(cond);
                 self.empty_block(body);
                 self.block(body);
+                self.let_scopes.pop();
             }
-            ExprKind::Loop(body) => {
+            ExprKind::Loop { label, body } => {
+                self.label(label.as_ref(), body);
                 self.empty_block(body);
                 self.block(body);
             }
-            ExprKind::For { pattern, iter, body } => {
+            ExprKind::For { label, pattern, iter, body } => {
+                self.label(label.as_ref(), body);
                 self.pattern_names(pattern, false);
                 self.expr(iter);
+                self.let_scopes.push(vec![]);
+                self.bind_pattern(pattern);
                 self.empty_block(body);
                 self.block(body);
+                self.let_scopes.pop();
             }
             ExprKind::Block(b) => self.block(b),
             ExprKind::Match { scrutinee, arms, .. } => {
                 self.expr(scrutinee);
                 for a in arms {
                     self.pattern_names_in(&a.pattern, false, false);
+                    self.let_scopes.push(vec![]);
+                    self.bind_pattern(&a.pattern);
                     if let Some(g) = &a.guard {
                         self.expr(g);
                     }
                     self.expr(&a.body);
+                    self.let_scopes.pop();
                 }
             }
             ExprKind::Lambda { params, body, .. } => {
@@ -410,12 +558,23 @@ impl<'a> Linter<'a> {
                     self.name(&p.name, is_snake(&p.name.name), "parameter", "snake_case");
                 }
                 self.let_scopes.push(vec![]);
+                for p in params {
+                    self.bind(&p.name);
+                }
                 self.expr(body);
                 self.let_scopes.pop();
             }
             ExprKind::Str(segs) => {
                 for s in segs {
-                    if let StrSeg::Expr(x, _) = s {
+                    if let StrSeg::Expr(x, spec) = s {
+                        // `"[0-9]{4}"` interpolates `4`: almost always meant as literal braces.
+                        if spec.is_none() && matches!(x.kind, ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Duration(_)) {
+                            self.warn(
+                                x.span.lo,
+                                "interpolated-literal",
+                                "interpolating a literal; for literal braces use a raw string (`r\"...\"`) or `\\{`".into(),
+                            );
+                        }
                         self.expr(x);
                     }
                 }
@@ -432,13 +591,17 @@ impl<'a> Linter<'a> {
                 }
             }
             ExprKind::ListComp(x, clauses) => {
-                self.expr(x);
+                self.let_scopes.push(vec![]);
                 self.clauses(clauses);
+                self.expr(x);
+                self.let_scopes.pop();
             }
             ExprKind::MapComp(k, v, clauses) => {
+                self.let_scopes.push(vec![]);
+                self.clauses(clauses);
                 self.expr(k);
                 self.expr(v);
-                self.clauses(clauses);
+                self.let_scopes.pop();
             }
             ExprKind::StructLit { fields, base, .. } => {
                 for f in fields {
@@ -470,8 +633,17 @@ impl<'a> Linter<'a> {
                     self.expr(&a.value);
                 }
             }
-            ExprKind::Return(Some(x)) | ExprKind::Break(Some(x)) => self.expr(x),
+            ExprKind::Return(Some(x)) | ExprKind::Break { value: Some(x), .. } => self.expr(x),
             _ => {}
+        }
+    }
+
+    /// Lints a loop label: its name, and whether anything refers to it.
+    fn label(&mut self, label: Option<&Ident>, body: &Block) {
+        let Some(l) = label else { return };
+        self.name(l, is_snake(&l.name), "label", "snake_case");
+        if !block_any(body, &mut |x| uses_label(x, &l.name)) {
+            self.warn(l.span.lo, "unused-label", format!("label `@{}` is never used", l.name));
         }
     }
 
@@ -481,6 +653,7 @@ impl<'a> Linter<'a> {
                 CompClause::For(p, e) => {
                     self.pattern_names(p, false);
                     self.expr(e);
+                    self.bind_pattern(p);
                 }
                 CompClause::If(e) => self.expr(e),
             }
@@ -490,7 +663,7 @@ impl<'a> Linter<'a> {
     // ------------------------------------------------------------------
     // Lints from checker facts
 
-    fn fact_lints(&mut self, m: &Module) {
+    fn fact_lints(&mut self) {
         let facts = self.facts;
         for (line, col, f) in &facts.locals {
             if f.name.starts_with('_') || f.name == "self" || f.name.starts_with('<') {
@@ -526,13 +699,81 @@ impl<'a> Linter<'a> {
                 self.out.push(LintWarning { code: "unused-import", message: format!("unused import `{name}`"), line: *line, column: *col });
             }
         }
-        for item in &m.items {
-            if let ItemKind::Fn(f) = &item.kind
-                && !f.is_pub
-                && !facts.used_names.contains(&f.name.name)
+        for (line, col, name, is_method) in &facts.unused_fns {
+            let what = if *is_method { "method" } else { "function" };
+            self.out.push(LintWarning {
+                code: "unused-function",
+                message: format!("{what} `{name}` is never used"),
+                line: *line,
+                column: *col,
+            });
+        }
+    }
+}
+
+/// Private functions and methods of the main module that are unreachable from
+/// its public API, top-level code and tests (`unused-function`).
+///
+/// References are the resolved function ids in the checked HIR: direct calls
+/// (including pipes and method calls), function values and default-argument
+/// helpers. Reachability (rather than "referenced anywhere") means a function
+/// used only by itself or by other unused functions is unused too.
+pub(crate) fn unused_functions(checked: &CheckedProgram) -> Vec<FnId> {
+    let main = checked.main_module;
+    let n = checked.fns.len();
+    let is_root = |f: &FnInfo| -> bool {
+        // Trait methods are reached through dictionaries, not static references;
+        // their names are dictated by the trait.
+        if f.module != main || f.impl_of.is_some() || f.trait_of.is_some() {
+            return true;
+        }
+        match f.kind {
+            FnKind::Init | FnKind::Test(_) | FnKind::Native(_) | FnKind::TraitMethod(..) => true,
+            FnKind::DefaultHelper => false,
+            FnKind::Script => match f.owner {
+                // Methods are public exactly when their type is.
+                Some(Ctor::Def(d)) => checked.types.get(d as usize).is_none_or(|t| t.is_pub),
+                Some(_) => true,
+                None => f.is_pub,
+            },
+        }
+    };
+    let mut reached = vec![false; n];
+    let mut stack: Vec<FnId> = Vec::new();
+    for (i, f) in checked.fns.iter().enumerate() {
+        if is_root(f) {
+            reached[i] = true;
+            stack.push(i as FnId);
+        }
+    }
+    while let Some(id) = stack.pop() {
+        let Some(Some(body)) = checked.bodies.get(id as usize) else { continue };
+        let mut refs: Vec<FnId> = Vec::new();
+        crate::compile::walk(&body.body, &mut |e| match &e.kind {
+            HKind::FnValue(f) => refs.push(*f),
+            HKind::Call { func, args } => {
+                refs.push(*func);
+                refs.extend(args.iter().filter_map(|a| if let HArg::Default { helper, .. } = a { Some(*helper) } else { None }));
+            }
+            HKind::CallNative { args, .. } => {
+                refs.extend(args.iter().filter_map(|a| if let HArg::Default { helper, .. } = a { Some(*helper) } else { None }));
+            }
+            _ => {}
+        });
+        for r in refs {
+            if let Some(seen) = reached.get_mut(r as usize)
+                && !*seen
             {
-                self.warn(f.name.span.lo, "unused-function", format!("function `{}` is never used", f.name.name));
+                *seen = true;
+                stack.push(r);
             }
         }
     }
+    checked
+        .fns
+        .iter()
+        .enumerate()
+        .filter(|(i, f)| !reached[*i] && f.module == main && matches!(f.kind, FnKind::Script))
+        .map(|(i, _)| i as FnId)
+        .collect()
 }

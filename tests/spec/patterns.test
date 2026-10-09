@@ -246,3 +246,33 @@ for Item { name, qty } in [Item { name: "a", qty: 2 }] {
 }
 --- stdout
 a x2
+
+=== match on a never-typed scrutinee
+fn f() -> int {
+    match panic("boom") {
+        Some(v) => v
+        None => 0
+    }
+}
+fn g() -> int {
+    match (panic("nested"), 1) {
+        (Ok(v), 1) => v
+        _ => 0
+    }
+}
+fn h() -> int {
+    let Some(x) = panic("let")
+    x
+}
+print(f() + g() + h())
+--- panic
+boom
+
+=== match on an erroneous scrutinee reports the error
+let ts = nope.map(u => spawn u)
+match ts[0].wait() {
+    Ok(p) => print(p)
+    Err(e) => print(e)
+}
+--- error
+1: undefined name `nope`

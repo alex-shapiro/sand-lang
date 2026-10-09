@@ -15,15 +15,18 @@ path = "src/main.rs"
 
 [features]
 default = ["tls"]
-# HTTPS / TLS support via rustls (pulls in `ring`, which contains C and assembly).
 tls = ["dep:rustls", "dep:tokio-rustls", "dep:webpki-roots"]
 
 [dependencies]
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "fs", "io-util", "io-std", "sync", "macros"] }
-regex = "1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "fs", "io-util", "io-std", "sync", "macros", "signal"] }
+regex-automata = { version = "0.4.16", default-features = false, features = ["std", "syntax", "meta", "nfa-pikevm", "nfa-backtrack", "hybrid", "dfa-onepass", "perf-inline", "perf-literal", "unicode"] }
 rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = { version = "0.26", optional = true, default-features = false, features = ["ring", "tls12"] }
 webpki-roots = { version = "1", optional = true }
+unicode-normalization = "0.1"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", default-features = false, features = ["fs", "std"] }
 
 [dev-dependencies]
 proptest = "1"

@@ -1,0 +1,1268 @@
+=== trait with required and default methods
+trait Describe {
+    fn describe(self) -> str
+    fn shout(self) -> str { self.describe().to_upper() + "!" }
+}
+struct Point { x: int, y: int }
+impl Describe for Point {
+    fn describe(self) -> str { "point {self.x},{self.y}" }
+}
+struct Word { w: str }
+impl Describe for Word {
+    fn describe(self) -> str { self.w }
+    fn shout(self) -> str { "~{self.w}~" }
+}
+let p = Point { x: 1, y: 2 }
+print(p.describe())
+print(p.shout())
+print(Word { w: "hi" }.shout())
+--- stdout
+point 1,2
+POINT 1,2!
+~hi~
+
+=== generic function with a trait bound
+trait Describe {
+    fn describe(self) -> str
+}
+struct Point { x: int }
+impl Describe for Point {
+    fn describe(self) -> str { "P{self.x}" }
+}
+impl Describe for int {
+    fn describe(self) -> str { "int {self}" }
+}
+fn twice<T: Describe>(x: T) -> str { x.describe() + " " + x.describe() }
+fn all<T>(xs: [T]) -> [str] where T: Describe { xs.map(x => x.describe()) }
+print(twice(Point { x: 3 }))
+print(twice(7))
+print(all([1, 2]))
+--- stdout
+P3 P3
+int 7 int 7
+["int 1", "int 2"]
+
+=== multiple bounds including built-in ones
+trait Describe {
+    fn describe(self) -> str
+}
+impl Describe for int {
+    fn describe(self) -> str { "#{self}" }
+}
+impl Describe for str {
+    fn describe(self) -> str { "'{self}'" }
+}
+fn largest<T: Ord + Describe>(xs: [T]) -> str {
+    var best = xs[0]
+    for x in xs {
+        if x > best { best = x }
+    }
+    best.describe()
+}
+fn keys<K>(xs: [K]) -> [K: str] where K: Hash, K: Describe {
+    [x: x.describe() for x in xs]
+}
+print(largest([3, 9, 2]))
+print(largest(["b", "a"]))
+print(keys([1, 2]))
+--- stdout
+#9
+'b'
+[1: "#1", 2: "#2"]
+
+=== static methods through types and bounded type parameters
+trait Monoid {
+    fn empty() -> Self
+    fn combine(self, other: Self) -> Self
+}
+impl Monoid for int {
+    fn empty() -> int { 0 }
+    fn combine(self, other: int) -> int { self + other }
+}
+impl Monoid for str {
+    fn empty() -> Self { "" }
+    fn combine(self, other: Self) -> Self { self + other }
+}
+fn concat_all<T: Monoid>(xs: [T]) -> T {
+    xs.fold(T.empty(), (acc, x) => acc.combine(x))
+}
+let none: [int] = []
+print(concat_all([1, 2, 3]))
+print(concat_all(["a", "b", "c"]))
+print(concat_all(none))
+print(int.empty())
+print(str.empty().len())
+let s: str = Monoid.empty()
+print(s.is_empty())
+--- stdout
+6
+abc
+0
+0
+0
+true
+
+=== default methods calling static methods through Self
+trait Monoid {
+    fn empty() -> Self
+    fn combine(self, other: Self) -> Self
+    fn twice(self) -> Self { self.combine(self) }
+    fn reset(self) -> Self { Self.empty() }
+}
+impl Monoid for int {
+    fn empty() -> int { 0 }
+    fn combine(self, other: int) -> int { self + other }
+}
+print(21.twice())
+print(5.reset())
+--- stdout
+42
+0
+
+=== supertraits
+trait Describe {
+    fn describe(self) -> str
+}
+trait Shape: Describe + Eq {
+    fn area(self) -> float
+    fn summary(self) -> str { "{self.describe()}: {self.area()}" }
+}
+enum Fig {
+    Circle(r: float)
+    Square(s: float)
+}
+impl Describe for Fig {
+    fn describe(self) -> str {
+        match self {
+            Circle(_) => "circle"
+            Square(_) => "square"
+        }
+    }
+}
+impl Shape for Fig {
+    fn area(self) -> float {
+        match self {
+            Circle(r) => 3.0 * r * r
+            Square(s) => s * s
+        }
+    }
+}
+fn report<T: Shape>(xs: [T]) -> [str] {
+    // Supertrait methods and built-in supertraits are available through the bound.
+    let first = xs[0]
+    xs.map(x => "{x.summary()} {x.describe()} {x == first}")
+}
+print(report([Fig.Circle(1.0), Fig.Square(2.0)]))
+--- stdout
+["circle: 3.0 circle true", "square: 4.0 square false"]
+
+=== supertrait chains
+trait A {
+    fn a(self) -> str
+}
+trait B: A {
+    fn b(self) -> str { "b" + self.a() }
+}
+trait C: B {
+    fn c(self) -> str { "c" + self.b() }
+}
+impl A for int {
+    fn a(self) -> str { "a{self}" }
+}
+impl B for int {}
+impl C for int {}
+fn use_c<T: C>(x: T) -> str { x.c() + " " + x.b() + " " + x.a() }
+print(use_c(1))
+--- stdout
+cba1 ba1 a1
+
+=== traits with type parameters
+trait Into<T> {
+    fn into(self) -> T
+}
+impl Into<str> for int {
+    fn into(self) -> str { "#{self}" }
+}
+impl Into<float> for int {
+    fn into(self) -> float { self.to_float() / 2.0 }
+}
+fn convert<T: Into<U>, U>(xs: [T]) -> [U] { xs.map(x => x.into()) }
+let s: str = 5.into()
+let f: float = 5.into()
+print(s)
+print(f)
+let strs: [str] = convert([1, 2])
+print(strs)
+fn takes_float(x: float) -> float { x }
+print(takes_float(3.into()))
+--- stdout
+#5
+2.5
+["#1", "#2"]
+1.5
+
+=== a single impl determines the trait arguments
+trait Into<T> {
+    fn into(self) -> T
+}
+struct Celsius { c: float }
+impl Into<float> for Celsius {
+    fn into(self) -> float { self.c * 1.8 + 32.0 }
+}
+let f = Celsius { c: 100.0 }.into()
+print(f + 0.5)
+--- stdout
+212.5
+
+=== evidence resolved later can determine earlier evidence
+trait Into<T> {
+    fn into(self) -> T
+}
+trait Show {
+    fn show(self) -> str
+}
+struct Box<T> { v: T }
+impl Into<str> for Box<int> {
+    fn into(self) -> str { "boxed {self.v}" }
+}
+impl Show for str {
+    fn show(self) -> str { "s:" + self }
+}
+fn show_it<T: Show>(x: T) -> str { x.show() }
+let b = Box { v: 3 }
+print(show_it(b.into()))
+--- stdout
+s:boxed 3
+
+=== several impls need an annotation
+trait Into<T> {
+    fn into(self) -> T
+}
+impl Into<str> for int {
+    fn into(self) -> str { "" }
+}
+impl Into<float> for int {
+    fn into(self) -> float { 0.0 }
+}
+let x = 5.into()
+--- error
+10: cannot infer the type arguments of `Into<_>` for int
+
+=== conditional impls
+trait Describe {
+    fn describe(self) -> str
+}
+struct Point { x: int }
+impl Describe for Point {
+    fn describe(self) -> str { "P{self.x}" }
+}
+impl<T: Describe> Describe for [T] {
+    fn describe(self) -> str { "[" + self.map(x => x.describe()).join(", ") + "]" }
+}
+impl<T: Describe> Describe for T? {
+    fn describe(self) -> str {
+        match self {
+            Some(x) => "Some " + x.describe()
+            None => "nothing"
+        }
+    }
+}
+impl<K: Hash, V: Describe> Describe for [K: V] {
+    fn describe(self) -> str { "{self.len()} entries, first " + (self.values().first().describe()) }
+}
+fn show<T: Describe>(x: T) -> str { x.describe() }
+let p = Point { x: 1 }
+print([p, Point { x: 2 }].describe())
+print([[p], []].describe())
+print(show([Some(p), None]))
+print(["a": p].describe())
+--- stdout
+[P1, P2]
+[[P1], []]
+[Some P1, nothing]
+1 entries, first Some P1
+
+=== impls for built-in types and tuples of each size
+trait Size {
+    fn size(self) -> int
+}
+impl Size for str {
+    fn size(self) -> int { self.char_count() }
+}
+impl Size for bytes {
+    fn size(self) -> int { self.len() }
+}
+impl Size for () {
+    fn size(self) -> int { 0 }
+}
+impl Size for Range {
+    fn size(self) -> int { self.len() }
+}
+impl<T: Hash> Size for Set<T> {
+    fn size(self) -> int { self.len() }
+}
+impl<A: Size, B: Size> Size for (A, B) {
+    fn size(self) -> int { self.0.size() + self.1.size() }
+}
+impl<A: Size, B: Size, C: Size> Size for (A, B, C) {
+    fn size(self) -> int { self.0.size() + self.1.size() + self.2.size() }
+}
+impl Size for duration {
+    fn size(self) -> int { self.millis() }
+}
+print("héllo".size())
+print(b"ab".size())
+print(().size())
+print((0..10).size())
+print(set([1, 2, 2]).size())
+print(("ab", ()).size())
+print(("a", b"xyz", 2s).size())
+--- stdout
+5
+2
+0
+10
+2
+2
+2004
+
+=== generic impls for user types
+trait Describe {
+    fn describe(self) -> str
+}
+impl Describe for int {
+    fn describe(self) -> str { "{self}" }
+}
+enum Tree<T> {
+    Leaf
+    Node(left: Tree<T>, value: T, right: Tree<T>)
+}
+impl<T: Describe> Describe for Tree<T> {
+    fn describe(self) -> str {
+        match self {
+            Leaf => "."
+            Node(l, v, r) => "(" + l.describe() + " " + v.describe() + " " + r.describe() + ")"
+        }
+    }
+}
+struct Pair<A, B> { a: A, b: B }
+impl<A, B> Describe for Pair<A, B> where A: Describe, B: Describe {
+    fn describe(self) -> str { "<" + self.a.describe() + ", " + self.b.describe() + ">" }
+}
+let t = Tree.Node(Tree.Leaf, 1, Tree.Node(Tree.Leaf, 2, Tree.Leaf))
+print(t.describe())
+print(Pair { a: 1, b: t }.describe())
+--- stdout
+(. 1 (. 2 .))
+<1, (. 1 (. 2 .))>
+
+=== generic monoid impls
+trait Monoid {
+    fn empty() -> Self
+    fn combine(self, other: Self) -> Self
+}
+impl Monoid for int {
+    fn empty() -> int { 0 }
+    fn combine(self, other: int) -> int { self + other }
+}
+impl<T> Monoid for [T] {
+    fn empty() -> [T] { [] }
+    fn combine(self, other: [T]) -> [T] { self + other }
+}
+impl<A: Monoid, B: Monoid> Monoid for (A, B) {
+    fn empty() -> (A, B) { (A.empty(), B.empty()) }
+    fn combine(self, other: (A, B)) -> (A, B) { (self.0.combine(other.0), self.1.combine(other.1)) }
+}
+impl<T: Monoid> Monoid for T? {
+    fn empty() -> T? { None }
+    fn combine(self, other: T?) -> T? {
+        match (self, other) {
+            (Some(a), Some(b)) => Some(a.combine(b))
+            (a, None) => a
+            (None, b) => b
+        }
+    }
+}
+fn total<T: Monoid>(xs: [T]) -> T {
+    var acc = T.empty()
+    for x in xs { acc = acc.combine(x) }
+    acc
+}
+print(total([[1], [2, 3]]))
+print(total([(1, ["a"]), (2, ["b"])]))
+print(total([Some(1), None, Some(5)]))
+let e: (int, [str]) = Monoid.empty()
+print(e)
+--- stdout
+[1, 2, 3]
+(3, ["a", "b"])
+Some(6)
+(0, [])
+
+=== trait methods with their own type parameters
+trait Describe {
+    fn describe(self) -> str
+}
+impl Describe for int {
+    fn describe(self) -> str { "i{self}" }
+}
+trait Mapper {
+    fn map_all<U: Describe>(self, f: fn(int) -> U) -> [str]
+    fn first<U: Describe>(self, f: fn(int) -> U) -> str { self.map_all(f)[0] }
+}
+struct Nums { xs: [int] }
+impl Mapper for Nums {
+    fn map_all<V: Describe>(self, f: fn(int) -> V) -> [str] { self.xs.map(x => f(x).describe()) }
+}
+fn through_bound<M: Mapper>(m: M) -> str { m.first(x => x * 100) }
+print(Nums { xs: [1, 2] }.map_all(x => x + 1))
+print(through_bound(Nums { xs: [3] }))
+--- stdout
+["i2", "i3"]
+i300
+
+=== an iterator-style trait
+trait Iter<T> {
+    fn next(self) -> T?
+}
+struct Counter {
+    var i: int
+    n: int
+}
+impl Iter<int> for Counter {
+    fn next(self) -> int? {
+        if self.i >= self.n { return None }
+        self.i += 1
+        Some(self.i)
+    }
+}
+fn collect<I: Iter<T>, T>(it: I) -> [T] {
+    var out = []
+    while let Some(x) = it.next() { out.push(x) }
+    out
+}
+print(collect(Counter { i: 0, n: 4 }))
+--- stdout
+[1, 2, 3, 4]
+
+=== function values of bounded generic functions and trait methods
+import help
+trait Describe {
+    /// Describes the value.
+    fn describe(self) -> str
+}
+struct Point { x: int }
+impl Describe for Point {
+    /// Describes a point.
+    fn describe(self) -> str { "P{self.x}" }
+}
+impl Describe for int {
+    fn describe(self) -> str { "i{self}" }
+}
+/// Describes one value.
+fn describe_one<T: Describe>(x: T) -> str { x.describe() }
+let ps = [Point { x: 1 }, Point { x: 2 }]
+print(ps.map(describe_one))
+print(ps.map(Point.describe))
+print(ps.map(Describe.describe))
+print([1, 2].map(Describe.describe))
+let f = describe_one
+print(f(3))
+print(help.doc(describe_one))
+print(help.signature(describe_one))
+print(help.doc(Point.describe))
+print(help.doc(int.describe))
+print(help.signature(Describe.describe))
+print(Point { x: 5 } |> describe_one)
+--- stdout
+["P1", "P2"]
+["P1", "P2"]
+["P1", "P2"]
+["i1", "i2"]
+i3
+Describes one value.
+fn describe_one(x: T) -> str
+Describes a point.
+Describes the value.
+fn describe(self) -> str
+P5
+
+=== lambdas, local functions and spawn capture dictionaries
+trait Describe {
+    fn describe(self) -> str
+}
+impl Describe for int {
+    fn describe(self) -> str { "i{self}" }
+}
+fn labels<T: Describe>(xs: [T]) -> [str] {
+    fn label(x: T) -> str { "<" + x.describe() + ">" }
+    let wrap = (x: T) => "[" + label(x) + "]"
+    xs.map(wrap)
+}
+fn later<T: Describe>(x: T) -> str {
+    let t = spawn x.describe()
+    t.wait()
+}
+fn make<T: Describe>() -> fn(T) -> str { x => x.describe() + "!" }
+print(labels([1, 2]))
+print(later(5))
+print(make()(7))
+--- stdout
+["[<i1>]", "[<i2>]"]
+i5
+i7!
+
+=== recursion and polymorphic recursion
+trait Describe {
+    fn describe(self) -> str
+}
+impl Describe for int {
+    fn describe(self) -> str { "{self}" }
+}
+impl<T: Describe> Describe for [T] {
+    fn describe(self) -> str { "[" + self.map(x => x.describe()).join(" ") + "]" }
+}
+fn nest<T: Describe>(x: T, n: int) -> str {
+    if n == 0 { x.describe() } else { nest([x, x], n - 1) }
+}
+fn count_down<T: Describe>(x: T, n: int) -> [str] {
+    if n == 0 { return [] }
+    [x.describe()] + count_down(x, n - 1)
+}
+print(nest(1, 2))
+print(count_down(4, 2))
+--- stdout
+[[1 1] [1 1]]
+["4", "4"]
+
+=== default arguments may use bounds
+trait Monoid {
+    fn empty() -> Self
+    fn combine(self, other: Self) -> Self
+}
+impl Monoid for str {
+    fn empty() -> str { "" }
+    fn combine(self, other: str) -> str { self + other }
+}
+fn join<T: Monoid>(a: T, b: T = T.empty()) -> T { a.combine(b) }
+print(join("x"))
+print(join("x", "y"))
+print(join("x", b: "z"))
+--- stdout
+x
+xy
+xz
+
+=== where clauses on methods of generic types
+trait Describe {
+    fn describe(self) -> str
+}
+impl Describe for int {
+    fn describe(self) -> str { "i{self}" }
+}
+struct Box<T> {
+    item: T
+    fn show(self) -> str where T: Describe { "Box(" + self.item.describe() + ")" }
+    fn get(self) -> T { self.item }
+}
+extend<T> Box<T> {
+    fn twice(self) -> str where T: Describe { self.show() + self.show() }
+}
+let b = Box { item: 3 }
+print(b.show())
+print(b.twice())
+print(Box { item: "plain" }.get())
+print([b].map(Box.show))
+--- stdout
+Box(i3)
+Box(i3)Box(i3)
+plain
+["Box(i3)"]
+
+=== where clause methods check the bound at the call
+trait Describe {
+    fn describe(self) -> str
+}
+struct Box<T> {
+    item: T
+    fn show(self) -> str where T: Describe { self.item.describe() }
+}
+print(Box { item: 1 }.show())
+--- error
+8: the trait `Describe` is not implemented for int
+
+=== reflect natives alongside dictionaries
+import json
+trait Describe {
+    fn describe(self) -> str
+}
+struct P { x: int }
+impl Describe for P {
+    fn describe(self) -> str {
+        let again: P = json.decode(json.encode(self)).unwrap()
+        "P{again.x}"
+    }
+}
+fn with_extra<T: Describe>(items: [T], text: str) -> str {
+    let extra: [P] = json.decode(text).unwrap()
+    items.map(x => x.describe()).join(",") + ";" + extra.map(p => p.describe()).join(",")
+}
+print(with_extra([P { x: 1 }], r#"[{"x": 2}, {"x": 3}]"#))
+--- stdout
+P1;P2,P3
+
+=== globals used only by trait and impl methods
+let PREFIX = "> "
+var calls = 0
+trait Describe {
+    fn describe(self) -> str
+    fn line(self) -> str { PREFIX + self.describe() }
+}
+impl Describe for int {
+    fn describe(self) -> str {
+        calls += 1
+        "{self}"
+    }
+}
+print(1.line())
+print(2.line())
+print(calls)
+--- stdout
+> 1
+> 2
+2
+
+=== static methods and Self in generic impls
+trait Monoid {
+    fn empty() -> Self
+    fn combine(self, other: Self) -> Self
+}
+impl<T> Monoid for [T] {
+    fn empty() -> [T] { [] }
+    fn combine(self, other: Self) -> Self {
+        if other.is_empty() { self } else if self.is_empty() { Self.empty() + other } else { self + other }
+    }
+}
+fn maker<T: Monoid>() -> fn() -> T { T.empty }
+let mk: fn() -> [int] = maker()
+print(mk())
+print([1].combine([2]))
+--- stdout
+[]
+[1, 2]
+
+=== trait bounds on extend blocks
+trait Describe {
+    fn describe(self) -> str
+}
+impl Describe for int {
+    fn describe(self) -> str { "i{self}" }
+}
+struct Box<T> { item: T }
+extend<T: Describe> Box<T> {
+    fn show(self) -> str { "[" + self.item.describe() + "]" }
+}
+print(Box { item: 4 }.show())
+--- stdout
+[i4]
+
+=== qualified calls
+trait Describe {
+    fn describe(self) -> str
+}
+trait Label {
+    fn describe(self) -> str
+}
+struct P { x: int }
+impl Describe for P {
+    fn describe(self) -> str { "describe {self.x}" }
+}
+impl Label for P {
+    fn describe(self) -> str { "label {self.x}" }
+}
+let p = P { x: 1 }
+print(Describe.describe(p))
+print(Label.describe(p))
+print([p].map(Label.describe))
+--- stdout
+describe 1
+label 1
+["label 1"]
+
+=== ambiguous method calls are errors
+trait Describe {
+    fn describe(self) -> str
+}
+trait Label {
+    fn describe(self) -> str
+}
+struct P { x: int }
+impl Describe for P {
+    fn describe(self) -> str { "describe" }
+}
+impl Label for P {
+    fn describe(self) -> str { "label" }
+}
+let p = P { x: 1 }
+print(Describe.describe(p))
+print(Label.describe(p))
+print(p.describe())
+--- error
+17: method `describe` is ambiguous: it is provided by traits `Describe` and `Label`
+
+=== ambiguity through bounds
+trait A {
+    fn name(self) -> str
+}
+trait B {
+    fn name(self) -> str
+}
+fn f<T: A + B>(x: T) -> str { A.name(x) + B.name(x) }
+fn g<T: A + B>(x: T) -> str { x.name() }
+--- error
+8: ambiguous
+
+=== inherent methods take precedence over trait methods
+trait Describe {
+    fn describe(self) -> str
+}
+struct P {
+    x: int
+    fn describe(self) -> str { "inherent" }
+}
+impl Describe for P {
+    fn describe(self) -> str { "trait" }
+}
+fn generic<T: Describe>(x: T) -> str { x.describe() }
+let p = P { x: 1 }
+print(p.describe())
+print(Describe.describe(p))
+print(generic(p))
+--- stdout
+inherent
+trait
+trait
+
+=== trait methods take precedence over universal methods
+trait Show {
+    fn to_str(self) -> str
+}
+struct P { x: int }
+impl Show for P {
+    fn to_str(self) -> str { "custom" }
+}
+fn show<T: Show>(x: T) -> str { x.to_str() }
+let p = P { x: 1 }
+print(p.to_str())
+print(show(p))
+print("{p}")
+--- stdout
+custom
+custom
+P { x: 1 }
+
+=== marker traits
+trait Marker {}
+struct P { x: int }
+impl Marker for P {}
+fn only_marked<T: Marker>(x: T) -> T { x }
+print(only_marked(P { x: 2 }).x)
+--- stdout
+2
+
+=== traits and impls in other modules
+import "./shapes.sand"
+from "./shapes.sand" import Shape
+struct Circle { r: float }
+impl shapes.Shape for Circle {
+    fn area(self) -> float { 3.0 * self.r * self.r }
+    fn name(self) -> str { "circle" }
+}
+fn describe<T: Shape>(x: T) -> str { "{x.name()} {x.area()}" }
+fn describe2<T: shapes.Shape>(x: T) -> str { x.name() }
+print(describe(Circle { r: 1.0 }))
+print(describe(shapes.Square { side: 2.0 }))
+print(describe2(shapes.Square { side: 3.0 }))
+print(shapes.total([Circle { r: 1.0 }, Circle { r: 2.0 }]))
+print(shapes.Shape.area(Circle { r: 2.0 }))
+print(shapes.Square { side: 2.0 }.area())
+print(shapes.Square { side: 2.0 }.size())
+--- file shapes.sand
+/// Something with an area.
+pub trait Shape {
+    fn area(self) -> float
+    fn name(self) -> str { "shape" }
+}
+pub struct Square { side: float }
+impl Shape for Square {
+    fn area(self) -> float { self.side * self.side }
+}
+pub trait Sized {
+    fn size(self) -> int
+}
+impl Sized for Square {
+    fn size(self) -> int { 4 }
+}
+pub fn total<T: Shape>(xs: [T]) -> float {
+    xs.map(x => x.area()).sum()
+}
+--- stdout
+circle 3.0
+shape 4.0
+shape
+15.0
+12.0
+4.0
+4
+
+=== impls for imported types live with the type or the trait
+import "./lib.sand"
+trait Describe {
+    fn describe(self) -> str
+}
+impl Describe for lib.Point {
+    fn describe(self) -> str { "point {self.x}" }
+}
+impl lib.Named for str {
+    fn name(self) -> str { self }
+}
+impl lib.Named for lib.Point {
+    fn name(self) -> str { "again" }
+}
+--- file lib.sand
+pub struct Point { x: int }
+pub trait Named {
+    fn name(self) -> str
+}
+impl Named for Point {
+    fn name(self) -> str { "p" }
+}
+--- error
+8: the impl of `Named` for str must be in the module that declares the trait or the type
+11: the impl of `Named` for Point must be in the module that declares the trait or the type
+
+=== private traits are not visible to other modules
+import "./lib.sand"
+fn f<T: lib.Secret>(x: T) {}
+print(lib.P { x: 1 }.secret())
+--- file lib.sand
+pub struct P { x: int }
+trait Secret {
+    fn secret(self) -> int
+}
+impl Secret for P {
+    fn secret(self) -> int { self.x }
+}
+--- error
+2: `Secret` is private
+3: no method `secret` on type P
+
+=== missing methods
+trait Shape {
+    fn area(self) -> float
+    fn name(self) -> str
+    fn label(self) -> str { "shape" }
+}
+struct S { x: int }
+impl Shape for S {
+    fn name(self) -> str { "s" }
+}
+--- error
+7: missing method `area` in the impl of `Shape` for S
+
+=== extra methods
+trait Shape {
+    fn area(self) -> float
+}
+struct S { x: int }
+impl Shape for S {
+    fn area(self) -> float { 1.0 }
+    fn perimeter(self) -> float { 2.0 }
+}
+--- error
+7: `perimeter` is not a method of trait `Shape`
+
+=== method signatures must match the trait
+trait T {
+    fn a(self) -> str
+    fn b(self, x: int) -> int
+    fn c() -> Self
+    fn d(self)
+    fn e<U: Ord>(self, u: U) -> U
+}
+struct S { x: int }
+impl T for S {
+    fn a(self) -> int { 1 }
+    fn b(self, x: str) -> int { 1 }
+    fn c(self) -> S { self }
+    fn d(self, extra: int) {}
+    fn e<U>(self, u: U) -> U { u }
+}
+--- error
+10: method `a` does not match its declaration in trait `T`: expected `fn a(self) -> str`, found `fn a(self) -> int`
+11: method `b` does not match its declaration in trait `T`: expected `fn b(self, x: int) -> int`
+12: method `c` does not match
+13: method `d` does not match
+14: the type parameters of method `e` have different bounds than in trait `T`
+
+=== Self in a trait is the implementing type
+trait Clone {
+    fn copy(self) -> Self
+}
+struct S { x: int }
+impl Clone for S {
+    fn copy(self) -> int { 1 }
+}
+--- error
+6: expected `fn copy(self) -> S`, found `fn copy(self) -> int`
+
+=== overlapping impls
+trait Describe {
+    fn describe(self) -> str
+}
+impl Describe for [int] {
+    fn describe(self) -> str { "ints" }
+}
+impl<T> Describe for [T] {
+    fn describe(self) -> str { "list" }
+}
+impl Describe for int {
+    fn describe(self) -> str { "a" }
+}
+impl Describe for int {
+    fn describe(self) -> str { "b" }
+}
+--- error
+7: conflicting impls of `Describe` for [T]: it is already implemented (line 4)
+13: conflicting impls of `Describe` for int
+
+=== overlapping impls of generic traits
+trait Into<T> {
+    fn into(self) -> T
+}
+impl Into<str> for int {
+    fn into(self) -> str { "" }
+}
+impl Into<float> for int {
+    fn into(self) -> float { 0.0 }
+}
+impl<T> Into<[T]> for int {
+    fn into(self) -> [T] { [] }
+}
+impl<T> Into<T?> for int {
+    fn into(self) -> T? { None }
+}
+impl Into<str?> for int {
+    fn into(self) -> str? { None }
+}
+--- error
+16: conflicting impls of `Into<str?>` for int
+
+=== unsatisfied bounds
+trait Describe {
+    fn describe(self) -> str
+}
+struct Point { x: int }
+impl Describe for Point {
+    fn describe(self) -> str { "p" }
+}
+impl<T: Describe> Describe for [T] {
+    fn describe(self) -> str { "list" }
+}
+fn show<T: Describe>(x: T) -> str { x.describe() }
+print(show(Point { x: 1 }))
+print(show(1))
+print(show([[Point { x: 1 }]]))
+print(show([["s"]]))
+print("s".describe())
+--- error
+13: the trait `Describe` is not implemented for int
+15: the trait `Describe` is not implemented for str (required for [str] to implement `Describe`)
+16: no method `describe` on type str (the trait `Describe` has it but is not implemented for str)
+
+=== type parameters need bounds
+trait Describe {
+    fn describe(self) -> str
+}
+fn show<T: Describe>(x: T) -> str { x.describe() }
+fn a<T>(x: T) -> str { x.describe() }
+fn b<T>(x: T) -> str { show(x) }
+--- error
+5: no method `describe` on type T; add a bound `T: Describe`
+6: type parameter `T` does not implement `Describe`; add a bound `T: Describe`
+
+=== conditional impl bounds include built-in bounds
+trait Describe {
+    fn describe(self) -> str
+}
+impl Describe for int {
+    fn describe(self) -> str { "i" }
+}
+impl Describe for float {
+    fn describe(self) -> str { "f" }
+}
+impl<T: Describe + Hash> Describe for [T] {
+    fn describe(self) -> str { "list" }
+}
+print([1].describe())
+print([1.5].describe())
+--- error
+14: float does not satisfy Hash (required for [float] to implement `Describe`)
+
+=== supertraits must be implemented
+trait Describe {
+    fn describe(self) -> str
+}
+trait Shape: Describe {
+    fn area(self) -> float
+}
+trait Keyed: Hash {
+    fn key(self) -> str
+}
+struct S { x: int }
+impl Shape for S {
+    fn area(self) -> float { 1.0 }
+}
+struct M { var n: int }
+impl Keyed for M {
+    fn key(self) -> str { "m" }
+}
+struct W<T> { t: T }
+impl<T> Describe for W<T> where T: Describe {
+    fn describe(self) -> str { self.t.describe() }
+}
+impl<T> Shape for W<T> {
+    fn area(self) -> float { 0.0 }
+}
+--- error
+11: the trait `Describe` is not implemented for S, which trait `Shape` requires
+15: M does not satisfy Hash, which trait `Keyed` requires
+22: type parameter `T` does not implement `Describe`
+
+=== cyclic supertraits
+trait A: B {}
+trait B: A {}
+--- error
+1: trait `A` is its own supertrait
+
+=== static methods cannot be called on values
+trait Monoid {
+    fn empty() -> Self
+}
+impl Monoid for int {
+    fn empty() -> int { 0 }
+}
+print(5.empty())
+--- error
+7: `empty` is a static method of `Monoid`; call it on the type
+
+=== the implementing type must be inferable
+trait Monoid {
+    fn empty() -> Self
+}
+impl Monoid for int {
+    fn empty() -> int { 0 }
+}
+fn f() {
+    let x = Monoid.empty()
+}
+--- error
+8: cannot infer the type that must implement `Monoid`
+
+=== invalid bounds and impls
+trait Describe {
+    fn describe(self) -> str
+}
+struct S { x: int }
+fn a<T: Nope>(x: T) {}
+fn b<T: S>(x: T) {}
+fn c(x: Describe) {}
+impl Eq for S {}
+impl Describe for fn(int) {
+    fn describe(self) -> str { "" }
+}
+impl<T> Describe for T {
+    fn describe(self) -> str { "" }
+}
+impl<T> Describe for S {
+    fn describe(self) -> str { "" }
+}
+struct Wrap<T: Describe> { t: T }
+trait Bad<T: Ord> {}
+trait Eq {}
+extend<T: Bogus> Wrap<T> {}
+--- error
+21: unknown bound `Bogus`
+5: unknown bound `Nope`
+6: `S` is a type, not a trait
+7: `Describe` is a trait, not a type
+8: `Eq` is a built-in bound
+9: cannot implement traits for fn(int)
+12: cannot implement traits for T
+15: type parameter `T` is not used by the impl's type or trait arguments
+18: trait bounds are not allowed on the type parameters of a type
+19: bounds on trait type parameters are not supported
+20: `Eq` is a built-in bound and cannot be redefined
+
+=== restrictions on trait and impl methods
+trait Describe<X> {
+    fn describe(self, prefix: str = default_prefix()) -> str
+    fn other<U>(self, u: U) -> str where X: Ord
+}
+fn default_prefix() -> str { ">" }
+struct S { x: int }
+impl<T> Describe<int> for [T] {
+    fn describe(self, prefix: str = "") -> str { prefix }
+    fn other<U>(self, u: U) -> str where T: Ord { "" }
+}
+fn outer() {
+    fn local<T: Describe<int>>(x: T) {}
+}
+--- error
+2: default values of trait method parameters must be constants
+3: `where` clauses in trait methods may only constrain the method's own type parameters
+8: default values are declared by the trait, not the impl
+9: impl methods cannot add bounds to the impl's type parameters
+12: local functions cannot have trait bounds
+
+=== pub is not allowed on trait and impl methods
+trait Describe {
+    pub fn describe(self) -> str
+}
+--- error
+2: `pub` is not allowed on trait methods
+
+=== traits are not values or types
+trait Describe {
+    fn describe(self) -> str
+}
+let x = Describe
+print(Describe.nothing(1))
+--- error
+4: `Describe` is a trait, not a value
+5: trait `Describe` has no method `nothing`
+
+=== trait methods in tests
+trait Double {
+    fn double(self) -> Self
+}
+impl Double for int {
+    fn double(self) -> int { self * 2 }
+}
+test "doubling" {
+    assert(4.double() == 8)
+}
+--- test
+ok doubling
+1 passed, 0 failed
+
+=== formatting traits and impls
+/// Describes.
+pub trait Describe:Eq+  Ord{
+  /// Required.
+  fn describe(self)->str
+  fn shout(self)->str{self.describe().to_upper()}
+}
+trait Into<T>{fn into(self)->T}
+impl<T:Describe+Hash>Describe for [T] where T:Ord{
+  fn describe(self)->str{"list"}
+}
+impl  Into<str>for int{
+    fn into(self) -> str { "" }
+}
+fn f<T:Describe+geo.Shape,U:Into<[int]>>(x:T,u:U)->str where T:Hash{x.describe()}
+--- fmt
+/// Describes.
+pub trait Describe: Eq + Ord {
+    /// Required.
+    fn describe(self) -> str
+
+    fn shout(self) -> str { self.describe().to_upper() }
+}
+
+trait Into<T> {
+    fn into(self) -> T
+}
+
+impl<T: Describe + Hash> Describe for [T] where T: Ord {
+    fn describe(self) -> str { "list" }
+}
+
+impl Into<str> for int {
+    fn into(self) -> str { "" }
+}
+
+fn f<T: Describe + geo.Shape, U: Into<[int]>>(x: T, u: U) -> str where T: Hash { x.describe() }
+
+=== formatting keeps comments in trait bodies
+trait Describe {
+    // A comment.
+    fn describe(self) -> str // trailing
+
+    /// Doc.
+    fn shout(self) -> str {
+        // inside
+        self.describe()
+    }
+}
+impl Describe for int {} // empty impl
+--- fmt
+trait Describe {
+    // A comment.
+    fn describe(self) -> str // trailing
+
+    /// Doc.
+    fn shout(self) -> str {
+        // inside
+        self.describe()
+    }
+}
+
+impl Describe for int {} // empty impl
+
+=== lint naming for traits
+trait describe_it {
+    fn Describe(self) -> str
+}
+impl describe_it for int {
+    fn Describe(self) -> str { "" }
+}
+print(1.Describe())
+--- lint
+1: naming
+2: naming
+
+=== an import used only through a trait method is used
+import "./lib.sand"
+print(5.describe())
+--- file lib.sand
+pub trait Describe {
+    fn describe(self) -> str
+}
+impl Describe for int {
+    fn describe(self) -> str { "int {self}" }
+}
+--- lint
+
+=== no unused warnings for trait and impl method parameters
+import "./lib.sand"
+trait Combine {
+    fn combine(self, other: Self, extra: int) -> Self
+    fn twice(self, unused: int) -> Self { self }
+}
+impl Combine for int {
+    fn combine(self, other: int, extra: int) -> int { self }
+}
+struct Mine { x: int }
+impl lib.Named for Mine {
+    fn name(self) -> str { "" }
+}
+fn f<T: Combine>(x: T, n: int = 0) -> T { x.combine(x, n) }
+print(f(1))
+print(1.twice(2))
+print(Mine { x: 1 }.name())
+--- file lib.sand
+pub trait Named {
+    fn name(self) -> str
+}
+--- lint

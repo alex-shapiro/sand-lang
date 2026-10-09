@@ -21,7 +21,7 @@ impl TempDir {
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        TempDir(dir.canonicalize().unwrap())
+        TempDir(sandlang::policy::normalize_path(&dir))
     }
     pub fn path(&self) -> &Path {
         &self.0
@@ -130,12 +130,54 @@ pub struct TestServer {
     pub requests: std::sync::Arc<std::sync::Mutex<Vec<HttpRequest>>>,
 }
 
+type Handler = std::sync::Arc<dyn Fn(&HttpRequest) -> HttpResponse + Send + Sync>;
+
 pub fn http_server<F>(handler: F) -> TestServer
 where
     F: Fn(&HttpRequest) -> HttpResponse + Send + Sync + 'static,
 {
+    serve(std::sync::Arc::new(handler), None)
+}
+
+/// Like [`http_server`], over TLS with the `localhost` certificate from
+/// `tests/tls` (trust `tls_test_root()` to accept it).
+#[cfg(feature = "tls")]
+pub fn https_server<F>(handler: F) -> TestServer
+where
+    F: Fn(&HttpRequest) -> HttpResponse + Send + Sync + 'static,
+{
+    serve(std::sync::Arc::new(handler), Some(tls_acceptor()))
+}
+
+/// Without TLS support there is no acceptor.
+#[cfg(not(feature = "tls"))]
+#[derive(Clone)]
+enum TlsAcceptor {}
+#[cfg(feature = "tls")]
+use tokio_rustls::TlsAcceptor;
+
+/// The test root CA (DER) that issued the `localhost` certificate.
+pub fn tls_test_root() -> Vec<u8> {
+    include_bytes!("../tls/ca.der").to_vec()
+}
+
+/// A TLS acceptor presenting the `localhost` test certificate.
+#[cfg(feature = "tls")]
+pub fn tls_acceptor() -> TlsAcceptor {
+    use tokio_rustls::rustls::{self, pki_types};
+    let cert = pki_types::CertificateDer::from(include_bytes!("../tls/localhost.der").to_vec());
+    let key = pki_types::PrivateKeyDer::Pkcs8(pki_types::PrivatePkcs8KeyDer::from(include_bytes!("../tls/localhost.key.der").to_vec()));
+    let config = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert], key)
+        .unwrap();
+    TlsAcceptor::from(std::sync::Arc::new(config))
+}
+
+fn serve(handler: Handler, tls: Option<TlsAcceptor>) -> TestServer {
     use std::sync::{Arc, Mutex};
-    let handler = Arc::new(handler);
     let requests = Arc::new(Mutex::new(Vec::new()));
     let reqs = requests.clone();
     let (tx, rx) = std::sync::mpsc::channel();
@@ -145,77 +187,24 @@ where
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             tx.send(listener.local_addr().unwrap()).unwrap();
             loop {
-                let (mut sock, _) = match listener.accept().await {
+                let (sock, _) = match listener.accept().await {
                     Ok(s) => s,
                     Err(_) => continue,
                 };
                 let handler = handler.clone();
                 let reqs = reqs.clone();
+                let tls = tls.clone();
                 tokio::spawn(async move {
-                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                    let mut buf = Vec::new();
-                    loop {
-                        // Read the head.
-                        let head_end = loop {
-                            if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                                break Some(p);
-                            }
-                            let mut chunk = [0u8; 4096];
-                            match sock.read(&mut chunk).await {
-                                Ok(0) | Err(_) => break None,
-                                Ok(n) => buf.extend_from_slice(&chunk[..n]),
-                            }
-                        };
-                        let Some(head_end) = head_end else { return };
-                        let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
-                        buf.drain(..head_end + 4);
-                        let mut lines = head.split("\r\n");
-                        let mut first = lines.next().unwrap_or("").split_whitespace();
-                        let method = first.next().unwrap_or("").to_string();
-                        let target = first.next().unwrap_or("").to_string();
-                        let headers: Vec<(String, String)> =
-                            lines.filter_map(|l| l.split_once(':')).map(|(k, v)| (k.trim().to_string(), v.trim().to_string())).collect();
-                        let len = headers
-                            .iter()
-                            .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
-                            .and_then(|(_, v)| v.parse::<usize>().ok())
-                            .unwrap_or(0);
-                        while buf.len() < len {
-                            let mut chunk = [0u8; 4096];
-                            match sock.read(&mut chunk).await {
-                                Ok(0) | Err(_) => return,
-                                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    match tls {
+                        None => serve_connection(sock, handler, reqs).await,
+                        #[cfg(feature = "tls")]
+                        Some(acceptor) => {
+                            if let Ok(stream) = acceptor.accept(sock).await {
+                                serve_connection(stream, handler, reqs).await
                             }
                         }
-                        let body: Vec<u8> = buf.drain(..len).collect();
-                        let req = HttpRequest { method, target, headers, body };
-                        reqs.lock().unwrap().push(req.clone());
-                        // Run the handler off the (single-threaded) runtime so slow handlers overlap.
-                        let resp = {
-                            let (handler, req) = (handler.clone(), req.clone());
-                            tokio::task::spawn_blocking(move || handler(&req)).await.unwrap()
-                        };
-                        let mut out = format!("HTTP/1.1 {} X\r\n", resp.status).into_bytes();
-                        for (k, v) in &resp.headers {
-                            out.extend_from_slice(format!("{k}: {v}\r\n").as_bytes());
-                        }
-                        if resp.chunked {
-                            out.extend_from_slice(b"transfer-encoding: chunked\r\n\r\n");
-                            for piece in resp.body.chunks(7) {
-                                out.extend_from_slice(format!("{:x}\r\n", piece.len()).as_bytes());
-                                out.extend_from_slice(piece);
-                                out.extend_from_slice(b"\r\n");
-                            }
-                            out.extend_from_slice(b"0\r\n\r\n");
-                        } else {
-                            out.extend_from_slice(format!("content-length: {}\r\n\r\n", resp.body.len()).as_bytes());
-                            if req.method != "HEAD" {
-                                out.extend_from_slice(&resp.body);
-                            }
-                        }
-                        if sock.write_all(&out).await.is_err() {
-                            return;
-                        }
+                        #[cfg(not(feature = "tls"))]
+                        Some(never) => match never {},
                     }
                 });
             }
@@ -223,4 +212,73 @@ where
     });
     let addr = rx.recv().unwrap();
     TestServer { addr, requests }
+}
+
+/// Answers the requests arriving on one connection.
+async fn serve_connection<S>(mut sock: S, handler: Handler, reqs: std::sync::Arc<std::sync::Mutex<Vec<HttpRequest>>>)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut buf = Vec::new();
+    loop {
+        // Read the head.
+        let head_end = loop {
+            if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break Some(p);
+            }
+            let mut chunk = [0u8; 4096];
+            match sock.read(&mut chunk).await {
+                Ok(0) | Err(_) => break None,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+        };
+        let Some(head_end) = head_end else { return };
+        let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+        buf.drain(..head_end + 4);
+        let mut lines = head.split("\r\n");
+        let mut first = lines.next().unwrap_or("").split_whitespace();
+        let method = first.next().unwrap_or("").to_string();
+        let target = first.next().unwrap_or("").to_string();
+        let headers: Vec<(String, String)> =
+            lines.filter_map(|l| l.split_once(':')).map(|(k, v)| (k.trim().to_string(), v.trim().to_string())).collect();
+        let len =
+            headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("content-length")).and_then(|(_, v)| v.parse::<usize>().ok()).unwrap_or(0);
+        while buf.len() < len {
+            let mut chunk = [0u8; 4096];
+            match sock.read(&mut chunk).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+        }
+        let body: Vec<u8> = buf.drain(..len).collect();
+        let req = HttpRequest { method, target, headers, body };
+        reqs.lock().unwrap().push(req.clone());
+        // Run the handler off the (single-threaded) runtime so slow handlers overlap.
+        let resp = {
+            let (handler, req) = (handler.clone(), req.clone());
+            tokio::task::spawn_blocking(move || handler(&req)).await.unwrap()
+        };
+        let mut out = format!("HTTP/1.1 {} X\r\n", resp.status).into_bytes();
+        for (k, v) in &resp.headers {
+            out.extend_from_slice(format!("{k}: {v}\r\n").as_bytes());
+        }
+        if resp.chunked {
+            out.extend_from_slice(b"transfer-encoding: chunked\r\n\r\n");
+            for piece in resp.body.chunks(7) {
+                out.extend_from_slice(format!("{:x}\r\n", piece.len()).as_bytes());
+                out.extend_from_slice(piece);
+                out.extend_from_slice(b"\r\n");
+            }
+            out.extend_from_slice(b"0\r\n\r\n");
+        } else {
+            out.extend_from_slice(format!("content-length: {}\r\n\r\n", resp.body.len()).as_bytes());
+            if req.method != "HEAD" {
+                out.extend_from_slice(&resp.body);
+            }
+        }
+        if sock.write_all(&out).await.is_err() || sock.flush().await.is_err() {
+            return;
+        }
+    }
 }

@@ -1,7 +1,8 @@
 //! The bytecode interpreter loop.
 
-use super::compare::{values_eq, values_le, values_lt, with_keyref};
+use super::compare::{values_eq, values_eq_metered, values_le, values_le_metered, values_lt, values_lt_metered, with_keyref_metered};
 use super::display;
+use super::meter::{MemoryLimit, ctl_message, message_ctl};
 use super::*;
 use crate::LimitKind;
 
@@ -22,8 +23,6 @@ pub enum Exit {
     /// The running task was cancelled.
     Cancelled,
 }
-
-const MAX_NATIVE_ARGS: usize = 16;
 
 #[inline(always)]
 fn floor_div(a: i64, b: i64) -> Option<i64> {
@@ -65,6 +64,31 @@ pub fn int_pow(a: i64, b: i64) -> Result<i64, &'static str> {
     a.checked_pow(b as u32).ok_or("integer overflow")
 }
 
+/// The payload of an inline variant as field `idx` (kept out of line so the
+/// interpreter's struct field fast path stays small).
+#[cold]
+#[inline(never)]
+fn inline_field(v: Value, idx: u16) -> Option<Value> {
+    match v.as_inline_variant() {
+        Some((_, p)) if idx == 0 => Some(p),
+        _ => None,
+    }
+}
+
+/// The interpreter's fuel counter, kept in a local and written back to the
+/// caller's counter when the interpreter returns.
+struct FuelGuard<'a> {
+    left: i64,
+    out: &'a mut i64,
+}
+
+impl Drop for FuelGuard<'_> {
+    #[inline]
+    fn drop(&mut self) {
+        *self.out = self.left;
+    }
+}
+
 pub fn float_rem(a: f64, b: f64) -> f64 {
     let r = a % b;
     if r != 0.0 && ((r < 0.0) != (b < 0.0)) { r + b } else { r }
@@ -76,6 +100,7 @@ fn shift_amount(b: i64) -> Result<u32, &'static str> {
 
 impl Vm {
     /// Generic arithmetic on runtime values.
+    #[inline(never)]
     pub fn arith(&mut self, op: u8, a: Value, b: Value) -> Result<Value, String> {
         use Value::*;
         Ok(match (op, a, b) {
@@ -98,17 +123,18 @@ impl Vm {
                 if y == 0 {
                     return Err("division by zero".into());
                 }
-                Dur(x / y)
+                Dur(x.checked_div(y).ok_or("duration overflow")?)
             }
             (3, Dur(x), Dur(y)) => Float(x as f64 / y as f64),
             (0, Obj(_), Obj(_)) => {
                 let (oa, ob) = (self.heap.get(a), self.heap.get(b));
                 match (oa, ob) {
                     (super::value::Obj::Str(x), super::value::Obj::Str(y)) => {
-                        let mut s = String::with_capacity(x.len() + y.len());
                         if self.heap.would_exceed(x.len() + y.len()) {
                             return Err("\u{0}memory".into());
                         }
+                        self.meter.charge_bytes(x.len() + y.len()).map_err(ctl_message)?;
+                        let mut s = String::with_capacity(x.len() + y.len());
                         s.push_str(x);
                         s.push_str(y);
                         self.heap.new_str(s)
@@ -117,6 +143,7 @@ impl Vm {
                         if self.heap.would_exceed(x.len() + y.len()) {
                             return Err("\u{0}memory".into());
                         }
+                        self.meter.charge_bytes(x.len() + y.len()).map_err(ctl_message)?;
                         let mut v = x.to_vec();
                         v.extend_from_slice(y);
                         self.heap.new_bytes(v)
@@ -125,6 +152,7 @@ impl Vm {
                         if self.heap.would_exceed((x.len() + y.len()) * 16) {
                             return Err("\u{0}memory".into());
                         }
+                        self.meter.charge((x.len() + y.len()) as u64).map_err(ctl_message)?;
                         let mut v = Vec::with_capacity(x.len() + y.len());
                         v.extend_from_slice(x);
                         v.extend_from_slice(y);
@@ -137,30 +165,86 @@ impl Vm {
         })
     }
 
-    fn trap(&self, fiber: &Fiber, ip: usize, msg: String) -> Trap {
-        if let Some(rest) = msg.strip_prefix('\u{0}')
-            && rest == "memory"
-        {
-            return Trap::Limit(LimitKind::Memory);
+    /// The trap for an error of the interpreter's own operations, whose
+    /// `Result<_, String>` APIs encode limits and interrupts in the message
+    /// (`meter::ctl_message`). Never use it for messages that may contain
+    /// text chosen by the script: see [`Vm::panic_trap`].
+    #[cold]
+    #[inline(never)]
+    fn trap(&mut self, fiber: &mut Fiber, ip: usize, msg: String) -> Trap {
+        match message_ctl(&msg) {
+            Some(Ctl::Limit(k)) => self.limit_trap(fiber, ip, k),
+            Some(_) => Trap::Interrupted,
+            None => self.panic_trap(fiber, ip, msg),
         }
+    }
+
+    /// The trap for a panic with message `msg`, taken literally: panics
+    /// raised by natives (whose limit errors are `Ctl::Limit` values, see
+    /// `meter::ctl_from_message`) or with text chosen by the script, which
+    /// therefore cannot pass for a limit error.
+    #[cold]
+    #[inline(never)]
+    fn panic_trap(&mut self, fiber: &mut Fiber, ip: usize, msg: String) -> Trap {
         Trap::Panic { message: msg, trace: self.trace_of(fiber, Some(ip as u32)) }
     }
 
+    /// The trap for a failed metered operation.
+    #[cold]
+    #[inline(never)]
+    fn ctl_trap(&mut self, fiber: &mut Fiber, ip: usize, c: Ctl) -> Trap {
+        match c {
+            Ctl::Panic(m) => self.trap(fiber, ip, m),
+            Ctl::Limit(k) => self.limit_trap(fiber, ip, k),
+            Ctl::Interrupted => Trap::Interrupted,
+            other => self.trap(fiber, ip, ctl_message(other)),
+        }
+    }
+
+    /// A limit hit by the instruction before `ip`. Memory checks count
+    /// garbage that has not been collected yet, so for the memory limit the
+    /// frame is rewound to that instruction and the scheduler collects and
+    /// runs it once more (the operations that check memory have no side
+    /// effects before the check).
+    #[cold]
+    fn limit_trap(&mut self, fiber: &mut Fiber, ip: usize, k: LimitKind) -> Trap {
+        if k == LimitKind::Memory
+            && let Some(fr) = fiber.frames.last_mut()
+        {
+            fr.ip = ip.saturating_sub(1) as u32;
+            self.gc_retry = true;
+        }
+        Trap::Limit(k)
+    }
+
     /// Runs `fiber` until it finishes, blocks, or exhausts `fuel`.
-    pub(crate) fn interp(&mut self, fiber: &mut Fiber, fuel: &mut i64) -> Result<Exit, Trap> {
+    pub(crate) fn interp(&mut self, fiber: &mut Fiber, fuel_out: &mut i64) -> Result<Exit, Trap> {
         if let Some(msg) = fiber.pending_panic.take() {
             let ip = fiber.frames.last().map(|f| f.ip).unwrap_or(0) as usize;
-            return Err(self.trap(fiber, ip, msg));
+            return Err(self.panic_trap(fiber, ip, msg));
         }
         let prog = self.prog.clone();
+        let natives = self.natives.clone();
+        let max_depth = self.host.limits.max_call_depth;
         let mut fr = *fiber.frames.last().unwrap();
-        let mut code: &[Op] = &prog.protos[fr.proto as usize].code;
+        let protos: &[Proto] = &prog.protos;
+        let mut code: &[Op] = &protos[fr.proto as usize].code;
         let mut ip = fr.ip as usize;
         let mut base = fr.base as usize;
+        // The remaining fuel lives in a local (written back on every exit).
+        let mut fuel = FuelGuard { left: *fuel_out, out: fuel_out };
+        // The current frame's register window. Re-derived (`reload!`) after
+        // anything that may move or resize the stack.
+        let mut regs: &mut [Value] = &mut fiber.stack[base..];
 
         macro_rules! r {
             ($x:expr) => {
-                fiber.stack[base + $x as usize]
+                regs[$x as usize]
+            };
+        }
+        macro_rules! reload {
+            () => {
+                regs = &mut fiber.stack[base..]
             };
         }
         macro_rules! save {
@@ -172,6 +256,19 @@ impl Vm {
             ($msg:expr) => {{
                 save!();
                 return Err(self.trap(fiber, ip, String::from($msg)));
+            }};
+        }
+        // A panic whose message may hold text chosen by the script.
+        macro_rules! fail_literal {
+            ($msg:expr) => {{
+                save!();
+                return Err(self.panic_trap(fiber, ip, String::from($msg)));
+            }};
+        }
+        macro_rules! fail_ctl {
+            ($c:expr) => {{
+                save!();
+                return Err(self.ctl_trap(fiber, ip, $c));
             }};
         }
         macro_rules! int {
@@ -195,70 +292,77 @@ impl Vm {
                 ip = (ip as isize + $off as isize) as usize
             };
         }
+        // A safe point: consumes fuel; collects garbage or preempts (the
+        // slow path is out of line). The fiber resumes at `$resume`.
+        macro_rules! safe_point {
+            ($resume:expr) => {
+                fuel.left -= 1;
+                if fuel.left <= 0 || self.heap.wants_gc() {
+                    if let Some(exit) = self.safe_point(fiber, fuel.left, $resume) {
+                        return exit;
+                    }
+                    reload!();
+                }
+            };
+        }
         macro_rules! tick {
             () => {
-                *fuel -= 1;
-                if *fuel <= 0 || self.heap.wants_gc() {
-                    save!();
-                    if self.heap.wants_gc() {
-                        self.collect_garbage(Some(fiber));
-                        if self.heap.over_limit() {
-                            return Err(Trap::Limit(LimitKind::Memory));
-                        }
-                    }
-                    if *fuel <= 0 {
-                        return Ok(Exit::Preempt);
-                    }
-                }
+                safe_point!(ip)
             };
         }
         // Like `tick!` but for call instructions: on preemption the call is
         // re-executed when the fiber resumes.
         macro_rules! tick_call {
             () => {
-                *fuel -= 1;
-                if *fuel <= 0 || self.heap.wants_gc() {
-                    if self.heap.wants_gc() {
-                        save!();
-                        self.collect_garbage(Some(fiber));
-                        if self.heap.over_limit() {
-                            return Err(Trap::Limit(LimitKind::Memory));
-                        }
-                    }
-                    if *fuel <= 0 {
-                        fiber.frames.last_mut().unwrap().ip = (ip - 1) as u32;
-                        return Ok(Exit::Preempt);
-                    }
-                }
+                safe_point!(ip - 1)
             };
+        }
+        // Calls native `n` with `argc` arguments at absolute slot `start`,
+        // writing the result to absolute slot `slot`.
+        macro_rules! native_call {
+            ($n:expr, $start:expr, $argc:expr, $slot:expr) => {{
+                match self.call_native(&natives, fiber, $n, $start, $argc, $slot, ip) {
+                    Ok(None) => reload!(),
+                    Ok(Some(exit)) => return Ok(exit),
+                    Err(t) => return Err(t),
+                }
+            }};
         }
         // Enters a new frame for a script function.
         macro_rules! enter {
             ($proto:expr, $new_base:expr, $ret:expr, $closure:expr) => {{
-                if fiber.frames.len() >= self.host.limits.max_call_depth {
+                if fiber.frames.len() >= max_depth {
                     fail!("stack overflow");
                 }
                 save!();
-                let p = &prog.protos[$proto as usize];
+                let p = &protos[$proto as usize];
                 let nb = $new_base;
                 let need = nb + p.nregs as usize;
-                if fiber.stack.len() < need {
-                    if need > 64 * 1024 * 1024 {
-                        fail!("stack overflow");
-                    }
-                    fiber.stack.resize(need, Value::Unit);
+                if fiber.stack.len() < need
+                    && let Err(m) = fiber.grow_stack(need, &mut self.heap)
+                {
+                    fail!(m);
+                }
+                if fiber.frames.len() == fiber.frames.capacity()
+                    && let Err(m) = fiber.grow_frames(&mut self.heap)
+                {
+                    fail!(m);
                 }
                 fr = Frame { proto: $proto, ip: 0, base: nb as u32, ret: $ret as u32, closure: $closure };
                 fiber.frames.push(fr);
                 code = &p.code;
                 ip = 0;
                 base = nb;
+                reload!();
             }};
         }
+        // Returns to the caller. The callee's registers are left in place:
+        // they are dead, and the GC only scans each fiber's live window.
         macro_rules! do_return {
             ($v:expr) => {{
                 let v = $v;
-                let done = fiber.frames.pop().unwrap();
+                let ret = fr.ret as usize;
+                fiber.frames.pop();
                 match fiber.frames.last() {
                     None => {
                         fiber.stack.truncate(0);
@@ -266,15 +370,11 @@ impl Vm {
                     }
                     Some(caller) => {
                         fr = *caller;
-                        let cp = &prog.protos[fr.proto as usize];
-                        code = &cp.code;
+                        code = &protos[fr.proto as usize].code;
                         ip = fr.ip as usize;
                         base = fr.base as usize;
-                        fiber.stack[done.ret as usize] = v;
-                        let top = base + cp.nregs as usize;
-                        if fiber.stack.len() > top + 256 {
-                            fiber.stack.truncate(top);
-                        }
+                        fiber.stack[ret] = v;
+                        reload!();
                     }
                 }
             }};
@@ -299,20 +399,27 @@ impl Vm {
                     r!(dst) = v;
                 }
                 Op::StoreGlobal { g, src } => self.globals[g as usize] = r!(src),
+                Op::HoistGlobal { dst, g, off } => {
+                    let v = self.globals[g as usize];
+                    r!(dst) = v;
+                    if let Value::Uninit = v {
+                        jump!(off);
+                    }
+                }
                 Op::LoadCapture { dst, idx } => {
-                    r!(dst) = self.heap.fields(fr.closure)[idx as usize];
+                    r!(dst) = self.heap.fields(Value::Obj(fr.closure))[idx as usize];
                 }
                 Op::LoadCaptureCell { dst, idx } => {
-                    let cell = self.heap.fields(fr.closure)[idx as usize];
+                    let cell = self.heap.fields(Value::Obj(fr.closure))[idx as usize];
                     r!(dst) = match self.heap.get(cell) {
                         Obj::Cell(v) => *v,
                         _ => Value::Unit,
                     };
                 }
                 Op::StoreCaptureCell { idx, src } => {
-                    let cell = self.heap.fields(fr.closure)[idx as usize];
+                    let cell = self.heap.fields(Value::Obj(fr.closure))[idx as usize];
                     let v = r!(src);
-                    if let Obj::Cell(c) = self.heap.get_mut(cell) {
+                    if let Obj::Cell(c) = self.heap.get_mut_storing(cell, &[v]) {
                         *c = v;
                     }
                 }
@@ -331,19 +438,19 @@ impl Vm {
                     let c = r!(cell);
                     let v = r!(src);
                     if let Value::Obj(_) = c
-                        && let Obj::Cell(x) = self.heap.get_mut(c)
+                        && let Obj::Cell(x) = self.heap.get_mut_storing(c, &[v])
                     {
                         *x = v;
                     }
                 }
                 Op::MakeClosure { dst, proto } => {
-                    let p = &prog.protos[proto as usize];
+                    let p = &protos[proto as usize];
                     let mut caps = Vec::with_capacity(p.captures.len());
                     for c in &p.captures {
                         caps.push(match *c {
                             CaptureSrc::Reg(u16::MAX) => Value::Unit,
                             CaptureSrc::Reg(rr) => r!(rr),
-                            CaptureSrc::Capture(i) => self.heap.fields(fr.closure)[i as usize],
+                            CaptureSrc::Capture(i) => self.heap.fields(Value::Obj(fr.closure))[i as usize],
                         });
                     }
                     r!(dst) = self.heap.alloc(Obj::Closure(proto, caps.into_boxed_slice()));
@@ -450,10 +557,16 @@ impl Vm {
                 Op::NeF { dst, a, b } => r!(dst) = Value::Bool(float!(a) != float!(b)),
                 Op::LtF { dst, a, b } => r!(dst) = Value::Bool(float!(a) < float!(b)),
                 Op::LeF { dst, a, b } => r!(dst) = Value::Bool(float!(a) <= float!(b)),
-                Op::Eq { dst, a, b } => r!(dst) = Value::Bool(values_eq(&self.heap, r!(a), r!(b))),
-                Op::Ne { dst, a, b } => r!(dst) = Value::Bool(!values_eq(&self.heap, r!(a), r!(b))),
-                Op::Lt { dst, a, b } => r!(dst) = Value::Bool(values_lt(&prog, &self.heap, r!(a), r!(b))),
-                Op::Le { dst, a, b } => r!(dst) = Value::Bool(values_le(&prog, &self.heap, r!(a), r!(b))),
+                // Composite values are compared with metering: deep
+                // comparisons of large values cost fuel and can be interrupted.
+                // (Like natives, heavy operations charge the meter, not the
+                // interpreter's own fuel, which stays in a register.)
+                Op::Eq { dst, a, b } | Op::Ne { dst, a, b } | Op::Lt { dst, a, b } | Op::Le { dst, a, b } => {
+                    match self.op_compare(&prog, op, r!(a), r!(b)) {
+                        Ok(v) => r!(dst) = Value::Bool(v),
+                        Err(c) => fail_ctl!(c),
+                    }
+                }
 
                 // ---------------- control flow
                 Op::Jmp { off } => jump!(off),
@@ -511,10 +624,12 @@ impl Vm {
                 }
 
                 // ---------------- calls
+                // (`tick_call!` reloads `regs` after a collection; `enter!` reloads again.)
+                #[allow(unused_assignments)]
                 Op::CallDirect { base: b, proto } => {
                     tick_call!();
                     let nb = base + b as usize;
-                    enter!(proto, nb, nb, Value::Unit);
+                    enter!(proto, nb, nb, NO_CLOSURE);
                 }
                 Op::Call { base: b, argc } => {
                     tick_call!();
@@ -522,18 +637,15 @@ impl Vm {
                     match self.heap.get(callee) {
                         Obj::Closure(p, _) => {
                             let p = *p;
+                            let Value::Obj(h) = callee else { unreachable!() };
                             let nb = base + b as usize + 1;
-                            enter!(p, nb, nb - 1, callee);
+                            enter!(p, nb, nb - 1, h);
                         }
                         Obj::NativeFn(n) => {
                             let n = *n;
                             let start = base + b as usize + 1;
                             let slot = base + b as usize;
-                            match self.call_native(fiber, n, start, argc as usize, slot, ip) {
-                                Ok(None) => {}
-                                Ok(Some(exit)) => return Ok(exit),
-                                Err(t) => return Err(t),
-                            }
+                            native_call!(n, start, argc as usize, slot);
                         }
                         _ => fail!("internal error: call of a non-function"),
                     }
@@ -541,25 +653,27 @@ impl Vm {
                 Op::CallNative { base: b, native } => {
                     let start = base + b as usize;
                     let argc = prog.native_argc.get(native as usize).copied().unwrap_or(0) as usize;
-                    match self.call_native(fiber, native, start, argc, start, ip) {
-                        Ok(None) => {}
-                        Ok(Some(exit)) => return Ok(exit),
-                        Err(t) => return Err(t),
-                    }
+                    native_call!(native, start, argc, start);
                 }
+                // (`tick_call!` reloads `regs` after a collection; the stack is reloaded again below.)
+                #[allow(unused_assignments)]
                 Op::TailCallDirect { base: b, proto } => {
                     tick_call!();
-                    let p = &prog.protos[proto as usize];
+                    let p = &protos[proto as usize];
                     let n = p.nparams as usize;
-                    let src = base + b as usize;
-                    fiber.stack.copy_within(src..src + n, base);
+                    let src = b as usize;
+                    // Grow first: the call is retried after a memory limit error.
                     let need = base + p.nregs as usize;
-                    if fiber.stack.len() < need {
-                        fiber.stack.resize(need, Value::Unit);
+                    if fiber.stack.len() < need
+                        && let Err(m) = fiber.grow_stack(need, &mut self.heap)
+                    {
+                        fail!(m);
                     }
+                    reload!();
+                    regs.copy_within(src..src + n, 0);
                     let top = fiber.frames.last_mut().unwrap();
                     top.proto = proto;
-                    top.closure = Value::Unit;
+                    top.closure = NO_CLOSURE;
                     fr = *top;
                     code = &p.code;
                     ip = 0;
@@ -570,17 +684,22 @@ impl Vm {
                     match self.heap.get(callee) {
                         Obj::Closure(p, _) => {
                             let proto = *p;
-                            let pr = &prog.protos[proto as usize];
+                            let pr = &protos[proto as usize];
                             let n = argc as usize;
-                            let src = base + b as usize + 1;
-                            fiber.stack.copy_within(src..src + n, base);
+                            let src = b as usize + 1;
+                            // Grow first: the call is retried after a memory limit error.
                             let need = base + pr.nregs as usize;
-                            if fiber.stack.len() < need {
-                                fiber.stack.resize(need, Value::Unit);
+                            if fiber.stack.len() < need
+                                && let Err(m) = fiber.grow_stack(need, &mut self.heap)
+                            {
+                                fail!(m);
                             }
+                            reload!();
+                            regs.copy_within(src..src + n, 0);
+                            let Value::Obj(h) = callee else { unreachable!() };
                             let top = fiber.frames.last_mut().unwrap();
                             top.proto = proto;
-                            top.closure = callee;
+                            top.closure = h;
                             fr = *top;
                             code = &pr.code;
                             ip = 0;
@@ -590,11 +709,7 @@ impl Vm {
                             let n = *n;
                             let start = base + b as usize + 1;
                             let slot = base + b as usize;
-                            match self.call_native(fiber, n, start, argc as usize, slot, ip) {
-                                Ok(None) => {}
-                                Ok(Some(exit)) => return Ok(exit),
-                                Err(t) => return Err(t),
-                            }
+                            native_call!(n, start, argc as usize, slot);
                         }
                         _ => fail!("internal error: call of a non-function"),
                     }
@@ -607,37 +722,32 @@ impl Vm {
 
                 // ---------------- data structures
                 Op::NewList { dst, start, count } => {
-                    let s = base + start as usize;
-                    let items = fiber.stack[s..s + count as usize].to_vec();
+                    let s = start as usize;
+                    let items = regs[s..s + count as usize].to_vec();
                     r!(dst) = self.heap.new_list(items);
                 }
                 Op::NewTuple { dst, start, count } => {
-                    let s = base + start as usize;
-                    let items: Box<[Value]> = fiber.stack[s..s + count as usize].into();
+                    let s = start as usize;
+                    let items: Box<[Value]> = regs[s..s + count as usize].into();
                     r!(dst) = self.heap.alloc(Obj::Tuple(items));
                 }
                 Op::NewStruct { dst, start, def } => {
                     let n = prog.types[def as usize].fields.len();
-                    let s = base + start as usize;
-                    let items: Box<[Value]> = fiber.stack[s..s + n].into();
+                    let s = start as usize;
+                    let items: Box<[Value]> = regs[s..s + n].into();
                     r!(dst) = self.heap.alloc(Obj::Struct(def as u32, items));
                 }
                 Op::NewVariant { dst, start, variant } => {
                     let n = prog.variants[variant as usize].arity;
-                    if n == 0 {
-                        r!(dst) = Value::Tag(variant as u32);
-                    } else {
-                        let s = base + start as usize;
-                        let items: Box<[Value]> = fiber.stack[s..s + n].into();
-                        r!(dst) = self.heap.alloc(Obj::Variant(variant as u32, items));
-                    }
+                    let s = start as usize;
+                    r!(dst) = self.heap.new_variant(variant as u32, &regs[s..s + n]);
                 }
                 Op::NewMap { dst, start, count } => {
                     let m = self.heap.alloc(Obj::Map(Box::default()));
-                    let s = base + start as usize;
+                    let s = start as usize;
                     for i in 0..count as usize {
-                        let k = fiber.stack[s + 2 * i];
-                        let v = fiber.stack[s + 2 * i + 1];
+                        let k = regs[s + 2 * i];
+                        let v = regs[s + 2 * i + 1];
                         if let Err(e) = self.map_insert(m, k, v) {
                             fail!(e);
                         }
@@ -656,13 +766,17 @@ impl Vm {
                     let o = r!(obj);
                     r!(dst) = match self.heap.fields(o).get(idx as usize) {
                         Some(v) => *v,
-                        None => fail!(format!("internal error: field {idx} of {:?}", self.heap.get(o))),
+                        // Inline variants have no field slice.
+                        None => match inline_field(o, idx) {
+                            Some(v) => v,
+                            None => fail!(format!("internal error: field {idx} of {o:?} {:?}", self.heap.get(o))),
+                        },
                     };
                 }
                 Op::SetField { obj, idx, src } => {
                     let o = r!(obj);
                     let v = r!(src);
-                    match self.heap.get_mut(o) {
+                    match self.heap.get_mut_storing(o, &[v]) {
                         Obj::Struct(_, f) => f[idx as usize] = v,
                         _ => fail!("internal error: set field on non-struct"),
                     }
@@ -692,7 +806,7 @@ impl Vm {
                     let o = r!(obj);
                     let i = int!(idx);
                     let v = r!(src);
-                    let l = self.heap.list_mut(o);
+                    let Some(l) = self.heap.list_mut_storing(o, i as usize, v) else { fail!("internal error: set index on non-list") };
                     if i < 0 || i as usize >= l.len() {
                         let n = l.len();
                         fail!(format!("index out of bounds: index {i}, length {n}"));
@@ -840,6 +954,9 @@ impl Vm {
                     let l = self.heap.list(r!(list));
                     let end = l.len().saturating_sub(after as usize);
                     let items = l.get(before as usize..end.max(before as usize)).map(|s| s.to_vec()).unwrap_or_default();
+                    if let Err(c) = self.meter.charge(items.len() as u64) {
+                        fail_ctl!(c);
+                    }
                     r!(dst) = self.heap.new_list(items);
                 }
 
@@ -852,37 +969,25 @@ impl Vm {
                         r!(dst) = v;
                         continue;
                     }
-                    match display::to_display(&prog, &self.heap, v) {
-                        Ok(s) => r!(dst) = self.heap.new_str(s),
-                        Err(e) => fail!(e),
+                    match self.op_display(&prog, v, None, false) {
+                        Ok(v) => r!(dst) = v,
+                        Err(c) => fail_ctl!(c),
                     }
                 }
-                Op::Debug { dst, src } => match display::to_debug(&prog, &self.heap, r!(src)) {
-                    Ok(s) => r!(dst) = self.heap.new_str(s),
-                    Err(e) => fail!(e),
+                Op::Debug { dst, src } => match self.op_display(&prog, r!(src), None, true) {
+                    Ok(v) => r!(dst) = v,
+                    Err(c) => fail_ctl!(c),
                 },
-                Op::Format { dst, src, spec } => {
-                    let s = &prog.specs[spec as usize];
-                    match display::format_value(&prog, &self.heap, r!(src), s) {
-                        Ok(s) => r!(dst) = self.heap.new_str(s),
-                        Err(e) => fail!(e),
-                    }
-                }
+                Op::Format { dst, src, spec } => match self.op_display(&prog, r!(src), Some(spec), false) {
+                    Ok(v) => r!(dst) = v,
+                    Err(c) => fail_ctl!(c),
+                },
                 Op::Concat { dst, start, count } => {
-                    let s = base + start as usize;
-                    let mut total = 0;
-                    for i in 0..count as usize {
-                        total += self.heap.str(fiber.stack[s + i]).len();
+                    let s = start as usize;
+                    match self.op_concat(&regs[s..s + count as usize]) {
+                        Ok(v) => r!(dst) = v,
+                        Err(c) => fail_ctl!(c),
                     }
-                    if self.heap.would_exceed(total) {
-                        save!();
-                        return Err(Trap::Limit(LimitKind::Memory));
-                    }
-                    let mut out = String::with_capacity(total);
-                    for i in 0..count as usize {
-                        out.push_str(self.heap.str(fiber.stack[s + i]));
-                    }
-                    r!(dst) = self.heap.new_str(out);
                 }
 
                 // ---------------- misc
@@ -890,17 +995,20 @@ impl Vm {
                     let c = r!(closure);
                     match self.spawn_task(c) {
                         Ok(t) => r!(dst) = t,
-                        Err(Ctl::Panic(m)) => fail!(m),
-                        Err(_) => fail!("spawn failed"),
+                        Err(Ctl::Panic(m)) => fail_literal!(m),
+                        Err(c) => fail_ctl!(c),
                     }
                 }
                 Op::TryTop { src } => {
                     save!();
-                    let e = self.heap.fields(r!(src)).first().copied().unwrap_or(Value::Unit);
-                    let text = match display::to_display(&prog, &self.heap, e) {
+                    let e = self.heap.field(r!(src), 0).unwrap_or(Value::Unit);
+                    let text = match display::to_display_metered(&prog, &self.heap, &self.meter, e) {
                         Ok(t) => t,
-                        Err(m) => fail!(m),
+                        Err(c) => fail_ctl!(c),
                     };
+                    if self.session {
+                        fail_literal!(text);
+                    }
                     let msg = format!("error: {text}\n");
                     match self.write_stream(2, msg.as_bytes()) {
                         Ok(()) => {}
@@ -914,28 +1022,62 @@ impl Vm {
                         Const::Str(s) => s.clone(),
                         _ => "panic".into(),
                     };
-                    fail!(m);
+                    fail_literal!(m);
                 }
             }
         }
     }
 
+    /// The slow path of a safe point: collects garbage if wanted, then
+    /// preempts if out of fuel. Returns how to leave the interpreter, if it
+    /// must; the fiber resumes at `resume_ip`.
+    #[cold]
+    #[inline(never)]
+    fn safe_point(&mut self, fiber: &mut Fiber, fuel_left: i64, resume_ip: usize) -> Option<Result<Exit, Trap>> {
+        fiber.frames.last_mut().unwrap().ip = resume_ip as u32;
+        if self.heap.wants_gc() {
+            self.collect_garbage(Some(fiber));
+            if self.heap.over_limit() {
+                return Some(Err(Trap::Limit(LimitKind::Memory)));
+            }
+        }
+        if fuel_left <= 0 {
+            return Some(Ok(Exit::Preempt));
+        }
+        None
+    }
+
     /// Calls a native; `Ok(None)` to continue, `Ok(Some(exit))` to suspend.
-    fn call_native(&mut self, fiber: &mut Fiber, n: u32, start: usize, argc: usize, slot: usize, ip: usize) -> Result<Option<Exit>, Trap> {
-        let mut buf = [Value::Unit; MAX_NATIVE_ARGS];
-        let argc = argc.min(MAX_NATIVE_ARGS);
-        buf[..argc].copy_from_slice(&fiber.stack[start..start + argc]);
+    /// Arguments are passed straight from the fiber's stack (the running
+    /// fiber is not in `self.fibers`, so natives cannot observe or move it),
+    /// and `natives` is the interpreter's own reference to the table, so no
+    /// per-call copies or reference counting are needed. Natives charge the
+    /// meter for their work; a native that exhausts the slice's native fuel
+    /// preempts the task once it returns.
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    fn call_native(
+        &mut self,
+        natives: &[NativeEntry],
+        fiber: &mut Fiber,
+        n: u32,
+        start: usize,
+        argc: usize,
+        slot: usize,
+        ip: usize,
+    ) -> Result<Option<Exit>, Trap> {
         fiber.frames.last_mut().unwrap().ip = ip as u32;
-        let r = match &self.natives[n as usize].imp {
-            NativeImpl::Builtin(f) => {
-                let f = *f;
-                f(self, &buf[..argc])
-            }
-            NativeImpl::Host(f) => {
-                let f = f.clone();
-                f(self, &buf[..argc])
-            }
-        };
+        let mut r = Self::invoke_native(self, natives, n, &fiber.stack[start..start + argc]);
+        if r.is_memory_limit() {
+            // Natives check memory against an estimate that includes garbage
+            // they cannot collect (their locals are not roots). Collect and
+            // retry once; natives reserve memory before they mutate anything.
+            self.collect_all_garbage(Some(fiber));
+            r = Self::invoke_native(self, natives, n, &fiber.stack[start..start + argc]);
+        }
+        if !matches!(r, Err(Ctl::NeedPermission(_))) {
+            self.forget_once_answers();
+        }
         let r = match r {
             Ok(v) => {
                 fiber.stack[slot] = v;
@@ -943,13 +1085,20 @@ impl Vm {
                     self.cancel_current = false;
                     return Ok(Some(Exit::Cancelled));
                 }
+                if self.meter.fuel() <= 0 {
+                    // Natives used up the slice: let the scheduler check
+                    // limits and run other tasks.
+                    return Ok(Some(Exit::Preempt));
+                }
                 return Ok(None);
             }
             Err(c) => c,
         };
         match r {
-            Ctl::Panic(m) => Err(self.trap(fiber, ip, m)),
+            Ctl::Panic(m) => Err(self.panic_trap(fiber, ip, m)),
+            // Already retried after a collection.
             Ctl::Limit(k) => Err(Trap::Limit(k)),
+            Ctl::Interrupted => Err(Trap::Interrupted),
             Ctl::Exit(c) => Ok(Some(Exit::Terminate(c))),
             Ctl::NeedPermission(cap) => {
                 // Retry the call instruction after the prompt.
@@ -987,6 +1136,65 @@ impl Vm {
         }
     }
 
+    /// `==`, `!=`, `<` and `<=` on generic values. Out of line, like the other
+    /// heavy operations, to keep the dispatch loop small; composite values
+    /// are compared with metering (deep comparisons cost fuel and can be
+    /// interrupted).
+    #[inline(never)]
+    fn op_compare(&mut self, prog: &Program, op: Op, x: Value, y: Value) -> Result<bool, Ctl> {
+        // Anything but two plain scalars may be arbitrarily large (inline
+        // variants such as `Some(x)` hold heap values too).
+        let scalar = |v: Value| matches!(v, Value::Unit | Value::Bool(_) | Value::Int(_) | Value::Float(_) | Value::Dur(_) | Value::Tag(_));
+        let composite = !(scalar(x) && scalar(y));
+        Ok(match op {
+            Op::Eq { .. } | Op::Ne { .. } => {
+                let eq = if composite { values_eq_metered(&self.heap, &self.meter, x, y)? } else { values_eq(&self.heap, x, y) };
+                eq == matches!(op, Op::Eq { .. })
+            }
+            Op::Lt { .. } if composite => values_lt_metered(prog, &self.heap, &self.meter, x, y)?,
+            Op::Lt { .. } => values_lt(prog, &self.heap, x, y),
+            _ if composite => values_le_metered(prog, &self.heap, &self.meter, x, y)?,
+            _ => values_le(prog, &self.heap, x, y),
+        })
+    }
+
+    /// `ToStr` (display), `Debug` and `Format` of a value, as a new string.
+    #[inline(never)]
+    fn op_display(&mut self, prog: &Program, v: Value, spec: Option<u16>, debug: bool) -> Result<Value, Ctl> {
+        let s = match spec {
+            Some(i) => display::format_value_metered(prog, &self.heap, &self.meter, v, &prog.specs[i as usize])?,
+            None if debug => display::to_debug_metered(prog, &self.heap, &self.meter, v)?,
+            None => display::to_display_metered(prog, &self.heap, &self.meter, v)?,
+        };
+        Ok(self.heap.new_str(s))
+    }
+
+    /// Concatenates the strings in `parts` (string interpolation).
+    #[inline(never)]
+    fn op_concat(&mut self, parts: &[Value]) -> Result<Value, Ctl> {
+        let total: usize = parts.iter().map(|p| self.heap.str(*p).len()).sum();
+        if self.heap.would_exceed(total) {
+            return Err(Ctl::Limit(LimitKind::Memory));
+        }
+        self.meter.charge_bytes(total)?;
+        let mut out = String::with_capacity(total);
+        for p in parts {
+            out.push_str(self.heap.str(*p));
+        }
+        Ok(self.heap.new_str(out))
+    }
+
+    /// Calls native `n`. (A Rust panic in it is caught by the scheduler
+    /// around the whole slice, see `crate::unwind`.)
+    #[inline(always)]
+    fn invoke_native(&mut self, natives: &[NativeEntry], n: u32, args: &[Value]) -> NResult {
+        let entry = &natives[n as usize];
+        match &entry.imp {
+            NativeImpl::Builtin(f) => f(self, args),
+            NativeImpl::Host(f) => f(self, args),
+        }
+    }
+
     /// Registers a blocking wait for fiber `me`; returns a value if it can be
     /// satisfied immediately.
     fn block_on(&mut self, me: u32, g: u64, b: BlockOn) -> Result<Option<Value>, String> {
@@ -1003,9 +1211,7 @@ impl Vm {
                         if fid == me {
                             return Err("deadlock: a task cannot wait for itself".into());
                         }
-                        if let Some(Some(f)) = self.fibers.get_mut(fid as usize) {
-                            f.waiters.push((me, g));
-                        }
+                        self.add_waiter(fid, (me, g))?;
                         Ok(None)
                     }
                 }
@@ -1013,6 +1219,11 @@ impl Vm {
             BlockOn::Race(tasks) => {
                 if tasks.is_empty() {
                     return Err("task.race called with an empty list".into());
+                }
+                // One waiter per task, and the list of tasks to cancel.
+                self.meter.charge(tasks.len() as u64).map_err(ctl_message)?;
+                if self.heap.would_exceed(tasks.len() * (std::mem::size_of::<Value>() + std::mem::size_of::<(u32, u64)>())) {
+                    return Err(ctl_message(Ctl::Limit(LimitKind::Memory)));
                 }
                 for &t in &tasks {
                     if let Obj::Task(to) = self.heap.get(t)
@@ -1032,10 +1243,9 @@ impl Vm {
                         Obj::Task(to) if to.state == TaskState::Running => to.fiber,
                         _ => continue,
                     };
-                    if let Some(Some(f)) = self.fibers.get_mut(fid as usize) {
-                        f.waiters.push((me, g));
-                    }
+                    self.add_waiter(fid, (me, g))?;
                 }
+                self.heap.fiber_bytes += tasks.capacity() * std::mem::size_of::<Value>();
                 self.pending_race = Some(tasks);
                 Ok(None)
             }
@@ -1063,7 +1273,17 @@ impl Vm {
                 if c.closed {
                     return Ok(Some(self.none()));
                 }
+                if c.receivers.len() >= c.receivers_prune_at.max(MIN_PRUNE) {
+                    // Drop the waits of cancelled tasks.
+                    self.meter.charge(c.receivers.len() as u64).map_err(ctl_message)?;
+                    let fibers = &self.fibers;
+                    c.receivers.retain(|&w| wait_is_live(fibers, w));
+                    c.receivers_prune_at = 2 * c.receivers.len();
+                }
+                let before = c.receivers.capacity();
                 c.receivers.push_back((me, g));
+                let grown = c.receivers.capacity().saturating_sub(before);
+                self.heap.bytes += grown * std::mem::size_of::<(u32, u64)>();
                 Ok(None)
             }
             BlockOn::Send(ch, v) => {
@@ -1085,58 +1305,101 @@ impl Vm {
                         return Ok(Some(Value::Bool(true)));
                     }
                 }
-                let Obj::Channel(c) = self.heap.get_mut(ch) else { unreachable!() };
+                let Obj::Channel(c) = self.heap.get(ch) else { unreachable!() };
                 if c.capacity == 0 || c.queue.len() < c.capacity {
+                    // Count the queue's growth before it happens (it doubles).
+                    let (len, cap) = (c.queue.len(), c.queue.capacity());
+                    let more = if len == cap { cap.max(4) } else { 0 };
+                    if more > 0 && self.heap.would_exceed(more * std::mem::size_of::<Value>()) {
+                        return Err(ctl_message(Ctl::Limit(LimitKind::Memory)));
+                    }
+                    let Obj::Channel(c) = self.heap.get_mut_storing(ch, &[v]) else { unreachable!() };
+                    c.queue.reserve_exact(more);
                     c.queue.push_back(v);
-                    let before = c.queue.capacity();
-                    let _ = before;
-                    self.heap.bytes += std::mem::size_of::<Value>();
+                    let grown = c.queue.capacity() - cap;
+                    self.heap.bytes += grown * std::mem::size_of::<Value>();
                     return Ok(Some(Value::Bool(true)));
                 }
+                let Obj::Channel(c) = self.heap.get_mut(ch) else { unreachable!() };
+                let before = c.senders.capacity();
                 c.senders.push_back((me, g, v));
+                let grown = c.senders.capacity().saturating_sub(before);
+                self.heap.bytes += grown * std::mem::size_of::<(u32, u64, Value)>();
                 Ok(None)
             }
         }
     }
 
+    /// Registers `waiter` to be woken when the task of fiber `target`
+    /// finishes, first dropping stale waits (of cancelled tasks) if the list
+    /// has grown enough.
+    fn add_waiter(&mut self, target: u32, waiter: (u32, u64)) -> Result<(), String> {
+        let Some(Some(f)) = self.fibers.get_mut(target as usize) else { return Ok(()) };
+        let prune = f.waiters.len() >= f.waiters_prune_at.max(MIN_PRUNE);
+        if prune {
+            self.meter.charge(f.waiters.len() as u64).map_err(ctl_message)?;
+        }
+        let Some(Some(f)) = self.fibers.get_mut(target as usize) else { return Ok(()) };
+        let mut list = std::mem::take(&mut f.waiters);
+        let mut prune_at = f.waiters_prune_at;
+        if prune {
+            // The waiting fiber is running (not in `fibers`): its current
+            // wait, registered by a `race` on the same task, is live.
+            list.retain(|&w| w == waiter || wait_is_live(&self.fibers, w));
+            prune_at = 2 * list.len();
+        }
+        let before = list.capacity();
+        list.push(waiter);
+        self.heap.fiber_bytes += list.capacity().saturating_sub(before) * std::mem::size_of::<(u32, u64)>();
+        if let Some(Some(f)) = self.fibers.get_mut(target as usize) {
+            f.waiters = list;
+            f.waiters_prune_at = prune_at;
+        }
+        Ok(())
+    }
+
     // ------------------------------------------------------------------
     // Maps, slices and snapshots
 
+    #[inline(never)]
     pub fn map_get(&self, m: Value, k: Value) -> Result<Option<Value>, String> {
         let Obj::Map(mo) = self.heap.get(m) else { return Err("internal error: not a map".into()) };
-        let slot = with_keyref(&self.heap, k, |kr| mo.index.get(kr))?;
+        let slot = with_keyref_metered(&self.heap, &self.meter, k, |kr| mo.index.get(kr))?;
         Ok(slot.and_then(|s| mo.entries[s].map(|(_, v)| v)))
     }
 
+    #[inline(never)]
     pub fn map_insert(&mut self, m: Value, k: Value, v: Value) -> Result<Option<Value>, String> {
         // Existing key: overwrite in place.
         let slot = {
             let Obj::Map(mo) = self.heap.get(m) else { return Err("internal error: not a map".into()) };
-            with_keyref(&self.heap, k, |kr| mo.index.get(kr))?
+            with_keyref_metered(&self.heap, &self.meter, k, |kr| mo.index.get(kr))?
         };
         if let Some(s) = slot {
-            let Obj::Map(mo) = self.heap.get_mut(m) else { unreachable!() };
+            let Obj::Map(mo) = self.heap.get_mut_storing(m, &[k, v]) else { unreachable!() };
             let old = mo.entries[s].map(|(_, ov)| ov);
             mo.entries[s] = Some((k, v));
             return Ok(old);
         }
-        let owned = self.owned_key(k)?;
-        let Obj::Map(mo) = self.heap.get_mut(m) else { unreachable!() };
+        let (owned, key_bytes) = self.owned_key(k)?;
+        let Obj::Map(mo) = self.heap.get_mut_storing(m, &[k, v]) else { unreachable!() };
         let s = mo.entries.len();
         mo.entries.push(Some((k, v)));
         mo.live += 1;
+        mo.key_bytes += key_bytes;
         insert_owned(&mut mo.index, owned, s);
-        self.heap.bytes += 2 * std::mem::size_of::<Value>() + 48;
+        self.heap.bytes += 2 * std::mem::size_of::<Value>() + INDEX_ENTRY_SIZE + key_bytes;
         Ok(None)
     }
 
     pub fn map_remove(&mut self, m: Value, k: Value) -> Result<Option<Value>, String> {
-        let owned = self.owned_key(k)?;
+        let (owned, key_bytes) = self.owned_key(k)?;
         let Obj::Map(mo) = self.heap.get_mut(m) else { return Err("internal error: not a map".into()) };
         let slot = remove_owned(&mut mo.index, &owned);
         let Some(s) = slot else { return Ok(None) };
         let old = mo.entries[s].take().map(|(_, v)| v);
         mo.live -= 1;
+        mo.key_bytes = mo.key_bytes.saturating_sub(key_bytes);
         // Compact when more than half the slots are tombstones.
         if mo.entries.len() > 32 && mo.live * 2 < mo.entries.len() {
             let mut remap = vec![usize::MAX; mo.entries.len()];
@@ -1153,47 +1416,53 @@ impl Vm {
         Ok(old)
     }
 
-    /// An owned key usable for insertion/removal.
-    pub fn owned_key(&self, k: Value) -> Result<OwnedKey, String> {
-        Ok(match k {
-            Value::Int(i) => OwnedKey::Int(i),
+    /// An owned key usable for insertion/removal, and the bytes it owns.
+    pub fn owned_key(&self, k: Value) -> Result<(OwnedKey, usize), String> {
+        let other = |k| super::compare::hkey_sized(&self.heap, &self.meter, k).map(|(h, n)| (OwnedKey::Other(h), n));
+        match k {
+            Value::Int(i) => Ok((OwnedKey::Int(i), 0)),
             Value::Obj(_) => match self.heap.get(k) {
-                Obj::Str(s) => OwnedKey::Str(s.clone()),
-                _ => OwnedKey::Other(super::compare::hkey(&self.heap, k)?),
+                Obj::Str(s) => {
+                    self.meter.charge_bytes(s.len()).map_err(ctl_message)?;
+                    Ok((OwnedKey::Str(s.clone()), s.len()))
+                }
+                _ => other(k),
             },
-            other => OwnedKey::Other(super::compare::hkey(&self.heap, other)?),
-        })
+            _ => other(k),
+        }
     }
 
     pub fn set_add(&mut self, s: Value, k: Value) -> Result<bool, String> {
         let exists = {
             let Obj::Set(so) = self.heap.get(s) else { return Err("internal error: not a set".into()) };
-            with_keyref(&self.heap, k, |kr| so.index.get(kr))?.is_some()
+            with_keyref_metered(&self.heap, &self.meter, k, |kr| so.index.get(kr))?.is_some()
         };
         if exists {
             return Ok(false);
         }
-        let owned = self.owned_key(k)?;
-        let Obj::Set(so) = self.heap.get_mut(s) else { unreachable!() };
+        let (owned, key_bytes) = self.owned_key(k)?;
+        let Obj::Set(so) = self.heap.get_mut_storing(s, &[k]) else { unreachable!() };
         let slot = so.entries.len();
         so.entries.push(Some(k));
         so.live += 1;
+        so.key_bytes += key_bytes;
         insert_owned(&mut so.index, owned, slot);
-        self.heap.bytes += std::mem::size_of::<Value>() + 48;
+        self.heap.bytes += std::mem::size_of::<Value>() + INDEX_ENTRY_SIZE + key_bytes;
         Ok(true)
     }
 
     pub fn set_contains(&self, s: Value, k: Value) -> Result<bool, String> {
         let Obj::Set(so) = self.heap.get(s) else { return Err("internal error: not a set".into()) };
-        Ok(with_keyref(&self.heap, k, |kr| so.index.get(kr))?.is_some())
+        Ok(with_keyref_metered(&self.heap, &self.meter, k, |kr| so.index.get(kr))?.is_some())
     }
 
     pub fn set_remove(&mut self, s: Value, k: Value) -> Result<bool, String> {
-        let owned = self.owned_key(k)?;
+        let (owned, key_bytes) = self.owned_key(k)?;
         let Obj::Set(so) = self.heap.get_mut(s) else { return Err("internal error: not a set".into()) };
         let Some(slot) = remove_owned(&mut so.index, &owned) else { return Ok(false) };
         so.entries[slot] = None;
         so.live -= 1;
+        so.key_bytes = so.key_bytes.saturating_sub(key_bytes);
         if so.entries.len() > 32 && so.live * 2 < so.entries.len() {
             let mut remap = vec![usize::MAX; so.entries.len()];
             let mut fresh = Vec::with_capacity(so.live);
@@ -1209,7 +1478,19 @@ impl Vm {
         Ok(true)
     }
 
+    #[inline(never)]
     fn snapshot(&mut self, o: Value) -> Result<Value, String> {
+        let n = match self.heap.get(o) {
+            Obj::List(l) => l.len(),
+            Obj::Set(s) => s.entries.len(),
+            Obj::Map(m) => m.entries.len(),
+            Obj::Range(a, b, incl) => ((*b as i128) - (*a as i128) + i128::from(*incl)).clamp(0, i64::MAX as i128) as usize,
+            _ => 0,
+        };
+        if self.heap.would_exceed(n.saturating_mul(16)) {
+            return Err("\u{0}memory".into());
+        }
+        self.meter.charge(n as u64).map_err(ctl_message)?;
         let items: Vec<Value> = match self.heap.get(o) {
             Obj::List(l) => l.clone(),
             Obj::Set(s) => s.entries.iter().flatten().copied().collect(),
@@ -1235,6 +1516,7 @@ impl Vm {
         Ok(self.heap.new_list(items))
     }
 
+    #[inline(never)]
     fn slice(&mut self, o: Value, start: Option<i64>, end: Option<i64>, inclusive: bool, flags: u16) -> Result<Value, String> {
         let len = match self.heap.get(o) {
             Obj::List(l) => l.len(),
@@ -1251,6 +1533,8 @@ impl Vm {
             return Err(format!("slice {a}..{b} out of range for length {len}"));
         }
         let (a, b) = (a as usize, b as usize);
+        let cost = if let Obj::List(_) = self.heap.get(o) { (b - a) as u64 } else { ((b - a) / super::meter::BYTES_PER_UNIT) as u64 };
+        self.meter.charge(cost).map_err(ctl_message)?;
         Ok(match self.heap.get(o) {
             Obj::List(l) => {
                 let v = l[a..b].to_vec();

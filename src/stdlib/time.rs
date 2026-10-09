@@ -312,6 +312,7 @@ pub fn register(r: &mut Registry) {
         let fmt = vm.str(a[1]);
         // Every directive expands to at most 16 bytes.
         vm.reserve(fmt.len().saturating_mul(16))?;
+        vm.charge_slow_bytes(fmt.len())?;
         let s = format(unix_nanos(vm, a[0]), fmt);
         Ok(vm.new_str(s))
     });
@@ -329,6 +330,7 @@ pub fn register(r: &mut Registry) {
     r.add_builtin("time.Instant.since", |vm, a| Ok(duration_between(instant(vm, a[0])?, instant(vm, a[1])?)));
 
     r.add_builtin("time.parse_nanos", |vm, a| {
+        vm.charge_bytes(vm.str(a[0]).len())?;
         let n = parse_iso(vm.str(a[0]));
         nanos_result(vm, n, "parse")
     });

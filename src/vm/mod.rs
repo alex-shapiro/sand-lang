@@ -5,6 +5,8 @@ pub mod compare;
 pub mod display;
 pub mod heap;
 mod interp;
+pub mod iomem;
+pub mod meter;
 pub mod sched;
 pub mod value;
 
@@ -12,6 +14,7 @@ use crate::policy::{Capability, Decision, Policy, PromptAnswer, Prompter};
 use crate::{LimitKind, Limits};
 use bytecode::*;
 use heap::Heap;
+use meter::Meter;
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::path::PathBuf;
@@ -51,6 +54,8 @@ pub enum Ctl {
     Block(BlockOn),
     /// Let other tasks run; the call returns `()`.
     Yield,
+    /// The host interrupted the engine (see `Meter::check`).
+    Interrupted,
 }
 
 impl std::fmt::Debug for Ctl {
@@ -63,6 +68,7 @@ impl std::fmt::Debug for Ctl {
             Ctl::Async(_) => write!(f, "Async"),
             Ctl::Block(_) => write!(f, "Block"),
             Ctl::Yield => write!(f, "Yield"),
+            Ctl::Interrupted => write!(f, "Interrupted"),
         }
     }
 }
@@ -78,6 +84,7 @@ pub enum BlockOn {
     Send(Value, Value),
 }
 
+/// A call frame (20 bytes).
 #[derive(Clone, Copy, Debug)]
 pub struct Frame {
     pub proto: u32,
@@ -85,7 +92,35 @@ pub struct Frame {
     pub base: u32,
     /// Absolute stack slot receiving the return value.
     pub ret: u32,
-    pub closure: Value,
+    /// Heap handle of the running closure, or `NO_CLOSURE` for direct calls.
+    pub closure: u32,
+}
+
+/// `Frame::closure` of a direct (closure-less) call.
+pub const NO_CLOSURE: u32 = u32::MAX;
+
+impl Frame {
+    /// The running closure as a value (`Unit` for direct calls).
+    #[inline]
+    pub fn closure_value(&self) -> Value {
+        if self.closure == NO_CLOSURE { Value::Unit } else { Value::Obj(self.closure) }
+    }
+}
+
+/// Maximum number of value slots in a fiber's stack.
+pub const MAX_STACK_SLOTS: usize = 64 * 1024 * 1024;
+
+/// Initial number of stack slots of a new fiber.
+const INITIAL_STACK_SLOTS: usize = 64;
+
+/// Lists of waiting fibers (task waiters, channel receivers) are pruned of
+/// stale entries (cancelled waits) once they reach this length, and then
+/// again at twice their length after pruning.
+pub(crate) const MIN_PRUNE: usize = 16;
+
+/// Whether the wait `(fiber, generation)` is still current.
+pub(crate) fn wait_is_live(fibers: &[Option<Box<Fiber>>], (fid, wgen): (u32, u64)) -> bool {
+    matches!(fibers.get(fid as usize), Some(Some(f)) if f.state == FiberState::Waiting && f.wgen == wgen)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,6 +143,8 @@ pub struct Fiber {
     pub race: Vec<Value>,
     /// Fibers waiting for this one: (fiber, generation).
     pub waiters: Vec<(u32, u64)>,
+    /// Stale `waiters` are pruned when it reaches this length.
+    pub waiters_prune_at: usize,
     /// Pending IO operation id, if waiting on IO.
     pub io: Option<u64>,
     /// A panic to raise when the fiber resumes.
@@ -223,6 +260,7 @@ pub struct Host {
     pub log_level: u8,
     pub interrupt: Arc<AtomicBool>,
     pub stream_decisions: HashMap<u8, bool>,
+    pub(crate) tls: crate::stdlib::TlsSettings,
 }
 
 pub struct Vm {
@@ -241,34 +279,86 @@ pub struct Vm {
     pub io: sched::IoTable,
     pub gen_counter: u64,
     pub fuel_used: u64,
+    /// Fuel accounting for native work (see `meter`).
+    pub meter: Meter,
+    /// Set when the running instruction hit the memory limit and should be
+    /// retried after a garbage collection (see `interp::limit_trap`).
+    pub(crate) gc_retry: bool,
     pub cancel_current: bool,
     /// Extra GC roots (e.g. values held by the test runner).
     pub pinned: Vec<Value>,
     pub(crate) pending_race: Option<Vec<Value>>,
+    /// Runs the inputs of a REPL session: a top-level `?` that meets an
+    /// `Err` panics (aborting the input) instead of ending the program.
+    pub session: bool,
 }
 
 pub const SLICE_FUEL: i64 = 20_000;
 
+impl Fiber {
+    /// One past the highest stack slot used by the innermost frame. Slots at
+    /// and above it are dead: they are not GC roots and may hold stale values.
+    pub fn live_top(&self, prog: &Program) -> usize {
+        match self.frames.last() {
+            Some(fr) => (fr.base as usize + prog.protos[fr.proto as usize].nregs as usize).min(self.stack.len()),
+            None => 0,
+        }
+    }
+
+    /// Grows the stack (geometrically) to at least `need` slots, counting
+    /// the memory in `heap.fiber_bytes`. Fails with `"stack overflow"` beyond
+    /// `MAX_STACK_SLOTS`, or with the encoded memory limit error
+    /// (`meter::ctl_message`) if the memory limit does not allow it.
+    #[cold]
+    #[inline(never)]
+    pub fn grow_stack(&mut self, need: usize, heap: &mut Heap) -> Result<(), String> {
+        if need > MAX_STACK_SLOTS {
+            return Err("stack overflow".into());
+        }
+        let n = need.max(self.stack.len() * 2).min(MAX_STACK_SLOTS);
+        let before = self.stack.capacity();
+        let extra = n.saturating_sub(before) * std::mem::size_of::<Value>();
+        if heap.would_exceed(extra) {
+            return Err(meter::ctl_message(Ctl::Limit(LimitKind::Memory)));
+        }
+        self.stack.reserve_exact(n - self.stack.len());
+        self.stack.resize(n, Value::Unit);
+        heap.fiber_bytes += self.stack.capacity().saturating_sub(before) * std::mem::size_of::<Value>();
+        Ok(())
+    }
+
+    /// Makes room for more frames (called when `frames` is full), counting
+    /// the memory like [`Fiber::grow_stack`].
+    #[cold]
+    #[inline(never)]
+    pub fn grow_frames(&mut self, heap: &mut Heap) -> Result<(), String> {
+        let before = self.frames.capacity();
+        let more = before.max(8);
+        if heap.would_exceed(more * std::mem::size_of::<Frame>()) {
+            return Err(meter::ctl_message(Ctl::Limit(LimitKind::Memory)));
+        }
+        self.frames.reserve_exact(more);
+        heap.fiber_bytes += self.frames.capacity().saturating_sub(before) * std::mem::size_of::<Frame>();
+        Ok(())
+    }
+
+    /// Memory used by the fiber, as counted in `Heap::fiber_bytes`.
+    pub fn footprint(&self) -> usize {
+        std::mem::size_of::<Fiber>()
+            + self.stack.capacity() * std::mem::size_of::<Value>()
+            + self.frames.capacity() * std::mem::size_of::<Frame>()
+            + self.race.capacity() * std::mem::size_of::<Value>()
+            + self.waiters.capacity() * std::mem::size_of::<(u32, u64)>()
+    }
+}
+
 impl Vm {
     pub fn new(prog: Arc<Program>, natives: Arc<Vec<NativeEntry>>, host: Host) -> Vm {
-        let mut heap = Heap::new(host.limits.max_memory);
-        let mut consts = Vec::with_capacity(prog.consts.len());
-        for c in &prog.consts {
-            let v = match c {
-                Const::Int(i) => Value::Int(*i),
-                Const::Float(f) => Value::Float(*f),
-                Const::Dur(d) => Value::Dur(*d),
-                Const::Str(s) => heap.new_str(s.as_str()),
-                Const::Bytes(b) => heap.new_bytes(b.clone()),
-                Const::Fn(p) => heap.alloc(Obj::Closure(*p, Box::new([]))),
-                Const::Native(n) => heap.alloc(Obj::NativeFn(*n)),
-                Const::Spec(_) => Value::Unit,
-                Const::TypeDesc(t) => heap.alloc(Obj::TypeDesc(t.clone())),
-            };
-            consts.push(v);
-        }
+        let heap = Heap::new(host.limits.max_memory);
+        let consts = Vec::with_capacity(prog.consts.len());
         let globals = vec![Value::Uninit; prog.nglobals];
-        Vm {
+        let meter = Meter::new(host.limits.max_instructions, host.interrupt.clone());
+        let mut vm = Vm {
             prog,
             natives,
             heap,
@@ -284,9 +374,75 @@ impl Vm {
             io: sched::IoTable::default(),
             gen_counter: 1,
             fuel_used: 0,
+            meter,
+            gc_retry: false,
             cancel_current: false,
             pinned: Vec::new(),
             pending_race: None,
+            session: false,
+        };
+        vm.load_program();
+        vm
+    }
+
+    /// Creates the values of the program's constants and the slots of its
+    /// globals that do not exist yet: all of them for a new VM, or those a
+    /// REPL session appended to the program.
+    pub fn load_program(&mut self) {
+        for i in self.consts.len()..self.prog.consts.len() {
+            let heap = &mut self.heap;
+            let v = match &self.prog.consts[i] {
+                Const::Int(i) => Value::Int(*i),
+                Const::Float(f) => Value::Float(*f),
+                Const::Dur(d) => Value::Dur(*d),
+                Const::Str(s) => heap.new_str(s.as_str()),
+                Const::Bytes(b) => heap.new_bytes(b.clone()),
+                Const::Fn(p) => heap.alloc(Obj::Closure(*p, Box::new([]))),
+                Const::Native(n) => heap.alloc(Obj::NativeFn(*n)),
+                Const::Spec(_) => Value::Unit,
+                Const::TypeDesc(t) => heap.alloc(Obj::TypeDesc(t.clone())),
+                Const::Tuple(items) => heap.new_tuple(items.iter().map(|&i| self.consts[i as usize]).collect()),
+            };
+            self.consts.push(v);
+        }
+        if self.globals.len() < self.prog.nglobals {
+            self.globals.resize(self.prog.nglobals, Value::Uninit);
+        }
+    }
+
+    /// Ends every task: after the main task of a REPL session input has
+    /// failed, the session continues with a VM that runs nothing. Tasks that
+    /// were running are marked cancelled; heap and globals are kept.
+    pub fn abandon_tasks(&mut self) {
+        for slot in &mut self.fibers {
+            if let Some(f) = slot.take()
+                && let Obj::Task(t) = self.heap.get_mut(f.task)
+                && t.state == TaskState::Running
+            {
+                t.state = TaskState::Cancelled;
+            }
+        }
+        self.fibers.clear();
+        self.free_fibers.clear();
+        self.ready.clear();
+        self.io.clear();
+        self.live_tasks = 0;
+        self.cancel_current = false;
+        self.pending_race = None;
+        self.host.grants_once.clear();
+        self.host.denies_once.clear();
+    }
+
+    /// Frees the fiber of the main task after it finished, leaving other
+    /// tasks to run (REPL sessions).
+    pub fn release_main(&mut self) {
+        let fid = self.main_fiber;
+        if let Some(f) = self.fibers.get_mut(fid as usize).and_then(Option::take) {
+            if let Obj::Task(t) = self.heap.get_mut(f.task) {
+                t.state = TaskState::Done;
+            }
+            self.free_fibers.push(fid);
+            self.live_tasks = self.live_tasks.saturating_sub(1);
         }
     }
 
@@ -308,7 +464,7 @@ impl Vm {
 
     pub fn some(&mut self, v: Value) -> Value {
         let id = self.prog.ids.some;
-        self.heap.alloc(Obj::Variant(id, Box::new([v])))
+        self.heap.new_variant(id, &[v])
     }
 
     pub fn none(&self) -> Value {
@@ -317,12 +473,12 @@ impl Vm {
 
     pub fn ok(&mut self, v: Value) -> Value {
         let id = self.prog.ids.ok;
-        self.heap.alloc(Obj::Variant(id, Box::new([v])))
+        self.heap.new_variant(id, &[v])
     }
 
     pub fn err(&mut self, v: Value) -> Value {
         let id = self.prog.ids.err;
-        self.heap.alloc(Obj::Variant(id, Box::new([v])))
+        self.heap.new_variant(id, &[v])
     }
 
     pub fn option(&mut self, v: Option<Value>) -> Value {
@@ -348,20 +504,75 @@ impl Vm {
 
     /// Unpacks an Option: `Some(x)` → `Some(x)`.
     pub fn as_option(&self, v: Value) -> Option<Value> {
-        if self.heap.variant_id(v) == self.prog.ids.some { Some(self.heap.fields(v)[0]) } else { None }
+        if self.heap.variant_id(v) == self.prog.ids.some { self.heap.field(v, 0) } else { None }
     }
 
+    /// Unpacks a Result: `Ok(x)` → `Ok(x)`, `Err(e)` → `Err(e)`.
+    pub fn as_result(&self, v: Value) -> Result<Value, Value> {
+        let payload = self.heap.field(v, 0).unwrap_or(Value::Unit);
+        if self.heap.variant_id(v) == self.prog.ids.ok { Ok(payload) } else { Err(payload) }
+    }
+
+    /// Payload field `i` of an enum variant value, whatever its
+    /// representation (`Unit` if there is no such field).
+    pub fn variant_payload(&self, v: Value, i: usize) -> Value {
+        self.heap.field(v, i).unwrap_or(Value::Unit)
+    }
+
+    /// The display form of `v`, charging the meter for the work.
     pub fn display(&self, v: Value) -> Result<String, Ctl> {
-        display::to_display(&self.prog, &self.heap, v).map_err(Ctl::Panic)
+        display::to_display_metered(&self.prog, &self.heap, &self.meter, v)
     }
 
+    /// The debug form of `v`, charging the meter for the work.
     pub fn debug(&self, v: Value) -> Result<String, Ctl> {
-        display::to_debug(&self.prog, &self.heap, v).map_err(Ctl::Panic)
+        display::to_debug_metered(&self.prog, &self.heap, &self.meter, v)
     }
 
     /// Fails with a memory limit error if `extra` bytes cannot be allocated.
     pub fn reserve(&self, extra: usize) -> Result<(), Ctl> {
         if self.heap.would_exceed(extra) { Err(Ctl::Limit(LimitKind::Memory)) } else { Ok(()) }
+    }
+
+    /// Starts accounting for the buffers of an I/O operation that are not
+    /// yet heap values (see [`iomem`]); the operation grows the reservation
+    /// as its buffers grow and drops it before turning them into values.
+    pub fn io_reservation(&self) -> iomem::Reservation {
+        self.heap.io_memory.publish_heap(self.heap.used());
+        iomem::Reservation::new(&self.heap.io_memory)
+    }
+
+    /// Like [`Vm::io_reservation`], reserving `bytes` at once. Fails with the
+    /// `Err(Error { kind: "limit" })` value to return if they do not fit.
+    pub fn reserve_io(&mut self, bytes: usize) -> Result<iomem::Reservation, Value> {
+        let mut r = self.io_reservation();
+        match r.ensure(bytes) {
+            Ok(()) => Ok(r),
+            Err(e) => Err(self.err_value("limit", &format!("cannot buffer {bytes} bytes: {e}"))),
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Metering (see `meter` for the cost model)
+
+    /// Charges `units` of fuel for native work: one unit per element
+    /// visited, compared or produced. Fails if a limit is exceeded or the
+    /// engine was interrupted; propagate the error with `?`.
+    #[inline]
+    pub fn charge(&self, units: u64) -> Result<(), Ctl> {
+        self.meter.charge(units)
+    }
+
+    /// Charges for `n` bytes copied, compared or scanned.
+    #[inline]
+    pub fn charge_bytes(&self, n: usize) -> Result<(), Ctl> {
+        self.meter.charge_bytes(n)
+    }
+
+    /// Charges for `n` bytes processed one at a time (hashing, encoding).
+    #[inline]
+    pub fn charge_slow_bytes(&self, n: usize) -> Result<(), Ctl> {
+        self.meter.charge_slow_bytes(n)
     }
 
     // ------------------------------------------------------------------
@@ -370,18 +581,27 @@ impl Vm {
     /// Checks a capability: `Ok(true)` allowed, `Ok(false)` denied, or a
     /// request to prompt the user.
     pub fn permit(&mut self, cap: &Capability) -> Result<bool, Ctl> {
-        if let Some(i) = self.host.grants_once.iter().position(|c| c == cap) {
-            self.host.grants_once.remove(i);
+        self.permit_by(cap, Policy::check)
+    }
+
+    /// Like [`Vm::permit`] for an operation on a directory entry itself
+    /// (see [`Policy::check_entry`]).
+    pub fn permit_entry(&mut self, cap: &Capability) -> Result<bool, Ctl> {
+        self.permit_by(cap, Policy::check_entry)
+    }
+
+    fn permit_by(&mut self, cap: &Capability, check: fn(&Policy, &Capability) -> Decision) -> Result<bool, Ctl> {
+        // "Once" answers given for the call being retried (see `forget_once_answers`).
+        if self.host.grants_once.contains(cap) {
             return Ok(true);
         }
-        if let Some(i) = self.host.denies_once.iter().position(|c| c == cap) {
-            self.host.denies_once.remove(i);
+        if self.host.denies_once.contains(cap) {
             return Ok(false);
         }
         if let Some(&d) = self.host.always.get(cap) {
             return Ok(d);
         }
-        match self.host.policy.check(cap) {
+        match check(&self.host.policy, cap) {
             Decision::Allow => Ok(true),
             Decision::Deny => Ok(false),
             Decision::Prompt => {
@@ -391,6 +611,19 @@ impl Vm {
                     Ok(false)
                 }
             }
+        }
+    }
+
+    /// Forgets "once" answers. A native that needs permission is retried
+    /// after each prompt, possibly several times when it checks several
+    /// capabilities (`fs.copy`), so "once" answers stay valid for the retried
+    /// call and are forgotten when it returns anything else than another
+    /// permission request: they never apply to a later call.
+    #[inline]
+    pub(crate) fn forget_once_answers(&mut self) {
+        if !self.host.grants_once.is_empty() || !self.host.denies_once.is_empty() {
+            self.host.grants_once.clear();
+            self.host.denies_once.clear();
         }
     }
 
@@ -450,18 +683,27 @@ impl Vm {
             _ => return panic("spawn: not a closure"),
         };
         let nregs = self.prog.protos[proto as usize].nregs as usize;
+        let Value::Obj(closure) = closure else { return panic("spawn: not a closure") };
+        let mut frames = Vec::with_capacity(8);
+        frames.push(Frame { proto, ip: 0, base: 0, ret: 0, closure });
+        let stack = nregs.max(INITIAL_STACK_SLOTS);
+        if self.heap.would_exceed(stack * std::mem::size_of::<Value>()) {
+            return Err(Ctl::Limit(crate::LimitKind::Memory));
+        }
         let fiber = Box::new(Fiber {
-            stack: vec![Value::Unit; nregs.max(1)],
-            frames: vec![Frame { proto, ip: 0, base: 0, ret: 0, closure }],
+            stack: vec![Value::Unit; stack],
+            frames,
             task,
             state: FiberState::Ready,
             wgen: 0,
             result_slot: 0,
             race: vec![],
             waiters: vec![],
+            waiters_prune_at: MIN_PRUNE,
             io: None,
             pending_panic: None,
         });
+        self.heap.fiber_bytes += fiber.footprint();
         let id = match self.free_fibers.pop() {
             Some(id) => {
                 self.fibers[id as usize] = Some(fiber);
@@ -569,24 +811,59 @@ impl Vm {
     // ------------------------------------------------------------------
     // Garbage collection
 
-    pub fn collect_garbage(&mut self, current: Option<&Fiber>) {
+    pub fn collect_garbage(&mut self, current: Option<&mut Fiber>) {
+        self.collect_garbage_with(current, false);
+    }
+
+    /// A major collection, freeing all unreachable objects; used before
+    /// reporting a memory limit, since a minor collection leaves old garbage.
+    pub fn collect_all_garbage(&mut self, current: Option<&mut Fiber>) {
+        self.collect_garbage_with(current, true);
+    }
+
+    fn collect_garbage_with(&mut self, current: Option<&mut Fiber>, force_major: bool) {
+        let start = std::time::Instant::now();
         let mut roots: Vec<Value> = Vec::with_capacity(1024);
         roots.extend(self.globals.iter().copied());
         roots.extend(self.consts.iter().copied());
         roots.extend(self.pinned.iter().copied());
-        let add_fiber = |f: &Fiber, roots: &mut Vec<Value>| {
-            roots.extend(f.stack.iter().copied());
-            roots.extend(f.frames.iter().map(|fr| fr.closure));
+        let prog = &self.prog;
+        let mut fiber_bytes = 0;
+        let mut add_fiber = |f: &mut Fiber, roots: &mut Vec<Value>| {
+            // Only the live part of the stack is scanned. Dead slots are
+            // cleared so that they never hold handles to freed objects, and
+            // a stack left large by deep recursion is shrunk.
+            let top = f.live_top(prog);
+            roots.extend(f.stack[..top].iter().copied());
+            if f.stack.len() > 2 * top + 4096 {
+                f.stack.truncate((top + top / 2).max(INITIAL_STACK_SLOTS));
+                f.stack.shrink_to_fit();
+            }
+            f.stack[top..].fill(Value::Unit);
+            roots.extend(f.frames.iter().map(|fr| fr.closure_value()));
             roots.push(f.task);
             roots.extend(f.race.iter().copied());
+            fiber_bytes += f.footprint();
         };
-        for f in self.fibers.iter().flatten() {
+        for f in self.fibers.iter_mut().flatten() {
             add_fiber(f, &mut roots);
         }
         if let Some(f) = current {
             add_fiber(f, &mut roots);
         }
-        self.heap.collect(roots);
+        self.heap.fiber_bytes = fiber_bytes;
+        // Major collections when the old generation has grown enough (and
+        // regularly under stress testing); minor ones otherwise.
+        let mut major = force_major || self.heap.wants_major() || (self.heap.stress && self.heap.stats.collections.is_multiple_of(8));
+        if !major {
+            self.heap.collect(roots.iter().copied(), false);
+            // Unreachable old objects may be what keeps us over the limit.
+            major = self.heap.over_limit();
+        }
+        if major {
+            self.heap.collect(roots, true);
+        }
+        self.heap.stats.record(start.elapsed(), major);
     }
 
     pub fn trace_of(&self, fiber: &Fiber, ip: Option<u32>) -> Vec<TraceEntry> {

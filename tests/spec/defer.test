@@ -1,0 +1,315 @@
+=== deferred expressions run when the block ends, last first
+fn work() {
+    defer print("first deferred, runs last")
+    defer print("second deferred, runs first")
+    print("body")
+}
+work()
+{
+    defer print("inner block done")
+    print("inner block")
+}
+print("after")
+--- stdout
+body
+second deferred, runs first
+first deferred, runs last
+inner block
+inner block done
+after
+
+=== only defers already reached run
+fn f(n: int) {
+    defer print("a")
+    if n == 0 { return }
+    defer print("b")
+    print("end {n}")
+}
+f(0)
+f(1)
+--- stdout
+a
+end 1
+b
+a
+
+=== return runs every pending defer after computing its value
+var trace = []
+fn compute() -> int {
+    trace.push("compute")
+    7
+}
+fn g(flag: bool) -> int {
+    defer trace.push("outer")
+    if flag {
+        defer trace.push("inner")
+        return compute()
+    }
+    compute() + 1
+}
+print(g(true))
+print(trace)
+trace.clear()
+print(g(false))
+print(trace)
+--- stdout
+7
+["compute", "inner", "outer"]
+8
+["compute", "outer"]
+
+=== the value of a block or return is computed before defers modify variables
+var x = 1
+let r = {
+    defer { x += 10 }
+    x
+}
+print((r, x))
+fn ret() -> int {
+    var z = 1
+    defer { z = 99 }
+    z
+}
+print(ret())
+var y = 0
+y = loop {
+    defer { y += 100 }
+    break y + 1
+}
+print(y)
+--- stdout
+(1, 11)
+1
+1
+
+=== question mark propagation runs defers
+fn parse(s: str) -> Result<int> {
+    defer print("parse {s} done")
+    let n = s.parse_int().ok_or(error("not a number"))?
+    Ok(n * 2)
+}
+print(parse("21"))
+print(parse("x"))
+fn first(xs: [int]) -> int? {
+    defer print("first done")
+    let x = xs.first()?
+    Some(x)
+}
+print(first([]))
+--- stdout
+parse 21 done
+Ok(42)
+parse x done
+Err(Error { kind: "error", message: "not a number" })
+first done
+None
+
+=== let else divergence runs defers
+fn name(o: str?) -> str {
+    defer print("name done")
+    let Some(n) = o else { return "anonymous" }
+    n
+}
+print(name(None))
+print(name(Some("ann")))
+--- stdout
+name done
+anonymous
+name done
+ann
+
+=== break and continue run the defers of the blocks they leave
+var log = []
+@outer for i in 0..3 {
+    defer log.push("end {i}")
+    for j in 0..3 {
+        defer log.push("end {i}.{j}")
+        if j == 1 { continue @outer }
+        if i == 2 { break @outer }
+        log.push("body {i}.{j}")
+    }
+}
+print(log.join(", "))
+var n = 0
+let v = loop {
+    n += 1
+    defer print("iteration {n} done")
+    if n == 2 { break n * 10 }
+}
+print(v)
+--- stdout
+body 0.0, end 0.0, end 0.1, end 0, body 1.0, end 1.0, end 1.1, end 1, end 2.0, end 2
+iteration 1 done
+iteration 2 done
+20
+
+=== variables are read when the deferred code runs
+fn f() {
+    var state = "initial"
+    defer print("state: {state}")
+    state = "final"
+}
+f()
+--- stdout
+state: final
+
+=== deferred blocks may declare locals, loop and call lambdas
+fn f(n: int) -> int {
+    let items = [1, 2, 3]
+    defer {
+        let (a, b) = (n, n * 2)
+        let total = items.map(x => x + a).sum()
+        for (i, v) in items.enumerate() {
+            if i > 0 { break }
+            print("first {v}")
+        }
+        print("a={a} b={b} total={total}")
+    }
+    var k = 0
+    while k < 10 {
+        let pair = (k, k + 1)
+        if pair.0 == n { return k * 100 }
+        if k > 5 { break }
+        k += 1
+    }
+    let (c, d) = (7, 8)
+    c + d
+}
+print(f(2))
+print(f(20))
+--- stdout
+first 1
+a=2 b=4 total=12
+200
+first 1
+a=20 b=40 total=66
+15
+
+=== lambdas and tasks have their own defers
+fn g() {
+    let h = () => {
+        defer print("lambda done")
+        print("lambda body")
+    }
+    defer h()
+    print("g body")
+}
+g()
+let ch: Channel<int> = task.channel()
+let t = spawn {
+    defer ch.close()
+    for i in 0..3 {
+        ch.send(i)
+    }
+}
+for v in ch {
+    print("got {v}")
+}
+t.wait()
+--- stdout
+g body
+lambda body
+lambda done
+got 0
+got 1
+got 2
+
+=== deferred code may suspend
+fn slow() {
+    defer {
+        task.sleep(1ms)
+        print("slept in defer")
+    }
+    print("slow body")
+}
+slow()
+print("after")
+--- stdout
+slow body
+slept in defer
+after
+
+=== top-level defers run when the module's top-level code ends
+defer print("top-level done")
+print("first")
+--- stdout
+first
+top-level done
+
+=== top-level question mark failures run defers
+defer print("cleanup")
+let n = int.parse("x").ok_or(error("bad"))?
+print(n)
+--- stdout
+cleanup
+--- exit 1
+
+=== panics do not run defers
+fn f() {
+    defer print("never printed")
+    panic("boom")
+}
+f()
+--- panic
+boom
+
+=== deferred expressions must be unit and stay inside
+fn f(o: int?) -> int? {
+    defer { return None }
+    defer { let v = o? }
+    for i in 0..3 {
+        defer { if i > 1 { break } }
+        defer { continue }
+        defer {
+            for j in 0..2 {
+                if j > 0 { break }
+            }
+        }
+    }
+    defer 5
+    defer [1].pop()
+    defer [1].each(x => {
+        if x > 0 { return }
+    })
+    defer panic("boom")
+    o
+}
+--- error
+2: `return` cannot be used in a deferred expression
+3: `?` cannot be used in a deferred expression
+5: `break` cannot leave a deferred expression
+6: `continue` cannot leave a deferred expression
+13: a deferred expression must have type (), found int
+14: a deferred expression must have type (), found int?
+
+=== defer is a keyword
+let defer = 1
+--- error
+1: expected pattern
+
+=== formatting defer
+fn f(c: Conn) {
+    defer   c.close()
+    defer {c.flush()
+    print("x")}
+}
+--- fmt
+fn f(c: Conn) {
+    defer c.close()
+    defer {
+        c.flush()
+        print("x")
+    }
+}
+
+=== linting inside deferred code
+fn f() {
+    defer {
+        let unused = 1
+        if true == true { print("x") }
+    }
+}
+f()
+--- lint
+3: unused-variable
+4: bool-comparison

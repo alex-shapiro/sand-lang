@@ -92,6 +92,7 @@ fn choice(vm: &mut Vm, rng: &mut Rng, a: &[Value]) -> NResult {
 
 /// Fisher-Yates.
 fn shuffle(vm: &mut Vm, rng: &mut Rng, a: &[Value]) -> NResult {
+    vm.charge(vm.heap.list(a[0]).len() as u64)?;
     let xs = vm.heap.list_mut(a[0]);
     for i in (1..xs.len()).rev() {
         let j = rng.below(i as u64 + 1) as usize;
@@ -105,6 +106,7 @@ fn sample(vm: &mut Vm, rng: &mut Rng, a: &[Value]) -> NResult {
     let n = vm.heap.list(a[0]).len();
     let k = a[1].as_int().clamp(0, n as i64) as usize;
     vm.reserve(size_of_val(vm.heap.list(a[0])))?;
+    vm.charge(n as u64)?;
     let mut xs = vm.heap.list(a[0]).to_vec();
     for i in 0..k {
         let j = i + rng.below((n - i) as u64) as usize;
@@ -117,6 +119,7 @@ fn sample(vm: &mut Vm, rng: &mut Rng, a: &[Value]) -> NResult {
 fn bytes(vm: &mut Vm, rng: &mut Rng, a: &[Value]) -> NResult {
     let Ok(n) = usize::try_from(a[0].as_int()) else { return panic("random.bytes: negative length") };
     vm.reserve(n)?;
+    vm.charge_slow_bytes(n)?;
     let mut out = Vec::with_capacity(n);
     while out.len() < n {
         let word = rng.next_u64().to_le_bytes();

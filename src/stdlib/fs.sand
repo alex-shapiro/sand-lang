@@ -56,10 +56,12 @@ pub native fn create_dir(path: str, recursive: bool = false) -> Result<()>
 pub native fn remove_file(path: str) -> Result<()>
 
 /// Removes an empty directory, or with `recursive` a directory and its contents.
-/// Every entry is checked against the policy before it is removed; symlinks
-/// are removed, never followed.
+/// A recursive removal fails before removing anything if a deny rule protects
+/// a path inside the directory; every entry is also checked against the policy
+/// before it is removed. Symlinks are removed, never followed.
 pub fn remove_dir(path: str, recursive: bool = false) -> Result<()> {
     if recursive and entry_type(path)? == "dir" {
+        check_tree(path)?
         for name in list_dir(path)? {
             let child = join([path, name])
             if entry_type(child)? == "dir" {
@@ -72,7 +74,9 @@ pub fn remove_dir(path: str, recursive: bool = false) -> Result<()> {
     remove_empty_dir(path)
 }
 
-/// Renames or moves a file or directory, replacing `dst` if it is a file.
+/// Renames or moves a file or directory (a symlink itself, not its target),
+/// replacing `dst` if it is a file. Fails if a deny rule of the policy
+/// protects a path inside either tree.
 pub native fn rename(src: str, dst: str) -> Result<()>
 
 /// Copies the contents of file `src` to `dst`.
@@ -99,3 +103,7 @@ native fn entry_type(path: str) -> Result<str>
 
 /// Removes an empty directory.
 native fn remove_empty_dir(path: str) -> Result<()>
+
+/// Checks that the whole tree at `path` may be removed: write access to
+/// `path` itself and no deny rule inside it.
+native fn check_tree(path: str) -> Result<()>

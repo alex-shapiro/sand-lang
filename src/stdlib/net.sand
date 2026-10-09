@@ -2,7 +2,8 @@
 //!
 //! Connecting requires the `Net(host:port)` capability, listening the
 //! `NetListen(addr)` capability. Sockets count against the
-//! `max_open_resources` limit until they are closed (or collected).
+//! `max_open_resources` limit until they are closed (or collected), and so
+//! do connections being established and pending `accept` calls.
 
 /// Starts listening for TCP connections on `addr` (`host:port`; port `0`
 /// picks a free port).
@@ -13,8 +14,11 @@ pub native fn listen(addr: str) -> Result<Listener>
 pub native fn connect(addr: str, timeout: duration = 30s) -> Result<Conn>
 
 /// Opens a TLS connection to `host:port`, verifying the server certificate
-/// against the bundled web PKI roots (requires the `tls` feature).
-pub native fn connect_tls(host: str, port: int) -> Result<Conn>
+/// for `host` against the bundled web PKI roots and any roots trusted by the
+/// host application (requires the `tls` feature). Fails with kind
+/// `"timeout"` if the connection and the TLS handshake are not completed
+/// within `timeout`.
+pub native fn connect_tls(host: str, port: int, timeout: duration = 30s) -> Result<Conn>
 
 /// A listening TCP socket.
 pub native type Listener

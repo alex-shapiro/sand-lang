@@ -143,3 +143,62 @@ true
 let d: duration = 5
 --- error
 1: expected duration, found int
+
+=== loops reading globals that are not initialised yet
+// A loop in a function called before the global it reads is initialised.
+fn sum_late(n: int) -> int {
+    var t = 0
+    for i in 0..n {
+        if i == 3 {
+            t += LATE
+        }
+        t += 1
+    }
+    t
+}
+
+// Started before `SHARED` is initialised; reads it only on its last
+// iteration, after the main task has initialised it.
+fn worker() -> int {
+    var n = 0
+    for i in 0..50 {
+        if i == 49 {
+            n += SHARED
+        }
+        task.yield_now()
+    }
+    n
+}
+
+// The unhoisted copy of a loop that declares pattern locals.
+fn label_pairs(pairs: [(int, str)], use_late: bool) -> str {
+    var out = ""
+    for (n, s) in pairs {
+        let d = n * 2
+        if use_late {
+            out = out + "{LATER}"
+        }
+        out = out + "{s}{d};"
+    }
+    out
+}
+
+print(label_pairs([(1, "a"), (2, "b")], false))
+let LATER = 9
+print(label_pairs([(1, "a"), (2, "b")], true))
+let t = spawn { worker() }
+task.yield_now()
+let SHARED = 7
+print(t.wait())
+print(sum_late(0))
+print(sum_late(3))
+print(sum_late(4))
+let LATE = 100
+--- stdout
+a2;b4;
+9a2;9b4;
+7
+0
+3
+--- panic
+global used before initialization: `LATE`

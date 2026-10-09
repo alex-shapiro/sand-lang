@@ -1,13 +1,13 @@
 //! The `io` and `env` modules.
 
-use super::io_kind;
+use super::net::{NetError, read_line_bytes, read_to_end_reserved, strip_eol};
 use crate::check::ModKind;
 use crate::engine::Registry;
 use crate::policy::Capability;
+use crate::vm::iomem::Reservation;
 use crate::vm::value::{Obj, Value};
 use crate::vm::{Ctl, Finisher, NResult, StdinSource, Vm};
-use std::io::{self, BufRead, Read};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+use tokio::io::AsyncBufRead;
 use tokio::sync::Mutex;
 
 pub fn register(r: &mut Registry) {
@@ -21,12 +21,12 @@ fn register_io(r: &mut Registry) {
     r.add_builtin("io.read_line", |vm, _| read_stdin(vm, true));
     r.add_builtin("io.read_all", |vm, _| read_stdin(vm, false));
     r.add_builtin("io.write", |vm, a| {
-        let data = vm.str(a[0]).as_bytes().to_vec();
+        let data = copy_out(vm, a[0])?;
         vm.write_stream(1, &data)?;
         Ok(Value::Unit)
     });
     r.add_builtin("io.ewrite", |vm, a| {
-        let data = vm.str(a[0]).as_bytes().to_vec();
+        let data = copy_out(vm, a[0])?;
         vm.write_stream(2, &data)?;
         Ok(Value::Unit)
     });
@@ -44,22 +44,19 @@ fn read_stdin(vm: &mut Vm, line: bool) -> NResult {
         return Ok(vm.err_value("permission_denied", "permission denied: read standard input"));
     }
     let stdin = vm.host.stdin.clone();
-    // Read at most one byte more than can be allocated; the finisher then
-    // fails with the memory limit instead of exhausting host memory.
-    let limit = match vm.heap.limit {
-        Some(l) => l.saturating_sub(vm.heap.bytes) as u64 + 1,
-        None => 1 << 40,
-    };
+    // The input is buffered outside the heap until it is complete.
+    let mut res = vm.io_reservation();
     Err(Ctl::Async(Box::pin(async move {
-        let result = if line { read_line(&stdin, limit).await } else { read_all(&stdin, limit).await.map(Some) };
+        let result = read_input(&stdin, line, &mut res).await;
         Box::new(move |vm: &mut Vm| -> NResult {
+            drop(res);
             let data = match result {
                 Ok(Some(data)) => data,
                 Ok(None) => {
                     let none = vm.none();
                     return Ok(vm.ok(none));
                 }
-                Err(e) => return Ok(vm.err_value(io_kind(&e), &format!("stdin: {e}"))),
+                Err(e) => return NetError::new(e.kind, format!("stdin: {}", e.message)).into_value(vm),
             };
             vm.reserve(data.len())?;
             let Ok(text) = String::from_utf8(data) else {
@@ -72,36 +69,27 @@ fn read_stdin(vm: &mut Vm, line: bool) -> NResult {
     })))
 }
 
-/// The next line without its terminator, `None` at end of input.
-async fn read_line(stdin: &Mutex<StdinSource>, limit: u64) -> io::Result<Option<Vec<u8>>> {
+/// The next line without its terminator (`None` at end of input), or all
+/// remaining input.
+async fn read_input(stdin: &Mutex<StdinSource>, line: bool, res: &mut Reservation) -> Result<Option<Vec<u8>>, NetError> {
     let mut source = stdin.lock().await;
-    let mut buf = Vec::new();
-    let n = match &mut *source {
-        StdinSource::None => 0,
-        StdinSource::Bytes(c) => Read::take(c, limit).read_until(b'\n', &mut buf)?,
-        StdinSource::Inherit(r) => r.take(limit).read_until(b'\n', &mut buf).await?,
-    };
-    if n == 0 {
-        return Ok(None);
+    match &mut *source {
+        StdinSource::None => Ok((!line).then(Vec::new)),
+        StdinSource::Bytes(c) => read_from(c, line, res).await,
+        StdinSource::Inherit(r) => read_from(r, line, res).await,
     }
-    if buf.last() == Some(&b'\n') {
-        buf.pop();
-        if buf.last() == Some(&b'\r') {
-            buf.pop();
-        }
-    }
-    Ok(Some(buf))
 }
 
-async fn read_all(stdin: &Mutex<StdinSource>, limit: u64) -> io::Result<Vec<u8>> {
-    let mut source = stdin.lock().await;
-    let mut buf = Vec::new();
-    match &mut *source {
-        StdinSource::None => 0,
-        StdinSource::Bytes(c) => Read::take(c, limit).read_to_end(&mut buf)?,
-        StdinSource::Inherit(r) => r.take(limit).read_to_end(&mut buf).await?,
-    };
-    Ok(buf)
+async fn read_from<R: AsyncBufRead + Unpin>(r: &mut R, line: bool, res: &mut Reservation) -> Result<Option<Vec<u8>>, NetError> {
+    if line {
+        let Some(mut data) = read_line_bytes(r, usize::MAX, res).await? else { return Ok(None) };
+        strip_eol(&mut data);
+        Ok(Some(data))
+    } else {
+        let mut data = Vec::new();
+        read_to_end_reserved(r, &mut data, res, usize::MAX).await?;
+        Ok(Some(data))
+    }
 }
 
 fn register_env(r: &mut Registry) {
@@ -140,8 +128,17 @@ fn register_env(r: &mut Registry) {
         };
         for (k, v) in vars {
             let (k, v) = (vm.new_str(k), vm.new_str(v));
-            vm.map_insert(map, k, v).map_err(Ctl::Panic)?;
+            vm.map_insert(map, k, v).map_err(crate::vm::meter::ctl_from_message)?;
         }
         Ok(map)
     });
+}
+
+/// A copy of the string `s` to write (the stream needs `&mut Vm`), checked
+/// against the memory limit and charged.
+fn copy_out(vm: &Vm, s: Value) -> Result<Vec<u8>, Ctl> {
+    let n = vm.str(s).len();
+    vm.reserve(n)?;
+    vm.charge_bytes(n)?;
+    Ok(vm.str(s).as_bytes().to_vec())
 }

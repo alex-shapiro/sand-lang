@@ -1,12 +1,15 @@
 //! The embedding API: `Engine`, `Config`, errors and module loading.
 
+use crate::check::budget::{CompileBudget, Stop};
 use crate::check::{Checker, ModKind, ParsedModule};
 use crate::diag::{Diag, Diagnostic, SourceMap, Span};
 use crate::native::NativeModule;
 use crate::policy::{Capability, Decision, Policy, PromptAnswer, Prompter, normalize_path};
+use crate::session::Session;
 use crate::stdlib;
 use crate::syntax::lexer::{StrPart, Tok, lex};
 use crate::vm::bytecode::{HelpEntry, Program};
+use crate::vm::heap::GcStats;
 use crate::vm::sched::{IoShared, IoTable, RunEnd};
 use crate::vm::{Host, NativeEntry, OutputSink, Rng, SharedSink, StdinSource, TraceEntry, Trap, Vm, entropy_seed};
 use std::collections::{BTreeMap, HashMap};
@@ -14,7 +17,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Per-engine resource limits.
 #[derive(Clone, Debug)]
@@ -28,7 +31,15 @@ pub struct Limits {
     pub max_open_resources: usize,
     pub max_output_bytes: Option<u64>,
     pub max_http_body: usize,
+    /// Total size of the program's source files (the main file and every
+    /// imported script; the standard library is not counted).
     pub max_source_bytes: usize,
+    /// Work allowed for type checking, in compile fuel units (about one per
+    /// expression checked, unification step, type node and pattern row; see
+    /// `check::budget`). `None` means unlimited. Compilation is also bounded
+    /// by `max_wall_time` (counted from the start of compilation) and can be
+    /// stopped with an `InterruptHandle`.
+    pub max_compile_fuel: Option<u64>,
 }
 
 impl Default for Limits {
@@ -44,6 +55,7 @@ impl Default for Limits {
             max_output_bytes: None,
             max_http_body: 64 << 20,
             max_source_bytes: 16 << 20,
+            max_compile_fuel: Some(crate::check::budget::DEFAULT_COMPILE_FUEL),
         }
     }
 }
@@ -186,6 +198,8 @@ pub struct Config {
     pub(crate) args: Vec<String>,
     pub(crate) env: Option<Vec<(String, String)>>,
     pub(crate) seed: Option<u64>,
+    pub(crate) gc_stress: bool,
+    pub(crate) tls: crate::stdlib::TlsSettings,
 }
 
 impl Default for Config {
@@ -209,6 +223,8 @@ impl Config {
             args: Vec::new(),
             env: None,
             seed: None,
+            gc_stress: std::env::var_os("SAND_GC_STRESS").is_some(),
+            tls: Default::default(),
         }
     }
     pub fn policy(mut self, p: Policy) -> Self {
@@ -263,6 +279,22 @@ impl Config {
     }
     pub fn seed(mut self, s: u64) -> Self {
         self.seed = Some(s);
+        self
+    }
+    /// Testing aid: run a garbage collection at every safe point (every
+    /// loop iteration and call), alternating minor and major collections.
+    /// Very slow. Also enabled by the `SAND_GC_STRESS` environment variable.
+    #[doc(hidden)]
+    pub fn gc_stress(mut self, on: bool) -> Self {
+        self.gc_stress = on;
+        self
+    }
+    /// Trusts additional root certificates (DER-encoded X.509) for TLS
+    /// connections (`https`, `net.connect_tls`), besides the bundled web PKI
+    /// roots. An invalid certificate makes TLS connections fail. Without the
+    /// `tls` feature this has no effect.
+    pub fn tls_root_certificates(mut self, certs: Vec<Vec<u8>>) -> Self {
+        self.tls = self.tls.with_roots(certs);
         self
     }
 }
@@ -320,15 +352,18 @@ pub(crate) struct Registry {
     pub by_name: HashMap<String, u32>,
     /// Module name -> Sand source.
     pub sources: BTreeMap<String, (ModKind, String)>,
+    /// Lazily computed `help.module` summaries.
+    pub help: Arc<ModuleHelp>,
 }
 
 impl Registry {
     fn build(config: &Config) -> Registry {
-        let mut r = Registry { entries: Vec::new(), by_name: HashMap::new(), sources: BTreeMap::new() };
+        let mut r = Registry { entries: Vec::new(), by_name: HashMap::new(), sources: BTreeMap::new(), help: Arc::default() };
         stdlib::register(&mut r);
         for m in &config.modules {
             m.register(&mut r);
         }
+        r.help = Arc::new(ModuleHelp { sources: r.sources.clone(), cache: Mutex::default() });
         r
     }
 
@@ -353,15 +388,19 @@ pub struct Engine {
     natives: Arc<Vec<NativeEntry>>,
     interrupt: Arc<AtomicBool>,
     shared: Arc<IoShared>,
+    /// "Always" prompt answers, remembered for the lifetime of the engine
+    /// (SPEC 14.3): shared by import checks and every run.
+    always: Arc<Mutex<HashMap<Capability, bool>>>,
+    gc_stats: GcStats,
 }
 
-struct LoadedModule {
-    name: String,
-    file: u32,
-    kind: ModKind,
+pub(crate) struct LoadedModule {
+    pub name: String,
+    pub file: u32,
+    pub kind: ModKind,
     /// Import item index -> module key.
-    imports: Vec<(usize, String)>,
-    dir: Option<PathBuf>,
+    pub imports: Vec<(usize, String)>,
+    pub dir: Option<PathBuf>,
 }
 
 /// A compiled program with its sources (for diagnostics).
@@ -379,9 +418,11 @@ pub(crate) struct ResolvedFacts {
     pub locals: Vec<(usize, usize, crate::check::LocalFact)>,
     pub imports: Vec<(usize, usize, String)>,
     pub used_names: std::collections::HashSet<String>,
+    /// Unused private functions and methods: (line, column, display name, is method).
+    pub unused_fns: Vec<(usize, usize, String, bool)>,
 }
 
-const COMPILE_STACK: usize = 256 << 20;
+pub(crate) const COMPILE_STACK: usize = 256 << 20;
 
 impl Engine {
     pub fn new(config: Config) -> Engine {
@@ -393,7 +434,14 @@ impl Engine {
             natives,
             interrupt: Arc::new(AtomicBool::new(false)),
             shared: Arc::new(IoShared::default()),
+            always: Arc::default(),
+            gc_stats: GcStats::default(),
         }
+    }
+
+    /// Garbage collector statistics of the most recent run.
+    pub fn gc_stats(&self) -> GcStats {
+        self.gc_stats
     }
 
     /// Compiles a file and returns checker facts for the linter.
@@ -414,6 +462,59 @@ impl Engine {
         InterruptHandle { flag: self.interrupt.clone(), shared: self.shared.clone() }
     }
 
+    /// Starts an interactive session ([`Session`]) with this engine's
+    /// configuration. The session shares the engine's "always" answers to
+    /// permission prompts, but not its interrupt handle: use
+    /// [`Session::interrupt_handle`].
+    pub fn session(&self) -> Session {
+        Session::new(Engine {
+            config: self.config.clone(),
+            registry: self.registry.clone(),
+            natives: self.natives.clone(),
+            interrupt: Arc::new(AtomicBool::new(false)),
+            shared: Arc::new(IoShared::default()),
+            always: self.always.clone(),
+            gc_stats: GcStats::default(),
+        })
+    }
+
+    pub(crate) fn config(&self) -> &Config {
+        &self.config
+    }
+
+    pub(crate) fn registry(&self) -> Arc<Registry> {
+        self.registry.clone()
+    }
+
+    /// Forgets interrupts of earlier runs; interrupts from now on stop the
+    /// next compilation or run.
+    pub(crate) fn clear_interrupt(&self) {
+        self.interrupt.store(false, Ordering::SeqCst);
+    }
+
+    /// Prepares a VM that persists between runs (a session's) for a run.
+    pub(crate) fn prepare_run(&self, vm: &mut Vm) {
+        self.interrupt.store(false, Ordering::SeqCst);
+        // "Always" answers given since (to imports, or by other runs).
+        let always = self.always.lock().unwrap_or_else(|e| e.into_inner());
+        vm.host.always.extend(always.iter().map(|(c, d)| (c.clone(), *d)));
+    }
+
+    /// Records a run's "always" answers and flushes its output.
+    /// A compile budget for one compilation starting now (REPL inputs).
+    pub(crate) fn compile_budget(&self) -> Arc<CompileBudget> {
+        let limits = &self.config.limits;
+        let deadline = limits.max_wall_time.and_then(|t| Instant::now().checked_add(t));
+        Arc::new(CompileBudget::new(limits.max_compile_fuel, deadline, Some(self.interrupt.clone())))
+    }
+
+    pub(crate) fn finish_run(&self, vm: &Vm) {
+        self.remember_always(&vm.host.always);
+        if let Ok(mut s) = self.config.stdout.lock() {
+            let _ = s.flush();
+        }
+    }
+
     /// Type checks a source without running it; returns warnings.
     pub fn check_source(&mut self, name: &str, source: &str) -> Result<Vec<Diagnostic>, Error> {
         let rt = tokio::runtime::Builder::new_current_thread().build().map_err(|e| Error::Io(e.to_string()))?;
@@ -431,6 +532,10 @@ impl Engine {
     }
 
     pub async fn run_source(&mut self, name: &str, source: &str) -> Result<crate::Outcome, Error> {
+        crate::unwind::guard(self.run_source_inner(name, source)).await
+    }
+
+    async fn run_source_inner(&mut self, name: &str, source: &str) -> Result<crate::Outcome, Error> {
         let root = self
             .config
             .module_root
@@ -442,15 +547,23 @@ impl Engine {
     }
 
     pub async fn run_file(&mut self, path: impl AsRef<Path>) -> Result<crate::Outcome, Error> {
-        let (name, source, root) = self.read_main(path.as_ref())?;
-        let compiled = self.compile(&name, &source, root.clone(), Some(path.as_ref())).await?;
+        crate::unwind::guard(self.run_file_inner(path.as_ref())).await
+    }
+
+    async fn run_file_inner(&mut self, path: &Path) -> Result<crate::Outcome, Error> {
+        let (name, source, root) = self.read_main(path)?;
+        let compiled = self.compile(&name, &source, root.clone(), Some(path)).await?;
         let cwd = self.config.cwd.clone().unwrap_or(root);
         self.execute(compiled.program, cwd).await
     }
 
     pub async fn run_tests(&mut self, path: impl AsRef<Path>) -> Result<TestReport, Error> {
-        let (name, source, root) = self.read_main(path.as_ref())?;
-        let compiled = self.compile(&name, &source, root.clone(), Some(path.as_ref())).await?;
+        crate::unwind::guard(self.run_tests_inner(path.as_ref())).await
+    }
+
+    async fn run_tests_inner(&mut self, path: &Path) -> Result<TestReport, Error> {
+        let (name, source, root) = self.read_main(path)?;
+        let compiled = self.compile(&name, &source, root.clone(), Some(path)).await?;
         let cwd = self.config.cwd.clone().unwrap_or(root);
         let prog = compiled.program;
         let mut report = TestReport::default();
@@ -459,9 +572,8 @@ impl Engine {
             let init = vm.run_main(prog.entry).await;
             let result = match init {
                 Ok(RunEnd::Finished(_)) => {
-                    let mut vm2 = vm;
-                    vm2.ready.clear();
-                    match vm2.run_main(proto).await {
+                    vm.ready.clear();
+                    match vm.run_main(proto).await {
                         Ok(RunEnd::Finished(_)) | Ok(RunEnd::Exit(0)) => Ok(()),
                         Ok(RunEnd::Exit(c)) => Err(format!("exited with code {c}")),
                         Err(t) => Err(trap_message(t)),
@@ -470,6 +582,7 @@ impl Engine {
                 Ok(RunEnd::Exit(c)) => Err(format!("module exited with code {c}")),
                 Err(t) => Err(trap_message(t)),
             };
+            self.remember_always(&vm.host.always);
             report.results.push(TestResult { name: tname, passed: result.is_ok(), message: result.err() });
         }
         Ok(report)
@@ -488,7 +601,7 @@ impl Engine {
         Ok((name, source, root))
     }
 
-    fn new_vm(&self, prog: Arc<Program>, cwd: PathBuf, quiet: bool) -> Vm {
+    pub(crate) fn new_vm(&self, prog: Arc<Program>, cwd: PathBuf, quiet: bool) -> Vm {
         let c = &self.config;
         let stdin = match &c.stdin {
             StdinConfig::None => StdinSource::None,
@@ -502,7 +615,7 @@ impl Engine {
             prompter: c.prompter.clone(),
             grants_once: Vec::new(),
             denies_once: Vec::new(),
-            always: HashMap::new(),
+            always: self.always.lock().unwrap_or_else(|e| e.into_inner()).clone(),
             stdout,
             stderr,
             stdin: Arc::new(tokio::sync::Mutex::new(stdin)),
@@ -515,9 +628,14 @@ impl Engine {
             log_level: 1,
             interrupt: self.interrupt.clone(),
             stream_decisions: HashMap::new(),
+            tls: c.tls.clone(),
         };
         let mut vm = Vm::new(prog, self.natives.clone(), host);
         vm.io = IoTable::with_shared(self.shared.clone());
+        if c.gc_stress {
+            vm.heap.stress = true;
+            vm.heap.next_gc = 0;
+        }
         vm
     }
 
@@ -532,12 +650,10 @@ impl Engine {
                 }
             }
         }
-        self.interrupt.store(false, Ordering::SeqCst);
         let mut vm = self.new_vm(prog.clone(), cwd, false);
         let r = vm.run_main(prog.entry).await;
-        if let Ok(mut s) = self.config.stdout.lock() {
-            let _ = s.flush();
-        }
+        self.finish_run(&vm);
+        self.gc_stats = vm.heap.stats;
         match r {
             Ok(RunEnd::Finished(_)) => Ok(crate::Outcome { exit_code: 0 }),
             Ok(RunEnd::Exit(c)) => Ok(crate::Outcome { exit_code: c }),
@@ -551,13 +667,31 @@ impl Engine {
     // ------------------------------------------------------------------
     // Loading and compiling
 
+    /// Records "always" answers given during a run.
+    fn remember_always(&self, answers: &HashMap<Capability, bool>) {
+        if !answers.is_empty() {
+            self.always.lock().unwrap_or_else(|e| e.into_inner()).extend(answers.iter().map(|(c, d)| (c.clone(), *d)));
+        }
+    }
+
+    /// Checks (and if need be, prompts for) importing the script at `path`.
     async fn check_import(&self, path: &Path) -> bool {
         let cap = Capability::Import(path.to_path_buf());
+        if let Some(&d) = self.always.lock().unwrap_or_else(|e| e.into_inner()).get(&cap) {
+            return d;
+        }
         match self.config.policy.check(&cap) {
             Decision::Allow => true,
             Decision::Deny => false,
             Decision::Prompt => match &self.config.prompter {
-                Some(p) => matches!(p.prompt(cap).await, PromptAnswer::AllowOnce | PromptAnswer::AllowAlways),
+                Some(p) => {
+                    let answer = p.prompt(cap.clone()).await;
+                    let allowed = matches!(answer, PromptAnswer::AllowOnce | PromptAnswer::AllowAlways);
+                    if matches!(answer, PromptAnswer::AllowAlways | PromptAnswer::DenyAlways) {
+                        self.always.lock().unwrap_or_else(|e| e.into_inner()).insert(cap, allowed);
+                    }
+                    allowed
+                }
                 None => false,
             },
         }
@@ -570,40 +704,32 @@ impl Engine {
         root: PathBuf,
         main_path: Option<&Path>,
     ) -> Result<Compiled, Error> {
-        let mut sm = SourceMap::default();
+        // A new run: forget interrupts of previous runs. Interrupts from now
+        // on stop compilation or execution.
+        self.interrupt.store(false, Ordering::SeqCst);
+        let started = Instant::now();
+        let mut g = ModuleGraph::default();
         let mut errors: Vec<Diag> = Vec::new();
+        g.source_bytes = main_source.len();
         if main_source.len() > self.config.limits.max_source_bytes {
-            let f = sm.add(main_name, "");
+            let f = g.sm.add(main_name, "");
             errors.push(Diag::error(Span::new(f, 0, 0), "source too large"));
-            return Err(Error::Compile(errors.iter().map(|d| sm.resolve(d)).collect()));
+            return Err(Error::Compile(errors.iter().map(|d| g.sm.resolve(d)).collect()));
         }
+        // The directory of the main file itself (a symlink to it resolved),
+        // like the default module root (`read_main`), so that the main
+        // file's imports resolve as they do next to the file.
         let main_dir = main_path
             .and_then(|p| std::path::absolute(p).ok())
-            .and_then(|p| p.parent().map(normalize_path))
+            .and_then(|p| normalize_path(&p).parent().map(Path::to_path_buf))
             .unwrap_or_else(|| root.clone());
         let root = normalize_path(&root);
 
         // Discover modules depth-first, in dependency order.
-        let mut modules: Vec<LoadedModule> = Vec::new();
-        let mut index: HashMap<String, usize> = HashMap::new();
-        let mut order: Vec<usize> = Vec::new();
-
-        enum State {
-            Visiting,
-            Done,
-        }
-        let mut state: HashMap<String, State> = HashMap::new();
-
         // Built-in modules: prelude and task.
-        let prelude_src = self.registry.sources.get("prelude").map(|(_, s)| s.clone()).unwrap_or_default();
-        let f = sm.add("<prelude>", prelude_src.as_str());
-        modules.push(LoadedModule { name: "prelude".into(), file: f, kind: ModKind::Prelude, imports: vec![], dir: None });
-        index.insert("std:prelude".into(), 0);
-        order.push(0);
-        state.insert("std:prelude".into(), State::Done);
+        g.load_prelude(&self.registry.sources);
 
-        // Iterative DFS stack: (module index, next import position).
-        let main_file = sm.add(main_name, main_source);
+        let main_file = g.sm.add(main_name, main_source);
         let main_key = format!(
             "file:{}",
             main_path
@@ -611,28 +737,76 @@ impl Engine {
                 .unwrap_or_else(|| main_name.to_string())
         );
         let main_mod_name = Path::new(main_name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "main".into());
-        modules.push(LoadedModule {
+        g.modules.push(LoadedModule {
             name: main_mod_name,
             file: main_file,
             kind: ModKind::Script { main: true },
             imports: vec![],
             dir: Some(main_dir),
         });
-        index.insert(main_key.clone(), 1);
+        g.index.insert(main_key.clone(), 1);
 
         // Every module implicitly depends on `task`, so it is loaded first.
-        self.load_std_tree("task", &mut sm, &mut modules, &mut index, &mut order, &mut errors);
-        // DFS stack: (module index, its imports, next import to visit).
-        let mut stack: Vec<ImportFrame> = Vec::new();
-        state.insert(main_key.clone(), State::Visiting);
-        let imports = scan_imports(&sm, main_file);
-        stack.push((1, imports, 0));
-        let mut path_stack: Vec<String> = vec![main_key.clone()];
+        g.load_std_tree(&self.registry.sources, "task", &mut errors);
+        if let Some(stop) = self.discover(&mut g, 1, main_key, &root, &mut errors).await {
+            return Err(stop);
+        }
+        if !errors.is_empty() {
+            return Err(Error::Compile(errors.iter().map(|d| g.sm.resolve(d)).collect()));
+        }
+        let registry = self.registry.clone();
+        let limits = &self.config.limits;
+        let budget = BudgetConfig {
+            fuel: limits.max_compile_fuel,
+            deadline: limits.max_wall_time.and_then(|t| started.checked_add(t)),
+            interrupt: self.interrupt.clone(),
+        };
+
+        std::thread::scope(|s| {
+            std::thread::Builder::new()
+                .stack_size(COMPILE_STACK)
+                .spawn_scoped(s, || compile_modules(&g.sm, &g.modules, &g.index, &g.order, &registry, budget))
+                .map_err(|e| Error::Io(e.to_string()))?
+                .join()
+                .map_err(|_| Error::Io("internal compiler error".into()))?
+        })
+    }
+
+    /// Loads the modules imported by module `start` (whose key is `key`) and,
+    /// depth first, their imports, checking script imports against the
+    /// policy. Appends the new modules to `g.order` in dependency order,
+    /// followed by `start`. Modules already in `g` are not loaded again.
+    ///
+    /// This runs before the compile budget exists, so it is bounded on its
+    /// own: overlong import paths are refused, discovery stops after
+    /// [`MAX_DISCOVERY_ERRORS`] errors, and it returns the error to report
+    /// if the engine is interrupted or the wall-time limit passes.
+    pub(crate) async fn discover(
+        &self,
+        g: &mut ModuleGraph,
+        start: usize,
+        key: String,
+        root: &Path,
+        errors: &mut Vec<Diag>,
+    ) -> Option<Error> {
+        let deadline = self.config.limits.max_wall_time.and_then(|t| Instant::now().checked_add(t));
+        // DFS stack: (module index, its imports, next import to visit), and
+        // the keys of the modules on it (to detect cycles).
+        let mut stack: Vec<ImportFrame> = vec![(start, scan_imports(&g.sm, g.modules[start].file), 0)];
+        let mut path_stack: Vec<String> = vec![key];
         while let Some((mi, imports, pos)) = stack.pop() {
+            if self.interrupt.load(Ordering::Relaxed) {
+                return Some(Error::Interrupted);
+            }
+            if deadline.is_some_and(|d| Instant::now() >= d) {
+                return Some(Error::Limit(LimitKind::WallTime));
+            }
+            if errors.len() >= MAX_DISCOVERY_ERRORS {
+                return None;
+            }
             if pos >= imports.len() {
-                order.push(mi);
-                let key = path_stack.pop().unwrap();
-                state.insert(key, State::Done);
+                g.order.push(mi);
+                path_stack.pop();
                 continue;
             }
             let (item_idx, imp) = imports[pos].clone();
@@ -640,121 +814,149 @@ impl Engine {
             match imp {
                 ImportRef::Name(name, span) => {
                     if self.registry.sources.contains_key(&name) && name != "prelude" {
-                        let key = self.load_std_tree(&name, &mut sm, &mut modules, &mut index, &mut order, &mut errors);
-                        modules[mi].imports.push((item_idx, key));
+                        let key = g.load_std_tree(&self.registry.sources, &name, errors);
+                        g.modules[mi].imports.push((item_idx, key));
                     } else {
                         errors.push(Diag::error(span, format!("unknown module `{name}`")));
                     }
                 }
                 ImportRef::Path(p, span) => {
-                    let dir = modules[mi].dir.clone().unwrap_or_else(|| root.clone());
+                    if p.len() > crate::policy::MAX_PATH_BYTES {
+                        errors.push(Diag::error(span, "cannot import: the path is too long"));
+                        continue;
+                    }
+                    let dir = g.modules[mi].dir.clone().unwrap_or_else(|| root.to_path_buf());
                     let mut target = dir.join(&p);
                     if target.extension().is_none() {
                         target.set_extension("sand");
                     }
                     let target = normalize_path(&target);
-                    if !target.starts_with(&root) {
+                    if !target.starts_with(root) {
                         errors.push(Diag::error(span, format!("cannot import `{p}`: the path is outside the module root")));
                         continue;
                     }
                     let key = format!("file:{}", target.display());
-                    match state.get(&key) {
-                        Some(State::Done) => {
-                            modules[mi].imports.push((item_idx, key));
-                            continue;
-                        }
-                        Some(State::Visiting) => {
-                            let cycle: Vec<String> = path_stack.iter().map(|k| k.trim_start_matches("file:").to_string()).collect();
-                            errors.push(Diag::error(span, format!("import cycle: {} -> {}", cycle.join(" -> "), target.display())));
-                            continue;
-                        }
-                        None => {}
+                    if path_stack.contains(&key) {
+                        let cycle: Vec<String> = path_stack.iter().map(|k| k.trim_start_matches("file:").to_string()).collect();
+                        errors.push(Diag::error(span, format!("import cycle: {} -> {}", cycle.join(" -> "), target.display())));
+                        continue;
+                    }
+                    if g.index.contains_key(&key) {
+                        g.modules[mi].imports.push((item_idx, key));
+                        continue;
                     }
                     if !self.check_import(&target).await {
                         errors.push(Diag::error(span, format!("cannot import `{p}`: permission denied")));
-                        continue;
+                        // Compilation has failed: do not prompt for further imports.
+                        break;
                     }
-                    let text = match std::fs::read_to_string(&target) {
+                    // Read the checked file without following symlinks swapped in since.
+                    let text = match crate::stdlib::read_source(&target, self.config.limits.max_source_bytes) {
                         Ok(t) => t,
                         Err(e) => {
                             errors.push(Diag::error(span, format!("cannot load module `{p}`: {e}")));
                             continue;
                         }
                     };
-                    if text.len() > self.config.limits.max_source_bytes {
-                        errors.push(Diag::error(span, format!("cannot load module `{p}`: source too large")));
+                    g.source_bytes = g.source_bytes.saturating_add(text.len());
+                    if g.source_bytes > self.config.limits.max_source_bytes {
+                        errors.push(Diag::error(
+                            span,
+                            format!("cannot load module `{p}`: source too large (the program's sources exceed the limit in total)"),
+                        ));
                         continue;
                     }
                     let display =
-                        target.strip_prefix(&root).map(|r| r.display().to_string()).unwrap_or_else(|_| target.display().to_string());
-                    let f = sm.add(display, text.as_str());
+                        target.strip_prefix(root).map(|r| r.display().to_string()).unwrap_or_else(|_| target.display().to_string());
+                    let f = g.sm.add(display, text.as_str());
                     let name = target.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-                    let idx = modules.len();
-                    modules.push(LoadedModule {
+                    let idx = g.modules.len();
+                    g.modules.push(LoadedModule {
                         name,
                         file: f,
                         kind: ModKind::Script { main: false },
                         imports: vec![],
                         dir: target.parent().map(|d| d.to_path_buf()),
                     });
-                    index.insert(key.clone(), idx);
-                    modules[mi].imports.push((item_idx, key.clone()));
-                    state.insert(key.clone(), State::Visiting);
+                    g.index.insert(key.clone(), idx);
+                    g.modules[mi].imports.push((item_idx, key.clone()));
                     path_stack.push(key);
-                    let imports = scan_imports(&sm, f);
+                    let imports = scan_imports(&g.sm, f);
                     stack.push((idx, imports, 0));
                 }
             }
         }
-        if !errors.is_empty() {
-            return Err(Error::Compile(errors.iter().map(|d| sm.resolve(d)).collect()));
-        }
-        let registry = self.registry.clone();
+        None
+    }
+}
 
-        std::thread::scope(|s| {
-            std::thread::Builder::new()
-                .stack_size(COMPILE_STACK)
-                .spawn_scoped(s, || compile_modules(&sm, &modules, &index, &order, &registry))
-                .map_err(|e| Error::Io(e.to_string()))?
-                .join()
-                .map_err(|_| Error::Io("internal compiler error".into()))?
-        })
+/// Module discovery stops after this many errors (they are all reported).
+const MAX_DISCOVERY_ERRORS: usize = 100;
+
+/// The modules of a compilation (or of a REPL session, which adds to them).
+#[derive(Default)]
+pub(crate) struct ModuleGraph {
+    pub sm: SourceMap,
+    pub modules: Vec<LoadedModule>,
+    /// Module key (`std:name` or `file:path`) -> index in `modules`.
+    pub index: HashMap<String, usize>,
+    /// Module indices in dependency (check) order.
+    pub order: Vec<usize>,
+    /// Bytes of script source loaded (main file and imports), limited by
+    /// `max_source_bytes` in total.
+    pub source_bytes: usize,
+}
+
+/// The sizes of a [`ModuleGraph`], to undo a failed addition.
+#[derive(Clone, Copy)]
+pub(crate) struct GraphMark {
+    pub(crate) files: usize,
+    pub(crate) modules: usize,
+    pub(crate) order: usize,
+    pub(crate) source_bytes: usize,
+}
+
+impl ModuleGraph {
+    /// Adds the prelude as module 0.
+    pub(crate) fn load_prelude(&mut self, sources: &BTreeMap<String, (ModKind, String)>) {
+        let prelude_src = sources.get("prelude").map(|(_, s)| s.clone()).unwrap_or_default();
+        let f = self.sm.add("<prelude>", prelude_src.as_str());
+        self.modules.push(LoadedModule { name: "prelude".into(), file: f, kind: ModKind::Prelude, imports: vec![], dir: None });
+        self.index.insert("std:prelude".into(), 0);
+        self.order.push(0);
+    }
+
+    pub(crate) fn mark(&self) -> GraphMark {
+        GraphMark { files: self.sm.files.len(), modules: self.modules.len(), order: self.order.len(), source_bytes: self.source_bytes }
+    }
+
+    pub(crate) fn rollback(&mut self, m: &GraphMark) {
+        self.sm.files.truncate(m.files);
+        self.modules.truncate(m.modules);
+        self.order.truncate(m.order);
+        self.source_bytes = m.source_bytes;
+        self.index.retain(|_, i| *i < m.modules);
     }
 
     /// Loads a standard (or host) module and its dependencies; returns its key.
-    fn load_std_tree(
-        &self,
-        name: &str,
-        sm: &mut SourceMap,
-        modules: &mut Vec<LoadedModule>,
-        index: &mut HashMap<String, usize>,
-        order: &mut Vec<usize>,
-        errors: &mut Vec<Diag>,
-    ) -> String {
+    pub(crate) fn load_std_tree(&mut self, sources: &BTreeMap<String, (ModKind, String)>, name: &str, errors: &mut Vec<Diag>) -> String {
         let key = format!("std:{name}");
-        if index.contains_key(&key) {
+        if self.index.contains_key(&key) {
             return key;
         }
-        if name == "help" {
-            // `help.module` can describe any module, so all of them are compiled.
-            let others: Vec<String> = self.registry.sources.keys().filter(|k| !matches!(k.as_str(), "prelude" | "help")).cloned().collect();
-            for other in others {
-                self.load_std_tree(&other, sm, modules, index, order, errors);
-            }
-        }
-        let Some((kind, src)) = self.registry.sources.get(name).cloned() else {
+        let Some((kind, src)) = sources.get(name) else {
             return key;
         };
-        let f = sm.add(format!("<{name}>"), src.as_str());
-        let idx = modules.len();
-        modules.push(LoadedModule { name: name.to_string(), file: f, kind, imports: vec![], dir: None });
-        index.insert(key.clone(), idx);
-        for (item, imp) in scan_imports(sm, f) {
+        let f = self.sm.add(format!("<{name}>"), src.as_str());
+        let idx = self.modules.len();
+        self.modules.push(LoadedModule { name: name.to_string(), file: f, kind: *kind, imports: vec![], dir: None });
+        self.index.insert(key.clone(), idx);
+        for (item, imp) in scan_imports(&self.sm, f) {
             match imp {
                 ImportRef::Name(dep, span) => {
-                    if self.registry.sources.contains_key(&dep) {
-                        let k = self.load_std_tree(&dep, sm, modules, index, order, errors);
-                        modules[idx].imports.push((item, k));
+                    if sources.contains_key(&dep) {
+                        let k = self.load_std_tree(sources, &dep, errors);
+                        self.modules[idx].imports.push((item, k));
                     } else {
                         errors.push(Diag::error(span, format!("unknown module `{dep}`")));
                     }
@@ -762,8 +964,77 @@ impl Engine {
                 ImportRef::Path(_, span) => errors.push(Diag::error(span, "native modules cannot import script files")),
             }
         }
-        order.push(idx);
+        self.order.push(idx);
         key
+    }
+}
+
+/// Summaries of standard and host modules for `help.module`, computed on the
+/// first request and cached for the lifetime of the engine, so that importing
+/// `help` costs nothing extra.
+#[derive(Default)]
+pub struct ModuleHelp {
+    sources: BTreeMap<String, (ModKind, String)>,
+    cache: Mutex<HelpCache>,
+}
+
+#[derive(Default)]
+struct HelpCache {
+    /// Whether summarising all modules at once has been attempted.
+    all_tried: bool,
+    summaries: HashMap<String, Option<String>>,
+}
+
+impl fmt::Debug for ModuleHelp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ModuleHelp").finish_non_exhaustive()
+    }
+}
+
+impl ModuleHelp {
+    /// The summary of module `name`, or `None` if there is no such module.
+    pub(crate) fn summary(&self, name: &str) -> Option<String> {
+        if name == "prelude" || !self.sources.contains_key(name) {
+            return None;
+        }
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        if !cache.all_tried {
+            // One checker pass over every module costs about as much as one over
+            // a single module (checking the prelude dominates).
+            cache.all_tried = true;
+            let names: Vec<&str> = self.sources.keys().map(String::as_str).collect();
+            for (m, s) in self.summarise(&names).unwrap_or_default() {
+                cache.summaries.insert(m, Some(s));
+            }
+        }
+        if let Some(s) = cache.summaries.get(name) {
+            return s.clone();
+        }
+        // Checking everything failed (e.g. a broken host module): just this one.
+        let s = self.summarise(&[name]).and_then(|all| all.into_iter().find(|(m, _)| m == name).map(|(_, s)| s));
+        cache.summaries.insert(name.to_string(), s.clone());
+        s
+    }
+
+    /// Type checks the named modules (with their dependencies) and returns the
+    /// summaries of all standard and host modules involved.
+    fn summarise(&self, names: &[&str]) -> Option<Vec<(String, String)>> {
+        let check = || {
+            let mut g = ModuleGraph::default();
+            let mut errors = Vec::new();
+            for m in ["prelude", "task"].iter().chain(names) {
+                g.load_std_tree(&self.sources, m, &mut errors);
+            }
+            if !errors.is_empty() {
+                return None;
+            }
+            let parsed = parse_modules(&g.sm, &g.modules, &g.index, &g.order, &CompileBudget::default(), 0).ok()?;
+            // Native implementations are irrelevant to summaries.
+            let lookup = |_: &str| Some(0);
+            let checked = Checker::new(&g.sm, &lookup).check_program(parsed).ok()?;
+            Some(checked.modules.into_iter().filter(|m| !matches!(m.kind, ModKind::Script { .. })).map(|m| (m.name, m.summary)).collect())
+        };
+        std::thread::scope(|s| std::thread::Builder::new().stack_size(COMPILE_STACK).spawn_scoped(s, check).ok()?.join().ok()?)
     }
 }
 
@@ -823,20 +1094,56 @@ fn scan_imports(sm: &SourceMap, file: u32) -> Vec<(usize, ImportRef)> {
     out.into_iter().enumerate().collect()
 }
 
-fn compile_modules(
+/// Limits for compilation (see `check::budget`).
+struct BudgetConfig {
+    fuel: Option<u64>,
+    deadline: Option<Instant>,
+    interrupt: Arc<AtomicBool>,
+}
+
+/// The error for a compilation stopped by its budget.
+pub(crate) fn budget_error(stop: Stop, sm: &SourceMap, main_file: u32) -> Error {
+    match stop {
+        Stop::Fuel => Error::Compile(vec![sm.resolve(&Diag::error(
+            Span::new(main_file, 0, 0),
+            "program too complex to compile: exceeded the compile budget (max_compile_fuel)",
+        ))]),
+        Stop::Time => Error::Limit(crate::LimitKind::WallTime),
+        Stop::Interrupted => Error::Interrupted,
+    }
+}
+
+/// Parses modules (in check order) and links their imports.
+fn parse_modules(
     sm: &SourceMap,
     modules: &[LoadedModule],
     index: &HashMap<String, usize>,
     order: &[usize],
-    registry: &Registry,
-) -> Result<Compiled, Error> {
-    let mut parse_errors = Vec::new();
-    let mut parsed: Vec<Option<ParsedModule>> = (0..modules.len()).map(|_| None).collect();
+    budget: &CompileBudget,
+    main_file: u32,
+) -> Result<Vec<ParsedModule>, Error> {
     // Map module index -> position in check order.
     let mut position = vec![0u32; modules.len()];
     for (pos, &mi) in order.iter().enumerate() {
         position[mi] = pos as u32;
     }
+    if !budget.check() {
+        return Err(budget_error(budget.stopped().unwrap_or(Stop::Time), sm, main_file));
+    }
+    parse_in_order(sm, modules, index, order, |mi| Some(position[mi]))
+}
+
+/// Parses the modules `order` (indices into `modules`) and links their
+/// imports to the ids the checker knows the imported modules by (`mod_id`).
+pub(crate) fn parse_in_order(
+    sm: &SourceMap,
+    modules: &[LoadedModule],
+    index: &HashMap<String, usize>,
+    order: &[usize],
+    mod_id: impl Fn(usize) -> Option<crate::types::ModId>,
+) -> Result<Vec<ParsedModule>, Error> {
+    let mut parse_errors = Vec::new();
+    let mut parsed = Vec::new();
     for &mi in order {
         let m = &modules[mi];
         let res = crate::syntax::parse_module(sm.text(m.file), m.file);
@@ -848,22 +1155,41 @@ fn compile_modules(
             if let crate::syntax::ast::ItemKind::Import(_) = item.kind {
                 if let Some((_, key)) = m.imports.iter().find(|(scan_k, _)| *scan_k == k)
                     && let Some(&target) = index.get(key)
+                    && let Some(id) = mod_id(target)
                 {
-                    imports.insert(item_idx, position[target]);
+                    imports.insert(item_idx, id);
                 }
                 k += 1;
             }
         }
-        parsed[mi] = Some(ParsedModule { name: m.name.clone(), file: m.file, ast: res.module, kind: m.kind, imports });
+        parsed.push(ParsedModule { name: m.name.clone(), file: m.file, ast: res.module, kind: m.kind, imports });
     }
     if !parse_errors.is_empty() {
         return Err(Error::Compile(parse_errors.iter().map(|d| sm.resolve(d)).collect()));
     }
-    let ordered: Vec<ParsedModule> = order.iter().map(|&mi| parsed[mi].take().unwrap()).collect();
-    let lookup = |name: &str| registry.by_name.get(name).copied();
-    let checker = Checker::new(sm, &lookup);
-    let checked = checker.check_program(ordered).map_err(|ds| Error::Compile(ds.iter().map(|d| sm.resolve(d)).collect()))?;
+    Ok(parsed)
+}
+
+fn compile_modules(
+    sm: &SourceMap,
+    modules: &[LoadedModule],
+    index: &HashMap<String, usize>,
+    order: &[usize],
+    registry: &Registry,
+    budget: BudgetConfig,
+) -> Result<Compiled, Error> {
+    let budget = Arc::new(CompileBudget::new(budget.fuel, budget.deadline, Some(budget.interrupt)));
     let main_file = modules.iter().find(|m| m.kind == (ModKind::Script { main: true })).map(|m| m.file).unwrap_or(0);
+    let ordered = parse_modules(sm, modules, index, order, &budget, main_file)?;
+    let lookup = |name: &str| registry.by_name.get(name).copied();
+    let mut checker = Checker::new(sm, &lookup);
+    checker.budget = budget.clone();
+    let checked = checker.check_program(ordered);
+    if let Some(stop) = budget.stopped() {
+        // Diagnostics after the budget ran out are not meaningful.
+        return Err(budget_error(stop, sm, main_file));
+    }
+    let checked = checked.map_err(|ds| Error::Compile(ds.iter().map(|d| sm.resolve(d)).collect()))?;
     let mut facts = ResolvedFacts::default();
     {
         let f = sm.file(main_file);
@@ -884,11 +1210,33 @@ fn compile_modules(
             facts.imports.push((l, c, name.clone()));
         }
         facts.used_names = checked.lint.used_names.iter().filter(|(m, _)| *m == checked.main_module).map(|(_, n)| n.clone()).collect();
+        for id in crate::lint::unused_functions(&checked) {
+            let fi = &checked.fns[id as usize];
+            if fi.span.file == main_file {
+                let (l, c) = f.line_col(fi.span.lo);
+                let name = match fi.owner {
+                    Some(crate::check::Ctor::Def(d)) => format!("{}.{}", checked.types[d as usize].name, fi.name),
+                    _ => fi.name.clone(),
+                };
+                facts.unused_fns.push((l, c, name, fi.owner.is_some()));
+            }
+        }
     }
-    // Help entries for natives.
+    let (native_help, native_argc) = native_info(&checked, registry);
+    let mut program =
+        crate::compile::compile(crate::compile::CompileInput { checked: &checked, sm, native_lookup: &lookup, native_help, native_argc })
+            .map_err(|ds| Error::Compile(ds.iter().map(|d| sm.resolve(d)).collect()))?;
+    program.available_modules = registry.sources.keys().filter(|k| k.as_str() != "prelude").cloned().collect();
+    program.help_index = Some(registry.help.clone());
+    Ok(Compiled { program: Arc::new(program), warnings: vec![], facts: Some(facts) })
+}
+
+/// Help entries and argument counts (by native id) of the natives declared
+/// by the checked modules.
+pub(crate) fn native_info(checked: &crate::check::CheckedProgram, registry: &Registry) -> (Vec<HelpEntry>, Vec<u16>) {
     let mut native_help: Vec<HelpEntry> = (0..registry.entries.len()).map(|_| HelpEntry { doc: None, signature: String::new() }).collect();
     let mut native_argc = vec![0u16; registry.entries.len()];
-    for (i, f) in checked.fns.iter().enumerate() {
+    for f in &checked.fns {
         if let crate::check::FnKind::Native(n) = f.kind
             && (n as usize) < native_help.len()
         {
@@ -898,12 +1246,7 @@ fn compile_modules(
             native_help[n as usize] = HelpEntry { doc: f.doc.clone(), signature: printer.signature(&f.name, &params, &f.ret) };
             let reflect = f.generics.iter().filter(|g| checked.params[**g as usize].reflect).count();
             native_argc[n as usize] = (f.params.len() + reflect) as u16;
-            let _ = i;
         }
     }
-    let mut program =
-        crate::compile::compile(crate::compile::CompileInput { checked: &checked, sm, native_lookup: &lookup, native_help, native_argc })
-            .map_err(|ds| Error::Compile(ds.iter().map(|d| sm.resolve(d)).collect()))?;
-    program.available_modules = registry.sources.keys().filter(|k| k.as_str() != "prelude").cloned().collect();
-    Ok(Compiled { program: Arc::new(program), warnings: vec![], facts: Some(facts) })
+    (native_help, native_argc)
 }

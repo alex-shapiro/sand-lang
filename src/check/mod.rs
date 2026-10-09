@@ -1,16 +1,21 @@
 //! Name resolution and type checking: AST to typed HIR.
 
+pub mod budget;
 mod expr;
 mod pat;
+mod traits;
 mod unify;
 
 use crate::diag::{Diag, FileId, SourceMap, Span};
 use crate::hir::*;
 use crate::syntax::ast::{self, ItemKind, TypeExpr, TypeExprKind};
 use crate::types::*;
+use budget::{CompileBudget, MAX_TYPE_SIZE};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 pub use pat::Witness;
+pub use traits::{ImplDef, TraitDef, TraitMethod};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModKind {
@@ -37,6 +42,7 @@ pub enum Def {
     Module(ModId),
     /// An enum variant usable unqualified (`Some`, `None`, `Ok`, `Err`).
     Variant(TypeDefId, u32),
+    Trait(TraitId),
 }
 
 #[derive(Clone, Debug)]
@@ -118,6 +124,8 @@ pub enum FnKind {
     Test(String),
     /// Computes the default value of a parameter or field.
     DefaultHelper,
+    /// The signature of method `slot` of a trait; calls dispatch through a dictionary.
+    TraitMethod(TraitId, u32),
 }
 
 #[derive(Clone, Debug)]
@@ -138,6 +146,15 @@ pub struct FnInfo {
     pub self_ty: Option<Type>,
     /// AST for checking the body (script functions and helpers).
     pub decl: Option<FnDeclRef>,
+    /// Hidden dictionary parameters, passed before the declared parameters:
+    /// evidence that each type implements each trait. For trait methods
+    /// (signatures, default methods and impl methods) the first is the
+    /// dictionary of the implementing type.
+    pub dicts: Vec<(Type, TraitRef)>,
+    /// The impl this method belongs to.
+    pub impl_of: Option<ImplId>,
+    /// The trait whose signature or default method this is.
+    pub trait_of: Option<TraitId>,
 }
 
 #[derive(Clone, Debug)]
@@ -159,6 +176,7 @@ pub struct GlobalInfo {
     pub span: Span,
 }
 
+#[derive(Clone)]
 pub struct ModInfo {
     pub name: String,
     pub file: FileId,
@@ -209,6 +227,8 @@ pub struct CheckedProgram {
     pub tests: Vec<(String, FnId)>,
     pub lint: LintFacts,
     pub main_module: ModId,
+    pub traits: Vec<TraitDef>,
+    pub impls: Vec<ImplDef>,
 }
 
 pub struct ModSummary {
@@ -217,8 +237,9 @@ pub struct ModSummary {
     pub summary: String,
 }
 
-pub type NativeLookup<'a> = &'a dyn Fn(&str) -> Option<u32>;
+pub type NativeLookup<'a> = &'a (dyn Fn(&str) -> Option<u32> + Sync);
 
+#[derive(Clone)]
 pub(crate) struct LocalData {
     pub ty: Type,
     pub scheme: Vec<ParamId>,
@@ -228,15 +249,25 @@ pub(crate) struct LocalData {
     pub decl_span: Span,
 }
 
+#[derive(Clone)]
 pub(crate) struct LoopCtx {
+    /// The type of `break` values (`loop` only).
     pub break_ty: Option<Type>,
+    pub label: Option<String>,
+    /// The loop of a comprehension clause, which `break` and `continue` skip
+    /// (it still counts for their depth).
+    pub hidden: bool,
 }
 
+#[derive(Clone)]
 pub(crate) struct FnCtx {
     pub ret: Type,
     pub kind: CtxKind,
     pub loops: Vec<LoopCtx>,
     pub lambda: u32,
+    /// Inside a deferred expression: the number of loops around it, which
+    /// `break` and `continue` may not target (nor may `return` or `?` be used).
+    pub in_defer: Option<usize>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -246,7 +277,7 @@ pub(crate) enum CtxKind {
     TopLevel { main: bool },
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct FnState {
     pub locals: Vec<LocalInfo>,
     pub data: Vec<LocalData>,
@@ -260,8 +291,13 @@ pub(crate) struct FnState {
     pub top_level: bool,
     pub generics: Vec<(String, ParamId)>,
     pub self_ty: Option<Type>,
+    /// Trait evidence available in the function: (type, trait, dictionary expression).
+    pub evidence: Vec<(Type, TraitRef, HExpr)>,
+    /// Whether the body contains [`HKind::Evidence`] placeholders.
+    pub holes: bool,
 }
 
+#[derive(Clone)]
 pub struct Checker<'a> {
     pub sm: &'a SourceMap,
     pub natives: NativeLookup<'a>,
@@ -291,6 +327,29 @@ pub struct Checker<'a> {
     pub(crate) lint_func: u32,
     /// Names referenced from functions of the module being checked.
     pub(crate) fn_names: HashSet<String>,
+    pub traits: Vec<TraitDef>,
+    pub impls: Vec<ImplDef>,
+    /// Impls by (trait, type constructor, tuple arity).
+    pub(crate) impls_by: HashMap<(TraitId, Ctor, u32), Vec<ImplId>>,
+    /// Impls by (type constructor, tuple arity).
+    pub(crate) impls_by_ctor: HashMap<(Ctor, u32), Vec<ImplId>>,
+    /// Records variable bindings made by `unify` so they can be undone.
+    pub(crate) unify_log: Option<Vec<VarId>>,
+    /// Bounds the work of checking (see `budget`).
+    pub budget: Arc<CompileBudget>,
+    /// The module of a REPL session, whose inputs are checked one at a time
+    /// ([`Checker::check_cell`]).
+    pub(crate) session: Option<ModId>,
+    /// Whether the final expression statement of the session input being
+    /// checked is its value, and then (after checking) the value's type.
+    pub(crate) want_cell_value: bool,
+    pub(crate) cell_value: Option<Type>,
+    /// The prelude's private trait `Num` (static `zero` and `one`): the
+    /// evidence that a type satisfies the built-in bound `Num`.
+    pub(crate) num_trait: Option<TraitId>,
+    /// The prelude's `Iterator` trait and `Iter` struct, which `for` loops use.
+    pub(crate) iter_trait: Option<TraitId>,
+    pub(crate) iter_struct: Option<TypeDefId>,
 }
 
 const MAX_ERRORS: usize = 50;
@@ -325,12 +384,65 @@ impl<'a> Checker<'a> {
             loop_breaks: Vec::new(),
             lint_func: 0,
             fn_names: HashSet::new(),
+            traits: Vec::new(),
+            impls: Vec::new(),
+            impls_by: HashMap::new(),
+            impls_by_ctor: HashMap::new(),
+            unify_log: None,
+            session: None,
+            want_cell_value: false,
+            cell_value: None,
+            budget: Arc::new(CompileBudget::default()),
+            num_trait: None,
+            iter_trait: None,
+            iter_struct: None,
+        }
+    }
+
+    /// Whether `t` has more than `MAX_TYPE_SIZE` nodes once inference
+    /// variables are resolved. Costs at most `MAX_TYPE_SIZE` steps (charged
+    /// to the budget), even for types with exponentially large expansions.
+    pub(crate) fn type_too_large(&self, t: &Type) -> bool {
+        fn walk(c: &Checker, t: &Type, n: &mut usize) -> bool {
+            *n += 1;
+            if *n > MAX_TYPE_SIZE {
+                return true;
+            }
+            match t {
+                Type::Var(v) => match &c.subst[*v as usize] {
+                    Some(b) => {
+                        *n -= 1;
+                        walk(c, b, n)
+                    }
+                    None => false,
+                },
+                Type::List(a) | Type::Set(a) => walk(c, a, n),
+                Type::Map(a, b) => walk(c, a, n) || walk(c, b, n),
+                Type::Tuple(ts) | Type::Named(_, ts) => ts.iter().any(|x| walk(c, x, n)),
+                Type::Fn(ps, r) => ps.iter().any(|x| walk(c, x, n)) || walk(c, r, n),
+                _ => false,
+            }
+        }
+        let mut n = 0;
+        let large = walk(self, t, &mut n);
+        self.budget.charge(n as u64);
+        large
+    }
+
+    /// Replaces a type that is too large with `Type::Error`, reporting it.
+    pub(crate) fn limit_type_size(&mut self, t: &mut Type, span: Span) {
+        if !matches!(t, Type::Error) && self.type_too_large(t) {
+            self.error(span, format!("type too large: types may have at most {MAX_TYPE_SIZE} components"));
+            *t = Type::Error;
         }
     }
 
     pub fn error(&mut self, span: Span, msg: impl Into<String>) {
-        if self.diags.len() < MAX_ERRORS {
-            self.diags.push(Diag::error(span, msg));
+        let d = Diag::error(span, msg);
+        // The same obligation can be reported through several paths.
+        let dup = self.diags.iter().any(|x| x.span == d.span && x.message == d.message);
+        if self.diags.len() < MAX_ERRORS && !dup {
+            self.diags.push(d);
         }
     }
 
@@ -344,7 +456,7 @@ impl<'a> Checker<'a> {
     }
 
     pub fn new_param(&mut self, name: &str, bounds: Vec<Bound>, reflect: bool) -> ParamId {
-        self.params.push(ParamInfo { name: name.to_string(), bounds, reflect });
+        self.params.push(ParamInfo { name: name.to_string(), bounds, traits: Vec::new(), reflect });
         (self.params.len() - 1) as ParamId
     }
 
@@ -362,8 +474,25 @@ impl<'a> Checker<'a> {
     // Program
 
     pub fn check_program(mut self, modules: Vec<ParsedModule>) -> Result<CheckedProgram, Vec<Diag>> {
-        let modules: Vec<ParsedModule> = modules;
+        self.add_modules(modules);
+        let errors = self.errors();
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+        self.lint.main_imports = self.mods[self.main_module as usize].import_spans.clone();
+        Ok(self.take_checked(true))
+    }
+
+    fn errors(&self) -> Vec<Diag> {
+        self.diags.iter().filter(|d| d.severity == crate::diag::Severity::Error).cloned().collect()
+    }
+
+    /// Checks `modules`, in dependency order, after the modules checked so
+    /// far: a module's [`ModId`] is its position in the combined list.
+    fn add_modules(&mut self, modules: Vec<ParsedModule>) {
+        let base = self.mods.len();
         for (i, m) in modules.iter().enumerate() {
+            let i = base + i;
             self.mods.push(ModInfo {
                 name: m.name.clone(),
                 file: m.file,
@@ -384,33 +513,223 @@ impl<'a> Checker<'a> {
             }
         }
         for (i, m) in modules.iter().enumerate() {
-            self.cur_mod = i as ModId;
+            if !self.budget.check() {
+                break;
+            }
+            let i = (base + i) as ModId;
+            self.cur_mod = i;
             self.check_module(m);
-            if i as ModId == self.prelude.unwrap_or(u32::MAX) {
+            if i == self.prelude.unwrap_or(u32::MAX) {
                 self.find_well_known();
             }
         }
-        let errors: Vec<Diag> = self.diags.iter().filter(|d| d.severity == crate::diag::Severity::Error).cloned().collect();
-        if !errors.is_empty() {
-            return Err(errors);
-        }
+    }
+
+    /// Moves the checked program out of the checker (see [`Checker::restore_checked`]).
+    pub(crate) fn take_checked(&mut self, summaries: bool) -> CheckedProgram {
         let module_inits = self.mods.iter().filter_map(|m| m.init).collect();
-        self.lint.main_imports = self.mods[self.main_module as usize].import_spans.clone();
-        let summaries = self.module_summaries();
-        Ok(CheckedProgram {
-            fns: self.fns,
-            bodies: self.bodies,
-            types: self.types,
-            params: self.params,
+        let modules = if summaries { self.module_summaries() } else { Vec::new() };
+        CheckedProgram {
+            fns: std::mem::take(&mut self.fns),
+            bodies: std::mem::take(&mut self.bodies),
+            types: std::mem::take(&mut self.types),
+            params: std::mem::take(&mut self.params),
             wk: self.wk,
-            variants: self.variants,
-            globals: self.globals,
+            variants: std::mem::take(&mut self.variants),
+            globals: std::mem::take(&mut self.globals),
             module_inits,
-            modules: summaries,
-            tests: self.tests,
-            lint: self.lint,
+            modules,
+            tests: std::mem::take(&mut self.tests),
+            lint: std::mem::take(&mut self.lint),
             main_module: self.main_module,
-        })
+            traits: std::mem::take(&mut self.traits),
+            impls: std::mem::take(&mut self.impls),
+        }
+    }
+
+    /// Puts back a program taken with [`Checker::take_checked`], so that
+    /// checking can resume.
+    pub(crate) fn restore_checked(&mut self, cp: CheckedProgram) {
+        self.fns = cp.fns;
+        self.bodies = cp.bodies;
+        self.types = cp.types;
+        self.params = cp.params;
+        self.variants = cp.variants;
+        self.globals = cp.globals;
+        self.tests = cp.tests;
+        self.lint = cp.lint;
+        self.traits = cp.traits;
+        self.impls = cp.impls;
+    }
+
+    // ------------------------------------------------------------------
+    // REPL sessions
+    //
+    // A session is one script module whose items arrive one input ("cell") at
+    // a time: `check_cell` checks each input as more items of that module,
+    // after the modules it imports for the first time. Between inputs the
+    // checker is stored detached from its source map (`detach`, `attach`);
+    // each input is checked on a clone, so a rejected input leaves no trace.
+
+    /// Starts a session: checks `modules` (the prelude, `task` and an empty
+    /// module, `session`, which will receive the inputs).
+    pub(crate) fn begin_session(&mut self, modules: Vec<ParsedModule>, session: ModId) -> Result<(), Vec<Diag>> {
+        self.session = Some(session);
+        self.add_modules(modules);
+        let errors = self.errors();
+        if errors.is_empty() { Ok(()) } else { Err(errors) }
+    }
+
+    /// Checks one session input, `cell`, after `modules` (the modules it
+    /// imports for the first time, in dependency order, numbered from
+    /// `self.mods.len()`). Its names are added to the session module, where
+    /// they shadow those of earlier inputs. With `want_value`, a final
+    /// expression statement is the value of the input; its type is then left
+    /// in [`Checker::cell_value`].
+    pub(crate) fn check_cell(&mut self, modules: Vec<ParsedModule>, cell: &ParsedModule, want_value: bool) -> Result<(), Vec<Diag>> {
+        let session = self.session.expect("not a session");
+        self.diags.clear();
+        // Lint facts are not needed (and would only accumulate).
+        self.lint = LintFacts::default();
+        self.global_facts.clear();
+        self.add_modules(modules);
+        self.cur_mod = session;
+        let m = &mut self.mods[session as usize];
+        m.file = cell.file;
+        m.import_spans.clear();
+        self.want_cell_value = want_value;
+        self.cell_value = None;
+        self.check_module(cell);
+        self.want_cell_value = false;
+        let errors = self.errors();
+        if errors.is_empty() { Ok(()) } else { Err(errors) }
+    }
+
+    /// Whether the module being checked is a session module.
+    pub(crate) fn in_session(&self) -> bool {
+        self.session == Some(self.cur_mod)
+    }
+
+    /// Whether `span` is in an earlier input of the session whose input is
+    /// being checked; the definitions of earlier inputs may be shadowed.
+    fn defined_by_earlier_input(&self, span: Span) -> bool {
+        self.in_session() && span.file != self.mods[self.cur_mod as usize].file
+    }
+
+    /// Drops the syntax and bodies of the functions checked so far, which a
+    /// session no longer needs once they are compiled.
+    pub(crate) fn release_bodies(&mut self) {
+        for (f, b) in self.fns.iter_mut().zip(&mut self.bodies) {
+            if b.take().is_some() {
+                f.decl = None;
+            }
+        }
+    }
+
+    /// The checker without its borrows, to be kept between the inputs of a
+    /// session and resumed with [`Checker::attach`].
+    pub(crate) fn detach(self) -> Checker<'static> {
+        static NO_SOURCES: SourceMap = SourceMap { files: Vec::new() };
+        fn no_natives(_: &str) -> Option<u32> {
+            None
+        }
+        let Checker {
+            sm: _,
+            natives: _,
+            mods,
+            types,
+            aliases,
+            params,
+            fns,
+            bodies,
+            globals,
+            methods,
+            variants,
+            subst,
+            var_bounds,
+            diags,
+            wk,
+            prelude,
+            task_mod,
+            cur_mod,
+            fs,
+            lint,
+            tests,
+            main_module,
+            fs_unused,
+            global_facts,
+            loop_breaks,
+            lint_func,
+            fn_names,
+            traits,
+            impls,
+            impls_by,
+            impls_by_ctor,
+            unify_log,
+            session,
+            want_cell_value,
+            cell_value,
+            budget: _,
+            num_trait,
+            iter_trait,
+            iter_struct,
+        } = self;
+        Checker {
+            sm: &NO_SOURCES,
+            natives: &no_natives,
+            mods,
+            types,
+            aliases,
+            params,
+            fns,
+            bodies,
+            globals,
+            methods,
+            variants,
+            subst,
+            var_bounds,
+            diags,
+            wk,
+            prelude,
+            task_mod,
+            cur_mod,
+            fs,
+            lint,
+            tests,
+            main_module,
+            fs_unused,
+            global_facts,
+            loop_breaks,
+            lint_func,
+            fn_names,
+            traits,
+            impls,
+            impls_by,
+            impls_by_ctor,
+            unify_log,
+            session,
+            want_cell_value,
+            cell_value,
+            // Each input gets its own budget (see `attach`).
+            budget: Arc::new(CompileBudget::default()),
+            num_trait,
+            iter_trait,
+            iter_struct,
+        }
+    }
+
+    /// Resumes a detached checker with the session's sources and natives.
+    pub(crate) fn attach(
+        detached: Checker<'static>,
+        sm: &'a SourceMap,
+        natives: NativeLookup<'a>,
+        budget: Arc<CompileBudget>,
+    ) -> Checker<'a> {
+        let mut c: Checker<'a> = detached;
+        c.sm = sm;
+        c.natives = natives;
+        c.budget = budget;
+        c
     }
 
     fn find_well_known(&mut self) {
@@ -470,6 +789,16 @@ impl<'a> Checker<'a> {
                         let gi = &self.globals[*g as usize];
                         lines.push(format!("let {name}: {}", self.show(&gi.ty)));
                     }
+                    Def::Trait(t) if self.traits[*t as usize].module == mi as ModId => {
+                        let td = &self.traits[*t as usize];
+                        lines.push(format!("trait {name}"));
+                        if let Some(d) = &td.doc {
+                            lines.push(format!("    {}", d.lines().next().unwrap_or("")));
+                        }
+                        for m in &td.methods {
+                            lines.push(format!("    {}", self.fn_signature(m.sig)));
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -489,9 +818,10 @@ impl<'a> Checker<'a> {
 
     fn define(&mut self, name: &str, def: Def, is_pub: bool, span: Span) {
         let m = self.cur_mod as usize;
-        if let Some((existing, _, _)) = self.mods[m].scope.get(name) {
-            // Re-binding a global with `let` shadows; anything else is a duplicate.
-            let shadowable = matches!((existing, &def), (Def::Global(_), Def::Global(_)));
+        if let Some((existing, _, existing_span)) = self.mods[m].scope.get(name) {
+            // Re-binding a global with `let` shadows, as does any definition of
+            // a later session input; anything else is a duplicate.
+            let shadowable = matches!((existing, &def), (Def::Global(_), Def::Global(_))) || self.defined_by_earlier_input(*existing_span);
             if !shadowable {
                 self.error(span, format!("`{name}` is already defined"));
                 return;
@@ -502,6 +832,7 @@ impl<'a> Checker<'a> {
 
     fn check_module(&mut self, pm: &ParsedModule) {
         let mi = self.cur_mod;
+        let first_global = self.globals.len();
         let items = &pm.ast.items;
         // 1. Imports.
         for (idx, item) in items.iter().enumerate() {
@@ -512,7 +843,15 @@ impl<'a> Checker<'a> {
                 self.bind_import(imp, target, item.span);
             }
         }
-        // 2. Declare types.
+        // 2. Declare traits, then types.
+        let mut trait_ids = Vec::new();
+        for item in items {
+            if let ItemKind::Trait(t) = &item.kind {
+                let id = self.declare_trait(t);
+                self.define(&t.name.name, Def::Trait(id), t.is_pub, t.name.span);
+                trait_ids.push(id);
+            }
+        }
         let mut struct_ids = Vec::new();
         for item in items {
             match &item.kind {
@@ -565,12 +904,25 @@ impl<'a> Checker<'a> {
                 _ => {}
             }
         }
+        if pm.kind == ModKind::Prelude {
+            let scope = &self.mods[mi as usize].scope;
+            if let Some((Def::Trait(t), _, _)) = scope.get("Iterator") {
+                self.iter_trait = Some(*t);
+            }
+            if let Some((Def::Type(TyRef::Def(d)), _, _)) = scope.get("Iter") {
+                self.iter_struct = Some(*d);
+            }
+        }
         // Resolve aliases eagerly so errors are reported once.
         for i in 0..self.aliases.len() {
             if self.aliases[i].ty.is_none() && self.aliases[i].decl.as_ref().map(|d| d.0) == Some(mi) {
                 self.resolve_alias(i, Span::default());
             }
         }
+        // Supertraits, then trait method signatures.
+        let trait_decls: Vec<&ast::TraitDecl> =
+            items.iter().filter_map(|i| if let ItemKind::Trait(t) = &i.kind { Some(t) } else { None }).collect();
+        self.resolve_supertraits(&trait_ids, &trait_decls);
         // 3. Fields and variants.
         let mut k = 0;
         for item in items {
@@ -598,6 +950,9 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+        }
+        for (&id, t) in trait_ids.iter().zip(&trait_decls) {
+            self.declare_trait_methods(id, t);
         }
         // 4. Functions and methods.
         let mut fn_items: Vec<FnId> = Vec::new();
@@ -633,6 +988,18 @@ impl<'a> Checker<'a> {
                 _ => {}
             }
         }
+        // Impls, then the supertrait requirements of each.
+        let mut impl_ids = Vec::new();
+        for item in items {
+            if let ItemKind::Impl(i) = &item.kind
+                && let Some(id) = self.declare_impl(i)
+            {
+                impl_ids.push(id);
+            }
+        }
+        for id in impl_ids {
+            self.check_impl_supertraits(id);
+        }
         // 5. Top-level code.
         let init = self.add_fn(FnInfo {
             name: format!("<{}>", self.mods[mi as usize].name),
@@ -649,6 +1016,9 @@ impl<'a> Checker<'a> {
             owner: None,
             self_ty: None,
             decl: Some(FnDeclRef::Init(mi)),
+            dicts: vec![],
+            impl_of: None,
+            trait_of: None,
         });
         self.mods[mi as usize].init = Some(init);
         self.check_init(init, pm);
@@ -683,6 +1053,9 @@ impl<'a> Checker<'a> {
                         owner: None,
                         self_ty: None,
                         decl: Some(FnDeclRef::Test(mi, t.body.clone())),
+                        dicts: vec![],
+                        impl_of: None,
+                        trait_of: None,
                     });
                     let decl = self.fns[id as usize].decl.clone().unwrap();
                     self.check_fn_body(id, &decl);
@@ -708,6 +1081,9 @@ impl<'a> Checker<'a> {
                         owner: None,
                         self_ty: None,
                         decl: Some(FnDeclRef::Test(mi, t.body.clone())),
+                        dicts: vec![],
+                        impl_of: None,
+                        trait_of: None,
                     });
                     let decl = self.fns[id as usize].decl.clone().unwrap();
                     self.check_fn_body(id, &decl);
@@ -715,7 +1091,7 @@ impl<'a> Checker<'a> {
             }
         }
         // 8. Globals must have fully inferred types.
-        for g in 0..self.globals.len() {
+        for g in first_global..self.globals.len() {
             if self.globals[g].module == mi {
                 let t = self.zonk(&self.globals[g].ty);
                 if t.has_vars() {
@@ -773,22 +1149,40 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Type parameters of a type declaration (only built-in bounds are allowed).
     fn declare_generics(&mut self, gs: &[ast::GenericParam]) -> Vec<ParamId> {
-        let mut out = Vec::new();
-        for g in gs {
-            let bounds = self.parse_bounds(&g.bounds);
-            out.push(self.new_param(&g.name.name, bounds, g.reflect));
+        let out = self.declare_params(gs, &[], None);
+        for (g, &p) in gs.iter().zip(&out) {
+            // `Num` evidence is passed to the type's methods, not stored.
+            let num = self.num_trait;
+            self.params[p as usize].traits.retain(|t| Some(t.trait_id) != num);
+            if !self.params[p as usize].traits.is_empty() {
+                self.error(
+                    g.name.span,
+                    format!(
+                        "trait bounds are not allowed on the type parameters of a type; add them to the functions or impls that need them (`where {}: ...`)",
+                        g.name.name
+                    ),
+                );
+                self.params[p as usize].traits.clear();
+            }
         }
         out
     }
 
-    fn parse_bounds(&mut self, bs: &[ast::Ident]) -> Vec<Bound> {
+    /// Declares type parameters with their bounds; bounds may refer to any of
+    /// the parameters and to `outer`.
+    fn declare_params(&mut self, gs: &[ast::GenericParam], outer: &[(String, ParamId)], self_ty: Option<&Type>) -> Vec<ParamId> {
+        let mut scope = outer.to_vec();
         let mut out = Vec::new();
-        for b in bs {
-            match Bound::parse(&b.name) {
-                Some(x) => out.push(x),
-                None => self.error(b.span, format!("unknown bound `{}`", b.name)),
-            }
+        for g in gs {
+            let p = self.new_param(&g.name.name, vec![], g.reflect);
+            scope.push((g.name.name.clone(), p));
+            out.push(p);
+        }
+        for (g, &p) in gs.iter().zip(&out) {
+            let (bounds, traits) = self.resolve_bounds(&g.bounds, &scope, self_ty);
+            self.add_bounds(p, bounds, traits);
         }
         out
     }
@@ -858,6 +1252,9 @@ impl<'a> Checker<'a> {
                     owner: None,
                     self_ty: Some(self_ty.clone()),
                     decl: Some(FnDeclRef::Default(self.cur_mod, d.clone())),
+                    dicts: vec![],
+                    impl_of: None,
+                    trait_of: None,
                 });
                 fields[i].default = Some(helper);
                 fields[i].const_default = const_default;
@@ -906,9 +1303,10 @@ impl<'a> Checker<'a> {
         let saved = self.cur_mod;
         self.cur_mod = m;
         let scope: Vec<(String, ParamId)> = self.aliases[i].generics.iter().map(|&p| (self.params[p as usize].name.clone(), p)).collect();
-        let t = self.resolve_type_in(&te, &scope, None);
+        let mut t = self.resolve_type_in(&te, &scope, None);
         self.cur_mod = saved;
         self.aliases[i].resolving = false;
+        self.limit_type_size(&mut t, te.span);
         self.aliases[i].ty = Some(t.clone());
         t
     }
@@ -996,6 +1394,10 @@ impl<'a> Checker<'a> {
                     // still names the built-in type in type position.
                     let def = match self.lookup_global(&first.name) {
                         Some(Def::Type(r)) => Some(r),
+                        Some(Def::Trait(_)) => {
+                            self.trait_as_type_error(first);
+                            return Type::Error;
+                        }
                         _ => builtin_type(&first.name),
                     };
                     match def {
@@ -1009,6 +1411,10 @@ impl<'a> Checker<'a> {
                     match self.lookup_global(&first.name) {
                         Some(Def::Module(m)) => match self.module_member(m, &path[1].name, path[1].span) {
                             Some(Def::Type(r)) => self.instantiate_tyref(r, args, te.span, &path[1].name),
+                            Some(Def::Trait(_)) => {
+                                self.trait_as_type_error(&path[1]);
+                                Type::Error
+                            }
                             Some(_) => {
                                 self.error(path[1].span, format!("`{}` is not a type", path[1].name));
                                 Type::Error
@@ -1081,22 +1487,11 @@ impl<'a> Checker<'a> {
         }
         let mut scope: Vec<(String, ParamId)> = outer.to_vec();
         let mut generics: Vec<ParamId> = outer.iter().map(|(_, p)| *p).collect();
-        for g in &f.generics {
-            let bounds = self.parse_bounds(&g.bounds);
-            let p = self.new_param(&g.name.name, bounds, g.reflect);
-            scope.push((g.name.name.clone(), p));
+        for p in self.declare_params(&f.generics, outer, self_ty.as_ref()) {
+            scope.push((self.params[p as usize].name.clone(), p));
             generics.push(p);
         }
-        for w in &f.where_clause {
-            let bounds = self.parse_bounds(&w.bounds);
-            match scope.iter().rev().find(|(n, _)| *n == w.name.name) {
-                Some((_, p)) => {
-                    let p = *p as usize;
-                    self.params[p].bounds.extend(bounds);
-                }
-                None => self.error(w.name.span, format!("unknown type parameter `{}`", w.name.name)),
-            }
-        }
+        self.apply_where(&f.where_clause, &scope, self_ty.as_ref());
         let mut params = Vec::new();
         let mut seen = HashSet::new();
         for (i, p) in f.params.iter().enumerate() {
@@ -1139,6 +1534,12 @@ impl<'a> Checker<'a> {
         } else {
             FnKind::Script
         };
+        // One hidden dictionary per (type parameter, trait bound).
+        let dicts: Vec<(Type, TraitRef)> =
+            generics.iter().flat_map(|&p| self.params[p as usize].traits.iter().map(move |tr| (Type::Param(p), tr.clone()))).collect();
+        if f.is_native && !dicts.is_empty() {
+            self.error(f.name.span, "native functions cannot have trait bounds");
+        }
         let id = self.add_fn(FnInfo {
             name: f.name.name.clone(),
             qual_name,
@@ -1154,6 +1555,9 @@ impl<'a> Checker<'a> {
             owner,
             self_ty: self_ty.clone(),
             decl: if f.is_native { None } else { Some(FnDeclRef::Fn(self.cur_mod, f.clone())) },
+            dicts: dicts.clone(),
+            impl_of: None,
+            trait_of: None,
         });
         // Default argument helpers.
         for (i, p) in f.params.iter().enumerate() {
@@ -1178,6 +1582,9 @@ impl<'a> Checker<'a> {
                         owner: None,
                         self_ty: self_ty.clone(),
                         decl: Some(FnDeclRef::Default(self.cur_mod, d.clone())),
+                        dicts: dicts.clone(),
+                        impl_of: None,
+                        trait_of: None,
                     });
                     DefaultArg::Helper(helper)
                 };
@@ -1194,7 +1601,8 @@ impl<'a> Checker<'a> {
         let mut outer = Vec::new();
         for p in &orig {
             let info = self.params[*p as usize].clone();
-            let np = self.new_param(&info.name, info.bounds.clone(), false);
+            let np = self.new_param(&info.name, vec![], false);
+            self.add_bounds(np, info.bounds, vec![]);
             outer.push((info.name, np));
         }
         let self_ty = Type::Named(def, outer.iter().map(|(_, p)| Type::Param(*p)).collect());
@@ -1206,6 +1614,17 @@ impl<'a> Checker<'a> {
     fn register_method(&mut self, ctor: Ctor, name: &ast::Ident, id: FnId) {
         let has_self = self.fns[id as usize].has_self;
         let module = self.fns[id as usize].module;
+        if self.in_session() {
+            // A method defined again by a later session input replaces the earlier one.
+            let fns = &self.fns;
+            let cur_file = self.mods[module as usize].file;
+            if let Some(ids) = self.methods.get_mut(&(ctor, name.name.clone())) {
+                ids.retain(|&f| {
+                    let other = &fns[f as usize];
+                    !(other.has_self == has_self && other.module == module && other.span.file != cur_file)
+                });
+            }
+        }
         let existing = self.methods.get(&(ctor, name.name.clone())).cloned().unwrap_or_default();
         let dup = existing.iter().any(|&f| {
             let other = &self.fns[f as usize];
@@ -1219,12 +1638,10 @@ impl<'a> Checker<'a> {
 
     fn declare_extend(&mut self, x: &ast::ExtendDecl) -> Vec<FnId> {
         let mut out = Vec::new();
-        let mut gen_names = Vec::new();
-        for g in &x.generics {
-            gen_names.push((g.name.name.clone(), self.parse_bounds(&g.bounds)));
-        }
         // Resolve the target once to find its constructor.
-        let probe_scope: Vec<(String, ParamId)> = gen_names.iter().map(|(n, b)| (n.clone(), self.new_param(n, b.clone(), false))).collect();
+        // (This also reports invalid bounds once, even if there are no methods.)
+        let probe = self.declare_params(&x.generics, &[], None);
+        let probe_scope: Vec<(String, ParamId)> = probe.iter().map(|&p| (self.params[p as usize].name.clone(), p)).collect();
         let target = self.resolve_type_in(&x.target, &probe_scope, None);
         let ctor = match ctor_of(&target) {
             Some(c) => c,
@@ -1246,7 +1663,9 @@ impl<'a> Checker<'a> {
             return out;
         }
         for m in &x.methods {
-            let scope: Vec<(String, ParamId)> = gen_names.iter().map(|(n, b)| (n.clone(), self.new_param(n, b.clone(), false))).collect();
+            // Fresh parameters per method so that `where` clauses only affect that method.
+            let params = self.declare_params(&x.generics, &[], None);
+            let scope: Vec<(String, ParamId)> = params.iter().map(|&p| (self.params[p as usize].name.clone(), p)).collect();
             let self_ty = self.resolve_type_in(&x.target, &scope, None);
             let id = self.declare_fn(m, Some(ctor), &scope, Some(self_ty));
             self.register_method(ctor, &m.name, id);
@@ -1279,16 +1698,21 @@ impl<'a> Checker<'a> {
             FnDeclRef::Test(m, b) => (*m, b.span),
         };
         self.cur_mod = m;
-        let mut param_locals = Vec::new();
+        let mut param_locals = self.declare_dict_params(&fi);
         let decl_params: Vec<(String, Span)> = match decl {
             FnDeclRef::Fn(_, f) => f.params.iter().map(|p| (p.name.name.clone(), p.name.span)).collect(),
             _ => fi.params.iter().map(|p| (p.name.clone(), fi.span)).collect(),
         };
         for (p, (name, pspan)) in fi.params.iter().zip(decl_params) {
             let l = self.declare_local(&name, p.ty.clone(), false, pspan, true);
+            // Parameters of trait and impl methods are dictated by the trait;
+            // those of default helpers are synthetic.
+            if fi.impl_of.is_some() || fi.trait_of.is_some() || matches!(decl, FnDeclRef::Default(..)) {
+                self.fs.data[l as usize].used = true;
+            }
             param_locals.push(l);
         }
-        self.fs.ctx.push(FnCtx { ret: fi.ret.clone(), kind: CtxKind::Function, loops: vec![], lambda: 0 });
+        self.fs.ctx.push(FnCtx { ret: fi.ret.clone(), kind: CtxKind::Function, loops: vec![], lambda: 0, in_defer: None });
         let body = match decl {
             FnDeclRef::Fn(_, f) => {
                 let b = f.body.as_ref().unwrap();
@@ -1319,24 +1743,45 @@ impl<'a> Checker<'a> {
         self.fn_names = names_used_in_functions(&pm.ast);
         self.begin_fn(vec![], None);
         let main = pm.kind == (ModKind::Script { main: true });
-        self.fs.ctx.push(FnCtx { ret: Type::Unit, kind: CtxKind::TopLevel { main }, loops: vec![], lambda: 0 });
+        self.fs.ctx.push(FnCtx { ret: Type::Unit, kind: CtxKind::TopLevel { main }, loops: vec![], lambda: 0, in_defer: None });
         let mut stmts = Vec::new();
-        for item in &pm.ast.items {
+        // The final expression statement of a session input may be its value.
+        let value = match pm.ast.items.last() {
+            Some(ast::Item { kind: ItemKind::Stmt(ast::Stmt { kind: ast::StmtKind::Expr(e), .. }), .. })
+                if self.want_cell_value && self.in_session() =>
+            {
+                Some(e)
+            }
+            _ => None,
+        };
+        let mut ty = Type::Unit;
+        for (i, item) in pm.ast.items.iter().enumerate() {
             if let ItemKind::Stmt(s) = &item.kind {
                 self.fs.top_level = true;
-                let h = self.check_stmt(s, false);
+                match value {
+                    Some(e) if i + 1 == pm.ast.items.len() => {
+                        let h = self.infer(e, None);
+                        ty = h.ty.clone();
+                        stmts.push(h);
+                    }
+                    _ => stmts.extend(self.check_stmt(s, false)),
+                }
                 self.fs.top_level = false;
-                stmts.extend(h);
             }
         }
-        let body = HExpr { kind: HKind::Block(stmts), ty: Type::Unit, span: pm.ast.span };
+        let body = HExpr { kind: HKind::Block(stmts), ty, span: pm.ast.span };
         let name = self.fns[id as usize].name.clone();
         let hfn = self.finish_fn(name, vec![], body, pm.ast.span);
+        if value.is_some() {
+            self.cell_value = Some(hfn.body.ty.clone());
+        }
         self.bodies[id as usize] = Some(hfn);
     }
 
     /// Final checks for a function: bounds, inference completeness; zonks the body.
     fn finish_fn(&mut self, name: String, params: Vec<LocalId>, mut body: HExpr, span: Span) -> HFn {
+        // Trait evidence first: resolving it may determine types.
+        self.resolve_holes(&mut body);
         let obligations = std::mem::take(&mut self.fs.obligations);
         for (t, b, sp) in obligations {
             self.check_bound(&t, b, sp, true);
@@ -1522,17 +1967,27 @@ fn const_of(e: &ast::Expr) -> Option<ConstVal> {
 }
 
 pub(crate) fn zonk_with(subst: &[Option<Type>], t: &Type) -> Type {
+    zonk_budget(subst, t, &CompileBudget::default())
+}
+
+/// Resolves inference variables in `t`, charging `budget` one unit per node
+/// produced; once the budget is exhausted the rest of the type is `Error`.
+pub(crate) fn zonk_budget(subst: &[Option<Type>], t: &Type, budget: &CompileBudget) -> Type {
+    if !budget.charge(1) {
+        return Type::Error;
+    }
+    let z = |t: &Type| zonk_budget(subst, t, budget);
     match t {
         Type::Var(v) => match &subst[*v as usize] {
-            Some(t) => zonk_with(subst, t),
+            Some(t) => z(t),
             None => t.clone(),
         },
-        Type::List(t) => Type::List(Box::new(zonk_with(subst, t))),
-        Type::Set(t) => Type::Set(Box::new(zonk_with(subst, t))),
-        Type::Map(k, v) => Type::Map(Box::new(zonk_with(subst, k)), Box::new(zonk_with(subst, v))),
-        Type::Tuple(ts) => Type::Tuple(ts.iter().map(|t| zonk_with(subst, t)).collect()),
-        Type::Named(d, ts) => Type::Named(*d, ts.iter().map(|t| zonk_with(subst, t)).collect()),
-        Type::Fn(ps, r) => Type::Fn(ps.iter().map(|t| zonk_with(subst, t)).collect(), Box::new(zonk_with(subst, r))),
+        Type::List(t) => Type::List(Box::new(z(t))),
+        Type::Set(t) => Type::Set(Box::new(z(t))),
+        Type::Map(k, v) => Type::Map(Box::new(z(k)), Box::new(z(v))),
+        Type::Tuple(ts) => Type::Tuple(ts.iter().map(z).collect()),
+        Type::Named(d, ts) => Type::Named(*d, ts.iter().map(z).collect()),
+        Type::Fn(ps, r) => Type::Fn(ps.iter().map(z).collect(), Box::new(z(r))),
         other => other.clone(),
     }
 }
@@ -1570,7 +2025,7 @@ pub(crate) fn names_used_in_functions(m: &ast::Module) -> HashSet<String> {
                 expr(target, out);
                 expr(value, out);
             }
-            ast::StmtKind::Expr(e) => expr(e, out),
+            ast::StmtKind::Expr(e) | ast::StmtKind::Defer(e) => expr(e, out),
             ast::StmtKind::Fn(f) => fn_decl(f, out),
         }
     }
@@ -1659,8 +2114,8 @@ pub(crate) fn names_used_in_functions(m: &ast::Module) -> HashSet<String> {
                     expr(&a.body, out);
                 }
             }
-            K::Block(b) | K::Loop(b) => block(b, out),
-            K::While { cond: c, body } => {
+            K::Block(b) | K::Loop { body: b, .. } => block(b, out),
+            K::While { cond: c, body, .. } => {
                 cond(c, out);
                 block(body, out);
             }
@@ -1669,7 +2124,7 @@ pub(crate) fn names_used_in_functions(m: &ast::Module) -> HashSet<String> {
                 block(body, out);
             }
             K::Lambda { body, .. } => expr(body, out),
-            K::Return(Some(x)) | K::Break(Some(x)) => expr(x, out),
+            K::Return(Some(x)) | K::Break { value: Some(x), .. } => expr(x, out),
             _ => {}
         }
     }
@@ -1689,6 +2144,8 @@ pub(crate) fn names_used_in_functions(m: &ast::Module) -> HashSet<String> {
             }
             ItemKind::Enum(e) => e.methods.iter().for_each(|f| fn_decl(f, &mut out)),
             ItemKind::Extend(x) => x.methods.iter().for_each(|f| fn_decl(f, &mut out)),
+            ItemKind::Trait(t) => t.methods.iter().for_each(|f| fn_decl(f, &mut out)),
+            ItemKind::Impl(i) => i.methods.iter().for_each(|f| fn_decl(f, &mut out)),
             ItemKind::Test(t) => block(&t.body, &mut out),
             _ => {}
         }

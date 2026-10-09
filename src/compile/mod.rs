@@ -8,7 +8,6 @@ use crate::hir::*;
 use crate::types::{FnId, Type};
 use crate::vm::bytecode::*;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 pub struct CompileInput<'a> {
     pub checked: &'a CheckedProgram,
@@ -21,13 +20,17 @@ pub struct CompileInput<'a> {
 struct Compiler<'a> {
     cp: &'a CheckedProgram,
     sm: &'a SourceMap,
-    prog: Program,
+    prog: &'a mut Program,
     fn_protos: Vec<Option<u32>>,
     str_consts: HashMap<String, u32>,
     int_consts: HashMap<i64, u32>,
     fn_consts: HashMap<u32, u32>,
     native_consts: HashMap<u32, u32>,
     variant_wrappers: HashMap<u32, u32>,
+    /// Constant trait dictionaries by their elements.
+    dict_consts: HashMap<Vec<u32>, u32>,
+    /// Shared type descriptions of `reflect` type arguments.
+    descs: reflect::DescCache,
     errors: Vec<Diag>,
     recv_native: Option<u32>,
     /// Natives compiled to dedicated instructions.
@@ -46,6 +49,9 @@ struct LoopCx {
     breaks: Vec<usize>,
     continues: Vec<usize>,
     result: Option<Reg>,
+    /// The number of defer scopes outside the loop: `break` and `continue`
+    /// run the deferred expressions of the scopes above.
+    defer_depth: usize,
 }
 
 struct FnState<'h> {
@@ -62,147 +68,275 @@ struct FnState<'h> {
     no_fused: bool,
     too_big: bool,
     in_tail_fn: bool,
+    /// Loop-invariant values loaded into registers before the enclosing
+    /// outermost loop (see `hoisted_loop`).
+    hoisted: HashMap<HoistKey, Reg>,
+    /// Inside an outermost loop whose invariants were already hoisted.
+    hoisting: bool,
+    /// Deferred expressions of the enclosing blocks (innermost last), compiled
+    /// again at every exit edge that leaves their block.
+    defers: Vec<Vec<HExpr>>,
+    /// Instructions emitted for copies of deferred code (see `MAX_DEFER_OPS`).
+    defer_ops: usize,
 }
 
 const MAX_REGS: u32 = 60000;
+/// The most instructions a function may contain for copies of deferred code.
+const MAX_DEFER_OPS: usize = 1 << 20;
+
+/// A loop-invariant value that can be loaded once before a loop.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum HoistKey {
+    Int(i64),
+    Float(u64),
+    Str(String),
+    Bytes(Vec<u8>),
+    Dur(i64),
+    Tag(u32),
+    /// An immutable global (hoisted with a guard, see `hoisted_loop`).
+    Global(u32),
+}
+
+/// At most this many values are hoisted per loop nest.
+const MAX_HOISTED: usize = 24;
+/// Hoisting is skipped when the function already uses this many registers.
+const HOIST_REG_BUDGET: u32 = 1000;
+/// Loops are duplicated for global hoisting only up to this many HIR nodes.
+const MAX_VERSIONED_NODES: usize = 400;
 
 pub fn compile(input: CompileInput) -> Result<Program, Vec<Diag>> {
+    let mut prog = Program::default();
+    let inits = input.checked.module_inits.clone();
+    prog.entry = compile_more(input, &mut prog, &mut Incremental::default(), &inits)?;
+    Ok(prog)
+}
+
+/// What the compiler remembers between the compilations of a REPL session,
+/// each of which appends to the same [`Program`].
+#[derive(Clone, Default)]
+pub(crate) struct Incremental {
+    fn_protos: Vec<Option<u32>>,
+    str_consts: HashMap<String, u32>,
+    int_consts: HashMap<i64, u32>,
+    fn_consts: HashMap<u32, u32>,
+    native_consts: HashMap<u32, u32>,
+    variant_wrappers: HashMap<u32, u32>,
+    dict_consts: HashMap<Vec<u32>, u32>,
+    descs: reflect::DescCache,
+    /// Number of tests compiled.
+    tests: usize,
+}
+
+/// The sizes of a program's tables, to undo a failed [`compile_more`].
+pub(crate) struct ProgramMark {
+    protos: usize,
+    consts: usize,
+    types: usize,
+    variants: usize,
+    specs: usize,
+    tests: usize,
+    nglobals: usize,
+    ids: RtIds,
+}
+
+impl ProgramMark {
+    pub(crate) fn of(p: &Program) -> ProgramMark {
+        ProgramMark {
+            protos: p.protos.len(),
+            consts: p.consts.len(),
+            types: p.types.len(),
+            variants: p.variants.len(),
+            specs: p.specs.len(),
+            tests: p.tests.len(),
+            nglobals: p.nglobals,
+            ids: p.ids,
+        }
+    }
+
+    /// Truncates `p` to the marked sizes. (Help for natives of modules that
+    /// were being added may remain, which is harmless.)
+    pub(crate) fn rollback(&self, p: &mut Program) {
+        p.protos.truncate(self.protos);
+        p.consts.truncate(self.consts);
+        p.types.truncate(self.types);
+        p.variants.truncate(self.variants);
+        p.specs.truncate(self.specs);
+        p.tests.truncate(self.tests);
+        p.nglobals = self.nglobals;
+        p.global_names.truncate(self.nglobals);
+        p.ids = self.ids;
+    }
+}
+
+/// Compiles the parts of `input.checked` that are not yet in `prog` (all of
+/// it, for a new program): the types, variants and globals added since, and
+/// the functions with bodies numbered from `inc`'s count. Appends them to
+/// `prog` without renumbering anything already there, so values of a running
+/// VM stay valid. Returns a new entry proto that calls `inits` in order and
+/// returns the result of the last. On error, `prog` may be partially
+/// extended (see [`ProgramMark`]).
+pub(crate) fn compile_more(input: CompileInput, prog: &mut Program, inc: &mut Incremental, inits: &[FnId]) -> Result<u32, Vec<Diag>> {
     let cp = input.checked;
     let mut c = Compiler {
         cp,
         sm: input.sm,
-        prog: Program::default(),
-        fn_protos: vec![None; cp.fns.len()],
-        str_consts: HashMap::new(),
-        int_consts: HashMap::new(),
-        fn_consts: HashMap::new(),
-        native_consts: HashMap::new(),
-        variant_wrappers: HashMap::new(),
+        prog,
+        fn_protos: std::mem::take(&mut inc.fn_protos),
+        str_consts: std::mem::take(&mut inc.str_consts),
+        int_consts: std::mem::take(&mut inc.int_consts),
+        fn_consts: std::mem::take(&mut inc.fn_consts),
+        native_consts: std::mem::take(&mut inc.native_consts),
+        variant_wrappers: std::mem::take(&mut inc.variant_wrappers),
+        dict_consts: std::mem::take(&mut inc.dict_consts),
+        descs: std::mem::take(&mut inc.descs),
         errors: Vec::new(),
         recv_native: (input.native_lookup)("Channel.recv"),
         inline: HashMap::new(),
     };
-    for (name, op) in [
-        ("List.len", Inline::Len),
-        ("str.len", Inline::Len),
-        ("bytes.len", Inline::Len),
-        ("Map.len", Inline::Len),
-        ("Set.len", Inline::Len),
-        ("List.push", Inline::Push),
-        ("int.to_float", Inline::ToFloat),
-    ] {
-        if let Some(id) = (input.native_lookup)(name) {
-            c.inline.insert(id, op);
+    c.descs.start();
+    let entry = c.compile_new(input, inits, &mut inc.tests);
+    inc.fn_protos = c.fn_protos;
+    inc.str_consts = c.str_consts;
+    inc.int_consts = c.int_consts;
+    inc.fn_consts = c.fn_consts;
+    inc.native_consts = c.native_consts;
+    inc.variant_wrappers = c.variant_wrappers;
+    inc.dict_consts = c.dict_consts;
+    inc.descs = c.descs;
+    if c.errors.is_empty() { Ok(entry) } else { Err(c.errors) }
+}
+
+impl Compiler<'_> {
+    fn compile_new(&mut self, input: CompileInput, inits: &[FnId], ntests: &mut usize) -> u32 {
+        let cp = self.cp;
+        for (name, op) in [
+            ("List.len", Inline::Len),
+            ("str.len", Inline::Len),
+            ("bytes.len", Inline::Len),
+            ("Map.len", Inline::Len),
+            ("Set.len", Inline::Len),
+            ("List.push", Inline::Push),
+            ("int.to_float", Inline::ToFloat),
+        ] {
+            if let Some(id) = (input.native_lookup)(name) {
+                self.inline.insert(id, op);
+            }
         }
-    }
-    c.prog.native_help = input.native_help;
-    c.prog.native_argc = input.native_argc;
-    c.prog.recv_native = c.recv_native;
-    c.prog.files = input.sm.files.iter().map(|f| f.name.clone()).collect();
-    c.prog.nglobals = cp.globals.len();
-    c.prog.global_names = cp.globals.iter().map(|g| g.name.clone()).collect();
-    for t in &cp.types {
-        c.prog.types.push(StructRt {
-            name: t.name.clone(),
-            module: t.module_name.clone(),
-            fields: t.fields().iter().map(|f| f.name.clone()).collect(),
-            is_enum: t.is_enum(),
-        });
-    }
-    for (rt, (d, i)) in cp.variants.iter().enumerate() {
-        let v = &cp.types[*d as usize].variants()[*i as usize];
-        let _ = rt;
-        c.prog.variants.push(VariantRt {
-            def: *d,
-            index: *i,
-            name: v.name.clone(),
-            field_names: v.field_names.clone(),
-            arity: v.fields.len(),
-        });
-    }
-    let wk = cp.wk;
-    let vid = |d: u32, name: &str| cp.types[d as usize].variants().iter().find(|v| v.name == name).map(|v| v.rt_id).unwrap_or(0);
-    c.prog.ids = RtIds {
-        some: vid(wk.option, "Some"),
-        none: vid(wk.option, "None"),
-        ok: vid(wk.result, "Ok"),
-        err: vid(wk.result, "Err"),
-        error_def: wk.error,
-        json: None,
-    };
-    if let Some(jd) = cp.types.iter().position(|t| t.name == "Json" && t.module_name == "json") {
-        let jd = jd as u32;
-        c.prog.ids.json = Some(JsonIds {
-            def: jd,
-            null: vid(jd, "Null"),
-            bool_: vid(jd, "Bool"),
-            num: vid(jd, "Num"),
-            str_: vid(jd, "Str"),
-            arr: vid(jd, "Arr"),
-            obj: vid(jd, "Obj"),
-        });
-    }
-    // Reserve protos for every script function so calls can refer to them.
-    for (i, f) in cp.fns.iter().enumerate() {
-        if !matches!(f.kind, FnKind::Native(_)) && cp.bodies[i].is_some() {
-            let idx = c.prog.protos.len() as u32;
-            c.prog.protos.push(Proto {
-                name: f.name.clone(),
-                file: 0,
-                nparams: 0,
-                nregs: 0,
-                code: vec![],
-                lines: vec![],
-                captures: vec![],
-                capture_cells: vec![],
-                doc: None,
-                signature: String::new(),
+        // Help for natives is only given when (new) natives were checked.
+        if !input.native_help.is_empty() {
+            self.prog.native_help = input.native_help;
+            self.prog.native_argc = input.native_argc;
+        }
+        self.prog.recv_native = self.recv_native;
+        self.prog.files = input.sm.files.iter().map(|f| f.name.clone()).collect();
+        self.prog.nglobals = cp.globals.len();
+        let known = self.prog.global_names.len();
+        self.prog.global_names.extend(cp.globals[known..].iter().map(|g| g.name.clone()));
+        for t in &cp.types[self.prog.types.len()..] {
+            self.prog.types.push(StructRt {
+                name: t.name.clone(),
+                module: t.module_name.clone(),
+                fields: t.fields().iter().map(|f| f.name.clone()).collect(),
+                is_enum: t.is_enum(),
             });
-            c.fn_protos[i] = Some(idx);
         }
-    }
-    for i in 0..cp.fns.len() {
-        if let (Some(p), Some(body)) = (c.fn_protos[i], &cp.bodies[i]) {
-            c.compile_fn(i as FnId, p, body);
+        for (d, i) in &cp.variants[self.prog.variants.len()..] {
+            let v = &cp.types[*d as usize].variants()[*i as usize];
+            self.prog.variants.push(VariantRt {
+                def: *d,
+                index: *i,
+                name: v.name.clone(),
+                field_names: v.field_names.clone(),
+                arity: v.fields.len(),
+            });
         }
-    }
-    // Entry: run every module initialiser in order.
-    let mut code = Vec::new();
-    for &init in &cp.module_inits {
-        if let Some(p) = c.fn_protos[init as usize] {
-            code.push(Op::CallDirect { base: 0, proto: p });
+        let wk = cp.wk;
+        let vid = |d: u32, name: &str| cp.types[d as usize].variants().iter().find(|v| v.name == name).map(|v| v.rt_id).unwrap_or(0);
+        self.prog.ids = RtIds {
+            some: vid(wk.option, "Some"),
+            none: vid(wk.option, "None"),
+            ok: vid(wk.result, "Ok"),
+            err: vid(wk.result, "Err"),
+            error_def: wk.error,
+            json: None,
+        };
+        if let Some(jd) = cp.types.iter().position(|t| t.name == "Json" && t.module_name == "json") {
+            let jd = jd as u32;
+            self.prog.ids.json = Some(JsonIds {
+                def: jd,
+                null: vid(jd, "Null"),
+                bool_: vid(jd, "Bool"),
+                num: vid(jd, "Num"),
+                str_: vid(jd, "Str"),
+                arr: vid(jd, "Arr"),
+                obj: vid(jd, "Obj"),
+            });
         }
-    }
-    code.push(Op::RetUnit);
-    let n = code.len();
-    c.prog.entry = c.prog.protos.len() as u32;
-    c.prog.protos.push(Proto {
-        name: "<entry>".into(),
-        file: 0,
-        nparams: 0,
-        nregs: 1,
-        code,
-        lines: vec![0; n],
-        captures: vec![],
-        capture_cells: vec![],
-        doc: None,
-        signature: String::new(),
-    });
-    for (name, f) in &cp.tests {
-        if let Some(p) = c.fn_protos[*f as usize] {
-            c.prog.tests.push((name.clone(), p));
+        // Reserve protos for every new script function so calls can refer to them.
+        let first = self.fn_protos.len();
+        self.fn_protos.resize(cp.fns.len(), None);
+        for (i, f) in cp.fns.iter().enumerate().skip(first) {
+            if !matches!(f.kind, FnKind::Native(_)) && cp.bodies[i].is_some() {
+                let idx = self.prog.protos.len() as u32;
+                self.prog.protos.push(Proto {
+                    name: f.name.clone(),
+                    file: 0,
+                    nparams: 0,
+                    nregs: 0,
+                    code: vec![],
+                    lines: vec![],
+                    captures: vec![],
+                    capture_cells: vec![],
+                    doc: None,
+                    signature: String::new(),
+                });
+                self.fn_protos[i] = Some(idx);
+            }
         }
+        for i in first..cp.fns.len() {
+            if let (Some(p), Some(body)) = (self.fn_protos[i], &cp.bodies[i]) {
+                self.compile_fn(i as FnId, p, body);
+            }
+        }
+        // Entry: run the module initialisers in order.
+        let mut code = Vec::new();
+        for &init in inits {
+            if let Some(p) = self.fn_protos[init as usize] {
+                code.push(Op::CallDirect { base: 0, proto: p });
+            }
+        }
+        code.push(Op::Ret { src: 0 });
+        let n = code.len();
+        let entry = self.prog.protos.len() as u32;
+        self.prog.protos.push(Proto {
+            name: "<entry>".into(),
+            file: 0,
+            nparams: 0,
+            nregs: 1,
+            code,
+            lines: vec![0; n],
+            captures: vec![],
+            capture_cells: vec![],
+            doc: None,
+            signature: String::new(),
+        });
+        for (name, f) in &cp.tests[*ntests..] {
+            if let Some(p) = self.fn_protos[*f as usize] {
+                self.prog.tests.push((name.clone(), p));
+            }
+        }
+        *ntests = cp.tests.len();
+        // Summaries are only given when (new) modules were checked.
+        if !cp.modules.is_empty() {
+            self.prog.module_help = cp
+                .modules
+                .iter()
+                .filter(|m| !matches!(m.kind, crate::check::ModKind::Script { .. }))
+                .map(|m| (m.name.clone(), m.summary.clone()))
+                .collect();
+        }
+        entry
     }
-    c.prog.module_help = cp
-        .modules
-        .iter()
-        .filter(|m| !matches!(m.kind, crate::check::ModKind::Script { .. }))
-        .map(|m| (m.name.clone(), m.summary.clone()))
-        .collect();
-    if !c.errors.is_empty() {
-        return Err(c.errors);
-    }
-    Ok(c.prog)
 }
 
 fn int_fits_i32(v: i64) -> bool {
@@ -277,6 +411,10 @@ impl<'a> Compiler<'a> {
                 no_fused,
                 too_big: false,
                 in_tail_fn: true,
+                hoisted: HashMap::new(),
+                hoisting: false,
+                defers: Vec::new(),
+                defer_ops: 0,
             };
             for &p in &body.params {
                 let r = self.alloc(&mut f);
@@ -372,6 +510,7 @@ impl<'a> Compiler<'a> {
             | Op::JNltF { off: o, .. }
             | Op::JNleF { off: o, .. }
             | Op::JNotVariant { off: o, .. }
+            | Op::HoistGlobal { off: o, .. }
             | Op::JListLen { off: o, .. }
             | Op::JListMinLen { off: o, .. }
             | Op::ForList { off: o, .. }
@@ -492,6 +631,12 @@ impl<'a> Compiler<'a> {
         {
             return r;
         }
+        if !f.hoisted.is_empty()
+            && let Some(k) = self.hoist_key(e)
+            && let Some(&r) = f.hoisted.get(&k)
+        {
+            return r;
+        }
         let r = self.alloc(f);
         self.expr_to(f, e, r);
         r
@@ -519,10 +664,22 @@ impl<'a> Compiler<'a> {
             HKind::Unit | HKind::Local(_) | HKind::Bool(_) | HKind::Int(_) => return,
             HKind::Block(items) => {
                 let mark = f.next_reg;
+                f.defers.push(Vec::new());
                 for it in items {
                     self.discard(f, it);
                 }
+                if !e.ty.is_never() {
+                    self.emit_scope_defers(f);
+                }
+                f.defers.pop();
                 f.next_reg = mark;
+                return;
+            }
+            HKind::Defer(x) => {
+                if f.defers.is_empty() {
+                    f.defers.push(Vec::new());
+                }
+                f.defers.last_mut().unwrap().push((**x).clone());
                 return;
             }
             _ => {}
@@ -542,23 +699,28 @@ impl<'a> Compiler<'a> {
     /// Compiles `e` as the return value of the current function (tail position).
     fn ret_expr(&mut self, f: &mut FnState, e: &HExpr) {
         self.set_line(f, e.span);
+        // Pending deferred expressions run after the value is computed, so
+        // calls cannot be tail calls.
+        let tail = !defers_pending(f);
         match &e.kind {
             HKind::Block(items) if !items.is_empty() => {
                 let mark = f.next_reg;
+                f.defers.push(Vec::new());
                 for it in &items[..items.len() - 1] {
                     self.discard(f, it);
                 }
                 self.ret_expr(f, items.last().unwrap());
+                f.defers.pop();
                 f.next_reg = mark;
             }
-            HKind::Call { func, args } if self.fn_protos[*func as usize].is_some() => {
+            HKind::Call { func, args } if tail && self.fn_protos[*func as usize].is_some() => {
                 let proto = self.fn_protos[*func as usize].unwrap();
                 let base = self.call_args(f, args, 0);
                 self.set_line(f, e.span);
                 self.emit(f, Op::TailCallDirect { base, proto });
                 self.emit(f, Op::Ret { src: base });
             }
-            HKind::CallValue { callee, args } => {
+            HKind::CallValue { callee, args } if tail => {
                 let base = self.alloc_n(f, args.len() + 1);
                 self.expr_to(f, callee, base);
                 for (i, a) in args.iter().enumerate() {
@@ -568,6 +730,21 @@ impl<'a> Compiler<'a> {
                 self.emit(f, Op::TailCall { base, argc: args.len() as u16 });
                 self.emit(f, Op::Ret { src: base });
             }
+            HKind::CallTrait { slot, args, impl_id, .. } if tail => match self.static_target(*impl_id, *slot) {
+                Some(proto) => {
+                    let base = self.call_args(f, args, 0);
+                    self.set_line(f, e.span);
+                    self.emit(f, Op::TailCallDirect { base, proto });
+                    self.emit(f, Op::Ret { src: base });
+                }
+                None => {
+                    let base = self.call_args(f, args, 1);
+                    self.emit(f, Op::GetField { dst: base, obj: base + 1, idx: *slot as u16 });
+                    self.set_line(f, e.span);
+                    self.emit(f, Op::TailCall { base, argc: args.len() as u16 });
+                    self.emit(f, Op::Ret { src: base });
+                }
+            },
             HKind::If { cond, then, else_: Some(els) } => {
                 let mark = f.next_reg;
                 let jf = self.cond_jump(f, cond);
@@ -581,13 +758,61 @@ impl<'a> Compiler<'a> {
                 let mark = f.next_reg;
                 if matches!(e.ty, Type::Unit) && !matches!(e.kind, HKind::Local(_) | HKind::Global(_)) {
                     self.discard(f, e);
+                    self.emit_defers(f, 0);
                     self.emit(f, Op::RetUnit);
-                } else {
+                } else if !defers_pending(f) {
                     let r = self.expr_reg(f, e);
+                    self.emit(f, Op::Ret { src: r });
+                } else {
+                    // A fresh register: deferred code may assign the local returned.
+                    let r = self.alloc(f);
+                    self.expr_to(f, e, r);
+                    self.emit_defers(f, 0);
                     self.emit(f, Op::Ret { src: r });
                 }
                 f.next_reg = mark;
             }
+        }
+    }
+
+    /// Compiles the deferred expressions of the defer scopes `from..`,
+    /// innermost scope first and each scope in reverse order (an exit edge
+    /// leaving those blocks).
+    fn emit_defers(&mut self, f: &mut FnState, from: usize) {
+        let line = f.line;
+        for i in (from..f.defers.len()).rev() {
+            for j in (0..f.defers[i].len()).rev() {
+                // Copies are bounded so that many defers times many exits
+                // cannot make compilation itself unbounded.
+                if f.defer_ops > MAX_DEFER_OPS {
+                    let span = f.defers[i][j].span;
+                    let msg =
+                        "too much deferred code: a `defer` is compiled into every exit of its block; move the cleanup into a function";
+                    if !self.errors.iter().any(|d| d.span == span && d.message == msg) {
+                        self.errors.push(Diag::error(span, msg));
+                    }
+                    f.too_big = true;
+                    return;
+                }
+                let x = f.defers[i][j].clone();
+                let (ops, protos) = (f.code.len(), self.prog.protos.len());
+                // Locals declared by the deferred code get fresh registers at
+                // each copy (the registers of an earlier copy may be in use here).
+                let saved = f.local_reg.clone();
+                self.discard(f, &x);
+                f.local_reg = saved;
+                let lambda_ops: usize = self.prog.protos[protos..].iter().map(|p| p.code.len()).sum();
+                f.defer_ops += f.code.len() - ops + lambda_ops;
+            }
+        }
+        f.line = line;
+    }
+
+    /// Runs the deferred expressions of the innermost scope (its block ends normally).
+    fn emit_scope_defers(&mut self, f: &mut FnState) {
+        if f.defers.last().is_some_and(|d| !d.is_empty()) {
+            let n = f.defers.len() - 1;
+            self.emit_defers(f, n);
         }
     }
 
@@ -679,8 +904,14 @@ impl<'a> Compiler<'a> {
 
     fn expr_to(&mut self, f: &mut FnState, e: &HExpr, dst: Reg) {
         self.set_line(f, e.span);
+        if !f.hoisting
+            && matches!(e.kind, HKind::Loop(_) | HKind::While { .. } | HKind::WhileLet { .. } | HKind::ForRange { .. } | HKind::For { .. })
+        {
+            self.hoisted_loop(f, e, dst);
+            return;
+        }
         match &e.kind {
-            HKind::Error => {
+            HKind::Error | HKind::Evidence(_) => {
                 let k = self.const_idx(Const::Str("internal error: unchecked expression".into()));
                 self.emit(f, Op::Panic { msg: k });
             }
@@ -705,9 +936,12 @@ impl<'a> Compiler<'a> {
                 self.emit(f, Op::LoadConst { dst, k });
             }
             HKind::Local(l) => self.read_local(f, *l, dst),
-            HKind::Global(g) => {
-                self.emit(f, Op::LoadGlobal { dst, g: *g });
-            }
+            HKind::Global(g) => match f.hoisted.get(&HoistKey::Global(*g)) {
+                Some(&r) => self.mv(f, dst, r),
+                None => {
+                    self.emit(f, Op::LoadGlobal { dst, g: *g });
+                }
+            },
             HKind::FnValue(fid) => {
                 let k = match (&self.cp.fns[*fid as usize].kind, self.fn_protos[*fid as usize]) {
                     (FnKind::Native(n), _) => self.const_idx(Const::Native(*n)),
@@ -753,12 +987,30 @@ impl<'a> Compiler<'a> {
                 if items.is_empty() {
                     self.emit(f, Op::LoadUnit { dst });
                 } else {
+                    f.defers.push(Vec::new());
                     for it in &items[..items.len() - 1] {
                         self.discard(f, it);
                     }
-                    self.expr_to(f, items.last().unwrap(), dst);
+                    let last = items.last().unwrap();
+                    if f.defers.last().is_some_and(|d| !d.is_empty()) || matches!(last.kind, HKind::Defer(_)) {
+                        // The value is computed before the deferred code runs
+                        // (which may assign `dst` if it is a local's register).
+                        let t = self.alloc(f);
+                        self.expr_to(f, last, t);
+                        if !e.ty.is_never() {
+                            self.emit_scope_defers(f);
+                        }
+                        self.mv(f, dst, t);
+                    } else {
+                        self.expr_to(f, last, dst);
+                    }
+                    f.defers.pop();
                 }
                 f.next_reg = mark;
+            }
+            HKind::Defer(_) => {
+                self.discard(f, e);
+                self.emit(f, Op::LoadUnit { dst });
             }
             HKind::If { cond, then, else_ } => {
                 let mark = f.next_reg;
@@ -823,7 +1075,7 @@ impl<'a> Compiler<'a> {
             HKind::Loop(body) => {
                 let mark = f.next_reg;
                 let top = self.here(f);
-                f.loops.push(LoopCx { result: Some(dst), ..Default::default() });
+                f.loops.push(LoopCx { result: Some(dst), defer_depth: f.defers.len(), ..Default::default() });
                 self.discard(f, body);
                 self.emit_loop_back(f, top);
                 let cx = f.loops.pop().unwrap();
@@ -838,7 +1090,7 @@ impl<'a> Compiler<'a> {
                 let top = self.here(f);
                 let jf = self.cond_jump(f, cond);
                 f.next_reg = mark;
-                f.loops.push(LoopCx::default());
+                f.loops.push(LoopCx { defer_depth: f.defers.len(), ..Default::default() });
                 self.discard(f, body);
                 self.emit_loop_back(f, top);
                 let cx = f.loops.pop().unwrap();
@@ -859,7 +1111,7 @@ impl<'a> Compiler<'a> {
                 let mut fails = Vec::new();
                 self.match_pattern(f, pat, v, &mut fails);
                 f.next_reg = vmark;
-                f.loops.push(LoopCx::default());
+                f.loops.push(LoopCx { defer_depth: f.defers.len(), ..Default::default() });
                 self.discard(f, body);
                 self.emit_loop_back(f, top);
                 let cx = f.loops.pop().unwrap();
@@ -891,7 +1143,7 @@ impl<'a> Compiler<'a> {
                     self.match_pattern(f, pat, var, &mut fails);
                     self.patch_list(f, fails);
                 }
-                f.loops.push(LoopCx::default());
+                f.loops.push(LoopCx { defer_depth: f.defers.len(), ..Default::default() });
                 self.discard(f, body);
                 self.emit_loop_back(f, top);
                 let cx = f.loops.pop().unwrap();
@@ -927,7 +1179,7 @@ impl<'a> Compiler<'a> {
                     let mut fails = Vec::new();
                     self.match_pattern(f, pat, elem, &mut fails);
                     self.patch_list(f, fails);
-                    f.loops.push(LoopCx::default());
+                    f.loops.push(LoopCx { defer_depth: f.defers.len(), ..Default::default() });
                     self.discard(f, body);
                     self.emit_loop_back(f, top);
                     let cx = f.loops.pop().unwrap();
@@ -968,7 +1220,7 @@ impl<'a> Compiler<'a> {
                     self.match_pattern(f, pat, elem, &mut fails);
                     self.patch_list(f, fails);
                 }
-                f.loops.push(LoopCx::default());
+                f.loops.push(LoopCx { defer_depth: f.defers.len(), ..Default::default() });
                 self.discard(f, body);
                 self.emit_loop_back(f, top);
                 let cx = f.loops.pop().unwrap();
@@ -980,24 +1232,39 @@ impl<'a> Compiler<'a> {
                 self.emit(f, Op::LoadUnit { dst });
                 f.next_reg = mark;
             }
-            HKind::Break(v) => {
-                let result = f.loops.last().and_then(|l| l.result);
+            HKind::Break { value: v, depth } => {
+                let target = f.loops.len().checked_sub(1 + *depth as usize);
+                let result = target.and_then(|i| f.loops[i].result);
+                let from = target.map_or(f.defers.len(), |i| f.loops[i].defer_depth);
+                let deferred = f.defers[from..].iter().any(|d| !d.is_empty());
                 match (v, result) {
+                    // The value is computed before the deferred code runs.
+                    (Some(v), Some(r)) if deferred => {
+                        let mark = f.next_reg;
+                        let t = self.alloc(f);
+                        self.expr_to(f, v, t);
+                        self.emit_defers(f, from);
+                        self.mv(f, r, t);
+                        f.next_reg = mark;
+                    }
                     (Some(v), Some(r)) => self.expr_to(f, v, r),
                     (None, Some(r)) => {
+                        self.emit_defers(f, from);
                         self.emit(f, Op::LoadUnit { dst: r });
                     }
-                    _ => {}
+                    _ => self.emit_defers(f, from),
                 }
                 let j = self.emit_jump(f);
-                if let Some(l) = f.loops.last_mut() {
-                    l.breaks.push(j);
+                if let Some(i) = target {
+                    f.loops[i].breaks.push(j);
                 }
             }
-            HKind::Continue => {
+            HKind::Continue { depth } => {
+                let target = f.loops.len().checked_sub(1 + *depth as usize);
+                self.emit_defers(f, target.map_or(f.defers.len(), |i| f.loops[i].defer_depth));
                 let j = self.emit_jump(f);
-                if let Some(l) = f.loops.last_mut() {
-                    l.continues.push(j);
+                if let Some(i) = target {
+                    f.loops[i].continues.push(j);
                 }
             }
             HKind::Return(v) => match v {
@@ -1012,6 +1279,7 @@ impl<'a> Compiler<'a> {
                     f.next_reg = mark;
                 }
                 None => {
+                    self.emit_defers(f, 0);
                     self.emit(f, Op::RetUnit);
                 }
             },
@@ -1054,8 +1322,15 @@ impl<'a> Compiler<'a> {
                 let mark = f.next_reg;
                 let base = self.call_args(f, args, reflect.len());
                 for (i, t) in reflect.iter().enumerate() {
-                    let desc = reflect::type_desc(self.cp, t);
-                    let k = self.const_idx(Const::TypeDesc(Arc::new(desc)));
+                    let prog = &mut *self.prog;
+                    let add = |desc| {
+                        prog.consts.push(Const::TypeDesc(desc));
+                        (prog.consts.len() - 1) as u32
+                    };
+                    let Some(k) = self.descs.const_for(self.cp, t, add) else {
+                        self.errors.push(Diag::error(e.span, "type too large to describe at runtime"));
+                        continue;
+                    };
                     self.emit(f, Op::LoadConst { dst: base + i as Reg, k });
                 }
                 self.set_line(f, e.span);
@@ -1073,6 +1348,46 @@ impl<'a> Compiler<'a> {
                 self.set_line(f, e.span);
                 self.emit(f, Op::Call { base, argc: args.len() as u16 });
                 self.mv(f, dst, base);
+                f.next_reg = mark;
+            }
+            HKind::CallTrait { slot, args, impl_id, .. } => {
+                let mark = f.next_reg;
+                match self.static_target(*impl_id, *slot) {
+                    // The impl is known: call its method directly.
+                    Some(proto) => {
+                        let base = self.call_args(f, args, 0);
+                        self.set_line(f, e.span);
+                        self.emit(f, Op::CallDirect { base, proto });
+                        self.mv(f, dst, base);
+                    }
+                    // Otherwise fetch the method from the dictionary (the first argument).
+                    None => {
+                        let base = self.call_args(f, args, 1);
+                        self.emit(f, Op::GetField { dst: base, obj: base + 1, idx: *slot as u16 });
+                        self.set_line(f, e.span);
+                        self.emit(f, Op::Call { base, argc: args.len() as u16 });
+                        self.mv(f, dst, base);
+                    }
+                }
+                f.next_reg = mark;
+            }
+            HKind::Dict { impl_id, args } => {
+                if let Some(k) = self.const_dict(e) {
+                    self.emit(f, Op::LoadConst { dst, k });
+                    return;
+                }
+                let mark = f.next_reg;
+                let slots = &self.cp.impls[*impl_id as usize].slots;
+                let n = slots.len() + args.len();
+                let start = self.alloc_n(f, n);
+                for (i, &fid) in slots.iter().enumerate() {
+                    let k = self.fn_const(fid);
+                    self.emit(f, Op::LoadConst { dst: start + i as Reg, k });
+                }
+                for (i, a) in args.iter().enumerate() {
+                    self.expr_to(f, a, start + (slots.len() + i) as Reg);
+                }
+                self.emit(f, Op::NewTuple { dst, start, count: n as u16 });
                 f.next_reg = mark;
             }
             HKind::MakeVariant { rt_id, args } => {
@@ -1292,7 +1607,14 @@ impl<'a> Compiler<'a> {
             }
             HKind::Try { e: inner, kind } => {
                 let mark = f.next_reg;
-                let v = self.expr_reg(f, inner);
+                let v = if defers_pending(f) {
+                    // A fresh register: deferred code may assign the local tested.
+                    let t = self.alloc(f);
+                    self.expr_to(f, inner, t);
+                    t
+                } else {
+                    self.expr_reg(f, inner)
+                };
                 let (good, _) = match kind {
                     TryKind::Option => (self.prog.ids.some, self.prog.ids.none),
                     _ => (self.prog.ids.ok, self.prog.ids.err),
@@ -1303,6 +1625,7 @@ impl<'a> Compiler<'a> {
                 let jend = self.emit_jump(f);
                 self.patch_list(f, fail);
                 self.set_line(f, e.span);
+                self.emit_defers(f, 0);
                 match kind {
                     TryKind::Option => {
                         let t = self.alloc(f);
@@ -1398,6 +1721,39 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    /// The proto of the method a trait call invokes, when its dictionary
+    /// comes from a known impl.
+    fn static_target(&self, impl_id: Option<u32>, slot: u32) -> Option<u32> {
+        let fid = *self.cp.impls[impl_id? as usize].slots.get(slot as usize)?;
+        self.fn_protos[fid as usize]
+    }
+
+    fn fn_const(&mut self, fid: FnId) -> u32 {
+        match self.fn_protos[fid as usize] {
+            Some(p) => self.const_idx(Const::Fn(p)),
+            None => self.const_idx(Const::Str("<missing fn>".into())),
+        }
+    }
+
+    /// A dictionary that does not depend on the function's own dictionaries
+    /// is built once, as a constant.
+    fn const_dict(&mut self, e: &HExpr) -> Option<u32> {
+        let HKind::Dict { impl_id, args } = &e.kind else { return None };
+        let mut items = Vec::new();
+        for a in args {
+            items.push(self.const_dict(a)?);
+        }
+        let slots = self.cp.impls[*impl_id as usize].slots.clone();
+        let mut all: Vec<u32> = slots.iter().map(|&fid| self.fn_const(fid)).collect();
+        all.extend(items);
+        if let Some(&k) = self.dict_consts.get(&all) {
+            return Some(k);
+        }
+        let k = self.const_idx(Const::Tuple(all.clone()));
+        self.dict_consts.insert(all, k);
+        Some(k)
+    }
+
     /// Emits the per-iteration step of a fused loop; returns exit jump sites.
     /// kind: 0 = list, 1 = range, 2 = inclusive range.
     fn for_next(&mut self, f: &mut FnState, kind: u8, var: Reg, base: Reg) -> Vec<usize> {
@@ -1448,6 +1804,235 @@ impl<'a> Compiler<'a> {
         });
         self.variant_wrappers.insert(rt, p);
         p
+    }
+
+    // ------------------------------------------------------------------
+    // Loop-invariant hoisting
+
+    /// The hoisting key of a constant or immutable-global expression.
+    fn hoist_key(&self, e: &HExpr) -> Option<HoistKey> {
+        Some(match &e.kind {
+            HKind::Int(i) => HoistKey::Int(*i),
+            HKind::Float(x) => HoistKey::Float(x.to_bits()),
+            HKind::Str(s) => HoistKey::Str(s.clone()),
+            HKind::Bytes(b) => HoistKey::Bytes(b.clone()),
+            HKind::Dur(d) => HoistKey::Dur(*d),
+            HKind::Tag(t) => HoistKey::Tag(*t),
+            HKind::Global(g) if self.cp.globals.get(*g as usize).is_some_and(|gi| !gi.mutable) => HoistKey::Global(*g),
+            _ => return None,
+        })
+    }
+
+    /// Hoistable values used in loop `e` outside nested lambdas, most
+    /// frequent first, plus whether `e` contains lambdas and its size.
+    ///
+    /// Constants only count where the compiler evaluates them with
+    /// `expr_reg` (as instruction operands): elsewhere they are materialised
+    /// into a fixed register anyway, so hoisting would not save anything.
+    /// Immutable globals count everywhere, since a `Move` from a register is
+    /// cheaper than a checked `LoadGlobal`.
+    fn hoist_candidates(&self, e: &HExpr) -> (Vec<HoistKey>, bool, usize) {
+        let mut in_lambda: HashSet<*const HExpr> = HashSet::new();
+        let mut has_lambda = false;
+        let mut nodes = 0;
+        let mut found: Vec<(HoistKey, usize)> = Vec::new();
+        let mut count = |k: HoistKey| match found.iter_mut().find(|(fk, _)| *fk == k) {
+            Some(entry) => entry.1 += 1,
+            None => found.push((k, 1)),
+        };
+        walk(e, &mut |x| {
+            nodes += 1;
+            if in_lambda.contains(&(x as *const HExpr)) {
+                return;
+            }
+            if let HKind::Lambda(l) = &x.kind {
+                // A separate function with its own registers.
+                has_lambda = true;
+                walk(&l.body, &mut |y| {
+                    in_lambda.insert(y as *const HExpr);
+                });
+                return;
+            }
+            if let Some(k @ HoistKey::Global(_)) = self.hoist_key(x) {
+                count(k);
+            }
+            self.operands(x, &mut |o| {
+                if let Some(k) = self.hoist_key(o)
+                    && !matches!(k, HoistKey::Global(_))
+                {
+                    count(k);
+                }
+            });
+        });
+        // Most frequent first; ties keep source order.
+        found.sort_by_key(|e| std::cmp::Reverse(e.1));
+        (found.into_iter().map(|(k, _)| k).collect(), has_lambda, nodes)
+    }
+
+    /// Calls `out` for the direct sub-expressions of `x` that the compiler
+    /// evaluates with `expr_reg` (approximately; used for hoisting only).
+    fn operands<'x>(&self, x: &'x HExpr, out: &mut impl FnMut(&'x HExpr)) {
+        let small = |e: &HExpr| matches!(e.kind, HKind::Int(k) if k >= i16::MIN as i64 && k <= i16::MAX as i64);
+        match &x.kind {
+            HKind::Arith { op, l, r } => {
+                out(l);
+                // `x + k` / `x - k` use an immediate.
+                if !(matches!(op, ArithOp::Add | ArithOp::Sub) && matches!(l.ty, Type::Int) && small(r)) {
+                    out(r);
+                }
+            }
+            HKind::Cmp { l, r, .. } => {
+                out(l);
+                out(r);
+            }
+            HKind::Index { obj, index, .. } => {
+                out(obj);
+                out(index);
+            }
+            HKind::Range { start, end, .. } => {
+                out(start);
+                out(end);
+            }
+            HKind::InsertLocal { key, value, .. } => {
+                out(key);
+                out(value);
+            }
+            HKind::Unary { e, .. } | HKind::Field { obj: e, .. } | HKind::Try { e, .. } | HKind::ToStr(e) | HKind::Debug(e) => out(e),
+            HKind::Coalesce { l, .. } => out(l),
+            HKind::PushLocal { value, .. } => out(value),
+            HKind::IfLet { value, .. } | HKind::WhileLet { value, .. } => out(value),
+            HKind::Match { scrut, .. } => out(scrut),
+            HKind::Interp(parts) => {
+                for p in parts {
+                    if let InterpPart::Expr(e, _) = p {
+                        out(e);
+                    }
+                }
+            }
+            HKind::CallNative { native, args, .. } if self.inline.contains_key(native) => {
+                for a in args {
+                    if let HArg::Expr(e) = a {
+                        out(e);
+                    }
+                }
+            }
+            HKind::Assign { place, op, value, .. } => {
+                match place {
+                    Place::Field { obj, .. } => out(obj),
+                    Place::Index { obj, index, .. } => {
+                        out(obj);
+                        out(index);
+                    }
+                    _ => {}
+                }
+                let local = matches!(place, Place::Local(_));
+                let immediate = matches!(op, Some(ArithOp::Add | ArithOp::Sub)) && small(value);
+                if (op.is_some() || !local) && !immediate {
+                    out(value);
+                }
+            }
+            HKind::If { cond, .. } | HKind::While { cond, .. } => self.cond_operands(cond, out),
+            _ => {}
+        }
+    }
+
+    /// Operands of a condition compiled by `cond_jump`.
+    fn cond_operands<'x>(&self, cond: &'x HExpr, out: &mut impl FnMut(&'x HExpr)) {
+        match &cond.kind {
+            HKind::And(a, b) => {
+                self.cond_operands(a, out);
+                self.cond_operands(b, out);
+            }
+            HKind::Unary { op: HUnOp::Not, e } => out(e),
+            HKind::Cmp { .. } | HKind::Bool(_) => {}
+            _ => out(cond),
+        }
+    }
+
+    /// Loads the constant `k` into `dst`.
+    fn load_hoisted(&mut self, f: &mut FnState, k: &HoistKey, dst: Reg) {
+        match k {
+            HoistKey::Int(i) => self.load_int(f, dst, *i),
+            HoistKey::Str(s) => self.load_str(f, dst, s),
+            HoistKey::Tag(t) => {
+                self.emit(f, Op::LoadTag { dst, tag: *t });
+            }
+            HoistKey::Float(_) | HoistKey::Bytes(_) | HoistKey::Dur(_) => {
+                let c = match k {
+                    HoistKey::Float(bits) => Const::Float(f64::from_bits(*bits)),
+                    HoistKey::Bytes(b) => Const::Bytes(b.clone()),
+                    HoistKey::Dur(d) => Const::Dur(*d),
+                    _ => unreachable!(),
+                };
+                let kidx = self.const_idx(c);
+                self.emit(f, Op::LoadConst { dst, k: kidx });
+            }
+            HoistKey::Global(g) => {
+                self.emit(f, Op::LoadGlobal { dst, g: *g });
+            }
+        }
+    }
+
+    /// Compiles the outermost loop `e` with its loop-invariant constants and
+    /// immutable globals loaded into registers once, before the loop.
+    ///
+    /// Constants are pure. An immutable global never changes once
+    /// initialised, but reading it before its initialiser has run must
+    /// panic at the point of use, so hoisted globals are loaded with
+    /// `HoistGlobal`, which jumps to a second, unhoisted copy of the loop if
+    /// any of them is still uninitialised. Loops containing lambdas (whose
+    /// prototypes would be duplicated) or larger than `MAX_VERSIONED_NODES`
+    /// only get their constants hoisted.
+    fn hoisted_loop(&mut self, f: &mut FnState, e: &HExpr, dst: Reg) {
+        let mark = f.next_reg;
+        f.hoisting = true;
+        let (cands, has_lambda, nodes) = self.hoist_candidates(e);
+        let cands: Vec<HoistKey> = cands.into_iter().take(MAX_HOISTED).collect();
+        if cands.is_empty() || f.next_reg + cands.len() as u32 > HOIST_REG_BUDGET {
+            self.expr_to(f, e, dst);
+            f.hoisting = false;
+            return;
+        }
+        let version = !has_lambda && nodes <= MAX_VERSIONED_NODES && !f.no_fused;
+        let mut globals = Vec::new();
+        for k in &cands {
+            match k {
+                HoistKey::Global(g) => {
+                    if version && *g <= u16::MAX as u32 {
+                        globals.push((*g as u16, k.clone()));
+                    }
+                }
+                _ => {
+                    let r = self.alloc(f);
+                    self.load_hoisted(f, k, r);
+                    f.hoisted.insert(k.clone(), r);
+                }
+            }
+        }
+        if globals.is_empty() {
+            self.expr_to(f, e, dst);
+        } else {
+            let mut guards = Vec::new();
+            for (g, k) in &globals {
+                let r = self.alloc(f);
+                guards.push(self.emit(f, Op::HoistGlobal { dst: r, g: *g, off: 0 }));
+                f.hoisted.insert(k.clone(), r);
+            }
+            let locals = f.local_reg.clone();
+            self.expr_to(f, e, dst);
+            let jend = self.emit_jump(f);
+            // Some global was not initialised yet: run the loop without them.
+            self.patch_list(f, guards);
+            for (_, k) in &globals {
+                f.hoisted.remove(k);
+            }
+            f.local_reg = locals;
+            self.expr_to(f, e, dst);
+            self.patch_here(f, jend);
+        }
+        f.hoisted.clear();
+        f.hoisting = false;
+        f.next_reg = mark;
     }
 
     // ------------------------------------------------------------------
@@ -1796,6 +2381,10 @@ impl<'a> Compiler<'a> {
             no_fused: f.no_fused,
             too_big: false,
             in_tail_fn: true,
+            hoisted: HashMap::new(),
+            hoisting: false,
+            defers: Vec::new(),
+            defer_ops: 0,
         };
         for &p in &lam.params {
             let r = self.alloc(&mut sub);
@@ -1826,6 +2415,11 @@ impl<'a> Compiler<'a> {
         });
         p
     }
+}
+
+/// Whether a deferred expression is pending in the current function.
+fn defers_pending(f: &FnState) -> bool {
+    f.defers.iter().any(|d| !d.is_empty())
 }
 
 fn arith_op(op: ArithOp, lt: &Type, rt: &Type, dst: Reg, a: Reg, b: Reg) -> Op {
@@ -1908,7 +2502,7 @@ fn collect_local_refs(e: &HExpr, out: &mut Vec<LocalId>) {
 }
 
 /// Pre-order traversal of every expression (including inside lambdas, places and args).
-fn walk(e: &HExpr, f: &mut impl FnMut(&HExpr)) {
+pub(crate) fn walk(e: &HExpr, f: &mut impl FnMut(&HExpr)) {
     f(e);
     match &e.kind {
         HKind::Let { init, else_, .. } => {
@@ -1975,18 +2569,19 @@ fn walk(e: &HExpr, f: &mut impl FnMut(&HExpr)) {
             walk(end, f);
             walk(body, f);
         }
-        HKind::Break(x) | HKind::Return(x) => {
+        HKind::Break { value: x, .. } | HKind::Return(x) => {
             if let Some(x) = x {
                 walk(x, f);
             }
         }
-        HKind::Call { args, .. } | HKind::CallNative { args, .. } => {
+        HKind::Call { args, .. } | HKind::CallNative { args, .. } | HKind::CallTrait { args, .. } => {
             for a in args {
                 if let HArg::Expr(x) = a {
                     walk(x, f);
                 }
             }
         }
+        HKind::Dict { args, .. } => args.iter().for_each(|x| walk(x, f)),
         HKind::CallValue { callee, args } => {
             walk(callee, f);
             args.iter().for_each(|x| walk(x, f));
@@ -2020,7 +2615,7 @@ fn walk(e: &HExpr, f: &mut impl FnMut(&HExpr)) {
                 walk(x, f);
             }
         }
-        HKind::Unary { e, .. } | HKind::ToStr(e) | HKind::Debug(e) | HKind::Spawn(e) | HKind::Try { e, .. } => walk(e, f),
+        HKind::Unary { e, .. } | HKind::ToStr(e) | HKind::Debug(e) | HKind::Spawn(e) | HKind::Defer(e) | HKind::Try { e, .. } => walk(e, f),
         HKind::Arith { l, r, .. } | HKind::Cmp { l, r, .. } | HKind::And(l, r) | HKind::Or(l, r) | HKind::Coalesce { l, r, .. } => {
             walk(l, f);
             walk(r, f);
@@ -2038,5 +2633,54 @@ fn walk(e: &HExpr, f: &mut impl FnMut(&HExpr)) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::vm::bytecode::{Op, Program};
+    use crate::{Config, Engine};
+    use std::sync::Arc;
+
+    fn compile(src: &str) -> Arc<Program> {
+        let engine = Engine::new(Config::new());
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let root = std::env::current_dir().unwrap();
+        match rt.block_on(engine.compile("main.sand", src, root, None)) {
+            Ok(c) => c.program,
+            Err(e) => panic!("{e}"),
+        }
+    }
+
+    /// The first loop (from its back-edge target to the `Loop` instruction)
+    /// of function `name`, and the code before it.
+    fn first_loop<'p>(prog: &'p Program, name: &str) -> (&'p [Op], &'p [Op]) {
+        let p = prog.protos.iter().find(|p| p.name == name).unwrap();
+        let (at, off) =
+            p.code.iter().enumerate().find_map(|(i, op)| if let Op::Loop { off } = op { Some((i, *off)) } else { None }).unwrap();
+        let top = (at as i64 + 1 + off as i64) as usize;
+        (&p.code[top..=at], &p.code[..top])
+    }
+
+    fn loads(ops: &[Op]) -> usize {
+        ops.iter().filter(|op| matches!(op, Op::LoadInt { .. } | Op::LoadConst { .. } | Op::LoadGlobal { .. } | Op::LoadTag { .. })).count()
+    }
+
+    #[test]
+    fn loop_invariant_constants_and_immutable_globals_are_hoisted() {
+        let prog = compile(
+            "let K = 3\nlet S = \"ab\"\nfn f(n: int) -> int {\n    var t = 0\n    var i = 0\n    while i < 100000 {\n        t += K * i + i % 7 + S.len()\n        if t > 1000000 { t = t % 1000003 }\n        i += 1\n    }\n    t\n}\nprint(f(3))",
+        );
+        let (body, pre) = first_loop(&prog, "f");
+        assert_eq!(loads(body), 0, "{body:#?}");
+        assert_eq!(pre.iter().filter(|op| matches!(op, Op::HoistGlobal { .. })).count(), 2, "{pre:#?}");
+    }
+
+    #[test]
+    fn mutable_globals_are_not_hoisted() {
+        let prog = compile("var g = 1\nfn h(n: int) -> int {\n    var t = 0\n    for i in 0..n { t += g }\n    t\n}\nprint(h(3))");
+        let (body, pre) = first_loop(&prog, "h");
+        assert_eq!(body.iter().filter(|op| matches!(op, Op::LoadGlobal { .. })).count(), 1, "{body:#?}");
+        assert!(!pre.iter().any(|op| matches!(op, Op::HoistGlobal { .. })), "{pre:#?}");
     }
 }
