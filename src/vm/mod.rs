@@ -272,7 +272,8 @@ pub struct Host {
     pub rng: Rng,
     pub log_level: u8,
     pub interrupt: Arc<AtomicBool>,
-    pub stream_decisions: HashMap<u8, bool>,
+    /// Cached decisions for stdout (index 0) and stderr (1).
+    pub stream_decisions: [Option<bool>; 2],
     pub(crate) tls: crate::stdlib::TlsSettings,
     /// Recently compiled regexes: (pattern hash, heap handle), see
     /// `stdlib::regex`. The handles are not GC roots; entries are checked
@@ -774,8 +775,9 @@ impl Vm {
 
     /// Writes to stdout (1) or stderr (2), enforcing policy and output limits.
     pub fn write_stream(&mut self, which: u8, data: &[u8]) -> Result<(), Ctl> {
-        let allowed = match self.host.stream_decisions.get(&which) {
-            Some(&d) => d,
+        let slot = usize::from(which != 1);
+        let allowed = match self.host.stream_decisions[slot] {
+            Some(d) => d,
             None => {
                 let cap = if which == 1 { Capability::Stdout } else { Capability::Stderr };
                 let d = self.permit(&cap)?;
@@ -785,7 +787,7 @@ impl Vm {
                     && self.host.denies_once.is_empty()
                     && let Decision::Allow | Decision::Deny = self.host.policy.check(&cap)
                 {
-                    self.host.stream_decisions.insert(which, d);
+                    self.host.stream_decisions[slot] = Some(d);
                 }
                 d
             }

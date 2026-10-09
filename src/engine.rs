@@ -680,7 +680,7 @@ impl Engine {
             rng: Rng::new(c.seed.unwrap_or_else(entropy_seed)),
             log_level: 1,
             interrupt: self.interrupt.clone(),
-            stream_decisions: HashMap::new(),
+            stream_decisions: [None; 2],
             tls: c.tls.clone(),
             regex_cache: Vec::new(),
         };

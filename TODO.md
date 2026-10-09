@@ -42,10 +42,6 @@ Follow-up work, roughly in priority order.
       and is slower). A threaded design (one function per instruction with
       guaranteed tail calls, Rust's `become`) would remove the shared
       register allocation once it is stable.
-- [ ] CPython parity (`bench/examples/run.py`): every workload is at parity
-      or faster except `search_index_index` (about 1.1x), dominated by a
-      character-by-character lazy tokenizer (`chars_iter`, `is_alnum`,
-      string appends): about 40 ns per character against CPython's 25.
 
 ### Language
 

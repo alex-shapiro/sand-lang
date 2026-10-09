@@ -125,3 +125,37 @@ so the run lasts longer than the sampling window. Natives show up as
 `stdlib::core::register_*::{closure}`; `atos -i -o target/release/sand -l
 LOAD_ADDRESS ADDR` on a sampled address maps such a closure to its source
 line, and so to the builtin's name.
+
+## Results
+
+Apple M-series laptop, `cargo build --release`, CPython 3.14.8, 5 runs each
+(ratio = Sand median / CPython median; below 1 means Sand is faster):
+
+| workload            | Sand    | CPython | ratio |
+|---------------------|---------|---------|-------|
+| life                | 231 ms  | 400 ms  | 0.58  |
+| life_big            | 232 ms  | 423 ms  | 0.55  |
+| calc                | 218 ms  | 353 ms  | 0.62  |
+| adventure           | 160 ms  | 166 ms  | 0.96  |
+| template_render     | 208 ms  | 298 ms  | 0.70  |
+| template_compile    | 142 ms  | 189 ms  | 0.75  |
+| ledger              | 274 ms  | 554 ms  | 0.49  |
+| search_index_index  | 191 ms  | 196 ms  | 0.98  |
+| search_index_search | 199 ms  | 609 ms  | 0.33  |
+| search_index_add    | 137 ms  | 241 ms  | 0.57  |
+| search_index_stats  | 134 ms  | 359 ms  | 0.37  |
+| http_fetch          | 88 ms   | 211 ms  | 0.42  |
+| chat_server         | 484 ms  | 542 ms  | 0.89  |
+| s3_put              | 61 ms   | 81 ms   | 0.75  |
+| s3_get              | 136 ms  | 241 ms  | 0.56  |
+| s3_ls               | 79 ms   | 82 ms   | 0.96  |
+| s3_small_ops        | 255 ms  | 983 ms  | 0.26  |
+
+Geometric mean: 0.59. When this harness was written, five workloads were
+slower than CPython (`s3_ls` 11.7x, `s3_put` and `adventure` 2.3x,
+`search_index_index` 2.0x, `http_fetch` 1.05x); the changes that fixed them
+(a regex compile cache, buffered standard output and synchronous buffered
+`read_line`, SHA-256 with the CPU's instructions, in-place string appends,
+iterator fusion and native iterator sources, a hot file system worker, and
+interpreter work) are described in `docs/INTERNALS.md`.
+
