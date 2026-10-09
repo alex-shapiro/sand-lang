@@ -81,7 +81,8 @@ impl Checker<'_> {
                     let args: Vec<Type> = (0..n).map(|_| self.fresh()).collect();
                     let et = Type::Named(d, args.clone());
                     if !self.unify(&et, &rt) {
-                        let msg = format!("type mismatch: expected {}, found {}", self.show(&rt), self.show(&et));
+                        let (e, f) = self.show_pair(&rt, &et);
+                        let msg = format!("type mismatch: expected {e}, found {f}");
                         self.error(last.span, msg);
                         return None;
                     }
@@ -117,7 +118,8 @@ impl Checker<'_> {
         let args: Vec<Type> = (0..n).map(|_| self.fresh()).collect();
         let et = Type::Named(d, args.clone());
         if !self.unify(&et, &rt) {
-            let msg = format!("type mismatch: expected {}, found {}", self.show(&rt), self.show(&et));
+            let (e, f) = self.show_pair(&rt, &et);
+            let msg = format!("type mismatch: expected {e}, found {f}");
             self.error(last.span, msg);
             return None;
         }

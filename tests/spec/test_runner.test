@@ -61,7 +61,7 @@ ok err
 FAIL fail: explicit
 4 passed, 2 failed
 
-=== tests see initialised top level state and are isolated
+=== tests see initialized top level state and are isolated
 var counter = 10
 
 test "mutates" {

@@ -6,52 +6,52 @@ Follow-up work, roughly in priority order.
 
 ### Sandbox
 
-- [ ] **Windows file system races.** Windows still uses path-based file
-      operations, so the symlink-swap race closed on Unix (`fs_safe.rs`)
-      remains there. Use handle-relative opens (`NtCreateFile` with a root
-      directory handle, via a safe wrapper crate) or verify handles after
-      opening.
-- [ ] **Symlink names in deny rules.** A symlink's own final name is matched
-      by the folded (case/Unicode-insensitive) comparison, but not converted
-      to its stored spelling like other entries.
+- [ ] **Windows rename.** No safe API renames by handle, so on Windows
+      `fs_safe::rename` is path-based: it holds the directories on both paths
+      open (they cannot be renamed or replaced), but an entry's parent could
+      still be emptied and turned into a junction during the call (usually
+      detected afterwards, not prevented). The Windows `fs_safe` code has
+      only been cross-compiled, not run (see "Test coverage").
 - [ ] **HTTP server fairness.** `accept` reads up to 64 pending connections
       at once; 64+ idle connections can still delay a new request by up to
       30s, and a waiting `accept` holds up to half the free resource slots.
-- [ ] **Caught Rust panics in sessions.** After an internal panic is caught,
-      the VM is memory safe but may be inconsistent; a session should be
-      reset automatically.
-- [ ] **Small accounting gaps.** Fixed 8 KiB per-connection buffers aren't
-      counted against `max_memory`; checks made inside a native may overrun
-      `max_instructions` by up to one slice (20,000 units); the bytecode
-      compiler, linter and formatter are not covered by the compile budget.
+
+- [ ] **Unconfirmed from the metering audit.** Path normalization
+      (`canonicalize`, `read_dir`) runs on the VM thread before the
+      permission check, so a hung network file system could block it beyond
+      the interrupt and wall-time limits; buffered standard output is
+      flushed synchronously (a stalled pipe could block the run); list and
+      map growth doubles capacity before the next memory check (up to ~2x
+      slack); `[a, ..rest]` patterns copy without a memory check;
+      `check::traits::resolve_holes` re-walks a body per progress pass
+      without charging the compile budget.
 
 ### Test coverage
 
 - [ ] Run the CI workflow (`.github/workflows/ci.yml`) on Windows and Linux:
       nothing has run there yet (Windows is only cross-checked with
-      `--no-default-features`; `ring` needs a Windows C toolchain).
-- [ ] An automated test of the real `/dev/tty` / `CONIN$` prompter (the
-      dialogue is unit tested and `--prompt-stdin` is tested end to end).
+      `--no-default-features`; `ring` needs a Windows C toolchain). This
+      includes the ConPTY variant of `tests/prompt_tty.rs`, which has only
+      been compiled.
 
 ### Tooling
 
-- [ ] REPL: background tasks only progress while an input runs; `:type` on
-      generic functions shows inference variables; redefining a type can give
-      messages like "expected Point, found Point".
+- [ ] REPL line editing: output of background tasks re-prints the prompt but
+      not the text typed after it (it stays in the terminal's line buffer);
+      a line editor (history, redraw) would fix this. A script read of
+      standard input started during an input and still pending between
+      inputs competes with the REPL for lines.
 
 ### Performance
 
-- [ ] Lazy iterator chains cost about 2x eager ones per element (closure
-      call overhead); consider fusing adapters or cheaper closure calls.
-- [ ] The interpreter's dispatch loop is sensitive to code layout (±10-25%
-      on call-heavy benchmarks from unrelated edits). Consider splitting cold
-      opcodes into separate functions systematically, or a threaded-dispatch
-      design.
-- [ ] Task spawn/wait got slower during the sandbox fixes (5k tasks: 2.5ms
-      -> 4.5ms, about 0.4µs per task), probably from per-task stack and
-      wait-list accounting; profile and trim.
-- [ ] Incremental (not just generational) GC: major collections still pause
-      in proportion to the heap; heaps under 8 MB only get major collections.
+- [ ] Dispatch loop: the loop now keeps its state minimal and its cold
+      paths out of line (docs/INTERNALS.md "Dispatch loop"), and `cargo bench`
+      prints a geometric mean to compare builds, but the cost of individual
+      instructions still shifts by up to ±15% between builds as LLVM
+      reallocates registers (a full split of cold instructions was measured
+      and is slower). A threaded design (one function per instruction with
+      guaranteed tail calls, Rust's `become`) would remove the shared
+      register allocation once it is stable.
 
 ### Language
 

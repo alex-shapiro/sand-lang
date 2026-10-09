@@ -2,8 +2,8 @@
 
 use std::any::Any;
 use std::collections::{HashMap, VecDeque};
-use std::hash::{BuildHasherDefault, Hasher};
-use std::sync::Arc;
+use std::hash::{BuildHasher, Hasher};
+use std::sync::{Arc, OnceLock};
 
 /// A runtime value. Immediate values are stored inline; everything else is a
 /// handle into the engine's heap.
@@ -27,7 +27,7 @@ pub enum Value {
     Tag(u32),
     /// A heap object handle.
     Obj(u32),
-    /// A global that has not been initialised yet.
+    /// A global that has not been initialized yet.
     Uninit,
     /// `variant(())`.
     VUnit(u32),
@@ -142,18 +142,44 @@ impl VariantRef<'_> {
     }
 }
 
-/// A fast, deterministic hasher (FxHash).
-#[derive(Default, Clone, Copy)]
+/// The fast hasher of map and set keys. FxHash, but each 8-byte word is mixed
+/// in with a folded multiply (the two halves of a 128-bit product XORed, as in
+/// foldhash), starting from a random per-process seed.
+///
+/// Scripts choose map and set keys, so they must not be able to choose keys
+/// that collide: in a table full of collisions every operation, charged as
+/// a unit or so, scans all the colliding keys. Plain FxHash failed both
+/// ways: the low bits of its product, which pick the bucket, depend only on
+/// the low bits of the key (so all multiples of 2^32 collided), and any set
+/// of colliding keys could be computed in advance. The folded multiply
+/// makes every bit of the key affect the low bits, and the seed, which
+/// scripts cannot observe (no iteration order depends on hashes), keeps
+/// collisions from being computed in advance.
+#[derive(Clone, Copy)]
 pub struct FxHasher {
     hash: u64,
 }
 
-const SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+const MULTIPLIER: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+
+/// The random seed of this process's hashes.
+fn hash_seed() -> u64 {
+    static SEED: OnceLock<u64> = OnceLock::new();
+    *SEED.get_or_init(|| std::collections::hash_map::RandomState::new().hash_one(0x5eed_u64))
+}
+
+impl Default for FxHasher {
+    /// A hasher starting from the process seed.
+    fn default() -> Self {
+        FxHasher { hash: hash_seed() }
+    }
+}
 
 impl FxHasher {
     #[inline]
     fn add(&mut self, w: u64) {
-        self.hash = (self.hash.rotate_left(5) ^ w).wrapping_mul(SEED);
+        let p = ((self.hash ^ w) as u128).wrapping_mul(MULTIPLIER as u128);
+        self.hash = (p as u64) ^ ((p >> 64) as u64);
     }
 }
 
@@ -165,9 +191,8 @@ impl Hasher for FxHasher {
             self.add(u64::from_le_bytes(*c));
         }
         if !rem.is_empty() {
-            let mut buf = [0u8; 8];
-            buf[..rem.len()].copy_from_slice(rem);
-            self.add(u64::from_le_bytes(buf));
+            let w = rem.iter().rev().fold(0u64, |w, &b| (w << 8) | b as u64);
+            self.add(w);
         }
     }
     #[inline]
@@ -196,7 +221,26 @@ impl Hasher for FxHasher {
     }
 }
 
-pub type FxBuild = BuildHasherDefault<FxHasher>;
+/// Builds [`FxHasher`]s: holds the process's seed, read once per table.
+#[derive(Clone, Copy)]
+pub struct FxBuild {
+    seed: u64,
+}
+
+impl Default for FxBuild {
+    fn default() -> Self {
+        FxBuild { seed: hash_seed() }
+    }
+}
+
+impl BuildHasher for FxBuild {
+    type Hasher = FxHasher;
+    #[inline]
+    fn build_hasher(&self) -> FxHasher {
+        FxHasher { hash: self.seed }
+    }
+}
+
 pub type FxHashMap<K, V> = HashMap<K, V, FxBuild>;
 
 /// An owned, hashable copy of a key value.
@@ -444,9 +488,26 @@ impl std::fmt::Debug for TypeDesc {
     }
 }
 
+/// The state of an [`Obj::IterFn`].
+#[derive(Debug, Clone, Copy)]
+pub enum IterSrc {
+    /// The indices of list `list` (a heap handle) below `n` (its length
+    /// when the iterator was made), stopping early if it shrinks; `i` is
+    /// the next one.
+    List { list: u32, i: i64, n: i64 },
+    /// The integers from `i` below `end`.
+    Range { i: i64, end: i64 },
+    /// The characters of string `s` (a heap handle) from byte offset `i`.
+    Chars { s: u32, i: i64 },
+}
+
 pub enum Obj {
     Free(u32),
     Str(Box<str>),
+    /// The growable buffer of a string local being appended to (see
+    /// `Op::AppendStr`); only that local's register ever holds it, and it is
+    /// turned into a `Str` before the value can be read anywhere else.
+    StrBuf(String),
     Bytes(Box<[u8]>),
     List(Vec<Value>),
     Map(Box<MapObj>),
@@ -456,6 +517,9 @@ pub enum Obj {
     Variant(u32, Box<[Value]>),
     Closure(u32, Box<[Value]>),
     NativeFn(u32),
+    /// The `next` function of the iterator of a list, range or string: a
+    /// function value (`fn() -> T?`) that the interpreter steps directly.
+    IterFn(IterSrc),
     Cell(Value),
     Range(i64, i64, bool),
     Task(Box<TaskObj>),
@@ -469,6 +533,7 @@ impl std::fmt::Debug for Obj {
         match self {
             Obj::Free(_) => write!(f, "Free"),
             Obj::Str(s) => write!(f, "Str({s:?})"),
+            Obj::StrBuf(s) => write!(f, "StrBuf({s:?})"),
             Obj::Bytes(b) => write!(f, "Bytes({b:?})"),
             Obj::List(l) => write!(f, "List({l:?})"),
             Obj::Map(_) => write!(f, "Map"),
@@ -478,6 +543,7 @@ impl std::fmt::Debug for Obj {
             Obj::Variant(d, v) => write!(f, "Variant({d}, {v:?})"),
             Obj::Closure(p, v) => write!(f, "Closure({p}, {v:?})"),
             Obj::NativeFn(n) => write!(f, "NativeFn({n})"),
+            Obj::IterFn(it) => write!(f, "IterFn({it:?})"),
             Obj::Cell(v) => write!(f, "Cell({v:?})"),
             Obj::Range(a, b, i) => write!(f, "Range({a}, {b}, {i})"),
             Obj::Task(t) => write!(f, "Task({t:?})"),
@@ -490,6 +556,9 @@ impl std::fmt::Debug for Obj {
 
 const VALUE_SIZE: usize = std::mem::size_of::<Value>();
 
+// Objects are kept small.
+const _: () = assert!(std::mem::size_of::<Obj>() == 32);
+
 /// Fixed cost of an entry of a map's or set's key index (the key's own
 /// allocations are counted in `key_bytes`).
 pub const INDEX_ENTRY_SIZE: usize = 48;
@@ -501,11 +570,13 @@ impl Obj {
         base + match self {
             Obj::Free(_) | Obj::NativeFn(_) | Obj::Cell(_) | Obj::Range(..) => 0,
             Obj::Str(s) => s.len(),
+            Obj::StrBuf(s) => s.capacity(),
             Obj::Bytes(b) => b.len(),
             Obj::List(l) => l.capacity() * VALUE_SIZE,
             Obj::Map(m) => m.entries.capacity() * (2 * VALUE_SIZE + 8) + m.index.len() * INDEX_ENTRY_SIZE + m.key_bytes,
             Obj::Set(s) => s.entries.capacity() * (VALUE_SIZE + 8) + s.index.len() * INDEX_ENTRY_SIZE + s.key_bytes,
             Obj::Tuple(t) | Obj::Struct(_, t) | Obj::Variant(_, t) | Obj::Closure(_, t) => t.len() * VALUE_SIZE,
+            Obj::IterFn(_) => 0,
             Obj::Task(_) => 32,
             Obj::Channel(c) => {
                 64 + c.queue.capacity() * VALUE_SIZE
@@ -531,6 +602,10 @@ impl Obj {
             Obj::Set(s) => s.entries.iter().flatten().for_each(|v| f(*v)),
             Obj::Tuple(t) | Obj::Struct(_, t) | Obj::Variant(_, t) | Obj::Closure(_, t) => t.iter().for_each(|v| f(*v)),
             Obj::Cell(v) => f(*v),
+            Obj::IterFn(it) => match *it {
+                IterSrc::List { list: h, .. } | IterSrc::Chars { s: h, .. } => f(Value::Obj(h)),
+                IterSrc::Range { .. } => {}
+            },
             Obj::Task(t) => f(t.result),
             Obj::Channel(c) => {
                 c.queue.iter().for_each(|v| f(*v));

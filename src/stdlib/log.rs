@@ -17,7 +17,7 @@ pub fn register(r: &mut Registry) {
     r.add_builtin("log.set_level", |vm, a| {
         let name = vm.str(a[0]);
         let Some(level) = LEVELS.iter().chain(&["OFF"]).position(|l| l.eq_ignore_ascii_case(name)) else {
-            return panic(format!("unknown log level {name:?} (expected debug, info, warn, error or off)"));
+            return panic(format!("unknown log level {:?} (expected debug, info, warn, error or off)", super::truncate(name, 64)));
         };
         vm.host.log_level = level as u8;
         Ok(Value::Unit)

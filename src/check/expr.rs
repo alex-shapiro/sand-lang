@@ -35,8 +35,10 @@ pub(crate) enum IterPlan {
     /// Ranges, lists, maps, sets and channels, with dedicated instructions.
     Builtin(IterKind),
     /// An `Iterator`: the value is kept in a hidden local, and `next` (a call
-    /// of type `T?` on it) runs before each iteration.
-    Lazy { local: LocalId, next: Box<HExpr> },
+    /// of type `T?` on it) runs before each iteration. For an `Iter`, the
+    /// local holds its `next` function instead (`next_fn`; the field is
+    /// immutable, so it is loaded once).
+    Lazy { local: LocalId, next: Box<HExpr>, next_fn: bool },
 }
 
 /// An instantiated function signature.
@@ -68,7 +70,8 @@ impl Checker<'_> {
     pub(crate) fn check_expr(&mut self, e: &Expr, expected: &Type) -> HExpr {
         let h = self.infer_inner(e, Some(expected), true);
         if !self.unify(expected, &h.ty) {
-            let msg = format!("type mismatch: expected {}, found {}", self.show(expected), self.show(&h.ty));
+            let (want, got) = self.show_pair(expected, &h.ty);
+            let msg = format!("type mismatch: expected {want}, found {got}");
             self.error(e.span, msg);
         }
         h
@@ -227,7 +230,7 @@ impl Checker<'_> {
         let vty = annotated.clone().unwrap_or_else(|| init.ty.clone());
         // Top-level bindings only need global slots if functions (or other
         // modules, or later session inputs) can see them; otherwise they are
-        // initialiser locals.
+        // initializer locals.
         let mut bound = Vec::new();
         pattern.bindings(&mut bound);
         let needs_global = is_pub || self.in_session() || bound.iter().any(|b| self.fn_names.contains(&b.name));
@@ -267,10 +270,11 @@ impl Checker<'_> {
             Some(b) => {
                 // Bindings are not visible in the else block.
                 let names = self.pattern_names(&hp);
-                let saved: Vec<(String, LocalId)> = self.fs.scopes.last().unwrap().clone();
-                self.fs.scopes.last_mut().unwrap().retain(|(n, _)| !names.contains(n));
+                let hidden: Vec<(&String, LocalId)> = names.iter().filter_map(|n| Some((n, self.fs.scopes.remove(n)?))).collect();
                 let h = self.check_block(b, None, false);
-                *self.fs.scopes.last_mut().unwrap() = saved;
+                for (n, id) in hidden {
+                    self.fs.scopes.declare(n, id);
+                }
                 if !self.resolve(&h.ty).is_never() {
                     self.error(b.span, "the `else` block of `let ... else` must diverge (return, break, continue or panic)");
                 }
@@ -288,7 +292,9 @@ impl Checker<'_> {
             // Bindings of a top-level destructuring pattern become globals.
             let bound = self.pattern_bindings(&hp);
             let names: Vec<String> = bound.iter().map(|(n, _)| n.clone()).collect();
-            self.fs.scopes.last_mut().unwrap().retain(|(n, _)| !names.contains(n));
+            for n in &names {
+                self.fs.scopes.remove(n);
+            }
             for (name, l) in bound {
                 let lty = self.fs.data[l as usize].ty.clone();
                 let g = self.globals.len() as GlobalId;
@@ -508,8 +514,7 @@ impl Checker<'_> {
         let mut lambdas = Vec::new();
         for (f, (ptys, ret, scope, fty)) in group.iter().zip(sigs) {
             let saved_generics = std::mem::replace(&mut self.fs.generics, scope);
-            self.fs.next_lambda += 1;
-            let id = self.fs.next_lambda;
+            let id = self.new_lambda();
             self.fs.ctx.push(FnCtx { ret: ret.clone(), kind: CtxKind::Lambda, loops: vec![], lambda: id, in_defer: None });
             self.push_scope();
             let mut params = Vec::new();
@@ -791,8 +796,7 @@ impl Checker<'_> {
                 mk(HKind::Continue { depth }, Type::Never, span)
             }
             ExprKind::Spawn(inner) => {
-                self.fs.next_lambda += 1;
-                let id = self.fs.next_lambda;
+                let id = self.new_lambda();
                 let ret = self.fresh();
                 self.fs.ctx.push(FnCtx { ret: ret.clone(), kind: CtxKind::Lambda, loops: vec![], lambda: id, in_defer: None });
                 self.push_scope();
@@ -947,6 +951,12 @@ impl Checker<'_> {
     pub(crate) fn instantiate_fn_with(&mut self, f: FnId, span: Span, pre: &[(ParamId, Type)]) -> Instance {
         let fi = self.fns[f as usize].clone();
         let fresh: Vec<Type> = fi.generics.iter().map(|_| self.fresh()).collect();
+        if let Some(q) = &mut self.type_query {
+            q.origins.extend(fi.generics.iter().zip(&fresh).filter_map(|(&g, v)| match v {
+                Type::Var(v) => Some((*v, g)),
+                _ => None,
+            }));
+        }
         for (p, t) in pre {
             if let Some(i) = fi.generics.iter().position(|g| g == p) {
                 self.unify(&fresh[i], t);
@@ -1587,7 +1597,8 @@ impl Checker<'_> {
                 return err(span);
             }
             let _ = fi;
-            return self.call_fn(f, Some(r), args, span);
+            let call = self.call_fn(f, Some(r), args, span);
+            return self.fuse_consumer(call);
         }
         // Trait methods: through the bounds of a type parameter, or the impls of a type.
         match self.find_trait_method(&rt, &method.name, method.span) {
@@ -1888,7 +1899,8 @@ impl Checker<'_> {
             };
         }
         if !self.unify(&l, &r) {
-            let msg = format!("type mismatch: expected {}, found {}", self.show(&l), self.show(&r));
+            let (e, f) = self.show_pair(&l, &r);
+            let msg = format!("type mismatch: expected {e}, found {f}");
             self.error(span, msg);
             return Type::Error;
         }
@@ -2193,11 +2205,12 @@ impl Checker<'_> {
                 // `Iter<T>`: call its `next` function directly.
                 let elem = args[0].clone();
                 let local = self.hidden_local(ty.clone(), span);
-                let obj = Box::new(mk(HKind::Local(local), ty, span));
                 let opt = self.option_of(elem.clone());
-                let callee = Box::new(mk(HKind::Field { obj, index: 0 }, Type::func(vec![], opt.clone()), span));
+                let fty = Type::func(vec![], opt.clone());
+                self.fs.data[local as usize].ty = fty.clone();
+                let callee = Box::new(mk(HKind::Local(local), fty, span));
                 let next = mk(HKind::CallValue { callee, args: vec![] }, opt, span);
-                (IterPlan::Lazy { local, next: Box::new(next) }, elem)
+                (IterPlan::Lazy { local, next: Box::new(next), next_fn: true }, elem)
             }
             Type::Named(d, args) if d == self.wk.channel => builtin(IterKind::Channel, args[0].clone()),
             Type::Error => builtin(IterKind::List, Type::Error),
@@ -2214,7 +2227,7 @@ impl Checker<'_> {
                     let slot = self.traits[t as usize].methods.iter().position(|m| m.name == "next").unwrap_or(0) as u32;
                     let tr = TraitRef { trait_id: t, args: vec![elem.clone()] };
                     let next = self.call_trait_method(tr, slot, ty, Some(recv), &[], span);
-                    (IterPlan::Lazy { local, next: Box::new(next) }, elem)
+                    (IterPlan::Lazy { local, next: Box::new(next), next_fn: false }, elem)
                 }
                 None => {
                     let msg = format!("type {} is not iterable (it does not implement `Iterator`)", self.show(&other));
@@ -2228,9 +2241,20 @@ impl Checker<'_> {
     /// The loop over `ih` that binds `pat` to each element and runs `body`.
     fn iter_loop(&mut self, plan: IterPlan, ih: HExpr, pat: HPat, body: HExpr, span: Span) -> HExpr {
         match plan {
+            IterPlan::Builtin(IterKind::List) if self.is_enumerate_for(&ih, &pat) => self.enumerate_for(ih, pat, body, span),
             IterPlan::Builtin(kind) => mk(HKind::For { pat, iter: Box::new(ih), kind, body: Box::new(body) }, Type::Unit, span),
-            // `{ let it = ih; while let Some(pat) = <next> { body } }`
-            IterPlan::Lazy { local, next } => {
+            // `{ let it = ih; while let Some(pat) = <next> { body } }`, or a
+            // fused pipeline (see `fuse`).
+            IterPlan::Lazy { local, next, next_fn } => {
+                if self.can_fuse(&ih) {
+                    return self.fuse_for(ih, pat, body, span);
+                }
+                let ih = if next_fn {
+                    let fty = self.fs.data[local as usize].ty.clone();
+                    mk(HKind::Field { obj: Box::new(ih), index: 0 }, fty, span)
+                } else {
+                    ih
+                };
                 let it = HPat { kind: HPatKind::Bind(local), ty: ih.ty.clone(), span };
                 let init = mk(HKind::Let { pat: it, init: Box::new(ih), else_: None }, Type::Unit, span);
                 let some = self.types[self.wk.option as usize].variants()[0].rt_id;
@@ -2438,8 +2462,7 @@ impl Checker<'_> {
             _ => None,
         };
         let ret = hinted.as_ref().map(|(_, r)| r.clone()).unwrap_or_else(|| self.fresh());
-        self.fs.next_lambda += 1;
-        let id = self.fs.next_lambda;
+        let id = self.new_lambda();
         self.fs.ctx.push(FnCtx { ret: ret.clone(), kind: CtxKind::Lambda, loops: vec![], lambda: id, in_defer: None });
         self.push_scope();
         let mut locals = Vec::new();

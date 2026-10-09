@@ -2,6 +2,7 @@
 
 pub mod budget;
 mod expr;
+mod fuse;
 mod pat;
 mod traits;
 mod unify;
@@ -277,13 +278,72 @@ pub(crate) enum CtxKind {
     TopLevel { main: bool },
 }
 
+/// The local names in scope in a function: a stack of scopes, indexed by
+/// name so that a lookup does not scan every binding in scope (that made
+/// functions with many locals quadratic to check). A name bound again in
+/// the same scope replaces its binding there: the older one could never be
+/// seen again.
+#[derive(Default, Clone)]
+pub(crate) struct Scopes {
+    /// Per scope, innermost last: name -> local.
+    scopes: Vec<HashMap<String, LocalId>>,
+    /// Per name: the scopes binding it (indices into `scopes`), innermost last.
+    by_name: HashMap<String, Vec<u32>>,
+}
+
+impl Scopes {
+    pub(crate) fn push(&mut self) {
+        self.scopes.push(HashMap::new());
+    }
+
+    pub(crate) fn pop(&mut self) {
+        for name in self.scopes.pop().unwrap_or_default().into_keys() {
+            self.unbind(&name);
+        }
+    }
+
+    /// Binds `name` to `id` in the innermost scope.
+    pub(crate) fn declare(&mut self, name: &str, id: LocalId) {
+        let depth = self.scopes.len() as u32 - 1;
+        if self.scopes.last_mut().unwrap().insert(name.to_string(), id).is_none() {
+            self.by_name.entry(name.to_string()).or_default().push(depth);
+        }
+    }
+
+    pub(crate) fn find(&self, name: &str) -> Option<LocalId> {
+        let depth = *self.by_name.get(name)?.last()?;
+        self.scopes[depth as usize].get(name).copied()
+    }
+
+    /// Removes the binding of `name` from the innermost scope, if any.
+    pub(crate) fn remove(&mut self, name: &str) -> Option<LocalId> {
+        let id = self.scopes.last_mut().unwrap().remove(name)?;
+        self.unbind(name);
+        Some(id)
+    }
+
+    /// Drops the innermost entry of `name`'s list of scopes.
+    fn unbind(&mut self, name: &str) {
+        if let Some(depths) = self.by_name.get_mut(name) {
+            depths.pop();
+            if depths.is_empty() {
+                self.by_name.remove(name);
+            }
+        }
+    }
+}
+
 #[derive(Default, Clone)]
 pub(crate) struct FnState {
     pub locals: Vec<LocalInfo>,
     pub data: Vec<LocalData>,
-    pub scopes: Vec<Vec<(String, LocalId)>>,
+    pub scopes: Scopes,
     pub ctx: Vec<FnCtx>,
     pub next_lambda: u32,
+    /// For each lambda (by id, from 1): the number of locals when it was
+    /// started, so that its own locals are found without a scan of all
+    /// (see `fuse.rs`, which re-owns the locals of inlined lambdas).
+    pub lambda_first_local: Vec<LocalId>,
     pub obligations: Vec<(Type, Bound, Span)>,
     pub reflect_checks: Vec<(Type, Span)>,
     pub infer_checks: Vec<(Type, Span)>,
@@ -344,12 +404,16 @@ pub struct Checker<'a> {
     /// checked is its value, and then (after checking) the value's type.
     pub(crate) want_cell_value: bool,
     pub(crate) cell_value: Option<Type>,
+    /// Set while checking an expression for `Session::type_of`.
+    pub(crate) type_query: Option<TypeQuery>,
     /// The prelude's private trait `Num` (static `zero` and `one`): the
     /// evidence that a type satisfies the built-in bound `Num`.
     pub(crate) num_trait: Option<TraitId>,
     /// The prelude's `Iterator` trait and `Iter` struct, which `for` loops use.
     pub(crate) iter_trait: Option<TraitId>,
     pub(crate) iter_struct: Option<TypeDefId>,
+    /// Prelude functions taking part in iterator fusion (found on first use).
+    pub(crate) fuse_fns: Option<fuse::FuseFns>,
 }
 
 const MAX_ERRORS: usize = 50;
@@ -392,10 +456,12 @@ impl<'a> Checker<'a> {
             session: None,
             want_cell_value: false,
             cell_value: None,
+            type_query: None,
             budget: Arc::new(CompileBudget::default()),
             num_trait: None,
             iter_trait: None,
             iter_struct: None,
+            fuse_fns: None,
         }
     }
 
@@ -453,6 +519,122 @@ impl<'a> Checker<'a> {
     pub fn show(&self, t: &Type) -> String {
         let z = self.zonk(t);
         self.printer().show(&z)
+    }
+
+    /// Shows the types of a type mismatch. Distinct types that would look
+    /// the same (`expected Point, found Point`, e.g. after a session input
+    /// defined `Point` again) are told apart by where they are defined.
+    pub fn show_pair(&self, a: &Type, b: &Type) -> (String, String) {
+        let (za, zb) = (self.zonk(a), self.zonk(b));
+        // Names of the type definitions mentioned, with their ids.
+        let mut seen: Vec<TypeDefId> = Vec::new();
+        for t in [&za, &zb] {
+            t.walk(&mut |t| {
+                if let Type::Named(d, _) = t
+                    && !seen.contains(d)
+                {
+                    seen.push(*d);
+                }
+            });
+        }
+        let name = |d: TypeDefId| self.types[d as usize].name.as_str();
+        let clashing: Vec<TypeDefId> = seen.iter().copied().filter(|&d| seen.iter().any(|&e| e != d && name(e) == name(d))).collect();
+        if clashing.is_empty() {
+            let p = self.printer();
+            return (p.show(&za), p.show(&zb));
+        }
+        let mut tags: Vec<(TypeDefId, String)> = clashing.iter().map(|&d| (d, self.def_origin(d, false))).collect();
+        if tags.iter().any(|(d, t)| tags.iter().any(|(e, u)| e != d && u == t && name(*e) == name(*d))) {
+            tags = clashing.iter().map(|&d| (d, self.def_origin(d, true))).collect();
+        }
+        let tag = |d: TypeDefId| tags.iter().find(|(e, _)| *e == d).map(|(_, t)| t.clone());
+        let p = self.printer();
+        (p.show_tagged(&za, &tag), p.show_tagged(&zb, &tag))
+    }
+
+    /// Where type `d` is defined, for diagnostics: "defined in input 3" (of a
+    /// session) or "defined in module geo"; `exact` adds the position.
+    fn def_origin(&self, d: TypeDefId, exact: bool) -> String {
+        let def = &self.types[d as usize];
+        let file = self.sm.files.get(def.span.file as usize);
+        let name = file.map_or("", |f| f.name.as_str());
+        let place = match name.strip_prefix("<input ").and_then(|f| f.strip_suffix('>')) {
+            Some(n) => format!("input {n}"),
+            None if Some(def.module) == self.prelude => "the prelude".to_string(),
+            None => format!("module {}", def.module_name),
+        };
+        if exact && let Some(f) = file {
+            let (line, col) = f.line_col(def.span.lo);
+            format!("defined in {place}, at {name}:{line}:{col}")
+        } else {
+            format!("defined in {place}")
+        }
+    }
+
+    /// Shows the type of a session input's value (`Session::type_of`). A
+    /// function type whose inference variables are left open is shown as a
+    /// generic one, named after the type parameters they instantiate (if
+    /// recorded in `type_query`): `fn<T>(T) -> T`, `fn<T: Ord>([T]) -> [T]`.
+    pub(crate) fn show_value_type(&self, t: &Type) -> String {
+        let z = self.zonk(t);
+        if !matches!(z, Type::Fn(..)) || !z.has_vars() {
+            return self.printer().show(&z);
+        }
+        let mut vars: Vec<VarId> = Vec::new();
+        z.walk(&mut |t| {
+            if let Type::Var(v) = t
+                && !vars.contains(v)
+            {
+                vars.push(*v);
+            }
+        });
+        let origin = |v: VarId| {
+            let q = self.type_query.as_ref()?;
+            q.origins.iter().find(|(o, _)| self.zonk(&Type::Var(*o)) == Type::Var(v)).map(|&(_, p)| p)
+        };
+        // Names: those of the parameters first, then T, U, ... for the others.
+        let mut names: Vec<Option<String>> = vec![None; vars.len()];
+        let mut used: Vec<String> = Vec::new();
+        let take = |base: &str, used: &mut Vec<String>| {
+            let mut name = base.to_string();
+            let mut k = 2;
+            while used.contains(&name) {
+                name = format!("{base}{k}");
+                k += 1;
+            }
+            used.push(name.clone());
+            name
+        };
+        for (i, &v) in vars.iter().enumerate() {
+            if let Some(p) = origin(v) {
+                names[i] = Some(take(&self.params[p as usize].name, &mut used));
+            }
+        }
+        for name in names.iter_mut().filter(|n| n.is_none()) {
+            let base = ["T", "U", "V", "W"].into_iter().find(|n| !used.iter().any(|u| u == n)).unwrap_or("T");
+            *name = Some(take(base, &mut used));
+        }
+        let mut params = self.params.clone();
+        let mut map: HashMap<VarId, Type> = HashMap::new();
+        let mut generics = Vec::new();
+        for (&v, name) in vars.iter().zip(names) {
+            let name = name.unwrap_or_default();
+            let mut bounds: Vec<String> = Vec::new();
+            let declared = origin(v).map(|p| &self.params[p as usize]);
+            let required = self.type_query.iter().flat_map(|q| &q.bounds).filter(|(t, _)| self.zonk(t) == Type::Var(v)).map(|(_, b)| *b);
+            let builtin = required.chain(declared.into_iter().flat_map(|p| p.bounds.clone()));
+            for b in builtin {
+                if !bounds.iter().any(|x| x == b.name()) {
+                    bounds.push(b.name().to_string());
+                }
+            }
+            bounds.extend(declared.into_iter().flat_map(|p| p.traits.iter().map(|tr| self.show_trait(tr))));
+            generics.push(if bounds.is_empty() { name.clone() } else { format!("{name}: {}", bounds.join(" + ")) });
+            params.push(ParamInfo { name, bounds: Vec::new(), traits: Vec::new(), reflect: false });
+            map.insert(v, Type::Param((params.len() - 1) as ParamId));
+        }
+        let shown = TypePrinter { defs: &self.types, params: &params, wk: self.wk }.show(&replace_vars(&z, &map));
+        format!("fn<{}>{}", generics.join(", "), shown.strip_prefix("fn").unwrap_or(&shown))
     }
 
     pub fn new_param(&mut self, name: &str, bounds: Vec<Bound>, reflect: bool) -> ParamId {
@@ -669,10 +851,12 @@ impl<'a> Checker<'a> {
             session,
             want_cell_value,
             cell_value,
+            type_query: _,
             budget: _,
             num_trait,
             iter_trait,
             iter_struct,
+            fuse_fns,
         } = self;
         Checker {
             sm: &NO_SOURCES,
@@ -710,11 +894,13 @@ impl<'a> Checker<'a> {
             session,
             want_cell_value,
             cell_value,
+            type_query: None,
             // Each input gets its own budget (see `attach`).
             budget: Arc::new(CompileBudget::default()),
             num_trait,
             iter_trait,
             iter_struct,
+            fuse_fns,
         }
     }
 
@@ -1683,7 +1869,7 @@ impl<'a> Checker<'a> {
         self.loop_breaks.clear();
         self.fs.generics = generics;
         self.fs.self_ty = self_ty;
-        self.fs.scopes.push(Vec::new());
+        self.fs.scopes.push();
     }
 
     fn check_fn_body(&mut self, id: FnId, decl: &FnDeclRef) {
@@ -1783,6 +1969,9 @@ impl<'a> Checker<'a> {
         // Trait evidence first: resolving it may determine types.
         self.resolve_holes(&mut body);
         let obligations = std::mem::take(&mut self.fs.obligations);
+        if let Some(q) = &mut self.type_query {
+            q.bounds.extend(obligations.iter().map(|(t, b, _)| (t.clone(), *b)));
+        }
         for (t, b, sp) in obligations {
             self.check_bound(&t, b, sp, true);
         }
@@ -1845,7 +2034,7 @@ impl<'a> Checker<'a> {
         self.fs.data.push(LocalData { ty, scheme: vec![], used: false, assigned: false, is_param, decl_span: span });
         let id = (self.fs.locals.len() - 1) as LocalId;
         if name != "_" {
-            self.fs.scopes.last_mut().unwrap().push((name.to_string(), id));
+            self.fs.scopes.declare(name, id);
         }
         id
     }
@@ -1858,18 +2047,18 @@ impl<'a> Checker<'a> {
     }
 
     pub(crate) fn find_local(&self, name: &str) -> Option<LocalId> {
-        for scope in self.fs.scopes.iter().rev() {
-            for (n, id) in scope.iter().rev() {
-                if n == name {
-                    return Some(*id);
-                }
-            }
-        }
-        None
+        self.fs.scopes.find(name)
     }
 
     pub(crate) fn push_scope(&mut self) {
-        self.fs.scopes.push(Vec::new());
+        self.fs.scopes.push();
+    }
+
+    /// A new lambda id for the function being checked.
+    pub(crate) fn new_lambda(&mut self) -> u32 {
+        self.fs.next_lambda += 1;
+        self.fs.lambda_first_local.push(self.fs.locals.len() as LocalId);
+        self.fs.next_lambda
     }
     pub(crate) fn pop_scope(&mut self) {
         self.fs.scopes.pop();
@@ -1994,7 +2183,7 @@ pub(crate) fn zonk_budget(subst: &[Option<Type>], t: &Type, budget: &CompileBudg
 
 /// Names referenced (as identifiers or struct-literal shorthands) inside
 /// function bodies, methods, tests and default expressions of a module.
-/// Top-level bindings not in this set can live in the module initialiser's
+/// Top-level bindings not in this set can live in the module initializer's
 /// registers instead of global slots.
 pub(crate) fn names_used_in_functions(m: &ast::Module) -> HashSet<String> {
     let mut out = HashSet::new();
@@ -2151,4 +2340,29 @@ pub(crate) fn names_used_in_functions(m: &ast::Module) -> HashSet<String> {
         }
     }
     out
+}
+
+/// What `Session::type_of` needs to show a type with open inference
+/// variables as a generic one.
+#[derive(Clone, Default)]
+pub(crate) struct TypeQuery {
+    /// The variables made for the type parameters of instantiated functions.
+    pub origins: Vec<(VarId, ParamId)>,
+    /// The built-in bounds required of types.
+    pub bounds: Vec<(Type, Bound)>,
+}
+
+/// `t` with the inference variables in `map` replaced.
+fn replace_vars(t: &Type, map: &HashMap<VarId, Type>) -> Type {
+    let r = |t: &Type| replace_vars(t, map);
+    match t {
+        Type::Var(v) => map.get(v).cloned().unwrap_or(Type::Var(*v)),
+        Type::List(t) => Type::List(Box::new(r(t))),
+        Type::Set(t) => Type::Set(Box::new(r(t))),
+        Type::Map(k, v) => Type::Map(Box::new(r(k)), Box::new(r(v))),
+        Type::Tuple(ts) => Type::Tuple(ts.iter().map(r).collect()),
+        Type::Named(d, ts) => Type::Named(*d, ts.iter().map(r).collect()),
+        Type::Fn(ps, ret) => Type::Fn(ps.iter().map(r).collect(), Box::new(r(ret))),
+        other => other.clone(),
+    }
 }

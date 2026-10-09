@@ -44,7 +44,7 @@ pub enum Op {
         src: Reg,
     },
     /// Loads global `g` into `dst` before a loop that uses it; jumps if the
-    /// global is not initialised yet (to an unhoisted copy of the loop).
+    /// global is not initialized yet (to an unhoisted copy of the loop).
     HoistGlobal {
         dst: Reg,
         g: u16,
@@ -289,7 +289,6 @@ pub enum Op {
     Jmp {
         off: i32,
     },
-    /// Backward jump: also consumes fuel (a loop iteration).
     Loop {
         off: i32,
     },
@@ -332,6 +331,12 @@ pub enum Op {
         b: Reg,
         off: i16,
     },
+    /// Jump if the value is not `Some(_)
+    JNotSome {
+        src: Reg,
+        dst: Reg,
+        off: i16,
+    },
     /// Jump if the value is not the given variant.
     JNotVariant {
         src: Reg,
@@ -340,19 +345,44 @@ pub enum Op {
     },
 
     // Calls.
-    /// Callee at `base`, arguments at `base+1..`; result written to `base`.
+    /// Callee at `base`, arguments at `base+1..`; result written to `dst`.
     Call {
         base: Reg,
         argc: u16,
+        dst: Reg,
+    },
+    /// Calls the function value in register `callee` (anywhere) with the
+    /// `argc` arguments at `base..`; result written to `dst`. A closure's
+    /// frame starts at `base`.
+    CallR {
+        callee: Reg,
+        base: Reg,
+        dst: Reg,
+        argc: u8,
     },
     /// Arguments at `base..`; result written to `base`.
     CallDirect {
         base: Reg,
         proto: u32,
     },
+    /// Like `CallDirect` (for the first 65536 protos), writing the result
+    /// to `dst`.
+    CallDirectTo {
+        base: Reg,
+        dst: Reg,
+        proto: u16,
+    },
+    /// Arguments at `base..`; result written to `base`.
     CallNative {
         base: Reg,
         native: u32,
+    },
+    /// Like `CallNative` (for the first 65536 natives), writing the result
+    /// to `dst`. The arguments may be any registers, e.g. a local's.
+    CallNativeTo {
+        base: Reg,
+        dst: Reg,
+        native: u16,
     },
     TailCall {
         base: Reg,
@@ -468,6 +498,12 @@ pub enum Op {
         base: Reg,
         off: i16,
     },
+    /// Range value `src` as the registers of an inclusive range loop
+    /// (`ForRangeIncl`): `base` = start, `base+1` = last, `base+2` = done.
+    UnpackRange {
+        base: Reg,
+        src: Reg,
+    },
     /// Snapshot of map entries (as tuples) or set elements as a list.
     IterSnapshot {
         dst: Reg,
@@ -534,6 +570,33 @@ pub enum Op {
     IntToFloat {
         dst: Reg,
         src: Reg,
+    },
+    /// `local += src` for a string local that only this register holds
+    /// (see `compile::builder_locals`): appends in place to the local's
+    /// private buffer (`Obj::StrBuf`), making one first if needed.
+    AppendStr {
+        local: Reg,
+        src: Reg,
+    },
+    /// Before any other read of such a local: turns its buffer, if it has
+    /// one, into an ordinary string (in place: the handle stays the same).
+    FreezeStr {
+        reg: Reg,
+    },
+    /// Jump unless string `src` is of class `class & 0x7f` (as `StrClass`);
+    /// with bit 7 of `class` set, jump if it is.
+    JStrClass {
+        src: Reg,
+        class: u8,
+        off: i16,
+    },
+    /// Whether string `src` is non-empty and every character is of `class`
+    /// (0 digit, 1 alphabetic, 2 alphanumeric, 3 whitespace, 4 uppercase,
+    /// 5 lowercase): `str.is_digit` ... `str.is_lower`.
+    StrClass {
+        dst: Reg,
+        src: Reg,
+        class: u8,
     },
 
     // Strings.
@@ -668,7 +731,7 @@ pub struct Program {
     pub ids: RtIds,
     pub entry: u32,
     pub tests: Vec<(String, u32)>,
-    /// Test setup (module initialisation) entry.
+    /// Test setup (module initialization) entry.
     pub files: Vec<String>,
     /// Help text for natives by id.
     pub native_help: Vec<HelpEntry>,

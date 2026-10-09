@@ -31,18 +31,46 @@ pub struct SourceFile {
     pub name: String,
     pub text: Arc<str>,
     line_starts: Vec<u32>,
+    /// The number of characters before each multiple of [`CHAR_MARK`] bytes,
+    /// so that columns are found in constant time on long lines.
+    char_marks: Vec<u32>,
+}
+
+/// Bytes between the entries of `SourceFile::char_marks`.
+const CHAR_MARK: usize = 256;
+
+/// Whether `b` starts a character (is not a UTF-8 continuation byte).
+fn starts_char(b: u8) -> bool {
+    b & 0xC0 != 0x80
 }
 
 impl SourceFile {
     pub fn new(name: impl Into<String>, text: impl Into<Arc<str>>) -> SourceFile {
         let text: Arc<str> = text.into();
         let mut line_starts = vec![0];
+        let mut char_marks = Vec::with_capacity(text.len() / CHAR_MARK + 1);
+        let mut chars = 0u32;
         for (i, b) in text.bytes().enumerate() {
+            if i.is_multiple_of(CHAR_MARK) {
+                char_marks.push(chars);
+            }
+            chars += starts_char(b) as u32;
             if b == b'\n' {
                 line_starts.push(i as u32 + 1);
             }
         }
-        SourceFile { name: name.into(), text, line_starts }
+        if text.len().is_multiple_of(CHAR_MARK) {
+            char_marks.push(chars);
+        }
+        SourceFile { name: name.into(), text, line_starts, char_marks }
+    }
+
+    /// The number of characters before byte offset `pos`.
+    fn chars_before(&self, pos: usize) -> usize {
+        let pos = pos.min(self.text.len());
+        let mark = pos / CHAR_MARK;
+        let before = self.char_marks[mark];
+        before as usize + self.text.as_bytes()[mark * CHAR_MARK..pos].iter().filter(|&&b| starts_char(b)).count()
     }
 
     /// 1-based line and column (in characters) of a byte offset.
@@ -52,8 +80,7 @@ impl SourceFile {
             Err(i) => i - 1,
         };
         let start = self.line_starts[line] as usize;
-        let end = (pos as usize).min(self.text.len());
-        let col = self.text.get(start..end).map(|s| s.chars().count()).unwrap_or(end - start);
+        let col = self.chars_before(pos as usize).saturating_sub(self.chars_before(start));
         (line + 1, col + 1)
     }
 
@@ -181,5 +208,30 @@ impl fmt::Display for Diagnostic {
             Severity::Warning => "warning",
         };
         write!(f, "{}:{}:{}: {kind}: {}", self.file, self.line, self.column, self.message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn columns_count_characters_on_long_lines() {
+        let text = format!("ab\n{}x\né{}y\n", "é".repeat(300), "a".repeat(1000));
+        let f = SourceFile::new("t", text.as_str());
+        let col = |needle: char| f.line_col(text.find(needle).unwrap() as u32);
+        assert_eq!(col('b'), (1, 2));
+        assert_eq!(col('x'), (2, 301));
+        assert_eq!(col('y'), (3, 1002));
+        assert_eq!(f.line_col(text.len() as u32), (4, 1));
+        for len in [0, 255, 256, 257, 512] {
+            let f = SourceFile::new("t", "a".repeat(len));
+            assert_eq!(f.line_col(len as u32), (1, len + 1));
+        }
+        for (pos, _) in text.char_indices() {
+            let (line, col) = f.line_col(pos as u32);
+            let start = text[..pos].rfind('\n').map_or(0, |i| i + 1);
+            assert_eq!((line, col), (text[..pos].matches('\n').count() + 1, text[start..pos].chars().count() + 1));
+        }
     }
 }

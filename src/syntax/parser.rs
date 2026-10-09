@@ -3,9 +3,13 @@
 use super::ast::*;
 use super::lexer::{Comment, CommentKind, StrPart, Tok, Token, lex, lex_range};
 use crate::diag::{Diag, FileId, Span};
+use std::rc::Rc;
 
 /// Maximum syntactic nesting depth (expressions, types, patterns, blocks).
 pub const MAX_DEPTH: usize = 256;
+
+/// Max number of syntax errors reported per module.
+const MAX_ERRORS: usize = 50;
 
 pub struct ParseResult {
     pub module: Module,
@@ -15,11 +19,13 @@ pub struct ParseResult {
 
 pub fn parse_module(src: &str, file: FileId) -> ParseResult {
     let lexed = lex(src, file);
-    let mut p = Parser::new(src, file, lexed.tokens, &lexed.comments);
+    let newlines = src.bytes().enumerate().filter(|&(_, b)| b == b'\n').map(|(i, _)| i as u32).collect();
+    let mut p = Parser::new(src, file, lexed.tokens, &lexed.comments, newlines);
     p.errors = lexed.errors;
     let module = p.module();
     let mut errors = p.errors;
     errors.sort_by_key(|d| d.span.lo);
+    errors.truncate(MAX_ERRORS);
     ParseResult { module, comments: lexed.comments, errors }
 }
 
@@ -38,12 +44,14 @@ struct Parser<'a> {
     fatal: bool,
     /// Inside a `trait` body: methods may omit their body.
     in_trait: bool,
+    /// Offsets of source code line breaks.
+    newlines: Rc<[u32]>,
 }
 
 type PResult<T> = Result<T, ()>;
 
 impl<'a> Parser<'a> {
-    fn new(src: &'a str, file: FileId, toks: Vec<Token>, comments: &'a [Comment]) -> Parser<'a> {
+    fn new(src: &'a str, file: FileId, toks: Vec<Token>, comments: &'a [Comment], newlines: Rc<[u32]>) -> Parser<'a> {
         Parser {
             src,
             file,
@@ -57,6 +65,7 @@ impl<'a> Parser<'a> {
             depth: 0,
             fatal: false,
             in_trait: false,
+            newlines,
         }
     }
 
@@ -168,8 +177,14 @@ impl<'a> Parser<'a> {
     fn leave(&mut self) {
         self.depth -= 1;
     }
+    /// The number of line breaks before `pos`.
     fn line_of(&self, pos: u32) -> usize {
-        self.src[..pos as usize].bytes().filter(|&b| b == b'\n').count()
+        self.newlines.partition_point(|&nl| nl < pos)
+    }
+
+    /// Whether `lo` and `hi` are on the same line.
+    fn same_line(&self, lo: u32, hi: u32) -> bool {
+        self.line_of(lo) == self.line_of(hi)
     }
 
     /// Doc comment (`///`) immediately preceding byte offset `lo`.
@@ -572,7 +587,7 @@ impl<'a> Parser<'a> {
         }
         let close = self.lo();
         self.expect(&Tok::RBrace, "`}`")?;
-        let inline = self.line_of(lo) == self.line_of(close);
+        let inline = self.same_line(lo, close);
         Ok(StructDecl { name, generics, fields, methods, is_pub, doc, inline })
     }
 
@@ -623,7 +638,7 @@ impl<'a> Parser<'a> {
         }
         let close = self.lo();
         self.expect(&Tok::RBrace, "`}`")?;
-        let inline = self.line_of(lo) == self.line_of(close);
+        let inline = self.same_line(lo, close);
         Ok(EnumDecl { name, generics, variants, methods, is_pub, doc, inline })
     }
 
@@ -856,7 +871,7 @@ impl<'a> Parser<'a> {
         self.no_struct = saved;
         let close = self.lo();
         self.expect(&Tok::RBrace, "`}`")?;
-        let inline = self.line_of(lo) == self.line_of(close);
+        let inline = self.same_line(lo, close);
         Ok(Block { stmts, span: self.span_from(lo), inline })
     }
 
@@ -1453,7 +1468,7 @@ impl<'a> Parser<'a> {
                 self.no_struct = saved;
                 let close = self.lo();
                 self.expect(&Tok::RBrace, "`}`")?;
-                let inline = self.line_of(lo) == self.line_of(close);
+                let inline = self.same_line(lo, close);
                 Ok(self.mk(ExprKind::Match { scrutinee: Box::new(scrutinee), arms, inline }, self.span_from(lo)))
             }
             Tok::At => {
@@ -1633,7 +1648,7 @@ impl<'a> Parser<'a> {
                     let lexed = lex_range(self.src, self.file, lo as usize, hi as usize);
                     let mut toks = lexed.tokens;
                     toks.retain(|t| t.tok != Tok::Semi);
-                    let mut sub = Parser::new(self.src, self.file, toks, &[]);
+                    let mut sub = Parser::new(self.src, self.file, toks, &[], self.newlines.clone());
                     sub.errors = lexed.errors;
                     sub.next_id = self.next_id;
                     sub.depth = self.depth;

@@ -152,12 +152,47 @@ impl OutputSink for MemorySink {
 }
 
 struct StdoutSink;
+
+const STDOUT_BUFFER: usize = 8 << 10;
+
+struct StdoutBuffer {
+    data: Vec<u8>,
+    tty: Option<bool>,
+}
+
+static STDOUT: Mutex<StdoutBuffer> = Mutex::new(StdoutBuffer { data: Vec::new(), tty: None });
+
+fn flush_stdout(b: &mut StdoutBuffer) -> std::io::Result<()> {
+    use std::io::Write;
+    if b.data.is_empty() {
+        return Ok(());
+    }
+    let mut o = std::io::stdout().lock();
+    let r = o.write_all(&b.data).and_then(|()| o.flush());
+    b.data.clear();
+    r
+}
+
 impl OutputSink for StdoutSink {
     fn write(&mut self, data: &[u8]) -> std::io::Result<()> {
-        use std::io::Write;
-        let mut o = std::io::stdout().lock();
-        o.write_all(data)?;
-        o.flush()
+        use std::io::IsTerminal;
+        let mut b = STDOUT.lock().unwrap_or_else(|e| e.into_inner());
+        let tty = *b.tty.get_or_insert_with(|| std::io::stdout().is_terminal());
+        b.data.extend_from_slice(data);
+        if b.data.len() >= STDOUT_BUFFER || (tty && data.contains(&b'\n')) {
+            flush_stdout(&mut b)?;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        flush_stdout(&mut STDOUT.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    fn flush_before_input(&mut self) -> std::io::Result<()> {
+        let mut b = STDOUT.lock().unwrap_or_else(|e| e.into_inner());
+        // Like C's stdio: only a line-buffered (terminal) stream.
+        if b.tty == Some(true) { flush_stdout(&mut b) } else { Ok(()) }
     }
 }
 
@@ -199,6 +234,7 @@ pub struct Config {
     pub(crate) env: Option<Vec<(String, String)>>,
     pub(crate) seed: Option<u64>,
     pub(crate) gc_stress: bool,
+    pub(crate) exit_after_run: bool,
     pub(crate) tls: crate::stdlib::TlsSettings,
 }
 
@@ -224,6 +260,7 @@ impl Config {
             env: None,
             seed: None,
             gc_stress: std::env::var_os("SAND_GC_STRESS").is_some(),
+            exit_after_run: false,
             tls: Default::default(),
         }
     }
@@ -287,6 +324,12 @@ impl Config {
     #[doc(hidden)]
     pub fn gc_stress(mut self, on: bool) -> Self {
         self.gc_stress = on;
+        self
+    }
+    /// The process exits right after `run_file`/`run_source` returns
+    #[doc(hidden)]
+    pub fn exit_after_run(mut self, on: bool) -> Self {
+        self.exit_after_run = on;
         self
     }
     /// Trusts additional root certificates (DER-encoded X.509) for TLS
@@ -627,8 +670,9 @@ impl Engine {
             rng: Rng::new(c.seed.unwrap_or_else(entropy_seed)),
             log_level: 1,
             interrupt: self.interrupt.clone(),
-            stream_decisions: HashMap::new(),
+            stream_decisions: [None; 2],
             tls: c.tls.clone(),
+            regex_cache: Vec::new(),
         };
         let mut vm = Vm::new(prog, self.natives.clone(), host);
         vm.io = IoTable::with_shared(self.shared.clone());
@@ -654,6 +698,9 @@ impl Engine {
         let r = vm.run_main(prog.entry).await;
         self.finish_run(&vm);
         self.gc_stats = vm.heap.stats;
+        if self.config.exit_after_run {
+            std::mem::forget(vm);
+        }
         match r {
             Ok(RunEnd::Finished(_)) => Ok(crate::Outcome { exit_code: 0 }),
             Ok(RunEnd::Exit(c)) => Ok(crate::Outcome { exit_code: c }),
@@ -668,7 +715,7 @@ impl Engine {
     // Loading and compiling
 
     /// Records "always" answers given during a run.
-    fn remember_always(&self, answers: &HashMap<Capability, bool>) {
+    pub(crate) fn remember_always(&self, answers: &HashMap<Capability, bool>) {
         if !answers.is_empty() {
             self.always.lock().unwrap_or_else(|e| e.into_inner()).extend(answers.iter().map(|(c, d)| (c.clone(), *d)));
         }
@@ -1223,9 +1270,12 @@ fn compile_modules(
         }
     }
     let (native_help, native_argc) = native_info(&checked, registry);
-    let mut program =
-        crate::compile::compile(crate::compile::CompileInput { checked: &checked, sm, native_lookup: &lookup, native_help, native_argc })
-            .map_err(|ds| Error::Compile(ds.iter().map(|d| sm.resolve(d)).collect()))?;
+    let input = crate::compile::CompileInput { checked: &checked, sm, native_lookup: &lookup, native_help, native_argc, budget: &budget };
+    let program = crate::compile::compile(input);
+    if let Some(stop) = budget.stopped() {
+        return Err(budget_error(stop, sm, main_file));
+    }
+    let mut program = program.map_err(|ds| Error::Compile(ds.iter().map(|d| sm.resolve(d)).collect()))?;
     program.available_modules = registry.sources.keys().filter(|k| k.as_str() != "prelude").cloned().collect();
     program.help_index = Some(registry.help.clone());
     Ok(Compiled { program: Arc::new(program), warnings: vec![], facts: Some(facts) })

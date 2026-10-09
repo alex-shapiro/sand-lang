@@ -117,7 +117,7 @@ fn to_unix_nanos((y, mo, d): (i64, i64, i64), (h, mi, s): (i64, i64, i64), nanos
 
 /// Parses RFC 3339 / ISO 8601 extended format into Unix nanoseconds.
 fn parse_iso(text: &str) -> Result<i64, String> {
-    let err = || format!("invalid date-time: {text:?}");
+    let err = || format!("invalid date-time: {:?}", super::truncate(text, 64));
     let mut p = Cursor { s: text.as_bytes(), i: 0 };
     let year = p.digits(4).ok_or_else(err)?;
     p.expect(b'-').ok_or_else(err)?;

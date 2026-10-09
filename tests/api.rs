@@ -1008,6 +1008,27 @@ fn interrupt_from_another_thread() {
 }
 
 #[test]
+fn interrupt_stops_a_run_waiting_for_a_prompt() {
+    let (asked_tx, asked_rx) = std::sync::mpsc::channel();
+    let asked_tx = Mutex::new(asked_tx);
+    let config = Config::new().policy(Policy::rules(RulePolicy::new().fallback(Decision::Prompt))).prompter(move |_cap: Capability| {
+        let _ = asked_tx.lock().unwrap().send(());
+        std::future::pending::<PromptAnswer>()
+    });
+    let mut engine = Engine::new(config);
+    let handle = engine.interrupt_handle();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let r = rt().block_on(engine.run_source("main.sand", "import env\nprint(env.get(\"HOME\"))"));
+        let _ = done_tx.send(r);
+    });
+    asked_rx.recv_timeout(Duration::from_secs(10)).expect("the prompter was not asked");
+    handle.interrupt();
+    let r = done_rx.recv_timeout(Duration::from_secs(10)).expect("the run did not stop after the interrupt");
+    assert!(matches!(r, Err(Error::Interrupted)), "{r:?}");
+}
+
+#[test]
 fn limits_are_per_engine() {
     // One engine hitting its limit must not affect another.
     let limited = Config::new().limits(Limits { max_instructions: Some(10_000), ..Limits::default() });
@@ -1212,7 +1233,9 @@ fn rust_panics_in_natives_do_not_unwind_into_the_host() {
     assert_eq!((report.passed(), report.failed()), (1, 1));
     let mut session = Engine::new(Config::new().module(module())).session();
     assert!(rt().block_on(session.eval("import buggy\nbuggy.boom(7)")).is_err());
-    assert_eq!(rt().block_on(session.eval("buggy.boom(2) + 1")).unwrap().as_deref(), Some("3"));
+    assert!(session.was_reset());
+    assert!(matches!(rt().block_on(session.eval("buggy.boom(2)")), Err(Error::Compile(_))));
+    assert_eq!(rt().block_on(session.eval("import buggy\nbuggy.boom(2) + 1")).unwrap().as_deref(), Some("3"));
 }
 
 #[test]

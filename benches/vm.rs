@@ -17,6 +17,7 @@ struct Bench {
 }
 
 const BENCHES: &[Bench] = &[
+    Bench { name: "startup (empty program)", source: "print(1)", expected: "1\n", ops: 0 },
     Bench {
         name: "fib(30) recursive calls",
         source: "fn fib(n: int) -> int { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }\nprint(fib(30))",
@@ -138,6 +139,12 @@ const BENCHES: &[Bench] = &[
         ops: 10_000_000,
     },
     Bench {
+        name: "gc: 4M live (200MB), mutated + 10M churn",
+        source: "struct P {\n    x: int\n    y: int\n}\nlet live = [P { x: i, y: i } for i in 0..3000000]\nlet m: [int: str] = [:]\nfor i in 0..1000000 { m[i] = \"v{i}\" }\nvar t = 0\nfor i in 0..10000000 {\n    let p = P { x: i, y: 1 }\n    if i % 100 == 0 { live[i % 3000000] = p }\n    if i % 1000 == 0 { m[i % 1000000] = \"w{i}\" }\n    t += p.y\n}\nprint(t + live.len() + m.len())",
+        expected: "14000000\n",
+        ops: 10_000_000,
+    },
+    Bench {
         name: "gc: 1M live, mutated + 5M churn",
         source: "struct P {\n    x: int\n    y: int\n}\nlet live = [P { x: i, y: i } for i in 0..1000000]\nvar t = 0\nfor i in 0..5000000 {\n    let p = P { x: i, y: 1 }\n    if i % 100 == 0 { live[i % 1000000] = p }\n    t += p.y\n}\nprint(t + live.len())",
         expected: "6000000\n",
@@ -165,6 +172,8 @@ fn main() {
         "{:<34} {:>10} {:>10} {:>8} {:>5} {:>6} {:>9} {:>9} {:>9}",
         "benchmark", "best", "median", "ns/op", "gcs", "majors", "max-pause", "max-minor", "avg-pause"
     );
+    let mut log_sum = 0.0;
+    let mut count = 0;
     for b in BENCHES {
         if let Some(f) = &filter
             && !b.name.contains(f.as_str())
@@ -185,6 +194,8 @@ fn main() {
             gc.max_minor_pause = gc.max_minor_pause.max(s.max_minor_pause);
         }
         times.sort();
+        log_sum += ms(times[0]).ln();
+        count += 1;
         let ns_op = if b.ops > 0 { format!("{:.1}", times[0].as_secs_f64() * 1e9 / b.ops as f64) } else { "-".into() };
         let avg = if gc.collections > 0 { gc.total_pause / gc.collections as u32 } else { Duration::ZERO };
         println!(
@@ -199,5 +210,10 @@ fn main() {
             ms(gc.max_minor_pause),
             ms(avg)
         );
+    }
+    // One number to compare builds by (the interpreter's speed is sensitive
+    // to code layout, see docs/INTERNALS.md "Dispatch loop").
+    if count > 1 {
+        println!("geometric mean of best times: {:.2}ms over {count} benchmarks", (log_sum / count as f64).exp());
     }
 }

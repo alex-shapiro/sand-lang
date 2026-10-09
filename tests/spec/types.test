@@ -144,8 +144,8 @@ let d: duration = 5
 --- error
 1: expected duration, found int
 
-=== loops reading globals that are not initialised yet
-// A loop in a function called before the global it reads is initialised.
+=== loops reading globals that are not initialized yet
+// A loop in a function called before the global it reads is initialized.
 fn sum_late(n: int) -> int {
     var t = 0
     for i in 0..n {
@@ -157,8 +157,8 @@ fn sum_late(n: int) -> int {
     t
 }
 
-// Started before `SHARED` is initialised; reads it only on its last
-// iteration, after the main task has initialised it.
+// Started before `SHARED` is initialized; reads it only on its last
+// iteration, after the main task has initialized it.
 fn worker() -> int {
     var n = 0
     for i in 0..50 {

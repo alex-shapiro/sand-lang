@@ -113,6 +113,13 @@ pub const MAX_STACK_SLOTS: usize = 64 * 1024 * 1024;
 /// Initial number of stack slots of a new fiber.
 const INITIAL_STACK_SLOTS: usize = 64;
 
+/// At most this many finished fibers are kept for reuse, and only those
+/// whose stack and frame list are small (a few MB at most, counted against
+/// the memory limit and freed before a memory limit error is reported).
+const MAX_SPARE_FIBERS: usize = 4096;
+const MAX_SPARE_STACK_SLOTS: usize = 1024;
+const MAX_SPARE_FRAMES: usize = 64;
+
 /// Lists of waiting fibers (task waiters, channel receivers) are pruned of
 /// stale entries (cancelled waits) once they reach this length, and then
 /// again at twice their length after pruning.
@@ -179,6 +186,10 @@ pub trait OutputSink: Send {
     fn write(&mut self, data: &[u8]) -> std::io::Result<()>;
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
+    }
+    /// Called before the script reads standard input.
+    fn flush_before_input(&mut self) -> std::io::Result<()> {
+        self.flush()
     }
 }
 
@@ -259,8 +270,10 @@ pub struct Host {
     pub rng: Rng,
     pub log_level: u8,
     pub interrupt: Arc<AtomicBool>,
-    pub stream_decisions: HashMap<u8, bool>,
+    /// Cached decisions for stdout (index 0) and stderr (1).
+    pub stream_decisions: [Option<bool>; 2],
     pub(crate) tls: crate::stdlib::TlsSettings,
+    pub(crate) regex_cache: Vec<(u64, u32)>,
 }
 
 pub struct Vm {
@@ -271,6 +284,9 @@ pub struct Vm {
     pub consts: Vec<Value>,
     pub fibers: Vec<Option<Box<Fiber>>>,
     pub free_fibers: Vec<u32>,
+    /// Finished fibers kept for reuse, boxed so they move without copying.
+    #[allow(clippy::vec_box)]
+    spare_fibers: Vec<Box<Fiber>>,
     pub ready: VecDeque<u32>,
     pub current: u32,
     pub main_fiber: u32,
@@ -291,6 +307,14 @@ pub struct Vm {
     /// Runs the inputs of a REPL session: a top-level `?` that meets an
     /// `Err` panics (aborting the input) instead of ending the program.
     pub session: bool,
+    /// Strings of one ASCII character, by byte (`Unit` until first
+    /// made); shared, since strings are immutable. GC roots.
+    ascii_strs: Vec<Value>,
+
+    /// Set when a Rust panic (a bug) was caught in the interpreter, a native
+    /// or an I/O finisher: the VM is memory safe but may be inconsistent, so
+    /// a REPL session discards it.
+    pub(crate) caught_panic: bool,
 }
 
 pub const SLICE_FUEL: i64 = 20_000;
@@ -366,6 +390,7 @@ impl Vm {
             consts,
             fibers: Vec::new(),
             free_fibers: Vec::new(),
+            spare_fibers: Vec::new(),
             ready: VecDeque::new(),
             current: 0,
             main_fiber: 0,
@@ -380,6 +405,8 @@ impl Vm {
             pinned: Vec::new(),
             pending_race: None,
             session: false,
+            ascii_strs: Vec::new(),
+            caught_panic: false,
         };
         vm.load_program();
         vm
@@ -462,9 +489,88 @@ impl Vm {
         self.heap.new_str(s)
     }
 
+    /// A function value (`fn() -> T?`) producing the elements of `src`.
+    pub fn iter_fn(&mut self, src: IterSrc) -> Value {
+        self.heap.alloc(Obj::IterFn(src))
+    }
+
+    /// Calls the iterator function `it` (an [`Obj::IterFn`]): the next
+    /// element, or `None`.
+    #[inline(never)]
+    pub(crate) fn iter_step(&mut self, it: Value) -> Value {
+        let next = self.iter_next(it);
+        self.option(next)
+    }
+
+    /// [`Vm::iter_step`] without wrapping the element in `Some`.
+    #[inline(never)]
+    pub(crate) fn iter_next(&mut self, it: Value) -> Option<Value> {
+        let Obj::IterFn(src) = self.heap.get(it) else { return None };
+        if let IterSrc::Chars { s, i } = *src
+            && let Some(&b) = self.heap.str(Value::Obj(s)).as_bytes().get(i as usize)
+            && b.is_ascii()
+        {
+            if let Some(IterSrc::Chars { i, .. }) = self.heap.iter_src_mut(it) {
+                *i += 1;
+            }
+            return Some(self.ascii_str(b));
+        }
+        let (next, state) = match *src {
+            IterSrc::List { list, i, n } => match self.heap.list(Value::Obj(list)).get(i as usize) {
+                Some(&x) if i < n => (Some(x), IterSrc::List { list, i: i + 1, n }),
+                _ => (None, IterSrc::List { list, i: n, n }),
+            },
+            IterSrc::Range { i, end } if i < end => (Some(Value::Int(i)), IterSrc::Range { i: i + 1, end }),
+            IterSrc::Range { .. } => return None,
+            IterSrc::Chars { s, i } => {
+                let c = self.heap.str(Value::Obj(s)).get(i as usize..).and_then(|t| t.chars().next())?;
+                let state = IterSrc::Chars { s, i: i + c.len_utf8() as i64 };
+                (Some(self.short_str(c.encode_utf8(&mut [0; 4]))), state)
+            }
+        };
+        if let Some(src) = self.heap.iter_src_mut(it) {
+            *src = state;
+        }
+        next
+    }
+
+    /// The shared string of one ASCII character `b` (see `short_str`).
+    #[inline]
+    fn ascii_str(&mut self, b: u8) -> Value {
+        match self.ascii_strs.get(b as usize) {
+            Some(&v @ Value::Obj(_)) => v,
+            _ => self.short_str(std::str::from_utf8(&[b]).unwrap_or("?")),
+        }
+    }
+
+    /// A string equal to `s`, which may be shared: strings of one ASCII
+    /// character (as `chars`, `char_at` and splitting produce in bulk) are
+    /// made once per VM.
+    pub fn short_str(&mut self, s: &str) -> Value {
+        let &[b] = s.as_bytes() else { return self.heap.new_str(s) };
+        if !b.is_ascii() {
+            return self.heap.new_str(s);
+        }
+        if self.ascii_strs.is_empty() {
+            self.ascii_strs = vec![Value::Unit; 128];
+        }
+        match self.ascii_strs[b as usize] {
+            Value::Unit => {
+                let v = self.heap.new_str(s);
+                self.ascii_strs[b as usize] = v;
+                v
+            }
+            v => v,
+        }
+    }
+
+    #[inline]
     pub fn some(&mut self, v: Value) -> Value {
         let id = self.prog.ids.some;
-        self.heap.new_variant(id, &[v])
+        match Value::variant1(id, v) {
+            Some(inline) => inline,
+            None => self.heap.new_variant(id, &[v]),
+        }
     }
 
     pub fn none(&self) -> Value {
@@ -481,6 +587,7 @@ impl Vm {
         self.heap.new_variant(id, &[v])
     }
 
+    #[inline]
     pub fn option(&mut self, v: Option<Value>) -> Value {
         match v {
             Some(v) => self.some(v),
@@ -584,6 +691,12 @@ impl Vm {
         self.permit_by(cap, Policy::check)
     }
 
+    /// Like [`Vm::permit`] for a file capability whose path is already
+    /// normalized (see [`Policy::check_normalized`]).
+    pub fn permit_normalized(&mut self, cap: &Capability) -> Result<bool, Ctl> {
+        self.permit_by(cap, Policy::check_normalized)
+    }
+
     /// Like [`Vm::permit`] for an operation on a directory entry itself
     /// (see [`Policy::check_entry`]).
     pub fn permit_entry(&mut self, cap: &Capability) -> Result<bool, Ctl> {
@@ -640,10 +753,22 @@ impl Vm {
         }
     }
 
+    /// Flushes buffered standard output (see `Engine`'s stdout sink).
+    pub fn flush_stdout(&self) {
+        let _ = self.host.stdout.lock().unwrap_or_else(|e| e.into_inner()).flush();
+    }
+
+    /// Flushes standard output before reading standard input, if the sink
+    /// wants to (see [`OutputSink::flush_before_input`]).
+    pub fn flush_before_input(&self) {
+        let _ = self.host.stdout.lock().unwrap_or_else(|e| e.into_inner()).flush_before_input();
+    }
+
     /// Writes to stdout (1) or stderr (2), enforcing policy and output limits.
     pub fn write_stream(&mut self, which: u8, data: &[u8]) -> Result<(), Ctl> {
-        let allowed = match self.host.stream_decisions.get(&which) {
-            Some(&d) => d,
+        let slot = usize::from(which != 1);
+        let allowed = match self.host.stream_decisions[slot] {
+            Some(d) => d,
             None => {
                 let cap = if which == 1 { Capability::Stdout } else { Capability::Stderr };
                 let d = self.permit(&cap)?;
@@ -653,7 +778,7 @@ impl Vm {
                     && self.host.denies_once.is_empty()
                     && let Decision::Allow | Decision::Deny = self.host.policy.check(&cap)
                 {
-                    self.host.stream_decisions.insert(which, d);
+                    self.host.stream_decisions[slot] = Some(d);
                 }
                 d
             }
@@ -667,9 +792,11 @@ impl Vm {
         {
             return Err(Ctl::Limit(LimitKind::Output));
         }
-        let sink = if which == 1 { self.host.stdout.clone() } else { self.host.stderr.clone() };
-        let mut s = sink.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = s.write(data);
+        if which != 1 {
+            self.flush_stdout();
+        }
+        let sink = if which == 1 { &self.host.stdout } else { &self.host.stderr };
+        let _ = sink.lock().unwrap_or_else(|e| e.into_inner()).write(data);
         Ok(())
     }
 
@@ -684,26 +811,41 @@ impl Vm {
         };
         let nregs = self.prog.protos[proto as usize].nregs as usize;
         let Value::Obj(closure) = closure else { return panic("spawn: not a closure") };
-        let mut frames = Vec::with_capacity(8);
-        frames.push(Frame { proto, ip: 0, base: 0, ret: 0, closure });
-        let stack = nregs.max(INITIAL_STACK_SLOTS);
-        if self.heap.would_exceed(stack * std::mem::size_of::<Value>()) {
-            return Err(Ctl::Limit(crate::LimitKind::Memory));
-        }
-        let fiber = Box::new(Fiber {
-            stack: vec![Value::Unit; stack],
-            frames,
-            task,
-            state: FiberState::Ready,
-            wgen: 0,
-            result_slot: 0,
-            race: vec![],
-            waiters: vec![],
-            waiters_prune_at: MIN_PRUNE,
-            io: None,
-            pending_panic: None,
-        });
-        self.heap.fiber_bytes += fiber.footprint();
+        let frame = Frame { proto, ip: 0, base: 0, ret: 0, closure };
+        let fiber = match self.spare_fibers.pop() {
+            // A recycled fiber is already counted in `fiber_bytes`.
+            Some(mut f) if f.stack.len() >= nregs => {
+                f.frames.push(frame);
+                f.task = task;
+                f
+            }
+            spare => {
+                if let Some(f) = spare {
+                    self.heap.fiber_bytes = self.heap.fiber_bytes.saturating_sub(f.footprint());
+                }
+                let stack = nregs.max(INITIAL_STACK_SLOTS);
+                if self.heap.would_exceed(stack * std::mem::size_of::<Value>()) {
+                    return Err(Ctl::Limit(crate::LimitKind::Memory));
+                }
+                let mut frames = Vec::with_capacity(8);
+                frames.push(frame);
+                let fiber = Box::new(Fiber {
+                    stack: vec![Value::Unit; stack],
+                    frames,
+                    task,
+                    state: FiberState::Ready,
+                    wgen: 0,
+                    result_slot: 0,
+                    race: vec![],
+                    waiters: vec![],
+                    waiters_prune_at: MIN_PRUNE,
+                    io: None,
+                    pending_panic: None,
+                });
+                self.heap.fiber_bytes += fiber.footprint();
+                fiber
+            }
+        };
         let id = match self.free_fibers.pop() {
             Some(id) => {
                 self.fibers[id as usize] = Some(fiber);
@@ -718,10 +860,47 @@ impl Vm {
         Ok(id)
     }
 
+    /// Keeps the allocations of a finished fiber for a later `spawn_fiber`,
+    /// if it is small; otherwise frees it. Pooled fibers stay counted in
+    /// `heap.fiber_bytes`. Their stacks are cleared: a reused fiber's live
+    /// window is a GC root before the new task writes every slot of it, so
+    /// it must not hold handles of objects freed since.
+    fn recycle_fiber(&mut self, mut f: Box<Fiber>) {
+        let small = f.stack.capacity() <= MAX_SPARE_STACK_SLOTS && f.frames.capacity() <= MAX_SPARE_FRAMES;
+        if self.spare_fibers.len() >= MAX_SPARE_FIBERS || !small || !f.race.is_empty() || f.waiters.capacity() > MIN_PRUNE {
+            self.heap.fiber_bytes = self.heap.fiber_bytes.saturating_sub(f.footprint());
+            return;
+        }
+        let slots = f.stack.capacity();
+        f.stack.clear();
+        f.stack.resize(slots, Value::Unit);
+        f.frames.clear();
+        f.task = Value::Unit;
+        f.state = FiberState::Ready;
+        f.wgen = 0;
+        f.result_slot = 0;
+        f.waiters.clear();
+        f.waiters_prune_at = MIN_PRUNE;
+        f.io = None;
+        f.pending_panic = None;
+        self.spare_fibers.push(f);
+    }
+
+    /// Frees spare fibers before a memory limit error is reported.
+    fn free_spare_fibers(&mut self) {
+        let spare: usize = self.spare_fibers.iter().map(|f| f.footprint()).sum();
+        self.heap.fiber_bytes = self.heap.fiber_bytes.saturating_sub(spare);
+        self.spare_fibers = Vec::new();
+    }
+
     /// Spawns a new task running `closure`; returns the task handle.
     pub fn spawn_task(&mut self, closure: Value) -> NResult {
         if self.live_tasks >= self.host.limits.max_tasks {
             return panic("task limit exceeded");
+        }
+        if let Obj::Closure(p, _) = self.heap.get(closure) {
+            let p = &self.prog.protos[*p as usize];
+            self.meter.charge(meter::code_fuel(p.code.len() + p.nregs as usize) as u64)?;
         }
         let task = self.heap.alloc(Obj::Task(Box::new(TaskObj { fiber: u32::MAX, state: TaskState::Running, result: Value::Unit })));
         let fid = self.spawn_fiber(closure, task)?;
@@ -774,9 +953,10 @@ impl Vm {
         }
         self.free_fibers.push(fid);
         self.live_tasks = self.live_tasks.saturating_sub(1);
-        for (w, g) in f.waiters {
+        for &(w, g) in &f.waiters {
             self.deliver(w, g, result);
         }
+        self.recycle_fiber(f);
     }
 
     /// Cancels a task (no-op if already finished).
@@ -821,18 +1001,19 @@ impl Vm {
         self.collect_garbage_with(current, true);
     }
 
-    fn collect_garbage_with(&mut self, current: Option<&mut Fiber>, force_major: bool) {
-        let start = std::time::Instant::now();
+    /// GC roots: globals, constants, pinned values and the fibers' live stack
+    /// windows, closures, tasks and race lists. Clears dead slots of stacks so
+    /// that they never hold handles to objects freed later. Shrinks stacks left
+    /// large by deep recursion and recounts `heap.fiber_bytes`.
+    fn gc_roots(&mut self, current: Option<&mut Fiber>) -> Vec<Value> {
         let mut roots: Vec<Value> = Vec::with_capacity(1024);
         roots.extend(self.globals.iter().copied());
         roots.extend(self.consts.iter().copied());
         roots.extend(self.pinned.iter().copied());
+        roots.extend(self.ascii_strs.iter().copied());
         let prog = &self.prog;
         let mut fiber_bytes = 0;
         let mut add_fiber = |f: &mut Fiber, roots: &mut Vec<Value>| {
-            // Only the live part of the stack is scanned. Dead slots are
-            // cleared so that they never hold handles to freed objects, and
-            // a stack left large by deep recursion is shrunk.
             let top = f.live_top(prog);
             roots.extend(f.stack[..top].iter().copied());
             if f.stack.len() > 2 * top + 4096 {
@@ -851,19 +1032,56 @@ impl Vm {
         if let Some(f) = current {
             add_fiber(f, &mut roots);
         }
+        fiber_bytes += self.spare_fibers.iter().map(|f| f.footprint()).sum::<usize>();
         self.heap.fiber_bytes = fiber_bytes;
-        // Major collections when the old generation has grown enough (and
-        // regularly under stress testing); minor ones otherwise.
-        let mut major = force_major || self.heap.wants_major() || (self.heap.stress && self.heap.stats.collections.is_multiple_of(8));
-        if !major {
-            self.heap.collect(roots.iter().copied(), false);
-            // Unreachable old objects may be what keeps us over the limit.
-            major = self.heap.over_limit();
+        roots
+    }
+
+    fn collect_garbage_with(&mut self, mut current: Option<&mut Fiber>, force_major: bool) {
+        let start = std::time::Instant::now();
+        let mut full = force_major;
+        if force_major {
+            self.free_spare_fibers();
+        } else if self.heap.cycle_active() {
+            if self.heap.minor_due() {
+                let roots = self.gc_roots(current.as_deref_mut());
+                self.heap.collect(roots, false);
+                self.heap.stats.record(start.elapsed(), false);
+            }
+            let step = std::time::Instant::now();
+            if self.heap.cycle_step() {
+                let roots = self.gc_roots(current.as_deref_mut());
+                self.heap.finish_marking(roots);
+            }
+            self.heap.stats.record_step(step.elapsed());
+        } else {
+            let roots = self.gc_roots(current.as_deref_mut());
+            // Major collection if the old generation is large enough; minor otherwise.
+            let major = self.heap.wants_major() || (self.heap.stress && self.heap.stats.collections.is_multiple_of(8));
+            if !major {
+                self.heap.collect(roots, false);
+                self.heap.stats.record(start.elapsed(), false);
+            } else if self.heap.major_is_incremental() {
+                self.heap.start_cycle(roots);
+                self.heap.stats.record_step(start.elapsed());
+            } else {
+                full = true;
+            }
         }
-        if major {
+        // Unreachable old objects may keep us over the limit
+        if !full && self.heap.over_limit() {
+            self.free_spare_fibers();
+            full = self.heap.over_limit();
+        }
+        if full {
+            let start = std::time::Instant::now();
+            let roots = self.gc_roots(current);
             self.heap.collect(roots, true);
+            if self.heap.over_limit() {
+                self.free_spare_fibers();
+            }
+            self.heap.stats.record(start.elapsed(), true);
         }
-        self.heap.stats.record(start.elapsed(), major);
     }
 
     pub fn trace_of(&self, fiber: &Fiber, ip: Option<u32>) -> Vec<TraceEntry> {

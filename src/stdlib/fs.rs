@@ -11,7 +11,7 @@ use super::fs_safe::{self, EntryKind};
 use super::{io_kind, resolve_path};
 use crate::check::ModKind;
 use crate::engine::Registry;
-use crate::policy::{Capability, MAX_PATH_BYTES, normalize_entry_path};
+use crate::policy::{Capability, MAX_PATH_BYTES, entry_path};
 use crate::vm::iomem::Reservation;
 use crate::vm::value::{Obj, Value};
 use crate::vm::{Ctl, Finisher, NResult, Vm, panic};
@@ -146,7 +146,8 @@ pub fn register(r: &mut Registry) {
             }
         }
         // The others must exist already (fs_safe does not create them).
-        let keep = path.components().count().saturating_sub(missing.len() + 2);
+        let names = path.components().filter(|c| matches!(c, std::path::Component::Normal(_))).count();
+        let keep = names.saturating_sub(missing.len() + 1);
         run(shown, blocking(move || fs_safe::create_dir_all(&path, keep)), ok_unit)
     });
     r.add_builtin("fs.remove_file", |vm, a| {
@@ -274,7 +275,7 @@ pub fn register(r: &mut Registry) {
 
 /// The script-supplied path `p` and its resolved form (the entry's own path
 /// if `entry`). Overlong paths are refused (kind `"invalid"`) before
-/// normalisation, which is charged per component.
+/// normalization, which is charged per component.
 fn target(vm: &mut Vm, p: Value, entry: bool) -> Result<Result<(String, PathBuf), Value>, Ctl> {
     let shown = vm.str(p);
     if shown.len() > MAX_PATH_BYTES {
@@ -285,11 +286,18 @@ fn target(vm: &mut Vm, p: Value, entry: bool) -> Result<Result<(String, PathBuf)
     }
     let shown = shown.to_string();
     let joined = vm.host.cwd.join(&shown);
-    // Lexical normalisation, a few `canonicalize` calls (binary search) and
+    // Lexical normalization, a few `canonicalize` calls (binary search) and
     // the policy's checks, each linear in the length.
     vm.charge(4 * joined.components().count() as u64)?;
     vm.charge_bytes(4 * joined.as_os_str().len())?;
-    let path = if entry { normalize_entry_path(&joined) } else { resolve_path(vm, &shown) };
+    let path = if entry {
+        let e = entry_path(&joined);
+        vm.charge(4 * e.scanned as u64)?;
+        vm.charge_bytes(4 * e.scanned_bytes)?;
+        e.path
+    } else {
+        resolve_path(vm, &shown)
+    };
     Ok(Ok((shown, path)))
 }
 
@@ -307,7 +315,7 @@ fn denied(vm: &mut Vm, cap: &Capability, shown: &str) -> Value {
 /// Checks `cap` against the policy: `Some(Err(Error))` to return if it is
 /// denied, `None` if the effect may proceed.
 fn refuse(vm: &mut Vm, cap: Capability, shown: &str) -> Result<Option<Value>, Ctl> {
-    if vm.permit(&cap)? {
+    if vm.permit_normalized(&cap)? {
         return Ok(None);
     }
     Ok(Some(denied(vm, &cap, shown)))
@@ -328,9 +336,81 @@ fn protected_tree(vm: &mut Vm, shown: &str, path: &Path) -> Option<Value> {
     protected.then(|| vm.err_value("permission_denied", &format!("permission denied: {shown} contains paths protected by the policy")))
 }
 
-/// Runs the blocking file system operation `op` on tokio's blocking pool.
+/// Runs a blocking file system operation `op` off the VM thread: on the
+/// process's hot file system worker if idle, otherwise on tokio's blocking
+/// pool.
 async fn blocking<T: Send + 'static>(op: impl FnOnce() -> io::Result<T> + Send + 'static) -> io::Result<T> {
-    tokio::task::spawn_blocking(op).await.unwrap_or_else(|e| Err(io::Error::other(e)))
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let job: Box<dyn FnOnce() + Send> = Box::new(move || {
+        let _ = tx.send(op());
+    });
+    match FsWorker::get().try_run(job) {
+        Ok(()) => rx.await.unwrap_or_else(|e| Err(io::Error::other(e))),
+        Err(job) => {
+            tokio::task::spawn_blocking(job).await.map_err(io::Error::other)?;
+            rx.await.unwrap_or_else(|e| Err(io::Error::other(e)))
+        }
+    }
+}
+
+/// A thread that runs file system operations one at a time and stays awake
+/// in between. It takes a job only when idle, so operations never queue
+/// behind a slow one, and engines run operations in parallel.
+pub(crate) struct FsWorker {
+    jobs: std::sync::Mutex<std::sync::mpsc::Sender<Box<dyn FnOnce() + Send>>>,
+    busy: std::sync::atomic::AtomicBool,
+}
+
+impl FsWorker {
+    const LINGER: std::time::Duration = std::time::Duration::from_micros(50);
+
+    fn get() -> &'static FsWorker {
+        static WORKER: std::sync::OnceLock<FsWorker> = std::sync::OnceLock::new();
+        WORKER.get_or_init(|| {
+            let (tx, rx) = std::sync::mpsc::channel::<Box<dyn FnOnce() + Send>>();
+            let spawned = std::thread::Builder::new().name("sand-fs".into()).spawn(move || {
+                let worker = FsWorker::get();
+                while let Ok(mut job) = rx.recv() {
+                    loop {
+                        job();
+                        worker.busy.store(false, std::sync::atomic::Ordering::Release);
+                        let until = std::time::Instant::now() + FsWorker::LINGER;
+                        let next = loop {
+                            match rx.try_recv() {
+                                Ok(j) => break Some(j),
+                                Err(_) if std::time::Instant::now() < until => std::hint::spin_loop(),
+                                Err(_) => break None,
+                            }
+                        };
+                        match next {
+                            Some(j) => job = j,
+                            None => break,
+                        }
+                    }
+                }
+            });
+            let busy = std::sync::atomic::AtomicBool::new(spawned.is_err());
+            FsWorker { jobs: std::sync::Mutex::new(tx), busy }
+        })
+    }
+
+    /// Hands a job to the worker if it is idle; gives it back otherwise.
+    fn try_run(&self, job: Box<dyn FnOnce() + Send>) -> Result<(), Box<dyn FnOnce() + Send>> {
+        use std::sync::atomic::Ordering;
+        if self.busy.compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed).is_err() {
+            return Err(job);
+        }
+        let jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        jobs.send(job).map_err(|e| {
+            self.busy.store(false, Ordering::Release);
+            e.0
+        })
+    }
+
+    /// Whether the worker is running a job.
+    pub(crate) fn busy() -> bool {
+        FsWorker::get().busy.load(std::sync::atomic::Ordering::Acquire)
+    }
 }
 
 /// Runs `op` on the I/O runtime; `finish` converts its result on the VM

@@ -11,6 +11,9 @@ use std::time::{Duration, Instant};
 #[derive(Default)]
 pub struct IoShared {
     ready: Mutex<Vec<u64>>,
+    /// Set when `ready` may be non-empty (checked without the lock while
+    /// waiting briefly for a file operation, see `FS_SPIN`).
+    any_ready: std::sync::atomic::AtomicBool,
     waker: Mutex<Option<Waker>>,
 }
 
@@ -19,6 +22,14 @@ impl IoShared {
     pub fn wake(&self) {
         if let Some(w) = self.waker.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
             w.wake_by_ref();
+        }
+    }
+
+    /// Registers the engine task's waker (woken by I/O and interrupts).
+    fn set_waker(&self, w: &Waker) {
+        let mut slot = self.waker.lock().unwrap_or_else(|e| e.into_inner());
+        if !slot.as_ref().is_some_and(|x| x.will_wake(w)) {
+            *slot = Some(w.clone());
         }
     }
 }
@@ -34,6 +45,7 @@ impl Wake for IdWaker {
     }
     fn wake_by_ref(self: &Arc<Self>) {
         self.shared.ready.lock().unwrap_or_else(|e| e.into_inner()).push(self.id);
+        self.shared.any_ready.store(true, Ordering::Release);
         self.shared.wake();
     }
 }
@@ -74,12 +86,13 @@ impl IoTable {
     /// Polls futures that were woken. Returns completed operations.
     pub fn poll_ready(&mut self, task_waker: Option<&Waker>) -> Vec<(u32, u64, Finisher)> {
         if let Some(w) = task_waker {
-            let mut slot = self.shared.waker.lock().unwrap_or_else(|e| e.into_inner());
-            if !slot.as_ref().is_some_and(|x| x.will_wake(w)) {
-                *slot = Some(w.clone());
-            }
+            self.shared.set_waker(w);
         }
-        let ids: Vec<u64> = std::mem::take(&mut *self.shared.ready.lock().unwrap_or_else(|e| e.into_inner()));
+        let ids: Vec<u64> = {
+            let mut ready = self.shared.ready.lock().unwrap_or_else(|e| e.into_inner());
+            self.shared.any_ready.store(false, Ordering::Relaxed);
+            std::mem::take(&mut *ready)
+        };
         let mut done = Vec::new();
         for id in ids {
             let Some(entry) = self.futures.get_mut(&id) else { continue };
@@ -93,6 +106,12 @@ impl IoTable {
         done
     }
 }
+
+/// How long the scheduler waits for a file operation before parking.
+const FS_SPIN: Duration = Duration::from_micros(100);
+
+/// Slices run between clock readings at most.
+const CLOCK_SLICES: u32 = 32;
 
 /// Result of running the program's main task.
 pub enum RunEnd {
@@ -125,13 +144,26 @@ impl Vm {
     }
 
     fn apply_completions(&mut self, done: Vec<(u32, u64, Finisher)>) -> Result<(), Trap> {
+        let spent = self.meter.spent();
+        let r = self.apply_finishers(done);
+        self.fuel_used += self.meter.spent().saturating_sub(spent);
+        r
+    }
+
+    fn apply_finishers(&mut self, done: Vec<(u32, u64, Finisher)>) -> Result<(), Trap> {
         for (fid, wgen, fin) in done {
             let still_waiting = matches!(self.fibers.get(fid as usize), Some(Some(f)) if f.state == FiberState::Waiting && f.wgen == wgen);
             if !still_waiting {
                 continue;
             }
             // A Rust panic in the finisher (a bug) becomes a script panic.
-            let r = crate::unwind::catch(|| fin(self)).unwrap_or_else(|msg| Err(Ctl::Panic(format!("internal error: {msg}"))));
+            let r = match crate::unwind::catch(|| fin(self)) {
+                Ok(r) => r,
+                Err(msg) => {
+                    self.caught_panic = true;
+                    Err(Ctl::Panic(format!("internal error: {msg}")))
+                }
+            };
             match r {
                 Ok(v) => {
                     self.deliver(fid, wgen, v);
@@ -158,8 +190,15 @@ impl Vm {
     }
 
     /// Runs `proto` (a zero-argument function) as the main task until it
-    /// finishes, then returns. Other tasks are abandoned.
+    /// finishes, then returns. Other tasks are abandoned. Buffered standard
+    /// output is flushed at the end.
     pub async fn run_main(&mut self, proto: u32) -> Result<RunEnd, Trap> {
+        let r = self.run_main_inner(proto).await;
+        self.flush_stdout();
+        r
+    }
+
+    async fn run_main_inner(&mut self, proto: u32) -> Result<RunEnd, Trap> {
         let closure = self.heap.alloc(Obj::Closure(proto, Box::new([])));
         let task = self.heap.alloc(Obj::Task(Box::new(TaskObj { fiber: 0, state: TaskState::Running, result: Value::Unit })));
         let fid = self.spawn_fiber(closure, task).map_err(|c| match c {
@@ -174,7 +213,9 @@ impl Vm {
         let start = Instant::now();
         let mut paused = Duration::ZERO;
         let mut cpu = Duration::ZERO;
-        let mut last_yield = Instant::now();
+        let mut now = Instant::now();
+        let mut last_yield = now;
+        let (mut unclocked_slices, mut unclocked_fuel) = (0u32, 0u64);
         // Where an instruction was retried after a memory limit error, until
         // the task makes progress.
         let mut gc_retried: Option<(u32, usize, u32)> = None;
@@ -186,22 +227,35 @@ impl Vm {
                     continue;
                 }
                 self.current = fid;
-                let mut fuel = SLICE_FUEL;
-                let t0 = Instant::now();
-                // Deadlines let long natives check the time limits mid-call.
                 let l = &self.host.limits;
+                let slice = l
+                    .max_instructions
+                    .map_or(SLICE_FUEL, |m| m.saturating_sub(self.fuel_used).saturating_add(1).min(SLICE_FUEL as u64) as i64);
+                let mut fuel = slice;
+                let t0 = now;
+                // Deadlines let long natives check the time limits mid-call.
                 let cpu_deadline = l.max_cpu_time.and_then(|m| t0.checked_add(m.saturating_sub(cpu)));
                 let wall_deadline = l.max_wall_time.and_then(|m| start.checked_add(paused.saturating_add(m)));
-                self.meter.start_slice(fuel, self.fuel_used, cpu_deadline, wall_deadline);
+                self.meter.start_slice(SLICE_FUEL, slice, self.fuel_used, cpu_deadline, wall_deadline);
                 // A Rust panic in the interpreter or a native (a bug) ends
                 // the run as a panic instead of unwinding into the host;
                 // caught per slice, which costs nothing per native call.
                 let r = match crate::unwind::catch(|| self.interp(&mut f, &mut fuel)) {
                     Ok(r) => r,
-                    Err(msg) => Err(Trap::Panic { message: format!("internal error: {msg}"), trace: self.trace_of(&f, None) }),
+                    Err(msg) => {
+                        self.caught_panic = true;
+                        Err(Trap::Panic { message: format!("internal error: {msg}"), trace: self.trace_of(&f, None) })
+                    }
                 };
-                cpu += t0.elapsed();
-                self.fuel_used += (SLICE_FUEL - fuel).max(0) as u64 + self.meter.spent();
+                let spent = (slice - fuel).max(0) as u64 + self.meter.spent();
+                self.fuel_used += spent;
+                unclocked_slices += 1;
+                unclocked_fuel += spent;
+                if unclocked_slices >= CLOCK_SLICES || unclocked_fuel >= SLICE_FUEL as u64 {
+                    now = Instant::now();
+                    cpu += now.saturating_duration_since(t0);
+                    (unclocked_slices, unclocked_fuel) = (0, 0);
+                }
                 self.current = u32::MAX;
                 let exit = match r {
                     Ok(e) => {
@@ -256,13 +310,33 @@ impl Vm {
                         f.state = FiberState::Ready;
                         self.fibers[fid as usize] = Some(f);
                         self.ready.push_front(fid);
+                        self.flush_stdout();
                         let prompter = self.host.prompter.clone();
                         let t = Instant::now();
+                        cpu += t.saturating_duration_since(now);
+                        (unclocked_slices, unclocked_fuel) = (0, 0);
                         let answer = match prompter {
-                            Some(p) => p.prompt(cap.clone()).await,
+                            Some(p) => {
+                                // Host interrupt stops the run while a prompt is pending
+                                let mut prompt = p.prompt(cap.clone());
+                                let (interrupt, shared) = (self.host.interrupt.clone(), self.io.shared.clone());
+                                let answer = std::future::poll_fn(|cx| {
+                                    shared.set_waker(cx.waker());
+                                    if interrupt.load(Ordering::Relaxed) {
+                                        return Poll::Ready(None);
+                                    }
+                                    prompt.as_mut().poll(cx).map(Some)
+                                })
+                                .await;
+                                match answer {
+                                    Some(a) => a,
+                                    None => return Err(Trap::Interrupted),
+                                }
+                            }
                             None => PromptAnswer::DenyOnce,
                         };
-                        paused += t.elapsed();
+                        now = Instant::now();
+                        paused += now.saturating_duration_since(t);
                         self.apply_answer(cap, answer);
                     }
                     Exit::Terminate(c) => return Ok(RunEnd::Exit(c)),
@@ -281,15 +355,19 @@ impl Vm {
                 }
                 self.check_limits(start, paused, cpu)?;
                 // Keep I/O flowing and let other host tasks run.
-                if last_yield.elapsed() > Duration::from_millis(2) {
+                if now.saturating_duration_since(last_yield) > Duration::from_millis(2) {
                     self.heap.io_memory.publish_heap(self.heap.used());
                     let done = self.io.poll_ready(None);
                     self.apply_completions(done)?;
+                    cpu += Instant::now().saturating_duration_since(now);
                     tokio::task::yield_now().await;
-                    last_yield = Instant::now();
+                    now = Instant::now();
+                    last_yield = now;
+                    (unclocked_slices, unclocked_fuel) = (0, 0);
                 }
             }
             // Nothing is ready: wait for I/O.
+            self.flush_stdout();
             if self.io.is_empty() {
                 let trace = match self.fibers.get(self.main_fiber as usize) {
                     Some(Some(f)) => self.trace_of(f, None),
@@ -297,6 +375,23 @@ impl Vm {
                 };
                 return Err(Trap::Panic { message: "deadlock: all tasks are blocked".into(), trace });
             }
+            // A file operation on the hot worker usually finishes within µs.
+            // Wait for it briefly because a park-then-wake-up costs more.
+            let mut done = self.io.poll_ready(None);
+            if done.is_empty() && crate::stdlib::fs_worker_busy() {
+                let until = Instant::now() + FS_SPIN;
+                while !self.io.shared.any_ready.load(Ordering::Acquire) && crate::stdlib::fs_worker_busy() && Instant::now() < until {
+                    std::hint::spin_loop();
+                }
+                done = self.io.poll_ready(None);
+            }
+            if !done.is_empty() {
+                self.apply_completions(done)?;
+                self.check_limits(start, paused, cpu)?;
+                continue;
+            }
+            cpu += Instant::now().saturating_duration_since(now);
+            (unclocked_slices, unclocked_fuel) = (0, 0);
             let remaining = self.host.limits.max_wall_time.map(|m| m.saturating_sub(start.elapsed().saturating_sub(paused)));
             let mut sleep = remaining.map(|r| Box::pin(tokio::time::sleep(r)));
             let interrupt = self.host.interrupt.clone();
@@ -320,7 +415,8 @@ impl Vm {
             .await;
             self.apply_completions(done)?;
             self.check_limits(start, paused, cpu)?;
-            last_yield = Instant::now();
+            now = Instant::now();
+            last_yield = now;
         }
     }
 }

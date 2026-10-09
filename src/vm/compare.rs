@@ -19,6 +19,28 @@ fn is_mutable_container(o: &Obj) -> bool {
     matches!(o, Obj::List(_) | Obj::Map(_) | Obj::Set(_) | Obj::Struct(..))
 }
 
+/// The pairs of mutable containers a comparison has compared, so that
+/// shared and cyclic structures are compared once.
+struct Seen {
+    pairs: HashSet<(u32, u32)>,
+}
+
+impl Seen {
+    fn new() -> Seen {
+        Seen { pairs: HashSet::new() }
+    }
+
+    /// Records `pair`; false if it was recorded already.
+    fn insert(&mut self, heap: &Heap, pair: (u32, u32)) -> Result<bool, Ctl> {
+        if self.pairs.len() == self.pairs.capacity() {
+            if heap.would_exceed(self.pairs.capacity().max(4).saturating_mul(3 * 12)) {
+                return Err(Ctl::Limit(crate::LimitKind::Memory));
+            }
+        }
+        Ok(self.pairs.insert(pair))
+    }
+}
+
 /// The elements of a list, or the fields of a tuple, struct or variant.
 fn items(heap: &Heap, v: Value) -> &[Value] {
     match heap.get(v) {
@@ -73,7 +95,7 @@ pub fn values_eq_metered(heap: &Heap, budget: &impl Budget, a: Value, b: Value) 
         _ => return Ok(scalar_eq(a, b)),
     }
     let mut stack: Vec<EqWork> = vec![EqWork::Pair(a, b)];
-    let mut seen: HashSet<(u32, u32)> = HashSet::new();
+    let mut seen = Seen::new();
     while let Some(w) = stack.pop() {
         let (a, b) = match w {
             EqWork::Pair(a, b) => (a, b),
@@ -115,7 +137,7 @@ pub fn values_eq_metered(heap: &Heap, budget: &impl Budget, a: Value, b: Value) 
             continue;
         }
         let (ox, oy) = (heap.get(a), heap.get(b));
-        if is_mutable_container(ox) && !seen.insert((x, y)) {
+        if is_mutable_container(ox) && !seen.insert(heap, (x, y))? {
             // Already being compared (cycle): assume equal.
             continue;
         }
@@ -424,7 +446,7 @@ pub fn values_cmp_metered(prog: &Program, heap: &Heap, budget: &impl Budget, a: 
         _ => {}
     }
     let mut stack: Vec<CmpWork> = vec![CmpWork::Pair(a, b)];
-    let mut seen: HashSet<(u32, u32)> = HashSet::new();
+    let mut seen = Seen::new();
     while let Some(w) = stack.pop() {
         let (a, b) = match w {
             CmpWork::Pair(a, b) => (a, b),
@@ -474,7 +496,7 @@ pub fn values_cmp_metered(prog: &Program, heap: &Heap, budget: &impl Budget, a: 
                         Ordering::Equal
                     } else {
                         let (ox, oy) = (heap.get(a), heap.get(b));
-                        if is_mutable_container(ox) && !seen.insert((x, y)) {
+                        if is_mutable_container(ox) && !seen.insert(heap, (x, y))? {
                             Ordering::Equal
                         } else {
                             match (ox, oy) {

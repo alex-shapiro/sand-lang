@@ -12,6 +12,7 @@
 //! elsewhere is emitted in place (block comments) or after the enclosing element
 //! (line comments). No comment is ever dropped.
 
+use crate::check::budget::{CompileBudget, Stop, tool_fuel};
 use crate::diag::{SourceFile, Span};
 use crate::syntax::ast::*;
 use crate::syntax::lexer::{Comment, CommentKind, Tok, Token, lex};
@@ -22,29 +23,53 @@ const WIDTH: usize = 100;
 /// Spaces per indentation level.
 const INDENT: usize = 4;
 
-/// Formats a source file in canonical style; fails if it does not parse.
+/// Formats a source file in canonical style.
 pub fn format_source(src: &str) -> Result<String, String> {
+    format_source_with(src, &CompileBudget::new(Some(tool_fuel(src.len())), None, None))
+}
+
+/// Like [`format_source`], with the work bounded by a budget.
+pub fn format_source_with(src: &str, budget: &CompileBudget) -> Result<String, String> {
+    if !budget.check() {
+        return Err(stop_message(budget.stopped().unwrap_or(Stop::Interrupted), "format"));
+    }
     // The formatter recurses over the syntax tree; like the compiler, it runs
     // on a thread with a large stack so maximally nested input cannot overflow.
-    std::thread::scope(|s| {
+    let out = std::thread::scope(|s| {
         std::thread::Builder::new()
             .stack_size(64 << 20)
-            .spawn_scoped(s, || format_on_this_thread(src))
+            .spawn_scoped(s, || format_on_this_thread(src, budget))
             .map_err(|e| e.to_string())?
             .join()
             .map_err(|_| "internal formatter error".to_string())?
-    })
+    });
+    match budget.stopped() {
+        Some(stop) => Err(stop_message(stop, "format")),
+        None => out,
+    }
 }
 
-fn format_on_this_thread(src: &str) -> Result<String, String> {
+/// Format or lint budget error message.
+pub(crate) fn stop_message(stop: Stop, what: &str) -> String {
+    match stop {
+        Stop::Fuel => format!("source too complex to {what}: exceeded the {what} budget"),
+        Stop::Time => format!("time limit exceeded (while trying to {what} the source)"),
+        Stop::Interrupted => "interrupted".into(),
+    }
+}
+
+fn format_on_this_thread(src: &str, budget: &CompileBudget) -> Result<String, String> {
+    if !budget.charge((src.len() / 64) as u64) {
+        return Ok(String::new());
+    }
     let parsed = parse_module(src, 0);
     if let Some(err) = parsed.errors.first() {
         let (line, col) = SourceFile::new("", src).line_col(err.span.lo);
         return Err(format!("{line}:{col}: {}", err.message));
     }
-    let mut f = Formatter::new(src, &parsed.comments);
+    let mut f = Formatter::new(src, &parsed.comments, budget);
     let doc = f.module(&parsed.module);
-    Ok(render(&doc))
+    Ok(render(&doc, budget))
 }
 
 // ----------------------------------------------------------------------
@@ -98,21 +123,24 @@ fn indent(doc: Doc) -> Doc {
     Doc::Indent(Box::new(doc))
 }
 
-fn group(force: bool, doc: Doc) -> Doc {
-    let force = force || needs_break(&doc);
+fn group(b: &CompileBudget, force: bool, doc: Doc) -> Doc {
+    let force = force || needs_break(b, &doc);
     Doc::Group { doc: Box::new(doc), force, hug: false, strict: false }
 }
 
 /// A group that is flat only if it fits entirely (see [`Doc::Group`]).
-fn strict_group(force: bool, doc: Doc) -> Doc {
-    let force = force || contains_hard(&doc);
+fn strict_group(b: &CompileBudget, force: bool, doc: Doc) -> Doc {
+    let force = force || contains_hard(b, &doc);
     Doc::Group { doc: Box::new(doc), force, hug: false, strict: true }
 }
 
 /// True if `doc` contains a forced break outside of nested groups and hug groups.
-fn needs_break(doc: &Doc) -> bool {
+fn needs_break(b: &CompileBudget, doc: &Doc) -> bool {
     let mut stack = vec![doc];
     while let Some(d) = stack.pop() {
+        if !b.charge(1) {
+            return false;
+        }
         match d {
             Doc::HardLine | Doc::Trailing(_) => return true,
             Doc::Group { force, hug, .. } if *force && !*hug => return true,
@@ -125,14 +153,17 @@ fn needs_break(doc: &Doc) -> bool {
 }
 
 /// Marks the outermost last group of `doc` as a hug group.
-fn mark_hug(doc: &mut Doc) -> bool {
+fn mark_hug(b: &CompileBudget, doc: &mut Doc) -> bool {
+    if !b.charge(1) {
+        return false;
+    }
     match doc {
         Doc::Group { hug, .. } => {
             *hug = true;
             true
         }
-        Doc::Indent(d) => mark_hug(d),
-        Doc::Concat(ds) => ds.iter_mut().rev().any(mark_hug),
+        Doc::Indent(d) => mark_hug(b, d),
+        Doc::Concat(ds) => ds.iter_mut().rev().any(|d| mark_hug(b, d)),
         _ => false,
     }
 }
@@ -145,9 +176,13 @@ fn prepend(pre: Option<Doc>, doc: Doc) -> Doc {
 }
 
 /// True if printing `doc` flat would still produce a line break.
-fn contains_hard(doc: &Doc) -> bool {
+fn contains_hard(b: &CompileBudget, doc: &Doc) -> bool {
     let mut stack = vec![doc];
     while let Some(d) = stack.pop() {
+        let scanned = if let Doc::Text(s) = d { s.len() } else { 0 };
+        if !b.charge(1 + (scanned / 64) as u64) {
+            return false;
+        }
         match d {
             Doc::HardLine | Doc::Trailing(_) | Doc::Group { force: true, .. } => return true,
             Doc::Text(s) if s.contains('\n') => return true,
@@ -195,10 +230,18 @@ impl Printer {
     }
 }
 
-fn render(doc: &Doc) -> String {
+fn render(doc: &Doc, b: &CompileBudget) -> String {
     let mut p = Printer { out: String::new(), col: 0, pending_indent: None };
     let mut stack: Vec<(usize, Mode, &Doc)> = vec![(0, Mode::Break, doc)];
     while let Some((ind, mode, doc)) = stack.pop() {
+        let printed = match doc {
+            Doc::Text(s) | Doc::Trailing(s) => s.len(),
+            Doc::Line | Doc::SoftLine | Doc::HardLine => ind,
+            _ => 0,
+        };
+        if !b.charge(1 + printed as u64) {
+            break;
+        }
         match doc {
             Doc::Text(s) | Doc::Trailing(s) => p.text(s),
             Doc::Line if mode == Mode::Flat => p.text(" "),
@@ -209,7 +252,7 @@ fn render(doc: &Doc) -> String {
             Doc::Group { doc: d, force, hug, strict } => {
                 let m = if *force {
                     Mode::Break
-                } else if (mode == Mode::Flat && !hug) || fits(d, &stack, WIDTH as isize - p.col as isize, *strict) {
+                } else if (mode == Mode::Flat && !hug) || fits(d, &stack, WIDTH as isize - p.col as isize, *strict, b) {
                     Mode::Flat
                 } else {
                     Mode::Break
@@ -242,7 +285,7 @@ enum Measure {
 
 /// True if `next` printed flat, followed by `rest`, fits in `width` columns up
 /// to the next line break.
-fn fits(next: &Doc, rest: &[(usize, Mode, &Doc)], mut width: isize, strict: bool) -> bool {
+fn fits(next: &Doc, rest: &[(usize, Mode, &Doc)], mut width: isize, strict: bool, b: &CompileBudget) -> bool {
     let first = if strict { Measure::Strict } else { Measure::Next };
     let mut stack: Vec<(Mode, &Doc, Measure)> = vec![(Mode::Flat, next, first)];
     let mut rest_idx = rest.len();
@@ -255,6 +298,10 @@ fn fits(next: &Doc, rest: &[(usize, Mode, &Doc)], mut width: isize, strict: bool
                 (rest[rest_idx].1, rest[rest_idx].2, Measure::Rest)
             }
         };
+        let measured = if let Doc::Text(s) = doc { s.len() } else { 0 };
+        if !b.charge(1 + (measured / 64) as u64) {
+            return false;
+        }
         match doc {
             Doc::Text(s) => match s.find('\n') {
                 Some(i) => return width >= s[..i].chars().count() as isize,
@@ -521,12 +568,13 @@ struct Formatter<'a> {
     next: usize,
     /// Line comments found inside an element, to be emitted after it.
     deferred: Vec<usize>,
+    budget: &'a CompileBudget,
 }
 
 impl<'a> Formatter<'a> {
-    fn new(src: &'a str, comments: &'a [Comment]) -> Formatter<'a> {
+    fn new(src: &'a str, comments: &'a [Comment], budget: &'a CompileBudget) -> Formatter<'a> {
         let tokens = lex(src, 0).tokens.into_iter().filter(|t| !(t.tok == Tok::Semi && t.lo == t.hi) && t.tok != Tok::Eof).collect();
-        Formatter { src, comments, tokens, next: 0, deferred: Vec::new() }
+        Formatter { src, comments, tokens, next: 0, deferred: Vec::new(), budget }
     }
 
     // ------------------------------------------------------------------
@@ -540,7 +588,8 @@ impl<'a> Formatter<'a> {
     fn clean(&self, span: Span) -> String {
         let mut out = String::new();
         let mut pos = span.lo as usize;
-        for c in self.comments.iter().filter(|c| c.lo >= span.lo && c.hi <= span.hi) {
+        let first = self.comments.partition_point(|c| c.lo < span.lo);
+        for c in self.comments[first..].iter().take_while(|c| c.lo < span.hi).filter(|c| c.hi <= span.hi) {
             out.push_str(&self.src[pos..c.lo as usize]);
             pos = c.hi as usize;
         }
@@ -798,7 +847,7 @@ impl<'a> Formatter<'a> {
         }
         let (parts, hard) = self.vertical_list(kind, members, close);
         let body = cat(parts);
-        let flat = inline && !hard && !contains_hard(&body);
+        let flat = inline && !hard && !contains_hard(self.budget, &body);
         (cat(vec![text("{"), indent(cat(vec![Doc::Line, body])), Doc::Line, text("}")]), flat)
     }
 
@@ -827,7 +876,7 @@ impl<'a> Formatter<'a> {
             let mut doc = self.celem(el);
             let next = elems.get(i + 1);
             if next.is_none() && opts.hug_last {
-                mark_hug(&mut doc);
+                mark_hug(self.budget, &mut doc);
             }
             parts.push(doc);
             if next.is_some() {
@@ -844,7 +893,7 @@ impl<'a> Formatter<'a> {
             hard = true;
         }
         let end = if opts.pad { Doc::Line } else { Doc::SoftLine };
-        prepend(pre, group(hard, cat(vec![text(open), indent(cat(parts)), end, text(close)])))
+        prepend(pre, group(self.budget, hard, cat(vec![text(open), indent(cat(parts)), end, text(close)])))
     }
 
     fn celem(&mut self, el: CElem<'a>) -> Doc {
@@ -893,6 +942,9 @@ impl<'a> Formatter<'a> {
     }
 
     fn item(&mut self, item: &'a Item) -> Doc {
+        if !self.budget.charge(1) {
+            return text("");
+        }
         match &item.kind {
             ItemKind::Import(i) => self.import(i),
             ItemKind::Fn(f) => self.fn_decl(f),
@@ -1038,7 +1090,7 @@ impl<'a> Formatter<'a> {
         members.extend(s.methods.iter().map(|f| Member::Method(f, self.fn_lo(f))));
         members.sort_by_key(|m| m.lo());
         let (body, flat) = self.braced(ListKind::Body, &members, self.closing_brace(span), s.inline && s.methods.is_empty());
-        cat(vec![head, strict_group(!flat, body)])
+        cat(vec![head, strict_group(self.budget, !flat, body)])
     }
 
     fn field_decl(&mut self, f: &'a FieldDecl) -> Doc {
@@ -1059,7 +1111,7 @@ impl<'a> Formatter<'a> {
         members.sort_by_key(|m| m.lo());
         let inline = e.inline && e.methods.is_empty() && e.variants.iter().all(|v| v.fields.is_empty());
         let (body, flat) = self.braced(ListKind::Body, &members, self.closing_brace(span), inline);
-        cat(vec![head, strict_group(!flat, body)])
+        cat(vec![head, strict_group(self.budget, !flat, body)])
     }
 
     fn variant(&mut self, v: &'a VariantDecl) -> Doc {
@@ -1080,7 +1132,7 @@ impl<'a> Formatter<'a> {
         let head = cat(vec![text("extend"), self.generics(&x.generics), text(" "), self.ty(&x.target), text(" ")]);
         let members: Vec<Member> = x.methods.iter().map(|f| Member::Method(f, self.fn_lo(f))).collect();
         let (body, flat) = self.braced(ListKind::Body, &members, self.closing_brace(span), false);
-        cat(vec![head, strict_group(!flat, body)])
+        cat(vec![head, strict_group(self.budget, !flat, body)])
     }
 
     fn trait_decl(&mut self, t: &'a TraitDecl, span: Span) -> Doc {
@@ -1093,7 +1145,7 @@ impl<'a> Formatter<'a> {
         head.push(text(" "));
         let members: Vec<Member> = t.methods.iter().map(|f| Member::Method(f, self.fn_lo(f))).collect();
         let (body, flat) = self.braced(ListKind::Body, &members, self.closing_brace(span), false);
-        cat(vec![cat(head), strict_group(!flat, body)])
+        cat(vec![cat(head), strict_group(self.budget, !flat, body)])
     }
 
     fn impl_decl(&mut self, i: &'a ImplDecl, span: Span) -> Doc {
@@ -1104,13 +1156,16 @@ impl<'a> Formatter<'a> {
         head.push(text(" "));
         let members: Vec<Member> = i.methods.iter().map(|f| Member::Method(f, self.fn_lo(f))).collect();
         let (body, flat) = self.braced(ListKind::Body, &members, self.closing_brace(span), false);
-        cat(vec![cat(head), strict_group(!flat, body)])
+        cat(vec![cat(head), strict_group(self.budget, !flat, body)])
     }
 
     // ------------------------------------------------------------------
     // Statements and blocks
 
     fn stmt(&mut self, s: &'a Stmt) -> Doc {
+        if !self.budget.charge(1) {
+            return text("");
+        }
         match &s.kind {
             StmtKind::Let { pattern, ty, value, else_block, mutable, is_pub, .. } => {
                 let vis = if *is_pub { "pub " } else { "" };
@@ -1143,13 +1198,16 @@ impl<'a> Formatter<'a> {
 
     fn block(&mut self, b: &'a Block) -> Doc {
         let (doc, flat) = self.block_parts(b);
-        strict_group(!flat, doc)
+        strict_group(self.budget, !flat, doc)
     }
 
     // ------------------------------------------------------------------
     // Expressions
 
     fn expr(&mut self, e: &'a Expr) -> Doc {
+        if !self.budget.charge(1) {
+            return text("");
+        }
         let pre = self.inline_comments(e.span.lo);
         let doc = self.expr_kind(e);
         prepend(pre, doc)
@@ -1225,7 +1283,7 @@ impl<'a> Formatter<'a> {
                 let head = cat(vec![text("match "), self.expr(scrutinee), text(" ")]);
                 let members: Vec<Member> = arms.iter().map(Member::Arm).collect();
                 let (body, flat) = self.braced(ListKind::Arms, &members, e.span.hi - 1, *inline);
-                cat(vec![head, strict_group(!flat, body)])
+                cat(vec![head, strict_group(self.budget, !flat, body)])
             }
             ExprKind::Block(b) => self.block(b),
             ExprKind::Loop { label, body } => cat(vec![text(format!("{}loop ", label_prefix(label))), self.block(body)]),
@@ -1358,7 +1416,7 @@ impl<'a> Formatter<'a> {
                 _ => cur = el,
             }
         }
-        strict_group(!flat, cat(parts))
+        strict_group(self.budget, !flat, cat(parts))
     }
 
     /// Postfix chains (calls, method calls, fields, indexing, `?`). Chains of
@@ -1432,7 +1490,7 @@ impl<'a> Formatter<'a> {
             }
             tail.push(self.postfix(op));
         }
-        group(force, cat(vec![cat(head), indent(cat(tail))]))
+        group(self.budget, force, cat(vec![cat(head), indent(cat(tail))]))
     }
 
     fn postfix(&mut self, op: &'a Expr) -> Doc {
@@ -1480,6 +1538,9 @@ impl<'a> Formatter<'a> {
     // Types and patterns
 
     fn ty(&mut self, t: &'a TypeExpr) -> Doc {
+        if !self.budget.charge(1) {
+            return text("");
+        }
         let pre = self.inline_comments(t.span.lo);
         let doc = match &t.kind {
             TypeExprKind::Named { path, args } => {
@@ -1520,6 +1581,9 @@ impl<'a> Formatter<'a> {
     }
 
     fn pat(&mut self, p: &'a Pattern) -> Doc {
+        if !self.budget.charge(1) {
+            return text("");
+        }
         let pre = self.inline_comments(p.span.lo);
         let doc = match &p.kind {
             PatternKind::Wildcard => text("_"),

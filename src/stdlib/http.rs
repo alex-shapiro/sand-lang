@@ -77,7 +77,7 @@ struct Url {
 }
 
 fn parse_error(text: &str, why: &str) -> NetError {
-    NetError::new("parse", format!("invalid URL {text:?}: {why}"))
+    NetError::new("parse", format!("invalid URL {:?}: {why}", super::truncate(text, 200)))
 }
 
 fn default_port(scheme: &str) -> Option<u16> {
@@ -106,7 +106,10 @@ impl Url {
         let Some(rest) = rest.strip_prefix("//") else { return Err(parse_error(text, "missing `//` after the scheme")) };
         let scheme = scheme.to_ascii_lowercase();
         let Some(default) = default_port(&scheme) else {
-            return Err(NetError::new("invalid", format!("unsupported URL scheme {scheme:?} (expected http or https)")));
+            return Err(NetError::new(
+                "invalid",
+                format!("unsupported URL scheme {:?} (expected http or https)", super::truncate(&scheme, 64)),
+            ));
         };
         if scheme == "https" && !cfg!(feature = "tls") {
             return Err(NetError::new("invalid", "https is not supported: TLS support is not enabled in this build"));
@@ -368,7 +371,7 @@ fn header_pairs(vm: &Vm, map: Value) -> Result<Vec<(String, String)>, String> {
     for (k, v) in m.entries.iter().flatten() {
         let (k, v) = (vm.str(*k), vm.str(*v));
         if !valid_header(k, v) {
-            return Err(format!("invalid header {k:?}: {v:?}"));
+            return Err(format!("invalid header {:?}: {:?}", super::truncate(k, 64), super::truncate(v, 64)));
         }
         pairs.push((k.to_string(), v.to_string()));
     }
@@ -403,7 +406,7 @@ fn send(vm: &mut Vm, a: &[Value]) -> NResult {
         Err(e) => return Ok(vm.err_value(e.kind, &e.message)),
     };
     if !is_token(&method) {
-        return Ok(vm.err_value("invalid", &format!("invalid HTTP method {method:?}")));
+        return Ok(vm.err_value("invalid", &format!("invalid HTTP method {:?}", super::truncate(&method, 64))));
     }
     let headers = match header_pairs(vm, a[2]) {
         Ok(h) => h,
@@ -422,8 +425,10 @@ fn send(vm: &mut Vm, a: &[Value]) -> NResult {
     if let Err(e) = res.ensure(request.len()) {
         return Ok(vm.err_value("limit", &format!("cannot buffer the request: {e}")));
     }
-    // The request's socket counts as an open resource while it is in use.
-    let slot = match net::resource_slot(vm) {
+    // Request socket counts as an open resource while it is in use.
+    // Request buffers count against the memory limit.
+    let buffers = if url.scheme == "https" { net::CONN_BUFFER + net::TLS_BUFFERS } else { net::CONN_BUFFER };
+    let slot = match net::conn_slot(vm, buffers) {
         Ok(s) => s,
         Err(e) => return Ok(e),
     };
@@ -504,7 +509,7 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
     max_body: usize,
     res: &mut Reservation,
 ) -> Result<RawResponse, NetError> {
-    let mut stream = BufReader::new(stream);
+    let mut stream = BufReader::with_capacity(net::CONN_BUFFER, stream);
     stream.write_all(request).await?;
     stream.flush().await?;
     loop {
@@ -659,11 +664,22 @@ fn next_request(vm: &mut Vm, a: &[Value]) -> NResult {
     })))
 }
 
+/// The fixed buffers of a server connection: the buffer its request is
+/// read with, then also the `net.Conn`'s own (the first may still hold data
+/// that followed the request).
+const SERVER_CONN_BUFFERS: usize = 2 * net::CONN_BUFFER;
+
 /// Reads the request of an accepted connection (see [`Reading`]).
-async fn read_connection(stream: TcpStream, max_body: usize, mem: Arc<IoMemory>, slot: ResourceSlot) -> Result<Received, ResourceSlot> {
+async fn read_connection(stream: TcpStream, max_body: usize, mem: Arc<IoMemory>, mut slot: ResourceSlot) -> Result<Received, ResourceSlot> {
     let Ok(peer) = stream.peer_addr().map(|a| a.to_string()) else { return Err(slot) };
     let (r, mut w) = stream.into_split();
-    let mut reader = BufReader::new(r);
+    if slot.reserve_buffers(SERVER_CONN_BUFFERS).is_err() {
+        // The connection's buffers do not fit in the memory limit
+        let response = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let _ = tokio::time::timeout(Duration::from_secs(5), w.write_all(response.as_bytes())).await;
+        return Err(slot);
+    }
+    let mut reader = BufReader::with_capacity(net::CONN_BUFFER, r);
     let mut res = Reservation::new(&mem);
     let read = read_request(&mut reader, &mut w, max_body, &mut res);
     let result = match tokio::time::timeout(REQUEST_TIMEOUT, read).await {
@@ -671,7 +687,10 @@ async fn read_connection(stream: TcpStream, max_body: usize, mem: Arc<IoMemory>,
         Err(_) => Err(NetError::new("timeout", "timed out reading the request")),
     };
     match result {
-        Ok(request) => Ok(Received { request, conn: net::Conn::new(Box::new(reader), Box::new(w), peer), res, slot }),
+        Ok(request) => {
+            let conn = net::Conn::new(Box::new(reader), Box::new(w), peer, SERVER_CONN_BUFFERS - net::CONN_BUFFER);
+            Ok(Received { request, conn, res, slot })
+        }
         Err(e) => {
             drop(res);
             if e.kind != "closed" {

@@ -520,6 +520,29 @@ print(fs.metadata("pipe")?.is_file)
     assert_eq!(r.ok_stdout(), "invalid\nio\ninvalid\nfalse\n");
 }
 
+#[cfg(windows)]
+#[test]
+fn junctions_are_checked_like_symlinks() {
+    let dir = TempDir::new("junctions");
+    dir.write("outside/dir/keep.txt", "keep");
+    dir.write("allowed/real.txt", "real");
+    let (link, target) = (dir.path().join("allowed").join("link"), dir.path().join("outside").join("dir"));
+    junction::create(&target, &link).unwrap();
+    let src = r#"
+import fs
+print(fs.read_text("allowed/link/keep.txt").unwrap_err().kind)
+print(fs.list_dir("allowed/link").unwrap_err().kind)
+print(fs.write_text("allowed/link/new.txt", "x").unwrap_err().kind)
+fs.rename("allowed/link", "allowed/moved")?
+fs.remove_file("allowed/moved")?
+print(fs.list_dir("allowed")?)
+"#;
+    let r = run_with(src, rules(&dir, RulePolicy::new().allow_write(dir.path().join("allowed"))));
+    assert_eq!(r.ok_stdout(), "permission_denied\npermission_denied\npermission_denied\n[\"real.txt\"]\n");
+    assert_eq!(std::fs::read_to_string(target.join("keep.txt")).unwrap(), "keep");
+    assert!(!target.join("new.txt").exists());
+}
+
 /// A script swaps a directory with a symlink to a forbidden directory while
 /// other tasks read through it: whatever the interleaving, no read may see
 /// the forbidden file (it is refused by the policy check or by the no-follow
@@ -645,17 +668,15 @@ print(results.recv())
 
 #[test]
 fn pending_socket_buffers_count_against_the_memory_limit() {
-    // Each pending read holds its buffer (up to 1 MiB); 64 of them exceed 32 MB.
     let src = r#"
 import net
 let listener = net.listen("127.0.0.1:0")?
 let addr = listener.addr()
-var readers = []
+var conns = []
 for _ in 0..64 {
-    let c = net.connect(addr)?
-    let _ = listener.accept()?
-    readers.push(spawn c.read(max: 1048576))
+    conns.push((net.connect(addr)?, listener.accept()?))
 }
+let readers = conns.map(p => spawn p.0.read(max: 1048576))
 task.sleep(100ms)
 // Reads whose buffer did not fit are done (failed); the others still wait.
 let failed = readers.filter(t => t.is_done()).map(t => t.wait().unwrap_err().kind)
@@ -664,7 +685,6 @@ print(failed.all(k => k == "limit"))
 "#;
     assert_eq!(run_with(src, limited(32 << 20)).ok_stdout(), "true\ntrue\n");
 
-    // Copies of data being written are held until the peer takes them.
     let src = r#"
 import net
 let listener = net.listen("127.0.0.1:0")?
@@ -684,8 +704,6 @@ print(failed.all(k => k == "limit"))
 
 #[test]
 fn hostile_peers_cannot_end_a_server_run() {
-    // A request that claims a huge body, and a line that never ends, fail
-    // the operation (kind "limit") without ending the run.
     let src = r#"
 import http
 import net
@@ -713,9 +731,6 @@ print("still running")
         std::thread::sleep(Duration::from_millis(10));
     };
     use std::io::{Read, Write};
-    // Claims 60 MB and sends more than fits: the request fails (and is
-    // answered with 400, which may be lost to a reset since the server
-    // closes the connection with input unread).
     let mut hostile = std::net::TcpStream::connect(&http_addr).unwrap();
     write!(hostile, "POST / HTTP/1.1\r\nContent-Length: 60000000\r\n\r\n").unwrap();
     let _ = hostile.write_all(&vec![b'a'; 12 << 20]);
@@ -800,7 +815,7 @@ fn deny_rules_ignore_case() {
     assert!(p.denies_under(&d.join("Future")));
 }
 
-/// Unicode spellings a case- and normalisation-insensitive file system
+/// Unicode spellings a case- and normalization-insensitive file system
 /// (APFS) treats as the same name: `ſ`/`s`, `ς`/`σ`, NFC/NFD.
 #[test]
 fn deny_rules_match_unicode_equivalent_spellings() {
@@ -860,6 +875,66 @@ print(fs.list_dir("data")?)
     let stored = sandlang::policy::normalize_entry_path(&data.join("ſecrets"));
     assert_eq!(stored, data.join("secrets"));
     assert_eq!(p.check_entry(&Capability::FsWrite(data.join("CONFIG.JSON"))), Decision::Deny);
+}
+
+/// A symlink's own name (which cannot be canonicalised without following
+/// the link) is named as stored too, so allow rules, which compare exactly,
+/// see the same path for every spelling the file system accepts.
+#[cfg(target_os = "macos")]
+#[test]
+fn symlink_entries_are_named_as_stored() {
+    use sandlang::policy::normalize_entry_path;
+    use std::os::unix::fs::symlink;
+    let dir = TempDir::new("link-names");
+    dir.write("outside/target.txt", "target");
+    let data = dir.path().join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    symlink(dir.path().join("outside/target.txt"), data.join("Link.txt")).unwrap();
+    symlink(dir.path().join("outside"), data.join("caf\u{e9}-link")).unwrap();
+    for (given, stored) in [
+        ("link.TXT", "Link.txt"),
+        ("Link.txt", "Link.txt"),
+        ("cafe\u{301}-link", "caf\u{e9}-link"),
+        ("CAF\u{c9}-LINK", "caf\u{e9}-link"),
+        ("missing.TXT", "missing.TXT"),
+    ] {
+        assert_eq!(normalize_entry_path(&data.join(given)), data.join(stored), "{given}");
+    }
+    let p = Policy::rules(RulePolicy::new().allow_write(data.join("Later")));
+    symlink(dir.path().join("outside/target.txt"), data.join("Later")).unwrap();
+    assert_eq!(p.check_entry(&Capability::FsWrite(data.join("LATER"))), Decision::Allow);
+
+    let allowed = [
+        Capability::Stdout,
+        Capability::FsRead(data.clone()),
+        Capability::FsWrite(data.join("Link.txt")),
+        Capability::FsWrite(data.join("renamed.txt")),
+    ];
+    let policy = Policy::custom(move |cap: &Capability| if allowed.contains(cap) { Decision::Allow } else { Decision::Deny });
+    let src = r#"
+import fs
+fs.rename("data/LINK.TXT", "data/renamed.txt")?
+print(fs.list_dir("data")?)
+print(fs.remove_file("data/CAFE\u{301}-LINK").unwrap_err().kind)
+"#;
+    let cwd = dir.path().to_path_buf();
+    let r = run_with(src, move |c| c.policy(policy).cwd(cwd));
+    assert_eq!(r.ok_stdout(), "[\"Later\", \"caf\u{e9}-link\", \"renamed.txt\"]\npermission_denied\n");
+    assert_eq!(std::fs::read_to_string(dir.path().join("outside/target.txt")).unwrap(), "target");
+}
+
+/// On a case-sensitive file system, differently cased symlinks are distinct
+/// entries and keep their names.
+#[cfg(target_os = "linux")]
+#[test]
+fn symlink_entries_keep_their_exact_names() {
+    use sandlang::policy::normalize_entry_path;
+    let dir = TempDir::new("link-cases");
+    for name in ["link", "LINK"] {
+        std::os::unix::fs::symlink("/nowhere", dir.path().join(name)).unwrap();
+        assert_eq!(normalize_entry_path(&dir.path().join(name)), dir.path().join(name));
+    }
+    assert_eq!(normalize_entry_path(&dir.path().join("Link")), dir.path().join("Link"));
 }
 
 #[test]

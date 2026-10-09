@@ -26,6 +26,14 @@ mod uuid;
 use crate::engine::Registry;
 pub(crate) use net::TlsSettings;
 
+/// At most the first `max` characters of `s`.
+pub(crate) fn truncate(s: &str, max: usize) -> &str {
+    match s.char_indices().nth(max) {
+        Some((i, _)) => &s[..i],
+        None => s,
+    }
+}
+
 pub(crate) fn register(r: &mut Registry) {
     core::register(r);
     base64::register(r);
@@ -79,4 +87,9 @@ pub(crate) fn resolve_path(vm: &crate::vm::Vm, p: &str) -> std::path::PathBuf {
     let path = std::path::Path::new(p);
     let joined = if path.is_absolute() { path.to_path_buf() } else { vm.host.cwd.join(path) };
     crate::policy::normalize_path(&joined)
+}
+
+/// Whether the file system worker is running an operation.
+pub(crate) fn fs_worker_busy() -> bool {
+    fs::FsWorker::busy()
 }

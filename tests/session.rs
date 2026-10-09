@@ -4,9 +4,10 @@
 mod common;
 
 use common::{TempDir, rt};
-use sandlang::{Capability, Config, Engine, Error, LimitKind, Limits, MemorySink, Policy, PromptAnswer, RulePolicy, Session};
+use sandlang::session::RESET_NOTE;
+use sandlang::{Capability, Config, Engine, Error, LimitKind, Limits, MemorySink, NativeModule, Policy, PromptAnswer, RulePolicy, Session};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 struct Repl {
@@ -506,4 +507,252 @@ fn input_completeness() {
     ] {
         assert!(!Session::is_complete(incomplete), "{incomplete:?}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Internal errors
+// ---------------------------------------------------------------------------
+
+/// A host module whose `crash(n)` panics (in Rust) when `n > 0`: host natives
+/// can have bugs.
+fn buggy_module() -> NativeModule {
+    let mut m = NativeModule::new("bug");
+    m.function("crash", |n: i64| -> i64 {
+        if n > 0 {
+            panic!("host bug {n}");
+        }
+        n
+    });
+    m
+}
+
+fn assert_reset(r: &Repl, message: &str, panic: &str) {
+    assert!(message.starts_with(&format!("internal error: {panic}")), "{message}");
+    assert!(message.ends_with(RESET_NOTE), "{message}");
+    assert!(r.session.was_reset());
+}
+
+#[test]
+fn internal_panics_reset_the_session() {
+    let mut r = Repl::with(Config::new().module(buggy_module()));
+    r.ok("import bug\nlet x = 1");
+    assert_eq!(r.value("bug.crash(0) + x"), "1");
+    assert!(!r.session.was_reset());
+    let msg = r.runtime_error("let y = x + 1\nbug.crash(1)");
+    assert_reset(&r, &msg, "host bug 1");
+    let msg = r.compile_error("x");
+    assert!(msg.contains("undefined name `x`"), "{msg}");
+    assert!(!r.session.was_reset());
+    r.ok("import bug\nlet x = 2");
+    assert_eq!(r.value("bug.crash(0) + x"), "2");
+    let msg = r.runtime_error("let t = spawn bug.crash(2)\ntask.sleep(50ms)");
+    assert_reset(&r, &msg, "host bug 2");
+    r.compile_error("t");
+    r.ok("import bug");
+    r.ok("test \"a\" { assert(bug.crash(0) == 0) }\ntest \"b\" { bug.crash(3) }\ntest \"c\" { assert(true) }");
+    let report = r.rt.block_on(r.session.run_tests()).unwrap();
+    assert!(r.session.was_reset());
+    assert_eq!(report.results.len(), 2, "{}", report.render());
+    assert!(report.results[0].passed);
+    let msg = report.results[1].message.clone().unwrap();
+    assert!(msg.starts_with("internal error: host bug 3") && msg.ends_with(RESET_NOTE), "{msg}");
+    r.compile_error("bug.crash(0)");
+}
+
+#[test]
+fn internal_panics_in_background_tasks_reset_the_session() {
+    let mut r = Repl::with(Config::new().module(buggy_module()));
+    r.ok("import bug\nlet t = spawn { task.sleep(20ms)\nbug.crash(1) }");
+    let mut errors = Vec::new();
+    let got = r.rt.block_on(r.session.run_tasks_until(async { tokio::time::sleep(Duration::from_millis(300)).await }, |e| errors.push(e)));
+    assert_eq!(got, Some(()));
+    match &errors[..] {
+        [Error::Runtime { message, .. }] => assert_reset(&r, message, "host bug 1"),
+        other => panic!("{other:?}"),
+    }
+    r.compile_error("t");
+}
+
+#[test]
+fn always_answers_survive_a_reset() {
+    let dir = TempDir::new("session-reset-prompt");
+    std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "bye").unwrap();
+    let asked = Arc::new(AtomicUsize::new(0));
+    let n = asked.clone();
+    let prompter = move |cap: Capability| -> sandlang::policy::PromptFuture {
+        if matches!(&cap, Capability::FsRead(p) if p.ends_with("b.txt")) {
+            panic!("prompter bug");
+        }
+        n.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { PromptAnswer::AllowAlways })
+    };
+    let policy = Policy::rules(RulePolicy::new().fallback(sandlang::Decision::Prompt));
+    let mut r = Repl::with(Config::new().policy(policy).prompter(prompter).cwd(dir.path()).module_root(dir.path()));
+    let msg = r.runtime_error("import fs\nlet a = fs.read_text(\"a.txt\")?\nlet b = fs.read_text(\"b.txt\")?");
+    assert_reset(&r, &msg, "prompter bug");
+    let asked_before = asked.load(Ordering::SeqCst);
+    r.ok("import fs");
+    assert_eq!(r.value("fs.read_text(\"a.txt\")?"), "\"hello\"");
+    assert_eq!(asked.load(Ordering::SeqCst), asked_before);
+}
+
+// ---------------------------------------------------------------------------
+// Tasks between inputs
+// ---------------------------------------------------------------------------
+
+impl Repl {
+    /// Runs the session's tasks for `ms` milliseconds; returns the errors.
+    fn idle(&mut self, ms: u64) -> Vec<Error> {
+        let mut errors = Vec::new();
+        let wait = async move { tokio::time::sleep(Duration::from_millis(ms)).await };
+        let got = self.rt.block_on(self.session.run_tasks_until(wait, |e| errors.push(e)));
+        assert_eq!(got, Some(()), "a task called exit");
+        errors
+    }
+}
+
+#[test]
+fn tasks_run_between_inputs() {
+    let mut r = Repl::new();
+    let got = r.rt.block_on(r.session.run_tasks_until(async { 5 }, |e| panic!("{e}")));
+    assert_eq!(got, Some(5));
+    r.ok("var log: [str] = []");
+    r.ok("let t = spawn {\n    task.sleep(20ms)\n    log.push(\"tick\")\n    print(\"tick\")\n    task.sleep(20ms)\n    log.push(\"tock\")\n}");
+    assert_eq!(r.value("log"), "[]");
+    assert!(r.idle(300).is_empty());
+    assert_eq!(r.value("log"), "[\"tick\", \"tock\"]");
+    assert_eq!(r.take_out(), "tick\n");
+    r.ok("let ch: Channel<int> = task.channel(1)\nlet reader = spawn ch.recv()");
+    assert!(r.idle(50).is_empty());
+    r.ok("ch.send(4);");
+    assert_eq!(r.value("reader.wait()"), "Some(4)");
+    r.ok("let slow = spawn { task.sleep(10s) }\nlet bad = spawn { task.sleep(10ms)\npanic(\"bad task\") }");
+    match &r.idle(300)[..] {
+        [Error::Runtime { message, trace }] => {
+            assert_eq!(message, "bad task");
+            assert!(!trace.is_empty());
+        }
+        other => panic!("{other:?}"),
+    }
+    let msg = r.runtime_error("slow.wait()");
+    assert!(msg.contains("task cancelled"), "{msg}");
+    r.ok("let slow = spawn { task.sleep(10s) }");
+    assert_eq!(r.session.cancel_tasks(), 1);
+    assert_eq!(r.session.cancel_tasks(), 0);
+    let msg = r.runtime_error("slow.wait()");
+    assert!(msg.contains("task cancelled"), "{msg}");
+}
+
+#[test]
+fn limits_of_tasks_between_inputs() {
+    let limits = Limits { max_instructions: Some(200_000), max_wall_time: Some(Duration::from_millis(100)), ..Limits::default() };
+    let mut r = Repl::with(Config::new().limits(limits));
+    r.ok("var done = false\nlet t = spawn { task.sleep(150ms)\ndone = true }");
+    assert!(r.idle(400).is_empty());
+    assert_eq!(r.value("done"), "true");
+    r.ok("var n = 0\nlet busy = spawn { while true { n += 1 } }");
+    match &r.idle(500)[..] {
+        [Error::Limit(LimitKind::Instructions)] => {}
+        other => panic!("{other:?}"),
+    }
+    let msg = r.runtime_error("busy.wait()");
+    assert!(msg.contains("task cancelled"), "{msg}");
+    assert_eq!(r.value("n > 0"), "true");
+    match r.eval("task.sleep(1s)") {
+        Err(Error::Limit(LimitKind::WallTime)) => {}
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn exit_in_a_task_between_inputs() {
+    let mut r = Repl::new();
+    r.ok("spawn { task.sleep(10ms)\nexit(7) };");
+    let start = std::time::Instant::now();
+    let got = r.rt.block_on(r.session.run_tasks_until(async { tokio::time::sleep(Duration::from_secs(20)).await }, |e| panic!("{e}")));
+    assert_eq!(got, None);
+    assert!(start.elapsed() < Duration::from_secs(10));
+    assert_eq!(r.session.exit_code(), Some(7));
+}
+
+#[test]
+fn prompts_between_inputs_wait_for_the_input() {
+    let dir = TempDir::new("session-idle-prompt");
+    std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
+    let have_input = Arc::new(AtomicBool::new(false));
+    let asked_early = Arc::new(AtomicUsize::new(0));
+    let asked = Arc::new(AtomicUsize::new(0));
+    let (h, e, n) = (have_input.clone(), asked_early.clone(), asked.clone());
+    let prompter = move |_: Capability| -> sandlang::policy::PromptFuture {
+        n.fetch_add(1, Ordering::SeqCst);
+        if !h.load(Ordering::SeqCst) {
+            e.fetch_add(1, Ordering::SeqCst);
+        }
+        Box::pin(async { PromptAnswer::AllowOnce })
+    };
+    let policy = Policy::rules(RulePolicy::new().fallback(sandlang::Decision::Prompt));
+    let mut r = Repl::with(Config::new().policy(policy).prompter(prompter).cwd(dir.path()).module_root(dir.path()));
+    r.ok("import fs");
+    let before = asked.load(Ordering::SeqCst);
+    r.ok("let t = spawn { task.sleep(10ms)\nfs.read_text(\"a.txt\") }");
+    let input = async {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        have_input.store(true, Ordering::SeqCst);
+        "the input"
+    };
+    let got = r.rt.block_on(r.session.run_tasks_until(input, |e| panic!("{e}")));
+    assert_eq!(got, Some("the input"));
+    assert_eq!(asked.load(Ordering::SeqCst), before + 1);
+    assert_eq!(asked_early.load(Ordering::SeqCst), 0);
+    assert_eq!(r.value("t.wait()"), "Ok(\"hello\")");
+}
+
+#[test]
+fn dropping_a_run_tasks_until_future_keeps_the_tasks() {
+    let mut r = Repl::new();
+    r.ok("var k = 0\nlet t = spawn { task.sleep(150ms)\nk = 1 }");
+    let Repl { rt, session, .. } = &mut r;
+    let wait = session.run_tasks_until(std::future::pending::<()>(), |e| panic!("{e}"));
+    assert!(rt.block_on(async { tokio::time::timeout(Duration::from_millis(50), wait).await }).is_err());
+    assert_eq!(r.value("t.wait()\nk"), "1");
+    assert!(r.idle(10).is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Types in messages
+// ---------------------------------------------------------------------------
+
+#[test]
+fn types_of_generic_functions() {
+    let mut r = Repl::new();
+    r.ok("fn id<T>(x: T) -> T { x }\nfn pair<A, B>(a: A, b: B) -> (A, B) { (a, b) }\nfn smallest<T: Ord>(xs: [T]) -> T? { None }");
+    r.ok("trait Shape { fn area(self) -> float }\nfn total<S: Shape>(xs: [S]) -> float { 0.0 }");
+    let mut ty = |s: &str| r.session.type_of(s).unwrap();
+    assert_eq!(ty("id"), "fn<T>(T) -> T");
+    assert_eq!(ty("pair"), "fn<A, B>(A, B) -> (A, B)");
+    assert_eq!(ty("smallest"), "fn<T: Ord>([T]) -> T?");
+    assert_eq!(ty("total"), "fn<S: Shape>([S]) -> float");
+    assert_eq!(ty("x => pair(x, 1)"), "fn<A>(A) -> (A, int)");
+    assert_eq!(ty("x => x"), "fn<T>(T) -> T");
+    assert_eq!(ty("(a, b) => a < b"), "fn<T: Ord>(T, T) -> bool");
+    assert_eq!(ty("Some"), "fn<T>(T) -> T?");
+    assert_eq!(ty("(x, y) => pair(id(x), y)"), "fn<A, B>(A, B) -> (A, B)");
+    assert_eq!(ty("id(3)"), "int");
+    assert_eq!(ty("[]"), "[_]");
+}
+
+#[test]
+fn redefined_types_are_told_apart_in_messages() {
+    let mut r = Repl::new();
+    r.ok("struct Point { x: int }");
+    r.ok("let p = Point { x: 1 }");
+    r.ok("struct Point { x: int }");
+    r.ok("fn f(q: Point) -> int { q.x }");
+    let msg = r.compile_error("f(p)");
+    assert_eq!(msg, "type mismatch: expected Point (defined in input 3), found Point (defined in input 1)");
+    let msg = r.compile_error("let o: Point? = Some(p)");
+    assert_eq!(msg, "type mismatch: expected Option<Point (defined in input 3)>, found Option<Point (defined in input 1)>");
+    let msg = r.compile_error("let n: int = p");
+    assert_eq!(msg, "type mismatch: expected int, found Point");
 }

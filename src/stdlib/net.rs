@@ -62,8 +62,11 @@ pub fn register(r: &mut Registry) {
     });
     r.add_builtin("net.Conn.close", |vm, a| {
         let c = vm.heap.native_mut::<Conn>(a[0]).ok_or_else(|| Ctl::Panic("not a connection".into()))?;
+        let before = c.size();
         if c.close() {
+            let after = c.size();
             vm.heap.resource_closed();
+            vm.heap.account(before, after);
         }
         Ok(Value::Unit)
     });
@@ -143,6 +146,18 @@ pub(crate) fn resource_slot(vm: &mut Vm) -> Result<ResourceSlot, Value> {
         return Err(vm.err_value("limit", &format!("too many open resources (limit {max})")));
     }
     Ok(ResourceSlot::new(&mem))
+}
+
+/// Like [`resource_slot`], for a connection: also reserves `buffers` bytes
+/// for its fixed buffers ([`CONN_BUFFER`], ...), which its `Conn` object
+/// counts once it exists.
+pub(crate) fn conn_slot(vm: &mut Vm, buffers: usize) -> Result<ResourceSlot, Value> {
+    let mut slot = resource_slot(vm)?;
+    vm.heap.io_memory.publish_heap(vm.heap.used());
+    match slot.reserve_buffers(buffers) {
+        Ok(()) => Ok(slot),
+        Err(e) => Err(vm.err_value("limit", &format!("cannot open a connection: its buffers ({buffers} bytes) do not fit: {e}"))),
+    }
 }
 
 /// Allocates a socket object in place of the slot that counted it.
@@ -251,7 +266,7 @@ fn listener_accept(vm: &mut Vm, a: &[Value]) -> NResult {
     let Some(socket) = l.socket.clone() else { return Ok(vm.err_value("closed", "listener closed")) };
     let closed = CloseSignal(l.closed.subscribe());
     // A pending accept holds a slot for the connection it will produce.
-    let slot = match resource_slot(vm) {
+    let slot = match conn_slot(vm, CONN_BUFFER) {
         Ok(s) => s,
         Err(e) => return Ok(e),
     };
@@ -266,6 +281,13 @@ fn listener_accept(vm: &mut Vm, a: &[Value]) -> NResult {
 
 // ----------------------------------------------------------------------
 // Connections
+
+/// The size of a connection's read buffer.
+pub(crate) const CONN_BUFFER: usize = 8 << 10;
+
+/// An estimate of the memory a TLS session holds besides the connection's
+/// read buffer.
+pub(crate) const TLS_BUFFERS: usize = 40 << 10;
 
 pub(crate) type ReadHalf = BufReader<Box<dyn AsyncRead + Send + Unpin>>;
 pub(crate) type WriteHalf = Box<dyn AsyncWrite + Send + Unpin>;
@@ -284,6 +306,8 @@ pub(crate) struct Conn {
     halves: Option<(SharedReader, SharedWriter)>,
     peer: String,
     closed: watch::Sender<bool>,
+    /// Bytes of fixed buffers held while open.
+    buffers: usize,
 }
 
 /// Makes end of stream final: once the peer has finished sending, later reads
@@ -316,19 +340,23 @@ impl<R: AsyncRead + Unpin> AsyncRead for StickyEof<R> {
 }
 
 impl Conn {
-    pub fn new(reader: Box<dyn AsyncRead + Send + Unpin>, writer: WriteHalf, peer: String) -> Conn {
+    /// A connection over `reader` and `writer`, which hold `extra` bytes of
+    /// buffers besides the connection's own read buffer ([`CONN_BUFFER`]).
+    /// Its slot has reserved them all.
+    pub fn new(reader: Box<dyn AsyncRead + Send + Unpin>, writer: WriteHalf, peer: String, extra: usize) -> Conn {
         let reader: Box<dyn AsyncRead + Send + Unpin> = Box::new(StickyEof { inner: reader, eof: false });
         Conn {
-            halves: Some((Arc::new(Mutex::new(BufReader::new(reader))), Arc::new(Mutex::new(writer)))),
+            halves: Some((Arc::new(Mutex::new(BufReader::with_capacity(CONN_BUFFER, reader))), Arc::new(Mutex::new(writer)))),
             peer,
             closed: watch::Sender::new(false),
+            buffers: CONN_BUFFER + extra,
         }
     }
 
     fn from_tcp(stream: TcpStream) -> std::io::Result<Conn> {
         let peer = stream.peer_addr()?.to_string();
         let (r, w) = stream.into_split();
-        Ok(Conn::new(Box::new(r), Box::new(w), peer))
+        Ok(Conn::new(Box::new(r), Box::new(w), peer, 0))
     }
 
     /// The handle for an operation, or `None` if the connection is closed.
@@ -347,6 +375,9 @@ impl Conn {
 impl NativeObject for Conn {
     fn type_name(&self) -> &'static str {
         "Conn"
+    }
+    fn size(&self) -> usize {
+        64 + if self.halves.is_some() { self.buffers } else { 0 }
     }
     fn is_resource(&self) -> bool {
         self.halves.is_some()
@@ -435,13 +466,13 @@ pub(crate) async fn tcp_connect(policy: &Policy, host: &str, port: u16, timeout:
 fn connect(vm: &mut Vm, a: &[Value]) -> NResult {
     let addr = vm.str(a[0]).to_string();
     let Some((host, port)) = split_host_port(&addr) else {
-        return Ok(vm.err_value("invalid", &format!("invalid address {addr:?} (expected host:port)")));
+        return Ok(vm.err_value("invalid", &format!("invalid address {:?} (expected host:port)", super::truncate(&addr, 200))));
     };
     if let Some(denied) = check_permission(vm, Capability::Net { host: host.clone(), port })? {
         return Ok(denied);
     }
     // Counted from the start: a connection attempt holds a socket.
-    let slot = match resource_slot(vm) {
+    let slot = match conn_slot(vm, CONN_BUFFER) {
         Ok(s) => s,
         Err(e) => return Ok(e),
     };
@@ -461,7 +492,7 @@ fn connect_tls(vm: &mut Vm, a: &[Value]) -> NResult {
     if let Some(denied) = check_permission(vm, Capability::Net { host: host.clone(), port })? {
         return Ok(denied);
     }
-    let slot = match resource_slot(vm) {
+    let slot = match conn_slot(vm, CONN_BUFFER + TLS_BUFFERS) {
         Ok(s) => s,
         Err(e) => return Ok(e),
     };
@@ -476,7 +507,7 @@ fn connect_tls(vm: &mut Vm, a: &[Value]) -> NResult {
         let peer = tcp.peer_addr()?.to_string();
         let tls = tls::connect(&settings, &host, tcp).await?;
         let (r, w) = tokio::io::split(tls);
-        Ok(Conn::new(Box::new(r), Box::new(w), peer))
+        Ok(Conn::new(Box::new(r), Box::new(w), peer, TLS_BUFFERS))
     };
     suspend_resource(slot, async move {
         match tokio::time::timeout(timeout, open).await {
@@ -685,8 +716,8 @@ pub(crate) mod tls {
 
     /// Performs a TLS handshake over `tcp`, verifying the certificate for `host`.
     pub async fn connect(settings: &TlsSettings, host: &str, tcp: TcpStream) -> Result<TlsStream<TcpStream>, NetError> {
-        let name =
-            ServerName::try_from(host.to_string()).map_err(|_| NetError::new("invalid", format!("invalid TLS server name {host:?}")))?;
+        let name = ServerName::try_from(host.to_string())
+            .map_err(|_| NetError::new("invalid", format!("invalid TLS server name {:?}", crate::stdlib::truncate(host, 200))))?;
         connector(settings)?.connect(name, tcp).await.map_err(|e| {
             let e = NetError::from(e);
             NetError::new(e.kind, format!("TLS handshake with {host} failed: {}", e.message))

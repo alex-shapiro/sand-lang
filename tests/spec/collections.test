@@ -528,3 +528,25 @@ for i in 0..100000 {
 print(a == b)
 --- stdout
 true
+
+=== list stores after pops keep their values through collections
+// Under GC stress each loop iteration collects: the list becomes old, its
+// pushed tail is remembered, the pops shrink it below the tail's start and
+// the push stores a young value there before the next collection.
+let xs = [[0]]
+var out = []
+for round in 0..20 {
+    xs.push([round])
+    xs.pop()
+    xs.pop()
+    var fresh = [round * 10, round * 10 + 1]
+    xs.push(fresh)
+    fresh = []
+    for _ in 0..3 {
+        let garbage = [[1], [2], [3]]
+    }
+    out.push(xs[0][1])
+}
+print(out)
+--- stdout
+[1, 11, 21, 31, 41, 51, 61, 71, 81, 91, 101, 111, 121, 131, 141, 151, 161, 171, 181, 191]
