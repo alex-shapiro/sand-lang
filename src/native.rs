@@ -20,6 +20,31 @@ pub trait SandType {
 /// Conversion from a Sand value.
 pub trait FromValue: Sized {
     fn from_value(vm: &Vm, v: Value) -> Result<Self, String>;
+
+    /// The memory that converting `v` allocates besides `Self` itself
+    /// (string and byte buffers, vector elements), which the typed function
+    /// wrappers check against the memory limit before converting their
+    /// arguments: values share structure (a list may hold one big string
+    /// many times), so a conversion can be far larger than its argument.
+    /// Charges for any walk it does; limit errors are encoded with
+    /// `meter::ctl_message`. Types whose conversion allocates in proportion
+    /// to their input should override the default (nothing).
+    fn alloc_size(_vm: &Vm, _v: Value) -> Result<usize, String> {
+        Ok(0)
+    }
+}
+
+/// `FromValue::alloc_size` of a parameter type.
+type AllocSize = fn(&Vm, Value) -> Result<usize, String>;
+
+/// Checks that the conversions of `args` (`alloc_size` of their types,
+/// in order) fit in the memory limit.
+fn reserve_args(vm: &Vm, args: &[Value], sizes: &[AllocSize]) -> Result<(), Ctl> {
+    let mut total = 0usize;
+    for (&a, size) in args.iter().zip(sizes) {
+        total = total.saturating_add(size(vm, a).map_err(crate::vm::meter::ctl_from_message)?);
+    }
+    vm.reserve(total)
 }
 
 /// Conversion into a Sand value.
@@ -92,6 +117,9 @@ impl FromValue for String {
             _ => Err("expected str".into()),
         }
     }
+    fn alloc_size(vm: &Vm, v: Value) -> Result<usize, String> {
+        Ok(vm.str(v).len())
+    }
 }
 impl IntoValue for String {
     fn into_value(self, vm: &mut Vm) -> Value {
@@ -129,6 +157,9 @@ impl FromValue for Vec<u8> {
             _ => Err("expected bytes".into()),
         }
     }
+    fn alloc_size(vm: &Vm, v: Value) -> Result<usize, String> {
+        Ok(vm.heap.bytes_of(v).len())
+    }
 }
 impl IntoValue for Vec<u8> {
     fn into_value(self, vm: &mut Vm) -> Value {
@@ -136,8 +167,10 @@ impl IntoValue for Vec<u8> {
     }
 }
 
+// `$owns`: whether the elements own buffers (so that the size of a
+// conversion requires visiting them).
 macro_rules! vec_of {
-    ($($t:ty),*) => {$(
+    ($($t:ty: $owns:expr),*) => {$(
         impl SandType for Vec<$t> {
             fn sand_type() -> String { format!("[{}]", <$t as SandType>::sand_type()) }
         }
@@ -145,6 +178,17 @@ macro_rules! vec_of {
             fn from_value(vm: &Vm, v: Value) -> Result<Self, String> {
                 vm.charge(vm.heap.list(v).len() as u64).map_err(ctl_message)?;
                 vm.heap.list(v).iter().map(|x| <$t as FromValue>::from_value(vm, *x)).collect()
+            }
+            fn alloc_size(vm: &Vm, v: Value) -> Result<usize, String> {
+                let items = vm.heap.list(v);
+                let mut total = items.len().saturating_mul(std::mem::size_of::<$t>());
+                if $owns {
+                    vm.charge(items.len() as u64).map_err(ctl_message)?;
+                    for &x in items {
+                        total = total.saturating_add(<$t as FromValue>::alloc_size(vm, x)?);
+                    }
+                }
+                Ok(total)
             }
         }
         impl IntoValue for Vec<$t> {
@@ -155,7 +199,7 @@ macro_rules! vec_of {
         }
     )*};
 }
-vec_of!(i64, f64, bool, String, Vec<u8>);
+vec_of!(i64: false, f64: false, bool: false, String: true, Vec<u8>: true);
 
 impl<T: SandType> SandType for Option<T> {
     fn sand_type() -> String {
@@ -168,6 +212,9 @@ impl<T: FromValue> FromValue for Option<T> {
             Some(x) => Ok(Some(T::from_value(vm, x)?)),
             None => Ok(None),
         }
+    }
+    fn alloc_size(vm: &Vm, v: Value) -> Result<usize, String> {
+        vm.as_option(v).map_or(Ok(0), |x| T::alloc_size(vm, x))
     }
 }
 impl<T: IntoValue> IntoValue for Option<T> {
@@ -226,6 +273,15 @@ fn read_map<T: FromValue>(vm: &Vm, v: Value) -> Result<Vec<(String, T)>, String>
         _ => Err("expected map".into()),
     }
 }
+fn map_alloc_size<T: FromValue>(vm: &Vm, v: Value) -> Result<usize, String> {
+    let Obj::Map(m) = vm.heap.get(v) else { return Ok(0) };
+    vm.charge(m.live as u64).map_err(ctl_message)?;
+    let mut total = m.live.saturating_mul(std::mem::size_of::<(String, T)>());
+    for (k, val) in m.entries.iter().flatten() {
+        total = total.saturating_add(String::alloc_size(vm, *k)?).saturating_add(T::alloc_size(vm, *val)?);
+    }
+    Ok(total)
+}
 fn write_map<T: IntoValue>(vm: &mut Vm, items: impl IntoIterator<Item = (String, T)>) -> Value {
     let m = vm.heap.alloc(Obj::Map(Box::default()));
     for (k, v) in items {
@@ -239,6 +295,9 @@ impl<T: FromValue> FromValue for HashMap<String, T> {
     fn from_value(vm: &Vm, v: Value) -> Result<Self, String> {
         Ok(read_map(vm, v)?.into_iter().collect())
     }
+    fn alloc_size(vm: &Vm, v: Value) -> Result<usize, String> {
+        map_alloc_size::<T>(vm, v)
+    }
 }
 impl<T: IntoValue> IntoValue for HashMap<String, T> {
     fn into_value(self, vm: &mut Vm) -> Value {
@@ -250,6 +309,9 @@ impl<T: IntoValue> IntoValue for HashMap<String, T> {
 impl<T: FromValue> FromValue for BTreeMap<String, T> {
     fn from_value(vm: &Vm, v: Value) -> Result<Self, String> {
         Ok(read_map(vm, v)?.into_iter().collect())
+    }
+    fn alloc_size(vm: &Vm, v: Value) -> Result<usize, String> {
+        map_alloc_size::<T>(vm, v)
     }
 }
 impl<T: IntoValue> IntoValue for BTreeMap<String, T> {
@@ -270,6 +332,10 @@ macro_rules! tuple_impls {
             fn from_value(vm: &Vm, v: Value) -> Result<Self, String> {
                 let f = vm.heap.fields(v);
                 Ok(($($n::from_value(vm, *f.get($i).ok_or("tuple too short")?)?,)+))
+            }
+            fn alloc_size(vm: &Vm, v: Value) -> Result<usize, String> {
+                let f = vm.heap.fields(v);
+                Ok(0usize$(.saturating_add(match f.get($i) { Some(&x) => $n::alloc_size(vm, x)?, None => 0 }))+)
             }
         }
         impl<$($n: IntoValue),+> IntoValue for ($($n,)+) {
@@ -315,6 +381,7 @@ macro_rules! host_fn_impls {
             }
             fn into_host(self) -> HostFn {
                 Arc::new(move |vm: &mut Vm, args: &[Value]| -> NResult {
+                    reserve_args(vm, args, &[$($a::alloc_size),*])?;
                     let mut it = args.iter();
                     $(let $a = $a::from_value(vm, *it.next().ok_or_else(|| Ctl::Panic("missing argument".into()))?).map_err(crate::vm::meter::ctl_from_message)?;)*
                     let r = self($($a),*);
@@ -339,6 +406,7 @@ macro_rules! host_fn_impls {
             }
             fn into_host(self) -> HostFn {
                 Arc::new(move |vm: &mut Vm, args: &[Value]| -> NResult {
+                    reserve_args(vm, args, &[$($a::alloc_size),*])?;
                     let mut it = args.iter();
                     $(let $a = $a::from_value(vm, *it.next().ok_or_else(|| Ctl::Panic("missing argument".into()))?).map_err(crate::vm::meter::ctl_from_message)?;)*
                     let fut = self($($a),*);
@@ -414,6 +482,7 @@ impl NativeModule {
         let decl = Self::signature(name, &[A::sand_type()], &format!("Result<{}, Error>", R::sand_type()));
         self.decls.push((name.to_string(), decl));
         let host: HostFn = Arc::new(move |vm: &mut Vm, args: &[Value]| -> NResult {
+            reserve_args(vm, args, &[A::alloc_size])?;
             let a = A::from_value(vm, args[0]).map_err(crate::vm::meter::ctl_from_message)?;
             let cap = guard(&a);
             if !vm.permit(&cap)? {

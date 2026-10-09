@@ -183,9 +183,15 @@ struct DirtyList {
     idx: Vec<u32>,
 }
 
-/// Beyond this many stored indices (or an eighth of the list's length, if
-/// more) a list is scanned in full.
-const MAX_DIRTY_INDICES: usize = 1024;
+/// A partially remembered list (or map's or set's entries) records at most
+/// one stored index per this many elements (at least one); beyond that it
+/// is scanned in full. The index lists are not counted against the memory
+/// limit, and stores allocate nothing (so they need not lead to the
+/// collection that empties the lists), so they must stay small compared to
+/// the objects themselves. (A fixed minimum of 1,024 indices let a script
+/// keep 4 KB per one-element list, far beyond the limit, by storing a young
+/// value into many old small lists over and over.)
+const ELEMS_PER_DIRTY_INDEX: usize = 8;
 
 const NONE: u32 = u32::MAX;
 const MIN_GC: usize = 4 << 20;
@@ -369,7 +375,7 @@ impl Heap {
         if push {
             d.from = d.from.min(index);
             self.tail_bits[w] |= b;
-        } else if d.idx.len() < MAX_DIRTY_INDICES.max(len / 8) {
+        } else if d.idx.len() < (len / ELEMS_PER_DIRTY_INDEX).max(1) {
             d.idx.push(index);
         } else {
             self.remember_fully(h);
@@ -457,6 +463,19 @@ impl Heap {
         }
     }
 
+    /// The bytes `append_str(cur, add)` copies (what `Op::AppendStr` is
+    /// charged for): `add`, if it is appended in place (growing the buffer
+    /// is amortised); otherwise all of `cur` too, which is copied into a new
+    /// buffer (as when `cur` was read, and so frozen, since the last append).
+    #[inline(never)]
+    pub fn append_copies(&self, cur: Value, add: Value) -> usize {
+        let extra = self.str(add).len();
+        match cur {
+            Value::Obj(h) if add.handle() != Some(h) && matches!(self.objs[h as usize], Obj::StrBuf(_)) => extra,
+            _ => self.str(cur).len().saturating_add(extra),
+        }
+    }
+
     /// `Op::AppendStr`: appends string `add` to `cur`, in place if `cur` is a
     /// string buffer, otherwise into a new buffer holding `cur` followed by
     /// `add` (the result). Fails (changing nothing) if the memory needed
@@ -474,7 +493,9 @@ impl Heap {
             }
             let Obj::StrBuf(buf) = &mut self.objs[h as usize] else { unreachable!() };
             let mut text = std::mem::take(buf);
-            text.reserve_exact(grow);
+            // To exactly the capacity checked (`reserve_exact` counts from
+            // the length, not the capacity).
+            text.reserve_exact(cap + grow - len);
             text.push_str(self.str(add));
             self.bytes += text.capacity() - cap;
             self.objs[h as usize] = Obj::StrBuf(text);
@@ -1122,5 +1143,37 @@ fn chunk_children(obj: &Obj, start: usize, out: &mut Vec<Value>) -> Option<usize
             }
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dirty_index_lists_stay_small() {
+        // Old small lists receiving the same young value over and over: the
+        // recorded indices must stay proportional to the lists (they are not
+        // counted against the memory limit), so such lists are soon
+        // remembered in full instead.
+        let mut heap = Heap::new(None);
+        let lists: Vec<Value> = (0..100).map(|_| heap.new_list(vec![Value::Int(0)])).collect();
+        let big = heap.new_list(vec![Value::Int(0); 800]);
+        let mut roots = lists.clone();
+        roots.push(big);
+        heap.collect(roots.iter().copied(), false);
+        let young = heap.new_str("young");
+        for &l in lists.iter().chain([&big]) {
+            for _ in 0..1000 {
+                heap.list_mut_storing(l, 0, young).unwrap()[0] = young;
+            }
+        }
+        let recorded: usize = heap.dirty.values().map(|d| d.idx.len()).sum();
+        assert!(recorded <= 200, "{recorded} indices recorded");
+        // The stores are still found: the young value survives a minor
+        // collection rooted only in the old lists.
+        heap.collect(roots.iter().copied(), false);
+        assert_eq!(heap.str(heap.list(big)[0]), "young");
+        assert_eq!(heap.str(heap.list(lists[7])[0]), "young");
     }
 }

@@ -3,7 +3,8 @@
 //! concatenation, slicing, ...).
 //!
 //! The interpreter burns one unit of fuel per call, loop iteration and
-//! backward jump; the scheduler runs each task for a slice of `SLICE_FUEL`
+//! backward jump (and more for long functions and loops, see [`code_fuel`]);
+//! the scheduler runs each task for a slice of `SLICE_FUEL`
 //! units and checks the engine's limits between slices. Work outside the
 //! bytecode loop is charged with [`Meter::charge`] against a second budget of
 //! `SLICE_FUEL` units per slice (kept apart from the interpreter's counter,
@@ -70,6 +71,35 @@ pub const CHECK_INTERVAL: i64 = 20_000;
 
 /// Scratch-buffer growth between memory-limit checks.
 pub const SCRATCH_STEP: usize = 64 << 10;
+
+/// Instructions of straight-line bytecode per fuel unit, as a shift (64).
+pub const CODE_UNIT_SHIFT: u32 = 6;
+
+/// The extra fuel of running up to `n` instructions without passing a safe
+/// point. Bytecode only consumes fuel at loop back edges and calls, and
+/// between two of those it moves forward, so it runs at most the
+/// instructions of the loop (the back edge's span) or of the function
+/// entered. Without this, one unit could stand for hundreds of thousands
+/// of instructions (a long loop body or function), so `max_instructions`
+/// would be off by as much and the limits and the interrupt flag, which
+/// the scheduler checks between slices of fuel, would be checked only
+/// every few seconds. So a back edge costs one unit plus one per 64
+/// instructions it jumps back over, entering a function (a call, a tail
+/// call, a task's start) one plus one per 64 instructions of its code, and
+/// `MakeClosure` one per 64 captures it copies. Ordinary loop bodies and
+/// functions are shorter than that and cost one unit as before.
+#[inline(always)]
+pub const fn code_fuel(n: usize) -> i64 {
+    (n >> CODE_UNIT_SHIFT) as i64
+}
+
+/// The fuel of `Op::Loop { off }` (`off < 0`, see `thread_jumps`): one unit
+/// per 64 instructions jumped back over, rounded up (one shift on the back
+/// edge's path, where a plain tick costs one unit).
+#[inline(always)]
+pub const fn loop_fuel(off: i32) -> i64 {
+    -((off >> CODE_UNIT_SHIFT) as i64)
+}
 
 /// Something that can be charged for work: the engine's [`Meter`], or
 /// [`Unmetered`] for callers outside an engine run.

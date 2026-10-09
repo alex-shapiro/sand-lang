@@ -369,11 +369,14 @@ fn report_error(e: &Error, main: Option<&Path>) -> u8 {
     match e {
         Error::Compile(diags) => {
             let root = main.and_then(|m| m.parent()).map(Path::to_path_buf).unwrap_or_default();
+            // Each file is read once, however many diagnostics it has.
+            let mut sources: std::collections::HashMap<&str, Option<String>> = std::collections::HashMap::new();
             for d in diags {
-                let source = main
-                    .filter(|m| m.file_name().map(|n| n.to_string_lossy() == d.file).unwrap_or(false))
-                    .and_then(|m| std::fs::read_to_string(m).ok())
-                    .or_else(|| std::fs::read_to_string(root.join(&d.file)).ok());
+                let source = sources.entry(d.file.as_str()).or_insert_with(|| {
+                    main.filter(|m| m.file_name().map(|n| n.to_string_lossy() == d.file).unwrap_or(false))
+                        .and_then(|m| std::fs::read_to_string(m).ok())
+                        .or_else(|| std::fs::read_to_string(root.join(&d.file)).ok())
+                });
                 eprint!("{}", d.render(source.as_deref()));
             }
             2

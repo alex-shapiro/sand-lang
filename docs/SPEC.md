@@ -1212,7 +1212,7 @@ t.cancel()                        // cancels if still running
 
 While the engine waits for an interactive policy decision (§14.3), no task
 runs and no timers fire for scripts; the decision is applied before execution
-resumes.
+resumes. (The host can still interrupt the run meanwhile, §15.1.)
 
 ---
 
@@ -2027,7 +2027,7 @@ Configurable per engine:
 | `max_memory`         | 512 MiB    | run fails: `memory limit exceeded` (I/O whose buffers do not fit fails with kind `"limit"`)                              |
 | `max_instructions`   | unlimited  | run fails: `instruction limit exceeded` (counted in fuel units, §15.2)                                                   |
 | `max_cpu_time`       | unlimited  | run fails: `cpu time limit exceeded` (time spent executing, excluding waits and prompts)                                 |
-| `max_wall_time`      | unlimited  | run fails: `time limit exceeded`; also bounds compilation, counted from its start                                        |
+| `max_wall_time`      | unlimited  | run fails: `time limit exceeded` (prompts excluded); also bounds compilation, counted from its start                     |
 | `max_call_depth`     | 10,000     | panic: `stack overflow`                                                                                                  |
 | `max_tasks`          | 10,000     | `spawn` panics: `task limit exceeded`                                                                                    |
 | `max_open_resources` | 1,024      | open/connect/listen/accept and HTTP requests fail with kind `"limit"` (pending operations' sockets count, §13.11)          |
@@ -2064,12 +2064,18 @@ reports the limit. Limit violations are reported to the host as
 distinct error variants and cannot be intercepted by scripts. The host may
 also interrupt a running engine from another thread with an
 `InterruptHandle`; this stops compilation, bytecode and long-running library
-functions alike.
+functions alike, and a run waiting for I/O or for an answer to a prompt.
 
 ### 15.2 Fuel
 
 Execution is measured in _fuel units_. The interpreter spends one unit per
-function call, loop iteration and backward jump. Work done in one step by a
+function call, loop iteration and backward jump, plus one unit per 64
+instructions of compiled code that the step may run before the next one: a
+call (or the start of a task) also costs one unit per 64 instructions of the
+function called, an iteration one per 64 instructions of the loop, and
+creating a closure one per 64 values it captures. (So a long loop body or
+function costs in proportion to its length; ordinary ones are shorter.)
+Work done in one step by a
 library function or a generic operation is charged in proportion to its size,
 roughly one unit per simple loop iteration's worth of work (a few to a few
 tens of nanoseconds):
@@ -2150,6 +2156,12 @@ Checking a program happens before it runs, so it is bounded separately:
   P<[T]>? }` cannot be described. Finally, the copies of deferred code
   (§7.1) in one function are limited to about a million instructions (`too
   much deferred code`).
+- **Diagnostics.** At most 50 syntax errors per module, and 50 type errors,
+  are reported.
+- **Memory.** Compilation is not counted against `max_memory`: it uses memory
+  in proportion to the size of the source (several hundred bytes per source
+  byte), which `max_source_bytes` bounds. Hosts compiling untrusted code
+  under a small memory limit should lower `max_source_bytes` accordingly.
 
 ---
 

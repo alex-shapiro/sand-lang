@@ -882,6 +882,13 @@ impl Vm {
         if self.live_tasks >= self.host.limits.max_tasks {
             return panic("task limit exceeded");
         }
+        // The task starts without a call instruction: charge for entering
+        // its code (and setting up its registers) as a call would
+        // (`meter::code_fuel`).
+        if let Obj::Closure(p, _) = self.heap.get(closure) {
+            let p = &self.prog.protos[*p as usize];
+            self.meter.charge(meter::code_fuel(p.code.len() + p.nregs as usize) as u64)?;
+        }
         let task = self.heap.alloc(Obj::Task(Box::new(TaskObj { fiber: u32::MAX, state: TaskState::Running, result: Value::Unit })));
         let fid = self.spawn_fiber(closure, task)?;
         if let Obj::Task(t) = self.heap.get_mut(task) {

@@ -21,6 +21,14 @@ impl IoShared {
             w.wake_by_ref();
         }
     }
+
+    /// Registers the engine task's waker (woken by I/O and interrupts).
+    fn set_waker(&self, w: &Waker) {
+        let mut slot = self.waker.lock().unwrap_or_else(|e| e.into_inner());
+        if !slot.as_ref().is_some_and(|x| x.will_wake(w)) {
+            *slot = Some(w.clone());
+        }
+    }
 }
 
 struct IdWaker {
@@ -74,10 +82,7 @@ impl IoTable {
     /// Polls futures that were woken. Returns completed operations.
     pub fn poll_ready(&mut self, task_waker: Option<&Waker>) -> Vec<(u32, u64, Finisher)> {
         if let Some(w) = task_waker {
-            let mut slot = self.shared.waker.lock().unwrap_or_else(|e| e.into_inner());
-            if !slot.as_ref().is_some_and(|x| x.will_wake(w)) {
-                *slot = Some(w.clone());
-            }
+            self.shared.set_waker(w);
         }
         let ids: Vec<u64> = std::mem::take(&mut *self.shared.ready.lock().unwrap_or_else(|e| e.into_inner()));
         let mut done = Vec::new();
@@ -128,6 +133,15 @@ impl Vm {
     }
 
     fn apply_completions(&mut self, done: Vec<(u32, u64, Finisher)>) -> Result<(), Trap> {
+        // Finishers charge the meter for building their values between
+        // slices: count that fuel now (the next slice resets the meter).
+        let spent = self.meter.spent();
+        let r = self.apply_finishers(done);
+        self.fuel_used += self.meter.spent().saturating_sub(spent);
+        r
+    }
+
+    fn apply_finishers(&mut self, done: Vec<(u32, u64, Finisher)>) -> Result<(), Trap> {
         for (fid, wgen, fin) in done {
             let still_waiting = matches!(self.fibers.get(fid as usize), Some(Some(f)) if f.state == FiberState::Waiting && f.wgen == wgen);
             if !still_waiting {
@@ -299,7 +313,25 @@ impl Vm {
                         cpu += t.saturating_duration_since(now);
                         (unclocked_slices, unclocked_fuel) = (0, 0);
                         let answer = match prompter {
-                            Some(p) => p.prompt(cap.clone()).await,
+                            Some(p) => {
+                                // The host's interrupt stops the run even
+                                // while a prompt is pending (the prompter may
+                                // never answer); the prompt is dropped.
+                                let mut prompt = p.prompt(cap.clone());
+                                let (interrupt, shared) = (self.host.interrupt.clone(), self.io.shared.clone());
+                                let answer = std::future::poll_fn(|cx| {
+                                    shared.set_waker(cx.waker());
+                                    if interrupt.load(Ordering::Relaxed) {
+                                        return Poll::Ready(None);
+                                    }
+                                    prompt.as_mut().poll(cx).map(Some)
+                                })
+                                .await;
+                                match answer {
+                                    Some(a) => a,
+                                    None => return Err(Trap::Interrupted),
+                                }
+                            }
                             None => PromptAnswer::DenyOnce,
                         };
                         now = Instant::now();

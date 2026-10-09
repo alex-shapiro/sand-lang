@@ -13,6 +13,7 @@ use crate::vm::value::{NativeObject, Obj, Value};
 use crate::vm::{Ctl, NResult, Vm, panic};
 use regex_automata::meta::{self, Cache};
 use regex_automata::util::captures::{Captures, GroupInfo};
+use regex_automata::util::interpolate;
 use regex_automata::util::iter::Searcher;
 use regex_automata::util::syntax;
 use regex_automata::{Input, Match, MatchKind, PatternID};
@@ -250,14 +251,14 @@ fn each_match(
 }
 
 /// Like [`each_match`] with the capture groups of each match (as
-/// `regex::Regex::captures_iter` does).
+/// `regex::Regex::captures_iter` does); `found` may fail.
 fn each_captures(
     vm: &Vm,
     obj: &RegexObj,
     cache: &mut Cache,
     text: &str,
     scan: &mut Scan,
-    mut found: impl FnMut(&Captures) -> usize,
+    mut found: impl FnMut(&Captures) -> Result<usize, Ctl>,
 ) -> Result<(), Ctl> {
     let mut it = Searcher::new(Input::new(text));
     let mut caps = obj.re.create_captures();
@@ -266,7 +267,7 @@ fn each_captures(
         obj.re.search_captures_with(cache, input, &mut caps);
         Ok(caps.get_match())
     }) {
-        collected = found(&caps);
+        collected = found(&caps)?;
         scan.step(vm, m.end(), collected)?;
     }
     scan.step(vm, text.len(), collected)
@@ -278,11 +279,34 @@ fn new_match(vm: &mut Vm, def: u32, text: &str, start: usize, end: usize) -> Val
     vm.heap.alloc(Obj::Struct(def, Box::new([t, Value::Int(start as i64), Value::Int(end as i64)])))
 }
 
-fn new_captures(obj: &RegexObj, text: &str, caps: &Captures) -> CapturesObj {
-    let groups = (0..caps.group_len())
-        .map(|i| caps.get_group(i).map(|s| Group { text: text[s.start..s.end].into(), start: s.start, end: s.end }))
-        .collect();
-    CapturesObj { group_info: obj.re.group_info().clone(), groups, match_def: obj.match_def }
+/// Copies the groups of a match out of `text`, as an object of
+/// `CapturesObj::size()` bytes. Nested groups can each hold most of the
+/// match, so the copies can be many times the text's size: they are charged
+/// and checked against the memory limit (with the `collected` bytes held
+/// already) before they are made.
+fn new_captures(vm: &Vm, obj: &RegexObj, text: &str, caps: &Captures, collected: usize) -> Result<CapturesObj, Ctl> {
+    let spans = || (0..caps.group_len()).map(|i| caps.get_group(i));
+    let copied: usize = spans().flatten().map(|s| s.len()).sum();
+    vm.reserve(collected.saturating_add(64 + 32 * caps.group_len() + copied))?;
+    vm.charge(caps.group_len() as u64)?;
+    vm.charge_bytes(copied)?;
+    let groups = spans().map(|s| s.map(|s| Group { text: text[s.start..s.end].into(), start: s.start, end: s.end })).collect();
+    Ok(CapturesObj { group_info: obj.re.group_info().clone(), groups, match_def: obj.match_def })
+}
+
+/// The length of `rep` with the groups of `caps` interpolated (as
+/// `Captures::interpolate_string_into` writes it), measured without copying
+/// the groups. `literal` is scratch space for the replacement's own text.
+fn expansion_len(caps: &Captures, rep: &str, literal: &mut String) -> usize {
+    literal.clear();
+    let mut groups = 0usize;
+    interpolate::string(
+        rep,
+        |i, _| groups = groups.saturating_add(caps.get_group(i).map_or(0, |s| s.len())),
+        |name| caps.group_info().to_index(caps.pattern()?, name),
+        literal,
+    );
+    literal.len().saturating_add(groups)
 }
 
 /// Replaces the first (or every) match, checking the memory limit as the
@@ -296,6 +320,7 @@ fn replace(vm: &mut Vm, a: &[Value], all: bool) -> NResult {
         }
         // Capture groups are only needed if the replacement refers to them.
         let expand = rep.contains('$');
+        let mut literal = String::new();
         let mut out = String::new();
         let mut last = 0;
         let mut it = Searcher::new(Input::new(text));
@@ -307,6 +332,16 @@ fn replace(vm: &mut Vm, a: &[Value], all: bool) -> NResult {
             obj.re.search_captures_with(cache, input, &mut caps);
             Ok(caps.get_match())
         }) {
+            // What this match adds is checked against the memory limit
+            // before it is written: with `$0` repeated, one match can expand
+            // to many times the size of the text.
+            let added = if expand {
+                scan.charge(vm, (rep.len() / SLOW_BYTES_PER_UNIT) as u64)?;
+                expansion_len(&caps, rep, &mut literal)
+            } else {
+                rep.len()
+            };
+            vm.reserve(out.len().saturating_add(m.start() - last).saturating_add(added))?;
             out.push_str(&text[last..m.start()]);
             if expand {
                 caps.interpolate_string_into(text, rep, &mut out);
@@ -315,7 +350,6 @@ fn replace(vm: &mut Vm, a: &[Value], all: bool) -> NResult {
             }
             last = m.end();
             scan.step(vm, last, out.len())?;
-            vm.reserve(out.len())?;
             if !all {
                 break;
             }
@@ -435,7 +469,7 @@ pub fn register(r: &mut Registry) {
             let mut caps = obj.re.create_captures();
             obj.re.search_captures_with(cache, &Input::new(text), &mut caps);
             scan.finish(vm)?;
-            Ok(caps.is_match().then(|| new_captures(obj, text, &caps)))
+            caps.is_match().then(|| new_captures(vm, obj, text, &caps, 0)).transpose()
         })?;
         let v = caps.map(|c| vm.heap.alloc(Obj::Native(Box::new(c))));
         Ok(vm.option(v))
@@ -445,10 +479,10 @@ pub fn register(r: &mut Registry) {
             let text = vm.str(a[1]);
             let (mut all, mut cost, mut scan) = (Vec::new(), 0, Scan::new());
             each_captures(vm, obj, cache, text, &mut scan, |caps| {
-                let caps = new_captures(obj, text, caps);
+                let caps = new_captures(vm, obj, text, caps, cost)?;
                 cost += caps.size();
                 all.push(caps);
-                cost
+                Ok(cost)
             })?;
             Ok((all, cost))
         })?;

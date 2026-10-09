@@ -26,6 +26,17 @@ mod uuid;
 use crate::engine::Registry;
 pub(crate) use net::TlsSettings;
 
+/// At most the first `max` characters of `s`. Messages quote script text
+/// through this: a whole string, debug-escaped (up to 6 bytes per byte),
+/// would make a message far larger than the string, built outside the
+/// memory limit.
+pub(crate) fn truncate(s: &str, max: usize) -> &str {
+    match s.char_indices().nth(max) {
+        Some((i, _)) => &s[..i],
+        None => s,
+    }
+}
+
 pub(crate) fn register(r: &mut Registry) {
     core::register(r);
     base64::register(r);

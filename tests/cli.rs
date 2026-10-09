@@ -682,3 +682,21 @@ fn repl_ctrl_c_cancels_tasks() {
     assert!(o.stderr.contains("cancelled 1 task\n"), "{o:?}");
     assert!(o.stderr.contains("task cancelled"), "{o:?}");
 }
+
+// ---------------------------------------------------------------------------
+// Audit: quadratic compile paths
+
+#[test]
+fn many_syntax_errors_are_reported_quickly() {
+    // One syntax error per line used to be reported in full, each after
+    // reading the file again and counting its lines from the start.
+    let dir = TempDir::new("cli-errors");
+    dir.write("bad.sand", &")\n".repeat(40_000));
+    let start = std::time::Instant::now();
+    let o = sand(dir.path(), &["check", "bad.sand"]);
+    let took = start.elapsed();
+    assert_ne!(o.code, 0, "{o:?}");
+    let errors = o.stderr.matches("error").count();
+    assert!((1..=60).contains(&errors), "{errors} errors reported");
+    assert!(took < std::time::Duration::from_secs(3), "took {took:?}");
+}

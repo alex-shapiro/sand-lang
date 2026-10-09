@@ -3,9 +3,14 @@
 use super::ast::*;
 use super::lexer::{Comment, CommentKind, StrPart, Tok, Token, lex, lex_range};
 use crate::diag::{Diag, FileId, Span};
+use std::rc::Rc;
 
 /// Maximum syntactic nesting depth (expressions, types, patterns, blocks).
 pub const MAX_DEPTH: usize = 256;
+
+/// At most this many syntax errors are reported per module (like the
+/// checker's): a file of bad lines would otherwise make one per line.
+const MAX_ERRORS: usize = 50;
 
 pub struct ParseResult {
     pub module: Module,
@@ -15,11 +20,13 @@ pub struct ParseResult {
 
 pub fn parse_module(src: &str, file: FileId) -> ParseResult {
     let lexed = lex(src, file);
-    let mut p = Parser::new(src, file, lexed.tokens, &lexed.comments);
+    let newlines = src.bytes().enumerate().filter(|&(_, b)| b == b'\n').map(|(i, _)| i as u32).collect();
+    let mut p = Parser::new(src, file, lexed.tokens, &lexed.comments, newlines);
     p.errors = lexed.errors;
     let module = p.module();
     let mut errors = p.errors;
     errors.sort_by_key(|d| d.span.lo);
+    errors.truncate(MAX_ERRORS);
     ParseResult { module, comments: lexed.comments, errors }
 }
 
@@ -38,14 +45,16 @@ struct Parser<'a> {
     fatal: bool,
     /// Inside a `trait` body: methods may omit their body.
     in_trait: bool,
-    /// Offsets of the source's line breaks (for `line_of`).
-    newlines: Vec<u32>,
+    /// Offsets of the source's line breaks (for `line_of`), shared with the
+    /// parsers of interpolated expressions (indexing the source for each of
+    /// them made parsing quadratic in the number of interpolations).
+    newlines: Rc<[u32]>,
 }
 
 type PResult<T> = Result<T, ()>;
 
 impl<'a> Parser<'a> {
-    fn new(src: &'a str, file: FileId, toks: Vec<Token>, comments: &'a [Comment]) -> Parser<'a> {
+    fn new(src: &'a str, file: FileId, toks: Vec<Token>, comments: &'a [Comment], newlines: Rc<[u32]>) -> Parser<'a> {
         Parser {
             src,
             file,
@@ -59,7 +68,7 @@ impl<'a> Parser<'a> {
             depth: 0,
             fatal: false,
             in_trait: false,
-            newlines: src.bytes().enumerate().filter(|&(_, b)| b == b'\n').map(|(i, _)| i as u32).collect(),
+            newlines,
         }
     }
 
@@ -1642,7 +1651,7 @@ impl<'a> Parser<'a> {
                     let lexed = lex_range(self.src, self.file, lo as usize, hi as usize);
                     let mut toks = lexed.tokens;
                     toks.retain(|t| t.tok != Tok::Semi);
-                    let mut sub = Parser::new(self.src, self.file, toks, &[]);
+                    let mut sub = Parser::new(self.src, self.file, toks, &[], self.newlines.clone());
                     sub.errors = lexed.errors;
                     sub.next_id = self.next_id;
                     sub.depth = self.depth;

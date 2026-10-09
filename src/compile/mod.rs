@@ -2017,9 +2017,15 @@ impl<'a> Compiler<'a> {
         let mut has_lambda = false;
         let mut nodes = 0;
         let mut found: Vec<(HoistKey, usize)> = Vec::new();
-        let mut count = |k: HoistKey| match found.iter_mut().find(|(fk, _)| *fk == k) {
-            Some(entry) => entry.1 += 1,
-            None => found.push((k, 1)),
+        // Positions in `found` (a linear search per operand made loops with
+        // many distinct constants quadratic to compile).
+        let mut index: HashMap<HoistKey, usize> = HashMap::new();
+        let mut count = |k: HoistKey| match index.get(&k) {
+            Some(&i) => found[i].1 += 1,
+            None => {
+                index.insert(k.clone(), found.len());
+                found.push((k, 1));
+            }
         };
         walk(e, &mut |x| {
             nodes += 1;
@@ -2735,7 +2741,10 @@ fn thread_jumps(code: &mut [Op]) {
             }
         }
         code[i] = match code.get(t as usize) {
-            Some(&Op::Loop { off }) => Op::Loop { off: (t + 1 + off as i64 - (i as i64 + 1)) as i32 },
+            // (A `Loop` always jumps backward: its fuel grows with the
+            // distance, see `meter::loop_fuel`.)
+            Some(&Op::Loop { off }) if t + 1 + off as i64 <= i as i64 => Op::Loop { off: (t + 1 + off as i64 - (i as i64 + 1)) as i32 },
+            Some(&Op::Loop { off }) => Op::Jmp { off: (t + 1 + off as i64 - (i as i64 + 1)) as i32 },
             Some(&op @ (Op::Ret { .. } | Op::RetUnit)) => op,
             // Every backward jump consumes fuel (see `Op::Loop`), so that no
             // loop escapes the limits.
@@ -2747,6 +2756,7 @@ fn thread_jumps(code: &mut [Op]) {
         code.iter().all(|op| !matches!(op, Op::JmpIf { off, .. } | Op::JmpIfNot { off, .. } if *off < 0)),
         "conditional backward jump (it would not consume fuel)"
     );
+    debug_assert!(code.iter().all(|op| !matches!(op, Op::Loop { off } if *off >= 0)), "a `Loop` that does not jump backward");
 }
 
 /// The string locals of a function body that `+=` appends to and no

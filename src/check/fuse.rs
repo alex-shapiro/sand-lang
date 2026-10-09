@@ -309,18 +309,32 @@ impl Checker<'_> {
         if let HKind::Lambda(lam) = &e.kind
             && lam.self_local.is_none()
         {
-            let mut returns = false;
-            lam.body.clone().visit_mut(&mut |x| returns |= matches!(x.kind, HKind::Return(_) | HKind::Try { .. }));
+            let mut e = e;
+            let HKind::Lambda(lam) = &mut e.kind else { unreachable!() };
+            // (Walked in place: `e` is ours. Nested pipelines walk inner
+            // bodies again, so the walk is charged.)
+            let (mut returns, mut nodes) = (false, 0u64);
+            lam.body.visit_mut(&mut |x| {
+                nodes += 1;
+                returns |= matches!(x.kind, HKind::Return(_) | HKind::Try { .. });
+            });
+            self.budget.charge(nodes);
             if !returns {
                 let HKind::Lambda(lam) = e.kind else { unreachable!() };
                 let owner = self.fs.ctx.last().map(|c| c.lambda).unwrap_or(0);
-                for info in &mut self.fs.locals {
+                // The lambda's locals were all made while it was checked, so
+                // they come after the locals made before it (scanning all
+                // the function's locals per lambda was quadratic).
+                let first = self.fs.lambda_first_local.get(lam.id as usize - 1).map_or(0, |&l| l as usize).min(self.fs.locals.len());
+                self.budget.charge((self.fs.locals.len() - first) as u64);
+                for info in &mut self.fs.locals[first..] {
                     if info.owner == lam.id {
                         info.owner = owner;
                     }
                 }
                 return Func::Inline(lam);
             }
+            return Func::Tmp(self.bind_tmp(e, out));
         }
         Func::Tmp(self.bind_tmp(e, out))
     }

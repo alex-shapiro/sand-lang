@@ -828,8 +828,7 @@ impl Checker<'_> {
     pub(crate) fn wrapper_value(&mut self, f: FnId, pre: &[(ParamId, Type)], span: Span) -> HExpr {
         let inst = self.instantiate_fn_with(f, span, pre);
         let fi = self.fns[f as usize].clone();
-        self.fs.next_lambda += 1;
-        let id = self.fs.next_lambda;
+        let id = self.new_lambda();
         let mut args: Vec<HArg> = Vec::new();
         for (t, tr) in inst.dicts {
             let lenient = matches!(self.resolve(&t), Type::Var(_)) && inst.params.iter().any(|p| self.occurs_in(&t, p));

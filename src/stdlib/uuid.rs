@@ -38,7 +38,7 @@ pub fn register(r: &mut Registry) {
                 vm.ok(s)
             }
             None => {
-                let msg = format!("invalid UUID: {:?}", truncate(vm.str(a[0]), 64));
+                let msg = format!("invalid UUID: {:?}", super::truncate(vm.str(a[0]), 64));
                 vm.err_value("parse", &msg)
             }
         })
@@ -93,11 +93,4 @@ fn parse(s: &str) -> Option<[u8; 16]> {
         *o = digit(hex[2 * i]) << 4 | digit(hex[2 * i + 1]);
     }
     Some(out)
-}
-
-fn truncate(s: &str, max: usize) -> &str {
-    match s.char_indices().nth(max) {
-        Some((i, _)) => &s[..i],
-        None => s,
-    }
 }

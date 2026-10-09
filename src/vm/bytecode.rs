@@ -289,7 +289,8 @@ pub enum Op {
     Jmp {
         off: i32,
     },
-    /// Backward jump: also consumes fuel (a loop iteration).
+    /// Backward jump: also consumes fuel (a loop iteration: one unit, plus
+    /// one per 64 instructions jumped over, see `meter::code_fuel`).
     Loop {
         off: i32,
     },
