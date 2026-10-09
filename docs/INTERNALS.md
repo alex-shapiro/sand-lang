@@ -275,20 +275,35 @@ enforced there).
   `stdlib::fs_safe` on the blocking pool. Never use path-based `std::fs` /
   `tokio::fs` calls on script paths: `fs_safe` opens every directory without
   following symlinks (`openat` + `O_NOFOLLOW` per component, `O_PATH` on
-  Linux, one `O_NOFOLLOW_ANY` open on macOS), so the effect lands exactly on
-  the checked location. Operations that move or remove whole trees must also
+  Linux, one `O_NOFOLLOW_ANY` open on macOS; on Windows `NtCreateFile`
+  relative to the parent's handle with `FILE_OPEN_REPARSE_POINT`, through
+  the `fs_at` crate, refusing symlinks and junctions), so the effect lands
+  exactly on the checked location. On Windows, creating, removing and
+  listing go through handles too; only `rename` is path-based, holding every
+  directory on both paths open without `FILE_SHARE_DELETE` (each checked
+  against the handle walk by file ID, `same-file`) so that none can be
+  renamed or replaced, and checking that neither parent became a junction
+  just before and after. Windows names that Win32 would alter (trailing `.`
+  or space, `:` streams, `CON`, ...) are refused, since handle-relative opens
+  take them literally. Operations that move or remove whole trees must also
   refuse when `vm.host.policy.denies_under(path)`. In `fs.rs`, the
   `target!`/`entry_target!` macros do this resolution: they refuse paths
   over `policy::MAX_PATH_BYTES` (kind `invalid`) and charge for the
   normalisation, which `normalize_path` keeps to O(log n) `canonicalize`
-  calls by binary search. Denial errors name the path as the script spelled
+  calls by binary search, and for the directory entries read to find a
+  symlink's stored name (`policy::entry_path`, at most
+  `policy::MAX_LINK_SCAN`). Denial errors name the path as the script spelled
   it (`denied`), never the resolved path.
 * **Path rules**: allow rules compare normalised paths exactly; deny rules
   compare them through `policy::fold_name` (NFD, case folding, NFD,
   without default-ignorables), which equates every spelling a case- or
   normalisation-insensitive file system may treat as the same name, so deny
   rules also hold for paths that do not exist yet. `normalize_entry_path`
-  names an existing non-symlink entry as stored (`canonicalize`).
+  names an existing non-symlink entry as stored (`canonicalize`), and a
+  symlink by reading its (canonical) directory for the entry whose name
+  folds the same and that is the same entry (device and inode, or Windows
+  file ID), preferring an exact match; past `MAX_LINK_SCAN` entries the
+  given spelling is kept (deny rules still match it).
 * **Prompts**: a native returning `Ctl::NeedPermission` is retried after the
   prompt; "once" answers (`host.grants_once`/`denies_once`) stay valid while
   the same call is retried (natives checking several capabilities ask

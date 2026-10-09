@@ -11,7 +11,7 @@ use super::fs_safe::{self, EntryKind};
 use super::{io_kind, resolve_path};
 use crate::check::ModKind;
 use crate::engine::Registry;
-use crate::policy::{Capability, MAX_PATH_BYTES, normalize_entry_path};
+use crate::policy::{Capability, MAX_PATH_BYTES, entry_path};
 use crate::vm::iomem::Reservation;
 use crate::vm::value::{Obj, Value};
 use crate::vm::{Ctl, Finisher, NResult, Vm, panic};
@@ -145,8 +145,10 @@ pub fn register(r: &mut Registry) {
                 return Ok(e);
             }
         }
-        // The others must exist already (fs_safe does not create them).
-        let keep = path.components().count().saturating_sub(missing.len() + 2);
+        // The others (all names below the root but the missing ones and
+        // `path` itself) must exist already (fs_safe does not create them).
+        let names = path.components().filter(|c| matches!(c, std::path::Component::Normal(_))).count();
+        let keep = names.saturating_sub(missing.len() + 1);
         run(shown, blocking(move || fs_safe::create_dir_all(&path, keep)), ok_unit)
     });
     r.add_builtin("fs.remove_file", |vm, a| {
@@ -289,7 +291,16 @@ fn target(vm: &mut Vm, p: Value, entry: bool) -> Result<Result<(String, PathBuf)
     // the policy's checks, each linear in the length.
     vm.charge(4 * joined.components().count() as u64)?;
     vm.charge_bytes(4 * joined.as_os_str().len())?;
-    let path = if entry { normalize_entry_path(&joined) } else { resolve_path(vm, &shown) };
+    let path = if entry {
+        let e = entry_path(&joined);
+        // Finding a symlink's stored name reads its directory, here and in
+        // the policy's checks (bounded by `policy::MAX_LINK_SCAN`).
+        vm.charge(4 * e.scanned as u64)?;
+        vm.charge_bytes(4 * e.scanned_bytes)?;
+        e.path
+    } else {
+        resolve_path(vm, &shown)
+    };
     Ok(Ok((shown, path)))
 }
 

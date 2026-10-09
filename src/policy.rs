@@ -261,26 +261,109 @@ fn canonicalize_existing(p: PathBuf) -> PathBuf {
 
 /// Like [`normalize_path`], but a final symlink is not resolved: the path of
 /// a directory entry itself (its parent directory canonicalised). An
-/// existing entry that is not a symlink is named as stored, so that on a
-/// case- or normalisation-insensitive file system `data/ſecrets` becomes
-/// `data/secrets`.
+/// existing entry is named as stored, so that on a case- or
+/// normalisation-insensitive file system `data/ſecrets` becomes
+/// `data/secrets`; for a symlink, which cannot be canonicalised without
+/// following it, the stored name is looked up in its directory (see
+/// [`MAX_LINK_SCAN`]).
 pub fn normalize_entry_path(p: &Path) -> PathBuf {
+    entry_path(p).path
+}
+
+/// At most this many entries of a directory are read to find the stored
+/// name of a symlink in it (by [`normalize_entry_path`]); in a larger
+/// directory, a symlink keeps the name it was given. Deny rules match every
+/// spelling of a name anyway; allow rules then need the name as given.
+pub const MAX_LINK_SCAN: usize = 4096;
+
+/// The result of [`entry_path`].
+pub(crate) struct EntryPath {
+    pub path: PathBuf,
+    /// Directory entries read to find a symlink's stored name, and the
+    /// bytes of their names (for metering).
+    pub scanned: usize,
+    pub scanned_bytes: usize,
+}
+
+/// [`normalize_entry_path`], also reporting the directory entries it read.
+pub(crate) fn entry_path(p: &Path) -> EntryPath {
     let lexical = lexical(p);
-    match (lexical.parent(), lexical.file_name()) {
-        (Some(parent), Some(name)) => {
-            let parent = normalize_path(parent);
-            let entry = parent.join(name);
-            match std::fs::symlink_metadata(&entry) {
-                Ok(m) if !m.file_type().is_symlink() => match entry.canonicalize().map(simplify_verbatim) {
-                    // (If it became a symlink meanwhile, its target is ignored.)
-                    Ok(c) if c.parent() == Some(parent.as_path()) => c,
-                    _ => entry,
-                },
-                _ => entry,
-            }
+    let (Some(parent), Some(name)) = (lexical.parent(), lexical.file_name()) else {
+        return EntryPath { path: normalize_path(&lexical), scanned: 0, scanned_bytes: 0 };
+    };
+    let parent = normalize_path(parent);
+    let entry = parent.join(name);
+    let path = match std::fs::symlink_metadata(&entry) {
+        Ok(m) if m.file_type().is_symlink() => {
+            let (stored, scanned, scanned_bytes) = stored_link_name(&parent, name, MAX_LINK_SCAN);
+            let path = stored.map_or(entry, |n| parent.join(n));
+            return EntryPath { path, scanned, scanned_bytes };
         }
-        _ => normalize_path(&lexical),
+        Ok(_) => match entry.canonicalize().map(simplify_verbatim) {
+            // (If it became a symlink meanwhile, its target is ignored.)
+            Ok(c) if c.parent() == Some(parent.as_path()) => c,
+            _ => entry,
+        },
+        Err(_) => entry,
+    };
+    EntryPath { path, scanned: 0, scanned_bytes: 0 }
+}
+
+/// The stored name of the symlink `parent/name` if it is spelled
+/// differently (`None` if it is stored as `name`, or if the directory has
+/// more than `limit` entries), with the number of entries read and the
+/// bytes of their names. The stored name is the entry whose name
+/// folds like `name` (see [`fold_name`]) and that is the same directory
+/// entry as `parent/name`; an exact match is preferred.
+fn stored_link_name(parent: &Path, name: &std::ffi::OsStr, limit: usize) -> (Option<std::ffi::OsString>, usize, usize) {
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return (None, 0, 0);
+    };
+    let link = parent.join(name);
+    let folded = fold_name(&name.to_string_lossy());
+    let (mut found, mut scanned, mut bytes) = (None, 0, 0);
+    for entry in entries {
+        if scanned == limit {
+            return (None, scanned, bytes);
+        }
+        scanned += 1;
+        let Ok(entry) = entry else { continue };
+        let candidate = entry.file_name();
+        bytes += candidate.len();
+        if candidate == name {
+            return (None, scanned, bytes);
+        }
+        if found.is_none() && fold_name(&candidate.to_string_lossy()) == folded && same_entry(&link, &parent.join(&candidate)) {
+            found = Some(candidate);
+        }
     }
+    (found, scanned, bytes)
+}
+
+/// Whether `a` and `b` name the same directory entry (final symlinks not
+/// followed).
+#[cfg(unix)]
+fn same_entry(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::symlink_metadata(a), std::fs::symlink_metadata(b)) {
+        (Ok(a), Ok(b)) => (a.dev(), a.ino()) == (b.dev(), b.ino()),
+        _ => false,
+    }
+}
+
+#[cfg(windows)]
+fn same_entry(a: &Path, b: &Path) -> bool {
+    use std::os::windows::fs::OpenOptionsExt;
+    // FILE_READ_ATTRIBUTES; FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT.
+    let open = |p: &Path| {
+        std::fs::OpenOptions::new().access_mode(0x80).custom_flags(0x0200_0000 | 0x0020_0000).open(p).and_then(same_file::Handle::from_file)
+    };
+    matches!((open(a), open(b)), (Ok(a), Ok(b)) if a == b)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_entry(_: &Path, _: &Path) -> bool {
+    false
 }
 
 /// Windows canonical paths are "verbatim" (`\\?\C:\x`, `\\?\UNC\server\share\x`).
@@ -906,5 +989,29 @@ mod tests {
         assert_eq!(plain_from_verbatim("/home/user"), None);
         assert_eq!(plain_from_verbatim(r"\\?\Volume{0000}\x"), None);
         assert_eq!(plain_from_verbatim(r"\\?\GLOBALROOT\Device"), None);
+    }
+
+    /// On a case-insensitive file system (macOS's default), a symlink is
+    /// found under its stored name unless its directory is too large.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn symlink_names_are_looked_up_within_a_bound() {
+        use std::ffi::OsStr;
+        let base = normalize_path(&std::env::temp_dir()).join(format!("sand-policy-links-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::os::unix::fs::symlink("/nowhere", base.join("Link")).unwrap();
+        for i in 0..3 {
+            std::fs::write(base.join(format!("f{i}")), "").unwrap();
+        }
+        let (stored, scanned, bytes) = stored_link_name(&base, OsStr::new("LINK"), 10);
+        assert_eq!((stored.as_deref(), scanned, bytes), (Some(OsStr::new("Link")), 4, 10));
+        // Stored as given: found without reading further.
+        assert_eq!(stored_link_name(&base, OsStr::new("Link"), 10).0, None);
+        // More entries than the limit: the given name is kept.
+        let (stored, scanned, _) = stored_link_name(&base, OsStr::new("LINK"), 3);
+        assert_eq!((stored, scanned), (None, 3));
+        assert_eq!(entry_path(&base.join("LINK")).path, base.join("Link"));
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }

@@ -6,14 +6,12 @@ Follow-up work, roughly in priority order.
 
 ### Sandbox
 
-- [ ] **Windows file system races.** Windows still uses path-based file
-      operations, so the symlink-swap race closed on Unix (`fs_safe.rs`)
-      remains there. Use handle-relative opens (`NtCreateFile` with a root
-      directory handle, via a safe wrapper crate) or verify handles after
-      opening.
-- [ ] **Symlink names in deny rules.** A symlink's own final name is matched
-      by the folded (case/Unicode-insensitive) comparison, but not converted
-      to its stored spelling like other entries.
+- [ ] **Windows rename.** No safe API renames by handle, so on Windows
+      `fs_safe::rename` is path-based: it holds the directories on both paths
+      open (they cannot be renamed or replaced), but an entry's parent could
+      still be emptied and turned into a junction during the call (usually
+      detected afterwards, not prevented). The Windows `fs_safe` code has
+      only been cross-compiled, not run (see "Test coverage").
 - [ ] **HTTP server fairness.** `accept` reads up to 64 pending connections
       at once; 64+ idle connections can still delay a new request by up to
       30s, and a waiting `accept` holds up to half the free resource slots.
