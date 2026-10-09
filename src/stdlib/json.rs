@@ -851,7 +851,7 @@ fn classify<'h>(vm: &'h Vm, ids: &JsonIds, mut v: Value) -> Result<Node<'h>, Ctl
                 Node::Obj(names.iter().zip(fields.iter()).map(|(n, v)| (Cow::Borrowed(n.as_str()), Item::Val(*v))).collect())
             }
             Obj::Variant(id, fields) => return classify_variant(vm, ids, *id, fields),
-            Obj::Closure(..) | Obj::NativeFn(_) => return panic("cannot encode a function as JSON"),
+            Obj::Closure(..) | Obj::NativeFn(_) | Obj::BoundNative(..) => return panic("cannot encode a function as JSON"),
             Obj::Task(_) => return panic("cannot encode a task as JSON"),
             Obj::Channel(_) => return panic("cannot encode a channel as JSON"),
             Obj::Native(n) => return panic(format!("cannot encode a {} as JSON", n.type_name())),

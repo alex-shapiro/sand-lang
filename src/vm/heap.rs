@@ -478,7 +478,7 @@ impl Heap {
 
     pub fn fields(&self, v: Value) -> &[Value] {
         match self.get(v) {
-            Obj::Tuple(t) | Obj::Struct(_, t) | Obj::Variant(_, t) | Obj::Closure(_, t) => t,
+            Obj::Tuple(t) | Obj::Struct(_, t) | Obj::Variant(_, t) | Obj::Closure(_, t) | Obj::BoundNative(_, t) => t,
             _ => &[],
         }
     }
@@ -520,9 +520,12 @@ impl Heap {
 
     /// Mutable access to list `list` for removing elements from its end
     /// only (`pop`, `clear`): no write barrier is needed, as no value is
-    /// stored and none moves.
+    /// stored and none moves. But a partially remembered list's pushed tail
+    /// may now start past the end, so the next push must record where it
+    /// stores (the tail shortcut of `list_barrier_old` assumes growth).
     pub fn list_shrink(&mut self, list: Value) -> Option<&mut Vec<Value>> {
         let Value::Obj(h) = list else { return None };
+        clear_bit(&mut self.tail_bits, h);
         match &mut self.objs[h as usize] {
             Obj::List(l) => Some(l),
             _ => None,

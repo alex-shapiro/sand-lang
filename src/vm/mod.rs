@@ -315,6 +315,8 @@ pub struct Vm {
     /// The strings of one ASCII character, by byte (`Unit` until first
     /// made); shared, since strings are immutable. GC roots.
     ascii_strs: Vec<Value>,
+    /// Ids of natives looked up by name (see `native_id`).
+    native_ids: Vec<(&'static str, u32)>,
     /// Set when a Rust panic (a bug) was caught in the interpreter, a native
     /// or an I/O finisher: the VM is memory safe but may be inconsistent, so
     /// a REPL session discards it.
@@ -410,6 +412,7 @@ impl Vm {
             pending_race: None,
             session: false,
             ascii_strs: Vec::new(),
+            native_ids: Vec::new(),
             caught_panic: false,
         };
         vm.load_program();
@@ -491,6 +494,23 @@ impl Vm {
 
     pub fn new_str(&mut self, s: impl Into<Box<str>>) -> Value {
         self.heap.new_str(s)
+    }
+
+    /// The id of the registered native `name` (cached).
+    pub fn native_id(&mut self, name: &'static str) -> Option<u32> {
+        if let Some(&(_, id)) = self.native_ids.iter().find(|(n, _)| *n == name) {
+            return Some(id);
+        }
+        let id = self.natives.iter().position(|e| e.name == name)? as u32;
+        self.native_ids.push((name, id));
+        Some(id)
+    }
+
+    /// A function value calling native `step` with the new object itself
+    /// (holding `state` in its fields) and the call's arguments.
+    pub fn bound_native(&mut self, step: &'static str, state: Vec<Value>) -> NResult {
+        let Some(id) = self.native_id(step) else { return panic(format!("internal error: no native {step}")) };
+        Ok(self.heap.alloc(Obj::BoundNative(id, state.into_boxed_slice())))
     }
 
     /// A string equal to `s`, which may be shared: strings of one ASCII

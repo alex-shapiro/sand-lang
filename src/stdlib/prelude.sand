@@ -415,16 +415,10 @@ extend str {
 
     /// A lazy iterator over the characters (as one-character strings).
     pub fn chars_iter(self) -> Iter<str> {
-        var i = 0
-        fn next() -> str? {
-            let c = self.char_at(i)
-            if let Some(s) = c {
-                i += s.len()
-            }
-            c
-        }
-        Iter { next }
+        Iter { next: self.chars_iter_next() }
     }
+
+    native fn chars_iter_next(self) -> fn() -> str?
 }
 
 extend bytes {
@@ -500,20 +494,10 @@ extend<T> [T] {
     /// indices below the length the list has now, reading each element when
     /// it is reached, and stops early if the list shrinks.
     pub fn iter(self) -> Iter<T> {
-        var i = 0
-        let n = self.len()
-        fn next() -> T? {
-            if i < n and i < self.len() {
-                let x = self[i]
-                i += 1
-                Some(x)
-            } else {
-                i = n
-                None
-            }
-        }
-        Iter { next }
+        Iter { next: self.iter_next() }
     }
+
+    native fn iter_next(self) -> fn() -> T?
 
     /// The sum of the elements; zero for an empty list.
     pub fn sum(self) -> T where T: Num {
@@ -814,17 +798,10 @@ extend Range {
 
     /// A lazy iterator over the integers of the range.
     pub fn iter(self) -> Iter<int> {
-        var i = self.start()
-        let end = self.end()
-        fn next() -> int? {
-            if i >= end {
-                return None
-            }
-            i += 1
-            Some(i - 1)
-        }
-        Iter { next }
+        Iter { next: self.iter_next() }
     }
+
+    native fn iter_next(self) -> fn() -> int?
 
     pub fn map<U>(self, f: fn(int) -> U) -> [U] {
         let out = []

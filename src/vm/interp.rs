@@ -661,6 +661,13 @@ impl Vm {
                             let slot = base + dst as usize;
                             native_call!(n, start, argc as usize, slot);
                         }
+                        Obj::BoundNative(n, _) => {
+                            // The object itself is the first argument.
+                            let n = *n;
+                            let start = base + b as usize;
+                            let slot = base + dst as usize;
+                            native_call!(n, start, argc as usize + 1, slot);
+                        }
                         _ => fail!("internal error: call of a non-function"),
                     }
                 }
@@ -736,6 +743,11 @@ impl Vm {
                             let start = base + b as usize + 1;
                             let slot = base + b as usize;
                             native_call!(n, start, argc as usize, slot);
+                        }
+                        Obj::BoundNative(n, _) => {
+                            let n = *n;
+                            let start = base + b as usize;
+                            native_call!(n, start, argc as usize + 1, start);
                         }
                         _ => fail!("internal error: call of a non-function"),
                     }

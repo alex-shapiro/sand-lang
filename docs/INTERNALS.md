@@ -810,8 +810,18 @@ The lazy iterators (spec §12.13) are written in Sand in the prelude: the trait
 `Iterator<T>` and the struct `Iter<T> { next: fn() -> T? }`, whose adapters
 wrap the source's `next` closure in a new one (capturing the closure itself,
 not the `Iter`, to save a field load per element) and whose consumers are
-loops. Nothing is native, so every element costs calls and fuel and endless
-iterators cannot run unboundedly inside a native.
+loops, so every element costs calls and fuel and endless iterators cannot
+run unboundedly inside a native.
+
+The `next` functions of the iterators of lists (and so maps and sets),
+ranges and strings (`chars_iter`) are *bound natives* (`Obj::BoundNative`):
+a native step function and its state (e.g. the list, the next index and
+the length) in one heap object. Calling one calls the native with the
+object itself as the first argument (it is already in the callee register,
+so the arguments are passed in place) followed by the call's arguments; the
+native updates its state in the object's fields. A step thus costs one
+native call instead of a closure's frame plus its natives. `Vm::bound_native`
+makes one (natives find the step's id by name with `Vm::native_id`).
 
 The checker knows the trait and the struct (`Checker::iter_trait`,
 `iter_struct`, found when the prelude's items are declared). `iter_plan`

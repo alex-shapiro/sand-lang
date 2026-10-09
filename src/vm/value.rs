@@ -456,6 +456,11 @@ pub enum Obj {
     Variant(u32, Box<[Value]>),
     Closure(u32, Box<[Value]>),
     NativeFn(u32),
+    /// A native function bound to state: calling it calls native `.0` with
+    /// the object itself followed by the call's arguments, so the native
+    /// reads (and updates) its state in the fields. Used for the sources of
+    /// lazy iterators (the step function of `[T].iter()`, ...).
+    BoundNative(u32, Box<[Value]>),
     Cell(Value),
     Range(i64, i64, bool),
     Task(Box<TaskObj>),
@@ -478,6 +483,7 @@ impl std::fmt::Debug for Obj {
             Obj::Variant(d, v) => write!(f, "Variant({d}, {v:?})"),
             Obj::Closure(p, v) => write!(f, "Closure({p}, {v:?})"),
             Obj::NativeFn(n) => write!(f, "NativeFn({n})"),
+            Obj::BoundNative(n, v) => write!(f, "BoundNative({n}, {v:?})"),
             Obj::Cell(v) => write!(f, "Cell({v:?})"),
             Obj::Range(a, b, i) => write!(f, "Range({a}, {b}, {i})"),
             Obj::Task(t) => write!(f, "Task({t:?})"),
@@ -505,7 +511,7 @@ impl Obj {
             Obj::List(l) => l.capacity() * VALUE_SIZE,
             Obj::Map(m) => m.entries.capacity() * (2 * VALUE_SIZE + 8) + m.index.len() * INDEX_ENTRY_SIZE + m.key_bytes,
             Obj::Set(s) => s.entries.capacity() * (VALUE_SIZE + 8) + s.index.len() * INDEX_ENTRY_SIZE + s.key_bytes,
-            Obj::Tuple(t) | Obj::Struct(_, t) | Obj::Variant(_, t) | Obj::Closure(_, t) => t.len() * VALUE_SIZE,
+            Obj::Tuple(t) | Obj::Struct(_, t) | Obj::Variant(_, t) | Obj::Closure(_, t) | Obj::BoundNative(_, t) => t.len() * VALUE_SIZE,
             Obj::Task(_) => 32,
             Obj::Channel(c) => {
                 64 + c.queue.capacity() * VALUE_SIZE
@@ -529,7 +535,9 @@ impl Obj {
                 }
             }
             Obj::Set(s) => s.entries.iter().flatten().for_each(|v| f(*v)),
-            Obj::Tuple(t) | Obj::Struct(_, t) | Obj::Variant(_, t) | Obj::Closure(_, t) => t.iter().for_each(|v| f(*v)),
+            Obj::Tuple(t) | Obj::Struct(_, t) | Obj::Variant(_, t) | Obj::Closure(_, t) | Obj::BoundNative(_, t) => {
+                t.iter().for_each(|v| f(*v))
+            }
             Obj::Cell(v) => f(*v),
             Obj::Task(t) => f(t.result),
             Obj::Channel(c) => {
