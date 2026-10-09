@@ -340,19 +340,35 @@ pub enum Op {
     },
 
     // Calls.
-    /// Callee at `base`, arguments at `base+1..`; result written to `base`.
+    /// Callee at `base`, arguments at `base+1..`; result written to `dst`.
     Call {
         base: Reg,
         argc: u16,
+        dst: Reg,
     },
     /// Arguments at `base..`; result written to `base`.
     CallDirect {
         base: Reg,
         proto: u32,
     },
+    /// Like `CallDirect` (for the first 65536 protos), writing the result
+    /// to `dst`.
+    CallDirectTo {
+        base: Reg,
+        dst: Reg,
+        proto: u16,
+    },
+    /// Arguments at `base..`; result written to `base`.
     CallNative {
         base: Reg,
         native: u32,
+    },
+    /// Like `CallNative` (for the first 65536 natives), writing the result
+    /// to `dst`. The arguments may be any registers, e.g. a local's.
+    CallNativeTo {
+        base: Reg,
+        dst: Reg,
+        native: u16,
     },
     TailCall {
         base: Reg,

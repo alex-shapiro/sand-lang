@@ -174,7 +174,7 @@ fn register_numbers(r: &mut Registry) {
     });
     r.add_builtin("int.to_char", |vm, a| {
         let c = u32::try_from(int(a[0])).ok().and_then(char::from_u32);
-        let v = c.map(|c| vm.new_str(c.to_string()));
+        let v = c.map(|c| vm.short_str(c.encode_utf8(&mut [0; 4])));
         Ok(vm.option(v))
     });
     r.add_builtin("int.parse", |vm, a| {
@@ -253,7 +253,7 @@ fn split_list<'t, I: Iterator<Item = &'t str>>(vm: &mut Vm, text: &'t str, split
     let count = split(text).count();
     produce(vm, count, count)?;
     vm.reserve(text.len().saturating_add(count.saturating_mul(ITEM)))?;
-    let vals: Vec<Value> = split(text).map(|p| vm.new_str(p)).collect();
+    let vals: Vec<Value> = split(text).map(|p| vm.short_str(p)).collect();
     Ok(vm.heap.new_list(vals))
 }
 
@@ -453,7 +453,7 @@ fn register_str(r: &mut Registry) {
         let t = vm.str(a[0]);
         let i = int(a[1]);
         let c = if i >= 0 && (i as usize) < t.len() && t.is_char_boundary(i as usize) { t[i as usize..].chars().next() } else { None };
-        let v = c.map(|c| vm.new_str(c.to_string()));
+        let v = c.map(|c| vm.short_str(c.encode_utf8(&mut [0; 4])));
         Ok(vm.option(v))
     });
     r.add_builtin("str.ord", |vm, a| {

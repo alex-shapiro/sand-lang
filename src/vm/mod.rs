@@ -312,6 +312,9 @@ pub struct Vm {
     /// Runs the inputs of a REPL session: a top-level `?` that meets an
     /// `Err` panics (aborting the input) instead of ending the program.
     pub session: bool,
+    /// The strings of one ASCII character, by byte (`Unit` until first
+    /// made); shared, since strings are immutable. GC roots.
+    ascii_strs: Vec<Value>,
     /// Set when a Rust panic (a bug) was caught in the interpreter, a native
     /// or an I/O finisher: the VM is memory safe but may be inconsistent, so
     /// a REPL session discards it.
@@ -406,6 +409,7 @@ impl Vm {
             pinned: Vec::new(),
             pending_race: None,
             session: false,
+            ascii_strs: Vec::new(),
             caught_panic: false,
         };
         vm.load_program();
@@ -487,6 +491,27 @@ impl Vm {
 
     pub fn new_str(&mut self, s: impl Into<Box<str>>) -> Value {
         self.heap.new_str(s)
+    }
+
+    /// A string equal to `s`, which may be shared: strings of one ASCII
+    /// character (as `chars`, `char_at` and splitting produce in bulk) are
+    /// made once per VM.
+    pub fn short_str(&mut self, s: &str) -> Value {
+        let &[b] = s.as_bytes() else { return self.heap.new_str(s) };
+        if !b.is_ascii() {
+            return self.heap.new_str(s);
+        }
+        if self.ascii_strs.is_empty() {
+            self.ascii_strs = vec![Value::Unit; 128];
+        }
+        match self.ascii_strs[b as usize] {
+            Value::Unit => {
+                let v = self.heap.new_str(s);
+                self.ascii_strs[b as usize] = v;
+                v
+            }
+            v => v,
+        }
     }
 
     pub fn some(&mut self, v: Value) -> Value {
@@ -923,6 +948,7 @@ impl Vm {
         roots.extend(self.globals.iter().copied());
         roots.extend(self.consts.iter().copied());
         roots.extend(self.pinned.iter().copied());
+        roots.extend(self.ascii_strs.iter().copied());
         let prog = &self.prog;
         let mut fiber_bytes = 0;
         let mut add_fiber = |f: &mut Fiber, roots: &mut Vec<Value>| {

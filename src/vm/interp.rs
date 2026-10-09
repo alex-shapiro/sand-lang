@@ -645,7 +645,7 @@ impl Vm {
                     let nb = base + b as usize;
                     enter!(proto, nb, nb, NO_CLOSURE);
                 }
-                Op::Call { base: b, argc } => {
+                Op::Call { base: b, argc, dst } => {
                     tick_call!();
                     let callee = r!(b);
                     match self.heap.get(callee) {
@@ -653,21 +653,33 @@ impl Vm {
                             let p = *p;
                             let Value::Obj(h) = callee else { unreachable!() };
                             let nb = base + b as usize + 1;
-                            enter!(p, nb, nb - 1, h);
+                            enter!(p, nb, base + dst as usize, h);
                         }
                         Obj::NativeFn(n) => {
                             let n = *n;
                             let start = base + b as usize + 1;
-                            let slot = base + b as usize;
+                            let slot = base + dst as usize;
                             native_call!(n, start, argc as usize, slot);
                         }
                         _ => fail!("internal error: call of a non-function"),
                     }
                 }
+                // (`tick_call!` reloads `regs` after a collection; `enter!` reloads again.)
+                #[allow(unused_assignments)]
+                Op::CallDirectTo { base: b, dst, proto } => {
+                    tick_call!();
+                    let nb = base + b as usize;
+                    enter!(proto as u32, nb, base + dst as usize, NO_CLOSURE);
+                }
                 Op::CallNative { base: b, native } => {
                     let start = base + b as usize;
                     let argc = prog.native_argc.get(native as usize).copied().unwrap_or(0) as usize;
                     native_call!(native, start, argc, start);
+                }
+                Op::CallNativeTo { base: b, dst, native } => {
+                    let start = base + b as usize;
+                    let argc = prog.native_argc.get(native as usize).copied().unwrap_or(0) as usize;
+                    native_call!(native as u32, start, argc, base + dst as usize);
                 }
                 // (`tick_call!` reloads `regs` after a collection; the stack is reloaded again below.)
                 #[allow(unused_assignments)]
