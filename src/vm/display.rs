@@ -196,7 +196,8 @@ pub fn render_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Valu
                     Value::Obj(_) => {
                         let d = depth + 1;
                         match heap.get(v) {
-                            Obj::Str(s) => {
+                            Obj::Str(_) | Obj::StrBuf(_) => {
+                                let s = heap.str(v);
                                 // Reserve before copying a large string.
                                 scratch.check(heap, out.len() + s.len())?;
                                 if debug { escape_str_debug(s, out) } else { out.push_str(s) }
@@ -256,7 +257,7 @@ pub fn render_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Valu
                                     let _ = write!(out, "<fn {name}>");
                                 }
                             }
-                            Obj::BoundNative(..) => out.push_str("<fn>"),
+                            Obj::IterFn(_) => out.push_str("<fn>"),
                             Obj::NativeFn(n) => {
                                 let sig = prog.native_help.get(*n as usize).map(|h| h.signature.as_str()).unwrap_or("fn ?");
                                 let name = sig.trim_start_matches("fn ").split('(').next().unwrap_or("?");

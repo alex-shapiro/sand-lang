@@ -55,6 +55,7 @@
 
 use super::iomem::IoMemory;
 use super::value::*;
+use crate::LimitKind;
 use std::time::Duration;
 
 /// Garbage collector statistics for one VM run.
@@ -451,7 +452,64 @@ impl Heap {
     pub fn str(&self, v: Value) -> &str {
         match self.get(v) {
             Obj::Str(s) => s,
+            Obj::StrBuf(s) => s,
             _ => "",
+        }
+    }
+
+    /// `Op::AppendStr`: appends string `add` to `cur`, in place if `cur` is a
+    /// string buffer, otherwise into a new buffer holding `cur` followed by
+    /// `add` (the result). Fails (changing nothing) if the memory needed
+    /// does not fit.
+    pub fn append_str(&mut self, cur: Value, add: Value) -> Result<Value, LimitKind> {
+        let extra = self.str(add).len();
+        if let Value::Obj(h) = cur
+            && add.handle() != Some(h)
+            && let Obj::StrBuf(buf) = &self.objs[h as usize]
+        {
+            let (len, cap) = (buf.len(), buf.capacity());
+            let grow = if len + extra > cap { (len + extra).max(2 * cap) - cap } else { 0 };
+            if grow > 0 && self.would_exceed(grow) {
+                return Err(LimitKind::Memory);
+            }
+            let Obj::StrBuf(buf) = &mut self.objs[h as usize] else { unreachable!() };
+            let mut text = std::mem::take(buf);
+            text.reserve_exact(grow);
+            text.push_str(self.str(add));
+            self.bytes += text.capacity() - cap;
+            self.objs[h as usize] = Obj::StrBuf(text);
+            return Ok(cur);
+        }
+        let len = self.str(cur).len();
+        let cap = (2 * (len + extra)).max(16);
+        if self.would_exceed(cap) {
+            return Err(LimitKind::Memory);
+        }
+        let mut text = String::with_capacity(cap);
+        text.push_str(self.str(cur));
+        text.push_str(self.str(add));
+        Ok(self.alloc(Obj::StrBuf(text)))
+    }
+
+    /// `Op::FreezeStr`: turns string buffer `v` into an ordinary string.
+    #[inline]
+    pub fn freeze_str(&mut self, v: Value) {
+        if let Value::Obj(h) = v
+            && let Obj::StrBuf(_) = self.objs[h as usize]
+        {
+            self.freeze_slow(h);
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn freeze_slow(&mut self, h: u32) {
+        if let Obj::StrBuf(buf) = &mut self.objs[h as usize] {
+            let text = std::mem::take(buf);
+            let cap = text.capacity();
+            let frozen = text.into_boxed_str();
+            self.bytes = self.bytes.saturating_sub(cap - frozen.len());
+            self.objs[h as usize] = Obj::Str(frozen);
         }
     }
 
@@ -478,7 +536,7 @@ impl Heap {
 
     pub fn fields(&self, v: Value) -> &[Value] {
         match self.get(v) {
-            Obj::Tuple(t) | Obj::Struct(_, t) | Obj::Variant(_, t) | Obj::Closure(_, t) | Obj::BoundNative(_, t) => t,
+            Obj::Tuple(t) | Obj::Struct(_, t) | Obj::Variant(_, t) | Obj::Closure(_, t) => t,
             _ => &[],
         }
     }
@@ -562,6 +620,21 @@ impl Heap {
         let after = l.capacity();
         if after != before {
             self.bytes += (after - before) * std::mem::size_of::<Value>();
+        }
+    }
+
+    /// The payload of `v` if it is the single-payload variant `id`.
+    #[inline]
+    pub fn payload_if(&self, v: Value, id: u32) -> Option<Value> {
+        match v {
+            Value::Obj(h) => match &self.objs[h as usize] {
+                Obj::Variant(vid, f) if *vid == id => f.first().copied(),
+                _ => None,
+            },
+            _ => match v.as_inline_variant() {
+                Some((vid, p)) if vid == id => Some(p),
+                _ => None,
+            },
         }
     }
 

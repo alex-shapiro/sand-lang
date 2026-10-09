@@ -315,8 +315,7 @@ pub struct Vm {
     /// The strings of one ASCII character, by byte (`Unit` until first
     /// made); shared, since strings are immutable. GC roots.
     ascii_strs: Vec<Value>,
-    /// Ids of natives looked up by name (see `native_id`).
-    native_ids: Vec<(&'static str, u32)>,
+
     /// Set when a Rust panic (a bug) was caught in the interpreter, a native
     /// or an I/O finisher: the VM is memory safe but may be inconsistent, so
     /// a REPL session discards it.
@@ -412,7 +411,6 @@ impl Vm {
             pending_race: None,
             session: false,
             ascii_strs: Vec::new(),
-            native_ids: Vec::new(),
             caught_panic: false,
         };
         vm.load_program();
@@ -496,21 +494,36 @@ impl Vm {
         self.heap.new_str(s)
     }
 
-    /// The id of the registered native `name` (cached).
-    pub fn native_id(&mut self, name: &'static str) -> Option<u32> {
-        if let Some(&(_, id)) = self.native_ids.iter().find(|(n, _)| *n == name) {
-            return Some(id);
-        }
-        let id = self.natives.iter().position(|e| e.name == name)? as u32;
-        self.native_ids.push((name, id));
-        Some(id)
+    /// A function value (`fn() -> T?`) producing the elements of `src`.
+    pub fn iter_fn(&mut self, src: IterSrc) -> Value {
+        self.heap.alloc(Obj::IterFn(Box::new(src)))
     }
 
-    /// A function value calling native `step` with the new object itself
-    /// (holding `state` in its fields) and the call's arguments.
-    pub fn bound_native(&mut self, step: &'static str, state: Vec<Value>) -> NResult {
-        let Some(id) = self.native_id(step) else { return panic(format!("internal error: no native {step}")) };
-        Ok(self.heap.alloc(Obj::BoundNative(id, state.into_boxed_slice())))
+    /// Calls the iterator function `it` (an [`Obj::IterFn`]): the next
+    /// element, or `None`.
+    #[inline(never)]
+    pub(crate) fn iter_step(&mut self, it: Value) -> Value {
+        let Obj::IterFn(src) = self.heap.get(it) else { return self.none() };
+        let (next, state) = match **src {
+            IterSrc::List { list, i, n } => match self.heap.list(list).get(i as usize) {
+                Some(&x) if i < n => (Some(x), IterSrc::List { list, i: i + 1, n }),
+                _ => (None, IterSrc::List { list, i: n, n }),
+            },
+            IterSrc::Range { i, end } if i < end => (Some(Value::Int(i)), IterSrc::Range { i: i + 1, end }),
+            IterSrc::Range { .. } => return self.none(),
+            IterSrc::Chars { s, i } => match self.heap.str(s).get(i as usize..).and_then(|t| t.chars().next()) {
+                Some(c) => {
+                    let state = IterSrc::Chars { s, i: i + c.len_utf8() as i64 };
+                    (Some(self.short_str(c.encode_utf8(&mut [0; 4]))), state)
+                }
+                None => return self.none(),
+            },
+        };
+        // The state holds no new object: no write barrier is needed.
+        if let Obj::IterFn(src) = self.heap.get_mut_storing(it, &[]) {
+            **src = state;
+        }
+        self.option(next)
     }
 
     /// A string equal to `s`, which may be shared: strings of one ASCII
@@ -534,9 +547,13 @@ impl Vm {
         }
     }
 
+    #[inline]
     pub fn some(&mut self, v: Value) -> Value {
         let id = self.prog.ids.some;
-        self.heap.new_variant(id, &[v])
+        match Value::variant1(id, v) {
+            Some(inline) => inline,
+            None => self.heap.new_variant(id, &[v]),
+        }
     }
 
     pub fn none(&self) -> Value {

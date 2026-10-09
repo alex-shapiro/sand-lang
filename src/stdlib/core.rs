@@ -264,14 +264,6 @@ fn owned_str(vm: &Vm, v: Value) -> Result<String, Ctl> {
     Ok(t.to_string())
 }
 
-/// Sets field `i` of a bound native's state to a value that holds no
-/// object (so no write barrier is needed).
-fn set_field(vm: &mut Vm, obj: Value, i: usize, v: Value) {
-    if let Obj::BoundNative(_, f) = vm.heap.get_mut_storing(obj, &[v]) {
-        f[i] = v;
-    }
-}
-
 fn char_class(vm: &Vm, v: Value, f: impl Fn(char) -> bool) -> NResult {
     let t = vm.str(v);
     vm.charge_bytes(t.len())?;
@@ -457,16 +449,7 @@ fn register_str(r: &mut Registry) {
     r.add_builtin("str.is_space", |vm, a| char_class(vm, a[0], char::is_whitespace));
     r.add_builtin("str.is_upper", |vm, a| char_class(vm, a[0], char::is_uppercase));
     r.add_builtin("str.is_lower", |vm, a| char_class(vm, a[0], char::is_lowercase));
-    // The source of `chars_iter()`: state (string, byte offset).
-    r.add_builtin("str.chars_iter_next", |vm, a| vm.bound_native("str.chars_step", vec![a[0], Value::Int(0)]));
-    r.add_builtin("str.chars_step", |vm, a| {
-        let it = a[0];
-        let &[s, Value::Int(i)] = vm.heap.fields(it) else { return panic("internal error: bad chars iterator") };
-        let Some(c) = vm.str(s).get(i as usize..).and_then(|t| t.chars().next()) else { return Ok(vm.none()) };
-        set_field(vm, it, 1, Value::Int(i + c.len_utf8() as i64));
-        let v = vm.short_str(c.encode_utf8(&mut [0; 4]));
-        Ok(vm.some(v))
-    });
+    r.add_builtin("str.chars_iter_next", |vm, a| Ok(vm.iter_fn(IterSrc::Chars { s: a[0], i: 0 })));
     r.add_builtin("str.char_at", |vm, a| {
         let t = vm.str(a[0]);
         let i = int(a[1]);
@@ -663,19 +646,9 @@ fn register_list(r: &mut Registry) {
         vm.heap.list_push(a[0], a[1]);
         Ok(Value::Unit)
     });
-    // The source of `[T].iter()`: a step function with state (list, next
-    // index, length when the iterator was made), visiting the indices below
-    // that length and stopping early if the list shrinks.
     r.add_builtin("List.iter_next", |vm, a| {
         let n = list_len(vm, a[0]) as i64;
-        vm.bound_native("List.iter_step", vec![a[0], Value::Int(0), Value::Int(n)])
-    });
-    r.add_builtin("List.iter_step", |vm, a| {
-        let it = a[0];
-        let &[list, Value::Int(i), Value::Int(n)] = vm.heap.fields(it) else { return panic("internal error: bad list iterator") };
-        let next = vm.heap.list(list).get(i as usize).copied().filter(|_| i < n);
-        set_field(vm, it, 1, Value::Int(if next.is_some() { i + 1 } else { n }));
-        Ok(vm.option(next))
+        Ok(vm.iter_fn(IterSrc::List { list: a[0], i: 0, n }))
     });
     r.add_builtin("List.pop", |vm, a| {
         let v = vm.heap.list_shrink(a[0]).and_then(Vec::pop);
@@ -907,19 +880,9 @@ fn register_list(r: &mut Registry) {
             _ => (0, 0),
         }
     }
-    // The source of a range's `iter()`: state (next, end).
     r.add_builtin("Range.iter_next", |vm, a| {
-        let (s, e) = range(vm, a[0]);
-        vm.bound_native("Range.iter_step", vec![Value::Int(s), Value::Int(e)])
-    });
-    r.add_builtin("Range.iter_step", |vm, a| {
-        let it = a[0];
-        let &[Value::Int(i), Value::Int(e)] = vm.heap.fields(it) else { return panic("internal error: bad range iterator") };
-        if i >= e {
-            return Ok(vm.none());
-        }
-        set_field(vm, it, 0, Value::Int(i + 1));
-        Ok(vm.some(Value::Int(i)))
+        let (i, end) = range(vm, a[0]);
+        Ok(vm.iter_fn(IterSrc::Range { i, end }))
     });
     r.add_builtin("Range.start", |vm, a| Ok(Value::Int(range(vm, a[0]).0)));
     r.add_builtin("Range.end", |vm, a| Ok(Value::Int(range(vm, a[0]).1)));

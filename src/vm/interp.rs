@@ -75,6 +75,18 @@ fn inline_field(v: Value, idx: u16) -> Option<Value> {
     }
 }
 
+#[cold]
+#[inline(never)]
+fn index_error(i: i64, len: usize) -> String {
+    format!("index out of bounds: index {i}, length {len}")
+}
+
+#[cold]
+#[inline(never)]
+fn uninit_global(prog: &Program, g: u32) -> String {
+    format!("global used before initialization: `{}`", prog.global_names[g as usize])
+}
+
 /// A range object as (first, last, done): the loop state of an inclusive
 /// range loop visiting the same integers.
 #[inline(never)]
@@ -192,6 +204,68 @@ impl Vm {
         }
     }
 
+    /// `Op::MakeClosure`: a closure of `proto` (`p`) capturing from the
+    /// registers `regs` and the running closure `clo`.
+    #[inline(never)]
+    fn make_closure(&mut self, p: &Proto, proto: u32, regs: &[Value], clo: u32) -> Value {
+        let caps: Box<[Value]> = p
+            .captures
+            .iter()
+            .map(|c| match *c {
+                CaptureSrc::Reg(u16::MAX) => Value::Unit,
+                CaptureSrc::Reg(r) => regs[r as usize],
+                CaptureSrc::Capture(i) => self.heap.fields(Value::Obj(clo))[i as usize],
+            })
+            .collect();
+        self.heap.alloc(Obj::Closure(proto, caps))
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn key_error(&self, k: Value) -> String {
+        format!("key not found: {}", self.debug(k).unwrap_or_default())
+    }
+
+    /// `Op::TryTop`: a top-level `?` met `Err(e)` (`res`).
+    #[cold]
+    #[inline(never)]
+    fn try_top(&mut self, fiber: &mut Fiber, ip: usize, prog: &Program, res: Value) -> Result<Exit, Trap> {
+        let e = self.heap.field(res, 0).unwrap_or(Value::Unit);
+        let text = match display::to_display_metered(prog, &self.heap, &self.meter, e) {
+            Ok(t) => t,
+            Err(c) => return Err(self.ctl_trap(fiber, ip, c)),
+        };
+        if self.session {
+            return Err(self.panic_trap(fiber, ip, text));
+        }
+        let msg = format!("error: {text}\n");
+        match self.write_stream(2, msg.as_bytes()) {
+            Ok(()) => {}
+            Err(Ctl::Limit(k)) => return Err(Trap::Limit(k)),
+            Err(_) => {}
+        }
+        Ok(Exit::Terminate(1))
+    }
+
+    /// `Op::Panic`: a panic with constant message `msg`.
+    #[cold]
+    #[inline(never)]
+    fn const_panic(&mut self, fiber: &mut Fiber, ip: usize, prog: &Program, msg: u32) -> Trap {
+        let m = match &prog.consts[msg as usize] {
+            Const::Str(s) => s.clone(),
+            _ => "panic".into(),
+        };
+        self.panic_trap(fiber, ip, m)
+    }
+
+    /// The trap for an operand of the wrong type (a compiler bug).
+    #[cold]
+    #[inline(never)]
+    fn operand_trap(&mut self, fiber: &mut Fiber, ip: usize, v: Value, want: &str) -> Trap {
+        fiber.frames.last_mut().unwrap().ip = ip as u32;
+        self.trap(fiber, ip, format!("internal error: expected {want}, found {v:?}"))
+    }
+
     /// The trap for a panic with message `msg`, taken literally: panics
     /// raised by natives (whose limit errors are `Ctl::Limit` values, see
     /// `meter::ctl_from_message`) or with text chosen by the script, which
@@ -238,8 +312,10 @@ impl Vm {
         }
         let prog = self.prog.clone();
         let natives = self.natives.clone();
-        let max_depth = self.host.limits.max_call_depth;
-        let mut fr = *fiber.frames.last().unwrap();
+        // As few values as possible stay live across the loop (the rest is
+        // read from memory where needed), so that the register allocator
+        // keeps `code`, `ip`, `regs` and the fuel in registers.
+        let fr = *fiber.frames.last().unwrap();
         let protos: &[Proto] = &prog.protos;
         let mut code: &[Op] = &protos[fr.proto as usize].code;
         let mut ip = fr.ip as usize;
@@ -284,11 +360,13 @@ impl Vm {
                 return Err(self.ctl_trap(fiber, ip, $c));
             }};
         }
+        // (The failure paths of the typed operand reads are one cold call,
+        // not formatting code inline in every arithmetic instruction.)
         macro_rules! int {
             ($x:expr) => {
                 match r!($x) {
                     Value::Int(i) => i,
-                    other => fail!(format!("internal error: expected int, found {other:?}")),
+                    other => return Err(self.operand_trap(fiber, ip, other, "int")),
                 }
             };
         }
@@ -296,7 +374,7 @@ impl Vm {
             ($x:expr) => {
                 match r!($x) {
                     Value::Float(f) => f,
-                    other => fail!(format!("internal error: expected float, found {other:?}")),
+                    other => return Err(self.operand_trap(fiber, ip, other, "float")),
                 }
             };
         }
@@ -342,10 +420,16 @@ impl Vm {
                 }
             }};
         }
+        // The heap handle of the running closure.
+        macro_rules! closure {
+            () => {
+                fiber.frames.last().map_or(NO_CLOSURE, |f| f.closure)
+            };
+        }
         // Enters a new frame for a script function.
         macro_rules! enter {
             ($proto:expr, $new_base:expr, $ret:expr, $closure:expr) => {{
-                if fiber.frames.len() >= max_depth {
+                if fiber.frames.len() >= self.host.limits.max_call_depth {
                     fail!("stack overflow");
                 }
                 save!();
@@ -362,8 +446,7 @@ impl Vm {
                 {
                     fail!(m);
                 }
-                fr = Frame { proto: $proto, ip: 0, base: nb as u32, ret: $ret as u32, closure: $closure };
-                fiber.frames.push(fr);
+                fiber.frames.push(Frame { proto: $proto, ip: 0, base: nb as u32, ret: $ret as u32, closure: $closure });
                 code = &p.code;
                 ip = 0;
                 base = nb;
@@ -375,18 +458,16 @@ impl Vm {
         macro_rules! do_return {
             ($v:expr) => {{
                 let v = $v;
-                let ret = fr.ret as usize;
-                fiber.frames.pop();
+                let ret = fiber.frames.pop().map_or(0, |f| f.ret as usize);
                 match fiber.frames.last() {
                     None => {
                         fiber.stack.truncate(0);
                         return Ok(Exit::Done(v));
                     }
                     Some(caller) => {
-                        fr = *caller;
-                        code = &protos[fr.proto as usize].code;
-                        ip = fr.ip as usize;
-                        base = fr.base as usize;
+                        code = &protos[caller.proto as usize].code;
+                        ip = caller.ip as usize;
+                        base = caller.base as usize;
                         fiber.stack[ret] = v;
                         reload!();
                     }
@@ -408,7 +489,7 @@ impl Vm {
                 Op::LoadGlobal { dst, g } => {
                     let v = self.globals[g as usize];
                     if let Value::Uninit = v {
-                        fail!(format!("global used before initialization: `{}`", prog.global_names[g as usize]));
+                        fail!(uninit_global(&prog, g));
                     }
                     r!(dst) = v;
                 }
@@ -421,17 +502,17 @@ impl Vm {
                     }
                 }
                 Op::LoadCapture { dst, idx } => {
-                    r!(dst) = self.heap.fields(Value::Obj(fr.closure))[idx as usize];
+                    r!(dst) = self.heap.fields(Value::Obj(closure!()))[idx as usize];
                 }
                 Op::LoadCaptureCell { dst, idx } => {
-                    let cell = self.heap.fields(Value::Obj(fr.closure))[idx as usize];
+                    let cell = self.heap.fields(Value::Obj(closure!()))[idx as usize];
                     r!(dst) = match self.heap.get(cell) {
                         Obj::Cell(v) => *v,
                         _ => Value::Unit,
                     };
                 }
                 Op::StoreCaptureCell { idx, src } => {
-                    let cell = self.heap.fields(Value::Obj(fr.closure))[idx as usize];
+                    let cell = self.heap.fields(Value::Obj(closure!()))[idx as usize];
                     let v = r!(src);
                     if let Obj::Cell(c) = self.heap.get_mut_storing(cell, &[v]) {
                         *c = v;
@@ -458,16 +539,8 @@ impl Vm {
                     }
                 }
                 Op::MakeClosure { dst, proto } => {
-                    let p = &protos[proto as usize];
-                    let mut caps = Vec::with_capacity(p.captures.len());
-                    for c in &p.captures {
-                        caps.push(match *c {
-                            CaptureSrc::Reg(u16::MAX) => Value::Unit,
-                            CaptureSrc::Reg(rr) => r!(rr),
-                            CaptureSrc::Capture(i) => self.heap.fields(Value::Obj(fr.closure))[i as usize],
-                        });
-                    }
-                    r!(dst) = self.heap.alloc(Obj::Closure(proto, caps.into_boxed_slice()));
+                    let clo = closure!();
+                    r!(dst) = self.make_closure(&protos[proto as usize], proto, regs, clo);
                 }
 
                 // ---------------- integer arithmetic
@@ -628,6 +701,10 @@ impl Vm {
                         jump!(off)
                     }
                 }
+                Op::JNotSome { src, dst, off } => match self.heap.payload_if(r!(src), prog.ids.some) {
+                    Some(p) => r!(dst) = p,
+                    None => jump!(off),
+                },
                 Op::JNotVariant { src, variant, off } => {
                     if self.heap.variant_id(r!(src)) != variant as u32 {
                         jump!(off)
@@ -661,13 +738,7 @@ impl Vm {
                             let slot = base + dst as usize;
                             native_call!(n, start, argc as usize, slot);
                         }
-                        Obj::BoundNative(n, _) => {
-                            // The object itself is the first argument.
-                            let n = *n;
-                            let start = base + b as usize;
-                            let slot = base + dst as usize;
-                            native_call!(n, start, argc as usize + 1, slot);
-                        }
+                        Obj::IterFn(_) => r!(dst) = self.iter_step(callee),
                         _ => fail!("internal error: call of a non-function"),
                     }
                 }
@@ -707,7 +778,6 @@ impl Vm {
                     let top = fiber.frames.last_mut().unwrap();
                     top.proto = proto;
                     top.closure = NO_CLOSURE;
-                    fr = *top;
                     code = &p.code;
                     ip = 0;
                 }
@@ -733,7 +803,6 @@ impl Vm {
                             let top = fiber.frames.last_mut().unwrap();
                             top.proto = proto;
                             top.closure = h;
-                            fr = *top;
                             code = &pr.code;
                             ip = 0;
                         }
@@ -744,11 +813,7 @@ impl Vm {
                             let slot = base + b as usize;
                             native_call!(n, start, argc as usize, slot);
                         }
-                        Obj::BoundNative(n, _) => {
-                            let n = *n;
-                            let start = base + b as usize;
-                            native_call!(n, start, argc as usize + 1, start);
-                        }
+                        Obj::IterFn(_) => r!(b) = self.iter_step(callee),
                         _ => fail!("internal error: call of a non-function"),
                     }
                 }
@@ -824,7 +889,7 @@ impl Vm {
                     let i = int!(idx);
                     let l = self.heap.list(o);
                     if i < 0 || i as usize >= l.len() {
-                        fail!(format!("index out of bounds: index {i}, length {}", l.len()));
+                        fail!(index_error(i, l.len()));
                     }
                     r!(dst) = l[i as usize];
                 }
@@ -833,10 +898,7 @@ impl Vm {
                     let k = r!(key);
                     match self.map_get(m, k) {
                         Ok(Some(v)) => r!(dst) = v,
-                        Ok(None) => {
-                            let ks = self.debug(k).unwrap_or_default();
-                            fail!(format!("key not found: {ks}"))
-                        }
+                        Ok(None) => fail!(self.key_error(k)),
                         Err(e) => fail!(e),
                     }
                 }
@@ -847,7 +909,7 @@ impl Vm {
                     let Some(l) = self.heap.list_mut_storing(o, i as usize, v) else { fail!("internal error: set index on non-list") };
                     if i < 0 || i as usize >= l.len() {
                         let n = l.len();
-                        fail!(format!("index out of bounds: index {i}, length {n}"));
+                        fail!(index_error(i, n));
                     }
                     l[i as usize] = v;
                 }
@@ -893,6 +955,21 @@ impl Vm {
                     r!(dst) = Value::Int(n as i64);
                 }
                 Op::IntToFloat { dst, src } => r!(dst) = Value::Float(int!(src) as f64),
+                Op::AppendStr { local, src } => {
+                    let add = r!(src);
+                    if let Err(c) = self.meter.charge_bytes(self.heap.str(add).len()) {
+                        fail_ctl!(c);
+                    }
+                    match self.heap.append_str(r!(local), add) {
+                        Ok(v) => r!(local) = v,
+                        Err(k) => fail_ctl!(Ctl::Limit(k)),
+                    }
+                }
+                Op::FreezeStr { reg } => self.heap.freeze_str(r!(reg)),
+                Op::StrClass { dst, src, class } => match self.str_class(r!(src), class) {
+                    Ok(b) => r!(dst) = Value::Bool(b),
+                    Err(c) => fail_ctl!(c),
+                },
                 Op::ForList { elem, base: b, off } => {
                     let i = int!(b + 1);
                     let n = int!(b + 2);
@@ -1047,28 +1124,12 @@ impl Vm {
                 }
                 Op::TryTop { src } => {
                     save!();
-                    let e = self.heap.field(r!(src), 0).unwrap_or(Value::Unit);
-                    let text = match display::to_display_metered(&prog, &self.heap, &self.meter, e) {
-                        Ok(t) => t,
-                        Err(c) => fail_ctl!(c),
-                    };
-                    if self.session {
-                        fail_literal!(text);
-                    }
-                    let msg = format!("error: {text}\n");
-                    match self.write_stream(2, msg.as_bytes()) {
-                        Ok(()) => {}
-                        Err(Ctl::Limit(k)) => return Err(Trap::Limit(k)),
-                        Err(_) => {}
-                    }
-                    return Ok(Exit::Terminate(1));
+                    let e = r!(src);
+                    return self.try_top(fiber, ip, &prog, e);
                 }
                 Op::Panic { msg } => {
-                    let m = match &prog.consts[msg as usize] {
-                        Const::Str(s) => s.clone(),
-                        _ => "panic".into(),
-                    };
-                    fail_literal!(m);
+                    save!();
+                    return Err(self.const_panic(fiber, ip, &prog, msg));
                 }
             }
         }
@@ -1180,6 +1241,36 @@ impl Vm {
                 }
             }
         }
+    }
+
+    /// `Op::StrClass`: the character-class tests of strings.
+    #[inline(never)]
+    fn str_class(&self, v: Value, class: u8) -> Result<bool, Ctl> {
+        let t = self.heap.str(v);
+        if let &[b] = t.as_bytes()
+            && b.is_ascii()
+        {
+            // One ASCII character (the common case): the ASCII tests agree
+            // with the Unicode ones there.
+            return Ok(match class {
+                0 => b.is_ascii_digit(),
+                1 => b.is_ascii_alphabetic(),
+                2 => b.is_ascii_alphanumeric(),
+                3 => (b as char).is_whitespace(),
+                4 => b.is_ascii_uppercase(),
+                _ => b.is_ascii_lowercase(),
+            });
+        }
+        self.meter.charge_bytes(t.len())?;
+        let f: fn(char) -> bool = match class {
+            0 => |c| c.is_ascii_digit(),
+            1 => char::is_alphabetic,
+            2 => char::is_alphanumeric,
+            3 => char::is_whitespace,
+            4 => char::is_uppercase,
+            _ => char::is_lowercase,
+        };
+        Ok(!t.is_empty() && t.chars().all(f))
     }
 
     /// `==`, `!=`, `<` and `<=` on generic values. Out of line, like the other

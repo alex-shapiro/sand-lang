@@ -172,6 +172,8 @@ fn main() {
         "{:<34} {:>10} {:>10} {:>8} {:>5} {:>6} {:>9} {:>9} {:>9}",
         "benchmark", "best", "median", "ns/op", "gcs", "majors", "max-pause", "max-minor", "avg-pause"
     );
+    let mut log_sum = 0.0;
+    let mut count = 0;
     for b in BENCHES {
         if let Some(f) = &filter
             && !b.name.contains(f.as_str())
@@ -192,6 +194,8 @@ fn main() {
             gc.max_minor_pause = gc.max_minor_pause.max(s.max_minor_pause);
         }
         times.sort();
+        log_sum += ms(times[0]).ln();
+        count += 1;
         let ns_op = if b.ops > 0 { format!("{:.1}", times[0].as_secs_f64() * 1e9 / b.ops as f64) } else { "-".into() };
         let avg = if gc.collections > 0 { gc.total_pause / gc.collections as u32 } else { Duration::ZERO };
         println!(
@@ -206,5 +210,10 @@ fn main() {
             ms(gc.max_minor_pause),
             ms(avg)
         );
+    }
+    // One number to compare builds by (the interpreter's speed is sensitive
+    // to code layout, see docs/INTERNALS.md "Dispatch loop").
+    if count > 1 {
+        println!("geometric mean of best times: {:.2}ms over {count} benchmarks", (log_sum / count as f64).exp());
     }
 }

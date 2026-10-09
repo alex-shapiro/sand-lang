@@ -332,6 +332,13 @@ pub enum Op {
         b: Reg,
         off: i16,
     },
+    /// Jump if the value is not `Some(_)`; otherwise load the payload into
+    /// `dst` (`JNotVariant` and `GetField` in one, for options).
+    JNotSome {
+        src: Reg,
+        dst: Reg,
+        off: i16,
+    },
     /// Jump if the value is not the given variant.
     JNotVariant {
         src: Reg,
@@ -556,6 +563,26 @@ pub enum Op {
     IntToFloat {
         dst: Reg,
         src: Reg,
+    },
+    /// `local += src` for a string local that only this register holds
+    /// (see `compile::builder_locals`): appends in place to the local's
+    /// private buffer (`Obj::StrBuf`), making one first if needed.
+    AppendStr {
+        local: Reg,
+        src: Reg,
+    },
+    /// Before any other read of such a local: turns its buffer, if it has
+    /// one, into an ordinary string (in place: the handle stays the same).
+    FreezeStr {
+        reg: Reg,
+    },
+    /// Whether string `src` is non-empty and every character is of `class`
+    /// (0 digit, 1 alphabetic, 2 alphanumeric, 3 whitespace, 4 uppercase,
+    /// 5 lowercase): `str.is_digit` ... `str.is_lower`.
+    StrClass {
+        dst: Reg,
+        src: Reg,
+        class: u8,
     },
 
     // Strings.

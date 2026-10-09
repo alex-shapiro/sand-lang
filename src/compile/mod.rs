@@ -9,6 +9,7 @@ use crate::hir::*;
 use crate::types::{FnId, Type};
 use crate::vm::bytecode::*;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 pub struct CompileInput<'a> {
     pub checked: &'a CheckedProgram,
@@ -49,6 +50,8 @@ enum Inline {
     Len,
     Push,
     ToFloat,
+    /// `Op::StrClass` with this class.
+    StrClass(u8),
 }
 
 #[derive(Default)]
@@ -88,6 +91,8 @@ struct FnState<'h> {
     /// The register `discard` gives to an expression whose value is unused:
     /// unit results are not materialised in it (see `unit_to`).
     void: Option<Reg>,
+    /// String locals appended to in place (see `builder_locals`).
+    builders: Rc<HashSet<LocalId>>,
 }
 
 const MAX_REGS: u32 = 60000;
@@ -228,6 +233,12 @@ impl Compiler<'_> {
             ("Set.len", Inline::Len),
             ("List.push", Inline::Push),
             ("int.to_float", Inline::ToFloat),
+            ("str.is_digit", Inline::StrClass(0)),
+            ("str.is_alpha", Inline::StrClass(1)),
+            ("str.is_alnum", Inline::StrClass(2)),
+            ("str.is_space", Inline::StrClass(3)),
+            ("str.is_upper", Inline::StrClass(4)),
+            ("str.is_lower", Inline::StrClass(5)),
         ] {
             if let Some(id) = (input.native_lookup)(name) {
                 self.inline.insert(id, op);
@@ -427,6 +438,7 @@ impl<'a> Compiler<'a> {
                 defers: Vec::new(),
                 defer_ops: 0,
                 void: None,
+                builders: Rc::new(builder_locals(&body.body, &body.locals)),
             };
             for &p in &body.params {
                 let r = self.alloc(&mut f);
@@ -437,6 +449,7 @@ impl<'a> Compiler<'a> {
                 continue;
             }
             let nparams = body.params.len() as u16;
+            thread_jumps(&mut f.code);
             let proto = Proto {
                 name: fi.name.clone(),
                 file: body.span.file,
@@ -523,6 +536,7 @@ impl<'a> Compiler<'a> {
             | Op::JNltF { off: o, .. }
             | Op::JNleF { off: o, .. }
             | Op::JNotVariant { off: o, .. }
+            | Op::JNotSome { off: o, .. }
             | Op::HoistGlobal { off: o, .. }
             | Op::JListLen { off: o, .. }
             | Op::JListMinLen { off: o, .. }
@@ -615,6 +629,9 @@ impl<'a> Compiler<'a> {
     /// Reads local `l` into `dst`.
     fn read_local(&mut self, f: &mut FnState, l: LocalId, dst: Reg) {
         if let Some(&r) = f.local_reg.get(&l) {
+            if f.builders.contains(&l) {
+                self.emit(f, Op::FreezeStr { reg: r });
+            }
             if self.is_cell(f, l) {
                 self.emit(f, Op::LoadCell { dst, cell: r });
             } else {
@@ -670,6 +687,9 @@ impl<'a> Compiler<'a> {
             && let Some(&r) = f.local_reg.get(&l)
             && !self.is_cell(f, l)
         {
+            if f.builders.contains(&l) {
+                self.emit(f, Op::FreezeStr { reg: r });
+            }
             return r;
         }
         if !f.hoisted.is_empty()
@@ -909,15 +929,58 @@ impl<'a> Compiler<'a> {
                 j.extend(self.cond_jump(f, b));
                 j
             }
-            HKind::Unary { op: HUnOp::Not, e } => {
-                // Jump when `e` is true.
-                let c = self.expr_reg(f, e);
-                vec![self.emit(f, Op::JmpIf { cond: c, off: 0 })]
+            HKind::Or(a, b) => {
+                // `a` true: go on (past the test of `b`).
+                let ok = self.cond_jump_true(f, a);
+                let fails = self.cond_jump(f, b);
+                self.patch_list(f, ok);
+                fails
             }
+            HKind::Unary { op: HUnOp::Not, e } => self.cond_jump_true(f, e),
             HKind::Bool(true) => vec![],
             _ => {
                 let c = self.expr_reg(f, cond);
                 vec![self.emit(f, Op::JmpIfNot { cond: c, off: 0 })]
+            }
+        }
+    }
+
+    /// Like [`Self::cond_jump`], but the jumps are taken when `cond` is true.
+    fn cond_jump_true(&mut self, f: &mut FnState, cond: &HExpr) -> Vec<usize> {
+        self.set_line(f, cond.span);
+        match &cond.kind {
+            // Integer comparisons as the fused "jump if not" of the opposite
+            // comparison (not floats: the opposite of `<` is not `>=` for NaN).
+            HKind::Cmp { op, l, r } if !f.no_fused && matches!(l.ty, Type::Int) => {
+                let a = self.expr_reg(f, l);
+                let b = self.expr_reg(f, r);
+                let op = match op {
+                    CmpOp::Lt => Op::JNleI { a: b, b: a, off: 0 },
+                    CmpOp::Le => Op::JNltI { a: b, b: a, off: 0 },
+                    CmpOp::Gt => Op::JNleI { a, b, off: 0 },
+                    CmpOp::Ge => Op::JNltI { a, b, off: 0 },
+                    CmpOp::Eq => Op::JNneI { a, b, off: 0 },
+                    CmpOp::Ne => Op::JNeqI { a, b, off: 0 },
+                };
+                vec![self.emit(f, op)]
+            }
+            HKind::Or(a, b) => {
+                let mut j = self.cond_jump_true(f, a);
+                j.extend(self.cond_jump_true(f, b));
+                j
+            }
+            HKind::And(a, b) => {
+                // `a` false: go on (past the test of `b`).
+                let fails = self.cond_jump(f, a);
+                let ok = self.cond_jump_true(f, b);
+                self.patch_list(f, fails);
+                ok
+            }
+            HKind::Unary { op: HUnOp::Not, e } => self.cond_jump(f, e),
+            HKind::Bool(false) => vec![],
+            _ => {
+                let c = self.expr_reg(f, cond);
+                vec![self.emit(f, Op::JmpIf { cond: c, off: 0 })]
             }
         }
     }
@@ -1351,6 +1414,9 @@ impl<'a> Compiler<'a> {
                         }
                         Inline::ToFloat => {
                             self.emit(f, Op::IntToFloat { dst, src: regs[0] });
+                        }
+                        Inline::StrClass(class) => {
+                            self.emit(f, Op::StrClass { dst, src: regs[0], class });
                         }
                         Inline::Push => {
                             self.emit(f, Op::ListPush { list: regs[0], src: regs[1] });
@@ -2135,6 +2201,12 @@ impl<'a> Compiler<'a> {
                 }
                 Some(aop) => {
                     if let (Some(&r), false) = (f.local_reg.get(l), self.is_cell(f, *l)) {
+                        if f.builders.contains(l) && aop == ArithOp::Add {
+                            let v = self.expr_reg(f, value);
+                            self.emit(f, Op::AppendStr { local: r, src: v });
+                            f.next_reg = mark;
+                            return;
+                        }
                         // Operate on the local's register directly.
                         self.apply_op(f, aop, op_ty, &value.ty, r, value);
                     } else {
@@ -2296,6 +2368,18 @@ impl<'a> Compiler<'a> {
                     let t = self.field_temp(f, sp, v, *i as u16);
                     self.match_pattern(f, sp, t, fails);
                 }
+            }
+            HPatKind::Variant { rt_id, args }
+                if *rt_id == self.prog.ids.some && !f.no_fused && !matches!(args[..], [HPat { kind: HPatKind::Wildcard, .. }]) =>
+            {
+                // `Some(p)`: test and load the payload in one instruction.
+                let sp = &args[0];
+                let t = match sp.kind {
+                    HPatKind::Bind(l) if !self.is_cell(f, l) && f.local_reg.contains_key(&l) => f.local_reg[&l],
+                    _ => self.alloc(f),
+                };
+                fails.push(self.emit(f, Op::JNotSome { src: v, dst: t, off: 0 }));
+                self.match_pattern(f, sp, t, fails);
             }
             HPatKind::Variant { rt_id, args } => {
                 let var = self.variant_u16(f, *rt_id);
@@ -2478,6 +2562,7 @@ impl<'a> Compiler<'a> {
             defers: Vec::new(),
             defer_ops: 0,
             void: None,
+            builders: f.builders.clone(),
         };
         for &p in &lam.params {
             let r = self.alloc(&mut sub);
@@ -2503,6 +2588,7 @@ impl<'a> Compiler<'a> {
             lam.signature.clone()
         };
         let p = self.prog.protos.len() as u32;
+        thread_jumps(&mut sub.code);
         self.prog.protos.push(Proto {
             name: lam.name.clone(),
             file: f.file,
@@ -2597,6 +2683,47 @@ fn local_refs(x: &HExpr, out: &mut Vec<LocalId>) {
 }
 
 /// Pre-order traversal of every expression (including inside lambdas, places and args).
+/// Jump threading: an unconditional jump to another jump, a backward jump
+/// (`Loop`) or a return is replaced by its final target, so that e.g. the
+/// end of an `if` branch inside a loop jumps straight back to the loop's
+/// start. Only jumps are rewritten in place; no instruction moves.
+fn thread_jumps(code: &mut [Op]) {
+    for i in 0..code.len() {
+        let Op::Jmp { off } = code[i] else { continue };
+        let mut t = i as i64 + 1 + off as i64;
+        // Follow chains of jumps (a few, in case of cycles).
+        for _ in 0..8 {
+            match code.get(t as usize) {
+                Some(Op::Jmp { off }) => t = t + 1 + *off as i64,
+                _ => break,
+            }
+        }
+        code[i] = match code.get(t as usize) {
+            Some(&Op::Loop { off }) => Op::Loop { off: (t + 1 + off as i64 - (i as i64 + 1)) as i32 },
+            Some(&op @ (Op::Ret { .. } | Op::RetUnit)) => op,
+            _ => Op::Jmp { off: (t - (i as i64 + 1)) as i32 },
+        };
+    }
+}
+
+/// The string locals of a function body that `+=` appends to and no
+/// closure captures (cells): they are appended to in place. Such a local
+/// holds a private buffer (`Obj::StrBuf`) while it is being appended to;
+/// every other read of it first freezes the buffer into an ordinary string
+/// (`Op::FreezeStr`, in place), so no other register, object or closure
+/// ever sees a buffer, and appending cannot change a value seen elsewhere.
+fn builder_locals(body: &HExpr, locals: &[LocalInfo]) -> HashSet<LocalId> {
+    let mut out = HashSet::new();
+    walk(body, &mut |e| {
+        if let HKind::Assign { place: Place::Local(l), op: Some(ArithOp::Add), op_ty: Type::Str, .. } = &e.kind
+            && locals.get(*l as usize).is_some_and(|i| !i.cell)
+        {
+            out.insert(*l);
+        }
+    });
+    out
+}
+
 pub(crate) fn walk(e: &HExpr, f: &mut impl FnMut(&HExpr)) {
     f(e);
     match &e.kind {

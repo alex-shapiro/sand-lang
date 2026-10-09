@@ -35,8 +35,10 @@ pub(crate) enum IterPlan {
     /// Ranges, lists, maps, sets and channels, with dedicated instructions.
     Builtin(IterKind),
     /// An `Iterator`: the value is kept in a hidden local, and `next` (a call
-    /// of type `T?` on it) runs before each iteration.
-    Lazy { local: LocalId, next: Box<HExpr> },
+    /// of type `T?` on it) runs before each iteration. For an `Iter`, the
+    /// local holds its `next` function instead (`next_fn`; the field is
+    /// immutable, so it is loaded once).
+    Lazy { local: LocalId, next: Box<HExpr>, next_fn: bool },
 }
 
 /// An instantiated function signature.
@@ -2202,11 +2204,12 @@ impl Checker<'_> {
                 // `Iter<T>`: call its `next` function directly.
                 let elem = args[0].clone();
                 let local = self.hidden_local(ty.clone(), span);
-                let obj = Box::new(mk(HKind::Local(local), ty, span));
                 let opt = self.option_of(elem.clone());
-                let callee = Box::new(mk(HKind::Field { obj, index: 0 }, Type::func(vec![], opt.clone()), span));
+                let fty = Type::func(vec![], opt.clone());
+                self.fs.data[local as usize].ty = fty.clone();
+                let callee = Box::new(mk(HKind::Local(local), fty, span));
                 let next = mk(HKind::CallValue { callee, args: vec![] }, opt, span);
-                (IterPlan::Lazy { local, next: Box::new(next) }, elem)
+                (IterPlan::Lazy { local, next: Box::new(next), next_fn: true }, elem)
             }
             Type::Named(d, args) if d == self.wk.channel => builtin(IterKind::Channel, args[0].clone()),
             Type::Error => builtin(IterKind::List, Type::Error),
@@ -2223,7 +2226,7 @@ impl Checker<'_> {
                     let slot = self.traits[t as usize].methods.iter().position(|m| m.name == "next").unwrap_or(0) as u32;
                     let tr = TraitRef { trait_id: t, args: vec![elem.clone()] };
                     let next = self.call_trait_method(tr, slot, ty, Some(recv), &[], span);
-                    (IterPlan::Lazy { local, next: Box::new(next) }, elem)
+                    (IterPlan::Lazy { local, next: Box::new(next), next_fn: false }, elem)
                 }
                 None => {
                     let msg = format!("type {} is not iterable (it does not implement `Iterator`)", self.show(&other));
@@ -2240,10 +2243,16 @@ impl Checker<'_> {
             IterPlan::Builtin(kind) => mk(HKind::For { pat, iter: Box::new(ih), kind, body: Box::new(body) }, Type::Unit, span),
             // `{ let it = ih; while let Some(pat) = <next> { body } }`, or a
             // fused pipeline (see `fuse`).
-            IterPlan::Lazy { local, next } => {
+            IterPlan::Lazy { local, next, next_fn } => {
                 if self.can_fuse(&ih) {
                     return self.fuse_for(ih, pat, body, span);
                 }
+                let ih = if next_fn {
+                    let fty = self.fs.data[local as usize].ty.clone();
+                    mk(HKind::Field { obj: Box::new(ih), index: 0 }, fty, span)
+                } else {
+                    ih
+                };
                 let it = HPat { kind: HPatKind::Bind(local), ty: ih.ty.clone(), span };
                 let init = mk(HKind::Let { pat: it, init: Box::new(ih), else_: None }, Type::Unit, span);
                 let some = self.types[self.wk.option as usize].variants()[0].rt_id;

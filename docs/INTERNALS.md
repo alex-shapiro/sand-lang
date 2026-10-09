@@ -483,6 +483,64 @@ the result with `SAND_DUMP_BYTECODE=1 sand run file.sand`.
 
 ## Virtual machine
 
+### Dispatch loop
+
+`Vm::interp` is one `match` on the instruction, and its speed depends on how
+LLVM allocates registers across that whole function: when too many values
+stay live across the loop (it contains calls, so they need callee-saved
+registers), the allocator spills the hottest ones, `code` and `ip`, and
+every instruction reloads them from the stack (±10-40% on call-heavy code
+from unrelated edits). The rules that keep it fast:
+
+* Keep the loop-carried state minimal: `code`, `ip`, `base`, `regs` and the
+  fuel; read anything else from memory where it is needed (the current
+  frame's `ret`/`closure` from `fiber.frames`, the depth limit from
+  `self.host.limits`, the `Some` variant id from `prog.ids`). Adding one
+  more long-lived local can push `code` or `ip` out of registers.
+* Keep work out of the arms: anything with a loop, an allocation of many
+  values, formatting or a second call goes into an `#[inline(never)]`
+  method (`make_closure`, `op_compare`, `op_display`, `op_concat`,
+  `str_class`, `iter_step`, `call_native`, `try_top`, ...), and error paths
+  into `#[cold]` functions that build the message (`operand_trap` for the
+  operand checks of every typed arithmetic instruction, `index_error`, ...).
+* Measure: `cargo bench` prints the geometric mean of the benchmarks' best
+  times; compare it before and after any change to the loop, and inspect the
+  dispatch head with `objdump -d --disassemble-symbols=<Vm::interp>` (look
+  for `ldr`/`str` of `sp`-relative slots around the `br` of the jump table).
+
+Moving all rare instructions into one out-of-line `exec_cold` handler (a
+smaller loop) was measured and is slower (geometric mean 78 ms against 68
+ms): the fallback arm's call and result handling cost more registers than
+the arms it removed. A threaded design (one function per instruction,
+tail-calling the next) needs guaranteed tail calls, which stable Rust does
+not have.
+
+The compiler reduces the number of instructions dispatched: fused
+compare-and-branch instructions (also for `or` and `not` of integer
+comparisons, `cond_jump_true`), `JNotSome` (test and payload of `Some` in
+one), calls writing their result straight to the destination register
+(`CallDirectTo`, `CallNativeTo`, `Call`'s `dst`), one-argument natives and
+single-payload variants reading their argument in place, statements not
+materialising unit, captures loaded once per closure call, inline
+instructions for small natives (`Len`, `ListPush`, `IntToFloat`,
+`StrClass`), and jump threading (`thread_jumps`: a jump to a jump, a `Loop`
+or a return is replaced by its target).
+
+### Strings built by appending
+
+`s += x` on a string local copies `s` each time, which makes building a
+string piece by piece quadratic (CPython avoids this by appending in place
+when the string has no other reference). So the compiler appends in place
+when it can prove no one else sees the string: for `var` locals of type
+`str` that are appended to and not captured by a closure (not cells),
+`builder_locals` makes `s += x` an `AppendStr`, which keeps the value in a
+private, growable `Obj::StrBuf` (amortised doubling) held only by the
+local's register; every other read of the local first emits `FreezeStr`,
+which turns the buffer into an ordinary `Obj::Str` in place (same handle).
+So a buffer never reaches another register, object, closure or native, and
+appending can never change a value seen elsewhere. The buffer's capacity
+counts against `max_memory`; freezing gives back the unused part.
+
 ### Fibers, frames and stacks
 
 Every task runs on a `Fiber` with its own value stack and frame list. A
@@ -814,14 +872,11 @@ loops, so every element costs calls and fuel and endless iterators cannot
 run unboundedly inside a native.
 
 The `next` functions of the iterators of lists (and so maps and sets),
-ranges and strings (`chars_iter`) are *bound natives* (`Obj::BoundNative`):
-a native step function and its state (e.g. the list, the next index and
-the length) in one heap object. Calling one calls the native with the
-object itself as the first argument (it is already in the callee register,
-so the arguments are passed in place) followed by the call's arguments; the
-native updates its state in the object's fields. A step thus costs one
-native call instead of a closure's frame plus its natives. `Vm::bound_native`
-makes one (natives find the step's id by name with `Vm::native_id`).
+ranges and strings (`chars_iter`) are `Obj::IterFn` objects: the state of
+the iteration (`IterSrc`: the list, the next index and the length when the
+iterator was made, ...) as a callable function value. The `Call`
+instruction steps one directly (`Vm::iter_step`), with no frame and no
+native call; it is still one unit of fuel per element.
 
 The checker knows the trait and the struct (`Checker::iter_trait`,
 `iter_struct`, found when the prelude's items are declared). `iter_plan`

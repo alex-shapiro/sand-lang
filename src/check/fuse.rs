@@ -352,6 +352,12 @@ impl Checker<'_> {
     fn fused_loop(&mut self, chain: Chain, extra: Vec<HExpr>, span: Span, body: impl FnOnce(&mut Self, HExpr) -> Vec<HExpr>) -> Vec<HExpr> {
         let Chain { kind, source, elem, stages } = chain;
         let mut setup = Vec::new();
+        let opt = self.option_of(elem.clone());
+        // An `Iter` source is kept as its `next` function (an immutable field).
+        let source = match kind {
+            SourceKind::Iter => mk(HKind::Field { obj: Box::new(source), index: 0 }, Type::func(vec![], opt.clone()), span),
+            _ => source,
+        };
         let src_ty = source.ty.clone();
         let src = self.bind_tmp(source, &mut setup);
         let mut vars = Vec::new();
@@ -450,9 +456,7 @@ impl Checker<'_> {
                 )
             }
             SourceKind::Iter => {
-                let opt = self.option_of(elem.clone());
-                let callee = mk(HKind::Field { obj: Box::new(local(src, src_ty, span)), index: 0 }, Type::func(vec![], opt.clone()), span);
-                let next = mk(HKind::CallValue { callee: Box::new(callee), args: vec![] }, opt.clone(), span);
+                let next = mk(HKind::CallValue { callee: Box::new(local(src, src_ty, span)), args: vec![] }, opt.clone(), span);
                 let pat = HPat { kind: HPatKind::Variant { rt_id: self.some_rt(), args: vec![bind(x0, elem, span)] }, ty: opt, span };
                 if top.is_empty() {
                     mk(HKind::WhileLet { pat, value: Box::new(next), body: Box::new(block(stmts, span)) }, Type::Unit, span)
