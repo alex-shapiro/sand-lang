@@ -1,0 +1,14 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc dfe6ea562d20f2793f7c00b5f83cc8e1f83bb3eedc0311760fd2b0d1f467bbb5 # shrinks to x = 0.0
+cc 2c0c812fd53c9af552fdf58dc006bf62b76399fbfb1c5120047cf57ab95bff08 # shrinks to j = Null
+cc 4b77f6356d00490cbf029e3dabc875b9ec9e71b2e9f267b590b1b24a9d3bac49 # shrinks to ops = []
+cc ecd5e74023c0d94520ad6f7f16d455670c69a0f2f50cf9cfd6c4baa89533e28f # shrinks to xs = []
+cc 78d05b005ac4c371c9f8200b5b4db1af5194e10827d77a1acddad0ffd4f6d1d7 # shrinks to data = []
+cc baa77bd4926b666c2366fe0afbbfe7eb90d2b7b45b17498308c911f765928d0c # shrinks to a = 0, b = 0
+cc 4020a4b5f822d570a73751d1640fed1c02d4ca10186767b12763be64dd3972a4 # shrinks to prog = ("fn clamp(x: int) -> int { x.clamp(-1000, 1000) }\nfn safe_mod(a: int, b: int) -> int { if b == 0 { 0 } else { a % b } }\nlet v0 = clamp(clamp(clamp(clamp(0 * clamp(0 - (-8))) + 1) - 1))\nlet v1 = safe_mod((if clamp(v0 + v0) > 0 { v0 } else { 19 }), clamp(v0 + v0))\nlet v2 = clamp(clamp(15 * v1) * clamp(v0 * 3))\nvar acc = 0\nfor i in 0..2 {\n    acc = clamp(acc + v0 * i - v1)\n}\nprint(acc)\n", "0\n")
+cc 9b1df029ad68f32167f5df39ad4dabceef95a2869553c892977195580037b075 # shrinks to prog = ("fn clamp(x: int) -> int { x.clamp(-1000, 1000) }\nfn safe_mod(a: int, b: int) -> int { if b == 0 { 0 } else { a % b } }\nlet v0 = clamp(clamp(0 + 14))\nlet v1 = -v0\nlet v2 = safe_mod(safe_mod((-7), v0), safe_mod((-17), v1))\nvar acc = 0\nfor i in 0..2 {\n    acc = clamp(acc + v0 * i - v1)\n}\nprint(acc)\n", "42\n")

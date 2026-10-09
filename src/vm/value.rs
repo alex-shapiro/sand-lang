@@ -114,6 +114,38 @@ impl Value {
     }
 }
 
+/// A script integer used as a count or size (a repeat count, a width, a
+/// length to allocate): negative values become 0, and values too large for
+/// `usize` (only possible on 32-bit targets) saturate to `usize::MAX`, so an
+/// oversized request fails the memory limit or range check it fails on a
+/// 64-bit target instead of silently wrapping to a smaller one.
+#[inline]
+pub fn to_usize_saturating(n: i64) -> usize {
+    saturate(n.max(0), usize::MAX)
+}
+
+/// A script integer used as an index: `None` if it is negative or too large
+/// for `usize` (only possible on 32-bit targets), when it is out of bounds
+/// of every sequence.
+#[inline]
+pub fn to_index(i: i64) -> Option<usize> {
+    usize::try_from(i).ok()
+}
+
+/// A byte count or position from a `u64` (a file size, a cursor position)
+/// as `usize`, saturating on 32-bit targets like [`to_usize_saturating`].
+#[inline]
+pub fn u64_to_usize_saturating(n: u64) -> usize {
+    saturate(n, usize::MAX)
+}
+
+/// `n` converted to `T`, or `max` if it does not fit. Generic so the 32-bit
+/// behavior of the conversions above can be tested on any target with `u32`.
+#[inline]
+fn saturate<N, T: TryFrom<N>>(n: N, max: T) -> T {
+    T::try_from(n).unwrap_or(max)
+}
+
 /// A view of an enum variant value, independent of its representation
 /// (`Value::Tag`, an inline variant or a heap `Obj::Variant`).
 #[derive(Clone, Copy, Debug)]
@@ -165,7 +197,7 @@ const MULTIPLIER: u64 = 0x51_7c_c1_b7_27_22_0a_95;
 /// The random seed of this process's hashes.
 fn hash_seed() -> u64 {
     static SEED: OnceLock<u64> = OnceLock::new();
-    *SEED.get_or_init(|| std::collections::hash_map::RandomState::new().hash_one(0x5eed_u64))
+    *SEED.get_or_init(crate::platform::entropy)
 }
 
 impl Default for FxHasher {
@@ -613,5 +645,39 @@ impl Obj {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saturating_conversions_never_wrap() {
+        // On a 32-bit target `usize` is `u32`: oversized counts must
+        // saturate, not wrap to a small value (`1 << 32` would become 0).
+        assert_eq!(saturate::<i64, u32>(1 << 32, u32::MAX), u32::MAX);
+        assert_eq!(saturate::<i64, u32>(5_000_000_001, u32::MAX), u32::MAX);
+        assert_eq!(saturate::<i64, u32>(i64::MAX, u32::MAX), u32::MAX);
+        assert_eq!(saturate::<i64, u32>(u32::MAX as i64, u32::MAX), u32::MAX);
+        assert_eq!(saturate::<i64, u32>(7, u32::MAX), 7);
+        assert_eq!(saturate::<u64, u32>(1 << 32, u32::MAX), u32::MAX);
+        assert_eq!(saturate::<u64, u32>(u64::MAX, u32::MAX), u32::MAX);
+        assert_eq!(saturate::<u64, u32>(12, u32::MAX), 12);
+        assert_eq!(u32::try_from(1i64 << 32).ok(), None, "an index past u32::MAX is out of bounds, not index 0");
+
+        assert_eq!(to_usize_saturating(-5), 0);
+        assert_eq!(to_usize_saturating(0), 0);
+        assert_eq!(to_usize_saturating(42), 42);
+        assert_eq!(to_usize_saturating(i64::MIN), 0);
+        assert_eq!(to_index(-1), None);
+        assert_eq!(to_index(3), Some(3));
+        assert_eq!(u64_to_usize_saturating(9), 9);
+        // Values past `u32::MAX` keep their magnitude or saturate, whatever the target.
+        let big = 5_000_000_000i64;
+        assert!(to_usize_saturating(big) as u128 >= u32::MAX as u128);
+        assert!(to_index(big).is_none_or(|i| i as u64 == big as u64));
+        assert!(u64_to_usize_saturating(u64::MAX) == usize::MAX);
+        assert_eq!(to_usize_saturating(i64::MAX) as u128, (i64::MAX as u128).min(usize::MAX as u128));
     }
 }

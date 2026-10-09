@@ -7,7 +7,7 @@ use crate::engine::Registry;
 use crate::types::ConstVal;
 use crate::vm::bytecode::JsonIds;
 use crate::vm::meter::SLOW_BYTES_PER_UNIT;
-use crate::vm::value::{Obj, TypeDesc, Value};
+use crate::vm::value::{Obj, TypeDesc, Value, to_usize_saturating};
 use crate::vm::{Ctl, NResult, Vm, panic};
 use std::borrow::Cow;
 use std::fmt::Write;
@@ -138,7 +138,7 @@ impl<'a> Parser<'a> {
     fn push(&mut self, vm: &Vm, items: &mut Vec<Value>, v: Value) -> Result<(), Ctl> {
         if items.len() == items.capacity() {
             let more = items.capacity().max(4);
-            vm.reserve(64 + self.pending + 2 * more * std::mem::size_of::<Value>())?;
+            vm.reserve((64 + self.pending).saturating_add(more.saturating_mul(2 * std::mem::size_of::<Value>())))?;
             let before = items.capacity();
             items.reserve_exact(more);
             self.pending += (items.capacity() - before) * std::mem::size_of::<Value>();
@@ -877,7 +877,7 @@ fn classify<'h>(vm: &'h Vm, ids: &JsonIds, mut v: Value) -> Result<Node<'h>, Ctl
             Obj::Set(s) => Node::Arr(s.entries.iter().flatten().map(|v| Item::Val(*v)).collect()),
             Obj::Range(a, b, inclusive) => {
                 let end = if *inclusive { b.saturating_add(1) } else { *b };
-                let n = end.saturating_sub(*a).max(0) as usize;
+                let n = to_usize_saturating(end.saturating_sub(*a));
                 vm.reserve(n.saturating_mul(std::mem::size_of::<Item>()))?;
                 vm.charge(n as u64)?;
                 Node::Arr((*a..end).map(|i| Item::Node(Node::Int(i))).collect())
@@ -971,11 +971,11 @@ impl<'h> Emitter<'h> {
         self.charged = self.out.len();
         self.vm.charge(1 + (written / crate::vm::meter::BYTES_PER_UNIT) as u64)?;
         let items = match &node {
-            Node::Arr(items) => items.len() * std::mem::size_of::<Item>(),
-            Node::Obj(entries) => entries.len() * std::mem::size_of::<(Cow<str>, Item)>(),
+            Node::Arr(items) => items.len().saturating_mul(std::mem::size_of::<Item>()),
+            Node::Obj(entries) => entries.len().saturating_mul(std::mem::size_of::<(Cow<str>, Item)>()),
             _ => 0,
         };
-        self.vm.reserve(self.out.len() + items)?;
+        self.vm.reserve(self.out.len().saturating_add(items))?;
         match node {
             Node::Null => self.out.push_str("null"),
             Node::Bool(b) => self.out.push_str(if b { "true" } else { "false" }),

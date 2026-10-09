@@ -10,6 +10,7 @@ use crate::syntax::lexer::CommentKind;
 use crate::types::FnId;
 use crate::{Config, Policy};
 use std::collections::{HashMap, HashSet};
+#[cfg(feature = "os")]
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,34 +27,35 @@ impl std::fmt::Display for LintWarning {
     }
 }
 
-/// Lints a file (its imports are loaded relative to it).
+/// Lints a file of the host's file system (its imports are loaded relative
+/// to it).
+#[cfg(feature = "os")]
 pub fn lint_file(path: &Path) -> Result<Vec<LintWarning>, String> {
     let src = std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let engine = Engine::new(Config::new().policy(Policy::allow_all()));
-    let rt = tokio::runtime::Builder::new_current_thread().build().map_err(|e| e.to_string())?;
-    let facts = rt.block_on(engine.lint_facts(path)).map_err(|e| e.to_string())?;
+    let facts = crate::platform::block_on(engine.lint_facts(path))?.map_err(|e| e.to_string())?;
     lint_with(&src, facts)
 }
 
-/// Lints source text (imports are resolved against the current directory).
+/// Lints source text (imports are resolved against the current directory,
+/// or the root of an empty memory file system without the `os` feature).
 pub fn lint_source(name: &str, src: &str) -> Result<Vec<LintWarning>, String> {
-    let engine = Engine::new(Config::new().policy(Policy::allow_all()));
-    let rt = tokio::runtime::Builder::new_current_thread().build().map_err(|e| e.to_string())?;
-    let facts = rt.block_on(engine.lint_facts_source(name, src)).map_err(|e| e.to_string())?;
+    lint_source_with(&Engine::new(Config::new().policy(Policy::allow_all())), name, src)
+}
+
+/// Lints source text as `engine` would run it: imports come from its file
+/// system and module root, as its policy allows (without prompting).
+pub fn lint_source_with(engine: &Engine, name: &str, src: &str) -> Result<Vec<LintWarning>, String> {
+    let facts = crate::platform::block_on(engine.lint_facts_source(name, src))?.map_err(|e| e.to_string())?;
     lint_with(src, facts)
 }
 
 fn lint_with(src: &str, facts: ResolvedFacts) -> Result<Vec<LintWarning>, String> {
     let src = src.to_string();
     let budget = CompileBudget::new(Some(tool_fuel(src.len())), None, None);
-    let out = std::thread::scope(|s| {
-        std::thread::Builder::new()
-            .stack_size(64 << 20)
-            .spawn_scoped(s, || run_lints(&src, &facts, &budget))
-            .map_err(|e| e.to_string())?
-            .join()
-            .map_err(|_| "internal linter error".to_string())?
-    });
+    let out = crate::platform::with_stack(64 << 20, || run_lints(&src, &facts, &budget))
+        .map_err(|e| format!("internal linter error: {e}"))
+        .and_then(|r| r);
     match budget.stopped() {
         Some(stop) => Err(crate::fmt::stop_message(stop, "lint")),
         None => out,

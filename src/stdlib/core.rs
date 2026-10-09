@@ -23,7 +23,7 @@ fn copy_bytes(vm: &Vm, n: usize) -> Result<(), Ctl> {
 /// checks the memory limit.
 fn produce(vm: &Vm, n: usize, objs: usize) -> Result<(), Ctl> {
     vm.reserve(n.saturating_mul(SLOT).saturating_add(objs.saturating_mul(ITEM)))?;
-    vm.charge((n + objs) as u64)
+    vm.charge(n.saturating_add(objs) as u64)
 }
 
 fn int(v: Value) -> i64 {
@@ -119,7 +119,7 @@ pub fn register(r: &mut Registry) {
     r.add_builtin("task.sleep", |_, a| {
         let d = int(a[0]).max(0) as u64;
         Err(Ctl::Async(Box::pin(async move {
-            tokio::time::sleep(std::time::Duration::from_nanos(d)).await;
+            crate::platform::sleep(std::time::Duration::from_nanos(d)).await;
             Box::new(|_: &mut Vm| Ok(Value::Unit)) as crate::vm::Finisher
         })))
     });
@@ -139,7 +139,7 @@ pub fn register(r: &mut Registry) {
         if cap < 0 {
             return panic("channel capacity must not be negative");
         }
-        Ok(vm.heap.alloc(Obj::Channel(Box::new(ChannelObj { capacity: cap as usize, ..Default::default() }))))
+        Ok(vm.heap.alloc(Obj::Channel(Box::new(ChannelObj { capacity: to_usize_saturating(cap), ..Default::default() }))))
     });
 
     register_numbers(r);
@@ -206,7 +206,8 @@ fn register_numbers(r: &mut Registry) {
     r.add_builtin("float.is_infinite", |_, a| Ok(Value::Bool(float(a[0]).is_infinite())));
     r.add_builtin("float.to_int", |_, a| {
         let f = float(a[0]).trunc();
-        if f.is_nan() || f < -9223372036854775808.0 || f >= 9223372036854775808.0 {
+        // NaN is in no range.
+        if !(-9223372036854775808.0..9223372036854775808.0).contains(&f) {
             return panic(format!("cannot convert {} to int", crate::vm::display::fmt_float(float(a[0]))));
         }
         Ok(Value::Int(f as i64))
@@ -414,13 +415,14 @@ fn register_str(r: &mut Registry) {
         if n < 0 {
             return panic(format!("negative repeat count: {n}"));
         }
-        let total = vm.str(a[0]).len().checked_mul(n as usize).ok_or(Ctl::Limit(crate::LimitKind::Memory))?;
+        let n = to_usize_saturating(n);
+        let total = vm.str(a[0]).len().checked_mul(n).ok_or(Ctl::Limit(crate::LimitKind::Memory))?;
         copy_bytes(vm, total)?;
-        let s = vm.str(a[0]).repeat(n as usize);
+        let s = vm.str(a[0]).repeat(n);
         Ok(vm.new_str(s))
     });
     fn pad(vm: &mut Vm, a: &[Value], start: bool) -> NResult {
-        let width = int(a[1]).max(0) as usize;
+        let width = to_usize_saturating(int(a[1]));
         let (t, fill) = (vm.str(a[0]), vm.str(a[2]));
         vm.charge_bytes(t.len())?;
         let n = t.chars().count();
@@ -457,8 +459,7 @@ fn register_str(r: &mut Registry) {
     r.add_builtin("str.chars_iter_next", |vm, a| Ok(vm.iter_fn(IterSrc::Chars { s: a[0].handle().unwrap_or(0), i: 0 })));
     r.add_builtin("str.char_at", |vm, a| {
         let t = vm.str(a[0]);
-        let i = int(a[1]);
-        let c = if i >= 0 && (i as usize) < t.len() && t.is_char_boundary(i as usize) { t[i as usize..].chars().next() } else { None };
+        let c = to_index(int(a[1])).filter(|&i| i < t.len() && t.is_char_boundary(i)).and_then(|i| t[i..].chars().next());
         let v = c.map(|c| vm.short_str(c.encode_utf8(&mut [0; 4])));
         Ok(vm.option(v))
     });
@@ -500,8 +501,7 @@ fn register_bytes(r: &mut Registry) {
     r.add_builtin("bytes.len", |vm, a| Ok(Value::Int(vm.heap.bytes_of(a[0]).len() as i64)));
     r.add_builtin("bytes.is_empty", |vm, a| Ok(Value::Bool(vm.heap.bytes_of(a[0]).is_empty())));
     r.add_builtin("bytes.get", |vm, a| {
-        let i = int(a[1]);
-        let v = if i >= 0 { vm.heap.bytes_of(a[0]).get(i as usize).map(|b| Value::Int(*b as i64)) } else { None };
+        let v = to_index(int(a[1])).and_then(|i| vm.heap.bytes_of(a[0]).get(i)).map(|b| Value::Int(*b as i64));
         Ok(vm.option(v))
     });
     r.add_builtin("bytes.to_list", |vm, a| {
@@ -586,7 +586,7 @@ fn find_bytes(vm: &Vm, hay: &[u8], needle: &[u8]) -> Result<Option<usize>, Ctl> 
     if needle.len() > hay.len() {
         return Ok(None);
     }
-    vm.reserve(needle.len() * std::mem::size_of::<usize>())?;
+    vm.reserve(needle.len().saturating_mul(std::mem::size_of::<usize>()))?;
     vm.charge_slow_bytes(hay.len() + needle.len())?;
     let mut fail = vec![0usize; needle.len()];
     let mut k = 0;
@@ -627,10 +627,10 @@ fn index_of(vm: &Vm, list: Value, x: Value) -> Result<Option<usize>, Ctl> {
 
 fn index_check(i: i64, len: usize, inclusive: bool) -> Result<usize, Ctl> {
     let max = if inclusive { len } else { len.saturating_sub(1) };
-    if i < 0 || (i as usize) > max || (!inclusive && len == 0) {
-        return Err(Ctl::Panic(format!("index out of bounds: index {i}, length {len}")));
+    match to_index(i) {
+        Some(at) if at <= max && (inclusive || len > 0) => Ok(at),
+        _ => Err(Ctl::Panic(format!("index out of bounds: index {i}, length {len}"))),
     }
-    Ok(i as usize)
 }
 
 /// Sorts values by the language's total order; each comparison is charged
@@ -687,8 +687,7 @@ fn register_list(r: &mut Registry) {
         Ok(Value::Unit)
     });
     r.add_builtin("List.get", |vm, a| {
-        let i = int(a[1]);
-        let v = if i >= 0 { vm.heap.list(a[0]).get(i as usize).copied() } else { None };
+        let v = to_index(int(a[1])).and_then(|i| vm.heap.list(a[0]).get(i)).copied();
         Ok(vm.option(v))
     });
     r.add_builtin("List.first", |vm, a| {
@@ -760,14 +759,14 @@ fn register_list(r: &mut Registry) {
     });
     r.add_builtin("List.take", |vm, a| {
         let l = vm.heap.list(a[0]);
-        let n = (int(a[1]).max(0) as usize).min(l.len());
+        let n = to_usize_saturating(int(a[1])).min(l.len());
         produce(vm, n, 0)?;
         let v = l[..n].to_vec();
         Ok(vm.heap.new_list(v))
     });
     r.add_builtin("List.skip", |vm, a| {
         let l = vm.heap.list(a[0]);
-        let n = (int(a[1]).max(0) as usize).min(l.len());
+        let n = to_usize_saturating(int(a[1])).min(l.len());
         produce(vm, l.len() - n, 0)?;
         let v = l[n..].to_vec();
         Ok(vm.heap.new_list(v))
@@ -777,9 +776,9 @@ fn register_list(r: &mut Registry) {
         if n <= 0 {
             return panic(format!("chunk size must be positive, found {n}"));
         }
-        let len = list_len(vm, a[0]);
-        produce(vm, len, len.div_ceil(n as usize))?;
-        let parts: Vec<Vec<Value>> = vm.heap.list(a[0]).chunks(n as usize).map(|c| c.to_vec()).collect();
+        let (n, len) = (to_usize_saturating(n), list_len(vm, a[0]));
+        produce(vm, len, len.div_ceil(n))?;
+        let parts: Vec<Vec<Value>> = vm.heap.list(a[0]).chunks(n).map(|c| c.to_vec()).collect();
         let vals: Vec<Value> = parts.into_iter().map(|p| vm.heap.new_list(p)).collect();
         Ok(vm.heap.new_list(vals))
     });
@@ -788,10 +787,10 @@ fn register_list(r: &mut Registry) {
         if n <= 0 {
             return panic(format!("window size must be positive, found {n}"));
         }
-        let l = vm.heap.list(a[0]);
-        let windows = (l.len() + 1).saturating_sub(n as usize);
-        produce(vm, windows.saturating_mul(n as usize), windows)?;
-        let parts: Vec<Vec<Value>> = l.windows(n as usize).map(|c| c.to_vec()).collect();
+        let (n, l) = (to_usize_saturating(n), vm.heap.list(a[0]));
+        let windows = (l.len() + 1).saturating_sub(n);
+        produce(vm, windows.saturating_mul(n), windows)?;
+        let parts: Vec<Vec<Value>> = l.windows(n).map(|c| c.to_vec()).collect();
         let vals: Vec<Value> = parts.into_iter().map(|p| vm.heap.new_list(p)).collect();
         Ok(vm.heap.new_list(vals))
     });
@@ -901,7 +900,7 @@ fn register_list(r: &mut Registry) {
     });
     r.add_builtin("Range.to_list", |vm, a| {
         let (s, e) = range(vm, a[0]);
-        let n = e.saturating_sub(s).max(0) as usize;
+        let n = to_usize_saturating(e.saturating_sub(s));
         produce(vm, n, 0)?;
         let items: Vec<Value> = (s..e).map(Value::Int).collect();
         Ok(vm.heap.new_list(items))
@@ -912,14 +911,16 @@ fn register_list(r: &mut Registry) {
         if step <= 0 {
             return panic(format!("step must be positive, found {step}"));
         }
-        let n = (e.saturating_sub(s).max(0) / step) as usize;
+        let n = to_usize_saturating(e.saturating_sub(s) / step);
         produce(vm, n, 0)?;
-        let items: Vec<Value> = (s..e).step_by(step as usize).map(Value::Int).collect();
+        // Stepped in `i64`: a step past `usize::MAX` (32-bit targets) must not be truncated.
+        let items: Vec<Value> =
+            std::iter::successors((s < e).then_some(s), |i| i.checked_add(step).filter(|i| *i < e)).map(Value::Int).collect();
         Ok(vm.heap.new_list(items))
     });
     r.add_builtin("Range.reversed", |vm, a| {
         let (s, e) = range(vm, a[0]);
-        let n = e.saturating_sub(s).max(0) as usize;
+        let n = to_usize_saturating(e.saturating_sub(s));
         produce(vm, n, 0)?;
         let items: Vec<Value> = (s..e).rev().map(Value::Int).collect();
         Ok(vm.heap.new_list(items))

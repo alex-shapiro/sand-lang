@@ -36,8 +36,9 @@ impl fmt::Display for MemoryLimit {
     }
 }
 
-/// The most that may be reserved without a memory limit (as for heap values).
-const UNLIMITED: usize = 1 << 40;
+/// The most that may be reserved without a memory limit (as for heap
+/// values): 1 TiB, or 2 GiB with 32-bit addresses (WebAssembly).
+pub(crate) const UNLIMITED: usize = if usize::BITS > 32 { 1 << 40 } else { 1 << 31 };
 
 impl std::error::Error for MemoryLimit {}
 

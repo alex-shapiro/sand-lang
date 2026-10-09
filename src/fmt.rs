@@ -35,14 +35,9 @@ pub fn format_source_with(src: &str, budget: &CompileBudget) -> Result<String, S
     }
     // The formatter recurses over the syntax tree; like the compiler, it runs
     // on a thread with a large stack so maximally nested input cannot overflow.
-    let out = std::thread::scope(|s| {
-        std::thread::Builder::new()
-            .stack_size(64 << 20)
-            .spawn_scoped(s, || format_on_this_thread(src, budget))
-            .map_err(|e| e.to_string())?
-            .join()
-            .map_err(|_| "internal formatter error".to_string())?
-    });
+    let out = crate::platform::with_stack(64 << 20, || format_on_this_thread(src, budget))
+        .map_err(|e| format!("internal formatter error: {e}"))
+        .and_then(|r| r);
     match budget.stopped() {
         Some(stop) => Err(stop_message(stop, "format")),
         None => out,

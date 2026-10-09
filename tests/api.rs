@@ -1,4 +1,6 @@
 //! Acceptance tests for the embedding API, sandbox policy, and resource limits.
+// Helpers of the tests that need the host (feature `os`) are unused without it.
+#![cfg_attr(not(feature = "os"), allow(unused_imports, dead_code))]
 
 mod common;
 
@@ -322,6 +324,7 @@ fn native_module_custom_capability() {
 // Sandbox policy
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "os")]
 #[test]
 fn deny_all_blocks_io_but_allows_output() {
     let dir = TempDir::new("deny");
@@ -364,6 +367,7 @@ fn stdin_requires_permission() {
     assert_eq!(out, "permission_denied\n");
 }
 
+#[cfg(feature = "os")]
 #[test]
 fn rule_policy_confines_paths() {
     let dir = TempDir::new("rules");
@@ -398,6 +402,7 @@ print(fs.list_dir(".").unwrap_err().kind)
     );
 }
 
+#[cfg(feature = "os")]
 #[test]
 fn rule_policy_deny_overrides_allow() {
     let dir = TempDir::new("denyover");
@@ -437,6 +442,7 @@ fn rule_policy_env_and_listen() {
     assert_eq!(p.check(&Capability::Stdin), Decision::Allow);
 }
 
+#[cfg(feature = "os")]
 #[test]
 fn denied_import_is_a_compile_error() {
     let dir = TempDir::new("imp");
@@ -450,6 +456,7 @@ fn denied_import_is_a_compile_error() {
     }
 }
 
+#[cfg(feature = "os")]
 #[test]
 fn prompt_answers() {
     let dir = TempDir::new("prompt");
@@ -572,6 +579,7 @@ fn assert_import_denied(r: Result<sandlang::Outcome, Error>, import: &str) {
     }
 }
 
+#[cfg(feature = "os")]
 #[test]
 fn import_prompt_allow_once_asks_on_every_compile() {
     let dir = TempDir::new("impallowonce");
@@ -585,6 +593,7 @@ fn import_prompt_allow_once_asks_on_every_compile() {
     assert_eq!(prompter.asked(), vec![import_cap(&dir, "lib.sand")]);
 }
 
+#[cfg(feature = "os")]
 #[test]
 fn import_prompt_allow_always_is_remembered_by_the_engine() {
     let dir = TempDir::new("impallowalways");
@@ -609,6 +618,7 @@ fn import_prompt_allow_always_is_remembered_by_the_engine() {
     assert_eq!(prompter.asked(), vec![import_cap(&dir, "lib.sand")]);
 }
 
+#[cfg(feature = "os")]
 #[test]
 fn import_prompt_deny_once_and_deny_always() {
     let dir = TempDir::new("impdeny");
@@ -626,6 +636,7 @@ fn import_prompt_deny_once_and_deny_always() {
     assert_eq!(prompter.asked(), vec![]);
 }
 
+#[cfg(feature = "os")]
 #[test]
 fn import_prompt_without_prompter_denies() {
     let dir = TempDir::new("impnoprompter");
@@ -640,6 +651,7 @@ fn import_prompt_without_prompter_denies() {
     assert_eq!(prompter.asked(), vec![]);
 }
 
+#[cfg(feature = "os")]
 #[test]
 fn nested_imports_are_prompted_with_resolved_paths() {
     let dir = TempDir::new("impnested");
@@ -672,6 +684,7 @@ fn nested_imports_are_prompted_with_resolved_paths() {
     assert_eq!(prompter.asked(), vec![import_cap(&dir, "lib/a.sand"), import_cap(&dir, "lib/b.sand")]);
 }
 
+#[cfg(feature = "os")]
 #[test]
 fn runtime_always_answers_last_for_the_engine() {
     let dir = TempDir::new("alwaysruntime");
@@ -725,6 +738,63 @@ fn memory_limit_counts_big_buffers() {
     let config = Config::new().limits(Limits { max_memory: Some(4 << 20), ..Limits::default() });
     let (r, _, _) = run_src(config, "let s = \"x\".repeat(100000000)\nprint(s.len())");
     assert!(matches!(r, Err(Error::Limit(LimitKind::Memory))), "{r:?}");
+}
+
+/// Counts, sizes and indices past `u32::MAX` must keep their meaning on
+/// 32-bit targets (where `usize` is 32 bits): rejected by the memory limit or
+/// a bounds check, never wrapped to a small value.
+#[test]
+fn counts_past_u32_max_are_not_truncated() {
+    const BIG: &str = "4294967297"; // 2^32 + 1: wraps to 1 on a 32-bit target
+    let memory = Limits { max_memory: Some(4 << 20), ..Limits::default() };
+    for src in [
+        "print(\"x\".repeat(BIG).len())",
+        "print(\"x\".pad_start(BIG).len())",
+        "print(\"x\".pad_end(BIG, \"ab\").len())",
+        "import random\nprint(random.bytes(BIG).len())",
+        "print((0..BIG).to_list().len())",
+        "print((0..BIG).reversed().len())",
+        "print((0..BIG * 2).step_by(2).len())",
+        "print([0; BIG].len())",
+        "import json\nprint(json.encode(0..BIG).len())",
+    ] {
+        let src = src.replace("BIG", BIG);
+        let (r, out, _) = run_src(Config::new().limits(memory.clone()), &src);
+        assert!(matches!(r, Err(Error::Limit(LimitKind::Memory))), "{src}: {r:?} (stdout {out:?})");
+    }
+    let src = format!(
+        "let xs = [1, 2, 3]\n\
+         print(xs.get({BIG}))\n\
+         print(\"abc\".char_at({BIG}))\n\
+         print(\"abc\".bytes().get({BIG}))\n\
+         print(xs.take({BIG}))\n\
+         print(xs.skip({BIG}))\n\
+         print(xs.chunks({BIG}))\n\
+         print(xs.windows({BIG}))\n\
+         print((0..10000000000).step_by(5000000000))\n\
+         print((5000000000..5000000003).to_list())\n\
+         let ch = task.channel(capacity: {BIG})\n\
+         ch.send(1)\n\
+         print(ch.len())"
+    );
+    let (r, out, _) = run_src(Config::new(), &src);
+    r.unwrap();
+    assert_eq!(out, "None\nNone\nNone\n[1, 2, 3]\n[]\n[[1, 2, 3]]\n[]\n[0, 5000000000]\n[5000000000, 5000000001, 5000000002]\n1\n");
+    for (src, message) in [
+        ("let xs = [1, 2, 3]\nprint(xs[BIG])", "index out of bounds: index BIG, length 3"),
+        ("var xs = [1, 2, 3]\nxs[BIG] = 4\nprint(xs)", "index out of bounds: index BIG, length 3"),
+        ("var xs = [1, 2, 3]\nxs.insert(BIG, 4)", "index out of bounds: index BIG, length 3"),
+        ("var xs = [1, 2, 3]\nxs.remove(BIG)", "index out of bounds: index BIG, length 3"),
+        ("var xs = [1, 2, 3]\nxs.swap(0, BIG)", "index out of bounds: index BIG, length 3"),
+        ("let xs = [1, 2, 3]\nprint(xs[1..BIG])", "out of range"),
+    ] {
+        let (src, message) = (src.replace("BIG", BIG), message.replace("BIG", BIG));
+        let (r, out, _) = run_src(Config::new(), &src);
+        match r {
+            Err(Error::Runtime { message: m, .. }) => assert!(m.contains(&message), "{src}: {m:?}"),
+            other => panic!("{src}: expected a panic, got {other:?} (stdout {out:?})"),
+        }
+    }
 }
 
 #[test]
@@ -967,6 +1037,7 @@ fn output_limit() {
     assert!(out.len() <= 1000);
 }
 
+#[cfg(feature = "os")]
 #[test]
 fn open_resource_limit() {
     let config = Config::new().limits(Limits { max_open_resources: 2, ..Limits::default() });
@@ -1125,6 +1196,7 @@ fn seeded_engines_are_deterministic() {
 // Test runner API and file loading
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "os")]
 #[test]
 fn run_tests_api() {
     let dir = TempDir::new("tests");
@@ -1137,6 +1209,7 @@ fn run_tests_api() {
     assert_eq!(report.results[1].message.as_deref(), Some("nope"));
 }
 
+#[cfg(feature = "os")]
 #[test]
 fn run_file_with_imports_and_cwd() {
     let r = run_with("import \"./util.sand\"\nprint(util.X)", |c| c);
@@ -1205,6 +1278,7 @@ fn panic_messages_cannot_impersonate_limits_or_interrupts() {
     assert!(matches!(r, Err(Error::Runtime { .. })), "{r:?}");
 }
 
+#[cfg(feature = "os")]
 #[test]
 fn rust_panics_in_natives_do_not_unwind_into_the_host() {
     let module = || {
@@ -1250,6 +1324,7 @@ fn rust_panics_in_host_code_become_internal_errors() {
     assert!(matches!(r, Err(Error::Runtime { ref message, .. }) if message.contains("internal error: prompter bug")), "{r:?}");
 }
 
+#[cfg(feature = "os")]
 #[test]
 fn module_discovery_is_bounded() {
     let dir = TempDir::new("discovery");
@@ -1278,6 +1353,7 @@ fn module_discovery_is_bounded() {
     assert!(matches!(r, Err(Error::Limit(LimitKind::WallTime))), "{r:?}");
 }
 
+#[cfg(feature = "os")]
 #[test]
 fn once_answers_apply_only_to_the_call_that_asked() {
     let dir = TempDir::new("once");
@@ -1311,6 +1387,7 @@ print(fs.copy("a.txt", "d.txt").is_ok())
     assert_eq!(std::fs::read_to_string(dir.path().join("c.txt")).unwrap(), "A");
 }
 
+#[cfg(feature = "os")]
 #[cfg(unix)]
 #[test]
 fn a_symlinked_main_file_imports_from_its_own_directory() {

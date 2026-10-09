@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sand Playground</title>
+  <meta name="description" content="Write Sand programs and the policies that sandbox them, and run several engines at once, in your browser.">
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 3 L29 27 H3 Z' fill='%23c8913a'/%3E%3C/svg%3E">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><path d="M16 3 L29 27 H3 Z"/><path class="grain" d="M10 22h12M13 17h6"/></svg>
+      <h1>Sand <span>playground</span></h1>
+    </div>
+    <div class="actions">
+      <span id="running" class="running" aria-live="polite"></span>
+      <button id="examples-button" type="button" class="menu-button" popovertarget="examples-menu" aria-haspopup="menu">
+        Open an example…
+        <svg viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1l4 4 4-4"/></svg>
+      </button>
+      <div id="examples-menu" class="menu" role="menu" aria-label="Examples" popover></div>
+      <button id="new-sandbox" type="button">New</button>
+      <button id="share" type="button" title="Copy a link to these sandboxes">Share</button>
+    </div>
+  </header>
+
+  <main id="sandboxes" aria-label="Sandboxes"></main>
+
+  <footer>
+    <p id="engine-status" aria-live="polite">Loading the engine…</p>
+  </footer>
+
+  <div id="toast" class="toast" role="status" hidden>
+    <span class="toast-text"></span>
+    <button type="button">Undo</button>
+  </div>
+
+  <template id="sandbox-template">
+    <section class="sandbox">
+      <div class="sandbox-bar">
+        <input class="title" aria-label="Sandbox name" spellcheck="false">
+        <div class="sandbox-actions">
+          <button type="button" data-action="lint" title="Report the linter's warnings about the program">Lint</button>
+          <button type="button" data-action="format" title="Format the open .sand file (Ctrl-S)">Format</button>
+          <button type="button" data-action="remove" class="icon" title="Delete this sandbox" aria-label="Delete this sandbox">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4h11M6 4V2.5h4V4M4 4l.7 9.5h6.6L12 4M6.75 6.5v4.5M9.25 6.5v4.5"/></svg>
+          </button>
+          <button type="button" data-action="stop" class="icon stop" title="Stop the run (ends the session)" aria-label="Stop">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="3.5" width="9" height="9" rx="1.5"/></svg>
+          </button>
+          <button type="button" data-action="run" class="icon primary run" title="Run the program in a new session (Ctrl-Enter)" aria-label="Run">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.2v9.6a.6.6 0 0 0 .9.5l7.6-4.8a.6.6 0 0 0 0-1L5.9 2.7a.6.6 0 0 0-.9.5z"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="editor-pane">
+        <div class="pane-bar">
+          <div class="tabs setting-tabs" role="tablist" aria-label="Policy, environment and input"></div>
+          <div class="tabs file-tabs" role="tablist" aria-label="Files"></div>
+        </div>
+        <div class="editor-host"></div>
+        <div class="pane-foot" hidden><span class="tab-hint"></span></div>
+      </div>
+      <div class="output" hidden>
+        <div class="prompt-bar" hidden>
+          <span class="prompt-text"></span>
+          <span class="prompt-buttons">
+            <button type="button" data-answer="once" class="primary">Allow once</button>
+            <button type="button" data-answer="always">Always</button>
+            <button type="button" data-answer="deny">Deny</button>
+            <button type="button" data-answer="never">Never</button>
+          </span>
+        </div>
+        <div class="terminal">
+          <pre class="console" aria-label="Output" tabindex="0"></pre>
+          <div class="repl" hidden><span class="repl-prompt" aria-hidden="true">›</span><div class="repl-host"></div></div>
+        </div>
+        <div class="written" hidden></div>
+      </div>
+    </section>
+  </template>
+</body>
+</html>

@@ -66,14 +66,27 @@ pub fn run(source: &str) -> RunResult {
     run_with(source, |c| c)
 }
 
+/// Like [`run`], configured by `f`. With the `os` feature the script is a
+/// file of a temporary directory of the host, otherwise of a memory file
+/// system.
 pub fn run_with(source: &str, f: impl FnOnce(Config) -> Config) -> RunResult {
-    let dir = TempDir::new("run");
-    let main = dir.write("main.sand", source);
     let out = MemorySink::new();
     let err = MemorySink::new();
-    let config = Config::new().policy(Policy::allow_all()).cwd(dir.path()).stdout(out.clone()).stderr(err.clone());
-    let config = f(config);
-    let mut engine = Engine::new(config);
+    let config = Config::new().policy(Policy::allow_all()).stdout(out.clone()).stderr(err.clone());
+    #[cfg(feature = "os")]
+    let (_dir, main, config) = {
+        let dir = TempDir::new("run");
+        let main = dir.write("main.sand", source);
+        let config = config.cwd(dir.path());
+        (dir, main, config)
+    };
+    #[cfg(not(feature = "os"))]
+    let (main, config) = {
+        let fs = sandlang::MemFs::new();
+        fs.write("/run/main.sand", source).unwrap();
+        (PathBuf::from("/run/main.sand"), config.memory_fs(fs).cwd("/run"))
+    };
+    let mut engine = Engine::new(f(config));
     let result = rt().block_on(engine.run_file(&main));
     RunResult { result, stdout: out.contents(), stderr: err.contents() }
 }

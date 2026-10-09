@@ -178,6 +178,8 @@ pub enum Trap {
 pub enum StdinSource {
     None,
     Bytes(std::io::Cursor<Vec<u8>>),
+    /// The host process's standard input.
+    #[cfg(feature = "os")]
     Inherit(tokio::io::BufReader<tokio::io::Stdin>),
 }
 
@@ -246,10 +248,7 @@ impl Rng {
 }
 
 pub fn entropy_seed() -> u64 {
-    use std::hash::{BuildHasher, Hasher};
-    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-    h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
-    h.finish()
+    crate::platform::entropy()
 }
 
 /// Engine services available to natives.
@@ -272,8 +271,11 @@ pub struct Host {
     pub interrupt: Arc<AtomicBool>,
     /// Cached decisions for stdout (index 0) and stderr (1).
     pub stream_decisions: [Option<bool>; 2],
+    #[cfg(feature = "os")]
     pub(crate) tls: crate::stdlib::TlsSettings,
     pub(crate) regex_cache: Vec<(u64, u32)>,
+    /// The file system of the `fs` module.
+    pub(crate) fs: crate::files::Fs,
 }
 
 pub struct Vm {
@@ -686,24 +688,34 @@ impl Vm {
     // Policy
 
     /// Checks a capability: `Ok(true)` allowed, `Ok(false)` denied, or a
-    /// request to prompt the user.
+    /// request to prompt the user. Paths (`FsRead`, `FsWrite`, `Import`) are
+    /// paths of the engine's file system (the host's or a memory file
+    /// system), normalized as it does.
     pub fn permit(&mut self, cap: &Capability) -> Result<bool, Ctl> {
-        self.permit_by(cap, Policy::check)
+        let space = self.host.fs.space();
+        self.permit_by(cap, |p, c| p.check_in(c, space))
     }
 
     /// Like [`Vm::permit`] for a file capability whose path is already
     /// normalized (see [`Policy::check_normalized`]).
     pub fn permit_normalized(&mut self, cap: &Capability) -> Result<bool, Ctl> {
-        self.permit_by(cap, Policy::check_normalized)
+        self.permit_path(cap, false)
     }
 
     /// Like [`Vm::permit`] for an operation on a directory entry itself
     /// (see [`Policy::check_entry`]).
     pub fn permit_entry(&mut self, cap: &Capability) -> Result<bool, Ctl> {
-        self.permit_by(cap, Policy::check_entry)
+        self.permit_path(cap, true)
     }
 
-    fn permit_by(&mut self, cap: &Capability, check: fn(&Policy, &Capability) -> Decision) -> Result<bool, Ctl> {
+    /// [`Vm::permit_normalized`] (or, with `entry`, [`Vm::permit_entry`])
+    /// in the engine's file system.
+    pub(crate) fn permit_path(&mut self, cap: &Capability, entry: bool) -> Result<bool, Ctl> {
+        let space = self.host.fs.space();
+        self.permit_by(cap, |p, c| if entry { p.check_entry_in(c, space) } else { p.check_normalized_in(c, space) })
+    }
+
+    fn permit_by(&mut self, cap: &Capability, check: impl FnOnce(&Policy, &Capability) -> Decision) -> Result<bool, Ctl> {
         // "Once" answers given for the call being retried (see `forget_once_answers`).
         if self.host.grants_once.contains(cap) {
             return Ok(true);
@@ -1038,7 +1050,7 @@ impl Vm {
     }
 
     fn collect_garbage_with(&mut self, mut current: Option<&mut Fiber>, force_major: bool) {
-        let start = std::time::Instant::now();
+        let start = crate::platform::Instant::now();
         let mut full = force_major;
         if force_major {
             self.free_spare_fibers();
@@ -1048,7 +1060,7 @@ impl Vm {
                 self.heap.collect(roots, false);
                 self.heap.stats.record(start.elapsed(), false);
             }
-            let step = std::time::Instant::now();
+            let step = crate::platform::Instant::now();
             if self.heap.cycle_step() {
                 let roots = self.gc_roots(current.as_deref_mut());
                 self.heap.finish_marking(roots);
@@ -1074,7 +1086,7 @@ impl Vm {
             full = self.heap.over_limit();
         }
         if full {
-            let start = std::time::Instant::now();
+            let start = crate::platform::Instant::now();
             let roots = self.gc_roots(current);
             self.heap.collect(roots, true);
             if self.heap.over_limit() {

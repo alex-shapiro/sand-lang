@@ -14,7 +14,7 @@ pub fn register(r: &mut Registry) {
         Ok(vm.new_str(format_uuid(&b)))
     });
     r.add_builtin("uuid.unix_millis", |_, _| {
-        let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+        let ms = crate::platform::SystemTime::now().duration_since(crate::platform::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
         Ok(Value::Int(ms.min(i64::MAX as u128) as i64))
     });
     // Starts each millisecond's counter at a random value in the lower half

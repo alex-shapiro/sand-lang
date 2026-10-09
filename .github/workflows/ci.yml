@@ -27,13 +27,45 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
-      - name: Clippy (no default features)
+      - name: Clippy (without TLS, pure Rust)
+        run: cargo clippy --all-targets --no-default-features --features os -- -D warnings
+      - name: Clippy (without operating-system access)
         run: cargo clippy --all-targets --no-default-features -- -D warnings
       - name: Test
         run: cargo test
-      - name: Test (no default features, pure Rust)
+      - name: Test (without TLS, pure Rust)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test --no-default-features --features os
+      - name: Test (without operating-system access)
         if: matrix.os == 'ubuntu-latest'
         run: cargo test --no-default-features
+
+  wasm:
+    name: WebAssembly and playground
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy --target wasm32-unknown-unknown
+          rustup default stable
+      - uses: Swatinem/rust-cache@v2
+      # wasm-bindgen-cli must match the wasm-bindgen crate in Cargo.lock.
+      - name: Install wasm-bindgen-cli
+        run: cargo install wasm-bindgen-cli --locked --version "$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Clippy
+        run: cargo clippy -p sandlang-wasm --target wasm32-unknown-unknown -- -D warnings
+      - name: Build for Node.js
+        run: wasm/build.sh nodejs target/wasm-node
+      # The bindings, and every example of the playground.
+      - name: Test
+        run: node --test --test-timeout=120000 wasm/tests/
+      - name: Build the playground
+        run: playground/build.sh
 
   fuzz-targets:
     name: fuzz targets build

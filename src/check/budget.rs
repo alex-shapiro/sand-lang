@@ -23,9 +23,9 @@
 //! budget at a time), so that a checker holding one stays `Send`, as REPL
 //! sessions keep their checker between inputs.
 
+use crate::platform::Instant;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
-use std::time::Instant;
 
 /// A `Cell<u64>`-like counter that is `Sync`.
 #[derive(Default)]

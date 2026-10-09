@@ -2,6 +2,7 @@
 
 use crate::check::ModKind;
 use crate::engine::Registry;
+use crate::platform::{Instant, SystemTime, UNIX_EPOCH};
 use crate::vm::value::{NativeObject, Obj, Value};
 use crate::vm::{Ctl, NResult, Vm};
 use std::any::Any;
@@ -15,7 +16,7 @@ const MONTHS: [&str; 12] =
     ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 
 /// The opaque `time.Instant` type.
-struct InstantObj(std::time::Instant);
+struct InstantObj(Instant);
 
 impl NativeObject for InstantObj {
     fn type_name(&self) -> &'static str {
@@ -258,7 +259,7 @@ fn format(n: i64, fmt: &str) -> String {
     out
 }
 
-fn duration_between(later: std::time::Instant, earlier: std::time::Instant) -> Value {
+fn duration_between(later: Instant, earlier: Instant) -> Value {
     let nanos = match later.checked_duration_since(earlier) {
         Some(d) => i64::try_from(d.as_nanos()).unwrap_or(i64::MAX),
         None => -i64::try_from(earlier.duration_since(later).as_nanos()).unwrap_or(i64::MAX),
@@ -266,7 +267,7 @@ fn duration_between(later: std::time::Instant, earlier: std::time::Instant) -> V
     Value::Dur(nanos)
 }
 
-fn instant(vm: &Vm, v: Value) -> Result<std::time::Instant, Ctl> {
+fn instant(vm: &Vm, v: Value) -> Result<Instant, Ctl> {
     vm.heap.native::<InstantObj>(v).map(|i| i.0).ok_or_else(|| Ctl::Panic("not an Instant".into()))
 }
 
@@ -318,15 +319,15 @@ pub fn register(r: &mut Registry) {
     });
 
     r.add_builtin("time.now_nanos", |_, _| {
-        let now = std::time::SystemTime::now();
-        let nanos = match now.duration_since(std::time::UNIX_EPOCH) {
+        let now = SystemTime::now();
+        let nanos = match now.duration_since(UNIX_EPOCH) {
             Ok(d) => i64::try_from(d.as_nanos()).unwrap_or(i64::MAX),
             Err(e) => -i64::try_from(e.duration().as_nanos()).unwrap_or(i64::MAX),
         };
         Ok(Value::Int(nanos))
     });
-    r.add_builtin("time.monotonic", |vm, _| Ok(vm.heap.alloc(Obj::Native(Box::new(InstantObj(std::time::Instant::now()))))));
-    r.add_builtin("time.Instant.elapsed", |vm, a| Ok(duration_between(std::time::Instant::now(), instant(vm, a[0])?)));
+    r.add_builtin("time.monotonic", |vm, _| Ok(vm.heap.alloc(Obj::Native(Box::new(InstantObj(Instant::now()))))));
+    r.add_builtin("time.Instant.elapsed", |vm, a| Ok(duration_between(Instant::now(), instant(vm, a[0])?)));
     r.add_builtin("time.Instant.since", |vm, a| Ok(duration_between(instant(vm, a[0])?, instant(vm, a[1])?)));
 
     r.add_builtin("time.parse_nanos", |vm, a| {

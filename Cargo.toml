@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "wasm"]
+resolver = "3"
+
 [package]
 name = "sandlang"
 version = "0.1.0"
@@ -11,27 +15,52 @@ path = "src/lib.rs"
 
 [[bin]]
 name = "sand"
-path = "src/main.rs"
+path = "src/bin/sand/main.rs"
+required-features = ["cli"]
 
 [features]
-default = ["tls"]
-tls = ["dep:rustls", "dep:tokio-rustls", "dep:webpki-roots"]
+default = ["cli", "tls"]
+# Access to the host operating system: its file system (otherwise the `fs`
+# module and script imports use an in-memory file system, `MemFs`), network
+# sockets (the `net` and `http` modules), the process's standard input and
+# environment. Not available on wasm32-unknown-unknown.
+os = ["dep:rustix", "dep:fs_at", "dep:same-file", "tokio/net", "tokio/io-std", "tokio/macros"]
+# TLS for `https` and `net.connect_tls` (rustls with ring).
+tls = ["os", "dep:rustls", "dep:tokio-rustls", "dep:webpki-roots"]
+# The `sand` command-line tool.
+cli = ["os", "dep:reedline", "dep:nu-ansi-term", "tokio/signal"]
 
 [dependencies]
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "fs", "io-util", "io-std", "sync", "macros", "signal"] }
+tokio = { version = "1", features = ["rt", "sync", "io-util"] }
 regex-automata = { version = "0.4.16", default-features = false, features = ["std", "syntax", "meta", "nfa-pikevm", "nfa-backtrack", "hybrid", "dfa-onepass", "perf-inline", "perf-literal", "unicode"] }
 rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = { version = "0.26", optional = true, default-features = false, features = ["ring", "tls12"] }
 webpki-roots = { version = "1", optional = true }
 unicode-normalization = "0.1"
 sha2 = { version = "0.11", default-features = false }
+getrandom = "0.4"
+reedline = { version = "0.51", optional = true, features = ["external_printer"] }
+nu-ansi-term = { version = "0.50", optional = true }
+
+# Everywhere but the web: timers come from tokio.
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
+tokio = { version = "1", features = ["time"] }
+
+# The web (wasm32-unknown-unknown in a JavaScript host): the clock, timers
+# and entropy come from JavaScript.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
+web-time = "1.1"
+js-sys = "0.3.105"
+wasm-bindgen = "0.2.128"
+wasm-bindgen-futures = "0.4.78"
 
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1", default-features = false, features = ["fs", "std"] }
+rustix = { version = "1", optional = true, default-features = false, features = ["fs", "std"] }
 
 [target.'cfg(windows)'.dependencies]
-fs_at = "0.2.1"
-same-file = "1.0.6"
+fs_at = { version = "0.2.1", optional = true }
+same-file = { version = "1.0.6", optional = true }
 
 [dev-dependencies]
 portable-pty = "0.9"
@@ -40,6 +69,35 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "io
 
 [target.'cfg(windows)'.dev-dependencies]
 junction = "2"
+
+# Tests that need the `sand` binary or the host's operating system.
+[[test]]
+name = "cli"
+required-features = ["cli"]
+
+[[test]]
+name = "prompt_tty"
+required-features = ["cli"]
+
+[[test]]
+name = "repl_tty"
+required-features = ["cli"]
+
+[[test]]
+name = "examples"
+required-features = ["os"]
+
+[[test]]
+name = "net_http"
+required-features = ["os"]
+
+[[test]]
+name = "sandbox_io"
+required-features = ["os"]
+
+[[test]]
+name = "tls"
+required-features = ["os"]
 
 [[bench]]
 name = "vm"

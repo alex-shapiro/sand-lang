@@ -7,6 +7,9 @@ use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
+mod file;
+pub use file::{PolicyError, PolicyFile, parse_duration, parse_size, rule_for};
+
 /// A request to perform an effect outside the sandbox.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Capability {
@@ -130,13 +133,18 @@ impl Policy {
     }
 
     pub fn check(&self, cap: &Capability) -> Decision {
+        self.check_in(cap, PathSpace::Host)
+    }
+
+    /// Like [`Policy::check`] for paths of the file system `space`.
+    pub(crate) fn check_in(&self, cap: &Capability, space: PathSpace) -> Decision {
         match self {
             Policy::AllowAll => Decision::Allow,
             Policy::DenyAll => match cap {
                 Capability::Stdout | Capability::Stderr | Capability::Import(_) => Decision::Allow,
                 _ => Decision::Deny,
             },
-            Policy::Rules(r) => r.check(cap),
+            Policy::Rules(r) => r.check_in(cap, space),
             Policy::Custom(f) => f(cap),
         }
     }
@@ -146,9 +154,15 @@ impl Policy {
     /// (and will operate on exactly): a rule policy skips normalizing it
     /// again, which costs a `realpath`.
     pub fn check_normalized(&self, cap: &Capability) -> Decision {
+        self.check_normalized_in(cap, PathSpace::Host)
+    }
+
+    /// Like [`Policy::check_normalized`] for paths of the file system `space`
+    /// (normalized by it).
+    pub(crate) fn check_normalized_in(&self, cap: &Capability, space: PathSpace) -> Decision {
         match self {
-            Policy::Rules(r) => r.check_normalized(cap),
-            _ => self.check(cap),
+            Policy::Rules(r) => r.check_normalized_in(cap, space),
+            _ => self.check_in(cap, space),
         }
     }
 
@@ -156,9 +170,14 @@ impl Policy {
     /// (removing or renaming it): a final symlink in an `FsRead`/`FsWrite`
     /// path is the entry and is not resolved to its target.
     pub fn check_entry(&self, cap: &Capability) -> Decision {
+        self.check_entry_in(cap, PathSpace::Host)
+    }
+
+    /// Like [`Policy::check_entry`] for paths of the file system `space`.
+    pub(crate) fn check_entry_in(&self, cap: &Capability, space: PathSpace) -> Decision {
         match self {
-            Policy::Rules(r) => r.check_entry(cap),
-            _ => self.check(cap),
+            Policy::Rules(r) => r.check_entry_in(cap, space),
+            _ => self.check_in(cap, space),
         }
     }
 
@@ -167,9 +186,45 @@ impl Policy {
     /// `path` itself may be written. Only rule policies have such rules;
     /// other policies decide on the top-level paths alone.
     pub fn denies_under(&self, path: &Path) -> bool {
+        self.denies_under_in(path, PathSpace::Host)
+    }
+
+    /// Like [`Policy::denies_under`] for a path of the file system `space`.
+    pub(crate) fn denies_under_in(&self, path: &Path, space: PathSpace) -> bool {
         match self {
-            Policy::Rules(r) => r.denies_under(path),
+            Policy::Rules(r) => r.denies_under_in(path, space),
             _ => false,
+        }
+    }
+}
+
+/// The file system whose paths a check is about. A rule policy keeps each
+/// rule's path in the form of either: canonicalised on the host's file
+/// system (resolving symlinks and taking the stored spelling of existing
+/// components), and lexically normalized from the root for a memory file
+/// system ([`crate::MemFs`]), which has no symlinks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PathSpace {
+    Host,
+    Memory,
+}
+
+/// A path of a rule, in the form of each [`PathSpace`].
+#[derive(Clone, Debug)]
+struct PathRule {
+    host: PathBuf,
+    memory: PathBuf,
+}
+
+impl PathRule {
+    fn new(p: &Path) -> PathRule {
+        PathRule { host: normalize_path(p), memory: crate::files::memory_path(p) }
+    }
+
+    fn path(&self, space: PathSpace) -> &Path {
+        match space {
+            PathSpace::Host => &self.host,
+            PathSpace::Memory => &self.memory,
         }
     }
 }
@@ -178,20 +233,25 @@ impl Policy {
 /// matching no rule get the fallback decision.
 #[derive(Clone, Debug)]
 pub struct RulePolicy {
-    read_allow: Vec<PathBuf>,
-    read_deny: Vec<PathBuf>,
-    write_allow: Vec<PathBuf>,
-    write_deny: Vec<PathBuf>,
+    read_allow: Vec<PathRule>,
+    read_deny: Vec<PathRule>,
+    write_allow: Vec<PathRule>,
+    write_deny: Vec<PathRule>,
     net_allow: Vec<NetPattern>,
     net_deny: Vec<NetPattern>,
     deny_private: bool,
     listen_allow: Vec<String>,
+    listen_deny: Vec<String>,
     env_allow: Vec<String>,
-    import_allow: Option<Vec<PathBuf>>,
-    stdin: bool,
+    env_deny: Vec<String>,
+    import_allow: Option<Vec<PathRule>>,
+    import_deny: Vec<PathRule>,
+    /// `Some(true)` allowed, `Some(false)` denied, `None` the fallback decides.
+    stdin: Option<bool>,
     stdout: bool,
     stderr: bool,
     custom_allow: Vec<(String, Option<String>)>,
+    custom_deny: Vec<(String, Option<String>)>,
     fallback: Decision,
 }
 
@@ -226,10 +286,17 @@ fn lexical(p: &Path) -> PathBuf {
 /// longest existing prefix (resolving symlinks, and on case- or
 /// normalization-insensitive file systems taking the stored spelling of each
 /// existing component).
+///
+/// Without the `os` feature there is no host file system: paths are only
+/// normalized lexically.
 pub fn normalize_path(p: &Path) -> PathBuf {
-    canonicalize_existing(lexical(p))
+    #[cfg(feature = "os")]
+    return canonicalize_existing(lexical(p));
+    #[cfg(not(feature = "os"))]
+    return lexical(p);
 }
 
+#[cfg(feature = "os")]
 /// Canonicalises the longest prefix of the lexically normal path `p` that
 /// resolves, keeping the rest as it is. If a prefix resolves, so do the
 /// shorter ones, so the prefix is found by binary search: a path of n
@@ -298,6 +365,14 @@ pub(crate) struct EntryPath {
 
 /// [`normalize_entry_path`], also reporting the directory entries it read.
 pub(crate) fn entry_path(p: &Path) -> EntryPath {
+    #[cfg(not(feature = "os"))]
+    return EntryPath { path: lexical(p), scanned: 0, scanned_bytes: 0 };
+    #[cfg(feature = "os")]
+    entry_path_on_host(p)
+}
+
+#[cfg(feature = "os")]
+fn entry_path_on_host(p: &Path) -> EntryPath {
     let lexical = lexical(p);
     let (Some(parent), Some(name)) = (lexical.parent(), lexical.file_name()) else {
         return EntryPath { path: normalize_path(&lexical), scanned: 0, scanned_bytes: 0 };
@@ -320,6 +395,7 @@ pub(crate) fn entry_path(p: &Path) -> EntryPath {
     EntryPath { path, scanned: 0, scanned_bytes: 0 }
 }
 
+#[cfg(feature = "os")]
 /// The stored name of the symlink `parent/name` if it is spelled
 /// differently, with the number of entries read and the bytes of
 /// their names. The stored name is the entry whose name folds like
@@ -352,7 +428,7 @@ fn stored_link_name(parent: &Path, name: &std::ffi::OsStr, limit: usize) -> (Opt
 
 /// Whether `a` and `b` name the same directory entry (final symlinks not
 /// followed).
-#[cfg(unix)]
+#[cfg(all(feature = "os", unix))]
 fn same_entry(a: &Path, b: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     match (std::fs::symlink_metadata(a), std::fs::symlink_metadata(b)) {
@@ -361,7 +437,7 @@ fn same_entry(a: &Path, b: &Path) -> bool {
     }
 }
 
-#[cfg(windows)]
+#[cfg(all(feature = "os", windows))]
 fn same_entry(a: &Path, b: &Path) -> bool {
     use std::os::windows::fs::OpenOptionsExt;
     // FILE_READ_ATTRIBUTES; FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT.
@@ -371,7 +447,7 @@ fn same_entry(a: &Path, b: &Path) -> bool {
     matches!((open(a), open(b)), (Ok(a), Ok(b)) if a == b)
 }
 
-#[cfg(not(any(unix, windows)))]
+#[cfg(all(feature = "os", not(any(unix, windows))))]
 fn same_entry(_: &Path, _: &Path) -> bool {
     false
 }
@@ -381,6 +457,7 @@ fn same_entry(_: &Path, _: &Path) -> bool {
 /// that all normalized paths share one form whether or not they exist (and
 /// read naturally in prompts and errors). The standard library re-adds the
 /// prefix where needed (long paths).
+#[cfg(feature = "os")]
 fn simplify_verbatim(p: PathBuf) -> PathBuf {
     if cfg!(windows)
         && let Some(s) = p.to_str()
@@ -391,6 +468,7 @@ fn simplify_verbatim(p: PathBuf) -> PathBuf {
     p
 }
 
+#[cfg(any(feature = "os", test))]
 fn plain_from_verbatim(s: &str) -> Option<String> {
     let rest = s.strip_prefix(r"\\?\")?;
     if let Some(unc) = rest.strip_prefix(r"UNC\") {
@@ -401,8 +479,12 @@ fn plain_from_verbatim(s: &str) -> Option<String> {
     (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\').then(|| rest.to_string())
 }
 
-fn under(path: &Path, roots: &[PathBuf]) -> bool {
-    roots.iter().any(|r| path_starts_with(path, r))
+fn under(path: &Path, roots: &[PathRule], space: PathSpace) -> bool {
+    match space {
+        PathSpace::Host => roots.iter().any(|r| path_starts_with(path, &r.host)),
+        // Memory file systems are case sensitive everywhere.
+        PathSpace::Memory => roots.iter().any(|r| path.starts_with(&r.memory)),
+    }
 }
 
 /// Whether `path` is at or below a deny rule. File systems may be case
@@ -415,9 +497,9 @@ fn under(path: &Path, roots: &[PathBuf]) -> bool {
 /// entry). So on every platform deny rules compare paths by [`fold_name`],
 /// which equates every such spelling. Allow rules stay exact, so this only
 /// ever denies more.
-fn under_deny(path: &Path, roots: &[PathBuf]) -> bool {
+fn under_deny(path: &Path, roots: &[PathRule], space: PathSpace) -> bool {
     let key = deny_key(path);
-    roots.iter().any(|r| key.starts_with(deny_key(r)))
+    roots.iter().any(|r| key.starts_with(deny_key(r.path(space))))
 }
 
 fn deny_starts_with(path: &Path, root: &Path) -> bool {
@@ -747,32 +829,36 @@ impl RulePolicy {
             net_deny: vec![],
             deny_private: false,
             listen_allow: vec![],
+            listen_deny: vec![],
             env_allow: vec![],
+            env_deny: vec![],
             import_allow: None,
-            stdin: false,
+            import_deny: vec![],
+            stdin: None,
             stdout: true,
             stderr: true,
             custom_allow: vec![],
+            custom_deny: vec![],
             fallback: Decision::Deny,
         }
     }
     pub fn allow_read(mut self, p: impl AsRef<Path>) -> Self {
-        self.read_allow.push(normalize_path(p.as_ref()));
+        self.read_allow.push(PathRule::new(p.as_ref()));
         self
     }
     pub fn deny_read(mut self, p: impl AsRef<Path>) -> Self {
-        self.read_deny.push(normalize_path(p.as_ref()));
+        self.read_deny.push(PathRule::new(p.as_ref()));
         self
     }
     /// Allows writing (and reading) under `p`.
     pub fn allow_write(mut self, p: impl AsRef<Path>) -> Self {
-        let n = normalize_path(p.as_ref());
+        let n = PathRule::new(p.as_ref());
         self.write_allow.push(n.clone());
         self.read_allow.push(n);
         self
     }
     pub fn deny_write(mut self, p: impl AsRef<Path>) -> Self {
-        self.write_deny.push(normalize_path(p.as_ref()));
+        self.write_deny.push(PathRule::new(p.as_ref()));
         self
     }
     /// Allows outgoing connections. Patterns: `host`, `*.example.com`, `*`,
@@ -807,12 +893,28 @@ impl RulePolicy {
         self.listen_allow.push(addr.to_string());
         self
     }
+    /// Denies listening on matching addresses (patterns as for
+    /// [`RulePolicy::allow_listen`]).
+    pub fn deny_listen(mut self, addr: &str) -> Self {
+        self.listen_deny.push(addr.to_string());
+        self
+    }
     pub fn allow_env(mut self, name: &str) -> Self {
         self.env_allow.push(name.to_string());
         self
     }
+    /// Denies reading the variable `name` (`"*"`: every variable). Listing
+    /// all variables (`Env("*")`) is denied while any variable is.
+    pub fn deny_env(mut self, name: &str) -> Self {
+        self.env_deny.push(name.to_string());
+        self
+    }
     pub fn allow_stdin(mut self) -> Self {
-        self.stdin = true;
+        self.stdin = Some(true);
+        self
+    }
+    pub fn deny_stdin(mut self) -> Self {
+        self.stdin = Some(false);
         self
     }
     pub fn deny_stdout(mut self) -> Self {
@@ -825,12 +927,22 @@ impl RulePolicy {
     }
     /// Restricts imports to the given directories.
     pub fn allow_import(mut self, p: impl AsRef<Path>) -> Self {
-        self.import_allow.get_or_insert_with(Vec::new).push(normalize_path(p.as_ref()));
+        self.import_allow.get_or_insert_with(Vec::new).push(PathRule::new(p.as_ref()));
+        self
+    }
+    /// Denies importing scripts under `p`.
+    pub fn deny_import(mut self, p: impl AsRef<Path>) -> Self {
+        self.import_deny.push(PathRule::new(p.as_ref()));
         self
     }
     /// Allows a custom capability (`detail = None` allows any detail).
     pub fn allow_custom(mut self, name: &str, detail: Option<&str>) -> Self {
         self.custom_allow.push((name.to_string(), detail.map(String::from)));
+        self
+    }
+    /// Denies a custom capability (`detail = None` denies any detail).
+    pub fn deny_custom(mut self, name: &str, detail: Option<&str>) -> Self {
+        self.custom_deny.push((name.to_string(), detail.map(String::from)));
         self
     }
     pub fn fallback(mut self, d: Decision) -> Self {
@@ -840,46 +952,70 @@ impl RulePolicy {
 
     /// See [`Policy::check_entry`].
     pub fn check_entry(&self, cap: &Capability) -> Decision {
+        self.check_entry_in(cap, PathSpace::Host)
+    }
+
+    fn check_entry_in(&self, cap: &Capability, space: PathSpace) -> Decision {
+        let entry = |p: &Path| match space {
+            PathSpace::Host => normalize_entry_path(p),
+            PathSpace::Memory => crate::files::memory_path(p),
+        };
         match cap {
-            Capability::FsRead(p) => self.check_path(&normalize_entry_path(p), false),
-            Capability::FsWrite(p) => self.check_path(&normalize_entry_path(p), true),
-            _ => self.check(cap),
+            Capability::FsRead(p) => self.check_path(&entry(p), false, space),
+            Capability::FsWrite(p) => self.check_path(&entry(p), true, space),
+            _ => self.check_in(cap, space),
         }
     }
 
     /// See [`Policy::denies_under`]: whether a read or write deny rule lies
     /// at or below `path` (a final symlink is not resolved).
     pub fn denies_under(&self, path: &Path) -> bool {
-        let path = normalize_entry_path(path);
-        self.read_deny.iter().chain(&self.write_deny).any(|rule| deny_starts_with(rule, &path))
+        self.denies_under_in(path, PathSpace::Host)
+    }
+
+    fn denies_under_in(&self, path: &Path, space: PathSpace) -> bool {
+        let path = match space {
+            PathSpace::Host => normalize_entry_path(path),
+            PathSpace::Memory => crate::files::memory_path(path),
+        };
+        self.read_deny.iter().chain(&self.write_deny).any(|rule| deny_starts_with(rule.path(space), &path))
     }
 
     /// Decides access to a normalized path.
-    fn check_path(&self, p: &Path, write: bool) -> Decision {
+    fn check_path(&self, p: &Path, write: bool, space: PathSpace) -> Decision {
         let allow_or = |b: bool| if b { Decision::Allow } else { self.fallback };
         if write {
-            if under_deny(p, &self.write_deny) || under_deny(p, &self.read_deny) {
+            if under_deny(p, &self.write_deny, space) || under_deny(p, &self.read_deny, space) {
                 Decision::Deny
             } else {
-                allow_or(under(p, &self.write_allow))
+                allow_or(under(p, &self.write_allow, space))
             }
-        } else if under_deny(p, &self.read_deny) {
+        } else if under_deny(p, &self.read_deny, space) {
             Decision::Deny
         } else {
-            allow_or(under(p, &self.read_allow))
+            allow_or(under(p, &self.read_allow, space))
         }
     }
 
-    /// [`Policy::check_normalized`].
-    fn check_normalized(&self, cap: &Capability) -> Decision {
+    /// [`Policy::check_normalized_in`].
+    fn check_normalized_in(&self, cap: &Capability, space: PathSpace) -> Decision {
         match cap {
-            Capability::FsRead(p) => self.check_path(p, false),
-            Capability::FsWrite(p) => self.check_path(p, true),
-            _ => self.check(cap),
+            Capability::FsRead(p) => self.check_path(p, false, space),
+            Capability::FsWrite(p) => self.check_path(p, true, space),
+            _ => self.check_in(cap, space),
         }
     }
 
     pub fn check(&self, cap: &Capability) -> Decision {
+        self.check_in(cap, PathSpace::Host)
+    }
+
+    fn check_in(&self, cap: &Capability, space: PathSpace) -> Decision {
+        // Paths as the policy compares them in `space`.
+        let normal = |p: &Path| match space {
+            PathSpace::Host => normalize_path(p),
+            PathSpace::Memory => crate::files::memory_path(p),
+        };
         let allow_or = |b: bool| if b { Decision::Allow } else { self.fallback };
         match cap {
             Capability::Stdout => {
@@ -896,9 +1032,13 @@ impl RulePolicy {
                     Decision::Deny
                 }
             }
-            Capability::Stdin => allow_or(self.stdin),
-            Capability::FsRead(p) => self.check_path(&normalize_path(p), false),
-            Capability::FsWrite(p) => self.check_path(&normalize_path(p), true),
+            Capability::Stdin => match self.stdin {
+                Some(true) => Decision::Allow,
+                Some(false) => Decision::Deny,
+                None => self.fallback,
+            },
+            Capability::FsRead(p) => self.check_path(&normal(p), false, space),
+            Capability::FsWrite(p) => self.check_path(&normal(p), true, space),
             Capability::Net { host, port } => {
                 let ip = parse_ip(host);
                 let host = host.trim_start_matches('[').trim_end_matches(']');
@@ -924,14 +1064,36 @@ impl RulePolicy {
                     || self.net_allow.iter().any(|pat| pat.matches_ip(ip, addr.port()));
                 if allowed { Decision::Allow } else { Decision::Deny }
             }
-            Capability::NetListen(addr) => allow_or(self.listen_allow.iter().any(|pat| listen_matches(pat, addr))),
-            Capability::Env(name) => allow_or(self.env_allow.iter().any(|n| n == name || n == "*")),
-            Capability::Import(p) => match &self.import_allow {
-                None => Decision::Allow,
-                Some(roots) => allow_or(under(&normalize_path(p), roots)),
-            },
+            Capability::NetListen(addr) => {
+                if self.listen_deny.iter().any(|pat| listen_matches(pat, addr)) {
+                    return Decision::Deny;
+                }
+                allow_or(self.listen_allow.iter().any(|pat| listen_matches(pat, addr)))
+            }
+            Capability::Env(name) => {
+                // All variables cannot be had while some are denied.
+                if self.env_deny.iter().any(|n| n == name || n == "*") || (name == "*" && !self.env_deny.is_empty()) {
+                    return Decision::Deny;
+                }
+                allow_or(self.env_allow.iter().any(|n| n == name || n == "*"))
+            }
+            Capability::Import(p) => {
+                // Importing reads the module: read deny rules apply.
+                let path = normal(p);
+                if under_deny(&path, &self.read_deny, space) || under_deny(&path, &self.import_deny, space) {
+                    return Decision::Deny;
+                }
+                match &self.import_allow {
+                    None => Decision::Allow,
+                    Some(roots) => allow_or(under(&path, roots, space)),
+                }
+            }
             Capability::Custom { name, detail } => {
-                allow_or(self.custom_allow.iter().any(|(n, d)| n == name && d.as_ref().is_none_or(|d| d == detail)))
+                let matches = |(n, d): &(String, Option<String>)| n == name && d.as_ref().is_none_or(|d| d == detail);
+                if self.custom_deny.iter().any(matches) {
+                    return Decision::Deny;
+                }
+                allow_or(self.custom_allow.iter().any(matches))
             }
         }
     }
@@ -969,6 +1131,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "os")]
     fn normalization_finds_the_longest_existing_prefix() {
         let base = normalize_path(&std::env::temp_dir()).join(format!("sand-policy-norm-{}", std::process::id()));
         std::fs::create_dir_all(base.join("a/b")).unwrap();
@@ -1012,7 +1175,7 @@ mod tests {
 
     /// On a case-insensitive file system (macOS's default), a symlink is
     /// found under its stored name unless its directory is too large.
-    #[cfg(target_os = "macos")]
+    #[cfg(all(feature = "os", target_os = "macos"))]
     #[test]
     fn symlink_names_are_looked_up_within_a_bound() {
         use std::ffi::OsStr;

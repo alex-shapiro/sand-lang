@@ -1,5 +1,7 @@
 //! The compile budget: hostile programs must fail to compile, format, or lint
 //! quickly instead of stalling or crashing the host.
+// Helpers of the tests that need the host (feature `os`) are unused without it.
+#![cfg_attr(not(feature = "os"), allow(unused_imports, dead_code))]
 
 mod common;
 
@@ -265,6 +267,7 @@ fn wall_time_and_interrupts_stop_compilation() {
     assert!(start.elapsed() < FAST, "took {:?}", start.elapsed());
 }
 
+#[cfg(feature = "os")]
 #[test]
 fn source_size_limit_covers_imports() {
     let dir = TempDir::new("imports");
@@ -303,6 +306,7 @@ fn run_files(files: &[(&str, &str)], main: &str) -> Result<String, Error> {
     Ok(out.contents())
 }
 
+#[cfg(feature = "os")]
 #[test]
 fn reflected_types_are_described_once() {
     // Struct descriptions that double at each level, used by many call
@@ -323,6 +327,7 @@ print(s.a.b.x * 10 + s.b.a.x)
     assert!(start.elapsed() < FAST, "took {:?}", start.elapsed());
 }
 
+#[cfg(feature = "os")]
 #[test]
 fn shared_reflected_types_with_back_references() {
     // Shared descriptions that refer back to an enclosing type, and
@@ -344,6 +349,7 @@ print(t)
     assert_eq!(run_files(&[], src).unwrap(), "3 7 5\n(Node(Leaf(1), Leaf(2)), Leaf(3))\n");
 }
 
+#[cfg(feature = "os")]
 #[test]
 fn reflected_types_with_the_same_name() {
     // Two structs named `Config` in different modules are different types

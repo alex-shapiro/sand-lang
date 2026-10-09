@@ -3,9 +3,10 @@
 use super::interp::Exit;
 use super::*;
 use crate::LimitKind;
+use crate::platform::Instant;
 use std::sync::atomic::Ordering;
 use std::task::{Context, Poll, Wake, Waker};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// State shared with wakers and interrupt handles.
 #[derive(Default)]
@@ -359,8 +360,13 @@ impl Vm {
                     self.heap.io_memory.publish_heap(self.heap.used());
                     let done = self.io.poll_ready(None);
                     self.apply_completions(done)?;
+                    // On the web a computing engine keeps the thread (yielding
+                    // does not reach the event loop), so output reaches the
+                    // host only when flushed: flush it as it runs.
+                    #[cfg(web)]
+                    self.flush_stdout();
                     cpu += Instant::now().saturating_duration_since(now);
-                    tokio::task::yield_now().await;
+                    crate::platform::yield_now().await;
                     now = Instant::now();
                     last_yield = now;
                     (unclocked_slices, unclocked_fuel) = (0, 0);
@@ -378,9 +384,9 @@ impl Vm {
             // A file operation on the hot worker usually finishes within µs.
             // Wait for it briefly because a park-then-wake-up costs more.
             let mut done = self.io.poll_ready(None);
-            if done.is_empty() && crate::stdlib::fs_worker_busy() {
+            if done.is_empty() && crate::files::worker_busy() {
                 let until = Instant::now() + FS_SPIN;
-                while !self.io.shared.any_ready.load(Ordering::Acquire) && crate::stdlib::fs_worker_busy() && Instant::now() < until {
+                while !self.io.shared.any_ready.load(Ordering::Acquire) && crate::files::worker_busy() && Instant::now() < until {
                     std::hint::spin_loop();
                 }
                 done = self.io.poll_ready(None);
@@ -393,7 +399,7 @@ impl Vm {
             cpu += Instant::now().saturating_duration_since(now);
             (unclocked_slices, unclocked_fuel) = (0, 0);
             let remaining = self.host.limits.max_wall_time.map(|m| m.saturating_sub(start.elapsed().saturating_sub(paused)));
-            let mut sleep = remaining.map(|r| Box::pin(tokio::time::sleep(r)));
+            let mut sleep = remaining.map(|r| Box::pin(crate::platform::sleep(r)));
             let interrupt = self.host.interrupt.clone();
             // Pending I/O checks its buffers against the heap's current size.
             self.heap.io_memory.publish_heap(self.heap.used());

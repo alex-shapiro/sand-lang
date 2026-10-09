@@ -2543,6 +2543,13 @@ fn arith_text(op: ArithOp) -> &'static str {
     }
 }
 
+/// A format width or precision. Parsed as `u64` and saturated, so that a
+/// number too large for a 32-bit `usize` gets the same "too large" error as
+/// on 64-bit targets.
+fn parse_spec_number(digits: &str) -> Option<usize> {
+    digits.parse::<u64>().ok().map(crate::vm::value::u64_to_usize_saturating)
+}
+
 /// Parses `[[fill]align][sign][0][width][.precision][type]`.
 pub fn parse_format_spec(s: &str) -> Result<FormatSpec, String> {
     let chars: Vec<char> = s.chars().collect();
@@ -2571,7 +2578,7 @@ pub fn parse_format_spec(s: &str) -> Result<FormatSpec, String> {
     }
     if i > start {
         let w: String = chars[start..i].iter().collect();
-        spec.width = Some(w.parse().map_err(|_| format!("invalid format spec `{s}`: width too large"))?);
+        spec.width = Some(parse_spec_number(&w).ok_or_else(|| format!("invalid format spec `{s}`: width too large"))?);
     }
     if i < chars.len() && chars[i] == '.' {
         i += 1;
@@ -2583,7 +2590,7 @@ pub fn parse_format_spec(s: &str) -> Result<FormatSpec, String> {
             return Err(format!("invalid format spec `{s}`: expected precision after `.`"));
         }
         let p: String = chars[ps..i].iter().collect();
-        spec.precision = Some(p.parse().map_err(|_| format!("invalid format spec `{s}`: precision too large"))?);
+        spec.precision = Some(parse_spec_number(&p).ok_or_else(|| format!("invalid format spec `{s}`: precision too large"))?);
     }
     if i < chars.len() {
         match chars[i] {

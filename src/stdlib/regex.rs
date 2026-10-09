@@ -8,6 +8,7 @@
 
 use crate::check::ModKind;
 use crate::engine::Registry;
+use crate::platform::Instant;
 use crate::vm::meter::{SLOW_BYTES_PER_UNIT, Scratch};
 use crate::vm::value::{NativeObject, Obj, Value};
 use crate::vm::{Ctl, NResult, Vm, panic};
@@ -19,7 +20,6 @@ use regex_automata::util::syntax;
 use regex_automata::{Input, Match, MatchKind, PatternID};
 use std::any::Any;
 use std::cell::{Cell, RefCell};
-use std::time::Instant;
 
 /// Limit on each compiled NFA (forward and reverse) of a regex.
 const NFA_SIZE_LIMIT: usize = 4 << 20;

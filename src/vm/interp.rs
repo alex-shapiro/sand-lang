@@ -944,10 +944,10 @@ impl Vm {
                     let o = r!(obj);
                     let i = int!(idx);
                     let l = self.heap.list(o);
-                    if i < 0 || i as usize >= l.len() {
-                        fail!(index_error(i, l.len()));
+                    match to_index(i).and_then(|at| l.get(at)) {
+                        Some(&v) => r!(dst) = v,
+                        None => fail!(index_error(i, l.len())),
                     }
-                    r!(dst) = l[i as usize];
                 }
                 Op::IndexMap { dst, obj, key } => {
                     let m = r!(obj);
@@ -962,12 +962,15 @@ impl Vm {
                     let o = r!(obj);
                     let i = int!(idx);
                     let v = r!(src);
-                    let Some(l) = self.heap.list_mut_storing(o, i as usize, v) else { fail!("internal error: set index on non-list") };
-                    if i < 0 || i as usize >= l.len() {
-                        let n = l.len();
-                        fail!(index_error(i, n));
+                    let at = to_index(i).unwrap_or(usize::MAX);
+                    let Some(l) = self.heap.list_mut_storing(o, at, v) else { fail!("internal error: set index on non-list") };
+                    match l.get_mut(at) {
+                        Some(slot) => *slot = v,
+                        None => {
+                            let n = l.len();
+                            fail!(index_error(i, n));
+                        }
                     }
-                    l[i as usize] = v;
                 }
                 Op::SetIndexMap { obj, key, src } => {
                     let (m, k, v) = (r!(obj), r!(key), r!(src));
@@ -993,7 +996,7 @@ impl Vm {
                     if n < 0 {
                         fail!(format!("negative repeat count: {n}"));
                     }
-                    if self.heap.would_exceed((n as usize).saturating_mul(16)) {
+                    if self.heap.would_exceed(to_usize_saturating(n).saturating_mul(16)) {
                         save!();
                         return Err(Trap::Limit(LimitKind::Memory));
                     }
@@ -1685,7 +1688,9 @@ impl Vm {
             Obj::List(l) => l.len(),
             Obj::Set(s) => s.entries.len(),
             Obj::Map(m) => m.entries.len(),
-            Obj::Range(a, b, incl) => ((*b as i128) - (*a as i128) + i128::from(*incl)).clamp(0, i64::MAX as i128) as usize,
+            Obj::Range(a, b, incl) => {
+                to_usize_saturating(((*b as i128) - (*a as i128) + i128::from(*incl)).clamp(0, i64::MAX as i128) as i64)
+            }
             _ => 0,
         };
         if self.heap.would_exceed(n.saturating_mul(16)) {
@@ -1706,8 +1711,8 @@ impl Vm {
             Obj::Range(a, b, incl) => {
                 let (a, b, incl) = (*a, *b, *incl);
                 let end = if incl { b.saturating_add(1) } else { b };
-                let n = (end - a).max(0) as usize;
-                if self.heap.would_exceed(n * 16) {
+                let n = to_usize_saturating(end.saturating_sub(a));
+                if self.heap.would_exceed(n.saturating_mul(16)) {
                     return Err("\u{0}memory".into());
                 }
                 (a..end).map(Value::Int).collect()

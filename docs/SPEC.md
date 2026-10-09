@@ -215,7 +215,7 @@ from "./shapes.sand" import Shape, area
 ```
 
 Script paths are resolved relative to the directory of the importing module; the
-`.sand` extension may be omitted. The resolved path must lie within the
+`.sand` extension may be omitted, and other files cannot be imported. The resolved path must lie within the
 **module root** (the directory of the main module, unless the host configures
 otherwise; a symlinked main file's imports and module root are those of the
 file it links to). Every script import is checked against the policy as
@@ -1580,6 +1580,14 @@ is allowed. The engine cannot tell such links apart from ordinary files in
 general; do not allow access to directories that untrusted parties can write
 hard links into.
 
+**Memory file systems.** An engine may give scripts a memory file system
+instead of the host's (§16.1; always without the `os` feature). The
+functions behave as above, on paths that are absolute from its root `/`
+(the default working directory and module root) and normalized lexically.
+It has no symlinks, hard links or permissions; names are case sensitive on
+every platform. It has a capacity: a write that would exceed it fails with
+kind `"limit"`. Operations complete at once rather than off the VM thread.
+
 ### 13.4 `help`
 
 `doc<T>(f: T) -> str` (doc comment of a function value, `""` if none),
@@ -1588,6 +1596,18 @@ hard links into.
 items with signatures and first doc lines), `modules() -> [str]`.
 
 ### 13.5 `http`
+
+`http` and `net` (§13.11) need operating-system access: without the `os`
+feature (§16.1) they do not exist, and importing them is a compile error
+saying so. On the web (§16.2), `http` is a client over the browser's
+`fetch` with the same `Response`, `get`, `post` and `request`: `Net(host,
+port)` is decided before anything is sent (as written: the browser resolves
+names, so `NetAddr` is not checked); a response is readable only if its
+site allows it (CORS), with the headers it exposes; the browser sets some
+request headers itself and sends no cookies; redirects are not followed (a
+redirect fails with kind `"http"`, since the browser does not reveal its
+target to the policy); `timeout` covers the whole exchange; there is no
+`serve`.
 
 ```
 pub struct Response { status: int, headers: [str: str], body: bytes, url: str }
@@ -1893,7 +1913,8 @@ forms; returns lower-case hyphenated), `is_valid(s: str) -> bool`,
   emptied and turned into a junction while the rename runs. On other
   platforms accesses are path-based and the race remains. On Windows, paths
   are compared case-insensitively and use the plain `C:\...` /
-  `\\server\share\...` form (not `\\?\...`).
+  `\\server\share\...` form (not `\\?\...`). Paths of a memory file
+  system (§16.1), which has no symlinks, are normalized lexically.
 
 ### 14.2 Capabilities
 
@@ -1920,6 +1941,10 @@ only: a library function that needs several capabilities (`fs.copy`) is
 retried after each prompt, and the "once" answers given meanwhile apply to
 that call alone, never to a later one. If no prompter is configured,
 `Prompt` behaves as `Deny`.
+
+A `RulePolicy` denies `Import(path)` when a read deny rule covers `path`
+(importing reads the module), and otherwise allows it unless `allow_import`
+rules restrict imports to other directories.
 
 `Import` requests are decided while the program is compiled (also by `check`
 and `lint`), one per script module, depth-first in import order, with the
@@ -2014,6 +2039,66 @@ Without `deny_private_networks()`, a `RulePolicy` allows every resolved
 address not matched by a deny range. The `sand` command line enables it by
 default (§17.5).
 
+### 14.7 Policy files
+
+A policy and limits can be written as text, a **policy file**: `sand run
+--policy=FILE` (§17.5) reads one, and hosts can parse them with
+`sandlang::policy::PolicyFile::parse(text, base)` (the playground's policy
+editor is one). Each line is a rule; `#` starts a comment; words are
+separated by spaces or commas, and a word may be double-quoted to contain
+them (`"/my data"`, with `\"` and `\\` escapes).
+
+```
+# Read the data, write the report, and nothing else.
+allow read ./data, ./config.json
+deny read ./data/private        # deny rules win over allow rules
+allow write ./out               # writing implies reading
+allow net api.example.com:443 *.example.org
+allow env HOME USER
+default prompt                  # ask about the rest (default: deny)
+limit memory 64M
+limit time 10s
+```
+
+| Rule                                                | Meaning                                                   |
+| --------------------------------------------------- | --------------------------------------------------------- |
+| `allow read PATH...`, `deny read PATH...`           | `FsRead` under the paths (§14.5)                          |
+| `allow write PATH...`, `deny write PATH...`         | `FsWrite` (and, for `allow`, `FsRead`) under the paths    |
+| `allow import PATH...`, `deny import PATH...`       | restrict script imports to (or keep them from) these directories |
+| `allow net PATTERN...`, `deny net PATTERN...`       | network destinations (§14.5 patterns)                     |
+| `allow private-net`                                 | do not deny private and internal destinations (§14.6)     |
+| `allow listen ADDR...`, `deny listen ADDR...`       | listening addresses (`host:port`, port `0` = any)         |
+| `allow env NAME...`, `deny env NAME...`             | environment variables (`*`: all; listing all variables is denied while any is) |
+| `allow stdin`, `deny stdin`, `deny stdout`, `deny stderr` | standard streams                                    |
+| `allow custom NAME [DETAIL]`, `deny custom NAME [DETAIL]` | a host-defined capability (any detail if omitted)   |
+| `default deny` \| `default prompt` \| `default allow` | the decision for requests no rule decides (once per file) |
+| `limit NAME VALUE`                                  | a limit (§15.1), below                                    |
+
+Relative paths are relative to the policy file's directory (`base`).
+Without a `default` line, the host decides what happens to requests no
+rule decides: `sand` denies them (unless `--prompt`), the web `Engine`
+(§16.2) asks its `onPrompt` callback. Unless `allow private-net` is given, private and internal network
+destinations are denied as by `deny_private_networks()`.
+
+Limits: `memory`, `output`, `source` and `http-body` take sizes (`4096`,
+`64K`, `256M`, `1G`); `time` (wall clock) and `cpu` durations (`500ms`,
+`10s`, `1.5m`, `2h`); `instructions`, `compile-fuel`, `tasks`, `call-depth`
+and `open-resources` counts (`1_000_000`). `none` removes the `memory`,
+`time`, `cpu`, `instructions`, `compile-fuel` and `output` limits. Limits
+not given keep their defaults.
+
+Every error is reported with its line number (`PolicyError`), and a file
+with errors is rejected as a whole: misspelled rules (`alow`), unknown
+capabilities or limits, invalid network patterns, sizes or durations,
+arguments to rules that take none, and rules that do not exist (`allow
+stdout`, which is the default, and `deny private-net`).
+
+Every request a prompt can ask about has a rule that decides it for good:
+`sandlang::policy::rule_for(capability, allow)` gives it as a line of a
+policy file (e.g. `allow read /data/a.txt`, `deny net example.com:443`,
+quoting words as needed). The playground adds it to the policy when "always"
+or "never" is answered.
+
 ---
 
 ## 15. Resource limits
@@ -2027,7 +2112,7 @@ Configurable per engine:
 | `max_memory`         | 512 MiB    | run fails: `memory limit exceeded` (I/O whose buffers do not fit fails with kind `"limit"`)                              |
 | `max_instructions`   | unlimited  | run fails: `instruction limit exceeded` (counted in fuel units, §15.2)                                                   |
 | `max_cpu_time`       | unlimited  | run fails: `cpu time limit exceeded` (time spent executing, excluding waits and prompts)                                 |
-| `max_wall_time`      | unlimited  | run fails: `time limit exceeded` (prompts excluded); also bounds compilation, counted from its start                     |
+| `max_wall_time`      | unlimited  | run fails: `time limit exceeded` (waiting for prompt answers excluded, also those about imports while compiling, which it also bounds) |
 | `max_call_depth`     | 10,000     | panic: `stack overflow`                                                                                                  |
 | `max_tasks`          | 10,000     | `spawn` panics: `task limit exceeded`                                                                                    |
 | `max_open_resources` | 1,024      | open/connect/listen/accept and HTTP requests fail with kind `"limit"` (pending operations' sockets count, §13.11)        |
@@ -2184,9 +2269,11 @@ let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 
 
 - `Engine: Send`. All script execution happens inside the future returned by
   `run_*`, on whichever thread polls it. Engines share no mutable state, so any
-  number may run concurrently on different threads or tasks.
+  number may run concurrently on different threads or tasks (or, on the web,
+  interleaved on one thread, §16.2).
 - `run_source(name, source)`, `run_file(path)`, `check_source`, `run_tests`.
 - Captured streams: `Config::stdout(Box<dyn OutputSink>)`, `stderr`, `stdin`.
+- `Config::memory_fs(MemFs)` gives scripts a memory file system (§16.1).
 - `Config::tls_root_certificates(Vec<Vec<u8>>)` trusts additional
   DER-encoded root certificates for TLS (e.g. a private CA), in addition to
   the bundled web PKI roots; calls accumulate. An invalid certificate makes
@@ -2214,7 +2301,69 @@ normalize_entry_path}` for hosts writing their own policies or natives.
   unwind (the default `panic = "unwind"`). A session in which this happens
   is reset (below).
 
-**Sessions.** `Engine::session()` returns a `Session`, which runs inputs one
+### 16.1 Operating-system access and file systems
+
+The crate's features choose what an engine can reach at all:
+
+- `os` (default): the host's file system, network sockets (`net`, `http`),
+  and the process's standard input (`Config::inherit_stdin`) and environment
+  (when `Config::env` gives none). Without it the engine has no way to
+  reach the operating system, whatever the policy says: `net` and `http`
+  do not exist, the environment is empty unless given, standard input is
+  what the host gives (`Config::stdin_bytes`), and scripts see a memory
+  file system. The engine then builds for `wasm32-unknown-unknown` (§16.2).
+- `tls` (default, implies `os`): TLS for `https` and `net.connect_tls`.
+- `cli` (default, implies `os`): the `sand` command-line tool.
+
+A `MemFs` is an in-memory file system. `Config::memory_fs(fs)` makes it the
+file system of the engine's scripts (the `fs` module, script imports and
+the main file of `run_file`), in every build; without `os` an engine has an
+empty one unless given one. A `MemFs` is a handle: clones share their
+files, so the host can prepare files and read back what scripts wrote, and
+engines can share one. `MemFs::with_capacity(bytes)` limits its contents
+(default 64 MiB; each entry counts 64 bytes more than its name and
+contents); `write`, `read`, `create_dir_all`, `remove`, `clear` and
+`files()` are for the host. The working directory and module root are then
+paths of the memory file system (default `/`). The policy decides on these
+paths as written: a `RulePolicy` keeps each path rule both as canonicalised
+on the host and as normalized lexically, and compares memory paths with the
+latter (exactly, also on Windows).
+
+```rust
+let fs = MemFs::new();
+fs.write("/data/in.txt", "input")?;
+let config = Config::new().memory_fs(fs.clone()).policy(Policy::rules(
+    RulePolicy::new().allow_read("/data").allow_write("/out")));
+// ... run a script; then:
+let report = fs.read("/out/report.txt")?;
+```
+
+`check_source`, `check_file` and `lint::lint_source_with(&engine, ...)` load
+imports like a run (from the engine's file system, under its policy), but
+never prompt: imports the policy would prompt for are refused.
+
+### 16.2 The web
+
+Built without `os`, the engine runs as WebAssembly in a JavaScript host
+(`wasm32-unknown-unknown` with `wasm-bindgen`): the clock and timers come
+from JavaScript, and there are no threads, so the compiler's recursive
+passes run on the module's stack, which is linked large enough for the
+deepest nesting the parser accepts. A run executes on the calling thread
+and returns to the event loop only while it waits (for a timer, I/O or a
+permission prompt); hosts run engines in Web Workers to keep pages
+responsive and to run several in parallel. The `sandlang-wasm` crate
+(`wasm/`) is the JavaScript API: an `Engine` built from a policy file,
+files, an environment, arguments and standard input, with `onOutput` and
+`onPrompt` callbacks (requests the policy does not decide go to `onPrompt`,
+and are denied without it), `run`, `check`, `lint`, sessions (`eval(source,
+name?)`, and `runTasks`/`stopTasks` to run tasks between inputs), `format`
+and `highlight`. `Session::eval_as(name, source)` names an input (e.g.
+`main.sand` for a program that a session continues) in diagnostics and
+traces. `playground/` is a web page built on it.
+
+### 16.3 Sessions
+
+`Engine::session()` returns a `Session`, which runs inputs one
 at a time with the semantics of `sand repl` (§17.6), using the engine's
 configuration (policy, prompter, limits, streams, host modules, module root
 and working directory):
@@ -2226,7 +2375,8 @@ assert_eq!(session.eval("hit() + hit()").await?, Some("3".to_string()));
 ```
 
 - `eval(source) -> Result<Option<String>, Error>` checks, compiles and runs
-  one input; `Some` holds the debug form of its value. After `exit(code)`,
+  one input (`eval_as(name, source)` names it `name` in diagnostics and
+  traces instead of `<input N>`); `Some` holds the debug form of its value. After `exit(code)`,
   `eval` returns `Ok(None)` and `exit_code()` returns `Some(code)` (until the
   next input); the session remains usable.
 - `type_of(expr) -> Result<String, Error>` checks an expression without
@@ -2359,7 +2509,9 @@ exceeds a limit fails with the limit's message.
 
 ### 17.5 `sand run FILE [-- ARGS...]`
 
-Options: `--allow-read=PATHS`, `--allow-write=PATHS`, `--allow-net=HOSTS`,
+Options: `--policy=FILE` (a policy file, §14.7: the other options add rules
+to it and override its limits; its `default prompt` prompts like
+`--prompt`), `--allow-read=PATHS`, `--allow-write=PATHS`, `--allow-net=HOSTS`,
 `--deny-net=HOSTS`, `--allow-private-net`, `--allow-listen=ADDRS`,
 `--allow-env=NAMES`, `--allow-stdin`, `--allow-all`,
 `--prompt` (prompt on the terminal for unmatched requests), `--max-memory=BYTES`
@@ -2419,9 +2571,10 @@ and run **exactly once**; state persists between inputs.
   the REPL waits for input, and can be awaited by later inputs. A panic in
   any task fails the input being run (or, between inputs, is reported as
   such). After a failed input or task, all tasks are cancelled. While the
-  REPL waits for input, the tasks' output starts on a new line and the
-  prompt is shown again after it; their permission prompts and reads of
-  standard input wait until a line has been entered.
+  REPL waits for input, the tasks' output appears above the input being
+  edited (on a terminal) or starts on a new line followed by the prompt
+  again; their permission prompts and reads of standard input wait until an
+  input has been entered.
 - `exit(code)` ends the session with exit code `code`.
 - The instruction, CPU time, wall time and output limits apply to each input
   separately; the memory limit applies to the session's heap. Between
@@ -2444,6 +2597,31 @@ printed on standard output, diagnostics and errors on standard error. The
 REPL's input is also the scripts' standard input (`--allow-stdin`); when it is
 not a terminal, a script that reads it may consume input meant for the REPL.
 
+When standard input and output are a terminal, inputs are edited with a line
+editor. An incomplete input continues on `...` lines of the same input (Enter
+on an incomplete input starts a new line), which is edited, recalled and kept
+in the history as a whole. Ctrl-C discards the input being edited, or, if it
+is empty, cancels the tasks left running; Ctrl-D on an empty input ends the
+session. Output of tasks while an input is edited appears above it (on
+standard output, whichever stream it was written to). Keys (Emacs style):
+
+| Keys                                                        | Effect                                             |
+| ----------------------------------------------------------- | -------------------------------------------------- |
+| Left, Right, Ctrl-B, Ctrl-F                                 | move by character                                  |
+| Alt-Left, Alt-Right, Ctrl-Left, Ctrl-Right, Alt-B, Alt-F    | move by word (macOS: Option-Left, Option-Right)    |
+| Home, End, Ctrl-A, Ctrl-E, Super-Left, Super-Right          | start or end of the line (macOS: Command-Left/Right) |
+| Ctrl-Home, Ctrl-End                                         | start or end of the input                          |
+| Up, Down                                                    | previous or next line of the input, else history   |
+| Ctrl-R                                                      | search the history                                 |
+| Ctrl-W, Alt-Backspace, Alt-D, Ctrl-U, Ctrl-K                | cut a word back or forward, to the start or end    |
+| Ctrl-Y, Ctrl-Z, Ctrl-G                                      | paste the cut text, undo, redo                     |
+| Ctrl-L                                                      | clear the screen                                   |
+
+The history holds the last 1000 inputs and persists in the file named by the
+`SAND_HISTORY` environment variable (not kept if it is empty), by default
+`.sand_history` in the home directory. Commands are inputs too, but a
+command line is always complete.
+
 Commands (on a line of their own):
 
 | Command       | Effect                                                                                                                                                 |
@@ -2455,6 +2633,17 @@ Commands (on a line of their own):
 | `:quit`, `:q` | end the session (exit code 0)                                                                                                                          |
 
 ---
+
+### 17.7 `sand playground [DIR] [--port=PORT]`
+
+Serves the web playground (§16.2) on the local host, at
+`http://127.0.0.1:PORT/` (default port 8000; `--port=0` picks a free one
+and the address is printed). `DIR` defaults to `playground/` of the source
+tree the binary was built from, or else `./playground`; its engine must be
+built first (`playground/build.sh`). It is a static file server: `GET` and
+`HEAD` of regular files inside `DIR` (a directory serves its `index.html`;
+paths with `..`, and symlinks leading outside, are not found), listening on
+the loopback address only. Ctrl-C stops it.
 
 ## 18. Diagnostics
 

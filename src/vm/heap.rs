@@ -384,7 +384,7 @@ impl Heap {
     pub fn would_exceed(&self, extra: usize) -> bool {
         match self.limit {
             Some(l) => self.used().saturating_add(self.io_memory.reserved()).saturating_add(extra) > l,
-            None => extra > (1usize << 40),
+            None => extra > super::iomem::UNLIMITED,
         }
     }
 
@@ -1008,7 +1008,8 @@ impl Heap {
                 let budget = if self.stress {
                     (slots / 8).max(64)
                 } else {
-                    let share = (allocated as u128 * MARK_PACE as u128 * slots as u128 / self.cycle_live.max(1) as u128) as usize;
+                    let share = allocated as u128 * MARK_PACE as u128 * slots as u128 / self.cycle_live.max(1) as u128;
+                    let share = usize::try_from(share).unwrap_or(usize::MAX);
                     share.max(MIN_SWEEP_SLOTS)
                 };
                 self.sweep_some(budget);

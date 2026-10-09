@@ -54,10 +54,10 @@
 use super::Ctl;
 use super::heap::Heap;
 use crate::LimitKind;
+use crate::platform::Instant;
 use std::cell::Cell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
 
 /// Bytes per fuel unit for memcpy-like work (copying, comparing, scanning).
 pub const BYTES_PER_UNIT: usize = 64;

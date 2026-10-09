@@ -7,24 +7,39 @@ mod base64;
 mod core;
 mod crypto;
 mod fs;
-mod fs_safe;
 mod help;
+#[cfg(feature = "os")]
 mod http;
+#[cfg(any(feature = "os", web))]
+mod http_common;
+#[cfg(all(web, not(feature = "os")))]
+mod http_web;
 mod io;
 mod json;
 mod log;
 mod math;
+#[cfg(feature = "os")]
 mod net;
 mod random;
 mod regex;
 mod statistics;
+mod stream;
 mod test;
 mod time;
 mod uri;
 mod uuid;
 
 use crate::engine::Registry;
+#[cfg(feature = "os")]
 pub(crate) use net::TlsSettings;
+
+/// Standard modules that need operating-system access: without the `os`
+/// feature they do not exist, and importing them is an error that says why.
+#[cfg(not(web))]
+pub(crate) const OS_MODULES: &[&str] = &["http", "net"];
+/// (On the web, `http` goes through the browser's `fetch`.)
+#[cfg(web)]
+pub(crate) const OS_MODULES: &[&str] = &["net"];
 
 /// At most the first `max` characters of `s`.
 pub(crate) fn truncate(s: &str, max: usize) -> &str {
@@ -40,11 +55,15 @@ pub(crate) fn register(r: &mut Registry) {
     crypto::register(r);
     fs::register(r);
     help::register(r);
+    #[cfg(feature = "os")]
     http::register(r);
+    #[cfg(all(web, not(feature = "os")))]
+    http_web::register(r);
     io::register(r);
     json::register(r);
     log::register(r);
     math::register(r);
+    #[cfg(feature = "os")]
     net::register(r);
     random::register(r);
     regex::register(r);
@@ -64,32 +83,9 @@ pub(crate) fn io_kind(e: &std::io::Error) -> &'static str {
         AlreadyExists => "already_exists",
         TimedOut | WouldBlock => "timeout",
         InvalidData | InvalidInput => "invalid",
-        // I/O buffers that do not fit in the memory limit (see `vm::iomem`).
-        OutOfMemory => "limit",
+        // I/O buffers that do not fit in the memory limit (see `vm::iomem`),
+        // and a full memory file system (`MemFs`).
+        OutOfMemory | QuotaExceeded => "limit",
         _ => "io",
     }
-}
-
-/// Reads a script module (at most `max + 1` bytes, so that oversized sources
-/// are detected without reading them whole) without following symlinks.
-pub(crate) fn read_source(path: &std::path::Path, max: usize) -> std::io::Result<String> {
-    use std::io::{Error, ErrorKind, Read};
-    let mut data = Vec::new();
-    fs_safe::open_read(path)?.take(max as u64 + 1).read_to_end(&mut data)?;
-    if data.len() > max {
-        return Err(Error::new(ErrorKind::InvalidData, "source too large"));
-    }
-    String::from_utf8(data).map_err(|_| Error::new(ErrorKind::InvalidData, "source is not valid UTF-8"))
-}
-
-/// Resolves a script-supplied path against the engine's working directory.
-pub(crate) fn resolve_path(vm: &crate::vm::Vm, p: &str) -> std::path::PathBuf {
-    let path = std::path::Path::new(p);
-    let joined = if path.is_absolute() { path.to_path_buf() } else { vm.host.cwd.join(path) };
-    crate::policy::normalize_path(&joined)
-}
-
-/// Whether the file system worker is running an operation.
-pub(crate) fn fs_worker_busy() -> bool {
-    fs::FsWorker::busy()
 }

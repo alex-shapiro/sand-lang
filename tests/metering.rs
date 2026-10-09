@@ -2,6 +2,8 @@
 //! `max_instructions`, `max_cpu_time`, `max_wall_time` and the interrupt
 //! handle apply while they run, and Rust-side scratch space counts against
 //! `max_memory`.
+// Helpers of the tests that need the host (feature `os`) are unused without it.
+#![cfg_attr(not(feature = "os"), allow(unused_imports, dead_code))]
 
 mod common;
 
@@ -417,6 +419,7 @@ fn comparing_shared_structures_counts_the_pairs_it_remembers() {
     }
 }
 
+#[cfg(feature = "os")]
 #[test]
 fn completed_io_is_charged() {
     let src = "import fs\nfs.write_text(\"big.txt\", \"x\".repeat(4194304))?\nvar n = 0\nfor i in 0..300 { n += fs.read_text(\"big.txt\")?.len() }\nprint(n)";
@@ -602,6 +605,7 @@ fn string_natives_are_charged_for_every_argument_they_scan() {
     assert_eq!(out, "(Some(2), Some(4), [\"a\", \"b\", \"c\"], Some((\"key\", \"v\")), Some(\"x\"), Some(\"x\"), \"007\", \"ac\")\n");
 }
 
+#[cfg(feature = "os")]
 #[test]
 fn messages_quote_only_part_of_a_huge_argument() {
     let big = "let s = \"\\u{1}\".repeat(20000000)\n";

@@ -5,11 +5,11 @@
 //! Closing a socket wakes every pending operation on it (they fail with kind
 //! `"closed"`) and releases the OS socket once those operations have finished.
 
-use super::io_kind;
+use super::stream::{IoFailure, read_line_bytes, strip_eol};
 use crate::check::ModKind;
 use crate::engine::Registry;
 use crate::policy::{Capability, Decision, Policy, is_private_address};
-use crate::vm::iomem::{MemoryLimit, Reservation, ResourceSlot};
+use crate::vm::iomem::{Reservation, ResourceSlot};
 use crate::vm::value::{NativeObject, Obj, Value};
 use crate::vm::{Ctl, Finisher, NResult, Vm};
 use std::any::Any;
@@ -17,7 +17,7 @@ use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, watch};
 
@@ -75,42 +75,13 @@ pub fn register(r: &mut Registry) {
 // ----------------------------------------------------------------------
 // Errors and results
 
-/// An error produced off the VM thread, turned into a Sand `Error` on it.
-#[derive(Debug)]
-pub(crate) struct NetError {
-    pub kind: &'static str,
-    pub message: String,
-}
-
-impl NetError {
-    pub fn new(kind: &'static str, message: impl Into<String>) -> NetError {
-        NetError { kind, message: message.into() }
-    }
-
-    pub fn closed() -> NetError {
-        NetError::new("closed", "connection closed")
-    }
-
-    /// The `Err(Error)` value for `self`.
-    pub fn into_value(self, vm: &mut Vm) -> NResult {
-        Ok(vm.err_value(self.kind, &self.message))
-    }
-}
-
-impl From<MemoryLimit> for NetError {
-    fn from(e: MemoryLimit) -> NetError {
-        NetError::new("limit", e.to_string())
-    }
-}
-
-impl From<std::io::Error> for NetError {
-    fn from(e: std::io::Error) -> NetError {
-        NetError::new(io_kind(&e), e.to_string())
-    }
+/// The error of an operation on a closed connection.
+pub(crate) fn closed() -> IoFailure {
+    IoFailure::new("closed", "connection closed")
 }
 
 /// Builds a finisher that turns `r` into `Ok(..)` (via `ok`) or `Err(Error)`.
-pub(crate) fn finish<T: Send + 'static>(r: Result<T, NetError>, ok: impl FnOnce(&mut Vm, T) -> NResult + Send + 'static) -> Finisher {
+pub(crate) fn finish<T: Send + 'static>(r: Result<T, IoFailure>, ok: impl FnOnce(&mut Vm, T) -> NResult + Send + 'static) -> Finisher {
     Box::new(move |vm: &mut Vm| match r {
         Ok(v) => {
             let v = ok(vm, v)?;
@@ -122,7 +93,7 @@ pub(crate) fn finish<T: Send + 'static>(r: Result<T, NetError>, ok: impl FnOnce(
 
 /// Suspends the calling task on `fut`, finishing with `ok` on success.
 pub(crate) fn suspend<T: Send + 'static>(
-    fut: impl Future<Output = Result<T, NetError>> + Send + 'static,
+    fut: impl Future<Output = Result<T, IoFailure>> + Send + 'static,
     ok: impl FnOnce(&mut Vm, T) -> NResult + Send + 'static,
 ) -> NResult {
     Err(Ctl::Async(Box::pin(async move { finish(fut.await, ok) })))
@@ -168,7 +139,7 @@ pub(crate) fn alloc_resource(vm: &mut Vm, obj: Box<dyn NativeObject>, slot: Reso
 
 /// Like [`suspend`] for operations that produce a socket object, counted by
 /// `slot` until then.
-fn suspend_resource<T: NativeObject>(slot: ResourceSlot, fut: impl Future<Output = Result<T, NetError>> + Send + 'static) -> NResult {
+fn suspend_resource<T: NativeObject>(slot: ResourceSlot, fut: impl Future<Output = Result<T, IoFailure>> + Send + 'static) -> NResult {
     Err(Ctl::Async(Box::pin(async move {
         let r = fut.await;
         Box::new(move |vm: &mut Vm| match r {
@@ -190,13 +161,13 @@ pub(crate) struct CloseSignal(watch::Receiver<bool>);
 
 impl CloseSignal {
     /// Runs `op` unless (or until) the socket is closed.
-    pub async fn guard<T>(mut self, op: impl Future<Output = Result<T, NetError>>) -> Result<T, NetError> {
+    pub async fn guard<T>(mut self, op: impl Future<Output = Result<T, IoFailure>>) -> Result<T, IoFailure> {
         if *self.0.borrow() {
-            return Err(NetError::closed());
+            return Err(closed());
         }
         tokio::select! {
             r = op => r,
-            _ = self.0.wait_for(|closed| *closed) => Err(NetError::closed()),
+            _ = self.0.wait_for(|closed| *closed) => Err(closed()),
         }
     }
 }
@@ -420,7 +391,7 @@ fn split_host_port(addr: &str) -> Option<(String, u16)> {
 /// (`Capability::NetAddr`), so that a name cannot lead to an address the
 /// policy forbids (e.g. through DNS rebinding). Fails with kind
 /// `"permission_denied"` if every address is denied.
-pub(crate) async fn resolve_allowed(policy: &Policy, host: &str, port: u16) -> Result<Vec<SocketAddr>, NetError> {
+pub(crate) async fn resolve_allowed(policy: &Policy, host: &str, port: u16) -> Result<Vec<SocketAddr>, IoFailure> {
     let addrs: Vec<SocketAddr> = match host.parse::<IpAddr>() {
         Ok(ip) => vec![SocketAddr::new(ip, port)],
         Err(_) => tokio::net::lookup_host((host, port)).await?.collect(),
@@ -438,28 +409,28 @@ pub(crate) async fn resolve_allowed(policy: &Policy, host: &str, port: u16) -> R
     match denied {
         Some(addr) if allowed.is_empty() => {
             let class = if is_private_address(addr.ip()) { " (private or internal)" } else { "" };
-            Err(NetError::new(
+            Err(IoFailure::new(
                 "permission_denied",
                 format!("permission denied: connect to {host}:{port}: address {}{class} is not allowed", addr.ip()),
             ))
         }
-        _ if allowed.is_empty() => Err(NetError::new("not_found", format!("no addresses found for {host}"))),
+        _ if allowed.is_empty() => Err(IoFailure::new("not_found", format!("no addresses found for {host}"))),
         _ => Ok(allowed),
     }
 }
 
 /// Opens a TCP connection to one of the addresses of `host` the policy allows.
-pub(crate) async fn connect_checked(policy: &Policy, host: &str, port: u16) -> Result<TcpStream, NetError> {
+pub(crate) async fn connect_checked(policy: &Policy, host: &str, port: u16) -> Result<TcpStream, IoFailure> {
     let addrs = resolve_allowed(policy, host, port).await?;
     // Connects to the checked addresses only (in order); never resolves again.
     Ok(TcpStream::connect(&addrs[..]).await?)
 }
 
 /// Like [`connect_checked`], failing with kind `"timeout"` after `timeout`.
-pub(crate) async fn tcp_connect(policy: &Policy, host: &str, port: u16, timeout: Duration) -> Result<TcpStream, NetError> {
+pub(crate) async fn tcp_connect(policy: &Policy, host: &str, port: u16, timeout: Duration) -> Result<TcpStream, IoFailure> {
     match tokio::time::timeout(timeout, connect_checked(policy, host, port)).await {
         Ok(r) => r,
-        Err(_) => Err(NetError::new("timeout", format!("connecting to {host}:{port} timed out"))),
+        Err(_) => Err(IoFailure::new("timeout", format!("connecting to {host}:{port} timed out"))),
     }
 }
 
@@ -512,7 +483,7 @@ fn connect_tls(vm: &mut Vm, a: &[Value]) -> NResult {
     suspend_resource(slot, async move {
         match tokio::time::timeout(timeout, open).await {
             Ok(r) => r,
-            Err(_) => Err(NetError::new("timeout", format!("TLS connection to {target} timed out"))),
+            Err(_) => Err(IoFailure::new("timeout", format!("TLS connection to {target} timed out"))),
         }
     })
 }
@@ -549,63 +520,6 @@ fn conn_read(vm: &mut Vm, a: &[Value]) -> NResult {
     )
 }
 
-/// Reads a line including its `\n` (if any); `None` at end of stream. Fails
-/// with kind `"limit"` if the line exceeds `max` bytes. The line's buffer is
-/// reserved in `res`.
-pub(crate) async fn read_line_bytes<R: AsyncBufRead + Unpin>(
-    r: &mut R,
-    max: usize,
-    res: &mut Reservation,
-) -> Result<Option<Vec<u8>>, NetError> {
-    let mut line = Vec::new();
-    loop {
-        let buf = r.fill_buf().await?;
-        if buf.is_empty() {
-            return Ok((!line.is_empty()).then_some(line));
-        }
-        let (take, done) = match buf.iter().position(|&b| b == b'\n') {
-            Some(i) => (i + 1, true),
-            None => (buf.len(), false),
-        };
-        if line.len() + take > max {
-            return Err(NetError::new("limit", format!("line longer than {max} bytes")));
-        }
-        res.reserve_buf_upto(&mut line, take, max)?;
-        line.extend_from_slice(&buf[..take]);
-        r.consume(take);
-        if done {
-            return Ok(Some(line));
-        }
-    }
-}
-
-/// Appends everything up to the end of `r` to `data`, whose buffer is
-/// reserved in `res` as data arrives and grows to at most `cap` bytes (`r`
-/// must end by then, e.g. through `take`).
-pub(crate) async fn read_to_end_reserved<R: AsyncRead + Unpin>(
-    r: &mut R,
-    data: &mut Vec<u8>,
-    res: &mut Reservation,
-    cap: usize,
-) -> Result<(), NetError> {
-    loop {
-        res.reserve_buf_upto(data, (16 << 10).min(cap.saturating_sub(data.len())), cap)?;
-        if r.read_buf(data).await? == 0 {
-            return Ok(());
-        }
-    }
-}
-
-/// Removes a trailing `\n` or `\r\n`.
-pub(crate) fn strip_eol(line: &mut Vec<u8>) {
-    if line.last() == Some(&b'\n') {
-        line.pop();
-        if line.last() == Some(&b'\r') {
-            line.pop();
-        }
-    }
-}
-
 fn conn_read_line(vm: &mut Vm, a: &[Value]) -> NResult {
     let h = match conn_handle(vm, a[0])? {
         Ok(h) => h,
@@ -618,7 +532,7 @@ fn conn_read_line(vm: &mut Vm, a: &[Value]) -> NResult {
             let mut reader = h.reader.lock().await;
             let Some(mut line) = read_line_bytes(&mut *reader, usize::MAX, &mut res).await? else { return Ok((None, res)) };
             strip_eol(&mut line);
-            let line = String::from_utf8(line).map_err(|_| NetError::new("invalid", "line is not valid UTF-8"))?;
+            let line = String::from_utf8(line).map_err(|_| IoFailure::new("invalid", "line is not valid UTF-8"))?;
             Ok((Some(line), res))
         }),
         |vm, (line, res)| {
@@ -681,7 +595,7 @@ impl TlsSettings {
 
 #[cfg(feature = "tls")]
 pub(crate) mod tls {
-    use super::{NetError, TlsSettings};
+    use super::{IoFailure, TlsSettings};
     use rustls::pki_types::{CertificateDer, ServerName};
     use std::sync::{Arc, OnceLock};
     use tokio::net::TcpStream;
@@ -700,7 +614,7 @@ pub(crate) mod tls {
             .map_err(|e| e.to_string())
     }
 
-    fn connector(settings: &TlsSettings) -> Result<TlsConnector, NetError> {
+    fn connector(settings: &TlsSettings) -> Result<TlsConnector, IoFailure> {
         // Engines without extra roots share one configuration.
         static DEFAULT: OnceLock<Result<Arc<rustls::ClientConfig>, String>> = OnceLock::new();
         let config = if settings.roots.is_empty() {
@@ -710,28 +624,28 @@ pub(crate) mod tls {
         };
         match config {
             Ok(c) => Ok(TlsConnector::from(c.clone())),
-            Err(e) => Err(NetError::new("io", format!("TLS setup failed: {e}"))),
+            Err(e) => Err(IoFailure::new("io", format!("TLS setup failed: {e}"))),
         }
     }
 
     /// Performs a TLS handshake over `tcp`, verifying the certificate for `host`.
-    pub async fn connect(settings: &TlsSettings, host: &str, tcp: TcpStream) -> Result<TlsStream<TcpStream>, NetError> {
+    pub async fn connect(settings: &TlsSettings, host: &str, tcp: TcpStream) -> Result<TlsStream<TcpStream>, IoFailure> {
         let name = ServerName::try_from(host.to_string())
-            .map_err(|_| NetError::new("invalid", format!("invalid TLS server name {:?}", crate::stdlib::truncate(host, 200))))?;
+            .map_err(|_| IoFailure::new("invalid", format!("invalid TLS server name {:?}", crate::stdlib::truncate(host, 200))))?;
         connector(settings)?.connect(name, tcp).await.map_err(|e| {
-            let e = NetError::from(e);
-            NetError::new(e.kind, format!("TLS handshake with {host} failed: {}", e.message))
+            let e = IoFailure::from(e);
+            IoFailure::new(e.kind, format!("TLS handshake with {host} failed: {}", e.message))
         })
     }
 }
 
 #[cfg(not(feature = "tls"))]
 pub(crate) mod tls {
-    use super::{NetError, TlsSettings};
+    use super::{IoFailure, TlsSettings};
     use tokio::net::TcpStream;
 
     /// TLS is unavailable without the `tls` feature.
-    pub async fn connect(_settings: &TlsSettings, _host: &str, _tcp: TcpStream) -> Result<TcpStream, NetError> {
-        Err(NetError::new("invalid", "TLS support is not enabled in this build"))
+    pub async fn connect(_settings: &TlsSettings, _host: &str, _tcp: TcpStream) -> Result<TcpStream, IoFailure> {
+        Err(IoFailure::new("invalid", "TLS support is not enabled in this build"))
     }
 }

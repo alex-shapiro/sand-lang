@@ -17,6 +17,9 @@
 //!
 //! Paths must be absolute and lexically normalized (no `.`/`..`).
 
+#[cfg(test)]
+use super::is_unchecked_symlink;
+use super::{EntryKind, unchecked_symlink};
 use crate::vm::iomem::Reservation;
 use std::ffi::OsStr;
 use std::io;
@@ -26,42 +29,12 @@ use std::time::SystemTime;
 /// Bytes counted per directory entry besides its name.
 const ENTRY_OVERHEAD: usize = 2 * std::mem::size_of::<std::ffi::OsString>();
 
-/// The type of a directory entry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum EntryKind {
-    File,
-    Dir,
-    Symlink,
-    Other,
-}
-
 /// Metadata of a directory entry (a final symlink is not followed).
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct EntryMeta {
+pub(crate) struct Meta {
     pub kind: EntryKind,
     pub size: u64,
     pub modified: Option<SystemTime>,
-}
-
-/// The error for a symlink met where the checked path had none.
-#[derive(Debug)]
-struct UncheckedSymlink(String);
-
-impl std::fmt::Display for UncheckedSymlink {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "not following symbolic link {:?}: it was not checked by the policy", self.0)
-    }
-}
-
-impl std::error::Error for UncheckedSymlink {}
-
-pub(crate) fn unchecked_symlink(name: &OsStr) -> io::Error {
-    io::Error::new(io::ErrorKind::PermissionDenied, UncheckedSymlink(name.to_string_lossy().into_owned()))
-}
-
-/// Whether `e` reports a symlink that was not followed.
-pub(crate) fn is_unchecked_symlink(e: &io::Error) -> bool {
-    e.get_ref().is_some_and(|inner| inner.is::<UncheckedSymlink>())
 }
 
 fn not_regular(path: &Path) -> io::Error {
@@ -184,7 +157,7 @@ mod imp {
         open_file(path, OFlags::WRONLY | OFlags::CREATE | mode)
     }
 
-    pub(crate) fn stat(path: &Path) -> io::Result<EntryMeta> {
+    pub(crate) fn stat(path: &Path) -> io::Result<Meta> {
         let (dir, name) = parent(path)?;
         let st = rustix::fs::statat(&dir, name, AtFlags::SYMLINK_NOFOLLOW)?;
         let t = FileType::from_raw_mode(st.st_mode as _);
@@ -205,7 +178,7 @@ mod imp {
                 .checked_sub(Duration::from_secs(secs.unsigned_abs()))
                 .and_then(|t| t.checked_add(Duration::from_nanos(nanos as u64)))
         };
-        Ok(EntryMeta { kind, size: st.st_size as u64, modified })
+        Ok(Meta { kind, size: st.st_size as u64, modified })
     }
 
     /// The names of the entries of the directory `path` (unsorted, without
@@ -505,7 +478,7 @@ mod imp {
         Ok(f)
     }
 
-    fn entry_meta(m: &Metadata) -> EntryMeta {
+    fn entry_meta(m: &Metadata) -> Meta {
         let t = m.file_type();
         let kind = if t.is_symlink() {
             EntryKind::Symlink
@@ -516,10 +489,10 @@ mod imp {
         } else {
             EntryKind::Other
         };
-        EntryMeta { kind, size: m.len(), modified: m.modified().ok() }
+        Meta { kind, size: m.len(), modified: m.modified().ok() }
     }
 
-    pub(crate) fn stat(path: &Path) -> io::Result<EntryMeta> {
+    pub(crate) fn stat(path: &Path) -> io::Result<Meta> {
         if path.parent().is_none() {
             return Ok(entry_meta(&open_dir(path)?.metadata()?));
         }
@@ -703,7 +676,7 @@ mod imp {
         regular(path, o.open(path)?)
     }
 
-    pub(crate) fn stat(path: &Path) -> io::Result<EntryMeta> {
+    pub(crate) fn stat(path: &Path) -> io::Result<Meta> {
         let m = std::fs::symlink_metadata(path)?;
         let t = m.file_type();
         let kind = if t.is_symlink() {
@@ -715,7 +688,7 @@ mod imp {
         } else {
             EntryKind::Other
         };
-        Ok(EntryMeta { kind, size: m.len(), modified: m.modified().ok() })
+        Ok(Meta { kind, size: m.len(), modified: m.modified().ok() })
     }
 
     pub(crate) fn list_dir(path: &Path, res: &mut Reservation) -> io::Result<Vec<std::ffi::OsString>> {

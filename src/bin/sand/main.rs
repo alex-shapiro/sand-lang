@@ -1,11 +1,14 @@
 //! The `sand` command-line tool.
 #![forbid(unsafe_code)]
 
-use sandlang::{Capability, Config, Decision, Engine, Error, Limits, Policy, PromptAnswer, RulePolicy};
+mod playground;
+mod repl;
+
+use sandlang::policy::{PolicyFile, parse_duration, parse_size};
+use sandlang::{Capability, Config, Decision, Engine, Error, Policy, PromptAnswer};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Duration;
 
 const USAGE: &str = "\
 sand — the Sand language
@@ -17,9 +20,13 @@ USAGE:
     sand fmt FILE... [--check]             format files in place (or check)
     sand test FILE... [OPTIONS]            run test blocks (options as for run)
     sand repl [OPTIONS]                    interactive session
+    sand playground [DIR] [--port=PORT]    serve the web playground on localhost
+                                           (build it first: playground/build.sh)
     sand --version
 
 RUN, TEST AND REPL OPTIONS (all access is denied unless allowed):
+    --policy=FILE            rules and limits from a policy file (the options below
+                             add to its rules and override its limits)
     --allow-read=PATHS       comma-separated directories readable by the script
     --allow-write=PATHS      directories writable (and readable) by the script
     --allow-net=HOSTS        hosts the script may connect to (host, host:port, *.domain,
@@ -54,7 +61,8 @@ fn main() -> ExitCode {
         "lint" => cmd_lint(rest),
         "fmt" => cmd_fmt(rest),
         "test" => cmd_test(rest),
-        "repl" => cmd_repl(rest),
+        "repl" => repl::cmd_repl(rest),
+        "playground" => playground::cmd_playground(rest),
         "--version" | "-V" | "version" => {
             println!("sand {}", env!("CARGO_PKG_VERSION"));
             Ok(0)
@@ -78,32 +86,6 @@ fn runtime() -> Result<tokio::runtime::Runtime, String> {
     tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())
 }
 
-fn parse_size(s: &str) -> Result<usize, String> {
-    let s = s.trim();
-    let (num, mult) = match s.chars().last() {
-        Some('K' | 'k') => (&s[..s.len() - 1], 1usize << 10),
-        Some('M' | 'm') => (&s[..s.len() - 1], 1 << 20),
-        Some('G' | 'g') => (&s[..s.len() - 1], 1 << 30),
-        _ => (s, 1),
-    };
-    num.parse::<usize>().map(|n| n.saturating_mul(mult)).map_err(|_| format!("invalid size `{s}`"))
-}
-
-fn parse_duration(s: &str) -> Result<Duration, String> {
-    let s = s.trim();
-    let units: [(&str, f64); 6] = [("ms", 1e-3), ("us", 1e-6), ("ns", 1e-9), ("s", 1.0), ("m", 60.0), ("h", 3600.0)];
-    for (u, mult) in units {
-        if let Some(n) = s.strip_suffix(u)
-            && let Ok(v) = n.parse::<f64>()
-            && v >= 0.0
-            && v.is_finite()
-        {
-            return Ok(Duration::from_secs_f64(v * mult));
-        }
-    }
-    Err(format!("invalid duration `{s}` (use e.g. 500ms, 10s, 2m)"))
-}
-
 struct RunOptions {
     config: Config,
     file: Option<PathBuf>,
@@ -118,11 +100,21 @@ fn run_options(args: &[String]) -> Result<RunOptions, String> {
 /// Like [`run_options`]; with `files_only` every positional argument is a
 /// file (`file` is the first, `script_args` the others) and `--` is refused.
 fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, String> {
-    let mut rules = RulePolicy::new();
+    // The policy file first, wherever it is given: the options add to it.
+    let options = args.iter().position(|a| a == "--").map_or(args, |end| &args[..end]);
+    let mut policy_files = options.iter().filter_map(|a| a.strip_prefix("--policy=").or((a == "--policy").then_some("")));
+    let policy_file = match (policy_files.next(), policy_files.next()) {
+        (Some(_), Some(_)) => return Err("--policy given more than once".into()),
+        (Some(""), None) => return Err("--policy requires a value (--policy=FILE)".into()),
+        (Some(path), None) => Some(read_policy(Path::new(path))?),
+        (None, _) => None,
+    };
+    let (mut rules, default, mut allow_private_net, mut limits) = match policy_file {
+        Some(f) => (f.rules, f.default.unwrap_or(Decision::Deny), f.private_net, f.limits),
+        None => (Default::default(), Decision::Deny, false, Default::default()),
+    };
     let mut allow_all = false;
-    let mut allow_private_net = false;
-    let mut prompt = None;
-    let mut limits = Limits::default();
+    let mut prompt = (default == Decision::Prompt).then_some(PromptVia::Terminal);
     let mut seed = None;
     let mut file = None;
     let mut script_args = Vec::new();
@@ -188,6 +180,8 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
             "--allow-all" => allow_all = true,
             "--prompt" => prompt = prompt.or(Some(PromptVia::Terminal)),
             "--prompt-stdin" => prompt = Some(PromptVia::Stdin),
+            // Read above.
+            "--policy" => {}
             "--max-memory" => limits.max_memory = Some(parse_size(&required(&value)?)?),
             "--max-time" => limits.max_wall_time = Some(parse_duration(&required(&value)?)?),
             "--max-cpu" => limits.max_cpu_time = Some(parse_duration(&required(&value)?)?),
@@ -214,9 +208,8 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
             }
         }
     }
-    if prompt.is_some() {
-        rules = rules.fallback(Decision::Prompt);
-    }
+    // `--prompt` asks about what would be denied; a file's `default allow` stays.
+    rules = rules.fallback(if prompt.is_some() && default != Decision::Allow { Decision::Prompt } else { default });
     if !allow_private_net {
         rules = rules.deny_private_networks();
     }
@@ -235,6 +228,17 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
         config = config.seed(s);
     }
     Ok(RunOptions { config, file, script_args })
+}
+
+/// Reads and parses a policy file (relative paths in it are relative to
+/// its directory).
+fn read_policy(path: &Path) -> Result<PolicyFile, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read policy file {}: {e}", path.display()))?;
+    let base = absolute(&path.to_string_lossy()).parent().map(Path::to_path_buf).unwrap_or_default();
+    PolicyFile::parse(&text, &base).map_err(|errors| {
+        let lines: Vec<String> = errors.iter().map(|e| format!("{}:{}: {}", path.display(), e.line, e.message)).collect();
+        format!("invalid policy file\n{}", lines.join("\n"))
+    })
 }
 
 /// Rejects malformed network patterns (which would silently match nothing).
@@ -527,285 +531,10 @@ fn cmd_test(args: &[String]) -> Result<u8, String> {
     Ok(if failed > 0 { 1 } else { 0 })
 }
 
-const REPL_HELP: &str = "\
-Enter statements, expressions and declarations; each input runs once, in the
-context of the previous ones. The value of a final expression is shown (end
-the input with `;` to hide it). Input continues on `...` lines while brackets,
-strings or comments are open. Tasks spawned by an input keep running, also
-while the REPL waits for input. Ctrl-C interrupts a running input (and cancels
-all tasks), discards a partial input, or at an empty prompt cancels the tasks
-left running; Ctrl-D or :quit exits.
-
-COMMANDS:
-    :help          show this help
-    :type EXPR     show the type of EXPR without running it
-    :test          run the `test` blocks entered so far
-    :reset         forget all inputs and start over
-    :quit, :q      exit
-";
-
-/// The interactive session: reads inputs (possibly spanning several lines)
-/// and runs each once in a persistent session.
-fn cmd_repl(args: &[String]) -> Result<u8, String> {
-    let opts = run_options(args)?;
-    if let Some(f) = opts.file {
-        return Err(format!("unexpected argument `{}` (`sand repl` takes options only)", f.display()));
-    }
-    let rt = runtime()?;
-    let prompt = PromptLine::default();
-    let config =
-        opts.config.stdout(ReplSink { prompt: prompt.clone(), stderr: false }).stderr(ReplSink { prompt: prompt.clone(), stderr: true });
-    let mut session = Engine::new(config).session();
-    println!("sand {} — :help for help, :quit to exit", env!("CARGO_PKG_VERSION"));
-    Ok(rt.block_on(repl(&mut session, &prompt)))
-}
-
-async fn repl(session: &mut sandlang::Session, prompt: &PromptLine) -> u8 {
-    let mut lines = LineReader::new();
-    let mut input = String::new();
-    loop {
-        prompt.show(if input.is_empty() { "> " } else { "... " });
-        // Background tasks run while the REPL waits for a line (or Ctrl-C).
-        let next = async {
-            tokio::select! {
-                line = lines.next() => Some(line),
-                Ok(()) = tokio::signal::ctrl_c() => None,
-            }
-        };
-        let on_error = |e: Error| {
-            prompt.output(|| {
-                report_repl_error(&e, "");
-                eprintln!("(in a background task; all tasks were cancelled)");
-            })
-        };
-        let got = session.run_tasks_until(next, on_error).await;
-        prompt.hide();
-        let Some(got) = got else {
-            return exit_status(session.exit_code().unwrap_or(0));
-        };
-        let Some(line) = got else {
-            println!();
-            if input.is_empty() {
-                match session.cancel_tasks() {
-                    0 => {}
-                    1 => eprintln!("cancelled 1 task"),
-                    n => eprintln!("cancelled {n} tasks"),
-                }
-            }
-            input.clear();
-            continue;
-        };
-        let Some(line) = line else {
-            // End of input: run what was entered.
-            if !input.trim().is_empty() {
-                println!();
-                eval(session, &input).await;
-            }
-            break;
-        };
-        if input.is_empty() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            if let Some(command) = trimmed.strip_prefix(':') {
-                let (name, arg) = command.split_once(char::is_whitespace).unwrap_or((command, ""));
-                match name {
-                    "quit" | "q" => break,
-                    "help" | "h" => print!("{REPL_HELP}"),
-                    "reset" => session.reset(),
-                    "type" | "t" => match session.type_of(arg.trim()) {
-                        Ok(t) => println!("{t}"),
-                        Err(e) => report_repl_error(&e, arg),
-                    },
-                    "test" => match interruptible(session.interrupt_handle(), session.run_tests()).await {
-                        Ok(report) => print!("{}", report.render()),
-                        Err(e) => report_repl_error(&e, ""),
-                    },
-                    _ => eprintln!("unknown command `:{name}` (:help lists the commands)"),
-                }
-                continue;
-            }
-        }
-        input.push_str(&line);
-        if !sandlang::Session::is_complete(&input) {
-            continue;
-        }
-        eval(session, &std::mem::take(&mut input)).await;
-        if let Some(code) = session.exit_code() {
-            return exit_status(code);
-        }
-    }
-    0
-}
-
-/// Runs one input, printing its value or error.
-async fn eval(session: &mut sandlang::Session, input: &str) {
-    let handle = session.interrupt_handle();
-    match interruptible(handle, session.eval(input)).await {
-        Ok(Some(value)) => println!("{value}"),
-        Ok(None) => {}
-        Err(e) => report_repl_error(&e, input),
-    }
-}
-
-/// Awaits `fut`, interrupting the session it runs on when Ctrl-C is pressed.
-async fn interruptible<T>(handle: sandlang::InterruptHandle, fut: impl std::future::Future<Output = T>) -> T {
-    let mut fut = std::pin::pin!(fut);
-    loop {
-        tokio::select! {
-            r = &mut fut => return r,
-            Ok(()) = tokio::signal::ctrl_c() => handle.interrupt(),
-        }
-    }
-}
-
-fn report_repl_error(e: &Error, input: &str) {
-    match e {
-        Error::Compile(diags) => {
-            for d in diags {
-                // Diagnostics are in the input, or in a module it imports.
-                let source = if d.file.starts_with("<input ") || d.file == "<type>" {
-                    Some(input.to_string())
-                } else {
-                    std::fs::read_to_string(&d.file).ok()
-                };
-                eprint!("{}", d.render(source.as_deref()));
-            }
-        }
-        _ => eprintln!("{e}"),
-    }
-}
-
-/// The REPL's prompt, while it waits for input.
-#[derive(Clone, Default)]
-struct PromptLine(std::sync::Arc<std::sync::Mutex<PromptState>>);
-
-#[derive(Default)]
-struct PromptState {
-    /// The prompt, while waiting for input.
-    prompt: Option<&'static str>,
-    /// Whether the prompt ends the output so far.
-    visible: bool,
-}
-
-impl PromptLine {
-    fn state(&self) -> std::sync::MutexGuard<'_, PromptState> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// Prints `prompt` and waits for input.
-    fn show(&self, prompt: &'static str) {
-        let mut st = self.state();
-        let mut out = std::io::stdout().lock();
-        let _ = out.write_all(prompt.as_bytes());
-        let _ = out.flush();
-        *st = PromptState { prompt: Some(prompt), visible: true };
-    }
-
-    /// Stops waiting for input.
-    fn hide(&self) {
-        *self.state() = PromptState::default();
-    }
-
-    /// Writes output with `write`, which ends a line if `ends_line`.
-    fn write<R>(&self, ends_line: bool, write: impl FnOnce() -> R) -> R {
-        let mut st = self.state();
-        if st.visible {
-            let mut out = std::io::stdout().lock();
-            let _ = out.write_all(b"\n");
-            let _ = out.flush();
-            st.visible = false;
-        }
-        let r = write();
-        if let Some(prompt) = st.prompt
-            && ends_line
-        {
-            let mut out = std::io::stdout().lock();
-            let _ = out.write_all(prompt.as_bytes());
-            let _ = out.flush();
-            st.visible = true;
-        }
-        r
-    }
-
-    /// Writes whole lines with `write`.
-    fn output(&self, write: impl FnOnce()) {
-        self.write(true, write)
-    }
-}
-
-/// Standard output or error of the REPL's scripts (see [`PromptLine`]).
-struct ReplSink {
-    prompt: PromptLine,
-    stderr: bool,
-}
-
-impl sandlang::OutputSink for ReplSink {
-    fn write(&mut self, data: &[u8]) -> std::io::Result<()> {
-        self.prompt.write(data.ends_with(b"\n"), || {
-            if self.stderr {
-                std::io::stderr().lock().write_all(data)
-            } else {
-                let mut out = std::io::stdout().lock();
-                out.write_all(data)?;
-                out.flush()
-            }
-        })
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        if self.stderr { std::io::stderr().flush() } else { std::io::stdout().flush() }
-    }
-}
-
-/// Reads lines of standard input on a thread, one per request, so that the
-/// REPL can wait for a line and for Ctrl-C at once. Nothing is read between
-/// requests, so a prompter can read answers from standard input meanwhile.
-struct LineReader {
-    requests: std::sync::mpsc::Sender<()>,
-    lines: tokio::sync::mpsc::UnboundedReceiver<Option<String>>,
-    pending: bool,
-}
-
-impl LineReader {
-    fn new() -> LineReader {
-        let (requests, wanted) = std::sync::mpsc::channel::<()>();
-        let (send, lines) = tokio::sync::mpsc::unbounded_channel();
-        std::thread::spawn(move || {
-            for () in wanted {
-                let mut line = String::new();
-                let got = match std::io::stdin().lock().read_line(&mut line) {
-                    Ok(0) | Err(_) => None,
-                    Ok(_) => Some(line),
-                };
-                let end = got.is_none();
-                if send.send(got).is_err() || end {
-                    break;
-                }
-            }
-        });
-        LineReader { requests, lines, pending: false }
-    }
-
-    /// The next line, with its terminator; `None` at the end of input.
-    /// Cancel-safe: if the future is dropped, the next call gets the line.
-    async fn next(&mut self) -> Option<String> {
-        if !self.pending {
-            if self.requests.send(()).is_err() {
-                return None;
-            }
-            self.pending = true;
-        }
-        let line = self.lines.recv().await.flatten();
-        self.pending = false;
-        line
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn dialogue(cap: &Capability, input: &str) -> (PromptAnswer, String) {
         let mut out = Vec::new();

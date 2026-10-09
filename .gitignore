@@ -4,3 +4,4 @@
 /fuzz/artifacts
 /fuzz/Cargo.lock
 /.claude/worktrees
+/playground/pkg

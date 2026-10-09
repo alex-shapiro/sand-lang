@@ -243,6 +243,61 @@ print(fs.write_text("data/in.txt", "clobbered").is_ok())
 }
 
 #[test]
+fn policy_files() {
+    let dir = script(
+        "policyfile",
+        r#"import fs
+import env
+print(fs.read_text("data/in.txt"))
+print(fs.read_text("data/secret.txt").is_ok())
+print(fs.write_text("out/result.txt", "written").is_ok())
+print(env.get("SAND_CLI_POLICY"))
+var i = 0
+while true { i += 1 }
+"#,
+    );
+    dir.write("data/in.txt", "input");
+    dir.write("data/secret.txt", "secret");
+    std::fs::create_dir_all(dir.path().join("out")).unwrap();
+    // Paths are relative to the policy file's directory, not the working directory.
+    dir.write(
+        "conf/app.policy",
+        "# the app's policy\nallow read ../data\ndeny read ../data/secret.txt\nallow env SAND_CLI_POLICY\nlimit instructions 100000\n",
+    );
+    let vars = [("SAND_CLI_POLICY", "on")];
+    let o = sand_in(dir.path(), &["run", "main.sand", "--policy=conf/app.policy"], "", &vars);
+    assert_eq!((o.code, o.stdout.as_str()), (3, "Ok(\"input\")\nfalse\nfalse\nSome(\"on\")\n"), "{o:?}");
+    assert!(o.stderr.contains("instruction limit exceeded"), "{o:?}");
+
+    // Options add rules to the file's and override its limits.
+    let o =
+        sand_in(dir.path(), &["run", "main.sand", "--allow-write=out", "--policy=conf/app.policy", "--max-instructions=200000"], "", &vars);
+    assert_eq!((o.code, o.stdout.as_str()), (3, "Ok(\"input\")\nfalse\ntrue\nSome(\"on\")\n"), "{o:?}");
+
+    // Errors name the file and line; the script does not run.
+    dir.write("bad.policy", "allow read .\nalow net *\nlimit memory lots\n");
+    let o = sand(dir.path(), &["run", "main.sand", "--policy=bad.policy"]);
+    assert_eq!(o.code, 2, "{o:?}");
+    assert!(o.stderr.contains("bad.policy:2: unknown rule `alow`"), "{o:?}");
+    assert!(o.stderr.contains("bad.policy:3: invalid size `lots`"), "{o:?}");
+    assert_eq!(o.stdout, "");
+    let o = sand(dir.path(), &["run", "main.sand", "--policy=missing.policy"]);
+    assert!(o.code == 2 && o.stderr.contains("cannot read policy file missing.policy"), "{o:?}");
+    let o = sand(dir.path(), &["run", "main.sand", "--policy=a", "--policy=b"]);
+    assert!(o.code == 2 && o.stderr.contains("--policy given more than once"), "{o:?}");
+}
+
+#[test]
+fn policy_file_default_prompt_asks() {
+    let dir = script("policyprompt", "import fs\nprint(fs.read_text(\"a.txt\").is_ok())");
+    dir.write("a.txt", "A");
+    dir.write("ask.policy", "default prompt\n");
+    let o = sand_in(dir.path(), &["run", "main.sand", "--policy=ask.policy", "--prompt-stdin"], "y\n", &[]);
+    assert_eq!((o.code, o.stdout.as_str()), (0, "true\n"), "{o:?}");
+    assert!(o.stderr.contains("sand: allow the script to read "), "{o:?}");
+}
+
+#[test]
 fn allow_env_names() {
     let dir = script("envflags", "import env\nprint(env.get(\"SAND_CLI_ALLOWED\"))\nprint(env.get(\"SAND_CLI_OTHER\"))");
     let vars = [("SAND_CLI_ALLOWED", "yes"), ("SAND_CLI_OTHER", "hidden")];
@@ -687,4 +742,61 @@ fn many_syntax_errors_are_reported_quickly() {
     let errors = o.stderr.matches("error").count();
     assert!((1..=60).contains(&errors), "{errors} errors reported");
     assert!(took < std::time::Duration::from_secs(3), "took {took:?}");
+}
+
+// ---------------------------------------------------------------------------
+// playground
+// ---------------------------------------------------------------------------
+
+/// `GET`s `path` from a server on `port`: (status line, headers and body).
+fn http_get(port: u16, method: &str, path: &str) -> (String, String) {
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write!(s, "{method} {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+    let mut response = String::new();
+    s.read_to_string(&mut response).unwrap();
+    let (head, body) = response.split_once("\r\n\r\n").unwrap();
+    (head.to_string(), body.to_string())
+}
+
+#[test]
+fn playground_serves_its_directory_on_localhost() {
+    let dir = TempDir::new("playground");
+    dir.write("site/index.html", "<p>hi</p>");
+    dir.write("site/app.js", "export {}");
+    dir.write("secret.txt", "outside");
+    let site = dir.path().join("site");
+    // Without the built engine it explains what to do.
+    let o = sand(dir.path(), &["playground", "site"]);
+    assert!(o.code == 2 && o.stderr.contains("run playground/build.sh"), "{o:?}");
+    dir.write("site/pkg/sandlang_wasm_bg.wasm", "\0asm");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(dir.path().join("secret.txt"), site.join("link.txt")).unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sand"))
+        .args(["playground", "site", "--port=0"])
+        .current_dir(dir.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut first = String::new();
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(child.stdout.take().unwrap()), &mut first).unwrap();
+    let port: u16 = first.split("http://127.0.0.1:").nth(1).and_then(|r| r.split('/').next()).and_then(|p| p.parse().ok()).expect(&first);
+
+    let (head, body) = http_get(port, "GET", "/");
+    assert!(head.starts_with("HTTP/1.1 200") && head.contains("text/html") && body == "<p>hi</p>", "{head}");
+    let (head, _) = http_get(port, "GET", "/pkg/sandlang_wasm_bg.wasm");
+    assert!(head.contains("Content-Type: application/wasm"), "{head}");
+    let (head, _) = http_get(port, "GET", "/app.js?v=1");
+    assert!(head.contains("text/javascript"), "{head}");
+    for path in ["/../secret.txt", "/%2e%2e/secret.txt", "/missing", "/link.txt"] {
+        let (head, _) = http_get(port, "GET", path);
+        assert!(head.starts_with("HTTP/1.1 404"), "{path}: {head}");
+    }
+    let (head, body) = http_get(port, "HEAD", "/");
+    assert!(head.starts_with("HTTP/1.1 200") && body.is_empty(), "{head}");
+    let (head, _) = http_get(port, "POST", "/");
+    assert!(head.starts_with("HTTP/1.1 405"), "{head}");
+    child.kill().unwrap();
+    let _ = child.wait();
 }

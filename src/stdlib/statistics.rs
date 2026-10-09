@@ -33,7 +33,7 @@ pub fn register(r: &mut Registry) {
     });
     r.add_builtin("statistics.mode", |vm, a| {
         let xs = floats(vm, a[0])?;
-        vm.reserve(xs.len() * 32)?;
+        vm.reserve(xs.len().saturating_mul(32))?;
         // Count by bit pattern (with -0.0 folded into 0.0); remember the
         // first index of each value so ties go to the earliest.
         let mut counts: HashMap<u64, (usize, usize)> = HashMap::new();

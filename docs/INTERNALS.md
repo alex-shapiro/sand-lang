@@ -11,8 +11,8 @@ source ──lexer──▶ tokens ──parser──▶ AST ──checker──
 ```
 
 - `src/engine.rs` — `Engine`, `Config`, module discovery (imports are found
-  with the lexer, checked against the policy, read from disk) and compilation
-  on a big-stack thread. Only imported modules are compiled; `help.module`
+  with the lexer, checked against the policy, read from the engine's file
+  system) and compilation on a big stack (`platform::with_stack`). Only imported modules are compiled; `help.module`
   summaries of other modules come from `ModuleHelp`, which type checks all
   standard and host modules (without compiling them) on the first request and
   caches the result for the engine's lifetime.
@@ -26,8 +26,20 @@ source ──lexer──▶ tokens ──parser──▶ AST ──checker──
   sorting (`compare.rs`).
 - `src/session.rs` — REPL sessions: incremental checking and compilation and
   a persistent VM (see "REPL sessions" below).
-- `src/policy.rs` — capabilities and policies.
+- `src/policy/` — capabilities and policies (`mod.rs`), policy files
+  (`file.rs`).
+- `src/files/` — the file systems scripts see (see "Platforms and file
+  systems" below): `Fs` dispatches to the host's (`safe.rs`, `host.rs`; the
+  `os` feature) or a `MemFs` (`mem.rs`).
+- `src/platform.rs` — the clock, timers, yielding, entropy, deep stacks and
+  `block_on`, from std and tokio or, on the web, from JavaScript.
+- `src/syntax/highlight.rs` — syntax highlighting from the lexer, for the
+  REPL's line editor and the web playground.
 - `src/native.rs` — the public `NativeModule` API for hosts.
+- `src/bin/sand/` — the command-line tool (`main.rs`) and its REPL front end
+  (`repl.rs`); the `cli` feature.
+- `wasm/` — `sandlang-wasm`, the JavaScript API (wasm-bindgen) of an engine
+  built without `os`; `playground/` is a web page using it.
 - `src/stdlib/` — the standard library.
 
 ## Standard library modules
@@ -320,18 +332,20 @@ enforced there).
 
 ### I/O natives and the sandbox
 
-- **Files**: resolve the script's path with `resolve_path` (symlinks
-  followed; use `policy::normalize_entry_path` for operations on a directory
-  entry itself), check `Capability::FsRead`/`FsWrite` with `vm.permit` (or
-  `vm.permit_entry` for entry operations), then perform the I/O only through
-  `stdlib::fs_safe` off the VM thread (`fs::blocking`: on the process's hot
-  file system worker, `FsWorker`, when it is idle, otherwise on tokio's
-  blocking pool). The worker stays awake for 50 µs after each operation and
+- **Files**: resolve the script's path with the engine's file system
+  (`vm.host.fs.resolve`, symlinks followed; `vm.host.fs.entry` for
+  operations on a directory entry itself), check `Capability::FsRead`/
+  `FsWrite` with `vm.permit_path(&cap, entry)` (which compares the path in
+  the file system's `PathSpace`), then perform the I/O only through the
+  `files::Fs` operations (see `stdlib/fs.rs`, `run`). On the host they run
+  through `files::safe` off the VM thread (`files::host::blocking`: on the
+  process's hot file system worker, `FsWorker`, when it is idle, otherwise
+  on tokio's blocking pool); on a `MemFs` they complete at once. The worker stays awake for 50 µs after each operation and
   the scheduler waits up to 100 µs for its result before parking
   (`FS_SPIN`), so a run of small file operations pays no thread wake-ups
   (which cost more than a `stat`); a slow or hung operation only occupies
   the worker, and later ones go to the pool. Never use path-based `std::fs` /
-  `tokio::fs` calls on script paths: `fs_safe` opens every directory without
+  `tokio::fs` calls on script paths: `files::safe` opens every directory without
   following symlinks (`openat` + `O_NOFOLLOW` per component, `O_PATH` on
   Linux, one `O_NOFOLLOW_ANY` open on macOS; on Windows `NtCreateFile`
   relative to the parent's handle with `FILE_OPEN_REPARSE_POINT`, through
@@ -388,6 +402,51 @@ enforced there).
   `Config::tls_root_certificates`; bound it (and every other wait on a
   peer) with a timeout. Take a `net::resource_slot` before connecting (see
   "Opaque native types").
+
+## Platforms and file systems
+
+**Features.** `os` (default) is everything that reaches the operating
+system: `files::safe`/`files::host` (the host's file system), the `net` and
+`http` modules (`stdlib::OS_MODULES`; importing them without `os` is a
+compile error naming the reason), `Config::inherit_stdin`
+(`StdinSource::Inherit`) and the process environment as the default of
+`env`. `tls` and `cli` imply it. Code shared by `io` (standard input) and
+`net`/`http` is in `stdlib::stream`. Integration tests that need the host
+are gated with `required-features` (Cargo.toml) or `#[cfg(feature = "os")]`;
+`tests/common::run_with` and the spec runner use a `MemFs` without `os`.
+
+**Platform.** `src/platform.rs` is the only place that knows where time,
+timers, randomness and threads come from. `cfg(web)` (set by `build.rs` for
+`wasm32-unknown-unknown`) selects JavaScript: `web_time` for `Instant` and
+`SystemTime`, `setTimeout` (through `js-sys`, with a `Send` oneshot receiver
+as the future) for `sleep`, a self-waking future for `yield_now`,
+`getrandom`'s `wasm_js` backend for `entropy`, and no threads: `with_stack`
+runs its closure directly (the WebAssembly module's stack is linked at
+16 MiB, `wasm/build.rs`, which the deep-nesting tests in
+`wasm/tests/node.test.mjs` exercise), and `block_on` polls once and fails if
+the future would wait. A Rust panic aborts the module there (no unwinding):
+`wasm/src/lib.rs` installs a panic hook that leaves the message in the
+global `sandPanic`, and the playground replaces a crashed worker.
+
+**File systems.** `files::Fs` is `Host` (with `os`) or `Memory(MemFs)`,
+chosen per engine (`Config::memory_fs`; the default is the host's with
+`os`, an empty `MemFs` without). It provides path normalization for the
+policy (`resolve`, `entry`, `absolute`, `default_dir`), the operations of
+the `fs` module, and reading of script modules (`read_source`) and main
+files (`read_main`). `MemFs` is a tree of `BTreeMap` directories behind an
+`Arc<Mutex<_>>`, with POSIX-like errors (`rename` refuses to move a
+directory into itself or over a non-empty one, ...) and a capacity counting
+contents, names and 64 bytes per entry (`QuotaExceeded`, which `io_kind`
+maps to `limit`). Every spec case runs on both file systems
+(`tests/spec_runner.rs`), so their behavior stays the same.
+
+The policy compares a path in the namespace it belongs to (`PathSpace`): a
+`RulePolicy` stores each path rule twice (`PathRule`): canonicalised on the
+host at construction (as before) and normalized lexically from `/` for
+memory file systems, where it is compared exactly (case-sensitively, also
+on Windows). The `*_in(cap, space)` variants of `Policy::check`,
+`check_normalized`, `check_entry` and `denies_under` take the namespace; the
+public ones are the host's.
 
 ## Traits
 
@@ -865,15 +924,31 @@ they work on clones that are discarded, and the program is truncated
 
 ### Front end
 
-The CLI (`cmd_repl` in `src/main.rs`) reads lines on a thread, one per
-request, so it can wait for a line and for Ctrl-C (`tokio::signal::ctrl_c`)
-at once without reading ahead of a prompter that uses standard input;
+The CLI (`src/bin/sand/repl.rs`) reads inputs on a thread, one per request,
+so it can wait for an input and for Ctrl-C (`tokio::signal::ctrl_c`) at once
+without reading ahead of a prompter that uses the terminal or standard input;
 `Session::is_complete` (lexer based) decides when an input is complete. It
-waits for each line inside `run_tasks_until`. The scripts' standard output
-and error go through `ReplSink`s that share a `PromptLine`: while a prompt is
-shown, output first moves to a new line and is followed by the prompt again
-(text the user had typed stays in the terminal's line buffer but is not
-redrawn). Ctrl-C at an empty prompt calls `cancel_tasks`.
+waits for each input inside `run_tasks_until`.
+
+On a terminal the thread runs a reedline editor: `Session::is_complete` is
+its validator (Enter on an incomplete input inserts a line break, so an
+input is edited and kept in the history as a whole), a highlighter colors
+tokens from the lexer, and the history file is synced after each input.
+Reedline clears the buffer before it reports Ctrl-C, so whether Ctrl-C
+discarded text (rather than cancelling tasks at an empty input) is tracked
+from outside, conservatively: the highlighter records whether the buffer
+was empty at each repaint, and the edit mode (Emacs, wrapped) whether keys
+were read since. Otherwise (piped input) lines are read with `read_line`.
+
+The scripts' standard output and error go through `ReplSink`s that share a
+`Screen`. While the plain reader waits, output first moves to a new line and
+is followed by the prompt again. While the editor reads, complete lines go
+to its `ExternalPrinter` (a bounded channel that reedline drains while it
+reads; reedline prints them above the input, on standard output) with
+`try_send` only, since the editor may stop reading at any moment and a
+blocked VM thread would never let the next read start; when the read ends,
+`Screen::stop_editing` prints what the editor did not and the unfinished
+last line. Ctrl-C at an empty input calls `cancel_tasks`.
 
 ### Types in messages
 

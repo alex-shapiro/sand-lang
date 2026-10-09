@@ -32,10 +32,8 @@ impl Seen {
 
     /// Records `pair`; false if it was recorded already.
     fn insert(&mut self, heap: &Heap, pair: (u32, u32)) -> Result<bool, Ctl> {
-        if self.pairs.len() == self.pairs.capacity() {
-            if heap.would_exceed(self.pairs.capacity().max(4).saturating_mul(3 * 12)) {
-                return Err(Ctl::Limit(crate::LimitKind::Memory));
-            }
+        if self.pairs.len() == self.pairs.capacity() && heap.would_exceed(self.pairs.capacity().max(4).saturating_mul(3 * 12)) {
+            return Err(Ctl::Limit(crate::LimitKind::Memory));
         }
         Ok(self.pairs.insert(pair))
     }

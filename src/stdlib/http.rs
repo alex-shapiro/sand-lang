@@ -4,12 +4,14 @@
 //! Redirects are followed in Sand (`http.sand`) so that every hop goes
 //! through `send`, which checks the policy before connecting.
 
-use super::net::{self, NetError, TlsSettings, check_permission, finish, read_line_bytes, read_to_end_reserved, strip_eol, suspend};
+use super::http_common::*;
+use super::net::{self, TlsSettings, check_permission, finish, suspend};
+use super::stream::{IoFailure, read_line_bytes, read_to_end_reserved, strip_eol};
 use crate::check::ModKind;
 use crate::engine::Registry;
 use crate::policy::{Capability, Policy};
 use crate::vm::iomem::{IoMemory, Reservation, ResourceSlot};
-use crate::vm::value::{NativeObject, Obj, Value};
+use crate::vm::value::{NativeObject, Obj, Value, u64_to_usize_saturating};
 use crate::vm::{Ctl, NResult, Vm};
 use std::any::Any;
 use std::future::Future;
@@ -62,194 +64,25 @@ pub fn register(r: &mut Registry) {
     r.add_builtin("http.encode_response", encode_response);
 }
 
-// ----------------------------------------------------------------------
-// URLs
-
-/// An absolute `http` or `https` URL.
-#[derive(Debug, Clone, PartialEq)]
-struct Url {
-    scheme: String,
-    /// Lower-cased host, without brackets for IPv6 literals.
-    host: String,
-    port: u16,
-    /// Path and query (the request target); never empty.
-    target: String,
-}
-
-fn parse_error(text: &str, why: &str) -> NetError {
-    NetError::new("parse", format!("invalid URL {:?}: {why}", super::truncate(text, 200)))
-}
-
-fn default_port(scheme: &str) -> Option<u16> {
-    match scheme {
-        "http" => Some(80),
-        "https" => Some(443),
-        _ => None,
-    }
-}
-
-/// Splits off a leading `scheme:` if `s` starts with one.
-fn split_scheme(s: &str) -> Option<(&str, &str)> {
-    let (scheme, rest) = s.split_once(':')?;
-    let mut chars = scheme.chars();
-    let valid =
-        chars.next().is_some_and(|c| c.is_ascii_alphabetic()) && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
-    valid.then_some((scheme, rest))
-}
-
-impl Url {
-    fn parse(text: &str) -> Result<Url, NetError> {
-        if text.chars().any(|c| c.is_whitespace() || c.is_control()) {
-            return Err(parse_error(text, "contains whitespace or control characters"));
-        }
-        let Some((scheme, rest)) = split_scheme(text) else { return Err(parse_error(text, "missing scheme")) };
-        let Some(rest) = rest.strip_prefix("//") else { return Err(parse_error(text, "missing `//` after the scheme")) };
-        let scheme = scheme.to_ascii_lowercase();
-        let Some(default) = default_port(&scheme) else {
-            return Err(NetError::new(
-                "invalid",
-                format!("unsupported URL scheme {:?} (expected http or https)", super::truncate(&scheme, 64)),
-            ));
-        };
-        if scheme == "https" && !cfg!(feature = "tls") {
-            return Err(NetError::new("invalid", "https is not supported: TLS support is not enabled in this build"));
-        }
-        let rest = rest.split('#').next().unwrap_or("");
-        let split = rest.find(['/', '?']).unwrap_or(rest.len());
-        let (authority, target) = rest.split_at(split);
-        // Credentials in URLs are not supported; they are ignored.
-        let host_port = authority.rsplit_once('@').map_or(authority, |(_, hp)| hp);
-        let (host, port) = if let Some(v6) = host_port.strip_prefix('[') {
-            let Some((host, after)) = v6.split_once(']') else { return Err(parse_error(text, "unterminated IPv6 address")) };
-            (host, after.strip_prefix(':'))
-        } else {
-            match host_port.split_once(':') {
-                Some((h, p)) => (h, Some(p)),
-                None => (host_port, None),
-            }
-        };
-        if host.is_empty() {
-            return Err(parse_error(text, "missing host"));
-        }
-        if host.contains(['/', '\\', '[', ']', '@']) {
-            return Err(parse_error(text, "invalid host"));
-        }
-        let port = match port {
-            None | Some("") => default,
-            Some(p) => p.parse().map_err(|_| parse_error(text, "invalid port"))?,
-        };
-        let target = if target.starts_with('/') { target.to_string() } else { format!("/{target}") };
-        Ok(Url { scheme, host: host.to_ascii_lowercase(), port, target })
-    }
-
-    /// `host[:port]` as sent in the `Host` header (the port only if non-default).
-    fn authority(&self) -> String {
-        let host = if self.host.contains(':') { format!("[{}]", self.host) } else { self.host.clone() };
-        if Some(self.port) == default_port(&self.scheme) { host } else { format!("{host}:{}", self.port) }
-    }
-
-    fn origin(&self) -> String {
-        format!("{}://{}", self.scheme, self.authority())
-    }
-
-    /// The path part of the target.
-    fn path(&self) -> &str {
-        self.target.split('?').next().unwrap_or("/")
-    }
-}
-
-/// Removes `.` and `..` segments from an absolute path (RFC 3986 §5.2.4).
-fn remove_dot_segments(path: &str) -> String {
-    let mut out: Vec<&str> = Vec::new();
-    let segments: Vec<&str> = path.split('/').skip(1).collect();
-    for (i, seg) in segments.iter().enumerate() {
-        let last = i + 1 == segments.len();
-        match *seg {
-            "." => {
-                if last {
-                    out.push("");
-                }
-            }
-            ".." => {
-                out.pop();
-                if last {
-                    out.push("");
-                }
-            }
-            s => out.push(s),
-        }
-    }
-    format!("/{}", out.join("/"))
-}
-
-/// Resolves a `Location` header value against `base`.
-fn resolve(base: &str, location: &str) -> Result<String, NetError> {
-    let location = location.trim();
-    if split_scheme(location).is_some() {
-        Url::parse(location)?;
-        return Ok(location.split('#').next().unwrap_or(location).to_string());
-    }
-    let base = Url::parse(base)?;
-    let location = location.split('#').next().unwrap_or("");
-    if location.starts_with("//") {
-        return resolve_absolute(&format!("{}:{location}", base.scheme));
-    }
-    let (path, query) = match location.split_once('?') {
-        Some((p, q)) => (p, Some(q)),
-        None => (location, None),
-    };
-    let path = if path.is_empty() {
-        base.path().to_string()
-    } else if path.starts_with('/') {
-        path.to_string()
-    } else {
-        let dir = &base.path()[..base.path().rfind('/').map_or(0, |i| i + 1)];
-        format!("{dir}{path}")
-    };
-    let query = match query {
-        Some(q) => format!("?{q}"),
-        // An empty reference keeps the base query.
-        None if location.is_empty() => base.target[base.path().len()..].to_string(),
-        None => String::new(),
-    };
-    Ok(format!("{}{}{query}", base.origin(), remove_dot_segments(&path)))
-}
-
-fn resolve_absolute(url: &str) -> Result<String, NetError> {
-    Url::parse(url)?;
-    Ok(url.to_string())
-}
-
-// ----------------------------------------------------------------------
-// Message syntax
-
-fn is_token(s: &str) -> bool {
-    !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
-}
-
-fn valid_header(name: &str, value: &str) -> bool {
-    is_token(name) && !value.contains(['\r', '\n', '\0'])
-}
-
 /// Reads `name: value` header lines up to the blank line ending the head,
 /// after the start line. Names are lower-cased; repeated headers are joined
 /// with `", "`. The lines are reserved in `res`.
-async fn read_head<R: AsyncBufRead + Unpin>(r: &mut R, res: &mut Reservation) -> Result<(String, Vec<(String, String)>), NetError> {
+async fn read_head<R: AsyncBufRead + Unpin>(r: &mut R, res: &mut Reservation) -> Result<(String, Vec<(String, String)>), IoFailure> {
     let mut budget = MAX_HEAD;
-    let mut next_line = async |budget: &mut usize, res: &mut Reservation| -> Result<Option<String>, NetError> {
+    let mut next_line = async |budget: &mut usize, res: &mut Reservation| -> Result<Option<String>, IoFailure> {
         let line = read_line_bytes(&mut *r, *budget, res).await.map_err(|e| match e.kind {
-            "limit" => NetError::new("http", "message head too large"),
+            "limit" => IoFailure::new("http", "message head too large"),
             _ => e,
         })?;
         let Some(mut line) = line else { return Ok(None) };
         *budget -= line.len();
         strip_eol(&mut line);
-        String::from_utf8(line).map(Some).map_err(|_| NetError::new("http", "message head is not valid UTF-8"))
+        String::from_utf8(line).map(Some).map_err(|_| IoFailure::new("http", "message head is not valid UTF-8"))
     };
     // Tolerate blank lines before the start line (RFC 9112 §2.2).
     let start = loop {
         match next_line(&mut budget, res).await? {
-            None => return Err(NetError::closed()),
+            None => return Err(net::closed()),
             Some(l) if l.is_empty() => continue,
             Some(l) => break l,
         }
@@ -257,13 +90,13 @@ async fn read_head<R: AsyncBufRead + Unpin>(r: &mut R, res: &mut Reservation) ->
     let mut headers: Vec<(String, String)> = Vec::new();
     loop {
         let Some(line) = next_line(&mut budget, res).await? else {
-            return Err(NetError::new("http", "connection closed in the middle of the message head"));
+            return Err(IoFailure::new("http", "connection closed in the middle of the message head"));
         };
         if line.is_empty() {
             return Ok((start, headers));
         }
         let Some((name, value)) = line.split_once(':') else {
-            return Err(NetError::new("http", format!("malformed header line {line:?}")));
+            return Err(IoFailure::new("http", format!("malformed header line {line:?}")));
         };
         let (name, value) = (name.trim().to_ascii_lowercase(), value.trim());
         match headers.iter_mut().find(|(k, _)| *k == name) {
@@ -280,8 +113,8 @@ fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
     headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
 }
 
-fn too_large(max: usize) -> NetError {
-    NetError::new("limit", format!("HTTP body larger than the limit of {max} bytes"))
+fn too_large(max: usize) -> IoFailure {
+    IoFailure::new("limit", format!("HTTP body larger than the limit of {max} bytes"))
 }
 
 /// Reads a message body framed by `headers`. Without `Content-Length` or
@@ -293,7 +126,7 @@ async fn read_body<R: AsyncBufRead + Unpin>(
     max: usize,
     read_to_close: bool,
     res: &mut Reservation,
-) -> Result<Vec<u8>, NetError> {
+) -> Result<Vec<u8>, IoFailure> {
     let chunked = header(headers, "transfer-encoding")
         .is_some_and(|te| te.rsplit(',').next().is_some_and(|last| last.trim().eq_ignore_ascii_case("chunked")));
     if chunked {
@@ -301,11 +134,13 @@ async fn read_body<R: AsyncBufRead + Unpin>(
     }
     if let Some(len) = header(headers, "content-length") {
         // Repeated identical values were joined with ", " by `read_head`.
-        let mut values = len.split(',').map(|v| v.trim().parse::<usize>());
+        // Parsed as `u64` so that a length past `usize::MAX` (32-bit targets) is too large, not invalid.
+        let mut values = len.split(',').map(|v| v.trim().parse::<u64>());
         let first = values.next().and_then(|v| v.ok());
         let Some(len) = first.filter(|&n| values.all(|v| v.ok() == Some(n))) else {
-            return Err(NetError::new("http", format!("invalid content-length {len:?}")));
+            return Err(IoFailure::new("http", format!("invalid content-length {len:?}")));
         };
+        let len = u64_to_usize_saturating(len);
         if len > max {
             return Err(too_large(max));
         }
@@ -313,7 +148,7 @@ async fn read_body<R: AsyncBufRead + Unpin>(
         let mut body = Vec::new();
         read_to_end_reserved(&mut (&mut *r).take(len as u64), &mut body, res, len).await?;
         if body.len() < len {
-            return Err(NetError::new("io", "connection closed in the middle of the message body"));
+            return Err(IoFailure::new("io", "connection closed in the middle of the message body"));
         }
         return Ok(body);
     }
@@ -328,8 +163,8 @@ async fn read_body<R: AsyncBufRead + Unpin>(
     Ok(body)
 }
 
-async fn read_chunked<R: AsyncBufRead + Unpin>(r: &mut R, max: usize, res: &mut Reservation) -> Result<Vec<u8>, NetError> {
-    let truncated = || NetError::new("http", "connection closed in the middle of a chunked body");
+async fn read_chunked<R: AsyncBufRead + Unpin>(r: &mut R, max: usize, res: &mut Reservation) -> Result<Vec<u8>, IoFailure> {
+    let truncated = || IoFailure::new("http", "connection closed in the middle of a chunked body");
     let mut body = Vec::new();
     loop {
         // Size and trailer lines are released as soon as they are parsed.
@@ -337,7 +172,8 @@ async fn read_chunked<R: AsyncBufRead + Unpin>(r: &mut R, max: usize, res: &mut 
         strip_eol(&mut line);
         let text = String::from_utf8_lossy(&line);
         let size = text.split(';').next().unwrap_or("").trim();
-        let size = usize::from_str_radix(size, 16).map_err(|_| NetError::new("http", format!("invalid chunk size {size:?}")))?;
+        let size = u64::from_str_radix(size, 16).map_err(|_| IoFailure::new("http", format!("invalid chunk size {size:?}")))?;
+        let size = u64_to_usize_saturating(size);
         if size == 0 {
             // Skip trailer fields up to the final blank line.
             while let Some(mut line) = read_line_bytes(&mut *r, MAX_HEAD, &mut res.sibling()).await? {
@@ -359,34 +195,9 @@ async fn read_chunked<R: AsyncBufRead + Unpin>(r: &mut R, max: usize, res: &mut 
         let mut end = read_line_bytes(&mut *r, 2, &mut res.sibling()).await?.ok_or_else(truncated)?;
         strip_eol(&mut end);
         if !end.is_empty() {
-            return Err(NetError::new("http", "missing CRLF after a chunk"));
+            return Err(IoFailure::new("http", "missing CRLF after a chunk"));
         }
     }
-}
-
-/// Converts a `[str: str]` map into validated header pairs.
-fn header_pairs(vm: &Vm, map: Value) -> Result<Vec<(String, String)>, String> {
-    let Obj::Map(m) = vm.heap.get(map) else { return Ok(vec![]) };
-    let mut pairs = Vec::new();
-    for (k, v) in m.entries.iter().flatten() {
-        let (k, v) = (vm.str(*k), vm.str(*v));
-        if !valid_header(k, v) {
-            return Err(format!("invalid header {:?}: {:?}", super::truncate(k, 64), super::truncate(v, 64)));
-        }
-        pairs.push((k.to_string(), v.to_string()));
-    }
-    Ok(pairs)
-}
-
-/// Builds a `[str: str]` map from header pairs.
-fn header_map(vm: &mut Vm, headers: Vec<(String, String)>) -> NResult {
-    let map = vm.heap.alloc(Obj::Map(Box::default()));
-    for (k, v) in headers {
-        let k = vm.new_str(k);
-        let v = vm.new_str(v);
-        vm.map_insert(map, k, v).map_err(crate::vm::meter::ctl_from_message)?;
-    }
-    Ok(map)
 }
 
 // ----------------------------------------------------------------------
@@ -443,7 +254,7 @@ fn send(vm: &mut Vm, a: &[Value]) -> NResult {
             let exchange = fetch(&policy, &tls, &url, &request, head_only, max_body, &mut response_res);
             let r = match tokio::time::timeout(timeout, exchange).await {
                 Ok(r) => r.map(|resp| (resp, response_res)),
-                Err(_) => Err(NetError::new("timeout", format!("request to {text} timed out"))),
+                Err(_) => Err(IoFailure::new("timeout", format!("request to {text} timed out"))),
             };
             // The socket was closed when the exchange ended.
             drop(slot);
@@ -492,7 +303,7 @@ async fn fetch(
     head_only: bool,
     max_body: usize,
     res: &mut Reservation,
-) -> Result<RawResponse, NetError> {
+) -> Result<RawResponse, IoFailure> {
     // The overall timeout is applied by the caller.
     let tcp = net::connect_checked(policy, &url.host, url.port).await?;
     if url.scheme == "https" {
@@ -508,7 +319,7 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
     head_only: bool,
     max_body: usize,
     res: &mut Reservation,
-) -> Result<RawResponse, NetError> {
+) -> Result<RawResponse, IoFailure> {
     let mut stream = BufReader::with_capacity(net::CONN_BUFFER, stream);
     stream.write_all(request).await?;
     stream.flush().await?;
@@ -516,14 +327,14 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
         // Interim responses are discarded with their reservation.
         let mut head_res = res.sibling();
         let (start, headers) = read_head(&mut stream, &mut head_res).await.map_err(|e| match e.kind {
-            "closed" => NetError::new("io", "connection closed before a response was received"),
+            "closed" => IoFailure::new("io", "connection closed before a response was received"),
             _ => e,
         })?;
         let mut parts = start.splitn(3, ' ');
         let version = parts.next().unwrap_or("");
         let status = parts.next().and_then(|s| s.parse::<i64>().ok()).filter(|s| (100..=999).contains(s));
         let Some(status) = status.filter(|_| version.starts_with("HTTP/")) else {
-            return Err(NetError::new("http", format!("malformed status line {start:?}")));
+            return Err(IoFailure::new("http", format!("malformed status line {start:?}")));
         };
         // Skip interim responses such as `100 Continue`.
         if (100..200).contains(&status) && status != 101 {
@@ -623,7 +434,7 @@ fn next_request(vm: &mut Vm, a: &[Value]) -> NResult {
                             reads.push(Box::pin(read_connection(stream, max_body, mem.clone(), slot)));
                             progress = true;
                         }
-                        Poll::Ready(Err(e)) => return Poll::Ready(Err(NetError::from(e))),
+                        Poll::Ready(Err(e)) => return Poll::Ready(Err(IoFailure::from(e))),
                         Poll::Pending => {}
                     }
                 }
@@ -684,7 +495,7 @@ async fn read_connection(stream: TcpStream, max_body: usize, mem: Arc<IoMemory>,
     let read = read_request(&mut reader, &mut w, max_body, &mut res);
     let result = match tokio::time::timeout(REQUEST_TIMEOUT, read).await {
         Ok(r) => r,
-        Err(_) => Err(NetError::new("timeout", "timed out reading the request")),
+        Err(_) => Err(IoFailure::new("timeout", "timed out reading the request")),
     };
     match result {
         Ok(request) => {
@@ -717,14 +528,14 @@ async fn read_request<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin>(
     writer: &mut W,
     max_body: usize,
     res: &mut Reservation,
-) -> Result<RawRequest, NetError> {
+) -> Result<RawRequest, IoFailure> {
     let (start, headers) = read_head(&mut *reader, res).await?;
     let parts: Vec<&str> = start.split(' ').collect();
     let [method, target, version] = parts[..] else {
-        return Err(NetError::new("http", format!("malformed request line {start:?}")));
+        return Err(IoFailure::new("http", format!("malformed request line {start:?}")));
     };
     if !is_token(method) || !version.starts_with("HTTP/1.") || target.is_empty() {
-        return Err(NetError::new("http", format!("malformed request line {start:?}")));
+        return Err(IoFailure::new("http", format!("malformed request line {start:?}")));
     }
     // Absolute-form targets (`GET http://host/path`) carry the path after the authority.
     let target = match split_scheme(target).and_then(|(_, rest)| rest.strip_prefix("//")) {

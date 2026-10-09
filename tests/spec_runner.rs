@@ -27,12 +27,79 @@
 //! Every file is also run a second time with `Config::gc_stress`, which
 //! collects garbage at every safe point (alternating minor and major
 //! collections), to check that the collector never frees live values.
+//!
+//! Every case runs with scripts seeing the host's file system (a temporary
+//! directory; with the `os` feature) and with a memory file system
+//! (`MemFs`), which must behave alike.
 
 mod common;
 
-use common::{TempDir, rt};
-use sandlang::{Config, Engine, Error, MemorySink, Policy};
+use common::rt;
+use sandlang::{Config, Engine, Error, MemFs, MemorySink, Policy};
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+/// The file system a case runs against.
+#[derive(Clone, Copy, Debug)]
+enum Backend {
+    /// A temporary directory of the host's file system.
+    #[cfg(feature = "os")]
+    Host,
+    /// The directory `/case` of a memory file system.
+    Memory,
+}
+
+/// The directory of a case's files.
+enum CaseDir {
+    #[cfg(feature = "os")]
+    Host(common::TempDir),
+    Memory(MemFs),
+}
+
+impl CaseDir {
+    fn new(backend: Backend, name: &str) -> CaseDir {
+        match backend {
+            #[cfg(feature = "os")]
+            Backend::Host => CaseDir::Host(common::TempDir::new(name)),
+            Backend::Memory => {
+                let _ = name;
+                let fs = MemFs::new();
+                fs.create_dir_all("/case").unwrap();
+                CaseDir::Memory(fs)
+            }
+        }
+    }
+
+    fn path(&self) -> PathBuf {
+        match self {
+            #[cfg(feature = "os")]
+            CaseDir::Host(d) => d.path().to_path_buf(),
+            CaseDir::Memory(_) => PathBuf::from("/case"),
+        }
+    }
+
+    fn write(&self, rel: &str, contents: &str) -> PathBuf {
+        match self {
+            #[cfg(feature = "os")]
+            CaseDir::Host(d) => d.write(rel, contents),
+            CaseDir::Memory(fs) => {
+                let p = Path::new("/case").join(rel);
+                fs.write(&p, contents).unwrap();
+                p
+            }
+        }
+    }
+
+    /// `config` with scripts seeing this directory's file system.
+    fn configure(&self, config: Config) -> Config {
+        let config = config.cwd(self.path());
+        match self {
+            #[cfg(feature = "os")]
+            CaseDir::Host(_) => config,
+            CaseDir::Memory(fs) => config.memory_fs(fs.clone()),
+        }
+    }
+}
 
 #[derive(Default, Debug)]
 struct Case {
@@ -97,9 +164,9 @@ fn parse_cases(text: &str) -> Vec<Case> {
     cases
 }
 
-fn run_case(case: &Case, gc_stress: bool) -> Result<(), String> {
+fn run_case(case: &Case, gc_stress: bool, backend: Backend) -> Result<(), String> {
     let get = |name: &str| case.sections.iter().find(|(h, _)| h == name).map(|(_, b)| b.clone());
-    let dir = TempDir::new(&case.name);
+    let dir = CaseDir::new(backend, &case.name);
     for (h, body) in &case.sections {
         if let Some(path) = h.strip_prefix("file ") {
             dir.write(path.trim(), body);
@@ -121,8 +188,9 @@ fn run_case(case: &Case, gc_stress: bool) -> Result<(), String> {
     }
 
     if let Some(expected) = get("lint") {
-        let main = dir.write("main.sand", &case.source);
-        let warnings = sandlang::lint::lint_file(&main).map_err(|e| format!("lint failed: {e}"))?;
+        dir.write("main.sand", &case.source);
+        let engine = Engine::new(dir.configure(Config::new().policy(Policy::allow_all())));
+        let warnings = sandlang::lint::lint_source_with(&engine, "main.sand", &case.source).map_err(|e| format!("lint failed: {e}"))?;
         let mut got: Vec<String> = warnings.iter().map(|w| format!("{}: {}", w.line, w.code)).collect();
         got.sort();
         let mut want: Vec<String> = expected.lines().filter(|l| !l.trim().is_empty()).map(|l| l.trim().to_string()).collect();
@@ -138,7 +206,7 @@ fn run_case(case: &Case, gc_stress: bool) -> Result<(), String> {
     let out = MemorySink::new();
     let err = MemorySink::new();
     let mut config =
-        Config::new().policy(Policy::allow_all()).cwd(dir.path()).stdout(out.clone()).stderr(err.clone()).seed(42).gc_stress(gc_stress);
+        dir.configure(Config::new().policy(Policy::allow_all()).stdout(out.clone()).stderr(err.clone()).seed(42).gc_stress(gc_stress));
     if let Some(stdin) = get("stdin") {
         config = config.stdin_bytes(stdin.into_bytes());
     }
@@ -232,7 +300,7 @@ fn run_case(case: &Case, gc_stress: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn run_file(name: &str, gc_stress: bool) {
+fn run_file(name: &str, gc_stress: bool, backend: Backend) {
     let path = format!("{}/tests/spec/{name}.test", env!("CARGO_MANIFEST_DIR"));
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
     let cases = parse_cases(&text);
@@ -247,11 +315,12 @@ fn run_file(name: &str, gc_stress: bool) {
             continue;
         }
         ran += 1;
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_case(case, gc_stress)));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_case(case, gc_stress, backend)));
+        let note = format!("{} ({backend:?} file system)", stress_note(gc_stress));
         match outcome {
             Ok(Ok(())) => {}
-            Ok(Err(msg)) => failures.push(format!("[{name}.test:{}] {}{}\n{msg}", case.line, case.name, stress_note(gc_stress))),
-            Err(_) => failures.push(format!("[{name}.test:{}] {}{}\nHARNESS PANIC", case.line, case.name, stress_note(gc_stress))),
+            Ok(Err(msg)) => failures.push(format!("[{name}.test:{}] {}{note}\n{msg}", case.line, case.name)),
+            Err(_) => failures.push(format!("[{name}.test:{}] {}{note}\nHARNESS PANIC", case.line, case.name)),
         }
     }
     if !failures.is_empty() {
@@ -265,19 +334,42 @@ fn stress_note(gc_stress: bool) -> &'static str {
 
 macro_rules! spec_files {
     ($($name:ident),* $(,)?) => {
-        $(
-            #[test]
-            fn $name() {
-                run_file(stringify!($name), false);
-            }
-        )*
-        mod gc_stress {
+        #[cfg(feature = "os")]
+        mod host {
+            use super::{Backend, run_file};
             $(
                 #[test]
                 fn $name() {
-                    super::run_file(stringify!($name), true);
+                    run_file(stringify!($name), false, Backend::Host);
                 }
             )*
+            mod gc_stress {
+                use super::{Backend, run_file};
+                $(
+                    #[test]
+                    fn $name() {
+                        run_file(stringify!($name), true, Backend::Host);
+                    }
+                )*
+            }
+        }
+        mod memory {
+            use super::{Backend, run_file};
+            $(
+                #[test]
+                fn $name() {
+                    run_file(stringify!($name), false, Backend::Memory);
+                }
+            )*
+            mod gc_stress {
+                use super::{Backend, run_file};
+                $(
+                    #[test]
+                    fn $name() {
+                        run_file(stringify!($name), true, Backend::Memory);
+                    }
+                )*
+            }
         }
     };
 }

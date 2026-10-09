@@ -1,11 +1,11 @@
 //! The `io` and `env` modules.
 
-use super::net::{NetError, read_line_bytes, read_to_end_reserved, strip_eol};
+use super::stream::{IoFailure, read_line_bytes, read_to_end_reserved, strip_eol};
 use crate::check::ModKind;
 use crate::engine::Registry;
 use crate::policy::Capability;
 use crate::vm::iomem::Reservation;
-use crate::vm::value::{Obj, Value};
+use crate::vm::value::{Obj, Value, u64_to_usize_saturating};
 use crate::vm::{Ctl, Finisher, NResult, StdinSource, Vm};
 use tokio::io::AsyncBufRead;
 use tokio::sync::Mutex;
@@ -72,7 +72,7 @@ fn read_stdin(vm: &mut Vm, line: bool) -> NResult {
                     let none = vm.none();
                     return Ok(vm.ok(none));
                 }
-                Err(e) => return NetError::new(e.kind, format!("stdin: {}", e.message)).into_value(vm),
+                Err(e) => return IoFailure::new(e.kind, format!("stdin: {}", e.message)).into_value(vm),
             };
             vm.reserve(data.len())?;
             let Ok(text) = String::from_utf8(data) else {
@@ -95,9 +95,10 @@ fn buffered_line(vm: &Vm) -> Option<Option<Vec<u8>>> {
     let (buf, at_end) = match &mut *source {
         StdinSource::None => return Some(None),
         StdinSource::Bytes(c) => {
-            let at = (c.position() as usize).min(c.get_ref().len());
+            let at = u64_to_usize_saturating(c.position()).min(c.get_ref().len());
             (&c.get_ref()[at..], true)
         }
+        #[cfg(feature = "os")]
         StdinSource::Inherit(r) => (r.buffer(), false),
     };
     let take = match buf.iter().position(|&b| b == b'\n') {
@@ -114,6 +115,7 @@ fn buffered_line(vm: &Vm) -> Option<Option<Vec<u8>>> {
     let mut data = buf[..take].to_vec();
     match &mut *source {
         StdinSource::Bytes(c) => c.set_position(c.position() + take as u64),
+        #[cfg(feature = "os")]
         StdinSource::Inherit(r) => std::pin::Pin::new(r).consume(take),
         StdinSource::None => {}
     }
@@ -123,16 +125,17 @@ fn buffered_line(vm: &Vm) -> Option<Option<Vec<u8>>> {
 
 /// The next line without its terminator (`None` at end of input), or all
 /// remaining input.
-async fn read_input(stdin: &Mutex<StdinSource>, line: bool, res: &mut Reservation) -> Result<Option<Vec<u8>>, NetError> {
+async fn read_input(stdin: &Mutex<StdinSource>, line: bool, res: &mut Reservation) -> Result<Option<Vec<u8>>, IoFailure> {
     let mut source = stdin.lock().await;
     match &mut *source {
         StdinSource::None => Ok((!line).then(Vec::new)),
         StdinSource::Bytes(c) => read_from(c, line, res).await,
+        #[cfg(feature = "os")]
         StdinSource::Inherit(r) => read_from(r, line, res).await,
     }
 }
 
-async fn read_from<R: AsyncBufRead + Unpin>(r: &mut R, line: bool, res: &mut Reservation) -> Result<Option<Vec<u8>>, NetError> {
+async fn read_from<R: AsyncBufRead + Unpin>(r: &mut R, line: bool, res: &mut Reservation) -> Result<Option<Vec<u8>>, IoFailure> {
     if line {
         let Some(mut data) = read_line_bytes(r, usize::MAX, res).await? else { return Ok(None) };
         strip_eol(&mut data);
@@ -153,8 +156,13 @@ fn register_env(r: &mut Registry) {
         let value = match &vm.host.env {
             Some(vars) => vars.iter().find(|(k, _)| *k == name).map(|(_, v)| v.clone()),
             // `std::env::var` may panic on such names.
+            #[cfg(feature = "os")]
             None if name.is_empty() || name.contains(['=', '\0']) => None,
+            #[cfg(feature = "os")]
             None => std::env::var(&name).ok(),
+            // No process environment without operating-system access.
+            #[cfg(not(feature = "os"))]
+            None => None,
         };
         let v = value.map(|v| vm.new_str(v));
         Ok(vm.option(v))
@@ -171,6 +179,9 @@ fn register_env(r: &mut Registry) {
         }
         let vars = match &vm.host.env {
             Some(vars) => vars.clone(),
+            #[cfg(not(feature = "os"))]
+            None => Vec::new(),
+            #[cfg(feature = "os")]
             None => {
                 let mut vars: Vec<(String, String)> =
                     std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))).collect();

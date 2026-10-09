@@ -1,5 +1,7 @@
 //! Tests of REPL sessions (`Engine::session`): incremental checking and a
 //! persistent VM.
+// Helpers of the tests that need the host (feature `os`) are unused without it.
+#![cfg_attr(not(feature = "os"), allow(unused_imports, dead_code))]
 
 mod common;
 
@@ -213,6 +215,7 @@ fn iterators_labels_and_defer_across_inputs() {
     assert_eq!(r.value("let none: [float] = []\nnone.sum()"), "0.0");
 }
 
+#[cfg(feature = "os")]
 #[test]
 fn imports_mid_session() {
     let dir = TempDir::new("session-import");
@@ -371,6 +374,7 @@ fn interrupting_an_input() {
     assert_eq!(r.value("steps > 0"), "true");
 }
 
+#[cfg(feature = "os")]
 #[test]
 fn dropping_an_eval_future_leaves_a_usable_session() {
     let dir = TempDir::new("session-drop");
@@ -446,6 +450,7 @@ fn reset_starts_over() {
     assert_eq!(r.value("x"), "\"fresh\"");
 }
 
+#[cfg(feature = "os")]
 #[test]
 fn always_answers_persist_and_prompts_happen_once() {
     let dir = TempDir::new("session-prompt");
@@ -573,6 +578,7 @@ fn internal_panics_in_background_tasks_reset_the_session() {
     r.compile_error("t");
 }
 
+#[cfg(feature = "os")]
 #[test]
 fn always_answers_survive_a_reset() {
     let dir = TempDir::new("session-reset-prompt");
@@ -676,6 +682,7 @@ fn exit_in_a_task_between_inputs() {
     assert_eq!(r.session.exit_code(), Some(7));
 }
 
+#[cfg(feature = "os")]
 #[test]
 fn prompts_between_inputs_wait_for_the_input() {
     let dir = TempDir::new("session-idle-prompt");
@@ -755,4 +762,15 @@ fn redefined_types_are_told_apart_in_messages() {
     assert_eq!(msg, "type mismatch: expected Option<Point (defined in input 3)>, found Option<Point (defined in input 1)>");
     let msg = r.compile_error("let n: int = p");
     assert_eq!(msg, "type mismatch: expected int, found Point");
+}
+
+#[test]
+fn inputs_can_be_named() {
+    let mut session = Engine::new(Config::new()).session();
+    match rt().block_on(session.eval_as("main.sand", "let a = 1\nlet b: int = \"no\"")) {
+        Err(Error::Compile(d)) => assert_eq!((d[0].file.as_str(), d[0].line), ("main.sand", 2)),
+        other => panic!("{other:?}"),
+    }
+    rt().block_on(session.eval_as("main.sand", "fn f() -> int { 7 }")).unwrap();
+    assert_eq!(rt().block_on(session.eval("f() * 6")).unwrap().as_deref(), Some("42"));
 }

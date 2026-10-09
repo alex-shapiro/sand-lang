@@ -3,8 +3,10 @@
 use crate::check::budget::{CompileBudget, Stop};
 use crate::check::{Checker, ModKind, ParsedModule};
 use crate::diag::{Diag, Diagnostic, SourceMap, Span};
+use crate::files::{Fs, MemFs};
 use crate::native::NativeModule;
-use crate::policy::{Capability, Decision, Policy, PromptAnswer, Prompter, normalize_path};
+use crate::platform::Instant;
+use crate::policy::{Capability, Decision, Policy, PromptAnswer, Prompter};
 use crate::session::Session;
 use crate::stdlib;
 use crate::syntax::lexer::{StrPart, Tok, lex};
@@ -17,7 +19,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Per-engine resource limits.
 #[derive(Clone, Debug)]
@@ -215,6 +217,7 @@ impl OutputSink for NullSink {
 enum StdinConfig {
     None,
     Bytes(Vec<u8>),
+    #[cfg(feature = "os")]
     Inherit,
 }
 
@@ -235,7 +238,9 @@ pub struct Config {
     pub(crate) seed: Option<u64>,
     pub(crate) gc_stress: bool,
     pub(crate) exit_after_run: bool,
+    #[cfg(feature = "os")]
     pub(crate) tls: crate::stdlib::TlsSettings,
+    pub(crate) fs: Fs,
 }
 
 impl Default for Config {
@@ -261,7 +266,9 @@ impl Config {
             seed: None,
             gc_stress: std::env::var_os("SAND_GC_STRESS").is_some(),
             exit_after_run: false,
+            #[cfg(feature = "os")]
             tls: Default::default(),
+            fs: Fs::default(),
         }
     }
     pub fn policy(mut self, p: Policy) -> Self {
@@ -293,10 +300,24 @@ impl Config {
         self
     }
     /// Uses the host process's standard input.
+    #[cfg(feature = "os")]
     pub fn inherit_stdin(mut self) -> Self {
         self.stdin = StdinConfig::Inherit;
         self
     }
+    /// Scripts see the memory file system `fs` (the `fs` module and script
+    /// imports, and the main file of [`Engine::run_file`]) instead of the
+    /// host's. Without the `os` feature, engines have an empty memory file
+    /// system unless one is given here.
+    ///
+    /// The working directory ([`Config::cwd`]) and module root
+    /// ([`Config::module_root`]) are then paths of `fs`, by default its root.
+    pub fn memory_fs(mut self, fs: MemFs) -> Self {
+        self.fs = Fs::Memory(fs);
+        self
+    }
+    /// The directory relative paths of the script start from (by default
+    /// the module root).
     pub fn cwd(mut self, p: impl AsRef<Path>) -> Self {
         self.cwd = Some(p.as_ref().to_path_buf());
         self
@@ -336,6 +357,7 @@ impl Config {
     /// connections (`https`, `net.connect_tls`), besides the bundled web PKI
     /// roots. An invalid certificate makes TLS connections fail. Without the
     /// `tls` feature this has no effect.
+    #[cfg(feature = "os")]
     pub fn tls_root_certificates(mut self, certs: Vec<Vec<u8>>) -> Self {
         self.tls = self.tls.with_roots(certs);
         self
@@ -488,16 +510,16 @@ impl Engine {
     }
 
     /// Compiles a file and returns checker facts for the linter.
+    #[cfg(feature = "os")]
     pub(crate) async fn lint_facts(&self, path: &Path) -> Result<ResolvedFacts, Error> {
         let (name, source, root) = self.read_main(path)?;
-        let c = self.compile(&name, &source, root, Some(path)).await?;
+        let c = self.without_prompter().compile(&name, &source, root, Some(path)).await?;
         Ok(c.facts.unwrap_or_default())
     }
 
     /// Compiles source text and returns checker facts for the linter.
     pub(crate) async fn lint_facts_source(&self, name: &str, source: &str) -> Result<ResolvedFacts, Error> {
-        let root = std::env::current_dir().unwrap_or_default();
-        let c = self.compile(name, source, root, None).await?;
+        let c = self.without_prompter().compile(name, source, self.source_root(), None).await?;
         Ok(c.facts.unwrap_or_default())
     }
 
@@ -558,20 +580,40 @@ impl Engine {
         }
     }
 
-    /// Type checks a source without running it; returns warnings.
+    /// Type checks a source without running it; returns warnings. Imports
+    /// the policy would prompt for are refused (checks never prompt).
     pub fn check_source(&mut self, name: &str, source: &str) -> Result<Vec<Diagnostic>, Error> {
-        let rt = tokio::runtime::Builder::new_current_thread().build().map_err(|e| Error::Io(e.to_string()))?;
-        let root = std::env::current_dir().unwrap_or_default();
-        let c = rt.block_on(self.compile(name, source, root, None))?;
+        let tool = self.without_prompter();
+        let c = crate::platform::block_on(tool.compile(name, source, self.source_root(), None)).map_err(Error::Io)??;
         Ok(c.warnings)
     }
 
-    /// Type checks a file (and its imports) without running it; returns warnings.
+    /// Type checks a file (and its imports) without running it; returns
+    /// warnings. Imports are not prompted for (see [`Engine::check_source`]).
     pub fn check_file(&mut self, path: impl AsRef<Path>) -> Result<Vec<Diagnostic>, Error> {
-        let rt = tokio::runtime::Builder::new_current_thread().build().map_err(|e| Error::Io(e.to_string()))?;
         let (name, source, root) = self.read_main(path.as_ref())?;
-        let c = rt.block_on(self.compile(&name, &source, root, Some(path.as_ref())))?;
+        let tool = self.without_prompter();
+        let c = crate::platform::block_on(tool.compile(&name, &source, root, Some(path.as_ref()))).map_err(Error::Io)??;
         Ok(c.warnings)
+    }
+
+    /// This engine for tools that check without running (and never prompt).
+    pub(crate) fn without_prompter(&self) -> Engine {
+        Engine {
+            config: Config { prompter: None, ..self.config.clone() },
+            registry: self.registry.clone(),
+            natives: self.natives.clone(),
+            interrupt: self.interrupt.clone(),
+            shared: self.shared.clone(),
+            always: self.always.clone(),
+            gc_stats: GcStats::default(),
+        }
+    }
+
+    /// The module root of source text: the configured root or working
+    /// directory, or [`Engine::default_root`].
+    fn source_root(&self) -> PathBuf {
+        self.config.module_root.clone().or_else(|| self.config.cwd.clone()).unwrap_or_else(|| self.default_root())
     }
 
     pub async fn run_source(&mut self, name: &str, source: &str) -> Result<crate::Outcome, Error> {
@@ -579,12 +621,7 @@ impl Engine {
     }
 
     async fn run_source_inner(&mut self, name: &str, source: &str) -> Result<crate::Outcome, Error> {
-        let root = self
-            .config
-            .module_root
-            .clone()
-            .or_else(|| self.config.cwd.clone())
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        let root = self.source_root();
         let compiled = self.compile(name, source, root.clone(), None).await?;
         self.execute(compiled.program, root).await
     }
@@ -631,14 +668,22 @@ impl Engine {
         Ok(report)
     }
 
+    /// The module root of source text run without a configured root or
+    /// working directory: the process's working directory, or the root of a
+    /// memory file system.
+    pub(crate) fn default_root(&self) -> PathBuf {
+        self.config.fs.default_dir()
+    }
+
     fn read_main(&self, path: &Path) -> Result<(String, String, PathBuf), Error> {
-        let source = std::fs::read_to_string(path).map_err(|e| Error::Io(format!("cannot read {}: {e}", path.display())))?;
-        let abs = normalize_path(&std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()));
+        let fs = &self.config.fs;
+        let source = fs.read_main(path).map_err(|e| Error::Io(format!("cannot read {}: {e}", path.display())))?;
+        let abs = fs.resolve(&fs.absolute(path));
         let root = self
             .config
             .module_root
             .clone()
-            .map(|r| normalize_path(&r))
+            .map(|r| fs.resolve(&fs.absolute(&r)))
             .unwrap_or_else(|| abs.parent().map(|p| p.to_path_buf()).unwrap_or_default());
         let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "main.sand".into());
         Ok((name, source, root))
@@ -649,6 +694,7 @@ impl Engine {
         let stdin = match &c.stdin {
             StdinConfig::None => StdinSource::None,
             StdinConfig::Bytes(b) => StdinSource::Bytes(std::io::Cursor::new(b.clone())),
+            #[cfg(feature = "os")]
             StdinConfig::Inherit => StdinSource::Inherit(tokio::io::BufReader::new(tokio::io::stdin())),
         };
         let (stdout, stderr): (SharedSink, SharedSink) =
@@ -671,7 +717,9 @@ impl Engine {
             log_level: 1,
             interrupt: self.interrupt.clone(),
             stream_decisions: [None; 2],
+            #[cfg(feature = "os")]
             tls: c.tls.clone(),
+            fs: c.fs.clone(),
             regex_cache: Vec::new(),
         };
         let mut vm = Vm::new(prog, self.natives.clone(), host);
@@ -727,7 +775,7 @@ impl Engine {
         if let Some(&d) = self.always.lock().unwrap_or_else(|e| e.into_inner()).get(&cap) {
             return d;
         }
-        match self.config.policy.check(&cap) {
+        match self.config.policy.check_in(&cap, self.config.fs.space()) {
             Decision::Allow => true,
             Decision::Deny => false,
             Decision::Prompt => match &self.config.prompter {
@@ -766,11 +814,9 @@ impl Engine {
         // The directory of the main file itself (a symlink to it resolved),
         // like the default module root (`read_main`), so that the main
         // file's imports resolve as they do next to the file.
-        let main_dir = main_path
-            .and_then(|p| std::path::absolute(p).ok())
-            .and_then(|p| normalize_path(&p).parent().map(Path::to_path_buf))
-            .unwrap_or_else(|| root.clone());
-        let root = normalize_path(&root);
+        let fs = &self.config.fs;
+        let main_dir = main_path.and_then(|p| fs.resolve(&fs.absolute(p)).parent().map(Path::to_path_buf)).unwrap_or_else(|| root.clone());
+        let root = fs.resolve(&fs.absolute(&root));
 
         // Discover modules depth-first, in dependency order.
         // Built-in modules: prelude and task.
@@ -779,9 +825,7 @@ impl Engine {
         let main_file = g.sm.add(main_name, main_source);
         let main_key = format!(
             "file:{}",
-            main_path
-                .map(|p| normalize_path(&std::path::absolute(p).unwrap_or_default()).display().to_string())
-                .unwrap_or_else(|| main_name.to_string())
+            main_path.map(|p| fs.resolve(&fs.absolute(p)).display().to_string()).unwrap_or_else(|| main_name.to_string())
         );
         let main_mod_name = Path::new(main_name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "main".into());
         g.modules.push(LoadedModule {
@@ -795,7 +839,8 @@ impl Engine {
 
         // Every module implicitly depends on `task`, so it is loaded first.
         g.load_std_tree(&self.registry.sources, "task", &mut errors);
-        if let Some(stop) = self.discover(&mut g, 1, main_key, &root, &mut errors).await {
+        let mut prompted = Duration::ZERO;
+        if let Some(stop) = self.discover(&mut g, 1, main_key, &root, &mut errors, &mut prompted).await {
             return Err(stop);
         }
         if !errors.is_empty() {
@@ -805,18 +850,13 @@ impl Engine {
         let limits = &self.config.limits;
         let budget = BudgetConfig {
             fuel: limits.max_compile_fuel,
-            deadline: limits.max_wall_time.and_then(|t| started.checked_add(t)),
+            // Time spent waiting for prompt answers does not count.
+            deadline: limits.max_wall_time.and_then(|t| started.checked_add(t + prompted)),
             interrupt: self.interrupt.clone(),
         };
 
-        std::thread::scope(|s| {
-            std::thread::Builder::new()
-                .stack_size(COMPILE_STACK)
-                .spawn_scoped(s, || compile_modules(&g.sm, &g.modules, &g.index, &g.order, &registry, budget))
-                .map_err(|e| Error::Io(e.to_string()))?
-                .join()
-                .map_err(|_| Error::Io("internal compiler error".into()))?
-        })
+        crate::platform::with_stack(COMPILE_STACK, || compile_modules(&g.sm, &g.modules, &g.index, &g.order, &registry, budget))
+            .map_err(|e| Error::Io(format!("internal compiler error: {e}")))?
     }
 
     /// Loads the modules imported by module `start` (whose key is `key`) and,
@@ -827,7 +867,9 @@ impl Engine {
     /// This runs before the compile budget exists, so it is bounded on its
     /// own: overlong import paths are refused, discovery stops after
     /// [`MAX_DISCOVERY_ERRORS`] errors, and it returns the error to report
-    /// if the engine is interrupted or the wall-time limit passes.
+    /// if the engine is interrupted or the wall-time limit passes. Time
+    /// spent deciding imports (waiting for prompt answers) is added to
+    /// `prompted` and does not count against the limit.
     pub(crate) async fn discover(
         &self,
         g: &mut ModuleGraph,
@@ -835,6 +877,7 @@ impl Engine {
         key: String,
         root: &Path,
         errors: &mut Vec<Diag>,
+        prompted: &mut Duration,
     ) -> Option<Error> {
         let deadline = self.config.limits.max_wall_time.and_then(|t| Instant::now().checked_add(t));
         // DFS stack: (module index, its imports, next import to visit), and
@@ -845,7 +888,7 @@ impl Engine {
             if self.interrupt.load(Ordering::Relaxed) {
                 return Some(Error::Interrupted);
             }
-            if deadline.is_some_and(|d| Instant::now() >= d) {
+            if deadline.is_some_and(|d| Instant::now() >= d + *prompted) {
                 return Some(Error::Limit(LimitKind::WallTime));
             }
             if errors.len() >= MAX_DISCOVERY_ERRORS {
@@ -863,6 +906,11 @@ impl Engine {
                     if self.registry.sources.contains_key(&name) && name != "prelude" {
                         let key = g.load_std_tree(&self.registry.sources, &name, errors);
                         g.modules[mi].imports.push((item_idx, key));
+                    } else if crate::stdlib::OS_MODULES.contains(&name.as_str()) {
+                        errors.push(Diag::error(
+                            span,
+                            format!("module `{name}` is not available: this build of Sand has no operating-system access"),
+                        ));
                     } else {
                         errors.push(Diag::error(span, format!("unknown module `{name}`")));
                     }
@@ -877,7 +925,12 @@ impl Engine {
                     if target.extension().is_none() {
                         target.set_extension("sand");
                     }
-                    let target = normalize_path(&target);
+                    // Only scripts: a diagnostic would quote other files.
+                    if target.extension().is_none_or(|e| e != "sand") {
+                        errors.push(Diag::error(span, format!("cannot import `{p}`: script modules are `.sand` files")));
+                        continue;
+                    }
+                    let target = self.config.fs.resolve(&target);
                     if !target.starts_with(root) {
                         errors.push(Diag::error(span, format!("cannot import `{p}`: the path is outside the module root")));
                         continue;
@@ -892,13 +945,16 @@ impl Engine {
                         g.modules[mi].imports.push((item_idx, key));
                         continue;
                     }
-                    if !self.check_import(&target).await {
+                    let asked = Instant::now();
+                    let allowed = self.check_import(&target).await;
+                    *prompted += asked.elapsed();
+                    if !allowed {
                         errors.push(Diag::error(span, format!("cannot import `{p}`: permission denied")));
                         // Compilation has failed: do not prompt for further imports.
                         break;
                     }
                     // Read the checked file without following symlinks swapped in since.
-                    let text = match crate::stdlib::read_source(&target, self.config.limits.max_source_bytes) {
+                    let text = match self.config.fs.read_source(&target, self.config.limits.max_source_bytes) {
                         Ok(t) => t,
                         Err(e) => {
                             errors.push(Diag::error(span, format!("cannot load module `{p}`: {e}")));
@@ -1081,7 +1137,7 @@ impl ModuleHelp {
             let checked = Checker::new(&g.sm, &lookup).check_program(parsed).ok()?;
             Some(checked.modules.into_iter().filter(|m| !matches!(m.kind, ModKind::Script { .. })).map(|m| (m.name, m.summary)).collect())
         };
-        std::thread::scope(|s| std::thread::Builder::new().stack_size(COMPILE_STACK).spawn_scoped(s, check).ok()?.join().ok()?)
+        crate::platform::with_stack(COMPILE_STACK, check).ok()?
     }
 }
 

@@ -2,7 +2,7 @@
 
 use crate::check::ModKind;
 use crate::engine::Registry;
-use crate::vm::value::{NativeObject, Obj, Value};
+use crate::vm::value::{NativeObject, Obj, Value, to_usize_saturating};
 use crate::vm::{NResult, Rng, Vm, panic};
 use std::any::Any;
 
@@ -117,7 +117,11 @@ fn sample(vm: &mut Vm, rng: &mut Rng, a: &[Value]) -> NResult {
 }
 
 fn bytes(vm: &mut Vm, rng: &mut Rng, a: &[Value]) -> NResult {
-    let Ok(n) = usize::try_from(a[0].as_int()) else { return panic("random.bytes: negative length") };
+    let n = a[0].as_int();
+    if n < 0 {
+        return panic("random.bytes: negative length");
+    }
+    let n = to_usize_saturating(n);
     vm.reserve(n)?;
     vm.charge_slow_bytes(n)?;
     let mut out = Vec::with_capacity(n);

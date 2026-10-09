@@ -154,9 +154,11 @@ const SESSION_MODULE: &str = "repl";
 impl Session {
     pub(crate) fn new(engine: Engine) -> Session {
         let config = engine.config();
-        let root = config.module_root.clone().or_else(|| config.cwd.clone()).unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        let fs = &config.fs;
+        let root = config.module_root.clone().or_else(|| config.cwd.clone()).unwrap_or_else(|| fs.default_dir());
         let cwd = config.cwd.clone().unwrap_or_else(|| root.clone());
-        Session { engine, root: crate::policy::normalize_path(&root), cwd, state: None, inputs: 0, exit_code: None, was_reset: false }
+        let root = fs.resolve(&fs.absolute(&root));
+        Session { engine, root, cwd, state: None, inputs: 0, exit_code: None, was_reset: false }
     }
 
     /// Checks, compiles and runs one input. Returns the debug form of its
@@ -167,17 +169,28 @@ impl Session {
     /// the error. If the input calls `exit(code)`, the result is `Ok(None)`
     /// and [`Session::exit_code`] returns the code.
     pub async fn eval(&mut self, source: &str) -> Result<Option<String>, Error> {
+        self.eval_named(None, source).await
+    }
+
+    /// Like [`Session::eval`], naming the input `name` in diagnostics and
+    /// traces (e.g. `main.sand` for a program that a session continues),
+    /// instead of `<input N>`.
+    pub async fn eval_as(&mut self, name: &str, source: &str) -> Result<Option<String>, Error> {
+        self.eval_named(Some(name), source).await
+    }
+
+    async fn eval_named(&mut self, name: Option<&str>, source: &str) -> Result<Option<String>, Error> {
         self.was_reset = false;
-        let r = CatchUnwind::new(self.eval_inner(source)).await;
+        let r = CatchUnwind::new(self.eval_inner(name, source)).await;
         self.settle(r)
     }
 
-    async fn eval_inner(&mut self, source: &str) -> Result<Option<String>, Error> {
+    async fn eval_inner(&mut self, name: Option<&str>, source: &str) -> Result<Option<String>, Error> {
         self.exit_code = None;
         self.engine.clear_interrupt();
         self.start().await?;
         self.inputs += 1;
-        let name = format!("<input {}>", self.inputs);
+        let name = name.map_or_else(|| format!("<input {}>", self.inputs), str::to_string);
         let want_value = !source.trim_end().ends_with(';');
         let (entry, value) = self.compile_input(&name, source, want_value).await?;
         let show = value.is_some_and(|t| !matches!(t, Type::Unit | Type::Never));
@@ -586,7 +599,9 @@ impl Session {
         });
         let mut errors = Vec::new();
         st.loading = Some(mark);
-        let stop = engine.discover(&mut st.graph, cell, format!("input:{name}"), root, &mut errors).await;
+        // (The input's compile budget starts after its imports are decided.)
+        let mut prompted = std::time::Duration::ZERO;
+        let stop = engine.discover(&mut st.graph, cell, format!("input:{name}"), root, &mut errors, &mut prompted).await;
         st.loading = None;
         if let Some(e) = stop {
             st.rollback(&mark);
@@ -766,12 +781,5 @@ impl State {
 
 /// Runs `f` on a thread with a stack big enough for checking and compiling.
 fn on_compile_stack<R: Send>(f: impl FnOnce() -> Result<R, Error> + Send) -> Result<R, Error> {
-    std::thread::scope(|s| {
-        std::thread::Builder::new()
-            .stack_size(crate::engine::COMPILE_STACK)
-            .spawn_scoped(s, f)
-            .map_err(|e| Error::Io(e.to_string()))?
-            .join()
-            .map_err(|p| Error::Io(format!("internal compiler error: {}", crate::unwind::panic_text(&*p))))?
-    })
+    crate::platform::with_stack(crate::engine::COMPILE_STACK, f).map_err(|e| Error::Io(format!("internal compiler error: {e}")))?
 }
