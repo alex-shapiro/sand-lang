@@ -463,6 +463,16 @@ slot receiving the return value) and `closure` (a heap handle, or
   the collector clears them (so they never hold handles to freed objects) and
   shrinks stacks left large by deep recursion. Consequently the compiler must
   never read a register before writing it in the same frame.
+* Finished fibers are kept for reuse (`Vm::recycle_fiber`, up to
+  `MAX_SPARE_FIBERS` with small stacks): spawning a task then allocates no
+  stack or frame list. The pool counts in `fiber_bytes` and is freed before
+  a memory limit error is reported (`free_spare_fibers`). A recycled stack
+  is cleared, since the new task's live window is a GC root before the task
+  has written all of it.
+* The scheduler reads the clock (for CPU time) after every `CLOCK_SLICES`
+  slices or `SLICE_FUEL` units of fuel and around every wait, not once per
+  slice: tasks that finish or block quickly make slices far shorter than
+  a clock reading.
 * The interpreter keeps the current register window as a local slice
   (`regs`) and the fuel counter in a local; `reload!()` re-derives the window
   after anything that may move or resize the stack (calls, returns, natives,
@@ -698,13 +708,51 @@ anything else that implements `Iterator` is lowered to
 where `<next>` calls the `next` closure field of an `Iter` directly
 (`CallValue` of a `Field`), or is a `CallTrait` of `Iterator.next` with
 evidence resolved as usual (a direct call for a concrete type, a dictionary
-call for a bounded type parameter). A lazy `for` loop over `xs.iter().map(f)
-.filter(g)` costs three closure calls per element (the list source, `map` and
-`filter`) besides `f` and `g`: in a release build, 1M elements take about
-130 ns each against about 50 ns for the eager `xs.map(f).filter(g)`, which
-calls only `f` and `g` but builds two lists. Call overhead dominates; the
-adapters that only pass elements on (`filter`, `take`, ...) return the
-source's `Some` unchanged rather than rebuilding it.
+call for a bounded type parameter).
+
+### Fusion
+
+Iterating through the adapters costs a closure call per adapter and element
+plus a `Some` per level. So when a whole pipeline is visible where it is
+consumed, `src/check/fuse.rs` lowers it to one loop instead (stream fusion,
+at the HIR level, while the enclosing function is being checked):
+
+* **Pipelines**: a source — `[T].iter()` (a native `ForList` loop), a
+  range's `iter()` (`For` over the range, `UnpackRange` + `ForRangeIncl`,
+  no list), or any other `Iter` expression (its `next` called directly) —
+  followed by the adapters `map`, `filter`, `filter_map`, `enumerate`,
+  `inspect`, `take`, `skip`, `take_while`, `skip_while`. Others (`zip`,
+  `chain`, `flat_map`, `step_by`) end a pipeline: what precedes them is an
+  ordinary `Iter` source of the next one.
+* **Consumers**: `for` loops and comprehension clauses (`iter_loop`), and
+  calls of `to_list`, `fold`, `each`, `count`, `any`, `all`, `find` and
+  `sum` (for `int`/`float` elements), hooked in `check_method_call`.
+* **Eager methods** of lists (`map`, `filter`, `filter_map`, `take_while`,
+  `count`, `fold`, `each`, `any`, `all`, `find`) and ranges (`map`,
+  `filter`, `each`) are one-stage pipelines with a consumer (`xs.map(f)` is
+  `xs.iter().map(f).to_list()`; the prelude implements them with exactly
+  that loop), so they are lowered the same way.
+* **Inlining**: a lambda literal passed to a fused adapter or consumer is
+  called at exactly one place of the loop, so it is inlined there (its
+  parameters become `let`s; its locals are re-owned by the enclosing
+  function, so the compiler's capture analysis sees them as its own) unless
+  its body contains `return` or `?`.
+
+The lowering preserves evaluation order and the number of pulls: the source
+and the adapters' arguments are evaluated once, in order, into hidden
+locals; each adapter's function runs for the same elements in the same
+order; `take` checks its count when a pull of it *starts* (at the top of the
+loop, before the source is pulled, outermost `take` first), so it never
+pulls past its count. A list source becomes a native list loop (whose length
+snapshot is taken when the loop starts, where `[T].iter` takes it when
+called) only if the adapters' and the consumer's arguments are inert
+(lambdas, locals, literals). The loop is one HIR loop, so the depths of the
+body's `break`/`continue` stay valid; adapters skip elements with
+`continue` and stop with `break`. Fused, `xs.iter().map(f).filter(g)` over
+1M elements takes about 10 ns per element (against 100 ns through the
+closures, and 25 ns for the eager `xs.map(f).filter(g)`, which builds two
+lists); an iterator stored in a variable and consumed later still goes
+through the closures.
 
 ## Tests
 

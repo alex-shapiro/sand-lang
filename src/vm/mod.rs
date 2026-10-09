@@ -278,7 +278,9 @@ pub struct Vm {
     pub consts: Vec<Value>,
     pub fibers: Vec<Option<Box<Fiber>>>,
     pub free_fibers: Vec<u32>,
-    /// Finished fibers kept for reuse by `spawn_fiber` (see `recycle_fiber`).
+    /// Finished fibers kept for reuse by `spawn_fiber` (see `recycle_fiber`);
+    /// boxed like those in `fibers`, so that they move without copying.
+    #[allow(clippy::vec_box)]
     spare_fibers: Vec<Box<Fiber>>,
     pub ready: VecDeque<u32>,
     pub current: u32,

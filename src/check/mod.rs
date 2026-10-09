@@ -2,6 +2,7 @@
 
 pub mod budget;
 mod expr;
+mod fuse;
 mod pat;
 mod traits;
 mod unify;
@@ -350,6 +351,8 @@ pub struct Checker<'a> {
     /// The prelude's `Iterator` trait and `Iter` struct, which `for` loops use.
     pub(crate) iter_trait: Option<TraitId>,
     pub(crate) iter_struct: Option<TypeDefId>,
+    /// Prelude functions taking part in iterator fusion (found on first use).
+    pub(crate) fuse_fns: Option<fuse::FuseFns>,
 }
 
 const MAX_ERRORS: usize = 50;
@@ -396,6 +399,7 @@ impl<'a> Checker<'a> {
             num_trait: None,
             iter_trait: None,
             iter_struct: None,
+            fuse_fns: None,
         }
     }
 
@@ -673,6 +677,7 @@ impl<'a> Checker<'a> {
             num_trait,
             iter_trait,
             iter_struct,
+            fuse_fns,
         } = self;
         Checker {
             sm: &NO_SOURCES,
@@ -715,6 +720,7 @@ impl<'a> Checker<'a> {
             num_trait,
             iter_trait,
             iter_struct,
+            fuse_fns,
         }
     }
 

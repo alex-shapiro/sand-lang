@@ -1131,28 +1131,7 @@ impl<'a> Compiler<'a> {
                 if *inclusive {
                     self.emit(f, Op::LoadBool { dst: base + 2, v: false });
                 }
-                self.declare_pattern_locals(f, pat);
-                let (var, direct) = match pat.kind {
-                    HPatKind::Bind(l) if !self.is_cell(f, l) => (f.local_reg[&l], true),
-                    _ => (self.alloc(f), false),
-                };
-                let top = self.here(f);
-                let exit = self.for_next(f, if *inclusive { 2 } else { 1 }, var, base);
-                if !direct {
-                    let mut fails = Vec::new();
-                    self.match_pattern(f, pat, var, &mut fails);
-                    self.patch_list(f, fails);
-                }
-                f.loops.push(LoopCx { defer_depth: f.defers.len(), ..Default::default() });
-                self.discard(f, body);
-                self.emit_loop_back(f, top);
-                let cx = f.loops.pop().unwrap();
-                self.patch_list(f, exit);
-                self.patch_list(f, cx.breaks);
-                for c in cx.continues {
-                    self.patch(f, c, top);
-                }
-                self.emit(f, Op::LoadUnit { dst });
+                self.range_loop(f, pat, body, base, *inclusive, dst);
                 f.next_reg = mark;
             }
             HKind::For { pat, iter, kind, body } => {
@@ -1196,9 +1175,13 @@ impl<'a> Compiler<'a> {
                 match kind {
                     IterKind::List => self.expr_to(f, iter, base),
                     IterKind::Range => {
+                        // Loop over the bounds, without materialising the range.
                         let r = self.alloc(f);
                         self.expr_to(f, iter, r);
-                        self.emit(f, Op::IterSnapshot { dst: base, src: r });
+                        self.emit(f, Op::UnpackRange { base, src: r });
+                        self.range_loop(f, pat, body, base, true, dst);
+                        f.next_reg = mark;
+                        return;
                     }
                     _ => {
                         let r = self.alloc(f);
@@ -1756,6 +1739,33 @@ impl<'a> Compiler<'a> {
 
     /// Emits the per-iteration step of a fused loop; returns exit jump sites.
     /// kind: 0 = list, 1 = range, 2 = inclusive range.
+    /// The loop of a range whose bounds are in `base` (start) and `base+1`
+    /// (end; for an inclusive loop, `base+2` holds the done flag).
+    fn range_loop(&mut self, f: &mut FnState, pat: &HPat, body: &HExpr, base: Reg, inclusive: bool, dst: Reg) {
+        self.declare_pattern_locals(f, pat);
+        let (var, direct) = match pat.kind {
+            HPatKind::Bind(l) if !self.is_cell(f, l) => (f.local_reg[&l], true),
+            _ => (self.alloc(f), false),
+        };
+        let top = self.here(f);
+        let exit = self.for_next(f, if inclusive { 2 } else { 1 }, var, base);
+        if !direct {
+            let mut fails = Vec::new();
+            self.match_pattern(f, pat, var, &mut fails);
+            self.patch_list(f, fails);
+        }
+        f.loops.push(LoopCx { defer_depth: f.defers.len(), ..Default::default() });
+        self.discard(f, body);
+        self.emit_loop_back(f, top);
+        let cx = f.loops.pop().unwrap();
+        self.patch_list(f, exit);
+        self.patch_list(f, cx.breaks);
+        for c in cx.continues {
+            self.patch(f, c, top);
+        }
+        self.emit(f, Op::LoadUnit { dst });
+    }
+
     fn for_next(&mut self, f: &mut FnState, kind: u8, var: Reg, base: Reg) -> Vec<usize> {
         if !f.no_fused {
             let op = match kind {

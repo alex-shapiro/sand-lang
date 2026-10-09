@@ -75,6 +75,19 @@ fn inline_field(v: Value, idx: u16) -> Option<Value> {
     }
 }
 
+/// A range object as (first, last, done): the loop state of an inclusive
+/// range loop visiting the same integers.
+#[inline(never)]
+fn unpack_range(o: &Obj) -> Option<(i64, i64, bool)> {
+    let Obj::Range(a, b, inclusive) = *o else { return None };
+    Some(match (inclusive, b.checked_sub(1)) {
+        (true, _) => (a, b, false),
+        (false, Some(last)) => (a, last, false),
+        // `a..i64::MIN` is empty.
+        (false, None) => (a, b, true),
+    })
+}
+
 /// The interpreter's fuel counter, kept in a local and written back to the
 /// caller's counter when the interpreter returns.
 struct FuelGuard<'a> {
@@ -926,6 +939,14 @@ impl Vm {
                         r!(b + 3) = Value::Bool(false);
                     }
                 }
+                Op::UnpackRange { base: b, src } => match unpack_range(self.heap.get(r!(src))) {
+                    Some((first, last, done)) => {
+                        r!(b) = Value::Int(first);
+                        r!(b + 1) = Value::Int(last);
+                        r!(b + 2) = Value::Bool(done);
+                    }
+                    None => fail!("internal error: not a range"),
+                },
                 Op::IterSnapshot { dst, src } => {
                     let o = r!(src);
                     match self.snapshot(o) {

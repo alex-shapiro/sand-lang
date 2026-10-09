@@ -1587,7 +1587,8 @@ impl Checker<'_> {
                 return err(span);
             }
             let _ = fi;
-            return self.call_fn(f, Some(r), args, span);
+            let call = self.call_fn(f, Some(r), args, span);
+            return self.fuse_consumer(call);
         }
         // Trait methods: through the bounds of a type parameter, or the impls of a type.
         match self.find_trait_method(&rt, &method.name, method.span) {
@@ -2229,8 +2230,12 @@ impl Checker<'_> {
     fn iter_loop(&mut self, plan: IterPlan, ih: HExpr, pat: HPat, body: HExpr, span: Span) -> HExpr {
         match plan {
             IterPlan::Builtin(kind) => mk(HKind::For { pat, iter: Box::new(ih), kind, body: Box::new(body) }, Type::Unit, span),
-            // `{ let it = ih; while let Some(pat) = <next> { body } }`
+            // `{ let it = ih; while let Some(pat) = <next> { body } }`, or a
+            // fused pipeline (see `fuse`).
             IterPlan::Lazy { local, next } => {
+                if self.can_fuse(&ih) {
+                    return self.fuse_for(ih, pat, body, span);
+                }
                 let it = HPat { kind: HPatKind::Bind(local), ty: ih.ty.clone(), span };
                 let init = mk(HKind::Let { pat: it, init: Box::new(ih), else_: None }, Type::Unit, span);
                 let some = self.types[self.wk.option as usize].variants()[0].rt_id;

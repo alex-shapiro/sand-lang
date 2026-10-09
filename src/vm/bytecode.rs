@@ -468,6 +468,12 @@ pub enum Op {
         base: Reg,
         off: i16,
     },
+    /// Range value `src` as the registers of an inclusive range loop
+    /// (`ForRangeIncl`): `base` = start, `base+1` = last, `base+2` = done.
+    UnpackRange {
+        base: Reg,
+        src: Reg,
+    },
     /// Snapshot of map entries (as tuples) or set elements as a list.
     IterSnapshot {
         dst: Reg,

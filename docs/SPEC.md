@@ -1463,7 +1463,8 @@ T?` (`T: Ord`; the first minimal/maximal), `min_by`/`max_by<K: Ord>(key: fn(T)
   elements. Use the list (or call `iter()` again) to iterate twice.
 - **Exhaustion.** The iterators of lists, ranges, maps, sets, strings and
   channels keep returning `None` once they have; `Iter.from_fn` iterators
-  return whatever their function returns.
+  return whatever their function returns. Whether an adapter asks an
+  exhausted source for more elements (`skip` may) is unspecified.
 - **Mutation.** A list iterator behaves like a `for` loop (§6.9): it visits
   the indices below the length the list had when `iter()` was called, reading
   each element when it is reached, and stops early if the list shrinks;
@@ -1471,8 +1472,15 @@ T?` (`T: Ord`; the first minimal/maximal), `min_by`/`max_by<K: Ord>(key: fn(T)
   work on a snapshot of the entries taken by `iter()`. A channel iterator
   receives live (and suspends while the channel is empty).
 - **Limits.** Iterators are ordinary Sand code: every element costs at least
-  one function call (one unit of fuel, §15.2), so endless iterators are
-  bounded by the instruction, time and memory limits (§15) like any loop.
+  one unit of fuel (§15.2), so endless iterators are bounded by the
+  instruction, time and memory limits (§15) like any loop.
+- **Performance.** A pipeline written as one expression where it is consumed
+  (`for x in xs.iter().map(f).filter(g) { ... }`, `xs.iter().map(f).sum()`)
+  is compiled to a single loop with the same behaviour, so it builds no
+  intermediate lists and costs about as much as the equivalent hand-written
+  loop; so are the eager methods taking a function (`xs.map(f)`). An
+  iterator stored in a variable and consumed later calls a closure per
+  adapter and element.
 - **Cost** _(informative)_. Each adapter adds about one function call per
   element besides the user function it applies, so eager list methods are
   usually faster per element; iterators avoid building intermediate lists and

@@ -41,15 +41,10 @@ Follow-up work, roughly in priority order.
 
 ### Performance
 
-- [ ] Lazy iterator chains cost about 2x eager ones per element (closure
-      call overhead); consider fusing adapters or cheaper closure calls.
 - [ ] The interpreter's dispatch loop is sensitive to code layout (±10-25%
       on call-heavy benchmarks from unrelated edits). Consider splitting cold
       opcodes into separate functions systematically, or a threaded-dispatch
       design.
-- [ ] Task spawn/wait got slower during the sandbox fixes (5k tasks: 2.5ms
-      -> 4.5ms, about 0.4µs per task), probably from per-task stack and
-      wait-list accounting; profile and trim.
 - [ ] Incremental (not just generational) GC: major collections still pause
       in proportion to the heap; heaps under 8 MB only get major collections.
 
