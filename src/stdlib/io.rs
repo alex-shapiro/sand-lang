@@ -43,6 +43,23 @@ fn read_stdin(vm: &mut Vm, line: bool) -> NResult {
     if !vm.permit(&Capability::Stdin)? {
         return Ok(vm.err_value("permission_denied", "permission denied: read standard input"));
     }
+    // A prompt written before reading must be visible (on a terminal).
+    vm.flush_before_input();
+    if line && let Some(data) = buffered_line(vm) {
+        // A whole line is already buffered: no need to suspend the task.
+        let v = match data {
+            Some(data) => {
+                vm.charge_bytes(data.len())?;
+                let Ok(text) = String::from_utf8(data) else {
+                    return Ok(vm.err_value("invalid", "stdin: input is not valid UTF-8"));
+                };
+                let s = vm.new_str(text);
+                vm.some(s)
+            }
+            None => vm.none(),
+        };
+        return Ok(vm.ok(v));
+    }
     let stdin = vm.host.stdin.clone();
     // The input is buffered outside the heap until it is complete.
     let mut res = vm.io_reservation();
@@ -67,6 +84,44 @@ fn read_stdin(vm: &mut Vm, line: bool) -> NResult {
             Ok(vm.ok(v))
         }) as Finisher
     })))
+}
+
+/// The next line of standard input (without its terminator; `None` at the
+/// end of the input), if it can be had without waiting: input given as
+/// bytes, or a whole line in the read buffer of the process's standard
+/// input. `None` if the read must wait (or another read is under way, or
+/// the line does not fit in the memory limit). Nothing is consumed then.
+fn buffered_line(vm: &Vm) -> Option<Option<Vec<u8>>> {
+    let mut source = vm.host.stdin.try_lock().ok()?;
+    let (buf, at_end) = match &mut *source {
+        StdinSource::None => return Some(None),
+        StdinSource::Bytes(c) => {
+            let at = (c.position() as usize).min(c.get_ref().len());
+            (&c.get_ref()[at..], true)
+        }
+        StdinSource::Inherit(r) => (r.buffer(), false),
+    };
+    let take = match buf.iter().position(|&b| b == b'\n') {
+        Some(nl) => nl + 1,
+        // (Bytes: the rest is the last line.)
+        None if at_end => buf.len(),
+        None => return None,
+    };
+    if take == 0 {
+        return Some(None);
+    }
+    if vm.heap.would_exceed(take) {
+        // Too big: the asynchronous read reports the memory limit.
+        return None;
+    }
+    let mut data = buf[..take].to_vec();
+    match &mut *source {
+        StdinSource::Bytes(c) => c.set_position(c.position() + take as u64),
+        StdinSource::Inherit(r) => std::pin::Pin::new(r).consume(take),
+        StdinSource::None => {}
+    }
+    strip_eol(&mut data);
+    Some(Some(data))
 }
 
 /// The next line without its terminator (`None` at end of input), or all

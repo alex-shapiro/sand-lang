@@ -785,6 +785,13 @@ impl Heap {
     // ------------------------------------------------------------------
     // Incremental major collection
 
+    /// Whether `v` is an object that the sweep of an incremental collection
+    /// will free: unreachable, so it must not be made reachable again (as a
+    /// cache that does not hold its entries alive could do).
+    pub fn condemned(&self, v: Value) -> bool {
+        self.phase == Phase::Sweeping && v.handle().is_some_and(|h| !test_bit(&self.cmarks, h))
+    }
+
     /// Whether an incremental major collection is under way.
     pub fn cycle_active(&self) -> bool {
         self.phase != Phase::Idle

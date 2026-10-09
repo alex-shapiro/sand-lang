@@ -167,8 +167,15 @@ impl Vm {
     }
 
     /// Runs `proto` (a zero-argument function) as the main task until it
-    /// finishes, then returns. Other tasks are abandoned.
+    /// finishes, then returns. Other tasks are abandoned. Buffered standard
+    /// output is flushed at the end.
     pub async fn run_main(&mut self, proto: u32) -> Result<RunEnd, Trap> {
+        let r = self.run_main_inner(proto).await;
+        self.flush_stdout();
+        r
+    }
+
+    async fn run_main_inner(&mut self, proto: u32) -> Result<RunEnd, Trap> {
         let closure = self.heap.alloc(Obj::Closure(proto, Box::new([])));
         let task = self.heap.alloc(Obj::Task(Box::new(TaskObj { fiber: 0, state: TaskState::Running, result: Value::Unit })));
         let fid = self.spawn_fiber(closure, task).map_err(|c| match c {
@@ -286,6 +293,7 @@ impl Vm {
                         f.state = FiberState::Ready;
                         self.fibers[fid as usize] = Some(f);
                         self.ready.push_front(fid);
+                        self.flush_stdout();
                         let prompter = self.host.prompter.clone();
                         let t = Instant::now();
                         cpu += t.saturating_duration_since(now);
@@ -325,7 +333,8 @@ impl Vm {
                     (unclocked_slices, unclocked_fuel) = (0, 0);
                 }
             }
-            // Nothing is ready: wait for I/O.
+            // Nothing is ready: wait for I/O (with the output so far shown).
+            self.flush_stdout();
             if self.io.is_empty() {
                 let trace = match self.fibers.get(self.main_fiber as usize) {
                     Some(Some(f)) => self.trace_of(f, None),

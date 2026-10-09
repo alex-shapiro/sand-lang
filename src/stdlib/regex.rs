@@ -188,6 +188,37 @@ fn captures_obj(vm: &Vm, v: Value) -> Result<&CapturesObj, Ctl> {
 
 /// Runs `search` with the regex `re` (a `Regex` value) and its cache, then
 /// accounts for the cache's growth.
+/// Slots of the per-engine cache of compiled regexes (direct-mapped by the
+/// pattern's hash).
+const REGEX_CACHE_SLOTS: usize = 64;
+
+/// Fuel for a `regex.new` served from the cache (plus the pattern's bytes).
+const CACHED_COST: u64 = 4;
+
+/// The pattern's hash and its slot in the regex cache.
+fn cache_slot(pattern: &str) -> (u64, usize) {
+    use std::hash::{BuildHasher, BuildHasherDefault};
+    let h = BuildHasherDefault::<crate::vm::value::FxHasher>::default().hash_one(pattern);
+    (h, (h % REGEX_CACHE_SLOTS as u64) as usize)
+}
+
+/// A live regex compiled from `pattern`, if the cache knows one. The cache
+/// holds handles, not roots: the object found at the handle must be a regex
+/// with the same pattern (a freed or reused slot is simply a miss), and one
+/// that a collection has already found unreachable is not used again.
+fn cached_regex(vm: &Vm, pattern: Value, (hash, slot): (u64, usize)) -> Option<Value> {
+    let &(h, handle) = vm.host.regex_cache.get(slot)?;
+    if h != hash || handle == u32::MAX {
+        return None;
+    }
+    let re = Value::Obj(handle);
+    if vm.heap.condemned(re) {
+        return None;
+    }
+    let obj = vm.heap.native::<RegexObj>(re)?;
+    (*obj.pattern == *vm.str(pattern)).then_some(re)
+}
+
 fn with_regex<T>(vm: &mut Vm, re: Value, search: impl FnOnce(&Vm, &RegexObj, &mut Cache) -> Result<T, Ctl>) -> Result<T, Ctl> {
     let (result, (before, after)) = {
         let obj = regex_obj(vm, re)?;
@@ -316,6 +347,15 @@ pub fn register(r: &mut Registry) {
     r.source("regex", ModKind::Std, include_str!("regex.sand"));
 
     r.add_builtin("regex.new", |vm, a| {
+        // A regex compiled from the same pattern that is still alive is
+        // shared (regexes are immutable), as programs often compile the
+        // same pattern in a loop.
+        let slot = cache_slot(vm.str(a[0]));
+        if let Some(re) = cached_regex(vm, a[0], slot) {
+            vm.charge(CACHED_COST)?;
+            vm.charge_bytes(vm.str(a[0]).len())?;
+            return Ok(vm.ok(re));
+        }
         let mut scan = Scan::new();
         scan.charge(vm, COMPILE_BASE + COMPILE_PER_BYTE * vm.str(a[0]).len() as u64)?;
         let built = builder().build(vm.str(a[0]));
@@ -339,6 +379,13 @@ pub fn register(r: &mut Registry) {
         let obj = RegexObj::new(re, vm.str(a[0]), match_def as u32);
         vm.reserve(obj.size())?;
         let obj = vm.heap.alloc(Obj::Native(Box::new(obj)));
+        if let Some(h) = obj.handle() {
+            let cache = &mut vm.host.regex_cache;
+            if cache.is_empty() {
+                cache.resize(REGEX_CACHE_SLOTS, (0, u32::MAX));
+            }
+            cache[slot.1] = (slot.0, h);
+        }
         Ok(vm.ok(obj))
     });
     r.add_builtin("regex.Regex.is_match", |vm, a| {

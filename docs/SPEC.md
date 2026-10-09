@@ -1651,6 +1651,12 @@ directly is allowed but has no special meaning.
 EOF; capability `Stdin`), `read_all() -> Result<str>` (`Stdin`), `write(s: str)`
 (stdout, no newline), `ewrite(s: str)` (stderr), `flush()`.
 
+The CLI's standard output is buffered like C's stdio: by line on a
+terminal, in blocks otherwise. It is flushed by `flush()`, at the end of the
+run, before writing to standard error, before a permission prompt, whenever
+every task is waiting (for I/O, a timer, ...), and, on a terminal, before
+reading standard input. Standard error is not buffered.
+
 ### 13.7 `env`
 
 `get(name: str) -> str?` (capability `Env(name)`; a denial yields `None`),

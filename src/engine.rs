@@ -151,13 +151,54 @@ impl OutputSink for MemorySink {
     }
 }
 
+/// The process's standard output, buffered like C's stdio and Python's: by
+/// line on a terminal, in blocks of `STDOUT_BUFFER` bytes otherwise. One
+/// buffer is shared by every engine of the process (so that their output
+/// keeps its order). The VM flushes it when a run ends, before it writes to
+/// standard error, prompts, or waits for I/O, on `io.flush()`, and, on a
+/// terminal, before it reads standard input.
 struct StdoutSink;
+
+const STDOUT_BUFFER: usize = 8 << 10;
+
+struct StdoutBuffer {
+    data: Vec<u8>,
+    tty: Option<bool>,
+}
+
+static STDOUT: Mutex<StdoutBuffer> = Mutex::new(StdoutBuffer { data: Vec::new(), tty: None });
+
+fn flush_stdout(b: &mut StdoutBuffer) -> std::io::Result<()> {
+    use std::io::Write;
+    if b.data.is_empty() {
+        return Ok(());
+    }
+    let mut o = std::io::stdout().lock();
+    let r = o.write_all(&b.data).and_then(|()| o.flush());
+    b.data.clear();
+    r
+}
+
 impl OutputSink for StdoutSink {
     fn write(&mut self, data: &[u8]) -> std::io::Result<()> {
-        use std::io::Write;
-        let mut o = std::io::stdout().lock();
-        o.write_all(data)?;
-        o.flush()
+        use std::io::IsTerminal;
+        let mut b = STDOUT.lock().unwrap_or_else(|e| e.into_inner());
+        let tty = *b.tty.get_or_insert_with(|| std::io::stdout().is_terminal());
+        b.data.extend_from_slice(data);
+        if b.data.len() >= STDOUT_BUFFER || (tty && data.contains(&b'\n')) {
+            flush_stdout(&mut b)?;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        flush_stdout(&mut STDOUT.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    fn flush_before_input(&mut self) -> std::io::Result<()> {
+        let mut b = STDOUT.lock().unwrap_or_else(|e| e.into_inner());
+        // Like C's stdio: only a line-buffered (terminal) stream.
+        if b.tty == Some(true) { flush_stdout(&mut b) } else { Ok(()) }
     }
 }
 
@@ -629,6 +670,7 @@ impl Engine {
             interrupt: self.interrupt.clone(),
             stream_decisions: HashMap::new(),
             tls: c.tls.clone(),
+            regex_cache: Vec::new(),
         };
         let mut vm = Vm::new(prog, self.natives.clone(), host);
         vm.io = IoTable::with_shared(self.shared.clone());

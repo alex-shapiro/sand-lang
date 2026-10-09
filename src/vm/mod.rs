@@ -187,6 +187,12 @@ pub trait OutputSink: Send {
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
+    /// Called before the script reads standard input, so that a prompt it
+    /// wrote is visible. A sink buffering a non-interactive stream may
+    /// leave its buffer alone (as C's stdio does).
+    fn flush_before_input(&mut self) -> std::io::Result<()> {
+        self.flush()
+    }
 }
 
 pub type SharedSink = Arc<Mutex<dyn OutputSink>>;
@@ -268,6 +274,10 @@ pub struct Host {
     pub interrupt: Arc<AtomicBool>,
     pub stream_decisions: HashMap<u8, bool>,
     pub(crate) tls: crate::stdlib::TlsSettings,
+    /// Recently compiled regexes: (pattern hash, heap handle), see
+    /// `stdlib::regex`. The handles are not GC roots; entries are checked
+    /// against the object found at the handle.
+    pub(crate) regex_cache: Vec<(u64, u32)>,
 }
 
 pub struct Vm {
@@ -657,6 +667,17 @@ impl Vm {
         }
     }
 
+    /// Flushes buffered standard output (see `Engine`'s stdout sink).
+    pub fn flush_stdout(&self) {
+        let _ = self.host.stdout.lock().unwrap_or_else(|e| e.into_inner()).flush();
+    }
+
+    /// Flushes standard output before reading standard input, if the sink
+    /// wants to (see [`OutputSink::flush_before_input`]).
+    pub fn flush_before_input(&self) {
+        let _ = self.host.stdout.lock().unwrap_or_else(|e| e.into_inner()).flush_before_input();
+    }
+
     /// Writes to stdout (1) or stderr (2), enforcing policy and output limits.
     pub fn write_stream(&mut self, which: u8, data: &[u8]) -> Result<(), Ctl> {
         let allowed = match self.host.stream_decisions.get(&which) {
@@ -684,9 +705,12 @@ impl Vm {
         {
             return Err(Ctl::Limit(LimitKind::Output));
         }
-        let sink = if which == 1 { self.host.stdout.clone() } else { self.host.stderr.clone() };
-        let mut s = sink.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = s.write(data);
+        if which != 1 {
+            // Standard error is unbuffered: earlier output comes first.
+            self.flush_stdout();
+        }
+        let sink = if which == 1 { &self.host.stdout } else { &self.host.stderr };
+        let _ = sink.lock().unwrap_or_else(|e| e.into_inner()).write(data);
         Ok(())
     }
 
