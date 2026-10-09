@@ -20,18 +20,14 @@ Follow-up work, roughly in priority order.
 - [ ] **Caught Rust panics in sessions.** After an internal panic is caught,
       the VM is memory safe but may be inconsistent; a session should be
       reset automatically.
-- [ ] **Small accounting gaps.** Fixed 8 KiB per-connection buffers aren't
-      counted against `max_memory`; checks made inside a native may overrun
-      `max_instructions` by up to one slice (20,000 units); the bytecode
-      compiler, linter and formatter are not covered by the compile budget.
 
 ### Test coverage
 
 - [ ] Run the CI workflow (`.github/workflows/ci.yml`) on Windows and Linux:
       nothing has run there yet (Windows is only cross-checked with
-      `--no-default-features`; `ring` needs a Windows C toolchain).
-- [ ] An automated test of the real `/dev/tty` / `CONIN$` prompter (the
-      dialogue is unit tested and `--prompt-stdin` is tested end to end).
+      `--no-default-features`; `ring` needs a Windows C toolchain). This
+      includes the ConPTY variant of `tests/prompt_tty.rs`, which has only
+      been compiled.
 
 ### Tooling
 

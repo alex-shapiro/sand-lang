@@ -2019,8 +2019,13 @@ from when the operation starts until its result becomes a value. An
 operation whose buffers would not fit fails with kind `"limit"` instead,
 before allocating them, and the run continues (so a peer sending a huge
 line or body cannot end a server script); files are checked by their size
-before they are read, while network data is counted as it arrives. Small
-fixed per-connection buffers (8 KiB) are not counted. In a session (§16,
+before they are read, while network data is counted as it arrives. Open
+connections also count their fixed buffers while they are open (from when
+they are being connected or accepted until closed): 8 KiB each (16 KiB for
+the connections of an HTTP server, 48 KiB for TLS connections, including an
+estimate of the TLS session's buffers); opening a connection whose buffers
+do not fit fails with kind `"limit"`, and an HTTP server answers such a
+connection with `503 Service Unavailable` and closes it. In a session (§16,
 §17.6), the instruction, CPU time, wall time and output limits apply to each
 input; the memory limit applies to the session's heap, which persists. Library functions
 also check the Rust-side scratch space they use while building a result
@@ -2073,12 +2078,16 @@ Fuel counts against `max_instructions`. Long operations check the limits while
 they run: once a scheduling slice's fuel is spent, they check the instruction
 budget, the CPU and wall-clock limits and the interrupt flag at least every
 20,000 units, so a single library call or comparison of huge values is
-stopped promptly. (Instruction checks made inside a call may let it overrun
-`max_instructions` by up to one slice, 20,000 units; the check between slices
-is exact.) Operations that cannot be interrupted internally (a single regex
-search) are charged before they start, so they fail immediately when the
-remaining budget cannot cover them. A task whose library calls use up its
-slice is preempted when the call returns, letting other tasks run.
+stopped promptly. The instruction limit is exact for library functions: a
+call stops as soon as the fuel used by the run (including the bytecode
+executed before the call) exceeds `max_instructions`, and so does bytecode
+(within one unit). The generic operations of the interpreter (comparison,
+display, concatenation, slicing) may overrun it by the bytecode fuel spent
+since the last library call, less than 20,000 units. Operations that cannot
+be interrupted internally (a single regex search) are charged before they
+start, so they fail immediately when the remaining budget cannot cover
+them. A task whose library calls use up its slice is preempted when the
+call returns, letting other tasks run.
 
 ### 15.3 Compile-time limits
 
@@ -2086,7 +2095,9 @@ Checking a program happens before it runs, so it is bounded separately:
 
 - **Compile fuel.** Type checking spends about one unit per expression
   checked, unification step, type component examined or produced, and pattern
-  row examined. Ordinary programs need less than one unit per byte of source
+  row examined; code generation one unit per expression compiled (deferred
+  code once per copy, §7.1), instruction emitted and expression examined by
+  its analyses. Ordinary programs need less than one unit per byte of source
   (a `match` with 1,000 arms on an enum about a million). When
   `max_compile_fuel` is exhausted, compilation fails with `program too complex
   to compile`. `None` means unlimited.
@@ -2249,6 +2260,13 @@ the trait dictates them; the names of impl methods are checked at the trait.
 A lint can be suppressed for the next line with `// lint: allow(name)`, or for
 a file with `//! lint: allow(name)`.
 
+Linting checks the file first, with the default limits (§15.3). The lints
+themselves are bounded like compilation: they may spend 64 units of fuel per
+byte of source (at least 10,000,000), about one per syntax tree node and per
+node examined again by a lint (for example a loop body searched for a
+`break`); a file that needs more fails with `source too complex to lint`
+(exit code 2).
+
 ### 17.3 `sand fmt FILE... [--check]`
 
 Rewrites files in canonical style: 4-space indentation, one statement per line,
@@ -2262,6 +2280,12 @@ never changes the parse tree (modulo spans). With `--check`, files are not
 written; the exit code is 1 if any file is not formatted. Exit code 2 if a file
 cannot be read or parsed. Trait and impl bodies are laid out like struct
 bodies: one method per line, with a blank line around methods that have a body.
+Formatting is bounded like linting (§17.2): 64 units of fuel per byte of
+source (at least 10,000,000), about one per syntax tree node and layout node
+examined, per 64 bytes of text measured, and per byte of output (deeply
+nested code is indented, so the output can be much larger than the source);
+a file that needs more is not formatted: `source too complex to format`
+(exit code 2).
 
 ### 17.4 `sand test FILE... [OPTIONS]`
 

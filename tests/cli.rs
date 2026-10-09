@@ -1,11 +1,11 @@
 //! End-to-end tests of the `sand` command-line tool: subcommands, flag
 //! parsing, exit codes, standard streams and the `--prompt-stdin` prompter.
 //!
-//! `--prompt` itself asks on the controlling terminal, which a test cannot
-//! provide portably (and must not block on when the tests are run from one),
-//! so the prompt dialogue is unit-tested in `src/main.rs` and exercised end to
-//! end here through the hidden `--prompt-stdin` option, which differs only in
-//! where it reads and writes.
+//! `--prompt` itself asks on the controlling terminal (tested on a
+//! pseudo-terminal in `tests/prompt_tty.rs`); the prompt dialogue is
+//! unit-tested in `src/main.rs` and exercised end to end here through the
+//! hidden `--prompt-stdin` option, which differs only in where it reads and
+//! writes.
 
 mod common;
 

@@ -1,6 +1,8 @@
 //! The linter: style and correctness warnings on top of the type checker.
 
+use crate::check::budget::{CompileBudget, tool_fuel};
 use crate::check::{CheckedProgram, Ctor, FnInfo, FnKind};
+use crate::diag::SourceFile;
 use crate::engine::{Engine, ResolvedFacts};
 use crate::hir::{HArg, HKind};
 use crate::syntax::ast::*;
@@ -24,7 +26,10 @@ impl std::fmt::Display for LintWarning {
     }
 }
 
-/// Lints a file (its imports are loaded relative to it).
+/// Lints a file (its imports are loaded relative to it). Checking it is
+/// bounded by the default [`Limits`](crate::Limits) (`max_compile_fuel`),
+/// and the lints by [`tool_fuel`] units (one per syntax tree node and per
+/// binding or expression examined again by a lint).
 pub fn lint_file(path: &Path) -> Result<Vec<LintWarning>, String> {
     let src = std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let engine = Engine::new(Config::new().policy(Policy::allow_all()));
@@ -43,46 +48,53 @@ pub fn lint_source(name: &str, src: &str) -> Result<Vec<LintWarning>, String> {
 
 fn lint_with(src: &str, facts: ResolvedFacts) -> Result<Vec<LintWarning>, String> {
     let src = src.to_string();
-    std::thread::scope(|s| {
+    let budget = CompileBudget::new(Some(tool_fuel(src.len())), None, None);
+    let out = std::thread::scope(|s| {
         std::thread::Builder::new()
             .stack_size(64 << 20)
-            .spawn_scoped(s, || run_lints(&src, &facts))
+            .spawn_scoped(s, || run_lints(&src, &facts, &budget))
             .map_err(|e| e.to_string())?
             .join()
             .map_err(|_| "internal linter error".to_string())?
-    })
+    });
+    match budget.stopped() {
+        Some(stop) => Err(crate::fmt::stop_message(stop, "lint")),
+        None => out,
+    }
 }
 
 struct Linter<'a> {
-    src: &'a str,
-    line_starts: Vec<usize>,
+    file: SourceFile,
     out: Vec<LintWarning>,
     facts: &'a ResolvedFacts,
     /// Types of bindings by (line, column), from the checker.
     types: HashMap<(usize, usize), String>,
-    /// Bindings (with known types) in the scopes enclosing the current point of
-    /// the current function, innermost last: name -> type.
-    let_scopes: Vec<Vec<(String, String)>>,
+    /// The names of the bindings (with known types) of each scope enclosing
+    /// the current point of the current function, innermost last.
+    let_scopes: Vec<Vec<String>>,
+    /// The types of the bindings in `let_scopes` by name, innermost last.
+    in_scope: HashMap<String, Vec<String>>,
+    /// Bounds the work (see `lint_file`); once it is exhausted the linter
+    /// skips the rest of the program.
+    budget: &'a CompileBudget,
 }
 
-fn run_lints(src: &str, facts: &ResolvedFacts) -> Result<Vec<LintWarning>, String> {
+fn run_lints(src: &str, facts: &ResolvedFacts, budget: &CompileBudget) -> Result<Vec<LintWarning>, String> {
+    if !budget.charge((src.len() / 64) as u64) {
+        return Ok(vec![]);
+    }
     let parsed = crate::syntax::parse_module(src, 0);
     if !parsed.errors.is_empty() {
         return Err("cannot lint a file with syntax errors".into());
     }
-    let mut line_starts = vec![0];
-    for (i, b) in src.bytes().enumerate() {
-        if b == b'\n' {
-            line_starts.push(i + 1);
-        }
-    }
     let mut l = Linter {
-        src,
-        line_starts,
+        file: SourceFile::new("", src),
         out: Vec::new(),
         facts,
         types: facts.locals.iter().map(|(ln, c, f)| ((*ln, *c), f.ty.clone())).collect(),
         let_scopes: vec![vec![]],
+        in_scope: HashMap::new(),
+        budget,
     };
     l.module(&parsed.module);
     l.fact_lints();
@@ -128,14 +140,14 @@ fn is_screaming(s: &str) -> bool {
     s.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_') && s.chars().any(|c| c.is_ascii_uppercase())
 }
 
-fn diverges(e: &Expr) -> bool {
+fn diverges(b: &CompileBudget, e: &Expr) -> bool {
     match &e.kind {
         ExprKind::Return(_) | ExprKind::Break { .. } | ExprKind::Continue(_) => true,
         ExprKind::Call { callee, .. } => {
             matches!(&callee.kind, ExprKind::Ident(id) if matches!(id.name.as_str(), "panic" | "exit" | "todo"))
         }
         // A `loop` that nothing breaks out of never completes.
-        ExprKind::Loop { label, body } => !block_any(body, &mut |x| breaks_to(x, label.as_ref(), 0)),
+        ExprKind::Loop { label, body } => !block_any(body, &mut |x| breaks_to(b, x, label.as_ref(), 0)),
         _ => false,
     }
 }
@@ -197,38 +209,44 @@ fn clauses_any(cs: &[CompClause], f: &mut dyn FnMut(&Expr) -> bool) -> bool {
 }
 
 /// Whether `e` contains a `break` leaving the loop labeled `label` that is
-/// `depth` loops out (labels and loops do not reach into lambdas).
-fn breaks_to(e: &Expr, label: Option<&Ident>, depth: usize) -> bool {
+/// `depth` loops out (labels and loops do not reach into lambdas). Charges
+/// `b` per expression (nested loops are searched again for each enclosing
+/// one), answering `true` once it is exhausted.
+fn breaks_to(b: &CompileBudget, e: &Expr, label: Option<&Ident>, depth: usize) -> bool {
+    if !b.charge(1) {
+        return true;
+    }
     match &e.kind {
         ExprKind::Break { label: Some(l), .. } if label.is_some_and(|x| x.name == l.name) => true,
         ExprKind::Break { label: None, .. } if depth == 0 => true,
         ExprKind::Lambda { .. } => false,
-        ExprKind::Loop { .. } | ExprKind::While { .. } | ExprKind::For { .. } => any_sub_expr(e, &mut |x| breaks_to(x, label, depth + 1)),
-        _ => any_sub_expr(e, &mut |x| breaks_to(x, label, depth)),
+        ExprKind::Loop { .. } | ExprKind::While { .. } | ExprKind::For { .. } => {
+            any_sub_expr(e, &mut |x| breaks_to(b, x, label, depth + 1))
+        }
+        _ => any_sub_expr(e, &mut |x| breaks_to(b, x, label, depth)),
     }
 }
 
-/// Whether `e` contains a `break @name` or `continue @name` (outside lambdas).
-fn uses_label(e: &Expr, name: &str) -> bool {
+/// Whether `e` contains a `break @name` or `continue @name` (outside
+/// lambdas). Charges `b` like `breaks_to`.
+fn uses_label(b: &CompileBudget, e: &Expr, name: &str) -> bool {
+    if !b.charge(1) {
+        return true;
+    }
     match &e.kind {
         ExprKind::Break { label: Some(l), .. } | ExprKind::Continue(Some(l)) if l.name == name => true,
         ExprKind::Lambda { .. } => false,
-        _ => any_sub_expr(e, &mut |x| uses_label(x, name)),
+        _ => any_sub_expr(e, &mut |x| uses_label(b, x, name)),
     }
 }
 
 impl<'a> Linter<'a> {
     fn line_of(&self, pos: usize) -> usize {
-        match self.line_starts.binary_search(&pos) {
-            Ok(i) => i + 1,
-            Err(i) => i,
-        }
+        self.file.line_col(pos as u32).0
     }
 
     fn col_of(&self, pos: usize) -> usize {
-        let line = self.line_of(pos);
-        let start = self.line_starts[line - 1];
-        self.src.get(start..pos).map(|s| s.chars().count()).unwrap_or(0) + 1
+        self.file.line_col(pos as u32).1
     }
 
     fn warn(&mut self, pos: u32, code: &'static str, message: String) {
@@ -300,9 +318,9 @@ impl<'a> Linter<'a> {
                 }
                 ItemKind::Test(t) => {
                     // A test is a separate function: top-level bindings are not shadowed by it.
-                    let saved = std::mem::take(&mut self.let_scopes);
+                    let saved = (std::mem::take(&mut self.let_scopes), std::mem::take(&mut self.in_scope));
                     self.block(&t.body);
-                    self.let_scopes = saved;
+                    (self.let_scopes, self.in_scope) = saved;
                 }
                 ItemKind::Stmt(s) => self.stmt(s, true),
             }
@@ -334,14 +352,14 @@ impl<'a> Linter<'a> {
             }
         }
         if let Some(b) = &f.body {
-            let saved = std::mem::replace(&mut self.let_scopes, vec![vec![]]);
+            let saved = (std::mem::replace(&mut self.let_scopes, vec![vec![]]), std::mem::take(&mut self.in_scope));
             for p in &f.params {
                 if p.name.name != "self" {
                     self.bind(&p.name);
                 }
             }
             self.block(b);
-            self.let_scopes = saved;
+            (self.let_scopes, self.in_scope) = saved;
         }
     }
 
@@ -357,7 +375,23 @@ impl<'a> Linter<'a> {
         if let Some(ty) = self.binding_type(id)
             && let Some(scope) = self.let_scopes.last_mut()
         {
-            scope.push((id.name.clone(), ty));
+            scope.push(id.name.clone());
+            self.in_scope.entry(id.name.clone()).or_default().push(ty);
+        }
+    }
+
+    fn push_scope(&mut self) {
+        self.let_scopes.push(vec![]);
+    }
+
+    fn pop_scope(&mut self) {
+        for name in self.let_scopes.pop().unwrap_or_default() {
+            if let Some(types) = self.in_scope.get_mut(&name) {
+                types.pop();
+                if types.is_empty() {
+                    self.in_scope.remove(&name);
+                }
+            }
         }
     }
 
@@ -376,7 +410,7 @@ impl<'a> Linter<'a> {
         p.bindings(&mut ids);
         for id in &ids {
             let Some(ty) = self.binding_type(id) else { continue };
-            let prior = self.let_scopes.iter().rev().flat_map(|sc| sc.iter().rev()).find(|(n, _)| *n == id.name).map(|(_, t)| t.clone());
+            let prior = self.in_scope.get(&id.name).and_then(|types| types.last()).cloned();
             if let Some(prev_ty) = prior
                 && prev_ty != ty
             {
@@ -392,7 +426,7 @@ impl<'a> Linter<'a> {
     fn unreachable(&mut self, stmts: &[&Stmt]) {
         for w in stmts.windows(2) {
             if let StmtKind::Expr(e) = &w[0].kind
-                && diverges(e)
+                && diverges(self.budget, e)
             {
                 self.warn(w[1].span.lo, "unreachable-code", "unreachable code".into());
                 break;
@@ -401,13 +435,13 @@ impl<'a> Linter<'a> {
     }
 
     fn block(&mut self, b: &Block) {
-        self.let_scopes.push(vec![]);
+        self.push_scope();
         for s in &b.stmts {
             self.stmt(s, false);
         }
         let refs: Vec<&Stmt> = b.stmts.iter().collect();
         self.unreachable(&refs);
-        self.let_scopes.pop();
+        self.pop_scope();
     }
 
     fn empty_block(&mut self, b: &Block) {
@@ -434,6 +468,9 @@ impl<'a> Linter<'a> {
     }
 
     fn stmt(&mut self, s: &Stmt, top: bool) {
+        if !self.budget.charge(1) {
+            return;
+        }
         match &s.kind {
             StmtKind::Let { pattern, value, else_block, mutable, .. } => {
                 self.expr(value);
@@ -471,6 +508,9 @@ impl<'a> Linter<'a> {
     }
 
     fn expr(&mut self, e: &Expr) {
+        if !self.budget.charge(1) {
+            return;
+        }
         match &e.kind {
             ExprKind::Binary(op, a, b) => {
                 if matches!(op, BinOp::Eq | BinOp::Ne) {
@@ -504,11 +544,11 @@ impl<'a> Linter<'a> {
             }
             ExprKind::If { cond, then, else_ } => {
                 // `if let` bindings are in scope in the `then` block only.
-                self.let_scopes.push(vec![]);
+                self.push_scope();
                 self.cond(cond);
                 self.empty_block(then);
                 self.block(then);
-                self.let_scopes.pop();
+                self.pop_scope();
                 if let Some(x) = else_ {
                     if let ExprKind::Block(b) = &x.kind {
                         self.empty_block(b);
@@ -518,11 +558,11 @@ impl<'a> Linter<'a> {
             }
             ExprKind::While { label, cond, body } => {
                 self.label(label.as_ref(), body);
-                self.let_scopes.push(vec![]);
+                self.push_scope();
                 self.cond(cond);
                 self.empty_block(body);
                 self.block(body);
-                self.let_scopes.pop();
+                self.pop_scope();
             }
             ExprKind::Loop { label, body } => {
                 self.label(label.as_ref(), body);
@@ -533,36 +573,36 @@ impl<'a> Linter<'a> {
                 self.label(label.as_ref(), body);
                 self.pattern_names(pattern, false);
                 self.expr(iter);
-                self.let_scopes.push(vec![]);
+                self.push_scope();
                 self.bind_pattern(pattern);
                 self.empty_block(body);
                 self.block(body);
-                self.let_scopes.pop();
+                self.pop_scope();
             }
             ExprKind::Block(b) => self.block(b),
             ExprKind::Match { scrutinee, arms, .. } => {
                 self.expr(scrutinee);
                 for a in arms {
                     self.pattern_names_in(&a.pattern, false, false);
-                    self.let_scopes.push(vec![]);
+                    self.push_scope();
                     self.bind_pattern(&a.pattern);
                     if let Some(g) = &a.guard {
                         self.expr(g);
                     }
                     self.expr(&a.body);
-                    self.let_scopes.pop();
+                    self.pop_scope();
                 }
             }
             ExprKind::Lambda { params, body, .. } => {
                 for p in params {
                     self.name(&p.name, is_snake(&p.name.name), "parameter", "snake_case");
                 }
-                self.let_scopes.push(vec![]);
+                self.push_scope();
                 for p in params {
                     self.bind(&p.name);
                 }
                 self.expr(body);
-                self.let_scopes.pop();
+                self.pop_scope();
             }
             ExprKind::Str(segs) => {
                 for s in segs {
@@ -591,17 +631,17 @@ impl<'a> Linter<'a> {
                 }
             }
             ExprKind::ListComp(x, clauses) => {
-                self.let_scopes.push(vec![]);
+                self.push_scope();
                 self.clauses(clauses);
                 self.expr(x);
-                self.let_scopes.pop();
+                self.pop_scope();
             }
             ExprKind::MapComp(k, v, clauses) => {
-                self.let_scopes.push(vec![]);
+                self.push_scope();
                 self.clauses(clauses);
                 self.expr(k);
                 self.expr(v);
-                self.let_scopes.pop();
+                self.pop_scope();
             }
             ExprKind::StructLit { fields, base, .. } => {
                 for f in fields {
@@ -642,7 +682,7 @@ impl<'a> Linter<'a> {
     fn label(&mut self, label: Option<&Ident>, body: &Block) {
         let Some(l) = label else { return };
         self.name(l, is_snake(&l.name), "label", "snake_case");
-        if !block_any(body, &mut |x| uses_label(x, &l.name)) {
+        if !block_any(body, &mut |x| uses_label(self.budget, x, &l.name)) {
             self.warn(l.span.lo, "unused-label", format!("label `@{}` is never used", l.name));
         }
     }

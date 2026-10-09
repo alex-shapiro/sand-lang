@@ -1223,9 +1223,12 @@ fn compile_modules(
         }
     }
     let (native_help, native_argc) = native_info(&checked, registry);
-    let mut program =
-        crate::compile::compile(crate::compile::CompileInput { checked: &checked, sm, native_lookup: &lookup, native_help, native_argc })
-            .map_err(|ds| Error::Compile(ds.iter().map(|d| sm.resolve(d)).collect()))?;
+    let input = crate::compile::CompileInput { checked: &checked, sm, native_lookup: &lookup, native_help, native_argc, budget: &budget };
+    let program = crate::compile::compile(input);
+    if let Some(stop) = budget.stopped() {
+        return Err(budget_error(stop, sm, main_file));
+    }
+    let mut program = program.map_err(|ds| Error::Compile(ds.iter().map(|d| sm.resolve(d)).collect()))?;
     program.available_modules = registry.sources.keys().filter(|k| k.as_str() != "prelude").cloned().collect();
     program.help_index = Some(registry.help.clone());
     Ok(Compiled { program: Arc::new(program), warnings: vec![], facts: Some(facts) })

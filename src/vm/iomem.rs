@@ -166,10 +166,13 @@ impl Drop for Reservation {
 /// One open resource (a socket being connected, accepted or used by a
 /// pending operation) counted against `max_open_resources` until it becomes
 /// a heap object, which the heap counts instead, or until it is dropped
-/// (the operation failed, finished or was cancelled).
+/// (the operation failed, finished or was cancelled). The fixed buffers of a
+/// connection are reserved with its slot ([`ResourceSlot::reserve_buffers`])
+/// and, likewise, counted by the heap object's `size()` once it is one.
 #[derive(Debug)]
 pub struct ResourceSlot {
     mem: Arc<IoMemory>,
+    buffers: Reservation,
 }
 
 impl ResourceSlot {
@@ -177,7 +180,12 @@ impl ResourceSlot {
     /// against the heap's open resources plus [`IoMemory::pending_resources`]).
     pub fn new(mem: &Arc<IoMemory>) -> ResourceSlot {
         mem.pending_resources.fetch_add(1, Ordering::Relaxed);
-        ResourceSlot { mem: mem.clone() }
+        ResourceSlot { mem: mem.clone(), buffers: Reservation::new(mem) }
+    }
+
+    /// Reserves `bytes` (in total) for the fixed buffers of the resource.
+    pub fn reserve_buffers(&mut self, bytes: usize) -> Result<(), MemoryLimit> {
+        self.buffers.ensure(bytes)
     }
 }
 
@@ -209,6 +217,12 @@ mod tests {
         assert!(buf.capacity() >= 10 && b.bytes() >= buf.capacity());
         drop(b);
         assert_eq!(mem.reserved(), 0);
+        let mut slot = ResourceSlot::new(&mem);
+        slot.reserve_buffers(64).unwrap();
+        slot.reserve_buffers(64).unwrap();
+        assert_eq!((mem.reserved(), mem.pending_resources()), (64, 1));
+        drop(slot);
+        assert_eq!((mem.reserved(), mem.pending_resources()), (0, 0));
         let unlimited = IoMemory::new(None);
         Reservation::new(&unlimited).ensure(1 << 39).unwrap();
         assert_eq!(unlimited.reserved(), 0);

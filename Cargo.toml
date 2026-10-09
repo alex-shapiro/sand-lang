@@ -29,6 +29,8 @@ unicode-normalization = "0.1"
 rustix = { version = "1", default-features = false, features = ["fs", "std"] }
 
 [dev-dependencies]
+# Pseudo-terminals (Unix ptys, Windows ConPTY) for testing `--prompt`.
+portable-pty = "0.9"
 proptest = "1"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "io-util", "macros"] }
 
