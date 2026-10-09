@@ -54,7 +54,7 @@ use std::task::Poll;
 /// * An input that fails to compile has no effect. An input that panics (or
 ///   exceeds a limit, is interrupted or calls `exit`) keeps its declarations
 ///   and the effects that happened before the failure, including global
-///   assignments; its remaining globals stay uninitialised. All tasks are
+///   assignments; its remaining globals stay uninitialized. All tasks are
 ///   then cancelled.
 /// * Tasks spawned by an input keep running, alongside later inputs, and
 ///   between inputs while the front end calls [`Session::run_tasks_until`].
@@ -90,7 +90,7 @@ struct State {
     checker: Checker<'static>,
     compiler: Incremental,
     vm: Vm,
-    /// The entry that initialises the standard modules, until it has run.
+    /// The entry that initializes the standard modules, until it has run.
     pending: Option<u32>,
     /// Set while an input's imports are being loaded or it is running, so
     /// that the work of an `eval` future dropped there can be undone.
@@ -308,7 +308,7 @@ impl Session {
     /// that background tasks keep running between inputs; when no task can
     /// make progress, it just awaits `until`.
     ///
-    /// The instruction, CPU time and output limits apply to each call as to
+    /// Instruction, CPU time and output limits apply to each call as to
     /// an input; the wall-time limit does not apply (waiting for input may
     /// take any time). Permission prompts wait until `until` has completed,
     /// so that they do not compete with the front end for its input; no
@@ -468,7 +468,7 @@ impl Session {
         Ok(self.state.as_mut().unwrap())
     }
 
-    /// Makes sure the session is started and its standard modules initialised.
+    /// Makes sure the session is started and its standard modules initialized.
     async fn start(&mut self) -> Result<(), Error> {
         if let Some(entry) = self.state()?.pending.take() {
             self.run(entry, false).await?;
@@ -557,7 +557,7 @@ impl Session {
     }
 
     /// Loads the modules `source` imports for the first time, then checks and
-    /// compiles them and the input. Returns the entry that initialises them
+    /// compiles them and the input. Returns the entry that initializes them
     /// and runs the input, and the type of the input's value (if
     /// `want_value` and it has one). On error, the session is unchanged.
     async fn compile_input(&mut self, name: &str, source: &str, want_value: bool) -> Result<(u32, Option<Type>), Error> {
@@ -625,7 +625,7 @@ impl Session {
                     }
                     checked.map_err(resolve)?;
                     let value = checker.cell_value.take();
-                    // Initialise the new modules, then run the input.
+                    // Initialize the new modules, then run the input.
                     let session = checker.session.unwrap_or_default();
                     let inits: Vec<FnId> =
                         (first_id..first_id + added).chain([session as usize]).filter_map(|m| checker.mods[m].init).collect();
@@ -674,7 +674,6 @@ impl Session {
         // Limits other than memory apply to each input.
         vm.fuel_used = 0;
         vm.host.output_bytes = 0;
-        // (Changed by idle runs.)
         vm.host.limits.max_wall_time = engine.config().limits.max_wall_time;
         vm.host.prompter = engine.config().prompter.clone();
         st.running = true;

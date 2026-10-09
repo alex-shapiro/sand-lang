@@ -151,7 +151,7 @@ spec begins at the first `:` that is not nested inside `()`, `[]`, `{}` or a
 string.
 
 > **Beware literal braces.** Because every `{` in a non-raw string starts an
-> interpolation, text that merely *contains* braces changes meaning silently or
+> interpolation, text that merely _contains_ braces changes meaning silently or
 > fails to compile. A regex quantifier such as `"[0-9]{4}"` evaluates `4` and
 > produces the pattern `[0-9]4`; JSON text such as `"{\"a\": 1}"` is parsed as
 > an interpolation and rejected. Write such text as a raw string
@@ -190,9 +190,9 @@ comment, `import` declarations, then any mix of item declarations (§4),
 `test` blocks and top-level statements.
 
 When a module is executed, its top-level statements and top-level `let`/`var`
-initialisers run in source order. Functions, types and methods may be referred
+initializers run in source order. Functions, types and methods may be referred
 to before their textual definition. A top-level variable read before its
-initialiser has run causes a panic (`global used before initialization`).
+initializer has run causes a panic (`global used before initialization`).
 
 The **main module** is the module the host asks the engine to run. Each imported
 module is executed exactly once, before the first module that imports it,
@@ -369,7 +369,7 @@ var counter = 0
 ```
 
 Top-level `let` and `var` follow the same rules as local bindings; their types
-must be fully inferred from their initialiser and module-level uses.
+must be fully inferred from their initializer and module-level uses.
 
 ### 4.7 Native declarations
 
@@ -475,7 +475,7 @@ implements a trait for a type.
 - Each type parameter of the impl must occur in the type or in the trait
   arguments. The impl's bounds (in `<...>` or in a `where` clause after the
   type) are required wherever the impl is used: `impl<T: Describe> Describe
-  for [T]` makes `[T]` implement `Describe` exactly when `T` does.
+for [T]` makes `[T]` implement `Describe` exactly when `T` does.
 - The impl defines each required method of the trait, may override default
   methods, and may not define other methods. Each method's signature must
   equal the trait's after replacing `Self` by the impl's type and the trait's
@@ -1067,7 +1067,7 @@ A panic aborts the whole engine run (all tasks) with a runtime error carrying a
 message and a stack trace of `file:line` entries. Panics are raised by: integer
 overflow, division by zero, index/key/slice errors, `panic(msg)`, failed
 `assert`, `unwrap`/`expect` on `None`/`Err`, unreachable code, use of a global
-before initialisation, stack overflow, deep nesting during value printing,
+before initialization, stack overflow, deep nesting during value printing,
 comparison or hashing (beyond 2,000 levels), and waiting on a cancelled task.
 Panics cannot be caught by scripts and do not run deferred expressions
 (§7.1). (The test runner isolates panics per test.)
@@ -1159,7 +1159,7 @@ Examples: `"{3.14159:.2}"` → `3.14`; `"{42:>5}"` → `   42`; `"{7:03}"` →
 
 An engine runs one task at a time on one OS thread. All I/O is asynchronous:
 when a task performs I/O it is suspended and other ready tasks run. There is no
-`async`/`await` colouring — any function may suspend. Tasks are scheduled
+`async`/`await` coloring — any function may suspend. Tasks are scheduled
 cooperatively with preemption at instruction-count boundaries, so a busy loop in
 one task does not starve others.
 
@@ -1301,44 +1301,44 @@ element outside `0..=255`), `bytes.from_hex(s: str) -> bytes?`.
 
 ### 12.8 `[T]`
 
-| Method                                                                          | Description                   |
-| ------------------------------------------------------------------------------- | ----------------------------- |
-| `len()`, `is_empty()`                                                           |                               |
-| `push(x: T)`, `pop() -> T?`                                                     | at the end                    |
-| `insert(i: int, x: T)`, `remove(i: int) -> T`                                   | panics if out of range        |
-| `extend(xs: [T])`, `clear()`                                                    |                               |
-| `get(i: int) -> T?`, `first() -> T?`, `last() -> T?`                            |                               |
-| `contains(x: T) -> bool`, `index_of(x: T) -> int?`                              | `T: Eq`                       |
-| `reverse()` (in place), `reversed() -> [T]`                                     |                               |
-| `sort()`, `sorted() -> [T]`                                                     | `T: Ord`, stable              |
-| `sort_by<K: Ord>(key: fn(T) -> K)`, `sorted_by<K: Ord>(key: fn(T) -> K) -> [T]` | stable                        |
-| `map<U>(f: fn(T) -> U) -> [U]`                                                  |                               |
-| `filter(f: fn(T) -> bool) -> [T]`                                               |                               |
-| `filter_map<U>(f: fn(T) -> U?) -> [U]`                                          |                               |
-| `flat_map<U>(f: fn(T) -> [U]) -> [U]`                                           |                               |
-| `each(f: fn(T))`                                                                |                               |
-| `fold<A>(init: A, f: fn(A, T) -> A) -> A`                                       |                               |
-| `reduce(f: fn(T, T) -> T) -> T?`                                                |                               |
-| `any(f: fn(T) -> bool)`, `all(f: fn(T) -> bool)`                                |                               |
-| `find(f: fn(T) -> bool) -> T?`, `find_index(f: fn(T) -> bool) -> int?`          |                               |
-| `count(f: fn(T) -> bool) -> int`                                                |                               |
+| Method                                                                          | Description                             |
+| ------------------------------------------------------------------------------- | --------------------------------------- |
+| `len()`, `is_empty()`                                                           |                                         |
+| `push(x: T)`, `pop() -> T?`                                                     | at the end                              |
+| `insert(i: int, x: T)`, `remove(i: int) -> T`                                   | panics if out of range                  |
+| `extend(xs: [T])`, `clear()`                                                    |                                         |
+| `get(i: int) -> T?`, `first() -> T?`, `last() -> T?`                            |                                         |
+| `contains(x: T) -> bool`, `index_of(x: T) -> int?`                              | `T: Eq`                                 |
+| `reverse()` (in place), `reversed() -> [T]`                                     |                                         |
+| `sort()`, `sorted() -> [T]`                                                     | `T: Ord`, stable                        |
+| `sort_by<K: Ord>(key: fn(T) -> K)`, `sorted_by<K: Ord>(key: fn(T) -> K) -> [T]` | stable                                  |
+| `map<U>(f: fn(T) -> U) -> [U]`                                                  |                                         |
+| `filter(f: fn(T) -> bool) -> [T]`                                               |                                         |
+| `filter_map<U>(f: fn(T) -> U?) -> [U]`                                          |                                         |
+| `flat_map<U>(f: fn(T) -> [U]) -> [U]`                                           |                                         |
+| `each(f: fn(T))`                                                                |                                         |
+| `fold<A>(init: A, f: fn(A, T) -> A) -> A`                                       |                                         |
+| `reduce(f: fn(T, T) -> T) -> T?`                                                |                                         |
+| `any(f: fn(T) -> bool)`, `all(f: fn(T) -> bool)`                                |                                         |
+| `find(f: fn(T) -> bool) -> T?`, `find_index(f: fn(T) -> bool) -> int?`          |                                         |
+| `count(f: fn(T) -> bool) -> int`                                                |                                         |
 | `sum() -> T`, `product() -> T`                                                  | `T: Num`; empty: `T.zero()` / `T.one()` |
-| `min() -> T?`, `max() -> T?`                                                    | `T: Ord`                      |
-| `min_by<K: Ord>(key: fn(T) -> K) -> T?`, `max_by<K: Ord>(...)`                  | first minimal / first maximal |
-| `enumerate() -> [(int, T)]`                                                     |                               |
-| `zip<U>(other: [U]) -> [(T, U)]`                                                | truncates to the shorter      |
-| `take(n: int)`, `skip(n: int)`                                                  | clamp to length               |
-| `take_while(f)`, `skip_while(f)`                                                |                               |
-| `chunks(n: int) -> [[T]]`, `windows(n: int) -> [[T]]`                           | `n > 0`                       |
-| `dedup() -> [T]`                                                                | remove consecutive duplicates |
-| `unique() -> [T]`                                                               | first occurrences, `T: Hash`  |
-| `group_by<K: Hash>(key: fn(T) -> K) -> [K: [T]]`                                |                               |
-| `partition(f: fn(T) -> bool) -> ([T], [T])`                                     |                               |
-| `copy() -> [T]`                                                                 | shallow copy                  |
-| `swap(i: int, j: int)`                                                          |                               |
-| `join(sep: str = "") -> str`                                                    | `T = str` only                |
-| `to_set() -> Set<T>`                                                            | `T: Hash`                     |
-| `iter() -> Iter<T>`                                                             | lazy iterator (§12.13)        |
+| `min() -> T?`, `max() -> T?`                                                    | `T: Ord`                                |
+| `min_by<K: Ord>(key: fn(T) -> K) -> T?`, `max_by<K: Ord>(...)`                  | first minimal / first maximal           |
+| `enumerate() -> [(int, T)]`                                                     |                                         |
+| `zip<U>(other: [U]) -> [(T, U)]`                                                | truncates to the shorter                |
+| `take(n: int)`, `skip(n: int)`                                                  | clamp to length                         |
+| `take_while(f)`, `skip_while(f)`                                                |                                         |
+| `chunks(n: int) -> [[T]]`, `windows(n: int) -> [[T]]`                           | `n > 0`                                 |
+| `dedup() -> [T]`                                                                | remove consecutive duplicates           |
+| `unique() -> [T]`                                                               | first occurrences, `T: Hash`            |
+| `group_by<K: Hash>(key: fn(T) -> K) -> [K: [T]]`                                |                                         |
+| `partition(f: fn(T) -> bool) -> ([T], [T])`                                     |                                         |
+| `copy() -> [T]`                                                                 | shallow copy                            |
+| `swap(i: int, j: int)`                                                          |                                         |
+| `join(sep: str = "") -> str`                                                    | `T = str` only                          |
+| `to_set() -> Set<T>`                                                            | `T: Hash`                               |
+| `iter() -> Iter<T>`                                                             | lazy iterator (§12.13)                  |
 
 ### 12.9 `[K: V]`
 
@@ -1421,14 +1421,14 @@ obtained with `iter()` from lists, maps (`(key, value)` pairs), sets, ranges,
 channels and any `Iterator`, with `chars_iter()` from strings, or from these
 static sources:
 
-| Source                                                     | Elements                                                |
-| ---------------------------------------------------------- | ------------------------------------------------------- |
-| `Iter.from_fn(f: fn() -> T?)`                              | the results of `f` until it returns `None` (also `Iter { next: f }`) |
-| `Iter.empty()`                                             | none                                                    |
-| `Iter.once(x: T)`                                          | `x`                                                     |
-| `Iter.repeat(x: T)`                                        | `x` forever                                             |
-| `Iter.count_from(start: int, step: int = 1) -> Iter<int>`  | `start`, `start + step`, ... forever                    |
-| `Iter.successors(first: T?, f: fn(T) -> T?)`               | `first`, then `f` of the previous element until `None`  |
+| Source                                                    | Elements                                                             |
+| --------------------------------------------------------- | -------------------------------------------------------------------- |
+| `Iter.from_fn(f: fn() -> T?)`                             | the results of `f` until it returns `None` (also `Iter { next: f }`) |
+| `Iter.empty()`                                            | none                                                                 |
+| `Iter.once(x: T)`                                         | `x`                                                                  |
+| `Iter.repeat(x: T)`                                       | `x` forever                                                          |
+| `Iter.count_from(start: int, step: int = 1) -> Iter<int>` | `start`, `start + step`, ... forever                                 |
+| `Iter.successors(first: T?, f: fn(T) -> T?)`              | `first`, then `f` of the previous element until `None`               |
 
 **Adapters** return a new `Iter` and do no work until it is consumed:
 `map<U>(f: fn(T) -> U)`, `filter(f: fn(T) -> bool)`, `filter_map<U>(f: fn(T) ->
@@ -1476,7 +1476,7 @@ T?` (`T: Ord`; the first minimal/maximal), `min_by`/`max_by<K: Ord>(key: fn(T)
   instruction, time and memory limits (§15) like any loop.
 - **Performance.** A pipeline written as one expression where it is consumed
   (`for x in xs.iter().map(f).filter(g) { ... }`, `xs.iter().map(f).sum()`)
-  is compiled to a single loop with the same behaviour, so it builds no
+  is compiled to a single loop with the same behavior, so it builds no
   intermediate lists and costs about as much as the equivalent hand-written
   loop; so are the eager methods taking a function (`xs.map(f)`). An
   iterator stored in a variable and consumed later calls a closure per
@@ -1537,7 +1537,7 @@ Paths may use `/` as the separator on every platform (on Windows `\` is also
 a separator). `join` inserts the platform's separator (`\` on Windows) and a
 part that is an absolute path replaces the parts before it; `basename`,
 `dirname` and `extension` are purely lexical. Paths in capabilities and
-prompts are absolute and normalised (§14.1); on Windows they use the plain
+prompts are absolute and normalized (§14.1); on Windows they use the plain
 `C:\...` form rather than the `\\?\` form. Permission errors name the path
 as the script spelled it (`permission denied: read data/x.txt`), so that
 they reveal neither symlink targets nor the stored spelling of names the
@@ -1879,7 +1879,7 @@ forms; returns lower-case hyphenated), `is_valid(s: str) -> bool`,
   engine's policy **before** the effect occurs.
 - The VM has no FFI, does not spawn processes, does not use IPC, shared memory
   or `mmap`, and never executes generated machine code.
-- Paths are normalised lexically (`.`/`..` resolved) and, when they exist,
+- Paths are normalized lexically (`.`/`..` resolved) and, when they exist,
   canonicalised (symlinks resolved) before being checked, so a script cannot
   escape an allowed directory via `..` or symlinks. The checked location is
   then accessed without following symlinks (directories are opened one
@@ -1961,14 +1961,14 @@ requested once.
   containing it from being renamed, replaced or recursively removed as a
   whole (`Policy::denies_under`); custom policies are only asked about the
   top-level paths of such operations. Path rules are compared after
-  normalisation (§14.1), which names existing files and directories with
-  their stored spelling (on case- or normalisation-insensitive file systems
+  normalization (§14.1), which names existing files and directories with
+  their stored spelling (on case- or normalization-insensitive file systems
   `data/ſecrets` or `data/SECRETS` may name `data/secrets`). For operations
   on an entry itself (below), a final symlink is named with its stored
   spelling too, which is looked up in its directory; in a directory of more
   than 4096 entries it keeps the spelling it was given. Allow rules
   compare paths exactly (ignoring case on Windows). Deny rules, on every
-  platform, compare paths caselessly and normalisation-insensitively
+  platform, compare paths caselessly and normalization-insensitively
   (canonical decomposition, full case folding, default-ignorable characters
   removed), so a deny rule also covers other spellings of a path, including
   a not-yet-existing one (`data/ſecrets`, `café` with a precomposed or a
@@ -2030,7 +2030,7 @@ Configurable per engine:
 | `max_wall_time`      | unlimited  | run fails: `time limit exceeded` (prompts excluded); also bounds compilation, counted from its start                     |
 | `max_call_depth`     | 10,000     | panic: `stack overflow`                                                                                                  |
 | `max_tasks`          | 10,000     | `spawn` panics: `task limit exceeded`                                                                                    |
-| `max_open_resources` | 1,024      | open/connect/listen/accept and HTTP requests fail with kind `"limit"` (pending operations' sockets count, §13.11)          |
+| `max_open_resources` | 1,024      | open/connect/listen/accept and HTTP requests fail with kind `"limit"` (pending operations' sockets count, §13.11)        |
 | `max_output_bytes`   | unlimited  | writes fail: `output limit exceeded`                                                                                     |
 | `max_http_body`      | 64 MiB     | HTTP read fails with kind `"limit"`                                                                                      |
 | `max_source_bytes`   | 16 MiB     | compile error: `source too large` (the main file and all imported scripts together; the standard library is not counted) |
@@ -2080,13 +2080,13 @@ library function or a generic operation is charged in proportion to its size,
 roughly one unit per simple loop iteration's worth of work (a few to a few
 tens of nanoseconds):
 
-| Work                                                                                        | Cost                        |
-| ------------------------------------------------------------------------------------------- | --------------------------- |
-| element visited, compared, hashed, copied or produced                                       | 1 unit                      |
-| byte copied, compared or scanned (strings, bytes, output text)                              | 1/64 unit                   |
-| byte processed one at a time (hashing, regex search, encodings, case conversion, JSON text) | 1/8 unit                    |
+| Work                                                                                        | Cost                                                                 |
+| ------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| element visited, compared, hashed, copied or produced                                       | 1 unit                                                               |
+| byte copied, compared or scanned (strings, bytes, output text)                              | 1/64 unit                                                            |
+| byte processed one at a time (hashing, regex search, encodings, case conversion, JSON text) | 1/8 unit                                                             |
 | compiling a regex                                                                           | 1,000 + 16 per pattern byte, + 1/8 unit per byte of compiled program |
-| regex work (compiling, searching, iterating), at least                                      | 1 unit per microsecond it takes |
+| regex work (compiling, searching, iterating), at least                                      | 1 unit per microsecond it takes                                      |
 
 Elements include list, map and set elements, the components of values being
 compared, hashed, displayed or encoded, JSON values, regex matches and sort
@@ -2134,13 +2134,13 @@ Checking a program happens before it runs, so it is bounded separately:
   its analyses. Ordinary programs need less than one unit per byte of source
   (a `match` with 1,000 arms on an enum about a million). When
   `max_compile_fuel` is exhausted, compilation fails with `program too complex
-  to compile`. `None` means unlimited.
+to compile`. `None` means unlimited.
 - **Time and interrupts.** Compilation stops with `time limit exceeded` once
   `max_wall_time` has elapsed since it started, and with an interrupt error
   when the host interrupts the engine.
 - **Local limits**, reported at the offending construct: syntactic nesting of
   expressions, types, patterns and blocks is limited to 256 levels (`nesting
-  too deep`); strings nested inside string interpolations to 32 levels
+too deep`); strings nested inside string interpolations to 32 levels
   (`strings nested too deeply inside string interpolations`); types to 10,000
   components (`type too large`); the exhaustiveness check of one `match` to a
   fixed amount of work (`pattern too complex to check for exhaustiveness`);
@@ -2152,10 +2152,10 @@ Checking a program happens before it runs, so it is bounded separately:
   one description may take at most 100,000 units of work (about one per
   component built or type component examined), and all the descriptions of
   a compilation together at most 1,000,000 (`type too large to describe at
-  runtime`); a polymorphically recursive type such as `struct P<T> { next:
-  P<[T]>? }` cannot be described. Finally, the copies of deferred code
+runtime`); a polymorphically recursive type such as `struct P<T> { next:
+P<[T]>? }` cannot be described. Finally, the copies of deferred code
   (§7.1) in one function are limited to about a million instructions (`too
-  much deferred code`).
+much deferred code`).
 - **Diagnostics.** At most 50 syntax errors per module, and 50 type errors,
   are reported.
 - **Memory.** Compilation is not counted against `max_memory`: it uses memory
@@ -2196,7 +2196,7 @@ let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 
   operations on a directory entry itself), `Policy::denies_under(path)`;
   `RulePolicy::{allow_net, deny_net, deny_private_networks, ...}`;
   `sandlang::policy::{is_private_address, normalize_path,
-  normalize_entry_path}` for hosts writing their own policies or natives.
+normalize_entry_path}` for hosts writing their own policies or natives.
 - `NativeModule::function` accepts closures whose argument and return types
   implement `FromValue`/`IntoValue`: `i64`, `f64`, `bool`, `String`, `Vec<u8>`
   (as `bytes`), `()`, `Vec<T>`, `Option<T>`, `Result<T, E: Display>` (as
@@ -2276,23 +2276,23 @@ value that cannot be parsed.
 Reports warnings (exit code 1 if any, unless `--allow-warnings`; 2 if a file
 cannot be read or has errors):
 
-| Lint                | Description                                                                      |
-| ------------------- | -------------------------------------------------------------------------------- |
-| `unused-variable`   | local binding or parameter never read (names starting with `_` are exempt)       |
-| `unused-import`     | import never referenced                                                          |
-| `unused-function`   | private function or method not reachable from the module's public items, top-level code or tests (see below) |
-| `unnecessary-var`   | `var` never reassigned (use `let`)                                               |
-| `unused-result`     | a `Result` value is discarded                                                    |
-| `unreachable-code`  | statement after `return`, `break`, `continue`, `panic`, `exit`, or after a `loop` that no `break` leaves (labeled breaks from nested loops count) |
-| `unused-label`      | loop label that no `break` or `continue` refers to                               |
-| `naming`            | violates naming conventions (§2.4)                                               |
-| `bool-comparison`   | comparing with `true`/`false` literal                                            |
-| `self-assignment`   | `x = x`                                                                          |
-| `len-zero`          | `x.len() == 0` (use `is_empty()`)                                                |
-| `empty-block`       | empty `if`/`else`/loop body                                                      |
-| `todo`              | call to `todo()`                                                                 |
-| `interpolated-literal` | `{4}` in a string: a number literal interpolated without a format spec (usually meant as literal braces, §2.5) |
-| `shadowed-variable` | `let`/`var` binding a name that is already bound, with a different type, by a binding of the same function that is still in scope (see below) |
+| Lint                   | Description                                                                                                                                       |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `unused-variable`      | local binding or parameter never read (names starting with `_` are exempt)                                                                        |
+| `unused-import`        | import never referenced                                                                                                                           |
+| `unused-function`      | private function or method not reachable from the module's public items, top-level code or tests (see below)                                      |
+| `unnecessary-var`      | `var` never reassigned (use `let`)                                                                                                                |
+| `unused-result`        | a `Result` value is discarded                                                                                                                     |
+| `unreachable-code`     | statement after `return`, `break`, `continue`, `panic`, `exit`, or after a `loop` that no `break` leaves (labeled breaks from nested loops count) |
+| `unused-label`         | loop label that no `break` or `continue` refers to                                                                                                |
+| `naming`               | violates naming conventions (§2.4)                                                                                                                |
+| `bool-comparison`      | comparing with `true`/`false` literal                                                                                                             |
+| `self-assignment`      | `x = x`                                                                                                                                           |
+| `len-zero`             | `x.len() == 0` (use `is_empty()`)                                                                                                                 |
+| `empty-block`          | empty `if`/`else`/loop body                                                                                                                       |
+| `todo`                 | call to `todo()`                                                                                                                                  |
+| `interpolated-literal` | `{4}` in a string: a number literal interpolated without a format spec (usually meant as literal braces, §2.5)                                    |
+| `shadowed-variable`    | `let`/`var` binding a name that is already bound, with a different type, by a binding of the same function that is still in scope (see below)     |
 
 `unused-function` applies to the module being linted. Its public items are
 `pub` top-level functions and all methods of `pub` types; every other function
@@ -2347,7 +2347,7 @@ a file that needs more is not formatted: `source too complex to format`
 ### 17.4 `sand test FILE... [OPTIONS]`
 
 Runs the module's top-level code with output captured, then every `test` block
-as a separate task with a fresh view of top-level state _as initialised_. Each
+as a separate task with a fresh view of top-level state _as initialized_. Each
 test passes if it completes without panicking. Output: one line per test
 (`ok name` / `FAIL name: message`) and a summary `N passed, M failed`. Exit
 code 1 if any test failed, 2 for compile errors.
@@ -2412,7 +2412,7 @@ and run **exactly once**; state persists between inputs.
 - An input that fails to compile has no effect. An input that panics, exceeds
   a limit or is interrupted keeps its declarations and every effect that
   happened before the failure, including assignments to globals; globals it
-  had not initialised yet remain uninitialised (reading them panics, §3.1). A
+  had not initialized yet remain uninitialized (reading them panics, §3.1). A
   top-level `?` that meets an `Err` aborts the input like a panic whose
   message is the error.
 - Tasks spawned by an input keep running while later inputs run, and while
@@ -2446,13 +2446,13 @@ not a terminal, a script that reads it may consume input meant for the REPL.
 
 Commands (on a line of their own):
 
-| Command      | Effect                                                         |
-| ------------ | -------------------------------------------------------------- |
-| `:help`      | show the commands                                              |
-| `:type EXPR` | show the type of an expression without running it (a generic function as `fn<T: Ord>([T]) -> T?`) |
-| `:test`      | run the `test` blocks entered so far, against the current state (the last block of each name; effects persist), and print a report as `sand test` does |
-| `:reset`     | forget all inputs and start a fresh session ("always" answers are kept) |
-| `:quit`, `:q` | end the session (exit code 0)                                 |
+| Command       | Effect                                                                                                                                                 |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `:help`       | show the commands                                                                                                                                      |
+| `:type EXPR`  | show the type of an expression without running it (a generic function as `fn<T: Ord>([T]) -> T?`)                                                      |
+| `:test`       | run the `test` blocks entered so far, against the current state (the last block of each name; effects persist), and print a report as `sand test` does |
+| `:reset`      | forget all inputs and start a fresh session ("always" answers are kept)                                                                                |
+| `:quit`, `:q` | end the session (exit code 0)                                                                                                                          |
 
 ---
 

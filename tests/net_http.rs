@@ -466,9 +466,6 @@ for i in 0..2 {
 
 #[test]
 fn connection_buffers_count_against_the_memory_limit() {
-    // Each open connection counts its 8 KiB read buffer: connecting (and
-    // accepting) fails with kind "limit" once they fill the memory limit, and
-    // closing connections makes room again.
     let src = r#"
 import net
 let listener = net.listen("127.0.0.1:0")?
@@ -501,12 +498,10 @@ print(server.wait() > 0)
     let out = r.ok_stdout();
     let lines: Vec<&str> = out.lines().collect();
     assert!(lines[0].starts_with("limit: cannot open a connection"), "{out}");
-    // At most 8 KiB per connection (16 KiB once the server task accepts it).
     let n: usize = lines[1].parse().unwrap();
     assert!((20..=128).contains(&n), "{n} connections");
     assert_eq!(&lines[2..], ["true", "true"]);
 
-    // An HTTP server answers connections whose buffers do not fit with 503.
     let src = r#"
 import http
 let server = http.serve("127.0.0.1:0")?

@@ -27,7 +27,7 @@ pub enum Value {
     Tag(u32),
     /// A heap object handle.
     Obj(u32),
-    /// A global that has not been initialised yet.
+    /// A global that has not been initialized yet.
     Uninit,
     /// `variant(())`.
     VUnit(u32),
@@ -142,9 +142,8 @@ impl VariantRef<'_> {
     }
 }
 
-/// The fast hasher of map and set keys (and of the engine's other tables):
-/// FxHash's word-at-a-time structure, but each 8-byte word is mixed in with
-/// a folded multiply (the two halves of a 128-bit product XORed, as in
+/// The fast hasher of map and set keys. FxHash, but each 8-byte word is mixed
+/// in with a folded multiply (the two halves of a 128-bit product XORed, as in
 /// foldhash), starting from a random per-process seed.
 ///
 /// Scripts choose map and set keys, so they must not be able to choose keys
@@ -170,8 +169,7 @@ fn hash_seed() -> u64 {
 }
 
 impl Default for FxHasher {
-    /// A hasher starting from the process's seed (see [`FxBuild`], which
-    /// reads it once per table, not once per hash).
+    /// A hasher starting from the process seed.
     fn default() -> Self {
         FxHasher { hash: hash_seed() }
     }
@@ -193,8 +191,6 @@ impl Hasher for FxHasher {
             self.add(u64::from_le_bytes(*c));
         }
         if !rem.is_empty() {
-            // (Byte by byte: a variable-length copy into a buffer would call
-            // `memcpy` for every short key.)
             let w = rem.iter().rev().fold(0u64, |w, &b| (w << 8) | b as u64);
             self.add(w);
         }
@@ -560,7 +556,7 @@ impl std::fmt::Debug for Obj {
 
 const VALUE_SIZE: usize = std::mem::size_of::<Value>();
 
-// Objects are kept small: the heap is an array of them.
+// Objects are kept small.
 const _: () = assert!(std::mem::size_of::<Obj>() == 32);
 
 /// Fixed cost of an entry of a map's or set's key index (the key's own

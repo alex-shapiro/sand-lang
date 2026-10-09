@@ -22,13 +22,11 @@ pub trait FromValue: Sized {
     fn from_value(vm: &Vm, v: Value) -> Result<Self, String>;
 
     /// The memory that converting `v` allocates besides `Self` itself
-    /// (string and byte buffers, vector elements), which the typed function
-    /// wrappers check against the memory limit before converting their
-    /// arguments: values share structure (a list may hold one big string
-    /// many times), so a conversion can be far larger than its argument.
-    /// Charges for any walk it does; limit errors are encoded with
-    /// `meter::ctl_message`. Types whose conversion allocates in proportion
-    /// to their input should override the default (nothing).
+    /// (string and byte buffers, vector elements).
+    ///
+    /// Charges for any walk performed; limit errors are encoded with
+    /// `meter::ctl_message`. Types whose conversion allocates in
+    /// proportion to their input should override the default.
     fn alloc_size(_vm: &Vm, _v: Value) -> Result<usize, String> {
         Ok(0)
     }

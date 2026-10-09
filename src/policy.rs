@@ -142,8 +142,8 @@ impl Policy {
     }
 
     /// Like [`Policy::check`] for a capability whose path (`FsRead`,
-    /// `FsWrite`) the caller already normalised with [`normalize_path`]
-    /// (and will operate on exactly): a rule policy skips normalising it
+    /// `FsWrite`) the caller already normalized with [`normalize_path`]
+    /// (and will operate on exactly): a rule policy skips normalizing it
     /// again, which costs a `realpath`.
     pub fn check_normalized(&self, cap: &Capability) -> Decision {
         match self {
@@ -201,10 +201,10 @@ impl Default for RulePolicy {
     }
 }
 
-/// Paths (as given by a script, before normalisation) longer than this many
+/// Paths (as given by a script, before normalization) longer than this many
 /// bytes are refused by the file system functions and imports: no usable
 /// path is that long (`PATH_MAX` is 4096 bytes on Linux and 1024 on macOS),
-/// and normalising one costs time in proportion to its length.
+/// and normalizing one costs time in proportion to its length.
 pub const MAX_PATH_BYTES: usize = 4096;
 
 /// Resolves `.` and `..` lexically.
@@ -222,9 +222,9 @@ fn lexical(p: &Path) -> PathBuf {
     out
 }
 
-/// Normalises a path lexically (resolving `.` and `..`) and canonicalises the
+/// Normalizes a path lexically (resolving `.` and `..`) and canonicalises the
 /// longest existing prefix (resolving symlinks, and on case- or
-/// normalisation-insensitive file systems taking the stored spelling of each
+/// normalization-insensitive file systems taking the stored spelling of each
 /// existing component).
 pub fn normalize_path(p: &Path) -> PathBuf {
     canonicalize_existing(lexical(p))
@@ -273,7 +273,7 @@ fn canonicalize_existing(p: PathBuf) -> PathBuf {
 /// Like [`normalize_path`], but a final symlink is not resolved: the path of
 /// a directory entry itself (its parent directory canonicalised). An
 /// existing entry is named as stored, so that on a case- or
-/// normalisation-insensitive file system `data/ſecrets` becomes
+/// normalization-insensitive file system `data/ſecrets` becomes
 /// `data/secrets`; for a symlink, which cannot be canonicalised without
 /// following it, the stored name is looked up in its directory (see
 /// [`MAX_LINK_SCAN`]).
@@ -321,11 +321,10 @@ pub(crate) fn entry_path(p: &Path) -> EntryPath {
 }
 
 /// The stored name of the symlink `parent/name` if it is spelled
-/// differently (`None` if it is stored as `name`, or if the directory has
-/// more than `limit` entries), with the number of entries read and the
-/// bytes of their names. The stored name is the entry whose name
-/// folds like `name` (see [`fold_name`]) and that is the same directory
-/// entry as `parent/name`; an exact match is preferred.
+/// differently, with the number of entries read and the bytes of
+/// their names. The stored name is the entry whose name folds like
+/// `name` (see [`fold_name`]) and that is the same directory entry
+/// as `parent/name`; an exact match is preferred.
 fn stored_link_name(parent: &Path, name: &std::ffi::OsStr, limit: usize) -> (Option<std::ffi::OsString>, usize, usize) {
     let Ok(entries) = std::fs::read_dir(parent) else {
         return (None, 0, 0);
@@ -379,7 +378,7 @@ fn same_entry(_: &Path, _: &Path) -> bool {
 
 /// Windows canonical paths are "verbatim" (`\\?\C:\x`, `\\?\UNC\server\share\x`).
 /// Every path is converted to the plain form (`C:\x`, `\\server\share\x`), so
-/// that all normalised paths share one form whether or not they exist (and
+/// that all normalized paths share one form whether or not they exist (and
 /// read naturally in prompts and errors). The standard library re-adds the
 /// prefix where needed (long paths).
 fn simplify_verbatim(p: PathBuf) -> PathBuf {
@@ -408,7 +407,7 @@ fn under(path: &Path, roots: &[PathBuf]) -> bool {
 
 /// Whether `path` is at or below a deny rule. File systems may be case
 /// insensitive (Windows, macOS, case-folding directories on Linux, network
-/// shares) and normalisation insensitive (APFS, HFS+): `data/ſecrets`,
+/// shares) and normalization insensitive (APFS, HFS+): `data/ſecrets`,
 /// `data/SECRETS` and `data/secrets` may name the same entry, as may `café`
 /// spelled with a precomposed or a combining accent. Existing paths are
 /// canonicalised to their stored spelling, but a path that does not exist
@@ -430,8 +429,8 @@ fn deny_key(p: &Path) -> PathBuf {
     p.components().map(|c| std::ffi::OsString::from(fold_name(&c.as_os_str().to_string_lossy()))).collect()
 }
 
-/// A caseless, normalisation-insensitive form of a file name, coarser than
-/// the comparisons of case- and normalisation-insensitive file systems:
+/// A caseless, normalization-insensitive form of a file name, coarser than
+/// the comparisons of case- and normalization-insensitive file systems:
 /// canonical decomposition (NFD), case folding (lower case of the upper case,
 /// twice, which also folds `ſ`, `ς`, `ß`, `ẞ`, ligatures and the Kelvin
 /// sign), NFD again, without default-ignorable characters (which HFS+
@@ -855,7 +854,7 @@ impl RulePolicy {
         self.read_deny.iter().chain(&self.write_deny).any(|rule| deny_starts_with(rule, &path))
     }
 
-    /// Decides access to a normalised path.
+    /// Decides access to a normalized path.
     fn check_path(&self, p: &Path, write: bool) -> Decision {
         let allow_or = |b: bool| if b { Decision::Allow } else { self.fallback };
         if write {
@@ -970,7 +969,7 @@ mod tests {
     }
 
     #[test]
-    fn normalisation_finds_the_longest_existing_prefix() {
+    fn normalization_finds_the_longest_existing_prefix() {
         let base = normalize_path(&std::env::temp_dir()).join(format!("sand-policy-norm-{}", std::process::id()));
         std::fs::create_dir_all(base.join("a/b")).unwrap();
         for rest in ["", "a", "a/b", "a/b/c", "a/b/c/d/e", "a/x/../b/./c", "missing/a/b", "a/b/../../.."] {

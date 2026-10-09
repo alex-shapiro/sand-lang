@@ -425,8 +425,8 @@ fn send(vm: &mut Vm, a: &[Value]) -> NResult {
     if let Err(e) = res.ensure(request.len()) {
         return Ok(vm.err_value("limit", &format!("cannot buffer the request: {e}")));
     }
-    // The request's socket counts as an open resource while it is in use,
-    // and its buffers against the memory limit.
+    // Request socket counts as an open resource while it is in use.
+    // Request buffers count against the memory limit.
     let buffers = if url.scheme == "https" { net::CONN_BUFFER + net::TLS_BUFFERS } else { net::CONN_BUFFER };
     let slot = match net::conn_slot(vm, buffers) {
         Ok(s) => s,
@@ -674,8 +674,7 @@ async fn read_connection(stream: TcpStream, max_body: usize, mem: Arc<IoMemory>,
     let Ok(peer) = stream.peer_addr().map(|a| a.to_string()) else { return Err(slot) };
     let (r, mut w) = stream.into_split();
     if slot.reserve_buffers(SERVER_CONN_BUFFERS).is_err() {
-        // The connection's buffers do not fit in the memory limit (best
-        // effort, as below).
+        // The connection's buffers do not fit in the memory limit
         let response = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
         let _ = tokio::time::timeout(Duration::from_secs(5), w.write_all(response.as_bytes())).await;
         return Err(slot);

@@ -89,7 +89,7 @@ struct FnState<'h> {
     /// Instructions emitted for copies of deferred code (see `MAX_DEFER_OPS`).
     defer_ops: usize,
     /// The register `discard` gives to an expression whose value is unused:
-    /// unit results are not materialised in it (see `unit_to`).
+    /// unit results are not materialized in it (see `unit_to`).
     void: Option<Reg>,
     /// String locals appended to in place (see `builder_locals`).
     builders: Rc<HashSet<LocalId>>,
@@ -320,7 +320,7 @@ impl Compiler<'_> {
                 self.compile_fn(i as FnId, p, body);
             }
         }
-        // Entry: run the module initialisers in order.
+        // Entry: run the module initializers in order.
         let mut code = Vec::new();
         for &init in inits {
             if let Some(p) = self.fn_protos[init as usize] {
@@ -662,14 +662,14 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    /// Declares local `l` (allocating its register) and initialises it from `src`.
+    /// Declares local `l` (allocating its register) and initializes it from `src`.
     fn declare_local(&mut self, f: &mut FnState, l: LocalId) -> Reg {
         let r = self.alloc(f);
         f.local_reg.insert(l, r);
         r
     }
 
-    /// Initialises a declared local from `src` (wrapping in a cell if needed).
+    /// Initializes a declared local from `src` (wrapping in a cell if needed).
     fn init_local(&mut self, f: &mut FnState, l: LocalId, src: Reg) {
         let r = f.local_reg[&l];
         if self.is_cell(f, l) {
@@ -1388,9 +1388,6 @@ impl<'a> Compiler<'a> {
             HKind::Continue { depth } => {
                 let target = f.loops.len().checked_sub(1 + *depth as usize);
                 self.emit_defers(f, target.map_or(f.defers.len(), |i| f.loops[i].defer_depth));
-                // A backward jump to the loop's start: like the loop's own
-                // back edge, it consumes fuel (a loop that only continues
-                // must still be preempted and stopped by the limits).
                 let j = self.emit(f, Op::Loop { off: 0 });
                 if let Some(i) = target {
                     f.loops[i].continues.push(j);
@@ -1452,7 +1449,6 @@ impl<'a> Compiler<'a> {
                 }
                 let mark = f.next_reg;
                 if let ([HArg::Expr(x)], true) = (args.as_slice(), reflect.is_empty()) {
-                    // One argument: passed in place (e.g. a local's register).
                     let r = self.expr_reg(f, x);
                     self.set_line(f, e.span);
                     self.call_native(f, r, *native, dst);
@@ -2008,7 +2004,7 @@ impl<'a> Compiler<'a> {
     /// frequent first, plus whether `e` contains lambdas and its size.
     ///
     /// Constants only count where the compiler evaluates them with
-    /// `expr_reg` (as instruction operands): elsewhere they are materialised
+    /// `expr_reg` (as instruction operands): elsewhere they are materialized
     /// into a fixed register anyway, so hoisting would not save anything.
     /// Immutable globals count everywhere, since a `Move` from a register is
     /// cheaper than a checked `LoadGlobal`.
@@ -2017,8 +2013,6 @@ impl<'a> Compiler<'a> {
         let mut has_lambda = false;
         let mut nodes = 0;
         let mut found: Vec<(HoistKey, usize)> = Vec::new();
-        // Positions in `found` (a linear search per operand made loops with
-        // many distinct constants quadratic to compile).
         let mut index: HashMap<HoistKey, usize> = HashMap::new();
         let mut count = |k: HoistKey| match index.get(&k) {
             Some(&i) => found[i].1 += 1,
@@ -2164,10 +2158,10 @@ impl<'a> Compiler<'a> {
     /// immutable globals loaded into registers once, before the loop.
     ///
     /// Constants are pure. An immutable global never changes once
-    /// initialised, but reading it before its initialiser has run must
+    /// initialized, but reading it before its initializer has run must
     /// panic at the point of use, so hoisted globals are loaded with
     /// `HoistGlobal`, which jumps to a second, unhoisted copy of the loop if
-    /// any of them is still uninitialised. Loops containing lambdas (whose
+    /// any of them is still uninitialized. Loops containing lambdas (whose
     /// prototypes would be duplicated) or larger than `MAX_VERSIONED_NODES`
     /// only get their constants hoisted.
     fn hoisted_loop(&mut self, f: &mut FnState, e: &HExpr, dst: Reg) {
@@ -2212,7 +2206,7 @@ impl<'a> Compiler<'a> {
             let locals = f.local_reg.clone();
             self.expr_to(f, e, dst);
             let jend = self.emit_jump(f);
-            // Some global was not initialised yet: run the loop without them.
+            // Some global was not initialized yet: run the loop without them.
             self.patch_list(f, guards);
             for (_, k) in &globals {
                 f.hoisted.remove(k);
@@ -2414,7 +2408,6 @@ impl<'a> Compiler<'a> {
             HPatKind::Variant { rt_id, args }
                 if *rt_id == self.prog.ids.some && !f.no_fused && !matches!(args[..], [HPat { kind: HPatKind::Wildcard, .. }]) =>
             {
-                // `Some(p)`: test and load the payload in one instruction.
                 let sp = &args[0];
                 let t = match sp.kind {
                     HPatKind::Bind(l) if !self.is_cell(f, l) && f.local_reg.contains_key(&l) => f.local_reg[&l],
@@ -2610,8 +2603,6 @@ impl<'a> Compiler<'a> {
             let r = self.alloc(&mut sub);
             sub.local_reg.insert(p, r);
         }
-        // Captured values that cannot change (not cells) are loaded into
-        // registers once, on entry, and used like the closure's own locals.
         for (i, &l) in free.iter().enumerate() {
             if !cells[i] {
                 let r = self.alloc(&mut sub);
@@ -2725,10 +2716,6 @@ fn local_refs(x: &HExpr, out: &mut Vec<LocalId>) {
 }
 
 /// Pre-order traversal of every expression (including inside lambdas, places and args).
-/// Jump threading: an unconditional jump to another jump, a backward jump
-/// (`Loop`) or a return is replaced by its final target, so that e.g. the
-/// end of an `if` branch inside a loop jumps straight back to the loop's
-/// start. Only jumps are rewritten in place; no instruction moves.
 fn thread_jumps(code: &mut [Op]) {
     for i in 0..code.len() {
         let Op::Jmp { off } = code[i] else { continue };
@@ -2741,13 +2728,9 @@ fn thread_jumps(code: &mut [Op]) {
             }
         }
         code[i] = match code.get(t as usize) {
-            // (A `Loop` always jumps backward: its fuel grows with the
-            // distance, see `meter::loop_fuel`.)
             Some(&Op::Loop { off }) if t + 1 + off as i64 <= i as i64 => Op::Loop { off: (t + 1 + off as i64 - (i as i64 + 1)) as i32 },
             Some(&Op::Loop { off }) => Op::Jmp { off: (t + 1 + off as i64 - (i as i64 + 1)) as i32 },
             Some(&op @ (Op::Ret { .. } | Op::RetUnit)) => op,
-            // Every backward jump consumes fuel (see `Op::Loop`), so that no
-            // loop escapes the limits.
             _ if t <= i as i64 => Op::Loop { off: (t - (i as i64 + 1)) as i32 },
             _ => Op::Jmp { off: (t - (i as i64 + 1)) as i32 },
         };

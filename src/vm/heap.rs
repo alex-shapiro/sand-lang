@@ -73,8 +73,7 @@ pub struct GcStats {
     pub max_major_pause: Duration,
     /// Longest minor collection.
     pub max_minor_pause: Duration,
-    /// Steps of incremental major collections (each completed cycle also
-    /// counts as one collection and one major collection).
+    /// Steps of incremental major collections.
     pub steps: u64,
     /// Longest step of an incremental major collection.
     pub max_step_pause: Duration,
@@ -102,7 +101,7 @@ impl GcStats {
     }
 }
 
-/// The state of the incremental major collection (see the module docs).
+/// The state of the incremental major collection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
     Idle,
@@ -195,17 +194,15 @@ const ELEMS_PER_DIRTY_INDEX: usize = 8;
 
 const NONE: u32 = u32::MAX;
 const MIN_GC: usize = 4 << 20;
-/// Bytes allocated between minor collections, at most (a quarter of the
-/// major collection threshold, at least `MIN_NURSERY`).
+/// Bytes allocated between minor collections, at most.
 const NURSERY: usize = 8 << 20;
 const MIN_NURSERY: usize = 1 << 20;
 /// Major collections are incremental from this heap size on.
 const INCREMENTAL_MIN: usize = 8 << 20;
 /// Bytes allocated between steps of an incremental collection.
 const STEP_BYTES: usize = 256 << 10;
-/// Marking does this many units of work (values scanned) per 16 bytes
-/// allocated, so a cycle marks the whole heap while allocating about a
-/// quarter of its live size.
+/// Marking does this many units of work per 16 bytes allocated, so a cycle
+/// marks the whole heap while allocating about a quarter of its live size.
 const MARK_PACE: usize = 4;
 const MIN_MARK_WORK: usize = 16 << 10;
 const MIN_SWEEP_SLOTS: usize = 32 << 10;
@@ -513,8 +510,6 @@ impl Heap {
             }
             let Obj::StrBuf(buf) = &mut self.objs[h as usize] else { unreachable!() };
             let mut text = std::mem::take(buf);
-            // To exactly the capacity checked (`reserve_exact` counts from
-            // the length, not the capacity).
             text.reserve_exact(cap + grow - len);
             text.push_str(self.str(add));
             self.bytes += text.capacity() - cap;
@@ -819,7 +814,6 @@ impl Heap {
         self.objs[i] = Obj::Free(self.free_head);
         self.free_head = h;
         self.live_objects -= 1;
-        // Free slots have clear mark bits (of both kinds).
         clear_bit(&mut self.cmarks, h);
         clear_bit(&mut self.gray_bits, h);
         size
@@ -897,7 +891,6 @@ impl Heap {
             self.young = young;
             self.bytes = self.bytes.saturating_sub(freed);
             if self.phase == Phase::Marking {
-                // Freed objects leave the worklist (their slots may be reused).
                 let objs = &self.objs;
                 self.gray.retain(|&(h, _)| !matches!(objs[h as usize], Obj::Free(_)));
             }
@@ -944,8 +937,7 @@ impl Heap {
                 }
             }
         }
-        // Small heaps get a small nursery, so that they see minor
-        // collections between major ones.
+        // Small heaps get a nursery that sees minor collections between major ones.
         let nursery = (self.major_at / 4).clamp(MIN_NURSERY, NURSERY);
         self.minor_at = self.bytes.saturating_add(nursery);
         self.update_next_gc();
@@ -961,12 +953,8 @@ impl Heap {
         };
     }
 
-    // ------------------------------------------------------------------
-    // Incremental major collection
-
     /// Whether `v` is an object that the sweep of an incremental collection
-    /// will free: unreachable, so it must not be made reachable again (as a
-    /// cache that does not hold its entries alive could do).
+    /// will free: unreachable, so it must not be made reachable again.
     pub fn condemned(&self, v: Value) -> bool {
         self.phase == Phase::Sweeping && v.handle().is_some_and(|h| !test_bit(&self.cmarks, h))
     }
@@ -976,7 +964,7 @@ impl Heap {
         self.phase != Phase::Idle
     }
 
-    /// Whether a minor collection is due (during an incremental cycle).
+    /// Whether a minor collection is due during an incremental cycle.
     pub fn minor_due(&mut self) -> bool {
         if self.stress {
             self.stress_tick += 1;
@@ -985,8 +973,7 @@ impl Heap {
         self.bytes > self.minor_at
     }
 
-    /// Whether the major collection due should be incremental. Under stress
-    /// testing, every other one is.
+    /// Whether the major collection due should be incremental.
     pub fn major_is_incremental(&self) -> bool {
         self.incremental && if self.stress { self.stats.collections.is_multiple_of(16) } else { self.bytes >= INCREMENTAL_MIN }
     }
@@ -1006,21 +993,17 @@ impl Heap {
     }
 
     /// Runs one step of the incremental collection. Returns true if marking
-    /// is complete and `finish_marking` must run (it needs the roots).
+    /// is complete and `finish_marking` must run.
     pub fn cycle_step(&mut self) -> bool {
         let allocated = self.bytes.saturating_sub(self.step_bytes).max(STEP_BYTES);
         self.step_bytes = self.bytes;
         match self.phase {
             Phase::Marking => {
-                // (Under stress testing, cycles take a few steps, so that
-                // they interleave with mutation but leave most safe points
-                // to minor and full collections.)
                 let budget = if self.stress { (self.live_objects / 8).max(64) } else { (allocated / 16 * MARK_PACE).max(MIN_MARK_WORK) };
                 self.mark_some(budget);
                 self.gray.is_empty()
             }
             Phase::Sweeping => {
-                // Sweep the arena while allocating a quarter of the live size.
                 let slots = self.objs.len();
                 let budget = if self.stress {
                     (slots / 8).max(64)
@@ -1035,16 +1018,13 @@ impl Heap {
         }
     }
 
-    /// Completes the marking: shades the roots again (fiber stacks and
-    /// globals have no write barrier) and drains the worklist. Everything
-    /// marked is reachable and becomes old; sweeping starts.
+    /// Completes the marking: shades the roots again and drains the worklist.
+    /// Everything marked is reachable and becomes old; sweeping starts.
     pub fn finish_marking(&mut self, roots: impl IntoIterator<Item = Value>) {
         for r in roots {
             self.shade(r);
         }
         self.mark_some(usize::MAX);
-        // Survivors are old; with no young objects left, nothing old points
-        // to a young object, so the remembered set restarts empty.
         self.marks.copy_from_slice(&self.cmarks);
         for &h in &self.remembered {
             let (w, b) = ((h / 64) as usize, 1u64 << (h % 64));
@@ -1060,7 +1040,7 @@ impl Heap {
         self.update_next_gc();
     }
 
-    /// Abandons the incremental collection (a full collection follows).
+    /// Abandons incremental collection.
     fn abandon_cycle(&mut self) {
         self.phase = Phase::Idle;
         self.gray.clear();
@@ -1185,10 +1165,6 @@ mod tests {
 
     #[test]
     fn dirty_index_lists_stay_small() {
-        // Old small lists receiving the same young value over and over: the
-        // recorded indices must stay proportional to the lists (they are not
-        // counted against the memory limit), so such lists are soon
-        // remembered in full instead.
         let mut heap = Heap::new(None);
         let lists: Vec<Value> = (0..100).map(|_| heap.new_list(vec![Value::Int(0)])).collect();
         let big = heap.new_list(vec![Value::Int(0); 800]);
@@ -1203,8 +1179,6 @@ mod tests {
         }
         let recorded: usize = heap.dirty.values().map(|d| d.idx.len()).sum();
         assert!(recorded <= 200, "{recorded} indices recorded");
-        // The stores are still found: the young value survives a minor
-        // collection rooted only in the old lists.
         heap.collect(roots.iter().copied(), false);
         assert_eq!(heap.str(heap.list(big)[0]), "young");
         assert_eq!(heap.str(heap.list(lists[7])[0]), "young");

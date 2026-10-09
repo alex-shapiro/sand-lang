@@ -24,7 +24,6 @@ rustls = { version = "0.23", optional = true, default-features = false, features
 tokio-rustls = { version = "0.26", optional = true, default-features = false, features = ["ring", "tls12"] }
 webpki-roots = { version = "1", optional = true }
 unicode-normalization = "0.1"
-# SHA-256 with the CPU's SHA instructions where available (pure Rust).
 sha2 = { version = "0.11", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
@@ -35,7 +34,6 @@ fs_at = "0.2.1"
 same-file = "1.0.6"
 
 [dev-dependencies]
-# Pseudo-terminals (Unix ptys, Windows ConPTY) for testing `--prompt`.
 portable-pty = "0.9"
 proptest = "1"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "io-util", "macros"] }

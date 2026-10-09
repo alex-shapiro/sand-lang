@@ -44,7 +44,7 @@ pub enum Op {
         src: Reg,
     },
     /// Loads global `g` into `dst` before a loop that uses it; jumps if the
-    /// global is not initialised yet (to an unhoisted copy of the loop).
+    /// global is not initialized yet (to an unhoisted copy of the loop).
     HoistGlobal {
         dst: Reg,
         g: u16,
@@ -289,8 +289,6 @@ pub enum Op {
     Jmp {
         off: i32,
     },
-    /// Backward jump: also consumes fuel (a loop iteration: one unit, plus
-    /// one per 64 instructions jumped over, see `meter::code_fuel`).
     Loop {
         off: i32,
     },
@@ -333,8 +331,7 @@ pub enum Op {
         b: Reg,
         off: i16,
     },
-    /// Jump if the value is not `Some(_)`; otherwise load the payload into
-    /// `dst` (`JNotVariant` and `GetField` in one, for options).
+    /// Jump if the value is not `Some(_)
     JNotSome {
         src: Reg,
         dst: Reg,
@@ -734,7 +731,7 @@ pub struct Program {
     pub ids: RtIds,
     pub entry: u32,
     pub tests: Vec<(String, u32)>,
-    /// Test setup (module initialisation) entry.
+    /// Test setup (module initialization) entry.
     pub files: Vec<String>,
     /// Help text for natives by id.
     pub native_help: Vec<HelpEntry>,

@@ -116,8 +116,7 @@ struct Parser<'a> {
     depth: usize,
     /// Input consumed up to here has been charged to the meter.
     charged: usize,
-    /// Bytes held by the buffers of the lists being built (Rust-side, not
-    /// yet heap objects), checked against the memory limit with every value.
+    /// Bytes held by the buffers of the lists being built.
     pending: usize,
 }
 
@@ -138,8 +137,6 @@ impl<'a> Parser<'a> {
     /// otherwise grow unchecked until the list is complete.
     fn push(&mut self, vm: &Vm, items: &mut Vec<Value>, v: Value) -> Result<(), Ctl> {
         if items.len() == items.capacity() {
-            // Growing copies the buffer: the old one is freed only after the
-            // new one (twice its size) is allocated.
             let more = items.capacity().max(4);
             vm.reserve(64 + self.pending + 2 * more * std::mem::size_of::<Value>())?;
             let before = items.capacity();
@@ -683,7 +680,6 @@ impl<'a, 'd> Decoder<'a, 'd> {
                 self.p.parse_json(vm, &ids)
             }
             TypeDesc::Recur(id) => {
-                // (The stack is at most `MAX_DEPTH` deep.)
                 vm.charge(1 + (self.stack.len() / LOOKUPS_PER_UNIT) as u64)?;
                 let found = self.stack.iter().rev().find(|d| match d {
                     TypeDesc::Struct { id: i, .. } | TypeDesc::Enum { id: i, .. } => i == id,
@@ -851,8 +847,7 @@ fn vals<'h>(vs: &[Value]) -> Vec<Item<'h>> {
 
 /// Classifies a value by its JSON shape (spec §13.8).
 fn classify<'h>(vm: &'h Vm, ids: &JsonIds, mut v: Value) -> Result<Node<'h>, Ctl> {
-    // `Some(x)` encodes as `x`. (A unit per level: values shared by many
-    // elements may be nested arbitrarily deep.)
+    // `Some(x)` encodes as `x`.
     while vm.heap.variant_id(v) == vm.prog.ids.some {
         vm.charge(1)?;
         v = vm.variant_payload(v, 0);
@@ -1050,9 +1045,7 @@ fn write_float(out: &mut String, f: f64) {
     }
 }
 
-/// The length of `s` as written by [`write_str`] (control characters take
-/// up to six bytes each, so the output is checked against the memory limit
-/// for its exact size).
+/// The length of `s` as written by [`write_str`].
 fn escaped_len(s: &str) -> usize {
     let escapes: usize = s
         .bytes()

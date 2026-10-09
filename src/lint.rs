@@ -26,10 +26,7 @@ impl std::fmt::Display for LintWarning {
     }
 }
 
-/// Lints a file (its imports are loaded relative to it). Checking it is
-/// bounded by the default [`Limits`](crate::Limits) (`max_compile_fuel`),
-/// and the lints by [`tool_fuel`] units (one per syntax tree node and per
-/// binding or expression examined again by a lint).
+/// Lints a file (its imports are loaded relative to it).
 pub fn lint_file(path: &Path) -> Result<Vec<LintWarning>, String> {
     let src = std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let engine = Engine::new(Config::new().policy(Policy::allow_all()));
@@ -74,8 +71,6 @@ struct Linter<'a> {
     let_scopes: Vec<Vec<String>>,
     /// The types of the bindings in `let_scopes` by name, innermost last.
     in_scope: HashMap<String, Vec<String>>,
-    /// Bounds the work (see `lint_file`); once it is exhausted the linter
-    /// skips the rest of the program.
     budget: &'a CompileBudget,
 }
 
@@ -209,9 +204,7 @@ fn clauses_any(cs: &[CompClause], f: &mut dyn FnMut(&Expr) -> bool) -> bool {
 }
 
 /// Whether `e` contains a `break` leaving the loop labeled `label` that is
-/// `depth` loops out (labels and loops do not reach into lambdas). Charges
-/// `b` per expression (nested loops are searched again for each enclosing
-/// one), answering `true` once it is exhausted.
+/// `depth` loops out (labels and loops do not reach into lambdas).
 fn breaks_to(b: &CompileBudget, e: &Expr, label: Option<&Ident>, depth: usize) -> bool {
     if !b.charge(1) {
         return true;
@@ -227,8 +220,7 @@ fn breaks_to(b: &CompileBudget, e: &Expr, label: Option<&Ident>, depth: usize) -
     }
 }
 
-/// Whether `e` contains a `break @name` or `continue @name` (outside
-/// lambdas). Charges `b` like `breaks_to`.
+/// Whether `e` contains a `break @name` or `continue @name` (outside lambdas).
 fn uses_label(b: &CompileBudget, e: &Expr, name: &str) -> bool {
     if !b.charge(1) {
         return true;

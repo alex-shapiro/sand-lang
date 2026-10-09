@@ -540,17 +540,14 @@ fn internal_panics_reset_the_session() {
     assert!(!r.session.was_reset());
     let msg = r.runtime_error("let y = x + 1\nbug.crash(1)");
     assert_reset(&r, &msg, "host bug 1");
-    // Everything was forgotten; the session starts over.
     let msg = r.compile_error("x");
     assert!(msg.contains("undefined name `x`"), "{msg}");
     assert!(!r.session.was_reset());
     r.ok("import bug\nlet x = 2");
     assert_eq!(r.value("bug.crash(0) + x"), "2");
-    // A panic in another task, while an input runs.
     let msg = r.runtime_error("let t = spawn bug.crash(2)\ntask.sleep(50ms)");
     assert_reset(&r, &msg, "host bug 2");
     r.compile_error("t");
-    // While running tests: the tests after it do not run.
     r.ok("import bug");
     r.ok("test \"a\" { assert(bug.crash(0) == 0) }\ntest \"b\" { bug.crash(3) }\ntest \"c\" { assert(true) }");
     let report = r.rt.block_on(r.session.run_tests()).unwrap();
@@ -583,7 +580,6 @@ fn always_answers_survive_a_reset() {
     std::fs::write(dir.path().join("b.txt"), "bye").unwrap();
     let asked = Arc::new(AtomicUsize::new(0));
     let n = asked.clone();
-    // A buggy prompter: it panics when asked about `b.txt`.
     let prompter = move |cap: Capability| -> sandlang::policy::PromptFuture {
         if matches!(&cap, Capability::FsRead(p) if p.ends_with("b.txt")) {
             panic!("prompter bug");
@@ -593,7 +589,6 @@ fn always_answers_survive_a_reset() {
     };
     let policy = Policy::rules(RulePolicy::new().fallback(sandlang::Decision::Prompt));
     let mut r = Repl::with(Config::new().policy(policy).prompter(prompter).cwd(dir.path()).module_root(dir.path()));
-    // The "always" answer is given by the input that fails.
     let msg = r.runtime_error("import fs\nlet a = fs.read_text(\"a.txt\")?\nlet b = fs.read_text(\"b.txt\")?");
     assert_reset(&r, &msg, "prompter bug");
     let asked_before = asked.load(Ordering::SeqCst);
@@ -620,7 +615,6 @@ impl Repl {
 #[test]
 fn tasks_run_between_inputs() {
     let mut r = Repl::new();
-    // Nothing to run: `until` is just awaited.
     let got = r.rt.block_on(r.session.run_tasks_until(async { 5 }, |e| panic!("{e}")));
     assert_eq!(got, Some(5));
     r.ok("var log: [str] = []");
@@ -629,12 +623,10 @@ fn tasks_run_between_inputs() {
     assert!(r.idle(300).is_empty());
     assert_eq!(r.value("log"), "[\"tick\", \"tock\"]");
     assert_eq!(r.take_out(), "tick\n");
-    // Tasks blocked on a channel stay blocked (waiting is not a deadlock).
     r.ok("let ch: Channel<int> = task.channel(1)\nlet reader = spawn ch.recv()");
     assert!(r.idle(50).is_empty());
     r.ok("ch.send(4);");
     assert_eq!(r.value("reader.wait()"), "Some(4)");
-    // A task that fails cancels the others.
     r.ok("let slow = spawn { task.sleep(10s) }\nlet bad = spawn { task.sleep(10ms)\npanic(\"bad task\") }");
     match &r.idle(300)[..] {
         [Error::Runtime { message, trace }] => {
@@ -645,7 +637,6 @@ fn tasks_run_between_inputs() {
     }
     let msg = r.runtime_error("slow.wait()");
     assert!(msg.contains("task cancelled"), "{msg}");
-    // `cancel_tasks` cancels them on request.
     r.ok("let slow = spawn { task.sleep(10s) }");
     assert_eq!(r.session.cancel_tasks(), 1);
     assert_eq!(r.session.cancel_tasks(), 0);
@@ -657,11 +648,9 @@ fn tasks_run_between_inputs() {
 fn limits_of_tasks_between_inputs() {
     let limits = Limits { max_instructions: Some(200_000), max_wall_time: Some(Duration::from_millis(100)), ..Limits::default() };
     let mut r = Repl::with(Config::new().limits(limits));
-    // The wall-time limit does not apply while waiting for input.
     r.ok("var done = false\nlet t = spawn { task.sleep(150ms)\ndone = true }");
     assert!(r.idle(400).is_empty());
     assert_eq!(r.value("done"), "true");
-    // The instruction limit applies to each wait.
     r.ok("var n = 0\nlet busy = spawn { while true { n += 1 } }");
     match &r.idle(500)[..] {
         [Error::Limit(LimitKind::Instructions)] => {}
@@ -670,7 +659,6 @@ fn limits_of_tasks_between_inputs() {
     let msg = r.runtime_error("busy.wait()");
     assert!(msg.contains("task cancelled"), "{msg}");
     assert_eq!(r.value("n > 0"), "true");
-    // Inputs still get the wall-time limit.
     match r.eval("task.sleep(1s)") {
         Err(Error::Limit(LimitKind::WallTime)) => {}
         other => panic!("{other:?}"),
@@ -746,7 +734,6 @@ fn types_of_generic_functions() {
     assert_eq!(ty("smallest"), "fn<T: Ord>([T]) -> T?");
     assert_eq!(ty("total"), "fn<S: Shape>([S]) -> float");
     assert_eq!(ty("x => pair(x, 1)"), "fn<A>(A) -> (A, int)");
-    // Variables that come from no type parameter get names of their own.
     assert_eq!(ty("x => x"), "fn<T>(T) -> T");
     assert_eq!(ty("(a, b) => a < b"), "fn<T: Ord>(T, T) -> bool");
     assert_eq!(ty("Some"), "fn<T>(T) -> T?");
@@ -766,7 +753,6 @@ fn redefined_types_are_told_apart_in_messages() {
     assert_eq!(msg, "type mismatch: expected Point (defined in input 3), found Point (defined in input 1)");
     let msg = r.compile_error("let o: Point? = Some(p)");
     assert_eq!(msg, "type mismatch: expected Option<Point (defined in input 3)>, found Option<Point (defined in input 1)>");
-    // Types with different names are shown as usual.
     let msg = r.compile_error("let n: int = p");
     assert_eq!(msg, "type mismatch: expected int, found Point");
 }

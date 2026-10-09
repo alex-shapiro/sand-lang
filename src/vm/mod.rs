@@ -187,9 +187,7 @@ pub trait OutputSink: Send {
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
-    /// Called before the script reads standard input, so that a prompt it
-    /// wrote is visible. A sink buffering a non-interactive stream may
-    /// leave its buffer alone (as C's stdio does).
+    /// Called before the script reads standard input.
     fn flush_before_input(&mut self) -> std::io::Result<()> {
         self.flush()
     }
@@ -275,9 +273,6 @@ pub struct Host {
     /// Cached decisions for stdout (index 0) and stderr (1).
     pub stream_decisions: [Option<bool>; 2],
     pub(crate) tls: crate::stdlib::TlsSettings,
-    /// Recently compiled regexes: (pattern hash, heap handle), see
-    /// `stdlib::regex`. The handles are not GC roots; entries are checked
-    /// against the object found at the handle.
     pub(crate) regex_cache: Vec<(u64, u32)>,
 }
 
@@ -289,8 +284,7 @@ pub struct Vm {
     pub consts: Vec<Value>,
     pub fibers: Vec<Option<Box<Fiber>>>,
     pub free_fibers: Vec<u32>,
-    /// Finished fibers kept for reuse by `spawn_fiber` (see `recycle_fiber`);
-    /// boxed like those in `fibers`, so that they move without copying.
+    /// Finished fibers kept for reuse, boxed so they move without copying.
     #[allow(clippy::vec_box)]
     spare_fibers: Vec<Box<Fiber>>,
     pub ready: VecDeque<u32>,
@@ -313,7 +307,7 @@ pub struct Vm {
     /// Runs the inputs of a REPL session: a top-level `?` that meets an
     /// `Err` panics (aborting the input) instead of ending the program.
     pub session: bool,
-    /// The strings of one ASCII character, by byte (`Unit` until first
+    /// Strings of one ASCII character, by byte (`Unit` until first
     /// made); shared, since strings are immutable. GC roots.
     ascii_strs: Vec<Value>,
 
@@ -512,8 +506,6 @@ impl Vm {
     #[inline(never)]
     pub(crate) fn iter_next(&mut self, it: Value) -> Option<Value> {
         let Obj::IterFn(src) = self.heap.get(it) else { return None };
-        // The characters of a string, one ASCII byte at a time (the common
-        // case): no decoding, and the state updated in place.
         if let IterSrc::Chars { s, i } = *src
             && let Some(&b) = self.heap.str(Value::Obj(s)).as_bytes().get(i as usize)
             && b.is_ascii()
@@ -536,7 +528,6 @@ impl Vm {
                 (Some(self.short_str(c.encode_utf8(&mut [0; 4]))), state)
             }
         };
-        // The state holds no new object: no write barrier is needed.
         if let Some(src) = self.heap.iter_src_mut(it) {
             *src = state;
         }
@@ -701,7 +692,7 @@ impl Vm {
     }
 
     /// Like [`Vm::permit`] for a file capability whose path is already
-    /// normalised (see [`Policy::check_normalized`]).
+    /// normalized (see [`Policy::check_normalized`]).
     pub fn permit_normalized(&mut self, cap: &Capability) -> Result<bool, Ctl> {
         self.permit_by(cap, Policy::check_normalized)
     }
@@ -802,7 +793,6 @@ impl Vm {
             return Err(Ctl::Limit(LimitKind::Output));
         }
         if which != 1 {
-            // Standard error is unbuffered: earlier output comes first.
             self.flush_stdout();
         }
         let sink = if which == 1 { &self.host.stdout } else { &self.host.stderr };
@@ -823,8 +813,7 @@ impl Vm {
         let Value::Obj(closure) = closure else { return panic("spawn: not a closure") };
         let frame = Frame { proto, ip: 0, base: 0, ret: 0, closure };
         let fiber = match self.spare_fibers.pop() {
-            // A recycled fiber is already counted in `fiber_bytes`, and its
-            // stack is all `Unit` (see `recycle_fiber`).
+            // A recycled fiber is already counted in `fiber_bytes`.
             Some(mut f) if f.stack.len() >= nregs => {
                 f.frames.push(frame);
                 f.task = task;
@@ -882,7 +871,6 @@ impl Vm {
             self.heap.fiber_bytes = self.heap.fiber_bytes.saturating_sub(f.footprint());
             return;
         }
-        // (The final return truncated the stack.)
         let slots = f.stack.capacity();
         f.stack.clear();
         f.stack.resize(slots, Value::Unit);
@@ -898,7 +886,7 @@ impl Vm {
         self.spare_fibers.push(f);
     }
 
-    /// Frees the spare fibers (before a memory limit error is reported).
+    /// Frees spare fibers before a memory limit error is reported.
     fn free_spare_fibers(&mut self) {
         let spare: usize = self.spare_fibers.iter().map(|f| f.footprint()).sum();
         self.heap.fiber_bytes = self.heap.fiber_bytes.saturating_sub(spare);
@@ -910,9 +898,6 @@ impl Vm {
         if self.live_tasks >= self.host.limits.max_tasks {
             return panic("task limit exceeded");
         }
-        // The task starts without a call instruction: charge for entering
-        // its code (and setting up its registers) as a call would
-        // (`meter::code_fuel`).
         if let Obj::Closure(p, _) = self.heap.get(closure) {
             let p = &self.prog.protos[*p as usize];
             self.meter.charge(meter::code_fuel(p.code.len() + p.nregs as usize) as u64)?;
@@ -1016,11 +1001,10 @@ impl Vm {
         self.collect_garbage_with(current, true);
     }
 
-    /// The GC roots: globals, constants, pinned values and the fibers' live
-    /// stack windows, closures, tasks and race lists. Also clears the dead
-    /// slots of the stacks (so that they never hold handles to objects freed
-    /// later), shrinks stacks left large by deep recursion and recounts
-    /// `heap.fiber_bytes`.
+    /// GC roots: globals, constants, pinned values and the fibers' live stack
+    /// windows, closures, tasks and race lists. Clears dead slots of stacks so
+    /// that they never hold handles to objects freed later. Shrinks stacks left
+    /// large by deep recursion and recounts `heap.fiber_bytes`.
     fn gc_roots(&mut self, current: Option<&mut Fiber>) -> Vec<Value> {
         let mut roots: Vec<Value> = Vec::with_capacity(1024);
         roots.extend(self.globals.iter().copied());
@@ -1059,8 +1043,6 @@ impl Vm {
         if force_major {
             self.free_spare_fibers();
         } else if self.heap.cycle_active() {
-            // A step of an incremental major collection, after a minor
-            // collection if one is due.
             if self.heap.minor_due() {
                 let roots = self.gc_roots(current.as_deref_mut());
                 self.heap.collect(roots, false);
@@ -1074,8 +1056,7 @@ impl Vm {
             self.heap.stats.record_step(step.elapsed());
         } else {
             let roots = self.gc_roots(current.as_deref_mut());
-            // Major collections when the old generation has grown enough
-            // (and regularly under stress testing); minor ones otherwise.
+            // Major collection if the old generation is large enough; minor otherwise.
             let major = self.heap.wants_major() || (self.heap.stress && self.heap.stats.collections.is_multiple_of(8));
             if !major {
                 self.heap.collect(roots, false);
@@ -1087,8 +1068,7 @@ impl Vm {
                 full = true;
             }
         }
-        // Unreachable old objects may be what keeps us over the limit: only
-        // a full collection decides.
+        // Unreachable old objects may keep us over the limit
         if !full && self.heap.over_limit() {
             self.free_spare_fibers();
             full = self.heap.over_limit();

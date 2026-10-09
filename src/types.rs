@@ -324,7 +324,6 @@ impl Tagged<'_, '_> {
                 }
             }
             Type::Named(d, args) => {
-                // (`Option<Point (defined in ...)>` rather than a `?` after the tag.)
                 let tagged = matches!(&args[..], [Type::Named(e, _)] if (self.tag)(*e).is_some());
                 if *d == wk.option && args.len() == 1 && !tagged {
                     let needs_parens = matches!(args[0], Type::Fn(..));

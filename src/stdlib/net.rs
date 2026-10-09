@@ -64,7 +64,6 @@ pub fn register(r: &mut Registry) {
         let c = vm.heap.native_mut::<Conn>(a[0]).ok_or_else(|| Ctl::Panic("not a connection".into()))?;
         let before = c.size();
         if c.close() {
-            // Its buffers are released (once pending operations end).
             let after = c.size();
             vm.heap.resource_closed();
             vm.heap.account(before, after);
@@ -283,14 +282,11 @@ fn listener_accept(vm: &mut Vm, a: &[Value]) -> NResult {
 // ----------------------------------------------------------------------
 // Connections
 
-/// The size of a connection's read buffer. It counts against `max_memory`
-/// (reserved with the connection's [`ResourceSlot`], then as part of the
-/// `Conn` object) while the connection is open.
+/// The size of a connection's read buffer.
 pub(crate) const CONN_BUFFER: usize = 8 << 10;
 
 /// An estimate of the memory a TLS session holds besides the connection's
-/// read buffer (incoming and decrypted records, up to 16 KiB each, and its
-/// state), counted like [`CONN_BUFFER`].
+/// read buffer.
 pub(crate) const TLS_BUFFERS: usize = 40 << 10;
 
 pub(crate) type ReadHalf = BufReader<Box<dyn AsyncRead + Send + Unpin>>;
@@ -310,7 +306,7 @@ pub(crate) struct Conn {
     halves: Option<(SharedReader, SharedWriter)>,
     peer: String,
     closed: watch::Sender<bool>,
-    /// Bytes of fixed buffers held while open (counted by `size()`).
+    /// Bytes of fixed buffers held while open.
     buffers: usize,
 }
 

@@ -332,9 +332,6 @@ fn replace(vm: &mut Vm, a: &[Value], all: bool) -> NResult {
             obj.re.search_captures_with(cache, input, &mut caps);
             Ok(caps.get_match())
         }) {
-            // What this match adds is checked against the memory limit
-            // before it is written: with `$0` repeated, one match can expand
-            // to many times the size of the text.
             let added = if expand {
                 scan.charge(vm, (rep.len() / SLOW_BYTES_PER_UNIT) as u64)?;
                 expansion_len(&caps, rep, &mut literal)
@@ -381,9 +378,6 @@ pub fn register(r: &mut Registry) {
     r.source("regex", ModKind::Std, include_str!("regex.sand"));
 
     r.add_builtin("regex.new", |vm, a| {
-        // A regex compiled from the same pattern that is still alive is
-        // shared (regexes are immutable), as programs often compile the
-        // same pattern in a loop.
         let slot = cache_slot(vm.str(a[0]));
         if let Some(re) = cached_regex(vm, a[0], slot) {
             vm.charge(CACHED_COST)?;

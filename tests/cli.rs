@@ -1,11 +1,5 @@
 //! End-to-end tests of the `sand` command-line tool: subcommands, flag
 //! parsing, exit codes, standard streams and the `--prompt-stdin` prompter.
-//!
-//! `--prompt` itself asks on the controlling terminal (tested on a
-//! pseudo-terminal in `tests/prompt_tty.rs`); the prompt dialogue is
-//! unit-tested in `src/main.rs` and exercised end to end here through the
-//! hidden `--prompt-stdin` option, which differs only in where it reads and
-//! writes.
 
 mod common;
 
@@ -575,7 +569,6 @@ fn repl_ctrl_c_interrupts_the_input() {
 struct LiveRepl {
     child: std::process::Child,
     input: Option<std::process::ChildStdin>,
-    /// Standard output and error so far.
     streams: [std::sync::Arc<std::sync::Mutex<String>>; 2],
     readers: Vec<std::thread::JoinHandle<()>>,
 }
@@ -683,13 +676,8 @@ fn repl_ctrl_c_cancels_tasks() {
     assert!(o.stderr.contains("task cancelled"), "{o:?}");
 }
 
-// ---------------------------------------------------------------------------
-// Audit: quadratic compile paths
-
 #[test]
 fn many_syntax_errors_are_reported_quickly() {
-    // One syntax error per line used to be reported in full, each after
-    // reading the file again and counting its lines from the start.
     let dir = TempDir::new("cli-errors");
     dir.write("bad.sand", &")\n".repeat(40_000));
     let start = std::time::Instant::now();

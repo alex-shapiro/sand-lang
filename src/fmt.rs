@@ -23,17 +23,12 @@ const WIDTH: usize = 100;
 /// Spaces per indentation level.
 const INDENT: usize = 4;
 
-/// Formats a source file in canonical style; fails if it does not parse, or
-/// if formatting it exceeds the default budget
-/// ([`tool_fuel`](crate::check::budget::tool_fuel)).
+/// Formats a source file in canonical style.
 pub fn format_source(src: &str) -> Result<String, String> {
     format_source_with(src, &CompileBudget::new(Some(tool_fuel(src.len())), None, None))
 }
 
-/// Like [`format_source`], with the work bounded by `budget` (fuel, deadline
-/// and interrupt flag): one unit per syntax tree node and layout node
-/// examined, per 64 bytes of source read or text measured, and per byte of
-/// output.
+/// Like [`format_source`], with the work bounded by a budget.
 pub fn format_source_with(src: &str, budget: &CompileBudget) -> Result<String, String> {
     if !budget.check() {
         return Err(stop_message(budget.stopped().unwrap_or(Stop::Interrupted), "format"));
@@ -54,8 +49,7 @@ pub fn format_source_with(src: &str, budget: &CompileBudget) -> Result<String, S
     }
 }
 
-/// The error of a formatter or linter stopped by its budget; `what` is
-/// "format" or "lint".
+/// Format or lint budget error message.
 pub(crate) fn stop_message(stop: Stop, what: &str) -> String {
     match stop {
         Stop::Fuel => format!("source too complex to {what}: exceeded the {what} budget"),
@@ -141,8 +135,6 @@ fn strict_group(b: &CompileBudget, force: bool, doc: Doc) -> Doc {
 }
 
 /// True if `doc` contains a forced break outside of nested groups and hug groups.
-/// (Like the other layout functions, it charges `b` one unit per node it
-/// examines and gives up, with any result, once the budget is exhausted.)
 fn needs_break(b: &CompileBudget, doc: &Doc) -> bool {
     let mut stack = vec![doc];
     while let Some(d) = stack.pop() {
@@ -242,9 +234,6 @@ fn render(doc: &Doc, b: &CompileBudget) -> String {
     let mut p = Printer { out: String::new(), col: 0, pending_indent: None };
     let mut stack: Vec<(usize, Mode, &Doc)> = vec![(0, Mode::Break, doc)];
     while let Some((ind, mode, doc)) = stack.pop() {
-        // One unit per node, and per byte printed (indentation included):
-        // deep indentation could otherwise make the output far larger than
-        // the source.
         let printed = match doc {
             Doc::Text(s) | Doc::Trailing(s) => s.len(),
             Doc::Line | Doc::SoftLine | Doc::HardLine => ind,
@@ -599,7 +588,6 @@ impl<'a> Formatter<'a> {
     fn clean(&self, span: Span) -> String {
         let mut out = String::new();
         let mut pos = span.lo as usize;
-        // Comments are in source order.
         let first = self.comments.partition_point(|c| c.lo < span.lo);
         for c in self.comments[first..].iter().take_while(|c| c.lo < span.hi).filter(|c| c.hi <= span.hi) {
             out.push_str(&self.src[pos..c.lo as usize]);

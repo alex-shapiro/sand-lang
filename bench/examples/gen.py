@@ -3,7 +3,7 @@
 Everything here is a pure function of a fixed seed, so the Sand and Python
 programs always see byte-identical inputs, and a run is reproducible.
 
-`run.py` imports this module; it can also be run on its own to materialise
+`run.py` imports this module; it can also be run on its own to materialize
 all inputs (useful for profiling a single workload by hand):
 
     python3.14 bench/examples/gen.py OUT_DIR
@@ -20,8 +20,36 @@ PY_PORTS = Path(__file__).resolve().parent / "python"
 
 # Syllables for synthetic but word-like vocabulary.
 _SYLLABLES = [
-    "ka", "lo", "mi", "ra", "te", "su", "na", "vo", "ze", "pi", "do", "ge", "bu", "fa", "ri", "sho",
-    "tan", "mel", "kor", "vin", "dra", "lis", "pon", "quar", "eth", "ul", "or", "an", "ex", "ist",
+    "ka",
+    "lo",
+    "mi",
+    "ra",
+    "te",
+    "su",
+    "na",
+    "vo",
+    "ze",
+    "pi",
+    "do",
+    "ge",
+    "bu",
+    "fa",
+    "ri",
+    "sho",
+    "tan",
+    "mel",
+    "kor",
+    "vin",
+    "dra",
+    "lis",
+    "pon",
+    "quar",
+    "eth",
+    "ul",
+    "or",
+    "an",
+    "ex",
+    "ist",
 ]
 
 
@@ -29,7 +57,9 @@ def vocabulary(rng: random.Random, n: int) -> list[str]:
     words: list[str] = []
     seen = set()
     while len(words) < n:
-        w = "".join(rng.choice(_SYLLABLES) for _ in range(rng.choice([1, 2, 2, 3, 3, 4])))
+        w = "".join(
+            rng.choice(_SYLLABLES) for _ in range(rng.choice([1, 2, 2, 3, 3, 4]))
+        )
         if w not in seen:
             seen.add(w)
             words.append(w)
@@ -43,7 +73,9 @@ def zipf_weights(n: int, s: float = 1.05) -> list[float]:
 def _substitute(path: Path, old: str, new: str) -> str:
     text = path.read_text()
     if text.count(old) != 1:
-        raise SystemExit(f"gen.py: expected exactly one occurrence of the input block in {path}")
+        raise SystemExit(
+            f"gen.py: expected exactly one occurrence of the input block in {path}"
+        )
     return text.replace(old, new)
 
 
@@ -61,9 +93,16 @@ GLIDER_BLOCK = """\
 """
 
 
-def life_board(width: int = 64, height: int = 64, density: float = 0.35, seed: int = 1) -> str:
+def life_board(
+    width: int = 64, height: int = 64, density: float = 0.35, seed: int = 1
+) -> str:
     rng = random.Random(seed)
-    return "".join("    " + "".join("#" if rng.random() < density else "." for _ in range(width)) + "\n" for _ in range(height))
+    return "".join(
+        "    "
+        + "".join("#" if rng.random() < density else "." for _ in range(width))
+        + "\n"
+        for _ in range(height)
+    )
 
 
 def write_life_bench(out: Path) -> tuple[Path, Path]:
@@ -196,7 +235,9 @@ def calc_script(n: int = 40_000, seed: int = 3) -> str:
         if r < 0.15:
             name = f"v{rng.randint(0, 40)}"
             # Variables stay small so `^` can't overflow.
-            lines.append(f"let {name} = {rng.randint(0, 20)} + {rng.randint(0, 9)} / {rng.randint(1, 9)}")
+            lines.append(
+                f"let {name} = {rng.randint(0, 20)} + {rng.randint(0, 9)} / {rng.randint(1, 9)}"
+            )
             if name not in defined:
                 defined.append(name)
         elif r < 0.97:
@@ -231,12 +272,44 @@ def calc_script(n: int = 40_000, seed: int = 3) -> str:
 # failing ones) for a long time, then win.
 
 _ADVENTURE_LOOP = [
-    "look", "take lamp", "inventory", "go north", "look", "e", "take book", "drop book", "use lamp",
-    "s", "drop lamp", "i", "east", "take bread", "take key", "look", "drop bread", "w", "drop key",
-    "go west", "dance", "help", "take nothing", "drop nothing", "use nothing", "", "LOOK", "  go   north  ",
-    "south", "l",
+    "look",
+    "take lamp",
+    "inventory",
+    "go north",
+    "look",
+    "e",
+    "take book",
+    "drop book",
+    "use lamp",
+    "s",
+    "drop lamp",
+    "i",
+    "east",
+    "take bread",
+    "take key",
+    "look",
+    "drop bread",
+    "w",
+    "drop key",
+    "go west",
+    "dance",
+    "help",
+    "take nothing",
+    "drop nothing",
+    "use nothing",
+    "",
+    "LOOK",
+    "  go   north  ",
+    "south",
+    "l",
 ]
-_ADVENTURE_WIN = ["take lamp", "take key", "n", "use key", "east"]  # the key was dropped in the hall
+_ADVENTURE_WIN = [
+    "take lamp",
+    "take key",
+    "n",
+    "use key",
+    "east",
+]  # the key was dropped in the hall
 
 
 def adventure_script(loops: int = 6_000) -> str:
@@ -268,8 +341,30 @@ TEMPLATE_RENDER = """\
 
 def template_data(n: int = 12_000, seed: int = 4) -> dict:
     rng = random.Random(seed)
-    first = ["ann", "bob", "cara", "dan", "eve", "finn", "gus", "hana", "ivo", "jo", "kim", "lea"]
-    last = ["lee", "smith", "o'brien", "nguyen", "garcia", "müller", "kowalski", "de la cruz"]
+    first = [
+        "ann",
+        "bob",
+        "cara",
+        "dan",
+        "eve",
+        "finn",
+        "gus",
+        "hana",
+        "ivo",
+        "jo",
+        "kim",
+        "lea",
+    ]
+    last = [
+        "lee",
+        "smith",
+        "o'brien",
+        "nguyen",
+        "garcia",
+        "müller",
+        "kowalski",
+        "de la cruz",
+    ]
     cities = ["Oslo", "Lima", "Kyoto", "Accra", "Perth", "Quito", "Riga"]
     tags = ["ops", "dev", "qa", "design", "sales", "<lead>", "remote", "oncall"]
     users = []
@@ -283,7 +378,12 @@ def template_data(n: int = 12_000, seed: int = 4) -> dict:
             "tags": rng.sample(tags, rng.randint(0, 4)),
             "score": rng.choice([rng.randint(0, 100), round(rng.uniform(0, 100), 2)]),
             "team": rng.choice(["core", "core", "web"]),
-            "bio": "  " + " ".join(rng.choice(["likes", "<b>tea</b>", "&", "maps", "\"quotes\""]) for _ in range(5)) + " ",
+            "bio": "  "
+            + " ".join(
+                rng.choice(["likes", "<b>tea</b>", "&", "maps", '"quotes"'])
+                for _ in range(5)
+            )
+            + " ",
         }
         if rng.random() < 0.9:
             u["address"] = {"city": rng.choice(cities), "zip": rng.randint(1000, 99999)}
@@ -297,25 +397,36 @@ def template_compile_source(sections: int = 12_000, seed: int = 5) -> str:
     for i in range(sections):
         match rng.randrange(5):
             case 0:
-                parts.append(f"<p id=\"s{i}\">{{{{ title | upper }}}} {{{{ 'x|y' | default(\"a, b\") }}}}</p>\n")
+                parts.append(
+                    f'<p id="s{i}">{{{{ title | upper }}}} {{{{ \'x|y\' | default("a, b") }}}}</p>\n'
+                )
             case 1:
                 parts.append(
                     "{% if count > 3 %}<b>{{ count }}</b>{% elif count == 1 %}one{% else %}{{ missing | default('none') }}{% endif %}\n"
                 )
             case 2:
-                parts.append("<ul>{% for t in tags %}<li>{{ loop.index }}. {{ t | title | escape }}</li>{% endfor %}</ul>\n")
+                parts.append(
+                    "<ul>{% for t in tags %}<li>{{ loop.index }}. {{ t | title | escape }}</li>{% endfor %}</ul>\n"
+                )
             case 3:
-                parts.append(f"{{# comment {i} #}}<span>{{{{ user.name | lower }}}} / {{{{ user.age }}}}</span>\n")
+                parts.append(
+                    f"{{# comment {i} #}}<span>{{{{ user.name | lower }}}} / {{{{ user.age }}}}</span>\n"
+                )
             case _:
                 parts.append(
                     "{% if not user.admin %}{% if user.age >= 18 %}adult{% endif %}{% else %}admin{% endif %} "
-                    "{{ tags | join(\" | \") }} {{ tags | length }}\n"
+                    '{{ tags | join(" | ") }} {{ tags | length }}\n'
                 )
     parts.append("</html>\n")
     return "".join(parts)
 
 
-TEMPLATE_COMPILE_DATA = {"title": "Small", "count": 5, "tags": ["red", "green", "blue"], "user": {"name": "Ann LEE", "age": 41, "admin": False}}
+TEMPLATE_COMPILE_DATA = {
+    "title": "Small",
+    "count": 5,
+    "tags": ["red", "green", "blue"],
+    "user": {"name": "Ann LEE", "age": 41, "admin": False},
+}
 
 
 # ---------------------------------------------------------------------------
@@ -353,7 +464,14 @@ def search_queries(n: int = 6) -> list[list[str]]:
     vocab = vocabulary(rng, 6_000)
     queries = []
     for i in range(n):
-        q = [vocab[i], vocab[3 + i].upper(), vocab[17 * (i + 1)], vocab[150 + i], vocab[999 - i], vocab[4000 + i]]
+        q = [
+            vocab[i],
+            vocab[3 + i].upper(),
+            vocab[17 * (i + 1)],
+            vocab[150 + i],
+            vocab[999 - i],
+            vocab[4000 + i],
+        ]
         q += ["the", "zzzz"] if i % 2 else [vocab[42 + i] + "!"]
         queries.append(q)
     queries.append(["zebra"])
@@ -373,13 +491,17 @@ def search_add_files(corpus: Path) -> list[str]:
 def html_page(i: int, seed: int = 7) -> str:
     rng = random.Random(seed * 1000 + i)
     vocab = vocabulary(rng, 400)
-    out = [f"<!doctype html>\n<html><head><meta charset=utf-8><title>Page {i} &amp; <b>friends</b></title></head>\n<body>\n"]
+    out = [
+        f"<!doctype html>\n<html><head><meta charset=utf-8><title>Page {i} &amp; <b>friends</b></title></head>\n<body>\n"
+    ]
     for s in range(60):
         level = rng.randint(1, 3)
-        out.append(f"<h{level} class=\"h\">Section {s} <em>{rng.choice(vocab)}</em> &lt;{rng.choice(vocab)}&gt;</h{level}>\n")
+        out.append(
+            f'<h{level} class="h">Section {s} <em>{rng.choice(vocab)}</em> &lt;{rng.choice(vocab)}&gt;</h{level}>\n'
+        )
         for _ in range(rng.randint(5, 15)):
             text = " ".join(rng.choices(vocab, k=rng.randint(10, 40)))
-            out.append(f"<p>{text}\n  <span class=\"x\">{rng.choice(vocab)}</span></p>\n")
+            out.append(f'<p>{text}\n  <span class="x">{rng.choice(vocab)}</span></p>\n')
             r = rng.randrange(8)
             href = [
                 f"/page/{rng.randint(0, 500)}",
@@ -392,7 +514,9 @@ def html_page(i: int, seed: int = 7) -> str:
                 f"?page={rng.randint(0, 30)}",
             ][r]
             quote = rng.choice(['"', "'"])
-            out.append(f"<a class=\"l\" href={quote}{href}{quote} title=\"t\">{rng.choice(vocab)}</a>\n")
+            out.append(
+                f'<a class="l" href={quote}{href}{quote} title="t">{rng.choice(vocab)}</a>\n'
+            )
     out.append("</body></html>\n")
     return "".join(out)
 

@@ -380,7 +380,6 @@ fn register_str(r: &mut Registry) {
     r.add_builtin("str.trim_start", |vm, a| substr(vm, a[0], str::trim_start));
     r.add_builtin("str.trim_end", |vm, a| substr(vm, a[0], str::trim_end));
     r.add_builtin("str.strip_prefix", |vm, a| {
-        // Comparing the prefix costs its length.
         vm.charge_bytes(vm.str(a[1]).len())?;
         let s = vm.str(a[0]).strip_prefix(vm.str(a[1]));
         copy_bytes(vm, s.map_or(0, str::len))?;
@@ -428,8 +427,6 @@ fn register_str(r: &mut Registry) {
         if n >= width || fill.is_empty() {
             return Ok(a[0]);
         }
-        // Only the first `width - n` characters of the (repeated) fill are
-        // read and copied, however long the fill is.
         let chars = width - n;
         copy_bytes(vm, chars.saturating_mul(fill.len().min(4)).saturating_add(t.len()))?;
         let padding: String = fill.chars().cycle().take(chars).collect();

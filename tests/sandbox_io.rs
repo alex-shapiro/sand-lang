@@ -520,9 +520,6 @@ print(fs.metadata("pipe")?.is_file)
     assert_eq!(r.ok_stdout(), "invalid\nio\ninvalid\nfalse\n");
 }
 
-/// Junctions (which, unlike symlinks, need no privilege to create on
-/// Windows) are resolved by the policy check and never followed by the
-/// operation; entry operations act on the junction itself.
 #[cfg(windows)]
 #[test]
 fn junctions_are_checked_like_symlinks() {
@@ -671,8 +668,6 @@ print(results.recv())
 
 #[test]
 fn pending_socket_buffers_count_against_the_memory_limit() {
-    // Each pending read holds its buffer (up to 1 MiB); 64 of them exceed 32 MB.
-    // (The connections are opened first: their own buffers count too.)
     let src = r#"
 import net
 let listener = net.listen("127.0.0.1:0")?
@@ -690,7 +685,6 @@ print(failed.all(k => k == "limit"))
 "#;
     assert_eq!(run_with(src, limited(32 << 20)).ok_stdout(), "true\ntrue\n");
 
-    // Copies of data being written are held until the peer takes them.
     let src = r#"
 import net
 let listener = net.listen("127.0.0.1:0")?
@@ -710,8 +704,6 @@ print(failed.all(k => k == "limit"))
 
 #[test]
 fn hostile_peers_cannot_end_a_server_run() {
-    // A request that claims a huge body, and a line that never ends, fail
-    // the operation (kind "limit") without ending the run.
     let src = r#"
 import http
 import net
@@ -739,9 +731,6 @@ print("still running")
         std::thread::sleep(Duration::from_millis(10));
     };
     use std::io::{Read, Write};
-    // Claims 60 MB and sends more than fits: the request fails (and is
-    // answered with 400, which may be lost to a reset since the server
-    // closes the connection with input unread).
     let mut hostile = std::net::TcpStream::connect(&http_addr).unwrap();
     write!(hostile, "POST / HTTP/1.1\r\nContent-Length: 60000000\r\n\r\n").unwrap();
     let _ = hostile.write_all(&vec![b'a'; 12 << 20]);
@@ -826,7 +815,7 @@ fn deny_rules_ignore_case() {
     assert!(p.denies_under(&d.join("Future")));
 }
 
-/// Unicode spellings a case- and normalisation-insensitive file system
+/// Unicode spellings a case- and normalization-insensitive file system
 /// (APFS) treats as the same name: `ſ`/`s`, `ς`/`σ`, NFC/NFD.
 #[test]
 fn deny_rules_match_unicode_equivalent_spellings() {
@@ -911,14 +900,10 @@ fn symlink_entries_are_named_as_stored() {
     ] {
         assert_eq!(normalize_entry_path(&data.join(given)), data.join(stored), "{given}");
     }
-    // A rule naming a path that later becomes a symlink.
     let p = Policy::rules(RulePolicy::new().allow_write(data.join("Later")));
     symlink(dir.path().join("outside/target.txt"), data.join("Later")).unwrap();
     assert_eq!(p.check_entry(&Capability::FsWrite(data.join("LATER"))), Decision::Allow);
 
-    // Capabilities (seen by custom policies and prompts, and remembered by
-    // "always" answers) name the link as stored. Only the link and the new
-    // name may be written here.
     let allowed = [
         Capability::Stdout,
         Capability::FsRead(data.clone()),

@@ -8,8 +8,7 @@ use std::rc::Rc;
 /// Maximum syntactic nesting depth (expressions, types, patterns, blocks).
 pub const MAX_DEPTH: usize = 256;
 
-/// At most this many syntax errors are reported per module (like the
-/// checker's): a file of bad lines would otherwise make one per line.
+/// Max number of syntax errors reported per module.
 const MAX_ERRORS: usize = 50;
 
 pub struct ParseResult {
@@ -45,9 +44,7 @@ struct Parser<'a> {
     fatal: bool,
     /// Inside a `trait` body: methods may omit their body.
     in_trait: bool,
-    /// Offsets of the source's line breaks (for `line_of`), shared with the
-    /// parsers of interpolated expressions (indexing the source for each of
-    /// them made parsing quadratic in the number of interpolations).
+    /// Offsets of source code line breaks.
     newlines: Rc<[u32]>,
 }
 

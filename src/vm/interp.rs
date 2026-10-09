@@ -6,8 +6,7 @@ use super::meter::{MemoryLimit, code_fuel, ctl_message, loop_fuel, message_ctl};
 use super::*;
 use crate::LimitKind;
 
-/// Why metered work stopped (the errors of `Meter::charge`), small enough to
-/// be returned in a register by the interpreter's helpers.
+/// Why metered work stopped. Must fit in a register.
 #[derive(Clone, Copy)]
 enum Stop {
     Interrupted,
@@ -338,9 +337,8 @@ impl Vm {
         }
         let prog = self.prog.clone();
         let natives = self.natives.clone();
-        // As few values as possible stay live across the loop (the rest is
-        // read from memory where needed), so that the register allocator
-        // keeps `code`, `ip`, `regs` and the fuel in registers.
+        // As few values as possible stay live across the loop, so that the
+        // register allocator keeps `code`, `ip`, `regs` and fuel in registers.
         let fr = *fiber.frames.last().unwrap();
         let protos: &[Proto] = &prog.protos;
         let mut code: &[Op] = &protos[fr.proto as usize].code;
@@ -386,8 +384,6 @@ impl Vm {
                 return Err(self.ctl_trap(fiber, ip, $c));
             }};
         }
-        // (The failure paths of the typed operand reads are one cold call,
-        // not formatting code inline in every arithmetic instruction.)
         macro_rules! int {
             ($x:expr) => {
                 match r!($x) {
@@ -409,9 +405,8 @@ impl Vm {
                 ip = (ip as isize + $off as isize) as usize
             };
         }
-        // A safe point: consumes `$cost` units of fuel; collects garbage or
-        // preempts (the slow path is out of line). The fiber resumes at
-        // `$resume`.
+        // A safe point: consumes fuel, collects garbage, or preempts.
+        // The fiber resumes at `$resume`.
         macro_rules! safe_point {
             ($resume:expr, $cost:expr) => {
                 fuel.left -= $cost;
@@ -784,8 +779,6 @@ impl Vm {
                         Obj::IterFn(_) => {
                             let next = self.iter_next(callee);
                             r!(dst) = self.option(next);
-                            // `while let Some(x) = next()`: the test that
-                            // follows runs here (one dispatch less).
                             if let Some(&Op::JNotSome { src, dst: d, off }) = code.get(ip)
                                 && src == dst
                             {
@@ -1321,8 +1314,7 @@ impl Vm {
         if let &[b] = t.as_bytes()
             && b.is_ascii()
         {
-            // One ASCII character (the common case): the ASCII tests agree
-            // with the Unicode ones there.
+            // One ASCII character (the common case)
             return Ok(match class {
                 0 => b.is_ascii_digit(),
                 1 => b.is_ascii_alphabetic(),
@@ -1499,10 +1491,6 @@ impl Vm {
                 if c.closed {
                     return Ok(Some(Value::Bool(false)));
                 }
-                // Hand directly to a waiting receiver, dropping the stale
-                // waits of cancelled tasks met on the way (one at a time:
-                // copying the whole list made each send cost as many steps
-                // as there are receivers).
                 while let Some((rf, rg)) = c.receivers.pop_front() {
                     if wait_is_live(&self.fibers, (rf, rg)) {
                         let some = self.some(v);
@@ -1748,7 +1736,6 @@ impl Vm {
         let (a, b) = (a as usize, b as usize);
         let list = matches!(self.heap.get(o), Obj::List(_));
         let cost = if list { (b - a) as u64 } else { ((b - a) / super::meter::BYTES_PER_UNIT) as u64 };
-        // The copy may be as large as the heap: check it first, as `+` does.
         if self.heap.would_exceed(if list { (b - a) * std::mem::size_of::<Value>() } else { b - a }) {
             return Err(ctl_message(Ctl::Limit(LimitKind::Memory)));
         }

@@ -230,7 +230,7 @@ impl Checker<'_> {
         let vty = annotated.clone().unwrap_or_else(|| init.ty.clone());
         // Top-level bindings only need global slots if functions (or other
         // modules, or later session inputs) can see them; otherwise they are
-        // initialiser locals.
+        // initializer locals.
         let mut bound = Vec::new();
         pattern.bindings(&mut bound);
         let needs_global = is_pub || self.in_session() || bound.iter().any(|b| self.fn_names.contains(&b.name));

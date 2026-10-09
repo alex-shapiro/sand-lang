@@ -46,7 +46,6 @@ fn read_stdin(vm: &mut Vm, line: bool) -> NResult {
     // A prompt written before reading must be visible (on a terminal).
     vm.flush_before_input();
     if line && let Some(data) = buffered_line(vm) {
-        // A whole line is already buffered: no need to suspend the task.
         let v = match data {
             Some(data) => {
                 vm.charge_bytes(data.len())?;
@@ -103,7 +102,6 @@ fn buffered_line(vm: &Vm) -> Option<Option<Vec<u8>>> {
     };
     let take = match buf.iter().position(|&b| b == b'\n') {
         Some(nl) => nl + 1,
-        // (Bytes: the rest is the last line.)
         None if at_end => buf.len(),
         None => return None,
     };
@@ -111,7 +109,6 @@ fn buffered_line(vm: &Vm) -> Option<Option<Vec<u8>>> {
         return Some(None);
     }
     if vm.heap.would_exceed(take) {
-        // Too big: the asynchronous read reports the memory limit.
         return None;
     }
     let mut data = buf[..take].to_vec();

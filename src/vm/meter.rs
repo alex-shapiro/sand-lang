@@ -3,8 +3,7 @@
 //! concatenation, slicing, ...).
 //!
 //! The interpreter burns one unit of fuel per call, loop iteration and
-//! backward jump (and more for long functions and loops, see [`code_fuel`]);
-//! the scheduler runs each task for a slice of `SLICE_FUEL`
+//! backward jump; the scheduler runs each task for a slice of `SLICE_FUEL`
 //! units and checks the engine's limits between slices. Work outside the
 //! bytecode loop is charged with [`Meter::charge`] against a second budget of
 //! `SLICE_FUEL` units per slice (kept apart from the interpreter's counter,
@@ -394,22 +393,18 @@ mod tests {
     #[test]
     fn the_instruction_limit_is_checked_exactly() {
         let m = Meter::new(Some(1000), Arc::new(AtomicBool::new(false)));
-        // 300 units used before the slice; the interpreter has 500 of its own.
         m.start_slice(20_000, 500, 300, None, None);
         assert!(m.charge(700).is_ok(), "1000 units used");
         assert!(matches!(m.charge(1), Err(Ctl::Limit(LimitKind::Instructions))));
-        // Bytecode fuel reported by the interpreter counts too.
         m.start_slice(20_000, 500, 300, None, None);
         m.sync_bytecode(200);
         assert_eq!(m.used(), 600);
         assert!(m.charge(400).is_ok(), "1000 units used");
         assert!(matches!(m.charge(1), Err(Ctl::Limit(LimitKind::Instructions))));
-        // Far from the limit, checks happen every CHECK_INTERVAL units only.
         let m = Meter::new(Some(1_000_000), Arc::new(AtomicBool::new(false)));
         m.start_slice(100, 100, 0, None, None);
         assert!(m.charge(101).is_ok());
         assert_eq!(m.check_at.get(), -1 - CHECK_INTERVAL);
-        // ... until the limit is closer than that.
         m.start_slice(100, 100, 990_000, None, None);
         assert!(m.charge(101).is_ok());
         assert_eq!(m.check_at.get(), 100 + 100 + 990_000 - 1_000_000 - 100);

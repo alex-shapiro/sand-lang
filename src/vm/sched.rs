@@ -110,7 +110,7 @@ impl IoTable {
 /// How long the scheduler waits for a file operation before parking.
 const FS_SPIN: Duration = Duration::from_micros(100);
 
-/// Slices run between clock readings at most (see `Vm::run_main`).
+/// Slices run between clock readings at most.
 const CLOCK_SLICES: u32 = 32;
 
 /// Result of running the program's main task.
@@ -144,8 +144,6 @@ impl Vm {
     }
 
     fn apply_completions(&mut self, done: Vec<(u32, u64, Finisher)>) -> Result<(), Trap> {
-        // Finishers charge the meter for building their values between
-        // slices: count that fuel now (the next slice resets the meter).
         let spent = self.meter.spent();
         let r = self.apply_finishers(done);
         self.fuel_used += self.meter.spent().saturating_sub(spent);
@@ -215,11 +213,6 @@ impl Vm {
         let start = Instant::now();
         let mut paused = Duration::ZERO;
         let mut cpu = Duration::ZERO;
-        // CPU time is measured from `now`, the last clock reading. Short
-        // slices (tasks that finish or block quickly) do not read the clock
-        // each: it is read after `CLOCK_SLICES` slices or `SLICE_FUEL` units
-        // of fuel, and before and after anything that waits, so CPU time is
-        // never more than about one slice behind.
         let mut now = Instant::now();
         let mut last_yield = now;
         let (mut unclocked_slices, mut unclocked_fuel) = (0u32, 0u64);
@@ -234,7 +227,6 @@ impl Vm {
                     continue;
                 }
                 self.current = fid;
-                // Near the instruction limit, the slice ends one unit past it.
                 let l = &self.host.limits;
                 let slice = l
                     .max_instructions
@@ -325,9 +317,7 @@ impl Vm {
                         (unclocked_slices, unclocked_fuel) = (0, 0);
                         let answer = match prompter {
                             Some(p) => {
-                                // The host's interrupt stops the run even
-                                // while a prompt is pending (the prompter may
-                                // never answer); the prompt is dropped.
+                                // Host interrupt stops the run while a prompt is pending
                                 let mut prompt = p.prompt(cap.clone());
                                 let (interrupt, shared) = (self.host.interrupt.clone(), self.io.shared.clone());
                                 let answer = std::future::poll_fn(|cx| {
@@ -376,7 +366,7 @@ impl Vm {
                     (unclocked_slices, unclocked_fuel) = (0, 0);
                 }
             }
-            // Nothing is ready: wait for I/O (with the output so far shown).
+            // Nothing is ready: wait for I/O.
             self.flush_stdout();
             if self.io.is_empty() {
                 let trace = match self.fibers.get(self.main_fiber as usize) {
@@ -385,10 +375,8 @@ impl Vm {
                 };
                 return Err(Trap::Panic { message: "deadlock: all tasks are blocked".into(), trace });
             }
-            // A file operation on the hot worker (`stdlib::fs::FsWorker`)
-            // usually finishes within microseconds: wait for it briefly
-            // rather than parking the thread (a wake-up costs more). Other
-            // I/O (network, timers) does not spin.
+            // A file operation on the hot worker usually finishes within µs.
+            // Wait for it briefly because a park-then-wake-up costs more.
             let mut done = self.io.poll_ready(None);
             if done.is_empty() && crate::stdlib::fs_worker_busy() {
                 let until = Instant::now() + FS_SPIN;

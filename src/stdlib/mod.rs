@@ -26,10 +26,7 @@ mod uuid;
 use crate::engine::Registry;
 pub(crate) use net::TlsSettings;
 
-/// At most the first `max` characters of `s`. Messages quote script text
-/// through this: a whole string, debug-escaped (up to 6 bytes per byte),
-/// would make a message far larger than the string, built outside the
-/// memory limit.
+/// At most the first `max` characters of `s`.
 pub(crate) fn truncate(s: &str, max: usize) -> &str {
     match s.char_indices().nth(max) {
         Some((i, _)) => &s[..i],
@@ -92,8 +89,7 @@ pub(crate) fn resolve_path(vm: &crate::vm::Vm, p: &str) -> std::path::PathBuf {
     crate::policy::normalize_path(&joined)
 }
 
-/// Whether the file system worker is running an operation (see
-/// `fs::FsWorker`).
+/// Whether the file system worker is running an operation.
 pub(crate) fn fs_worker_busy() -> bool {
     fs::FsWorker::busy()
 }

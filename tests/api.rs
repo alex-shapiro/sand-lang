@@ -1009,8 +1009,6 @@ fn interrupt_from_another_thread() {
 
 #[test]
 fn interrupt_stops_a_run_waiting_for_a_prompt() {
-    // A prompter that never answers (a host waiting for a user who has gone
-    // away) must not keep the interrupt handle from stopping the run.
     let (asked_tx, asked_rx) = std::sync::mpsc::channel();
     let asked_tx = Mutex::new(asked_tx);
     let config = Config::new().policy(Policy::rules(RulePolicy::new().fallback(Decision::Prompt))).prompter(move |_cap: Capability| {
@@ -1020,7 +1018,6 @@ fn interrupt_stops_a_run_waiting_for_a_prompt() {
     let mut engine = Engine::new(config);
     let handle = engine.interrupt_handle();
     let (done_tx, done_rx) = std::sync::mpsc::channel();
-    // (On its own thread, so that the test fails instead of hanging.)
     std::thread::spawn(move || {
         let r = rt().block_on(engine.run_source("main.sand", "import env\nprint(env.get(\"HOME\"))"));
         let _ = done_tx.send(r);
@@ -1234,7 +1231,6 @@ fn rust_panics_in_natives_do_not_unwind_into_the_host() {
     dir.write("t.sand", "import buggy\ntest \"bad\" {\n    buggy.boom(9)\n}\ntest \"good\" {\n    assert(buggy.boom(2) == 2)\n}\n");
     let report = rt().block_on(Engine::new(Config::new().module(module())).run_tests(dir.path().join("t.sand"))).unwrap();
     assert_eq!((report.passed(), report.failed()), (1, 1));
-    // A session is reset (its VM may be inconsistent) and keeps working.
     let mut session = Engine::new(Config::new().module(module())).session();
     assert!(rt().block_on(session.eval("import buggy\nbuggy.boom(7)")).is_err());
     assert!(session.was_reset());

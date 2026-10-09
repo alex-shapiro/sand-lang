@@ -16,7 +16,7 @@ Follow-up work, roughly in priority order.
       at once; 64+ idle connections can still delay a new request by up to
       30s, and a waiting `accept` holds up to half the free resource slots.
 
-- [ ] **Unconfirmed from the metering audit.** Path normalisation
+- [ ] **Unconfirmed from the metering audit.** Path normalization
       (`canonicalize`, `read_dir`) runs on the VM thread before the
       permission check, so a hung network file system could block it beyond
       the interrupt and wall-time limits; buffered standard output is

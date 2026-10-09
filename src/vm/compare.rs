@@ -19,14 +19,8 @@ fn is_mutable_container(o: &Obj) -> bool {
     matches!(o, Obj::List(_) | Obj::Map(_) | Obj::Set(_) | Obj::Struct(..))
 }
 
-/// The pairs of mutable containers a comparison has compared (or is
-/// comparing), so that shared and cyclic structures are compared once.
-/// Their number grows with the work done, not with the heap: two DAGs can
-/// have far more pairs of nodes than nodes (2,000 nodes per level, each
-/// pointing at two random ones of the next level, make up to 4,000,000
-/// pairs per level), so the set's memory is checked against the limit as it
-/// grows (it used to grow by gigabytes for as long as the time limits
-/// allowed).
+/// The pairs of mutable containers a comparison has compared, so that
+/// shared and cyclic structures are compared once.
 struct Seen {
     pairs: HashSet<(u32, u32)>,
 }
@@ -39,8 +33,6 @@ impl Seen {
     /// Records `pair`; false if it was recorded already.
     fn insert(&mut self, heap: &Heap, pair: (u32, u32)) -> Result<bool, Ctl> {
         if self.pairs.len() == self.pairs.capacity() {
-            // Growing: the old and the new table (twice as large) coexist
-            // while it rehashes. (About 12 bytes per entry of capacity.)
             if heap.would_exceed(self.pairs.capacity().max(4).saturating_mul(3 * 12)) {
                 return Err(Ctl::Limit(crate::LimitKind::Memory));
             }

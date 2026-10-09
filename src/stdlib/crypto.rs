@@ -75,8 +75,7 @@ fn md_blocks(parts: &[&[u8]], big_endian: bool, budget: &impl Budget, mut block:
     Ok(())
 }
 
-/// SHA-256 (FIPS 180-4) of the concatenation of `parts` (the `sha2` crate,
-/// which uses the CPU's SHA instructions when it has them).
+/// SHA-256 (FIPS 180-4) of the concatenation of `parts`.
 pub(crate) fn sha256_parts(parts: &[&[u8]], budget: &impl Budget) -> Result<[u8; 32], Ctl> {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();

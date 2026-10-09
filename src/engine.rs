@@ -151,12 +151,6 @@ impl OutputSink for MemorySink {
     }
 }
 
-/// The process's standard output, buffered like C's stdio and Python's: by
-/// line on a terminal, in blocks of `STDOUT_BUFFER` bytes otherwise. One
-/// buffer is shared by every engine of the process (so that their output
-/// keeps its order). The VM flushes it when a run ends, before it writes to
-/// standard error, prompts, or waits for I/O, on `io.flush()`, and, on a
-/// terminal, before it reads standard input.
 struct StdoutSink;
 
 const STDOUT_BUFFER: usize = 8 << 10;
@@ -332,11 +326,7 @@ impl Config {
         self.gc_stress = on;
         self
     }
-    /// The process exits right after `run_file`/`run_source` returns (the
-    /// CLI): the run's VM is not freed, as the operating system reclaims its
-    /// memory faster (freeing a large heap object by object can take longer
-    /// than the program took to build it). Never use it for an engine that
-    /// runs more than once: every run leaks its heap.
+    /// The process exits right after `run_file`/`run_source` returns
     #[doc(hidden)]
     pub fn exit_after_run(mut self, on: bool) -> Self {
         self.exit_after_run = on;

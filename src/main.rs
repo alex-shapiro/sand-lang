@@ -310,7 +310,7 @@ fn sanitize(s: &str) -> String {
 }
 
 /// Written to the terminal before each prompt, so that whatever state the
-/// script's output left the terminal in (concealed or invisible colours,
+/// script's output left the terminal in (concealed or invisible colors,
 /// alternate character sets, a half-written line), the question starts on a
 /// fresh line in the default rendition, after a marker line. `ESC [ ! p` is
 /// a soft terminal reset (DECSTR), `ESC [ 0 m` resets character attributes.
@@ -369,7 +369,6 @@ fn report_error(e: &Error, main: Option<&Path>) -> u8 {
     match e {
         Error::Compile(diags) => {
             let root = main.and_then(|m| m.parent()).map(Path::to_path_buf).unwrap_or_default();
-            // Each file is read once, however many diagnostics it has.
             let mut sources: std::collections::HashMap<&str, Option<String>> = std::collections::HashMap::new();
             for d in diags {
                 let source = sources.entry(d.file.as_str()).or_insert_with(|| {
@@ -404,7 +403,6 @@ fn cmd_run(args: &[String]) -> Result<u8, String> {
     let opts = run_options(args)?;
     let file = opts.file.ok_or("missing FILE to run")?;
     let _ = opts.script_args;
-    // The process ends with the run: no need to free the heap.
     let mut engine = Engine::new(opts.config.exit_after_run(true));
     let rt = runtime()?;
     match rt.block_on(engine.run_file(&file)) {
@@ -583,11 +581,9 @@ async fn repl(session: &mut sandlang::Session, prompt: &PromptLine) -> u8 {
         let got = session.run_tasks_until(next, on_error).await;
         prompt.hide();
         let Some(got) = got else {
-            // A background task called `exit`.
             return exit_status(session.exit_code().unwrap_or(0));
         };
         let Some(line) = got else {
-            // Ctrl-C: discard the partial input, or cancel the tasks left running.
             println!();
             if input.is_empty() {
                 match session.cancel_tasks() {
@@ -681,10 +677,7 @@ fn report_repl_error(e: &Error, input: &str) {
     }
 }
 
-/// The REPL's prompt, while it waits for input: output written meanwhile (by
-/// background tasks) starts on a new line, and the prompt is shown again
-/// after it. (Text typed after the prompt stays in the terminal's line buffer,
-/// but is not shown again.)
+/// The REPL's prompt, while it waits for input.
 #[derive(Clone, Default)]
 struct PromptLine(std::sync::Arc<std::sync::Mutex<PromptState>>);
 

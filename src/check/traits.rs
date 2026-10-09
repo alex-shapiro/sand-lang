@@ -1021,7 +1021,7 @@ impl Checker<'_> {
     }
 
     /// Moves a dictionary (and the non-constant dictionaries in it) to hidden
-    /// locals initialised on entry, sharing identical ones.
+    /// locals initialized on entry, sharing identical ones.
     fn hoist_dict(&mut self, e: &mut HExpr, hoisted: &mut Vec<(String, LocalId, HExpr)>) {
         if let HKind::Dict { args, .. } = &mut e.kind {
             for a in args.iter_mut() {

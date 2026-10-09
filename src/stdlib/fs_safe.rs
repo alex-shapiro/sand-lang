@@ -10,14 +10,12 @@
 //! the operation reaches exactly the checked location or fails: a symlink
 //! that appears in the path fails with [`unchecked_symlink`].
 //!
-//! On Windows, every component is likewise opened relative to its parent's
-//! handle without following reparse points (symlinks, junctions); see the
-//! Windows `imp` module for details and for `rename`, which is path-based
-//! there but holds the directories on both paths open so that they cannot
-//! be replaced. On other platforms the operations fall back to path-based
-//! `std::fs` calls, which do follow symlinks swapped in after the check.
+//! On Windows, every component is opened relative to its parent's handle
+//! without following reparse points (symlinks, junctions). On other platforms
+//! the operations fall back to path-based `std::fs` calls, which do follow
+//! symlinks swapped in after the check.
 //!
-//! Paths must be absolute and lexically normalised (no `.`/`..`).
+//! Paths must be absolute and lexically normalized (no `.`/`..`).
 
 use crate::vm::iomem::Reservation;
 use std::ffi::OsStr;
@@ -151,7 +149,7 @@ mod imp {
         let mut dir = rustix::fs::open("/", TRAVERSE, Mode::empty())?;
         for c in components {
             let Component::Normal(name) = c else {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("{} is not a normalised path", path.display())));
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("{} is not a normalized path", path.display())));
             };
             dir = rustix::fs::openat(&dir, name, TRAVERSE, Mode::empty()).map_err(|e| nofollow_error(e, &dir, name))?;
         }
@@ -246,7 +244,7 @@ mod imp {
         let mut components = components.enumerate().peekable();
         while let Some((i, c)) = components.next() {
             let Component::Normal(name) = c else {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("{} is not a normalised path", path.display())));
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("{} is not a normalized path", path.display())));
             };
             let opened = match rustix::fs::openat(&dir, name, TRAVERSE, Mode::empty()) {
                 Err(Errno::NOENT) if i < keep => Err(Errno::NOENT),
@@ -298,8 +296,7 @@ mod imp {
 #[cfg(windows)]
 mod imp {
     //! Every component is opened relative to the handle of its parent
-    //! directory (`NtCreateFile` with a `RootDirectory`, through the `fs_at`
-    //! crate) with `FILE_OPEN_REPARSE_POINT`, so a symlink, junction or other
+    //! directory with `FILE_OPEN_REPARSE_POINT`, so a symlink, junction or other
     //! name-surrogate reparse point is opened itself, never followed, and is
     //! refused (or, for entry operations, acted on itself). Creating and
     //! removing entries and listing directories also go through handles.
@@ -312,7 +309,7 @@ mod imp {
     //! trailing `.` or space, `:` for alternate data streams, reserved
     //! device names such as `CON`) are refused: handle-relative opens take
     //! them literally, so they would name entries that the policy's
-    //! (Win32-based) normalisation does not see.
+    //! (Win32-based) normalization does not see.
     use super::*;
     use fs_at::os::windows::{FileExt, OpenOptionsExt};
     use same_file::Handle;
@@ -349,7 +346,7 @@ mod imp {
         io::Error::new(io::ErrorKind::PermissionDenied, format!("{} changed during the operation", path.display()))
     }
 
-    /// Splits the absolute, normalised `path` into its root (`C:\`,
+    /// Splits the absolute, normalized `path` into its root (`C:\`,
     /// `\\server\share\`) and the names below it.
     fn split(path: &Path) -> io::Result<(PathBuf, Vec<&OsStr>)> {
         let mut root = PathBuf::new();
@@ -362,7 +359,7 @@ mod imp {
                     names.push(name);
                 }
                 _ if !root.is_absolute() => return Err(invalid(path, "is not an absolute path")),
-                _ => return Err(invalid(path, "is not a normalised path")),
+                _ => return Err(invalid(path, "is not a normalized path")),
             }
         }
         if !root.is_absolute() {
@@ -371,8 +368,7 @@ mod imp {
         Ok((root, names))
     }
 
-    /// Refuses names that Win32 path functions would alter or treat
-    /// specially, which handle-relative opens would take literally.
+    /// Checks for names that Win32 path functions treat specially.
     fn check_name(path: &Path, name: &OsStr) -> io::Result<()> {
         let wide: Vec<u16> = name.encode_wide().collect();
         if wide.contains(&0) {
@@ -398,12 +394,7 @@ mod imp {
         Ok(())
     }
 
-    /// Options to open an entry relative to a directory handle with `access`.
-    /// `FILE_OPEN_REPARSE_POINT` is always set: a symlink or junction is
-    /// opened itself, never followed, and callers check what they opened.
-    /// (`follow(true)` only stops `fs_at` from probing for links with
-    /// `FSCTL_GET_REPARSE_POINT`, which fails on file systems without
-    /// reparse points, such as FAT.)
+    /// Options to open an entry relative to a directory handle.
     fn options(access: u32, create_options: u32) -> fs_at::OpenOptions {
         let mut o = fs_at::OpenOptions::default();
         o.follow(true)
@@ -567,8 +558,7 @@ mod imp {
     }
 
     /// Creates `path` and missing parents; an existing directory is fine.
-    /// The first `keep` components below the root must exist already (they
-    /// were not checked as directories that may be created).
+    /// The first `keep` components below the root must exist already.
     pub(crate) fn create_dir_all(path: &Path, keep: usize) -> io::Result<()> {
         let (root, names) = split(path)?;
         let mut dir = open_root(&root)?;
@@ -583,7 +573,6 @@ mod imp {
             };
             dir = match opened {
                 Ok(d) => d,
-                // Like `std::fs::create_dir_all`: something other than a directory is in the way.
                 Err(e) if i + 1 == last && e.kind() == io::ErrorKind::NotADirectory => {
                     return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{} exists and is not a directory", path.display())));
                 }
@@ -593,8 +582,7 @@ mod imp {
         Ok(())
     }
 
-    /// Opens the entry `path` itself (not followed) for deletion and deletes
-    /// it if `accept` approves of its metadata.
+    /// Opens the entry `path` itself for deletion and deletes it if allowed.
     fn remove(path: &Path, accept: impl FnOnce(&Metadata) -> io::Result<()>) -> io::Result<()> {
         let (dir, name) = parent(path)?;
         let entry = open_in(&dir, name, &options(DELETE | FILE_READ_ATTRIBUTES, 0))?;
@@ -977,7 +965,6 @@ mod windows_tests {
         assert!(is_unchecked_symlink(&imp::open_dir(&dir.join("link/deeper")).unwrap_err()));
         assert_eq!(imp::open_dir(&dir.join("real/file.txt")).unwrap_err().kind(), io::ErrorKind::NotADirectory);
         assert_eq!(imp::open_dir(&dir.join("missing")).unwrap_err().kind(), io::ErrorKind::NotFound);
-        // Names are looked up case-insensitively, as by Win32 path functions.
         assert!(imp::open_dir(&dir.join("REAL")).is_ok());
         std::fs::remove_dir_all(&dir).unwrap();
     }

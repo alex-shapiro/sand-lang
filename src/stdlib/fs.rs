@@ -145,8 +145,7 @@ pub fn register(r: &mut Registry) {
                 return Ok(e);
             }
         }
-        // The others (all names below the root but the missing ones and
-        // `path` itself) must exist already (fs_safe does not create them).
+        // The others must exist already (fs_safe does not create them).
         let names = path.components().filter(|c| matches!(c, std::path::Component::Normal(_))).count();
         let keep = names.saturating_sub(missing.len() + 1);
         run(shown, blocking(move || fs_safe::create_dir_all(&path, keep)), ok_unit)
@@ -276,7 +275,7 @@ pub fn register(r: &mut Registry) {
 
 /// The script-supplied path `p` and its resolved form (the entry's own path
 /// if `entry`). Overlong paths are refused (kind `"invalid"`) before
-/// normalisation, which is charged per component.
+/// normalization, which is charged per component.
 fn target(vm: &mut Vm, p: Value, entry: bool) -> Result<Result<(String, PathBuf), Value>, Ctl> {
     let shown = vm.str(p);
     if shown.len() > MAX_PATH_BYTES {
@@ -287,14 +286,12 @@ fn target(vm: &mut Vm, p: Value, entry: bool) -> Result<Result<(String, PathBuf)
     }
     let shown = shown.to_string();
     let joined = vm.host.cwd.join(&shown);
-    // Lexical normalisation, a few `canonicalize` calls (binary search) and
+    // Lexical normalization, a few `canonicalize` calls (binary search) and
     // the policy's checks, each linear in the length.
     vm.charge(4 * joined.components().count() as u64)?;
     vm.charge_bytes(4 * joined.as_os_str().len())?;
     let path = if entry {
         let e = entry_path(&joined);
-        // Finding a symlink's stored name reads its directory, here and in
-        // the policy's checks (bounded by `policy::MAX_LINK_SCAN`).
         vm.charge(4 * e.scanned as u64)?;
         vm.charge_bytes(4 * e.scanned_bytes)?;
         e.path
@@ -318,7 +315,6 @@ fn denied(vm: &mut Vm, cap: &Capability, shown: &str) -> Value {
 /// Checks `cap` against the policy: `Some(Err(Error))` to return if it is
 /// denied, `None` if the effect may proceed.
 fn refuse(vm: &mut Vm, cap: Capability, shown: &str) -> Result<Option<Value>, Ctl> {
-    // (The paths come from `target`, normalised already.)
     if vm.permit_normalized(&cap)? {
         return Ok(None);
     }
@@ -340,9 +336,9 @@ fn protected_tree(vm: &mut Vm, shown: &str, path: &Path) -> Option<Value> {
     protected.then(|| vm.err_value("permission_denied", &format!("permission denied: {shown} contains paths protected by the policy")))
 }
 
-/// Runs the blocking file system operation `op` off the VM thread: on the
-/// process's hot file system worker if it is idle (see [`FsWorker`]),
-/// otherwise on tokio's blocking pool.
+/// Runs a blocking file system operation `op` off the VM thread: on the
+/// process's hot file system worker if idle, otherwise on tokio's blocking
+/// pool.
 async fn blocking<T: Send + 'static>(op: impl FnOnce() -> io::Result<T> + Send + 'static) -> io::Result<T> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let job: Box<dyn FnOnce() + Send> = Box::new(move || {
@@ -357,17 +353,11 @@ async fn blocking<T: Send + 'static>(op: impl FnOnce() -> io::Result<T> + Send +
     }
 }
 
-/// A thread that runs file system operations one at a time and, after each,
-/// stays awake (spinning) for [`FsWorker::LINGER`] waiting for the next:
-/// a script doing many small file operations in a row then pays no thread
-/// wake-up per operation, which costs more than the operation itself
-/// (`stat` or reading a small file takes a few microseconds). It only takes
-/// a job when idle, so operations never queue behind a slow one (one on a
-/// hung network file system holds it, and later ones go to tokio's
-/// blocking pool), and engines keep running operations in parallel.
+/// A thread that runs file system operations one at a time and stays awake
+/// in between. It takes a job only when idle, so operations never queue
+/// behind a slow one, and engines run operations in parallel.
 pub(crate) struct FsWorker {
     jobs: std::sync::Mutex<std::sync::mpsc::Sender<Box<dyn FnOnce() + Send>>>,
-    /// A job was handed over and has not finished.
     busy: std::sync::atomic::AtomicBool,
 }
 
@@ -384,7 +374,6 @@ impl FsWorker {
                     loop {
                         job();
                         worker.busy.store(false, std::sync::atomic::Ordering::Release);
-                        // Linger: the next operation usually follows at once.
                         let until = std::time::Instant::now() + FsWorker::LINGER;
                         let next = loop {
                             match rx.try_recv() {
@@ -400,13 +389,12 @@ impl FsWorker {
                     }
                 }
             });
-            // Without a worker every job goes to the blocking pool.
             let busy = std::sync::atomic::AtomicBool::new(spawned.is_err());
             FsWorker { jobs: std::sync::Mutex::new(tx), busy }
         })
     }
 
-    /// Hands `job` to the worker if it is idle; gives it back otherwise.
+    /// Hands a job to the worker if it is idle; gives it back otherwise.
     fn try_run(&self, job: Box<dyn FnOnce() + Send>) -> Result<(), Box<dyn FnOnce() + Send>> {
         use std::sync::atomic::Ordering;
         if self.busy.compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed).is_err() {
@@ -419,8 +407,7 @@ impl FsWorker {
         })
     }
 
-    /// Whether the worker is running a job (the VM waits for it briefly
-    /// before parking its thread).
+    /// Whether the worker is running a job.
     pub(crate) fn busy() -> bool {
         FsWorker::get().busy.load(std::sync::atomic::Ordering::Acquire)
     }

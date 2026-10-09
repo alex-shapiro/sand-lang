@@ -2183,7 +2183,7 @@ pub(crate) fn zonk_budget(subst: &[Option<Type>], t: &Type, budget: &CompileBudg
 
 /// Names referenced (as identifiers or struct-literal shorthands) inside
 /// function bodies, methods, tests and default expressions of a module.
-/// Top-level bindings not in this set can live in the module initialiser's
+/// Top-level bindings not in this set can live in the module initializer's
 /// registers instead of global slots.
 pub(crate) fn names_used_in_functions(m: &ast::Module) -> HashSet<String> {
     let mut out = HashSet::new();
