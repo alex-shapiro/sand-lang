@@ -28,9 +28,16 @@ unicode-normalization = "0.1"
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", default-features = false, features = ["fs", "std"] }
 
+[target.'cfg(windows)'.dependencies]
+fs_at = "0.2.1"
+same-file = "1.0.6"
+
 [dev-dependencies]
 proptest = "1"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "io-util", "macros"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+junction = "2"
 
 [[bench]]
 name = "vm"

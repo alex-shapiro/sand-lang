@@ -133,8 +133,9 @@ CI (`.github/workflows/ci.yml`) runs `cargo fmt --check`, `cargo clippy` and
 `tokio` (async I/O), `regex-automata` (the engine of the `regex` crate, used
 directly so each compiled regex's memory can be measured),
 `unicode-normalization` (matching path deny rules the way case- and
-normalisation-insensitive file systems compare names), `rustix` (on Unix, for
-file access that never follows symlinks), and — behind the default `tls`
+normalisation-insensitive file systems compare names), `rustix` (on Unix) and
+`fs_at` and `same-file` (on Windows) for file access that never follows
+symlinks, and — behind the default `tls`
 feature — `rustls`,
 `tokio-rustls` and `webpki-roots` for HTTPS. Note that rustls's `ring`
 crypto provider contains C and assembly; build with

@@ -1554,6 +1554,11 @@ Symbolic links (§14.1):
   `to`; `remove_dir(path, recursive: true)` checks the same for `path`
   before removing anything, and checks each entry before removing it.
 
+On Windows, a junction counts as a symlink, and file names that Win32
+would alter or treat specially (ending in `.` or a space, containing `:`,
+which names an alternate data stream, or a reserved device name such as
+`CON` or `nul.txt`) fail with kind `"invalid"`.
+
 Reading, writing and copying accept regular files only (kind `"invalid"`
 otherwise, e.g. for directories and FIFOs). `copy` copies the contents
 only: a new file gets the default permissions (never the source's execute
@@ -1865,8 +1870,14 @@ forms; returns lower-case hyphenated), `is_valid(s: str) -> bool`,
   escape an allowed directory via `..` or symlinks. The checked location is
   then accessed without following symlinks (directories are opened one
   component at a time with no-follow semantics), so a symlink swapped into
-  the path after the check cannot redirect the access (§13.3). On non-Unix
-  platforms accesses are path-based and this race remains. On Windows, paths
+  the path after the check cannot redirect the access (§13.3). On Windows,
+  every component is opened relative to its parent directory's handle
+  without following symlinks or junctions; `rename` is path-based there, but
+  holds every directory on both paths open (so that none can be renamed or
+  replaced) and checks that it is the directory the no-follow walk finds,
+  leaving only a narrow race in which the parent directory of an entry is
+  emptied and turned into a junction while the rename runs. On other
+  platforms accesses are path-based and the race remains. On Windows, paths
   are compared case-insensitively and use the plain `C:\...` /
   `\\server\share\...` form (not `\\?\...`).
 
@@ -1938,7 +1949,10 @@ requested once.
   top-level paths of such operations. Path rules are compared after
   normalisation (§14.1), which names existing files and directories with
   their stored spelling (on case- or normalisation-insensitive file systems
-  `data/ſecrets` or `data/SECRETS` may name `data/secrets`). Allow rules
+  `data/ſecrets` or `data/SECRETS` may name `data/secrets`). For operations
+  on an entry itself (below), a final symlink is named with its stored
+  spelling too, which is looked up in its directory; in a directory of more
+  than 4096 entries it keeps the spelling it was given. Allow rules
   compare paths exactly (ignoring case on Windows). Deny rules, on every
   platform, compare paths caselessly and normalisation-insensitively
   (canonical decomposition, full case folding, default-ignorable characters
