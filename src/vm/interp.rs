@@ -1410,13 +1410,17 @@ impl Vm {
             with_keyref_metered(&self.heap, &self.meter, k, |kr| mo.index.get(kr))?
         };
         if let Some(s) = slot {
-            let Obj::Map(mo) = self.heap.get_mut_storing(m, &[k, v]) else { unreachable!() };
+            let Obj::Map(mo) = self.heap.entries_mut_storing(m, s, false, &[k, v]) else { unreachable!() };
             let old = mo.entries[s].map(|(_, ov)| ov);
             mo.entries[s] = Some((k, v));
             return Ok(old);
         }
         let (owned, key_bytes) = self.owned_key(k)?;
-        let Obj::Map(mo) = self.heap.get_mut_storing(m, &[k, v]) else { unreachable!() };
+        let end = match self.heap.get(m) {
+            Obj::Map(mo) => mo.entries.len(),
+            _ => 0,
+        };
+        let Obj::Map(mo) = self.heap.entries_mut_storing(m, end, true, &[k, v]) else { unreachable!() };
         let s = mo.entries.len();
         mo.entries.push(Some((k, v)));
         mo.live += 1;
@@ -1475,7 +1479,11 @@ impl Vm {
             return Ok(false);
         }
         let (owned, key_bytes) = self.owned_key(k)?;
-        let Obj::Set(so) = self.heap.get_mut_storing(s, &[k]) else { unreachable!() };
+        let end = match self.heap.get(s) {
+            Obj::Set(so) => so.entries.len(),
+            _ => 0,
+        };
+        let Obj::Set(so) = self.heap.entries_mut_storing(s, end, true, &[k]) else { unreachable!() };
         let slot = so.entries.len();
         so.entries.push(Some(k));
         so.live += 1;

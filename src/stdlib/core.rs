@@ -646,7 +646,7 @@ fn register_list(r: &mut Registry) {
         Ok(Value::Unit)
     });
     r.add_builtin("List.pop", |vm, a| {
-        let v = vm.heap.list_mut(a[0]).pop();
+        let v = vm.heap.list_shrink(a[0]).and_then(Vec::pop);
         Ok(vm.option(v))
     });
     r.add_builtin("List.insert", |vm, a| {
@@ -671,7 +671,9 @@ fn register_list(r: &mut Registry) {
         Ok(Value::Unit)
     });
     r.add_builtin("List.clear", |vm, a| {
-        vm.heap.list_mut(a[0]).clear();
+        if let Some(l) = vm.heap.list_shrink(a[0]) {
+            l.clear();
+        }
         Ok(Value::Unit)
     });
     r.add_builtin("List.get", |vm, a| {

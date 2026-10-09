@@ -22,10 +22,12 @@
 //!   `get_mut_storing`, which only remembers the object if a stored value
 //!   refers to a young object. `NativeObject`s never hold `Value`s, so
 //!   `native_mut` needs no barrier.
-//! * Lists remembered only through `list_push`/`list_mut_storing` are *partially*
-//!   remembered: the minor collection scans just the stored indices and the
-//!   pushed tail (`DirtyList`) instead of the whole list. Any other mutation,
-//!   or too many scattered stores, makes the remembered entry a full one.
+//! * Lists remembered only through `list_push`/`list_mut_storing` (and maps
+//!   and sets only through `entries_mut_storing`) are *partially*
+//!   remembered: the minor collection scans just the stored indices (entries)
+//!   and the pushed tail (`DirtyList`) instead of the whole object. Any other
+//!   mutation, or too many scattered stores, makes the remembered entry a
+//!   full one.
 //!
 //! Major collections of large heaps are **incremental**: instead of marking
 //! and sweeping the whole heap in one pause, a *cycle* does the work in
@@ -358,6 +360,8 @@ impl Heap {
         let index = index.min(NONE as usize - 1) as u32;
         let len = match &self.objs[h as usize] {
             Obj::List(l) => l.len(),
+            Obj::Map(m) => m.entries.len(),
+            Obj::Set(s) => s.entries.len(),
             _ => 0,
         };
         let Some(d) = self.dirty.get_mut(&h) else { return };
@@ -512,6 +516,32 @@ impl Heap {
             Obj::List(l) => Some(l),
             _ => None,
         }
+    }
+
+    /// Mutable access to list `list` for removing elements from its end
+    /// only (`pop`, `clear`): no write barrier is needed, as no value is
+    /// stored and none moves.
+    pub fn list_shrink(&mut self, list: Value) -> Option<&mut Vec<Value>> {
+        let Value::Obj(h) = list else { return None };
+        match &mut self.objs[h as usize] {
+            Obj::List(l) => Some(l),
+            _ => None,
+        }
+    }
+
+    /// Mutable access to map or set `obj` for storing `stored` (and nothing
+    /// else) into its entry `slot` (`push`: appending the entry at `slot`,
+    /// the current number of entries): the precise, card-marking write
+    /// barrier of `list_mut_storing`, for entries.
+    pub fn entries_mut_storing(&mut self, obj: Value, slot: usize, push: bool, stored: &[Value]) -> &mut Obj {
+        let Value::Obj(h) = obj else { panic!("internal error: not an object") };
+        if stored.iter().any(|s| s.handle().is_some_and(|c| !self.is_marked(c))) {
+            self.list_barrier(h, slot, push);
+        }
+        if self.phase == Phase::Marking {
+            stored.iter().for_each(|&s| self.shade(s));
+        }
+        &mut self.objs[h as usize]
     }
 
     pub fn list_push(&mut self, list: Value, v: Value) {
@@ -693,6 +723,25 @@ impl Heap {
                         if let Some(tail) = l.get(d.from as usize..) {
                             children.extend_from_slice(tail);
                         }
+                    }
+                    (Some(d), Obj::Map(m)) => {
+                        let entries = d
+                            .idx
+                            .iter()
+                            .filter_map(|&i| m.entries.get(i as usize))
+                            .chain(m.entries.get(d.from as usize..).unwrap_or_default());
+                        for (k, v) in entries.flatten() {
+                            children.push(*k);
+                            children.push(*v);
+                        }
+                    }
+                    (Some(d), Obj::Set(st)) => {
+                        let entries = d
+                            .idx
+                            .iter()
+                            .filter_map(|&i| st.entries.get(i as usize))
+                            .chain(st.entries.get(d.from as usize..).unwrap_or_default());
+                        children.extend(entries.flatten());
                     }
                     (_, obj) => obj.children(|v| children.push(v)),
                 }
