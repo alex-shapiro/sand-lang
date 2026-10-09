@@ -742,6 +742,24 @@ impl Vm {
                         _ => fail!("internal error: call of a non-function"),
                     }
                 }
+                Op::CallR { callee: c, base: b, dst, argc } => {
+                    tick_call!();
+                    let callee = r!(c);
+                    match self.heap.get(callee) {
+                        Obj::Closure(p, _) => {
+                            let p = *p;
+                            let Value::Obj(h) = callee else { unreachable!() };
+                            let nb = base + b as usize;
+                            enter!(p, nb, base + dst as usize, h);
+                        }
+                        Obj::IterFn(_) => r!(dst) = self.iter_step(callee),
+                        Obj::NativeFn(n) => {
+                            let n = *n;
+                            native_call!(n, base + b as usize, argc as usize, base + dst as usize);
+                        }
+                        _ => fail!("internal error: call of a non-function"),
+                    }
+                }
                 // (`tick_call!` reloads `regs` after a collection; `enter!` reloads again.)
                 #[allow(unused_assignments)]
                 Op::CallDirectTo { base: b, dst, proto } => {
@@ -966,6 +984,14 @@ impl Vm {
                     }
                 }
                 Op::FreezeStr { reg } => self.heap.freeze_str(r!(reg)),
+                Op::JStrClass { src, class, off } => match self.str_class(r!(src), class & 0x7f) {
+                    Ok(b) => {
+                        if b == (class & 0x80 != 0) {
+                            jump!(off)
+                        }
+                    }
+                    Err(c) => fail_ctl!(c),
+                },
                 Op::StrClass { dst, src, class } => match self.str_class(r!(src), class) {
                     Ok(b) => r!(dst) = Value::Bool(b),
                     Err(c) => fail_ctl!(c),

@@ -537,6 +537,7 @@ impl<'a> Compiler<'a> {
             | Op::JNleF { off: o, .. }
             | Op::JNotVariant { off: o, .. }
             | Op::JNotSome { off: o, .. }
+            | Op::JStrClass { off: o, .. }
             | Op::HoistGlobal { off: o, .. }
             | Op::JListLen { off: o, .. }
             | Op::JListMinLen { off: o, .. }
@@ -923,6 +924,9 @@ impl<'a> Compiler<'a> {
                 return vec![self.emit(f, op)];
             }
         }
+        if let Some(j) = self.str_class_jump(f, cond, false) {
+            return j;
+        }
         match &cond.kind {
             HKind::And(a, b) => {
                 let mut j = self.cond_jump(f, a);
@@ -945,9 +949,26 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    /// A character-class test (`c.is_alnum()`, an inline `StrClass`) as
+    /// one compare-and-branch: jumps when the test is `when`.
+    fn str_class_jump(&mut self, f: &mut FnState, cond: &HExpr, when: bool) -> Option<Vec<usize>> {
+        let HKind::CallNative { native, args, .. } = &cond.kind else { return None };
+        let (Some(&Inline::StrClass(class)), [HArg::Expr(x)], false) = (self.inline.get(native), args.as_slice(), f.no_fused) else {
+            return None;
+        };
+        let mark = f.next_reg;
+        let src = self.expr_reg(f, x);
+        let j = self.emit(f, Op::JStrClass { src, class: if when { class | 0x80 } else { class }, off: 0 });
+        f.next_reg = mark;
+        Some(vec![j])
+    }
+
     /// Like [`Self::cond_jump`], but the jumps are taken when `cond` is true.
     fn cond_jump_true(&mut self, f: &mut FnState, cond: &HExpr) -> Vec<usize> {
         self.set_line(f, cond.span);
+        if let Some(j) = self.str_class_jump(f, cond, true) {
+            return j;
+        }
         match &cond.kind {
             // Integer comparisons as the fused "jump if not" of the opposite
             // comparison (not floats: the opposite of `<` is not `>=` for NaN).
@@ -1457,6 +1478,18 @@ impl<'a> Compiler<'a> {
             }
             HKind::CallValue { callee, args } => {
                 let mark = f.next_reg;
+                if let (HKind::Local(_), Ok(argc)) = (&callee.kind, u8::try_from(args.len())) {
+                    // The function is in a register already: call it there.
+                    let c = self.expr_reg(f, callee);
+                    let base = self.alloc_n(f, args.len().max(1));
+                    for (i, a) in args.iter().enumerate() {
+                        self.expr_to(f, a, base + i as Reg);
+                    }
+                    self.set_line(f, e.span);
+                    self.emit(f, Op::CallR { callee: c, base, dst, argc });
+                    f.next_reg = mark;
+                    return;
+                }
                 let base = self.alloc_n(f, args.len() + 1);
                 self.expr_to(f, callee, base);
                 for (i, a) in args.iter().enumerate() {

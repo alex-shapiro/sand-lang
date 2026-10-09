@@ -141,6 +141,17 @@ impl Policy {
         }
     }
 
+    /// Like [`Policy::check`] for a capability whose path (`FsRead`,
+    /// `FsWrite`) the caller already normalised with [`normalize_path`]
+    /// (and will operate on exactly): a rule policy skips normalising it
+    /// again, which costs a `realpath`.
+    pub fn check_normalized(&self, cap: &Capability) -> Decision {
+        match self {
+            Policy::Rules(r) => r.check_normalized(cap),
+            _ => self.check(cap),
+        }
+    }
+
     /// Like [`Policy::check`] for an operation on a directory entry itself
     /// (removing or renaming it): a final symlink in an `FsRead`/`FsWrite`
     /// path is the entry and is not resolved to its target.
@@ -857,6 +868,15 @@ impl RulePolicy {
             Decision::Deny
         } else {
             allow_or(under(p, &self.read_allow))
+        }
+    }
+
+    /// [`Policy::check_normalized`].
+    fn check_normalized(&self, cap: &Capability) -> Decision {
+        match cap {
+            Capability::FsRead(p) => self.check_path(p, false),
+            Capability::FsWrite(p) => self.check_path(p, true),
+            _ => self.check(cap),
         }
     }
 

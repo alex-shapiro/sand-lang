@@ -353,6 +353,15 @@ pub enum Op {
         argc: u16,
         dst: Reg,
     },
+    /// Calls the function value in register `callee` (anywhere) with the
+    /// `argc` arguments at `base..`; result written to `dst`. A closure's
+    /// frame starts at `base`.
+    CallR {
+        callee: Reg,
+        base: Reg,
+        dst: Reg,
+        argc: u8,
+    },
     /// Arguments at `base..`; result written to `base`.
     CallDirect {
         base: Reg,
@@ -575,6 +584,13 @@ pub enum Op {
     /// one, into an ordinary string (in place: the handle stays the same).
     FreezeStr {
         reg: Reg,
+    },
+    /// Jump unless string `src` is of class `class & 0x7f` (as `StrClass`);
+    /// with bit 7 of `class` set, jump if it is.
+    JStrClass {
+        src: Reg,
+        class: u8,
+        off: i16,
     },
     /// Whether string `src` is non-empty and every character is of `class`
     /// (0 digit, 1 alphabetic, 2 alphanumeric, 3 whitespace, 4 uppercase,

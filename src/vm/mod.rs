@@ -673,6 +673,12 @@ impl Vm {
         self.permit_by(cap, Policy::check)
     }
 
+    /// Like [`Vm::permit`] for a file capability whose path is already
+    /// normalised (see [`Policy::check_normalized`]).
+    pub fn permit_normalized(&mut self, cap: &Capability) -> Result<bool, Ctl> {
+        self.permit_by(cap, Policy::check_normalized)
+    }
+
     /// Like [`Vm::permit`] for an operation on a directory entry itself
     /// (see [`Policy::check_entry`]).
     pub fn permit_entry(&mut self, cap: &Capability) -> Result<bool, Ctl> {

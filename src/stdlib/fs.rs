@@ -318,7 +318,8 @@ fn denied(vm: &mut Vm, cap: &Capability, shown: &str) -> Value {
 /// Checks `cap` against the policy: `Some(Err(Error))` to return if it is
 /// denied, `None` if the effect may proceed.
 fn refuse(vm: &mut Vm, cap: Capability, shown: &str) -> Result<Option<Value>, Ctl> {
-    if vm.permit(&cap)? {
+    // (The paths come from `target`, normalised already.)
+    if vm.permit_normalized(&cap)? {
         return Ok(None);
     }
     Ok(Some(denied(vm, &cap, shown)))
