@@ -16,6 +16,16 @@ Follow-up work, roughly in priority order.
       at once; 64+ idle connections can still delay a new request by up to
       30s, and a waiting `accept` holds up to half the free resource slots.
 
+- [ ] **Unconfirmed from the metering audit.** Path normalisation
+      (`canonicalize`, `read_dir`) runs on the VM thread before the
+      permission check, so a hung network file system could block it beyond
+      the interrupt and wall-time limits; buffered standard output is
+      flushed synchronously (a stalled pipe could block the run); list and
+      map growth doubles capacity before the next memory check (up to ~2x
+      slack); `[a, ..rest]` patterns copy without a memory check;
+      `check::traits::resolve_holes` re-walks a body per progress pass
+      without charging the compile budget.
+
 ### Test coverage
 
 - [ ] Run the CI workflow (`.github/workflows/ci.yml`) on Windows and Linux:
