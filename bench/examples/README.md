@@ -107,3 +107,21 @@ The network servers (`servers.py`) run in threads of the harness process,
 which is otherwise idle while a program runs; they are the same for both
 implementations. The fake S3 server, like the mock in `tests/examples.rs`,
 only checks that requests carry SigV4-shaped headers.
+
+## Profiling a workload
+
+The release profile has `debug = 1`, so macOS `sample` (or Instruments)
+shows Rust function names and line numbers. Materialise the inputs and sample
+a run, e.g. for `adventure`:
+
+```
+python3.14 bench/examples/gen.py /tmp/sand-inputs
+target/release/sand run examples/adventure.sand --allow-stdin < /tmp/sand-inputs/adventure.txt > /dev/null &
+sample $! 3 1 -mayDie -file /tmp/adventure.sample.txt
+```
+
+Make the input bigger than the benchmark's (e.g. `gen.adventure_script(60_000)`)
+so the run lasts longer than the sampling window. Natives show up as
+`stdlib::core::register_*::{closure}`; `atos -i -o target/release/sand -l
+LOAD_ADDRESS ADDR` on a sampled address maps such a closure to its source
+line, and so to the builtin's name.
