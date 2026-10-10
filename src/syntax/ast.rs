@@ -123,8 +123,6 @@ pub struct StructDecl {
     pub methods: Vec<FnDecl>,
     pub is_pub: bool,
     pub doc: Option<String>,
-    /// True if written on a single line in the source (formatter hint).
-    pub inline: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -149,7 +147,6 @@ pub struct EnumDecl {
     pub methods: Vec<FnDecl>,
     pub is_pub: bool,
     pub doc: Option<String>,
-    pub inline: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -231,8 +228,6 @@ pub enum TypeExprKind {
 pub struct Block {
     pub stmts: Vec<Stmt>,
     pub span: Span,
-    /// True if the block was written on one line (formatter hint).
-    pub inline: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -273,14 +268,10 @@ pub enum StmtKind {
     Defer(Expr),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ExprId(pub u32);
-
 #[derive(Clone, Debug)]
 pub struct Expr {
     pub kind: ExprKind,
     pub span: Span,
-    pub id: ExprId,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -451,7 +442,6 @@ pub enum ExprKind {
     Match {
         scrutinee: Box<Expr>,
         arms: Vec<MatchArm>,
-        inline: bool,
     },
     Block(Block),
     /// Loops may be labeled (`@outer loop { ... }`) for `break @outer`.

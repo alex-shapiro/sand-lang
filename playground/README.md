@@ -31,8 +31,8 @@ and Safari) and works offline once loaded.
 - **Policy, environment, input.** The darker Policy, Env and Input tabs left
   of the files. The policy is a policy file (`docs/SPEC.md` §14.7) saying
   what the program may and may not do (`allow read /data`, `deny read
-  /data/private`, `allow net api.github.com`, `allow env USER`, `allow
-  stdin`) and its limits (`limit time 2s`). Whatever the policy does not
+/data/private`, `allow net api.github.com`, `allow env USER`, `allow
+stdin`) and its limits (`limit time 2s`). Whatever the policy does not
   decide, the program asks you about in the page when it needs it: allow or
   deny once, or always ("Always" and "Never" add the rule that says so to
   the policy, e.g. `allow read /notes/todo.txt`, so later runs do not ask).
@@ -70,7 +70,7 @@ and Safari) and works offline once loaded.
   workers.
 - `worker.js` — runs engines: one worker per sandbox for its session, and one
   shared worker for checking, linting and formatting. A run makes `new
-  Engine(options, hooks).session()` and evaluates the program as its first
+Engine(options, hooks).session()` and evaluates the program as its first
   input (`session.eval(source, "main.sand")`); console inputs are further
   `eval`s, and between them `session.runTasks()` keeps the program's tasks
   running. Output and permission prompts are posted to the page as they

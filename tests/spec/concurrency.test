@@ -7,7 +7,7 @@ print(t.wait())
 === spawned tasks run concurrently with sleeps
 fn worker(name: str, delay: duration) -> str {
     task.sleep(delay)
-    print("done {name}")
+    print("done \(name)")
     name
 }
 let a = spawn worker("slow", 60ms)
@@ -124,14 +124,14 @@ var log = []
 let p = spawn {
     for i in 0..3 {
         ch.send(i)
-        log.push("sent {i}")
+        log.push("sent \(i)")
     }
 }
 task.sleep(10ms)
-log.push("recv {ch.recv().unwrap()}")
+log.push("recv \(ch.recv().unwrap())")
 task.sleep(10ms)
-log.push("recv {ch.recv().unwrap()}")
-log.push("recv {ch.recv().unwrap()}")
+log.push("recv \(ch.recv().unwrap())")
+log.push("recv \(ch.recv().unwrap())")
 p.wait()
 print(log)
 --- stdout
@@ -197,12 +197,12 @@ main done
 var order = []
 let t = spawn {
     for i in 0..3 {
-        order.push("t{i}")
+        order.push("t\(i)")
         task.yield_now()
     }
 }
 for i in 0..3 {
-    order.push("m{i}")
+    order.push("m\(i)")
     task.yield_now()
 }
 t.wait()

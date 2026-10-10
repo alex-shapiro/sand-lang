@@ -186,7 +186,7 @@ print("done")`;
 });
 
 test("several engines run at once", async () => {
-  const program = (name, ms) => `for i in 0..3 {\n task.sleep(${ms}ms)\n print("${name}{i}") }`;
+  const program = (name, ms) => `for i in 0..3 {\n task.sleep(${ms}ms)\n print("${name}\\(i)") }`;
   const runs = await Promise.all([run(program("x", 7)), run(program("y", 11)), run(program("z", 3))]);
   assert.deepEqual(
     runs.map((r) => r.stdout),
@@ -259,15 +259,33 @@ test("invalid policies and options are reported", () => {
 test("check, lint and format", () => {
   const engine = new sand.Engine({}, {});
   const ok = engine.check("let x = 1\nprint(x)");
-  assert.deepEqual([ok.ok, ok.diagnostics.length], [true, 0]);
+  assert.deepEqual([ok.ok, ok.diagnostics.length, ok.lint], [true, 0, []]);
   const bad = engine.check("print(nope)");
   assert.equal(bad.ok, false);
   assert.match(bad.diagnostics[0].message, /nope/);
+  assert.deepEqual(engine.check("let unused = 1\n").lint.map((w) => w.code), ["unused-variable"]);
   const warnings = engine.lint("let unused = 1\n");
   assert.ok(warnings.some((w) => /unused/.test(w.message)), JSON.stringify(warnings));
   assert.equal(sand.format("fn  f( )->int{1}"), "fn f() -> int { 1 }\n");
   assert.throws(() => sand.format("fn ("), /expected/);
   assert.equal(typeof sand.version(), "string");
+});
+
+test("files changed since a generation", async () => {
+  const engine = new sand.Engine({ policy: "allow write /", files: { "/a.txt": "a", "/b.txt": "b" } }, {});
+  const start = engine.generation();
+  assert.deepEqual(engine.changedFiles(start), []);
+  const result = await engine.run('import fs\nfs.write_text("/b.txt", "B")?\nfs.write_text("/d.txt", "D")?');
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const changed = engine.changedFiles(start).map(({ path, data }) => [path, new TextDecoder().decode(data)]);
+  assert.deepEqual(changed, [["/b.txt", "B"], ["/d.txt", "D"]]);
+});
+
+test("errors carry their exit code", async () => {
+  const { result } = await run('panic("boom")');
+  assert.deepEqual([result.exitCode, result.error.exitCode, result.error.kind], [1, 1, "runtime"]);
+  const session = new sand.Engine({}, {}).session();
+  assert.equal((await session.eval("nope")).error.exitCode, 2);
 });
 
 test("sessions keep state between inputs", async () => {
@@ -336,14 +354,14 @@ test("http goes through fetch, as the policy allows", async () => {
     const base = `http://127.0.0.1:${port}`;
     const source = `import http
 let r = http.get("${base}/hello")?
-print("{r.status} {r.text()?} {r.header("x-greeting")}")
+print("\\(r.status) \\(r.text()?) \\(r.header("x-greeting"))")
 let p = http.post("${base}/echo", b"data", headers: ["content-type": "text/plain"])?
-print("{p.status} {p.json()?}")
+print("\\(p.status) \\(p.json()?)")
 print(http.get("${base}/missing")?.status)
 for url in ["${base}/redirect", "${base}/big", "http://example.com/", "ftp://x/"] {
     match http.get(url) {
-        Ok(r) => print("ok {r.status}")
-        Err(e) => print("{e.kind}: {e.message}")
+        Ok(r) => print("ok \\(r.status)")
+        Err(e) => print("\\(e.kind): \\(e.message)")
     }
 }
 print(http.get("${base}/slow", timeout: 50ms).unwrap_err().kind)
@@ -387,7 +405,7 @@ test("sessions continue a program, and run its tasks between inputs", async () =
   let out = "";
   const engine = new sand.Engine({}, { onOutput: (_, t) => (out += t) });
   const session = engine.session();
-  const program = "var ticks = 0\nlet ticker = spawn {\n    for i in 0..3 {\n        task.sleep(10ms)\n        ticks += 1\n        print(\"tick {ticks}\")\n    }\n}\nprint(\"started\")";
+  const program = "var ticks = 0\nlet ticker = spawn {\n    for i in 0..3 {\n        task.sleep(10ms)\n        ticks += 1\n        print(\"tick \\(ticks)\")\n    }\n}\nprint(\"started\")";
   assert.deepEqual(await session.eval(program, "main.sand"), {});
   assert.equal(out, "started\n");
   const tasks = session.runTasks();
@@ -438,6 +456,6 @@ test("prompt requests carry the rules that answer them for good", async () => {
 });
 
 test("requests the browser blocks say so", async () => {
-  const { stdout } = await run('import http\nlet e = http.get("http://127.0.0.1:1/").unwrap_err()\nprint("{e.kind}: {e.message}")', { policy: "allow net 127.0.0.1:1" });
+  const { stdout } = await run('import http\nlet e = http.get("http://127.0.0.1:1/").unwrap_err()\nprint("\\(e.kind): \\(e.message)")', { policy: "allow net 127.0.0.1:1" });
   assert.equal(stdout, "io: the browser blocked the request to http://127.0.0.1:1/: 127.0.0.1:1 does not let pages of other sites read its answers (CORS), or it cannot be reached\n");
 });

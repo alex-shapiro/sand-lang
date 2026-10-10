@@ -1,9 +1,8 @@
 //! Recursive-descent parser with precedence climbing for expressions.
 
 use super::ast::*;
-use super::lexer::{Comment, CommentKind, StrPart, Tok, Token, lex, lex_range};
+use super::lexer::{Comment, CommentKind, Lexed, Tok, Token, lex};
 use crate::diag::{Diag, FileId, Span};
-use std::rc::Rc;
 
 /// Maximum syntactic nesting depth (expressions, types, patterns, blocks).
 pub const MAX_DEPTH: usize = 256;
@@ -14,19 +13,22 @@ const MAX_ERRORS: usize = 50;
 pub struct ParseResult {
     pub module: Module,
     pub comments: Vec<Comment>,
+    /// The tokens, with statement terminators; the payloads of literals
+    /// are taken by the syntax tree (for the formatter, which needs their
+    /// positions).
+    pub tokens: Vec<Token>,
     pub errors: Vec<Diag>,
 }
 
 pub fn parse_module(src: &str, file: FileId) -> ParseResult {
-    let lexed = lex(src, file);
-    let newlines = src.bytes().enumerate().filter(|&(_, b)| b == b'\n').map(|(i, _)| i as u32).collect();
-    let mut p = Parser::new(src, file, lexed.tokens, &lexed.comments, newlines);
-    p.errors = lexed.errors;
+    let Lexed { tokens, comments, errors, .. } = lex(src, file);
+    let mut p = Parser::new(src, file, tokens, &comments);
+    p.errors = errors;
     let module = p.module();
-    let mut errors = p.errors;
+    let (tokens, mut errors) = (p.toks, p.errors);
     errors.sort_by_key(|d| d.span.lo);
     errors.truncate(MAX_ERRORS);
-    ParseResult { module, comments: lexed.comments, errors }
+    ParseResult { module, comments, tokens, errors }
 }
 
 struct Parser<'a> {
@@ -36,7 +38,6 @@ struct Parser<'a> {
     pos: usize,
     comments: &'a [Comment],
     errors: Vec<Diag>,
-    next_id: u32,
     no_struct: bool,
     /// In a match guard: `x => ...` ends the guard rather than starting a lambda.
     in_guard: bool,
@@ -44,14 +45,12 @@ struct Parser<'a> {
     fatal: bool,
     /// Inside a `trait` body: methods may omit their body.
     in_trait: bool,
-    /// Offsets of source code line breaks.
-    newlines: Rc<[u32]>,
 }
 
 type PResult<T> = Result<T, ()>;
 
 impl<'a> Parser<'a> {
-    fn new(src: &'a str, file: FileId, toks: Vec<Token>, comments: &'a [Comment], newlines: Rc<[u32]>) -> Parser<'a> {
+    fn new(src: &'a str, file: FileId, toks: Vec<Token>, comments: &'a [Comment]) -> Parser<'a> {
         Parser {
             src,
             file,
@@ -59,13 +58,11 @@ impl<'a> Parser<'a> {
             pos: 0,
             comments,
             errors: Vec::new(),
-            next_id: 0,
             no_struct: false,
             in_guard: false,
             depth: 0,
             fatal: false,
             in_trait: false,
-            newlines,
         }
     }
 
@@ -95,12 +92,24 @@ impl<'a> Parser<'a> {
     fn span_from(&self, lo: u32) -> Span {
         Span::new(self.file, lo, self.prev_hi().max(lo))
     }
-    fn bump(&mut self) -> Token {
-        let t = self.toks[self.pos].clone();
+    /// Moves to the next token (the parser never goes back); returns the
+    /// span of the current one.
+    fn bump(&mut self) -> Span {
+        let span = self.span_here();
         if self.pos + 1 < self.toks.len() {
             self.pos += 1;
         }
-        t
+        span
+    }
+    /// The text of a string token (`Str` or `StrText`), taken from it, and
+    /// moves past it.
+    fn take_text(&mut self) -> String {
+        let text = match &mut self.toks[self.pos].tok {
+            Tok::Str(s) | Tok::StrText(s) => std::mem::take(s),
+            _ => String::new(),
+        };
+        self.bump();
+        text
     }
     fn eat(&mut self, t: &Tok) -> bool {
         if self.at(t) {
@@ -110,8 +119,12 @@ impl<'a> Parser<'a> {
             false
         }
     }
-    fn text(&self, t: &Token) -> &'a str {
-        &self.src[t.lo as usize..t.hi as usize]
+    fn slice(&self, span: Span) -> &'a str {
+        &self.src[span.lo as usize..span.hi as usize]
+    }
+    /// The source text of the current token.
+    fn cur_text(&self) -> &'a str {
+        self.slice(self.span_here())
     }
     fn error_here(&mut self, msg: impl Into<String>) {
         let span = self.span_here();
@@ -134,18 +147,13 @@ impl<'a> Parser<'a> {
             self.bump();
         }
     }
-    fn new_id(&mut self) -> ExprId {
-        self.next_id += 1;
-        ExprId(self.next_id)
-    }
-    fn mk(&mut self, kind: ExprKind, span: Span) -> Expr {
-        let id = self.new_id();
-        Expr { kind, span, id }
+    fn mk(&self, kind: ExprKind, span: Span) -> Expr {
+        Expr { kind, span }
     }
     fn ident(&mut self, what: &str) -> PResult<Ident> {
         if self.at(&Tok::Ident) {
-            let t = self.bump();
-            Ok(Ident { name: self.text(&t).to_string(), span: Span::new(self.file, t.lo, t.hi) })
+            let span = self.bump();
+            Ok(Ident { name: self.slice(span).to_string(), span })
         } else {
             self.expected(what);
             Err(())
@@ -153,11 +161,9 @@ impl<'a> Parser<'a> {
     }
     /// An identifier, also accepting keywords (for function and member names).
     fn name_or_keyword(&mut self, what: &str) -> PResult<Ident> {
-        let t = self.toks[self.pos].clone();
-        let is_kw = !t.tok.text().is_empty() && t.tok.text().chars().all(|c| c.is_ascii_alphabetic()) && t.tok != Tok::SelfLower;
-        if self.at(&Tok::Ident) || is_kw {
-            self.bump();
-            Ok(Ident { name: self.text(&t).to_string(), span: Span::new(self.file, t.lo, t.hi) })
+        if self.at(&Tok::Ident) || (self.tok().is_keyword() && !self.at(&Tok::SelfLower)) {
+            let span = self.bump();
+            Ok(Ident { name: self.slice(span).to_string(), span })
         } else {
             self.expected(what);
             Err(())
@@ -177,16 +183,6 @@ impl<'a> Parser<'a> {
     fn leave(&mut self) {
         self.depth -= 1;
     }
-    /// The number of line breaks before `pos`.
-    fn line_of(&self, pos: u32) -> usize {
-        self.newlines.partition_point(|&nl| nl < pos)
-    }
-
-    /// Whether `lo` and `hi` are on the same line.
-    fn same_line(&self, lo: u32, hi: u32) -> bool {
-        self.line_of(lo) == self.line_of(hi)
-    }
-
     /// Doc comment (`///`) immediately preceding byte offset `lo`.
     fn doc_before(&self, lo: u32) -> Option<String> {
         let idx = self.comments.partition_point(|c| c.hi <= lo);
@@ -202,7 +198,7 @@ impl<'a> Parser<'a> {
             if !between.trim().is_empty() || between.matches('\n').count() > 1 {
                 break;
             }
-            let t = c.text.trim_start_matches("///");
+            let t = c.text(self.src).trim_start_matches("///");
             lines.push(t.strip_prefix(' ').unwrap_or(t).to_string());
             boundary = c.lo;
             i -= 1;
@@ -249,7 +245,7 @@ impl<'a> Parser<'a> {
             .take_while(|c| c.kind == CommentKind::ModuleDoc || c.kind == CommentKind::Line)
             .filter(|c| c.kind == CommentKind::ModuleDoc)
             .map(|c| {
-                let t = c.text.trim_start_matches("//!");
+                let t = c.text(self.src).trim_start_matches("//!");
                 t.strip_prefix(' ').unwrap_or(t).to_string()
             })
             .collect();
@@ -329,21 +325,12 @@ impl<'a> Parser<'a> {
             Tok::Trait => ItemKind::Trait(self.trait_decl(false, doc)?),
             Tok::Impl => ItemKind::Impl(self.impl_decl()?),
             Tok::Type if matches!(self.peek_tok(1), Tok::Ident) => ItemKind::TypeAlias(self.type_alias(false, doc)?),
-            Tok::Ident if self.text(&self.toks[self.pos].clone()) == "test" && matches!(self.peek_tok(1), Tok::Str(_)) => {
+            Tok::Ident if self.cur_text() == "test" && matches!(self.peek_tok(1), Tok::Str(_) | Tok::StrStart) => {
                 self.bump();
-                let t = self.bump();
-                let name = match &t.tok {
-                    Tok::Str(parts) => parts
-                        .iter()
-                        .map(|p| match p {
-                            StrPart::Text(s) => s.clone(),
-                            StrPart::Expr { .. } => String::new(),
-                        })
-                        .collect(),
-                    _ => unreachable!(),
-                };
+                let name_span = self.span_here();
+                let name = self.plain_string("a test name")?;
                 let body = self.block()?;
-                ItemKind::Test(TestDecl { name, name_span: Span::new(self.file, t.lo, t.hi), body })
+                ItemKind::Test(TestDecl { name, name_span, body })
             }
             _ => {
                 let mut s = self.stmt()?;
@@ -364,19 +351,44 @@ impl<'a> Parser<'a> {
         Ok(Item { kind, span: self.span_from(lo) })
     }
 
-    fn import_source(&mut self) -> PResult<ImportSource> {
-        match self.tok().clone() {
-            Tok::Ident => Ok(ImportSource::Name(self.ident("module name")?)),
-            Tok::Str(parts) => {
-                let t = self.bump();
-                let span = Span::new(self.file, t.lo, t.hi);
-                match parts.as_slice() {
-                    [StrPart::Text(s)] => Ok(ImportSource::Path(s.clone(), span)),
-                    _ => {
-                        self.errors.push(Diag::error(span, "import path must be a plain string"));
-                        Err(())
+    /// A string literal without interpolations (`what` is what it is).
+    fn plain_string(&mut self, what: &str) -> PResult<String> {
+        match self.tok() {
+            Tok::Str(_) => Ok(self.take_text()),
+            Tok::StrStart => {
+                // The whole string, up to its (matching) end.
+                let lo = self.lo();
+                let mut depth = 0;
+                let mut i = self.pos;
+                while let Some(t) = self.toks.get(i) {
+                    match t.tok {
+                        Tok::StrStart => depth += 1,
+                        Tok::StrEnd if depth == 1 => break,
+                        Tok::StrEnd => depth -= 1,
+                        Tok::Eof => break,
+                        _ => {}
                     }
+                    i += 1;
                 }
+                let hi = self.toks.get(i).map_or(lo, |t| t.hi);
+                self.errors
+                    .push(Diag::error(Span::new(self.file, lo, hi), format!("{what} must be a plain string, without interpolation")));
+                Err(())
+            }
+            _ => {
+                self.expected("string");
+                Err(())
+            }
+        }
+    }
+
+    fn import_source(&mut self) -> PResult<ImportSource> {
+        match self.tok() {
+            Tok::Ident => Ok(ImportSource::Name(self.ident("module name")?)),
+            Tok::Str(_) | Tok::StrStart => {
+                let lo = self.lo();
+                let path = self.plain_string("an import path")?;
+                Ok(ImportSource::Path(path, self.span_from(lo)))
             }
             _ => {
                 self.expected("module name or path string");
@@ -412,7 +424,7 @@ impl<'a> Parser<'a> {
         }
         loop {
             let mut reflect = false;
-            if self.at(&Tok::Ident) && self.text(&self.toks[self.pos].clone()) == "reflect" && matches!(self.peek_tok(1), Tok::Ident) {
+            if self.at(&Tok::Ident) && self.cur_text() == "reflect" && matches!(self.peek_tok(1), Tok::Ident) {
                 self.bump();
                 reflect = true;
             }
@@ -460,7 +472,7 @@ impl<'a> Parser<'a> {
     /// An optional `where T: B, U: C` clause.
     fn where_clause(&mut self) -> PResult<Vec<WherePredicate>> {
         let mut out = Vec::new();
-        if self.at(&Tok::Ident) && self.text(&self.toks[self.pos].clone()) == "where" {
+        if self.at(&Tok::Ident) && self.cur_text() == "where" {
             self.bump();
             loop {
                 let name = self.ident("type parameter")?;
@@ -513,13 +525,8 @@ impl<'a> Parser<'a> {
         while !self.at(&Tok::RParen) {
             let plo = self.lo();
             if self.at(&Tok::SelfLower) {
-                let t = self.bump();
-                params.push(Param {
-                    name: Ident { name: "self".into(), span: Span::new(self.file, t.lo, t.hi) },
-                    ty: None,
-                    default: None,
-                    span: self.span_from(plo),
-                });
+                let span = self.bump();
+                params.push(Param { name: Ident { name: "self".into(), span }, ty: None, default: None, span: self.span_from(plo) });
             } else {
                 let pname = self.ident("parameter name")?;
                 self.expect(&Tok::Colon, "`:`")?;
@@ -554,7 +561,6 @@ impl<'a> Parser<'a> {
     }
 
     fn struct_decl(&mut self, is_pub: bool, doc: Option<String>) -> PResult<StructDecl> {
-        let lo = self.lo();
         self.bump();
         let name = self.ident("struct name")?;
         let generics = self.generics()?;
@@ -585,14 +591,11 @@ impl<'a> Parser<'a> {
                 return Err(());
             }
         }
-        let close = self.lo();
         self.expect(&Tok::RBrace, "`}`")?;
-        let inline = self.same_line(lo, close);
-        Ok(StructDecl { name, generics, fields, methods, is_pub, doc, inline })
+        Ok(StructDecl { name, generics, fields, methods, is_pub, doc })
     }
 
     fn enum_decl(&mut self, is_pub: bool, doc: Option<String>) -> PResult<EnumDecl> {
-        let lo = self.lo();
         self.bump();
         let name = self.ident("enum name")?;
         let generics = self.generics()?;
@@ -636,10 +639,8 @@ impl<'a> Parser<'a> {
                 return Err(());
             }
         }
-        let close = self.lo();
         self.expect(&Tok::RBrace, "`}`")?;
-        let inline = self.same_line(lo, close);
-        Ok(EnumDecl { name, generics, variants, methods, is_pub, doc, inline })
+        Ok(EnumDecl { name, generics, variants, methods, is_pub, doc })
     }
 
     fn extend_decl(&mut self) -> PResult<ExtendDecl> {
@@ -740,7 +741,7 @@ impl<'a> Parser<'a> {
 
     fn ty_inner(&mut self) -> PResult<TypeExpr> {
         let lo = self.lo();
-        let mut t = match self.tok().clone() {
+        let mut t = match self.tok() {
             Tok::LBracket => {
                 self.bump();
                 let a = self.ty()?;
@@ -762,14 +763,7 @@ impl<'a> Parser<'a> {
                     if self.eat(&Tok::RParen) {
                         first
                     } else {
-                        let mut items = vec![first];
-                        while self.eat(&Tok::Comma) {
-                            if self.at(&Tok::RParen) {
-                                break;
-                            }
-                            items.push(self.ty()?);
-                        }
-                        self.expect(&Tok::RParen, "`)`")?;
+                        let items = self.tuple_rest(first, lo, Self::ty)?;
                         TypeExpr { kind: TypeExprKind::Tuple(items), span: self.span_from(lo) }
                     }
                 }
@@ -791,8 +785,8 @@ impl<'a> Parser<'a> {
             Tok::Ident | Tok::SelfUpper => {
                 let mut path = Vec::new();
                 if self.at(&Tok::SelfUpper) {
-                    let t = self.bump();
-                    path.push(Ident { name: "Self".into(), span: Span::new(self.file, t.lo, t.hi) });
+                    let span = self.bump();
+                    path.push(Ident { name: "Self".into(), span });
                 } else {
                     path.push(self.ident("type")?);
                     while self.at(&Tok::Dot) && matches!(self.peek_tok(1), Tok::Ident) {
@@ -826,6 +820,24 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(t)
+    }
+
+    /// The rest of a parenthesized tuple (type, pattern or expression)
+    /// after its first element: `, b, c)`, with an optional trailing comma.
+    /// A tuple has two or more elements (§5.2), so `(a,)` is an error.
+    fn tuple_rest<T>(&mut self, first: T, lo: u32, mut elem: impl FnMut(&mut Self) -> PResult<T>) -> PResult<Vec<T>> {
+        let mut items = vec![first];
+        while self.eat(&Tok::Comma) {
+            if self.at(&Tok::RParen) {
+                break;
+            }
+            items.push(elem(self)?);
+        }
+        self.expect(&Tok::RParen, "`)` or `,`")?;
+        if items.len() == 1 {
+            self.errors.push(Diag::error(self.span_from(lo), "a tuple has two or more elements; without the comma, `(x)` is just `x`"));
+        }
+        Ok(items)
     }
 
     // ------------------------------------------------------------------
@@ -869,10 +881,8 @@ impl<'a> Parser<'a> {
             }
         }
         self.no_struct = saved;
-        let close = self.lo();
         self.expect(&Tok::RBrace, "`}`")?;
-        let inline = self.same_line(lo, close);
-        Ok(Block { stmts, span: self.span_from(lo), inline })
+        Ok(Block { stmts, span: self.span_from(lo) })
     }
 
     fn let_stmt(&mut self) -> PResult<Stmt> {
@@ -968,6 +978,13 @@ impl<'a> Parser<'a> {
         let mut lhs = self.prefix(min_bp)?;
         let mut chain = 0usize;
         while let Some((lbp, rbp)) = self.infix_bp() {
+            if self.toks[self.pos].negates {
+                self.error_here(
+                    "ambiguous `-`: with a space before it and none after, `-` negates the operand that follows; \
+                     to subtract, put spaces on both sides (`a - b`)",
+                );
+                return Err(());
+            }
             if lbp < min_bp {
                 break;
             }
@@ -979,8 +996,9 @@ impl<'a> Parser<'a> {
                 self.fatal = true;
                 return Err(());
             }
-            let op_tok = self.bump();
-            let kind = match op_tok.tok {
+            let op_tok = self.tok().clone();
+            self.bump();
+            let kind = match op_tok {
                 Tok::PipeGt => {
                     let rhs = self.expr_bp(rbp)?;
                     ExprKind::Pipe(Box::new(lhs), Box::new(rhs))
@@ -990,7 +1008,7 @@ impl<'a> Parser<'a> {
                     ExprKind::Coalesce(Box::new(lhs), Box::new(rhs))
                 }
                 Tok::DotDot | Tok::DotDotEq => {
-                    let inclusive = op_tok.tok == Tok::DotDotEq;
+                    let inclusive = op_tok == Tok::DotDotEq;
                     let end = if self.range_end_absent() { None } else { Some(Box::new(self.expr_bp(rbp)?)) };
                     let e = ExprKind::Range { start: Some(Box::new(lhs)), end, inclusive };
                     let ex = self.mk(e, self.span_from(lo));
@@ -1147,7 +1165,7 @@ impl<'a> Parser<'a> {
                 self.fatal = true;
                 return Err(());
             }
-            match self.tok().clone() {
+            match *self.tok() {
                 Tok::LParen => {
                     self.bump();
                     let args = self.args()?;
@@ -1168,37 +1186,28 @@ impl<'a> Parser<'a> {
                 }
                 Tok::Dot => {
                     self.bump();
-                    match self.tok().clone() {
-                        t if t == Tok::Ident || (!t.text().is_empty() && t.text().chars().all(|c| c.is_ascii_alphabetic())) => {
-                            let name = self.name_or_keyword("field or method name")?;
-                            if self.at(&Tok::LParen) {
-                                self.bump();
-                                let args = self.args()?;
-                                e = self.mk(ExprKind::MethodCall { receiver: Box::new(e), method: name, args }, self.span_from(lo));
-                            } else {
-                                e = self.mk(ExprKind::Field(Box::new(e), name), self.span_from(lo));
-                            }
-                        }
+                    match *self.tok() {
+                        Tok::Ident => e = self.member(e, lo)?,
+                        _ if self.tok().is_keyword() => e = self.member(e, lo)?,
                         Tok::Int(i) => {
-                            let t = self.bump();
-                            e = self.mk(ExprKind::TupleField(Box::new(e), i as u32, Span::new(self.file, t.lo, t.hi)), self.span_from(lo));
+                            let span = self.bump();
+                            let Ok(i) = u32::try_from(i) else {
+                                self.errors.push(Diag::error(span, "invalid tuple index"));
+                                return Err(());
+                            };
+                            e = self.mk(ExprKind::TupleField(Box::new(e), i, span), self.span_from(lo));
                         }
                         Tok::Float(_) => {
                             // `t.0.1` lexes as `t` `.` `0.1`.
-                            let t = self.bump();
-                            let text = self.text(&t);
-                            let mut parts = text.split('.');
-                            for part in parts.by_ref() {
-                                match part.parse::<u32>() {
-                                    Ok(i) => {
-                                        e = self
-                                            .mk(ExprKind::TupleField(Box::new(e), i, Span::new(self.file, t.lo, t.hi)), self.span_from(lo));
-                                    }
-                                    Err(_) => {
-                                        self.errors.push(Diag::error(Span::new(self.file, t.lo, t.hi), "invalid tuple index"));
-                                        return Err(());
-                                    }
-                                }
+                            let span = self.bump();
+                            for part in self.slice(span).split('.') {
+                                // Only plain digits (`t.0.1`, not `t.1e3`).
+                                let index = part.bytes().all(|b| b.is_ascii_digit()).then(|| part.parse::<u32>().ok()).flatten();
+                                let Some(i) = index else {
+                                    self.errors.push(Diag::error(span, "invalid tuple index"));
+                                    return Err(());
+                                };
+                                e = self.mk(ExprKind::TupleField(Box::new(e), i, span), self.span_from(lo));
                             }
                         }
                         _ => {
@@ -1214,6 +1223,18 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(e)
+    }
+
+    /// `.name` or `.name(args)` after `e` (the `.` was consumed).
+    fn member(&mut self, receiver: Expr, lo: u32) -> PResult<Expr> {
+        let name = self.name_or_keyword("field or method name")?;
+        let receiver = Box::new(receiver);
+        if self.eat(&Tok::LParen) {
+            let args = self.args()?;
+            Ok(self.mk(ExprKind::MethodCall { receiver, method: name, args }, self.span_from(lo)))
+        } else {
+            Ok(self.mk(ExprKind::Field(receiver, name), self.span_from(lo)))
+        }
     }
 
     fn path_of(e: &Expr) -> Option<Vec<Ident>> {
@@ -1282,27 +1303,6 @@ impl<'a> Parser<'a> {
         Ok(self.mk(ExprKind::StructLit { path, fields, base }, self.span_from(lo)))
     }
 
-    /// True if the tokens starting at the current `(` form a lambda parameter list.
-    fn paren_is_lambda(&self) -> bool {
-        let mut depth = 0usize;
-        let mut i = self.pos;
-        while i < self.toks.len() {
-            match self.toks[i].tok {
-                Tok::LParen | Tok::LBracket | Tok::LBrace => depth += 1,
-                Tok::RParen | Tok::RBracket | Tok::RBrace => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return matches!(self.toks.get(i + 1).map(|t| &t.tok), Some(Tok::FatArrow));
-                    }
-                }
-                Tok::Eof => return false,
-                _ => {}
-            }
-            i += 1;
-        }
-        false
-    }
-
     fn lambda(&mut self, lo: u32) -> PResult<Expr> {
         let mut params = Vec::new();
         let parens = self.at(&Tok::LParen);
@@ -1347,8 +1347,7 @@ impl<'a> Parser<'a> {
 
     fn primary(&mut self) -> PResult<Expr> {
         let lo = self.lo();
-        let t = self.tok().clone();
-        match t {
+        match *self.tok() {
             Tok::Int(v) => {
                 self.bump();
                 Ok(self.mk(ExprKind::Int(v), self.span_from(lo)))
@@ -1366,17 +1365,22 @@ impl<'a> Parser<'a> {
                 Ok(self.mk(ExprKind::Duration(v), self.span_from(lo)))
             }
             Tok::True | Tok::False => {
+                let value = self.at(&Tok::True);
                 self.bump();
-                Ok(self.mk(ExprKind::Bool(t == Tok::True), self.span_from(lo)))
+                Ok(self.mk(ExprKind::Bool(value), self.span_from(lo)))
             }
-            Tok::Str(parts) => {
-                self.bump();
-                let segs = self.string_segments(parts)?;
-                Ok(self.mk(ExprKind::Str(segs), self.span_from(lo)))
+            Tok::Str(_) => {
+                let text = self.take_text();
+                Ok(self.mk(ExprKind::Str(vec![StrSeg::Text(text)]), self.span_from(lo)))
             }
-            Tok::Bytes(b) => {
+            Tok::StrStart => self.interpolated_string(),
+            Tok::Bytes(_) => {
+                let bytes = match &mut self.toks[self.pos].tok {
+                    Tok::Bytes(b) => std::mem::take(b),
+                    _ => unreachable!(),
+                };
                 self.bump();
-                Ok(self.mk(ExprKind::Bytes(b), self.span_from(lo)))
+                Ok(self.mk(ExprKind::Bytes(bytes), self.span_from(lo)))
             }
             Tok::Ident => {
                 if matches!(self.peek_tok(1), Tok::FatArrow) && !self.in_guard {
@@ -1394,7 +1398,7 @@ impl<'a> Parser<'a> {
                 Ok(self.mk(ExprKind::SelfType, self.span_from(lo)))
             }
             Tok::LParen => {
-                if !self.in_guard && self.paren_is_lambda() {
+                if !self.in_guard && self.toks[self.pos].opens_lambda {
                     return self.lambda(lo);
                 }
                 self.bump();
@@ -1414,20 +1418,9 @@ impl<'a> Parser<'a> {
                     self.no_struct = saved;
                     return Ok(self.mk(ExprKind::Paren(Box::new(first)), self.span_from(lo)));
                 }
-                let mut items = vec![first];
-                while self.eat(&Tok::Comma) {
-                    if self.at(&Tok::RParen) {
-                        break;
-                    }
-                    items.push(self.expr()?);
-                }
+                let items = self.tuple_rest(first, lo, Self::expr);
                 self.no_struct = saved;
-                self.expect(&Tok::RParen, "`)` or `,`")?;
-                if items.len() == 1 {
-                    let only = items.pop().unwrap();
-                    return Ok(self.mk(ExprKind::Paren(Box::new(only)), self.span_from(lo)));
-                }
-                Ok(self.mk(ExprKind::Tuple(items), self.span_from(lo)))
+                Ok(self.mk(ExprKind::Tuple(items?), self.span_from(lo)))
             }
             Tok::LBracket => self.bracket(lo),
             Tok::LBrace => {
@@ -1466,10 +1459,8 @@ impl<'a> Parser<'a> {
                     }
                 }
                 self.no_struct = saved;
-                let close = self.lo();
                 self.expect(&Tok::RBrace, "`}`")?;
-                let inline = self.same_line(lo, close);
-                Ok(self.mk(ExprKind::Match { scrutinee: Box::new(scrutinee), arms, inline }, self.span_from(lo)))
+                Ok(self.mk(ExprKind::Match { scrutinee: Box::new(scrutinee), arms }, self.span_from(lo)))
             }
             Tok::At => {
                 let label = self.label()?;
@@ -1516,7 +1507,9 @@ impl<'a> Parser<'a> {
 
     /// `loop`, `while` or `for`, with an optional label already parsed.
     fn loop_expr(&mut self, lo: u32, label: Option<Ident>) -> PResult<Expr> {
-        let kind = match self.bump().tok {
+        let tok = self.tok().clone();
+        self.bump();
+        let kind = match tok {
             Tok::Loop => ExprKind::Loop { label, body: self.block()? },
             Tok::While => {
                 let cond = self.cond()?;
@@ -1634,42 +1627,48 @@ impl<'a> Parser<'a> {
         Ok(self.mk(ExprKind::List(items), self.span_from(lo)))
     }
 
-    fn string_segments(&mut self, parts: Vec<StrPart>) -> PResult<Vec<StrSeg>> {
+    /// A string with interpolations, from its `StrStart` token.
+    fn interpolated_string(&mut self) -> PResult<Expr> {
+        let lo = self.lo();
+        self.bump();
         let mut segs = Vec::new();
-        for part in parts {
-            match part {
-                StrPart::Text(t) => segs.push(StrSeg::Text(t)),
-                StrPart::Expr { lo, hi, spec } => {
-                    let span = Span::new(self.file, lo, hi);
-                    if self.src[lo as usize..hi as usize].trim().is_empty() {
-                        self.errors.push(Diag::error(span, "empty interpolation; write `\\{` for a literal brace"));
+        loop {
+            match self.tok() {
+                Tok::StrText(_) => segs.push(StrSeg::Text(self.take_text())),
+                Tok::InterpStart => {
+                    let open = self.bump();
+                    if let Tok::InterpEnd { .. } = self.tok() {
+                        let span = Span::new(self.file, open.lo, self.toks[self.pos].hi);
+                        self.errors.push(Diag::error(span, "empty interpolation: `\\(` must hold an expression"));
                         return Err(());
                     }
-                    let lexed = lex_range(self.src, self.file, lo as usize, hi as usize);
-                    let mut toks = lexed.tokens;
-                    toks.retain(|t| t.tok != Tok::Semi);
-                    let mut sub = Parser::new(self.src, self.file, toks, &[], self.newlines.clone());
-                    sub.errors = lexed.errors;
-                    sub.next_id = self.next_id;
-                    sub.depth = self.depth;
-                    let e = sub.expr();
-                    if e.is_ok() && !sub.at(&Tok::Eof) {
-                        sub.expected("end of interpolated expression");
-                    }
-                    self.next_id = sub.next_id;
-                    let failed = !sub.errors.is_empty();
-                    self.fatal |= sub.fatal;
-                    self.errors.append(&mut sub.errors);
-                    let e = match e {
-                        Ok(e) if !failed => e,
-                        _ => return Err(()),
+                    // An interpolation is parsed on its own, like a parenthesized expression.
+                    let saved = (std::mem::replace(&mut self.no_struct, false), std::mem::replace(&mut self.in_guard, false));
+                    let e = self.expr();
+                    (self.no_struct, self.in_guard) = saved;
+                    let e = e?;
+                    let Tok::InterpEnd { spec } = *self.tok() else {
+                        self.expected("`)` to end the interpolation");
+                        return Err(());
                     };
-                    let spec = spec.map(|(text, at)| FormatSpecAst { span: Span::new(self.file, at, at + text.len() as u32), text });
+                    let end = self.bump();
+                    // `:spec)`
+                    let spec = spec.then(|| {
+                        let span = Span::new(self.file, end.lo + 1, end.hi - 1);
+                        FormatSpecAst { text: self.slice(span).to_string(), span }
+                    });
                     segs.push(StrSeg::Expr(Box::new(e), spec));
+                }
+                Tok::StrEnd => {
+                    self.bump();
+                    return Ok(self.mk(ExprKind::Str(segs), self.span_from(lo)));
+                }
+                _ => {
+                    self.expected("end of string");
+                    return Err(());
                 }
             }
         }
-        Ok(segs)
     }
 
     // ------------------------------------------------------------------
@@ -1697,7 +1696,7 @@ impl<'a> Parser<'a> {
 
     fn int_lit_pattern(&mut self) -> PResult<i64> {
         let neg = self.eat(&Tok::Minus);
-        match self.tok().clone() {
+        match *self.tok() {
             Tok::Int(v) => {
                 self.bump();
                 Ok(if neg { -v } else { v })
@@ -1715,7 +1714,7 @@ impl<'a> Parser<'a> {
 
     fn pattern_atom(&mut self) -> PResult<Pattern> {
         let lo = self.lo();
-        let kind = match self.tok().clone() {
+        let kind = match self.tok() {
             Tok::Int(_) | Tok::Minus | Tok::IntOverflow(_) => {
                 let a = self.int_lit_pattern()?;
                 if self.eat(&Tok::DotDotEq) {
@@ -1728,16 +1727,7 @@ impl<'a> Parser<'a> {
                     PatternKind::Literal(PatLit::Int(a))
                 }
             }
-            Tok::Str(parts) => {
-                self.bump();
-                match parts.as_slice() {
-                    [StrPart::Text(s)] => PatternKind::Literal(PatLit::Str(s.clone())),
-                    _ => {
-                        self.errors.push(Diag::error(self.span_from(lo), "string patterns cannot contain interpolation"));
-                        return Err(());
-                    }
-                }
-            }
+            Tok::Str(_) | Tok::StrStart => PatternKind::Literal(PatLit::Str(self.plain_string("a string pattern")?)),
             Tok::True | Tok::False => {
                 let b = self.at(&Tok::True);
                 self.bump();
@@ -1752,15 +1742,7 @@ impl<'a> Parser<'a> {
                     if self.eat(&Tok::RParen) {
                         return Ok(first);
                     }
-                    let mut items = vec![first];
-                    while self.eat(&Tok::Comma) {
-                        if self.at(&Tok::RParen) {
-                            break;
-                        }
-                        items.push(self.pattern()?);
-                    }
-                    self.expect(&Tok::RParen, "`)`")?;
-                    PatternKind::Tuple(items)
+                    PatternKind::Tuple(self.tuple_rest(first, lo, Self::pattern)?)
                 }
             }
             Tok::LBracket => {
@@ -1792,8 +1774,8 @@ impl<'a> Parser<'a> {
             Tok::Ident | Tok::SelfUpper => {
                 let mut path = Vec::new();
                 if self.at(&Tok::SelfUpper) {
-                    let t = self.bump();
-                    path.push(Ident { name: "Self".into(), span: Span::new(self.file, t.lo, t.hi) });
+                    let span = self.bump();
+                    path.push(Ident { name: "Self".into(), span });
                 } else {
                     path.push(self.ident("pattern")?);
                 }

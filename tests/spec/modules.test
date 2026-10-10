@@ -41,7 +41,7 @@ print(older(u).age)
 pub struct User {
     name: str
     age: int
-    fn greeting(self) -> str { "hello {self.name}" }
+    fn greeting(self) -> str { "hello \(self.name)" }
 }
 --- stdout
 hello ann
@@ -113,9 +113,9 @@ pub fn base() -> int { 41 }
 
 === stdlib module import and alias
 import math as m
-from math import sqrt
-print(m.sqrt(9.0))
-print(sqrt(16.0))
+from math import cbrt
+print(m.cbrt(27.0))
+print(cbrt(64.0))
 --- stdout
 3.0
 4.0

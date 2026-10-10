@@ -17,6 +17,7 @@ use reedline::{
 use sandlang::syntax::highlight::{Highlight, highlight};
 use sandlang::{Engine, Error, Session};
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -95,7 +96,7 @@ async fn repl(session: &mut Session, screen: &Screen, mut reader: Reader) -> u8 
             }
         };
         let on_error = |e: Error| {
-            let mut text = repl_error_text(&e, "");
+            let mut text = e.render();
             text.push_str("(in a background task; all tasks were cancelled)\n");
             let _ = screen.write(true, text.as_bytes());
         };
@@ -142,11 +143,11 @@ async fn repl(session: &mut Session, screen: &Screen, mut reader: Reader) -> u8 
                     "reset" => session.reset(),
                     "type" | "t" => match session.type_of(arg.trim()) {
                         Ok(t) => println!("{t}"),
-                        Err(e) => eprint!("{}", repl_error_text(&e, arg)),
+                        Err(e) => eprint!("{}", e.render()),
                     },
                     "test" => match interruptible(session.interrupt_handle(), session.run_tests()).await {
                         Ok(report) => print!("{}", report.render()),
-                        Err(e) => eprint!("{}", repl_error_text(&e, "")),
+                        Err(e) => eprint!("{}", e.render()),
                     },
                     _ => eprintln!("unknown command `:{name}` (:help lists the commands)"),
                 }
@@ -171,7 +172,7 @@ async fn eval(session: &mut Session, input: &str) {
     match interruptible(handle, session.eval(input)).await {
         Ok(Some(value)) => println!("{value}"),
         Ok(None) => {}
-        Err(e) => eprint!("{}", repl_error_text(&e, input)),
+        Err(e) => eprint!("{}", e.render()),
     }
 }
 
@@ -183,25 +184,6 @@ async fn interruptible<T>(handle: sandlang::InterruptHandle, fut: impl std::futu
             r = &mut fut => return r,
             Ok(()) = tokio::signal::ctrl_c() => handle.interrupt(),
         }
-    }
-}
-
-/// The report of an error of an input (whose text is `input`).
-fn repl_error_text(e: &Error, input: &str) -> String {
-    match e {
-        Error::Compile(diags) => diags
-            .iter()
-            .map(|d| {
-                // Diagnostics are in the input, or in a module it imports.
-                let source = if d.file.starts_with("<input ") || d.file == "<type>" {
-                    Some(input.to_string())
-                } else {
-                    std::fs::read_to_string(&d.file).ok()
-                };
-                d.render(source.as_deref())
-            })
-            .collect(),
-        _ => format!("{e}\n"),
     }
 }
 
@@ -228,6 +210,9 @@ struct ScreenState {
     printer: Option<ExternalPrinter<String>>,
     /// Output received while the editor reads that does not end a line yet.
     partial: Vec<u8>,
+    /// Lines for the editor's printer while it is full (it is drained only
+    /// while the editor reads, and the scripts must never wait for it).
+    backlog: VecDeque<String>,
 }
 
 impl Screen {
@@ -266,8 +251,25 @@ impl Screen {
         while let Some(lines) = printer.get_line() {
             let _ = writeln!(out, "{lines}");
         }
+        for lines in std::mem::take(&mut st.backlog) {
+            let _ = writeln!(out, "{lines}");
+        }
         let _ = out.write_all(&std::mem::take(&mut st.partial));
         let _ = out.flush();
+    }
+
+    /// Passes held lines to the editor's printer, as far as it takes them.
+    fn flush_backlog(&self) {
+        let mut st = self.state();
+        let ScreenState { printer: Some(printer), backlog, .. } = &mut *st else { return };
+        while let Some(lines) = backlog.pop_front() {
+            if let Err(e) = printer.sender().try_send(lines) {
+                if e.is_full() {
+                    backlog.push_front(e.into_inner());
+                }
+                return;
+            }
+        }
     }
 
     /// Writes script output (`stderr` for standard error).
@@ -290,26 +292,12 @@ impl Screen {
             if message.is_empty() {
                 message.push(' ');
             }
-            loop {
-                let Some(printer) = &st.printer else {
-                    return direct(stderr, message.as_bytes()).and_then(|()| direct(stderr, b"\n"));
-                };
-                // Never block here: the editor drains its printer only while
-                // it reads, and it may have just stopped.
-                match printer.sender().try_send(message) {
-                    Ok(()) => return Ok(()),
-                    Err(e) if e.is_full() => {
-                        message = e.into_inner();
-                        drop(st);
-                        std::thread::sleep(Duration::from_millis(5));
-                        st = self.state();
-                    }
-                    Err(e) => {
-                        let message = e.into_inner();
-                        return direct(stderr, message.as_bytes()).and_then(|()| direct(stderr, b"\n"));
-                    }
-                }
-            }
+            // Never block here: the editor drains its printer only while it
+            // reads; what it does not take now waits in the backlog.
+            st.backlog.push_back(message);
+            drop(st);
+            self.flush_backlog();
+            return Ok(());
         }
         if st.visible {
             let mut out = std::io::stdout().lock();
@@ -351,11 +339,11 @@ struct ReplSink {
 }
 
 impl sandlang::OutputSink for ReplSink {
-    fn write(&mut self, data: &[u8]) -> std::io::Result<()> {
+    fn write(&self, data: &[u8]) -> std::io::Result<()> {
         self.screen.write(self.stderr, data)
     }
 
-    fn flush(&mut self) -> std::io::Result<()> {
+    fn flush(&self) -> std::io::Result<()> {
         if self.stderr { std::io::stderr().flush() } else { std::io::stdout().flush() }
     }
 }
@@ -391,103 +379,111 @@ impl Reader {
     }
 }
 
-/// Reads lines of standard input on a thread, one per request, so that the
-/// REPL can wait for a line and for Ctrl-C at once. Nothing is read between
-/// requests, so a prompter can read answers from standard input meanwhile.
-struct LineReader {
-    requests: std::sync::mpsc::Sender<()>,
-    lines: tokio::sync::mpsc::UnboundedReceiver<Option<String>>,
+/// A thread that serves requests one at a time, for work that blocks (reading
+/// the terminal), so that the REPL can wait for an answer and for Ctrl-C at
+/// once. Nothing is read between requests, so a prompter can use the
+/// terminal or standard input meanwhile.
+struct Requests<Q, A> {
+    requests: std::sync::mpsc::Sender<Q>,
+    answers: tokio::sync::mpsc::UnboundedReceiver<A>,
     pending: bool,
 }
 
-impl LineReader {
-    fn new() -> LineReader {
-        let (requests, wanted) = std::sync::mpsc::channel::<()>();
-        let (send, lines) = tokio::sync::mpsc::unbounded_channel();
+impl<Q: Send + 'static, A: Send + 'static> Requests<Q, A> {
+    /// Starts the thread: `serve` answers a request, and says whether it was
+    /// the last answer (the end of the input).
+    fn spawn(mut serve: impl FnMut(Q) -> (A, bool) + Send + 'static) -> Requests<Q, A> {
+        let (requests, wanted) = std::sync::mpsc::channel::<Q>();
+        let (send, answers) = tokio::sync::mpsc::unbounded_channel();
         std::thread::spawn(move || {
-            for () in wanted {
-                let mut line = String::new();
-                let got = match std::io::stdin().lock().read_line(&mut line) {
-                    Ok(0) | Err(_) => None,
-                    Ok(_) => Some(line),
-                };
-                let end = got.is_none();
-                if send.send(got).is_err() || end {
+            for request in wanted {
+                let (answer, last) = serve(request);
+                if send.send(answer).is_err() || last {
                     break;
                 }
             }
         });
-        LineReader { requests, lines, pending: false }
+        Requests { requests, answers, pending: false }
     }
 
-    /// The next line, with its terminator; `None` at the end of input.
-    /// Cancel-safe: if the future is dropped, the next call gets the line.
-    async fn next(&mut self) -> Option<String> {
+    /// The answer to `request` (`None` once the thread has ended).
+    /// Cancel-safe: if the future is dropped, the next call gets the answer
+    /// (to the request made then).
+    async fn ask(&mut self, request: Q) -> Option<A> {
         if !self.pending {
-            if self.requests.send(()).is_err() {
-                return None;
-            }
+            self.requests.send(request).ok()?;
             self.pending = true;
         }
-        let line = self.lines.recv().await.flatten();
+        let answer = self.answers.recv().await;
         self.pending = false;
-        line
+        answer
     }
 }
 
-/// Reads inputs with the line editor on a thread (it blocks), one per
-/// request, like [`LineReader`]: the terminal is left alone between
-/// requests, for permission prompts and running inputs.
+/// Reads lines of standard input (with their terminator; `None` at the end
+/// of the input).
+struct LineReader(Requests<(), Option<String>>);
+
+impl LineReader {
+    fn new() -> LineReader {
+        LineReader(Requests::spawn(|()| {
+            let mut line = String::new();
+            match std::io::stdin().lock().read_line(&mut line) {
+                Ok(0) | Err(_) => (None, true),
+                Ok(_) => (Some(line), false),
+            }
+        }))
+    }
+
+    async fn next(&mut self) -> Option<String> {
+        self.0.ask(()).await.flatten()
+    }
+}
+
+/// Reads inputs with the line editor, after a prompt; the terminal is left
+/// alone between requests, for permission prompts and running inputs.
 struct EditorReader {
-    requests: std::sync::mpsc::Sender<&'static str>,
-    inputs: tokio::sync::mpsc::UnboundedReceiver<Got>,
-    pending: bool,
+    requests: Requests<&'static str, Got>,
+    screen: Screen,
 }
 
 impl EditorReader {
     fn new(screen: Screen) -> EditorReader {
-        let (requests, wanted) = std::sync::mpsc::channel::<&'static str>();
-        let (send, inputs) = tokio::sync::mpsc::unbounded_channel();
-        std::thread::spawn(move || {
-            let printer = ExternalPrinter::new(256);
-            let buffer = Arc::new(BufferState::default());
-            let mut editor = line_editor(printer.clone(), buffer.clone());
-            for prompt in wanted {
-                screen.start_editing(printer.clone());
+        let printer = ExternalPrinter::new(256);
+        let buffer = Arc::new(BufferState::default());
+        let mut editor = None;
+        let thread_screen = screen.clone();
+        let requests = Requests::spawn(move |prompt| {
+            let editor = editor.get_or_insert_with(|| line_editor(printer.clone(), buffer.clone()));
+            loop {
+                thread_screen.start_editing(printer.clone());
                 let signal = editor.read_line(&ReplPrompt(prompt));
-                screen.stop_editing();
+                thread_screen.stop_editing();
                 let _ = editor.sync_history();
-                let got = match signal {
-                    Ok(Signal::Success(input)) => Got::Line(input + "\n"),
-                    Ok(Signal::CtrlC) => Got::Interrupt { discarded: !buffer.surely_empty() },
-                    Ok(Signal::CtrlD) => Got::End,
+                return match signal {
+                    Ok(Signal::Success(input)) => (Got::Line(input + "\n"), false),
+                    Ok(Signal::CtrlC) => (Got::Interrupt { discarded: !buffer.surely_empty() }, false),
+                    Ok(Signal::CtrlD) => (Got::End, true),
                     Ok(_) => continue,
                     Err(e) => {
                         eprintln!("sand: cannot read the terminal: {e}");
-                        Got::End
+                        (Got::End, true)
                     }
                 };
-                let end = matches!(got, Got::End);
-                if send.send(got).is_err() || end {
-                    break;
-                }
             }
         });
-        EditorReader { requests, inputs, pending: false }
+        EditorReader { requests, screen }
     }
 
-    /// The next input (after `prompt`). Cancel-safe: if the future is
-    /// dropped, the next call gets the input.
+    /// The next input (after `prompt`). Cancel-safe. Meanwhile, output held
+    /// for the editor is passed on as it takes it.
     async fn next(&mut self, prompt: &'static str) -> Got {
-        if !self.pending {
-            if self.requests.send(prompt).is_err() {
-                return Got::End;
+        loop {
+            tokio::select! {
+                got = self.requests.ask(prompt) => return got.unwrap_or(Got::End),
+                () = tokio::time::sleep(Duration::from_millis(25)) => self.screen.flush_backlog(),
             }
-            self.pending = true;
         }
-        let got = self.inputs.recv().await.unwrap_or(Got::End);
-        self.pending = false;
-        got
     }
 }
 

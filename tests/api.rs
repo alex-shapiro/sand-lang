@@ -57,7 +57,7 @@ fn compile_errors_are_reported_as_diagnostics() {
             assert_eq!(diags[0].line, 1);
             assert_eq!(diags[0].file, "main.sand");
             assert!(diags[0].message.contains("type mismatch"));
-            let rendered = diags[0].render(Some("let x: int = \"s\"\nlet y = nope"));
+            let rendered = diags[0].render();
             assert!(rendered.contains("--> main.sand:1:14"), "{rendered}");
             assert!(rendered.contains("^^^"), "{rendered}");
         }
@@ -132,8 +132,8 @@ fn script_args_and_env_are_virtual() {
 
 fn geo_module() -> NativeModule {
     let mut m = NativeModule::new("geo");
-    m.function("dist", |a: f64, b: f64| -> f64 { (a * a + b * b).sqrt() });
-    m.function("count", |s: String| -> i64 { s.chars().count() as i64 });
+    m.function("dist", |a: f64, b: f64| -> f64 { (a * a + b * b).sqrt() }).params(&["a", "b"]);
+    m.function("count", |s: &str| -> i64 { s.chars().count() as i64 });
     m.function("split", |s: String| -> Vec<String> { s.split(',').map(String::from).collect() });
     m.function("find", |xs: Vec<i64>, t: i64| -> Option<i64> { xs.iter().position(|&x| x == t).map(|i| i as i64) });
     m.function("checked", |a: i64| -> Result<i64, String> {
@@ -179,6 +179,74 @@ print(help.doc(geo.dist))
         out,
         "5.0\n5\n[\"a\", \"b\"]\nSome(2)\nNone\nOk(3)\nnegative: -1\n2\n(42, \"X\")\nb\"cba\"\ntrue\nfn dist(a: float, b: float) -> float\nEuclidean length of (a, b).\n"
     );
+}
+
+#[test]
+fn native_module_conversions() {
+    let mut m = NativeModule::new("conv");
+    m.function("grid", |n: i64| -> Vec<Vec<i64>> { (0..n).map(|i| (0..i).collect()).collect() });
+    m.function("pairs", |xs: Vec<(String, i64)>| -> Vec<(i64, String)> { xs.into_iter().map(|(s, i)| (i, s)).collect() });
+    m.function("somes", |xs: Vec<Option<i64>>| -> i64 { xs.iter().flatten().sum() });
+    m.function("words", |text: &str, sep: &str| -> Vec<String> { text.split(sep).map(String::from).collect() });
+    m.function("first", |b: &[u8]| -> Option<i64> { b.first().map(|&x| x as i64) });
+    m.function("lookup", |key: &str| -> Result<i64, sandlang::HostError> {
+        key.parse().map_err(|_| sandlang::HostError::new("not_found", format!("no key {key}")))
+    })
+    .params(&["key"]);
+    m.function("many", |n: i64| -> Vec<String> { (0..n).map(|i| "x".repeat(1000) + &i.to_string()).collect() });
+    m.guarded_function(
+        "write",
+        |path: &&str, data: &Vec<u8>| Capability::Custom { name: "write".into(), detail: format!("{path} {}", data.len()) },
+        |path: &str, data: Vec<u8>| -> i64 { (path.len() + data.len()) as i64 },
+    );
+    let src = r#"
+import conv
+import help
+print(conv.grid(3))
+print(conv.pairs([("a", 1), ("b", 2)]))
+print(conv.somes([Some(1), None, Some(5)]))
+print(conv.words("a b c", " "))
+print(conv.first(b"xyz"))
+print(conv.lookup(key: "12"))
+print(conv.lookup("x"))
+print(help.signature(conv.lookup))
+print(help.signature(conv.grid))
+print(conv.write("f", b"abc"))
+print(conv.write("g", b""))
+"#;
+    let policy = Policy::custom(|cap: &Capability| match cap {
+        Capability::Custom { detail, .. } if detail == "f 3" => Decision::Allow,
+        Capability::Custom { .. } => Decision::Deny,
+        _ => Decision::Allow,
+    });
+    let (r, out, _) = run_src(Config::new().policy(policy).module(m.clone()), src);
+    r.unwrap();
+    assert_eq!(
+        out,
+        "[[], [0], [0, 1]]\n[(1, \"a\"), (2, \"b\")]\n6\n[\"a\", \"b\", \"c\"]\nSome(120)\nOk(12)\nErr(Error { kind: \"not_found\", message: \"no key x\" })\nfn lookup(key: str) -> Result<int, Error>\nfn grid(arg1: int) -> [[int]]\nOk(4)\nErr(Error { kind: \"permission_denied\", message: \"permission denied: write g 0\" })\n"
+    );
+    // Results are built within the memory limit.
+    let limits = Limits { max_memory: Some(16 << 20), ..Limits::default() };
+    let (r, _, _) = run_src(Config::new().limits(limits).module(m), "import conv\nprint(conv.many(100000).len())");
+    assert!(matches!(r, Err(Error::Limit(LimitKind::Memory))), "{r:?}");
+}
+
+#[test]
+#[should_panic(expected = "name of a standard module")]
+fn host_modules_cannot_replace_standard_modules() {
+    NativeModule::new("json");
+}
+
+#[test]
+#[should_panic(expected = "added twice")]
+fn host_module_names_are_unique() {
+    let _ = Config::new().module(NativeModule::new("a")).module(NativeModule::new("a"));
+}
+
+#[test]
+#[should_panic(expected = "registered twice")]
+fn host_function_names_are_unique() {
+    NativeModule::new("a").function("f", || -> i64 { 1 }).function("f", || -> i64 { 2 });
 }
 
 #[test]
@@ -243,7 +311,7 @@ fn native_module_declares_traits_for_builtin_types() {
 pub trait Unit {
     /// The unit's symbol.
     fn symbol() -> str
-    fn show(self) -> str { "{self.magnitude()}{Self.symbol()}" }
+    fn show(self) -> str { "\(self.magnitude())\(Self.symbol())" }
     fn magnitude(self) -> float
 }
 impl Unit for duration {
@@ -647,7 +715,7 @@ fn import_prompt_without_prompter_denies() {
     // Standard modules are not script imports and are never prompted for.
     let prompter = ScriptedPrompter::new(&[]);
     let mut engine = Engine::new(prompter.config(prompt_for_imports()));
-    rt().block_on(engine.run_source("main.sand", "import json\nprint(json.stringify(json.Json.Null))")).unwrap();
+    rt().block_on(engine.run_source("main.sand", "import json\nprint(json.encode(json.Json.Null))")).unwrap();
     assert_eq!(prompter.asked(), vec![]);
 }
 
@@ -850,7 +918,7 @@ fn returned_frames_do_not_keep_garbage_alive() {
 fn deep_recursion_then_garbage_churn() {
     // The stack grows for deep recursion and is shrunk again by the GC; values
     // in live frames must survive collections triggered deep in the recursion.
-    let src = "fn deep(n: int, acc: [str]) -> int {\n    if n == 0 { return acc.len() }\n    let s = \"v{n}\"\n    let r = deep(n - 1, acc + [s])\n    if r % 1000 == 0 { let _junk = (0..1000).map(i => i.to_str()) }\n    r + s.len() - s.len()\n}\nvar total = 0\nfor round in 0..3 {\n    total += deep(3000, [])\n    var junk = 0\n    for i in 0..200000 { junk += [i].len() }\n    total += junk\n}\nprint(total)";
+    let src = "fn deep(n: int, acc: [str]) -> int {\n    if n == 0 { return acc.len() }\n    let s = \"v\\(n)\"\n    let r = deep(n - 1, acc + [s])\n    if r % 1000 == 0 { let _junk = (0..1000).map(i => i.to_str()) }\n    r + s.len() - s.len()\n}\nvar total = 0\nfor round in 0..3 {\n    total += deep(3000, [])\n    var junk = 0\n    for i in 0..200000 { junk += [i].len() }\n    total += junk\n}\nprint(total)";
     let (r, out, _) = run_src(Config::new(), src);
     r.unwrap();
     assert_eq!(out, "609000\n");
@@ -865,9 +933,9 @@ fn objects_reachable_only_through_inline_variants_survive_gc() {
 struct Holder {
     v: str?
 }
-let in_list = [Some("list {i}") for i in 0..1000]
+let in_list = [Some("list \(i)") for i in 0..1000]
 let in_map: [int: Result<str, int>] = [:]
-for i in 0..1000 { in_map[i] = Ok("map {i}") }
+for i in 0..1000 { in_map[i] = Ok("map \(i)") }
 let in_struct = Holder { v: Some("struct field") }
 let captured = Some(["captured", "list"])
 let closure = () => captured.unwrap().len()
@@ -877,7 +945,7 @@ let t = spawn { Some("task result") }
 t.wait()
 var churn = 0
 for i in 0..300000 { churn += [i, i + 1].len() }
-let local = Some("local {churn}")
+let local = Some("local \(churn)")
 for i in 0..300000 { churn += [i].len() }
 var total = 0
 for x in in_list { total += x.unwrap().len() }
@@ -911,25 +979,25 @@ let node = Node { name: "root", next: None }
 let ch = task.channel(capacity: 100)
 var captured = "c0"
 let bump = (i: int) => {
-    captured = "c{i}"
+    captured = "c\(i)"
 }
 for i in 0..60 {
-    xs.push("p{i}")
-    ys[i % 3] = "y{i}"
-    m["k{i % 7}"] = [i, i * 2]
-    s.add("s{i % 11}")
-    head = Some(Node { name: "n{i}", next: head })
-    node.next = Some(Node { name: "child{i}", next: None })
-    ch.send("msg{i}")
+    xs.push("p\(i)")
+    ys[i % 3] = "y\(i)"
+    m["k\(i % 7)"] = [i, i * 2]
+    s.add("s\(i % 11)")
+    head = Some(Node { name: "n\(i)", next: head })
+    node.next = Some(Node { name: "child\(i)", next: None })
+    ch.send("msg\(i)")
     bump(i)
-    xs.insert(0, "front{i}")
-    xs.extend(["e{i}"])
+    xs.insert(0, "front\(i)")
+    xs.extend(["e\(i)"])
     if i % 5 == 0 {
         xs.sort()
         xs.swap(0, xs.len() - 1)
-        m.remove("k{(i + 3) % 7}")
-        m.insert("ins{i}", [i])
-        let _ = m.get_or_insert("goi{i}", [i, i])
+        m.remove("k\((i + 3) % 7)")
+        m.insert("ins\(i)", [i])
+        let _ = m.get_or_insert("goi\(i)", [i, i])
     }
 }
 let t = spawn { ["task", "result"].map(x => x + "!") }
@@ -950,7 +1018,7 @@ while let Some(msg) = ch.try_recv() { total += msg.len() }
 total += captured.len()
 print(total)
 print(t.wait())
-print("{xs[0]} {xs[xs.len() - 1]} {ys} {s.len()}")
+print("\(xs[0]) \(xs[xs.len() - 1]) \(ys) \(s.len())")
 "#;
 
 #[test]
@@ -976,11 +1044,11 @@ let tail: [str] = []
 for round in 0..6 {{
     for i in 0..{N} {{
         if i % 7 == round {{
-            xs[i] = "r{{round}}i{{i}}"
+            xs[i] = "r\(round)i\(i)"
         }}
     }}
-    few[round * 1000] = "few{{round}}"
-    for i in 0..3000 {{ tail.push("t{{round}}.{{i}}") }}
+    few[round * 1000] = "few\(round)"
+    for i in 0..3000 {{ tail.push("t\(round).\(i)") }}
     var junk = 0
     for j in 0..150000 {{ junk += [j, j].len() }}
     if round == 3 {{
@@ -1032,7 +1100,7 @@ fn task_limit() {
 #[test]
 fn output_limit() {
     let config = Config::new().limits(Limits { max_output_bytes: Some(1000), ..Limits::default() });
-    let (r, out, _) = run_src(config, "for i in 0..1000 { print(\"line {i}\") }");
+    let (r, out, _) = run_src(config, "for i in 0..1000 { print(\"line \\(i)\") }");
     assert!(matches!(r, Err(Error::Limit(LimitKind::Output))), "{r:?}");
     assert!(out.len() <= 1000);
 }

@@ -54,7 +54,7 @@ pub(crate) fn cmd_playground(args: &[String]) -> Result<u8, String> {
 /// `playground/` of the source tree this binary was built from, if it is
 /// still there, else `./playground`.
 fn default_dir() -> PathBuf {
-    let built = Path::new(env!("CARGO_MANIFEST_DIR")).join("playground");
+    let built = Path::new(env!("CARGO_MANIFEST_DIR")).join("../playground");
     if built.join("index.html").is_file() { built } else { PathBuf::from("playground") }
 }
 

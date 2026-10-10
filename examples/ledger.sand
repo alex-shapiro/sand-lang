@@ -37,7 +37,7 @@ impl Monoid for Money {
 }
 
 impl Render for Money {
-    fn render(self) -> str { "${self.cents / 100}.{self.cents % 100:02}" }
+    fn render(self) -> str { "$\(self.cents / 100).\(self.cents % 100:02)" }
 }
 
 /// The largest value combined so far, if any.
@@ -71,7 +71,7 @@ impl Monoid for int {
 }
 
 impl Render for int {
-    fn render(self) -> str { "{self}" }
+    fn render(self) -> str { "\(self)" }
 }
 
 impl Render for str {
@@ -114,7 +114,7 @@ fn summarize<K: Hash, V: Monoid>(pairs: [(K, V)]) -> [K: V] {
 }
 
 fn section<K: Render + Ord + Hash, V: Render>(title: str, rows: [K: V]) {
-    print("== {title}")
+    print("== \(title)")
     for k in rows.keys().sorted() {
         print("  " + k.cell(10) + rows[k].render())
     }
@@ -142,10 +142,10 @@ let expenses = data.lines().filter_map(parse)
 section("by category: count, total, largest", summarize(expenses.map(e => (e.category, stats(e)))))
 section("by month: total", summarize(expenses.map(e => (e.month, e.amount))))
 let overall: Stats = Monoid.concat(expenses.map(stats))
-print("== overall: {overall.render()}")
+print("== overall: \(overall.render())")
 
 // An optional argument picks one category.
 if let Some(wanted) = env.args().first() {
     let items = expenses.filter(e => e.category == wanted).map(e => e.what)
-    print("== {wanted}: " + (if items.is_empty() { "none" } else { items.render() }))
+    print("== \(wanted): " + (if items.is_empty() { "none" } else { items.render() }))
 }

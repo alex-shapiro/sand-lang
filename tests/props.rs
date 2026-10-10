@@ -14,8 +14,6 @@ fn lit(s: &str) -> String {
         match c {
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
-            '{' => out.push_str("\\{"),
-            '}' => out.push_str("\\}"),
             '\n' => out.push_str("\\n"),
             '\t' => out.push_str("\\t"),
             '\r' => out.push_str("\\r"),
@@ -233,7 +231,7 @@ proptest! {
     fn json_roundtrip(j in json_value()) {
         let text = render_json(&j);
         let src = format!(
-            "import json\nlet j = json.parse({})?\nlet t = json.stringify(j)\nprint(t)\nprint(json.parse(t)? == j)\nprint(json.parse(json.stringify(j, indent: 2))? == j)\n",
+            "import json\nlet j = json.parse({})?\nlet t = json.encode(j)\nprint(t)\nprint(json.parse(t)? == j)\nprint(json.parse(json.encode(j, indent: 2))? == j)\n",
             lit(&text)
         );
         let r = run(&src);

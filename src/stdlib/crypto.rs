@@ -1,12 +1,13 @@
-//! The `crypto` module: SHA-256 (from the `sha2` crate), and SHA-1, MD5
-//! and HMAC-SHA256 implemented from their specifications (FIPS 180-4,
-//! RFC 1321, RFC 2104).
+//! The `crypto` module: SHA-256, SHA-1, MD5 and HMAC-SHA256 from the
+//! RustCrypto crates, charged as they go.
 
 use crate::check::ModKind;
 use crate::engine::Registry;
 use crate::vm::Ctl;
 use crate::vm::meter::{Budget, SLOW_BYTES_PER_UNIT};
 use crate::vm::value::Value;
+use hmac::{KeyInit, Mac};
+use sha2::Digest;
 
 pub fn register(r: &mut Registry) {
     r.source("crypto", ModKind::Std, include_str!("crypto.sand"));
@@ -15,11 +16,11 @@ pub fn register(r: &mut Registry) {
         Ok(vm.heap.new_bytes(d.to_vec()))
     });
     r.add_builtin("crypto.sha1", |vm, a| {
-        let d = sha1(vm.heap.bytes_of(a[0]), &vm.meter)?;
+        let d = digest::<sha1::Sha1>(&[vm.heap.bytes_of(a[0])], &vm.meter)?;
         Ok(vm.heap.new_bytes(d.to_vec()))
     });
     r.add_builtin("crypto.md5", |vm, a| {
-        let d = md5(vm.heap.bytes_of(a[0]), &vm.meter)?;
+        let d = digest::<md5::Md5>(&[vm.heap.bytes_of(a[0])], &vm.meter)?;
         Ok(vm.heap.new_bytes(d.to_vec()))
     });
     r.add_builtin("crypto.hmac_sha256", |vm, a| {
@@ -32,151 +33,40 @@ pub fn register(r: &mut Registry) {
     });
 }
 
-/// Blocks hashed between charges to the budget (4 KiB).
-const BLOCKS_PER_CHARGE: usize = 64;
+/// Bytes hashed between charges to the budget (4 KiB).
+const CHUNK: usize = 4096;
 
-/// Merkle–Damgård padding shared by SHA-1, SHA-256 and MD5: the message
-/// (the concatenation of `parts`), `0x80`, zeros, and the bit length (big-
-/// or little-endian) filling 64-byte blocks. Calls `block` for each block,
-/// charging `budget` as it goes so that hashing huge inputs can be stopped.
-fn md_blocks(parts: &[&[u8]], big_endian: bool, budget: &impl Budget, mut block: impl FnMut(&[u8; 64])) -> Result<(), Ctl> {
-    let mut buf = [0u8; 64];
-    let mut filled = 0;
-    let mut len: u64 = 0;
+/// Feeds the concatenation of `parts` to `update`, charging `budget` as it
+/// goes so that hashing huge inputs can be stopped.
+fn feed(parts: &[&[u8]], budget: &impl Budget, mut update: impl FnMut(&[u8])) -> Result<(), Ctl> {
     for part in parts {
-        len = len.wrapping_add(part.len() as u64);
-        let mut rest = *part;
-        if filled > 0 {
-            let n = rest.len().min(64 - filled);
-            buf[filled..filled + n].copy_from_slice(&rest[..n]);
-            filled += n;
-            rest = &rest[n..];
-            if filled < 64 {
-                continue;
-            }
-            block(&buf);
+        for chunk in part.chunks(CHUNK) {
+            budget.charge((chunk.len() / SLOW_BYTES_PER_UNIT) as u64)?;
+            update(chunk);
         }
-        let (blocks, rem) = rest.as_chunks::<64>();
-        for chunk in blocks.chunks(BLOCKS_PER_CHARGE) {
-            budget.charge((chunk.len() * 64 / SLOW_BYTES_PER_UNIT) as u64)?;
-            chunk.iter().for_each(&mut block);
-        }
-        buf[..rem.len()].copy_from_slice(rem);
-        filled = rem.len();
     }
-    let mut tail = [0u8; 128];
-    tail[..filled].copy_from_slice(&buf[..filled]);
-    tail[filled] = 0x80;
-    let total = if filled < 56 { 64 } else { 128 };
-    let bit_len = len.wrapping_mul(8);
-    let len_bytes = if big_endian { bit_len.to_be_bytes() } else { bit_len.to_le_bytes() };
-    tail[total - 8..total].copy_from_slice(&len_bytes);
-    tail[..total].as_chunks::<64>().0.iter().for_each(block);
     Ok(())
+}
+
+/// The digest of the concatenation of `parts`.
+fn digest<D: Digest>(parts: &[&[u8]], budget: &impl Budget) -> Result<sha2::digest::Output<D>, Ctl> {
+    let mut h = D::new();
+    feed(parts, budget, |chunk| h.update(chunk))?;
+    Ok(h.finalize())
 }
 
 /// SHA-256 (FIPS 180-4) of the concatenation of `parts`.
 pub(crate) fn sha256_parts(parts: &[&[u8]], budget: &impl Budget) -> Result<[u8; 32], Ctl> {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    for part in parts {
-        for chunk in part.chunks(BLOCKS_PER_CHARGE * 64) {
-            budget.charge((chunk.len() / SLOW_BYTES_PER_UNIT) as u64)?;
-            h.update(chunk);
-        }
-    }
-    Ok(h.finalize().into())
-}
-
-/// SHA-1 (FIPS 180-4).
-pub(crate) fn sha1(data: &[u8], budget: &impl Budget) -> Result<[u8; 20], Ctl> {
-    let mut h: [u32; 5] = [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0];
-    md_blocks(&[data], true, budget, |block| {
-        let mut w = [0u32; 80];
-        for (i, word) in block.as_chunks::<4>().0.iter().enumerate() {
-            w[i] = u32::from_be_bytes(*word);
-        }
-        for i in 16..80 {
-            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
-        }
-        let [mut a, mut b, mut c, mut d, mut e] = h;
-        for (i, &wi) in w.iter().enumerate() {
-            let (f, k) = match i {
-                0..=19 => ((b & c) | (!b & d), 0x5a827999),
-                20..=39 => (b ^ c ^ d, 0x6ed9eba1),
-                40..=59 => ((b & c) | (b & d) | (c & d), 0x8f1bbcdc),
-                _ => (b ^ c ^ d, 0xca62c1d6),
-            };
-            let t = a.rotate_left(5).wrapping_add(f).wrapping_add(e).wrapping_add(k).wrapping_add(wi);
-            e = d;
-            d = c;
-            c = b.rotate_left(30);
-            b = a;
-            a = t;
-        }
-        for (x, y) in h.iter_mut().zip([a, b, c, d, e]) {
-            *x = x.wrapping_add(y);
-        }
-    })?;
-    let mut out = [0u8; 20];
-    for (o, x) in out.as_chunks_mut::<4>().0.iter_mut().zip(h) {
-        *o = x.to_be_bytes();
-    }
-    Ok(out)
-}
-
-const MD5_S: [u32; 64] = [
-    7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4,
-    11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
-];
-
-/// MD5 (RFC 1321).
-pub(crate) fn md5(data: &[u8], budget: &impl Budget) -> Result<[u8; 16], Ctl> {
-    // K[i] = floor(abs(sin(i + 1)) * 2^32).
-    let k: [u32; 64] = std::array::from_fn(|i| ((i as f64 + 1.0).sin().abs() * 4294967296.0) as u32);
-    let mut h: [u32; 4] = [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476];
-    md_blocks(&[data], false, budget, |block| {
-        let mut m = [0u32; 16];
-        for (i, word) in block.as_chunks::<4>().0.iter().enumerate() {
-            m[i] = u32::from_le_bytes(*word);
-        }
-        let [mut a, mut b, mut c, mut d] = h;
-        for i in 0..64 {
-            let (f, g) = match i {
-                0..=15 => ((b & c) | (!b & d), i),
-                16..=31 => ((d & b) | (!d & c), (5 * i + 1) % 16),
-                32..=47 => (b ^ c ^ d, (3 * i + 5) % 16),
-                _ => (c ^ (b | !d), (7 * i) % 16),
-            };
-            let f = f.wrapping_add(a).wrapping_add(k[i]).wrapping_add(m[g]);
-            a = d;
-            d = c;
-            c = b;
-            b = b.wrapping_add(f.rotate_left(MD5_S[i]));
-        }
-        for (x, y) in h.iter_mut().zip([a, b, c, d]) {
-            *x = x.wrapping_add(y);
-        }
-    })?;
-    let mut out = [0u8; 16];
-    for (o, x) in out.as_chunks_mut::<4>().0.iter_mut().zip(h) {
-        *o = x.to_le_bytes();
-    }
-    Ok(out)
+    Ok(digest::<sha2::Sha256>(parts, budget)?.into())
 }
 
 /// HMAC-SHA256 (RFC 2104).
 pub(crate) fn hmac_sha256(key: &[u8], data: &[u8], budget: &impl Budget) -> Result<[u8; 32], Ctl> {
-    let mut k = [0u8; 64];
-    if key.len() > 64 {
-        k[..32].copy_from_slice(&sha256_parts(&[key], budget)?);
-    } else {
-        k[..key.len()].copy_from_slice(key);
-    }
-    let ipad = k.map(|b| b ^ 0x36);
-    let opad = k.map(|b| b ^ 0x5c);
-    let inner = sha256_parts(&[&ipad, data], budget)?;
-    sha256_parts(&[&opad, &inner], budget)
+    // A key longer than a block is hashed first.
+    budget.charge((key.len() / SLOW_BYTES_PER_UNIT) as u64)?;
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(key).map_err(|_| Ctl::panic("internal error: HMAC key"))?;
+    feed(&[data], budget, |chunk| mac.update(chunk))?;
+    Ok(mac.finalize().into_bytes().into())
 }
 
 /// Equality whose running time does not depend on where the inputs differ.
@@ -206,9 +96,10 @@ mod tests {
         // NIST two-block message.
         let m = b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
         assert_eq!(hex(&sha256(m)), "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
-        assert_eq!(hex(&sha1(m, &Unmetered).unwrap()), "84983e441c3bd26ebaae4aa1f95129e5e54670f1");
+        assert_eq!(hex(&digest::<sha1::Sha1>(&[m], &Unmetered).unwrap()), "84983e441c3bd26ebaae4aa1f95129e5e54670f1");
         assert_eq!(
-            hex(&md5(b"12345678901234567890123456789012345678901234567890123456789012345678901234567890", &Unmetered).unwrap()),
+            hex(&digest::<md5::Md5>(&[b"12345678901234567890123456789012345678901234567890123456789012345678901234567890"], &Unmetered)
+                .unwrap()),
             "57edf4a22be3c955ac49da2e2107b67a"
         );
         // Splitting the input must not change the digest.

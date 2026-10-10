@@ -1,0 +1,103 @@
+//! An HTTP/1.1 client and a minimal HTTP/1.1 server.
+//!
+//! Requests need the `Net(host:port)` capability (checked again for every
+//! redirect hop); `serve` needs `NetListen(addr)`. `https` URLs use TLS when
+//! the engine is built with the `tls` feature. Response bodies larger than
+//! the `max_http_body` limit fail with kind `"limit"`.
+
+import json
+import net
+
+/// Starts an HTTP server listening on `addr` (`host:port`; port `0` picks a
+/// free port).
+pub fn serve(addr: str) -> Result<Server> {
+    Ok(Server { listener: net.listen(addr)?, pending: new_pending() })
+}
+
+/// An HTTP/1.1 server. Each connection carries one request and is closed
+/// after the response.
+pub struct Server {
+    listener: net.Listener
+    /// Connections accepted whose requests are still being read.
+    pending: PendingRequests
+
+    /// Waits for the next request. Requests are read from several
+    /// connections at once, so a slow or idle client does not delay the
+    /// others. Connections that do not send a valid request within 30
+    /// seconds are answered with `400 Bad Request` and closed.
+    fn accept(self) -> Result<Request> {
+        let (method, path, query, headers, body, conn) = next_request(self.listener, self.pending)?
+        Ok(Request { method, path, query, headers, body, conn })
+    }
+
+    /// The local address (`host:port`) the server listens on.
+    fn addr(self) -> str {
+        self.listener.addr()
+    }
+
+    /// Stops accepting connections; connections whose requests were still
+    /// being read are closed.
+    fn close(self) {
+        self.listener.close()
+        close_pending(self.pending)
+    }
+}
+
+/// A request received by a `Server`. Header names are lower-cased; `path`
+/// and `query` are the parts of the request target before and after `?`.
+pub struct Request {
+    method: str
+    path: str
+    query: str
+    headers: [str: str]
+    body: bytes
+    /// The client connection. `respond` writes the response to it and closes
+    /// it; a script may instead write a response to it directly.
+    conn: net.Conn
+
+    /// Sends the response and closes the connection.
+    fn respond(self, status: int, body: bytes, headers: [str: str] = [:]) -> Result<()> {
+        let sent = write_response(self.conn, status, body, headers, self.method != "HEAD")
+        self.conn.close()
+        sent
+    }
+
+    /// The body decoded as UTF-8.
+    fn text(self) -> Result<str> {
+        self.body.to_str()
+    }
+
+    /// The body parsed as JSON.
+    fn json(self) -> Result<json.Json> {
+        json.parse(self.text()?)
+    }
+
+    /// The value of header `name` (case-insensitive).
+    fn header(self, name: str) -> str? {
+        self.headers.get(name.to_lower())
+    }
+}
+
+/// Connections accepted by a `Server` whose requests are being read.
+native type PendingRequests
+
+native fn new_pending() -> PendingRequests
+
+/// Accepts connections on `listener` and reads their requests concurrently
+/// until one is complete: `(method, path, query, headers, body, conn)`.
+native fn next_request(
+    listener: net.Listener,
+    pending: PendingRequests,
+) -> Result<(str, str, str, [str: str], bytes, net.Conn)>
+
+/// Closes the connections whose requests are being read.
+native fn close_pending(pending: PendingRequests)
+
+/// Writes a response (with `content-length` and `connection: close`) to `conn`.
+native fn write_response(
+    conn: net.Conn,
+    status: int,
+    body: bytes,
+    headers: [str: str],
+    include_body: bool,
+) -> Result<()>

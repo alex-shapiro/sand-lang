@@ -3,9 +3,8 @@
 use crate::check::ModKind;
 use crate::engine::Registry;
 use crate::platform::{Instant, SystemTime, UNIX_EPOCH};
-use crate::vm::value::{NativeObject, Obj, Value};
-use crate::vm::{Ctl, NResult, Vm};
-use std::any::Any;
+use crate::vm::value::Value;
+use crate::vm::{NResult, Vm};
 use std::fmt::Write;
 
 const NANOS_PER_SEC: i64 = 1_000_000_000;
@@ -15,19 +14,12 @@ const WEEKDAYS: [&str; 7] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Frid
 const MONTHS: [&str; 12] =
     ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 
-/// The opaque `time.Instant` type.
-struct InstantObj(Instant);
-
-impl NativeObject for InstantObj {
-    fn type_name(&self) -> &'static str {
-        "Instant"
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
+/// The origin of the monotonic clock (`time.Instant { nanos }` counts from
+/// it): the first reading of the process.
+fn monotonic_nanos() -> i64 {
+    static ORIGIN: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let origin = *ORIGIN.get_or_init(Instant::now);
+    i64::try_from(origin.elapsed().as_nanos()).unwrap_or(i64::MAX)
 }
 
 /// Days since 1970-01-01 of a proleptic Gregorian date (Hinnant's `days_from_civil`).
@@ -259,18 +251,6 @@ fn format(n: i64, fmt: &str) -> String {
     out
 }
 
-fn duration_between(later: Instant, earlier: Instant) -> Value {
-    let nanos = match later.checked_duration_since(earlier) {
-        Some(d) => i64::try_from(d.as_nanos()).unwrap_or(i64::MAX),
-        None => -i64::try_from(earlier.duration_since(later).as_nanos()).unwrap_or(i64::MAX),
-    };
-    Value::Dur(nanos)
-}
-
-fn instant(vm: &Vm, v: Value) -> Result<Instant, Ctl> {
-    vm.heap.native::<InstantObj>(v).map(|i| i.0).ok_or_else(|| Ctl::Panic("not an Instant".into()))
-}
-
 /// The `unix_nanos` field of a `DateTime`.
 fn unix_nanos(vm: &Vm, v: Value) -> i64 {
     vm.heap.fields(v)[0].as_int()
@@ -326,9 +306,7 @@ pub fn register(r: &mut Registry) {
         };
         Ok(Value::Int(nanos))
     });
-    r.add_builtin("time.monotonic", |vm, _| Ok(vm.heap.alloc(Obj::Native(Box::new(InstantObj(Instant::now()))))));
-    r.add_builtin("time.Instant.elapsed", |vm, a| Ok(duration_between(Instant::now(), instant(vm, a[0])?)));
-    r.add_builtin("time.Instant.since", |vm, a| Ok(duration_between(instant(vm, a[0])?, instant(vm, a[1])?)));
+    r.add_builtin("time.monotonic_nanos", |_, _| Ok(Value::Int(monotonic_nanos())));
 
     r.add_builtin("time.parse_nanos", |vm, a| {
         vm.charge_bytes(vm.str(a[0]).len())?;

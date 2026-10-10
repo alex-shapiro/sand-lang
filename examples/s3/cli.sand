@@ -34,13 +34,13 @@ fn client() -> Result<s3.Client> {
 }
 
 fn human(n: int) -> str {
-    if n < 1024 { return "{n}B" }
+    if n < 1024 { return "\(n)B" }
     var size = n.to_float()
     for unit in ["K", "M", "G", "T"] {
         size = size / 1024.0
-        if size < 1024.0 { return "{size:.1}{unit}" }
+        if size < 1024.0 { return "\(size:.1)\(unit)" }
     }
-    "{size:.1}P"
+    "\(size:.1)P"
 }
 
 fn run(args: [str]) -> Result<()> {
@@ -50,29 +50,29 @@ fn run(args: [str]) -> Result<()> {
             let prefix = args.get(2) ?? ""
             let objects = c.list_objects(bucket, prefix: prefix)?
             for o in objects {
-                print("{o.last_modified:<24} {human(o.size):>8}  {o.key}")
+                print("\(o.last_modified:<24) \(human(o.size):>8)  \(o.key)")
             }
-            print("{objects.len()} objects, {human(objects.map(o => o.size).sum())}")
+            print("\(objects.len()) objects, \(human(objects.map(o => o.size).sum()))")
         }
         ["put", bucket, key, file] => {
             let data = fs.read_bytes(file)?
             c.put_object(bucket, key, data)?
-            print("uploaded {file} to s3://{bucket}/{key} ({human(data.len())})")
+            print("uploaded \(file) to s3://\(bucket)/\(key) (\(human(data.len())))")
         }
         ["get", bucket, key] => io.write(c.get_object(bucket, key)?.to_str_lossy())
         ["get", bucket, key, file] => {
             let data = c.get_object(bucket, key)?
             fs.write_bytes(file, data)?
-            print("downloaded s3://{bucket}/{key} to {file} ({human(data.len())})")
+            print("downloaded s3://\(bucket)/\(key) to \(file) (\(human(data.len())))")
         }
         ["cat", bucket, key] => io.write(c.get_object(bucket, key)?.to_str()?)
         ["rm", bucket, key] => {
             c.delete_object(bucket, key)?
-            print("deleted s3://{bucket}/{key}")
+            print("deleted s3://\(bucket)/\(key)")
         }
         ["stat", bucket, key] => match c.head_object(bucket, key)? {
-            Some(info) => print("{info.key}: {info.size} bytes, etag {info.etag}, modified {info.last_modified}")
-            None => print("not found: s3://{bucket}/{key}")
+            Some(info) => print("\(info.key): \(info.size) bytes, etag \(info.etag), modified \(info.last_modified)")
+            None => print("not found: s3://\(bucket)/\(key)")
         }
         _ => {
             eprint("usage: cli.sand (ls BUCKET [PREFIX] | put BUCKET KEY FILE | get BUCKET KEY [FILE] | cat BUCKET KEY | rm BUCKET KEY | stat BUCKET KEY)")
@@ -85,7 +85,7 @@ fn run(args: [str]) -> Result<()> {
 match run(env.args()) {
     Ok(_) => {}
     Err(e) => {
-        eprint("error: {e}")
+        eprint("error: \(e)")
         exit(1)
     }
 }

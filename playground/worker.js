@@ -25,13 +25,11 @@
 //   {type: "ended", exitCode}               a task called `exit`
 
 import { initSync, Engine, format } from "./pkg/sandlang_wasm.js";
-import { engineOptions, program, writtenFiles } from "./sandbox.js";
+import { engineOptions, program } from "./sandbox.js";
 
 const pendingPrompts = new Map();
 let nextPrompt = 1;
 let queue = Promise.resolve();
-
-/** The session of the last run: {engine, session, sandbox, tasks}. */
 let current = null;
 
 self.onmessage = (event) => {
@@ -134,10 +132,10 @@ async function run(id, sandbox) {
     return;
   }
   const session = engine.session();
-  current = { engine, session, sandbox, tasks: null };
+  current = { engine, session, sandbox, tasks: null, start: engine.generation() };
   const evaluated = await session.eval(sandbox.files[program(sandbox)] ?? "", program(sandbox));
   const result = asRunResult(evaluated);
-  const written = writtenFiles(sandbox, engine.files());
+  const written = engine.changedFiles(current.start);
   self.postMessage({ type: "done", id, result, written }, written.map((f) => f.data.buffer));
   if (evaluated.exitCode === undefined) resumeTasks();
 }
@@ -149,7 +147,7 @@ async function input(id, source) {
   }
   await pauseTasks();
   const result = await current.session.eval(source);
-  const written = writtenFiles(current.sandbox, current.engine.files());
+  const written = current.engine.changedFiles(current.start);
   self.postMessage({ type: "evaluated", id, result, written }, written.map((f) => f.data.buffer));
   if (result.exitCode === undefined) resumeTasks();
 }
@@ -157,8 +155,7 @@ async function input(id, source) {
 /** A session's first input as the result of a run. */
 function asRunResult(evaluated) {
   if (evaluated.error) {
-    const codes = { compile: 2, runtime: 1, limit: 3, interrupted: 130, io: 2 };
-    return { ok: false, exitCode: evaluated.exitCode ?? codes[evaluated.error.kind] ?? 1, error: evaluated.error };
+    return { ok: false, exitCode: evaluated.exitCode ?? evaluated.error.exitCode, error: evaluated.error };
   }
   const exitCode = evaluated.exitCode ?? 0;
   return { ok: exitCode === 0, exitCode, value: evaluated.value };
@@ -172,17 +169,8 @@ function check(id, sandbox) {
   }
   try {
     const name = program(sandbox);
-    const source = sandbox.files[name] ?? "";
-    const result = engine.check(source, name);
-    let warnings = [];
-    if (result.ok) {
-      try {
-        warnings = engine.lint(source, name);
-      } catch {
-        // Linting needs a program that type checks; it did.
-      }
-    }
-    self.postMessage({ type: "checked", id, check: result, lint: warnings, policyErrors: [] });
+    const result = engine.check(sandbox.files[name] ?? "", name);
+    self.postMessage({ type: "checked", id, check: result, lint: result.lint, policyErrors: [] });
   } finally {
     engine.free();
   }

@@ -81,7 +81,7 @@ q=a%20b&x=%26%3D
 import uri
 let base = uri.parse("http://a/b/c/d;p?q")?
 for r in ["g", "./g", "g/", "/g", "//g", "?y", "g?y", "#s", "g#s", "..", "../g", "../..", "../../g", "../../../g", "./../g", "g/./h", "g/../h"] {
-    print("{r} -> {base.join(r)?.to_str()}")
+    print("\(r) -> \(base.join(r)?.to_str())")
 }
 --- stdout
 g -> http://a/b/c/g

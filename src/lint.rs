@@ -3,12 +3,13 @@
 use crate::check::budget::{CompileBudget, tool_fuel};
 use crate::check::{CheckedProgram, Ctor, FnInfo, FnKind};
 use crate::diag::SourceFile;
-use crate::engine::{Engine, ResolvedFacts};
+use crate::engine::Engine;
 use crate::hir::{HArg, HKind};
+use crate::modules::ResolvedFacts;
 use crate::syntax::ast::*;
 use crate::syntax::lexer::CommentKind;
 use crate::types::FnId;
-use crate::{Config, Policy};
+use crate::{Config, Error, Policy};
 use std::collections::{HashMap, HashSet};
 #[cfg(feature = "os")]
 use std::path::Path;
@@ -28,26 +29,35 @@ impl std::fmt::Display for LintWarning {
 }
 
 /// Lints a file of the host's file system (its imports are loaded relative
-/// to it).
+/// to it, as `sand check` loads them: from the module root, without
+/// prompting).
 #[cfg(feature = "os")]
 pub fn lint_file(path: &Path) -> Result<Vec<LintWarning>, String> {
     let src = std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    let engine = Engine::new(Config::new().policy(Policy::allow_all()));
-    let facts = crate::platform::block_on(engine.lint_facts(path))?.map_err(|e| e.to_string())?;
+    let engine = Engine::new(Config::new().policy(Policy::deny_all()));
+    let facts = engine.lint_facts(path).map_err(|e| e.to_string())?;
     lint_with(&src, facts)
 }
 
 /// Lints source text (imports are resolved against the current directory,
 /// or the root of an empty memory file system without the `os` feature).
 pub fn lint_source(name: &str, src: &str) -> Result<Vec<LintWarning>, String> {
-    lint_source_with(&Engine::new(Config::new().policy(Policy::allow_all())), name, src)
+    lint_source_with(&Engine::new(Config::new().policy(Policy::deny_all())), name, src)
 }
 
 /// Lints source text as `engine` would run it: imports come from its file
 /// system and module root, as its policy allows (without prompting).
 pub fn lint_source_with(engine: &Engine, name: &str, src: &str) -> Result<Vec<LintWarning>, String> {
-    let facts = crate::platform::block_on(engine.lint_facts_source(name, src))?.map_err(|e| e.to_string())?;
-    lint_with(src, facts)
+    check_and_lint(engine, name, src).map_err(|e| e.to_string())
+}
+
+/// Type checks source text as `engine` would run it (see
+/// [`lint_source_with`]) and, if it type checks, lints it: the compile
+/// errors, or the warnings. A lint that cannot finish (the source is too
+/// complex) is an [`Error::Io`].
+pub fn check_and_lint(engine: &Engine, name: &str, src: &str) -> Result<Vec<LintWarning>, Error> {
+    let facts = engine.lint_facts_source(name, src)?;
+    lint_with(src, facts).map_err(Error::Io)
 }
 
 fn lint_with(src: &str, facts: ResolvedFacts) -> Result<Vec<LintWarning>, String> {
@@ -66,13 +76,19 @@ struct Linter<'a> {
     file: SourceFile,
     out: Vec<LintWarning>,
     facts: &'a ResolvedFacts,
-    /// Types of bindings by (line, column), from the checker.
+    /// Types of bindings by (line, column), from the checker (empty for
+    /// top-level bindings).
     types: HashMap<(usize, usize), String>,
+    /// The payload-less variants of the enum type of capitalized bindings
+    /// by (line, column), from the checker (`variant-like-binding`).
+    variants: HashMap<(usize, usize), Vec<String>>,
     /// The names of the bindings (with known types) of each scope enclosing
     /// the current point of the current function, innermost last.
     let_scopes: Vec<Vec<String>>,
     /// The types of the bindings in `let_scopes` by name, innermost last.
     in_scope: HashMap<String, Vec<String>>,
+    /// Names that may shadow the prelude's (see [`declarations`]).
+    declared: HashSet<String>,
     budget: &'a CompileBudget,
 }
 
@@ -84,13 +100,16 @@ fn run_lints(src: &str, facts: &ResolvedFacts, budget: &CompileBudget) -> Result
     if !parsed.errors.is_empty() {
         return Err("cannot lint a file with syntax errors".into());
     }
+    let declared = declarations(&parsed.module);
     let mut l = Linter {
         file: SourceFile::new("", src),
         out: Vec::new(),
         facts,
         types: facts.locals.iter().map(|(ln, c, f)| ((*ln, *c), f.ty.clone())).collect(),
+        variants: facts.locals.iter().filter(|(.., f)| !f.variants.is_empty()).map(|(ln, c, f)| ((*ln, *c), f.variants.clone())).collect(),
         let_scopes: vec![vec![]],
         in_scope: HashMap::new(),
+        declared,
         budget,
     };
     l.module(&parsed.module);
@@ -101,8 +120,8 @@ fn run_lints(src: &str, facts: &ResolvedFacts, budget: &CompileBudget) -> Result
     let mut line_allow: HashMap<usize, HashSet<String>> = HashMap::new();
     for c in &parsed.comments {
         let text = match c.kind {
-            CommentKind::ModuleDoc => c.text.trim_start_matches("//!").trim(),
-            CommentKind::Line => c.text.trim_start_matches("//").trim(),
+            CommentKind::ModuleDoc => c.text(src).trim_start_matches("//!").trim(),
+            CommentKind::Line => c.text(src).trim_start_matches("//").trim(),
             _ => continue,
         };
         let Some(rest) = text.strip_prefix("lint: allow(") else { continue };
@@ -124,6 +143,27 @@ fn run_lints(src: &str, facts: &ResolvedFacts, budget: &CompileBudget) -> Result
     Ok(out)
 }
 
+/// The edit distance between `a` and `b` (insertions, deletions,
+/// substitutions and transpositions of adjacent characters).
+fn edit_distance(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    // Rows i - 2, i - 1 and i of the distances between prefixes.
+    let mut rows = [vec![0; b.len() + 1], vec![0; b.len() + 1], (0..=b.len()).collect::<Vec<_>>()];
+    for i in 1..=a.len() {
+        rows.rotate_left(1);
+        rows[2][0] = i;
+        for j in 1..=b.len() {
+            let cost = (a[i - 1] != b[j - 1]) as usize;
+            let mut d = (rows[1][j] + 1).min(rows[2][j - 1] + 1).min(rows[1][j - 1] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                d = d.min(rows[0][j - 2] + 1);
+            }
+            rows[2][j] = d;
+        }
+    }
+    rows[2][b.len()]
+}
+
 fn is_upper_camel(s: &str) -> bool {
     s.chars().next().is_some_and(|c| c.is_ascii_uppercase()) && !s.contains('_')
 }
@@ -137,14 +177,51 @@ fn is_screaming(s: &str) -> bool {
     s.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_') && s.chars().any(|c| c.is_ascii_uppercase())
 }
 
-fn diverges(b: &CompileBudget, e: &Expr) -> bool {
-    match &e.kind {
-        ExprKind::Return(_) | ExprKind::Break { .. } | ExprKind::Continue(_) => true,
-        ExprKind::Call { callee, .. } => {
-            matches!(&callee.kind, ExprKind::Ident(id) if matches!(id.name.as_str(), "panic" | "exit" | "todo"))
+/// The names of the functions (at any depth), imports and top-level
+/// bindings of a module, which may shadow the prelude's.
+fn declarations(m: &Module) -> HashSet<String> {
+    fn function(f: &FnDecl, out: &mut HashSet<String>) {
+        out.insert(f.name.name.clone());
+        for s in f.body.iter().flat_map(|b| &b.stmts) {
+            if let StmtKind::Fn(f) = &s.kind {
+                function(f, out);
+            }
         }
-        // A `loop` that nothing breaks out of never completes.
-        ExprKind::Loop { label, body } => !block_any(body, &mut |x| breaks_to(b, x, label.as_ref(), 0)),
+    }
+    let mut out = HashSet::new();
+    for item in &m.items {
+        match &item.kind {
+            ItemKind::Fn(f) => function(f, &mut out),
+            ItemKind::Import(i) => out.extend(i.alias.iter().chain(i.names.iter().flatten()).map(|n| n.name.clone())),
+            ItemKind::Stmt(Stmt { kind: StmtKind::Let { pattern, .. }, .. }) => {
+                let mut ids = Vec::new();
+                pattern.bindings(&mut ids);
+                out.extend(ids.into_iter().map(|id| id.name));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// An expression statement that computes a value and does nothing else.
+fn has_no_effect(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Unit
+        | ExprKind::Bool(_)
+        | ExprKind::Int(_)
+        | ExprKind::IntOverflow(_)
+        | ExprKind::Float(_)
+        | ExprKind::Duration(_)
+        | ExprKind::Bytes(_)
+        | ExprKind::Ident(_)
+        | ExprKind::SelfValue
+        | ExprKind::Lambda { .. } => true,
+        ExprKind::Str(segs) => segs.iter().all(|s| matches!(s, StrSeg::Text(_))),
+        ExprKind::Paren(x) | ExprKind::Unary(_, x) | ExprKind::Field(x, _) | ExprKind::TupleField(x, ..) => has_no_effect(x),
+        ExprKind::Binary(_, a, b) => has_no_effect(a) && has_no_effect(b),
+        ExprKind::Range { start, end, .. } => start.iter().chain(end).all(|x| has_no_effect(x)),
+        ExprKind::List(xs) | ExprKind::Tuple(xs) => xs.iter().all(has_no_effect),
         _ => false,
     }
 }
@@ -239,13 +316,9 @@ impl<'a> Linter<'a> {
         self.file.line_col(pos as u32).0
     }
 
-    fn col_of(&self, pos: usize) -> usize {
-        self.file.line_col(pos as u32).1
-    }
-
     fn warn(&mut self, pos: u32, code: &'static str, message: String) {
-        let p = pos as usize;
-        self.out.push(LintWarning { code, message, line: self.line_of(p), column: self.col_of(p) });
+        let (line, column) = self.file.line_col(pos);
+        self.out.push(LintWarning { code, message, line, column });
     }
 
     fn name(&mut self, id: &Ident, ok: bool, what: &str, style: &str) {
@@ -322,6 +395,7 @@ impl<'a> Linter<'a> {
         // Unreachable top-level statements.
         let stmts: Vec<&Stmt> = m.items.iter().filter_map(|i| if let ItemKind::Stmt(s) = &i.kind { Some(s) } else { None }).collect();
         self.unreachable(&stmts);
+        self.no_effect(&stmts, None);
     }
 
     fn generics(&mut self, gs: &[GenericParam]) {
@@ -359,8 +433,7 @@ impl<'a> Linter<'a> {
 
     /// The checker's type of the binding introduced at `id`, if known.
     fn binding_type(&self, id: &Ident) -> Option<String> {
-        let pos = (self.line_of(id.span.lo as usize), self.col_of(id.span.lo as usize));
-        self.types.get(&pos).filter(|t| !t.is_empty()).cloned()
+        self.types.get(&self.file.line_col(id.span.lo)).filter(|t| !t.is_empty()).cloned()
     }
 
     /// Brings a binding into the innermost scope. Names without a checker type
@@ -417,13 +490,51 @@ impl<'a> Linter<'a> {
         }
     }
 
+    /// Whether `name` is the prelude's function of that name (nothing in
+    /// the module or in scope shadows it).
+    fn is_prelude(&self, name: &str) -> bool {
+        !self.declared.contains(name) && !self.in_scope.contains_key(name)
+    }
+
+    /// Whether evaluating `e` never completes.
+    fn diverges(&self, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Return(_) | ExprKind::Break { .. } | ExprKind::Continue(_) => true,
+            ExprKind::Call { callee, .. } => {
+                matches!(&callee.kind, ExprKind::Ident(id) if matches!(id.name.as_str(), "panic" | "exit" | "todo") && self.is_prelude(&id.name))
+            }
+            // A `loop` that nothing breaks out of never completes.
+            ExprKind::Loop { label, body } => !block_any(body, &mut |x| breaks_to(self.budget, x, label.as_ref(), 0)),
+            _ => false,
+        }
+    }
+
     fn unreachable(&mut self, stmts: &[&Stmt]) {
         for w in stmts.windows(2) {
             if let StmtKind::Expr(e) = &w[0].kind
-                && diverges(self.budget, e)
+                && self.diverges(e)
             {
                 self.warn(w[1].span.lo, "unreachable-code", "unreachable code".into());
                 break;
+            }
+        }
+    }
+
+    /// `no-effect`: expression statements whose value is discarded and that
+    /// do nothing else (`value` is the statement whose value is used, if any).
+    fn no_effect(&mut self, stmts: &[&Stmt], value: Option<&Stmt>) {
+        for s in stmts {
+            if let StmtKind::Expr(e) = &s.kind
+                && value.is_none_or(|v| !std::ptr::eq(v, *s))
+                && has_no_effect(e)
+            {
+                let message = if matches!(e.kind, ExprKind::Unary(UnOp::Neg, _)) {
+                    "expression statement has no effect (a line starting with `-x` starts a new statement; to subtract \
+                     on a continued line, write `- x`)"
+                } else {
+                    "expression statement has no effect"
+                };
+                self.warn(s.span.lo, "no-effect", message.into());
             }
         }
     }
@@ -435,6 +546,8 @@ impl<'a> Linter<'a> {
         }
         let refs: Vec<&Stmt> = b.stmts.iter().collect();
         self.unreachable(&refs);
+        // The last statement is the block's value.
+        self.no_effect(&refs, b.stmts.last());
         self.pop_scope();
     }
 
@@ -448,17 +561,47 @@ impl<'a> Linter<'a> {
         self.pattern_names_in(p, top_level_let, true);
     }
 
-    /// `is_let`: in `match`/`if let` patterns a capitalised name is a variant.
+    /// The naming lints of the bindings of a pattern. A capitalized name
+    /// that the checker found to bind (rather than to be a variant) is a
+    /// `variant-like-binding`, unless it is a top-level constant
+    /// (`SCREAMING_SNAKE_CASE`); `is_let`: a `let`, `for` or comprehension
+    /// pattern, where the checker's facts may be missing for a binding.
     fn pattern_names_in(&mut self, p: &Pattern, top_level_let: bool, is_let: bool) {
         let mut ids = Vec::new();
         p.bindings(&mut ids);
         for id in ids {
-            if !is_let && id.name.starts_with(|c: char| c.is_ascii_uppercase()) {
-                continue;
+            let constant = top_level_let && is_screaming(&id.name);
+            if id.name.starts_with(|c: char| c.is_ascii_uppercase()) && !constant {
+                if self.types.contains_key(&self.file.line_col(id.span.lo)) {
+                    self.variant_like_binding(&id);
+                    continue;
+                }
+                if !is_let {
+                    // A variant.
+                    continue;
+                }
             }
-            let ok = is_snake(&id.name) || (top_level_let && is_screaming(&id.name));
-            self.name(&id, ok, "variable", "snake_case");
+            self.name(&id, is_snake(&id.name) || constant, "variable", "snake_case");
         }
+    }
+
+    /// `variant-like-binding`: a capitalized name in a pattern that binds a
+    /// new variable, most likely a misspelled variant without a payload.
+    fn variant_like_binding(&mut self, id: &Ident) {
+        let name = id.name.to_ascii_lowercase();
+        let close = self.variants.get(&self.file.line_col(id.span.lo)).and_then(|variants| {
+            variants
+                .iter()
+                .map(|v| (edit_distance(&name, &v.rsplit('.').next().unwrap_or(v).to_ascii_lowercase()), v))
+                .filter(|&(d, _)| d <= (name.chars().count() / 3).max(1))
+                .min_by_key(|&(d, _)| d)
+                .map(|(_, v)| v.clone())
+        });
+        let message = match close {
+            Some(v) => format!("`{}` binds a new variable; did you mean the variant `{v}`?", id.name),
+            None => format!("`{}` binds a new variable rather than matching a variant; use a lowercase name for a binding", id.name),
+        };
+        self.warn(id.span.lo, "variant-like-binding", message);
     }
 
     fn stmt(&mut self, s: &Stmt, top: bool) {
@@ -528,6 +671,7 @@ impl<'a> Linter<'a> {
             ExprKind::Call { callee, args } => {
                 if let ExprKind::Ident(id) = &callee.kind
                     && id.name == "todo"
+                    && self.is_prelude("todo")
                 {
                     self.warn(e.span.lo, "todo", "`todo()` left in code".into());
                 }
@@ -600,15 +744,7 @@ impl<'a> Linter<'a> {
             }
             ExprKind::Str(segs) => {
                 for s in segs {
-                    if let StrSeg::Expr(x, spec) = s {
-                        // `"[0-9]{4}"` interpolates `4`: almost always meant as literal braces.
-                        if spec.is_none() && matches!(x.kind, ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Duration(_)) {
-                            self.warn(
-                                x.span.lo,
-                                "interpolated-literal",
-                                "interpolating a literal; for literal braces use a raw string (`r\"...\"`) or `\\{`".into(),
-                            );
-                        }
+                    if let StrSeg::Expr(x, _) = s {
                         self.expr(x);
                     }
                 }
@@ -781,7 +917,7 @@ pub(crate) fn unused_functions(checked: &CheckedProgram) -> Vec<FnId> {
         }
     }
     while let Some(id) = stack.pop() {
-        let Some(Some(body)) = checked.bodies.get(id as usize) else { continue };
+        let Some(body) = checked.bodies.get(id) else { continue };
         let mut refs: Vec<FnId> = Vec::new();
         crate::compile::walk(&body.body, &mut |e| match &e.kind {
             HKind::FnValue(f) => refs.push(*f),
@@ -810,4 +946,31 @@ pub(crate) fn unused_functions(checked: &CheckedProgram) -> Vec<FnId> {
         .filter(|(i, f)| !reached[*i] && f.module == main && matches!(f.kind, FnKind::Script))
         .map(|(i, _)| i as FnId)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn edit_distances() {
+        assert_eq!(edit_distance("emtpy", "empty"), 1);
+        assert_eq!(edit_distance("fulll", "full"), 1);
+        assert_eq!(edit_distance("", "abc"), 3);
+        assert_eq!(edit_distance("kitten", "sitting"), 3);
+    }
+
+    #[test]
+    fn variant_like_bindings_suggest_the_closest_variant() {
+        let src = "enum State {\n    Empty\n    Closed\n    Full(int)\n}\nfn f(s: State) -> int {\n    match s {\n        Full(n) => n\n        Closed => 1\n        Emtpy => 0\n    }\n}\nfn g(s: State) -> int {\n    match s {\n        Full(n) => n\n        Rest => 1\n    }\n}\nprint(f(State.Empty) + g(State.Empty))\n";
+        let messages: Vec<String> =
+            lint_source("main.sand", src).unwrap().into_iter().filter(|w| w.code == "variant-like-binding").map(|w| w.message).collect();
+        assert_eq!(
+            messages,
+            [
+                "`Emtpy` binds a new variable; did you mean the variant `State.Empty`?",
+                "`Rest` binds a new variable rather than matching a variant; use a lowercase name for a binding",
+            ]
+        );
+    }
 }

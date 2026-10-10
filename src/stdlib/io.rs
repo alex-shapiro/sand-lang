@@ -21,18 +21,18 @@ fn register_io(r: &mut Registry) {
     r.add_builtin("io.read_line", |vm, _| read_stdin(vm, true));
     r.add_builtin("io.read_all", |vm, _| read_stdin(vm, false));
     r.add_builtin("io.write", |vm, a| {
-        let data = copy_out(vm, a[0])?;
-        vm.write_stream(1, &data)?;
+        vm.charge_bytes(vm.str(a[0]).len())?;
+        vm.write_stream_str(1, a[0])?;
         Ok(Value::Unit)
     });
     r.add_builtin("io.ewrite", |vm, a| {
-        let data = copy_out(vm, a[0])?;
-        vm.write_stream(2, &data)?;
+        vm.charge_bytes(vm.str(a[0]).len())?;
+        vm.write_stream_str(2, a[0])?;
         Ok(Value::Unit)
     });
     r.add_builtin("io.flush", |vm, _| {
         for sink in [&vm.host.stdout, &vm.host.stderr] {
-            let _ = sink.lock().unwrap_or_else(|e| e.into_inner()).flush();
+            let _ = sink.flush();
         }
         Ok(Value::Unit)
     });
@@ -62,7 +62,7 @@ fn read_stdin(vm: &mut Vm, line: bool) -> NResult {
     let stdin = vm.host.stdin.clone();
     // The input is buffered outside the heap until it is complete.
     let mut res = vm.io_reservation();
-    Err(Ctl::Async(Box::pin(async move {
+    Err(Ctl::suspend(Box::pin(async move {
         let result = read_input(&stdin, line, &mut res).await;
         Box::new(move |vm: &mut Vm| -> NResult {
             drop(res);
@@ -191,17 +191,8 @@ fn register_env(r: &mut Registry) {
         };
         for (k, v) in vars {
             let (k, v) = (vm.new_str(k), vm.new_str(v));
-            vm.map_insert(map, k, v).map_err(crate::vm::meter::ctl_from_message)?;
+            vm.map_insert(map, k, v)?;
         }
         Ok(map)
     });
-}
-
-/// A copy of the string `s` to write (the stream needs `&mut Vm`), checked
-/// against the memory limit and charged.
-fn copy_out(vm: &Vm, s: Value) -> Result<Vec<u8>, Ctl> {
-    let n = vm.str(s).len();
-    vm.reserve(n)?;
-    vm.charge_bytes(n)?;
-    Ok(vm.str(s).as_bytes().to_vec())
 }

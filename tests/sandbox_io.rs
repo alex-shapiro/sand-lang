@@ -241,8 +241,8 @@ fn names_resolving_to_private_addresses_are_denied() {
 import http
 import net
 for host in ["127.1", "2130706433", "localhost", "127.0.0.1"] {{
-    let e = http.get("http://{{host}}:{port}/").unwrap_err()
-    print("{{e.kind}}: {{e.message.contains("127.0.0.1") or e.message.contains("::1")}}")
+    let e = http.get("http://\(host):{port}/").unwrap_err()
+    print("\(e.kind): \(e.message.contains("127.0.0.1") or e.message.contains("::1"))")
 }}
 print(net.connect("127.1:{port}").unwrap_err().kind)
 "#
@@ -339,26 +339,6 @@ fn net_addr_capability_display() {
     let addr: SocketAddr = "93.184.215.14:443".parse().unwrap();
     assert_eq!(Capability::NetAddr { host: "example.com".into(), addr }.to_string(), "connect to example.com at 93.184.215.14:443");
     assert_eq!(Capability::NetAddr { host: "93.184.215.14".into(), addr }.to_string(), "connect to 93.184.215.14:443");
-}
-
-// Relies on the resolver accepting `127.1` for 127.0.0.1 (glibc, macOS).
-#[cfg(unix)]
-#[test]
-fn cli_denies_private_networks_by_default() {
-    let server = http_server(|_| HttpResponse::new(200, "hi"));
-    let dir = TempDir::new("cli-net");
-    let script = dir
-        .write("main.sand", &format!("import http\nprint(http.get(\"http://127.1:{}/\").map(r => r.text().unwrap()))", server.addr.port()));
-    let run = |flags: &[&str]| {
-        let out = std::process::Command::new(env!("CARGO_BIN_EXE_sand")).arg("run").arg(&script).args(flags).output().unwrap();
-        String::from_utf8_lossy(&out.stdout).into_owned()
-    };
-    assert!(run(&["--allow-net=*"]).starts_with("Err(Error { kind: \"permission_denied\""));
-    assert_eq!(run(&["--allow-net=*", "--allow-private-net"]), "Ok(\"hi\")\n");
-    assert_eq!(run(&["--allow-net=*,127.0.0.0/8"]), "Ok(\"hi\")\n");
-    assert!(
-        run(&["--allow-net=*", "--allow-private-net", "--deny-net=127.0.0.0/8"]).starts_with("Err(Error { kind: \"permission_denied\"")
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -564,6 +544,8 @@ let swapper = spawn {
         task.yield_now()
         fs.rename("x", "link").unwrap()
         fs.rename("tmp", "x").unwrap()
+        // (File operations do not suspend: let the readers see both states.)
+        task.yield_now()
     }
 }
 let readers = (0..4).map(_ => spawn {
@@ -585,13 +567,383 @@ for seen in task.all(readers) {
     secret += seen.get("SECRET") ?? 0
     public += seen.get("public") ?? 0
 }
-print("secret reads: {secret}")
+print("secret reads: \(secret)")
 print(public > 0)
 "#;
     let cwd = dir.path().join("allowed");
     let policy = RulePolicy::new().allow_write(&cwd);
     let r = run_with(src, move |c| c.policy(Policy::rules(policy)).cwd(cwd));
     assert_eq!(r.ok_stdout(), "secret reads: 0\ntrue\n");
+}
+
+/// Runs `f` on another thread until the returned guard is dropped (for
+/// races with the file system operations of a script).
+#[cfg(unix)]
+struct Racer {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<u64>>,
+}
+
+#[cfg(unix)]
+impl Racer {
+    fn start(mut f: impl FnMut() + Send + 'static) -> Racer {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let thread = std::thread::spawn(move || {
+            let mut rounds = 0;
+            while !flag.load(Ordering::Relaxed) {
+                f();
+                rounds += 1;
+            }
+            rounds
+        });
+        Racer { stop, thread: Some(thread) }
+    }
+
+    /// Stops the thread; the number of rounds it ran.
+    fn finish(mut self) -> u64 {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.thread.take().unwrap().join().unwrap()
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Racer {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+/// Another process (here a thread) swaps a directory with a symlink to a
+/// forbidden directory as fast as it can while the script reads, writes,
+/// lists and creates through it: whatever the interleaving, nothing outside
+/// is read, written or listed. The swap is one atomic exchange, so `x` never
+/// goes missing (a recursive `create_dir` would legitimately make a fresh one
+/// and end the race).
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+#[test]
+fn concurrent_symlink_swaps_cannot_bypass_the_policy() {
+    use rustix::fs::{CWD, RenameFlags, renameat_with};
+    use std::os::unix::fs::symlink;
+    let dir = TempDir::new("race-swap");
+    dir.write("allowed/x/file.txt", "public");
+    dir.write("outside/file.txt", "SECRET");
+    dir.write("outside/only-outside.txt", "");
+    let (allowed, outside) = (dir.path().join("allowed"), dir.path().join("outside"));
+    symlink(&outside, allowed.join("link")).unwrap();
+    let (x, link) = (allowed.join("x"), allowed.join("link"));
+    let swap = move || renameat_with(CWD, &x, CWD, &link, RenameFlags::EXCHANGE);
+    swap().and_then(|_| swap()).expect("the file system exchanges names atomically");
+    let racer = Racer::start(move || {
+        let _ = swap();
+        std::thread::yield_now();
+        let _ = swap();
+    });
+    let src = r#"
+import fs
+var seen: [str: int] = [:]
+fn note(seen: [str: int], key: str) {
+    seen[key] = (seen.get(key) ?? 0) + 1
+}
+for i in 0..3000 {
+    note(seen, match fs.read_text("x/file.txt") {
+        Ok(text) => text
+        Err(e) => e.kind
+    })
+    let _ = fs.write_text("x/new\(i % 7).txt", "w")
+    let _ = fs.append_text("x/file.txt", "")
+    let _ = fs.create_dir("x/d\(i % 5)/e", recursive: true)
+    match fs.list_dir("x") {
+        Ok(names) => if names.contains("only-outside.txt") { note(seen, "listed") }
+        Err(_) => {}
+    }
+    let _ = fs.exists("x/file.txt")
+}
+print(seen.get("SECRET") ?? 0)
+print(seen.get("listed") ?? 0)
+print((seen.get("public") ?? 0) > 0)
+"#;
+    let policy = RulePolicy::new().allow_write(&allowed);
+    let cwd = allowed.clone();
+    let r = run_with(src, move |c| c.policy(Policy::rules(policy)).cwd(cwd));
+    let rounds = racer.finish();
+    assert_eq!(r.ok_stdout(), "0\n0\ntrue\n", "after {rounds} swaps");
+    let mut names: Vec<_> = std::fs::read_dir(&outside).unwrap().map(|e| e.unwrap().file_name()).collect();
+    names.sort();
+    assert_eq!(names, ["file.txt", "only-outside.txt"]);
+    assert_eq!(std::fs::read_to_string(outside.join("file.txt")).unwrap(), "SECRET");
+}
+
+/// A symlink appears at the name being created (a file, or the next
+/// directory of a recursive `create_dir`) while the script creates it:
+/// nothing is ever created or truncated through it.
+#[cfg(unix)]
+#[test]
+fn symlinks_raced_into_created_paths_are_refused() {
+    use std::os::unix::fs::symlink;
+    let dir = TempDir::new("race-create");
+    dir.write("outside/victim.txt", "intact");
+    std::fs::create_dir_all(dir.path().join("allowed")).unwrap();
+    let (allowed, outside) = (dir.path().join("allowed"), dir.path().join("outside"));
+    let (a, o) = (allowed.clone(), outside.clone());
+    let racer = Racer::start(move || {
+        let _ = symlink(o.join("victim.txt"), a.join("race.txt"));
+        let _ = symlink(&o, a.join("racedir"));
+        std::thread::yield_now();
+        let _ = std::fs::remove_file(a.join("race.txt"));
+        let _ = std::fs::remove_file(a.join("racedir"));
+        let _ = std::fs::remove_dir_all(a.join("racedir"));
+    });
+    let src = r#"
+import fs
+for i in 0..3000 {
+    let _ = fs.write_text("race.txt", "evil")
+    let _ = fs.create_dir("racedir/sub\(i % 3)/deeper", recursive: true)
+    let _ = fs.copy("race.txt", "racedir/copied.txt")
+    let _ = fs.remove_file("race.txt")
+}
+print("done")
+"#;
+    let policy = RulePolicy::new().allow_write(&allowed);
+    let cwd = allowed.clone();
+    let r = run_with(src, move |c| c.policy(Policy::rules(policy)).cwd(cwd));
+    racer.finish();
+    assert_eq!(r.ok_stdout(), "done\n");
+    assert_eq!(std::fs::read_to_string(outside.join("victim.txt")).unwrap(), "intact");
+    let names: Vec<_> = std::fs::read_dir(&outside).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(names, ["victim.txt"]);
+}
+
+/// `..` in a script's path is resolved lexically; in a symlink's target it
+/// is the parent of the directory the link leads to. Either way the policy
+/// sees where the path really leads.
+#[cfg(unix)]
+#[test]
+fn parent_directories_cannot_escape() {
+    use std::os::unix::fs::symlink;
+    let dir = TempDir::new("dotdot");
+    dir.write("outside/file.txt", "SECRET");
+    dir.write("allowed/a/b/file.txt", "public");
+    let allowed = dir.path().join("allowed");
+    symlink("../outside", allowed.join("up")).unwrap();
+    symlink("../../../outside/file.txt", allowed.join("a/b/far.txt")).unwrap();
+    symlink("..", allowed.join("a/b/parent")).unwrap();
+    symlink("b/parent/../..", allowed.join("a/sneaky")).unwrap();
+    symlink("loop2", allowed.join("loop1")).unwrap();
+    symlink("loop1", allowed.join("loop2")).unwrap();
+    symlink("/", allowed.join("root")).unwrap();
+    let src = r#"
+import fs
+print(fs.read_text("up/file.txt").unwrap_err().kind)
+print(fs.read_text("a/b/far.txt").unwrap_err().kind)
+print(fs.read_text("a/sneaky/outside/file.txt").unwrap_err().kind)
+print(fs.read_text("../outside/file.txt").unwrap_err().kind)
+print(fs.read_text("a/../../outside/file.txt").unwrap_err().kind)
+print(fs.write_text("a/sneaky/outside/new.txt", "x").unwrap_err().kind)
+print(fs.list_dir("root").unwrap_err().kind)
+print(fs.read_text("loop1").unwrap_err().kind)
+print(fs.exists("loop1/x")?)
+// What stays inside is allowed.
+print(fs.read_text("a/b/parent/b/file.txt")?)
+print(fs.read_text("a/sneaky/allowed/a/b/file.txt")?)
+print(fs.list_dir("a/b/parent")?)
+"#;
+    let policy = RulePolicy::new().allow_write(&allowed);
+    let cwd = allowed.clone();
+    let r = run_with(src, move |c| c.policy(Policy::rules(policy)).cwd(cwd));
+    assert_eq!(r.ok_stdout(), format!("{}false\npublic\npublic\n[\"b\", \"sneaky\"]\n", "permission_denied\n".repeat(8)));
+    assert!(!dir.path().join("outside/new.txt").exists());
+}
+
+/// Whether the file system of `dir` is case-insensitive (macOS's default).
+#[cfg(unix)]
+fn case_insensitive(dir: &std::path::Path) -> bool {
+    std::fs::write(dir.join("CaseProbe"), "").unwrap();
+    let insensitive = dir.join("caseprobe").exists();
+    std::fs::remove_file(dir.join("CaseProbe")).unwrap();
+    insensitive
+}
+
+/// On a case-insensitive volume, every spelling of a protected path is
+/// denied, whether it reaches the protected entry directly, through a
+/// symlink or as a directory to create below; custom policies and prompts
+/// see the stored spelling; and allow rules naming one entry match all its
+/// spellings.
+#[cfg(unix)]
+#[test]
+fn case_variants_cannot_bypass_the_policy() {
+    use std::os::unix::fs::symlink;
+    let dir = TempDir::new("case-variants");
+    if !case_insensitive(dir.path()) {
+        eprintln!("skipped: {} is on a case-sensitive file system", dir.path().display());
+        return;
+    }
+    dir.write("data/Private/key.txt", "SECRET");
+    dir.write("data/Readme.TXT", "readme");
+    dir.write("data/public.txt", "public");
+    let data = dir.path().join("data");
+    symlink(data.join("Private"), data.join("link")).unwrap();
+    let policy = RulePolicy::new().allow_write(&data).deny_read(data.join("Private"));
+    let src = r#"
+import fs
+for p in ["data/Private/key.txt", "data/private/key.txt", "data/PRIVATE/KEY.TXT", "data/pRiVaTe/Key.Txt", "data/LINK/key.txt"] {
+    print(fs.read_text(p).unwrap_err().kind)
+    print(fs.is_file(p).unwrap_err().kind)
+}
+print(fs.list_dir("data/PRIVATE").unwrap_err().kind)
+print(fs.write_text("data/private/new.txt", "x").unwrap_err().kind)
+print(fs.create_dir("data/PRIVATE/sub/dir", recursive: true).unwrap_err().kind)
+print(fs.rename("data/pRIVATE", "data/stolen").unwrap_err().kind)
+print(fs.remove_file("data/PRIVATE/KEY.TXT").unwrap_err().kind)
+print(fs.remove_dir("data/privatE", recursive: true).unwrap_err().kind)
+print(fs.copy("data/PRIVATE/key.txt", "data/copy.txt").unwrap_err().kind)
+print(fs.read_text("data/PUBLIC.TXT")?)
+"#;
+    let r = run_with(src, rules(&dir, policy));
+    assert_eq!(r.ok_stdout(), format!("{}public\n", "permission_denied\n".repeat(17)));
+    assert!(data.join("Private/key.txt").exists() && !data.join("copy.txt").exists());
+
+    // A custom policy that denies one file, compared exactly.
+    let secret = data.join("Private/key.txt");
+    let custom = Policy::custom(move |cap: &Capability| match cap {
+        Capability::FsRead(p) | Capability::FsWrite(p) if *p == secret => Decision::Deny,
+        _ => Decision::Allow,
+    });
+    let src = r#"
+import fs
+print(fs.read_text("data/PRIVATE/KEY.TXT").unwrap_err().kind)
+print(fs.read_text("data/private/key.txt").unwrap_err().kind)
+print(fs.remove_file("data/Private/KEY.txt").unwrap_err().kind)
+print(fs.read_text("data/LINK/Key.txt").unwrap_err().kind)
+print(fs.read_text("data/README.txt")?)
+"#;
+    let cwd = dir.path().to_path_buf();
+    let r = run_with(src, move |c| c.policy(custom).cwd(cwd));
+    assert_eq!(r.ok_stdout(), "permission_denied\npermission_denied\npermission_denied\npermission_denied\nreadme\n");
+
+    // An allow rule for one file; prompts for the rest show stored names.
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let log = asked.clone();
+    let policy = Policy::rules(RulePolicy::new().allow_read(data.join("Readme.TXT")).fallback(Decision::Prompt));
+    let src = r#"
+import fs
+print(fs.read_text("data/README.txt")?)
+print(fs.read_text("data/readme.txt")?)
+print(fs.read_text("data/PUBLIC.txt").unwrap_err().kind)
+print(fs.is_dir("data/PRIVATE").unwrap_err().kind)
+"#;
+    let cwd = dir.path().to_path_buf();
+    let r = run_with(src, move |c| {
+        c.policy(policy).cwd(cwd).prompter(move |cap: Capability| {
+            log.lock().unwrap().push(cap);
+            async { PromptAnswer::DenyOnce }
+        })
+    });
+    assert_eq!(r.ok_stdout(), "readme\nreadme\npermission_denied\npermission_denied\n");
+    assert_eq!(*asked.lock().unwrap(), [Capability::FsRead(data.join("public.txt")), Capability::FsRead(data.join("Private"))]);
+}
+
+/// Paths longer than macOS's `PATH_MAX` (1024 bytes), and symlinks deep
+/// inside them, work and are checked like any other.
+#[cfg(unix)]
+#[test]
+fn long_paths_are_resolved_and_checked() {
+    use std::os::unix::fs::symlink;
+    let dir = TempDir::new("long");
+    dir.write("outside/file.txt", "SECRET");
+    let allowed = dir.path().join("allowed");
+    std::fs::create_dir_all(&allowed).unwrap();
+    symlink(dir.path().join("outside"), allowed.join("out")).unwrap();
+    let src = r#"
+import fs
+var p = "."
+for i in 0..40 {
+    p = p + "/directory-number-\(i)-" + "x".repeat(40)
+}
+print(p.len() > 2000)
+fs.create_dir(p, recursive: true)?
+fs.write_text("\(p)/f.txt", "deep")?
+print(fs.read_text("\(p)/f.txt")?)
+print(fs.list_dir(p)?)
+// A symlink moved deep inside still leads outside.
+fs.rename("out", "\(p)/out")?
+print(fs.read_text("\(p)/out/file.txt").unwrap_err().kind)
+print(fs.write_text("\(p)/out/new.txt", "x").unwrap_err().kind)
+print(fs.is_dir("\(p)/out").unwrap_err().kind)
+fs.rename("\(p)/f.txt", "\(p)/g.txt")?
+fs.remove_dir("directory-number-0-" + "x".repeat(40), recursive: true)?
+print(fs.list_dir(".")?)
+"#;
+    let policy = RulePolicy::new().allow_write(&allowed);
+    let cwd = allowed.clone();
+    let r = run_with(src, move |c| c.policy(Policy::rules(policy)).cwd(cwd));
+    assert_eq!(r.ok_stdout(), "true\ndeep\n[\"f.txt\"]\npermission_denied\npermission_denied\npermission_denied\n[]\n");
+    assert!(!dir.path().join("outside/new.txt").exists());
+}
+
+/// Names that are not UTF-8 (Linux allows them; APFS does not): in the
+/// working directory, in a symlink's target and in a deny rule.
+#[cfg(unix)]
+#[test]
+fn names_that_are_not_utf8() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::symlink;
+    let dir = TempDir::new("non-utf8");
+    let odd = dir.path().join(OsStr::from_bytes(b"caf\xe9"));
+    if std::fs::create_dir(&odd).is_err() {
+        eprintln!("skipped: the file system of {} refuses names that are not UTF-8", dir.path().display());
+        return;
+    }
+    std::fs::write(odd.join("key.txt"), "SECRET").unwrap();
+    std::fs::create_dir_all(odd.join("work")).unwrap();
+    std::fs::write(odd.join("work/notes.txt"), "notes").unwrap();
+    symlink(OsStr::from_bytes(b"../caf\xe9"), odd.join("work/up")).unwrap();
+    let policy = RulePolicy::new().allow_write(&odd).deny_read(odd.join("key.txt"));
+    let src = r#"
+import fs
+print(fs.read_text("notes.txt")?)
+print(fs.read_text("up/key.txt").unwrap_err().kind)
+print(fs.read_text("../key.txt").unwrap_err().kind)
+print(fs.list_dir("up")?)
+fs.write_text("up/new.txt", "ok")?
+print(fs.list_dir("..")?.len())
+"#;
+    let cwd = odd.join("work");
+    let r = run_with(src, move |c| c.policy(Policy::rules(policy)).cwd(cwd));
+    assert_eq!(r.ok_stdout(), "notes\npermission_denied\npermission_denied\n[\"key.txt\", \"work\"]\n3\n");
+    assert_eq!(std::fs::read_to_string(odd.join("new.txt")).unwrap(), "ok");
+}
+
+/// A dangling symlink is refused even when its target would be allowed:
+/// the policy did not see where it leads (nothing exists there yet).
+#[cfg(unix)]
+#[test]
+fn dangling_symlinks_inside_allowed_directories_are_refused() {
+    use std::os::unix::fs::symlink;
+    let dir = TempDir::new("dangling-inside");
+    let allowed = dir.path().join("allowed");
+    std::fs::create_dir_all(allowed.join("sub")).unwrap();
+    symlink(allowed.join("missing.txt"), allowed.join("dangling")).unwrap();
+    symlink("sub/missing/deeper", allowed.join("dangling_dir")).unwrap();
+    let src = r#"
+import fs
+print(fs.write_text("dangling", "x").unwrap_err().kind)
+print(fs.create_dir("dangling_dir/a", recursive: true).unwrap_err().kind)
+print(fs.read_text("dangling").unwrap_err().kind)
+print(fs.is_file("dangling")?)
+fs.rename("dangling", "renamed")?
+print(fs.list_dir(".")?)
+"#;
+    let policy = RulePolicy::new().allow_write(&allowed);
+    let cwd = allowed.clone();
+    let r = run_with(src, move |c| c.policy(Policy::rules(policy)).cwd(cwd));
+    assert_eq!(r.ok_stdout(), "permission_denied\npermission_denied\npermission_denied\nfalse\n[\"dangling_dir\", \"renamed\", \"sub\"]\n");
+    assert!(!allowed.join("missing.txt").exists() && !allowed.join("sub/missing").exists());
 }
 
 // ---------------------------------------------------------------------------
@@ -678,12 +1030,11 @@ for _ in 0..64 {
 }
 let readers = conns.map(p => spawn p.0.read(max: 1048576))
 task.sleep(100ms)
-// Reads whose buffer did not fit are done (failed); the others still wait.
-let failed = readers.filter(t => t.is_done()).map(t => t.wait().unwrap_err().kind)
-print(failed.len() > 16 and failed.len() < 64)
-print(failed.all(k => k == "limit"))
+// A read takes what the connection's buffer holds: a large `max` reserves
+// no more than the buffer, so every read still waits.
+print(readers.filter(t => t.is_done()).len())
 "#;
-    assert_eq!(run_with(src, limited(32 << 20)).ok_stdout(), "true\ntrue\n");
+    assert_eq!(run_with(src, limited(32 << 20)).ok_stdout(), "0\n");
 
     let src = r#"
 import net
@@ -709,7 +1060,7 @@ import http
 import net
 let server = http.serve("127.0.0.1:0")?
 let raw = net.listen("127.0.0.1:0")?
-print("ready {server.addr()} {raw.addr()}")
+print("ready \(server.addr()) \(raw.addr())")
 let req = server.accept()?
 req.respond(200, b"served after the hostile request")?
 let line = raw.accept()?.read_line()

@@ -1,0 +1,621 @@
+=== and/or assigned to a local they read
+var x = false
+let y = true
+x = y and x
+print(x)
+x = true
+x = false or x
+print(x)
+x = false
+x = y or x
+print(x)
+var z = true
+z = (false or z) and z
+print(z)
+z = loop { break y and not z }
+print(z)
+--- stdout
+false
+true
+true
+true
+false
+
+=== and/or as statements and values
+fn t(s: str) -> bool {
+    print(s)
+    true
+}
+fn f(s: str) -> bool {
+    print(s)
+    false
+}
+let a = f("a") and t("b")
+let b = t("c") or f("d")
+let c = t("e") and f("f")
+let d = f("g") or t("h")
+t("i") and f("j")
+f("k") or t("l")
+print("\(a) \(b) \(c) \(d)")
+--- stdout
+a
+c
+e
+f
+g
+h
+i
+j
+k
+l
+false true false true
+
+=== calls in match arms in tail position are tail calls
+fn loop_m(n: int, acc: int) -> int {
+    match n {
+        0 => acc,
+        _ => loop_m(n - 1, acc + 1),
+    }
+}
+fn loop_l(n: int, acc: int) -> int {
+    if let 0 = n { acc } else { loop_l(n - 1, acc + 2) }
+}
+fn loop_o(n: int?, acc: int) -> int {
+    match n {
+        Some(0) => acc,
+        Some(k) if k % 2 == 0 => loop_o(Some(k - 1), acc + 1),
+        Some(k) => loop_o(Some(k - 1), acc),
+        None => -1,
+    }
+}
+print(loop_m(100000, 0))
+print(loop_l(100000, 0))
+print(loop_o(Some(100000), 0))
+print(loop_o(None, 0))
+--- stdout
+100000
+200000
+50000
+-1
+
+=== comparisons with constants and negative literals
+fn cls(n: int) -> str {
+    if n < -32768 { "tiny" } else if n <= -1 { "neg" } else if n == 0 { "zero" } else if 32767 < n { "huge" } else if n >= 100 { "big" } else { "small" }
+}
+for n in [-40000, -32768, -1, 0, 1, 99, 100, 32767, 32768] {
+    print("\(n) \(cls(n))")
+}
+var i = -3
+while -1 > i { i += 1 }
+print(i)
+let neg = -2.5
+print(neg * -2.0)
+print(-9223372036854775807 - 1)
+--- stdout
+-40000 tiny
+-32768 neg
+-1 neg
+0 zero
+1 small
+99 small
+100 big
+32767 big
+32768 huge
+-1
+5.0
+-9223372036854775808
+
+=== integer and range patterns
+fn name(n: int) -> str {
+    match n {
+        -1 => "minus one",
+        0 => "zero",
+        1..=9 => "digit",
+        -100000..=-2 => "negative",
+        100000 => "big",
+        40000..=99999 => "large",
+        _ => "other",
+    }
+}
+for n in [-1, 0, 5, -5, -100000, -100001, 100000, 50000, 10] {
+    print(name(n))
+}
+--- stdout
+minus one
+zero
+digit
+negative
+negative
+other
+big
+large
+other
+
+=== the ? operator and ?? on options and results
+fn half(x: int) -> int? { if x % 2 == 0 { Some(x / 2) } else { None } }
+fn quarter(x: int) -> int? { Some(half(half(x)?)? ) }
+fn parse(s: str) -> Result<int, str> {
+    if s == "" { return Err("empty") }
+    Ok(s.len())
+}
+fn total(a: str, b: str) -> Result<int, str> {
+    let x = parse(a)?
+    let y = parse(b)?
+    Ok(x + y)
+}
+fn noisy(x: int) -> int? {
+    defer { print("deferred \(x)") }
+    let h = half(x)?
+    Some(h + 1)
+}
+print(quarter(8))
+print(quarter(6))
+print(total("ab", "c"))
+print(total("ab", ""))
+print(noisy(4))
+print(noisy(3))
+print(half(3) ?? -1)
+print(half(4) ?? -1)
+print(parse("") ?? 0)
+print(parse("xyz") ?? 0)
+let f = (x: int) => Some(half(x)? * 10)
+print(f(4))
+print(f(5))
+--- stdout
+Some(2)
+None
+Ok(3)
+Err("empty")
+deferred 4
+Some(3)
+deferred 3
+None
+-1
+2
+0
+3
+Some(20)
+None
+
+=== blocks as conditions
+var n = 0
+for x in 0..10 {
+    if { let y = x * 2; y > 10 } { n += 1 }
+    while { let z = n; z < 0 } { n += 100 }
+}
+print(n)
+print([1, 2, 3, 4].filter(v => v > 2))
+--- stdout
+4
+[3, 4]
+
+=== struct literals evaluate fields in source order
+struct P {
+    x: int
+    y: int
+    z: int = 9
+}
+fn v(s: str, n: int) -> int {
+    print(s)
+    n
+}
+let p = P { y: v("y", 2), x: v("x", 1) }
+let q = P { z: v("z", 3), ..p }
+let x = 5
+let r = P { x, y: x + 1 }
+print("\(p.x) \(p.y) \(p.z) \(q.x) \(q.y) \(q.z) \(r.x) \(r.y) \(r.z)")
+fn mk(a: int) -> P { P { x: a, y: a * 2 } }
+print(mk(4).y)
+--- stdout
+y
+x
+z
+1 2 9 1 2 3 5 6 9
+8
+
+=== copies of locals see the value they had
+var x = 1
+let a = x
+x = 2
+print(a)
+for i in 0..3 {
+    let j = i
+    var k = j
+    k += 10
+    print("\(j) \(k)")
+}
+fn f(n: int) -> int {
+    var m = n
+    let c = m
+    m += 1
+    c * 100 + m
+}
+print(f(7))
+print([1, 2, 3].map(v => { let w = v; w * 2 }).fold(0, (acc, e) => acc + e))
+--- stdout
+1
+0 10
+1 11
+2 12
+708
+12
+
+=== operands are read before later operands assign them
+var x = 1
+let y = x + { x = 5; x }
+print(y)
+var s = "a"
+fn g() -> str { "b" }
+let t = s + { s = g(); s }
+print(t)
+var i = 0
+let xs = [10, 20, 30]
+print(xs[i] + xs[{ i = 2; i }])
+var k = 3
+print(k < { k = 1; k })
+--- stdout
+6
+ab
+40
+false
+
+=== continue and break in rotated loops
+var out = []
+var i = 0
+while i < 10 {
+    i += 1
+    if i % 2 == 0 { continue }
+    if i > 7 { break }
+    out.push(i)
+}
+print(out)
+fn more(n: int) -> bool { n < 5 }
+var j = 0
+while more(j) {
+    j += 1
+    if j == 2 { continue }
+    out.push(j * 10)
+}
+print(out)
+var acc = []
+@outer for a in 0..4 {
+    for b in 0..=3 {
+        if b > a { continue @outer }
+        if a == 3 { break @outer }
+        acc.push("\(a)\(b)")
+    }
+}
+print(acc)
+let xs = [5, 6, 7, 8]
+var t = 0
+while let Some(x) = xs.pop() {
+    if x == 7 { continue }
+    t += x
+}
+print(t)
+var k = 0
+while true {
+    k += 1
+    if k == 3 { break }
+}
+while false { print("never") }
+print(k)
+let q: [int?] = [Some(1), Some(2), None, Some(4)]
+var m = 0
+var n = 0
+while let Some(v) = q[m] {
+    n += v
+    m += 1
+}
+print(n)
+--- stdout
+[1, 3, 5, 7]
+[1, 3, 5, 7, 10, 30, 40, 50]
+["00", "10", "11", "20", "21", "22"]
+19
+3
+3
+
+=== loops with deferred code and channels
+fn f() -> int {
+    var n = 0
+    for i in 0..5 {
+        defer { n += 100 }
+        if i == 1 { continue }
+        if i == 3 { break }
+        n += i
+    }
+    n
+}
+print(f())
+let ch = task.channel()
+spawn {
+    for i in 0..5 { ch.send(i * i) }
+    ch.close()
+}
+var s = 0
+for v in ch {
+    if v == 4 { continue }
+    s += v
+}
+print(s)
+let ch2 = task.channel()
+spawn {
+    ch2.send((1, "a"))
+    ch2.send((2, "b"))
+    ch2.close()
+}
+for (n, name) in ch2 { print("\(n)\(name)") }
+--- stdout
+402
+26
+1a
+2b
+
+=== loops over ranges and repeats
+var r = []
+for i in 3..=1 { r.push(i) }
+for i in -2..=-2 { r.push(i) }
+for i in 9223372036854775806..=9223372036854775807 { r.push(i % 10) }
+let rg = 1..4
+for i in rg { r.push(i) }
+for (a, b) in [(1, 2), (3, 4)] { r.push(a * b) }
+print(r)
+print([0; 3])
+print([[1]; 2])
+--- stdout
+[-2, 6, 7, 1, 2, 3, 2, 12]
+[0, 0, 0]
+[[1], [1]]
+
+=== loop conditions of every kind
+let cs = "123abc".chars()
+var i = 0
+while cs[i].is_digit() { i += 1 }
+print(i)
+var x = 0.5
+while x < 10.0 { x *= 3.0 }
+print(x)
+var y = 0.0 / 0.0
+var n = 0
+while not (y >= 1.0) and n < 3 { n += 1 }
+print(n)
+var w = 0
+while w != 12 and (w < 5 or w % 2 == 0) { w += 1 }
+print(w)
+--- stdout
+3
+13.5
+3
+5
+
+=== string interpolation
+struct P {
+    x: int
+    y: float
+}
+let p = P { x: 3, y: 1.5 }
+print("P(\(p.x), \(p.y)) sum=\(p.x.to_float() + p.y) \(p:?) [\(p.x:>5)] \("lit")\("" + "x") \([1, 2]) \(Some("s"))")
+var s = ""
+for i in 0..5 { s += "\(i)," }
+s += "|\(s)|"
+print(s)
+let name = "w"
+print("\(name)\(name:?)\(name:>3)")
+--- stdout
+P(3, 1.5) sum=4.5 P { x: 3, y: 1.5 } [    3] litx [1, 2] Some("s")
+0,1,2,3,4,|0,1,2,3,4,|
+w"w"  w
+
+=== loops over maps and sets see a snapshot
+let m = ["a": 1, "b": 2, "c": 3]
+for (k, v) in m {
+    m[k] = v * 10
+    m["new"] = 0
+    print("\(k)=\(v)")
+}
+m.remove("new")
+for (_, v) in m { print(v) }
+for e in m { print(e) }
+for (k, (a, b)) in ["x": (1, 2)] { print("\(k) \(a) \(b)") }
+var fs: [fn() -> str] = []
+for (k, v) in ["p": 1, "q": 2] { fs.push(() => "\(k)\(v)") }
+print(fs.map(g => g()))
+let s = set([3, 1, 2])
+for x in s {
+    s.remove(x)
+    print(x)
+}
+print(s.len())
+let em: [str: int] = [:]
+for (k, v) in em { print(k) }
+--- stdout
+a=1
+b=2
+c=3
+10
+20
+30
+("a", 10)
+("b", 20)
+("c", 30)
+x 1 2
+["p1", "q2"]
+3
+1
+2
+0
+
+=== calls of function values, fields and trait methods in loops
+trait Shape {
+    fn area(self) -> int
+}
+struct Sq {
+    s: int
+}
+impl Shape for Sq {
+    fn area(self) -> int { self.s * self.s }
+}
+fn total<T: Shape>(xs: [T]) -> int {
+    var t = 0
+    for x in xs { t += x.area() }
+    t
+}
+fn last<T: Shape>(xs: [T], i: int) -> int {
+    if i == 0 { xs[0].area() } else { last(xs, i - 1) }
+}
+struct Box {
+    f: fn(int) -> int
+    var g: fn(int) -> int
+}
+let it = [1, 2, 3].iter()
+var s = 0
+while let Some(x) = it.next() { s += x }
+print(s)
+print(total([Sq { s: 2 }, Sq { s: 3 }]))
+print(last([Sq { s: 4 }], 3))
+let b = Box { f: x => x + 1, g: x => x * 2 }
+var n = 0
+for i in 0..3 {
+    n = b.f(n) + b.g(n)
+    b.g = x => x * 3
+}
+print(n)
+let fs = [(x: int) => x - 1, (x: int) => x + 100]
+print(fs[1](1))
+fn apply(g: fn(int) -> int, v: int) -> int { g(v) }
+print(apply(x => x * 7, 6))
+import math
+fn fapply(g: fn(float) -> float, v: float) -> float { g(v) }
+print(fapply(math.cbrt, 27.0))
+let h = math.cbrt
+print([8.0, 64.0].map(h))
+--- stdout
+6
+13
+16
+21
+101
+42
+3.0
+[2.0, 4.0]
+
+=== matches with jump tables, virtual tuples and exhaustive last arms
+enum T { Leaf(int), Node(T, T) }
+enum Op { Add(int), Sub(int), Mul(int), Neg, Nop }
+fn build(d: int) -> T { if d == 0 { T.Leaf(1) } else { T.Node(build(d - 1), build(d - 1)) } }
+fn sum(t: T) -> int { match t { Leaf(v) => v, Node(l, r) => sum(l) + sum(r) } }
+fn run(ops: [Op]) -> int {
+    var acc = 1
+    for op in ops {
+        acc = match op {
+            Add(k) => acc + k,
+            Sub(k) => acc - k,
+            Mul(k) if k > 0 => acc * k,
+            Mul(_) => 0,
+            Neg => -acc,
+            Nop => acc,
+        }
+    }
+    acc
+}
+fn day(n: int) -> str {
+    match n {
+        0 => "sun",
+        1 | 7 => "mon",
+        2 => "tue",
+        3 if false => "never",
+        3 => "wed",
+        _ => "other",
+    }
+}
+fn pair(a: int, b: int) -> int {
+    match (a, b) {
+        (0, _) => 1,
+        (_, 0) => 2,
+        (x, y) if x == y => 3,
+        t => t.0 + t.1,
+    }
+}
+print(sum(build(4)))
+print(run([Op.Add(2), Op.Mul(3), Op.Sub(1), Op.Neg, Op.Nop, Op.Mul(-1), Op.Add(5)]))
+print([0, 1, 2, 3, 7, 9, -1].map(day))
+print([pair(0, 5), pair(5, 0), pair(4, 4), pair(2, 3)])
+var a = 1
+var b = 2
+let (c, d) = (b, a)
+print("\(c) \(d)")
+enum Big { A, B(int), C(str), D(int, int), E }
+fn big(b: Big) -> str {
+    match b {
+        A | E => "ae",
+        B(n) if n > 10 => "big b",
+        D(x, y) => "d\(x + y)",
+        B(_) => "b",
+        C(s) => s,
+    }
+}
+print([Big.A, Big.B(11), Big.B(1), Big.C("c"), Big.D(1, 2), Big.E].map(big))
+fn code(n: int) -> int {
+    match n {
+        -2 => 20,
+        -1 => 10,
+        0 | 2 => 0,
+        1 => 1,
+        x if x > 100 => 100,
+        _ => -5,
+    }
+}
+print([-3, -2, -1, 0, 1, 2, 3, 101, 1000000000000].map(code))
+fn swap(p: (int, int)) -> (int, int) {
+    let (a, b) = p
+    let (c, d) = (b, a)
+    (c, d)
+}
+print(swap((1, 2)))
+if let (1, x) = (1, "one") { print(x) }
+let opt: (int?, int?) = (Some(1), None)
+match opt {
+    (Some(a), Some(b)) => print(a + b),
+    (Some(a), None) | (None, Some(a)) => print(a),
+    (None, None) => print(0),
+}
+--- stdout
+16
+5
+["sun", "mon", "tue", "wed", "mon", "other", "other"]
+[1, 2, 3, 5]
+2 1
+["ae", "big b", "b", "c", "d3", "ae"]
+[-5, 20, 10, 0, 1, 0, -5, 100, 100]
+(2, 1)
+one
+1
+
+=== equality branches on strings and other values
+fn kind(s: str) -> str {
+    if s == "a" { "is a" } else if s != "b" { "not b" } else { "b" }
+}
+print([kind("a"), kind("b"), kind("c")])
+var w = "xxxx"
+var n = 0
+while w != "" {
+    w = w[1..]
+    n += 1
+}
+print(n)
+let p = (1, "z")
+if p == (1, "z") and not (p != (1, "z")) { print("eq") }
+match "two" {
+    "one" => print(1),
+    "two" => print(2),
+    _ => print(0),
+}
+let o: int? = None
+if o == None { print("none") }
+--- stdout
+["is a", "b", "not b"]
+4
+eq
+2
+none

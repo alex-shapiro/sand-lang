@@ -4,7 +4,7 @@ use super::Ctl;
 use super::bytecode::Program;
 use super::compare::MAX_DEPTH;
 use super::heap::Heap;
-use super::meter::{BYTES_PER_UNIT, Budget, Scratch, Unmetered, ctl_message};
+use super::meter::{BYTES_PER_UNIT, Budget, Scratch};
 use super::value::*;
 use crate::hir::FormatSpec;
 use std::fmt::Write as _;
@@ -104,12 +104,6 @@ enum Work {
 /// Output beyond this size fails even without a memory limit.
 const MAX_OUTPUT: usize = 1 << 30;
 
-/// Renders a value. `debug` selects the debug form at the top level; nested
-/// values always use the debug form.
-pub fn render(prog: &Program, heap: &Heap, v: Value, debug: bool, out: &mut String) -> Result<(), String> {
-    render_metered(prog, heap, &Unmetered, v, debug, out).map_err(ctl_message)
-}
-
 /// [`render`], charging `budget` one unit per value plus the bytes written,
 /// and checking the output and work stack against the memory limit as they
 /// grow. Scratch space grows with the nesting depth, not the size of the value.
@@ -164,10 +158,10 @@ pub fn render_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Valu
             }
             Work::Val(v, depth, debug) => {
                 if depth > MAX_DEPTH {
-                    return Err(Ctl::Panic("value too deeply nested to display".into()));
+                    return Err(Ctl::panic("value too deeply nested to display"));
                 }
                 if out.len() > MAX_OUTPUT {
-                    return Err(Ctl::Panic("value too large to display".into()));
+                    return Err(Ctl::panic("value too large to display"));
                 }
                 budget.charge(1)?;
                 match v {
@@ -284,11 +278,7 @@ pub fn render_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Valu
     Ok(())
 }
 
-pub fn to_display(prog: &Program, heap: &Heap, v: Value) -> Result<String, String> {
-    to_display_metered(prog, heap, &Unmetered, v).map_err(ctl_message)
-}
-
-/// [`to_display`], charging `budget` (see [`render_metered`]).
+/// The display form of `v`, charging `budget` (see [`render_metered`]).
 pub fn to_display_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Value) -> Result<String, Ctl> {
     // Fast paths for scalars.
     match v {
@@ -308,20 +298,39 @@ pub fn to_display_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: 
     Ok(s)
 }
 
-pub fn to_debug(prog: &Program, heap: &Heap, v: Value) -> Result<String, String> {
-    to_debug_metered(prog, heap, &Unmetered, v).map_err(ctl_message)
+/// Appends the display form of `v` to `out`, charging `budget` (see
+/// [`render_metered`]).
+pub fn write_display_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Value, out: &mut String) -> Result<(), Ctl> {
+    match v {
+        Value::Int(i) => {
+            let _ = write!(out, "{i}");
+            return Ok(());
+        }
+        Value::Float(f) => {
+            out.push_str(&fmt_float(f));
+            return Ok(());
+        }
+        Value::Bool(b) => {
+            out.push_str(if b { "true" } else { "false" });
+            return Ok(());
+        }
+        _ => {}
+    }
+    if let Value::Obj(_) = v
+        && let Obj::Str(s) = heap.get(v)
+    {
+        budget.charge_bytes(s.len())?;
+        out.push_str(s);
+        return Ok(());
+    }
+    render_metered(prog, heap, budget, v, false, out)
 }
 
-/// [`to_debug`], charging `budget` (see [`render_metered`]).
+/// The debug form of `v`, charging `budget` (see [`render_metered`]).
 pub fn to_debug_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Value) -> Result<String, Ctl> {
     let mut s = String::new();
     render_metered(prog, heap, budget, v, true, &mut s)?;
     Ok(s)
-}
-
-/// Applies a format specification.
-pub fn format_value(prog: &Program, heap: &Heap, v: Value, spec: &FormatSpec) -> Result<String, String> {
-    format_value_metered(prog, heap, &Unmetered, v, spec).map_err(ctl_message)
 }
 
 /// [`format_value`], charging `budget` and checking large precisions and
@@ -389,7 +398,7 @@ pub fn format_value_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v
 /// Charges for and checks the memory limit before building `n` bytes of output.
 fn reserve(heap: &Heap, budget: &impl Budget, n: usize) -> Result<(), Ctl> {
     if n > MAX_OUTPUT || heap.would_exceed(n) {
-        return Err(Ctl::Limit(crate::LimitKind::Memory));
+        return Err(Ctl::limit(crate::LimitKind::Memory));
     }
     budget.charge_bytes(n)
 }

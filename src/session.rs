@@ -7,27 +7,23 @@
 //! ([`compile_more`]), and run in the session's VM, whose heap, globals and
 //! tasks persist. See `docs/INTERNALS.md` ("REPL sessions").
 
-use crate::check::budget::CompileBudget;
 use crate::check::{Checker, ModKind, ParsedModule};
 use crate::compile::{CompileInput, Incremental, ProgramMark, compile_more};
 use crate::diag::{Diag, Span};
-use crate::engine::{
-    Engine, Error, GraphMark, InterruptHandle, LoadedModule, ModuleGraph, TestReport, TestResult, budget_error, native_info, parse_in_order,
-};
-use crate::policy::{Capability, PromptFuture, Prompter};
+use crate::engine::{Discovery, Engine, Error, InterruptHandle, TestReport, TestResult, on_compile_stack};
+use crate::modules::{GraphMark, ModuleGraph, Snapshot, budget_error, native_info};
+use crate::platform::Instant;
+use crate::policy::{Capability, PromptAnswer};
 use crate::syntax::ast::{ItemKind, StmtKind};
-use crate::syntax::lexer::{Tok, lex};
-use crate::types::{FnId, ModId, Type};
+use crate::types::{FnId, ModId, TypeId};
 use crate::unwind::CatchUnwind;
-use crate::vm::bytecode::{Op, Program, Proto};
-use crate::vm::sched::RunEnd;
+use crate::vm::sched::{RunEnd, Stop};
 use crate::vm::value::Value;
-use crate::vm::{Ctl, Finisher, NResult, NativeEntry, NativeImpl, Trap, Vm};
+use crate::vm::{CtlKind, Trap, Vm};
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::task::Poll;
 
 /// An interactive session: a sequence of inputs (statements, expressions and
@@ -84,9 +80,8 @@ pub const RESET_NOTE: &str = " (the session was reset)";
 
 /// A started session.
 struct State {
+    snapshot: Arc<Snapshot>,
     graph: ModuleGraph,
-    /// Module index in `graph` -> module id of the checker.
-    mod_ids: HashMap<usize, ModId>,
     checker: Checker<'static>,
     compiler: Incremental,
     vm: Vm,
@@ -96,56 +91,9 @@ struct State {
     /// that the work of an `eval` future dropped there can be undone.
     loading: Option<GraphMark>,
     running: bool,
-    /// The entry that waits for the gate in `idle_slot`: the main task of
-    /// [`Session::run_tasks_until`].
-    idle_proto: u32,
-    idle_slot: Arc<Mutex<Option<Arc<Gate>>>>,
-    /// The gate of a [`Session::run_tasks_until`] in progress (or dropped).
-    idle: Option<Arc<Gate>>,
-}
-
-/// Opened once: lets the main task of an idle run finish, and deferred
-/// prompts be asked.
-#[derive(Default)]
-struct Gate {
-    open: AtomicBool,
-    notify: tokio::sync::Notify,
-}
-
-impl Gate {
-    fn open(&self) {
-        self.open.store(true, Ordering::SeqCst);
-        self.notify.notify_waiters();
-    }
-
-    async fn wait(&self) {
-        loop {
-            let notified = self.notify.notified();
-            let mut notified = std::pin::pin!(notified);
-            notified.as_mut().enable();
-            if self.open.load(Ordering::SeqCst) {
-                return;
-            }
-            notified.await;
-        }
-    }
-}
-
-/// The prompter while the front end waits for input: prompts wait until it
-/// has its input, so that they do not compete with it for the terminal.
-struct DeferredPrompter {
-    inner: Arc<dyn Prompter>,
-    gate: Arc<Gate>,
-}
-
-impl Prompter for DeferredPrompter {
-    fn prompt(&self, cap: Capability) -> PromptFuture {
-        let (inner, gate) = (self.inner.clone(), self.gate.clone());
-        Box::pin(async move {
-            gate.wait().await;
-            inner.prompt(cap).await
-        })
-    }
+    /// A permission prompt a task needed while the front end waited for
+    /// input (see [`Session::run_tasks_until`]), to ask once it has it.
+    deferred_prompt: Option<Capability>,
 }
 
 /// Name of the session module (for qualified names of its functions).
@@ -192,9 +140,11 @@ impl Session {
         self.inputs += 1;
         let name = name.map_or_else(|| format!("<input {}>", self.inputs), str::to_string);
         let want_value = !source.trim_end().ends_with(';');
-        let (entry, value) = self.compile_input(&name, source, want_value).await?;
-        let show = value.is_some_and(|t| !matches!(t, Type::Unit | Type::Never));
-        self.run(entry, show).await
+        // The wall-time limit counts from here, for compiling and running.
+        let deadline = self.engine.deadline();
+        let (entry, value, deadline) = self.compile_input(&name, source, want_value, deadline).await?;
+        let show = value.is_some_and(|t| !matches!(t, TypeId::UNIT | TypeId::NEVER));
+        self.run(entry, show, deadline).await
     }
 
     /// The type of an expression, checked in the context of the session's
@@ -207,34 +157,31 @@ impl Session {
 
     fn type_of_inner(&mut self, expr: &str) -> Result<String, Error> {
         self.engine.clear_interrupt();
-        let registry = self.engine.registry();
-        let budget = self.engine.compile_budget();
+        let registry = self.engine.registry().clone();
+        let budget = self.engine.compile_budget(self.engine.deadline());
         let st = self.state()?;
         let mark = st.graph.mark();
         let file = st.graph.sm.add("<type>", expr);
-        let res = crate::syntax::parse_module(expr, file);
-        let resolve = |sm: &crate::diag::SourceMap, ds: &[Diag]| Error::Compile(ds.iter().map(|d| sm.resolve(d)).collect());
-        let mut errors = res.errors;
-        let is_expr =
-            matches!(res.module.items.as_slice(), [item] if matches!(&item.kind, ItemKind::Stmt(s) if matches!(s.kind, StmtKind::Expr(_))));
-        if errors.is_empty() && !is_expr {
-            errors.push(Diag::error(Span::new(file, 0, expr.len() as u32), "expected an expression"));
-        }
-        if !errors.is_empty() {
-            let e = resolve(&st.graph.sm, &errors);
-            st.graph.rollback(&mark);
-            return Err(e);
-        }
-        let cell = ParsedModule {
-            name: SESSION_MODULE.into(),
-            file,
-            ast: res.module,
-            kind: ModKind::Script { main: true },
-            imports: HashMap::new(),
-        };
         let (graph, detached) = (&st.graph, &st.checker);
         let r = on_compile_stack(|| {
-            let lookup = |name: &str| registry.by_name.get(name).copied();
+            let resolve = |sm: &crate::diag::SourceMap, ds: &[Diag]| Error::Compile(ds.iter().map(|d| sm.resolve(d)).collect());
+            let res = crate::syntax::parse_module(expr, file);
+            let mut errors = res.errors;
+            let is_expr = matches!(res.module.items.as_slice(), [item] if matches!(&item.kind, ItemKind::Stmt(s) if matches!(s.kind, StmtKind::Expr(_))));
+            if errors.is_empty() && !is_expr {
+                errors.push(Diag::error(Span::new(file, 0, expr.len() as u32), "expected an expression"));
+            }
+            if !errors.is_empty() {
+                return Err(resolve(&graph.sm, &errors));
+            }
+            let cell = ParsedModule {
+                name: SESSION_MODULE.into(),
+                file,
+                ast: res.module,
+                kind: ModKind::Script { main: true },
+                imports: HashMap::new(),
+            };
+            let lookup = |name: &str| registry.native(name);
             let mut checker = Checker::attach(detached.clone(), &graph.sm, &lookup, budget.clone());
             checker.type_query = Some(Default::default());
             let checked = checker.check_cell(Vec::new(), &cell, true);
@@ -242,7 +189,7 @@ impl Session {
                 return Err(budget_error(stop, &graph.sm, file));
             }
             checked.map_err(|ds| resolve(&graph.sm, &ds))?;
-            Ok(checker.cell_value.as_ref().map(|t| checker.show_value_type(t)).unwrap_or_else(|| "()".into()))
+            Ok(checker.cell_value.map(|t| checker.show_value_type(t)).unwrap_or_else(|| "()".into()))
         });
         st.graph.rollback(&mark);
         r
@@ -269,7 +216,8 @@ impl Session {
         let mut report = TestReport::default();
         for (name, proto) in tests {
             self.exit_code = None;
-            let message = match self.run(proto, false).await {
+            let deadline = self.engine.deadline();
+            let message = match self.run(proto, false, deadline).await {
                 Ok(_) => match self.exit_code {
                     Some(0) | None => None,
                     Some(c) => Some(format!("exited with code {c}")),
@@ -299,10 +247,6 @@ impl Session {
     /// Forgets all inputs: the next input starts a fresh session. "Always"
     /// answers to permission prompts are kept (they belong to the engine).
     pub fn reset(&mut self) {
-        if let Some(st) = &self.state {
-            // Answers given during a run that did not finish normally.
-            self.engine.remember_always(&st.vm.host.always);
-        }
         self.state = None;
         self.inputs = 0;
         self.exit_code = None;
@@ -343,30 +287,46 @@ impl Session {
         if !runnable {
             return Some(until.await);
         }
-        let gate = Arc::new(Gate::default());
-        let mut output = None;
-        let r = {
-            let mut run = std::pin::pin!(CatchUnwind::new(self.run_idle(gate.clone())));
+        // Run the tasks until `until` completes (the run is then dropped,
+        // where it waits) or they stop.
+        let stopped = {
+            let mut run = std::pin::pin!(CatchUnwind::new(self.run_idle()));
             std::future::poll_fn(|cx| {
-                if output.is_none()
-                    && let Poll::Ready(v) = until.as_mut().poll(cx)
-                {
-                    output = Some(v);
-                    gate.open();
+                if let Poll::Ready(v) = until.as_mut().poll(cx) {
+                    return Poll::Ready(Err(v));
                 }
-                run.as_mut().poll(cx)
+                run.as_mut().poll(cx).map(Ok)
             })
             .await
         };
-        match self.settle(r) {
-            Ok(false) => {}
-            Ok(true) => return None,
-            Err(e) => on_error(e),
+        let output = match stopped {
+            Err(v) => {
+                if let Some(st) = self.state.as_ref() {
+                    st.vm.flush_stdout();
+                }
+                v
+            }
+            Ok(r) => {
+                match self.settle(r) {
+                    Ok(false) => {}
+                    Ok(true) => return None,
+                    Err(e) => on_error(e),
+                }
+                until.await
+            }
+        };
+        // A prompt a task needed meanwhile is asked now; the task retries
+        // its call when it runs again.
+        if let Some(st) = self.state.as_mut()
+            && let Some(cap) = st.deferred_prompt.take()
+        {
+            let answer = match self.engine.config().prompter.clone() {
+                Some(p) => p.prompt(cap.clone()).await,
+                None => PromptAnswer::DenyOnce,
+            };
+            st.vm.apply_answer(cap, answer);
         }
-        Some(match output {
-            Some(v) => v,
-            None => until.await,
-        })
+        Some(output)
     }
 
     /// Cancels every task that earlier inputs left running, as a failed input
@@ -376,6 +336,7 @@ impl Session {
         st.recover();
         let n = st.vm.live_tasks;
         st.vm.abandon_tasks();
+        st.deferred_prompt = None;
         n
     }
 
@@ -409,65 +370,7 @@ impl Session {
     /// string or comment left open, a final binary operator or a trailing doc
     /// comment).
     pub fn is_complete(source: &str) -> bool {
-        let lexed = lex(source, 0);
-        if lexed.errors.iter().any(|d| d.message.starts_with("unterminated")) {
-            return false;
-        }
-        let mut depth = 0i32;
-        let mut last = None;
-        for t in &lexed.tokens {
-            match t.tok {
-                Tok::LParen | Tok::LBracket | Tok::LBrace => depth += 1,
-                Tok::RParen | Tok::RBracket | Tok::RBrace => depth -= 1,
-                Tok::Semi | Tok::Newline | Tok::Eof => continue,
-                _ => {}
-            }
-            last = Some(&t.tok);
-        }
-        let continues = matches!(
-            last,
-            Some(
-                Tok::Plus
-                    | Tok::Minus
-                    | Tok::Star
-                    | Tok::Slash
-                    | Tok::Percent
-                    | Tok::StarStar
-                    | Tok::Amp
-                    | Tok::Pipe
-                    | Tok::Caret
-                    | Tok::Shl
-                    | Tok::Shr
-                    | Tok::EqEq
-                    | Tok::NotEq
-                    | Tok::Lt
-                    | Tok::Le
-                    | Tok::Gt
-                    | Tok::Ge
-                    | Tok::Eq
-                    | Tok::PlusEq
-                    | Tok::MinusEq
-                    | Tok::StarEq
-                    | Tok::SlashEq
-                    | Tok::PercentEq
-                    | Tok::FatArrow
-                    | Tok::Arrow
-                    | Tok::PipeGt
-                    | Tok::QQ
-                    | Tok::Dot
-                    | Tok::Comma
-                    | Tok::Colon
-                    | Tok::And
-                    | Tok::Or
-                    | Tok::Not
-                    | Tok::Else
-                    | Tok::In
-                    | Tok::As
-            )
-        );
-        // A doc comment belongs to the item that follows.
-        let doc = source.lines().rev().find(|l| !l.trim().is_empty()).is_some_and(|l| l.trim_start().starts_with("///"));
-        depth <= 0 && !continues && !doc
+        crate::syntax::lexer::is_complete(source)
     }
 
     // ------------------------------------------------------------------
@@ -484,103 +387,62 @@ impl Session {
     /// Makes sure the session is started and its standard modules initialized.
     async fn start(&mut self) -> Result<(), Error> {
         if let Some(entry) = self.state()?.pending.take() {
-            self.run(entry, false).await?;
+            let deadline = self.engine.deadline();
+            self.run(entry, false, deadline).await?;
         }
         Ok(())
     }
 
     fn init(&self) -> Result<State, Error> {
         let registry = self.engine.registry();
-        let mut g = ModuleGraph::default();
-        let mut errors = Vec::new();
-        g.load_prelude(&registry.sources);
-        g.load_std_tree(&registry.sources, "task", &mut errors);
+        let snapshot = registry.core()?;
+        let mut graph = ModuleGraph::new(&snapshot);
         // The module the inputs are added to; its own source is empty.
-        let file = g.sm.add("<repl>", "");
-        g.modules.push(LoadedModule {
+        let file = graph.sm.add("<repl>", "");
+        let lookup = |name: &str| registry.native(name);
+        let mut checker = Checker::attach(snapshot.checker.clone(), &graph.sm, &lookup, Default::default());
+        let module = ParsedModule {
             name: SESSION_MODULE.into(),
             file,
+            ast: crate::syntax::parse_module("", file).module,
             kind: ModKind::Script { main: true },
-            imports: vec![],
-            dir: Some(self.root.clone()),
-        });
-        g.order.push(g.modules.len() - 1);
-        if !errors.is_empty() {
-            return Err(Error::Compile(errors.iter().map(|d| g.sm.resolve(d)).collect()));
-        }
-        let mod_ids: HashMap<usize, ModId> = g.order.iter().enumerate().map(|(pos, &mi)| (mi, pos as ModId)).collect();
-        let parsed = parse_in_order(&g.sm, &g.modules, &g.index, &g.order, |mi| mod_ids.get(&mi).copied())?;
-        let session = (g.order.len() - 1) as ModId;
-        let graph = &g;
-        let (checker, compiler, prog) = on_compile_stack(|| {
-            let sm = &graph.sm;
-            let lookup = |name: &str| registry.by_name.get(name).copied();
-            let mut checker = Checker::new(sm, &lookup);
-            checker.begin_session(parsed, session).map_err(|ds| Error::Compile(ds.iter().map(|d| sm.resolve(d)).collect()))?;
-            let cp = checker.take_checked(true);
-            let (native_help, native_argc) = native_info(&cp, &registry);
-            let mut prog = Program::default();
-            let mut compiler = Incremental::default();
-            let budget = CompileBudget::default();
-            let input = CompileInput { checked: &cp, sm, native_lookup: &lookup, native_help, native_argc, budget: &budget };
-            prog.entry = compile_more(input, &mut prog, &mut compiler, &cp.module_inits)
-                .map_err(|ds| Error::Compile(ds.iter().map(|d| sm.resolve(d)).collect()))?;
-            prog.available_modules = registry.sources.keys().filter(|k| k.as_str() != "prelude").cloned().collect();
-            prog.help_index = Some(registry.help.clone());
-            checker.restore_checked(cp);
-            checker.release_bodies();
-            Ok((checker.detach(), compiler, prog))
-        })?;
+            imports: HashMap::new(),
+        };
+        let session = checker.mods.len() as ModId;
+        checker.begin_session(vec![module], session).map_err(|ds| Error::Compile(ds.iter().map(|d| graph.sm.resolve(d)).collect()))?;
+        let checker = checker.detach();
+        // The standard library's program; its entry initializes the prelude and `task`.
+        let mut prog = snapshot.program.clone();
+        // Summaries of every module for `help.module` (the session checks
+        // only those it imports).
+        prog.module_help = registry.snapshot()?.program.module_help.clone();
         let pending = Some(prog.entry);
-        let mut prog = prog;
-        // The main task of idle runs: waits for the gate in `idle_slot`.
-        let idle_slot: Arc<Mutex<Option<Arc<Gate>>>> = Arc::default();
-        let idle_native = registry.entries.len() as u32;
-        let idle_proto = prog.protos.len() as u32;
-        prog.protos.push(Proto {
-            name: "<entry>".into(),
-            file: 0,
-            nparams: 0,
-            nregs: 1,
-            code: vec![Op::CallNative { base: 0, native: idle_native }, Op::Ret { src: 0 }],
-            lines: vec![0, 0],
-            captures: vec![],
-            capture_cells: vec![],
-            doc: None,
-            signature: String::new(),
-        });
         let mut vm = self.engine.new_vm(Arc::new(prog), self.cwd.clone(), false);
         vm.session = true;
-        let slot = idle_slot.clone();
-        let wait = move |_: &mut Vm, _: &[Value]| -> NResult {
-            let gate = slot.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            Err(Ctl::Async(Box::pin(async move {
-                if let Some(gate) = gate {
-                    gate.wait().await;
-                }
-                Box::new(|_: &mut Vm| -> NResult { Ok(Value::Unit) }) as Finisher
-            })))
-        };
-        // The session's VM has one native more than the engine's (its name
-        // cannot be declared by a `native fn`).
-        let natives = Arc::make_mut(&mut vm.natives);
-        debug_assert_eq!(natives.len() as u32, idle_native);
-        natives.push(NativeEntry { name: "<session idle>".into(), imp: NativeImpl::Host(Arc::new(wait)) });
-        Ok(State { graph: g, mod_ids, checker, compiler, vm, pending, loading: None, running: false, idle_proto, idle_slot, idle: None })
+        let compiler = snapshot.compiler.clone();
+        Ok(State { snapshot, graph, checker, compiler, vm, pending, loading: None, running: false, deferred_prompt: None })
     }
 
     /// Loads the modules `source` imports for the first time, then checks and
     /// compiles them and the input. Returns the entry that initializes them
     /// and runs the input, and the type of the input's value (if
     /// `want_value` and it has one). On error, the session is unchanged.
-    async fn compile_input(&mut self, name: &str, source: &str, want_value: bool) -> Result<(u32, Option<Type>), Error> {
-        let registry = self.engine.registry();
+    /// The wall-time limit passes at `deadline`, and for the input's run at
+    /// the deadline returned (later by the time spent on prompts).
+    async fn compile_input(
+        &mut self,
+        name: &str,
+        source: &str,
+        want_value: bool,
+        deadline: Option<Instant>,
+    ) -> Result<(u32, Option<TypeId>, Option<Instant>), Error> {
         let max_source = self.engine.config().limits.max_source_bytes;
         let Session { engine, root, state, .. } = self;
+        let registry = engine.registry();
         let st = state.as_mut().expect("session not started");
         if let Some(mark) = st.loading.take() {
             // An earlier `eval` was dropped while loading imports.
-            st.rollback(&mark);
+            st.graph.rollback(&mark);
         }
         let mark = st.graph.mark();
         let file = st.graph.sm.add(name, source);
@@ -589,86 +451,78 @@ impl Session {
             st.graph.rollback(&mark);
             return Err(e);
         }
-        let cell = st.graph.modules.len();
-        st.graph.modules.push(LoadedModule {
-            name: SESSION_MODULE.into(),
-            file,
-            kind: ModKind::Script { main: true },
-            imports: vec![],
-            dir: Some(root.clone()),
-        });
+        let (cell, imports) = st.graph.add(SESSION_MODULE.into(), file, ModKind::Script { main: true }, Some(root.clone()));
         let mut errors = Vec::new();
         st.loading = Some(mark);
         // (The input's compile budget starts after its imports are decided.)
         let mut prompted = std::time::Duration::ZERO;
-        let stop = engine.discover(&mut st.graph, cell, format!("input:{name}"), root, &mut errors, &mut prompted).await;
+        let discovery = Discovery { snap: &st.snapshot, root, deadline, prompt: true };
+        let stop = engine.discover(&discovery, &mut st.graph, cell, imports, format!("input:{name}"), &mut errors, &mut prompted).await;
         st.loading = None;
         if let Some(e) = stop {
-            st.rollback(&mark);
+            st.graph.rollback(&mark);
+            return Err(e);
+        }
+        if !errors.is_empty() {
+            let e = Error::Compile(errors.iter().map(|d| st.graph.sm.resolve(d)).collect());
+            st.graph.rollback(&mark);
             return Err(e);
         }
         let new_mods: Vec<usize> = st.graph.order[mark.order..].iter().copied().filter(|&mi| mi != cell).collect();
-        let first_id = st.checker.mods.len();
-        for (k, &mi) in new_mods.iter().enumerate() {
-            st.mod_ids.insert(mi, (first_id + k) as ModId);
-        }
-        let parsed = if errors.is_empty() {
-            let mod_id = |mi: usize| st.mod_ids.get(&mi).copied();
-            parse_in_order(&st.graph.sm, &st.graph.modules, &st.graph.index, &new_mods, mod_id).and_then(|ms| {
-                let mut cell = parse_in_order(&st.graph.sm, &st.graph.modules, &st.graph.index, &[cell], mod_id)?;
-                Ok((ms, cell.pop().unwrap()))
-            })
-        } else {
-            Err(Error::Compile(errors.iter().map(|d| st.graph.sm.resolve(d)).collect()))
-        };
+        let session = st.checker.session.unwrap_or_default();
+        // The new standard modules, then the new loaded ones, then the input.
+        let new_std: Vec<ModId> = st.graph.std[mark.std..].to_vec();
+        let natives = st.graph.has_natives(&new_mods);
         // Compilation appends to the program; a failure (even an internal
         // error) truncates it again.
         let prog_mark = ProgramMark::of(&st.vm.prog);
-        let result = match parsed {
-            Ok((modules, cell)) => {
-                let (graph, detached, compiler, prog) = (&st.graph, &st.checker, &st.compiler, &mut st.vm.prog);
-                let budget = engine.compile_budget();
-                on_compile_stack(|| {
-                    let sm = &graph.sm;
-                    let resolve = |ds: Vec<Diag>| Error::Compile(ds.iter().map(|d| sm.resolve(d)).collect());
-                    let lookup = |name: &str| registry.by_name.get(name).copied();
-                    let mut checker = Checker::attach(detached.clone(), sm, &lookup, budget.clone());
-                    let added = modules.len();
-                    let checked = checker.check_cell(modules, &cell, want_value);
-                    if let Some(stop) = budget.stopped() {
-                        return Err(budget_error(stop, sm, file));
-                    }
-                    checked.map_err(resolve)?;
-                    let value = checker.cell_value.take();
-                    // Initialize the new modules, then run the input.
-                    let session = checker.session.unwrap_or_default();
-                    let inits: Vec<FnId> =
-                        (first_id..first_id + added).chain([session as usize]).filter_map(|m| checker.mods[m].init).collect();
-                    let cp = checker.take_checked(added > 0);
-                    let (native_help, native_argc) = if added > 0 { native_info(&cp, &registry) } else { (Vec::new(), Vec::new()) };
-                    let mut compiler = compiler.clone();
-                    let input = CompileInput { checked: &cp, sm, native_lookup: &lookup, native_help, native_argc, budget: &budget };
-                    let entry = compile_more(input, Arc::make_mut(prog), &mut compiler, &inits);
-                    if let Some(stop) = budget.stopped() {
-                        return Err(budget_error(stop, sm, file));
-                    }
-                    let entry = entry.map_err(resolve)?;
-                    checker.restore_checked(cp);
-                    checker.release_bodies();
-                    Ok((checker.detach(), compiler, entry, value))
-                })
+        let (graph, detached, compiler, prog, snapshot) = (&mut st.graph, &st.checker, &st.compiler, &mut st.vm.prog, &st.snapshot);
+        let deadline = deadline.map(|d| d + prompted);
+        let budget = engine.compile_budget(deadline);
+        let result = on_compile_stack(|| {
+            let first = detached.mods.len();
+            let parsed = graph.parse(&new_mods, first as ModId).and_then(|modules| {
+                let mut cell = graph.parse(&[cell], session)?;
+                Ok((modules, cell.pop().expect("one module")))
+            });
+            let sm = &graph.sm;
+            let resolve = |ds: Vec<Diag>| Error::Compile(ds.iter().map(|d| sm.resolve(d)).collect());
+            let (modules, cell_module) = parsed.map_err(resolve)?;
+            let lookup = |name: &str| registry.native(name);
+            let mut checker = Checker::attach(detached.clone(), sm, &lookup, budget.clone());
+            let added = modules.len();
+            let checked = checker.check_cell(modules, &cell_module, want_value);
+            if let Some(stop) = budget.stopped() {
+                return Err(budget_error(stop, sm, file));
             }
-            Err(e) => Err(e),
-        };
+            checked.map_err(resolve)?;
+            let value = checker.cell_value.take();
+            let std_inits = new_std.iter().map(|&id| snapshot.mods[id as usize].init);
+            let inits = (first..first + added).chain([session as usize]).map(|m| checker.mods[m].init);
+            let inits: Vec<FnId> = std_inits.chain(inits).flatten().collect();
+            // (The program keeps the summaries made for the whole library.)
+            let cp = checker.take_checked(false);
+            let (native_help, native_argc) = if natives { native_info(&cp, registry) } else { (Vec::new(), Vec::new()) };
+            let mut compiler = compiler.clone();
+            let input = CompileInput { checked: &cp, sm, native_lookup: &lookup, native_help, native_argc, budget: &budget };
+            let entry = compile_more(input, Arc::make_mut(prog), &mut compiler, &inits);
+            if let Some(stop) = budget.stopped() {
+                return Err(budget_error(stop, sm, file));
+            }
+            let entry = entry.map_err(resolve)?;
+            checker.restore_checked(cp);
+            checker.release_bodies();
+            Ok((checker.detach(), compiler, entry, value))
+        });
         match result {
             Ok((checker, compiler, entry, value)) => {
                 st.checker = checker;
                 st.compiler = compiler;
                 st.vm.load_program();
-                Ok((entry, value))
+                Ok((entry, value, deadline))
             }
             Err(e) => {
-                st.rollback(&mark);
+                st.graph.rollback(&mark);
                 // (Not shared if it was changed.)
                 if let Some(prog) = Arc::get_mut(&mut st.vm.prog) {
                     prog_mark.rollback(prog);
@@ -678,61 +532,62 @@ impl Session {
         }
     }
 
-    /// Runs `proto` as the main task of the session's VM. Returns the debug
-    /// form of its result if `show`. On failure, cancels all tasks.
-    async fn run(&mut self, proto: u32, show: bool) -> Result<Option<String>, Error> {
+    /// Runs `proto` as the main task of the session's VM, with the
+    /// wall-time limit passing at `deadline`. Returns the debug form of its
+    /// result if `show`. On failure, cancels all tasks.
+    async fn run(&mut self, proto: u32, show: bool, deadline: Option<Instant>) -> Result<Option<String>, Error> {
         let Session { engine, state, exit_code, .. } = self;
         let st = state.as_mut().expect("session not started");
         st.recover();
         let vm = &mut st.vm;
-        engine.prepare_run(vm);
+        engine.clear_interrupt();
         // Limits other than memory apply to each input.
-        vm.fuel_used = 0;
+        vm.meter.reset();
         vm.host.output_bytes = 0;
-        vm.host.limits.max_wall_time = engine.config().limits.max_wall_time;
-        vm.host.prompter = engine.config().prompter.clone();
+        vm.deadline = deadline;
         st.running = true;
         let r = vm.run_main(proto).await;
         st.running = false;
-        engine.finish_run(vm);
         let Some(v) = conclude(vm, r, exit_code)? else { return Ok(None) };
         let shown = if show { Some(vm.debug(v)) } else { None };
         vm.release_main();
         match shown {
             None => Ok(None),
             Some(Ok(s)) => Ok(Some(s)),
-            Some(Err(Ctl::Limit(k))) => Err(Error::Limit(k)),
-            Some(Err(Ctl::Panic(message))) => Err(Error::Runtime { message, trace: vec![] }),
-            Some(Err(other)) => Err(Error::Runtime { message: format!("cannot show the value: {other:?}"), trace: vec![] }),
+            Some(Err(c)) => match c.into_kind() {
+                CtlKind::Limit(k) => Err(Error::Limit(k)),
+                CtlKind::Panic(message) => Err(Error::Runtime { message, trace: vec![] }),
+                other => Err(Error::Runtime { message: format!("cannot show the value: {other:?}"), trace: vec![] }),
+            },
         }
     }
 
-    /// Runs the session's tasks until `gate` opens (see
-    /// [`Session::run_tasks_until`]). Returns whether a task called `exit`.
-    async fn run_idle(&mut self, gate: Arc<Gate>) -> Result<bool, Error> {
+    /// Runs the session's tasks (see [`Session::run_tasks_until`]) until
+    /// none can run or one needs a permission prompt, which is deferred.
+    /// Returns whether a task called `exit`.
+    async fn run_idle(&mut self) -> Result<bool, Error> {
         let Session { engine, state, exit_code, .. } = self;
         let st = state.as_mut().expect("session not started");
         let vm = &mut st.vm;
-        engine.prepare_run(vm);
-        vm.fuel_used = 0;
+        engine.clear_interrupt();
+        vm.meter.reset();
         vm.host.output_bytes = 0;
-        // (Restored by the next `run`.)
-        vm.host.limits.max_wall_time = None;
-        vm.host.prompter =
-            engine.config().prompter.clone().map(|inner| Arc::new(DeferredPrompter { inner, gate: gate.clone() }) as Arc<dyn Prompter>);
+        // Waiting for input may take any time.
+        vm.deadline = None;
         // Reads of standard input wait until the front end has its input.
         let _stdin = vm.host.stdin.clone().try_lock_owned().ok();
-        *st.idle_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(gate.clone());
-        st.idle = Some(gate);
-        let r = vm.run_main(st.idle_proto).await;
-        st.idle = None;
-        *st.idle_slot.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        engine.finish_run(vm);
-        if conclude(vm, r, exit_code)?.is_none() {
-            return Ok(true);
-        }
-        vm.release_main();
-        Ok(false)
+        let r = vm.drive(None).await;
+        vm.flush_stdout();
+        let r = match r {
+            Ok(Stop::Prompt(cap)) => {
+                st.deferred_prompt = Some(cap);
+                return Ok(false);
+            }
+            Ok(Stop::Idle | Stop::Main(_)) => return Ok(false),
+            Ok(Stop::Exit(c)) => Ok(RunEnd::Exit(c)),
+            Err(t) => Err(t),
+        };
+        Ok(conclude(vm, r, exit_code)?.is_none())
     }
 }
 
@@ -759,27 +614,13 @@ fn conclude(vm: &mut Vm, r: Result<RunEnd, Trap>, exit_code: &mut Option<i32>) -
 }
 
 impl State {
-    /// Recovers from a call whose future was dropped: an `eval` while its
-    /// input ran (all tasks are cancelled), or a `run_tasks_until` (its main
-    /// task is let finish, as an ordinary task).
+    /// Recovers from an `eval` whose future was dropped while its input
+    /// ran: all tasks are cancelled. (A dropped `run_tasks_until` leaves the
+    /// tasks where they wait.)
     fn recover(&mut self) {
         if std::mem::take(&mut self.running) {
             self.vm.abandon_tasks();
-        }
-        if let Some(gate) = self.idle.take() {
-            gate.open();
-            *self.idle_slot.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            self.deferred_prompt = None;
         }
     }
-
-    /// Forgets the modules loaded since `mark`.
-    fn rollback(&mut self, mark: &GraphMark) {
-        self.graph.rollback(mark);
-        self.mod_ids.retain(|&mi, _| mi < mark.modules);
-    }
-}
-
-/// Runs `f` on a thread with a stack big enough for checking and compiling.
-fn on_compile_stack<R: Send>(f: impl FnOnce() -> Result<R, Error> + Send) -> Result<R, Error> {
-    crate::platform::with_stack(crate::engine::COMPILE_STACK, f).map_err(|e| Error::Io(format!("internal compiler error: {e}")))?
 }

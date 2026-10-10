@@ -8,10 +8,11 @@
 use super::Ctl;
 use super::bytecode::Program;
 use super::heap::Heap;
-use super::meter::{Budget, Scratch, Unmetered, ctl_message, message_ctl};
+use super::meter::{Budget, Unmetered};
 use super::value::*;
 use std::cmp::Ordering;
 use std::collections::HashSet;
+use std::hash::Hasher;
 
 pub const MAX_DEPTH: usize = 2000;
 
@@ -33,7 +34,7 @@ impl Seen {
     /// Records `pair`; false if it was recorded already.
     fn insert(&mut self, heap: &Heap, pair: (u32, u32)) -> Result<bool, Ctl> {
         if self.pairs.len() == self.pairs.capacity() && heap.would_exceed(self.pairs.capacity().max(4).saturating_mul(3 * 12)) {
-            return Err(Ctl::Limit(crate::LimitKind::Memory));
+            return Err(Ctl::limit(crate::LimitKind::Memory));
         }
         Ok(self.pairs.insert(pair))
     }
@@ -200,191 +201,345 @@ pub fn values_eq_metered(heap: &Heap, budget: &impl Budget, a: Value, b: Value) 
     Ok(true)
 }
 
-/// Turns a key lookup error into either a hard failure (limits) or "not
-/// found" (unhashable keys).
-fn lookup_failure(msg: String) -> Result<(), Ctl> {
-    match message_ctl(&msg) {
-        Some(c) => Err(c),
-        None => Ok(()),
-    }
+fn map_lookup_value(heap: &Heap, budget: &impl Budget, m: &MapObj, k: Value) -> Result<Option<Value>, Ctl> {
+    Ok(map_slot(heap, budget, m, k)?.and_then(|s| m.entries[s].map(|(_, v)| v)))
 }
 
-fn map_lookup_value(heap: &Heap, budget: &impl Budget, m: &MapObj, k: Value) -> Result<Option<Value>, Ctl> {
-    match with_keyref_metered(heap, budget, k, |kr| m.index.get(kr)) {
-        Ok(slot) => Ok(slot.and_then(|s| m.entries[s].map(|(_, v)| v))),
-        Err(e) => lookup_failure(e).map(|()| None),
+/// The slot of key `k` in map `m`.
+#[inline]
+pub fn map_slot(heap: &Heap, budget: &impl Budget, m: &MapObj, k: Value) -> Result<Option<usize>, Ctl> {
+    if m.live == 0 {
+        return Ok(None);
     }
+    if let Value::Int(i) = k {
+        // Int keys compare without the general (fallible) equality.
+        return Ok(m.index.find(int_hash(i), |s| matches!(m.entries[s], Some((Value::Int(x), _)) if x == i)));
+    }
+    let hash = hash_key(heap, budget, k)?;
+    find_key(heap, budget, &m.index, hash, k, |i| m.entries[i].map(|(k, _)| k))
+}
+
+/// The slot of element `k` in set `s`.
+#[inline]
+pub fn set_slot(heap: &Heap, budget: &impl Budget, s: &SetObj, k: Value) -> Result<Option<usize>, Ctl> {
+    if s.live == 0 {
+        return Ok(None);
+    }
+    if let Value::Int(i) = k {
+        return Ok(s.index.find(int_hash(i), |e| matches!(s.entries[e], Some(Value::Int(x)) if x == i)));
+    }
+    let hash = hash_key(heap, budget, k)?;
+    find_key(heap, budget, &s.index, hash, k, |i| s.entries[i])
 }
 
 fn set_lookup(heap: &Heap, budget: &impl Budget, s: &SetObj, k: Value) -> Result<Option<usize>, Ctl> {
-    match with_keyref_metered(heap, budget, k, |kr| s.index.get(kr)) {
-        Ok(slot) => Ok(slot),
-        Err(e) => lookup_failure(e).map(|()| None),
-    }
+    set_slot(heap, budget, s, k)
 }
 
-/// Calls `f` with a borrowed key for `k`.
-pub fn with_keyref<R>(heap: &Heap, k: Value, f: impl FnOnce(&KeyRef) -> R) -> Result<R, String> {
-    with_keyref_metered(heap, &Unmetered, k, f)
-}
-
-/// [`with_keyref`], charging `budget` for hashing the key. Limit errors are
-/// encoded as internal messages (see `meter::ctl_message`).
-pub fn with_keyref_metered<R>(heap: &Heap, budget: &impl Budget, k: Value, f: impl FnOnce(&KeyRef) -> R) -> Result<R, String> {
-    match k {
-        Value::Int(i) => Ok(f(&KeyRef::Int(i))),
-        Value::Obj(_) => {
-            if let Obj::Str(s) = heap.get(k) {
-                budget.charge_bytes(s.len()).map_err(ctl_message)?;
-                return Ok(f(&KeyRef::Str(s)));
+/// The slot of `table` holding key `k` (whose hash is `hash`); `key_at`
+/// reads the key of a slot.
+#[inline]
+pub fn find_key(
+    heap: &Heap,
+    budget: &impl Budget,
+    table: &KeyTable,
+    hash: u64,
+    k: Value,
+    key_at: impl Fn(usize) -> Option<Value>,
+) -> Result<Option<usize>, Ctl> {
+    let mut failed = None;
+    let slot = table.find(hash, |i| match key_at(i) {
+        Some(x) => match keys_eq(heap, budget, x, k) {
+            Ok(eq) => eq,
+            Err(c) => {
+                failed.get_or_insert(c);
+                false
             }
-            let h = hkey_metered(heap, budget, k)?;
-            Ok(f(&KeyRef::Other(h)))
-        }
-        other => {
-            let h = hkey_metered(heap, budget, other)?;
-            Ok(f(&KeyRef::Other(h)))
-        }
+        },
+        None => false,
+    });
+    match failed {
+        Some(c) => Err(c),
+        None => Ok(slot),
     }
 }
 
-/// An owned hashable key for a value.
-pub fn hkey(heap: &Heap, v: Value) -> Result<HKey, String> {
-    hkey_metered(heap, &Unmetered, v)
-}
-
-/// [`hkey`], charging `budget` one unit per node plus the bytes copied, and
-/// checking the key's size against the memory limit as it is built (keys
-/// of values with shared substructure can be much larger than the values).
-pub fn hkey_metered(heap: &Heap, budget: &impl Budget, v: Value) -> Result<HKey, String> {
-    hkey_sized(heap, budget, v).map(|(k, _)| k)
-}
-
-/// [`hkey_metered`], also returning the number of bytes the key owns
-/// (strings and nested nodes; a key of shared substructure owns a copy per
-/// occurrence).
-pub fn hkey_sized(heap: &Heap, budget: &impl Budget, v: Value) -> Result<(HKey, usize), String> {
-    let mut kb = KeyBuilder { heap, budget, size: 0, scratch: Scratch::new() };
-    let k = kb.build(v, 0)?;
-    Ok((k, kb.size))
-}
-
-struct KeyBuilder<'a, B> {
-    heap: &'a Heap,
-    budget: &'a B,
-    /// Bytes allocated for the key so far.
-    size: usize,
-    scratch: Scratch,
-}
-
-impl<B: Budget> KeyBuilder<'_, B> {
-    /// Accounts for a key node (plus `bytes` of copied data).
-    fn node(&mut self, bytes: usize) -> Result<(), String> {
-        self.budget.charge(1 + (bytes / super::meter::BYTES_PER_UNIT) as u64).map_err(ctl_message)?;
-        self.size = self.size.saturating_add(std::mem::size_of::<HKey>() + bytes);
-        self.scratch.check(self.heap, self.size).map_err(ctl_message)
+/// Equality of two keys (of a `Hash` type).
+#[inline]
+pub fn keys_eq(heap: &Heap, budget: &impl Budget, a: Value, b: Value) -> Result<bool, Ctl> {
+    match (a, b) {
+        (Value::Int(x), Value::Int(y)) => Ok(x == y),
+        _ if a == b => Ok(true),
+        _ => values_eq_metered(heap, budget, a, b),
     }
+}
 
-    fn build(&mut self, v: Value, depth: usize) -> Result<HKey, String> {
-        if depth > 200 {
-            // Deep keys are hashed iteratively.
-            return self.build_iter(v);
-        }
-        Ok(match v {
-            Value::Unit => HKey::Unit,
-            Value::Bool(b) => HKey::Bool(b),
-            Value::Int(i) => HKey::Int(i),
-            Value::Dur(d) => HKey::Dur(d),
-            Value::Float(f) => HKey::Int(f.to_bits() as i64),
-            Value::Tag(t) => HKey::Tag(t),
-            Value::Uninit => HKey::Unit,
-            Value::VUnit(_)
-            | Value::VBool(..)
-            | Value::VInt(..)
-            | Value::VFloat(..)
-            | Value::VDur(..)
-            | Value::VTag(..)
-            | Value::VObj(..) => {
-                let (id, p) = v.as_inline_variant().unwrap_or((u32::MAX, Value::Unit));
-                self.node(std::mem::size_of::<HKey>())?;
-                HKey::Variant(id, Box::new([self.build(p, depth + 1)?]))
+/// The hash of a map key or set element, consistent with [`values_eq`] for
+/// the `Hash` types (variants hash the same in every representation, `0.0`
+/// and `-0.0` alike, NaNs alike), computed where the value lives: `Hash`
+/// types are deeply immutable, so keys are never copied.
+///
+/// Hashes are compositional (a container's hash combines the hashes of its
+/// fields), so once a key turns out to be large the hashes of its containers
+/// are memoized by handle: a key with shared substructure, whose tree is
+/// exponentially larger than its heap size, hashes in time linear in the
+/// latter. Charges one unit per node visited plus the bytes hashed;
+/// iterative, so deep keys cannot overflow the host stack.
+#[inline]
+pub fn hash_key(heap: &Heap, budget: &impl Budget, v: Value) -> Result<u64, Ctl> {
+    // Fast paths, inlined: the common scalar and string keys.
+    match v {
+        Value::Int(i) => Ok(int_hash(i)),
+        Value::Obj(_) => match heap.get(v) {
+            Obj::Str(s) => {
+                budget.charge_bytes(s.len())?;
+                Ok(bytes_hash(s.as_bytes()))
             }
-            Value::Obj(h) => {
-                let heap = self.heap;
-                match heap.get(v) {
-                    Obj::Str(s) => {
-                        self.node(s.len())?;
-                        HKey::Str(s.clone())
-                    }
-                    Obj::Bytes(b) => {
-                        self.node(b.len())?;
-                        HKey::Bytes(b.clone())
-                    }
-                    Obj::Tuple(t) => HKey::Tuple(self.fields(t, depth)?),
-                    Obj::Variant(id, t) => HKey::Variant(*id, self.fields(t, depth)?),
-                    Obj::Struct(id, t) => HKey::Struct(*id, self.fields(t, depth)?),
-                    Obj::Range(a, b, i) => HKey::Range(*a, *b, *i),
-                    _ => HKey::Ident(h),
+            _ => hash_tree(heap, budget, v),
+        },
+        _ => hash_tree(heap, budget, v),
+    }
+}
+
+/// [`hash_key`] for keys that are not ints or strings.
+#[inline(never)]
+fn hash_tree(heap: &Heap, budget: &impl Budget, v: Value) -> Result<u64, Ctl> {
+    let mut stack = HashStack::default();
+    let mut memo: Option<FxHashMap<u32, u64>> = None;
+    let mut nodes = 0usize;
+    let mut next = Some(v);
+    loop {
+        // The hash of the next finished node, if any.
+        let done = match next.take() {
+            Some(v) => {
+                budget.charge(1)?;
+                nodes += 1;
+                if nodes == MEMO_AFTER {
+                    memo = Some(FxHashMap::default());
                 }
-            }
-        })
-    }
-
-    fn fields(&mut self, t: &[Value], depth: usize) -> Result<Box<[HKey]>, String> {
-        self.node(t.len() * std::mem::size_of::<HKey>())?;
-        t.iter().map(|x| self.build(*x, depth + 1)).collect()
-    }
-
-    /// Iterative key construction with a depth limit.
-    fn build_iter(&mut self, v: Value) -> Result<HKey, String> {
-        // Build bottom-up using an explicit stack of frames.
-        enum Frame {
-            Enter(Value, usize),
-            Build(u8, u32, usize),
-        }
-        let mut work = vec![Frame::Enter(v, 0)];
-        let mut out: Vec<HKey> = Vec::new();
-        while let Some(fr) = work.pop() {
-            match fr {
-                Frame::Enter(v, depth) => {
-                    if depth > MAX_DEPTH {
-                        return Err("value too deeply nested to hash".into());
-                    }
-                    if let Some((id, p)) = v.as_inline_variant() {
-                        self.node(std::mem::size_of::<HKey>())?;
-                        work.push(Frame::Build(1, id, 1));
-                        work.push(Frame::Enter(p, depth + 1));
-                        continue;
-                    }
-                    let heap = self.heap;
-                    let (kind, id, t) = match (v, heap.get(v)) {
-                        (Value::Obj(_), Obj::Tuple(t)) => (0, 0, t),
-                        (Value::Obj(_), Obj::Variant(id, t)) => (1, *id, t),
-                        (Value::Obj(_), Obj::Struct(id, t)) => (2, *id, t),
-                        _ => {
-                            let k = self.build(v, 0)?;
-                            out.push(k);
-                            continue;
+                match leaf_hash(heap, budget, v)? {
+                    Some(h) => Some(h),
+                    None => {
+                        if let (Some(memo), Value::Obj(h)) = (&memo, v)
+                            && let Some(&x) = memo.get(&h)
+                        {
+                            Some(x)
+                        } else {
+                            push_container(heap, &mut stack, v)?;
+                            None
                         }
-                    };
-                    self.node(t.len() * std::mem::size_of::<HKey>())?;
-                    work.push(Frame::Build(kind, id, t.len()));
-                    for x in t.iter().rev() {
-                        work.push(Frame::Enter(*x, depth + 1));
                     }
                 }
-                Frame::Build(kind, id, n) => {
-                    let items: Box<[HKey]> = out.split_off(out.len() - n).into_boxed_slice();
-                    out.push(match kind {
-                        0 => HKey::Tuple(items),
-                        1 => HKey::Variant(id, items),
-                        _ => HKey::Struct(id, items),
-                    });
+            }
+            None => {
+                let Some(top) = stack.top() else { unreachable!("hash of an empty stack") };
+                match heap.field(top.v, top.i) {
+                    Some(f) => {
+                        top.i += 1;
+                        next = Some(f);
+                        None
+                    }
+                    None => {
+                        let (c, h) = (top.v, top.h.finish());
+                        stack.pop();
+                        // (Only heap containers: an inline variant's `handle` is its payload's.)
+                        if let (Some(memo), Value::Obj(handle)) = (&mut memo, c) {
+                            if memo.len() == memo.capacity() && heap.would_exceed(memo.len().max(4) * 2 * 24) {
+                                return Err(Ctl::limit(crate::LimitKind::Memory));
+                            }
+                            memo.insert(handle, h);
+                        }
+                        Some(h)
+                    }
                 }
             }
+        };
+        if let Some(h) = done {
+            match stack.top() {
+                Some(top) => top.h.write_u64(h),
+                None => return Ok(h),
+            }
         }
-        Ok(out.pop().unwrap())
     }
+}
+
+/// Nodes a key may have before [`hash_key`] memoizes the hashes of its
+/// containers.
+const MEMO_AFTER: usize = 256;
+
+/// [`hash_key`] of a string with contents `s`, for keys that are not on
+/// the heap yet (see `Heap::staged`).
+#[inline]
+pub fn str_hash(s: &str) -> u64 {
+    bytes_hash(s.as_bytes())
+}
+
+// Scalar and string hashes carry no type tag: the keys of a map, and the
+// values at any one position of a key (a field, an element, a variant's
+// payload), all have one static type, so values of different types are
+// never compared. Ints hash with one multiply.
+
+#[inline]
+fn int_hash(i: i64) -> u64 {
+    let mut h = FxHasher::default();
+    h.write_i64(i);
+    h.finish()
+}
+
+/// The length keeps strings that differ by trailing NULs apart (the last
+/// partial word is zero-padded).
+#[inline]
+fn bytes_hash(b: &[u8]) -> u64 {
+    let mut h = FxHasher::default();
+    h.write_usize(b.len());
+    h.write(b);
+    h.finish()
+}
+
+/// The hash of `v` if it is not a container (a tuple, struct or variant
+/// with a payload).
+#[inline]
+fn leaf_hash(heap: &Heap, budget: &impl Budget, v: Value) -> Result<Option<u64>, Ctl> {
+    let mut h = FxHasher::default();
+    match v {
+        Value::Unit | Value::Uninit => h.write_u8(0),
+        Value::Bool(b) => {
+            h.write_u8(1);
+            h.write_u8(b as u8);
+        }
+        Value::Int(i) => return Ok(Some(int_hash(i))),
+        Value::Dur(d) => return Ok(Some(int_hash(d))),
+        Value::Float(f) => {
+            h.write_u8(4);
+            h.write_u64(if f == 0.0 {
+                0
+            } else if f.is_nan() {
+                f64::NAN.to_bits()
+            } else {
+                f.to_bits()
+            });
+        }
+        // A payload-less variant (canonical: never a heap object).
+        Value::Tag(id) => {
+            h.write_u8(5);
+            h.write_u32(id);
+            h.write_usize(0);
+        }
+        Value::Obj(handle) => match heap.get(v) {
+            Obj::Str(s) => {
+                budget.charge_bytes(s.len())?;
+                return Ok(Some(bytes_hash(s.as_bytes())));
+            }
+            Obj::Bytes(b) => {
+                budget.charge_bytes(b.len())?;
+                return Ok(Some(bytes_hash(b)));
+            }
+            Obj::Variant(..) | Obj::Tuple(_) | Obj::Struct(..) => return Ok(None),
+            Obj::Range(a, b, incl) => {
+                h.write_u8(10);
+                h.write_i64(*a);
+                h.write_i64(*b);
+                h.write_u8(*incl as u8);
+            }
+            // Identity types (tasks, channels, ...).
+            _ => {
+                h.write_u8(11);
+                h.write_u32(handle);
+            }
+        },
+        // Inline single-payload variants are containers.
+        _ => return Ok(None),
+    }
+    Ok(Some(h.finish()))
+}
+
+/// The hasher of container `v` after its header (kind, id, arity); its
+/// fields' hashes follow.
+fn container_hasher(heap: &Heap, v: Value) -> FxHasher {
+    let mut h = FxHasher::default();
+    if let Some((id, _)) = v.as_inline_variant() {
+        h.write_u8(5);
+        h.write_u32(id);
+        h.write_usize(1);
+        return h;
+    }
+    match heap.get(v) {
+        Obj::Variant(id, f) => {
+            h.write_u8(5);
+            h.write_u32(*id);
+            h.write_usize(f.len());
+        }
+        Obj::Tuple(f) => {
+            h.write_u8(8);
+            h.write_usize(f.len());
+        }
+        Obj::Struct(def, _) => {
+            h.write_u8(9);
+            h.write_u32(*def);
+        }
+        _ => {}
+    }
+    h
+}
+
+/// A container [`hash_key`] is in: its next field and its hasher.
+#[derive(Clone, Copy)]
+struct HashFrame {
+    v: Value,
+    i: usize,
+    h: FxHasher,
+}
+
+/// The containers [`hash_key`] is in: on the host stack up to a small depth
+/// (so hashing a typical tuple key allocates nothing), then on the heap.
+#[derive(Default)]
+struct HashStack {
+    small: [Option<HashFrame>; 8],
+    n: usize,
+    big: Vec<HashFrame>,
+}
+
+impl HashStack {
+    #[inline]
+    fn top(&mut self) -> Option<&mut HashFrame> {
+        match self.big.last_mut() {
+            Some(t) => Some(t),
+            None => self.n.checked_sub(1).and_then(|i| self.small[i].as_mut()),
+        }
+    }
+
+    #[inline]
+    fn pop(&mut self) {
+        if self.big.pop().is_none() {
+            self.n -= 1;
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.n + self.big.len()
+    }
+}
+
+/// Starts hashing container `v`.
+fn push_container(heap: &Heap, stack: &mut HashStack, v: Value) -> Result<(), Ctl> {
+    let frame = HashFrame { v, i: 0, h: container_hasher(heap, v) };
+    if stack.big.is_empty() && stack.n < stack.small.len() {
+        stack.small[stack.n] = Some(frame);
+        stack.n += 1;
+        return Ok(());
+    }
+    if stack.len() >= MAX_DEPTH {
+        return Err(Ctl::panic("value too deeply nested to hash"));
+    }
+    if stack.big.len() == stack.big.capacity() && heap.would_exceed(stack.len().max(4) * 2 * std::mem::size_of::<HashFrame>()) {
+        return Err(Ctl::limit(crate::LimitKind::Memory));
+    }
+    if stack.big.is_empty() {
+        stack.big.extend(stack.small[..stack.n].iter().flatten());
+        stack.n = 0;
+    }
+    stack.big.push(frame);
+    Ok(())
 }
 
 fn total_cmp_f(x: f64, y: f64) -> Ordering {
@@ -736,6 +891,7 @@ fn merge<T: Copy>(a: &[T], b: &[T], out: &mut [T], cmp: &mut impl FnMut(&T, &T) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vm::CtlKind;
 
     #[test]
     fn try_sort_is_a_stable_sort() {
@@ -760,9 +916,9 @@ mod tests {
         let mut calls = 0;
         let r = try_sort_by(&mut v, |a, b| {
             calls += 1;
-            if calls > 3000 { Err(Ctl::Interrupted) } else { Ok(a.cmp(b)) }
+            if calls > 3000 { Err(Ctl::interrupted()) } else { Ok(a.cmp(b)) }
         });
-        assert!(matches!(r, Err(Ctl::Interrupted)));
+        assert!(matches!(r.map_err(Ctl::into_kind), Err(CtlKind::Interrupted)));
         assert!(calls <= 3001);
         let mut sorted = v.clone();
         sorted.sort();

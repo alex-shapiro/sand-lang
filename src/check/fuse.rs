@@ -35,8 +35,9 @@ use super::expr::mk;
 use super::{Checker, Ctor};
 use crate::diag::Span;
 use crate::hir::*;
-use crate::types::{FnId, Type};
+use crate::types::{FnId, Ty, TypeId};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Adapter {
@@ -98,14 +99,14 @@ struct Stage {
     kind: Adapter,
     arg: Option<HExpr>,
     /// The element type after this stage.
-    out: Type,
+    out: TypeId,
 }
 
 struct Chain {
     kind: SourceKind,
     source: HExpr,
     /// The element type of the source.
-    elem: Type,
+    elem: TypeId,
     /// Adapters, from the source outwards.
     stages: Vec<Stage>,
 }
@@ -120,7 +121,7 @@ enum Func {
 /// The run-time state of a stage in the fused loop.
 struct StageVars {
     kind: Adapter,
-    out: Type,
+    out: TypeId,
     /// The adapter's function.
     func: Option<Func>,
     /// `take`/`skip`: elements left; `enumerate`: the counter.
@@ -161,7 +162,7 @@ impl Checker<'_> {
             if found.roles.is_empty() {
                 return None;
             }
-            self.fuse_fns = Some(found);
+            self.fuse_fns = Some(Arc::new(found));
         }
         self.fuse_fns.as_ref().and_then(|t| t.roles.get(&f).copied())
     }
@@ -174,11 +175,12 @@ impl Checker<'_> {
             if fi.module != prelude || !fi.has_self {
                 continue;
             }
-            if let (Some(Ctor::List), "enumerate", super::FnKind::Native(n)) = (&fi.owner, fi.name.as_str(), &fi.kind) {
+            let name = self.name(fi.name);
+            if let (Some(Ctor::List), "enumerate", super::FnKind::Native(n)) = (&fi.owner, name, &fi.kind) {
                 list_enumerate = Some(*n);
             }
             let eager = |range: bool, stage: Option<Adapter>, consumer: Consumer| Role::Eager { range, stage, consumer };
-            let role = match (&fi.owner, fi.name.as_str()) {
+            let role = match (&fi.owner, name) {
                 (Some(Ctor::List), "iter") => Role::ListIter,
                 (Some(Ctor::Range), "iter") => Role::RangeIter,
                 (Some(Ctor::List | Ctor::Range), name) => {
@@ -228,9 +230,9 @@ impl Checker<'_> {
     }
 
     /// The element type of an `Iter<T>` type.
-    fn iter_elem(&self, t: &Type) -> Option<Type> {
-        match self.resolve(t) {
-            Type::Named(d, args) if Some(d) == self.iter_struct && args.len() == 1 => Some(args[0].clone()),
+    fn iter_elem(&self, t: TypeId) -> Option<TypeId> {
+        match self.rty(t) {
+            Ty::Named(d, args) if Some(d) == self.iter_struct && self.arena.list_len(args) == 1 => Some(self.arena.elem(args, 0)),
             _ => None,
         }
     }
@@ -240,7 +242,7 @@ impl Checker<'_> {
         let HKind::Call { func, args } = &e.kind else { return None };
         let Some(Role::Adapter(kind)) = self.fuse_role(*func) else { return None };
         let fits = args.len() == arity(kind) && args.iter().all(|a| matches!(a, HArg::Expr(_)));
-        (fits && self.iter_elem(&e.ty).is_some()).then_some(kind)
+        (fits && self.iter_elem(e.ty).is_some()).then_some(kind)
     }
 
     /// The source kind of a pipeline whose adapters were peeled off,
@@ -255,7 +257,7 @@ impl Checker<'_> {
                 _ => {}
             }
         }
-        self.iter_elem(&e.ty).map(|_| SourceKind::Iter)
+        self.iter_elem(e.ty).map(|_| SourceKind::Iter)
     }
 
     /// The number of adapters and the source kind of `e`, if it is a
@@ -286,7 +288,7 @@ impl Checker<'_> {
         let mut cur = e;
         for _ in 0..depth {
             let kind = self.adapter_of(&cur).unwrap();
-            let out = self.iter_elem(&cur.ty).unwrap();
+            let out = self.iter_elem(cur.ty).unwrap();
             let HKind::Call { args, .. } = cur.kind else { unreachable!() };
             let mut args = args.into_iter().map(|a| match a {
                 HArg::Expr(x) => x,
@@ -298,11 +300,11 @@ impl Checker<'_> {
         stages.reverse();
         let (source, elem) = match kind {
             SourceKind::Iter => {
-                let elem = self.iter_elem(&cur.ty).unwrap();
+                let elem = self.iter_elem(cur.ty).unwrap();
                 (cur, elem)
             }
             SourceKind::List | SourceKind::Range => {
-                let elem = self.iter_elem(&cur.ty).unwrap();
+                let elem = self.iter_elem(cur.ty).unwrap();
                 let HKind::Call { args, .. } = cur.kind else { unreachable!() };
                 let Some(HArg::Expr(recv)) = args.into_iter().next() else { unreachable!() };
                 (recv, elem)
@@ -349,12 +351,12 @@ impl Checker<'_> {
     }
 
     /// A call of `f` with `args`, whose result has type `ret`.
-    fn apply(&mut self, f: Func, args: Vec<HExpr>, ret: Type, span: Span) -> HExpr {
+    fn apply(&mut self, f: Func, args: Vec<HExpr>, ret: TypeId, span: Span) -> HExpr {
         match f {
-            Func::Tmp(l) => call_local(l, args, ret, span),
+            Func::Tmp(l) => self.call_local(l, args, ret, span),
             Func::Inline(lam) => {
                 let lam = *lam;
-                let mut stmts: Vec<HExpr> = lam.params.iter().zip(args).map(|(&p, a)| let_(p, a.ty.clone(), a, span)).collect();
+                let mut stmts: Vec<HExpr> = lam.params.iter().zip(args).map(|(&p, a)| let_(p, a.ty, a, span)).collect();
                 stmts.push(lam.body);
                 block_ty(stmts, ret, span)
             }
@@ -363,8 +365,8 @@ impl Checker<'_> {
 
     /// `let <tmp> = e` (appended to `out`); returns the temporary.
     fn bind_tmp(&mut self, e: HExpr, out: &mut Vec<HExpr>) -> LocalId {
-        let (ty, span) = (e.ty.clone(), e.span);
-        let l = self.hidden_local(ty.clone(), span);
+        let (ty, span) = (e.ty, e.span);
+        let l = self.hidden_local(ty, span);
         out.push(let_(l, ty, e, span));
         l
     }
@@ -375,13 +377,16 @@ impl Checker<'_> {
     fn fused_loop(&mut self, chain: Chain, extra: Vec<HExpr>, span: Span, body: impl FnOnce(&mut Self, HExpr) -> Vec<HExpr>) -> Vec<HExpr> {
         let Chain { kind, source, elem, stages } = chain;
         let mut setup = Vec::new();
-        let opt = self.option_of(elem.clone());
+        let opt = self.option_of(elem);
         // An `Iter` source is kept as its `next` function (an immutable field).
         let source = match kind {
-            SourceKind::Iter => mk(HKind::Field { obj: Box::new(source), index: 0 }, Type::func(vec![], opt.clone()), span),
+            SourceKind::Iter => {
+                let next_ty = self.fn_ty(&[], opt);
+                mk(HKind::Field { obj: Box::new(source), index: 0 }, next_ty, span)
+            }
             _ => source,
         };
-        let src_ty = source.ty.clone();
+        let src_ty = source.ty;
         let src = self.bind_tmp(source, &mut setup);
         let mut vars = Vec::new();
         for st in stages {
@@ -411,57 +416,53 @@ impl Checker<'_> {
         let mut top = Vec::new();
         for v in vars.iter().rev() {
             if let (Adapter::Take, Some(n), Some(pull)) = (v.kind, v.count, v.flag) {
-                let stop = if_(cmp(CmpOp::Le, local(n, Type::Int, span), int(0, span)), break_(span), span);
+                let stop = if_(cmp(CmpOp::Le, local(n, TypeId::INT, span), int(0, span)), break_(span), span);
                 let start = block(vec![stop, add_assign(n, -1, span), assign(pull, bool_(false, span), span)], span);
-                top.push(if_(local(pull, Type::Bool, span), start, span));
+                top.push(if_(local(pull, TypeId::BOOL, span), start, span));
             }
         }
-        let x0 = self.hidden_local(elem.clone(), span);
+        let x0 = self.hidden_local(elem, span);
         let mut stmts = Vec::new();
-        let mut cur = local(x0, elem.clone(), span);
+        let mut cur = local(x0, elem, span);
         for mut v in vars {
             let mut f = v.func.take();
-            let mut call = |s: &mut Self, args: Vec<HExpr>, ty: Type| s.apply(f.take().expect("adapter function"), args, ty, span);
+            let mut call = |s: &mut Self, args: Vec<HExpr>, ty: TypeId| s.apply(f.take().expect("adapter function"), args, ty, span);
             match v.kind {
                 Adapter::Map => {
-                    let x = self.hidden_local(v.out.clone(), span);
-                    stmts.push(let_(x, v.out.clone(), call(self, vec![cur], v.out.clone()), span));
+                    let x = self.hidden_local(v.out, span);
+                    stmts.push(let_(x, v.out, call(self, vec![cur], v.out), span));
                     cur = local(x, v.out, span);
                 }
-                Adapter::Filter => stmts.push(if_(not(call(self, vec![cur.clone()], Type::Bool)), continue_(span), span)),
+                Adapter::Filter => stmts.push(if_(not(call(self, vec![cur.clone()], TypeId::BOOL)), continue_(span), span)),
                 Adapter::FilterMap => {
-                    let x = self.hidden_local(v.out.clone(), span);
-                    let opt = self.option_of(v.out.clone());
-                    let pat = HPat {
-                        kind: HPatKind::Variant { rt_id: self.some_rt(), args: vec![bind(x, v.out.clone(), span)] },
-                        ty: opt.clone(),
-                        span,
-                    };
+                    let x = self.hidden_local(v.out, span);
+                    let opt = self.option_of(v.out);
+                    let pat = HPat { kind: HPatKind::Variant { rt_id: self.some_rt(), args: vec![bind(x, v.out, span)] }, ty: opt, span };
                     let init = call(self, vec![cur], opt);
-                    stmts.push(mk(HKind::Let { pat, init: Box::new(init), else_: Some(Box::new(continue_(span))) }, Type::Unit, span));
+                    stmts.push(mk(HKind::Let { pat, init: Box::new(init), else_: Some(Box::new(continue_(span))) }, TypeId::UNIT, span));
                     cur = local(x, v.out, span);
                 }
                 Adapter::Enumerate => {
                     let n = v.count.unwrap();
-                    let x = self.hidden_local(v.out.clone(), span);
-                    let pair = mk(HKind::Tuple(vec![local(n, Type::Int, span), cur]), v.out.clone(), span);
-                    stmts.push(let_(x, v.out.clone(), pair, span));
+                    let x = self.hidden_local(v.out, span);
+                    let pair = mk(HKind::Tuple(vec![local(n, TypeId::INT, span), cur]), v.out, span);
+                    stmts.push(let_(x, v.out, pair, span));
                     stmts.push(add_assign(n, 1, span));
                     cur = local(x, v.out, span);
                 }
-                Adapter::Inspect => stmts.push(call(self, vec![cur.clone()], Type::Unit)),
+                Adapter::Inspect => stmts.push(call(self, vec![cur.clone()], TypeId::UNIT)),
                 Adapter::Take => stmts.push(assign(v.flag.unwrap(), bool_(true, span), span)),
                 Adapter::Skip => {
                     let n = v.count.unwrap();
                     let skip = block(vec![add_assign(n, -1, span), continue_(span)], span);
-                    stmts.push(if_(cmp(CmpOp::Gt, local(n, Type::Int, span), int(0, span)), skip, span));
+                    stmts.push(if_(cmp(CmpOp::Gt, local(n, TypeId::INT, span), int(0, span)), skip, span));
                 }
-                Adapter::TakeWhile => stmts.push(if_(not(call(self, vec![cur.clone()], Type::Bool)), break_(span), span)),
+                Adapter::TakeWhile => stmts.push(if_(not(call(self, vec![cur.clone()], TypeId::BOOL)), break_(span), span)),
                 Adapter::SkipWhile => {
                     let skipping = v.flag.unwrap();
-                    let skip = if_(call(self, vec![cur.clone()], Type::Bool), continue_(span), span);
+                    let skip = if_(call(self, vec![cur.clone()], TypeId::BOOL), continue_(span), span);
                     let check = block(vec![skip, assign(skipping, bool_(false, span), span)], span);
-                    stmts.push(if_(local(skipping, Type::Bool, span), check, span));
+                    stmts.push(if_(local(skipping, TypeId::BOOL, span), check, span));
                 }
             }
         }
@@ -474,24 +475,31 @@ impl Checker<'_> {
                 let pat = bind(x0, elem, span);
                 mk(
                     HKind::For { pat, iter: Box::new(local(src, src_ty, span)), kind: iter_kind, body: Box::new(block(top, span)) },
-                    Type::Unit,
+                    TypeId::UNIT,
                     span,
                 )
             }
             SourceKind::Iter => {
-                let next = mk(HKind::CallValue { callee: Box::new(local(src, src_ty, span)), args: vec![] }, opt.clone(), span);
+                let next = mk(HKind::CallValue { callee: Box::new(local(src, src_ty, span)), args: vec![] }, opt, span);
                 let pat = HPat { kind: HPatKind::Variant { rt_id: self.some_rt(), args: vec![bind(x0, elem, span)] }, ty: opt, span };
                 if top.is_empty() {
-                    mk(HKind::WhileLet { pat, value: Box::new(next), body: Box::new(block(stmts, span)) }, Type::Unit, span)
+                    mk(HKind::WhileLet { pat, value: Box::new(next), body: Box::new(block(stmts, span)) }, TypeId::UNIT, span)
                 } else {
-                    top.push(mk(HKind::Let { pat, init: Box::new(next), else_: Some(Box::new(break_(span))) }, Type::Unit, span));
+                    top.push(mk(HKind::Let { pat, init: Box::new(next), else_: Some(Box::new(break_(span))) }, TypeId::UNIT, span));
                     top.extend(stmts);
-                    mk(HKind::Loop(Box::new(block(top, span))), Type::Unit, span)
+                    mk(HKind::Loop(Box::new(block(top, span))), TypeId::UNIT, span)
                 }
             }
         };
         setup.push(lp);
         setup
+    }
+
+    /// A call of the function in local `f` with `args`, whose result has type `ret`.
+    fn call_local(&mut self, f: LocalId, args: Vec<HExpr>, ret: TypeId, span: Span) -> HExpr {
+        let ps: Vec<TypeId> = args.iter().map(|a| a.ty).collect();
+        let fty = self.fn_ty(&ps, ret);
+        mk(HKind::CallValue { callee: Box::new(local(f, fty, span)), args }, ret, span)
     }
 
     fn some_rt(&self) -> u32 {
@@ -523,25 +531,24 @@ impl Checker<'_> {
         let HPatKind::Tuple(mut ps) = pat.kind else { unreachable!() };
         let (px, pi) = (ps.pop().unwrap(), ps.pop().unwrap());
         let mut stmts = Vec::new();
-        let list_ty = list.ty.clone();
-        let copy =
-            mk(HKind::Slice { obj: Box::new(list), start: None, end: None, inclusive: false, kind: SeqKind::List }, list_ty.clone(), span);
+        let list_ty = list.ty;
+        let copy = mk(HKind::Slice { obj: Box::new(list), start: None, end: None, inclusive: false, kind: SeqKind::List }, list_ty, span);
         let snap = self.bind_tmp(copy, &mut stmts);
         let n = self.bind_tmp(int(0, span), &mut stmts);
-        let x = self.hidden_local(px.ty.clone(), span);
-        let x_ty = px.ty.clone();
+        let x = self.hidden_local(px.ty, span);
+        let x_ty = px.ty;
         let body = block(
             vec![
-                mk(HKind::Let { pat: pi, init: Box::new(local(n, Type::Int, span)), else_: None }, Type::Unit, span),
+                mk(HKind::Let { pat: pi, init: Box::new(local(n, TypeId::INT, span)), else_: None }, TypeId::UNIT, span),
                 add_assign(n, 1, span),
-                mk(HKind::Let { pat: px, init: Box::new(local(x, x_ty.clone(), span)), else_: None }, Type::Unit, span),
+                mk(HKind::Let { pat: px, init: Box::new(local(x, x_ty, span)), else_: None }, TypeId::UNIT, span),
                 body,
             ],
             span,
         );
         let lp = mk(
             HKind::For { pat: bind(x, x_ty, span), iter: Box::new(local(snap, list_ty, span)), kind: IterKind::List, body: Box::new(body) },
-            Type::Unit,
+            TypeId::UNIT,
             span,
         );
         stmts.push(lp);
@@ -559,7 +566,7 @@ impl Checker<'_> {
         let shape = self.chain_shape(&iter, true).expect("a fusible pipeline");
         let chain = self.take_chain(iter, shape);
         let stmts = self
-            .fused_loop(chain, vec![], span, |_, x| vec![mk(HKind::Let { pat, init: Box::new(x), else_: None }, Type::Unit, span), body]);
+            .fused_loop(chain, vec![], span, |_, x| vec![mk(HKind::Let { pat, init: Box::new(x), else_: None }, TypeId::UNIT, span), body]);
         block(stmts, span)
     }
 
@@ -576,18 +583,18 @@ impl Checker<'_> {
         let inert = args[ndicts + 1..].iter().all(|a| matches!(a, HArg::Expr(x) if is_inert(x)));
         let (c, shape) = match role {
             Some(Role::Consumer(c)) if let Some(shape) = self.chain_shape(recv, inert) => (c, shape),
-            Some(Role::Eager { range, .. }) if range || matches!(self.resolve(&recv.ty), Type::List(_)) => return self.fuse_eager(call),
+            Some(Role::Eager { range, .. }) if range || matches!(self.rty(recv.ty), Ty::List(_)) => return self.fuse_eager(call),
             _ => return call,
         };
         let num = match c {
-            Consumer::Sum => match self.iter_elem(&recv.ty).map(|t| self.resolve(&t)) {
-                Some(Type::Int) => int(0, call.span),
-                Some(Type::Float) => mk(HKind::Float(0.0), Type::Float, call.span),
+            Consumer::Sum => match self.iter_elem(recv.ty).map(|t| self.resolve(t)) {
+                Some(TypeId::INT) => int(0, call.span),
+                Some(TypeId::FLOAT) => mk(HKind::Float(0.0), TypeId::FLOAT, call.span),
                 _ => return call,
             },
-            _ => mk(HKind::Unit, Type::Unit, call.span),
+            _ => mk(HKind::Unit, TypeId::UNIT, call.span),
         };
-        let (ty, span) = (call.ty.clone(), call.span);
+        let (ty, span) = (call.ty, call.span);
         let mut args = plain_args(call, ndicts);
         let rest = args.split_off(1);
         let chain = self.take_chain(args.pop().unwrap(), shape);
@@ -598,20 +605,20 @@ impl Checker<'_> {
     fn fuse_eager(&mut self, call: HExpr) -> HExpr {
         let HKind::Call { func, .. } = &call.kind else { unreachable!() };
         let Some(Role::Eager { range, stage, consumer }) = self.fuse_role(*func) else { unreachable!() };
-        let (ty, span) = (call.ty.clone(), call.span);
+        let (ty, span) = (call.ty, call.span);
         let mut args = plain_args(call, 0);
         let rest = args.split_off(1);
         let source = args.pop().unwrap();
-        let elem = match self.resolve(&source.ty) {
-            Type::List(e) => *e,
-            _ => Type::Int,
+        let elem = match self.rty(source.ty) {
+            Ty::List(e) => e,
+            _ => TypeId::INT,
         };
         let mut rest = rest.into_iter();
         let stages = match stage {
             Some(kind) => {
-                let out = match (kind, self.resolve(&ty)) {
-                    (Adapter::Map | Adapter::FilterMap, Type::List(u)) => *u,
-                    _ => elem.clone(),
+                let out = match (kind, self.rty(ty)) {
+                    (Adapter::Map | Adapter::FilterMap, Ty::List(u)) => u,
+                    _ => elem,
                 };
                 vec![Stage { kind, arg: rest.next(), out }]
             }
@@ -619,37 +626,38 @@ impl Checker<'_> {
         };
         let kind = if range { SourceKind::Range } else { SourceKind::List };
         let chain = Chain { kind, source, elem, stages };
-        let unit = mk(HKind::Unit, Type::Unit, span);
+        let unit = mk(HKind::Unit, TypeId::UNIT, span);
         self.consume(consumer, chain, rest.collect(), unit, ty, span)
     }
 
     /// The fused loop of consumer `c` (with arguments `rest`) over `chain`;
     /// `num` is the zero of `sum`.
-    fn consume(&mut self, c: Consumer, chain: Chain, rest: Vec<HExpr>, num: HExpr, ty: Type, span: Span) -> HExpr {
+    fn consume(&mut self, c: Consumer, chain: Chain, rest: Vec<HExpr>, num: HExpr, ty: TypeId, span: Span) -> HExpr {
         let mut extra = Vec::new();
         let mut rest = rest.into_iter();
         let (result, stmts) = match c {
             Consumer::ToList => {
-                let out = self.bind_tmp(mk(HKind::List(vec![]), ty.clone(), span), &mut extra);
-                let stmts = self
-                    .fused_loop(chain, extra, span, |_, x| vec![mk(HKind::PushLocal { list: out, value: Box::new(x) }, Type::Unit, span)]);
+                let out = self.bind_tmp(mk(HKind::List(vec![]), ty, span), &mut extra);
+                let stmts = self.fused_loop(chain, extra, span, |_, x| {
+                    vec![mk(HKind::PushLocal { list: out, value: Box::new(x) }, TypeId::UNIT, span)]
+                });
                 (out, stmts)
             }
             Consumer::Fold => {
                 let acc = self.bind_tmp(rest.next().unwrap(), &mut extra);
                 let f = self.func(rest.next().unwrap(), &mut extra);
-                let acc_ty = ty.clone();
+                let acc_ty = ty;
                 let stmts = self.fused_loop(chain, extra, span, |s, x| {
-                    let v = s.apply(f, vec![local(acc, acc_ty.clone(), span), x], acc_ty, span);
+                    let v = s.apply(f, vec![local(acc, acc_ty, span), x], acc_ty, span);
                     vec![assign(acc, v, span)]
                 });
                 (acc, stmts)
             }
             Consumer::Each => {
                 let f = self.func(rest.next().unwrap(), &mut extra);
-                let stmts = self.fused_loop(chain, extra, span, |s, x| vec![s.apply(f, vec![x], Type::Unit, span)]);
+                let stmts = self.fused_loop(chain, extra, span, |s, x| vec![s.apply(f, vec![x], TypeId::UNIT, span)]);
                 let mut stmts = stmts;
-                stmts.push(mk(HKind::Unit, Type::Unit, span));
+                stmts.push(mk(HKind::Unit, TypeId::UNIT, span));
                 return block_ty(stmts, ty, span);
             }
             Consumer::Count => {
@@ -662,7 +670,7 @@ impl Checker<'_> {
                 let f = self.func(rest.next().unwrap(), &mut extra);
                 let r = self.bind_tmp(bool_(!any, span), &mut extra);
                 let stmts = self.fused_loop(chain, extra, span, |s, x| {
-                    let test = s.apply(f, vec![x], Type::Bool, span);
+                    let test = s.apply(f, vec![x], TypeId::BOOL, span);
                     let test = if any { test } else { not(test) };
                     let found = block(vec![assign(r, bool_(any, span), span), break_(span)], span);
                     vec![if_(test, found, span)]
@@ -671,11 +679,11 @@ impl Checker<'_> {
             }
             Consumer::Find => {
                 let f = self.func(rest.next().unwrap(), &mut extra);
-                let r = self.bind_tmp(mk(HKind::Tag(self.none_rt()), ty.clone(), span), &mut extra);
+                let r = self.bind_tmp(mk(HKind::Tag(self.none_rt()), ty, span), &mut extra);
                 let some = self.some_rt();
-                let opt_ty = ty.clone();
+                let opt_ty = ty;
                 let stmts = self.fused_loop(chain, extra, span, |s, x| {
-                    let test = s.apply(f, vec![x.clone()], Type::Bool, span);
+                    let test = s.apply(f, vec![x.clone()], TypeId::BOOL, span);
                     let wrapped = mk(HKind::MakeVariant { rt_id: some, args: vec![x] }, opt_ty, span);
                     let found = block(vec![assign(r, wrapped, span), break_(span)], span);
                     vec![if_(test, found, span)]
@@ -684,13 +692,13 @@ impl Checker<'_> {
             }
             Consumer::FindIndex => {
                 let f = self.func(rest.next().unwrap(), &mut extra);
-                let r = self.bind_tmp(mk(HKind::Tag(self.none_rt()), ty.clone(), span), &mut extra);
+                let r = self.bind_tmp(mk(HKind::Tag(self.none_rt()), ty, span), &mut extra);
                 let n = self.bind_tmp(int(0, span), &mut extra);
                 let some = self.some_rt();
-                let opt_ty = ty.clone();
+                let opt_ty = ty;
                 let stmts = self.fused_loop(chain, extra, span, |s, x| {
-                    let test = s.apply(f, vec![x], Type::Bool, span);
-                    let wrapped = mk(HKind::MakeVariant { rt_id: some, args: vec![local(n, Type::Int, span)] }, opt_ty, span);
+                    let test = s.apply(f, vec![x], TypeId::BOOL, span);
+                    let wrapped = mk(HKind::MakeVariant { rt_id: some, args: vec![local(n, TypeId::INT, span)] }, opt_ty, span);
                     let found = block(vec![assign(r, wrapped, span), break_(span)], span);
                     vec![if_(test, found, span), add_assign(n, 1, span)]
                 });
@@ -698,17 +706,16 @@ impl Checker<'_> {
             }
             Consumer::Sum => {
                 let acc = self.bind_tmp(num, &mut extra);
-                let acc_ty = ty.clone();
+                let acc_ty = ty;
                 let stmts = self.fused_loop(chain, extra, span, |_, x| {
-                    let sum =
-                        mk(HKind::Arith { op: ArithOp::Add, l: Box::new(local(acc, acc_ty.clone(), span)), r: Box::new(x) }, acc_ty, span);
+                    let sum = mk(HKind::Arith { op: ArithOp::Add, l: Box::new(local(acc, acc_ty, span)), r: Box::new(x) }, acc_ty, span);
                     vec![assign(acc, sum, span)]
                 });
                 (acc, stmts)
             }
         };
         let mut stmts = stmts;
-        stmts.push(local(result, ty.clone(), span));
+        stmts.push(local(result, ty, span));
         block_ty(stmts, ty, span)
     }
 }
@@ -725,65 +732,64 @@ fn plain_args(call: HExpr, skip: usize) -> Vec<HExpr> {
         .collect()
 }
 
-fn local(l: LocalId, ty: Type, span: Span) -> HExpr {
+fn local(l: LocalId, ty: TypeId, span: Span) -> HExpr {
     mk(HKind::Local(l), ty, span)
 }
 
 fn int(i: i64, span: Span) -> HExpr {
-    mk(HKind::Int(i), Type::Int, span)
+    mk(HKind::Int(i), TypeId::INT, span)
 }
 
 fn bool_(b: bool, span: Span) -> HExpr {
-    mk(HKind::Bool(b), Type::Bool, span)
+    mk(HKind::Bool(b), TypeId::BOOL, span)
 }
 
-fn bind(l: LocalId, ty: Type, span: Span) -> HPat {
+fn bind(l: LocalId, ty: TypeId, span: Span) -> HPat {
     HPat { kind: HPatKind::Bind(l), ty, span }
 }
 
-fn let_(l: LocalId, ty: Type, init: HExpr, span: Span) -> HExpr {
-    mk(HKind::Let { pat: bind(l, ty, span), init: Box::new(init), else_: None }, Type::Unit, span)
+fn let_(l: LocalId, ty: TypeId, init: HExpr, span: Span) -> HExpr {
+    mk(HKind::Let { pat: bind(l, ty, span), init: Box::new(init), else_: None }, TypeId::UNIT, span)
 }
 
 fn assign(l: LocalId, value: HExpr, span: Span) -> HExpr {
-    mk(HKind::Assign { place: Place::Local(l), op: None, op_ty: value.ty.clone(), value: Box::new(value) }, Type::Unit, span)
+    mk(HKind::Assign { place: Place::Local(l), op: None, op_ty: value.ty, value: Box::new(value) }, TypeId::UNIT, span)
 }
 
 fn add_assign(l: LocalId, k: i64, span: Span) -> HExpr {
-    mk(HKind::Assign { place: Place::Local(l), op: Some(ArithOp::Add), op_ty: Type::Int, value: Box::new(int(k, span)) }, Type::Unit, span)
-}
-
-fn call_local(f: LocalId, args: Vec<HExpr>, ret: Type, span: Span) -> HExpr {
-    let fty = Type::func(args.iter().map(|a| a.ty.clone()).collect(), ret.clone());
-    mk(HKind::CallValue { callee: Box::new(local(f, fty, span)), args }, ret, span)
+    mk(
+        HKind::Assign { place: Place::Local(l), op: Some(ArithOp::Add), op_ty: TypeId::INT, value: Box::new(int(k, span)) },
+        TypeId::UNIT,
+        span,
+    )
 }
 
 fn not(e: HExpr) -> HExpr {
     let span = e.span;
-    mk(HKind::Unary { op: HUnOp::Not, e: Box::new(e) }, Type::Bool, span)
+    mk(HKind::Unary { op: HUnOp::Not, e: Box::new(e) }, TypeId::BOOL, span)
 }
 
 fn cmp(op: CmpOp, l: HExpr, r: HExpr) -> HExpr {
     let span = l.span;
-    mk(HKind::Cmp { op, l: Box::new(l), r: Box::new(r) }, Type::Bool, span)
+    mk(HKind::Cmp { op, l: Box::new(l), r: Box::new(r) }, TypeId::BOOL, span)
 }
 
 fn if_(cond: HExpr, then: HExpr, span: Span) -> HExpr {
-    mk(HKind::If { cond: Box::new(cond), then: Box::new(then), else_: None }, Type::Unit, span)
+    mk(HKind::If { cond: Box::new(cond), then: Box::new(then), else_: None }, TypeId::UNIT, span)
 }
 
 fn block(stmts: Vec<HExpr>, span: Span) -> HExpr {
-    block_ty(stmts, Type::Unit, span)
+    block_ty(stmts, TypeId::UNIT, span)
 }
 
-fn block_ty(stmts: Vec<HExpr>, ty: Type, span: Span) -> HExpr {
+fn block_ty(stmts: Vec<HExpr>, ty: TypeId, span: Span) -> HExpr {
     mk(HKind::Block(stmts), ty, span)
 }
 
 fn break_(span: Span) -> HExpr {
-    mk(HKind::Break { value: None, depth: 0 }, Type::Never, span)
+    mk(HKind::Break { value: None, depth: 0 }, TypeId::NEVER, span)
 }
 
 fn continue_(span: Span) -> HExpr {
-    mk(HKind::Continue { depth: 0 }, Type::Never, span)
+    mk(HKind::Continue { depth: 0 }, TypeId::NEVER, span)
 }

@@ -5,12 +5,12 @@ trait Describe {
 }
 struct Point { x: int, y: int }
 impl Describe for Point {
-    fn describe(self) -> str { "point {self.x},{self.y}" }
+    fn describe(self) -> str { "point \(self.x),\(self.y)" }
 }
 struct Word { w: str }
 impl Describe for Word {
     fn describe(self) -> str { self.w }
-    fn shout(self) -> str { "~{self.w}~" }
+    fn shout(self) -> str { "~\(self.w)~" }
 }
 let p = Point { x: 1, y: 2 }
 print(p.describe())
@@ -27,10 +27,10 @@ trait Describe {
 }
 struct Point { x: int }
 impl Describe for Point {
-    fn describe(self) -> str { "P{self.x}" }
+    fn describe(self) -> str { "P\(self.x)" }
 }
 impl Describe for int {
-    fn describe(self) -> str { "int {self}" }
+    fn describe(self) -> str { "int \(self)" }
 }
 fn twice<T: Describe>(x: T) -> str { x.describe() + " " + x.describe() }
 fn all<T>(xs: [T]) -> [str] where T: Describe { xs.map(x => x.describe()) }
@@ -47,10 +47,10 @@ trait Describe {
     fn describe(self) -> str
 }
 impl Describe for int {
-    fn describe(self) -> str { "#{self}" }
+    fn describe(self) -> str { "#\(self)" }
 }
 impl Describe for str {
-    fn describe(self) -> str { "'{self}'" }
+    fn describe(self) -> str { "'\(self)'" }
 }
 fn largest<T: Ord + Describe>(xs: [T]) -> str {
     var best = xs[0]
@@ -125,7 +125,7 @@ trait Describe {
 }
 trait Shape: Describe + Eq {
     fn area(self) -> float
-    fn summary(self) -> str { "{self.describe()}: {self.area()}" }
+    fn summary(self) -> str { "\(self.describe()): \(self.area())" }
 }
 enum Fig {
     Circle(r: float)
@@ -150,7 +150,7 @@ impl Shape for Fig {
 fn report<T: Shape>(xs: [T]) -> [str] {
     // Supertrait methods and built-in supertraits are available through the bound.
     let first = xs[0]
-    xs.map(x => "{x.summary()} {x.describe()} {x == first}")
+    xs.map(x => "\(x.summary()) \(x.describe()) \(x == first)")
 }
 print(report([Fig.Circle(1.0), Fig.Square(2.0)]))
 --- stdout
@@ -167,7 +167,7 @@ trait C: B {
     fn c(self) -> str { "c" + self.b() }
 }
 impl A for int {
-    fn a(self) -> str { "a{self}" }
+    fn a(self) -> str { "a\(self)" }
 }
 impl B for int {}
 impl C for int {}
@@ -181,7 +181,7 @@ trait Into<T> {
     fn into(self) -> T
 }
 impl Into<str> for int {
-    fn into(self) -> str { "#{self}" }
+    fn into(self) -> str { "#\(self)" }
 }
 impl Into<float> for int {
     fn into(self) -> float { self.to_float() / 2.0 }
@@ -223,7 +223,7 @@ trait Show {
 }
 struct Box<T> { v: T }
 impl Into<str> for Box<int> {
-    fn into(self) -> str { "boxed {self.v}" }
+    fn into(self) -> str { "boxed \(self.v)" }
 }
 impl Show for str {
     fn show(self) -> str { "s:" + self }
@@ -254,7 +254,7 @@ trait Describe {
 }
 struct Point { x: int }
 impl Describe for Point {
-    fn describe(self) -> str { "P{self.x}" }
+    fn describe(self) -> str { "P\(self.x)" }
 }
 impl<T: Describe> Describe for [T] {
     fn describe(self) -> str { "[" + self.map(x => x.describe()).join(", ") + "]" }
@@ -268,7 +268,7 @@ impl<T: Describe> Describe for T? {
     }
 }
 impl<K: Hash, V: Describe> Describe for [K: V] {
-    fn describe(self) -> str { "{self.len()} entries, first " + (self.values().first().describe()) }
+    fn describe(self) -> str { "\(self.len()) entries, first " + (self.values().first().describe()) }
 }
 fn show<T: Describe>(x: T) -> str { x.describe() }
 let p = Point { x: 1 }
@@ -331,7 +331,7 @@ trait Describe {
     fn describe(self) -> str
 }
 impl Describe for int {
-    fn describe(self) -> str { "{self}" }
+    fn describe(self) -> str { "\(self)" }
 }
 enum Tree<T> {
     Leaf
@@ -404,7 +404,7 @@ trait Describe {
     fn describe(self) -> str
 }
 impl Describe for int {
-    fn describe(self) -> str { "i{self}" }
+    fn describe(self) -> str { "i\(self)" }
 }
 trait Mapper {
     fn map_all<U: Describe>(self, f: fn(int) -> U) -> [str]
@@ -454,10 +454,10 @@ trait Describe {
 struct Point { x: int }
 impl Describe for Point {
     /// Describes a point.
-    fn describe(self) -> str { "P{self.x}" }
+    fn describe(self) -> str { "P\(self.x)" }
 }
 impl Describe for int {
-    fn describe(self) -> str { "i{self}" }
+    fn describe(self) -> str { "i\(self)" }
 }
 /// Describes one value.
 fn describe_one<T: Describe>(x: T) -> str { x.describe() }
@@ -492,7 +492,7 @@ trait Describe {
     fn describe(self) -> str
 }
 impl Describe for int {
-    fn describe(self) -> str { "i{self}" }
+    fn describe(self) -> str { "i\(self)" }
 }
 fn labels<T: Describe>(xs: [T]) -> [str] {
     fn label(x: T) -> str { "<" + x.describe() + ">" }
@@ -517,7 +517,7 @@ trait Describe {
     fn describe(self) -> str
 }
 impl Describe for int {
-    fn describe(self) -> str { "{self}" }
+    fn describe(self) -> str { "\(self)" }
 }
 impl<T: Describe> Describe for [T] {
     fn describe(self) -> str { "[" + self.map(x => x.describe()).join(" ") + "]" }
@@ -558,7 +558,7 @@ trait Describe {
     fn describe(self) -> str
 }
 impl Describe for int {
-    fn describe(self) -> str { "i{self}" }
+    fn describe(self) -> str { "i\(self)" }
 }
 struct Box<T> {
     item: T
@@ -600,7 +600,7 @@ struct P { x: int }
 impl Describe for P {
     fn describe(self) -> str {
         let again: P = json.decode(json.encode(self)).unwrap()
-        "P{again.x}"
+        "P\(again.x)"
     }
 }
 fn with_extra<T: Describe>(items: [T], text: str) -> str {
@@ -621,7 +621,7 @@ trait Describe {
 impl Describe for int {
     fn describe(self) -> str {
         calls += 1
-        "{self}"
+        "\(self)"
     }
 }
 print(1.line())
@@ -656,7 +656,7 @@ trait Describe {
     fn describe(self) -> str
 }
 impl Describe for int {
-    fn describe(self) -> str { "i{self}" }
+    fn describe(self) -> str { "i\(self)" }
 }
 struct Box<T> { item: T }
 extend<T: Describe> Box<T> {
@@ -675,10 +675,10 @@ trait Label {
 }
 struct P { x: int }
 impl Describe for P {
-    fn describe(self) -> str { "describe {self.x}" }
+    fn describe(self) -> str { "describe \(self.x)" }
 }
 impl Label for P {
-    fn describe(self) -> str { "label {self.x}" }
+    fn describe(self) -> str { "label \(self.x)" }
 }
 let p = P { x: 1 }
 print(Describe.describe(p))
@@ -755,7 +755,7 @@ fn show<T: Show>(x: T) -> str { x.to_str() }
 let p = P { x: 1 }
 print(p.to_str())
 print(show(p))
-print("{p}")
+print("\(p)")
 --- stdout
 custom
 custom
@@ -778,7 +778,7 @@ impl shapes.Shape for Circle {
     fn area(self) -> float { 3.0 * self.r * self.r }
     fn name(self) -> str { "circle" }
 }
-fn describe<T: Shape>(x: T) -> str { "{x.name()} {x.area()}" }
+fn describe<T: Shape>(x: T) -> str { "\(x.name()) \(x.area())" }
 fn describe2<T: shapes.Shape>(x: T) -> str { x.name() }
 print(describe(Circle { r: 1.0 }))
 print(describe(shapes.Square { side: 2.0 }))
@@ -821,7 +821,7 @@ trait Describe {
     fn describe(self) -> str
 }
 impl Describe for lib.Point {
-    fn describe(self) -> str { "point {self.x}" }
+    fn describe(self) -> str { "point \(self.x)" }
 }
 impl lib.Named for str {
     fn name(self) -> str { self }
@@ -1240,7 +1240,7 @@ pub trait Describe {
     fn describe(self) -> str
 }
 impl Describe for int {
-    fn describe(self) -> str { "int {self}" }
+    fn describe(self) -> str { "int \(self)" }
 }
 --- lint
 

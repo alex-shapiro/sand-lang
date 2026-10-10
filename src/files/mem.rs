@@ -56,6 +56,8 @@ struct Tree {
     /// Bytes of contents, names and per-entry overhead.
     used: usize,
     capacity: usize,
+    /// Counts the writes and moves of files (see [`MemFs::generation`]).
+    generation: u64,
 }
 
 enum Node {
@@ -67,6 +69,8 @@ struct File {
     data: Vec<u8>,
     /// Unix time in nanoseconds.
     modified: i64,
+    /// The generation of the file system when it was last written or moved.
+    generation: u64,
 }
 
 #[derive(Default)]
@@ -292,6 +296,8 @@ impl Tree {
         self.take(extra)?;
         let (dir, name) = self.root.parent_mut(parts)?;
         let t = now();
+        self.generation += 1;
+        let generation = self.generation;
         match dir.entries.get_mut(name) {
             Some(Node::File(f)) => {
                 let freed = if append {
@@ -303,10 +309,11 @@ impl Tree {
                     freed
                 };
                 f.modified = t;
+                f.generation = generation;
                 self.give_back(freed);
             }
             _ => {
-                dir.entries.insert(name.to_string(), Node::File(File { data: data.to_vec(), modified: t }));
+                dir.entries.insert(name.to_string(), Node::File(File { data: data.to_vec(), modified: t, generation }));
                 dir.modified = t;
             }
         }
@@ -395,6 +402,16 @@ impl Tree {
         let (dir, name) = self.root.parent_mut(from)?;
         let node = dir.entries.remove(name).ok_or_else(not_found)?;
         dir.modified = t;
+        // Moved files count as written.
+        self.generation += 1;
+        let mut node = node;
+        let mut moved = vec![&mut node];
+        while let Some(n) = moved.pop() {
+            match n {
+                Node::File(f) => f.generation = self.generation,
+                Node::Dir(d) => moved.extend(d.entries.values_mut()),
+            }
+        }
         let (dir, name) = self.root.parent_mut(to)?;
         dir.entries.insert(name.to_string(), node);
         dir.modified = t;
@@ -415,7 +432,7 @@ impl MemFs {
     /// An empty file system holding at most `bytes` bytes of contents and
     /// names (each file and directory counts 64 bytes more).
     pub fn with_capacity(bytes: usize) -> MemFs {
-        let tree = Tree { root: Dir { entries: BTreeMap::new(), modified: now() }, used: 0, capacity: bytes };
+        let tree = Tree { root: Dir { entries: BTreeMap::new(), modified: now() }, used: 0, capacity: bytes, generation: 0 };
         MemFs { tree: Arc::new(Mutex::new(tree)) }
     }
 
@@ -477,6 +494,27 @@ impl MemFs {
     pub fn files(&self) -> Vec<(PathBuf, Vec<u8>)> {
         let mut out = Vec::new();
         self.for_each_file(|path, data| out.push((path.to_path_buf(), data.to_vec())));
+        out
+    }
+
+    /// A number that grows whenever a file is written (or moved), for
+    /// [`MemFs::changed_files`].
+    pub fn generation(&self) -> u64 {
+        self.lock().generation
+    }
+
+    /// The files written (or moved) since the file system was at
+    /// `generation`, with their contents, in the order of [`MemFs::files`].
+    pub fn changed_files(&self, generation: u64) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut out = Vec::new();
+        let t = self.lock();
+        walk(&t.root, |names, node| {
+            if let Node::File(file) = node
+                && file.generation > generation
+            {
+                out.push((std::iter::once("/").chain(names.iter().copied()).collect(), file.data.clone()));
+            }
+        });
         out
     }
 
@@ -682,5 +720,20 @@ mod tests {
         fs.remove("/d").unwrap();
         assert_eq!(fs.used(), 0, "everything given back");
         assert!(fs.files().is_empty());
+    }
+
+    #[test]
+    fn changed_files_since_a_generation() {
+        let fs = MemFs::new();
+        fs.write("/a/x", "1").unwrap();
+        fs.write("/a/y", "2").unwrap();
+        let start = fs.generation();
+        assert_eq!(fs.changed_files(start), vec![]);
+        fs.write("/a/x", "one").unwrap();
+        fs.write_file(Path::new("/b"), b"!", true).unwrap();
+        fs.rename(Path::new("/a"), Path::new("/c")).unwrap();
+        let paths: Vec<PathBuf> = fs.changed_files(start).into_iter().map(|(p, _)| p).collect();
+        assert_eq!(paths, [PathBuf::from("/b"), PathBuf::from("/c/x"), PathBuf::from("/c/y")]);
+        assert_eq!(fs.changed_files(0).len(), 3);
     }
 }

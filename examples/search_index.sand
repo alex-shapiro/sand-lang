@@ -150,33 +150,33 @@ match args[0] {
         if args.len() != 3 { usage() }
         let n = index_dir(index, args[2])?
         index.save(index_path)?
-        print("indexed {n} documents, {index.postings.len()} terms")
+        print("indexed \(n) documents, \(index.postings.len()) terms")
     }
     "add" => {
         for path in args[2..] {
             index.add(path, fs.read_text(path)?)
         }
         index.save(index_path)?
-        print("added {args.len() - 2} documents")
+        print("added \(args.len() - 2) documents")
     }
     "search" => {
-        let query = " ".join(args[2..])
+        let query = args[2..].join(" ")
         let results = index.search(query)
         if results.is_empty() {
-            print("no results for \"{query}\"")
+            print("no results for \"\(query)\"")
         }
         for (path, score) in results {
-            print("{score:.4}  {path}")
+            print("\(score:.4)  \(path)")
         }
     }
     "stats" => {
-        print("documents: {index.live_docs()}")
-        print("terms: {index.postings.len()}")
+        print("documents: \(index.live_docs())")
+        print("terms: \(index.postings.len())")
         let top = index.postings.entries()
             .sorted_by(e => (-e.1.len(), e.0))
             .take(5)
-            .map(e => "{e.0}({e.1.len()})")
-        print("most common: {", ".join(top)}")
+            .map(e => "\(e.0)(\(e.1.len()))")
+        print("most common: \(top.join(", "))")
     }
     _ => usage()
 }

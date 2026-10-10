@@ -17,7 +17,7 @@ use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, watch};
 
@@ -32,7 +32,7 @@ pub fn register(r: &mut Registry) {
         Ok(vm.new_str(addr))
     });
     r.add_builtin("net.Listener.close", |vm, a| {
-        let l = vm.heap.native_mut::<Listener>(a[0]).ok_or_else(|| Ctl::Panic("not a listener".into()))?;
+        let l = vm.heap.native_mut::<Listener>(a[0]).ok_or_else(|| Ctl::panic("not a listener"))?;
         if l.close() {
             vm.heap.resource_closed();
         }
@@ -40,28 +40,14 @@ pub fn register(r: &mut Registry) {
     });
     r.add_builtin("net.Conn.read", conn_read);
     r.add_builtin("net.Conn.read_line", conn_read_line);
-    r.add_builtin("net.Conn.write", |vm, a| {
-        let res = match vm.reserve_io(vm.heap.bytes_of(a[1]).len()) {
-            Ok(r) => r,
-            Err(e) => return Ok(e),
-        };
-        let data = vm.heap.bytes_of(a[1]).to_vec();
-        conn_write(vm, a[0], data, res)
-    });
-    r.add_builtin("net.Conn.write_str", |vm, a| {
-        let res = match vm.reserve_io(vm.str(a[1]).len()) {
-            Ok(r) => r,
-            Err(e) => return Ok(e),
-        };
-        let data = vm.str(a[1]).as_bytes().to_vec();
-        conn_write(vm, a[0], data, res)
-    });
+    r.add_builtin("net.Conn.write", |vm, a| conn_write(vm, a[0], a[1]));
+    r.add_builtin("net.Conn.write_str", |vm, a| conn_write(vm, a[0], a[1]));
     r.add_builtin("net.Conn.peer_addr", |vm, a| {
         let peer = conn(vm, a[0])?.peer.clone();
         Ok(vm.new_str(peer))
     });
     r.add_builtin("net.Conn.close", |vm, a| {
-        let c = vm.heap.native_mut::<Conn>(a[0]).ok_or_else(|| Ctl::Panic("not a connection".into()))?;
+        let c = vm.heap.native_mut::<Conn>(a[0]).ok_or_else(|| Ctl::panic("not a connection"))?;
         let before = c.size();
         if c.close() {
             let after = c.size();
@@ -96,7 +82,7 @@ pub(crate) fn suspend<T: Send + 'static>(
     fut: impl Future<Output = Result<T, IoFailure>> + Send + 'static,
     ok: impl FnOnce(&mut Vm, T) -> NResult + Send + 'static,
 ) -> NResult {
-    Err(Ctl::Async(Box::pin(async move { finish(fut.await, ok) })))
+    Err(Ctl::suspend(Box::pin(async move { finish(fut.await, ok) })))
 }
 
 /// Checks `cap`; `Ok(Some(err))` is the `Err(permission_denied)` value to return.
@@ -140,7 +126,7 @@ pub(crate) fn alloc_resource(vm: &mut Vm, obj: Box<dyn NativeObject>, slot: Reso
 /// Like [`suspend`] for operations that produce a socket object, counted by
 /// `slot` until then.
 fn suspend_resource<T: NativeObject>(slot: ResourceSlot, fut: impl Future<Output = Result<T, IoFailure>> + Send + 'static) -> NResult {
-    Err(Ctl::Async(Box::pin(async move {
+    Err(Ctl::suspend(Box::pin(async move {
         let r = fut.await;
         Box::new(move |vm: &mut Vm| match r {
             Ok(obj) => {
@@ -210,7 +196,7 @@ impl NativeObject for Listener {
 }
 
 fn listener(vm: &Vm, v: Value) -> Result<&Listener, Ctl> {
-    vm.heap.native::<Listener>(v).ok_or_else(|| Ctl::Panic("not a listener".into()))
+    vm.heap.native::<Listener>(v).ok_or_else(|| Ctl::panic("not a listener"))
 }
 
 /// The socket of the listener `v` and its close signal, for accepting
@@ -362,7 +348,7 @@ impl NativeObject for Conn {
 }
 
 fn conn(vm: &Vm, v: Value) -> Result<&Conn, Ctl> {
-    vm.heap.native::<Conn>(v).ok_or_else(|| Ctl::Panic("not a connection".into()))
+    vm.heap.native::<Conn>(v).ok_or_else(|| Ctl::panic("not a connection"))
 }
 
 /// The operation handle of the connection `v`, or the `Err(closed)` value.
@@ -493,8 +479,9 @@ fn conn_read(vm: &mut Vm, a: &[Value]) -> NResult {
     if max <= 0 {
         return Ok(vm.err_value("invalid", "read: max must be positive"));
     }
-    // Reads return whatever is available, so a large `max` need not be allocated up front.
-    let max = max.min(1 << 20) as usize;
+    // A read returns what the connection's buffer holds (filling it first if
+    // it is empty), at most `CONN_BUFFER` bytes.
+    let max = (max as usize).min(CONN_BUFFER);
     let h = match conn_handle(vm, a[0])? {
         Ok(h) => h,
         Err(e) => return Ok(e),
@@ -507,10 +494,10 @@ fn conn_read(vm: &mut Vm, a: &[Value]) -> NResult {
     suspend(
         h.closed.guard(async move {
             let mut reader = h.reader.lock().await;
-            let mut buf = vec![0; max];
-            let n = reader.read(&mut buf).await?;
-            buf.truncate(n);
-            Ok((buf, res))
+            let available = reader.fill_buf().await?;
+            let data = available[..available.len().min(max)].to_vec();
+            reader.consume(data.len());
+            Ok((data, res))
         }),
         |vm, (data, res)| {
             drop(res);
@@ -549,8 +536,27 @@ fn conn_read_line(vm: &mut Vm, a: &[Value]) -> NResult {
     )
 }
 
-/// Writes `data` (whose copy is reserved in `res` until the write is done).
-fn conn_write(vm: &mut Vm, c: Value, data: Vec<u8>, res: Reservation) -> NResult {
+/// Writes `data` (a `str` or `bytes`), from a copy that is reserved until
+/// the write is done (the heap value may change or go meanwhile).
+fn conn_write(vm: &mut Vm, c: Value, v: Value) -> NResult {
+    fn bytes(vm: &Vm, v: Value) -> &[u8] {
+        match vm.heap.get(v) {
+            Obj::Str(s) => s.as_bytes(),
+            _ => vm.heap.bytes_of(v),
+        }
+    }
+    let len = bytes(vm, v).len();
+    vm.charge_bytes(len)?;
+    let res = match vm.reserve_io(len) {
+        Ok(r) => r,
+        Err(e) => return Ok(e),
+    };
+    let data = bytes(vm, v).to_vec();
+    write_bytes(vm, c, data, res)
+}
+
+/// Writes `data` to connection `c`; `res` reserves `data` until the write is done.
+pub(crate) fn write_bytes(vm: &mut Vm, c: Value, data: Vec<u8>, res: Reservation) -> NResult {
     let h = match conn_handle(vm, c)? {
         Ok(h) => h,
         Err(e) => return Ok(e),

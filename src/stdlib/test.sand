@@ -8,7 +8,7 @@ let PROPERTY_SEED = 20240611
 pub fn assert_eq<T: Eq>(actual: T, expected: T, msg: str = "") {
     if actual != expected {
         let head = if msg.is_empty() { "assertion failed: left == right" } else { msg }
-        panic("{head}\n  left: {actual.debug()}\n right: {expected.debug()}")
+        panic("\(head)\n  left: \(actual.debug())\n right: \(expected.debug())")
     }
 }
 
@@ -16,7 +16,7 @@ pub fn assert_eq<T: Eq>(actual: T, expected: T, msg: str = "") {
 pub fn assert_ne<T: Eq>(actual: T, expected: T, msg: str = "") {
     if actual == expected {
         let head = if msg.is_empty() { "assertion failed: left != right" } else { msg }
-        panic("{head}\n  left: {actual.debug()}\n right: {expected.debug()}")
+        panic("\(head)\n  left: \(actual.debug())\n right: \(expected.debug())")
     }
 }
 
@@ -39,21 +39,21 @@ pub fn assert_false(cond: bool, msg: str = "") {
 pub fn assert_close(a: float, b: float, tol: float = 1e-9) {
     let scale = 1.0.max(a.abs()).max(b.abs())
     if not (a == b or (a - b).abs() <= tol * scale) {
-        panic("assertion failed: {a} is not close to {b} (tolerance {tol})")
+        panic("assertion failed: \(a) is not close to \(b) (tolerance \(tol))")
     }
 }
 
 /// Panics unless `r` is `Err`.
 pub fn assert_err<T, E>(r: Result<T, E>) {
     if r.is_ok() {
-        panic("assertion failed: expected Err, got {r.debug()}")
+        panic("assertion failed: expected Err, got \(r.debug())")
     }
 }
 
 /// Panics unless `r` is `Ok`.
 pub fn assert_ok<T, E>(r: Result<T, E>) {
     if r.is_err() {
-        panic("assertion failed: expected Ok, got {r.debug()}")
+        panic("assertion failed: expected Ok, got \(r.debug())")
     }
 }
 
@@ -65,12 +65,18 @@ pub fn fail(msg: str) -> never {
 /// Checks that `prop` holds for `cases` values produced by `gen`.
 /// Panics with the first failing input. The generator is seeded with `seed`
 /// (fixed by default), so failures are reproducible.
-pub fn property<T>(name: str, gen: fn(random.Rng) -> T, prop: fn(T) -> bool, cases: int = 100, seed: int = PROPERTY_SEED) {
+pub fn property<T>(
+    name: str,
+    gen: fn(random.Rng) -> T,
+    prop: fn(T) -> bool,
+    cases: int = 100,
+    seed: int = PROPERTY_SEED,
+) {
     let rng = random.rng(seed)
     for _ in 0..cases {
         let input = gen(rng)
         if not prop(input) {
-            panic("property `{name}` failed for input: {input.debug()}")
+            panic("property `\(name)` failed for input: \(input.debug())")
         }
     }
 }

@@ -112,7 +112,7 @@ pub enum Result<T, E> {
     pub fn unwrap(self) -> T {
         match self {
             Ok(x) => x
-            Err(e) => panic("unwrap on Err: {e}")
+            Err(e) => panic("unwrap on Err: \(e)")
         }
     }
 
@@ -120,7 +120,7 @@ pub enum Result<T, E> {
     pub fn expect(self, msg: str) -> T {
         match self {
             Ok(x) => x
-            Err(e) => panic("{msg}: {e}")
+            Err(e) => panic("\(msg): \(e)")
         }
     }
 
@@ -135,7 +135,7 @@ pub enum Result<T, E> {
     /// The `Err` payload; panics on `Ok`.
     pub fn unwrap_err(self) -> E {
         match self {
-            Ok(x) => panic("unwrap_err on Ok: {x.debug()}")
+            Ok(x) => panic("unwrap_err on Ok: \(x.debug())")
             Err(e) => e
         }
     }
@@ -268,11 +268,13 @@ trait Num {
 
 impl Num for int {
     fn zero() -> int { 0 }
+
     fn one() -> int { 1 }
 }
 
 impl Num for float {
     fn zero() -> float { 0.0 }
+
     fn one() -> float { 1.0 }
 }
 
@@ -321,8 +323,6 @@ extend int {
     pub native fn to_str_radix(self, radix: int) -> str
     /// The one-character string for a Unicode scalar value.
     pub native fn to_char(self) -> str?
-    /// Parses an integer.
-    pub native fn parse(text: str, radix: int = 10) -> int?
 
     /// The largest int.
     pub fn max_value() -> int {
@@ -344,7 +344,9 @@ extend float {
     pub native fn trunc(self) -> float
     pub native fn sqrt(self) -> float
     pub native fn pow(self, e: float) -> float
+    /// The smaller of `self` and `other`; a NaN is ignored.
     pub native fn min(self, other: float) -> float
+    /// The larger of `self` and `other`; a NaN is ignored.
     pub native fn max(self, other: float) -> float
     pub native fn is_nan(self) -> bool
     pub native fn is_finite(self) -> bool
@@ -353,8 +355,6 @@ extend float {
     pub native fn to_int(self) -> int
     /// Formats with a fixed number of digits after the point.
     pub native fn to_str_fixed(self, digits: int) -> str
-    /// Parses a float.
-    pub native fn parse(text: str) -> float?
 
     /// Restricts `self` to `lo..=hi`.
     pub fn clamp(self, lo: float, hi: float) -> float {
@@ -397,7 +397,10 @@ extend str {
     pub native fn pad_start(self, width: int, fill: str = " ") -> str
     /// Pads on the right to `width` characters.
     pub native fn pad_end(self, width: int, fill: str = " ") -> str
-    pub native fn parse_int(self) -> int?
+    /// The integer written in `radix` (2..36), with an optional `-`.
+    pub native fn parse_int(self, radix: int = 10) -> int?
+    /// The float written in decimal or scientific notation, or `inf`,
+    /// `-inf` or `NaN` (as floats are displayed).
     pub native fn parse_float(self) -> float?
     pub native fn is_digit(self) -> bool
     pub native fn is_alpha(self) -> bool
@@ -410,8 +413,6 @@ extend str {
     /// The scalar value of a one-character string.
     pub native fn ord(self) -> int
     pub native fn reversed(self) -> str
-    /// Joins `items` with `self` as separator.
-    pub native fn join(self, items: [str]) -> str
 
     /// A lazy iterator over the characters (as one-character strings).
     pub fn chars_iter(self) -> Iter<str> {
@@ -568,8 +569,13 @@ extend<T> [T] {
     /// Combines elements from the left; `None` if empty.
     pub fn reduce(self, f: fn(T, T) -> T) -> T? {
         var acc = self.first()?
-        for x in self.skip(1) {
-            acc = f(acc, x)
+        var first = true
+        for x in self {
+            if first {
+                first = false
+            } else {
+                acc = f(acc, x)
+            }
         }
         Some(acc)
     }
@@ -655,7 +661,13 @@ extend<T> [T] {
     pub fn group_by<K: Hash>(self, key: fn(T) -> K) -> [K: [T]] {
         let out: [K: [T]] = [:]
         for x in self {
-            out.get_or_insert(key(x), []).push(x)
+            let k = key(x)
+            match out.get(k) {
+                Some(group) => group.push(x)
+                None => {
+                    out[k] = [x]
+                }
+            }
         }
         out
     }
@@ -678,7 +690,12 @@ extend<T> [T] {
     pub fn min_by<K: Ord>(self, key: fn(T) -> K) -> T? {
         var best = self.first()?
         var best_key = key(best)
-        for x in self.skip(1) {
+        var first = true
+        for x in self {
+            if first {
+                first = false
+                continue
+            }
             let k = key(x)
             if k < best_key {
                 best = x
@@ -692,7 +709,12 @@ extend<T> [T] {
     pub fn max_by<K: Ord>(self, key: fn(T) -> K) -> T? {
         var best = self.first()?
         var best_key = key(best)
-        for x in self.skip(1) {
+        var first = true
+        for x in self {
+            if first {
+                first = false
+                continue
+            }
             let k = key(x)
             if k > best_key {
                 best = x
@@ -738,10 +760,13 @@ extend<K: Hash, V> [K: V] {
     /// Inserts `default` if `key` is absent; returns the stored value.
     pub native fn get_or_insert(self, key: K, default: V) -> V
 
-    /// A lazy iterator over the (key, value) entries as they are now.
+    /// A lazy iterator over the (key, value) entries as they are now (a
+    /// change of the map meanwhile does not affect it).
     pub fn iter(self) -> Iter<(K, V)> {
-        self.entries().iter()
+        Iter { next: self.iter_next() }
     }
+
+    native fn iter_next(self) -> fn() -> (K, V)?
 
     /// A new map with `f` applied to every value.
     pub fn map_values<W>(self, f: fn(V) -> W) -> [K: W] {
@@ -780,10 +805,13 @@ extend<T: Hash> Set<T> {
     pub native fn copy(self) -> Set<T>
     pub native fn clear(self)
 
-    /// A lazy iterator over the elements as they are now.
+    /// A lazy iterator over the elements as they are now (a change of the
+    /// set meanwhile does not affect it).
     pub fn iter(self) -> Iter<T> {
-        self.to_list().iter()
+        Iter { next: self.iter_next() }
     }
+
+    native fn iter_next(self) -> fn() -> T?
 }
 
 extend Range {
@@ -805,7 +833,7 @@ extend Range {
 
     pub fn map<U>(self, f: fn(int) -> U) -> [U] {
         let out = []
-        for i in self.to_list() {
+        for i in self {
             out.push(f(i))
         }
         out
@@ -813,7 +841,7 @@ extend Range {
 
     pub fn filter(self, f: fn(int) -> bool) -> [int] {
         let out = []
-        for i in self.to_list() {
+        for i in self {
             if f(i) {
                 out.push(i)
             }
@@ -822,7 +850,7 @@ extend Range {
     }
 
     pub fn each(self, f: fn(int)) {
-        for i in self.to_list() {
+        for i in self {
             f(i)
         }
     }
@@ -1068,7 +1096,7 @@ pub struct Iter<T> {
     /// The first element and then every `step`-th; panics if `step <= 0`.
     pub fn step_by(self, step: int) -> Iter<T> {
         if step <= 0 {
-            panic("step must be positive, found {step}")
+            panic("step must be positive, found \(step)")
         }
         let next = self.next
         var first = true

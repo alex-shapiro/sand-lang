@@ -1,7 +1,7 @@
 === read lines from stdin
 import io
 while let Some(line) = io.read_line()? {
-    print("got: {line}")
+    print("got: \(line)")
 }
 --- stdin
 first

@@ -112,10 +112,3 @@ true
 true
 true
 
-=== sleep in time module
-import time
-let m = time.monotonic()
-time.sleep(10ms)
-print(m.elapsed() >= 10ms)
---- stdout
-true

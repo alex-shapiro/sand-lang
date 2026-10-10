@@ -29,11 +29,11 @@
 mod hooks;
 
 use hooks::{Hooks, JsOutput, JsPrompter};
+use js_sys::{Array, Object, Reflect};
+use sandlang::lint::LintWarning;
 use sandlang::policy::{PolicyError, PolicyFile};
 use sandlang::{Config, Decision, Diagnostic, Error, MemFs, Severity};
-use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
-use std::collections::BTreeMap;
 use std::path::Path;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
@@ -99,6 +99,8 @@ export interface Diagnostic {
 export interface SandError {
   kind: "compile" | "runtime" | "limit" | "interrupted" | "io";
   message: string;
+  /** How `sand run` exits for it: 1 runtime error, 2 compile error, 3 limit, 130 interrupted. */
+  exitCode: number;
   diagnostics: Diagnostic[];
   /** For runtime errors: the stack, innermost first. */
   trace: { function: string; file: string; line: number }[];
@@ -116,6 +118,8 @@ export interface CheckResult {
   ok: boolean;
   /** Errors, or warnings when `ok`. */
   diagnostics: Diagnostic[];
+  /** Lint warnings when `ok` (from the same compilation). */
+  lint: LintWarning[];
   error?: SandError;
 }
 
@@ -132,24 +136,8 @@ export interface EvalResult {
 export interface FileEntry { path: string; data: Uint8Array; }
 "#;
 
-/// The fields of [`Options`] (serde-wasm-bindgen reads only known fields,
-/// so unknown ones, typically misspelt, are refused by `check_keys`).
+/// The fields of `EngineOptions` (unknown ones, typically misspelt, are refused).
 const OPTION_KEYS: &[&str] = &["policy", "files", "env", "args", "stdin", "seed", "fileSystemCapacity", "cwd"];
-
-/// Options of an engine (see `EngineOptions` above).
-#[derive(Deserialize, Default)]
-#[serde(rename_all = "camelCase", default)]
-struct Options {
-    policy: String,
-    /// Read by `write_files` (strings or bytes).
-    files: Option<serde::de::IgnoredAny>,
-    env: BTreeMap<String, String>,
-    args: Vec<String>,
-    stdin: Option<String>,
-    seed: Option<f64>,
-    file_system_capacity: Option<f64>,
-    cwd: Option<String>,
-}
 
 /// The JavaScript callbacks of an engine and its sessions, unregistered when
 /// the last of them is freed.
@@ -167,7 +155,7 @@ impl Drop for HookKey {
 pub struct Engine {
     /// Taken while a run uses it.
     engine: Rc<RefCell<Option<sandlang::Engine>>>,
-    files: Files,
+    fs: MemFs,
     interrupt: sandlang::InterruptHandle,
     hooks: Rc<HookKey>,
 }
@@ -181,17 +169,13 @@ impl Engine {
         #[wasm_bindgen(unchecked_param_type = "EngineOptions")] options: JsValue,
         #[wasm_bindgen(unchecked_param_type = "EngineHooks")] hooks: JsValue,
     ) -> Result<Engine, JsValue> {
-        let opts: Options = if options.is_undefined() || options.is_null() {
-            Options::default()
-        } else {
-            check_keys(&options, OPTION_KEYS, "engine option")?;
-            serde_wasm_bindgen::from_value(options.clone()).map_err(|e| error(&format!("invalid engine options: {e}")))?
-        };
+        check_keys(&options, OPTION_KEYS, "engine option")?;
         check_keys(&hooks, &["onOutput", "onPrompt"], "engine hook")?;
-        let cwd = opts.cwd.clone().unwrap_or_else(|| "/".into());
-        let policy = PolicyFile::parse(&opts.policy, Path::new(&cwd)).map_err(policy_error)?;
-        let fs = match opts.file_system_capacity {
-            Some(c) if c.is_finite() && c >= 0.0 => MemFs::with_capacity(c as usize),
+        let cwd = string_option(&options, "cwd")?.unwrap_or_else(|| "/".into());
+        let policy = string_option(&options, "policy")?.unwrap_or_default();
+        let policy = PolicyFile::parse(&policy, Path::new(&cwd)).map_err(policy_error)?;
+        let fs = match number_option(&options, "fileSystemCapacity")? {
+            Some(c) if c >= 0.0 => MemFs::with_capacity(c as usize),
             Some(_) => return Err(error("invalid fileSystemCapacity")),
             None => MemFs::new(),
         };
@@ -204,21 +188,20 @@ impl Engine {
             .limits(policy.limits.clone())
             .memory_fs(fs.clone())
             .cwd(&cwd)
-            .env(opts.env.into_iter().collect())
-            .args(opts.args)
+            .env(string_entries(&options, "env")?)
+            .args(string_list(&options, "args")?)
             .stdout(JsOutput::new(key.0, "stdout"))
             .stderr(JsOutput::new(key.0, "stderr"));
         config = config.prompter(JsPrompter { id: key.0 });
-        if let Some(stdin) = opts.stdin {
+        if let Some(stdin) = string_option(&options, "stdin")? {
             config = config.stdin_bytes(stdin.into_bytes());
         }
-        if let Some(seed) = opts.seed {
+        if let Some(seed) = number_option(&options, "seed")? {
             config = config.seed(seed as u64);
         }
         let engine = sandlang::Engine::new(config);
         let interrupt = engine.interrupt_handle();
-        let files = Files { fs, root: Path::new("/").join(&cwd) };
-        Ok(Engine { engine: Rc::new(RefCell::new(Some(engine))), files, interrupt, hooks: key })
+        Ok(Engine { engine: Rc::new(RefCell::new(Some(engine))), fs, interrupt, hooks: key })
     }
 
     /// Runs a script (`name` names it in messages; default `main.sand`).
@@ -227,7 +210,6 @@ impl Engine {
     #[wasm_bindgen(unchecked_return_type = "Promise<RunResult>")]
     pub fn run(&self, source: String, name: Option<String>) -> js_sys::Promise {
         let slot = self.engine.clone();
-        let files = self.files.clone();
         wasm_bindgen_futures::future_to_promise(async move {
             let name = name.unwrap_or_else(|| "main.sand".into());
             let mut engine = take(&slot)?;
@@ -235,33 +217,33 @@ impl Engine {
             let outcome = engine.run_source(&name, &source).await;
             let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
             *slot.borrow_mut() = Some(engine);
-            let result = match outcome {
-                Ok(o) => RunResult { ok: o.exit_code == 0, exit_code: o.exit_code, error: None, elapsed_ms },
-                Err(e) => {
-                    let exit_code = exit_code(&e);
-                    RunResult { ok: false, exit_code, error: Some(error_info(&e, &name, &source, &files)), elapsed_ms }
-                }
+            let (exit_code, error) = match outcome {
+                Ok(o) => (o.exit_code, JsValue::UNDEFINED),
+                Err(e) => (e.exit_code(), error_info(&e)),
             };
-            to_js(&result)
+            Ok(object(&[
+                ("ok", (exit_code == 0).into()),
+                ("exitCode", exit_code.into()),
+                ("error", error),
+                ("elapsedMs", elapsed_ms.into()),
+            ]))
         })
     }
 
     /// Type checks a script without running it (imports the policy would
-    /// prompt for are refused).
+    /// prompt for are refused) and, if it type checks, lints it.
     #[wasm_bindgen(unchecked_return_type = "CheckResult")]
     pub fn check(&self, source: &str, name: Option<String>) -> Result<JsValue, JsValue> {
         let name = name.unwrap_or_else(|| "main.sand".into());
-        let mut engine = take(&self.engine)?;
-        let r = engine.check_source(&name, source);
+        let engine = take(&self.engine)?;
+        let r = sandlang::lint::check_and_lint(&engine, &name, source);
         *self.engine.borrow_mut() = Some(engine);
-        let result = match r {
-            Ok(warnings) => CheckResult { ok: true, diagnostics: diagnostics(&warnings, &name, source, &self.files), error: None },
-            Err(Error::Compile(errors)) => {
-                CheckResult { ok: false, diagnostics: diagnostics(&errors, &name, source, &self.files), error: None }
-            }
-            Err(e) => CheckResult { ok: false, diagnostics: vec![], error: Some(error_info(&e, &name, source, &self.files)) },
+        let (ok, diagnostics, lint, error) = match r {
+            Ok(warnings) => (true, Array::new().into(), array(&warnings, lint_warning), JsValue::UNDEFINED),
+            Err(Error::Compile(errors)) => (false, array(&errors, diagnostic), Array::new().into(), JsValue::UNDEFINED),
+            Err(e) => (false, Array::new().into(), Array::new().into(), error_info(&e)),
         };
-        to_js(&result)
+        Ok(object(&[("ok", ok.into()), ("diagnostics", diagnostics), ("lint", lint), ("error", error)]))
     }
 
     /// Lint warnings of a script that type checks; throws an `Error` with
@@ -272,12 +254,7 @@ impl Engine {
         let engine = take(&self.engine)?;
         let r = sandlang::lint::lint_source_with(&engine, &name, source);
         *self.engine.borrow_mut() = Some(engine);
-        let warnings: Vec<LintInfo> = r
-            .map_err(|e| error(&e))?
-            .into_iter()
-            .map(|w| LintInfo { code: w.code, message: w.message, line: w.line, column: w.column })
-            .collect();
-        to_js(&warnings)
+        Ok(array(&r.map_err(|e| error(&e))?, lint_warning))
     }
 
     /// Stops the current run (or session input) as soon as it waits or
@@ -293,32 +270,31 @@ impl Engine {
         let engine = engine.as_ref().ok_or_else(|| error("the engine is running"))?;
         let session = engine.session();
         let interrupt = session.interrupt_handle();
-        Ok(Session {
-            session: Rc::new(RefCell::new(Some(session))),
-            files: self.files.clone(),
-            interrupt,
-            hooks: self.hooks.clone(),
-            stop_tasks: Rc::default(),
-        })
+        Ok(Session { session: Rc::new(RefCell::new(Some(session))), interrupt, hooks: self.hooks.clone(), stop_tasks: Rc::default() })
     }
 
     /// Every file of the file system, by path.
     #[wasm_bindgen(unchecked_return_type = "FileEntry[]")]
-    pub fn files(&self) -> Result<JsValue, JsValue> {
-        let files = js_sys::Array::new();
-        for (path, data) in self.files.fs.files() {
-            let entry = js_sys::Object::new();
-            js_sys::Reflect::set(&entry, &"path".into(), &path.display().to_string().into())?;
-            js_sys::Reflect::set(&entry, &"data".into(), &js_sys::Uint8Array::from(data.as_slice()))?;
-            files.push(&entry);
-        }
-        Ok(files.into())
+    pub fn files(&self) -> JsValue {
+        file_entries(self.fs.files())
+    }
+
+    /// A number that grows whenever a file is written or moved (by a
+    /// script or the host), for `changedFiles`.
+    pub fn generation(&self) -> f64 {
+        self.fs.generation() as f64
+    }
+
+    /// The files written or moved since the file system was at `generation`.
+    #[wasm_bindgen(js_name = changedFiles, unchecked_return_type = "FileEntry[]")]
+    pub fn changed_files(&self, generation: f64) -> JsValue {
+        file_entries(self.fs.changed_files(generation as u64))
     }
 
     /// The contents of a file, or `undefined` if there is none.
     #[wasm_bindgen(js_name = readFile)]
     pub fn read_file(&self, path: &str) -> Option<Vec<u8>> {
-        self.files.fs.read(path).ok()
+        self.fs.read(path).ok()
     }
 
     /// Writes a file (text or bytes), creating its directories.
@@ -329,12 +305,12 @@ impl Engine {
         #[wasm_bindgen(unchecked_param_type = "string | Uint8Array")] data: JsValue,
     ) -> Result<(), JsValue> {
         let bytes = file_bytes(&data).ok_or_else(|| error("file contents must be a string or a Uint8Array"))?;
-        self.files.fs.write(path, bytes).map_err(|e| error(&format!("{path}: {e}")))
+        self.fs.write(path, bytes).map_err(|e| error(&format!("{path}: {e}")))
     }
 
     /// Removes a file, or a directory with its contents.
     pub fn remove(&self, path: &str) -> Result<(), JsValue> {
-        self.files.fs.remove(path).map_err(|e| error(&format!("{path}: {e}")))
+        self.fs.remove(path).map_err(|e| error(&format!("{path}: {e}")))
     }
 }
 
@@ -342,7 +318,6 @@ impl Engine {
 #[wasm_bindgen]
 pub struct Session {
     session: Rc<RefCell<Option<sandlang::Session>>>,
-    files: Files,
     interrupt: sandlang::InterruptHandle,
     hooks: Rc<HookKey>,
     /// Ends the `runTasks` in progress.
@@ -358,24 +333,19 @@ impl Session {
     #[wasm_bindgen(unchecked_return_type = "Promise<EvalResult>")]
     pub fn eval(&self, source: String, name: Option<String>) -> js_sys::Promise {
         let slot = self.session.clone();
-        let files = self.files.clone();
         wasm_bindgen_futures::future_to_promise(async move {
             let mut session = take(&slot)?;
             let r = match &name {
                 Some(name) => session.eval_as(name, &source).await,
                 None => session.eval(&source).await,
             };
-            let exit_code = session.exit_code();
+            let exit_code = session.exit_code().map_or(JsValue::UNDEFINED, JsValue::from);
             *slot.borrow_mut() = Some(session);
-            let result = match r {
-                Ok(value) => EvalResult { value, error: None, exit_code },
-                Err(e) => EvalResult {
-                    value: None,
-                    error: Some(error_info(&e, name.as_deref().unwrap_or("<input>"), &source, &files)),
-                    exit_code,
-                },
+            let (value, error) = match r {
+                Ok(value) => (value.map_or(JsValue::UNDEFINED, JsValue::from), JsValue::UNDEFINED),
+                Err(e) => (JsValue::UNDEFINED, error_info(&e)),
             };
-            to_js(&result)
+            Ok(object(&[("value", value), ("error", error), ("exitCode", exit_code)]))
         })
     }
 
@@ -387,24 +357,18 @@ impl Session {
     #[wasm_bindgen(js_name = runTasks, unchecked_return_type = "Promise<{ exitCode?: number }>")]
     pub fn run_tasks(&self) -> js_sys::Promise {
         let slot = self.session.clone();
-        let files = self.files.clone();
         let hook = self.hooks.0;
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         *self.stop_tasks.borrow_mut() = Some(tx);
         wasm_bindgen_futures::future_to_promise(async move {
             let mut session = take(&slot)?;
             let on_error = |e: Error| {
-                let message = error_info(&e, "<task>", "", &files).message;
-                hooks::emit(hook, "stderr", &format!("{}\n(in a background task; all tasks were cancelled)\n", message.trim_end()));
+                hooks::emit(hook, "stderr", &format!("{}(in a background task; all tasks were cancelled)\n", e.render()));
             };
             let stopped = session.run_tasks_until(rx, on_error).await;
             let exit_code = if stopped.is_none() { session.exit_code() } else { None };
             *slot.borrow_mut() = Some(session);
-            let result = js_sys::Object::new();
-            if let Some(code) = exit_code {
-                js_sys::Reflect::set(&result, &"exitCode".into(), &code.into())?;
-            }
-            Ok(result.into())
+            Ok(object(&[("exitCode", exit_code.map_or(JsValue::UNDEFINED, JsValue::from))]))
         })
     }
 
@@ -430,7 +394,7 @@ impl Session {
         let mut session = take(&self.session)?;
         let r = session.type_of(expr);
         *self.session.borrow_mut() = Some(session);
-        r.map_err(|e| error(&error_info(&e, "<type>", expr, &self.files).message))
+        r.map_err(|e| error(e.render().trim_end()))
     }
 
     /// Forgets every input.
@@ -519,74 +483,30 @@ pub fn version() -> String {
 // ----------------------------------------------------------------------
 // Conversions
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RunResult {
-    ok: bool,
-    exit_code: i32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<ErrorInfo>,
-    elapsed_ms: f64,
+/// A JavaScript object with the given properties (`undefined` ones are left out).
+fn object(properties: &[(&str, JsValue)]) -> JsValue {
+    let o = Object::new();
+    for (name, value) in properties {
+        if !value.is_undefined() {
+            let _ = Reflect::set(&o, &(*name).into(), value);
+        }
+    }
+    o.into()
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CheckResult {
-    ok: bool,
-    diagnostics: Vec<DiagnosticInfo>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<ErrorInfo>,
+fn array<T>(items: &[T], f: impl Fn(&T) -> JsValue) -> JsValue {
+    items.iter().map(f).collect::<Array>().into()
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct EvalResult {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    value: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<ErrorInfo>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    exit_code: Option<i32>,
+fn strings(items: &[String]) -> JsValue {
+    array(items, |s| s.into())
 }
 
-#[derive(Serialize)]
-struct ErrorInfo {
-    kind: &'static str,
-    message: String,
-    diagnostics: Vec<DiagnosticInfo>,
-    trace: Vec<Frame>,
-}
-
-#[derive(Serialize)]
-struct Frame {
-    function: String,
-    file: String,
-    line: usize,
-}
-
-#[derive(Serialize)]
-struct DiagnosticInfo {
-    severity: &'static str,
-    code: String,
-    message: String,
-    file: String,
-    line: usize,
-    column: usize,
-    width: usize,
-    notes: Vec<String>,
-    rendered: String,
-}
-
-#[derive(Serialize)]
-struct LintInfo {
-    code: &'static str,
-    message: String,
-    line: usize,
-    column: usize,
-}
-
-fn to_js<T: Serialize>(value: &T) -> Result<JsValue, JsValue> {
-    value.serialize(&serde_wasm_bindgen::Serializer::json_compatible()).map_err(|e| error(&e.to_string()))
+/// `{path, data}` entries.
+fn file_entries(files: Vec<(std::path::PathBuf, Vec<u8>)>) -> JsValue {
+    array(&files, |(path, data)| {
+        object(&[("path", path.display().to_string().into()), ("data", js_sys::Uint8Array::from(data.as_slice()).into())])
+    })
 }
 
 /// A JavaScript `Error`.
@@ -594,17 +514,52 @@ fn error(message: &str) -> JsValue {
     js_sys::Error::new(message).into()
 }
 
+/// `options[name]`, unless it is missing (undefined or null).
+fn option(options: &JsValue, name: &str) -> Result<Option<JsValue>, JsValue> {
+    if options.is_undefined() || options.is_null() {
+        return Ok(None);
+    }
+    let value = Reflect::get(options, &name.into())?;
+    Ok((!value.is_undefined() && !value.is_null()).then_some(value))
+}
+
+fn string_option(options: &JsValue, name: &str) -> Result<Option<String>, JsValue> {
+    option(options, name)?.map(|v| v.as_string().ok_or_else(|| error(&format!("`{name}` must be a string")))).transpose()
+}
+
+fn number_option(options: &JsValue, name: &str) -> Result<Option<f64>, JsValue> {
+    option(options, name)?
+        .map(|v| v.as_f64().filter(|n| n.is_finite()).ok_or_else(|| error(&format!("`{name}` must be a number"))))
+        .transpose()
+}
+
+/// `options[name]`: an array of strings.
+fn string_list(options: &JsValue, name: &str) -> Result<Vec<String>, JsValue> {
+    let Some(list) = option(options, name)? else { return Ok(Vec::new()) };
+    let bad = || error(&format!("`{name}` must be an array of strings"));
+    let list = list.dyn_into::<Array>().map_err(|_| bad())?;
+    list.iter().map(|v| v.as_string().ok_or_else(bad)).collect()
+}
+
+/// `options[name]`: an object whose values are strings.
+fn string_entries(options: &JsValue, name: &str) -> Result<Vec<(String, String)>, JsValue> {
+    let Some(obj) = option(options, name)? else { return Ok(Vec::new()) };
+    let bad = || error(&format!("`{name}` must be an object of strings"));
+    let obj = obj.dyn_into::<Object>().map_err(|_| bad())?;
+    Object::entries(&obj)
+        .iter()
+        .map(|entry| {
+            let pair = Array::from(&entry);
+            Ok((pair.get(0).as_string().ok_or_else(bad)?, pair.get(1).as_string().ok_or_else(bad)?))
+        })
+        .collect()
+}
+
 fn policy_error(errors: Vec<PolicyError>) -> JsValue {
     let lines: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
     let err = js_sys::Error::new(&format!("invalid policy\n{}", lines.join("\n")));
-    let list = js_sys::Array::new();
-    for e in &errors {
-        let o = js_sys::Object::new();
-        let _ = js_sys::Reflect::set(&o, &"line".into(), &(e.line as u32).into());
-        let _ = js_sys::Reflect::set(&o, &"message".into(), &e.message.as_str().into());
-        list.push(&o);
-    }
-    let _ = js_sys::Reflect::set(&err, &"policyErrors".into(), &list);
+    let list = array(&errors, |e| object(&[("line", (e.line as u32).into()), ("message", e.message.as_str().into())]));
+    let _ = Reflect::set(&err, &"policyErrors".into(), &list);
     err.into()
 }
 
@@ -615,10 +570,10 @@ fn take<T>(slot: &RefCell<Option<T>>) -> Result<T, JsValue> {
 
 /// Refuses keys of the object `obj` other than `known`.
 fn check_keys(obj: &JsValue, known: &[&str], what: &str) -> Result<(), JsValue> {
-    let Some(obj) = obj.dyn_ref::<js_sys::Object>() else {
+    let Some(obj) = obj.dyn_ref::<Object>() else {
         return if obj.is_undefined() || obj.is_null() { Ok(()) } else { Err(error(&format!("{what}s must be an object"))) };
     };
-    for key in js_sys::Object::keys(obj) {
+    for key in Object::keys(obj) {
         let key = key.as_string().unwrap_or_default();
         if !known.contains(&key.as_str()) {
             return Err(error(&format!("unknown {what} `{key}` (expected one of: {})", known.join(", "))));
@@ -629,14 +584,7 @@ fn check_keys(obj: &JsValue, known: &[&str], what: &str) -> Result<(), JsValue> 
 
 /// The function `obj[name]`, if any.
 fn function(obj: &JsValue, name: &str) -> Result<Option<js_sys::Function>, JsValue> {
-    if obj.is_undefined() || obj.is_null() {
-        return Ok(None);
-    }
-    let f = js_sys::Reflect::get(obj, &name.into())?;
-    if f.is_undefined() || f.is_null() {
-        return Ok(None);
-    }
-    f.dyn_into::<js_sys::Function>().map(Some).map_err(|_| error(&format!("`{name}` must be a function")))
+    option(obj, name)?.map(|f| f.dyn_into::<js_sys::Function>().map_err(|_| error(&format!("`{name}` must be a function")))).transpose()
 }
 
 /// Text or bytes from JavaScript.
@@ -649,16 +597,10 @@ fn file_bytes(data: &JsValue) -> Option<Vec<u8>> {
 
 /// Writes `options.files` into `fs`.
 fn write_files(fs: &MemFs, options: &JsValue) -> Result<(), JsValue> {
-    if options.is_undefined() || options.is_null() {
-        return Ok(());
-    }
-    let files = js_sys::Reflect::get(options, &"files".into())?;
-    if files.is_undefined() || files.is_null() {
-        return Ok(());
-    }
-    let files = files.dyn_into::<js_sys::Object>().map_err(|_| error("`files` must be an object"))?;
-    for entry in js_sys::Object::entries(&files) {
-        let pair = js_sys::Array::from(&entry);
+    let Some(files) = option(options, "files")? else { return Ok(()) };
+    let files = files.dyn_into::<Object>().map_err(|_| error("`files` must be an object"))?;
+    for entry in Object::entries(&files) {
+        let pair = Array::from(&entry);
         let path = pair.get(0).as_string().unwrap_or_default();
         let data = file_bytes(&pair.get(1)).ok_or_else(|| error(&format!("file {path}: contents must be a string or a Uint8Array")))?;
         fs.write(&path, data).map_err(|e| error(&format!("file {path}: {e}")))?;
@@ -666,66 +608,54 @@ fn write_files(fs: &MemFs, options: &JsValue) -> Result<(), JsValue> {
     Ok(())
 }
 
-/// The exit status `sand run` would have for `e`.
-fn exit_code(e: &Error) -> i32 {
-    match e {
-        Error::Compile(_) | Error::Io(_) => 2,
-        Error::Runtime { .. } => 1,
-        Error::Limit(_) => 3,
-        Error::Interrupted => 130,
-    }
-}
-
-/// An engine's file system and module root, for diagnostics' excerpts.
-#[derive(Clone)]
-struct Files {
-    fs: MemFs,
-    root: std::path::PathBuf,
-}
-
-fn error_info(e: &Error, name: &str, source: &str, fs: &Files) -> ErrorInfo {
+/// A `SandError`.
+fn error_info(e: &Error) -> JsValue {
     let (kind, diagnostics, trace) = match e {
-        Error::Compile(ds) => ("compile", diagnostics(ds, name, source, fs), vec![]),
-        Error::Runtime { trace, .. } => {
-            ("runtime", vec![], trace.iter().map(|t| Frame { function: t.function.clone(), file: t.file.clone(), line: t.line }).collect())
-        }
-        Error::Limit(_) => ("limit", vec![], vec![]),
-        Error::Interrupted => ("interrupted", vec![], vec![]),
-        Error::Io(_) => ("io", vec![], vec![]),
+        Error::Compile(ds) => ("compile", array(ds, diagnostic), Array::new().into()),
+        Error::Runtime { trace, .. } => (
+            "runtime",
+            Array::new().into(),
+            array(trace, |t| {
+                object(&[("function", t.function.as_str().into()), ("file", t.file.as_str().into()), ("line", t.line.into())])
+            }),
+        ),
+        Error::Limit(_) => ("limit", Array::new().into(), Array::new().into()),
+        Error::Interrupted => ("interrupted", Array::new().into(), Array::new().into()),
+        Error::Io(_) => ("io", Array::new().into(), Array::new().into()),
     };
     let message = match e {
-        Error::Compile(_) => diagnostics.iter().map(|d| d.rendered.as_str()).collect(),
+        Error::Compile(_) => e.render(),
         Error::Runtime { message, .. } => format!("panic: {message}"),
         e => e.to_string(),
     };
-    ErrorInfo { kind, message, diagnostics, trace }
+    object(&[
+        ("kind", kind.into()),
+        ("message", message.into()),
+        ("exitCode", e.exit_code().into()),
+        ("diagnostics", diagnostics),
+        ("trace", trace),
+    ])
 }
 
-/// Diagnostics with their rendering (a source excerpt from the main source,
-/// or from the file system for imported modules).
-fn diagnostics(ds: &[Diagnostic], name: &str, source: &str, files: &Files) -> Vec<DiagnosticInfo> {
-    ds.iter()
-        .map(|d| {
-            let text = if d.file == name || d.file.starts_with("<input") || d.file == "<type>" {
-                Some(source.to_string())
-            } else {
-                // Imported modules are named relative to the module root.
-                files.fs.read(files.root.join(&d.file)).ok().and_then(|b| String::from_utf8(b).ok())
-            };
-            DiagnosticInfo {
-                severity: match d.severity {
-                    Severity::Error => "error",
-                    Severity::Warning => "warning",
-                },
-                code: d.code.clone(),
-                message: d.message.clone(),
-                file: d.file.clone(),
-                line: d.line,
-                column: d.column,
-                width: d.width,
-                notes: d.notes.clone(),
-                rendered: d.render(text.as_deref()),
-            }
-        })
-        .collect()
+/// A `Diagnostic`, with its rendering.
+fn diagnostic(d: &Diagnostic) -> JsValue {
+    let severity = match d.severity {
+        Severity::Error => "error",
+        Severity::Warning => "warning",
+    };
+    object(&[
+        ("severity", severity.into()),
+        ("code", d.code.as_str().into()),
+        ("message", d.message.as_str().into()),
+        ("file", d.file.as_str().into()),
+        ("line", d.line.into()),
+        ("column", d.column.into()),
+        ("width", d.width.into()),
+        ("notes", strings(&d.notes)),
+        ("rendered", d.render().into()),
+    ])
+}
+
+fn lint_warning(w: &LintWarning) -> JsValue {
+    object(&[("code", w.code.into()), ("message", w.message.as_str().into()), ("line", w.line.into()), ("column", w.column.into())])
 }

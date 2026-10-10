@@ -12,6 +12,7 @@ SandLang is a sandboxed bytecode interpreter with the following requirements:
 - script module imports
 - native Rust modules with limited type interop
 - extensible standard library written in Rust
+- runs on every major platform: iOS, macOS, Windows, Linux, Android, and Web
 
 Treat every request as though you own the whole codebase and can make any change, anywhere.
 There is zero legacy code to maintain, so every task MUST be approached from first principles.

@@ -99,7 +99,7 @@ fn expressions_show_their_debug_form() {
 fn side_effects_happen_once() {
     let mut r = Repl::new();
     r.ok("print(\"one\")");
-    r.ok("var n = 0\nn += 1\nprint(\"n = {n}\")");
+    r.ok("var n = 0\nn += 1\nprint(\"n = \\(n)\")");
     assert_eq!(r.value("n"), "1");
     assert_eq!(r.value("n"), "1");
     r.ok("print(\"two\")");
@@ -174,14 +174,14 @@ fn traits_and_impls_across_inputs() {
     let mut r = Repl::new();
     r.ok("trait Describe {\n    fn describe(self) -> str\n    fn shout(self) -> str { self.describe().to_upper() }\n}");
     r.ok("struct Cat { name: str }");
-    r.ok("impl Describe for Cat {\n    fn describe(self) -> str { \"cat {self.name}\" }\n}");
+    r.ok("impl Describe for Cat {\n    fn describe(self) -> str { \"cat \\(self.name)\" }\n}");
     assert_eq!(r.value("Cat { name: \"tom\" }.shout()"), "\"CAT TOM\"");
     r.ok("fn all<T: Describe>(xs: [T]) -> [str] { xs.map(x => x.describe()) }");
-    r.ok("impl Describe for int {\n    fn describe(self) -> str { \"int {self}\" }\n}");
+    r.ok("impl Describe for int {\n    fn describe(self) -> str { \"int \\(self)\" }\n}");
     assert_eq!(r.value("all([1, 2])"), "[\"int 1\", \"int 2\"]");
     // An impl can be replaced by a later input; earlier code keeps the old one.
     r.ok("fn describe_one() -> str { 7.describe() }");
-    r.ok("impl Describe for int {\n    fn describe(self) -> str { \"number {self}\" }\n}");
+    r.ok("impl Describe for int {\n    fn describe(self) -> str { \"number \\(self)\" }\n}");
     assert_eq!(r.value("7.describe()"), "\"number 7\"");
     assert_eq!(r.value("all([3])"), "[\"number 3\"]");
     assert_eq!(r.value("describe_one()"), "\"int 7\"");
@@ -222,9 +222,9 @@ fn imports_mid_session() {
     dir.write("geo.sand", "pub fn area(w: float, h: float) -> float { w * h }\nprint(\"geo loaded\")\n");
     let mut r = Repl::with(Config::new().policy(Policy::allow_all()).module_root(dir.path()).cwd(dir.path()));
     r.ok("import json");
-    assert_eq!(r.value("json.stringify(json.parse(\"[1, 2]\")?)"), "\"[1,2]\"");
-    r.ok("from math import sqrt");
-    assert_eq!(r.value("sqrt(16.0)"), "4.0");
+    assert_eq!(r.value("json.encode(json.parse(\"[1, 2]\")?)"), "\"[1,2]\"");
+    r.ok("from math import cbrt");
+    assert_eq!(r.value("cbrt(64.0)"), "4.0");
     r.ok("import \"geo.sand\"");
     assert_eq!(r.take_out(), "geo loaded\n");
     assert_eq!(r.value("geo.area(2.0, 3.0)"), "6.0");
@@ -493,7 +493,9 @@ fn session_future_is_send() {
 
 #[test]
 fn input_completeness() {
-    for complete in ["1 + 2", "let x = [1,\n2]", "fn f() {\n}", "\"a\"", "x?", "s = \"{a}\"", "// c", "", "r\"{\"", "/// Doc.\nfn f() {}"] {
+    for complete in
+        ["1 + 2", "let x = [1,\n2]", "fn f() {\n}", "\"a\"", "x?", "s = \"\\(a)\"", "\"{\"", "// c", "", "r\"{\"", "/// Doc.\nfn f() {}"]
+    {
         assert!(Session::is_complete(complete), "{complete:?}");
     }
     for incomplete in [
@@ -501,6 +503,9 @@ fn input_completeness() {
         "[1,",
         "foo(",
         "\"abc",
+        // An open interpolation keeps the input open.
+        "print(\"a \\(x",
+        "print(\"a \\(f(x,",
         "\"\"\"\nabc",
         "/* c",
         "1 +",

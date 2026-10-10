@@ -106,7 +106,7 @@ pub struct Client {
         let (host, path) = if self.path_style {
             (host_base, "/" + bucket + (if key.is_empty() { "" } else { "/" + key }))
         } else {
-            ("{bucket}.{host_base}", "/" + key)
+            ("\(bucket).\(host_base)", "/" + key)
         }
         let request = SignedRequest {
             method,
@@ -117,7 +117,7 @@ pub struct Client {
             payload: body,
         }
         let headers = sign(request, self.credentials, self.region, time.now())
-        var url = "{base.scheme}://{host}{uri.encode_path(path)}"
+        var url = "\(base.scheme)://\(host)\(uri.encode_path(path))"
         if not query.is_empty() {
             url += "?" + canonical_query(query)
         }
@@ -153,9 +153,9 @@ fn check(resp: http.Response) -> Result<http.Response> {
         return Ok(resp)
     }
     let text = resp.text() ?? ""
-    let code = xml_text(text, "Code") ?? "HTTP{resp.status}"
-    let message = xml_text(text, "Message") ?? "request failed with status {resp.status}"
-    Err(error("{code}: {message}", kind: "http"))
+    let code = xml_text(text, "Code") ?? "HTTP\(resp.status)"
+    let message = xml_text(text, "Message") ?? "request failed with status \(resp.status)"
+    Err(error("\(code): \(message)", kind: "http"))
 }
 
 fn hex_sha256(data: bytes) -> str { crypto.sha256(data).to_hex() }
@@ -166,7 +166,7 @@ pub fn canonical_query(query: [(str, str)]) -> str {
     query
         .map(p => (uri.encode_component(p.0), uri.encode_component(p.1)))
         .sorted()
-        .map(p => "{p.0}={p.1}")
+        .map(p => "\(p.0)=\(p.1)")
         .join("&")
 }
 
@@ -188,32 +188,32 @@ pub fn sign(req: SignedRequest, creds: Credentials, region: str, now: time.DateT
     }
 
     let names = headers.keys().sorted()
-    let canonical_headers = names.map(n => "{n}:{headers[n]}\n").join()
-    let signed_headers = ";".join(names)
-    let canonical_request = "\n".join([
+    let canonical_headers = names.map(n => "\(n):\(headers[n])\n").join()
+    let signed_headers = names.join(";")
+    let canonical_request = [
         req.method,
         uri.encode_path(req.path),
         canonical_query(req.query),
         canonical_headers,
         signed_headers,
         payload_hash,
-    ])
+    ].join("\n")
 
-    let scope = "{date}/{region}/s3/aws4_request"
-    let string_to_sign = "\n".join([
+    let scope = "\(date)/\(region)/s3/aws4_request"
+    let string_to_sign = [
         "AWS4-HMAC-SHA256",
         amz_date,
         scope,
         hex_sha256(canonical_request.bytes()),
-    ])
+    ].join("\n")
 
-    let k_date = hmac("AWS4{creds.secret_key}".bytes(), date)
+    let k_date = hmac("AWS4\(creds.secret_key)".bytes(), date)
     let k_region = hmac(k_date, region)
     let k_service = hmac(k_region, "s3")
     let k_signing = hmac(k_service, "aws4_request")
     let signature = hmac(k_signing, string_to_sign).to_hex()
 
-    headers["authorization"] = "AWS4-HMAC-SHA256 Credential={creds.access_key}/{scope}, SignedHeaders={signed_headers}, Signature={signature}"
+    headers["authorization"] = "AWS4-HMAC-SHA256 Credential=\(creds.access_key)/\(scope), SignedHeaders=\(signed_headers), Signature=\(signature)"
     headers.remove("host")
     headers
 }
@@ -222,7 +222,7 @@ pub fn sign(req: SignedRequest, creds: Credentials, region: str, now: time.DateT
 // Just enough XML for S3 responses.
 
 fn xml_blocks(xml: str, tag: str) -> [str] {
-    let re = regex.new("(?s)<{tag}>(.*?)</{tag}>").unwrap()
+    let re = regex.new("(?s)<\(tag)>(.*?)</\(tag)>").unwrap()
     re.captures_all(xml).filter_map(c => c.text(1))
 }
 

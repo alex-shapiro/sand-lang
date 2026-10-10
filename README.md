@@ -21,8 +21,8 @@ fn fetch(url: str) -> Result<Page> {
 let pages = ["https://example.com", "https://example.org"].map(u => spawn fetch(u))
 for p in task.all(pages) {
     match p {
-        Ok(page) => print("{page.url}: {page.title ?? "(no title)"}")
-        Err(e) => eprint("failed: {e}")
+        Ok(page) => print("\(page.url): \(page.title ?? "(no title)")")
+        Err(e) => eprint("failed: \(e)")
     }
 }
 ```
@@ -38,6 +38,8 @@ for p in task.all(pages) {
 
 ## Command line
 
+The `sand` command is the `sand-cli` package (`cli/`): `cargo install --path cli`.
+
 ```
 sand run script.sand --allow-read=./data --allow-net=api.example.com -- arg1 arg2
 sand run script.sand --policy=app.policy   # rules and limits from a policy file
@@ -45,14 +47,15 @@ sand run script.sand --prompt          # ask on the terminal for each new access
 sand run script.sand --allow-net='*' --allow-private-net   # also reach localhost/LAN addresses
 sand check script.sand                 # type check
 sand lint script.sand                  # warnings
-sand fmt script.sand [--check]         # format
+sand fmt script.sand [--check]         # format (`sand fmt -`: standard input to output)
 sand test script.sand                  # run `test "..." { }` blocks
 sand repl --allow-read=.               # interactive session (run options apply)
 sand playground                        # the web playground on localhost (see below)
 ```
 
 Limits: `--max-memory=256M --max-time=10s --max-cpu=2s --max-instructions=N --max-compile-fuel=N`.
-Exit codes: the script's exit code; 1 runtime error; 2 compile error; 3 limit.
+Exit codes: the script's exit code; 1 runtime error; 2 compile error (also
+for `sand check`); 3 limit; 130 interrupted.
 
 A policy file says the same as the options, one rule per line
 ([`docs/SPEC.md` §14.7](docs/SPEC.md)):
@@ -95,7 +98,8 @@ session.eval("import geo\nlet d = geo.dist(3.0, 4.0)").await?;
 assert_eq!(session.eval("d * 2.0").await?, Some("10.0".to_string()));
 ```
 
-Without the default `os` feature the engine cannot reach the operating
+The library's default feature is `os`; `tls` adds TLS for `https` and
+`net.connect_tls`. Without `os` the engine cannot reach the operating
 system at all (no host files, sockets, environment or standard input):
 scripts see an in-memory file system the host fills and reads back, which
 any engine can also be given with `Config::memory_fs(MemFs)`.
@@ -124,14 +128,13 @@ See [`playground/README.md`](playground/README.md).
 ## Tests
 
 ```
-cargo test                        # spec, API, sandbox, examples, property and fuzz tests
-cargo test --no-default-features  # the engine without operating-system access
-wasm/build.sh nodejs target/wasm-node   # (needs wasm-bindgen-cli; the script says which)
-node --test wasm/tests/           # the WebAssembly build and the playground's examples
-cargo bench                       # VM benchmarks
-cargo +nightly fuzz run compile   # coverage-guided fuzzing (fuzz/)
-python3.14 bench/examples/run.py  # the examples against CPython ports (after cargo build --release)
+cargo test                                     # library and cli, with TLS
+cargo test -p sandlang --no-default-features   # engine without operating-system access
+wasm/build.sh nodejs target/wasm-node          # needs wasm-bindgen-cli
+node --test wasm/tests/                        # wasm build and the playground examples
+cargo bench                                    # VM and front-end benchmarks
+cargo +nightly fuzz run compile                # coverage-guided fuzzing
+python3.14 bench/examples/run.py               # examples vs CPython 3.14 ports
 ```
 
-CI (`.github/workflows/ci.yml`) runs `cargo fmt --check`, `cargo clippy` and
-`cargo test` on Linux, macOS and Windows.
+CI runs `cargo fmt --check`, `cargo clippy`, and `cargo test` on macOS, Windows, Linux, and WebAssembly.

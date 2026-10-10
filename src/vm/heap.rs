@@ -173,6 +173,94 @@ pub struct Heap {
     pub incremental: bool,
 }
 
+/// New objects being built by [`Heap::staged`]. Their handles are taken in
+/// advance from the heap's free list (which cannot change while it is
+/// borrowed) and then past the end of the arena, exactly as `Heap::alloc`
+/// would take them.
+pub struct Staging<'h> {
+    heap: &'h Heap,
+    /// The next free slot (`NONE`: none left).
+    free: u32,
+    /// The next slot past the end of the arena.
+    end: usize,
+    objs: Vec<(u32, Obj)>,
+    /// Accounted size of the staged objects.
+    bytes: usize,
+}
+
+impl Staging<'_> {
+    /// Stages `obj`, returning the value it will have.
+    pub fn alloc(&mut self, obj: Obj) -> Value {
+        self.bytes += obj.size();
+        let h = if self.free != NONE {
+            let h = self.free;
+            self.free = match self.heap.objs[h as usize] {
+                Obj::Free(next) => next,
+                _ => unreachable!("corrupt free list"),
+            };
+            h
+        } else {
+            self.end += 1;
+            (self.end - 1) as u32
+        };
+        self.objs.push((h, obj));
+        Value::Obj(h)
+    }
+
+    pub fn new_str(&mut self, s: impl Into<Box<str>>) -> Value {
+        self.alloc(Obj::Str(s.into()))
+    }
+
+    pub fn new_bytes(&mut self, b: impl Into<Box<[u8]>>) -> Value {
+        self.alloc(Obj::Bytes(b.into()))
+    }
+
+    pub fn new_list(&mut self, items: Vec<Value>) -> Value {
+        self.alloc(Obj::List(items))
+    }
+
+    pub fn new_tuple(&mut self, items: Vec<Value>) -> Value {
+        self.alloc(Obj::Tuple(items.into_boxed_slice()))
+    }
+
+    /// [`Heap::new_variant`], staged.
+    pub fn new_variant(&mut self, id: u32, fields: &[Value]) -> Value {
+        match fields {
+            [] => Value::Tag(id),
+            [p] => match Value::variant1(id, *p) {
+                Some(v) => v,
+                None => self.alloc(Obj::Variant(id, Box::new([*p]))),
+            },
+            _ => self.alloc(Obj::Variant(id, fields.into())),
+        }
+    }
+
+    /// Whether `extra` more bytes, besides those staged, would exceed the
+    /// memory limit of the heap.
+    pub fn would_exceed(&self, extra: usize) -> bool {
+        self.heap.would_exceed(self.bytes.saturating_add(extra))
+    }
+
+    /// Fails with the memory limit if `extra` more bytes do not fit.
+    pub fn reserve(&self, extra: usize) -> Result<(), crate::vm::Ctl> {
+        if self.would_exceed(extra) { Err(crate::vm::Ctl::limit(LimitKind::Memory)) } else { Ok(()) }
+    }
+
+    /// Makes room for `n` more staged objects.
+    pub fn expect(&mut self, n: usize) {
+        self.objs.reserve(n);
+    }
+
+    /// The number of objects staged.
+    pub fn len(&self) -> usize {
+        self.objs.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.objs.is_empty()
+    }
+}
+
 /// The parts of an old list that may hold young values.
 #[derive(Default)]
 struct DirtyList {
@@ -289,6 +377,24 @@ impl Heap {
         Value::Obj(h)
     }
 
+    /// Runs `f` with read access to the heap and a [`Staging`] area for new
+    /// objects, which are added to the heap when `f` returns. Natives use it
+    /// to build values from the contents of others (`split`, `lines`, JSON
+    /// parsing, regex matches) without first copying those contents out of
+    /// the heap. The values `Staging::alloc` returns are valid once `f` has
+    /// returned (they may be stored in other staged objects meanwhile).
+    pub fn staged<R>(&mut self, f: impl FnOnce(&Heap, &mut Staging<'_>) -> R) -> R {
+        let mut st = Staging { heap: self, free: self.free_head, end: self.objs.len(), objs: Vec::new(), bytes: 0 };
+        let r = f(self, &mut st);
+        let (free, objs) = (st.free, st.objs);
+        for (h, obj) in objs {
+            let v = self.alloc(obj);
+            debug_assert_eq!(v, Value::Obj(h), "staged handles follow the free list, then the arena's end");
+        }
+        debug_assert_eq!(self.free_head, free);
+        r
+    }
+
     /// True if a collection should run at the next safe point.
     #[inline]
     pub fn wants_gc(&self) -> bool {
@@ -383,7 +489,13 @@ impl Heap {
     /// covers buffers reserved by pending I/O).
     pub fn would_exceed(&self, extra: usize) -> bool {
         match self.limit {
-            Some(l) => self.used().saturating_add(self.io_memory.reserved()).saturating_add(extra) > l,
+            Some(l) => {
+                let used = self.used();
+                // (Every check before the heap grows keeps the size that
+                // pending I/O checks against up to date.)
+                self.io_memory.publish_heap(used);
+                used.saturating_add(self.io_memory.reserved()).saturating_add(extra) > l
+            }
             None => extra > super::iomem::UNLIMITED,
         }
     }
@@ -527,6 +639,37 @@ impl Heap {
         Ok(self.alloc(Obj::StrBuf(text)))
     }
 
+    /// `Op::AppendInterp`: appends `text` to `cur` like [`Heap::append_str`].
+    pub fn append_text(&mut self, cur: Value, text: &str) -> Result<Value, LimitKind> {
+        if let Value::Obj(h) = cur
+            && let Obj::StrBuf(buf) = &mut self.objs[h as usize]
+        {
+            let (len, cap) = (buf.len(), buf.capacity());
+            if len + text.len() <= cap {
+                buf.push_str(text);
+                return Ok(cur);
+            }
+            let grow = (len + text.len()).max(2 * cap) - cap;
+            if self.would_exceed(grow) {
+                return Err(LimitKind::Memory);
+            }
+            let Obj::StrBuf(buf) = &mut self.objs[h as usize] else { unreachable!() };
+            buf.reserve_exact(cap + grow - len);
+            buf.push_str(text);
+            self.bytes += buf.capacity() - cap;
+            return Ok(cur);
+        }
+        let len = self.str(cur).len();
+        let cap = (2 * (len + text.len())).max(16);
+        if self.would_exceed(cap) {
+            return Err(LimitKind::Memory);
+        }
+        let mut buf = String::with_capacity(cap);
+        buf.push_str(self.str(cur));
+        buf.push_str(text);
+        Ok(self.alloc(Obj::StrBuf(buf)))
+    }
+
     /// `Op::FreezeStr`: turns string buffer `v` into an ordinary string.
     #[inline]
     pub fn freeze_str(&mut self, v: Value) {
@@ -619,6 +762,19 @@ impl Heap {
         match v {
             Value::Obj(h) => match &mut self.objs[h as usize] {
                 Obj::IterFn(src) => Some(src),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The pins of map or set `v`, to update them: they are not values, so
+    /// no write barrier is needed.
+    pub fn pins_mut(&mut self, v: Value) -> Option<&mut Pins> {
+        match v {
+            Value::Obj(h) => match &mut self.objs[h as usize] {
+                Obj::Map(m) => Some(&mut m.pins),
+                Obj::Set(s) => Some(&mut s.pins),
                 _ => None,
             },
             _ => None,
@@ -1151,6 +1307,14 @@ fn chunk_children(obj: &Obj, start: usize, out: &mut Vec<Value>) -> Option<usize
             out.extend(s.entries[r].iter().flatten());
             next
         }
+        Obj::Channel(c) => {
+            let (r, next) = chunk(c.queue.len());
+            out.extend(c.queue.range(r));
+            if start == 0 {
+                out.extend(c.senders.iter().map(|&(_, _, v)| v));
+            }
+            next
+        }
         _ => {
             if start == 0 {
                 obj.children(|v| out.push(v));
@@ -1163,6 +1327,26 @@ fn chunk_children(obj: &Obj, start: usize, out: &mut Vec<Value>) -> Option<usize
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn staged_objects_get_the_handles_promised() {
+        let mut heap = Heap::new(None);
+        let a = heap.new_str("a");
+        let b = heap.new_str("b");
+        heap.collect([b], true);
+        // `a`'s slot is free: the first staged object takes it, the next
+        // ones new slots, as `alloc` would.
+        let (s, l) = heap.staged(|h, st| {
+            let s = st.new_str(h.str(b).repeat(3));
+            let l = st.new_list(vec![s, b]);
+            (s, l)
+        });
+        assert_eq!(heap.str(s), "bbb");
+        assert_eq!(heap.list(l), &[s, b]);
+        assert_eq!(s, a, "the free slot is reused");
+        let c = heap.new_str("c");
+        assert_eq!(c.handle(), l.handle().map(|h| h + 1));
+    }
 
     #[test]
     fn dirty_index_lists_stay_small() {

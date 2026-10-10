@@ -1,5 +1,6 @@
 //! Runtime values and heap objects.
 
+use hashbrown::HashTable;
 use std::any::Any;
 use std::collections::{HashMap, VecDeque};
 use std::hash::{BuildHasher, Hasher};
@@ -275,139 +276,192 @@ impl BuildHasher for FxBuild {
 
 pub type FxHashMap<K, V> = HashMap<K, V, FxBuild>;
 
-/// An owned, hashable copy of a key value.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum HKey {
-    Unit,
-    Bool(bool),
-    Int(i64),
-    Dur(i64),
-    Str(Box<str>),
-    Bytes(Box<[u8]>),
-    Tag(u32),
-    Range(i64, i64, bool),
-    Tuple(Box<[HKey]>),
-    Variant(u32, Box<[HKey]>),
-    Struct(u32, Box<[HKey]>),
-    /// Identity of an object (tasks, channels).
-    Ident(u32),
+/// The hash index of a map or set: the slots of its entries, found by the
+/// hash of their keys (`compare::hash_key`).
+///
+/// Keys are never copied: `Hash` types are deeply immutable (spec §5.6), so a
+/// key is hashed and compared where it lives on the heap. Each table entry
+/// packs the slot (low 32 bits) with a 32-bit tag of the key's hash (high
+/// bits), which is enough to grow the table without rehashing any key and
+/// rejects almost every mismatch before the keys themselves are compared.
+#[derive(Clone, Default)]
+pub struct KeyTable {
+    table: HashTable<u64>,
 }
 
-/// Key index specialised for the common key types.
-#[derive(Debug, Default)]
-pub enum KeyIndex {
-    #[default]
-    Empty,
-    Int(FxHashMap<i64, usize>),
-    Str(FxHashMap<Box<str>, usize>),
-    Other(FxHashMap<HKey, usize>),
+impl std::fmt::Debug for KeyTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "KeyTable({})", self.table.len())
+    }
 }
 
-/// An insertion-ordered hash map.
-#[derive(Debug, Default)]
-pub struct MapObj {
-    pub index: KeyIndex,
-    pub entries: Vec<Option<(Value, Value)>>,
-    pub live: usize,
-    /// Bytes owned by the copies of the keys in `index` (strings, nested
-    /// key nodes), besides a fixed per-entry cost.
-    pub key_bytes: usize,
+/// Whether a map or set can hold an entry (live or removed) at `slot`:
+/// slots are stored in 32 bits.
+#[inline]
+pub fn slot_fits(slot: usize) -> bool {
+    u32::try_from(slot).is_ok()
 }
 
-/// An insertion-ordered hash set.
-#[derive(Debug, Default)]
-pub struct SetObj {
-    pub index: KeyIndex,
-    pub entries: Vec<Option<Value>>,
-    pub live: usize,
-    /// See [`MapObj::key_bytes`].
-    pub key_bytes: usize,
+/// Bytes per bucket of a [`KeyTable`] (an entry and a control byte).
+const TABLE_BUCKET_SIZE: usize = 9;
+
+#[inline]
+fn hash_tag(hash: u64) -> u32 {
+    (hash ^ (hash >> 32)) as u32
 }
 
-/// Key lookup argument: borrowed for the fast paths.
-pub enum KeyRef<'a> {
-    Int(i64),
-    Str(&'a str),
-    Other(HKey),
+/// The table hash of a tag: its bits spread over 64 (hashbrown picks the
+/// bucket from the low bits and the control byte from the top 7).
+#[inline]
+fn tag_hash(tag: u32) -> u64 {
+    (tag as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
 }
 
-impl KeyIndex {
-    pub fn get(&self, k: &KeyRef) -> Option<usize> {
-        match (self, k) {
-            (KeyIndex::Empty, _) => None,
-            (KeyIndex::Int(m), KeyRef::Int(i)) => m.get(i).copied(),
-            (KeyIndex::Str(m), KeyRef::Str(s)) => m.get(*s).copied(),
-            (KeyIndex::Other(m), KeyRef::Other(h)) => m.get(h).copied(),
-            (KeyIndex::Other(m), KeyRef::Int(i)) => m.get(&HKey::Int(*i)).copied(),
-            (KeyIndex::Other(m), KeyRef::Str(s)) => m.get(&HKey::Str((*s).into())).copied(),
-            _ => None,
+#[inline]
+fn entry_slot(e: u64) -> usize {
+    e as u32 as usize
+}
+
+#[inline]
+fn entry_tag(e: u64) -> u32 {
+    (e >> 32) as u32
+}
+
+impl KeyTable {
+    /// The slot whose key has hash `hash` and satisfies `eq(slot)`.
+    #[inline]
+    pub fn find(&self, hash: u64, mut eq: impl FnMut(usize) -> bool) -> Option<usize> {
+        let tag = hash_tag(hash);
+        self.table.find(tag_hash(tag), |&e| entry_tag(e) == tag && eq(entry_slot(e))).map(|&e| entry_slot(e))
+    }
+
+    /// Adds `slot` (see [`slot_fits`]) for a key with hash `hash` that is not
+    /// in the table.
+    #[inline]
+    pub fn insert(&mut self, hash: u64, slot: usize) {
+        debug_assert!(slot_fits(slot));
+        let tag = hash_tag(hash);
+        self.table.insert_unique(tag_hash(tag), (tag as u64) << 32 | slot as u64, |&e| tag_hash(entry_tag(e)));
+    }
+
+    /// Removes and returns the slot whose key has hash `hash` and satisfies `eq(slot)`.
+    pub fn remove(&mut self, hash: u64, mut eq: impl FnMut(usize) -> bool) -> Option<usize> {
+        let tag = hash_tag(hash);
+        match self.table.find_entry(tag_hash(tag), |&e| entry_tag(e) == tag && eq(entry_slot(e))) {
+            Ok(entry) => Some(entry_slot(entry.remove().0)),
+            Err(_) => None,
         }
     }
 
-    pub fn insert(&mut self, k: KeyRef, slot: usize) {
-        if let KeyIndex::Empty = self {
-            *self = match &k {
-                KeyRef::Int(_) => KeyIndex::Int(FxHashMap::default()),
-                KeyRef::Str(_) => KeyIndex::Str(FxHashMap::default()),
-                KeyRef::Other(_) => KeyIndex::Other(FxHashMap::default()),
-            };
-        }
-        match (self, k) {
-            (KeyIndex::Int(m), KeyRef::Int(i)) => {
-                m.insert(i, slot);
-            }
-            (KeyIndex::Str(m), KeyRef::Str(s)) => {
-                m.insert(s.into(), slot);
-            }
-            (KeyIndex::Other(m), KeyRef::Other(h)) => {
-                m.insert(h, slot);
-            }
-            (KeyIndex::Other(m), KeyRef::Int(i)) => {
-                m.insert(HKey::Int(i), slot);
-            }
-            (KeyIndex::Other(m), KeyRef::Str(s)) => {
-                m.insert(HKey::Str(s.into()), slot);
-            }
-            _ => {}
+    /// Renumbers the slots after the entries were compacted.
+    pub fn renumber(&mut self, f: impl Fn(usize) -> usize) {
+        for e in self.table.iter_mut() {
+            *e = (*e & !(u32::MAX as u64)) | f(entry_slot(*e)) as u64;
         }
     }
 
-    pub fn remove(&mut self, k: &KeyRef) -> Option<usize> {
-        match (self, k) {
-            (KeyIndex::Int(m), KeyRef::Int(i)) => m.remove(i),
-            (KeyIndex::Str(m), KeyRef::Str(s)) => m.remove(*s),
-            (KeyIndex::Other(m), KeyRef::Other(h)) => m.remove(h),
-            (KeyIndex::Other(m), KeyRef::Int(i)) => m.remove(&HKey::Int(*i)),
-            (KeyIndex::Other(m), KeyRef::Str(s)) => m.remove(&HKey::Str((*s).into())),
-            _ => None,
-        }
+    /// Makes room for `extra` more keys.
+    pub fn reserve(&mut self, extra: usize) {
+        self.table.reserve(extra, |&e| tag_hash(entry_tag(e)));
     }
 
     pub fn clear(&mut self) {
-        *self = KeyIndex::Empty;
+        self.table = HashTable::new();
     }
 
     pub fn len(&self) -> usize {
-        match self {
-            KeyIndex::Empty => 0,
-            KeyIndex::Int(m) => m.len(),
-            KeyIndex::Str(m) => m.len(),
-            KeyIndex::Other(m) => m.len(),
-        }
+        self.table.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.table.is_empty()
     }
 
-    /// Rebuilds slot numbers after compaction.
-    pub fn renumber(&mut self, f: impl Fn(usize) -> usize) {
-        match self {
-            KeyIndex::Empty => {}
-            KeyIndex::Int(m) => m.values_mut().for_each(|v| *v = f(*v)),
-            KeyIndex::Str(m) => m.values_mut().for_each(|v| *v = f(*v)),
-            KeyIndex::Other(m) => m.values_mut().for_each(|v| *v = f(*v)),
+    /// The memory the table owns.
+    pub fn bytes(&self) -> usize {
+        // A table of n buckets allocates n entries and n + 16 control bytes.
+        match self.table.capacity() {
+            0 => 0,
+            cap => (cap * 8 / 7).next_power_of_two() * TABLE_BUCKET_SIZE + 16,
         }
+    }
+}
+
+/// Removes the tombstones of `entries` if they are more than half of them,
+/// renumbering `table`.
+pub fn compact_entries<T: Copy>(entries: &mut Vec<Option<T>>, live: usize, table: &mut KeyTable) {
+    if entries.len() <= 32 || live * 2 >= entries.len() {
+        return;
+    }
+    let mut remap = vec![u32::MAX; entries.len()];
+    let mut fresh = Vec::with_capacity(live);
+    for (i, e) in entries.iter().enumerate() {
+        if let Some(e) = e {
+            remap[i] = fresh.len() as u32;
+            fresh.push(Some(*e));
+        }
+    }
+    *entries = fresh;
+    table.renumber(|i| remap[i] as usize);
+}
+
+/// An insertion-ordered hash map: entries in insertion order (`None` for
+/// removed ones, compacted when they are the majority), indexed by key.
+///
+/// Iterators read the entries in place while the map is unchanged; every
+/// change first calls `Vm::unpin`, which moves the iterators still reading
+/// it (its `pins`) to a copy of the entries (see `vm/iter.rs`).
+#[derive(Debug, Default, Clone)]
+pub struct MapObj {
+    pub index: KeyTable,
+    pub entries: Vec<Option<(Value, Value)>>,
+    pub live: usize,
+    pub pins: Pins,
+}
+
+/// An insertion-ordered hash set (see [`MapObj`]).
+#[derive(Debug, Default, Clone)]
+pub struct SetObj {
+    pub index: KeyTable,
+    pub entries: Vec<Option<Value>>,
+    pub live: usize,
+    pub pins: Pins,
+}
+
+/// The iterators that may be reading a map or set in place: handles of
+/// `Obj::IterFn`s, held weakly (not traced). A handle is stale once its
+/// iterator is exhausted, has moved to a copy, or was collected (and its
+/// slot maybe reused): `Vm::unpin` checks each one is still an iterator
+/// reading this object in place. A copy of the map or set has no pins.
+#[derive(Debug, Default)]
+pub struct Pins {
+    pub its: Vec<u32>,
+    /// Stale handles are dropped when `its` reaches this length.
+    pub prune_at: usize,
+}
+
+impl Clone for Pins {
+    fn clone(&self) -> Pins {
+        Pins::default()
+    }
+}
+
+impl Pins {
+    /// The memory the pins own.
+    pub fn bytes(&self) -> usize {
+        self.its.capacity() * std::mem::size_of::<u32>()
+    }
+}
+
+impl MapObj {
+    pub fn clear(&mut self) {
+        *self = MapObj::default();
+    }
+}
+
+impl SetObj {
+    pub fn clear(&mut self) {
+        *self = SetObj::default();
     }
 }
 
@@ -531,6 +585,13 @@ pub enum IterSrc {
     Range { i: i64, end: i64 },
     /// The characters of string `s` (a heap handle) from byte offset `i`.
     Chars { s: u32, i: i64 },
+    /// The (key, value) entries of map `map` (a heap handle: the map
+    /// itself, pinned, or a copy of its entries) from slot `slot` on.
+    Map { map: u32, slot: usize },
+    /// The elements of set `set` (as for `Map`) from slot `slot` on.
+    Set { set: u32, slot: usize },
+    /// An exhausted map or set iterator.
+    Done,
 }
 
 pub enum Obj {
@@ -549,8 +610,9 @@ pub enum Obj {
     Variant(u32, Box<[Value]>),
     Closure(u32, Box<[Value]>),
     NativeFn(u32),
-    /// The `next` function of the iterator of a list, range or string: a
-    /// function value (`fn() -> T?`) that the interpreter steps directly.
+    /// The `next` function of the iterator of a list, range, string, map
+    /// or set: a function value (`fn() -> T?`) that the interpreter steps
+    /// directly.
     IterFn(IterSrc),
     Cell(Value),
     Range(i64, i64, bool),
@@ -591,9 +653,10 @@ const VALUE_SIZE: usize = std::mem::size_of::<Value>();
 // Objects are kept small.
 const _: () = assert!(std::mem::size_of::<Obj>() == 32);
 
-/// Fixed cost of an entry of a map's or set's key index (the key's own
-/// allocations are counted in `key_bytes`).
-pub const INDEX_ENTRY_SIZE: usize = 48;
+/// Bytes of an entry of a map (`Option<(Value, Value)>`).
+pub const MAP_ENTRY_SIZE: usize = std::mem::size_of::<Option<(Value, Value)>>();
+/// Bytes of an entry of a set (`Option<Value>`).
+pub const SET_ENTRY_SIZE: usize = std::mem::size_of::<Option<Value>>();
 
 impl Obj {
     /// Approximate memory footprint in bytes.
@@ -605,8 +668,8 @@ impl Obj {
             Obj::StrBuf(s) => s.capacity(),
             Obj::Bytes(b) => b.len(),
             Obj::List(l) => l.capacity() * VALUE_SIZE,
-            Obj::Map(m) => m.entries.capacity() * (2 * VALUE_SIZE + 8) + m.index.len() * INDEX_ENTRY_SIZE + m.key_bytes,
-            Obj::Set(s) => s.entries.capacity() * (VALUE_SIZE + 8) + s.index.len() * INDEX_ENTRY_SIZE + s.key_bytes,
+            Obj::Map(m) => m.entries.capacity() * MAP_ENTRY_SIZE + m.index.bytes() + m.pins.bytes(),
+            Obj::Set(s) => s.entries.capacity() * SET_ENTRY_SIZE + s.index.bytes() + s.pins.bytes(),
             Obj::Tuple(t) | Obj::Struct(_, t) | Obj::Variant(_, t) | Obj::Closure(_, t) => t.len() * VALUE_SIZE,
             Obj::IterFn(_) => 0,
             Obj::Task(_) => 32,
@@ -635,8 +698,10 @@ impl Obj {
             Obj::Tuple(t) | Obj::Struct(_, t) | Obj::Variant(_, t) | Obj::Closure(_, t) => t.iter().for_each(|v| f(*v)),
             Obj::Cell(v) => f(*v),
             Obj::IterFn(it) => match *it {
-                IterSrc::List { list: h, .. } | IterSrc::Chars { s: h, .. } => f(Value::Obj(h)),
-                IterSrc::Range { .. } => {}
+                IterSrc::List { list: h, .. } | IterSrc::Chars { s: h, .. } | IterSrc::Map { map: h, .. } | IterSrc::Set { set: h, .. } => {
+                    f(Value::Obj(h))
+                }
+                IterSrc::Range { .. } | IterSrc::Done => {}
             },
             Obj::Task(t) => f(t.result),
             Obj::Channel(c) => {

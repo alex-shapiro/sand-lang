@@ -14,7 +14,7 @@ true
 
 === functions
 import math
-print(math.sqrt(2.0))
+print(2.0.sqrt())
 print(math.cbrt(27.0))
 print(math.exp(0.0))
 print(math.ln(math.e))
@@ -25,15 +25,15 @@ print(math.sin(0.0))
 print(math.cos(0.0))
 print(math.atan2(1.0, 1.0) * 4.0)
 print(math.hypot(3.0, 4.0))
-print(math.floor(-1.5))
-print(math.ceil(-1.5))
-print(math.round(2.5))
-print(math.trunc(-2.7))
-print(math.abs(-3.0))
-print(math.pow(2.0, 10.0))
-print(math.min(1.0, 2.0))
-print(math.max(1.0, 2.0))
-print(math.clamp(5.0, 0.0, 1.0))
+print((-1.5).floor())
+print((-1.5).ceil())
+print(2.5.round())
+print((-2.7).trunc())
+print((-3.0).abs())
+print(2.0.pow(10.0))
+print(1.0.min(2.0))
+print(1.0.max(2.0))
+print(5.0.clamp(0.0, 1.0))
 print(math.to_degrees(math.pi))
 print(math.to_radians(180.0))
 --- stdout
@@ -78,17 +78,11 @@ print(math.gcd(12, 18))
 print(math.gcd(-4, 6))
 print(math.lcm(4, 6))
 print(math.isqrt(17))
-print(math.abs_int(-4))
-print(math.min_int(3, -3))
-print(math.max_int(3, -3))
 --- stdout
 6
 2
 12
 4
-4
--3
-3
 
 === isqrt of negative panics
 import math

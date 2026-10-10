@@ -126,7 +126,7 @@ const TOKENS: &[&str] = &[
     "1.5",
     "10ms",
     "\"s\"",
-    "\"a{x}b\"",
+    "\"a\\(x)b\"",
     "r\"raw\"",
     "b\"by\"",
     "\"\"\"\n  m\n  \"\"\"",
@@ -336,7 +336,7 @@ fn hostile_runtime_programs_are_contained() {
         // JSON bombs.
         "import json\nlet t = \"[\".repeat(100000)\nprint(json.parse(t).is_err())",
         // Formatting huge widths.
-        "print(\"{1:999999999}\".len())",
+        "print(\"\\(1:999999999)\".len())",
         // Sleeping forever.
         "task.sleep(1000h)",
     ];
@@ -357,7 +357,7 @@ fn random_json_and_uri_inputs() {
         let s: String = (0..n).map(|_| *rng.pick(&alphabet)).collect();
         cases.push(s);
     }
-    let lits: Vec<String> = cases.iter().map(|s| format!("{s:?}").replace('{', "\\{").replace('}', "\\}")).collect();
+    let lits: Vec<String> = cases.iter().map(|s| format!("{s:?}")).collect();
     let src = format!(
         "import json\nimport uri\nimport base64\nimport regex\nimport time\nimport uuid\nvar n = 0\nfor s in [{}] {{\n    if json.parse(s).is_ok() {{ n += 1 }}\n    if uri.parse(s).is_ok() {{ n += 1 }}\n    if base64.decode(s).is_ok() {{ n += 1 }}\n    if regex.new(s).is_ok() {{ n += 1 }}\n    if time.parse(s).is_ok() {{ n += 1 }}\n    if uuid.parse(s).is_ok() {{ n += 1 }}\n    let _ = uri.decode_component(s)\n    let _ = s.parse_float()\n}}\nprint(n >= 0)\n",
         lits.join(", ")
@@ -380,7 +380,7 @@ fn fuzz_regressions() {
         "let d = 3333333333333333333333333333333333333333h",
         // Variant patterns on a scrutinee whose type has no fields to offer (error
         // type, `never`) indexed past the end of the column types in pat.rs.
-        "let tasks = urks.map(u => spawn fetch(u))\nfor (url, t) in urls.zip(tasks) {\n    match t.wait() {\n        Ok(page) => print(page)\n        Err(e) => print(\"{url}: {e}\")\n    }\n}\n",
+        "let tasks = urks.map(u => spawn fetch(u))\nfor (url, t) in urls.zip(tasks) {\n    match t.wait() {\n        Ok(page) => print(page)\n        Err(e) => print(\"\\(url): \\(e)\")\n    }\n}\n",
         "fn f() -> int {\n    match panic(\"x\") {\n        Some(v) => v\n        None => 0\n    }\n}\nprint(f())\n",
         "fn f() -> int {\n    match [panic(\"x\")] {\n        [Ok(Some((a, b)))] => a + b\n        _ => 0\n    }\n}\nprint(f())\n",
         // A trailing comment ending in `}` after a one-line declaration was taken
@@ -411,7 +411,7 @@ fn hostile_native_work_is_contained() {
         format!("{dag}print(a == b)"),
         format!("{dag}print(a < b)"),
         format!("{dag}print(a)"),
-        format!("{dag}print(\"{{a:?}}\")"),
+        format!("{dag}print(\"\\(a:?)\")"),
         format!("{dag}print([a, b, a, b].sorted().len())"),
         format!("{dag}print([a].contains(b))"),
         format!("{dag}print(set([a]).len())"),
@@ -447,7 +447,7 @@ fn hostile_compile_inputs_are_contained() {
             vec!["A | B"; n].join(", ")
         ),
         format!("fn dup<T>(x: T) -> (T, T) {{ (x, x) }}\nlet a = {}1{}\n", "dup(".repeat(n), ")".repeat(n)),
-        format!("let s = {}1{}\n", "\"{".repeat(200_000), "}\"".repeat(200_000)),
+        format!("let s = {}1{}\n", "\"\\(".repeat(200_000), ")\"".repeat(200_000)),
     ];
     for src in &programs {
         let start = std::time::Instant::now();

@@ -30,43 +30,28 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const USER_AGENT: &str = concat!("sand/", env!("CARGO_PKG_VERSION"));
 
 pub fn register(r: &mut Registry) {
-    r.source("http", ModKind::Std, include_str!("http.sand"));
+    // The client (`http.sand`) is shared with the web's.
+    r.source("http", ModKind::Std, concat!(include_str!("http_os.sand"), include_str!("http.sand")));
+    super::http_common::register(r);
     r.add_builtin("http.send", send);
-    r.add_builtin("http.resolve", |vm, a| {
-        let resolved = resolve(vm.str(a[0]), vm.str(a[1]));
-        Ok(match resolved {
-            Ok(url) => {
-                let s = vm.new_str(url);
-                vm.ok(s)
-            }
-            Err(e) => vm.err_value(e.kind, &e.message),
-        })
-    });
-    r.add_builtin("http.same_origin", |vm, a| {
-        let same = match (Url::parse(vm.str(a[0])), Url::parse(vm.str(a[1]))) {
-            (Ok(x), Ok(y)) => x.origin() == y.origin(),
-            _ => false,
-        };
-        Ok(Value::Bool(same))
-    });
     r.add_builtin("http.new_pending", |vm, _| {
         let pending = PendingRequests { shared: Arc::new(PendingShared::default()) };
         Ok(vm.heap.alloc(Obj::Native(Box::new(pending))))
     });
     r.add_builtin("http.next_request", next_request);
     r.add_builtin("http.close_pending", |vm, a| {
-        let p = vm.heap.native_mut::<PendingRequests>(a[0]).ok_or_else(|| Ctl::Panic("not a request queue".into()))?;
+        let p = vm.heap.native_mut::<PendingRequests>(a[0]).ok_or_else(|| Ctl::panic("not a request queue"))?;
         // The connections are dropped (closed) with the last reference to
         // the old state: now, or when a pending `next_request` ends.
         p.shared = Arc::new(PendingShared::default());
         Ok(Value::Unit)
     });
-    r.add_builtin("http.encode_response", encode_response);
+    r.add_builtin("http.write_response", write_response);
 }
 
 /// Reads `name: value` header lines up to the blank line ending the head,
 /// after the start line. Names are lower-cased; repeated headers are joined
-/// with `", "`. The lines are reserved in `res`.
+/// with `", "` (in the place of the first). The lines are reserved in `res`.
 async fn read_head<R: AsyncBufRead + Unpin>(r: &mut R, res: &mut Reservation) -> Result<(String, Vec<(String, String)>), IoFailure> {
     let mut budget = MAX_HEAD;
     let mut next_line = async |budget: &mut usize, res: &mut Reservation| -> Result<Option<String>, IoFailure> {
@@ -88,6 +73,8 @@ async fn read_head<R: AsyncBufRead + Unpin>(r: &mut R, res: &mut Reservation) ->
         }
     };
     let mut headers: Vec<(String, String)> = Vec::new();
+    // The position of each name in `headers`.
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     loop {
         let Some(line) = next_line(&mut budget, res).await? else {
             return Err(IoFailure::new("http", "connection closed in the middle of the message head"));
@@ -99,12 +86,16 @@ async fn read_head<R: AsyncBufRead + Unpin>(r: &mut R, res: &mut Reservation) ->
             return Err(IoFailure::new("http", format!("malformed header line {line:?}")));
         };
         let (name, value) = (name.trim().to_ascii_lowercase(), value.trim());
-        match headers.iter_mut().find(|(k, _)| *k == name) {
-            Some((_, v)) => {
+        match seen.get(&name) {
+            Some(&i) => {
+                let v = &mut headers[i].1;
                 v.push_str(", ");
                 v.push_str(value);
             }
-            None => headers.push((name, value.to_string())),
+            None => {
+                seen.insert(name.clone(), headers.len());
+                headers.push((name, value.to_string()));
+            }
         }
     }
 }
@@ -210,16 +201,17 @@ struct RawResponse {
 }
 
 fn send(vm: &mut Vm, a: &[Value]) -> NResult {
-    let method = vm.str(a[0]).to_string();
-    let text = vm.str(a[1]).to_string();
-    let url = match Url::parse(&text) {
+    let (method, text) = (vm.str(a[0]), vm.str(a[1]));
+    vm.charge_slow_bytes(method.len().saturating_add(text.len()))?;
+    let url = match Url::parse(text) {
         Ok(u) => u,
         Err(e) => return Ok(vm.err_value(e.kind, &e.message)),
     };
-    if !is_token(&method) {
-        return Ok(vm.err_value("invalid", &format!("invalid HTTP method {:?}", super::truncate(&method, 64))));
+    if !is_token(method) {
+        return Ok(vm.err_value("invalid", &format!("invalid HTTP method {:?}", super::truncate(method, 64))));
     }
-    let headers = match header_pairs(vm, a[2]) {
+    let (method, text) = (method.to_string(), text.to_string());
+    let headers = match header_pairs(vm, a[2])? {
         Ok(h) => h,
         Err(e) => return Ok(vm.err_value("invalid", &e)),
     };
@@ -232,6 +224,7 @@ fn send(vm: &mut Vm, a: &[Value]) -> NResult {
         Err(e) => return Ok(e),
     };
     let body = vm.heap.bytes_of(a[3]);
+    vm.charge_bytes(body.len())?;
     let request = encode_request(&method, &url, &headers, body);
     if let Err(e) = res.ensure(request.len()) {
         return Ok(vm.err_value("limit", &format!("cannot buffer the request: {e}")));
@@ -407,7 +400,7 @@ fn next_request(vm: &mut Vm, a: &[Value]) -> NResult {
     let Some((socket, closed)) = net::listener_socket(vm, a[0])? else { return Ok(vm.err_value("closed", "listener closed")) };
     let shared = match vm.heap.native::<PendingRequests>(a[1]) {
         Some(p) => p.shared.clone(),
-        None => return Err(Ctl::Panic("not a request queue".into())),
+        None => return Err(Ctl::panic("not a request queue")),
     };
     // Slots for the connections this call may accept: up to MAX_READING
     // read at once, and at most half of what the open-resource limit has
@@ -461,7 +454,7 @@ fn next_request(vm: &mut Vm, a: &[Value]) -> NResult {
         })
         .await
     };
-    Err(Ctl::Async(Box::pin(async move {
+    Err(Ctl::suspend(Box::pin(async move {
         finish(closed.guard(serve).await, |vm, received: Received| {
             let Received { request: (method, path, query, headers, body), conn, res, slot } = received;
             drop(res);
@@ -538,11 +531,11 @@ async fn read_request<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin>(
         return Err(IoFailure::new("http", format!("malformed request line {start:?}")));
     }
     // Absolute-form targets (`GET http://host/path`) carry the path after the authority.
-    let target = match split_scheme(target).and_then(|(_, rest)| rest.strip_prefix("//")) {
-        Some(rest) => rest.find(['/', '?']).map_or("/", |i| &rest[i..]),
-        None => target,
+    let absolute = (!target.starts_with('/')).then(|| super::uri::parse(target, true).ok()).flatten().filter(|p| p.authority.is_some());
+    let (path, query) = match &absolute {
+        Some(p) => (if p.path.is_empty() { "/" } else { p.path.as_str() }, p.query.as_deref().unwrap_or("")),
+        None => target.split_once('?').unwrap_or((target, "")),
     };
-    let (path, query) = target.split_once('?').unwrap_or((target, ""));
     if header(&headers, "expect").is_some_and(|e| e.eq_ignore_ascii_case("100-continue")) {
         writer.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await?;
         writer.flush().await?;
@@ -587,16 +580,17 @@ fn reason_phrase(status: i64) -> &'static str {
     }
 }
 
-fn encode_response(vm: &mut Vm, a: &[Value]) -> NResult {
-    let status = a[0].as_int();
+/// `write_response(conn, status, body, headers, include_body)`: writes the
+/// head and (unless `include_body` is false) the body to `conn`.
+fn write_response(vm: &mut Vm, a: &[Value]) -> NResult {
+    let status = a[1].as_int();
     if !(100..=999).contains(&status) {
         return Ok(vm.err_value("invalid", &format!("invalid HTTP status {status}")));
     }
-    let headers = match header_pairs(vm, a[2]) {
+    let headers = match header_pairs(vm, a[3])? {
         Ok(h) => h,
         Err(e) => return Ok(vm.err_value("invalid", &e)),
     };
-    let body = vm.heap.bytes_of(a[1]);
     let mut head = format!("HTTP/1.1 {status} {}\r\n", reason_phrase(status));
     for (k, v) in &headers {
         if !["content-length", "transfer-encoding", "connection"].iter().any(|h| k.eq_ignore_ascii_case(h)) {
@@ -604,17 +598,21 @@ fn encode_response(vm: &mut Vm, a: &[Value]) -> NResult {
         }
     }
     let has_body = status >= 200 && status != 204 && status != 304;
+    let body = if has_body && a[4].as_bool() { vm.heap.bytes_of(a[2]) } else { &[] };
     if has_body {
-        head += &format!("Content-Length: {}\r\n", body.len());
+        head += &format!("Content-Length: {}\r\n", vm.heap.bytes_of(a[2]).len());
     }
     head += "Connection: close\r\n\r\n";
-    let mut out = head.into_bytes();
-    if has_body && a[3].as_bool() {
-        out.extend_from_slice(body);
-    }
-    vm.reserve(out.len())?;
-    let out = vm.heap.new_bytes(out);
-    Ok(vm.ok(out))
+    let len = head.len().saturating_add(body.len());
+    vm.charge_bytes(len)?;
+    let res = match vm.reserve_io(len) {
+        Ok(r) => r,
+        Err(e) => return Ok(e),
+    };
+    let body = if has_body && a[4].as_bool() { vm.heap.bytes_of(a[2]) } else { &[] };
+    let mut data = head.into_bytes();
+    data.extend_from_slice(body);
+    net::write_bytes(vm, a[0], data, res)
 }
 
 #[cfg(test)]
@@ -633,6 +631,8 @@ mod tests {
         assert_eq!(Url::parse("ftp://x/").unwrap_err().kind, "invalid");
         assert_eq!(Url::parse("http://h:99999/").unwrap_err().kind, "parse");
         assert_eq!(Url::parse("http:///x").unwrap_err().kind, "parse");
+        assert_eq!(Url::parse("http://user:pw@h/").unwrap().authority(), "h");
+        assert_eq!(Url::parse("http://h/a b").unwrap_err().kind, "parse");
     }
 
     #[test]
@@ -649,5 +649,7 @@ mod tests {
         #[cfg(not(feature = "tls"))]
         assert_eq!(resolve(base, "https://o.example/x#f").unwrap_err().kind, "invalid");
         assert_eq!(resolve(base, "./").unwrap(), "http://h:81/a/b/");
+        assert_eq!(resolve(base, "../../../../x").unwrap(), "http://h:81/x");
+        assert_eq!(resolve(base, "mailto:x@y").unwrap_err().kind, "invalid");
     }
 }

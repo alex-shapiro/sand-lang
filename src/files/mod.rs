@@ -2,21 +2,30 @@
 //! loading of script modules (imports and main files) go through an [`Fs`],
 //! either the host's file system (with the `os` feature) or a [`MemFs`].
 //!
-//! Paths given to the operations are normalized by the same `Fs`
-//! ([`Fs::resolve`], [`Fs::entry`]) and checked against the policy in its
-//! [`PathSpace`] before the operation runs. Host operations block, so they
-//! run off the VM thread; memory operations complete at once.
+//! A path given to an operation is first resolved by the same `Fs` into a
+//! [`Target`] ([`Fs::target`]): its normal form, which the policy checks in
+//! the file system's [`PathSpace`], and on the host the directory handles
+//! of the walk that found it, through which the operation then acts (see
+//! `unix.rs`). Operations run on the VM thread: on the host they are system
+//! calls, which count towards the run's CPU time like the rest of its work.
 
 #[cfg(feature = "os")]
 mod host;
 mod mem;
-#[cfg(feature = "os")]
-mod safe;
+#[cfg(all(feature = "os", unix))]
+mod unix;
+#[cfg(all(feature = "os", windows))]
+mod windows;
+
+// Elsewhere there is no way to open a path without following symlinks, so
+// the host's file system cannot be confined to what the policy checked.
+#[cfg(all(feature = "os", not(any(unix, windows))))]
+compile_error!("the `os` feature needs Unix or Windows (files are opened without following symlinks)");
 
 pub use mem::MemFs;
 pub(crate) use mem::normalize as memory_path;
 
-use crate::policy::{EntryPath, PathSpace};
+use crate::policy::PathSpace;
 use crate::vm::iomem::Reservation;
 use std::ffi::OsStr;
 use std::io;
@@ -62,6 +71,87 @@ pub(crate) fn is_unchecked_symlink(e: &io::Error) -> bool {
     e.get_ref().is_some_and(|inner| inner.is::<UncheckedSymlink>())
 }
 
+/// Whether an operation acts on what a final symlink points to (`Follow`)
+/// or on the directory entry itself (`Entry`: removing or renaming a link).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Mode {
+    Follow,
+    Entry,
+}
+
+/// Work done resolving a path besides scanning it (for metering).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Work {
+    /// Names resolved, and bytes of symlink targets read.
+    pub steps: usize,
+    pub bytes: usize,
+    /// Directory entries read to find a stored name, and their bytes.
+    pub scanned: usize,
+    pub scanned_bytes: usize,
+}
+
+/// A path resolved by an [`Fs`] for an operation.
+pub(crate) struct Target {
+    /// The normal form, which the policy decides on: absolute, without
+    /// `.` and `..`, and on the host with every symlink before the final
+    /// name resolved (and the final one unless the mode is `Entry`), and
+    /// existing directories named as stored.
+    pub path: PathBuf,
+    #[cfg(feature = "os")]
+    host: Option<host::Resolved>,
+}
+
+impl Target {
+    /// Whether the final name is known to be spelled as stored. On a case-
+    /// or normalization-insensitive file system an existing entry can be
+    /// named differently; the policy's deny rules equate every such
+    /// spelling (`policy::fold_name`), so only decisions that compare it
+    /// exactly need [`Target::fix_spelling`].
+    pub fn exact(&self) -> bool {
+        #[cfg(feature = "os")]
+        if let Some(h) = &self.host {
+            return h.exact();
+        }
+        true
+    }
+
+    /// Names an existing final entry as stored.
+    pub fn fix_spelling(&mut self) {
+        #[cfg(feature = "os")]
+        if let Some(h) = &mut self.host
+            && !h.exact()
+        {
+            h.fix_spelling();
+            self.path = h.path();
+        }
+    }
+
+    /// Work done resolving it (for metering).
+    pub fn work(&self) -> Work {
+        #[cfg(feature = "os")]
+        if let Some(h) = &self.host {
+            return h.work;
+        }
+        Work::default()
+    }
+
+    fn memory(path: PathBuf) -> Target {
+        Target {
+            path,
+            #[cfg(feature = "os")]
+            host: None,
+        }
+    }
+
+    #[cfg(feature = "os")]
+    fn host(self) -> io::Result<(PathBuf, host::Resolved)> {
+        match self.host {
+            Some(h) => Ok((self.path, h)),
+            None => Err(io::Error::other("not a host path")),
+        }
+    }
+}
+
 /// A file system scripts can see.
 #[derive(Clone)]
 pub(crate) enum Fs {
@@ -101,15 +191,6 @@ impl Fs {
         }
     }
 
-    /// Whether operations block (and must run off the VM thread).
-    pub fn is_blocking(&self) -> bool {
-        match self {
-            #[cfg(feature = "os")]
-            Fs::Host => true,
-            Fs::Memory(_) => false,
-        }
-    }
-
     /// The directory of relative paths when none is configured: the
     /// process's working directory, or the root of a memory file system.
     pub fn default_dir(&self) -> PathBuf {
@@ -130,139 +211,153 @@ impl Fs {
         }
     }
 
+    /// Resolves the absolute path `p` for an operation (lexically in memory).
+    pub fn target(&self, p: &Path, mode: Mode) -> Target {
+        match self {
+            #[cfg(feature = "os")]
+            Fs::Host => {
+                let h = host::resolve(p, mode);
+                Target { path: h.path(), host: Some(h) }
+            }
+            Fs::Memory(_) => {
+                let _ = mode;
+                Target::memory(mem::normalize(p))
+            }
+        }
+    }
+
     /// The normal form of the absolute path `p` that the policy decides on
     /// (see [`crate::policy::normalize_path`]; lexical in memory).
     pub fn resolve(&self, p: &Path) -> PathBuf {
-        match self {
-            #[cfg(feature = "os")]
-            Fs::Host => crate::policy::normalize_path(p),
-            Fs::Memory(_) => mem::normalize(p),
-        }
+        let mut t = self.target(p, Mode::Follow);
+        t.fix_spelling();
+        t.path
     }
 
-    /// Like [`Fs::resolve`] for the directory entry at `p` itself (a final
-    /// symlink is not resolved).
-    pub fn entry(&self, p: &Path) -> EntryPath {
+    /// The paths of the directories above the target that do not exist,
+    /// outermost first.
+    pub fn missing_ancestors(&self, t: &Target) -> Vec<PathBuf> {
         match self {
             #[cfg(feature = "os")]
-            Fs::Host => crate::policy::entry_path(p),
-            Fs::Memory(_) => EntryPath { path: mem::normalize(p), scanned: 0, scanned_bytes: 0 },
-        }
-    }
-
-    /// The ancestors of the normalized `path` that do not exist, outermost first.
-    pub fn missing_ancestors(&self, path: &Path) -> Vec<PathBuf> {
-        match self {
-            #[cfg(feature = "os")]
-            Fs::Host => host::missing_ancestors(path),
+            Fs::Host => t.host.as_ref().map(host::Resolved::missing_ancestors).unwrap_or_default(),
             Fs::Memory(m) => {
-                let mut missing: Vec<PathBuf> = path.ancestors().skip(1).take_while(|a| !m.exists(a)).map(Path::to_path_buf).collect();
+                let mut missing: Vec<PathBuf> = t.path.ancestors().skip(1).take_while(|a| !m.exists(a)).map(Path::to_path_buf).collect();
                 missing.reverse();
                 missing
             }
         }
     }
 
+    /// The size of the file at the target, if known without more I/O.
+    pub fn size(&self, t: &Target) -> Option<u64> {
+        match self {
+            #[cfg(feature = "os")]
+            Fs::Host => t.host.as_ref().and_then(host::Resolved::size),
+            Fs::Memory(m) => m.stat(&t.path).ok().map(|m| m.size),
+        }
+    }
+
     /// Reads a regular file into a buffer reserved in `res`.
-    pub fn read(&self, path: &Path, res: Reservation) -> io::Result<(Vec<u8>, Reservation)> {
+    pub fn read(&self, t: Target, res: Reservation) -> io::Result<(Vec<u8>, Reservation)> {
         match self {
             #[cfg(feature = "os")]
-            Fs::Host => host::read_reserved(path, res),
-            Fs::Memory(m) => m.read_reserved(path, res),
+            Fs::Host => {
+                let (path, h) = t.host()?;
+                host::read_reserved(h.open_read(&path)?, res)
+            }
+            Fs::Memory(m) => m.read_reserved(&t.path, res),
         }
     }
 
-    /// Writes (or appends) `data` to the file at `path`, creating it.
-    pub fn write(&self, path: &Path, data: &[u8], append: bool) -> io::Result<()> {
+    /// Writes (or appends) `data` to the file at `t`, creating it.
+    pub fn write(&self, t: Target, data: &[u8], append: bool) -> io::Result<()> {
         match self {
             #[cfg(feature = "os")]
-            Fs::Host => host::write(path, data, append),
-            Fs::Memory(m) => m.write_file(path, data, append),
+            Fs::Host => {
+                let (path, h) = t.host()?;
+                host::write_all(h.open_write(&path, append)?, data)
+            }
+            Fs::Memory(m) => m.write_file(&t.path, data, append),
         }
     }
 
-    pub fn stat(&self, path: &Path) -> io::Result<EntryMeta> {
+    /// Metadata of the target (a final symlink is not followed in `Entry`
+    /// mode).
+    pub fn stat(&self, t: &Target) -> io::Result<EntryMeta> {
         match self {
             #[cfg(feature = "os")]
-            Fs::Host => host::stat(path),
-            Fs::Memory(m) => m.stat(path),
+            Fs::Host => t.host.as_ref().ok_or_else(|| io::Error::other("not a host path"))?.stat(),
+            Fs::Memory(m) => m.stat(&t.path),
         }
     }
 
-    /// The names in the directory `path`, sorted, reserved in `res`.
-    pub fn list_dir(&self, path: &Path, mut res: Reservation) -> io::Result<(Vec<String>, Reservation)> {
+    /// The names in the directory `t`, sorted, reserved in `res`.
+    pub fn list_dir(&self, t: Target, mut res: Reservation) -> io::Result<(Vec<String>, Reservation)> {
         let mut names = match self {
             #[cfg(feature = "os")]
-            Fs::Host => host::list_dir(path, &mut res)?,
-            Fs::Memory(m) => m.list_dir(path, &mut res)?,
+            Fs::Host => t.host()?.1.list_dir(&mut res)?,
+            Fs::Memory(m) => m.list_dir(&t.path, &mut res)?,
         };
         names.sort();
         Ok((names, res))
     }
 
-    pub fn create_dir(&self, path: &Path) -> io::Result<()> {
+    pub fn create_dir(&self, t: Target) -> io::Result<()> {
         match self {
             #[cfg(feature = "os")]
-            Fs::Host => safe::create_dir(path),
-            Fs::Memory(m) => m.create_dir(path),
+            Fs::Host => t.host()?.1.create_dir(),
+            Fs::Memory(m) => m.create_dir(&t.path),
         }
     }
 
-    /// Creates `path` and its missing ancestors, of which the first `keep`
-    /// components must exist (they were not checked by the policy).
-    pub fn create_dir_all(&self, path: &Path, keep: usize) -> io::Result<()> {
+    /// Creates `t` and the missing directories above it (those that
+    /// [`Fs::missing_ancestors`] reported, which the policy checked).
+    pub fn create_dir_all(&self, t: Target) -> io::Result<()> {
         match self {
             #[cfg(feature = "os")]
-            Fs::Host => safe::create_dir_all(path, keep),
-            Fs::Memory(m) => {
-                // Nothing changes between the policy check and the operation.
-                let _ = keep;
-                m.make_dir_all(path)
+            Fs::Host => {
+                let (path, h) = t.host()?;
+                h.create_dir_all(&path)
             }
+            // Nothing changes between the policy check and the operation.
+            Fs::Memory(m) => m.make_dir_all(&t.path),
         }
     }
 
-    pub fn remove_file(&self, path: &Path) -> io::Result<()> {
+    pub fn remove_file(&self, t: Target) -> io::Result<()> {
         match self {
             #[cfg(feature = "os")]
-            Fs::Host => safe::remove_file(path),
-            Fs::Memory(m) => m.remove_file(path),
+            Fs::Host => t.host()?.1.remove_file(),
+            Fs::Memory(m) => m.remove_file(&t.path),
         }
     }
 
-    /// Removes the empty directory `path`.
-    pub fn remove_dir(&self, path: &Path) -> io::Result<()> {
+    /// Removes the empty directory `t`.
+    pub fn remove_dir(&self, t: Target) -> io::Result<()> {
         match self {
             #[cfg(feature = "os")]
-            Fs::Host => safe::remove_dir(path),
-            Fs::Memory(m) => m.remove_dir(path),
+            Fs::Host => t.host()?.1.remove_dir(),
+            Fs::Memory(m) => m.remove_dir(&t.path),
         }
     }
 
-    pub fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+    pub fn rename(&self, from: Target, to: Target) -> io::Result<()> {
         match self {
             #[cfg(feature = "os")]
-            Fs::Host => safe::rename(from, to),
-            Fs::Memory(m) => m.rename(from, to),
+            Fs::Host => host::Resolved::rename(from.host()?.1, to.host()?.1),
+            Fs::Memory(m) => m.rename(&from.path, &to.path),
         }
     }
 
     /// Copies the contents of the regular file `from` to `to`.
-    pub fn copy(&self, from: &Path, to: &Path) -> io::Result<()> {
+    pub fn copy(&self, from: Target, to: Target) -> io::Result<()> {
         match self {
             #[cfg(feature = "os")]
-            Fs::Host => host::copy(from, to),
-            Fs::Memory(m) => m.copy(from, to),
-        }
-    }
-
-    /// Runs `op` on this file system, off the VM thread if operations
-    /// block (see [`Fs::is_blocking`]).
-    pub async fn run_blocking<T: Send + 'static>(self, op: impl FnOnce(&Fs) -> io::Result<T> + Send + 'static) -> io::Result<T> {
-        match self {
-            #[cfg(feature = "os")]
-            Fs::Host => host::blocking(move || op(&Fs::Host)).await,
-            Fs::Memory(_) => op(&self),
+            Fs::Host => {
+                let ((from_path, from), (to_path, to)) = (from.host()?, to.host()?);
+                host::copy(from.open_read(&from_path)?, to.open_write(&to_path, false)?)
+            }
+            Fs::Memory(m) => m.copy(&from.path, &to.path),
         }
     }
 
@@ -277,19 +372,19 @@ impl Fs {
     }
 
     /// Reads a script module (at most `max + 1` bytes, so that oversized
-    /// sources are detected without reading them whole) without following
-    /// symlinks.
-    pub fn read_source(&self, path: &Path, max: usize) -> io::Result<String> {
+    /// sources are detected without reading them whole).
+    pub fn read_source(&self, t: Target, max: usize) -> io::Result<String> {
         use io::{Error, ErrorKind};
         let data = match self {
             #[cfg(feature = "os")]
             Fs::Host => {
                 use io::Read;
+                let (path, h) = t.host()?;
                 let mut data = Vec::new();
-                safe::open_read(path)?.take(max as u64 + 1).read_to_end(&mut data)?;
+                h.open_read(&path)?.take(max as u64 + 1).read_to_end(&mut data)?;
                 data
             }
-            Fs::Memory(m) => m.read_source(path, max)?,
+            Fs::Memory(m) => m.read_source(&t.path, max)?,
         };
         if data.len() > max {
             return Err(Error::new(ErrorKind::InvalidData, "source too large"));
@@ -298,11 +393,33 @@ impl Fs {
     }
 }
 
-/// Whether the host's file system worker is running an operation (the
-/// scheduler then waits for it briefly instead of parking).
-pub(crate) fn worker_busy() -> bool {
-    #[cfg(feature = "os")]
-    return host::FsWorker::busy();
-    #[cfg(not(feature = "os"))]
-    return false;
+/// The plain form of a Windows "verbatim" path (`\\?\C:\x` is `C:\x`,
+/// `\\?\UNC\server\share\x` is `\\server\share\x`), if it has one.
+#[cfg(any(all(feature = "os", windows), test))]
+pub(crate) fn plain_from_verbatim(s: &str) -> Option<String> {
+    let rest = s.strip_prefix(r"\\?\")?;
+    if let Some(unc) = rest.strip_prefix(r"UNC\") {
+        return Some(format!(r"\\{unc}"));
+    }
+    let b = rest.as_bytes();
+    // `C:` alone would be relative to the drive's current directory.
+    (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\').then(|| rest.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verbatim_paths_become_plain() {
+        assert_eq!(plain_from_verbatim(r"\\?\C:\Users\a.sand").as_deref(), Some(r"C:\Users\a.sand"));
+        assert_eq!(plain_from_verbatim(r"\\?\d:\").as_deref(), Some(r"d:\"));
+        assert_eq!(plain_from_verbatim(r"\\?\C:"), None);
+        assert_eq!(plain_from_verbatim(r"\\?\UNC\server\share\x").as_deref(), Some(r"\\server\share\x"));
+        // Not verbatim, or a verbatim form without a plain equivalent.
+        assert_eq!(plain_from_verbatim(r"C:\Users"), None);
+        assert_eq!(plain_from_verbatim("/home/user"), None);
+        assert_eq!(plain_from_verbatim(r"\\?\Volume{0000}\x"), None);
+        assert_eq!(plain_from_verbatim(r"\\?\GLOBALROOT\Device"), None);
+    }
 }

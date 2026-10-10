@@ -87,7 +87,7 @@ None
 fn parse(s: str) -> Result<int, str> {
     match s.parse_int() {
         Some(v) => Ok(v)
-        None => Err("not a number: {s}")
+        None => Err("not a number: \(s)")
     }
 }
 fn sum2(a: str, b: str) -> Result<int, str> {
@@ -210,14 +210,14 @@ let n2: int?? = Some(None)
 print(n2 == None)
 print(n2.unwrap() == None)
 match Some(Some(Some(3))) {
-    Some(Some(Some(x))) => print("deep {x}")
+    Some(Some(Some(x))) => print("deep \(x)")
     _ => print("no")
 }
 let r: Result<int?, str> = Ok(Some(4))
 match r {
-    Ok(Some(x)) => print("ok some {x}")
+    Ok(Some(x)) => print("ok some \(x)")
     Ok(None) => print("ok none")
-    Err(e) => print("err {e}")
+    Err(e) => print("err \(e)")
 }
 let e2: Result<Result<int, str>, str> = Err("outer")
 print(e2)
@@ -271,9 +271,9 @@ fn sum_evens(a: [int], b: [int]) -> int? {
 }
 print(sum_evens([1, 2], [3, 4]))
 print(sum_evens([1, 3], [4]))
-print("{Some(1.5)} {Some(true)} {Some(())}")
+print("\(Some(1.5)) \(Some(true)) \(Some(()))")
 let okv: Result<str, str> = Ok("s")
-print("{okv} {okv:?}")
+print("\(okv) \(okv:?)")
 --- stdout
 A(1)
 B("x")

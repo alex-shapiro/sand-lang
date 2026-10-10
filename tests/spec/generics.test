@@ -177,3 +177,35 @@ fn wrap<T>(x: T, n: int) -> [T] {
 print(wrap("z", 2))
 --- stdout
 ["z", "z", "z"]
+
+=== a recursive type does not satisfy a bound something in it does not
+struct A { b: B?, x: float }
+struct B { a: A? }
+let ok = B { a: None } == B { a: None }
+let bs = [B { a: None }: 1]
+--- error
+4: B does not satisfy Hash
+
+=== built-in bounds of generic types depend on their arguments
+struct Pair<K, V> { k: K, v: V }
+struct Cell<T> { var t: T }
+let ok = [Pair { k: 1, v: "x" }: 1]
+let floats = [Pair { k: 1.5, v: "x" }: 1]
+let cells = [Cell { t: 1 }: 1]
+print(Pair { k: 1.5, v: [2] } == Pair { k: 1.5, v: [2] })
+--- error
+4: Pair<float, str> does not satisfy Hash
+5: Cell<int> does not satisfy Hash
+
+=== recursive types satisfy built-in bounds
+enum Tree<T> {
+    Leaf(T)
+    Node(Tree<T>, Tree<T>)
+}
+let t = Tree.Node(Tree.Leaf(1), Tree.Leaf(2))
+let keys = [t: "tree"]
+print(keys[Tree.Node(Tree.Leaf(1), Tree.Leaf(2))])
+print(Tree.Leaf("a") < Tree.Leaf("b"))
+--- stdout
+tree
+true

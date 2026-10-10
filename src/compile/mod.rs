@@ -3,11 +3,13 @@
 mod reflect;
 
 use crate::check::budget::CompileBudget;
+use crate::check::persist::{PMap, PVec};
 use crate::check::{CheckedProgram, FnKind};
 use crate::diag::{Diag, SourceMap, Span};
 use crate::hir::*;
-use crate::types::{FnId, Type};
+use crate::types::{FnId, Ty, TypeArena, TypeDefId, TypeId};
 use crate::vm::bytecode::*;
+use crate::vm::value::FxHashMap;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -26,17 +28,18 @@ pub struct CompileInput<'a> {
 
 struct Compiler<'a> {
     cp: &'a CheckedProgram,
+    /// The program's types, which `reflect` extends with the instances it
+    /// describes (a private copy: they are not needed after compiling).
+    arena: TypeArena,
     budget: &'a CompileBudget,
     sm: &'a SourceMap,
     prog: &'a mut Program,
-    fn_protos: Vec<Option<u32>>,
-    str_consts: HashMap<String, u32>,
-    int_consts: HashMap<i64, u32>,
-    fn_consts: HashMap<u32, u32>,
-    native_consts: HashMap<u32, u32>,
-    variant_wrappers: HashMap<u32, u32>,
+    fn_protos: PVec<Option<u32>>,
+    /// The constants made so far, to share them.
+    consts: ConstTable,
+    variant_wrappers: PMap<u32, u32>,
     /// Constant trait dictionaries by their elements.
-    dict_consts: HashMap<Vec<u32>, u32>,
+    dict_consts: PMap<Vec<u32>, u32>,
     /// Shared type descriptions of `reflect` type arguments.
     descs: reflect::DescCache,
     errors: Vec<Diag>,
@@ -57,6 +60,7 @@ enum Inline {
 #[derive(Default)]
 struct LoopCx {
     breaks: Vec<usize>,
+    /// `Jmp`s to the loop's next iteration (its test, for a rotated loop).
     continues: Vec<usize>,
     result: Option<Reg>,
     /// The number of defer scopes outside the loop: `break` and `continue`
@@ -67,49 +71,116 @@ struct LoopCx {
 struct FnState<'h> {
     code: Vec<Op>,
     lines: Vec<u32>,
+    /// Branches whose targets are too far for their offset field, as
+    /// (instruction, target): `assemble` routes them through branch islands.
+    far: Vec<(usize, usize)>,
     locals: &'h [LocalInfo],
-    local_reg: HashMap<LocalId, Reg>,
-    capture_idx: HashMap<LocalId, u16>,
+    /// The register of each local (`NONE`: not declared yet, or captured).
+    local_reg: Vec<Reg>,
+    /// The previous registers of the locals declared, to undo declarations
+    /// (`reset_regs`).
+    reg_log: Vec<(LocalId, Reg)>,
+    /// The capture index of each local captured by the function (a lambda).
+    capture_idx: Vec<u16>,
     next_reg: u32,
     max_reg: u32,
     loops: Vec<LoopCx>,
     line: u32,
     file: u32,
-    no_fused: bool,
+    /// Set once an error about the function's size has been reported.
     too_big: bool,
-    in_tail_fn: bool,
     /// Loop-invariant values loaded into registers before the enclosing
     /// outermost loop (see `hoisted_loop`).
-    hoisted: HashMap<HoistKey, Reg>,
+    hoisted: FxHashMap<HoistKey<'h>, Reg>,
     /// Inside an outermost loop whose invariants were already hoisted.
     hoisting: bool,
     /// Deferred expressions of the enclosing blocks (innermost last), compiled
     /// again at every exit edge that leaves their block.
-    defers: Vec<Vec<HExpr>>,
+    defers: Vec<Vec<&'h HExpr>>,
     /// Instructions emitted for copies of deferred code (see `MAX_DEFER_OPS`).
     defer_ops: usize,
     /// The register `discard` gives to an expression whose value is unused:
     /// unit results are not materialized in it (see `unit_to`).
     void: Option<Reg>,
-    /// String locals appended to in place (see `builder_locals`).
-    builders: Rc<HashSet<LocalId>>,
+    /// What the compiler knows about the function's locals.
+    facts: Rc<LocalFacts>,
+    /// Failure paths of `?`, emitted after the function's code (so the
+    /// success path falls through), with the branches to them and a line.
+    stubs: Vec<(Stub, Vec<usize>, u32)>,
+    /// The jump tables of the function's switches: their index in
+    /// `Program::switches` and targets (instructions; the default last).
+    switches: Vec<(u32, Vec<usize>)>,
 }
 
 const MAX_REGS: u32 = 60000;
+/// No register (or capture index).
+const NONE: u16 = u16::MAX;
+
+impl FnState<'_> {
+    fn reg(&self, l: LocalId) -> Option<Reg> {
+        Some(self.local_reg[l as usize]).filter(|&r| r != NONE)
+    }
+
+    fn set_reg(&mut self, l: LocalId, r: Reg) {
+        self.reg_log.push((l, self.local_reg[l as usize]));
+        self.local_reg[l as usize] = r;
+    }
+
+    /// Undoes the declarations since `reg_log` had length `mark`.
+    fn reset_regs(&mut self, mark: usize) {
+        for (l, r) in self.reg_log.drain(mark..).rev() {
+            self.local_reg[l as usize] = r;
+        }
+    }
+
+    fn capture(&self, l: LocalId) -> Option<u16> {
+        Some(self.capture_idx[l as usize]).filter(|&i| i != NONE)
+    }
+}
 /// The most instructions a function may contain for copies of deferred code.
 const MAX_DEFER_OPS: usize = 1 << 20;
 
 /// A loop-invariant value that can be loaded once before a loop.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum HoistKey {
+enum HoistKey<'h> {
     Int(i64),
     Float(u64),
-    Str(String),
-    Bytes(Vec<u8>),
+    Str(&'h str),
+    Bytes(&'h [u8]),
     Dur(i64),
     Tag(u32),
     /// An immutable global (hoisted with a guard, see `hoisted_loop`).
     Global(u32),
+    /// An immutable field of a struct or tuple in a local that is never
+    /// assigned (`it.next`, the function of an `Iter`).
+    Field(LocalId, u32),
+    /// A method of a trait dictionary in a local that is never assigned
+    /// (a call through a bound).
+    Method(LocalId, u32),
+}
+
+/// The hoisting key of the method a dynamic trait call loads.
+fn method_key<'h>(f: &FnState, args: &[HArg], slot: u32) -> Option<HoistKey<'h>> {
+    let [HArg::Expr(HExpr { kind: HKind::Local(l), .. }), ..] = args else { return None };
+    (!f.facts.assigned[*l as usize] && !f.locals[*l as usize].cell).then_some(HoistKey::Method(*l, slot))
+}
+
+/// The constants of a program by value (see `Compiler::const_idx`).
+#[derive(Clone, Default)]
+pub(crate) struct ConstTable {
+    strs: PMap<String, u32>,
+    bytes: PMap<Vec<u8>, u32>,
+    scalars: PMap<ScalarConst, u32>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum ScalarConst {
+    Int(i64),
+    /// By its bits (so `-0.0` and `0.0`, and NaNs, stay apart).
+    Float(u64),
+    Dur(i64),
+    Fn(u32),
+    Native(u32),
 }
 
 /// At most this many values are hoisted per loop nest.
@@ -119,24 +190,17 @@ const HOIST_REG_BUDGET: u32 = 1000;
 /// Loops are duplicated for global hoisting only up to this many HIR nodes.
 const MAX_VERSIONED_NODES: usize = 400;
 
-pub fn compile(input: CompileInput) -> Result<Program, Vec<Diag>> {
-    let mut prog = Program::default();
-    let inits = input.checked.module_inits.clone();
-    prog.entry = compile_more(input, &mut prog, &mut Incremental::default(), &inits)?;
-    Ok(prog)
-}
-
 /// What the compiler remembers between the compilations of a REPL session,
-/// each of which appends to the same [`Program`].
+/// each of which appends to the same [`Program`] (and between the standard
+/// library's snapshot and each program compiled on it). Its tables are
+/// persistent, so copying it is cheap.
 #[derive(Clone, Default)]
 pub(crate) struct Incremental {
-    fn_protos: Vec<Option<u32>>,
-    str_consts: HashMap<String, u32>,
-    int_consts: HashMap<i64, u32>,
-    fn_consts: HashMap<u32, u32>,
-    native_consts: HashMap<u32, u32>,
-    variant_wrappers: HashMap<u32, u32>,
-    dict_consts: HashMap<Vec<u32>, u32>,
+    fn_protos: PVec<Option<u32>>,
+    /// The constants made so far, to share them.
+    consts: ConstTable,
+    variant_wrappers: PMap<u32, u32>,
+    dict_consts: PMap<Vec<u32>, u32>,
     descs: reflect::DescCache,
     /// Number of tests compiled.
     tests: usize,
@@ -148,9 +212,11 @@ pub(crate) struct ProgramMark {
     consts: usize,
     types: usize,
     variants: usize,
-    specs: usize,
+    templates: usize,
+    switches: usize,
     tests: usize,
     nglobals: usize,
+    files: usize,
     ids: RtIds,
 }
 
@@ -161,9 +227,11 @@ impl ProgramMark {
             consts: p.consts.len(),
             types: p.types.len(),
             variants: p.variants.len(),
-            specs: p.specs.len(),
+            templates: p.templates.len(),
+            switches: p.switches.len(),
             tests: p.tests.len(),
             nglobals: p.nglobals,
+            files: p.files.len(),
             ids: p.ids,
         }
     }
@@ -175,10 +243,12 @@ impl ProgramMark {
         p.consts.truncate(self.consts);
         p.types.truncate(self.types);
         p.variants.truncate(self.variants);
-        p.specs.truncate(self.specs);
+        p.templates.truncate(self.templates);
+        p.switches.truncate(self.switches);
         p.tests.truncate(self.tests);
         p.nglobals = self.nglobals;
         p.global_names.truncate(self.nglobals);
+        p.files.truncate(self.files);
         p.ids = self.ids;
     }
 }
@@ -194,14 +264,12 @@ pub(crate) fn compile_more(input: CompileInput, prog: &mut Program, inc: &mut In
     let cp = input.checked;
     let mut c = Compiler {
         cp,
+        arena: cp.arena.clone(),
         budget: input.budget,
         sm: input.sm,
         prog,
         fn_protos: std::mem::take(&mut inc.fn_protos),
-        str_consts: std::mem::take(&mut inc.str_consts),
-        int_consts: std::mem::take(&mut inc.int_consts),
-        fn_consts: std::mem::take(&mut inc.fn_consts),
-        native_consts: std::mem::take(&mut inc.native_consts),
+        consts: std::mem::take(&mut inc.consts),
         variant_wrappers: std::mem::take(&mut inc.variant_wrappers),
         dict_consts: std::mem::take(&mut inc.dict_consts),
         descs: std::mem::take(&mut inc.descs),
@@ -212,17 +280,14 @@ pub(crate) fn compile_more(input: CompileInput, prog: &mut Program, inc: &mut In
     c.descs.start();
     let entry = c.compile_new(input, inits, &mut inc.tests);
     inc.fn_protos = c.fn_protos;
-    inc.str_consts = c.str_consts;
-    inc.int_consts = c.int_consts;
-    inc.fn_consts = c.fn_consts;
-    inc.native_consts = c.native_consts;
+    inc.consts = c.consts;
     inc.variant_wrappers = c.variant_wrappers;
     inc.dict_consts = c.dict_consts;
     inc.descs = c.descs;
     if c.errors.is_empty() { Ok(entry) } else { Err(c.errors) }
 }
 
-impl Compiler<'_> {
+impl<'a> Compiler<'a> {
     fn compile_new(&mut self, input: CompileInput, inits: &[FnId], ntests: &mut usize) -> u32 {
         let cp = self.cp;
         for (name, op) in [
@@ -246,34 +311,42 @@ impl Compiler<'_> {
         }
         // Help for natives is only given when (new) natives were checked.
         if !input.native_help.is_empty() {
-            self.prog.native_help = input.native_help;
-            self.prog.native_argc = input.native_argc;
+            self.prog.native_help = input.native_help.into();
+            self.prog.native_argc = input.native_argc.into();
         }
-        self.prog.recv_native = self.recv_native;
-        self.prog.files = input.sm.files.iter().map(|f| f.name.clone()).collect();
+        // The program's files are a prefix of the source map's (those of a
+        // failed compilation are removed by `ProgramMark`): only add the new.
+        let known = self.prog.files.len().min(input.sm.files.len());
+        debug_assert!(known == 0 || self.prog.files[known - 1] == input.sm.files[known - 1].name);
+        self.prog.files.truncate(known);
+        self.prog.files.extend(input.sm.files[known..].iter().map(|f| f.name.clone()));
         self.prog.nglobals = cp.globals.len();
         let known = self.prog.global_names.len();
-        self.prog.global_names.extend(cp.globals[known..].iter().map(|g| g.name.clone()));
-        for t in &cp.types[self.prog.types.len()..] {
+        let name = |s| cp.name(s).to_string();
+        self.prog.global_names.extend(cp.globals.iter_from(known).map(|g| name(g.name)));
+        for t in cp.types.iter_from(self.prog.types.len()) {
             self.prog.types.push(StructRt {
-                name: t.name.clone(),
-                module: t.module_name.clone(),
-                fields: t.fields().iter().map(|f| f.name.clone()).collect(),
+                name: name(t.name),
+                module: name(t.module_name),
+                fields: t.fields().iter().map(|f| name(f.name)).collect(),
                 is_enum: t.is_enum(),
             });
         }
-        for (d, i) in &cp.variants[self.prog.variants.len()..] {
-            let v = &cp.types[*d as usize].variants()[*i as usize];
+        for &(d, i) in cp.variants.iter_from(self.prog.variants.len()) {
+            let v = &cp.types[d as usize].variants()[i as usize];
             self.prog.variants.push(VariantRt {
-                def: *d,
-                index: *i,
-                name: v.name.clone(),
-                field_names: v.field_names.clone(),
+                def: d,
+                index: i,
+                name: name(v.name),
+                field_names: v.field_names.as_ref().map(|ns| ns.iter().map(|&n| name(n)).collect()),
                 arity: v.fields.len(),
             });
         }
         let wk = cp.wk;
-        let vid = |d: u32, name: &str| cp.types[d as usize].variants().iter().find(|v| v.name == name).map(|v| v.rt_id).unwrap_or(0);
+        let vid = |d: u32, n: &str| {
+            let s = cp.syms.get(n);
+            cp.types[d as usize].variants().iter().find(|v| Some(v.name) == s).map(|v| v.rt_id).unwrap_or(0)
+        };
         self.prog.ids = RtIds {
             some: vid(wk.option, "Some"),
             none: vid(wk.option, "None"),
@@ -282,7 +355,8 @@ impl Compiler<'_> {
             error_def: wk.error,
             json: None,
         };
-        if let Some(jd) = cp.types.iter().position(|t| t.name == "Json" && t.module_name == "json") {
+        let (json, json_mod) = (cp.syms.get("Json"), cp.syms.get("json"));
+        if let Some(jd) = cp.types.iter().position(|t| Some(t.name) == json && Some(t.module_name) == json_mod) {
             let jd = jd as u32;
             self.prog.ids.json = Some(JsonIds {
                 def: jd,
@@ -296,12 +370,14 @@ impl Compiler<'_> {
         }
         // Reserve protos for every new script function so calls can refer to them.
         let first = self.fn_protos.len();
-        self.fn_protos.resize(cp.fns.len(), None);
-        for (i, f) in cp.fns.iter().enumerate().skip(first) {
-            if !matches!(f.kind, FnKind::Native(_)) && cp.bodies[i].is_some() {
+        while self.fn_protos.len() < cp.fns.len() {
+            self.fn_protos.push(None);
+        }
+        for (i, f) in cp.fns.iter_from(first).enumerate().map(|(k, f)| (first + k, f)) {
+            if !matches!(f.kind, FnKind::Native(_)) && cp.bodies.get(i as FnId).is_some() {
                 let idx = self.prog.protos.len() as u32;
                 self.prog.protos.push(Proto {
-                    name: f.name.clone(),
+                    name: name(f.name),
                     file: 0,
                     nparams: 0,
                     nregs: 0,
@@ -316,7 +392,7 @@ impl Compiler<'_> {
             }
         }
         for i in first..cp.fns.len() {
-            if let (Some(p), Some(body)) = (self.fn_protos[i], &cp.bodies[i]) {
+            if let (Some(p), Some(body)) = (self.fn_protos[i], cp.bodies.get(i as FnId)) {
                 self.compile_fn(i as FnId, p, body);
             }
         }
@@ -365,126 +441,297 @@ fn int_fits_i32(v: i64) -> bool {
     v >= i32::MIN as i64 && v <= i32::MAX as i64
 }
 
-impl<'a> Compiler<'a> {
-    fn const_idx(&mut self, k: Const) -> u32 {
-        match &k {
-            Const::Str(s) => {
-                if let Some(&i) = self.str_consts.get(s) {
-                    return i;
-                }
-                let i = self.prog.consts.len() as u32;
-                self.str_consts.insert(s.clone(), i);
-                self.prog.consts.push(k);
-                i
-            }
-            Const::Int(v) => {
-                if let Some(&i) = self.int_consts.get(v) {
-                    return i;
-                }
-                let i = self.prog.consts.len() as u32;
-                self.int_consts.insert(*v, i);
-                self.prog.consts.push(k);
-                i
-            }
-            Const::Fn(p) => {
-                if let Some(&i) = self.fn_consts.get(p) {
-                    return i;
-                }
-                let i = self.prog.consts.len() as u32;
-                self.fn_consts.insert(*p, i);
-                self.prog.consts.push(k);
-                i
-            }
-            Const::Native(n) => {
-                if let Some(&i) = self.native_consts.get(n) {
-                    return i;
-                }
-                let i = self.prog.consts.len() as u32;
-                self.native_consts.insert(*n, i);
-                self.prog.consts.push(k);
-                i
-            }
-            _ => {
-                self.prog.consts.push(k);
-                (self.prog.consts.len() - 1) as u32
-            }
+/// The value of an integer literal, also negated (`-1`, which the checker
+/// leaves as a negation).
+fn int_lit(e: &HExpr) -> Option<i64> {
+    match &e.kind {
+        HKind::Int(k) => Some(*k),
+        HKind::Unary { op: HUnOp::Neg, e } => match e.kind {
+            HKind::Int(k) => k.checked_neg(),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// An integer literal that fits an instruction's immediate operand.
+fn small_lit(e: &HExpr) -> Option<i16> {
+    int_lit(e).and_then(|k| i16::try_from(k).ok())
+}
+
+/// The value of a float literal, also negated.
+fn float_lit(e: &HExpr) -> Option<f64> {
+    match &e.kind {
+        HKind::Float(x) => Some(*x),
+        HKind::Unary { op: HUnOp::Neg, e } => match e.kind {
+            HKind::Float(x) => Some(-x),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The comparison that holds exactly when `op` does not (for integers).
+fn negate_cmp(op: CmpOp) -> CmpOp {
+    match op {
+        CmpOp::Lt => CmpOp::Ge,
+        CmpOp::Le => CmpOp::Gt,
+        CmpOp::Gt => CmpOp::Le,
+        CmpOp::Ge => CmpOp::Lt,
+        CmpOp::Eq => CmpOp::Ne,
+        CmpOp::Ne => CmpOp::Eq,
+    }
+}
+
+/// `k op a` as `a op' k`.
+fn mirror_cmp(op: CmpOp) -> CmpOp {
+    match op {
+        CmpOp::Lt => CmpOp::Gt,
+        CmpOp::Le => CmpOp::Ge,
+        CmpOp::Gt => CmpOp::Lt,
+        CmpOp::Ge => CmpOp::Le,
+        CmpOp::Eq | CmpOp::Ne => op,
+    }
+}
+
+/// The branch taken when `a op k` is false.
+fn jump_unless_k(op: CmpOp, a: Reg, k: i16) -> Op {
+    match op {
+        CmpOp::Lt => Op::JNltIK { a, k, off: 0 },
+        CmpOp::Le => Op::JNleIK { a, k, off: 0 },
+        CmpOp::Gt => Op::JNgtIK { a, k, off: 0 },
+        CmpOp::Ge => Op::JNgeIK { a, k, off: 0 },
+        CmpOp::Eq => Op::JNeqIK { a, k, off: 0 },
+        CmpOp::Ne => Op::JNneIK { a, k, off: 0 },
+    }
+}
+
+/// The step of a native loop over the registers at `base`.
+#[derive(Clone, Copy)]
+enum Step {
+    /// `base` = list, `base+1` = index, `base+2` = length snapshot.
+    List,
+    /// `base` = counter, `base+1` = end (exclusive).
+    Range,
+    /// `base` = counter, `base+1` = end (inclusive), `base+2` = done flag.
+    RangeIncl,
+    /// `base` = the iterator of a map; the key goes to `var`, the value to
+    /// `var+1`.
+    Map,
+    /// `base` = the iterator of a set.
+    Set,
+}
+
+impl Step {
+    /// The step writing the next element to `var`: forward, jumping when
+    /// there is none, or backward, jumping when there is one.
+    fn op(self, var: Reg, base: Reg, back: bool) -> Op {
+        match (self, back) {
+            (Step::List, false) => Op::ForList { elem: var, base, off: 0 },
+            (Step::List, true) => Op::ForListBack { elem: var, base, off: 0 },
+            (Step::Range, false) => Op::ForRange { var, base, off: 0 },
+            (Step::Range, true) => Op::ForRangeBack { var, base, off: 0 },
+            (Step::RangeIncl, false) => Op::ForRangeIncl { var, base, off: 0 },
+            (Step::RangeIncl, true) => Op::ForRangeInclBack { var, base, off: 0 },
+            (Step::Map, false) => Op::ForMap { key: var, base, off: 0 },
+            (Step::Map, true) => Op::ForMapBack { key: var, base, off: 0 },
+            (Step::Set, false) => Op::ForSet { elem: var, base, off: 0 },
+            (Step::Set, true) => Op::ForSetBack { elem: var, base, off: 0 },
         }
+    }
+}
+
+/// Whether a loop condition is small and simple enough to be compiled
+/// twice (tested on entry and at the end of a rotated loop).
+fn cheap_cond(cond: &HExpr) -> bool {
+    let mut nodes = 0;
+    let mut simple = true;
+    walk(cond, &mut |e| {
+        nodes += 1;
+        simple &= matches!(
+            e.kind,
+            HKind::Local(_)
+                | HKind::Global(_)
+                | HKind::Int(_)
+                | HKind::Float(_)
+                | HKind::Bool(_)
+                | HKind::Str(_)
+                | HKind::Tag(_)
+                | HKind::Cmp { .. }
+                | HKind::And(..)
+                | HKind::Or(..)
+                | HKind::Unary { .. }
+                | HKind::Arith { .. }
+                | HKind::Field { .. }
+                | HKind::Index { .. }
+                | HKind::CallNative { .. }
+        );
+    });
+    simple && nodes <= 16
+}
+
+/// A pattern-match scrutinee: a value in a register, or the elements of a
+/// tuple literal, never built (see `Compiler::scrutinee`).
+enum Scrut {
+    Reg(Reg),
+    Tuple(Vec<Reg>),
+}
+
+/// What the start of a pattern tests.
+enum Head {
+    /// Nothing: it matches any value.
+    Any,
+    /// The runtime variant id or integer is one of these.
+    Values(Vec<i64>),
+    /// Something else.
+    Other,
+}
+
+fn head(p: &HPat) -> Head {
+    match &p.kind {
+        HPatKind::Wildcard | HPatKind::Bind(_) => Head::Any,
+        HPatKind::Variant { rt_id, .. } => Head::Values(vec![*rt_id as i64]),
+        HPatKind::Int(k) => Head::Values(vec![*k]),
+        HPatKind::Or(alts) => {
+            let mut all = Vec::new();
+            for a in alts {
+                match head(a) {
+                    Head::Values(vs) => all.extend(vs),
+                    h => return h,
+                }
+            }
+            Head::Values(all)
+        }
+        _ => Head::Other,
+    }
+}
+
+fn pat_is_int(p: &HPat) -> bool {
+    match &p.kind {
+        HPatKind::Int(_) => true,
+        HPatKind::Or(alts) => alts.iter().all(pat_is_int),
+        _ => false,
+    }
+}
+
+/// A `match` starting with a jump table (`Op::SwitchVariant`/`SwitchInt`)
+/// over the values `first..first + len`.
+struct SwitchPlan {
+    int: bool,
+    first: i64,
+    len: usize,
+    heads: Vec<Head>,
+}
+
+/// The out-of-line code a failed `?` jumps to (see `FnState::stubs`).
+#[derive(Clone, Copy, PartialEq)]
+enum Stub {
+    /// Returns `None`.
+    RetNone,
+    /// Returns the register (an `Err`).
+    Ret(Reg),
+    /// A top-level `?` on an `Err`.
+    TryTop(Reg),
+}
+
+impl<'a> Compiler<'a> {
+    /// The index of constant `k`, shared with equal constants made before
+    /// (but trait dictionaries and type descriptions have their own caches).
+    fn const_idx(&mut self, k: Const) -> u32 {
+        let next = self.prog.consts.len() as u32;
+        let t = &mut self.consts;
+        let i = match &k {
+            Const::Str(s) => return self.str_const(s),
+            Const::Bytes(b) => t.bytes.get_or_insert(b.clone(), next),
+            Const::Int(v) => t.scalars.get_or_insert(ScalarConst::Int(*v), next),
+            Const::Float(x) => t.scalars.get_or_insert(ScalarConst::Float(x.to_bits()), next),
+            Const::Dur(d) => t.scalars.get_or_insert(ScalarConst::Dur(*d), next),
+            Const::Fn(p) => t.scalars.get_or_insert(ScalarConst::Fn(*p), next),
+            Const::Native(n) => t.scalars.get_or_insert(ScalarConst::Native(*n), next),
+            Const::TypeDesc(_) | Const::Tuple(_) => next,
+        };
+        if i == next {
+            self.prog.consts.push(k);
+        }
+        i
+    }
+
+    fn str_const(&mut self, s: &str) -> u32 {
+        if let Some(&i) = self.consts.strs.get(s) {
+            return i;
+        }
+        let i = self.prog.consts.len() as u32;
+        self.consts.strs.insert(s.to_string(), i);
+        self.prog.consts.push(Const::Str(s.to_string()));
+        i
     }
 
     fn line_of(&self, span: Span) -> u32 {
-        if (span.file as usize) < self.sm.files.len() { self.sm.file(span.file).line_col(span.lo).0 as u32 } else { 0 }
+        if (span.file as usize) < self.sm.files.len() { self.sm.file(span.file).line(span.lo) as u32 } else { 0 }
     }
 
-    fn compile_fn(&mut self, fid: FnId, proto_idx: u32, body: &HFn) {
+    fn compile_fn(&mut self, fid: FnId, proto_idx: u32, body: &'a HFn) {
         let fi = &self.cp.fns[fid as usize];
         let signature = self.signature_of(fid);
-        for no_fused in [false, true] {
-            let mut f = FnState {
-                code: Vec::new(),
-                lines: Vec::new(),
-                locals: &body.locals,
-                local_reg: HashMap::new(),
-                capture_idx: HashMap::new(),
-                next_reg: 0,
-                max_reg: 0,
-                loops: vec![],
-                line: self.line_of(body.span),
-                file: body.span.file,
-                no_fused,
-                too_big: false,
-                in_tail_fn: true,
-                hoisted: HashMap::new(),
-                hoisting: false,
-                defers: Vec::new(),
-                defer_ops: 0,
-                void: None,
-                builders: Rc::new(builder_locals(&body.body, &body.locals)),
-            };
-            for &p in &body.params {
-                let r = self.alloc(&mut f);
-                f.local_reg.insert(p, r);
-            }
-            self.ret_expr(&mut f, &body.body);
-            if f.too_big && !no_fused {
-                continue;
-            }
-            let nparams = body.params.len() as u16;
-            thread_jumps(&mut f.code);
-            let proto = Proto {
-                name: fi.name.clone(),
-                file: body.span.file,
-                nparams,
-                nregs: f.max_reg.max(1) as u16,
-                code: f.code,
-                lines: f.lines,
-                captures: vec![],
-                capture_cells: vec![],
-                doc: fi.doc.clone(),
-                signature: signature.clone(),
-            };
-            self.prog.protos[proto_idx as usize] = proto;
-            return;
+        let mut f = FnState {
+            code: Vec::new(),
+            lines: Vec::new(),
+            far: Vec::new(),
+            locals: &body.locals,
+            local_reg: vec![NONE; body.locals.len()],
+            reg_log: Vec::new(),
+            capture_idx: vec![NONE; body.locals.len()],
+            next_reg: 0,
+            max_reg: 0,
+            loops: vec![],
+            line: self.line_of(body.span),
+            file: body.span.file,
+            too_big: false,
+            hoisted: FxHashMap::default(),
+            hoisting: false,
+            defers: Vec::new(),
+            defer_ops: 0,
+            void: None,
+            facts: Rc::new(local_facts(&body.body, &body.locals, self.budget)),
+            stubs: Vec::new(),
+            switches: Vec::new(),
+        };
+        for &p in &body.params {
+            let r = self.alloc(&mut f);
+            f.set_reg(p, r);
         }
+        self.ret_expr(&mut f, &body.body);
+        let nregs = f.max_reg.max(1) as u16;
+        let (code, lines) = self.finish(f);
+        self.prog.protos[proto_idx as usize] = Proto {
+            name: self.cp.name(fi.name).to_string(),
+            file: body.span.file,
+            nparams: body.params.len() as u16,
+            nregs,
+            code,
+            lines,
+            captures: vec![],
+            capture_cells: vec![],
+            doc: fi.doc.as_deref().map(String::from),
+            signature,
+        };
     }
 
     fn signature_of(&self, fid: FnId) -> String {
-        let fi = &self.cp.fns[fid as usize];
-        let printer = crate::types::TypePrinter { defs: &self.cp.types, params: &self.cp.params, wk: self.cp.wk };
-        let params: Vec<(String, Type, bool)> = fi.params.iter().map(|p| (p.name.clone(), p.ty.clone(), p.default.is_some())).collect();
-        printer.signature(&fi.name, &params, &fi.ret)
+        self.cp.fn_signature(fid)
     }
 
     // ------------------------------------------------------------------
     // Emission helpers
 
-    fn emit(&mut self, f: &mut FnState, op: Op) -> usize {
+    fn emit(&mut self, f: &mut FnState<'a>, op: Op) -> usize {
         self.budget.charge(1);
         f.code.push(op);
         f.lines.push(f.line);
         f.code.len() - 1
     }
 
-    fn alloc(&mut self, f: &mut FnState) -> Reg {
+    fn alloc(&mut self, f: &mut FnState<'a>) -> Reg {
         let r = f.next_reg;
         f.next_reg += 1;
         if f.next_reg > f.max_reg {
@@ -500,7 +747,7 @@ impl<'a> Compiler<'a> {
         r as Reg
     }
 
-    fn alloc_n(&mut self, f: &mut FnState, n: usize) -> Reg {
+    fn alloc_n(&mut self, f: &mut FnState<'a>, n: usize) -> Reg {
         let base = f.next_reg;
         for _ in 0..n {
             self.alloc(f);
@@ -514,57 +761,89 @@ impl<'a> Compiler<'a> {
         base.min(MAX_REGS - 1) as Reg
     }
 
-    fn here(&self, f: &FnState) -> usize {
+    fn here(&self, f: &FnState<'a>) -> usize {
         f.code.len()
     }
 
-    fn emit_jump(&mut self, f: &mut FnState) -> usize {
+    fn emit_jump(&mut self, f: &mut FnState<'a>) -> usize {
         self.emit(f, Op::Jmp { off: 0 })
     }
 
-    /// Patches the jump at `at` to land on `target`.
-    fn patch(&mut self, f: &mut FnState, at: usize, target: usize) {
-        let off = target as i64 - (at as i64 + 1);
-        let fits16 = off >= i16::MIN as i64 && off <= i16::MAX as i64;
-        let op = &mut f.code[at];
-        match op {
-            Op::Jmp { off: o } | Op::Loop { off: o } | Op::JmpIf { off: o, .. } | Op::JmpIfNot { off: o, .. } => *o = off as i32,
-            Op::JNltI { off: o, .. }
-            | Op::JNleI { off: o, .. }
-            | Op::JNeqI { off: o, .. }
-            | Op::JNneI { off: o, .. }
-            | Op::JNltF { off: o, .. }
-            | Op::JNleF { off: o, .. }
-            | Op::JNotVariant { off: o, .. }
-            | Op::JNotSome { off: o, .. }
-            | Op::JStrClass { off: o, .. }
-            | Op::HoistGlobal { off: o, .. }
-            | Op::JListLen { off: o, .. }
-            | Op::JListMinLen { off: o, .. }
-            | Op::ForList { off: o, .. }
-            | Op::ForRange { off: o, .. }
-            | Op::ForRangeIncl { off: o, .. } => {
-                if fits16 {
-                    *o = off as i16;
-                } else {
-                    f.too_big = true;
-                }
-            }
-            _ => unreachable!("patching a non-jump"),
+    /// Patches the jump at `at` to land on `target`. A target out of the
+    /// range of the instruction's offset field is resolved by `assemble`.
+    fn patch(&mut self, f: &mut FnState<'a>, at: usize, target: usize) {
+        // A conditional branch back (ending a rotated loop) is a safe point.
+        if target <= at
+            && let Some(back) = f.code[at].backward()
+        {
+            f.code[at] = back;
+        }
+        if !f.code[at].set_branch_off(target as i64 - (at as i64 + 1)) {
+            f.far.push((at, target));
         }
     }
 
-    fn patch_here(&mut self, f: &mut FnState, at: usize) {
+    /// The function's final code and lines: its stubs emitted, assembled
+    /// (`assemble`), and its jump tables completed.
+    fn finish(&mut self, mut f: FnState<'a>) -> (Vec<Op>, Vec<u32>) {
+        self.emit_stubs(&mut f);
+        let mut tables: Vec<Vec<usize>> = f.switches.iter().map(|s| s.1.clone()).collect();
+        let (code, lines) = assemble(f.code, f.lines, &f.far, &mut tables);
+        for ((idx, _), targets) in f.switches.iter().zip(tables) {
+            let sw = &mut self.prog.switches[*idx as usize];
+            let (&default, targets) = targets.split_last().expect("a default target");
+            sw.targets = targets.iter().map(|&t| t as u32).collect();
+            sw.default = default as u32;
+        }
+        (code, lines)
+    }
+
+    /// Makes the branch at `at` go to `stub` (emitted by `emit_stubs`).
+    fn jump_to_stub(&mut self, f: &mut FnState<'a>, at: usize, stub: Stub) {
+        match f.stubs.iter_mut().find(|s| s.0 == stub) {
+            Some(s) => s.1.push(at),
+            None => f.stubs.push((stub, vec![at], f.line)),
+        }
+    }
+
+    /// Emits the stubs after the function's code.
+    fn emit_stubs(&mut self, f: &mut FnState<'a>) {
+        for (stub, jumps, line) in std::mem::take(&mut f.stubs) {
+            f.line = line;
+            self.patch_list(f, jumps);
+            match stub {
+                Stub::RetNone => {
+                    // Any register will do: the function returns.
+                    self.emit(f, Op::LoadTag { dst: 0, tag: self.prog.ids.none });
+                    self.emit(f, Op::Ret { src: 0 });
+                }
+                Stub::Ret(r) => {
+                    self.emit(f, Op::Ret { src: r });
+                }
+                Stub::TryTop(r) => {
+                    self.emit(f, Op::TryTop { src: r });
+                }
+            }
+        }
+    }
+
+    fn patch_all(&mut self, f: &mut FnState<'a>, jumps: Vec<usize>, target: usize) {
+        for j in jumps {
+            self.patch(f, j, target);
+        }
+    }
+
+    fn patch_here(&mut self, f: &mut FnState<'a>, at: usize) {
         let t = self.here(f);
         self.patch(f, at, t);
     }
 
-    fn emit_loop_back(&mut self, f: &mut FnState, target: usize) {
+    fn emit_loop_back(&mut self, f: &mut FnState<'a>, target: usize) {
         let at = self.emit(f, Op::Loop { off: 0 });
         self.patch(f, at, target);
     }
 
-    fn mv(&mut self, f: &mut FnState, dst: Reg, src: Reg) {
+    fn mv(&mut self, f: &mut FnState<'a>, dst: Reg, src: Reg) {
         if dst != src {
             self.emit(f, Op::Move { dst, src });
         }
@@ -572,7 +851,7 @@ impl<'a> Compiler<'a> {
 
     /// Calls script function `proto` with the arguments at `base..`,
     /// writing the result to `dst`.
-    fn call_direct(&mut self, f: &mut FnState, base: Reg, proto: u32, dst: Reg) {
+    fn call_direct(&mut self, f: &mut FnState<'a>, base: Reg, proto: u32, dst: Reg) {
         match u16::try_from(proto) {
             Ok(proto) => {
                 self.emit(f, Op::CallDirectTo { base, dst, proto });
@@ -586,19 +865,27 @@ impl<'a> Compiler<'a> {
 
     /// Calls `native` with the arguments at `base..`, writing the result to
     /// `dst`.
-    fn call_native(&mut self, f: &mut FnState, base: Reg, native: u32, dst: Reg) {
+    fn call_native(&mut self, f: &mut FnState<'a>, base: Reg, native: u32, dst: Reg) {
         match u16::try_from(native) {
             Ok(native) => {
                 self.emit(f, Op::CallNativeTo { base, dst, native });
             }
             Err(_) => {
-                self.emit(f, Op::CallNative { base, native });
-                self.mv(f, dst, base);
+                // The arguments may be locals' registers: call on copies.
+                let argc = self.prog.native_argc.get(native as usize).copied().unwrap_or(0) as usize;
+                let mark = f.next_reg;
+                let t = self.alloc_n(f, argc.max(1));
+                for i in 0..argc as Reg {
+                    self.mv(f, t + i, base + i);
+                }
+                self.emit(f, Op::CallNative { base: t, native });
+                self.mv(f, dst, t);
+                f.next_reg = mark;
             }
         }
     }
 
-    fn load_int(&mut self, f: &mut FnState, dst: Reg, v: i64) {
+    fn load_int(&mut self, f: &mut FnState<'a>, dst: Reg, v: i64) {
         if int_fits_i32(v) {
             self.emit(f, Op::LoadInt { dst, v: v as i32 });
         } else {
@@ -607,12 +894,12 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn load_str(&mut self, f: &mut FnState, dst: Reg, s: &str) {
-        let k = self.const_idx(Const::Str(s.to_string()));
+    fn load_str(&mut self, f: &mut FnState<'a>, dst: Reg, s: &str) {
+        let k = self.str_const(s);
         self.emit(f, Op::LoadConst { dst, k });
     }
 
-    fn variant_u16(&mut self, f: &FnState, rt: u32) -> u16 {
+    fn variant_u16(&mut self, f: &FnState<'a>, rt: u32) -> u16 {
         if rt > u16::MAX as u32 {
             self.errors.push(Diag::error(Span::new(f.file, 0, 0), "too many enum variants in program"));
             return 0;
@@ -623,14 +910,14 @@ impl<'a> Compiler<'a> {
     // ------------------------------------------------------------------
     // Locals
 
-    fn is_cell(&self, f: &FnState, l: LocalId) -> bool {
+    fn is_cell(&self, f: &FnState<'a>, l: LocalId) -> bool {
         f.locals[l as usize].cell
     }
 
     /// Reads local `l` into `dst`.
-    fn read_local(&mut self, f: &mut FnState, l: LocalId, dst: Reg) {
-        if let Some(&r) = f.local_reg.get(&l) {
-            if f.builders.contains(&l) {
+    fn read_local(&mut self, f: &mut FnState<'a>, l: LocalId, dst: Reg) {
+        if let Some(r) = f.reg(l) {
+            if f.facts.builder[l as usize] {
                 self.emit(f, Op::FreezeStr { reg: r });
             }
             if self.is_cell(f, l) {
@@ -638,7 +925,7 @@ impl<'a> Compiler<'a> {
             } else {
                 self.mv(f, dst, r);
             }
-        } else if let Some(&i) = f.capture_idx.get(&l) {
+        } else if let Some(i) = f.capture(l) {
             if self.is_cell(f, l) {
                 self.emit(f, Op::LoadCaptureCell { dst, idx: i });
             } else {
@@ -650,28 +937,40 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn write_local(&mut self, f: &mut FnState, l: LocalId, src: Reg) {
-        if let Some(&r) = f.local_reg.get(&l) {
+    /// A register holding local `l`: its own, unless it is a cell or captured.
+    fn local_operand(&mut self, f: &mut FnState<'a>, l: LocalId) -> Reg {
+        match f.reg(l) {
+            Some(r) if !self.is_cell(f, l) && !f.facts.builder[l as usize] => r,
+            _ => {
+                let r = self.alloc(f);
+                self.read_local(f, l, r);
+                r
+            }
+        }
+    }
+
+    fn write_local(&mut self, f: &mut FnState<'a>, l: LocalId, src: Reg) {
+        if let Some(r) = f.reg(l) {
             if self.is_cell(f, l) {
                 self.emit(f, Op::StoreCell { cell: r, src });
             } else {
                 self.mv(f, r, src);
             }
-        } else if let Some(&i) = f.capture_idx.get(&l) {
+        } else if let Some(i) = f.capture(l) {
             self.emit(f, Op::StoreCaptureCell { idx: i, src });
         }
     }
 
     /// Declares local `l` (allocating its register) and initializes it from `src`.
-    fn declare_local(&mut self, f: &mut FnState, l: LocalId) -> Reg {
+    fn declare_local(&mut self, f: &mut FnState<'a>, l: LocalId) -> Reg {
         let r = self.alloc(f);
-        f.local_reg.insert(l, r);
+        f.set_reg(l, r);
         r
     }
 
     /// Initializes a declared local from `src` (wrapping in a cell if needed).
-    fn init_local(&mut self, f: &mut FnState, l: LocalId, src: Reg) {
-        let r = f.local_reg[&l];
+    fn init_local(&mut self, f: &mut FnState<'a>, l: LocalId, src: Reg) {
+        let r = f.reg(l).unwrap();
         if self.is_cell(f, l) {
             self.emit(f, Op::NewCell { dst: r, src });
         } else {
@@ -683,18 +982,18 @@ impl<'a> Compiler<'a> {
     // Expressions
 
     /// Returns a register holding the value of `e`, avoiding a copy for plain locals.
-    fn expr_reg(&mut self, f: &mut FnState, e: &HExpr) -> Reg {
+    fn expr_reg(&mut self, f: &mut FnState<'a>, e: &'a HExpr) -> Reg {
         if let HKind::Local(l) = e.kind
-            && let Some(&r) = f.local_reg.get(&l)
+            && let Some(r) = f.reg(l)
             && !self.is_cell(f, l)
         {
-            if f.builders.contains(&l) {
+            if f.facts.builder[l as usize] {
                 self.emit(f, Op::FreezeStr { reg: r });
             }
             return r;
         }
         if !f.hoisted.is_empty()
-            && let Some(k) = self.hoist_key(e)
+            && let Some(k) = self.hoist_key(f, e)
             && let Some(&r) = f.hoisted.get(&k)
         {
             return r;
@@ -704,8 +1003,22 @@ impl<'a> Compiler<'a> {
         r
     }
 
+    /// `expr_reg` for an operand evaluated before the operands `later`: a
+    /// local is read in place only if they cannot assign it (`x + { x = 5; x }`).
+    fn operand(&mut self, f: &mut FnState<'a>, e: &'a HExpr, later: &[&'a HExpr]) -> Reg {
+        if let HKind::Local(l) = e.kind
+            && f.facts.assigned[l as usize]
+            && later.iter().any(|x| assigns(x, l, self.budget))
+        {
+            let r = self.alloc(f);
+            self.read_local(f, l, r);
+            return r;
+        }
+        self.expr_reg(f, e)
+    }
+
     /// Compiles `e` for its side effects only.
-    fn discard(&mut self, f: &mut FnState, e: &HExpr) {
+    fn discard(&mut self, f: &mut FnState<'a>, e: &'a HExpr) {
         match &e.kind {
             HKind::Let { pat, init, else_ } => {
                 self.set_line(f, e.span);
@@ -714,7 +1027,7 @@ impl<'a> Compiler<'a> {
             }
             HKind::Assign { place, op, op_ty, value } => {
                 self.set_line(f, e.span);
-                self.compile_assign(f, place, *op, op_ty, value);
+                self.compile_assign(f, place, *op, *op_ty, value);
                 return;
             }
             HKind::LocalFns { .. } => {
@@ -741,7 +1054,7 @@ impl<'a> Compiler<'a> {
                 if f.defers.is_empty() {
                     f.defers.push(Vec::new());
                 }
-                f.defers.last_mut().unwrap().push((**x).clone());
+                f.defers.last_mut().unwrap().push(x);
                 return;
             }
             _ => {}
@@ -756,26 +1069,26 @@ impl<'a> Compiler<'a> {
 
     /// Loads unit into `dst` as the value of an expression, unless the
     /// value is unused (`dst` is the register of a discarded expression).
-    fn unit_to(&mut self, f: &mut FnState, dst: Reg) {
+    fn unit_to(&mut self, f: &mut FnState<'a>, dst: Reg) {
         if f.void != Some(dst) {
             self.emit(f, Op::LoadUnit { dst });
         }
     }
 
-    fn set_line(&mut self, f: &mut FnState, span: Span) {
+    fn set_line(&mut self, f: &mut FnState<'a>, span: Span) {
         if span.file == f.file && span.hi > 0 {
             f.line = self.line_of(span);
         }
     }
 
     /// Compiles `e` as the return value of the current function (tail position).
-    fn ret_expr(&mut self, f: &mut FnState, e: &HExpr) {
+    fn ret_expr(&mut self, f: &mut FnState<'a>, e: &'a HExpr) {
         self.set_line(f, e.span);
         // Pending deferred expressions run after the value is computed, so
         // calls cannot be tail calls.
         let tail = !defers_pending(f);
         match &e.kind {
-            HKind::Block(items) if !items.is_empty() => {
+            HKind::Block(items) if !items.is_empty() && self.struct_literal(f, items).is_none() => {
                 let mark = f.next_reg;
                 f.defers.push(Vec::new());
                 for it in &items[..items.len() - 1] {
@@ -790,16 +1103,17 @@ impl<'a> Compiler<'a> {
                 let base = self.call_args(f, args, 0);
                 self.set_line(f, e.span);
                 self.emit(f, Op::TailCallDirect { base, proto });
-                self.emit(f, Op::Ret { src: base });
             }
             HKind::CallValue { callee, args } if tail => {
-                let base = self.alloc_n(f, args.len() + 1);
-                self.expr_to(f, callee, base);
+                let argc = self.argc(f, args.len(), e.span);
+                let callee = self.operand(f, callee, &args.iter().collect::<Vec<_>>());
+                let base = self.alloc_n(f, args.len().max(1));
                 for (i, a) in args.iter().enumerate() {
-                    self.expr_to(f, a, base + 1 + i as Reg);
+                    self.expr_to(f, a, base + i as Reg);
                 }
                 self.set_line(f, e.span);
-                self.emit(f, Op::TailCall { base, argc: args.len() as u16 });
+                // (A native callee returns here: its result is in `base`.)
+                self.emit(f, Op::TailCall { callee, base, argc: argc as u16 });
                 self.emit(f, Op::Ret { src: base });
             }
             HKind::CallTrait { slot, args, impl_id, .. } if tail => match self.static_target(*impl_id, *slot) {
@@ -807,13 +1121,13 @@ impl<'a> Compiler<'a> {
                     let base = self.call_args(f, args, 0);
                     self.set_line(f, e.span);
                     self.emit(f, Op::TailCallDirect { base, proto });
-                    self.emit(f, Op::Ret { src: base });
                 }
                 None => {
-                    let base = self.call_args(f, args, 1);
-                    self.emit(f, Op::GetField { dst: base, obj: base + 1, idx: *slot as u16 });
+                    let argc = self.argc(f, args.len(), e.span);
+                    let base = self.call_args(f, args, 0);
+                    let callee = self.method(f, args, base, *slot);
                     self.set_line(f, e.span);
-                    self.emit(f, Op::TailCall { base, argc: args.len() as u16 });
+                    self.emit(f, Op::TailCall { callee, base, argc: argc as u16 });
                     self.emit(f, Op::Ret { src: base });
                 }
             },
@@ -825,10 +1139,23 @@ impl<'a> Compiler<'a> {
                 self.patch_list(f, jf);
                 self.ret_expr(f, els);
             }
+            // Every arm returns: calls in arms are tail calls (SPEC §10.5).
+            HKind::IfLet { pat, value, then, else_: Some(els) } => {
+                let mark = f.next_reg;
+                self.declare_pattern_locals(f, pat);
+                let v = self.scrutinee(f, value);
+                let mut fails = Vec::new();
+                self.match_scrut(f, pat, &v, &mut fails);
+                self.ret_expr(f, then);
+                self.patch_list(f, fails);
+                self.ret_expr(f, els);
+                f.next_reg = mark;
+            }
+            HKind::Match { scrut, arms } => self.compile_match(f, scrut, arms, None),
             HKind::Return(Some(v)) => self.ret_expr(f, v),
             _ => {
                 let mark = f.next_reg;
-                if matches!(e.ty, Type::Unit) && !matches!(e.kind, HKind::Local(_) | HKind::Global(_)) {
+                if matches!(e.ty, TypeId::UNIT) && !matches!(e.kind, HKind::Local(_) | HKind::Global(_)) {
                     self.discard(f, e);
                     self.emit_defers(f, 0);
                     self.emit(f, Op::RetUnit);
@@ -850,7 +1177,7 @@ impl<'a> Compiler<'a> {
     /// Compiles the deferred expressions of the defer scopes `from..`,
     /// innermost scope first and each scope in reverse order (an exit edge
     /// leaving those blocks).
-    fn emit_defers(&mut self, f: &mut FnState, from: usize) {
+    fn emit_defers(&mut self, f: &mut FnState<'a>, from: usize) {
         let line = f.line;
         for i in (from..f.defers.len()).rev() {
             for j in (0..f.defers[i].len()).rev() {
@@ -866,13 +1193,13 @@ impl<'a> Compiler<'a> {
                     f.too_big = true;
                     return;
                 }
-                let x = f.defers[i][j].clone();
+                let x = f.defers[i][j];
                 let (ops, protos) = (f.code.len(), self.prog.protos.len());
                 // Locals declared by the deferred code get fresh registers at
                 // each copy (the registers of an earlier copy may be in use here).
-                let saved = f.local_reg.clone();
-                self.discard(f, &x);
-                f.local_reg = saved;
+                let saved = f.reg_log.len();
+                self.discard(f, x);
+                f.reset_regs(saved);
                 let lambda_ops: usize = self.prog.protos[protos..].iter().map(|p| p.code.len()).sum();
                 f.defer_ops += f.code.len() - ops + lambda_ops;
             }
@@ -881,30 +1208,34 @@ impl<'a> Compiler<'a> {
     }
 
     /// Runs the deferred expressions of the innermost scope (its block ends normally).
-    fn emit_scope_defers(&mut self, f: &mut FnState) {
+    fn emit_scope_defers(&mut self, f: &mut FnState<'a>) {
         if f.defers.last().is_some_and(|d| !d.is_empty()) {
             let n = f.defers.len() - 1;
             self.emit_defers(f, n);
         }
     }
 
-    fn patch_list(&mut self, f: &mut FnState, jumps: Vec<usize>) {
+    fn patch_list(&mut self, f: &mut FnState<'a>, jumps: Vec<usize>) {
         for j in jumps {
             self.patch_here(f, j);
         }
     }
 
     /// Emits a conditional jump taken when `cond` is false; returns patch sites.
-    fn cond_jump(&mut self, f: &mut FnState, cond: &HExpr) -> Vec<usize> {
+    fn cond_jump(&mut self, f: &mut FnState<'a>, cond: &'a HExpr) -> Vec<usize> {
         self.set_line(f, cond.span);
-        if !f.no_fused
-            && let HKind::Cmp { op, l, r } = &cond.kind
-        {
-            let ty = &l.ty;
-            if matches!(ty, Type::Int) || matches!(ty, Type::Float) {
-                let a = self.expr_reg(f, l);
+        if let Some(j) = self.cmp_k_jump(f, cond, false) {
+            return j;
+        }
+        if let Some(j) = self.eq_jump(f, cond, false) {
+            return j;
+        }
+        if let HKind::Cmp { op, l, r } = &cond.kind {
+            let ty = l.ty;
+            if matches!(ty, TypeId::INT) || matches!(ty, TypeId::FLOAT) {
+                let a = self.operand(f, l, &[r]);
                 let b = self.expr_reg(f, r);
-                let int = matches!(ty, Type::Int);
+                let int = matches!(ty, TypeId::INT);
                 let op = match (op, int) {
                     (CmpOp::Lt, true) => Op::JNltI { a, b, off: 0 },
                     (CmpOp::Le, true) => Op::JNleI { a, b, off: 0 },
@@ -942,6 +1273,8 @@ impl<'a> Compiler<'a> {
             }
             HKind::Unary { op: HUnOp::Not, e } => self.cond_jump_true(f, e),
             HKind::Bool(true) => vec![],
+            HKind::Bool(false) => vec![self.emit_jump(f)],
+            HKind::Block(items) if cond_block(items) => self.block_jump(f, items, false),
             _ => {
                 let c = self.expr_reg(f, cond);
                 vec![self.emit(f, Op::JmpIfNot { cond: c, off: 0 })]
@@ -949,11 +1282,54 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    /// An integer comparison with a small constant as one compare-and-branch
+    /// with an immediate: jumps when the comparison is `when`.
+    fn cmp_k_jump(&mut self, f: &mut FnState<'a>, cond: &'a HExpr, when: bool) -> Option<Vec<usize>> {
+        let HKind::Cmp { op, l, r } = &cond.kind else { return None };
+        if !matches!(l.ty, TypeId::INT) {
+            return None;
+        }
+        let (op, x, k) = match (small_lit(l), small_lit(r)) {
+            (_, Some(k)) => (*op, l, k),
+            (Some(k), None) => (mirror_cmp(*op), r, k),
+            (None, None) => return None,
+        };
+        let a = self.expr_reg(f, x);
+        let op = if when { negate_cmp(op) } else { op };
+        Some(vec![self.emit(f, jump_unless_k(op, a, k))])
+    }
+
+    /// `==` or `!=` of values other than numbers (strings, ...) as one
+    /// compare-and-branch: jumps when the comparison is `when`.
+    fn eq_jump(&mut self, f: &mut FnState<'a>, cond: &'a HExpr, when: bool) -> Option<Vec<usize>> {
+        let HKind::Cmp { op: op @ (CmpOp::Eq | CmpOp::Ne), l, r } = &cond.kind else { return None };
+        if matches!(l.ty, TypeId::INT | TypeId::FLOAT) {
+            return None;
+        }
+        let a = self.operand(f, l, &[r]);
+        let b = self.expr_reg(f, r);
+        let eq = (*op == CmpOp::Eq) != when;
+        Some(vec![self.emit(f, if eq { Op::JNeq { a, b, off: 0 } } else { Op::JNne { a, b, off: 0 } })])
+    }
+
+    /// The condition `{ items }` (see `cond_block`): its statements, then a
+    /// branch on its last expression taken when it is `when`.
+    fn block_jump(&mut self, f: &mut FnState<'a>, items: &'a [HExpr], when: bool) -> Vec<usize> {
+        f.defers.push(Vec::new());
+        for it in &items[..items.len() - 1] {
+            self.discard(f, it);
+        }
+        let last = items.last().unwrap();
+        let j = if when { self.cond_jump_true(f, last) } else { self.cond_jump(f, last) };
+        f.defers.pop();
+        j
+    }
+
     /// A character-class test (`c.is_alnum()`, an inline `StrClass`) as
     /// one compare-and-branch: jumps when the test is `when`.
-    fn str_class_jump(&mut self, f: &mut FnState, cond: &HExpr, when: bool) -> Option<Vec<usize>> {
+    fn str_class_jump(&mut self, f: &mut FnState<'a>, cond: &'a HExpr, when: bool) -> Option<Vec<usize>> {
         let HKind::CallNative { native, args, .. } = &cond.kind else { return None };
-        let (Some(&Inline::StrClass(class)), [HArg::Expr(x)], false) = (self.inline.get(native), args.as_slice(), f.no_fused) else {
+        let (Some(&Inline::StrClass(class)), [HArg::Expr(x)]) = (self.inline.get(native), args.as_slice()) else {
             return None;
         };
         let mark = f.next_reg;
@@ -964,16 +1340,22 @@ impl<'a> Compiler<'a> {
     }
 
     /// Like [`Self::cond_jump`], but the jumps are taken when `cond` is true.
-    fn cond_jump_true(&mut self, f: &mut FnState, cond: &HExpr) -> Vec<usize> {
+    fn cond_jump_true(&mut self, f: &mut FnState<'a>, cond: &'a HExpr) -> Vec<usize> {
         self.set_line(f, cond.span);
         if let Some(j) = self.str_class_jump(f, cond, true) {
+            return j;
+        }
+        if let Some(j) = self.cmp_k_jump(f, cond, true) {
+            return j;
+        }
+        if let Some(j) = self.eq_jump(f, cond, true) {
             return j;
         }
         match &cond.kind {
             // Integer comparisons as the fused "jump if not" of the opposite
             // comparison (not floats: the opposite of `<` is not `>=` for NaN).
-            HKind::Cmp { op, l, r } if !f.no_fused && matches!(l.ty, Type::Int) => {
-                let a = self.expr_reg(f, l);
+            HKind::Cmp { op, l, r } if matches!(l.ty, TypeId::INT) => {
+                let a = self.operand(f, l, &[r]);
                 let b = self.expr_reg(f, r);
                 let op = match op {
                     CmpOp::Lt => Op::JNleI { a: b, b: a, off: 0 },
@@ -999,6 +1381,8 @@ impl<'a> Compiler<'a> {
             }
             HKind::Unary { op: HUnOp::Not, e } => self.cond_jump(f, e),
             HKind::Bool(false) => vec![],
+            HKind::Bool(true) => vec![self.emit_jump(f)],
+            HKind::Block(items) if cond_block(items) => self.block_jump(f, items, true),
             _ => {
                 let c = self.expr_reg(f, cond);
                 vec![self.emit(f, Op::JmpIf { cond: c, off: 0 })]
@@ -1008,7 +1392,7 @@ impl<'a> Compiler<'a> {
 
     /// Compiles arguments into consecutive registers starting at a fresh base
     /// (after `extra` leading slots); returns the base.
-    fn call_args(&mut self, f: &mut FnState, args: &[HArg], extra: usize) -> Reg {
+    fn call_args(&mut self, f: &mut FnState<'a>, args: &'a [HArg], extra: usize) -> Reg {
         let base = self.alloc_n(f, args.len() + extra);
         let base_args = base + extra as Reg;
         for (i, a) in args.iter().enumerate() {
@@ -1034,7 +1418,7 @@ impl<'a> Compiler<'a> {
         base
     }
 
-    fn expr_to(&mut self, f: &mut FnState, e: &HExpr, dst: Reg) {
+    fn expr_to(&mut self, f: &mut FnState<'a>, e: &'a HExpr, dst: Reg) {
         if !self.budget.charge(1) {
             return;
         }
@@ -1114,8 +1498,36 @@ impl<'a> Compiler<'a> {
                 self.unit_to(f, dst);
             }
             HKind::Assign { place, op, op_ty, value } => {
-                self.compile_assign(f, place, *op, op_ty, value);
+                self.compile_assign(f, place, *op, *op_ty, value);
                 self.unit_to(f, dst);
+            }
+            HKind::Block(items) if self.struct_literal(f, items).is_some() => {
+                let (n, def, fields) = self.struct_literal(f, items).unwrap();
+                let mark = f.next_reg;
+                let start = self.alloc_n(f, fields.len());
+                // The fields given, in source order, straight into their
+                // registers; then the others (from `..base` or defaults).
+                let mut done = vec![false; fields.len()];
+                for it in &items[..n] {
+                    let HKind::Let { pat, init, else_ } = &it.kind else { unreachable!() };
+                    let HPatKind::Bind(l) = pat.kind else { unreachable!() };
+                    match fields.iter().position(|x| matches!(x.kind, HKind::Local(m) if m == l)) {
+                        Some(i) => {
+                            self.expr_to(f, init, start + i as Reg);
+                            done[i] = true;
+                        }
+                        // `..base`
+                        None => self.compile_let(f, pat, init, else_.as_deref()),
+                    }
+                }
+                for (i, x) in fields.iter().enumerate() {
+                    if !done[i] {
+                        self.expr_to(f, x, start + i as Reg);
+                    }
+                }
+                let def = self.def_u16(f, def);
+                self.emit(f, Op::NewStruct { dst, start, def });
+                f.next_reg = mark;
             }
             HKind::Block(items) => {
                 let mark = f.next_reg;
@@ -1147,6 +1559,15 @@ impl<'a> Compiler<'a> {
                 self.discard(f, e);
                 self.unit_to(f, dst);
             }
+            HKind::If { cond, then, else_: None } if f.void == Some(dst) && self.loop_exit(f, then).is_some() => {
+                // `if c { continue }` / `if c { break }`: one branch to the target.
+                let (i, cont) = self.loop_exit(f, then).unwrap();
+                let mark = f.next_reg;
+                let j = self.cond_jump_true(f, cond);
+                f.next_reg = mark;
+                let cx = &mut f.loops[i];
+                if cont { cx.continues.extend(j) } else { cx.breaks.extend(j) }
+            }
             HKind::If { cond, then, else_ } => {
                 let mark = f.next_reg;
                 let jf = self.cond_jump(f, cond);
@@ -1172,9 +1593,9 @@ impl<'a> Compiler<'a> {
             HKind::IfLet { pat, value, then, else_ } => {
                 let mark = f.next_reg;
                 self.declare_pattern_locals(f, pat);
-                let v = self.expr_reg(f, value);
+                let v = self.scrutinee(f, value);
                 let mut fails = Vec::new();
-                self.match_pattern(f, pat, v, &mut fails);
+                self.match_scrut(f, pat, &v, &mut fails);
                 self.expr_to(f, then, dst);
                 if else_.is_none() && f.void == Some(dst) {
                     // A statement: nothing to do when the pattern fails.
@@ -1193,28 +1614,7 @@ impl<'a> Compiler<'a> {
                 self.patch_here(f, jend);
                 f.next_reg = mark;
             }
-            HKind::Match { scrut, arms } => {
-                let mark = f.next_reg;
-                let s = self.expr_reg(f, scrut);
-                let mut ends = Vec::new();
-                for arm in arms {
-                    let amark = f.next_reg;
-                    self.declare_pattern_locals(f, &arm.pat);
-                    let mut fails = Vec::new();
-                    self.match_pattern(f, &arm.pat, s, &mut fails);
-                    if let Some(g) = &arm.guard {
-                        fails.extend(self.cond_jump(f, g));
-                    }
-                    self.expr_to(f, &arm.body, dst);
-                    ends.push(self.emit_jump(f));
-                    self.patch_list(f, fails);
-                    f.next_reg = amark;
-                }
-                let k = self.const_idx(Const::Str("internal error: no match arm matched".into()));
-                self.emit(f, Op::Panic { msg: k });
-                self.patch_list(f, ends);
-                f.next_reg = mark;
-            }
+            HKind::Match { scrut, arms } => self.compile_match(f, scrut, arms, Some(dst)),
             HKind::Loop(body) => {
                 let mark = f.next_reg;
                 let top = self.here(f);
@@ -1223,45 +1623,80 @@ impl<'a> Compiler<'a> {
                 self.emit_loop_back(f, top);
                 let cx = f.loops.pop().unwrap();
                 self.patch_list(f, cx.breaks);
-                for c in cx.continues {
-                    self.patch(f, c, top);
-                }
+                self.patch_all(f, cx.continues, top);
                 f.next_reg = mark;
             }
+            // Loops are rotated: the test is at the end, branching back to
+            // the body (one dispatch per iteration fewer than a test at the
+            // top and a `Loop`). A cheap condition is also tested on entry;
+            // otherwise entry jumps to the test.
             HKind::While { cond, body } => {
                 let mark = f.next_reg;
-                let top = self.here(f);
-                let jf = self.cond_jump(f, cond);
+                let cheap = cheap_cond(cond);
+                let entry = if cheap { self.cond_jump(f, cond) } else { vec![self.emit_jump(f)] };
                 f.next_reg = mark;
+                let top = self.here(f);
                 f.loops.push(LoopCx { defer_depth: f.defers.len(), ..Default::default() });
                 self.discard(f, body);
-                self.emit_loop_back(f, top);
                 let cx = f.loops.pop().unwrap();
-                self.patch_list(f, jf);
-                self.patch_list(f, cx.breaks);
-                for c in cx.continues {
-                    self.patch(f, c, top);
+                self.patch_list(f, cx.continues);
+                if !cheap {
+                    self.patch_list(f, entry.clone());
                 }
+                self.set_line(f, cond.span);
+                let back = self.cond_jump_true(f, cond);
+                f.next_reg = mark;
+                self.patch_all(f, back, top);
+                if cheap {
+                    self.patch_list(f, entry);
+                }
+                self.patch_list(f, cx.breaks);
                 self.unit_to(f, dst);
                 f.next_reg = mark;
             }
             HKind::WhileLet { pat, value, body } => {
                 let mark = f.next_reg;
                 self.declare_pattern_locals(f, pat);
-                let top = self.here(f);
-                let vmark = f.next_reg;
-                let v = self.expr_reg(f, value);
-                let mut fails = Vec::new();
-                self.match_pattern(f, pat, v, &mut fails);
-                f.next_reg = vmark;
-                f.loops.push(LoopCx { defer_depth: f.defers.len(), ..Default::default() });
-                self.discard(f, body);
-                self.emit_loop_back(f, top);
-                let cx = f.loops.pop().unwrap();
-                self.patch_list(f, fails);
-                self.patch_list(f, cx.breaks);
-                for c in cx.continues {
-                    self.patch(f, c, top);
+                match &pat.kind {
+                    // Rotated: `Some` is tested at the end (`JSomeBack`).
+                    HPatKind::Variant { rt_id, args } if *rt_id == self.prog.ids.some && args.len() == 1 => {
+                        let sub = &args[0];
+                        let t = match sub.kind {
+                            HPatKind::Bind(l) if !self.is_cell(f, l) && f.reg(l).is_some() => f.reg(l).unwrap(),
+                            _ => self.alloc(f),
+                        };
+                        let entry = self.emit_jump(f);
+                        let top = self.here(f);
+                        let mut fails = Vec::new();
+                        self.match_pattern(f, sub, t, &mut fails);
+                        f.loops.push(LoopCx { defer_depth: f.defers.len(), ..Default::default() });
+                        self.discard(f, body);
+                        let cx = f.loops.pop().unwrap();
+                        self.patch_list(f, cx.continues);
+                        self.patch_here(f, entry);
+                        let vmark = f.next_reg;
+                        let v = self.expr_reg(f, value);
+                        let back = self.emit(f, Op::JSomeBack { src: v, dst: t, off: 0 });
+                        self.patch(f, back, top);
+                        f.next_reg = vmark;
+                        self.patch_list(f, fails);
+                        self.patch_list(f, cx.breaks);
+                    }
+                    _ => {
+                        let top = self.here(f);
+                        let vmark = f.next_reg;
+                        let v = self.expr_reg(f, value);
+                        let mut fails = Vec::new();
+                        self.match_pattern(f, pat, v, &mut fails);
+                        f.next_reg = vmark;
+                        f.loops.push(LoopCx { defer_depth: f.defers.len(), ..Default::default() });
+                        self.discard(f, body);
+                        self.emit_loop_back(f, top);
+                        let cx = f.loops.pop().unwrap();
+                        self.patch_list(f, fails);
+                        self.patch_list(f, cx.breaks);
+                        self.patch_all(f, cx.continues, top);
+                    }
                 }
                 self.unit_to(f, dst);
                 f.next_reg = mark;
@@ -1274,7 +1709,7 @@ impl<'a> Compiler<'a> {
                 if *inclusive {
                     self.emit(f, Op::LoadBool { dst: base + 2, v: false });
                 }
-                self.range_loop(f, pat, body, base, *inclusive, dst);
+                self.for_loop(f, if *inclusive { Step::RangeIncl } else { Step::Range }, pat, body, base, dst);
                 f.next_reg = mark;
             }
             HKind::For { pat, iter, kind, body } => {
@@ -1283,34 +1718,41 @@ impl<'a> Compiler<'a> {
                     let ch = self.alloc(f);
                     self.expr_to(f, iter, ch);
                     self.declare_pattern_locals(f, pat);
+                    let (elem, direct) = self.loop_var(f, pat);
+                    // Rotated: receives at the end (`Channel.recv`, then `JSomeBack`).
+                    let entry = self.emit_jump(f);
                     let top = self.here(f);
+                    if !direct {
+                        let mut fails = Vec::new();
+                        self.match_pattern(f, pat, elem, &mut fails);
+                        self.patch_list(f, fails);
+                    }
+                    f.loops.push(LoopCx { defer_depth: f.defers.len(), ..Default::default() });
+                    self.discard(f, body);
+                    let cx = f.loops.pop().unwrap();
+                    self.patch_list(f, cx.continues);
+                    self.patch_here(f, entry);
                     let t = self.alloc(f);
-                    self.mv(f, t, ch);
                     match self.recv_native {
-                        Some(n) => {
-                            self.emit(f, Op::CallNative { base: t, native: n });
-                        }
+                        Some(n) => self.call_native(f, ch, n, t),
                         None => {
                             self.emit(f, Op::LoadTag { dst: t, tag: self.prog.ids.none });
                         }
                     }
-                    let some = self.variant_u16(f, self.prog.ids.some);
-                    let exit = self.jump_not_variant(f, t, some);
-                    let elem = self.alloc(f);
-                    self.emit(f, Op::GetField { dst: elem, obj: t, idx: 0 });
-                    let mut fails = Vec::new();
-                    self.match_pattern(f, pat, elem, &mut fails);
-                    self.patch_list(f, fails);
-                    f.loops.push(LoopCx { defer_depth: f.defers.len(), ..Default::default() });
-                    self.discard(f, body);
-                    self.emit_loop_back(f, top);
-                    let cx = f.loops.pop().unwrap();
-                    self.patch_list(f, exit);
+                    let back = self.emit(f, Op::JSomeBack { src: t, dst: elem, off: 0 });
+                    self.patch(f, back, top);
                     self.patch_list(f, cx.breaks);
-                    for c in cx.continues {
-                        self.patch(f, c, top);
-                    }
                     self.unit_to(f, dst);
+                    f.next_reg = mark;
+                    return;
+                }
+                if matches!(kind, IterKind::Map | IterKind::Set) {
+                    // Over the entries as they are now, read in place.
+                    let base = self.alloc(f);
+                    let r = self.expr_reg(f, iter);
+                    self.emit(f, Op::NewIter { dst: base, src: r });
+                    let step = if *kind == IterKind::Map { Step::Map } else { Step::Set };
+                    self.for_loop(f, step, pat, body, base, dst);
                     f.next_reg = mark;
                     return;
                 }
@@ -1322,40 +1764,15 @@ impl<'a> Compiler<'a> {
                         let r = self.alloc(f);
                         self.expr_to(f, iter, r);
                         self.emit(f, Op::UnpackRange { base, src: r });
-                        self.range_loop(f, pat, body, base, true, dst);
+                        self.for_loop(f, Step::RangeIncl, pat, body, base, dst);
                         f.next_reg = mark;
                         return;
                     }
-                    _ => {
-                        let r = self.alloc(f);
-                        self.expr_to(f, iter, r);
-                        self.emit(f, Op::IterSnapshot { dst: base, src: r });
-                    }
+                    IterKind::Map | IterKind::Set | IterKind::Channel => unreachable!("handled above"),
                 }
                 self.emit(f, Op::LoadInt { dst: base + 1, v: 0 });
                 self.emit(f, Op::Len { dst: base + 2, src: base });
-                self.declare_pattern_locals(f, pat);
-                let (elem, direct) = match pat.kind {
-                    HPatKind::Bind(l) if !self.is_cell(f, l) => (f.local_reg[&l], true),
-                    _ => (self.alloc(f), false),
-                };
-                let top = self.here(f);
-                let exit = self.for_next(f, 0, elem, base);
-                if !direct {
-                    let mut fails = Vec::new();
-                    self.match_pattern(f, pat, elem, &mut fails);
-                    self.patch_list(f, fails);
-                }
-                f.loops.push(LoopCx { defer_depth: f.defers.len(), ..Default::default() });
-                self.discard(f, body);
-                self.emit_loop_back(f, top);
-                let cx = f.loops.pop().unwrap();
-                self.patch_list(f, exit);
-                self.patch_list(f, cx.breaks);
-                for c in cx.continues {
-                    self.patch(f, c, top);
-                }
-                self.unit_to(f, dst);
+                self.for_loop(f, Step::List, pat, body, base, dst);
                 f.next_reg = mark;
             }
             HKind::Break { value: v, depth } => {
@@ -1388,7 +1805,7 @@ impl<'a> Compiler<'a> {
             HKind::Continue { depth } => {
                 let target = f.loops.len().checked_sub(1 + *depth as usize);
                 self.emit_defers(f, target.map_or(f.defers.len(), |i| f.loops[i].defer_depth));
-                let j = self.emit(f, Op::Loop { off: 0 });
+                let j = self.emit_jump(f);
                 if let Some(i) = target {
                     f.loops[i].continues.push(j);
                 }
@@ -1396,12 +1813,7 @@ impl<'a> Compiler<'a> {
             HKind::Return(v) => match v {
                 Some(v) => {
                     let mark = f.next_reg;
-                    if f.in_tail_fn {
-                        self.ret_expr(f, v);
-                    } else {
-                        let r = self.expr_reg(f, v);
-                        self.emit(f, Op::Ret { src: r });
-                    }
+                    self.ret_expr(f, v);
                     f.next_reg = mark;
                 }
                 None => {
@@ -1422,13 +1834,14 @@ impl<'a> Compiler<'a> {
             HKind::CallNative { native, args, reflect } => {
                 if let (Some(&op), true) = (self.inline.get(native), args.iter().all(|a| matches!(a, HArg::Expr(_)))) {
                     let mark = f.next_reg;
-                    let regs: Vec<Reg> = args
+                    let args: Vec<&HExpr> = args
                         .iter()
                         .map(|a| match a {
-                            HArg::Expr(x) => self.expr_reg(f, x),
+                            HArg::Expr(x) => x,
                             HArg::Default { .. } => unreachable!(),
                         })
                         .collect();
+                    let regs: Vec<Reg> = (0..args.len()).map(|i| self.operand(f, args[i], &args[i + 1..])).collect();
                     match op {
                         Inline::Len => {
                             self.emit(f, Op::Len { dst, src: regs[0] });
@@ -1462,7 +1875,7 @@ impl<'a> Compiler<'a> {
                         prog.consts.push(Const::TypeDesc(desc));
                         (prog.consts.len() - 1) as u32
                     };
-                    let Some(k) = self.descs.const_for(self.cp, t, add) else {
+                    let Some(k) = self.descs.const_for(self.cp, &mut self.arena, *t, add) else {
                         self.errors.push(Diag::error(e.span, "type too large to describe at runtime"));
                         continue;
                     };
@@ -1474,25 +1887,16 @@ impl<'a> Compiler<'a> {
             }
             HKind::CallValue { callee, args } => {
                 let mark = f.next_reg;
-                if let (HKind::Local(_), Ok(argc)) = (&callee.kind, u8::try_from(args.len())) {
-                    // The function is in a register already: call it there.
-                    let c = self.expr_reg(f, callee);
-                    let base = self.alloc_n(f, args.len().max(1));
-                    for (i, a) in args.iter().enumerate() {
-                        self.expr_to(f, a, base + i as Reg);
-                    }
-                    self.set_line(f, e.span);
-                    self.emit(f, Op::CallR { callee: c, base, dst, argc });
-                    f.next_reg = mark;
-                    return;
-                }
-                let base = self.alloc_n(f, args.len() + 1);
-                self.expr_to(f, callee, base);
+                let argc = self.argc(f, args.len(), e.span);
+                // The function is called where it is (a local's register, a
+                // hoisted field, a temporary).
+                let c = self.operand(f, callee, &args.iter().collect::<Vec<_>>());
+                let base = self.alloc_n(f, args.len().max(1));
                 for (i, a) in args.iter().enumerate() {
-                    self.expr_to(f, a, base + 1 + i as Reg);
+                    self.expr_to(f, a, base + i as Reg);
                 }
                 self.set_line(f, e.span);
-                self.emit(f, Op::Call { base, argc: args.len() as u16, dst });
+                self.emit(f, Op::CallR { callee: c, base, dst, argc });
                 f.next_reg = mark;
             }
             HKind::CallTrait { slot, args, impl_id, .. } => {
@@ -1506,10 +1910,11 @@ impl<'a> Compiler<'a> {
                     }
                     // Otherwise fetch the method from the dictionary (the first argument).
                     None => {
-                        let base = self.call_args(f, args, 1);
-                        self.emit(f, Op::GetField { dst: base, obj: base + 1, idx: *slot as u16 });
+                        let argc = self.argc(f, args.len(), e.span);
+                        let base = self.call_args(f, args, 0);
+                        let c = self.method(f, args, base, *slot);
                         self.set_line(f, e.span);
-                        self.emit(f, Op::Call { base, argc: args.len() as u16, dst });
+                        self.emit(f, Op::CallR { callee: c, base, dst, argc });
                     }
                 }
                 f.next_reg = mark;
@@ -1556,7 +1961,8 @@ impl<'a> Compiler<'a> {
                 for (i, a) in fields.iter().enumerate() {
                     self.expr_to(f, a, start + i as Reg);
                 }
-                self.emit(f, Op::NewStruct { dst, start, def: *def as u16 });
+                let def = self.def_u16(f, *def);
+                self.emit(f, Op::NewStruct { dst, start, def });
                 f.next_reg = mark;
             }
             HKind::Tuple(items) => {
@@ -1620,20 +2026,20 @@ impl<'a> Compiler<'a> {
                 self.expr_to(f, count, base + 1);
                 self.emit(f, Op::CheckRepeat { src: base + 1 });
                 let var = self.alloc(f);
+                let exit = self.emit(f, Step::Range.op(var, base, false));
                 let top = self.here(f);
-                let exit = self.for_next(f, 1, var, base);
                 let t = self.alloc(f);
                 self.expr_to(f, elem, t);
                 self.emit(f, Op::ListPush { list: l, src: t });
-                self.emit_loop_back(f, top);
-                self.patch_list(f, exit);
+                let back = self.emit(f, Step::Range.op(var, base, true));
+                self.patch(f, back, top);
+                self.patch_here(f, exit);
                 self.mv(f, dst, l);
                 f.next_reg = mark;
             }
             HKind::PushLocal { list, value } => {
                 let mark = f.next_reg;
-                let l = self.alloc(f);
-                self.read_local(f, *list, l);
+                let l = self.local_operand(f, *list);
                 let v = self.expr_reg(f, value);
                 self.emit(f, Op::ListPush { list: l, src: v });
                 self.unit_to(f, dst);
@@ -1641,9 +2047,8 @@ impl<'a> Compiler<'a> {
             }
             HKind::InsertLocal { map, key, value } => {
                 let mark = f.next_reg;
-                let m = self.alloc(f);
-                self.read_local(f, *map, m);
-                let k = self.expr_reg(f, key);
+                let m = self.local_operand(f, *map);
+                let k = self.operand(f, key, &[value]);
                 let v = self.expr_reg(f, value);
                 self.emit(f, Op::SetIndexMap { obj: m, key: k, src: v });
                 self.unit_to(f, dst);
@@ -1652,12 +2057,13 @@ impl<'a> Compiler<'a> {
             HKind::Field { obj, index } => {
                 let mark = f.next_reg;
                 let o = self.expr_reg(f, obj);
-                self.emit(f, Op::GetField { dst, obj: o, idx: *index as u16 });
+                let idx = self.field_u16(f, *index);
+                self.emit(f, Op::GetField { dst, obj: o, idx });
                 f.next_reg = mark;
             }
             HKind::Index { obj, index, map } => {
                 let mark = f.next_reg;
-                let o = self.expr_reg(f, obj);
+                let o = self.operand(f, obj, &[index]);
                 let i = self.expr_reg(f, index);
                 self.set_line(f, e.span);
                 if *map {
@@ -1692,6 +2098,11 @@ impl<'a> Compiler<'a> {
                 self.emit(f, Op::Slice { dst, base, flags });
                 f.next_reg = mark;
             }
+            HKind::Unary { op: HUnOp::Neg, .. } if int_lit(e).is_some() => self.load_int(f, dst, int_lit(e).unwrap()),
+            HKind::Unary { op: HUnOp::Neg, .. } if float_lit(e).is_some() => {
+                let k = self.const_idx(Const::Float(float_lit(e).unwrap()));
+                self.emit(f, Op::LoadConst { dst, k });
+            }
             HKind::Unary { op, e: inner } => {
                 let mark = f.next_reg;
                 let a = self.expr_reg(f, inner);
@@ -1699,8 +2110,8 @@ impl<'a> Compiler<'a> {
                     HUnOp::Not => Op::Not { dst, a },
                     HUnOp::BitNot => Op::BitNot { dst, a },
                     HUnOp::Neg => match inner.ty {
-                        Type::Int => Op::NegI { dst, a },
-                        Type::Float => Op::NegF { dst, a },
+                        TypeId::INT => Op::NegI { dst, a },
+                        TypeId::FLOAT => Op::NegF { dst, a },
                         _ => Op::Neg { dst, a },
                     },
                 };
@@ -1711,9 +2122,9 @@ impl<'a> Compiler<'a> {
             HKind::Arith { op, l, r } => {
                 let mark = f.next_reg;
                 // `x + k` / `x - k` with small integer constants.
-                if matches!(l.ty, Type::Int)
+                if matches!(l.ty, TypeId::INT)
                     && matches!(op, ArithOp::Add | ArithOp::Sub)
-                    && let HKind::Int(k) = r.kind
+                    && let Some(k) = int_lit(r)
                 {
                     let k = if *op == ArithOp::Sub { k.checked_neg() } else { Some(k) };
                     if let Some(k) = k.filter(|k| *k >= i16::MIN as i64 && *k <= i16::MAX as i64) {
@@ -1724,123 +2135,103 @@ impl<'a> Compiler<'a> {
                         return;
                     }
                 }
-                let a = self.expr_reg(f, l);
+                let a = self.operand(f, l, &[r]);
                 let b = self.expr_reg(f, r);
-                let op = arith_op(*op, &l.ty, &r.ty, dst, a, b);
+                let op = arith_op(*op, l.ty, r.ty, dst, a, b);
                 self.set_line(f, e.span);
                 self.emit(f, op);
                 f.next_reg = mark;
             }
             HKind::Cmp { op, l, r } => {
                 let mark = f.next_reg;
-                let a = self.expr_reg(f, l);
+                let a = self.operand(f, l, &[r]);
                 let b = self.expr_reg(f, r);
-                let op = cmp_op(*op, &l.ty, dst, a, b);
+                let op = cmp_op(*op, l.ty, dst, a, b);
                 self.emit(f, op);
                 f.next_reg = mark;
             }
-            HKind::And(a, b) => {
-                self.expr_to(f, a, dst);
-                let j = self.emit(f, Op::JmpIfNot { cond: dst, off: 0 });
+            // `dst` is written only once the value is known: it may be the
+            // register of a local that `b` reads (`x = y and x`).
+            HKind::And(a, b) | HKind::Or(a, b) => {
+                let and = matches!(e.kind, HKind::And(..));
+                let mark = f.next_reg;
+                let short = if and { self.cond_jump(f, a) } else { self.cond_jump_true(f, a) };
+                f.next_reg = mark;
                 self.expr_to(f, b, dst);
-                self.patch_here(f, j);
-            }
-            HKind::Or(a, b) => {
-                self.expr_to(f, a, dst);
-                let j = self.emit(f, Op::JmpIf { cond: dst, off: 0 });
-                self.expr_to(f, b, dst);
-                self.patch_here(f, j);
+                if f.void == Some(dst) || short.is_empty() {
+                    self.patch_list(f, short);
+                } else {
+                    let jend = self.emit_jump(f);
+                    self.patch_list(f, short);
+                    self.emit(f, Op::LoadBool { dst, v: !and });
+                    self.patch_here(f, jend);
+                }
             }
             HKind::Lambda(lam) => {
-                let p = self.compile_lambda(f, lam, &e.ty);
+                let p = self.compile_lambda(f, lam, e.ty);
                 self.emit(f, Op::MakeClosure { dst, proto: p });
             }
             HKind::Try { e: inner, kind } => {
                 let mark = f.next_reg;
-                let v = if defers_pending(f) {
+                let test = |src: Reg| match kind {
+                    TryKind::Option => Op::JNotSome { src, dst, off: 0 },
+                    _ => Op::JNotOk { src, dst, off: 0 },
+                };
+                if defers_pending(f) {
                     // A fresh register: deferred code may assign the local tested.
-                    let t = self.alloc(f);
-                    self.expr_to(f, inner, t);
-                    t
+                    let v = self.alloc(f);
+                    self.expr_to(f, inner, v);
+                    self.set_line(f, e.span);
+                    let fail = self.emit(f, test(v));
+                    let jend = self.emit_jump(f);
+                    self.patch_here(f, fail);
+                    self.emit_defers(f, 0);
+                    match kind {
+                        TryKind::Option => {
+                            self.emit(f, Op::LoadTag { dst: v, tag: self.prog.ids.none });
+                            self.emit(f, Op::Ret { src: v });
+                        }
+                        TryKind::Result => {
+                            self.emit(f, Op::Ret { src: v });
+                        }
+                        TryKind::TopLevel => {
+                            self.emit(f, Op::TryTop { src: v });
+                        }
+                    }
+                    self.patch_here(f, jend);
                 } else {
-                    self.expr_reg(f, inner)
-                };
-                let (good, _) = match kind {
-                    TryKind::Option => (self.prog.ids.some, self.prog.ids.none),
-                    _ => (self.prog.ids.ok, self.prog.ids.err),
-                };
-                let good = self.variant_u16(f, good);
-                let fail = self.jump_not_variant(f, v, good);
-                self.emit(f, Op::GetField { dst, obj: v, idx: 0 });
-                let jend = self.emit_jump(f);
-                self.patch_list(f, fail);
-                self.set_line(f, e.span);
-                self.emit_defers(f, 0);
-                match kind {
-                    TryKind::Option => {
-                        let t = self.alloc(f);
-                        self.emit(f, Op::LoadTag { dst: t, tag: self.prog.ids.none });
-                        self.emit(f, Op::Ret { src: t });
-                    }
-                    TryKind::Result => {
-                        self.emit(f, Op::Ret { src: v });
-                    }
-                    TryKind::TopLevel => {
-                        self.emit(f, Op::TryTop { src: v });
-                    }
+                    let v = self.expr_reg(f, inner);
+                    self.set_line(f, e.span);
+                    let fail = self.emit(f, test(v));
+                    let stub = match kind {
+                        TryKind::Option => Stub::RetNone,
+                        TryKind::Result => Stub::Ret(v),
+                        TryKind::TopLevel => Stub::TryTop(v),
+                    };
+                    self.jump_to_stub(f, fail, stub);
                 }
-                self.patch_here(f, jend);
                 f.next_reg = mark;
             }
             HKind::Coalesce { l, r, result } => {
                 let mark = f.next_reg;
                 let v = self.expr_reg(f, l);
-                let good = if *result { self.prog.ids.ok } else { self.prog.ids.some };
-                let good = self.variant_u16(f, good);
-                let other = self.jump_not_variant(f, v, good);
-                self.emit(f, Op::GetField { dst, obj: v, idx: 0 });
+                let other = if *result { Op::JNotOk { src: v, dst, off: 0 } } else { Op::JNotSome { src: v, dst, off: 0 } };
+                let other = self.emit(f, other);
                 let jend = self.emit_jump(f);
-                self.patch_list(f, other);
+                self.patch_here(f, other);
                 self.expr_to(f, r, dst);
                 self.patch_here(f, jend);
                 f.next_reg = mark;
             }
             HKind::Interp(parts) => {
                 let mark = f.next_reg;
-                let start = self.alloc_n(f, parts.len());
-                for (i, p) in parts.iter().enumerate() {
-                    let r = start + i as Reg;
-                    match p {
-                        InterpPart::Text(t) => self.load_str(f, r, t),
-                        InterpPart::Expr(x, spec) => {
-                            let v = self.expr_reg(f, x);
-                            match spec {
-                                Some(s) => {
-                                    let k = self.prog.specs.len();
-                                    if k > u16::MAX as usize {
-                                        self.errors.push(Diag::error(x.span, "too many format specifications in program"));
-                                    }
-                                    self.prog.specs.push(s.clone());
-                                    self.emit(f, Op::Format { dst: r, src: v, spec: k as u16 });
-                                }
-                                None => {
-                                    if matches!(x.ty, Type::Str) {
-                                        self.mv(f, r, v);
-                                    } else {
-                                        self.emit(f, Op::ToStr { dst: r, src: v });
-                                    }
-                                }
-                            }
-                            f.next_reg = start as u32 + parts.len() as u32;
-                        }
-                    }
-                }
-                self.emit(f, Op::Concat { dst, start, count: parts.len() as u16 });
+                let tmpl = self.template(f, parts);
+                self.emit(f, Op::Interp { dst, tmpl });
                 f.next_reg = mark;
             }
             HKind::Range { start, end, inclusive } => {
                 let mark = f.next_reg;
-                let a = self.expr_reg(f, start);
+                let a = self.operand(f, start, &[end]);
                 let b = self.expr_reg(f, end);
                 if *inclusive {
                     self.emit(f, Op::NewRangeIncl { dst, a, b });
@@ -1871,6 +2262,113 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    /// A struct literal as the checker lowers it: hidden locals bound to the
+    /// fields given, in source order, then `MakeStruct` (see
+    /// `check_struct_lit`). Returns the number of `let`s, the struct and
+    /// its field values.
+    fn struct_literal<'e>(&self, f: &FnState, items: &'e [HExpr]) -> Option<(usize, TypeDefId, &'e [HExpr])> {
+        let (HKind::MakeStruct { def, fields }, lets) = (&items.last()?.kind, &items[..items.len() - 1]) else { return None };
+        let hidden = |it: &HExpr| {
+            matches!(&it.kind, HKind::Let { pat: HPat { kind: HPatKind::Bind(l), .. }, else_: None, .. }
+                if f.locals[*l as usize].name == crate::types::Symbol::TMP && !f.locals[*l as usize].cell)
+        };
+        lets.iter().all(hidden).then_some((lets.len(), *def, fields))
+    }
+
+    /// A field (or dictionary slot) index as an instruction operand.
+    fn field_u16(&mut self, f: &FnState<'a>, i: u32) -> u16 {
+        u16::try_from(i).unwrap_or_else(|_| {
+            self.errors.push(Diag::error(Span::new(f.file, 0, 0), "too many fields in a type"));
+            0
+        })
+    }
+
+    fn def_u16(&mut self, f: &FnState<'a>, def: TypeDefId) -> u16 {
+        u16::try_from(def).unwrap_or_else(|_| {
+            self.errors.push(Diag::error(Span::new(f.file, 0, 0), "too many types in program"));
+            0
+        })
+    }
+
+    /// The loop (index in `f.loops`) and kind (`true` for `continue`) of a
+    /// `continue` or `break` without a value that is a plain jump (no
+    /// deferred code to run, no result to set): `e` or a block of just it.
+    fn loop_exit(&self, f: &FnState<'a>, e: &'a HExpr) -> Option<(usize, bool)> {
+        let (depth, cont) = match &e.kind {
+            HKind::Block(items) if items.len() == 1 => return self.loop_exit(f, &items[0]),
+            HKind::Continue { depth } => (*depth, true),
+            HKind::Break { value: None, depth } => (*depth, false),
+            _ => return None,
+        };
+        let i = f.loops.len().checked_sub(1 + depth as usize)?;
+        let plain = (cont || f.loops[i].result.is_none()) && !f.defers[f.loops[i].defer_depth..].iter().any(|d| !d.is_empty());
+        plain.then_some((i, cont))
+    }
+
+    /// Evaluates the values of an interpolation (`Op::Interp`) into
+    /// registers and returns its template.
+    fn template(&mut self, f: &mut FnState<'a>, parts: &'a [InterpPart]) -> u32 {
+        let mut t = Template::default();
+        let text = |t: &mut Template, s: &str| {
+            t.text_len += s.len();
+            match t.pieces.last_mut() {
+                Some(Piece::Text(prev)) => prev.push_str(s),
+                _ => t.pieces.push(Piece::Text(s.to_string())),
+            }
+        };
+        let exprs: Vec<&HExpr> = parts
+            .iter()
+            .filter_map(|p| match p {
+                InterpPart::Expr(x, _) => Some(&**x),
+                InterpPart::Text(_) => None,
+            })
+            .collect();
+        let mut k = 0;
+        for p in parts {
+            // `exprs[k..]`: the values after this one.
+            k += matches!(p, InterpPart::Expr(..)) as usize;
+            match p {
+                InterpPart::Text(s) => text(&mut t, s),
+                InterpPart::Expr(x, None) if let HKind::Str(s) = &x.kind => text(&mut t, s),
+                InterpPart::Expr(x, spec) => {
+                    // Read when the instruction runs: no later value may assign it.
+                    let r = self.operand(f, x, &exprs[k..]);
+                    t.pieces.push(match spec {
+                        Some(spec) => Piece::Format(r, spec.clone()),
+                        None => Piece::Value(r),
+                    });
+                }
+            }
+        }
+        self.prog.templates.push(t);
+        (self.prog.templates.len() - 1) as u32
+    }
+
+    /// The argument count of a call of a function value (an instruction operand).
+    fn argc(&mut self, f: &FnState<'a>, n: usize, span: Span) -> u8 {
+        u8::try_from(n).unwrap_or_else(|_| {
+            if !f.too_big {
+                self.errors.push(Diag::error(span, "too many arguments in a call of a function value (at most 255)"));
+            }
+            0
+        })
+    }
+
+    /// A register holding method `slot` of the dictionary of a trait call
+    /// (its first argument, already in `base`): hoisted before the loop,
+    /// or loaded now.
+    fn method(&mut self, f: &mut FnState<'a>, args: &'a [HArg], base: Reg, slot: u32) -> Reg {
+        if let Some(k) = method_key(f, args, slot)
+            && let Some(&r) = f.hoisted.get(&k)
+        {
+            return r;
+        }
+        let c = self.alloc(f);
+        let idx = self.field_u16(f, slot);
+        self.emit(f, Op::GetField { dst: c, obj: base, idx });
+        c
+    }
+
     /// The proto of the method a trait call invokes, when its dictionary
     /// comes from a known impl.
     fn static_target(&self, impl_id: Option<u32>, slot: u32) -> Option<u32> {
@@ -1887,7 +2385,7 @@ impl<'a> Compiler<'a> {
 
     /// A dictionary that does not depend on the function's own dictionaries
     /// is built once, as a constant.
-    fn const_dict(&mut self, e: &HExpr) -> Option<u32> {
+    fn const_dict(&mut self, e: &'a HExpr) -> Option<u32> {
         let HKind::Dict { impl_id, args } = &e.kind else { return None };
         let mut items = Vec::new();
         for a in args {
@@ -1904,65 +2402,89 @@ impl<'a> Compiler<'a> {
         Some(k)
     }
 
-    /// Emits the per-iteration step of a fused loop; returns exit jump sites.
-    /// kind: 0 = list, 1 = range, 2 = inclusive range.
-    /// The loop of a range whose bounds are in `base` (start) and `base+1`
-    /// (end; for an inclusive loop, `base+2` holds the done flag).
-    fn range_loop(&mut self, f: &mut FnState, pat: &HPat, body: &HExpr, base: Reg, inclusive: bool, dst: Reg) {
-        self.declare_pattern_locals(f, pat);
-        let (var, direct) = match pat.kind {
-            HPatKind::Bind(l) if !self.is_cell(f, l) => (f.local_reg[&l], true),
+    /// The register a loop binding `pat` writes each element to, and
+    /// whether that is the register of the local `pat` binds.
+    fn loop_var(&mut self, f: &mut FnState<'a>, pat: &'a HPat) -> (Reg, bool) {
+        match pat.kind {
+            HPatKind::Bind(l) if !self.is_cell(f, l) => (f.reg(l).unwrap(), true),
             _ => (self.alloc(f), false),
+        }
+    }
+
+    /// A loop over the registers at `base` (see `Step`), rotated: `step`
+    /// tests on entry, and its backward form at the end.
+    fn for_loop(&mut self, f: &mut FnState<'a>, step: Step, pat: &'a HPat, body: &'a HExpr, base: Reg, dst: Reg) {
+        // The patterns to match at the top of the body, against registers.
+        let mut binds: Vec<(&HPat, Reg)> = Vec::new();
+        // A map's key and value go to two registers: those of the locals
+        // `(k, v)` binds, or a tuple when the pattern is not a pair.
+        let mut pair = None;
+        let var = match step {
+            Step::Map => {
+                let key = self.alloc_n(f, 2);
+                match &pat.kind {
+                    HPatKind::Tuple(ps) if ps.len() == 2 => {
+                        for (p, r) in ps.iter().zip([key, key + 1]) {
+                            match p.kind {
+                                HPatKind::Bind(l) if !self.is_cell(f, l) => f.set_reg(l, r),
+                                HPatKind::Wildcard => {}
+                                _ => {
+                                    self.declare_pattern_locals(f, p);
+                                    binds.push((p, r));
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        self.declare_pattern_locals(f, pat);
+                        let t = self.alloc(f);
+                        pair = Some(t);
+                        binds.push((pat, t));
+                    }
+                }
+                key
+            }
+            _ => {
+                self.declare_pattern_locals(f, pat);
+                let (var, direct) = self.loop_var(f, pat);
+                if !direct {
+                    binds.push((pat, var));
+                }
+                var
+            }
         };
+        let exit = self.emit(f, step.op(var, base, false));
         let top = self.here(f);
-        let exit = self.for_next(f, if inclusive { 2 } else { 1 }, var, base);
-        if !direct {
+        if let Some(t) = pair {
+            self.emit(f, Op::NewTuple { dst: t, start: var, count: 2 });
+        }
+        for (p, r) in binds {
             let mut fails = Vec::new();
-            self.match_pattern(f, pat, var, &mut fails);
+            self.match_pattern(f, p, r, &mut fails);
             self.patch_list(f, fails);
         }
         f.loops.push(LoopCx { defer_depth: f.defers.len(), ..Default::default() });
         self.discard(f, body);
-        self.emit_loop_back(f, top);
         let cx = f.loops.pop().unwrap();
-        self.patch_list(f, exit);
+        self.patch_list(f, cx.continues);
+        let back = self.emit(f, step.op(var, base, true));
+        self.patch(f, back, top);
+        self.patch_here(f, exit);
         self.patch_list(f, cx.breaks);
-        for c in cx.continues {
-            self.patch(f, c, top);
-        }
         self.unit_to(f, dst);
     }
 
-    fn for_next(&mut self, f: &mut FnState, kind: u8, var: Reg, base: Reg) -> Vec<usize> {
-        if !f.no_fused {
-            let op = match kind {
-                0 => Op::ForList { elem: var, base, off: 0 },
-                1 => Op::ForRange { var, base, off: 0 },
-                _ => Op::ForRangeIncl { var, base, off: 0 },
-            };
-            return vec![self.emit(f, op)];
-        }
-        let op = match kind {
-            0 => Op::ForListNext { elem: var, base },
-            1 => Op::ForRangeNext { var, base },
-            _ => Op::ForRangeInclNext { var, base },
-        };
-        self.emit(f, op);
-        vec![self.emit(f, Op::JmpIfNot { cond: base + 3, off: 0 })]
-    }
-
-    fn jump_not_variant(&mut self, f: &mut FnState, src: Reg, variant: u16) -> Vec<usize> {
-        if !f.no_fused {
-            return vec![self.emit(f, Op::JNotVariant { src, variant, off: 0 })];
-        }
-        let t = self.alloc(f);
-        self.emit(f, Op::IsVariant { dst: t, src, variant });
-        vec![self.emit(f, Op::JmpIfNot { cond: t, off: 0 })]
+    fn jump_not_variant(&mut self, f: &mut FnState<'a>, src: Reg, variant: u16) -> Vec<usize> {
+        vec![self.emit(f, Op::JNotVariant { src, variant, off: 0 })]
     }
 
     fn variant_wrapper(&mut self, rt: u32, arity: usize, file: u32) -> u32 {
         if let Some(&p) = self.variant_wrappers.get(&rt) {
             return p;
+        }
+        if rt > u16::MAX as u32 || arity >= MAX_REGS as usize {
+            self.errors.push(Diag::error(Span::new(file, 0, 0), "too many enum variants or fields in program"));
+            return 0;
         }
         let name = self.prog.variants.get(rt as usize).map(|v| v.name.clone()).unwrap_or_default();
         let code = vec![Op::NewVariant { dst: arity as Reg, start: 0, variant: rt as u16 }, Op::Ret { src: arity as Reg }];
@@ -1987,15 +2509,34 @@ impl<'a> Compiler<'a> {
     // Loop-invariant hoisting
 
     /// The hoisting key of a constant or immutable-global expression.
-    fn hoist_key(&self, e: &HExpr) -> Option<HoistKey> {
+    fn hoist_key(&self, f: &FnState<'a>, e: &'a HExpr) -> Option<HoistKey<'a>> {
+        if let Some(i) = int_lit(e) {
+            return Some(HoistKey::Int(i));
+        }
+        if let Some(x) = float_lit(e) {
+            return Some(HoistKey::Float(x.to_bits()));
+        }
         Some(match &e.kind {
-            HKind::Int(i) => HoistKey::Int(*i),
-            HKind::Float(x) => HoistKey::Float(x.to_bits()),
-            HKind::Str(s) => HoistKey::Str(s.clone()),
-            HKind::Bytes(b) => HoistKey::Bytes(b.clone()),
+            HKind::Str(s) => HoistKey::Str(s),
+            HKind::Bytes(b) => HoistKey::Bytes(b),
             HKind::Dur(d) => HoistKey::Dur(*d),
             HKind::Tag(t) => HoistKey::Tag(*t),
             HKind::Global(g) if self.cp.globals.get(*g as usize).is_some_and(|gi| !gi.mutable) => HoistKey::Global(*g),
+            HKind::Field { obj, index } => {
+                let HKind::Local(l) = obj.kind else { return None };
+                let fixed = match self.arena.get(obj.ty) {
+                    Ty::Tuple(_) => true,
+                    Ty::Named(d, _) => {
+                        let t = &self.cp.types[d as usize];
+                        t.is_struct() && t.fields().get(*index as usize).is_some_and(|fd| !fd.mutable)
+                    }
+                    _ => false,
+                };
+                if !fixed || f.facts.assigned[l as usize] || f.locals[l as usize].cell {
+                    return None;
+                }
+                HoistKey::Field(l, *index)
+            }
             _ => return None,
         })
     }
@@ -2008,44 +2549,49 @@ impl<'a> Compiler<'a> {
     /// into a fixed register anyway, so hoisting would not save anything.
     /// Immutable globals count everywhere, since a `Move` from a register is
     /// cheaper than a checked `LoadGlobal`.
-    fn hoist_candidates(&self, e: &HExpr) -> (Vec<HoistKey>, bool, usize) {
-        let mut in_lambda: HashSet<*const HExpr> = HashSet::new();
+    fn hoist_candidates(&self, f: &FnState<'a>, e: &'a HExpr) -> (Vec<HoistKey<'a>>, bool, usize) {
         let mut has_lambda = false;
         let mut nodes = 0;
-        let mut found: Vec<(HoistKey, usize)> = Vec::new();
-        let mut index: HashMap<HoistKey, usize> = HashMap::new();
-        let mut count = |k: HoistKey| match index.get(&k) {
+        let mut found: Vec<(HoistKey<'a>, usize)> = Vec::new();
+        let mut index: FxHashMap<HoistKey<'a>, usize> = FxHashMap::default();
+        let mut count = |k: HoistKey<'a>| match index.get(&k) {
             Some(&i) => found[i].1 += 1,
             None => {
                 index.insert(k.clone(), found.len());
                 found.push((k, 1));
             }
         };
-        walk(e, &mut |x| {
+        walk_pruned(e, &mut |x| {
             nodes += 1;
-            if in_lambda.contains(&(x as *const HExpr)) {
-                return;
-            }
-            if let HKind::Lambda(l) = &x.kind {
+            if let HKind::Lambda(_) = &x.kind {
                 // A separate function with its own registers.
                 has_lambda = true;
-                walk(&l.body, &mut |y| {
-                    in_lambda.insert(y as *const HExpr);
-                });
-                return;
+                return false;
             }
-            if let Some(k @ HoistKey::Global(_)) = self.hoist_key(x) {
+            if let Some(k @ HoistKey::Global(_)) = self.hoist_key(f, x) {
+                count(k);
+            }
+            if let HKind::CallTrait { slot, args, impl_id, .. } = &x.kind
+                && self.static_target(*impl_id, *slot).is_none()
+                && let Some(k) = method_key(f, args, *slot)
+            {
                 count(k);
             }
             self.operands(x, &mut |o| {
-                if let Some(k) = self.hoist_key(o)
+                if let Some(k) = self.hoist_key(f, o)
                     && !matches!(k, HoistKey::Global(_))
                 {
                     count(k);
                 }
             });
+            true
         });
-        // Most frequent first; ties keep source order.
+        // Most frequent first; ties keep source order. Fields and methods
+        // of locals declared in the loop cannot be loaded before it.
+        found.retain(|(k, _)| match k {
+            HoistKey::Field(l, _) | HoistKey::Method(l, _) => f.reg(*l).is_some(),
+            _ => true,
+        });
         found.sort_by_key(|e| std::cmp::Reverse(e.1));
         (found.into_iter().map(|(k, _)| k).collect(), has_lambda, nodes)
     }
@@ -2053,18 +2599,24 @@ impl<'a> Compiler<'a> {
     /// Calls `out` for the direct sub-expressions of `x` that the compiler
     /// evaluates with `expr_reg` (approximately; used for hoisting only).
     fn operands<'x>(&self, x: &'x HExpr, out: &mut impl FnMut(&'x HExpr)) {
-        let small = |e: &HExpr| matches!(e.kind, HKind::Int(k) if k >= i16::MIN as i64 && k <= i16::MAX as i64);
+        let small = |e: &HExpr| small_lit(e).is_some();
         match &x.kind {
             HKind::Arith { op, l, r } => {
                 out(l);
                 // `x + k` / `x - k` use an immediate.
-                if !(matches!(op, ArithOp::Add | ArithOp::Sub) && matches!(l.ty, Type::Int) && small(r)) {
+                if !(matches!(op, ArithOp::Add | ArithOp::Sub) && matches!(l.ty, TypeId::INT) && small(r)) {
                     out(r);
                 }
             }
+            // Integer comparisons with small constants use an immediate.
             HKind::Cmp { l, r, .. } => {
-                out(l);
-                out(r);
+                let int = matches!(l.ty, TypeId::INT);
+                if !(int && small(l)) {
+                    out(l);
+                }
+                if !(int && small(r)) {
+                    out(r);
+                }
             }
             HKind::Index { obj, index, .. } => {
                 out(obj);
@@ -2083,6 +2635,7 @@ impl<'a> Compiler<'a> {
             HKind::PushLocal { value, .. } => out(value),
             HKind::IfLet { value, .. } | HKind::WhileLet { value, .. } => out(value),
             HKind::Match { scrut, .. } => out(scrut),
+            HKind::CallValue { callee, .. } => out(callee),
             HKind::Interp(parts) => {
                 for p in parts {
                     if let InterpPart::Expr(e, _) = p {
@@ -2131,7 +2684,7 @@ impl<'a> Compiler<'a> {
     }
 
     /// Loads the constant `k` into `dst`.
-    fn load_hoisted(&mut self, f: &mut FnState, k: &HoistKey, dst: Reg) {
+    fn load_hoisted(&mut self, f: &mut FnState<'a>, k: &HoistKey<'a>, dst: Reg) {
         match k {
             HoistKey::Int(i) => self.load_int(f, dst, *i),
             HoistKey::Str(s) => self.load_str(f, dst, s),
@@ -2141,7 +2694,7 @@ impl<'a> Compiler<'a> {
             HoistKey::Float(_) | HoistKey::Bytes(_) | HoistKey::Dur(_) => {
                 let c = match k {
                     HoistKey::Float(bits) => Const::Float(f64::from_bits(*bits)),
-                    HoistKey::Bytes(b) => Const::Bytes(b.clone()),
+                    HoistKey::Bytes(b) => Const::Bytes(b.to_vec()),
                     HoistKey::Dur(d) => Const::Dur(*d),
                     _ => unreachable!(),
                 };
@@ -2150,6 +2703,10 @@ impl<'a> Compiler<'a> {
             }
             HoistKey::Global(g) => {
                 self.emit(f, Op::LoadGlobal { dst, g: *g });
+            }
+            HoistKey::Field(l, idx) | HoistKey::Method(l, idx) => {
+                let obj = f.reg(*l).expect("a local declared before the loop");
+                self.emit(f, Op::GetField { dst, obj, idx: *idx as u16 });
             }
         }
     }
@@ -2164,10 +2721,10 @@ impl<'a> Compiler<'a> {
     /// any of them is still uninitialized. Loops containing lambdas (whose
     /// prototypes would be duplicated) or larger than `MAX_VERSIONED_NODES`
     /// only get their constants hoisted.
-    fn hoisted_loop(&mut self, f: &mut FnState, e: &HExpr, dst: Reg) {
+    fn hoisted_loop(&mut self, f: &mut FnState<'a>, e: &'a HExpr, dst: Reg) {
         let mark = f.next_reg;
         f.hoisting = true;
-        let (cands, has_lambda, nodes) = self.hoist_candidates(e);
+        let (cands, has_lambda, nodes) = self.hoist_candidates(f, e);
         if !self.budget.charge(nodes as u64) {
             f.hoisting = false;
             return;
@@ -2178,7 +2735,7 @@ impl<'a> Compiler<'a> {
             f.hoisting = false;
             return;
         }
-        let version = !has_lambda && nodes <= MAX_VERSIONED_NODES && !f.no_fused;
+        let version = !has_lambda && nodes <= MAX_VERSIONED_NODES;
         let mut globals = Vec::new();
         for k in &cands {
             match k {
@@ -2203,7 +2760,7 @@ impl<'a> Compiler<'a> {
                 guards.push(self.emit(f, Op::HoistGlobal { dst: r, g: *g, off: 0 }));
                 f.hoisted.insert(k.clone(), r);
             }
-            let locals = f.local_reg.clone();
+            let locals = f.reg_log.len();
             self.expr_to(f, e, dst);
             let jend = self.emit_jump(f);
             // Some global was not initialized yet: run the loop without them.
@@ -2211,7 +2768,7 @@ impl<'a> Compiler<'a> {
             for (_, k) in &globals {
                 f.hoisted.remove(k);
             }
-            f.local_reg = locals;
+            f.reset_regs(locals);
             self.expr_to(f, e, dst);
             self.patch_here(f, jend);
         }
@@ -2223,12 +2780,12 @@ impl<'a> Compiler<'a> {
     // ------------------------------------------------------------------
     // Assignment
 
-    fn compile_assign(&mut self, f: &mut FnState, place: &Place, op: Option<ArithOp>, op_ty: &Type, value: &HExpr) {
+    fn compile_assign(&mut self, f: &mut FnState<'a>, place: &'a Place, op: Option<ArithOp>, op_ty: TypeId, value: &'a HExpr) {
         let mark = f.next_reg;
         match place {
             Place::Local(l) => match op {
                 None => {
-                    if let (Some(&r), false) = (f.local_reg.get(l), self.is_cell(f, *l)) {
+                    if let (Some(r), false) = (f.reg(*l), self.is_cell(f, *l)) {
                         self.expr_to(f, value, r);
                     } else {
                         let v = self.expr_reg(f, value);
@@ -2236,19 +2793,24 @@ impl<'a> Compiler<'a> {
                     }
                 }
                 Some(aop) => {
-                    if let (Some(&r), false) = (f.local_reg.get(l), self.is_cell(f, *l)) {
-                        if f.builders.contains(l) && aop == ArithOp::Add {
-                            let v = self.expr_reg(f, value);
-                            self.emit(f, Op::AppendStr { local: r, src: v });
+                    if let (Some(r), false) = (f.reg(*l), self.is_cell(f, *l)) {
+                        if f.facts.builder[*l as usize] && aop == ArithOp::Add {
+                            if let HKind::Interp(parts) = &value.kind {
+                                let tmpl = self.template(f, parts);
+                                self.emit(f, Op::AppendInterp { local: r, tmpl });
+                            } else {
+                                let v = self.expr_reg(f, value);
+                                self.emit(f, Op::AppendStr { local: r, src: v });
+                            }
                             f.next_reg = mark;
                             return;
                         }
                         // Operate on the local's register directly.
-                        self.apply_op(f, aop, op_ty, &value.ty, r, value);
+                        self.apply_op(f, aop, op_ty, value.ty, r, value);
                     } else {
                         let cur = self.alloc(f);
                         self.read_local(f, *l, cur);
-                        self.apply_op(f, aop, op_ty, &value.ty, cur, value);
+                        self.apply_op(f, aop, op_ty, value.ty, cur, value);
                         self.write_local(f, *l, cur);
                     }
                 }
@@ -2259,28 +2821,30 @@ impl<'a> Compiler<'a> {
                     Some(aop) => {
                         let cur = self.alloc(f);
                         self.emit(f, Op::LoadGlobal { dst: cur, g: *g });
-                        self.apply_op(f, aop, op_ty, &value.ty, cur, value);
+                        self.apply_op(f, aop, op_ty, value.ty, cur, value);
                         cur
                     }
                 };
                 self.emit(f, Op::StoreGlobal { g: *g, src: v });
             }
             Place::Field { obj, index } => {
-                let o = self.expr_reg(f, obj);
+                let o = self.operand(f, obj, &[value]);
                 let v = match op {
                     None => self.expr_reg(f, value),
                     Some(aop) => {
                         let cur = self.alloc(f);
-                        self.emit(f, Op::GetField { dst: cur, obj: o, idx: *index as u16 });
-                        self.apply_op(f, aop, op_ty, &value.ty, cur, value);
+                        let idx = self.field_u16(f, *index);
+                        self.emit(f, Op::GetField { dst: cur, obj: o, idx });
+                        self.apply_op(f, aop, op_ty, value.ty, cur, value);
                         cur
                     }
                 };
-                self.emit(f, Op::SetField { obj: o, idx: *index as u16, src: v });
+                let idx = self.field_u16(f, *index);
+                self.emit(f, Op::SetField { obj: o, idx, src: v });
             }
             Place::Index { obj, index, map } => {
-                let o = self.expr_reg(f, obj);
-                let i = self.expr_reg(f, index);
+                let o = self.operand(f, obj, &[index, value]);
+                let i = self.operand(f, index, &[value]);
                 let v = match op {
                     None => self.expr_reg(f, value),
                     Some(aop) => {
@@ -2290,7 +2854,7 @@ impl<'a> Compiler<'a> {
                         } else {
                             self.emit(f, Op::Index { dst: cur, obj: o, idx: i });
                         }
-                        self.apply_op(f, aop, op_ty, &value.ty, cur, value);
+                        self.apply_op(f, aop, op_ty, value.ty, cur, value);
                         cur
                     }
                 };
@@ -2305,10 +2869,10 @@ impl<'a> Compiler<'a> {
     }
 
     /// `cur = cur <op> value`.
-    fn apply_op(&mut self, f: &mut FnState, op: ArithOp, lt: &Type, rt: &Type, cur: Reg, value: &HExpr) {
-        if matches!(lt, Type::Int)
+    fn apply_op(&mut self, f: &mut FnState<'a>, op: ArithOp, lt: TypeId, rt: TypeId, cur: Reg, value: &'a HExpr) {
+        if matches!(lt, TypeId::INT)
             && matches!(op, ArithOp::Add | ArithOp::Sub)
-            && let HKind::Int(k) = value.kind
+            && let Some(k) = int_lit(value)
         {
             let k = if op == ArithOp::Sub { k.checked_neg() } else { Some(k) };
             if let Some(k) = k.filter(|k| *k >= i16::MIN as i64 && *k <= i16::MAX as i64) {
@@ -2324,10 +2888,10 @@ impl<'a> Compiler<'a> {
     // ------------------------------------------------------------------
     // Patterns
 
-    fn declare_pattern_locals(&mut self, f: &mut FnState, p: &HPat) {
+    fn declare_pattern_locals(&mut self, f: &mut FnState<'a>, p: &'a HPat) {
         match &p.kind {
             HPatKind::Bind(l) => {
-                if !f.local_reg.contains_key(l) {
+                if f.reg(*l).is_none() {
                     self.declare_local(f, *l);
                 }
             }
@@ -2337,7 +2901,7 @@ impl<'a> Compiler<'a> {
             HPatKind::List { before, rest, after } => {
                 before.iter().for_each(|x| self.declare_pattern_locals(f, x));
                 if let Some(Some(l)) = rest
-                    && !f.local_reg.contains_key(l)
+                    && f.reg(*l).is_none()
                 {
                     self.declare_local(f, *l);
                 }
@@ -2348,36 +2912,19 @@ impl<'a> Compiler<'a> {
     }
 
     /// Tests `v` against `p`, binding locals; jumps to `fails` on mismatch.
-    fn match_pattern(&mut self, f: &mut FnState, p: &HPat, v: Reg, fails: &mut Vec<usize>) {
+    fn match_pattern(&mut self, f: &mut FnState<'a>, p: &'a HPat, v: Reg, fails: &mut Vec<usize>) {
         match &p.kind {
             HPatKind::Wildcard => {}
             HPatKind::Bind(l) => self.init_local(f, *l, v),
-            HPatKind::Int(i) => {
-                let t = self.alloc(f);
-                self.load_int(f, t, *i);
-                if f.no_fused {
-                    let c = self.alloc(f);
-                    self.emit(f, Op::EqI { dst: c, a: v, b: t });
-                    fails.push(self.emit(f, Op::JmpIfNot { cond: c, off: 0 }));
-                } else {
-                    fails.push(self.emit(f, Op::JNeqI { a: v, b: t, off: 0 }));
-                }
-            }
+            HPatKind::Int(i) => fails.push(self.jump_unless(f, CmpOp::Eq, v, *i)),
             HPatKind::Range(a, b) => {
-                let t = self.alloc(f);
-                let c = self.alloc(f);
-                self.load_int(f, t, *a);
-                self.emit(f, Op::LeI { dst: c, a: t, b: v });
-                fails.push(self.emit(f, Op::JmpIfNot { cond: c, off: 0 }));
-                self.load_int(f, t, *b);
-                self.emit(f, Op::LeI { dst: c, a: v, b: t });
-                fails.push(self.emit(f, Op::JmpIfNot { cond: c, off: 0 }));
+                fails.push(self.jump_unless(f, CmpOp::Ge, v, *a));
+                fails.push(self.jump_unless(f, CmpOp::Le, v, *b));
             }
             HPatKind::Str(s) => {
                 let t = self.alloc(f);
                 self.load_str(f, t, s);
-                self.emit(f, Op::Eq { dst: t, a: v, b: t });
-                fails.push(self.emit(f, Op::JmpIfNot { cond: t, off: 0 }));
+                fails.push(self.emit(f, Op::JNeq { a: v, b: t, off: 0 }));
             }
             HPatKind::Bool(b) => {
                 if *b {
@@ -2401,16 +2948,17 @@ impl<'a> Compiler<'a> {
                     if matches!(sp.kind, HPatKind::Wildcard) {
                         continue;
                     }
-                    let t = self.field_temp(f, sp, v, *i as u16);
+                    let idx = self.field_u16(f, *i);
+                    let t = self.field_temp(f, sp, v, idx);
                     self.match_pattern(f, sp, t, fails);
                 }
             }
             HPatKind::Variant { rt_id, args }
-                if *rt_id == self.prog.ids.some && !f.no_fused && !matches!(args[..], [HPat { kind: HPatKind::Wildcard, .. }]) =>
+                if *rt_id == self.prog.ids.some && !matches!(args[..], [HPat { kind: HPatKind::Wildcard, .. }]) =>
             {
                 let sp = &args[0];
                 let t = match sp.kind {
-                    HPatKind::Bind(l) if !self.is_cell(f, l) && f.local_reg.contains_key(&l) => f.local_reg[&l],
+                    HPatKind::Bind(l) if !self.is_cell(f, l) && f.reg(l).is_some() => f.reg(l).unwrap(),
                     _ => self.alloc(f),
                 };
                 fails.push(self.emit(f, Op::JNotSome { src: v, dst: t, off: 0 }));
@@ -2419,25 +2967,15 @@ impl<'a> Compiler<'a> {
             HPatKind::Variant { rt_id, args } => {
                 let var = self.variant_u16(f, *rt_id);
                 fails.extend(self.jump_not_variant(f, v, var));
-                for (i, sp) in args.iter().enumerate() {
-                    if matches!(sp.kind, HPatKind::Wildcard) {
-                        continue;
-                    }
-                    let t = self.field_temp(f, sp, v, i as u16);
-                    self.match_pattern(f, sp, t, fails);
-                }
+                self.match_variant_args(f, args, v, fails);
             }
             HPatKind::List { before, rest, after } => {
+                if before.len() > 255 || after.len() > 255 {
+                    self.errors.push(Diag::error(p.span, "list pattern too long"));
+                    return;
+                }
                 let n = (before.len() + after.len()) as u16;
-                if f.no_fused {
-                    let c = self.alloc(f);
-                    if rest.is_some() {
-                        self.emit(f, Op::ListLenGe { dst: c, src: v, n });
-                    } else {
-                        self.emit(f, Op::ListLenEq { dst: c, src: v, n });
-                    }
-                    fails.push(self.emit(f, Op::JmpIfNot { cond: c, off: 0 }));
-                } else if rest.is_some() {
+                if rest.is_some() {
                     fails.push(self.emit(f, Op::JListMinLen { src: v, n, off: 0 }));
                 } else {
                     fails.push(self.emit(f, Op::JListLen { src: v, n, off: 0 }));
@@ -2461,9 +2999,6 @@ impl<'a> Compiler<'a> {
                 }
                 if let Some(Some(l)) = rest {
                     let t = self.alloc(f);
-                    if before.len() > 255 || after.len() > 255 {
-                        self.errors.push(Diag::error(p.span, "list pattern too long"));
-                    }
                     self.emit(f, Op::ListRest { dst: t, list: v, before: before.len() as u8, after: after.len() as u8 });
                     self.init_local(f, *l, t);
                 }
@@ -2485,10 +3020,243 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    /// A branch taken unless `v op k` (integers).
+    fn jump_unless(&mut self, f: &mut FnState<'a>, op: CmpOp, v: Reg, k: i64) -> usize {
+        if let Ok(k) = i16::try_from(k) {
+            return self.emit(f, jump_unless_k(op, v, k));
+        }
+        let t = self.alloc(f);
+        self.load_int(f, t, k);
+        self.emit(
+            f,
+            match op {
+                CmpOp::Ge => Op::JNleI { a: t, b: v, off: 0 },
+                CmpOp::Le => Op::JNleI { a: v, b: t, off: 0 },
+                _ => Op::JNeqI { a: v, b: t, off: 0 },
+            },
+        )
+    }
+
+    /// Matches the payload of variant `v` against `args`.
+    fn match_variant_args(&mut self, f: &mut FnState<'a>, args: &'a [HPat], v: Reg, fails: &mut Vec<usize>) {
+        if let [sp] = args {
+            // One payload: inline or not, `Payload` reads it.
+            if !matches!(sp.kind, HPatKind::Wildcard) {
+                let t = match sp.kind {
+                    HPatKind::Bind(l) if !self.is_cell(f, l) && f.reg(l).is_some() => f.reg(l).unwrap(),
+                    _ => self.alloc(f),
+                };
+                self.emit(f, Op::Payload { dst: t, src: v });
+                self.match_pattern(f, sp, t, fails);
+            }
+            return;
+        }
+        for (i, sp) in args.iter().enumerate() {
+            if matches!(sp.kind, HPatKind::Wildcard) {
+                continue;
+            }
+            let t = self.field_temp(f, sp, v, i as u16);
+            self.match_pattern(f, sp, t, fails);
+        }
+    }
+
+    /// The scrutinee of a pattern match: a tuple literal is not built, its
+    /// elements are matched where they are (a virtual tuple).
+    fn scrutinee(&mut self, f: &mut FnState<'a>, e: &'a HExpr) -> Scrut {
+        let HKind::Tuple(items) = &e.kind else { return Scrut::Reg(self.expr_reg(f, e)) };
+        let regs = items
+            .iter()
+            .map(|x| match x.kind {
+                // Arms run after all of the scrutinee is evaluated, and a
+                // guard may assign a local: those are copied.
+                HKind::Local(l) if !f.facts.assigned[l as usize] => self.expr_reg(f, x),
+                _ => {
+                    let r = self.alloc(f);
+                    self.expr_to(f, x, r);
+                    r
+                }
+            })
+            .collect();
+        Scrut::Tuple(regs)
+    }
+
+    /// `match_pattern` against a scrutinee.
+    fn match_scrut(&mut self, f: &mut FnState<'a>, p: &'a HPat, s: &Scrut, fails: &mut Vec<usize>) {
+        let regs = match s {
+            Scrut::Reg(r) => return self.match_pattern(f, p, *r, fails),
+            Scrut::Tuple(regs) => regs,
+        };
+        match &p.kind {
+            HPatKind::Wildcard => {}
+            HPatKind::Tuple(ps) => {
+                for (sp, &r) in ps.iter().zip(regs) {
+                    self.match_pattern(f, sp, r, fails);
+                }
+            }
+            HPatKind::Or(alts) => {
+                let mut oks = Vec::new();
+                for (i, alt) in alts.iter().enumerate() {
+                    let mut alt_fails = Vec::new();
+                    self.match_scrut(f, alt, s, &mut alt_fails);
+                    if i + 1 < alts.len() {
+                        oks.push(self.emit_jump(f));
+                        self.patch_list(f, alt_fails);
+                    } else {
+                        fails.extend(alt_fails);
+                    }
+                }
+                self.patch_list(f, oks);
+            }
+            // The tuple itself is needed (`t => ...`).
+            _ => {
+                let start = self.alloc_n(f, regs.len());
+                for (i, &r) in regs.iter().enumerate() {
+                    self.mv(f, start + i as Reg, r);
+                }
+                let t = self.alloc(f);
+                self.emit(f, Op::NewTuple { dst: t, start, count: regs.len() as u16 });
+                self.match_pattern(f, p, t, fails);
+            }
+        }
+    }
+
+    /// Whether a `match` on a value of type `ty` should start with a jump
+    /// table: when it tests at least three variants or integers (not too
+    /// sparse ones) and every arm starts with such a test or none.
+    fn switch_plan(&self, ty: TypeId, arms: &'a [HArm]) -> Option<SwitchPlan> {
+        let heads: Vec<Head> = arms.iter().map(|a| head(&a.pat)).collect();
+        let mut values: Vec<i64> = Vec::new();
+        for h in &heads {
+            match h {
+                Head::Any => {}
+                Head::Values(vs) => values.extend(vs),
+                Head::Other => return None,
+            }
+        }
+        values.sort_unstable();
+        values.dedup();
+        if values.len() < 3 {
+            return None;
+        }
+        let (int, first, len) = match self.arena.get(ty) {
+            Ty::Int => {
+                let span = values.last()?.checked_sub(values[0])?.checked_add(1)?;
+                if span > 4 * values.len() as i64 + 8 || span > 4096 {
+                    return None;
+                }
+                (true, values[0], span as usize)
+            }
+            Ty::Named(d, _) if self.cp.types[d as usize].is_enum() => {
+                let ids = self.cp.types[d as usize].variants().iter().map(|v| v.rt_id as i64);
+                let (lo, hi) = (ids.clone().min()?, ids.max()?);
+                (false, lo, (hi - lo + 1) as usize)
+            }
+            _ => return None,
+        };
+        // Integer heads are integer patterns, variant heads variants.
+        let ints = arms.iter().all(|a| !matches!(head(&a.pat), Head::Values(_)) || pat_is_int(&a.pat));
+        (ints == int).then_some(SwitchPlan { int, first, len, heads })
+    }
+
+    /// Compiles `match`: into `dst`, or (`None`) returning each arm's value.
+    ///
+    /// The arms are tested in order; a jump table (`switch_plan`) first
+    /// sends the scrutinee to the first arm that can match it, past that
+    /// arm's test of the variant or integer. The last arm, unguarded, is
+    /// not tested: the checker proved the match exhaustive.
+    fn compile_match(&mut self, f: &mut FnState<'a>, scrut: &'a HExpr, arms: &'a [HArm], dst: Option<Reg>) {
+        let mark = f.next_reg;
+        let s = self.scrutinee(f, scrut);
+        let plan = match s {
+            Scrut::Reg(r) => self.switch_plan(scrut.ty, arms).map(|p| (p, r)),
+            Scrut::Tuple(_) => None,
+        };
+        let switch = plan.as_ref().map(|(p, r)| {
+            let table = self.prog.switches.len() as u32;
+            self.prog.switches.push(Switch { first: p.first, ..Default::default() });
+            let op = if p.int { Op::SwitchInt { src: *r, table } } else { Op::SwitchVariant { src: *r, table } };
+            self.emit(f, op);
+            table
+        });
+        let mut entries = Vec::with_capacity(arms.len());
+        let mut ends = Vec::new();
+        let mut unmatched = Vec::new();
+        for (i, arm) in arms.iter().enumerate() {
+            let amark = f.next_reg;
+            let start = self.here(f);
+            self.declare_pattern_locals(f, &arm.pat);
+            let mut fails = Vec::new();
+            let last = i + 1 == arms.len() && arm.guard.is_none();
+            let entry = match (&s, &arm.pat.kind) {
+                // Test the variant or integer (unless exhaustiveness proves
+                // it), then the rest: an entry point past the test.
+                (Scrut::Reg(r), HPatKind::Variant { rt_id, args }) if *rt_id != self.prog.ids.some || last => {
+                    if !last {
+                        let var = self.variant_u16(f, *rt_id);
+                        fails.extend(self.jump_not_variant(f, *r, var));
+                    }
+                    let entry = self.here(f);
+                    self.match_variant_args(f, args, *r, &mut fails);
+                    entry
+                }
+                (Scrut::Reg(r), HPatKind::Int(k)) => {
+                    if !last {
+                        fails.push(self.jump_unless(f, CmpOp::Eq, *r, *k));
+                    }
+                    self.here(f)
+                }
+                _ => {
+                    self.match_scrut(f, &arm.pat, &s, &mut fails);
+                    start
+                }
+            };
+            entries.push(entry);
+            if let Some(g) = &arm.guard {
+                fails.extend(self.cond_jump(f, g));
+            }
+            match dst {
+                Some(dst) => {
+                    self.expr_to(f, &arm.body, dst);
+                    ends.push(self.emit_jump(f));
+                }
+                None => self.ret_expr(f, &arm.body),
+            }
+            if i + 1 < arms.len() {
+                self.patch_list(f, fails);
+            } else {
+                unmatched = fails;
+            }
+            f.next_reg = amark;
+        }
+        let nowhere = self.here(f);
+        if !unmatched.is_empty() || arms.is_empty() || switch.is_some() {
+            self.patch_list(f, unmatched);
+            let k = self.const_idx(Const::Str("internal error: no match arm matched".into()));
+            self.emit(f, Op::Panic { msg: k });
+        }
+        if let (Some(table), Some((plan, _))) = (switch, plan) {
+            // Each value goes to the first arm that can match it, past the
+            // test of an arm testing just this value (`entries`).
+            let target = |v: Option<i64>| {
+                let arm = plan.heads.iter().position(|h| match (h, v) {
+                    (Head::Any, _) => true,
+                    (Head::Values(vs), Some(v)) => vs.contains(&v),
+                    _ => false,
+                });
+                arm.map_or(nowhere, |i| entries[i])
+            };
+            let mut targets: Vec<usize> = (0..plan.len).map(|i| target(Some(plan.first + i as i64))).collect();
+            targets.push(target(None));
+            f.switches.push((table, targets));
+        }
+        self.patch_list(f, ends);
+        f.next_reg = mark;
+    }
+
     /// Loads field `idx` of `v` into a register suitable for matching `sp`.
-    fn field_temp(&mut self, f: &mut FnState, sp: &HPat, v: Reg, idx: u16) -> Reg {
+    fn field_temp(&mut self, f: &mut FnState<'a>, sp: &'a HPat, v: Reg, idx: u16) -> Reg {
         if let HPatKind::Bind(l) = sp.kind
-            && let (Some(&r), false) = (f.local_reg.get(&l), self.is_cell(f, l))
+            && let (Some(r), false) = (f.reg(l), self.is_cell(f, l))
         {
             self.emit(f, Op::GetField { dst: r, obj: v, idx });
             return r;
@@ -2498,10 +3266,17 @@ impl<'a> Compiler<'a> {
         t
     }
 
-    fn compile_let(&mut self, f: &mut FnState, pat: &HPat, init: &HExpr, else_: Option<&HExpr>) {
+    fn compile_let(&mut self, f: &mut FnState<'a>, pat: &'a HPat, init: &'a HExpr, else_: Option<&'a HExpr>) {
         if let HPatKind::Bind(l) = pat.kind
             && else_.is_none()
         {
+            if f.facts.alias[l as usize]
+                && let HKind::Local(x) = init.kind
+                && let Some(r) = f.reg(x)
+            {
+                f.set_reg(l, r);
+                return;
+            }
             let r = self.declare_local(f, l);
             if self.is_cell(f, l) {
                 let mark = f.next_reg;
@@ -2515,9 +3290,9 @@ impl<'a> Compiler<'a> {
         }
         self.declare_pattern_locals(f, pat);
         let mark = f.next_reg;
-        let v = self.expr_reg(f, init);
+        let v = self.scrutinee(f, init);
         let mut fails = Vec::new();
-        self.match_pattern(f, pat, v, &mut fails);
+        self.match_scrut(f, pat, &v, &mut fails);
         match else_ {
             Some(els) => {
                 let jok = self.emit_jump(f);
@@ -2541,35 +3316,19 @@ impl<'a> Compiler<'a> {
     // ------------------------------------------------------------------
     // Lambdas
 
-    fn compile_lambda(&mut self, f: &mut FnState, lam: &HLambda, ty: &Type) -> u32 {
+    fn compile_lambda(&mut self, f: &mut FnState<'a>, lam: &'a HLambda, ty: TypeId) -> u32 {
         // Free locals: referenced inside but declared outside the lambda.
-        let mut inner_lambdas = HashSet::new();
-        inner_lambdas.insert(lam.id);
-        let mut refs = Vec::new();
-        let mut nodes = 0;
-        walk(&lam.body, &mut |x| {
-            nodes += 1;
-            if let HKind::Lambda(l) = &x.kind {
-                inner_lambdas.insert(l.id);
-            }
-            local_refs(x, &mut refs);
-        });
-        // (Nested lambdas are walked again for each enclosing one.)
-        self.budget.charge(nodes);
-        let mut free: Vec<LocalId> = Vec::new();
-        let mut seen = HashSet::new();
-        for l in refs {
-            let owner = f.locals[l as usize].owner;
-            if !inner_lambdas.contains(&owner) && seen.insert(l) {
-                free.push(l);
-            }
+        let facts = f.facts.clone();
+        let free: &[LocalId] = facts.free.get(&lam.id).map_or(&[], |v| v);
+        if free.len() > u16::MAX as usize {
+            self.errors.push(Diag::error(lam.body.span, "a closure captures too many variables"));
         }
         let mut captures = Vec::new();
         let mut cells = Vec::new();
-        for &l in &free {
-            let src = if let Some(&r) = f.local_reg.get(&l) {
+        for &l in free {
+            let src = if let Some(r) = f.reg(l) {
                 CaptureSrc::Reg(r)
-            } else if let Some(&i) = f.capture_idx.get(&l) {
+            } else if let Some(i) = f.capture(l) {
                 CaptureSrc::Capture(i)
             } else {
                 // Declared in code not yet reached (e.g. a sibling local fn); capture unit.
@@ -2581,61 +3340,67 @@ impl<'a> Compiler<'a> {
         let mut sub = FnState {
             code: Vec::new(),
             lines: Vec::new(),
+            far: Vec::new(),
             locals: f.locals,
-            local_reg: HashMap::new(),
-            capture_idx: free.iter().enumerate().map(|(i, &l)| (l, i as u16)).collect(),
+            local_reg: vec![NONE; f.locals.len()],
+            reg_log: Vec::new(),
+            capture_idx: vec![NONE; f.locals.len()],
             next_reg: 0,
             max_reg: 0,
             loops: vec![],
             line: f.line,
             file: f.file,
-            no_fused: f.no_fused,
             too_big: false,
-            in_tail_fn: true,
-            hoisted: HashMap::new(),
+            hoisted: FxHashMap::default(),
             hoisting: false,
             defers: Vec::new(),
             defer_ops: 0,
             void: None,
-            builders: f.builders.clone(),
+            facts: f.facts.clone(),
+            stubs: Vec::new(),
+            switches: Vec::new(),
         };
+        for (i, &l) in free.iter().enumerate() {
+            sub.capture_idx[l as usize] = i as u16;
+        }
         for &p in &lam.params {
             let r = self.alloc(&mut sub);
-            sub.local_reg.insert(p, r);
+            sub.set_reg(p, r);
         }
         for (i, &l) in free.iter().enumerate() {
             if !cells[i] {
                 let r = self.alloc(&mut sub);
                 self.emit(&mut sub, Op::LoadCapture { dst: r, idx: i as u16 });
-                sub.local_reg.insert(l, r);
+                sub.set_reg(l, r);
             }
         }
         self.ret_expr(&mut sub, &lam.body);
-        if sub.too_big {
-            f.too_big = true;
-        }
-        let signature = if lam.signature.is_empty() {
-            let printer = crate::types::TypePrinter { defs: &self.cp.types, params: &self.cp.params, wk: self.cp.wk };
-            printer.show(ty)
-        } else {
-            lam.signature.clone()
-        };
+        f.too_big |= sub.too_big;
+        let signature = if lam.signature.is_empty() { self.cp.printer().show(ty) } else { lam.signature.clone() };
         let p = self.prog.protos.len() as u32;
-        thread_jumps(&mut sub.code);
+        let nregs = sub.max_reg.max(1) as u16;
+        let (code, lines) = self.finish(sub);
         self.prog.protos.push(Proto {
             name: lam.name.clone(),
             file: f.file,
             nparams: lam.params.len() as u16,
-            nregs: sub.max_reg.max(1) as u16,
-            code: sub.code,
-            lines: sub.lines,
+            nregs,
+            code,
+            lines,
             captures,
             capture_cells: cells,
-            doc: lam.doc.clone(),
+            doc: lam.doc.as_deref().map(String::from),
             signature,
         });
         p
     }
+}
+
+/// Whether a block used as a condition can be compiled as its statements
+/// followed by a branch on its last expression (an inlined filter lambda,
+/// `{ let x = e; x > 2 }`): it defers nothing.
+fn cond_block(items: &[HExpr]) -> bool {
+    !items.is_empty() && !items.iter().any(|x| matches!(x.kind, HKind::Defer(_)))
 }
 
 /// Whether a deferred expression is pending in the current function.
@@ -2643,9 +3408,9 @@ fn defers_pending(f: &FnState) -> bool {
     f.defers.iter().any(|d| !d.is_empty())
 }
 
-fn arith_op(op: ArithOp, lt: &Type, rt: &Type, dst: Reg, a: Reg, b: Reg) -> Op {
-    let int = matches!(lt, Type::Int) && matches!(rt, Type::Int);
-    let float = matches!(lt, Type::Float) && matches!(rt, Type::Float);
+fn arith_op(op: ArithOp, lt: TypeId, rt: TypeId, dst: Reg, a: Reg, b: Reg) -> Op {
+    let int = matches!(lt, TypeId::INT) && matches!(rt, TypeId::INT);
+    let float = matches!(lt, TypeId::FLOAT) && matches!(rt, TypeId::FLOAT);
     use ArithOp::*;
     match op {
         Add if int => Op::AddI { dst, a, b },
@@ -2674,9 +3439,9 @@ fn arith_op(op: ArithOp, lt: &Type, rt: &Type, dst: Reg, a: Reg, b: Reg) -> Op {
     }
 }
 
-fn cmp_op(op: CmpOp, ty: &Type, dst: Reg, a: Reg, b: Reg) -> Op {
+fn cmp_op(op: CmpOp, ty: TypeId, dst: Reg, a: Reg, b: Reg) -> Op {
     match ty {
-        Type::Int => match op {
+        TypeId::INT => match op {
             CmpOp::Eq => Op::EqI { dst, a, b },
             CmpOp::Ne => Op::NeI { dst, a, b },
             CmpOp::Lt => Op::LtI { dst, a, b },
@@ -2684,7 +3449,7 @@ fn cmp_op(op: CmpOp, ty: &Type, dst: Reg, a: Reg, b: Reg) -> Op {
             CmpOp::Gt => Op::LtI { dst, a: b, b: a },
             CmpOp::Ge => Op::LeI { dst, a: b, b: a },
         },
-        Type::Float => match op {
+        TypeId::FLOAT => match op {
             CmpOp::Eq => Op::EqF { dst, a, b },
             CmpOp::Ne => Op::NeF { dst, a, b },
             CmpOp::Lt => Op::LtF { dst, a, b },
@@ -2715,7 +3480,126 @@ fn local_refs(x: &HExpr, out: &mut Vec<LocalId>) {
     }
 }
 
-/// Pre-order traversal of every expression (including inside lambdas, places and args).
+/// The farthest (in instructions) `assemble` places a branch island from its branch.
+const ISLAND_REACH: usize = 30000;
+
+/// The final assembly of a function's code: threads jumps (`thread_jumps`),
+/// then routes each branch in `far` (instruction, target), whose target is
+/// out of the range of its offset field, through a branch island: a `Jmp`
+/// (or, backward, a `Loop`) to the target. An island goes into a gap
+/// between the branch and its target that no code falls through to (after
+/// an unconditional instruction) when there is one within reach, so it
+/// costs nothing on other paths; otherwise right after the branch, behind
+/// a jump over it.
+fn assemble(mut code: Vec<Op>, lines: Vec<u32>, far: &[(usize, usize)], tables: &mut [Vec<usize>]) -> (Vec<Op>, Vec<u32>) {
+    thread_jumps(&mut code);
+    let n = code.len();
+    // The target of every branch, by instruction.
+    let mut targets: Vec<Option<usize>> =
+        code.iter().enumerate().map(|(i, op)| op.branch_off().map(|o| (i as i64 + 1 + o as i64) as usize)).collect();
+    for &(at, t) in far {
+        targets[at] = Some(t);
+    }
+    // The branches needing islands, with whether their island must follow
+    // them: those out of range, and conditional branches back without a
+    // backward form (which must reach a safe point: a `Loop` island).
+    let mut needs: Vec<(usize, bool)> = far.iter().map(|&(at, _)| (at, false)).collect();
+    for (i, op) in code.iter().enumerate() {
+        if targets[i].is_some_and(|t| t <= i) && !op.is_back_edge() && !far.iter().any(|&(at, _)| at == i) {
+            needs.push((i, true));
+        }
+    }
+    if needs.is_empty() {
+        debug_assert!(check_back_edges(&code));
+        return (code, lines);
+    }
+    // Positions (before an instruction, or `n`) no code falls through to.
+    let gaps: Vec<usize> = (1..=n).filter(|&p| code[p - 1].is_unconditional()).collect();
+    loop {
+        // (position, index in `needs`), in code order.
+        let mut islands: Vec<(usize, usize)> = needs
+            .iter()
+            .enumerate()
+            .map(|(k, &(at, inline))| {
+                let t = targets[at].unwrap();
+                let gap = gaps.get(gaps.partition_point(|&p| p <= at)).copied().filter(|&p| !inline && p <= t && p - at <= ISLAND_REACH);
+                (gap.unwrap_or(at + 1), k)
+            })
+            .collect();
+        islands.sort_unstable();
+        let mut out = Vec::with_capacity(n + 2 * islands.len());
+        let mut out_lines = Vec::with_capacity(n + 2 * islands.len());
+        let mut new_idx = vec![0; n + 1];
+        let mut island_at = vec![0; needs.len()];
+        // Jumps over inline islands, with the position they skip to.
+        let mut skips = Vec::new();
+        let mut next = islands.iter().peekable();
+        for i in 0..=n {
+            while let Some(&&(pos, k)) = next.peek()
+                && pos == i
+            {
+                let (at, _) = needs[k];
+                if gaps.binary_search(&pos).is_err() {
+                    skips.push((out.len(), pos));
+                    out.push(Op::Jmp { off: 0 });
+                    out_lines.push(lines[at]);
+                }
+                island_at[k] = out.len();
+                out.push(Op::Jmp { off: 0 });
+                out_lines.push(lines[at]);
+                next.next();
+            }
+            new_idx[i] = out.len();
+            if i < n {
+                out.push(code[i]);
+                out_lines.push(lines[i]);
+            }
+        }
+        for (j, pos) in skips {
+            out[j] = Op::Jmp { off: (new_idx[pos] - j - 1) as i32 };
+        }
+        for (k, &(at, _)) in needs.iter().enumerate() {
+            let (j, t) = (island_at[k], new_idx[targets[at].unwrap()]);
+            let off = t as i64 - j as i64 - 1;
+            out[j] = if off < 0 { Op::Loop { off: off as i32 } } else { Op::Jmp { off: off as i32 } };
+        }
+        // Re-target every branch; one that no longer fits (islands were
+        // inserted in between) gets an island too, as does one too far from
+        // its island in a gap.
+        let mut need_of = vec![None; n];
+        for (k, &(at, _)) in needs.iter().enumerate() {
+            need_of[at] = Some(k);
+        }
+        let mut retry = false;
+        for i in 0..n {
+            let Some(t) = targets[i] else { continue };
+            let k = need_of[i];
+            let to = match k {
+                Some(k) => island_at[k],
+                None => new_idx[t],
+            };
+            let from = new_idx[i];
+            if !out[from].set_branch_off(to as i64 - from as i64 - 1) {
+                match k {
+                    Some(k) => needs[k].1 = true,
+                    None => needs.push((i, false)),
+                }
+                retry = true;
+            }
+        }
+        if !retry {
+            for t in tables.iter_mut().flatten() {
+                *t = new_idx[*t];
+            }
+            debug_assert!(check_back_edges(&out));
+            return (out, out_lines);
+        }
+    }
+}
+
+/// Jump threading: a `Jmp` to a `Jmp` goes to the final target, one to a
+/// `Loop` becomes that `Loop` (or a `Jmp` to its target), one to a return
+/// becomes the return, and a `Jmp` back becomes a `Loop` (a back edge).
 fn thread_jumps(code: &mut [Op]) {
     for i in 0..code.len() {
         let Op::Jmp { off } = code[i] else { continue };
@@ -2735,158 +3619,283 @@ fn thread_jumps(code: &mut [Op]) {
             _ => Op::Jmp { off: (t - (i as i64 + 1)) as i32 },
         };
     }
-    debug_assert!(
-        code.iter().all(|op| !matches!(op, Op::JmpIf { off, .. } | Op::JmpIfNot { off, .. } if *off < 0)),
-        "conditional backward jump (it would not consume fuel)"
-    );
-    debug_assert!(code.iter().all(|op| !matches!(op, Op::Loop { off } if *off >= 0)), "a `Loop` that does not jump backward");
 }
 
-/// The string locals of a function body that `+=` appends to and no
-/// closure captures (cells): they are appended to in place. Such a local
-/// holds a private buffer (`Obj::StrBuf`) while it is being appended to;
-/// every other read of it first freezes the buffer into an ordinary string
-/// (`Op::FreezeStr`, in place), so no other register, object or closure
-/// ever sees a buffer, and appending cannot change a value seen elsewhere.
-fn builder_locals(body: &HExpr, locals: &[LocalInfo]) -> HashSet<LocalId> {
-    let mut out = HashSet::new();
-    walk(body, &mut |e| {
-        if let HKind::Assign { place: Place::Local(l), op: Some(ArithOp::Add), op_ty: Type::Str, .. } = &e.kind
-            && locals.get(*l as usize).is_some_and(|i| !i.cell)
-        {
-            out.insert(*l);
+/// Every branch back is a safe point charging fuel (see "Metering" in
+/// docs/INTERNALS.md), and every `Loop` jumps back.
+fn check_back_edges(code: &[Op]) -> bool {
+    code.iter().all(|op| match op.branch_off() {
+        Some(off) if off < 0 => op.is_back_edge(),
+        Some(_) => !matches!(op, Op::Loop { .. }),
+        None => true,
+    })
+}
+
+/// Facts about the locals of a function body (indexed by `LocalId`).
+struct LocalFacts {
+    /// The string locals that `+=` appends to and no closure captures
+    /// (cells): they are appended to in place. Such a local holds a private
+    /// buffer (`Obj::StrBuf`) while it is being appended to; every other
+    /// read of it first freezes the buffer into an ordinary string
+    /// (`Op::FreezeStr`, in place), so no other register, object or closure
+    /// ever sees a buffer, and appending cannot change a value seen elsewhere.
+    builder: Vec<bool>,
+    /// Locals that share the register of the local they are initialized
+    /// from (`let v = x`, copy propagation): neither is a cell, `v` is
+    /// never assigned, `x` is not assigned by the rest of the block (while
+    /// `v` exists) and is not a string builder. Inlined lambdas bind their
+    /// parameters this way.
+    alias: Vec<bool>,
+    /// Locals assigned somewhere (after their declaration).
+    assigned: Vec<bool>,
+    /// The free locals of each lambda (by `HLambda::id`): referenced in it
+    /// but declared outside, in order of first reference.
+    free: HashMap<u32, Vec<LocalId>>,
+}
+
+/// A lambda being visited by `lambda_free`: its id and the locals referenced in it.
+struct FreeFrame {
+    id: u32,
+    refs: Vec<LocalId>,
+    seen: HashSet<LocalId>,
+}
+
+/// Collects the free locals of the lambdas in `e` into `free` (one walk:
+/// a lambda's free locals are those of its own references and of its
+/// lambdas' free locals that it does not declare).
+fn lambda_free(e: &HExpr, locals: &[LocalInfo], stack: &mut Vec<FreeFrame>, free: &mut HashMap<u32, Vec<LocalId>>, nodes: &mut u64) {
+    walk_pruned(e, &mut |x| {
+        *nodes += 1;
+        if let HKind::Lambda(l) = &x.kind {
+            stack.push(FreeFrame { id: l.id, refs: Vec::new(), seen: HashSet::new() });
+            lambda_free(&l.body, locals, stack, free, nodes);
+            let fr = stack.pop().unwrap();
+            let list: Vec<LocalId> = fr.refs.into_iter().filter(|&r| locals.get(r as usize).is_some_and(|i| i.owner != fr.id)).collect();
+            if let Some(parent) = stack.last_mut() {
+                for &r in &list {
+                    if parent.seen.insert(r) {
+                        parent.refs.push(r);
+                    }
+                }
+            }
+            free.insert(l.id, list);
+            return false;
         }
-    });
-    out
-}
-
-pub(crate) fn walk(e: &HExpr, f: &mut impl FnMut(&HExpr)) {
-    f(e);
-    match &e.kind {
-        HKind::Let { init, else_, .. } => {
-            walk(init, f);
-            if let Some(x) = else_ {
-                walk(x, f);
+        if let Some(top) = stack.last_mut() {
+            let mut refs = Vec::new();
+            local_refs(x, &mut refs);
+            for r in refs {
+                if top.seen.insert(r) {
+                    top.refs.push(r);
+                }
             }
         }
-        HKind::LocalFns { lambdas, .. } => lambdas.iter().for_each(|x| walk(x, f)),
+        true
+    });
+}
+
+/// Whether `e` assigns local `l`.
+fn assigns(e: &HExpr, l: LocalId, budget: &CompileBudget) -> bool {
+    let mut found = false;
+    let mut nodes = 0;
+    walk(e, &mut |x| {
+        nodes += 1;
+        found |= matches!(x.kind, HKind::Assign { place: Place::Local(m), .. } if m == l);
+    });
+    budget.charge(nodes);
+    found
+}
+
+/// Rest-of-block scans for `LocalFacts::alias` give up after this many nodes.
+const MAX_ALIAS_SCAN: usize = 1000;
+
+fn local_facts(body: &HExpr, locals: &[LocalInfo], budget: &CompileBudget) -> LocalFacts {
+    let n = locals.len();
+    let cell = |l: LocalId| locals.get(l as usize).is_none_or(|i| i.cell);
+    let mut builder = vec![false; n];
+    let mut assigned = vec![false; n];
+    let mut nodes = 0u64;
+    walk(body, &mut |e| {
+        nodes += 1;
+        if let HKind::Assign { place: Place::Local(l), op, op_ty, .. } = &e.kind {
+            assigned[*l as usize] = true;
+            if *op == Some(ArithOp::Add) && *op_ty == TypeId::STR && !cell(*l) {
+                builder[*l as usize] = true;
+            }
+        }
+    });
+    let mut alias = vec![false; n];
+    walk(body, &mut |e| {
+        let HKind::Block(items) = &e.kind else { return };
+        for (i, it) in items.iter().enumerate() {
+            let HKind::Let { pat: HPat { kind: HPatKind::Bind(v), .. }, init, else_: None } = &it.kind else { continue };
+            let HKind::Local(x) = init.kind else { continue };
+            if cell(*v) || cell(x) || assigned[*v as usize] || builder[x as usize] {
+                continue;
+            }
+            // Is `x` assigned by the rest of the block?
+            let mut seen = 0;
+            let mut clobbered = false;
+            for later in &items[i + 1..] {
+                walk(later, &mut |y| {
+                    seen += 1;
+                    clobbered |= matches!(y.kind, HKind::Assign { place: Place::Local(l), .. } if l == x);
+                });
+                if clobbered || seen > MAX_ALIAS_SCAN {
+                    break;
+                }
+            }
+            nodes += seen as u64;
+            alias[*v as usize] = !clobbered && seen <= MAX_ALIAS_SCAN;
+        }
+    });
+    let mut free = HashMap::new();
+    lambda_free(body, locals, &mut Vec::new(), &mut free, &mut nodes);
+    budget.charge(nodes);
+    LocalFacts { builder, alias, assigned, free }
+}
+
+/// Pre-order traversal of every expression (including inside lambdas, places and args).
+pub(crate) fn walk<'e>(e: &'e HExpr, f: &mut impl FnMut(&'e HExpr)) {
+    walk_pruned(e, &mut |x| {
+        f(x);
+        true
+    });
+}
+
+/// Like [`walk`], but skips the sub-expressions of the expressions for
+/// which `f` returns false.
+fn walk_pruned<'e>(e: &'e HExpr, f: &mut impl FnMut(&'e HExpr) -> bool) {
+    if !f(e) {
+        return;
+    }
+    match &e.kind {
+        HKind::Let { init, else_, .. } => {
+            walk_pruned(init, f);
+            if let Some(x) = else_ {
+                walk_pruned(x, f);
+            }
+        }
+        HKind::LocalFns { lambdas, .. } => lambdas.iter().for_each(|x| walk_pruned(x, f)),
         HKind::Assign { place, value, .. } => {
             match place {
-                Place::Field { obj, .. } => walk(obj, f),
+                Place::Field { obj, .. } => walk_pruned(obj, f),
                 Place::Index { obj, index, .. } => {
-                    walk(obj, f);
-                    walk(index, f);
+                    walk_pruned(obj, f);
+                    walk_pruned(index, f);
                 }
                 _ => {}
             }
-            walk(value, f);
+            walk_pruned(value, f);
         }
         HKind::Block(xs)
         | HKind::Tuple(xs)
         | HKind::List(xs)
         | HKind::MakeVariant { args: xs, .. }
-        | HKind::MakeStruct { fields: xs, .. } => xs.iter().for_each(|x| walk(x, f)),
+        | HKind::MakeStruct { fields: xs, .. } => xs.iter().for_each(|x| walk_pruned(x, f)),
         HKind::If { cond, then, else_ } => {
-            walk(cond, f);
-            walk(then, f);
+            walk_pruned(cond, f);
+            walk_pruned(then, f);
             if let Some(x) = else_ {
-                walk(x, f);
+                walk_pruned(x, f);
             }
         }
         HKind::IfLet { value, then, else_, .. } => {
-            walk(value, f);
-            walk(then, f);
+            walk_pruned(value, f);
+            walk_pruned(then, f);
             if let Some(x) = else_ {
-                walk(x, f);
+                walk_pruned(x, f);
             }
         }
         HKind::Match { scrut, arms } => {
-            walk(scrut, f);
+            walk_pruned(scrut, f);
             for a in arms {
                 if let Some(g) = &a.guard {
-                    walk(g, f);
+                    walk_pruned(g, f);
                 }
-                walk(&a.body, f);
+                walk_pruned(&a.body, f);
             }
         }
-        HKind::Loop(b) => walk(b, f),
+        HKind::Loop(b) => walk_pruned(b, f),
         HKind::While { cond, body } => {
-            walk(cond, f);
-            walk(body, f);
+            walk_pruned(cond, f);
+            walk_pruned(body, f);
         }
         HKind::WhileLet { value, body, .. } => {
-            walk(value, f);
-            walk(body, f);
+            walk_pruned(value, f);
+            walk_pruned(body, f);
         }
         HKind::For { iter, body, .. } => {
-            walk(iter, f);
-            walk(body, f);
+            walk_pruned(iter, f);
+            walk_pruned(body, f);
         }
         HKind::ForRange { start, end, body, .. } => {
-            walk(start, f);
-            walk(end, f);
-            walk(body, f);
+            walk_pruned(start, f);
+            walk_pruned(end, f);
+            walk_pruned(body, f);
         }
         HKind::Break { value: x, .. } | HKind::Return(x) => {
             if let Some(x) = x {
-                walk(x, f);
+                walk_pruned(x, f);
             }
         }
         HKind::Call { args, .. } | HKind::CallNative { args, .. } | HKind::CallTrait { args, .. } => {
             for a in args {
                 if let HArg::Expr(x) = a {
-                    walk(x, f);
+                    walk_pruned(x, f);
                 }
             }
         }
-        HKind::Dict { args, .. } => args.iter().for_each(|x| walk(x, f)),
+        HKind::Dict { args, .. } => args.iter().for_each(|x| walk_pruned(x, f)),
         HKind::CallValue { callee, args } => {
-            walk(callee, f);
-            args.iter().for_each(|x| walk(x, f));
+            walk_pruned(callee, f);
+            args.iter().for_each(|x| walk_pruned(x, f));
         }
         HKind::Map(kvs) => {
             for (k, v) in kvs {
-                walk(k, f);
-                walk(v, f);
+                walk_pruned(k, f);
+                walk_pruned(v, f);
             }
         }
         HKind::Repeat { elem, count } => {
-            walk(elem, f);
-            walk(count, f);
+            walk_pruned(elem, f);
+            walk_pruned(count, f);
         }
-        HKind::PushLocal { value, .. } => walk(value, f),
+        HKind::PushLocal { value, .. } => walk_pruned(value, f),
         HKind::InsertLocal { key, value, .. } => {
-            walk(key, f);
-            walk(value, f);
+            walk_pruned(key, f);
+            walk_pruned(value, f);
         }
-        HKind::Field { obj, .. } => walk(obj, f),
+        HKind::Field { obj, .. } => walk_pruned(obj, f),
         HKind::Index { obj, index, .. } => {
-            walk(obj, f);
-            walk(index, f);
+            walk_pruned(obj, f);
+            walk_pruned(index, f);
         }
         HKind::Slice { obj, start, end, .. } => {
-            walk(obj, f);
+            walk_pruned(obj, f);
             if let Some(x) = start {
-                walk(x, f);
+                walk_pruned(x, f);
             }
             if let Some(x) = end {
-                walk(x, f);
+                walk_pruned(x, f);
             }
         }
-        HKind::Unary { e, .. } | HKind::ToStr(e) | HKind::Debug(e) | HKind::Spawn(e) | HKind::Defer(e) | HKind::Try { e, .. } => walk(e, f),
+        HKind::Unary { e, .. } | HKind::ToStr(e) | HKind::Debug(e) | HKind::Spawn(e) | HKind::Defer(e) | HKind::Try { e, .. } => {
+            walk_pruned(e, f)
+        }
         HKind::Arith { l, r, .. } | HKind::Cmp { l, r, .. } | HKind::And(l, r) | HKind::Or(l, r) | HKind::Coalesce { l, r, .. } => {
-            walk(l, f);
-            walk(r, f);
+            walk_pruned(l, f);
+            walk_pruned(r, f);
         }
         HKind::Range { start, end, .. } => {
-            walk(start, f);
-            walk(end, f);
+            walk_pruned(start, f);
+            walk_pruned(end, f);
         }
-        HKind::Lambda(l) => walk(&l.body, f),
+        HKind::Lambda(l) => walk_pruned(&l.body, f),
         HKind::Interp(parts) => {
             for p in parts {
                 if let InterpPart::Expr(x, _) = p {
-                    walk(x, f);
+                    walk_pruned(x, f);
                 }
             }
         }
@@ -2904,20 +3913,50 @@ mod tests {
         let engine = Engine::new(Config::new());
         let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let root = std::env::current_dir().unwrap();
-        match rt.block_on(engine.compile("main.sand", src, root, None)) {
+        match rt.block_on(engine.compile("main.sand", src, &root, None)) {
             Ok(c) => c.program,
             Err(e) => panic!("{e}"),
         }
     }
 
-    /// The first loop (from its back-edge target to the `Loop` instruction)
-    /// of function `name`, and the code before it.
+    /// The first loop (from its back edge's target to the back edge) of
+    /// function `name`, and the code before it.
     fn first_loop<'p>(prog: &'p Program, name: &str) -> (&'p [Op], &'p [Op]) {
         let p = prog.protos.iter().find(|p| p.name == name).unwrap();
         let (at, off) =
-            p.code.iter().enumerate().find_map(|(i, op)| if let Op::Loop { off } = op { Some((i, *off)) } else { None }).unwrap();
+            p.code.iter().enumerate().find_map(|(i, op)| op.is_back_edge().then(|| Some((i, op.branch_off()?))).flatten()).unwrap();
         let top = (at as i64 + 1 + off as i64) as usize;
         (&p.code[top..=at], &p.code[..top])
+    }
+
+    fn run(src: &str) -> String {
+        let out = crate::MemorySink::new();
+        let mut engine = Engine::new(Config::new().stdout(out.clone()));
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        if let Err(e) = rt.block_on(engine.run_source("main.sand", src)) {
+            panic!("{e}");
+        }
+        out.contents()
+    }
+
+    #[test]
+    fn branches_beyond_the_offset_range_go_through_islands() {
+        // Bodies of about 40000 instructions: the loop exits, the `if` and
+        // the match test jump farther than an `i16` offset reaches.
+        let body = "            t += i % 3\n".repeat(20000);
+        let src = format!(
+            "fn big(n: int, o: int?) -> int {{\n    var t = 0\n    var i = 0\n    while i < n {{\n        if i % 2 == 0 {{\n{body}        }}\n        i += 1\n    }}\n    for i in 0..n {{\n        match o {{\n            Some(k) if k > i => {{\n{body}            }}\n            _ => {{ t += 1 }}\n        }}\n    }}\n    t\n}}\nprint(big(4, Some(3)))\nprint(big(3, None))\n"
+        );
+        assert_eq!(run(&src), "100001\n40003\n");
+        let prog = compile(&src);
+        let p = prog.protos.iter().find(|p| p.name == "big").unwrap();
+        assert!(p.code.len() > 70000);
+        // A jump table whose targets move when islands are inserted.
+        let arm = "            t += i % 3\n".repeat(20000);
+        let src = format!(
+            "enum E {{ A, B(int), C, D }}\nfn f(e: E, i: int) -> int {{\n    var t = 0\n    match e {{\n        A => {{\n{arm}        }}\n        B(k) if k > 0 => {{\n{arm}        }}\n        C => {{ t = 7 }}\n        _ => {{ t = -1 }}\n    }}\n    t\n}}\nprint([E.A, E.B(1), E.B(0), E.C, E.D].map(e => f(e, 2)))\n"
+        );
+        assert_eq!(run(&src), "[40000, 40000, -1, 7, -1]\n");
     }
 
     fn loads(ops: &[Op]) -> usize {

@@ -22,7 +22,8 @@
 //! [`MAX_TOTAL_DESC_NODES`] per compilation.
 
 use crate::check::CheckedProgram;
-use crate::types::{Type, TypeDefKind, TypePrinter};
+use crate::check::persist::PMap;
+use crate::types::{Ty, TyList, TypeArena, TypeDefKind, TypeId, TypePrinter};
 use crate::vm::value::TypeDesc;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -34,7 +35,8 @@ pub const MAX_DESC_NODES: usize = 100_000;
 /// Maximum work for all the descriptions built by one compilation.
 pub const MAX_TOTAL_DESC_NODES: usize = 1_000_000;
 
-/// A structural key identifying a type (`Type` is not hashable).
+/// A structural key identifying a type (independent of the ids of the
+/// arena, which differ between the compilations that share the cache).
 type Key = Vec<u32>;
 
 /// Type descriptions shared between the `reflect` call sites of a program
@@ -42,11 +44,11 @@ type Key = Vec<u32>;
 #[derive(Clone, Default)]
 pub(crate) struct DescCache {
     /// Ids of struct and enum instances (`TypeDesc::Struct::id`).
-    ids: HashMap<Key, u32>,
+    ids: PMap<Key, u32>,
     /// Closed descriptions of struct and enum instances.
-    closed: HashMap<Key, Arc<TypeDesc>>,
+    closed: PMap<Key, Arc<TypeDesc>>,
     /// The constant holding the description of each reflected type.
-    consts: HashMap<Key, u32>,
+    consts: PMap<Key, u32>,
     /// Work done by the current compilation (reset by [`DescCache::start`]).
     total: usize,
 }
@@ -59,9 +61,15 @@ impl DescCache {
 
     /// The index of the constant describing `t`, creating it with `add` if
     /// needed; `None` if the description is too large.
-    pub(crate) fn const_for(&mut self, cp: &CheckedProgram, t: &Type, add: impl FnOnce(Arc<TypeDesc>) -> u32) -> Option<u32> {
+    pub(crate) fn const_for(
+        &mut self,
+        cp: &CheckedProgram,
+        arena: &mut TypeArena,
+        t: TypeId,
+        add: impl FnOnce(Arc<TypeDesc>) -> u32,
+    ) -> Option<u32> {
         let mut key = Vec::new();
-        type_key(t, &mut key);
+        type_key(arena, t, &mut key);
         self.total = self.total.saturating_add(key.len());
         if self.total > MAX_TOTAL_DESC_NODES {
             return None;
@@ -69,17 +77,26 @@ impl DescCache {
         if let Some(&k) = self.consts.get(&key) {
             return Some(k);
         }
-        let desc = self.describe(cp, t)?;
+        let desc = self.describe(cp, arena, t)?;
         let k = add(desc);
         self.consts.insert(key, k);
         Some(k)
     }
 
     /// The description of `t`, or `None` if it is too large.
-    fn describe(&mut self, cp: &CheckedProgram, t: &Type) -> Option<Arc<TypeDesc>> {
+    fn describe(&mut self, cp: &CheckedProgram, arena: &mut TypeArena, t: TypeId) -> Option<Arc<TypeDesc>> {
         let budget = MAX_DESC_NODES.min(MAX_TOTAL_DESC_NODES.saturating_sub(self.total));
-        let mut b =
-            Builder { cp, cache: self, stack: HashMap::new(), open: HashMap::new(), open_at: Vec::new(), work: 0, budget, failed: false };
+        let mut b = Builder {
+            cp,
+            arena,
+            cache: self,
+            stack: HashMap::new(),
+            open: HashMap::new(),
+            open_at: Vec::new(),
+            work: 0,
+            budget,
+            failed: false,
+        };
         let (d, _) = b.desc(t);
         let (work, failed) = (b.work, b.failed);
         self.total = self.total.saturating_add(work);
@@ -88,52 +105,58 @@ impl DescCache {
 }
 
 /// Appends the structural key of `t` to `out`.
-fn type_key(t: &Type, out: &mut Key) {
-    match t {
-        Type::Int => out.push(0),
-        Type::Float => out.push(1),
-        Type::Bool => out.push(2),
-        Type::Str => out.push(3),
-        Type::Bytes => out.push(4),
-        Type::Duration => out.push(5),
-        Type::Unit => out.push(6),
-        Type::Never => out.push(7),
-        Type::Range => out.push(8),
-        Type::Error => out.push(9),
-        Type::List(e) => {
+fn type_key(arena: &TypeArena, t: TypeId, out: &mut Key) {
+    let list = |l: TyList, out: &mut Key| {
+        let ts = arena.list(l);
+        out.push(ts.len() as u32);
+        ts.iter().for_each(|&t| type_key(arena, t, out));
+    };
+    match arena.get(t) {
+        Ty::Int => out.push(0),
+        Ty::Float => out.push(1),
+        Ty::Bool => out.push(2),
+        Ty::Str => out.push(3),
+        Ty::Bytes => out.push(4),
+        Ty::Duration => out.push(5),
+        Ty::Unit => out.push(6),
+        Ty::Never => out.push(7),
+        Ty::Range => out.push(8),
+        Ty::Error => out.push(9),
+        Ty::List(e) => {
             out.push(10);
-            type_key(e, out);
+            type_key(arena, e, out);
         }
-        Type::Set(e) => {
+        Ty::Set(e) => {
             out.push(11);
-            type_key(e, out);
+            type_key(arena, e, out);
         }
-        Type::Map(k, v) => {
+        Ty::Map(k, v) => {
             out.push(12);
-            type_key(k, out);
-            type_key(v, out);
+            type_key(arena, k, out);
+            type_key(arena, v, out);
         }
-        Type::Tuple(ts) => {
-            out.extend([13, ts.len() as u32]);
-            ts.iter().for_each(|t| type_key(t, out));
+        Ty::Tuple(ts) => {
+            out.push(13);
+            list(ts, out);
         }
-        Type::Fn(ps, r) => {
-            out.extend([14, ps.len() as u32]);
-            ps.iter().for_each(|t| type_key(t, out));
-            type_key(r, out);
+        Ty::Fn(ps, r) => {
+            out.push(14);
+            list(ps, out);
+            type_key(arena, r, out);
         }
-        Type::Named(d, args) => {
-            out.extend([15, *d, args.len() as u32]);
-            args.iter().for_each(|t| type_key(t, out));
+        Ty::Named(d, args) => {
+            out.extend([15, d]);
+            list(args, out);
         }
-        Type::Param(p) => out.extend([16, *p]),
-        Type::Var(v) => out.extend([17, *v]),
+        Ty::Param(p) => out.extend([16, p]),
+        Ty::Var(v) => out.extend([17, v]),
     }
 }
 
 /// Builds one description.
 struct Builder<'a, 'c> {
     cp: &'a CheckedProgram,
+    arena: &'c mut TypeArena,
     cache: &'c mut DescCache,
     /// The struct and enum instances being described, by their depth.
     stack: HashMap<Key, usize>,
@@ -168,35 +191,36 @@ impl Builder<'_, '_> {
     }
 
     /// The description of `t` and the lowest depth of `stack` it refers to.
-    fn desc(&mut self, t: &Type) -> (Arc<TypeDesc>, Option<usize>) {
+    fn desc(&mut self, t: TypeId) -> (Arc<TypeDesc>, Option<usize>) {
         if !self.charge(1) {
             return (Arc::new(TypeDesc::Unit), None);
         }
         let leaf = |d: TypeDesc| (Arc::new(d), None);
-        match t {
-            Type::Int => leaf(TypeDesc::Int),
-            Type::Float => leaf(TypeDesc::Float),
-            Type::Bool => leaf(TypeDesc::Bool),
-            Type::Str => leaf(TypeDesc::Str),
-            Type::Bytes => leaf(TypeDesc::Bytes),
-            Type::Duration => leaf(TypeDesc::Duration),
-            Type::Unit => leaf(TypeDesc::Unit),
-            Type::List(e) => {
+        match self.arena.get(t) {
+            Ty::Int => leaf(TypeDesc::Int),
+            Ty::Float => leaf(TypeDesc::Float),
+            Ty::Bool => leaf(TypeDesc::Bool),
+            Ty::Str => leaf(TypeDesc::Str),
+            Ty::Bytes => leaf(TypeDesc::Bytes),
+            Ty::Duration => leaf(TypeDesc::Duration),
+            Ty::Unit => leaf(TypeDesc::Unit),
+            Ty::List(e) => {
                 let (e, l) = self.desc(e);
                 (Arc::new(TypeDesc::List(e)), l)
             }
-            Type::Set(e) => {
+            Ty::Set(e) => {
                 let (e, l) = self.desc(e);
                 (Arc::new(TypeDesc::Set(e)), l)
             }
-            Type::Map(k, v) => {
+            Ty::Map(k, v) => {
                 let ((k, lk), (v, lv)) = (self.desc(k), self.desc(v));
                 (Arc::new(TypeDesc::Map(k, v)), low(lk, lv))
             }
-            Type::Tuple(ts) => {
+            Ty::Tuple(ts) => {
                 let mut l = None;
+                let ts = self.arena.list(ts).to_vec();
                 let items = ts
-                    .iter()
+                    .into_iter()
                     .map(|x| {
                         let (d, lx) = self.desc(x);
                         l = low(l, lx);
@@ -205,34 +229,34 @@ impl Builder<'_, '_> {
                     .collect();
                 (Arc::new(TypeDesc::Tuple(items)), l)
             }
-            Type::Named(d, args) => {
-                if *d == self.cp.wk.option {
-                    let (inner, l) = self.desc(&args[0]);
+            Ty::Named(d, args) => {
+                if d == self.cp.wk.option {
+                    let (inner, l) = self.desc(self.arena.elem(args, 0));
                     return (Arc::new(TypeDesc::Option(inner)), l);
                 }
-                let def = &self.cp.types[*d as usize];
-                if def.name == "Json" && def.module_name == "json" {
+                let def = &self.cp.types[d as usize];
+                if self.cp.name(def.name) == "Json" && self.cp.name(def.module_name) == "json" {
                     return leaf(TypeDesc::Json);
                 }
-                self.named(t, *d, args)
+                self.named(t, d, args)
             }
-            other => leaf(TypeDesc::Unsupported(self.show(other))),
+            _ => leaf(TypeDesc::Unsupported(self.show(t))),
         }
     }
 
-    fn show(&self, t: &Type) -> String {
-        TypePrinter { defs: &self.cp.types, params: &self.cp.params, wk: self.cp.wk }.show(t)
+    fn show(&self, t: TypeId) -> String {
+        TypePrinter::new(self.arena, &self.cp.types, &self.cp.params, &self.cp.syms, self.cp.wk).show(t)
     }
 
     /// The description of the struct or enum instance `t` = `d<args>`.
-    fn named(&mut self, t: &Type, d: u32, args: &[Type]) -> (Arc<TypeDesc>, Option<usize>) {
+    fn named(&mut self, t: TypeId, d: u32, args: TyList) -> (Arc<TypeDesc>, Option<usize>) {
         let mut key = Vec::new();
-        type_key(t, &mut key);
+        type_key(self.arena, t, &mut key);
         if !self.charge(key.len()) {
             return (Arc::new(TypeDesc::Unit), None);
         }
         let next_id = self.cache.ids.len() as u32;
-        let id = *self.cache.ids.entry(key.clone()).or_insert(next_id);
+        let id = self.cache.ids.get_or_insert(key.clone(), next_id);
         if let Some(&depth) = self.stack.get(&key) {
             return (Arc::new(TypeDesc::Recur(id)), Some(depth));
         }
@@ -247,8 +271,9 @@ impl Builder<'_, '_> {
         if !self.charge(name.len() / 8) {
             return (Arc::new(TypeDesc::Unit), None);
         }
-        let gens = def.generics.clone();
-        let sub = |ty: &Type| ty.subst_params(&|p| gens.iter().position(|&g| g == p).map(|i| args[i].clone()));
+        let cp = self.cp;
+        let args = self.arena.list(args).to_vec();
+        let name_of = |s| cp.name(s).to_string();
         let depth = self.stack.len();
         self.stack.insert(key.clone(), depth);
         self.open_at.push(Vec::new());
@@ -258,9 +283,10 @@ impl Builder<'_, '_> {
                 let fields = fields
                     .iter()
                     .map(|f| {
-                        let (fd, lf) = self.desc(&sub(&f.ty));
+                        let ft = self.arena.instantiate(f.ty, &def.generics, &args);
+                        let (fd, lf) = self.desc(ft);
                         l = low(l, lf);
-                        (f.name.clone(), fd, f.const_default.clone())
+                        (name_of(f.name), fd, f.const_default.clone())
                     })
                     .collect();
                 TypeDesc::Struct { id, def: d, name, fields }
@@ -272,18 +298,19 @@ impl Builder<'_, '_> {
                         let payload = v
                             .fields
                             .iter()
-                            .map(|x| {
-                                let (fd, lf) = self.desc(&sub(x));
+                            .map(|&x| {
+                                let ft = self.arena.instantiate(x, &def.generics, &args);
+                                let (fd, lf) = self.desc(ft);
                                 l = low(l, lf);
                                 fd
                             })
                             .collect();
-                        (v.name.clone(), v.rt_id, payload, v.field_names.clone())
+                        (name_of(v.name), v.rt_id, payload, v.field_names.as_ref().map(|ns| ns.iter().map(|&n| name_of(n)).collect()))
                     })
                     .collect();
                 TypeDesc::Enum { id, name, variants }
             }
-            TypeDefKind::Opaque => TypeDesc::Unsupported(def.name.clone()),
+            TypeDefKind::Opaque => TypeDesc::Unsupported(name_of(def.name)),
         };
         // Descriptions made inside this instance are not reused outside it.
         for k in self.open_at.pop().unwrap_or_default() {

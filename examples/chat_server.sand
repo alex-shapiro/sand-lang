@@ -35,11 +35,11 @@ fn handle(c: Client) {
     defer {
         clients.remove(c.id)
         c.conn.close()
-        broadcast(c.id, "* {c.name} left")
+        broadcast(c.id, "* \(c.name) left")
         log.info("client left", fields: ["name": c.name])
     }
-    send(c, "welcome {c.name}")
-    broadcast(c.id, "* {c.name} joined")
+    send(c, "welcome \(c.name)")
+    broadcast(c.id, "* \(c.name) joined")
     while let Ok(Some(line)) = c.conn.read_line() {
         let text = line.trim()
         if text.is_empty() {
@@ -48,14 +48,14 @@ fn handle(c: Client) {
         if let Some(nick) = text.strip_prefix("/nick ") {
             let old = c.name
             c.name = nick.trim()
-            broadcast(c.id, "* {old} is now {c.name}")
-            send(c, "you are now {c.name}")
+            broadcast(c.id, "* \(old) is now \(c.name)")
+            send(c, "you are now \(c.name)")
         } else if text == "/who" {
-            send(c, "online: {clients.values().map(x => x.name).join(", ")}")
+            send(c, "online: \(clients.values().map(x => x.name).join(", "))")
         } else if text == "/quit" {
             break
         } else {
-            broadcast(c.id, "{c.name}: {text}")
+            broadcast(c.id, "\(c.name): \(text)")
         }
     }
 }
@@ -63,12 +63,12 @@ fn handle(c: Client) {
 let addr = env.args().first() ?? "127.0.0.1:7000"
 let listener = net.listen(addr)?
 defer listener.close()
-print("listening on {listener.addr()}")
+print("listening on \(listener.addr())")
 
 loop {
     let conn = listener.accept()?
     next_id += 1
-    let client = Client { id: next_id, name: "guest{next_id}", conn }
+    let client = Client { id: next_id, name: "guest\(next_id)", conn }
     clients[client.id] = client
     log.info("client joined", fields: ["peer": conn.peer_addr()])
     spawn handle(client)

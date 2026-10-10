@@ -184,7 +184,7 @@ loop {
     match fs.rename("/x", "/y/x") {
         Ok(()) => {}
         Err(e) => {
-            print("stopped at depth {depth}: {e.kind}")
+            print("stopped at depth \(depth): \(e.kind)")
             break
         }
     }

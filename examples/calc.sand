@@ -46,7 +46,7 @@ struct Lexer {
                     "," => Token.Comma
                     "=" => Token.Assign
                     "+" | "-" | "*" | "/" | "%" | "^" => Token.Op(c)
-                    _ => return Err("unexpected character `{c}` at {self.pos}")
+                    _ => return Err("unexpected character `\(c)` at \(self.pos)")
                 })
             }
         }
@@ -55,16 +55,18 @@ struct Lexer {
 
     fn number(self) -> Result<float, str> {
         let start = self.pos
-        while self.pos < self.src.len() and (self.src[self.pos].is_digit() or self.src[self.pos] == ".") {
+        while self.pos < self.src.len()
+            and (self.src[self.pos].is_digit() or self.src[self.pos] == ".") {
             self.pos += 1
         }
         let text = self.src[start..self.pos].join()
-        text.parse_float().ok_or("bad number `{text}`")
+        text.parse_float().ok_or("bad number `\(text)`")
     }
 
     fn word(self) -> str {
         let start = self.pos
-        while self.pos < self.src.len() and (self.src[self.pos].is_alnum() or self.src[self.pos] == "_") {
+        while self.pos < self.src.len()
+            and (self.src[self.pos].is_alnum() or self.src[self.pos] == "_") {
             self.pos += 1
         }
         self.src[start..self.pos].join()
@@ -99,8 +101,8 @@ struct Parser {
     fn expect(self, want: Token, what: str) -> Result<(), str> {
         match self.advance() {
             Some(t) if t == want => Ok(())
-            Some(t) => Err("expected {what}, found {t}")
-            None => Err("expected {what}, found end of input")
+            Some(t) => Err("expected \(what), found \(t)")
+            None => Err("expected \(what), found end of input")
         }
     }
 
@@ -118,7 +120,7 @@ struct Parser {
         }
         match self.peek() {
             None => Ok(stmt)
-            Some(t) => Err("unexpected {t}")
+            Some(t) => Err("unexpected \(t)")
         }
     }
 
@@ -175,7 +177,7 @@ struct Parser {
                 self.expect(Token.RParen, "`)`")?
                 Ok(e)
             }
-            Some(t) => Err("unexpected {t}")
+            Some(t) => Err("unexpected \(t)")
             None => Err("unexpected end of input")
         }
     }
@@ -195,7 +197,7 @@ struct Interpreter {
     fn eval(self, e: Expr) -> Result<float, str> {
         match e {
             Num(n) => Ok(n)
-            Var(name) => self.vars.get(name).ok_or("unknown variable `{name}`")
+            Var(name) => self.vars.get(name).ok_or("unknown variable `\(name)`")
             Neg(inner) => Ok(-self.eval(inner)?)
             Bin(op, l, r) => {
                 let a = self.eval(l)?
@@ -226,7 +228,7 @@ struct Interpreter {
             Let(name, e) => {
                 let v = self.eval(e)?
                 self.vars[name] = v
-                Ok("{name} = {fmt_num(v)}")
+                Ok("\(name) = \(fmt_num(v))")
             }
             Eval(e) => Ok(fmt_num(self.eval(e)?))
         }
@@ -235,12 +237,12 @@ struct Interpreter {
 
 fn call(name: str, args: [float]) -> Result<float, str> {
     match (name, args) {
-        ("sqrt", [x]) => Ok(math.sqrt(x))
+        ("sqrt", [x]) => Ok(x.sqrt())
         ("abs", [x]) => Ok(x.abs())
         ("max", [first, ..rest]) => Ok(rest.fold(first, (a, b) => a.max(b)))
         ("min", [first, ..rest]) => Ok(rest.fold(first, (a, b) => a.min(b)))
-        ("sqrt", _) | ("abs", _) => Err("`{name}` takes 1 argument")
-        _ => Err("unknown function `{name}`")
+        ("sqrt", _) | ("abs", _) => Err("`\(name)` takes 1 argument")
+        _ => Err("unknown function `\(name)`")
     }
 }
 
@@ -253,6 +255,6 @@ while let Some(line) = io.read_line()? {
     if line.trim().is_empty() { continue }
     match interp.run(line) {
         Ok(out) => print(out)
-        Err(msg) => print("error: {msg}")
+        Err(msg) => print("error: \(msg)")
     }
 }

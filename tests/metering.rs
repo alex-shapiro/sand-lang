@@ -105,6 +105,11 @@ fn loops_that_only_continue_are_metered() {
         "for x in 0..9223372036854775807 { if x >= 0 { continue } }",
         "for x in Iter.repeat(1).filter(x => x > 1) { print(x) }",
         "print(Iter.count_from(0).filter(x => x < 0).count())",
+        // Rotated loops: tests at the end branching back.
+        "var i = 0\nwhile i < 10 { if i >= 0 { continue } }",
+        "while \"1\".is_digit() {}",
+        "let x = 1.0\nwhile x < 2.0 {}",
+        "let xs = [1]\nwhile let Some(x) = xs.last() { if x > 0 { continue } }",
     ];
     for src in cases {
         expect_stop(limits(|l| l.max_instructions = Some(1_000_000)), src, is_limit(LimitKind::Instructions), Duration::from_secs(10));
@@ -121,6 +126,8 @@ fn long_straight_line_code_costs_fuel() {
     let cases = [
         format!("var n = 0\nwhile true {{\n    var x = n\n{stmts}    n += 1\n    print(n)\n}}"),
         format!("var n = 0\nwhile true {{\n    var x = n\n{stmts}    n += 1\n    print(n)\n    continue\n}}"),
+        format!("var n = 0\nwhile n >= 0 {{\n    var x = n\n{stmts}    n += 1\n    print(n)\n}}"),
+        format!("var n = 0\nfor i in 0..1000000000 {{\n    var x = n\n{stmts}    n += 1\n    print(n)\n}}"),
         format!(
             "fn f(y: int) -> int {{\n    var x = y\n{stmts}    x\n}}\nvar n = 0\nwhile true {{\n    n += 1\n    let _ = f(n)\n    print(n)\n}}"
         ),
@@ -360,12 +367,11 @@ fn scratch_buffers_count_against_the_memory_limit() {
     let config = || limits(|l| l.max_memory = Some(64 << 20));
     for src in [
         &format!("{DAG}print(a.to_str().len())") as &str,
-        &format!("{DAG}print(\"{{a:?}}\".len())"),
+        &format!("{DAG}print(\"\\(a:?)\".len())"),
         &format!("import json\n{DAG}print(json.encode(a).len())"),
-        &format!("{DAG}print(set([a]).len())"),
         "let s = \",\".repeat(20000000)\nprint(s.split(\",\").len())",
         "let s = \"a\".repeat(1000000)\nprint(s.replace(\"a\", \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\").len())",
-        "let xs = (0..100000).to_list().map(i => \"x\".repeat(1000))\nprint(\"\".join(xs).len())",
+        "let xs = (0..100000).to_list().map(i => \"x\".repeat(1000))\nprint(xs.join().len())",
         "import base64\nlet b = \"x\".repeat(40000000).bytes()\nprint(base64.encode(b).len())",
     ] {
         let start = Instant::now();
@@ -373,6 +379,14 @@ fn scratch_buffers_count_against_the_memory_limit() {
         assert!(matches!(r, Err(Error::Limit(LimitKind::Memory))), "{src}: {r:?}");
         assert!(start.elapsed() < Duration::from_secs(20), "{src}: took {:?}", start.elapsed());
     }
+}
+
+#[test]
+fn keys_with_shared_structure_hash_in_linear_time() {
+    // `a`'s tree has 2^60 nodes, its heap 60 objects.
+    let (r, out) = run(limits(|l| l.max_instructions = Some(1_000_000)), &format!("{DAG}let s = set([a])\nprint(s.contains(a))"));
+    r.unwrap();
+    assert_eq!(out, "true\n");
 }
 
 #[test]
@@ -438,11 +452,21 @@ fn slices_are_checked_before_they_are_copied() {
 }
 
 #[test]
-fn map_and_set_keys_count_their_copies() {
+fn map_and_set_keys_are_not_copied() {
+    // Keys stay where they are on the heap: 2000 keys holding 4 MB of
+    // shared strings each fit in a few MB.
     let src = "let s = \"x\".repeat(1 << 20)\nvar m: [(int, str, str, str, str): int] = [:]\nfor i in 0..2000 { m[(i, s, s, s, s)] = i }\nprint(m.len())";
-    expect_stop(mem_limit(64), src, is_limit(LimitKind::Memory), Duration::from_secs(20));
+    let (r, out) = run(mem_limit(16), src);
+    r.unwrap();
+    assert_eq!(out, "2000\n");
     let src = "let s = \"x\".repeat(1 << 20)\nvar m: Set<(int, str, str)> = set([])\nfor i in 0..2000 { m.add((i, s, s)) }\nprint(m.len())";
-    expect_stop(mem_limit(64), src, is_limit(LimitKind::Memory), Duration::from_secs(20));
+    let (r, out) = run(mem_limit(16), src);
+    r.unwrap();
+    assert_eq!(out, "2000\n");
+    // Hashing them is still charged for every byte.
+    let src = "let s = \"x\".repeat(1 << 20)\nvar m: [(int, str): int] = [:]\nfor i in 0..2000 { m[(i, s)] = i }";
+    let config = limits(|l| l.max_instructions = Some(1_000_000));
+    expect_stop(config, src, is_limit(LimitKind::Instructions), Duration::from_secs(20));
     let src = "let s = \"x\".repeat(1 << 20)\nvar m: [(int, str): int] = [:]\nfor i in 0..200 {\n    m[(i, s)] = i\n    m.remove((i, s))\n}\nprint(m.len())";
     let (r, out) = run(mem_limit(32), src);
     r.unwrap();
@@ -519,13 +543,13 @@ print(([[1, 2], [1]] == [[1, 2], [1]], [[1], [2]] != [[1], [3]]))
 print(("a,b,,c".split(","), "x y  z".split_whitespace(), "héllo".chars()))
 print(("aaa".replace("a", "bc"), "abcabc".replace("bc", "")))
 print((b"hello world".find(b"o w"), b"aaab".contains(b"aab"), b"abc".find(b"abd")))
-print(json.stringify(json.parse(r#"{"k": [1, 2, {"x": null}]}"#)?))
+print(json.encode(json.parse(r#"{"k": [1, 2, {"x": null}]}"#)?))
 print(regex.new(r"\d+")?.find_all("a1 b22 c333").map(m => m.text))
 print(regex.new(r"\s*,\s*")?.split("a , b,c"))
 print(crypto.sha256("abc".bytes()).to_hex())
 let m = [(1, "a"): 1, (2, "b"): 2]
 print((m[(2, "b")], set([(1, 2), (1, 2), (2, 3)]).len()))
-print("{3.14159:.2} {42:>5} {"ab":*^6}")
+print("\(3.14159:.2) \(42:>5) \("ab":*^6)")
 "##;
     let (r, out) = run(Config::new(), src);
     r.unwrap();
@@ -558,7 +582,7 @@ fn compiled_regexes_count_against_the_memory_limit() {
 import regex
 var rs = []
 for i in 0..300 {
-    let r = regex.new(r"\w{60}" + "{i}")?
+    let r = regex.new(r"\w{60}" + "\(i)")?
     rs.push(r)
     let _ = r.find_all("é".repeat(100000))
 }
@@ -572,7 +596,7 @@ print(rs.len())
 
 #[test]
 fn compiling_a_regex_is_charged_for_the_program_it_builds() {
-    let src = "import regex\nfor i in 0..1000 { let _ = regex.new(r\"\\w{60}\" + \"{i}\") }";
+    let src = "import regex\nfor i in 0..1000 { let _ = regex.new(r\"\\w{60}\" + \"\\(i)\") }";
     expect_stop(limits(|l| l.max_instructions = Some(2_000_000)), src, is_limit(LimitKind::Instructions), Duration::from_secs(5));
 }
 
@@ -659,12 +683,18 @@ fn json_encode_reserves_escaped_strings() {
 }
 
 #[test]
-fn json_decode_charges_for_field_lookups() {
+fn json_decode_finds_the_fields_of_large_structs_by_index() {
+    // 200,000 keys that are not among 1,000 fields: each lookup is one probe
+    // of the struct's field index (a scan would cost 1,000 comparisons).
     let fields: String = (0..1000).map(|i| format!("    f{i}: int?\n")).collect();
     let src = format!(
-        "import json\nstruct Big {{\n{fields}}}\nlet t = \"\\{{\" + \"\\\"f999x\\\":0,\".repeat(200000) + \"\\\"f0\\\":1\\}}\"\nlet r: Result<Big> = json.decode(t)\nprint(r.is_ok())"
+        "import json\nstruct Big {{\n{fields}}}\nlet t = \"{{\" + \"\\\"f999x\\\":0,\".repeat(200000) + \"\\\"f0\\\":1}}\"\nlet r: Result<Big> = json.decode(t)\nprint(r.is_ok())"
     );
-    expect_stop(limits(|l| l.max_instructions = Some(3_000_000)), &src, is_limit(LimitKind::Instructions), Duration::from_secs(30));
+    let start = Instant::now();
+    let (r, out) = run(limits(|l| l.max_instructions = Some(3_000_000)), &src);
+    r.unwrap();
+    assert_eq!(out, "true\n");
+    assert!(start.elapsed() < Duration::from_secs(10));
 }
 
 #[test]
@@ -678,11 +708,18 @@ fn json_parse_counts_the_lists_it_builds() {
 }
 
 #[test]
-fn regex_captures_reserve_their_groups() {
-    let src = "import regex\nlet r = regex.new(\"(\".repeat(100) + \"a*\" + \")\".repeat(100))?\nlet s = \"a\".repeat(2000000)\nprint(r.captures(s).is_some())";
-    expect_stop(limits(|l| l.max_memory = Some(32 << 20)), src, is_limit(LimitKind::Memory), Duration::from_secs(30));
-    let src = src.replace("r.captures(s).is_some()", "r.captures_all(s).len()");
-    expect_stop(limits(|l| l.max_memory = Some(32 << 20)), &src, is_limit(LimitKind::Memory), Duration::from_secs(30));
+fn regex_captures_do_not_copy_their_groups() {
+    // 100 nested groups each matching all of a 2 MB text: captures hold the
+    // text once and the groups' offsets (copying each group's text would be
+    // 200 MB).
+    let src = "import regex\nlet r = regex.new(\"(\".repeat(100) + \"a*\" + \")\".repeat(100))?\nlet s = \"a\".repeat(2000000)\nprint(r.captures(s).unwrap().len())";
+    let (r, out) = run(limits(|l| l.max_memory = Some(32 << 20)), src);
+    r.unwrap();
+    assert_eq!(out, "101\n");
+    let src = src.replace("r.captures(s).unwrap().len()", "r.captures_all(s).len()");
+    let (r, out) = run(limits(|l| l.max_memory = Some(32 << 20)), &src);
+    r.unwrap();
+    assert_eq!(out, "1\n");
     let src = "import regex\nlet r = regex.new(r\"(\\w+)@(\\w+)\")?\nlet c = r.captures(\"mail: joe@example now\").unwrap()\nprint((c.text(1), c.text(2), r.captures_all(\"a@b c@d\").len()))";
     let (r, out) = run(limits(|l| l.max_memory = Some(32 << 20)), src);
     r.unwrap();
@@ -699,4 +736,22 @@ fn regex_replacements_are_reserved_before_they_are_expanded() {
     let (r, out) = run(Config::new(), src);
     r.unwrap();
     assert_eq!(out, "(\"<abab> <cdcd>\", \"[ab] cd\", \"x\")\n");
+}
+
+#[test]
+fn iterating_maps_and_sets_copies_nothing() {
+    // The map and the set take about 17 MB; a copy of their entries (or a
+    // list of (key, value) tuples) would not fit. Loops left early leave
+    // pinned iterators behind, which must not accumulate either.
+    let src = "let m: [int: int] = [:]\nfor i in 0..200000 { m[i] = i }\nlet s: Set<int> = set()\nfor i in 0..200000 { s.add(i) }\n\
+               var t = 0\nfor (k, v) in m { t += v }\nfor e in m.iter() { t += e.1 }\nfor x in s { t += x }\nt += s.iter().sum()\n\
+               for _ in 0..200000 {\n    for (k, v) in m { break }\n    for x in s.iter() { break }\n}\nprint(t)";
+    let (r, out) = run(limits(|l| l.max_memory = Some(20 << 20)), src);
+    r.unwrap();
+    assert_eq!(out, "79999600000\n");
+    // Changing the map while an iterator reads it costs the copy.
+    let src = "let m: [int: int] = [:]\nfor i in 0..200000 { m[i] = i }\nlet s: Set<int> = set()\nfor i in 0..200000 { s.add(i) }\n\
+               let it = m.iter()\nm[0] = 1\nprint(it.count())";
+    let (r, _) = run(limits(|l| l.max_memory = Some(20 << 20)), src);
+    assert!(matches!(r, Err(Error::Limit(LimitKind::Memory))), "{r:?}");
 }

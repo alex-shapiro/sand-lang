@@ -1,8 +1,8 @@
 //! Regular expressions with the syntax of Rust's `regex` crate: matching takes
 //! linear time and there are no backreferences or look-around. Offsets are
-//! byte offsets into the searched text. Write patterns and replacements as raw
-//! strings (`r"\d{4}"`, `r"${name}"`) so that `{` and `\` are not
-//! interpreted by Sand's string syntax.
+//! byte offsets into the searched text. Braces need no care in Sand strings
+//! (`"[0-9]{4}"`, `"${name}"`); write patterns with backslashes as raw strings
+//! (`r"\d{4}"`), since `\` starts an escape in an ordinary string.
 
 /// A match: the matched `text` and its byte range `start..end`.
 pub struct Match {
@@ -15,7 +15,42 @@ pub struct Match {
 pub native type Regex
 
 /// The capture groups of one match. Group 0 is the whole match.
-pub native type Captures
+pub struct Captures {
+    /// The text searched.
+    text: str
+    /// The start and end offsets of each group, `-1` for a group that did
+    /// not participate.
+    spans: [int]
+    regex: Regex
+
+    /// Group `i`; `None` if it did not participate or does not exist.
+    pub fn get(self, i: int) -> Match? {
+        if i < 0 or i >= self.len() {
+            return None
+        }
+        let start = self.spans[2 * i]
+        if start < 0 {
+            return None
+        }
+        let end = self.spans[2 * i + 1]
+        Some(Match { text: self.text[start..end], start, end })
+    }
+
+    /// The group called `n`; `None` if it did not participate or does not exist.
+    pub fn name(self, n: str) -> Match? {
+        self.get(self.regex.group_index(n)?)
+    }
+
+    /// The number of groups, including group 0.
+    pub fn len(self) -> int {
+        self.spans.len() / 2
+    }
+
+    /// The text of group `i`.
+    pub fn text(self, i: int) -> str? {
+        Some(self.get(i)?.text)
+    }
+}
 
 /// Compiles `pattern`; errors have kind `"parse"` (invalid syntax) or
 /// `"limit"` (the compiled program would be too large).
@@ -33,10 +68,17 @@ extend Regex {
     pub native fn find(self, text: str) -> Match?
     /// All non-overlapping matches, left to right.
     pub native fn find_all(self, text: str) -> [Match]
+
     /// The capture groups of the leftmost-first match.
-    pub native fn captures(self, text: str) -> Captures?
+    pub fn captures(self, text: str) -> Captures? {
+        Some(Captures { text, spans: self.capture_spans(text)?, regex: self })
+    }
+
     /// The capture groups of all non-overlapping matches.
-    pub native fn captures_all(self, text: str) -> [Captures]
+    pub fn captures_all(self, text: str) -> [Captures] {
+        self.capture_spans_all(text).map(spans => Captures { text, spans, regex: self })
+    }
+
     /// Replaces the first match with `rep`, in which `$1` or `${1}` stands
     /// for a numbered group, `${name}` for a named group and `$$` for `$`.
     pub native fn replace(self, text: str, rep: str) -> str
@@ -46,15 +88,11 @@ extend Regex {
     pub native fn split(self, text: str) -> [str]
     /// The source pattern.
     pub native fn pattern(self) -> str
-}
 
-extend Captures {
-    /// Group `i`; `None` if it did not participate or does not exist.
-    pub native fn get(self, i: int) -> Match?
-    /// The group called `n`; `None` if it did not participate or does not exist.
-    pub native fn name(self, n: str) -> Match?
-    /// The number of groups, including group 0.
-    pub native fn len(self) -> int
-    /// The text of group `i`.
-    pub native fn text(self, i: int) -> str?
+    /// The spans of the groups of the leftmost-first match (see `Captures`).
+    native fn capture_spans(self, text: str) -> [int]?
+    /// The spans of the groups of all non-overlapping matches.
+    native fn capture_spans_all(self, text: str) -> [[int]]
+    /// The index of the group called `name`.
+    native fn group_index(self, name: str) -> int?
 }

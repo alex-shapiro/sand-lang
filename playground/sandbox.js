@@ -49,16 +49,6 @@ export function engineOptions(sandbox) {
   return options;
 }
 
-/**
- * The files of `after` (`{path, data}` entries from `engine.files()`) that
- * are new or changed compared to the sandbox's files.
- */
-export function writtenFiles(sandbox, after) {
-  const before = new Map(Object.entries(sandbox.files ?? {}).map(([name, text]) => [filePath(name), text]));
-  const decoder = new TextDecoder();
-  return after.filter(({ path, data }) => before.get(path) !== decoder.decode(data));
-}
-
 /** Encodes sandboxes for a link (deflated JSON, base64url). */
 export async function encodeShare(sandboxes) {
   const json = JSON.stringify(sandboxes.map(({ title, main, files, policy, env, stdin }) => ({ title, main, files, policy, env, stdin })));

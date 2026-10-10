@@ -85,7 +85,8 @@ fn lex(src: str) -> Result<[Tok]> {
 
 fn parse_literal(text: str) -> Json? {
     let t = text.trim()
-    if t.len() >= 2 and (t.starts_with("\"") and t.ends_with("\"") or t.starts_with("'") and t.ends_with("'")) {
+    if t.len() >= 2
+        and (t.starts_with("\"") and t.ends_with("\"") or t.starts_with("'") and t.ends_with("'")) {
         return Some(Json.Str(t[1..t.len() - 1]))
     }
     if let Some(n) = t.parse_float() {
@@ -105,7 +106,7 @@ fn parse_operand(text: str) -> Result<Operand> {
     }
     let parts = text.trim().split(".")
     if parts.any(p => p.is_empty() or not p.replace("_", "a").is_alnum()) {
-        return Err(error("invalid expression `{text}`", kind: "parse"))
+        return Err(error("invalid expression `\(text)`", kind: "parse"))
     }
     Ok(Operand.Path(parts))
 }
@@ -142,12 +143,14 @@ fn parse_expr(text: str) -> Result<Expr> {
         match p.split_once("(") {
             Some((name, rest)) => {
                 let Some(inner) = rest.strip_suffix(")") else {
-                    return Err(error("unclosed filter arguments in `{p}`", kind: "parse"))
+                    return Err(error("unclosed filter arguments in `\(p)`", kind: "parse"))
                 }
                 let args = []
                 for a in split_outside_quotes(inner, ",") {
                     let Some(lit) = parse_literal(a) else {
-                        return Err(error("filter arguments must be literals: `{a}`", kind: "parse"))
+                        return Err(
+                            error("filter arguments must be literals: `\(a)`", kind: "parse"),
+                        )
                     }
                     args.push(lit)
                 }
@@ -165,7 +168,7 @@ fn parse_cond(text: str) -> Result<Cond> {
         return Ok(Cond.Not(parse_cond(rest)?))
     }
     for op in ["==", "!=", "<=", ">=", "<", ">"] {
-        if let Some((l, r)) = t.split_once(" {op} ") {
+        if let Some((l, r)) = t.split_once(" \(op) ") {
             return Ok(Cond.Compare(op, parse_expr(l)?, parse_expr(r)?))
         }
     }
@@ -197,7 +200,7 @@ struct Parser {
         if stops.is_empty() {
             Ok((out, ""))
         } else {
-            Err(error("unexpected end of template, expected one of {stops}", kind: "parse"))
+            Err(error("unexpected end of template, expected one of \(stops)", kind: "parse"))
         }
     }
 
@@ -206,7 +209,7 @@ struct Parser {
             "for" => {
                 let parts = tag.split_whitespace()
                 if parts.len() != 4 or parts[2] != "in" {
-                    return Err(error("malformed for tag `{tag}`", kind: "parse"))
+                    return Err(error("malformed for tag `\(tag)`", kind: "parse"))
                 }
                 let (body, _) = self.nodes(["endfor"])?
                 Ok(Node.For(parts[1], parse_expr(parts[3])?, body))
@@ -227,7 +230,7 @@ struct Parser {
                     }
                 }
             }
-            _ => Err(error("unknown tag `{tag}`", kind: "parse"))
+            _ => Err(error("unknown tag `\(tag)`", kind: "parse"))
         }
     }
 }
@@ -281,7 +284,7 @@ fn display(v: Json) -> str {
         Bool(b) => b.to_str()
         Num(n) => if n == n.round() and n.abs() < 1e15 { n.to_int().to_str() } else { n.to_str() }
         Str(s) => s
-        other => json.stringify(other)
+        other => json.encode(other)
     }
 }
 
@@ -311,7 +314,7 @@ fn apply_filter(v: Json, f: Filter) -> Result<Json> {
         }
         "escape" => Ok(Json.Str(escape_html(display(v))))
         "trim" => Ok(Json.Str(display(v).trim()))
-        _ => Err(error("unknown filter `{f.name}`", kind: "invalid"))
+        _ => Err(error("unknown filter `\(f.name)`", kind: "invalid"))
     }
 }
 

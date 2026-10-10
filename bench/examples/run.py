@@ -28,6 +28,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+BASELINE = (3, 14)
+if sys.version_info[:2] != BASELINE:
+    sys.exit(f"run.py runs on Python {BASELINE[0]}.{BASELINE[1]} (python{BASELINE[0]}.{BASELINE[1]} bench/examples/run.py)")
+
 import gen
 import servers
 
@@ -357,7 +361,16 @@ def main() -> int:
     parser.add_argument("--only", help="comma-separated workload names or prefixes (e.g. life,search_index)")
     parser.add_argument("--runs", type=int, default=5, help="timed runs per implementation (default 5)")
     parser.add_argument("--sand", default=str(ROOT / "target" / "release" / "sand"), help="sand binary")
-    parser.add_argument("--python", default="/opt/homebrew/bin/python3.14", help="python interpreter for the ports")
+    parser.add_argument(
+        "--python",
+        default=sys.executable,
+        help="interpreter for the ports (default: the one running this script)",
+    )
+    parser.add_argument(
+        "--any-python",
+        action="store_true",
+        help=f"allow a Python other than {BASELINE[0]}.{BASELINE[1]} (the ratios are then not comparable)",
+    )
     parser.add_argument("--keep", action="store_true", help="keep the generated inputs and print where they are")
     args = parser.parse_args()
 
@@ -365,12 +378,21 @@ def main() -> int:
     if not sand.exists():
         print(f"{sand} not found: run `cargo build --release` first", file=sys.stderr)
         return 2
-    if not shutil.which(args.python):
+    python = shutil.which(args.python)
+    if not python:
         print(f"{args.python} not found (use --python)", file=sys.stderr)
         return 2
+    probe = "import sys; print(sys.version_info[0], sys.version_info[1]); print(sys.version.replace(chr(10), ' '))"
+    lines = subprocess.run([python, "-c", probe], capture_output=True, text=True, check=True).stdout.splitlines()
+    version, description = tuple(int(x) for x in lines[0].split()), lines[1]
+    if version != BASELINE and not args.any_python:
+        want = f"{BASELINE[0]}.{BASELINE[1]}"
+        print(f"{python} is Python {description}; the baseline is {want} (use --python, or --any-python)", file=sys.stderr)
+        return 2
+    print(f"python: {python} ({description})")
 
     tmp = Path(tempfile.mkdtemp(prefix="sand-bench-")).resolve()
-    b = Bench(sand, args.python, tmp)
+    b = Bench(sand, python, tmp)
     failed = False
     rows = []
     try:

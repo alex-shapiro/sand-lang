@@ -1,22 +1,22 @@
 //! The `fs` module.
 //!
 //! Every native resolves its paths against the engine's working directory
-//! with the engine's file system ([`Fs`]: on the host, canonicalising
-//! existing prefixes, so `..` and symlinks cannot escape) and checks the
-//! policy on the resolved path *before* touching the file system. On the
-//! host, the I/O itself runs off the VM thread through `files::safe`, which
-//! never follows a symlink, so the operation reaches exactly the checked
-//! location even if the file system changes in between. Operations on a
-//! memory file system complete at once.
+//! with the engine's file system ([`Fs::target`]: on the host, one walk
+//! that resolves `..` and symlinks the way `realpath` does, so neither can
+//! escape, and holds the directories it passes) and checks the policy on
+//! the resolved path *before* the operation, which then acts through the
+//! held directories without following a symlink, so it reaches exactly the
+//! checked location even if the file system changes in between. Operations
+//! run on the VM thread.
 
 use super::io_kind;
 use crate::check::ModKind;
 use crate::engine::Registry;
-use crate::files::{EntryKind, Fs, is_unchecked_symlink, unchecked_symlink};
-use crate::policy::{Capability, MAX_PATH_BYTES};
+use crate::files::{EntryKind, Fs, Mode, Target, is_unchecked_symlink, unchecked_symlink};
+use crate::policy::{Capability, Decision, MAX_PATH_BYTES};
 use crate::vm::iomem::Reservation;
-use crate::vm::value::{Obj, Value};
-use crate::vm::{Ctl, Finisher, NResult, Vm, panic};
+use crate::vm::value::Value;
+use crate::vm::{Ctl, NResult, Vm};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 /// native for an unusable path.
 macro_rules! target {
     ($vm:expr, $p:expr) => {
-        match target($vm, $p, false)? {
+        match target($vm, $p, Mode::Follow)? {
             Ok(t) => t,
             Err(e) => return Ok(e),
         }
@@ -37,7 +37,7 @@ macro_rules! target {
 /// or require permission for, its target).
 macro_rules! entry_target {
     ($vm:expr, $p:expr) => {
-        match target($vm, $p, true)? {
+        match target($vm, $p, Mode::Entry)? {
             Ok(t) => t,
             Err(e) => return Ok(e),
         }
@@ -48,15 +48,15 @@ pub fn register(r: &mut Registry) {
     r.source("fs", ModKind::Std, include_str!("fs.sand"));
 
     r.add_builtin("fs.read_bytes", |vm, a| {
-        let (shown, path) = target!(vm, a[0]);
-        if let Some(e) = refuse(vm, Capability::FsRead(path.clone()), &shown)? {
+        let (shown, mut t) = target!(vm, a[0]);
+        if let Some(e) = refuse(vm, &mut t, Access::Read, &shown)? {
             return Ok(e);
         }
         let res = vm.io_reservation();
         run(
             vm,
             shown,
-            move |fs| fs.read(&path, res),
+            move |fs| fs.read(t, res),
             |vm, (data, res)| {
                 drop(res);
                 vm.reserve(data.len())?;
@@ -67,15 +67,15 @@ pub fn register(r: &mut Registry) {
         )
     });
     r.add_builtin("fs.read_text", |vm, a| {
-        let (shown, path) = target!(vm, a[0]);
-        if let Some(e) = refuse(vm, Capability::FsRead(path.clone()), &shown)? {
+        let (shown, mut t) = target!(vm, a[0]);
+        if let Some(e) = refuse(vm, &mut t, Access::Read, &shown)? {
             return Ok(e);
         }
         let res = vm.io_reservation();
         run(
             vm,
             shown.clone(),
-            move |fs| fs.read(&path, res),
+            move |fs| fs.read(t, res),
             move |vm, (data, res)| {
                 drop(res);
                 vm.reserve(data.len())?;
@@ -122,15 +122,15 @@ pub fn register(r: &mut Registry) {
     r.add_builtin("fs.is_file", |vm, a| file_kind(vm, a[0], |k| k == EntryKind::File));
     r.add_builtin("fs.is_dir", |vm, a| file_kind(vm, a[0], |k| k == EntryKind::Dir));
     r.add_builtin("fs.list_dir", |vm, a| {
-        let (shown, path) = target!(vm, a[0]);
-        if let Some(e) = refuse(vm, Capability::FsRead(path.clone()), &shown)? {
+        let (shown, mut t) = target!(vm, a[0]);
+        if let Some(e) = refuse(vm, &mut t, Access::Read, &shown)? {
             return Ok(e);
         }
         let res = vm.io_reservation();
         run(
             vm,
             shown,
-            move |fs| fs.list_dir(&path, res),
+            move |fs| fs.list_dir(t, res),
             |vm, (names, res)| {
                 drop(res);
                 let bytes = names.iter().map(|n| n.len() + 32).sum();
@@ -146,128 +146,102 @@ pub fn register(r: &mut Registry) {
         )
     });
     r.add_builtin("fs.create_dir", |vm, a| {
-        let (shown, path) = target!(vm, a[0]);
-        if let Some(e) = refuse(vm, Capability::FsWrite(path.clone()), &shown)? {
+        let (shown, mut t) = target!(vm, a[0]);
+        if let Some(e) = refuse(vm, &mut t, Access::Write, &shown)? {
             return Ok(e);
         }
         if !a[1].as_bool() {
-            return run(vm, shown, move |fs| fs.create_dir(&path), ok_unit);
+            return run(vm, shown, move |fs| fs.create_dir(t), ok_unit);
         }
         // Every directory to be created must be writable, not just the last.
-        let missing = vm.host.fs.missing_ancestors(&path);
-        for dir in &missing {
-            if let Some(e) = refuse(vm, Capability::FsWrite(dir.clone()), &shown)? {
+        // (Those that exist are not created, whatever happens meanwhile.)
+        for dir in vm.host.fs.missing_ancestors(&t) {
+            if let Some(e) = refuse_path(vm, Capability::FsWrite(dir), &shown)? {
                 return Ok(e);
             }
         }
-        // The others must exist already (they are not created).
-        let names = path.components().filter(|c| matches!(c, std::path::Component::Normal(_))).count();
-        let keep = names.saturating_sub(missing.len() + 1);
-        run(vm, shown, move |fs| fs.create_dir_all(&path, keep), ok_unit)
+        run(vm, shown, move |fs| fs.create_dir_all(t), ok_unit)
     });
     r.add_builtin("fs.remove_file", |vm, a| {
-        let (shown, path) = entry_target!(vm, a[0]);
-        if let Some(e) = refuse_entry(vm, Capability::FsWrite(path.clone()), &shown)? {
+        let (shown, mut t) = entry_target!(vm, a[0]);
+        if let Some(e) = refuse(vm, &mut t, Access::Write, &shown)? {
             return Ok(e);
         }
-        run(vm, shown, move |fs| fs.remove_file(&path), ok_unit)
+        run(vm, shown, move |fs| fs.remove_file(t), ok_unit)
     });
     r.add_builtin("fs.remove_empty_dir", |vm, a| {
-        let (shown, path) = entry_target!(vm, a[0]);
-        if let Some(e) = refuse_entry(vm, Capability::FsWrite(path.clone()), &shown)? {
+        let (shown, mut t) = entry_target!(vm, a[0]);
+        if let Some(e) = refuse(vm, &mut t, Access::Write, &shown)? {
             return Ok(e);
         }
-        run(vm, shown, move |fs| fs.remove_dir(&path), ok_unit)
+        run(vm, shown, move |fs| fs.remove_dir(t), ok_unit)
     });
     r.add_builtin("fs.check_tree", |vm, a| {
-        let (shown, path) = entry_target!(vm, a[0]);
-        if let Some(e) = refuse_entry(vm, Capability::FsWrite(path.clone()), &shown)? {
+        let (shown, mut t) = entry_target!(vm, a[0]);
+        if let Some(e) = refuse(vm, &mut t, Access::Write, &shown)? {
             return Ok(e);
         }
-        if let Some(e) = protected_tree(vm, &shown, &path) {
+        if let Some(e) = protected_tree(vm, &shown, &t.path) {
             return Ok(e);
         }
         Ok(vm.ok(Value::Unit))
     });
-    r.add_builtin("fs.entry_type", |vm, a| {
-        let (shown, path) = entry_target!(vm, a[0]);
-        if let Some(e) = refuse_entry(vm, Capability::FsRead(path.clone()), &shown)? {
+    r.add_builtin("fs.is_dir_entry", |vm, a| {
+        let (shown, mut t) = entry_target!(vm, a[0]);
+        if let Some(e) = refuse(vm, &mut t, Access::Read, &shown)? {
             return Ok(e);
         }
-        run(
-            vm,
-            shown,
-            move |fs| fs.stat(&path),
-            |vm, m| {
-                let kind = match m.kind {
-                    EntryKind::Symlink => "symlink",
-                    EntryKind::Dir => "dir",
-                    EntryKind::File => "file",
-                    EntryKind::Other => "other",
-                };
-                let s = vm.new_str(kind);
-                Ok(vm.ok(s))
-            },
-        )
+        run(vm, shown, move |fs| fs.stat(&t), |vm, m| ok_bool(vm, m.kind == EntryKind::Dir))
     });
     r.add_builtin("fs.rename", |vm, a| {
-        let (shown, from) = entry_target!(vm, a[0]);
-        let (shown_to, to) = entry_target!(vm, a[1]);
-        for (cap, shown) in [(Capability::FsWrite(from.clone()), &shown), (Capability::FsWrite(to.clone()), &shown_to)] {
-            if let Some(e) = refuse_entry(vm, cap, shown)? {
+        let (shown, mut from) = entry_target!(vm, a[0]);
+        let (shown_to, mut to) = entry_target!(vm, a[1]);
+        for (t, shown) in [(&mut from, &shown), (&mut to, &shown_to)] {
+            if let Some(e) = refuse(vm, t, Access::Write, shown)? {
                 return Ok(e);
             }
         }
         // Moving a directory moves everything below it, and replacing `to` replaces its tree.
-        for (shown, path) in [(&shown, &from), (&shown_to, &to)] {
-            if let Some(e) = protected_tree(vm, shown, path) {
+        for (shown, t) in [(&shown, &from), (&shown_to, &to)] {
+            if let Some(e) = protected_tree(vm, shown, &t.path) {
                 return Ok(e);
             }
         }
         // A memory file system walks the moved tree (to check its paths' lengths).
         if let Some(m) = vm.host.fs.memory() {
-            vm.charge(m.entries_below(&from) as u64)?;
+            vm.charge(m.entries_below(&from.path) as u64)?;
         }
-        run(vm, shown, move |fs| fs.rename(&from, &to), ok_unit)
+        run(vm, shown, move |fs| fs.rename(from, to), ok_unit)
     });
     r.add_builtin("fs.copy", |vm, a| {
-        let (shown, from) = target!(vm, a[0]);
-        let (shown_to, to) = target!(vm, a[1]);
-        for (cap, shown) in [(Capability::FsRead(from.clone()), &shown), (Capability::FsWrite(to.clone()), &shown_to)] {
-            if let Some(e) = refuse(vm, cap, shown)? {
+        let (shown, mut from) = target!(vm, a[0]);
+        let (shown_to, mut to) = target!(vm, a[1]);
+        for (t, access, shown) in [(&mut from, Access::Read, &shown), (&mut to, Access::Write, &shown_to)] {
+            if let Some(e) = refuse(vm, t, access, shown)? {
                 return Ok(e);
             }
         }
-        // A memory file system copies on the VM thread.
-        if !vm.host.fs.is_blocking()
-            && let Ok(m) = vm.host.fs.stat(&from)
-        {
-            vm.charge_bytes(usize::try_from(m.size).unwrap_or(usize::MAX))?;
+        // Copying is charged for the bytes copied.
+        if let Some(size) = vm.host.fs.size(&from) {
+            vm.charge_bytes(usize::try_from(size).unwrap_or(usize::MAX))?;
         }
-        run(vm, shown, move |fs| fs.copy(&from, &to), ok_unit)
+        run(vm, shown, move |fs| fs.copy(from, to), ok_unit)
     });
-    r.add_builtin("fs.metadata", |vm, a| {
-        let (shown, path) = target!(vm, a[0]);
-        if let Some(e) = refuse(vm, Capability::FsRead(path.clone()), &shown)? {
+    r.add_builtin("fs.stat", |vm, a| {
+        let (shown, mut t) = target!(vm, a[0]);
+        if let Some(e) = refuse(vm, &mut t, Access::Read, &shown)? {
             return Ok(e);
         }
-        let stat = move |fs: &Fs| match fs.stat(&path)? {
-            m if m.kind == EntryKind::Symlink => Err(unchecked_symlink(path.file_name().unwrap_or_default())),
+        let stat = move |fs: &Fs| match fs.stat(&t)? {
+            m if m.kind == EntryKind::Symlink => Err(unchecked_symlink(t.path.file_name().unwrap_or_default())),
             m => Ok(m),
         };
         run(vm, shown, stat, |vm, m| {
-            let modified = match m.modified {
-                Some(t) => {
-                    let nanos = Value::Int(t);
-                    let dt = new_struct(vm, "time", "DateTime", &[("unix_nanos", nanos)])?;
-                    vm.some(dt)
-                }
-                None => vm.none(),
-            };
+            let modified = vm.option(m.modified.map(Value::Int));
             let size = Value::Int(i64::try_from(m.size).unwrap_or(i64::MAX));
             let (is_file, is_dir) = (Value::Bool(m.kind == EntryKind::File), Value::Bool(m.kind == EntryKind::Dir));
-            let md = new_struct(vm, "fs", "Metadata", &[("size", size), ("is_file", is_file), ("is_dir", is_dir), ("modified", modified)])?;
-            Ok(vm.ok(md))
+            let t = vm.heap.new_tuple(vec![size, is_file, is_dir, modified]);
+            Ok(vm.ok(t))
         })
     });
 
@@ -303,10 +277,11 @@ pub fn register(r: &mut Registry) {
     });
 }
 
-/// The script-supplied path `p` and its resolved form (the entry's own path
-/// if `entry`). Overlong paths are refused (kind `"invalid"`) before
-/// normalization, which is charged per component.
-fn target(vm: &mut Vm, p: Value, entry: bool) -> Result<Result<(String, PathBuf), Value>, Ctl> {
+/// The script-supplied path `p` and its resolved form (in `mode`).
+/// Overlong paths are refused (kind `"invalid"`) before resolution, which
+/// is charged per component, for the symlinks it follows and for the
+/// directory entries it reads.
+fn target(vm: &mut Vm, p: Value, mode: Mode) -> Result<Result<(String, Target), Value>, Ctl> {
     let shown = vm.str(p);
     if shown.len() > MAX_PATH_BYTES {
         return Ok(Err(vm.err_value("invalid", &format!("path too long ({} bytes; the limit is {MAX_PATH_BYTES})", shown.len()))));
@@ -316,19 +291,28 @@ fn target(vm: &mut Vm, p: Value, entry: bool) -> Result<Result<(String, PathBuf)
     }
     let shown = shown.to_string();
     let joined = vm.host.cwd.join(&shown);
-    // Lexical normalization, a few `canonicalize` calls (binary search) and
-    // the policy's checks, each linear in the length.
+    // Lexical normalization, the walk and the policy's checks, each linear
+    // in the length.
     vm.charge(4 * joined.components().count() as u64)?;
     vm.charge_bytes(joined.as_os_str().len().saturating_mul(4))?;
-    let path = if entry {
-        let e = vm.host.fs.entry(&joined);
-        vm.charge(4 * e.scanned as u64)?;
-        vm.charge_bytes(e.scanned_bytes.saturating_mul(4))?;
-        e.path
-    } else {
-        vm.host.fs.resolve(&joined)
-    };
-    Ok(Ok((shown, path)))
+    let t = vm.host.fs.target(&crate::policy::lexical(&joined), mode);
+    charge_work(vm, &t)?;
+    Ok(Ok((shown, t)))
+}
+
+/// Charges for the symlinks followed and the entries scanned resolving `t`
+/// (beyond the names of the path itself, charged before).
+fn charge_work(vm: &Vm, t: &Target) -> Result<(), Ctl> {
+    let w = t.work();
+    vm.charge(4 * (w.steps.saturating_sub(t.path.components().count()) + w.scanned) as u64)?;
+    vm.charge_bytes(w.bytes.saturating_add(w.scanned_bytes).saturating_mul(4))
+}
+
+/// The capability an operation needs on its target.
+#[derive(Clone, Copy)]
+enum Access {
+    Read,
+    Write,
 }
 
 /// The error for a denied `cap`. It names the path as the script spelled it
@@ -342,18 +326,37 @@ fn denied(vm: &mut Vm, cap: &Capability, shown: &str) -> Value {
     vm.err_value("permission_denied", &format!("permission denied: {verb} {shown}"))
 }
 
-/// Checks `cap` against the policy: `Some(Err(Error))` to return if it is
-/// denied, `None` if the effect may proceed.
-fn refuse(vm: &mut Vm, cap: Capability, shown: &str) -> Result<Option<Value>, Ctl> {
-    if vm.permit_path(&cap, false)? {
-        return Ok(None);
+/// Checks `access` to `t` against the policy: `Some(Err(Error))` to return
+/// if it is denied, `None` if the effect may proceed. The final name is
+/// looked up as stored first (`Target::fix_spelling`) only if the decision
+/// may depend on it: on a case-insensitive file system that costs a system
+/// call or two, and most decisions are the same for every spelling.
+fn refuse(vm: &mut Vm, t: &mut Target, access: Access, shown: &str) -> Result<Option<Value>, Ctl> {
+    let cap = |p: &Path| match access {
+        Access::Read => Capability::FsRead(p.to_path_buf()),
+        Access::Write => Capability::FsWrite(p.to_path_buf()),
+    };
+    if !t.exact() {
+        let space = vm.host.fs.space();
+        let decided = if vm.has_answers() { None } else { vm.host.policy.decision_for_any_spelling(&cap(&t.path), space) };
+        match decided {
+            Some(Decision::Allow) => return Ok(None),
+            Some(_) => return Ok(Some(denied(vm, &cap(&t.path), shown))),
+            None => {
+                let before = t.work();
+                t.fix_spelling();
+                let after = t.work();
+                vm.charge(4 * after.scanned.saturating_sub(before.scanned) as u64)?;
+                vm.charge_bytes(after.scanned_bytes.saturating_sub(before.scanned_bytes).saturating_mul(4))?;
+            }
+        }
     }
-    Ok(Some(denied(vm, &cap, shown)))
+    refuse_path(vm, cap(&t.path), shown)
 }
 
-/// Like [`refuse`] for a capability on a directory entry itself.
-fn refuse_entry(vm: &mut Vm, cap: Capability, shown: &str) -> Result<Option<Value>, Ctl> {
-    if vm.permit_path(&cap, true)? {
+/// Checks `cap` (whose path is normalized) against the policy.
+fn refuse_path(vm: &mut Vm, cap: Capability, shown: &str) -> Result<Option<Value>, Ctl> {
+    if vm.permit_normalized(&cap)? {
         return Ok(None);
     }
     Ok(Some(denied(vm, &cap, shown)))
@@ -362,32 +365,17 @@ fn refuse_entry(vm: &mut Vm, cap: Capability, shown: &str) -> Result<Option<Valu
 /// The `Err(permission_denied)` value if a deny rule protects something in
 /// the tree at `path` (which is about to be moved, replaced or removed).
 fn protected_tree(vm: &mut Vm, shown: &str, path: &Path) -> Option<Value> {
-    let protected = vm.host.policy.denies_under_in(path, vm.host.fs.space());
+    let protected = vm.host.policy.denies_under_normalized_in(path, vm.host.fs.space());
     protected.then(|| vm.err_value("permission_denied", &format!("permission denied: {shown} contains paths protected by the policy")))
 }
 
-/// Runs the file system operation `op`; `finish` converts its result on the
-/// VM thread. I/O errors become `Err(Error)` values mentioning `shown`.
-/// Operations that block (on the host) suspend the calling task while they
-/// run off the VM thread; the others complete at once.
-fn run<T: Send + 'static>(
-    vm: &mut Vm,
-    shown: String,
-    op: impl FnOnce(&Fs) -> io::Result<T> + Send + 'static,
-    finish: impl FnOnce(&mut Vm, T) -> NResult + Send + 'static,
-) -> NResult {
-    let fs = vm.host.fs.clone();
-    if !fs.is_blocking() {
-        let result = op(&fs);
-        return complete(vm, &shown, result, finish);
-    }
-    Err(Ctl::Async(Box::pin(async move {
-        let result = fs.run_blocking(op).await;
-        Box::new(move |vm: &mut Vm| complete(vm, &shown, result, finish)) as Finisher
-    })))
-}
-
-fn complete<T>(vm: &mut Vm, shown: &str, result: io::Result<T>, finish: impl FnOnce(&mut Vm, T) -> NResult) -> NResult {
+/// Runs the file system operation `op`, then `finish` converts its result.
+/// I/O errors become `Err(Error)` values mentioning `shown`. Operations run
+/// on the VM thread: on the host they are system calls (a few microseconds
+/// each), cheaper than handing them to another thread, and they count
+/// towards the run's CPU time.
+fn run<T>(vm: &mut Vm, shown: String, op: impl FnOnce(&Fs) -> io::Result<T>, finish: impl FnOnce(&mut Vm, T) -> NResult) -> NResult {
+    let result = op(&vm.host.fs);
     match result {
         Ok(v) => finish(vm, v),
         Err(e) => Ok(vm.err_value(io_kind(&e), &format!("{shown}: {e}"))),
@@ -404,12 +392,12 @@ fn ok_bool(vm: &mut Vm, b: bool) -> NResult {
 
 /// Writes `data` (whose copy is reserved in `res` until the write is done).
 fn write(vm: &mut Vm, path: Value, data: Vec<u8>, append: bool, res: Reservation) -> NResult {
-    let (shown, path) = target!(vm, path);
-    if let Some(e) = refuse(vm, Capability::FsWrite(path.clone()), &shown)? {
+    let (shown, mut t) = target!(vm, path);
+    if let Some(e) = refuse(vm, &mut t, Access::Write, &shown)? {
         return Ok(e);
     }
     let op = move |fs: &Fs| {
-        let r = fs.write(&path, &data, append);
+        let r = fs.write(t, &data, append);
         drop(res);
         r
     };
@@ -427,29 +415,14 @@ fn lexical_cost(vm: &Vm, p: Value) -> Result<(), Ctl> {
 /// `exists` / `is_file` / `is_dir`: `false` when nothing (or a symlink that
 /// was not resolved by the policy check) is at the path.
 fn file_kind(vm: &mut Vm, p: Value, test: fn(EntryKind) -> bool) -> NResult {
-    let (shown, path) = target!(vm, p);
-    if let Some(e) = refuse(vm, Capability::FsRead(path.clone()), &shown)? {
+    let (shown, mut t) = target!(vm, p);
+    if let Some(e) = refuse(vm, &mut t, Access::Read, &shown)? {
         return Ok(e);
     }
-    let op = move |fs: &Fs| match fs.stat(&path) {
+    let op = move |fs: &Fs| match fs.stat(&t) {
         Ok(m) => Ok(test(m.kind)),
         Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) || is_unchecked_symlink(&e) => Ok(false),
         Err(e) => Err(e),
     };
     run(vm, shown, op, ok_bool)
-}
-
-/// Builds an instance of the struct `module.name`, placing `fields` by name.
-fn new_struct(vm: &mut Vm, module: &str, name: &str, fields: &[(&str, Value)]) -> NResult {
-    let Some(def) = vm.prog.types.iter().position(|t| t.name == name && t.module == module) else {
-        return panic(format!("internal error: {module}.{name} is not loaded"));
-    };
-    let mut values = Vec::with_capacity(fields.len());
-    for field in &vm.prog.types[def].fields {
-        match fields.iter().find(|(n, _)| n == field) {
-            Some(&(_, v)) => values.push(v),
-            None => return panic(format!("internal error: no value for {module}.{name}.{field}")),
-        }
-    }
-    Ok(vm.heap.alloc(Obj::Struct(def as u32, values.into_boxed_slice())))
 }

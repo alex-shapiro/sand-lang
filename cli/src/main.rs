@@ -18,11 +18,13 @@ USAGE:
     sand check FILE...                     type check
     sand lint FILE... [--allow-warnings]   report lint warnings
     sand fmt FILE... [--check]             format files in place (or check)
+    sand fmt - [--check]                   format standard input to standard output
     sand test FILE... [OPTIONS]            run test blocks (options as for run)
     sand repl [OPTIONS]                    interactive session
     sand playground [DIR] [--port=PORT]    serve the web playground on localhost
                                            (build it first: playground/build.sh)
     sand --version
+    sand COMMAND --help                    show this help
 
 RUN, TEST AND REPL OPTIONS (all access is denied unless allowed):
     --policy=FILE            rules and limits from a policy file (the options below
@@ -55,6 +57,12 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     };
     let rest = &args[1..];
+    // Options end at `--` (what follows goes to the script).
+    let options = rest.iter().position(|a| a == "--").map_or(rest, |end| &rest[..end]);
+    if options.iter().any(|a| a == "--help" || a == "-h") {
+        print!("{USAGE}");
+        return ExitCode::SUCCESS;
+    }
     let result = match cmd.as_str() {
         "run" => cmd_run(rest),
         "check" => cmd_check(rest),
@@ -214,7 +222,11 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
         rules = rules.deny_private_networks();
     }
     let policy = if allow_all { Policy::allow_all() } else { Policy::rules(rules) };
-    let mut config = Config::new().policy(policy).limits(limits);
+    let mut config = Config::new()
+        .policy(policy)
+        .limits(limits)
+        .gc_stress(std::env::var_os("SAND_GC_STRESS").is_some())
+        .dump_bytecode(std::env::var_os("SAND_DUMP_BYTECODE").is_some());
     if !files_only {
         config = config.args(script_args.clone());
     }
@@ -369,49 +381,23 @@ fn prompter(via: PromptVia) -> impl Fn(Capability) -> sandlang::policy::PromptFu
     }
 }
 
-fn report_error(e: &Error, main: Option<&Path>) -> u8 {
+/// Reports an error on standard error; returns the exit status for it.
+fn report_error(e: &Error) -> u8 {
     match e {
-        Error::Compile(diags) => {
-            let root = main.and_then(|m| m.parent()).map(Path::to_path_buf).unwrap_or_default();
-            let mut sources: std::collections::HashMap<&str, Option<String>> = std::collections::HashMap::new();
-            for d in diags {
-                let source = sources.entry(d.file.as_str()).or_insert_with(|| {
-                    main.filter(|m| m.file_name().map(|n| n.to_string_lossy() == d.file).unwrap_or(false))
-                        .and_then(|m| std::fs::read_to_string(m).ok())
-                        .or_else(|| std::fs::read_to_string(root.join(&d.file)).ok())
-                });
-                eprint!("{}", d.render(source.as_deref()));
-            }
-            2
-        }
-        Error::Runtime { .. } => {
-            eprintln!("{e}");
-            1
-        }
-        Error::Limit(_) => {
-            eprintln!("sand: {e}");
-            3
-        }
-        Error::Interrupted => {
-            eprintln!("sand: interrupted");
-            130
-        }
-        Error::Io(m) => {
-            eprintln!("sand: {m}");
-            2
-        }
+        Error::Compile(_) | Error::Runtime { .. } => eprint!("{}", e.render()),
+        e => eprintln!("sand: {e}"),
     }
+    exit_status(e.exit_code())
 }
 
 fn cmd_run(args: &[String]) -> Result<u8, String> {
     let opts = run_options(args)?;
     let file = opts.file.ok_or("missing FILE to run")?;
-    let _ = opts.script_args;
     let mut engine = Engine::new(opts.config.exit_after_run(true));
     let rt = runtime()?;
     match rt.block_on(engine.run_file(&file)) {
         Ok(o) => Ok(exit_status(o.exit_code)),
-        Err(e) => Ok(report_error(&e, Some(&file))),
+        Err(e) => Ok(report_error(&e)),
     }
 }
 
@@ -429,7 +415,7 @@ fn files_and_flags<'a>(args: &'a [String], flags: &[&str]) -> Result<(Vec<&'a St
     for a in args {
         if let Some(i) = flags.iter().position(|f| f == a) {
             set[i] = true;
-        } else if a.starts_with('-') && a.len() > 1 {
+        } else if a.starts_with('-') && a != "-" {
             return Err(format!("unknown option `{a}`"));
         } else {
             files.push(a);
@@ -450,11 +436,7 @@ fn cmd_check(args: &[String]) -> Result<u8, String> {
         let mut engine = Engine::new(Config::new().policy(Policy::deny_all()));
         match engine.check_file(path) {
             Ok(_) => println!("{f}: ok"),
-            Err(e) => {
-                report_error(&e, Some(path));
-                // 1 for errors in the program (SPEC 17.1), 2 if it cannot be read.
-                code = code.max(if matches!(e, Error::Compile(_)) { 1 } else { 2 });
-            }
+            Err(e) => code = code.max(report_error(&e)),
         }
     }
     Ok(code)
@@ -484,6 +466,12 @@ fn cmd_lint(args: &[String]) -> Result<u8, String> {
 fn cmd_fmt(args: &[String]) -> Result<u8, String> {
     let (files, flags) = files_and_flags(args, &["--check"])?;
     let check = flags[0];
+    if files.iter().any(|f| *f == "-") {
+        if files.len() > 1 {
+            return Err("`sand fmt -` formats standard input only".into());
+        }
+        return fmt_stdin(check);
+    }
     let mut code = 0;
     for f in files {
         let src = std::fs::read_to_string(f).map_err(|e| format!("cannot read {f}: {e}"))?;
@@ -508,6 +496,24 @@ fn cmd_fmt(args: &[String]) -> Result<u8, String> {
     Ok(code)
 }
 
+/// `sand fmt -`: formats standard input to standard output (with
+/// `--check`, prints nothing and exits with 1 if it is not formatted).
+fn fmt_stdin(check: bool) -> Result<u8, String> {
+    let mut src = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut src).map_err(|e| format!("cannot read standard input: {e}"))?;
+    match sandlang::fmt::format_source(&src) {
+        Ok(out) if check => Ok(if out == src { 0 } else { 1 }),
+        Ok(out) => {
+            print!("{out}");
+            Ok(0)
+        }
+        Err(e) => {
+            eprintln!("<stdin>: {e}");
+            Ok(2)
+        }
+    }
+}
+
 /// Runs test blocks under the same policy and limits as `sand run` (tests
 /// are code like any other: everything is denied unless allowed).
 fn cmd_test(args: &[String]) -> Result<u8, String> {
@@ -525,7 +531,7 @@ fn cmd_test(args: &[String]) -> Result<u8, String> {
                 print!("{}", report.render());
                 failed += report.failed();
             }
-            Err(e) => return Ok(report_error(&e, Some(f))),
+            Err(e) => return Ok(report_error(&e)),
         }
     }
     Ok(if failed > 0 { 1 } else { 0 })

@@ -176,13 +176,13 @@ fn http_server_requests_expose_their_connection() {
 import http
 let server = http.serve("127.0.0.1:0")?
 let addr = server.addr()
-let client = spawn http.get("http://{addr}/stream?x=1")
+let client = spawn http.get("http://\(addr)/stream?x=1")
 let req = server.accept()?
-print("{req.method} {req.path} {req.query} {req.header("Host").is_some()}")
+print("\(req.method) \(req.path) \(req.query) \(req.header("Host").is_some())")
 // Stream a chunked response by hand instead of using `respond`.
 req.conn.write_str("HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n")?
 for part in ["streamed ", "by ", "hand"] {
-    req.conn.write_str("{part.len():x}\r\n{part}\r\n")?
+    req.conn.write_str("\(part.len():x)\r\n\(part)\r\n")?
 }
 req.conn.write_str("0\r\n\r\n")?
 req.conn.close()
@@ -200,10 +200,10 @@ fn http_server_api() {
     let src = r#"
 import http
 let server = http.serve("127.0.0.1:0")?
-print("addr {server.addr()}")
+print("addr \(server.addr())")
 for _ in 0..2 {
     let req = server.accept()?
-    let body = "you sent {req.method} {req.path} q={req.query} body={req.text()?} ua={req.headers.get("user-agent") ?? "-"}"
+    let body = "you sent \(req.method) \(req.path) q=\(req.query) body=\(req.text()?) ua=\(req.headers.get("user-agent") ?? "-")"
     req.respond(201, body.bytes(), headers: ["x-reply": "1"])?
 }
 "#;
@@ -438,10 +438,10 @@ fn idle_connections_do_not_delay_http_requests() {
     let src = r#"
 import http
 let server = http.serve("127.0.0.1:0")?
-print("ready {server.addr()}")
+print("ready \(server.addr())")
 for i in 0..2 {
     let req = server.accept()?
-    req.respond(200, "served {req.path}".bytes())?
+    req.respond(200, "served \(req.path)".bytes())?
 }
 "#;
     let limits = Limits { max_wall_time: Some(Duration::from_secs(25)), ..Limits::default() };
@@ -481,7 +481,7 @@ while conns.len() < 1000 {
     match net.connect(addr) {
         Ok(c) => conns.push(c)
         Err(e) => {
-            err = "{e.kind}: {e.message}"
+            err = "\(e.kind): \(e.message)"
             break
         }
     }
@@ -505,7 +505,7 @@ print(server.wait() > 0)
     let src = r#"
 import http
 let server = http.serve("127.0.0.1:0")?
-print("ready {server.addr()}")
+print("ready \(server.addr())")
 let req = server.accept()?
 req.respond(200, "served".bytes())?
 "#;

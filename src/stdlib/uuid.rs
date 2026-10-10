@@ -56,12 +56,14 @@ fn random_bytes(vm: &mut Vm) -> [u8; 16] {
 
 /// The lower-case hyphenated form `8-4-4-4-12`.
 fn format_uuid(b: &[u8; 16]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(36);
     for (i, x) in b.iter().enumerate() {
         if matches!(i, 4 | 6 | 8 | 10) {
             s.push('-');
         }
-        s.push_str(&format!("{x:02x}"));
+        s.push(HEX[(x >> 4) as usize] as char);
+        s.push(HEX[(x & 15) as usize] as char);
     }
     s
 }

@@ -1,4 +1,6 @@
-//! Mathematical constants and functions on `float` and `int`.
+//! Mathematical constants and functions on `float` and `int`. Rounding,
+//! `abs`, `min`, `max`, `clamp`, `sqrt` and `pow` are methods of `float`
+//! and `int` (`x.sqrt()`).
 
 /// The ratio of a circle's circumference to its diameter.
 pub let pi = 3.141592653589793
@@ -15,8 +17,6 @@ pub let inf = 1.0 / 0.0
 /// A quiet NaN ("not a number").
 pub let nan = 0.0 / 0.0
 
-/// Square root (`NaN` for negative inputs).
-pub native fn sqrt(x: float) -> float
 /// Cube root.
 pub native fn cbrt(x: float) -> float
 /// `e` raised to the power `x`.
@@ -51,31 +51,10 @@ pub native fn cosh(x: float) -> float
 pub native fn tanh(x: float) -> float
 /// `sqrt(x * x + y * y)` without intermediate overflow.
 pub native fn hypot(x: float, y: float) -> float
-/// Largest integral value not greater than `x`.
-pub native fn floor(x: float) -> float
-/// Smallest integral value not less than `x`.
-pub native fn ceil(x: float) -> float
-/// Nearest integral value, rounding half away from zero.
-pub native fn round(x: float) -> float
-/// Integral part of `x` (rounds toward zero).
-pub native fn trunc(x: float) -> float
-/// Absolute value.
-pub native fn abs(x: float) -> float
-/// `x` raised to the power `y`.
-pub native fn pow(x: float, y: float) -> float
-/// The smaller of `a` and `b` (a NaN argument is ignored).
-pub native fn min(a: float, b: float) -> float
-/// The larger of `a` and `b` (a NaN argument is ignored).
-pub native fn max(a: float, b: float) -> float
 /// Converts degrees to radians.
 pub native fn to_radians(degrees: float) -> float
 /// Converts radians to degrees.
 pub native fn to_degrees(radians: float) -> float
-
-/// Restricts `x` to `lo..=hi`.
-pub fn clamp(x: float, lo: float, hi: float) -> float {
-    x.max(lo).min(hi)
-}
 
 /// True if `a` and `b` are equal within a relative tolerance (scaled by the
 /// larger magnitude) or an absolute tolerance. Infinities are close only to
@@ -99,18 +78,3 @@ pub native fn lcm(a: int, b: int) -> int
 
 /// The largest integer whose square is at most `n`; panics if `n` is negative.
 pub native fn isqrt(n: int) -> int
-
-/// Absolute value of an integer; panics on overflow.
-pub fn abs_int(n: int) -> int {
-    n.abs()
-}
-
-/// The smaller of two integers.
-pub fn min_int(a: int, b: int) -> int {
-    a.min(b)
-}
-
-/// The larger of two integers.
-pub fn max_int(a: int, b: int) -> int {
-    a.max(b)
-}

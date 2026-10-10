@@ -100,7 +100,7 @@ print(1m)
 === string escapes
 print("tab:\tend")
 print("quote:\" backslash:\\")
-print("brace:\{x\}")
+print("brace:{x}")
 print("unicode:\u{48}\u{49} \u{1F600}")
 print("a\nb")
 --- stdout
@@ -124,9 +124,9 @@ unterminated string
 === interpolation
 let name = "world"
 let n = 3
-print("hello {name}, {n} + 1 = {n + 1}")
-print("nested {"inner {n}"}")
-print("list {[1, 2]} map {["a": 1]}")
+print("hello \(name), \(n) + 1 = \(n + 1)")
+print("nested \("inner \(n)")")
+print("list \([1, 2]) map \(["a": 1])")
 --- stdout
 hello world, 3 + 1 = 4
 nested inner 3
@@ -134,7 +134,7 @@ list [1, 2] map ["a": 1]
 
 === interpolation with method calls and quotes
 let xs = ["a", "b"]
-print("{xs.len()} items: {", ".join(xs)}")
+print("\(xs.len()) items: \(xs.join(", "))")
 --- stdout
 2 items: a, b
 
@@ -163,12 +163,91 @@ line three
 === multiline string interpolation
 let who = "x"
 let s = """
-    hi {who}
+    hi \(who)
     bye"""
 print(s)
 --- stdout
 hi x
 bye
+
+=== braces are ordinary characters in strings
+import regex
+import json
+print("[0-9]{4} {x} }{ {{}}")
+print(regex.new("^[0-9]{4}$").unwrap().is_match("2024"))
+let doc = json.parse("{\"a\": {\"b\": [1, 2]}}").unwrap()
+print(doc.path("a.b.1"))
+--- stdout
+[0-9]{4} {x} }{ {{}}
+true
+Some(Num(2.0))
+
+=== interpolations hold strings, parentheses and brackets
+fn add(a: int, b: int) -> int { a + b }
+let xs = [3, 1, 2]
+print("sorted: \(xs.sorted().map(x => "<\(x)>").join(", "))")
+print("\((1 + 2) * 3) \(xs[(0)]) \(["k": "v"].get("k") ?? "none")")
+print("\(if xs.len() > 2 { "many" } else { "few" }) \("a:b"):\(1)")
+print("sum \(add(
+    1,
+    2,
+))")
+--- stdout
+sorted: <1>, <2>, <3>
+9 3 v
+many a:b:1
+sum 3
+
+=== format specs in interpolations
+let pi = 3.14159
+print("[\(pi:.2)] [\(42:>5)] [\("ab":*^6)] [\(255:#>6x)] [\("hi":?)]")
+print("[\(["a": 7].get("a") ?? 0:03)] [\(7:(^5)] [\((1, 2):?)]")
+--- stdout
+[3.14] [   42] [**ab**] [####ff] ["hi"]
+[007] [((7((] [(1, 2)]
+
+=== block strings with braces and interpolations
+let name = "sand"
+let tags = ["a", "b"]
+let s = """
+    {
+      "name": "\(name)",
+      "tags": [\(tags.map(t => "\"\(t)\"").join(", "))]
+    }"""
+print(s)
+--- stdout
+{
+  "name": "sand",
+  "tags": ["a", "b"]
+}
+
+=== unterminated interpolation
+let x = 1
+let s = "a \(x + 1
+print(s)
+--- error
+2: unterminated interpolation
+
+=== an interpolation does not continue on the next line outside brackets
+print("\(1 +
+2)")
+--- error
+1: unterminated interpolation
+
+=== empty interpolation
+print("a \() b")
+--- error
+1: empty interpolation
+
+=== brace escapes are invalid
+print("\{x\}")
+--- error
+1: braces need no escape
+
+=== bytes literals have no interpolation
+print(b"\(1)")
+--- error
+1: bytes literals have no interpolation
 
 === bytes literals
 let b = b"ab\x00\xff"
@@ -236,6 +315,45 @@ print(x)
 --- stdout
 1
 
+=== leading minus with a space continues the previous line
+let base = 10
+let discount = 3
+let total = base
+    - discount
+    -
+    1
+print(total)
+--- stdout
+6
+
+=== minus with a space before it and none after negates
+let a = 5
+let b = 2
+print([a-b, a- b, a - b, a - -b, -a, (-b)])
+let xs = [
+    a,
+    -b,
+]
+print(xs)
+--- stdout
+[3, 3, 3, 7, -5, -2]
+[5, -2]
+
+=== negating minus after an operand is ambiguous
+let a = 5
+let b = 2
+print(a -b)
+--- error
+3: ambiguous `-`
+
+=== negating minus after an operand inside brackets is ambiguous
+let xs = [
+    1
+    -2
+]
+--- error
+3: ambiguous `-`
+
 === pipe continues across lines
 fn double(x: int) -> int { x * 2 }
 let r = 5
@@ -291,6 +409,74 @@ print(0.5us)
 --- stdout
 1.25ms
 500ns
+
+=== durations are exact decimal values
+print(1.005s)
+print(0.1s.nanos())
+print(2.5e-3s)
+print(1.9ns.nanos())
+print(0.000000000000000000000000000000000000000001h.nanos())
+--- stdout
+1.005s
+100000000
+2.5ms
+1
+0
+
+=== hexadecimal binary and octal literals are 64-bit patterns
+print(0xFFFF_FFFF_FFFF_FFFF)
+print(0x8000_0000_0000_0000)
+print(0x7FFF_FFFF_FFFF_FFFF)
+print(0b1111111111111111111111111111111111111111111111111111111111111110)
+print(0o1777777777777777777777)
+--- stdout
+-1
+-9223372036854775808
+9223372036854775807
+-2
+-1
+
+=== hexadecimal literal too large
+print(0x1_0000_0000_0000_0000)
+--- error
+1: integer literal out of range
+
+=== leading star continues the previous line
+let n = 2
+    * 3
+print(n)
+--- stdout
+6
+
+=== a range operator at the end of a line ends the statement
+fn f() -> int { 7 }
+let r = 1..
+print(f())
+--- error
+2: open ranges are only allowed in slices
+
+=== tuple index out of range
+let t = (1, 2)
+print(t.4294967296)
+--- error
+2: invalid tuple index
+
+=== one-element tuples are errors everywhere
+let u: (int,) = (1,)
+match (1, 2) {
+    (a,) => 1
+    _ => 2
+}
+--- error
+1: a tuple has two or more elements
+1: a tuple has two or more elements
+3: a tuple has two or more elements
+
+=== test names are plain strings
+let x = 1
+test "a \(x)" {}
+--- error
+2: a test name must be a plain string, without interpolation
 
 === hex escape cut short by a multi-byte character
 print(b"\x0П")

@@ -36,7 +36,8 @@ extend Listener {
 pub native type Conn
 
 extend Conn {
-    /// Reads up to `max` bytes as soon as some are available; empty at end of stream.
+    /// Reads up to `max` bytes as soon as some are available (at most what
+    /// the connection's 8 KiB buffer holds); empty at end of stream.
     pub native fn read(self, max: int = 65536) -> Result<bytes>
     /// Reads one line without its `\n` / `\r\n` terminator; `None` at end of stream.
     pub native fn read_line(self) -> Result<str?>

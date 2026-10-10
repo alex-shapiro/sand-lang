@@ -11,10 +11,8 @@ use std::time::Duration;
 /// State shared with wakers and interrupt handles.
 #[derive(Default)]
 pub struct IoShared {
-    ready: Mutex<Vec<u64>>,
-    /// Set when `ready` may be non-empty (checked without the lock while
-    /// waiting briefly for a file operation, see `FS_SPIN`).
-    any_ready: std::sync::atomic::AtomicBool,
+    /// The slots of the operations woken since the table last polled them.
+    ready: Mutex<Vec<u32>>,
     waker: Mutex<Option<Waker>>,
 }
 
@@ -35,72 +33,104 @@ impl IoShared {
     }
 }
 
-struct IdWaker {
-    id: u64,
+/// Wakes the operation in a slot of an [`IoTable`] (whichever it holds:
+/// a wake-up meant for an earlier operation only polls it once more).
+struct SlotWaker {
+    slot: u32,
     shared: Arc<IoShared>,
 }
 
-impl Wake for IdWaker {
+impl Wake for SlotWaker {
     fn wake(self: Arc<Self>) {
         self.wake_by_ref();
     }
     fn wake_by_ref(self: &Arc<Self>) {
-        self.shared.ready.lock().unwrap_or_else(|e| e.into_inner()).push(self.id);
-        self.shared.any_ready.store(true, Ordering::Release);
+        self.shared.ready.lock().unwrap_or_else(|e| e.into_inner()).push(self.slot);
         self.shared.wake();
     }
 }
 
+/// A pending I/O operation: the future of a native call of task `fid`,
+/// which waits for it as wait generation `wgen`.
+struct IoOp {
+    fid: u32,
+    wgen: u64,
+    fut: BoxFuture,
+}
+
+/// The pending I/O operations of a VM, in slots (an operation's id is its
+/// slot); each slot keeps its waker for the operations it holds.
 #[derive(Default)]
 pub struct IoTable {
-    next_id: u64,
-    futures: HashMap<u64, (u32, u64, BoxFuture)>,
+    ops: Vec<Option<IoOp>>,
+    wakers: Vec<Waker>,
+    free: Vec<u32>,
+    pending: usize,
     pub shared: Arc<IoShared>,
 }
 
 impl IoTable {
     pub fn with_shared(shared: Arc<IoShared>) -> IoTable {
-        IoTable { next_id: 0, futures: HashMap::new(), shared }
+        IoTable { shared, ..IoTable::default() }
     }
 
-    pub fn add(&mut self, fid: u32, wgen: u64, fut: BoxFuture) -> u64 {
-        self.next_id += 1;
-        let id = self.next_id;
-        self.futures.insert(id, (fid, wgen, fut));
-        self.shared.ready.lock().unwrap_or_else(|e| e.into_inner()).push(id);
-        id
+    /// Adds the operation `fut` of task `fid` (waiting as `wgen`), polling
+    /// it once: returns its id, or its result if it is done already.
+    pub fn add(&mut self, fid: u32, wgen: u64, mut fut: BoxFuture) -> Result<u64, Finisher> {
+        let slot = match self.free.pop() {
+            Some(s) => s,
+            None => {
+                let s = self.ops.len() as u32;
+                self.ops.push(None);
+                self.wakers.push(Waker::from(Arc::new(SlotWaker { slot: s, shared: self.shared.clone() })));
+                s
+            }
+        };
+        if let Poll::Ready(fin) = fut.as_mut().poll(&mut Context::from_waker(&self.wakers[slot as usize])) {
+            self.free.push(slot);
+            return Err(fin);
+        }
+        self.ops[slot as usize] = Some(IoOp { fid, wgen, fut });
+        self.pending += 1;
+        Ok(u64::from(slot))
     }
 
     pub fn cancel(&mut self, id: u64) {
-        self.futures.remove(&id);
+        if let Some(op) = self.ops.get_mut(id as usize)
+            && op.take().is_some()
+        {
+            self.free.push(id as u32);
+            self.pending -= 1;
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.futures.is_empty()
+        self.pending == 0
     }
 
     /// Cancels every pending operation.
     pub fn clear(&mut self) {
-        self.futures.clear();
+        for (slot, op) in self.ops.iter_mut().enumerate() {
+            if op.take().is_some() {
+                self.free.push(slot as u32);
+            }
+        }
+        self.pending = 0;
     }
 
-    /// Polls futures that were woken. Returns completed operations.
+    /// Polls the operations that were woken. Returns those completed.
     pub fn poll_ready(&mut self, task_waker: Option<&Waker>) -> Vec<(u32, u64, Finisher)> {
         if let Some(w) = task_waker {
             self.shared.set_waker(w);
         }
-        let ids: Vec<u64> = {
-            let mut ready = self.shared.ready.lock().unwrap_or_else(|e| e.into_inner());
-            self.shared.any_ready.store(false, Ordering::Relaxed);
-            std::mem::take(&mut *ready)
-        };
+        let slots = std::mem::take(&mut *self.shared.ready.lock().unwrap_or_else(|e| e.into_inner()));
         let mut done = Vec::new();
-        for id in ids {
-            let Some(entry) = self.futures.get_mut(&id) else { continue };
-            let waker = Waker::from(Arc::new(IdWaker { id, shared: self.shared.clone() }));
-            let mut cx = Context::from_waker(&waker);
-            if let Poll::Ready(fin) = entry.2.as_mut().poll(&mut cx) {
-                let (fid, wgen, _) = self.futures.remove(&id).unwrap();
+        for slot in slots {
+            let Some(Some(op)) = self.ops.get_mut(slot as usize) else { continue };
+            if let Poll::Ready(fin) = op.fut.as_mut().poll(&mut Context::from_waker(&self.wakers[slot as usize])) {
+                let IoOp { fid, wgen, .. } = self.ops[slot as usize].take().expect("polled");
+                self.free.push(slot);
+                self.pending -= 1;
                 done.push((fid, wgen, fin));
             }
         }
@@ -108,11 +138,12 @@ impl IoTable {
     }
 }
 
-/// How long the scheduler waits for a file operation before parking.
-const FS_SPIN: Duration = Duration::from_micros(100);
-
 /// Slices run between clock readings at most.
 const CLOCK_SLICES: u32 = 32;
+
+/// How often a running engine polls its I/O and lets other tasks of the
+/// host's executor run.
+const YIELD_EVERY: Duration = Duration::from_millis(2);
 
 /// Result of running the program's main task.
 pub enum RunEnd {
@@ -120,41 +151,104 @@ pub enum RunEnd {
     Exit(i32),
 }
 
+/// Why [`Vm::drive`] returned.
+pub(crate) enum Stop {
+    /// The main task finished with this value.
+    Main(Value),
+    /// A task called `exit`.
+    Exit(i32),
+    /// Without a main task: no task can run and no I/O is pending.
+    Idle,
+    /// Without a main task: a task needs a permission prompt. It is not
+    /// asked; the task retries the call when it runs again.
+    Prompt(Capability),
+}
+
+/// The clocks of a run's time limits. CPU time is read from the thread's
+/// CPU clock (`platform::cpu_time`) for the stretches between waits, during
+/// which the run stays on one thread.
+struct Clock {
+    /// CPU time used by the run, up to `cpu_mark`.
+    cpu: Duration,
+    /// The thread's CPU clock when `cpu` was last brought up to date.
+    cpu_mark: Duration,
+    /// The wall clock, read with the CPU clock.
+    now: Instant,
+    last_yield: Instant,
+    /// Slices run and fuel spent since the clocks were last read.
+    unclocked: (u32, u64),
+}
+
+impl Clock {
+    fn start() -> Clock {
+        let now = Instant::now();
+        Clock { cpu: Duration::ZERO, cpu_mark: crate::platform::cpu_time(), now, last_yield: now, unclocked: (0, 0) }
+    }
+
+    /// Brings the CPU time up to date (before waiting).
+    fn read(&mut self) {
+        let mark = crate::platform::cpu_time();
+        self.cpu += mark.saturating_sub(self.cpu_mark);
+        self.cpu_mark = mark;
+        self.now = Instant::now();
+        self.unclocked = (0, 0);
+    }
+
+    /// Starts a stretch on (possibly) another thread, after a wait.
+    fn resume(&mut self) {
+        self.cpu_mark = crate::platform::cpu_time();
+        self.now = Instant::now();
+        self.unclocked = (0, 0);
+    }
+
+    /// Records a slice that spent `fuel`; reads the clocks every
+    /// `CLOCK_SLICES` slices or `SLICE_FUEL` units of fuel (tasks that
+    /// finish or block quickly make slices far shorter than a reading).
+    fn ran(&mut self, fuel: u64) {
+        self.unclocked.0 += 1;
+        self.unclocked.1 += fuel;
+        if self.unclocked.0 >= CLOCK_SLICES || self.unclocked.1 >= SLICE_FUEL as u64 {
+            self.read();
+        }
+    }
+
+    /// The point of the thread's CPU clock at which `max` is exceeded.
+    fn cpu_deadline(&self, max: Option<Duration>) -> Option<Duration> {
+        max.map(|m| self.cpu_mark.saturating_add(m.saturating_sub(self.cpu)))
+    }
+}
+
 impl Vm {
-    fn check_limits(&self, start: Instant, paused: Duration, cpu: Duration) -> Result<(), Trap> {
+    fn check_limits(&self, clock: &Clock) -> Result<(), Trap> {
         if self.host.interrupt.load(Ordering::Relaxed) {
             return Err(Trap::Interrupted);
         }
         let l = &self.host.limits;
         if let Some(max) = l.max_instructions
-            && self.fuel_used > max
+            && self.meter.used() > max
         {
             return Err(Trap::Limit(LimitKind::Instructions));
         }
         if let Some(max) = l.max_cpu_time
-            && cpu > max
+            && clock.cpu > max
         {
             return Err(Trap::Limit(LimitKind::CpuTime));
         }
-        if let Some(max) = l.max_wall_time
-            && start.elapsed().saturating_sub(paused) > max
-        {
+        if self.deadline.is_some_and(|d| Instant::now() >= d) {
             return Err(Trap::Limit(LimitKind::WallTime));
         }
         Ok(())
     }
 
-    fn apply_completions(&mut self, done: Vec<(u32, u64, Finisher)>) -> Result<(), Trap> {
-        let spent = self.meter.spent();
-        let r = self.apply_finishers(done);
-        self.fuel_used += self.meter.spent().saturating_sub(spent);
-        r
-    }
-
-    fn apply_finishers(&mut self, done: Vec<(u32, u64, Finisher)>) -> Result<(), Trap> {
+    /// Runs the finishers of completed I/O operations, which charge the
+    /// meter like natives.
+    fn apply_completions(&mut self, done: Vec<(u32, u64, Finisher)>, clock: &Clock) -> Result<(), Trap> {
+        if done.is_empty() {
+            return Ok(());
+        }
+        self.meter.start_slice(clock.cpu_deadline(self.host.limits.max_cpu_time), self.deadline);
         for (fid, wgen, fin) in done {
-            let still_waiting = matches!(self.fibers.get(fid as usize), Some(Some(f)) if f.state == FiberState::Waiting && f.wgen == wgen);
-            if !still_waiting {
+            if !wait_is_live(&self.fibers, (fid, wgen)) {
                 continue;
             }
             // A Rust panic in the finisher (a bug) becomes a script panic.
@@ -162,27 +256,28 @@ impl Vm {
                 Ok(r) => r,
                 Err(msg) => {
                     self.caught_panic = true;
-                    Err(Ctl::Panic(format!("internal error: {msg}")))
+                    Err(Ctl::panic(format!("internal error: {msg}")))
                 }
             };
             match r {
                 Ok(v) => {
                     self.deliver(fid, wgen, v);
                 }
-                Err(Ctl::Panic(m)) => {
-                    let trace = match &self.fibers[fid as usize] {
-                        Some(f) => self.trace_of(f, None),
-                        None => vec![],
-                    };
-                    return Err(Trap::Panic { message: m, trace });
-                }
-                Err(Ctl::Limit(k)) => return Err(Trap::Limit(k)),
-                Err(Ctl::Interrupted) => return Err(Trap::Interrupted),
-                Err(Ctl::Exit(c)) => return Err(Trap::Exit(c)),
-                Err(other) => {
-                    return Err(Trap::Panic {
-                        message: format!("internal error: unexpected {other:?} from an I/O operation"),
-                        trace: vec![],
+                Err(c) => {
+                    return Err(match c.into_kind() {
+                        CtlKind::Panic(m) => {
+                            let trace = match &self.fibers[fid as usize] {
+                                Some(f) => self.trace_of(f, None),
+                                None => vec![],
+                            };
+                            Trap::Panic { message: m, trace }
+                        }
+                        CtlKind::Limit(k) => Trap::Limit(k),
+                        CtlKind::Interrupted => Trap::Interrupted,
+                        CtlKind::Exit(c) => Trap::Exit(c),
+                        other => {
+                            Trap::Panic { message: format!("internal error: unexpected {other:?} from an I/O operation"), trace: vec![] }
+                        }
                     });
                 }
             }
@@ -191,32 +286,49 @@ impl Vm {
     }
 
     /// Runs `proto` (a zero-argument function) as the main task until it
-    /// finishes, then returns. Other tasks are abandoned. Buffered standard
-    /// output is flushed at the end.
+    /// finishes, running the other tasks meanwhile, then returns (other
+    /// tasks are left as they are). The wall-time limit is `self.deadline`.
+    /// Buffered standard output is flushed at the end.
     pub async fn run_main(&mut self, proto: u32) -> Result<RunEnd, Trap> {
-        let r = self.run_main_inner(proto).await;
+        let r = match self.start_main(proto) {
+            Ok(fid) => match self.drive(Some(fid)).await {
+                Ok(Stop::Exit(c)) => Ok(RunEnd::Exit(c)),
+                Ok(Stop::Main(v)) => Ok(RunEnd::Finished(v)),
+                // (Only runs without a main task stop otherwise.)
+                Ok(Stop::Idle | Stop::Prompt(_)) => Ok(RunEnd::Finished(Value::Unit)),
+                Err(t) => Err(t),
+            },
+            Err(t) => Err(t),
+        };
         self.flush_stdout();
         r
     }
 
-    async fn run_main_inner(&mut self, proto: u32) -> Result<RunEnd, Trap> {
+    fn start_main(&mut self, proto: u32) -> Result<u32, Trap> {
         let closure = self.heap.alloc(Obj::Closure(proto, Box::new([])));
         let task = self.heap.alloc(Obj::Task(Box::new(TaskObj { fiber: 0, state: TaskState::Running, result: Value::Unit })));
-        let fid = self.spawn_fiber(closure, task).map_err(|c| match c {
-            Ctl::Limit(k) => Trap::Limit(k),
-            _ => Trap::Panic { message: "internal error: cannot start main task".into(), trace: vec![] },
+        let fid = self.spawn_fiber(closure, task).map_err(|c| match c.as_limit() {
+            Some(k) => Trap::Limit(k),
+            None => Trap::Panic { message: "internal error: cannot start main task".into(), trace: vec![] },
         })?;
         if let Obj::Task(t) = self.heap.get_mut(task) {
             t.fiber = fid;
         }
         self.main_fiber = fid;
         self.live_tasks += 1;
-        let start = Instant::now();
-        let mut paused = Duration::ZERO;
-        let mut cpu = Duration::ZERO;
-        let mut now = Instant::now();
-        let mut last_yield = now;
-        let (mut unclocked_slices, mut unclocked_fuel) = (0u32, 0u64);
+        Ok(fid)
+    }
+
+    /// Runs the ready tasks and pending I/O until the main task (fiber
+    /// `main`) finishes or, without one, until no task can run and no I/O
+    /// is pending, or a task needs a permission prompt (which, without a
+    /// main task, is left to the caller: see [`Stop::Prompt`]).
+    ///
+    /// The future may be dropped where it waits (for I/O, a prompt or its
+    /// turn on the executor): every task is then in the scheduler's tables
+    /// (a task waiting for a prompt retries its call when it runs again).
+    pub(crate) async fn drive(&mut self, main: Option<u32>) -> Result<Stop, Trap> {
+        let mut clock = Clock::start();
         // Where an instruction was retried after a memory limit error, until
         // the task makes progress.
         let mut gc_retried: Option<(u32, usize, u32)> = None;
@@ -228,16 +340,8 @@ impl Vm {
                     continue;
                 }
                 self.current = fid;
-                let l = &self.host.limits;
-                let slice = l
-                    .max_instructions
-                    .map_or(SLICE_FUEL, |m| m.saturating_sub(self.fuel_used).saturating_add(1).min(SLICE_FUEL as u64) as i64);
-                let mut fuel = slice;
-                let t0 = now;
                 // Deadlines let long natives check the time limits mid-call.
-                let cpu_deadline = l.max_cpu_time.and_then(|m| t0.checked_add(m.saturating_sub(cpu)));
-                let wall_deadline = l.max_wall_time.and_then(|m| start.checked_add(paused.saturating_add(m)));
-                self.meter.start_slice(SLICE_FUEL, slice, self.fuel_used, cpu_deadline, wall_deadline);
+                let mut fuel = self.meter.start_slice(clock.cpu_deadline(self.host.limits.max_cpu_time), self.deadline);
                 // A Rust panic in the interpreter or a native (a bug) ends
                 // the run as a panic instead of unwinding into the host;
                 // caught per slice, which costs nothing per native call.
@@ -248,15 +352,10 @@ impl Vm {
                         Err(Trap::Panic { message: format!("internal error: {msg}"), trace: self.trace_of(&f, None) })
                     }
                 };
-                let spent = (slice - fuel).max(0) as u64 + self.meter.spent();
-                self.fuel_used += spent;
-                unclocked_slices += 1;
-                unclocked_fuel += spent;
-                if unclocked_slices >= CLOCK_SLICES || unclocked_fuel >= SLICE_FUEL as u64 {
-                    now = Instant::now();
-                    cpu += now.saturating_duration_since(t0);
-                    (unclocked_slices, unclocked_fuel) = (0, 0);
-                }
+                self.meter.sync(fuel);
+                clock.ran(self.meter.spent());
+                // Pending I/O checks its buffers against the heap's size.
+                self.heap.io_memory.publish_heap(self.heap.used());
                 self.current = u32::MAX;
                 let exit = match r {
                     Ok(e) => {
@@ -278,16 +377,15 @@ impl Vm {
                         self.ready.push_front(fid);
                         continue;
                     }
-                    Err(Trap::Exit(c)) => return Ok(RunEnd::Exit(c)),
+                    Err(Trap::Exit(c)) => return Ok(Stop::Exit(c)),
                     Err(t) => return Err(t),
                 };
                 match exit {
                     Exit::Done(v) => {
-                        if fid == self.main_fiber {
-                            self.fibers[fid as usize] = Some(f);
-                            return Ok(RunEnd::Finished(v));
-                        }
                         self.fibers[fid as usize] = Some(f);
+                        if Some(fid) == main {
+                            return Ok(Stop::Main(v));
+                        }
                         self.finish_task(fid, v);
                     }
                     Exit::Preempt | Exit::YieldNow => {
@@ -303,20 +401,27 @@ impl Vm {
                         let g = self.next_gen();
                         f.wgen = g;
                         f.state = FiberState::Waiting;
-                        let id = self.io.add(fid, g, fut);
-                        f.io = Some(id);
+                        // Polled once right away: an operation that is
+                        // done already completes without a wait.
+                        let added = self.io.add(fid, g, fut);
+                        f.io = added.as_ref().ok().copied();
                         self.fibers[fid as usize] = Some(f);
+                        if let Err(fin) = added {
+                            self.apply_completions(vec![(fid, g, fin)], &clock)?;
+                        }
                     }
                     Exit::Prompt(cap) => {
+                        // The call is retried after the prompt.
                         f.state = FiberState::Ready;
                         self.fibers[fid as usize] = Some(f);
                         self.ready.push_front(fid);
+                        if main.is_none() {
+                            return Ok(Stop::Prompt(cap));
+                        }
                         self.flush_stdout();
-                        let prompter = self.host.prompter.clone();
-                        let t = Instant::now();
-                        cpu += t.saturating_duration_since(now);
-                        (unclocked_slices, unclocked_fuel) = (0, 0);
-                        let answer = match prompter {
+                        clock.read();
+                        let asked = Instant::now();
+                        let answer = match self.host.prompter.clone() {
                             Some(p) => {
                                 // Host interrupt stops the run while a prompt is pending
                                 let mut prompt = p.prompt(cap.clone());
@@ -336,11 +441,14 @@ impl Vm {
                             }
                             None => PromptAnswer::DenyOnce,
                         };
-                        now = Instant::now();
-                        paused += now.saturating_duration_since(t);
+                        // Time spent waiting for the answer does not count.
+                        if let Some(d) = &mut self.deadline {
+                            *d += asked.elapsed();
+                        }
+                        clock.resume();
                         self.apply_answer(cap, answer);
                     }
-                    Exit::Terminate(c) => return Ok(RunEnd::Exit(c)),
+                    Exit::Terminate(c) => return Ok(Stop::Exit(c)),
                     Exit::Cancelled => {
                         // The task cancelled itself.
                         let waiters = std::mem::take(&mut f.waiters);
@@ -349,60 +457,46 @@ impl Vm {
                         for (w, g) in waiters {
                             self.deliver_panic(w, g, "task cancelled");
                         }
-                        if fid == self.main_fiber {
-                            return Ok(RunEnd::Finished(Value::Unit));
+                        if Some(fid) == main {
+                            return Ok(Stop::Main(Value::Unit));
                         }
                     }
                 }
-                self.check_limits(start, paused, cpu)?;
+                self.check_limits(&clock)?;
                 // Keep I/O flowing and let other host tasks run.
-                if now.saturating_duration_since(last_yield) > Duration::from_millis(2) {
-                    self.heap.io_memory.publish_heap(self.heap.used());
+                if clock.now.saturating_duration_since(clock.last_yield) > YIELD_EVERY {
                     let done = self.io.poll_ready(None);
-                    self.apply_completions(done)?;
+                    self.apply_completions(done, &clock)?;
                     // On the web a computing engine keeps the thread (yielding
                     // does not reach the event loop), so output reaches the
                     // host only when flushed: flush it as it runs.
                     #[cfg(web)]
                     self.flush_stdout();
-                    cpu += Instant::now().saturating_duration_since(now);
+                    clock.read();
                     crate::platform::yield_now().await;
-                    now = Instant::now();
-                    last_yield = now;
-                    (unclocked_slices, unclocked_fuel) = (0, 0);
+                    clock.resume();
+                    clock.last_yield = clock.now;
                 }
             }
             // Nothing is ready: wait for I/O.
             self.flush_stdout();
             if self.io.is_empty() {
-                let trace = match self.fibers.get(self.main_fiber as usize) {
+                let Some(main) = main else { return Ok(Stop::Idle) };
+                let trace = match self.fibers.get(main as usize) {
                     Some(Some(f)) => self.trace_of(f, None),
                     _ => vec![],
                 };
                 return Err(Trap::Panic { message: "deadlock: all tasks are blocked".into(), trace });
             }
-            // A file operation on the hot worker usually finishes within µs.
-            // Wait for it briefly because a park-then-wake-up costs more.
-            let mut done = self.io.poll_ready(None);
-            if done.is_empty() && crate::files::worker_busy() {
-                let until = Instant::now() + FS_SPIN;
-                while !self.io.shared.any_ready.load(Ordering::Acquire) && crate::files::worker_busy() && Instant::now() < until {
-                    std::hint::spin_loop();
-                }
-                done = self.io.poll_ready(None);
-            }
+            let done = self.io.poll_ready(None);
             if !done.is_empty() {
-                self.apply_completions(done)?;
-                self.check_limits(start, paused, cpu)?;
+                self.apply_completions(done, &clock)?;
+                self.check_limits(&clock)?;
                 continue;
             }
-            cpu += Instant::now().saturating_duration_since(now);
-            (unclocked_slices, unclocked_fuel) = (0, 0);
-            let remaining = self.host.limits.max_wall_time.map(|m| m.saturating_sub(start.elapsed().saturating_sub(paused)));
-            let mut sleep = remaining.map(|r| Box::pin(crate::platform::sleep(r)));
+            clock.read();
+            let mut sleep = self.deadline.map(|d| Box::pin(crate::platform::sleep(d.saturating_duration_since(Instant::now()))));
             let interrupt = self.host.interrupt.clone();
-            // Pending I/O checks its buffers against the heap's current size.
-            self.heap.io_memory.publish_heap(self.heap.used());
             let done = std::future::poll_fn(|cx| {
                 let done = self.io.poll_ready(Some(cx.waker()));
                 if !done.is_empty() {
@@ -419,10 +513,10 @@ impl Vm {
                 Poll::Pending
             })
             .await;
-            self.apply_completions(done)?;
-            self.check_limits(start, paused, cpu)?;
-            now = Instant::now();
-            last_yield = now;
+            clock.resume();
+            clock.last_yield = clock.now;
+            self.apply_completions(done, &clock)?;
+            self.check_limits(&clock)?;
         }
     }
 }

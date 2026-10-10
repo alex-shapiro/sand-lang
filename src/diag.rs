@@ -26,7 +26,7 @@ impl Span {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct SourceFile {
     pub name: String,
     pub text: Arc<str>,
@@ -73,12 +73,21 @@ impl SourceFile {
         before as usize + self.text.as_bytes()[mark * CHAR_MARK..pos].iter().filter(|&&b| starts_char(b)).count()
     }
 
-    /// 1-based line and column (in characters) of a byte offset.
-    pub fn line_col(&self, pos: u32) -> (usize, usize) {
-        let line = match self.line_starts.binary_search(&pos) {
+    /// 1-based line of a byte offset.
+    pub fn line(&self, pos: u32) -> usize {
+        self.line_index(pos) + 1
+    }
+
+    fn line_index(&self, pos: u32) -> usize {
+        match self.line_starts.binary_search(&pos) {
             Ok(i) => i,
             Err(i) => i - 1,
-        };
+        }
+    }
+
+    /// 1-based line and column (in characters) of a byte offset.
+    pub fn line_col(&self, pos: u32) -> (usize, usize) {
+        let line = self.line_index(pos);
         let start = self.line_starts[line] as usize;
         let col = self.chars_before(pos as usize).saturating_sub(self.chars_before(start));
         (line + 1, col + 1)
@@ -92,7 +101,7 @@ impl SourceFile {
 }
 
 /// All source files known to a compilation.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct SourceMap {
     pub files: Vec<SourceFile>,
 }
@@ -122,6 +131,7 @@ impl SourceMap {
             column,
             width,
             notes: d.notes.clone(),
+            source_line: Some(f.line_text(line).to_string()),
         }
     }
 }
@@ -170,11 +180,21 @@ pub struct Diagnostic {
     pub column: usize,
     pub width: usize,
     pub notes: Vec<String>,
+    /// The text of the line (without its line break), as compiled.
+    pub source_line: Option<String>,
 }
 
 impl Diagnostic {
-    /// Renders the diagnostic, with a source excerpt if `source` is the text of `self.file`.
-    pub fn render(&self, source: Option<&str>) -> String {
+    /// Renders the diagnostic, with an excerpt of its line:
+    ///
+    /// ```text
+    /// error: type mismatch: expected int, found str
+    ///   --> main.sand:3:9
+    ///   |
+    /// 3 | let x: int = "hi"
+    ///   |              ^^^^
+    /// ```
+    pub fn render(&self) -> String {
         let kind = match self.severity {
             Severity::Error => "error",
             Severity::Warning => "warning",
@@ -185,9 +205,7 @@ impl Diagnostic {
             format!("{kind}[{}]: {}\n", self.code, self.message)
         };
         out.push_str(&format!("  --> {}:{}:{}\n", self.file, self.line, self.column));
-        if let Some(src) = source
-            && let Some(text) = src.lines().nth(self.line - 1)
-        {
+        if let Some(text) = &self.source_line {
             let num = self.line.to_string();
             let pad = " ".repeat(num.len());
             out.push_str(&format!("{pad} |\n{num} | {text}\n"));

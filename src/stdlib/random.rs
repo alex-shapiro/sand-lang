@@ -2,7 +2,7 @@
 
 use crate::check::ModKind;
 use crate::engine::Registry;
-use crate::vm::value::{NativeObject, Obj, Value, to_usize_saturating};
+use crate::vm::value::{FxHashMap, NativeObject, Obj, Value, to_usize_saturating};
 use crate::vm::{NResult, Rng, Vm, panic};
 use std::any::Any;
 
@@ -103,17 +103,23 @@ fn shuffle(vm: &mut Vm, rng: &mut Rng, a: &[Value]) -> NResult {
 
 /// A partial Fisher-Yates shuffle of a copy.
 fn sample(vm: &mut Vm, rng: &mut Rng, a: &[Value]) -> NResult {
-    let n = vm.heap.list(a[0]).len();
+    let items = vm.heap.list(a[0]);
+    let n = items.len();
     let k = a[1].as_int().clamp(0, n as i64) as usize;
-    vm.reserve(size_of_val(vm.heap.list(a[0])))?;
-    vm.charge(n as u64)?;
-    let mut xs = vm.heap.list(a[0]).to_vec();
+    vm.reserve(k.saturating_mul(2 * std::mem::size_of::<Value>()))?;
+    vm.charge(k as u64)?;
+    // A partial Fisher-Yates shuffle of the positions, recording only the
+    // positions it has disturbed (the element now at each).
+    let mut moved: FxHashMap<usize, usize> = FxHashMap::default();
+    let mut out = Vec::with_capacity(k);
     for i in 0..k {
         let j = i + rng.below((n - i) as u64) as usize;
-        xs.swap(i, j);
+        let at_i = moved.get(&i).copied().unwrap_or(i);
+        let at_j = moved.get(&j).copied().unwrap_or(j);
+        moved.insert(j, at_i);
+        out.push(items[at_j]);
     }
-    xs.truncate(k);
-    Ok(vm.heap.new_list(xs))
+    Ok(vm.heap.new_list(out))
 }
 
 fn bytes(vm: &mut Vm, rng: &mut Rng, a: &[Value]) -> NResult {

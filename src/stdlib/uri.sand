@@ -30,7 +30,9 @@ pub struct Uri {
 
     /// Resolves `reference` (absolute or relative) against this URI as the
     /// base, following RFC 3986 §5.2.
-    pub native fn join(self, reference: str) -> Result<Uri>
+    pub fn join(self, reference: str) -> Result<Uri> {
+        Ok(from_parts(resolve_parts(self, reference)?))
+    }
 
     /// The query string decoded into key/value pairs (see `parse_query`).
     pub fn query_pairs(self) -> [(str, str)] {
@@ -67,7 +69,21 @@ pub struct Uri {
 
 /// Parses an absolute URI (with a scheme). The scheme is lower-cased.
 /// Fails with kind `"parse"` on invalid syntax, characters or ports.
-pub native fn parse(text: str) -> Result<Uri>
+pub fn parse(text: str) -> Result<Uri> {
+    Ok(from_parts(parse_parts(text)?))
+}
+
+/// The components of a URI: scheme, userinfo, host, port, path, query and fragment.
+type Parts = (str, str?, str?, int?, str, str?, str?)
+
+fn from_parts(parts: Parts) -> Uri {
+    let (scheme, userinfo, host, port, path, query, fragment) = parts
+    Uri { scheme, userinfo, host, port, path, query, fragment }
+}
+
+native fn parse_parts(text: str) -> Result<Parts>
+
+native fn resolve_parts(base: Uri, reference: str) -> Result<Parts>
 
 /// Percent-encodes every byte except the unreserved characters
 /// `A-Z a-z 0-9 - . _ ~`.
@@ -87,5 +103,5 @@ pub native fn parse_query(q: str) -> [(str, str)]
 
 /// Builds a query string from key/value pairs, percent-encoding both.
 pub fn build_query(pairs: [(str, str)]) -> str {
-    "&".join(pairs.map(p => encode_component(p.0) + "=" + encode_component(p.1)))
+    pairs.map(p => encode_component(p.0) + "=" + encode_component(p.1)).join("&")
 }

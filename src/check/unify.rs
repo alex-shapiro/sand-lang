@@ -1,103 +1,129 @@
 //! Unification, bounds and zonking.
+//!
+//! Inference variables are nodes of the type arena (`Ty::Var`) whose
+//! bindings are kept in `Checker::subst`; types are hash-consed, so equal
+//! types are equal ids and most comparisons are integer comparisons.
 
-use super::{Checker, zonk_budget};
+use super::Checker;
+use super::traits::is_const_dict;
 use crate::diag::Span;
 use crate::hir::*;
 use crate::types::*;
-use std::collections::HashSet;
 
 impl Checker<'_> {
-    pub fn fresh(&mut self) -> Type {
+    pub fn fresh(&mut self) -> TypeId {
         self.subst.push(None);
-        Type::Var((self.subst.len() - 1) as VarId)
+        self.arena.var((self.subst.len() - 1) as VarId)
     }
 
     /// Follows variable bindings at the top level.
-    pub fn resolve(&self, t: &Type) -> Type {
-        let mut t = t.clone();
-        while let Type::Var(v) = t {
-            match &self.subst[v as usize] {
-                Some(b) => t = b.clone(),
-                None => break,
+    #[inline]
+    pub fn resolve(&self, mut t: TypeId) -> TypeId {
+        while let Ty::Var(v) = self.arena.get(t) {
+            match self.subst.get(v as usize) {
+                Some(Some(b)) => t = *b,
+                _ => break,
             }
         }
         t
     }
 
-    pub fn zonk(&self, t: &Type) -> Type {
-        zonk_budget(&self.subst, t, &self.budget)
+    /// Resolves the inference variables in `t`, charging the budget one unit
+    /// per node visited; once the budget is exhausted the rest of the type
+    /// is `ERROR`.
+    pub fn zonk(&mut self, t: TypeId) -> TypeId {
+        if !self.arena.has_vars(t) {
+            return t;
+        }
+        let Checker { arena, subst, budget, .. } = self;
+        zonk_in(arena, subst, budget, t)
     }
 
     /// Whether the (unresolved) variable `v` occurs in `t`.
-    pub(crate) fn occurs_in(&self, v: &Type, t: &Type) -> bool {
-        match self.resolve(v) {
-            Type::Var(x) => self.occurs(x, t),
+    pub(crate) fn occurs_in(&self, v: TypeId, t: TypeId) -> bool {
+        match self.rty(v) {
+            Ty::Var(x) => self.occurs(x, t),
             _ => false,
         }
     }
 
-    fn occurs(&self, v: VarId, t: &Type) -> bool {
+    fn occurs(&self, v: VarId, t: TypeId) -> bool {
+        if !self.arena.has_vars(t) {
+            return false;
+        }
         if !self.budget.charge(1) {
             // Out of budget: refuse the binding rather than risk a cycle.
             return true;
         }
-        let t = self.resolve(t);
-        match &t {
-            Type::Var(w) => *w == v,
-            Type::List(a) | Type::Set(a) => self.occurs(v, a),
-            Type::Map(a, b) => self.occurs(v, a) || self.occurs(v, b),
-            Type::Tuple(ts) | Type::Named(_, ts) => ts.iter().any(|x| self.occurs(v, x)),
-            Type::Fn(ps, r) => ps.iter().any(|x| self.occurs(v, x)) || self.occurs(v, r),
+        match self.rty(t) {
+            Ty::Var(w) => w == v,
+            Ty::List(a) | Ty::Set(a) => self.occurs(v, a),
+            Ty::Map(a, b) => self.occurs(v, a) || self.occurs(v, b),
+            Ty::Tuple(l) | Ty::Named(_, l) => self.arena.list(l).iter().any(|&x| self.occurs(v, x)),
+            Ty::Fn(l, r) => self.arena.list(l).iter().any(|&x| self.occurs(v, x)) || self.occurs(v, r),
             _ => false,
         }
     }
 
-    pub fn unify(&mut self, a: &Type, b: &Type) -> bool {
+    pub fn unify(&mut self, a: TypeId, b: TypeId) -> bool {
+        if a == b {
+            return true;
+        }
         if !self.budget.charge(1) {
             // Out of budget: compilation fails anyway; avoid cascading errors.
             return true;
         }
         let a = self.resolve(a);
         let b = self.resolve(b);
-        match (&a, &b) {
-            (Type::Error, _) | (_, Type::Error) => true,
-            (Type::Never, _) | (_, Type::Never) => true,
-            (Type::Var(x), Type::Var(y)) if x == y => true,
-            (Type::Var(x), t) | (t, Type::Var(x)) => {
-                if self.occurs(*x, t) {
-                    return false;
-                }
-                self.subst[*x as usize] = Some(t.clone());
-                if let Some(log) = &mut self.unify_log {
-                    log.push(*x);
-                }
-                true
-            }
-            (Type::Int, Type::Int)
-            | (Type::Float, Type::Float)
-            | (Type::Bool, Type::Bool)
-            | (Type::Str, Type::Str)
-            | (Type::Bytes, Type::Bytes)
-            | (Type::Duration, Type::Duration)
-            | (Type::Unit, Type::Unit)
-            | (Type::Range, Type::Range) => true,
-            (Type::List(x), Type::List(y)) | (Type::Set(x), Type::Set(y)) => self.unify(x, y),
-            (Type::Map(k1, v1), Type::Map(k2, v2)) => self.unify(k1, k2) && self.unify(v1, v2),
-            (Type::Tuple(xs), Type::Tuple(ys)) => xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| self.unify(x, y)),
-            (Type::Named(d1, xs), Type::Named(d2, ys)) => {
-                d1 == d2 && xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| self.unify(x, y))
-            }
-            (Type::Fn(p1, r1), Type::Fn(p2, r2)) => {
-                p1.len() == p2.len() && p1.iter().zip(p2).all(|(x, y)| self.unify(x, y)) && self.unify(r1, r2)
-            }
-            (Type::Param(p), Type::Param(q)) => p == q,
+        if a == b {
+            return true;
+        }
+        match (self.ty(a), self.ty(b)) {
+            (Ty::Error, _) | (_, Ty::Error) => true,
+            (Ty::Var(x), _) => self.bind(x, b),
+            (_, Ty::Var(y)) => self.bind(y, a),
+            (Ty::List(x), Ty::List(y)) | (Ty::Set(x), Ty::Set(y)) => self.unify(x, y),
+            (Ty::Map(k1, v1), Ty::Map(k2, v2)) => self.unify(k1, k2) && self.unify(v1, v2),
+            (Ty::Tuple(xs), Ty::Tuple(ys)) => self.unify_lists(xs, ys),
+            (Ty::Named(d1, xs), Ty::Named(d2, ys)) => d1 == d2 && self.unify_lists(xs, ys),
+            (Ty::Fn(p1, r1), Ty::Fn(p2, r2)) => self.unify_lists(p1, p2) && self.unify(r1, r2),
+            // (Equal primitives and parameters are equal ids.)
             _ => false,
         }
     }
 
-    /// Unifies, reporting `type mismatch: expected X, found Y` on failure.
-    pub fn expect_type(&mut self, expected: &Type, found: &Type, span: Span) -> bool {
-        if self.unify(expected, found) {
+    fn unify_lists(&mut self, xs: TyList, ys: TyList) -> bool {
+        let n = self.arena.list_len(xs);
+        n == self.arena.list_len(ys) && (0..n).all(|i| self.unify(self.arena.elem(xs, i), self.arena.elem(ys, i)))
+    }
+
+    /// Binds unbound variable `x` to `t` (resolved, not `x` itself).
+    fn bind(&mut self, x: VarId, t: TypeId) -> bool {
+        if self.occurs(x, t) {
+            return false;
+        }
+        self.subst[x as usize] = Some(t);
+        if x < self.fs.var_mark {
+            self.fs.old_bound.push(x);
+        }
+        if let Some(log) = &mut self.unify_log {
+            log.push(x);
+        }
+        true
+    }
+
+    /// Whether a value of type `found` can be used where `expected` is
+    /// required: the types unify, or the value is `never` (its expression
+    /// diverges). Only a whole value's type may be `never` here: `[never]`
+    /// or `fn() -> never` unify with nothing else.
+    pub fn coerce(&mut self, expected: TypeId, found: TypeId) -> bool {
+        self.resolve(found).is_never() || self.unify(expected, found)
+    }
+
+    /// Coerces (see [`Checker::coerce`]), reporting `type mismatch: expected
+    /// X, found Y` on failure.
+    pub fn expect_type(&mut self, expected: TypeId, found: TypeId, span: Span) -> bool {
+        if self.coerce(expected, found) {
             return true;
         }
         let (e, f) = self.show_pair(expected, found);
@@ -107,7 +133,7 @@ impl Checker<'_> {
     }
 
     /// The type of a value that is either `a` or `b` (branches).
-    pub fn join(&mut self, a: &Type, b: &Type, span: Span) -> Type {
+    pub fn join(&mut self, a: TypeId, b: TypeId, span: Span) -> TypeId {
         let ra = self.resolve(a);
         let rb = self.resolve(b);
         if ra.is_never() {
@@ -116,315 +142,257 @@ impl Checker<'_> {
         if rb.is_never() {
             return ra;
         }
-        self.expect_type(&ra, &rb, span);
+        self.expect_type(ra, rb, span);
         ra
     }
 
     /// Whether `t` satisfies `b`; `None` if unknown (unresolved variable).
-    pub fn satisfies(&self, t: &Type, b: Bound) -> Option<bool> {
-        let mut visiting = HashSet::new();
-        self.satisfies_inner(t, b, &mut visiting)
-    }
-
-    fn satisfies_inner(&self, t: &Type, b: Bound, visiting: &mut HashSet<(TypeDefId, Bound)>) -> Option<bool> {
+    pub fn satisfies(&self, t: TypeId, b: Bound) -> Option<bool> {
         if !self.budget.charge(1) {
             return Some(true);
         }
-        let t = self.resolve(t);
-        let all = |c: &Checker, ts: &[Type], visiting: &mut HashSet<(TypeDefId, Bound)>| -> Option<bool> {
+        // Whether all of `ts` satisfy `b`, or `None` if that is not known yet.
+        let all = |ts: &mut dyn Iterator<Item = TypeId>| {
             let mut unknown = false;
             for x in ts {
-                match c.satisfies_inner(x, b, visiting) {
+                match self.satisfies(x, b) {
                     Some(false) => return Some(false),
                     None => unknown = true,
-                    _ => {}
+                    Some(true) => {}
                 }
             }
             if unknown { None } else { Some(true) }
         };
-        Some(match &t {
-            Type::Var(_) => return None,
-            Type::Error | Type::Never => true,
-            Type::Int => true,
-            Type::Float => b != Bound::Hash,
-            Type::Bool | Type::Str | Type::Bytes | Type::Duration | Type::Unit => b != Bound::Num,
-            Type::Range => matches!(b, Bound::Eq | Bound::Hash),
-            Type::List(x) => match b {
-                Bound::Eq | Bound::Ord => return self.satisfies_inner(x, b, visiting),
-                _ => false,
+        let ty = self.rty(t);
+        match ty {
+            Ty::Var(_) => None,
+            Ty::List(x) if matches!(b, Bound::Eq | Bound::Ord) => self.satisfies(x, b),
+            Ty::Set(x) if b == Bound::Eq => self.satisfies(x, b),
+            Ty::Map(k, v) if b == Bound::Eq => all(&mut [k, v].into_iter()),
+            Ty::Tuple(l) if !matches!(b, Bound::Num | Bound::Add) => all(&mut self.arena.list(l).iter().copied()),
+            Ty::Param(p) => Some(self.params[p as usize].has_bound(b)),
+            Ty::Named(d, l) => match derived_index(b).and_then(|k| self.derived.get(d as usize).map(|x| &x[k])) {
+                Some(Derived::Never) => Some(false),
+                Some(Derived::Needs(ps)) => all(&mut ps.iter().map(|&i| self.arena.elem(l, i as usize))),
+                // `Num` and `Add`; the bounds of a type still being declared are not known.
+                None => Some(!matches!(b, Bound::Num | Bound::Add)),
             },
-            Type::Set(x) => match b {
-                Bound::Eq => return self.satisfies_inner(x, b, visiting),
-                _ => false,
-            },
-            Type::Map(k, v) => match b {
-                Bound::Eq => return all(self, &[(**k).clone(), (**v).clone()], visiting),
-                _ => false,
-            },
-            Type::Tuple(ts) => {
-                if b == Bound::Num {
-                    false
-                } else {
-                    return all(self, ts, visiting);
+            _ => Some(prim_satisfies(ty, b)),
+        }
+    }
+
+    /// Works out which built-in bounds the type definitions from `first` on
+    /// (those of the module being checked) satisfy, once their fields and
+    /// variants are known: see [`Derived`].
+    pub(crate) fn derive_bounds(&mut self, first: usize) {
+        let n = self.types.len();
+        // From the optimistic start (every bound holds, requiring nothing),
+        // refine until nothing changes: the greatest fixed point, so that a
+        // recursive type satisfies a bound unless something in it does not.
+        while self.derived.len() < n {
+            self.derived.push(std::array::from_fn(|_| Derived::Needs(Vec::new())));
+        }
+        loop {
+            let mut changed = false;
+            for d in first..n {
+                for (k, b) in DERIVED.into_iter().enumerate() {
+                    let new = self.derive(d, b);
+                    if new != self.derived[d][k] {
+                        self.derived[d][k] = new;
+                        changed = true;
+                    }
                 }
             }
-            Type::Fn(..) => false,
-            Type::Param(p) => self.params[*p as usize].has_bound(b),
-            Type::Named(d, args) => {
-                if b == Bound::Num {
-                    return Some(false);
-                }
-                if !visiting.insert((*d, b)) {
-                    return Some(true);
-                }
-                let def = &self.types[*d as usize];
-                let gens = def.generics.clone();
-                let sub = |ty: &Type| ty.subst_params(&|p| gens.iter().position(|&g| g == p).map(|i| args[i].clone()));
-                let r = match &def.kind {
-                    TypeDefKind::Opaque => b == Bound::Eq,
-                    TypeDefKind::Struct { fields } => {
-                        if b == Bound::Hash && fields.iter().any(|f| f.mutable) {
-                            false
-                        } else {
-                            let tys: Vec<Type> = fields.iter().map(|f| sub(&f.ty)).collect();
-                            match all(self, &tys, visiting) {
-                                Some(x) => x,
-                                None => {
-                                    visiting.remove(&(*d, b));
-                                    return None;
-                                }
-                            }
-                        }
-                    }
-                    TypeDefKind::Enum { variants } => {
-                        let tys: Vec<Type> = variants.iter().flat_map(|v| v.fields.iter().map(sub)).collect();
-                        match all(self, &tys, visiting) {
-                            Some(x) => x,
-                            None => {
-                                visiting.remove(&(*d, b));
-                                return None;
-                            }
-                        }
-                    }
-                };
-                visiting.remove(&(*d, b));
-                r
+            if !changed || !self.budget.check() {
+                break;
             }
-        })
+        }
+    }
+
+    /// What type definition `d` needs to satisfy `b`, from its fields and
+    /// variants and what the other definitions need (so far).
+    fn derive(&self, d: usize, b: Bound) -> Derived {
+        let def = &self.types[d];
+        let mut needs = Vec::new();
+        let ok = match &def.kind {
+            TypeDefKind::Opaque => b == Bound::Eq,
+            TypeDefKind::Struct { fields } => {
+                !(b == Bound::Hash && fields.iter().any(|f| f.mutable))
+                    && fields.iter().all(|f| self.needs(f.ty, b, &def.generics, &mut needs))
+            }
+            TypeDefKind::Enum { variants } => variants.iter().flat_map(|v| &v.fields).all(|&t| self.needs(t, b, &def.generics, &mut needs)),
+        };
+        if !ok {
+            return Derived::Never;
+        }
+        needs.sort_unstable();
+        needs.dedup();
+        Derived::Needs(needs)
+    }
+
+    /// Whether field type `t` of a definition with type parameters
+    /// `generics` can satisfy `b`, adding to `needs` the parameters (as
+    /// indices into `generics`) whose arguments must satisfy it too.
+    fn needs(&self, t: TypeId, b: Bound, generics: &[ParamId], needs: &mut Vec<u32>) -> bool {
+        self.budget.charge(1);
+        let mut go = |t: TypeId| self.needs(t, b, generics, needs);
+        let ty = self.ty(t);
+        match ty {
+            Ty::Param(p) => match generics.iter().position(|&g| g == p) {
+                Some(i) => {
+                    needs.push(i as u32);
+                    true
+                }
+                None => self.params[p as usize].has_bound(b),
+            },
+            Ty::List(x) => matches!(b, Bound::Eq | Bound::Ord) && go(x),
+            Ty::Set(x) => b == Bound::Eq && go(x),
+            Ty::Map(k, v) => b == Bound::Eq && go(k) && go(v),
+            Ty::Tuple(l) => !matches!(b, Bound::Num | Bound::Add) && self.arena.list(l).iter().all(|&x| go(x)),
+            Ty::Named(e, l) => match derived_index(b).map(|k| &self.derived[e as usize][k]) {
+                Some(Derived::Needs(ps)) => ps.iter().all(|&i| go(self.arena.elem(l, i as usize))),
+                _ => false,
+            },
+            Ty::Var(_) => true,
+            _ => prim_satisfies(ty, b),
+        }
     }
 
     /// Checks a bound now, or defers it if the type is not yet known.
-    pub fn require_bound(&mut self, t: &Type, b: Bound, span: Span) {
+    pub fn require_bound(&mut self, t: TypeId, b: Bound, span: Span) {
         match self.satisfies(t, b) {
             Some(true) => {}
             Some(false) => self.report_bound(t, b, span),
-            None => self.fs.obligations.push((t.clone(), b, span)),
+            None => self.fs.obligations.push((t, b, span)),
         }
     }
 
-    pub fn check_bound(&mut self, t: &Type, b: Bound, span: Span, _final: bool) {
-        if self.satisfies(t, b) == Some(false) {
-            self.report_bound(t, b, span);
-        }
-    }
-
-    fn report_bound(&mut self, t: &Type, b: Bound, span: Span) {
-        let z = self.zonk(t);
-        let msg = match z {
-            Type::Param(p) => {
-                let n = self.params[p as usize].name.clone();
+    pub(crate) fn report_bound(&mut self, t: TypeId, b: Bound, span: Span) {
+        let msg = match self.rty(t) {
+            Ty::Param(p) if b == Bound::Add => {
+                let n = self.name(self.params[p as usize].name);
+                format!("operator `+` is not defined for type parameter `{n}`; add a bound `{n}: Num`")
+            }
+            _ if b == Bound::Add => format!("operator `+` is not defined for {}", self.show(t)),
+            Ty::Param(p) => {
+                let n = self.name(self.params[p as usize].name);
                 format!("type parameter `{n}` does not satisfy {}; add a bound `{n}: {}`", b.name(), b.name())
             }
-            _ => format!("{} does not satisfy {}", self.show(&z), b.name()),
+            _ => format!("{} does not satisfy {}", self.show(t), b.name()),
         };
         self.error(span, msg);
     }
 
     // ------------------------------------------------------------------
-    // Zonking HIR
+    // The final walk
 
-    pub fn zonk_expr(&self, e: &mut HExpr) {
-        e.ty = self.zonk(&e.ty);
+    /// The final walk over a checked function body: resolves inference
+    /// variables, puts the dictionaries in place of the evidence placeholders
+    /// (noting the statically known impls of trait calls, and building the
+    /// non-constant dictionaries used in loops or lambdas once, on entry),
+    /// and marks the mutable locals that lambdas capture as cells (after
+    /// fusion has inlined some lambdas). `lambda` is the lambda being walked
+    /// (0: the function itself); `nested` tells whether it is in a loop or lambda.
+    pub(crate) fn finish_expr(&mut self, e: &mut HExpr, fin: &mut Finish, lambda: u32, nested: bool) {
+        e.ty = self.zonk(e.ty);
         match &mut e.kind {
-            HKind::Let { pat, init, else_ } => {
-                self.zonk_pat(pat);
-                self.zonk_expr(init);
-                if let Some(x) = else_ {
-                    self.zonk_expr(x)
+            HKind::Evidence(i) => {
+                let i = *i as usize;
+                *e = HExpr { span: e.span, ..fin.dicts[i].clone() };
+                if nested && fin.hoist && matches!(e.kind, HKind::Dict { .. }) && !is_const_dict(e) {
+                    self.hoist_dict(e, &mut fin.hoisted);
+                }
+                return;
+            }
+            HKind::CallTrait { args, impl_id, .. } => {
+                if let Some(HArg::Expr(HExpr { kind: HKind::Evidence(i), .. })) = args.first()
+                    && let HKind::Dict { impl_id: id, .. } = fin.dicts[*i as usize].kind
+                {
+                    *impl_id = Some(id);
                 }
             }
-            HKind::LocalFns { lambdas, .. } => lambdas.iter_mut().for_each(|l| self.zonk_expr(l)),
-            HKind::Assign { place, op_ty, value, .. } => {
-                *op_ty = self.zonk(op_ty);
-                self.zonk_place(place);
-                self.zonk_expr(value);
-            }
-            HKind::Block(xs) | HKind::Tuple(xs) | HKind::List(xs) => xs.iter_mut().for_each(|x| self.zonk_expr(x)),
-            HKind::If { cond, then, else_ } => {
-                self.zonk_expr(cond);
-                self.zonk_expr(then);
-                if let Some(x) = else_ {
-                    self.zonk_expr(x)
+            HKind::Local(l)
+            | HKind::Assign { place: Place::Local(l), .. }
+            | HKind::PushLocal { list: l, .. }
+            | HKind::InsertLocal { map: l, .. } => {
+                let info = &mut self.fs.locals[*l as usize];
+                if info.mutable && info.owner != lambda {
+                    info.cell = true;
                 }
-            }
-            HKind::IfLet { pat, value, then, else_ } => {
-                self.zonk_pat(pat);
-                self.zonk_expr(value);
-                self.zonk_expr(then);
-                if let Some(x) = else_ {
-                    self.zonk_expr(x)
-                }
-            }
-            HKind::Match { scrut, arms } => {
-                self.zonk_expr(scrut);
-                for a in arms {
-                    self.zonk_pat(&mut a.pat);
-                    if let Some(g) = &mut a.guard {
-                        self.zonk_expr(g);
-                    }
-                    self.zonk_expr(&mut a.body);
-                }
-            }
-            HKind::Loop(b) => self.zonk_expr(b),
-            HKind::While { cond, body } => {
-                self.zonk_expr(cond);
-                self.zonk_expr(body);
-            }
-            HKind::WhileLet { pat, value, body } => {
-                self.zonk_pat(pat);
-                self.zonk_expr(value);
-                self.zonk_expr(body);
-            }
-            HKind::For { pat, iter, body, .. } => {
-                self.zonk_pat(pat);
-                self.zonk_expr(iter);
-                self.zonk_expr(body);
-            }
-            HKind::ForRange { pat, start, end, body, .. } => {
-                self.zonk_pat(pat);
-                self.zonk_expr(start);
-                self.zonk_expr(end);
-                self.zonk_expr(body);
-            }
-            HKind::Break { value: x, .. } | HKind::Return(x) => {
-                if let Some(x) = x {
-                    self.zonk_expr(x)
-                }
-            }
-            HKind::Call { args, .. } | HKind::CallTrait { args, .. } => self.zonk_args(args),
-            HKind::Evidence(b) => {
-                b.ty = self.zonk(&b.ty);
-                for t in &mut b.tr.args {
-                    *t = self.zonk(t);
-                }
-            }
-            HKind::Dict { args, .. } => args.iter_mut().for_each(|x| self.zonk_expr(x)),
-            HKind::CallNative { args, reflect, .. } => {
-                self.zonk_args(args);
-                for t in reflect {
-                    *t = self.zonk(t);
-                }
-            }
-            HKind::CallValue { callee, args } => {
-                self.zonk_expr(callee);
-                args.iter_mut().for_each(|x| self.zonk_expr(x));
-            }
-            HKind::MakeVariant { args, .. } | HKind::MakeStruct { fields: args, .. } => args.iter_mut().for_each(|x| self.zonk_expr(x)),
-            HKind::Map(kvs) => {
-                for (k, v) in kvs {
-                    self.zonk_expr(k);
-                    self.zonk_expr(v);
-                }
-            }
-            HKind::Repeat { elem, count } => {
-                self.zonk_expr(elem);
-                self.zonk_expr(count);
-            }
-            HKind::PushLocal { value, .. } => self.zonk_expr(value),
-            HKind::InsertLocal { key, value, .. } => {
-                self.zonk_expr(key);
-                self.zonk_expr(value);
-            }
-            HKind::Field { obj, .. } => self.zonk_expr(obj),
-            HKind::Index { obj, index, .. } => {
-                self.zonk_expr(obj);
-                self.zonk_expr(index);
-            }
-            HKind::Slice { obj, start, end, .. } => {
-                self.zonk_expr(obj);
-                if let Some(x) = start {
-                    self.zonk_expr(x)
-                }
-                if let Some(x) = end {
-                    self.zonk_expr(x)
-                }
-            }
-            HKind::Unary { e, .. } | HKind::ToStr(e) | HKind::Debug(e) | HKind::Spawn(e) | HKind::Defer(e) => self.zonk_expr(e),
-            HKind::Try { e, .. } => self.zonk_expr(e),
-            HKind::Arith { l, r, .. } | HKind::Cmp { l, r, .. } | HKind::And(l, r) | HKind::Or(l, r) | HKind::Coalesce { l, r, .. } => {
-                self.zonk_expr(l);
-                self.zonk_expr(r);
-            }
-            HKind::Range { start, end, .. } => {
-                self.zonk_expr(start);
-                self.zonk_expr(end);
-            }
-            HKind::Lambda(l) => self.zonk_expr(&mut l.body),
-            HKind::Interp(parts) => {
-                for p in parts {
-                    if let InterpPart::Expr(x, _) = p {
-                        self.zonk_expr(x);
-                    }
-                }
-            }
-            HKind::Unit
-            | HKind::Bool(_)
-            | HKind::Int(_)
-            | HKind::Float(_)
-            | HKind::Dur(_)
-            | HKind::Str(_)
-            | HKind::Bytes(_)
-            | HKind::Local(_)
-            | HKind::Global(_)
-            | HKind::FnValue(_)
-            | HKind::VariantFn { .. }
-            | HKind::Tag(_)
-            | HKind::Continue { .. }
-            | HKind::Error => {}
-        }
-    }
-
-    fn zonk_args(&self, args: &mut [HArg]) {
-        for a in args {
-            match a {
-                HArg::Expr(e) => self.zonk_expr(e),
-                HArg::Default { ty, .. } => *ty = self.zonk(ty),
-            }
-        }
-    }
-
-    fn zonk_place(&self, p: &mut Place) {
-        match p {
-            Place::Field { obj, .. } => self.zonk_expr(obj),
-            Place::Index { obj, index, .. } => {
-                self.zonk_expr(obj);
-                self.zonk_expr(index);
             }
             _ => {}
         }
+        let (lambda, nested) = match &e.kind {
+            HKind::Lambda(l) => (l.id, true),
+            HKind::Loop(_) | HKind::While { .. } | HKind::WhileLet { .. } | HKind::For { .. } | HKind::ForRange { .. } => (lambda, true),
+            _ => (lambda, nested),
+        };
+        e.for_each_part(&mut |p| match p {
+            Part::Expr(x) => self.finish_expr(x, fin, lambda, nested),
+            Part::Pat(p) => self.zonk_pat(p),
+            Part::Type(t) => *t = self.zonk(*t),
+        });
     }
 
-    pub fn zonk_pat(&self, p: &mut HPat) {
-        p.ty = self.zonk(&p.ty);
-        match &mut p.kind {
-            HPatKind::Tuple(ps) | HPatKind::Or(ps) => ps.iter_mut().for_each(|x| self.zonk_pat(x)),
-            HPatKind::Variant { args, .. } => args.iter_mut().for_each(|x| self.zonk_pat(x)),
-            HPatKind::Struct { fields } => fields.iter_mut().for_each(|(_, x)| self.zonk_pat(x)),
-            HPatKind::List { before, after, .. } => {
-                before.iter_mut().for_each(|x| self.zonk_pat(x));
-                after.iter_mut().for_each(|x| self.zonk_pat(x));
-            }
-            _ => {}
-        }
+    pub fn zonk_pat(&mut self, p: &mut HPat) {
+        p.ty = self.zonk(p.ty);
+        p.for_each_subpattern(&mut |x| self.zonk_pat(x));
+    }
+}
+
+/// Resolves the inference variables in `t` (see [`Checker::zonk`]).
+pub(crate) fn zonk_in(arena: &mut TypeArena, subst: &[Option<TypeId>], budget: &super::budget::CompileBudget, t: TypeId) -> TypeId {
+    if !arena.has_vars(t) {
+        return t;
+    }
+    if !budget.charge(1) {
+        return TypeId::ERROR;
+    }
+    match arena.get(t) {
+        Ty::Var(v) => match subst.get(v as usize) {
+            Some(Some(b)) => zonk_in(arena, subst, budget, *b),
+            _ => t,
+        },
+        _ => arena.rebuild(t, &mut |a, x| zonk_in(a, subst, budget, x)),
+    }
+}
+
+/// The state of the final walk of a function body ([`Checker::finish_expr`]).
+pub(crate) struct Finish {
+    /// The dictionary of each evidence placeholder.
+    pub dicts: Vec<HExpr>,
+    /// Whether non-constant dictionaries may occur (the function has dictionaries).
+    pub hoist: bool,
+    /// Dictionaries built on entry, in hidden locals.
+    pub hoisted: Vec<(LocalId, HExpr)>,
+}
+
+/// What a type definition needs to satisfy a built-in bound.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Derived {
+    /// Nothing does it: a field type never satisfies the bound.
+    Never,
+    /// The arguments of these type parameters (indices) must satisfy it.
+    Needs(Vec<u32>),
+}
+
+/// The bounds that type definitions may satisfy, in the order of `Checker::derived`.
+const DERIVED: [Bound; 3] = [Bound::Eq, Bound::Ord, Bound::Hash];
+
+fn derived_index(b: Bound) -> Option<usize> {
+    DERIVED.iter().position(|&x| x == b)
+}
+
+/// Whether a type without components that may vary satisfies `b`.
+fn prim_satisfies(t: Ty, b: Bound) -> bool {
+    match t {
+        Ty::Error | Ty::Never | Ty::Int => true,
+        Ty::Float => b != Bound::Hash,
+        Ty::Str | Ty::Bytes | Ty::Duration => b != Bound::Num,
+        Ty::Bool | Ty::Unit => !matches!(b, Bound::Num | Bound::Add),
+        Ty::Range => matches!(b, Bound::Eq | Bound::Hash),
+        // Concatenation.
+        Ty::List(_) => b == Bound::Add,
+        _ => false,
     }
 }

@@ -277,9 +277,9 @@ print((-3).sign())
 print(4.is_even())
 print(4.is_odd())
 print(65.to_char())
-print(int.parse("42"))
-print(int.parse("x"))
-print(int.parse("ff", radix: 16))
+print("42".parse_int())
+print("x".parse_int())
+print("ff".parse_int(radix: 16))
 print(int.max_value())
 print(int.min_value())
 --- stdout
@@ -306,8 +306,11 @@ print(1.5.min(0.5))
 print(2.0.pow(3.0))
 print(3.7.trunc())
 print(3.14159.to_str_fixed(2))
-print(float.parse("2.5"))
-print(float.parse("nope"))
+print("2.5".parse_float())
+print("nope".parse_float())
+print("-inf".parse_float())
+print((0.0 / 0.0).to_str().parse_float().unwrap().is_nan())
+print("infinity".parse_float())
 print((1.0 / 0.0).is_infinite())
 print(1.0.is_finite())
 print(5.5.clamp(0.0, 1.0))
@@ -319,6 +322,9 @@ print(5.5.clamp(0.0, 1.0))
 3.0
 3.14
 Some(2.5)
+None
+Some(-inf)
+true
 None
 true
 true

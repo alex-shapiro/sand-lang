@@ -60,11 +60,11 @@ pub native fn remove_file(path: str) -> Result<()>
 /// a path inside the directory; every entry is also checked against the policy
 /// before it is removed. Symlinks are removed, never followed.
 pub fn remove_dir(path: str, recursive: bool = false) -> Result<()> {
-    if recursive and entry_type(path)? == "dir" {
+    if recursive and is_dir_entry(path)? {
         check_tree(path)?
         for name in list_dir(path)? {
             let child = join([path, name])
-            if entry_type(child)? == "dir" {
+            if is_dir_entry(child)? {
                 remove_dir(child, recursive: true)?
             } else {
                 remove_file(child)?
@@ -83,7 +83,16 @@ pub native fn rename(src: str, dst: str) -> Result<()>
 pub native fn copy(src: str, dst: str) -> Result<()>
 
 /// Size, kind and modification time of a file or directory.
-pub native fn metadata(path: str) -> Result<Metadata>
+pub fn metadata(path: str) -> Result<Metadata> {
+    let (size, is_file, is_dir, modified) = stat(path)?
+    Ok(Metadata { size, is_file, is_dir, modified: modified.map(n => time.DateTime {
+        unix_nanos: n,
+    }) })
+}
+
+/// `(size, is_file, is_dir, modified)`, the modification time in
+/// nanoseconds since the Unix epoch.
+native fn stat(path: str) -> Result<(int, bool, bool, int?)>
 
 /// Joins path components with the platform separator.
 /// An absolute component replaces everything before it.
@@ -98,8 +107,9 @@ pub native fn dirname(path: str) -> str
 /// The extension of the final component, without the dot.
 pub native fn extension(path: str) -> str?
 
-/// `"file"`, `"dir"`, `"symlink"` or `"other"` (a final symlink is not followed).
-native fn entry_type(path: str) -> Result<str>
+/// Whether the entry at `path` is a directory (a final symlink is not
+/// followed: a link to a directory is not one).
+native fn is_dir_entry(path: str) -> Result<bool>
 
 /// Removes an empty directory.
 native fn remove_empty_dir(path: str) -> Result<()>

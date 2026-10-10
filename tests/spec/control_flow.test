@@ -109,7 +109,7 @@ while true { break 1 }
 for i in 0..3 {
     for j in 0..3 {
         if j == 1 { break }
-        print("{i}{j}")
+        print("\(i)\(j)")
     }
 }
 --- stdout
@@ -134,7 +134,7 @@ let cmd = "go"
 match cmd {
     "stop" => print("stopping")
     "go" => print("going")
-    other => print("unknown {other}")
+    other => print("unknown \(other)")
 }
 --- stdout
 zero
@@ -194,7 +194,7 @@ print(get(None))
 === if let and while let
 let maybe = Some(3)
 if let Some(v) = maybe {
-    print("got {v}")
+    print("got \(v)")
 } else {
     print("nothing")
 }
@@ -368,7 +368,7 @@ fn patterns(pairs: [(int, str)]) -> str {
         let doubled = n * K
         match doubled {
             6 => { out = out + "six," }
-            _ => { out = out + "{s}{doubled}," }
+            _ => { out = out + "\(s)\(doubled)," }
         }
     }
     var i = 0
@@ -380,9 +380,9 @@ fn patterns(pairs: [(int, str)]) -> str {
     }
     var xs = [1, 2, 3]
     while let Some(x) = xs.pop() {
-        out = out + "{x * K}"
+        out = out + "\(x * K)"
     }
-    "{out} {r}"
+    "\(out) \(r)"
 }
 
 fn early(n: int) -> int {
@@ -419,7 +419,7 @@ fn float_and_strings() -> str {
             s += 100
         }
     }
-    "{x} {s}"
+    "\(x) \(s)"
 }
 
 print(uses_consts(50))

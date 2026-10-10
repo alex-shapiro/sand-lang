@@ -381,6 +381,7 @@ spec_files!(
     format,
     collections,
     control_flow,
+    codegen,
     defer,
     functions,
     closures,

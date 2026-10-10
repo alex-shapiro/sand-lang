@@ -140,10 +140,10 @@ let v = match x { 1 => "a", _ => "b" }
 let v = match x { 1 => "a", _ => "b" }
 
 === string literals and interpolation are preserved verbatim
-let s = "a  {x+1}  b"
+let s = "a  \(x+1)  b"
 let r = r"raw\n"
 --- fmt
-let s = "a  {x+1}  b"
+let s = "a  \(x+1)  b"
 let r = r"raw\n"
 
 === lambdas and pipes
@@ -305,3 +305,47 @@ let y = l? ?
     break @outer
 }
 
+=== long operator chains break before their operators
+let ready = configuration_is_loaded(settings) and connection_is_open(database) and cache_is_warm(cache_layer)
+let total = first_quantity_with_a_long_name + second_quantity_with_a_long_name + third_quantity_with_a_long_name
+let diff = first_quantity_with_a_long_name * 2 - second_quantity_with_a_long_name * 3 - third_quantity_x
+--- fmt
+let ready = configuration_is_loaded(settings)
+    and connection_is_open(database)
+    and cache_is_warm(cache_layer)
+let total = first_quantity_with_a_long_name
+    + second_quantity_with_a_long_name
+    + third_quantity_with_a_long_name
+let diff = first_quantity_with_a_long_name * 2
+    - second_quantity_with_a_long_name * 3
+    - third_quantity_x
+
+=== pipe chains break one per line
+let result = input_values_from_the_user |> remove_duplicate_entries |> sort_by_priority |> take_first_ten
+--- fmt
+let result = input_values_from_the_user
+    |> remove_duplicate_entries
+    |> sort_by_priority
+    |> take_first_ten
+
+=== comments stay next to the operator
+let x = 1 /* one */ + 2
+--- fmt
+let x = 1 /* one */ + 2
+
+=== interpolations with nested strings, brackets and braces are kept verbatim
+let xs=[1,2]
+print( "{\"n\": \(xs.map(x => "<\(x:>2)>").join(",")), \"m\": \(f(
+    1))}" )
+--- fmt
+let xs = [1, 2]
+print("{\"n\": \(xs.map(x => "<\(x:>2)>").join(",")), \"m\": \(f(
+    1))}")
+
+=== a continued minus line and a negation line keep their meaning
+var x = base
+- discount
+-x
+--- fmt
+var x = base - discount
+-x

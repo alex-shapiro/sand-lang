@@ -1,7 +1,8 @@
 //! Natives for the prelude and the `task` module.
 
 use crate::engine::Registry;
-use crate::vm::compare::{try_sort_by, try_sort_numbers, values_cmp_metered, values_eq_metered};
+use crate::vm::compare::{find_key, hash_key, set_slot, try_sort_by, try_sort_numbers, values_cmp_metered, values_eq_metered};
+use crate::vm::heap::Heap;
 use crate::vm::value::*;
 use crate::vm::{BlockOn, Ctl, NResult, Vm, panic};
 use std::cmp::Ordering;
@@ -52,19 +53,14 @@ pub fn register(r: &mut Registry) {
         Ok(Value::Unit)
     });
     r.add_builtin("panic", |vm, a| panic(vm.str(a[0]).to_string()));
-    r.add_builtin("exit", |_, a| Err(Ctl::Exit(int(a[0]).clamp(i32::MIN as i64, i32::MAX as i64) as i32)));
+    r.add_builtin("exit", |_, a| Err(Ctl::exit(int(a[0]).clamp(i32::MIN as i64, i32::MAX as i64) as i32)));
     r.add_builtin("set", |vm, a| {
-        produce(vm, 2 * list_len(vm, a[0]), 0)?;
-        let s = vm.heap.alloc(Obj::Set(Box::default()));
-        let items = vm.heap.list(a[0]).to_vec();
-        for x in items {
-            vm.set_add(s, x).map_err(crate::vm::meter::ctl_from_message)?;
-        }
-        Ok(s)
+        let set = set_of(vm, vm.heap.list(a[0]))?;
+        Ok(new_set(vm, set))
     });
 
     // Tasks and channels.
-    r.add_builtin("Task.wait", |_, a| Err(Ctl::Block(BlockOn::Join(a[0]))));
+    r.add_builtin("Task.wait", |vm, a| vm.block(BlockOn::Join(a[0])));
     r.add_builtin("Task.is_done", |vm, a| {
         Ok(Value::Bool(match vm.heap.get(a[0]) {
             Obj::Task(t) => t.state != TaskState::Running,
@@ -75,8 +71,8 @@ pub fn register(r: &mut Registry) {
         vm.cancel_task(a[0]);
         Ok(Value::Unit)
     });
-    r.add_builtin("Channel.send", |_, a| Err(Ctl::Block(BlockOn::Send(a[0], a[1]))));
-    r.add_builtin("Channel.recv", |_, a| Err(Ctl::Block(BlockOn::Recv(a[0]))));
+    r.add_builtin("Channel.send", |vm, a| vm.block(BlockOn::Send(a[0], a[1])));
+    r.add_builtin("Channel.recv", |vm, a| vm.block(BlockOn::Recv(a[0])));
     r.add_builtin("Channel.try_recv", |vm, a| {
         let Obj::Channel(c) = vm.heap.get_mut(a[0]) else { return panic("not a channel") };
         let v = c.queue.pop_front();
@@ -118,12 +114,12 @@ pub fn register(r: &mut Registry) {
     });
     r.add_builtin("task.sleep", |_, a| {
         let d = int(a[0]).max(0) as u64;
-        Err(Ctl::Async(Box::pin(async move {
+        Err(Ctl::suspend(Box::pin(async move {
             crate::platform::sleep(std::time::Duration::from_nanos(d)).await;
             Box::new(|_: &mut Vm| Ok(Value::Unit)) as crate::vm::Finisher
         })))
     });
-    r.add_builtin("task.yield_now", |_, _| Err(Ctl::Yield));
+    r.add_builtin("task.yield_now", |vm, _| Err(vm.yield_now()));
     r.add_builtin("task.race", |vm, a| {
         let n = vm.heap.list(a[0]).len();
         vm.charge(n as u64)?;
@@ -132,7 +128,7 @@ pub fn register(r: &mut Registry) {
         if tasks.is_empty() {
             return panic("task.race called with an empty list");
         }
-        Err(Ctl::Block(BlockOn::Race(tasks)))
+        vm.block(BlockOn::Race(tasks))
     });
     r.add_builtin("task.channel", |vm, a| {
         let cap = int(a[0]);
@@ -177,16 +173,6 @@ fn register_numbers(r: &mut Registry) {
         let v = c.map(|c| vm.short_str(c.encode_utf8(&mut [0; 4])));
         Ok(vm.option(v))
     });
-    r.add_builtin("int.parse", |vm, a| {
-        let radix = int(a[1]);
-        if !(2..=36).contains(&radix) {
-            return panic(format!("radix must be between 2 and 36, found {radix}"));
-        }
-        let t = vm.str(a[0]);
-        vm.charge_bytes(t.len())?;
-        let v = if t.starts_with('+') { None } else { i64::from_str_radix(t, radix as u32).ok() };
-        Ok(vm.option(v.map(Value::Int)))
-    });
     macro_rules! fl {
         ($name:expr, $f:expr) => {
             r.add_builtin($name, |_, a| Ok(Value::Float($f(float(a[0])))));
@@ -217,14 +203,6 @@ fn register_numbers(r: &mut Registry) {
         let s = format!("{:.*}", d, float(a[0]));
         Ok(vm.new_str(s))
     });
-    r.add_builtin("float.parse", |vm, a| {
-        let t = vm.str(a[0]);
-        vm.charge_bytes(t.len())?;
-        let ok = !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit() || matches!(b, b'.' | b'-' | b'+' | b'e' | b'E'))
-            || matches!(t, "inf" | "-inf" | "NaN");
-        let v = if ok { t.parse::<f64>().ok() } else { None };
-        Ok(vm.option(v.map(Value::Float)))
-    });
     r.add_builtin("duration.nanos", |_, a| Ok(Value::Int(int(a[0]))));
     r.add_builtin("duration.micros", |_, a| Ok(Value::Int(int(a[0]) / 1_000)));
     r.add_builtin("duration.millis", |_, a| Ok(Value::Int(int(a[0]) / 1_000_000)));
@@ -247,22 +225,39 @@ fn register_numbers(r: &mut Registry) {
     });
 }
 
-/// Splits the string `text` with `split` into a `[str]`, checking the
-/// memory limit before building the pieces.
-fn split_list<'t, I: Iterator<Item = &'t str>>(vm: &mut Vm, text: &'t str, split: impl Fn(&'t str) -> I) -> NResult {
-    vm.charge_bytes(text.len())?;
-    let count = split(text).count();
+/// Splits a string into a `[str]` of new strings (pieces of one ASCII
+/// character are shared, see `Vm::short_str`). `split` reads the text from
+/// the heap and calls its argument for each piece; it is called twice, to
+/// count the pieces and check the memory limit before building them, and to
+/// build them. The caller charges for scanning the text.
+fn split_list(vm: &mut Vm, text: Value, split: impl for<'h> Fn(&'h Heap, &mut dyn FnMut(&'h str))) -> NResult {
+    let mut count = 0usize;
+    split(&vm.heap, &mut |_| count += 1);
     produce(vm, count, count)?;
-    vm.reserve(text.len().saturating_add(count.saturating_mul(ITEM)))?;
-    let vals: Vec<Value> = split(text).map(|p| vm.short_str(p)).collect();
-    Ok(vm.heap.new_list(vals))
+    vm.reserve(vm.str(text).len().saturating_add(count.saturating_mul(ITEM)))?;
+    Ok(vm.staged_strs(|heap, st, ascii| {
+        st.expect(count + 1);
+        let mut items = Vec::with_capacity(count);
+        split(heap, &mut |p| {
+            items.push(match p.as_bytes() {
+                &[b] if b.is_ascii() => ascii[b as usize],
+                _ => st.new_str(p),
+            })
+        });
+        st.new_list(items)
+    }))
 }
 
-/// Copies the string argument out of the heap (charging for the copy).
-fn owned_str(vm: &Vm, v: Value) -> Result<String, Ctl> {
-    let t = vm.str(v);
-    copy_bytes(vm, t.len())?;
-    Ok(t.to_string())
+/// A new string holding the bytes `range` of string `v` (copied once).
+pub(crate) fn new_substr(vm: &mut Vm, v: Value, range: std::ops::Range<usize>) -> Value {
+    let s: Box<str> = vm.str(v).get(range).unwrap_or_default().into();
+    vm.heap.new_str(s)
+}
+
+/// The byte range of `part`, a slice of `whole`, within it.
+pub(crate) fn span_of(whole: &str, part: &str) -> std::ops::Range<usize> {
+    let start = (part.as_ptr() as usize).wrapping_sub(whole.as_ptr() as usize);
+    start..start + part.len()
 }
 
 fn char_class(vm: &Vm, v: Value, f: impl Fn(char) -> bool) -> NResult {
@@ -275,8 +270,11 @@ fn register_str(r: &mut Registry) {
     r.add_builtin("str.len", |vm, a| Ok(Value::Int(vm.str(a[0]).len() as i64)));
     r.add_builtin("str.is_empty", |vm, a| Ok(Value::Bool(vm.str(a[0]).is_empty())));
     r.add_builtin("str.chars", |vm, a| {
-        let t = owned_str(vm, a[0])?;
-        split_list(vm, &t, |t| t.char_indices().map(move |(i, c)| &t[i..i + c.len_utf8()]))
+        vm.charge_bytes(vm.str(a[0]).len())?;
+        split_list(vm, a[0], |heap, f| {
+            let t = heap.str(a[0]);
+            t.char_indices().for_each(|(i, c)| f(&t[i..i + c.len_utf8()]))
+        })
     });
     r.add_builtin("str.char_count", |vm, a| {
         let t = vm.str(a[0]);
@@ -339,32 +337,30 @@ fn register_str(r: &mut Registry) {
         Ok(vm.new_str(s))
     });
     r.add_builtin("str.split", |vm, a| {
-        if vm.str(a[1]).is_empty() {
+        let (t, sep) = (vm.str(a[0]), vm.str(a[1]));
+        if sep.is_empty() {
             return panic("split with an empty separator");
         }
-        let (t, sep) = (owned_str(vm, a[0])?, owned_str(vm, a[1])?);
-        split_list(vm, &t, |t| t.split(sep.as_str()))
+        vm.charge_bytes(t.len().saturating_add(sep.len()))?;
+        split_list(vm, a[0], |heap, f| heap.str(a[0]).split(heap.str(a[1])).for_each(f))
     });
     r.add_builtin("str.split_once", |vm, a| {
-        vm.charge_bytes(vm.str(a[0]).len().saturating_add(vm.str(a[1]).len()))?;
-        let parts = vm.str(a[0]).split_once(vm.str(a[1])).map(|(x, y)| (x.to_string(), y.to_string()));
-        match parts {
-            Some((x, y)) => {
-                let xv = vm.new_str(x);
-                let yv = vm.new_str(y);
-                let t = vm.heap.new_tuple(vec![xv, yv]);
-                Ok(vm.some(t))
-            }
-            None => Ok(vm.none()),
-        }
+        let (t, sep) = (vm.str(a[0]), vm.str(a[1]));
+        vm.charge_bytes(t.len().saturating_add(sep.len()))?;
+        let Some((x, y)) = t.split_once(sep) else { return Ok(vm.none()) };
+        let (x, y) = (span_of(t, x), span_of(t, y));
+        copy_bytes(vm, x.len() + y.len())?;
+        let (x, y) = (new_substr(vm, a[0], x), new_substr(vm, a[0], y));
+        let pair = vm.heap.new_tuple(vec![x, y]);
+        Ok(vm.some(pair))
     });
     r.add_builtin("str.split_whitespace", |vm, a| {
-        let t = owned_str(vm, a[0])?;
-        split_list(vm, &t, str::split_whitespace)
+        vm.charge_bytes(vm.str(a[0]).len())?;
+        split_list(vm, a[0], |heap, f| heap.str(a[0]).split_whitespace().for_each(f))
     });
     r.add_builtin("str.lines", |vm, a| {
-        let t = owned_str(vm, a[0])?;
-        split_list(vm, &t, str::lines)
+        vm.charge_bytes(vm.str(a[0]).len())?;
+        split_list(vm, a[0], |heap, f| heap.str(a[0]).lines().for_each(f))
     });
     fn substr(vm: &mut Vm, v: Value, f: impl Fn(&str) -> &str) -> NResult {
         let t = vm.str(v);
@@ -373,29 +369,24 @@ fn register_str(r: &mut Registry) {
         if s.len() == t.len() {
             return Ok(v);
         }
-        copy_bytes(vm, s.len())?;
-        let s = s.to_string();
-        Ok(vm.new_str(s))
+        let range = span_of(t, s);
+        copy_bytes(vm, range.len())?;
+        Ok(new_substr(vm, v, range))
     }
     r.add_builtin("str.trim", |vm, a| substr(vm, a[0], str::trim));
     r.add_builtin("str.trim_start", |vm, a| substr(vm, a[0], str::trim_start));
     r.add_builtin("str.trim_end", |vm, a| substr(vm, a[0], str::trim_end));
-    r.add_builtin("str.strip_prefix", |vm, a| {
-        vm.charge_bytes(vm.str(a[1]).len())?;
-        let s = vm.str(a[0]).strip_prefix(vm.str(a[1]));
-        copy_bytes(vm, s.map_or(0, str::len))?;
-        let s = s.map(String::from);
-        let v = s.map(|s| vm.new_str(s));
-        Ok(vm.option(v))
-    });
-    r.add_builtin("str.strip_suffix", |vm, a| {
-        vm.charge_bytes(vm.str(a[1]).len())?;
-        let s = vm.str(a[0]).strip_suffix(vm.str(a[1]));
-        copy_bytes(vm, s.map_or(0, str::len))?;
-        let s = s.map(String::from);
-        let v = s.map(|s| vm.new_str(s));
-        Ok(vm.option(v))
-    });
+    fn strip(vm: &mut Vm, a: &[Value], f: impl Fn(&str, &str) -> Option<usize>) -> NResult {
+        let (t, affix) = (vm.str(a[0]), vm.str(a[1]));
+        vm.charge_bytes(affix.len())?;
+        let Some(start) = f(t, affix) else { return Ok(vm.none()) };
+        let range = start..start + t.len() - affix.len();
+        copy_bytes(vm, range.len())?;
+        let s = new_substr(vm, a[0], range);
+        Ok(vm.some(s))
+    }
+    r.add_builtin("str.strip_prefix", |vm, a| strip(vm, a, |t, p| t.starts_with(p).then_some(p.len())));
+    r.add_builtin("str.strip_suffix", |vm, a| strip(vm, a, |t, p| t.ends_with(p).then_some(0)));
     r.add_builtin("str.to_upper", |vm, a| {
         let t = vm.str(a[0]);
         vm.reserve(case_mapped_bound(t))?;
@@ -416,7 +407,7 @@ fn register_str(r: &mut Registry) {
             return panic(format!("negative repeat count: {n}"));
         }
         let n = to_usize_saturating(n);
-        let total = vm.str(a[0]).len().checked_mul(n).ok_or(Ctl::Limit(crate::LimitKind::Memory))?;
+        let total = vm.str(a[0]).len().checked_mul(n).ok_or(Ctl::limit(crate::LimitKind::Memory))?;
         copy_bytes(vm, total)?;
         let s = vm.str(a[0]).repeat(n);
         Ok(vm.new_str(s))
@@ -438,15 +429,22 @@ fn register_str(r: &mut Registry) {
     r.add_builtin("str.pad_start", |vm, a| pad(vm, a, true));
     r.add_builtin("str.pad_end", |vm, a| pad(vm, a, false));
     r.add_builtin("str.parse_int", |vm, a| {
+        let radix = int(a[1]);
+        if !(2..=36).contains(&radix) {
+            return panic(format!("radix must be between 2 and 36, found {radix}"));
+        }
         let t = vm.str(a[0]);
         vm.charge_bytes(t.len())?;
-        let v = if t.starts_with('+') { None } else { t.parse::<i64>().ok() };
+        let v = if t.starts_with('+') { None } else { i64::from_str_radix(t, radix as u32).ok() };
         Ok(vm.option(v.map(Value::Int)))
     });
     r.add_builtin("str.parse_float", |vm, a| {
         let t = vm.str(a[0]);
         vm.charge_bytes(t.len())?;
-        let ok = !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit() || matches!(b, b'.' | b'-' | b'+' | b'e' | b'E'));
+        // Decimal and scientific notation, and the non-finite values as
+        // floats display them (Rust's parser also takes `infinity`, `nan`, ...).
+        let ok = !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit() || matches!(b, b'.' | b'-' | b'+' | b'e' | b'E'))
+            || matches!(t, "inf" | "-inf" | "NaN");
         let v = if ok { t.parse::<f64>().ok() } else { None };
         Ok(vm.option(v.map(Value::Float)))
     });
@@ -477,7 +475,6 @@ fn register_str(r: &mut Registry) {
         let s: String = t.chars().rev().collect();
         Ok(vm.new_str(s))
     });
-    r.add_builtin("str.join", |vm, a| join(vm, a[1], a[0]));
     r.add_builtin("List.join", |vm, a| join(vm, a[0], a[1]));
 }
 
@@ -629,7 +626,7 @@ fn index_check(i: i64, len: usize, inclusive: bool) -> Result<usize, Ctl> {
     let max = if inclusive { len } else { len.saturating_sub(1) };
     match to_index(i) {
         Some(at) if at <= max && (inclusive || len > 0) => Ok(at),
-        _ => Err(Ctl::Panic(format!("index out of bounds: index {i}, length {len}"))),
+        _ => Err(Ctl::panic(format!("index out of bounds: index {i}, length {len}"))),
     }
 }
 
@@ -663,8 +660,10 @@ fn register_list(r: &mut Registry) {
         let n = list_len(vm, a[0]);
         let i = index_check(int(a[1]), n, true)?;
         vm.charge_bytes((n - i) * SLOT)?;
+        let before = vm.heap.get(a[0]).size();
         vm.heap.list_mut(a[0]).insert(i, a[2]);
-        vm.heap.bytes += 16;
+        let after = vm.heap.get(a[0]).size();
+        vm.heap.account(before, after);
         Ok(Value::Unit)
     });
     r.add_builtin("List.remove", |vm, a| {
@@ -675,9 +674,12 @@ fn register_list(r: &mut Registry) {
     });
     r.add_builtin("List.extend", |vm, a| {
         produce(vm, list_len(vm, a[1]), 0)?;
+        // A copy: the list may extend itself.
         let other = vm.heap.list(a[1]).to_vec();
-        vm.heap.bytes += other.len() * 16;
+        let before = vm.heap.get(a[0]).size();
         vm.heap.list_mut(a[0]).extend(other);
+        let after = vm.heap.get(a[0]).size();
+        vm.heap.account(before, after);
         Ok(Value::Unit)
     });
     r.add_builtin("List.clear", |vm, a| {
@@ -778,9 +780,10 @@ fn register_list(r: &mut Registry) {
         }
         let (n, len) = (to_usize_saturating(n), list_len(vm, a[0]));
         produce(vm, len, len.div_ceil(n))?;
-        let parts: Vec<Vec<Value>> = vm.heap.list(a[0]).chunks(n).map(|c| c.to_vec()).collect();
-        let vals: Vec<Value> = parts.into_iter().map(|p| vm.heap.new_list(p)).collect();
-        Ok(vm.heap.new_list(vals))
+        Ok(vm.heap.staged(|heap, st| {
+            let parts = heap.list(a[0]).chunks(n).map(|c| st.new_list(c.to_vec())).collect();
+            st.new_list(parts)
+        }))
     });
     r.add_builtin("List.windows", |vm, a| {
         let n = int(a[1]);
@@ -790,23 +793,25 @@ fn register_list(r: &mut Registry) {
         let (n, l) = (to_usize_saturating(n), vm.heap.list(a[0]));
         let windows = (l.len() + 1).saturating_sub(n);
         produce(vm, windows.saturating_mul(n), windows)?;
-        let parts: Vec<Vec<Value>> = l.windows(n).map(|c| c.to_vec()).collect();
-        let vals: Vec<Value> = parts.into_iter().map(|p| vm.heap.new_list(p)).collect();
-        Ok(vm.heap.new_list(vals))
+        Ok(vm.heap.staged(|heap, st| {
+            let parts = heap.list(a[0]).windows(n).map(|w| st.new_list(w.to_vec())).collect();
+            st.new_list(parts)
+        }))
     });
     r.add_builtin("List.enumerate", |vm, a| {
         produce(vm, list_len(vm, a[0]), list_len(vm, a[0]))?;
-        let items = vm.heap.list(a[0]).to_vec();
-        let vals: Vec<Value> = items.into_iter().enumerate().map(|(i, x)| vm.heap.new_tuple(vec![Value::Int(i as i64), x])).collect();
-        Ok(vm.heap.new_list(vals))
+        Ok(vm.heap.staged(|heap, st| {
+            let pairs = heap.list(a[0]).iter().enumerate().map(|(i, &x)| st.new_tuple(vec![Value::Int(i as i64), x])).collect();
+            st.new_list(pairs)
+        }))
     });
     r.add_builtin("List.zip", |vm, a| {
         let n = list_len(vm, a[0]).min(list_len(vm, a[1]));
         produce(vm, n, n)?;
-        let xs = vm.heap.list(a[0]).to_vec();
-        let ys = vm.heap.list(a[1]).to_vec();
-        let vals: Vec<Value> = xs.into_iter().zip(ys).map(|(x, y)| vm.heap.new_tuple(vec![x, y])).collect();
-        Ok(vm.heap.new_list(vals))
+        Ok(vm.heap.staged(|heap, st| {
+            let pairs = heap.list(a[0]).iter().zip(heap.list(a[1])).map(|(&x, &y)| st.new_tuple(vec![x, y])).collect();
+            st.new_list(pairs)
+        }))
     });
     r.add_builtin("List.dedup", |vm, a| {
         produce(vm, 2 * list_len(vm, a[0]), 0)?;
@@ -824,25 +829,14 @@ fn register_list(r: &mut Registry) {
         Ok(vm.heap.new_list(out))
     });
     r.add_builtin("List.unique", |vm, a| {
-        produce(vm, 4 * list_len(vm, a[0]), 0)?;
-        let items = vm.heap.list(a[0]).to_vec();
-        let set = vm.heap.alloc(Obj::Set(Box::default()));
-        let mut out = Vec::new();
-        for x in items {
-            if vm.set_add(set, x).map_err(crate::vm::meter::ctl_from_message)? {
-                out.push(x);
-            }
-        }
-        Ok(vm.heap.new_list(out))
+        let set = set_of(vm, vm.heap.list(a[0]))?;
+        produce(vm, set.live, 0)?;
+        let items = set.entries.into_iter().flatten().collect();
+        Ok(vm.heap.new_list(items))
     });
     r.add_builtin("List.to_set", |vm, a| {
-        produce(vm, 3 * list_len(vm, a[0]), 0)?;
-        let items = vm.heap.list(a[0]).to_vec();
-        let set = vm.heap.alloc(Obj::Set(Box::default()));
-        for x in items {
-            vm.set_add(set, x).map_err(crate::vm::meter::ctl_from_message)?;
-        }
-        Ok(set)
+        let set = set_of(vm, vm.heap.list(a[0]))?;
+        Ok(new_set(vm, set))
     });
     // Values are erased, so the identity (`T.zero()` / `T.one()`, from the
     // `Num` evidence of the caller) is passed in: an empty `[float]` sums to 0.0.
@@ -851,7 +845,7 @@ fn register_list(r: &mut Registry) {
         let items = vm.heap.list(list).to_vec();
         let mut acc = init;
         for x in items {
-            acc = vm.arith(if product { 2 } else { 0 }, acc, x).map_err(crate::vm::meter::ctl_from_message)?;
+            acc = vm.arith(if product { 2 } else { 0 }, acc, x)?;
         }
         Ok(acc)
     }
@@ -927,7 +921,97 @@ fn register_list(r: &mut Registry) {
     });
 }
 
+/// Approximate memory of a set element or map entry built in bulk: the
+/// entry plus its share of the index.
+const ENTRY: usize = 3 * SLOT;
+
+/// Adds `x` to `set`, a set being built outside the heap (so it needs no
+/// write barrier); false if it was there already.
+fn set_insert(vm: &Vm, set: &mut SetObj, x: Value) -> Result<bool, Ctl> {
+    let hash = hash_key(&vm.heap, &vm.meter, x)?;
+    if find_key(&vm.heap, &vm.meter, &set.index, hash, x, |i| set.entries[i])?.is_some() {
+        return Ok(false);
+    }
+    set_push(set, hash, x)?;
+    Ok(true)
+}
+
+/// Appends `x`, which is not in `set` and has hash `hash`.
+fn set_push(set: &mut SetObj, hash: u64, x: Value) -> Result<(), Ctl> {
+    if !slot_fits(set.entries.len()) {
+        return panic("set too large");
+    }
+    set.index.insert(hash, set.entries.len());
+    set.entries.push(Some(x));
+    set.live += 1;
+    Ok(())
+}
+
+/// The set of `items` (the first of equal elements, in order).
+fn set_of(vm: &Vm, items: &[Value]) -> Result<SetObj, Ctl> {
+    produce(vm, items.len().saturating_mul(ENTRY / SLOT), 0)?;
+    let mut set = SetObj::default();
+    for &x in items {
+        set_insert(vm, &mut set, x)?;
+    }
+    Ok(set)
+}
+
+/// The set of the elements of set `v` that satisfy `keep`, in order.
+fn set_filter(vm: &Vm, v: Value, mut keep: impl FnMut(Value) -> Result<bool, Ctl>) -> Result<SetObj, Ctl> {
+    let Obj::Set(src) = vm.heap.get(v) else { return Ok(SetObj::default()) };
+    produce(vm, src.live.saturating_mul(ENTRY / SLOT), 0)?;
+    let mut set = SetObj::default();
+    for &x in src.entries.iter().flatten() {
+        if keep(x)? {
+            // Elements of a set are distinct: no lookup is needed.
+            let hash = hash_key(&vm.heap, &vm.meter, x)?;
+            set_push(&mut set, hash, x)?;
+        }
+    }
+    Ok(set)
+}
+
+fn new_set(vm: &mut Vm, set: SetObj) -> Value {
+    vm.heap.alloc(Obj::Set(Box::new(set)))
+}
+
+/// A copy of map or set object `v` (sharing no state): the entries and
+/// their index are copied without rehashing any key.
+fn copy_container(vm: &mut Vm, v: Value) -> NResult {
+    let copy = match vm.heap.get(v) {
+        Obj::Map(m) => Obj::Map(m.clone()),
+        Obj::Set(s) => Obj::Set(s.clone()),
+        _ => return panic("not a map or set"),
+    };
+    let size = copy.size();
+    vm.reserve(size)?;
+    vm.charge_bytes(size)?;
+    Ok(vm.heap.alloc(copy))
+}
+
+/// Empties map or set `v`, accounting for the memory freed.
+fn clear_container(vm: &mut Vm, v: Value) -> Result<(), Ctl> {
+    vm.unpin(v)?;
+    let before = vm.heap.get(v).size();
+    match vm.heap.get_mut(v) {
+        Obj::Map(m) => m.clear(),
+        Obj::Set(s) => s.clear(),
+        _ => {}
+    }
+    let after = vm.heap.get(v).size();
+    vm.heap.account(before, after);
+    Ok(())
+}
+
 fn register_map_set(r: &mut Registry) {
+    /// The keys (`0`) or values (`1`) of map `m`, as a list.
+    fn map_column(vm: &mut Vm, m: Value, col: usize) -> NResult {
+        let Obj::Map(mo) = vm.heap.get(m) else { return Ok(vm.heap.new_list(Vec::new())) };
+        produce(vm, mo.live, 0)?;
+        let items = mo.entries.iter().flatten().map(|&(k, v)| if col == 0 { k } else { v }).collect();
+        Ok(vm.heap.new_list(items))
+    }
     fn map_entries(vm: &Vm, m: Value) -> Result<Vec<(Value, Value)>, Ctl> {
         match vm.heap.get(m) {
             Obj::Map(mo) => {
@@ -937,13 +1021,10 @@ fn register_map_set(r: &mut Registry) {
             _ => Ok(vec![]),
         }
     }
-    fn set_items(vm: &Vm, s: Value) -> Result<Vec<Value>, Ctl> {
+    fn set_items(vm: &Vm, s: Value) -> &[Option<Value>] {
         match vm.heap.get(s) {
-            Obj::Set(so) => {
-                produce(vm, so.live, 0)?;
-                Ok(so.entries.iter().flatten().copied().collect())
-            }
-            _ => Ok(vec![]),
+            Obj::Set(so) => &so.entries,
+            _ => &[],
         }
     }
     r.add_builtin("Map.len", |vm, a| {
@@ -959,66 +1040,45 @@ fn register_map_set(r: &mut Registry) {
         }))
     });
     r.add_builtin("Map.get", |vm, a| {
-        let v = vm.map_get(a[0], a[1]).map_err(crate::vm::meter::ctl_from_message)?;
+        let v = vm.map_get(a[0], a[1])?;
         Ok(vm.option(v))
     });
-    r.add_builtin("Map.get_or", |vm, a| Ok(vm.map_get(a[0], a[1]).map_err(crate::vm::meter::ctl_from_message)?.unwrap_or(a[2])));
-    r.add_builtin("Map.contains", |vm, a| Ok(Value::Bool(vm.map_get(a[0], a[1]).map_err(crate::vm::meter::ctl_from_message)?.is_some())));
+    r.add_builtin("Map.get_or", |vm, a| Ok(vm.map_get(a[0], a[1])?.unwrap_or(a[2])));
+    r.add_builtin("Map.contains", |vm, a| Ok(Value::Bool(vm.map_get(a[0], a[1])?.is_some())));
     r.add_builtin("Map.insert", |vm, a| {
-        let old = vm.map_insert(a[0], a[1], a[2]).map_err(crate::vm::meter::ctl_from_message)?;
+        let old = vm.map_insert(a[0], a[1], a[2])?;
         Ok(vm.option(old))
     });
     r.add_builtin("Map.remove", |vm, a| {
-        let old = vm.map_remove(a[0], a[1]).map_err(crate::vm::meter::ctl_from_message)?;
+        let old = vm.map_remove(a[0], a[1])?;
         Ok(vm.option(old))
     });
-    r.add_builtin("Map.keys", |vm, a| {
-        let ks: Vec<Value> = map_entries(vm, a[0])?.into_iter().map(|e| e.0).collect();
-        Ok(vm.heap.new_list(ks))
-    });
-    r.add_builtin("Map.values", |vm, a| {
-        let vs: Vec<Value> = map_entries(vm, a[0])?.into_iter().map(|e| e.1).collect();
-        Ok(vm.heap.new_list(vs))
-    });
+    r.add_builtin("Map.iter_next", |vm, a| vm.container_iter(a[0]));
+    r.add_builtin("Map.keys", |vm, a| map_column(vm, a[0], 0));
+    r.add_builtin("Map.values", |vm, a| map_column(vm, a[0], 1));
     r.add_builtin("Map.entries", |vm, a| {
-        let es = map_entries(vm, a[0])?;
-        produce(vm, 0, es.len())?;
-        let vals: Vec<Value> = es.into_iter().map(|(k, v)| vm.heap.new_tuple(vec![k, v])).collect();
-        Ok(vm.heap.new_list(vals))
+        let Obj::Map(mo) = vm.heap.get(a[0]) else { return Ok(vm.heap.new_list(Vec::new())) };
+        produce(vm, mo.live, mo.live)?;
+        Ok(vm.heap.staged(|heap, st| {
+            let Obj::Map(mo) = heap.get(a[0]) else { unreachable!() };
+            let items = mo.entries.iter().flatten().map(|&(k, v)| st.new_tuple(vec![k, v])).collect();
+            st.new_list(items)
+        }))
     });
     r.add_builtin("Map.clear", |vm, a| {
-        if let Obj::Map(m) = vm.heap.get_mut(a[0]) {
-            m.entries.clear();
-            m.index.clear();
-            m.live = 0;
-            m.key_bytes = 0;
-        }
+        clear_container(vm, a[0])?;
         Ok(Value::Unit)
     });
-    r.add_builtin("Map.copy", |vm, a| {
-        let es = map_entries(vm, a[0])?;
-        produce(vm, 4 * es.len(), 0)?;
-        let m = vm.heap.alloc(Obj::Map(Box::default()));
-        for (k, v) in es {
-            vm.map_insert(m, k, v).map_err(crate::vm::meter::ctl_from_message)?;
-        }
-        Ok(m)
-    });
+    r.add_builtin("Map.copy", |vm, a| copy_container(vm, a[0]));
     r.add_builtin("Map.extend", |vm, a| {
         let es = map_entries(vm, a[1])?;
         produce(vm, 4 * es.len(), 0)?;
         for (k, v) in es {
-            vm.map_insert(a[0], k, v).map_err(crate::vm::meter::ctl_from_message)?;
+            vm.map_insert(a[0], k, v)?;
         }
         Ok(Value::Unit)
     });
-    r.add_builtin("Map.get_or_insert", |vm, a| match vm.map_get(a[0], a[1]).map_err(crate::vm::meter::ctl_from_message)? {
-        Some(v) => Ok(v),
-        None => {
-            vm.map_insert(a[0], a[1], a[2]).map_err(crate::vm::meter::ctl_from_message)?;
-            Ok(a[2])
-        }
-    });
+    r.add_builtin("Map.get_or_insert", |vm, a| Ok(vm.map_get_or_insert(a[0], a[1], a[2])?.unwrap_or(a[2])));
 
     r.add_builtin("Set.len", |vm, a| {
         Ok(Value::Int(match vm.heap.get(a[0]) {
@@ -1032,63 +1092,65 @@ fn register_map_set(r: &mut Registry) {
             _ => true,
         }))
     });
-    r.add_builtin("Set.add", |vm, a| Ok(Value::Bool(vm.set_add(a[0], a[1]).map_err(crate::vm::meter::ctl_from_message)?)));
-    r.add_builtin("Set.remove", |vm, a| Ok(Value::Bool(vm.set_remove(a[0], a[1]).map_err(crate::vm::meter::ctl_from_message)?)));
-    r.add_builtin("Set.contains", |vm, a| Ok(Value::Bool(vm.set_contains(a[0], a[1]).map_err(crate::vm::meter::ctl_from_message)?)));
+    r.add_builtin("Set.add", |vm, a| Ok(Value::Bool(vm.set_add(a[0], a[1])?)));
+    r.add_builtin("Set.remove", |vm, a| Ok(Value::Bool(vm.set_remove(a[0], a[1])?)));
+    r.add_builtin("Set.contains", |vm, a| Ok(Value::Bool(vm.set_contains(a[0], a[1])?)));
+    r.add_builtin("Set.iter_next", |vm, a| vm.container_iter(a[0]));
     r.add_builtin("Set.to_list", |vm, a| {
-        let items = set_items(vm, a[0])?;
+        let items = set_items(vm, a[0]);
+        produce(vm, items.len(), 0)?;
+        let items = items.iter().flatten().copied().collect();
         Ok(vm.heap.new_list(items))
     });
-    fn set_from(vm: &mut Vm, items: Vec<Value>) -> NResult {
-        produce(vm, 3 * items.len(), 0)?;
-        let s = vm.heap.alloc(Obj::Set(Box::default()));
-        for x in items {
-            vm.set_add(s, x).map_err(crate::vm::meter::ctl_from_message)?;
-        }
-        Ok(s)
-    }
     r.add_builtin("Set.union", |vm, a| {
-        let mut items = set_items(vm, a[0])?;
-        items.extend(set_items(vm, a[1])?);
-        set_from(vm, items)
+        let Obj::Set(first) = vm.heap.get(a[0]) else { return panic("not a set") };
+        let mut set = (**first).clone();
+        let more = set_items(vm, a[1]);
+        produce(vm, (set.entries.len() + more.len()).saturating_mul(ENTRY / SLOT), 0)?;
+        for &x in more.iter().flatten() {
+            set_insert(vm, &mut set, x)?;
+        }
+        Ok(new_set(vm, set))
     });
     r.add_builtin("Set.intersection", |vm, a| {
-        let mut items = Vec::new();
-        for x in set_items(vm, a[0])? {
-            if vm.set_contains(a[1], x).map_err(crate::vm::meter::ctl_from_message)? {
-                items.push(x);
+        let (Obj::Set(x), Obj::Set(y)) = (vm.heap.get(a[0]), vm.heap.get(a[1])) else { return panic("not a set") };
+        if x.live <= y.live {
+            let set = set_filter(vm, a[0], |e| vm.set_contains(a[1], e))?;
+            return Ok(new_set(vm, set));
+        }
+        // Look the smaller set's elements up in the larger, and keep the
+        // larger's order (the order of `self`).
+        produce(vm, y.live.saturating_mul(ENTRY / SLOT), 0)?;
+        let mut slots = Vec::new();
+        for &e in y.entries.iter().flatten() {
+            if let Some(slot) = set_slot(&vm.heap, &vm.meter, x, e)? {
+                slots.push(slot);
             }
         }
-        set_from(vm, items)
+        vm.charge(slots.len() as u64)?;
+        slots.sort_unstable();
+        let mut set = SetObj::default();
+        for slot in slots {
+            let e = x.entries[slot].unwrap_or(Value::Unit);
+            set_push(&mut set, hash_key(&vm.heap, &vm.meter, e)?, e)?;
+        }
+        Ok(new_set(vm, set))
     });
     r.add_builtin("Set.difference", |vm, a| {
-        let mut items = Vec::new();
-        for x in set_items(vm, a[0])? {
-            if !vm.set_contains(a[1], x).map_err(crate::vm::meter::ctl_from_message)? {
-                items.push(x);
-            }
-        }
-        set_from(vm, items)
+        let set = set_filter(vm, a[0], |e| Ok(!vm.set_contains(a[1], e)?))?;
+        Ok(new_set(vm, set))
     });
     r.add_builtin("Set.is_subset", |vm, a| {
-        for x in set_items(vm, a[0])? {
-            if !vm.set_contains(a[1], x).map_err(crate::vm::meter::ctl_from_message)? {
+        for &x in set_items(vm, a[0]).iter().flatten() {
+            if !vm.set_contains(a[1], x)? {
                 return Ok(Value::Bool(false));
             }
         }
         Ok(Value::Bool(true))
     });
-    r.add_builtin("Set.copy", |vm, a| {
-        let items = set_items(vm, a[0])?;
-        set_from(vm, items)
-    });
+    r.add_builtin("Set.copy", |vm, a| copy_container(vm, a[0]));
     r.add_builtin("Set.clear", |vm, a| {
-        if let Obj::Set(s) = vm.heap.get_mut(a[0]) {
-            s.entries.clear();
-            s.index.clear();
-            s.live = 0;
-            s.key_bytes = 0;
-        }
+        clear_container(vm, a[0])?;
         Ok(Value::Unit)
     });
 }

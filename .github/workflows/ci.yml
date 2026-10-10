@@ -8,6 +8,29 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Formatting and lints do not depend on the operating system (but for
+  # Windows and Unix code paths, linted by `test` in its default build).
+  lint:
+    name: format and clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all -- --check
+      # The library and the command line (which enables TLS).
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Clippy (library, without TLS)
+        run: cargo clippy -p sandlang --all-targets -- -D warnings
+      - name: Clippy (library, without operating-system access)
+        run: cargo clippy -p sandlang --all-targets --no-default-features -- -D warnings
+
   test:
     name: test (${{ matrix.os }})
     strategy:
@@ -20,25 +43,25 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Rust
         run: |
-          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup toolchain install stable --profile minimal --component clippy
           rustup default stable
       - uses: Swatinem/rust-cache@v2
-      - name: Format
-        run: cargo fmt --all -- --check
       - name: Clippy
+        if: matrix.os != 'ubuntu-latest'
         run: cargo clippy --all-targets -- -D warnings
-      - name: Clippy (without TLS, pure Rust)
-        run: cargo clippy --all-targets --no-default-features --features os -- -D warnings
-      - name: Clippy (without operating-system access)
-        run: cargo clippy --all-targets --no-default-features -- -D warnings
+      # The library (with TLS) and the command line.
       - name: Test
         run: cargo test
-      - name: Test (without TLS, pure Rust)
+      # One checked run of each benchmark program (optimized: they are long).
+      - name: Benchmarks still run
         if: matrix.os == 'ubuntu-latest'
-        run: cargo test --no-default-features --features os
-      - name: Test (without operating-system access)
+        run: cargo test --release -p sandlang --benches
+      - name: Test (library, without TLS)
         if: matrix.os == 'ubuntu-latest'
-        run: cargo test --no-default-features
+        run: cargo test -p sandlang
+      - name: Test (library, without operating-system access)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test -p sandlang --no-default-features
 
   wasm:
     name: WebAssembly and playground
@@ -51,9 +74,12 @@ jobs:
           rustup toolchain install stable --profile minimal --component clippy --target wasm32-unknown-unknown
           rustup default stable
       - uses: Swatinem/rust-cache@v2
-      # wasm-bindgen-cli must match the wasm-bindgen crate in Cargo.lock.
-      - name: Install wasm-bindgen-cli
-        run: cargo install wasm-bindgen-cli --locked --version "$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)"
+      # wasm-bindgen-cli must match the wasm-bindgen crate in Cargo.lock;
+      # wasm/build.sh requires wasm-opt in CI.
+      - name: Install wasm-bindgen-cli and wasm-opt
+        run: |
+          cargo install wasm-bindgen-cli --locked --version "$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)"
+          sudo apt-get install -y binaryen
       - uses: actions/setup-node@v4
         with:
           node-version: 22

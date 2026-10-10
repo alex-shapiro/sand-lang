@@ -2,7 +2,7 @@
 //! editors (the REPL's line editor, the web playground). Works on incomplete
 //! and invalid source.
 
-use super::lexer::{CommentKind, StrPart, Tok, lex, lex_range};
+use super::lexer::{Comment, CommentKind, Tok, lex};
 
 /// What a highlighted range is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -46,47 +46,39 @@ impl Highlight {
 /// The highlighted ranges of `source` (byte offsets, in order, not
 /// overlapping). Text in no range is plain.
 pub fn highlight(source: &str) -> Vec<(usize, usize, Highlight)> {
-    let mut out = Vec::new();
-    ranges(source, 0, source.len(), 0, &mut out);
-    out.sort_by_key(|&(lo, _, _)| lo);
-    // Drop anything overlapping an earlier range (it never should).
-    let mut end = 0;
-    out.retain(|&(lo, hi, _)| {
-        let keep = lo >= end && lo < hi;
-        if keep {
-            end = hi;
+    let lexed = lex(source, 0);
+    let mut out: Vec<(usize, usize, Highlight)> = Vec::new();
+    let mut add = |lo: usize, hi: usize, kind: Highlight| {
+        let hi = hi.min(source.len());
+        match out.last_mut() {
+            _ if lo >= hi => {}
+            // The parts of a string (quotes, text, format specs) are one range.
+            Some(last) if last.1 == lo && last.2 == kind && kind == Highlight::String => last.1 = hi,
+            Some(last) if last.1 > lo => {}
+            _ => out.push((lo, hi, kind)),
         }
-        keep
-    });
-    out
-}
-
-/// Nested interpolations are highlighted down to this depth.
-const MAX_NESTING: usize = 8;
-
-fn ranges(source: &str, lo: usize, hi: usize, depth: usize, out: &mut Vec<(usize, usize, Highlight)>) {
-    let lexed = if lo == 0 && hi == source.len() { lex(source, 0) } else { lex_range(source, 0, lo, hi) };
-    for c in &lexed.comments {
-        let kind = match c.kind {
-            CommentKind::Doc | CommentKind::ModuleDoc => Highlight::DocComment,
-            CommentKind::Line | CommentKind::Block => Highlight::Comment,
-        };
-        out.push((c.lo as usize, c.hi as usize, kind));
-    }
+    };
+    let mut comments = lexed.comments.iter().peekable();
     let tokens = &lexed.tokens;
     for (i, t) in tokens.iter().enumerate() {
-        let (tlo, thi) = (t.lo as usize, (t.hi as usize).min(source.len()));
+        let (lo, hi) = (t.lo as usize, t.hi as usize);
+        while let Some(c) = comments.next_if(|c| (c.lo as usize) < lo) {
+            add(c.lo as usize, c.hi as usize, comment(c));
+        }
         let kind = match &t.tok {
-            Tok::Str(parts) => {
-                string(source, tlo, thi, parts, depth, out);
+            Tok::Str(_) | Tok::Bytes(_) | Tok::StrStart | Tok::StrText(_) | Tok::StrEnd => Highlight::String,
+            Tok::InterpStart => Highlight::Interpolation,
+            Tok::InterpEnd { spec } => {
+                if *spec {
+                    add(lo, hi - 1, Highlight::String);
+                }
+                add(hi - 1, hi, Highlight::Interpolation);
                 continue;
             }
-            Tok::Bytes(_) => Highlight::String,
             Tok::Int(_) | Tok::IntOverflow(_) | Tok::Float(_) | Tok::Duration(_) => Highlight::Number,
             Tok::True | Tok::False | Tok::SelfLower | Tok::SelfUpper => Highlight::Constant,
             Tok::Ident => {
-                let text = source.get(tlo..thi).unwrap_or("");
-                if text.starts_with(|c: char| c.is_ascii_uppercase()) {
+                if source[lo..hi].starts_with(|c: char| c.is_ascii_uppercase()) {
                     Highlight::Type
                 } else if matches!(tokens.get(i + 1), Some(n) if n.tok == Tok::LParen && n.lo == t.hi) {
                     Highlight::Call
@@ -94,78 +86,22 @@ fn ranges(source: &str, lo: usize, hi: usize, depth: usize, out: &mut Vec<(usize
                     continue;
                 }
             }
-            tok if is_keyword(tok) => Highlight::Keyword,
+            tok if tok.is_keyword() => Highlight::Keyword,
             _ => continue,
         };
-        out.push((tlo, thi, kind));
+        add(lo, hi, kind);
     }
+    for c in comments {
+        add(c.lo as usize, c.hi as usize, comment(c));
+    }
+    out
 }
 
-/// A string literal at `lo..hi`: string ranges around its interpolated
-/// expressions, which are highlighted as code.
-fn string(source: &str, lo: usize, hi: usize, parts: &[StrPart], depth: usize, out: &mut Vec<(usize, usize, Highlight)>) {
-    let mut at = lo;
-    for part in parts {
-        let StrPart::Expr { lo: elo, hi: ehi, spec } = part else { continue };
-        let (elo, ehi) = (*elo as usize, *ehi as usize);
-        // `{` before the expression, and `}` after it (or its format spec).
-        let (Some(open), Some(close)) = (elo.checked_sub(1), source[ehi.min(hi)..hi].find('}').map(|i| ehi + i)) else { continue };
-        if open < at || elo > ehi || close >= hi {
-            continue;
-        }
-        if open > at {
-            out.push((at, open, Highlight::String));
-        }
-        out.push((open, elo, Highlight::Interpolation));
-        if depth < MAX_NESTING {
-            ranges(source, elo, ehi, depth + 1, out);
-        }
-        if spec.is_some() && close > ehi {
-            // `:spec`
-            out.push((ehi, close, Highlight::String));
-        }
-        out.push((close, close + 1, Highlight::Interpolation));
-        at = close + 1;
+fn comment(c: &Comment) -> Highlight {
+    match c.kind {
+        CommentKind::Doc | CommentKind::ModuleDoc => Highlight::DocComment,
+        CommentKind::Line | CommentKind::Block => Highlight::Comment,
     }
-    if hi > at {
-        out.push((at, hi, Highlight::String));
-    }
-}
-
-fn is_keyword(tok: &Tok) -> bool {
-    matches!(
-        tok,
-        Tok::And
-            | Tok::As
-            | Tok::Break
-            | Tok::Continue
-            | Tok::Defer
-            | Tok::Else
-            | Tok::Enum
-            | Tok::Extend
-            | Tok::Fn
-            | Tok::For
-            | Tok::From
-            | Tok::If
-            | Tok::Impl
-            | Tok::Import
-            | Tok::In
-            | Tok::Let
-            | Tok::Loop
-            | Tok::Match
-            | Tok::Native
-            | Tok::Not
-            | Tok::Or
-            | Tok::Pub
-            | Tok::Return
-            | Tok::Spawn
-            | Tok::Struct
-            | Tok::Test
-            | Tok::Trait
-            | Tok::Type
-            | Tok::Var
-            | Tok::While
-    )
 }
 
 #[cfg(test)]
@@ -191,25 +127,25 @@ mod tests {
     #[test]
     fn interpolations_are_code() {
         assert_eq!(
-            show(r#"print("n = {len(xs) + 1:>4}!")"#),
+            show(r#"print("n = \(len(xs) + 1:>4)!")"#),
             [
                 ("print", "call"),
                 ("\"n = ", "string"),
-                ("{", "interpolation"),
+                ("\\(", "interpolation"),
                 ("len", "call"),
                 ("1", "number"),
                 (":>4", "string"),
-                ("}", "interpolation"),
+                (")", "interpolation"),
                 ("!\"", "string"),
             ]
         );
-        assert_eq!(show(r#""a{"b{1}"}""#).iter().filter(|(_, h)| *h == "number").count(), 1, "nested");
+        assert_eq!(show(r#""a\("b\(1)")""#).iter().filter(|(_, h)| *h == "number").count(), 1, "nested");
     }
 
     #[test]
     fn incomplete_source_is_highlighted() {
         assert_eq!(show("fn f() { \"unterminated"), [("fn", "keyword"), ("f", "call"), ("\"unterminated", "string")]);
         assert_eq!(show("/* open"), [("/* open", "comment")]);
-        assert!(highlight("\"{\"").iter().all(|&(lo, hi, _)| lo < hi && hi <= 3));
+        assert!(highlight("\"\\(\"").iter().all(|&(lo, hi, _)| lo < hi && hi <= 4));
     }
 }

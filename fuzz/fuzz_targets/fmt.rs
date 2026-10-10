@@ -7,5 +7,7 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(once) = sandlang::fmt::format_source(src) {
         let twice = sandlang::fmt::format_source(&once).expect("formatted output must parse");
         assert_eq!(once, twice);
+        let before = sandlang::fmt::meaning(src).expect("formatted sources parse");
+        assert_eq!(before, sandlang::fmt::meaning(&once).expect("formatted output must parse"), "formatting changed the meaning");
     }
 });

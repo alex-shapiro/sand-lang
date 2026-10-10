@@ -10,15 +10,17 @@ source ──lexer──▶ tokens ──parser──▶ AST ──checker──
  src/syntax/lexer.rs   src/syntax/parser.rs   src/check/   src/hir.rs   src/compile/   src/vm/
 ```
 
-- `src/engine.rs` — `Engine`, `Config`, module discovery (imports are found
-  with the lexer, checked against the policy, read from the engine's file
-  system) and compilation on a big stack (`platform::with_stack`). Only imported modules are compiled; `help.module`
-  summaries of other modules come from `ModuleHelp`, which type checks all
-  standard and host modules (without compiling them) on the first request and
-  caches the result for the engine's lifetime.
+- `src/engine.rs` — `Engine`, `Config`, the `Registry` of natives and module
+  sources, module discovery (imports are checked against the policy and read
+  from the engine's file system) and compilation on a big stack
+  (`platform::with_stack`).
+- `src/modules.rs` — the standard library's `Snapshot` and the
+  `ModuleGraph` of a compilation (see "Modules and imports" below).
 - `src/check/` — name resolution, type inference (`unify.rs`), patterns and
   exhaustiveness (`pat.rs`), expressions (`expr.rs`), the compile budget
-  (`budget.rs`). Produces `CheckedProgram`.
+  (`budget.rs`), persistent collections (`persist.rs`). Produces
+  `CheckedProgram`. Types (hash-consed `TypeId`s) and interned names
+  (`Symbol`s) are in `src/types.rs`.
 - `src/compile/` — HIR to register bytecode (`src/vm/bytecode.rs`).
 - `src/vm/` — values (`value.rs`), GC heap (`heap.rs`), interpreter
   (`interp.rs`), scheduler and async I/O (`sched.rs`), fuel metering
@@ -29,18 +31,79 @@ source ──lexer──▶ tokens ──parser──▶ AST ──checker──
 - `src/policy/` — capabilities and policies (`mod.rs`), policy files
   (`file.rs`).
 - `src/files/` — the file systems scripts see (see "Platforms and file
-  systems" below): `Fs` dispatches to the host's (`safe.rs`, `host.rs`; the
-  `os` feature) or a `MemFs` (`mem.rs`).
+  systems" below): `Fs` resolves paths into `Target`s and dispatches to the
+  host's (`host.rs` over `unix.rs` or `windows.rs`; the `os` feature) or a
+  `MemFs` (`mem.rs`).
 - `src/platform.rs` — the clock, timers, yielding, entropy, deep stacks and
   `block_on`, from std and tokio or, on the web, from JavaScript.
 - `src/syntax/highlight.rs` — syntax highlighting from the lexer, for the
   REPL's line editor and the web playground.
 - `src/native.rs` — the public `NativeModule` API for hosts.
-- `src/bin/sand/` — the command-line tool (`main.rs`) and its REPL front end
-  (`repl.rs`); the `cli` feature.
+- `cli/` — the `sand-cli` package: the `sand` command (`src/main.rs`), its
+  REPL front end (`src/repl.rs`) and playground server (`src/playground.rs`),
+  with its own tests. It is a separate package so that embedders of the
+  library do not build its dependencies (the line editor, TLS).
 - `wasm/` — `sandlang-wasm`, the JavaScript API (wasm-bindgen) of an engine
   built without `os`; `playground/` is a web page using it.
 - `src/stdlib/` — the standard library.
+
+## Lexer, parser and formatter
+
+**Tokens.** `src/syntax/lexer.rs` declares `Tok` with a macro that gives
+each keyword and punctuation token its text and flags: whether it is a
+keyword, whether a newline after it ends a statement (`ENDS`) and whether a
+line starting with it continues the previous one (`CONTINUES`). Line
+termination (§2.3), the highlighter's keywords and `Session::is_complete`
+(`lexer::is_complete`) all read these flags. The lexer inserts statement
+terminators as it produces tokens (`push_span`): a `Semi` goes before a
+token when a line break separates it from a previous token that `ENDS`,
+outside parentheses, brackets and interpolations, unless it `CONTINUES`
+(a `-` continues unless `Token::negates`: whitespace before it and none
+after, which also makes the parser reject it in infix position).
+`Token::newline_before` records the line break for the few places that
+need it (an item's end after a type ending in `>`).
+
+**Strings.** A string literal without interpolations is one `Str` token. A
+string with interpolations is `StrStart`, its text (`StrText`) and
+interpolations (`InterpStart` for the `\(`, the expression's tokens,
+`InterpEnd` for the `)`, whose token covers `:spec)` if there is a format
+spec), then `StrEnd`; the parser reads the interpolations inline
+(`interpolated_string`). The lexer is modal through a stack of open groups
+(`Group`): brackets, and interpolations with the state of their string. In
+string mode only `\` and the closing quote are special; `\(` pushes an
+interpolation and returns to code mode, where a `)` (or a `:` starting a
+spec) with an interpolation innermost ends it and resumes the string, and a
+line break there reports it unterminated. A nested string inside an
+interpolation is just another token, and nothing is lexed twice. A `"""`
+string removes the common indentation of its lines once its end is known:
+`Lexer::blocks` records, per open block string, where each of its text lines
+starts (in which `StrText` token, at which offset, after how much
+whitespace) and the least indentation so far, and `end_string` cuts the
+indentation out of the tokens already produced. The same stack marks the `(` of lambda parameters
+(`Token::opens_lambda`: its group is followed by `=>`), so the parser
+never scans ahead. `Lexed::open` says whether the source ends inside a
+string, comment or brackets (an incomplete REPL input).
+
+**Parser.** Recursive descent, never going back: `bump` moves on and the
+payloads of string and bytes tokens are taken (`take_text`), not copied.
+`parse_module` returns the tokens too, for the formatter. Nesting is
+limited to `MAX_DEPTH` (expressions, types, patterns, blocks).
+
+**Formatter.** `src/fmt.rs` turns the syntax tree into a `Doc` (see its
+module documentation) and renders it at width 100. It reads layout hints
+from the source through the tokens and a line index (whether a block,
+struct, enum or `match` was written on one line, blank lines, comment
+positions). Binary operators of one precedence level form a chain that
+breaks before each operator (a line starting with `- ` continues the
+previous one, §2.3). Comments are not in the syntax tree: the formatter emits
+each block comment before the token it preceded (`punct`, `text_at`,
+`name`: every piece of fixed text that stands for a source token knows that
+token's position), and literals are copied verbatim with any comments in
+them. `fmt::meaning` is what formatting must preserve, the syntax tree
+without positions and each block comment with its neighbouring tokens;
+`tests/fmt_meaning.rs` compares it before and after formatting every spec
+and example source (and with a comment inserted after each token of some),
+and so does the `fmt` fuzz target.
 
 ## Standard library modules
 
@@ -59,6 +122,7 @@ use crate::vm::value::{Obj, Value};
 use crate::vm::{panic, Ctl, NResult, Vm};
 
 pub fn register(r: &mut Registry) {
+    // Names and sources are `&'static str`: registering copies nothing.
     r.source("foo", ModKind::Std, include_str!("foo.sand"));
     r.add_builtin("foo.double", |vm: &mut Vm, args: &[Value]| -> NResult {
         Ok(Value::Int(args[0].as_int() * 2))
@@ -77,7 +141,12 @@ The registry key of a `native fn` is:
 | prelude top-level                                                           | `bar`                                                       |
 | prelude `extend str` / `[T]` / `[K: V]` / `Set<T>` / `int` / ...            | `str.bar`, `List.bar`, `Map.bar`, `Set.bar`, `int.bar`, ... |
 
-A missing registration is a compile error: `no native implementation registered for ...`.
+A missing registration is a compile error: `no native implementation registered for ...`;
+a registration that no `native fn` declares is caught by the unit test
+`engine::registry_tests::every_std_native_is_declared`. A module whose
+source differs per platform registers the concatenation of a platform
+header (module doc, imports, platform-only items) and the shared part:
+`http` is `http_os.sand` or `http_web.sand` followed by `http.sand`.
 
 ### Calling convention
 
@@ -87,17 +156,20 @@ A missing registration is a compile error: `no native implementation registered 
 - For `reflect` type parameters (e.g. `native fn decode<reflect T>(text: str)`),
   a `TypeDesc` object (`Obj::TypeDesc(Arc<TypeDesc>)`) is passed **before**
   the declared parameters, one per reflect parameter.
-- Return `Ok(value)` or an `Err(Ctl)`:
-  - `Ctl::Panic(msg)` — runtime panic (use `crate::vm::panic(msg)`).
-  - `Ctl::Limit(LimitKind::Memory)` — memory limit; check big allocations
+- Return `Ok(value)` or an `Err(Ctl)`. A `Ctl` is one pointer to a boxed
+  `CtlKind` (so that results stay 16 bytes, see "Dispatch loop"): build it
+  with its constructors and inspect it with `kind()`/`into_kind()`.
+  - `Ctl::panic(msg)` — runtime panic (or `crate::vm::panic(msg)`, the
+    `Err`).
+  - `Ctl::limit(LimitKind::Memory)` — memory limit; check big allocations
     first with `vm.reserve(bytes)?`.
-  - `Ctl::Async(future)` — suspend the calling task until the future
+  - `Ctl::suspend(future)` — suspend the calling task until the future
     completes. The future must be `Send + 'static` and must not hold `Value`s;
     it resolves to a `Finisher` (`Box<dyn FnOnce(&mut Vm) -> NResult + Send>`)
     that builds the result value on the VM thread:
 
     ```rust
-    Err(Ctl::Async(Box::pin(async move {
+    Err(Ctl::suspend(Box::pin(async move {
         let text = tokio::fs::read_to_string(path).await;
         Box::new(move |vm: &mut Vm| -> NResult {
             Ok(match text {
@@ -108,13 +180,18 @@ A missing registration is a compile error: `no native implementation registered 
     })))
     ```
 
-  - `Ctl::NeedPermission(cap)` — returned by `vm.permit(&cap)?`; the engine
-    prompts the user and re-executes the call. Always check permissions
-    _before_ performing an effect, and propagate with `?`.
-  - `Ctl::Block(BlockOn::...)` — scheduler waits (tasks/channels; core only).
-  - `Ctl::Yield`, `Ctl::Exit(code)`.
-  - `Ctl::Interrupted` / `Ctl::Limit(kind)` from `vm.charge(...)?` — see
-    below; always propagate them.
+  - `CtlKind::NeedPermission(cap)` — returned by `vm.permit(&cap)?`; the
+    engine prompts the user and re-executes the call. Always check
+    permissions _before_ performing an effect, and propagate with `?`.
+  - `vm.block(BlockOn::...)` — scheduler waits (tasks/channels; core only):
+    the value if it is there already, or else it registers the task's wait
+    and returns `Err` of the dataless `CtlKind::Blocked`. `vm.yield_now()`
+    (`CtlKind::Yield`) lets other tasks run. Tasks block and yield in steady
+    state, so these two reuse the box of the last one consumed instead of
+    allocating (an allocation per channel operation cost 30%).
+  - `Ctl::exit(code)`.
+  - `CtlKind::Interrupted` / `CtlKind::Limit(kind)` from `vm.charge(...)?` —
+    see below; always propagate them.
 
 - Never panic on script input. As defence in depth, the scheduler runs each
   interpreter slice (with the natives it calls) and each finisher inside
@@ -131,11 +208,15 @@ error: ...`); the public `run_*`/`Session` futures are wrapped in
 
 The interpreter spends one unit of fuel per call, loop iteration and backward
 jump, and the scheduler checks the limits between slices of `SLICE_FUEL`
-units. Between two of those safe points bytecode only moves forward, so it
+units. Every branch back is a _back edge_ (`Op::is_back_edge`): `Loop`, or
+the `…Back` form of a conditional branch that ends a rotated loop
+(`JNleIBack`, `ForRangeBack`, `JSomeBack`, ...), which charges fuel and is a
+safe point when taken; `assemble` checks this for every function, and
+routes a conditional branch back that has no backward form through a `Loop`
+island. Between two of those safe points bytecode only moves forward, so it
 runs at most the instructions of the loop (a back edge's span) or of the
 function entered; `meter::code_fuel` charges one more unit per 64 of them
-(`Op::Loop` by its offset, `meter::loop_fuel`, which is why `thread_jumps`
-keeps every `Loop` backward; calls, tail calls and `spawn` by the callee's
+(back edges by their offset, `meter::loop_fuel`; calls, tail calls and `spawn` by the callee's
 code length; `MakeClosure` per 64 captures, the only instruction whose work
 is not proportional to the instructions before it). Without that, one unit could
 stand for the hundreds of thousands of instructions of a long loop body or
@@ -153,24 +234,26 @@ vm.charge_slow_bytes(data.len())?; // 1 unit per 8 bytes of byte-at-a-time work
 ```
 
 - Charging is cheap (a subtraction and a comparison on a `Cell` in
-  `vm.meter`); it takes `&self`, so it works while the heap is borrowed. No
-  syscalls happen until the slice's native fuel (`SLICE_FUEL` units, kept
-  apart from the interpreter's own counter) is spent; after that, every
-  `CHECK_INTERVAL` units the meter checks the interrupt flag, the instruction
-  budget and the CPU/wall deadlines the scheduler computed for the slice, and
-  `charge` returns `Err(Ctl::Interrupted)` or `Err(Ctl::Limit(kind))`.
-  Propagate with `?`; `call_native` turns them into the run's error.
-- The instruction limit is exact for natives. The meter's next checkpoint
-  (`check_at`) is never later than the point where the fuel used exceeds
-  `max_instructions`: `start_slice` knows the fuel used before the slice and
-  the interpreter's fuel for it, and the interpreter reports the fuel it has
-  left before each native call (`Meter::sync_bytecode`, one store and a
-  compare in the `native_call!` macro), so the comparison in `charge` stays
-  the only cost on the hot path. Near the limit the scheduler also shortens
-  the interpreter's slice to the remaining budget plus one unit. The
+  `vm.meter`); it takes `&self`, so it works while the heap is borrowed.
+  Bytecode and natives draw on one counter, the slice's fuel
+  (`Meter::start_slice`: at most `SLICE_FUEL` units, and at most what is
+  left of `max_instructions`). The interpreter keeps its count in a
+  register; the `native_call!` macro applies what it spent since its last
+  native call before the call (`Meter::sync`) and reloads the count after
+  it (`Meter::resync`). No syscalls happen until the slice's fuel is spent;
+  after that, every `CHECK_INTERVAL` units the meter checks the interrupt
+  flag, the instruction budget and the CPU/wall deadlines the scheduler
+  computed for the slice, and `charge` fails with `CtlKind::Interrupted` or
+  `CtlKind::Limit(kind)`. Propagate with `?`; `call_native` turns them into
+  the run's error.
+- The instruction limit is exact by construction: a slice ends where the
+  budget does, so the first check (when the slice's fuel goes negative) is
+  where the budget is exceeded, and later checks are never past that point
+  (`Meter::checkpoint`). Bytecode stops within one unit of the limit. The
   interpreter's own heavy operations (deep comparison, concatenation, ...)
-  see the bytecode fuel as of the last native call, so they may overrun by
-  the bytecode spent since (less than a slice); `tests/metering.rs`
+  charge the meter between native calls, before it has seen the bytecode
+  fuel spent since the last one, so they may overrun by that much (less
+  than a slice); `tests/metering.rs`
   (`natives_stop_exactly_at_the_instruction_limit`) checks the bound.
 - **Charge as you go** in loops that can be long (per element, per chunk of
   4 KiB, per match), so the call can be stopped midway. Work that cannot be
@@ -185,44 +268,57 @@ vm.charge_slow_bytes(data.len())?; // 1 unit per 8 bytes of byte-at-a-time work
   regex searches may scan far beyond the text they report or fall back to a
   slower engine, so `stdlib/regex.rs` (`Scan`) raises each call's charge to
   one unit per microsecond it has taken (far above the cost of ordinary
-  searches, whose fuel therefore stays deterministic).
+  searches, whose fuel therefore stays deterministic). It reads the clock
+  every 32 charges and for every large one: a clock reading costs more
+  than a short step of an iteration over matches.
 - Code that only has `&Heap` takes a budget: `meter::Budget` is implemented by
   `Meter` and by `Unmetered` (for callers outside an engine run). The
   `compare` and `display` modules provide `*_metered` variants
   (`values_eq_metered`, `values_cmp_metered`, `hkey_metered`,
   `with_keyref_metered`, `to_display_metered`, ...); `vm.display`/`vm.debug`
   and the `vm.map_*`/`vm.set_*` helpers already charge.
-- APIs that report errors as `String` (map/set helpers, `vm.arith`) encode
-  limit errors with `meter::ctl_message` (a NUL-prefixed code); convert them
-  with `.map_err(meter::ctl_from_message)`, which turns them back into
-  `Ctl::Limit`/`Ctl::Interrupted`. Never use `.map_err(Ctl::Panic)`: a
-  `Ctl::Panic` is always reported as a panic, whatever its text, so that a
-  script's `panic("\u{0}memory")` cannot pass for a limit error.
+- The VM's own helpers (`vm.map_*`/`vm.set_*`, `vm.arith`, `display`,
+  `compare`) return `Result<_, Ctl>`: limits, interrupts and panics stay
+  typed all the way, so propagate them with `?`.
 - Sort with `compare::try_sort_by`, a stable merge sort whose comparator may
   fail (charge per comparison). The standard library's sorts cannot be stopped
   midway, and may panic if a comparator becomes inconsistent.
-- Hash table operations are charged a unit or so (plus the key's bytes),
-  which assumes that keys spread over the table. Scripts choose keys, so
-  tables keyed by script data must use `value::FxHashMap` (or another
-  seeded hasher): its `FxHasher` mixes each word in with a folded multiply
-  from a random per-process seed, which scripts cannot observe (iteration
-  orders never depend on hashes). With plain FxHash, whose bucket bits
-  depend only on the keys' low bits, multiples of 2^32 (or any keys
-  computed in advance) made every operation scan all the others.
+- Map keys and set elements are hashed and compared where they live on the
+  heap (`compare::hash_key`, `keys_eq`): `Hash` types are deeply immutable,
+  so keys are never copied. A `MapObj`/`SetObj` is its entries in insertion
+  order (`None` for removed ones, compacted when they are the majority)
+  plus a `KeyTable`, a hashbrown table of entry slots each packed with 32
+  bits of its key's hash (enough to grow without rehashing keys, and to
+  reject almost every mismatch before comparing keys). Hashing charges a
+  unit per node plus the bytes hashed; it is compositional, and memoizes
+  container hashes by handle once a key passes 256 nodes, so keys with
+  shared substructure hash in time linear in their heap size. Scripts choose
+  keys, so hashes use `value::FxHasher`, which mixes each word in with a
+  folded multiply from a random per-process seed that scripts cannot
+  observe (iteration orders never depend on hashes); with plain FxHash,
+  whose bucket bits depend only on the keys' low bits, multiples of 2^32
+  (or any keys computed in advance) made every operation scan all the
+  others. Tables keyed by script data elsewhere must use `value::FxHashMap`.
 - A native that spends more than the slice's native fuel preempts its task
   when it returns (other tasks run, the scheduler checks the limits).
-- Host modules: typed `NativeModule::function`s are charged for converting
-  their arguments, and check the memory the conversion allocates
-  (`FromValue::alloc_size`: strings, bytes, vector and map elements) against
-  the limit before converting (a list holding one big string many times
-  converts to many copies); `raw_function`s receive `&mut Vm` and should call
+- Host modules: typed `NativeModule::function`s convert their arguments in
+  one pass, charging for the work and counting what the conversion allocates
+  in a `native::Conversion`, which checks it against the memory limit as it
+  grows, before each allocation (a list holding one big string many times
+  converts to many copies). `&str` and `&[u8]` arguments borrow from the
+  heap instead: host closures get no `&mut Vm`, so the heap cannot change
+  during the call (`FromValue::Item<'a>` is the borrowed form; the closure is
+  called through its higher-ranked signature, `for<'a> Fn(A::Item<'a>) ->
+  R`, the bound that also names `A` for type inference). Results are
+  converted after the call (`IntoValue`), reserving memory and charging fuel
+  for what they build. `raw_function`s receive `&mut Vm` and should call
   `vm.charge` like built-in natives.
 
 ### Scratch memory
 
 `max_memory` counts heap objects. Rust-side buffers a native builds before
 turning them into values (output strings, piece lists, encodings, sort
-buffers, hash keys) must be checked too, so a script cannot make the host
+buffers) must be checked too, so a script cannot make the host
 allocate far beyond the limit:
 
 - Reserve **before** allocating when the size is known: `vm.reserve(bytes)?`
@@ -238,7 +334,7 @@ allocate far beyond the limit:
   checks `heap.would_exceed(len)` every `SCRATCH_STEP` bytes of growth
   (`render_metered`, JSON encoding and regex iteration do this).
 - Beware of shared structure: a value whose nodes reuse the same child has
-  a display form, JSON text or hash key exponentially larger than its heap
+  a display form or JSON text exponentially larger than its heap
   size, and two such values far more pairs of nodes than nodes (the set of
   container pairs a deep comparison remembers, `compare::Seen`, is checked
   as it grows).
@@ -272,8 +368,25 @@ Useful helpers on `Vm`:
   `vm.heap.list_push`; tuples: `vm.heap.new_tuple(vec)`, fields of tuples and
   structs: `vm.heap.fields(v)` (for variants see above).
 - maps: `vm.heap.alloc(Obj::Map(Box::default()))`, `vm.map_insert(m, k, v)`,
-  `vm.map_get(m, k)`; iterate `Obj::Map(m)` → `m.entries.iter().flatten()`.
-  Sets: `Obj::Set`, `vm.set_add`.
+  `vm.map_get(m, k)`, `vm.map_get_or_insert(m, k, v)` (one lookup);
+  iterate `Obj::Map(m)` → `m.entries.iter().flatten()`. Sets: `Obj::Set`,
+  `vm.set_add`. `MapObj`/`SetObj` are `Clone` (a copy needs no rehashing:
+  `copy`, `union`); a set built in bulk is assembled as a `SetObj` outside
+  the heap and allocated once (`core::set_of`).
+- building values from the contents of others: `vm.heap.staged(|heap,
+  st| ...)` gives read access to the heap and a `Staging` area whose
+  `alloc`/`new_str`/`new_list`/`new_variant`/... return the values the new
+  objects will have (handles taken in advance from the free list, then past
+  the end of the arena, as `alloc` would); they join the heap when the
+  closure returns. So `split`, `lines`, JSON and regex natives read their
+  arguments in place instead of copying them out first (check memory with
+  `st.reserve(bytes)`, which counts what is staged). Staged objects cannot be
+  read back until then, so a native assembling a map or set keeps its keys'
+  texts itself (`compare::str_hash` hashes a string key by its text, as
+  `hash_key` would). `vm.staged_strs` also passes the VM's shared
+  one-character strings, for natives that split text into many pieces. A
+  substring that is the whole result is copied once with
+  `core::new_substr(vm, v, range)`.
 - `Option`/`Result`: `vm.some(v)`, `vm.none()`, `vm.option(Option<Value>)`,
   `vm.ok(v)`, `vm.err(v)`, `vm.as_option(v)`, `vm.as_result(v)`; any
   variant's payload: `vm.variant_payload(v, i)`.
@@ -281,15 +394,21 @@ Useful helpers on `Vm`:
   `vm.err_value(kind, message)` builds `Err(Error {..})`. Standard kinds:
   `error`, `not_found`, `permission_denied`, `already_exists`, `io`,
   `timeout`, `parse`, `invalid`, `http`, `closed`, `limit`.
-- structs declared in Sand: `vm.heap.alloc(Obj::Struct(def_id, fields))`.
-  Find a struct's def id by name with `vm.prog.types.iter().position(|t| t.name == "Metadata" && t.module == "fs")`.
+- structs declared in Sand: a native returns their fields as a tuple and
+  a Sand function builds the struct (`time.parse`, `fs.metadata`,
+  `uri.parse`, `http.Server.accept`, `regex.Captures`), so natives never
+  look struct definitions up by name at run time. (`regex.Match`, built in
+  bulk by `find_all`, is the exception: a compiled regex resolves its id
+  once, `vm.heap.alloc(Obj::Struct(def_id, fields))`.)
   Enum variants: `vm.prog.variants` (runtime ids); build values with
   `vm.heap.new_variant(id, &fields)` (a `Value::Tag` when there are no
   fields, inline for a single payload where possible, `Obj::Variant`
   otherwise).
 - display: `vm.display(v)`, `vm.debug(v)`.
-- Borrowing: `vm.str(a)` borrows the heap; copy out (`.to_string()`) before
-  allocating.
+- Borrowing: `vm.str(a)` borrows the heap; build what is derived from it
+  with `vm.heap.staged` (above) rather than copying it out (`.to_string()`)
+  before allocating. Async natives copy what their future needs (it
+  outlives the call), charging for the copy.
 
 ### Opaque native types
 
@@ -333,50 +452,93 @@ enforced there).
 ### I/O natives and the sandbox
 
 - **Files**: resolve the script's path with the engine's file system
-  (`vm.host.fs.resolve`, symlinks followed; `vm.host.fs.entry` for
+  (`vm.host.fs.target(path, Mode::Follow)`, or `Mode::Entry` for
   operations on a directory entry itself), check `Capability::FsRead`/
-  `FsWrite` with `vm.permit_path(&cap, entry)` (which compares the path in
-  the file system's `PathSpace`), then perform the I/O only through the
-  `files::Fs` operations (see `stdlib/fs.rs`, `run`). On the host they run
-  through `files::safe` off the VM thread (`files::host::blocking`: on the
-  process's hot file system worker, `FsWorker`, when it is idle, otherwise
-  on tokio's blocking pool); on a `MemFs` they complete at once. The worker stays awake for 50 µs after each operation and
-  the scheduler waits up to 100 µs for its result before parking
-  (`FS_SPIN`), so a run of small file operations pays no thread wake-ups
-  (which cost more than a `stat`); a slow or hung operation only occupies
-  the worker, and later ones go to the pool. Never use path-based `std::fs` /
-  `tokio::fs` calls on script paths: `files::safe` opens every directory without
-  following symlinks (`openat` + `O_NOFOLLOW` per component, `O_PATH` on
-  Linux, one `O_NOFOLLOW_ANY` open on macOS; on Windows `NtCreateFile`
-  relative to the parent's handle with `FILE_OPEN_REPARSE_POINT`, through
-  the `fs_at` crate, refusing symlinks and junctions), so the effect lands
-  exactly on the checked location. On Windows, creating, removing and
-  listing go through handles too; only `rename` is path-based, holding every
-  directory on both paths open without `FILE_SHARE_DELETE` (each checked
-  against the handle walk by file ID, `same-file`) so that none can be
-  renamed or replaced, and checking that neither parent became a junction
-  just before and after. Windows names that Win32 would alter (trailing `.`
-  or space, `:` streams, `CON`, ...) are refused, since handle-relative opens
-  take them literally. Operations that move or remove whole trees must also
-  refuse when `vm.host.policy.denies_under(path)`. In `fs.rs`, the
-  `target!`/`entry_target!` macros do this resolution: they refuse paths
-  over `policy::MAX_PATH_BYTES` (kind `invalid`) and charge for the
-  normalization, which `normalize_path` keeps to O(log n) `canonicalize`
-  calls by binary search, and for the directory entries read to find a
-  symlink's stored name (`policy::entry_path`, at most
-  `policy::MAX_LINK_SCAN`). Denial errors name the path as the script spelled
-  it (`denied`), never the resolved path.
+  `FsWrite` on the target's path (`refuse` in `stdlib/fs.rs`, ending in
+  `vm.permit_normalized`, which compares it in the file system's
+  `PathSpace` without normalizing again), then perform the I/O only by
+  passing the `Target` to the `files::Fs` operations (see `run`), which
+  act through it. Never use path-based `std::fs` / `tokio::fs` calls on
+  script paths. Operations run on the VM thread: on the host they are
+  system calls of a few microseconds, cheaper than handing them to another
+  thread, and they count towards the run's CPU time (and the engine stays
+  on its one thread). A read from a hung network file system blocks the
+  engine (the interrupt handle cannot stop a system call). Operations that
+  move or remove whole trees must also refuse when
+  `vm.host.policy.denies_under_normalized_in(path, space)`. In `fs.rs`, the
+  `target!`/`entry_target!` macros resolve: they refuse paths over
+  `policy::MAX_PATH_BYTES` (kind `invalid`) and charge per component and
+  byte, and (`charge_work`) for the symlinks followed and directory entries
+  scanned. Denial errors name the path as the script spelled it
+  (`denied`), never the resolved path.
+- **The host walk** (`files/unix.rs`): `resolve` walks the lexically normal
+  absolute path from the root in one pass. Directories are opened without
+  following symlinks, several names at once where the system can refuse
+  any symlink on the way (`O_NOFOLLOW_ANY` on macOS, `openat2` with
+  `RESOLVE_NO_SYMLINKS` on Linux; disabled at run time if `openat2` is
+  missing or filtered) and otherwise one at a time (`openat` +
+  `O_NOFOLLOW`, `O_PATH` on Linux, `O_SEARCH` on macOS, which is several
+  times cheaper there than a readable open). When a chunk fails, the first
+  name alone is tried (symlinks are usually near the root: `/tmp`, `/var`
+  on macOS), then halves, to find the name that does not open; if
+  `readlinkat` says it is a symlink, its target replaces it in the queue of
+  names (an absolute target restarts at the root; `..` opens the physical
+  parent), at most 40 times. The first symlink being followed is remembered
+  (`Site`) until its target is resolved: if the target does not resolve
+  (a missing name, or a non-directory before its end, or too many links),
+  the walk returns to the link and stops there (`Stop::Dangling`), like
+  `realpath` on the longest prefix that resolves, and operations refuse
+  it with `unchecked_symlink`. A missing directory stops the walk too
+  (`Stop::Errno(NOENT)`; the names from it on are kept as given, and are
+  what `create_dir(recursive)` checks and creates). The result
+  (`Resolved`) holds the directory containing the final entry, the final
+  entry's `lstat` (a final symlink followed unless in `Entry` mode) and
+  the canonical path: the names walked, and on macOS `F_GETPATH` of the
+  held directory (stored spelling, firmlinks resolved; the names walked if
+  it fails, beyond `MAXPATHLEN`). Operations act relative to the held
+  directory with no-follow flags (`openat` + `O_NOFOLLOW`, `statat` +
+  `AT_SYMLINK_NOFOLLOW`, `mkdirat`, `unlinkat`, `renameat`), so the walk
+  is the only one: there is no separate canonicalisation pass. Metadata
+  (`stat`, `exists`, `is_file`, `copy`'s size) comes from the walk's
+  `lstat`.
+- **Final names' spelling**: an existing final entry may have been named
+  differently than stored on macOS (and a symlink entry anywhere), so
+  `Target::exact` is false. `refuse` asks
+  `Policy::decision_for_any_spelling` first: deny rules fold names
+  (`fold_name`) and an allow rule decides every spelling of a name alike
+  unless it lies below the name's directory, so a `RulePolicy` with no such
+  rule (and no remembered prompt answers, `Vm::has_answers`, and no
+  prompt) decides without the stored name. Otherwise (custom policies,
+  prompts) `Target::fix_spelling` looks it up: on macOS `F_GETPATH` of the
+  entry opened without following it (`O_SEARCH` for a directory, read-only
+  for a regular file, which a later read reuses, `O_SYMLINK` for a symlink;
+  checked to be the same file in the same directory, as a file with
+  several hard links is named by the one last looked up); otherwise, and
+  for devices, a scan of at most `policy::MAX_LINK_SCAN` directory entries
+  for the one whose name folds the same and that is the same file
+  (preferring an exact match). Imports, roots and `policy::normalize_path`
+  always fix it (modules are told apart by their paths).
 - **Path rules**: allow rules compare normalized paths exactly; deny rules
   compare them through `policy::fold_name` (NFD, case folding, NFD,
   without default-ignorables), which equates every spelling a case- or
   normalization-insensitive file system may treat as the same name, so deny
-  rules also hold for paths that do not exist yet. `normalize_entry_path`
-  names an existing non-symlink entry as stored (`canonicalize`), and a
-  symlink by reading its (canonical) directory for the entry whose name
-  folds the same and that is the same entry (device and inode, or Windows
-  file ID), preferring an exact match; past `MAX_LINK_SCAN` entries the
-  given spelling is kept (deny rules still match it).
-- **Prompts**: a native returning `Ctl::NeedPermission` is retried after the
+  rules also hold for paths that do not exist yet. Rule paths are
+  normalized with the same walk (`normalize_path`, `PathRule::new`).
+- **Windows** (`files/windows.rs`) keeps two passes: the standard
+  library's `canonicalize` (binary search for the longest prefix that
+  resolves; `normalize_entry_path`'s scan for a symlink's stored name),
+  then a walk with `NtCreateFile` relative to the parent's handle with
+  `FILE_OPEN_REPARSE_POINT` (through the `fs_at` crate), refusing symlinks
+  and junctions. A single walk would need reparse-point targets and
+  `GetFinalPathNameByHandleW`, which have no safe API among the
+  dependencies. Creating, removing and listing go through handles; only
+  `rename` is path-based, holding every directory on both paths open
+  without `FILE_SHARE_DELETE` (each checked against the handle walk by file
+  ID, `same-file`) so that none can be renamed or replaced, and checking
+  that neither parent became a junction just before and after. Windows
+  names that Win32 would alter (trailing `.` or space, `:` streams, `CON`,
+  ...) are refused, since handle-relative opens take them literally.
+- **Prompts**: a native returning `CtlKind::NeedPermission` is retried after the
   prompt; "once" answers (`host.grants_once`/`denies_once`) stay valid while
   the same call is retried (natives checking several capabilities ask
   several times) and `call_native` forgets them as soon as the call returns
@@ -389,11 +551,12 @@ enforced there).
   `res.ensure(total)` (`MemoryLimit` converts into `NetError` and
   `io::Error`, which become errors of kind `"limit"`), move it into the
   finisher and drop it right before `vm.reserve(len)?` and allocating the
-  value. Finishers charge the meter like natives (they run between slices;
-  `apply_completions` adds their fuel to the run's). Never reserve a size a peer merely announces (e.g.
+  value. Finishers charge the meter like natives (they run between slices,
+  `apply_completions` starts one for them). Never reserve a size a peer merely announces (e.g.
   `Content-Length`) before the data arrives. Reserved bytes count in
-  `Heap::would_exceed` / `over_limit`; the scheduler publishes the heap size
-  for checks made off the VM thread.
+  `Heap::would_exceed` / `over_limit`; checks made off the VM thread compare
+  with the heap size the VM publishes after every slice and at every
+  `would_exceed`.
 - **Network**: check `Capability::Net { host, port }` with `vm.permit`, then
   connect with `net::connect_checked` / `net::tcp_connect` (passing a clone
   of `vm.host.policy`): they resolve the name once, check each address as
@@ -406,11 +569,11 @@ enforced there).
 ## Platforms and file systems
 
 **Features.** `os` (default) is everything that reaches the operating
-system: `files::safe`/`files::host` (the host's file system), the `net` and
+system: `files::host` (the host's file system), the `net` and
 `http` modules (`stdlib::OS_MODULES`; importing them without `os` is a
 compile error naming the reason), `Config::inherit_stdin`
 (`StdinSource::Inherit`) and the process environment as the default of
-`env`. `tls` and `cli` imply it. Code shared by `io` (standard input) and
+`env`. `tls` implies it; the `sand` command enables `tls`. Code shared by `io` (standard input) and
 `net`/`http` is in `stdlib::stream`. Integration tests that need the host
 are gated with `required-features` (Cargo.toml) or `#[cfg(feature = "os")]`;
 `tests/common::run_with` and the spec runner use a `MemFs` without `os`.
@@ -430,10 +593,11 @@ global `sandPanic`, and the playground replaces a crashed worker.
 
 **File systems.** `files::Fs` is `Host` (with `os`) or `Memory(MemFs)`,
 chosen per engine (`Config::memory_fs`; the default is the host's with
-`os`, an empty `MemFs` without). It provides path normalization for the
-policy (`resolve`, `entry`, `absolute`, `default_dir`), the operations of
-the `fs` module, and reading of script modules (`read_source`) and main
-files (`read_main`). `MemFs` is a tree of `BTreeMap` directories behind an
+`os`, an empty `MemFs` without). It resolves paths into `Target`s
+(`target`; `resolve` for a path alone, fully normalized, for roots), and
+provides `absolute`, `default_dir`, the operations of the `fs` module on
+targets, and reading of script modules (`read_source`, through the
+import's target) and main files (`read_main`). `MemFs` is a tree of `BTreeMap` directories behind an
 `Arc<Mutex<_>>`, with POSIX-like errors (`rename` refuses to move a
 directory into itself or over a non-empty one, ...) and a capacity counting
 contents, names and 64 bytes per entry (`QuotaExceeded`, which `io_kind`
@@ -447,6 +611,92 @@ memory file systems, where it is compared exactly (case-sensitively, also
 on Windows). The `*_in(cap, space)` variants of `Policy::check`,
 `check_normalized`, `check_entry` and `denies_under` take the namespace; the
 public ones are the host's.
+
+## Type checker
+
+- **Types are hash-consed ids.** A type is a `TypeId` (`src/types.rs`), a
+  `u32` index of a node of the checker's `TypeArena`. A node (`Ty`) holds
+  its components as ids (`List(TypeId)`, `Named(TypeDefId, TyList)`, ...);
+  lists of types (tuple elements, parameter types, type arguments,
+  `TraitRef::args`) are interned too, as `TyList`s. Interning gives
+  structurally equal types the same id, so types and trait references are
+  `Copy` and equality is an integer compare; the primitives have fixed ids
+  (`TypeId::INT`, ...). Each node records whether it contains inference
+  variables or type parameters and its size written out as a tree, so
+  zonking and substitution return types without either at once, and
+  `type_too_large` reads the size of resolved subtrees. Building a type
+  needs `&mut` (the arena); reading one does not, and printing
+  (`TypePrinter`) and `satisfies` follow variable bindings as they go
+  instead of zonking first. Match on `self.ty(t)` (the node) or
+  `self.rty(t)` (the node after resolving variables at the top).
+- **Inference variables** are nodes too (`Ty::Var(v)`, one per `VarId`,
+  made by `TypeArena::var`), and their bindings live in the side table
+  `Checker::subst` (`Vec<Option<TypeId>>`), which `unify` writes and
+  `resolve`/`zonk` read. Variable ids are reused: `release_vars` truncates
+  `subst` when a function is finished (below), and the whole table is
+  cleared when a module is finished (its globals are zonked by then, and
+  nothing refers to its variables; type queries keep them). So the
+  variables, and the arena nodes built from them, stay as many as one
+  module needs, however long a REPL session runs.
+- **Names are interned `Symbol`s** (`Symbols`): scopes (module and local),
+  `methods`, trait methods, fields, variants, parameters and the `Def`s of
+  modules are keyed or named by symbols. Syntax names are looked up with
+  `Symbols::get` (a name never interned is bound nowhere) and rendered only
+  at the edges: diagnostics, signatures, help, reflection and the program's
+  runtime tables (the compiler renders them through `CheckedProgram::name`).
+- **Persistent tables** (`check::persist`). The standard library is checked
+  once, and every compilation, and every input of a REPL session, extends a
+  copy of the checker. All of its tables (type arena, symbols, functions,
+  types, parameters, modules and their scopes, methods, traits, impls, ...)
+  are persistent: `PVec` (a vector in `Arc`'d chunks of 64) and `PMap`
+  (a hash array mapped trie with the process's seeded hasher; `PHash` is
+  the trie for values the caller hashes and compares, as the interners do).
+  Cloning a checker costs one reference count per table; a change copies
+  only the chunk or trie path it touches if a copy shares it. The compiler's
+  `Incremental` tables are persistent in the same way. `CheckedProgram`
+  shares the tables too (`take_checked` moves only the bodies, tests and
+  lint facts). Bodies are kept per compilation (`Bodies`, from the first
+  function not yet released).
+- **Declarations and bodies.** `check_module` declares a module's items,
+  then checks the bodies of its functions, methods, default helpers and
+  tests while the module's AST is borrowed. `FnInfo::decl` is a
+  `FnDeclRef` that locates the syntax (`DeclPath`: item and method index),
+  not a copy of it, and calls never clone `FnInfo`: they read parameter
+  types, names and defaults in place (`Callee`, `CallArgs`), and build
+  names and messages only for errors.
+- **`never`** is an ordinary type in unification: only a whole value of
+  type `never` fits any expected type (`Checker::coerce`, used by
+  `check_expr` and `expect_type`, and for operands and scrutinees), so
+  `[never]` and `fn() -> never` accept nothing else.
+- **`+` on operands of unknown type** requires the internal bound
+  `Bound::Add` (numbers, durations, strings, bytes and lists: what the VM's
+  generic addition accepts), checked when the function is finished like the
+  other deferred bounds. It cannot be written in source, and `type_of` does
+  not show it.
+- **Built-in bounds of type definitions.** Once a module's fields and
+  variants are known, `derive_bounds` works out for each definition and
+  each of `Eq`, `Ord` and `Hash` a `Derived`: never, or the type parameters
+  whose arguments must satisfy the bound too (a greatest fixed point, so
+  recursive types work). `satisfies` on `Named(d, args)` then checks only
+  those arguments instead of walking every field of every nested type at
+  each `==`, `<` or hash.
+- **Finishing a function** (`finish_fn`): the evidence placeholders are
+  resolved from their side table (below); deferred bounds and inference
+  checks run; then one walk of the body (`finish_expr`, built on the
+  generic `HExpr::for_each_part`) zonks its types, puts the dictionaries in
+  place, notes the known impls of trait calls, hoists dictionaries used in
+  loops and closures, and decides which mutable locals are cells (those
+  used by a lambda other than their owner), after fusion has inlined
+  lambdas. `release_vars` then truncates `Checker::subst` to its length
+  when the function began (the variable nodes stay in the arena and are
+  reused): the body is zonked, and the older variables
+  bound meanwhile (`FnState::old_bound`, recorded by `unify`) are zonked
+  too. The variables are kept if one of those still refers to an unbound
+  new one, for module initializers (functions may still determine the types
+  of their globals) and for type queries.
+- **Lint facts** (`LintFacts`) are gathered only with `Checker::lint_facts`
+  (on by default; sessions turn it off) and only for the main module, the
+  only one the linter reads.
 
 ## Traits
 
@@ -487,10 +737,11 @@ arity)]`; coherence allows at most one impl per entry with unifiable trait
 ### Evidence resolution
 
 While checking a body, every call that needs evidence gets an
-`HKind::Evidence { ty, trait }` placeholder argument, since `ty` may still be
-an inference variable. `finish_fn` resolves the placeholders first (before
-built-in bound obligations, as resolution can determine types), replacing
-each with:
+`HKind::Evidence(i)` placeholder argument, since the type may still be an
+inference variable: `i` indexes the `EvidenceReq` (type, trait, span) in
+`FnState::holes`. `finish_fn` resolves that table first (`resolve_holes`,
+before built-in bound obligations, as resolution can determine types), and
+the final walk replaces each placeholder with its dictionary expression:
 
 1. for a type without type parameters, the impl for its constructor: an
    `HKind::Dict { impl, args }` whose arguments are the recursively resolved
@@ -521,8 +772,9 @@ the closure can never run and a unit placeholder is passed instead
 - `HKind::CallTrait { slot, args, impl_id }`: when the dictionary comes from
   a known impl (`impl_id`, noted when the placeholders are resolved), the
   compiler emits a direct `CallDirect` to that impl's method; otherwise it
-  loads the method with `GetField` from the dictionary and emits `Call` (no
-  hashing or lookup).
+  loads the method with `GetField` from the dictionary (once, before the
+  loop, when the call is in a loop: see "Loop-invariant hoisting") and calls
+  it with `CallR` (no hashing or lookup).
 - A `Dict` whose arguments are all `Dict`s is a compile-time constant
   (`Const::Tuple`, built when the VM starts and deduplicated). A `Dict` that
   depends on the function's own dictionaries (a generic impl used from
@@ -573,13 +825,70 @@ registers instead of re-materialising the values on every iteration:
   of the loop if the global is not initialized yet. Immutable globals never
   change once initialized, so the hoisted copy is exact. This loop
   versioning is skipped for loops containing lambdas (their prototypes would
-  be duplicated), loops larger than `MAX_VERSIONED_NODES` HIR nodes, and in
-  the unfused fallback for very large functions.
+  be duplicated) and loops larger than `MAX_VERSIONED_NODES` HIR nodes;
+- immutable fields of structs and tuples in locals declared before the loop
+  and never assigned, where they are called or used as operands
+  (`it.next()` of an `Iter`: the field load leaves the loop, and the call
+  is a `CallR` of the register);
+- the methods of trait dictionaries in such locals, for calls through a
+  bound (`GetField` of the dictionary's slot).
 
 `var` globals and captured mutable locals (cells) are never hoisted. At most
 `MAX_HOISTED` values are hoisted per loop nest (most frequently used first),
 and none when the function already uses `HOIST_REG_BUDGET` registers. Inspect
 the result with `SAND_DUMP_BYTECODE=1 sand run file.sand`.
+
+### Loops
+
+Loops are _rotated_: the test is at the end of the loop and branches back
+to the body, so an iteration dispatches one instruction fewer than with a
+test at the top and a `Loop` back. A `for` loop over a list or range tests
+on entry with the forward step (`ForList`, jumping out when done) and at
+the end with its backward form (`ForListBack`, jumping back to the body
+with the next element); a `while` loop tests a cheap condition
+(`cheap_cond`) on entry too, and jumps to the test at the end otherwise; a
+`while let Some(..)` loop and a `for` loop over a channel jump to the test
+(`JSomeBack`). `continue` jumps forward to the test. `loop` and other
+`while let` patterns keep the test at the top and end with `Loop`. Branches
+patched to a target at or before themselves take their backward form
+(`Op::backward`); each backward form is a safe point charging the loop's
+fuel, like `Loop` (see "Metering").
+
+### Pattern matching
+
+A `match` tests its arms in order (`compile_match`), with three shortcuts:
+
+- When the arms test at least three variants of an enum, or three
+  integers that are not too sparse, and every arm starts with such a test
+  or matches anything, a jump table (`SwitchVariant`/`SwitchInt` and
+  `Program::switches`) first sends the value to the first arm that can
+  match it, past that arm's test; the arm's other tests and guard fall
+  through to the next arm as usual. `assemble` moves the tables' targets
+  with the code.
+- The last arm, if it has no guard, does not test its variant or integer:
+  the checker proved the match exhaustive (HIR `match`es must be).
+- A tuple literal as the scrutinee of `match`, `if let` or `let` (`match
+  (a, b)`, `let (x, y) = (y, x)`) is never built: its elements are
+  evaluated into registers and the arms' tuple patterns match them there
+  (`Scrut::Tuple`).
+
+A variant with one payload is read with `Payload` (inline or not).
+
+### Assembly and branch islands
+
+Branches are emitted with placeholder offsets and patched when their target
+is known (`patch`). Most compare-and-branch instructions have 16-bit
+offsets (they must fit 8 bytes with their operands); a target out of that
+range is recorded in `FnState::far` instead, and `assemble`, the last step
+of compiling a function, routes those branches through _branch islands_: a
+`Jmp` (or, for a backward target, a `Loop`, which charges the back edge's
+fuel) to the target, placed in a gap no code falls through to (after an
+unconditional instruction) between the branch and its target when one is
+within `ISLAND_REACH` instructions, so other paths do not pay for it, or
+else right after the branch behind a jump over it. Inserting islands moves
+code, so every branch is re-targeted, and any that no longer fits gets an
+island too (repeated until all fit). So every function is compiled once,
+with the same instruction set, however large it is.
 
 ## Virtual machine
 
@@ -597,16 +906,36 @@ from unrelated edits). The rules that keep it fast:
   frame's `ret`/`closure` from `fiber.frames`, the depth limit from
   `self.host.limits`, the `Some` variant id from `prog.ids`). Adding one
   more long-lived local can push `code` or `ip` out of registers.
+- Back edges (`Loop` and the `…Back` branches) leave the `match` with their
+  offset (`break 'back`) and share one safe point after it, instead of one
+  copy of the safe point per arm.
 - Keep work out of the arms: anything with a loop, an allocation of many
   values, formatting or a second call goes into an `#[inline(never)]`
-  method (`make_closure`, `op_compare`, `op_display`, `op_concat`,
+  method (`make_closure`, `op_compare`, `op_display`, `op_interp`,
   `str_class`, `iter_step`, `call_native`, `try_top`, ...), and error paths
   into `#[cold]` functions that build the message (`operand_trap` for the
   operand checks of every typed arithmetic instruction, `index_error`, ...).
+- Results of out-of-line helpers go through memory: rustc returns every
+  enum larger than a register (`Value`, `Option<Value>`, `Result<Value,
+  Ctl>` alike) through a return slot (only scalar pairs such as `(u64,
+  u64)` come back in two registers), and the caller reads it right after
+  the call. That read stalls on store forwarding unless the callee wrote
+  the result with one store as wide as the load. So results stay 16 bytes
+  (`Ctl` is one pointer: `Result<Value, Ctl>` and `Result<Option<Value>,
+  Ctl>` are, and the `const` asserts in `vm/mod.rs` keep them so), and a
+  helper returning a `Value` it found copies it whole (`Ok(*v)` from the
+  entry, as `map_index` and `map_get` do), not through an `Option<Value>`
+  whose niche checks make LLVM store the tag and the payload separately
+  (`m[k]` ran 13% slower in cycles at the same instruction count that way;
+  with a 40-byte `Ctl` it was 15-40%).
 - Measure: `cargo bench` prints the geometric mean of the benchmarks' best
   times; compare it before and after any change to the loop, and inspect the
   dispatch head with `objdump -d --disassemble-symbols=<Vm::interp>` (look
   for `ldr`/`str` of `sp`-relative slots around the `br` of the jump table).
+  The release profile builds one codegen unit: with several, what LLVM
+  inlined into the loop (and so whether `code` stayed in registers) changed
+  with edits elsewhere in the crate (call-heavy benchmarks 10-15% slower
+  for a field removed from `Program`).
 
 Moving all rare instructions into one out-of-line `exec_cold` handler (a
 smaller loop) was measured and is slower (geometric mean 78 ms against 68
@@ -615,14 +944,23 @@ the arms it removed. A threaded design (one function per instruction,
 tail-calling the next) needs guaranteed tail calls, which stable Rust does
 not have.
 
-The compiler reduces the number of instructions dispatched: fused
-compare-and-branch instructions (also for `or` and `not` of integer
-comparisons, `cond_jump_true`, and character-class tests, `JStrClass`),
+The compiler reduces the number of instructions dispatched: rotated loops
+(see "Loops" under "Compiler"), fused compare-and-branch instructions (also
+for `or` and `not` of integer comparisons, `cond_jump_true`, with an
+immediate operand for small constants, `JNltIK` ..., for character-class
+tests, `JStrClass`, and for blocks used as conditions, the inlined filters
+of fused loops), `if c { continue }` and `if c { break }` as one branch,
+`?` as one `JNotSome`/`JNotOk` whose failure path is out of line (a stub
+after the function's code, `FnState::stubs`), struct literals evaluated
+straight into their fields' registers, `let` copies of locals sharing the
+register (`LocalFacts::alias`: the parameters of inlined lambdas),
+generic equality branches (`JNeq`, `JNne`: strings, string patterns),
 `JNotSome` (test and payload of `Some` in one; after a call of an
-`Obj::IterFn`, `CallR` performs a following `JNotSome` itself), calls
-writing their result straight to the destination register (`CallDirectTo`,
-`CallNativeTo`, `Call`'s `dst`), calls of a function already in a register
-without moving it into the call's base (`CallR`), one-argument natives and
+`Obj::IterFn`, `CallR` performs a following `JNotSome` or `JSomeBack`
+itself), calls writing their result straight to the destination register
+(`CallDirectTo`, `CallNativeTo`, `CallR`), function values called where
+they are (`CallR` and `TailCall` take the callee's register: a local's, a
+hoisted field's or method's), one-argument natives and
 single-payload variants reading their argument in place, statements not
 materialising unit, captures loaded once per closure call, inline
 instructions for small natives (`Len`, `ListPush`, `IntToFloat`,
@@ -648,6 +986,18 @@ appended text when it appends in place, but all of the string when the
 local holds a frozen string (it was read since the last append), which is
 copied into a new buffer.
 
+### String interpolation
+
+`"P(\(p.x), \(p.y:.2))"` is one `Interp { dst, tmpl }`: `Program::templates`
+holds, per interpolation, its pieces (literal text, string literals folded
+in, and the registers of the values with their format specifications), so
+the values are read where they are (a local's register, or a temporary
+loaded by the instructions before) and formatted straight into one buffer
+(`render_template`: the text is charged by its bytes, values by the
+display functions, and the buffer is checked against the memory limit as it
+grows, `Scratch`). `s += "\(i),"` on a string builder local (see above) is
+`AppendInterp`, which appends the formatted text to the local's buffer.
+
 ### Fibers, frames and stacks
 
 Every task runs on a `Fiber` with its own value stack and frame list. A
@@ -669,10 +1019,20 @@ slot receiving the return value) and `closure` (a heap handle, or
   a memory limit error is reported (`free_spare_fibers`). A recycled stack
   is cleared, since the new task's live window is a GC root before the task
   has written all of it.
-- The scheduler reads the clock (for CPU time) after every `CLOCK_SLICES`
-  slices or `SLICE_FUEL` units of fuel and around every wait, not once per
-  slice: tasks that finish or block quickly make slices far shorter than
-  a clock reading.
+- CPU time is the thread's CPU clock (`platform::cpu_time`: user and system
+  time, from `clock_gettime(CLOCK_THREAD_CPUTIME_ID)` on Unix with `os`;
+  elsewhere elapsed time), summed over the stretches between waits, during
+  which the run stays on one thread (`sched::Clock`). The scheduler reads
+  the clocks after every `CLOCK_SLICES` slices or `SLICE_FUEL` units of fuel
+  and around every wait, not once per slice: tasks that finish or block
+  quickly make slices far shorter than a clock reading.
+- The wall-time limit is one deadline, `Vm::deadline`, for the compilation
+  and the run together (the engine computes it before compiling); time
+  spent waiting for prompt answers moves it on.
+- Pending I/O lives in `sched::IoTable`, slots each with a waker made once;
+  a new operation is polled once right away (one that is done already
+  completes without a wait), then whenever its waker fires (noticed when
+  every task is blocked, or every 2 ms while tasks run).
 - The interpreter keeps the current register window as a local slice
   (`regs`) and the fuel counter in a local; `reload!()` re-derives the window
   after anything that may move or resize the stack (calls, returns, natives,
@@ -722,9 +1082,7 @@ collection are young and listed in `Heap::young`.
   are card-marked the same way, by entry.
 - Accounting: `bytes` grows on allocation and container growth; minor
   collections subtract the sizes of freed young objects, major collections
-  recompute it exactly. Maps and sets count the bytes their key index owns
-  (`key_bytes`: strings and `HKey` nodes, copied per entry, so a key tuple
-  repeating a shared string counts each copy). `fiber_bytes` counts the
+  recompute it exactly. `fiber_bytes` counts the
   fibers (stacks, frames, waiter and race lists, `Fiber::footprint`): it
   grows with them (`Fiber::grow_stack`/`grow_frames` check the limit first)
   and every collection recomputes it. `Heap::used()` (both) is what
@@ -734,21 +1092,26 @@ collection are young and listed in `Heap::young`.
   open native resource and recounted by major collections.
 - `GcStats` (collections, majors, total/max pause, max major/minor pause) is
   available from `Engine::gc_stats()` after a run; `cargo bench` prints it.
-- `Config::gc_stress(true)` (or the `SAND_GC_STRESS` environment variable,
-  also honoured by the CLI) collects at every safe point, alternating seven
+- `Config::gc_stress(true)` (the CLI sets it when the `SAND_GC_STRESS`
+  environment variable is set) collects at every safe point, alternating seven
   minor collections with one major one.
 
 ## Compile budget
 
-Type checking runs before any runtime limit applies, so the checker carries a
+The standard library is compiled once, outside any program's budget: the
+budget covers the program's own modules. Type checking runs before any
+runtime limit applies, so the checker carries a
 `check::budget::CompileBudget` (`checker.budget`, `Cell`-based like the
 meter). Code in `src/check/` that can do superlinear work charges it:
 `self.budget.charge(units)` returns `false` once compilation must stop
 (`max_compile_fuel` exhausted, `max_wall_time` passed, or the engine
-interrupted); callers then bail out cheaply (return `Type::Error`, `err(..)`,
+interrupted); callers then bail out cheaply (return `TypeId::ERROR`, `err(..)`,
 assume success) and the engine reports the stop instead of the diagnostics.
 Currently charged: every expression (`infer_inner`), unification and occurs
-steps, bound checks, type nodes zonked or measured, and exhaustiveness work.
+steps, bound checks, type nodes zonked or measured (types without
+variables are not visited: their size is known), the field types visited
+by `derive_bounds`, the supertraits searched by `find_fact`, and
+exhaustiveness work.
 The bytecode compiler gets the same budget (`CompileInput::budget`): it
 charges every expression compiled (`expr_to`, which returns at once when the
 budget is exhausted, so the rest of the program is skipped; deferred code
@@ -770,18 +1133,21 @@ skip the rest and return `source too complex to format`/`lint` (or the time
 or interrupt error). Per-binding lookups are kept constant time instead
 (`SourceFile::line_col` finds columns from per-256-byte character counts;
 the linter's shadowing check keeps a map of the bindings in scope), and the
-parser finds line numbers by binary search.
+formatter finds line numbers by binary search.
 Local limits with precise diagnostics: `limit_type_size` (types of
 expressions and aliases, `MAX_TYPE_SIZE` components), the per-`match`
 pattern work (`start_pattern_check`/`pattern_step`, `MAX_PATTERN_WORK`),
 reflection descriptions (`compile::reflect::MAX_DESC_NODES` per description,
-`MAX_TOTAL_DESC_NODES` per compilation), and the lexer's interpolation
-nesting (`MAX_STRING_NESTING`).
+`MAX_TOTAL_DESC_NODES` per compilation), and the parser's nesting
+(`parser::MAX_DEPTH`, which strings nested in interpolations count towards).
 
 Reflection descriptions (`TypeDesc`, built by the compiler, not the checker)
 are DAGs: `compile::reflect::DescCache` (kept in `compile::Incremental`, so
 shared by the inputs of a REPL session) describes each struct or enum
-instance once, keyed by a structural key of its `Type`, and shares the
+instance once, keyed by a structural key of its type (independent of the
+arena's ids, which differ between the compilations sharing the cache; the
+instances' field types are built in the compiler's private copy of the
+arena), and shares the
 `Arc<TypeDesc>`; each reflected type becomes a single constant used by all
 its call sites. A recursive reference is `TypeDesc::Recur(id)`, resolved by
 `json.decode` against the enclosing `Struct`/`Enum` with that `id` (ids are
@@ -832,14 +1198,21 @@ rule for impls. What differs in a session module (`Checker::in_session`):
 the session stores it as `Checker<'static>` (`detach` swaps the borrows for
 static empty ones; `attach` restores real ones, by covariance). Each input is
 checked on a **clone** of the stored checker, so a rejected input leaves no
-trace; on success the clone replaces it. To keep clones cheap,
-`release_bodies` drops the HIR bodies and syntax of functions once they are
-compiled (only new functions are compiled, and checking never looks at other
-bodies), and lint facts are cleared per input. Cloning costs about a
-millisecond for a session with thousands of definitions.
+trace; on success the clone replaces it. The checker's tables are
+persistent (see "Type checker"), so a clone costs a reference count per
+table whatever the session's size, and an input copies only the chunks it
+changes; the compiler's `Incremental` is cloned the same way. Besides,
+`release_bodies` drops the HIR bodies of functions once they are compiled
+(only new functions are compiled, and checking never looks at other
+bodies), the inference variables of each module are dropped when it is
+finished (so each input's variable ids, and the type nodes built from
+them, are reused), and no lint facts are gathered. An input that defines
+nothing adds only its initializer's `FnInfo` to the checker.
 
-`take_checked`/`restore_checked` move the checked tables into a
-`CheckedProgram` for the compiler and back.
+`take_checked`/`restore_checked` move the bodies, tests and lint facts
+into a `CheckedProgram` for the compiler and back; the other tables are
+shared with it. The program's file names are appended to (`ProgramMark`
+removes those of a failed input).
 
 ### Appending to the program
 
@@ -858,14 +1231,64 @@ constants and slots for the new globals.
 
 ### Modules and imports
 
-`ModuleGraph` (`src/engine.rs`) holds the sources and the loaded modules of a
-compilation; `Engine::discover` loads, depth first and with policy checks,
-whatever a module imports that the graph does not hold yet. `Engine::compile`
-runs it once from the main module; a session keeps its graph and runs it from
-each input (a pseudo-module that is not checked as such), so standard, host
-and script modules imported mid-session are loaded, checked, compiled and
+The standard library is checked and compiled once per `Registry`: a
+`Snapshot` (`src/modules.rs`) holds its sources, the checker's state after
+checking every standard module (detached, bodies released, lint facts
+cleared), the compiler's `Incremental` tables and the compiled `Program`,
+whose `module_help` summarises every module (so `help.module` needs nothing
+else). Engines without host modules share the standard library's registry
+(`engine::STD`) and so one snapshot per process; it is immutable, so engines
+stay isolated: a compilation extends its own copies of the checker and the
+compiler's tables (persistent, so copying them costs a few reference
+counts and an extension copies only what it changes) and of the program
+(whose help tables are shared `Arc`s). A copy of the program is reused: after a run (or check), an
+engine truncates its program back to the snapshot's tables (`Snapshot::mark`,
+`Engine::recycle`) and compiles the next program on it, since copying and
+dropping the snapshot's program cost more than compiling a small program.
+The registry builds a `core` snapshot first (the prelude and `task`), which
+the full one extends. Until the full snapshot is made, a compilation starts
+from the core: the standard modules its program imports are loaded into its
+graph like scripts, and then it continues on the core extended with just
+those (`Registry::extended`, made once per set of modules, at most
+`MAX_PARTIAL_SNAPSHOTS` of them; `ModuleGraph::rebase` moves the graph onto
+it), so a one-off run (the `sand` command) checks and compiles no more of
+the library than it uses; a program importing `help` (which describes every
+module) uses the full snapshot. A REPL session starts from the core and checks the
+standard modules its inputs import itself (as loaded modules), because each
+input is checked on a copy of the session's checker, and copying the whole
+library's for every input would cost more than checking the few modules a
+session imports; its program takes the full snapshot's `module_help`. An
+engine with host modules has a registry of its own whose
+snapshot extends the standard one with each host module that checks, one at
+a time on a copy of the checker; one that does not (or that imports one that
+does not) is left out and compiled, reporting its errors, by the programs
+that import it.
+
+`ModuleGraph` holds the sources (the snapshot's, then the loaded ones) and the
+modules a compilation loads: scripts, and registered modules that are not in
+its snapshot (host modules with errors; standard modules in a session). `Engine::discover` loads, depth first and with policy checks,
+whatever a module imports that the graph does not hold yet; imports of
+snapshot modules record the module (and what it imports) in `ModuleGraph::std`,
+in dependency order: the program's entry initializes exactly those (the
+prelude and `task` always), then the loaded modules, so standard modules that
+are compiled but not imported neither run their initializers nor appear in
+scope. Imports are found with the lexer (`modules::scan_imports`) while
+modules load, on the caller's stack (loading may wait for prompts); every
+module is parsed once, on the compiler's stack (the parser recurses as deep
+as the source nests), and each `import` item of the syntax tree is matched
+with the module loaded for it by the span of its name or path.
+`Engine::compile` runs discovery once from the main module; a session keeps
+its graph and runs it from each input (a pseudo-module that is not checked
+as such), so modules imported mid-session are loaded, checked, compiled and
 initialized once, before the input. `GraphMark` undoes the additions of a
 rejected input.
+
+`Checker::check_modules` checks a program's modules on the snapshot's checker
+(`Checker::check_program` is no longer used by the engine). Lint facts
+(`modules::ResolvedFacts`) are only computed for the linter
+(`CompileOptions::facts`). Checking without running (`check_source`,
+`check_file`, the linter) never prompts, so it never waits: `compile_now`
+polls the compilation once, synchronously, inside `unwind::catch`.
 
 ### Running inputs
 
@@ -875,39 +1298,30 @@ whose heap, globals, fibers and policy decisions persist. After it finishes,
 whenever a later input runs, or the front end idles (below). If the input
 fails (panic, limit, interruption,
 `exit`), `abandon_tasks` drops every fiber and pending I/O operation and marks
-their tasks cancelled; heap and globals are kept. `fuel_used` and
-`output_bytes` are reset per input, and `run_main` measures CPU and wall time
-per call, so those limits are per input. `Vm::session` makes a failed
-top-level `?` panic instead of ending the program. "Always" answers are
-shared with the engine (`prepare_run`/`finish_run`).
+their tasks cancelled; heap and globals are kept. The meter's fuel used
+(`Meter::reset`) and `output_bytes` are reset per input, each input gets
+its own deadline, and the scheduler measures CPU time per call, so those
+limits are per input. `Vm::session` makes a failed top-level `?` panic
+instead of ending the program. "Always" answers live in one map shared by
+the engine, its sessions and every VM (`Host::always`).
 
 ### Tasks between inputs
 
 `Session::run_tasks_until(until, on_error)` drives the VM while a front end
-waits for input. The scheduler only runs while `run_main` runs, so an idle
-run is a `run_main` of a hidden entry (`State::idle_proto`, appended to the
-program when the session starts) that calls a host native (`<session
-idle>`, appended to the session VM's copy of the native table; no `native
-fn` can name it) which suspends on a `Gate`. The method polls `until` and
-the run together; when `until` completes it opens the gate, the idle main
-task finishes at the next scheduling point (within a slice and the 2 ms I/O
-poll), and `release_main` frees it. The VM and the scheduler needed no
-changes. When no task is ready and no I/O is pending, nothing can progress
-and `until` is simply awaited.
-
-During an idle run the session swaps in idle settings, restored from the
-engine's configuration by the next `run`: no wall-time limit
-(`host.limits.max_wall_time`; fuel, CPU time and output count from zero as
-for an input), and a `DeferredPrompter` that waits for the gate before asking
-the real prompter, so a background task's prompt never competes with the
-front end for the terminal (no script code runs while a prompt is pending,
-as always). It also holds the stdin mutex (`try_lock_owned`; skipped if a
-read is already in progress), so script reads of standard input wait too.
-Failures and `exit` are concluded as for inputs (`conclude`). If an idle
-future is dropped, `State::recover` opens its gate on the next call: the
-idle main task then finishes as an ordinary task (`main_fiber` has moved on),
-and the other tasks are kept; a dropped `eval` (`running`) still cancels
-all tasks.
+waits for input: it polls `until` together with `Vm::drive(None)`, the
+scheduler loop without a main task, which runs ready tasks and I/O until no
+task can run and no I/O is pending (`Stop::Idle`; then `until` is simply
+awaited). When `until` completes first, the drive future is dropped where
+it waits: every task is then in the scheduler's tables, and runs again
+with the next input or idle run. No wall-time limit applies (fuel, CPU
+time and output count from zero as for an input). A task that needs a
+permission prompt is not run further (`Stop::Prompt`): the prompt is
+deferred until `until` has completed, so that it never competes with the
+front end for the terminal, then asked; the task retries its call when it
+runs again. The idle run also holds the stdin mutex (`try_lock_owned`;
+skipped if a read is already in progress), so script reads of standard
+input wait too. Failures and `exit` are concluded as for inputs
+(`conclude`); a dropped `eval` (`running`) cancels all tasks.
 
 ### Internal errors
 
@@ -924,8 +1338,8 @@ they work on clones that are discarded, and the program is truncated
 
 ### Front end
 
-The CLI (`src/bin/sand/repl.rs`) reads inputs on a thread, one per request,
-so it can wait for an input and for Ctrl-C (`tokio::signal::ctrl_c`) at once
+The CLI (`cli/src/repl.rs`) reads inputs on a thread, one per request
+(`Requests`), so it can wait for an input and for Ctrl-C (`tokio::signal::ctrl_c`) at once
 without reading ahead of a prompter that uses the terminal or standard input;
 `Session::is_complete` (lexer based) decides when an input is complete. It
 waits for each input inside `run_tasks_until`.
@@ -946,9 +1360,11 @@ is followed by the prompt again. While the editor reads, complete lines go
 to its `ExternalPrinter` (a bounded channel that reedline drains while it
 reads; reedline prints them above the input, on standard output) with
 `try_send` only, since the editor may stop reading at any moment and a
-blocked VM thread would never let the next read start; when the read ends,
-`Screen::stop_editing` prints what the editor did not and the unfinished
-last line. Ctrl-C at an empty input calls `cancel_tasks`.
+blocked VM thread would never let the next read start: lines the full
+channel does not take wait in `ScreenState::backlog`, which later writes and
+a timer of the waiting reader (`EditorReader::next`) pass on. When the read
+ends, `Screen::stop_editing` prints what the editor did not, the backlog
+and the unfinished last line. Ctrl-C at an empty input calls `cancel_tasks`.
 
 ### Types in messages
 
@@ -999,17 +1415,46 @@ not the `Iter`, to save a field load per element) and whose consumers are
 loops, so every element costs calls and fuel and endless iterators cannot
 run unboundedly inside a native.
 
-The `next` functions of the iterators of lists (and so maps and sets),
-ranges and strings (`chars_iter`) are `Obj::IterFn` objects: the state of
-the iteration (`IterSrc`: the list, the next index and the length when the
-iterator was made, ...) as a callable function value. The `Call`
-instruction steps one directly (`Vm::iter_step`), with no frame and no
+The `next` functions of the iterators of lists, maps, sets, ranges and
+strings (`chars_iter`) are `Obj::IterFn` objects: the state of the
+iteration (`IterSrc`: the list, the next index and the length when the
+iterator was made, ...) as a callable function value. `CallR` steps one
+directly (`Vm::iter_step`, `src/vm/iter.rs`), with no frame and no
 native call; it is still one unit of fuel per element.
+
+### Maps and sets
+
+Iterators of maps and sets, and `for` loops over them (`NewIter`, then
+`ForMap`/`ForSet` stepping the iterator into registers), go over the entries
+the map or set had when they started (spec §6.9, §12.13) without copying
+them: `IterSrc::Map`/`Set` reads `MapObj.entries`/`SetObj.entries` in place
+by slot, skipping removed entries, and the iterator's handle is added to
+the map's `pins`. Every change of a map or set (insert, value update,
+remove, clear) first calls `Vm::unpin`: if a pinned iterator still reads it
+in place, the entries are copied once into a private map or set with the
+same slots (no index; charged and checked against the memory limit before
+anything changes) and every such iterator moves to the copy; the pins are
+cleared. So read-only iteration costs no copy (`for` loops over a
+1M-entry map: peak memory 383 MB down to 83 MB, each entry with its loop
+body 73 cycles instead of 132), and a change during iteration costs the
+one copy every iteration used to make. Compaction (`compact_entries`
+renumbers slots) only happens in a change, so it never moves entries under
+an iterator.
+
+Pins are weak: not traced, so an abandoned iterator (a loop left with
+`break`) is collected as usual. A pin is acted on only if its handle still
+holds an `IterFn` reading this map in place, which also covers handles of
+collected iterators reused by other objects (an iterator reusing the slot
+for the same map is pinned anyway). Stale pins are dropped when the list
+doubles (`Pins::prune_at`) and when the map changes. The steps cannot fail,
+so `container_iter` charges up front for the removed entries they will skip
+(an iterator walks exactly the entries it started with).
 
 The checker knows the trait and the struct (`Checker::iter_trait`,
 `iter_struct`, found when the prelude's items are declared). `iter_plan`
 decides how a `for` loop or comprehension clause iterates: ranges, lists,
-maps, sets and channels keep their dedicated instructions (`HKind::For`);
+maps, sets and channels keep their dedicated instructions (`HKind::For`;
+maps and sets as above);
 anything else that implements `Iterator` is lowered to
 
 ```
@@ -1050,8 +1495,10 @@ at the HIR level, while the enclosing function is being checked):
 - **Inlining**: a lambda literal passed to a fused adapter or consumer is
   called at exactly one place of the loop, so it is inlined there (its
   parameters become `let`s; its locals are re-owned by the enclosing
-  function, so the compiler's capture analysis sees them as its own) unless
-  its body contains `return` or `?`.
+  function, so the compiler's capture analysis sees them as its own, and
+  the variables it captured are no longer cells unless another lambda
+  captures them, since cells are decided after fusion) unless its body
+  contains `return` or `?`.
 
 The lowering preserves evaluation order and the number of pulls: the source
 and the adapters' arguments are evaluated once, in order, into hidden
@@ -1074,12 +1521,12 @@ through the closures.
 - `cargo test --test spec_runner <file>` runs `tests/spec/<file>.test`;
   `SPEC_FILTER=substring` limits it to matching cases.
 - API, sandbox, network and example tests live in `tests/*.rs`.
-- `tests/cli.rs` runs the built `sand` binary. The prompt dialogue
+- `cli/tests/cli.rs` runs the built `sand` binary. The prompt dialogue
   (`prompt_dialogue`, generic over the reader and writer) is unit-tested in
-  `src/main.rs`; most CLI tests use the hidden `sand run --prompt-stdin`
+  `cli/src/main.rs`; most CLI tests use the hidden `sand run --prompt-stdin`
   option, which asks the same questions on standard error and reads the
   answers from standard input (the script then gets no standard input).
-- `tests/prompt_tty.rs` drives the real `--prompt` path on a pseudo-terminal
+- `cli/tests/prompt_tty.rs` drives the real `--prompt` path on a pseudo-terminal
   (the `portable-pty` dev-dependency): on Unix a pty that becomes the child's
   controlling terminal, so `sand` opens it as `/dev/tty`; on Windows a ConPTY
   pseudo console, which `CONIN$`/`CONOUT$` open. The test waits for each

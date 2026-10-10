@@ -1,4 +1,5 @@
-//! VM benchmarks. Run with `cargo bench`.
+//! VM benchmarks. Run with `cargo bench`; `cargo test --benches` runs each
+//! program once and checks its output.
 //!
 //! Each benchmark is a Sand program; the harness reports the best and median
 //! wall time over several runs (including compilation), the time per
@@ -49,8 +50,14 @@ const BENCHES: &[Bench] = &[
         ops: 0,
     },
     Bench {
+        name: "map/set iteration 1M",
+        source: "let m: [int: int] = [:]\nfor i in 0..1000000 { m[i] = i }\nvar t = 0\nfor r in 0..3 { for (k, v) in m { t += v } }\nfor e in m.iter() { t += e.1 }\nlet s = set(m.keys())\nfor x in s { t += x }\nprint(t)",
+        expected: "2499997500000\n",
+        ops: 0,
+    },
+    Bench {
         name: "string building 200k",
-        source: "let parts = []\nfor i in 0..200000 { parts.push(\"item{i}\") }\nlet s = \",\".join(parts)\nprint(s.len())",
+        source: "let parts = []\nfor i in 0..200000 { parts.push(\"item\\(i)\") }\nlet s = parts.join(\",\")\nprint(s.len())",
         expected: "2088889\n",
         ops: 0,
     },
@@ -80,7 +87,7 @@ const BENCHES: &[Bench] = &[
     },
     Bench {
         name: "json parse/stringify 2MB",
-        source: "import json\nlet items = [\"\\{\\\"id\\\": {i}, \\\"name\\\": \\\"item {i}\\\", \\\"tags\\\": [1, 2, 3]\\}\" for i in 0..30000]\nlet text = \"[\" + \",\".join(items) + \"]\"\nlet j = json.parse(text).unwrap()\nprint(json.stringify(j).len() > 0)",
+        source: "import json\nlet items = [\"{\\\"id\\\": \\(i), \\\"name\\\": \\\"item \\(i)\\\", \\\"tags\\\": [1, 2, 3]}\" for i in 0..30000]\nlet text = \"[\" + items.join(\",\") + \"]\"\nlet j = json.parse(text).unwrap()\nprint(json.encode(j).len() > 0)",
         expected: "true\n",
         ops: 0,
     },
@@ -140,7 +147,7 @@ const BENCHES: &[Bench] = &[
     },
     Bench {
         name: "gc: 4M live (200MB), mutated + 10M churn",
-        source: "struct P {\n    x: int\n    y: int\n}\nlet live = [P { x: i, y: i } for i in 0..3000000]\nlet m: [int: str] = [:]\nfor i in 0..1000000 { m[i] = \"v{i}\" }\nvar t = 0\nfor i in 0..10000000 {\n    let p = P { x: i, y: 1 }\n    if i % 100 == 0 { live[i % 3000000] = p }\n    if i % 1000 == 0 { m[i % 1000000] = \"w{i}\" }\n    t += p.y\n}\nprint(t + live.len() + m.len())",
+        source: "struct P {\n    x: int\n    y: int\n}\nlet live = [P { x: i, y: i } for i in 0..3000000]\nlet m: [int: str] = [:]\nfor i in 0..1000000 { m[i] = \"v\\(i)\" }\nvar t = 0\nfor i in 0..10000000 {\n    let p = P { x: i, y: 1 }\n    if i % 100 == 0 { live[i % 3000000] = p }\n    if i % 1000 == 0 { m[i % 1000000] = \"w\\(i)\" }\n    t += p.y\n}\nprint(t + live.len() + m.len())",
         expected: "14000000\n",
         ops: 10_000_000,
     },
@@ -167,7 +174,7 @@ fn ms(d: Duration) -> f64 {
 
 fn main() {
     let filter = std::env::args().skip(1).find(|a| !a.starts_with('-'));
-    let quick = std::env::var("BENCH_QUICK").is_ok();
+    let quick = std::env::var("BENCH_QUICK").is_ok() || !std::env::args().any(|a| a == "--bench");
     println!(
         "{:<34} {:>10} {:>10} {:>8} {:>5} {:>6} {:>9} {:>9} {:>9}",
         "benchmark", "best", "median", "ns/op", "gcs", "majors", "max-pause", "max-minor", "avg-pause"

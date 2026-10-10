@@ -132,6 +132,9 @@ impl Policy {
         Policy::Custom(Arc::new(f))
     }
 
+    /// Decides `cap`. A rule policy normalizes the path of a file capability
+    /// first ([`normalize_path`], which resolves symlinks on the host's file
+    /// system: a `realpath`); [`Policy::check_normalized`] skips that.
     pub fn check(&self, cap: &Capability) -> Decision {
         self.check_in(cap, PathSpace::Host)
     }
@@ -181,6 +184,41 @@ impl Policy {
         }
     }
 
+    /// The decision on `cap`, a file or import capability whose path is
+    /// normalized except that its final name may be spelled differently
+    /// than stored (on a case- or normalization-insensitive file system),
+    /// if the decision is the same for every such spelling: `None` if the
+    /// policy may decide differently (a custom policy, which may compare
+    /// paths exactly, or an allow rule below the final name's directory)
+    /// or would prompt (prompts show the path, and answers are remembered
+    /// for it). Deny rules equate every spelling ([`fold_name`]).
+    pub(crate) fn decision_for_any_spelling(&self, cap: &Capability, space: PathSpace) -> Option<Decision> {
+        let decision = match self {
+            Policy::AllowAll | Policy::DenyAll => self.check_in(cap, space),
+            Policy::Custom(_) => return None,
+            Policy::Rules(r) => {
+                let (Capability::FsRead(p) | Capability::FsWrite(p) | Capability::Import(p)) = cap else {
+                    return None;
+                };
+                // An allow rule matches `dir/name` for every spelling of
+                // `name` unless it is below `dir` (it then names one).
+                let dir = p.parent().unwrap_or(p);
+                let below = |r: &PathRule| {
+                    let rule = match space {
+                        PathSpace::Host => &r.host,
+                        PathSpace::Memory => &r.memory,
+                    };
+                    path_starts_with(rule, dir) && rule.components().count() > dir.components().count()
+                };
+                if r.allow_rules(cap).iter().any(below) {
+                    return None;
+                }
+                r.check_normalized_in(cap, space)
+            }
+        };
+        (decision != Decision::Prompt).then_some(decision)
+    }
+
     /// Whether a deny rule protects `path` or anything below it, so that
     /// moving or removing the whole tree at `path` must be refused even if
     /// `path` itself may be written. Only rule policies have such rules;
@@ -192,7 +230,16 @@ impl Policy {
     /// Like [`Policy::denies_under`] for a path of the file system `space`.
     pub(crate) fn denies_under_in(&self, path: &Path, space: PathSpace) -> bool {
         match self {
-            Policy::Rules(r) => r.denies_under_in(path, space),
+            Policy::Rules(r) => r.denies_under_normalized_in(&r.entry_path(path, space), space),
+            _ => false,
+        }
+    }
+
+    /// Like [`Policy::denies_under_in`] for a path already normalized as
+    /// the path of an entry itself.
+    pub(crate) fn denies_under_normalized_in(&self, path: &Path, space: PathSpace) -> bool {
+        match self {
+            Policy::Rules(r) => r.denies_under_normalized_in(path, space),
             _ => false,
         }
     }
@@ -209,22 +256,27 @@ pub(crate) enum PathSpace {
     Memory,
 }
 
-/// A path of a rule, in the form of each [`PathSpace`].
+/// A path of a rule, in the form of each [`PathSpace`], and (for deny
+/// rules) folded by [`deny_key`] once.
 #[derive(Clone, Debug)]
 struct PathRule {
     host: PathBuf,
     memory: PathBuf,
+    host_key: PathBuf,
+    memory_key: PathBuf,
 }
 
 impl PathRule {
     fn new(p: &Path) -> PathRule {
-        PathRule { host: normalize_path(p), memory: crate::files::memory_path(p) }
+        let (host, memory) = (normalize_path(p), crate::files::memory_path(p));
+        PathRule { host_key: deny_key(&host), memory_key: deny_key(&memory), host, memory }
     }
 
-    fn path(&self, space: PathSpace) -> &Path {
+    /// The folded path, for deny rules.
+    fn key(&self, space: PathSpace) -> &Path {
         match space {
-            PathSpace::Host => &self.host,
-            PathSpace::Memory => &self.memory,
+            PathSpace::Host => &self.host_key,
+            PathSpace::Memory => &self.memory_key,
         }
     }
 }
@@ -268,7 +320,7 @@ impl Default for RulePolicy {
 pub const MAX_PATH_BYTES: usize = 4096;
 
 /// Resolves `.` and `..` lexically.
-fn lexical(p: &Path) -> PathBuf {
+pub(crate) fn lexical(p: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for c in p.components() {
         match c {
@@ -282,202 +334,47 @@ fn lexical(p: &Path) -> PathBuf {
     out
 }
 
-/// Normalizes a path lexically (resolving `.` and `..`) and canonicalises the
-/// longest existing prefix (resolving symlinks, and on case- or
-/// normalization-insensitive file systems taking the stored spelling of each
-/// existing component).
+/// Normalizes a path lexically (resolving `.` and `..`) and resolves it on
+/// the host's file system like `realpath` does for the longest prefix that
+/// exists: symlinks are followed, and on macOS existing components are
+/// named as stored (case- and normalization-insensitive volumes accept
+/// other spellings) and through their firmlinks
+/// (`/System/Volumes/Data/Users` is `/Users`). A symlink whose target does
+/// not resolve is kept, with the rest of the path.
 ///
 /// Without the `os` feature there is no host file system: paths are only
 /// normalized lexically.
 pub fn normalize_path(p: &Path) -> PathBuf {
     #[cfg(feature = "os")]
-    return canonicalize_existing(lexical(p));
+    return crate::files::Fs::Host.resolve(&lexical(p));
     #[cfg(not(feature = "os"))]
     return lexical(p);
 }
 
-#[cfg(feature = "os")]
-/// Canonicalises the longest prefix of the lexically normal path `p` that
-/// resolves, keeping the rest as it is. If a prefix resolves, so do the
-/// shorter ones, so the prefix is found by binary search: a path of n
-/// components takes O(log n) `canonicalize` calls rather than n.
-fn canonicalize_existing(p: PathBuf) -> PathBuf {
-    if let Ok(c) = p.canonicalize() {
-        return simplify_verbatim(c);
-    }
-    let parts: Vec<&std::ffi::OsStr> = p.components().map(|c| c.as_os_str()).collect();
-    // The root (`/`, `C:\`) is not split: `C:` alone is relative.
-    let root = p.components().take_while(|c| matches!(c, Component::Prefix(_) | Component::RootDir)).count();
-    let prefix = |k: usize| parts[..k].iter().collect::<PathBuf>();
-    // Invariant: `prefix(hi)` does not resolve; `best` is the canonical
-    // `prefix(lo)` once one was found.
-    let (mut lo, mut hi, mut best) = (root, parts.len(), None);
-    while hi - lo > 1 {
-        let mid = lo + (hi - lo) / 2;
-        match prefix(mid).canonicalize() {
-            Ok(c) => {
-                lo = mid;
-                best = Some(c);
-            }
-            Err(_) => hi = mid,
-        }
-    }
-    let best = match best {
-        Some(b) => b,
-        None if root > 0 => match prefix(root).canonicalize() {
-            Ok(b) => b,
-            Err(_) => return p,
-        },
-        None => return p,
-    };
-    let mut r = simplify_verbatim(best);
-    for part in &parts[lo..] {
-        r.push(part);
-    }
-    r
-}
-
 /// Like [`normalize_path`], but a final symlink is not resolved: the path of
-/// a directory entry itself (its parent directory canonicalised). An
-/// existing entry is named as stored, so that on a case- or
+/// a directory entry itself (its parent directory normalized). An existing
+/// entry is named as stored, so that on a case- or
 /// normalization-insensitive file system `data/ſecrets` becomes
-/// `data/secrets`; for a symlink, which cannot be canonicalised without
-/// following it, the stored name is looked up in its directory (see
+/// `data/secrets`; for a symlink this may take a scan of its directory (see
 /// [`MAX_LINK_SCAN`]).
 pub fn normalize_entry_path(p: &Path) -> PathBuf {
-    entry_path(p).path
+    #[cfg(feature = "os")]
+    {
+        let mut t = crate::files::Fs::Host.target(&lexical(p), crate::files::Mode::Entry);
+        t.fix_spelling();
+        t.path
+    }
+    #[cfg(not(feature = "os"))]
+    return lexical(p);
 }
 
 /// At most this many entries of a directory are read to find the stored
-/// name of a symlink in it (by [`normalize_entry_path`]); in a larger
-/// directory, a symlink keeps the name it was given. Deny rules match every
-/// spelling of a name anyway; allow rules then need the name as given.
+/// name of an entry in it when it cannot be had otherwise (a symlink's;
+/// on macOS, that of a file that cannot be opened for reading or of a
+/// device); in a larger directory, the entry keeps the name it was given.
+/// Deny rules match every spelling of a name anyway; allow rules then need
+/// the name as given.
 pub const MAX_LINK_SCAN: usize = 4096;
-
-/// The result of [`entry_path`].
-pub(crate) struct EntryPath {
-    pub path: PathBuf,
-    /// Directory entries read to find a symlink's stored name, and the
-    /// bytes of their names (for metering).
-    pub scanned: usize,
-    pub scanned_bytes: usize,
-}
-
-/// [`normalize_entry_path`], also reporting the directory entries it read.
-pub(crate) fn entry_path(p: &Path) -> EntryPath {
-    #[cfg(not(feature = "os"))]
-    return EntryPath { path: lexical(p), scanned: 0, scanned_bytes: 0 };
-    #[cfg(feature = "os")]
-    entry_path_on_host(p)
-}
-
-#[cfg(feature = "os")]
-fn entry_path_on_host(p: &Path) -> EntryPath {
-    let lexical = lexical(p);
-    let (Some(parent), Some(name)) = (lexical.parent(), lexical.file_name()) else {
-        return EntryPath { path: normalize_path(&lexical), scanned: 0, scanned_bytes: 0 };
-    };
-    let parent = normalize_path(parent);
-    let entry = parent.join(name);
-    let path = match std::fs::symlink_metadata(&entry) {
-        Ok(m) if m.file_type().is_symlink() => {
-            let (stored, scanned, scanned_bytes) = stored_link_name(&parent, name, MAX_LINK_SCAN);
-            let path = stored.map_or(entry, |n| parent.join(n));
-            return EntryPath { path, scanned, scanned_bytes };
-        }
-        Ok(_) => match entry.canonicalize().map(simplify_verbatim) {
-            // (If it became a symlink meanwhile, its target is ignored.)
-            Ok(c) if c.parent() == Some(parent.as_path()) => c,
-            _ => entry,
-        },
-        Err(_) => entry,
-    };
-    EntryPath { path, scanned: 0, scanned_bytes: 0 }
-}
-
-#[cfg(feature = "os")]
-/// The stored name of the symlink `parent/name` if it is spelled
-/// differently, with the number of entries read and the bytes of
-/// their names. The stored name is the entry whose name folds like
-/// `name` (see [`fold_name`]) and that is the same directory entry
-/// as `parent/name`; an exact match is preferred.
-fn stored_link_name(parent: &Path, name: &std::ffi::OsStr, limit: usize) -> (Option<std::ffi::OsString>, usize, usize) {
-    let Ok(entries) = std::fs::read_dir(parent) else {
-        return (None, 0, 0);
-    };
-    let link = parent.join(name);
-    let folded = fold_name(&name.to_string_lossy());
-    let (mut found, mut scanned, mut bytes) = (None, 0, 0);
-    for entry in entries {
-        if scanned == limit {
-            return (None, scanned, bytes);
-        }
-        scanned += 1;
-        let Ok(entry) = entry else { continue };
-        let candidate = entry.file_name();
-        bytes += candidate.len();
-        if candidate == name {
-            return (None, scanned, bytes);
-        }
-        if found.is_none() && fold_name(&candidate.to_string_lossy()) == folded && same_entry(&link, &parent.join(&candidate)) {
-            found = Some(candidate);
-        }
-    }
-    (found, scanned, bytes)
-}
-
-/// Whether `a` and `b` name the same directory entry (final symlinks not
-/// followed).
-#[cfg(all(feature = "os", unix))]
-fn same_entry(a: &Path, b: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    match (std::fs::symlink_metadata(a), std::fs::symlink_metadata(b)) {
-        (Ok(a), Ok(b)) => (a.dev(), a.ino()) == (b.dev(), b.ino()),
-        _ => false,
-    }
-}
-
-#[cfg(all(feature = "os", windows))]
-fn same_entry(a: &Path, b: &Path) -> bool {
-    use std::os::windows::fs::OpenOptionsExt;
-    // FILE_READ_ATTRIBUTES; FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT.
-    let open = |p: &Path| {
-        std::fs::OpenOptions::new().access_mode(0x80).custom_flags(0x0200_0000 | 0x0020_0000).open(p).and_then(same_file::Handle::from_file)
-    };
-    matches!((open(a), open(b)), (Ok(a), Ok(b)) if a == b)
-}
-
-#[cfg(all(feature = "os", not(any(unix, windows))))]
-fn same_entry(_: &Path, _: &Path) -> bool {
-    false
-}
-
-/// Windows canonical paths are "verbatim" (`\\?\C:\x`, `\\?\UNC\server\share\x`).
-/// Every path is converted to the plain form (`C:\x`, `\\server\share\x`), so
-/// that all normalized paths share one form whether or not they exist (and
-/// read naturally in prompts and errors). The standard library re-adds the
-/// prefix where needed (long paths).
-#[cfg(feature = "os")]
-fn simplify_verbatim(p: PathBuf) -> PathBuf {
-    if cfg!(windows)
-        && let Some(s) = p.to_str()
-        && let Some(plain) = plain_from_verbatim(s)
-    {
-        return PathBuf::from(plain);
-    }
-    p
-}
-
-#[cfg(any(feature = "os", test))]
-fn plain_from_verbatim(s: &str) -> Option<String> {
-    let rest = s.strip_prefix(r"\\?\")?;
-    if let Some(unc) = rest.strip_prefix(r"UNC\") {
-        return Some(format!(r"\\{unc}"));
-    }
-    let b = rest.as_bytes();
-    // `C:` alone would be relative to the drive's current directory.
-    (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\').then(|| rest.to_string())
-}
 
 fn under(path: &Path, roots: &[PathRule], space: PathSpace) -> bool {
     match space {
@@ -498,12 +395,11 @@ fn under(path: &Path, roots: &[PathRule], space: PathSpace) -> bool {
 /// which equates every such spelling. Allow rules stay exact, so this only
 /// ever denies more.
 fn under_deny(path: &Path, roots: &[PathRule], space: PathSpace) -> bool {
+    if roots.is_empty() {
+        return false;
+    }
     let key = deny_key(path);
-    roots.iter().any(|r| key.starts_with(deny_key(r.path(space))))
-}
-
-fn deny_starts_with(path: &Path, root: &Path) -> bool {
-    deny_key(path).starts_with(deny_key(root))
+    roots.iter().any(|r| key.starts_with(r.key(space)))
 }
 
 /// `p` with every component folded by [`fold_name`].
@@ -956,13 +852,9 @@ impl RulePolicy {
     }
 
     fn check_entry_in(&self, cap: &Capability, space: PathSpace) -> Decision {
-        let entry = |p: &Path| match space {
-            PathSpace::Host => normalize_entry_path(p),
-            PathSpace::Memory => crate::files::memory_path(p),
-        };
         match cap {
-            Capability::FsRead(p) => self.check_path(&entry(p), false, space),
-            Capability::FsWrite(p) => self.check_path(&entry(p), true, space),
+            Capability::FsRead(p) => self.check_path(&self.entry_path(p, space), false, space),
+            Capability::FsWrite(p) => self.check_path(&self.entry_path(p, space), true, space),
             _ => self.check_in(cap, space),
         }
     }
@@ -970,15 +862,20 @@ impl RulePolicy {
     /// See [`Policy::denies_under`]: whether a read or write deny rule lies
     /// at or below `path` (a final symlink is not resolved).
     pub fn denies_under(&self, path: &Path) -> bool {
-        self.denies_under_in(path, PathSpace::Host)
+        self.denies_under_normalized_in(&self.entry_path(path, PathSpace::Host), PathSpace::Host)
     }
 
-    fn denies_under_in(&self, path: &Path, space: PathSpace) -> bool {
-        let path = match space {
-            PathSpace::Host => normalize_entry_path(path),
-            PathSpace::Memory => crate::files::memory_path(path),
-        };
-        self.read_deny.iter().chain(&self.write_deny).any(|rule| deny_starts_with(rule.path(space), &path))
+    fn denies_under_normalized_in(&self, path: &Path, space: PathSpace) -> bool {
+        let key = deny_key(path);
+        self.read_deny.iter().chain(&self.write_deny).any(|rule| rule.key(space).starts_with(&key))
+    }
+
+    /// The path of the entry `p` itself, normalized in `space`.
+    fn entry_path(&self, p: &Path, space: PathSpace) -> PathBuf {
+        match space {
+            PathSpace::Host => normalize_entry_path(p),
+            PathSpace::Memory => crate::files::memory_path(p),
+        }
     }
 
     /// Decides access to a normalized path.
@@ -1002,7 +899,31 @@ impl RulePolicy {
         match cap {
             Capability::FsRead(p) => self.check_path(p, false, space),
             Capability::FsWrite(p) => self.check_path(p, true, space),
+            Capability::Import(p) => self.check_import(p, space),
             _ => self.check_in(cap, space),
+        }
+    }
+
+    /// Decides importing the module at the normalized path `p`.
+    fn check_import(&self, p: &Path, space: PathSpace) -> Decision {
+        // Importing reads the module: read deny rules apply.
+        if under_deny(p, &self.read_deny, space) || under_deny(p, &self.import_deny, space) {
+            return Decision::Deny;
+        }
+        match &self.import_allow {
+            None => Decision::Allow,
+            Some(roots) if under(p, roots, space) => Decision::Allow,
+            Some(_) => self.fallback,
+        }
+    }
+
+    /// The allow rules that decide `cap` (none for other capabilities).
+    fn allow_rules(&self, cap: &Capability) -> &[PathRule] {
+        match cap {
+            Capability::FsRead(_) => &self.read_allow,
+            Capability::FsWrite(_) => &self.write_allow,
+            Capability::Import(_) => self.import_allow.as_deref().unwrap_or_default(),
+            _ => &[],
         }
     }
 
@@ -1077,17 +998,7 @@ impl RulePolicy {
                 }
                 allow_or(self.env_allow.iter().any(|n| n == name || n == "*"))
             }
-            Capability::Import(p) => {
-                // Importing reads the module: read deny rules apply.
-                let path = normal(p);
-                if under_deny(&path, &self.read_deny, space) || under_deny(&path, &self.import_deny, space) {
-                    return Decision::Deny;
-                }
-                match &self.import_allow {
-                    None => Decision::Allow,
-                    Some(roots) => allow_or(under(&path, roots, space)),
-                }
-            }
+            Capability::Import(p) => self.check_import(&normal(p), space),
             Capability::Custom { name, detail } => {
                 let matches = |(n, d): &(String, Option<String>)| n == name && d.as_ref().is_none_or(|d| d == detail);
                 if self.custom_deny.iter().any(matches) {
@@ -1130,12 +1041,34 @@ mod tests {
         assert_eq!(fold_name("plain.txt"), "plain.txt");
     }
 
+    /// The resolver agrees with `realpath` (the standard library's
+    /// `canonicalize`) on the longest prefix that resolves.
     #[test]
-    #[cfg(feature = "os")]
+    #[cfg(all(feature = "os", unix))]
     fn normalization_finds_the_longest_existing_prefix() {
         let base = normalize_path(&std::env::temp_dir()).join(format!("sand-policy-norm-{}", std::process::id()));
         std::fs::create_dir_all(base.join("a/b")).unwrap();
-        for rest in ["", "a", "a/b", "a/b/c", "a/b/c/d/e", "a/x/../b/./c", "missing/a/b", "a/b/../../.."] {
+        std::fs::write(base.join("a/file"), "").unwrap();
+        std::os::unix::fs::symlink(base.join("a/b"), base.join("link")).unwrap();
+        std::os::unix::fs::symlink("../a/file", base.join("a/b/file_link")).unwrap();
+        std::os::unix::fs::symlink("missing/x", base.join("a/dangling")).unwrap();
+        for rest in [
+            "",
+            "a",
+            "a/b",
+            "a/b/c",
+            "a/b/c/d/e",
+            "a/x/../b/./c",
+            "missing/a/b",
+            "a/b/../../..",
+            "link",
+            "link/c/d",
+            "link/file_link",
+            "link/file_link/x",
+            "a/dangling",
+            "a/dangling/x/y",
+            "a/file/x",
+        ] {
             let p = base.join(rest);
             let expected = {
                 // The obvious algorithm: drop components from the end until it resolves.
@@ -1146,7 +1079,7 @@ mod tests {
                     tail.push(existing.file_name().unwrap().to_os_string());
                     existing.pop();
                 }
-                let mut r = simplify_verbatim(existing.canonicalize().unwrap());
+                let mut r = existing.canonicalize().unwrap();
                 r.extend(tail.iter().rev());
                 r
             };
@@ -1160,40 +1093,26 @@ mod tests {
         std::fs::remove_dir_all(&base).unwrap();
     }
 
-    #[test]
-    fn verbatim_paths_become_plain() {
-        assert_eq!(plain_from_verbatim(r"\\?\C:\Users\a.sand").as_deref(), Some(r"C:\Users\a.sand"));
-        assert_eq!(plain_from_verbatim(r"\\?\d:\").as_deref(), Some(r"d:\"));
-        assert_eq!(plain_from_verbatim(r"\\?\C:"), None);
-        assert_eq!(plain_from_verbatim(r"\\?\UNC\server\share\x").as_deref(), Some(r"\\server\share\x"));
-        // Not verbatim, or a verbatim form without a plain equivalent.
-        assert_eq!(plain_from_verbatim(r"C:\Users"), None);
-        assert_eq!(plain_from_verbatim("/home/user"), None);
-        assert_eq!(plain_from_verbatim(r"\\?\Volume{0000}\x"), None);
-        assert_eq!(plain_from_verbatim(r"\\?\GLOBALROOT\Device"), None);
-    }
-
-    /// On a case-insensitive file system (macOS's default), a symlink is
-    /// found under its stored name unless its directory is too large.
+    /// On a case-insensitive file system (macOS's default), entries are
+    /// named as stored, symlinks too.
     #[cfg(all(feature = "os", target_os = "macos"))]
     #[test]
-    fn symlink_names_are_looked_up_within_a_bound() {
-        use std::ffi::OsStr;
+    fn entries_are_named_as_stored() {
         let base = normalize_path(&std::env::temp_dir()).join(format!("sand-policy-links-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).unwrap();
+        std::fs::create_dir_all(base.join("Dir")).unwrap();
+        std::fs::write(base.join("Dir/File.txt"), "").unwrap();
         std::os::unix::fs::symlink("/nowhere", base.join("Link")).unwrap();
-        for i in 0..3 {
-            std::fs::write(base.join(format!("f{i}")), "").unwrap();
+        if !base.join("dir").exists() {
+            // A case-sensitive volume.
+            std::fs::remove_dir_all(&base).unwrap();
+            return;
         }
-        let (stored, scanned, bytes) = stored_link_name(&base, OsStr::new("LINK"), 10);
-        assert_eq!((stored.as_deref(), scanned, bytes), (Some(OsStr::new("Link")), 4, 10));
-        // Stored as given: found without reading further.
-        assert_eq!(stored_link_name(&base, OsStr::new("Link"), 10).0, None);
-        // More entries than the limit: the given name is kept.
-        let (stored, scanned, _) = stored_link_name(&base, OsStr::new("LINK"), 3);
-        assert_eq!((stored, scanned), (None, 3));
-        assert_eq!(entry_path(&base.join("LINK")).path, base.join("Link"));
+        assert_eq!(normalize_entry_path(&base.join("LINK")), base.join("Link"));
+        assert_eq!(normalize_entry_path(&base.join("Link")), base.join("Link"));
+        assert_eq!(normalize_path(&base.join("DIR/FILE.TXT")), base.join("Dir/File.txt"));
+        assert_eq!(normalize_entry_path(&base.join("dir/file.txt")), base.join("Dir/File.txt"));
+        assert_eq!(normalize_path(&base.join("dir/new.TXT")), base.join("Dir/new.TXT"));
         std::fs::remove_dir_all(&base).unwrap();
     }
 }

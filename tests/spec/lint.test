@@ -75,7 +75,8 @@ struct bad_name { x: int }
 enum Good { lower_variant }
 fn BadFn() {}
 let BadVar = 1
-print(BadVar)
+let badVar = 2
+print(BadVar + badVar)
 BadFn()
 print(bad_name { x: 1 })
 print(Good.lower_variant)
@@ -83,7 +84,8 @@ print(Good.lower_variant)
 1: naming
 2: naming
 3: naming
-4: naming
+4: variant-like-binding
+5: naming
 
 === bool comparison
 let ok = true
@@ -232,18 +234,18 @@ fn f(s: str, xs: [int]) {
     let s = s.len()
     print(s)
     for x in xs {
-        let x = "item {x}"
+        let x = "item \(x)"
         print(x)
     }
     let (a, b) = (1, 2)
-    let a = "{a}{b}"
+    let a = "\(a)\(b)"
     print(a)
     if let Some(v) = xs.first() {
-        let v = "{v}"
+        let v = "\(v)"
         print(v)
     }
     let g = (n: int) => {
-        let n = "{n}"
+        let n = "\(n)"
         n.len()
     }
     print(g(1))
@@ -358,14 +360,11 @@ print(P { v: 2 }.v)
 --- lint
 11: unused-function
 
-=== interpolated literals
+=== braces in strings are text, and interpolating a literal is not a lint
 let n = 3
-print("[0-9]{4}")
-print("{n} {2.5:.1} {r"{4}"}")
-print("{1.5}")
+print("[0-9]{4} {n}")
+print("\(n) \(2.5:.1) \(1.5) \(r"{4}")")
 --- lint
-2: interpolated-literal
-4: interpolated-literal
 
 === label lints
 @Rows for i in 0..3 {
@@ -417,3 +416,87 @@ f()
 --- lint
 4: unreachable-code
 
+=== statements without effect
+let x = 1
+let y = x
+    -3
+x + 1
+fn f() -> int {
+    3
+    4
+}
+fn g(a: [int]) {
+    a.len() == 0
+    a.push(1)
+}
+print(y + f())
+g([])
+--- lint
+3: no-effect
+4: no-effect
+6: no-effect
+10: len-zero
+
+=== shadowed prelude functions do not diverge
+fn exit(code: int) {
+    print(code)
+}
+fn f() {
+    exit(1)
+    print("reached")
+}
+f()
+--- lint
+
+=== a subtraction continued on the next line has an effect
+let x = 1
+let y = x
+    - 3
+print(y)
+--- lint
+
+=== a capitalized name that binds in a pattern is a variant-like binding
+enum State {
+    Empty
+    Full(int)
+}
+fn size(s: State) -> int {
+    match s {
+        Full(n) => n
+        Emtpy => 0
+    }
+}
+fn label(s: State) -> str {
+    match s {
+        Empty => "empty"
+        Other => "other: \(Other)"
+    }
+}
+fn first(o: State?) -> int {
+    if let Some(Full(n)) = o { n } else { 0 }
+}
+print(size(State.Empty))
+print(label(State.Full(1)))
+print(first(None))
+--- lint
+8: unused-variable
+8: variant-like-binding
+14: variant-like-binding
+
+=== variant-like bindings in let and for, constants, and suppression
+let LIMIT = 3
+let Answer = 42
+fn f() -> int {
+    let Total = 3
+    // lint: allow(variant-like-binding)
+    let Count = 4
+    for (Key, v) in [("a", 1)] {
+        print("\(Key) \(v)")
+    }
+    Total + Count
+}
+print([LIMIT, Answer, f()])
+--- lint
+2: variant-like-binding
+4: variant-like-binding
+7: variant-like-binding

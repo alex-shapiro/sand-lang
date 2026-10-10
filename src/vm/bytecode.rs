@@ -331,8 +331,57 @@ pub enum Op {
         b: Reg,
         off: i16,
     },
-    /// Jump if the value is not `Some(_)
+    /// Generic equality (strings, ...) and branch: jump if NOT (a == b).
+    JNeq {
+        a: Reg,
+        b: Reg,
+        off: i16,
+    },
+    /// Jump if NOT (a != b).
+    JNne {
+        a: Reg,
+        b: Reg,
+        off: i16,
+    },
+    /// Compare with an immediate and branch: jump if NOT (a op k).
+    JNltIK {
+        a: Reg,
+        k: i16,
+        off: i16,
+    },
+    JNleIK {
+        a: Reg,
+        k: i16,
+        off: i16,
+    },
+    JNgtIK {
+        a: Reg,
+        k: i16,
+        off: i16,
+    },
+    JNgeIK {
+        a: Reg,
+        k: i16,
+        off: i16,
+    },
+    JNeqIK {
+        a: Reg,
+        k: i16,
+        off: i16,
+    },
+    JNneIK {
+        a: Reg,
+        k: i16,
+        off: i16,
+    },
+    /// Jump if the value is not `Some(_)`; otherwise its payload goes to `dst`.
     JNotSome {
+        src: Reg,
+        dst: Reg,
+        off: i16,
+    },
+    /// Jump if the value is not `Ok(_)`; otherwise its payload goes to `dst`.
+    JNotOk {
         src: Reg,
         dst: Reg,
         off: i16,
@@ -343,14 +392,88 @@ pub enum Op {
         variant: u16,
         off: i16,
     },
+    /// Jump to `Program::switches[table]`'s target for the runtime
+    /// variant id of `src` (`match` on an enum).
+    SwitchVariant {
+        src: Reg,
+        table: u32,
+    },
+    /// Jump to `Program::switches[table]`'s target for the integer `src`.
+    SwitchInt {
+        src: Reg,
+        table: u32,
+    },
+
+    // Backward branches, which end rotated loops: each is the forward
+    // instruction of the same name without `Back`, but its (negative)
+    // offset jumps back, and taking it is a safe point charging the loop's
+    // fuel like `Loop`.
+    JmpIfBack {
+        cond: Reg,
+        off: i32,
+    },
+    JmpIfNotBack {
+        cond: Reg,
+        off: i32,
+    },
+    JNltIBack {
+        a: Reg,
+        b: Reg,
+        off: i16,
+    },
+    JNleIBack {
+        a: Reg,
+        b: Reg,
+        off: i16,
+    },
+    JNeqIBack {
+        a: Reg,
+        b: Reg,
+        off: i16,
+    },
+    JNneIBack {
+        a: Reg,
+        b: Reg,
+        off: i16,
+    },
+    JNltIKBack {
+        a: Reg,
+        k: i16,
+        off: i16,
+    },
+    JNleIKBack {
+        a: Reg,
+        k: i16,
+        off: i16,
+    },
+    JNgtIKBack {
+        a: Reg,
+        k: i16,
+        off: i16,
+    },
+    JNgeIKBack {
+        a: Reg,
+        k: i16,
+        off: i16,
+    },
+    JNeqIKBack {
+        a: Reg,
+        k: i16,
+        off: i16,
+    },
+    JNneIKBack {
+        a: Reg,
+        k: i16,
+        off: i16,
+    },
+    /// Jump back if the value is `Some(_)`, with its payload in `dst`.
+    JSomeBack {
+        src: Reg,
+        dst: Reg,
+        off: i16,
+    },
 
     // Calls.
-    /// Callee at `base`, arguments at `base+1..`; result written to `dst`.
-    Call {
-        base: Reg,
-        argc: u16,
-        dst: Reg,
-    },
     /// Calls the function value in register `callee` (anywhere) with the
     /// `argc` arguments at `base..`; result written to `dst`. A closure's
     /// frame starts at `base`.
@@ -384,7 +507,11 @@ pub enum Op {
         dst: Reg,
         native: u16,
     },
+    /// Tail call of the function value in register `callee` with the
+    /// `argc` arguments at `base..`. (A native is called as by `CallR`,
+    /// writing its result to `base`: the compiler returns it next.)
     TailCall {
+        callee: Reg,
         base: Reg,
         argc: u16,
     },
@@ -437,6 +564,11 @@ pub enum Op {
         dst: Reg,
         obj: Reg,
         idx: u16,
+    },
+    /// The payload of a variant with exactly one (inline or not).
+    Payload {
+        dst: Reg,
+        src: Reg,
     },
     SetField {
         obj: Reg,
@@ -498,14 +630,57 @@ pub enum Op {
         base: Reg,
         off: i16,
     },
+    /// `base` = the iterator of a set (`NewIter`): `elem` = its next
+    /// element if there is one; otherwise jump.
+    ForSet {
+        elem: Reg,
+        base: Reg,
+        off: i16,
+    },
+    /// `base` = the iterator of a map (`NewIter`): if there is an entry
+    /// left, `key` = its key and `key+1` = its value; otherwise jump.
+    ForMap {
+        key: Reg,
+        base: Reg,
+        off: i16,
+    },
+    /// The steps of rotated loops (at their end): like `ForList`,
+    /// `ForRange` and `ForRangeIncl`, but jumping back to the loop's body
+    /// when there is an element (a safe point, charging the loop's fuel).
+    ForListBack {
+        elem: Reg,
+        base: Reg,
+        off: i16,
+    },
+    ForRangeBack {
+        var: Reg,
+        base: Reg,
+        off: i16,
+    },
+    ForRangeInclBack {
+        var: Reg,
+        base: Reg,
+        off: i16,
+    },
+    ForSetBack {
+        elem: Reg,
+        base: Reg,
+        off: i16,
+    },
+    ForMapBack {
+        key: Reg,
+        base: Reg,
+        off: i16,
+    },
     /// Range value `src` as the registers of an inclusive range loop
     /// (`ForRangeIncl`): `base` = start, `base+1` = last, `base+2` = done.
     UnpackRange {
         base: Reg,
         src: Reg,
     },
-    /// Snapshot of map entries (as tuples) or set elements as a list.
-    IterSnapshot {
+    /// The iterator of map or set `src` (`Vm::container_iter`): it goes on
+    /// with the entries `src` has now, whatever happens to `src` meanwhile.
+    NewIter {
         dst: Reg,
         src: Reg,
     },
@@ -534,35 +709,6 @@ pub enum Op {
         after: u8,
     },
 
-    // Unfused forms used in very large functions (offsets that do not fit i16).
-    IsVariant {
-        dst: Reg,
-        src: Reg,
-        variant: u16,
-    },
-    ListLenEq {
-        dst: Reg,
-        src: Reg,
-        n: u16,
-    },
-    ListLenGe {
-        dst: Reg,
-        src: Reg,
-        n: u16,
-    },
-    /// Like `ForList` but writes whether an element was produced to `base+3`.
-    ForListNext {
-        elem: Reg,
-        base: Reg,
-    },
-    ForRangeNext {
-        var: Reg,
-        base: Reg,
-    },
-    ForRangeInclNext {
-        var: Reg,
-        base: Reg,
-    },
     Len {
         dst: Reg,
         src: Reg,
@@ -608,16 +754,17 @@ pub enum Op {
         dst: Reg,
         src: Reg,
     },
-    /// `spec` indexes `Program::specs`.
-    Format {
+    /// String interpolation: the template `Program::templates[tmpl]`
+    /// with the values of its registers, as a new string.
+    Interp {
         dst: Reg,
-        src: Reg,
-        spec: u16,
+        tmpl: u32,
     },
-    Concat {
-        dst: Reg,
-        start: Reg,
-        count: u16,
+    /// `local += "..."` (an interpolation) for a string builder local (see
+    /// `AppendStr`): formats the template and appends it in place.
+    AppendInterp {
+        local: Reg,
+        tmpl: u32,
     },
 
     // Misc.
@@ -635,6 +782,178 @@ pub enum Op {
 }
 
 const _: () = assert!(std::mem::size_of::<Op>() == 8);
+
+impl Op {
+    /// The offset of a branch instruction (relative to the next one).
+    pub fn branch_off(&self) -> Option<i32> {
+        match *self {
+            Op::Jmp { off }
+            | Op::Loop { off }
+            | Op::JmpIf { off, .. }
+            | Op::JmpIfNot { off, .. }
+            | Op::JmpIfBack { off, .. }
+            | Op::JmpIfNotBack { off, .. } => Some(off),
+            Op::JNltI { off, .. }
+            | Op::JNleI { off, .. }
+            | Op::JNeqI { off, .. }
+            | Op::JNneI { off, .. }
+            | Op::JNltF { off, .. }
+            | Op::JNleF { off, .. }
+            | Op::JNeq { off, .. }
+            | Op::JNne { off, .. }
+            | Op::JNltIK { off, .. }
+            | Op::JNleIK { off, .. }
+            | Op::JNgtIK { off, .. }
+            | Op::JNgeIK { off, .. }
+            | Op::JNeqIK { off, .. }
+            | Op::JNneIK { off, .. }
+            | Op::JNotSome { off, .. }
+            | Op::JNotOk { off, .. }
+            | Op::JNotVariant { off, .. }
+            | Op::JStrClass { off, .. }
+            | Op::HoistGlobal { off, .. }
+            | Op::JListLen { off, .. }
+            | Op::JListMinLen { off, .. }
+            | Op::ForList { off, .. }
+            | Op::ForRange { off, .. }
+            | Op::ForRangeIncl { off, .. }
+            | Op::ForSet { off, .. }
+            | Op::ForMap { off, .. }
+            | Op::JNltIBack { off, .. }
+            | Op::JNleIBack { off, .. }
+            | Op::JNeqIBack { off, .. }
+            | Op::JNneIBack { off, .. }
+            | Op::JNltIKBack { off, .. }
+            | Op::JNleIKBack { off, .. }
+            | Op::JNgtIKBack { off, .. }
+            | Op::JNgeIKBack { off, .. }
+            | Op::JNeqIKBack { off, .. }
+            | Op::JNneIKBack { off, .. }
+            | Op::JSomeBack { off, .. }
+            | Op::ForListBack { off, .. }
+            | Op::ForRangeBack { off, .. }
+            | Op::ForRangeInclBack { off, .. }
+            | Op::ForSetBack { off, .. }
+            | Op::ForMapBack { off, .. } => Some(off as i32),
+            _ => None,
+        }
+    }
+
+    /// Sets the offset of a branch instruction; false if it does not fit
+    /// the instruction's offset field (which is then left unchanged).
+    pub fn set_branch_off(&mut self, to: i64) -> bool {
+        match self {
+            Op::Jmp { off }
+            | Op::Loop { off }
+            | Op::JmpIf { off, .. }
+            | Op::JmpIfNot { off, .. }
+            | Op::JmpIfBack { off, .. }
+            | Op::JmpIfNotBack { off, .. } => match i32::try_from(to) {
+                Ok(o) => *off = o,
+                Err(_) => return false,
+            },
+            Op::JNltI { off, .. }
+            | Op::JNleI { off, .. }
+            | Op::JNeqI { off, .. }
+            | Op::JNneI { off, .. }
+            | Op::JNltF { off, .. }
+            | Op::JNleF { off, .. }
+            | Op::JNeq { off, .. }
+            | Op::JNne { off, .. }
+            | Op::JNltIK { off, .. }
+            | Op::JNleIK { off, .. }
+            | Op::JNgtIK { off, .. }
+            | Op::JNgeIK { off, .. }
+            | Op::JNeqIK { off, .. }
+            | Op::JNneIK { off, .. }
+            | Op::JNotSome { off, .. }
+            | Op::JNotOk { off, .. }
+            | Op::JNotVariant { off, .. }
+            | Op::JStrClass { off, .. }
+            | Op::HoistGlobal { off, .. }
+            | Op::JListLen { off, .. }
+            | Op::JListMinLen { off, .. }
+            | Op::ForList { off, .. }
+            | Op::ForRange { off, .. }
+            | Op::ForRangeIncl { off, .. }
+            | Op::ForSet { off, .. }
+            | Op::ForMap { off, .. }
+            | Op::JNltIBack { off, .. }
+            | Op::JNleIBack { off, .. }
+            | Op::JNeqIBack { off, .. }
+            | Op::JNneIBack { off, .. }
+            | Op::JNltIKBack { off, .. }
+            | Op::JNleIKBack { off, .. }
+            | Op::JNgtIKBack { off, .. }
+            | Op::JNgeIKBack { off, .. }
+            | Op::JNeqIKBack { off, .. }
+            | Op::JNneIKBack { off, .. }
+            | Op::JSomeBack { off, .. }
+            | Op::ForListBack { off, .. }
+            | Op::ForRangeBack { off, .. }
+            | Op::ForRangeInclBack { off, .. }
+            | Op::ForSetBack { off, .. }
+            | Op::ForMapBack { off, .. } => match i16::try_from(to) {
+                Ok(o) => *off = o,
+                Err(_) => return false,
+            },
+            _ => panic!("not a branch: {self:?}"),
+        }
+        true
+    }
+
+    /// The backward form of a branch (`Loop` for `Jmp`, see also
+    /// `JmpIfBack`), if it has one.
+    pub fn backward(self) -> Option<Op> {
+        Some(match self {
+            Op::Jmp { off } => Op::Loop { off },
+            Op::JmpIf { cond, off } => Op::JmpIfBack { cond, off },
+            Op::JmpIfNot { cond, off } => Op::JmpIfNotBack { cond, off },
+            Op::JNltI { a, b, off } => Op::JNltIBack { a, b, off },
+            Op::JNleI { a, b, off } => Op::JNleIBack { a, b, off },
+            Op::JNeqI { a, b, off } => Op::JNeqIBack { a, b, off },
+            Op::JNneI { a, b, off } => Op::JNneIBack { a, b, off },
+            Op::JNltIK { a, k, off } => Op::JNltIKBack { a, k, off },
+            Op::JNleIK { a, k, off } => Op::JNleIKBack { a, k, off },
+            Op::JNgtIK { a, k, off } => Op::JNgtIKBack { a, k, off },
+            Op::JNgeIK { a, k, off } => Op::JNgeIKBack { a, k, off },
+            Op::JNeqIK { a, k, off } => Op::JNeqIKBack { a, k, off },
+            Op::JNneIK { a, k, off } => Op::JNneIKBack { a, k, off },
+            _ => return None,
+        })
+    }
+
+    /// Whether taking the branch is a safe point charging the loop's fuel.
+    pub fn is_back_edge(&self) -> bool {
+        matches!(
+            self,
+            Op::Loop { .. }
+                | Op::JmpIfBack { .. }
+                | Op::JmpIfNotBack { .. }
+                | Op::JNltIBack { .. }
+                | Op::JNleIBack { .. }
+                | Op::JNeqIBack { .. }
+                | Op::JNneIBack { .. }
+                | Op::JNltIKBack { .. }
+                | Op::JNleIKBack { .. }
+                | Op::JNgtIKBack { .. }
+                | Op::JNgeIKBack { .. }
+                | Op::JNeqIKBack { .. }
+                | Op::JNneIKBack { .. }
+                | Op::JSomeBack { .. }
+                | Op::ForListBack { .. }
+                | Op::ForRangeBack { .. }
+                | Op::ForRangeInclBack { .. }
+                | Op::ForSetBack { .. }
+                | Op::ForMapBack { .. }
+        )
+    }
+
+    /// Whether execution never continues with the next instruction.
+    pub fn is_unconditional(&self) -> bool {
+        matches!(self, Op::Jmp { .. } | Op::Loop { .. } | Op::Ret { .. } | Op::RetUnit | Op::TailCallDirect { .. } | Op::Panic { .. })
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CaptureSrc {
@@ -667,10 +986,45 @@ pub enum Const {
     /// A script function (closure without captures).
     Fn(u32),
     Native(u32),
-    Spec(FormatSpec),
     TypeDesc(Arc<TypeDesc>),
     /// An immutable tuple of earlier constants (constant trait dictionaries).
     Tuple(Vec<u32>),
+}
+
+/// The jump table of a `SwitchVariant` or `SwitchInt`: instruction
+/// `targets[v - first]` for value `v`, `default` for the others.
+#[derive(Clone, Debug, Default)]
+pub struct Switch {
+    pub first: i64,
+    pub targets: Vec<u32>,
+    pub default: u32,
+}
+
+impl Switch {
+    #[inline]
+    pub fn target(&self, v: i64) -> usize {
+        match self.targets.get(v.wrapping_sub(self.first) as u64 as usize) {
+            Some(&t) => t as usize,
+            None => self.default as usize,
+        }
+    }
+}
+
+/// A string interpolation: its pieces, in order.
+#[derive(Clone, Debug, Default)]
+pub struct Template {
+    pub pieces: Vec<Piece>,
+    /// The total length of the text pieces.
+    pub text_len: usize,
+}
+
+#[derive(Clone, Debug)]
+pub enum Piece {
+    Text(String),
+    /// The display form of the value in a register.
+    Value(Reg),
+    /// The value in a register, formatted by a format specification.
+    Format(Reg, FormatSpec),
 }
 
 #[derive(Clone, Debug)]
@@ -733,15 +1087,15 @@ pub struct Program {
     pub tests: Vec<(String, u32)>,
     /// Test setup (module initialization) entry.
     pub files: Vec<String>,
-    /// Help text for natives by id.
-    pub native_help: Vec<HelpEntry>,
-    pub module_help: Vec<(String, String)>,
-    pub native_argc: Vec<u16>,
-    pub specs: Vec<FormatSpec>,
+    /// Help text for natives by id. (The tables made once for the standard
+    /// library are shared by the programs that extend its snapshot.)
+    pub native_help: Arc<[HelpEntry]>,
+    pub module_help: Arc<[(String, String)]>,
+    pub native_argc: Arc<[u16]>,
+    /// The templates of string interpolations (`Op::Interp`).
+    pub templates: Vec<Template>,
+    /// The jump tables of `SwitchVariant` and `SwitchInt`.
+    pub switches: Vec<Switch>,
     /// Names of all standard and host modules available to `import`.
-    pub available_modules: Vec<String>,
-    /// Summaries of modules not compiled into this program (for `help.module`).
-    pub help_index: Option<Arc<crate::engine::ModuleHelp>>,
-    /// Native id of `task.spawn`-style helpers used by the compiler.
-    pub recv_native: Option<u32>,
+    pub available_modules: Arc<[String]>,
 }

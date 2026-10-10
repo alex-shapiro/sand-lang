@@ -52,7 +52,7 @@ true
 
 === default parameters
 fn greet(name: str, greeting: str = "Hello", punct: str = "!") -> str {
-    "{greeting}, {name}{punct}"
+    "\(greeting), \(name)\(punct)"
 }
 print(greet("ann"))
 print(greet("bob", "Hi"))
@@ -222,16 +222,16 @@ hi
 
 === pipe into module function
 import math
-print(16.0 |> math.sqrt)
+print(64.0 |> math.cbrt)
 --- stdout
 4.0
 
 === static methods on builtin types
-print(int.parse("12"))
-print(float.parse("1.5"))
+print(int.max_value())
+print(duration.from_millis(1500).millis())
 --- stdout
-Some(12)
-Some(1.5)
+9223372036854775807
+1500
 
 === calling a non-function is an error
 let x = 1

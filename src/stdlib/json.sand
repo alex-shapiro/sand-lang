@@ -45,9 +45,9 @@ pub enum Json {
     /// The value of a number that is integral and fits in an `int`.
     pub fn as_int(self) -> int? {
         match self {
-            Num(n) if n == n.floor() and n >= -9223372036854775808.0 and n < 9223372036854775808.0 => Some(
-                n.to_int(),
-            )
+            Num(n) if n == n.floor()
+                and n >= -9223372036854775808.0
+                and n < 9223372036854775808.0 => Some(n.to_int())
             _ => None
         }
     }
@@ -105,11 +105,9 @@ pub enum Json {
 /// column. Nesting deeper than 512 arrays/objects is rejected.
 pub native fn parse(text: str) -> Result<Json>
 
-/// Prints JSON: compact for `indent == 0`, otherwise pretty-printed with
-/// `indent` spaces per level. Non-finite numbers print as `null`.
-pub native fn stringify(value: Json, indent: int = 0) -> str
-
-/// Encodes any value as JSON text (see `to_json` for the mapping). Panics on
+/// Encodes any value, including a `Json`, as JSON text (see `to_json` for
+/// the mapping): compact for `indent == 0`, otherwise pretty-printed with
+/// `indent` spaces per level. Non-finite numbers print as `null`. Panics on
 /// values that have no JSON form (functions, tasks, channels).
 pub native fn encode<T>(value: T, indent: int = 0) -> str
 

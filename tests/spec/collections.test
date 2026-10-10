@@ -441,7 +441,7 @@ for x in [1, 2] {
     print(x)
 }
 for (k, v) in ["a": 1, "b": 2] {
-    print("{k}={v}")
+    print("\(k)=\(v)")
 }
 for x in set(["s"]) {
     print(x)
@@ -453,7 +453,7 @@ for i in 3..=4 {
     print(i)
 }
 for (i, c) in ["x", "y"].enumerate() {
-    print("{i}:{c}")
+    print("\(i):\(c)")
 }
 --- stdout
 1

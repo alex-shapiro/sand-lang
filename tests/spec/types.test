@@ -93,7 +93,7 @@ print("a" + 1)
 1: type mismatch
 
 === interpolation accepts any type
-print("{1} {1.5} {true} {[1]} {()}")
+print("\(1) \(1.5) \(true) \([1]) \(())")
 --- stdout
 1 1.5 true [1] ()
 
@@ -176,9 +176,9 @@ fn label_pairs(pairs: [(int, str)], use_late: bool) -> str {
     for (n, s) in pairs {
         let d = n * 2
         if use_late {
-            out = out + "{LATER}"
+            out = out + "\(LATER)"
         }
-        out = out + "{s}{d};"
+        out = out + "\(s)\(d);"
     }
     out
 }
@@ -202,3 +202,103 @@ a2;b4;
 3
 --- panic
 global used before initialization: `LATE`
+
+=== never fits a whole value, not part of a type
+fn run(f: fn() -> never) -> str {
+    f()
+}
+print(run(() => 5).len())
+--- error
+4: type mismatch: expected never, found int
+
+=== a list of never holds no values
+let xs: [never] = [1, 2]
+let s: str = xs[0]
+--- error
+1: expected [never], found [int]
+
+=== never operands of operators and patterns
+fn f(x: int) -> int {
+    let a = if x > 0 { x } else { return -1 } + 1
+    let b = x + (if x > 0 { 1 } else { return -2 })
+    if x == (if x > 0 { x } else { panic("unreachable") }) {
+        print("same")
+    }
+    let (p, q) = if x > 0 { (x, x) } else { panic("unreachable") }
+    a + b + p + q
+}
+print(f(2))
+print(f(0))
+--- stdout
+same
+10
+-1
+
+=== plus on values of unknown type requires a type with plus
+let add = (a, b) => a + b
+print(add(true, false))
+--- error
+1: operator `+` is not defined for bool
+
+=== plus on values of unknown type works for numbers, strings and lists
+fn twice<T>(x: T, f: fn(T, T) -> T) -> T {
+    f(x, x)
+}
+let add = (a, b) => a + b
+print(add(1, 2))
+print(twice("ab", (a, b) => a + b))
+print(twice([1], (a, b) => a + b))
+print(twice(1s, (a, b) => a + b))
+--- stdout
+3
+abab
+[1, 1]
+2s
+
+=== plus on values of a type parameter's type requires Num
+fn f<T>(x: T) -> T {
+    let g = (a, b) => a + b
+    g(x, x)
+}
+--- error
+2: operator `+` is not defined for type parameter `T`; add a bound `T: Num`
+
+=== a method receiver of the wrong instance is reported once
+struct Box<T> { v: T }
+extend Box<int> {
+    fn twice(self) -> int {
+        self.v * 2
+    }
+}
+let b = Box { v: "a" }
+print(b.twice())
+--- error
+8: no method `twice` on type Box<str>
+
+=== the receiver check does not leave partial bindings
+struct Box<T> { v: T }
+extend Box<([int], int)> {
+    fn size(self) -> int {
+        self.v.0.len()
+    }
+}
+let xs = []
+let b = Box { v: (xs, "a") }
+print(b.size())
+xs.push("s")
+--- error
+9: no method `size` on type Box<([_], str)>
+
+=== assigning to something that is not a place
+fn f() {
+    var x = 1
+    x = 2
+    f = 3
+    y = 4
+    (x, x).0 = 5
+    print(x)
+}
+--- error
+4: cannot assign to `f`
+5: undefined name `y`
+6: cannot assign to a tuple element

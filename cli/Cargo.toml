@@ -1,0 +1,20 @@
+[package]
+name = "sand-cli"
+version = "0.1.0"
+edition = "2024"
+description = "The `sand` command: run, check, lint, format and test Sand scripts, a REPL and the web playground"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[[bin]]
+name = "sand"
+path = "src/main.rs"
+
+[dependencies]
+sandlang = { path = "..", features = ["tls"] }
+tokio = { version = "1", features = ["rt", "net", "io-util", "time", "signal", "macros"] }
+reedline = { version = "0.51", features = ["external_printer"] }
+nu-ansi-term = "0.50"
+
+[dev-dependencies]
+portable-pty = "0.9"

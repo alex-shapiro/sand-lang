@@ -6,7 +6,6 @@
 
 use js_sys::Function;
 use sandlang::{Capability, OutputSink, PromptAnswer, Prompter};
-use serde::Serialize;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
@@ -61,29 +60,29 @@ pub(crate) struct JsOutput {
     pub id: u32,
     pub stream: &'static str,
     /// Text not delivered yet, and the bytes of an unfinished UTF-8 sequence.
-    pending: Vec<u8>,
+    pending: std::sync::Mutex<Vec<u8>>,
 }
 
 const DELIVERY_BYTES: usize = 8 << 10;
 
 impl JsOutput {
     pub fn new(id: u32, stream: &'static str) -> JsOutput {
-        JsOutput { id, stream, pending: Vec::new() }
+        JsOutput { id, stream, pending: Default::default() }
     }
 
     /// Delivers the pending text (keeping an unfinished UTF-8 sequence).
-    fn deliver(&mut self) {
-        let complete = match std::str::from_utf8(&self.pending) {
-            Ok(_) => self.pending.len(),
+    fn deliver(&self, pending: &mut Vec<u8>) {
+        let complete = match std::str::from_utf8(pending) {
+            Ok(_) => pending.len(),
             // Invalid bytes are replaced; an incomplete sequence at the end waits.
             Err(e) if e.error_len().is_none() => e.valid_up_to(),
-            Err(_) => self.pending.len(),
+            Err(_) => pending.len(),
         };
         if complete == 0 {
             return;
         }
-        let rest = self.pending.split_off(complete);
-        let text = String::from_utf8_lossy(&std::mem::replace(&mut self.pending, rest)).into_owned();
+        let rest = pending.split_off(complete);
+        let text = String::from_utf8_lossy(&std::mem::replace(pending, rest)).into_owned();
         if let Some(f) = callback(self.id, |h| h.on_output.as_ref()) {
             let _ = f.call2(&JsValue::NULL, &JsValue::from_str(self.stream), &JsValue::from_str(&text));
         }
@@ -91,37 +90,19 @@ impl JsOutput {
 }
 
 impl OutputSink for JsOutput {
-    fn write(&mut self, data: &[u8]) -> std::io::Result<()> {
-        self.pending.extend_from_slice(data);
-        if self.stream == "stderr" || self.pending.len() >= DELIVERY_BYTES {
-            self.deliver();
+    fn write(&self, data: &[u8]) -> std::io::Result<()> {
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        pending.extend_from_slice(data);
+        if self.stream == "stderr" || pending.len() >= DELIVERY_BYTES {
+            self.deliver(&mut pending);
         }
         Ok(())
     }
 
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.deliver();
+    fn flush(&self) -> std::io::Result<()> {
+        self.deliver(&mut self.pending.lock().unwrap_or_else(|e| e.into_inner()));
         Ok(())
     }
-}
-
-/// What `onPrompt` is asked about.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PromptRequest {
-    /// `read`, `write`, `net`, `listen`, `env`, `stdin`, `stdout`, `stderr`,
-    /// `import` or `custom`.
-    kind: &'static str,
-    /// The path, host, variable, ... (empty for standard streams).
-    target: String,
-    /// The whole request in words, e.g. "read /data/a.txt".
-    description: String,
-    /// The policy file rules that answer it from now on ("always" and
-    /// "never"), e.g. `allow read /data/a.txt`, if a rule can.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    allow_rule: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    deny_rule: Option<String>,
 }
 
 /// Asks `onPrompt`, which answers `"once"`, `"always"`, `"deny"` or
@@ -135,15 +116,18 @@ impl Prompter for JsPrompter {
     fn prompt(&self, cap: Capability) -> sandlang::policy::PromptFuture {
         let (tx, rx) = tokio::sync::oneshot::channel();
         if let Some(f) = callback(self.id, |h| h.on_prompt.as_ref()) {
+            // A `PromptRequest`: the kind (`read`, `net`, ...), the target (path,
+            // host, ...; empty for standard streams), the request in words, and
+            // the policy rules that answer it from now on ("always" and "never").
             let (kind, target) = describe(&cap);
-            let request = PromptRequest {
-                kind,
-                target,
-                description: cap.to_string(),
-                allow_rule: sandlang::policy::rule_for(&cap, true),
-                deny_rule: sandlang::policy::rule_for(&cap, false),
-            };
-            let request = serde_wasm_bindgen::to_value(&request).unwrap_or(JsValue::NULL);
+            let rule = |allow| sandlang::policy::rule_for(&cap, allow).map_or(JsValue::UNDEFINED, JsValue::from);
+            let request = crate::object(&[
+                ("kind", kind.into()),
+                ("target", target.into()),
+                ("description", cap.to_string().into()),
+                ("allowRule", rule(true)),
+                ("denyRule", rule(false)),
+            ]);
             match f.call1(&JsValue::NULL, &request) {
                 Ok(answer) => {
                     // The answer may be a promise: wait for it in a local task;

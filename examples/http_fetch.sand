@@ -63,11 +63,11 @@ fn parse_page(url: str, status: int, html: str) -> Result<Page> {
 fn fetch(url: str) -> Result<Page> {
     let resp = http.get(url, headers: ["user-agent": "sand-fetch/0.1"], timeout: 10s)?
     if not resp.ok() {
-        return Err(error("{url} returned status {resp.status}", kind: "http"))
+        return Err(error("\(url) returned status \(resp.status)", kind: "http"))
     }
     let content_type = resp.header("content-type") ?? "text/html"
     if not content_type.contains("html") {
-        return Err(error("{url} is not HTML ({content_type})", kind: "invalid"))
+        return Err(error("\(url) is not HTML (\(content_type))", kind: "invalid"))
     }
     parse_page(resp.url, resp.status, resp.text()?)
 }
@@ -83,13 +83,13 @@ let tasks = urls.map(u => spawn fetch(u))
 for (url, t) in urls.zip(tasks) {
     match t.wait() {
         Ok(page) => {
-            print("{page.url} [{page.status}]")
-            print("title: {page.title ?? "(none)"}")
+            print("\(page.url) [\(page.status)]")
+            print("title: \(page.title ?? "(none)")")
             print("headings:")
-            for h in page.headings { print("  {h}") }
-            print("links ({page.links.len()}):")
-            for l in page.links { print("  {l}") }
+            for h in page.headings { print("  \(h)") }
+            print("links (\(page.links.len())):")
+            for l in page.links { print("  \(l)") }
         }
-        Err(e) => print("{url}: {e}")
+        Err(e) => print("\(url): \(e)")
     }
 }

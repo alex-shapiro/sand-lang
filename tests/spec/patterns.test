@@ -1,7 +1,7 @@
 === tuple patterns
 let pairs = [(1, "a"), (2, "b")]
 for (n, s) in pairs {
-    print("{n}{s}")
+    print("\(n)\(s)")
 }
 match (1, (2, 3)) {
     (a, (b, c)) => print(a + b + c)
@@ -17,8 +17,8 @@ fn where_is(p: P) -> str {
     match p {
         P { x: 0, y: 0 } => "origin"
         P { x: 0, .. } => "on y axis"
-        P { y: 0, x } => "on x axis at {x}"
-        P { x, y } => "at {x},{y}"
+        P { y: 0, x } => "on x axis at \(x)"
+        P { x, y } => "at \(x),\(y)"
     }
 }
 print(where_is(P { x: 0, y: 0 }))
@@ -46,9 +46,9 @@ match (P { x: 1, y: 2 }) {
 fn describe(xs: [int]) -> str {
     match xs {
         [] => "empty"
-        [x] => "one: {x}"
-        [a, b] => "two: {a} {b}"
-        [first, ..rest] => "first {first}, {rest.len()} more"
+        [x] => "one: \(x)"
+        [a, b] => "two: \(a) \(b)"
+        [first, ..rest] => "first \(first), \(rest.len()) more"
     }
 }
 print(describe([]))
@@ -226,9 +226,9 @@ print(_)
 === result patterns
 fn show(r: Result<int, str>) -> str {
     match r {
-        Ok(v) if v > 10 => "big {v}"
-        Ok(v) => "ok {v}"
-        Err(e) => "err {e}"
+        Ok(v) if v > 10 => "big \(v)"
+        Ok(v) => "ok \(v)"
+        Err(e) => "err \(e)"
     }
 }
 print(show(Ok(50)))
@@ -242,7 +242,7 @@ err bad
 === pattern binding in for loop with struct
 struct Item { name: str, qty: int }
 for Item { name, qty } in [Item { name: "a", qty: 2 }] {
-    print("{name} x{qty}")
+    print("\(name) x\(qty)")
 }
 --- stdout
 a x2

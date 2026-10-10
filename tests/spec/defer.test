@@ -23,7 +23,7 @@ fn f(n: int) {
     defer print("a")
     if n == 0 { return }
     defer print("b")
-    print("end {n}")
+    print("end \(n)")
 }
 f(0)
 f(1)
@@ -84,7 +84,7 @@ print(y)
 
 === question mark propagation runs defers
 fn parse(s: str) -> Result<int> {
-    defer print("parse {s} done")
+    defer print("parse \(s) done")
     let n = s.parse_int().ok_or(error("not a number"))?
     Ok(n * 2)
 }
@@ -121,19 +121,19 @@ ann
 === break and continue run the defers of the blocks they leave
 var log = []
 @outer for i in 0..3 {
-    defer log.push("end {i}")
+    defer log.push("end \(i)")
     for j in 0..3 {
-        defer log.push("end {i}.{j}")
+        defer log.push("end \(i).\(j)")
         if j == 1 { continue @outer }
         if i == 2 { break @outer }
-        log.push("body {i}.{j}")
+        log.push("body \(i).\(j)")
     }
 }
 print(log.join(", "))
 var n = 0
 let v = loop {
     n += 1
-    defer print("iteration {n} done")
+    defer print("iteration \(n) done")
     if n == 2 { break n * 10 }
 }
 print(v)
@@ -146,7 +146,7 @@ iteration 2 done
 === variables are read when the deferred code runs
 fn f() {
     var state = "initial"
-    defer print("state: {state}")
+    defer print("state: \(state)")
     state = "final"
 }
 f()
@@ -161,9 +161,9 @@ fn f(n: int) -> int {
         let total = items.map(x => x + a).sum()
         for (i, v) in items.enumerate() {
             if i > 0 { break }
-            print("first {v}")
+            print("first \(v)")
         }
-        print("a={a} b={b} total={total}")
+        print("a=\(a) b=\(b) total=\(total)")
     }
     var k = 0
     while k < 10 {
@@ -203,7 +203,7 @@ let t = spawn {
     }
 }
 for v in ch {
-    print("got {v}")
+    print("got \(v)")
 }
 t.wait()
 --- stdout
@@ -238,7 +238,7 @@ top-level done
 
 === top-level question mark failures run defers
 defer print("cleanup")
-let n = int.parse("x").ok_or(error("bad"))?
+let n = "x".parse_int().ok_or(error("bad"))?
 print(n)
 --- stdout
 cleanup

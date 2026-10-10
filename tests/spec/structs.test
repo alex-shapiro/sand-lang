@@ -121,7 +121,7 @@ false
 === struct ordering
 struct V { major: int, minor: int }
 let vs = [V { major: 1, minor: 5 }, V { major: 0, minor: 9 }, V { major: 1, minor: 2 }]
-print(vs.sorted().map(v => "{v.major}.{v.minor}"))
+print(vs.sorted().map(v => "\(v.major).\(v.minor)"))
 --- stdout
 ["0.9", "1.2", "1.5"]
 

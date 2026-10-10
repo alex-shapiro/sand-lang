@@ -6,6 +6,7 @@ pub mod display;
 pub mod heap;
 mod interp;
 pub mod iomem;
+mod iter;
 pub mod meter;
 pub mod sched;
 pub mod value;
@@ -13,7 +14,7 @@ pub mod value;
 use crate::policy::{Capability, Decision, Policy, PromptAnswer, Prompter};
 use crate::{LimitKind, Limits};
 use bytecode::*;
-use heap::Heap;
+use heap::{Heap, Staging};
 use meter::Meter;
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
@@ -37,12 +38,32 @@ pub enum NativeImpl {
 
 #[derive(Clone)]
 pub struct NativeEntry {
-    pub name: String,
+    pub name: std::borrow::Cow<'static, str>,
     pub imp: NativeImpl,
 }
 
-/// Non-local outcomes of a native call.
-pub enum Ctl {
+/// A non-local outcome of a native call or a VM helper: a panic, a limit, a
+/// request to the scheduler, ...
+///
+/// One pointer (to a boxed [`CtlKind`]), so that `Result<Value, Ctl>` and
+/// `Result<Option<Value>, Ctl>` are 16 bytes, the size of a `Value`: every
+/// native call and fallible helper returns one, and a small result is
+/// written and read back with one 16-byte store and load (see "Dispatch
+/// loop" in docs/INTERNALS.md). Build one with the constructors
+/// ([`Ctl::panic`], [`Ctl::limit`], ...) or from a [`CtlKind`], and inspect
+/// it with [`Ctl::kind`] or [`Ctl::into_kind`].
+///
+/// Tasks block and yield in steady state, where an allocation per channel
+/// operation cost 30%: [`Vm::block`] and [`Vm::yield_now`] return the
+/// dataless kinds in the box of the last one the VM consumed.
+pub struct Ctl(Box<CtlKind>);
+
+const _: () = assert!(std::mem::size_of::<Ctl>() == std::mem::size_of::<usize>());
+const _: () = assert!(std::mem::size_of::<Result<Value, Ctl>>() == 16);
+const _: () = assert!(std::mem::size_of::<Result<Option<Value>, Ctl>>() == 16);
+
+/// What a [`Ctl`] is.
+pub enum CtlKind {
     Panic(String),
     Limit(LimitKind),
     Exit(i32),
@@ -50,33 +71,105 @@ pub enum Ctl {
     NeedPermission(Capability),
     /// Suspend the task until the future completes.
     Async(BoxFuture),
-    /// Suspend the task on a scheduler event.
-    Block(BlockOn),
+    /// The task waits for the scheduler event that [`Vm::block`]
+    /// registered; the call returns what wakes it.
+    Blocked,
     /// Let other tasks run; the call returns `()`.
     Yield,
     /// The host interrupted the engine (see `Meter::check`).
     Interrupted,
 }
 
-impl std::fmt::Debug for Ctl {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Ctl::Panic(m) => write!(f, "Panic({m})"),
-            Ctl::Limit(k) => write!(f, "Limit({k:?})"),
-            Ctl::Exit(c) => write!(f, "Exit({c})"),
-            Ctl::NeedPermission(c) => write!(f, "NeedPermission({c})"),
-            Ctl::Async(_) => write!(f, "Async"),
-            Ctl::Block(_) => write!(f, "Block"),
-            Ctl::Yield => write!(f, "Yield"),
-            Ctl::Interrupted => write!(f, "Interrupted"),
+impl Ctl {
+    /// A panic with message `msg`.
+    #[cold]
+    pub fn panic(msg: impl Into<String>) -> Ctl {
+        Ctl(Box::new(CtlKind::Panic(msg.into())))
+    }
+
+    /// A limit was exceeded.
+    #[cold]
+    pub fn limit(k: LimitKind) -> Ctl {
+        Ctl(Box::new(CtlKind::Limit(k)))
+    }
+
+    /// The host interrupted the engine.
+    #[cold]
+    pub fn interrupted() -> Ctl {
+        Ctl(Box::new(CtlKind::Interrupted))
+    }
+
+    /// `exit(code)`.
+    pub fn exit(code: i32) -> Ctl {
+        Ctl(Box::new(CtlKind::Exit(code)))
+    }
+
+    /// Suspend the task until `fut` completes.
+    pub fn suspend(fut: BoxFuture) -> Ctl {
+        Ctl(Box::new(CtlKind::Async(fut)))
+    }
+
+    /// Ask the user for `cap`.
+    pub fn need_permission(cap: Capability) -> Ctl {
+        Ctl(Box::new(CtlKind::NeedPermission(cap)))
+    }
+
+    pub fn kind(&self) -> &CtlKind {
+        &self.0
+    }
+
+    pub fn into_kind(self) -> CtlKind {
+        *self.0
+    }
+
+    /// The limit, if this is one.
+    pub fn as_limit(&self) -> Option<LimitKind> {
+        match *self.0 {
+            CtlKind::Limit(k) => Some(k),
+            _ => None,
         }
     }
 }
 
-pub fn panic<T>(msg: impl Into<String>) -> Result<T, Ctl> {
-    Err(Ctl::Panic(msg.into()))
+impl From<CtlKind> for Ctl {
+    fn from(k: CtlKind) -> Ctl {
+        Ctl(Box::new(k))
+    }
 }
 
+impl std::fmt::Debug for Ctl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.kind().fmt(f)
+    }
+}
+
+impl std::fmt::Debug for CtlKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CtlKind::Panic(m) => write!(f, "Panic({m})"),
+            CtlKind::Limit(k) => write!(f, "Limit({k:?})"),
+            CtlKind::Exit(c) => write!(f, "Exit({c})"),
+            CtlKind::NeedPermission(c) => write!(f, "NeedPermission({c})"),
+            CtlKind::Async(_) => write!(f, "Async"),
+            CtlKind::Blocked => write!(f, "Blocked"),
+            CtlKind::Yield => write!(f, "Yield"),
+            CtlKind::Interrupted => write!(f, "Interrupted"),
+        }
+    }
+}
+
+impl From<&str> for Ctl {
+    /// A panic with message `msg`.
+    fn from(msg: &str) -> Ctl {
+        Ctl::panic(msg)
+    }
+}
+
+pub fn panic<T>(msg: impl Into<String>) -> Result<T, Ctl> {
+    Err(Ctl::panic(msg))
+}
+
+/// What [`Vm::block`] waits for.
 pub enum BlockOn {
     Join(Value),
     Race(Vec<Value>),
@@ -184,18 +277,21 @@ pub enum StdinSource {
 }
 
 /// Output sink for standard streams and logs.
-pub trait OutputSink: Send {
-    fn write(&mut self, data: &[u8]) -> std::io::Result<()>;
-    fn flush(&mut self) -> std::io::Result<()> {
+pub trait OutputSink: Send + Sync {
+    fn write(&self, data: &[u8]) -> std::io::Result<()>;
+    fn flush(&self) -> std::io::Result<()> {
         Ok(())
     }
     /// Called before the script reads standard input.
-    fn flush_before_input(&mut self) -> std::io::Result<()> {
+    fn flush_before_input(&self) -> std::io::Result<()> {
         self.flush()
     }
 }
 
-pub type SharedSink = Arc<Mutex<dyn OutputSink>>;
+pub type SharedSink = Arc<dyn OutputSink>;
+
+/// "Always" answers to permission prompts, shared by an engine's runs.
+pub type Always = Arc<Mutex<HashMap<Capability, bool>>>;
 
 /// A small deterministic PRNG (xoshiro256**).
 #[derive(Clone, Debug)]
@@ -257,7 +353,9 @@ pub struct Host {
     pub prompter: Option<Arc<dyn Prompter>>,
     pub grants_once: Vec<Capability>,
     pub denies_once: Vec<Capability>,
-    pub always: HashMap<Capability, bool>,
+    /// "Always" answers to prompts: the engine's, which keeps them for its
+    /// lifetime (shared with its other runs and its import checks).
+    pub always: Always,
     pub stdout: SharedSink,
     pub stderr: SharedSink,
     pub stdin: Arc<tokio::sync::Mutex<StdinSource>>,
@@ -296,9 +394,11 @@ pub struct Vm {
     pub host: Host,
     pub io: sched::IoTable,
     pub gen_counter: u64,
-    pub fuel_used: u64,
-    /// Fuel accounting for native work (see `meter`).
+    /// Fuel accounting (see `meter`).
     pub meter: Meter,
+    /// When the run exceeds the wall-time limit (moved on by the time
+    /// spent waiting for prompt answers).
+    pub(crate) deadline: Option<crate::platform::Instant>,
     /// Set when the running instruction hit the memory limit and should be
     /// retried after a garbage collection (see `interp::limit_trap`).
     pub(crate) gc_retry: bool,
@@ -306,6 +406,10 @@ pub struct Vm {
     /// Extra GC roots (e.g. values held by the test runner).
     pub pinned: Vec<Value>,
     pub(crate) pending_race: Option<Vec<Value>>,
+    /// The box of the last `Blocked` or `Yield` consumed (see `Vm::signal`).
+    spare_ctl: Option<Box<CtlKind>>,
+    /// The wait generation of the wait [`Vm::block`] registered.
+    wait_gen: u64,
     /// Runs the inputs of a REPL session: a top-level `?` that meets an
     /// `Err` panics (aborting the input) instead of ending the program.
     pub session: bool,
@@ -333,19 +437,18 @@ impl Fiber {
 
     /// Grows the stack (geometrically) to at least `need` slots, counting
     /// the memory in `heap.fiber_bytes`. Fails with `"stack overflow"` beyond
-    /// `MAX_STACK_SLOTS`, or with the encoded memory limit error
-    /// (`meter::ctl_message`) if the memory limit does not allow it.
+    /// `MAX_STACK_SLOTS`, or with the memory limit error.
     #[cold]
     #[inline(never)]
-    pub fn grow_stack(&mut self, need: usize, heap: &mut Heap) -> Result<(), String> {
+    pub fn grow_stack(&mut self, need: usize, heap: &mut Heap) -> Result<(), Ctl> {
         if need > MAX_STACK_SLOTS {
-            return Err("stack overflow".into());
+            return Err(Ctl::panic("stack overflow"));
         }
         let n = need.max(self.stack.len() * 2).min(MAX_STACK_SLOTS);
         let before = self.stack.capacity();
         let extra = n.saturating_sub(before) * std::mem::size_of::<Value>();
         if heap.would_exceed(extra) {
-            return Err(meter::ctl_message(Ctl::Limit(LimitKind::Memory)));
+            return Err(Ctl::limit(LimitKind::Memory));
         }
         self.stack.reserve_exact(n - self.stack.len());
         self.stack.resize(n, Value::Unit);
@@ -357,11 +460,11 @@ impl Fiber {
     /// the memory like [`Fiber::grow_stack`].
     #[cold]
     #[inline(never)]
-    pub fn grow_frames(&mut self, heap: &mut Heap) -> Result<(), String> {
+    pub fn grow_frames(&mut self, heap: &mut Heap) -> Result<(), Ctl> {
         let before = self.frames.capacity();
         let more = before.max(8);
         if heap.would_exceed(more * std::mem::size_of::<Frame>()) {
-            return Err(meter::ctl_message(Ctl::Limit(LimitKind::Memory)));
+            return Err(Ctl::limit(LimitKind::Memory));
         }
         self.frames.reserve_exact(more);
         heap.fiber_bytes += self.frames.capacity().saturating_sub(before) * std::mem::size_of::<Frame>();
@@ -400,12 +503,14 @@ impl Vm {
             host,
             io: sched::IoTable::default(),
             gen_counter: 1,
-            fuel_used: 0,
             meter,
+            deadline: None,
             gc_retry: false,
             cancel_current: false,
             pinned: Vec::new(),
             pending_race: None,
+            spare_ctl: None,
+            wait_gen: 0,
             session: false,
             ascii_strs: Vec::new(),
             caught_panic: false,
@@ -428,7 +533,6 @@ impl Vm {
                 Const::Bytes(b) => heap.new_bytes(b.clone()),
                 Const::Fn(p) => heap.alloc(Obj::Closure(*p, Box::new([]))),
                 Const::Native(n) => heap.alloc(Obj::NativeFn(*n)),
-                Const::Spec(_) => Value::Unit,
                 Const::TypeDesc(t) => heap.alloc(Obj::TypeDesc(t.clone())),
                 Const::Tuple(items) => heap.new_tuple(items.iter().map(|&i| self.consts[i as usize]).collect()),
             };
@@ -475,6 +579,33 @@ impl Vm {
         }
     }
 
+    /// The dataless `kind` (`Blocked` or `Yield`) as a [`Ctl`], in the box
+    /// of the last one consumed.
+    #[inline]
+    fn signal(&mut self, kind: CtlKind) -> Ctl {
+        match self.spare_ctl.take() {
+            Some(mut b) => {
+                // (The spare box holds a dataless kind: nothing to drop.)
+                std::mem::forget(std::mem::replace(&mut *b, kind));
+                Ctl(b)
+            }
+            None => Ctl::from(kind),
+        }
+    }
+
+    /// Keeps the box of a consumed `Blocked` or `Yield` for [`Vm::signal`].
+    #[inline]
+    pub(crate) fn recycle(&mut self, c: Ctl) {
+        if self.spare_ctl.is_none() {
+            self.spare_ctl = Some(c.0);
+        }
+    }
+
+    /// Lets other tasks run (a native's result); the call returns `()`.
+    pub fn yield_now(&mut self) -> Ctl {
+        self.signal(CtlKind::Yield)
+    }
+
     pub fn next_gen(&mut self) -> u64 {
         self.gen_counter += 1;
         self.gen_counter
@@ -491,57 +622,28 @@ impl Vm {
         self.heap.new_str(s)
     }
 
-    /// A function value (`fn() -> T?`) producing the elements of `src`.
-    pub fn iter_fn(&mut self, src: IterSrc) -> Value {
-        self.heap.alloc(Obj::IterFn(src))
+    /// [`Heap::staged`], also passing the shared strings of one ASCII
+    /// character (indexed by the character; see `short_str`), for natives
+    /// that split text into many short pieces.
+    pub fn staged_strs<R>(&mut self, f: impl FnOnce(&Heap, &mut Staging<'_>, &[Value]) -> R) -> R {
+        self.ascii_table();
+        let ascii = &self.ascii_strs;
+        self.heap.staged(|heap, st| f(heap, st, ascii))
     }
 
-    /// Calls the iterator function `it` (an [`Obj::IterFn`]): the next
-    /// element, or `None`.
-    #[inline(never)]
-    pub(crate) fn iter_step(&mut self, it: Value) -> Value {
-        let next = self.iter_next(it);
-        self.option(next)
-    }
-
-    /// [`Vm::iter_step`] without wrapping the element in `Some`.
-    #[inline(never)]
-    pub(crate) fn iter_next(&mut self, it: Value) -> Option<Value> {
-        let Obj::IterFn(src) = self.heap.get(it) else { return None };
-        if let IterSrc::Chars { s, i } = *src
-            && let Some(&b) = self.heap.str(Value::Obj(s)).as_bytes().get(i as usize)
-            && b.is_ascii()
-        {
-            if let Some(IterSrc::Chars { i, .. }) = self.heap.iter_src_mut(it) {
-                *i += 1;
-            }
-            return Some(self.ascii_str(b));
+    /// Makes the shared strings of one ASCII character (once per VM).
+    fn ascii_table(&mut self) {
+        if self.ascii_strs.is_empty() {
+            self.ascii_strs = (0..128u8).map(|b| self.heap.new_str(char::from(b).to_string())).collect();
         }
-        let (next, state) = match *src {
-            IterSrc::List { list, i, n } => match self.heap.list(Value::Obj(list)).get(i as usize) {
-                Some(&x) if i < n => (Some(x), IterSrc::List { list, i: i + 1, n }),
-                _ => (None, IterSrc::List { list, i: n, n }),
-            },
-            IterSrc::Range { i, end } if i < end => (Some(Value::Int(i)), IterSrc::Range { i: i + 1, end }),
-            IterSrc::Range { .. } => return None,
-            IterSrc::Chars { s, i } => {
-                let c = self.heap.str(Value::Obj(s)).get(i as usize..).and_then(|t| t.chars().next())?;
-                let state = IterSrc::Chars { s, i: i + c.len_utf8() as i64 };
-                (Some(self.short_str(c.encode_utf8(&mut [0; 4]))), state)
-            }
-        };
-        if let Some(src) = self.heap.iter_src_mut(it) {
-            *src = state;
-        }
-        next
     }
 
     /// The shared string of one ASCII character `b` (see `short_str`).
     #[inline]
     fn ascii_str(&mut self, b: u8) -> Value {
         match self.ascii_strs.get(b as usize) {
-            Some(&v @ Value::Obj(_)) => v,
-            _ => self.short_str(std::str::from_utf8(&[b]).unwrap_or("?")),
+            Some(&v) => v,
+            None => self.short_str(std::str::from_utf8(&[b]).unwrap_or("?")),
         }
     }
 
@@ -549,20 +651,12 @@ impl Vm {
     /// character (as `chars`, `char_at` and splitting produce in bulk) are
     /// made once per VM.
     pub fn short_str(&mut self, s: &str) -> Value {
-        let &[b] = s.as_bytes() else { return self.heap.new_str(s) };
-        if !b.is_ascii() {
-            return self.heap.new_str(s);
-        }
-        if self.ascii_strs.is_empty() {
-            self.ascii_strs = vec![Value::Unit; 128];
-        }
-        match self.ascii_strs[b as usize] {
-            Value::Unit => {
-                let v = self.heap.new_str(s);
-                self.ascii_strs[b as usize] = v;
-                v
+        match s.as_bytes() {
+            &[b] if b.is_ascii() => {
+                self.ascii_table();
+                self.ascii_strs[b as usize]
             }
-            v => v,
+            _ => self.heap.new_str(s),
         }
     }
 
@@ -640,7 +734,7 @@ impl Vm {
 
     /// Fails with a memory limit error if `extra` bytes cannot be allocated.
     pub fn reserve(&self, extra: usize) -> Result<(), Ctl> {
-        if self.heap.would_exceed(extra) { Err(Ctl::Limit(LimitKind::Memory)) } else { Ok(()) }
+        if self.heap.would_exceed(extra) { Err(Ctl::limit(LimitKind::Memory)) } else { Ok(()) }
     }
 
     /// Starts accounting for the buffers of an I/O operation that are not
@@ -715,6 +809,14 @@ impl Vm {
         self.permit_by(cap, |p, c| if entry { p.check_entry_in(c, space) } else { p.check_normalized_in(c, space) })
     }
 
+    /// Whether prompt answers are remembered (for this call or for good):
+    /// they apply to capabilities as the policy saw them when prompting.
+    pub(crate) fn has_answers(&self) -> bool {
+        !self.host.grants_once.is_empty()
+            || !self.host.denies_once.is_empty()
+            || !self.host.always.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
+    }
+
     fn permit_by(&mut self, cap: &Capability, check: impl FnOnce(&Policy, &Capability) -> Decision) -> Result<bool, Ctl> {
         // "Once" answers given for the call being retried (see `forget_once_answers`).
         if self.host.grants_once.contains(cap) {
@@ -723,7 +825,7 @@ impl Vm {
         if self.host.denies_once.contains(cap) {
             return Ok(false);
         }
-        if let Some(&d) = self.host.always.get(cap) {
+        if let Some(&d) = self.host.always.lock().unwrap_or_else(|e| e.into_inner()).get(cap) {
             return Ok(d);
         }
         match check(&self.host.policy, cap) {
@@ -731,7 +833,7 @@ impl Vm {
             Decision::Deny => Ok(false),
             Decision::Prompt => {
                 if self.host.prompter.is_some() {
-                    Err(Ctl::NeedPermission(cap.clone()))
+                    Err(Ctl::need_permission(cap.clone()))
                 } else {
                     Ok(false)
                 }
@@ -756,28 +858,42 @@ impl Vm {
         match answer {
             PromptAnswer::AllowOnce => self.host.grants_once.push(cap),
             PromptAnswer::DenyOnce => self.host.denies_once.push(cap),
-            PromptAnswer::AllowAlways => {
-                self.host.always.insert(cap, true);
-            }
-            PromptAnswer::DenyAlways => {
-                self.host.always.insert(cap, false);
+            PromptAnswer::AllowAlways | PromptAnswer::DenyAlways => {
+                let allow = answer == PromptAnswer::AllowAlways;
+                self.host.always.lock().unwrap_or_else(|e| e.into_inner()).insert(cap, allow);
             }
         }
     }
 
     /// Flushes buffered standard output (see `Engine`'s stdout sink).
     pub fn flush_stdout(&self) {
-        let _ = self.host.stdout.lock().unwrap_or_else(|e| e.into_inner()).flush();
+        let _ = self.host.stdout.flush();
     }
 
     /// Flushes standard output before reading standard input, if the sink
     /// wants to (see [`OutputSink::flush_before_input`]).
     pub fn flush_before_input(&self) {
-        let _ = self.host.stdout.lock().unwrap_or_else(|e| e.into_inner()).flush_before_input();
+        let _ = self.host.stdout.flush_before_input();
     }
 
     /// Writes to stdout (1) or stderr (2), enforcing policy and output limits.
     pub fn write_stream(&mut self, which: u8, data: &[u8]) -> Result<(), Ctl> {
+        self.admit_output(which, data.len())?;
+        let _ = self.stream_sink(which).write(data);
+        Ok(())
+    }
+
+    /// Writes string `s` (a heap value) to stdout (1) or stderr (2), like
+    /// `write_stream`, without copying it out of the heap first.
+    pub fn write_stream_str(&mut self, which: u8, s: Value) -> Result<(), Ctl> {
+        self.admit_output(which, self.heap.str(s).len())?;
+        let _ = self.stream_sink(which).write(self.heap.str(s).as_bytes());
+        Ok(())
+    }
+
+    /// Checks the policy and the output limit for writing `len` bytes to
+    /// stream `which`, and counts them.
+    fn admit_output(&mut self, which: u8, len: usize) -> Result<(), Ctl> {
         let slot = usize::from(which != 1);
         let allowed = match self.host.stream_decisions[slot] {
             Some(d) => d,
@@ -785,7 +901,7 @@ impl Vm {
                 let cap = if which == 1 { Capability::Stdout } else { Capability::Stderr };
                 let d = self.permit(&cap)?;
                 // Cache static decisions for the hot path.
-                if !self.host.always.contains_key(&cap)
+                if !self.host.always.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&cap)
                     && self.host.grants_once.is_empty()
                     && self.host.denies_once.is_empty()
                     && let Decision::Allow | Decision::Deny = self.host.policy.check(&cap)
@@ -798,18 +914,21 @@ impl Vm {
         if !allowed {
             return panic(if which == 1 { "permission denied: stdout" } else { "permission denied: stderr" });
         }
-        self.host.output_bytes += data.len() as u64;
+        self.host.output_bytes += len as u64;
         if let Some(max) = self.host.limits.max_output_bytes
             && self.host.output_bytes > max
         {
-            return Err(Ctl::Limit(LimitKind::Output));
+            return Err(Ctl::limit(LimitKind::Output));
         }
         if which != 1 {
             self.flush_stdout();
         }
-        let sink = if which == 1 { &self.host.stdout } else { &self.host.stderr };
-        let _ = sink.lock().unwrap_or_else(|e| e.into_inner()).write(data);
         Ok(())
+    }
+
+    /// The sink of stream `which`.
+    fn stream_sink(&self, which: u8) -> &SharedSink {
+        if which == 1 { &self.host.stdout } else { &self.host.stderr }
     }
 
     // ------------------------------------------------------------------
@@ -837,7 +956,7 @@ impl Vm {
                 }
                 let stack = nregs.max(INITIAL_STACK_SLOTS);
                 if self.heap.would_exceed(stack * std::mem::size_of::<Value>()) {
-                    return Err(Ctl::Limit(crate::LimitKind::Memory));
+                    return Err(Ctl::limit(crate::LimitKind::Memory));
                 }
                 let mut frames = Vec::with_capacity(8);
                 frames.push(frame);

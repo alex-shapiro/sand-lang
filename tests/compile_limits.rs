@@ -109,7 +109,11 @@ fn bound_checks_on_structs_sharing_field_types() {
         src += &format!("struct S{i} {{ a: S{}, b: S{} }}\n", i - 1, i - 1);
     }
     src += "fn same<T: Eq>(a: T, b: T) -> bool { a == b }\nfn f(x: S59) -> bool { same(x, x) }\n";
-    rejects(&src, "program too complex to compile");
+    // Bound checks use what each definition needs (`derive_bounds`) instead
+    // of visiting the 2^60 paths through the fields.
+    let (r, took) = check(Config::new(), &src);
+    r.unwrap();
+    assert!(took < FAST, "took {took:?}");
     // Runtime type descriptions (`json.decode`) share the descriptions of
     // such structs, so they stay small (see `reflected_types_are_shared`).
     let mut src = String::from("import json\nstruct S0 { x: int }\n");
@@ -125,11 +129,12 @@ fn bound_checks_on_structs_sharing_field_types() {
 #[test]
 fn deeply_nested_string_interpolation() {
     // Used to overflow the host stack in the lexer (aborting the process).
+    // The lexer keeps its own stack; the parser limits the nesting.
     let n = 100_000;
-    let src = format!("let s = {}1{}\n", "\"{".repeat(n), "}\"".repeat(n));
-    rejects(&src, "strings nested too deeply");
+    let src = format!("let s = {}1{}\n", "\"\\(".repeat(n), ")\"".repeat(n));
+    rejects(&src, "nesting too deep");
     // Moderate nesting still works.
-    let src = "let x = 1\nprint(\"a{\"b{\"c{x}\"}\"}\")\n";
+    let src = "let x = 1\nprint(\"a\\(\"b\\(\"c\\(x)\")\")\")\n";
     let out = MemorySink::new();
     let mut engine = Engine::new(Config::new().stdout(out.clone()));
     rt().block_on(engine.run_source("main.sand", src)).unwrap();
@@ -151,8 +156,9 @@ fn slow_program() -> String {
 
 #[test]
 fn compile_fuel_is_configurable() {
+    // (The standard library is compiled once, outside any program's budget.)
     let src = "fn f(x: int) -> int { x + 1 }\nprint(f(1))\n";
-    rejects_with(limits(|l| l.max_compile_fuel = Some(100)), src, "program too complex to compile");
+    rejects_with(limits(|l| l.max_compile_fuel = Some(10)), src, "program too complex to compile");
     let (r, _) = check(limits(|l| l.max_compile_fuel = None), src);
     r.unwrap();
     // The default stops a program whose checking is merely slow.
@@ -188,7 +194,7 @@ fn code_generation_is_covered_by_the_compile_budget() {
     let (r, took) = check(limits(|l| l.max_compile_fuel = None), &deferred_copies(1, 900));
     r.unwrap();
     assert!(took < FAST, "took {took:?}");
-    rejects(&src, "program too complex to compile");
+    rejects_with(limits(|l| l.max_compile_fuel = Some(5_000_000)), &src, "program too complex to compile");
     let timed = limits(|l| {
         l.max_compile_fuel = None;
         l.max_wall_time = Some(Duration::from_millis(100));
@@ -319,7 +325,7 @@ fn reflected_types_are_described_once() {
     for i in 0..400 {
         src += &format!("let r{i}: Result<S39> = json.decode(\"1\")\n");
     }
-    src += r#"let s: S2 = json.decode("\{\"a\": \{\"a\": \{\"x\": 1\}, \"b\": \{\"x\": 2\}\}, \"b\": \{\"a\": \{\"x\": 3\}, \"b\": \{\"x\": 4\}\}\}").unwrap()
+    src += r#"let s: S2 = json.decode("{\"a\": {\"a\": {\"x\": 1}, \"b\": {\"x\": 2}}, \"b\": {\"a\": {\"x\": 3}, \"b\": {\"x\": 4}}}").unwrap()
 print(s.a.b.x * 10 + s.b.a.x)
 "#;
     let start = Instant::now();
@@ -337,13 +343,13 @@ struct S0 { x: int, up: Root? }
 struct S1 { a: S0, b: S0 }
 struct Root { a: S1, b: S1, n: int }
 enum Tree { Leaf(int), Node(Tree, Tree) }
-let leaf = "\{\"x\": 1\}"
-let s1 = "\{\"a\": {leaf}, \"b\": {leaf}\}"
-let inner = "\{\"a\": {s1}, \"b\": {s1}, \"n\": 7\}"
-let s1b = "\{\"a\": {leaf}, \"b\": \{\"x\": 5, \"up\": {inner}\}\}"
-let r: Root = json.decode("\{\"a\": {s1}, \"b\": {s1b}, \"n\": 3\}").unwrap()
-print("{r.n} {r.b.b.up.unwrap().n} {r.b.b.x}")
-let t: (Tree, Tree) = json.decode("[\{\"Node\": [\{\"Leaf\": [1]\}, \{\"Leaf\": [2]\}]\}, \{\"Leaf\": [3]\}]").unwrap()
+let leaf = "{\"x\": 1}"
+let s1 = "{\"a\": \(leaf), \"b\": \(leaf)}"
+let inner = "{\"a\": \(s1), \"b\": \(s1), \"n\": 7}"
+let s1b = "{\"a\": \(leaf), \"b\": {\"x\": 5, \"up\": \(inner)}}"
+let r: Root = json.decode("{\"a\": \(s1), \"b\": \(s1b), \"n\": 3}").unwrap()
+print("\(r.n) \(r.b.b.up.unwrap().n) \(r.b.b.x)")
+let t: (Tree, Tree) = json.decode("[{\"Node\": [{\"Leaf\": [1]}, {\"Leaf\": [2]}]}, {\"Leaf\": [3]}]").unwrap()
 print(t)
 "#;
     assert_eq!(run_files(&[], src).unwrap(), "3 7 5\n(Node(Leaf(1), Leaf(2)), Leaf(3))\n");
@@ -359,9 +365,9 @@ fn reflected_types_with_the_same_name() {
     let src = r#"import json
 import "./a.sand"
 struct Config { inner: a.Config? }
-let c: Config = json.decode("\{\"inner\": \{\"p\": 1, \"q\": 2, \"r\": 3\}\}").unwrap()
+let c: Config = json.decode("{\"inner\": {\"p\": 1, \"q\": 2, \"r\": 3}}").unwrap()
 print(c.inner.unwrap().r)
-let bad: Result<Config> = json.decode("\{\"inner\": \{\"inner\": null\}\}")
+let bad: Result<Config> = json.decode("{\"inner\": {\"inner\": null}}")
 print(bad.is_err())
 "#;
     assert_eq!(run_files(&files, src).unwrap(), "3\ntrue\n");
@@ -389,7 +395,14 @@ fn compiles_in_linear_time(what: &str, n: usize, source: impl Fn(usize) -> Strin
 
 #[test]
 fn interpolations_parse_in_linear_time() {
-    compiles_in_linear_time("interpolations", 25_000, |n| format!("let x = 1\nlet s = \"{}\"\nprint(s.len())\n", "{x}".repeat(n)));
+    compiles_in_linear_time("interpolations", 25_000, |n| format!("let x = 1\nlet s = \"{}\"\nprint(s.len())\n", "\\(x)".repeat(n)));
+}
+
+#[test]
+fn indented_multiline_strings_lex_in_linear_time() {
+    compiles_in_linear_time("multiline string lines", 25_000, |n| {
+        format!("let s = \"\"\"\n{}    \"\"\"\nprint(s.len())\n", "    2024-03, food, cafe, 6.39\n".repeat(n))
+    });
 }
 
 #[test]

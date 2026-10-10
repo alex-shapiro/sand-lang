@@ -41,6 +41,31 @@ pub(crate) const OS_MODULES: &[&str] = &["http", "net"];
 #[cfg(web)]
 pub(crate) const OS_MODULES: &[&str] = &["net"];
 
+/// The names of the standard modules (and of the prelude), which host
+/// modules cannot take.
+pub(crate) const STD_MODULES: &[&str] = &[
+    "prelude",
+    "base64",
+    "crypto",
+    "env",
+    "fs",
+    "help",
+    "http",
+    "io",
+    "json",
+    "log",
+    "math",
+    "net",
+    "random",
+    "regex",
+    "statistics",
+    "task",
+    "test",
+    "time",
+    "uri",
+    "uuid",
+];
+
 /// At most the first `max` characters of `s`.
 pub(crate) fn truncate(s: &str, max: usize) -> &str {
     match s.char_indices().nth(max) {

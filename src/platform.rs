@@ -1,7 +1,6 @@
-//! What the engine needs from the platform it runs on: a clock, timers, a
-//! way to let other tasks of the host's executor run, entropy, deep stacks
-//! for the recursive compiler passes, and running a future to completion in
-//! a synchronous API.
+//! What the engine needs from the platform it runs on: clocks, timers, a
+//! way to let other tasks of the host's executor run, entropy and deep
+//! stacks for the recursive compiler passes.
 //!
 //! Natively these come from the standard library and tokio. On the web
 //! (`wasm32-unknown-unknown` in a JavaScript host, `cfg(web)`) the clock and
@@ -10,17 +9,33 @@
 //! threads: the compiler runs on the module's own stack, whose size is set
 //! when the WebAssembly module is linked (see `wasm/build.rs`).
 
-use std::future::Future;
 #[cfg(web)]
 use std::pin::Pin;
 #[cfg(web)]
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 #[cfg(not(web))]
 pub use std::time::{Instant, SystemTime, UNIX_EPOCH};
 #[cfg(web)]
 pub use web_time::{Instant, SystemTime, UNIX_EPOCH};
+
+/// The CPU time (user and system) the calling thread has used, from the
+/// thread's CPU clock on Unix with the `os` feature. Elsewhere (Windows, the
+/// web, builds without `os`) it is the time elapsed since the first call:
+/// the CPU time limit then counts elapsed time while the engine runs.
+pub(crate) fn cpu_time() -> Duration {
+    #[cfg(all(feature = "os", unix))]
+    {
+        let t = rustix::time::clock_gettime(rustix::time::ClockId::ThreadCPUTime);
+        Duration::new(t.tv_sec.max(0) as u64, t.tv_nsec.clamp(0, 999_999_999) as u32)
+    }
+    #[cfg(not(all(feature = "os", unix)))]
+    {
+        static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        START.get_or_init(Instant::now).elapsed()
+    }
+}
 
 /// Waits for `d`.
 #[cfg(not(web))]
@@ -127,24 +142,5 @@ pub(crate) fn with_stack<R: Send>(size: usize, f: impl FnOnce() -> R + Send) -> 
     {
         let _ = size;
         Ok(f())
-    }
-}
-
-/// Runs `f` to completion for a synchronous API. Natively on a
-/// current-thread tokio runtime; on the web, where nothing may block, `f`
-/// must complete without waiting (for a timer, I/O or a permission prompt).
-pub(crate) fn block_on<F: Future>(f: F) -> Result<F::Output, String> {
-    #[cfg(not(web))]
-    {
-        let rt = tokio::runtime::Builder::new_current_thread().build().map_err(|e| e.to_string())?;
-        Ok(rt.block_on(f))
-    }
-    #[cfg(web)]
-    {
-        let mut f = std::pin::pin!(f);
-        match f.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
-            Poll::Ready(v) => Ok(v),
-            Poll::Pending => Err("cannot wait here: on the web, synchronous calls cannot wait (use the async API)".into()),
-        }
     }
 }

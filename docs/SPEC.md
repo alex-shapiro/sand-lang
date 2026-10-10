@@ -79,10 +79,11 @@ Doc comments are retained and are available at runtime through the `help` module
 Newlines are significant. The lexer converts a newline into a statement
 terminator (`;`) when the last token on the line is one of:
 
-- an identifier, keyword `self`, `true`, `false`, `break`, `continue`, `return`
+- an identifier, keyword `self`, `Self`, `true`, `false`, `break`, `continue`, `return`
 - a literal (number, duration, string, bytes)
 - a closing `)`, `]` or `}`
 - the postfix operator `?`
+- `..` or `..=`, which may end an open range (`let rest = 1..`)
 
 and the newline is **not** inside a `(...)` or `[...]` group. Inside `{...}`
 newlines are significant again, even when that brace is nested inside
@@ -90,8 +91,8 @@ parentheses. (So `break @outer` ends a statement at the end of a line, and a
 loop label `@outer` must be on the same line as its loop, §6.9.)
 
 A terminator is **not** inserted if the first token on the next non-blank line is
-`.`, `|>`, `?.`, `else`, `and`, `or`, `=>` or a binary operator other than `-`
-and `*`. This permits chains such as:
+`.`, `|>`, `else`, `and`, `or`, `=>`, a binary operator, or a `-` followed by
+whitespace (see below). This permits chains such as:
 
 ```
 let total = items
@@ -99,6 +100,35 @@ let total = items
     .map(x => x.price)
     .sum()
 ```
+
+**Minus and whitespace.** `-` is both the subtraction and the negation
+operator; the whitespace around it decides which one it is where the grammar
+alone would not. A `-` with whitespace (a space, tab or line break, or the
+start of the source) before it and none after it (`-x`) is a negation:
+
+- at the start of a line it begins a new statement, whatever the line before
+  ends with (the linter reports the statement if it has no effect,
+  `no-effect`, §17.2);
+- after an operand (on the same line, or on the next line inside `(...)` or
+  `[...]`), where only a binary operator could follow, it is an error
+  (an ambiguous `-`): `a -b` and `[1` / `-2]` are rejected rather than read as
+  `a - b` and `[1 - 2]`.
+
+Every other `-` is a subtraction after an operand and a negation elsewhere:
+`a - b`, `a-b` and `a- b` subtract; `-a`, `f(-a)`, `[1, -2]`, `x = -1` and the
+second `-` of `a - -b` negate. In particular a line starting with `- ` (`-` followed by
+whitespace) continues the previous line with a subtraction:
+
+```
+let total = base
+    - discount
+```
+
+The rule is a property of `-` alone: it is the only operator that is both
+prefix and binary (`~` and `not` are only prefix, the others only binary), so
+spacing never changes the meaning of any other operator. The formatter prints
+a subtraction with spaces on both sides and a negation without a space after
+it, so formatted code always means what it says.
 
 Explicit `;` may be used to separate statements on one line. Redundant
 terminators are ignored.
@@ -127,48 +157,60 @@ labels are `snake_case`; top-level `let` constants may also be `SCREAMING_SNAKE_
 ### 2.5 Literals
 
 **Integers**: `0`, `42`, `1_000_000`, `0xff`, `0b1010`, `0o777`. Underscores may
-separate digits. The value must fit in a 64-bit signed integer (the literal
-`9223372036854775808` is permitted only as the operand of unary minus).
+separate digits. A decimal literal must fit in a 64-bit signed integer (the
+literal `9223372036854775808` is permitted only as the operand of unary minus).
+A hexadecimal, binary or octal literal may be any 64-bit pattern, read as a
+two's complement integer: `0x7FFF_FFFF_FFFF_FFFF` is the largest `int`,
+`0x8000_0000_0000_0000` the smallest and `0xFFFF_FFFF_FFFF_FFFF` is `-1`.
 
 **Floats**: `1.0`, `0.5`, `1e9`, `2.5e-3`, `1_000.5`. A float must have digits
 on both sides of a `.`; `1.` and `.5` are not floats.
 
 **Durations**: an integer or float literal immediately followed by a unit:
 `ns`, `us`, `ms`, `s`, `m`, `h`. Examples: `250ms`, `1.5s`, `2h`. The value is
-stored as a signed 64-bit number of nanoseconds; fractional nanoseconds are
+stored as a signed 64-bit number of nanoseconds, computed exactly from the
+decimal literal (`1.005s` is 1,005,000,000 ns); fractional nanoseconds are
 truncated.
 
 **Booleans**: `true`, `false`.
 
-**Strings**: `"..."`. Escapes: `\\`, `\"`, `\n`, `\r`, `\t`, `\0`, `\{`, `\}`,
-`\u{XXXX}` (1-6 hex digits, a Unicode scalar value). Any other escape is an
-error. Strings may contain literal newlines.
+**Strings**: `"..."`. Escapes: `\\`, `\"`, `\n`, `\r`, `\t`, `\0`, `\'`,
+`\u{XXXX}` (1-6 hex digits, a Unicode scalar value), and `\(` which starts an
+interpolation. Any other escape is an error (including `\{` and `\}`: braces
+need no escape). Strings may contain literal newlines. The backslash is the
+only special character inside a string: `{`, `}`, `(`, `)` and `:` are ordinary
+text, so regular expressions (`"[0-9]{4}"`) and JSON (`"{\"a\": 1}"`) are
+written as they read.
 
-**Interpolation**: inside a non-raw string, `{expr}` evaluates `expr` and
-inserts its display form (§10.9). `{expr:spec}` applies a format specification
-(§10.10). The expression may contain nested strings and brackets; the format
-spec begins at the first `:` that is not nested inside `()`, `[]`, `{}` or a
-string.
-
-> **Beware literal braces.** Because every `{` in a non-raw string starts an
-> interpolation, text that merely _contains_ braces changes meaning silently or
-> fails to compile. A regex quantifier such as `"[0-9]{4}"` evaluates `4` and
-> produces the pattern `[0-9]4`; JSON text such as `"{\"a\": 1}"` is parsed as
-> an interpolation and rejected. Write such text as a raw string
-> (`r"[0-9]{4}"`, `r#"{"a": 1}"#`) or escape the braces (`"[0-9]\{4\}"`). The
-> linter reports interpolations whose expression is a literal
-> (`interpolated-literal`, §17.2), which catches the regex case.
+**Interpolation**: inside a non-raw string, `\(expr)` evaluates `expr` and
+inserts its display form (§10.9); `\(expr:spec)` applies a format
+specification (§10.10). The expression is lexed as ordinary code up to the `)`
+that closes the `\(`: a `)` that closes a `(` opened inside the interpolation
+does not end it, and the expression may contain any tokens, including string
+literals with interpolations of their own (`"\(xs.map(x => "<\(x)>"))"`). The
+format spec begins at the first `:` that is not nested inside `()`, `[]`, `{}`
+or a string, and runs to the next `)`, which ends the interpolation (so a spec
+cannot contain `)`). An interpolation does not continue onto the next line
+except inside brackets (`()`, `[]`, `{}`) opened within it: a line break at its
+top level, or before the `)` of a format spec, is an error (`unterminated
+interpolation`), reported at the `\(`. An interpolation must hold an
+expression (`\()` is an error, `empty interpolation`).
 
 **Multi-line strings**: `"""` starts a block string that ends at the next
-`"""`. If the opening `"""` is followed by a newline, that newline is removed.
-The common leading whitespace of all non-blank lines (and of the line holding
-the closing `"""`) is removed. Escapes and interpolation work as in `"..."`.
+`"""` (outside its interpolations). If the opening `"""` is followed by a
+newline, that newline is removed. The common leading whitespace of the lines
+of its text is removed from each of them: the lines counted are its non-blank
+lines and the line holding the closing `"""` (unless that is the first line).
+A line that starts inside an interpolation (which may span lines inside
+brackets) is code, not text, and is neither counted nor dedented. Escapes and
+interpolation work as in `"..."`.
 
 **Raw strings**: `r"..."`, `r#"..."#`, `r##"..."##`, ... have no escapes and no
 interpolation.
 
 **Bytes**: `b"..."` produces a `bytes` value. Escapes as in strings plus
-`\xNN`; no interpolation. Non-ASCII characters are encoded as UTF-8.
+`\xNN`; no interpolation (`\(` is an invalid escape). Non-ASCII characters
+are encoded as UTF-8.
 
 ### 2.6 Operators and punctuation
 
@@ -210,7 +252,7 @@ import json                         // standard or host-native module, bound as 
 import math as m                    // renamed
 import "./geometry.sand"            // script module, bound as `geometry` (file stem)
 import "lib/util.sand" as util      // script module, renamed
-from math import sqrt, pi           // bind selected public names directly
+from math import cbrt, pi           // bind selected public names directly
 from "./shapes.sand" import Shape, area
 ```
 
@@ -250,7 +292,7 @@ pub fn max<T: Ord>(a: T, b: T) -> T {
 }
 
 fn greet(name: str, greeting: str = "Hello") {
-    print("{greeting}, {name}!")
+    print("\(greeting), \(name)!")
 }
 ```
 
@@ -281,7 +323,7 @@ pub struct Point {
 
     /// Distance from the origin.
     fn norm(self) -> float {
-        math.sqrt(self.x * self.x + self.y * self.y)
+        (self.x * self.x + self.y * self.y).sqrt()
     }
 
     fn origin() -> Point { Point { x: 0.0, y: 0.0 } }
@@ -394,7 +436,8 @@ test "addition is commutative" {
 }
 ```
 
-Test blocks are ignored by `run` and executed by the test runner (§17.4).
+The name is a string literal without interpolation. Test blocks are ignored by
+`run` and executed by the test runner (§17.4).
 
 ### 4.9 Traits and impls
 
@@ -423,7 +466,7 @@ pub trait Into<T> {                         // a trait with a type parameter
 }
 
 impl Describe for Point {
-    fn describe(self) -> str { "({self.x}, {self.y})" }
+    fn describe(self) -> str { "(\(self.x), \(self.y))" }
 }
 impl<T: Describe> Describe for [T] {        // conditional (generic) impl
     fn describe(self) -> str { "[" + self.map(x => x.describe()).join(", ") + "]" }
@@ -563,6 +606,9 @@ enum.
 
 `never` is a subtype of every type: an expression of type `never` (`return`,
 `break`, `continue`, `panic(...)`) may appear where any type is expected.
+This applies to whole values only, not to the parts of a type: `[never]` and
+`fn() -> never` are distinct types, so `let xs: [never] = [1]` and passing
+`() => 5` where a `fn() -> never` is expected are type errors.
 
 ### 5.2 Composite types
 
@@ -571,7 +617,7 @@ enum.
 | `[T]`           | growable list (reference type, mutable)                   |
 | `[K: V]`        | hash map, insertion ordered (reference type, mutable)     |
 | `Set<T>`        | hash set, insertion ordered (reference type, mutable)     |
-| `(A, B, ...)`   | tuple of two or more elements (immutable)                 |
+| `(A, B, ...)`   | tuple of two or more elements (immutable); `(A,)` is an error, as are the pattern `(p,)` and the expression `(e,)` |
 | `T?`            | shorthand for `Option<T>`                                 |
 | `Result<T, E>`  | `Ok(T)` or `Err(E)`; `Result<T>` means `Result<T, Error>` |
 | `fn(A, B) -> R` | function; `fn(A)` returns `()`                            |
@@ -716,6 +762,9 @@ or the iterable of `for`; parenthesise it instead.
 same `Num` type, with these additions:
 
 - `str + str`, `bytes + bytes`, `[T] + [T]` concatenate (producing new values).
+- When the operands' type is not known yet (`let add = (a, b) => a + b`), `+`
+  requires that it be one of these (a number, `duration`, `str`, `bytes` or a
+  list) once inferred: `add(true, false)` is a compile error.
 - `duration + duration`, `duration - duration`, `-duration`,
   `duration * int`, `duration / int` produce `duration`;
   `duration / duration` produces `float`.
@@ -880,8 +929,9 @@ mutation inside the lambda is visible outside and vice versa.
 
 ### 6.11 String interpolation
 
-`"{a} + {b} = {a + b}"` builds a string from the display forms (§10.9) of the
-embedded expressions. Any type may be interpolated.
+`"\(a) + \(b) = \(a + b)"` builds a string from the display forms (§10.9) of the
+embedded expressions. Any type may be interpolated. The lexical rules (nesting,
+line breaks, format specs) are in §2.5.
 
 ### 6.12 `spawn`
 
@@ -985,7 +1035,9 @@ p1 | p2               alternatives (must bind the same names with the same types
 
 A binding pattern `name` that coincides with a payload-less variant of the
 scrutinee's enum type refers to that variant (so `Empty` in the example above
-is a variant, not a binding). Struct patterns must either mention every field
+is a variant, not a binding). A capitalized name that is not such a variant is a
+binding; the linter reports it (`variant-like-binding`, §17.2), since it is
+most often a misspelled variant. Struct patterns must either mention every field
 or end with `..`.
 
 ### 8.2 Guards
@@ -1035,7 +1087,8 @@ needed`).
 - Bounds on type parameters are checked at instantiation. Trait bounds are
   checked once the function's types are inferred: each needs an impl (§4.9),
   a bound of an enclosing type parameter, or `Self` in a trait.
-- An expression of type `never` unifies with any type.
+- An expression of type `never` fits any expected type (§5.1); inside other
+  types `never` is an ordinary type.
 - Every type, after inference variables are resolved, has at most 10,000
   components (type constructors and leaves); larger types, which can only
   arise by doubling (`let b = (a, a)` repeatedly, or similar aliases or
@@ -1124,22 +1177,23 @@ resources (files, sockets) which are closed when collected.
 | `None`                              | `None`                              | same                                                                            |
 | `Point { x: 1.0 }`                  | `Point { x: 1.0 }`                  | same                                                                            |
 | `Circle(2.0)`                       | `Circle(2.0)`                       | same                                                                            |
-| `Error`                             | `{kind}: {message}`                 | `Error { kind: "...", message: "..." }`                                         |
+| `Error`                             | `<kind>: <message>`                 | `Error { kind: "...", message: "..." }`                                         |
 | function                            | `<fn name>`                         | same                                                                            |
 | task / channel                      | `<task>` / `<channel>`              | same                                                                            |
 | `0..3`                              | `0..3`                              | same                                                                            |
 
-Composite values print their components in debug form. Durations display with
+Composite values print their components in debug form. The debug form of a
+string is a string literal that evaluates to it. Durations display with
 the largest unit among `h`, `m`, `s`, `ms`, `us`, `ns` that keeps the value
 `>= 1`, using the shortest float representation of the value in that unit:
 `90s` displays as `1.5m`, `1500ms` as `1.5s`, `0ns` as `0s`.
 
 ### 10.10 Format specifications
 
-`{expr:spec}` with `spec = [[fill]align][sign][0][width][.precision][type]`:
+`\(expr:spec)` with `spec = [[fill]align][sign][0][width][.precision][type]`:
 
 - `align`: `<` left, `>` right, `^` center. Default: right for numbers, left
-  otherwise. `fill` is any single character (default space).
+  otherwise. `fill` is any single character other than `)` (default space).
 - `sign`: `+` forces a sign for numbers.
 - `0`: zero-pad numbers after the sign to `width`.
 - `width`: minimum width in characters.
@@ -1148,8 +1202,8 @@ the largest unit among `h`, `m`, `s`, `ms`, `us`, `ns` that keeps the value
 - `type`: `x` / `X` hex, `b` binary, `o` octal (ints only); `e` scientific
   (floats); `?` debug form.
 
-Examples: `"{3.14159:.2}"` → `3.14`; `"{42:>5}"` → `   42`; `"{7:03}"` →
-`007`; `"{255:x}"` → `ff`; `"{"ab":*^6}"` → `**ab**`; `"{"hi":?}"` → `"hi"`.
+Examples: `"\(3.14159:.2)"` → `3.14`; `"\(42:>5)"` → `   42`; `"\(7:03)"` →
+`007`; `"\(255:x)"` → `ff`; `"\("ab":*^6)"` → `**ab**`; `"\("hi":?)"` → `"hi"`.
 
 ---
 
@@ -1242,15 +1296,16 @@ Every value has `to_str() -> str` and `debug() -> str`.
 `abs`, `pow(e: int) -> int`, `min(o)`, `max(o)`, `clamp(lo, hi)`, `to_float`,
 `to_str_radix(radix: int) -> str` (2..36), `sign() -> int`, `is_even`, `is_odd`,
 `to_char() -> str?` (Unicode scalar to one-char string). Static:
-`int.parse(s: str, radix: int = 10) -> int?`, `int.max_value() -> int`,
-`int.min_value() -> int`.
+`int.max_value() -> int`, `int.min_value() -> int`. Parsing: `str.parse_int`
+(§12.5).
 
 ### 12.4 `float`
 
 `abs`, `floor`, `ceil`, `round` (half away from zero), `trunc`, `sqrt`, `pow(e:
 float)`, `min`, `max`, `clamp`, `is_nan`, `is_finite`, `is_infinite`,
 `to_int() -> int` (truncates; panics on NaN or out of range), `to_str_fixed(digits:
-int) -> str`. Static: `float.parse(s: str) -> float?`.
+int) -> str`. `min` and `max` ignore a NaN argument. Parsing: `str.parse_float`
+(§12.5).
 
 ### 12.5 `str`
 
@@ -1275,15 +1330,14 @@ int) -> str`. Static: `float.parse(s: str) -> float?`.
 | `to_upper()`, `to_lower()`                                                         | Unicode-aware                                                                         |
 | `repeat(n: int) -> str`                                                            |                                                                                       |
 | `pad_start(width: int, fill: str = " ")`, `pad_end(...)`                           | pad to `width` characters                                                             |
-| `parse_int() -> int?`, `parse_float() -> float?`                                   | strict (no whitespace)                                                                |
+| `parse_int(radix: int = 10) -> int?`, `parse_float() -> float?`                    | strict (no whitespace); radix 2..36; floats also `inf`, `-inf`, `NaN`                 |
 | `is_digit()`, `is_alpha()`, `is_alnum()`, `is_space()`, `is_upper()`, `is_lower()` | true if non-empty and all chars satisfy (ASCII classes for digit; Unicode for others) |
 | `char_at(i: int) -> str?`                                                          | the scalar starting at byte offset `i`                                                |
 | `ord() -> int`                                                                     | scalar value of a one-char string (panics otherwise)                                  |
 | `reversed() -> str`                                                                | by scalars                                                                            |
-| `join(items: [str]) -> str`                                                        | `", ".join(xs)`                                                                       |
 | `chars_iter() -> Iter<str>`                                                        | lazy iterator over the scalars (§12.13)                                               |
 
-`[str].join(sep: str = "")` is also available on lists.
+Lists of strings are joined with `[str].join(sep: str = "")`: `xs.join(", ")`.
 
 ### 12.6 `bytes`
 
@@ -1469,8 +1523,11 @@ T?` (`T: Ord`; the first minimal/maximal), `min_by`/`max_by<K: Ord>(key: fn(T)
   the indices below the length the list had when `iter()` was called, reading
   each element when it is reached, and stops early if the list shrinks;
   elements pushed meanwhile are not visited. The iterators of maps and sets
-  work on a snapshot of the entries taken by `iter()`. A channel iterator
-  receives live (and suspends while the channel is empty).
+  work on a snapshot of the entries taken by `iter()`: inserting, updating,
+  removing or clearing meanwhile changes none of the entries they produce.
+  (Taking the snapshot copies nothing; a change while an iterator is
+  unfinished copies the entries once.) A channel iterator receives live
+  (and suspends while the channel is empty).
 - **Limits.** Iterators are ordinary Sand code: every element costs at least
   one unit of fuel (§15.2), so endless iterators are bounded by the
   instruction, time and memory limits (§15) like any loop.
@@ -1548,11 +1605,14 @@ Symbolic links (§14.1):
 
 - Most functions follow symlinks: the path is resolved first and the policy
   is checked for the resolved location (the link's target), which the
-  operation then accesses **without following any symlink**. If a symlink
-  appears in the path between the check and the operation, or the path names
-  a dangling symlink (one whose target did not exist when the path was
-  resolved), the operation fails with kind `"permission_denied"`;
-  `exists`, `is_file` and `is_dir` return `false` instead.
+  operation then accesses **without following any symlink**: it acts in
+  the directory the resolution reached, even if that directory is moved or
+  replaced by a symlink meanwhile. If a symlink replaces the final entry
+  between the check and the operation, or the path leads through a dangling
+  symlink (one whose target, or a directory after it, did not exist when
+  the path was resolved), the operation fails with kind
+  `"permission_denied"`; `exists`, `is_file` and `is_dir` return `false`
+  instead.
 - `remove_file`, `remove_dir` and `rename` act on the directory entry
   itself: a final symlink is removed or renamed, never its target, and the
   capability ("entry") is checked for the link's own path (its directory
@@ -1620,7 +1680,7 @@ pub fn post(url: str, body: bytes, headers: [str: str] = [:], timeout: duration 
 Response methods: `text() -> Result<str>`, `json() -> Result<json.Json>`,
 `ok() -> bool` (200..=299), `header(name: str) -> str?` (case-insensitive).
 Header names in `headers` are lower-cased. HTTP/1.1 over TCP; `https` URLs use
-TLS when the engine is built with the `tls` feature (default). Redirects
+TLS when the engine is built with the `tls` feature (as `sand` is). Redirects
 (301, 302, 303, 307, 308) are followed up to 10 times; each hop is checked
 against the policy. Responses with `Content-Length`, chunked encoding, or
 read-until-close bodies are supported; bodies larger than the
@@ -1681,14 +1741,13 @@ reading standard input. Standard error is not buffered.
 
 `get(name: str) -> str?` (capability `Env(name)`; a denial yields `None`),
 `args() -> [str]` (arguments the host passed to the script; no capability),
-`vars() -> [str: str]` (capability `Env("*")`).
+`vars() -> [str: str]` (capability `Env("*")`; a denial yields an empty map).
 
 ### 13.8 `json`
 
 ```
 pub enum Json { Null, Bool(bool), Num(float), Str(str), Arr([Json]), Obj([str: Json]) }
 pub native fn parse(text: str) -> Result<Json>
-pub native fn stringify(value: Json, indent: int = 0) -> str
 pub native fn encode<T>(value: T, indent: int = 0) -> str
 pub native fn decode<reflect T>(text: str) -> Result<T>
 pub native fn to_json<T>(value: T) -> Json
@@ -1700,10 +1759,11 @@ values only), `as_bool() -> bool?`, `as_list() -> [Json]?`,
 `as_map() -> [str: Json]?`, `is_null() -> bool`, `path(p: str) -> Json?`
 (dot-separated keys and indices: `"items.0.name"`).
 
-JSON text embedded in source must be a raw string (`json.parse(r#"{"a": 1}"#)`),
-since `{` starts an interpolation in ordinary strings (§2.5).
+JSON text embedded in source may be an ordinary string
+(`json.parse("{\"a\": 1}")`) or, to avoid escaping its quotes, a raw string
+(`json.parse(r#"{"a": 1}"#)`).
 
-`stringify` emits compact JSON for `indent == 0`, otherwise pretty-prints with
+`encode` emits compact JSON for `indent == 0`, otherwise pretty-prints with
 `indent` spaces. Object keys keep insertion order. Non-finite numbers encode as
 `null`. Integral floats within ±2^53 print without a fraction (`1.0` → `1`).
 
@@ -1733,13 +1793,13 @@ default sink.
 ### 13.10 `math`
 
 Constants (`pub let` values): `pi`, `e`, `tau`, `inf`, `nan`. Functions on
-`float`: `sqrt`, `cbrt`, `exp`, `ln`, `log2`, `log10`, `log(x, base)`, `sin`,
+`float`: `cbrt`, `exp`, `ln`, `log2`, `log10`, `log(x, base)`, `sin`,
 `cos`, `tan`, `asin`, `acos`, `atan`, `atan2(y, x)`, `sinh`, `cosh`, `tanh`,
-`hypot(x, y)`, `floor`, `ceil`, `round`, `trunc`, `abs`, `pow(x, y)`,
-`min(a, b)`, `max(a, b)`, `clamp(x, lo, hi)`, `to_radians`, `to_degrees`,
+`hypot(x, y)`, `to_radians`, `to_degrees`,
 `is_close(a, b, rel_tol: float = 1e-9, abs_tol: float = 0.0) -> bool`.
-Integer helpers: `gcd(a: int, b: int) -> int`, `lcm`, `isqrt(n: int) -> int`,
-`abs_int`, `min_int`, `max_int`.
+Integer helpers: `gcd(a: int, b: int) -> int`, `lcm`, `isqrt(n: int) -> int`.
+Rounding, `abs`, `min`, `max`, `clamp`, `sqrt` and `pow` are methods of
+`float` and `int` (§12.3, §12.4).
 
 ### 13.11 `net`
 
@@ -1749,7 +1809,7 @@ pub native fn connect(addr: str, timeout: duration = 30s) -> Result<Conn>  // Ne
 listener.accept() -> Result<Conn>
 listener.addr() -> str
 listener.close()
-conn.read(max: int = 65536) -> Result<bytes>     // empty bytes at EOF
+conn.read(max: int = 65536) -> Result<bytes>     // at most 8 KiB (its buffer); empty bytes at EOF
 conn.read_line() -> Result<str?>                 // None at EOF; strips \n / \r\n
 conn.write(data: bytes) -> Result<()>
 conn.write_str(text: str) -> Result<()>
@@ -1798,12 +1858,17 @@ r.replace_all(text, rep: str) -> str
 r.split(text) -> [str]
 r.pattern() -> str
 struct Match { text: str, start: int, end: int }
+struct Captures { text: str, spans: [int], regex: Regex }
 Captures: get(i: int) -> Match?, name(n: str) -> Match?, len() -> int, text(i: int) -> str?
 ```
 
+`Captures` holds the text searched and the start and end offsets of every
+group (`-1` for a group that did not participate); its methods slice the
+text, so capturing copies no group text up front.
 Syntax is that of the Rust `regex` crate (linear-time, no backreferences).
-Write patterns as raw strings (`r"\d{4}-\d{2}"`): in ordinary strings `\d` is an
-invalid escape and `{4}` is an interpolation (§2.5).
+Patterns that contain backslashes are best written as raw strings
+(`r"\d{4}-\d{2}"`), since `\d` is an invalid escape in an ordinary string;
+braces need no care (`"[0-9]{4}"`, §2.5).
 Compiled programs are limited in size (each automaton to a few MiB; larger
 patterns, such as `\w{150}`, fail with kind `"limit"`). A compiled regex
 counts against `max_memory` with the memory of its automata and of its search
@@ -1839,7 +1904,7 @@ one derived from `random.int`) to explore other inputs. Failure messages for `as
 ```
 pub struct DateTime { unix_nanos: int }   // UTC instant
 pub native fn now() -> DateTime
-pub native fn monotonic() -> Instant
+pub fn monotonic() -> Instant                             // Instant { nanos: int }
 pub native fn parse(text: str) -> Result<DateTime>        // RFC 3339 / ISO 8601
 pub native fn from_unix(secs: int) -> DateTime
 pub native fn from_unix_millis(ms: int) -> DateTime
@@ -1853,8 +1918,7 @@ pub native fn date(year: int, month: int, day: int, hour: int = 0, minute: int =
 `to_iso() -> str` (`2024-01-02T03:04:05Z`, with fractional seconds only if
 non-zero), `format(fmt: str) -> str` (strftime subset: `%Y %m %d %H %M %S %f %j
 %a %A %b %B %y %e %Z %z %s %%`, plus `%3f`/`%6f`/`%9f`). `Instant`: `elapsed() ->
-duration`, `since(earlier: Instant) -> duration`. Also `time.sleep(d)` (same as
-`task.sleep`).
+duration`, `since(earlier: Instant) -> duration`. To sleep, use `task.sleep(d)`.
 
 ### 13.16a `task`
 
@@ -1867,7 +1931,7 @@ pub struct Uri {
     scheme: str, userinfo: str?, host: str?, port: int?,
     path: str, query: str?, fragment: str?
 }
-pub native fn parse(text: str) -> Result<Uri>          // RFC 3986
+pub fn parse(text: str) -> Result<Uri>                 // RFC 3986
 pub native fn encode_component(s: str) -> str          // percent-encodes all but unreserved
 pub native fn encode_path(s: str) -> str               // also keeps "/"
 pub native fn decode_component(s: str) -> Result<str>
@@ -1899,22 +1963,32 @@ forms; returns lower-case hyphenated), `is_valid(s: str) -> bool`,
   engine's policy **before** the effect occurs.
 - The VM has no FFI, does not spawn processes, does not use IPC, shared memory
   or `mmap`, and never executes generated machine code.
-- Paths are normalized lexically (`.`/`..` resolved) and, when they exist,
-  canonicalised (symlinks resolved) before being checked, so a script cannot
-  escape an allowed directory via `..` or symlinks. The checked location is
-  then accessed without following symlinks (directories are opened one
-  component at a time with no-follow semantics), so a symlink swapped into
-  the path after the check cannot redirect the access (§13.3). On Windows,
-  every component is opened relative to its parent directory's handle
-  without following symlinks or junctions; `rename` is path-based there, but
-  holds every directory on both paths open (so that none can be renamed or
-  replaced) and checks that it is the directory the no-follow walk finds,
-  leaving only a narrow race in which the parent directory of an entry is
-  emptied and turned into a junction while the rename runs. On other
-  platforms accesses are path-based and the race remains. On Windows, paths
-  are compared case-insensitively and use the plain `C:\...` /
-  `\\server\share\...` form (not `\\?\...`). Paths of a memory file
-  system (§16.1), which has no symlinks, are normalized lexically.
+- Paths are normalized lexically (`.`/`..` resolved) and then resolved the
+  way `realpath` resolves the longest prefix that exists: symlinks are
+  followed (`..` in a symlink's target is the parent of the directory the
+  link is in), and the result is checked, so a script cannot escape an
+  allowed directory via `..` or symlinks. A symlink whose target does not
+  resolve is not followed (§13.3). On the host this is one walk from the
+  root that opens each directory without following symlinks (reading each
+  symlink it meets and continuing with its target) and keeps the
+  directories open; the access then acts relative to the directory that
+  holds the final entry, without following a final symlink, so a symlink
+  swapped into the path after the check cannot redirect it (§13.3). On
+  macOS, existing directories and entries are named as stored (volumes
+  are usually case-insensitive and always normalization-insensitive) and
+  by their usual paths rather than through a firmlink
+  (`/System/Volumes/Data/Users/...` is `/Users/...`); on Linux and other
+  Unix systems names are kept as given, like `realpath`. On Windows,
+  paths are canonicalised first, and then every component is opened
+  relative to its parent directory's handle without following symlinks
+  or junctions; `rename` is path-based there, but holds every directory on
+  both paths open (so that none can be renamed or replaced) and checks that
+  it is the directory the no-follow walk finds, leaving only a narrow race
+  in which the parent directory of an entry is emptied and turned into a
+  junction while the rename runs. On Windows, paths are compared
+  case-insensitively and use the plain `C:\...` / `\\server\share\...`
+  form (not `\\?\...`). Paths of a memory file system (§16.1), which has no
+  symlinks, are normalized lexically.
 
 ### 14.2 Capabilities
 
@@ -1954,7 +2028,9 @@ requested once.
 ### 14.4 Effects of a denial
 
 - I/O functions return `Err` with kind `"permission_denied"`.
-- `env.get` returns `None`.
+- The environment treats a denied variable as unset, so that a script
+  cannot tell which variables exist: `env.get` returns `None`, and
+  `env.vars` an empty map when `Env("*")` is denied.
 - `print`, `eprint` and `io.write` panic with `permission denied: stdout` /
   `stderr`.
 - A denied `Import` is a compile-time error. Compilation stops there, so no
@@ -1986,12 +2062,15 @@ requested once.
   containing it from being renamed, replaced or recursively removed as a
   whole (`Policy::denies_under`); custom policies are only asked about the
   top-level paths of such operations. Path rules are compared after
-  normalization (§14.1), which names existing files and directories with
-  their stored spelling (on case- or normalization-insensitive file systems
-  `data/ſecrets` or `data/SECRETS` may name `data/secrets`). For operations
-  on an entry itself (below), a final symlink is named with its stored
-  spelling too, which is looked up in its directory; in a directory of more
-  than 4096 entries it keeps the spelling it was given. Allow rules
+  normalization (§14.1), which on macOS names existing files and
+  directories with their stored spelling (on case- or
+  normalization-insensitive file systems `data/ſecrets` or `data/SECRETS`
+  may name `data/secrets`). For operations on an entry itself (below), a
+  final symlink is named with its stored spelling on every platform. Where
+  the stored name of a final entry cannot be had from the system (a
+  symlink outside macOS, a device, a file that cannot be opened), it is
+  looked up in its directory; in a directory of more than 4096 entries it
+  keeps the spelling it was given. Allow rules
   compare paths exactly (ignoring case on Windows). Deny rules, on every
   platform, compare paths caselessly and normalization-insensitively
   (canonical decomposition, full case folding, default-ignorable characters
@@ -2111,8 +2190,8 @@ Configurable per engine:
 | -------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------ |
 | `max_memory`         | 512 MiB    | run fails: `memory limit exceeded` (I/O whose buffers do not fit fails with kind `"limit"`)                              |
 | `max_instructions`   | unlimited  | run fails: `instruction limit exceeded` (counted in fuel units, §15.2)                                                   |
-| `max_cpu_time`       | unlimited  | run fails: `cpu time limit exceeded` (time spent executing, excluding waits and prompts)                                 |
-| `max_wall_time`      | unlimited  | run fails: `time limit exceeded` (waiting for prompt answers excluded, also those about imports while compiling, which it also bounds) |
+| `max_cpu_time`       | unlimited  | run fails: `cpu time limit exceeded` (CPU time the engine's thread spends executing, excluding waits and prompts; where the platform has no thread CPU clock, elapsed time while executing) |
+| `max_wall_time`      | unlimited  | run fails: `time limit exceeded` (one limit for compiling and running the program, counted from the start of compilation; waiting for prompt answers excluded) |
 | `max_call_depth`     | 10,000     | panic: `stack overflow`                                                                                                  |
 | `max_tasks`          | 10,000     | `spawn` panics: `task limit exceeded`                                                                                    |
 | `max_open_resources` | 1,024      | open/connect/listen/accept and HTTP requests fail with kind `"limit"` (pending operations' sockets count, §13.11)        |
@@ -2122,7 +2201,7 @@ Configurable per engine:
 | `max_compile_fuel`   | 10,000,000 | compile error: `program too complex to compile` (§15.3)                                                                  |
 
 Memory is measured as the engine's accounting of live heap objects (including
-their buffers and the copies of map and set keys held by their indexes) and
+their buffers and the indexes of maps and sets) and
 of the tasks themselves (call stacks, and the lists of tasks waiting for a
 task or a channel), and is enforced after garbage collection. A call that
 would grow a task's stack beyond the limit fails with the memory limit. It also includes the
@@ -2142,7 +2221,7 @@ connection with `503 Service Unavailable` and closes it. In a session (§16,
 §17.6), the instruction, CPU time, wall time and output limits apply to each
 input; the memory limit applies to the session's heap, which persists. Library functions
 also check the Rust-side scratch space they use while building a result
-(output strings and lists, display and JSON text, sort buffers, hash keys)
+(output strings and lists, display and JSON text, sort buffers)
 against the limit before or while it grows, so a script cannot make the host
 allocate much beyond `max_memory`. Garbage is collected before such a check
 reports the limit. Limit violations are reported to the host as
@@ -2221,8 +2300,10 @@ Checking a program happens before it runs, so it is bounded separately:
   `max_compile_fuel` is exhausted, compilation fails with `program too complex
 to compile`. `None` means unlimited.
 - **Time and interrupts.** Compilation stops with `time limit exceeded` once
-  `max_wall_time` has elapsed since it started, and with an interrupt error
-  when the host interrupts the engine.
+  `max_wall_time` has elapsed since it started (the run that follows has
+  what is left of the same limit), and with an interrupt error when the
+  host interrupts the engine. The standard library is compiled once per
+  process (or per engine with host modules), outside any program's budget.
 - **Local limits**, reported at the offending construct: syntactic nesting of
   expressions, types, patterns and blocks is limited to 256 levels (`nesting
 too deep`); strings nested inside string interpolations to 32 levels
@@ -2257,7 +2338,7 @@ use sandlang::{Engine, Config, Limits, Policy, NativeModule, Value};
 
 let mut module = NativeModule::new("geo");
 module.function("dist", |a: f64, b: f64| -> f64 { (a * a + b * b).sqrt() });
-module.async_function("lookup", |key: String| async move { Ok::<_, String>(key.len() as i64) });
+module.async_function("lookup", |key: String| async move { Ok::<_, String>(key.len() as i64) }).params(&["key"]);
 
 let config = Config::new()
     .policy(Policy::deny_all())
@@ -2285,13 +2366,26 @@ let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 
   `sandlang::policy::{is_private_address, normalize_path,
 normalize_entry_path}` for hosts writing their own policies or natives.
 - `NativeModule::function` accepts closures whose argument and return types
-  implement `FromValue`/`IntoValue`: `i64`, `f64`, `bool`, `String`, `Vec<u8>`
-  (as `bytes`), `()`, `Vec<T>`, `Option<T>`, `Result<T, E: Display>` (as
-  `Result<T, Error>`), `HashMap<String, T>` / `BTreeMap<String, T>` (as
-  `[str: T]`), and tuples up to 4. The Sand signature is derived from the Rust
-  types. `NativeModule::source` may add Sand declarations (types, pure-Sand
-  helper functions, `native fn` with explicit signatures bound via
-  `NativeModule::raw_function`).
+  implement `FromValue`/`IntoValue`: `i64`, `f64`, `bool`, `String` and `&str`,
+  `Vec<u8>` and `&[u8]` (as `bytes`), `()`, `Vec<T>` (any element type,
+  e.g. `Vec<Vec<i64>>`, `Vec<(String, i64)>`, `Vec<Option<T>>`), `Option<T>`,
+  `Result<T, E>` (as `Result<T, Error>`: a `HostError { kind, message }`
+  keeps its kind, any other `E: Display` has kind `"error"`),
+  `HashMap<String, T>` / `BTreeMap<String, T>` (as `[str: T]`), and tuples up
+  to 4. `&str` and `&[u8]` arguments borrow the script's values for the call
+  instead of copying them (async functions take owned arguments). Converting
+  arguments and results is charged to the fuel meter and checked against
+  `max_memory`. The Sand signature is derived from the Rust types; its
+  parameters are named `arg1`, `arg2`, ... unless `.params(&["x", "y"])`
+  follows the registration. `guarded_function(name, guard, f)` checks the
+  capability `guard` computes from (references to) the arguments before
+  calling `f`, and returns `Result<R, Error>` (`permission_denied` on a
+  denial). `NativeModule::source` may add Sand declarations (types,
+  pure-Sand helper functions, `native fn` with explicit signatures, which
+  take precedence over derived ones and are required for
+  `NativeModule::raw_function`). A host module cannot take the name of a
+  standard module (`NativeModule::new` panics), nor be added twice
+  (`Config::module` panics), nor register a function twice.
 - `Outcome { exit_code: i32 }`; errors are `Error::Compile(diagnostics)`,
   `Error::Runtime { message, trace }`, `Error::Limit(kind)`, `Error::Interrupted`.
 - A Rust panic inside the engine (a bug in a library or host native, an I/O
@@ -2312,8 +2406,8 @@ The crate's features choose what an engine can reach at all:
   do not exist, the environment is empty unless given, standard input is
   what the host gives (`Config::stdin_bytes`), and scripts see a memory
   file system. The engine then builds for `wasm32-unknown-unknown` (§16.2).
-- `tls` (default, implies `os`): TLS for `https` and `net.connect_tls`.
-- `cli` (default, implies `os`): the `sand` command-line tool.
+- `tls` (implies `os`): TLS for `https` and `net.connect_tls` (rustls with
+  ring). The `sand` command (the `sand-cli` package) enables it.
 
 A `MemFs` is an in-memory file system. `Config::memory_fs(fs)` makes it the
 file system of the engine's scripts (the `fs` module, script imports and
@@ -2414,8 +2508,8 @@ assert_eq!(session.eval("hit() + hit()").await?, Some("3".to_string()));
 
 ### 17.1 `sand check FILE...`
 
-Parses and type checks; prints diagnostics; exit code 1 on errors (2 if a file
-cannot be read).
+Parses and type checks; prints diagnostics; exit code 2 on errors or if a file
+cannot be read, as for `sand run` (§17.5).
 
 All subcommands exit with code 2, after a message on standard error, for usage
 errors: an unknown subcommand or option, a missing file argument, or an option
@@ -2433,7 +2527,8 @@ cannot be read or has errors):
 | `unused-function`      | private function or method not reachable from the module's public items, top-level code or tests (see below)                                      |
 | `unnecessary-var`      | `var` never reassigned (use `let`)                                                                                                                |
 | `unused-result`        | a `Result` value is discarded                                                                                                                     |
-| `unreachable-code`     | statement after `return`, `break`, `continue`, `panic`, `exit`, or after a `loop` that no `break` leaves (labeled breaks from nested loops count) |
+| `no-effect`            | an expression statement that only computes a value which is discarded (`x + 1`, `-3`: §2.3); not the last statement of a block, which is its value |
+| `unreachable-code`     | statement after `return`, `break`, `continue`, a call of the prelude's `panic`, `exit` or `todo` (not of a function of the module with that name), or after a `loop` that no `break` leaves (labeled breaks from nested loops count) |
 | `unused-label`         | loop label that no `break` or `continue` refers to                                                                                                |
 | `naming`               | violates naming conventions (§2.4)                                                                                                                |
 | `bool-comparison`      | comparing with `true`/`false` literal                                                                                                             |
@@ -2441,8 +2536,8 @@ cannot be read or has errors):
 | `len-zero`             | `x.len() == 0` (use `is_empty()`)                                                                                                                 |
 | `empty-block`          | empty `if`/`else`/loop body                                                                                                                       |
 | `todo`                 | call to `todo()`                                                                                                                                  |
-| `interpolated-literal` | `{4}` in a string: a number literal interpolated without a format spec (usually meant as literal braces, §2.5)                                    |
 | `shadowed-variable`    | `let`/`var` binding a name that is already bound, with a different type, by a binding of the same function that is still in scope (see below)     |
+| `variant-like-binding` | a name starting with an upper-case letter that binds a new variable in a pattern (`match`, `if let`, `while let`, `let`, `for`), usually a misspelled variant without a payload (see below) |
 
 `unused-function` applies to the module being linted. Its public items are
 `pub` top-level functions and all methods of `pub` types; every other function
@@ -2461,6 +2556,18 @@ arms) do not shadow each other. A lambda belongs to its enclosing function (a
 each named function and each `test` block is checked on its own, so a
 function or test re-binding a top-level name is not reported.
 
+For `variant-like-binding`: a bare name in a pattern is a payload-less
+variant of the scrutinee's enum if it has one of that name, and otherwise a
+new binding that matches anything (§8.1), so a misspelled variant (`Emtpy =>`
+for `Empty`) silently becomes a catch-all arm. A pattern binding whose name
+starts with an upper-case letter is reported, with the closest payload-less
+variant of its type when that type is an enum and one is within a small edit
+distance (`` `Emtpy` binds a new variable; did you mean the variant
+`State.Empty`? ``), and otherwise with the advice to use a lowercase name.
+Top-level `let` constants in `SCREAMING_SNAKE_CASE` are exempt. It takes the
+place of `naming` for such names, so the two are never both reported for one
+name.
+
 Parameters of trait and impl methods are exempt from `unused-variable`, since
 the trait dictates them; the names of impl methods are checked at the trait.
 
@@ -2474,7 +2581,7 @@ node examined again by a lint (for example a loop body searched for a
 `break`); a file that needs more fails with `source too complex to lint`
 (exit code 2).
 
-### 17.3 `sand fmt FILE... [--check]`
+### 17.3 `sand fmt FILE... [--check]`, `sand fmt - [--check]`
 
 Rewrites files in canonical style: 4-space indentation, one statement per line,
 spaces around binary operators, no space before `(` in calls, `{` on the same
@@ -2483,9 +2590,12 @@ line between statements, at most two consecutive blank lines never, items
 separated by exactly one blank line, line width 100 (calls, lists, maps and
 parameter lists that do not fit are broken one element per line), comments
 preserved. Formatting is idempotent: `fmt(fmt(x)) == fmt(x)`, and formatting
-never changes the parse tree (modulo spans). With `--check`, files are not
+never changes the parse tree (modulo spans). String literals, including the
+code inside their interpolations, are copied verbatim. With `--check`, files are not
 written; the exit code is 1 if any file is not formatted. Exit code 2 if a file
-cannot be read or parsed. Trait and impl bodies are laid out like struct
+cannot be read or parsed. `sand fmt -` formats standard input to standard
+output (with `--check`, it prints nothing and exits with 1 if the input is
+not formatted). Trait and impl bodies are laid out like struct
 bodies: one method per line, with a blank line around methods that have a body.
 Formatting is bounded like linting (§17.2): 64 units of fuel per byte of
 source (at least 10,000,000), about one per syntax tree node and layout node

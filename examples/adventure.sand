@@ -48,24 +48,24 @@ struct Game {
     fn describe(self) -> str {
         let r = self.room()
         let exits = r.exits.keys().map(d => d.name()).join(", ")
-        var text = "== {r.name} ==\n{r.description}\nExits: {exits}"
+        var text = "== \(r.name) ==\n\(r.description)\nExits: \(exits)"
         if not r.items.is_empty() {
-            text += "\nYou see: {r.items.to_list().sorted().join(", ")}"
+            text += "\nYou see: \(r.items.to_list().sorted().join(", "))"
         }
         text
     }
 
     fn go(self, d: Dir) -> str {
         let r = self.room()
-        let Some(dest) = r.exits.get(d) else { return "You can't go {d.name()}." }
+        let Some(dest) = r.exits.get(d) else { return "You can't go \(d.name())." }
         if r.locked == Some(d) {
-            return "The door to the {d.name()} is locked."
+            return "The door to the \(d.name()) is locked."
         }
         self.here = dest
         self.moves += 1
         if self.here == "vault" {
             self.won = true
-            return self.describe() + "\nYou found the treasure in {self.moves} moves. You win!"
+            return self.describe() + "\nYou found the treasure in \(self.moves) moves. You win!"
         }
         self.describe()
     }
@@ -73,29 +73,29 @@ struct Game {
     fn take(self, item: str) -> str {
         let r = self.room()
         if not r.items.remove(item) {
-            return "There is no {item} here."
+            return "There is no \(item) here."
         }
         self.inventory.add(item)
-        "Taken: {item}."
+        "Taken: \(item)."
     }
 
     fn drop(self, item: str) -> str {
         if not self.inventory.remove(item) {
-            return "You don't have {item}."
+            return "You don't have \(item)."
         }
         self.room().items.add(item)
-        "Dropped: {item}."
+        "Dropped: \(item)."
     }
 
     fn use_item(self, item: str) -> str {
         if not self.inventory.contains(item) {
-            return "You don't have {item}."
+            return "You don't have \(item)."
         }
         let r = self.room()
         match (item, r.locked) {
             ("key", Some(d)) => {
                 r.locked = None
-                "You unlock the door to the {d.name()}."
+                "You unlock the door to the \(d.name())."
             }
             _ => "Nothing happens."
         }
@@ -110,7 +110,7 @@ struct Game {
             ["inventory"] | ["i"] => Some(if self.inventory.is_empty() {
                 "You are empty-handed."
             } else {
-                "You carry: {self.inventory.to_list().sorted().join(", ")}"
+                "You carry: \(self.inventory.to_list().sorted().join(", "))"
             })
             ["go", d] | [d] if Dir.parse(d).is_some() => Some(self.go(Dir.parse(d).unwrap()))
             ["take", item] => Some(self.take(item))

@@ -13,10 +13,11 @@ pub enum Witness {
 #[derive(Clone, Debug, PartialEq)]
 pub enum SCtor {
     Bool(bool),
-    /// Variant index within its enum, with display name.
-    Variant(u32, String),
+    /// Variant `i` of enum `d`.
+    Variant(TypeDefId, u32),
     Tuple(usize),
-    Struct(usize, String),
+    /// A struct (if its type is known) with its number of fields.
+    Struct(usize, Option<TypeDefId>),
     Unit,
     Int(i64),
     IntRange(i64, i64),
@@ -34,21 +35,28 @@ enum SPat {
 }
 
 impl Checker<'_> {
-    pub(crate) fn check_pattern(&mut self, p: &Pattern, ty: &Type, mutable: bool) -> HPat {
+    pub(crate) fn check_pattern(&mut self, p: &Pattern, ty: TypeId, mutable: bool) -> HPat {
         let mut or_map = None;
         self.check_pat_inner(p, ty, mutable, &mut or_map)
     }
 
-    fn pat(&self, kind: HPatKind, ty: &Type, span: Span) -> HPat {
-        HPat { kind, ty: ty.clone(), span }
+    /// Checks that a pattern of type `pat_ty` can match values of type
+    /// `scrut`, reporting a mismatch. A `never` scrutinee matches anything
+    /// (its expression diverges).
+    fn expect_scrutinee(&mut self, scrut: TypeId, pat_ty: TypeId, span: Span) -> bool {
+        self.resolve(scrut).is_never() || self.expect_type(scrut, pat_ty, span)
     }
 
-    fn bind_name(&mut self, id: &ast::Ident, ty: &Type, mutable: bool, or_map: &mut Option<HashMap<String, LocalId>>) -> HPat {
+    fn pat(&self, kind: HPatKind, ty: TypeId, span: Span) -> HPat {
+        HPat { kind, ty, span }
+    }
+
+    fn bind_name(&mut self, id: &ast::Ident, ty: TypeId, mutable: bool, or_map: &mut Option<HashMap<Symbol, LocalId>>) -> HPat {
         if let Some(map) = or_map {
-            match map.get(&id.name) {
+            match self.syms.get(&id.name).and_then(|s| map.get(&s)) {
                 Some(&l) => {
-                    let lt = self.fs.data[l as usize].ty.clone();
-                    self.expect_type(&lt, ty, id.span);
+                    let lt = self.fs.data[l as usize].ty;
+                    self.expect_type(lt, ty, id.span);
                     return self.pat(HPatKind::Bind(l), ty, id.span);
                 }
                 None => {
@@ -61,36 +69,38 @@ impl Checker<'_> {
             }
         }
         // Duplicate bindings within one pattern are an error.
-        let l = self.declare_local(&id.name, ty.clone(), mutable, id.span, false);
+        let l = self.declare_local(&id.name, ty, mutable, id.span, false);
         self.pat(HPatKind::Bind(l), ty, id.span)
     }
 
+    /// Fresh type arguments for type definition `d`.
+    fn fresh_args(&mut self, d: TypeDefId) -> Vec<TypeId> {
+        let n = self.types[d as usize].generics.len();
+        (0..n).map(|_| self.fresh()).collect()
+    }
+
     /// Resolves a variant path in a pattern against the scrutinee type.
-    fn pattern_variant(&mut self, path: &[ast::Ident], ty: &Type) -> Option<(TypeDefId, u32, Vec<Type>)> {
+    fn pattern_variant(&mut self, path: &[ast::Ident], ty: TypeId) -> Option<(TypeDefId, u32, Vec<TypeId>)> {
         let rt = self.resolve(ty);
         let last = path.last().unwrap();
         if path.len() == 1 {
-            if let Type::Named(d, args) = &rt
-                && let Some(i) = self.types[*d as usize].variants().iter().position(|v| v.name == last.name)
+            if let Ty::Named(d, args) = self.ty(rt)
+                && let Some(i) = self.find_variant_named(d, &last.name)
             {
-                return Some((*d, i as u32, args.clone()));
+                return Some((d, i, self.elems(args)));
             }
             match self.lookup_global(&last.name) {
                 Some(Def::Variant(d, i)) => {
-                    let n = self.types[d as usize].generics.len();
-                    let args: Vec<Type> = (0..n).map(|_| self.fresh()).collect();
-                    let et = Type::Named(d, args.clone());
-                    if !self.unify(&et, &rt) {
-                        let (e, f) = self.show_pair(&rt, &et);
-                        let msg = format!("type mismatch: expected {e}, found {f}");
-                        self.error(last.span, msg);
+                    let args = self.fresh_args(d);
+                    let t = self.named_ty(d, &args);
+                    if !self.expect_scrutinee(rt, t, last.span) {
                         return None;
                     }
                     return Some((d, i, args));
                 }
                 _ => {
-                    let msg = if matches!(rt, Type::Named(d, _) if self.types[d as usize].is_enum()) {
-                        format!("no variant `{}` on type {}", last.name, self.show(&rt))
+                    let msg = if matches!(self.ty(rt), Ty::Named(d, _) if self.types[d as usize].is_enum()) {
+                        format!("no variant `{}` on type {}", last.name, self.show(rt))
                     } else {
                         format!("unknown variant `{}`", last.name)
                     };
@@ -109,27 +119,29 @@ impl Checker<'_> {
                 return None;
             }
         };
-        let Some(i) = self.types[d as usize].variants().iter().position(|v| v.name == last.name) else {
-            let msg = format!("no variant `{}` on type {}", last.name, self.types[d as usize].name);
+        let Some(i) = self.find_variant_named(d, &last.name) else {
+            let msg = format!("no variant `{}` on type {}", last.name, self.name(self.types[d as usize].name));
             self.error(last.span, msg);
             return None;
         };
-        let n = self.types[d as usize].generics.len();
-        let args: Vec<Type> = (0..n).map(|_| self.fresh()).collect();
-        let et = Type::Named(d, args.clone());
-        if !self.unify(&et, &rt) {
-            let (e, f) = self.show_pair(&rt, &et);
-            let msg = format!("type mismatch: expected {e}, found {f}");
-            self.error(last.span, msg);
+        let args = self.fresh_args(d);
+        let t = self.named_ty(d, &args);
+        if !self.expect_scrutinee(rt, t, last.span) {
             return None;
         }
-        Some((d, i as u32, args))
+        Some((d, i, args))
+    }
+
+    /// The index of the variant of enum `d` named `name`.
+    fn find_variant_named(&self, d: TypeDefId, name: &str) -> Option<u32> {
+        let s = self.syms.get(name)?;
+        self.types[d as usize].variants().iter().position(|v| v.name == s).map(|i| i as u32)
     }
 
     fn resolve_struct_path_quiet(&mut self, path: &[ast::Ident]) -> Option<TypeDefId> {
         if path.len() == 1 {
             if path[0].name == "Self" {
-                if let Some(Type::Named(d, _)) = self.fs.self_ty.clone() {
+                if let Some(Ty::Named(d, _)) = self.fs.self_ty.map(|t| self.ty(t)) {
                     return Some(d);
                 }
                 return None;
@@ -141,9 +153,10 @@ impl Checker<'_> {
         } else if path.len() == 2 {
             match self.lookup_global(&path[0].name)? {
                 Def::Module(m) => {
-                    self.lint.used_names.insert((self.cur_mod, path[0].name.clone()));
-                    match self.mods[m as usize].scope.get(&path[1].name) {
-                        Some((Def::Type(TyRef::Def(d)), true, _)) => Some(*d),
+                    self.note_name_used(&path[0].name);
+                    let found = self.syms.get(&path[1].name).and_then(|s| self.mods[m as usize].scope.get(&s).copied());
+                    match found {
+                        Some(Binding { def: Def::Type(TyRef::Def(d)), is_pub: true, .. }) => Some(d),
                         _ => None,
                     }
                 }
@@ -154,42 +167,44 @@ impl Checker<'_> {
         }
     }
 
-    fn check_pat_inner(&mut self, p: &Pattern, ty: &Type, mutable: bool, or_map: &mut Option<HashMap<String, LocalId>>) -> HPat {
+    fn check_pat_inner(&mut self, p: &Pattern, ty: TypeId, mutable: bool, or_map: &mut Option<HashMap<Symbol, LocalId>>) -> HPat {
         let span = p.span;
         match &p.kind {
             PatternKind::Wildcard => self.pat(HPatKind::Wildcard, ty, span),
             PatternKind::Binding(id) => {
                 // A payload-less variant of the scrutinee's enum?
                 let rt = self.resolve(ty);
-                if let Type::Named(d, _) = &rt
-                    && let Some(v) = self.types[*d as usize].variants().iter().find(|v| v.name == id.name)
-                    && v.fields.is_empty()
+                if let Ty::Named(d, _) = self.ty(rt)
+                    && let Some(i) = self.find_variant_named(d, &id.name)
+                    && self.types[d as usize].variants()[i as usize].fields.is_empty()
                 {
-                    return self.pat(HPatKind::Variant { rt_id: v.rt_id, args: vec![] }, ty, span);
+                    let rt_id = self.types[d as usize].variants()[i as usize].rt_id;
+                    return self.pat(HPatKind::Variant { rt_id, args: vec![] }, ty, span);
                 }
-                if let Some(Def::Variant(d, i)) = self.mods[self.prelude.unwrap_or(0) as usize].scope.get(&id.name).map(|x| x.0.clone()) {
-                    let v = self.types[d as usize].variants()[i as usize].clone();
+                if let Some(Def::Variant(d, i)) = self.scope_def(self.prelude.unwrap_or(0), &id.name) {
+                    let v = &self.types[d as usize].variants()[i as usize];
                     if v.fields.is_empty() {
-                        let n = self.types[d as usize].generics.len();
-                        let args: Vec<Type> = (0..n).map(|_| self.fresh()).collect();
-                        self.expect_type(&rt, &Type::Named(d, args), span);
-                        return self.pat(HPatKind::Variant { rt_id: v.rt_id, args: vec![] }, ty, span);
+                        let rt_id = v.rt_id;
+                        let args = self.fresh_args(d);
+                        let t = self.named_ty(d, &args);
+                        self.expect_scrutinee(rt, t, span);
+                        return self.pat(HPatKind::Variant { rt_id, args: vec![] }, ty, span);
                     }
                 }
                 self.bind_name(id, ty, mutable, or_map)
             }
             PatternKind::Literal(lit) => {
                 let (kind, lt) = match lit {
-                    PatLit::Int(i) => (HPatKind::Int(*i), Type::Int),
-                    PatLit::Str(s) => (HPatKind::Str(s.clone()), Type::Str),
-                    PatLit::Bool(b) => (HPatKind::Bool(*b), Type::Bool),
-                    PatLit::Unit => (HPatKind::Unit, Type::Unit),
+                    PatLit::Int(i) => (HPatKind::Int(*i), TypeId::INT),
+                    PatLit::Str(s) => (HPatKind::Str(s.clone()), TypeId::STR),
+                    PatLit::Bool(b) => (HPatKind::Bool(*b), TypeId::BOOL),
+                    PatLit::Unit => (HPatKind::Unit, TypeId::UNIT),
                 };
-                self.expect_type(ty, &lt, span);
+                self.expect_scrutinee(ty, lt, span);
                 self.pat(kind, ty, span)
             }
             PatternKind::Range(a, b) => {
-                self.expect_type(ty, &Type::Int, span);
+                self.expect_scrutinee(ty, TypeId::INT, span);
                 if a > b {
                     self.error(span, "empty range pattern");
                 }
@@ -197,39 +212,40 @@ impl Checker<'_> {
             }
             PatternKind::Tuple(ps) => {
                 let rt = self.resolve(ty);
-                let tys = match rt {
-                    Type::Tuple(ts) if ts.len() == ps.len() => ts,
-                    Type::Var(_) => {
-                        let ts: Vec<Type> = ps.iter().map(|_| self.fresh()).collect();
-                        self.unify(ty, &Type::Tuple(ts.clone()));
+                let tys: Vec<TypeId> = match self.ty(rt) {
+                    Ty::Tuple(ts) if self.arena.list_len(ts) == ps.len() => self.elems(ts),
+                    Ty::Var(_) | Ty::Never => {
+                        let ts: Vec<TypeId> = ps.iter().map(|_| self.fresh()).collect();
+                        let t = self.tuple_ty(&ts);
+                        self.unify(ty, t);
                         ts
                     }
-                    Type::Error => ps.iter().map(|_| Type::Error).collect(),
-                    other => {
-                        let msg = format!("type mismatch: expected {}, found a tuple pattern of {} elements", self.show(&other), ps.len());
+                    Ty::Error => vec![TypeId::ERROR; ps.len()],
+                    _ => {
+                        let msg = format!("type mismatch: expected {}, found a tuple pattern of {} elements", self.show(rt), ps.len());
                         self.error(span, msg);
-                        ps.iter().map(|_| Type::Error).collect()
+                        vec![TypeId::ERROR; ps.len()]
                     }
                 };
-                let hs = ps.iter().zip(&tys).map(|(p, t)| self.check_pat_inner(p, t, mutable, or_map)).collect();
+                let hs = ps.iter().zip(tys).map(|(p, t)| self.check_pat_inner(p, t, mutable, or_map)).collect();
                 self.pat(HPatKind::Tuple(hs), ty, span)
             }
             PatternKind::Variant { path, args } => {
                 let Some((d, i, targs)) = self.pattern_variant(path, ty) else {
                     if let Some(args) = args {
                         for a in args {
-                            self.check_pat_inner(a, &Type::Error, mutable, or_map);
+                            self.check_pat_inner(a, TypeId::ERROR, mutable, or_map);
                         }
                     }
                     return self.pat(HPatKind::Wildcard, ty, span);
                 };
-                let v = self.types[d as usize].variants()[i as usize].clone();
-                let ftys = self.variant_field_types_pub(d, i, &targs);
-                let args = args.clone().unwrap_or_default();
+                let rt_id = self.types[d as usize].variants()[i as usize].rt_id;
+                let ftys = self.variant_field_types(d, i, &targs);
+                let args = args.as_deref().unwrap_or_default();
                 if args.len() != ftys.len() {
                     let msg = format!(
                         "variant `{}` has {} field{}, but the pattern has {}",
-                        v.name,
+                        self.name(self.types[d as usize].variants()[i as usize].name),
                         ftys.len(),
                         if ftys.len() == 1 { "" } else { "s" },
                         args.len()
@@ -237,8 +253,8 @@ impl Checker<'_> {
                     self.error(span, msg);
                     return self.pat(HPatKind::Wildcard, ty, span);
                 }
-                let hs = args.iter().zip(&ftys).map(|(p, t)| self.check_pat_inner(p, t, mutable, or_map)).collect();
-                self.pat(HPatKind::Variant { rt_id: v.rt_id, args: hs }, ty, span)
+                let hs = args.iter().zip(ftys).map(|(p, t)| self.check_pat_inner(p, t, mutable, or_map)).collect();
+                self.pat(HPatKind::Variant { rt_id, args: hs }, ty, span)
             }
             PatternKind::Struct { path, fields, rest } => {
                 let Some(d) = self.resolve_struct_path_quiet(path) else {
@@ -246,61 +262,62 @@ impl Checker<'_> {
                     self.error(path[0].span, format!("unknown struct `{name}`"));
                     return self.pat(HPatKind::Wildcard, ty, span);
                 };
-                let def = self.types[d as usize].clone();
-                if !def.is_struct() {
-                    self.error(path[0].span, format!("`{}` is not a struct", def.name));
+                if !self.types[d as usize].is_struct() {
+                    let msg = format!("`{}` is not a struct", self.name(self.types[d as usize].name));
+                    self.error(path[0].span, msg);
                     return self.pat(HPatKind::Wildcard, ty, span);
                 }
-                let n = def.generics.len();
-                let targs: Vec<Type> = (0..n).map(|_| self.fresh()).collect();
-                let st = Type::Named(d, targs.clone());
-                self.expect_type(ty, &st, span);
-                let gens = def.generics.clone();
+                let targs = self.fresh_args(d);
+                let st = self.named_ty(d, &targs);
+                self.expect_scrutinee(ty, st, span);
                 let mut hs = Vec::new();
-                let mut seen = HashSet::new();
+                let mut seen = vec![false; self.types[d as usize].fields().len()];
                 for f in fields {
-                    let Some(idx) = def.fields().iter().position(|x| x.name == f.name.name) else {
-                        self.error(f.name.span, format!("no field `{}` on type {}", f.name.name, def.name));
+                    let sym = self.syms.get(&f.name.name);
+                    let Some(idx) = self.types[d as usize].fields().iter().position(|x| Some(x.name) == sym) else {
+                        let msg = format!("no field `{}` on type {}", f.name.name, self.name(self.types[d as usize].name));
+                        self.error(f.name.span, msg);
                         continue;
                     };
-                    seen.insert(idx);
-                    let fty = def.fields()[idx].ty.subst_params(&|p| gens.iter().position(|&g| g == p).map(|k| targs[k].clone()));
+                    seen[idx] = true;
+                    let fty = self.field_type(d, idx, &targs);
                     let h = match &f.pattern {
-                        Some(p) => self.check_pat_inner(p, &fty, mutable, or_map),
-                        None => self.bind_name(&f.name, &fty, mutable, or_map),
+                        Some(p) => self.check_pat_inner(p, fty, mutable, or_map),
+                        None => self.bind_name(&f.name, fty, mutable, or_map),
                     };
                     hs.push((idx as u32, h));
                 }
                 if !rest {
-                    for (i, fd) in def.fields().iter().enumerate() {
-                        if !seen.contains(&i) {
-                            self.error(span, format!("missing field `{}` in pattern; add `..` to ignore the rest", fd.name));
-                        }
+                    for i in seen.iter().enumerate().filter(|(_, s)| !**s).map(|(i, _)| i) {
+                        let fname = self.name(self.types[d as usize].fields()[i].name);
+                        let msg = format!("missing field `{fname}` in pattern; add `..` to ignore the rest");
+                        self.error(span, msg);
                     }
                 }
                 self.pat(HPatKind::Struct { fields: hs }, ty, span)
             }
             PatternKind::List { before, rest, after } => {
                 let rt = self.resolve(ty);
-                let elem = match rt {
-                    Type::List(e) => *e,
-                    Type::Var(_) => {
+                let elem = match self.ty(rt) {
+                    Ty::List(e) => e,
+                    Ty::Var(_) | Ty::Never => {
                         let e = self.fresh();
-                        self.unify(ty, &Type::list(e.clone()));
+                        let t = self.list_ty(e);
+                        self.unify(ty, t);
                         e
                     }
-                    Type::Error => Type::Error,
-                    other => {
-                        let msg = format!("type mismatch: expected {}, found a list pattern", self.show(&other));
+                    Ty::Error => TypeId::ERROR,
+                    _ => {
+                        let msg = format!("type mismatch: expected {}, found a list pattern", self.show(rt));
                         self.error(span, msg);
-                        Type::Error
+                        TypeId::ERROR
                     }
                 };
-                let b = before.iter().map(|p| self.check_pat_inner(p, &elem, mutable, or_map)).collect();
+                let b = before.iter().map(|p| self.check_pat_inner(p, elem, mutable, or_map)).collect();
                 let r = match rest {
                     Some(Some(id)) => {
-                        let lt = Type::list(elem.clone());
-                        match self.bind_name(id, &lt, mutable, or_map).kind {
+                        let lt = self.list_ty(elem);
+                        match self.bind_name(id, lt, mutable, or_map).kind {
                             HPatKind::Bind(l) => Some(Some(l)),
                             _ => Some(None),
                         }
@@ -308,21 +325,22 @@ impl Checker<'_> {
                     Some(None) => Some(None),
                     None => None,
                 };
-                let a = after.iter().map(|p| self.check_pat_inner(p, &elem, mutable, or_map)).collect();
+                let a = after.iter().map(|p| self.check_pat_inner(p, elem, mutable, or_map)).collect();
                 self.pat(HPatKind::List { before: b, rest: r, after: a }, ty, span)
             }
             PatternKind::Or(alts) => {
                 let first = self.check_pat_inner(&alts[0], ty, mutable, or_map);
-                let names: HashMap<String, LocalId> = self.pattern_bindings(&first).into_iter().collect();
+                let names: HashMap<Symbol, LocalId> = self.pattern_bindings(&first).into_iter().collect();
                 let mut hs = vec![first];
                 for alt in &alts[1..] {
                     let mut sub = Some(names.clone());
                     let h = self.check_pat_inner(alt, ty, mutable, &mut sub);
-                    let bound: HashSet<String> = self.pattern_bindings(&h).into_iter().map(|(n, _)| n).collect();
-                    for n in names.keys() {
-                        if !bound.contains(n) {
-                            self.error(alt.span, format!("all alternatives of an or-pattern must bind the same names; `{n}` is missing"));
-                        }
+                    let bound: HashSet<Symbol> = self.pattern_bindings(&h).into_iter().map(|(n, _)| n).collect();
+                    let mut missing: Vec<&Symbol> = names.keys().filter(|n| !bound.contains(n)).collect();
+                    missing.sort_by_key(|n| names[n]);
+                    for n in missing {
+                        let msg = format!("all alternatives of an or-pattern must bind the same names; `{}` is missing", self.name(*n));
+                        self.error(alt.span, msg);
                     }
                     hs.push(h);
                 }
@@ -331,22 +349,12 @@ impl Checker<'_> {
         }
     }
 
-    pub(crate) fn variant_field_types_pub(&self, d: TypeDefId, i: u32, args: &[Type]) -> Vec<Type> {
-        let def = &self.types[d as usize];
-        let gens = def.generics.clone();
-        def.variants()[i as usize]
-            .fields
-            .iter()
-            .map(|t| t.subst_params(&|p| gens.iter().position(|&g| g == p).map(|k| args[k].clone())))
-            .collect()
-    }
-
-    pub(crate) fn pattern_bindings(&self, p: &HPat) -> Vec<(String, LocalId)> {
+    pub(crate) fn pattern_bindings(&self, p: &HPat) -> Vec<(Symbol, LocalId)> {
         let mut out = Vec::new();
-        fn go(c: &Checker, p: &HPat, out: &mut Vec<(String, LocalId)>) {
+        fn go(c: &Checker, p: &HPat, out: &mut Vec<(Symbol, LocalId)>) {
             match &p.kind {
                 HPatKind::Bind(l) => {
-                    let n = c.fs.locals[*l as usize].name.clone();
+                    let n = c.fs.locals[*l as usize].name;
                     if !out.iter().any(|(_, x)| x == l) {
                         out.push((n, *l));
                     }
@@ -362,7 +370,7 @@ impl Checker<'_> {
                 HPatKind::List { before, rest, after } => {
                     before.iter().for_each(|x| go(c, x, out));
                     if let Some(Some(l)) = rest {
-                        out.push((c.fs.locals[*l as usize].name.clone(), *l));
+                        out.push((c.fs.locals[*l as usize].name, *l));
                     }
                     after.iter().for_each(|x| go(c, x, out));
                 }
@@ -373,7 +381,7 @@ impl Checker<'_> {
         out
     }
 
-    pub(crate) fn pattern_names(&self, p: &HPat) -> Vec<String> {
+    pub(crate) fn pattern_names(&self, p: &HPat) -> Vec<Symbol> {
         self.pattern_bindings(p).into_iter().map(|(n, _)| n).collect()
     }
 
@@ -391,13 +399,12 @@ impl Checker<'_> {
             HPatKind::Tuple(ps) => SPat::Ctor(SCtor::Tuple(ps.len()), ps.iter().map(|x| self.simplify(x)).collect()),
             HPatKind::Variant { rt_id, args } => {
                 let (d, i) = self.variants[*rt_id as usize];
-                let name = self.types[d as usize].variants()[i as usize].name.clone();
-                SPat::Ctor(SCtor::Variant(i, name), args.iter().map(|x| self.simplify(x)).collect())
+                SPat::Ctor(SCtor::Variant(d, i), args.iter().map(|x| self.simplify(x)).collect())
             }
             HPatKind::Struct { fields } => {
-                let (n, name) = match self.resolve(&p.ty) {
-                    Type::Named(d, _) => (self.types[d as usize].fields().len(), self.types[d as usize].name.clone()),
-                    _ => (0, String::new()),
+                let (n, def) = match self.rty(p.ty) {
+                    Ty::Named(d, _) => (self.types[d as usize].fields().len(), Some(d)),
+                    _ => (0, None),
                 };
                 let mut args = vec![SPat::Wild; n];
                 for (i, f) in fields {
@@ -405,7 +412,7 @@ impl Checker<'_> {
                         args[*i as usize] = self.simplify(f);
                     }
                 }
-                SPat::Ctor(SCtor::Struct(n, name), args)
+                SPat::Ctor(SCtor::Struct(n, def), args)
             }
             HPatKind::List { before, rest, after } => {
                 let mut args: Vec<SPat> = before.iter().map(|x| self.simplify(x)).collect();
@@ -420,9 +427,21 @@ impl Checker<'_> {
     }
 
     pub(crate) fn pattern_irrefutable(&mut self, p: &HPat) -> bool {
+        // (Most `let`s bind names, maybe in tuples or structs: no need to check.)
+        fn binds_only(p: &HPat) -> bool {
+            match &p.kind {
+                HPatKind::Wildcard | HPatKind::Bind(_) => true,
+                HPatKind::Tuple(ps) => ps.iter().all(binds_only),
+                HPatKind::Struct { fields } => fields.iter().all(|(_, p)| binds_only(p)),
+                _ => false,
+            }
+        }
+        if binds_only(p) {
+            return true;
+        }
         let row = vec![self.simplify(p)];
-        let ty = self.zonk(&p.ty);
-        if matches!(ty, Type::Never | Type::Error) {
+        let ty = self.zonk(p.ty);
+        if matches!(self.ty(ty), Ty::Never | Ty::Error) {
             return true;
         }
         self.budget.start_pattern_check();
@@ -434,10 +453,10 @@ impl Checker<'_> {
         irrefutable
     }
 
-    pub(crate) fn check_exhaustive(&mut self, ty: &Type, arms: &[HArm], span: Span) {
+    pub(crate) fn check_exhaustive(&mut self, ty: TypeId, arms: &[HArm], span: Span) {
         let ty = self.zonk(ty);
         // No values (`never`), or an error has been reported already.
-        if matches!(ty, Type::Never | Type::Error) {
+        if matches!(self.ty(ty), Ty::Never | Ty::Error) {
             return;
         }
         let mut rows: Vec<Vec<SPat>> = Vec::new();
@@ -447,14 +466,14 @@ impl Checker<'_> {
                 break;
             }
             let sp = self.simplify(&arm.pat);
-            if self.useful(&rows, std::slice::from_ref(&sp), std::slice::from_ref(&ty)).is_none() && !self.budget.pattern_too_complex() {
+            if self.useful(&rows, std::slice::from_ref(&sp), &[ty]).is_none() && !self.budget.pattern_too_complex() {
                 self.error(arm.pat.span, "unreachable pattern");
             }
             if arm.guard.is_none() {
                 rows.push(vec![sp]);
             }
         }
-        let missing = if self.budget.pattern_too_complex() { None } else { self.useful(&rows, &[SPat::Wild], std::slice::from_ref(&ty)) };
+        let missing = if self.budget.pattern_too_complex() { None } else { self.useful(&rows, &[SPat::Wild], &[ty]) };
         if self.budget.pattern_too_complex() {
             self.error(span, "pattern too complex to check for exhaustiveness");
         } else if let Some(w) = missing {
@@ -471,15 +490,12 @@ impl Checker<'_> {
                 match c {
                     SCtor::Bool(b) => b.to_string(),
                     SCtor::Unit => "()".into(),
-                    SCtor::Variant(_, name) => {
-                        if a.is_empty() {
-                            name.clone()
-                        } else {
-                            format!("{name}({})", a.join(", "))
-                        }
+                    SCtor::Variant(d, i) => {
+                        let name = self.name(self.types[*d as usize].variants()[*i as usize].name);
+                        if a.is_empty() { name.to_string() } else { format!("{name}({})", a.join(", ")) }
                     }
                     SCtor::Tuple(_) => format!("({})", a.join(", ")),
-                    SCtor::Struct(_, name) => format!("{name} {{ .. }}"),
+                    SCtor::Struct(_, d) => format!("{} {{ .. }}", d.map_or("_", |d| self.name(self.types[d as usize].name))),
                     SCtor::ListExact(_) => format!("[{}]", a.join(", ")),
                     SCtor::ListAtLeast(..) => {
                         let mut parts = a.clone();
@@ -495,39 +511,38 @@ impl Checker<'_> {
     }
 
     /// Constructor arity and argument types for the column type `ty`.
-    fn ctor_args(&self, c: &SCtor, ty: &Type) -> Vec<Type> {
-        let ty = self.resolve(ty);
+    fn ctor_args(&mut self, c: &SCtor, ty: TypeId) -> Vec<TypeId> {
+        let ty = self.rty(ty);
         match c {
             SCtor::Tuple(n) => match ty {
-                Type::Tuple(ts) => ts,
-                _ => vec![Type::Error; *n],
+                Ty::Tuple(ts) => self.elems(ts),
+                _ => vec![TypeId::ERROR; *n],
             },
-            SCtor::Variant(i, _) => match ty {
-                Type::Named(d, args) => self.variant_field_types_pub(d, *i, &args),
+            SCtor::Variant(_, i) => match ty {
+                Ty::Named(d, args) => {
+                    let args = self.elems(args);
+                    self.variant_field_types(d, *i, &args)
+                }
                 _ => vec![],
             },
             SCtor::Struct(n, _) => match ty {
-                Type::Named(d, args) => {
-                    let def = &self.types[d as usize];
-                    let gens = def.generics.clone();
-                    def.fields()
-                        .iter()
-                        .map(|f| f.ty.subst_params(&|p| gens.iter().position(|&g| g == p).map(|k| args[k].clone())))
-                        .collect()
+                Ty::Named(d, args) => {
+                    let args = self.elems(args);
+                    (0..self.types[d as usize].fields().len()).map(|i| self.field_type(d, i, &args)).collect()
                 }
-                _ => vec![Type::Error; *n],
+                _ => vec![TypeId::ERROR; *n],
             },
             SCtor::ListExact(n) => {
                 let e = match ty {
-                    Type::List(e) => *e,
-                    _ => Type::Error,
+                    Ty::List(e) => e,
+                    _ => TypeId::ERROR,
                 };
                 vec![e; *n]
             }
             SCtor::ListAtLeast(k, m) => {
                 let e = match ty {
-                    Type::List(e) => *e,
-                    _ => Type::Error,
+                    Ty::List(e) => e,
+                    _ => TypeId::ERROR,
                 };
                 vec![e; k + m]
             }
@@ -536,22 +551,20 @@ impl Checker<'_> {
     }
 
     /// All constructors of a type, if finite and known.
-    fn all_ctors(&self, ty: &Type, rows: &[Vec<SPat>]) -> Option<Vec<SCtor>> {
-        match self.resolve(ty) {
-            Type::Bool => Some(vec![SCtor::Bool(true), SCtor::Bool(false)]),
-            Type::Unit => Some(vec![SCtor::Unit]),
-            Type::Tuple(ts) => Some(vec![SCtor::Tuple(ts.len())]),
-            Type::Named(d, _) => {
+    fn all_ctors(&self, ty: TypeId, rows: &[Vec<SPat>]) -> Option<Vec<SCtor>> {
+        match self.rty(ty) {
+            Ty::Bool => Some(vec![SCtor::Bool(true), SCtor::Bool(false)]),
+            Ty::Unit => Some(vec![SCtor::Unit]),
+            Ty::Tuple(ts) => Some(vec![SCtor::Tuple(self.arena.list_len(ts))]),
+            Ty::Named(d, _) => {
                 let def = &self.types[d as usize];
                 match &def.kind {
-                    TypeDefKind::Enum { variants } => {
-                        Some(variants.iter().enumerate().map(|(i, v)| SCtor::Variant(i as u32, v.name.clone())).collect())
-                    }
-                    TypeDefKind::Struct { fields } => Some(vec![SCtor::Struct(fields.len(), def.name.clone())]),
+                    TypeDefKind::Enum { variants } => Some((0..variants.len()).map(|i| SCtor::Variant(d, i as u32)).collect()),
+                    TypeDefKind::Struct { fields } => Some(vec![SCtor::Struct(fields.len(), Some(d))]),
                     TypeDefKind::Opaque => None,
                 }
             }
-            Type::List(_) => {
+            Ty::List(_) => {
                 let l = max_list_len(rows);
                 let mut v: Vec<SCtor> = (0..=l).map(SCtor::ListExact).collect();
                 v.push(SCtor::ListAtLeast(l + 1, 0));
@@ -634,7 +647,7 @@ impl Checker<'_> {
 
     /// Returns a witness vector if `v` matches something no row in `rows` matches.
     /// Gives up (returning `None`) once the check is too complex.
-    fn useful(&self, rows: &[Vec<SPat>], v: &[SPat], tys: &[Type]) -> Option<Vec<Witness>> {
+    fn useful(&mut self, rows: &[Vec<SPat>], v: &[SPat], tys: &[TypeId]) -> Option<Vec<Witness>> {
         // Each row is cloned or specialized below: O(width) work per row.
         if !self.budget.pattern_step(1 + (rows.len() * v.len()) as u64) {
             return None;
@@ -653,28 +666,7 @@ impl Checker<'_> {
             return None;
         }
         let rows = self.expand_or(rows);
-        let ty = &tys[0];
-        let try_ctor = |c: &SCtor, vhead: Vec<SPat>| -> Option<Vec<Witness>> {
-            let args = self.ctor_args(c, ty);
-            let arity = match c {
-                SCtor::ListAtLeast(n, 0) if vhead.is_empty() => *n,
-                // The type does not determine the fields (a `never` or erroneous
-                // type, e.g. a variant pattern on `panic(..)`): the pattern does.
-                _ if !vhead.is_empty() => vhead.len(),
-                _ => args.len(),
-            };
-            let arg_tys: Vec<Type> = if args.len() == arity { args } else { vec![args.first().cloned().unwrap_or(Type::Error); arity] };
-            let srows: Vec<Vec<SPat>> = rows.iter().filter_map(|r| self.specialize_row(r, c, arity)).collect();
-            let mut nv = if vhead.is_empty() && arity > 0 { vec![SPat::Wild; arity] } else { vhead };
-            nv.extend(v[1..].iter().cloned());
-            let mut ntys = arg_tys;
-            ntys.extend(tys[1..].iter().cloned());
-            let w = self.useful(&srows, &nv, &ntys)?;
-            let (head, tail) = w.split_at(arity.min(w.len()));
-            let mut out = vec![Witness::Ctor(c.clone(), head.to_vec())];
-            out.extend(tail.iter().cloned());
-            Some(out)
-        };
+        let ty = tys[0];
         match &v[0] {
             SPat::Ctor(SCtor::ListAtLeast(k, m), args) => {
                 // A rest pattern stands for every length >= k + m.
@@ -689,16 +681,13 @@ impl Checker<'_> {
                     let mut head = args[..*k].to_vec();
                     head.extend(std::iter::repeat_n(SPat::Wild, n - k - m));
                     head.extend(args[*k..].iter().cloned());
-                    if let Some(w) = try_ctor(&c, head) {
+                    if let Some(w) = self.try_ctor(&rows, v, tys, &c, head) {
                         return Some(w);
                     }
                 }
                 None
             }
-            SPat::Ctor(c, args) => {
-                let c = c.clone();
-                try_ctor(&c, args.clone())
-            }
+            SPat::Ctor(c, args) => self.try_ctor(&rows, v, tys, c, args.clone()),
             SPat::Wild => {
                 let used: Vec<SCtor> =
                     rows.iter().filter_map(|r| if let SPat::Ctor(c, _) = &r[0] { Some(c.clone()) } else { None }).collect();
@@ -715,7 +704,7 @@ impl Checker<'_> {
                 };
                 if complete && !used.is_empty() {
                     for c in all.unwrap() {
-                        if let Some(w) = try_ctor(&c, vec![]) {
+                        if let Some(w) = self.try_ctor(&rows, v, tys, &c, vec![]) {
                             return Some(w);
                         }
                     }
@@ -724,7 +713,7 @@ impl Checker<'_> {
                     let default: Vec<Vec<SPat>> = rows.iter().filter(|r| matches!(r[0], SPat::Wild)).map(|r| r[1..].to_vec()).collect();
                     let w = self.useful(&default, &v[1..], &tys[1..])?;
                     let missing = match all {
-                        Some(all) if !used.is_empty() || matches!(self.resolve(ty), Type::Bool | Type::Named(..)) => {
+                        Some(all) if !used.is_empty() || matches!(self.rty(ty), Ty::Bool | Ty::Named(..)) => {
                             let m = all.into_iter().find(|c| match c {
                                 SCtor::ListExact(n) => {
                                     !used.iter().any(|u| *u == SCtor::ListExact(*n) || matches!(u, SCtor::ListAtLeast(k, m) if k + m <= *n))
@@ -752,6 +741,30 @@ impl Checker<'_> {
             }
             SPat::Or(_) => unreachable!(),
         }
+    }
+
+    /// `useful` for the rows (or-patterns expanded) specialized by
+    /// constructor `c`, whose arguments in `v` are `vhead`.
+    fn try_ctor(&mut self, rows: &[Vec<SPat>], v: &[SPat], tys: &[TypeId], c: &SCtor, vhead: Vec<SPat>) -> Option<Vec<Witness>> {
+        let args = self.ctor_args(c, tys[0]);
+        let arity = match c {
+            SCtor::ListAtLeast(n, 0) if vhead.is_empty() => *n,
+            // The type does not determine the fields (a `never` or erroneous
+            // type, e.g. a variant pattern on `panic(..)`): the pattern does.
+            _ if !vhead.is_empty() => vhead.len(),
+            _ => args.len(),
+        };
+        let arg_tys: Vec<TypeId> = if args.len() == arity { args } else { vec![args.first().copied().unwrap_or(TypeId::ERROR); arity] };
+        let srows: Vec<Vec<SPat>> = rows.iter().filter_map(|r| self.specialize_row(r, c, arity)).collect();
+        let mut nv = if vhead.is_empty() && arity > 0 { vec![SPat::Wild; arity] } else { vhead };
+        nv.extend(v[1..].iter().cloned());
+        let mut ntys = arg_tys;
+        ntys.extend(tys[1..].iter().copied());
+        let w = self.useful(&srows, &nv, &ntys)?;
+        let (head, tail) = w.split_at(arity.min(w.len()));
+        let mut out = vec![Witness::Ctor(c.clone(), head.to_vec())];
+        out.extend(tail.iter().cloned());
+        Some(out)
     }
 }
 

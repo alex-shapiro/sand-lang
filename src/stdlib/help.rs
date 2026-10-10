@@ -18,12 +18,8 @@ pub fn register(r: &mut Registry) {
     r.add_builtin("help.module", |vm, a| {
         let name = vm.str(a[0]).to_string();
         let prog = vm.prog.clone();
-        // Modules compiled into the program already have a summary; others are
-        // summarised on demand (and cached by the engine).
-        let summary = match prog.module_help.iter().find(|(m, _)| *m == name) {
-            Some((_, s)) => Some(s.clone()),
-            None => prog.help_index.as_ref().and_then(|h| h.summary(&name)),
-        };
+        // (Every standard and host module is compiled into the program.)
+        let summary = prog.module_help.iter().find(|(m, _)| *m == name).map(|(_, s)| s.clone());
         let v = summary.map(|s| vm.new_str(s));
         Ok(vm.option(v))
     });

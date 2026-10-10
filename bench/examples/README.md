@@ -20,7 +20,8 @@ Options:
 | `--only NAMES`  | comma-separated workload names or prefixes (`search_index` = all four) |
 | `--runs N`      | timed runs per implementation (default 5)                              |
 | `--sand PATH`   | Sand binary (default `target/release/sand`)                            |
-| `--python PATH` | interpreter for the ports (default `/opt/homebrew/bin/python3.14`)     |
+| `--python PATH` | interpreter for the ports (default: the 3.14 running `run.py`)        |
+| `--any-python`  | allow a version other than 3.14 (ratios are then not comparable)       |
 | `--keep`        | keep the generated inputs (the temp dir is printed)                    |
 
 For each workload, `run.py` generates its inputs into a temporary directory,
@@ -66,13 +67,14 @@ numbers in JSON being floats in `template`). Notable translation choices:
 
 ## Profiling a workload
 
-The release profile has `debug = 1`, so macOS `sample` (or Instruments)
-shows Rust function names and line numbers. Materialize the inputs and sample
-a run, e.g. for `adventure`:
+The `profiling` profile is the release profile with `debug = 1`, so macOS
+`sample` (or Instruments) shows Rust function names and line numbers. Build
+it, materialize the inputs and sample a run, e.g. for `adventure`:
 
 ```
+cargo build --profile profiling
 python3.14 bench/examples/gen.py /tmp/sand-inputs
-target/release/sand run examples/adventure.sand --allow-stdin < /tmp/sand-inputs/adventure.txt > /dev/null &
+target/profiling/sand run examples/adventure.sand --allow-stdin < /tmp/sand-inputs/adventure.txt > /dev/null &
 sample $! 3 1 -mayDie -file /tmp/adventure.sample.txt
 ```
 

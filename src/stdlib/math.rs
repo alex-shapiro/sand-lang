@@ -19,7 +19,6 @@ pub fn register(r: &mut Registry) {
         };
     }
     unary! {
-        "sqrt" => f64::sqrt,
         "cbrt" => f64::cbrt,
         "exp" => f64::exp,
         "ln" => f64::ln,
@@ -34,11 +33,6 @@ pub fn register(r: &mut Registry) {
         "sinh" => f64::sinh,
         "cosh" => f64::cosh,
         "tanh" => f64::tanh,
-        "floor" => f64::floor,
-        "ceil" => f64::ceil,
-        "round" => f64::round,
-        "trunc" => f64::trunc,
-        "abs" => f64::abs,
         "to_radians" => f64::to_radians,
         "to_degrees" => f64::to_degrees,
     }
@@ -46,9 +40,6 @@ pub fn register(r: &mut Registry) {
         "log" => f64::log,
         "atan2" => f64::atan2,
         "hypot" => f64::hypot,
-        "pow" => f64::powf,
-        "min" => f64::min,
-        "max" => f64::max,
     }
 
     r.add_builtin("math.gcd", |_, a| int_result(gcd(a[0].as_int(), a[1].as_int())));

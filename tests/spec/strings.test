@@ -159,7 +159,7 @@ ord
 
 === reversed and join
 print("abc".reversed())
-print(", ".join(["a", "b", "c"]))
+print(["a", "b", "c"].join(", "))
 print(["x", "y"].join("-"))
 print(["x", "y"].join())
 --- stdout

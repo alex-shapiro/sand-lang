@@ -60,7 +60,9 @@ impl IoMemory {
     }
 
     /// Records the heap's current size; reservations made off the VM thread
-    /// are checked against it.
+    /// are checked against it. The VM publishes it after every slice and
+    /// whenever it checks an allocation against the limit, so it lags the
+    /// heap by at most the small allocations made since.
     #[inline]
     pub fn publish_heap(&self, bytes: usize) {
         self.heap.store(bytes, Ordering::Relaxed);

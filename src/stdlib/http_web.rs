@@ -30,7 +30,9 @@ use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
 pub fn register(r: &mut Registry) {
-    r.source("http", ModKind::Std, include_str!("http_web.sand"));
+    // The client (`http.sand`) is shared with other builds.
+    r.source("http", ModKind::Std, concat!(include_str!("http_web.sand"), include_str!("http.sand")));
+    super::http_common::register(r);
     r.add_builtin("http.send", send);
 }
 
@@ -50,6 +52,7 @@ type Response = (i64, Vec<(String, String)>, Vec<u8>, Reservation);
 fn send(vm: &mut Vm, a: &[Value]) -> NResult {
     let method = vm.str(a[0]).to_string();
     let text = vm.str(a[1]).to_string();
+    vm.charge_slow_bytes(method.len() + text.len())?;
     let url = match Url::parse(&text) {
         Ok(u) => u,
         Err(e) => return Ok(vm.err_value(e.kind, &e.message)),
@@ -57,7 +60,7 @@ fn send(vm: &mut Vm, a: &[Value]) -> NResult {
     if !is_token(&method) {
         return Ok(vm.err_value("invalid", &format!("invalid HTTP method {:?}", super::truncate(&method, 64))));
     }
-    let headers = match header_pairs(vm, a[2]) {
+    let headers = match header_pairs(vm, a[2])? {
         Ok(h) => h,
         Err(e) => return Ok(vm.err_value("invalid", &e)),
     };
@@ -81,7 +84,7 @@ fn send(vm: &mut Vm, a: &[Value]) -> NResult {
         max_body: vm.host.limits.max_http_body,
     };
     let (id, done) = start(request, res);
-    Err(Ctl::Async(Box::pin(async move {
+    Err(Ctl::suspend(Box::pin(async move {
         let _abort = AbortOnDrop(id);
         let result = done.await.unwrap_or_else(|_| Err(IoFailure::new("io", "the request was abandoned")));
         Box::new(move |vm: &mut Vm| -> NResult {

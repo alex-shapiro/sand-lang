@@ -66,5 +66,5 @@ let board = Board.parse(glider)
 for _ in 0..generations {
     board.step()
 }
-print("generation {generations}, population {board.population()}")
+print("generation \(generations), population \(board.population())")
 print(board.render())

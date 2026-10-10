@@ -1,5 +1,5 @@
-//! Wall-clock dates and times (UTC, proleptic Gregorian calendar), monotonic
-//! clocks and sleeping.
+//! Wall-clock dates and times (UTC, proleptic Gregorian calendar) and the
+//! monotonic clock. (To sleep, use `task.sleep`.)
 
 /// An instant in UTC, stored as nanoseconds since 1970-01-01T00:00:00Z.
 /// Representable instants lie between the years 1677 and 2262.
@@ -64,13 +64,20 @@ pub struct DateTime {
 }
 
 /// A reading of the monotonic clock, for measuring elapsed time.
-pub native type Instant
+pub struct Instant {
+    /// Nanoseconds since an unspecified origin, the same for every reading
+    /// in the process.
+    nanos: int
 
-extend Instant {
     /// The time since this reading.
-    pub native fn elapsed(self) -> duration
+    pub fn elapsed(self) -> duration {
+        duration.from_nanos(monotonic_nanos() - self.nanos)
+    }
+
     /// The time from `earlier` to this reading (negative if `earlier` is later).
-    pub native fn since(self, earlier: Instant) -> duration
+    pub fn since(self, earlier: Instant) -> duration {
+        duration.from_nanos(self.nanos - earlier.nanos)
+    }
 }
 
 /// The current time.
@@ -81,7 +88,11 @@ pub fn now() -> DateTime {
 native fn now_nanos() -> int
 
 /// The current reading of the monotonic clock.
-pub native fn monotonic() -> Instant
+pub fn monotonic() -> Instant {
+    Instant { nanos: monotonic_nanos() }
+}
+
+native fn monotonic_nanos() -> int
 
 /// Parses an RFC 3339 / ISO 8601 date-time such as `2024-02-29T13:05:09Z`,
 /// `2024-02-29T15:05:09.5+02:00`, `2024-02-29 13:05:09` (UTC) or the date
@@ -123,8 +134,3 @@ native fn date_nanos(
     minute: int,
     second: int,
 ) -> Result<int>
-
-/// Suspends the current task for `d` (same as `task.sleep`).
-pub fn sleep(d: duration) {
-    task.sleep(d)
-}

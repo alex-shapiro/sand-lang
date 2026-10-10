@@ -45,7 +45,7 @@ pub fn is_valid(s: str) -> bool {
 /// The version number of a UUID (e.g. 4 or 7), or `None` if `s` is not a UUID.
 pub fn version(s: str) -> int? {
     let id = parse(s).ok()?
-    int.parse(id[14..15], radix: 16)
+    id[14..15].parse_int(radix: 16)
 }
 
 native fn unix_millis() -> int

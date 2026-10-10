@@ -76,7 +76,7 @@ let counter = Iter.from_fn(() => {
 print(counter.to_list())
 print((0..5).iter().map(i => i * i).to_list())
 print((1..=3).iter().to_list())
-print(["a": 1, "b": 2].iter().map(p => "{p.0}={p.1}").to_list())
+print(["a": 1, "b": 2].iter().map(p => "\(p.0)=\(p.1)").to_list())
 print(set([3, 1]).iter().to_list())
 print("héllo".chars_iter().to_list())
 let ch: Channel<int> = task.channel()
@@ -105,7 +105,7 @@ print(ch.iter().map(x => x + 100).to_list())
 === adapters are lazy and pull only what consumers need
 var log = []
 let it = [1, 2, 3, 4].iter()
-    .inspect(x => log.push("saw {x}"))
+    .inspect(x => log.push("saw \(x)"))
     .map(x => x * 10)
     .filter(x => x > 10)
 print(log)
@@ -168,7 +168,7 @@ None
 
 === for loops and comprehensions over iterators
 for (i, w) in ["x", "y"].iter().enumerate() {
-    print("{i}: {w}")
+    print("\(i): \(w)")
 }
 print([x * 2 for x in (0..10).iter().filter(x => x % 3 == 0)])
 print([w: w.len() for w in ["ab", "c"].iter()])
@@ -183,7 +183,7 @@ var total = 0
 print(total)
 fn first_square_over(n: int) -> int {
     for x in Iter.count_from(1).map(x => x * x) {
-        defer print("checked {x}")
+        defer print("checked \(x)")
         if x > n { return x }
     }
     -1
@@ -334,7 +334,7 @@ fn map(self, f: fn(T) -> U) -> Iter<U>
 let xs = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3]
 fn check(name: str, a: [str], b: [str]) {
     if a != b {
-        panic("{name}: {a} != {b}")
+        panic("\(name): \(a) != \(b)")
     }
 }
 var log: [str] = []
@@ -342,26 +342,26 @@ fn src(n: int) -> Iter<int> {
     var i = 0
     Iter.from_fn(() => {
         i += 1
-        log.push("pull{i}")
+        log.push("pull\(i)")
         if i <= n { Some(i) } else { None }
     })
 }
-let fused = src(20).inspect(x => log.push("see{x}")).filter(x => x % 3 != 0).map(x => x * 2).skip(2).take(4).enumerate().to_list()
+let fused = src(20).inspect(x => log.push("see\(x)")).filter(x => x % 3 != 0).map(x => x * 2).skip(2).take(4).enumerate().to_list()
 let a = log
 log = []
-let it = src(20).inspect(x => log.push("see{x}")).filter(x => x % 3 != 0).map(x => x * 2).skip(2).take(4).enumerate()
+let it = src(20).inspect(x => log.push("see\(x)")).filter(x => x % 3 != 0).map(x => x * 2).skip(2).take(4).enumerate()
 let unfused = it.to_list()
 check("pipeline", a, log)
 print((fused == unfused, fused))
 log = []
 for x in src(10).skip_while(x => x < 3).take_while(x => x < 7).filter_map(x => if x % 2 == 0 { Some(x * 10) } else { None }) {
-    log.push("body{x}")
+    log.push("body\(x)")
 }
 let b = log
 log = []
 let it2 = src(10).skip_while(x => x < 3).take_while(x => x < 7).filter_map(x => if x % 2 == 0 { Some(x * 10) } else { None })
 for x in it2 {
-    log.push("body{x}")
+    log.push("body\(x)")
 }
 check("for", b, log)
 print(b)
@@ -436,10 +436,10 @@ for (i, x) in xs.enumerate() {
     if i == 0 { xs.push("d") }
     if i == 1 { xs[2] = "z" }
     if x == "b" { continue }
-    print("{i}{x}")
+    print("\(i)\(x)")
 }
 print(xs)
-for (i, (n, s)) in [(1, "p"), (2, "q")].enumerate() { print("{i} {n}{s}") }
+for (i, (n, s)) in [(1, "p"), (2, "q")].enumerate() { print("\(i) \(n)\(s)") }
 print([i * 10 + x for (i, x) in [5, 6, 7].enumerate() if i != 1])
 --- stdout
 0a
@@ -448,3 +448,103 @@ print([i * 10 + x for (i, x) in [5, 6, 7].enumerate() if i != 1])
 0 1p
 1 2q
 [5, 27]
+
+=== map and set iterators keep the entries they started with
+// Iterators read the entries in place; a change of the map or set first
+// moves them to a copy, so none of these changes is seen.
+let m = ["a": 1, "b": 2, "c": 3]
+let it = m.iter()
+print(it.next())
+m["b"] = 20
+m.remove("c")
+m["d"] = 4
+print(it.to_list())
+print(it.next())
+print(m)
+// Two iterators made at different times see different entries.
+let n = [1: "x", 2: "y"]
+let i1 = n.iter()
+n[3] = "z"
+let i2 = n.iter()
+n.clear()
+print(i1.to_list())
+print(i2.to_list())
+print(n.iter().next())
+// Removals that compact the entries (renumbering their slots).
+let big: [int: int] = [:]
+for k in 0..100 { big[k] = k }
+let bi = big.iter()
+var total = 0
+for (k, v) in bi {
+    if k == 0 {
+        for j in 1..90 { big.remove(j) }
+    }
+    total += v
+}
+print(total)
+print(big.len())
+let s = set([1, 2, 3])
+let si = s.iter()
+s.remove(1)
+s.add(4)
+print(si.to_list())
+// A map with removed entries: the iterator skips them.
+let h: [int: int] = [:]
+for k in 0..40 { h[k] = k }
+for k in 0..30 { h.remove(k) }
+print(h.iter().map(e => e.0).to_list())
+--- stdout
+Some(("a", 1))
+[("b", 2), ("c", 3)]
+None
+["a": 1, "b": 20, "d": 4]
+[(1, "x"), (2, "y")]
+[(1, "x"), (2, "y"), (3, "z")]
+None
+4950
+11
+[1, 2, 3]
+[30, 31, 32, 33, 34, 35, 36, 37, 38, 39]
+
+=== for loops over maps and sets see the entries they started with
+let m = ["a": 1, "b": 2, "c": 3]
+for (k, v) in m {
+    print("\(k)=\(v)")
+    m.remove("c")
+    m["b"] = 99
+    m[k + k] = v
+}
+print(m)
+// Nested loops over one set, changing it in the inner one.
+let s = set([1, 2])
+for x in s {
+    for y in s {
+        s.add(x * 10 + y)
+    }
+}
+print(s.to_list())
+// A loop left early, then a change, then a new loop.
+let n = [1: 1, 2: 2, 3: 3]
+for (k, _) in n {
+    if k == 2 { break }
+}
+n.remove(1)
+for (k, v) in n { print("\(k) \(v)") }
+// Clearing while iterating.
+let c = set(["p", "q"])
+for x in c {
+    c.clear()
+    print(x)
+}
+print(c.len())
+--- stdout
+a=1
+b=2
+c=3
+["a": 1, "b": 99, "aa": 1, "bb": 2, "cc": 3]
+[1, 2, 11, 12, 21, 22, 31, 32]
+2 2
+3 3
+p
+q
+0

@@ -311,9 +311,9 @@ fn allow_env_names() {
 fn standard_input() {
     let src = r#"import io
 match io.read_line() {
-    Ok(Some(line)) => print("line: {line}")
+    Ok(Some(line)) => print("line: \(line)")
     Ok(None) => print("eof")
-    Err(e) => print("error: {e.kind}")
+    Err(e) => print("error: \(e.kind)")
 }
 print(io.read_all().map(s => s.len()))
 "#;
@@ -367,7 +367,7 @@ fn check_command() {
     let o = sand(dir.path(), &["check", "good.sand"]);
     assert_eq!((o.code, o.stdout.as_str()), (0, "good.sand: ok\n"), "{o:?}");
     let o = sand(dir.path(), &["check", "good.sand", "bad.sand"]);
-    assert_eq!(o.code, 1, "{o:?}");
+    assert_eq!(o.code, 2, "{o:?}");
     assert_eq!(o.stdout, "good.sand: ok\n");
     assert!(o.stderr.contains("bad.sand:1"), "{o:?}");
     let o = sand(dir.path(), &["check", "missing.sand"]);
@@ -428,6 +428,18 @@ fn fmt_command() {
     let o = sand(dir.path(), &["fmt", "--check", "broken.sand"]);
     assert_eq!(o.code, 2, "{o:?}");
     assert!(o.stderr.contains("broken.sand"), "{o:?}");
+
+    // Standard input to standard output.
+    let o = sand_in(dir.path(), &["fmt", "-"], ugly, &[]);
+    assert_eq!((o.code, o.stdout.as_str()), (0, pretty), "{o:?}");
+    let o = sand_in(dir.path(), &["fmt", "-", "--check"], ugly, &[]);
+    assert_eq!((o.code, o.stdout.as_str()), (1, ""), "{o:?}");
+    let o = sand_in(dir.path(), &["fmt", "-"], "fn (\n", &[]);
+    assert_eq!(o.code, 2, "{o:?}");
+    assert!(o.stderr.contains("<stdin>"), "{o:?}");
+    let o = sand(dir.path(), &["fmt", "--help"]);
+    assert_eq!(o.code, 0, "{o:?}");
+    assert!(o.stdout.contains("sand fmt -"), "{o:?}");
 }
 
 #[test]
@@ -799,4 +811,45 @@ fn playground_serves_its_directory_on_localhost() {
     assert!(head.starts_with("HTTP/1.1 405"), "{head}");
     child.kill().unwrap();
     let _ = child.wait();
+}
+
+/// A local HTTP server (on a thread) answering every request with `hi`;
+/// returns its port.
+fn hi_server() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for conn in listener.incoming() {
+            let Ok(mut conn) = conn else { continue };
+            let mut head = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                match conn.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => head.extend_from_slice(&buf[..n]),
+                }
+            }
+            let _ = conn.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi");
+        }
+    });
+    port
+}
+
+// Relies on the resolver accepting `127.1` for 127.0.0.1 (glibc, macOS).
+#[cfg(unix)]
+#[test]
+fn private_networks_are_denied_by_default() {
+    let port = hi_server();
+    let dir = script("net", &format!("import http\nprint(http.get(\"http://127.1:{port}/\").map(r => r.text().unwrap()))"));
+    let run = |flags: &[&str]| {
+        let mut args = vec!["run", "main.sand"];
+        args.extend_from_slice(flags);
+        sand(dir.path(), &args).stdout
+    };
+    assert!(run(&["--allow-net=*"]).starts_with("Err(Error { kind: \"permission_denied\""));
+    assert_eq!(run(&["--allow-net=*", "--allow-private-net"]), "Ok(\"hi\")\n");
+    assert_eq!(run(&["--allow-net=*,127.0.0.0/8"]), "Ok(\"hi\")\n");
+    assert!(
+        run(&["--allow-net=*", "--allow-private-net", "--deny-net=127.0.0.0/8"]).starts_with("Err(Error { kind: \"permission_denied\"")
+    );
 }

@@ -2,23 +2,23 @@
 
 use crate::check::ModKind;
 use crate::engine::Registry;
-use crate::vm::value::{Obj, Value};
-use crate::vm::{NResult, Vm, panic};
+use crate::vm::value::Value;
+use crate::vm::{NResult, Vm};
 
 pub fn register(r: &mut Registry) {
     r.source("uri", ModKind::Std, include_str!("uri.sand"));
-    r.add_builtin("uri.parse", |vm, a| {
+    r.add_builtin("uri.parse_parts", |vm, a| {
         let n = vm.str(a[0]).len();
         vm.reserve(n.saturating_mul(2))?;
         vm.charge_slow_bytes(n)?;
         let parsed = parse(vm.str(a[0]), true);
         result(vm, parsed)
     });
-    r.add_builtin("uri.Uri.join", |vm, a| {
-        let n = vm.heap.fields(a[0]).iter().map(|f| vm.str(*f).len()).fold(vm.str(a[1]).len(), usize::saturating_add);
+    r.add_builtin("uri.resolve_parts", |vm, a| {
+        let base = from_value(vm, a[0]);
+        let n = base.len().saturating_add(vm.str(a[1]).len());
         vm.reserve(n.saturating_mul(3))?;
         vm.charge_slow_bytes(n)?;
-        let base = from_value(vm, a[0]);
         let resolved = parse(vm.str(a[1]), false).map(|r| resolve(&base, r));
         result(vm, resolved)
     });
@@ -53,40 +53,68 @@ pub fn register(r: &mut Registry) {
 
 /// The components of a URI reference.
 #[derive(Debug, Default, Clone, PartialEq)]
-struct Parts {
-    scheme: Option<String>,
-    authority: Option<Authority>,
-    path: String,
-    query: Option<String>,
-    fragment: Option<String>,
+pub(crate) struct Parts {
+    pub scheme: Option<String>,
+    pub authority: Option<Authority>,
+    pub path: String,
+    pub query: Option<String>,
+    pub fragment: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct Authority {
-    userinfo: Option<String>,
-    host: String,
-    port: Option<i64>,
+pub(crate) struct Authority {
+    pub userinfo: Option<String>,
+    pub host: String,
+    pub port: Option<i64>,
 }
 
-fn result(vm: &mut Vm, parsed: Result<Parts, String>) -> NResult {
-    match parsed {
-        Ok(p) => {
-            let u = to_value(vm, p)?;
-            Ok(vm.ok(u))
+impl Parts {
+    /// The length of the text of the components.
+    fn len(&self) -> usize {
+        let opt = |s: &Option<String>| s.as_ref().map_or(0, String::len);
+        let auth = self.authority.as_ref().map_or(0, |a| opt(&a.userinfo) + a.host.len() + 8);
+        opt(&self.scheme) + auth + self.path.len() + opt(&self.query) + opt(&self.fragment)
+    }
+}
+
+impl std::fmt::Display for Parts {
+    /// The URI as text (RFC 3986 §5.3 recomposition).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(s) = &self.scheme {
+            write!(f, "{s}:")?;
         }
-        Err(msg) => Ok(vm.err_value("parse", &msg)),
+        if let Some(a) = &self.authority {
+            f.write_str("//")?;
+            if let Some(u) = &a.userinfo {
+                write!(f, "{u}@")?;
+            }
+            if a.host.contains(':') {
+                write!(f, "[{}]", a.host)?
+            } else {
+                f.write_str(&a.host)?
+            }
+            if let Some(p) = a.port {
+                write!(f, ":{p}")?;
+            }
+        }
+        f.write_str(&self.path)?;
+        if let Some(q) = &self.query {
+            write!(f, "?{q}")?;
+        }
+        if let Some(x) = &self.fragment {
+            write!(f, "#{x}")?;
+        }
+        Ok(())
     }
 }
 
-fn uri_def(vm: &Vm) -> Result<u32, crate::vm::Ctl> {
-    match vm.prog.types.iter().position(|t| t.name == "Uri" && t.module == "uri") {
-        Some(d) => Ok(d as u32),
-        None => panic("uri.Uri is not loaded"),
-    }
-}
-
-fn to_value(vm: &mut Vm, p: Parts) -> NResult {
-    let def = uri_def(vm)?;
+/// `Ok((scheme, userinfo, host, port, path, query, fragment))`, the
+/// components of a `uri.Uri` (built in Sand), or `Err(Error { kind: "parse" })`.
+fn result(vm: &mut Vm, parsed: Result<Parts, String>) -> NResult {
+    let p = match parsed {
+        Ok(p) => p,
+        Err(msg) => return Ok(vm.err_value("parse", &msg)),
+    };
     let opt_str = |vm: &mut Vm, s: Option<String>| {
         let v = s.map(|s| vm.new_str(s));
         vm.option(v)
@@ -99,19 +127,23 @@ fn to_value(vm: &mut Vm, p: Parts) -> NResult {
     let path = vm.new_str(p.path);
     let query = opt_str(vm, p.query);
     let fragment = opt_str(vm, p.fragment);
-    Ok(vm.heap.alloc(Obj::Struct(def, Box::new([scheme, userinfo, host, port, path, query, fragment]))))
+    let parts = vm.heap.new_tuple(vec![scheme, userinfo, host, port, path, query, fragment]);
+    Ok(vm.ok(parts))
 }
 
+/// The components of the `uri.Uri` `v`.
 fn from_value(vm: &Vm, v: Value) -> Parts {
     let f = vm.heap.fields(v);
-    let opt_str = |x: Value| vm.as_option(x).map(|s| vm.str(s).to_string());
-    let authority = opt_str(f[2]).map(|host| Authority { userinfo: opt_str(f[1]), host, port: vm.as_option(f[3]).map(|p| p.as_int()) });
+    let field = |i: usize| f.get(i).copied().unwrap_or(Value::Unit);
+    let opt_str = |i: usize| vm.as_option(field(i)).map(|s| vm.str(s).to_string());
+    let port = vm.as_option(field(3)).map(Value::as_int);
+    let authority = opt_str(2).map(|host| Authority { userinfo: opt_str(1), host, port });
     Parts {
-        scheme: Some(vm.str(f[0]).to_string()),
+        scheme: Some(vm.str(field(0)).to_string()),
         authority,
-        path: vm.str(f[4]).to_string(),
-        query: opt_str(f[5]),
-        fragment: opt_str(f[6]),
+        path: vm.str(field(4)).to_string(),
+        query: opt_str(5),
+        fragment: opt_str(6),
     }
 }
 
@@ -129,7 +161,7 @@ fn is_sub_delim(b: u8) -> bool {
 }
 
 /// Parses a URI reference. With `absolute`, a scheme is required.
-fn parse(text: &str, absolute: bool) -> Result<Parts, String> {
+pub(crate) fn parse(text: &str, absolute: bool) -> Result<Parts, String> {
     let shown: String = text.chars().take(100).collect();
     let fail = |why: &str| format!("invalid URI `{shown}`: {why}");
     let bytes = text.as_bytes();
@@ -218,7 +250,7 @@ fn parse_authority(auth: &str) -> Result<Authority, String> {
 }
 
 /// Resolves reference `r` against `base` (RFC 3986 §5.2.2, strict).
-fn resolve(base: &Parts, r: Parts) -> Parts {
+pub(crate) fn resolve(base: &Parts, r: Parts) -> Parts {
     if r.scheme.is_some() {
         return Parts { path: remove_dot_segments(&r.path), ..r };
     }

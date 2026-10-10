@@ -32,14 +32,14 @@ import json
 fn describe(j: json.Json) -> str {
     match j {
         Null => "null"
-        Bool(b) => "bool {b}"
-        Num(n) => "num {n}"
-        Str(s) => "str {s}"
-        Arr(items) => "arr of {items.len()}"
-        Obj(fields) => "obj with {fields.len()}"
+        Bool(b) => "bool \(b)"
+        Num(n) => "num \(n)"
+        Str(s) => "str \(s)"
+        Arr(items) => "arr of \(items.len())"
+        Obj(fields) => "obj with \(fields.len())"
     }
 }
-for text in ["null", "true", "1.5", "\"x\"", "[1,2]", "\{\"a\":1\}"] {
+for text in ["null", "true", "1.5", "\"x\"", "[1,2]", "{\"a\":1}"] {
     print(describe(json.parse(text)?))
 }
 --- stdout
@@ -53,8 +53,8 @@ obj with 1
 === stringify compact and pretty
 import json
 let j = json.parse(r#"{"b": [1, 2.5, "x"], "a": {"c": null}}"#)?
-print(json.stringify(j))
-print(json.stringify(j, indent: 2))
+print(json.encode(j))
+print(json.encode(j, indent: 2))
 --- stdout
 {"b":[1,2.5,"x"],"a":{"c":null}}
 {
@@ -71,7 +71,7 @@ print(json.stringify(j, indent: 2))
 === string escapes roundtrip
 import json
 let j = json.Json.Str("quote \" backslash \\ newline \n tab \t unicode é \u{1}")
-let text = json.stringify(j)
+let text = json.encode(j)
 print(text)
 print(json.parse(text)? == j)
 print(json.parse("\"\\u00e9\\ud83d\\ude00\"")?)
@@ -82,7 +82,7 @@ Str("é😀")
 
 === parse errors
 import json
-for bad in ["", "\{", "[1,]", "\{\"a\" 1\}", "tru", "\"unterminated", "1 2", "01", "\"\\x\""] {
+for bad in ["", "{", "[1,]", "{\"a\" 1}", "tru", "\"unterminated", "1 2", "01", "\"\\x\""] {
     let r = json.parse(bad)
     print(r.is_err() and r.unwrap_err().kind == "parse")
 }
@@ -112,8 +112,8 @@ nesting too deep at line 1, column 513
 
 === numbers
 import json
-print(json.stringify(json.parse("[0, -1, 1e3, 1.5e-2, 123456789012]")?))
-print(json.stringify(json.Json.Num(0.0 / 0.0)))
+print(json.encode(json.parse("[0, -1, 1e3, 1.5e-2, 123456789012]")?))
+print(json.encode(json.Json.Num(0.0 / 0.0)))
 --- stdout
 [0,-1,1000,0.015,123456789012]
 null
@@ -179,7 +179,7 @@ let r: Result<Order> = json.decode(r#"{"items": [{"name": "a"}, {"name": 5}]}"#)
 print(r.unwrap_err().message)
 let r2: Result<[int]> = json.decode("[1, 2.5]")
 print(r2.unwrap_err().message)
-let r3: Result<Item> = json.decode("\{\}")
+let r3: Result<Item> = json.decode("{}")
 print(r3.unwrap_err().message)
 --- stdout
 $.items[1].name: expected str
@@ -218,7 +218,7 @@ Some(Num(2.0))
 
 === json values print readably
 import json
-print(json.parse("[1, \{\"a\": null\}]")?)
+print(json.parse("[1, {\"a\": null}]")?)
 --- stdout
 Arr([Num(1.0), Obj(["a": Null])])
 
@@ -252,19 +252,19 @@ print(json.encode(Some(Some(3))))
 print(json.encode([Shape.Circle(1.0), Shape.Label("q")]))
 let j = json.parse(r#"{"a": [1, 2.5, "s", true, null, {"b": []}], "c": {"d": null}}"#).unwrap()
 print(j)
-print(json.stringify(j))
-print(json.stringify(j, indent: 2))
+print(json.encode(j))
+print(json.encode(j, indent: 2))
 match j {
     json.Json.Obj(m) => {
         match m["a"] {
             json.Json.Arr(items) => {
                 for it in items {
                     match it {
-                        json.Json.Num(n) => print("num {n}")
-                        json.Json.Str(s) => print("str {s}")
-                        json.Json.Bool(b) => print("bool {b}")
+                        json.Json.Num(n) => print("num \(n)")
+                        json.Json.Str(s) => print("str \(s)")
+                        json.Json.Bool(b) => print("bool \(b)")
                         json.Json.Null => print("null")
-                        other => print("other {other}")
+                        other => print("other \(other)")
                     }
                 }
             }

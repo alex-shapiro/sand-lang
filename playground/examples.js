@@ -48,15 +48,15 @@ let planets = [
 for p in planets {
     let description = match size(p) {
         Size.Lonely => "no moons at all"
-        Size.Few(n) => "{n} moon{if n == 1 { "" } else { "s" }}"
-        Size.Many(n) => "a crowd of {n} moons"
+        Size.Few(n) => "\\(n) moon\\(if n == 1 { "" } else { "s" })"
+        Size.Many(n) => "a crowd of \\(n) moons"
     }
-    print("{p.name:<8} has {description}")
+    print("\\(p.name:<8) has \\(description)")
 }
 
 let total = planets.map(p => p.moons).sum()
 let most = planets.max_by(p => p.moons).unwrap()
-print("\\n{planets.len()} planets, {total} moons; {most.name} has the most.")
+print("\\n\\(planets.len()) planets, \\(total) moons; \\(most.name) has the most.")
 `,
     },
     policy: `# The policy decides what the script may do.
@@ -86,9 +86,9 @@ import io
 /// (or by you), or allowed but failed.
 fn report<T>(what: str, result: Result<T>) {
     match result {
-        Ok(_) => print("allowed  {what}")
-        Err(e) if e.kind == "permission_denied" => print("denied   {what}: {e.message}")
-        Err(e) => print("failed   {what}: {e.message}")
+        Ok(_) => print("allowed  \\(what)")
+        Err(e) if e.kind == "permission_denied" => print("denied   \\(what): \\(e.message)")
+        Err(e) => print("failed   \\(what): \\(e.message)")
     }
 }
 
@@ -101,7 +101,7 @@ report("write /out/note.txt", fs.create_dir("/out", recursive: true).and_then(_ 
 report("write /data/greeting.txt", fs.write_text("/data/greeting.txt", "overwritten"))
 
 print("\nEnvironment (the Environment tab) and input (the Input tab):")
-print("         USER is {env.get("USER") ?? "not visible"}, TOKEN is {env.get("TOKEN") ?? "not visible"}")
+print("         USER is \\(env.get("USER") ?? "not visible"), TOKEN is \\(env.get("TOKEN") ?? "not visible")")
 report("read standard input", io.read_line())
 
 print("\nNetwork:")
@@ -183,23 +183,23 @@ struct Current {
 let response = http.get("https://api.github.com/repos/rust-lang/rust")?
 if response.ok() {
     let repo: Repo = json.decode(response.text()?)?
-    print("{repo.full_name}: {repo.description ?? "(no description)"}")
-    print("  {repo.stargazers_count} stars, written in {repo.language ?? "?"}")
+    print("\\(repo.full_name): \\(repo.description ?? "(no description)")")
+    print("  \\(repo.stargazers_count) stars, written in \\(repo.language ?? "?")")
 } else {
     // GitHub limits how often each address may ask.
-    print("GitHub answered {response.status}")
+    print("GitHub answered \\(response.status)")
 }
 
 let page: Page = json.decode(http.get("https://en.wikipedia.org/api/rest_v1/page/summary/Sand")?.text()?)?
-print("{page.title}: {page.extract.split(". ")[0]}.")
+print("\\(page.title): \\(page.extract.split(". ")[0]).")
 
 // Not in the policy: you are asked first. Allow it to see the weather.
 match http.get("https://api.open-meteo.com/v1/forecast?latitude=52.52&longitude=13.41&current=temperature_2m") {
     Ok(r) => {
         let weather: Weather = json.decode(r.text()?)?
-        print("Berlin: {weather.current.temperature_2m} °C")
+        print("Berlin: \\(weather.current.temperature_2m) °C")
     }
-    Err(e) => print("api.open-meteo.com: {e.message}")
+    Err(e) => print("api.open-meteo.com: \\(e.message)")
 }
 `,
     },
@@ -229,10 +229,10 @@ struct Sale {
 fn parse(line: str) -> Result<Sale> {
     let cols = line.split(",")
     if cols.len() != 4 {
-        return Err(error("expected 4 columns: {line}", kind: "parse"))
+        return Err(error("expected 4 columns: \\(line)", kind: "parse"))
     }
-    let units = cols[2].parse_int().ok_or(error("bad units: {cols[2]}"))?
-    let price = cols[3].parse_float().ok_or(error("bad price: {cols[3]}"))?
+    let units = cols[2].parse_int().ok_or(error("bad units: \\(cols[2])"))?
+    let price = cols[3].parse_float().ok_or(error("bad price: \\(cols[3])"))?
     Ok(Sale { region: cols[0], units, price })
 }
 
@@ -244,18 +244,18 @@ for line in fs.read_lines("/data/sales.csv")?.skip(1) {
 
 var report = "Revenue by region\\n"
 for (region, total) in totals.entries().sorted_by(e => -e.1) {
-    report += "  {region:<6} {total:>8.2}\\n"
+    report += "  \\(region:<6) \\(total:>8.2)\\n"
 }
 print(report)
 
 match fs.create_dir("/out", recursive: true).and_then(_ => fs.write_text("/out/report.txt", report)) {
     Ok(()) => print("Wrote /out/report.txt (listed below the output).")
-    Err(e) => print("Could not write the report: {e.message}")
+    Err(e) => print("Could not write the report: \\(e.message)")
 }
 
 match fs.read_text("/data/private/salaries.csv") {
-    Ok(text) => print("Read the private file: {text.len()} bytes")
-    Err(e) => print("Private data stays private: {e.message}")
+    Ok(text) => print("Read the private file: \\(text.len()) bytes")
+    Err(e) => print("Private data stays private: \\(e.message)")
 }
 `,
       "data/sales.csv": `region,product,units,price
@@ -295,7 +295,7 @@ fn worker(name: str, jobs: Channel<int>, results: Channel<str>) {
     for n in jobs.iter() {
         // Pretend that bigger jobs take longer.
         task.sleep(n * 40ms)
-        results.send("{start.elapsed().millis():>4} ms  {name} finished job {n}")
+        results.send("\\(start.elapsed().millis():>4) ms  \\(name) finished job \\(n)")
     }
 }
 
@@ -313,7 +313,7 @@ spawn {
 for line in results.iter() {
     print(line)
 }
-print("{start.elapsed().millis():>4} ms  all jobs done")
+print("\\(start.elapsed().millis():>4) ms  all jobs done")
 `,
     },
     policy: `limit time 10s
@@ -334,7 +334,7 @@ while true {
     if primes.all(p => p * p > n or n % p != 0) {
         primes.push(n)
         if primes.len() % 2000 == 0 {
-            print("{primes.len()} primes so far, the last is {n}")
+            print("\\(primes.len()) primes so far, the last is \\(n)")
         }
     }
     n += 1
@@ -358,11 +358,11 @@ limit memory 16M
 import env
 import fs
 
-print("Hello, {env.get("USER") ?? "stranger"}!")
+print("Hello, \\(env.get("USER") ?? "stranger")!")
 for path in ["/notes/todo.txt", "/notes/diary.txt"] {
     match fs.read_text(path) {
-        Ok(text) => print("{path}: {text.trim()}")
-        Err(e) => print("{path}: {e.message}")
+        Ok(text) => print("\\(path): \\(text.trim())")
+        Err(e) => print("\\(path): \\(e.message)")
     }
 }
 `,
@@ -401,16 +401,16 @@ struct Item {
 let orders: [Order] = json.decode(io.read_all()?)?
 for order in orders {
     let count = order.items.map(i => i.quantity).sum()
-    print("order #{order.id} for {order.customer}: {count} items")
+    print("order #\\(order.id) for \\(order.customer): \\(count) items")
     for item in order.items.filter(i => i.note != None) {
-        print("  note on {item.name}: {item.note.unwrap()}")
+        print("  note on \\(item.name): \\(item.note.unwrap())")
     }
 }
 
 let digits = regex.new(r"\\d+")?
 let text = "3 apples, 12 pears and 7 plums"
 let numbers = digits.find_all(text).map(m => m.text.parse_int().unwrap())
-print("{text} -> {numbers} (sum {numbers.sum()})")
+print("\\(text) -> \\(numbers) (sum \\(numbers.sum()))")
 print(json.encode(orders[0].items[0]))
 `,
     },
@@ -440,7 +440,7 @@ trait Shape {
     fn name(self) -> str
 
     /// A default method, built on the others.
-    fn describe(self) -> str { "{self.name()} with area {self.area():.2}" }
+    fn describe(self) -> str { "\\(self.name()) with area \\(self.area():.2)" }
 }
 
 struct Circle { r: float }
@@ -464,8 +464,8 @@ let circles = [Circle { r: 1.0 }, Circle { r: 2.5 }, Circle { r: 0.5 }]
 let rects = [Rect { w: 2.0, h: 3.0 }, Rect { w: 4.0, h: 4.0 }]
 for c in circles { print(c.describe()) }
 for r in rects { print(r.describe()) }
-print("largest circle: {largest(circles).unwrap().describe()}")
-print("largest rectangle: {largest(rects).unwrap().describe()}")
+print("largest circle: \\(largest(circles).unwrap().describe())")
+print("largest rectangle: \\(largest(rects).unwrap().describe())")
 `,
     },
     policy: `limit time 5s
