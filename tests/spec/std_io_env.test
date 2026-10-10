@@ -1,6 +1,6 @@
 === read lines from stdin
 import io
-while let Some(line) = io.read_line()? {
+while let Some(line) = io.stdin.read_line()? {
     print("got: \(line)")
 }
 --- stdin
@@ -12,7 +12,7 @@ got: second
 
 === read all stdin
 import io
-let text = io.read_all()?
+let text = io.stdin.read_text()?
 print(text.lines().len())
 --- stdin
 a
@@ -21,15 +21,56 @@ c
 --- stdout
 3
 
+=== read stdin in pieces and as lines
+import io
+print(io.stdin.read(3)?)
+for line in io.stdin.lines() {
+    print(line?)
+}
+print(io.stdin.read()?)
+--- stdin
+abcdef
+g
+--- stdout
+b"abc"
+def
+g
+b""
+
 === write without newline
 import io
-io.write("a")
-io.write("b\n")
-io.ewrite("err\n")
+io.stdout.write_str("a")?
+io.stdout.write(b"b\n")?
+io.stderr.write_str("err\n")?
+io.stdout.flush()?
 --- stdout
 ab
 --- stderr
 err
+
+=== copy stdin to stdout
+import io
+let n = io.copy(io.stdin, io.stdout)?
+print(n)
+--- stdin
+one
+two
+--- stdout
+one
+two
+8
+
+=== the standard streams are readers and writers
+import io
+fn shout<W: io.Writer>(w: W, text: str) -> Result<()> {
+    w.write_str(text.to_upper() + "\n")
+}
+shout(io.stdout, "hi")?
+shout(io.stderr, "there")?
+--- stdout
+HI
+--- stderr
+THERE
 
 === eprint writes to stderr
 eprint("to stderr")

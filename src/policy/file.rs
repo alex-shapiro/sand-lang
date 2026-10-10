@@ -222,11 +222,10 @@ impl PolicyFile {
     }
 }
 
-/// The rule that decides `cap` from now on: allows it (or, unless
-/// `allow`, denies it). What a prompt's "always" (or "never") answer says
-/// as a policy file line, e.g. `allow read /data/a.txt`. `None` for
-/// requests no rule names (`NetAddr`, which is never prompted; standard
-/// output and error, which are allowed unless denied).
+/// The policy-file line that allows (or, unless `allow`, denies) `cap`,
+/// e.g. `allow read /data/a.txt`, for a prompt's "always" or "never"
+/// answer. `None` where no rule applies: `NetAddr`, and allowing standard
+/// output or error.
 pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
     let verb = if allow { "allow" } else { "deny" };
     let path = |p: &Path| p.to_str().map(str::to_string);
@@ -319,8 +318,7 @@ fn words(line: &str) -> Result<Vec<String>, String> {
 
 /// Parses a size: a number of bytes with an optional `K`, `M` or `G` suffix
 /// (powers of 1024), e.g. `512`, `64K`, `256M`, `1G`. Sizes too large for
-/// `usize` (on 32-bit targets) saturate, like those too large for `u64`
-/// with a suffix.
+/// `usize` saturate, as do suffixed ones too large for `u64`.
 pub fn parse_size(s: &str) -> Result<usize, String> {
     parse_size_u64(s).map(crate::vm::value::u64_to_usize_saturating)
 }

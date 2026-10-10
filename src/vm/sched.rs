@@ -33,8 +33,8 @@ impl IoShared {
     }
 }
 
-/// Wakes the operation in a slot of an [`IoTable`] (whichever it holds:
-/// a wake-up meant for an earlier operation only polls it once more).
+/// Wakes the operation in a slot of an [`IoTable`]; a stale wake-up only
+/// polls the slot's current operation once more.
 struct SlotWaker {
     slot: u32,
     shared: Arc<IoShared>,
@@ -294,7 +294,7 @@ impl Vm {
             Ok(fid) => match self.drive(Some(fid)).await {
                 Ok(Stop::Exit(c)) => Ok(RunEnd::Exit(c)),
                 Ok(Stop::Main(v)) => Ok(RunEnd::Finished(v)),
-                // (Only runs without a main task stop otherwise.)
+                // Only runs without a main task stop this way.
                 Ok(Stop::Idle | Stop::Prompt(_)) => Ok(RunEnd::Finished(Value::Unit)),
                 Err(t) => Err(t),
             },
@@ -320,13 +320,9 @@ impl Vm {
     }
 
     /// Runs the ready tasks and pending I/O until the main task (fiber
-    /// `main`) finishes or, without one, until no task can run and no I/O
-    /// is pending, or a task needs a permission prompt (which, without a
-    /// main task, is left to the caller: see [`Stop::Prompt`]).
-    ///
-    /// The future may be dropped where it waits (for I/O, a prompt or its
-    /// turn on the executor): every task is then in the scheduler's tables
-    /// (a task waiting for a prompt retries its call when it runs again).
+    /// `main`) finishes or, without one, until nothing can run or a task
+    /// needs a permission prompt ([`Stop::Prompt`]). The future may be
+    /// dropped where it waits: every task is then in the scheduler's tables.
     pub(crate) async fn drive(&mut self, main: Option<u32>) -> Result<Stop, Trap> {
         let mut clock = Clock::start();
         // Where an instruction was retried after a memory limit error, until
@@ -401,8 +397,6 @@ impl Vm {
                         let g = self.next_gen();
                         f.wgen = g;
                         f.state = FiberState::Waiting;
-                        // Polled once right away: an operation that is
-                        // done already completes without a wait.
                         let added = self.io.add(fid, g, fut);
                         f.io = added.as_ref().ok().copied();
                         self.fibers[fid as usize] = Some(f);
@@ -411,7 +405,6 @@ impl Vm {
                         }
                     }
                     Exit::Prompt(cap) => {
-                        // The call is retried after the prompt.
                         f.state = FiberState::Ready;
                         self.fibers[fid as usize] = Some(f);
                         self.ready.push_front(fid);
@@ -423,7 +416,7 @@ impl Vm {
                         let asked = Instant::now();
                         let answer = match self.host.prompter.clone() {
                             Some(p) => {
-                                // Host interrupt stops the run while a prompt is pending
+                                // A host interrupt stops the run while a prompt is pending.
                                 let mut prompt = p.prompt(cap.clone());
                                 let (interrupt, shared) = (self.host.interrupt.clone(), self.io.shared.clone());
                                 let answer = std::future::poll_fn(|cx| {
@@ -451,19 +444,23 @@ impl Vm {
                     Exit::Terminate(c) => return Ok(Stop::Exit(c)),
                     Exit::Cancelled => {
                         // The task cancelled itself.
-                        let waiters = std::mem::take(&mut f.waiters);
+                        self.end_cancelled(fid, f);
+                        if self.fibers[fid as usize].is_some() {
+                            self.ready.push_back(fid);
+                        } else if Some(fid) == main {
+                            return Ok(Stop::Main(Value::Unit));
+                        }
+                    }
+                    Exit::Unwound => {
                         self.free_fibers.push(fid);
                         self.live_tasks = self.live_tasks.saturating_sub(1);
-                        for (w, g) in waiters {
-                            self.deliver_panic(w, g, "task cancelled");
-                        }
+                        self.recycle_fiber(f);
                         if Some(fid) == main {
                             return Ok(Stop::Main(Value::Unit));
                         }
                     }
                 }
                 self.check_limits(&clock)?;
-                // Keep I/O flowing and let other host tasks run.
                 if clock.now.saturating_duration_since(clock.last_yield) > YIELD_EVERY {
                     let done = self.io.poll_ready(None);
                     self.apply_completions(done, &clock)?;
@@ -493,6 +490,9 @@ impl Vm {
                 self.apply_completions(done, &clock)?;
                 self.check_limits(&clock)?;
                 continue;
+            }
+            if self.ending {
+                return Ok(Stop::Idle);
             }
             clock.read();
             let mut sleep = self.deadline.map(|d| Box::pin(crate::platform::sleep(d.saturating_duration_since(Instant::now()))));

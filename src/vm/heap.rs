@@ -142,8 +142,9 @@ pub struct Heap {
     /// recomputed by every collection.
     pub fiber_bytes: usize,
     pub live_objects: usize,
-    /// Native resources currently open (sockets, listeners, ...).
-    pub open_resources: usize,
+    /// Resources (open files, sockets, ...) allocated since the last
+    /// collection; enough of them trigger one (see [`RESOURCE_BURST`]).
+    young_resources: usize,
     /// Testing aid: collect at every safe point (see `Config::gc_stress`).
     pub stress: bool,
     /// Buffers of pending I/O, counted against `limit` with the heap.
@@ -270,20 +271,22 @@ struct DirtyList {
     idx: Vec<u32>,
 }
 
-/// A partially remembered list (or map's or set's entries) records at most
+/// A partially remembered list (or a map's or set's entries) records at most
 /// one stored index per this many elements (at least one); beyond that it
 /// is scanned in full. The index lists are not counted against the memory
-/// limit, and stores allocate nothing (so they need not lead to the
-/// collection that empties the lists), so they must stay small compared to
-/// the objects themselves. (A fixed minimum of 1,024 indices let a script
-/// keep 4 KB per one-element list, far beyond the limit, by storing a young
-/// value into many old small lists over and over.)
+/// limit, and stores allocate nothing, so they need not lead to the
+/// collection that empties the lists. The lists must therefore stay small
+/// relative to their objects: a fixed allowance would let a script hold
+/// unaccounted memory by storing young values into many small old lists.
 const ELEMS_PER_DIRTY_INDEX: usize = 8;
 
 const NONE: u32 = u32::MAX;
 const MIN_GC: usize = 4 << 20;
 /// Bytes allocated between minor collections, at most.
 const NURSERY: usize = 8 << 20;
+/// Resources allocated between collections at most (see
+/// `Heap::resource_allocated`).
+const RESOURCE_BURST: usize = 64;
 const MIN_NURSERY: usize = 1 << 20;
 /// Major collections are incremental from this heap size on.
 const INCREMENTAL_MIN: usize = 8 << 20;
@@ -299,12 +302,14 @@ const SCAN_CHUNK: usize = 4096;
 
 impl Default for Heap {
     fn default() -> Self {
-        Heap::new(None)
+        Heap::new(None, usize::MAX)
     }
 }
 
 impl Heap {
-    pub fn new(limit: Option<usize>) -> Heap {
+    /// A heap for a memory limit of `limit` bytes and at most
+    /// `max_resources` open resources.
+    pub fn new(limit: Option<usize>, max_resources: usize) -> Heap {
         Heap {
             objs: Vec::new(),
             marks: Vec::new(),
@@ -321,9 +326,9 @@ impl Heap {
             limit,
             fiber_bytes: 0,
             live_objects: 0,
-            open_resources: 0,
+            young_resources: 0,
             stress: false,
-            io_memory: IoMemory::new(limit),
+            io_memory: IoMemory::new(limit, max_resources),
             worklist: Vec::new(),
             stats: GcStats::default(),
             phase: Phase::Idle,
@@ -346,7 +351,7 @@ impl Heap {
         if let Obj::Native(n) = &obj
             && n.is_resource()
         {
-            self.open_resources += 1;
+            self.resource_allocated();
         }
         // Free slots and new slots have clear mark bits: the object is young.
         let h = if self.free_head != NONE {
@@ -491,8 +496,8 @@ impl Heap {
         match self.limit {
             Some(l) => {
                 let used = self.used();
-                // (Every check before the heap grows keeps the size that
-                // pending I/O checks against up to date.)
+                // Publishing on every check before the heap grows keeps the
+                // size that pending I/O checks against up to date.
                 self.io_memory.publish_heap(used);
                 used.saturating_add(self.io_memory.reserved()).saturating_add(extra) > l
             }
@@ -575,7 +580,7 @@ impl Heap {
     /// The bytes `append_str(cur, add)` copies (what `Op::AppendStr` is
     /// charged for): `add`, if it is appended in place (growing the buffer
     /// is amortised); otherwise all of `cur` too, which is copied into a new
-    /// buffer (as when `cur` was read, and so frozen, since the last append).
+    /// buffer (e.g. when `cur` was read, and so frozen, since the last append).
     #[inline(never)]
     pub fn append_copies(&self, cur: Value, add: Value) -> usize {
         let extra = self.str(add).len();
@@ -738,8 +743,8 @@ impl Heap {
 
     /// Mutable access to list `list` for storing `stored` at `index` (and
     /// nothing else): the precise, card-marking write barrier. `None` if
-    /// `list` is not a list. (Kept out of line: inlining it into the
-    /// interpreter loop measurably slows down unrelated instructions.)
+    /// `list` is not a list. Out of line because inlining it into the
+    /// interpreter loop slows down unrelated instructions.
     #[inline(never)]
     pub fn list_mut_storing(&mut self, list: Value, index: usize, stored: Value) -> Option<&mut Vec<Value>> {
         let Value::Obj(h) = list else { return None };
@@ -914,9 +919,20 @@ impl Heap {
         }
     }
 
-    /// Releases a native resource early (e.g. `conn.close()`), keeping the object.
-    pub fn resource_closed(&mut self) {
-        self.open_resources = self.open_resources.saturating_sub(1);
+    /// Paces collections by the resources allocated: memory alone may not
+    /// call for one for a long time, while each resource that a script
+    /// dropped without closing it holds a file or socket until collected.
+    /// After [`RESOURCE_BURST`] of them, the next safe point collects (a
+    /// major collection once half of `max_open_resources` are open).
+    #[cold]
+    fn resource_allocated(&mut self) {
+        self.young_resources += 1;
+        if self.young_resources >= RESOURCE_BURST {
+            self.next_gc = 0;
+            if self.io_memory.open_resources() >= self.io_memory.max_resources() / 2 {
+                self.major_at = 0;
+            }
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -962,11 +978,6 @@ impl Heap {
     fn free(&mut self, h: u32) -> usize {
         let i = h as usize;
         let size = self.objs[i].size();
-        if let Obj::Native(n) = &self.objs[i]
-            && n.is_resource()
-        {
-            self.open_resources = self.open_resources.saturating_sub(1);
-        }
         self.objs[i] = Obj::Free(self.free_head);
         self.free_head = h;
         self.live_objects -= 1;
@@ -1058,7 +1069,6 @@ impl Heap {
     fn sweep_all(&mut self) {
         let mut live_bytes = 0;
         let mut live = 0;
-        let mut open = 0;
         for i in 0..self.objs.len() {
             if matches!(self.objs[i], Obj::Free(_)) {
                 continue;
@@ -1066,23 +1076,17 @@ impl Heap {
             if self.is_marked(i as u32) {
                 live_bytes += self.objs[i].size();
                 live += 1;
-                if let Obj::Native(n) = &self.objs[i]
-                    && n.is_resource()
-                {
-                    open += 1;
-                }
             } else {
                 self.objs[i] = Obj::Free(self.free_head);
                 self.free_head = i as u32;
             }
         }
-        // Resources closed explicitly are still objects; keep the explicit count if lower.
-        self.open_resources = self.open_resources.min(open);
         self.bytes = live_bytes;
         self.live_objects = live;
     }
 
     fn set_thresholds(&mut self, major: bool) {
+        self.young_resources = 0;
         if major {
             let live_bytes = self.bytes;
             self.major_at = (live_bytes * 2).max(MIN_GC);
@@ -1330,7 +1334,7 @@ mod tests {
 
     #[test]
     fn staged_objects_get_the_handles_promised() {
-        let mut heap = Heap::new(None);
+        let mut heap = Heap::new(None, usize::MAX);
         let a = heap.new_str("a");
         let b = heap.new_str("b");
         heap.collect([b], true);
@@ -1350,7 +1354,7 @@ mod tests {
 
     #[test]
     fn dirty_index_lists_stay_small() {
-        let mut heap = Heap::new(None);
+        let mut heap = Heap::new(None, usize::MAX);
         let lists: Vec<Value> = (0..100).map(|_| heap.new_list(vec![Value::Int(0)])).collect();
         let big = heap.new_list(vec![Value::Int(0); 800]);
         let mut roots = lists.clone();

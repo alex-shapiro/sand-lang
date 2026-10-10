@@ -192,7 +192,6 @@ pub fn render_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Valu
                         match heap.get(v) {
                             Obj::Str(_) | Obj::StrBuf(_) => {
                                 let s = heap.str(v);
-                                // Reserve before copying a large string.
                                 scratch.check(heap, out.len() + s.len())?;
                                 if debug { escape_str_debug(s, out) } else { out.push_str(s) }
                             }
@@ -223,7 +222,6 @@ pub fn render_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Valu
                             Obj::Struct(def, fields) => {
                                 let rt = &prog.types[*def as usize];
                                 if *def == prog.ids.error_def && !debug {
-                                    // Error displays as `kind: message`.
                                     let kind = heap.str(fields[0]);
                                     let msg = heap.str(fields[1]);
                                     scratch.check(heap, out.len() + kind.len() + msg.len())?;
@@ -280,7 +278,6 @@ pub fn render_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Valu
 
 /// The display form of `v`, charging `budget` (see [`render_metered`]).
 pub fn to_display_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Value) -> Result<String, Ctl> {
-    // Fast paths for scalars.
     match v {
         Value::Int(i) => return Ok(i.to_string()),
         Value::Float(f) => return Ok(fmt_float(f)),

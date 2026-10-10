@@ -1,12 +1,11 @@
 //! Fusion of lazy iterator pipelines (spec §12.13).
 //!
 //! An `Iter` pipeline such as `xs.iter().map(f).filter(g)` costs a closure
-//! call per adapter and element (the source's `next`, `map`'s and
-//! `filter`'s), and every element is wrapped in `Some` at each level. When
-//! the whole pipeline is visible where it is consumed — as the iterable of
-//! a `for` loop or comprehension, or as the receiver of a consumer such as
-//! `to_list`, `fold` or `sum` — the checker lowers it to a single loop that
-//! calls only the adapters' functions (`f` and `g`):
+//! call per adapter and element, and every element is wrapped in `Some` at
+//! each level. When the whole pipeline is visible where it is consumed — as
+//! the iterable of a `for` loop or comprehension, or as the receiver of a
+//! consumer such as `to_list`, `fold` or `sum` — the checker lowers it to a
+//! single loop that calls only the adapters' functions:
 //!
 //! ```text
 //! for y in xs.iter().map(f).filter(g) { body }
@@ -18,18 +17,15 @@
 //! The lowering keeps the lazy semantics exactly: the source and the
 //! adapters' arguments are evaluated once, in order, before the loop; each
 //! adapter's function runs for the same elements and in the same order; and
-//! the source is pulled the same number of times (`take` never pulls past
-//! its count). The one difference: a pipeline stops at the first `None` of
+//! the source is pulled the same number of times. The one difference: a pipeline stops at the first `None` of
 //! its source, where a lazy `skip` would call an exhausted source again.
-//! A list source becomes a native list loop (which visits the indices below
-//! the length the list had when the loop started, where `[T].iter` reads it
-//! when called) only if evaluating the adapters' and the consumer's arguments
-//! cannot run code; otherwise the list's `iter()` is called as written.
+//! A list source becomes a native list loop, which reads the list's length
+//! when it starts, only if evaluating the adapters' and the consumer's
+//! arguments cannot run code.
 //!
-//! The eager methods of lists and ranges that take a function (`xs.map(f)`,
-//! `filter`, `fold`, `any`, ...) are such pipelines too (`xs.map(f)` is
-//! `xs.iter().map(f).to_list()`), and are lowered the same way. Lambda
-//! literals passed to fused adapters and consumers are inlined.
+//! Eager list and range methods that take a function (`xs.map(f)` is
+//! `xs.iter().map(f).to_list()`) are lowered the same way. Lambda literals
+//! passed to fused adapters and consumers are inlined.
 
 use super::expr::mk;
 use super::{Checker, Ctor};
@@ -105,7 +101,6 @@ struct Stage {
 struct Chain {
     kind: SourceKind,
     source: HExpr,
-    /// The element type of the source.
     elem: TypeId,
     /// Adapters, from the source outwards.
     stages: Vec<Stage>,
@@ -122,7 +117,6 @@ enum Func {
 struct StageVars {
     kind: Adapter,
     out: TypeId,
-    /// The adapter's function.
     func: Option<Func>,
     /// `take`/`skip`: elements left; `enumerate`: the counter.
     count: Option<LocalId>,
@@ -229,7 +223,6 @@ impl Checker<'_> {
         FuseFns { roles, list_enumerate }
     }
 
-    /// The element type of an `Iter<T>` type.
     fn iter_elem(&self, t: TypeId) -> Option<TypeId> {
         match self.rty(t) {
             Ty::Named(d, args) if Some(d) == self.iter_struct && self.arena.list_len(args) == 1 => Some(self.arena.elem(args, 0)),
@@ -237,7 +230,6 @@ impl Checker<'_> {
         }
     }
 
-    /// The adapter `e` calls, if it is a fusible adapter call.
     fn adapter_of(&mut self, e: &HExpr) -> Option<Adapter> {
         let HKind::Call { func, args } = &e.kind else { return None };
         let Some(Role::Adapter(kind)) = self.fuse_role(*func) else { return None };
@@ -322,8 +314,7 @@ impl Checker<'_> {
         {
             let mut e = e;
             let HKind::Lambda(lam) = &mut e.kind else { unreachable!() };
-            // (Walked in place: `e` is ours. Nested pipelines walk inner
-            // bodies again, so the walk is charged.)
+            // Charged: nested pipelines walk inner bodies again.
             let (mut returns, mut nodes) = (false, 0u64);
             lam.body.visit_mut(&mut |x| {
                 nodes += 1;
@@ -334,8 +325,7 @@ impl Checker<'_> {
                 let HKind::Lambda(lam) = e.kind else { unreachable!() };
                 let owner = self.fs.ctx.last().map(|c| c.lambda).unwrap_or(0);
                 // The lambda's locals were all made while it was checked, so
-                // they come after the locals made before it (scanning all
-                // the function's locals per lambda was quadratic).
+                // they start at `lambda_first_local`.
                 let first = self.fs.lambda_first_local.get(lam.id as usize - 1).map_or(0, |&l| l as usize).min(self.fs.locals.len());
                 self.budget.charge((self.fs.locals.len() - first) as u64);
                 for info in &mut self.fs.locals[first..] {
@@ -350,7 +340,6 @@ impl Checker<'_> {
         Func::Tmp(self.bind_tmp(e, out))
     }
 
-    /// A call of `f` with `args`, whose result has type `ret`.
     fn apply(&mut self, f: Func, args: Vec<HExpr>, ret: TypeId, span: Span) -> HExpr {
         match f {
             Func::Tmp(l) => self.call_local(l, args, ret, span),
@@ -495,7 +484,6 @@ impl Checker<'_> {
         setup
     }
 
-    /// A call of the function in local `f` with `args`, whose result has type `ret`.
     fn call_local(&mut self, f: LocalId, args: Vec<HExpr>, ret: TypeId, span: Span) -> HExpr {
         let ps: Vec<TypeId> = args.iter().map(|a| a.ty).collect();
         let fty = self.fn_ty(&ps, ret);
@@ -514,7 +502,7 @@ impl Checker<'_> {
     /// xs.enumerate()`, which `enumerate_for` lowers.
     pub(crate) fn is_enumerate_for(&mut self, iter: &HExpr, pat: &HPat) -> bool {
         if self.fuse_fns.is_none() {
-            // (Finds the tables; any prelude function will do.)
+            // Builds the tables; any prelude function will do.
             let _ = self.fuse_role(0);
         }
         let enumerate = self.fuse_fns.as_ref().and_then(|t| t.list_enumerate);
@@ -555,7 +543,6 @@ impl Checker<'_> {
         block(stmts, span)
     }
 
-    /// Whether `iter` is a pipeline that `fuse_for` can fuse.
     pub(crate) fn can_fuse(&mut self, iter: &HExpr) -> bool {
         self.chain_shape(iter, true).is_some()
     }

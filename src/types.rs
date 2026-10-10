@@ -2,10 +2,9 @@
 //!
 //! Types are hash-consed: a [`TypeId`] indexes a node of a [`TypeArena`],
 //! and structurally equal types have the same id, so types are `Copy` and
-//! compared as integers. Lists of types (tuple elements, parameters, type
-//! arguments) are interned too ([`TyList`]). Each node records whether it
-//! contains inference variables or type parameters, so substitution and
-//! zonking skip the (common) types that have none. Names are interned as
+//! compared as integers. Lists of types are interned too ([`TyList`]). Each
+//! node records whether it contains inference variables or type parameters,
+//! so substitution and zonking skip the types that have none. Names are interned as
 //! [`Symbol`]s in [`Symbols`]. Both tables are persistent (see
 //! `check::persist`): the standard library's are shared by every
 //! compilation that extends them.
@@ -96,9 +95,7 @@ pub enum Ty {
 
 const PRIMS: [Ty; 10] = [Ty::Int, Ty::Float, Ty::Bool, Ty::Str, Ty::Bytes, Ty::Duration, Ty::Unit, Ty::Never, Ty::Range, Ty::Error];
 
-/// The type contains an inference variable.
 const HAS_VAR: u8 = 1;
-/// The type contains a type parameter.
 const HAS_PARAM: u8 = 2;
 
 #[derive(Clone, Copy)]
@@ -136,7 +133,7 @@ impl ListPool {
             v.extend_from_slice(ids);
             return ((self.chunks.len() - 1) as u32, start as u32);
         }
-        // (A chunk shared with another copy of the arena is left as it is.)
+        // A chunk shared with another copy of the arena is left as it is.
         let mut v = Vec::with_capacity(POOL_CHUNK.max(ids.len()));
         v.extend_from_slice(ids);
         self.chunks.push(Arc::new(v));
@@ -209,7 +206,7 @@ impl TypeArena {
         a
     }
 
-    /// The number of types made (for statistics).
+    /// The number of types made.
     pub fn len(&self) -> usize {
         self.nodes.len()
     }
@@ -246,7 +243,6 @@ impl TypeArena {
         &self.pool.chunks[r.chunk as usize][r.start as usize..(r.start + r.len) as usize]
     }
 
-    /// The `i`th element of list `l`.
     #[inline]
     pub fn elem(&self, l: TyList, i: usize) -> TypeId {
         self.list(l)[i]
@@ -351,7 +347,6 @@ impl TypeArena {
         self.vars[v as usize]
     }
 
-    /// Maps the elements of list `l` with `f`.
     pub fn map_list(&mut self, l: TyList, f: &mut impl FnMut(&mut TypeArena, TypeId) -> TypeId) -> TyList {
         let n = self.list_len(l);
         let mut out = Ids::new();
@@ -415,7 +410,6 @@ impl TypeArena {
             }
     }
 
-    /// Whether `t` mentions type parameter `p`.
     pub fn mentions(&self, t: TypeId, p: ParamId) -> bool {
         self.has_params(t) && self.any(t, &mut |x| x == Ty::Param(p))
     }
@@ -426,7 +420,7 @@ impl TypeArena {
 pub struct Symbol(u32);
 
 /// Names every symbol table has, with fixed symbols.
-const KNOWN: [&str; 8] = ["", "Self", "self", "_", "<tmp>", "<dict>", "<arg>", "next"];
+const KNOWN: [&str; 9] = ["", "Self", "self", "_", "<tmp>", "<dict>", "<arg>", "next", "close"];
 
 impl Symbol {
     pub const EMPTY: Symbol = Symbol(0);
@@ -440,6 +434,7 @@ impl Symbol {
     /// Parameters of the closures made for function values.
     pub const ARG: Symbol = Symbol(6);
     pub const NEXT: Symbol = Symbol(7);
+    pub const CLOSE: Symbol = Symbol(8);
 }
 
 /// Interned names (persistent, like the [`TypeArena`]).

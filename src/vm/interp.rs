@@ -1,4 +1,21 @@
 //! The bytecode interpreter loop.
+//!
+//! Its speed depends on how LLVM allocates registers across the loop: when
+//! too many values stay live, the hottest ones (`code`, `ip`) are spilled
+//! and every instruction reloads them, which unrelated edits can trigger.
+//! So:
+//!
+//! - The loop carries only `code`, `ip`, `base`, `regs` and the fuel;
+//!   anything else is read from memory where needed.
+//! - Back edges leave the `match` with their offset and share one safe point.
+//! - Loops, allocations, formatting and error paths go into `#[inline(never)]`
+//!   or `#[cold]` functions, not into the arms.
+//! - Results stay 16 bytes (`Ctl` is one pointer), and a helper returns a
+//!   `Value` whole (`Ok(*v)`), not through an `Option<Value>`: larger or
+//!   split results go through memory and stall the caller's load.
+//!
+//! Measure changes with `cargo bench` and by looking for stack loads and
+//! stores around the dispatch jump in the disassembly of `Vm::interp`.
 
 use super::compare::{
     find_key, hash_key, map_slot, set_slot, values_eq, values_eq_metered, values_le, values_le_metered, values_lt, values_lt_metered,
@@ -49,6 +66,8 @@ pub enum Exit {
     YieldNow,
     /// The running task was cancelled.
     Cancelled,
+    /// A cancelled task ran its pending deferred code.
+    Unwound,
 }
 
 #[inline(always)]
@@ -114,7 +133,7 @@ fn uninit_global(prog: &Program, g: u32) -> String {
     format!("global used before initialization: `{}`", prog.global_names[g as usize])
 }
 
-/// `Op::Payload`: the payload of a variant with one, inline or not.
+/// `Op::Payload`: the field of a one-field variant, inline or boxed.
 #[inline(never)]
 fn payload(heap: &Heap, v: Value) -> Option<Value> {
     match v.as_inline_variant() {
@@ -344,7 +363,6 @@ impl Vm {
         let mut code: &[Op] = &protos[fr.proto as usize].code;
         let mut ip = fr.ip as usize;
         let mut base = fr.base as usize;
-        // The remaining fuel lives in a local (written back on every exit).
         let mut fuel = FuelGuard { left: *fuel_out, out: fuel_out };
         // The current frame's register window. Re-derived (`reload!`) after
         // anything that may move or resize the stack.
@@ -665,11 +683,8 @@ impl Vm {
                     Op::NeF { dst, a, b } => r!(dst) = Value::Bool(float!(a) != float!(b)),
                     Op::LtF { dst, a, b } => r!(dst) = Value::Bool(float!(a) < float!(b)),
                     Op::LeF { dst, a, b } => r!(dst) = Value::Bool(float!(a) <= float!(b)),
-                    // Composite values are compared with metering: deep
-                    // comparisons of large values cost fuel and can be interrupted.
-                    // (Like natives, heavy operations charge the meter, not the
-                    // interpreter's own fuel, which stays in a register.)
-                    // (The branches `JNeq` and `JNne` too: one arm, one call.)
+                    // Metered and out of line (`op_compare`); the branches
+                    // `JNeq` and `JNne` share the arm to keep one call site.
                     Op::Eq { .. } | Op::Ne { .. } | Op::Lt { .. } | Op::Le { .. } | Op::JNeq { .. } | Op::JNne { .. } => {
                         match self.op_compare(&prog, op, regs) {
                             Ok(off) => jump!(off),
@@ -833,7 +848,7 @@ impl Vm {
                     }
 
                     // ---------------- calls
-                    // (`tick_call!` reloads `regs` after a collection; `enter!` reloads again.)
+                    // `tick_call!` may reload `regs`, which `enter!` overwrites unread.
                     #[allow(unused_assignments)]
                     Op::CallDirect { base: b, proto } => {
                         tick_call!();
@@ -878,7 +893,7 @@ impl Vm {
                             _ => fail!("internal error: call of a non-function"),
                         }
                     }
-                    // (`tick_call!` reloads `regs` after a collection; `enter!` reloads again.)
+                    // `tick_call!` may reload `regs`, which `enter!` overwrites unread.
                     #[allow(unused_assignments)]
                     Op::CallDirectTo { base: b, dst, proto } => {
                         tick_call!();
@@ -895,7 +910,7 @@ impl Vm {
                         let argc = prog.native_argc.get(native as usize).copied().unwrap_or(0) as usize;
                         native_call!(native as u32, start, argc, base + dst as usize);
                     }
-                    // (`tick_call!` reloads `regs` after a collection; the stack is reloaded again below.)
+                    // `tick_call!` may reload `regs`, which is reloaded again below unread.
                     #[allow(unused_assignments)]
                     Op::TailCallDirect { base: b, proto } => {
                         tick_call!();
@@ -959,6 +974,17 @@ impl Vm {
                         do_return!(v);
                     }
                     Op::RetUnit => do_return!(Value::Unit),
+                    Op::Unwind => {
+                        fiber.frames.pop();
+                        if !self.unwind_to_pad(fiber, true) {
+                            return Ok(Exit::Unwound);
+                        }
+                        let fr = *fiber.frames.last().unwrap();
+                        code = &protos[fr.proto as usize].code;
+                        ip = fr.ip as usize;
+                        base = fr.base as usize;
+                        reload!();
+                    }
 
                     // ---------------- data structures
                     Op::NewList { dst, start, count } => {
@@ -1319,12 +1345,9 @@ impl Vm {
     }
 
     /// Calls a native; `Ok(None)` to continue, `Ok(Some(exit))` to suspend.
-    /// Arguments are passed straight from the fiber's stack (the running
-    /// fiber is not in `self.fibers`, so natives cannot observe or move it),
-    /// and `natives` is the interpreter's own reference to the table, so no
-    /// per-call copies or reference counting are needed. Natives charge the
-    /// meter for their work; a native that exhausts the slice's native fuel
-    /// preempts the task once it returns.
+    /// Arguments are borrowed from the fiber's stack: the running fiber is not
+    /// in `self.fibers`, so natives cannot observe or move it. A native that
+    /// exhausts the slice's fuel preempts the task once it returns.
     #[allow(clippy::too_many_arguments)]
     #[inline(never)]
     fn call_native(
@@ -1339,12 +1362,15 @@ impl Vm {
     ) -> Result<Option<Exit>, Trap> {
         fiber.frames.last_mut().unwrap().ip = ip as u32;
         let mut r = Self::invoke_native(self, natives, n, &fiber.stack[start..start + argc]);
-        if r.is_memory_limit() {
-            // Natives check memory against an estimate that includes garbage
-            // they cannot collect (their locals are not roots). Collect and
-            // retry once; natives reserve memory before they mutate anything.
+        if r.is_memory_limit() || matches!(&r, Err(c) if matches!(c.kind(), CtlKind::Collect)) {
+            // Natives check memory (and open resources) against counts that
+            // include garbage they cannot collect (their locals are not
+            // roots). Collect and retry once; natives reserve memory and
+            // resources before they mutate anything.
             self.collect_all_garbage(Some(fiber));
+            self.collected = true;
             r = Self::invoke_native(self, natives, n, &fiber.stack[start..start + argc]);
+            self.collected = false;
         }
         if !matches!(&r, Err(c) if matches!(c.kind(), CtlKind::NeedPermission(_))) {
             self.forget_once_answers();
@@ -1398,6 +1424,7 @@ impl Vm {
                 Ok(Some(Exit::Async(fut)))
             }
             CtlKind::Yield | CtlKind::Blocked => unreachable!("handled above"),
+            CtlKind::Collect => Err(self.panic_trap(fiber, ip, "internal error: a native asked for a collection twice".into())),
         }
     }
 
@@ -1408,7 +1435,7 @@ impl Vm {
         if let &[b] = t.as_bytes()
             && b.is_ascii()
         {
-            // One ASCII character (the common case)
+            // One ASCII character: the common case.
             return Ok(match class {
                 0 => b.is_ascii_digit(),
                 1 => b.is_ascii_alphabetic(),
@@ -1430,12 +1457,10 @@ impl Vm {
         Ok(!t.is_empty() && t.chars().all(f))
     }
 
-    /// `==`, `!=`, `<` and `<=` on generic values, into the destination
-    /// register, or the offset of a `JNeq`/`JNne` branch taken (else 0).
-    /// Out of line, like the other
-    /// heavy operations, to keep the dispatch loop small; composite values
-    /// are compared with metering (deep comparisons cost fuel and can be
-    /// interrupted).
+    /// `==`, `!=`, `<` and `<=` on generic values: writes the destination
+    /// register, or returns the offset of a taken `JNeq`/`JNne` branch
+    /// (else 0). Composite values are compared with metering, so deep
+    /// comparisons cost fuel and can be interrupted.
     #[inline(never)]
     fn op_compare(&mut self, prog: &Program, op: Op, regs: &mut [Value]) -> Result<i16, Ctl> {
         let (Op::Eq { a, b, .. }
@@ -1527,13 +1552,14 @@ impl Vm {
         self.heap.append_text(cur, &s).map_err(Ctl::limit)
     }
 
-    /// Calls native `n`. (A Rust panic in it is caught by the scheduler
-    /// around the whole slice, see `crate::unwind`.)
+    /// Calls native `n`. A Rust panic in it is caught by the scheduler
+    /// around the whole slice (`crate::unwind`).
     #[inline(always)]
     fn invoke_native(&mut self, natives: &[NativeEntry], n: u32, args: &[Value]) -> NResult {
         let entry = &natives[n as usize];
         match &entry.imp {
             NativeImpl::Builtin(f) => f(self, args),
+            NativeImpl::Method(f) => f(self, args.get(1..).unwrap_or_default()),
             NativeImpl::Host(f) => f(self, args),
         }
     }
@@ -1606,8 +1632,8 @@ impl Vm {
                 Ok(None)
             }
             BlockOn::Recv(ch) => {
-                // (Values only leave the channel, or move within it: nothing
-                // is stored, see `Send`.)
+                // Values only leave the channel or move within it, so the
+                // write barrier is told nothing is stored.
                 let Obj::Channel(c) = self.heap.get_mut_storing(ch, &[]) else { return Err(internal("not a channel")) };
                 if let Some(v) = c.queue.pop_front() {
                     // Move a blocked sender's value into the queue.
@@ -1616,10 +1642,9 @@ impl Vm {
                         (sf, sg)
                     });
                     let some = self.some(v);
-                    if let Some((sf, sg)) = woken
-                        && !self.deliver(sf, sg, Value::Bool(true))
-                    {
-                        // The sender went away; its value stays queued.
+                    if let Some((sf, sg)) = woken {
+                        // If the sender went away, its value stays queued.
+                        self.deliver(sf, sg, Value::Bool(true));
                     }
                     return Ok(Some(some));
                 }
@@ -1645,9 +1670,8 @@ impl Vm {
                 Ok(None)
             }
             BlockOn::Send(ch, v) => {
-                // (Taking a receiver's wait stores no value: the precise
-                // barrier with nothing stored, so that a send does not make
-                // an incremental collection scan the whole queue again.)
+                // Handing the value to a receiver stores nothing, and the
+                // empty precise barrier keeps the queue from being rescanned.
                 let Obj::Channel(c) = self.heap.get_mut_storing(ch, &[]) else { return Err(internal("not a channel")) };
                 if c.closed {
                     return Ok(Some(Value::Bool(false)));
@@ -1725,10 +1749,10 @@ impl Vm {
         }
     }
 
-    /// `m[k]`: the value, or a panic if the key is missing. (The value is
-    /// copied from the entry as a whole, never through an `Option<Value>`,
-    /// whose niche checks make LLVM write the result piecewise: a caller
-    /// loading it as one 16-byte value then stalls on store forwarding.)
+    /// `m[k]`: the value, or a panic if the key is missing. It copies the
+    /// value out of the entry directly rather than through `map_get`'s
+    /// `Option<Value>`, whose niche makes LLVM write the result piecewise and
+    /// stalls the caller's 16-byte load on store forwarding.
     #[inline(never)]
     fn map_index(&self, m: Value, k: Value) -> Result<Value, Ctl> {
         let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
@@ -1745,7 +1769,7 @@ impl Vm {
     }
 
     /// Inserts `k` with value `v` into map `m` unless it is there already;
-    /// returns its existing value (one lookup, unlike a lookup and `map_insert`).
+    /// returns its existing value. One lookup, unlike `map_get` then `map_insert`.
     pub fn map_get_or_insert(&mut self, m: Value, k: Value, v: Value) -> Result<Option<Value>, Ctl> {
         self.map_store(m, k, v, false)
     }
@@ -1760,7 +1784,6 @@ impl Vm {
             if !replace {
                 return Ok(mo.entries[s].map(|(_, old)| old));
             }
-            // Existing key: overwrite in place.
             self.unpin(m)?;
             let Obj::Map(mo) = self.heap.entries_mut_storing(m, s, false, &[k, v]) else { unreachable!() };
             return Ok(mo.entries[s].replace((k, v)).map(|(_, old)| old));

@@ -168,7 +168,6 @@ impl Checker<'_> {
         mk(HKind::Block(out), ty, b.span)
     }
 
-    /// Checks a statement; returns HIR statements.
     pub(crate) fn check_stmt(&mut self, s: &Stmt) -> Vec<HExpr> {
         match &s.kind {
             StmtKind::Expr(e) => {
@@ -194,7 +193,60 @@ impl Checker<'_> {
             }
             StmtKind::Fn(f) => vec![self.check_local_fns(&[f])],
             StmtKind::Defer(e) => vec![self.check_defer(e, s.span)],
+            StmtKind::Use { name, ty, value } => self.check_use(s, name, ty.as_ref(), value),
         }
+    }
+
+    /// `use name = value`: `let name = value` (a local, also at the top
+    /// level), then `defer Close.close(name)`. The value's type must
+    /// implement `Close`; the trait's method is called even if the type has
+    /// an inherent `close`.
+    fn check_use(&mut self, s: &Stmt, name: &ast::Ident, ty: Option<&ast::TypeExpr>, value: &Expr) -> Vec<HExpr> {
+        let annotated = ty.map(|t| self.resolve_annotation(t));
+        let init = match annotated {
+            Some(t) => self.check_expr(value, t),
+            None => self.infer(value, None),
+        };
+        let vty = annotated.unwrap_or(init.ty);
+        let local = if name.name == "_" {
+            self.hidden_local(vty, name.span)
+        } else {
+            let l = self.declare_local(&name.name, vty, false, name.span, false);
+            // Read by the deferred `close`.
+            self.fs.data[l as usize].used = true;
+            l
+        };
+        let pat = HPat { kind: HPatKind::Bind(local), ty: vty, span: name.span };
+        let bind = mk(HKind::Let { pat, init: Box::new(init), else_: None }, TypeId::UNIT, s.span);
+        let rty = self.resolve(vty);
+        let close = self.close_trait.filter(|&t| self.implements_trait(rty, t));
+        let Some(t) = close else {
+            match self.ty(rty) {
+                Ty::Error => {}
+                Ty::Var(_) => self.error(value.span, "type annotation needed: a `use` binding's type must be known where it is bound"),
+                ty => {
+                    // `use f = fs.open(path)` without the `?`.
+                    let ok = match ty {
+                        Ty::Named(d, args) if d == self.wk.result => Some(self.arena.elem(args, 0)),
+                        _ => None,
+                    };
+                    let hint = match ok {
+                        Some(t) if self.close_trait.is_some_and(|c| self.implements_trait(t, c)) => {
+                            "; add `?` to bind the value of `Ok` (and return the error)"
+                        }
+                        _ => "",
+                    };
+                    let msg = format!("`use` needs a value whose type implements `Close`, found {}{hint}", self.show(rty));
+                    self.error(value.span, msg);
+                }
+            }
+            return vec![bind];
+        };
+        let recv = mk(HKind::Local(local), vty, name.span);
+        let slot = self.traits[t as usize].slot(Symbol::CLOSE).unwrap_or(0);
+        let tr = TraitRef { trait_id: t, args: self.arena.intern_list(&[]) };
+        let call = self.call_trait_method(tr, slot, rty, Some(recv), &CallArgs::default(), s.span);
+        vec![bind, mk(HKind::Defer(Box::new(call)), TypeId::UNIT, s.span)]
     }
 
     /// `defer e`: `e` must have type `()` and cannot leave the deferred
@@ -449,7 +501,6 @@ impl Checker<'_> {
         };
         match place {
             Some(place) => mk(HKind::Assign { place, op: arith, op_ty: tty, value: Box::new(v) }, TypeId::UNIT, span),
-            // (Reported above.)
             None => mk(HKind::Error, TypeId::UNIT, span),
         }
     }
@@ -1012,7 +1063,6 @@ impl Checker<'_> {
         (0..n).map(|_| self.fresh()).collect()
     }
 
-    /// The payload types of variant `i` of enum `d` with type arguments `args`.
     pub(crate) fn variant_field_types(&mut self, d: TypeDefId, i: u32, args: &[TypeId]) -> Vec<TypeId> {
         let def = &self.types[d as usize];
         let arena = &mut self.arena;
@@ -1111,7 +1161,6 @@ impl Checker<'_> {
         Some((i as u32, self.field_type(d, i, &args), self.types[d as usize].fields()[i].mutable))
     }
 
-    /// The type of field `i` of struct `d` with type arguments `args`.
     pub(crate) fn field_type(&mut self, d: TypeDefId, i: usize, args: &[TypeId]) -> TypeId {
         let def = &self.types[d as usize];
         self.arena.instantiate(def.fields()[i].ty, &def.generics, args)
@@ -1205,7 +1254,6 @@ impl Checker<'_> {
         }
     }
 
-    /// The name of parameter `i` of a callee, if it has one.
     fn param_name(&self, c: Callee, i: usize) -> Option<&str> {
         match c {
             Callee::Fn(f) => Some(self.name(self.fns[f as usize].params[i].name)),
@@ -1304,13 +1352,11 @@ impl Checker<'_> {
             return None;
         }
         if out_of_order {
-            // Evaluate named arguments in source order via temporaries.
             self.reorder_args(&mut out, &named_order, span);
         }
         Some(out)
     }
 
-    /// The default of parameter `i` of a callee, if any.
     fn param_default(&self, c: Callee, i: usize) -> Option<DefaultArg> {
         match c {
             Callee::Fn(f) => self.fns[f as usize].params[i].default.clone(),
@@ -1357,7 +1403,6 @@ impl Checker<'_> {
         self.call_instance(f, inst, recv, args, span)
     }
 
-    /// Calls `f` instantiated as `inst`.
     fn call_instance(&mut self, f: FnId, inst: Instance, recv: Option<HExpr>, args: &CallArgs, span: Span) -> HExpr {
         let Instance { fresh, params: ptys, ret, dicts } = inst;
         let Some(mut hargs) = self.bind_args(Callee::Fn(f), &ptys, recv, args, span) else {

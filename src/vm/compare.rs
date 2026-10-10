@@ -1,9 +1,7 @@
 //! Structural equality, ordering and hashing of values. All algorithms are
-//! iterative so that deeply nested values cannot overflow the host stack,
-//! walk sequences lazily (scratch space grows with nesting depth, not with
-//! the size of the values), and charge a [`Budget`] one unit per node plus
-//! the bytes of strings compared, so that comparing huge values costs fuel
-//! and can be interrupted.
+//! iterative (deep values cannot overflow the host stack), use scratch space
+//! proportional to nesting depth, and charge a [`Budget`] one unit per node
+//! plus the bytes compared, so comparing huge values can be interrupted.
 
 use super::Ctl;
 use super::bytecode::Program;
@@ -275,16 +273,14 @@ pub fn keys_eq(heap: &Heap, budget: &impl Budget, a: Value, b: Value) -> Result<
 }
 
 /// The hash of a map key or set element, consistent with [`values_eq`] for
-/// the `Hash` types (variants hash the same in every representation, `0.0`
-/// and `-0.0` alike, NaNs alike), computed where the value lives: `Hash`
-/// types are deeply immutable, so keys are never copied.
+/// the `Hash` types: a variant hashes the same inline or boxed, `0.0` and
+/// `-0.0` hash alike, and so do all NaNs. Keys are hashed in place (`Hash`
+/// types are deeply immutable).
 ///
-/// Hashes are compositional (a container's hash combines the hashes of its
-/// fields), so once a key turns out to be large the hashes of its containers
-/// are memoized by handle: a key with shared substructure, whose tree is
-/// exponentially larger than its heap size, hashes in time linear in the
-/// latter. Charges one unit per node visited plus the bytes hashed;
-/// iterative, so deep keys cannot overflow the host stack.
+/// Charges one unit per node visited plus the bytes hashed. Once a key turns
+/// out to be large, the hashes of its containers are memoized by handle, so
+/// a key with shared substructure hashes in time linear in its heap size,
+/// not in its (possibly exponentially larger) tree size.
 #[inline]
 pub fn hash_key(heap: &Heap, budget: &impl Budget, v: Value) -> Result<u64, Ctl> {
     // Fast paths, inlined: the common scalar and string keys.
@@ -342,7 +338,7 @@ fn hash_tree(heap: &Heap, budget: &impl Budget, v: Value) -> Result<u64, Ctl> {
                     None => {
                         let (c, h) = (top.v, top.h.finish());
                         stack.pop();
-                        // (Only heap containers: an inline variant's `handle` is its payload's.)
+                        // Inline variants have no handle of their own, so only heap containers are memoized.
                         if let (Some(memo), Value::Obj(handle)) = (&mut memo, c) {
                             if memo.len() == memo.capacity() && heap.would_exceed(memo.len().max(4) * 2 * 24) {
                                 return Err(Ctl::limit(crate::LimitKind::Memory));
@@ -386,8 +382,7 @@ fn int_hash(i: i64) -> u64 {
     h.finish()
 }
 
-/// The length keeps strings that differ by trailing NULs apart (the last
-/// partial word is zero-padded).
+/// Hashes the length so that trailing NULs (the zero padding) are not lost.
 #[inline]
 fn bytes_hash(b: &[u8]) -> u64 {
     let mut h = FxHasher::default();
@@ -719,11 +714,10 @@ pub fn values_le_metered(prog: &Program, heap: &Heap, budget: &impl Budget, a: V
 }
 
 /// Sorts a list whose elements are all ints, all floats or all durations
-/// (the common case) without the generic comparator; `None` for other lists.
-/// The work is charged to `budget` ahead of each step: chunks are sorted by
-/// the standard library's sort and then merged pass by pass, so no
-/// uninterruptible step is long and the limits are checked in between. On
-/// an error `v` is left a permutation of its elements.
+/// without the generic comparator; `None` for other lists. The work is
+/// charged to `budget` before each bounded step (sorting one chunk, or one
+/// merge pass), so limits are checked in between. On error `v` holds a
+/// permutation of its elements.
 pub fn try_sort_numbers(v: &mut [Value], budget: &impl Budget) -> Option<Result<(), Ctl>> {
     match v.first()? {
         Value::Int(_) if v.iter().all(|x| matches!(x, Value::Int(_))) => {
@@ -798,9 +792,10 @@ fn sort_keys<K: Copy>(
 }
 
 /// A stable merge sort whose comparator may fail (e.g. when the meter runs
-/// out): the standard library's sorts cannot be stopped midway, and an
-/// inconsistent comparator could make them panic. Uses `v.len()` elements
-/// of scratch space; on error `v` holds a permutation of its elements.
+/// out). Unlike the standard library's sorts it stops at the first error,
+/// and an inconsistent comparator cannot make it panic. Uses `v.len()`
+/// elements of scratch space; on error `v` holds a permutation of its
+/// elements.
 pub fn try_sort_by<T: Copy>(v: &mut [T], mut cmp: impl FnMut(&T, &T) -> Result<Ordering, Ctl>) -> Result<(), Ctl> {
     const RUN: usize = 16;
     let n = v.len();

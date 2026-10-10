@@ -255,16 +255,43 @@ where
         let target = first.next().unwrap_or("").to_string();
         let headers: Vec<(String, String)> =
             lines.filter_map(|l| l.split_once(':')).map(|(k, v)| (k.trim().to_string(), v.trim().to_string())).collect();
-        let len =
-            headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("content-length")).and_then(|(_, v)| v.parse::<usize>().ok()).unwrap_or(0);
-        while buf.len() < len {
-            let mut chunk = [0u8; 4096];
-            match sock.read(&mut chunk).await {
-                Ok(0) | Err(_) => return,
-                Ok(n) => buf.extend_from_slice(&chunk[..n]),
-            }
+        let header = |name: &str| headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str());
+        // Reads until `buf` holds `n` bytes.
+        macro_rules! fill {
+            ($n:expr) => {
+                let n = $n;
+                while buf.len() < n {
+                    let mut chunk = [0u8; 4096];
+                    match sock.read(&mut chunk).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    }
+                }
+            };
         }
-        let body: Vec<u8> = buf.drain(..len).collect();
+        let body: Vec<u8> = if header("transfer-encoding").is_some_and(|v| v.eq_ignore_ascii_case("chunked")) {
+            let mut body = Vec::new();
+            loop {
+                let line_end = loop {
+                    if let Some(p) = buf.windows(2).position(|w| w == b"\r\n") {
+                        break p;
+                    }
+                    fill!(buf.len() + 1);
+                };
+                let size = usize::from_str_radix(String::from_utf8_lossy(&buf[..line_end]).trim(), 16).unwrap();
+                buf.drain(..line_end + 2);
+                fill!(size + 2);
+                body.extend(buf.drain(..size));
+                buf.drain(..2);
+                if size == 0 {
+                    break body;
+                }
+            }
+        } else {
+            let len = header("content-length").and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+            fill!(len);
+            buf.drain(..len).collect()
+        };
         let req = HttpRequest { method, target, headers, body };
         reqs.lock().unwrap().push(req.clone());
         // Run the handler off the (single-threaded) runtime so slow handlers overlap.

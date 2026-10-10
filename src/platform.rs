@@ -37,7 +37,6 @@ pub(crate) fn cpu_time() -> Duration {
     }
 }
 
-/// Waits for `d`.
 #[cfg(not(web))]
 pub(crate) async fn sleep(d: Duration) {
     tokio::time::sleep(d).await

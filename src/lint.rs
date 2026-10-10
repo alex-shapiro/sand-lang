@@ -28,9 +28,8 @@ impl std::fmt::Display for LintWarning {
     }
 }
 
-/// Lints a file of the host's file system (its imports are loaded relative
-/// to it, as `sand check` loads them: from the module root, without
-/// prompting).
+/// Lints a file of the host's file system, loading its imports as `sand
+/// check` does.
 #[cfg(feature = "os")]
 pub fn lint_file(path: &Path) -> Result<Vec<LintWarning>, String> {
     let src = std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
@@ -39,8 +38,7 @@ pub fn lint_file(path: &Path) -> Result<Vec<LintWarning>, String> {
     lint_with(&src, facts)
 }
 
-/// Lints source text (imports are resolved against the current directory,
-/// or the root of an empty memory file system without the `os` feature).
+/// Lints source text, resolving imports against the current directory.
 pub fn lint_source(name: &str, src: &str) -> Result<Vec<LintWarning>, String> {
     lint_source_with(&Engine::new(Config::new().policy(Policy::deny_all())), name, src)
 }
@@ -51,10 +49,8 @@ pub fn lint_source_with(engine: &Engine, name: &str, src: &str) -> Result<Vec<Li
     check_and_lint(engine, name, src).map_err(|e| e.to_string())
 }
 
-/// Type checks source text as `engine` would run it (see
-/// [`lint_source_with`]) and, if it type checks, lints it: the compile
-/// errors, or the warnings. A lint that cannot finish (the source is too
-/// complex) is an [`Error::Io`].
+/// Like [`lint_source_with`], but returns compile errors as [`Error::Compile`].
+/// A lint that cannot finish is an [`Error::Io`].
 pub fn check_and_lint(engine: &Engine, name: &str, src: &str) -> Result<Vec<LintWarning>, Error> {
     let facts = engine.lint_facts_source(name, src)?;
     lint_with(src, facts).map_err(Error::Io)
@@ -115,7 +111,6 @@ fn run_lints(src: &str, facts: &ResolvedFacts, budget: &CompileBudget) -> Result
     l.module(&parsed.module);
     l.fact_lints();
 
-    // Suppressions.
     let mut file_allow: HashSet<String> = HashSet::new();
     let mut line_allow: HashMap<usize, HashSet<String>> = HashMap::new();
     for c in &parsed.comments {
@@ -271,7 +266,7 @@ fn block_any(b: &Block, f: &mut dyn FnMut(&Expr) -> bool) -> bool {
     b.stmts.iter().any(|s| match &s.kind {
         StmtKind::Let { value, else_block, .. } => f(value) || else_block.as_ref().is_some_and(|b| block_any(b, f)),
         StmtKind::Assign { target, value, .. } => f(target) || f(value),
-        StmtKind::Expr(x) | StmtKind::Defer(x) => f(x),
+        StmtKind::Expr(x) | StmtKind::Defer(x) | StmtKind::Use { value: x, .. } => f(x),
         StmtKind::Fn(_) => false,
     })
 }
@@ -392,7 +387,6 @@ impl<'a> Linter<'a> {
                 ItemKind::Stmt(s) => self.stmt(s, true),
             }
         }
-        // Unreachable top-level statements.
         let stmts: Vec<&Stmt> = m.items.iter().filter_map(|i| if let ItemKind::Stmt(s) = &i.kind { Some(s) } else { None }).collect();
         self.unreachable(&stmts);
         self.no_effect(&stmts, None);
@@ -564,8 +558,8 @@ impl<'a> Linter<'a> {
     /// The naming lints of the bindings of a pattern. A capitalized name
     /// that the checker found to bind (rather than to be a variant) is a
     /// `variant-like-binding`, unless it is a top-level constant
-    /// (`SCREAMING_SNAKE_CASE`); `is_let`: a `let`, `for` or comprehension
-    /// pattern, where the checker's facts may be missing for a binding.
+    /// (`SCREAMING_SNAKE_CASE`). `is_let` marks a `let`, `for` or
+    /// comprehension pattern, where facts may be missing for a binding.
     fn pattern_names_in(&mut self, p: &Pattern, top_level_let: bool, is_let: bool) {
         let mut ids = Vec::new();
         p.bindings(&mut ids);
@@ -630,6 +624,15 @@ impl<'a> Linter<'a> {
             }
             StmtKind::Expr(e) | StmtKind::Defer(e) => self.expr(e),
             StmtKind::Fn(f) => self.fn_decl(f),
+            StmtKind::Use { name, value, .. } => {
+                self.expr(value);
+                if name.name != "_" {
+                    let p = Pattern { kind: PatternKind::Binding(name.clone()), span: name.span };
+                    self.pattern_names(&p, false);
+                    self.check_shadowing(&p);
+                    self.bind_pattern(&p);
+                }
+            }
         }
     }
 
@@ -863,6 +866,9 @@ impl<'a> Linter<'a> {
                 line: *line,
                 column: *col,
             });
+        }
+        for (line, col, code, message) in &facts.resources {
+            self.out.push(LintWarning { code, message: message.clone(), line: *line, column: *col });
         }
         for (line, col, name) in &facts.imports {
             if !facts.used_names.contains(name) {

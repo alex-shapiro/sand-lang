@@ -4,8 +4,12 @@
 
 use super::stream::IoFailure;
 use super::uri;
-use crate::vm::value::{Obj, Value};
-use crate::vm::{Ctl, NResult, Vm};
+use crate::vm::iomem::{Reservation, ResourceSlot};
+use crate::vm::value::{NativeObject, Obj, Value};
+use crate::vm::{Ctl, Finisher, NResult, Vm};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 
 // ----------------------------------------------------------------------
 // URLs
@@ -84,8 +88,9 @@ pub(crate) fn resolve(base: &str, location: &str) -> Result<String, IoFailure> {
     Ok(text)
 }
 
-/// The natives `http.resolve` and `http.same_origin`, used by every client.
+/// Registers the natives every client shares.
 pub(crate) fn register(r: &mut crate::engine::Registry) {
+    register_body(r);
     r.add_builtin("http.resolve", |vm, a| {
         vm.charge_slow_bytes(vm.str(a[0]).len().saturating_add(vm.str(a[1]).len()))?;
         let resolved = resolve(vm.str(a[0]), vm.str(a[1]));
@@ -119,14 +124,15 @@ pub(crate) fn valid_header(name: &str, value: &str) -> bool {
     is_token(name) && !value.contains(['\r', '\n', '\0'])
 }
 
-/// Converts a `[str: str]` map into validated header pairs; `Ok(Err(..))`
+/// Converts a `[(str, str)]` list into validated header pairs; `Ok(Err(..))`
 /// describes an invalid header.
-pub(crate) fn header_pairs(vm: &Vm, map: Value) -> Result<Result<Vec<(String, String)>, String>, Ctl> {
-    let Obj::Map(m) = vm.heap.get(map) else { return Ok(Ok(vec![])) };
-    vm.charge(m.live as u64)?;
-    let mut pairs = Vec::with_capacity(m.live);
+pub(crate) fn header_pairs(vm: &Vm, list: Value) -> Result<Result<Vec<(String, String)>, String>, Ctl> {
+    let items = vm.heap.list(list);
+    vm.charge(items.len() as u64)?;
+    let mut pairs = Vec::with_capacity(items.len());
     let mut size = 0usize;
-    for (k, v) in m.entries.iter().flatten() {
+    for &item in items {
+        let [k, v] = vm.heap.fields(item) else { return Err(Ctl::panic("a header is not a pair")) };
         let (k, v) = (vm.str(*k), vm.str(*v));
         size = size.saturating_add(k.len() + v.len() + 64);
         vm.charge_bytes(k.len() + v.len())?;
@@ -139,16 +145,314 @@ pub(crate) fn header_pairs(vm: &Vm, map: Value) -> Result<Result<Vec<(String, St
     Ok(Ok(pairs))
 }
 
-/// Builds a `[str: str]` map from header pairs.
-pub(crate) fn header_map(vm: &mut Vm, headers: Vec<(String, String)>) -> NResult {
-    let size = headers.iter().map(|(k, v)| k.len() + v.len() + 128).fold(0usize, usize::saturating_add);
+/// Builds a `[(str, str)]` list from header pairs.
+pub(crate) fn header_list(vm: &mut Vm, headers: Vec<(String, String)>) -> NResult {
+    let size = headers.iter().map(|(k, v)| k.len() + v.len() + 160).fold(0usize, usize::saturating_add);
     vm.reserve(size)?;
     vm.charge(headers.len() as u64)?;
-    let map = vm.heap.alloc(Obj::Map(Box::default()));
-    for (k, v) in headers {
-        let k = vm.new_str(k);
-        let v = vm.new_str(v);
-        vm.map_insert(map, k, v)?;
+    let items = headers
+        .into_iter()
+        .map(|(k, v)| {
+            let (k, v) = (vm.new_str(k), vm.new_str(v));
+            vm.heap.new_tuple(vec![k, v])
+        })
+        .collect();
+    Ok(vm.heap.new_list(items))
+}
+
+// ----------------------------------------------------------------------
+// Bodies
+
+/// The bytes of a body that are available, once some are.
+pub(crate) type Filled<'a> = Pin<Box<dyn Future<Output = Result<&'a [u8], IoFailure>> + Send + 'a>>;
+
+/// The bytes of a message body as they arrive (any framing decoded).
+pub(crate) trait BodyStream: Send {
+    /// Waits for body bytes: the bytes available (empty at the end).
+    fn fill(&mut self) -> Filled<'_>;
+    /// Consumes `n` of the bytes `fill` returned.
+    fn consume(&mut self, n: usize);
+    /// Called after each read of the body: releases what the stream holds
+    /// only while it is read (a connection's lock).
+    fn release(&mut self) {}
+    /// Called when the body ends: starts closing a connection it owns.
+    fn shutdown(&mut self) {}
+}
+
+/// A body received whole (on the web, where the browser reads it).
+pub(crate) struct MemoryBody {
+    data: Vec<u8>,
+    at: usize,
+}
+
+impl MemoryBody {
+    pub fn new(data: Vec<u8>) -> MemoryBody {
+        MemoryBody { data, at: 0 }
     }
-    Ok(map)
+}
+
+impl BodyStream for MemoryBody {
+    fn fill(&mut self) -> Filled<'_> {
+        Box::pin(std::future::ready(Ok(&self.data[self.at..])))
+    }
+    fn consume(&mut self, n: usize) {
+        self.at += n;
+    }
+}
+
+/// Reading a body: its stream, and what reading it holds.
+pub(crate) struct BodyReader {
+    /// `None` once the body has been read to its end (or failed).
+    stream: Option<Box<dyn BodyStream>>,
+    /// The connection's slot (if the body owns its connection), released
+    /// with the stream.
+    slot: Option<ResourceSlot>,
+    /// The most `read_all` reads (`max_http_body`).
+    max_all: usize,
+    /// Memory reserved for the stream's buffers (a memory body's data),
+    /// released with it.
+    _held: Option<Reservation>,
+}
+
+impl BodyReader {
+    pub fn new(stream: Box<dyn BodyStream>, slot: Option<ResourceSlot>, max_all: usize, held: Option<Reservation>) -> BodyReader {
+        BodyReader { stream: Some(stream), slot, max_all, _held: held }
+    }
+
+    /// Ends the body: the stream (and its connection) is released.
+    fn end(&mut self) {
+        if let Some(s) = &mut self.stream {
+            s.shutdown();
+        }
+        self.stream = None;
+        self.slot = None;
+        self._held = None;
+    }
+
+    /// The bytes available (waiting for some); empty at the end.
+    async fn fill(&mut self) -> Result<usize, IoFailure> {
+        let Some(stream) = &mut self.stream else { return Ok(0) };
+        match stream.fill().await {
+            Ok([]) => {
+                self.end();
+                Ok(0)
+            }
+            Ok(b) => Ok(b.len()),
+            Err(e) => {
+                self.end();
+                Err(e)
+            }
+        }
+    }
+
+    /// The bytes `fill` made available, consumed with `consume`.
+    fn available(&mut self) -> Filled<'_> {
+        match &mut self.stream {
+            Some(s) => s.fill(),
+            None => Box::pin(std::future::ready(Ok(&[][..]))),
+        }
+    }
+
+    fn consume(&mut self, n: usize) {
+        if let Some(s) = &mut self.stream {
+            s.consume(n);
+        }
+    }
+
+    /// Runs `op`, a read of the body. A body that fails is ended (its
+    /// connection released), unless the data read did not fit in memory
+    /// (where `read` consumed nothing; `read_line` drops the partial line).
+    async fn reading<T>(&mut self, op: impl AsyncFnOnce(&mut Self) -> Result<T, IoFailure>) -> Result<T, IoFailure> {
+        let r = op(self).await;
+        match &r {
+            Err(e) if e.kind != "limit" => self.end(),
+            _ => {
+                if let Some(s) = &mut self.stream {
+                    s.release();
+                }
+            }
+        }
+        r
+    }
+
+    /// Up to `max` bytes, once some are available; empty at the end.
+    async fn read(&mut self, max: usize, res: &mut Reservation) -> Result<Vec<u8>, IoFailure> {
+        let n = self.fill().await?.min(max);
+        res.ensure(n)?;
+        let data = self.available().await?[..n].to_vec();
+        self.consume(n);
+        Ok(data)
+    }
+
+    /// A line, without its `\n` or `\r\n`; `None` at the end.
+    async fn read_line(&mut self, res: &mut Reservation) -> Result<Option<Vec<u8>>, IoFailure> {
+        let mut line = Vec::new();
+        loop {
+            if self.fill().await? == 0 {
+                return Ok((!line.is_empty()).then_some(line));
+            }
+            let buf = self.available().await?;
+            let (take, done) = match buf.iter().position(|&b| b == b'\n') {
+                Some(i) => (i + 1, true),
+                None => (buf.len(), false),
+            };
+            res.reserve_buf(&mut line, take)?;
+            line.extend_from_slice(&buf[..take]);
+            self.consume(take);
+            if done {
+                super::stream::strip_eol(&mut line);
+                return Ok(Some(line));
+            }
+        }
+    }
+
+    /// The rest of the body (at most `max_all` bytes).
+    async fn read_all(&mut self, res: &mut Reservation) -> Result<Vec<u8>, IoFailure> {
+        let mut data = Vec::new();
+        loop {
+            let n = self.fill().await?;
+            if n == 0 {
+                return Ok(data);
+            }
+            if data.len().saturating_add(n) > self.max_all {
+                self.end();
+                return Err(IoFailure::new("limit", format!("HTTP body larger than the limit of {} bytes", self.max_all)));
+            }
+            res.reserve_buf(&mut data, n)?;
+            data.extend_from_slice(&self.available().await?[..n]);
+            self.consume(n);
+        }
+    }
+}
+
+/// The `http.Body` type: a message body read as it arrives. A body that
+/// owns its connection (a response's) counts as an open resource until it
+/// has been read to its end or is closed.
+pub(crate) struct Body {
+    reader: Option<Arc<tokio::sync::Mutex<BodyReader>>>,
+    closed: tokio::sync::watch::Sender<bool>,
+    /// Whether the body holds a connection's slot.
+    owns_conn: bool,
+}
+
+impl Body {
+    pub fn new(reader: BodyReader) -> Body {
+        let owns_conn = reader.slot.is_some();
+        Body { reader: Some(Arc::new(tokio::sync::Mutex::new(reader))), closed: tokio::sync::watch::Sender::new(false), owns_conn }
+    }
+}
+
+impl NativeObject for Body {
+    fn type_name(&self) -> &'static str {
+        "Body"
+    }
+    fn is_resource(&self) -> bool {
+        self.owns_conn && self.reader.is_some()
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+/// What a read of a body reads.
+#[derive(Clone, Copy)]
+enum BodyRead {
+    Upto(usize),
+    Line,
+    All,
+}
+
+/// Reads from body `v` until the read completes or the body is closed.
+fn read_body(vm: &mut Vm, v: Value, what: BodyRead) -> NResult {
+    let body = vm.heap.native::<Body>(v).ok_or_else(|| Ctl::panic("not a body"))?;
+    let Some(reader) = body.reader.clone() else { return Ok(vm.err_value("closed", "body closed")) };
+    let mut closed = body.closed.subscribe();
+    let mut res = match what {
+        BodyRead::Upto(n) => super::or_return!(vm.reserve_io(n.min(64 << 10))),
+        _ => vm.io_reservation(),
+    };
+    let op = async move {
+        if *closed.borrow() {
+            return Err(IoFailure::new("closed", "body closed"));
+        }
+        let read = async {
+            let mut r = reader.lock().await;
+            let res = &mut res;
+            r.reading(async move |r: &mut BodyReader| match what {
+                BodyRead::Upto(n) => r.read(n, res).await.map(Some),
+                BodyRead::Line => r.read_line(res).await,
+                BodyRead::All => r.read_all(res).await.map(Some),
+            })
+            .await
+        };
+        let data = {
+            let mut read = std::pin::pin!(read);
+            let mut wait = std::pin::pin!(closed.wait_for(|c| *c));
+            std::future::poll_fn(|cx| {
+                if let std::task::Poll::Ready(r) = read.as_mut().poll(cx) {
+                    return std::task::Poll::Ready(r);
+                }
+                match wait.as_mut().poll(cx) {
+                    std::task::Poll::Ready(_) => std::task::Poll::Ready(Err(IoFailure::new("closed", "body closed"))),
+                    std::task::Poll::Pending => std::task::Poll::Pending,
+                }
+            })
+            .await?
+        };
+        Ok((data, res))
+    };
+    Err(Ctl::suspend(Box::pin(async move {
+        let r = op.await;
+        Box::new(move |vm: &mut Vm| -> NResult {
+            let (data, res) = match r {
+                Ok(x) => x,
+                Err(e) => return e.into_value(vm),
+            };
+            drop(res);
+            let v = match (what, data) {
+                (BodyRead::Line, None) => vm.none(),
+                (BodyRead::Line, Some(line)) => {
+                    vm.reserve(line.len())?;
+                    vm.charge_slow_bytes(line.len())?;
+                    let Ok(text) = String::from_utf8(line) else { return Ok(vm.err_value("invalid", "line is not valid UTF-8")) };
+                    let s = vm.new_str(text);
+                    vm.some(s)
+                }
+                (_, data) => {
+                    let data = data.unwrap_or_default();
+                    vm.reserve(data.len())?;
+                    vm.charge_bytes(data.len())?;
+                    vm.heap.new_bytes(data)
+                }
+            };
+            Ok(vm.ok(v))
+        }) as Finisher
+    })))
+}
+
+pub(crate) fn alloc_body(vm: &mut Vm, reader: BodyReader) -> Value {
+    vm.heap.alloc(Obj::Native(Box::new(Body::new(reader))))
+}
+
+pub(crate) fn register_body(r: &mut crate::engine::Registry) {
+    r.add_method("http.Body.read", |vm, a| {
+        let max = a[1].as_int();
+        if max <= 0 {
+            return Ok(vm.err_value("invalid", "read: max must be positive"));
+        }
+        read_body(vm, a[0], BodyRead::Upto(crate::vm::value::to_usize_saturating(max)))
+    });
+    r.add_method("http.Body.read_line", |vm, a| read_body(vm, a[0], BodyRead::Line));
+    r.add_method("http.Body.read_all", |vm, a| read_body(vm, a[0], BodyRead::All));
+    r.add_method("http.Body.close", |vm, a| {
+        let b = vm.heap.native_mut::<Body>(a[0]).ok_or_else(|| Ctl::panic("not a body"))?;
+        b.closed.send_replace(true);
+        // The stream and the connection go with the last reference to the
+        // reader: now, or when a pending read ends.
+        b.reader = None;
+        Ok(Value::Unit)
+    });
 }

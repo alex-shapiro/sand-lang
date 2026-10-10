@@ -155,8 +155,8 @@ fn world() -> [str: Room] {
 let game = Game { rooms: world(), here: "hall" }
 print(game.describe())
 while not game.won {
-    io.write("> ")
-    let Some(line) = io.read_line()? else { break }
+    io.stdout.write_str("> ")?
+    let Some(line) = io.stdin.read_line()? else { break }
     match game.command(line) {
         Some(reply) => if not reply.is_empty() { print(reply) }
         None => {

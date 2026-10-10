@@ -37,7 +37,7 @@ pub(crate) use net::TlsSettings;
 /// feature they do not exist, and importing them is an error that says why.
 #[cfg(not(web))]
 pub(crate) const OS_MODULES: &[&str] = &["http", "net"];
-/// (On the web, `http` goes through the browser's `fetch`.)
+/// On the web, `http` goes through the browser's `fetch`.
 #[cfg(web)]
 pub(crate) const OS_MODULES: &[&str] = &["net"];
 
@@ -65,6 +65,19 @@ pub(crate) const STD_MODULES: &[&str] = &[
     "uri",
     "uuid",
 ];
+
+/// Unwraps a `Result<Result<T, Value>, Ctl>` (as `Vm::resource_slot` and
+/// `Vm::reserve_io` return): propagates the `Ctl`, and returns the
+/// `Err(Error)` value from the native.
+macro_rules! or_return {
+    ($e:expr) => {
+        match $e? {
+            Ok(x) => x,
+            Err(v) => return Ok(v),
+        }
+    };
+}
+pub(crate) use or_return;
 
 /// At most the first `max` characters of `s`.
 pub(crate) fn truncate(s: &str, max: usize) -> &str {
@@ -107,9 +120,9 @@ pub(crate) fn io_kind(e: &std::io::Error) -> &'static str {
         PermissionDenied => "permission_denied",
         AlreadyExists => "already_exists",
         TimedOut | WouldBlock => "timeout",
-        InvalidData | InvalidInput => "invalid",
-        // I/O buffers that do not fit in the memory limit (see `vm::iomem`),
-        // and a full memory file system (`MemFs`).
+        // Only regular files are opened, so a directory is an invalid argument.
+        InvalidData | InvalidInput | IsADirectory => "invalid",
+        // The memory limit (`vm::iomem`), or a full `MemFs`.
         OutOfMemory | QuotaExceeded => "limit",
         _ => "io",
     }

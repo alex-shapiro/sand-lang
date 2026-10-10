@@ -188,7 +188,6 @@ pub struct Error {
     message: str
 }
 
-/// Constructs an `Error`.
 pub fn error(message: str, kind: str = "error") -> Error {
     Error { kind, message }
 }
@@ -215,7 +214,8 @@ extend<T> Channel<T> {
     pub native fn recv(self) -> T?
     /// Receives without suspending.
     pub native fn try_recv(self) -> T?
-    /// Closes the channel.
+    /// Closes the channel: later sends fail, and receivers get the
+    /// messages already queued, then `None`.
     pub native fn close(self)
     /// Number of queued messages.
     pub native fn len(self) -> int
@@ -226,6 +226,41 @@ extend<T> Channel<T> {
     /// empty) until the channel is closed and drained.
     pub fn iter(self) -> Iter<T> {
         Iter { next: () => self.recv() }
+    }
+}
+
+/// A value that holds a resource, such as an open file or a connection, to
+/// be released as soon as it is no longer needed. A `use` binding closes its
+/// value when the block it is in ends, however it ends:
+///
+/// ```
+/// use f = fs.open("data.txt")?
+/// ```
+///
+/// A resource that is never closed is closed when the garbage collector
+/// finds it unreachable (at the latest, before an operation would fail
+/// because too many resources are open).
+pub trait Close {
+    /// Releases the resource. Closing it again does nothing; operations on a
+    /// closed resource fail with kind `"closed"`.
+    fn close(self)
+}
+
+impl<T: Close> Close for T? {
+    /// Closes the value, if there is one.
+    fn close(self) {
+        if let Some(x) = self {
+            x.close()
+        }
+    }
+}
+
+impl<T: Close> Close for [T] {
+    /// Closes the elements, last first.
+    fn close(self) {
+        for x in self.reversed() {
+            x.close()
+        }
     }
 }
 
@@ -317,7 +352,6 @@ extend int {
         self % 2 != 0
     }
 
-    /// Converts to a float.
     pub native fn to_float(self) -> float
     /// Formats in the given radix (2..36).
     pub native fn to_str_radix(self, radix: int) -> str

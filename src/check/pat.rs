@@ -68,12 +68,10 @@ impl Checker<'_> {
                 }
             }
         }
-        // Duplicate bindings within one pattern are an error.
         let l = self.declare_local(&id.name, ty, mutable, id.span, false);
         self.pat(HPatKind::Bind(l), ty, id.span)
     }
 
-    /// Fresh type arguments for type definition `d`.
     fn fresh_args(&mut self, d: TypeDefId) -> Vec<TypeId> {
         let n = self.types[d as usize].generics.len();
         (0..n).map(|_| self.fresh()).collect()
@@ -132,7 +130,6 @@ impl Checker<'_> {
         Some((d, i, args))
     }
 
-    /// The index of the variant of enum `d` named `name`.
     fn find_variant_named(&self, d: TypeDefId, name: &str) -> Option<u32> {
         let s = self.syms.get(name)?;
         self.types[d as usize].variants().iter().position(|v| v.name == s).map(|i| i as u32)
@@ -427,7 +424,7 @@ impl Checker<'_> {
     }
 
     pub(crate) fn pattern_irrefutable(&mut self, p: &HPat) -> bool {
-        // (Most `let`s bind names, maybe in tuples or structs: no need to check.)
+        // Most `let`s only bind names: no need to check.
         fn binds_only(p: &HPat) -> bool {
             match &p.kind {
                 HPatKind::Wildcard | HPatKind::Bind(_) => true,
@@ -574,7 +571,7 @@ impl Checker<'_> {
         }
     }
 
-    /// Specializes a row by constructor `c` (with `arity` arguments).
+    /// Specializes a row by constructor `c`.
     fn specialize_row(&self, row: &[SPat], c: &SCtor, arity: usize) -> Option<Vec<SPat>> {
         let rest = &row[1..];
         let head: Vec<SPat> = match &row[0] {

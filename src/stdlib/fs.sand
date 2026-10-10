@@ -3,6 +3,7 @@
 //! Relative paths are resolved against the engine's working directory; every
 //! access is checked against the policy.
 
+import io
 import time
 
 /// Information about a file or directory.
@@ -15,25 +16,100 @@ pub struct Metadata {
     modified: time.DateTime?
 }
 
+/// How `open` opens a file.
+pub enum Mode {
+    /// Read an existing file (needs `FsRead`).
+    Read
+    /// Write from the start, creating the file or truncating it (`FsWrite`).
+    Write
+    /// Write at the end, creating the file if needed (`FsWrite`).
+    Append
+    /// Create a new file for writing; fails with kind `"already_exists"` if
+    /// something is there (`FsWrite`).
+    CreateNew
+    /// Read and write an existing file in place (`FsRead` and `FsWrite`).
+    ReadWrite
+}
+
+/// Opens the regular file at `path` for reading and writing incrementally.
+/// The policy is checked here, once: the file stays accessible as opened
+/// even if it is renamed, removed or replaced meanwhile.
+///
+/// ```
+/// use f = fs.open("data.csv")?
+/// while let Some(line) = f.read_line()? {
+///     print(line.split(","))
+/// }
+/// ```
+pub fn open(path: str, mode: Mode = Mode.Read) -> Result<File> {
+    open_file(path, match mode {
+        Read => 0
+        Write => 1
+        Append => 2
+        CreateNew => 3
+        ReadWrite => 4
+    })
+}
+
+native fn open_file(path: str, mode: int) -> Result<File>
+
+/// An open file (see `open`). It reads and writes at its position, which
+/// each read and write moves on; appending files write at the end. Reads
+/// are buffered; writes go to the file at once. Closing it (when a `use`
+/// binding's block ends, or with `close`) releases it; operations on a
+/// closed file fail with kind `"closed"`.
+pub native type File
+
+impl io.Reader for File {
+    native fn read(self, max: int) -> Result<bytes>
+    native fn read_line(self) -> Result<str?>
+    native fn read_all(self) -> Result<bytes>
+    native fn read_text(self) -> Result<str>
+}
+
+impl io.Writer for File {
+    native fn write(self, data: bytes) -> Result<()>
+    native fn write_str(self, text: str) -> Result<()>
+}
+
+impl Close for File {
+    native fn close(self)
+}
+
+extend File {
+    /// Moves to byte offset `pos` from the start (it may be past the end: a
+    /// write there fills the gap with zeros).
+    pub native fn seek(self, pos: int) -> Result<()>
+    /// The byte offset that the next read or write uses.
+    pub native fn position(self) -> Result<int>
+    /// Size and modification time of the file (`is_file` is true).
+    pub fn metadata(self) -> Result<Metadata> {
+        let (size, modified) = file_stat(self)?
+        Ok(to_metadata(size, true, false, modified))
+    }
+    /// Truncates the file, or extends it with zeros, to `len` bytes.
+    pub native fn set_len(self, len: int) -> Result<()>
+    /// Waits until what was written is stored durably (`fsync`).
+    pub native fn sync(self) -> Result<()>
+    /// The path the file was opened with, as given to `open`.
+    pub native fn path(self) -> str
+}
+
+/// `(size, modified)` of an open file, the modification time in
+/// nanoseconds since the Unix epoch.
+native fn file_stat(f: File) -> Result<(int, int?)>
+
 /// Reads a whole file as UTF-8 text (kind `invalid` if it is not UTF-8).
 pub native fn read_text(path: str) -> Result<str>
 
 /// Reads a whole file as bytes.
 pub native fn read_bytes(path: str) -> Result<bytes>
 
-/// Reads a UTF-8 text file as a list of lines (without line terminators).
-pub fn read_lines(path: str) -> Result<[str]> {
-    Ok(read_text(path)?.lines())
-}
-
 /// Writes `text` to a file, creating or truncating it.
 pub native fn write_text(path: str, text: str) -> Result<()>
 
 /// Writes `data` to a file, creating or truncating it.
 pub native fn write_bytes(path: str, data: bytes) -> Result<()>
-
-/// Appends `text` to a file, creating it if needed.
-pub native fn append_text(path: str, text: str) -> Result<()>
 
 /// Whether a file or directory exists at `path`.
 pub native fn exists(path: str) -> Result<bool>
@@ -60,18 +136,7 @@ pub native fn remove_file(path: str) -> Result<()>
 /// a path inside the directory; every entry is also checked against the policy
 /// before it is removed. Symlinks are removed, never followed.
 pub fn remove_dir(path: str, recursive: bool = false) -> Result<()> {
-    if recursive and is_dir_entry(path)? {
-        check_tree(path)?
-        for name in list_dir(path)? {
-            let child = join([path, name])
-            if is_dir_entry(child)? {
-                remove_dir(child, recursive: true)?
-            } else {
-                remove_file(child)?
-            }
-        }
-    }
-    remove_empty_dir(path)
+    if recursive { remove_tree(path) } else { remove_empty_dir(path) }
 }
 
 /// Renames or moves a file or directory (a symlink itself, not its target),
@@ -85,9 +150,11 @@ pub native fn copy(src: str, dst: str) -> Result<()>
 /// Size, kind and modification time of a file or directory.
 pub fn metadata(path: str) -> Result<Metadata> {
     let (size, is_file, is_dir, modified) = stat(path)?
-    Ok(Metadata { size, is_file, is_dir, modified: modified.map(n => time.DateTime {
-        unix_nanos: n,
-    }) })
+    Ok(to_metadata(size, is_file, is_dir, modified))
+}
+
+fn to_metadata(size: int, is_file: bool, is_dir: bool, modified: int?) -> Metadata {
+    Metadata { size, is_file, is_dir, modified: modified.map(n => time.DateTime { unix_nanos: n }) }
 }
 
 /// `(size, is_file, is_dir, modified)`, the modification time in
@@ -107,13 +174,9 @@ pub native fn dirname(path: str) -> str
 /// The extension of the final component, without the dot.
 pub native fn extension(path: str) -> str?
 
-/// Whether the entry at `path` is a directory (a final symlink is not
-/// followed: a link to a directory is not one).
-native fn is_dir_entry(path: str) -> Result<bool>
-
 /// Removes an empty directory.
 native fn remove_empty_dir(path: str) -> Result<()>
 
-/// Checks that the whole tree at `path` may be removed: write access to
-/// `path` itself and no deny rule inside it.
-native fn check_tree(path: str) -> Result<()>
+/// Removes the directory `path` (not a symlink to one) and everything
+/// below it, checking each entry before removing it.
+native fn remove_tree(path: str) -> Result<()>

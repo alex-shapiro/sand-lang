@@ -9,8 +9,6 @@ the Sand program (`target/release/sand run ...`) and the Python port
 (`bench/examples/python/...`) are each run once untimed (warm-up and output
 check) and then N times, alternating. Every run's output must be identical
 between the two implementations; the exit status is 1 if any differ.
-
-See bench/examples/README.md for what each workload does.
 """
 
 import argparse

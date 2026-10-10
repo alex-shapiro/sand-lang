@@ -14,8 +14,7 @@ const WEEKDAYS: [&str; 7] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Frid
 const MONTHS: [&str; 12] =
     ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 
-/// The origin of the monotonic clock (`time.Instant { nanos }` counts from
-/// it): the first reading of the process.
+/// Nanoseconds since the process's first monotonic reading (`time.Instant`).
 fn monotonic_nanos() -> i64 {
     static ORIGIN: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     let origin = *ORIGIN.get_or_init(Instant::now);

@@ -1,15 +1,14 @@
 //! Iterator functions (`Obj::IterFn`): the lazy iterators of lists, ranges,
 //! strings, maps and sets, which the interpreter steps directly.
 //!
-//! The iterators of maps and sets (and `for` loops over them) iterate over
-//! the entries the map or set had when the iterator was made (spec §6.9,
-//! §12.13), without copying them up front: an iterator reads the entries in
-//! place, by slot, skipping removed ones, and pins the map or set (its
-//! `pins`). Every change of a map or set first calls [`Vm::unpin`], which
-//! moves the iterators still reading it in place to one copy of its entries
-//! (a private map or set, with the same slots) and clears the pins. So
-//! iterating costs no copy unless the map or set changes meanwhile, when it
-//! costs the one copy every iteration used to make.
+//! An iterator of a map or set (including a `for` loop over one) visits the
+//! entries it had when the iterator was made (spec §6.9, §12.13), without
+//! copying them up front: it reads the entries in place by slot, skipping
+//! removed ones, and pins the map or set (its `pins`). Every change to a map
+//! or set first calls [`Vm::unpin`], which moves the iterators still reading
+//! it to one private copy of its entries (with the same slots) and clears
+//! the pins. So iterating costs no copy unless the map or set changes
+//! meanwhile, in which case it costs one copy.
 
 use super::*;
 use crate::vm::interp::internal;
@@ -83,10 +82,9 @@ impl Vm {
         Ok(it)
     }
 
-    /// Before map or set `c` changes: moves the iterators reading it in
+    /// Call before map or set `c` changes: moves the iterators reading it in
     /// place to a copy of its entries, so that they go on with the entries
-    /// they started with. The only side effects come after the checks that
-    /// can fail.
+    /// they started with. On error nothing has changed.
     #[inline]
     pub(crate) fn unpin(&mut self, c: Value) -> Result<(), Ctl> {
         let pinned = match self.heap.get(c) {

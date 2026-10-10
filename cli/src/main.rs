@@ -188,7 +188,6 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
             "--allow-all" => allow_all = true,
             "--prompt" => prompt = prompt.or(Some(PromptVia::Terminal)),
             "--prompt-stdin" => prompt = Some(PromptVia::Stdin),
-            // Read above.
             "--policy" => {}
             "--max-memory" => limits.max_memory = Some(parse_size(&required(&value)?)?),
             "--max-time" => limits.max_wall_time = Some(parse_duration(&required(&value)?)?),

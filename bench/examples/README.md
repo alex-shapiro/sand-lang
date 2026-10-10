@@ -2,8 +2,7 @@
 
 Every program in `examples/` has an idiomatic CPython port in `python/`.
 `run.py` runs both on scaled-up workloads, checks that their output is byte-identical,
-and prints a timing table. The goal is to find where the Sand interpreter and its standard library
-is slower than CPython 3.14, and to measure progress towards parity.
+and prints a timing table, to find where Sand is slower than CPython 3.14.
 
 ## Usage
 
@@ -25,19 +24,14 @@ Options:
 | `--keep`        | keep the generated inputs (the temp dir is printed)                    |
 
 For each workload, `run.py` generates its inputs into a temporary directory,
-does one untimed warm-up run of each implementation (which also primes the
-page cache and Python's `__pycache__`), then N timed runs, alternating Sand and
-Python. Every run's output (plus, where relevant, a hash of the files the
-program wrote) must equal the other implementation's; any difference prints
-the first differing line, saves both outputs next to the inputs, and makes the
-script exit with status 1.
+does one untimed warm-up run of each implementation, then N timed runs,
+alternating Sand and Python. Every run's output (and any files it writes)
+must match the other implementation's; otherwise the script prints the first
+differing line, saves both outputs next to the inputs, and exits with status 1.
 
-Times are wall-clock times of whole processes that include process start-up,
-compilation (Sand) or bytecode loading (Python), and I/O.
-
-Sand programs are run as `target/release/sand run FILE --max-memory=8G <sandbox flags> -- ARGS`,
-with exactly the set of required permissions (`--allow-stdin`, `--allow-read=DIR`, `--allow-net=127.0.0.1:PORT`, ...).
-`sand run` resolves relative paths against the script's directory, so all paths passed to the programs are absolute.
+Times are wall-clock times of whole processes, including start-up and
+compilation. Sand runs with `--max-memory=8G` and exactly the permissions
+each program needs.
 
 ## Files
 
@@ -48,10 +42,10 @@ with exactly the set of required permissions (`--allow-stdin`, `--allow-read=DIR
 | `servers.py`                | local HTTP page server, fake S3 server and chat client driver |
 | `python/*.py`, `python/s3/` | CPython ports, one per example                                |
 
-Ports use the same algorithms and data structures as their Sand counterparts.
-Where Sand semantics differ from Python's, the ports reproduce Sand's output
-(e.g. Sand's float formatting `1e20` / `NaN`, IEEE results instead of exceptions in `calc`,
-numbers in JSON being floats in `template`). Notable translation choices:
+Ports use the same algorithms and data structures as their Sand counterparts,
+and reproduce Sand's output where its semantics differ (float formatting
+`1e20` / `NaN`, IEEE results in `calc`, JSON numbers as floats in `template`).
+Notable translation choices:
 
 - `Result`/`?` error handling becomes exceptions.
 - `ledger`'s `Monoid`/`Render` traits, which Sand implements for structs and
@@ -68,8 +62,7 @@ numbers in JSON being floats in `template`). Notable translation choices:
 ## Profiling a workload
 
 The `profiling` profile is the release profile with `debug = 1`, so macOS
-`sample` (or Instruments) shows Rust function names and line numbers. Build
-it, materialize the inputs and sample a run, e.g. for `adventure`:
+`sample` (or Instruments) shows Rust function names and line numbers:
 
 ```
 cargo build --profile profiling
@@ -79,10 +72,9 @@ sample $! 3 1 -mayDie -file /tmp/adventure.sample.txt
 ```
 
 Make the input bigger than the benchmark's (e.g. `gen.adventure_script(60_000)`)
-so the run lasts longer than the sampling window. Natives show up as
-`stdlib::core::register_*::{closure}`; `atos -i -o target/release/sand -l
-LOAD_ADDRESS ADDR` on a sampled address maps such a closure to its source
-line, and so to the builtin's name.
+so the run outlasts the sampling window. Natives show up as
+`stdlib::core::register_*::{closure}`; `atos -i -o target/profiling/sand -l
+LOAD_ADDRESS ADDR` maps a sampled address to its source line.
 
 ## Results
 

@@ -30,6 +30,8 @@ for p in task.all(pages) {
 ## Highlights
 
 - Sandboxed, with resource limits, under policies written as code or text
+- Resources: `use f = fs.open(path)?` closes `f` when its block ends, and
+  the linter reports resources that are never closed or that escape
 - Embeddable in a larger process, or in a web page (WebAssembly)
 - Async by default
 - Types and traits
@@ -71,11 +73,8 @@ limit memory 64M
 limit time 10s
 ```
 
-On a terminal the REPL has a line editor: the arrow keys move the cursor
-(Option/Alt-arrows by word, Home/End or Command-arrows to the ends of the
-line), Up and Down recall earlier inputs (kept in `~/.sand_history`, or
-`$SAND_HISTORY`), Ctrl-R searches them, and an input with open brackets
-continues on `...` lines and is edited as a whole. `:help` lists the keys.
+On a terminal the REPL has a line editor with history (`~/.sand_history`, or
+`$SAND_HISTORY`); `:help` lists the keys.
 
 ## Embedding
 
@@ -98,11 +97,9 @@ session.eval("import geo\nlet d = geo.dist(3.0, 4.0)").await?;
 assert_eq!(session.eval("d * 2.0").await?, Some("10.0".to_string()));
 ```
 
-The library's default feature is `os`; `tls` adds TLS for `https` and
-`net.connect_tls`. Without `os` the engine cannot reach the operating
-system at all (no host files, sockets, environment or standard input):
-scripts see an in-memory file system the host fills and reads back, which
-any engine can also be given with `Config::memory_fs(MemFs)`.
+The default feature `os` gives access to the operating system; without it,
+scripts see an in-memory file system the host fills and reads back
+(`Config::memory_fs`). `tls` adds TLS for `https` and `net.connect_tls`.
 
 See [`docs/SPEC.md`](docs/SPEC.md) for the language specification and
 [`docs/INTERNALS.md`](docs/INTERNALS.md) for the implementation.
@@ -110,9 +107,8 @@ See [`docs/SPEC.md`](docs/SPEC.md) for the language specification and
 ## In the browser
 
 The engine also builds for WebAssembly (`wasm/`, JavaScript bindings).
-`playground/` is a web page to try Sand: each sandbox has its program (and
-extra files) beside its policy, and runs in its own engine in its own Web
-Worker, so several run at once.
+`playground/` is a web page to try Sand, each sandbox in its own engine and
+Web Worker.
 
 ```
 playground/build.sh     # builds the engine for the web (needs wasm-bindgen-cli)

@@ -5,7 +5,7 @@
 //! Closing a socket wakes every pending operation on it (they fail with kind
 //! `"closed"`) and releases the OS socket once those operations have finished.
 
-use super::stream::{IoFailure, read_line_bytes, strip_eol};
+use super::stream::{IoFailure, read_line_bytes, read_to_end_reserved, strip_eol};
 use crate::check::ModKind;
 use crate::engine::Registry;
 use crate::policy::{Capability, Decision, Policy, is_private_address};
@@ -31,29 +31,21 @@ pub fn register(r: &mut Registry) {
         let addr = listener(vm, a[0])?.addr.clone();
         Ok(vm.new_str(addr))
     });
-    r.add_builtin("net.Listener.close", |vm, a| {
-        let l = vm.heap.native_mut::<Listener>(a[0]).ok_or_else(|| Ctl::panic("not a listener"))?;
-        if l.close() {
-            vm.heap.resource_closed();
-        }
+    r.add_method("net.Listener.close", |vm, a| {
+        vm.heap.native_mut::<Listener>(a[0]).ok_or_else(|| Ctl::panic("not a listener"))?.close();
         Ok(Value::Unit)
     });
-    r.add_builtin("net.Conn.read", conn_read);
-    r.add_builtin("net.Conn.read_line", conn_read_line);
-    r.add_builtin("net.Conn.write", |vm, a| conn_write(vm, a[0], a[1]));
-    r.add_builtin("net.Conn.write_str", |vm, a| conn_write(vm, a[0], a[1]));
+    r.add_method("net.Conn.read", conn_read);
+    r.add_method("net.Conn.read_line", conn_read_line);
+    r.add_method("net.Conn.read_all", conn_read_all);
+    r.add_method("net.Conn.write", |vm, a| conn_write(vm, a[0], a[1]));
+    r.add_method("net.Conn.write_str", |vm, a| conn_write(vm, a[0], a[1]));
     r.add_builtin("net.Conn.peer_addr", |vm, a| {
         let peer = conn(vm, a[0])?.peer.clone();
         Ok(vm.new_str(peer))
     });
-    r.add_builtin("net.Conn.close", |vm, a| {
-        let c = vm.heap.native_mut::<Conn>(a[0]).ok_or_else(|| Ctl::panic("not a connection"))?;
-        let before = c.size();
-        if c.close() {
-            let after = c.size();
-            vm.heap.resource_closed();
-            vm.heap.account(before, after);
-        }
+    r.add_method("net.Conn.close", |vm, a| {
+        vm.heap.native_mut::<Conn>(a[0]).ok_or_else(|| Ctl::panic("not a connection"))?.close();
         Ok(Value::Unit)
     });
 }
@@ -61,7 +53,6 @@ pub fn register(r: &mut Registry) {
 // ----------------------------------------------------------------------
 // Errors and results
 
-/// The error of an operation on a closed connection.
 pub(crate) fn closed() -> IoFailure {
     IoFailure::new("closed", "connection closed")
 }
@@ -90,47 +81,32 @@ pub(crate) fn check_permission(vm: &mut Vm, cap: Capability) -> Result<Option<Va
     if vm.permit(&cap)? { Ok(None) } else { Ok(Some(vm.err_value("permission_denied", &format!("permission denied: {cap}")))) }
 }
 
-/// Takes a slot for a socket about to be opened (or used) by a pending
-/// operation, counted against `max_open_resources` together with the open
-/// sockets on the heap and the slots of other pending operations. `Err` is
-/// the `Err(Error { kind: "limit" })` value to return. The slot is released
-/// when dropped: when the operation fails, finishes or is cancelled, or right
-/// before its socket becomes a heap object ([`alloc_resource`]).
-pub(crate) fn resource_slot(vm: &mut Vm) -> Result<ResourceSlot, Value> {
-    let max = vm.host.limits.max_open_resources;
-    let mem = vm.heap.io_memory.clone();
-    if vm.heap.open_resources.saturating_add(mem.pending_resources()) >= max {
-        return Err(vm.err_value("limit", &format!("too many open resources (limit {max})")));
-    }
-    Ok(ResourceSlot::new(&mem))
+/// A native object holding an open resource, counted by its slot (see
+/// `iomem::ResourceSlot`) until closed or collected.
+pub(crate) trait Resource: NativeObject {
+    /// Takes the slot that counted the resource while it was being opened.
+    fn attach(&mut self, slot: ResourceSlot);
 }
 
-/// Like [`resource_slot`], for a connection: also reserves `buffers` bytes
-/// for its fixed buffers ([`CONN_BUFFER`], ...), which its `Conn` object
-/// counts once it exists.
-pub(crate) fn conn_slot(vm: &mut Vm, buffers: usize) -> Result<ResourceSlot, Value> {
-    let mut slot = resource_slot(vm)?;
-    vm.heap.io_memory.publish_heap(vm.heap.used());
-    match slot.reserve_buffers(buffers) {
-        Ok(()) => Ok(slot),
-        Err(e) => Err(vm.err_value("limit", &format!("cannot open a connection: its buffers ({buffers} bytes) do not fit: {e}"))),
-    }
+/// Allocates the object of a resource that `slot` counted while it was
+/// being opened (the object keeps the slot until it is closed).
+pub(crate) fn alloc_resource<T: Resource>(vm: &mut Vm, mut obj: T, slot: ResourceSlot) -> Value {
+    obj.attach(slot);
+    vm.heap.alloc(Obj::Native(Box::new(obj)))
 }
 
-/// Allocates a socket object in place of the slot that counted it.
-pub(crate) fn alloc_resource(vm: &mut Vm, obj: Box<dyn NativeObject>, slot: ResourceSlot) -> Value {
-    drop(slot);
-    vm.heap.alloc(Obj::Native(obj))
-}
-
-/// Like [`suspend`] for operations that produce a socket object, counted by
-/// `slot` until then.
-fn suspend_resource<T: NativeObject>(slot: ResourceSlot, fut: impl Future<Output = Result<T, IoFailure>> + Send + 'static) -> NResult {
+/// Like [`suspend`] for operations that produce a resource object,
+/// counted by `slot` from the start (a socket being connected or accepted
+/// is open already).
+pub(crate) fn suspend_resource<T: Resource>(
+    slot: ResourceSlot,
+    fut: impl Future<Output = Result<T, IoFailure>> + Send + 'static,
+) -> NResult {
     Err(Ctl::suspend(Box::pin(async move {
         let r = fut.await;
         Box::new(move |vm: &mut Vm| match r {
             Ok(obj) => {
-                let v = alloc_resource(vm, Box::new(obj), slot);
+                let v = alloc_resource(vm, obj, slot);
                 Ok(vm.ok(v))
             }
             Err(e) => e.into_value(vm),
@@ -146,6 +122,16 @@ fn suspend_resource<T: NativeObject>(slot: ResourceSlot, fut: impl Future<Output
 pub(crate) struct CloseSignal(watch::Receiver<bool>);
 
 impl CloseSignal {
+    /// The signal of `sender`'s socket.
+    pub fn of(sender: &watch::Sender<bool>) -> CloseSignal {
+        CloseSignal(sender.subscribe())
+    }
+
+    /// Whether the socket has been closed.
+    pub fn is_closed(&self) -> bool {
+        *self.0.borrow()
+    }
+
     /// Runs `op` unless (or until) the socket is closed.
     pub async fn guard<T>(mut self, op: impl Future<Output = Result<T, IoFailure>>) -> Result<T, IoFailure> {
         if *self.0.borrow() {
@@ -163,6 +149,7 @@ impl CloseSignal {
 
 pub(crate) struct Listener {
     socket: Option<Arc<TcpListener>>,
+    slot: Option<ResourceSlot>,
     addr: String,
     closed: watch::Sender<bool>,
 }
@@ -170,13 +157,20 @@ pub(crate) struct Listener {
 impl Listener {
     fn new(socket: TcpListener) -> std::io::Result<Listener> {
         let addr = socket.local_addr()?.to_string();
-        Ok(Listener { socket: Some(Arc::new(socket)), addr, closed: watch::Sender::new(false) })
+        Ok(Listener { socket: Some(Arc::new(socket)), slot: None, addr, closed: watch::Sender::new(false) })
     }
 
-    /// Closes the listener; true if it was open.
-    fn close(&mut self) -> bool {
+    /// Closes the listener (the socket once pending accepts have ended).
+    fn close(&mut self) {
         self.closed.send_replace(true);
-        self.socket.take().is_some()
+        self.socket = None;
+        self.slot = None;
+    }
+}
+
+impl Resource for Listener {
+    fn attach(&mut self, slot: ResourceSlot) {
+        self.slot = Some(slot);
     }
 }
 
@@ -199,22 +193,12 @@ fn listener(vm: &Vm, v: Value) -> Result<&Listener, Ctl> {
     vm.heap.native::<Listener>(v).ok_or_else(|| Ctl::panic("not a listener"))
 }
 
-/// The socket of the listener `v` and its close signal, for accepting
-/// connections; `None` if the listener is closed.
-pub(crate) fn listener_socket(vm: &Vm, v: Value) -> Result<Option<(Arc<TcpListener>, CloseSignal)>, Ctl> {
-    let l = listener(vm, v)?;
-    Ok(l.socket.clone().map(|s| (s, CloseSignal(l.closed.subscribe()))))
-}
-
 fn listen(vm: &mut Vm, a: &[Value]) -> NResult {
     let addr = vm.str(a[0]).to_string();
     if let Some(denied) = check_permission(vm, Capability::NetListen(addr.clone()))? {
         return Ok(denied);
     }
-    let slot = match resource_slot(vm) {
-        Ok(s) => s,
-        Err(e) => return Ok(e),
-    };
+    let slot = super::or_return!(vm.resource_slot());
     suspend_resource(slot, async move { Ok(Listener::new(TcpListener::bind(addr).await?)?) })
 }
 
@@ -223,10 +207,7 @@ fn listener_accept(vm: &mut Vm, a: &[Value]) -> NResult {
     let Some(socket) = l.socket.clone() else { return Ok(vm.err_value("closed", "listener closed")) };
     let closed = CloseSignal(l.closed.subscribe());
     // A pending accept holds a slot for the connection it will produce.
-    let slot = match conn_slot(vm, CONN_BUFFER) {
-        Ok(s) => s,
-        Err(e) => return Ok(e),
-    };
+    let slot = super::or_return!(vm.resource_slot_with(CONN_BUFFER, "a connection"));
     suspend_resource(
         slot,
         closed.guard(async move {
@@ -247,6 +228,12 @@ pub(crate) const CONN_BUFFER: usize = 8 << 10;
 pub(crate) const TLS_BUFFERS: usize = 40 << 10;
 
 pub(crate) type ReadHalf = BufReader<Box<dyn AsyncRead + Send + Unpin>>;
+
+/// The buffered read half of a connection over `reader` (its buffer is
+/// [`CONN_BUFFER`]).
+pub(crate) fn read_half(reader: Box<dyn AsyncRead + Send + Unpin>) -> ReadHalf {
+    BufReader::with_capacity(CONN_BUFFER, Box::new(StickyEof { inner: reader, eof: false }))
+}
 pub(crate) type WriteHalf = Box<dyn AsyncWrite + Send + Unpin>;
 type SharedReader = Arc<Mutex<ReadHalf>>;
 type SharedWriter = Arc<Mutex<WriteHalf>>;
@@ -261,16 +248,15 @@ pub(crate) struct ConnHandle {
 
 pub(crate) struct Conn {
     halves: Option<(SharedReader, SharedWriter)>,
+    /// Counts the connection, and reserves its fixed buffers, while open.
+    slot: Option<ResourceSlot>,
     peer: String,
     closed: watch::Sender<bool>,
-    /// Bytes of fixed buffers held while open.
-    buffers: usize,
 }
 
 /// Makes end of stream final: once the peer has finished sending, later reads
-/// report end of stream again instead of consulting the socket. (Some
-/// platforms report a reset received after the peer's FIN — e.g. in answer
-/// to data written after it closed — as an error on the next read.)
+/// report end of stream again: some platforms report a reset received after
+/// the peer's FIN as an error on the next read.
 struct StickyEof<R> {
     inner: R,
     eof: bool,
@@ -297,23 +283,26 @@ impl<R: AsyncRead + Unpin> AsyncRead for StickyEof<R> {
 }
 
 impl Conn {
-    /// A connection over `reader` and `writer`, which hold `extra` bytes of
-    /// buffers besides the connection's own read buffer ([`CONN_BUFFER`]).
-    /// Its slot has reserved them all.
-    pub fn new(reader: Box<dyn AsyncRead + Send + Unpin>, writer: WriteHalf, peer: String, extra: usize) -> Conn {
-        let reader: Box<dyn AsyncRead + Send + Unpin> = Box::new(StickyEof { inner: reader, eof: false });
+    /// A connection over `reader` and `writer`; its slot reserves their buffers.
+    pub fn new(reader: Box<dyn AsyncRead + Send + Unpin>, writer: WriteHalf, peer: String) -> Conn {
+        Conn::with_reader(read_half(reader), writer, peer)
+    }
+
+    /// A connection over a reader made by [`read_half`] (which may have
+    /// been read from already).
+    pub fn with_reader(reader: ReadHalf, writer: WriteHalf, peer: String) -> Conn {
         Conn {
-            halves: Some((Arc::new(Mutex::new(BufReader::with_capacity(CONN_BUFFER, reader))), Arc::new(Mutex::new(writer)))),
+            halves: Some((Arc::new(Mutex::new(reader)), Arc::new(Mutex::new(writer)))),
+            slot: None,
             peer,
             closed: watch::Sender::new(false),
-            buffers: CONN_BUFFER + extra,
         }
     }
 
     fn from_tcp(stream: TcpStream) -> std::io::Result<Conn> {
         let peer = stream.peer_addr()?.to_string();
         let (r, w) = stream.into_split();
-        Ok(Conn::new(Box::new(r), Box::new(w), peer, 0))
+        Ok(Conn::new(Box::new(r), Box::new(w), peer))
     }
 
     /// The handle for an operation, or `None` if the connection is closed.
@@ -322,19 +311,35 @@ impl Conn {
         Some(ConnHandle { reader, writer, closed: CloseSignal(self.closed.subscribe()) })
     }
 
-    /// Closes the connection; true if it was open.
-    fn close(&mut self) -> bool {
+    /// Closes the connection: the socket is closed once pending operations
+    /// (which fail with kind `"closed"`) have ended.
+    fn close(&mut self) {
         self.closed.send_replace(true);
-        self.halves.take().is_some()
+        if let Some((_, w)) = self.halves.take()
+            && let Ok(mut w) = w.try_lock()
+        {
+            shutdown_now(&mut **w);
+        }
+        self.slot = None;
+    }
+}
+
+/// Starts closing `w` without waiting: a TLS stream sends its
+/// `close_notify` and a TCP stream its FIN, if the socket takes them now.
+pub(crate) fn shutdown_now<W: AsyncWrite + Unpin + ?Sized>(w: &mut W) {
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    let _ = std::pin::Pin::new(w).poll_shutdown(&mut cx);
+}
+
+impl Resource for Conn {
+    fn attach(&mut self, slot: ResourceSlot) {
+        self.slot = Some(slot);
     }
 }
 
 impl NativeObject for Conn {
     fn type_name(&self) -> &'static str {
         "Conn"
-    }
-    fn size(&self) -> usize {
-        64 + if self.halves.is_some() { self.buffers } else { 0 }
     }
     fn is_resource(&self) -> bool {
         self.halves.is_some()
@@ -429,10 +434,7 @@ fn connect(vm: &mut Vm, a: &[Value]) -> NResult {
         return Ok(denied);
     }
     // Counted from the start: a connection attempt holds a socket.
-    let slot = match conn_slot(vm, CONN_BUFFER) {
-        Ok(s) => s,
-        Err(e) => return Ok(e),
-    };
+    let slot = super::or_return!(vm.resource_slot_with(CONN_BUFFER, "a connection"));
     let timeout = Duration::from_nanos(a[1].as_int().max(0) as u64);
     let policy = vm.host.policy.clone();
     suspend_resource(slot, async move { Ok(Conn::from_tcp(tcp_connect(&policy, &host, port, timeout).await?)?) })
@@ -442,18 +444,15 @@ fn connect_tls(vm: &mut Vm, a: &[Value]) -> NResult {
     if !cfg!(feature = "tls") {
         return Ok(vm.err_value("invalid", "TLS support is not enabled in this build"));
     }
-    let host = vm.str(a[0]).trim_start_matches('[').trim_end_matches(']').to_string();
-    let Ok(port) = u16::try_from(a[1].as_int()) else {
-        return Ok(vm.err_value("invalid", &format!("invalid port {}", a[1].as_int())));
+    let addr = vm.str(a[0]);
+    let Some((host, port)) = split_host_port(addr) else {
+        return Ok(vm.err_value("invalid", &format!("invalid address {:?} (expected host:port)", super::truncate(addr, 200))));
     };
     if let Some(denied) = check_permission(vm, Capability::Net { host: host.clone(), port })? {
         return Ok(denied);
     }
-    let slot = match conn_slot(vm, CONN_BUFFER + TLS_BUFFERS) {
-        Ok(s) => s,
-        Err(e) => return Ok(e),
-    };
-    let timeout = Duration::from_nanos(a[2].as_int().max(0) as u64);
+    let slot = super::or_return!(vm.resource_slot_with(CONN_BUFFER + TLS_BUFFERS, "a connection"));
+    let timeout = Duration::from_nanos(a[1].as_int().max(0) as u64);
     let policy = vm.host.policy.clone();
     let settings = vm.host.tls.clone();
     // The timeout covers connecting and the handshake, so a peer that
@@ -464,7 +463,7 @@ fn connect_tls(vm: &mut Vm, a: &[Value]) -> NResult {
         let peer = tcp.peer_addr()?.to_string();
         let tls = tls::connect(&settings, &host, tcp).await?;
         let (r, w) = tokio::io::split(tls);
-        Ok(Conn::new(Box::new(r), Box::new(w), peer, TLS_BUFFERS))
+        Ok(Conn::new(Box::new(r), Box::new(w), peer))
     };
     suspend_resource(slot, async move {
         match tokio::time::timeout(timeout, open).await {
@@ -487,10 +486,7 @@ fn conn_read(vm: &mut Vm, a: &[Value]) -> NResult {
         Err(e) => return Ok(e),
     };
     // The buffer is counted against the memory limit while the read is pending.
-    let res = match vm.reserve_io(max) {
-        Ok(r) => r,
-        Err(e) => return Ok(e),
-    };
+    let res = super::or_return!(vm.reserve_io(max));
     suspend(
         h.closed.guard(async move {
             let mut reader = h.reader.lock().await;
@@ -502,6 +498,7 @@ fn conn_read(vm: &mut Vm, a: &[Value]) -> NResult {
         |vm, (data, res)| {
             drop(res);
             vm.reserve(data.len())?;
+            vm.charge_bytes(data.len())?;
             Ok(vm.heap.new_bytes(data))
         },
     )
@@ -527,11 +524,36 @@ fn conn_read_line(vm: &mut Vm, a: &[Value]) -> NResult {
             Ok(match line {
                 Some(s) => {
                     vm.reserve(s.len())?;
+                    vm.charge_slow_bytes(s.len())?;
                     let s = vm.new_str(s);
                     vm.some(s)
                 }
                 None => vm.none(),
             })
+        },
+    )
+}
+
+/// Reads until the peer has finished sending; the data is reserved as it
+/// arrives.
+fn conn_read_all(vm: &mut Vm, a: &[Value]) -> NResult {
+    let h = match conn_handle(vm, a[0])? {
+        Ok(h) => h,
+        Err(e) => return Ok(e),
+    };
+    let mut res = vm.io_reservation();
+    suspend(
+        h.closed.guard(async move {
+            let mut reader = h.reader.lock().await;
+            let mut data = Vec::new();
+            read_to_end_reserved(&mut *reader, &mut data, &mut res, usize::MAX).await?;
+            Ok((data, res))
+        }),
+        |vm, (data, res)| {
+            drop(res);
+            vm.reserve(data.len())?;
+            vm.charge_bytes(data.len())?;
+            Ok(vm.heap.new_bytes(data))
         },
     )
 }
@@ -547,10 +569,7 @@ fn conn_write(vm: &mut Vm, c: Value, v: Value) -> NResult {
     }
     let len = bytes(vm, v).len();
     vm.charge_bytes(len)?;
-    let res = match vm.reserve_io(len) {
-        Ok(r) => r,
-        Err(e) => return Ok(e),
-    };
+    let res = super::or_return!(vm.reserve_io(len));
     let data = bytes(vm, v).to_vec();
     write_bytes(vm, c, data, res)
 }

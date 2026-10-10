@@ -310,12 +310,12 @@ fn allow_env_names() {
 #[test]
 fn standard_input() {
     let src = r#"import io
-match io.read_line() {
+match io.stdin.read_line() {
     Ok(Some(line)) => print("line: \(line)")
     Ok(None) => print("eof")
     Err(e) => print("error: \(e.kind)")
 }
-print(io.read_all().map(s => s.len()))
+print(io.stdin.read_text().map(s => s.len()))
 "#;
     let dir = script("stdin", src);
     let o = sand_in(dir.path(), &["run", "main.sand"], "first\nsecond\n", &[]);
@@ -518,7 +518,7 @@ fn repl_runs_each_input_once() {
     assert_eq!(repl_shown(&o.stdout), ["start", "2", "11", "20"], "{o:?}");
     assert_eq!(o.stderr, "", "{o:?}");
     // Effects such as writing files happen once too.
-    let input = "import fs\nfs.append_text(\"log.txt\", \"x\")?\nfs.append_text(\"log.txt\", \"y\")?\nfs.read_text(\"log.txt\")?\n";
+    let input = "import fs\nfs.write_text(\"log.txt\", \"x\")?\nfs.write_text(\"log.txt\", fs.read_text(\"log.txt\")? + \"y\")?\nfs.read_text(\"log.txt\")?\n";
     let o = sand_in(dir.path(), &["repl", "--allow-write=."], input, &[]);
     assert_eq!(repl_shown(&o.stdout), ["\"xy\""], "{o:?}");
 }

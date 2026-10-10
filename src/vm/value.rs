@@ -126,8 +126,8 @@ pub fn to_usize_saturating(n: i64) -> usize {
 }
 
 /// A script integer used as an index: `None` if it is negative or too large
-/// for `usize` (only possible on 32-bit targets), when it is out of bounds
-/// of every sequence.
+/// for `usize` (only possible on 32-bit targets), as such an index is out of
+/// bounds of every sequence.
 #[inline]
 pub fn to_index(i: i64) -> Option<usize> {
     usize::try_from(i).ok()
@@ -175,19 +175,17 @@ impl VariantRef<'_> {
     }
 }
 
-/// The fast hasher of map and set keys. FxHash, but each 8-byte word is mixed
+/// The fast hasher of map and set keys: FxHash, but each 8-byte word is mixed
 /// in with a folded multiply (the two halves of a 128-bit product XORed, as in
 /// foldhash), starting from a random per-process seed.
 ///
-/// Scripts choose map and set keys, so they must not be able to choose keys
-/// that collide: in a table full of collisions every operation, charged as
-/// a unit or so, scans all the colliding keys. Plain FxHash failed both
-/// ways: the low bits of its product, which pick the bucket, depend only on
-/// the low bits of the key (so all multiples of 2^32 collided), and any set
-/// of colliding keys could be computed in advance. The folded multiply
-/// makes every bit of the key affect the low bits, and the seed, which
-/// scripts cannot observe (no iteration order depends on hashes), keeps
-/// collisions from being computed in advance.
+/// Scripts choose map and set keys, so they must not be able to make keys
+/// collide: in a table full of collisions every operation, charged about one
+/// unit, scans all the colliding keys. The folded multiply makes every bit of
+/// the key affect the low bits that pick the bucket (with plain FxHash they
+/// depend only on the key's low bits, so all multiples of 2^32 collide). The
+/// seed keeps colliding keys from being computed in advance; scripts cannot
+/// observe it, since no iteration order depends on hashes.
 #[derive(Clone, Copy)]
 pub struct FxHasher {
     hash: u64,
@@ -499,7 +497,9 @@ pub trait NativeObject: Any + Send {
     fn size(&self) -> usize {
         64
     }
-    /// Whether this object counts against the open-resource limit.
+    /// Whether this object holds an open resource (with its
+    /// `iomem::ResourceSlot`, which counts it against `max_open_resources`);
+    /// allocating such objects paces garbage collection.
     fn is_resource(&self) -> bool {
         false
     }
@@ -650,7 +650,6 @@ impl std::fmt::Debug for Obj {
 
 const VALUE_SIZE: usize = std::mem::size_of::<Value>();
 
-// Objects are kept small.
 const _: () = assert!(std::mem::size_of::<Obj>() == 32);
 
 /// Bytes of an entry of a map (`Option<(Value, Value)>`).

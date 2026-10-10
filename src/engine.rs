@@ -37,14 +37,11 @@ pub struct Limits {
     pub max_open_resources: usize,
     pub max_output_bytes: Option<u64>,
     pub max_http_body: usize,
-    /// Total size of the program's source files (the main file and every
-    /// imported script; the standard library is not counted).
+    /// Total size of the main file and imported scripts, not counting the
+    /// standard library.
     pub max_source_bytes: usize,
-    /// Work allowed for type checking, in compile fuel units (about one per
-    /// expression checked, unification step, type node and pattern row; see
-    /// `check::budget`). `None` means unlimited. Compilation is also bounded
-    /// by `max_wall_time` (counted from the start of compilation) and can be
-    /// stopped with an `InterruptHandle`.
+    /// Work allowed for type checking, in compile fuel units; `None` means
+    /// unlimited. Compilation also counts against `max_wall_time`.
     pub max_compile_fuel: Option<u64>,
 }
 
@@ -127,9 +124,8 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 impl Error {
-    /// The exit status of `sand run` (and every tool) for the error: 1 for
-    /// a runtime error, 2 for compile errors (and unreadable files), 3 for
-    /// a limit, 130 when interrupted.
+    /// The exit status of the `sand` tools for the error: 1 for a runtime
+    /// error, 2 for compile and I/O errors, 3 for a limit, 130 if interrupted.
     pub fn exit_code(&self) -> i32 {
         match self {
             Error::Runtime { .. } => 1,
@@ -139,9 +135,8 @@ impl Error {
         }
     }
 
-    /// The error as tools report it: diagnostics with an excerpt of their
-    /// source line (as it was compiled), else its message; ends with a
-    /// line break.
+    /// The error as tools report it, ending with a line break: diagnostics
+    /// with an excerpt of their source line, else the message.
     pub fn render(&self) -> String {
         match self {
             Error::Compile(diags) => diags.iter().map(Diagnostic::render).collect(),
@@ -360,13 +355,10 @@ impl Config {
         self.stdin = StdinConfig::Inherit;
         self
     }
-    /// Scripts see the memory file system `fs` (the `fs` module and script
-    /// imports, and the main file of [`Engine::run_file`]) instead of the
-    /// host's. Without the `os` feature, engines have an empty memory file
-    /// system unless one is given here.
-    ///
-    /// The working directory ([`Config::cwd`]) and module root
-    /// ([`Config::module_root`]) are then paths of `fs`, by default its root.
+    /// Scripts, their imports and the main file of [`Engine::run_file`] use
+    /// `fs` instead of the host's file system, with [`Config::cwd`] and
+    /// [`Config::module_root`] as paths in `fs` (by default its root).
+    /// Without the `os` feature, engines have an empty memory file system.
     pub fn memory_fs(mut self, fs: MemFs) -> Self {
         self.fs = Fs::Memory(fs);
         self
@@ -396,22 +388,20 @@ impl Config {
     }
     /// Testing aid: run a garbage collection at every safe point (every
     /// loop iteration and call), alternating minor and major collections.
-    /// Very slow. (The `sand` command enables it with the `SAND_GC_STRESS`
-    /// environment variable.)
+    /// Very slow.
     #[doc(hidden)]
     pub fn gc_stress(mut self, on: bool) -> Self {
         self.gc_stress = on;
         self
     }
     /// Debugging aid: print the bytecode of the program's own functions to
-    /// standard error before running it. (The `sand` command enables it with
-    /// the `SAND_DUMP_BYTECODE` environment variable.)
+    /// standard error before running it.
     #[doc(hidden)]
     pub fn dump_bytecode(mut self, on: bool) -> Self {
         self.dump_bytecode = on;
         self
     }
-    /// The process exits right after `run_file`/`run_source` returns
+    /// The process exits right after `run_file`/`run_source` returns.
     #[doc(hidden)]
     pub fn exit_after_run(mut self, on: bool) -> Self {
         self.exit_after_run = on;
@@ -533,7 +523,7 @@ impl Registry {
         for m in &config.modules {
             m.register(&mut r);
         }
-        // (A host module replacing a standard one needs a snapshot of its own.)
+        // A host module replacing a standard one needs a snapshot of its own.
         if !r.sources.iter().any(|(name, (kind, _))| *kind == ModKind::Host && std.sources.contains_key(name)) {
             r.base = Some(std);
         }
@@ -554,6 +544,14 @@ impl Registry {
 
     pub fn add_builtin(&mut self, name: impl Into<Cow<'static, str>>, f: crate::vm::NativeFn) {
         self.add(name, crate::vm::NativeImpl::Builtin(f));
+    }
+
+    /// Registers the native implementing a trait method in an impl
+    /// (`impl Close for File { native fn close(self) }` is `fs.File.close`):
+    /// `f` receives `self` and the other arguments, without the impl's
+    /// dictionary that trait methods are passed first.
+    pub fn add_method(&mut self, name: impl Into<Cow<'static, str>>, f: crate::vm::NativeFn) {
+        self.add(name, crate::vm::NativeImpl::Method(f));
     }
 
     pub fn source(&mut self, module: impl Into<Cow<'static, str>>, kind: ModKind, src: impl Into<Cow<'static, str>>) {
@@ -612,9 +610,8 @@ impl Registry {
     }
 
     /// The prelude and `task` checked and compiled. A REPL session starts
-    /// from it, and checks the modules it imports itself: copying the
-    /// checker of the whole standard library for each input would cost
-    /// more.
+    /// from it and checks the modules it imports itself, which is cheaper
+    /// than copying the whole library's checker for each input.
     pub(crate) fn core(&self) -> Result<Arc<Snapshot>, Error> {
         if let Some(b) = &self.base {
             return b.core();
@@ -649,9 +646,8 @@ pub(crate) struct Compiled {
     pub program: Arc<Program>,
     /// Checker facts about the main module, for the linter (if asked for).
     pub facts: Option<ResolvedFacts>,
-    /// When the wall-time limit passes for the program's run: it counts
-    /// from the start of the compilation (without the time spent on
-    /// prompts about imports).
+    /// When the run's wall-time limit passes, counted from the start of
+    /// compilation, excluding import prompts.
     pub deadline: Option<Instant>,
     /// The snapshot the program extends, if it only adds to its tables (no
     /// host module had to be compiled), so that it can be recycled.
@@ -759,16 +755,15 @@ impl Engine {
         Arc::new(CompileBudget::new(limits.max_compile_fuel, deadline, Some(self.interrupt.clone())))
     }
 
-    /// Type checks a source without running it; returns warnings. Imports
-    /// the policy would prompt for are refused (checks never prompt).
+    /// Type checks a source without running it. Imports the policy would
+    /// prompt for are refused.
     pub fn check_source(&mut self, name: &str, source: &str) -> Result<Vec<Diagnostic>, Error> {
         let c = self.compile_now(name, source, &self.source_root().1, None, false)?;
         self.recycle(c.program, c.snapshot);
         Ok(Vec::new())
     }
 
-    /// Type checks a file (and its imports) without running it; returns
-    /// warnings. Imports are not prompted for (see [`Engine::check_source`]).
+    /// Type checks a file and its imports, like [`Engine::check_source`].
     pub fn check_file(&mut self, path: impl AsRef<Path>) -> Result<Vec<Diagnostic>, Error> {
         let (name, source, root) = self.read_main(path.as_ref())?;
         let c = self.compile_now(&name, &source, &root, Some(path.as_ref()), false)?;
@@ -776,17 +771,16 @@ impl Engine {
         Ok(Vec::new())
     }
 
-    /// Keeps the program `prog` (if `recyclable` and no longer in use),
+    /// Keeps `prog` (if `snapshot` is given and nothing else holds it),
     /// truncated to the snapshot's tables, to compile the next program on:
-    /// copying the snapshot's program and dropping it again cost more than
-    /// compiling a small program.
+    /// copying the snapshot's program costs more than compiling a small one.
     fn recycle(&self, prog: Arc<Program>, snapshot: Option<Arc<Snapshot>>) {
         let (Ok(mut prog), Some(snap)) = (Arc::try_unwrap(prog), snapshot) else { return };
         snap.mark.rollback(&mut prog);
         *self.spare.lock().unwrap_or_else(|e| e.into_inner()) = Some((snap, prog));
     }
 
-    /// Compiles without prompting, which never waits: synchronously.
+    /// Compiles synchronously: without prompts, it never waits.
     fn compile_now(&self, name: &str, source: &str, root: &Path, path: Option<&Path>, facts: bool) -> Result<Compiled, Error> {
         let options = CompileOptions { prompt: false, facts };
         let compiling = std::pin::pin!(self.compile_with(name, source, root, path, options));
@@ -850,7 +844,8 @@ impl Engine {
             let result = match init {
                 Ok(RunEnd::Finished(_)) => {
                     vm.ready.clear();
-                    match vm.run_main(proto).await {
+                    let r = vm.run_main(proto).await;
+                    match end_run(&mut vm, r).await {
                         Ok(RunEnd::Finished(_)) | Ok(RunEnd::Exit(0)) => Ok(()),
                         Ok(RunEnd::Exit(c)) => Err(format!("exited with code {c}")),
                         Err(t) => Err(trap_message(t)),
@@ -944,6 +939,7 @@ impl Engine {
         let mut vm = self.new_vm(prog.clone(), cwd, false);
         vm.deadline = compiled.deadline;
         let r = vm.run_main(prog.entry).await;
+        let r = end_run(&mut vm, r).await;
         let _ = self.config.stdout.flush();
         self.gc_stats = vm.heap.stats;
         if self.config.exit_after_run {
@@ -1011,14 +1007,9 @@ impl Engine {
         main_path: Option<&Path>,
         options: CompileOptions,
     ) -> Result<Compiled, Error> {
-        // A new run: forget interrupts of previous runs. Interrupts from now
-        // on stop compilation or execution.
-        self.interrupt.store(false, Ordering::SeqCst);
-        // The full snapshot if it is made already, otherwise the core: then
-        // the standard modules the program imports are loaded, and the
-        // program is compiled on a snapshot extended with just those (see
-        // `Registry::extended`), so that one-off runs (the `sand` command)
-        // do not check and compile the whole library.
+        self.clear_interrupt();
+        // Unless the full snapshot exists, compile on the core extended with
+        // just the standard modules the program imports (`Registry::extended`).
         let mut snap = match self.registry.ready() {
             Some(s) => s,
             None => self.registry.core()?,
@@ -1029,9 +1020,7 @@ impl Engine {
             let f = g.sm.add(main_name, "");
             return Err(Error::Compile(vec![g.sm.resolve(&Diag::error(Span::new(f, 0, 0), "source too large"))]));
         }
-        // The directory of the main file itself (a symlink to it resolved),
-        // like the default module root (`read_main`), so that the main
-        // file's imports resolve as they do next to the file.
+        // The main file's real directory (symlinks resolved), as in `read_main`.
         let fs = &self.config.fs;
         let main_dir =
             main_path.and_then(|p| fs.resolve(&fs.absolute(p)).parent().map(Path::to_path_buf)).unwrap_or_else(|| root.to_path_buf());
@@ -1072,18 +1061,16 @@ impl Engine {
         Ok(Compiled { program, facts, deadline, snapshot: (!natives).then_some(snap) })
     }
 
-    /// Loads the modules imported by module `start` (whose key is `key` and
-    /// whose imports are `imports`) and, depth first, their imports,
-    /// checking script imports against the policy. Appends the new modules
-    /// to `g.order` in dependency order, followed by `start`. Modules
-    /// already in `g` are not loaded again.
+    /// Loads, depth first, the modules `imports` of module `start` (keyed
+    /// `key`) and their imports, checking script imports against the policy.
+    /// Appends the new modules to `g.order` in dependency order, followed by
+    /// `start`.
     ///
     /// This runs before the compile budget exists, so it is bounded on its
     /// own: overlong import paths are refused, discovery stops after
     /// [`MAX_DISCOVERY_ERRORS`] errors, and it returns the error to report
     /// if the engine is interrupted or the wall-time limit passes. Time
-    /// spent deciding imports (waiting for prompt answers) is added to
-    /// `prompted` and does not count against the limit.
+    /// spent waiting for prompt answers is added to `prompted`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn discover(
         &self,
@@ -1167,7 +1154,6 @@ impl Engine {
                         errors.push(Diag::error(span, format!("cannot import `{p}`: script modules are `.sand` files")));
                         continue;
                     }
-                    // One walk resolves the path, and the module is read through it.
                     let mut resolved = self.config.fs.target(&crate::policy::lexical(&target), crate::files::Mode::Follow);
                     // Modules are told apart by their paths: name them as stored.
                     resolved.fix_spelling();
@@ -1241,6 +1227,14 @@ pub(crate) struct Discovery<'a> {
 
 /// Module discovery stops after this many errors (they are all reported).
 const MAX_DISCOVERY_ERRORS: usize = 100;
+
+/// Ends a run whose main task finished (`Vm::end_tasks`).
+async fn end_run(vm: &mut Vm, r: Result<RunEnd, Trap>) -> Result<RunEnd, Trap> {
+    match r {
+        Ok(RunEnd::Finished(v)) => Ok(vm.end_tasks().await?.map_or(RunEnd::Finished(v), RunEnd::Exit)),
+        r => r,
+    }
+}
 
 fn trap_message(t: Trap) -> String {
     match t {

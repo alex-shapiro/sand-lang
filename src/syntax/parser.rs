@@ -13,9 +13,8 @@ const MAX_ERRORS: usize = 50;
 pub struct ParseResult {
     pub module: Module,
     pub comments: Vec<Comment>,
-    /// The tokens, with statement terminators; the payloads of literals
-    /// are taken by the syntax tree (for the formatter, which needs their
-    /// positions).
+    /// The tokens, with statement terminators, for the formatter (the
+    /// contents of string and bytes literals are moved into the syntax tree).
     pub tokens: Vec<Token>,
     pub errors: Vec<Diag>,
 }
@@ -92,8 +91,7 @@ impl<'a> Parser<'a> {
     fn span_from(&self, lo: u32) -> Span {
         Span::new(self.file, lo, self.prev_hi().max(lo))
     }
-    /// Moves to the next token (the parser never goes back); returns the
-    /// span of the current one.
+    /// Moves to the next token; returns the span of the current one.
     fn bump(&mut self) -> Span {
         let span = self.span_here();
         if self.pos + 1 < self.toks.len() {
@@ -265,7 +263,6 @@ impl<'a> Parser<'a> {
                         self.bump();
                     }
                     self.recover();
-                    // A stray closing brace at the top level.
                     if self.at(&Tok::RBrace) {
                         self.error_here("unexpected `}`");
                         self.bump();
@@ -342,16 +339,12 @@ impl<'a> Parser<'a> {
             }
         };
         if !matches!(kind, ItemKind::Stmt(_) | ItemKind::Import(_)) {
-            // Items end at a newline or `;` like statements.
-            if !(self.eat(&Tok::Semi) || self.at(&Tok::Eof) || self.at(&Tok::RBrace) || self.toks[self.pos].newline_before) {
-                self.expected("newline or `;`");
-                return Err(());
-            }
+            self.end_of_item()?;
         }
         Ok(Item { kind, span: self.span_from(lo) })
     }
 
-    /// A string literal without interpolations (`what` is what it is).
+    /// A string literal without interpolations.
     fn plain_string(&mut self, what: &str) -> PResult<String> {
         match self.tok() {
             Tok::Str(_) => Ok(self.take_text()),
@@ -681,7 +674,8 @@ impl<'a> Parser<'a> {
                 self.error_here(format!("`pub` is not allowed on {what} methods; they are public if the trait is"));
                 self.bump();
             }
-            if !self.at(&Tok::Fn) {
+            // Natives may implement the methods of an impl (not declare a trait's).
+            if !(self.at(&Tok::Fn) || (!in_trait && self.at(&Tok::Native))) {
                 self.expected("`fn`");
                 return Err(());
             }
@@ -902,6 +896,21 @@ impl<'a> Parser<'a> {
         Ok(Stmt { kind: StmtKind::Let { pattern, ty, value, else_block, mutable, is_pub: false, doc: None }, span: self.span_from(lo) })
     }
 
+    /// `use name [: type] = value` or `use _ = value`.
+    fn use_stmt(&mut self) -> PResult<Stmt> {
+        let lo = self.lo();
+        self.bump();
+        if !self.at(&Tok::Ident) {
+            self.expected("a name or `_` after `use` (a `use` binding cannot be a pattern)");
+            return Err(());
+        }
+        let name = self.ident("name")?;
+        let ty = if self.eat(&Tok::Colon) { Some(self.ty()?) } else { None };
+        self.expect(&Tok::Eq, "`=`")?;
+        let value = self.expr()?;
+        Ok(Stmt { kind: StmtKind::Use { name, ty, value }, span: self.span_from(lo) })
+    }
+
     fn stmt(&mut self) -> PResult<Stmt> {
         let lo = self.lo();
         match self.tok() {
@@ -911,6 +920,7 @@ impl<'a> Parser<'a> {
                 let e = self.expr()?;
                 Ok(Stmt { kind: StmtKind::Defer(e), span: self.span_from(lo) })
             }
+            Tok::Use => self.use_stmt(),
             Tok::Fn if matches!(self.peek_tok(1), Tok::Ident) => {
                 let doc = self.doc_before(lo);
                 let f = self.fn_decl(false, doc)?;
@@ -1652,7 +1662,7 @@ impl<'a> Parser<'a> {
                         return Err(());
                     };
                     let end = self.bump();
-                    // `:spec)`
+                    // The token spans `:spec)`.
                     let spec = spec.then(|| {
                         let span = Span::new(self.file, end.lo + 1, end.hi - 1);
                         FormatSpecAst { text: self.slice(span).to_string(), span }

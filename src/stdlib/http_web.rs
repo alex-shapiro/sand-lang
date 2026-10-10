@@ -12,7 +12,7 @@
 //! channel. Dropping that wait (a cancelled task, an interrupted run)
 //! aborts the request.
 
-use super::http_common::{Url, header_map, header_pairs, is_token};
+use super::http_common::{BodyReader, MemoryBody, Url, alloc_body, header_list, header_pairs, is_token};
 use super::stream::IoFailure;
 use crate::check::ModKind;
 use crate::engine::Registry;
@@ -30,7 +30,6 @@ use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
 pub fn register(r: &mut Registry) {
-    // The client (`http.sand`) is shared with other builds.
     r.source("http", ModKind::Std, concat!(include_str!("http_web.sand"), include_str!("http.sand")));
     super::http_common::register(r);
     r.add_builtin("http.send", send);
@@ -69,10 +68,7 @@ fn send(vm: &mut Vm, a: &[Value]) -> NResult {
         return Ok(vm.err_value("permission_denied", &format!("permission denied: {cap}")));
     }
     // The request body is held, and the response buffered, outside the heap.
-    let res = match vm.reserve_io(vm.heap.bytes_of(a[3]).len()) {
-        Ok(r) => r,
-        Err(e) => return Ok(e),
-    };
+    let res = super::or_return!(vm.reserve_io(vm.heap.bytes_of(a[3]).len()));
     let body = vm.heap.bytes_of(a[3]).to_vec();
     vm.charge_bytes(body.len())?;
     let request = Request {
@@ -83,6 +79,7 @@ fn send(vm: &mut Vm, a: &[Value]) -> NResult {
         timeout: Duration::from_nanos(a[4].as_int().max(0) as u64),
         max_body: vm.host.limits.max_http_body,
     };
+    let max_body = request.max_body;
     let (id, done) = start(request, res);
     Err(Ctl::suspend(Box::pin(async move {
         let _abort = AbortOnDrop(id);
@@ -92,10 +89,10 @@ fn send(vm: &mut Vm, a: &[Value]) -> NResult {
                 Ok(r) => r,
                 Err(e) => return e.into_value(vm),
             };
-            drop(res);
-            vm.reserve(body.len())?;
-            let headers = header_map(vm, headers)?;
-            let body = vm.heap.new_bytes(body);
+            let headers = header_list(vm, headers)?;
+            // The browser read the body: it stays reserved while it is read.
+            let reader = BodyReader::new(Box::new(MemoryBody::new(body)), None, max_body, Some(res));
+            let body = alloc_body(vm, reader);
             let tuple = vm.heap.new_tuple(vec![Value::Int(status), headers, body]);
             Ok(vm.ok(tuple))
         }) as Finisher
@@ -204,7 +201,6 @@ async fn exchange(id: u64, request: &Request, mut res: Reservation) -> Result<Re
             res.grow(64).map_err(IoFailure::from)?;
         }
     }
-    // The body, as a stream, checked against the limits as it arrives.
     let mut data = Vec::new();
     let body = get(&response, "body");
     if !body.is_null() && !body.is_undefined() {

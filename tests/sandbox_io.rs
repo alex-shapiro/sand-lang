@@ -395,7 +395,7 @@ fn dangling_symlinks_cannot_create_files_outside() {
     let src = r#"
 import fs
 print(fs.write_text("allowed/dangling", "x").unwrap_err().kind)
-print(fs.append_text("allowed/dangling", "x").unwrap_err().kind)
+print(fs.open("allowed/dangling", fs.Mode.Append).unwrap_err().kind)
 print(fs.write_bytes("allowed/dangling", b"x").unwrap_err().message.contains("symbolic link"))
 print(fs.copy("allowed/real.txt", "allowed/dangling").unwrap_err().kind)
 print(fs.create_dir("allowed/dangling_dir/a", recursive: true).unwrap_err().kind)
@@ -526,7 +526,7 @@ print(fs.list_dir("allowed")?)
 /// A script swaps a directory with a symlink to a forbidden directory while
 /// other tasks read through it: whatever the interleaving, no read may see
 /// the forbidden file (it is refused by the policy check or by the no-follow
-/// open). With path-based opens, this leaks the file dozens of times.
+/// open). Path-based opens would leak the file dozens of times.
 #[cfg(unix)]
 #[test]
 fn symlink_swaps_cannot_bypass_the_policy() {
@@ -655,7 +655,7 @@ for i in 0..3000 {
         Err(e) => e.kind
     })
     let _ = fs.write_text("x/new\(i % 7).txt", "w")
-    let _ = fs.append_text("x/file.txt", "")
+    let _ = fs.open("x/file.txt", fs.Mode.Append)
     let _ = fs.create_dir("x/d\(i % 5)/e", recursive: true)
     match fs.list_dir("x") {
         Ok(names) => if names.contains("only-outside.txt") { note(seen, "listed") }
@@ -951,7 +951,7 @@ print(fs.list_dir(".")?)
 // ---------------------------------------------------------------------------
 
 fn limited(bytes: usize) -> impl FnOnce(sandlang::Config) -> sandlang::Config {
-    // The wall time limit turns a regression (buffers pending forever) into a failure.
+    // The wall time limit turns buffers left pending forever into a failure.
     let limits = Limits { max_memory: Some(bytes), max_wall_time: Some(Duration::from_secs(10)), ..Limits::default() };
     move |c| c.policy(Policy::allow_all()).limits(limits)
 }
@@ -1061,8 +1061,17 @@ import net
 let server = http.serve("127.0.0.1:0")?
 let raw = net.listen("127.0.0.1:0")?
 print("ready \(server.addr()) \(raw.addr())")
-let req = server.accept()?
-req.respond(200, b"served after the hostile request")?
+// The hostile request's body does not fit in memory: reading it fails.
+for _ in 0..2 {
+    let req = server.accept()?
+    match req.bytes() {
+        Ok(_) => req.respond(200, b"served after the hostile request")?
+        Err(e) => {
+            print("body: \(e.kind)")
+            let _ = req.respond(413, b"")
+        }
+    }
+}
 let line = raw.accept()?.read_line()
 print(line.unwrap_err().kind)
 print("still running")
@@ -1095,7 +1104,7 @@ print("still running")
     let mut liner = std::net::TcpStream::connect(&raw_addr).unwrap();
     let _ = liner.write_all(&vec![b'b'; 10 << 20]);
     handle.join().unwrap().unwrap();
-    assert!(out.contents().ends_with("limit\nstill running\n"), "{}", out.contents());
+    assert!(out.contents().ends_with("body: limit\nlimit\nstill running\n"), "{}", out.contents());
 }
 
 #[test]
@@ -1143,12 +1152,13 @@ fn oversized_files_and_input_fail_before_being_read() {
     let src = "import fs\nlet e = fs.read_text(\"big.txt\").unwrap_err()\nprint(e.kind)\nprint(e.message)";
     let r = run_with(src, move |c| limited(8 << 20)(c).cwd(cwd));
     assert_eq!(r.ok_stdout(), "limit\nbig.txt: the data does not fit in the memory limit\n");
-    let r = run_with("import io\nprint(io.read_all().unwrap_err().kind)", |c| limited(8 << 20)(c).stdin_bytes(vec![b'a'; 10 << 20]));
+    let r = run_with("import io\nprint(io.stdin.read_all().unwrap_err().kind)", |c| limited(8 << 20)(c).stdin_bytes(vec![b'a'; 10 << 20]));
     assert_eq!(r.ok_stdout(), "limit\n");
-    let r = run_with("import io\nprint(io.read_line().unwrap_err().kind)", |c| limited(8 << 20)(c).stdin_bytes(vec![b'a'; 10 << 20]));
+    let r = run_with("import io\nprint(io.stdin.read_line().unwrap_err().kind)", |c| limited(8 << 20)(c).stdin_bytes(vec![b'a'; 10 << 20]));
     assert_eq!(r.ok_stdout(), "limit\n");
-    let r =
-        run_with("import io\nprint(io.read_line()?)\nprint(io.read_all()?)", |c| limited(8 << 20)(c).stdin_bytes(b"one\r\ntwo\n".to_vec()));
+    let r = run_with("import io\nprint(io.stdin.read_line()?)\nprint(io.stdin.read_text()?)", |c| {
+        limited(8 << 20)(c).stdin_bytes(b"one\r\ntwo\n".to_vec())
+    });
     assert_eq!(r.ok_stdout(), "Some(\"one\")\ntwo\n\n");
 }
 
@@ -1185,9 +1195,8 @@ fn deny_rules_match_unicode_equivalent_spellings() {
     assert_eq!(p.check(&Capability::FsWrite(d.join("future/secret"))), Decision::Allow);
 }
 
-/// The reported bypasses on APFS: renaming or removing protected entries,
-/// and squatting protected paths before they exist, through alternative
-/// spellings.
+/// Alternative spellings on APFS cannot rename or remove protected entries,
+/// or squat protected paths before they exist.
 #[cfg(target_os = "macos")]
 #[test]
 fn unicode_spellings_cannot_bypass_deny_rules_on_apfs() {

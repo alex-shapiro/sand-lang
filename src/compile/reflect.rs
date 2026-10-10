@@ -6,8 +6,8 @@
 //! DAGs: the description of each struct or enum *instance* (a definition
 //! with its type arguments) is built once and shared (`Arc`) by every place
 //! that refers to it, within one description and, through [`DescCache`],
-//! across all the `reflect` call sites of a program (and the inputs of a
-//! REPL session). Each reflected type becomes one shared constant.
+//! across all the `reflect` call sites of a program. Each reflected type
+//! becomes one shared constant.
 //!
 //! A recursive reference to an enclosing struct or enum is a
 //! `TypeDesc::Recur(id)`, resolved by the decoder against the instances it
@@ -104,7 +104,6 @@ impl DescCache {
     }
 }
 
-/// Appends the structural key of `t` to `out`.
 fn type_key(arena: &TypeArena, t: TypeId, out: &mut Key) {
     let list = |l: TyList, out: &mut Key| {
         let ts = arena.list(l);

@@ -4,8 +4,7 @@
 /// A random (version 4) UUID.
 pub native fn v4() -> str
 
-// v7 state: the timestamp and counter of the last UUID generated, so that
-// UUIDs from one engine sort in creation order even within a millisecond.
+// The timestamp and counter of the last v7 UUID generated.
 var last_millis = 0
 var counter = 0
 

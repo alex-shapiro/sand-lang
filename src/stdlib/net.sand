@@ -3,7 +3,16 @@
 //! Connecting requires the `Net(host:port)` capability, listening the
 //! `NetListen(addr)` capability. Sockets count against the
 //! `max_open_resources` limit until they are closed (or collected), and so
-//! do connections being established and pending `accept` calls.
+//! do connections being established and pending `accept` calls. Bind them
+//! with `use` to close them when the block ends:
+//!
+//! ```
+//! use conn = net.connect("example.com:80")?
+//! conn.write_str("GET / HTTP/1.0\r\n\r\n")?
+//! print(conn.read_text()?)
+//! ```
+
+import io
 
 /// Starts listening for TCP connections on `addr` (`host:port`; port `0`
 /// picks a free port).
@@ -13,12 +22,12 @@ pub native fn listen(addr: str) -> Result<Listener>
 /// `"timeout"` if it is not established within `timeout`.
 pub native fn connect(addr: str, timeout: duration = 30s) -> Result<Conn>
 
-/// Opens a TLS connection to `host:port`, verifying the server certificate
-/// for `host` against the bundled web PKI roots and any roots trusted by the
-/// host application (requires the `tls` feature). Fails with kind
-/// `"timeout"` if the connection and the TLS handshake are not completed
-/// within `timeout`.
-pub native fn connect_tls(host: str, port: int, timeout: duration = 30s) -> Result<Conn>
+/// Opens a TLS connection to `addr` (`host:port`), verifying the server
+/// certificate for `host` against the bundled web PKI roots and any roots
+/// trusted by the host application (requires the `tls` feature). Fails with
+/// kind `"timeout"` if the connection and the TLS handshake are not
+/// completed within `timeout`.
+pub native fn connect_tls(addr: str, timeout: duration = 30s) -> Result<Conn>
 
 /// A listening TCP socket.
 pub native type Listener
@@ -28,25 +37,37 @@ extend Listener {
     pub native fn accept(self) -> Result<Conn>
     /// The local address (`host:port`) the listener is bound to.
     pub native fn addr(self) -> str
+}
+
+impl Close for Listener {
     /// Stops listening. Pending and later `accept` calls fail with kind `"closed"`.
-    pub native fn close(self)
+    native fn close(self)
 }
 
 /// A TCP (or TLS) connection. One task may read while another writes.
 pub native type Conn
 
-extend Conn {
+impl io.Reader for Conn {
     /// Reads up to `max` bytes as soon as some are available (at most what
-    /// the connection's 8 KiB buffer holds); empty at end of stream.
-    pub native fn read(self, max: int = 65536) -> Result<bytes>
-    /// Reads one line without its `\n` / `\r\n` terminator; `None` at end of stream.
-    pub native fn read_line(self) -> Result<str?>
-    /// Writes all of `data`.
-    pub native fn write(self, data: bytes) -> Result<()>
-    /// Writes all of `text` as UTF-8.
-    pub native fn write_str(self, text: str) -> Result<()>
+    /// the connection's 8 KiB buffer holds); empty once the peer has
+    /// finished sending.
+    native fn read(self, max: int) -> Result<bytes>
+    native fn read_line(self) -> Result<str?>
+    /// Reads until the peer has finished sending.
+    native fn read_all(self) -> Result<bytes>
+}
+
+impl io.Writer for Conn {
+    native fn write(self, data: bytes) -> Result<()>
+    native fn write_str(self, text: str) -> Result<()>
+}
+
+impl Close for Conn {
+    /// Closes the connection. Pending and later operations fail with kind `"closed"`.
+    native fn close(self)
+}
+
+extend Conn {
     /// The remote address (`host:port`).
     pub native fn peer_addr(self) -> str
-    /// Closes the connection. Pending and later operations fail with kind `"closed"`.
-    pub native fn close(self)
 }

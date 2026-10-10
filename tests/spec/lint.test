@@ -500,3 +500,121 @@ print([LIMIT, Answer, f()])
 2: variant-like-binding
 4: variant-like-binding
 7: variant-like-binding
+
+=== resources bound without use are reported
+import fs
+fs.write_text("r.txt", "x")?
+fn read_one() -> Result<str> {
+    let f = fs.open("r.txt")?
+    f.read_text()
+}
+fn read_temp() -> Result<str> {
+    fs.open("r.txt")?.read_text()
+}
+fn read_closed() -> Result<str> {
+    use f = fs.open("r.txt")?
+    f.read_text()
+}
+fn read_lines() -> Result<int> {
+    use f = fs.open("r.txt")?
+    var n = 0
+    for line in f.lines() {
+        n += line?.len()
+    }
+    Ok(n)
+}
+print(read_one()?)
+print(read_temp()?)
+print(read_closed()?)
+print(read_lines()?)
+--- lint
+4: unclosed-resource
+8: unclosed-resource
+
+=== resources handed on are not reported
+import fs
+let open_files: [fs.File] = []
+fn open_log() -> Result<fs.File> {
+    let f = fs.open("log.txt", fs.Mode.Append)?
+    f.write_str("opened\n")?
+    Ok(f)
+}
+fn track(f: fs.File) {
+    // lint: allow(resource-escapes)
+    open_files.push(f)
+}
+let f = open_log()?
+track(f)
+track(open_log()?)
+let t = spawn {
+    use g = open_log()?
+    print(g.path())
+    Ok(())
+}
+t.wait()?
+print(open_files.len())
+--- lint
+
+=== resources escaping a use binding or a parameter are reported
+import fs
+let kept: [fs.File] = []
+fn keep(f: fs.File) {
+    kept.push(f)
+}
+fn escape() -> Result<fs.File> {
+    use f = fs.open("e.txt", fs.Mode.Write)?
+    keep(f)
+    spawn f.write_str("late")
+    Ok(f)
+}
+// (The file returned is never closed.)
+print(escape().is_ok())
+--- lint
+4: resource-escapes
+8: resource-escapes
+9: resource-escapes
+10: resource-escapes
+13: unclosed-resource
+
+=== resource fields need a Close impl
+import fs
+struct Log {
+    file: fs.File
+}
+struct Owned {
+    file: fs.File
+}
+impl Close for Owned {
+    fn close(self) {
+        self.file.close()
+    }
+}
+enum Source {
+    File(fs.File)
+    Text(str)
+}
+fn make() -> Result<Owned> {
+    Ok(Owned { file: fs.open("o.txt", fs.Mode.Write)? })
+}
+use o = make()?
+print(o.file.path())
+let l = Log { file: fs.open("o.txt")? }
+print(Source.Text("x"))
+print(l.file.path())
+--- lint
+3: resource-field
+14: resource-field
+22: unclosed-resource
+
+=== plain data read from a resource does not carry it
+import fs
+struct Info {
+    path: str
+    size: int
+}
+fn info(path: str) -> Result<Info> {
+    use f = fs.open(path, fs.Mode.Write)?
+    Ok(Info { path: f.path(), size: f.metadata()?.size })
+}
+print(info("i.txt")?)
+--- lint

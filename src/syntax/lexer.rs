@@ -122,6 +122,7 @@ tokens! {
         Trait "trait" 0,
         True "true" ENDS,
         Type "type" 0,
+        Use "use" 0,
         Var "var" 0,
         While "while" 0,
     }
@@ -698,7 +699,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Parses an escape sequence after the backslash; returns the char.
+    /// Lexes an escape after its backslash: a char, a `\xHH` byte, or `None`.
     fn escape(&mut self, allow_hex: bool) -> Option<Result<char, u8>> {
         let lo = self.pos - 1;
         let c = self.peek(0);
@@ -856,11 +857,10 @@ impl<'a> Lexer<'a> {
         let close = self.pos;
         self.pos = (self.pos + st.quote_len()).min(self.bytes.len());
         if st.triple {
-            // The common indentation of its lines, then a closing delimiter
-            // on its own line leaves only whitespace after the final newline.
-            // Each text is rebuilt in one pass (its lines are in source
-            // order); removing each line's indentation in place would move
-            // the rest of the text once per line.
+            // Remove the common indentation, then the whitespace before a
+            // closing delimiter on its own line. Each text is rebuilt in one
+            // pass: removing indentation in place would move the rest of the
+            // text once per line.
             let block = self.blocks.pop().unwrap();
             let indent = block.indent.unwrap_or(0);
             for lines in block.lines.chunk_by(|a, b| a.0 == b.0).filter(|_| indent > 0) {

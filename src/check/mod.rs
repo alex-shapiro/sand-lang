@@ -5,6 +5,7 @@ mod expr;
 mod fuse;
 mod pat;
 pub mod persist;
+mod resources;
 mod traits;
 mod unify;
 
@@ -174,17 +175,10 @@ pub struct FnInfo {
 #[derive(Clone, Copy, Debug)]
 pub enum FnDeclRef {
     Fn(DeclPath),
-    /// Default parameter value
     ParamDefault(DeclPath, u32),
-    /// Default struct field value
-    FieldDefault {
-        item: u32,
-        field: u32,
-    },
+    FieldDefault { item: u32, field: u32 },
     Init,
-    Test {
-        item: u32,
-    },
+    Test { item: u32 },
 }
 
 /// A function or method declared by the index of an item in a module.
@@ -197,7 +191,6 @@ pub struct DeclPath {
 impl DeclPath {
     pub const NOT_METHOD: u32 = u32::MAX;
 
-    /// The declaration in `m`.
     pub fn get(self, m: &ast::Module) -> &ast::FnDecl {
         let i = self.method as usize;
         match &m.items[self.item as usize].kind {
@@ -264,8 +257,10 @@ pub struct LintFacts {
     /// Import names of the main module and their spans.
     pub main_imports: Vec<(String, Span)>,
     pub unused_results: Vec<Span>,
+    /// The resource lints (`unclosed-resource`, `resource-field`,
+    /// `resource-escapes`; see `resources`): span, code and message.
+    pub resources: Vec<(Span, &'static str, String)>,
     pub used_names: HashSet<(ModId, String)>,
-    /// (declaration span, name, used, mutable, reassigned, type display)
     pub locals: Vec<LocalFact>,
 }
 
@@ -341,7 +336,6 @@ impl CheckedProgram {
         TypePrinter::new(&self.arena, &self.types, &self.params, &self.syms, self.wk)
     }
 
-    /// The text of a name.
     pub fn name(&self, s: Symbol) -> &str {
         self.syms.str(s)
     }
@@ -402,11 +396,8 @@ pub(crate) enum CtxKind {
     TopLevel { main: bool },
 }
 
-/// The local names in scope in a function: a stack of scopes, indexed by
-/// name so that a lookup does not scan every binding in scope (that made
-/// functions with many locals quadratic to check). A name bound again in
-/// the same scope replaces its binding there: the older one could never be
-/// seen again.
+/// The local names in scope in a function: a stack of scopes, also indexed
+/// by name. A name bound again in the same scope replaces its binding there.
 #[derive(Default, Clone)]
 pub(crate) struct Scopes {
     /// Per scope, innermost last: name -> local.
@@ -550,6 +541,10 @@ pub struct Checker<'a> {
     pub(crate) num_trait: Option<TraitId>,
     /// The prelude's `Iterator` trait and `Iter` struct, which `for` loops use.
     pub(crate) iter_trait: Option<TraitId>,
+    /// The prelude's `Close` trait, which `use` bindings call.
+    pub(crate) close_trait: Option<TraitId>,
+    /// What the parameters of analysed functions may do (see `resources`).
+    pub(crate) flows: PMap<FnId, resources::ParamFlow>,
     pub(crate) iter_struct: Option<TypeDefId>,
     /// Prelude functions taking part in iterator fusion (found on first use).
     pub(crate) fuse_fns: Option<Arc<fuse::FuseFns>>,
@@ -601,6 +596,8 @@ impl<'a> Checker<'a> {
             budget: Arc::new(CompileBudget::default()),
             num_trait: None,
             iter_trait: None,
+            close_trait: None,
+            flows: PMap::new(),
             iter_struct: None,
             fuse_fns: None,
         }
@@ -609,7 +606,6 @@ impl<'a> Checker<'a> {
     // ------------------------------------------------------------------
     // Types and names
 
-    /// The node of type `t`.
     #[inline]
     pub fn ty(&self, t: TypeId) -> Ty {
         self.arena.get(t)
@@ -621,7 +617,6 @@ impl<'a> Checker<'a> {
         self.arena.get(self.resolve(t))
     }
 
-    /// The text of a name.
     #[inline]
     pub fn name(&self, s: Symbol) -> &str {
         self.syms.str(s)
@@ -672,7 +667,7 @@ impl<'a> Checker<'a> {
     pub(crate) fn type_too_large(&self, t: TypeId) -> bool {
         fn walk(c: &Checker, t: TypeId, n: &mut usize) -> bool {
             if !c.arena.has_vars(t) {
-                // (Its size is known.)
+                // Its size is known.
                 *n += c.arena.size(t) as usize;
                 return *n > MAX_TYPE_SIZE;
             }
@@ -882,16 +877,6 @@ impl<'a> Checker<'a> {
     // ------------------------------------------------------------------
     // Program
 
-    pub fn check_program(mut self, modules: Vec<ParsedModule>) -> Result<CheckedProgram, Vec<Diag>> {
-        self.add_modules(modules);
-        let errors = self.errors();
-        if !errors.is_empty() {
-            return Err(errors);
-        }
-        self.lint.main_imports = self.main_imports();
-        Ok(self.take_checked(true))
-    }
-
     /// The import names of the main module and their spans (for the linter).
     pub fn main_imports(&self) -> Vec<(String, Span)> {
         self.mods[self.main_module as usize].import_spans.iter().map(|&(n, sp)| (self.name(n).to_string(), sp)).collect()
@@ -987,7 +972,6 @@ impl<'a> Checker<'a> {
     /// inputs).
     pub(crate) fn begin_session(&mut self, modules: Vec<ParsedModule>, session: ModId) -> Result<(), Vec<Diag>> {
         self.session = Some(session);
-        // (Lint facts are not needed.)
         self.lint_facts = false;
         self.check_modules(modules)
     }
@@ -1024,7 +1008,6 @@ impl<'a> Checker<'a> {
         if errors.is_empty() { Ok(()) } else { Err(errors) }
     }
 
-    /// Whether the module being checked is a session module.
     pub(crate) fn in_session(&self) -> bool {
         self.session == Some(self.cur_mod)
     }
@@ -1095,6 +1078,8 @@ impl<'a> Checker<'a> {
             budget: _,
             num_trait,
             iter_trait,
+            close_trait,
+            flows,
             iter_struct,
             fuse_fns,
         } = self;
@@ -1141,6 +1126,8 @@ impl<'a> Checker<'a> {
             budget: Arc::new(CompileBudget::default()),
             num_trait,
             iter_trait,
+            close_trait,
+            flows,
             iter_struct,
             fuse_fns,
         }
@@ -1265,7 +1252,6 @@ impl<'a> Checker<'a> {
         self.mods[m].scope.insert(name, Binding { def, is_pub, span });
     }
 
-    /// Defines a name written in source.
     fn define_ident(&mut self, id: &ast::Ident, def: Def, is_pub: bool) {
         let name = self.sym(&id.name);
         self.define(name, def, is_pub, id.span);
@@ -1333,6 +1319,9 @@ impl<'a> Checker<'a> {
         if pm.kind == ModKind::Prelude {
             if let Some(Def::Trait(t)) = self.scope_def(mi, "Iterator") {
                 self.iter_trait = Some(t);
+            }
+            if let Some(Def::Trait(t)) = self.scope_def(mi, "Close") {
+                self.close_trait = Some(t);
             }
             if let Some(Def::Type(TyRef::Def(d))) = self.scope_def(mi, "Iter") {
                 self.iter_struct = Some(d);
@@ -1477,6 +1466,8 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        // Where resources go (for the resource lints).
+        self.resource_flows(first_fn, &pm.ast);
         // 8. Globals must have fully inferred types.
         for g in first_global..self.globals.len() {
             if self.globals[g].module == mi {
@@ -2414,7 +2405,6 @@ impl<'a> Checker<'a> {
         self.fs.scopes.push();
     }
 
-    /// A new lambda id for the function being checked.
     pub(crate) fn new_lambda(&mut self) -> u32 {
         self.fs.next_lambda += 1;
         self.fs.lambda_first_local.push(self.fs.locals.len() as LocalId);
@@ -2543,7 +2533,7 @@ pub(crate) fn names_used_in_functions(m: &ast::Module) -> HashSet<String, FxBuil
                 expr(target, out);
                 expr(value, out);
             }
-            ast::StmtKind::Expr(e) | ast::StmtKind::Defer(e) => expr(e, out),
+            ast::StmtKind::Expr(e) | ast::StmtKind::Defer(e) | ast::StmtKind::Use { value: e, .. } => expr(e, out),
             ast::StmtKind::Fn(f) => fn_decl(f, out),
         }
     }

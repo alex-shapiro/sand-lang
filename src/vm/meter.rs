@@ -1,30 +1,27 @@
-//! Fuel metering: one counter for the bytecode and for the work done outside
-//! the bytecode loop (natives and the heavy generic operations of the
-//! interpreter: deep comparison, display, concatenation, slicing, ...).
+//! Fuel metering: one counter for bytecode and for the work done outside the
+//! bytecode loop (natives, and the interpreter's heavy generic operations:
+//! deep comparison, display, concatenation, slicing, ...).
 //!
 //! The scheduler runs each task for a slice of fuel: at most `SLICE_FUEL`
 //! units, and at most what is left of `max_instructions`. The interpreter
-//! spends one unit per call, loop iteration and backward jump, and natives
-//! charge the meter ([`Meter::charge`]) for their work, both from the
-//! slice's fuel. The interpreter keeps its count in a register and, before
-//! it calls a native, applies what it spent since its last native call to
-//! the meter ([`Meter::sync`]; it reloads the count after the call,
-//! [`Meter::resync`]). So:
+//! spends one unit per call, loop iteration and backward jump; natives
+//! charge the meter ([`Meter::charge`]) for their work. The interpreter
+//! keeps its count in a register, applies what it spent to the meter before
+//! each native call ([`Meter::sync`]) and reloads it afterwards
+//! ([`Meter::resync`]). So:
 //!
-//! * charging is a subtraction and a comparison — no syscalls;
+//! * charging is a subtraction and a comparison, with no syscalls;
 //! * native work counts against `max_instructions`, and a native that
 //!   exhausts the slice preempts its task when it returns;
-//! * once the slice's fuel is exhausted, every further `CHECK_INTERVAL`
-//!   units the meter checks the interrupt flag, the instruction budget and
-//!   the CPU/wall-clock deadlines computed by the scheduler for this slice,
-//!   and fails with `Ctl::interrupted()` or `Ctl::limit(kind)`. A slice ends
-//!   where the instruction budget does, and the later checks are never past
-//!   that point, so natives stop exactly at the limit (and bytecode within
-//!   one unit of it);
-//! * the interpreter's own generic operations charge the meter between
-//!   native calls, while the meter has not yet seen the bytecode fuel spent
-//!   since the last one: they may overrun the limit by that much (less than
-//!   a slice).
+//! * once the slice is exhausted, the meter checks the interrupt flag, the
+//!   instruction budget and the slice's CPU and wall-clock deadlines every
+//!   `CHECK_INTERVAL` units, failing with `Ctl::interrupted()` or
+//!   `Ctl::limit(kind)`. Neither a slice nor a check interval extends past
+//!   the instruction budget, so natives stop exactly at the limit and
+//!   bytecode within one unit of it;
+//! * the interpreter's generic operations charge the meter before it has
+//!   seen the bytecode fuel spent since the last sync, so they may overrun
+//!   the limit by that much (less than a slice).
 //!
 //! The meter uses `Cell`s so that it can be charged through a shared
 //! reference while the heap is borrowed (e.g. inside sort comparators).
@@ -71,27 +68,27 @@ pub const SCRATCH_STEP: usize = 64 << 10;
 /// Instructions of straight-line bytecode per fuel unit, as a shift (64).
 pub const CODE_UNIT_SHIFT: u32 = 6;
 
-/// The extra fuel of running up to `n` instructions without passing a safe
-/// point. Bytecode only consumes fuel at loop back edges and calls, and
-/// between two of those it moves forward, so it runs at most the
-/// instructions of the loop (the back edge's span) or of the function
-/// entered. Without this, one unit could stand for hundreds of thousands
-/// of instructions (a long loop body or function), so `max_instructions`
-/// would be off by as much and the limits and the interrupt flag, which
-/// the scheduler checks between slices of fuel, would be checked only
-/// every few seconds. So a back edge costs one unit plus one per 64
-/// instructions it jumps back over, entering a function (a call, a tail
-/// call, a task's start) one plus one per 64 instructions of its code, and
-/// `MakeClosure` one per 64 captures it copies. Ordinary loop bodies and
-/// functions are shorter than that and cost one unit as before.
+/// The extra fuel for running up to `n` instructions without passing a safe
+/// point: one unit per 64.
+///
+/// Bytecode consumes fuel only at back edges and calls, and between those it
+/// only moves forward, so it runs at most the instructions of the loop body
+/// or function entered. Without this surcharge one unit could stand for
+/// hundreds of thousands of instructions, making `max_instructions` that
+/// inaccurate and delaying the limit and interrupt checks between slices by
+/// seconds. So a back edge costs one unit plus one per 64 instructions it
+/// jumps back over, entering a function (a call, a tail call, a task's
+/// start) one plus one per 64 instructions of its code, and `MakeClosure`
+/// one per 64 captures it copies. Typical loop bodies and functions are
+/// shorter than 64 instructions and cost one unit.
 #[inline(always)]
 pub const fn code_fuel(n: usize) -> i64 {
     (n >> CODE_UNIT_SHIFT) as i64
 }
 
-/// The fuel of `Op::Loop { off }` (`off < 0`, see `thread_jumps`): one unit
-/// per 64 instructions jumped back over, rounded up (one shift on the back
-/// edge's path, where a plain tick costs one unit).
+/// The fuel of a back edge with offset `off < 0`: one unit per 64
+/// instructions jumped back over, rounded up. This includes the edge's base
+/// unit, so the back edge's path pays one shift for it.
 #[inline(always)]
 pub const fn loop_fuel(off: i32) -> i64 {
     -((off >> CODE_UNIT_SHIFT) as i64)
@@ -303,9 +300,9 @@ impl Scratch {
     }
 }
 
-/// Results that may report the memory limit (directly or as an encoded
-/// message). Memory checks use the heap's byte count, which includes garbage
-/// not yet collected, so callers that can run the collector retry once.
+/// Results that may report the memory limit. Memory checks use the heap's
+/// byte count, which includes garbage not yet collected, so callers that can
+/// run the collector retry once.
 pub(crate) trait MemoryLimit {
     fn is_memory_limit(&self) -> bool;
 }

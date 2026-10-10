@@ -8,8 +8,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Formatting and lints do not depend on the operating system (but for
-  # Windows and Unix code paths, linted by `test` in its default build).
+  # Formatting and lints run once; the `test` job runs clippy on macOS and Windows.
   lint:
     name: format and clippy
     runs-on: ubuntu-latest

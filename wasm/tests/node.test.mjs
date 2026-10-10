@@ -161,7 +161,7 @@ import random
 print(env.get("NAME"))
 print(env.get("HIDDEN"))
 print(env.args())
-print(io.read_line())
+print(io.stdin.read_line())
 print(random.int(0, 1000000))`;
   const options = { policy: "allow env NAME\nallow stdin", env: { NAME: "sand", HIDDEN: "x" }, args: ["a", "b"], stdin: "line\n", seed: 42 };
   const first = await run(source, options);
@@ -355,7 +355,7 @@ test("http goes through fetch, as the policy allows", async () => {
     const source = `import http
 let r = http.get("${base}/hello")?
 print("\\(r.status) \\(r.text()?) \\(r.header("x-greeting"))")
-let p = http.post("${base}/echo", b"data", headers: ["content-type": "text/plain"])?
+let p = http.post("${base}/echo", b"data", headers: [("content-type", "text/plain")])?
 print("\\(p.status) \\(p.json()?)")
 print(http.get("${base}/missing")?.status)
 for url in ["${base}/redirect", "${base}/big", "http://example.com/", "ftp://x/"] {
@@ -365,6 +365,10 @@ for url in ["${base}/redirect", "${base}/big", "http://example.com/", "ftp://x/"
     }
 }
 print(http.get("${base}/slow", timeout: 50ms).unwrap_err().kind)
+{
+    use s = http.open("GET", "${base}/hello")?
+    print("\\(s.status) \\(s.body.read(5)?) \\(s.body.read_text()?)")
+}
 `;
     const policy = `allow net 127.0.0.1:${port}\nlimit http-body 10K`;
     const { result, stdout } = await run(source, { policy });
@@ -378,6 +382,7 @@ print(http.get("${base}/slow", timeout: 50ms).unwrap_err().kind)
     assert.equal(lines[5], "permission_denied: permission denied: connect to example.com:80");
     assert.match(lines[6], /^invalid: unsupported URL scheme/);
     assert.equal(lines[7], "timeout");
+    assert.equal(lines[8], '200 b"hello"  from the server');
   } finally {
     close();
   }

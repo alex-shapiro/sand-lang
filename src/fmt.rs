@@ -33,8 +33,7 @@ pub fn format_source_with(src: &str, budget: &CompileBudget) -> Result<String, S
     if !budget.check() {
         return Err(stop_message(budget.stopped().unwrap_or(Stop::Interrupted), "format"));
     }
-    // The formatter recurses over the syntax tree; like the compiler, it runs
-    // on a thread with a large stack so maximally nested input cannot overflow.
+    // Like the compiler, the formatter recurses, so it needs a large stack.
     let out = crate::platform::with_stack(64 << 20, || format_on_this_thread(src, budget))
         .map_err(|e| format!("internal formatter error: {e}"))
         .and_then(|r| r);
@@ -44,7 +43,6 @@ pub fn format_source_with(src: &str, budget: &CompileBudget) -> Result<String, S
     }
 }
 
-/// Format or lint budget error message.
 pub(crate) fn stop_message(stop: Stop, what: &str) -> String {
     match stop {
         Stop::Fuel => format!("source too complex to {what}: exceeded the {what} budget"),
@@ -478,7 +476,7 @@ struct ListOpts {
 
 const LIST: ListOpts = ListOpts { force: false, pad: false, trailing_comma: true, hug_last: false };
 
-/// The operator, operands and precedence level (§6.1) of a binary operation.
+/// The operator and operands of a binary operation.
 fn binary_parts(e: &Expr) -> Option<(&'static str, &Expr, &Expr)> {
     match &e.kind {
         ExprKind::Binary(op, l, r) => Some((op.text(), l, r)),
@@ -1304,6 +1302,16 @@ impl<'a> Formatter<'a> {
             StmtKind::Expr(e) => self.expr(e),
             StmtKind::Fn(f) => self.fn_decl(f),
             StmtKind::Defer(e) => cat(vec![text("defer "), self.expr(e)]),
+            StmtKind::Use { name, ty, value } => {
+                let mut parts = vec![text("use "), self.name(name)];
+                if let Some(ty) = ty {
+                    parts.push(self.punct(name.span.hi, &Tok::Colon, ": "));
+                    parts.push(self.ty(ty));
+                }
+                parts.push(self.punct(ty.as_ref().map_or(name.span.hi, |t| t.span.hi), &Tok::Eq, " = "));
+                parts.push(self.expr(value));
+                cat(parts)
+            }
         }
     }
 

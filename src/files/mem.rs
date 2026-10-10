@@ -1,30 +1,29 @@
 //! An in-memory file system: [`MemFs`].
 
-use super::{EntryKind, EntryMeta};
+use super::{EntryKind, EntryMeta, OpenMode};
 use crate::vm::iomem::Reservation;
 use std::collections::BTreeMap;
 use std::io::{self, ErrorKind};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 /// Bytes counted per file or directory besides its name and contents.
 const NODE_OVERHEAD: usize = 64;
 
-/// An in-memory file system for scripts: the `fs` module and script imports
-/// of engines configured with [`Config::memory_fs`](crate::Config::memory_fs)
-/// (and of every engine built without the `os` feature) see it instead of
-/// the host's file system.
+/// An in-memory file system that scripts see instead of the host's, in
+/// engines configured with [`Config::memory_fs`](crate::Config::memory_fs)
+/// and in every engine built without the `os` feature.
 ///
 /// A `MemFs` is a handle: clones share the same files, so the host can
-/// prepare files before a run and read what the script wrote afterwards,
-/// and several engines can share one file system. Paths are absolute
-/// (relative paths are taken from the root, `/`), use `/` as the separator,
-/// and name UTF-8 entries; there are no symbolic links. The policy decides
-/// access as for the host's file system, on these paths.
+/// prepare files before a run, read what the script wrote afterwards, and
+/// share one file system between engines. Paths are absolute (relative
+/// paths start at `/`), use `/` as the separator and are UTF-8; there are
+/// no symbolic links. The policy decides access on these paths.
 ///
-/// Its contents (with a small overhead per entry) are limited to a capacity
-/// ([`MemFs::with_capacity`]); writes beyond it fail with an error of kind
-/// `limit`. The capacity is separate from the engines' memory limits.
+/// Contents and a small per-entry overhead are limited by a capacity
+/// ([`MemFs::with_capacity`]), separate from the engines' memory limits;
+/// writes beyond it fail with an error of kind `limit`.
 ///
 /// ```
 /// use sandlang::MemFs;
@@ -46,31 +45,117 @@ impl Default for MemFs {
 
 impl std::fmt::Debug for MemFs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let t = self.lock();
-        f.debug_struct("MemFs").field("used", &t.used).field("capacity", &t.capacity).finish_non_exhaustive()
+        f.debug_struct("MemFs").field("used", &self.used()).field("capacity", &self.capacity()).finish_non_exhaustive()
     }
 }
 
 struct Tree {
     root: Dir,
+    shared: Arc<Shared>,
+}
+
+/// What the tree and the files open in it share.
+struct Shared {
     /// Bytes of contents, names and per-entry overhead.
-    used: usize,
+    used: AtomicUsize,
     capacity: usize,
     /// Counts the writes and moves of files (see [`MemFs::generation`]).
-    generation: u64,
+    generation: AtomicU64,
+}
+
+impl Shared {
+    /// Accounts for `n` more bytes, if they fit.
+    fn take(&self, n: usize) -> io::Result<()> {
+        let capacity = self.capacity;
+        self.used
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| used.checked_add(n).filter(|&t| t <= capacity))
+            .map(|_| ())
+            .map_err(|_| error(ErrorKind::QuotaExceeded, &format!("file system full (its capacity is {capacity} bytes)")))
+    }
+
+    fn give_back(&self, n: usize) {
+        let _ = self.used.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| Some(used.saturating_sub(n)));
+    }
+
+    fn next_generation(&self) -> u64 {
+        self.generation.fetch_add(1, Ordering::Relaxed) + 1
+    }
 }
 
 enum Node {
-    File(File),
+    File(Arc<FileCell>),
     Dir(Dir),
 }
 
-struct File {
+/// A file's contents, shared by its directory entry and the files opened
+/// on it (`OpenFile`), which keep it when the entry is removed or replaced.
+/// Its bytes count against the capacity until the last of them is dropped.
+struct FileCell {
+    content: Mutex<Content>,
+    shared: Arc<Shared>,
+}
+
+struct Content {
     data: Vec<u8>,
     /// Unix time in nanoseconds.
     modified: i64,
     /// The generation of the file system when it was last written or moved.
     generation: u64,
+}
+
+impl FileCell {
+    /// A new file holding `data`, whose bytes the caller has accounted for.
+    fn new(shared: &Arc<Shared>, data: Vec<u8>, generation: u64) -> Arc<FileCell> {
+        Arc::new(FileCell { content: Mutex::new(Content { data, modified: now(), generation }), shared: shared.clone() })
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Content> {
+        self.content.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Replaces or extends the contents with `data` at `at` (at the end if
+    /// `None`), filling a gap past the end with zeros; returns where the
+    /// data ends. The growth must fit in the capacity.
+    fn write_at(&self, at: Option<u64>, data: &[u8]) -> io::Result<u64> {
+        let mut c = self.lock();
+        let start = match at {
+            Some(at) => usize::try_from(at).map_err(|_| error(ErrorKind::QuotaExceeded, "file too large"))?,
+            None => c.data.len(),
+        };
+        let end = start.checked_add(data.len()).ok_or_else(|| error(ErrorKind::QuotaExceeded, "file too large"))?;
+        if end > c.data.len() {
+            self.shared.take(end - c.data.len())?;
+            c.data.resize(end, 0);
+        }
+        c.data[start..end].copy_from_slice(data);
+        c.modified = now();
+        c.generation = self.shared.next_generation();
+        Ok(end as u64)
+    }
+
+    /// Truncates or extends (with zeros) the contents to `len` bytes.
+    fn set_len(&self, len: u64) -> io::Result<()> {
+        let mut c = self.lock();
+        let len = usize::try_from(len).map_err(|_| error(ErrorKind::QuotaExceeded, "file too large"))?;
+        if len > c.data.len() {
+            self.shared.take(len - c.data.len())?;
+        } else {
+            self.shared.give_back(c.data.len() - len);
+        }
+        c.data.resize(len, 0);
+        let keep = len.max(c.data.capacity() / 2);
+        c.data.shrink_to(keep);
+        c.modified = now();
+        c.generation = self.shared.next_generation();
+        Ok(())
+    }
+}
+
+impl Drop for FileCell {
+    fn drop(&mut self) {
+        let len = self.content.get_mut().map_or(0, |c| c.data.len());
+        self.shared.give_back(len);
+    }
 }
 
 #[derive(Default)]
@@ -132,17 +217,21 @@ fn walk<'a>(dir: &'a Dir, mut visit: impl FnMut(&[&'a str], &'a Node)) {
 impl Node {
     fn meta(&self) -> EntryMeta {
         match self {
-            Node::File(f) => EntryMeta { kind: EntryKind::File, size: f.data.len() as u64, modified: Some(f.modified) },
+            Node::File(f) => {
+                let c = f.lock();
+                EntryMeta { kind: EntryKind::File, size: c.data.len() as u64, modified: Some(c.modified) }
+            }
             Node::Dir(d) => EntryMeta { kind: EntryKind::Dir, size: 0, modified: Some(d.modified) },
         }
     }
 
-    /// The bytes this node and everything below it count.
+    /// The bytes the entries of this node and everything below it count
+    /// (their names and overhead: the contents of files are given back when
+    /// their `FileCell`s are dropped).
     fn footprint(&self, name: &str) -> usize {
-        let own = |name: &str, node: &Node| NODE_OVERHEAD + name.len() + if let Node::File(f) = node { f.data.len() } else { 0 };
-        let mut total = own(name, self);
+        let mut total = NODE_OVERHEAD + name.len();
         if let Node::Dir(d) = self {
-            walk(d, |names, node| total += own(names[names.len() - 1], node));
+            walk(d, |names, _| total += NODE_OVERHEAD + names[names.len() - 1].len());
         }
         total
     }
@@ -262,62 +351,78 @@ impl Dir {
 }
 
 impl Tree {
-    /// Accounts for `n` more bytes, if they fit.
-    fn take(&mut self, n: usize) -> io::Result<()> {
-        match self.used.checked_add(n) {
-            Some(total) if total <= self.capacity => {
-                self.used = total;
-                Ok(())
-            }
-            _ => Err(error(ErrorKind::QuotaExceeded, &format!("file system full (its capacity is {} bytes)", self.capacity))),
-        }
+    fn take(&self, n: usize) -> io::Result<()> {
+        self.shared.take(n)
     }
 
-    fn give_back(&mut self, n: usize) {
-        self.used = self.used.saturating_sub(n);
+    fn give_back(&self, n: usize) {
+        self.shared.give_back(n)
     }
 
+    /// Writes (or appends) a whole file at once: nothing changes if it does
+    /// not fit.
     fn write(&mut self, parts: &[&str], data: &[u8], append: bool) -> io::Result<()> {
         if parts.is_empty() {
             return Err(error(ErrorKind::IsADirectory, "is a directory"));
         }
         check_path_len(path_len(parts))?;
         let (dir, name) = self.root.parent_mut(parts)?;
-        let old = match dir.entries.get(name) {
+        let cell = match dir.entries.get(name) {
             Some(Node::Dir(_)) => return Err(error(ErrorKind::IsADirectory, "is a directory")),
-            Some(Node::File(f)) => Some(f.data.len()),
-            None => None,
-        };
-        let extra = match (old, append) {
-            (Some(_), true) => data.len(),
-            (Some(len), false) => data.len().saturating_sub(len),
-            (None, _) => NODE_OVERHEAD + name.len() + data.len(),
-        };
-        self.take(extra)?;
-        let (dir, name) = self.root.parent_mut(parts)?;
-        let t = now();
-        self.generation += 1;
-        let generation = self.generation;
-        match dir.entries.get_mut(name) {
-            Some(Node::File(f)) => {
-                let freed = if append {
-                    f.data.extend_from_slice(data);
-                    0
-                } else {
-                    let freed = f.data.len().saturating_sub(data.len());
-                    f.data = data.to_vec();
-                    freed
-                };
-                f.modified = t;
-                f.generation = generation;
-                self.give_back(freed);
+            Some(Node::File(f)) => f.clone(),
+            None => {
+                self.take(NODE_OVERHEAD + name.len() + data.len())?;
+                let generation = self.shared.next_generation();
+                let cell = FileCell::new(&self.shared, data.to_vec(), generation);
+                let (dir, name) = self.root.parent_mut(parts)?;
+                dir.entries.insert(name.to_string(), Node::File(cell));
+                dir.modified = now();
+                return Ok(());
             }
-            _ => {
-                dir.entries.insert(name.to_string(), Node::File(File { data: data.to_vec(), modified: t, generation }));
-                dir.modified = t;
-            }
+        };
+        let mut c = cell.lock();
+        if append {
+            self.take(data.len())?;
+            c.data.extend_from_slice(data);
+        } else {
+            let old = c.data.len();
+            self.take(data.len().saturating_sub(old))?;
+            c.data = data.to_vec();
+            self.give_back(old.saturating_sub(data.len()));
         }
+        c.modified = now();
+        c.generation = self.shared.next_generation();
         Ok(())
+    }
+
+    /// The file at `parts`, opened for `mode`: created if the mode creates
+    /// files, emptied if it truncates them.
+    fn open(&mut self, parts: &[&str], mode: OpenMode) -> io::Result<Arc<FileCell>> {
+        if parts.is_empty() {
+            return Err(error(ErrorKind::IsADirectory, "is a directory"));
+        }
+        let (dir, name) = self.root.parent_mut(parts)?;
+        match dir.entries.get(name) {
+            Some(Node::Dir(_)) => return Err(error(ErrorKind::IsADirectory, "is a directory")),
+            Some(Node::File(_)) if mode == OpenMode::CreateNew => return Err(error(ErrorKind::AlreadyExists, "already exists")),
+            Some(Node::File(f)) => {
+                let f = f.clone();
+                if mode.truncates() {
+                    f.set_len(0)?;
+                }
+                return Ok(f);
+            }
+            None if !mode.creates() => return Err(not_found()),
+            None => {}
+        }
+        check_path_len(path_len(parts))?;
+        self.take(NODE_OVERHEAD + name.len())?;
+        let generation = self.shared.next_generation();
+        let cell = FileCell::new(&self.shared, Vec::new(), generation);
+        let (dir, name) = self.root.parent_mut(parts)?;
+        dir.entries.insert(name.to_string(), Node::File(cell.clone()));
+        dir.modified = now();
+        Ok(cell)
     }
 
     fn create_dir(&mut self, parts: &[&str]) -> io::Result<()> {
@@ -403,12 +508,12 @@ impl Tree {
         let node = dir.entries.remove(name).ok_or_else(not_found)?;
         dir.modified = t;
         // Moved files count as written.
-        self.generation += 1;
+        let generation = self.shared.next_generation();
         let mut node = node;
         let mut moved = vec![&mut node];
         while let Some(n) = moved.pop() {
             match n {
-                Node::File(f) => f.generation = self.generation,
+                Node::File(f) => f.lock().generation = generation,
                 Node::Dir(d) => moved.extend(d.entries.values_mut()),
             }
         }
@@ -432,8 +537,8 @@ impl MemFs {
     /// An empty file system holding at most `bytes` bytes of contents and
     /// names (each file and directory counts 64 bytes more).
     pub fn with_capacity(bytes: usize) -> MemFs {
-        let tree = Tree { root: Dir { entries: BTreeMap::new(), modified: now() }, used: 0, capacity: bytes, generation: 0 };
-        MemFs { tree: Arc::new(Mutex::new(tree)) }
+        let shared = Arc::new(Shared { used: AtomicUsize::new(0), capacity: bytes, generation: AtomicU64::new(0) });
+        MemFs { tree: Arc::new(Mutex::new(Tree { root: Dir { entries: BTreeMap::new(), modified: now() }, shared })) }
     }
 
     fn lock(&self) -> MutexGuard<'_, Tree> {
@@ -442,16 +547,16 @@ impl MemFs {
 
     /// The capacity in bytes.
     pub fn capacity(&self) -> usize {
-        self.lock().capacity
+        self.lock().shared.capacity
     }
 
-    /// The bytes in use (contents, names and per-entry overhead).
+    /// The bytes in use (contents, names and per-entry overhead), including
+    /// the contents of removed files that scripts still have open.
     pub fn used(&self) -> usize {
-        self.lock().used
+        self.lock().shared.used.load(Ordering::Relaxed)
     }
 
-    /// Writes a file, creating its directory (and theirs) if need be, and
-    /// replacing the file if it exists.
+    /// Writes a file, creating missing parent directories; replaces an existing file.
     pub fn write(&self, path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Result<()> {
         let parts = parts(path.as_ref())?;
         let mut t = self.lock();
@@ -465,7 +570,7 @@ impl MemFs {
     pub fn read(&self, path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
         let parts = parts(path.as_ref())?;
         match self.lock().root.get(&parts)? {
-            Node::File(f) => Ok(f.data.clone()),
+            Node::File(f) => Ok(f.lock().data.clone()),
             Node::Dir(_) => Err(error(ErrorKind::IsADirectory, "is a directory")),
         }
     }
@@ -482,11 +587,12 @@ impl MemFs {
         self.lock().remove(&parts, |_| Ok(()))
     }
 
-    /// Removes everything.
+    /// Removes everything; open files keep their contents, still counted, until closed.
     pub fn clear(&self) {
         let mut t = self.lock();
+        let names: usize = t.root.entries.iter().map(|(name, node)| node.footprint(name)).sum();
         t.root.entries.clear();
-        t.used = 0;
+        t.give_back(names);
     }
 
     /// Every file with its contents, by path (in lexicographic order of
@@ -500,7 +606,7 @@ impl MemFs {
     /// A number that grows whenever a file is written (or moved), for
     /// [`MemFs::changed_files`].
     pub fn generation(&self) -> u64 {
-        self.lock().generation
+        self.lock().shared.generation.load(Ordering::Relaxed)
     }
 
     /// The files written (or moved) since the file system was at
@@ -509,24 +615,25 @@ impl MemFs {
         let mut out = Vec::new();
         let t = self.lock();
         walk(&t.root, |names, node| {
-            if let Node::File(file) = node
-                && file.generation > generation
-            {
-                out.push((std::iter::once("/").chain(names.iter().copied()).collect(), file.data.clone()));
+            if let Node::File(file) = node {
+                let c = file.lock();
+                if c.generation > generation {
+                    out.push((std::iter::once("/").chain(names.iter().copied()).collect(), c.data.clone()));
+                }
             }
         });
         out
     }
 
     /// Calls `f` with every file and its contents, in the order of
-    /// [`MemFs::files`], without copying them. (`f` must not use this file
-    /// system.)
+    /// [`MemFs::files`], without copying them. `f` must not use this file
+    /// system.
     pub fn for_each_file(&self, mut f: impl FnMut(&Path, &[u8])) {
         let t = self.lock();
         walk(&t.root, |names, node| {
             if let Node::File(file) = node {
                 let path: PathBuf = std::iter::once("/").chain(names.iter().copied()).collect();
-                f(&path, &file.data);
+                f(&path, &file.lock().data);
             }
         });
     }
@@ -539,8 +646,9 @@ impl MemFs {
         let t = self.lock();
         match t.root.get(&parts) {
             Ok(Node::File(f)) => {
-                res.ensure(f.data.len())?;
-                Ok((f.data.clone(), res))
+                let c = f.lock();
+                res.ensure(c.data.len())?;
+                Ok((c.data.clone(), res))
             }
             Ok(Node::Dir(_)) => Err(not_regular(path)),
             Err(_) if parts.is_empty() => Err(not_regular(path)),
@@ -552,10 +660,19 @@ impl MemFs {
     pub(crate) fn read_source(&self, path: &Path, max: usize) -> io::Result<Vec<u8>> {
         let parts = parts(path)?;
         match self.lock().root.get(&parts)? {
-            Node::File(f) if f.data.len() > max => Err(error(ErrorKind::InvalidData, "source too large")),
-            Node::File(f) => Ok(f.data.clone()),
+            Node::File(f) => {
+                let c = f.lock();
+                if c.data.len() > max { Err(error(ErrorKind::InvalidData, "source too large")) } else { Ok(c.data.clone()) }
+            }
             Node::Dir(_) => Err(not_regular(path)),
         }
+    }
+
+    /// Opens the regular file at `path` for `mode`.
+    pub(crate) fn open(&self, path: &Path, mode: OpenMode) -> io::Result<OpenFile> {
+        let parts = parts(path)?;
+        let cell = self.lock().open(&parts, mode)?;
+        Ok(OpenFile { cell, append: mode == OpenMode::Append })
     }
 
     /// The number of entries below `path` (the work of moving it).
@@ -613,6 +730,48 @@ impl MemFs {
         })
     }
 
+    /// Removes the directory `path` and everything below it, entry by
+    /// entry; `check` is asked about each entry below before it is removed
+    /// (see `files::Fs::remove_tree`).
+    pub(crate) fn remove_tree<E>(
+        &self,
+        path: &Path,
+        mut check: impl FnMut(&Path) -> Result<io::Result<()>, E>,
+    ) -> Result<io::Result<()>, E> {
+        let names = |p: &Path| -> io::Result<Vec<String>> {
+            let parts = parts(p)?;
+            let t = self.lock();
+            match t.root.get(&parts)? {
+                Node::Dir(d) => Ok(d.entries.keys().cloned().collect()),
+                Node::File(_) => Err(error(ErrorKind::NotADirectory, "not a directory")),
+            }
+        };
+        let first = match names(path) {
+            Ok(n) => n,
+            Err(e) => return Ok(Err(e)),
+        };
+        let mut levels = vec![(path.to_path_buf(), first)];
+        while let Some((dir, left)) = levels.last_mut() {
+            let Some(name) = left.pop() else {
+                let (done, _) = levels.pop().expect("a level");
+                if let Err(e) = self.remove_dir(&done) {
+                    return Ok(Err(e));
+                }
+                continue;
+            };
+            let child = dir.join(&name);
+            if let Err(e) = check(&child)? {
+                return Ok(Err(e));
+            }
+            let is_dir = matches!(self.stat(&child), Ok(m) if m.kind == EntryKind::Dir);
+            let r = if is_dir { names(&child).map(|n| levels.push((child, n))) } else { self.remove_file(&child) };
+            if let Err(e) = r {
+                return Ok(Err(e));
+            }
+        }
+        Ok(Ok(()))
+    }
+
     pub(crate) fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         self.lock().rename(&parts(from)?, &parts(to)?)
     }
@@ -622,7 +781,7 @@ impl MemFs {
         let (from, to) = (parts(from)?, parts(to)?);
         let mut t = self.lock();
         let data = match t.root.get(&from) {
-            Ok(Node::File(f)) => f.data.clone(),
+            Ok(Node::File(f)) => f.lock().data.clone(),
             Ok(Node::Dir(_)) => return Err(not_regular(Path::new("source"))),
             Err(_) if from.is_empty() => return Err(not_regular(Path::new("/"))),
             Err(e) => return Err(e),
@@ -633,6 +792,48 @@ impl MemFs {
     /// Whether anything is at `path`.
     pub(crate) fn exists(&self, path: &Path) -> bool {
         parts(path).is_ok_and(|p| p.is_empty() || self.lock().root.get(&p).is_ok())
+    }
+}
+
+/// A file of a memory file system opened by a script. It keeps its contents
+/// when the file is removed, renamed or replaced.
+pub(crate) struct OpenFile {
+    cell: Arc<FileCell>,
+    /// Every write goes to the end.
+    append: bool,
+}
+
+impl OpenFile {
+    /// Copies the bytes at `pos` into `buf`; returns how many.
+    pub fn read_at(&self, pos: u64, buf: &mut [u8]) -> usize {
+        let c = self.cell.lock();
+        let start = usize::try_from(pos).unwrap_or(usize::MAX).min(c.data.len());
+        let n = buf.len().min(c.data.len() - start);
+        buf[..n].copy_from_slice(&c.data[start..start + n]);
+        n
+    }
+
+    /// Writes `data` at `pos` (at the end in append mode); returns where it
+    /// ends. Writing nothing changes nothing (also past the end).
+    pub fn write_at(&self, pos: u64, data: &[u8]) -> io::Result<u64> {
+        if data.is_empty() {
+            return Ok(if self.append { self.cell.lock().data.len() as u64 } else { pos });
+        }
+        self.cell.write_at(if self.append { None } else { Some(pos) }, data)
+    }
+
+    /// Whether every write goes to the end.
+    pub fn appends(&self) -> bool {
+        self.append
+    }
+
+    pub fn set_len(&self, len: u64) -> io::Result<()> {
+        self.cell.set_len(len)
+    }
+
+    pub fn meta(&self) -> EntryMeta {
+        let c = self.cell.lock();
+        EntryMeta { kind: EntryKind::File, size: c.data.len() as u64, modified: Some(c.modified) }
     }
 }
 
@@ -663,7 +864,7 @@ mod tests {
         assert_eq!(kind(fs.create_dir(Path::new("/a"))), ErrorKind::AlreadyExists);
         assert_eq!(kind(fs.remove_dir(Path::new("/a"))), ErrorKind::DirectoryNotEmpty);
         assert_eq!(kind(fs.remove_file(Path::new("/a"))), ErrorKind::IsADirectory);
-        let mut res = Reservation::new(&crate::vm::iomem::IoMemory::new(None));
+        let mut res = Reservation::new(&crate::vm::iomem::IoMemory::new(None, usize::MAX));
         assert_eq!(fs.list_dir(Path::new("/a/b"), &mut res).unwrap(), vec!["c.txt"]);
         assert_eq!(fs.stat(Path::new("/")).unwrap().kind, EntryKind::Dir);
         assert_eq!(fs.stat(Path::new("/a/b/c.txt")).unwrap().size, 11);
@@ -693,7 +894,7 @@ mod tests {
         assert_eq!(kind(fs.rename(Path::new("/f"), Path::new("/f/g"))), ErrorKind::NotADirectory);
         assert_eq!(kind(fs.write_file(Path::new("/"), b"", false)), ErrorKind::IsADirectory);
         assert_eq!(
-            kind(fs.read_reserved(Path::new("/"), Reservation::new(&crate::vm::iomem::IoMemory::new(None)))),
+            kind(fs.read_reserved(Path::new("/"), Reservation::new(&crate::vm::iomem::IoMemory::new(None, usize::MAX)))),
             ErrorKind::InvalidInput
         );
         // Replacing a file frees its space before the new name is charged.
@@ -720,6 +921,44 @@ mod tests {
         fs.remove("/d").unwrap();
         assert_eq!(fs.used(), 0, "everything given back");
         assert!(fs.files().is_empty());
+    }
+
+    #[test]
+    fn open_files_keep_their_contents_and_count_until_closed() {
+        let fs = MemFs::with_capacity(1000);
+        fs.write("/f", vec![1; 100]).unwrap();
+        let f = fs.open(Path::new("/f"), OpenMode::ReadWrite).unwrap();
+        fs.remove_file(Path::new("/f")).unwrap();
+        // The contents are still there, and still counted.
+        assert_eq!(fs.used(), 100);
+        let mut buf = [0; 10];
+        assert_eq!(f.read_at(95, &mut buf), 5);
+        assert_eq!(f.write_at(100, &[2; 50]).unwrap(), 150);
+        assert_eq!(fs.used(), 150);
+        assert_eq!(f.write_at(0, &[0; 1001]).unwrap_err().kind(), ErrorKind::QuotaExceeded);
+        drop(f);
+        assert_eq!(fs.used(), 0);
+        // Replacing a file keeps the old contents for those who opened it.
+        fs.write("/g", "old").unwrap();
+        let g = fs.open(Path::new("/g"), OpenMode::Read).unwrap();
+        fs.write("/h", "new").unwrap();
+        fs.rename(Path::new("/h"), Path::new("/g")).unwrap();
+        let mut buf = [0; 3];
+        g.read_at(0, &mut buf);
+        assert_eq!(&buf, b"old");
+        assert_eq!(fs.read("/g").unwrap(), b"new");
+        // Modes: truncation, creation, exclusivity.
+        assert_eq!(fs.open(Path::new("/g"), OpenMode::CreateNew).err().map(|e| e.kind()), Some(ErrorKind::AlreadyExists));
+        assert_eq!(fs.open(Path::new("/none"), OpenMode::ReadWrite).err().map(|e| e.kind()), Some(ErrorKind::NotFound));
+        fs.open(Path::new("/g"), OpenMode::Write).unwrap();
+        assert_eq!(fs.read("/g").unwrap(), b"");
+        let a = fs.open(Path::new("/new"), OpenMode::Append).unwrap();
+        a.write_at(0, b"x").unwrap();
+        a.write_at(0, b"y").unwrap();
+        assert_eq!(fs.read("/new").unwrap(), b"xy");
+        drop((g, a));
+        fs.clear();
+        assert_eq!(fs.used(), 0);
     }
 
     #[test]

@@ -102,7 +102,7 @@ const SETTINGS = [
     id: "stdin",
     label: "Input",
     placeholder: "Program's standard input",
-    hint: "Standard input: io.read_line and io.read_all read it where the policy says `allow stdin`.",
+    hint: "Standard input: io.stdin (its read_line, read_text, ...) reads it where the policy says `allow stdin`.",
   },
 ];
 

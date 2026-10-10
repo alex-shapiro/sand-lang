@@ -18,10 +18,9 @@
 //!   compilation) and the engine's interrupt flag, polled every
 //!   [`POLL_INTERVAL`] units.
 //!
-//! Counters can be charged from `&self` methods. They are relaxed atomics
-//! read and written with plain loads and stores (one thread charges a
-//! budget at a time), so that a checker holding one stays `Send`, as REPL
-//! sessions keep their checker between inputs.
+//! The counters are relaxed atomics used as plain cells (one thread charges a
+//! budget at a time): charging works through `&self`, and a checker holding a
+//! budget stays `Send`, which REPL sessions need to keep it between inputs.
 
 use crate::platform::Instant;
 use std::sync::Arc;
@@ -80,9 +79,8 @@ pub const MAX_PATTERN_WORK: u64 = 5_000_000;
 pub const POLL_INTERVAL: u64 = 1 << 16;
 
 /// Default for `Limits::max_compile_fuel`. Ordinary programs need less than
-/// one unit per byte of source (the standard library and the examples take
-/// a few thousand units each; a 1,000-arm `match` on an enum about a
-/// million). Exhausting it takes well under a second and bounds the
+/// one unit per byte of source; a 1,000-arm `match` on an enum needs about a
+/// million. Exhausting it takes well under a second and bounds the
 /// compiler's memory to roughly a gigabyte.
 pub const DEFAULT_COMPILE_FUEL: u64 = 10_000_000;
 
@@ -90,11 +88,10 @@ pub const DEFAULT_COMPILE_FUEL: u64 = 10_000_000;
 /// linter ([`tool_fuel`]).
 pub const TOOL_FUEL_PER_BYTE: u64 = 64;
 
-/// The default budget for formatting or linting `len` bytes of source when
-/// they run on their own (`sand fmt`, `sand lint`): [`TOOL_FUEL_PER_BYTE`]
-/// units per byte (ordinary code needs one or two), and at least
-/// [`DEFAULT_COMPILE_FUEL`]. This keeps their time and the formatter's
-/// output linear in the size of the source, whatever its shape.
+/// The default budget for formatting or linting `len` bytes of source on
+/// their own (`sand fmt`, `sand lint`): [`TOOL_FUEL_PER_BYTE`] units per byte,
+/// and at least [`DEFAULT_COMPILE_FUEL`]. This keeps their time and the
+/// formatter's output linear in the size of the source, whatever its shape.
 pub fn tool_fuel(len: usize) -> u64 {
     DEFAULT_COMPILE_FUEL.max(TOOL_FUEL_PER_BYTE.saturating_mul(len as u64))
 }
@@ -139,9 +136,8 @@ impl CompileBudget {
         }
     }
 
-    /// Charges `units`; returns `false` once the budget is exhausted (or
-    /// compilation was stopped for another reason), after which callers
-    /// should bail out cheaply.
+    /// Charges `units`; returns `false` once compilation has stopped (fuel,
+    /// deadline or interrupt), after which callers should bail out cheaply.
     #[inline]
     pub fn charge(&self, units: u64) -> bool {
         if self.stop.get().is_some() {

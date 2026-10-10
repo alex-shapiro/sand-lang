@@ -5,7 +5,8 @@
 //! Each input is parsed, checked in the context of the previous inputs
 //! ([`Checker::check_cell`]), compiled by appending to the session's program
 //! ([`compile_more`]), and run in the session's VM, whose heap, globals and
-//! tasks persist. See `docs/INTERNALS.md` ("REPL sessions").
+//! tasks persist. A session only appends to the checker's tables and the
+//! program, so nothing a live value refers to is ever renumbered.
 
 use crate::check::{Checker, ModKind, ParsedModule};
 use crate::compile::{CompileInput, Incremental, ProgramMark, compile_more};
@@ -74,8 +75,7 @@ pub struct Session {
     was_reset: bool,
 }
 
-/// The end of the message of the error reported when a session was reset
-/// after an internal error (a caught Rust panic).
+/// The suffix of the error message of a call that reset the session.
 pub const RESET_NOTE: &str = " (the session was reset)";
 
 /// A started session.
@@ -260,10 +260,8 @@ impl Session {
     }
 
     /// Runs the tasks that earlier inputs left running until `until`
-    /// completes, and returns its output. A front end calls it while it waits
-    /// for the next input (with a future that resolves to that input), so
-    /// that background tasks keep running between inputs; when no task can
-    /// make progress, it just awaits `until`.
+    /// completes, and returns its output. A front end calls it with a future
+    /// that resolves to the next input, so that tasks run between inputs.
     ///
     /// Instruction, CPU time and output limits apply to each call as to
     /// an input; the wall-time limit does not apply (waiting for input may
@@ -454,7 +452,6 @@ impl Session {
         let (cell, imports) = st.graph.add(SESSION_MODULE.into(), file, ModKind::Script { main: true }, Some(root.clone()));
         let mut errors = Vec::new();
         st.loading = Some(mark);
-        // (The input's compile budget starts after its imports are decided.)
         let mut prompted = std::time::Duration::ZERO;
         let discovery = Discovery { snap: &st.snapshot, root, deadline, prompt: true };
         let stop = engine.discover(&discovery, &mut st.graph, cell, imports, format!("input:{name}"), &mut errors, &mut prompted).await;
@@ -500,7 +497,7 @@ impl Session {
             let std_inits = new_std.iter().map(|&id| snapshot.mods[id as usize].init);
             let inits = (first..first + added).chain([session as usize]).map(|m| checker.mods[m].init);
             let inits: Vec<FnId> = std_inits.chain(inits).flatten().collect();
-            // (The program keeps the summaries made for the whole library.)
+            // No `help` summaries: the program has the whole library's.
             let cp = checker.take_checked(false);
             let (native_help, native_argc) = if natives { native_info(&cp, registry) } else { (Vec::new(), Vec::new()) };
             let mut compiler = compiler.clone();
@@ -523,7 +520,7 @@ impl Session {
             }
             Err(e) => {
                 st.graph.rollback(&mark);
-                // (Not shared if it was changed.)
+                // A shared program was not changed.
                 if let Some(prog) = Arc::get_mut(&mut st.vm.prog) {
                     prog_mark.rollback(prog);
                 }

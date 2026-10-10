@@ -409,4 +409,4 @@ if args.len() != 2 {
 }
 let template = fs.read_text(args[0])?
 let data = json.parse(fs.read_text(args[1])?)?
-io.write(render(template, data)?)
+io.stdout.write_str(render(template, data)?)?

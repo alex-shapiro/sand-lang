@@ -33,9 +33,8 @@ pub trait FromValue: SandType {
     fn from_value<'a>(vm: &'a Vm, v: Value, conv: &mut Conversion) -> Result<Self::Item<'a>, Ctl>;
 }
 
-/// The conversion of a call's arguments: the memory it has allocated, checked
-/// against the memory limit as it grows (a list holding one big string many
-/// times converts to many copies).
+/// The memory allocated converting a call's arguments, checked against the
+/// memory limit as it grows.
 pub struct Conversion {
     bytes: usize,
     scratch: Scratch,
@@ -232,10 +231,8 @@ impl IntoValue for &[u8] {
     }
 }
 
-// Lists of any element type except bytes (`Vec<u8>` is `bytes`).
-
 /// Element types of lists (`Vec<T>`, `[T]` in Sand): every type with a
-/// Sand equivalent. (`Vec<u8>` is `bytes`, so `u8` is none.)
+/// Sand equivalent except `u8` (`Vec<u8>` is `bytes`).
 pub trait ListElem: SandType {}
 impl ListElem for i64 {}
 impl ListElem for f64 {}
@@ -426,8 +423,8 @@ pub trait GuardedFunction<Marker, G>: Send + Sync + 'static {
     fn into_host(self, guard: G) -> HostFn;
 }
 
-/// Arguments of a call that do not match the declaration (only possible
-/// for a declaration given in the module's source).
+/// The error for too few arguments, possible only when the module's source
+/// declares the function.
 fn missing() -> Ctl {
     Ctl::panic("host function called with too few arguments")
 }
@@ -646,6 +643,15 @@ impl NativeModule {
     /// declared in [`NativeModule::source`] with `native fn`.
     pub fn raw_function(&mut self, name: &str, f: impl Fn(&mut Vm, &[Value]) -> NResult + Send + Sync + 'static) -> &mut Self {
         self.add(name, None, Arc::new(f));
+        self
+    }
+
+    /// Registers the native method of a trait impl declared in
+    /// [`NativeModule::source`]: `"Conn.close"` for `impl Close for Conn {
+    /// native fn close(self) }`. `f` receives `self` and the other arguments.
+    pub fn raw_method(&mut self, name: &str, f: impl Fn(&mut Vm, &[Value]) -> NResult + Send + Sync + 'static) -> &mut Self {
+        // Trait methods are passed the impl's dictionary first.
+        self.add(name, None, Arc::new(move |vm: &mut Vm, a: &[Value]| f(vm, a.get(1..).unwrap_or_default())));
         self
     }
 

@@ -251,7 +251,7 @@ fn fmt_num(v: float) -> str {
 }
 
 let interp = Interpreter {}
-while let Some(line) = io.read_line()? {
+while let Some(line) = io.stdin.read_line()? {
     if line.trim().is_empty() { continue }
     match interp.run(line) {
         Ok(out) => print(out)

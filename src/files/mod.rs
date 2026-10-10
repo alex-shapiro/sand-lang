@@ -1,13 +1,11 @@
-//! The file system scripts see: the `fs` module's operations and the
-//! loading of script modules (imports and main files) go through an [`Fs`],
-//! either the host's file system (with the `os` feature) or a [`MemFs`].
+//! The file system scripts see: the `fs` module and the loading of script
+//! modules go through an [`Fs`], the host's (with the `os` feature) or a
+//! [`MemFs`].
 //!
-//! A path given to an operation is first resolved by the same `Fs` into a
-//! [`Target`] ([`Fs::target`]): its normal form, which the policy checks in
-//! the file system's [`PathSpace`], and on the host the directory handles
-//! of the walk that found it, through which the operation then acts (see
-//! `unix.rs`). Operations run on the VM thread: on the host they are system
-//! calls, which count towards the run's CPU time like the rest of its work.
+//! [`Fs::target`] first resolves an operation's path into a [`Target`]: the
+//! normal form the policy checks and, on the host, the directory handles of
+//! the walk, through which the operation then acts (see `unix.rs`). Host
+//! system calls run on the VM thread and count towards the run's CPU time.
 
 #[cfg(feature = "os")]
 mod host;
@@ -69,6 +67,39 @@ pub(crate) fn unchecked_symlink(name: &OsStr) -> io::Error {
 /// Whether `e` reports a symlink that was not followed.
 pub(crate) fn is_unchecked_symlink(e: &io::Error) -> bool {
     e.get_ref().is_some_and(|inner| inner.is::<UncheckedSymlink>())
+}
+
+/// How a file is opened (`fs.open`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OpenMode {
+    /// Read an existing file.
+    Read,
+    /// Write from the start, creating or truncating the file.
+    Write,
+    /// Write at the end, creating the file if needed.
+    Append,
+    /// Create a new file for writing; fail if one exists.
+    CreateNew,
+    /// Read and write an existing file in place.
+    ReadWrite,
+}
+
+impl OpenMode {
+    pub fn reads(self) -> bool {
+        matches!(self, OpenMode::Read | OpenMode::ReadWrite)
+    }
+
+    pub fn writes(self) -> bool {
+        self != OpenMode::Read
+    }
+
+    pub fn creates(self) -> bool {
+        matches!(self, OpenMode::Write | OpenMode::Append | OpenMode::CreateNew)
+    }
+
+    pub fn truncates(self) -> bool {
+        self == OpenMode::Write
+    }
 }
 
 /// Whether an operation acts on what a final symlink points to (`Follow`)
@@ -269,15 +300,15 @@ impl Fs {
         }
     }
 
-    /// Writes (or appends) `data` to the file at `t`, creating it.
-    pub fn write(&self, t: Target, data: &[u8], append: bool) -> io::Result<()> {
+    /// Writes `data` to the file at `t`, creating or truncating it.
+    pub fn write(&self, t: Target, data: &[u8]) -> io::Result<()> {
         match self {
             #[cfg(feature = "os")]
             Fs::Host => {
                 let (path, h) = t.host()?;
-                host::write_all(h.open_write(&path, append)?, data)
+                host::write_all(h.open_write(&path, false)?, data)
             }
-            Fs::Memory(m) => m.write_file(&t.path, data, append),
+            Fs::Memory(m) => m.write_file(&t.path, data, false),
         }
     }
 
@@ -341,6 +372,30 @@ impl Fs {
         }
     }
 
+    /// Removes the directory entry `t` (a final symlink is not followed: it
+    /// must be a directory) and everything below it, descending through
+    /// the directories it opens. `check` is asked about each entry below
+    /// `t`, by its normal path, before it is removed: its `Err` (a denial)
+    /// stops the removal. The names read are reserved in `res`.
+    pub fn remove_tree<E>(
+        &self,
+        t: Target,
+        res: &mut Reservation,
+        check: impl FnMut(&Path) -> Result<io::Result<()>, E>,
+    ) -> Result<io::Result<()>, E> {
+        match self {
+            #[cfg(feature = "os")]
+            Fs::Host => match t.host() {
+                Ok((_, h)) => h.remove_tree(res, check),
+                Err(e) => Ok(Err(e)),
+            },
+            Fs::Memory(m) => {
+                let _ = res;
+                m.remove_tree(&t.path, check)
+            }
+        }
+    }
+
     pub fn rename(&self, from: Target, to: Target) -> io::Result<()> {
         match self {
             #[cfg(feature = "os")]
@@ -358,6 +413,19 @@ impl Fs {
                 host::copy(from.open_read(&from_path)?, to.open_write(&to_path, false)?)
             }
             Fs::Memory(m) => m.copy(&from.path, &to.path),
+        }
+    }
+
+    /// Opens the regular file at `t` for `mode` (a file that exists is
+    /// opened only if it is a regular file).
+    pub fn open(&self, t: Target, mode: OpenMode) -> io::Result<OpenedFile> {
+        match self {
+            #[cfg(feature = "os")]
+            Fs::Host => {
+                let (path, h) = t.host()?;
+                Ok(OpenedFile::Host(h.open(&path, mode)?))
+            }
+            Fs::Memory(m) => Ok(OpenedFile::Memory(m.open(&t.path, mode)?, 0)),
         }
     }
 
@@ -390,6 +458,122 @@ impl Fs {
             return Err(Error::new(ErrorKind::InvalidData, "source too large"));
         }
         String::from_utf8(data).map_err(|_| Error::new(ErrorKind::InvalidData, "source is not valid UTF-8"))
+    }
+}
+
+/// A file opened by a script (`fs.File`), on the host (whose system
+/// keeps the position) or in a memory file system (with the position).
+pub(crate) enum OpenedFile {
+    #[cfg(feature = "os")]
+    Host(std::fs::File),
+    Memory(mem::OpenFile, u64),
+}
+
+impl OpenedFile {
+    /// Reads at the position into `buf`, moving it on; 0 at the end.
+    pub fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            #[cfg(feature = "os")]
+            OpenedFile::Host(f) => loop {
+                match io::Read::read(f, buf) {
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    r => return r,
+                }
+            },
+            OpenedFile::Memory(f, pos) => {
+                let n = f.read_at(*pos, buf);
+                *pos += n as u64;
+                Ok(n)
+            }
+        }
+    }
+
+    /// Writes all of `data` at the position (at the end in append mode),
+    /// moving it on. Returns the bytes of zeros written to fill a gap
+    /// before it (a memory file has no holes).
+    pub fn write_all(&mut self, data: &[u8]) -> io::Result<u64> {
+        match self {
+            #[cfg(feature = "os")]
+            OpenedFile::Host(f) => io::Write::write_all(f, data).map(|()| 0),
+            OpenedFile::Memory(f, pos) => {
+                let len = f.meta().size;
+                let start = if f.appends() { len } else { *pos };
+                *pos = f.write_at(*pos, data)?;
+                Ok(if data.is_empty() { 0 } else { start.saturating_sub(len) })
+            }
+        }
+    }
+
+    /// Moves to byte offset `to`, which may be past the end.
+    pub fn seek(&mut self, to: u64) -> io::Result<()> {
+        match self {
+            #[cfg(feature = "os")]
+            OpenedFile::Host(f) => io::Seek::seek(f, io::SeekFrom::Start(to)).map(|_| ()),
+            OpenedFile::Memory(_, pos) => {
+                *pos = to;
+                Ok(())
+            }
+        }
+    }
+
+    pub fn position(&mut self) -> io::Result<u64> {
+        match self {
+            #[cfg(feature = "os")]
+            OpenedFile::Host(f) => io::Seek::stream_position(f),
+            OpenedFile::Memory(_, pos) => Ok(*pos),
+        }
+    }
+
+    /// The size and modification time of the file.
+    pub fn meta(&self) -> io::Result<EntryMeta> {
+        match self {
+            #[cfg(feature = "os")]
+            OpenedFile::Host(f) => {
+                let m = f.metadata()?;
+                let modified = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
+                let modified = modified.map(|d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX));
+                Ok(EntryMeta { kind: EntryKind::File, size: m.len(), modified })
+            }
+            OpenedFile::Memory(f, _) => Ok(f.meta()),
+        }
+    }
+
+    /// Truncates or extends (with zeros) the file to `len` bytes. Returns
+    /// the bytes of zeros written (by a memory file).
+    pub fn set_len(&mut self, len: u64) -> io::Result<u64> {
+        match self {
+            #[cfg(feature = "os")]
+            OpenedFile::Host(f) => f.set_len(len).map(|()| 0),
+            OpenedFile::Memory(f, _) => {
+                let before = f.meta().size;
+                f.set_len(len)?;
+                Ok(len.saturating_sub(before))
+            }
+        }
+    }
+
+    /// Waits until the file's contents are stored durably.
+    pub fn sync(&mut self) -> io::Result<()> {
+        match self {
+            #[cfg(feature = "os")]
+            OpenedFile::Host(f) => f.sync_all(),
+            OpenedFile::Memory(..) => Ok(()),
+        }
+    }
+}
+
+/// Whether `e` reports that the process (or the system) has too many files
+/// open: closing unreachable ones may help.
+pub(crate) fn too_many_open_files(e: &io::Error) -> bool {
+    #[cfg(all(feature = "os", unix))]
+    return matches!(e.raw_os_error(), Some(code) if code == rustix::io::Errno::MFILE.raw_os_error() || code == rustix::io::Errno::NFILE.raw_os_error());
+    // ERROR_TOO_MANY_OPEN_FILES
+    #[cfg(all(feature = "os", windows))]
+    return e.raw_os_error() == Some(4);
+    #[cfg(not(feature = "os"))]
+    {
+        let _ = e;
+        false
     }
 }
 

@@ -1,6 +1,5 @@
-//! Syntax highlighting: what each part of a source is, from the lexer, for
-//! editors (the REPL's line editor, the web playground). Works on incomplete
-//! and invalid source.
+//! Syntax highlighting from the lexer, for the REPL's line editor and the
+//! web playground. Works on incomplete and invalid source.
 
 use super::lexer::{Comment, CommentKind, Tok, lex};
 
@@ -12,9 +11,9 @@ pub enum Highlight {
     Constant,
     /// Integer, float and duration literals.
     Number,
-    /// String and bytes literals (but not their interpolated expressions).
+    /// String and bytes literals, except interpolated expressions.
     String,
-    /// The braces around an interpolated expression.
+    /// `\(` and `)` around an interpolated expression.
     Interpolation,
     Comment,
     /// `///` and `//!` comments.

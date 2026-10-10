@@ -12,7 +12,6 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
-/// Generous: each of these took minutes, hours or gigabytes before.
 const FAST: Duration = Duration::from_secs(10);
 
 fn check(config: Config, src: &str) -> (Result<(), Error>, Duration) {
@@ -128,7 +127,6 @@ fn bound_checks_on_structs_sharing_field_types() {
 
 #[test]
 fn deeply_nested_string_interpolation() {
-    // Used to overflow the host stack in the lexer (aborting the process).
     // The lexer keeps its own stack; the parser limits the nesting.
     let n = 100_000;
     let src = format!("let s = {}1{}\n", "\"\\(".repeat(n), ")\"".repeat(n));
@@ -317,7 +315,7 @@ fn run_files(files: &[(&str, &str)], main: &str) -> Result<String, Error> {
 fn reflected_types_are_described_once() {
     // Struct descriptions that double at each level, used by many call
     // sites: each struct is described once and shared, within a
-    // description and by every call site (this took gigabytes).
+    // description and by every call site.
     let mut src = String::from("import json\nstruct S0 { x: int }\n");
     for i in 1..40 {
         src += &format!("struct S{i} {{ a: S{}, b: S{} }}\n", i - 1, i - 1);
@@ -358,9 +356,7 @@ print(t)
 #[cfg(feature = "os")]
 #[test]
 fn reflected_types_with_the_same_name() {
-    // Two structs named `Config` in different modules are different types
-    // (recursive references used to be resolved by name, decoding the inner
-    // one as the outer one).
+    // Two structs named `Config` in different modules are different types.
     let files = [("a.sand", "pub struct Config { p: int, q: int, r: int }\n")];
     let src = r#"import json
 import "./a.sand"

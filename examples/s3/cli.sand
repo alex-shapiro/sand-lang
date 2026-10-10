@@ -59,13 +59,13 @@ fn run(args: [str]) -> Result<()> {
             c.put_object(bucket, key, data)?
             print("uploaded \(file) to s3://\(bucket)/\(key) (\(human(data.len())))")
         }
-        ["get", bucket, key] => io.write(c.get_object(bucket, key)?.to_str_lossy())
+        ["get", bucket, key] => io.stdout.write_str(c.get_object(bucket, key)?.to_str_lossy())?
         ["get", bucket, key, file] => {
             let data = c.get_object(bucket, key)?
             fs.write_bytes(file, data)?
             print("downloaded s3://\(bucket)/\(key) to \(file) (\(human(data.len())))")
         }
-        ["cat", bucket, key] => io.write(c.get_object(bucket, key)?.to_str()?)
+        ["cat", bucket, key] => io.stdout.write_str(c.get_object(bucket, key)?.to_str()?)?
         ["rm", bucket, key] => {
             c.delete_object(bucket, key)?
             print("deleted s3://\(bucket)/\(key)")

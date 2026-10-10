@@ -430,7 +430,7 @@ fn stdout_can_be_denied() {
 #[test]
 fn stdin_requires_permission() {
     let config = Config::new().policy(Policy::deny_all()).stdin_bytes(b"line\n".to_vec());
-    let (r, out, _) = run_src(config, "import io\nprint(io.read_line().unwrap_err().kind)");
+    let (r, out, _) = run_src(config, "import io\nprint(io.stdin.read_line().unwrap_err().kind)");
     r.unwrap();
     assert_eq!(out, "permission_denied\n");
 }
@@ -1396,8 +1396,7 @@ fn rust_panics_in_host_code_become_internal_errors() {
 #[test]
 fn module_discovery_is_bounded() {
     let dir = TempDir::new("discovery");
-    // A huge import path is refused at once (it used to take seconds before
-    // the compile budget even existed).
+    // A huge import path is refused at once.
     let main = dir.write("main.sand", &format!("import \"{}b\"\nprint(1)", "a/".repeat(400_000)));
     let start = Instant::now();
     let r = rt().block_on(Engine::new(Config::new()).run_file(&main));
@@ -1415,8 +1414,7 @@ fn module_discovery_is_bounded() {
         other => panic!("{other:?}"),
     }
     // And it can be interrupted.
-    let engine = Engine::new(Config::new().limits(Limits { max_wall_time: Some(Duration::ZERO), ..Limits::default() }));
-    let mut engine = engine;
+    let mut engine = Engine::new(Config::new().limits(Limits { max_wall_time: Some(Duration::ZERO), ..Limits::default() }));
     let r = rt().block_on(engine.run_file(&main));
     assert!(matches!(r, Err(Error::Limit(LimitKind::WallTime))), "{r:?}");
 }
@@ -1468,4 +1466,58 @@ fn a_symlinked_main_file_imports_from_its_own_directory() {
     let mut engine = Engine::new(Config::new().policy(Policy::allow_all()).stdout(out.clone()));
     rt().block_on(engine.run_file(dir.path().join("bin/tool.sand"))).unwrap();
     assert_eq!(out.contents(), "hello from lib\n");
+}
+
+#[test]
+fn host_modules_can_define_resources() {
+    use sandlang::Value;
+    use sandlang::vm::Vm;
+    use sandlang::vm::iomem::ResourceSlot;
+    use sandlang::vm::value::{NativeObject, Obj};
+
+    struct Conn {
+        slot: Option<ResourceSlot>,
+        closed: Arc<AtomicUsize>,
+    }
+    impl NativeObject for Conn {
+        fn type_name(&self) -> &'static str {
+            "pool.Conn"
+        }
+        fn is_resource(&self) -> bool {
+            self.slot.is_some()
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+    }
+
+    let closed = Arc::new(AtomicUsize::new(0));
+    let mut m = NativeModule::new("pool");
+    m.source("pub native type Conn\nimpl Close for Conn {\n    native fn close(self)\n}\npub native fn connect() -> Result<Conn>");
+    let c = closed.clone();
+    m.raw_function("connect", move |vm: &mut Vm, _: &[Value]| {
+        let slot = match vm.resource_slot()? {
+            Ok(s) => s,
+            Err(e) => return Ok(vm.err(e)),
+        };
+        let conn = vm.heap.alloc(Obj::Native(Box::new(Conn { slot: Some(slot), closed: c.clone() })));
+        Ok(vm.ok(conn))
+    });
+    m.raw_method("Conn.close", |vm: &mut Vm, a: &[Value]| {
+        if let Some(conn) = vm.heap.native_mut::<Conn>(a[0])
+            && conn.slot.take().is_some()
+        {
+            conn.closed.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(Value::Unit)
+    });
+    let src = "import pool\nfor _ in 0..5 {\n    use c = pool.connect()?\n}\nlet kept = [pool.connect()?, pool.connect()?]\nprint(pool.connect())";
+    let config = Config::new().module(m).limits(Limits { max_open_resources: 2, ..Limits::default() });
+    let (r, out, err) = run_src(config, src);
+    assert!(r.is_ok(), "{r:?} {err}");
+    assert!(out.contains("too many open resources"), "{out}");
+    assert_eq!(closed.load(Ordering::Relaxed), 5);
 }

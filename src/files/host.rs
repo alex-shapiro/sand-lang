@@ -12,9 +12,8 @@ pub(crate) use super::windows::{Resolved, resolve};
 
 /// Reads the regular file `file` into a buffer reserved in `res`. The
 /// file's length is reserved first, so a file too large for the memory
-/// limit fails before it is read; the buffer then grows as data arrives
-/// (from a preallocation of at most 64 MiB, in case the length is that of a
-/// sparse file).
+/// limit fails before it is read. The buffer starts at no more than 64 MiB
+/// (the length may be that of a sparse file) and grows as data arrives.
 pub(crate) fn read_reserved(mut file: File, mut res: Reservation) -> io::Result<(Vec<u8>, Reservation)> {
     let len = usize::try_from(file.metadata()?.len()).unwrap_or(usize::MAX);
     res.ensure(len)?;
@@ -24,7 +23,6 @@ pub(crate) fn read_reserved(mut file: File, mut res: Reservation) -> io::Result<
     loop {
         let start = data.len();
         let n = if data.capacity() > start {
-            // Fill the reserved capacity.
             data.resize(data.capacity(), 0);
             let n = read_some(&mut file, &mut data[start..]);
             data.truncate(start + n.as_ref().map_or(0, |&n| n));

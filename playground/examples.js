@@ -14,8 +14,7 @@ export const examples = [
 //! Edit the program, press Run (or Ctrl-Enter / Cmd-Enter), then keep
 //! going in the console below the output: the program's variables and
 //! functions live on, so try \`planets.len()\` or \`size(planets[4])\`.
-//! The Policy tab says what the program may do. Each sandbox is a separate
-//! engine in its own worker: "Run all" runs them at once.
+//! The Policy tab says what the program may do.
 
 /// A planet and how many moons it has.
 struct Planet {
@@ -102,7 +101,7 @@ report("write /data/greeting.txt", fs.write_text("/data/greeting.txt", "overwrit
 
 print("\nEnvironment (the Environment tab) and input (the Input tab):")
 print("         USER is \\(env.get("USER") ?? "not visible"), TOKEN is \\(env.get("TOKEN") ?? "not visible")")
-report("read standard input", io.read_line())
+report("read standard input", io.stdin.read_line())
 
 print("\nNetwork:")
 report("GET https://api.github.com/zen", http.get("https://api.github.com/zen"))
@@ -236,10 +235,15 @@ fn parse(line: str) -> Result<Sale> {
     Ok(Sale { region: cols[0], units, price })
 }
 
+// The file is read a line at a time, and closed when the block ends.
 let totals: [str: float] = [:]
-for line in fs.read_lines("/data/sales.csv")?.skip(1) {
-    let s = parse(line)?
-    totals[s.region] = totals.get_or(s.region, 0.0) + s.units.to_float() * s.price
+{
+    use sales = fs.open("/data/sales.csv")?
+    sales.read_line()?  // the header
+    while let Some(line) = sales.read_line()? {
+        let s = parse(line)?
+        totals[s.region] = totals.get_or(s.region, 0.0) + s.units.to_float() * s.price
+    }
 }
 
 var report = "Revenue by region\\n"
@@ -398,7 +402,7 @@ struct Item {
     note: str?
 }
 
-let orders: [Order] = json.decode(io.read_all()?)?
+let orders: [Order] = json.decode(io.stdin.read_text()?)?
 for order in orders {
     let count = order.items.map(i => i.quantity).sum()
     print("order #\\(order.id) for \\(order.customer): \\(count) items")

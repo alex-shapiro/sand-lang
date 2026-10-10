@@ -124,7 +124,7 @@ pub struct Client {
         http.request(
             method,
             url,
-            headers: headers,
+            headers: headers.entries(),
             body: body,
             timeout: self.timeout,
             follow_redirects: false,

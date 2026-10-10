@@ -132,9 +132,8 @@ impl Policy {
         Policy::Custom(Arc::new(f))
     }
 
-    /// Decides `cap`. A rule policy normalizes the path of a file capability
-    /// first ([`normalize_path`], which resolves symlinks on the host's file
-    /// system: a `realpath`); [`Policy::check_normalized`] skips that.
+    /// Decides `cap`. A rule policy first normalizes a file capability's path
+    /// with [`normalize_path`]; [`Policy::check_normalized`] skips that.
     pub fn check(&self, cap: &Capability) -> Decision {
         self.check_in(cap, PathSpace::Host)
     }
@@ -184,14 +183,10 @@ impl Policy {
         }
     }
 
-    /// The decision on `cap`, a file or import capability whose path is
-    /// normalized except that its final name may be spelled differently
-    /// than stored (on a case- or normalization-insensitive file system),
-    /// if the decision is the same for every such spelling: `None` if the
-    /// policy may decide differently (a custom policy, which may compare
-    /// paths exactly, or an allow rule below the final name's directory)
-    /// or would prompt (prompts show the path, and answers are remembered
-    /// for it). Deny rules equate every spelling ([`fold_name`]).
+    /// The decision on `cap` (a file or import capability normalized except
+    /// for the final name's spelling) if it holds for every spelling. `None`
+    /// for a custom policy (which may compare paths exactly), an allow rule
+    /// below the final name's directory, or a prompt (which shows the path).
     pub(crate) fn decision_for_any_spelling(&self, cap: &Capability, space: PathSpace) -> Option<Decision> {
         let decision = match self {
             Policy::AllowAll | Policy::DenyAll => self.check_in(cap, space),
@@ -246,10 +241,8 @@ impl Policy {
 }
 
 /// The file system whose paths a check is about. A rule policy keeps each
-/// rule's path in the form of either: canonicalised on the host's file
-/// system (resolving symlinks and taking the stored spelling of existing
-/// components), and lexically normalized from the root for a memory file
-/// system ([`crate::MemFs`]), which has no symlinks.
+/// rule's path in both forms: canonicalised on the host, and lexically
+/// normalized for a memory file system ([`crate::MemFs`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PathSpace {
     Host,
@@ -334,16 +327,13 @@ pub(crate) fn lexical(p: &Path) -> PathBuf {
     out
 }
 
-/// Normalizes a path lexically (resolving `.` and `..`) and resolves it on
-/// the host's file system like `realpath` does for the longest prefix that
-/// exists: symlinks are followed, and on macOS existing components are
-/// named as stored (case- and normalization-insensitive volumes accept
-/// other spellings) and through their firmlinks
-/// (`/System/Volumes/Data/Users` is `/Users`). A symlink whose target does
-/// not resolve is kept, with the rest of the path.
+/// Normalizes a path lexically (`.`, `..`), then resolves its longest
+/// existing prefix on the host's file system as `realpath` does: following
+/// symlinks and, on macOS, spelling components as stored and resolving
+/// firmlinks (`/System/Volumes/Data/Users` is `/Users`). A symlink whose
+/// target does not resolve is kept, with the rest of the path.
 ///
-/// Without the `os` feature there is no host file system: paths are only
-/// normalized lexically.
+/// Without the `os` feature, paths are only normalized lexically.
 pub fn normalize_path(p: &Path) -> PathBuf {
     #[cfg(feature = "os")]
     return crate::files::Fs::Host.resolve(&lexical(p));
@@ -368,12 +358,10 @@ pub fn normalize_entry_path(p: &Path) -> PathBuf {
     return lexical(p);
 }
 
-/// At most this many entries of a directory are read to find the stored
-/// name of an entry in it when it cannot be had otherwise (a symlink's;
-/// on macOS, that of a file that cannot be opened for reading or of a
-/// device); in a larger directory, the entry keeps the name it was given.
-/// Deny rules match every spelling of a name anyway; allow rules then need
-/// the name as given.
+/// The most directory entries read to find an entry's stored name when
+/// there is no other way (a symlink's; on macOS, a device's or an unreadable
+/// file's). In a larger directory the entry keeps the given name, which deny
+/// rules still match but allow rules must name exactly.
 pub const MAX_LINK_SCAN: usize = 4096;
 
 fn under(path: &Path, roots: &[PathRule], space: PathSpace) -> bool {
@@ -384,16 +372,11 @@ fn under(path: &Path, roots: &[PathRule], space: PathSpace) -> bool {
     }
 }
 
-/// Whether `path` is at or below a deny rule. File systems may be case
-/// insensitive (Windows, macOS, case-folding directories on Linux, network
-/// shares) and normalization insensitive (APFS, HFS+): `data/ſecrets`,
-/// `data/SECRETS` and `data/secrets` may name the same entry, as may `café`
-/// spelled with a precomposed or a combining accent. Existing paths are
-/// canonicalised to their stored spelling, but a path that does not exist
-/// yet keeps the spelling it was given in (and could create the denied
-/// entry). So on every platform deny rules compare paths by [`fold_name`],
-/// which equates every such spelling. Allow rules stay exact, so this only
-/// ever denies more.
+/// Whether `path` is at or below a deny rule, comparing names by
+/// [`fold_name`]. File systems may be case- or normalization-insensitive, so
+/// `data/ſecrets`, `data/SECRETS` and `data/secrets` may name one entry, and
+/// a path that does not exist yet keeps its given spelling and could create
+/// the denied entry. Allow rules stay exact, so folding only denies more.
 fn under_deny(path: &Path, roots: &[PathRule], space: PathSpace) -> bool {
     if roots.is_empty() {
         return false;
@@ -611,7 +594,6 @@ impl NetPattern {
 /// The IPv4 address embedded in an IPv6 address of a form that reaches it:
 /// IPv4-compatible (`::a.b.c.d`, not `::` or `::1`), IPv4-translated
 /// (`::ffff:0:a.b.c.d`), NAT64 (`64:ff9b::a.b.c.d`) or 6to4 (`2002:aabb:ccdd::`).
-/// (IPv4-mapped addresses are converted by `to_canonical`.)
 fn embedded_ipv4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
     let v4 = |hi: u16, lo: u16| Some(Ipv4Addr::from(((hi as u32) << 16) | lo as u32));
     match ip.segments() {
@@ -1085,7 +1067,7 @@ mod tests {
             };
             assert_eq!(normalize_path(&p), expected, "{rest}");
         }
-        // Very long paths take few calls (this used to take seconds).
+        // Very long paths take few calls.
         let long = base.join("a/".repeat(100_000) + "b");
         let start = std::time::Instant::now();
         assert!(normalize_path(&long).starts_with(&base));

@@ -1,10 +1,9 @@
 //! The `regex` module, backed by the engine of the `regex` crate
 //! (`regex_automata::meta`, configured exactly like `regex::Regex`).
 //!
-//! Each compiled regex owns its search cache (instead of the `regex` crate's
-//! per-thread pool), so the memory of the compiled program and of the cache
-//! can be measured and counted against `max_memory`: the object's size is
-//! recomputed after every search and the heap's accounting adjusted.
+//! Each compiled regex owns its search cache, not the `regex` crate's
+//! per-thread pool, so its memory can be counted against `max_memory`: the
+//! object is re-measured after every search.
 
 use crate::check::ModKind;
 use crate::engine::Registry;
@@ -45,15 +44,12 @@ const COMPILE_PER_BYTE: u64 = 16;
 /// The time floor of regex work: whatever the deterministic charges, regex
 /// work is charged at least one unit per this many nanoseconds it takes.
 ///
-/// A search's work is not always proportional to the text it returns: the
-/// leftmost-first semantics can make a search look far past the match it
-/// finds (`[a-z]*X|[a-z]` on a long run of letters scans to the end of the
-/// text for every one-letter match, so iterating is quadratic), and a search
-/// that falls back from the lazy DFA to the PikeVM costs time proportional
-/// to the size of the program per byte. The regex engine does not report how
-/// much it scanned, so such work is bounded by measuring it: ordinary
-/// searches cost far less than this per unit of their deterministic charge
-/// (about a nanosecond per byte), so for them fuel stays deterministic.
+/// Work is not always proportional to the text: a search may look far past
+/// its match (`[a-z]*X|[a-z]` on a long run of letters scans to the end for
+/// every one-letter match), and the PikeVM fallback costs time per byte in
+/// the program's size. The engine does not report how much it scanned, so
+/// such work is timed. Ordinary searches take about a nanosecond per byte,
+/// far below the floor, so their fuel stays deterministic.
 const FLOOR_NANOS: u128 = 1000;
 
 /// Metering of regex work. A single search cannot be stopped, so it is
@@ -167,8 +163,6 @@ fn regex_obj(vm: &Vm, v: Value) -> Result<&RegexObj, Ctl> {
     vm.heap.native::<RegexObj>(v).ok_or_else(|| Ctl::panic("not a Regex"))
 }
 
-/// Runs `search` with the regex `re` (a `Regex` value) and its cache, then
-/// accounts for the cache's growth.
 /// Slots of the per-engine cache of compiled regexes (direct-mapped by the
 /// pattern's hash).
 const REGEX_CACHE_SLOTS: usize = 64;
@@ -200,6 +194,8 @@ fn cached_regex(vm: &Vm, pattern: Value, (hash, slot): (u64, usize)) -> Option<V
     (*obj.pattern == *vm.str(pattern)).then_some(re)
 }
 
+/// Runs `search` with the regex `re` (a `Regex` value) and its cache, then
+/// accounts for the cache's growth.
 fn with_regex<T>(vm: &mut Vm, re: Value, search: impl FnOnce(&Vm, &RegexObj, &mut Cache) -> Result<T, Ctl>) -> Result<T, Ctl> {
     let (result, (before, after)) = {
         let obj = regex_obj(vm, re)?;

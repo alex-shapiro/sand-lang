@@ -78,6 +78,10 @@ name = "sandbox_io"
 required-features = ["os"]
 
 [[test]]
+name = "resources"
+required-features = ["os"]
+
+[[test]]
 name = "tls"
 required-features = ["os"]
 

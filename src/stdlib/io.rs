@@ -5,9 +5,9 @@ use crate::check::ModKind;
 use crate::engine::Registry;
 use crate::policy::Capability;
 use crate::vm::iomem::Reservation;
-use crate::vm::value::{Obj, Value, u64_to_usize_saturating};
-use crate::vm::{Ctl, Finisher, NResult, StdinSource, Vm};
-use tokio::io::AsyncBufRead;
+use crate::vm::value::{NativeObject, Obj, Value, to_usize_saturating, u64_to_usize_saturating};
+use crate::vm::{Ctl, Finisher, NResult, NativeFn, StdinSource, Vm};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 use tokio::sync::Mutex;
 
 pub fn register(r: &mut Registry) {
@@ -18,52 +18,106 @@ pub fn register(r: &mut Registry) {
 }
 
 fn register_io(r: &mut Registry) {
-    r.add_builtin("io.read_line", |vm, _| read_stdin(vm, true));
-    r.add_builtin("io.read_all", |vm, _| read_stdin(vm, false));
-    r.add_builtin("io.write", |vm, a| {
-        vm.charge_bytes(vm.str(a[0]).len())?;
-        vm.write_stream_str(1, a[0])?;
-        Ok(Value::Unit)
-    });
-    r.add_builtin("io.ewrite", |vm, a| {
-        vm.charge_bytes(vm.str(a[0]).len())?;
-        vm.write_stream_str(2, a[0])?;
-        Ok(Value::Unit)
-    });
-    r.add_builtin("io.flush", |vm, _| {
-        for sink in [&vm.host.stdout, &vm.host.stderr] {
-            let _ = sink.flush();
+    r.add_builtin("io.new_stdin", |vm, _| Ok(vm.heap.alloc(Obj::Native(Box::new(StdStream::Stdin)))));
+    r.add_builtin("io.new_stdout", |vm, _| Ok(vm.heap.alloc(Obj::Native(Box::new(StdStream::Stdout)))));
+    r.add_builtin("io.new_stderr", |vm, _| Ok(vm.heap.alloc(Obj::Native(Box::new(StdStream::Stderr)))));
+    r.add_method("io.Stdin.read", |vm, a| {
+        let max = a[1].as_int();
+        if max <= 0 {
+            return Ok(vm.err_value("invalid", "read: max must be positive"));
         }
-        Ok(Value::Unit)
+        read_stdin(vm, Read::Upto(to_usize_saturating(max)))
     });
+    r.add_method("io.Stdin.read_line", |vm, _| read_stdin(vm, Read::Line));
+    r.add_method("io.Stdin.read_all", |vm, _| read_stdin(vm, Read::All));
+    for (key, which) in [("io.Stdout", 1), ("io.Stderr", 2)] {
+        let write: NativeFn = if which == 1 { |vm, a| write_out(vm, 1, a[1]) } else { |vm, a| write_out(vm, 2, a[1]) };
+        r.add_method(format!("{key}.write"), write);
+        r.add_method(format!("{key}.write_str"), write);
+        r.add_method(format!("{key}.flush"), if which == 1 { |vm, _| flush_out(vm, 1) } else { |vm, _| flush_out(vm, 2) });
+    }
 }
 
-/// `read_line` (`Result<str?>`) or `read_all` (`Result<str>`).
-fn read_stdin(vm: &mut Vm, line: bool) -> NResult {
+/// The standard streams' objects (`io.stdin`, `io.stdout`, `io.stderr`).
+enum StdStream {
+    Stdin,
+    Stdout,
+    Stderr,
+}
+
+impl NativeObject for StdStream {
+    fn type_name(&self) -> &'static str {
+        match self {
+            StdStream::Stdin => "Stdin",
+            StdStream::Stdout => "Stdout",
+            StdStream::Stderr => "Stderr",
+        }
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+/// Writes the `str` or `bytes` value `v` to stdout (1) or stderr (2).
+fn write_out(vm: &mut Vm, which: u8, v: Value) -> NResult {
+    let len = match vm.heap.get(v) {
+        Obj::Str(s) => s.len(),
+        _ => vm.heap.bytes_of(v).len(),
+    };
+    vm.charge_bytes(len)?;
+    vm.write_stream_value(which, v)
+}
+
+fn flush_out(vm: &mut Vm, which: u8) -> NResult {
+    let sink = if which == 1 { &vm.host.stdout } else { &vm.host.stderr };
+    Ok(match sink.flush() {
+        Ok(()) => vm.ok(Value::Unit),
+        Err(e) => vm.err_value(super::io_kind(&e), &e.to_string()),
+    })
+}
+
+/// What a read of standard input reads.
+#[derive(Clone, Copy, PartialEq)]
+enum Read {
+    /// A line (`Result<str?>`).
+    Line,
+    /// The rest (`Result<bytes>`).
+    All,
+    /// At most this many bytes, once some are available (`Result<bytes>`).
+    Upto(usize),
+}
+
+fn read_stdin(vm: &mut Vm, what: Read) -> NResult {
     if !vm.permit(&Capability::Stdin)? {
         return Ok(vm.err_value("permission_denied", "permission denied: read standard input"));
     }
     // A prompt written before reading must be visible (on a terminal).
     vm.flush_before_input();
-    if line && let Some(data) = buffered_line(vm) {
-        let v = match data {
-            Some(data) => {
-                vm.charge_bytes(data.len())?;
-                let Ok(text) = String::from_utf8(data) else {
-                    return Ok(vm.err_value("invalid", "stdin: input is not valid UTF-8"));
-                };
-                let s = vm.new_str(text);
-                vm.some(s)
+    if what == Read::Line
+        && let Some(data) = buffered_line(vm)
+    {
+        return match data {
+            Some(data) => line_result(vm, data),
+            None => {
+                let none = vm.none();
+                Ok(vm.ok(none))
             }
-            None => vm.none(),
         };
-        return Ok(vm.ok(v));
     }
     let stdin = vm.host.stdin.clone();
     // The input is buffered outside the heap until it is complete.
-    let mut res = vm.io_reservation();
+    let mut res = match what {
+        Read::Upto(max) => match vm.reserve_io(max.min(STDIN_CHUNK))? {
+            Ok(r) => r,
+            Err(e) => return Ok(e),
+        },
+        _ => vm.io_reservation(),
+    };
     Err(Ctl::suspend(Box::pin(async move {
-        let result = read_input(&stdin, line, &mut res).await;
+        let result = read_input(&stdin, what, &mut res).await;
         Box::new(move |vm: &mut Vm| -> NResult {
             drop(res);
             let data = match result {
@@ -75,21 +129,33 @@ fn read_stdin(vm: &mut Vm, line: bool) -> NResult {
                 Err(e) => return IoFailure::new(e.kind, format!("stdin: {}", e.message)).into_value(vm),
             };
             vm.reserve(data.len())?;
-            let Ok(text) = String::from_utf8(data) else {
-                return Ok(vm.err_value("invalid", "stdin: input is not valid UTF-8"));
-            };
-            let s = vm.new_str(text);
-            let v = if line { vm.some(s) } else { s };
-            Ok(vm.ok(v))
+            if what != Read::Line {
+                vm.charge_bytes(data.len())?;
+                let b = vm.heap.new_bytes(data);
+                return Ok(vm.ok(b));
+            }
+            line_result(vm, data)
         }) as Finisher
     })))
 }
 
-/// The next line of standard input (without its terminator; `None` at the
-/// end of the input), if it can be had without waiting: input given as
-/// bytes, or a whole line in the read buffer of the process's standard
-/// input. `None` if the read must wait (or another read is under way, or
-/// the line does not fit in the memory limit). Nothing is consumed then.
+/// `Ok(Some(line))`, or kind `"invalid"` if `line` is not UTF-8.
+fn line_result(vm: &mut Vm, line: Vec<u8>) -> NResult {
+    vm.charge_slow_bytes(line.len())?;
+    let Ok(text) = String::from_utf8(line) else {
+        return Ok(vm.err_value("invalid", "stdin: input is not valid UTF-8"));
+    };
+    let s = vm.new_str(text);
+    let v = vm.some(s);
+    Ok(vm.ok(v))
+}
+
+/// The most `read` returns at once from standard input.
+const STDIN_CHUNK: usize = 64 << 10;
+
+/// The next line of standard input without its terminator (`Some(None)` at
+/// the end), if it is in a buffer already; `None`, consuming nothing, if the
+/// read must wait, another is under way, or the line does not fit in memory.
 fn buffered_line(vm: &Vm) -> Option<Option<Vec<u8>>> {
     let mut source = vm.host.stdin.try_lock().ok()?;
     let (buf, at_end) = match &mut *source {
@@ -123,27 +189,36 @@ fn buffered_line(vm: &Vm) -> Option<Option<Vec<u8>>> {
     Some(Some(data))
 }
 
-/// The next line without its terminator (`None` at end of input), or all
-/// remaining input.
-async fn read_input(stdin: &Mutex<StdinSource>, line: bool, res: &mut Reservation) -> Result<Option<Vec<u8>>, IoFailure> {
+/// Reads `what` from standard input: `None` only for a line at the end of
+/// the input.
+async fn read_input(stdin: &Mutex<StdinSource>, what: Read, res: &mut Reservation) -> Result<Option<Vec<u8>>, IoFailure> {
     let mut source = stdin.lock().await;
     match &mut *source {
-        StdinSource::None => Ok((!line).then(Vec::new)),
-        StdinSource::Bytes(c) => read_from(c, line, res).await,
+        StdinSource::None => Ok((what != Read::Line).then(Vec::new)),
+        StdinSource::Bytes(c) => read_from(c, what, res).await,
         #[cfg(feature = "os")]
-        StdinSource::Inherit(r) => read_from(r, line, res).await,
+        StdinSource::Inherit(r) => read_from(r, what, res).await,
     }
 }
 
-async fn read_from<R: AsyncBufRead + Unpin>(r: &mut R, line: bool, res: &mut Reservation) -> Result<Option<Vec<u8>>, IoFailure> {
-    if line {
-        let Some(mut data) = read_line_bytes(r, usize::MAX, res).await? else { return Ok(None) };
-        strip_eol(&mut data);
-        Ok(Some(data))
-    } else {
-        let mut data = Vec::new();
-        read_to_end_reserved(r, &mut data, res, usize::MAX).await?;
-        Ok(Some(data))
+async fn read_from<R: AsyncBufRead + Unpin>(r: &mut R, what: Read, res: &mut Reservation) -> Result<Option<Vec<u8>>, IoFailure> {
+    match what {
+        Read::Line => {
+            let Some(mut data) = read_line_bytes(r, usize::MAX, res).await? else { return Ok(None) };
+            strip_eol(&mut data);
+            Ok(Some(data))
+        }
+        Read::All => {
+            let mut data = Vec::new();
+            read_to_end_reserved(r, &mut data, res, usize::MAX).await?;
+            Ok(Some(data))
+        }
+        Read::Upto(max) => {
+            let available = r.fill_buf().await?;
+            let data = available[..available.len().min(max).min(STDIN_CHUNK)].to_vec();
+            r.consume(data.len());
+            Ok(Some(data))
+        }
     }
 }
 

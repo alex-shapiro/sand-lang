@@ -1,14 +1,14 @@
 //! Accounting of memory held outside the heap by pending I/O.
 //!
-//! Buffers that pending I/O operations fill (file and socket reads, HTTP
-//! messages, standard input, copies of data being written) are not heap
-//! objects until the operation finishes. They are reserved here, while they
-//! grow, and the heap counts the reserved bytes against `max_memory` together
-//! with its own (see [`super::heap::Heap::would_exceed`]). A reservation is
-//! released when dropped: when the operation's result is turned into a value
-//! (the finisher drops it right before allocating), fails, or is cancelled.
-//! An operation whose buffers do not fit fails with an error of kind
-//! `"limit"`: nothing beyond the limit was allocated, so the run continues.
+//! The buffers pending I/O fills (file and socket reads, HTTP messages,
+//! standard input, copies of data being written) are not heap objects until
+//! the operation finishes. They are reserved here as they grow, and the heap
+//! counts the reserved bytes against `max_memory` together with its own
+//! ([`super::heap::Heap::would_exceed`]). A [`Reservation`] is released when
+//! dropped: right before the operation's result is allocated as a value, or
+//! when the operation fails or is cancelled. An operation whose buffers do
+//! not fit fails with an error of kind `"limit"`; nothing beyond the limit
+//! was allocated, so the run continues.
 
 use std::fmt;
 use std::sync::Arc;
@@ -22,8 +22,10 @@ pub struct IoMemory {
     /// The heap's size as last published by the VM.
     heap: AtomicUsize,
     limit: Option<usize>,
-    /// Sockets held by pending operations (see [`ResourceSlot`]).
-    pending_resources: AtomicUsize,
+    /// Open resources: the number of live [`ResourceSlot`]s.
+    resources: AtomicUsize,
+    /// `max_open_resources`.
+    max_resources: usize,
 }
 
 /// A reservation would exceed the memory limit.
@@ -49,8 +51,10 @@ impl From<MemoryLimit> for std::io::Error {
 }
 
 impl IoMemory {
-    pub fn new(limit: Option<usize>) -> Arc<IoMemory> {
-        Arc::new(IoMemory { limit, ..IoMemory::default() })
+    /// Accounting for a memory limit of `limit` bytes and at most
+    /// `max_resources` open resources.
+    pub fn new(limit: Option<usize>, max_resources: usize) -> Arc<IoMemory> {
+        Arc::new(IoMemory { limit, max_resources, ..IoMemory::default() })
     }
 
     /// Bytes currently reserved by pending I/O.
@@ -68,15 +72,23 @@ impl IoMemory {
         self.heap.store(bytes, Ordering::Relaxed);
     }
 
-    /// Sockets currently held by pending operations ([`ResourceSlot`]s);
-    /// they count against `max_open_resources` with the heap's open
-    /// resources.
+    /// The resources open now (live [`ResourceSlot`]s).
     #[inline]
-    pub fn pending_resources(&self) -> usize {
-        self.pending_resources.load(Ordering::Relaxed)
+    pub fn open_resources(&self) -> usize {
+        self.resources.load(Ordering::Relaxed)
+    }
+
+    /// `max_open_resources`.
+    pub fn max_resources(&self) -> usize {
+        self.max_resources
     }
 
     fn try_reserve(&self, n: usize) -> Result<(), MemoryLimit> {
+        self.try_reserve_leaving(n, 0)
+    }
+
+    /// Reserves `n` bytes if `spare` more would still fit.
+    fn try_reserve_leaving(&self, n: usize, spare: usize) -> Result<(), MemoryLimit> {
         let (limit, heap) = match self.limit {
             Some(limit) => (limit, self.heap.load(Ordering::Relaxed)),
             None => (UNLIMITED, 0),
@@ -84,7 +96,7 @@ impl IoMemory {
         self.reserved
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |r| {
                 let total = r.checked_add(n)?;
-                (total.saturating_add(heap) <= limit).then_some(total)
+                (total.saturating_add(heap).saturating_add(spare) <= limit).then_some(total)
             })
             .map(|_| ())
             .map_err(|_| MemoryLimit)
@@ -166,12 +178,19 @@ impl Drop for Reservation {
     }
 }
 
-/// One open resource (a socket being connected, accepted or used by a
-/// pending operation) counted against `max_open_resources` until it becomes
-/// a heap object, which the heap counts instead, or until it is dropped
-/// (the operation failed, finished or was cancelled). The fixed buffers of a
-/// connection are reserved with its slot ([`ResourceSlot::reserve_buffers`])
-/// and, likewise, counted by the heap object's `size()` once it is one.
+/// Memory that the fixed buffers of open resources leave free (see
+/// [`ResourceSlot::reserve_buffers`]).
+pub const RESOURCE_SPARE: usize = 16 << 10;
+
+/// One open resource (a file, a socket, or the socket of a pending
+/// operation), counted against `max_open_resources` while the slot lives.
+///
+/// A resource's heap object holds its slot until the resource is closed or
+/// collected. An operation opening a resource off the VM thread holds the
+/// slot from its start until the slot moves into the object, or until the
+/// operation fails or is cancelled. A connection's fixed buffers are
+/// reserved with its slot ([`ResourceSlot::reserve_buffers`]) and released
+/// with it.
 #[derive(Debug)]
 pub struct ResourceSlot {
     mem: Arc<IoMemory>,
@@ -179,22 +198,35 @@ pub struct ResourceSlot {
 }
 
 impl ResourceSlot {
-    /// Takes a slot; the caller has checked the limit (on the VM thread,
-    /// against the heap's open resources plus [`IoMemory::pending_resources`]).
-    pub fn new(mem: &Arc<IoMemory>) -> ResourceSlot {
-        mem.pending_resources.fetch_add(1, Ordering::Relaxed);
-        ResourceSlot { mem: mem.clone(), buffers: Reservation::new(mem) }
+    /// Takes a slot, if fewer than `max_open_resources` are open.
+    pub fn try_new(mem: &Arc<IoMemory>) -> Option<ResourceSlot> {
+        let max = mem.max_resources;
+        mem.resources.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| (n < max).then_some(n + 1)).ok()?;
+        Some(ResourceSlot { mem: mem.clone(), buffers: Reservation::new(mem) })
     }
 
     /// Reserves `bytes` (in total) for the fixed buffers of the resource.
+    /// They are held while the resource is open, so they may not take the
+    /// last [`RESOURCE_SPARE`] bytes of the memory limit: a script whose
+    /// resources fill the memory can still handle the error.
     pub fn reserve_buffers(&mut self, bytes: usize) -> Result<(), MemoryLimit> {
-        self.buffers.ensure(bytes)
+        if bytes > self.buffers.bytes {
+            let mem = &self.buffers.mem;
+            mem.try_reserve_leaving(bytes - self.buffers.bytes, RESOURCE_SPARE)?;
+            self.buffers.bytes = bytes;
+        }
+        Ok(())
+    }
+
+    /// The bytes reserved for the resource's buffers.
+    pub fn buffers(&self) -> usize {
+        self.buffers.bytes()
     }
 }
 
 impl Drop for ResourceSlot {
     fn drop(&mut self) {
-        self.mem.pending_resources.fetch_sub(1, Ordering::Relaxed);
+        self.mem.resources.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -204,7 +236,7 @@ mod tests {
 
     #[test]
     fn reservations_are_bounded_and_released() {
-        let mem = IoMemory::new(Some(1000));
+        let mem = IoMemory::new(Some(1000), 10);
         mem.publish_heap(400);
         let mut a = Reservation::new(&mem);
         a.ensure(500).unwrap();
@@ -220,13 +252,23 @@ mod tests {
         assert!(buf.capacity() >= 10 && b.bytes() >= buf.capacity());
         drop(b);
         assert_eq!(mem.reserved(), 0);
-        let mut slot = ResourceSlot::new(&mem);
+        // A resource's buffers leave `RESOURCE_SPARE` bytes free.
+        let mut slot = ResourceSlot::try_new(&mem).unwrap();
+        assert_eq!(slot.reserve_buffers(64), Err(MemoryLimit));
+        let mem = IoMemory::new(Some(RESOURCE_SPARE + 1000), 10);
+        let mut slot = ResourceSlot::try_new(&mem).unwrap();
         slot.reserve_buffers(64).unwrap();
         slot.reserve_buffers(64).unwrap();
-        assert_eq!((mem.reserved(), mem.pending_resources()), (64, 1));
+        assert_eq!((mem.reserved(), mem.open_resources()), (64, 1));
+        assert_eq!(slot.reserve_buffers(1001), Err(MemoryLimit));
         drop(slot);
-        assert_eq!((mem.reserved(), mem.pending_resources()), (0, 0));
-        let unlimited = IoMemory::new(None);
+        assert_eq!((mem.reserved(), mem.open_resources()), (0, 0));
+        // At most `max_resources` slots at once.
+        let slots: Vec<ResourceSlot> = (0..10).map(|_| ResourceSlot::try_new(&mem).unwrap()).collect();
+        assert!(ResourceSlot::try_new(&mem).is_none());
+        drop(slots);
+        assert!(ResourceSlot::try_new(&mem).is_some());
+        let unlimited = IoMemory::new(None, 10);
         Reservation::new(&unlimited).ensure(1 << 39).unwrap();
         assert_eq!(unlimited.reserved(), 0);
         assert_eq!(Reservation::new(&unlimited).ensure(usize::MAX / 2), Err(MemoryLimit));
@@ -234,7 +276,7 @@ mod tests {
 
     #[test]
     fn buffers_grow_exactly_near_the_limit() {
-        let mem = IoMemory::new(Some(10_000));
+        let mem = IoMemory::new(Some(10_000), 10);
         let mut r = Reservation::new(&mem);
         let mut buf = vec![0u8; 6000];
         r.ensure(buf.capacity()).unwrap();

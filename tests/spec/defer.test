@@ -313,3 +313,114 @@ f()
 --- lint
 3: unused-variable
 4: bool-comparison
+
+=== a cancelled task runs its pending defers
+fn work(log: [str]) {
+    defer log.push("work")
+    task.sleep(10s)
+    log.push("never")
+}
+var log = []
+let t = spawn {
+    defer log.push("outer")
+    {
+        defer log.push("inner")
+        work(log)
+    }
+    log.push("never")
+}
+task.sleep(5ms)
+t.cancel()
+print(t.is_done())
+task.sleep(5ms)
+print(log)
+--- stdout
+true
+["work", "inner", "outer"]
+
+=== defers not reached and already run are skipped on cancellation
+var log = []
+let t = spawn {
+    {
+        defer log.push("done")
+    }
+    defer log.push("a")
+    task.sleep(10s)
+    defer log.push("b")
+}
+task.sleep(5ms)
+t.cancel()
+task.yield_now()
+print(log)
+--- stdout
+["done", "a"]
+
+=== a task cancelled while its deferred code runs skips the rest of that defer
+var log = []
+let t = spawn {
+    defer log.push("first")
+    defer {
+        log.push("start")
+        task.sleep(10s)
+        log.push("never")
+    }
+}
+task.sleep(5ms)
+t.cancel()
+task.yield_now()
+print(log)
+--- stdout
+["start", "first"]
+
+=== deferred code of a cancelled task may suspend
+var log = []
+let t = spawn {
+    defer {
+        task.sleep(1ms)
+        log.push("closed")
+    }
+    task.sleep(10s)
+}
+task.sleep(5ms)
+t.cancel()
+task.sleep(20ms)
+print(log)
+--- stdout
+["closed"]
+
+=== a task that cancels itself runs its defers
+var log = []
+var ts: [Task<()>] = []
+ts.push(spawn {
+    defer log.push("deferred")
+    ts[0].cancel()
+    log.push("never")
+})
+task.sleep(5ms)
+print(log)
+--- stdout
+["deferred"]
+
+=== tasks left when the run ends run their defers
+let t = spawn {
+    defer print("closed")
+    task.sleep(10s)
+}
+task.yield_now()
+print("main done")
+--- stdout
+main done
+closed
+
+=== deferred code at the end of a run stops where it would wait
+let t = spawn {
+    defer {
+        print("closing")
+        task.sleep(10s)
+        print("never")
+    }
+    task.sleep(10s)
+}
+task.yield_now()
+--- stdout
+closing

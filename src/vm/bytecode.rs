@@ -523,6 +523,9 @@ pub enum Op {
         src: Reg,
     },
     RetUnit,
+    /// Ends a cleanup pad: leaves the frame and continues unwinding a
+    /// cancelled task (`Proto::cleanups`).
+    Unwind,
 
     // Data structures.
     NewList {
@@ -565,7 +568,7 @@ pub enum Op {
         obj: Reg,
         idx: u16,
     },
-    /// The payload of a variant with exactly one (inline or not).
+    /// The field of a one-field variant.
     Payload {
         dst: Reg,
         src: Reg,
@@ -951,7 +954,10 @@ impl Op {
 
     /// Whether execution never continues with the next instruction.
     pub fn is_unconditional(&self) -> bool {
-        matches!(self, Op::Jmp { .. } | Op::Loop { .. } | Op::Ret { .. } | Op::RetUnit | Op::TailCallDirect { .. } | Op::Panic { .. })
+        matches!(
+            self,
+            Op::Jmp { .. } | Op::Loop { .. } | Op::Ret { .. } | Op::RetUnit | Op::Unwind | Op::TailCallDirect { .. } | Op::Panic { .. }
+        )
     }
 }
 
@@ -974,6 +980,25 @@ pub struct Proto {
     pub capture_cells: Vec<bool>,
     pub doc: Option<String>,
     pub signature: String,
+    /// Sorted, disjoint code ranges inside which deferred code is pending,
+    /// with the cleanup pad that runs it when the task is cancelled.
+    pub cleanups: Vec<Cleanup>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Cleanup {
+    pub start: u32,
+    pub end: u32,
+    pub pad: u32,
+}
+
+impl Proto {
+    /// The cleanup pad for a frame stopped at instruction `pos`.
+    pub fn cleanup_at(&self, pos: usize) -> Option<usize> {
+        let i = self.cleanups.partition_point(|c| c.start as usize <= pos).checked_sub(1)?;
+        let c = self.cleanups[i];
+        (pos < c.end as usize).then_some(c.pad as usize)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1085,10 +1110,8 @@ pub struct Program {
     pub ids: RtIds,
     pub entry: u32,
     pub tests: Vec<(String, u32)>,
-    /// Test setup (module initialization) entry.
     pub files: Vec<String>,
-    /// Help text for natives by id. (The tables made once for the standard
-    /// library are shared by the programs that extend its snapshot.)
+    /// Help text for natives by id.
     pub native_help: Arc<[HelpEntry]>,
     pub module_help: Arc<[(String, String)]>,
     pub native_argc: Arc<[u16]>,

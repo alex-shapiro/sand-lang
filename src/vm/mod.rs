@@ -33,6 +33,9 @@ pub type BoxFuture = Pin<Box<dyn Future<Output = Finisher> + Send>>;
 #[derive(Clone)]
 pub enum NativeImpl {
     Builtin(NativeFn),
+    /// A native implementing a trait method: called without the impl's
+    /// dictionary, which the method receives first (`self` comes next).
+    Method(NativeFn),
     Host(HostFn),
 }
 
@@ -45,17 +48,9 @@ pub struct NativeEntry {
 /// A non-local outcome of a native call or a VM helper: a panic, a limit, a
 /// request to the scheduler, ...
 ///
-/// One pointer (to a boxed [`CtlKind`]), so that `Result<Value, Ctl>` and
-/// `Result<Option<Value>, Ctl>` are 16 bytes, the size of a `Value`: every
-/// native call and fallible helper returns one, and a small result is
-/// written and read back with one 16-byte store and load (see "Dispatch
-/// loop" in docs/INTERNALS.md). Build one with the constructors
-/// ([`Ctl::panic`], [`Ctl::limit`], ...) or from a [`CtlKind`], and inspect
-/// it with [`Ctl::kind`] or [`Ctl::into_kind`].
-///
-/// Tasks block and yield in steady state, where an allocation per channel
-/// operation cost 30%: [`Vm::block`] and [`Vm::yield_now`] return the
-/// dataless kinds in the box of the last one the VM consumed.
+/// One pointer, so that `Result<Value, Ctl>` is 16 bytes like a `Value`
+/// (see `interp`). [`Vm::block`] and
+/// [`Vm::yield_now`] reuse a spare box instead of allocating.
 pub struct Ctl(Box<CtlKind>);
 
 const _: () = assert!(std::mem::size_of::<Ctl>() == std::mem::size_of::<usize>());
@@ -78,6 +73,10 @@ pub enum CtlKind {
     Yield,
     /// The host interrupted the engine (see `Meter::check`).
     Interrupted,
+    /// Collect garbage and call the native again (once): what it needs (an
+    /// open-resource slot, I/O buffer space) may be held by garbage. See
+    /// [`Vm::resource_slot`].
+    Collect,
 }
 
 impl Ctl {
@@ -154,6 +153,7 @@ impl std::fmt::Debug for CtlKind {
             CtlKind::Blocked => write!(f, "Blocked"),
             CtlKind::Yield => write!(f, "Yield"),
             CtlKind::Interrupted => write!(f, "Interrupted"),
+            CtlKind::Collect => write!(f, "Collect"),
         }
     }
 }
@@ -251,7 +251,7 @@ pub struct Fiber {
     pub pending_panic: Option<String>,
 }
 
-/// A runtime error with its stack trace.
+/// One frame of a runtime error's stack trace.
 #[derive(Debug, Clone)]
 pub struct TraceEntry {
     pub function: String,
@@ -353,8 +353,7 @@ pub struct Host {
     pub prompter: Option<Arc<dyn Prompter>>,
     pub grants_once: Vec<Capability>,
     pub denies_once: Vec<Capability>,
-    /// "Always" answers to prompts: the engine's, which keeps them for its
-    /// lifetime (shared with its other runs and its import checks).
+    /// "Always" answers to prompts, kept for the engine's lifetime.
     pub always: Always,
     pub stdout: SharedSink,
     pub stderr: SharedSink,
@@ -402,7 +401,13 @@ pub struct Vm {
     /// Set when the running instruction hit the memory limit and should be
     /// retried after a garbage collection (see `interp::limit_trap`).
     pub(crate) gc_retry: bool,
+    /// Set while a native that asked for a collection (`CtlKind::Collect`)
+    /// is called again after it.
+    pub(crate) collected: bool,
     pub cancel_current: bool,
+    /// Set while the tasks left at the end of a run unwind (`end_tasks`):
+    /// `drive` stops instead of waiting for I/O.
+    pub(crate) ending: bool,
     /// Extra GC roots (e.g. values held by the test runner).
     pub pinned: Vec<Value>,
     pub(crate) pending_race: Option<Vec<Value>>,
@@ -483,7 +488,7 @@ impl Fiber {
 
 impl Vm {
     pub fn new(prog: Arc<Program>, natives: Arc<Vec<NativeEntry>>, host: Host) -> Vm {
-        let heap = Heap::new(host.limits.max_memory);
+        let heap = Heap::new(host.limits.max_memory, host.limits.max_open_resources);
         let consts = Vec::with_capacity(prog.consts.len());
         let globals = vec![Value::Uninit; prog.nglobals];
         let meter = Meter::new(host.limits.max_instructions, host.interrupt.clone());
@@ -506,7 +511,9 @@ impl Vm {
             meter,
             deadline: None,
             gc_retry: false,
+            collected: false,
             cancel_current: false,
+            ending: false,
             pinned: Vec::new(),
             pending_race: None,
             spare_ctl: None,
@@ -585,7 +592,7 @@ impl Vm {
     fn signal(&mut self, kind: CtlKind) -> Ctl {
         match self.spare_ctl.take() {
             Some(mut b) => {
-                // (The spare box holds a dataless kind: nothing to drop.)
+                // A dataless kind: nothing to drop.
                 std::mem::forget(std::mem::replace(&mut *b, kind));
                 Ctl(b)
             }
@@ -745,13 +752,46 @@ impl Vm {
         iomem::Reservation::new(&self.heap.io_memory)
     }
 
-    /// Like [`Vm::io_reservation`], reserving `bytes` at once. Fails with the
-    /// `Err(Error { kind: "limit" })` value to return if they do not fit.
-    pub fn reserve_io(&mut self, bytes: usize) -> Result<iomem::Reservation, Value> {
+    /// Like [`Vm::io_reservation`], reserving `bytes` at once. `Err` asks for
+    /// a collection and a retry (propagate it with `?`); `Ok(Err(e))`: they
+    /// still do not fit, and `e` is the `"limit"` error value to return.
+    pub fn reserve_io(&mut self, bytes: usize) -> Result<Result<iomem::Reservation, Value>, Ctl> {
         let mut r = self.io_reservation();
         match r.ensure(bytes) {
-            Ok(()) => Ok(r),
-            Err(e) => Err(self.err_value("limit", &format!("cannot buffer {bytes} bytes: {e}"))),
+            Ok(()) => Ok(Ok(r)),
+            Err(_) if !self.collected => Err(CtlKind::Collect.into()),
+            Err(e) => Ok(Err(self.err_value("limit", &format!("cannot buffer {bytes} bytes: {e}")))),
+        }
+    }
+
+    /// A slot for a resource about to be opened, counted against
+    /// `max_open_resources` until dropped. At the limit, `Err` asks for a
+    /// collection (which closes dropped resources) and a retry: propagate it
+    /// with `?` before any side effect. `Ok(Err(e))`: still at the limit, and
+    /// `e` is the `"limit"` error value to return.
+    pub fn resource_slot(&mut self) -> Result<Result<iomem::ResourceSlot, Value>, Ctl> {
+        match iomem::ResourceSlot::try_new(&self.heap.io_memory) {
+            Some(slot) => Ok(Ok(slot)),
+            None if !self.collected => Err(CtlKind::Collect.into()),
+            None => {
+                let max = self.heap.io_memory.max_resources();
+                Ok(Err(self.err_value("limit", &format!("too many open resources (limit {max})"))))
+            }
+        }
+    }
+
+    /// Like [`Vm::resource_slot`], also reserving `buffers` bytes for the
+    /// fixed buffers of the resource (`what`, for the message: "a connection").
+    pub fn resource_slot_with(&mut self, buffers: usize, what: &str) -> Result<Result<iomem::ResourceSlot, Value>, Ctl> {
+        let mut slot = match self.resource_slot()? {
+            Ok(s) => s,
+            Err(e) => return Ok(Err(e)),
+        };
+        self.heap.io_memory.publish_heap(self.heap.used());
+        match slot.reserve_buffers(buffers) {
+            Ok(()) => Ok(Ok(slot)),
+            Err(_) if !self.collected => Err(CtlKind::Collect.into()),
+            Err(e) => Ok(Err(self.err_value("limit", &format!("cannot open {what}: its buffers ({buffers} bytes) do not fit: {e}")))),
         }
     }
 
@@ -841,11 +881,9 @@ impl Vm {
         }
     }
 
-    /// Forgets "once" answers. A native that needs permission is retried
-    /// after each prompt, possibly several times when it checks several
-    /// capabilities (`fs.copy`), so "once" answers stay valid for the retried
-    /// call and are forgotten when it returns anything else than another
-    /// permission request: they never apply to a later call.
+    /// Forgets "once" answers. They hold while a native is retried after
+    /// prompts (several, if it checks several capabilities like `fs.copy`)
+    /// and are forgotten when it returns anything else.
     #[inline]
     pub(crate) fn forget_once_answers(&mut self) {
         if !self.host.grants_once.is_empty() || !self.host.denies_once.is_empty() {
@@ -876,7 +914,8 @@ impl Vm {
         let _ = self.host.stdout.flush_before_input();
     }
 
-    /// Writes to stdout (1) or stderr (2), enforcing policy and output limits.
+    /// Writes to stdout (1) or stderr (2), enforcing policy and output
+    /// limits; a denial panics (as `print` does).
     pub fn write_stream(&mut self, which: u8, data: &[u8]) -> Result<(), Ctl> {
         self.admit_output(which, data.len())?;
         let _ = self.stream_sink(which).write(data);
@@ -891,9 +930,41 @@ impl Vm {
         Ok(())
     }
 
+    /// Writes the bytes or string `v` (a heap value) to stdout (1) or
+    /// stderr (2) for `io.stdout` and `io.stderr`: a denial or a failed
+    /// write is the `Err(Error)` value it returns (`Ok(Unit)` otherwise);
+    /// exceeding the output limit stops the run.
+    pub fn write_stream_value(&mut self, which: u8, v: Value) -> NResult {
+        let len = match self.heap.get(v) {
+            Obj::Str(s) => s.len(),
+            _ => self.heap.bytes_of(v).len(),
+        };
+        if !self.output_allowed(which)? {
+            let name = if which == 1 { "stdout" } else { "stderr" };
+            return Ok(self.err_value("permission_denied", &format!("permission denied: {name}")));
+        }
+        self.count_output(which, len)?;
+        let data = match self.heap.get(v) {
+            Obj::Str(s) => s.as_bytes(),
+            _ => self.heap.bytes_of(v),
+        };
+        match self.stream_sink(which).write(data) {
+            Ok(()) => Ok(self.ok(Value::Unit)),
+            Err(e) => Ok(self.err_value(crate::stdlib::io_kind(&e), &e.to_string())),
+        }
+    }
+
     /// Checks the policy and the output limit for writing `len` bytes to
-    /// stream `which`, and counts them.
+    /// stream `which`, and counts them; a denial panics.
     fn admit_output(&mut self, which: u8, len: usize) -> Result<(), Ctl> {
+        if !self.output_allowed(which)? {
+            return panic(if which == 1 { "permission denied: stdout" } else { "permission denied: stderr" });
+        }
+        self.count_output(which, len)
+    }
+
+    /// Whether the policy allows writing to stream `which`.
+    fn output_allowed(&mut self, which: u8) -> Result<bool, Ctl> {
         let slot = usize::from(which != 1);
         let allowed = match self.host.stream_decisions[slot] {
             Some(d) => d,
@@ -911,9 +982,11 @@ impl Vm {
                 d
             }
         };
-        if !allowed {
-            return panic(if which == 1 { "permission denied: stdout" } else { "permission denied: stderr" });
-        }
+        Ok(allowed)
+    }
+
+    /// Counts `len` bytes written to stream `which` against the output limit.
+    fn count_output(&mut self, which: u8, len: usize) -> Result<(), Ctl> {
         self.host.output_bytes += len as u64;
         if let Some(max) = self.host.limits.max_output_bytes
             && self.host.output_bytes > max
@@ -1107,15 +1180,76 @@ impl Vm {
             self.cancel_current = true;
             return;
         }
-        if let Some(f) = self.fibers.get_mut(fid as usize).and_then(|f| f.take()) {
-            if let Some(io) = f.io {
+        if let Some(mut f) = self.fibers.get_mut(fid as usize).and_then(|f| f.take()) {
+            if let Some(io) = f.io.take() {
                 self.io.cancel(io);
             }
+            let queued = f.state == FiberState::Ready;
+            self.end_cancelled(fid, f);
+            if !queued && self.fibers[fid as usize].is_some() {
+                self.ready.push_back(fid);
+            }
+        }
+    }
+
+    /// Ends the fiber of a cancelled task: wakes its waiters with a panic,
+    /// then resumes it at its pending deferred code (`unwind_to_pad`), or
+    /// frees it if there is none.
+    pub(crate) fn end_cancelled(&mut self, fid: u32, mut f: Box<Fiber>) {
+        for (w, g) in std::mem::take(&mut f.waiters) {
+            self.deliver_panic(w, g, "task cancelled");
+        }
+        // A fiber waiting in a call, or woken to panic in it, stopped before the call completed.
+        let in_call = f.state == FiberState::Waiting || f.pending_panic.is_some();
+        if self.unwind_to_pad(&mut f, in_call) {
+            f.pending_panic = None;
+            f.state = FiberState::Ready;
+            self.fibers[fid as usize] = Some(f);
+        } else {
             self.free_fibers.push(fid);
             self.live_tasks = self.live_tasks.saturating_sub(1);
-            for (w, g) in f.waiters {
-                self.deliver_panic(w, g, "task cancelled");
+            self.recycle_fiber(f);
+        }
+    }
+
+    /// Drops the frames of `f` above the innermost one with deferred code
+    /// pending and resumes that frame at its cleanup pad; false if no frame
+    /// has any. Frames below the top stopped in a call; so did the top one
+    /// if `in_call`.
+    pub(crate) fn unwind_to_pad(&self, f: &mut Fiber, in_call: bool) -> bool {
+        let n = f.frames.len();
+        for i in (0..n).rev() {
+            let fr = &mut f.frames[i];
+            let pos = if i + 1 < n || in_call { (fr.ip as usize).saturating_sub(1) } else { fr.ip as usize };
+            if let Some(pad) = self.prog.protos[fr.proto as usize].cleanup_at(pos) {
+                fr.ip = pad as u32;
+                f.frames.truncate(i + 1);
+                return true;
             }
+        }
+        false
+    }
+
+    /// Ends a run whose main task finished: cancels the other tasks and runs
+    /// their pending deferred code until it finishes or would wait. Returns
+    /// the exit code if deferred code calls `exit`.
+    pub async fn end_tasks(&mut self) -> Result<Option<i32>, Trap> {
+        self.release_main();
+        let tasks: Vec<Value> = self.fibers.iter().flatten().map(|f| f.task).collect();
+        for t in tasks {
+            self.cancel_task(t);
+        }
+        if self.ready.is_empty() {
+            return Ok(None);
+        }
+        self.ending = true;
+        let r = self.drive(None).await;
+        self.ending = false;
+        self.flush_stdout();
+        match r {
+            Ok(sched::Stop::Exit(c)) => Ok(Some(c)),
+            Ok(_) => Ok(None),
+            Err(t) => Err(t),
         }
     }
 
@@ -1199,7 +1333,7 @@ impl Vm {
                 full = true;
             }
         }
-        // Unreachable old objects may keep us over the limit
+        // Old garbage may keep the heap over the limit.
         if !full && self.heap.over_limit() {
             self.free_spare_fibers();
             full = self.heap.over_limit();

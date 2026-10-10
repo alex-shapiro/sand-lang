@@ -2,7 +2,7 @@
 import fs
 fs.write_text("hello.txt", "hi there\nline 2\n")?
 print(fs.read_text("hello.txt")?)
-print(fs.read_lines("hello.txt")?)
+print(fs.read_text("hello.txt")?.lines())
 print(fs.exists("hello.txt")?)
 print(fs.exists("nope.txt")?)
 --- stdout
@@ -16,8 +16,10 @@ false
 === bytes and append
 import fs
 fs.write_bytes("data.bin", b"\x00\x01")?
-fs.append_text("log.txt", "a")?
-fs.append_text("log.txt", "b")?
+for text in ["a", "b"] {
+    use log = fs.open("log.txt", fs.Mode.Append)?
+    log.write_str(text)?
+}
 print(fs.read_bytes("data.bin")?)
 print(fs.read_text("log.txt")?)
 --- stdout
@@ -106,3 +108,198 @@ print(fs.create_dir("f.txt/sub", recursive: true).unwrap_err().kind)
 already_exists
 already_exists
 io
+
+=== open files read and write incrementally
+import fs
+{
+    use out = fs.open("lines.txt", fs.Mode.Write)?
+    for i in 1..=3 {
+        out.write_str("line \(i)\n")?
+    }
+    out.write(b"no newline at the end")?
+    print(out.position()?)
+}
+use f = fs.open("lines.txt")?
+print(f.read_line()?)
+print(f.read(4)?)
+print(f.read_line()?)
+print(f.position()?)
+for line in f.lines() {
+    print(line?)
+}
+print(f.read_line()?)
+print(f.read()?)
+f.seek(7)?
+print(f.read_text()?.len())
+print(f.metadata()?.size)
+print(f.path())
+--- stdout
+42
+Some("line 1")
+b"line"
+Some(" 2")
+14
+line 3
+no newline at the end
+None
+b""
+35
+42
+lines.txt
+
+=== file modes
+import fs
+fs.write_text("f.txt", "0123456789")?
+{
+    use f = fs.open("f.txt", fs.Mode.ReadWrite)?
+    f.seek(3)?
+    f.write_str("abc")?
+    print(f.read(2)?)
+    f.set_len(8)?
+}
+print(fs.read_text("f.txt")?)
+{
+    use f = fs.open("f.txt", fs.Mode.Append)?
+    f.seek(0)?
+    f.write_str("!")?
+}
+print(fs.read_text("f.txt")?)
+{
+    use f = fs.open("f.txt", fs.Mode.Write)?
+    print(fs.read_text("f.txt")?.len())
+}
+print(fs.open("f.txt", fs.Mode.CreateNew).unwrap_err().kind)
+use n = fs.open("new.txt", fs.Mode.CreateNew)?
+print(n.read().unwrap_err().kind)
+use r = fs.open("new.txt")?
+print(r.write_str("x").unwrap_err().kind)
+print(fs.open("missing.txt").unwrap_err().kind)
+print(fs.open("missing.txt", fs.Mode.ReadWrite).unwrap_err().kind)
+fs.create_dir("d")?
+print(fs.open("d").unwrap_err().kind)
+--- stdout
+b"67"
+012abc67
+012abc67!
+0
+already_exists
+invalid
+invalid
+not_found
+not_found
+invalid
+
+=== writing past the end fills the gap with zeros
+import fs
+use f = fs.open("sparse.bin", fs.Mode.Write)?
+f.seek(3)?
+f.write(b"\x01")?
+print(fs.read_bytes("sparse.bin")?)
+print(f.seek(-1).unwrap_err().kind)
+--- stdout
+b"\x00\x00\x00\x01"
+invalid
+
+=== an open file stays the file it was when renamed, removed or replaced
+import fs
+fs.write_text("a.txt", "first\nsecond\n")?
+use f = fs.open("a.txt")?
+print(f.read_line()?)
+fs.rename("a.txt", "b.txt")?
+fs.write_text("a.txt", "a new file")?
+print(f.read_line()?)
+fs.remove_file("b.txt")?
+f.seek(0)?
+print(f.read_text()?)
+use w = fs.open("w.txt", fs.Mode.Write)?
+fs.remove_file("w.txt")?
+w.write_str("into the removed file")?
+print(fs.exists("w.txt")?)
+--- stdout
+Some("first")
+Some("second")
+first
+second
+
+false
+
+=== closed files
+import fs
+let f = fs.open("c.txt", fs.Mode.Write)?
+f.write_str("x")?
+print(f.metadata()?.is_file)
+f.close()
+f.close()
+print(f.metadata().unwrap_err().kind)
+print(f.write_str("y").unwrap_err().kind)
+print(f.read().unwrap_err().kind)
+print(fs.read_text("c.txt")?)
+--- stdout
+true
+closed
+closed
+closed
+x
+
+=== files are readers and writers
+import fs
+import io
+fs.write_text("src.txt", "copied\nacross\n")?
+fn shout<R: io.Reader, W: io.Writer>(r: R, w: W) -> Result<()> {
+    while let Some(line) = r.read_line()? {
+        w.write_str(line.to_upper() + "\n")?
+    }
+    Ok(())
+}
+{
+    use src = fs.open("src.txt")?
+    use dst = fs.open("dst.txt", fs.Mode.Write)?
+    shout(src, dst)?
+}
+print(fs.read_text("dst.txt")?)
+{
+    use src = fs.open("dst.txt")?
+    print(io.copy(src, io.stdout)?)
+}
+--- stdout
+COPIED
+ACROSS
+
+COPIED
+ACROSS
+14
+
+
+=== writing nothing past the end changes nothing
+import fs
+use f = fs.open("e.txt", fs.Mode.Write)?
+f.write_str("ab")?
+f.seek(1000)?
+f.write(b"")?
+print(f.metadata()?.size)
+print(f.position()?)
+--- stdout
+2
+1000
+
+=== a cancelled task closes its files
+import fs
+let writer = spawn {
+    use f = fs.open("out.txt", fs.Mode.Write)?
+    f.write_str("buffered")?
+    task.sleep(10s)
+    Ok(())
+}
+task.sleep(5ms)
+writer.cancel()
+task.yield_now()
+print(fs.read_text("out.txt")?)
+let left = spawn {
+    use f = fs.open("end.txt", fs.Mode.Write)?
+    f.write_str("at the end")?
+    task.sleep(10s)
+    Ok(())
+}
+task.yield_now()
+--- stdout
+buffered

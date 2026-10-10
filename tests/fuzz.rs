@@ -375,21 +375,19 @@ fn random_json_and_uri_inputs() {
 #[test]
 fn fuzz_regressions() {
     let cases: &[&str] = &[
-        // Integer duration literal whose value times the unit overflowed i128 in the lexer.
+        // Duration literals whose value times the unit overflows i128.
         "fn f(b: bool) -> int {\n    match 33333333333333333333333333333333333333333333333333333333333333333333333333h b {\n        true => 1\n    }\n}\n",
         "let d = 3333333333333333333333333333333333333333h",
-        // Variant patterns on a scrutinee whose type has no fields to offer (error
-        // type, `never`) indexed past the end of the column types in pat.rs.
+        // Variant patterns on a scrutinee of error type or `never`.
         "let tasks = urks.map(u => spawn fetch(u))\nfor (url, t) in urls.zip(tasks) {\n    match t.wait() {\n        Ok(page) => print(page)\n        Err(e) => print(\"\\(url): \\(e)\")\n    }\n}\n",
         "fn f() -> int {\n    match panic(\"x\") {\n        Some(v) => v\n        None => 0\n    }\n}\nprint(f())\n",
         "fn f() -> int {\n    match [panic(\"x\")] {\n        [Ok(Some((a, b)))] => a + b\n        _ => 0\n    }\n}\nprint(f())\n",
-        // A trailing comment ending in `}` after a one-line declaration was taken
-        // for the declaration's closing brace (formatter not idempotent).
+        // A trailing comment ending in `}` after a one-line declaration.
         "import json\nstruct Item { name: str }//\0\0\0\0e name: str }//\0\0\0\0e mOrdson.decodesth.\u{19}\u{12}\0\0e",
         "enum E { A } // }",
-        // Two `?` in a row were printed as `??`, the coalescing operator.
+        // Two `?` in a row (not the `??` operator).
         "l ? ?",
-        // A `\x` escape followed by a multi-byte character sliced a `str` mid-character.
+        // A `\x` escape followed by a multi-byte character.
         "let maybe = Some(3)\nprint(b\"\\x0П\")\nprint(b\"\\xП\")\nlet x = b\"\\x",
     ];
     for src in cases {

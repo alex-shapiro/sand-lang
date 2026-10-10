@@ -1,0 +1,245 @@
+=== use closes its value when the block ends, last first
+struct Res {
+    name: str
+}
+impl Close for Res {
+    fn close(self) {
+        print("close \(self.name)")
+    }
+}
+fn work() {
+    use a = Res { name: "a" }
+    use b = Res { name: "b" }
+    print("work with \(a.name) and \(b.name)")
+}
+work()
+print("after")
+--- stdout
+work with a and b
+close b
+close a
+after
+
+=== use closes on every exit: return, ?, break and continue
+struct Res {
+    name: str
+}
+impl Close for Res {
+    fn close(self) {
+        print("close \(self.name)")
+    }
+}
+fn open(name: str, ok: bool) -> Result<Res> {
+    if ok { Ok(Res { name }) } else { Err(error("cannot open \(name)")) }
+}
+fn early(n: int) -> Result<int> {
+    use a = open("a", true)?
+    use b = open("b", n != 1)?
+    if n == 2 {
+        return Ok(2)
+    }
+    Ok(0)
+}
+print(early(0))
+print(early(1))
+print(early(2))
+for i in 0..3 {
+    use r = Res { name: "loop \(i)" }
+    if i == 0 {
+        continue
+    }
+    if i == 2 {
+        break
+    }
+    print("body \(i)")
+}
+--- stdout
+close b
+close a
+Ok(0)
+close a
+Err(Error { kind: "error", message: "cannot open b" })
+close b
+close a
+Ok(2)
+close loop 0
+body 1
+close loop 1
+close loop 2
+
+=== use interleaves with defer and closes once the value is computed
+struct Res {
+    name: str
+}
+impl Close for Res {
+    fn close(self) {
+        print("close \(self.name)")
+    }
+}
+fn f() -> str {
+    defer print("deferred first")
+    use r = Res { name: "r" }
+    defer print("deferred last")
+    r.name
+}
+print(f())
+--- stdout
+deferred last
+close r
+deferred first
+r
+
+=== use _ keeps a value only to close it
+struct Guard {
+    name: str
+}
+impl Close for Guard {
+    fn close(self) {
+        print("released \(self.name)")
+    }
+}
+fn lock(name: str) -> Guard {
+    print("acquired \(name)")
+    Guard { name }
+}
+{
+    use _ = lock("mutex")
+    print("critical section")
+}
+--- stdout
+acquired mutex
+critical section
+released mutex
+
+=== options and lists of resources close what they hold
+struct Res {
+    name: str
+}
+impl Close for Res {
+    fn close(self) {
+        print("close \(self.name)")
+    }
+}
+fn open_some(want: bool) -> Res? {
+    if want { Some(Res { name: "maybe" }) } else { None }
+}
+{
+    use a = open_some(true)
+    use b = open_some(false)
+    use all = [Res { name: "first" }, Res { name: "second" }]
+}
+--- stdout
+close second
+close first
+close maybe
+
+=== generic code closes through the trait
+struct Res {
+    name: str
+}
+impl Close for Res {
+    fn close(self) {
+        print("close \(self.name)")
+    }
+}
+fn consume<T: Close>(x: T) {
+    use owned = x
+    print("using it")
+}
+consume(Res { name: "generic" })
+--- stdout
+using it
+close generic
+
+=== use at the top level closes when the top-level code ends
+struct Res {
+    name: str
+}
+impl Close for Res {
+    fn close(self) {
+        print("close \(self.name)")
+    }
+}
+use r = Res { name: "top" }
+print("running")
+--- stdout
+running
+close top
+
+=== use calls Close.close even when the type has an inherent close
+struct Res {
+    name: str
+
+    fn close(self) {
+        print("inherent")
+    }
+}
+impl Close for Res {
+    fn close(self) {
+        print("trait")
+    }
+}
+{
+    use r = Res { name: "x" }
+}
+--- stdout
+trait
+
+=== use needs a value that implements Close
+fn f() -> Result<()> {
+    use n = 5
+    use xs: [int] = []
+    let r: Result<[Channel<int>]> = Ok([])
+    use c = r
+    Ok(())
+}
+--- error
+2: `use` needs a value whose type implements `Close`, found int
+3: the trait `Close` is not implemented for int
+5: add `?` to bind the value of `Ok`
+
+=== use binds a name or _, not a pattern
+fn f() {
+    use (a, b) = (1, 2)
+}
+--- error
+2: a `use` binding cannot be a pattern
+
+=== a use binding is immutable
+struct Res {
+    name: str
+}
+impl Close for Res {
+    fn close(self) {}
+}
+fn f() {
+    use r = Res { name: "a" }
+    r = Res { name: "b" }
+}
+--- error
+9: cannot assign to immutable binding `r`
+
+=== use is formatted like let
+struct Res {
+    name: str
+}
+impl Close for Res {
+    fn close(self) {}
+}
+fn f()   {
+    use   r:Res=Res { name: "a" }   // the resource
+    use _ = Res { name: "b" }
+}
+--- fmt
+struct Res {
+    name: str
+}
+
+impl Close for Res {
+    fn close(self) {}
+}
+
+fn f() {
+    use r: Res = Res { name: "a" } // the resource
+    use _ = Res { name: "b" }
+}

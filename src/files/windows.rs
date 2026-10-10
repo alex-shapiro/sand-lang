@@ -1,29 +1,25 @@
 //! The host's file system on Windows.
 //!
-//! Paths are canonicalised by the standard library (`canonicalize`, which
-//! follows symlinks and junctions and names components as stored) on the
-//! longest prefix that resolves; then every component is opened relative to
-//! the handle of its parent directory with `FILE_OPEN_REPARSE_POINT`, so a
-//! symlink, junction or other name-surrogate reparse point is opened
-//! itself, never followed, and is refused (or, for entry operations, acted
-//! on itself). Creating and removing entries and listing directories also
-//! go through handles. Only `rename` has no handle-based form in a safe
-//! API: it is path-based, with every directory leading to both entries held
-//! open (and checked against the handle-relative walk) so that none of them
-//! can be renamed, deleted or replaced meanwhile.
+//! A path is resolved by canonicalising its longest existing prefix
+//! (`std::fs::canonicalize` follows symlinks and junctions and spells names
+//! as stored). The operation then walks it again, opening each component
+//! relative to its parent's handle with `FILE_OPEN_REPARSE_POINT`, so a
+//! symlink, junction or other name-surrogate reparse point is opened itself,
+//! never followed: it is refused, or acted on by entry operations. Only
+//! `rename` is path-based (no safe handle-based form): every directory
+//! leading to both entries is held open, and checked against the handle
+//! walk, so none can be renamed, deleted or replaced meanwhile.
 //!
-//! This takes two walks (the canonicalisation and the handle walk): the
-//! single walk of `unix.rs` would need to read reparse points and the final
-//! path of a handle (`GetFinalPathNameByHandleW`), which the standard
-//! library and `fs_at` do not offer without `unsafe`.
+//! Unlike `unix.rs`, this takes two walks: one would need reparse points and
+//! `GetFinalPathNameByHandleW`, which neither the standard library nor
+//! `fs_at` offers without `unsafe`.
 //!
-//! Names that Win32 path functions would alter or treat specially (a
-//! trailing `.` or space, `:` for alternate data streams, reserved device
-//! names such as `CON`) are refused: handle-relative opens take them
-//! literally, so they would name entries that the (Win32-based)
-//! canonicalisation does not see.
+//! Names that Win32 path functions alter (a trailing `.` or space, `:` for
+//! alternate data streams, reserved device names such as `CON`) are refused:
+//! handle-relative opens take them literally, so they would name entries
+//! the canonicalisation does not see.
 
-use super::{EntryKind, EntryMeta, Mode, Work, plain_from_verbatim, unchecked_symlink};
+use super::{EntryKind, EntryMeta, Mode, OpenMode, Work, plain_from_verbatim, unchecked_symlink};
 use crate::policy::{MAX_LINK_SCAN, fold_name, lexical};
 use crate::vm::iomem::Reservation;
 use std::ffi::OsStr;
@@ -94,6 +90,11 @@ impl Resolved {
         open_write(&self.path, append)
     }
 
+    /// Opens the regular file for `mode`.
+    pub fn open(self, _: &Path, mode: OpenMode) -> io::Result<std::fs::File> {
+        open_mode(&self.path, mode)
+    }
+
     pub fn stat(&self) -> io::Result<EntryMeta> {
         let m = stat(&self.path)?;
         Ok(EntryMeta { kind: m.kind, size: m.size, modified: m.modified.map(unix_nanos) })
@@ -124,6 +125,47 @@ impl Resolved {
 
     pub fn rename(from: Resolved, to: Resolved) -> io::Result<()> {
         rename(&from.path, &to.path)
+    }
+
+    /// Removes the directory entry and everything below it, asking `check`
+    /// about each entry below first (see the Unix version). Each step opens
+    /// its path without following reparse points.
+    pub fn remove_tree<E>(
+        self,
+        res: &mut Reservation,
+        mut check: impl FnMut(&Path) -> Result<io::Result<()>, E>,
+    ) -> Result<io::Result<()>, E> {
+        macro_rules! io {
+            ($e:expr) => {
+                match $e {
+                    Ok(v) => v,
+                    Err(e) => return Ok(Err(e)),
+                }
+            };
+        }
+        if io!(stat(&self.path)).kind != EntryKind::Dir {
+            return Ok(Err(io::Error::new(io::ErrorKind::NotADirectory, format!("{} is not a directory", self.path.display()))));
+        }
+        let names = io!(list_dir(&self.path, res));
+        let mut levels = vec![(self.path.clone(), names)];
+        while let Some((dir, names)) = levels.last_mut() {
+            let Some(name) = names.pop() else {
+                let (done, _) = levels.pop().expect("a level");
+                io!(remove_dir(&done));
+                continue;
+            };
+            let path = dir.join(&name);
+            if let Err(e) = check(&path)? {
+                return Ok(Err(e));
+            }
+            if io!(stat(&path)).kind == EntryKind::Dir {
+                let names = io!(list_dir(&path, res));
+                levels.push((path, names));
+            } else {
+                io!(remove(&path, |_| Ok(())));
+            }
+        }
+        Ok(Ok(()))
     }
 }
 
@@ -206,7 +248,7 @@ fn entry_path_on_host(p: &Path) -> EntryPath {
             return EntryPath { path, scanned, scanned_bytes };
         }
         Ok(_) => match entry.canonicalize().map(simplify_verbatim) {
-            // (If it became a symlink meanwhile, its target is ignored.)
+            // If it became a symlink meanwhile, its target is ignored.
             Ok(c) if c.parent() == Some(parent.as_path()) => c,
             _ => entry,
         },
@@ -256,11 +298,10 @@ fn same_entry(a: &Path, b: &Path) -> bool {
     matches!((open(a), open(b)), (Ok(a), Ok(b)) if a == b)
 }
 
-/// Windows canonical paths are "verbatim" (`\\?\C:\x`, `\\?\UNC\server\share\x`).
-/// Every path is converted to the plain form (`C:\x`, `\\server\share\x`), so
-/// that all normalized paths share one form whether or not they exist (and
-/// read naturally in prompts and errors). The standard library re-adds the
-/// prefix where needed (long paths).
+/// Converts a "verbatim" canonical path (`\\?\C:\x`, `\\?\UNC\server\share\x`)
+/// to its plain form (`C:\x`, `\\server\share\x`), so that normalized paths
+/// have one form whether or not they exist. The standard library re-adds the
+/// prefix where needed.
 fn simplify_verbatim(p: PathBuf) -> PathBuf {
     if let Some(s) = p.to_str()
         && let Some(plain) = plain_from_verbatim(s)
@@ -335,7 +376,7 @@ fn split(path: &Path) -> io::Result<(PathBuf, Vec<&OsStr>)> {
 fn check_name(path: &Path, name: &OsStr) -> io::Result<()> {
     let wide: Vec<u16> = name.encode_wide().collect();
     if wide.contains(&0) {
-        // (`NtCreateFile` names would end there.)
+        // `NtCreateFile` names would end there.
         return Err(invalid(path, "contains a NUL character"));
     }
     if wide.contains(&u16::from(b':')) {
@@ -444,13 +485,25 @@ fn open_read(path: &Path) -> io::Result<File> {
 /// Opens a regular file for writing, creating it if needed; truncates it
 /// unless `append`.
 fn open_write(path: &Path, append: bool) -> io::Result<File> {
+    open_mode(path, if append { OpenMode::Append } else { OpenMode::Write })
+}
+
+/// Opens a regular file for `mode`.
+fn open_mode(path: &Path, mode: OpenMode) -> io::Result<File> {
+    if mode == OpenMode::Read {
+        return open_read(path);
+    }
     let (dir, name) = parent(path)?;
     // Without FILE_WRITE_DATA, every write appends. Truncation is done
     // after the checks: truncating on open would turn a symlink into an
     // empty regular file.
-    let write = if append { FILE_GENERIC_WRITE & !FILE_WRITE_DATA } else { FILE_GENERIC_WRITE };
-    let mut o = options(write | FILE_READ_ATTRIBUTES, FILE_NON_DIRECTORY_FILE);
-    o.create(true);
+    let write = if mode == OpenMode::Append { FILE_GENERIC_WRITE & !FILE_WRITE_DATA } else { FILE_GENERIC_WRITE };
+    let read = if mode.reads() { FILE_GENERIC_READ } else { FILE_READ_ATTRIBUTES };
+    let mut o = options(write | read, FILE_NON_DIRECTORY_FILE);
+    match mode {
+        OpenMode::CreateNew => o.create_new(true),
+        _ => o.create(mode.creates()),
+    };
     let opened = open_in(&dir, name, &o).map_err(|e| match nofollow_error(e, &dir, name) {
         // FILE_NON_DIRECTORY_FILE fails with "access denied" for a directory.
         e if e.kind() == io::ErrorKind::PermissionDenied && lstat(&dir, name).is_ok_and(|m| m.is_dir()) => {
@@ -459,7 +512,7 @@ fn open_write(path: &Path, append: bool) -> io::Result<File> {
         e => e,
     })?;
     let f = regular(path, name, opened)?;
-    if !append {
+    if mode.truncates() {
         f.set_len(0)?;
     }
     Ok(f)
@@ -677,7 +730,7 @@ mod windows_tests {
             assert!(is_unchecked_symlink(&e), "{p}: {e}");
         }
         assert!(is_unchecked_symlink(&open_write(&dir.join("link/new.txt"), true).unwrap_err()));
-        let mem = crate::vm::iomem::IoMemory::new(None);
+        let mem = crate::vm::iomem::IoMemory::new(None, usize::MAX);
         assert!(is_unchecked_symlink(&list_dir(&dir.join("link"), &mut Reservation::new(&mem)).unwrap_err()));
         assert!(is_unchecked_symlink(&create_dir(&dir.join("link/sub")).unwrap_err()));
         assert!(is_unchecked_symlink(&create_dir_all(&dir.join("link/a/b"), 0).unwrap_err()));
@@ -744,7 +797,7 @@ mod windows_tests {
         create_dir_all(&dir.join("real/x/y"), depth - 1).unwrap();
         create_dir(&dir.join("real/a/d")).unwrap();
         assert_eq!(create_dir(&dir.join("real/a/d")).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
-        let mem = crate::vm::iomem::IoMemory::new(None);
+        let mem = crate::vm::iomem::IoMemory::new(None, usize::MAX);
         let mut names = list_dir(&dir.join("real/a"), &mut Reservation::new(&mem)).unwrap();
         names.sort();
         assert_eq!(names, ["b", "d"]);

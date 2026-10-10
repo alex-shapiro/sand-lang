@@ -13,6 +13,15 @@ use crate::vm::value::FxHashMap;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+/// What a trait method call with a known impl runs.
+#[derive(Clone, Copy)]
+enum Target {
+    Proto(u32),
+    /// A native implementing the method (it receives the impl's dictionary
+    /// first, like the methods written in Sand).
+    Native(u32),
+}
+
 pub struct CompileInput<'a> {
     pub checked: &'a CheckedProgram,
     pub sm: &'a SourceMap,
@@ -95,8 +104,17 @@ struct FnState<'h> {
     /// Inside an outermost loop whose invariants were already hoisted.
     hoisting: bool,
     /// Deferred expressions of the enclosing blocks (innermost last), compiled
-    /// again at every exit edge that leaves their block.
-    defers: Vec<Vec<&'h HExpr>>,
+    /// again at every exit edge that leaves their block, with their `pads`.
+    defers: Vec<Vec<(&'h HExpr, usize)>>,
+    /// The cleanup pad of each `defer`: a copy of its code run when the task
+    /// is cancelled, and the pad of the defer pending before it.
+    pads: Vec<(usize, Option<usize>)>,
+    /// The innermost pending defer (in `pads`) and where code began to have
+    /// it pending.
+    pending: Option<usize>,
+    pending_from: usize,
+    /// Code ranges with a pending defer: (start, end, pad).
+    cleanups: Vec<(usize, usize, usize)>,
     /// Instructions emitted for copies of deferred code (see `MAX_DEFER_OPS`).
     defer_ops: usize,
     /// The register `discard` gives to an expression whose value is unused:
@@ -236,8 +254,7 @@ impl ProgramMark {
         }
     }
 
-    /// Truncates `p` to the marked sizes. (Help for natives of modules that
-    /// were being added may remain, which is harmless.)
+    /// Truncates `p` to the marked sizes.
     pub(crate) fn rollback(&self, p: &mut Program) {
         p.protos.truncate(self.protos);
         p.consts.truncate(self.consts);
@@ -387,6 +404,7 @@ impl<'a> Compiler<'a> {
                     capture_cells: vec![],
                     doc: None,
                     signature: String::new(),
+                    cleanups: Vec::new(),
                 });
                 self.fn_protos[i] = Some(idx);
             }
@@ -417,6 +435,7 @@ impl<'a> Compiler<'a> {
             capture_cells: vec![],
             doc: None,
             signature: String::new(),
+            cleanups: Vec::new(),
         });
         for (name, f) in &cp.tests[*ntests..] {
             if let Some(p) = self.fn_protos[*f as usize] {
@@ -690,6 +709,10 @@ impl<'a> Compiler<'a> {
             hoisted: FxHashMap::default(),
             hoisting: false,
             defers: Vec::new(),
+            pads: Vec::new(),
+            pending: None,
+            pending_from: 0,
+            cleanups: Vec::new(),
             defer_ops: 0,
             void: None,
             facts: Rc::new(local_facts(&body.body, &body.locals, self.budget)),
@@ -702,7 +725,7 @@ impl<'a> Compiler<'a> {
         }
         self.ret_expr(&mut f, &body.body);
         let nregs = f.max_reg.max(1) as u16;
-        let (code, lines) = self.finish(f);
+        let (code, lines, cleanups) = self.finish(f);
         self.prog.protos[proto_idx as usize] = Proto {
             name: self.cp.name(fi.name).to_string(),
             file: body.span.file,
@@ -714,6 +737,7 @@ impl<'a> Compiler<'a> {
             capture_cells: vec![],
             doc: fi.doc.as_deref().map(String::from),
             signature,
+            cleanups,
         };
     }
 
@@ -783,19 +807,41 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    /// The function's final code and lines: its stubs emitted, assembled
-    /// (`assemble`), and its jump tables completed.
-    fn finish(&mut self, mut f: FnState<'a>) -> (Vec<Op>, Vec<u32>) {
+    /// The function's final code, lines and cleanup ranges: its stubs
+    /// emitted, assembled (`assemble`), and its jump tables completed.
+    fn finish(&mut self, mut f: FnState<'a>) -> (Vec<Op>, Vec<u32>, Vec<Cleanup>) {
+        self.set_pending(&mut f, None);
         self.emit_stubs(&mut f);
         let mut tables: Vec<Vec<usize>> = f.switches.iter().map(|s| s.1.clone()).collect();
+        tables.push(f.cleanups.iter().flat_map(|&(start, end, pad)| [start, end, f.pads[pad].0]).collect());
         let (code, lines) = assemble(f.code, f.lines, &f.far, &mut tables);
+        let cleanups =
+            tables.pop().unwrap().chunks(3).map(|c| Cleanup { start: c[0] as u32, end: c[1] as u32, pad: c[2] as u32 }).collect();
         for ((idx, _), targets) in f.switches.iter().zip(tables) {
             let sw = &mut self.prog.switches[*idx as usize];
             let (&default, targets) = targets.split_last().expect("a default target");
             sw.targets = targets.iter().map(|&t| t as u32).collect();
             sw.default = default as u32;
         }
-        (code, lines)
+        (code, lines, cleanups)
+    }
+
+    /// Makes `pad` the innermost pending defer from here on.
+    fn set_pending(&mut self, f: &mut FnState<'a>, pad: Option<usize>) {
+        if pad == f.pending {
+            return;
+        }
+        let here = self.here(f);
+        if let Some(p) = f.pending
+            && f.pending_from < here
+        {
+            match f.cleanups.last_mut() {
+                Some(last) if last.1 == f.pending_from && last.2 == p => last.1 = here,
+                _ => f.cleanups.push((f.pending_from, here, p)),
+            }
+        }
+        f.pending = pad;
+        f.pending_from = here;
     }
 
     /// Makes the branch at `at` go to `stub` (emitted by `emit_stubs`).
@@ -806,7 +852,6 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    /// Emits the stubs after the function's code.
     fn emit_stubs(&mut self, f: &mut FnState<'a>) {
         for (stub, jumps, line) in std::mem::take(&mut f.stubs) {
             f.line = line;
@@ -914,7 +959,6 @@ impl<'a> Compiler<'a> {
         f.locals[l as usize].cell
     }
 
-    /// Reads local `l` into `dst`.
     fn read_local(&mut self, f: &mut FnState<'a>, l: LocalId, dst: Reg) {
         if let Some(r) = f.reg(l) {
             if f.facts.builder[l as usize] {
@@ -961,7 +1005,7 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    /// Declares local `l` (allocating its register) and initializes it from `src`.
+    /// Declares local `l`, allocating its register.
     fn declare_local(&mut self, f: &mut FnState<'a>, l: LocalId) -> Reg {
         let r = self.alloc(f);
         f.set_reg(l, r);
@@ -1038,7 +1082,7 @@ impl<'a> Compiler<'a> {
             }
             HKind::Unit | HKind::Local(_) | HKind::Bool(_) | HKind::Int(_) => return,
             HKind::Block(items) => {
-                let mark = f.next_reg;
+                let (mark, pending) = (f.next_reg, f.pending);
                 f.defers.push(Vec::new());
                 for it in items {
                     self.discard(f, it);
@@ -1047,6 +1091,7 @@ impl<'a> Compiler<'a> {
                     self.emit_scope_defers(f);
                 }
                 f.defers.pop();
+                self.set_pending(f, pending);
                 f.next_reg = mark;
                 return;
             }
@@ -1054,7 +1099,8 @@ impl<'a> Compiler<'a> {
                 if f.defers.is_empty() {
                     f.defers.push(Vec::new());
                 }
-                f.defers.last_mut().unwrap().push(x);
+                let pad = self.emit_pad(f, x);
+                f.defers.last_mut().unwrap().push((x, pad));
                 return;
             }
             _ => {}
@@ -1089,13 +1135,14 @@ impl<'a> Compiler<'a> {
         let tail = !defers_pending(f);
         match &e.kind {
             HKind::Block(items) if !items.is_empty() && self.struct_literal(f, items).is_none() => {
-                let mark = f.next_reg;
+                let (mark, pending) = (f.next_reg, f.pending);
                 f.defers.push(Vec::new());
                 for it in &items[..items.len() - 1] {
                     self.discard(f, it);
                 }
                 self.ret_expr(f, items.last().unwrap());
                 f.defers.pop();
+                self.set_pending(f, pending);
                 f.next_reg = mark;
             }
             HKind::Call { func, args } if tail && self.fn_protos[*func as usize].is_some() => {
@@ -1117,10 +1164,16 @@ impl<'a> Compiler<'a> {
                 self.emit(f, Op::Ret { src: base });
             }
             HKind::CallTrait { slot, args, impl_id, .. } if tail => match self.static_target(*impl_id, *slot) {
-                Some(proto) => {
+                Some(Target::Proto(proto)) => {
                     let base = self.call_args(f, args, 0);
                     self.set_line(f, e.span);
                     self.emit(f, Op::TailCallDirect { base, proto });
+                }
+                Some(Target::Native(native)) => {
+                    let base = self.call_args(f, args, 0);
+                    self.set_line(f, e.span);
+                    self.call_native(f, base, native, base);
+                    self.emit(f, Op::Ret { src: base });
                 }
                 None => {
                     let argc = self.argc(f, args.len(), e.span);
@@ -1178,33 +1231,64 @@ impl<'a> Compiler<'a> {
     /// innermost scope first and each scope in reverse order (an exit edge
     /// leaving those blocks).
     fn emit_defers(&mut self, f: &mut FnState<'a>, from: usize) {
-        let line = f.line;
-        for i in (from..f.defers.len()).rev() {
+        let (line, pending) = (f.line, f.pending);
+        'scopes: for i in (from..f.defers.len()).rev() {
             for j in (0..f.defers[i].len()).rev() {
-                // Copies are bounded so that many defers times many exits
-                // cannot make compilation itself unbounded.
-                if f.defer_ops > MAX_DEFER_OPS {
-                    let span = f.defers[i][j].span;
-                    let msg =
-                        "too much deferred code: a `defer` is compiled into every exit of its block; move the cleanup into a function";
-                    if !self.errors.iter().any(|d| d.span == span && d.message == msg) {
-                        self.errors.push(Diag::error(span, msg));
-                    }
-                    f.too_big = true;
-                    return;
+                let (x, pad) = f.defers[i][j];
+                self.set_pending(f, f.pads[pad].1);
+                if !self.emit_defer_copy(f, x) {
+                    break 'scopes;
                 }
-                let x = f.defers[i][j];
-                let (ops, protos) = (f.code.len(), self.prog.protos.len());
-                // Locals declared by the deferred code get fresh registers at
-                // each copy (the registers of an earlier copy may be in use here).
-                let saved = f.reg_log.len();
-                self.discard(f, x);
-                f.reset_regs(saved);
-                let lambda_ops: usize = self.prog.protos[protos..].iter().map(|p| p.code.len()).sum();
-                f.defer_ops += f.code.len() - ops + lambda_ops;
+            }
+        }
+        self.set_pending(f, pending);
+        f.line = line;
+    }
+
+    /// Compiles a copy of deferred expression `x`; false if the function
+    /// has too much deferred code.
+    fn emit_defer_copy(&mut self, f: &mut FnState<'a>, x: &'a HExpr) -> bool {
+        // Copies are bounded so that many defers times many exits cannot make
+        // compilation itself unbounded.
+        if f.defer_ops > MAX_DEFER_OPS {
+            let msg = "too much deferred code: a `defer` is compiled into every exit of its block; move the cleanup into a function";
+            if !self.errors.iter().any(|d| d.span == x.span && d.message == msg) {
+                self.errors.push(Diag::error(x.span, msg));
+            }
+            f.too_big = true;
+            return false;
+        }
+        let (ops, protos) = (f.code.len(), self.prog.protos.len());
+        // Locals declared by the deferred code get fresh registers at each
+        // copy (the registers of an earlier copy may be in use here).
+        let saved = f.reg_log.len();
+        self.discard(f, x);
+        f.reset_regs(saved);
+        let lambda_ops: usize = self.prog.protos[protos..].iter().map(|p| p.code.len()).sum();
+        f.defer_ops += f.code.len() - ops + lambda_ops;
+        true
+    }
+
+    /// Emits the cleanup pad of `defer x` (skipped by normal control flow)
+    /// and makes it pending: the pad runs `x`, then the pads of the defers
+    /// pending before it, then leaves the frame (`Op::Unwind`).
+    fn emit_pad(&mut self, f: &mut FnState<'a>, x: &'a HExpr) -> usize {
+        let (line, parent) = (f.line, f.pending);
+        let over = self.emit_jump(f);
+        let at = self.here(f);
+        self.emit_defer_copy(f, x);
+        match parent {
+            Some(p) => self.emit_loop_back(f, f.pads[p].0),
+            None => {
+                self.emit(f, Op::Unwind);
             }
         }
         f.line = line;
+        self.patch_here(f, over);
+        f.pads.push((at, parent));
+        let pad = f.pads.len() - 1;
+        self.set_pending(f, Some(pad));
+        pad
     }
 
     /// Runs the deferred expressions of the innermost scope (its block ends normally).
@@ -1534,6 +1618,7 @@ impl<'a> Compiler<'a> {
                 if items.is_empty() {
                     self.unit_to(f, dst);
                 } else {
+                    let pending = f.pending;
                     f.defers.push(Vec::new());
                     for it in &items[..items.len() - 1] {
                         self.discard(f, it);
@@ -1552,6 +1637,7 @@ impl<'a> Compiler<'a> {
                         self.expr_to(f, last, dst);
                     }
                     f.defers.pop();
+                    self.set_pending(f, pending);
                 }
                 f.next_reg = mark;
             }
@@ -1903,10 +1989,15 @@ impl<'a> Compiler<'a> {
                 let mark = f.next_reg;
                 match self.static_target(*impl_id, *slot) {
                     // The impl is known: call its method directly.
-                    Some(proto) => {
+                    Some(Target::Proto(proto)) => {
                         let base = self.call_args(f, args, 0);
                         self.set_line(f, e.span);
                         self.call_direct(f, base, proto, dst);
+                    }
+                    Some(Target::Native(native)) => {
+                        let base = self.call_args(f, args, 0);
+                        self.set_line(f, e.span);
+                        self.call_native(f, base, native, dst);
                     }
                     // Otherwise fetch the method from the dictionary (the first argument).
                     None => {
@@ -2369,17 +2460,20 @@ impl<'a> Compiler<'a> {
         c
     }
 
-    /// The proto of the method a trait call invokes, when its dictionary
-    /// comes from a known impl.
-    fn static_target(&self, impl_id: Option<u32>, slot: u32) -> Option<u32> {
+    /// What a trait call runs when its dictionary comes from a known impl.
+    fn static_target(&self, impl_id: Option<u32>, slot: u32) -> Option<Target> {
         let fid = *self.cp.impls[impl_id? as usize].slots.get(slot as usize)?;
-        self.fn_protos[fid as usize]
+        match self.cp.fns[fid as usize].kind {
+            FnKind::Native(n) => Some(Target::Native(n)),
+            _ => self.fn_protos[fid as usize].map(Target::Proto),
+        }
     }
 
     fn fn_const(&mut self, fid: FnId) -> u32 {
-        match self.fn_protos[fid as usize] {
-            Some(p) => self.const_idx(Const::Fn(p)),
-            None => self.const_idx(Const::Str("<missing fn>".into())),
+        match (&self.cp.fns[fid as usize].kind, self.fn_protos[fid as usize]) {
+            (FnKind::Native(n), _) => self.const_idx(Const::Native(*n)),
+            (_, Some(p)) => self.const_idx(Const::Fn(p)),
+            _ => self.const_idx(Const::Str("<missing fn>".into())),
         }
     }
 
@@ -2500,6 +2594,7 @@ impl<'a> Compiler<'a> {
             capture_cells: vec![],
             doc: None,
             signature: format!("fn {name}(...)"),
+            cleanups: Vec::new(),
         });
         self.variant_wrappers.insert(rt, p);
         p
@@ -2683,7 +2778,7 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    /// Loads the constant `k` into `dst`.
+    /// Loads the hoisted value `k` into `dst`.
     fn load_hoisted(&mut self, f: &mut FnState<'a>, k: &HoistKey<'a>, dst: Reg) {
         match k {
             HoistKey::Int(i) => self.load_int(f, dst, *i),
@@ -3037,7 +3132,6 @@ impl<'a> Compiler<'a> {
         )
     }
 
-    /// Matches the payload of variant `v` against `args`.
     fn match_variant_args(&mut self, f: &mut FnState<'a>, args: &'a [HPat], v: Reg, fails: &mut Vec<usize>) {
         if let [sp] = args {
             // One payload: inline or not, `Payload` reads it.
@@ -3354,6 +3448,10 @@ impl<'a> Compiler<'a> {
             hoisted: FxHashMap::default(),
             hoisting: false,
             defers: Vec::new(),
+            pads: Vec::new(),
+            pending: None,
+            pending_from: 0,
+            cleanups: Vec::new(),
             defer_ops: 0,
             void: None,
             facts: f.facts.clone(),
@@ -3379,7 +3477,7 @@ impl<'a> Compiler<'a> {
         let signature = if lam.signature.is_empty() { self.cp.printer().show(ty) } else { lam.signature.clone() };
         let p = self.prog.protos.len() as u32;
         let nregs = sub.max_reg.max(1) as u16;
-        let (code, lines) = self.finish(sub);
+        let (code, lines, cleanups) = self.finish(sub);
         self.prog.protos.push(Proto {
             name: lam.name.clone(),
             file: f.file,
@@ -3391,6 +3489,7 @@ impl<'a> Compiler<'a> {
             capture_cells: cells,
             doc: lam.doc.as_deref().map(String::from),
             signature,
+            cleanups,
         });
         p
     }
@@ -3403,7 +3502,6 @@ fn cond_block(items: &[HExpr]) -> bool {
     !items.is_empty() && !items.iter().any(|x| matches!(x.kind, HKind::Defer(_)))
 }
 
-/// Whether a deferred expression is pending in the current function.
 fn defers_pending(f: &FnState) -> bool {
     f.defers.iter().any(|d| !d.is_empty())
 }
@@ -3621,8 +3719,8 @@ fn thread_jumps(code: &mut [Op]) {
     }
 }
 
-/// Every branch back is a safe point charging fuel (see "Metering" in
-/// docs/INTERNALS.md), and every `Loop` jumps back.
+/// Whether every branch back is a safe point charging fuel (see "Metering"
+/// in docs/INTERNALS.md) and every `Loop` jumps back.
 fn check_back_edges(code: &[Op]) -> bool {
     code.iter().all(|op| match op.branch_off() {
         Some(off) if off < 0 => op.is_back_edge(),
@@ -3694,7 +3792,6 @@ fn lambda_free(e: &HExpr, locals: &[LocalInfo], stack: &mut Vec<FreeFrame>, free
     });
 }
 
-/// Whether `e` assigns local `l`.
 fn assigns(e: &HExpr, l: LocalId, budget: &CompileBudget) -> bool {
     let mut found = false;
     let mut nodes = 0;

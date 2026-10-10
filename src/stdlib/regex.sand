@@ -93,6 +93,5 @@ extend Regex {
     native fn capture_spans(self, text: str) -> [int]?
     /// The spans of the groups of all non-overlapping matches.
     native fn capture_spans_all(self, text: str) -> [[int]]
-    /// The index of the group called `name`.
     native fn group_index(self, name: str) -> int?
 }

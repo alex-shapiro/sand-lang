@@ -15,7 +15,11 @@ fn run_net(src: &str) -> String {
 #[test]
 fn http_get_basics() {
     let server = http_server(|req| match req.path() {
-        "/hello" => HttpResponse::new(200, "hello world").header("Content-Type", "text/plain").header("X-Custom", "yes"),
+        "/hello" => HttpResponse::new(200, "hello world")
+            .header("Content-Type", "text/plain")
+            .header("X-Custom", "yes")
+            .header("Set-Cookie", "a=1; Expires=Wed, 21 Oct 2015 07:28:00 GMT")
+            .header("Set-Cookie", "b=2"),
         "/chunked" => {
             let mut r = HttpResponse::new(200, "this body arrives in several chunks");
             r.chunked = true;
@@ -35,14 +39,17 @@ let r = http.get("{base}/hello")?
 print(r.status)
 print(r.ok())
 print(r.text()?)
-print(r.headers["content-type"])
+print(r.header("content-type") ?? "")
 print(r.header("X-CUSTOM"))
+// Repeated headers stay separate (a cookie's date contains a comma).
+print(r.header_values("set-cookie"))
+print(r.headers.filter(h => h.0 == "set-cookie").len())
 print(r.url)
 let c = http.get("{base}/chunked")?
 print(c.text()?)
 let j = http.get("{base}/json")?.json()?
 print(j.path("a.1"))
-let h = http.get("{base}/echo-headers", headers: ["X-Token": "abc"])?
+let h = http.get("{base}/echo-headers", headers: [("X-Token", "abc")])?
 print(h.text()?)
 let missing = http.get("{base}/missing")?
 print(missing.status)
@@ -52,7 +59,7 @@ print(missing.ok())
     assert_eq!(
         run_net(&src),
         format!(
-            "200\ntrue\nhello world\ntext/plain\nSome(\"yes\")\n{base}/hello\nthis body arrives in several chunks\nSome(Num(2.0))\nabc|{}\n404\nfalse\n",
+            "200\ntrue\nhello world\ntext/plain\nSome(\"yes\")\n[\"a=1; Expires=Wed, 21 Oct 2015 07:28:00 GMT\", \"b=2\"]\n2\n{base}/hello\nthis body arrives in several chunks\nSome(Num(2.0))\nabc|{}\n404\nfalse\n",
             server.addr
         )
     );
@@ -203,8 +210,8 @@ let server = http.serve("127.0.0.1:0")?
 print("addr \(server.addr())")
 for _ in 0..2 {
     let req = server.accept()?
-    let body = "you sent \(req.method) \(req.path) q=\(req.query) body=\(req.text()?) ua=\(req.headers.get("user-agent") ?? "-")"
-    req.respond(201, body.bytes(), headers: ["x-reply": "1"])?
+    let body = "you sent \(req.method) \(req.path) q=\(req.query) body=\(req.text()?) ua=\(req.header("user-agent") ?? "-")"
+    req.respond(201, body.bytes(), headers: [("x-reply", "1")])?
 }
 "#;
     let mut engine = Engine::new(Config::new().policy(Policy::allow_all()).stdout(out.clone()));
@@ -381,7 +388,7 @@ fn sockets_of_pending_operations_count_as_open_resources() {
         r#"
 import http
 import net
-let handshakes = (0..2).map(_ => spawn net.connect_tls("127.0.0.1", {port}, timeout: 30s))
+let handshakes = (0..2).map(_ => spawn net.connect_tls("127.0.0.1:{port}", timeout: 30s))
 let requests = (0..2).map(_ => spawn http.get("http://{addr}/", timeout: 30s))
 task.sleep(200ms)
 print(net.listen("127.0.0.1:0").unwrap_err().kind)
@@ -408,7 +415,7 @@ pending.cancel()
 #[test]
 fn tls_handshakes_time_out() {
     let addr = silent_server();
-    let src = format!("import net\nlet e = net.connect_tls(\"127.0.0.1\", {}, timeout: 200ms).unwrap_err()\nprint(e.kind)", addr.port());
+    let src = format!("import net\nlet e = net.connect_tls(\"127.0.0.1:{}\", timeout: 200ms).unwrap_err()\nprint(e.kind)", addr.port());
     let start = Instant::now();
     let r = run_with(&src, |c| c.policy(Policy::allow_all()));
     assert_eq!(r.ok_stdout(), "timeout\n");
@@ -511,7 +518,8 @@ req.respond(200, "served".bytes())?
 "#;
     let limits = Limits { max_memory: Some(768 << 10), max_wall_time: Some(Duration::from_secs(25)), ..Limits::default() };
     let (addr, handle) = start_server_script(src, limits);
-    let mut idle: Vec<_> = (0..60).map(|_| std::net::TcpStream::connect(&addr).unwrap()).collect();
+    // Each connection being read holds an 8 KiB buffer: not all of them fit.
+    let mut idle: Vec<_> = (0..120).map(|_| std::net::TcpStream::connect(&addr).unwrap()).collect();
     std::thread::sleep(Duration::from_millis(500));
     let mut refused = 0;
     for s in &mut idle {
@@ -522,7 +530,7 @@ req.respond(200, "served".bytes())?
             refused += 1;
         }
     }
-    assert!((1..60).contains(&refused), "{refused} refused");
+    assert!((1..120).contains(&refused), "{refused} refused");
     drop(idle);
     std::thread::sleep(Duration::from_millis(200));
     let mut s = std::net::TcpStream::connect(&addr).unwrap();
@@ -551,4 +559,92 @@ fn unlimited_http_bodies() {
     let limits = Limits { max_http_body: usize::MAX, ..Limits::default() };
     let r = run_with(&src, |c| c.policy(Policy::allow_all()).limits(limits));
     assert_eq!(r.ok_stdout(), "to the end\n");
+}
+
+#[test]
+fn http_uploads_stream_their_bodies() {
+    let server = http_server(|req| match req.path() {
+        "/moved" => HttpResponse::new(301, "").header("location", "/echo"),
+        _ => HttpResponse::new(
+            200,
+            format!("{} {} {}", req.method, req.header("transfer-encoding").unwrap_or("-"), String::from_utf8_lossy(&req.body)),
+        ),
+    });
+    let base = format!("http://{}", server.addr);
+    let src = format!(
+        r#"
+import http
+import io
+fn send(method: str, url: str, parts: [str], headers: [(str, str)] = []) -> Result<str> {{
+    use up = http.upload(method, url, headers: headers)?
+    for p in parts {{
+        up.write_str(p)?
+    }}
+    use resp = up.finish()?
+    Ok("\(resp.status) \(resp.body.read_text()?)")
+}}
+print(send("POST", "{base}/echo", ["one ", "", "two"]))
+print(send("PUT", "{base}/echo", ["abc"], headers: [("content-length", "3")]))
+print(send("PUT", "{base}/echo", ["abcd"], headers: [("content-length", "3")]))
+print(send("PUT", "{base}/echo", ["ab"], headers: [("content-length", "3")]))
+print(send("POST", "{base}/moved", ["x"]))
+use up = http.upload("POST", "{base}/echo")?
+up.close()
+print(up.write_str("late").unwrap_err().kind)
+"#
+    );
+    assert_eq!(
+        run_net(&src),
+        "Ok(\"200 POST chunked one two\")\nOk(\"200 PUT - abc\")\n\
+         Err(Error { kind: \"invalid\", message: \"the body is longer than its content-length\" })\n\
+         Err(Error { kind: \"invalid\", message: \"the body is 1 bytes shorter than its content-length\" })\n\
+         Ok(\"301 \")\nclosed\n"
+    );
+    let reqs = server.requests.lock().unwrap();
+    assert_eq!(reqs.len(), 3, "{reqs:?}");
+    assert_eq!(reqs[1].header("content-length"), Some("3"));
+}
+
+#[test]
+fn http_servers_stream_responses() {
+    let (addr, handle) = start_server_script(
+        r#"
+import http
+let server = http.serve("127.0.0.1:0")?
+print("ready \(server.addr())")
+for _ in 0..4 {
+    use req = server.accept()?
+    let headers = if req.path == "/sized" { [("Content-Length", "5")] } else { [("x-a", "1")] }
+    use out = req.respond_stream(200, headers)?
+    out.write_str("he")?
+    out.write(b"")?
+    out.write_str("llo")?
+    if req.path == "/finish" {
+        out.finish()?
+        print(out.write_str("late").unwrap_err().kind)
+    }
+}
+"#,
+        Limits::default(),
+    );
+    let exchange = |request: &str| {
+        let mut s = std::net::TcpStream::connect(&addr).unwrap();
+        s.write_all(request.as_bytes()).unwrap();
+        let mut resp = String::new();
+        s.read_to_string(&mut resp).unwrap();
+        resp
+    };
+    let resp = exchange("GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+    assert!(resp.starts_with("HTTP/1.1 200 OK\r\n"), "{resp}");
+    assert!(resp.contains("x-a: 1\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"), "{resp}");
+    assert!(resp.ends_with("\r\n\r\n2\r\nhe\r\n3\r\nllo\r\n0\r\n\r\n"), "{resp}");
+    let resp = exchange("GET /finish HTTP/1.1\r\nHost: x\r\n\r\n");
+    assert!(resp.ends_with("\r\n\r\n2\r\nhe\r\n3\r\nllo\r\n0\r\n\r\n"), "{resp}");
+    let resp = exchange("GET /sized HTTP/1.1\r\nHost: x\r\n\r\n");
+    assert!(resp.contains("Content-Length: 5\r\nConnection: close\r\n\r\nhello"), "{resp}");
+    assert!(!resp.contains("chunked"), "{resp}");
+    let resp = exchange("HEAD / HTTP/1.1\r\nHost: x\r\n\r\n");
+    assert!(resp.ends_with("Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n"), "{resp}");
+    let r = handle.join().unwrap();
+    assert!(r.is_ok(), "{r:?}");
 }

@@ -219,7 +219,7 @@ fn main() {
         );
     }
     // One number to compare builds by (the interpreter's speed is sensitive
-    // to code layout, see docs/INTERNALS.md "Dispatch loop").
+    // to code layout, see `vm::interp`).
     if count > 1 {
         println!("geometric mean of best times: {:.2}ms over {count} benchmarks", (log_sum / count as f64).exp());
     }

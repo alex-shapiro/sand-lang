@@ -383,6 +383,7 @@ spec_files!(
     control_flow,
     codegen,
     defer,
+    use_bindings,
     functions,
     closures,
     structs,

@@ -266,6 +266,14 @@ pub enum StmtKind {
     Fn(FnDecl),
     /// `defer expr`: runs `expr` when the enclosing block exits.
     Defer(Expr),
+    /// `use name = value` (or `use _ = value`): binds `value`, whose type
+    /// implements `Close`, and closes it when the enclosing block exits.
+    Use {
+        /// The name bound (`_` binds none).
+        name: Ident,
+        ty: Option<TypeExpr>,
+        value: Expr,
+    },
 }
 
 #[derive(Clone, Debug)]

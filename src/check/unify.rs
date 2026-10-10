@@ -87,7 +87,7 @@ impl Checker<'_> {
             (Ty::Tuple(xs), Ty::Tuple(ys)) => self.unify_lists(xs, ys),
             (Ty::Named(d1, xs), Ty::Named(d2, ys)) => d1 == d2 && self.unify_lists(xs, ys),
             (Ty::Fn(p1, r1), Ty::Fn(p2, r2)) => self.unify_lists(p1, p2) && self.unify(r1, r2),
-            // (Equal primitives and parameters are equal ids.)
+            // Equal primitives and parameters are equal ids.
             _ => false,
         }
     }
@@ -132,7 +132,7 @@ impl Checker<'_> {
         false
     }
 
-    /// The type of a value that is either `a` or `b` (branches).
+    /// The type of a value that is either `a` or `b`.
     pub fn join(&mut self, a: TypeId, b: TypeId, span: Span) -> TypeId {
         let ra = self.resolve(a);
         let rb = self.resolve(b);
@@ -151,7 +151,6 @@ impl Checker<'_> {
         if !self.budget.charge(1) {
             return Some(true);
         }
-        // Whether all of `ts` satisfy `b`, or `None` if that is not known yet.
         let all = |ts: &mut dyn Iterator<Item = TypeId>| {
             let mut unknown = false;
             for x in ts {
@@ -290,8 +289,7 @@ impl Checker<'_> {
     /// variables, puts the dictionaries in place of the evidence placeholders
     /// (noting the statically known impls of trait calls, and building the
     /// non-constant dictionaries used in loops or lambdas once, on entry),
-    /// and marks the mutable locals that lambdas capture as cells (after
-    /// fusion has inlined some lambdas). `lambda` is the lambda being walked
+    /// and marks the mutable locals that lambdas capture as cells. `lambda` is the lambda being walked
     /// (0: the function itself); `nested` tells whether it is in a loop or lambda.
     pub(crate) fn finish_expr(&mut self, e: &mut HExpr, fin: &mut Finish, lambda: u32, nested: bool) {
         e.ty = self.zonk(e.ty);
@@ -370,7 +368,7 @@ pub(crate) struct Finish {
 /// What a type definition needs to satisfy a built-in bound.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Derived {
-    /// Nothing does it: a field type never satisfies the bound.
+    /// A field type never satisfies the bound.
     Never,
     /// The arguments of these type parameters (indices) must satisfy it.
     Needs(Vec<u32>),
@@ -391,7 +389,6 @@ fn prim_satisfies(t: Ty, b: Bound) -> bool {
         Ty::Str | Ty::Bytes | Ty::Duration => b != Bound::Num,
         Ty::Bool | Ty::Unit => !matches!(b, Bound::Num | Bound::Add),
         Ty::Range => matches!(b, Bound::Eq | Bound::Hash),
-        // Concatenation.
         Ty::List(_) => b == Bound::Add,
         _ => false,
     }

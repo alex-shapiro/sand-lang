@@ -1,14 +1,12 @@
-//! An HTTP client, in the browser: requests go through the browser's
-//! `fetch`, once the policy allows `Net(host:port)`.
-//!
-//! Compared with other builds: a response from another site can be read
-//! only if the site allows it (CORS), and only the headers it exposes are
-//! visible; the browser sets some request headers itself (`host`,
-//! `cookie`, `user-agent`, ...), and sends no cookies. Redirects are not
-//! followed: the browser does not say where they lead, so the policy could
-//! not decide on them; a redirect fails with kind `"http"`. Host names are
-//! decided as written (the browser resolves them; the addresses are not
-//! checked). There is no server. Response bodies larger than the
-//! `max_http_body` limit fail with kind `"limit"`.
+//! An HTTP client, in the browser: requests go through `fetch` once the
+//! policy allows `Net(host:port)`. Unlike other builds, a response from
+//! another site is readable only if the site allows it (CORS), with only the
+//! headers it exposes; the browser sets some request headers itself (`host`,
+//! `cookie`, `user-agent`, ...) and sends no cookies; redirects fail with
+//! kind `"http"`, as the browser hides where they lead; host names are
+//! checked as written, not their addresses; there is no `upload` or
+//! server; and every body is read whole, also for `open`, so one larger
+//! than `max_http_body` fails with kind `"limit"`.
 
+import io
 import json

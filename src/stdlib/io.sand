@@ -1,17 +1,128 @@
-//! Standard input and output streams.
+//! Reading and writing bytes: the `Reader` and `Writer` traits, which
+//! files, connections, HTTP bodies and the standard streams implement, and
+//! the standard streams themselves.
+//!
+//! ```
+//! use f = fs.open("notes.txt")?
+//! while let Some(line) = f.read_line()? {
+//!     io.stdout.write_str(line.to_upper() + "\n")?
+//! }
+//! ```
 
-/// Reads a line from standard input (without its terminator); `None` at the end.
-/// Requires the `Stdin` capability.
-pub native fn read_line() -> Result<str?>
+/// A source of bytes, read in order: a file, a connection, an HTTP body,
+/// standard input.
+pub trait Reader {
+    /// Reads at most `max` bytes, waiting until some are available; empty
+    /// at the end of the stream. It may return fewer bytes than are left
+    /// (a connection returns at most what its buffer holds).
+    fn read(self, max: int = 65536) -> Result<bytes>
 
-/// Reads the rest of standard input. Requires the `Stdin` capability.
-pub native fn read_all() -> Result<str>
+    /// Reads one line, without its `\n` or `\r\n`; `None` at the end of the
+    /// stream (kind `"invalid"` if the line is not UTF-8).
+    fn read_line(self) -> Result<str?>
 
-/// Writes `s` to standard output, without a newline.
-pub native fn write(s: str)
+    /// Reads everything up to the end of the stream.
+    fn read_all(self) -> Result<bytes>
 
-/// Writes `s` to standard error, without a newline.
-pub native fn ewrite(s: str)
+    /// Reads everything up to the end of the stream as UTF-8 text (kind
+    /// `"invalid"` if it is not).
+    fn read_text(self) -> Result<str> {
+        self.read_all()?.to_str()
+    }
 
-/// Flushes standard output and standard error.
-pub native fn flush()
+    /// The remaining lines (as `read_line` reads them), read as the
+    /// iterator is consumed. An error is the last element.
+    fn lines(self) -> Iter<Result<str>> {
+        var done = false
+        Iter.from_fn(() => {
+            if done {
+                return None
+            }
+            match self.read_line() {
+                Ok(Some(line)) => Some(Ok(line)),
+                Ok(None) => {
+                    done = true
+                    None
+                }
+                Err(e) => {
+                    done = true
+                    Some(Err(e))
+                }
+            }
+        })
+    }
+}
+
+/// A destination of bytes: a file, a connection, standard output.
+pub trait Writer {
+    /// Writes all of `data`.
+    fn write(self, data: bytes) -> Result<()>
+
+    /// Writes all of `text`, encoded as UTF-8.
+    fn write_str(self, text: str) -> Result<()> {
+        self.write(text.bytes())
+    }
+
+    /// Passes on what the writer buffers, if anything.
+    fn flush(self) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// Copies what `src` reads, up to its end, to `dst`; returns the number of
+/// bytes copied. Only a chunk at a time is held in memory.
+pub fn copy<R: Reader, W: Writer>(src: R, dst: W) -> Result<int> {
+    var total = 0
+    loop {
+        let chunk = src.read()?
+        if chunk.is_empty() {
+            return Ok(total)
+        }
+        dst.write(chunk)?
+        total += chunk.len()
+    }
+}
+
+/// Standard input. Reading it needs the `Stdin` capability.
+pub native type Stdin
+
+impl Reader for Stdin {
+    native fn read(self, max: int) -> Result<bytes>
+    native fn read_line(self) -> Result<str?>
+    native fn read_all(self) -> Result<bytes>
+}
+
+/// Standard output. Writing it needs the `Stdout` capability (allowed
+/// unless the policy denies it); the output limit applies.
+pub native type Stdout
+
+impl Writer for Stdout {
+    native fn write(self, data: bytes) -> Result<()>
+    native fn write_str(self, text: str) -> Result<()>
+    native fn flush(self) -> Result<()>
+}
+
+/// Standard error. Writing it needs the `Stderr` capability (allowed
+/// unless the policy denies it); the output limit applies.
+pub native type Stderr
+
+impl Writer for Stderr {
+    native fn write(self, data: bytes) -> Result<()>
+    native fn write_str(self, text: str) -> Result<()>
+    native fn flush(self) -> Result<()>
+}
+
+/// The standard input stream.
+pub let stdin: Stdin = new_stdin()
+
+/// The standard output stream (also written by `print`).
+pub let stdout: Stdout = new_stdout()
+
+/// The standard error stream (also written by `eprint`).
+pub let stderr: Stderr = new_stderr()
+
+native fn new_stdin() -> Stdin
+
+native fn new_stdout() -> Stdout
+
+native fn new_stderr() -> Stderr

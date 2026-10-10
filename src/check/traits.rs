@@ -21,7 +21,6 @@ pub struct TraitMethod {
     pub name: Symbol,
     /// The signature ([`FnKind::TraitMethod`]).
     pub sig: FnId,
-    /// The default implementation, if any.
     pub default: Option<FnId>,
 }
 
@@ -43,7 +42,6 @@ pub struct TraitDef {
 }
 
 impl TraitDef {
-    /// The slot of method `name`.
     pub fn slot(&self, name: Symbol) -> Option<u32> {
         self.methods.iter().position(|m| m.name == name).map(|i| i as u32)
     }
@@ -192,7 +190,7 @@ impl Checker<'_> {
     /// Adds bounds to a type parameter, with the built-in bounds its traits
     /// imply. A `Num` bound also adds the trait that carries its evidence.
     pub(crate) fn add_bounds(&mut self, p: ParamId, mut bounds: Vec<Bound>, mut traits: Vec<TraitRef>) {
-        // (A trait with `Num` as a supertrait carries its evidence itself.)
+        // A trait with `Num` as a supertrait carries its evidence itself.
         if let Some(n) = self.num_trait.filter(|_| bounds.contains(&Bound::Num)) {
             traits.push(TraitRef { trait_id: n, args: TyList::EMPTY });
         }
@@ -503,7 +501,6 @@ impl Checker<'_> {
         add_impl(&mut self.impls_by, key, id);
         add_impl(&mut self.impls_by_ctor, (ctor, arity), id);
 
-        // Methods.
         let mut slots: Vec<Option<FnId>> = vec![None; self.traits[tid as usize].methods.len()];
         let rules = DeclRules { skip_where: &scope, defaults: DefaultRule::None };
         for (j, m) in d.methods.iter().enumerate() {
@@ -1035,7 +1032,6 @@ impl Checker<'_> {
         }
     }
 
-    /// `tr` with the inference variables in its arguments resolved.
     fn zonk_trait(&mut self, tr: TraitRef) -> TraitRef {
         let Checker { arena, subst, budget, .. } = self;
         TraitRef { trait_id: tr.trait_id, args: arena.map_list(tr.args, &mut |a, t| super::unify::zonk_in(a, subst, budget, t)) }
@@ -1093,10 +1089,9 @@ impl Checker<'_> {
 
     /// Evidence from the function's dictionaries (and their supertraits).
     fn find_fact(&mut self, ty: TypeId, tr: TraitRef) -> Option<HExpr> {
-        // Breadth first over the facts about `ty` and their supertraits (an
-        // acyclic graph), each trait once: (trait, the node it is a
-        // supertrait of, and the field holding its dictionary there; or no
-        // node, and the index of the fact).
+        // Breadth first over the facts about `ty` and their supertraits,
+        // visiting each trait once. A node is (trait, parent node, field of
+        // the parent's dictionary holding it), or (trait, None, fact index).
         let mut nodes: Vec<(TraitRef, Option<usize>, usize)> = Vec::new();
         for (k, (t, f, _)) in self.fs.evidence.iter().enumerate() {
             if *t == ty && !nodes.iter().any(|(x, _, _)| x == f) {
@@ -1166,14 +1161,12 @@ impl Checker<'_> {
     }
 }
 
-/// Registers impl `id` under `key`.
 fn add_impl<K: std::hash::Hash + Eq + Clone>(table: &mut PMap<K, Arc<[ImplId]>>, key: K, id: ImplId) {
     let mut ids: Vec<ImplId> = table.get(&key).map(|v| v.to_vec()).unwrap_or_default();
     ids.push(id);
     table.insert(key, ids.into());
 }
 
-/// Unregisters impl `id` from `key`.
 fn remove_impl<K: std::hash::Hash + Eq + Clone>(table: &mut PMap<K, Arc<[ImplId]>>, key: &K, id: ImplId) {
     if let Some(ids) = table.get(key) {
         let kept: Vec<ImplId> = ids.iter().copied().filter(|&i| i != id).collect();

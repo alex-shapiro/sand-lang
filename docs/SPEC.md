@@ -72,7 +72,7 @@ literals.
 //! documentation comment for the enclosing module (only before the first item)
 ```
 
-Doc comments are retained and are available at runtime through the `help` module.
+Doc comments are available at runtime through the `help` module.
 
 ### 2.3 Line termination
 
@@ -86,13 +86,11 @@ terminator (`;`) when the last token on the line is one of:
 - `..` or `..=`, which may end an open range (`let rest = 1..`)
 
 and the newline is **not** inside a `(...)` or `[...]` group. Inside `{...}`
-newlines are significant again, even when that brace is nested inside
-parentheses. (So `break @outer` ends a statement at the end of a line, and a
-loop label `@outer` must be on the same line as its loop, §6.9.)
+newlines are significant again, even when nested inside parentheses.
 
-A terminator is **not** inserted if the first token on the next non-blank line is
-`.`, `|>`, `else`, `and`, `or`, `=>`, a binary operator, or a `-` followed by
-whitespace (see below). This permits chains such as:
+No terminator is inserted if the next non-blank line starts with `.`, `|>`,
+`else`, `and`, `or`, `=>`, a binary operator, or a `-` followed by whitespace
+(see below). This permits chains such as:
 
 ```
 let total = items
@@ -101,37 +99,31 @@ let total = items
     .sum()
 ```
 
-**Minus and whitespace.** `-` is both the subtraction and the negation
-operator; the whitespace around it decides which one it is where the grammar
-alone would not. A `-` with whitespace (a space, tab or line break, or the
-start of the source) before it and none after it (`-x`) is a negation:
+**Minus and whitespace.** `-` is the only operator that is both prefix and
+binary; where the grammar cannot tell which is meant, whitespace decides. A
+`-` with whitespace (space, tab, line break or start of source) before it and
+none after it (`-x`) is a negation:
 
-- at the start of a line it begins a new statement, whatever the line before
-  ends with (the linter reports the statement if it has no effect,
-  `no-effect`, §17.2);
-- after an operand (on the same line, or on the next line inside `(...)` or
-  `[...]`), where only a binary operator could follow, it is an error
-  (an ambiguous `-`): `a -b` and `[1` / `-2]` are rejected rather than read as
-  `a - b` and `[1 - 2]`.
+- at the start of a line it begins a new statement, whatever the previous
+  line ends with (the linter reports it if it has no effect, `no-effect`,
+  §17.2);
+- after an operand (on the same line, or the next line inside `(...)` or
+  `[...]`) it is an error (an ambiguous `-`): `a -b` and `[1` / `-2]` are
+  rejected rather than read as `a - b` and `[1 - 2]`.
 
-Every other `-` is a subtraction after an operand and a negation elsewhere:
-`a - b`, `a-b` and `a- b` subtract; `-a`, `f(-a)`, `[1, -2]`, `x = -1` and the
-second `-` of `a - -b` negate. In particular a line starting with `- ` (`-` followed by
-whitespace) continues the previous line with a subtraction:
+Every other `-` subtracts after an operand and negates elsewhere: `a - b`,
+`a-b` and `a- b` subtract; `-a`, `f(-a)`, `[1, -2]`, `x = -1` and the second
+`-` of `a - -b` negate. So a line starting with `-` and whitespace continues
+the previous line:
 
 ```
 let total = base
     - discount
 ```
 
-The rule is a property of `-` alone: it is the only operator that is both
-prefix and binary (`~` and `not` are only prefix, the others only binary), so
-spacing never changes the meaning of any other operator. The formatter prints
-a subtraction with spaces on both sides and a negation without a space after
-it, so formatted code always means what it says.
-
-Explicit `;` may be used to separate statements on one line. Redundant
-terminators are ignored.
+The formatter prints subtraction with spaces on both sides and negation with
+none after, so formatted code means what it says. Explicit `;` may separate
+statements on one line; redundant terminators are ignored.
 
 ### 2.4 Identifiers and keywords
 
@@ -144,7 +136,7 @@ Reserved keywords:
 ```
 and as break continue defer else enum extend false fn for from if impl import
 in let loop match native not or pub return self Self spawn struct trait true
-type var while
+type use var while
 ```
 
 `test` is a contextual keyword: it begins a test block only when followed by a
@@ -152,7 +144,8 @@ string literal at the top level of a module.
 
 By convention (enforced by the linter): types, traits, enum variants and type
 parameters are `UpperCamelCase`; functions, variables, fields, modules and loop
-labels are `snake_case`; top-level `let` constants may also be `SCREAMING_SNAKE_CASE`. The identifier `_` is a wildcard and may not be read.
+labels are `snake_case`; top-level `let` constants may also be
+`SCREAMING_SNAKE_CASE`. The identifier `_` is a wildcard and may not be read.
 
 ### 2.5 Literals
 
@@ -176,34 +169,27 @@ truncated.
 
 **Strings**: `"..."`. Escapes: `\\`, `\"`, `\n`, `\r`, `\t`, `\0`, `\'`,
 `\u{XXXX}` (1-6 hex digits, a Unicode scalar value), and `\(` which starts an
-interpolation. Any other escape is an error (including `\{` and `\}`: braces
-need no escape). Strings may contain literal newlines. The backslash is the
-only special character inside a string: `{`, `}`, `(`, `)` and `:` are ordinary
-text, so regular expressions (`"[0-9]{4}"`) and JSON (`"{\"a\": 1}"`) are
-written as they read.
+interpolation. Any other escape is an error, including `\{` and `\}`.
+Strings may contain literal newlines; `{`, `}`, `(`, `)` and `:` are ordinary
+text (`"[0-9]{4}"`, `"{\"a\": 1}"`).
 
-**Interpolation**: inside a non-raw string, `\(expr)` evaluates `expr` and
-inserts its display form (§10.9); `\(expr:spec)` applies a format
-specification (§10.10). The expression is lexed as ordinary code up to the `)`
-that closes the `\(`: a `)` that closes a `(` opened inside the interpolation
-does not end it, and the expression may contain any tokens, including string
-literals with interpolations of their own (`"\(xs.map(x => "<\(x)>"))"`). The
-format spec begins at the first `:` that is not nested inside `()`, `[]`, `{}`
-or a string, and runs to the next `)`, which ends the interpolation (so a spec
-cannot contain `)`). An interpolation does not continue onto the next line
-except inside brackets (`()`, `[]`, `{}`) opened within it: a line break at its
-top level, or before the `)` of a format spec, is an error (`unterminated
-interpolation`), reported at the `\(`. An interpolation must hold an
-expression (`\()` is an error, `empty interpolation`).
+**Interpolation**: inside a non-raw string, `\(expr)` inserts the display form
+(§10.9) of `expr`; `\(expr:spec)` applies a format specification (§10.10). The
+expression is lexed as ordinary code up to the `)` closing the `\(` (nested
+parentheses do not end it) and may contain any tokens, including strings with
+their own interpolations (`"\(xs.map(x => "<\(x)>"))"`). The spec begins at
+the first `:` not nested inside `()`, `[]`, `{}` or a string and ends at the
+next `)`, which ends the interpolation. A line break is allowed only inside
+brackets opened within the interpolation; elsewhere, including in a spec, it
+is an error (`unterminated interpolation`), reported at the `\(`. `\()` is an
+error (`empty interpolation`).
 
-**Multi-line strings**: `"""` starts a block string that ends at the next
-`"""` (outside its interpolations). If the opening `"""` is followed by a
-newline, that newline is removed. The common leading whitespace of the lines
-of its text is removed from each of them: the lines counted are its non-blank
-lines and the line holding the closing `"""` (unless that is the first line).
-A line that starts inside an interpolation (which may span lines inside
-brackets) is code, not text, and is neither counted nor dedented. Escapes and
-interpolation work as in `"..."`.
+**Multi-line strings**: `"""` starts a block string ending at the next `"""`
+outside its interpolations; escapes and interpolation work as in `"..."`. A
+newline right after the opening `"""` is removed, and the leading whitespace
+common to the non-blank lines and the closing `"""` line (unless it is the
+first line) is removed from every line. Lines that start inside an
+interpolation are code: neither counted nor dedented.
 
 **Raw strings**: `r"..."`, `r#"..."#`, `r##"..."##`, ... have no escapes and no
 interpolation.
@@ -256,20 +242,17 @@ from math import cbrt, pi           // bind selected public names directly
 from "./shapes.sand" import Shape, area
 ```
 
-Script paths are resolved relative to the directory of the importing module; the
-`.sand` extension may be omitted, and other files cannot be imported. The resolved path must lie within the
-**module root** (the directory of the main module, unless the host configures
-otherwise; a symlinked main file's imports and module root are those of the
-file it links to). Every script import is checked against the policy as
-`Import(path)` (§14).
+Script paths are resolved relative to the importing module's directory; the
+`.sand` extension may be omitted, and other files cannot be imported. The
+resolved path must lie within the **module root**: the main module's directory
+unless the host configures another. A symlinked main file's imports and module
+root are those of its target. Every script import is checked against the
+policy as `Import(path)` (§14).
 
-A module name (`json`) refers first to a host-registered native module, then to a
-standard-library module. Only items marked `pub` are visible to importers.
-Accessing a non-`pub` item is an error. Importing a name that is not exported is
-an error.
-
-A module-qualified name is written `module.name`; a module-qualified type is
-written `module.Type`.
+A module name (`json`) refers to a host-registered native module, else to a
+standard-library module. Only `pub` items are visible to importers; accessing
+a non-`pub` item or importing a name that is not exported is an error.
+Qualified names are written `module.name` and `module.Type`.
 
 ### 3.3 Visibility
 
@@ -301,8 +284,8 @@ fn greet(name: str, greeting: str = "Hello") {
   module scope, and may refer to earlier parameters. Parameters with defaults
   must follow all parameters without them.
 - The return type follows `->`; if omitted it is `()` (unit).
-- The body is a block. The value of the block is the return value. In a function
-  returning `()`, the value of the final expression is discarded.
+- The body is a block whose value is returned. In a function returning `()`,
+  the value of the final expression is discarded.
 - Type parameters are listed in `<...>` with optional bounds `T: Ord + Hash`.
   Bounds are the built-in bounds `Eq`, `Ord`, `Hash` and `Num` (§5.6) and
   traits (§4.9), possibly module-qualified or with type arguments:
@@ -335,9 +318,8 @@ struct Counter {
 }
 ```
 
-- Fields are separated by newlines or commas. Fields are immutable unless
-  declared `var`. A field may have a default value expression which is used when
-  a struct literal omits the field.
+- Fields are separated by newlines or commas and are immutable unless
+  declared `var`. A field's default is used when a struct literal omits it.
 - Methods are `fn` declarations inside the body. A method whose first parameter
   is `self` (no annotation) is an instance method, called as `value.method(...)`.
   Other methods are static, called as `Type.method(...)`.
@@ -415,15 +397,16 @@ must be fully inferred from their initializer and module-level uses.
 
 ### 4.7 Native declarations
 
-Inside the prelude, standard library and host native modules, a function may be
-declared without a body using `native`:
+In the prelude, standard library and host native modules, functions and
+`impl` methods may be declared `native`, without a body; the module's registry
+supplies the Rust implementation. User scripts may not declare `native`
+functions.
 
 ```
 pub native fn parse(text: str) -> Result<Json>
 ```
 
-The implementation is supplied in Rust by the module's registry. User scripts
-may not declare `native` functions. A native type parameter may be marked
+A native type parameter may be marked
 `reflect` (`native fn decode<reflect T>(text: str) -> Result<T>`); the compiler
 then passes a runtime description of the instantiated type, which must be fully
 known at the call site.
@@ -517,8 +500,8 @@ implements a trait for a type.
   be fixed (`impl Describe for [int]`).
 - Each type parameter of the impl must occur in the type or in the trait
   arguments. The impl's bounds (in `<...>` or in a `where` clause after the
-  type) are required wherever the impl is used: `impl<T: Describe> Describe
-for [T]` makes `[T]` implement `Describe` exactly when `T` does.
+  type) are required wherever the impl is used: `impl<T: Describe>
+Describe for [T]` makes `[T]` implement `Describe` exactly when `T` does.
 - The impl defines each required method of the trait, may override default
   methods, and may not define other methods. Each method's signature must
   equal the trait's after replacing `Self` by the impl's type and the trait's
@@ -561,7 +544,6 @@ traits, local functions or native functions.
   module and have an impl for the type's constructor. The trait does not
   need to be imported.
 
-An inherent method takes precedence over a trait method of the same name.
 If several traits provide `m`, the call is ambiguous and an error. Every
 trait method can also be called in qualified form:
 
@@ -606,24 +588,24 @@ enum.
 
 `never` is a subtype of every type: an expression of type `never` (`return`,
 `break`, `continue`, `panic(...)`) may appear where any type is expected.
-This applies to whole values only, not to the parts of a type: `[never]` and
-`fn() -> never` are distinct types, so `let xs: [never] = [1]` and passing
-`() => 5` where a `fn() -> never` is expected are type errors.
+Inside other types it is ordinary: `[never]` and `fn() -> never` are distinct
+types, so `let xs: [never] = [1]` and passing `() => 5` where a
+`fn() -> never` is expected are type errors.
 
 ### 5.2 Composite types
 
-| Syntax          | Meaning                                                   |
-| --------------- | --------------------------------------------------------- |
-| `[T]`           | growable list (reference type, mutable)                   |
-| `[K: V]`        | hash map, insertion ordered (reference type, mutable)     |
-| `Set<T>`        | hash set, insertion ordered (reference type, mutable)     |
+| Syntax          | Meaning                                                                                                            |
+| --------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `[T]`           | growable list (reference type, mutable)                                                                            |
+| `[K: V]`        | hash map, insertion ordered (reference type, mutable)                                                              |
+| `Set<T>`        | hash set, insertion ordered (reference type, mutable)                                                              |
 | `(A, B, ...)`   | tuple of two or more elements (immutable); `(A,)` is an error, as are the pattern `(p,)` and the expression `(e,)` |
-| `T?`            | shorthand for `Option<T>`                                 |
-| `Result<T, E>`  | `Ok(T)` or `Err(E)`; `Result<T>` means `Result<T, Error>` |
-| `fn(A, B) -> R` | function; `fn(A)` returns `()`                            |
-| `Task<T>`       | a concurrently running computation (§11)                  |
-| `Channel<T>`    | a message queue between tasks (§11)                       |
-| `Range`         | an integer range `a..b` / `a..=b`                         |
+| `T?`            | shorthand for `Option<T>`                                                                                          |
+| `Result<T, E>`  | `Ok(T)` or `Err(E)`; `Result<T>` means `Result<T, Error>`                                                          |
+| `fn(A, B) -> R` | function; `fn(A)` returns `()`                                                                                     |
+| `Task<T>`       | a concurrently running computation (§11)                                                                           |
+| `Channel<T>`    | a message queue between tasks (§11)                                                                                |
+| `Range`         | an integer range `a..b` / `a..=b`                                                                                  |
 
 ### 5.3 Nominal types
 
@@ -673,8 +655,7 @@ a trait whose supertraits include a built-in bound implies it.
 A type parameter bounded by `Num` (directly, in a `where` clause, or through a
 trait with `Num` as a supertrait) also has the static methods `T.zero()` and
 `T.one()`, the additive and multiplicative identities (`0`/`1` for `int`,
-`0.0`/`1.0` for `float`). They are available even when no value of type `T`
-exists, so generic code can, for example, sum an empty list:
+`0.0`/`1.0` for `float`), so generic code can sum even an empty list:
 
 ```
 fn total<T: Num>(xs: [T]) -> T {
@@ -683,9 +664,6 @@ fn total<T: Num>(xs: [T]) -> T {
 let none: [float] = []
 print(total(none))            // 0.0
 ```
-
-(Runtime values do not carry their static types, so this information is
-passed to generic code as hidden evidence, like trait dictionaries.)
 
 ---
 
@@ -867,19 +845,15 @@ for x in iterable { ... }
   statement.
 - `loop` evaluates to the value given to `break` (or `()` if `break` has no
   value). `while` and `for` evaluate to `()`; `break` in them takes no value.
-- `for` iterates: `Range` (integers), `[T]` (elements), `[K: V]` (`(K, V)`
-  tuples), `Set<T>` (elements), `Channel<T>` (received messages until the
-  channel is closed and empty). The loop binding may be a pattern:
-  `for (k, v) in map`. A `for` over a list visits indices `0..n` where `n` is
-  the length when the loop starts (stopping early if the list shrinks), reading
-  each element when it is visited; so elements pushed during the loop are not
-  visited. Maps and sets are iterated over a snapshot of their entries taken
-  when the loop starts. Channels are consumed live. `for` also iterates over
-  any value whose type implements the prelude trait `Iterator<T>` (§12.13),
-  such as the lazy `Iter<T>`, calling its `next()` before each iteration until
-  it returns `None` (the call is static for concrete types and goes through
-  the dictionary for a bounded type parameter). Comprehension `for` clauses
-  accept the same values.
+- `for` (and a comprehension `for` clause) iterates over a `Range`
+  (integers), `[T]` (elements), `[K: V]` (`(K, V)` tuples), `Set<T>`
+  (elements), `Channel<T>` (messages received live until it is closed and
+  empty), or any value whose type implements the prelude trait `Iterator<T>`
+  (§12.13), such as `Iter<T>`, calling `next()` before each iteration until it
+  returns `None`. The loop binding may be a pattern: `for (k, v) in map`. A
+  list loop visits indices `0..n`, `n` being the length when the loop starts,
+  reading each element when visited and stopping early if the list shrinks.
+  Maps and sets are iterated over a snapshot taken when the loop starts.
 - `break` and `continue` refer to the innermost loop. `return e` returns from
   the innermost function or lambda. All three have type `never`.
 - **Labels.** A loop may be labeled by writing `@name` before `loop`, `while`
@@ -900,14 +874,12 @@ for x in iterable { ... }
   }
   ```
 
-  `break @name value` is allowed only when `@name` labels a `loop` (whose
-  value it gives, as for an unlabeled `break`); `continue @name` may target any
-  loop (for `loop`, it restarts the body). Labels name loops of the current
-  function or lambda only: `break` and `continue` cannot leave a lambda or a
-  local function, labeled or not. Using an unknown label, or a label that is
+  `break @name value` is allowed only when `@name` labels a `loop`;
+  `continue @name` may target any loop (on `loop`, it restarts the body).
+  Labels name loops of the current function or lambda only: `break` and
+  `continue` cannot leave a lambda or local function. An unknown label, or one
   already used by an enclosing loop of the same function, is a compile error.
-  Labels are not values and have no other use. The label must directly follow
-  the `@` (no space).
+  Labels are not values. The label must directly follow the `@`.
 
 ### 6.10 Lambdas
 
@@ -930,8 +902,7 @@ mutation inside the lambda is visible outside and vice versa.
 ### 6.11 String interpolation
 
 `"\(a) + \(b) = \(a + b)"` builds a string from the display forms (§10.9) of the
-embedded expressions. Any type may be interpolated. The lexical rules (nesting,
-line breaks, format specs) are in §2.5.
+embedded expressions, which may have any type. Lexical rules: §2.5.
 
 ### 6.12 `spawn`
 
@@ -955,6 +926,7 @@ m[k] = v                      // map insert/overwrite
 p.count += 1                  // `var` field assignment
 expr                          // expression statement
 defer conn.close()            // run when the enclosing block exits (§7.1)
+use f = fs.open(path)?        // close `f` when the enclosing block exits (§7.2)
 ```
 
 - Rebinding a name with `let` in the same block shadows it.
@@ -973,7 +945,7 @@ when the **enclosing block** exits, however it exits:
 fn copy(src: str, dst: str) -> Result<()> {
     let conn = net.connect(dst)?
     defer conn.close()                  // runs on every exit below
-    for line in fs.read_lines(src)? {
+    for line in fs.read_text(src)?.lines() {
         conn.write_str(line + "\n")?    // an error returns, closing conn
     }
     Ok(())
@@ -1005,11 +977,41 @@ fn copy(src: str, dst: str) -> Result<()> {
   errors (loops, lambdas and `let ... else` inside it are fine). Deferred
   code is compiled into every exit of its block, so a function with very many
   defers and exits can exceed a compile-time limit (§15.3).
-- **Panics and cancellation.** A panic aborts the run (§10.3) without running
-  defers, as does `exit`. A cancelled task (§11.2) stops at a suspension point
-  and does not run its pending defers; nor does a task cut short because the
-  run ends. Deferred code may itself suspend (perform I/O, wait on tasks or
-  channels) like any other code.
+- **Panics and cancellation.** A panic (§10.3) or `exit` aborts the run
+  without running defers. A cancelled task (§11.2) runs its pending defers,
+  innermost first; cancelling it again has no effect. Deferred code may
+  suspend like any code.
+
+### 7.2 `use`
+
+A **resource** is a value whose type implements the prelude trait `Close`
+(§12.14), such as an open file, a connection or an HTTP body. `use` binds one
+and closes it when the enclosing block exits:
+
+```
+fn first_line(path: str) -> Result<str?> {
+    use f = fs.open(path)?
+    f.read_line()                       // f is closed after this, on every path
+}
+```
+
+- `use name = e` (or `use name: T = e`) binds `e` immutably like `let` and
+  closes it as `defer Close.close(name)` would (§7.1): on every exit, last
+  declared first, interleaved with the block's defers. `use _ = e` keeps the
+  value only to close it (`use _ = lock.acquire()`).
+- The type of `e` must implement `Close` (a compile error otherwise); a
+  `Result` of one needs `?` first. The trait's method is called even if the
+  type also has an inherent `close`.
+- A `use` binding is a name or `_`, not a pattern, and is local to its block;
+  at a module's top level it is closed when the top-level code finishes (in
+  the REPL, at the end of the input).
+- A copy of the value kept beyond the block (stored, returned, captured by a
+  task) refers to a closed resource, whose operations fail with kind `"closed"`. The
+  linter reports such escapes (`resource-escapes`, §17.2) and resources
+  never closed (`unclosed-resource`).
+
+A resource that no `use` closes is still closed at the latest when the
+garbage collector finds it unreachable (§10.8).
 
 ---
 
@@ -1027,18 +1029,17 @@ Some(p)  None         Option variants
 Ok(p)  Err(p)         Result variants
 Circle(p)             enum variant (enum inferred from scrutinee)
 Shape.Circle(p)       qualified variant
-Point { x, y: 0 }     struct (fields not mentioned are ignored with `..`)
+Point { x, y: 0 }     struct
 Point { x, .. }
 []  [a, b]  [first, ..rest]  [.., last]   list patterns
 p1 | p2               alternatives (must bind the same names with the same types)
 ```
 
 A binding pattern `name` that coincides with a payload-less variant of the
-scrutinee's enum type refers to that variant (so `Empty` in the example above
-is a variant, not a binding). A capitalized name that is not such a variant is a
-binding; the linter reports it (`variant-like-binding`, §17.2), since it is
-most often a misspelled variant. Struct patterns must either mention every field
-or end with `..`.
+scrutinee's enum type refers to that variant (`Empty` for a `Shape`, §4.3). A
+capitalized name that is not such a variant is a binding, which the linter
+reports as a likely misspelled variant (`variant-like-binding`, §17.2). Struct
+patterns must either mention every field or end with `..`.
 
 ### 8.2 Guards
 
@@ -1047,15 +1048,13 @@ towards exhaustiveness.
 
 ### 8.3 Exhaustiveness and reachability
 
-A `match` must be exhaustive: for every value of the scrutinee's type some arm
-must match. Types with infinitely many values (`int`, `str`, lists, ...) require
-a wildcard or binding arm (list patterns `[]` + `[_, .._]` are exhaustive). A
-non-exhaustive match is a compile error that lists a missing pattern. An arm
-that can never match because earlier arms cover it is a compile error
-(`unreachable pattern`). Checking is exponential in the worst case (e.g.
-or-patterns in many tuple positions); a `match` (or refutability check of a
-`let`, `for` or comprehension pattern) whose check exceeds a fixed amount of
-work is rejected with `pattern too complex to check for exhaustiveness`
+A `match` must be exhaustive; otherwise it is a compile error listing a
+missing pattern. Types with infinitely many values (`int`, `str`, lists, ...)
+need a wildcard or binding arm (for lists, `[]` plus `[_, .._]` suffices). An
+arm covered by earlier arms is a compile error (`unreachable pattern`). A
+`match`, or refutability check of a `let`, `for` or comprehension pattern,
+whose check exceeds a fixed amount of work (e.g. or-patterns in many tuple
+positions) is rejected with `pattern too complex to check for exhaustiveness`
 (§15.3).
 
 ---
@@ -1073,27 +1072,22 @@ work is rejected with `pattern too complex to check for exhaustiveness`
   must have a known type constructor at that point (otherwise: `type annotation
 needed`).
 - Method resolution: for `e.m(...)`, the type constructor of `e` determines the
-  candidate methods. If the type is a struct with a function-typed field named
-  `m`, `e.m(...)` calls the field's value; otherwise an inherent method (declared
-  in the type or an `extend` block) is used; otherwise a trait method (§4.9),
-  which for a type parameter comes from its bounds. Every type also has the
+  candidates, in order: a function-typed struct field `m` (whose value is
+  called), an inherent method (declared in the type or an `extend` block), a
+  trait method (§4.9; for a type parameter, from its bounds), and the
   universal methods `to_str() -> str` (display form) and `debug() -> str`
-  (debug form), unless a trait method of the same name applies.
+  (debug form).
 - Integer and float literals have types `int` and `float` respectively; there
   is no literal polymorphism.
 - At the end of checking a function, every type variable must be resolved,
   except those bound to the function's own type parameters. Unresolved
   variables are errors (`cannot infer type`).
-- Bounds on type parameters are checked at instantiation. Trait bounds are
-  checked once the function's types are inferred: each needs an impl (§4.9),
-  a bound of an enclosing type parameter, or `Self` in a trait.
-- An expression of type `never` fits any expected type (§5.1); inside other
-  types `never` is an ordinary type.
-- Every type, after inference variables are resolved, has at most 10,000
-  components (type constructors and leaves); larger types, which can only
-  arise by doubling (`let b = (a, a)` repeatedly, or similar aliases or
-  generic calls), are rejected with `type too large`. See §15.3 for the other
-  compile-time limits.
+- Bounds on type parameters are checked at instantiation; trait bounds
+  (§4.9) once the function's types are inferred.
+- A type, with inference variables resolved, has at most 10,000 components
+  (type constructors and leaves); larger types, which only arise by repeated
+  doubling (`let b = (a, a)`, or similar aliases or generic calls), are
+  rejected with `type too large`. §15.3 lists the other compile-time limits.
 
 ---
 
@@ -1117,13 +1111,13 @@ evaluated once.
 ### 10.3 Panics
 
 A panic aborts the whole engine run (all tasks) with a runtime error carrying a
-message and a stack trace of `file:line` entries. Panics are raised by: integer
+message and a stack trace of `file:line` entries. Panics are raised by integer
 overflow, division by zero, index/key/slice errors, `panic(msg)`, failed
 `assert`, `unwrap`/`expect` on `None`/`Err`, unreachable code, use of a global
-before initialization, stack overflow, deep nesting during value printing,
-comparison or hashing (beyond 2,000 levels), and waiting on a cancelled task.
-Panics cannot be caught by scripts and do not run deferred expressions
-(§7.1). (The test runner isolates panics per test.)
+before initialization, stack overflow, nesting beyond 2,000 levels while
+printing, comparing or hashing a value, and waiting on a cancelled task.
+Scripts cannot catch panics, and panics do not run deferred expressions
+(§7.1); the test runner isolates panics per test.
 
 ### 10.4 Exit
 
@@ -1150,9 +1144,12 @@ scalar values as one-character strings. Comparison is by bytes.
 
 ### 10.8 Garbage collection
 
-Unreachable heap values are reclaimed by a tracing collector. Collection is
-not observable except through memory limits and the closing of unreachable
-resources (files, sockets) which are closed when collected.
+Unreachable heap values are reclaimed by a tracing collector, observable only
+through memory limits and the closing of unreachable resources (files,
+sockets, HTTP bodies). So that dropped, unclosed resources never make an
+operation fail, collections also run after every 64 resources opened and
+before an operation would fail because the open-resource limit (§15.1) or the
+system's open-file limit is reached.
 
 ### 10.9 Display and debug forms
 
@@ -1218,7 +1215,8 @@ cooperatively with preemption at instruction-count boundaries, so a busy loop in
 one task does not starve others.
 
 When the main module's top-level code finishes, the run ends: unfinished tasks
-are cancelled. If every task is blocked and no I/O or timer is pending, the run
+are cancelled, and their pending defers run until they finish or wait for I/O,
+a timer or another task. If every task is blocked and no I/O or timer is pending, the run
 fails with `deadlock: all tasks are blocked`.
 
 ### 11.2 Tasks
@@ -1235,8 +1233,9 @@ t.cancel()                        // cancels if still running
   with `task cancelled`. Waiting on a task more than once returns the same
   value.
 - Cancelling a task stops it at its next suspension point or instruction
-  boundary; pending I/O is dropped and its pending deferred expressions
-  (§7.1) do not run.
+  boundary and drops its pending I/O; it is done at once (waiting on it
+  panics) and then runs its pending deferred expressions (§7.1). A deferred
+  expression interrupted by the cancellation does not resume.
 - A panic in any task aborts the run (§10.3).
 
 ### 11.3 The `task` module (prelude-visible as `task`)
@@ -1336,8 +1335,6 @@ int) -> str`. `min` and `max` ignore a NaN argument. Parsing: `str.parse_float`
 | `ord() -> int`                                                                     | scalar value of a one-char string (panics otherwise)                                  |
 | `reversed() -> str`                                                                | by scalars                                                                            |
 | `chars_iter() -> Iter<str>`                                                        | lazy iterator over the scalars (§12.13)                                               |
-
-Lists of strings are joined with `[str].join(sep: str = "")`: `xs.join(", ")`.
 
 ### 12.6 `bytes`
 
@@ -1514,43 +1511,49 @@ T?` (`T: Ord`; the first minimal/maximal), `min_by`/`max_by<K: Ord>(key: fn(T)
 - **Single pass.** An iterator is a reference to its state: elements taken
   by any consumer (or by `next()` on any copy of the iterator, including one
   wrapped by an adapter) are gone. Consuming an exhausted iterator yields no
-  elements. Use the list (or call `iter()` again) to iterate twice.
+  elements.
 - **Exhaustion.** The iterators of lists, ranges, maps, sets, strings and
   channels keep returning `None` once they have; `Iter.from_fn` iterators
   return whatever their function returns. Whether an adapter asks an
   exhausted source for more elements (`skip` may) is unspecified.
-- **Mutation.** A list iterator behaves like a `for` loop (§6.9): it visits
-  the indices below the length the list had when `iter()` was called, reading
-  each element when it is reached, and stops early if the list shrinks;
-  elements pushed meanwhile are not visited. The iterators of maps and sets
-  work on a snapshot of the entries taken by `iter()`: inserting, updating,
-  removing or clearing meanwhile changes none of the entries they produce.
-  (Taking the snapshot copies nothing; a change while an iterator is
-  unfinished copies the entries once.) A channel iterator receives live
-  (and suspends while the channel is empty).
+- **Mutation.** A list iterator behaves like a `for` loop (§6.9), with the
+  length taken when `iter()` is called. Map and set iterators work on a
+  snapshot of the entries taken by `iter()`, unaffected by later changes. A
+  channel iterator receives live, suspending while the channel is empty.
 - **Limits.** Iterators are ordinary Sand code: every element costs at least
   one unit of fuel (§15.2), so endless iterators are bounded by the
   instruction, time and memory limits (§15) like any loop.
-- **Performance.** A pipeline written as one expression where it is consumed
-  (`for x in xs.iter().map(f).filter(g) { ... }`, `xs.iter().map(f).sum()`)
-  is compiled to a single loop with the same behavior, so it builds no
-  intermediate lists and costs about as much as the equivalent hand-written
-  loop; so are the eager methods taking a function (`xs.map(f)`). An
-  iterator stored in a variable and consumed later calls a closure per
-  adapter and element.
-- **Cost** _(informative)_. Each adapter adds about one function call per
-  element besides the user function it applies, so eager list methods are
-  usually faster per element; iterators avoid building intermediate lists and
-  can stop early.
+- **Cost** _(informative)_. A pipeline written as one expression where it is
+  consumed (`for x in xs.iter().map(f).filter(g) { ... }`,
+  `xs.iter().map(f).sum()`), like an eager method taking a function
+  (`xs.map(f)`), compiles to a single loop costing about as much as a
+  hand-written one. An iterator stored and consumed later costs about one
+  closure call per adapter and element.
+
+### 12.14 `Close`
+
+```
+pub trait Close {
+    fn close(self)
+}
+impl<T: Close> Close for T?        // closes the value, if any
+impl<T: Close> Close for [T]       // closes the elements, last first
+```
+
+Resources (§7.2) implement `Close`: `fs.File`, `net.Conn`, `net.Listener`,
+`http.Body`, `http.Stream`, `http.Upload`, `http.Reply`, `http.Server` and
+`http.Request`. Closing a
+resource again does nothing; its other operations fail with kind
+`"closed"` once it is closed. A struct holding a resource should implement
+`Close` by closing it (lint `resource-field`, §17.2).
 
 ---
 
 ## 13. Standard library
 
-Each module is imported with `import <name>`. Functions that perform I/O return
-`Result` values with `Error` kinds from §5.4 and are subject to the policy
-(§14). Unless stated, a permission denial produces
-`Err(Error { kind: "permission_denied", ... })`.
+Each module is imported with `import <name>`. I/O functions return `Result`
+values with the `Error` kinds of §5.4 and are subject to the policy (§14);
+unless stated otherwise, a denial is `Err(Error { kind: "permission_denied", ... })`.
 
 ### 13.1 `base64`
 
@@ -1568,16 +1571,14 @@ padding accepted on decode), `encode_str(text: str) -> str`.
 ### 13.3 `fs`
 
 Paths are strings. Relative paths are resolved against the engine's working
-directory (configured by the host; default: the module root).
+directory (set by the host; default: the module root).
 
 | Function                                                                         | Capability                        |
 | -------------------------------------------------------------------------------- | --------------------------------- |
 | `read_text(path) -> Result<str>`                                                 | `FsRead`                          |
 | `read_bytes(path) -> Result<bytes>`                                              | `FsRead`                          |
-| `read_lines(path) -> Result<[str]>`                                              | `FsRead`                          |
 | `write_text(path, text: str) -> Result<()>`                                      | `FsWrite`                         |
 | `write_bytes(path, data: bytes) -> Result<()>`                                   | `FsWrite`                         |
-| `append_text(path, text: str) -> Result<()>`                                     | `FsWrite`                         |
 | `exists(path) -> Result<bool>`                                                   | `FsRead`                          |
 | `is_file(path)`, `is_dir(path) -> Result<bool>`                                  | `FsRead`                          |
 | `list_dir(path) -> Result<[str]>` (sorted names)                                 | `FsRead`                          |
@@ -1586,156 +1587,257 @@ directory (configured by the host; default: the module root).
 | `rename(from, to) -> Result<()>`                                                 | `FsWrite` on both (entries)       |
 | `copy(from, to) -> Result<()>`                                                   | `FsRead` on from, `FsWrite` on to |
 | `metadata(path) -> Result<Metadata>`                                             | `FsRead`                          |
+| `open(path, mode: Mode = Mode.Read) -> Result<File>`                             | by mode, below                    |
 | `join(parts: [str]) -> str`, `basename(p)`, `dirname(p)`, `extension(p) -> str?` | none                              |
 
 `struct Metadata { size: int, is_file: bool, is_dir: bool, modified: time.DateTime? }`.
 
-Paths may use `/` as the separator on every platform (on Windows `\` is also
-a separator). `join` inserts the platform's separator (`\` on Windows) and a
-part that is an absolute path replaces the parts before it; `basename`,
-`dirname` and `extension` are purely lexical. Paths in capabilities and
-prompts are absolute and normalized (§14.1); on Windows they use the plain
-`C:\...` form rather than the `\\?\` form. Permission errors name the path
-as the script spelled it (`permission denied: read data/x.txt`), so that
-they reveal neither symlink targets nor the stored spelling of names the
-script may not access. A path longer than 4096 bytes, or containing a NUL
-character, fails with kind `"invalid"` before anything else is done.
-
-Symbolic links (§14.1):
-
-- Most functions follow symlinks: the path is resolved first and the policy
-  is checked for the resolved location (the link's target), which the
-  operation then accesses **without following any symlink**: it acts in
-  the directory the resolution reached, even if that directory is moved or
-  replaced by a symlink meanwhile. If a symlink replaces the final entry
-  between the check and the operation, or the path leads through a dangling
-  symlink (one whose target, or a directory after it, did not exist when
-  the path was resolved), the operation fails with kind
-  `"permission_denied"`; `exists`, `is_file` and `is_dir` return `false`
-  instead.
-- `remove_file`, `remove_dir` and `rename` act on the directory entry
-  itself: a final symlink is removed or renamed, never its target, and the
-  capability ("entry") is checked for the link's own path (its directory
-  resolved), so no permission for the target is needed.
-- `rename` fails with `"permission_denied"` if a deny rule of the policy
-  protects a path inside the tree being moved or the tree being replaced at
-  `to`; `remove_dir(path, recursive: true)` checks the same for `path`
-  before removing anything, and checks each entry before removing it.
-
-On Windows, a junction counts as a symlink, and file names that Win32
-would alter or treat specially (ending in `.` or a space, containing `:`,
-which names an alternate data stream, or a reserved device name such as
-`CON` or `nul.txt`) fail with kind `"invalid"`.
+`/` is a separator on every platform (on Windows `\` is too). `join` inserts
+the platform's separator, and a part that is an absolute path replaces the
+parts before it; `basename`, `dirname` and `extension` are lexical. A path
+longer than 4096 bytes or containing NUL fails with kind `"invalid"` before
+anything else is done. Capabilities and prompts name paths absolute and
+normalized (§14.1). Permission errors name the path as the script spelled
+it (`permission denied: read data/x.txt`), revealing neither symlink
+targets nor the stored spelling of names the script may not access.
 
 Reading, writing and copying accept regular files only (kind `"invalid"`
 otherwise, e.g. for directories and FIFOs). `copy` copies the contents
-only: a new file gets the default permissions (never the source's execute
-or setuid bits). `create_dir(path, recursive: true)` checks `FsWrite` for
-every directory it creates, not just `path`, and creates none of the
-directories whose existence was assumed when it checked.
+only: the new file gets default permissions, never the source's execute or
+setuid bits. `create_dir(path, recursive: true)` checks `FsWrite` for every
+directory it creates, and creates none that existed when it checked.
 
-Hard links are not symlinks: a hard link to an outside file that someone
-else placed inside an allowed directory is the same file, and accessing it
-is allowed. The engine cannot tell such links apart from ordinary files in
-general; do not allow access to directories that untrusted parties can write
-hard links into.
+Symbolic links (§14.1):
+
+- Most functions follow symlinks: the policy is checked for the resolved
+  location (the link's target), which the operation then accesses
+  **without following any symlink**, in the directory the resolution
+  reached, even if that directory is moved or replaced by a symlink
+  meanwhile. If a symlink replaces the final entry between the check and
+  the operation, or the path leads through a dangling symlink (one whose
+  target, or a directory after it, did not exist when the path was
+  resolved), the operation fails with kind `"permission_denied"`; `exists`,
+  `is_file` and `is_dir` return `false` instead.
+- `remove_file`, `remove_dir` and `rename` act on the entry itself: a final
+  symlink is removed or renamed, never its target, and the capability
+  ("entry") is checked for the link's own path (its directory resolved).
+- `rename` fails with `"permission_denied"` if a deny rule protects a path
+  inside the tree being moved or replaced at `to`; `remove_dir(path,
+recursive: true)` checks the same for `path` before removing anything,
+  and checks each entry before removing it.
+
+On Windows, a junction counts as a symlink, and names that Win32 would
+alter or treat specially (ending in `.` or a space, containing `:`, or a
+reserved device name such as `CON` or `nul.txt`) fail with kind `"invalid"`.
+
+A hard link to an outside file, placed in an allowed directory by someone
+else, is the same file and may be accessed; the engine cannot in general
+tell it from an ordinary file. Do not allow access to directories that
+untrusted parties can write hard links into.
+
+**Open files.** `open` opens a regular file for incremental reading and
+writing, returning a `File` (a resource, §7.2):
+
+```
+pub enum Mode { Read, Write, Append, CreateNew, ReadWrite }
+use f = fs.open("data.csv")?
+while let Some(line) = f.read_line()? { ... }
+```
+
+| Mode        | Opens                                                                 | Capability          |
+| ----------- | --------------------------------------------------------------------- | ------------------- |
+| `Read`      | an existing file, for reading                                         | `FsRead`            |
+| `Write`     | for writing from the start, creating the file or truncating it        | `FsWrite`           |
+| `Append`    | for writing at the end (every write), creating the file if needed     | `FsWrite`           |
+| `CreateNew` | a new file for writing; kind `"already_exists"` if something is there | `FsWrite`           |
+| `ReadWrite` | an existing file, for reading and writing in place                    | `FsRead`, `FsWrite` |
+
+The policy is checked **once**, at `open`. The `File` then stays the file
+that was checked: renaming or removing its path, or putting a symlink in
+its place, does not affect it (a removed file stays readable and writable
+until closed, and in a memory file system counts against its capacity until
+then). It counts against `max_open_resources` until closed or collected.
+
+`File` implements `io.Reader`, `io.Writer` (§13.6) and `Close`. Reads and
+writes move its position (`Append` writes go to the end); reads are
+buffered (16 KiB, counted against `max_memory`), writes are not. `read(max)`
+returns at most 1 MiB; `read_line` fails with kind `"limit"` (dropping what
+it read) if the line does not fit in memory, and `read_all`, before
+reading, if the rest of the file does not. Methods: `seek(pos: int)` (from
+the start; past the end is allowed, and writing there fills the gap with
+zeros), `position() -> Result<int>`, `metadata() -> Result<Metadata>`,
+`set_len(len: int)` (truncates or zero-extends; not in `Read` mode),
+`sync() -> Result<()>` (waits until written data is durable), `path() ->
+str` (as given to `open`). Reading a file not opened for reading, or
+writing one not opened for writing, fails with kind `"invalid"`; any
+operation on a closed file with kind `"closed"`.
 
 **Memory file systems.** An engine may give scripts a memory file system
-instead of the host's (§16.1; always without the `os` feature). The
-functions behave as above, on paths that are absolute from its root `/`
-(the default working directory and module root) and normalized lexically.
-It has no symlinks, hard links or permissions; names are case sensitive on
-every platform. It has a capacity: a write that would exceed it fails with
-kind `"limit"`. Operations complete at once rather than off the VM thread.
+instead of the host's (§16.1; always without the `os` feature). Paths are
+absolute from its root `/` (the default working directory and module root)
+and normalized lexically. It has no symlinks, hard links or permissions,
+names are case sensitive everywhere, and a write that would exceed its
+capacity fails with kind `"limit"`. Operations complete at once rather than
+off the VM thread.
 
 ### 13.4 `help`
 
 `doc<T>(f: T) -> str` (doc comment of a function value, `""` if none),
 `signature<T>(f: T) -> str` (e.g. `fn(text: str) -> Result<Json, Error>`),
-`module(name: str) -> str?` (summary listing of a standard/native module's public
-items with signatures and first doc lines), `modules() -> [str]`.
+`module(name: str) -> str?` (a standard or native module's public items,
+with signatures and first doc lines), `modules() -> [str]`.
 
 ### 13.5 `http`
 
 `http` and `net` (§13.11) need operating-system access: without the `os`
 feature (§16.1) they do not exist, and importing them is a compile error
-saying so. On the web (§16.2), `http` is a client over the browser's
-`fetch` with the same `Response`, `get`, `post` and `request`: `Net(host,
-port)` is decided before anything is sent (as written: the browser resolves
-names, so `NetAddr` is not checked); a response is readable only if its
-site allows it (CORS), with the headers it exposes; the browser sets some
-request headers itself and sends no cookies; redirects are not followed (a
-redirect fails with kind `"http"`, since the browser does not reveal its
-target to the policy); `timeout` covers the whole exchange; there is no
-`serve`.
+saying so.
+
+Headers are lists of `(name, value)` pairs, in order; a header sent several
+times (such as `Set-Cookie`) occurs several times. Names of received
+headers are lower-cased.
 
 ```
-pub struct Response { status: int, headers: [str: str], body: bytes, url: str }
-pub fn get(url: str, headers: [str: str] = [:], timeout: duration = 30s) -> Result<Response>
-pub fn request(method: str, url: str, headers: [str: str] = [:], body: bytes = b"",
+pub struct Response { status: int, headers: [(str, str)], body: bytes, url: str }
+pub fn get(url: str, headers: [(str, str)] = [], timeout: duration = 30s) -> Result<Response>
+pub fn request(method: str, url: str, headers: [(str, str)] = [], body: bytes = b"",
                timeout: duration = 30s, follow_redirects: bool = true) -> Result<Response>
-pub fn post(url: str, body: bytes, headers: [str: str] = [:], timeout: duration = 30s) -> Result<Response>
+pub fn post(url: str, body: bytes, headers: [(str, str)] = [], timeout: duration = 30s) -> Result<Response>
+pub fn open(method: str, url: str, headers: [(str, str)] = [], body: bytes = b"",
+            timeout: duration = 30s, follow_redirects: bool = true) -> Result<Stream>
+pub struct Stream { status: int, headers: [(str, str)], body: Body, url: str }
+pub fn upload(method: str, url: str, headers: [(str, str)] = [], timeout: duration = 30s) -> Result<Upload>
+upload.finish() -> Result<Stream>
 ```
 
-Response methods: `text() -> Result<str>`, `json() -> Result<json.Json>`,
-`ok() -> bool` (200..=299), `header(name: str) -> str?` (case-insensitive).
-Header names in `headers` are lower-cased. HTTP/1.1 over TCP; `https` URLs use
-TLS when the engine is built with the `tls` feature (as `sand` is). Redirects
-(301, 302, 303, 307, 308) are followed up to 10 times; each hop is checked
-against the policy. Responses with `Content-Length`, chunked encoding, or
-read-until-close bodies are supported; bodies larger than the
-`max_http_body` limit fail with kind `"limit"`. Non-2xx statuses are **not**
-errors. Capability: `Net(host:port)`, then `NetAddr` for the resolved
-addresses (§14.6), for every hop.
+`get`, `post` and `request` read the whole response. Response methods:
+`text() -> Result<str>`, `json() -> Result<json.Json>`, `ok() -> bool`
+(200..=299), `header(name: str) -> str?` (case-insensitive; the first value),
+`header_values(name: str) -> [str]`. HTTP/1.1 over TCP; `https` uses TLS
+with the `tls` feature (as in `sand`). Up to 10 redirects (301, 302, 303,
+307, 308) are followed. Bodies may be delimited by `Content-Length`,
+chunked encoding or connection close; one larger than `max_http_body` fails
+with kind `"limit"`. Non-2xx statuses are **not** errors. At every hop,
+`timeout` bounds connecting and receiving the head (then each wait for body
+data), and the capabilities `Net(host:port)`, then `NetAddr` for the
+resolved addresses (§14.6), are checked.
+
+`open` returns once the response's head has arrived. Its `body`, an
+`http.Body` (an `io.Reader`), is read as it arrives, so a body larger than
+memory can be processed a chunk at a time (`io.copy(resp.body, file)`);
+`max_http_body` applies only to its `read_all` and `read_text`. `Stream`
+has `ok`, `header` and `header_values`, and implements `Close` (closing its
+body). A body holds its connection, counted against `max_open_resources`,
+until it is read to its end (closing the connection), closed, or collected.
+
+`upload` connects and returns an `Upload`, an `io.Writer` for the request's
+body: chunked, or exactly as long as a `content-length` in `headers` (a
+write past it, or a `finish` short of it, fails with kind `"invalid"`).
+`finish` ends the body and waits for the response's head; the response's
+body is read from the upload's connection, which closing the `Upload`
+closes. `timeout` bounds connecting and waiting for the head. Redirects are
+not followed.
 
 Server:
 
 ```
 pub fn serve(addr: str) -> Result<Server>        // capability NetListen(addr)
-pub struct Server { listener: net.Listener, pending: PendingRequests }
 server.accept() -> Result<Request>
 server.addr() -> str
-server.close()
-pub struct Request { method: str, path: str, query: str, headers: [str: str], body: bytes, conn: net.Conn }
-request.respond(status: int, body: bytes, headers: [str: str] = [:]) -> Result<()>
+pub struct Request { method: str, path: str, query: str, headers: [(str, str)], body: Body, conn: net.Conn }
+request.respond(status: int, body: bytes, headers: [(str, str)] = []) -> Result<()>
+request.respond_stream(status: int, headers: [(str, str)] = []) -> Result<Reply>
+reply.finish() -> Result<()>
+request.bytes() -> Result<bytes>
 request.text() -> Result<str>
 request.json() -> Result<json.Json>
-request.header(name: str) -> str?                 // case-insensitive
+request.header(name: str) -> str?                 // case-insensitive; the first value
+request.header_values(name: str) -> [str]
 ```
 
-Each connection carries one request (no keep-alive). While `accept` waits,
-it accepts connections and reads their requests concurrently (up to 64
-connections at a time, and at most half of the sockets `max_open_resources`
-still allows), returning the first request that is complete, so idle or
-slow clients do not delay others. Connections whose requests are being read
-count against `max_open_resources`; reading continues with the next
-`accept` call, and `close` closes them. `accept` answers connections that
-do not deliver a valid request — malformed, not complete within 30 seconds
-of being accepted, or with a body larger than `max_http_body` — with
-`400 Bad Request` and closes them. `pending` (of a private type) holds the
-connections being read; a `Server` is only obtained from `serve`. `path` and `query`
-are the parts of the request target before and after `?`; header names are
-lower-cased.
+`Server` and `Request` implement `Close` (`Server.close` stops accepting
+and closes the connections being read; `Request.close` closes the
+request's body and connection). Each connection carries one request (no
+keep-alive). `accept` returns a request once its **head** has arrived;
+`path` and `query` are the parts of the target before and after `?`. The
+handler reads the body (`request.body`, or `bytes`, `text`, `json`, which
+read the rest of it, at most `max_http_body` bytes), each wait bounded by
+30 seconds. A client that sent `Expect: 100-continue` is answered `100
+Continue` when the handler starts reading the body.
 
-`conn` is the client connection the request arrived on (fields of public
-types are public, §3.3). `respond` writes a response with `content-length`
-and `connection: close` headers (and no body for `HEAD` requests or statuses
-without one) to `conn` and then closes it; a script may instead write to
-`conn` itself, e.g. to stream a response, in which case it produces the
-HTTP framing and closes the connection. Constructing a `Request` value
-directly is allowed but has no special meaning.
+`conn` is the client connection (fields of public types are public, §3.3).
+The body is read from it; `conn` may be used between reads of the body
+(reading `conn` reads past what the body has read), and closing the
+connection or the request ends the body. `respond` writes a response with
+`content-length` and `connection: close` headers (and no body for `HEAD`
+requests or statuses without one) to `conn`, then closes the request.
+`respond_stream` returns a `Reply`, an `io.Writer` for a body framed as an
+upload's is; the head is sent with the first write or `finish`, and closing
+the reply finishes it. A script may also write to `conn` directly,
+producing the HTTP framing itself. Constructing a
+`Request` value directly has no special meaning.
+
+While `accept` waits, it accepts connections and reads their heads
+concurrently, returning the first that is complete; reading continues with
+the next `accept`. A `Server` (opaque) counts against `max_open_resources`
+like a listener, as does each connection being read, which on acceptance
+takes a slot and an 8 KiB read buffer (counted against `max_memory`);
+while no slot is free, connections wait in the listener's backlog. At most
+half of `max_open_resources` connections are read at once: beyond that,
+the earliest accepted is answered `408 Request Timeout` and closed. A
+connection is also answered and closed with `408` if its head is not
+complete within 30 seconds of acceptance, `400 Bad Request` if the head is
+malformed, and `503 Service Unavailable` if its buffer does not fit in
+memory.
+
+On the web (§16.2), `http` is a client over the browser's `fetch` with the
+same `Response`, `Stream`, `get`, `post`, `request` and `open`, and no
+`upload` or `serve`. `Net(host, port)` is decided for the host as written before
+anything is sent; the browser resolves names, so `NetAddr` is not checked.
+A response is readable only if its site allows it (CORS), with the headers
+it exposes. The browser sets some request headers itself and sends no
+cookies. A redirect fails with kind `"http"`, since the browser hides its
+target from the policy. `timeout` covers the whole exchange, and every body
+is read whole, so `max_http_body` also applies to `open`.
 
 ### 13.6 `io`
 
-`read_line() -> Result<str?>` (stdin, without the line terminator; `None` at
-EOF; capability `Stdin`), `read_all() -> Result<str>` (`Stdin`), `write(s: str)`
-(stdout, no newline), `ewrite(s: str)` (stderr), `flush()`.
+Files (§13.3), connections (§13.11), HTTP bodies (§13.5) and the standard
+streams implement two traits:
 
-The CLI's standard output is buffered like C's stdio: by line on a
-terminal, in blocks otherwise. It is flushed by `flush()`, at the end of the
+```
+pub trait Reader {
+    fn read(self, max: int = 65536) -> Result<bytes>  // at most max bytes, waiting until some are available; empty at the end
+    fn read_line(self) -> Result<str?>                // without its \n or \r\n; None at the end; kind "invalid" if not UTF-8
+    fn read_all(self) -> Result<bytes>                // the rest
+    fn read_text(self) -> Result<str>                 // the rest as UTF-8 (kind "invalid" otherwise)
+    fn lines(self) -> Iter<Result<str>>               // the remaining lines, read lazily; an error ends them
+}
+pub trait Writer {
+    fn write(self, data: bytes) -> Result<()>         // all of data
+    fn write_str(self, text: str) -> Result<()>       // all of text, as UTF-8
+    fn flush(self) -> Result<()>                      // what the writer buffers, if anything
+}
+pub fn copy<R: Reader, W: Writer>(src: R, dst: W) -> Result<int>   // the bytes copied, a chunk at a time
+pub let stdin: Stdin                                  // a Reader
+pub let stdout: Stdout                                // a Writer
+pub let stderr: Stderr                                // a Writer
+```
+
+`read` may return fewer bytes than are left. `read_text`, `lines`,
+`write_str` and `flush` have default implementations; user types may
+implement the traits.
+
+Reading `stdin` needs the capability `Stdin`; writing `stdout` and `stderr`
+needs `Stdout` and `Stderr`, allowed unless the policy denies them. A
+denied write fails with kind `"permission_denied"` (`print` and `eprint`,
+§12.1, panic). The output limit applies (§15.1).
+
+The CLI buffers standard output like C's stdio (by line on a terminal, in
+blocks otherwise) and flushes it on `io.stdout.flush()`, at the end of the
 run, before writing to standard error, before a permission prompt, whenever
-every task is waiting (for I/O, a timer, ...), and, on a terminal, before
-reading standard input. Standard error is not buffered.
+every task is waiting, and, on a terminal, before reading standard input.
+Standard error is not buffered.
 
 ### 13.7 `env`
 
@@ -1759,36 +1861,31 @@ values only), `as_bool() -> bool?`, `as_list() -> [Json]?`,
 `as_map() -> [str: Json]?`, `is_null() -> bool`, `path(p: str) -> Json?`
 (dot-separated keys and indices: `"items.0.name"`).
 
-JSON text embedded in source may be an ordinary string
-(`json.parse("{\"a\": 1}")`) or, to avoid escaping its quotes, a raw string
-(`json.parse(r#"{"a": 1}"#)`).
-
 `encode` emits compact JSON for `indent == 0`, otherwise pretty-prints with
 `indent` spaces. Object keys keep insertion order. Non-finite numbers encode as
 `null`. Integral floats within ±2^53 print without a fraction (`1.0` → `1`).
 
 `encode`/`to_json` map values structurally: `int`/`float` → number, `str` →
-string, `bool`, `()` → `null`, lists/sets/tuples → arrays, maps with `str` keys →
-objects (other keys are converted with `to_str`), structs → objects keyed by
-field name, `Option`: `None` → `null`, `Some(x)` → `x`; other enums: a
-payload-less variant → `"Variant"`, otherwise `{"Variant": [payload...]}` (or an
-object for named payloads); `bytes` → base64 string; `duration` → nanoseconds;
-`Json` values as themselves.
+string, `bool`, `()` → `null`, lists/sets/tuples → arrays, maps → objects
+(non-`str` keys converted with `to_str`), structs → objects keyed by field
+name, `None` → `null`, `Some(x)` → `x`; other enums: a payload-less variant
+→ `"Variant"`, otherwise `{"Variant": [payload...]}` (an object for named
+payloads); `bytes` → base64 string; `duration` → nanoseconds; `Json` →
+itself.
 
-`decode<T>` is the inverse for types built from those components: struct fields
-missing from the object take their default value if one is declared and it is a
-constant expression (a literal, `[]`, `[:]` or `None`), otherwise
-`None` for option-typed fields, otherwise decoding fails with kind `"parse"`
-and a message naming the path (e.g. `$.items[2].name: expected str`).
-Parsing is limited to a nesting depth of 512.
+`decode<T>` is the inverse for types built from those components. A struct
+field missing from the object takes its declared default if that is a
+constant expression (a literal, `[]`, `[:]` or `None`), else `None` if
+optional; otherwise decoding fails with kind `"parse"` and a message naming
+the path (e.g. `$.items[2].name: expected str`). Parsing is limited to a
+nesting depth of 512.
 
 ### 13.9 `log`
 
 `debug(msg: str)`, `info(msg: str)`, `warn(msg: str)`, `error(msg: str)`;
 each accepts `fields: [str: str] = [:]`. `set_level(level: str)` with `"debug"`,
 `"info"` (default), `"warn"`, `"error"`, `"off"`. Records go to the host log sink
-(default: stderr as `LEVEL message key=value ...`). Capability `Stderr` with the
-default sink.
+(default: stderr as `LEVEL message key=value ...`, needing capability `Stderr`).
 
 ### 13.10 `math`
 
@@ -1805,33 +1902,33 @@ Rounding, `abs`, `min`, `max`, `clamp`, `sqrt` and `pow` are methods of
 
 ```
 pub native fn listen(addr: str) -> Result<Listener>    // NetListen(addr)
-pub native fn connect(addr: str, timeout: duration = 30s) -> Result<Conn>  // Net(host:port)
+pub native fn connect(addr: str, timeout: duration = 30s) -> Result<Conn>      // Net(host:port)
+pub native fn connect_tls(addr: str, timeout: duration = 30s) -> Result<Conn>  // Net(host:port); feature tls
 listener.accept() -> Result<Conn>
 listener.addr() -> str
-listener.close()
-conn.read(max: int = 65536) -> Result<bytes>     // at most 8 KiB (its buffer); empty bytes at EOF
-conn.read_line() -> Result<str?>                 // None at EOF; strips \n / \r\n
-conn.write(data: bytes) -> Result<()>
-conn.write_str(text: str) -> Result<()>
 conn.peer_addr() -> str
-conn.close()
 ```
 
+`Listener` implements `Close`; `Conn` implements `io.Reader`, `io.Writer`
+(§13.6) and `Close`. A connection's `read` returns at most what its 8 KiB
+buffer holds; once the peer has finished sending, `read` keeps returning
+empty bytes, `read_line` `None`, and `read_all` what was left. Closing a
+listener or connection makes its pending and later operations fail with
+kind `"closed"`. Different tasks may read and write the same connection.
 Connections are made only to resolved addresses the policy allows (§14.6).
-Reading and writing on the same connection from different tasks is allowed.
-Listeners and connections count against `max_open_resources` until they are
-closed (or collected), and so do sockets of operations still in progress:
-connections being established, pending `accept` calls and HTTP requests in
-flight; when the limit is reached, such operations fail with kind `"limit"`.
-Once the peer has finished sending, `read` keeps returning empty bytes and
-`read_line` keeps returning `None`.
-TLS client connections: `net.connect_tls(host: str, port: int, timeout:
-duration = 30s) -> Result<Conn>` (feature `tls`); `timeout` bounds
-connecting and the TLS handshake together (kind `"timeout"`). The server certificate is verified for `host`
-against the bundled web PKI roots plus any roots the host added
-(`Config::tls_root_certificates`, §16); a verification or handshake failure
-is an error (kind `"invalid"` for certificate problems), never a panic. The
-same applies to `https` requests.
+
+Listeners, connections and the sockets of operations in progress
+(connections being established, pending `accept` calls, HTTP requests in
+flight) count against `max_open_resources` until closed or collected; at
+the limit (after a collection, §10.8), such operations fail with kind
+`"limit"`.
+
+`connect_tls`'s `timeout` bounds connecting and the TLS handshake together
+(kind `"timeout"`). The server certificate is verified for `host` against
+the bundled web PKI roots plus any the host added
+(`Config::tls_root_certificates`, §16). Verification and handshake failures
+are errors (kind `"invalid"` for certificate problems), never panics; the
+same holds for `https` requests.
 
 ### 13.12 `random`
 
@@ -1840,8 +1937,8 @@ sets a seed. `int(lo: int, hi: int) -> int` (uniform in `lo..hi`; panics if
 empty), `float() -> float` (`[0, 1)`), `bool() -> bool`,
 `choice<T>(xs: [T]) -> T?`, `shuffle<T>(xs: [T])`, `sample<T>(xs: [T], k: int)
 -> [T]`, `bytes(n: int) -> bytes`, `seed(s: int)`, `normal(mean: float = 0.0,
-stdev: float = 1.0) -> float`. `random.Rng`: `random.rng(seed: int) -> Rng` with
-the same methods (except `seed`), independent of the engine PRNG.
+stdev: float = 1.0) -> float`. `random.rng(seed: int) -> Rng` returns a
+generator independent of the engine's, with the same methods except `seed`.
 
 ### 13.13 `regex`
 
@@ -1862,18 +1959,15 @@ struct Captures { text: str, spans: [int], regex: Regex }
 Captures: get(i: int) -> Match?, name(n: str) -> Match?, len() -> int, text(i: int) -> str?
 ```
 
-`Captures` holds the text searched and the start and end offsets of every
-group (`-1` for a group that did not participate); its methods slice the
-text, so capturing copies no group text up front.
-Syntax is that of the Rust `regex` crate (linear-time, no backreferences).
-Patterns that contain backslashes are best written as raw strings
-(`r"\d{4}-\d{2}"`), since `\d` is an invalid escape in an ordinary string;
-braces need no care (`"[0-9]{4}"`, §2.5).
-Compiled programs are limited in size (each automaton to a few MiB; larger
-patterns, such as `\w{150}`, fail with kind `"limit"`). A compiled regex
-counts against `max_memory` with the memory of its automata and of its search
-cache, which grows as it is used (up to a few MiB), so a script cannot hold
-more compiled regexes than the limit allows.
+`Captures` holds the searched text and each group's start and end offsets
+(`-1` for a group that did not participate); its methods slice the text.
+Syntax is that of the Rust `regex` crate (linear-time, no backreferences);
+patterns with backslashes are best written as raw strings (`r"\d{4}"`),
+since `\d` is an invalid escape in an ordinary string; braces need no care
+(`"[0-9]{4}"`, §2.5). Each compiled
+automaton is limited to a few MiB (larger patterns, such as `\w{150}`, fail
+with kind `"limit"`). A compiled regex counts against `max_memory` with its
+automata and its search cache, which grows with use up to a few MiB.
 
 ### 13.14 `statistics`
 
@@ -1892,12 +1986,11 @@ empty input (variance/stdev need at least two values). Also `mean_int([int])
 `assert_close(a: float, b: float, tol: float = 1e-9)`,
 `assert_err<T, E>(r: Result<T, E>)`, `assert_ok`, `fail(msg: str) -> never`,
 `property<T>(name: str, gen: fn(random.Rng) -> T, prop: fn(T) -> bool,
-cases: int = 100, seed: int = 20240611)` (runs `prop` on `cases` values produced by
-`gen` from a `random.Rng` seeded with `seed`; on failure panics with the
-failing input's debug form). The default seed is fixed, so property tests are
-deterministic and failures reproducible; pass a different `seed` (for example
-one derived from `random.int`) to explore other inputs. Failure messages for `assert_eq` have the form
-`assertion failed: left == right\n  left: <debug>\n right: <debug>`.
+cases: int = 100, seed: int = 20240611)` (runs `prop` on `cases` values
+`gen` produces from a `random.Rng` seeded with `seed`; on failure panics
+with the failing input's debug form). The fixed default seed makes property
+tests reproducible; pass another `seed` to explore other inputs. `assert_eq`
+fails with `assertion failed: left == right\n  left: <debug>\n right: <debug>`.
 
 ### 13.16 `time`
 
@@ -1963,32 +2056,29 @@ forms; returns lower-case hyphenated), `is_valid(s: str) -> bool`,
   engine's policy **before** the effect occurs.
 - The VM has no FFI, does not spawn processes, does not use IPC, shared memory
   or `mmap`, and never executes generated machine code.
-- Paths are normalized lexically (`.`/`..` resolved) and then resolved the
-  way `realpath` resolves the longest prefix that exists: symlinks are
-  followed (`..` in a symlink's target is the parent of the directory the
-  link is in), and the result is checked, so a script cannot escape an
-  allowed directory via `..` or symlinks. A symlink whose target does not
-  resolve is not followed (§13.3). On the host this is one walk from the
-  root that opens each directory without following symlinks (reading each
-  symlink it meets and continuing with its target) and keeps the
-  directories open; the access then acts relative to the directory that
-  holds the final entry, without following a final symlink, so a symlink
-  swapped into the path after the check cannot redirect it (§13.3). On
-  macOS, existing directories and entries are named as stored (volumes
-  are usually case-insensitive and always normalization-insensitive) and
-  by their usual paths rather than through a firmlink
-  (`/System/Volumes/Data/Users/...` is `/Users/...`); on Linux and other
-  Unix systems names are kept as given, like `realpath`. On Windows,
-  paths are canonicalised first, and then every component is opened
-  relative to its parent directory's handle without following symlinks
-  or junctions; `rename` is path-based there, but holds every directory on
-  both paths open (so that none can be renamed or replaced) and checks that
-  it is the directory the no-follow walk finds, leaving only a narrow race
-  in which the parent directory of an entry is emptied and turned into a
-  junction while the rename runs. On Windows, paths are compared
-  case-insensitively and use the plain `C:\...` / `\\server\share\...`
-  form (not `\\?\...`). Paths of a memory file system (§16.1), which has no
-  symlinks, are normalized lexically.
+- Paths are normalized lexically (`.`/`..` resolved), then resolved like
+  `realpath` resolves the longest existing prefix (symlinks followed; `..`
+  in a link's target is the parent of the link's directory), and the result
+  is checked, so `..` and symlinks cannot escape an allowed directory. A
+  symlink whose target does not resolve is not followed (§13.3). Memory
+  file system paths (§16.1) are only normalized lexically.
+
+On the host, resolution is one walk from the root that opens each directory
+without following symlinks (reading each symlink and continuing with its
+target) and keeps the directories open; the access then acts relative to
+the directory holding the final entry, without following a final symlink,
+so a symlink swapped in after the check cannot redirect it. On macOS,
+existing entries are named as stored (volumes are usually case-insensitive
+and always normalization-insensitive) and without firmlinks
+(`/System/Volumes/Data/Users/...` is `/Users/...`); on other Unix systems
+names are kept as given. On Windows, paths are canonicalized, then each
+component is opened relative to its parent's handle without following
+symlinks or junctions; paths compare case-insensitively and use the plain
+`C:\...` / `\\server\share\...` form (not `\\?\...`). `rename` is
+path-based there, but holds every directory on both paths open and checks
+each is the one the no-follow walk finds, leaving only a narrow race in
+which an entry's parent is emptied and turned into a junction during the
+rename.
 
 ### 14.2 Capabilities
 
@@ -2006,33 +2096,29 @@ forms; returns lower-case hyphenated), `is_valid(s: str) -> bool`,
 
 ### 14.3 Decisions
 
-A policy maps a request to `Allow`, `Deny` or `Prompt`. On `Prompt` the engine
-calls the host's prompter, suspending **all** script execution until it
-answers `AllowOnce`, `AllowAlways`, `DenyOnce` or `DenyAlways`. "Always" answers
-are remembered for the identical request for the lifetime of the engine (across
-all its runs and compilations); "once" answers apply to the single request
-only: a library function that needs several capabilities (`fs.copy`) is
-retried after each prompt, and the "once" answers given meanwhile apply to
-that call alone, never to a later one. If no prompter is configured,
-`Prompt` behaves as `Deny`.
+A policy maps a request to `Allow`, `Deny` or `Prompt`. On `Prompt` the
+engine suspends **all** script execution and calls the host's prompter,
+which answers `AllowOnce`, `AllowAlways`, `DenyOnce` or `DenyAlways`;
+without a prompter, `Prompt` is `Deny`. "Always" answers are remembered for
+the identical request for the engine's lifetime (across all its runs and
+compilations). "Once" answers apply to the single request: a library
+function needing several capabilities (`fs.copy`) is retried after each
+prompt, and "once" answers given meanwhile apply to that call alone.
 
-A `RulePolicy` denies `Import(path)` when a read deny rule covers `path`
-(importing reads the module), and otherwise allows it unless `allow_import`
-rules restrict imports to other directories.
-
-`Import` requests are decided while the program is compiled (also by `check`
-and `lint`), one per script module, depth-first in import order, with the
-module's resolved absolute path. A module imported by several modules is
-requested once.
+`Import` requests are decided during compilation (also by `check` and
+`lint`), once per script module, depth-first in import order, with the
+module's resolved absolute path. A `RulePolicy` denies `Import(path)` when
+a read deny rule covers `path`, and otherwise allows it unless
+`allow_import` rules restrict imports to other directories.
 
 ### 14.4 Effects of a denial
 
 - I/O functions return `Err` with kind `"permission_denied"`.
-- The environment treats a denied variable as unset, so that a script
-  cannot tell which variables exist: `env.get` returns `None`, and
-  `env.vars` an empty map when `Env("*")` is denied.
-- `print`, `eprint` and `io.write` panic with `permission denied: stdout` /
-  `stderr`.
+- A denied environment variable is treated as unset, so a script cannot
+  tell which exist: `env.get` returns `None`, and `env.vars` an empty map
+  when `Env("*")` is denied.
+- `print` and `eprint` panic with `permission denied: stdout` / `stderr`;
+  writes to `io.stdout` and `io.stderr` fail with kind `"permission_denied"`.
 - A denied `Import` is a compile-time error. Compilation stops there, so no
   further imports are requested.
 
@@ -2040,46 +2126,43 @@ requested once.
 
 - `Policy::deny_all()` — everything denied except `Stdout` and `Stderr`.
 - `Policy::allow_all()` — everything allowed (for trusted scripts).
-- `RulePolicy` — a rule list: allowed/denied read paths, write paths, network
-  destinations, listen addresses, environment variable names, streams,
-  imports, and a fallback decision for unmatched requests (`Deny` or
-  `Prompt`). Deny rules take precedence over allow rules. Network patterns
-  are `host`, `*.example.com` (strict subdomains), `*`, an IP address
-  (`127.0.0.1`, `::1`) or a CIDR range (`10.0.0.0/8`, `fc00::/7`), each
-  optionally followed by a port (`host:443`, `[::1]:8080`,
-  `10.0.0.0/8:443`, `[fc00::/7]:443`). Host names are ASCII and compared
-  case-insensitively, ignoring a trailing dot. IP and range patterns match IP
-  literals used by scripts and resolved addresses (§14.6); IPv4-mapped IPv6
-  addresses are compared as IPv4. IP and range deny patterns also match
-  other spellings of the addresses they cover: the unspecified address
-  (`0.0.0.0`, `::`, which connect to the local host) is matched as
-  `127.0.0.1` and `::1`, and IPv6 addresses embedding an IPv4 address
-  (IPv4-compatible, IPv4-translated, NAT64 `64:ff9b::/96`, 6to4
-  `2002::/16`) also as that address. A malformed pattern matches nothing
-  (`policy::is_valid_net_pattern` checks one; the CLI rejects them).
-  `deny_private_networks()` additionally denies private and internal
-  destinations (§14.6). A path deny rule also protects the directories
-  containing it from being renamed, replaced or recursively removed as a
-  whole (`Policy::denies_under`); custom policies are only asked about the
-  top-level paths of such operations. Path rules are compared after
-  normalization (§14.1), which on macOS names existing files and
-  directories with their stored spelling (on case- or
-  normalization-insensitive file systems `data/ſecrets` or `data/SECRETS`
-  may name `data/secrets`). For operations on an entry itself (below), a
-  final symlink is named with its stored spelling on every platform. Where
-  the stored name of a final entry cannot be had from the system (a
-  symlink outside macOS, a device, a file that cannot be opened), it is
-  looked up in its directory; in a directory of more than 4096 entries it
-  keeps the spelling it was given. Allow rules
-  compare paths exactly (ignoring case on Windows). Deny rules, on every
-  platform, compare paths caselessly and normalization-insensitively
-  (canonical decomposition, full case folding, default-ignorable characters
-  removed), so a deny rule also covers other spellings of a path, including
-  a not-yet-existing one (`data/ſecrets`, `café` with a precomposed or a
-  combining accent). This only ever denies more.
+- `RulePolicy` — allow and deny rules for read paths, write paths, network
+  destinations, listen addresses, environment variable names, streams and
+  imports, plus a fallback (`Deny` or `Prompt`) for unmatched requests.
+  Deny rules win over allow rules. `deny_private_networks()` additionally
+  denies private and internal destinations (§14.6).
 - For operations on a directory entry itself (§13.3), the engine uses
   `Policy::check_entry`, which for a `RulePolicy` does not resolve a final
-  symlink in the path; `Policy::check` always resolves it.
+  symlink; `Policy::check` always resolves it.
+
+Network patterns are `host`, `*.example.com` (strict subdomains), `*`, an
+IP address (`127.0.0.1`, `::1`) or a CIDR range (`10.0.0.0/8`, `fc00::/7`),
+optionally followed by a port (`host:443`, `[::1]:8080`, `10.0.0.0/8:443`,
+`[fc00::/7]:443`). Host names are ASCII, compared case-insensitively,
+ignoring a trailing dot. IP and range patterns match IP literals and
+resolved addresses (§14.6); IPv4-mapped IPv6 addresses compare as IPv4. IP
+and range deny patterns also match other spellings of their addresses: the
+unspecified address (`0.0.0.0`, `::`) as `127.0.0.1` and `::1`, and IPv6
+addresses embedding an IPv4 address (IPv4-compatible, IPv4-translated,
+NAT64 `64:ff9b::/96`, 6to4 `2002::/16`) as that address. A malformed
+pattern matches nothing (`policy::is_valid_net_pattern` checks one; the CLI
+rejects them).
+
+Path rules are compared after normalization (§14.1). Allow rules compare
+paths exactly (ignoring case on Windows). Deny rules, on every platform,
+compare caselessly and normalization-insensitively (canonical
+decomposition, full case folding, default-ignorable characters removed), so
+they also cover other spellings, including of paths that do not exist yet
+(`data/ſecrets`, `café` precomposed or with a combining accent). On macOS,
+existing files are named with their stored spelling, so on insensitive file
+systems `data/SECRETS` may name `data/secrets`. For operations on an entry
+itself, a final symlink is named with its stored spelling on every
+platform; where the system cannot give a final entry's stored name (a
+symlink outside macOS, a device, a file that cannot be opened), it is
+looked up in its directory, unless that holds more than 4096 entries. A
+deny rule also protects the directories containing it from being renamed,
+replaced or recursively removed as a whole (`Policy::denies_under`); custom
+policies are asked only about the top-level paths of such operations.
 
 ### 14.6 Network destinations
 
@@ -2088,18 +2171,18 @@ request and redirect hop) is checked in two stages:
 
 1. `Net(host, port)` for the host name or IP literal the script used. This
    request may be prompted.
-2. The name is resolved **once**. Each resolved address is checked as
-   `NetAddr(host, addr)`; the connection is then attempted only to the
-   allowed addresses, in resolver order, and the name is never resolved
-   again. (An IP literal "resolves" to itself.) If every address is denied,
-   the operation fails with kind `"permission_denied"` and a message naming
-   the address. `NetAddr` requests are never prompted: a `Prompt` decision
-   counts as `Allow`, since the user already decided the `Net` request.
+2. The name is resolved **once** (an IP literal to itself), and each
+   address is checked as `NetAddr(host, addr)`; the connection is attempted
+   only to the allowed addresses, in resolver order. If all are denied, the
+   operation fails with kind `"permission_denied"` naming the address.
+   `NetAddr` is never prompted: `Prompt` counts as `Allow`, since the user
+   already decided the `Net` request.
 
 `Policy::AllowAll` allows and `Policy::DenyAll` denies `NetAddr`; custom
 policies are called with it (and can use `sandlang::policy::is_private_address`).
-A `RulePolicy` denies a resolved address that matches an IP or range
-`deny_net` pattern. With `deny_private_networks()` it also treats as
+A `RulePolicy` denies an address matching an IP or range `deny_net`
+pattern, and otherwise allows it unless `deny_private_networks()` is set
+(as the `sand` command line does by default, §17.5). That treats as
 internal every address that is not public unicast — unspecified,
 `0.0.0.0/8`, loopback, RFC 1918, shared/CGNAT `100.64.0.0/10`, link-local
 (`169.254.0.0/16`, `fe80::/10`), unique-local `fc00::/7`, site-local,
@@ -2114,18 +2197,13 @@ and then:
 - an internal address reached by resolving any other name is denied unless
   an IP or range `allow_net` pattern matches it.
 
-Without `deny_private_networks()`, a `RulePolicy` allows every resolved
-address not matched by a deny range. The `sand` command line enables it by
-default (§17.5).
-
 ### 14.7 Policy files
 
-A policy and limits can be written as text, a **policy file**: `sand run
---policy=FILE` (§17.5) reads one, and hosts can parse them with
-`sandlang::policy::PolicyFile::parse(text, base)` (the playground's policy
-editor is one). Each line is a rule; `#` starts a comment; words are
-separated by spaces or commas, and a word may be double-quoted to contain
-them (`"/my data"`, with `\"` and `\\` escapes).
+A **policy file** writes a policy and limits as text. `sand run
+--policy=FILE` (§17.5) reads one; hosts parse them with
+`sandlang::policy::PolicyFile::parse(text, base)`. Each line is a rule; `#`
+starts a comment; words are separated by spaces or commas, and may be
+double-quoted to contain them (`"/my data"`, with `\"` and `\\` escapes).
 
 ```
 # Read the data, write the report, and nothing else.
@@ -2139,25 +2217,25 @@ limit memory 64M
 limit time 10s
 ```
 
-| Rule                                                | Meaning                                                   |
-| --------------------------------------------------- | --------------------------------------------------------- |
-| `allow read PATH...`, `deny read PATH...`           | `FsRead` under the paths (§14.5)                          |
-| `allow write PATH...`, `deny write PATH...`         | `FsWrite` (and, for `allow`, `FsRead`) under the paths    |
-| `allow import PATH...`, `deny import PATH...`       | restrict script imports to (or keep them from) these directories |
-| `allow net PATTERN...`, `deny net PATTERN...`       | network destinations (§14.5 patterns)                     |
-| `allow private-net`                                 | do not deny private and internal destinations (§14.6)     |
-| `allow listen ADDR...`, `deny listen ADDR...`       | listening addresses (`host:port`, port `0` = any)         |
-| `allow env NAME...`, `deny env NAME...`             | environment variables (`*`: all; listing all variables is denied while any is) |
-| `allow stdin`, `deny stdin`, `deny stdout`, `deny stderr` | standard streams                                    |
-| `allow custom NAME [DETAIL]`, `deny custom NAME [DETAIL]` | a host-defined capability (any detail if omitted)   |
-| `default deny` \| `default prompt` \| `default allow` | the decision for requests no rule decides (once per file) |
-| `limit NAME VALUE`                                  | a limit (§15.1), below                                    |
+| Rule                                                      | Meaning                                                                        |
+| --------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `allow read PATH...`, `deny read PATH...`                 | `FsRead` under the paths (§14.5)                                               |
+| `allow write PATH...`, `deny write PATH...`               | `FsWrite` (and, for `allow`, `FsRead`) under the paths                         |
+| `allow import PATH...`, `deny import PATH...`             | restrict script imports to (or keep them from) these directories               |
+| `allow net PATTERN...`, `deny net PATTERN...`             | network destinations (§14.5 patterns)                                          |
+| `allow private-net`                                       | do not deny private and internal destinations (§14.6)                          |
+| `allow listen ADDR...`, `deny listen ADDR...`             | listening addresses (`host:port`, port `0` = any)                              |
+| `allow env NAME...`, `deny env NAME...`                   | environment variables (`*`: all; listing all variables is denied while any is) |
+| `allow stdin`, `deny stdin`, `deny stdout`, `deny stderr` | standard streams                                                               |
+| `allow custom NAME [DETAIL]`, `deny custom NAME [DETAIL]` | a host-defined capability (any detail if omitted)                              |
+| `default deny` \| `default prompt` \| `default allow`     | the decision for requests no rule decides (once per file)                      |
+| `limit NAME VALUE`                                        | a limit (§15.1), below                                                         |
 
 Relative paths are relative to the policy file's directory (`base`).
-Without a `default` line, the host decides what happens to requests no
-rule decides: `sand` denies them (unless `--prompt`), the web `Engine`
-(§16.2) asks its `onPrompt` callback. Unless `allow private-net` is given, private and internal network
-destinations are denied as by `deny_private_networks()`.
+Without a `default` line, the host decides unmatched requests: `sand`
+denies them (unless `--prompt`), the web `Engine` (§16.2) asks `onPrompt`.
+Without `allow private-net`, private and internal destinations are denied
+as by `deny_private_networks()`.
 
 Limits: `memory`, `output`, `source` and `http-body` take sizes (`4096`,
 `64K`, `256M`, `1G`); `time` (wall clock) and `cpu` durations (`500ms`,
@@ -2166,17 +2244,16 @@ and `open-resources` counts (`1_000_000`). `none` removes the `memory`,
 `time`, `cpu`, `instructions`, `compile-fuel` and `output` limits. Limits
 not given keep their defaults.
 
-Every error is reported with its line number (`PolicyError`), and a file
-with errors is rejected as a whole: misspelled rules (`alow`), unknown
-capabilities or limits, invalid network patterns, sizes or durations,
-arguments to rules that take none, and rules that do not exist (`allow
-stdout`, which is the default, and `deny private-net`).
+A file with any error is rejected; each error (`PolicyError`) has its line
+number. Errors are misspelled rules (`alow`), unknown capabilities or
+limits, invalid network patterns, sizes or durations, arguments to rules
+that take none, and nonexistent rules (`allow stdout`, the default, and
+`deny private-net`).
 
-Every request a prompt can ask about has a rule that decides it for good:
-`sandlang::policy::rule_for(capability, allow)` gives it as a line of a
-policy file (e.g. `allow read /data/a.txt`, `deny net example.com:443`,
-quoting words as needed). The playground adds it to the policy when "always"
-or "never" is answered.
+`sandlang::policy::rule_for(capability, allow)` gives, as a policy file
+line, the rule that decides a promptable request for good (e.g. `allow read
+/data/a.txt`, `deny net example.com:443`, quoted as needed); the playground
+adds it to the policy when "always" or "never" is answered.
 
 ---
 
@@ -2186,63 +2263,60 @@ or "never" is answered.
 
 Configurable per engine:
 
-| Limit                | Default    | Effect when exceeded                                                                                                     |
-| -------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `max_memory`         | 512 MiB    | run fails: `memory limit exceeded` (I/O whose buffers do not fit fails with kind `"limit"`)                              |
-| `max_instructions`   | unlimited  | run fails: `instruction limit exceeded` (counted in fuel units, §15.2)                                                   |
-| `max_cpu_time`       | unlimited  | run fails: `cpu time limit exceeded` (CPU time the engine's thread spends executing, excluding waits and prompts; where the platform has no thread CPU clock, elapsed time while executing) |
-| `max_wall_time`      | unlimited  | run fails: `time limit exceeded` (one limit for compiling and running the program, counted from the start of compilation; waiting for prompt answers excluded) |
-| `max_call_depth`     | 10,000     | panic: `stack overflow`                                                                                                  |
-| `max_tasks`          | 10,000     | `spawn` panics: `task limit exceeded`                                                                                    |
-| `max_open_resources` | 1,024      | open/connect/listen/accept and HTTP requests fail with kind `"limit"` (pending operations' sockets count, §13.11)        |
-| `max_output_bytes`   | unlimited  | writes fail: `output limit exceeded`                                                                                     |
-| `max_http_body`      | 64 MiB     | HTTP read fails with kind `"limit"`                                                                                      |
-| `max_source_bytes`   | 16 MiB     | compile error: `source too large` (the main file and all imported scripts together; the standard library is not counted) |
-| `max_compile_fuel`   | 10,000,000 | compile error: `program too complex to compile` (§15.3)                                                                  |
+| Limit                | Default    | Effect when exceeded                                                                                                                                           |
+| -------------------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `max_memory`         | 512 MiB    | run fails: `memory limit exceeded` (I/O whose buffers do not fit fails with kind `"limit"`)                                                                    |
+| `max_instructions`   | unlimited  | run fails: `instruction limit exceeded` (counted in fuel units, §15.2)                                                                                         |
+| `max_cpu_time`       | unlimited  | run fails: `cpu time limit exceeded` (the engine thread's CPU time executing, excluding waits and prompts; without a thread CPU clock, elapsed time executing) |
+| `max_wall_time`      | unlimited  | run fails: `time limit exceeded` (covers compiling and running, from the start of compilation, excluding waits for prompt answers)                             |
+| `max_call_depth`     | 10,000     | panic: `stack overflow`                                                                                                                                        |
+| `max_tasks`          | 10,000     | `spawn` panics: `task limit exceeded`                                                                                                                          |
+| `max_open_resources` | 1,024      | opening files, connect/listen/accept and HTTP requests fail with kind `"limit"` (after a collection, §10.8; pending operations' sockets count, §13.11)         |
+| `max_output_bytes`   | unlimited  | writes fail: `output limit exceeded`                                                                                                                           |
+| `max_http_body`      | 64 MiB     | HTTP read fails with kind `"limit"`                                                                                                                            |
+| `max_source_bytes`   | 16 MiB     | compile error: `source too large` (the main file and all imported scripts together; the standard library is not counted)                                       |
+| `max_compile_fuel`   | 10,000,000 | compile error: `program too complex to compile` (§15.3)                                                                                                        |
 
-Memory is measured as the engine's accounting of live heap objects (including
-their buffers and the indexes of maps and sets) and
-of the tasks themselves (call stacks, and the lists of tasks waiting for a
-task or a channel), and is enforced after garbage collection. A call that
-would grow a task's stack beyond the limit fails with the memory limit. It also includes the
-buffers of pending I/O operations — file and socket reads, HTTP requests and
-responses in transfer, standard input, and copies of data being written —
-from when the operation starts until its result becomes a value. An
-operation whose buffers would not fit fails with kind `"limit"` instead,
-before allocating them, and the run continues (so a peer sending a huge
-line or body cannot end a server script); files are checked by their size
-before they are read, while network data is counted as it arrives. Open
-connections also count their fixed buffers while they are open (from when
-they are being connected or accepted until closed): 8 KiB each (16 KiB for
-the connections of an HTTP server, 48 KiB for TLS connections, including an
-estimate of the TLS session's buffers); opening a connection whose buffers
-do not fit fails with kind `"limit"`, and an HTTP server answers such a
-connection with `503 Service Unavailable` and closes it. In a session (§16,
-§17.6), the instruction, CPU time, wall time and output limits apply to each
-input; the memory limit applies to the session's heap, which persists. Library functions
-also check the Rust-side scratch space they use while building a result
-(output strings and lists, display and JSON text, sort buffers)
-against the limit before or while it grows, so a script cannot make the host
-allocate much beyond `max_memory`. Garbage is collected before such a check
-reports the limit. Limit violations are reported to the host as
-distinct error variants and cannot be intercepted by scripts. The host may
-also interrupt a running engine from another thread with an
-`InterruptHandle`; this stops compilation, bytecode and long-running library
-functions alike, and a run waiting for I/O or for an answer to a prompt.
+Memory is the engine's accounting, enforced after garbage collection, of
+live heap objects (with their buffers and map and set indexes), tasks
+(call stacks, and lists of tasks waiting for a task or channel; a call that
+would grow a stack beyond the limit fails with the memory limit), and the
+buffers of pending I/O (file and socket reads, HTTP requests and responses
+in transfer, standard input, copies of data being written) from the start
+of the operation until its result becomes a value. An I/O operation whose
+buffers would not fit fails with kind `"limit"` before allocating them and
+the run continues, so a peer sending a huge line or body cannot end a
+server script; files are checked by size before reading, network data as it
+arrives. Open resources also count their fixed buffers: a connection's 8
+KiB (48 KiB for TLS, including an estimate of the session's buffers) from
+when it is being connected or accepted until closed, and a file's 16 KiB
+read buffer from its first buffered read. These must leave the last 16 KiB
+of `max_memory` free, so a script can still handle the error: opening a
+connection that would not fails with kind `"limit"`, and an HTTP server
+answers it `503 Service Unavailable` and closes it. Library functions also
+check the Rust-side scratch space of a result they build (output strings
+and lists, display and JSON text, sort buffers) before or while it grows,
+collecting garbage before reporting the limit, so a script cannot make the
+host allocate much beyond `max_memory`.
+
+In a session (§16.3, §17.6), the instruction, CPU time, wall time and
+output limits apply to each input; the memory limit to the session's
+persistent heap. Limit violations are reported to the host as distinct
+error variants and cannot be intercepted by scripts. The host may also
+interrupt an engine from another thread with an `InterruptHandle`, which
+stops compilation, bytecode, long-running library functions, and waits for
+I/O or prompt answers.
 
 ### 15.2 Fuel
 
 Execution is measured in _fuel units_. The interpreter spends one unit per
 function call, loop iteration and backward jump, plus one unit per 64
-instructions of compiled code that the step may run before the next one: a
-call (or the start of a task) also costs one unit per 64 instructions of the
-function called, an iteration one per 64 instructions of the loop, and
-creating a closure one per 64 values it captures. (So a long loop body or
-function costs in proportion to its length; ordinary ones are shorter.)
-Work done in one step by a
-library function or a generic operation is charged in proportion to its size,
-roughly one unit per simple loop iteration's worth of work (a few to a few
-tens of nanoseconds):
+instructions the step may run before the next charge: a call (or task
+start) per 64 instructions of the called function, an iteration per 64
+instructions of the loop, and creating a closure per 64 captured values.
+Work a library function or generic operation does in one step is charged in
+proportion to its size, roughly one unit per simple loop iteration's worth
+(a few to a few tens of nanoseconds):
 
 | Work                                                                                        | Cost                                                                 |
 | ------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
@@ -2259,33 +2333,27 @@ n numbers costs about n·log₂(n) units, `==` on two lists of n integers about 
 units, and `json.parse` about one unit per value plus one per 8 bytes of
 text.
 
-The work of a regex search is not always proportional to its text: with
-leftmost-first semantics a search may look far past the match it returns
-(iterating over the matches of `[a-z]*X|[a-z]` in a long run of letters scans
-the rest of the text for every match), and a search the lazy DFA cannot handle
-falls back to an engine whose cost per byte grows with the size of the
-pattern. The engine does not report the bytes it examined, so a regex
-function's charge is raised to one unit per microsecond of the time it has
-taken (measured as it runs, and charged between matches when iterating).
-Ordinary searches take a few to a hundred nanoseconds per unit of their
-deterministic charge, so their fuel does not depend on timing; only work
-that the per-byte cost underestimates by an order of magnitude or more is
-charged by time.
+Regex work is charged by time too because it is not always proportional to
+the text: with leftmost-first semantics a search may look far past its
+match (iterating over the matches of `[a-z]*X|[a-z]` in a long run of
+letters scans the rest of the text per match), and searches the lazy DFA
+cannot handle fall back to an engine whose cost per byte grows with the
+pattern. Time is measured as the function runs and charged between matches
+when iterating. Ordinary searches take a few to a hundred nanoseconds per
+unit of their deterministic charge, so only work that charge underestimates
+by an order of magnitude or more is charged by time.
 
-Fuel counts against `max_instructions`. Long operations check the limits while
-they run: once a scheduling slice's fuel is spent, they check the instruction
-budget, the CPU and wall-clock limits and the interrupt flag at least every
-20,000 units, so a single library call or comparison of huge values is
-stopped promptly. The instruction limit is exact for library functions: a
-call stops as soon as the fuel used by the run (including the bytecode
-executed before the call) exceeds `max_instructions`, and so does bytecode
-(within one unit). The generic operations of the interpreter (comparison,
-display, concatenation, slicing) may overrun it by the bytecode fuel spent
-since the last library call, less than 20,000 units. Operations that cannot
-be interrupted internally (a single regex search) are charged before they
-start, so they fail immediately when the remaining budget cannot cover
-them. A task whose library calls use up its slice is preempted when the
-call returns, letting other tasks run.
+Fuel counts against `max_instructions`. Once a scheduling slice's fuel is
+spent, long operations check the instruction budget, the CPU and
+wall-clock limits and the interrupt flag at least every 20,000 units. The
+limit is exact for library functions (a call stops as soon as the run's
+fuel exceeds it) and for bytecode (within one unit); the interpreter's
+generic operations (comparison, display, concatenation, slicing) may
+overrun it by the bytecode fuel spent since the last library call, less
+than 20,000 units. Operations that cannot be interrupted internally (a
+single regex search) are charged before they start, so they fail at once
+when the remaining budget cannot cover them. A task whose library calls use
+up its slice is preempted when the call returns.
 
 ### 15.3 Compile-time limits
 
@@ -2301,33 +2369,30 @@ Checking a program happens before it runs, so it is bounded separately:
 to compile`. `None` means unlimited.
 - **Time and interrupts.** Compilation stops with `time limit exceeded` once
   `max_wall_time` has elapsed since it started (the run that follows has
-  what is left of the same limit), and with an interrupt error when the
-  host interrupts the engine. The standard library is compiled once per
-  process (or per engine with host modules), outside any program's budget.
-- **Local limits**, reported at the offending construct: syntactic nesting of
-  expressions, types, patterns and blocks is limited to 256 levels (`nesting
-too deep`); strings nested inside string interpolations to 32 levels
-  (`strings nested too deeply inside string interpolations`); types to 10,000
-  components (`type too large`); the exhaustiveness check of one `match` to a
-  fixed amount of work (`pattern too complex to check for exhaustiveness`);
-  runtime type descriptions of `reflect` type arguments (e.g. the target
-  type of `json.decode`). A description expands struct and enum definitions,
-  describing each struct or enum instance (a definition with its type
-  arguments) once and sharing it wherever it occurs, and each distinct type
-  is described once per program, however many call sites use it. Building
-  one description may take at most 100,000 units of work (about one per
-  component built or type component examined), and all the descriptions of
-  a compilation together at most 1,000,000 (`type too large to describe at
-runtime`); a polymorphically recursive type such as `struct P<T> { next:
-P<[T]>? }` cannot be described. Finally, the copies of deferred code
-  (§7.1) in one function are limited to about a million instructions (`too
-much deferred code`).
+  what is left), and with an interrupt error when the host interrupts the
+  engine. The standard library is compiled once per process (or per engine
+  with host modules), outside any program's budget.
+- **Local limits**, reported at the offending construct: nesting of
+  expressions, types, patterns and blocks to 256 levels (`nesting too
+deep`); strings nested inside string interpolations to 32 levels
+  (`strings nested too deeply inside string interpolations`); types to
+  10,000 components (`type too large`); the exhaustiveness check of one
+  `match` to a fixed amount of work (`pattern too complex to check for
+exhaustiveness`); copies of deferred code (§7.1) in one function to about
+  a million instructions (`too much deferred code`); runtime type
+  descriptions of `reflect` type arguments (e.g. for `json.decode`), which
+  describe each struct or enum instance once, shared wherever it occurs,
+  and each distinct type once per program: one description may take
+  100,000 units of work (about one per component built or type component
+  examined), all of a compilation 1,000,000 (`type too large to describe at
+runtime`), and a polymorphically recursive type such as `struct P<T> {
+next: P<[T]>? }` cannot be described.
 - **Diagnostics.** At most 50 syntax errors per module, and 50 type errors,
   are reported.
-- **Memory.** Compilation is not counted against `max_memory`: it uses memory
-  in proportion to the size of the source (several hundred bytes per source
-  byte), which `max_source_bytes` bounds. Hosts compiling untrusted code
-  under a small memory limit should lower `max_source_bytes` accordingly.
+- **Memory.** Compilation is not counted against `max_memory`; it uses
+  several hundred bytes per source byte, bounded by `max_source_bytes`,
+  which hosts compiling untrusted code under a small memory limit should
+  lower accordingly.
 
 ---
 
@@ -2356,12 +2421,11 @@ let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 
 - Captured streams: `Config::stdout(Box<dyn OutputSink>)`, `stderr`, `stdin`.
 - `Config::memory_fs(MemFs)` gives scripts a memory file system (§16.1).
 - `Config::tls_root_certificates(Vec<Vec<u8>>)` trusts additional
-  DER-encoded root certificates for TLS (e.g. a private CA), in addition to
-  the bundled web PKI roots; calls accumulate. An invalid certificate makes
-  TLS connections fail with kind `"io"`. Without the `tls` feature it has no
-  effect.
-- Policies (§14): `Policy::check(&Capability)`, `Policy::check_entry` (for
-  operations on a directory entry itself), `Policy::denies_under(path)`;
+  DER-encoded root certificates (e.g. a private CA) besides the bundled web
+  PKI roots; calls accumulate. An invalid one makes TLS connections fail
+  with kind `"io"`. Without the `tls` feature it has no effect.
+- Policies (§14): `Policy::check(&Capability)`, `Policy::check_entry`,
+  `Policy::denies_under(path)`;
   `RulePolicy::{allow_net, deny_net, deny_private_networks, ...}`;
   `sandlang::policy::{is_private_address, normalize_path,
 normalize_entry_path}` for hosts writing their own policies or natives.
@@ -2373,27 +2437,26 @@ normalize_entry_path}` for hosts writing their own policies or natives.
   keeps its kind, any other `E: Display` has kind `"error"`),
   `HashMap<String, T>` / `BTreeMap<String, T>` (as `[str: T]`), and tuples up
   to 4. `&str` and `&[u8]` arguments borrow the script's values for the call
-  instead of copying them (async functions take owned arguments). Converting
-  arguments and results is charged to the fuel meter and checked against
-  `max_memory`. The Sand signature is derived from the Rust types; its
-  parameters are named `arg1`, `arg2`, ... unless `.params(&["x", "y"])`
-  follows the registration. `guarded_function(name, guard, f)` checks the
-  capability `guard` computes from (references to) the arguments before
-  calling `f`, and returns `Result<R, Error>` (`permission_denied` on a
-  denial). `NativeModule::source` may add Sand declarations (types,
-  pure-Sand helper functions, `native fn` with explicit signatures, which
-  take precedence over derived ones and are required for
-  `NativeModule::raw_function`). A host module cannot take the name of a
-  standard module (`NativeModule::new` panics), nor be added twice
-  (`Config::module` panics), nor register a function twice.
+  (async functions take owned arguments). Conversions are charged to the
+  fuel meter and checked against `max_memory`. The Sand signature is
+  derived from the Rust types, with parameters named `arg1`, `arg2`, ...
+  unless `.params(&["x", "y"])` follows. `guarded_function(name, guard, f)`
+  checks the capability `guard` computes from (references to) the arguments
+  before calling `f`, and returns `Result<R, Error>` (`permission_denied`
+  on a denial). `NativeModule::source` may add Sand declarations (types,
+  pure-Sand helpers, `native fn` with explicit signatures, which take
+  precedence over derived ones and are required for
+  `NativeModule::raw_function`). Taking a standard module's name
+  (`NativeModule::new`), adding a module twice (`Config::module`) or
+  registering a function twice panics.
 - `Outcome { exit_code: i32 }`; errors are `Error::Compile(diagnostics)`,
   `Error::Runtime { message, trace }`, `Error::Limit(kind)`, `Error::Interrupted`.
 - A Rust panic inside the engine (a bug in a library or host native, an I/O
   operation or a prompter) does not unwind into the host: it ends the run
   (or session input, or test) like a script panic, with `Error::Runtime`
-  whose message starts with `internal error:`. This requires panics to
-  unwind (the default `panic = "unwind"`). A session in which this happens
-  is reset (below).
+  whose message starts with `internal error:`. This requires
+  `panic = "unwind"` (the default). A session in which this happens is
+  reset (§16.3).
 
 ### 16.1 Operating-system access and file systems
 
@@ -2401,27 +2464,26 @@ The crate's features choose what an engine can reach at all:
 
 - `os` (default): the host's file system, network sockets (`net`, `http`),
   and the process's standard input (`Config::inherit_stdin`) and environment
-  (when `Config::env` gives none). Without it the engine has no way to
-  reach the operating system, whatever the policy says: `net` and `http`
-  do not exist, the environment is empty unless given, standard input is
-  what the host gives (`Config::stdin_bytes`), and scripts see a memory
-  file system. The engine then builds for `wasm32-unknown-unknown` (§16.2).
+  (when `Config::env` gives none). Without it the engine cannot reach the
+  operating system, whatever the policy says: `net` and `http` do not
+  exist, the environment is empty unless given, standard input is what the
+  host gives (`Config::stdin_bytes`), scripts see a memory file system, and
+  the engine builds for `wasm32-unknown-unknown` (§16.2).
 - `tls` (implies `os`): TLS for `https` and `net.connect_tls` (rustls with
   ring). The `sand` command (the `sand-cli` package) enables it.
 
-A `MemFs` is an in-memory file system. `Config::memory_fs(fs)` makes it the
-file system of the engine's scripts (the `fs` module, script imports and
-the main file of `run_file`), in every build; without `os` an engine has an
-empty one unless given one. A `MemFs` is a handle: clones share their
-files, so the host can prepare files and read back what scripts wrote, and
-engines can share one. `MemFs::with_capacity(bytes)` limits its contents
-(default 64 MiB; each entry counts 64 bytes more than its name and
-contents); `write`, `read`, `create_dir_all`, `remove`, `clear` and
-`files()` are for the host. The working directory and module root are then
-paths of the memory file system (default `/`). The policy decides on these
-paths as written: a `RulePolicy` keeps each path rule both as canonicalised
-on the host and as normalized lexically, and compares memory paths with the
-latter (exactly, also on Windows).
+`Config::memory_fs(fs)` makes a `MemFs`, an in-memory file system, the file
+system of the engine's scripts (the `fs` module, script imports and the
+main file of `run_file`) in any build; without `os`, an engine has an empty
+one unless given one. Clones of a `MemFs` share their files, so the host
+can prepare files and read back what scripts wrote, and engines can share
+one. `MemFs::with_capacity(bytes)` limits its contents (default 64 MiB;
+each entry counts 64 bytes more than its name and contents); `write`,
+`read`, `create_dir_all`, `remove`, `clear` and `files()` are for the host.
+The working directory and module root are then memory paths (default `/`).
+The policy decides on these paths as written: a `RulePolicy` keeps each
+path rule both canonicalized on the host and normalized lexically, and
+compares memory paths with the latter (exactly, also on Windows).
 
 ```rust
 let fs = MemFs::new();
@@ -2439,28 +2501,26 @@ never prompt: imports the policy would prompt for are refused.
 ### 16.2 The web
 
 Built without `os`, the engine runs as WebAssembly in a JavaScript host
-(`wasm32-unknown-unknown` with `wasm-bindgen`): the clock and timers come
-from JavaScript, and there are no threads, so the compiler's recursive
-passes run on the module's stack, which is linked large enough for the
-deepest nesting the parser accepts. A run executes on the calling thread
-and returns to the event loop only while it waits (for a timer, I/O or a
-permission prompt); hosts run engines in Web Workers to keep pages
-responsive and to run several in parallel. The `sandlang-wasm` crate
-(`wasm/`) is the JavaScript API: an `Engine` built from a policy file,
-files, an environment, arguments and standard input, with `onOutput` and
-`onPrompt` callbacks (requests the policy does not decide go to `onPrompt`,
-and are denied without it), `run`, `check`, `lint`, sessions (`eval(source,
-name?)`, and `runTasks`/`stopTasks` to run tasks between inputs), `format`
-and `highlight`. `Session::eval_as(name, source)` names an input (e.g.
-`main.sand` for a program that a session continues) in diagnostics and
-traces. `playground/` is a web page built on it.
+(`wasm32-unknown-unknown` with `wasm-bindgen`). The clock and timers come
+from JavaScript; there are no threads, so the compiler's recursive passes
+run on the module's stack, linked large enough for the deepest nesting the
+parser accepts. A run executes on the calling thread and yields to the
+event loop only while it waits (for a timer, I/O or a prompt); hosts run
+engines in Web Workers to keep pages responsive and run several in
+parallel. The `sandlang-wasm` crate (`wasm/`) is the JavaScript API: an
+`Engine` built from a policy file, files, an environment, arguments and
+standard input, with `onOutput` and `onPrompt` callbacks (requests the
+policy does not decide go to `onPrompt`, and are denied without it), `run`,
+`check`, `lint`, sessions (`eval(source, name?)`, and
+`runTasks`/`stopTasks` to run tasks between inputs), `format` and
+`highlight`. `playground/` is a web page built on it.
 
 ### 16.3 Sessions
 
-`Engine::session()` returns a `Session`, which runs inputs one
-at a time with the semantics of `sand repl` (§17.6), using the engine's
-configuration (policy, prompter, limits, streams, host modules, module root
-and working directory):
+`Engine::session()` returns a `Session`, which runs inputs one at a time
+with the semantics of `sand repl` (§17.6) and the engine's configuration
+(policy, prompter, limits, streams, host modules, module root and working
+directory):
 
 ```rust
 let mut session = Engine::new(config).session();
@@ -2469,32 +2529,32 @@ assert_eq!(session.eval("hit() + hit()").await?, Some("3".to_string()));
 ```
 
 - `eval(source) -> Result<Option<String>, Error>` checks, compiles and runs
-  one input (`eval_as(name, source)` names it `name` in diagnostics and
-  traces instead of `<input N>`); `Some` holds the debug form of its value. After `exit(code)`,
-  `eval` returns `Ok(None)` and `exit_code()` returns `Some(code)` (until the
-  next input); the session remains usable.
+  one input; `Some` holds the debug form of its value. `eval_as(name,
+source)` names the input in diagnostics and traces instead of `<input
+N>` (e.g. `main.sand` for a program the session continues). After
+  `exit(code)`, `eval` returns `Ok(None)` and `exit_code()` returns
+  `Some(code)` until the next input; the session remains usable.
 - `type_of(expr) -> Result<String, Error>` checks an expression without
   running it or changing the session.
 - `run_tests() -> Result<TestReport, Error>` runs the `test` blocks entered so
   far, against the current state.
 - `reset()` forgets all inputs. `interrupt_handle()` interrupts the input being
   run (the engine's own handle does not affect sessions).
-- `run_tasks_until(until, on_error) -> Option<T>` runs the tasks that earlier
+- `run_tasks_until(until, on_error) -> Option<T>` runs the tasks earlier
   inputs left running until the future `until` completes, and returns its
-  output; a front end calls it while waiting for the next input, so that
-  tasks keep running between inputs (§17.6). The instruction, CPU time and
-  output limits apply to each call as to an input; the wall-time limit does
-  not apply. Permission prompts and reads of standard input wait until
-  `until` has completed. If a task fails (panic, limit, interruption), all
-  tasks are cancelled and the error is passed to `on_error` at once; the call
-  then goes on waiting. If a task calls `exit`, it returns `None` at once.
-  `cancel_tasks()` cancels the tasks left running.
-- After an internal error (a caught Rust panic, see above) in `eval`,
-  `run_tests`, `type_of` or `run_tasks_until`, the session's state may be
-  inconsistent, so it is reset as by `reset()`: the error's message ends with
-  `" (the session was reset)"` (`sandlang::session::RESET_NOTE`), and
-  `was_reset()` returns true until the next call. "Always" answers given
-  before are kept.
+  output; front ends call it while waiting for input (§17.6). The
+  instruction, CPU time and output limits apply to each call; the wall-time
+  limit does not. Permission prompts and standard input reads wait until
+  `until` completes. If a task fails (panic, limit, interruption), all tasks
+  are cancelled and the error goes to `on_error` at once; the call goes on
+  waiting. If a task calls `exit`, it returns `None` at once.
+  `cancel_tasks()` cancels the tasks left running, without running their
+  defers.
+- After an internal error (a caught Rust panic) in `eval`, `run_tests`,
+  `type_of` or `run_tasks_until`, the session is reset as by `reset()`: the
+  error's message ends with `" (the session was reset)"`
+  (`sandlang::session::RESET_NOTE`), and `was_reset()` returns true until
+  the next call. "Always" answers given before are kept.
 - `Session::is_complete(source)` tells whether a line-based front end should
   read more lines before evaluating (§17.6).
 - `Session: Send`; its futures are `Send`. A session shares the "always"
@@ -2506,103 +2566,109 @@ assert_eq!(session.eval("hit() + hit()").await?, Some("3".to_string()));
 
 ## 17. Tooling
 
-### 17.1 `sand check FILE...`
-
-Parses and type checks; prints diagnostics; exit code 2 on errors or if a file
-cannot be read, as for `sand run` (§17.5).
-
 All subcommands exit with code 2, after a message on standard error, for usage
 errors: an unknown subcommand or option, a missing file argument, or an option
 value that cannot be parsed.
+
+### 17.1 `sand check FILE...`
+
+Parses and type checks; prints diagnostics; exit code 2 on errors or if a file
+cannot be read.
 
 ### 17.2 `sand lint FILE...`
 
 Reports warnings (exit code 1 if any, unless `--allow-warnings`; 2 if a file
 cannot be read or has errors):
 
-| Lint                   | Description                                                                                                                                       |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `unused-variable`      | local binding or parameter never read (names starting with `_` are exempt)                                                                        |
-| `unused-import`        | import never referenced                                                                                                                           |
-| `unused-function`      | private function or method not reachable from the module's public items, top-level code or tests (see below)                                      |
-| `unnecessary-var`      | `var` never reassigned (use `let`)                                                                                                                |
-| `unused-result`        | a `Result` value is discarded                                                                                                                     |
-| `no-effect`            | an expression statement that only computes a value which is discarded (`x + 1`, `-3`: §2.3); not the last statement of a block, which is its value |
+| Lint                   | Description                                                                                                                                                                                                                          |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `unused-variable`      | local binding or parameter never read (names starting with `_` are exempt)                                                                                                                                                           |
+| `unused-import`        | import never referenced                                                                                                                                                                                                              |
+| `unused-function`      | private function or method not reachable from the module's public items, top-level code or tests (see below)                                                                                                                         |
+| `unnecessary-var`      | `var` never reassigned (use `let`)                                                                                                                                                                                                   |
+| `unused-result`        | a `Result` value is discarded                                                                                                                                                                                                        |
+| `no-effect`            | an expression statement that only computes a value which is discarded (`x + 1`, `-3`: §2.3); not the last statement of a block, which is its value                                                                                   |
 | `unreachable-code`     | statement after `return`, `break`, `continue`, a call of the prelude's `panic`, `exit` or `todo` (not of a function of the module with that name), or after a `loop` that no `break` leaves (labeled breaks from nested loops count) |
-| `unused-label`         | loop label that no `break` or `continue` refers to                                                                                                |
-| `naming`               | violates naming conventions (§2.4)                                                                                                                |
-| `bool-comparison`      | comparing with `true`/`false` literal                                                                                                             |
-| `self-assignment`      | `x = x`                                                                                                                                           |
-| `len-zero`             | `x.len() == 0` (use `is_empty()`)                                                                                                                 |
-| `empty-block`          | empty `if`/`else`/loop body                                                                                                                       |
-| `todo`                 | call to `todo()`                                                                                                                                  |
-| `shadowed-variable`    | `let`/`var` binding a name that is already bound, with a different type, by a binding of the same function that is still in scope (see below)     |
-| `variant-like-binding` | a name starting with an upper-case letter that binds a new variable in a pattern (`match`, `if let`, `while let`, `let`, `for`), usually a misspelled variant without a payload (see below) |
+| `unused-label`         | loop label that no `break` or `continue` refers to                                                                                                                                                                                   |
+| `naming`               | violates naming conventions (§2.4)                                                                                                                                                                                                   |
+| `bool-comparison`      | comparing with `true`/`false` literal                                                                                                                                                                                                |
+| `self-assignment`      | `x = x`                                                                                                                                                                                                                              |
+| `len-zero`             | `x.len() == 0` (use `is_empty()`)                                                                                                                                                                                                    |
+| `empty-block`          | empty `if`/`else`/loop body                                                                                                                                                                                                          |
+| `todo`                 | call to `todo()`                                                                                                                                                                                                                     |
+| `shadowed-variable`    | `let`/`var` binding a name that is already bound, with a different type, by a binding of the same function that is still in scope (see below)                                                                                        |
+| `variant-like-binding` | a name starting with an upper-case letter that binds a new variable in a pattern (`match`, `if let`, `while let`, `let`, `for`), usually a misspelled variant without a payload (see below)                                          |
+| `unclosed-resource`    | a resource (§7.2) created and never closed: bound with `let`/`var` or used as a temporary, and neither closed by `use` nor handed on (see below)                                                                                     |
+| `resource-field`       | a struct field or enum variant holding a resource, in a type that does not implement `Close`                                                                                                                                         |
+| `resource-escapes`     | a resource bound with `use`, or received as a parameter, that is kept beyond the call: returned (`use` only), stored, captured by a task, or passed to a function that keeps it                                                      |
 
-`unused-function` applies to the module being linted. Its public items are
-`pub` top-level functions and all methods of `pub` types; every other function
-and method is private. A private function counts as used only if it is
-reachable, through calls (including method calls and pipes), function values
-and default arguments, from top-level code, a `test` block or a public item.
-So a function referenced only by itself (recursion) or by other unused
-functions is reported.
+`unused-function`: public items are `pub` top-level functions and all
+methods of `pub` types. A private function is used only if reachable from
+top-level code, a `test` block or a public item, through calls (including
+method calls and pipes), function values and default arguments; one
+referenced only by itself or by unused functions is reported.
 
-For `shadowed-variable`, the earlier binding may be a parameter, a `let`/`var`
-(including destructuring), a loop variable, or a `match`/`if let`/`while let`/
-lambda/comprehension binding, and must still be in scope at the new `let`:
-bindings in sibling blocks (two branches of an `if`, two loops, two `match`
-arms) do not shadow each other. A lambda belongs to its enclosing function (a
-`let` in a lambda body may shadow a binding of the enclosing function), but
-each named function and each `test` block is checked on its own, so a
-function or test re-binding a top-level name is not reported.
+`shadowed-variable`: the earlier binding may be a parameter, a `let`/`var`
+(including destructuring), a loop variable, or a `match`/`if let`/`while
+let`/lambda/comprehension binding, and must still be in scope, so bindings
+in sibling blocks (two `if` branches, two loops, two `match` arms) do not
+shadow each other. A lambda belongs to its enclosing function, but each
+named function and `test` block is checked on its own, so re-binding a
+top-level name is not reported.
 
-For `variant-like-binding`: a bare name in a pattern is a payload-less
-variant of the scrutinee's enum if it has one of that name, and otherwise a
-new binding that matches anything (§8.1), so a misspelled variant (`Emtpy =>`
-for `Empty`) silently becomes a catch-all arm. A pattern binding whose name
-starts with an upper-case letter is reported, with the closest payload-less
-variant of its type when that type is an enum and one is within a small edit
-distance (`` `Emtpy` binds a new variable; did you mean the variant
-`State.Empty`? ``), and otherwise with the advice to use a lowercase name.
-Top-level `let` constants in `SCREAMING_SNAKE_CASE` are exempt. It takes the
-place of `naming` for such names, so the two are never both reported for one
-name.
+The resource lints follow resources through each function. A resource is
+_created_ by a call that returns one (or a `Result`, option or tuple holding
+one) unless its result may come from an argument, and by a literal of a
+`Close` type (struct, list, option, ...), which takes over the resources it
+is built from. It is _handed on_ when returned, stored (in a field, list,
+map, set, global or channel), captured by `spawn`, taken over by a new
+resource, or passed to a parameter the callee hands on (calls through
+function values and trait dictionaries count as neither keeping nor
+returning their arguments). A created resource neither handed on nor bound
+with `use` (or `let` directly followed by `defer` of its `close`) is
+`unclosed-resource`; a `use`-bound or parameter resource that is handed on
+is `resource-escapes` (returning a parameter is allowed). A deliberate
+escape is acknowledged with `// lint: allow(resource-escapes)`.
 
-Parameters of trait and impl methods are exempt from `unused-variable`, since
-the trait dictates them; the names of impl methods are checked at the trait.
+`variant-like-binding`: a bare name in a pattern is a payload-less variant
+of the scrutinee's enum if it has one of that name, and otherwise a new
+binding matching anything (§8.1), so a misspelled variant (`Emtpy =>`)
+silently becomes a catch-all arm. The warning suggests the closest
+payload-less variant within a small edit distance (`` `Emtpy` binds a new
+variable; did you mean the variant `State.Empty`? ``), otherwise a
+lowercase name. Top-level `let` constants in `SCREAMING_SNAKE_CASE` are
+exempt. It replaces `naming` for such names.
+
+Parameters of trait and impl methods are exempt from `unused-variable`; the
+names of impl methods are checked at the trait.
 
 A lint can be suppressed for the next line with `// lint: allow(name)`, or for
 a file with `//! lint: allow(name)`.
 
 Linting checks the file first, with the default limits (§15.3). The lints
-themselves are bounded like compilation: they may spend 64 units of fuel per
-byte of source (at least 10,000,000), about one per syntax tree node and per
-node examined again by a lint (for example a loop body searched for a
-`break`); a file that needs more fails with `source too complex to lint`
-(exit code 2).
+may spend 64 units of fuel per byte of source (at least 10,000,000), about
+one per syntax tree node and per node a lint examines again; a file that
+needs more fails with `source too complex to lint` (exit code 2).
 
 ### 17.3 `sand fmt FILE... [--check]`, `sand fmt - [--check]`
 
-Rewrites files in canonical style: 4-space indentation, one statement per line,
-spaces around binary operators, no space before `(` in calls, `{` on the same
-line, trailing commas in multi-line lists/arguments/fields, at most one blank
-line between statements, at most two consecutive blank lines never, items
-separated by exactly one blank line, line width 100 (calls, lists, maps and
-parameter lists that do not fit are broken one element per line), comments
-preserved. Formatting is idempotent: `fmt(fmt(x)) == fmt(x)`, and formatting
-never changes the parse tree (modulo spans). String literals, including the
-code inside their interpolations, are copied verbatim. With `--check`, files are not
-written; the exit code is 1 if any file is not formatted. Exit code 2 if a file
-cannot be read or parsed. `sand fmt -` formats standard input to standard
-output (with `--check`, it prints nothing and exits with 1 if the input is
-not formatted). Trait and impl bodies are laid out like struct
-bodies: one method per line, with a blank line around methods that have a body.
-Formatting is bounded like linting (§17.2): 64 units of fuel per byte of
-source (at least 10,000,000), about one per syntax tree node and layout node
-examined, per 64 bytes of text measured, and per byte of output (deeply
-nested code is indented, so the output can be much larger than the source);
-a file that needs more is not formatted: `source too complex to format`
-(exit code 2).
+Rewrites files in canonical style: 4-space indentation, one statement per
+line, spaces around binary operators, no space before `(` in calls, `{` on
+the same line, trailing commas in multi-line lists/arguments/fields, at most
+one blank line in a row, one blank line around functions with a body,
+types, `extend`, traits, impls and tests, line width 100 (calls, lists,
+maps and parameter lists that do not fit are broken one element per line),
+comments preserved. Trait and impl bodies are laid out like struct bodies,
+one method per line, with a blank line around methods with a body. String
+literals, including their interpolations, are copied verbatim. Formatting
+is idempotent and never changes the parse tree (modulo spans). `sand fmt -`
+formats standard input to standard output. With `--check`, nothing is
+written or printed, and the exit code is 1 if any input is not formatted.
+Exit code 2 if a file cannot be read or parsed. Formatting may spend 64
+units of fuel per byte of source (at least 10,000,000), about one per
+syntax tree node and layout node examined, per 64 bytes of text measured,
+and per byte of output; a file that needs more fails with `source too
+complex to format` (exit code 2).
 
 ### 17.4 `sand test FILE... [OPTIONS]`
 
@@ -2610,12 +2676,10 @@ Runs the module's top-level code with output captured, then every `test` block
 as a separate task with a fresh view of top-level state _as initialized_. Each
 test passes if it completes without panicking. Output: one line per test
 (`ok name` / `FAIL name: message`) and a summary `N passed, M failed`. Exit
-code 1 if any test failed, 2 for compile errors.
-
-Tests are untrusted code like any script: `sand test` takes the policy and
-limit options of `sand run` (§17.5, except `--` and script arguments) and,
-like `run`, denies everything that is not allowed by them. A test that
-exceeds a limit fails with the limit's message.
+code 1 if any test failed, 2 for compile errors. `sand test` takes the
+policy and limit options of `sand run` (§17.5) and, like it, denies what
+they do not allow. A test that exceeds a limit fails with the limit's
+message.
 
 ### 17.5 `sand run FILE [-- ARGS...]`
 
@@ -2632,43 +2696,42 @@ code (codes outside `0..=255` exit with 255), 1 for a runtime error or `?`
 failure, 2 for compile errors, 3 for limit violations.
 
 `--prompt` asks on the controlling terminal (`/dev/tty`; the console on
-Windows), never on the script's standard streams, so piped input cannot answer
-prompts. The answers are `y` (allow once), `a` (always), `n` or an empty line
-(deny once) and `N` (never); end of input denies, and an unrecognised answer is
-asked again up to three times before denying. Control characters in the
-request are escaped, as are Unicode format characters (such as
-bidirectional overrides), line and paragraph separators, spaces other than
-U+0020 and combining marks. Before each question the terminal's rendition is
-reset (a soft terminal reset and an SGR reset, on a fresh line) and a marker
-line is shown, so output the script left concealed or styled cannot hide or
-imitate the question. Without a terminal, prompted requests are denied.
+Windows), never on the script's standard streams, so piped input cannot
+answer; without a terminal, prompted requests are denied. Answers: `y`
+(allow once), `a` (always), `n` or an empty line (deny once), `N` (never);
+end of input denies, and an unrecognized answer is asked again up to three
+times before denying. Control characters in the request are escaped, as
+are Unicode format characters (such as bidirectional overrides), line and
+paragraph separators, spaces other than U+0020 and combining marks. Before
+each question the terminal's rendition is reset (soft terminal reset and
+SGR reset, on a fresh line) and a marker line is shown, so output the
+script left concealed or styled cannot hide or imitate the question.
 
-Unless `--allow-private-net` (or `--allow-all`) is given, the policy denies
-private and internal network destinations (§14.6): `--allow-net=*` does not
+Unless `--allow-private-net` or `--allow-all` is given, private and
+internal network destinations are denied (§14.6): `--allow-net=*` does not
 reach `localhost` or `10.0.0.5`, but `--allow-net=localhost:8080`,
 `--allow-net=127.0.0.1` or `--allow-net=10.0.0.0/8` do. Malformed network
 patterns are rejected.
 
 ### 17.6 `sand repl [OPTIONS]`
 
-Interactive read-eval-print loop, taking the options of `sand run` (§17.5;
-`--prompt` asks on the terminal as for `run`). It runs a session (§16): each
-input is type checked in the context of the previous inputs, then compiled
-and run **exactly once**; state persists between inputs.
+Interactive read-eval-print loop, taking the options of `sand run` (§17.5).
+It runs a session (§16.3): each input is type checked in the context of the
+previous inputs, then compiled and run **exactly once**; state persists
+between inputs.
 
-- An input is any mix of what a module may contain (§3.1): statements,
-  expressions and declarations, including `import`, `trait`, `impl` and
-  `test` blocks. The input's names join the session's single module scope.
+- An input is any mix of what a module may contain (§3.1), including
+  `import`, `trait`, `impl` and `test` blocks. Its names join the session's
+  single module scope.
 - If the input's last item is an expression statement, its value is printed
   in debug form (§10.9), unless it has type `()` or the input ends with `;`.
 - Top-level `let`/`var` bindings are globals that later inputs may read; a
   `var` declared by an earlier input may be assigned. Within one input, names
   must be unique as in a module; a later input may define any name again (as
   any kind of item), which shadows the earlier definition for later inputs.
-  Code checked earlier keeps referring to what it referred to then (a
-  function calls the function it was checked against, not a later one of the
-  same name). Methods (`extend`) and impls (§4.9) of a later input likewise
-  replace those of earlier inputs with the same name or for the same type.
+  Code checked earlier keeps referring to what it referred to then. Methods
+  (`extend`) and impls (§4.9) of a later input likewise replace those of
+  earlier inputs with the same name or for the same type.
 - A top-level variable's type must be inferred within the input that declares
   it.
 - An input that fails to compile has no effect. An input that panics, exceeds
@@ -2677,60 +2740,55 @@ and run **exactly once**; state persists between inputs.
   had not initialized yet remain uninitialized (reading them panics, §3.1). A
   top-level `?` that meets an `Err` aborts the input like a panic whose
   message is the error.
-- Tasks spawned by an input keep running while later inputs run, and while
-  the REPL waits for input, and can be awaited by later inputs. A panic in
-  any task fails the input being run (or, between inputs, is reported as
-  such). After a failed input or task, all tasks are cancelled. While the
-  REPL waits for input, the tasks' output appears above the input being
-  edited (on a terminal) or starts on a new line followed by the prompt
-  again; their permission prompts and reads of standard input wait until an
-  input has been entered.
+- Tasks spawned by an input keep running during later inputs and while the
+  REPL waits for input, and can be awaited by later inputs. A panic in any
+  task fails the input being run (or, between inputs, is reported). After a
+  failed input or task, all tasks are cancelled. While the REPL waits, the
+  tasks' output appears above the input being edited (on a terminal, on
+  standard output whichever stream it was written to) or starts on a new
+  line followed by the prompt again; their permission prompts and reads of
+  standard input wait until an input has been entered.
 - `exit(code)` ends the session with exit code `code`.
-- The instruction, CPU time, wall time and output limits apply to each input
-  separately; the memory limit applies to the session's heap. Between
-  inputs, the instruction, CPU time and output limits apply to the tasks'
-  work during each wait for input; the wall-time limit does not apply then.
-  "Always" answers to prompts apply to the rest of the session.
-- After an internal error (a bug in the engine or in a host native, §16) the
-  session is reset, as by `:reset`, and the error says so.
+- The instruction, CPU time, wall time and output limits apply to each
+  input; the memory limit to the session's heap. Between inputs, the
+  instruction, CPU time and output limits (not wall time) apply to the tasks'
+  work during each wait for input. "Always" answers apply to the rest of the session.
+- After an internal error (§16) the session is reset, as by `:reset`, and
+  the error says so.
 - `test` blocks are checked but not run when entered.
 
-Input lines are read until the input is complete: while brackets, a string or
-a block comment are open, or the last token is a binary operator, `=`, `,`,
-`.`, `:`, `=>`, `->`, `else` or a similar token that cannot end a statement,
-or the last line is a doc comment (`///`, which belongs to the next item), the
-REPL prompts with `...` for more. Ctrl-C interrupts the input being run
-(the session continues), discards a partially entered input, or, at an empty
-prompt, cancels the tasks left running; end of input
-(Ctrl-D) ends the session, running any partial input first. Results are
-printed on standard output, diagnostics and errors on standard error. The
-REPL's input is also the scripts' standard input (`--allow-stdin`); when it is
-not a terminal, a script that reads it may consume input meant for the REPL.
+Lines are read until the input is complete: while brackets, a string or a
+block comment are open, or the last token cannot end a statement (a binary
+operator, `=`, `,`, `.`, `:`, `=>`, `->`, `else`, ...), or the last line is
+a doc comment, the REPL prompts with `...` for more. A command line is
+always complete. Ctrl-C interrupts the input being run (the session
+continues), discards a partially entered input, or, at an empty prompt,
+cancels the tasks left running. End of input (Ctrl-D, on an empty input in
+the line editor) ends the session, running any partial input first. Results
+go to standard output, diagnostics and errors to standard error. The REPL's
+input is also the scripts' standard input (`--allow-stdin`); when it is not
+a terminal, a script that reads it may consume input meant for the REPL.
 
 When standard input and output are a terminal, inputs are edited with a line
-editor. An incomplete input continues on `...` lines of the same input (Enter
-on an incomplete input starts a new line), which is edited, recalled and kept
-in the history as a whole. Ctrl-C discards the input being edited, or, if it
-is empty, cancels the tasks left running; Ctrl-D on an empty input ends the
-session. Output of tasks while an input is edited appears above it (on
-standard output, whichever stream it was written to). Keys (Emacs style):
+editor. An incomplete input continues on `...` lines (Enter on an incomplete
+input starts a new line), and is edited, recalled and kept in the history as
+a whole. Keys (Emacs style):
 
-| Keys                                                        | Effect                                             |
-| ----------------------------------------------------------- | -------------------------------------------------- |
-| Left, Right, Ctrl-B, Ctrl-F                                 | move by character                                  |
-| Alt-Left, Alt-Right, Ctrl-Left, Ctrl-Right, Alt-B, Alt-F    | move by word (macOS: Option-Left, Option-Right)    |
-| Home, End, Ctrl-A, Ctrl-E, Super-Left, Super-Right          | start or end of the line (macOS: Command-Left/Right) |
-| Ctrl-Home, Ctrl-End                                         | start or end of the input                          |
-| Up, Down                                                    | previous or next line of the input, else history   |
-| Ctrl-R                                                      | search the history                                 |
-| Ctrl-W, Alt-Backspace, Alt-D, Ctrl-U, Ctrl-K                | cut a word back or forward, to the start or end    |
-| Ctrl-Y, Ctrl-Z, Ctrl-G                                      | paste the cut text, undo, redo                     |
-| Ctrl-L                                                      | clear the screen                                   |
+| Keys                                                     | Effect                                               |
+| -------------------------------------------------------- | ---------------------------------------------------- |
+| Left, Right, Ctrl-B, Ctrl-F                              | move by character                                    |
+| Alt-Left, Alt-Right, Ctrl-Left, Ctrl-Right, Alt-B, Alt-F | move by word (macOS: Option-Left, Option-Right)      |
+| Home, End, Ctrl-A, Ctrl-E, Super-Left, Super-Right       | start or end of the line (macOS: Command-Left/Right) |
+| Ctrl-Home, Ctrl-End                                      | start or end of the input                            |
+| Up, Down                                                 | previous or next line of the input, else history     |
+| Ctrl-R                                                   | search the history                                   |
+| Ctrl-W, Alt-Backspace, Alt-D, Ctrl-U, Ctrl-K             | cut a word back or forward, to the start or end      |
+| Ctrl-Y, Ctrl-Z, Ctrl-G                                   | paste the cut text, undo, redo                       |
+| Ctrl-L                                                   | clear the screen                                     |
 
-The history holds the last 1000 inputs and persists in the file named by the
-`SAND_HISTORY` environment variable (not kept if it is empty), by default
-`.sand_history` in the home directory. Commands are inputs too, but a
-command line is always complete.
+The history holds the last 1000 inputs (commands included) in the file
+named by `SAND_HISTORY` (not kept if empty), by default `.sand_history` in
+the home directory.
 
 Commands (on a line of their own):
 
@@ -2742,18 +2800,17 @@ Commands (on a line of their own):
 | `:reset`      | forget all inputs and start a fresh session ("always" answers are kept)                                                                                |
 | `:quit`, `:q` | end the session (exit code 0)                                                                                                                          |
 
----
-
 ### 17.7 `sand playground [DIR] [--port=PORT]`
 
-Serves the web playground (§16.2) on the local host, at
-`http://127.0.0.1:PORT/` (default port 8000; `--port=0` picks a free one
-and the address is printed). `DIR` defaults to `playground/` of the source
-tree the binary was built from, or else `./playground`; its engine must be
-built first (`playground/build.sh`). It is a static file server: `GET` and
-`HEAD` of regular files inside `DIR` (a directory serves its `index.html`;
-paths with `..`, and symlinks leading outside, are not found), listening on
-the loopback address only. Ctrl-C stops it.
+Serves the web playground (§16.2) at `http://127.0.0.1:PORT/`, on the
+loopback address only (default port 8000; `--port=0` picks a free one and
+prints the address). `DIR` defaults to `playground/` of the source tree the
+binary was built from, else `./playground`; its engine must be built first
+(`playground/build.sh`). It serves `GET` and `HEAD` of regular files inside
+`DIR` (a directory serves its `index.html`; paths with `..`, and symlinks
+leading outside, are not found). Ctrl-C stops it.
+
+---
 
 ## 18. Diagnostics
 
@@ -2774,5 +2831,5 @@ is defined: `expected Point (defined in input 3), found Point (defined in
 input 1)`, `... (defined in module geo)`; an optional such type is shown as
 `Option<Point (defined in ...)>`.
 
-The checker continues after errors where possible and reports up to 50 errors
-per run. Parse errors stop checking of the affected module.
+The checker continues after errors where possible, reporting at most 50
+(§15.3). Parse errors stop checking of the affected module.

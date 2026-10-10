@@ -8,8 +8,7 @@
 //!
 //! - [`PVec`]: a vector in chunks of [`CHUNK`] elements behind `Arc`s.
 //! - [`PHash`]: a hash array mapped trie of values with their hashes; the
-//!   caller hashes and compares (so interners can store bare ids and compare
-//!   through their tables).
+//!   caller hashes and compares.
 //! - [`PMap`]: a map built on it, hashing keys with the process's seeded
 //!   hasher (`FxBuild`), so that programs cannot choose colliding names.
 
@@ -112,7 +111,6 @@ impl<T: Clone> PVec<T> {
         Some(self.get_mut(i))
     }
 
-    /// Shortens the vector to `n` elements.
     pub fn truncate(&mut self, n: usize) {
         if n >= self.len {
             return;
@@ -126,7 +124,6 @@ impl<T: Clone> PVec<T> {
     }
 }
 
-/// An iterator over the elements of a [`PVec`].
 pub struct Iter<'a, T> {
     chunks: std::slice::Iter<'a, Arc<Vec<T>>>,
     cur: std::slice::Iter<'a, T>,
@@ -431,7 +428,7 @@ impl<K: Hash + Eq + Clone, V: Clone> PMap<K, V> {
     /// The entries, in no particular order.
     pub fn entries(&self) -> Vec<(&K, &V)> {
         let mut out = Vec::with_capacity(self.len());
-        // (`for_each` hands out references into the table.)
+        // Not `for_each`: its callback's references cannot outlive the call.
         fn collect<'a, K, V>(n: &'a Node<(K, V)>, out: &mut Vec<(&'a K, &'a V)>) {
             match n {
                 Node::Branch { slots, .. } => {

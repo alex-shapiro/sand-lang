@@ -8,11 +8,10 @@
 //! script modules it imports into a [`ModuleGraph`], checks and compiles
 //! only them, and initializes only the standard modules it imports.
 //!
-//! Imports are found with the lexer (`scan_imports`), on the caller's stack,
-//! while modules are loaded (which may wait for permission prompts); every
-//! module is then parsed once, on the compiler's stack (the parser recurses
-//! as deep as the source nests), and each import declaration of the syntax
-//! tree is matched with the module loaded for it by the span of its name.
+//! Imports are found by the lexer (`scan_imports`) on the caller's stack
+//! while modules load, which may wait for prompts. Each module is then parsed
+//! once on the compiler's stack, and its import declarations are matched to
+//! the loaded modules by the spans of their names.
 
 use crate::check::budget::{CompileBudget, Stop};
 use crate::check::{Checker, ModKind, ParsedModule};
@@ -74,12 +73,11 @@ impl Pending {
 }
 
 impl Snapshot {
-    /// Checks and compiles the modules of `registry` that `base` (the
-    /// standard library's snapshot, if given) does not hold. Every standard
-    /// module must check; a host module that does not (or that imports one
-    /// that does not) is left out, and compiled, reporting its errors, by
-    /// the programs that import it.
-    /// With `only`, just those modules (and what they import) are added.
+    /// Checks and compiles the modules of `registry` (with `only`, just those
+    /// and their imports) that `base`, the standard library's snapshot, does
+    /// not hold. Every standard module must check; a host module that does
+    /// not, or imports one that does not, is left out for the programs that
+    /// import it to compile and report.
     pub(crate) fn build(registry: &Registry, base: Option<&Snapshot>, only: Option<&[&str]>) -> Result<Snapshot, Error> {
         let (mut sm, mut by_name, mut mods) = match base {
             Some(b) => (b.sm.clone(), b.by_name.clone(), b.mods.clone()),
@@ -368,10 +366,8 @@ impl ModuleGraph {
         self.index.retain(|_, i| *i < m.modules);
     }
 
-    /// The graph on `snap`, which extends the snapshot of this one with the
-    /// standard modules this one loaded: they are imported from `snap`
-    /// instead (the other modules keep their order, their sources move to
-    /// new file ids).
+    /// The graph on `snap`, which extends this graph's snapshot with the
+    /// standard modules it loaded; the other modules get new file ids.
     pub(crate) fn rebase(self, snap: &Snapshot) -> ModuleGraph {
         let mut g = ModuleGraph::new(snap);
         g.source_bytes = self.source_bytes;
@@ -501,7 +497,8 @@ pub(crate) fn native_info(checked: &crate::check::CheckedProgram, registry: &Reg
             let signature = checked.printer().signature(checked.name(f.name), &params, f.ret);
             native_help[n as usize] = HelpEntry { doc: f.doc.as_deref().map(String::from), signature };
             let reflect = f.generics.iter().filter(|g| checked.params[**g as usize].reflect).count();
-            native_argc[n as usize] = (f.params.len() + reflect) as u16;
+            // A native implementing a trait method also receives its impl's dictionary.
+            native_argc[n as usize] = (f.dicts.len() + f.params.len() + reflect) as u16;
         }
     }
     (native_help, native_argc)
@@ -511,6 +508,8 @@ pub(crate) fn native_info(checked: &crate::check::CheckedProgram, registry: &Reg
 #[derive(Debug, Default)]
 pub(crate) struct ResolvedFacts {
     pub unused_results: Vec<(usize, usize)>,
+    /// The resource lints: (line, column, code, message).
+    pub resources: Vec<(usize, usize, &'static str, String)>,
     pub locals: Vec<(usize, usize, crate::check::LocalFact)>,
     pub imports: Vec<(usize, usize, String)>,
     pub used_names: HashSet<String>,
@@ -527,6 +526,12 @@ impl ResolvedFacts {
             if sp.file == main_file {
                 let (l, c) = f.line_col(sp.lo);
                 facts.unused_results.push((l, c));
+            }
+        }
+        for (sp, code, msg) in &checked.lint.resources {
+            if sp.file == main_file {
+                let (l, c) = f.line_col(sp.lo);
+                facts.resources.push((l, c, code, msg.clone()));
             }
         }
         for lf in &checked.lint.locals {

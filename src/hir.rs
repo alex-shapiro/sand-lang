@@ -143,7 +143,6 @@ pub struct HLambda {
     pub id: u32,
     pub name: String,
     pub params: Vec<LocalId>,
-    /// Destructuring for parameters (lambdas take plain names, so usually empty).
     pub body: HExpr,
     pub doc: Option<Arc<str>>,
     pub signature: String,
@@ -567,7 +566,6 @@ impl HPat {
         }
     }
 
-    /// Calls `f` on each direct subpattern.
     pub fn for_each_subpattern(&mut self, f: &mut impl FnMut(&mut HPat)) {
         match &mut self.kind {
             HPatKind::Tuple(ps) | HPatKind::Or(ps) | HPatKind::Variant { args: ps, .. } => ps.iter_mut().for_each(f),

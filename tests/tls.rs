@@ -65,11 +65,16 @@ let m = http.get("{base}/moved")?
 print(m.url == "{base}/hello")
 print(m.text()?)
 print(http.post("{base}/chunked", b"data")?.text()?)
+use up = http.upload("POST", "{base}/chunked")?
+up.write_str("streamed")?
+use resp = up.finish()?
+print(resp.body.read_text()?)
 "#
     );
     let r = run_with(&src, trusting);
-    assert_eq!(r.ok_stdout(), "200\nsecure hello\nSome(\"text/plain\")\ntrue\nsecure hello\nchunked over tls\n");
-    assert_eq!(server.requests.lock().unwrap().len(), 4);
+    assert_eq!(r.ok_stdout(), "200\nsecure hello\nSome(\"text/plain\")\ntrue\nsecure hello\nchunked over tls\nchunked over tls\n");
+    assert_eq!(server.requests.lock().unwrap().len(), 5);
+    assert_eq!(server.requests.lock().unwrap()[4].body, b"streamed");
 }
 
 #[test]
@@ -83,7 +88,7 @@ import net
 let e = http.get("https://localhost:{}/").unwrap_err()
 print(e.kind)
 print(e.message.contains("certificate"))
-let c = net.connect_tls("localhost", {})
+let c = net.connect_tls("localhost:{}")
 print(c.unwrap_err().message.contains("certificate"))
 "#,
         server.addr.port(),
@@ -107,7 +112,7 @@ import net
 let e = http.get("https://127.0.0.1:{}/").unwrap_err()
 print(e.kind)
 print(e.message)
-print(net.connect_tls("127.0.0.1", {}).is_err())
+print(net.connect_tls("127.0.0.1:{}").is_err())
 "#,
         server.addr.port(),
         echo.port()
@@ -126,7 +131,7 @@ fn connect_tls_reads_and_writes() {
     let src = format!(
         r#"
 import net
-let c = net.connect_tls("localhost", {})?
+let c = net.connect_tls("localhost:{}")?
 c.write_str("hello tls\n")?
 print(c.read_line()?)
 c.write(b"second\n")?
@@ -155,10 +160,10 @@ fn redirects_across_schemes() {
     let src = format!(
         r#"
 import http
-let a = http.get("http://{}/", headers: ["authorization": "secret"])?
+let a = http.get("http://{}/", headers: [("authorization", "secret")])?
 print(a.text()?)
 print(a.url)
-let b = http.get("https://localhost:{secure_port}/to-plain", headers: ["authorization": "secret"])?
+let b = http.get("https://localhost:{secure_port}/to-plain", headers: [("authorization", "secret")])?
 print(b.text()?)
 "#,
         up.addr
@@ -191,4 +196,28 @@ fn invalid_extra_root_fails_cleanly() {
     let r = run_with(&src, |c| c.policy(Policy::allow_all()).tls_root_certificates(vec![b"not a certificate".to_vec()]));
     let out = r.ok_stdout();
     assert!(out.starts_with("io\nTLS setup failed: invalid root certificate #1"), "{out}");
+}
+
+#[test]
+fn closing_a_tls_connection_sends_close_notify() {
+    // The server reports how the client's side of the session ended.
+    let (addr_tx, addr_rx) = std::sync::mpsc::channel();
+    let (end_tx, end_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        common::rt().block_on(async move {
+            use tokio::io::AsyncReadExt;
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            addr_tx.send(listener.local_addr().unwrap()).unwrap();
+            let (sock, _) = listener.accept().await.unwrap();
+            let mut stream = tls_acceptor().accept(sock).await.unwrap();
+            let mut buf = Vec::new();
+            end_tx.send(stream.read_to_end(&mut buf).await.map(|_| buf).map_err(|e| e.kind())).unwrap();
+        });
+    });
+    let addr: std::net::SocketAddr = addr_rx.recv().unwrap();
+    let src = format!("import net\nuse c = net.connect_tls(\"localhost:{}\")?\nc.write_str(\"bye\")?", addr.port());
+    let r = run_with(&src, trusting);
+    assert_eq!(r.ok_stdout(), "");
+    let end = end_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+    assert_eq!(end, Ok(b"bye".to_vec()), "a clean TLS shutdown");
 }

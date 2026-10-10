@@ -61,7 +61,7 @@ fn parse_page(url: str, status: int, html: str) -> Result<Page> {
 }
 
 fn fetch(url: str) -> Result<Page> {
-    let resp = http.get(url, headers: ["user-agent": "sand-fetch/0.1"], timeout: 10s)?
+    let resp = http.get(url, headers: [("user-agent", "sand-fetch/0.1")], timeout: 10s)?
     if not resp.ok() {
         return Err(error("\(url) returned status \(resp.status)", kind: "http"))
     }

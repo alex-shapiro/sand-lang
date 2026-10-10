@@ -1,10 +1,11 @@
 /// Redirects followed before a request fails with "too many redirects".
 let MAX_REDIRECTS = 10
 
-/// An HTTP response. Header names are lower-cased.
+/// An HTTP response, read completely (see `request`). Header names are
+/// lower-cased; a header sent several times occurs several times, in order.
 pub struct Response {
     status: int
-    headers: [str: str]
+    headers: [(str, str)]
     body: bytes
     /// The URL that produced this response (after redirects).
     url: str
@@ -24,14 +25,89 @@ pub struct Response {
         self.status >= 200 and self.status <= 299
     }
 
-    /// The value of header `name` (case-insensitive).
+    /// The value of header `name` (case-insensitive); the first if it was
+    /// sent several times.
     fn header(self, name: str) -> str? {
-        self.headers.get(name.to_lower())
+        find_header(self.headers, name)
+    }
+
+    /// Every value of header `name` (case-insensitive), in order.
+    fn header_values(self, name: str) -> [str] {
+        header_values(self.headers, name)
     }
 }
 
+/// A response whose body is read as it arrives (see `open`): a body that
+/// does not fit in memory can be processed, or copied to a file
+/// (`io.copy(resp.body, file)`), a chunk at a time. Its connection stays
+/// open until the body has been read to its end or the response is closed.
+pub struct Stream {
+    status: int
+    headers: [(str, str)]
+    body: Body
+    /// The URL that produced this response (after redirects).
+    url: str
+
+    /// True for a 2xx status.
+    fn ok(self) -> bool {
+        self.status >= 200 and self.status <= 299
+    }
+
+    /// The value of header `name` (case-insensitive); the first if it was
+    /// sent several times.
+    fn header(self, name: str) -> str? {
+        find_header(self.headers, name)
+    }
+
+    /// Every value of header `name` (case-insensitive), in order.
+    fn header_values(self, name: str) -> [str] {
+        header_values(self.headers, name)
+    }
+}
+
+impl Close for Stream {
+    /// Closes the body, and with it the connection.
+    fn close(self) {
+        self.body.close()
+    }
+}
+
+/// A message body, read as it arrives. Reading it to its end releases its
+/// connection. `read_all` and `read_text` read at most `max_http_body`
+/// bytes (kind `"limit"` beyond); each wait for data is bounded by the
+/// request's `timeout`.
+pub native type Body
+
+impl io.Reader for Body {
+    native fn read(self, max: int) -> Result<bytes>
+    native fn read_line(self) -> Result<str?>
+    native fn read_all(self) -> Result<bytes>
+}
+
+impl Close for Body {
+    /// Stops reading; the connection is closed.
+    native fn close(self)
+}
+
+/// The first value of header `name` (compared case-insensitively).
+fn find_header(headers: [(str, str)], name: str) -> str? {
+    let lower = name.to_lower()
+    for (k, v) in headers {
+        if k == lower or k.to_lower() == lower {
+            return Some(v)
+        }
+    }
+    None
+}
+
+/// Every value of header `name` (compared case-insensitively).
+fn header_values(headers: [(str, str)], name: str) -> [str] {
+    let lower = name.to_lower()
+    [v for (k, v) in headers if k == lower or k.to_lower() == lower]
+}
+
 /// Sends a `GET` request, following redirects.
-pub fn get(url: str, headers: [str: str] = [:], timeout: duration = 30s) -> Result<Response> {
+pub fn get(url: str, headers: [(str, str)] = [], timeout: duration = 30s) -> Result<Response> {
     request("GET", url, headers: headers, timeout: timeout)
 }
 
@@ -39,25 +115,50 @@ pub fn get(url: str, headers: [str: str] = [:], timeout: duration = 30s) -> Resu
 pub fn post(
     url: str,
     body: bytes,
-    headers: [str: str] = [:],
+    headers: [(str, str)] = [],
     timeout: duration = 30s,
 ) -> Result<Response> {
     request("POST", url, headers: headers, body: body, timeout: timeout)
 }
 
-/// Sends a request. `timeout` applies to each exchange (including every
-/// redirect hop). Redirects (301, 302, 303, 307, 308) are followed up to 10
-/// times unless `follow_redirects` is false; a 303 turns the request into a
-/// `GET` without a body. In the browser, redirects are not followed: a
-/// redirect fails with kind `"http"`. Non-2xx statuses are not errors.
+/// Sends a request and reads the whole response. `timeout` bounds
+/// connecting and receiving the response's head (at every redirect hop),
+/// and then each wait for its body. Redirects (301, 302, 303, 307, 308)
+/// are followed up to 10 times unless `follow_redirects` is false; a 303
+/// turns the request into a `GET` without a body. In the browser,
+/// redirects are not followed: a redirect fails with kind `"http"`.
+/// Non-2xx statuses are not errors. Bodies larger than `max_http_body`
+/// fail with kind `"limit"`.
 pub fn request(
     method: str,
     url: str,
-    headers: [str: str] = [:],
+    headers: [(str, str)] = [],
     body: bytes = b"",
     timeout: duration = 30s,
     follow_redirects: bool = true,
 ) -> Result<Response> {
+    use s = open(method, url, headers: headers, body: body, timeout: timeout, follow_redirects: follow_redirects)?
+    let data = s.body.read_all()?
+    Ok(Response { status: s.status, headers: s.headers, body: data, url: s.url })
+}
+
+/// Sends a request like `request`, returning once the response's head has
+/// arrived: its body is read as it arrives. Close the stream (or bind it
+/// with `use`) when done with it.
+///
+/// ```
+/// use resp = http.open("GET", "https://example.com/big.iso")?
+/// use out = fs.open("big.iso", fs.Mode.Write)?
+/// io.copy(resp.body, out)?
+/// ```
+pub fn open(
+    method: str,
+    url: str,
+    headers: [(str, str)] = [],
+    body: bytes = b"",
+    timeout: duration = 30s,
+    follow_redirects: bool = true,
+) -> Result<Stream> {
     var current_url = url
     var current_method = method
     var current_headers = headers
@@ -71,11 +172,12 @@ pub fn request(
             current_body,
             timeout,
         )?
-        let response = Response { status, headers: resp_headers, body: resp_body, url: current_url }
+        let response = Stream { status, headers: resp_headers, body: resp_body, url: current_url }
         if not follow_redirects or not [301, 302, 303, 307, 308].contains(status) {
             return Ok(response)
         }
-        let Some(location) = resp_headers.get("location") else { return Ok(response) }
+        let Some(location) = response.header("location") else { return Ok(response) }
+        response.close()
         if redirects == MAX_REDIRECTS {
             return Err(error("too many redirects", kind: "http"))
         }
@@ -84,29 +186,27 @@ pub fn request(
         if not same_origin(current_url, next) {
             // Never leak credentials to another origin.
             current_headers = current_headers.filter(
-                (k, _) => not ["authorization", "cookie", "host"].contains(k.to_lower()),
+                h => not ["authorization", "cookie", "host"].contains(h.0.to_lower()),
             )
         }
         if status == 303 and current_method != "HEAD" {
             current_method = "GET"
             current_body = b""
-            current_headers = current_headers.filter(
-                (k, _) => not k.to_lower().starts_with("content-"),
-            )
+            current_headers = current_headers.filter(h => not h.0.to_lower().starts_with("content-"))
         }
         current_url = next
     }
 }
 
-/// Performs one request/response exchange: `(status, headers, body)`
-/// (over TCP, or with the browser's `fetch`).
+/// Performs one exchange up to the response's head: `(status, headers,
+/// body)` (over TCP, or with the browser's `fetch`).
 native fn send(
     method: str,
     url: str,
-    headers: [str: str],
+    headers: [(str, str)],
     body: bytes,
     timeout: duration,
-) -> Result<(int, [str: str], bytes)>
+) -> Result<(int, [(str, str)], Body)>
 
 /// Resolves a `Location` header against the URL that returned it.
 native fn resolve(base: str, location: str) -> Result<str>

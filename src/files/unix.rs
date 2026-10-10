@@ -1,34 +1,25 @@
 //! The host's file system on Unix: one walk per operation.
 //!
 //! [`resolve`] walks an absolute, lexically normal path from the root,
-//! opening directories without following symlinks (`openat` with
-//! `O_NOFOLLOW`; several components at once with `O_NOFOLLOW_ANY` on macOS
-//! and `openat2` with `RESOLVE_NO_SYMLINKS` on Linux). A symlink met on the
-//! way is read (`readlinkat`) and its target spliced into the rest of the
-//! path, as `realpath` does, so the walk itself follows symlinks, one
-//! checked step at a time. It ends holding the directory that contains the
-//! final entry ([`Resolved`]), with the canonical path the policy decides
-//! on: the names walked on Linux and other Unix systems (like `realpath`),
-//! and on macOS the kernel's path of the held directory (`F_GETPATH`),
-//! which names every directory as stored (case- and normalization-insensitive
-//! volumes accept other spellings) and through its firmlink
-//! (`/System/Volumes/Data/Users` is `/Users`).
+//! opening directories without following symlinks (`O_NOFOLLOW`, or several
+//! components at once with `O_NOFOLLOW_ANY` on macOS and `openat2` with
+//! `RESOLVE_NO_SYMLINKS` on Linux). A symlink met on the way is read and its
+//! target spliced into the rest of the path, as `realpath` does. The walk
+//! ends holding the directory containing the final entry ([`Resolved`]),
+//! with the canonical path the policy decides on: the names walked, or on
+//! macOS the kernel's path of the held directory (`F_GETPATH`), which spells
+//! directories as stored and resolves firmlinks.
 //!
-//! The operation then acts relative to the held directory on the final name,
-//! never following a final symlink (`O_NOFOLLOW`, `AT_SYMLINK_NOFOLLOW`,
-//! `unlinkat`, `renameat`, `mkdirat`). So it reaches exactly the checked
-//! entry: a symlink swapped into the path after the walk cannot redirect it
-//! (the directories are held; a symlink that replaces the final entry fails
-//! with [`unchecked_symlink`]).
+//! The operation then acts on the final name relative to the held
+//! directory, never following a final symlink, so it reaches exactly the
+//! checked entry: the directories are held, and a symlink that replaces the
+//! final entry fails with [`unchecked_symlink`].
 //!
-//! The final entry's own spelling: on macOS an existing entry may have been
-//! named differently (`data/SECRETS` for `data/secrets`), so its stored name
-//! is looked up on demand ([`Resolved::fix_spelling`]: `F_GETPATH` on the
-//! entry opened without following it, or a bounded scan of the directory);
-//! elsewhere names are kept as given, except that of a symlink entry itself,
-//! which is looked up by a scan as before.
+//! On macOS, and for a symlink entry itself, an existing final entry may be
+//! stored under another spelling (`data/SECRETS` for `data/secrets`);
+//! [`Resolved::fix_spelling`] looks it up on demand.
 
-use super::{EntryKind, EntryMeta, Mode, Work, unchecked_symlink};
+use super::{EntryKind, EntryMeta, Mode, OpenMode, Work, unchecked_symlink};
 use crate::policy::{MAX_LINK_SCAN, fold_name};
 use crate::vm::iomem::Reservation;
 use rustix::fs::{AtFlags, FileType, Mode as Perm, OFlags, Stat};
@@ -53,6 +44,9 @@ const ENTRY_OVERHEAD: usize = 2 * std::mem::size_of::<OsString>();
 const TRAVERSE: OFlags = OFlags::PATH.union(OFlags::DIRECTORY).union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
 #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "freebsd")))]
 const TRAVERSE: OFlags = OFlags::RDONLY.union(OFlags::DIRECTORY).union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
+
+/// The most directories a recursive removal holds open at once.
+const OPEN_LEVELS: usize = 16;
 
 /// Flags for opening the final entry as a file (non-blocking, so that
 /// opening a FIFO cannot hang; it is rejected afterwards).
@@ -505,7 +499,7 @@ impl Walk {
                 let dir_path = dir_path(&dir, &self.names);
                 Resolved { dir: Some(dir), dir_path, rest, stop: None, entry, exact, file: None, mode, work }
             }
-            // (The root cannot be opened.)
+            // The root cannot be opened.
             Err(e) => {
                 let stop = Some(Stop::Errno(Errno::from_io_error(&e).unwrap_or(Errno::IO)));
                 let rest = std::mem::take(&mut self.names).into_iter().chain(rest).collect();
@@ -567,7 +561,7 @@ fn stored_by_path(dir: &OwnedFd, dir_path: &Path, entry: &Stat, name: &OsStr) ->
         return None;
     }
     let path = PathBuf::from(OsString::from_vec(rustix::fs::getpath(&fd).ok()?.into_bytes()));
-    // (A file with several hard links is named by the one last looked up.)
+    // A file with several hard links is named by the one last looked up.
     let stored = path.file_name()?;
     if path.parent() != Some(dir_path) || fold_name(&stored.to_string_lossy()) != fold_name(&name.to_string_lossy()) {
         return None;
@@ -699,10 +693,25 @@ impl Resolved {
     /// Opens a regular file for writing, creating it if needed; truncates it
     /// unless `append`.
     pub fn open_write(self, path: &Path, append: bool) -> io::Result<File> {
+        self.open(path, if append { OpenMode::Append } else { OpenMode::Write })
+    }
+
+    /// Opens the regular file for `mode`.
+    pub fn open(self, path: &Path, mode: OpenMode) -> io::Result<File> {
+        if mode == OpenMode::Read {
+            return self.open_read(path);
+        }
         let (dir, Some(name)) = self.at()? else {
             return Err(Errno::ISDIR.into());
         };
-        let flags = OFlags::WRONLY | OFlags::CREATE | FILE | if append { OFlags::APPEND } else { OFlags::TRUNC };
+        let flags = FILE
+            | match mode {
+                OpenMode::Read => OFlags::RDONLY,
+                OpenMode::Write => OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC,
+                OpenMode::Append => OFlags::WRONLY | OFlags::CREATE | OFlags::APPEND,
+                OpenMode::CreateNew => OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL,
+                OpenMode::ReadWrite => OFlags::RDWR,
+            };
         let fd = rustix::fs::openat(dir, name, flags, Perm::from_raw_mode(0o666)).map_err(|e| nofollow_error(e, dir, name))?;
         if !file_type(&rustix::fs::fstat(&fd)?).is_file() {
             return Err(not_regular(path));
@@ -722,14 +731,14 @@ impl Resolved {
             EntryKind::Dir
         } else if t.is_symlink() {
             if self.mode == Mode::Follow {
-                // (The walk follows them.)
+                // The walk follows them.
                 return Err(unchecked_symlink(name.unwrap_or_default()));
             }
             EntryKind::Symlink
         } else {
             EntryKind::Other
         };
-        // (The field types differ between platforms.)
+        // The field types differ between platforms.
         #[allow(clippy::unnecessary_cast)]
         let (secs, nanos) = (st.st_mtime as i64, st.st_mtime_nsec as i64);
         let modified = secs.checked_mul(1_000_000_000).and_then(|n| n.checked_add(nanos));
@@ -815,6 +824,108 @@ impl Resolved {
     pub fn remove_dir(self) -> io::Result<()> {
         let (dir, name) = self.entry_at()?;
         Ok(rustix::fs::unlinkat(dir, name, AtFlags::REMOVEDIR)?)
+    }
+
+    /// Removes the directory entry and everything below it, opening each
+    /// directory relative to its parent without following symlinks. `check`
+    /// is asked about each entry below (by its stored path) before it is
+    /// removed; its error stops the removal. The names read are reserved in
+    /// `res`.
+    pub fn remove_tree<E>(
+        self,
+        res: &mut Reservation,
+        mut check: impl FnMut(&Path) -> Result<io::Result<()>, E>,
+    ) -> Result<io::Result<()>, E> {
+        macro_rules! io {
+            ($e:expr) => {
+                match $e {
+                    Ok(v) => v,
+                    Err(e) => return Ok(Err(e.into())),
+                }
+            };
+        }
+        let (dir, name) = io!(self.entry_at());
+        if !file_type(&io!(rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW))).is_dir() {
+            return Ok(Err(Errno::NOTDIR.into()));
+        }
+        /// A directory being emptied: its path, the names left to remove
+        /// and its own name in its parent, and while it is held open, its
+        /// descriptor.
+        struct Level {
+            fd: Option<OwnedFd>,
+            path: PathBuf,
+            names: Vec<OsString>,
+            name: OsString,
+        }
+        fn open(at: &OwnedFd, name: &OsStr) -> io::Result<OwnedFd> {
+            let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+            rustix::fs::openat(at, name, flags, Perm::empty()).map_err(|e| nofollow_error(e, at, name))
+        }
+        /// Opens level `i` again if it was closed, by name from its nearest
+        /// open ancestor (the first level always is).
+        fn reopen(levels: &mut [Level], i: usize) -> io::Result<()> {
+            let from = (0..=i).rev().find(|&j| levels[j].fd.is_some()).expect("the first level stays open");
+            let mut fd: Option<OwnedFd> = None;
+            for k in from + 1..=i {
+                let at = fd.as_ref().or(levels[from].fd.as_ref()).expect("open");
+                fd = Some(open(at, &levels[k].name)?);
+            }
+            if fd.is_some() {
+                levels[i].fd = fd;
+            }
+            Ok(())
+        }
+        let names = |fd: &OwnedFd, res: &mut Reservation| -> io::Result<Vec<OsString>> {
+            let mut names = Vec::new();
+            for entry in read_dir(fd)? {
+                let entry = entry?;
+                let n = entry.file_name().to_bytes();
+                if n != b"." && n != b".." {
+                    res.grow(n.len() + ENTRY_OVERHEAD)?;
+                    names.push(OsStr::from_bytes(n).to_os_string());
+                }
+            }
+            Ok(names)
+        };
+        let fd = io!(open(dir, name));
+        let list = io!(names(&fd, res));
+        let mut levels = vec![Level { fd: Some(fd), path: self.path(), names: list, name: name.to_os_string() }];
+        while let Some(top) = levels.last_mut() {
+            let Some(name) = top.names.pop() else {
+                let done = levels.pop().expect("a level");
+                drop(done.fd);
+                let parent = match levels.len() {
+                    0 => dir,
+                    n => {
+                        io!(reopen(&mut levels, n - 1));
+                        levels[n - 1].fd.as_ref().expect("reopened")
+                    }
+                };
+                io!(rustix::fs::unlinkat(parent, &done.name, AtFlags::REMOVEDIR));
+                continue;
+            };
+            let path = top.path.join(&name);
+            if let Err(e) = check(&path)? {
+                return Ok(Err(e));
+            }
+            let at = top.fd.as_ref().expect("the innermost level is open");
+            let st = io!(rustix::fs::statat(at, &name, AtFlags::SYMLINK_NOFOLLOW));
+            if file_type(&st).is_dir() {
+                let fd = io!(open(at, &name));
+                let list = io!(names(&fd, res));
+                levels.push(Level { fd: Some(fd), path, names: list, name });
+                // However deep the tree, a bounded number of directories
+                // stay open: the first, and the innermost ones.
+                if levels.iter().filter(|l| l.fd.is_some()).count() > OPEN_LEVELS
+                    && let Some(l) = levels[1..].iter_mut().find(|l| l.fd.is_some())
+                {
+                    l.fd = None;
+                }
+            } else {
+                io!(rustix::fs::unlinkat(at, &name, AtFlags::empty()));
+            }
+        }
+        Ok(Ok(()))
     }
 
     /// Renames the entry `from` (a final symlink itself) to `to`.
@@ -933,7 +1044,7 @@ mod tests {
         assert_eq!(follow(&dir.join("real/root")).path(), Path::new("/"));
         assert_eq!(follow(&dir.join("real/a/b/far")).path(), Path::new("/"));
         assert_eq!(follow(&dir.join("real/a/b/parent")).stat().unwrap().kind, EntryKind::Dir);
-        let mem = crate::vm::iomem::IoMemory::new(None);
+        let mem = crate::vm::iomem::IoMemory::new(None, usize::MAX);
         let names = follow(&dir.join("real/a/b/parent")).list_dir(&mut Reservation::new(&mem)).unwrap();
         assert_eq!(names.len(), 2);
         assert_eq!(follow(Path::new("/")).path(), Path::new("/"));
@@ -974,7 +1085,7 @@ mod tests {
         follow(&dir.join("real/a")).create_dir().unwrap();
         follow(&dir.join("real/a/b")).create_dir().unwrap();
         assert_eq!(follow(&dir.join("real/a/b")).create_dir().unwrap_err().kind(), io::ErrorKind::AlreadyExists);
-        let mem = crate::vm::iomem::IoMemory::new(None);
+        let mem = crate::vm::iomem::IoMemory::new(None, usize::MAX);
         assert_eq!(follow(&dir.join("real/a")).list_dir(&mut Reservation::new(&mem)).unwrap(), ["b"]);
         assert_eq!(follow(&dir.join("real/a")).open_read(Path::new("x")).unwrap_err().kind(), io::ErrorKind::InvalidInput);
         assert_eq!(follow(&dir.join("real/missing")).open_read(Path::new("x")).unwrap_err().kind(), io::ErrorKind::NotFound);
@@ -1023,7 +1134,7 @@ mod tests {
         }
         deep.push(&rel);
         std::fs::create_dir_all(&deep).unwrap_or_else(|_| {
-            // (`create_dir_all` uses whole paths: create it in pieces.)
+            // `create_dir_all` uses whole paths: create it in pieces.
             let mut p = dir.join("real");
             for c in rel.components() {
                 p.push(c);
@@ -1037,8 +1148,7 @@ mod tests {
         let mut s = String::new();
         follow(&deep.join("f.txt")).open_read(Path::new("x")).unwrap().read_to_string(&mut s).unwrap();
         assert_eq!(s, "deep");
-        // Through symlinks at the bottom.
-        // (Path-based calls cannot reach the deep directory.)
+        // Through symlinks at the bottom, which path-based calls cannot reach.
         let held = follow(&deep.join("x")).dir.unwrap();
         rustix::fs::symlinkat("../../..", &held, "up").unwrap();
         rustix::fs::symlinkat(dir.join("outside"), &held, "out").unwrap();
@@ -1046,7 +1156,7 @@ mod tests {
         assert_eq!(follow(&deep.join("up/x")).path(), above.join("x"));
         assert_eq!(follow(&deep.join("out/file.txt")).path(), dir.join("outside/file.txt"));
         assert_eq!(entry(&deep.join("up")).stat().unwrap().kind, EntryKind::Symlink);
-        // (`remove_dir_all` cannot remove it either.)
+        // `remove_dir_all` cannot remove it either.
         for name in ["f.txt", "up", "out"] {
             entry(&deep.join(name)).remove_file().unwrap();
         }

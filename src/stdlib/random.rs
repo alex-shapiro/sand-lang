@@ -101,15 +101,14 @@ fn shuffle(vm: &mut Vm, rng: &mut Rng, a: &[Value]) -> NResult {
     Ok(Value::Unit)
 }
 
-/// A partial Fisher-Yates shuffle of a copy.
+/// A partial Fisher-Yates shuffle of the positions, recording only those it
+/// has disturbed (the element now at each).
 fn sample(vm: &mut Vm, rng: &mut Rng, a: &[Value]) -> NResult {
     let items = vm.heap.list(a[0]);
     let n = items.len();
     let k = a[1].as_int().clamp(0, n as i64) as usize;
     vm.reserve(k.saturating_mul(2 * std::mem::size_of::<Value>()))?;
     vm.charge(k as u64)?;
-    // A partial Fisher-Yates shuffle of the positions, recording only the
-    // positions it has disturbed (the element now at each).
     let mut moved: FxHashMap<usize, usize> = FxHashMap::default();
     let mut out = Vec::with_capacity(k);
     for i in 0..k {
