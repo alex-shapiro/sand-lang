@@ -1,12 +1,12 @@
 """Deterministic input generators for the example benchmarks.
 
-Everything here is a pure function of a fixed seed, so the Sand and Python
-programs always see byte-identical inputs, and a run is reproducible.
+Everything here is a pure function of a fixed seed, so the Sand program and
+its ports always see byte-identical inputs, and a run is reproducible.
 
 `run.py` imports this module; it can also be run on its own to materialize
 all inputs (useful for profiling a single workload by hand):
 
-    python3.14 bench/examples/gen.py OUT_DIR
+    python3.14 bench/gen.py OUT_DIR
 """
 
 import json
@@ -14,9 +14,9 @@ import random
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES = ROOT / "examples"
-PY_PORTS = Path(__file__).resolve().parent / "python"
+PORTS = Path(__file__).resolve().parent / "ports"
 
 # Syllables for synthetic but word-like vocabulary.
 _SYLLABLES = [
@@ -105,13 +105,18 @@ def life_board(
     )
 
 
-def write_life_bench(out: Path) -> tuple[Path, Path]:
-    board = life_board()
-    sand = out / "life_bench.sand"
-    py = out / "life_bench.py"
-    sand.write_text(_substitute(EXAMPLES / "life.sand", GLIDER_BLOCK, board))
-    py.write_text(_substitute(PY_PORTS / "life.py", GLIDER_BLOCK, board))
-    return sand, py
+def _write_variants(out: Path, name: str, block: str, data: str) -> dict[str, Path]:
+    """The example `name` and its ports with `block` replaced by `data`, by implementation."""
+    sources = {"sand": EXAMPLES / f"{name}.sand", "python": PORTS / "python" / f"{name}.py", "lua": PORTS / "lua" / f"{name}.lua"}
+    paths = {}
+    for impl, src in sources.items():
+        paths[impl] = out / f"{name}_bench{src.suffix}"
+        paths[impl].write_text(_substitute(src, block, data))
+    return paths
+
+
+def write_life_bench(out: Path) -> dict[str, Path]:
+    return _write_variants(out, "life", GLIDER_BLOCK, life_board())
 
 
 # ---------------------------------------------------------------------------
@@ -170,13 +175,8 @@ def ledger_lines(n: int = 120_000, seed: int = 2) -> str:
     return "".join(lines)
 
 
-def write_ledger_bench(out: Path) -> tuple[Path, Path]:
-    data = ledger_lines()
-    sand = out / "ledger_bench.sand"
-    py = out / "ledger_bench.py"
-    sand.write_text(_substitute(EXAMPLES / "ledger.sand", LEDGER_BLOCK, data))
-    py.write_text(_substitute(PY_PORTS / "ledger.py", LEDGER_BLOCK, data))
-    return sand, py
+def write_ledger_bench(out: Path) -> dict[str, Path]:
+    return _write_variants(out, "ledger", LEDGER_BLOCK, ledger_lines())
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,56 @@
+// Benchmarks Game fannkuch-redux: count prefix reversals over all permutations.
+// Stresses small integer lists: copying, in-place reversal and rotation.
+
+let N = 9
+
+fn flip_count(perm: [int]) -> int {
+    var flips = 0
+    var k = perm[0]
+    while k != 0 {
+        var i = 0
+        var j = k
+        while i < j {
+            perm.swap(i, j)
+            i += 1
+            j -= 1
+        }
+        flips += 1
+        k = perm[0]
+    }
+    flips
+}
+
+/// Returns the checksum and the maximum number of flips over all permutations of `0..n`.
+fn fannkuch(n: int) -> (int, int) {
+    let perm = (0..n).to_list()
+    let count = [0; n]
+    var max_flips = 0
+    var checksum = 0
+    var sign = 1
+    var r = n
+    loop {
+        while r != 1 {
+            count[r - 1] = r
+            r -= 1
+        }
+        let flips = flip_count(perm.copy())
+        max_flips = max_flips.max(flips)
+        checksum += sign * flips
+        sign = -sign
+        loop {
+            if r == n {
+                return (checksum, max_flips)
+            }
+            perm.insert(r, perm.remove(0))
+            count[r] -= 1
+            if count[r] > 0 {
+                break
+            }
+            r += 1
+        }
+    }
+}
+
+let (checksum, max_flips) = fannkuch(N)
+print(checksum)
+print("Pfannkuchen(\(N)) = \(max_flips)")

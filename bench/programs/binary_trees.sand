@@ -1,0 +1,41 @@
+// Benchmarks Game binary-trees: build and walk many perfect binary trees.
+// Stresses allocation of small structs, Option fields, recursion and the GC.
+
+let MIN_DEPTH = 4
+let MAX_DEPTH = 15
+
+struct Node {
+    left: Node?
+    right: Node?
+
+    fn bottom_up(depth: int) -> Node {
+        if depth == 0 {
+            Node { left: None, right: None }
+        } else {
+            Node { left: Some(Node.bottom_up(depth - 1)), right: Some(Node.bottom_up(depth - 1)) }
+        }
+    }
+
+    fn check(self) -> int {
+        match (self.left, self.right) {
+            (Some(l), Some(r)) => 1 + l.check() + r.check()
+            _ => 1
+        }
+    }
+}
+
+let stretch_depth = MAX_DEPTH + 1
+print("stretch tree of depth \(stretch_depth)\t check: \(Node.bottom_up(stretch_depth).check())")
+
+let long_lived = Node.bottom_up(MAX_DEPTH)
+
+for depth in (MIN_DEPTH..=MAX_DEPTH).step_by(2) {
+    let iterations = 1 << (MAX_DEPTH - depth + MIN_DEPTH)
+    var check = 0
+    for _ in 0..iterations {
+        check += Node.bottom_up(depth).check()
+    }
+    print("\(iterations)\t trees of depth \(depth)\t check: \(check)")
+}
+
+print("long lived tree of depth \(MAX_DEPTH)\t check: \(long_lived.check())")

@@ -168,7 +168,7 @@ impl Vm {
             }
             IterSrc::Map { map, slot } => match map_entry(&self.heap, map, slot) {
                 Some((s, k, v)) => {
-                    let pair = self.heap.alloc(Obj::Tuple(Box::new([k, v])));
+                    let pair = self.heap.new_tuple(&[k, v]);
                     (Some(pair), IterSrc::Map { map, slot: s + 1 })
                 }
                 None => (None, IterSrc::Done),

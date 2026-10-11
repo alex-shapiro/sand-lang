@@ -1,0 +1,89 @@
+// Dijkstra's shortest paths from several sources over a random weighted digraph.
+// Stresses tuple allocation and destructuring, list indexing, small methods
+// and a binary heap written in Sand.
+
+let NODES = 40_000
+let MAX_OUT_DEGREE = 9
+let SOURCES = 8
+let INF = int.max_value()
+
+struct Rng {
+    var state: int
+
+    fn next(self, bound: int) -> int {
+        self.state = (self.state * 1103515245 + 12345) % 2147483648
+        self.state * bound / 2147483648
+    }
+}
+
+/// A binary min-heap of `(dist, node)` pairs.
+struct Heap {
+    var items: [(int, int)]
+
+    fn push(self, item: (int, int)) {
+        self.items.push(item)
+        var i = self.items.len() - 1
+        while i > 0 {
+            let parent = (i - 1) / 2
+            if self.items[parent] <= self.items[i] { break }
+            self.items.swap(i, parent)
+            i = parent
+        }
+    }
+
+    fn pop(self) -> (int, int)? {
+        let last = self.items.pop()?
+        if self.items.is_empty() { return Some(last) }
+        let top = self.items[0]
+        self.items[0] = last
+        let n = self.items.len()
+        var i = 0
+        loop {
+            let left = 2 * i + 1
+            if left >= n { break }
+            let right = left + 1
+            let child = if right < n and self.items[right] < self.items[left] {
+                right
+            } else {
+                left
+            }
+            if self.items[i] <= self.items[child] { break }
+            self.items.swap(i, child)
+            i = child
+        }
+        Some(top)
+    }
+}
+
+fn random_edges(rng: Rng) -> [(int, int)] {
+    let degree = 1 + rng.next(MAX_OUT_DEGREE)
+    [(rng.next(NODES), 1 + rng.next(100)) for _ in 0..degree]
+}
+
+fn random_graph(rng: Rng) -> [[(int, int)]] { [random_edges(rng) for _ in 0..NODES] }
+
+fn shortest_paths(graph: [[(int, int)]], source: int) -> [int] {
+    let dist = [INF; graph.len()]
+    dist[source] = 0
+    let heap = Heap { items: [] }
+    heap.push((0, source))
+    while let Some((d, u)) = heap.pop() {
+        if d > dist[u] { continue }
+        for (v, w) in graph[u] {
+            let nd = d + w
+            if nd < dist[v] {
+                dist[v] = nd
+                heap.push((nd, v))
+            }
+        }
+    }
+    dist
+}
+
+let rng = Rng { state: 42 }
+let graph = random_graph(rng)
+for _ in 0..SOURCES {
+    let source = rng.next(NODES)
+    let reached = shortest_paths(graph, source).filter(d => d < INF)
+    print("source \(source): reached \(reached.len()), max \(reached.max().unwrap()), sum \(reached.sum())")
+}

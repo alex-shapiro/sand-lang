@@ -82,6 +82,8 @@ pub(crate) struct FuseFns {
     roles: HashMap<FnId, Role>,
     /// The native id of `[T].enumerate` (see `enumerate_for`).
     list_enumerate: Option<u32>,
+    /// The native id of `str.chars` (see `chars_source`).
+    str_chars: Option<u32>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -111,6 +113,8 @@ struct Chain {
 enum Func {
     Tmp(LocalId),
     Inline(Box<HLambda>),
+    /// A script function, called directly.
+    Fn(FnId),
 }
 
 /// The run-time state of a stage in the fused loop.
@@ -164,14 +168,17 @@ impl Checker<'_> {
     fn find_fuse_fns(&self) -> FuseFns {
         let mut roles = HashMap::new();
         let mut list_enumerate = None;
-        let (Some(iter), Some(prelude)) = (self.iter_struct, self.prelude) else { return FuseFns { roles, list_enumerate } };
+        let mut str_chars = None;
+        let (Some(iter), Some(prelude)) = (self.iter_struct, self.prelude) else { return FuseFns { roles, list_enumerate, str_chars } };
         for (id, fi) in self.fns.iter().enumerate() {
             if fi.module != prelude || !fi.has_self {
                 continue;
             }
             let name = self.name(fi.name);
-            if let (Some(Ctor::List), "enumerate", super::FnKind::Native(n)) = (&fi.owner, name, &fi.kind) {
-                list_enumerate = Some(*n);
+            match (&fi.owner, name, &fi.kind) {
+                (Some(Ctor::List), "enumerate", super::FnKind::Native(n)) => list_enumerate = Some(*n),
+                (Some(Ctor::Str), "chars", super::FnKind::Native(n)) => str_chars = Some(*n),
+                _ => {}
             }
             let eager = |range: bool, stage: Option<Adapter>, consumer: Consumer| Role::Eager { range, stage, consumer };
             let role = match (&fi.owner, name) {
@@ -220,7 +227,7 @@ impl Checker<'_> {
             };
             roles.insert(id as FnId, role);
         }
-        FuseFns { roles, list_enumerate }
+        FuseFns { roles, list_enumerate, str_chars }
     }
 
     fn iter_elem(&self, t: TypeId) -> Option<TypeId> {
@@ -309,6 +316,11 @@ impl Checker<'_> {
     /// of the fused loop. A lambda literal that cannot `return` (or use `?`)
     /// is inlined there: its locals become locals of the enclosing function.
     fn func(&mut self, e: HExpr, out: &mut Vec<HExpr>) -> Func {
+        if let HKind::FnValue(f) = e.kind
+            && self.fns[f as usize].dicts.is_empty()
+        {
+            return Func::Fn(f);
+        }
         if let HKind::Lambda(lam) = &e.kind
             && lam.self_local.is_none()
         {
@@ -343,6 +355,7 @@ impl Checker<'_> {
     fn apply(&mut self, f: Func, args: Vec<HExpr>, ret: TypeId, span: Span) -> HExpr {
         match f {
             Func::Tmp(l) => self.call_local(l, args, ret, span),
+            Func::Fn(f) => mk(HKind::Call { func: f, args: args.into_iter().map(HArg::Expr).collect() }, ret, span),
             Func::Inline(lam) => {
                 let lam = *lam;
                 let mut stmts: Vec<HExpr> = lam.params.iter().zip(args).map(|(&p, a)| let_(p, a.ty, a, span)).collect();
@@ -374,6 +387,11 @@ impl Checker<'_> {
                 mk(HKind::Field { obj: Box::new(source), index: 0 }, next_ty, span)
             }
             _ => source,
+        };
+        // `s.chars()` is a loop over the characters of `s`.
+        let (source, list_kind) = match self.chars_source(source) {
+            Ok(s) => (s, IterKind::Chars),
+            Err(source) => (source, IterKind::List),
         };
         let src_ty = source.ty;
         let src = self.bind_tmp(source, &mut setup);
@@ -459,7 +477,7 @@ impl Checker<'_> {
 
         let lp = match kind {
             SourceKind::List | SourceKind::Range => {
-                let iter_kind = if kind == SourceKind::List { IterKind::List } else { IterKind::Range };
+                let iter_kind = if kind == SourceKind::List { list_kind } else { IterKind::Range };
                 top.extend(stmts);
                 let pat = bind(x0, elem, span);
                 mk(
@@ -496,6 +514,22 @@ impl Checker<'_> {
 
     fn none_rt(&self) -> u32 {
         self.types[self.wk.option as usize].variants()[1].rt_id
+    }
+
+    /// The string `s` of `s.chars()` (`Err(e)` for any other `e`), whose
+    /// characters a loop can visit without building the list.
+    pub(crate) fn chars_source(&mut self, e: HExpr) -> Result<HExpr, HExpr> {
+        if self.fuse_fns.is_none() {
+            let _ = self.fuse_role(0);
+        }
+        let chars = self.fuse_fns.as_ref().and_then(|t| t.str_chars);
+        match e.kind {
+            HKind::CallNative { native, args, .. } if Some(native) == chars && matches!(args[..], [HArg::Expr(_)]) => {
+                let Some(HArg::Expr(s)) = args.into_iter().next() else { unreachable!() };
+                Ok(s)
+            }
+            _ => Err(e),
+        }
     }
 
     /// Whether a loop over `iter` binding `pat` is `for (i, x) in

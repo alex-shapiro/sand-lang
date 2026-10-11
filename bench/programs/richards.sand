@@ -1,0 +1,287 @@
+// Richards: the classic operating-system scheduler simulation (V8 / "Are We Fast Yet" version).
+// Six tasks of four kinds pass packets through linked queues until the idle task runs out.
+// Stresses method calls, `var` field mutation, Option links, and enum dispatch.
+
+let ITERATIONS = 40
+let COUNT = 10000
+let DATA_SIZE = 4
+
+let ID_IDLE = 0
+let ID_WORKER = 1
+let ID_HANDLER_A = 2
+let ID_HANDLER_B = 3
+let ID_DEVICE_A = 4
+let ID_DEVICE_B = 5
+let NUMBER_OF_IDS = 6
+
+enum PacketKind {
+    Device
+    Work
+}
+
+struct Packet {
+    var link: Packet?
+    var id: int
+    kind: PacketKind
+    var a1: int = 0
+    a2: [int] = [0; DATA_SIZE]
+
+    /// Appends this packet to the end of `queue` and returns the queue's head.
+    fn add_to(self, queue: Packet?) -> Packet {
+        self.link = None
+        let Some(head) = queue else { return self }
+        var next = head
+        while let Some(peek) = next.link {
+            next = peek
+        }
+        next.link = Some(self)
+        head
+    }
+}
+
+struct IdleState {
+    var v1: int
+    var count: int
+}
+
+struct WorkerState {
+    var dest: int
+    var v2: int
+}
+
+struct HandlerState {
+    var work: Packet? = None
+    var devices: Packet? = None
+}
+
+struct DeviceState {
+    var pending: Packet? = None
+}
+
+enum Task {
+    Idle(IdleState)
+    Worker(WorkerState)
+    Handler(HandlerState)
+    Device(DeviceState)
+
+    fn run(self, s: Scheduler, packet: Packet?) -> Tcb? {
+        match self {
+            Idle(t) => {
+                t.count -= 1
+                if t.count == 0 {
+                    return s.hold_current()
+                }
+                if t.v1 & 1 == 0 {
+                    t.v1 = t.v1 >> 1
+                    s.release(ID_DEVICE_A)
+                } else {
+                    t.v1 = (t.v1 >> 1) ^ 0xD008
+                    s.release(ID_DEVICE_B)
+                }
+            }
+            Worker(t) => {
+                let Some(p) = packet else { return s.suspend_current() }
+                t.dest = if t.dest == ID_HANDLER_A { ID_HANDLER_B } else { ID_HANDLER_A }
+                p.id = t.dest
+                p.a1 = 0
+                for i in 0..DATA_SIZE {
+                    t.v2 += 1
+                    if t.v2 > 26 {
+                        t.v2 = 1
+                    }
+                    p.a2[i] = t.v2
+                }
+                s.queue(p)
+            }
+            Handler(t) => {
+                if let Some(p) = packet {
+                    match p.kind {
+                        Work => { t.work = Some(p.add_to(t.work)) }
+                        Device => { t.devices = Some(p.add_to(t.devices)) }
+                    }
+                }
+                if let Some(work) = t.work {
+                    let count = work.a1
+                    if count < DATA_SIZE {
+                        if let Some(dev) = t.devices {
+                            t.devices = dev.link
+                            dev.a1 = work.a2[count]
+                            work.a1 = count + 1
+                            return s.queue(dev)
+                        }
+                    } else {
+                        t.work = work.link
+                        return s.queue(work)
+                    }
+                }
+                s.suspend_current()
+            }
+            Device(t) => {
+                match packet {
+                    Some(p) => {
+                        t.pending = Some(p)
+                        s.hold_current()
+                    }
+                    None => {
+                        let Some(v) = t.pending else { return s.suspend_current() }
+                        t.pending = None
+                        s.queue(v)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A task control block: one task, its packet queue and its scheduling state.
+struct Tcb {
+    link: Tcb?
+    id: int
+    priority: int
+    var queue: Packet?
+    task: Task
+    var packet_pending: bool
+    var waiting: bool = true
+    var holding: bool = false
+
+    fn held_or_suspended(self) -> bool {
+        self.holding or (not self.packet_pending and self.waiting)
+    }
+
+    fn run(self, s: Scheduler) -> Tcb? {
+        var packet: Packet? = None
+        if self.packet_pending and self.waiting and not self.holding {
+            let p = self.queue.unwrap()
+            self.queue = p.link
+            self.packet_pending = self.queue.is_some()
+            self.waiting = false
+            packet = Some(p)
+        }
+        self.task.run(s, packet)
+    }
+
+    /// Adds `packet` to this task's queue; returns the task that should run next.
+    fn check_priority_add(self, current: Tcb, packet: Packet) -> Tcb {
+        match self.queue {
+            None => {
+                self.queue = Some(packet)
+                self.packet_pending = true
+                if self.priority > current.priority {
+                    return self
+                }
+            }
+            Some(q) => { self.queue = Some(packet.add_to(Some(q))) }
+        }
+        current
+    }
+}
+
+struct Scheduler {
+    var list: Tcb? = None
+    var blocks: [Tcb?] = [None; NUMBER_OF_IDS]
+    var current: Tcb? = None
+    var current_id: int = 0
+    var queue_count: int = 0
+    var hold_count: int = 0
+
+    fn add_task(self, id: int, priority: int, queue: Packet?, task: Task) {
+        let tcb = Tcb {
+            link: self.list,
+            id,
+            priority,
+            queue,
+            task,
+            packet_pending: queue.is_some(),
+        }
+        self.list = Some(tcb)
+        self.blocks[id] = Some(tcb)
+        self.current = Some(tcb)
+    }
+
+    fn schedule(self) {
+        var next = self.list
+        while let Some(tcb) = next {
+            if tcb.held_or_suspended() {
+                next = tcb.link
+            } else {
+                self.current = Some(tcb)
+                self.current_id = tcb.id
+                next = tcb.run(self)
+            }
+        }
+    }
+
+    fn release(self, id: int) -> Tcb? {
+        let Some(tcb) = self.blocks[id] else { return None }
+        tcb.holding = false
+        let current = self.current.unwrap()
+        if tcb.priority > current.priority { Some(tcb) } else { Some(current) }
+    }
+
+    fn hold_current(self) -> Tcb? {
+        self.hold_count += 1
+        let current = self.current.unwrap()
+        current.holding = true
+        current.link
+    }
+
+    fn suspend_current(self) -> Tcb? {
+        let current = self.current.unwrap()
+        current.waiting = true
+        Some(current)
+    }
+
+    fn queue(self, packet: Packet) -> Tcb? {
+        let Some(t) = self.blocks[packet.id] else { return None }
+        self.queue_count += 1
+        packet.link = None
+        packet.id = self.current_id
+        Some(t.check_priority_add(self.current.unwrap(), packet))
+    }
+}
+
+fn make_queue(id: int, kind: PacketKind, n: int) -> Packet? {
+    var queue: Packet? = None
+    for _ in 0..n {
+        queue = Some(Packet { link: queue, id, kind })
+    }
+    queue
+}
+
+fn run_richards() -> (int, int) {
+    let s = Scheduler {}
+    s.add_task(ID_IDLE, 0, None, Task.Idle(IdleState { v1: 1, count: COUNT }))
+    s.current.unwrap().waiting = false
+    s.add_task(ID_WORKER, 1000, make_queue(ID_WORKER, PacketKind.Work, 2), Task.Worker(WorkerState {
+        dest: ID_HANDLER_A,
+        v2: 0,
+    }))
+    s.add_task(
+        ID_HANDLER_A,
+        2000,
+        make_queue(ID_DEVICE_A, PacketKind.Device, 3),
+        Task.Handler(HandlerState {}),
+    )
+    s.add_task(
+        ID_HANDLER_B,
+        3000,
+        make_queue(ID_DEVICE_B, PacketKind.Device, 3),
+        Task.Handler(HandlerState {}),
+    )
+    s.add_task(ID_DEVICE_A, 4000, None, Task.Device(DeviceState {}))
+    s.add_task(ID_DEVICE_B, 5000, None, Task.Device(DeviceState {}))
+    s.schedule()
+    (s.queue_count, s.hold_count)
+}
+
+var total_queued = 0
+var total_held = 0
+for _ in 0..ITERATIONS {
+    let (queued, held) = run_richards()
+    assert(queued == 23246 and held == 9297, "wrong result: \(queued) \(held)")
+    total_queued += queued
+    total_held += held
+}
+print("iterations: \(ITERATIONS)")
+print("packets queued: \(total_queued)")
+print("holds: \(total_held)")

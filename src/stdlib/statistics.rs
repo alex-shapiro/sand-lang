@@ -101,7 +101,7 @@ pub fn register(r: &mut Registry) {
         });
         Ok(match fit {
             Some((slope, intercept)) => {
-                let t = vm.heap.new_tuple(vec![Value::Float(slope), Value::Float(intercept)]);
+                let t = vm.heap.new_tuple(&[Value::Float(slope), Value::Float(intercept)]);
                 vm.some(t)
             }
             None => vm.none(),

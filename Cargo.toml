@@ -37,6 +37,7 @@ md-5 = { version = "0.11", default-features = false }
 hmac = { version = "0.13", default-features = false }
 getrandom = "0.4"
 hashbrown = { version = "0.16", default-features = false, features = ["inline-more"] }
+compact_str = { version = "0.9", default-features = false }
 
 # Everywhere but the web: timers come from tokio.
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]

@@ -45,7 +45,7 @@ pub fn register(r: &mut Registry) {
         for (k, v) in pairs {
             let k = vm.new_str(k);
             let v = vm.new_str(v);
-            items.push(vm.heap.new_tuple(vec![k, v]));
+            items.push(vm.heap.new_tuple(&[k, v]));
         }
         Ok(vm.heap.new_list(items))
     });
@@ -127,7 +127,7 @@ fn result(vm: &mut Vm, parsed: Result<Parts, String>) -> NResult {
     let path = vm.new_str(p.path);
     let query = opt_str(vm, p.query);
     let fragment = opt_str(vm, p.fragment);
-    let parts = vm.heap.new_tuple(vec![scheme, userinfo, host, port, path, query, fragment]);
+    let parts = vm.heap.new_tuple(&[scheme, userinfo, host, port, path, query, fragment]);
     Ok(vm.ok(parts))
 }
 

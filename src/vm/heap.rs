@@ -56,6 +56,7 @@
 use super::iomem::IoMemory;
 use super::value::*;
 use crate::LimitKind;
+use compact_str::CompactString;
 use std::time::Duration;
 
 /// Garbage collector statistics for one VM run.
@@ -172,7 +173,17 @@ pub struct Heap {
     stress_tick: u64,
     /// Major collections of large heaps are incremental (on by default).
     pub incremental: bool,
+    /// The boxes of freed tuples, structs, variants and closures of 1 to
+    /// `SPARE_LENS` values (by length), reused by [`Heap::boxed`]: such
+    /// objects are made and dropped all the time. Counted as used memory;
+    /// dropped by major collections.
+    spare: [Vec<Box<[Value]>>; SPARE_LENS],
+    spare_bytes: usize,
 }
+
+const SPARE_LENS: usize = 4;
+/// The most boxes kept of each length: about what a minor collection frees.
+const SPARE_MAX: usize = 1 << 14;
 
 /// New objects being built by [`Heap::staged`]. Their handles are taken in
 /// advance from the heap's free list (which cannot change while it is
@@ -208,7 +219,7 @@ impl Staging<'_> {
         Value::Obj(h)
     }
 
-    pub fn new_str(&mut self, s: impl Into<Box<str>>) -> Value {
+    pub fn new_str(&mut self, s: impl Into<CompactString>) -> Value {
         self.alloc(Obj::Str(s.into()))
     }
 
@@ -221,7 +232,10 @@ impl Staging<'_> {
     }
 
     pub fn new_tuple(&mut self, items: Vec<Value>) -> Value {
-        self.alloc(Obj::Tuple(items.into_boxed_slice()))
+        match items[..] {
+            [a, b] if let Some(v) = Value::tuple2(a, b) => v,
+            _ => self.alloc(Obj::Tuple(items.into_boxed_slice())),
+        }
     }
 
     /// [`Heap::new_variant`], staged.
@@ -341,6 +355,21 @@ impl Heap {
             minor_at: MIN_GC,
             stress_tick: 0,
             incremental: true,
+            spare: Default::default(),
+            spare_bytes: 0,
+        }
+    }
+
+    /// A box of `items`, reusing a freed one when there is one.
+    #[inline]
+    pub fn boxed(&mut self, items: &[Value]) -> Box<[Value]> {
+        match items.len().checked_sub(1).and_then(|i| self.spare.get_mut(i)).and_then(Vec::pop) {
+            Some(mut b) => {
+                self.spare_bytes -= size_of_val(&*b);
+                b.copy_from_slice(items);
+                b
+            }
+            None => items.into(),
         }
     }
 
@@ -511,7 +540,7 @@ impl Heap {
 
     /// Memory used by heap objects and fibers (not counting pending I/O).
     pub fn used(&self) -> usize {
-        self.bytes.saturating_add(self.fiber_bytes)
+        self.bytes.saturating_add(self.fiber_bytes).saturating_add(self.spare_bytes)
     }
 
     #[inline]
@@ -522,13 +551,19 @@ impl Heap {
         }
     }
 
+    /// The object with handle `h`.
+    #[inline]
+    pub fn obj(&self, h: u32) -> &Obj {
+        &self.objs[h as usize]
+    }
+
     /// Mutable access to an object, through the write barrier.
     #[inline]
     pub fn get_mut(&mut self, v: Value) -> &mut Obj {
         match v {
             Value::Obj(h) => {
                 self.barrier(h);
-                if self.phase == Phase::Marking {
+                if matches!(self.phase, Phase::Marking) {
                     self.regray(h);
                 }
                 &mut self.objs[h as usize]
@@ -547,12 +582,24 @@ impl Heap {
                 if stored.iter().any(|s| s.handle().is_some_and(|c| !self.is_marked(c))) {
                     self.barrier(h);
                 }
-                if self.phase == Phase::Marking {
+                if matches!(self.phase, Phase::Marking) {
                     stored.iter().for_each(|&s| self.shade(s));
                 }
                 &mut self.objs[h as usize]
             }
             _ => panic!("internal error: not an object"),
+        }
+    }
+
+    /// Stores `v` into cell `c`.
+    #[inline]
+    pub fn set_cell(&mut self, c: Value, v: Value) {
+        let obj = match (c, v.handle()) {
+            (Value::Obj(h), None) => &mut self.objs[h as usize],
+            _ => self.get_mut_storing(c, &[v]),
+        };
+        if let Obj::Cell(x) = obj {
+            *x = v;
         }
     }
 
@@ -691,8 +738,9 @@ impl Heap {
         if let Obj::StrBuf(buf) = &mut self.objs[h as usize] {
             let text = std::mem::take(buf);
             let cap = text.capacity();
-            let frozen = text.into_boxed_str();
-            self.bytes = self.bytes.saturating_sub(cap - frozen.len());
+            let frozen = CompactString::from_string_buffer(text);
+            let kept = if frozen.is_heap_allocated() { frozen.capacity() } else { 0 };
+            self.bytes = self.bytes.saturating_sub(cap - kept);
             self.objs[h as usize] = Obj::Str(frozen);
         }
     }
@@ -718,6 +766,8 @@ impl Heap {
         }
     }
 
+    /// The fields of a heap tuple, struct, variant or closure. Inline
+    /// values (`Value::Pair`, inline variants) have none: see [`Heap::field`].
     pub fn fields(&self, v: Value) -> &[Value] {
         match self.get(v) {
             Obj::Tuple(t) | Obj::Struct(_, t) | Obj::Variant(_, t) | Obj::Closure(_, t) => t,
@@ -725,7 +775,7 @@ impl Heap {
         }
     }
 
-    pub fn new_str(&mut self, s: impl Into<Box<str>>) -> Value {
+    pub fn new_str(&mut self, s: impl Into<CompactString>) -> Value {
         self.alloc(Obj::Str(s.into()))
     }
 
@@ -737,8 +787,15 @@ impl Heap {
         self.alloc(Obj::List(items))
     }
 
-    pub fn new_tuple(&mut self, items: Vec<Value>) -> Value {
-        self.alloc(Obj::Tuple(items.into_boxed_slice()))
+    /// The tuple of `items` (inline for a pair of ints, see `Value::Pair`).
+    pub fn new_tuple(&mut self, items: &[Value]) -> Value {
+        match *items {
+            [a, b] if let Some(v) = Value::tuple2(a, b) => v,
+            _ => {
+                let items = self.boxed(items);
+                self.alloc(Obj::Tuple(items))
+            }
+        }
     }
 
     /// Mutable access to list `list` for storing `stored` at `index` (and
@@ -751,7 +808,7 @@ impl Heap {
         if stored.handle().is_some_and(|c| !self.is_marked(c)) {
             self.list_barrier(h, index, false);
         }
-        if self.phase == Phase::Marking {
+        if matches!(self.phase, Phase::Marking) {
             self.shade(stored);
         }
         match &mut self.objs[h as usize] {
@@ -809,7 +866,7 @@ impl Heap {
         if stored.iter().any(|s| s.handle().is_some_and(|c| !self.is_marked(c))) {
             self.list_barrier(h, slot, push);
         }
-        if self.phase == Phase::Marking {
+        if matches!(self.phase, Phase::Marking) {
             stored.iter().for_each(|&s| self.shade(s));
         }
         &mut self.objs[h as usize]
@@ -821,7 +878,7 @@ impl Heap {
             let len = self.list(list).len();
             self.list_barrier(h, len, true);
         }
-        if self.phase == Phase::Marking {
+        if matches!(self.phase, Phase::Marking) {
             self.shade(v);
         }
         let Obj::List(l) = &mut self.objs[h as usize] else { return };
@@ -833,18 +890,27 @@ impl Heap {
         }
     }
 
-    /// The payload of `v` if it is the single-payload variant `id`.
+    /// The payload of `v` if it is the single-payload variant `id`, else
+    /// `Value::Uninit` (which no value holds): LLVM copies a value out of an
+    /// `Option` in unaligned pieces, which stalls the load that reads it back.
     #[inline]
-    pub fn payload_if(&self, v: Value, id: u32) -> Option<Value> {
-        match v {
+    pub fn payload_if(&self, v: &Value, id: u32) -> Value {
+        match *v {
+            Value::VUnit(x) if x == id => Value::Unit,
+            Value::VBool(x, b) if x == id => Value::Bool(b),
+            Value::VInt(x, i) if x == id => Value::Int(i),
+            Value::VFloat(x, f) if x == id => Value::Float(f),
+            Value::VDur(x, d) if x == id => Value::Dur(d),
+            Value::VTag(x, t) if x == id => Value::Tag(t),
+            Value::VObj(x, h) if x == id => Value::Obj(h),
             Value::Obj(h) => match &self.objs[h as usize] {
-                Obj::Variant(vid, f) if *vid == id => f.first().copied(),
-                _ => None,
+                Obj::Variant(vid, f) if *vid == id => match **f {
+                    [p, ..] => p,
+                    [] => Value::Uninit,
+                },
+                _ => Value::Uninit,
             },
-            _ => match v.as_inline_variant() {
-                Some((vid, p)) if vid == id => Some(p),
-                _ => None,
-            },
+            _ => Value::Uninit,
         }
     }
 
@@ -882,6 +948,7 @@ impl Heap {
     pub fn field(&self, v: Value, i: usize) -> Option<Value> {
         match v {
             Value::Obj(_) => self.fields(v).get(i).copied(),
+            Value::Pair(a, b) => [Value::Int(a as i64), Value::Int(b)].get(i).copied(),
             _ => match v.as_inline_variant() {
                 Some((_, p)) if i == 0 => Some(p),
                 _ => None,
@@ -895,11 +962,11 @@ impl Heap {
     pub fn new_variant(&mut self, id: u32, fields: &[Value]) -> Value {
         match fields {
             [] => Value::Tag(id),
-            [p] => match Value::variant1(id, *p) {
-                Some(v) => v,
-                None => self.alloc(Obj::Variant(id, Box::new([*p]))),
-            },
-            _ => self.alloc(Obj::Variant(id, fields.into())),
+            [p] if let Some(v) = Value::variant1(id, *p) => v,
+            _ => {
+                let fields = self.boxed(fields);
+                self.alloc(Obj::Variant(id, fields))
+            }
         }
     }
 
@@ -974,12 +1041,29 @@ impl Heap {
         }
     }
 
+    /// Puts slot `h` on the free list, keeping a small box for reuse.
+    fn release(&mut self, h: u32) {
+        let obj = std::mem::replace(&mut self.objs[h as usize], Obj::Free(self.free_head));
+        self.free_head = h;
+        if let Obj::Tuple(b) | Obj::Struct(_, b) | Obj::Variant(_, b) | Obj::Closure(_, b) = obj
+            && let Some(spare) = b.len().checked_sub(1).and_then(|i| self.spare.get_mut(i))
+            && spare.len() < SPARE_MAX
+        {
+            self.spare_bytes += size_of_val(&*b);
+            spare.push(b);
+        }
+    }
+
+    fn drop_spares(&mut self) {
+        self.spare = Default::default();
+        self.spare_bytes = 0;
+    }
+
     /// Frees object `h`, returning its accounted size.
     fn free(&mut self, h: u32) -> usize {
         let i = h as usize;
         let size = self.objs[i].size();
-        self.objs[i] = Obj::Free(self.free_head);
-        self.free_head = h;
+        self.release(h);
         self.live_objects -= 1;
         clear_bit(&mut self.cmarks, h);
         clear_bit(&mut self.gray_bits, h);
@@ -991,6 +1075,7 @@ impl Heap {
     /// are dropped, which closes them.
     pub fn collect(&mut self, roots: impl IntoIterator<Item = Value>, major: bool) {
         if major {
+            self.drop_spares();
             self.abandon_cycle();
             self.marks.iter_mut().for_each(|m| *m = 0);
         }
@@ -1057,7 +1142,7 @@ impl Heap {
             }
             self.young = young;
             self.bytes = self.bytes.saturating_sub(freed);
-            if self.phase == Phase::Marking {
+            if matches!(self.phase, Phase::Marking) {
                 let objs = &self.objs;
                 self.gray.retain(|&(h, _)| !matches!(objs[h as usize], Obj::Free(_)));
             }
@@ -1077,8 +1162,7 @@ impl Heap {
                 live_bytes += self.objs[i].size();
                 live += 1;
             } else {
-                self.objs[i] = Obj::Free(self.free_head);
-                self.free_head = i as u32;
+                self.release(i as u32);
             }
         }
         self.bytes = live_bytes;
@@ -1140,6 +1224,7 @@ impl Heap {
 
     /// Starts an incremental major collection: shades the roots.
     pub fn start_cycle(&mut self, roots: impl IntoIterator<Item = Value>) {
+        self.drop_spares();
         self.cmarks.iter_mut().for_each(|m| *m = 0);
         self.gray_bits.iter_mut().for_each(|m| *m = 0);
         self.gray.clear();

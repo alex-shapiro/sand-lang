@@ -130,7 +130,7 @@ wasm/build.sh nodejs target/wasm-node          # needs wasm-bindgen-cli
 node --test wasm/tests/                        # wasm build and the playground examples
 cargo bench                                    # VM and front-end benchmarks
 cargo +nightly fuzz run compile                # coverage-guided fuzzing
-python3.14 bench/examples/run.py               # examples vs CPython 3.14 ports
+python3.14 bench/run.py                        # vs Lua 5.5 and CPython 3.14 (bench/README.md)
 ```
 
 CI runs `cargo fmt --check`, `cargo clippy`, and `cargo test` on macOS, Windows, Linux, and WebAssembly.

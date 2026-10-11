@@ -515,6 +515,7 @@ impl<'c, 'a> Ctx<'c, 'a> {
                 self.carry(f, x);
                 0
             }
+            HKind::Inlined { body, .. } => self.carry(f, body),
             HKind::Arith { l, r, .. }
             | HKind::Cmp { l, r, .. }
             | HKind::And(l, r)

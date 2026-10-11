@@ -1,0 +1,38 @@
+// Collatz chain lengths below a limit, memoized in an int-keyed map, with a
+// histogram of the lengths and the longest chains. Stresses maps keyed by
+// dense small ints (Lua's array part), recursion and integer arithmetic.
+
+let LIMIT = 1_500_000
+let CACHE_BELOW = 3_000_000
+
+fn chain_length(cache: [int: int], n: int) -> int {
+    if let Some(l) = cache.get(n) { return l }
+    let next = if n % 2 == 0 { n / 2 } else { 3 * n + 1 }
+    let l = chain_length(cache, next) + 1
+    if n < CACHE_BELOW {
+        cache[n] = l
+    }
+    l
+}
+
+let cache: [int: int] = [1: 1]
+let histogram: [int: int] = [:]
+var longest = (0, 0)
+for n in 1..LIMIT {
+    let l = chain_length(cache, n)
+    histogram[l] = histogram.get_or(l, 0) + 1
+    if l > longest.1 {
+        longest = (n, l)
+    }
+}
+print("longest chain below \(LIMIT): \(longest.0) with \(longest.1) terms")
+print("cached lengths: \(cache.len())")
+let common = histogram.entries().sorted_by(e => (-e.1, e.0)).take(5)
+for (length, count) in common {
+    print("length \(length): \(count) starts")
+}
+var total = 0
+for n in 1..LIMIT {
+    total += cache[n] % 7
+}
+print("checksum \(total)")

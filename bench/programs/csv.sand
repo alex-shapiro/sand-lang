@@ -1,0 +1,191 @@
+// Sales report from CSV text: generate rows in memory, split and parse them, aggregate
+// per (region, product) and per month into maps of accumulators, then print padded tables.
+// Stresses string building and splitting, number parsing, map lookups with string and
+// tuple keys, small struct mutation and string formatting.
+
+let ROWS = 200000
+let REGIONS = ["north", "south", "east", "west", "central", "overseas"]
+let KINDS = ["widget", "gadget", "gizmo", "sprocket", "doohickey"]
+let HEADER = "date,region,product,quantity,unit_price"
+
+struct Rng {
+    var state: int
+
+    fn next(self, n: int) -> int {
+        self.state = (self.state * 1103515245 + 12345) % 2147483648
+        self.state / 65536 % n
+    }
+}
+
+fn generate(rows: int) -> str {
+    let rng = Rng { state: 7 }
+    let lines = [HEADER]
+    for _ in 0..rows {
+        let month = rng.next(12) + 1
+        let day = rng.next(28) + 1
+        let region = REGIONS[rng.next(REGIONS.len())]
+        let product = "\(KINDS[rng.next(KINDS.len())])-\(rng.next(10) + 1)"
+        let quantity = rng.next(20) + 1
+        let cents = 99 + rng.next(9900)
+        lines.push("2024-\(month:02)-\(day:02),\(region),\(product),\(quantity),\(cents / 100).\(cents % 100:02)")
+    }
+    lines.join("\n") + "\n"
+}
+
+struct Sale {
+    month: str
+    region: str
+    product: str
+    quantity: int
+    price: int
+}
+
+fn parse_sale(line: str) -> Result<Sale, str> {
+    let [date, region, product, qty, price] = line.split(",") else {
+        return Err("expected 5 fields: `\(line)`")
+    }
+    let Some(quantity) = qty.parse_int() else { return Err("bad quantity `\(qty)`") }
+    let Some(unit_price) = price.parse_float() else { return Err("bad price `\(price)`") }
+    Ok(Sale {
+        month: date[0..7],
+        region,
+        product,
+        quantity,
+        price: (unit_price * 100.0).round().to_int(),
+    })
+}
+
+/// Totals over a group of sales; prices and revenue are in cents.
+struct Acc {
+    var count: int = 0
+    var quantity: int = 0
+    var revenue: int = 0
+    var min_price: int = int.max_value()
+    var max_price: int = 0
+
+    fn add(self, quantity: int, price: int) {
+        self.count += 1
+        self.quantity += quantity
+        self.revenue += quantity * price
+        self.min_price = self.min_price.min(price)
+        self.max_price = self.max_price.max(price)
+    }
+
+    fn merge(self, other: Acc) {
+        self.count += other.count
+        self.quantity += other.quantity
+        self.revenue += other.revenue
+        self.min_price = self.min_price.min(other.min_price)
+        self.max_price = self.max_price.max(other.max_price)
+    }
+}
+
+fn money(cents: int) -> str {
+    let digits = (cents / 100).to_str()
+    var grouped = ""
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 and (digits.len() - i) % 3 == 0 { grouped += "," }
+        grouped += c
+    }
+    "$\(grouped).\(cents % 100:02)"
+}
+
+fn percent(part: int, whole: int) -> str {
+    let basis_points = part * 10000 / whole
+    "\(basis_points / 100).\(basis_points % 100:02)%"
+}
+
+let text = generate(ROWS)
+let lines = text.lines()
+assert(lines[0] == HEADER, "unexpected header")
+
+let by_pair: [(str, str): Acc] = [:]
+let by_month: [str: Acc] = [:]
+for line in lines[1..] {
+    let sale = parse_sale(line)?
+    by_pair.get_or_insert((sale.region, sale.product), Acc {}).add(sale.quantity, sale.price)
+    by_month.get_or_insert(sale.month, Acc {}).add(sale.quantity, sale.price)
+}
+
+let by_product: [str: Acc] = [:]
+let by_region: [str: Acc] = [:]
+let total = Acc {}
+for ((region, product), acc) in by_pair {
+    by_product.get_or_insert(product, Acc {}).merge(acc)
+    by_region.get_or_insert(region, Acc {}).merge(acc)
+    total.merge(acc)
+}
+
+print("== Sales report: \(total.count) orders, \(text.len()) bytes of CSV")
+print("units sold \(total.quantity), revenue \(money(total.revenue))")
+print("")
+
+print("== Top 15 products by revenue")
+print(
+    " #  "
+        + "product".pad_end(14)
+        + "orders".pad_start(8)
+        + "units".pad_start(8)
+        + "revenue".pad_start(16)
+        + "avg".pad_start(9)
+        + "min".pad_start(9)
+        + "max".pad_start(9),
+)
+let ranked = by_product.entries().sorted_by(e => (-e.1.revenue, e.0))
+for (i, (product, acc)) in ranked.take(15).enumerate() {
+    print(
+        (i + 1).to_str().pad_start(2)
+            + "  "
+            + product.pad_end(14)
+            + acc.count.to_str().pad_start(8)
+            + acc.quantity.to_str().pad_start(8)
+            + money(acc.revenue).pad_start(16)
+            + money(acc.revenue / acc.quantity).pad_start(9)
+            + money(acc.min_price).pad_start(9)
+            + money(acc.max_price).pad_start(9),
+    )
+}
+print("")
+
+print("== Revenue by region")
+print(
+    "region".pad_end(10)
+        + "orders".pad_start(8)
+        + "units".pad_start(8)
+        + "revenue".pad_start(16)
+        + "share".pad_start(9),
+)
+for region in by_region.keys().sorted() {
+    let acc = by_region[region]
+    print(
+        region.pad_end(10)
+            + acc.count.to_str().pad_start(8)
+            + acc.quantity.to_str().pad_start(8)
+            + money(acc.revenue).pad_start(16)
+            + percent(acc.revenue, total.revenue).pad_start(9),
+    )
+}
+print("")
+
+print("== Revenue by month")
+let best_month = by_month.values().map(acc => acc.revenue).max() ?? 1
+print(
+    "month".pad_end(9)
+        + "orders".pad_start(8)
+        + "units".pad_start(8)
+        + "revenue".pad_start(16)
+        + "avg order".pad_start(11)
+        + "  chart",
+)
+for month in by_month.keys().sorted() {
+    let acc = by_month[month]
+    print(
+        month.pad_end(9)
+            + acc.count.to_str().pad_start(8)
+            + acc.quantity.to_str().pad_start(8)
+            + money(acc.revenue).pad_start(16)
+            + money(acc.revenue / acc.count).pad_start(11)
+            + "  "
+            + "#".repeat(acc.revenue * 30 / best_month),
+    )
+}

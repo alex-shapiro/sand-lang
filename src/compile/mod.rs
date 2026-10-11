@@ -1,5 +1,6 @@
 //! Compiles checked HIR into register bytecode.
 
+mod inline;
 mod reflect;
 
 use crate::check::budget::CompileBudget;
@@ -55,12 +56,21 @@ struct Compiler<'a> {
     recv_native: Option<u32>,
     /// Natives compiled to dedicated instructions.
     inline: HashMap<u32, Inline>,
+    /// The bodies of the functions to compile, with calls inlined.
+    bodies: HashMap<FnId, &'a HFn>,
 }
 
 #[derive(Clone, Copy)]
 enum Inline {
     Len,
     Push,
+    ListGet,
+    ListPop,
+    MapGet,
+    MapGetOr,
+    MapHas,
+    SetHas,
+    SetAdd,
     ToFloat,
     /// `Op::StrClass` with this class.
     StrClass(u8),
@@ -90,7 +100,6 @@ struct FnState<'h> {
     /// (`reset_regs`).
     reg_log: Vec<(LocalId, Reg)>,
     /// The capture index of each local captured by the function (a lambda).
-    capture_idx: Vec<u16>,
     next_reg: u32,
     max_reg: u32,
     loops: Vec<LoopCx>,
@@ -128,6 +137,12 @@ struct FnState<'h> {
     /// The jump tables of the function's switches: their index in
     /// `Program::switches` and targets (instructions; the default last).
     switches: Vec<(u32, Vec<usize>)>,
+    /// For a local function: the local naming it, whose calls in its own
+    /// body are `CallSelf`.
+    self_local: Option<LocalId>,
+    /// The inlined call being compiled (see `Proto::sites`), 0 for none.
+    site: u16,
+    sites: Vec<InlineSite>,
 }
 
 const MAX_REGS: u32 = 60000;
@@ -149,10 +164,6 @@ impl FnState<'_> {
         for (l, r) in self.reg_log.drain(mark..).rev() {
             self.local_reg[l as usize] = r;
         }
-    }
-
-    fn capture(&self, l: LocalId) -> Option<u16> {
-        Some(self.capture_idx[l as usize]).filter(|&i| i != NONE)
     }
 }
 /// The most instructions a function may contain for copies of deferred code.
@@ -203,6 +214,21 @@ enum ScalarConst {
 
 /// At most this many values are hoisted per loop nest.
 const MAX_HOISTED: usize = 24;
+/// While a function is compiled, each line entry also holds the inlined
+/// call of the instruction above `LINE_BITS` (see `FnState::site`).
+const LINE_BITS: u32 = 20;
+const LINE_MASK: u32 = (1 << LINE_BITS) - 1;
+const MAX_SITES: usize = (1 << (32 - LINE_BITS)) - 1;
+
+/// A function's code as `FnState::finish` assembles it.
+struct Finished {
+    code: Vec<Op>,
+    lines: Vec<u32>,
+    cleanups: Vec<Cleanup>,
+    sites: Vec<u16>,
+    inlined: Vec<InlineSite>,
+}
+
 /// Hoisting is skipped when the function already uses this many registers.
 const HOIST_REG_BUDGET: u32 = 1000;
 /// Loops are duplicated for global hoisting only up to this many HIR nodes.
@@ -222,6 +248,8 @@ pub(crate) struct Incremental {
     descs: reflect::DescCache,
     /// Number of tests compiled.
     tests: usize,
+    /// The bodies of the functions whose calls are inlined.
+    inline: PMap<FnId, std::sync::Arc<HFn>>,
 }
 
 /// The sizes of a program's tables, to undo a failed [`compile_more`].
@@ -279,6 +307,15 @@ impl ProgramMark {
 /// extended (see [`ProgramMark`]).
 pub(crate) fn compile_more(input: CompileInput, prog: &mut Program, inc: &mut Incremental, inits: &[FnId]) -> Result<u32, Vec<Diag>> {
     let cp = input.checked;
+    let first = inc.fn_protos.len();
+    for (f, body) in cp.bodies.from(first as FnId) {
+        if let Some(b) = inline::inlinable(cp, f, body) {
+            inc.inline.insert(f, b);
+        }
+    }
+    let inlined: Vec<Option<HFn>> =
+        cp.bodies.from(first as FnId).map(|(_, b)| inline::inline_calls(b, &inc.inline, input.budget)).collect();
+    let bodies: HashMap<FnId, &HFn> = cp.bodies.from(first as FnId).zip(&inlined).map(|((f, b), i)| (f, i.as_ref().unwrap_or(b))).collect();
     let mut c = Compiler {
         cp,
         arena: cp.arena.clone(),
@@ -293,6 +330,7 @@ pub(crate) fn compile_more(input: CompileInput, prog: &mut Program, inc: &mut In
         errors: Vec::new(),
         recv_native: (input.native_lookup)("Channel.recv"),
         inline: HashMap::new(),
+        bodies,
     };
     c.descs.start();
     let entry = c.compile_new(input, inits, &mut inc.tests);
@@ -314,6 +352,13 @@ impl<'a> Compiler<'a> {
             ("Map.len", Inline::Len),
             ("Set.len", Inline::Len),
             ("List.push", Inline::Push),
+            ("List.get", Inline::ListGet),
+            ("List.pop", Inline::ListPop),
+            ("Map.get", Inline::MapGet),
+            ("Map.get_or", Inline::MapGetOr),
+            ("Map.contains", Inline::MapHas),
+            ("Set.contains", Inline::SetHas),
+            ("Set.add", Inline::SetAdd),
             ("int.to_float", Inline::ToFloat),
             ("str.is_digit", Inline::StrClass(0)),
             ("str.is_alpha", Inline::StrClass(1)),
@@ -391,7 +436,7 @@ impl<'a> Compiler<'a> {
             self.fn_protos.push(None);
         }
         for (i, f) in cp.fns.iter_from(first).enumerate().map(|(k, f)| (first + k, f)) {
-            if !matches!(f.kind, FnKind::Native(_)) && cp.bodies.get(i as FnId).is_some() {
+            if !matches!(f.kind, FnKind::Native(_)) && self.bodies.contains_key(&(i as FnId)) {
                 let idx = self.prog.protos.len() as u32;
                 self.prog.protos.push(Proto {
                     name: name(f.name),
@@ -401,16 +446,17 @@ impl<'a> Compiler<'a> {
                     code: vec![],
                     lines: vec![],
                     captures: vec![],
-                    capture_cells: vec![],
                     doc: None,
                     signature: String::new(),
                     cleanups: Vec::new(),
+                    sites: Vec::new(),
+                    inlined: Vec::new(),
                 });
                 self.fn_protos[i] = Some(idx);
             }
         }
         for i in first..cp.fns.len() {
-            if let (Some(p), Some(body)) = (self.fn_protos[i], cp.bodies.get(i as FnId)) {
+            if let (Some(p), Some(&body)) = (self.fn_protos[i], self.bodies.get(&(i as FnId))) {
                 self.compile_fn(i as FnId, p, body);
             }
         }
@@ -432,10 +478,11 @@ impl<'a> Compiler<'a> {
             code,
             lines: vec![0; n],
             captures: vec![],
-            capture_cells: vec![],
             doc: None,
             signature: String::new(),
             cleanups: Vec::new(),
+            sites: Vec::new(),
+            inlined: Vec::new(),
         });
         for (name, f) in &cp.tests[*ntests..] {
             if let Some(p) = self.fn_protos[*f as usize] {
@@ -539,6 +586,8 @@ enum Step {
     Map,
     /// `base` = the iterator of a set.
     Set,
+    /// `base` = string, `base+1` = byte offset.
+    Chars,
 }
 
 impl Step {
@@ -556,6 +605,8 @@ impl Step {
             (Step::Map, true) => Op::ForMapBack { key: var, base, off: 0 },
             (Step::Set, false) => Op::ForSet { elem: var, base, off: 0 },
             (Step::Set, true) => Op::ForSetBack { elem: var, base, off: 0 },
+            (Step::Chars, false) => Op::ForChars { elem: var, base, off: 0 },
+            (Step::Chars, true) => Op::ForCharsBack { elem: var, base, off: 0 },
         }
     }
 }
@@ -611,6 +662,7 @@ fn head(p: &HPat) -> Head {
         HPatKind::Wildcard | HPatKind::Bind(_) => Head::Any,
         HPatKind::Variant { rt_id, .. } => Head::Values(vec![*rt_id as i64]),
         HPatKind::Int(k) => Head::Values(vec![*k]),
+        HPatKind::Str(t) if t.len() == 1 => Head::Values(vec![t.as_bytes()[0] as i64]),
         HPatKind::Or(alts) => {
             let mut all = Vec::new();
             for a in alts {
@@ -625,18 +677,56 @@ fn head(p: &HPat) -> Head {
     }
 }
 
-fn pat_is_int(p: &HPat) -> bool {
+/// The `head` of the first element of a tuple pattern.
+fn first_head(p: &HPat) -> Head {
     match &p.kind {
-        HPatKind::Int(_) => true,
-        HPatKind::Or(alts) => alts.iter().all(pat_is_int),
+        HPatKind::Tuple(ps) => ps.first().map_or(Head::Any, head),
+        HPatKind::Wildcard | HPatKind::Bind(_) => Head::Any,
+        HPatKind::Or(alts) => {
+            let mut all = Vec::new();
+            for a in alts {
+                match first_head(a) {
+                    Head::Values(vs) => all.extend(vs),
+                    h => return h,
+                }
+            }
+            Head::Values(all)
+        }
+        _ => Head::Other,
+    }
+}
+
+/// Whether the head of the first element of tuple pattern `p` is of kind `kind`.
+fn first_is(p: &HPat, kind: SwitchKind) -> bool {
+    match &p.kind {
+        HPatKind::Tuple(ps) => ps.first().is_some_and(|q| head_is(q, kind)),
+        HPatKind::Or(alts) => alts.iter().all(|a| first_is(a, kind)),
         _ => false,
     }
 }
 
-/// A `match` starting with a jump table (`Op::SwitchVariant`/`SwitchInt`)
-/// over the values `first..first + len`.
+/// Whether the head of `p` (see `head`) is of kind `kind`.
+fn head_is(p: &HPat, kind: SwitchKind) -> bool {
+    match (&p.kind, kind) {
+        (HPatKind::Int(_), SwitchKind::Int) | (HPatKind::Variant { .. }, SwitchKind::Variant) => true,
+        (HPatKind::Str(t), SwitchKind::Char) => t.len() == 1,
+        (HPatKind::Or(alts), _) => alts.iter().all(|a| head_is(a, kind)),
+        _ => false,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum SwitchKind {
+    Int,
+    Variant,
+    /// Strings of one byte, switched on the byte (`Op::SwitchChar`).
+    Char,
+}
+
+/// A `match` starting with a jump table (`Op::SwitchVariant`, `SwitchInt`,
+/// `SwitchChar`) over the values `first..first + len`.
 struct SwitchPlan {
-    int: bool,
+    kind: SwitchKind,
     first: i64,
     len: usize,
     heads: Vec<Head>,
@@ -699,7 +789,6 @@ impl<'a> Compiler<'a> {
             locals: &body.locals,
             local_reg: vec![NONE; body.locals.len()],
             reg_log: Vec::new(),
-            capture_idx: vec![NONE; body.locals.len()],
             next_reg: 0,
             max_reg: 0,
             loops: vec![],
@@ -718,6 +807,9 @@ impl<'a> Compiler<'a> {
             facts: Rc::new(local_facts(&body.body, &body.locals, self.budget)),
             stubs: Vec::new(),
             switches: Vec::new(),
+            self_local: None,
+            site: 0,
+            sites: Vec::new(),
         };
         for &p in &body.params {
             let r = self.alloc(&mut f);
@@ -725,7 +817,7 @@ impl<'a> Compiler<'a> {
         }
         self.ret_expr(&mut f, &body.body);
         let nregs = f.max_reg.max(1) as u16;
-        let (code, lines, cleanups) = self.finish(f);
+        let Finished { code, lines, cleanups, sites, inlined } = self.finish(f);
         self.prog.protos[proto_idx as usize] = Proto {
             name: self.cp.name(fi.name).to_string(),
             file: body.span.file,
@@ -734,10 +826,11 @@ impl<'a> Compiler<'a> {
             code,
             lines,
             captures: vec![],
-            capture_cells: vec![],
             doc: fi.doc.as_deref().map(String::from),
             signature,
             cleanups,
+            sites,
+            inlined,
         };
     }
 
@@ -751,7 +844,7 @@ impl<'a> Compiler<'a> {
     fn emit(&mut self, f: &mut FnState<'a>, op: Op) -> usize {
         self.budget.charge(1);
         f.code.push(op);
-        f.lines.push(f.line);
+        f.lines.push(f.line.min(LINE_MASK) | (f.site as u32) << LINE_BITS);
         f.code.len() - 1
     }
 
@@ -809,7 +902,7 @@ impl<'a> Compiler<'a> {
 
     /// The function's final code, lines and cleanup ranges: its stubs
     /// emitted, assembled (`assemble`), and its jump tables completed.
-    fn finish(&mut self, mut f: FnState<'a>) -> (Vec<Op>, Vec<u32>, Vec<Cleanup>) {
+    fn finish(&mut self, mut f: FnState<'a>) -> Finished {
         self.set_pending(&mut f, None);
         self.emit_stubs(&mut f);
         let mut tables: Vec<Vec<usize>> = f.switches.iter().map(|s| s.1.clone()).collect();
@@ -823,7 +916,33 @@ impl<'a> Compiler<'a> {
             sw.targets = targets.iter().map(|&t| t as u32).collect();
             sw.default = default as u32;
         }
-        (code, lines, cleanups)
+        let sites = if f.sites.is_empty() { Vec::new() } else { lines.iter().map(|&l| (l >> LINE_BITS) as u16).collect() };
+        let lines = lines.into_iter().map(|l| l & LINE_MASK).collect();
+        Finished { code, lines, cleanups, sites, inlined: f.sites }
+    }
+
+    /// Compiles `body`, the body of function `func` inlined at the call `e`,
+    /// with `k`, recording the inlined call for stack traces.
+    fn inlined<R>(
+        &mut self,
+        f: &mut FnState<'a>,
+        e: &HExpr,
+        func: FnId,
+        body: &HExpr,
+        k: impl FnOnce(&mut Self, &mut FnState<'a>) -> R,
+    ) -> R {
+        self.set_line(f, e.span);
+        if f.sites.len() >= MAX_SITES {
+            return k(self, f);
+        }
+        let name = self.cp.name(self.cp.fns[func as usize].name).to_string();
+        f.sites.push(InlineSite { name, file: body.span.file, line: f.line, parent: f.site });
+        let saved = (f.site, f.file, f.line);
+        f.site = f.sites.len() as u16;
+        f.file = body.span.file;
+        let r = k(self, f);
+        (f.site, f.file, f.line) = saved;
+        r
     }
 
     /// Makes `pad` the innermost pending defer from here on.
@@ -969,12 +1088,6 @@ impl<'a> Compiler<'a> {
             } else {
                 self.mv(f, dst, r);
             }
-        } else if let Some(i) = f.capture(l) {
-            if self.is_cell(f, l) {
-                self.emit(f, Op::LoadCaptureCell { dst, idx: i });
-            } else {
-                self.emit(f, Op::LoadCapture { dst, idx: i });
-            }
         } else {
             // A local declared in an unreachable or not-yet-compiled branch.
             self.unit_to(f, dst);
@@ -1000,8 +1113,6 @@ impl<'a> Compiler<'a> {
             } else {
                 self.mv(f, r, src);
             }
-        } else if let Some(i) = f.capture(l) {
-            self.emit(f, Op::StoreCaptureCell { idx: i, src });
         }
     }
 
@@ -1206,6 +1317,13 @@ impl<'a> Compiler<'a> {
             }
             HKind::Match { scrut, arms } => self.compile_match(f, scrut, arms, None),
             HKind::Return(Some(v)) => self.ret_expr(f, v),
+            HKind::MakeVariant { rt_id, args } if tail && args.len() == 1 => {
+                let mark = f.next_reg;
+                let src = self.expr_reg(f, &args[0]);
+                let variant = self.variant_u16(f, *rt_id);
+                self.emit(f, Op::RetVariant { src, variant });
+                f.next_reg = mark;
+            }
             _ => {
                 let mark = f.next_reg;
                 if matches!(e.ty, TypeId::UNIT) && !matches!(e.kind, HKind::Local(_) | HKind::Global(_)) {
@@ -1390,9 +1508,21 @@ impl<'a> Compiler<'a> {
         if matches!(l.ty, TypeId::INT | TypeId::FLOAT) {
             return None;
         }
+        let eq = (*op == CmpOp::Eq) != when;
+        fn lit(x: &HExpr) -> Option<&str> {
+            match &x.kind {
+                HKind::Str(s) => Some(s),
+                _ => None,
+            }
+        }
+        if let Some((x, s)) = lit(r).map(|s| (l, s)).or_else(|| lit(l).map(|s| (r, s)))
+            && let Ok(k) = u16::try_from(self.str_const(s))
+        {
+            let a = self.expr_reg(f, x);
+            return Some(vec![self.emit(f, if eq { Op::JNeqK { a, k, off: 0 } } else { Op::JNneK { a, k, off: 0 } })]);
+        }
         let a = self.operand(f, l, &[r]);
         let b = self.expr_reg(f, r);
-        let eq = (*op == CmpOp::Eq) != when;
         Some(vec![self.emit(f, if eq { Op::JNeq { a, b, off: 0 } } else { Op::JNne { a, b, off: 0 } })])
     }
 
@@ -1845,6 +1975,13 @@ impl<'a> Compiler<'a> {
                 let base = self.alloc_n(f, 4);
                 match kind {
                     IterKind::List => self.expr_to(f, iter, base),
+                    IterKind::Chars => {
+                        self.expr_to(f, iter, base);
+                        self.emit(f, Op::LoadInt { dst: base + 1, v: 0 });
+                        self.for_loop(f, Step::Chars, pat, body, base, dst);
+                        f.next_reg = mark;
+                        return;
+                    }
                     IterKind::Range => {
                         // Loop over the bounds, without materialising the range.
                         let r = self.alloc(f);
@@ -1918,6 +2055,27 @@ impl<'a> Compiler<'a> {
                 f.next_reg = mark;
             }
             HKind::CallNative { native, args, reflect } => {
+                if let (Some(&op @ (Inline::MapGet | Inline::MapHas)), [HArg::Expr(m), HArg::Expr(k)]) =
+                    (self.inline.get(native), args.as_slice())
+                    && let HKind::Tuple(items) = &k.kind
+                    && let Ok(n) = u8::try_from(items.len())
+                {
+                    let mark = f.next_reg;
+                    let map = self.operand(f, m, &[k]);
+                    let start = self.alloc_n(f, items.len());
+                    for (i, a) in items.iter().enumerate() {
+                        self.expr_to(f, a, start + i as Reg);
+                    }
+                    self.emit(
+                        f,
+                        match op {
+                            Inline::MapGet => Op::MapGetTuple { dst, map, start, n },
+                            _ => Op::MapHasTuple { dst, map, start, n },
+                        },
+                    );
+                    f.next_reg = mark;
+                    return;
+                }
                 if let (Some(&op), true) = (self.inline.get(native), args.iter().all(|a| matches!(a, HArg::Expr(_)))) {
                     let mark = f.next_reg;
                     let args: Vec<&HExpr> = args
@@ -1941,6 +2099,32 @@ impl<'a> Compiler<'a> {
                         Inline::Push => {
                             self.emit(f, Op::ListPush { list: regs[0], src: regs[1] });
                             self.unit_to(f, dst)
+                        }
+                        Inline::ListGet => {
+                            self.emit(f, Op::ListGet { dst, list: regs[0], idx: regs[1] });
+                        }
+                        Inline::ListPop => {
+                            self.emit(f, Op::ListPop { dst, list: regs[0] });
+                        }
+                        Inline::MapGet => {
+                            self.emit(f, Op::MapGet { dst, map: regs[0], key: regs[1] });
+                        }
+                        Inline::MapHas => {
+                            self.emit(f, Op::MapHas { dst, map: regs[0], key: regs[1] });
+                        }
+                        Inline::MapGetOr => {
+                            // The default goes to `dst` first, so it must not
+                            // be the register of the map or key.
+                            let out = if dst == regs[0] || dst == regs[1] { self.alloc(f) } else { dst };
+                            self.mv(f, out, regs[2]);
+                            self.emit(f, Op::MapGetOr { dst: out, map: regs[0], key: regs[1] });
+                            self.mv(f, dst, out);
+                        }
+                        Inline::SetHas => {
+                            self.emit(f, Op::SetHas { dst, set: regs[0], key: regs[1] });
+                        }
+                        Inline::SetAdd => {
+                            self.emit(f, Op::SetAdd { dst, set: regs[0], key: regs[1] });
                         }
                     }
                     f.next_reg = mark;
@@ -1969,6 +2153,17 @@ impl<'a> Compiler<'a> {
                 }
                 self.set_line(f, e.span);
                 self.call_native(f, base, *native, dst);
+                f.next_reg = mark;
+            }
+            HKind::CallValue { callee, args } if matches!(callee.kind, HKind::Local(l) if f.self_local == Some(l)) => {
+                let mark = f.next_reg;
+                self.argc(f, args.len(), e.span);
+                let base = self.alloc_n(f, args.len().max(1));
+                for (i, a) in args.iter().enumerate() {
+                    self.expr_to(f, a, base + i as Reg);
+                }
+                self.set_line(f, e.span);
+                self.emit(f, Op::CallSelf { base, dst });
                 f.next_reg = mark;
             }
             HKind::CallValue { callee, args } => {
@@ -2212,19 +2407,17 @@ impl<'a> Compiler<'a> {
             }
             HKind::Arith { op, l, r } => {
                 let mark = f.next_reg;
-                // `x + k` / `x - k` with small integer constants.
+                // `x + k`, `x - k`, `x * k`, `x / k`, `x % k`, `k + x`, `k * x` with
+                // small integer constants.
                 if matches!(l.ty, TypeId::INT)
-                    && matches!(op, ArithOp::Add | ArithOp::Sub)
-                    && let Some(k) = int_lit(r)
+                    && let Some((x, k)) = imm_operands(*op, l, r)
+                    && let Some(imm) = imm_op(*op, k)
                 {
-                    let k = if *op == ArithOp::Sub { k.checked_neg() } else { Some(k) };
-                    if let Some(k) = k.filter(|k| *k >= i16::MIN as i64 && *k <= i16::MAX as i64) {
-                        let a = self.expr_reg(f, l);
-                        self.set_line(f, e.span);
-                        self.emit(f, Op::AddIK { dst, a, k: k as i16 });
-                        f.next_reg = mark;
-                        return;
-                    }
+                    let a = self.expr_reg(f, x);
+                    self.set_line(f, e.span);
+                    self.emit(f, imm(dst, a));
+                    f.next_reg = mark;
+                    return;
                 }
                 let a = self.operand(f, l, &[r]);
                 let b = self.expr_reg(f, r);
@@ -2235,6 +2428,18 @@ impl<'a> Compiler<'a> {
             }
             HKind::Cmp { op, l, r } => {
                 let mark = f.next_reg;
+                if matches!(l.ty, TypeId::INT)
+                    && let Some((x, op, k)) = match (small_lit(l), small_lit(r)) {
+                        (_, Some(k)) => Some((l, *op, k)),
+                        (Some(k), None) => Some((r, mirror_cmp(*op), k)),
+                        _ => None,
+                    }
+                {
+                    let a = self.expr_reg(f, x);
+                    self.emit(f, cmp_k(op, dst, a, k));
+                    f.next_reg = mark;
+                    return;
+                }
                 let a = self.operand(f, l, &[r]);
                 let b = self.expr_reg(f, r);
                 let op = cmp_op(*op, l.ty, dst, a, b);
@@ -2303,6 +2508,32 @@ impl<'a> Compiler<'a> {
                 }
                 f.next_reg = mark;
             }
+            // `m.get(k) ?? d` and `xs.get(i) ?? d` in one instruction when
+            // `d` can be evaluated first (it is a constant or a plain local).
+            HKind::Coalesce { l, r, result: false }
+                if let HKind::CallNative { native, args, .. } = &l.kind
+                    && let (Some(&op @ (Inline::MapGet | Inline::ListGet)), [HArg::Expr(obj), HArg::Expr(key)]) =
+                        (self.inline.get(native), args.as_slice())
+                    && (int_lit(r).is_some()
+                        || float_lit(r).is_some()
+                        || matches!(r.kind, HKind::Str(_) | HKind::Bool(_) | HKind::Unit | HKind::Tag(_))
+                        || matches!(r.kind, HKind::Local(x) if !self.is_cell(f, x) && !f.facts.builder[x as usize])) =>
+            {
+                let mark = f.next_reg;
+                let o = self.operand(f, obj, &[key]);
+                let k = self.expr_reg(f, key);
+                let out = if dst == o || dst == k { self.alloc(f) } else { dst };
+                self.expr_to(f, r, out);
+                self.emit(
+                    f,
+                    match op {
+                        Inline::MapGet => Op::MapGetOr { dst: out, map: o, key: k },
+                        _ => Op::ListGetOr { dst: out, list: o, idx: k },
+                    },
+                );
+                self.mv(f, dst, out);
+                f.next_reg = mark;
+            }
             HKind::Coalesce { l, r, result } => {
                 let mark = f.next_reg;
                 let v = self.expr_reg(f, l);
@@ -2338,6 +2569,7 @@ impl<'a> Compiler<'a> {
                 self.emit(f, Op::Spawn { dst, closure: c });
                 f.next_reg = mark;
             }
+            HKind::Inlined { func, body } => self.inlined(f, e, *func, body, |s, f| s.expr_to(f, body, dst)),
             HKind::ToStr(x) => {
                 let mark = f.next_reg;
                 let v = self.expr_reg(f, x);
@@ -2581,7 +2813,10 @@ impl<'a> Compiler<'a> {
             return 0;
         }
         let name = self.prog.variants.get(rt as usize).map(|v| v.name.clone()).unwrap_or_default();
-        let code = vec![Op::NewVariant { dst: arity as Reg, start: 0, variant: rt as u16 }, Op::Ret { src: arity as Reg }];
+        let code = match arity {
+            1 => vec![Op::RetVariant { src: 0, variant: rt as u16 }],
+            _ => vec![Op::NewVariant { dst: arity as Reg, start: 0, variant: rt as u16 }, Op::Ret { src: arity as Reg }],
+        };
         let p = self.prog.protos.len() as u32;
         self.prog.protos.push(Proto {
             name: name.clone(),
@@ -2591,10 +2826,11 @@ impl<'a> Compiler<'a> {
             lines: vec![0; code.len()],
             code,
             captures: vec![],
-            capture_cells: vec![],
             doc: None,
             signature: format!("fn {name}(...)"),
             cleanups: Vec::new(),
+            sites: Vec::new(),
+            inlined: Vec::new(),
         });
         self.variant_wrappers.insert(rt, p);
         p
@@ -2696,13 +2932,13 @@ impl<'a> Compiler<'a> {
     fn operands<'x>(&self, x: &'x HExpr, out: &mut impl FnMut(&'x HExpr)) {
         let small = |e: &HExpr| small_lit(e).is_some();
         match &x.kind {
-            HKind::Arith { op, l, r } => {
-                out(l);
-                // `x + k` / `x - k` use an immediate.
-                if !(matches!(op, ArithOp::Add | ArithOp::Sub) && matches!(l.ty, TypeId::INT) && small(r)) {
+            HKind::Arith { op, l, r } => match imm_operands(*op, l, r) {
+                Some((x, k)) if matches!(l.ty, TypeId::INT) && imm_op(*op, k).is_some() => out(x),
+                _ => {
+                    out(l);
                     out(r);
                 }
-            }
+            },
             // Integer comparisons with small constants use an immediate.
             HKind::Cmp { l, r, .. } => {
                 let int = matches!(l.ty, TypeId::INT);
@@ -3016,11 +3252,14 @@ impl<'a> Compiler<'a> {
                 fails.push(self.jump_unless(f, CmpOp::Ge, v, *a));
                 fails.push(self.jump_unless(f, CmpOp::Le, v, *b));
             }
-            HPatKind::Str(s) => {
-                let t = self.alloc(f);
-                self.load_str(f, t, s);
-                fails.push(self.emit(f, Op::JNeq { a: v, b: t, off: 0 }));
-            }
+            HPatKind::Str(s) => match u16::try_from(self.str_const(s)) {
+                Ok(k) => fails.push(self.emit(f, Op::JNeqK { a: v, k, off: 0 })),
+                Err(_) => {
+                    let t = self.alloc(f);
+                    self.load_str(f, t, s);
+                    fails.push(self.emit(f, Op::JNeq { a: v, b: t, off: 0 }));
+                }
+            },
             HPatKind::Bool(b) => {
                 if *b {
                     fails.push(self.emit(f, Op::JmpIfNot { cond: v, off: 0 }));
@@ -3217,8 +3456,10 @@ impl<'a> Compiler<'a> {
     /// Whether a `match` on a value of type `ty` should start with a jump
     /// table: when it tests at least three variants or integers (not too
     /// sparse ones) and every arm starts with such a test or none.
-    fn switch_plan(&self, ty: TypeId, arms: &'a [HArm]) -> Option<SwitchPlan> {
-        let heads: Vec<Head> = arms.iter().map(|a| head(&a.pat)).collect();
+    fn switch_plan(&self, ty: TypeId, arms: &'a [HArm], first: bool) -> Option<SwitchPlan> {
+        // With `first`, the scrutinee is a tuple literal, switched on its
+        // first element.
+        let heads: Vec<Head> = arms.iter().map(|a| if first { first_head(&a.pat) } else { head(&a.pat) }).collect();
         let mut values: Vec<i64> = Vec::new();
         for h in &heads {
             match h {
@@ -3232,24 +3473,26 @@ impl<'a> Compiler<'a> {
         if values.len() < 3 {
             return None;
         }
-        let (int, first, len) = match self.arena.get(ty) {
-            Ty::Int => {
+        let (kind, lo, len) = match self.arena.get(ty) {
+            t @ (Ty::Int | Ty::Str) => {
                 let span = values.last()?.checked_sub(values[0])?.checked_add(1)?;
-                if span > 4 * values.len() as i64 + 8 || span > 4096 {
+                // Bytes take at most 256 entries, however sparse.
+                if matches!(t, Ty::Int) && (span > 4 * values.len() as i64 + 8 || span > 4096) {
                     return None;
                 }
-                (true, values[0], span as usize)
+                (if matches!(t, Ty::Int) { SwitchKind::Int } else { SwitchKind::Char }, values[0], span as usize)
             }
             Ty::Named(d, _) if self.cp.types[d as usize].is_enum() => {
                 let ids = self.cp.types[d as usize].variants().iter().map(|v| v.rt_id as i64);
                 let (lo, hi) = (ids.clone().min()?, ids.max()?);
-                (false, lo, (hi - lo + 1) as usize)
+                (SwitchKind::Variant, lo, (hi - lo + 1) as usize)
             }
             _ => return None,
         };
-        // Integer heads are integer patterns, variant heads variants.
-        let ints = arms.iter().all(|a| !matches!(head(&a.pat), Head::Values(_)) || pat_is_int(&a.pat));
-        (ints == int).then_some(SwitchPlan { int, first, len, heads })
+        arms.iter()
+            .zip(&heads)
+            .all(|(a, h)| !matches!(h, Head::Values(_)) || if first { first_is(&a.pat, kind) } else { head_is(&a.pat, kind) })
+            .then_some(SwitchPlan { kind, first: lo, len, heads })
     }
 
     /// Compiles `match`: into `dst`, or (`None`) returning each arm's value.
@@ -3261,14 +3504,20 @@ impl<'a> Compiler<'a> {
     fn compile_match(&mut self, f: &mut FnState<'a>, scrut: &'a HExpr, arms: &'a [HArm], dst: Option<Reg>) {
         let mark = f.next_reg;
         let s = self.scrutinee(f, scrut);
-        let plan = match s {
-            Scrut::Reg(r) => self.switch_plan(scrut.ty, arms).map(|p| (p, r)),
-            Scrut::Tuple(_) => None,
+        let plan = match (&s, &scrut.kind) {
+            (Scrut::Reg(r), _) => self.switch_plan(scrut.ty, arms, false).map(|p| (p, *r)),
+            (Scrut::Tuple(regs), HKind::Tuple(items)) => self.switch_plan(items[0].ty, arms, true).map(|p| (p, regs[0])),
+            _ => None,
         };
         let switch = plan.as_ref().map(|(p, r)| {
             let table = self.prog.switches.len() as u32;
             self.prog.switches.push(Switch { first: p.first, ..Default::default() });
-            let op = if p.int { Op::SwitchInt { src: *r, table } } else { Op::SwitchVariant { src: *r, table } };
+            let src = *r;
+            let op = match p.kind {
+                SwitchKind::Int => Op::SwitchInt { src, table },
+                SwitchKind::Variant => Op::SwitchVariant { src, table },
+                SwitchKind::Char => Op::SwitchChar { src, table },
+            };
             self.emit(f, op);
             table
         });
@@ -3296,6 +3545,12 @@ impl<'a> Compiler<'a> {
                 (Scrut::Reg(r), HPatKind::Int(k)) => {
                     if !last {
                         fails.push(self.jump_unless(f, CmpOp::Eq, *r, *k));
+                    }
+                    self.here(f)
+                }
+                (Scrut::Reg(r), HPatKind::Str(_)) if switch.is_some() => {
+                    if !last {
+                        self.match_pattern(f, &arm.pat, *r, &mut fails);
                     }
                     self.here(f)
                 }
@@ -3417,20 +3672,8 @@ impl<'a> Compiler<'a> {
         if free.len() > u16::MAX as usize {
             self.errors.push(Diag::error(lam.body.span, "a closure captures too many variables"));
         }
-        let mut captures = Vec::new();
-        let mut cells = Vec::new();
-        for &l in free {
-            let src = if let Some(r) = f.reg(l) {
-                CaptureSrc::Reg(r)
-            } else if let Some(i) = f.capture(l) {
-                CaptureSrc::Capture(i)
-            } else {
-                // Declared in code not yet reached (e.g. a sibling local fn); capture unit.
-                CaptureSrc::Reg(u16::MAX)
-            };
-            captures.push(src);
-            cells.push(self.is_cell(f, l));
-        }
+        // Declared in code not yet reached (e.g. a sibling local fn): unit.
+        let captures: Vec<Reg> = free.iter().map(|&l| f.reg(l).unwrap_or(NO_REG)).collect();
         let mut sub = FnState {
             code: Vec::new(),
             lines: Vec::new(),
@@ -3438,7 +3681,6 @@ impl<'a> Compiler<'a> {
             locals: f.locals,
             local_reg: vec![NONE; f.locals.len()],
             reg_log: Vec::new(),
-            capture_idx: vec![NONE; f.locals.len()],
             next_reg: 0,
             max_reg: 0,
             loops: vec![],
@@ -3457,27 +3699,21 @@ impl<'a> Compiler<'a> {
             facts: f.facts.clone(),
             stubs: Vec::new(),
             switches: Vec::new(),
+            self_local: lam.self_local,
+            site: 0,
+            sites: Vec::new(),
         };
-        for (i, &l) in free.iter().enumerate() {
-            sub.capture_idx[l as usize] = i as u16;
-        }
-        for &p in &lam.params {
+        // The parameters, then the captures (see `Proto::captures`).
+        for &l in lam.params.iter().chain(free) {
             let r = self.alloc(&mut sub);
-            sub.set_reg(p, r);
-        }
-        for (i, &l) in free.iter().enumerate() {
-            if !cells[i] {
-                let r = self.alloc(&mut sub);
-                self.emit(&mut sub, Op::LoadCapture { dst: r, idx: i as u16 });
-                sub.set_reg(l, r);
-            }
+            sub.set_reg(l, r);
         }
         self.ret_expr(&mut sub, &lam.body);
         f.too_big |= sub.too_big;
         let signature = if lam.signature.is_empty() { self.cp.printer().show(ty) } else { lam.signature.clone() };
         let p = self.prog.protos.len() as u32;
         let nregs = sub.max_reg.max(1) as u16;
-        let (code, lines, cleanups) = self.finish(sub);
+        let Finished { code, lines, cleanups, sites, inlined } = self.finish(sub);
         self.prog.protos.push(Proto {
             name: lam.name.clone(),
             file: f.file,
@@ -3486,10 +3722,11 @@ impl<'a> Compiler<'a> {
             code,
             lines,
             captures,
-            capture_cells: cells,
             doc: lam.doc.as_deref().map(String::from),
             signature,
             cleanups,
+            sites,
+            inlined,
         });
         p
     }
@@ -3504,6 +3741,35 @@ fn cond_block(items: &[HExpr]) -> bool {
 
 fn defers_pending(f: &FnState) -> bool {
     f.defers.iter().any(|d| !d.is_empty())
+}
+
+/// The operands of `l op r` as `x op k` when one is an integer literal that
+/// can be an immediate.
+fn imm_operands<'e>(op: ArithOp, l: &'e HExpr, r: &'e HExpr) -> Option<(&'e HExpr, i64)> {
+    match (int_lit(l), int_lit(r)) {
+        (_, Some(k)) => Some((l, k)),
+        (Some(k), None) if matches!(op, ArithOp::Add | ArithOp::Mul) => Some((r, k)),
+        _ => None,
+    }
+}
+
+/// The instruction for `a op k` with an immediate, if there is one for `op`
+/// and `k` (division and remainder by 0 panic, through the general ones).
+fn imm_op(op: ArithOp, k: i64) -> Option<impl Fn(Reg, Reg) -> Op> {
+    let k = match op {
+        ArithOp::Sub => k.checked_neg()?,
+        ArithOp::Div | ArithOp::Rem if k == 0 => return None,
+        _ => k,
+    };
+    let k = i16::try_from(k).ok()?;
+    let make: fn(Reg, Reg, i16) -> Op = match op {
+        ArithOp::Add | ArithOp::Sub => |dst, a, k| Op::AddIK { dst, a, k },
+        ArithOp::Mul => |dst, a, k| Op::MulIK { dst, a, k },
+        ArithOp::Div => |dst, a, k| Op::DivIK { dst, a, k },
+        ArithOp::Rem => |dst, a, k| Op::RemIK { dst, a, k },
+        _ => return None,
+    };
+    Some(move |dst, a| make(dst, a, k))
 }
 
 fn arith_op(op: ArithOp, lt: TypeId, rt: TypeId, dst: Reg, a: Reg, b: Reg) -> Op {
@@ -3534,6 +3800,18 @@ fn arith_op(op: ArithOp, lt: TypeId, rt: TypeId, dst: Reg, a: Reg, b: Reg) -> Op
         BitXor => Op::BitXor { dst, a, b },
         Shl => Op::Shl { dst, a, b },
         Shr => Op::Shr { dst, a, b },
+    }
+}
+
+/// `a op k` as a bool for integers.
+fn cmp_k(op: CmpOp, dst: Reg, a: Reg, k: i16) -> Op {
+    match op {
+        CmpOp::Eq => Op::EqIK { dst, a, k },
+        CmpOp::Ne => Op::NeIK { dst, a, k },
+        CmpOp::Lt => Op::LtIK { dst, a, k },
+        CmpOp::Le => Op::LeIK { dst, a, k },
+        CmpOp::Gt => Op::GtIK { dst, a, k },
+        CmpOp::Ge => Op::GeIK { dst, a, k },
     }
 }
 
@@ -3589,8 +3867,11 @@ const ISLAND_REACH: usize = 30000;
 /// an unconditional instruction) when there is one within reach, so it
 /// costs nothing on other paths; otherwise right after the branch, behind
 /// a jump over it.
-fn assemble(mut code: Vec<Op>, lines: Vec<u32>, far: &[(usize, usize)], tables: &mut [Vec<usize>]) -> (Vec<Op>, Vec<u32>) {
+fn assemble(mut code: Vec<Op>, mut lines: Vec<u32>, far: &[(usize, usize)], tables: &mut [Vec<usize>]) -> (Vec<Op>, Vec<u32>) {
     thread_jumps(&mut code);
+    let mut far = far.to_vec();
+    drop_null_jumps(&mut code, &mut lines, &mut far, tables);
+    let far = &far[..];
     let n = code.len();
     // The target of every branch, by instruction.
     let mut targets: Vec<Option<usize>> =
@@ -3698,6 +3979,49 @@ fn assemble(mut code: Vec<Op>, lines: Vec<u32>, far: &[(usize, usize)], tables: 
 /// Jump threading: a `Jmp` to a `Jmp` goes to the final target, one to a
 /// `Loop` becomes that `Loop` (or a `Jmp` to its target), one to a return
 /// becomes the return, and a `Jmp` back becomes a `Loop` (a back edge).
+/// Removes the jumps to the next instruction, moving every branch target,
+/// far branch and table entry (positions) accordingly.
+fn drop_null_jumps(code: &mut Vec<Op>, lines: &mut Vec<u32>, far: &mut [(usize, usize)], tables: &mut [Vec<usize>]) {
+    let null = |op: &Op| matches!(op, Op::Jmp { off: 0 });
+    if !code.iter().any(null) {
+        return;
+    }
+    let n = code.len();
+    // Each position's new position: removed jumps go where they jumped.
+    let mut new_idx = Vec::with_capacity(n + 1);
+    let mut k = 0;
+    for op in code.iter() {
+        new_idx.push(k);
+        k += usize::from(!null(op));
+    }
+    new_idx.push(k);
+    let mut out = Vec::with_capacity(k);
+    let mut out_lines = Vec::with_capacity(k);
+    for (i, &op) in code.iter().enumerate() {
+        if null(&op) {
+            continue;
+        }
+        let mut op = op;
+        if let Some(off) = op.branch_off()
+            && !far.iter().any(|&(at, _)| at == i)
+        {
+            let t = new_idx[(i as i64 + 1 + off as i64) as usize] as i64;
+            // Branches only get shorter, so the offset fits.
+            op.set_branch_off(t - out.len() as i64 - 1);
+        }
+        out.push(op);
+        out_lines.push(lines[i]);
+    }
+    for (at, t) in far.iter_mut() {
+        (*at, *t) = (new_idx[*at], new_idx[*t]);
+    }
+    for table in tables.iter_mut() {
+        table.iter_mut().for_each(|p| *p = new_idx[*p]);
+    }
+    *code = out;
+    *lines = out_lines;
+}
+
 fn thread_jumps(code: &mut [Op]) {
     for i in 0..code.len() {
         let Op::Jmp { off } = code[i] else { continue };
@@ -3712,7 +4036,7 @@ fn thread_jumps(code: &mut [Op]) {
         code[i] = match code.get(t as usize) {
             Some(&Op::Loop { off }) if t + 1 + off as i64 <= i as i64 => Op::Loop { off: (t + 1 + off as i64 - (i as i64 + 1)) as i32 },
             Some(&Op::Loop { off }) => Op::Jmp { off: (t + 1 + off as i64 - (i as i64 + 1)) as i32 },
-            Some(&op @ (Op::Ret { .. } | Op::RetUnit)) => op,
+            Some(&op @ (Op::Ret { .. } | Op::RetVariant { .. } | Op::RetUnit)) => op,
             _ if t <= i as i64 => Op::Loop { off: (t - (i as i64 + 1)) as i32 },
             _ => Op::Jmp { off: (t - (i as i64 + 1)) as i32 },
         };

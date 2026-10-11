@@ -1,0 +1,158 @@
+// Closure-heavy event processing: an event bus of handler closures that mutate
+// captured variables, lazy iterator pipelines and eager higher-order list
+// methods. Stresses closure calls, captured `var`s, iterator adapters and
+// natives calling back into script code.
+
+let EVENTS = 300_000
+let KINDS = 8
+let USERS = 5_000
+let MOD = 1_000_000_007
+
+struct Rng {
+    var state: int
+
+    fn next(self, bound: int) -> int {
+        self.state = (self.state * 1103515245 + 12345) % 2147483648
+        self.state * bound / 2147483648
+    }
+}
+
+struct Event {
+    kind: int
+    user: int
+    amount: int
+}
+
+struct EventBus {
+    handlers: [int: [fn(Event)]]
+
+    fn on(self, kind: int, handler: fn(Event)) {
+        self.handlers.get_or_insert(kind, []).push(handler)
+    }
+
+    fn emit(self, event: Event) {
+        let Some(handlers) = self.handlers.get(event.kind) else { return }
+        for handler in handlers {
+            handler(event)
+        }
+    }
+}
+
+fn dispatch(events: [Event]) {
+    let bus = EventBus { handlers: [:] }
+    let counts = [0; KINDS]
+    var purchases = 0
+    var revenue = 0
+    var refunded = 0
+    var largest = 0
+    var digest = 0
+    let spend_by_user: [int: int] = [:]
+    for kind in 0..KINDS {
+        bus.on(kind, _ => { counts[kind] += 1 })
+        bus.on(kind, e => { digest = (digest * 31 + e.amount) % MOD })
+    }
+    bus.on(0, e => {
+        purchases += 1
+        revenue += e.amount
+    })
+    bus.on(1, e => { refunded += e.amount })
+    for kind in [0, 2] {
+        bus.on(kind, e => { largest = largest.max(e.amount) })
+    }
+    bus.on(2, e => { spend_by_user[e.user] = spend_by_user.get_or(e.user, 0) + e.amount })
+    for e in events {
+        bus.emit(e)
+    }
+    print("bus: counts \(counts.map(c => c.to_str()).join(" "))")
+    let average = revenue.to_float() / purchases.to_float()
+    print("bus: purchases \(purchases), revenue \(revenue), average \(average.to_str_fixed(2))")
+    print("bus: refunded \(refunded), largest \(largest), spenders \(spend_by_user.len()), digest \(digest)")
+}
+
+/// Runs of consecutive events of the same kind, as `(kind, length)` pairs.
+fn bursts(events: [Event]) -> Iter<(int, int)> {
+    var i = 0
+    Iter.from_fn(() => {
+        if i >= events.len() { return None }
+        let kind = events[i].kind
+        let start = i
+        while i < events.len() and events[i].kind == kind {
+            i += 1
+        }
+        Some((kind, i - start))
+    })
+}
+
+fn lazy_stats(events: [Event]) {
+    let total = events.iter().map(e => e.amount).sum()
+    let purchase_total = events.iter()
+        .filter(e => e.kind == 0)
+        .map(e => e.amount)
+        .sum()
+    let sampled = events.iter()
+        .enumerate()
+        .step_by(7)
+        .map(p => p.0 % 100 * p.1.amount)
+        .sum()
+    var budget = total / 2
+    let within_budget = events.iter().take_while(e => {
+        budget -= e.amount
+        budget > 0
+    }).count()
+    let rising = events.iter()
+        .zip(events.iter().skip(1))
+        .filter(p => p.0.amount < p.1.amount)
+        .count()
+    let digest = events.iter()
+        .filter(e => e.kind == 4)
+        .fold(0, (acc, e) => (acc * 31 + e.amount) % MOD)
+    let heavy_users = events.iter()
+        .filter(e => e.amount > 990)
+        .map(e => e.user)
+        .to_set()
+        .len()
+    let whale = events.iter().enumerate().find(p => p.1.kind == 7 and p.1.amount == 1000)
+    let long_bursts = bursts(events).filter(b => b.1 >= 4).count()
+    let (burst_kind, burst_length) = bursts(events).max_by(b => b.1).unwrap()
+    print("lazy: total \(total), purchases \(purchase_total), sampled \(sampled), within budget \(within_budget)")
+    print("lazy: rising \(rising), digest \(digest), heavy users \(heavy_users)")
+    match whale {
+        Some((index, e)) => print("lazy: first whale at \(index), user \(e.user)")
+        None => print("lazy: no whale")
+    }
+    print("lazy: long bursts \(long_bursts), longest kind \(burst_kind) x \(burst_length)")
+}
+
+fn eager_stats(events: [Event]) {
+    let big = events.filter(e => e.amount > 900)
+    let big_total = big.map(e => e.amount).sum()
+    let top_spenders = events
+        .group_by(e => e.user)
+        .entries()
+        .map(entry => (entry.0, entry.1.fold(0, (acc, e) => acc + e.amount)))
+        .sorted_by(t => (-t.1, t.0))
+        .take(3)
+        .map(t => "\(t.0)=\(t.1)")
+        .join(" ")
+    let order_digest = events
+        .sorted_by(e => (e.user, -e.amount))
+        .fold(0, (acc, e) => (acc * 31 + e.amount) % MOD)
+    let any_whale = events.any(e => e.kind == 7 and e.amount == 1000)
+    let all_positive = events.all(e => e.amount > 0)
+    let peak = events.max_by(e => e.amount * KINDS + e.kind).unwrap()
+    let refunds = events.count(e => e.kind == 1)
+    print("eager: big \(big.len()) totalling \(big_total), refunds \(refunds)")
+    print("eager: top spenders \(top_spenders)")
+    print("eager: order digest \(order_digest), any whale \(any_whale), all positive \(all_positive)")
+    print("eager: peak user \(peak.user), kind \(peak.kind), amount \(peak.amount)")
+}
+
+let rng = Rng { state: 2024 }
+let events = [Event {
+    kind: rng.next(KINDS),
+    user: rng.next(USERS),
+    amount: 1 + rng.next(1000),
+} for _ in 0..EVENTS]
+dispatch(events)
+lazy_stats(events)
+eager_stats(events)

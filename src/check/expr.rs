@@ -579,7 +579,7 @@ impl Checker<'_> {
             sigs.push((ptys, ret, scope, fty));
         }
         let mut lambdas = Vec::new();
-        for (f, (ptys, ret, scope, fty)) in group.iter().zip(sigs) {
+        for ((f, (ptys, ret, scope, fty)), &self_local) in group.iter().zip(sigs).zip(&locals) {
             let saved_generics = std::mem::replace(&mut self.fs.generics, scope);
             let id = self.new_lambda();
             self.fs.ctx.push(FnCtx { ret, kind: CtxKind::Lambda, loops: vec![], lambda: id, in_defer: None });
@@ -607,7 +607,7 @@ impl Checker<'_> {
                     body,
                     doc: f.doc.as_deref().map(Arc::from),
                     signature,
-                    self_local: None,
+                    self_local: Some(self_local),
                 })),
                 fty,
                 f.span,
@@ -2294,6 +2294,13 @@ impl Checker<'_> {
     fn iter_loop(&mut self, plan: IterPlan, ih: HExpr, pat: HPat, body: HExpr, span: Span) -> HExpr {
         match plan {
             IterPlan::Builtin(IterKind::List) if self.is_enumerate_for(&ih, &pat) => self.enumerate_for(ih, pat, body, span),
+            IterPlan::Builtin(IterKind::List) => {
+                let (ih, kind) = match self.chars_source(ih) {
+                    Ok(s) => (s, IterKind::Chars),
+                    Err(ih) => (ih, IterKind::List),
+                };
+                mk(HKind::For { pat, iter: Box::new(ih), kind, body: Box::new(body) }, TypeId::UNIT, span)
+            }
             IterPlan::Builtin(kind) => mk(HKind::For { pat, iter: Box::new(ih), kind, body: Box::new(body) }, TypeId::UNIT, span),
             // `{ let it = ih; while let Some(pat) = <next> { body } }`, or a
             // fused pipeline (see `fuse`).

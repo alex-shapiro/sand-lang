@@ -1,0 +1,258 @@
+// Ray: a recursive ray tracer (spheres on a checkered plane, two point lights, Phong shading,
+// hard shadows, reflections) that prints a pixel checksum and an ASCII rendering.
+// Stresses small immutable struct allocation (Vec3), float math, Option results, closures.
+
+let WIDTH = 320
+let HEIGHT = 160
+let ART_WIDTH = 40
+let ART_HEIGHT = 20
+let MAX_DEPTH = 3
+let EPSILON = 0.0001
+let AMBIENT = 0.1
+let RAMP = " .:-=+*#%@".chars()
+
+struct Vec3 {
+    x: float
+    y: float
+    z: float
+
+    fn add(self, o: Vec3) -> Vec3 { Vec3 { x: self.x + o.x, y: self.y + o.y, z: self.z + o.z } }
+
+    fn sub(self, o: Vec3) -> Vec3 { Vec3 { x: self.x - o.x, y: self.y - o.y, z: self.z - o.z } }
+
+    fn mul(self, o: Vec3) -> Vec3 { Vec3 { x: self.x * o.x, y: self.y * o.y, z: self.z * o.z } }
+
+    fn scale(self, k: float) -> Vec3 { Vec3 { x: self.x * k, y: self.y * k, z: self.z * k } }
+
+    fn dot(self, o: Vec3) -> float { self.x * o.x + self.y * o.y + self.z * o.z }
+
+    fn cross(self, o: Vec3) -> Vec3 {
+        Vec3 {
+            x: self.y * o.z - self.z * o.y,
+            y: self.z * o.x - self.x * o.z,
+            z: self.x * o.y - self.y * o.x,
+        }
+    }
+
+    fn len(self) -> float { self.dot(self).sqrt() }
+
+    fn norm(self) -> Vec3 { self.scale(1.0 / self.len()) }
+}
+
+fn vec(x: float, y: float, z: float) -> Vec3 { Vec3 { x, y, z } }
+
+struct Ray {
+    origin: Vec3
+    dir: Vec3
+
+    fn at(self, t: float) -> Vec3 { self.origin.add(self.dir.scale(t)) }
+}
+
+enum Pattern {
+    Solid(Vec3)
+    Checker(Vec3, Vec3)
+
+    fn color_at(self, p: Vec3) -> Vec3 {
+        match self {
+            Solid(c) => c
+            Checker(a, b) => if (p.x.floor().to_int() + p.z.floor().to_int()) % 2 == 0 {
+                a
+            } else {
+                b
+            }
+        }
+    }
+}
+
+struct Material {
+    pattern: Pattern
+    diffuse: float = 0.9
+    specular: float = 0.5
+    shininess: float = 32.0
+    reflect: float = 0.0
+}
+
+enum Shape {
+    Sphere(center: Vec3, radius: float)
+    Plane(normal: Vec3, offset: float)
+}
+
+struct Hit {
+    t: float
+    point: Vec3
+    normal: Vec3
+    material: Material
+}
+
+struct Object {
+    shape: Shape
+    material: Material
+
+    fn intersect(self, ray: Ray) -> Hit? {
+        match self.shape {
+            Sphere(center, radius) => {
+                let oc = ray.origin.sub(center)
+                let b = oc.dot(ray.dir)
+                let disc = b * b - (oc.dot(oc) - radius * radius)
+                if disc < 0.0 {
+                    return None
+                }
+                let sq = disc.sqrt()
+                var t = -b - sq
+                if t < EPSILON {
+                    t = -b + sq
+                }
+                if t < EPSILON {
+                    return None
+                }
+                let point = ray.at(t)
+                Some(Hit {
+                    t,
+                    point,
+                    normal: point.sub(center).scale(1.0 / radius),
+                    material: self.material,
+                })
+            }
+            Plane(normal, offset) => {
+                let denom = normal.dot(ray.dir)
+                if denom.abs() < 0.000000001 {
+                    return None
+                }
+                let t = (offset - normal.dot(ray.origin)) / denom
+                if t < EPSILON {
+                    return None
+                }
+                Some(Hit { t, point: ray.at(t), normal, material: self.material })
+            }
+        }
+    }
+}
+
+struct Light {
+    pos: Vec3
+    color: Vec3
+}
+
+struct Scene {
+    objects: [Object]
+    lights: [Light]
+
+    fn closest(self, ray: Ray) -> Hit? {
+        self.objects.filter_map(o => o.intersect(ray)).min_by(h => h.t)
+    }
+
+    fn occluded(self, ray: Ray, max_t: float) -> bool {
+        self.objects.any(o => match o.intersect(ray) {
+            Some(h) => h.t < max_t
+            None => false
+        })
+    }
+
+    fn trace(self, ray: Ray, depth: int) -> Vec3 {
+        let Some(hit) = self.closest(ray) else {
+            let t = 0.5 * (ray.dir.y + 1.0)
+            return vec(0.3, 0.35, 0.45).scale(1.0 - t).add(vec(0.05, 0.1, 0.3).scale(t))
+        }
+        let m = hit.material
+        let base = m.pattern.color_at(hit.point)
+        let over = hit.point.add(hit.normal.scale(EPSILON))
+        var color = base.scale(AMBIENT)
+        for light in self.lights {
+            let to_light = light.pos.sub(hit.point)
+            let dist = to_light.len()
+            let l = to_light.scale(1.0 / dist)
+            let ndotl = hit.normal.dot(l)
+            if ndotl <= 0.0 or self.occluded(Ray { origin: over, dir: l }, dist) {
+                continue
+            }
+            color = color.add(base.mul(light.color).scale(ndotl * m.diffuse))
+            let rv = -hit.normal.scale(2.0 * ndotl).sub(l).dot(ray.dir)
+            if rv > 0.0 {
+                color = color.add(light.color.scale(m.specular * rv.pow(m.shininess)))
+            }
+        }
+        if m.reflect > 0.0 and depth < MAX_DEPTH {
+            let dir = ray.dir.sub(hit.normal.scale(2.0 * ray.dir.dot(hit.normal)))
+            let reflected = self.trace(Ray { origin: over, dir }, depth + 1)
+            color = color.scale(1.0 - m.reflect).add(reflected.scale(m.reflect))
+        }
+        color
+    }
+}
+
+fn sphere(x: float, y: float, z: float, radius: float, material: Material) -> Object {
+    Object { shape: Shape.Sphere(vec(x, y, z), radius), material }
+}
+
+fn solid(r: float, g: float, b: float, reflect: float = 0.0) -> Material {
+    Material { pattern: Pattern.Solid(vec(r, g, b)), reflect }
+}
+
+fn quantize(c: float) -> int { (c.clamp(0.0, 1.0) * 255.0).floor().to_int() }
+
+let scene = Scene {
+    objects: [
+        Object {
+            shape: Shape.Plane(normal: vec(0.0, 1.0, 0.0), offset: 0.0),
+            material: Material {
+                pattern: Pattern.Checker(vec(0.9, 0.9, 0.9), vec(0.15, 0.15, 0.15)),
+                specular: 0.0,
+                reflect: 0.25,
+            },
+        },
+        sphere(0.0, 1.0, 0.0, 1.0, solid(0.9, 0.2, 0.2, reflect: 0.3)),
+        sphere(-2.2, 0.7, 0.8, 0.7, solid(0.2, 0.8, 0.3)),
+        sphere(2.1, 0.8, 0.5, 0.8, solid(0.2, 0.3, 0.9, reflect: 0.5)),
+        sphere(-0.9, 0.35, -1.6, 0.35, solid(0.95, 0.85, 0.2)),
+        sphere(1.0, 0.3, -1.8, 0.3, solid(0.8, 0.3, 0.9, reflect: 0.2)),
+        sphere(0.3, 2.6, 1.5, 0.6, solid(0.9, 0.9, 0.9, reflect: 0.8)),
+        sphere(-3.5, 1.5, 3.5, 1.5, solid(0.3, 0.9, 0.9, reflect: 0.1)),
+        sphere(3.8, 1.2, 3.0, 1.2, solid(0.95, 0.5, 0.1)),
+    ],
+    lights: [
+        Light { pos: vec(-5.0, 8.0, -6.0), color: vec(0.8, 0.8, 0.8) },
+        Light { pos: vec(6.0, 6.0, -3.0), color: vec(0.5, 0.45, 0.4) },
+    ],
+}
+
+let eye = vec(0.0, 2.2, -6.5)
+let forward = vec(0.0, 1.0, 0.0).sub(eye).norm()
+let right = vec(0.0, 1.0, 0.0).cross(forward).norm()
+let up = forward.cross(right)
+let aspect = WIDTH.to_float() / HEIGHT.to_float()
+
+var checksum = 0
+let lum = [0.0; WIDTH * HEIGHT]
+for py in 0..HEIGHT {
+    for px in 0..WIDTH {
+        let u = (2.0 * (px.to_float() + 0.5) / WIDTH.to_float() - 1.0) * aspect * 0.4
+        let v = (1.0 - 2.0 * (py.to_float() + 0.5) / HEIGHT.to_float()) * 0.4
+        let dir = forward.add(right.scale(u)).add(up.scale(v)).norm()
+        let c = scene.trace(Ray { origin: eye, dir }, 0)
+        let (r, g, b) = (quantize(c.x), quantize(c.y), quantize(c.z))
+        checksum += r + g + b
+        lum[py * WIDTH + px] = (0.2126 * r.to_float()
+            + 0.7152 * g.to_float()
+            + 0.0722 * b.to_float())
+            / 255.0
+    }
+}
+
+let block_w = WIDTH / ART_WIDTH
+let block_h = HEIGHT / ART_HEIGHT
+for cy in 0..ART_HEIGHT {
+    var line = ""
+    for cx in 0..ART_WIDTH {
+        var sum = 0.0
+        for y in cy * block_h..(cy + 1) * block_h {
+            for x in cx * block_w..(cx + 1) * block_w {
+                sum += lum[y * WIDTH + x]
+            }
+        }
+        let avg = sum / (block_w * block_h).to_float()
+        line += RAMP[(avg * 10.0).floor().to_int().min(9)]
+    }
+    print(line)
+}
+print("size: \(WIDTH)x\(HEIGHT)")
+print("checksum: \(checksum)")

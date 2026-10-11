@@ -148,5 +148,6 @@ keep it in the pending operation, and move it into the object in the finisher
 - `tests/fuzz.rs` holds randomised tests and the reproducers found by the
   `cargo fuzz` targets in `fuzz/`.
 - `SAND_GC_STRESS=1` collects at every safe point;
-  `SAND_DUMP_BYTECODE=1` prints the compiled code; `cargo bench` prints the
+  `SAND_DUMP_BYTECODE=1` prints the compiled code; `SAND_GC_STATS=1` (`sand
+  run`) prints collector statistics; `cargo bench` prints the
   geometric mean of the benchmarks' best times.

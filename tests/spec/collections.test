@@ -550,3 +550,86 @@ for round in 0..20 {
 print(out)
 --- stdout
 [1, 11, 21, 31, 41, 51, 61, 71, 81, 91, 101, 111, 121, 131, 141, 151, 161, 171, 181, 191]
+
+=== maps and sets keyed by small ints keep insertion order and every key
+let m: [int: str] = [:]
+for k in [5, 3, 9, 0] { m[k] = "v\(k)" }
+m[-1] = "neg"
+m[1000000] = "far"
+print(m)
+print("\(m[3]) \(m.get(-1) ?? "-") \(m.get(7) ?? "-") \(m.contains(1000000))")
+let d: [int: int] = [:]
+for i in 0..200 { d[i * 3] = i }
+for i in 0..150 { d.remove(i * 3) }
+print("\(d.len()) \(d.keys().take(3)) \(d[450]) \(d.get(3) ?? -1)")
+for i in 0..400 { d[i] = -i }
+print("\(d.len()) \(d[597]) \(d[5])")
+let e: [int: int] = [:]
+for i in (0..300).reversed() { e[i] = 0 }
+print(e.keys().take(3))
+let big: [int: int] = [:]
+for i in 0..100 { big[i * 1000000] = i }
+for i in 0..2000 { big[i] = i }
+print("\(big.len()) \(big[99000000]) \(big[1999])")
+let a: [int: int] = [1: 10, 2: 20]
+let b: [int: int] = [2: 20, -7: 0]
+b.remove(-7)
+b[1] = 10
+print(a == b)
+let s: Set<int> = set()
+for i in [4, 1, 4, 64, -3] { s.add(i) }
+print("\(s) \(s.contains(64)) \(s.contains(-3)) \(s.contains(2))")
+--- stdout
+[5: "v5", 3: "v3", 9: "v9", 0: "v0", -1: "neg", 1000000: "far"]
+v3 neg - true
+50 [450, 453, 456] 150 -1
+450 199 -5
+[299, 298, 297]
+2099 99 1999
+true
+Set([4, 1, 64, -3]) true true false
+
+=== maps keyed by dense ints read and update their values consistently
+let v: [int: int] = [:]
+for i in 0..100 { v[i] = i * 2 }
+v[5] = -1
+print(v.insert(6, -2))
+print(v.remove(7))
+print("\(v[5]) \(v.get(6) ?? 0) \(v.get(7) ?? 99) \(v.get_or(7, 77)) \(v.get_or(8, 77)) \(v.contains(7)) \(v.len())")
+var sum = 0
+for (k, x) in v { sum += k * x }
+print(sum)
+for i in 100..400 {
+    if i % 3 == 0 { v[i * 50] = i }
+}
+print("\(v[5]) \(v.get(6) ?? 0) \(v.get(15000) ?? 0) \(v.get(7) ?? 99) \(v.len())")
+v.clear()
+v[3] = 4
+print("\(v.get(3) ?? 0) \(v.get(0) ?? -5)")
+--- stdout
+Some(12)
+Some(14)
+-1 -2 99 77 16 false 99
+656463
+-1 -2 300 99 199
+4 -5
+
+=== matching on a lookup in a map keyed by dense ints
+let m: [int: int] = [:]
+for i in 0..50 { m[i] = i * i }
+fn describe(m: [int: int], k: int) -> str {
+    if let Some(x) = m.get(k) { return "hit \(x)" }
+    "miss"
+}
+fn arms(m: [int: int], k: int) -> str {
+    match m.get(k) {
+        Some(x) if x > 100 => "big \(x)",
+        Some(x) => "small \(x)",
+        None => "none",
+    }
+}
+print("\(describe(m, 7)) \(describe(m, 70)) \(describe(m, -1))")
+print("\(arms(m, 3)) \(arms(m, 30)) \(arms(m, 99))")
+--- stdout
+hit 49 miss miss
+small 9 big 900 none

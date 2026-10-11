@@ -9,6 +9,9 @@ use std::sync::Arc;
 
 pub type Reg = u16;
 
+/// No register (see `Proto::captures`).
+pub const NO_REG: Reg = Reg::MAX;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Op {
     Nop,
@@ -49,18 +52,6 @@ pub enum Op {
         dst: Reg,
         g: u16,
         off: i16,
-    },
-    LoadCapture {
-        dst: Reg,
-        idx: u16,
-    },
-    LoadCaptureCell {
-        dst: Reg,
-        idx: u16,
-    },
-    StoreCaptureCell {
-        idx: u16,
-        src: Reg,
     },
     NewCell {
         dst: Reg,
@@ -111,6 +102,23 @@ pub enum Op {
         b: Reg,
     },
     AddIK {
+        dst: Reg,
+        a: Reg,
+        k: i16,
+    },
+    MulIK {
+        dst: Reg,
+        a: Reg,
+        k: i16,
+    },
+    /// `a / k` for a constant `k` other than 0.
+    DivIK {
+        dst: Reg,
+        a: Reg,
+        k: i16,
+    },
+    /// `a % k` for a constant `k` other than 0.
+    RemIK {
         dst: Reg,
         a: Reg,
         k: i16,
@@ -244,6 +252,37 @@ pub enum Op {
         a: Reg,
         b: Reg,
     },
+    /// `a == k` for a constant `k` (and so on for the next ones).
+    EqIK {
+        dst: Reg,
+        a: Reg,
+        k: i16,
+    },
+    NeIK {
+        dst: Reg,
+        a: Reg,
+        k: i16,
+    },
+    LtIK {
+        dst: Reg,
+        a: Reg,
+        k: i16,
+    },
+    LeIK {
+        dst: Reg,
+        a: Reg,
+        k: i16,
+    },
+    GtIK {
+        dst: Reg,
+        a: Reg,
+        k: i16,
+    },
+    GeIK {
+        dst: Reg,
+        a: Reg,
+        k: i16,
+    },
     EqF {
         dst: Reg,
         a: Reg,
@@ -343,6 +382,18 @@ pub enum Op {
         b: Reg,
         off: i16,
     },
+    /// `JNeq` with constant `k` (a string, ...) as `b`.
+    JNeqK {
+        a: Reg,
+        k: u16,
+        off: i16,
+    },
+    /// `JNne` with constant `k` as `b`.
+    JNneK {
+        a: Reg,
+        k: u16,
+        off: i16,
+    },
     /// Compare with an immediate and branch: jump if NOT (a op k).
     JNltIK {
         a: Reg,
@@ -400,6 +451,12 @@ pub enum Op {
     },
     /// Jump to `Program::switches[table]`'s target for the integer `src`.
     SwitchInt {
+        src: Reg,
+        table: u32,
+    },
+    /// Jump to `Program::switches[table]`'s target for the byte of `src`, a
+    /// string of one byte; its default target for any other string.
+    SwitchChar {
         src: Reg,
         table: u32,
     },
@@ -495,6 +552,12 @@ pub enum Op {
         dst: Reg,
         proto: u16,
     },
+    /// Calls the running closure (a local function calling itself) with the
+    /// arguments at `base..`; result written to `dst`.
+    CallSelf {
+        base: Reg,
+        dst: Reg,
+    },
     /// Arguments at `base..`; result written to `base`.
     CallNative {
         base: Reg,
@@ -521,6 +584,11 @@ pub enum Op {
     },
     Ret {
         src: Reg,
+    },
+    /// Returns the variant `variant` with the one payload `src`.
+    RetVariant {
+        src: Reg,
+        variant: u16,
     },
     RetUnit,
     /// Ends a cleanup pad: leaves the frame and continues unwinding a
@@ -647,6 +715,14 @@ pub enum Op {
         base: Reg,
         off: i16,
     },
+    /// `base` = a string, `base+1` = a byte offset in it: if there is a
+    /// character there, `elem` = that character (a string) and the offset
+    /// moves past it; otherwise jump.
+    ForChars {
+        elem: Reg,
+        base: Reg,
+        off: i16,
+    },
     /// The steps of rotated loops (at their end): like `ForList`,
     /// `ForRange` and `ForRangeIncl`, but jumping back to the loop's body
     /// when there is an element (a safe point, charging the loop's fuel).
@@ -672,6 +748,11 @@ pub enum Op {
     },
     ForMapBack {
         key: Reg,
+        base: Reg,
+        off: i16,
+    },
+    ForCharsBack {
+        elem: Reg,
         base: Reg,
         off: i16,
     },
@@ -715,6 +796,70 @@ pub enum Op {
     Len {
         dst: Reg,
         src: Reg,
+    },
+    /// `list.get(idx)`: the element as an option.
+    ListGet {
+        dst: Reg,
+        list: Reg,
+        idx: Reg,
+    },
+    /// `list.get(idx) ?? default`, with `default` in `dst` beforehand:
+    /// `dst` = the element, if there is one.
+    ListGetOr {
+        dst: Reg,
+        list: Reg,
+        idx: Reg,
+    },
+    /// `list.pop()`.
+    ListPop {
+        dst: Reg,
+        list: Reg,
+    },
+    /// `map.get(key)`.
+    MapGet {
+        dst: Reg,
+        map: Reg,
+        key: Reg,
+    },
+    /// `map.get((a, b, ...))`: the tuple key's elements are the `n`
+    /// registers from `start` (no tuple is allocated).
+    MapGetTuple {
+        dst: Reg,
+        map: Reg,
+        start: Reg,
+        n: u8,
+    },
+    /// `map.contains((a, b, ...))`, as `MapGetTuple`.
+    MapHasTuple {
+        dst: Reg,
+        map: Reg,
+        start: Reg,
+        n: u8,
+    },
+    /// `map.get_or(key, default)` and `map.get(key) ?? default`, with
+    /// `default` in `dst` beforehand: `dst` = the value of `key`, if any.
+    MapGetOr {
+        dst: Reg,
+        map: Reg,
+        key: Reg,
+    },
+    /// `map.contains(key)`.
+    MapHas {
+        dst: Reg,
+        map: Reg,
+        key: Reg,
+    },
+    /// `set.contains(key)`.
+    SetHas {
+        dst: Reg,
+        set: Reg,
+        key: Reg,
+    },
+    /// `set.add(key)`.
+    SetAdd {
+        dst: Reg,
+        set: Reg,
+        key: Reg,
     },
     IntToFloat {
         dst: Reg,
@@ -804,6 +949,8 @@ impl Op {
             | Op::JNleF { off, .. }
             | Op::JNeq { off, .. }
             | Op::JNne { off, .. }
+            | Op::JNeqK { off, .. }
+            | Op::JNneK { off, .. }
             | Op::JNltIK { off, .. }
             | Op::JNleIK { off, .. }
             | Op::JNgtIK { off, .. }
@@ -822,6 +969,7 @@ impl Op {
             | Op::ForRangeIncl { off, .. }
             | Op::ForSet { off, .. }
             | Op::ForMap { off, .. }
+            | Op::ForChars { off, .. }
             | Op::JNltIBack { off, .. }
             | Op::JNleIBack { off, .. }
             | Op::JNeqIBack { off, .. }
@@ -837,7 +985,8 @@ impl Op {
             | Op::ForRangeBack { off, .. }
             | Op::ForRangeInclBack { off, .. }
             | Op::ForSetBack { off, .. }
-            | Op::ForMapBack { off, .. } => Some(off as i32),
+            | Op::ForMapBack { off, .. }
+            | Op::ForCharsBack { off, .. } => Some(off as i32),
             _ => None,
         }
     }
@@ -863,6 +1012,8 @@ impl Op {
             | Op::JNleF { off, .. }
             | Op::JNeq { off, .. }
             | Op::JNne { off, .. }
+            | Op::JNeqK { off, .. }
+            | Op::JNneK { off, .. }
             | Op::JNltIK { off, .. }
             | Op::JNleIK { off, .. }
             | Op::JNgtIK { off, .. }
@@ -881,6 +1032,7 @@ impl Op {
             | Op::ForRangeIncl { off, .. }
             | Op::ForSet { off, .. }
             | Op::ForMap { off, .. }
+            | Op::ForChars { off, .. }
             | Op::JNltIBack { off, .. }
             | Op::JNleIBack { off, .. }
             | Op::JNeqIBack { off, .. }
@@ -896,7 +1048,8 @@ impl Op {
             | Op::ForRangeBack { off, .. }
             | Op::ForRangeInclBack { off, .. }
             | Op::ForSetBack { off, .. }
-            | Op::ForMapBack { off, .. } => match i16::try_from(to) {
+            | Op::ForMapBack { off, .. }
+            | Op::ForCharsBack { off, .. } => match i16::try_from(to) {
                 Ok(o) => *off = o,
                 Err(_) => return false,
             },
@@ -949,6 +1102,7 @@ impl Op {
                 | Op::ForRangeInclBack { .. }
                 | Op::ForSetBack { .. }
                 | Op::ForMapBack { .. }
+                | Op::ForCharsBack { .. }
         )
     }
 
@@ -956,15 +1110,16 @@ impl Op {
     pub fn is_unconditional(&self) -> bool {
         matches!(
             self,
-            Op::Jmp { .. } | Op::Loop { .. } | Op::Ret { .. } | Op::RetUnit | Op::Unwind | Op::TailCallDirect { .. } | Op::Panic { .. }
+            Op::Jmp { .. }
+                | Op::Loop { .. }
+                | Op::Ret { .. }
+                | Op::RetVariant { .. }
+                | Op::RetUnit
+                | Op::Unwind
+                | Op::TailCallDirect { .. }
+                | Op::Panic { .. }
         )
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CaptureSrc {
-    Reg(Reg),
-    Capture(u16),
 }
 
 #[derive(Clone, Debug)]
@@ -975,14 +1130,32 @@ pub struct Proto {
     pub nregs: u16,
     pub code: Vec<Op>,
     pub lines: Vec<u32>,
-    pub captures: Vec<CaptureSrc>,
-    /// For each capture: whether it is a cell.
-    pub capture_cells: Vec<bool>,
+    /// The registers whose values a closure of this proto captures, from
+    /// the frame that makes it (`NO_REG`: unit, for a local not declared
+    /// yet). Calling the closure copies them to the registers following the
+    /// parameters.
+    pub captures: Vec<Reg>,
     pub doc: Option<String>,
     pub signature: String,
     /// Sorted, disjoint code ranges inside which deferred code is pending,
     /// with the cleanup pad that runs it when the task is cancelled.
     pub cleanups: Vec<Cleanup>,
+    /// For each instruction, the inlined call it belongs to: 0 for none, `i`
+    /// for `inlined[i - 1]`. Empty if nothing was inlined. The instruction's
+    /// line (`lines`) is then in the inlined function's file.
+    pub sites: Vec<u16>,
+    pub inlined: Vec<InlineSite>,
+}
+
+/// A function body inlined into a proto (see `Proto::sites`).
+#[derive(Clone, Debug)]
+pub struct InlineSite {
+    pub name: String,
+    pub file: u32,
+    /// The line of the call, in the file of the enclosing site (`parent`,
+    /// 0 for the proto itself).
+    pub line: u32,
+    pub parent: u16,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1016,7 +1189,7 @@ pub enum Const {
     Tuple(Vec<u32>),
 }
 
-/// The jump table of a `SwitchVariant` or `SwitchInt`: instruction
+/// The jump table of a `SwitchVariant`, `SwitchInt` or `SwitchChar`: instruction
 /// `targets[v - first]` for value `v`, `default` for the others.
 #[derive(Clone, Debug, Default)]
 pub struct Switch {
@@ -1117,7 +1290,7 @@ pub struct Program {
     pub native_argc: Arc<[u16]>,
     /// The templates of string interpolations (`Op::Interp`).
     pub templates: Vec<Template>,
-    /// The jump tables of `SwitchVariant` and `SwitchInt`.
+    /// The jump tables of `SwitchVariant`, `SwitchInt` and `SwitchChar`.
     pub switches: Vec<Switch>,
     /// Names of all standard and host modules available to `import`.
     pub available_modules: Arc<[String]>,

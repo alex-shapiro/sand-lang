@@ -56,8 +56,178 @@ fn scalar_eq(a: Value, b: Value) -> bool {
         (Value::Int(x), Value::Int(y)) | (Value::Dur(x), Value::Dur(y)) => x == y,
         (Value::Float(x), Value::Float(y)) => x == y || (x.is_nan() && y.is_nan()),
         (Value::Tag(x), Value::Tag(y)) => x == y,
+        (Value::Pair(a, b), Value::Pair(c, d)) => a == c && b == d,
         _ => false,
     }
+}
+
+/// The elements of a tuple of two ints, inline or on the heap.
+#[inline]
+fn int_pair(heap: &Heap, v: Value) -> Option<(i64, i64)> {
+    match v {
+        Value::Pair(a, b) => Some((a as i64, b)),
+        Value::Obj(h) => match heap.obj(h) {
+            Obj::Tuple(t) => match **t {
+                [Value::Int(a), Value::Int(b)] => Some((a, b)),
+                _ => None,
+            },
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The hash of the tuple `(a, b)` of two ints, as `hash_tree` hashes it.
+#[inline]
+fn pair_hash(a: i64, b: i64) -> u64 {
+    let mut h = FxHasher::default();
+    h.write_u8(8);
+    h.write_usize(2);
+    h.write_u64(int_hash(a));
+    h.write_u64(int_hash(b));
+    h.finish()
+}
+
+/// The bounded fast paths of comparison, equality and hashing visit at most
+/// this many nodes, nested at most `SMALL_DEPTH` deep: enough for typical
+/// tuple keys and sort keys, which they handle without allocating. Larger
+/// or other values (maps, sets, long lists) make them return `None`, and
+/// the general algorithm starts over.
+const SMALL_NODES: u32 = 32;
+const SMALL_DEPTH: u32 = 4;
+const SMALL_LIST: usize = 8;
+
+/// The work of a fast path, charged once it succeeds.
+#[derive(Default)]
+struct Small {
+    nodes: u32,
+    bytes: usize,
+}
+
+impl Small {
+    #[inline]
+    fn node(&mut self) -> Option<()> {
+        self.nodes += 1;
+        (self.nodes <= SMALL_NODES).then_some(())
+    }
+
+    fn charge(&self, budget: &impl Budget) -> Result<(), Ctl> {
+        budget.charge(self.nodes as u64)?;
+        budget.charge_bytes(self.bytes)
+    }
+}
+
+/// [`values_cmp_metered`] of small values.
+fn cmp_small(prog: &Program, heap: &Heap, a: Value, b: Value, depth: u32, w: &mut Small) -> Option<Ordering> {
+    w.node()?;
+    let fields = |p: &[Value], q: &[Value], w: &mut Small| -> Option<Ordering> {
+        let depth = depth.checked_sub(1)?;
+        for (x, y) in p.iter().zip(q) {
+            match cmp_small(prog, heap, *x, *y, depth, w)? {
+                Ordering::Equal => {}
+                o => return Some(o),
+            }
+        }
+        Some(Ordering::Equal)
+    };
+    Some(match (a, b) {
+        (Value::Unit, Value::Unit) => Ordering::Equal,
+        (Value::Bool(x), Value::Bool(y)) => x.cmp(&y),
+        (Value::Int(x), Value::Int(y)) | (Value::Dur(x), Value::Dur(y)) => x.cmp(&y),
+        (Value::Float(x), Value::Float(y)) => total_cmp_f(x, y),
+        (Value::Pair(..), _) | (_, Value::Pair(..)) => int_pair(heap, a)?.cmp(&int_pair(heap, b)?),
+        (Value::Obj(x), Value::Obj(y)) if x == y => Ordering::Equal,
+        (Value::Obj(_), Value::Obj(_)) => match (heap.get(a), heap.get(b)) {
+            (Obj::Str(p), Obj::Str(q)) => {
+                w.bytes += p.len().min(q.len());
+                p.as_bytes().cmp(q.as_bytes())
+            }
+            (Obj::Tuple(p), Obj::Tuple(q)) | (Obj::Struct(_, p), Obj::Struct(_, q)) => fields(p, q, w)?,
+            (Obj::List(p), Obj::List(q)) if p.len().max(q.len()) <= SMALL_LIST => fields(p, q, w)?.then(p.len().cmp(&q.len())),
+            (Obj::Variant(i, p), Obj::Variant(j, q)) => match variant_index(prog, *i).cmp(&variant_index(prog, *j)) {
+                Ordering::Equal => fields(p, q, w)?,
+                o => o,
+            },
+            _ => return None,
+        },
+        _ => {
+            let (va, vb) = (heap.variant(a)?, heap.variant(b)?);
+            match variant_index(prog, va.id()).cmp(&variant_index(prog, vb.id())) {
+                Ordering::Equal => fields(va.fields(), vb.fields(), w)?,
+                o => o,
+            }
+        }
+    })
+}
+
+/// [`values_eq_metered`] of small values (inside composites: NaN equals NaN).
+fn eq_small(heap: &Heap, a: Value, b: Value, depth: u32, w: &mut Small) -> Option<bool> {
+    w.node()?;
+    let fields = |p: &[Value], q: &[Value], w: &mut Small| -> Option<bool> {
+        if p.len() != q.len() {
+            return Some(false);
+        }
+        let depth = depth.checked_sub(1)?;
+        for (x, y) in p.iter().zip(q) {
+            if !eq_small(heap, *x, *y, depth, w)? {
+                return Some(false);
+            }
+        }
+        Some(true)
+    };
+    Some(match (a, b) {
+        (Value::Obj(x), Value::Obj(y)) if x == y => true,
+        (Value::Obj(_), Value::Obj(_)) => match (heap.get(a), heap.get(b)) {
+            (Obj::Str(p), Obj::Str(q)) => {
+                w.bytes += p.len().min(q.len());
+                p == q
+            }
+            (Obj::Tuple(p), Obj::Tuple(q)) => fields(p, q, w)?,
+            (Obj::Struct(d1, p), Obj::Struct(d2, q)) | (Obj::Variant(d1, p), Obj::Variant(d2, q)) => d1 == d2 && fields(p, q, w)?,
+            (Obj::List(p), Obj::List(q)) if p.len().max(q.len()) <= SMALL_LIST => fields(p, q, w)?,
+            _ => return None,
+        },
+        (Value::Obj(_), _) | (_, Value::Obj(_)) => false,
+        _ => match (a.as_inline_variant(), b.as_inline_variant()) {
+            (Some((ia, pa)), Some((ib, pb))) => ia == ib && eq_small(heap, pa, pb, depth.checked_sub(1)?, w)?,
+            _ => scalar_eq(a, b),
+        },
+    })
+}
+
+/// [`hash_key`] of a small value.
+fn hash_small(heap: &Heap, v: Value, depth: u32, w: &mut Small) -> Option<u64> {
+    w.node()?;
+    let fields = match v {
+        Value::Int(i) | Value::Dur(i) => return Some(int_hash(i)),
+        Value::Pair(a, b) => return Some(pair_hash(a as i64, b)),
+        Value::Obj(_) => match heap.get(v) {
+            Obj::Str(s) => {
+                w.bytes += s.len();
+                return Some(bytes_hash(s.as_bytes()));
+            }
+            Obj::Bytes(b) => {
+                w.bytes += b.len();
+                return Some(bytes_hash(b));
+            }
+            Obj::Tuple(f) | Obj::Struct(_, f) | Obj::Variant(_, f) => &**f,
+            _ => return leaf_hash(heap, &Unmetered, v).ok()?,
+        },
+        _ => match v.as_inline_variant() {
+            Some((_, p)) => {
+                let mut h = container_hasher(heap, v);
+                h.write_u64(hash_small(heap, p, depth.checked_sub(1)?, w)?);
+                return Some(h.finish());
+            }
+            None => return leaf_hash(heap, &Unmetered, v).ok()?,
+        },
+    };
+    let depth = depth.checked_sub(1)?;
+    let mut h = container_hasher(heap, v);
+    for f in fields {
+        h.write_u64(hash_small(heap, *f, depth, w)?);
+    }
+    Some(h.finish())
 }
 
 /// Deep structural equality. Floats at the top level use IEEE semantics;
@@ -90,6 +260,11 @@ pub fn values_eq_metered(heap: &Heap, budget: &impl Budget, a: Value, b: Value) 
         // Inline single-payload variants compare their payloads below.
         _ if a.as_inline_variant().is_some() && b.as_inline_variant().is_some() => {}
         _ => return Ok(scalar_eq(a, b)),
+    }
+    let mut w = Small::default();
+    if let Some(eq) = eq_small(heap, a, b, SMALL_DEPTH, &mut w) {
+        w.charge(budget)?;
+        return Ok(eq);
     }
     let mut stack: Vec<EqWork> = vec![EqWork::Pair(a, b)];
     let mut seen = Seen::new();
@@ -209,12 +384,90 @@ pub fn map_slot(heap: &Heap, budget: &impl Budget, m: &MapObj, k: Value) -> Resu
     if m.live == 0 {
         return Ok(None);
     }
-    if let Value::Int(i) = k {
-        // Int keys compare without the general (fallible) equality.
-        return Ok(m.index.find(int_hash(i), |s| matches!(m.entries[s], Some((Value::Int(x), _)) if x == i)));
+    // Ints and pairs of ints compare without the general (fallible) equality.
+    match k {
+        Value::Int(i) => return Ok(m.index.find_int(i, |s| matches!(m.entries[s], Some((Value::Int(x), _)) if x == i))),
+        Value::Pair(a, b) => return Ok(m.index.find(k, pair_hash(a as i64, b), |s| matches!(m.entries[s], Some((x, _)) if x == k))),
+        _ => {}
     }
     let hash = hash_key(heap, budget, k)?;
     find_key(heap, budget, &m.index, hash, k, |i| m.entries[i].map(|(k, _)| k))
+}
+
+/// The value of the int key `i` in map `m`: the fast path of lookups.
+/// (A reference: moving values through options makes LLVM copy them in
+/// unaligned pieces.)
+#[inline]
+pub fn map_get_int(m: &MapObj, i: i64) -> Option<&Value> {
+    if !m.vals.is_empty() {
+        return m.vals.get(usize::try_from(i).ok()?).filter(|v| !matches!(v, Value::Uninit));
+    }
+    if m.live == 0 {
+        return None;
+    }
+    let s = m.index.find_int(i, |s| matches!(m.entries[s], Some((Value::Int(x), _)) if x == i))?;
+    m.entries[s].as_ref().map(|(_, v)| v)
+}
+
+/// Whether set `s` holds the int `i`: the fast path of lookups.
+#[inline]
+pub fn set_has_int(s: &SetObj, i: i64) -> bool {
+    s.live != 0 && s.index.find_int(i, |e| matches!(s.entries[e], Some(Value::Int(x)) if x == i)).is_some()
+}
+
+/// The slot of key `k` (hashing to `hash`) among `entries`, comparing
+/// ints directly and other keys with [`keys_eq`].
+#[inline]
+pub fn find_entry<T>(
+    heap: &Heap,
+    budget: &impl Budget,
+    table: &KeyIndex,
+    hash: u64,
+    k: Value,
+    entries: &[Option<T>],
+    key: impl Fn(&T) -> Value,
+) -> Result<Option<usize>, Ctl> {
+    match k {
+        Value::Int(i) => Ok(table.find_int(i, |s| matches!(entries[s].as_ref().map(&key), Some(Value::Int(x)) if x == i))),
+        _ => find_key(heap, budget, table, hash, k, |s| entries[s].as_ref().map(&key)),
+    }
+}
+
+/// The slot of the tuple key whose elements are `items` in map `m`.
+pub fn map_slot_tuple(heap: &Heap, budget: &impl Budget, m: &MapObj, items: &[Value]) -> Result<Option<usize>, Ctl> {
+    if let [a, b] = *items
+        && let Some(k) = Value::tuple2(a, b)
+    {
+        return map_slot(heap, budget, m, k);
+    }
+    if m.live == 0 {
+        return Ok(None);
+    }
+    // As `container_hasher` and `hash_tree` hash a tuple.
+    let mut h = FxHasher::default();
+    h.write_u8(8);
+    h.write_usize(items.len());
+    for &x in items {
+        h.write_u64(hash_key(heap, budget, x)?);
+    }
+    budget.charge(1)?;
+    let mut failed = None;
+    let slot = m.index.find(Value::Unit, h.finish(), |s| {
+        let Some((Value::Obj(t), _)) = m.entries[s] else { return false };
+        let Obj::Tuple(t) = heap.obj(t) else { return false };
+        t.len() == items.len()
+            && t.iter().zip(items).all(|(&a, &b)| match keys_eq(heap, budget, a, b) {
+                Ok(eq) => eq,
+                Err(c) => {
+                    failed.get_or_insert(c);
+                    false
+                }
+            })
+    });
+    match failed {
+        Some(c) => Err(c),
+        None => Ok(slot),
+    }
 }
 
 /// The slot of element `k` in set `s`.
@@ -223,8 +476,10 @@ pub fn set_slot(heap: &Heap, budget: &impl Budget, s: &SetObj, k: Value) -> Resu
     if s.live == 0 {
         return Ok(None);
     }
-    if let Value::Int(i) = k {
-        return Ok(s.index.find(int_hash(i), |e| matches!(s.entries[e], Some(Value::Int(x)) if x == i)));
+    match k {
+        Value::Int(i) => return Ok(s.index.find_int(i, |e| matches!(s.entries[e], Some(Value::Int(x)) if x == i))),
+        Value::Pair(a, b) => return Ok(s.index.find(k, pair_hash(a as i64, b), |e| s.entries[e] == Some(k))),
+        _ => {}
     }
     let hash = hash_key(heap, budget, k)?;
     find_key(heap, budget, &s.index, hash, k, |i| s.entries[i])
@@ -240,13 +495,13 @@ fn set_lookup(heap: &Heap, budget: &impl Budget, s: &SetObj, k: Value) -> Result
 pub fn find_key(
     heap: &Heap,
     budget: &impl Budget,
-    table: &KeyTable,
+    table: &KeyIndex,
     hash: u64,
     k: Value,
     key_at: impl Fn(usize) -> Option<Value>,
 ) -> Result<Option<usize>, Ctl> {
     let mut failed = None;
-    let slot = table.find(hash, |i| match key_at(i) {
+    let slot = table.find(k, hash, |i| match key_at(i) {
         Some(x) => match keys_eq(heap, budget, x, k) {
             Ok(eq) => eq,
             Err(c) => {
@@ -267,6 +522,14 @@ pub fn find_key(
 pub fn keys_eq(heap: &Heap, budget: &impl Budget, a: Value, b: Value) -> Result<bool, Ctl> {
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => Ok(x == y),
+        (Value::Obj(x), Value::Obj(y)) if x == y => Ok(true),
+        (Value::Obj(x), Value::Obj(y)) => match (heap.obj(x), heap.obj(y)) {
+            (Obj::Str(p), Obj::Str(q)) => {
+                budget.charge_bytes(p.len().min(q.len()))?;
+                Ok(p.as_bytes() == q.as_bytes())
+            }
+            _ => values_eq_metered(heap, budget, a, b),
+        },
         _ if a == b => Ok(true),
         _ => values_eq_metered(heap, budget, a, b),
     }
@@ -286,19 +549,32 @@ pub fn hash_key(heap: &Heap, budget: &impl Budget, v: Value) -> Result<u64, Ctl>
     // Fast paths, inlined: the common scalar and string keys.
     match v {
         Value::Int(i) => Ok(int_hash(i)),
+        Value::Pair(a, b) => Ok(pair_hash(a as i64, b)),
         Value::Obj(_) => match heap.get(v) {
             Obj::Str(s) => {
                 budget.charge_bytes(s.len())?;
                 Ok(bytes_hash(s.as_bytes()))
             }
-            _ => hash_tree(heap, budget, v),
+            _ => hash_composite(heap, budget, v),
         },
-        _ => hash_tree(heap, budget, v),
+        _ => hash_composite(heap, budget, v),
     }
 }
 
 /// [`hash_key`] for keys that are not ints or strings.
 #[inline(never)]
+fn hash_composite(heap: &Heap, budget: &impl Budget, v: Value) -> Result<u64, Ctl> {
+    let mut w = Small::default();
+    match hash_small(heap, v, SMALL_DEPTH, &mut w) {
+        Some(h) => {
+            w.charge(budget)?;
+            Ok(h)
+        }
+        None => hash_tree(heap, budget, v),
+    }
+}
+
+/// [`hash_key`] of any key, memoizing the hashes of large ones.
 fn hash_tree(heap: &Heap, budget: &impl Budget, v: Value) -> Result<u64, Ctl> {
     let mut stack = HashStack::default();
     let mut memo: Option<FxHashMap<u32, u64>> = None;
@@ -375,13 +651,6 @@ pub fn str_hash(s: &str) -> u64 {
 // payload), all have one static type, so values of different types are
 // never compared. Ints hash with one multiply.
 
-#[inline]
-fn int_hash(i: i64) -> u64 {
-    let mut h = FxHasher::default();
-    h.write_i64(i);
-    h.finish()
-}
-
 /// Hashes the length so that trailing NULs (the zero padding) are not lost.
 #[inline]
 fn bytes_hash(b: &[u8]) -> u64 {
@@ -404,6 +673,7 @@ fn leaf_hash(heap: &Heap, budget: &impl Budget, v: Value) -> Result<Option<u64>,
         }
         Value::Int(i) => return Ok(Some(int_hash(i))),
         Value::Dur(d) => return Ok(Some(int_hash(d))),
+        Value::Pair(a, b) => return Ok(Some(pair_hash(a as i64, b))),
         Value::Float(f) => {
             h.write_u8(4);
             h.write_u64(if f == 0.0 {
@@ -593,6 +863,11 @@ pub fn values_cmp_metered(prog: &Program, heap: &Heap, budget: &impl Budget, a: 
         }
         _ => {}
     }
+    let mut w = Small::default();
+    if let Some(o) = cmp_small(prog, heap, a, b, SMALL_DEPTH, &mut w) {
+        w.charge(budget)?;
+        return Ok(o);
+    }
     let mut stack: Vec<CmpWork> = vec![CmpWork::Pair(a, b)];
     let mut seen = Seen::new();
     while let Some(w) = stack.pop() {
@@ -614,6 +889,7 @@ pub fn values_cmp_metered(prog: &Program, heap: &Heap, budget: &impl Budget, a: 
         budget.charge(1)?;
         let ord = match (a, b) {
             (Value::Unit, Value::Unit) => Ordering::Equal,
+            (Value::Pair(..), _) | (_, Value::Pair(..)) => int_pair(heap, a).cmp(&int_pair(heap, b)),
             (Value::Bool(x), Value::Bool(y)) => x.cmp(&y),
             (Value::Int(x), Value::Int(y)) | (Value::Dur(x), Value::Dur(y)) => x.cmp(&y),
             (Value::Float(x), Value::Float(y)) => total_cmp_f(x, y),

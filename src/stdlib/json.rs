@@ -287,7 +287,7 @@ impl<'a, 's, 'h> Build<'a, 's, 'h> {
         let mut map = MapObj { entries: Vec::with_capacity(n), live: n, ..MapObj::default() };
         map.index.reserve(n);
         for (slot, e) in self.entries.drain(m.base..).enumerate() {
-            map.index.insert(e.hash, slot);
+            map.index.insert(e.key, e.hash, slot);
             map.entries.push(Some((e.key, e.value)));
         }
         let index = m.index.map_or(0, |ix| ix.bytes());
@@ -1162,6 +1162,7 @@ impl Encoder<'_> {
                 let _ = write!(self.out, "{i}");
             }
             Value::Float(f) => write_float(&mut self.out, f),
+            Value::Pair(a, b) => self.array(2, [Value::Int(a as i64), Value::Int(b)].into_iter(), level)?,
             Value::Tag(id) if id == prog.ids.none || id == self.ids.null => self.out.push_str("null"),
             Value::Tag(id) => self.string(&prog.variants[id as usize].name)?,
             Value::Obj(_) => match heap.get(v) {
@@ -1335,6 +1336,7 @@ impl<'a> Converter<'a, '_, '_> {
             Value::Bool(b) => self.b.st.new_variant(ids.bool_, &[Value::Bool(b)]),
             Value::Int(i) | Value::Dur(i) => num(self.b.st, i as f64),
             Value::Float(f) => num(self.b.st, f),
+            Value::Pair(a, b) => self.array([Value::Int(a as i64), Value::Int(b)].into_iter(), depth)?,
             Value::Tag(id) if id == prog.ids.none => Value::Tag(ids.null),
             Value::Tag(id) => {
                 let name = self.variant_name(id);

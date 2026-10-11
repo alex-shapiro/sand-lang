@@ -172,6 +172,9 @@ pub fn render_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Valu
                     }
                     Value::Float(f) => out.push_str(&fmt_float(f)),
                     Value::Dur(d) => out.push_str(&fmt_duration(d)),
+                    Value::Pair(a, b) => {
+                        let _ = write!(out, "({a}, {b})");
+                    }
                     Value::Uninit => out.push_str("<uninit>"),
                     Value::Tag(t) => out.push_str(prog.variants.get(t as usize).map(|v| v.name.as_str()).unwrap_or("?")),
                     Value::VUnit(_)

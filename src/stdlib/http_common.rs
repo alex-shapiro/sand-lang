@@ -154,7 +154,7 @@ pub(crate) fn header_list(vm: &mut Vm, headers: Vec<(String, String)>) -> NResul
         .into_iter()
         .map(|(k, v)| {
             let (k, v) = (vm.new_str(k), vm.new_str(v));
-            vm.heap.new_tuple(vec![k, v])
+            vm.heap.new_tuple(&[k, v])
         })
         .collect();
     Ok(vm.heap.new_list(items))

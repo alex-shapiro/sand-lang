@@ -619,3 +619,236 @@ if o == None { print("none") }
 eq
 2
 none
+
+=== tuples of two ints are values
+let a = (1, 2)
+let big = (3000000000, 1)
+let c = (1, 3000000000)
+print("\(a) \(big) \(c) \(a.0 + c.1)")
+print([big, a, c, (1, 2), (-5, 0)].sorted())
+print(a == (1, 2) and a != c and big > a and (2, 0) > (1, 9) and (0, 0) < big)
+let m: [(int, int): str] = [:]
+m[(1, 2)] = "x"
+m[big] = "big"
+m[(1, 2)] = "y"
+print("\(m.get((1, 2)) ?? "-") \(m.get((3000000000, 1)) ?? "-") \(m.get((2, 1)) ?? "-") \(m.contains((1, 2)))")
+print(m)
+print(set([(1, 2), (1, 2), (2, 1), big]).len())
+print([5, 6].enumerate())
+let (x, y) = a
+match c {
+    (1, z) => print(x * 10 + y + z),
+    _ => print("no"),
+}
+print(Some((4, 5)))
+--- stdout
+(1, 2) (3000000000, 1) (1, 3000000000) 3000000001
+[(-5, 0), (1, 2), (1, 2), (1, 3000000000), (3000000000, 1)]
+true
+y big - true
+[(1, 2): "y", (3000000000, 1): "big"]
+3
+[(0, 5), (1, 6)]
+3000000012
+Some((4, 5))
+
+=== tuple keys are looked up without building the tuple
+let m: [(int, str): int] = [(1, "a"): 10, (2, "b"): 20]
+let k = "b"
+print(m.get((2, k)) ?? 0)
+print(m.get((2, "a")) ?? 0)
+print(m.contains((1, "a")))
+let n: [(int, int, int): int] = [(1, 2, 3): 6]
+print(n.get((1, 2, 3)) ?? 0)
+--- stdout
+20
+0
+true
+6
+
+=== loops over the characters of a string
+var out = []
+for c in "héllo, wörld ☃!".chars() {
+    out.push(c)
+}
+print(out)
+print("ab☃c".chars().map(c => c.to_upper()).join("-"))
+print("".chars().map(c => c + c))
+print("a,b,,c".chars().count(c => c == ","))
+var k = 0
+for c in "abc".chars() {
+    if c == "b" { continue }
+    k += 1
+}
+print(k)
+--- stdout
+["h", "é", "l", "l", "o", ",", " ", "w", "ö", "r", "l", "d", " ", "☃", "!"]
+A-B-☃-C
+[]
+3
+2
+
+=== match on one-character strings
+fn escape(c: str) -> str {
+    match c {
+        "\"" => "\\\""
+        "\\" => "\\\\"
+        "\n" => "\\n"
+        "\t" | "\r" => "ws"
+        "é" => "e"
+        _ if c.len() > 1 => "long"
+        _ => c
+    }
+}
+print(["a", "\"", "\\", "\n", "\t", "\r", "é", "ab", ""].map(escape))
+--- stdout
+["a", "\\\"", "\\\\", "\\n", "ws", "ws", "e", "long", ""]
+
+=== match on a tuple switches on its first element
+enum Op { Add, Sub, Div, Mod, Eq }
+fn apply(op: Op, a: int, b: int) -> str {
+    match (op, a, b) {
+        (Add, x, 0) => "add zero \(x)"
+        (Add, x, y) => "add \(x + y)"
+        (Div, _, 0) | (Mod, _, 0) => "division by zero"
+        (Div, x, y) => "div \(x / y)"
+        (Sub, x, y) if x < y => "negative"
+        (_, x, y) => "other \(x) \(y)"
+    }
+}
+for (op, a, b) in [(Op.Add, 1, 0), (Op.Add, 1, 2), (Op.Div, 1, 0), (Op.Mod, 1, 0), (Op.Div, 7, 2), (Op.Sub, 1, 2), (Op.Sub, 3, 2), (Op.Eq, 1, 1)] {
+    print(apply(op, a, b))
+}
+--- stdout
+add zero 1
+add 3
+division by zero
+division by zero
+div 3
+negative
+other 3 2
+other 1 1
+
+=== get_or into a register it reads
+let n: [int: int] = [5: 50, 50: 7]
+var y = 5
+y = n.get_or(y, 0)
+print(y)
+y = n.get_or(y, y)
+print(y)
+y = n.get_or(1, y)
+print(y)
+--- stdout
+50
+7
+7
+
+=== small functions are inlined with their frames in stack traces
+fn half(n: int) -> int { 10 / n }
+fn twice(n: int) -> int { half(n) * 2 }
+print(twice(5))
+print(twice(0))
+--- stdout
+4
+--- panic
+division by zero
+
+=== closures: captures, mutable captures, self-calls and tasks
+fn counter() -> fn() -> int {
+    var n = 0
+    () => {
+        n += 1
+        n
+    }
+}
+let c = counter()
+c()
+print(c())
+fn outer(k: int) -> int {
+    let base = k * 10
+    fn fact(n: int) -> int { if n <= 1 { base } else { n * fact(n - 1) } }
+    let add = (x: int) => (y: int) => x + y + base
+    fact(4) + add(1)(2)
+}
+print(outer(1))
+let words = ["a", "b"]
+var total = 0
+let t = spawn {
+    total += words.len()
+    words.len() * 100
+}
+print(t.wait() + total)
+--- stdout
+2
+253
+202
+
+=== comparisons with small constants on either side
+let xs = [-4, 0, 3, 5, 9]
+for x in xs {
+    print("\(x == 3) \(x != 3) \(x < 3) \(x <= 3) \(x > 3) \(x >= 3) \(5 < x) \(-4 >= x) \(0 == x)")
+}
+let big = 40000
+print("\(big > 32767) \(big == 40000)")
+--- stdout
+false true true true false false false true false
+false true true true false false false false true
+true false false true false true false false false
+false true false false true true false false false
+false true false false true true true false false
+true true
+
+=== functions returning a variant with one payload
+enum Shape {
+    Circle(float)
+    Named(str)
+}
+fn half(n: int) -> int? {
+    if n % 2 == 0 { return Some(n / 2) }
+    None
+}
+fn pair(n: int) -> (int, str)? {
+    if n > 0 { Some((n, "n\(n)")) } else { None }
+}
+fn check(n: int) -> Result<int> {
+    if n < 0 { return Err(error("negative: \(n)")) }
+    Ok(n)
+}
+fn named(s: str) -> Shape { Shape.Named(s) }
+print("\(half(8)) \(half(7)) \(pair(2)) \(pair(0))")
+print("\(check(4)) \(check(-1).is_err()) \(named("x")) \(Shape.Circle(1.5))")
+let it = Iter.from_fn(() => Some(1)).take(3).map(x => Some(x))
+print(it.to_list())
+--- stdout
+Some(4) None Some((2, "n2")) None
+Ok(4) true Named("x") Circle(1.5)
+[Some(1), Some(1), Some(1)]
+
+=== a store after a lookup of the same key
+let m: [str: int] = [:]
+let words = ["a", "bb", "a", "ccc", "bb", "a"]
+for w in words {
+    m[w] = m.get_or(w, 0) + 1
+}
+print(m)
+let k = "bb"
+let n = m[k]
+m.remove("a")
+m["a"] = 10
+m[k] = n * 100
+print(m)
+let o: [str: int] = ["x": 1]
+let x = o["x"]
+m["x"] = x
+print("\(m) \(o)")
+let t: [(str, int): int] = [:]
+for i in 0..4 {
+    let key = ("k", i % 2)
+    t[key] = t.get_or(key, 0) + i
+}
+print(t)
+--- stdout
+["a": 3, "bb": 2, "ccc": 1]
+["bb": 200, "ccc": 1, "a": 10]
+["bb": 200, "ccc": 1, "a": 10, "x": 1] ["x": 1]
+[("k", 0): 2, ("k", 1): 4]

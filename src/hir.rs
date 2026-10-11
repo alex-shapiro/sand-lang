@@ -63,6 +63,8 @@ pub enum HUnOp {
 pub enum IterKind {
     Range,
     List,
+    /// The characters of a string (`s.chars()`, without building the list).
+    Chars,
     Map,
     Set,
     Channel,
@@ -345,6 +347,12 @@ pub enum HKind {
     Spawn(Box<HExpr>),
     /// `defer e` (a statement of a block): `e` runs when the block exits.
     Defer(Box<HExpr>),
+    /// The body of function `func` inlined at a call (the expression's
+    /// span); the body keeps the spans of the function's own source.
+    Inlined {
+        func: FnId,
+        body: Box<HExpr>,
+    },
     /// Universal methods.
     ToStr(Box<HExpr>),
     Debug(Box<HExpr>),
@@ -499,9 +507,13 @@ impl HExpr {
                     e(x);
                 }
             }
-            HKind::Unary { e: x, .. } | HKind::ToStr(x) | HKind::Debug(x) | HKind::Spawn(x) | HKind::Defer(x) | HKind::Try { e: x, .. } => {
-                e(x)
-            }
+            HKind::Unary { e: x, .. }
+            | HKind::ToStr(x)
+            | HKind::Debug(x)
+            | HKind::Spawn(x)
+            | HKind::Defer(x)
+            | HKind::Try { e: x, .. }
+            | HKind::Inlined { body: x, .. } => e(x),
             HKind::Arith { l, r, .. }
             | HKind::Cmp { l, r, .. }
             | HKind::And(l, r)

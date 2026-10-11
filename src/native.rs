@@ -382,15 +382,25 @@ macro_rules! tuple_impls {
         impl<$($n: FromValue),+> FromValue for ($($n,)+) {
             type Item<'a> = ($($n::Item<'a>,)+);
             fn from_value<'a>(vm: &'a Vm, v: Value, conv: &mut Conversion) -> Result<Self::Item<'a>, Ctl> {
-                let Obj::Tuple(f) = vm.heap.get(v) else { return mismatch("tuple") };
+                let pair;
+                let f: &[Value] = match v {
+                    Value::Pair(a, b) => {
+                        pair = [Value::Int(a as i64), Value::Int(b)];
+                        &pair
+                    }
+                    _ => match vm.heap.get(v) {
+                        Obj::Tuple(f) => f,
+                        _ => return mismatch("tuple"),
+                    },
+                };
                 Ok(($($n::from_value(vm, *f.get($i).ok_or_else(|| Ctl::panic("tuple too short"))?, conv)?,)+))
             }
         }
         impl<$($n: IntoValue),+> IntoValue for ($($n,)+) {
             fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl> {
-                let items = vec![$(self.$i.into_value(vm)?),+];
+                let items = [$(self.$i.into_value(vm)?),+];
                 vm.reserve(items.len() * std::mem::size_of::<Value>())?;
-                Ok(vm.heap.new_tuple(items))
+                Ok(vm.heap.new_tuple(&items))
             }
         }
     };

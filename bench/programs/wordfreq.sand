@@ -1,0 +1,132 @@
+// Word-frequency analysis over a generated text of ~300k words.
+// Stresses string splitting, lowercasing, slicing, concatenation,
+// string-keyed map updates and sorting by composite keys.
+
+let VOCAB_SIZE = 5000
+let WORD_COUNT = 300_000
+let SYLLABLES = [
+    "ka",
+    "to",
+    "ri",
+    "men",
+    "sa",
+    "lo",
+    "ve",
+    "qu",
+    "an",
+    "del",
+    "pho",
+    "ny",
+    "ex",
+    "ur",
+    "bi",
+    "ston",
+    "gle",
+    "ad",
+    "ter",
+    "op",
+]
+let PUNCTUATION = [",", ".", ";", "!"]
+
+struct Rng {
+    var state: int
+
+    /// A pseudo-random integer in `0..n` (`n` at most 32768), from the high bits.
+    fn next(self, n: int) -> int {
+        self.state = (self.state * 1103515245 + 12345) % 2147483648
+        self.state / 65536 % n
+    }
+}
+
+fn make_word(rng: Rng) -> str {
+    var word = ""
+    for _ in 0..2 + rng.next(3) {
+        word += SYLLABLES[rng.next(SYLLABLES.len())]
+    }
+    word
+}
+
+/// A word of the vocabulary as it appears in running text: skewed towards
+/// frequent words, sometimes capitalized, sometimes quoted or punctuated.
+fn make_token(rng: Rng, vocabulary: [str]) -> str {
+    let n = vocabulary.len()
+    let word = vocabulary[rng.next(n) * rng.next(n) / n]
+    var token = match rng.next(10) {
+        0 => word[0..1].to_upper() + word[1..]
+        1 => word.to_upper()
+        _ => word
+    }
+    if rng.next(25) == 0 {
+        token = "\"" + token + "\""
+    }
+    let p = rng.next(8)
+    if p < PUNCTUATION.len() {
+        token += PUNCTUATION[p]
+    }
+    token
+}
+
+fn make_text(rng: Rng, vocabulary: [str]) -> str {
+    let lines: [str] = []
+    var written = 0
+    while written < WORD_COUNT {
+        let n = (8 + rng.next(9)).min(WORD_COUNT - written)
+        lines.push([make_token(rng, vocabulary) for _ in 0..n].join(" "))
+        written += n
+    }
+    lines.join("\n")
+}
+
+fn is_punctuation(c: str) -> bool {
+    c == "," or c == "." or c == ";" or c == "!" or c == "\""
+}
+
+fn strip_punctuation(word: str) -> str {
+    var start = 0
+    var end = word.len()
+    while start < end and is_punctuation(word[start..start + 1]) {
+        start += 1
+    }
+    while end > start and is_punctuation(word[end - 1..end]) {
+        end -= 1
+    }
+    word[start..end]
+}
+
+fn top(counts: [str: int], n: int) -> [(str, int)] {
+    counts.entries().sorted_by(e => (-e.1, e.0)).take(n)
+}
+
+let rng = Rng { state: 42 }
+let vocabulary = [make_word(rng) for _ in 0..VOCAB_SIZE]
+let text = make_text(rng, vocabulary)
+
+let words: [str: int] = [:]
+let bigrams: [str: int] = [:]
+var total = 0
+for line in text.lines() {
+    var previous: str? = None
+    for raw in line.split_whitespace() {
+        let word = strip_punctuation(raw.to_lower())
+        if word.is_empty() { continue }
+        total += 1
+        words[word] = words.get_or(word, 0) + 1
+        if let Some(p) = previous {
+            let bigram = p + " " + word
+            bigrams[bigram] = bigrams.get_or(bigram, 0) + 1
+        }
+        previous = Some(word)
+    }
+}
+
+print("total words: \(total)")
+print("distinct words: \(words.len())")
+print("distinct bigrams: \(bigrams.len())")
+print("top words:")
+for (word, count) in top(words, 20) {
+    print("  \(count) \(word)")
+}
+print("top bigrams:")
+for (bigram, count) in top(bigrams, 10) {
+    print("  \(count) \(bigram)")
+}

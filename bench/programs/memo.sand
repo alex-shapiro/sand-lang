@@ -1,0 +1,112 @@
+// Memoized recursive dynamic programming: lattice paths around obstacles,
+// edit distance and 0/1 knapsack, each memoized in a map with tuple keys.
+// Stresses tuple-keyed hashing, map get/insert, closures and recursion.
+
+let MOD = 1_000_000_007
+let GRIDS = 12
+let GRID_SIZE = 300
+let PAIRS = 450
+let KNAPSACKS = 12
+let ITEMS = 100
+let CAPACITY = 1000
+let BASES = ["A", "C", "G", "T"]
+
+struct Rng {
+    var state: int
+
+    /// A pseudo-random integer in `0..n` (`n` at most 32768), from the high bits.
+    fn next(self, n: int) -> int {
+        self.state = (self.state * 1103515245 + 12345) % 2147483648
+        self.state / 65536 % n
+    }
+}
+
+struct Item {
+    weight: int
+    value: int
+}
+
+/// A square grid where `true` marks an obstacle; the corners are always open.
+fn make_grid(rng: Rng, size: int) -> [[bool]] {
+    let grid = [[rng.next(8) == 0 for _ in 0..size] for _ in 0..size]
+    grid[0][0] = false
+    grid[size - 1][size - 1] = false
+    grid
+}
+
+/// The number of monotone (down/right) paths from the top-left to the
+/// bottom-right corner that avoid obstacles, modulo `MOD`.
+fn count_paths(grid: [[bool]]) -> int {
+    let memo: [(int, int): int] = [:]
+    fn paths(r: int, c: int) -> int {
+        if r < 0 or c < 0 or grid[r][c] { return 0 }
+        if r == 0 and c == 0 { return 1 }
+        if let Some(n) = memo.get((r, c)) { return n }
+        let n = (paths(r - 1, c) + paths(r, c - 1)) % MOD
+        memo[(r, c)] = n
+        n
+    }
+    paths(grid.len() - 1, grid[0].len() - 1)
+}
+
+fn random_string(rng: Rng) -> str {
+    [BASES[rng.next(BASES.len())] for _ in 0..40 + rng.next(41)].join()
+}
+
+fn edit_distance(a: str, b: str) -> int {
+    let xs = a.chars()
+    let ys = b.chars()
+    let memo: [(int, int): int] = [:]
+    fn dist(i: int, j: int) -> int {
+        if i == xs.len() { return ys.len() - j }
+        if j == ys.len() { return xs.len() - i }
+        if let Some(d) = memo.get((i, j)) { return d }
+        let d = if xs[i] == ys[j] {
+            dist(i + 1, j + 1)
+        } else {
+            1 + dist(i + 1, j).min(dist(i, j + 1)).min(dist(i + 1, j + 1))
+        }
+        memo[(i, j)] = d
+        d
+    }
+    dist(0, 0)
+}
+
+fn knapsack(items: [Item], capacity: int) -> int {
+    let memo: [(int, int): int] = [:]
+    fn best(i: int, room: int) -> int {
+        if i == items.len() { return 0 }
+        if let Some(v) = memo.get((i, room)) { return v }
+        let item = items[i]
+        var v = best(i + 1, room)
+        if item.weight <= room {
+            v = v.max(item.value + best(i + 1, room - item.weight))
+        }
+        memo[(i, room)] = v
+        v
+    }
+    best(0, capacity)
+}
+
+let rng = Rng { state: 42 }
+
+for g in 0..GRIDS {
+    print("grid \(g): \(count_paths(make_grid(rng, GRID_SIZE))) paths")
+}
+
+var total_distance = 0
+for p in 0..PAIRS {
+    let a = random_string(rng)
+    let b = random_string(rng)
+    let d = edit_distance(a, b)
+    if p < 5 {
+        print("distance \(a.len())x\(b.len()): \(d)")
+    }
+    total_distance += d
+}
+print("total distance: \(total_distance)")
+
+for k in 0..KNAPSACKS {
+    let items = [Item { weight: 1 + rng.next(100), value: 1 + rng.next(500) } for _ in 0..ITEMS]
+    print("knapsack \(k): \(knapsack(items, CAPACITY))")
+}

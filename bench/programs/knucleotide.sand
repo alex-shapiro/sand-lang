@@ -1,0 +1,54 @@
+// Benchmarks Game k-nucleotide over a generated DNA sequence: count every
+// k-mer for several k with substrings as map keys, then report frequencies.
+// Stresses substring creation and string-keyed hashing.
+
+let LENGTH = 600_000
+let QUERIES = ["GGT", "GGTA", "GGTATT", "GGTATTTTAATT", "GGTATTTTAATTTATAGT"]
+
+struct Rng {
+    var state: int
+
+    /// A pseudo-random integer in `0..n` (`n` at most 32768), from the high bits.
+    fn next(self, n: int) -> int {
+        self.state = (self.state * 1103515245 + 12345) % 2147483648
+        self.state / 65536 % n
+    }
+}
+
+/// A random base with the frequencies of the fasta benchmark's Homo sapiens
+/// alphabet, rounded to thousandths.
+fn random_base(rng: Rng) -> str {
+    match rng.next(1000) {
+        0..=302 => "A"
+        303..=500 => "C"
+        501..=698 => "G"
+        _ => "T"
+    }
+}
+
+fn frequencies(seq: str, k: int) -> [str: int] {
+    let counts: [str: int] = [:]
+    for i in 0..seq.len() - k + 1 {
+        let key = seq[i..i + k]
+        counts[key] = counts.get_or(key, 0) + 1
+    }
+    counts
+}
+
+fn print_frequencies(seq: str, k: int) {
+    let total = (seq.len() - k + 1).to_float()
+    let sorted = frequencies(seq, k).entries().sorted_by(e => (-e.1, e.0))
+    for (key, count) in sorted {
+        print("\(key) \((100.0 * count.to_float() / total).to_str_fixed(3))")
+    }
+    print("")
+}
+
+let rng = Rng { state: 42 }
+let seq = [random_base(rng) for _ in 0..LENGTH].join()
+
+print_frequencies(seq, 1)
+print_frequencies(seq, 2)
+for query in QUERIES {
+    print("\(frequencies(seq, query.len()).get_or(query, 0))\t\(query)")
+}

@@ -1,0 +1,221 @@
+// Record validation the way a config/ETL loader is written: generate `key=value;...` records,
+// a fraction malformed in various ways, parse each with small functions returning `Result`
+// and propagating with `?`, then aggregate valid records and count errors by kind.
+// Stresses Result/Option construction, `?` propagation, small calls, splitting and map updates.
+
+let RECORDS = 150_000
+let FIRST = [
+    "Ada",
+    "Alan",
+    "Grace",
+    "Edsger",
+    "Barbara",
+    "Donald",
+    "Margaret",
+    "Ken",
+    "Radia",
+    "Niklaus",
+]
+let LAST = [
+    "Lovelace",
+    "Turing",
+    "Hopper",
+    "Dijkstra",
+    "Liskov",
+    "Knuth",
+    "Hamilton",
+    "Thompson",
+    "Perlman",
+]
+let DOMAINS = ["example.com", "mail.org", "post.net", "uni.edu", "corp.io", "inbox.dev", "lab.ai"]
+let TAGS = ["admin", "dev", "ops", "qa", "sales", "hr", "ml", "web", "db", "sec", "mobile"]
+let FIELDS = ["id", "name", "age", "email", "tags", "score"]
+
+struct Rng {
+    var state: int
+
+    fn next(self, n: int) -> int {
+        self.state = (self.state * 1103515245 + 12345) % 2147483648
+        self.state / 65536 % n
+    }
+}
+
+fn generate(rng: Rng, index: int) -> str {
+    let first = FIRST[rng.next(FIRST.len())]
+    let last = LAST[rng.next(LAST.len())]
+    var id = (index + 1).to_str()
+    if rng.next(100) < 3 and index > 0 {
+        id = (1 + rng.next(index)).to_str()
+    }
+    var age = (18 + rng.next(60)).to_str()
+    var email = "\(first.to_lower()).\(last.to_lower())@\(DOMAINS[rng.next(DOMAINS.len())])"
+    let tags = [TAGS[rng.next(TAGS.len())] for _ in 0..1 + rng.next(4)]
+    let points = rng.next(1001)
+    var score = "\(points / 10).\(points % 10)"
+    var separator = "="
+    var dropped = ""
+    match rng.next(100) {
+        0 | 1 => { dropped = FIELDS[rng.next(FIELDS.len())] }
+        2 | 3 => { age = "\(age)x" }
+        4 => { id = "#\(id)" }
+        5 | 6 => { age = (131 + rng.next(100)).to_str() }
+        7 => { age = "-\(age)" }
+        8 | 9 => { email = email.replace("@", "") }
+        10 => { email = "\(first.to_lower())@localhost" }
+        11 | 12 => { tags.insert(rng.next(tags.len() + 1), "") }
+        13 => { score = "\(score).5" }
+        14 => { score = "1\(score)" }
+        15 => { separator = ":" }
+        _ => {}
+    }
+    let values = [id, "\(first) \(last)", age, email, tags.join(","), score]
+    let pairs: [str] = []
+    for (i, key) in FIELDS.enumerate() {
+        if key == dropped { continue }
+        pairs.push(if key == "age" {
+            "\(key)\(separator)\(values[i])"
+        } else {
+            "\(key)=\(values[i])"
+        })
+    }
+    pairs.join(";")
+}
+
+struct Person {
+    id: int
+    name: str
+    age: int
+    user: str
+    domain: str
+    tags: [str]
+    score: float
+}
+
+fn parse_fields(line: str) -> Result<[str: str]> {
+    let fields: [str: str] = [:]
+    for part in line.split(";") {
+        let Some((key, value)) = part.split_once("=") else {
+            return Err(error("expected key=value, got `\(part)`", kind: "syntax"))
+        }
+        fields[key] = value
+    }
+    Ok(fields)
+}
+
+fn field(fields: [str: str], key: str) -> Result<str> {
+    let Some(value) = fields.get(key) else {
+        return Err(error("missing field `\(key)`", kind: "missing"))
+    }
+    Ok(value)
+}
+
+fn parse_int_field(fields: [str: str], key: str) -> Result<int> {
+    let text = field(fields, key)?
+    text.parse_int().ok_or(error("field `\(key)`: `\(text)` is not an integer", kind: "int"))
+}
+
+fn validate_age(age: int) -> Result<int> {
+    if age < 0 or age > 130 {
+        return Err(error("field `age`: \(age) out of range", kind: "range"))
+    }
+    Ok(age)
+}
+
+fn validate_email(email: str) -> Result<(str, str)> {
+    let Some((user, domain)) = email.split_once("@") else {
+        return Err(error("bad email `\(email)`: no @", kind: "email"))
+    }
+    if user.is_empty()
+        or not domain.contains(".")
+        or domain.starts_with(".")
+        or domain.ends_with(".") {
+        return Err(error("bad email `\(email)`: bad domain", kind: "email"))
+    }
+    Ok((user, domain))
+}
+
+fn parse_tags(text: str) -> Result<[str]> {
+    let tags = text.split(",")
+    if tags.any(t => t.is_empty()) {
+        return Err(error("empty tag in `\(text)`", kind: "tag"))
+    }
+    Ok(tags)
+}
+
+fn parse_score(text: str) -> Result<float> {
+    let score = text.parse_float()
+        .ok_or(error("field `score`: `\(text)` is not a number", kind: "score"))?
+    if score < 0.0 or score > 100.0 {
+        return Err(error("field `score`: `\(text)` out of range", kind: "range"))
+    }
+    Ok(score)
+}
+
+fn parse_person(line: str) -> Result<Person> {
+    let fields = parse_fields(line)?
+    let id = parse_int_field(fields, "id")?
+    let name = field(fields, "name")?
+    let age = validate_age(parse_int_field(fields, "age")?)?
+    let (user, domain) = validate_email(field(fields, "email")?)?
+    let tags = parse_tags(field(fields, "tags")?)?
+    let score = parse_score(field(fields, "score")?)?
+    Ok(Person { id, name, age, user, domain, tags, score })
+}
+
+fn load(line: str, people: [int: Person]) -> Result<Person> {
+    let person = parse_person(line)?
+    if people.contains(person.id) {
+        return Err(error("duplicate id \(person.id)", kind: "duplicate"))
+    }
+    people[person.id] = person
+    Ok(person)
+}
+
+fn top(counts: [str: int], n: int) -> str {
+    counts.entries()
+        .sorted_by(e => (-e.1, e.0))
+        .take(n)
+        .map(e => "\(e.0)=\(e.1)")
+        .join(" ")
+}
+
+let rng = Rng { state: 1234 }
+let lines = [generate(rng, i) for i in 0..RECORDS]
+
+let people: [int: Person] = [:]
+let domains: [str: int] = [:]
+let tag_counts: [str: int] = [:]
+let error_counts: [str: int] = [:]
+let first_errors: [str] = []
+var total_age = 0
+var total_score = 0.0
+for (number, line) in lines.enumerate() {
+    match load(line, people) {
+        Ok(person) => {
+            domains[person.domain] = domains.get_or(person.domain, 0) + 1
+            for tag in person.tags {
+                tag_counts[tag] = tag_counts.get_or(tag, 0) + 1
+            }
+            total_age += person.age
+            total_score += person.score
+        }
+        Err(e) => {
+            error_counts[e.kind] = error_counts.get_or(e.kind, 0) + 1
+            if first_errors.len() < 8 {
+                first_errors.push("line \(number + 1): \(e)")
+            }
+        }
+    }
+}
+
+let valid = people.len()
+let best = people.values().max_by(p => (p.score, -p.id)).unwrap()
+print("records \(lines.len()), valid \(valid), rejected \(lines.len() - valid)")
+print("errors: \(error_counts.keys().sorted().map(k => "\(k)=\(error_counts[k])").join(" "))")
+print("domains: \(top(domains, 5))")
+print("tags: \(top(tag_counts, 5))")
+print("average age \((total_age.to_float() / valid.to_float()).to_str_fixed(2)), average score \((total_score / valid.to_float()).to_str_fixed(3))")
+print("best: #\(best.id) \(best.name) <\(best.user)@\(best.domain)> \(best.score.to_str_fixed(1)) \(best.tags.join(","))")
+for message in first_errors {
+    print(message)
+}

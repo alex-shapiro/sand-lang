@@ -207,7 +207,7 @@ pub fn register(r: &mut Registry) {
             let modified = vm.option(m.modified.map(Value::Int));
             let size = Value::Int(i64::try_from(m.size).unwrap_or(i64::MAX));
             let (is_file, is_dir) = (Value::Bool(m.kind == EntryKind::File), Value::Bool(m.kind == EntryKind::Dir));
-            let t = vm.heap.new_tuple(vec![size, is_file, is_dir, modified]);
+            let t = vm.heap.new_tuple(&[size, is_file, is_dir, modified]);
             Ok(vm.ok(t))
         })
     });
@@ -770,7 +770,7 @@ fn register_file(r: &mut Registry) {
                 Err(e) => return Ok(Err(e)),
             };
             let modified = vm.option(m.modified.map(Value::Int));
-            Ok(Ok(vm.heap.new_tuple(vec![Value::Int(i64::try_from(m.size).unwrap_or(i64::MAX)), modified])))
+            Ok(Ok(vm.heap.new_tuple(&[Value::Int(i64::try_from(m.size).unwrap_or(i64::MAX)), modified])))
         })
     });
     r.add_builtin("fs.File.set_len", |vm, a| {

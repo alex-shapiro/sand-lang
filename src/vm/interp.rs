@@ -18,7 +18,8 @@
 //! stores around the dispatch jump in the disassembly of `Vm::interp`.
 
 use super::compare::{
-    find_key, hash_key, map_slot, set_slot, values_eq, values_eq_metered, values_le, values_le_metered, values_lt, values_lt_metered,
+    find_entry, find_key, hash_key, map_get_int, map_slot, map_slot_tuple, set_has_int, set_slot, values_eq, values_eq_metered, values_le,
+    values_le_metered, values_lt, values_lt_metered,
 };
 use super::display;
 use super::meter::{MemoryLimit, Scratch, code_fuel, loop_fuel};
@@ -110,14 +111,79 @@ pub fn int_pow(a: i64, b: i64) -> Result<i64, &'static str> {
     a.checked_pow(b as u32).ok_or("integer overflow")
 }
 
+/// A lookup in the dense values of a map (`MapObj::vals`).
+enum Dense<'h> {
+    Hit(&'h Value),
+    Miss,
+    /// The map has no dense values, or the key is not an int.
+    Unknown,
+}
+
+/// The int key `k` in map `m`, if it has dense values.
+#[inline(always)]
+fn dense_get<'h>(heap: &'h Heap, m: &Value, k: &Value) -> Dense<'h> {
+    let (&Value::Obj(h), &Value::Int(i)) = (m, k) else { return Dense::Unknown };
+    let Obj::Map(mo) = heap.obj(h) else { return Dense::Unknown };
+    if mo.vals.is_empty() {
+        return Dense::Unknown;
+    }
+    match usize::try_from(i).ok().and_then(|i| mo.vals.get(i)) {
+        Some(Value::Uninit) | None => Dense::Miss,
+        Some(v) => Dense::Hit(v),
+    }
+}
+
+/// Copies the captures of closure `h` to the start of `regs`.
+#[inline]
+fn load_captures(heap: &Heap, h: u32, regs: &mut [Value]) {
+    if let Obj::Closure(_, caps) = heap.obj(h) {
+        copy_values(caps, regs);
+    }
+}
+
+/// Moves the `n` registers from `src` to the start of `regs` (a tail call's
+/// arguments), inline for the usual few.
+#[inline(always)]
+fn shift_args(regs: &mut [Value], src: usize, n: usize) {
+    match n {
+        0 => {}
+        1 => regs[0] = regs[src],
+        2 => {
+            regs[0] = regs[src];
+            regs[1] = regs[src + 1];
+        }
+        _ => regs.copy_within(src..src + n, 0),
+    }
+}
+
+/// Copies `src` to the start of `dst`, inline for the usual few values
+/// (`copy_from_slice` calls `memmove`).
+#[inline(always)]
+fn copy_values(src: &[Value], dst: &mut [Value]) {
+    match *src {
+        [] => {}
+        [a] => dst[0] = a,
+        [a, b] => {
+            dst[0] = a;
+            dst[1] = b;
+        }
+        [a, b, c] => {
+            dst[0] = a;
+            dst[1] = b;
+            dst[2] = c;
+        }
+        _ => dst[..src.len()].copy_from_slice(src),
+    }
+}
+
 /// The payload of an inline variant as field `idx` (kept out of line so the
 /// interpreter's struct field fast path stays small).
 #[cold]
 #[inline(never)]
-fn inline_field(v: Value, idx: u16) -> Option<Value> {
+fn inline_field(v: &Value, idx: u16) -> Value {
     match v.as_inline_variant() {
-        Some((_, p)) if idx == 0 => Some(p),
-        _ => None,
+        Some((_, p)) if idx == 0 => p,
+        _ => Value::Uninit,
     }
 }
 
@@ -133,6 +199,33 @@ fn uninit_global(prog: &Program, g: u32) -> String {
     format!("global used before initialization: `{}`", prog.global_names[g as usize])
 }
 
+/// `a == b` where it needs no fuel: the same object, or two strings one of
+/// which is shorter than a fuel unit's worth of bytes. `None` otherwise.
+///
+/// Takes references: matching copies of 16-byte values makes LLVM spill them
+/// to the stack to read their tags.
+#[inline(always)]
+fn quick_eq(heap: &Heap, a: &Value, b: &Value) -> Option<bool> {
+    let (&Value::Obj(x), &Value::Obj(y)) = (a, b) else { return None };
+    if x == y {
+        return Some(true);
+    }
+    match (heap.obj(x), heap.obj(y)) {
+        (Obj::Str(p), Obj::Str(q)) if p.len().min(q.len()) < super::meter::BYTES_PER_UNIT => Some(short_eq(p.as_bytes(), q.as_bytes())),
+        _ => None,
+    }
+}
+
+/// Equality of short byte strings, comparing the commonest (one byte)
+/// inline rather than calling `memcmp`.
+#[inline(always)]
+fn short_eq(p: &[u8], q: &[u8]) -> bool {
+    match (p, q) {
+        ([a], [b]) => a == b,
+        _ => p == q,
+    }
+}
+
 /// `Op::Payload`: the field of a one-field variant, inline or boxed.
 #[inline(never)]
 fn payload(heap: &Heap, v: Value) -> Option<Value> {
@@ -142,7 +235,19 @@ fn payload(heap: &Heap, v: Value) -> Option<Value> {
     }
 }
 
-/// The target of a `SwitchVariant` or `SwitchInt` for value `v`.
+/// The byte of a string of one byte, or -1 (`Op::SwitchChar`).
+#[inline(always)]
+fn char_code(heap: &Heap, v: &Value) -> i64 {
+    match *v {
+        Value::Obj(h) => match heap.obj(h) {
+            Obj::Str(s) if s.len() == 1 => s.as_bytes()[0] as i64,
+            _ => -1,
+        },
+        _ => -1,
+    }
+}
+
+/// The target of a switch instruction for value `v`.
 #[inline(never)]
 fn switch_target(prog: &Program, table: u32, v: i64) -> usize {
     prog.switches[table as usize].target(v)
@@ -251,19 +356,23 @@ impl Vm {
         })
     }
 
-    /// `Op::MakeClosure`: a closure of `proto` (`p`) capturing from the
-    /// registers `regs` and the running closure `clo`.
+    /// `Op::NewTuple` of anything but an inline pair.
     #[inline(never)]
-    fn make_closure(&mut self, p: &Proto, proto: u32, regs: &[Value], clo: u32) -> Value {
-        let caps: Box<[Value]> = p
-            .captures
-            .iter()
-            .map(|c| match *c {
-                CaptureSrc::Reg(u16::MAX) => Value::Unit,
-                CaptureSrc::Reg(r) => regs[r as usize],
-                CaptureSrc::Capture(i) => self.heap.fields(Value::Obj(clo))[i as usize],
-            })
-            .collect();
+    fn new_tuple(&mut self, items: &[Value]) -> Value {
+        let items = self.heap.boxed(items);
+        self.heap.alloc(Obj::Tuple(items))
+    }
+
+    /// `Op::MakeClosure`: a closure of `proto` (`p`) capturing from the
+    /// registers `regs`.
+    #[inline(never)]
+    fn make_closure(&mut self, p: &Proto, proto: u32, regs: &[Value]) -> Value {
+        let capture = |&r: &Reg| if r == NO_REG { Value::Unit } else { regs[r as usize] };
+        let caps: Box<[Value]> = match *p.captures {
+            [a] => self.heap.boxed(&[capture(&a)]),
+            [a, b] => self.heap.boxed(&[capture(&a), capture(&b)]),
+            _ => p.captures.iter().map(capture).collect(),
+        };
         self.heap.alloc(Obj::Closure(proto, caps))
     }
 
@@ -311,6 +420,15 @@ impl Vm {
     fn operand_trap(&mut self, fiber: &mut Fiber, ip: usize, v: Value, want: &str) -> Trap {
         fiber.frames.last_mut().unwrap().ip = ip as u32;
         self.panic_trap(fiber, ip, format!("internal error: expected {want}, found {v:?}"))
+    }
+
+    /// The trap for a `GetField` on a value without that field (a compiler bug).
+    #[cold]
+    #[inline(never)]
+    fn field_trap(&mut self, fiber: &mut Fiber, ip: usize, v: Value, idx: u16) -> Trap {
+        fiber.frames.last_mut().unwrap().ip = ip as u32;
+        let msg = format!("internal error: field {idx} of {v:?} {:?}", self.heap.get(v));
+        self.panic_trap(fiber, ip, msg)
     }
 
     /// The trap for a panic with message `msg`.
@@ -450,12 +568,6 @@ impl Vm {
                 }
             }};
         }
-        // The heap handle of the running closure.
-        macro_rules! closure {
-            () => {
-                fiber.frames.last().map_or(NO_CLOSURE, |f| f.closure)
-            };
-        }
         // Enters a new frame for a script function.
         macro_rules! enter {
             ($proto:expr, $new_base:expr, $ret:expr, $closure:expr) => {{
@@ -485,6 +597,14 @@ impl Vm {
                 ip = 0;
                 base = nb;
                 reload!();
+            }};
+        }
+        // Enters a new frame for closure `$closure` (a handle), copying its
+        // captures to the registers after the parameters.
+        macro_rules! enter_closure {
+            ($proto:expr, $new_base:expr, $ret:expr, $closure:expr) => {{
+                enter!($proto, $new_base, $ret, $closure);
+                load_captures(&self.heap, $closure, &mut regs[protos[$proto as usize].nparams as usize..]);
             }};
         }
         // Returns to the caller. The callee's registers are left in place:
@@ -524,62 +644,38 @@ impl Vm {
                     Op::LoadConst { dst, k } => r!(dst) = self.consts[k as usize],
                     Op::LoadTag { dst, tag } => r!(dst) = Value::Tag(tag),
                     Op::LoadGlobal { dst, g } => {
-                        let v = self.globals[g as usize];
+                        let v = &self.globals[g as usize];
                         if let Value::Uninit = v {
                             fail!(uninit_global(&prog, g));
                         }
-                        r!(dst) = v;
+                        r!(dst) = *v;
                     }
                     Op::StoreGlobal { g, src } => self.globals[g as usize] = r!(src),
                     Op::HoistGlobal { dst, g, off } => {
-                        let v = self.globals[g as usize];
-                        r!(dst) = v;
+                        let v = &self.globals[g as usize];
+                        r!(dst) = *v;
                         if let Value::Uninit = v {
                             jump!(off);
-                        }
-                    }
-                    Op::LoadCapture { dst, idx } => {
-                        r!(dst) = self.heap.fields(Value::Obj(closure!()))[idx as usize];
-                    }
-                    Op::LoadCaptureCell { dst, idx } => {
-                        let cell = self.heap.fields(Value::Obj(closure!()))[idx as usize];
-                        r!(dst) = match self.heap.get(cell) {
-                            Obj::Cell(v) => *v,
-                            _ => Value::Unit,
-                        };
-                    }
-                    Op::StoreCaptureCell { idx, src } => {
-                        let cell = self.heap.fields(Value::Obj(closure!()))[idx as usize];
-                        let v = r!(src);
-                        if let Obj::Cell(c) = self.heap.get_mut_storing(cell, &[v]) {
-                            *c = v;
                         }
                     }
                     Op::NewCell { dst, src } => {
                         let v = r!(src);
                         r!(dst) = self.heap.alloc(Obj::Cell(v));
                     }
+                    // Each arm stores: a `Value` merged from a loaded one and
+                    // a constant is built in pieces through the stack.
                     Op::LoadCell { dst, cell } => {
-                        let c = r!(cell);
-                        r!(dst) = match self.heap.get(c) {
-                            Obj::Cell(v) => *v,
-                            _ => Value::Unit,
-                        };
-                    }
-                    Op::StoreCell { cell, src } => {
-                        let c = r!(cell);
-                        let v = r!(src);
-                        if let Value::Obj(_) = c
-                            && let Obj::Cell(x) = self.heap.get_mut_storing(c, &[v])
+                        if let Value::Obj(h) = r!(cell)
+                            && let Obj::Cell(v) = self.heap.obj(h)
                         {
-                            *x = v;
+                            r!(dst) = *v;
                         }
                     }
+                    Op::StoreCell { cell, src } => self.heap.set_cell(r!(cell), r!(src)),
                     Op::MakeClosure { dst, proto } => {
-                        let clo = closure!();
                         let p = &protos[proto as usize];
                         fuel.left -= code_fuel(p.captures.len());
-                        r!(dst) = self.make_closure(p, proto, regs, clo);
+                        r!(dst) = self.make_closure(p, proto, regs);
                     }
 
                     // ---------------- integer arithmetic
@@ -611,6 +707,19 @@ impl Vm {
                         Some(v) => r!(dst) = Value::Int(v),
                         None => fail!("integer overflow"),
                     },
+                    Op::MulIK { dst, a, k } => match int!(a).checked_mul(k as i64) {
+                        Some(v) => r!(dst) = Value::Int(v),
+                        None => fail!("integer overflow"),
+                    },
+                    // Floor division and modulo by a positive power of two
+                    // are a shift and a mask.
+                    Op::DivIK { dst, a, k } if k > 0 && k & (k - 1) == 0 => r!(dst) = Value::Int(int!(a) >> k.trailing_zeros()),
+                    Op::DivIK { dst, a, k } => match floor_div(int!(a), k as i64) {
+                        Some(v) => r!(dst) = Value::Int(v),
+                        None => fail!("integer overflow"),
+                    },
+                    Op::RemIK { dst, a, k } if k > 0 && k & (k - 1) == 0 => r!(dst) = Value::Int(int!(a) & (k as i64 - 1)),
+                    Op::RemIK { dst, a, k } => r!(dst) = Value::Int(floor_rem(int!(a), k as i64)),
                     Op::NegI { dst, a } => match int!(a).checked_neg() {
                         Some(v) => r!(dst) = Value::Int(v),
                         None => fail!("integer overflow"),
@@ -679,10 +788,38 @@ impl Vm {
                     Op::NeI { dst, a, b } => r!(dst) = Value::Bool(int!(a) != int!(b)),
                     Op::LtI { dst, a, b } => r!(dst) = Value::Bool(int!(a) < int!(b)),
                     Op::LeI { dst, a, b } => r!(dst) = Value::Bool(int!(a) <= int!(b)),
+                    Op::EqIK { dst, a, k } => r!(dst) = Value::Bool(int!(a) == k as i64),
+                    Op::NeIK { dst, a, k } => r!(dst) = Value::Bool(int!(a) != k as i64),
+                    Op::LtIK { dst, a, k } => r!(dst) = Value::Bool(int!(a) < k as i64),
+                    Op::LeIK { dst, a, k } => r!(dst) = Value::Bool(int!(a) <= k as i64),
+                    Op::GtIK { dst, a, k } => r!(dst) = Value::Bool(int!(a) > k as i64),
+                    Op::GeIK { dst, a, k } => r!(dst) = Value::Bool(int!(a) >= k as i64),
                     Op::EqF { dst, a, b } => r!(dst) = Value::Bool(float!(a) == float!(b)),
                     Op::NeF { dst, a, b } => r!(dst) = Value::Bool(float!(a) != float!(b)),
                     Op::LtF { dst, a, b } => r!(dst) = Value::Bool(float!(a) < float!(b)),
                     Op::LeF { dst, a, b } => r!(dst) = Value::Bool(float!(a) <= float!(b)),
+                    Op::JNeq { a, b, off } if let Some(eq) = quick_eq(&self.heap, &r!(a), &r!(b)) => {
+                        if !eq {
+                            jump!(off)
+                        }
+                    }
+                    Op::JNne { a, b, off } if let Some(eq) = quick_eq(&self.heap, &r!(a), &r!(b)) => {
+                        if eq {
+                            jump!(off)
+                        }
+                    }
+                    Op::JNeqK { a, k, off } => match self.eq_const(&r!(a), k) {
+                        Ok(true) => {}
+                        Ok(false) => jump!(off),
+                        Err(c) => fail_ctl!(c),
+                    },
+                    Op::JNneK { a, k, off } => match self.eq_const(&r!(a), k) {
+                        Ok(true) => jump!(off),
+                        Ok(false) => {}
+                        Err(c) => fail_ctl!(c),
+                    },
+                    Op::Eq { dst, a, b } if let Some(eq) = quick_eq(&self.heap, &r!(a), &r!(b)) => r!(dst) = Value::Bool(eq),
+                    Op::Ne { dst, a, b } if let Some(eq) = quick_eq(&self.heap, &r!(a), &r!(b)) => r!(dst) = Value::Bool(!eq),
                     // Metered and out of line (`op_compare`); the branches
                     // `JNeq` and `JNne` share the arm to keep one call site.
                     Op::Eq { .. } | Op::Ne { .. } | Op::Lt { .. } | Op::Le { .. } | Op::JNeq { .. } | Op::JNne { .. } => {
@@ -765,13 +902,13 @@ impl Vm {
                             jump!(off)
                         }
                     }
-                    Op::JNotSome { src, dst, off } => match self.heap.payload_if(r!(src), prog.ids.some) {
-                        Some(p) => r!(dst) = p,
-                        None => jump!(off),
+                    Op::JNotSome { src, dst, off } => match self.heap.payload_if(&r!(src), prog.ids.some) {
+                        Value::Uninit => jump!(off),
+                        p => r!(dst) = p,
                     },
-                    Op::JNotOk { src, dst, off } => match self.heap.payload_if(r!(src), prog.ids.ok) {
-                        Some(p) => r!(dst) = p,
-                        None => jump!(off),
+                    Op::JNotOk { src, dst, off } => match self.heap.payload_if(&r!(src), prog.ids.ok) {
+                        Value::Uninit => jump!(off),
+                        p => r!(dst) = p,
                     },
                     Op::JmpIfBack { cond, off } => {
                         if r!(cond).as_bool() {
@@ -834,13 +971,15 @@ impl Vm {
                         }
                     }
                     Op::JSomeBack { src, dst, off } => {
-                        if let Some(p) = self.heap.payload_if(r!(src), prog.ids.some) {
+                        let p = self.heap.payload_if(&r!(src), prog.ids.some);
+                        if !matches!(p, Value::Uninit) {
                             r!(dst) = p;
                             break 'back off as i32;
                         }
                     }
                     Op::SwitchVariant { src, table } => ip = switch_target(&prog, table, self.heap.variant_id(r!(src)) as i64),
                     Op::SwitchInt { src, table } => ip = switch_target(&prog, table, int!(src)),
+                    Op::SwitchChar { src, table } => ip = switch_target(&prog, table, char_code(&self.heap, &r!(src))),
                     Op::JNotVariant { src, variant, off } => {
                         if self.heap.variant_id(r!(src)) != variant as u32 {
                             jump!(off)
@@ -863,7 +1002,7 @@ impl Vm {
                                 let p = *p;
                                 let Value::Obj(h) = callee else { unreachable!() };
                                 let nb = base + b as usize;
-                                enter!(p, nb, base + dst as usize, h);
+                                enter_closure!(p, nb, base + dst as usize, h);
                             }
                             Obj::IterFn(_) => {
                                 let next = self.iter_next(callee);
@@ -900,6 +1039,14 @@ impl Vm {
                         let nb = base + b as usize;
                         enter!(proto as u32, nb, base + dst as usize, NO_CLOSURE);
                     }
+                    // `tick_call!` may reload `regs`, which `enter!` overwrites unread.
+                    #[allow(unused_assignments)]
+                    Op::CallSelf { base: b, dst } => {
+                        tick_call!();
+                        let fr = *fiber.frames.last().unwrap();
+                        let nb = base + b as usize;
+                        enter_closure!(fr.proto, nb, base + dst as usize, fr.closure);
+                    }
                     Op::CallNative { base: b, native } => {
                         let start = base + b as usize;
                         let argc = prog.native_argc.get(native as usize).copied().unwrap_or(0) as usize;
@@ -925,7 +1072,7 @@ impl Vm {
                             fail_ctl!(c);
                         }
                         reload!();
-                        regs.copy_within(src..src + n, 0);
+                        shift_args(regs, src, n);
                         let top = fiber.frames.last_mut().unwrap();
                         top.proto = proto;
                         top.closure = NO_CLOSURE;
@@ -950,8 +1097,9 @@ impl Vm {
                                     fail_ctl!(c);
                                 }
                                 reload!();
-                                regs.copy_within(src..src + n, 0);
+                                shift_args(regs, src, n);
                                 let Value::Obj(h) = callee else { unreachable!() };
+                                load_captures(&self.heap, h, &mut regs[pr.nparams as usize..]);
                                 let top = fiber.frames.last_mut().unwrap();
                                 top.proto = proto;
                                 top.closure = h;
@@ -971,6 +1119,13 @@ impl Vm {
                     }
                     Op::Ret { src } => {
                         let v = r!(src);
+                        do_return!(v);
+                    }
+                    Op::RetVariant { src, variant } => {
+                        let v = match Value::variant1(variant as u32, r!(src)) {
+                            Some(v) => v,
+                            None => self.heap.new_variant(variant as u32, &[r!(src)]),
+                        };
                         do_return!(v);
                     }
                     Op::RetUnit => do_return!(Value::Unit),
@@ -994,19 +1149,24 @@ impl Vm {
                     }
                     Op::NewTuple { dst, start, count } => {
                         let s = start as usize;
-                        let items: Box<[Value]> = regs[s..s + count as usize].into();
-                        r!(dst) = self.heap.alloc(Obj::Tuple(items));
+                        r!(dst) = match regs[s..s + count as usize] {
+                            [Value::Int(a), Value::Int(b)] if let Ok(a) = i32::try_from(a) => Value::Pair(a, b),
+                            _ => self.new_tuple(&regs[s..s + count as usize]),
+                        };
                     }
                     Op::NewStruct { dst, start, def } => {
                         let n = prog.types[def as usize].fields.len();
                         let s = start as usize;
-                        let items: Box<[Value]> = regs[s..s + n].into();
+                        let items = self.heap.boxed(&regs[s..s + n]);
                         r!(dst) = self.heap.alloc(Obj::Struct(def as u32, items));
                     }
                     Op::NewVariant { dst, start, variant } => {
                         let n = prog.variants[variant as usize].arity;
                         let s = start as usize;
-                        r!(dst) = self.heap.new_variant(variant as u32, &regs[s..s + n]);
+                        r!(dst) = match Value::variant1(variant as u32, r!(s)) {
+                            Some(v) if n == 1 => v,
+                            _ => self.heap.new_variant(variant as u32, &regs[s..s + n]),
+                        };
                     }
                     Op::NewMap { dst, start, count } => {
                         let m = self.heap.alloc(Obj::Map(Box::default()));
@@ -1028,17 +1188,22 @@ impl Vm {
                         let (x, y) = (int!(a), int!(b));
                         r!(dst) = self.heap.alloc(Obj::Range(x, y, true));
                     }
-                    Op::GetField { dst, obj, idx } => {
-                        let o = r!(obj);
-                        r!(dst) = match self.heap.fields(o).get(idx as usize) {
-                            Some(v) => *v,
-                            // Inline variants have no field slice.
-                            None => match inline_field(o, idx) {
-                                Some(v) => v,
-                                None => fail!(format!("internal error: field {idx} of {o:?} {:?}", self.heap.get(o))),
-                            },
-                        };
-                    }
+                    Op::GetField { dst, obj, idx } => match r!(obj) {
+                        Value::Obj(h) => match self.heap.obj(h) {
+                            Obj::Struct(_, f) | Obj::Tuple(f) | Obj::Variant(_, f) | Obj::Closure(_, f) if (idx as usize) < f.len() => {
+                                r!(dst) = f[idx as usize];
+                            }
+                            _ => {
+                                let v = r!(obj);
+                                return Err(self.field_trap(fiber, ip, v, idx));
+                            }
+                        },
+                        Value::Pair(a, b) => r!(dst) = Value::Int(if idx == 0 { a as i64 } else { b }),
+                        v => match inline_field(&v, idx) {
+                            Value::Uninit => return Err(self.field_trap(fiber, ip, v, idx)),
+                            p => r!(dst) = p,
+                        },
+                    },
                     Op::Payload { dst, src } => {
                         let v = r!(src);
                         match payload(&self.heap, v) {
@@ -1063,9 +1228,12 @@ impl Vm {
                             None => fail!(index_error(i, l.len())),
                         }
                     }
-                    Op::IndexMap { dst, obj, key } => match self.map_index(r!(obj), r!(key)) {
-                        Ok(v) => r!(dst) = v,
-                        Err(c) => fail_ctl!(c),
+                    Op::IndexMap { dst, obj, key } => match dense_get(&self.heap, &r!(obj), &r!(key)) {
+                        Dense::Hit(v) => r!(dst) = *v,
+                        _ => match self.map_index(r!(obj), r!(key)) {
+                            Ok(v) => r!(dst) = v,
+                            Err(c) => fail_ctl!(c),
+                        },
                     },
                     Op::SetIndex { obj, idx, src } => {
                         let o = r!(obj);
@@ -1083,7 +1251,7 @@ impl Vm {
                     }
                     Op::SetIndexMap { obj, key, src } => {
                         let (m, k, v) = (r!(obj), r!(key), r!(src));
-                        if let Err(c) = self.map_insert(m, k, v) {
+                        if let Err(c) = self.map_set(m, k, v) {
                             fail_ctl!(c);
                         }
                     }
@@ -1122,6 +1290,81 @@ impl Vm {
                         };
                         r!(dst) = Value::Int(n as i64);
                     }
+                    Op::ListGet { dst, list, idx } => {
+                        let v = to_index(int!(idx)).and_then(|i| self.heap.list(r!(list)).get(i)).copied();
+                        r!(dst) = self.option(v);
+                    }
+                    Op::ListGetOr { dst, list, idx } => {
+                        if let Some(&v) = to_index(int!(idx)).and_then(|i| self.heap.list(r!(list)).get(i)) {
+                            r!(dst) = v;
+                        }
+                    }
+                    Op::ListPop { dst, list } => {
+                        let v = self.heap.list_shrink(r!(list)).and_then(Vec::pop);
+                        r!(dst) = self.option(v);
+                    }
+                    // `if let Some(x) = map.get(key)` tests the result right away.
+                    Op::MapGet { dst, map, key } => match dense_get(&self.heap, &r!(map), &r!(key)) {
+                        Dense::Hit(v) => {
+                            let v = *v;
+                            r!(dst) = self.some(v);
+                            if let Some(&Op::JNotSome { src, dst: d, .. }) = code.get(ip)
+                                && src == dst
+                            {
+                                ip += 1;
+                                r!(d) = v;
+                            }
+                        }
+                        Dense::Miss => {
+                            r!(dst) = self.none();
+                            if let Some(&Op::JNotSome { src, off, .. }) = code.get(ip)
+                                && src == dst
+                            {
+                                ip += 1;
+                                jump!(off);
+                            }
+                        }
+                        Dense::Unknown => match self.map_get_option(r!(map), r!(key)) {
+                            Ok(v) => r!(dst) = v,
+                            Err(c) => fail_ctl!(c),
+                        },
+                    },
+                    Op::MapGetTuple { dst, map, start, n } => {
+                        let s = start as usize;
+                        match self.map_get_tuple(r!(map), &regs[s..s + n as usize]) {
+                            Ok(v) => r!(dst) = v,
+                            Err(c) => fail_ctl!(c),
+                        }
+                    }
+                    Op::MapHasTuple { dst, map, start, n } => {
+                        let s = start as usize;
+                        match self.map_has_tuple(r!(map), &regs[s..s + n as usize]) {
+                            Ok(b) => r!(dst) = Value::Bool(b),
+                            Err(c) => fail_ctl!(c),
+                        }
+                    }
+                    Op::MapGetOr { dst, map, key } => match dense_get(&self.heap, &r!(map), &r!(key)) {
+                        Dense::Hit(v) => r!(dst) = *v,
+                        Dense::Miss => {}
+                        Dense::Unknown => {
+                            let (m, k) = (r!(map), r!(key));
+                            if let Err(c) = self.map_get_or(m, k, &mut r!(dst)) {
+                                fail_ctl!(c);
+                            }
+                        }
+                    },
+                    Op::MapHas { dst, map, key } => match self.map_has(r!(map), r!(key)) {
+                        Ok(b) => r!(dst) = Value::Bool(b),
+                        Err(c) => fail_ctl!(c),
+                    },
+                    Op::SetHas { dst, set, key } => match self.set_contains(r!(set), r!(key)) {
+                        Ok(b) => r!(dst) = Value::Bool(b),
+                        Err(c) => fail_ctl!(c),
+                    },
+                    Op::SetAdd { dst, set, key } => match self.set_add(r!(set), r!(key)) {
+                        Ok(b) => r!(dst) = Value::Bool(b),
+                        Err(c) => fail_ctl!(c),
+                    },
                     Op::IntToFloat { dst, src } => r!(dst) = Value::Float(int!(src) as f64),
                     Op::AppendStr { local, src } => {
                         let add = r!(src);
@@ -1235,6 +1478,20 @@ impl Vm {
                             break 'back off as i32;
                         }
                     }
+                    Op::ForChars { elem, base: b, off } => match self.next_char(&r!(b), &r!(b + 1)) {
+                        Some((c, at)) => {
+                            r!(elem) = c;
+                            r!(b + 1) = Value::Int(at);
+                        }
+                        None => jump!(off),
+                    },
+                    Op::ForCharsBack { elem, base: b, off } => {
+                        if let Some((c, at)) = self.next_char(&r!(b), &r!(b + 1)) {
+                            r!(elem) = c;
+                            r!(b + 1) = Value::Int(at);
+                            break 'back off as i32;
+                        }
+                    }
                     Op::UnpackRange { base: b, src } => match unpack_range(self.heap.get(r!(src))) {
                         Some((first, last, done)) => {
                             r!(b) = Value::Int(first);
@@ -1260,7 +1517,9 @@ impl Vm {
                     Op::ListElem { dst, list, idx } => {
                         let l = self.heap.list(r!(list));
                         let i = if idx < 0 { l.len() as isize + idx as isize } else { idx as isize };
-                        r!(dst) = l.get(i as usize).copied().unwrap_or(Value::Unit);
+                        if let Some(v) = l.get(i as usize) {
+                            r!(dst) = *v;
+                        }
                     }
                     Op::ListRest { dst, list, before, after } => {
                         let l = self.heap.list(r!(list));
@@ -1495,6 +1754,21 @@ impl Vm {
             Op::JNeq { off, .. } | Op::JNne { off, .. } if !v => off,
             _ => 0,
         })
+    }
+
+    /// `v == consts[k]`.
+    #[inline(always)]
+    fn eq_const(&self, v: &Value, k: u16) -> Result<bool, Ctl> {
+        let c = &self.consts[k as usize];
+        match quick_eq(&self.heap, v, c) {
+            Some(eq) => Ok(eq),
+            None => self.eq_slow(*v, *c),
+        }
+    }
+
+    #[inline(never)]
+    fn eq_slow(&self, a: Value, b: Value) -> Result<bool, Ctl> {
+        values_eq_metered(&self.heap, &self.meter, a, b)
     }
 
     /// `ToStr` (display) and `Debug` of a value, as a new string.
@@ -1749,6 +2023,100 @@ impl Vm {
         }
     }
 
+    /// `Op::ForChars`: the character of string `s` at byte offset `at`, and
+    /// the offset after it; `None` at the end.
+    #[inline]
+    fn next_char(&mut self, s: &Value, at: &Value) -> Option<(Value, i64)> {
+        let (&Value::Obj(h), &Value::Int(i)) = (s, at) else { return None };
+        let Obj::Str(t) = self.heap.obj(h) else { return None };
+        let i = i as usize;
+        let &b = t.as_bytes().get(i)?;
+        if b.is_ascii() {
+            return Some((self.ascii_str(b), i as i64 + 1));
+        }
+        self.next_char_slow(h, i)
+    }
+
+    #[inline(never)]
+    fn next_char_slow(&mut self, h: u32, i: usize) -> Option<(Value, i64)> {
+        let Obj::Str(t) = self.heap.obj(h) else { return None };
+        let c = t.get(i..)?.chars().next()?;
+        let end = i + c.len_utf8();
+        let text = c.to_string();
+        Some((self.heap.new_str(text), end as i64))
+    }
+
+    /// `m.get(k)`: the value as an option (built here rather than returned
+    /// as an `Option<Value>`, for the reason given at `map_index`).
+    #[inline(never)]
+    fn map_get_option(&mut self, m: Value, k: Value) -> Result<Value, Ctl> {
+        let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
+        if let Value::Int(i) = k {
+            let v = map_get_int(mo, i).copied();
+            return Ok(self.option(v));
+        }
+        match self.map_lookup(m, mo, k)?.map(|s| &mo.entries[s]) {
+            Some(&Some((_, v))) => Ok(self.some(v)),
+            _ => Ok(self.none()),
+        }
+    }
+
+    /// The slot of key `k` (not an int) in map `m`, remembered for a store
+    /// to the same key right after (`m[k] = m.get_or(k, 0) + 1`).
+    #[inline]
+    fn map_lookup(&self, m: Value, mo: &MapObj, k: Value) -> Result<Option<usize>, Ctl> {
+        let s = map_slot(&self.heap, &self.meter, mo, k)?;
+        if let (Some(s), Value::Obj(h)) = (s, m) {
+            self.last_slot.set((h, s as u32));
+        }
+        Ok(s)
+    }
+
+    /// The slot of `k` in map `m` if it is the slot last looked up: the
+    /// entry there holds `k` itself.
+    #[inline]
+    fn last_slot(&self, m: Value, mo: &MapObj, k: Value) -> Option<usize> {
+        let (h, s) = self.last_slot.get();
+        let hit = matches!(m, Value::Obj(x) if x == h)
+            && match (mo.entries.get(s as usize), k) {
+                (Some(Some((Value::Obj(x), _))), Value::Obj(y)) => *x == y,
+                (Some(Some((x, _))), _) => *x == k,
+                _ => false,
+            };
+        hit.then_some(s as usize)
+    }
+
+    /// `Op::MapGetOr`: the value of `k` in map `m` to `out`, if there is one.
+    #[inline(never)]
+    fn map_get_or(&self, m: Value, k: Value, out: &mut Value) -> Result<(), Ctl> {
+        let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
+        let v = match k {
+            Value::Int(i) => map_get_int(mo, i),
+            _ => self.map_lookup(m, mo, k)?.and_then(|s| mo.entries[s].as_ref()).map(|(_, v)| v),
+        };
+        if let Some(v) = v {
+            *out = *v;
+        }
+        Ok(())
+    }
+
+    /// `Op::MapGetTuple`.
+    #[inline(never)]
+    fn map_get_tuple(&mut self, m: Value, items: &[Value]) -> Result<Value, Ctl> {
+        let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
+        match map_slot_tuple(&self.heap, &self.meter, mo, items)?.map(|s| &mo.entries[s]) {
+            Some(&Some((_, v))) => Ok(self.some(v)),
+            _ => Ok(self.none()),
+        }
+    }
+
+    /// `Op::MapHasTuple`.
+    #[inline(never)]
+    fn map_has_tuple(&self, m: Value, items: &[Value]) -> Result<bool, Ctl> {
+        let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
+        Ok(map_slot_tuple(&self.heap, &self.meter, mo, items)?.is_some())
+    }
+
     /// `m[k]`: the value, or a panic if the key is missing. It copies the
     /// value out of the entry directly rather than through `map_get`'s
     /// `Option<Value>`, whose niche makes LLVM write the result piecewise and
@@ -1756,7 +2124,13 @@ impl Vm {
     #[inline(never)]
     fn map_index(&self, m: Value, k: Value) -> Result<Value, Ctl> {
         let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
-        match map_slot(&self.heap, &self.meter, mo, k)?.map(|s| &mo.entries[s]) {
+        if let Value::Int(i) = k {
+            return match map_get_int(mo, i) {
+                Some(v) => Ok(*v),
+                None => Err(self.key_error(k)),
+            };
+        }
+        match self.map_lookup(m, mo, k)?.map(|s| &mo.entries[s]) {
             Some(Some((_, v))) => Ok(*v),
             _ => Err(self.key_error(k)),
         }
@@ -1766,6 +2140,32 @@ impl Vm {
     #[inline(never)]
     pub fn map_insert(&mut self, m: Value, k: Value, v: Value) -> Result<Option<Value>, Ctl> {
         self.map_store(m, k, v, true)
+    }
+
+    /// `m[k] = v`: `map_insert` without the old value.
+    #[inline(never)]
+    fn map_set(&mut self, m: Value, k: Value, v: Value) -> Result<(), Ctl> {
+        let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
+        let found = match k {
+            Value::Int(i) => mo.index.find_int(i, |s| matches!(mo.entries[s], Some((Value::Int(x), _)) if x == i)),
+            _ if let Some(s) = self.last_slot(m, mo, k) => Some(s),
+            _ => {
+                let hash = hash_key(&self.heap, &self.meter, k)?;
+                match find_entry(&self.heap, &self.meter, &mo.index, hash, k, &mo.entries, |e| e.0)? {
+                    Some(s) => Some(s),
+                    None => return self.map_push(m, k, v, hash),
+                }
+            }
+        };
+        let Some(s) = found else { return self.map_push(m, k, v, int_hash(k.as_int())) };
+        self.unpin(m)?;
+        // The key stays: it equals `k`.
+        let Obj::Map(mo) = self.heap.entries_mut_storing(m, s, false, &[v]) else { unreachable!() };
+        if let Some(e) = &mut mo.entries[s] {
+            e.1 = v;
+        }
+        mo.set_dense(k, v);
+        Ok(())
     }
 
     /// Inserts `k` with value `v` into map `m` unless it is there already;
@@ -1778,28 +2178,43 @@ impl Vm {
     fn map_store(&mut self, m: Value, k: Value, v: Value, replace: bool) -> Result<Option<Value>, Ctl> {
         let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
         let hash = hash_key(&self.heap, &self.meter, k)?;
-        let found = find_key(&self.heap, &self.meter, &mo.index, hash, k, |i| mo.entries[i].map(|(k, _)| k))?;
-        let end = mo.entries.len();
+        let found = find_entry(&self.heap, &self.meter, &mo.index, hash, k, &mo.entries, |e| e.0)?;
         if let Some(s) = found {
             if !replace {
                 return Ok(mo.entries[s].map(|(_, old)| old));
             }
             self.unpin(m)?;
             let Obj::Map(mo) = self.heap.entries_mut_storing(m, s, false, &[k, v]) else { unreachable!() };
-            return Ok(mo.entries[s].replace((k, v)).map(|(_, old)| old));
+            let old = mo.entries[s].replace((k, v)).map(|(_, old)| old);
+            mo.set_dense(k, v);
+            return Ok(old);
         }
+        self.map_push(m, k, v, hash)?;
+        Ok(None)
+    }
+
+    /// Appends the entry `k: v` to map `m`, which does not hold `k` (with
+    /// hash `hash`).
+    fn map_push(&mut self, m: Value, k: Value, v: Value, hash: u64) -> Result<(), Ctl> {
+        let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
+        let end = mo.entries.len();
         if !slot_fits(end) {
             return Err(Ctl::panic("map too large"));
         }
         self.unpin(m)?;
-        let before = self.heap.get(m).size();
         let Obj::Map(mo) = self.heap.entries_mut_storing(m, end, true, &[k, v]) else { unreachable!() };
+        let keys = mo.entries.iter().enumerate().filter_map(|(s, e)| e.map(|(k, _)| (s, k)));
+        mo.index.densify(mo.live + 1, keys);
+        let (cap, index) = (mo.entries.capacity(), mo.index_bytes());
         mo.entries.push(Some((k, v)));
         mo.live += 1;
-        mo.index.insert(hash, end);
-        let after = self.heap.get(m).size();
-        self.heap.account(before, after);
-        Ok(None)
+        mo.index.insert(k, hash, end);
+        mo.set_dense(k, v);
+        if mo.entries.capacity() != cap || mo.index_bytes() != index {
+            let grown = (mo.entries.capacity() - cap) * MAP_ENTRY_SIZE + mo.index_bytes();
+            self.heap.bytes = (self.heap.bytes + grown).saturating_sub(index);
+        }
+        Ok(())
     }
 
     /// Removes `k` from map `m`; returns its value.
@@ -1812,15 +2227,16 @@ impl Vm {
         let Some(s) = find_key(&self.heap, &self.meter, &mo.index, hash, k, |i| mo.entries[i].map(|(k, _)| k))? else { return Ok(None) };
         self.unpin(m)?;
         let Obj::Map(mo) = self.heap.get(m) else { unreachable!() };
-        let before = mo.entries.capacity();
+        let before = mo.entries.capacity() * MAP_ENTRY_SIZE + mo.index_bytes();
         // Compaction moves entries: the full write barrier.
         let Obj::Map(mo) = self.heap.get_mut(m) else { unreachable!() };
-        mo.index.remove(hash, |i| i == s);
+        mo.index.remove(k, hash, |i| i == s);
         let old = mo.entries[s].take().map(|(_, v)| v);
         mo.live -= 1;
+        mo.set_dense(k, Value::Uninit);
         compact_entries(&mut mo.entries, mo.live, &mut mo.index);
-        let after = mo.entries.capacity();
-        self.heap.account(before * MAP_ENTRY_SIZE, after * MAP_ENTRY_SIZE);
+        let after = mo.entries.capacity() * MAP_ENTRY_SIZE + mo.index_bytes();
+        self.heap.account(before, after);
         Ok(old)
     }
 
@@ -1828,7 +2244,7 @@ impl Vm {
     pub fn set_add(&mut self, s: Value, k: Value) -> Result<bool, Ctl> {
         let Obj::Set(so) = self.heap.get(s) else { return Err(internal("not a set")) };
         let hash = hash_key(&self.heap, &self.meter, k)?;
-        if find_key(&self.heap, &self.meter, &so.index, hash, k, |i| so.entries[i])?.is_some() {
+        if find_entry(&self.heap, &self.meter, &so.index, hash, k, &so.entries, |&e| e)?.is_some() {
             return Ok(false);
         }
         let end = so.entries.len();
@@ -1836,19 +2252,37 @@ impl Vm {
             return Err(Ctl::panic("set too large"));
         }
         self.unpin(s)?;
-        let before = self.heap.get(s).size();
         let Obj::Set(so) = self.heap.entries_mut_storing(s, end, true, &[k]) else { unreachable!() };
+        let keys = so.entries.iter().enumerate().filter_map(|(s, e)| e.map(|k| (s, k)));
+        so.index.densify(so.live + 1, keys);
+        let (cap, index) = (so.entries.capacity(), so.index.bytes());
         so.entries.push(Some(k));
         so.live += 1;
-        so.index.insert(hash, end);
-        let after = self.heap.get(s).size();
-        self.heap.account(before, after);
+        so.index.insert(k, hash, end);
+        if so.entries.capacity() != cap || so.index.bytes() != index {
+            let grown = (so.entries.capacity() - cap) * SET_ENTRY_SIZE + so.index.bytes();
+            self.heap.bytes = (self.heap.bytes + grown).saturating_sub(index);
+        }
         Ok(true)
     }
 
+    #[inline(never)]
     pub fn set_contains(&self, s: Value, k: Value) -> Result<bool, Ctl> {
         let Obj::Set(so) = self.heap.get(s) else { return Err(internal("not a set")) };
+        if let Value::Int(i) = k {
+            return Ok(set_has_int(so, i));
+        }
         Ok(set_slot(&self.heap, &self.meter, so, k)?.is_some())
+    }
+
+    /// `m.contains(k)`.
+    #[inline(never)]
+    fn map_has(&self, m: Value, k: Value) -> Result<bool, Ctl> {
+        let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
+        if let Value::Int(i) = k {
+            return Ok(map_get_int(mo, i).is_some());
+        }
+        Ok(self.map_lookup(m, mo, k)?.is_some())
     }
 
     /// Removes `k` from set `s`; false if it was not there.
@@ -1863,7 +2297,7 @@ impl Vm {
         let Obj::Set(so) = self.heap.get(s) else { unreachable!() };
         let before = so.entries.capacity();
         let Obj::Set(so) = self.heap.get_mut(s) else { unreachable!() };
-        so.index.remove(hash, |i| i == slot);
+        so.index.remove(k, hash, |i| i == slot);
         so.entries[slot] = None;
         so.live -= 1;
         compact_entries(&mut so.entries, so.live, &mut so.index);

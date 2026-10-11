@@ -415,6 +415,9 @@ pub struct Vm {
     spare_ctl: Option<Box<CtlKind>>,
     /// The wait generation of the wait [`Vm::block`] registered.
     wait_gen: u64,
+    /// The map handle and slot of the last lookup of a key other than an
+    /// int, which a store to the same key reuses (see `Vm::map_set`).
+    last_slot: std::cell::Cell<(u32, u32)>,
     /// Runs the inputs of a REPL session: a top-level `?` that meets an
     /// `Err` panics (aborting the input) instead of ending the program.
     pub session: bool,
@@ -518,6 +521,7 @@ impl Vm {
             pending_race: None,
             spare_ctl: None,
             wait_gen: 0,
+            last_slot: std::cell::Cell::new((u32::MAX, 0)),
             session: false,
             ascii_strs: Vec::new(),
             caught_panic: false,
@@ -530,18 +534,24 @@ impl Vm {
     /// globals that do not exist yet: all of them for a new VM, or those a
     /// REPL session appended to the program.
     pub fn load_program(&mut self) {
-        for i in self.consts.len()..self.prog.consts.len() {
+        let prog = self.prog.clone();
+        for i in self.consts.len()..prog.consts.len() {
+            if let Const::Str(s) = &prog.consts[i] {
+                let v = self.short_str(s);
+                self.consts.push(v);
+                continue;
+            }
             let heap = &mut self.heap;
-            let v = match &self.prog.consts[i] {
+            let v = match &prog.consts[i] {
                 Const::Int(i) => Value::Int(*i),
                 Const::Float(f) => Value::Float(*f),
                 Const::Dur(d) => Value::Dur(*d),
-                Const::Str(s) => heap.new_str(s.as_str()),
+                Const::Str(_) => unreachable!(),
                 Const::Bytes(b) => heap.new_bytes(b.clone()),
                 Const::Fn(p) => heap.alloc(Obj::Closure(*p, Box::new([]))),
                 Const::Native(n) => heap.alloc(Obj::NativeFn(*n)),
                 Const::TypeDesc(t) => heap.alloc(Obj::TypeDesc(t.clone())),
-                Const::Tuple(items) => heap.new_tuple(items.iter().map(|&i| self.consts[i as usize]).collect()),
+                Const::Tuple(items) => heap.new_tuple(&items.iter().map(|&i| self.consts[i as usize]).collect::<Vec<_>>()),
             };
             self.consts.push(v);
         }
@@ -625,7 +635,7 @@ impl Vm {
         self.heap.str(v)
     }
 
-    pub fn new_str(&mut self, s: impl Into<Box<str>>) -> Value {
+    pub fn new_str(&mut self, s: impl Into<compact_str::CompactString>) -> Value {
         self.heap.new_str(s)
     }
 
@@ -1009,8 +1019,8 @@ impl Vm {
 
     /// Creates a fiber that calls `closure` with no arguments.
     pub fn spawn_fiber(&mut self, closure: Value, task: Value) -> Result<u32, Ctl> {
-        let proto = match self.heap.get(closure) {
-            Obj::Closure(p, _) => *p,
+        let (proto, ncaps) = match self.heap.get(closure) {
+            Obj::Closure(p, caps) => (*p, caps.len()),
             _ => return panic("spawn: not a closure"),
         };
         let nregs = self.prog.protos[proto as usize].nregs as usize;
@@ -1050,6 +1060,11 @@ impl Vm {
                 fiber
             }
         };
+        // A task's function takes no parameters: its captures come first.
+        let mut fiber = fiber;
+        if let Obj::Closure(_, caps) = self.heap.get(Value::Obj(closure)) {
+            fiber.stack[..ncaps].copy_from_slice(caps);
+        }
         let id = match self.free_fibers.pop() {
             Some(id) => {
                 self.fibers[id as usize] = Some(fiber);
@@ -1356,9 +1371,19 @@ impl Vm {
             let proto = &self.prog.protos[fr.proto as usize];
             let at = if i + 1 == n { ip.unwrap_or(fr.ip) } else { fr.ip };
             let idx = (at as usize).saturating_sub(1).min(proto.lines.len().saturating_sub(1));
-            let line = proto.lines.get(idx).copied().unwrap_or(0) as usize;
+            let mut line = proto.lines.get(idx).copied().unwrap_or(0) as usize;
             if proto.name == "<entry>" {
                 continue;
+            }
+            let mut site = proto.sites.get(idx).copied().unwrap_or(0);
+            while let Some(s) = (site as usize).checked_sub(1).and_then(|i| proto.inlined.get(i)) {
+                out.push(TraceEntry {
+                    function: s.name.clone(),
+                    file: self.prog.files.get(s.file as usize).cloned().unwrap_or_default(),
+                    line,
+                });
+                line = s.line as usize;
+                site = s.parent;
             }
             let name = if proto.name.starts_with('<') && proto.name.ends_with('>') && proto.name != "<lambda>" && proto.name != "<spawn>" {
                 "<top level>".to_string()

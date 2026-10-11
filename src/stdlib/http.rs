@@ -434,7 +434,7 @@ fn send(vm: &mut Vm, a: &[Value]) -> NResult {
                 BodyReader::new(Box::new(framed), Some(slot), max_body, None)
             };
             let body = alloc_body(vm, reader);
-            Ok(vm.heap.new_tuple(vec![Value::Int(status), headers, body]))
+            Ok(vm.heap.new_tuple(&[Value::Int(status), headers, body]))
         },
     )
 }
@@ -622,7 +622,7 @@ fn start_upload(vm: &mut Vm, a: &[Value]) -> NResult {
         move |vm, (conn, slot)| {
             let conn = net::alloc_resource(vm, conn, slot);
             let body = alloc_outgoing(vm, head, length, true);
-            Ok(vm.heap.new_tuple(vec![conn, body]))
+            Ok(vm.heap.new_tuple(&[conn, body]))
         },
     )
 }
@@ -732,7 +732,7 @@ fn read_response(vm: &mut Vm, a: &[Value]) -> NResult {
                 BodyReader::new(Box::new(framed), None, max_body, None)
             };
             let body = alloc_body(vm, reader);
-            Ok(vm.heap.new_tuple(vec![Value::Int(status), headers, body]))
+            Ok(vm.heap.new_tuple(&[Value::Int(status), headers, body]))
         },
     )
 }
@@ -918,7 +918,7 @@ fn next_request(vm: &mut Vm, a: &[Value]) -> NResult {
             };
             let body = alloc_body(vm, body);
             let conn = net::alloc_resource(vm, conn, slot);
-            Ok(vm.heap.new_tuple(vec![fields[0], fields[1], fields[2], headers, body, conn]))
+            Ok(vm.heap.new_tuple(&[fields[0], fields[1], fields[2], headers, body, conn]))
         })
     })))
 }

@@ -394,7 +394,11 @@ fn cmd_run(args: &[String]) -> Result<u8, String> {
     let file = opts.file.ok_or("missing FILE to run")?;
     let mut engine = Engine::new(opts.config.exit_after_run(true));
     let rt = runtime()?;
-    match rt.block_on(engine.run_file(&file)) {
+    let r = rt.block_on(engine.run_file(&file));
+    if std::env::var_os("SAND_GC_STATS").is_some() {
+        eprintln!("{:#?}", engine.gc_stats());
+    }
+    match r {
         Ok(o) => Ok(exit_status(o.exit_code)),
         Err(e) => Ok(report_error(&e)),
     }

@@ -250,7 +250,7 @@ fn split_list(vm: &mut Vm, text: Value, split: impl for<'h> Fn(&'h Heap, &mut dy
 
 /// A new string holding the bytes `range` of string `v` (copied once).
 pub(crate) fn new_substr(vm: &mut Vm, v: Value, range: std::ops::Range<usize>) -> Value {
-    let s: Box<str> = vm.str(v).get(range).unwrap_or_default().into();
+    let s = compact_str::CompactString::new(vm.str(v).get(range).unwrap_or_default());
     vm.heap.new_str(s)
 }
 
@@ -351,7 +351,7 @@ fn register_str(r: &mut Registry) {
         let (x, y) = (span_of(t, x), span_of(t, y));
         copy_bytes(vm, x.len() + y.len())?;
         let (x, y) = (new_substr(vm, a[0], x), new_substr(vm, a[0], y));
-        let pair = vm.heap.new_tuple(vec![x, y]);
+        let pair = vm.heap.new_tuple(&[x, y]);
         Ok(vm.some(pair))
     });
     r.add_builtin("str.split_whitespace", |vm, a| {
@@ -941,7 +941,7 @@ fn set_push(set: &mut SetObj, hash: u64, x: Value) -> Result<(), Ctl> {
     if !slot_fits(set.entries.len()) {
         return panic("set too large");
     }
-    set.index.insert(hash, set.entries.len());
+    set.index.insert(x, hash, set.entries.len());
     set.entries.push(Some(x));
     set.live += 1;
     Ok(())

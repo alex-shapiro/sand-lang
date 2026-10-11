@@ -1,5 +1,6 @@
 //! Runtime values and heap objects.
 
+use compact_str::CompactString;
 use hashbrown::HashTable;
 use std::any::Any;
 use std::collections::{HashMap, VecDeque};
@@ -44,6 +45,10 @@ pub enum Value {
     VTag(u32, u32),
     /// `variant(object)`: the payload is the heap object with this handle.
     VObj(u32, u32),
+    /// The tuple `(a, b)` of two ints whose first fits in 32 bits. Such
+    /// tuples are always stored inline (build them with `Value::tuple2` or
+    /// `Heap::new_tuple`); other tuples are heap objects.
+    Pair(i32, i64),
 }
 
 // The inline variants pack the discriminant, the u32 variant id and an
@@ -66,6 +71,15 @@ impl Value {
             Value::Obj(h) => Value::VObj(id, h),
             _ => return None,
         })
+    }
+
+    /// The tuple `(a, b)`, if it is stored inline.
+    #[inline]
+    pub fn tuple2(a: Value, b: Value) -> Option<Value> {
+        match (a, b) {
+            (Value::Int(x), Value::Int(y)) => Some(Value::Pair(i32::try_from(x).ok()?, y)),
+            _ => None,
+        }
     }
 
     /// For an inline variant: its runtime variant id and payload.
@@ -221,10 +235,20 @@ impl Hasher for FxHasher {
         for c in chunks {
             self.add(u64::from_le_bytes(*c));
         }
-        if !rem.is_empty() {
-            let w = rem.iter().rev().fold(0u64, |w, &b| (w << 8) | b as u64);
-            self.add(w);
-        }
+        // The last 1 to 7 bytes in one word, in a few loads: injective for a
+        // given length (two overlapping halves, or the first, middle and
+        // last byte of at most three).
+        let n = rem.len();
+        let w = match n {
+            0 => return,
+            1..=3 => rem[0] as u64 | (rem[n / 2] as u64) << 8 | (rem[n - 1] as u64) << 16,
+            _ => {
+                let head = u32::from_le_bytes([rem[0], rem[1], rem[2], rem[3]]);
+                let tail = u32::from_le_bytes([rem[n - 4], rem[n - 3], rem[n - 2], rem[n - 1]]);
+                head as u64 | (tail as u64) << 32
+            }
+        };
+        self.add(w);
     }
     #[inline]
     fn write_u8(&mut self, i: u8) {
@@ -377,17 +401,186 @@ impl KeyTable {
 
     /// The memory the table owns.
     pub fn bytes(&self) -> usize {
+        Self::bytes_for(self.capacity())
+    }
+
+    /// The number of keys the table can hold without growing.
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        self.table.capacity()
+    }
+
+    /// The memory of a table with capacity `cap`.
+    pub fn bytes_for(cap: usize) -> usize {
         // A table of n buckets allocates n entries and n + 16 control bytes.
-        match self.table.capacity() {
+        match cap {
             0 => 0,
             cap => (cap * 8 / 7).next_power_of_two() * TABLE_BUCKET_SIZE + 16,
         }
     }
 }
 
+/// The hash of an int key (`compare::hash_key`).
+#[inline]
+pub fn int_hash(i: i64) -> u64 {
+    let mut h = FxHasher::default();
+    h.write_i64(i);
+    h.finish()
+}
+
+/// The index of a map or set: the slots of its entries by key.
+///
+/// While every key is a non-negative int below a bound proportional to the
+/// number of keys, the index is a table by key, which needs no hashing;
+/// otherwise it is a [`KeyTable`]. A dense index becomes hashed when a key
+/// does not fit; a hashed one may become dense again where it would grow
+/// (see [`KeyIndex::densify`]).
+#[derive(Clone, Debug)]
+pub enum KeyIndex {
+    /// `slots[k]` is one more than the slot of key `k`, or 0.
+    Dense {
+        slots: Vec<u32>,
+        count: usize,
+    },
+    Hashed(KeyTable),
+}
+
+impl Default for KeyIndex {
+    fn default() -> Self {
+        KeyIndex::Dense { slots: Vec::new(), count: 0 }
+    }
+}
+
+/// Whether an int key `k` may be in a dense index of `count` keys.
+#[inline]
+fn dense_fits(k: i64, count: usize) -> bool {
+    0 <= k && (k as u64) < 8 * count as u64 + 64
+}
+
+impl KeyIndex {
+    /// The slot of int key `k` (`eq(slot)` tells whether it holds `k`).
+    #[inline]
+    pub fn find_int(&self, k: i64, eq: impl FnMut(usize) -> bool) -> Option<usize> {
+        match self {
+            KeyIndex::Dense { slots, .. } => match slots.get(usize::try_from(k).ok()?) {
+                Some(&s) if s != 0 => Some(s as usize - 1),
+                _ => None,
+            },
+            KeyIndex::Hashed(t) => t.find(int_hash(k), eq),
+        }
+    }
+
+    /// The slot of key `k`, with hash `hash`, satisfying `eq(slot)`.
+    #[inline]
+    pub fn find(&self, k: Value, hash: u64, eq: impl FnMut(usize) -> bool) -> Option<usize> {
+        match (self, k) {
+            (KeyIndex::Dense { .. }, Value::Int(i)) => self.find_int(i, eq),
+            // A dense index holds only ints.
+            (KeyIndex::Dense { .. }, _) => None,
+            (KeyIndex::Hashed(t), _) => t.find(hash, eq),
+        }
+    }
+
+    /// Adds `slot` (see [`slot_fits`]) for key `k`, with hash `hash`, which
+    /// is not in the index.
+    pub fn insert(&mut self, k: Value, hash: u64, slot: usize) {
+        if let KeyIndex::Dense { slots, count } = self {
+            if let Value::Int(i) = k
+                && dense_fits(i, *count)
+            {
+                let i = i as usize;
+                if i == slots.len() {
+                    slots.push(slot as u32 + 1);
+                } else {
+                    if i > slots.len() {
+                        slots.resize(i + 1, 0);
+                    }
+                    slots[i] = slot as u32 + 1;
+                }
+                *count += 1;
+                return;
+            }
+            self.hash_all();
+        }
+        let KeyIndex::Hashed(t) = self else { unreachable!() };
+        t.insert(hash, slot);
+    }
+
+    /// Turns a dense index into a hashed one.
+    fn hash_all(&mut self) {
+        let KeyIndex::Dense { slots, count } = self else { return };
+        let mut t = KeyTable::default();
+        t.reserve(*count + 1);
+        for (k, &s) in slots.iter().enumerate() {
+            if s != 0 {
+                t.insert(int_hash(k as i64), s as usize - 1);
+            }
+        }
+        *self = KeyIndex::Hashed(t);
+    }
+
+    /// Where a hashed index would grow, makes it dense if its `keys` (with
+    /// their slots) allow `count` keys: those and one more to be inserted.
+    pub fn densify(&mut self, count: usize, keys: impl Iterator<Item = (usize, Value)> + Clone) {
+        let KeyIndex::Hashed(t) = self else { return };
+        if t.len() < t.capacity() || !keys.clone().all(|(_, k)| matches!(k, Value::Int(i) if dense_fits(i, count))) {
+            return;
+        }
+        let mut slots = Vec::new();
+        let mut n = 0;
+        for (s, k) in keys {
+            let Value::Int(i) = k else { unreachable!() };
+            if i as usize >= slots.len() {
+                slots.resize(i as usize + 1, 0);
+            }
+            slots[i as usize] = s as u32 + 1;
+            n += 1;
+        }
+        *self = KeyIndex::Dense { slots, count: n };
+    }
+
+    /// Removes and returns the slot of key `k`, with hash `hash`, satisfying `eq(slot)`.
+    pub fn remove(&mut self, k: Value, hash: u64, eq: impl FnMut(usize) -> bool) -> Option<usize> {
+        match self {
+            KeyIndex::Dense { slots, count } => {
+                let Value::Int(i) = k else { return None };
+                let s = slots.get_mut(usize::try_from(i).ok()?)?;
+                let slot = (*s as usize).checked_sub(1)?;
+                *s = 0;
+                *count -= 1;
+                Some(slot)
+            }
+            KeyIndex::Hashed(t) => t.remove(hash, eq),
+        }
+    }
+
+    /// Renumbers the slots after the entries were compacted.
+    pub fn renumber(&mut self, f: impl Fn(usize) -> usize) {
+        match self {
+            KeyIndex::Dense { slots, .. } => slots.iter_mut().filter(|s| **s != 0).for_each(|s| *s = f(*s as usize - 1) as u32 + 1),
+            KeyIndex::Hashed(t) => t.renumber(f),
+        }
+    }
+
+    /// Makes room for `extra` more keys.
+    pub fn reserve(&mut self, extra: usize) {
+        if let KeyIndex::Hashed(t) = self {
+            t.reserve(extra);
+        }
+    }
+
+    /// The memory the index owns.
+    pub fn bytes(&self) -> usize {
+        match self {
+            KeyIndex::Dense { slots, .. } => slots.capacity() * std::mem::size_of::<u32>(),
+            KeyIndex::Hashed(t) => t.bytes(),
+        }
+    }
+}
+
 /// Removes the tombstones of `entries` if they are more than half of them,
 /// renumbering `table`.
-pub fn compact_entries<T: Copy>(entries: &mut Vec<Option<T>>, live: usize, table: &mut KeyTable) {
+pub fn compact_entries<T: Copy>(entries: &mut Vec<Option<T>>, live: usize, table: &mut KeyIndex) {
     if entries.len() <= 32 || live * 2 >= entries.len() {
         return;
     }
@@ -411,16 +604,21 @@ pub fn compact_entries<T: Copy>(entries: &mut Vec<Option<T>>, live: usize, table
 /// it (its `pins`) to a copy of the entries (see `vm/iter.rs`).
 #[derive(Debug, Default, Clone)]
 pub struct MapObj {
-    pub index: KeyTable,
+    pub index: KeyIndex,
     pub entries: Vec<Option<(Value, Value)>>,
     pub live: usize,
     pub pins: Pins,
+    /// While the index is dense and at least a quarter full: the value of
+    /// each key (`Value::Uninit` if absent), so that looking up a key reads
+    /// neither the index nor the entries. Every change of a value goes
+    /// through [`MapObj::set_dense`].
+    pub vals: Vec<Value>,
 }
 
 /// An insertion-ordered hash set (see [`MapObj`]).
 #[derive(Debug, Default, Clone)]
 pub struct SetObj {
-    pub index: KeyTable,
+    pub index: KeyIndex,
     pub entries: Vec<Option<Value>>,
     pub live: usize,
     pub pins: Pins,
@@ -454,6 +652,51 @@ impl Pins {
 impl MapObj {
     pub fn clear(&mut self) {
         *self = MapObj::default();
+    }
+
+    /// The memory of the index and the dense values.
+    pub fn index_bytes(&self) -> usize {
+        self.index.bytes() + self.vals.capacity() * VALUE_SIZE
+    }
+
+    /// Keeps `vals` in step after key `k` was given value `v` (or removed:
+    /// `Value::Uninit`), the index and entries being up to date.
+    pub fn set_dense(&mut self, k: Value, v: Value) {
+        let KeyIndex::Dense { slots, count } = &self.index else {
+            self.vals = Vec::new();
+            return;
+        };
+        if *count * 8 < slots.len() {
+            self.vals = Vec::new();
+            return;
+        }
+        if self.vals.is_empty() {
+            if *count * 4 < slots.len() {
+                return;
+            }
+            self.vals = vec![Value::Uninit; slots.len()];
+            for (key, &s) in slots.iter().enumerate() {
+                if let Some(Some((_, x))) = s.checked_sub(1).map(|s| &self.entries[s as usize]) {
+                    self.vals[key] = *x;
+                }
+            }
+            return;
+        }
+        if let Value::Int(i) = k
+            && i as usize == self.vals.len()
+            && slots.len() == self.vals.len() + 1
+        {
+            self.vals.push(v);
+            return;
+        }
+        if self.vals.len() < slots.len() {
+            self.vals.resize(slots.len(), Value::Uninit);
+        }
+        if let Value::Int(i) = k
+            && let Some(x) = self.vals.get_mut(i as usize)
+        {
+            *x = v;
+        }
     }
 }
 
@@ -596,7 +839,9 @@ pub enum IterSrc {
 
 pub enum Obj {
     Free(u32),
-    Str(Box<str>),
+    /// Strings of up to 24 bytes are stored inline: making and freeing them
+    /// allocates nothing.
+    Str(CompactString),
     /// The growable buffer of a string local being appended to (see
     /// `Op::AppendStr`); only that local's register ever holds it, and it is
     /// turned into a `Str` before the value can be read anywhere else.
@@ -663,11 +908,12 @@ impl Obj {
         let base = std::mem::size_of::<Obj>();
         base + match self {
             Obj::Free(_) | Obj::NativeFn(_) | Obj::Cell(_) | Obj::Range(..) => 0,
-            Obj::Str(s) => s.len(),
+            Obj::Str(s) if s.is_heap_allocated() => s.capacity(),
+            Obj::Str(_) => 0,
             Obj::StrBuf(s) => s.capacity(),
             Obj::Bytes(b) => b.len(),
             Obj::List(l) => l.capacity() * VALUE_SIZE,
-            Obj::Map(m) => m.entries.capacity() * MAP_ENTRY_SIZE + m.index.bytes() + m.pins.bytes(),
+            Obj::Map(m) => m.entries.capacity() * MAP_ENTRY_SIZE + m.index_bytes() + m.pins.bytes(),
             Obj::Set(s) => s.entries.capacity() * SET_ENTRY_SIZE + s.index.bytes() + s.pins.bytes(),
             Obj::Tuple(t) | Obj::Struct(_, t) | Obj::Variant(_, t) | Obj::Closure(_, t) => t.len() * VALUE_SIZE,
             Obj::IterFn(_) => 0,

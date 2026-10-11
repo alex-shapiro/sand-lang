@@ -1,0 +1,611 @@
+// A tree-walking interpreter for a tiny imperative language: a character-by-character
+// lexer, a recursive-descent parser and an evaluator with string-keyed scope chains.
+// Stresses enum construction and match dispatch, recursion, Result propagation,
+// string scanning, map lookups and allocation of small values.
+
+let PARSE_ROUNDS = 200
+
+let SOURCE = """
+    # Workload sizes.
+    let FIB_N = 21;
+    let PRIME_LIMIT = 10000;
+    let DIGITS = 3000;
+    let CALLS = 30000;
+
+    fn fib(n) {
+        if n < 2 { return n; }
+        return fib(n - 1) + fib(n - 2);
+    }
+
+    fn is_prime(n) {
+        if n < 2 { return 0; }
+        let d = 2;
+        while d * d <= n {
+            if n % d == 0 { return 0; }
+            d = d + 1;
+        }
+        return 1;
+    }
+
+    fn count_primes(limit) {
+        let count = 0;
+        let last = 0;
+        let n = 2;
+        while n < limit {
+            if is_prime(n) {
+                count = count + 1;
+                last = n;
+            }
+            n = n + 1;
+        }
+        print("primes below " + str(limit) + ": " + str(count) + ", largest " + str(last));
+        return count;
+    }
+
+    fn digits(n) {
+        let s = "";
+        let i = 0;
+        while i < n {
+            let d = i * 7 % 10;
+            if d == 0 { s = s + "-"; } else if d % 2 == 0 { s = s + str(d); } else { s = s + "."; }
+            i = i + 1;
+        }
+        return s;
+    }
+
+    fn square(x) { return x * x; }
+
+    fn clamp(x, lo, hi) {
+        if x < lo { return lo; }
+        if x > hi { return hi; }
+        return x;
+    }
+
+    fn mix(acc, x) { return (acc * 31 + clamp(square(x) % 1000, 100, 900)) % 1000003; }
+
+    fn hash_loop(n) {
+        let acc = 0;
+        let i = 0;
+        while i < n {
+            acc = mix(acc, i);
+            i = i + 1;
+        }
+        return acc;
+    }
+
+    fn greet(name, times) {
+        let out = "";
+        let i = 0;
+        while i < times {
+            if i > 0 { out = out + ", "; }
+            out = out + "hello " + name;
+            i = i + 1;
+        }
+        return out;
+    }
+
+    print("fib(" + str(FIB_N) + ") = " + str(fib(FIB_N)));
+    count_primes(PRIME_LIMIT);
+    let s = digits(DIGITS);
+    print("digits: " + str(len(s)) + " chars, empty " + str(s == "") + ", long " + str(len(s) > 10));
+    print("hash: " + str(hash_loop(CALLS)));
+    let g = greet("sand", 3);
+    print(g);
+    print("logic: " + str(len(g) > 10 and not (fib(5) != 5) or 0) + " " + str(-7 / 2) + " " + str(-7 % 3));
+    """
+
+enum Token {
+    Num(int)
+    Str(str)
+    Ident(str)
+    Keyword(str)
+    Sym(str)
+    Eof
+}
+
+let KEYWORDS = set(["fn", "let", "if", "else", "while", "return", "and", "or", "not"])
+let TWO_CHAR_SYMS = set(["==", "!=", "<=", ">="])
+
+struct Lexer {
+    src: [str]
+    var pos: int = 0
+
+    fn tokens(self) -> Result<[Token], str> {
+        let out = []
+        while self.pos < self.src.len() {
+            let c = self.src[self.pos]
+            if c.is_space() {
+                self.pos += 1
+            } else if c == "#" {
+                while self.pos < self.src.len() and self.src[self.pos] != "\n" {
+                    self.pos += 1
+                }
+            } else if c.is_digit() {
+                let text = self.scan(ch => ch.is_digit())
+                out.push(Token.Num(text.parse_int().ok_or("bad number `\(text)`")?))
+            } else if c.is_alpha() or c == "_" {
+                let word = self.scan(ch => ch.is_alnum() or ch == "_")
+                out.push(if KEYWORDS.contains(word) {
+                    Token.Keyword(word)
+                } else {
+                    Token.Ident(word)
+                })
+            } else if c == "\"" {
+                self.pos += 1
+                let text = self.scan(ch => ch != "\"")
+                if self.pos >= self.src.len() {
+                    return Err("unterminated string")
+                }
+                self.pos += 1
+                out.push(Token.Str(text))
+            } else {
+                let two = c + (self.src.get(self.pos + 1) ?? "")
+                if TWO_CHAR_SYMS.contains(two) {
+                    self.pos += 2
+                    out.push(Token.Sym(two))
+                } else if "+-*/%<>=(){},;".contains(c) {
+                    self.pos += 1
+                    out.push(Token.Sym(c))
+                } else {
+                    return Err("unexpected character `\(c)` at \(self.pos)")
+                }
+            }
+        }
+        out.push(Token.Eof)
+        Ok(out)
+    }
+
+    fn scan(self, accept: fn(str) -> bool) -> str {
+        let start = self.pos
+        while self.pos < self.src.len() and accept(self.src[self.pos]) {
+            self.pos += 1
+        }
+        self.src[start..self.pos].join()
+    }
+}
+
+enum BinOp {
+    Add
+    Sub
+    Mul
+    Div
+    Mod
+    Eq
+    Ne
+    Lt
+    Le
+    Gt
+    Ge
+}
+
+enum Expr {
+    Num(int)
+    Str(str)
+    Var(str)
+    Neg(Expr)
+    Not(Expr)
+    And(Expr, Expr)
+    Or(Expr, Expr)
+    Bin(op: BinOp, left: Expr, right: Expr)
+    Call(name: str, args: [Expr])
+}
+
+struct FnDef {
+    name: str
+    params: [str]
+    body: [Stmt]
+}
+
+enum Stmt {
+    Let(name: str, value: Expr)
+    Assign(name: str, value: Expr)
+    If(cond: Expr, then: [Stmt], otherwise: [Stmt])
+    While(cond: Expr, body: [Stmt])
+    Func(FnDef)
+    Return(Expr)
+    ExprStmt(Expr)
+}
+
+struct Parser {
+    tokens: [Token]
+    var pos: int = 0
+
+    fn peek(self) -> Token { self.tokens[self.pos] }
+
+    fn advance(self) -> Token {
+        let t = self.tokens[self.pos]
+        if t != Token.Eof {
+            self.pos += 1
+        }
+        t
+    }
+
+    fn eat(self, want: Token) -> bool {
+        if self.peek() == want {
+            self.pos += 1
+            true
+        } else {
+            false
+        }
+    }
+
+    fn expect(self, want: Token) -> Result<(), str> {
+        let t = self.advance()
+        if t == want { Ok(()) } else { Err("expected \(want), found \(t)") }
+    }
+
+    fn ident(self) -> Result<str, str> {
+        match self.advance() {
+            Ident(name) => Ok(name)
+            t => Err("expected a name, found \(t)")
+        }
+    }
+
+    fn program(self) -> Result<[Stmt], str> {
+        let stmts = []
+        while self.peek() != Token.Eof {
+            stmts.push(self.statement()?)
+        }
+        Ok(stmts)
+    }
+
+    fn block(self) -> Result<[Stmt], str> {
+        self.expect(Token.Sym("{"))?
+        let stmts = []
+        while not self.eat(Token.Sym("}")) {
+            stmts.push(self.statement()?)
+        }
+        Ok(stmts)
+    }
+
+    fn statement(self) -> Result<Stmt, str> {
+        match self.peek() {
+            Keyword("fn") => {
+                self.pos += 1
+                let name = self.ident()?
+                self.expect(Token.Sym("("))?
+                let params = []
+                if not self.eat(Token.Sym(")")) {
+                    loop {
+                        params.push(self.ident()?)
+                        if self.eat(Token.Sym(")")) { break }
+                        self.expect(Token.Sym(","))?
+                    }
+                }
+                Ok(Stmt.Func(FnDef { name, params, body: self.block()? }))
+            }
+            Keyword("let") => {
+                self.pos += 1
+                let name = self.ident()?
+                self.expect(Token.Sym("="))?
+                let value = self.expr()?
+                self.expect(Token.Sym(";"))?
+                Ok(Stmt.Let(name, value))
+            }
+            Keyword("if") => self.if_statement()
+            Keyword("while") => {
+                self.pos += 1
+                let cond = self.expr()?
+                Ok(Stmt.While(cond, self.block()?))
+            }
+            Keyword("return") => {
+                self.pos += 1
+                let value = self.expr()?
+                self.expect(Token.Sym(";"))?
+                Ok(Stmt.Return(value))
+            }
+            Ident(name) if self.tokens[self.pos + 1] == Token.Sym("=") => {
+                self.pos += 2
+                let value = self.expr()?
+                self.expect(Token.Sym(";"))?
+                Ok(Stmt.Assign(name, value))
+            }
+            _ => {
+                let e = self.expr()?
+                self.expect(Token.Sym(";"))?
+                Ok(Stmt.ExprStmt(e))
+            }
+        }
+    }
+
+    fn if_statement(self) -> Result<Stmt, str> {
+        self.pos += 1
+        let cond = self.expr()?
+        let then = self.block()?
+        let otherwise = if not self.eat(Token.Keyword("else")) {
+            []
+        } else if self.peek() == Token.Keyword("if") {
+            [self.if_statement()?]
+        } else {
+            self.block()?
+        }
+        Ok(Stmt.If(cond, then, otherwise))
+    }
+
+    fn expr(self) -> Result<Expr, str> {
+        var left = self.and_expr()?
+        while self.eat(Token.Keyword("or")) {
+            left = Expr.Or(left, self.and_expr()?)
+        }
+        Ok(left)
+    }
+
+    fn and_expr(self) -> Result<Expr, str> {
+        var left = self.comparison()?
+        while self.eat(Token.Keyword("and")) {
+            left = Expr.And(left, self.comparison()?)
+        }
+        Ok(left)
+    }
+
+    fn comparison(self) -> Result<Expr, str> {
+        let left = self.additive()?
+        let op = match self.peek() {
+            Sym("==") => BinOp.Eq
+            Sym("!=") => BinOp.Ne
+            Sym("<") => BinOp.Lt
+            Sym("<=") => BinOp.Le
+            Sym(">") => BinOp.Gt
+            Sym(">=") => BinOp.Ge
+            _ => return Ok(left)
+        }
+        self.pos += 1
+        Ok(Expr.Bin(op, left, self.additive()?))
+    }
+
+    fn additive(self) -> Result<Expr, str> {
+        var left = self.term()?
+        loop {
+            let op = match self.peek() {
+                Sym("+") => BinOp.Add
+                Sym("-") => BinOp.Sub
+                _ => break
+            }
+            self.pos += 1
+            left = Expr.Bin(op, left, self.term()?)
+        }
+        Ok(left)
+    }
+
+    fn term(self) -> Result<Expr, str> {
+        var left = self.unary()?
+        loop {
+            let op = match self.peek() {
+                Sym("*") => BinOp.Mul
+                Sym("/") => BinOp.Div
+                Sym("%") => BinOp.Mod
+                _ => break
+            }
+            self.pos += 1
+            left = Expr.Bin(op, left, self.unary()?)
+        }
+        Ok(left)
+    }
+
+    fn unary(self) -> Result<Expr, str> {
+        if self.eat(Token.Sym("-")) {
+            Ok(Expr.Neg(self.unary()?))
+        } else if self.eat(Token.Keyword("not")) {
+            Ok(Expr.Not(self.unary()?))
+        } else {
+            self.primary()
+        }
+    }
+
+    fn primary(self) -> Result<Expr, str> {
+        match self.advance() {
+            Num(n) => Ok(Expr.Num(n))
+            Str(s) => Ok(Expr.Str(s))
+            Ident(name) => {
+                if not self.eat(Token.Sym("(")) {
+                    return Ok(Expr.Var(name))
+                }
+                let args = []
+                if not self.eat(Token.Sym(")")) {
+                    loop {
+                        args.push(self.expr()?)
+                        if self.eat(Token.Sym(")")) { break }
+                        self.expect(Token.Sym(","))?
+                    }
+                }
+                Ok(Expr.Call(name, args))
+            }
+            Sym("(") => {
+                let e = self.expr()?
+                self.expect(Token.Sym(")"))?
+                Ok(e)
+            }
+            t => Err("unexpected \(t)")
+        }
+    }
+}
+
+enum Value {
+    Int(int)
+    Str(str)
+    Func(FnDef)
+
+    fn truthy(self) -> bool {
+        match self {
+            Int(n) => n != 0
+            Str(s) => not s.is_empty()
+            Func(_) => true
+        }
+    }
+
+    fn display(self) -> str {
+        match self {
+            Int(n) => n.to_str()
+            Str(s) => s
+            Func(f) => "<fn \(f.name)>"
+        }
+    }
+
+    fn of_bool(b: bool) -> Value { Value.Int(if b { 1 } else { 0 }) }
+}
+
+enum Flow {
+    Next
+    Return(Value)
+}
+
+/// A chain of scopes, innermost last; the first scope holds the globals.
+struct Env {
+    scopes: [[str: Value]]
+
+    fn lookup(self, name: str) -> Result<Value, str> {
+        var i = self.scopes.len() - 1
+        while i >= 0 {
+            if let Some(v) = self.scopes[i].get(name) {
+                return Ok(v)
+            }
+            i -= 1
+        }
+        Err("undefined variable `\(name)`")
+    }
+
+    fn assign(self, name: str, v: Value) -> Result<(), str> {
+        var i = self.scopes.len() - 1
+        while i >= 0 {
+            if self.scopes[i].contains(name) {
+                self.scopes[i][name] = v
+                return Ok(())
+            }
+            i -= 1
+        }
+        Err("assignment to undefined variable `\(name)`")
+    }
+
+    fn define(self, name: str, v: Value) {
+        self.scopes[self.scopes.len() - 1][name] = v
+    }
+
+    fn run(self, stmts: [Stmt]) -> Result<Flow, str> {
+        for stmt in stmts {
+            match self.exec(stmt)? {
+                Next => {}
+                ret => return Ok(ret)
+            }
+        }
+        Ok(Flow.Next)
+    }
+
+    fn run_scoped(self, stmts: [Stmt]) -> Result<Flow, str> {
+        self.scopes.push([:])
+        let flow = self.run(stmts)?
+        self.scopes.pop()
+        Ok(flow)
+    }
+
+    fn exec(self, stmt: Stmt) -> Result<Flow, str> {
+        match stmt {
+            Let(name, e) => self.define(name, self.eval(e)?)
+            Assign(name, e) => self.assign(name, self.eval(e)?)?
+            If(cond, then, otherwise) => {
+                return self.run_scoped(if self.eval(cond)?.truthy() { then } else { otherwise })
+            }
+            While(cond, body) => {
+                while self.eval(cond)?.truthy() {
+                    let flow = self.run_scoped(body)?
+                    if let Return(_) = flow {
+                        return Ok(flow)
+                    }
+                }
+            }
+            Func(f) => self.define(f.name, Value.Func(f))
+            Return(e) => return Ok(Flow.Return(self.eval(e)?))
+            ExprStmt(e) => {
+                self.eval(e)?
+            }
+        }
+        Ok(Flow.Next)
+    }
+
+    fn eval(self, e: Expr) -> Result<Value, str> {
+        match e {
+            Num(n) => Ok(Value.Int(n))
+            Str(s) => Ok(Value.Str(s))
+            Var(name) => self.lookup(name)
+            Neg(inner) => match self.eval(inner)? {
+                Int(n) => Ok(Value.Int(-n))
+                v => Err("cannot negate \(v.display())")
+            }
+            Not(inner) => Ok(Value.of_bool(not self.eval(inner)?.truthy()))
+            And(l, r) => Ok(Value.of_bool(self.eval(l)?.truthy() and self.eval(r)?.truthy()))
+            Or(l, r) => Ok(Value.of_bool(self.eval(l)?.truthy() or self.eval(r)?.truthy()))
+            Bin(op, l, r) => binary(op, self.eval(l)?, self.eval(r)?)
+            Call(name, arg_exprs) => {
+                let args = []
+                for a in arg_exprs {
+                    args.push(self.eval(a)?)
+                }
+                self.call(name, args)
+            }
+        }
+    }
+
+    fn call(self, name: str, args: [Value]) -> Result<Value, str> {
+        match (name, args) {
+            ("print", [v]) => {
+                print(v.display())
+                Ok(Value.Int(0))
+            }
+            ("len", [Str(s)]) => Ok(Value.Int(s.len()))
+            ("str", [v]) => Ok(Value.Str(v.display()))
+            _ => {
+                let Func(f) = self.lookup(name)? else {
+                    return Err("`\(name)` is not a function")
+                }
+                if f.params.len() != args.len() {
+                    return Err("`\(name)` takes \(f.params.len()) arguments, got \(args.len())")
+                }
+                let frame: [str: Value] = [:]
+                for (param, arg) in f.params.zip(args) {
+                    frame[param] = arg
+                }
+                let callee = Env { scopes: [self.scopes[0], frame] }
+                match callee.run(f.body)? {
+                    Return(v) => Ok(v)
+                    Next => Ok(Value.Int(0))
+                }
+            }
+        }
+    }
+}
+
+fn binary(op: BinOp, a: Value, b: Value) -> Result<Value, str> {
+    match (op, a, b) {
+        (Add, Int(x), Int(y)) => Ok(Value.Int(x + y))
+        (Add, Str(x), Str(y)) => Ok(Value.Str(x + y))
+        (Sub, Int(x), Int(y)) => Ok(Value.Int(x - y))
+        (Mul, Int(x), Int(y)) => Ok(Value.Int(x * y))
+        (Div, Int(_), Int(0)) | (Mod, Int(_), Int(0)) => Err("division by zero")
+        (Div, Int(x), Int(y)) => Ok(Value.Int(x / y))
+        (Mod, Int(x), Int(y)) => Ok(Value.Int(x % y))
+        (Eq, x, y) => Ok(Value.of_bool(x == y))
+        (Ne, x, y) => Ok(Value.of_bool(x != y))
+        (Lt, Int(x), Int(y)) => Ok(Value.of_bool(x < y))
+        (Le, Int(x), Int(y)) => Ok(Value.of_bool(x <= y))
+        (Gt, Int(x), Int(y)) => Ok(Value.of_bool(x > y))
+        (Ge, Int(x), Int(y)) => Ok(Value.of_bool(x >= y))
+        (op, x, y) => Err("unsupported operands for \(op): \(x.display()), \(y.display())")
+    }
+}
+
+fn parse(source: str) -> Result<([Token], [Stmt]), str> {
+    let tokens = Lexer { src: source.chars() }.tokens()?
+    let program = Parser { tokens }.program()?
+    Ok((tokens, program))
+}
+
+var token_total = 0
+var stmt_total = 0
+for _ in 0..PARSE_ROUNDS {
+    let (tokens, program) = parse(SOURCE)?
+    token_total += tokens.len()
+    stmt_total += program.len()
+}
+print("parsed \(PARSE_ROUNDS) times: \(token_total) tokens, \(stmt_total) statements")
+
+let (_, program) = parse(SOURCE)?
+Env { scopes: [[:]] }.run(program)?

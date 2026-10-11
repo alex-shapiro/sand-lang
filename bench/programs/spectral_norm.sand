@@ -1,0 +1,51 @@
+// Benchmarks Game spectral-norm: power method on an infinite matrix A.
+// Stresses small function calls, float arithmetic and list indexing.
+
+let N = 800
+
+fn eval_a(i: int, j: int) -> float {
+    1.0 / ((i + j) * (i + j + 1) / 2 + i + 1).to_float()
+}
+
+fn mul_av(v: [float], av: [float]) {
+    let n = v.len()
+    for i in 0..n {
+        var sum = 0.0
+        for j in 0..n {
+            sum += eval_a(i, j) * v[j]
+        }
+        av[i] = sum
+    }
+}
+
+fn mul_atv(v: [float], atv: [float]) {
+    let n = v.len()
+    for i in 0..n {
+        var sum = 0.0
+        for j in 0..n {
+            sum += eval_a(j, i) * v[j]
+        }
+        atv[i] = sum
+    }
+}
+
+fn mul_atav(v: [float], out: [float], tmp: [float]) {
+    mul_av(v, tmp)
+    mul_atv(tmp, out)
+}
+
+let u = [1.0; N]
+let v = [0.0; N]
+let tmp = [0.0; N]
+for _ in 0..10 {
+    mul_atav(u, v, tmp)
+    mul_atav(v, u, tmp)
+}
+
+var vbv = 0.0
+var vv = 0.0
+for i in 0..N {
+    vbv += u[i] * v[i]
+    vv += v[i] * v[i]
+}
+print((vbv / vv).sqrt().to_str_fixed(9))
