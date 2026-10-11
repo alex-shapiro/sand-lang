@@ -254,8 +254,7 @@ pub fn render_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Valu
                             }
                             Obj::IterFn(_) => out.push_str("<fn>"),
                             Obj::NativeFn(n) => {
-                                let sig = prog.native_help.get(*n as usize).map(|h| h.signature.as_str()).unwrap_or("fn ?");
-                                let name = sig.trim_start_matches("fn ").split('(').next().unwrap_or("?");
+                                let name = prog.native_names.get(*n as usize).map_or("?", String::as_str);
                                 let _ = write!(out, "<fn {name}>");
                             }
                             Obj::Cell(inner) => work.push(Work::Val(*inner, depth, debug)),

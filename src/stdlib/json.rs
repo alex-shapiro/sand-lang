@@ -1052,7 +1052,7 @@ fn const_value(st: &mut Staging, none: u32, c: &ConstVal) -> Value {
 // ---------------------------------------------------------------------------
 // Encoding
 
-/// Writes the JSON text of values on the heap (spec §13.8), compact or
+/// Writes the JSON text of values on the heap (spec §13.7), compact or
 /// pretty-printed.
 struct Encoder<'v> {
     prog: &'v Program,

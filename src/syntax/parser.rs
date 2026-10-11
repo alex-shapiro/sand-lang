@@ -318,7 +318,7 @@ impl<'a> Parser<'a> {
             Tok::Native => ItemKind::Fn(self.fn_decl(false, doc)?),
             Tok::Struct => ItemKind::Struct(self.struct_decl(false, doc)?),
             Tok::Enum => ItemKind::Enum(self.enum_decl(false, doc)?),
-            Tok::Extend => ItemKind::Extend(self.extend_decl()?),
+            Tok::Extend => ItemKind::Extend(self.extend_decl(doc)?),
             Tok::Trait => ItemKind::Trait(self.trait_decl(false, doc)?),
             Tok::Impl => ItemKind::Impl(self.impl_decl()?),
             Tok::Type if matches!(self.peek_tok(1), Tok::Ident) => ItemKind::TypeAlias(self.type_alias(false, doc)?),
@@ -636,7 +636,7 @@ impl<'a> Parser<'a> {
         Ok(EnumDecl { name, generics, variants, methods, is_pub, doc })
     }
 
-    fn extend_decl(&mut self) -> PResult<ExtendDecl> {
+    fn extend_decl(&mut self, doc: Option<String>) -> PResult<ExtendDecl> {
         self.bump();
         let generics = self.generics()?;
         let target = self.ty()?;
@@ -656,7 +656,7 @@ impl<'a> Parser<'a> {
             methods.push(self.fn_decl(p, mdoc)?);
         }
         self.expect(&Tok::RBrace, "`}`")?;
-        Ok(ExtendDecl { generics, target, methods })
+        Ok(ExtendDecl { generics, target, methods, doc })
     }
 
     /// Methods of a `trait` or `impl` body: doc comments and `fn` declarations.

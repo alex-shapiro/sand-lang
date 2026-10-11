@@ -1135,8 +1135,6 @@ pub struct Proto {
     /// yet). Calling the closure copies them to the registers following the
     /// parameters.
     pub captures: Vec<Reg>,
-    pub doc: Option<String>,
-    pub signature: String,
     /// Sorted, disjoint code ranges inside which deferred code is pending,
     /// with the cleanup pad that runs it when the task is cancelled.
     pub cleanups: Vec<Cleanup>,
@@ -1264,12 +1262,6 @@ pub struct JsonIds {
     pub obj: u32,
 }
 
-#[derive(Clone, Debug)]
-pub struct HelpEntry {
-    pub doc: Option<String>,
-    pub signature: String,
-}
-
 /// A compiled program, shared by `Arc`. It is immutable once built, except
 /// that a REPL session appends to it between inputs (never renumbering).
 #[derive(Clone, Debug, Default)]
@@ -1284,14 +1276,11 @@ pub struct Program {
     pub entry: u32,
     pub tests: Vec<(String, u32)>,
     pub files: Vec<String>,
-    /// Help text for natives by id.
-    pub native_help: Arc<[HelpEntry]>,
-    pub module_help: Arc<[(String, String)]>,
+    /// The names of the natives, by id.
+    pub native_names: Arc<[String]>,
     pub native_argc: Arc<[u16]>,
     /// The templates of string interpolations (`Op::Interp`).
     pub templates: Vec<Template>,
     /// The jump tables of `SwitchVariant`, `SwitchInt` and `SwitchChar`.
     pub switches: Vec<Switch>,
-    /// Names of all standard and host modules available to `import`.
-    pub available_modules: Arc<[String]>,
 }

@@ -126,3 +126,7 @@ Follow-up work, roughly in priority order.
 - [ ] **A pattern may bind a name twice.** `let (a, a) = (1, 2)` checks and
       binds the last value; it should be an error, as in an or-pattern
       that binds different names.
+- [ ] **NaN and infinity have no literals.** Floats display as `NaN` and
+      `inf`, but neither is valid source (only `math.nan`, `math.inf`,
+      `1.0 / 0.0` or `"inf".parse_float()`), so float display and debug
+      forms do not read back the way a string's debug form does.

@@ -158,7 +158,6 @@ fn native_module_typed_functions() {
     let config = Config::new().module(geo_module());
     let src = r#"
 import geo
-import help
 print(geo.dist(3.0, 4.0))
 print(geo.count("héllo"))
 print(geo.split("a,b"))
@@ -170,14 +169,13 @@ print(geo.tally(["a", "b", "a"])["a"])
 print(geo.pair(21, "x"))
 print(geo.raw(b"abc"))
 print(geo.flag(false))
-print(help.signature(geo.dist))
-print(help.doc(geo.dist))
+help(geo.dist)
 "#;
     let (r, out, _) = run_src(config, src);
     r.unwrap();
     assert_eq!(
         out,
-        "5.0\n5\n[\"a\", \"b\"]\nSome(2)\nNone\nOk(3)\nnegative: -1\n2\n(42, \"X\")\nb\"cba\"\ntrue\nfn dist(a: float, b: float) -> float\nEuclidean length of (a, b).\n"
+        "5.0\n5\n[\"a\", \"b\"]\nSome(2)\nNone\nOk(3)\nnegative: -1\n2\n(42, \"X\")\nb\"cba\"\ntrue\nfn geo.dist(a: float, b: float) -> float\n\nEuclidean length of (a, b).\n"
     );
 }
 
@@ -201,7 +199,6 @@ fn native_module_conversions() {
     );
     let src = r#"
 import conv
-import help
 print(conv.grid(3))
 print(conv.pairs([("a", 1), ("b", 2)]))
 print(conv.somes([Some(1), None, Some(5)]))
@@ -209,8 +206,8 @@ print(conv.words("a b c", " "))
 print(conv.first(b"xyz"))
 print(conv.lookup(key: "12"))
 print(conv.lookup("x"))
-print(help.signature(conv.lookup))
-print(help.signature(conv.grid))
+help(conv.lookup)
+help(conv.grid)
 print(conv.write("f", b"abc"))
 print(conv.write("g", b""))
 "#;
@@ -223,7 +220,7 @@ print(conv.write("g", b""))
     r.unwrap();
     assert_eq!(
         out,
-        "[[], [0], [0, 1]]\n[(1, \"a\"), (2, \"b\")]\n6\n[\"a\", \"b\", \"c\"]\nSome(120)\nOk(12)\nErr(Error { kind: \"not_found\", message: \"no key x\" })\nfn lookup(key: str) -> Result<int, Error>\nfn grid(arg1: int) -> [[int]]\nOk(4)\nErr(Error { kind: \"permission_denied\", message: \"permission denied: write g 0\" })\n"
+        "[[], [0], [0, 1]]\n[(1, \"a\"), (2, \"b\")]\n6\n[\"a\", \"b\", \"c\"]\nSome(120)\nOk(12)\nErr(Error { kind: \"not_found\", message: \"no key x\" })\nfn conv.lookup(key: str) -> Result<int, Error>\nfn conv.grid(arg1: int) -> [[int]]\nOk(4)\nErr(Error { kind: \"permission_denied\", message: \"permission denied: write g 0\" })\n"
     );
     // Results are built within the memory limit.
     let limits = Limits { max_memory: Some(16 << 20), ..Limits::default() };
@@ -326,7 +323,6 @@ pub fn total<T: Unit>(xs: [T]) -> str { xs.show() }
 "#,
     );
     let src = r#"
-import help
 import units
 struct Metres { m: float }
 impl units.Unit for Metres {
@@ -336,37 +332,37 @@ impl units.Unit for Metres {
 print(1500ms.show())
 print(units.total([1s, 2s]))
 print(units.total([Metres { m: 2.0 }, Metres { m: 0.5 }]))
-print(help.module("units") ?? "")
+help(units)
 "#;
     let (r, out, _) = run_src(Config::new().module(m), src);
     r.unwrap();
     assert_eq!(
         out,
-        "1.5s\n3.0s\n2.5m\ntrait Unit\n    Values with a unit.\n    fn symbol() -> str\n    fn show(self) -> str\n    fn magnitude(self) -> float\nfn total(xs: [T]) -> str\n"
+        "1.5s\n3.0s\n2.5m\nmodule units\n\nTraits:\n    trait Unit\n        Values with a unit.\n\nFunctions:\n    fn total<T: Unit>(xs: [T]) -> str\n"
     );
 }
 
 #[test]
-fn help_summarises_modules_that_are_not_imported() {
+fn help_describes_host_modules_that_are_not_imported() {
     let mut shapes = NativeModule::new("shapes");
     shapes.source(
-        "/// A square.\npub struct Square { side: float }\n/// Area of a square.\npub fn area(s: Square) -> float { s.side * s.side }\n",
+        "//! Shapes.\n/// A square.\npub struct Square { side: float }\n/// Area of a square.\npub fn area(s: Square) -> float { s.side * s.side }\n",
     );
     // A host module that does not type check must not break `help` for the others.
     let mut broken = NativeModule::new("broken");
     broken.source("pub fn bad() -> int { \"not an int\" }\n");
-    let src = r#"import help
-let s = help.module("shapes").unwrap()
-print(s)
-print(help.module("shapes") == Some(s))
-print(help.module("json").unwrap().contains("fn parse(text: str) -> Result<Json, Error>"))
-print(help.module("broken"))
-print(help.module("nope"))
-print(help.modules().contains("shapes"))
-"#;
-    let (r, out, _) = run_src(Config::new().module(shapes).module(broken), src);
+    let config = || Config::new().module(shapes.clone()).module(broken.clone());
+    let (r, out, _) = run_src(config(), "help(shapes)\nprint(members(shapes))\nhelp(\"shapes.Square\")");
     r.unwrap();
-    assert_eq!(out, "struct Square\n    A square.\nfn area(s: Square) -> float\n    Area of a square.\ntrue\ntrue\nNone\nNone\ntrue\n");
+    assert_eq!(
+        out,
+        "module shapes\n\nShapes.\n\nTypes:\n    struct Square\n        A square.\n\nFunctions:\n    fn area(s: Square) -> float\n        Area of a square.\n[\"Square\", \"area\"]\nstruct shapes.Square\n\nA square.\n\nFields:\n    side: float\n"
+    );
+    let (r, out, _) = run_src(config(), "help()");
+    r.unwrap();
+    assert!(out.contains("    shapes      Shapes.\n") && !out.contains("broken"), "{out}");
+    let (r, _, _) = run_src(config(), "help(broken)");
+    assert!(matches!(&r, Err(Error::Compile(d)) if d[0].message.contains("type mismatch")), "{r:?}");
 }
 
 #[test]

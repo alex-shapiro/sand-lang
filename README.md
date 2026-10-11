@@ -74,7 +74,9 @@ limit time 10s
 ```
 
 On a terminal the REPL has a line editor with history (`~/.sand_history`, or
-`$SAND_HISTORY`); `:help` lists the keys.
+`$SAND_HISTORY`); `:help` lists the keys. `help()` gives an overview of the
+language's functions, types and modules, `help(x)` documents a module, type,
+function or any value, and `members(x)` lists what may follow `x.`.
 
 ## Embedding
 

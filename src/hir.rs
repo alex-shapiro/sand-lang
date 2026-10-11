@@ -4,7 +4,6 @@
 
 use crate::diag::Span;
 use crate::types::{FnId, GlobalId, ImplId, Symbol, TraitId, TraitRef, TypeDefId, TypeId};
-use std::sync::Arc;
 
 pub type LocalId = u32;
 
@@ -146,8 +145,6 @@ pub struct HLambda {
     pub name: String,
     pub params: Vec<LocalId>,
     pub body: HExpr,
-    pub doc: Option<Arc<str>>,
-    pub signature: String,
     /// If this lambda is a local function bound to a cell local, that local.
     pub self_local: Option<LocalId>,
 }
@@ -602,4 +599,7 @@ pub struct HFn {
     pub body: HExpr,
     pub locals: Vec<LocalInfo>,
     pub span: Span,
+    /// The functions that `help` and `members` calls in the body name, which
+    /// the `unused-function` lint counts as used.
+    pub doc_refs: Vec<FnId>,
 }

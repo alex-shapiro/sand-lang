@@ -21,7 +21,7 @@ use crate::engine::{Error, Registry};
 use crate::syntax::ast::{self, ImportSource, ItemKind};
 use crate::syntax::lexer::{Tok, lex};
 use crate::types::{FnId, ModId};
-use crate::vm::bytecode::{HelpEntry, Program};
+use crate::vm::bytecode::Program;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
@@ -130,15 +130,20 @@ impl Snapshot {
         for (m, info) in mods.iter_mut().zip(checker.mods.iter()) {
             m.init = info.init;
         }
+        checker.module_index = registry
+            .sources
+            .iter()
+            .filter(|(name, (kind, _))| *name != "prelude" && (*kind != ModKind::Host || by_name.contains_key(name.as_ref())))
+            .map(|(name, (_, src))| (name.to_string(), crate::check::help::module_summary(src)))
+            .collect();
         let mut program = base.map(|b| b.program.clone()).unwrap_or_default();
         let mut compiler = base.map(|b| b.compiler.clone()).unwrap_or_default();
-        let cp = checker.take_checked(true);
-        let (native_help, native_argc) = native_info(&cp, registry);
+        let cp = checker.take_checked();
+        let (native_names, native_argc) = native_info(&cp, registry);
         let budget = CompileBudget::default();
-        let input = CompileInput { checked: &cp, sm: &sm, native_lookup: &lookup, native_help, native_argc, budget: &budget };
+        let input = CompileInput { checked: &cp, sm: &sm, native_lookup: &lookup, native_names, native_argc, budget: &budget };
         let inits: Vec<FnId> = ["prelude", "task"].iter().filter_map(|n| mods[by_name[*n] as usize].init).collect();
         program.entry = compile_more(input, &mut program, &mut compiler, &inits).map_err(|ds| resolve(&sm, &ds))?;
-        program.available_modules = registry.sources.keys().filter(|k| *k != "prelude").map(|k| k.to_string()).collect();
         checker.restore_checked(cp);
         checker.release_bodies();
         // Facts about the library are of no use to its users.
@@ -195,6 +200,7 @@ fn load_registered(
                     }
                 }
             }
+            ImportRef::Help(..) => unreachable!("not an import declaration"),
             ImportRef::Path(_, span) => {
                 ok = false;
                 if *kind != ModKind::Host {
@@ -211,17 +217,20 @@ fn load_registered(
 }
 
 /// An import declaration: of a standard or host module by name, or of a
-/// script by path, with the span of the name or path.
+/// script by path, with the span of the name or path. `Help` is a name that
+/// starts the argument of `help` or `members`: the module of that name, if
+/// there is one, is loaded (and checked) but not bound.
 #[derive(Clone, Debug)]
 pub(crate) enum ImportRef {
     Name(String, Span),
     Path(String, Span),
+    Help(String, Span),
 }
 
 impl ImportRef {
     fn span(&self) -> Span {
         match self {
-            ImportRef::Name(_, s) | ImportRef::Path(_, s) => *s,
+            ImportRef::Name(_, s) | ImportRef::Path(_, s) | ImportRef::Help(_, s) => *s,
         }
     }
 }
@@ -241,15 +250,31 @@ fn import_refs(m: &ast::Module) -> Vec<(usize, ImportRef)> {
     out
 }
 
-/// Finds the import declarations of a module with the lexer only (which,
-/// unlike the parser, needs no deep stack).
+/// Finds the import declarations of a module, and the modules named by
+/// `help` and `members` (`help(json)`, `help("json.Json")`), with the lexer
+/// only (which, unlike the parser, needs no deep stack).
 pub(crate) fn scan_imports(text: &str, file: FileId) -> Vec<ImportRef> {
     let toks = lex(text, file).tokens;
     let mut out = Vec::new();
     let mut i = 0;
     let mut depth = 0i32;
     let mut at_start = true;
+    let word = |t: &crate::syntax::lexer::Token| &text[t.lo as usize..t.hi as usize];
     while i < toks.len() {
+        if toks[i].tok == Tok::Ident
+            && matches!(word(&toks[i]), "help" | "members")
+            && toks.get(i + 1).is_some_and(|t| t.tok == Tok::LParen)
+            && let Some(arg) = toks[i + 2..].iter().find(|t| t.tok != Tok::LParen)
+        {
+            let name = match &arg.tok {
+                Tok::Ident => Some(word(arg)),
+                Tok::Str(s) => s.split(['.', '<']).next().map(str::trim),
+                _ => None,
+            };
+            if let Some(name) = name.filter(|n| !n.is_empty()) {
+                out.push(ImportRef::Help(name.to_string(), Span::new(file, arg.lo, arg.hi)));
+            }
+        }
         match &toks[i].tok {
             Tok::LParen | Tok::LBracket | Tok::LBrace => depth += 1,
             Tok::RParen | Tok::RBracket | Tok::RBrace => depth -= 1,
@@ -482,26 +507,23 @@ pub(crate) fn budget_error(stop: Stop, sm: &SourceMap, main_file: u32) -> Error 
     }
 }
 
-/// Help entries and argument counts (by native id) of the natives declared
-/// by the checked modules.
-pub(crate) fn native_info(checked: &crate::check::CheckedProgram, registry: &Registry) -> (Vec<HelpEntry>, Vec<u16>) {
+/// Names and argument counts (by native id) of the natives declared by the
+/// checked modules.
+pub(crate) fn native_info(checked: &crate::check::CheckedProgram, registry: &Registry) -> (Vec<String>, Vec<u16>) {
     let n = registry.natives.len();
-    let mut native_help: Vec<HelpEntry> = (0..n).map(|_| HelpEntry { doc: None, signature: String::new() }).collect();
+    let mut native_names = vec![String::new(); n];
     let mut native_argc = vec![0u16; n];
     for f in &checked.fns {
         if let crate::check::FnKind::Native(n) = f.kind
-            && (n as usize) < native_help.len()
+            && (n as usize) < native_names.len()
         {
-            let params: Vec<(&str, crate::types::TypeId, bool)> =
-                f.params.iter().map(|p| (checked.name(p.name), p.ty, p.default.is_some())).collect();
-            let signature = checked.printer().signature(checked.name(f.name), &params, f.ret);
-            native_help[n as usize] = HelpEntry { doc: f.doc.as_deref().map(String::from), signature };
+            native_names[n as usize] = checked.name(f.name).to_string();
             let reflect = f.generics.iter().filter(|g| checked.params[**g as usize].reflect).count();
             // A native implementing a trait method also receives its impl's dictionary.
             native_argc[n as usize] = (f.dicts.len() + f.params.len() + reflect) as u16;
         }
     }
-    (native_help, native_argc)
+    (native_names, native_argc)
 }
 
 /// Lint facts with spans resolved to (line, column) in the main file.

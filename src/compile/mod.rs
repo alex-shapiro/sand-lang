@@ -27,7 +27,7 @@ pub struct CompileInput<'a> {
     pub checked: &'a CheckedProgram,
     pub sm: &'a SourceMap,
     pub native_lookup: &'a dyn Fn(&str) -> Option<u32>,
-    pub native_help: Vec<HelpEntry>,
+    pub native_names: Vec<String>,
     pub native_argc: Vec<u16>,
     /// Charged one unit per expression compiled, instruction emitted and
     /// node visited by an analysis. Once it is exhausted the compiler skips
@@ -371,9 +371,9 @@ impl<'a> Compiler<'a> {
                 self.inline.insert(id, op);
             }
         }
-        // Help for natives is only given when (new) natives were checked.
-        if !input.native_help.is_empty() {
-            self.prog.native_help = input.native_help.into();
+        // Native names are only given when (new) natives were checked.
+        if !input.native_names.is_empty() {
+            self.prog.native_names = input.native_names.into();
             self.prog.native_argc = input.native_argc.into();
         }
         // The program's files are a prefix of the source map's (those of a
@@ -446,8 +446,6 @@ impl<'a> Compiler<'a> {
                     code: vec![],
                     lines: vec![],
                     captures: vec![],
-                    doc: None,
-                    signature: String::new(),
                     cleanups: Vec::new(),
                     sites: Vec::new(),
                     inlined: Vec::new(),
@@ -478,8 +476,6 @@ impl<'a> Compiler<'a> {
             code,
             lines: vec![0; n],
             captures: vec![],
-            doc: None,
-            signature: String::new(),
             cleanups: Vec::new(),
             sites: Vec::new(),
             inlined: Vec::new(),
@@ -490,15 +486,6 @@ impl<'a> Compiler<'a> {
             }
         }
         *ntests = cp.tests.len();
-        // Summaries are only given when (new) modules were checked.
-        if !cp.modules.is_empty() {
-            self.prog.module_help = cp
-                .modules
-                .iter()
-                .filter(|m| !matches!(m.kind, crate::check::ModKind::Script { .. }))
-                .map(|m| (m.name.clone(), m.summary.clone()))
-                .collect();
-        }
         entry
     }
 }
@@ -781,7 +768,6 @@ impl<'a> Compiler<'a> {
 
     fn compile_fn(&mut self, fid: FnId, proto_idx: u32, body: &'a HFn) {
         let fi = &self.cp.fns[fid as usize];
-        let signature = self.signature_of(fid);
         let mut f = FnState {
             code: Vec::new(),
             lines: Vec::new(),
@@ -826,16 +812,10 @@ impl<'a> Compiler<'a> {
             code,
             lines,
             captures: vec![],
-            doc: fi.doc.as_deref().map(String::from),
-            signature,
             cleanups,
             sites,
             inlined,
         };
-    }
-
-    fn signature_of(&self, fid: FnId) -> String {
-        self.cp.fn_signature(fid)
     }
 
     // ------------------------------------------------------------------
@@ -2464,7 +2444,7 @@ impl<'a> Compiler<'a> {
                 }
             }
             HKind::Lambda(lam) => {
-                let p = self.compile_lambda(f, lam, e.ty);
+                let p = self.compile_lambda(f, lam);
                 self.emit(f, Op::MakeClosure { dst, proto: p });
             }
             HKind::Try { e: inner, kind } => {
@@ -2826,8 +2806,6 @@ impl<'a> Compiler<'a> {
             lines: vec![0; code.len()],
             code,
             captures: vec![],
-            doc: None,
-            signature: format!("fn {name}(...)"),
             cleanups: Vec::new(),
             sites: Vec::new(),
             inlined: Vec::new(),
@@ -3665,7 +3643,7 @@ impl<'a> Compiler<'a> {
     // ------------------------------------------------------------------
     // Lambdas
 
-    fn compile_lambda(&mut self, f: &mut FnState<'a>, lam: &'a HLambda, ty: TypeId) -> u32 {
+    fn compile_lambda(&mut self, f: &mut FnState<'a>, lam: &'a HLambda) -> u32 {
         // Free locals: referenced inside but declared outside the lambda.
         let facts = f.facts.clone();
         let free: &[LocalId] = facts.free.get(&lam.id).map_or(&[], |v| v);
@@ -3710,7 +3688,6 @@ impl<'a> Compiler<'a> {
         }
         self.ret_expr(&mut sub, &lam.body);
         f.too_big |= sub.too_big;
-        let signature = if lam.signature.is_empty() { self.cp.printer().show(ty) } else { lam.signature.clone() };
         let p = self.prog.protos.len() as u32;
         let nregs = sub.max_reg.max(1) as u16;
         let Finished { code, lines, cleanups, sites, inlined } = self.finish(sub);
@@ -3722,8 +3699,6 @@ impl<'a> Compiler<'a> {
             code,
             lines,
             captures,
-            doc: lam.doc.as_deref().map(String::from),
-            signature,
             cleanups,
             sites,
             inlined,

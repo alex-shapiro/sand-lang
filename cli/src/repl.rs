@@ -31,7 +31,9 @@ the input with `;` to hide it). Input continues on `...` lines while brackets,
 strings or comments are open. Tasks spawned by an input keep running, also
 while the REPL waits for input. Ctrl-C interrupts a running input (and cancels
 all tasks), discards a partial input, or at an empty prompt cancels the tasks
-left running; Ctrl-D or :quit exits.
+left running; Ctrl-D or :quit exits. `help()` describes the language's
+functions, types and modules, `help(x)` describes x (a module, type, function,
+variable or any expression) and `members(x)` lists its members.
 
 EDITING (on a terminal):
     Left, Right                    move the cursor
@@ -70,7 +72,7 @@ pub(crate) fn cmd_repl(args: &[String]) -> Result<u8, String> {
     } else {
         Reader::Plain(LineReader::new())
     };
-    println!("sand {} — :help for help, :quit to exit", env!("CARGO_PKG_VERSION"));
+    println!("sand {} — help() for documentation, :help for the REPL's commands, :quit to exit", env!("CARGO_PKG_VERSION"));
     Ok(rt.block_on(repl(&mut session, &screen, reader)))
 }
 

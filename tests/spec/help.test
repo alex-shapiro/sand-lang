@@ -1,0 +1,372 @@
+=== user functions show their signature and doc comment
+/// Doubles a number.
+/// Works for any int.
+fn double(x: int) -> int { x * 2 }
+fn pick<T: Ord>(a: T, b: T, label: str = "max") -> T { a }
+help(double)
+help(pick)
+--- stdout
+fn double(x: int) -> int
+
+Doubles a number.
+Works for any int.
+fn pick<T: Ord>(a: T, b: T, label: str = "max") -> T
+
+=== functions of modules are qualified, imported or not
+help(base64.encode)
+--- stdout
+fn base64.encode(data: bytes) -> str
+
+Encodes `data` with the standard alphabet (`+`, `/`) and `=` padding.
+
+=== modules list their items with the first sentence of their docs
+help(uuid)
+--- stdout
+module uuid
+
+UUIDs (RFC 9562): random (v4) and time-ordered (v7) identifiers, parsing
+and validation. UUIDs are represented as lower-case hyphenated strings.
+
+Functions:
+    fn v4() -> str
+        A random (version 4) UUID.
+    fn v7() -> str
+        A time-ordered (version 7) UUID: a 48-bit Unix millisecond timestamp, a
+        12-bit counter and 62 random bits.
+    fn nil() -> str
+        The nil UUID `00000000-0000-0000-0000-000000000000`.
+    fn parse(s: str) -> Result<str, Error>
+        Parses a UUID in hyphenated, simple (32 hex digits), braced (`{...}`) or
+        URN (`urn:uuid:...`) form; returns the lower-case hyphenated form.
+    fn is_valid(s: str) -> bool
+        True if `s` is a UUID in any form accepted by `parse`.
+    fn version(s: str) -> int?
+        The version number of a UUID (e.g. 4 or 7), or `None` if `s` is not a
+        UUID.
+
+=== a string names a module or an item
+import json
+help("json.parse")
+help("[T].len")
+help("Option<T>.unwrap")
+--- stdout
+fn json.parse(text: str) -> Result<Json, Error>
+
+Parses JSON text. Errors have kind `"parse"` and give the line and
+column. Nesting deeper than 512 arrays/objects is rejected.
+fn [T].len(self) -> int
+
+Number of elements.
+fn Option.unwrap(self) -> T
+
+The payload; panics on `None`.
+
+=== types show their variants, fields, methods and traits
+/// A shape.
+enum Shape {
+    /// A circle.
+    Circle(radius: float)
+    Empty
+
+    /// The area.
+    fn area(self) -> float { 0.0 }
+}
+trait Describe {
+    /// Describes the value.
+    fn describe(self) -> str
+}
+impl Describe for Shape {
+    fn describe(self) -> str { "shape" }
+}
+struct Counter {
+    /// What is counted.
+    name: str
+    var count: int = 0
+}
+help(Shape)
+help(Counter)
+--- stdout
+enum Shape
+
+A shape.
+
+Variants:
+    Circle(radius: float)
+        A circle.
+    Empty
+
+Methods:
+    fn area(self) -> float
+        The area.
+
+Implements: Describe
+struct Counter
+
+Fields:
+    name: str
+        What is counted.
+    var count: int = 0
+
+=== built-in types, traits and type parameters
+help(Set)
+help(Iterator)
+fn f<T: Ord>(x: T) { help(T) }
+f(1)
+--- stdout
+type Set<T>
+
+Hash sets, built with `set([...])`, mutable, shared by reference and
+iterated in insertion order. Elements must be `Hash`.
+
+Methods:
+    fn len(self) -> int
+        Number of elements.
+    fn is_empty(self) -> bool
+        True if there are no elements.
+    fn add(self, x: T) -> bool
+        Adds; true if newly added.
+    fn remove(self, x: T) -> bool
+        Removes; true if it was present.
+    fn contains(self, x: T) -> bool
+        True if `x` is an element.
+    fn to_list(self) -> [T]
+        The elements, in insertion order.
+    fn union(self, other: Set<T>) -> Set<T>
+        The elements of either set.
+    fn intersection(self, other: Set<T>) -> Set<T>
+        The elements of both sets, in the order of `self`.
+    fn difference(self, other: Set<T>) -> Set<T>
+        The elements of `self` that are not in `other`.
+    fn is_subset(self, other: Set<T>) -> bool
+        True if every element is also in `other`.
+    fn copy(self) -> Set<T>
+        A shallow copy.
+    fn clear(self)
+        Removes all elements.
+    fn iter(self) -> Iter<T>
+        A lazy iterator over the elements as they are now (a change of the set
+        meanwhile does not affect it).
+trait Iterator<T>
+
+A source of elements produced one at a time. `for` loops iterate over any
+type that implements it, and `iter()` turns it into an `Iter`, whose lazy
+adapters (`map`, `filter`, ...) and consumers (`to_list`, `sum`, ...) work
+for every iterator.
+
+Methods:
+    fn next(self) -> T?
+        The next element, or `None` once there are no more.
+    fn iter(self) -> Iter<T>
+        A lazy `Iter` over the remaining elements.
+
+Implemented for:
+    Iter<T>
+type parameter T: Ord
+
+=== values stand for their type and are not evaluated
+struct Point {
+    /// Horizontal.
+    x: float
+}
+fn make() -> Point {
+    print("evaluated")
+    Point { x: 1.0 }
+}
+help(make())
+let p = make()
+help(p.x)
+help([1, 2].len)
+help(Some)
+help(p.to_str)
+--- stdout
+make(): Point
+
+struct Point
+
+Fields:
+    x: float
+        Horizontal.
+evaluated
+field Point.x: float
+
+Horizontal.
+fn [T].len(self) -> int
+
+Number of elements.
+variant Option.Some(T)
+
+A value.
+fn to_str(self) -> str
+
+The display form of the value, as `print` and string interpolation show it. Every value has this method.
+
+=== variables show their declaration and doc only
+/// How many retries.
+pub let RETRIES = 3
+var count = 0
+fn f(xs: [int]) { help(xs) }
+help(math.pi)
+help(RETRIES)
+help(count)
+f([1])
+let p = (1, "a")
+help(p)
+--- stdout
+let math.pi: float
+
+The ratio of a circle's circumference to its diameter.
+let RETRIES: int
+
+How many retries.
+var count: int
+xs: [int]
+let p: (int, str)
+
+=== trait methods show the impl's doc, else the trait's
+trait Describe {
+    /// Describes the value.
+    fn describe(self) -> str
+}
+struct Point { x: int }
+impl Describe for Point {
+    /// Describes a point.
+    fn describe(self) -> str { "P\(self.x)" }
+}
+impl Describe for int {
+    fn describe(self) -> str { "i\(self)" }
+}
+help(Point.describe)
+help(int.describe)
+help(Describe.describe)
+--- stdout
+fn Point.describe(self) -> str
+
+Describes a point.
+fn int.describe(self) -> str
+
+Describes the value.
+fn Describe.describe(self) -> str
+
+Describes the value.
+
+=== members of modules, types, values and the scope
+import json
+struct Point {
+    x: float
+    fn norm(self) -> float { self.x }
+}
+let p = Point { x: 1.0 }
+print(members(json))
+print(members(Point))
+print(members(p) == members(Point))
+print(members("regex.Match"))
+print(members(Some(1)).contains("unwrap"))
+fn f(a: int) -> [str] { members() }
+print([f(1).contains("a"), f(1).contains("p"), f(1).contains("print")])
+--- stdout
+["Json", "decode", "encode", "parse", "to_json"]
+["debug", "norm", "to_str", "x"]
+true
+["debug", "end", "start", "text", "to_str"]
+true
+[true, false, false]
+
+=== the overview lists functions, types and modules
+help()
+--- stdout
+help(x) shows the documentation of x: a module, type, trait, function,
+method, field, variant or variable, or the type of any other expression
+(which is not evaluated). A string names an item too: help("json.Json").
+members(x) lists the names that may follow `x.`, and members() those
+in scope.
+
+Functions:
+    error    An `Error` with `message` and `kind`.
+    print    Prints the display form of `x` and a newline to standard output.
+    eprint   Prints the display form of `x` and a newline to standard error.
+    panic    Stops the program with an error message.
+    assert   Panics with `message` unless `cond` is true.
+    todo     Marks unfinished code; panics when reached.
+    exit     Stops the program with an exit code.
+    set      Builds a set from a list.
+    help     Shows the documentation of `x`: a module, type, trait, function,
+             method, field, variant or variable (`help(json)`,
+             `help(str.split)`), or the type of any other expression, which is
+             not evaluated (`help(xs.first())`).
+    members  The names that may follow `x.`: a module's public items, or the
+             variants, fields and methods of a type or of a value's type,
+             sorted.
+
+Types:
+    int, float, bool, str, bytes, duration, Range, [T], [K: V], Set<T>,
+    Option<T>, Result<T, E>, Error, Task<T>, Channel<T>, Iter<T>
+
+Traits:
+    Close, Iterator<T>
+
+Modules (help(name) describes one):
+    base64      Base64 encoding (RFC 4648) with the standard and URL-safe
+                alphabets.
+    crypto      Cryptographic hash functions and message authentication.
+    env         The script's environment: variables and arguments.
+    fs          Files and directories.
+    http        An HTTP/1.1 client and a minimal HTTP/1.1 server.
+    io          Reading and writing bytes: the `Reader` and `Writer` traits,
+                which files, connections, HTTP bodies and the standard streams
+                implement, and the standard streams themselves.
+    json        JSON (RFC 8259): parsing, printing, and conversion between JSON
+                and typed Sand values.
+    log         Leveled logging to standard error.
+    math        Mathematical constants and functions on `float` and `int`.
+    net         TCP networking: listening sockets and connections.
+    random      Pseudo-random numbers (xoshiro256**).
+    regex       Regular expressions with the syntax of Rust's `regex` crate:
+                matching takes linear time and there are no backreferences or
+                look-around.
+    statistics  Descriptive statistics on lists of floats.
+    task        Tasks, timers and channels.
+    test        Assertions and property-based testing for `test` blocks.
+    time        Wall-clock dates and times (UTC, proleptic Gregorian calendar)
+                and the monotonic clock.
+    uri         URIs (RFC 3986): parsing, recomposition, reference resolution,
+                percent encoding and query strings.
+    uuid        UUIDs (RFC 9562): random (v4) and time-ordered (v7) identifiers,
+                parsing and validation.
+
+=== a user-defined help shadows the prelude's
+fn help(x: int) -> int { x + 1 }
+print(help(1))
+--- stdout
+2
+
+=== unknown names get suggestions
+help(jsn)
+--- error
+1: undefined name `jsn`; did you mean `json`?
+
+=== unknown members get suggestions
+help(str.spilt)
+--- error
+1: no member `spilt` on type str; did you mean `split`?
+
+=== private items are not shown
+import "./lib.sand"
+help(lib.secret)
+--- file lib.sand
+fn secret() {}
+--- error
+2: `secret` is private
+
+=== help takes one positional argument and cannot be a value
+help(1, 2)
+members(x: 1)
+let h = help
+--- error
+1: takes at most one argument
+2: takes no named arguments
+3: `help` can only be called
+
+=== a string must be a name
+help("json parse")
+--- error
+1: take a name, such as "json" or "json.Json"

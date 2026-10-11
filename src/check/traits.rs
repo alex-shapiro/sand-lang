@@ -264,7 +264,7 @@ impl Checker<'_> {
     }
 
     /// The traits a type parameter is known to implement (with supertraits).
-    fn bound_traits(&mut self, p: ParamId) -> Vec<TraitRef> {
+    pub(crate) fn bound_traits(&mut self, p: ParamId) -> Vec<TraitRef> {
         let traits = self.params[p as usize].traits.clone();
         let pt = self.param_ty(p);
         self.with_supers(pt, traits)
@@ -811,17 +811,7 @@ impl Checker<'_> {
     pub(crate) fn trait_method_value(&mut self, tr: TraitRef, slot: u32, self_ty: TypeId, span: Span) -> HExpr {
         let sig = self.traits[tr.trait_id as usize].methods[slot as usize].sig;
         let pre = self.trait_pre(tr, self_ty);
-        let mut h = self.wrapper_value(sig, &pre, span);
-        // Prefer the doc comment of the impl's method when the impl is known.
-        let rt = self.resolve(self_ty);
-        if let Some(key) = impl_key(&self.arena, rt)
-            && let Some([imp]) = self.impls_by.get(&(tr.trait_id, key.0, key.1)).map(|v| &v[..])
-            && let Some(doc) = self.fns[self.impls[*imp as usize].slots[slot as usize] as usize].doc.clone()
-            && let HKind::Lambda(l) = &mut h.kind
-        {
-            l.doc = Some(doc);
-        }
-        h
+        self.wrapper_value(sig, &pre, span)
     }
 
     /// A function value for `f` that supplies its dictionaries: a closure
@@ -847,9 +837,9 @@ impl Checker<'_> {
             FnKind::TraitMethod(trait_id, slot) => HKind::CallTrait { trait_id, slot, args, impl_id: None },
             _ => HKind::Call { func: f, args },
         };
-        let (name, doc) = (self.name(fi.name).to_string(), fi.doc.clone());
+        let name = self.name(fi.name).to_string();
         let body = mk(kind, inst.ret, span);
-        let lam = HLambda { id, name, params, body, doc, signature: self.fn_signature(f), self_local: None };
+        let lam = HLambda { id, name, params, body, self_local: None };
         let fty = self.fn_ty(&inst.params, inst.ret);
         mk(HKind::Lambda(Box::new(lam)), fty, span)
     }

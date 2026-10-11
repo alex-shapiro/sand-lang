@@ -72,7 +72,8 @@ literals.
 //! documentation comment for the enclosing module (only before the first item)
 ```
 
-Doc comments are available at runtime through the `help` module.
+`help` shows doc comments (§12.15). A doc comment on an `extend` block
+documents a built-in type.
 
 ### 2.3 Line termination
 
@@ -1285,6 +1286,8 @@ Always in scope without import.
 | `exit(code: int) -> never`                          | stop the run (§10.4)                  |
 | `error(message: str, kind: str = "error") -> Error` | construct an `Error`                  |
 | `set<T: Hash>(items: [T] = []) -> Set<T>`           | build a set                           |
+| `help(x)`, `help()`                                 | print documentation (§12.15)          |
+| `members(x) -> [str]`, `members() -> [str]`         | list member names (§12.15)            |
 
 ### 12.2 Universal methods
 
@@ -1547,6 +1550,40 @@ resource again does nothing; its other operations fail with kind
 `"closed"` once it is closed. A struct holding a resource should implement
 `Close` by closing it (lint `resource-field`, §17.2).
 
+### 12.15 `help` and `members`
+
+The checker evaluates calls of `help` and `members`, whose argument may
+be what no other function takes:
+
+- a module, imported or not (`help(json)`);
+- a type, trait or type parameter (`help(str)`, `help([int])`,
+  `help(json.Json)`, `help(Close)`, `help(T)`);
+- a function, method, trait method, field, variant or variable
+  (`help(print)`, `help(str.split)`, `help(xs.map)`, `help(p.x)`,
+  `help(Some)`, `help(math.pi)`, `help(xs)`);
+- a string literal naming one of these (`help("json.Json.get")`); its
+  first segment may be written as a type (`"[T].map"`, `"Set<T>.add"`,
+  `"int?.unwrap"`);
+- any other expression, which stands for its type and is not evaluated
+  (`help(f())`, `help([1, 2])`).
+
+`help(x)` prints the documentation of `x` to standard output, as `print`
+would: its declaration and doc comment (for a variable, its declared or
+inferred type), and for a module its items, for a type its variants,
+fields, methods and the traits it implements, for a trait its methods and
+implementing types, for any other expression its type and that type's
+documentation. Lists of items show the first sentence of each
+doc comment. `help()` prints an overview of the prelude and the modules.
+
+`members(x)` returns the names that may follow `x.`, sorted: a module's
+public items, or the variants, fields and methods (including those of
+visible trait impls, `to_str` and `debug`) of a type or of an
+expression's type. `members()` returns the names in scope, excluding the
+prelude's.
+
+Neither can be used as a function value. Defining `help` or `members`
+shadows them as usual.
+
 ---
 
 ## 13. Standard library
@@ -1658,7 +1695,7 @@ its place, does not affect it (a removed file stays readable and writable
 until closed, and in a memory file system counts against its capacity until
 then). It counts against `max_open_resources` until closed or collected.
 
-`File` implements `io.Reader`, `io.Writer` (§13.6) and `Close`. Reads and
+`File` implements `io.Reader`, `io.Writer` (§13.5) and `Close`. Reads and
 writes move its position (`Append` writes go to the end); reads are
 buffered (16 KiB, counted against `max_memory`), writes are not. `read(max)`
 returns at most 1 MiB; `read_line` fails with kind `"limit"` (dropping what
@@ -1680,16 +1717,9 @@ names are case sensitive everywhere, and a write that would exceed its
 capacity fails with kind `"limit"`. Operations complete at once rather than
 off the VM thread.
 
-### 13.4 `help`
+### 13.4 `http`
 
-`doc<T>(f: T) -> str` (doc comment of a function value, `""` if none),
-`signature<T>(f: T) -> str` (e.g. `fn(text: str) -> Result<Json, Error>`),
-`module(name: str) -> str?` (a standard or native module's public items,
-with signatures and first doc lines), `modules() -> [str]`.
-
-### 13.5 `http`
-
-`http` and `net` (§13.11) need operating-system access: without the `os`
+`http` and `net` (§13.10) need operating-system access: without the `os`
 feature (§16.1) they do not exist, and importing them is a compile error
 saying so.
 
@@ -1800,9 +1830,9 @@ cookies. A redirect fails with kind `"http"`, since the browser hides its
 target from the policy. `timeout` covers the whole exchange, and every body
 is read whole, so `max_http_body` also applies to `open`.
 
-### 13.6 `io`
+### 13.5 `io`
 
-Files (§13.3), connections (§13.11), HTTP bodies (§13.5) and the standard
+Files (§13.3), connections (§13.10), HTTP bodies (§13.4) and the standard
 streams implement two traits:
 
 ```
@@ -1839,13 +1869,13 @@ run, before writing to standard error, before a permission prompt, whenever
 every task is waiting, and, on a terminal, before reading standard input.
 Standard error is not buffered.
 
-### 13.7 `env`
+### 13.6 `env`
 
 `get(name: str) -> str?` (capability `Env(name)`; a denial yields `None`),
 `args() -> [str]` (arguments the host passed to the script; no capability),
 `vars() -> [str: str]` (capability `Env("*")`; a denial yields an empty map).
 
-### 13.8 `json`
+### 13.7 `json`
 
 ```
 pub enum Json { Null, Bool(bool), Num(float), Str(str), Arr([Json]), Obj([str: Json]) }
@@ -1880,14 +1910,14 @@ optional; otherwise decoding fails with kind `"parse"` and a message naming
 the path (e.g. `$.items[2].name: expected str`). Parsing is limited to a
 nesting depth of 512.
 
-### 13.9 `log`
+### 13.8 `log`
 
 `debug(msg: str)`, `info(msg: str)`, `warn(msg: str)`, `error(msg: str)`;
 each accepts `fields: [str: str] = [:]`. `set_level(level: str)` with `"debug"`,
 `"info"` (default), `"warn"`, `"error"`, `"off"`. Records go to the host log sink
 (default: stderr as `LEVEL message key=value ...`, needing capability `Stderr`).
 
-### 13.10 `math`
+### 13.9 `math`
 
 Constants (`pub let` values): `pi`, `e`, `tau`, `inf`, `nan`. Functions on
 `float`: `cbrt`, `exp`, `ln`, `log2`, `log10`, `log(x, base)`, `sin`,
@@ -1898,7 +1928,7 @@ Integer helpers: `gcd(a: int, b: int) -> int`, `lcm`, `isqrt(n: int) -> int`.
 Rounding, `abs`, `min`, `max`, `clamp`, `sqrt` and `pow` are methods of
 `float` and `int` (§12.3, §12.4).
 
-### 13.11 `net`
+### 13.10 `net`
 
 ```
 pub native fn listen(addr: str) -> Result<Listener>    // NetListen(addr)
@@ -1910,7 +1940,7 @@ conn.peer_addr() -> str
 ```
 
 `Listener` implements `Close`; `Conn` implements `io.Reader`, `io.Writer`
-(§13.6) and `Close`. A connection's `read` returns at most what its 8 KiB
+(§13.5) and `Close`. A connection's `read` returns at most what its 8 KiB
 buffer holds; once the peer has finished sending, `read` keeps returning
 empty bytes, `read_line` `None`, and `read_all` what was left. Closing a
 listener or connection makes its pending and later operations fail with
@@ -1930,7 +1960,7 @@ the bundled web PKI roots plus any the host added
 are errors (kind `"invalid"` for certificate problems), never panics; the
 same holds for `https` requests.
 
-### 13.12 `random`
+### 13.11 `random`
 
 Engine-local PRNG (xoshiro256\*\*), seeded from host entropy unless the host
 sets a seed. `int(lo: int, hi: int) -> int` (uniform in `lo..hi`; panics if
@@ -1940,7 +1970,7 @@ empty), `float() -> float` (`[0, 1)`), `bool() -> bool`,
 stdev: float = 1.0) -> float`. `random.rng(seed: int) -> Rng` returns a
 generator independent of the engine's, with the same methods except `seed`.
 
-### 13.13 `regex`
+### 13.12 `regex`
 
 ```
 pub native fn new(pattern: str) -> Result<Regex>
@@ -1969,7 +1999,7 @@ automaton is limited to a few MiB (larger patterns, such as `\w{150}`, fail
 with kind `"limit"`). A compiled regex counts against `max_memory` with its
 automata and its search cache, which grows with use up to a few MiB.
 
-### 13.14 `statistics`
+### 13.13 `statistics`
 
 On `[float]`: `mean`, `median`, `variance` (sample), `stdev` (sample),
 `pvariance`, `pstdev`, `min`, `max`, `sum`, `mode -> float?` (most common, first
@@ -1979,7 +2009,7 @@ float)?` (slope, intercept). All except `sum` return `float?` and are `None` for
 empty input (variance/stdev need at least two values). Also `mean_int([int])
 -> float?`.
 
-### 13.15 `test`
+### 13.14 `test`
 
 `assert_eq<T: Eq>(actual: T, expected: T, msg: str = "")`, `assert_ne`,
 `assert_true(c: bool, msg: str = "")`, `assert_false`,
@@ -1992,7 +2022,7 @@ with the failing input's debug form). The fixed default seed makes property
 tests reproducible; pass another `seed` to explore other inputs. `assert_eq`
 fails with `assertion failed: left == right\n  left: <debug>\n right: <debug>`.
 
-### 13.16 `time`
+### 13.15 `time`
 
 ```
 pub struct DateTime { unix_nanos: int }   // UTC instant
@@ -2013,7 +2043,7 @@ non-zero), `format(fmt: str) -> str` (strftime subset: `%Y %m %d %H %M %S %f %j
 %a %A %b %B %y %e %Z %z %s %%`, plus `%3f`/`%6f`/`%9f`). `Instant`: `elapsed() ->
 duration`, `since(earlier: Instant) -> duration`. To sleep, use `task.sleep(d)`.
 
-### 13.16a `task`
+### 13.16 `task`
 
 See §11.3.
 
@@ -2271,7 +2301,7 @@ Configurable per engine:
 | `max_wall_time`      | unlimited  | run fails: `time limit exceeded` (covers compiling and running, from the start of compilation, excluding waits for prompt answers)                             |
 | `max_call_depth`     | 10,000     | panic: `stack overflow`                                                                                                                                        |
 | `max_tasks`          | 10,000     | `spawn` panics: `task limit exceeded`                                                                                                                          |
-| `max_open_resources` | 1,024      | opening files, connect/listen/accept and HTTP requests fail with kind `"limit"` (after a collection, §10.8; pending operations' sockets count, §13.11)         |
+| `max_open_resources` | 1,024      | opening files, connect/listen/accept and HTTP requests fail with kind `"limit"` (after a collection, §10.8; pending operations' sockets count, §13.10)         |
 | `max_output_bytes`   | unlimited  | writes fail: `output limit exceeded`                                                                                                                           |
 | `max_http_body`      | 64 MiB     | HTTP read fails with kind `"limit"`                                                                                                                            |
 | `max_source_bytes`   | 16 MiB     | compile error: `source too large` (the main file and all imported scripts together; the standard library is not counted)                                       |
@@ -2605,8 +2635,9 @@ cannot be read or has errors):
 `unused-function`: public items are `pub` top-level functions and all
 methods of `pub` types. A private function is used only if reachable from
 top-level code, a `test` block or a public item, through calls (including
-method calls and pipes), function values and default arguments; one
-referenced only by itself or by unused functions is reported.
+method calls and pipes), function values, default arguments and the
+arguments of `help` and `members`; one referenced only by itself or by
+unused functions is reported.
 
 `shadowed-variable`: the earlier binding may be a parameter, a `let`/`var`
 (including destructuring), a loop variable, or a `match`/`if let`/`while

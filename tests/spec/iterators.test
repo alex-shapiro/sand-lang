@@ -317,16 +317,15 @@ print([1, 2].iter().step_by(0).to_list())
 step must be positive, found 0
 
 === help on iterator items
-import help
-print(help.doc(Iter.from_fn))
-print(help.signature(Iter.from_fn))
-print(help.doc(Iter.map))
-print(help.signature(Iter.map))
+help(Iter.from_fn)
+help([1].iter().map)
 --- stdout
+fn Iter.from_fn(f: fn() -> T?) -> Iter<T>
+
 An iterator over the results of `f`, until it returns `None`.
-fn from_fn(f: fn() -> T?) -> Iter<T>
+fn Iter.map<U>(self, f: fn(T) -> U) -> Iter<U>
+
 `f` applied to each element.
-fn map(self, f: fn(T) -> U) -> Iter<U>
 
 === fused pipelines match unfused ones
 // A pipeline written in one expression is fused into one loop; bound to a

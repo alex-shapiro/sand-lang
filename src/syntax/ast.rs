@@ -154,6 +154,7 @@ pub struct ExtendDecl {
     pub generics: Vec<GenericParam>,
     pub target: TypeExpr,
     pub methods: Vec<FnDecl>,
+    pub doc: Option<String>,
 }
 
 /// `trait Name<T>: Super + Eq { fn required(self) -> T  fn provided(self) { ... } }`

@@ -7,7 +7,6 @@ mod base64;
 mod core;
 mod crypto;
 mod fs;
-mod help;
 #[cfg(feature = "os")]
 mod http;
 #[cfg(any(feature = "os", web))]
@@ -49,7 +48,6 @@ pub(crate) const STD_MODULES: &[&str] = &[
     "crypto",
     "env",
     "fs",
-    "help",
     "http",
     "io",
     "json",
@@ -92,7 +90,6 @@ pub(crate) fn register(r: &mut Registry) {
     base64::register(r);
     crypto::register(r);
     fs::register(r);
-    help::register(r);
     #[cfg(feature = "os")]
     http::register(r);
     #[cfg(all(web, not(feature = "os")))]

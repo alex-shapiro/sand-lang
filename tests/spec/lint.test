@@ -34,6 +34,23 @@ print(used())
 --- lint
 1: unused-function
 
+=== functions named by help and members are used
+fn documented() {}
+struct Point {
+    x: int
+    fn norm(self) -> int { self.x }
+}
+fn listed() {}
+fn only_in_unused() {}
+fn unused() { help(only_in_unused) }
+help(documented)
+help(Point.norm)
+print(members(listed))
+print(Point { x: 1 }.x)
+--- lint
+7: unused-function
+8: unused-function
+
 === unnecessary var
 var x = 1
 var y = 1

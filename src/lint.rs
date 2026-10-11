@@ -140,7 +140,7 @@ fn run_lints(src: &str, facts: &ResolvedFacts, budget: &CompileBudget) -> Result
 
 /// The edit distance between `a` and `b` (insertions, deletions,
 /// substitutions and transpositions of adjacent characters).
-fn edit_distance(a: &str, b: &str) -> usize {
+pub(crate) fn edit_distance(a: &str, b: &str) -> usize {
     let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
     // Rows i - 2, i - 1 and i of the distances between prefixes.
     let mut rows = [vec![0; b.len() + 1], vec![0; b.len() + 1], (0..=b.len()).collect::<Vec<_>>()];
@@ -904,7 +904,7 @@ pub(crate) fn unused_functions(checked: &CheckedProgram) -> Vec<FnId> {
             return true;
         }
         match f.kind {
-            FnKind::Init | FnKind::Test(_) | FnKind::Native(_) | FnKind::TraitMethod(..) => true,
+            FnKind::Init | FnKind::Test(_) | FnKind::Native(_) | FnKind::TraitMethod(..) | FnKind::Intrinsic(_) => true,
             FnKind::DefaultHelper => false,
             FnKind::Script => match f.owner {
                 // Methods are public exactly when their type is.
@@ -924,7 +924,7 @@ pub(crate) fn unused_functions(checked: &CheckedProgram) -> Vec<FnId> {
     }
     while let Some(id) = stack.pop() {
         let Some(body) = checked.bodies.get(id) else { continue };
-        let mut refs: Vec<FnId> = Vec::new();
+        let mut refs: Vec<FnId> = body.doc_refs.clone();
         crate::compile::walk(&body.body, &mut |e| match &e.kind {
             HKind::FnValue(f) => refs.push(*f),
             HKind::Call { func, args } => {

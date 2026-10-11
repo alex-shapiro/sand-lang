@@ -446,7 +446,6 @@ print(collect(Counter { i: 0, n: 4 }))
 [1, 2, 3, 4]
 
 === function values of bounded generic functions and trait methods
-import help
 trait Describe {
     /// Describes the value.
     fn describe(self) -> str
@@ -468,11 +467,7 @@ print(ps.map(Describe.describe))
 print([1, 2].map(Describe.describe))
 let f = describe_one
 print(f(3))
-print(help.doc(describe_one))
-print(help.signature(describe_one))
-print(help.doc(Point.describe))
-print(help.doc(int.describe))
-print(help.signature(Describe.describe))
+help(describe_one)
 print(Point { x: 5 } |> describe_one)
 --- stdout
 ["P1", "P2"]
@@ -480,11 +475,9 @@ print(Point { x: 5 } |> describe_one)
 ["P1", "P2"]
 ["i1", "i2"]
 i3
+fn describe_one<T: Describe>(x: T) -> str
+
 Describes one value.
-fn describe_one(x: T) -> str
-Describes a point.
-Describes the value.
-fn describe(self) -> str
 P5
 
 === lambdas, local functions and spawn capture dictionaries

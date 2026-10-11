@@ -14,8 +14,8 @@ pub(crate) enum Ns {
 /// The arguments of a call, split into positional and named ones.
 #[derive(Default)]
 pub(crate) struct CallArgs<'e> {
-    positional: Vec<&'e Expr>,
-    named: Vec<(&'e ast::Ident, &'e Expr)>,
+    pub(crate) positional: Vec<&'e Expr>,
+    pub(crate) named: Vec<(&'e ast::Ident, &'e Expr)>,
 }
 
 impl<'e> CallArgs<'e> {
@@ -290,6 +290,10 @@ impl Checker<'_> {
         mutable: bool,
         is_pub: bool,
     ) -> Vec<HExpr> {
+        let doc = match &s.kind {
+            StmtKind::Let { doc, .. } => doc.as_deref().map(Arc::from),
+            _ => None,
+        };
         let annotated = ty.map(|t| self.resolve_annotation(t));
         let init = match annotated {
             Some(t) => self.check_expr(value, t),
@@ -313,7 +317,7 @@ impl Checker<'_> {
         {
             let g = self.globals.len() as GlobalId;
             let name = self.sym(&id.name);
-            self.globals.push(GlobalInfo { name, module: self.cur_mod, ty: vty, mutable, is_pub, span: id.span });
+            self.globals.push(GlobalInfo { name, module: self.cur_mod, ty: vty, mutable, is_pub, span: id.span, doc });
             self.define(name, Def::Global(g), is_pub, id.span);
             self.global_fact(g);
             return vec![mk(
@@ -356,7 +360,7 @@ impl Checker<'_> {
                 let lty = self.fs.data[l as usize].ty;
                 let g = self.globals.len() as GlobalId;
                 let span = self.fs.locals[l as usize].span;
-                self.globals.push(GlobalInfo { name, module: self.cur_mod, ty: lty, mutable, is_pub, span });
+                self.globals.push(GlobalInfo { name, module: self.cur_mod, ty: lty, mutable, is_pub, span, doc: doc.clone() });
                 self.define(name, Def::Global(g), is_pub, span);
                 self.fs.data[l as usize].used = true;
                 self.global_fact(g);
@@ -532,7 +536,7 @@ impl Checker<'_> {
         }
     }
 
-    fn mark_global_used(&mut self, g: GlobalId) {
+    pub(crate) fn mark_global_used(&mut self, g: GlobalId) {
         if let Some(&i) = self.global_facts.get(&g) {
             self.lint.locals[i].used = true;
         }
@@ -597,28 +601,13 @@ impl Checker<'_> {
             self.pop_scope();
             self.fs.ctx.pop();
             self.fs.generics = saved_generics;
-            let names: Vec<&str> = f.params.iter().map(|p| p.name.name.as_str()).collect();
-            let signature = self.lambda_signature(&f.name.name, &names, &ptys, ret);
             lambdas.push(mk(
-                HKind::Lambda(Box::new(HLambda {
-                    id,
-                    name: f.name.name.clone(),
-                    params,
-                    body,
-                    doc: f.doc.as_deref().map(Arc::from),
-                    signature,
-                    self_local: Some(self_local),
-                })),
+                HKind::Lambda(Box::new(HLambda { id, name: f.name.name.clone(), params, body, self_local: Some(self_local) })),
                 fty,
                 f.span,
             ));
         }
         mk(HKind::LocalFns { locals, lambdas }, TypeId::UNIT, group[0].span)
-    }
-
-    fn lambda_signature(&self, name: &str, names: &[&str], ptys: &[TypeId], ret: TypeId) -> String {
-        let ps: Vec<(&str, TypeId, bool)> = names.iter().zip(ptys).map(|(&n, &t)| (n, t, false)).collect();
-        self.printer().signature(name, &ps, ret)
     }
 
     // ------------------------------------------------------------------
@@ -878,15 +867,7 @@ impl Checker<'_> {
                 self.fs.ctx.pop();
                 let lam_ty = self.fn_ty(&[], ret);
                 let lam = mk(
-                    HKind::Lambda(Box::new(HLambda {
-                        id,
-                        name: "<spawn>".into(),
-                        params: vec![],
-                        body,
-                        doc: None,
-                        signature: "fn()".into(),
-                        self_local: None,
-                    })),
+                    HKind::Lambda(Box::new(HLambda { id, name: "<spawn>".into(), params: vec![], body, self_local: None })),
                     lam_ty,
                     span,
                 );
@@ -988,6 +969,14 @@ impl Checker<'_> {
     /// The value of a resolved definition used in expression position.
     fn def_value(&mut self, def: Def, name: &str, hint: Option<TypeId>, span: Span) -> HExpr {
         match def {
+            Def::Fn(f) if let FnKind::Intrinsic(i) = self.fns[f as usize].kind => {
+                let msg = match i {
+                    Intrinsic::Help => "`help` can only be called: `help()` gives an overview, `help(x)` describes x",
+                    Intrinsic::Members => "`members` can only be called: `members(x)` lists the members of x",
+                };
+                self.error(span, msg);
+                err(span)
+            }
             Def::Fn(f) => self.fn_value(f, span),
             Def::Global(g) => {
                 self.mark_global_used(g);
@@ -1524,7 +1513,12 @@ impl Checker<'_> {
     fn check_call(&mut self, callee: &Expr, args: &CallArgs, span: Span) -> HExpr {
         match &callee.kind {
             ExprKind::Ident(id) if self.find_local(&id.name).is_none() => match self.lookup_global(&id.name) {
-                Some(Def::Fn(f)) => return self.call_fn(f, None, args, span),
+                Some(Def::Fn(f)) => {
+                    if let FnKind::Intrinsic(i) = self.fns[f as usize].kind {
+                        return self.check_intrinsic(i, args, span);
+                    }
+                    return self.call_fn(f, None, args, span);
+                }
                 Some(Def::Variant(d, i)) => return self.call_variant(d, i, args, span),
                 Some(Def::Type(_)) => {
                     self.error(callee.span, format!("`{}` is a type; use `{} {{ ... }}` to construct it", id.name, id.name));
@@ -2560,19 +2554,7 @@ impl Checker<'_> {
             b
         };
         let fty = self.fn_ty(&ptys, ret);
-        mk(
-            HKind::Lambda(Box::new(HLambda {
-                id,
-                name: "<lambda>".into(),
-                params: locals,
-                body: body_h,
-                doc: None,
-                signature: String::new(),
-                self_local: None,
-            })),
-            fty,
-            span,
-        )
+        mk(HKind::Lambda(Box::new(HLambda { id, name: "<lambda>".into(), params: locals, body: body_h, self_local: None })), fty, span)
     }
 }
 

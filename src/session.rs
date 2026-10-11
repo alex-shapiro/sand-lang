@@ -410,10 +410,7 @@ impl Session {
         checker.begin_session(vec![module], session).map_err(|ds| Error::Compile(ds.iter().map(|d| graph.sm.resolve(d)).collect()))?;
         let checker = checker.detach();
         // The standard library's program; its entry initializes the prelude and `task`.
-        let mut prog = snapshot.program.clone();
-        // Summaries of every module for `help.module` (the session checks
-        // only those it imports).
-        prog.module_help = registry.snapshot()?.program.module_help.clone();
+        let prog = snapshot.program.clone();
         let pending = Some(prog.entry);
         let mut vm = self.engine.new_vm(Arc::new(prog), self.cwd.clone(), false);
         vm.session = true;
@@ -497,11 +494,10 @@ impl Session {
             let std_inits = new_std.iter().map(|&id| snapshot.mods[id as usize].init);
             let inits = (first..first + added).chain([session as usize]).map(|m| checker.mods[m].init);
             let inits: Vec<FnId> = std_inits.chain(inits).flatten().collect();
-            // No `help` summaries: the program has the whole library's.
-            let cp = checker.take_checked(false);
-            let (native_help, native_argc) = if natives { native_info(&cp, registry) } else { (Vec::new(), Vec::new()) };
+            let cp = checker.take_checked();
+            let (native_names, native_argc) = if natives { native_info(&cp, registry) } else { (Vec::new(), Vec::new()) };
             let mut compiler = compiler.clone();
-            let input = CompileInput { checked: &cp, sm, native_lookup: &lookup, native_help, native_argc, budget: &budget };
+            let input = CompileInput { checked: &cp, sm, native_lookup: &lookup, native_names, native_argc, budget: &budget };
             let entry = compile_more(input, Arc::make_mut(prog), &mut compiler, &inits);
             if let Some(stop) = budget.stopped() {
                 return Err(budget_error(stop, sm, file));

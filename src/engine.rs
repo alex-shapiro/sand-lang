@@ -585,8 +585,7 @@ impl Registry {
 
     /// A snapshot holding the standard modules `names` (and the core): the
     /// core extended with them, made once per set of names, or the full
-    /// snapshot (if made already, after `MAX_PARTIAL_SNAPSHOTS` sets, or for
-    /// a program using `help`, which describes every module).
+    /// snapshot (if made already, or after `MAX_PARTIAL_SNAPSHOTS` sets).
     pub(crate) fn extended(&self, names: &[&str]) -> Result<Arc<Snapshot>, Error> {
         if let Some(full) = self.ready() {
             return Ok(full);
@@ -598,7 +597,7 @@ impl Registry {
         if let Some(s) = partial.get(&key) {
             return Ok(s.clone());
         }
-        if key.iter().any(|n| n == "help") || partial.len() >= MAX_PARTIAL_SNAPSHOTS {
+        if partial.len() >= MAX_PARTIAL_SNAPSHOTS {
             drop(partial);
             return self.snapshot();
         }
@@ -1103,8 +1102,9 @@ impl Engine {
             }
             let imp = imports[pos].clone();
             stack.push((mi, imports, pos + 1));
+            let optional = matches!(imp, ImportRef::Help(..));
             match imp {
-                ImportRef::Name(name, span) => {
+                ImportRef::Name(name, span) | ImportRef::Help(name, span) => {
                     let registered = self.registry.sources.get(name.as_str()).filter(|_| name != "prelude");
                     if let Some(id) = d.snap.module(&name).filter(|_| name != "prelude") {
                         g.use_std(d.snap, id);
@@ -1127,6 +1127,8 @@ impl Engine {
                         g.modules[mi].imports.push((span, Target::Loaded(idx)));
                         path_stack.push(key);
                         stack.push((idx, imports, 0));
+                    } else if optional {
+                        continue;
                     } else if crate::stdlib::OS_MODULES.contains(&name.as_str()) {
                         errors.push(Diag::error(
                             span,
@@ -1278,13 +1280,13 @@ fn compile_program(
     if facts {
         checker.lint.main_imports = checker.main_imports();
     }
-    // Only host modules declare natives (and have summaries for `help`).
+    // Only host modules declare natives.
     let host = g.has_natives(&order);
-    let cp = checker.take_checked(host);
+    let cp = checker.take_checked();
     let facts = facts.then(|| ResolvedFacts::of(&cp, sm, main_file));
-    let (native_help, native_argc) = if host { native_info(&cp, registry) } else { (Vec::new(), Vec::new()) };
+    let (native_names, native_argc) = if host { native_info(&cp, registry) } else { (Vec::new(), Vec::new()) };
     let mut program = spare.unwrap_or_else(|| snap.program.clone());
-    let input = CompileInput { checked: &cp, sm, native_lookup: &lookup, native_help, native_argc, budget };
+    let input = CompileInput { checked: &cp, sm, native_lookup: &lookup, native_names, native_argc, budget };
     let entry = compile_more(input, &mut program, &mut snap.compiler.clone(), &inits);
     if let Some(stop) = budget.stopped() {
         return Err(budget_error(stop, sm, main_file));
