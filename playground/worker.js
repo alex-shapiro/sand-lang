@@ -13,10 +13,10 @@
 //       -> {type: "done", id, result, written, policyErrors?}
 //   {type: "input", id, source}             evaluate an input in the session
 //       -> {type: "evaluated", id, result, written}
-//   {type: "check", id, sandbox}            type check and lint the program
-//       -> {type: "checked", id, check, lint, policyErrors}
+//   {type: "check", id, sandbox}            type check and lint the program and policy
+//       -> {type: "checked", id, check, lint, policyErrors, policyWarnings}
 //   {type: "lint", id, sandbox}             -> {type: "linted", id, lint, error}
-//   {type: "format", id, source}            -> {type: "formatted", id, text | error}
+//   {type: "format", id, source, policy?}   -> {type: "formatted", id, text | error}
 //   {type: "answer", promptId, answer}      the answer to a permission prompt
 // Events (no id):
 //   {type: "ready"} | {type: "failed", message}
@@ -24,7 +24,7 @@
 //   {type: "prompt", promptId, request}
 //   {type: "ended", exitCode}               a task called `exit`
 
-import { initSync, Engine, format } from "./pkg/sandlang_wasm.js";
+import { initSync, Engine, format, formatPolicy, lintPolicy } from "./pkg/sandlang_wasm.js";
 import { engineOptions, program } from "./sandbox.js";
 
 const pendingPrompts = new Map();
@@ -67,7 +67,8 @@ async function handle(message) {
       return lint(id, message.sandbox);
     case "format":
       try {
-        self.postMessage({ type: "formatted", id, text: format(message.source) });
+        const text = message.policy ? formatPolicy(message.source) : format(message.source);
+        self.postMessage({ type: "formatted", id, text });
       } catch (e) {
         self.postMessage({ type: "formatted", id, error: String(e?.message ?? e) });
       }
@@ -170,7 +171,8 @@ function check(id, sandbox) {
   try {
     const name = program(sandbox);
     const result = engine.check(sandbox.files[name] ?? "", name);
-    self.postMessage({ type: "checked", id, check: result, lint: result.lint, policyErrors: [] });
+    const policyWarnings = lintPolicy(sandbox.policy ?? "");
+    self.postMessage({ type: "checked", id, check: result, lint: result.lint, policyErrors: [], policyWarnings });
   } finally {
     engine.free();
   }

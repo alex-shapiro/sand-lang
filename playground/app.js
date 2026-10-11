@@ -113,6 +113,7 @@ class SandboxView {
     this.tab = { kind: "file", name: program(model) };
     this.diagnostics = {};
     this.policyErrors = [];
+    this.policyWarnings = [];
     this.running = null;
     this.worker = null;
     this.session = false;
@@ -379,7 +380,9 @@ class SandboxView {
   }
 
   policyDiagnostics() {
-    return this.policyErrors.map((e) => ({ line: e.line, column: 1, width: 1000, severity: "error", message: e.message }));
+    const errors = this.policyErrors.map((e) => ({ line: e.line, column: e.column, width: 1000, severity: "error", message: e.message }));
+    const warnings = this.policyWarnings.map((w) => ({ line: w.line, column: w.column, width: 1000, severity: "warning", message: `${w.message} [${w.code}]` }));
+    return [...errors, ...warnings];
   }
 
   showDiagnostics(list) {
@@ -405,6 +408,7 @@ class SandboxView {
     }
     if (generation !== this.checkGeneration) return;
     this.policyErrors = answer.policyErrors ?? [];
+    this.policyWarnings = answer.policyWarnings ?? [];
     const found = answer.check?.diagnostics ?? [];
     const main = program(this.model);
     // Lint warnings have a position: mark the word there.
@@ -437,10 +441,11 @@ class SandboxView {
   }
 
   async format() {
-    if (this.tab.kind !== "file" || !this.tab.name.endsWith(".sand")) return;
+    const policy = this.tab.id === "policy";
+    if (!policy && (this.tab.kind !== "file" || !this.tab.name.endsWith(".sand"))) return;
     let answer;
     try {
-      answer = await this.app.tools.request({ type: "format", source: this.editor.value });
+      answer = await this.app.tools.request({ type: "format", source: this.editor.value, policy });
     } catch {
       this.app.restartTools();
       return;

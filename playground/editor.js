@@ -333,20 +333,24 @@ export function highlightPolicy(text) {
   const out = [];
   let base = 0;
   for (const line of text.split("\n")) {
-    const hash = line.indexOf("#");
-    const code = hash >= 0 ? line.slice(0, hash) : line;
-    const words = /"(?:[^"\\]|\\.)*"?|[^\s,"]+/g;
+    // A `#` starts a comment at the start of a word, outside quotes.
+    const words = /"(?:[^"\\]|\\.)*"?|#.*|[^\s,]+/g;
     let w;
     let index = 0;
-    while ((w = words.exec(code))) {
-      const [start, end, word] = [base + w.index, base + w.index + w[0].length, w[0]];
-      if (index === 0) out.push([start, end, /^(allow|deny|default|limit)$/.test(word) ? "keyword" : "invalid"]);
-      else if (index === 1) out.push([start, end, "type"]);
+    let first = "";
+    while ((w = words.exec(line))) {
+      const [start, word] = [base + w.index, w[0]];
+      const end = start + word.length;
+      if (word.startsWith("#")) out.push([start, end, "comment"]);
+      else if (index === 0) out.push([start, end, /^(allow|deny|default|limit|let)$/.test(word) ? "keyword" : "invalid"]);
+      else if (index === 1 && first !== "let" && !/^[/.~]/.test(word)) out.push([start, end, "type"]);
       else if (word.startsWith('"')) out.push([start, end, "string"]);
       else if (/^\d[\d_.]*([kKmMgG]|ns|us|ms|s|m|h)?$/.test(word)) out.push([start, end, "number"]);
+      else if (/^[A-Z][A-Z0-9_-]*$/.test(word)) out.push([start, end, "constant"]);
+      else for (const r of word.matchAll(/\{[^}]*\}/g)) out.push([start + r.index, start + r.index + r[0].length, "interpolation"]);
+      if (index === 0) first = word;
       index++;
     }
-    if (hash >= 0) out.push([base + hash, base + line.length, "comment"]);
     base += line.length + 1;
   }
   return out;

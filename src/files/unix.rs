@@ -160,7 +160,7 @@ enum Stop {
     Errno(Errno),
     /// The symlink of this name (in the original path) does not resolve:
     /// its target, or a component after it, does not exist. Operations
-    /// refuse it, as one that would follow a symlink the policy did not see.
+    /// deny it, as one that would follow a symlink the policy did not see.
     Dangling(OsString),
 }
 
@@ -575,7 +575,7 @@ fn stored_by_path(dir: &OwnedFd, dir_path: &Path, entry: &Stat, name: &OsStr) ->
 /// `None` if `name` itself is there, or nothing is found.
 fn stored_by_scan(dir: &OwnedFd, entry: &Stat, name: &OsStr, work: &mut Work) -> Option<OsString> {
     let entries = read_dir(dir).ok()?;
-    let folded = fold_name(&name.to_string_lossy());
+    let folded = fold_name(&name.to_string_lossy()).into_owned();
     let mut found = None;
     for (i, e) in entries.enumerate() {
         if i == MAX_LINK_SCAN {
@@ -977,7 +977,7 @@ mod tests {
         assert_eq!(entry(&dir.join("link")).path(), dir.join("link"));
         assert_eq!(entry(&dir.join("link/file.txt")).path(), dir.join("outside/file.txt"));
         assert_eq!(entry(&dir.join("real/link.txt")).stat().unwrap().kind, EntryKind::Symlink);
-        // A symlink that replaces the final entry after the walk is refused.
+        // A symlink that replaces the final entry after the walk is denied.
         let r = follow(&dir.join("real/file.txt"));
         std::fs::remove_file(dir.join("real/file.txt")).unwrap();
         symlink(dir.join("outside/file.txt"), dir.join("real/file.txt")).unwrap();

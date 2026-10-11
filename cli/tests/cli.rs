@@ -278,13 +278,46 @@ while true { i += 1 }
     dir.write("bad.policy", "allow read .\nalow net *\nlimit memory lots\n");
     let o = sand(dir.path(), &["run", "main.sand", "--policy=bad.policy"]);
     assert_eq!(o.code, 2, "{o:?}");
-    assert!(o.stderr.contains("bad.policy:2: unknown rule `alow`"), "{o:?}");
-    assert!(o.stderr.contains("bad.policy:3: invalid size `lots`"), "{o:?}");
+    assert!(o.stderr.contains("bad.policy:2:1: unknown rule `alow`"), "{o:?}");
+    assert!(o.stderr.contains("bad.policy:3:7: invalid size `lots`"), "{o:?}");
     assert_eq!(o.stdout, "");
     let o = sand(dir.path(), &["run", "main.sand", "--policy=missing.policy"]);
     assert!(o.code == 2 && o.stderr.contains("cannot read policy file missing.policy"), "{o:?}");
     let o = sand(dir.path(), &["run", "main.sand", "--policy=a", "--policy=b"]);
     assert!(o.code == 2 && o.stderr.contains("--policy given more than once"), "{o:?}");
+}
+
+#[test]
+fn policy_files_are_checked_formatted_and_linted() {
+    let dir = script("policytools", "");
+    dir.write("app.policy", "allow  read ./data,./data/x   # data\nlet unused = a\n\n\ndeny ~/.ssh # keys\n");
+    let o = sand(dir.path(), &["check", "app.policy"]);
+    assert_eq!((o.code, o.stdout.as_str()), (0, "app.policy: ok\n"), "{o:?}");
+    let o = sand(dir.path(), &["lint", "app.policy"]);
+    assert_eq!(o.code, 1, "{o:?}");
+    assert_eq!(
+        o.stdout,
+        "app.policy:1:20: warning[redundant-rule]: line 1 (`./data`) already allows this\n\
+         app.policy:2:5: warning[unused-set]: no rule uses the set `unused`\n",
+        "{o:?}"
+    );
+    let o = sand(dir.path(), &["fmt", "--check", "app.policy"]);
+    assert_eq!((o.code, o.stdout.as_str()), (1, "app.policy: not formatted\n"), "{o:?}");
+    let o = sand(dir.path(), &["fmt", "app.policy"]);
+    assert_eq!(o.code, 0, "{o:?}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("app.policy")).unwrap(),
+        "allow read ./data ./data/x  # data\nlet unused = a\n\ndeny ~/.ssh  # keys\n"
+    );
+
+    dir.write("bad.policy", "allow read data\nallow read \"open\n");
+    let o = sand(dir.path(), &["check", "bad.policy"]);
+    assert_eq!(o.code, 2, "{o:?}");
+    assert!(o.stderr.contains("bad.policy:1:12: path `data` is not anchored"), "{o:?}");
+    let o = sand(dir.path(), &["lint", "bad.policy"]);
+    assert!(o.code == 2 && o.stderr.contains("bad.policy:2:12: unterminated quotes"), "{o:?}");
+    let o = sand(dir.path(), &["fmt", "bad.policy"]);
+    assert!(o.code == 2 && o.stderr == "bad.policy:2:12: unterminated quotes\n", "{o:?}");
 }
 
 #[test]

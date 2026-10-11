@@ -121,8 +121,8 @@ allow write /out
 allow env USER
 allow stdin
 
-# Network: one host.
-allow net api.github.com
+# Network: GET requests to one host.
+allow http GET api.github.com
 
 limit time 10s
 `,
@@ -141,7 +141,7 @@ limit time 10s
         "USER is sandy, TOKEN is not visible",
         "allowed  read standard input",
         "allowed  GET https://api.github.com/zen",
-        "denied   GET https://en.wikipedia.org/api/rest_v1/page/summary/Sand: permission denied: connect to en.wikipedia.org:443",
+        "denied   GET https://en.wikipedia.org/api/rest_v1/page/summary/Sand: permission denied: GET https://en.wikipedia.org/api/rest_v1/page/summary/Sand",
         "denied   GET http://192.168.0.1/ (a private address): permission denied",
       ],
       writes: ["/out/note.txt"],
@@ -202,12 +202,13 @@ match http.get("https://api.open-meteo.com/v1/forecast?latitude=52.52&longitude=
 }
 `,
     },
-    policy: `# The hosts the program may reach (host or host:port; *.domain).
-allow net api.github.com
-allow net en.wikipedia.org
+    policy: `# What the program may fetch: methods, then URL patterns (a host,
+# *.domain or *, then a path, where \`*\` is any name and \`**\` any depth).
+allow http GET api.github.com/repos/**
+allow http GET en.wikipedia.org/api/rest_v1/page/summary/*
 limit time 20s
 `,
-    expect: { ok: true, prompts: 1, stdout: ["rust-lang/rust", "Sand: ", "api.open-meteo.com: permission denied: connect to api.open-meteo.com:443"] },
+    expect: { ok: true, prompts: 1, stdout: ["rust-lang/rust", "Sand: ", "api.open-meteo.com: permission denied: GET https://api.open-meteo.com/v1/forecast"] },
   },
   {
     id: "files",
@@ -276,7 +277,7 @@ ada,1000000
     },
     policy: `# Read the data, write the report, and nothing else.
 allow read /data
-deny read /data/private     # deny rules win over allow rules
+deny read /data/private     # the more specific rule wins
 allow write /out
 limit time 5s
 `,

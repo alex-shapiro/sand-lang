@@ -69,7 +69,7 @@ export interface EngineHooks {
 }
 
 export interface PromptRequest {
-  kind: "read" | "write" | "import" | "net" | "listen" | "env" | "stdin" | "stdout" | "stderr" | "custom";
+  kind: "read" | "write" | "import" | "net" | "http" | "listen" | "env" | "stdin" | "stdout" | "stderr" | "custom";
   target: string;
   /** e.g. "read /data/a.txt" */
   description: string;
@@ -136,7 +136,7 @@ export interface EvalResult {
 export interface FileEntry { path: string; data: Uint8Array; }
 "#;
 
-/// The fields of `EngineOptions` (unknown ones, typically misspelt, are refused).
+/// The fields of `EngineOptions` (unknown ones, typically misspelt, are denied).
 const OPTION_KEYS: &[&str] = &["policy", "files", "env", "args", "stdin", "seed", "fileSystemCapacity", "cwd"];
 
 /// The JavaScript callbacks of an engine and its sessions, unregistered when
@@ -163,7 +163,7 @@ pub struct Engine {
 #[wasm_bindgen]
 impl Engine {
     /// Creates an engine. Throws an `Error` for invalid options; for an
-    /// invalid policy, its `policyErrors` property lists `{line, message}`.
+    /// invalid policy, its `policyErrors` property lists `{line, column, message}`.
     #[wasm_bindgen(constructor)]
     pub fn new(
         #[wasm_bindgen(unchecked_param_type = "EngineOptions")] options: JsValue,
@@ -173,7 +173,7 @@ impl Engine {
         check_keys(&hooks, &["onOutput", "onPrompt"], "engine hook")?;
         let cwd = string_option(&options, "cwd")?.unwrap_or_else(|| "/".into());
         let policy = string_option(&options, "policy")?.unwrap_or_default();
-        let policy = PolicyFile::parse(&policy, Path::new(&cwd)).map_err(policy_error)?;
+        let policy = PolicyFile::parse(&policy, Path::new(&cwd), None).map_err(policy_error)?;
         let fs = match number_option(&options, "fileSystemCapacity")? {
             Some(c) if c >= 0.0 => MemFs::with_capacity(c as usize),
             Some(_) => return Err(error("invalid fileSystemCapacity")),
@@ -231,7 +231,7 @@ impl Engine {
     }
 
     /// Type checks a script without running it (imports the policy would
-    /// prompt for are refused) and, if it type checks, lints it.
+    /// prompt for are denied) and, if it type checks, lints it.
     #[wasm_bindgen(unchecked_return_type = "CheckResult")]
     pub fn check(&self, source: &str, name: Option<String>) -> Result<JsValue, JsValue> {
         let name = name.unwrap_or_else(|| "main.sand".into());
@@ -441,6 +441,22 @@ pub fn format(source: &str) -> Result<String, JsValue> {
     sandlang::fmt::format_source(source).map_err(|e| error(&e))
 }
 
+/// Formats a policy file; throws an `Error` with `policyErrors` if it does
+/// not split into words.
+#[wasm_bindgen(js_name = formatPolicy)]
+pub fn format_policy(policy: &str) -> Result<String, JsValue> {
+    sandlang::policy::format_policy(policy).map_err(policy_error)
+}
+
+/// Lints a policy file whose relative paths start at `cwd` (default `/`);
+/// throws an `Error` with `policyErrors` if it is invalid.
+#[wasm_bindgen(js_name = lintPolicy, unchecked_return_type = "LintWarning[]")]
+pub fn lint_policy(policy: &str, cwd: Option<String>) -> Result<JsValue, JsValue> {
+    let cwd = cwd.unwrap_or_else(|| "/".into());
+    let warnings = sandlang::policy::lint_policy(policy, Path::new(&cwd), None).map_err(policy_error)?;
+    Ok(array(&warnings, lint_warning))
+}
+
 /// The syntax highlighting of `source`: `[start, end, kind]` triples of
 /// UTF-16 offsets (as JavaScript strings count) and indices into
 /// `highlightKinds()`, in order.
@@ -558,7 +574,9 @@ fn string_entries(options: &JsValue, name: &str) -> Result<Vec<(String, String)>
 fn policy_error(errors: Vec<PolicyError>) -> JsValue {
     let lines: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
     let err = js_sys::Error::new(&format!("invalid policy\n{}", lines.join("\n")));
-    let list = array(&errors, |e| object(&[("line", (e.line as u32).into()), ("message", e.message.as_str().into())]));
+    let list = array(&errors, |e| {
+        object(&[("line", (e.line as u32).into()), ("column", (e.column as u32).into()), ("message", e.message.as_str().into())])
+    });
     let _ = Reflect::set(&err, &"policyErrors".into(), &list);
     err.into()
 }
@@ -568,7 +586,7 @@ fn take<T>(slot: &RefCell<Option<T>>) -> Result<T, JsValue> {
     slot.borrow_mut().take().ok_or_else(|| error("the engine is busy: wait for the current run to finish"))
 }
 
-/// Refuses keys of the object `obj` other than `known`.
+/// Denies keys of the object `obj` other than `known`.
 fn check_keys(obj: &JsValue, known: &[&str], what: &str) -> Result<(), JsValue> {
     let Some(obj) = obj.dyn_ref::<Object>() else {
         return if obj.is_undefined() || obj.is_null() { Ok(()) } else { Err(error(&format!("{what}s must be an object"))) };

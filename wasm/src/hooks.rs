@@ -159,6 +159,8 @@ fn describe(cap: &Capability) -> (&'static str, String) {
         Capability::FsWrite(p) => ("write", p.display().to_string()),
         Capability::Import(p) => ("import", p.display().to_string()),
         Capability::Net { host, port } => ("net", format!("{host}:{port}")),
+        // The URL, after the method.
+        Capability::Http { .. } => ("http", cap.to_string().split_once(' ').map_or_else(String::new, |(_, url)| url.to_string())),
         Capability::NetAddr { addr, .. } => ("net", addr.to_string()),
         Capability::NetListen(a) => ("listen", a.clone()),
         Capability::Env(n) => ("env", n.clone()),

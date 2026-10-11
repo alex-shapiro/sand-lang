@@ -51,7 +51,7 @@ print(fs.remove_dir("/data", recursive: true).unwrap_err().kind)
 }
 
 #[test]
-fn moving_a_tree_with_protected_paths_is_refused() {
+fn moving_a_tree_with_protected_paths_is_denied() {
     let fs = files();
     // Writing anywhere is allowed, except under the secret directory.
     let rules = RulePolicy::new().allow_write("/").deny_write("/data/secret");

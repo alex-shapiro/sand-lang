@@ -92,7 +92,7 @@ print(fs.list_dir("/data"))`;
 
 test("relative paths and imports resolve in the memory file system", async () => {
   const options = {
-    policy: "allow read data",
+    policy: "allow read ./data",
     files: { "/lib/util.sand": "pub fn twice(x: int) -> int { x * 2 }\n", "/data/n.txt": "21" },
   };
   const source = 'import "lib/util"\nimport fs\nlet n = fs.read_text("data/n.txt").unwrap().trim().parse_int().unwrap()\nprint(util.twice(n))';
@@ -240,13 +240,21 @@ print(fs.read_text("/b.txt").is_ok())`;
   assert.equal(broken.stdout, "false\nfalse\nfalse\n");
 });
 
+test("policies are formatted and linted", () => {
+  assert.equal(sand.formatPolicy("allow  read /a,/b   # x\ndeny ~/.ssh"), "allow read /a /b  # x\ndeny ~/.ssh\n");
+  assert.deepEqual(sand.lintPolicy("allow /data\nallow read ./data/x", "/"), [
+    { code: "redundant-rule", message: "line 1 (`/data`) already allows this", line: 2, column: 12 },
+  ]);
+  assert.throws(() => sand.lintPolicy("allow read ~/x"), (e) => e.policyErrors[0].message.startsWith("`~` cannot be used here"));
+});
+
 test("invalid policies and options are reported", () => {
   assert.throws(
     () => new sand.Engine({ policy: "allow read /x\nalow net *\nlimit memory lots" }, {}),
     (e) => {
       assert.deepEqual(e.policyErrors, [
-        { line: 2, message: "unknown rule `alow` (rules start with `allow`, `deny`, `default` or `limit`)" },
-        { line: 3, message: "invalid size `lots` (use e.g. 4096, 64K, 256M, 1G)" },
+        { line: 2, column: 1, message: "unknown rule `alow` (rules start with `allow`, `deny`, `default`, `limit` or `let`)" },
+        { line: 3, column: 7, message: "invalid size `lots` (use e.g. 4096, 64K, 256M, 1G)" },
       ]);
       return /invalid policy/.test(e.message);
     },
@@ -379,7 +387,7 @@ print(http.get("${base}/slow", timeout: 50ms).unwrap_err().kind)
     assert.equal(lines[2], "404");
     assert.match(lines[3], /^http: .*redirects elsewhere, and redirects are not followed in the browser/);
     assert.match(lines[4], /^limit: response body larger than 10240 bytes/);
-    assert.equal(lines[5], "permission_denied: permission denied: connect to example.com:80");
+    assert.equal(lines[5], "permission_denied: permission denied: GET http://example.com/");
     assert.match(lines[6], /^invalid: unsupported URL scheme/);
     assert.equal(lines[7], "timeout");
     assert.equal(lines[8], '200 b"hello"  from the server');
@@ -400,7 +408,12 @@ test("http requests are prompted for and denied without a rule", async () => {
     const asked = [];
     const prompted = await run(source, { policy: "default prompt" }, { onPrompt: (r) => (asked.push(r.description), "once") });
     assert.equal(prompted.stdout, "Ok(200)\n");
-    assert.deepEqual(asked, [`connect to 127.0.0.1:${port}`]);
+    assert.deepEqual(asked, [`GET http://127.0.0.1:${port}/hello`]);
+    // `http` rules name methods and paths.
+    const routed = await run(source, { policy: `allow http GET 127.0.0.1:${port}/hello` });
+    assert.equal(routed.stdout, "Ok(200)\n");
+    const otherPath = await run(source, { policy: `allow http GET 127.0.0.1:${port}/other` });
+    assert.match(otherPath.stdout, /permission_denied/);
   } finally {
     close();
   }

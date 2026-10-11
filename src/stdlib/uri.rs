@@ -284,7 +284,7 @@ fn merge(base: &Parts, path: &str) -> String {
 }
 
 /// RFC 3986 §5.2.4.
-fn remove_dot_segments(path: &str) -> String {
+pub(crate) fn remove_dot_segments(path: &str) -> String {
     let mut input = path;
     let mut out = String::with_capacity(path.len());
     while !input.is_empty() {

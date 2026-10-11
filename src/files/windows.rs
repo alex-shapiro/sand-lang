@@ -5,7 +5,7 @@
 //! as stored). The operation then walks it again, opening each component
 //! relative to its parent's handle with `FILE_OPEN_REPARSE_POINT`, so a
 //! symlink, junction or other name-surrogate reparse point is opened itself,
-//! never followed: it is refused, or acted on by entry operations. Only
+//! never followed: it is denied, or acted on by entry operations. Only
 //! `rename` is path-based (no safe handle-based form): every directory
 //! leading to both entries is held open, and checked against the handle
 //! walk, so none can be renamed, deleted or replaced meanwhile.
@@ -15,7 +15,7 @@
 //! `fs_at` offers without `unsafe`.
 //!
 //! Names that Win32 path functions alter (a trailing `.` or space, `:` for
-//! alternate data streams, reserved device names such as `CON`) are refused:
+//! alternate data streams, reserved device names such as `CON`) are denied:
 //! handle-relative opens take them literally, so they would name entries
 //! the canonicalisation does not see.
 
@@ -267,7 +267,7 @@ fn stored_link_name(parent: &Path, name: &std::ffi::OsStr, limit: usize) -> (Opt
         return (None, 0, 0);
     };
     let link = parent.join(name);
-    let folded = fold_name(&name.to_string_lossy());
+    let folded = fold_name(&name.to_string_lossy()).into_owned();
     let (mut found, mut scanned, mut bytes) = (None, 0, 0);
     for entry in entries {
         if scanned == limit {
@@ -823,9 +823,9 @@ mod windows_tests {
     }
 
     /// Handle-relative opens take names literally, so names that Win32
-    /// path functions would alter (and the policy would not see) are refused.
+    /// path functions would alter (and the policy would not see) are denied.
     #[test]
-    fn names_win32_treats_specially_are_refused() {
+    fn names_win32_treats_specially_are_denied() {
         let (dir, _) = temp("names");
         for name in ["x.", "x ", "file.txt:stream", "file.txt::$DATA", "CON", "nul.txt", "Com1", "LPT9.log", "aux ", "file.txt\0x"] {
             let e = open_write(&dir.join("real").join(name), false).unwrap_err();

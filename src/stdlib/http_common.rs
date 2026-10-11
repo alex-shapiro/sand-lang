@@ -21,7 +21,9 @@ pub(crate) struct Url {
     /// Lower-cased host, without brackets for IPv6 literals.
     pub host: String,
     pub port: u16,
-    /// Path and query (the request target); never empty.
+    /// The path, without `.` and `..` segments; never empty.
+    pub path: String,
+    /// Path and query (the request target).
     pub target: String,
 }
 
@@ -58,12 +60,18 @@ impl Url {
             Some(p) => u16::try_from(p).map_err(|_| fail("invalid port"))?,
             None => default,
         };
-        let path = if parts.path.is_empty() { "/" } else { &parts.path };
+        let path = without_dots(if parts.path.is_empty() { "/" } else { &parts.path });
         let target = match parts.query {
             Some(q) => format!("{path}?{q}"),
-            None => path.to_string(),
+            None => path.clone(),
         };
-        Ok(Url { scheme, host: authority.host.to_ascii_lowercase(), port, target })
+        Ok(Url { scheme, host: authority.host.to_ascii_lowercase(), port, path, target })
+    }
+
+    /// The capability to send a `method` request to this URL.
+    pub(crate) fn capability(&self, method: &str) -> crate::policy::Capability {
+        let (scheme, host, port, path) = (self.scheme.clone(), self.host.clone(), self.port, self.path.clone());
+        crate::policy::Capability::Http { method: method.to_string(), scheme, host, port, path }
     }
 
     /// `host[:port]` as sent in the `Host` header (the port only if non-default).
@@ -75,6 +83,19 @@ impl Url {
     pub(crate) fn origin(&self) -> String {
         format!("{}://{}", self.scheme, self.authority())
     }
+}
+
+/// `path` without `.` and `..` segments, also where they are spelled with
+/// `%2e` (as browsers resolve them): the path the policy checks is the one
+/// servers see.
+fn without_dots(path: &str) -> String {
+    let dots = |seg: &str| {
+        let s = seg.to_ascii_lowercase().replace("%2e", ".");
+        matches!(s.as_str(), "." | "..").then_some(s)
+    };
+    let spelled: Vec<String> = path.split('/').map(|seg| dots(seg).unwrap_or_else(|| seg.to_string())).collect();
+    let resolved = uri::remove_dot_segments(&spelled.join("/"));
+    if resolved.starts_with('/') { resolved } else { format!("/{resolved}") }
 }
 
 /// Resolves a `Location` header value against `base` (RFC 3986 §5.2,

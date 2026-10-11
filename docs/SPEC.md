@@ -2116,7 +2116,8 @@ rename.
 | --------------------------- | ------------------------------------------ |
 | `FsRead(path)`              | reading files, listing dirs, metadata      |
 | `FsWrite(path)`             | creating, writing, removing, renaming      |
-| `Net(host, port)`           | outgoing TCP/HTTP/TLS connections          |
+| `Net(host, port)`           | outgoing TCP and TLS connections (`net`)   |
+| `Http(method, url)`         | each `http` request and redirect hop       |
 | `NetAddr(host, addr)`       | each address `host` resolved to (§14.6)    |
 | `NetListen(addr)`           | listening sockets                          |
 | `Env(name)`                 | environment variable reads (`"*"` for all) |
@@ -2127,163 +2128,215 @@ rename.
 ### 14.3 Decisions
 
 A policy maps a request to `Allow`, `Deny` or `Prompt`. On `Prompt` the
-engine suspends **all** script execution and calls the host's prompter,
-which answers `AllowOnce`, `AllowAlways`, `DenyOnce` or `DenyAlways`;
-without a prompter, `Prompt` is `Deny`. "Always" answers are remembered for
-the identical request for the engine's lifetime (across all its runs and
-compilations). "Once" answers apply to the single request: a library
-function needing several capabilities (`fs.copy`) is retried after each
-prompt, and "once" answers given meanwhile apply to that call alone.
+engine suspends execution and calls the host's prompter, waiting for an
+answer of `AllowOnce`, `AllowAlways`, `DenyOnce` or `DenyAlways`. If no
+prompter exists, any would-be prompt is automatically denied. An "Always"
+decision persists for the engine lifetime across all runs and compilations.
+A "Once" decision applies to a single request.
 
-`Import` requests are decided during compilation (also by `check` and
-`lint`), once per script module, depth-first in import order, with the
-module's resolved absolute path. A `RulePolicy` denies `Import(path)` when
-a read deny rule covers `path`, and otherwise allows it unless
-`allow_import` rules restrict imports to other directories.
+`Import` requests are determined during compilation by `check` and `lint`,
+once per script module, depth-first in import order, with the module's
+resolved absolute path.
 
 ### 14.4 Effects of a denial
 
 - I/O functions return `Err` with kind `"permission_denied"`.
-- A denied environment variable is treated as unset, so a script cannot
-  tell which exist: `env.get` returns `None`, and `env.vars` an empty map
-  when `Env("*")` is denied.
-- `print` and `eprint` panic with `permission denied: stdout` / `stderr`;
-  writes to `io.stdout` and `io.stderr` fail with kind `"permission_denied"`.
-- A denied `Import` is a compile-time error. Compilation stops there, so no
-  further imports are requested.
+- A denied environment variable is treated as unset.
+- `print` and `eprint` panic with `permission denied: stdout` / `stderr`
+- writes to `io.stdout` and `io.stderr` fail with kind `"permission_denied"`.
+- A denied `Import` raises a compile-time error.
 
 ### 14.5 Built-in policies
 
-- `Policy::deny_all()` — everything denied except `Stdout` and `Stderr`.
-- `Policy::allow_all()` — everything allowed (for trusted scripts).
-- `RulePolicy` — allow and deny rules for read paths, write paths, network
-  destinations, listen addresses, environment variable names, streams and
-  imports, plus a fallback (`Deny` or `Prompt`) for unmatched requests.
-  Deny rules win over allow rules. `deny_private_networks()` additionally
-  denies private and internal destinations (§14.6).
-- For operations on a directory entry itself (§13.3), the engine uses
-  `Policy::check_entry`, which for a `RulePolicy` does not resolve a final
-  symlink; `Policy::check` always resolves it.
+- `Policy::deny_all()` denies everything except `Stdout` and `Stderr`.
+- `Policy::allow_all()` allows everything. Only use this when running 100% trusted code.
+- `RulePolicy` uses a rule policy + prompter for its allow and deny rules.
+- `deny_private_networks()` denies private and internal network destinations (§14.6).
 
-Network patterns are `host`, `*.example.com` (strict subdomains), `*`, an
-IP address (`127.0.0.1`, `::1`) or a CIDR range (`10.0.0.0/8`, `fc00::/7`),
-optionally followed by a port (`host:443`, `[::1]:8080`, `10.0.0.0/8:443`,
-`[fc00::/7]:443`). Host names are ASCII, compared case-insensitively,
-ignoring a trailing dot. IP and range patterns match IP literals and
-resolved addresses (§14.6); IPv4-mapped IPv6 addresses compare as IPv4. IP
-and range deny patterns also match other spellings of their addresses: the
-unspecified address (`0.0.0.0`, `::`) as `127.0.0.1` and `::1`, and IPv6
-addresses embedding an IPv4 address (IPv4-compatible, IPv4-translated,
-NAT64 `64:ff9b::/96`, 6to4 `2002::/16`) as that address. A malformed
-pattern matches nothing (`policy::is_valid_net_pattern` checks one; the CLI
-rejects them).
+A policy decision is determined by the most specific matching rule.
+If two opposing rules have equal specificity, deny wins. Rules:
 
-Path rules are compared after normalization (§14.1). Allow rules compare
-paths exactly (ignoring case on Windows). Deny rules, on every platform,
-compare caselessly and normalization-insensitively (canonical
+- **Files** (`FsRead`, `FsWrite`, `Import`)
+  - a path pattern matches the path and its subpaths: `/data` covers `/data/a/b`
+  - Each path segment may be a string, a name with `*` wildcards (`*.pem`),
+    standalone `*`, or standalone `**`.
+  - A path is "more specific" if it has more matching segments. For example,
+    `deny ~/**/*.pem` is more specific than `allow ~/project` for `~/project/key.pem`
+  - If two paths have equal depth, the one with fewer wildcards is more specific
+  - Write access implies read access
+  - Read denial implies write and import denial
+
+- **Network Requests** (`Net`)
+  - a host pattern may match any domain `*`, a specific domain `example.com` or strict subdomains `*.example.com`
+  - a host pattern may also match an IP address (`127.0.0.1`, `::1`) or a CIDR range (`10.0.0.0/8`, `fc00::/7`),
+    optionally with a port (`host:443`, `[::1]:8080`, `10.0.0.0/8:443`, `[fc00::/7]:443`).
+  - Exact hosts and addresses are most specific, then ranges and domains (longer ones more), then `*`
+  - A port increases rule specificity.
+  - Host names must be ASCII and are compared case-insensitively, ignoring a trailing dot
+  - IPv4-mapped IPv6 addresses are compared as IPv4.
+  - Address deny patterns are syntax-agnostic: `0.0.0.0` and `::` are considered identical.
+
+- **HTTP(S) requests** (`Http`)
+  - inherits net rules for the host pattern & port
+  - adds http methods and paths
+  - Specificity compares the host (as for `Net`), then http scheme, then path, then methods.
+  - URL paths are compared percent-decoded, without `.` and `..` segments
+  - A request whose path contains `\` or an encoded separator (`%2F`, `%5C`) is allowed
+    only if it is also allowed with those taken as separators.
+  - A net rule allowing a host lets scripts send it anything over `net`, even if `deny http` rules say otherwise
+
+- **Environment variables** (`Env`)
+  - supports a name `AWS_SECRET_KEY` or a pattern (`AWS_*`)
+  - specific names are prioritized above wildcard patterns
+
+- **Listen addresses** (`NetAddr`)
+  - specify a `host` and `port`
+  - a host name and port makes a rule more specific.
+
+- **Custom capabilities**:
+  - a native module may define its own capabilities
+
+Path rules are compared after normalization (§14.1). A rule's path is
+resolved when the policy decides its first request. Allow rules compare
+names exactly, ignoring case on Windows. Deny rules, on every platform,
+compare case-insensitively and normalization-insensitively (canonical
 decomposition, full case folding, default-ignorable characters removed), so
 they also cover other spellings, including of paths that do not exist yet
-(`data/ſecrets`, `café` precomposed or with a combining accent). On macOS,
-existing files are named with their stored spelling, so on insensitive file
-systems `data/SECRETS` may name `data/secrets`. For operations on an entry
-itself, a final symlink is named with its stored spelling on every
-platform; where the system cannot give a final entry's stored name (a
-symlink outside macOS, a device, a file that cannot be opened), it is
-looked up in its directory, unless that holds more than 4096 entries. A
-deny rule also protects the directories containing it from being renamed,
-replaced or recursively removed as a whole (`Policy::denies_under`); custom
-policies are asked only about the top-level paths of such operations.
+(`data/ſecrets`, `café` precomposed or with a combining accent)
+
+On macOS, existing files are named with their stored spelling, so case-insensitive
+file systems `data/SECRETS` may name `data/secrets`. For entry operations (§13.3),
+the engine uses `Policy::check_entry`. This check does not resolve a final symlink
+and names it with its stored spelling. If the system cannot give a final entry's
+stored name (a symlink outside macOS, a device, a file that cannot be opened), it
+is looked up in its directory, unless the directory holds more than 4096 entries.
+
+A deny rule that may match something inside a directory protects the directory from
+being renamed, replaced or recursively removed as a whole (`Policy::denies_under`).
+Custom policies are asked only about the top-level paths of such operations.
 
 ### 14.6 Network destinations
 
-An outgoing connection (`net.connect`, `net.connect_tls`, every `http`
-request and redirect hop) is checked in two stages:
+An outgoing connection (`net.connect`, `net.connect_tls`, `http` requests and redirect hops)
+is checked in two stages:
 
-1. `Net(host, port)` for the host name or IP literal the script used. This
-   request may be prompted.
-2. The name is resolved **once** (an IP literal to itself), and each
-   address is checked as `NetAddr(host, addr)`; the connection is attempted
-   only to the allowed addresses, in resolver order. If all are denied, the
-   operation fails with kind `"permission_denied"` naming the address.
-   `NetAddr` is never prompted: `Prompt` counts as `Allow`, since the user
-   already decided the `Net` request.
+1. `Net(host, port)` (for `http`, `Http(method, url)`) for the host name or
+   IP literal the script used. This request may be prompted.
+2. The name is resolved once (an IP literal to itself), and each address is
+   checked as `NetAddr(host, addr)`. Connection is attempted only to allowed
+   addresses, in resolver order. If all are denied, the operation fails with
+   kind `"permission_denied"` and the address. `NetAddr` never prompts: `Prompt`
+   counts as `Allow`, since the user already decided the first request.
 
-`Policy::AllowAll` allows and `Policy::DenyAll` denies `NetAddr`; custom
-policies are called with it (and can use `sandlang::policy::is_private_address`).
-A `RulePolicy` denies an address matching an IP or range `deny_net`
-pattern, and otherwise allows it unless `deny_private_networks()` is set
-(as the `sand` command line does by default, §17.5). That treats as
-internal every address that is not public unicast — unspecified,
-`0.0.0.0/8`, loopback, RFC 1918, shared/CGNAT `100.64.0.0/10`, link-local
+An internal address is any non-public network. Examples include `0.0.0.0/8`,
+loopback, RFC 1918, shared/CGNAT `100.64.0.0/10`, link-local
 (`169.254.0.0/16`, `fe80::/10`), unique-local `fc00::/7`, site-local,
 multicast, broadcast and other reserved, documentation and benchmarking
 ranges, with IPv6 forms embedding an IPv4 address (IPv4-mapped,
-IPv4-compatible, NAT64 `64:ff9b::/96`, 6to4) classified by that address —
-and then:
+IPv4-compatible, NAT64 `64:ff9b::/96`, 6to4). Rules:
 
-- an internal IP literal, or `localhost`, is allowed at stage 1 only by an
-  explicit pattern (not `*` or `*.domain`) or a prompt answer; `localhost`
-  must then resolve to loopback addresses;
-- an internal address reached by resolving any other name is denied unless
-  an IP or range `allow_net` pattern matches it.
+- An internal IP literal, or `localhost`, is allowed at stage 1 only by an
+  explicit rule or a user prompt response; `localhost` must then resolve to
+  loopback addresses.
+- An internal address reached by resolving any other name is denied unless
+  an address net rule allows it.
 
 ### 14.7 Policy files
 
-A **policy file** writes a policy and limits as text. `sand run
---policy=FILE` (§17.5) reads one; hosts parse them with
-`sandlang::policy::PolicyFile::parse(text, base)`. Each line is a rule; `#`
-starts a comment; words are separated by spaces or commas, and may be
-double-quoted to contain them (`"/my data"`, with `\"` and `\\` escapes).
+A policy file (`.policy`) contains policy rules and limits as text. Read it with
+`sand run --policy=FILE` (§17.5); parse it with `sandlang::policy::PolicyFile::parse(text, base, home)`.
+Each line contains an independent statement. A comment begins with `#` and
+continues for the rest of the line. Words are separated by spaces or commas.
+Quoted text `"..."` (with `\"` and `\\` escapes) is parsed literally, so a quoted
+`*` is not considered a wildcard. A word may contain both quoted and unquoted text
+(`"/my data"/**`).
 
 ```
-# Read the data, write the report, and nothing else.
-allow read ./data, ./config.json
-deny read ./data/private        # deny rules win over allow rules
-allow write ./out               # writing implies reading
-allow net api.example.com:443 *.example.org
-allow env HOME USER
-default prompt                  # ask about the rest (default: deny)
+# Read the system and the project; keep secrets out.
+let owners = alice bob
+allow read /usr /System ~/.gitconfig
+allow ./                                 # read and write the project
+deny ./**/.env                           # the more specific rule wins
+deny ~/Documents/*
+allow http GET HEAD api.github.com
+allow http POST PATCH api.github.com/repos/{owners}/**
+allow env HOME USER LC_*
+default prompt                           # ask about the rest (default: deny)
 limit memory 64M
-limit time 10s
 ```
 
-| Rule                                                      | Meaning                                                                        |
-| --------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| `allow read PATH...`, `deny read PATH...`                 | `FsRead` under the paths (§14.5)                                               |
-| `allow write PATH...`, `deny write PATH...`               | `FsWrite` (and, for `allow`, `FsRead`) under the paths                         |
-| `allow import PATH...`, `deny import PATH...`             | restrict script imports to (or keep them from) these directories               |
-| `allow net PATTERN...`, `deny net PATTERN...`             | network destinations (§14.5 patterns)                                          |
-| `allow private-net`                                       | do not deny private and internal destinations (§14.6)                          |
-| `allow listen ADDR...`, `deny listen ADDR...`             | listening addresses (`host:port`, port `0` = any)                              |
-| `allow env NAME...`, `deny env NAME...`                   | environment variables (`*`: all; listing all variables is denied while any is) |
-| `allow stdin`, `deny stdin`, `deny stdout`, `deny stderr` | standard streams                                                               |
-| `allow custom NAME [DETAIL]`, `deny custom NAME [DETAIL]` | a host-defined capability (any detail if omitted)                              |
-| `default deny` \| `default prompt` \| `default allow`     | the decision for requests no rule decides (once per file)                      |
-| `limit NAME VALUE`                                        | a limit (§15.1), below                                                         |
+| Statement                                                 | Meaning                                                                         |
+| --------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `allow PATH...`, `deny PATH...`                           | all access to files (§14.5): `allow` reads and writes, `deny` denies everything |
+| `allow read PATH...`, `deny read PATH...`                 | `FsRead` (a deny also denies writing and importing)                             |
+| `allow write PATH...`, `deny write PATH...`               | `FsWrite` (an allow also allows reading)                                        |
+| `allow import PATH...`, `deny import PATH...`             | script imports (an allow restricts imports to its paths)                        |
+| `allow net HOST...`, `deny net HOST...`                   | connections, and any HTTP request, to hosts (§14.5)                             |
+| `allow http [METHOD...] URL...`, `deny http ...`          | HTTP requests                                                                   |
+| `allow private-net`                                       | do not deny private and internal destinations (§14.6)                           |
+| `allow listen ADDR...`, `deny listen ADDR...`             | listening addresses (`host:port`, port `0` = any)                               |
+| `allow env NAME...`, `deny env NAME...`                   | environment variables (`AWS_*`; `*`: all)                                       |
+| `allow stdin`, `deny stdin`, `deny stdout`, `deny stderr` | standard streams                                                                |
+| `allow custom NAME [DETAIL]`, `deny custom NAME [DETAIL]` | a host-defined capability (any detail if omitted)                               |
+| `default deny` \| `default prompt` \| `default allow`     | the decision for requests no rule decides (once per file)                       |
+| `limit NAME VALUE`                                        | a limit (§15.1), below                                                          |
+| `let NAME = VALUE...`                                     | a set: `{NAME}` in any rule's word stands for each value                        |
 
-Relative paths are relative to the policy file's directory (`base`).
-Without a `default` line, the host decides unmatched requests: `sand`
-denies them (unless `--prompt`), the web `Engine` (§16.2) asks `onPrompt`.
-Without `allow private-net`, private and internal destinations are denied
-as by `deny_private_networks()`.
+All paths must be anchored, but they may be prefixed with a shortcut:
 
-Limits: `memory`, `output`, `source` and `http-body` take sizes (`4096`,
-`64K`, `256M`, `1G`); `time` (wall clock) and `cpu` durations (`500ms`,
-`10s`, `1.5m`, `2h`); `instructions`, `compile-fuel`, `tasks`, `call-depth`
-and `open-resources` counts (`1_000_000`). `none` removes the `memory`,
-`time`, `cpu`, `instructions`, `compile-fuel` and `output` limits. Limits
-not given keep their defaults.
+- `/...` begins at the root directory
+- `./...` begins at the file's directory
+- `../...` begins at the file's parent directory
+- `~/...` begins at the user's home directory
 
-A file with any error is rejected; each error (`PolicyError`) has its line
-number. Errors are misspelled rules (`alow`), unknown capabilities or
-limits, invalid network patterns, sizes or durations, arguments to rules
-that take none, and nonexistent rules (`allow stdout`, the default, and
-`deny private-net`).
+URL patterns are `[scheme://]host[:port][/path]`: a host pattern (§14.5,
+without ranges), then path segments as for files, percent-decoded. A pattern
+without a port but with a scheme matches the scheme's default port. A pattern
+without a port or a scheme matches any port.
+
+HTTP Methods (`GET`, any case, or any upper-case word) precede URLs.
+If no method is present, an http rule matches every method.
+
+A word with multiple set references allows every combination of set values
+(`{owners}/{repos}`), limited to 100,000 combination. A set may be defined
+anywhere in the file. A set may not contain another set.
+
+If the policy has no `default` rule, the host determines unmatched requests.
+By default, they are denied. If a prompter is defined, the host prompts and
+returns a response. Without `allow private-net`, private and internal destinations
+are denied as by `deny_private_networks()`.
+
+A policy file may contain limit rules:
+
+- `memory`, `output`, `source` and `http-body` take sizes (`4096`, `64K`, `256M`, `1G`)
+- `time` (wall clock) and `cpu` durations (`500ms`, `10s`, `1.5m`, `2h`)
+- `instructions`, `compile-fuel`, `tasks`, `call-depth` and `open-resources` counts (`1_000_000`)
+- `none` removes `memory`, `time`, `cpu`, `instructions`, `compile-fuel` and `output` limits.
+
+Each system resource category that is not explicitly specified has a default value.
+
+A policy file with any error is rejected. Each `PolicyError` provides the line and
+column containing the error.
+
+Policy files are covered by `sand fmt`, `sand lint` and `sand check` (§17).
+The formatter separates words by single spaces, adds quotes where necessary,
+writes methods in upper case, aligns the trailing comments of consecutive
+lines and removes runs of blank lines. `sandlang::policy::lint_policy`
+reports:
+
+| Lint                   | Description                                                                           |
+| ---------------------- | ------------------------------------------------------------------------------------- |
+| `redundant-rule`       | a rule repeats another, or a broader rule already decides what it covers the same way |
+| `overridden-rule`      | a rule taking precedence decides everything a rule covers the other way               |
+| `bypassable-http-deny` | a `deny http` rule for a host that a net rule lets scripts connect to                 |
+| `unused-set`           | a `let` set no rule uses                                                              |
+
+The first two compare rules naming one path (no wildcards) lexically, without resolving symlinks.
 
 `sandlang::policy::rule_for(capability, allow)` gives, as a policy file
 line, the rule that decides a promptable request for good (e.g. `allow read
-/data/a.txt`, `deny net example.com:443`, quoted as needed); the playground
-adds it to the policy when "always" or "never" is answered.
+/data/a.txt`, `deny http GET https://example.com/a`), quoted as needed; the
+playground adds it to the policy when "always" or "never" is answered.
 
 ---
 
@@ -2456,9 +2509,11 @@ let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 
   with kind `"io"`. Without the `tls` feature it has no effect.
 - Policies (§14): `Policy::check(&Capability)`, `Policy::check_entry`,
   `Policy::denies_under(path)`;
-  `RulePolicy::{allow_net, deny_net, deny_private_networks, ...}`;
-  `sandlang::policy::{is_private_address, normalize_path,
-normalize_entry_path}` for hosts writing their own policies or natives.
+  `RulePolicy::{allow_read, allow_http, deny_net, deny_private_networks, ...}`;
+  `sandlang::policy::{PolicyFile, format_policy, lint_policy, rule_for}`
+  for policy files; `sandlang::policy::{is_private_address,
+normalize_path, normalize_entry_path}` for hosts writing their own
+  policies or natives.
 - `NativeModule::function` accepts closures whose argument and return types
   implement `FromValue`/`IntoValue`: `i64`, `f64`, `bool`, `String` and `&str`,
   `Vec<u8>` and `&[u8]` (as `bytes`), `()`, `Vec<T>` (any element type,
@@ -2526,7 +2581,7 @@ let report = fs.read("/out/report.txt")?;
 
 `check_source`, `check_file` and `lint::lint_source_with(&engine, ...)` load
 imports like a run (from the engine's file system, under its policy), but
-never prompt: imports the policy would prompt for are refused.
+never prompt: imports the policy would prompt for are denied.
 
 ### 16.2 The web
 
@@ -2603,12 +2658,13 @@ value that cannot be parsed.
 ### 17.1 `sand check FILE...`
 
 Parses and type checks; prints diagnostics; exit code 2 on errors or if a file
-cannot be read.
+cannot be read. A `.policy` file is parsed as a policy file (§14.7).
 
 ### 17.2 `sand lint FILE...`
 
 Reports warnings (exit code 1 if any, unless `--allow-warnings`; 2 if a file
-cannot be read or has errors):
+cannot be read or has errors). Policy files get the lints of §14.7; scripts
+these:
 
 | Lint                   | Description                                                                                                                                                                                                                          |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -2695,7 +2751,8 @@ literals, including their interpolations, are copied verbatim. Formatting
 is idempotent and never changes the parse tree (modulo spans). `sand fmt -`
 formats standard input to standard output. With `--check`, nothing is
 written or printed, and the exit code is 1 if any input is not formatted.
-Exit code 2 if a file cannot be read or parsed. Formatting may spend 64
+Exit code 2 if a file cannot be read or parsed. Policy files are formatted
+as §14.7 describes. Formatting may spend 64
 units of fuel per byte of source (at least 10,000,000), about one per
 syntax tree node and layout node examined, per 64 bytes of text measured,
 and per byte of output; a file that needs more fails with `source too

@@ -6,6 +6,10 @@ Follow-up work, roughly in priority order.
 
 ### Sandbox
 
+- [ ] **Deny patterns protect whole trees.** With `deny ./**/.env`, every
+      directory under `.` may hold a denied file, so none can be renamed
+      or removed recursively (`Policy::denies_under`). Scanning the tree
+      for entries the rules deny would refuse only trees that hold one.
 - [ ] **Windows paths take two walks.** `files/windows.rs` canonicalizes,
       then walks again by handle; macOS and Linux resolve in one walk. One
       walk needs reparse-point targets and `GetFinalPathNameByHandleW`, which
@@ -41,7 +45,7 @@ Follow-up work, roughly in priority order.
 
 - [ ] Run the CI workflow on Windows and Linux, where nothing has run
       yet (Windows is only cross-checked with `--no-default-features
-      --features os`), including the ConPTY variant of
+  --features os`), including the ConPTY variant of
       `cli/tests/prompt_tty.rs` and the REPL's line editor.
 - [ ] Opening files for each `fs.Mode` on Windows (`open_mode` in
       `files/windows.rs`, through `fs_at` with `create_new`) has only been
@@ -72,6 +76,9 @@ Follow-up work, roughly in priority order.
 
 ### Tooling
 
+- [ ] Policy lints (`redundant-rule`, `overridden-rule`) only judge rules
+      that name one path. Rules with wildcards could be judged by whether
+      one pattern covers another.
 - [ ] **The linter parses every file a second time.** `lint::run_lints`
       calls `syntax::parse_module` on the source the engine already parsed,
       and matches the checker's facts to it by (line, column). The engine

@@ -35,3 +35,9 @@ name = "fmt"
 path = "fuzz_targets/fmt.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "policy"
+path = "fuzz_targets/policy.rs"
+test = false
+doc = false

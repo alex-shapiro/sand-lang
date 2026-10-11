@@ -27,7 +27,9 @@ bytecode  ─VM───────▶ effects    src/vm/
   memory held by pending I/O (`iomem.rs`).
 - `src/stdlib/`: the standard library; `src/native.rs`: the `NativeModule`
   API for hosts.
-- `src/policy/`: capabilities and policies; `src/files/`: the file systems
+- `src/policy/`: capabilities and policies (`rules.rs` decides requests by
+  rule indices: a trie of path patterns, hash tables of hosts); policy files
+  (`file.rs`) and their formatter and linter; `src/files/`: the file systems
   scripts see (the host's through `unix.rs`/`windows.rs`, or a `MemFs`).
 - `src/platform.rs`: time, timers, randomness, threads, deep stacks.
 - `src/session.rs`: REPL sessions; `src/fmt.rs`, `src/lint.rs`: tools.

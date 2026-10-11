@@ -193,7 +193,7 @@ fn persisted_inverted_index() {
     let o = run_example("search_index.sand", &["stats", "idx.json"], config());
     assert_eq!(ok(&o), "documents: 4\nterms: 15\nmost common: fox(3), brown(2), dog(2), quick(2), amet(1)\n");
 
-    // Writing outside the allowed directory is refused by the sandbox.
+    // Writing outside the allowed directory is denied by the sandbox.
     let o = run_example(
         "search_index.sand",
         &["index", "idx.json", "docs"],

@@ -1,0 +1,792 @@
+//! Rule policies: allow and deny rules, and the indices that decide
+//! requests by them.
+//!
+//! The most specific matching rule decides a request; between equally
+//! specific rules deny wins. Rules are indexed by what they match (path
+//! names in a trie, hosts in hash tables), so a check costs about the same
+//! whatever the number of rules.
+
+use super::net::{Dest, HostIndex, NetPattern, UrlPattern, is_localhost, is_private_address, listen_match, parse_ip, url_segments};
+use super::path::{Glob, Seg, Trie, path_segments};
+use super::{Capability, Decision, PathSpace, fold_name, normalize_entry_path, normalize_path};
+use crate::vm::value::FxHashMap;
+use std::borrow::Cow;
+use std::fmt;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
+
+/// The file accesses a rule names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Access {
+    Read,
+    Write,
+    Import,
+    /// Reading and writing (allow), or all access (deny).
+    Any,
+}
+
+const READ: u8 = 1;
+const WRITE: u8 = 2;
+const IMPORT: u8 = 4;
+
+impl Access {
+    /// The requests a rule decides: writing implies reading, and what may
+    /// not be read may not be written or imported either.
+    fn mask(self, allow: bool) -> u8 {
+        match (self, allow) {
+            (Access::Read, true) => READ,
+            (Access::Write | Access::Any, true) => READ | WRITE,
+            (Access::Read | Access::Any, false) => READ | WRITE | IMPORT,
+            (Access::Write, false) => WRITE,
+            (Access::Import, _) => IMPORT,
+        }
+    }
+}
+
+/// A file path pattern: an absolute path, then segments that start with a
+/// wildcard (no trailing `**`).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct PathPattern {
+    pub prefix: PathBuf,
+    pub rest: Vec<Seg>,
+}
+
+/// An environment variable name pattern (`HOME`, `AWS_*`, `*`).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum NamePattern {
+    Exact(String),
+    Glob(Glob),
+    Any,
+}
+
+impl NamePattern {
+    pub(crate) fn parse(name: &str) -> NamePattern {
+        if name == "*" {
+            return NamePattern::Any;
+        }
+        match Seg::parse(&name.chars().map(|c| (c, c == '*')).collect::<Vec<_>>()) {
+            Ok(Seg::Glob(g)) => NamePattern::Glob(g),
+            Ok(Seg::Star | Seg::GlobStar) => NamePattern::Any,
+            _ => NamePattern::Exact(name.to_string()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum RuleKind {
+    Files(Access, PathPattern),
+    Net(NetPattern),
+    /// Methods (upper case; `None`: any) and a URL pattern.
+    Http(Option<Vec<String>>, UrlPattern),
+    Listen(String),
+    Env(NamePattern),
+    Stdin,
+    Stdout,
+    Stderr,
+    Custom(String, Option<String>),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Rule {
+    pub allow: bool,
+    pub kind: RuleKind,
+    pub origin: Option<Origin>,
+}
+
+/// Where a rule was written: the line and column (from 1) of its pattern,
+/// and the pattern as written.
+#[derive(Clone, Debug)]
+pub(crate) struct Origin {
+    pub line: usize,
+    pub column: usize,
+    pub text: String,
+}
+
+/// A rule-based policy: the most specific rule matching a request decides
+/// it (see SPEC §14.5), deny at a tie; requests matching no rule get the
+/// fallback decision.
+#[derive(Clone)]
+pub struct RulePolicy {
+    rules: Vec<Rule>,
+    deny_private: bool,
+    fallback: Decision,
+    host_files: OnceLock<Arc<FileIndex>>,
+    memory_files: OnceLock<Arc<FileIndex>>,
+    others: OnceLock<Arc<Index>>,
+}
+
+impl fmt::Debug for RulePolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RulePolicy")
+            .field("rules", &self.rules.len())
+            .field("deny_private", &self.deny_private)
+            .field("fallback", &self.fallback)
+            .finish()
+    }
+}
+
+impl Default for RulePolicy {
+    fn default() -> Self {
+        RulePolicy::new()
+    }
+}
+
+fn net_pattern(pattern: &str) -> NetPattern {
+    NetPattern::parse(pattern).unwrap_or_else(|| panic!("invalid network pattern {pattern:?}"))
+}
+
+/// The paths of rules are taken literally (no wildcards) and cover what is
+/// below them; policy files ([`super::PolicyFile`]) write patterns.
+impl RulePolicy {
+    /// No rules: standard output and error and script imports (confined to
+    /// the module root) are allowed, everything else falls back to `Deny`.
+    pub fn new() -> RulePolicy {
+        RulePolicy::from_rules(vec![])
+    }
+
+    pub(crate) fn from_rules(rules: Vec<Rule>) -> RulePolicy {
+        RulePolicy {
+            rules,
+            deny_private: false,
+            fallback: Decision::Deny,
+            host_files: OnceLock::new(),
+            memory_files: OnceLock::new(),
+            others: OnceLock::new(),
+        }
+    }
+
+    pub(crate) fn rules(&self) -> &[Rule] {
+        &self.rules
+    }
+
+    pub(crate) fn push(mut self, allow: bool, kind: RuleKind) -> Self {
+        self.rules.push(Rule { allow, kind, origin: None });
+        self.host_files = OnceLock::new();
+        self.memory_files = OnceLock::new();
+        self.others = OnceLock::new();
+        self
+    }
+
+    pub(crate) fn extend(mut self, rules: Vec<Rule>) -> Self {
+        for r in rules {
+            self = self.push(r.allow, r.kind);
+            if let Some(last) = self.rules.last_mut() {
+                last.origin = r.origin;
+            }
+        }
+        self
+    }
+
+    fn files_rule(self, allow: bool, access: Access, p: &Path) -> Self {
+        self.push(allow, RuleKind::Files(access, PathPattern { prefix: p.to_path_buf(), rest: vec![] }))
+    }
+
+    pub fn allow_read(self, p: impl AsRef<Path>) -> Self {
+        self.files_rule(true, Access::Read, p.as_ref())
+    }
+    /// Denies reading, writing and importing under `p`.
+    pub fn deny_read(self, p: impl AsRef<Path>) -> Self {
+        self.files_rule(false, Access::Read, p.as_ref())
+    }
+    /// Allows writing (and reading) under `p`.
+    pub fn allow_write(self, p: impl AsRef<Path>) -> Self {
+        self.files_rule(true, Access::Write, p.as_ref())
+    }
+    pub fn deny_write(self, p: impl AsRef<Path>) -> Self {
+        self.files_rule(false, Access::Write, p.as_ref())
+    }
+    /// Restricts script imports to the directories of `allow_import` rules.
+    pub fn allow_import(self, p: impl AsRef<Path>) -> Self {
+        self.files_rule(true, Access::Import, p.as_ref())
+    }
+    pub fn deny_import(self, p: impl AsRef<Path>) -> Self {
+        self.files_rule(false, Access::Import, p.as_ref())
+    }
+    /// Allows outgoing connections. Patterns: `host`, `*.example.com`
+    /// (strict subdomains), `*`, an IP address (`127.0.0.1`, `::1`) or a
+    /// CIDR range (`10.0.0.0/8`, `fc00::/7`), each optionally with a port
+    /// (`host:443`, `[::1]:8080`, `10.0.0.0/8:443`, `[fc00::/7]:443`).
+    ///
+    /// # Panics
+    ///
+    /// If the pattern is invalid (see [`super::is_valid_net_pattern`]).
+    pub fn allow_net(self, pattern: &str) -> Self {
+        self.push(true, RuleKind::Net(net_pattern(pattern)))
+    }
+    /// Denies outgoing connections ([`RulePolicy::allow_net`]'s patterns).
+    pub fn deny_net(self, pattern: &str) -> Self {
+        self.push(false, RuleKind::Net(net_pattern(pattern)))
+    }
+    /// Allows HTTP requests: optional methods, then a URL pattern, as in a
+    /// policy file's `allow http` rule (`"GET POST api.example.com/v1/**"`).
+    ///
+    /// # Panics
+    ///
+    /// If the rule is invalid.
+    pub fn allow_http(self, rule: &str) -> Self {
+        self.http(true, rule)
+    }
+    pub fn deny_http(self, rule: &str) -> Self {
+        self.http(false, rule)
+    }
+    fn http(mut self, allow: bool, rule: &str) -> Self {
+        let verb = if allow { "allow" } else { "deny" };
+        let file = super::PolicyFile::parse(&format!("{verb} http {rule}"), Path::new("/"), None)
+            .unwrap_or_else(|e| panic!("invalid http rule {rule:?}: {}", e[0].message));
+        for r in file.rules.rules {
+            self = self.push(r.allow, r.kind);
+        }
+        self
+    }
+    /// Denies connections to private and internal addresses (see
+    /// [`super::is_private_address`]), whether named directly or reached by
+    /// resolving a host name. Exempt are IP literals and `localhost` allowed
+    /// by an explicit (non-wildcard) pattern or by a prompt answer, and
+    /// resolved addresses matching an IP or range `allow_net` pattern.
+    pub fn deny_private_networks(mut self) -> Self {
+        self.deny_private = true;
+        self
+    }
+    /// `host:port`, either `*`; port `0` allows any port.
+    pub fn allow_listen(self, addr: &str) -> Self {
+        self.push(true, RuleKind::Listen(addr.to_string()))
+    }
+    pub fn deny_listen(self, addr: &str) -> Self {
+        self.push(false, RuleKind::Listen(addr.to_string()))
+    }
+    /// Allows reading environment variables: a name, a pattern with `*`
+    /// (`AWS_*`), or `*` for all of them.
+    pub fn allow_env(self, name: &str) -> Self {
+        self.push(true, RuleKind::Env(NamePattern::parse(name)))
+    }
+    /// Denies reading matching variables. Listing all variables
+    /// (`Env("*")`) is denied while any variable is.
+    pub fn deny_env(self, name: &str) -> Self {
+        self.push(false, RuleKind::Env(NamePattern::parse(name)))
+    }
+    pub fn allow_stdin(self) -> Self {
+        self.push(true, RuleKind::Stdin)
+    }
+    pub fn deny_stdin(self) -> Self {
+        self.push(false, RuleKind::Stdin)
+    }
+    pub fn deny_stdout(self) -> Self {
+        self.push(false, RuleKind::Stdout)
+    }
+    pub fn deny_stderr(self) -> Self {
+        self.push(false, RuleKind::Stderr)
+    }
+    /// Allows a custom capability (`detail = None` allows any detail).
+    pub fn allow_custom(self, name: &str, detail: Option<&str>) -> Self {
+        self.push(true, RuleKind::Custom(name.to_string(), detail.map(String::from)))
+    }
+    pub fn deny_custom(self, name: &str, detail: Option<&str>) -> Self {
+        self.push(false, RuleKind::Custom(name.to_string(), detail.map(String::from)))
+    }
+    pub fn fallback(mut self, d: Decision) -> Self {
+        self.fallback = d;
+        self
+    }
+
+    pub fn check(&self, cap: &Capability) -> Decision {
+        self.check_in(cap, PathSpace::Host)
+    }
+
+    /// See [`super::Policy::check_entry`].
+    pub fn check_entry(&self, cap: &Capability) -> Decision {
+        self.check_entry_in(cap, PathSpace::Host)
+    }
+
+    /// See [`super::Policy::denies_under`].
+    pub fn denies_under(&self, path: &Path) -> bool {
+        self.denies_under_normalized_in(&entry_path(path, PathSpace::Host), PathSpace::Host)
+    }
+
+    pub(crate) fn check_in(&self, cap: &Capability, space: PathSpace) -> Decision {
+        let normal = |p: &Path| match space {
+            PathSpace::Host => normalize_path(p),
+            PathSpace::Memory => crate::files::memory_path(p),
+        };
+        match cap {
+            Capability::FsRead(p) => self.check_normalized_in(&Capability::FsRead(normal(p)), space),
+            Capability::FsWrite(p) => self.check_normalized_in(&Capability::FsWrite(normal(p)), space),
+            Capability::Import(p) => self.check_normalized_in(&Capability::Import(normal(p)), space),
+            _ => self.check_normalized_in(cap, space),
+        }
+    }
+
+    pub(crate) fn check_entry_in(&self, cap: &Capability, space: PathSpace) -> Decision {
+        match cap {
+            Capability::FsRead(p) => self.check_normalized_in(&Capability::FsRead(entry_path(p, space)), space),
+            Capability::FsWrite(p) => self.check_normalized_in(&Capability::FsWrite(entry_path(p, space)), space),
+            _ => self.check_in(cap, space),
+        }
+    }
+
+    /// Decides `cap`, whose path (if any) is normalized in `space`.
+    pub(crate) fn check_normalized_in(&self, cap: &Capability, space: PathSpace) -> Decision {
+        if let Capability::NetAddr { host, addr } = cap {
+            return self.check_addr(host, *addr);
+        }
+        match self.verdict(cap, space, &[]) {
+            Some((true, _)) => Decision::Allow,
+            Some((false, _)) => Decision::Deny,
+            None => match cap {
+                Capability::Stdout | Capability::Stderr => Decision::Allow,
+                Capability::Import(_) if !self.others().imports_restricted => Decision::Allow,
+                _ => self.fallback,
+            },
+        }
+    }
+
+    pub(crate) fn denies_under_normalized_in(&self, path: &Path, space: PathSpace) -> bool {
+        let index = self.files(space);
+        !index.deny.is_empty() && index.deny.any_below(&refs(&folded(&path_segments(path))), READ | WRITE)
+    }
+
+    /// The decision on a file capability normalized but for the spelling of
+    /// its final name, if it is the same for every spelling (see
+    /// [`super::Policy::decision_for_any_spelling`]).
+    pub(crate) fn decision_for_any_spelling(&self, cap: &Capability, space: PathSpace) -> Option<Decision> {
+        let (Capability::FsRead(p) | Capability::FsWrite(p) | Capability::Import(p)) = cap else { return None };
+        let index = self.files(space);
+        // Deny rules compare folded names, which are the same for every spelling.
+        if index.allow.names_last(&refs(&index.allow_input(&path_segments(p)))) {
+            return None;
+        }
+        Some(self.check_normalized_in(cap, space)).filter(|&d| d != Decision::Prompt)
+    }
+
+    /// The rule deciding `cap` (normalized in `space`), leaving out the
+    /// rules `exclude`: whether it allows, and its index. `None` if no rule
+    /// matches.
+    pub(crate) fn verdict(&self, cap: &Capability, space: PathSpace, exclude: &[usize]) -> Option<(bool, usize)> {
+        let mut best = Best::new(exclude);
+        let index = self.others();
+        match cap {
+            Capability::FsRead(p) => self.file_verdict(p, READ, space, &mut best),
+            Capability::FsWrite(p) => self.file_verdict(p, WRITE, space, &mut best),
+            Capability::Import(p) => self.file_verdict(p, IMPORT, space, &mut best),
+            Capability::Net { host, port } => self.net_verdict(&Dest::new(host, *port), &mut best),
+            Capability::NetAddr { .. } => {}
+            Capability::Http { method, scheme, host, port, path } => {
+                let dest = Dest::new(host, *port);
+                let (names, alt) = url_segments(path);
+                self.http_verdict(&dest, method, scheme, &names, &mut best);
+                let Some(alt) = alt else { return best.verdict() };
+                // A server may split at decoded separators: both readings
+                // must be allowed.
+                let mut other = Best::new(exclude);
+                self.http_verdict(&dest, method, scheme, &alt, &mut other);
+                return match (best.verdict(), other.verdict()) {
+                    (Some((false, r)), _) | (_, Some((false, r))) => Some((false, r)),
+                    (Some((true, r)), Some((true, _))) => Some((true, r)),
+                    _ => None,
+                };
+            }
+            Capability::NetListen(addr) => {
+                for &(ref pattern, allow, rule) in &index.listen {
+                    if let Some(score) = listen_match(pattern, addr) {
+                        best.offer([score, 0, 0, 0, 0], allow, rule);
+                    }
+                }
+            }
+            Capability::Env(name) if name == "*" => {
+                // All variables cannot be had while some are denied.
+                let named = index.env_names.values().flatten().map(|&(allow, rule)| (allow, rule));
+                let denies = named.chain(index.env.iter().map(|&(_, allow, rule)| (allow, rule)));
+                if let Some((_, rule)) = denies.filter(|&(allow, rule)| !allow && !exclude.contains(&(rule as usize))).min_by_key(|e| e.1) {
+                    return Some((false, rule as usize));
+                }
+                for &(ref pattern, allow, rule) in &index.env {
+                    if *pattern == NamePattern::Any {
+                        best.offer([0; 5], allow, rule);
+                    }
+                }
+            }
+            Capability::Env(name) => {
+                for &(allow, rule) in index.env_names.get(name.as_str()).into_iter().flatten() {
+                    best.offer([2, 0, 0, 0, 0], allow, rule);
+                }
+                for (pattern, allow, rule) in &index.env {
+                    let spec = match pattern {
+                        NamePattern::Glob(g) if g.matches(name) => [1, g.pieces().iter().map(|p| p.len() as u32).sum(), 0, 0, 0],
+                        NamePattern::Any => [0; 5],
+                        _ => continue,
+                    };
+                    best.offer(spec, *allow, *rule);
+                }
+            }
+            Capability::Stdin | Capability::Stdout | Capability::Stderr => {
+                for &(ref kind, allow, rule) in &index.streams {
+                    if std::mem::discriminant(kind) == std::mem::discriminant(cap) {
+                        best.offer([0; 5], allow, rule);
+                    }
+                }
+            }
+            Capability::Custom { name, detail } => {
+                for &(ref d, allow, rule) in index.custom.get(name.as_str()).into_iter().flatten() {
+                    if d.as_ref().is_none_or(|d| d == detail) {
+                        best.offer([d.is_some() as u32, 0, 0, 0, 0], allow, rule);
+                    }
+                }
+            }
+        }
+        best.verdict()
+    }
+
+    fn file_verdict(&self, p: &Path, op: u8, space: PathSpace, best: &mut Best<'_>) {
+        let index = self.files(space);
+        let mut offer = |e: &FileEntry, depth: usize, allow: bool| {
+            if e.mask & op != 0 {
+                best.offer([depth as u32, e.weight, 0, 0, 0], allow, e.rule);
+            }
+        };
+        let names = path_segments(p);
+        if !index.allow.is_empty() {
+            index.allow.matches(&refs(&index.allow_input(&names)), |e, depth| offer(e, depth, true));
+        }
+        if !index.deny.is_empty() {
+            index.deny.matches(&refs(&folded(&names)), |e, depth| offer(e, depth, false));
+        }
+    }
+
+    /// Offers the net rules matching `dest`. Unless `allow private-net`,
+    /// internal destinations named directly need an explicit allow rule.
+    fn net_verdict(&self, dest: &Dest, best: &mut Best<'_>) {
+        let internal = self.internal(dest);
+        self.others().net.find(dest, |score, explicit, spelled, e| {
+            if !e.allow || (!spelled && (explicit || !internal)) {
+                best.offer([score, 0, 0, 0, 0], e.allow, e.rule);
+            }
+        });
+    }
+
+    fn internal(&self, dest: &Dest) -> bool {
+        self.deny_private && (dest.ip.is_some_and(is_private_address) || is_localhost(dest.name))
+    }
+
+    /// Offers the net and http rules matching a request; net rules match
+    /// any method and path.
+    fn http_verdict(&self, dest: &Dest, method: &str, scheme: &str, names: &[String], best: &mut Best<'_>) {
+        self.net_verdict(dest, best);
+        let index = self.others();
+        if index.groups.is_empty() {
+            return;
+        }
+        let internal = self.internal(dest);
+        let method = method.to_ascii_uppercase();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut folded_names = None;
+        index.http.find(dest, |score, explicit, spelled, &group| {
+            let group = &index.groups[group as usize];
+            let mut offer = |e: &HttpEntry, depth: usize, allow: bool| {
+                if e.methods.as_ref().is_none_or(|m| m.contains(&method)) && e.scheme.is_none_or(|s| s.eq_ignore_ascii_case(scheme)) {
+                    best.offer([score, e.scheme.is_some() as u32, depth as u32, e.weight, e.methods.is_some() as u32], allow, e.rule);
+                }
+            };
+            if !group.allow.is_empty() && !spelled && (explicit || !internal) {
+                group.allow.matches(&names, |e, depth| offer(e, depth, true));
+            }
+            if !group.deny.is_empty() {
+                let folded = folded_names.get_or_insert_with(|| names.iter().map(|n| fold_name(n)).collect::<Vec<_>>());
+                group.deny.matches(&refs(folded), |e, depth| offer(e, depth, false));
+            }
+        });
+    }
+
+    /// Decides connecting to `addr`, an address `host` resolved to.
+    fn check_addr(&self, host: &str, addr: std::net::SocketAddr) -> Decision {
+        let ip = addr.ip().to_canonical();
+        // An IP literal was fully decided as `Net`, and resolves only to itself.
+        if let Some(literal) = parse_ip(host) {
+            return if literal == ip { Decision::Allow } else { Decision::Deny };
+        }
+        let mut best = Best::new(&[]);
+        self.others().net.find_ip(ip, addr.port(), |score, spelled, e| {
+            if !(e.allow && spelled) {
+                best.offer([score, 0, 0, 0, 0], e.allow, e.rule);
+            }
+        });
+        let allowed = match best.verdict() {
+            Some((allow, _)) => allow,
+            None => !self.deny_private || !is_private_address(ip) || (is_localhost(host) && ip.is_loopback()),
+        };
+        if allowed { Decision::Allow } else { Decision::Deny }
+    }
+
+    fn files(&self, space: PathSpace) -> &FileIndex {
+        let cell = match space {
+            PathSpace::Host => &self.host_files,
+            PathSpace::Memory => &self.memory_files,
+        };
+        cell.get_or_init(|| Arc::new(FileIndex::build(&self.rules, space)))
+    }
+
+    fn others(&self) -> &Index {
+        self.others.get_or_init(|| Arc::new(Index::build(&self.rules)))
+    }
+}
+
+/// The path of the entry `p` itself, normalized in `space`.
+pub(crate) fn entry_path(p: &Path, space: PathSpace) -> PathBuf {
+    match space {
+        PathSpace::Host => normalize_entry_path(p),
+        PathSpace::Memory => crate::files::memory_path(p),
+    }
+}
+
+/// Names, folded as deny rules compare them.
+fn folded<'a>(names: &'a [Cow<'a, str>]) -> Vec<Cow<'a, str>> {
+    names.iter().map(|s| fold_name(s)).collect()
+}
+
+fn refs<S: AsRef<str>>(names: &[S]) -> Vec<&str> {
+    names.iter().map(AsRef::as_ref).collect()
+}
+
+/// How specific a rule's match is, compared in order.
+type Spec = [u32; 5];
+
+/// The deciding rule among those offered: the most specific, deny at a
+/// tie, then the first.
+struct Best<'a> {
+    exclude: &'a [usize],
+    best: Option<(Spec, bool, std::cmp::Reverse<usize>)>,
+}
+
+impl<'a> Best<'a> {
+    fn new(exclude: &'a [usize]) -> Best<'a> {
+        Best { exclude, best: None }
+    }
+
+    fn offer(&mut self, spec: Spec, allow: bool, rule: u32) {
+        let rule = rule as usize;
+        let candidate = (spec, !allow, std::cmp::Reverse(rule));
+        if !self.exclude.contains(&rule) && self.best.is_none_or(|b| candidate > b) {
+            self.best = Some(candidate);
+        }
+    }
+
+    fn verdict(&self) -> Option<(bool, usize)> {
+        self.best.map(|(_, deny, rule)| (!deny, rule.0))
+    }
+}
+
+/// The file rules of a policy, with their paths normalized in one space.
+#[derive(Debug)]
+struct FileIndex {
+    allow: Trie<FileEntry>,
+    /// Deny rules, by names folded with [`fold_name`]: they also match other
+    /// spellings a file system may equate.
+    deny: Trie<FileEntry>,
+    /// Whether allow rules ignore case (Windows paths).
+    caseless: bool,
+}
+
+#[derive(Debug)]
+struct FileEntry {
+    rule: u32,
+    mask: u8,
+    weight: u32,
+}
+
+impl FileIndex {
+    fn build(rules: &[Rule], space: PathSpace) -> FileIndex {
+        let caseless = cfg!(windows) && space == PathSpace::Host;
+        let mut index = FileIndex { allow: Trie::default(), deny: Trie::default(), caseless };
+        let mut resolver = Resolver::default();
+        for (i, rule) in rules.iter().enumerate() {
+            let RuleKind::Files(access, pattern) = &rule.kind else { continue };
+            let prefix = match space {
+                PathSpace::Host => resolver.normalize(&pattern.prefix),
+                PathSpace::Memory => crate::files::memory_path(&pattern.prefix),
+            };
+            let segs: Vec<Seg> =
+                path_segments(&prefix).iter().map(|s| Seg::Lit((**s).into())).chain(pattern.rest.iter().cloned()).collect();
+            let mask = access.mask(rule.allow);
+            let entry = FileEntry { rule: i as u32, mask, weight: segs.iter().map(Seg::weight).sum() };
+            if rule.allow {
+                let segs: Vec<Seg> = if caseless { segs.iter().map(|s| s.map(str::to_lowercase)).collect() } else { segs };
+                index.allow.insert(&segs, entry, mask);
+            } else {
+                let segs: Vec<Seg> = segs.iter().map(|s| s.map(|n| fold_name(n).into_owned())).collect();
+                index.deny.insert(&segs, entry, mask);
+            }
+        }
+        index
+    }
+
+    /// Names as allow rules compare them.
+    fn allow_input<'a>(&self, names: &'a [Cow<'a, str>]) -> Vec<Cow<'a, str>> {
+        names.iter().map(|n| if self.caseless { Cow::Owned(n.to_lowercase()) } else { Cow::Borrowed(&**n) }).collect()
+    }
+}
+
+/// Normalizes the paths of many rules as [`normalize_path`] does, taking
+/// one walk and one listing per directory rather than a walk per path.
+#[derive(Default)]
+struct Resolver {
+    /// Directories: normalized, and what they hold (`None`: not listed).
+    dirs: FxHashMap<PathBuf, (PathBuf, Option<Listing>)>,
+}
+
+enum Listing {
+    /// The directory does not exist, so nothing in it does.
+    Missing,
+    /// The names of its regular files.
+    Files(hashbrown::HashSet<std::ffi::OsString, crate::vm::value::FxBuild>),
+}
+
+/// The most entries listed of a directory.
+const MAX_LISTING: usize = 1 << 20;
+
+impl Resolver {
+    fn normalize(&mut self, p: &Path) -> PathBuf {
+        let (Some(dir), Some(name)) = (p.parent(), p.file_name()) else { return normalize_path(p) };
+        if !cfg!(feature = "os") {
+            return normalize_path(p);
+        }
+        let (resolved, listing) = self.dirs.entry(dir.to_path_buf()).or_insert_with(|| {
+            let resolved = normalize_path(dir);
+            let listing = match std::fs::read_dir(&resolved) {
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => Some(Listing::Missing),
+                Err(_) => None,
+                // Names left out (beyond the limit, or unreadable) take the walk.
+                Ok(entries) => Some(Listing::Files(
+                    entries
+                        .take(MAX_LISTING)
+                        .flatten()
+                        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+                        .map(|e| e.file_name())
+                        .collect(),
+                )),
+            };
+            (resolved, listing)
+        });
+        match listing {
+            // A regular file named exactly so is itself; a directory may be
+            // a firmlink or junction, which the full walk resolves.
+            Some(Listing::Missing) => resolved.join(name),
+            Some(Listing::Files(files)) if files.contains(name) => resolved.join(name),
+            _ => normalize_path(p),
+        }
+    }
+}
+
+/// The rules of a policy other than file rules.
+#[derive(Debug, Default)]
+struct Index {
+    net: HostIndex<NetEntry>,
+    /// Groups of http rules by host pattern.
+    http: HostIndex<u32>,
+    groups: Vec<HttpGroup>,
+    listen: Vec<(String, bool, u32)>,
+    /// Rules for variables by name, and those with patterns.
+    env_names: FxHashMap<String, Vec<(bool, u32)>>,
+    env: Vec<(NamePattern, bool, u32)>,
+    streams: Vec<(Capability, bool, u32)>,
+    /// Custom rules by name: their detail, if any.
+    custom: FxHashMap<String, Vec<(Option<String>, bool, u32)>>,
+    imports_restricted: bool,
+}
+
+#[derive(Debug)]
+struct NetEntry {
+    rule: u32,
+    allow: bool,
+}
+
+#[derive(Debug, Default)]
+struct HttpGroup {
+    allow: Trie<HttpEntry>,
+    /// Deny rules, by folded names (see [`FileIndex::deny`]).
+    deny: Trie<HttpEntry>,
+}
+
+#[derive(Debug)]
+struct HttpEntry {
+    rule: u32,
+    methods: Option<Vec<String>>,
+    scheme: Option<&'static str>,
+    weight: u32,
+}
+
+impl Index {
+    fn build(rules: &[Rule]) -> Index {
+        let mut index = Index::default();
+        let mut groups: FxHashMap<String, u32> = FxHashMap::default();
+        for (i, rule) in rules.iter().enumerate() {
+            let (rule_id, allow) = (i as u32, rule.allow);
+            match &rule.kind {
+                RuleKind::Files(Access::Import, _) => index.imports_restricted |= allow,
+                RuleKind::Files(..) => {}
+                RuleKind::Net(p) => index.net.insert(p, NetEntry { rule: rule_id, allow }),
+                RuleKind::Http(methods, url) => {
+                    let key = url.host.to_string();
+                    let group = *groups.entry(key).or_insert_with(|| {
+                        index.http.insert(&url.host, index.groups.len() as u32);
+                        index.groups.push(HttpGroup::default());
+                        index.groups.len() as u32 - 1
+                    });
+                    let entry = HttpEntry {
+                        rule: rule_id,
+                        methods: methods.clone(),
+                        scheme: url.scheme,
+                        weight: url.path.iter().map(Seg::weight).sum(),
+                    };
+                    let group = &mut index.groups[group as usize];
+                    if allow {
+                        group.allow.insert(&url.path, entry, 1);
+                    } else {
+                        let segs: Vec<Seg> = url.path.iter().map(|s| s.map(|n| fold_name(n).into_owned())).collect();
+                        group.deny.insert(&segs, entry, 1);
+                    }
+                }
+                RuleKind::Listen(p) => index.listen.push((p.clone(), allow, rule_id)),
+                RuleKind::Env(NamePattern::Exact(n)) => index.env_names.entry(n.clone()).or_default().push((allow, rule_id)),
+                RuleKind::Env(p) => index.env.push((p.clone(), allow, rule_id)),
+                RuleKind::Stdin => index.streams.push((Capability::Stdin, allow, rule_id)),
+                RuleKind::Stdout => index.streams.push((Capability::Stdout, allow, rule_id)),
+                RuleKind::Stderr => index.streams.push((Capability::Stderr, allow, rule_id)),
+                RuleKind::Custom(n, d) => index.custom.entry(n.clone()).or_default().push((d.clone(), allow, rule_id)),
+            }
+        }
+        index
+    }
+}
+
+#[cfg(all(test, feature = "os", unix))]
+mod tests {
+    use super::*;
+
+    /// Resolving many paths at once agrees with resolving each.
+    #[test]
+    fn the_resolver_agrees_with_normalize_path() {
+        let base = normalize_path(&std::env::temp_dir()).join(format!("sand-policy-resolver-{}", std::process::id()));
+        std::fs::create_dir_all(base.join("dir/sub")).unwrap();
+        std::fs::write(base.join("dir/File.txt"), "").unwrap();
+        std::os::unix::fs::symlink(base.join("dir/File.txt"), base.join("dir/file-link")).unwrap();
+        std::os::unix::fs::symlink(base.join("dir/sub"), base.join("dir/dir-link")).unwrap();
+        std::os::unix::fs::symlink("missing", base.join("dir/dangling")).unwrap();
+        let mut resolver = Resolver::default();
+        for rest in [
+            "dir/File.txt",
+            "dir/file.TXT",
+            "dir/sub",
+            "dir/SUB",
+            "dir/file-link",
+            "dir/dir-link",
+            "dir/dangling",
+            "dir/missing",
+            "dir/dir-link/x",
+            "dir/dangling/x",
+            "missing/x",
+            "dir/File.txt/x",
+        ] {
+            let p = base.join(rest);
+            assert_eq!(resolver.normalize(&p), normalize_path(&p), "{rest}");
+        }
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+}

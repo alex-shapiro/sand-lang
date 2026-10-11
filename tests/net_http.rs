@@ -124,6 +124,49 @@ fn http_redirects_are_checked_against_policy() {
 }
 
 #[test]
+fn http_rules_decide_methods_and_routes() {
+    let server = http_server(|req| match req.path() {
+        "/old" => HttpResponse::new(302, "").header("location", "/private/x"),
+        path => HttpResponse::new(200, format!("{} {path}", req.method)),
+    });
+    let addr = server.addr;
+    let policy = RulePolicy::new()
+        .allow_http(&format!("GET {addr}/api/** {addr}/old"))
+        .allow_http(&format!("POST {addr}/api/items"))
+        .deny_http(&format!("{addr}/api/admin"));
+    let src = format!(
+        r#"
+import http
+fn show(r: Result<http.Response>) {{
+    match r {{
+        Ok(r) => print(r.text().unwrap())
+        Err(e) => print(e.message)
+    }}
+}}
+show(http.get("http://{addr}/api/v1"))
+show(http.post("http://{addr}/api/items", b""))
+show(http.post("http://{addr}/api/other", b""))
+show(http.get("http://{addr}/api/admin/users"))
+show(http.get("http://{addr}/api/../api/./v1/../v2"))
+show(http.get("http://{addr}/api/v1/%2e%2e/%2E%2E/private"))
+show(http.get("http://{addr}/old"))
+"#
+    );
+    let r = run_with(&src, |c| c.policy(Policy::rules(policy)));
+    assert_eq!(
+        r.ok_stdout(),
+        format!(
+            "GET /api/v1\nPOST /api/items\npermission denied: POST http://{addr}/api/other\n\
+             permission denied: GET http://{addr}/api/admin/users\nGET /api/v2\n\
+             permission denied: GET http://{addr}/private\npermission denied: GET http://{addr}/private/x\n"
+        )
+    );
+    // Denied requests reach no server, and the server saw the paths as checked.
+    let seen: Vec<String> = server.requests.lock().unwrap().iter().map(|r| r.target.clone()).collect();
+    assert_eq!(seen, ["/api/v1", "/api/items", "/api/v2", "/old"]);
+}
+
+#[test]
 fn http_body_limit() {
     let server = http_server(|_| HttpResponse::new(200, vec![b'x'; 100_000]));
     let src = format!("import http\nprint(http.get(\"http://{}/\").unwrap_err().kind)", server.addr);
@@ -149,7 +192,7 @@ fn http_timeout() {
 }
 
 #[test]
-fn http_connection_refused_and_bad_urls() {
+fn http_connection_denied_and_bad_urls() {
     let unused = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
     let src = format!(
         "import http\nprint(http.get(\"http://{unused}/\").unwrap_err().kind)\nprint(http.get(\"not a url\").unwrap_err().kind)\nprint(http.get(\"ftp://x/\").unwrap_err().kind)"
@@ -521,16 +564,16 @@ req.respond(200, "served".bytes())?
     // Each connection being read holds an 8 KiB buffer: not all of them fit.
     let mut idle: Vec<_> = (0..120).map(|_| std::net::TcpStream::connect(&addr).unwrap()).collect();
     std::thread::sleep(Duration::from_millis(500));
-    let mut refused = 0;
+    let mut denied = 0;
     for s in &mut idle {
         s.set_read_timeout(Some(Duration::from_millis(20))).unwrap();
         let mut resp = String::new();
         if s.read_to_string(&mut resp).is_ok() {
             assert!(resp.starts_with("HTTP/1.1 503 Service Unavailable\r\n"), "{resp}");
-            refused += 1;
+            denied += 1;
         }
     }
-    assert!((1..120).contains(&refused), "{refused} refused");
+    assert!((1..120).contains(&denied), "{denied} denied");
     drop(idle);
     std::thread::sleep(Duration::from_millis(200));
     let mut s = std::net::TcpStream::connect(&addr).unwrap();

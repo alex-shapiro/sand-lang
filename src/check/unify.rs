@@ -52,7 +52,7 @@ impl Checker<'_> {
             return false;
         }
         if !self.budget.charge(1) {
-            // Out of budget: refuse the binding rather than risk a cycle.
+            // Out of budget: deny the binding rather than risk a cycle.
             return true;
         }
         match self.rty(t) {

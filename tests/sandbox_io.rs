@@ -442,6 +442,32 @@ print(fs.list_dir("allowed")?)
 }
 
 #[test]
+fn deny_patterns_protect_matching_files_and_the_trees_that_may_hold_them() {
+    let dir = TempDir::new("deny-patterns");
+    dir.write("project/src/a.txt", "a");
+    dir.write("project/src/.env", "SECRET=1");
+    dir.write("project/Docs/notes.md", "notes");
+    let policy =
+        sandlang::policy::PolicyFile::parse("allow ./project\ndeny ./project/**/.env\ndeny write ./project/*/*.md", dir.path(), None)
+            .unwrap()
+            .policy();
+    let cwd = dir.path().to_path_buf();
+    let src = r#"
+import fs
+print(fs.read_text("project/src/.env").unwrap_err().kind)
+print(fs.write_text("project/new/.ENV", "x").unwrap_err().kind)
+print(fs.read_text("project/Docs/notes.md")?)
+print(fs.write_text("project/Docs/notes.md", "x").unwrap_err().kind)
+// Files have nothing below them; a directory may hold a `.env`.
+fs.rename("project/src/a.txt", "project/src/b.txt")?
+print(fs.rename("project/src", "project/lib").unwrap_err().kind)
+print(fs.list_dir("project/src")?)
+"#;
+    let r = run_with(src, move |c| c.policy(policy).cwd(cwd));
+    assert_eq!(r.ok_stdout(), "permission_denied\npermission_denied\nnotes\npermission_denied\npermission_denied\n[\".env\", \"b.txt\"]\n");
+}
+
+#[test]
 fn renaming_or_removing_trees_respects_deny_rules_inside() {
     let dir = TempDir::new("subtree");
     dir.write("data/a/secret/key.txt", "key");
@@ -525,7 +551,7 @@ print(fs.list_dir("allowed")?)
 
 /// A script swaps a directory with a symlink to a forbidden directory while
 /// other tasks read through it: whatever the interleaving, no read may see
-/// the forbidden file (it is refused by the policy check or by the no-follow
+/// the forbidden file (it is denied by the policy check or by the no-follow
 /// open). Path-based opens would leak the file dozens of times.
 #[cfg(unix)]
 #[test]
@@ -683,7 +709,7 @@ print((seen.get("public") ?? 0) > 0)
 /// nothing is ever created or truncated through it.
 #[cfg(unix)]
 #[test]
-fn symlinks_raced_into_created_paths_are_refused() {
+fn symlinks_raced_into_created_paths_are_denied() {
     use std::os::unix::fs::symlink;
     let dir = TempDir::new("race-create");
     dir.write("outside/victim.txt", "intact");
@@ -896,7 +922,7 @@ fn names_that_are_not_utf8() {
     let dir = TempDir::new("non-utf8");
     let odd = dir.path().join(OsStr::from_bytes(b"caf\xe9"));
     if std::fs::create_dir(&odd).is_err() {
-        eprintln!("skipped: the file system of {} refuses names that are not UTF-8", dir.path().display());
+        eprintln!("skipped: the file system of {} denies names that are not UTF-8", dir.path().display());
         return;
     }
     std::fs::write(odd.join("key.txt"), "SECRET").unwrap();
@@ -919,11 +945,11 @@ print(fs.list_dir("..")?.len())
     assert_eq!(std::fs::read_to_string(odd.join("new.txt")).unwrap(), "ok");
 }
 
-/// A dangling symlink is refused even when its target would be allowed:
+/// A dangling symlink is denied even when its target would be allowed:
 /// the policy did not see where it leads (nothing exists there yet).
 #[cfg(unix)]
 #[test]
-fn dangling_symlinks_inside_allowed_directories_are_refused() {
+fn dangling_symlinks_inside_allowed_directories_are_denied() {
     use std::os::unix::fs::symlink;
     let dir = TempDir::new("dangling-inside");
     let allowed = dir.path().join("allowed");
@@ -1260,7 +1286,10 @@ fn symlink_entries_are_named_as_stored() {
     ] {
         assert_eq!(normalize_entry_path(&data.join(given)), data.join(stored), "{given}");
     }
+    // The policy resolves its rules' paths when it first decides, here
+    // before `Later` exists.
     let p = Policy::rules(RulePolicy::new().allow_write(data.join("Later")));
+    assert_eq!(p.check_entry(&Capability::FsWrite(data.join("Later"))), Decision::Allow);
     symlink(dir.path().join("outside/target.txt"), data.join("Later")).unwrap();
     assert_eq!(p.check_entry(&Capability::FsWrite(data.join("LATER"))), Decision::Allow);
 
@@ -1324,7 +1353,7 @@ print(fs.remove_file("data/x.txt").unwrap_err().message)
 }
 
 #[test]
-fn overlong_paths_are_refused_quickly() {
+fn overlong_paths_are_denied_quickly() {
     let dir = TempDir::new("long-paths");
     let src = r#"
 import fs

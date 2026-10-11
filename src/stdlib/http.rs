@@ -391,7 +391,7 @@ fn send(vm: &mut Vm, a: &[Value]) -> NResult {
         Ok(h) => h,
         Err(e) => return Ok(vm.err_value("invalid", &e)),
     };
-    if let Some(denied) = check_permission(vm, Capability::Net { host: url.host.clone(), port: url.port })? {
+    if let Some(denied) = check_permission(vm, url.capability(&method))? {
         return Ok(denied);
     }
     // The request is held outside the heap while it is sent.
@@ -591,7 +591,7 @@ fn start_upload(vm: &mut Vm, a: &[Value]) -> NResult {
         Ok(n) => n,
         Err(e) => return Ok(vm.err_value("invalid", &e)),
     };
-    if let Some(denied) = check_permission(vm, Capability::Net { host: url.host.clone(), port: url.port })? {
+    if let Some(denied) = check_permission(vm, url.capability(&method))? {
         return Ok(denied);
     }
     let buffers = if url.scheme == "https" { net::CONN_BUFFER + net::TLS_BUFFERS } else { net::CONN_BUFFER };
@@ -925,7 +925,7 @@ fn next_request(vm: &mut Vm, a: &[Value]) -> NResult {
 
 /// Answers a connection that does not deliver a valid request head with
 /// `status` (best effort: a client that does not read cannot hold the slot).
-async fn refuse<W: AsyncWrite + Unpin>(w: &mut W, status: &str, message: &str) {
+async fn deny<W: AsyncWrite + Unpin>(w: &mut W, status: &str, message: &str) {
     let body = format!("{message}\n");
     let response = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
     let send = async {
@@ -940,7 +940,7 @@ async fn read_connection(stream: TcpStream, mem: Arc<IoMemory>, mut slot: Resour
     let peer = stream.peer_addr().ok()?.to_string();
     let (r, mut w) = stream.into_split();
     if slot.reserve_buffers(net::CONN_BUFFER).is_err() {
-        refuse(&mut w, "503 Service Unavailable", "the server is out of memory").await;
+        deny(&mut w, "503 Service Unavailable", "the server is out of memory").await;
         return None;
     }
     // Bytes buffered past the head stay in this reader for the body.
@@ -969,8 +969,8 @@ async fn read_connection(stream: TcpStream, mem: Arc<IoMemory>, mut slot: Resour
             drop(res);
             match e.kind {
                 "closed" => {}
-                "timeout" => refuse(&mut w, "408 Request Timeout", &e.message).await,
-                _ => refuse(&mut w, "400 Bad Request", &e.message).await,
+                "timeout" => deny(&mut w, "408 Request Timeout", &e.message).await,
+                _ => deny(&mut w, "400 Bad Request", &e.message).await,
             }
             None
         }

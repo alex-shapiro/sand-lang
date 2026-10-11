@@ -15,9 +15,9 @@ sand — the Sand language
 
 USAGE:
     sand run FILE [OPTIONS] [-- ARGS...]   run a script
-    sand check FILE...                     type check
-    sand lint FILE... [--allow-warnings]   report lint warnings
-    sand fmt FILE... [--check]             format files in place (or check)
+    sand check FILE...                     type check (FILE.policy: validate a policy)
+    sand lint FILE... [--allow-warnings]   report lint warnings (also of FILE.policy)
+    sand fmt FILE... [--check]             format files in place (or check; also FILE.policy)
     sand fmt - [--check]                   format standard input to standard output
     sand test FILE... [OPTIONS]            run test blocks (options as for run)
     sand repl [OPTIONS]                    interactive session
@@ -106,7 +106,7 @@ fn run_options(args: &[String]) -> Result<RunOptions, String> {
 }
 
 /// Like [`run_options`]; with `files_only` every positional argument is a
-/// file (`file` is the first, `script_args` the others) and `--` is refused.
+/// file (`file` is the first, `script_args` the others) and `--` is denied.
 fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, String> {
     // The policy file first, wherever it is given: the options add to it.
     let options = args.iter().position(|a| a == "--").map_or(args, |end| &args[..end]);
@@ -245,11 +245,28 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
 /// its directory).
 fn read_policy(path: &Path) -> Result<PolicyFile, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read policy file {}: {e}", path.display()))?;
-    let base = absolute(&path.to_string_lossy()).parent().map(Path::to_path_buf).unwrap_or_default();
-    PolicyFile::parse(&text, &base).map_err(|errors| {
-        let lines: Vec<String> = errors.iter().map(|e| format!("{}:{}: {}", path.display(), e.line, e.message)).collect();
+    PolicyFile::parse(&text, &policy_base(path), std::env::home_dir().as_deref()).map_err(|errors| {
+        let lines: Vec<String> = errors.iter().map(|e| format!("{}:{e}", path.display())).collect();
         format!("invalid policy file\n{}", lines.join("\n"))
     })
+}
+
+/// The directory relative paths in the policy file at `path` start from.
+fn policy_base(path: &Path) -> PathBuf {
+    absolute(&path.to_string_lossy()).parent().map(Path::to_path_buf).unwrap_or_default()
+}
+
+/// Check whether `file` is a policy file.
+fn is_policy(file: &str) -> bool {
+    Path::new(file).extension().is_some_and(|e| e == "policy")
+}
+
+/// Prints a policy file's errors; returns the exit status for them.
+fn report_policy_errors(file: &str, errors: &[sandlang::policy::PolicyError]) -> u8 {
+    for e in errors {
+        eprintln!("{file}:{e}");
+    }
+    2
 }
 
 /// Rejects malformed network patterns (which would silently match nothing).
@@ -435,6 +452,16 @@ fn cmd_check(args: &[String]) -> Result<u8, String> {
     let mut code = 0;
     for f in files {
         let path = Path::new(f);
+        if is_policy(f) {
+            match read_policy(path) {
+                Ok(_) => println!("{f}: ok"),
+                Err(e) => {
+                    eprintln!("sand: {e}");
+                    code = code.max(2);
+                }
+            }
+            continue;
+        }
         // Checking runs no script code; imports are confined to the module root.
         let mut engine = Engine::new(Config::new().policy(Policy::deny_all()));
         match engine.check_file(path) {
@@ -450,7 +477,16 @@ fn cmd_lint(args: &[String]) -> Result<u8, String> {
     let allow = flags[0];
     let mut count = 0;
     for f in files {
-        match sandlang::lint::lint_file(Path::new(f)) {
+        let warnings = if is_policy(f) {
+            let text = std::fs::read_to_string(f).map_err(|e| format!("cannot read {f}: {e}"))?;
+            match sandlang::policy::lint_policy(&text, &policy_base(Path::new(f)), std::env::home_dir().as_deref()) {
+                Ok(ws) => Ok(ws),
+                Err(errors) => return Ok(report_policy_errors(f, &errors)),
+            }
+        } else {
+            sandlang::lint::lint_file(Path::new(f))
+        };
+        match warnings {
             Ok(ws) => {
                 for w in ws {
                     println!("{f}:{w}");
@@ -478,7 +514,18 @@ fn cmd_fmt(args: &[String]) -> Result<u8, String> {
     let mut code = 0;
     for f in files {
         let src = std::fs::read_to_string(f).map_err(|e| format!("cannot read {f}: {e}"))?;
-        match sandlang::fmt::format_source(&src) {
+        let formatted = if is_policy(f) {
+            match sandlang::policy::format_policy(&src) {
+                Ok(out) => Ok(out),
+                Err(errors) => {
+                    code = report_policy_errors(f, &errors);
+                    continue;
+                }
+            }
+        } else {
+            sandlang::fmt::format_source(&src)
+        };
+        match formatted {
             Ok(out) => {
                 if out != src {
                     if check {

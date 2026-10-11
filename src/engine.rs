@@ -657,7 +657,7 @@ pub(crate) struct Compiled {
 #[derive(Clone, Copy)]
 pub(crate) struct CompileOptions {
     /// Whether imports the policy would prompt for are prompted for
-    /// (otherwise they are refused).
+    /// (otherwise they are denied).
     pub prompt: bool,
     /// Whether to gather lint facts.
     pub facts: bool,
@@ -755,7 +755,7 @@ impl Engine {
     }
 
     /// Type checks a source without running it. Imports the policy would
-    /// prompt for are refused.
+    /// prompt for are denied.
     pub fn check_source(&mut self, name: &str, source: &str) -> Result<Vec<Diagnostic>, Error> {
         let c = self.compile_now(name, source, &self.source_root().1, None, false)?;
         self.recycle(c.program, c.snapshot);
@@ -1066,7 +1066,7 @@ impl Engine {
     /// `start`.
     ///
     /// This runs before the compile budget exists, so it is bounded on its
-    /// own: overlong import paths are refused, discovery stops after
+    /// own: overlong import paths are denied, discovery stops after
     /// [`MAX_DISCOVERY_ERRORS`] errors, and it returns the error to report
     /// if the engine is interrupted or the wall-time limit passes. Time
     /// spent waiting for prompt answers is added to `prompted`.

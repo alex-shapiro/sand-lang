@@ -48,7 +48,7 @@ pub fn register(r: &mut Registry) {
 
     r.add_builtin("fs.read_bytes", |vm, a| {
         let (shown, mut t) = target!(vm, a[0]);
-        if let Some(e) = refuse(vm, &mut t, Access::Read, &shown)? {
+        if let Some(e) = check(vm, &mut t, Access::Read, &shown)? {
             return Ok(e);
         }
         let res = vm.io_reservation();
@@ -67,7 +67,7 @@ pub fn register(r: &mut Registry) {
     });
     r.add_builtin("fs.read_text", |vm, a| {
         let (shown, mut t) = target!(vm, a[0]);
-        if let Some(e) = refuse(vm, &mut t, Access::Read, &shown)? {
+        if let Some(e) = check(vm, &mut t, Access::Read, &shown)? {
             return Ok(e);
         }
         let res = vm.io_reservation();
@@ -107,7 +107,7 @@ pub fn register(r: &mut Registry) {
     r.add_builtin("fs.is_dir", |vm, a| file_kind(vm, a[0], |k| k == EntryKind::Dir));
     r.add_builtin("fs.list_dir", |vm, a| {
         let (shown, mut t) = target!(vm, a[0]);
-        if let Some(e) = refuse(vm, &mut t, Access::Read, &shown)? {
+        if let Some(e) = check(vm, &mut t, Access::Read, &shown)? {
             return Ok(e);
         }
         let res = vm.io_reservation();
@@ -131,7 +131,7 @@ pub fn register(r: &mut Registry) {
     });
     r.add_builtin("fs.create_dir", |vm, a| {
         let (shown, mut t) = target!(vm, a[0]);
-        if let Some(e) = refuse(vm, &mut t, Access::Write, &shown)? {
+        if let Some(e) = check(vm, &mut t, Access::Write, &shown)? {
             return Ok(e);
         }
         if !a[1].as_bool() {
@@ -140,7 +140,7 @@ pub fn register(r: &mut Registry) {
         // Every directory to be created must be writable, not just the last.
         // Those that exist are not created, whatever happens meanwhile.
         for dir in vm.host.fs.missing_ancestors(&t) {
-            if let Some(e) = refuse_path(vm, Capability::FsWrite(dir), &shown)? {
+            if let Some(e) = deny_path(vm, Capability::FsWrite(dir), &shown)? {
                 return Ok(e);
             }
         }
@@ -148,14 +148,14 @@ pub fn register(r: &mut Registry) {
     });
     r.add_builtin("fs.remove_file", |vm, a| {
         let (shown, mut t) = entry_target!(vm, a[0]);
-        if let Some(e) = refuse(vm, &mut t, Access::Write, &shown)? {
+        if let Some(e) = check(vm, &mut t, Access::Write, &shown)? {
             return Ok(e);
         }
         run(vm, shown, move |fs| fs.remove_file(t), ok_unit)
     });
     r.add_builtin("fs.remove_empty_dir", |vm, a| {
         let (shown, mut t) = entry_target!(vm, a[0]);
-        if let Some(e) = refuse(vm, &mut t, Access::Write, &shown)? {
+        if let Some(e) = check(vm, &mut t, Access::Write, &shown)? {
             return Ok(e);
         }
         run(vm, shown, move |fs| fs.remove_dir(t), ok_unit)
@@ -165,13 +165,15 @@ pub fn register(r: &mut Registry) {
         let (shown, mut from) = entry_target!(vm, a[0]);
         let (shown_to, mut to) = entry_target!(vm, a[1]);
         for (t, shown) in [(&mut from, &shown), (&mut to, &shown_to)] {
-            if let Some(e) = refuse(vm, t, Access::Write, shown)? {
+            if let Some(e) = check(vm, t, Access::Write, shown)? {
                 return Ok(e);
             }
         }
-        // Moving a directory moves everything below it, and replacing `to` replaces its tree.
-        for (shown, t) in [(&shown, &from), (&shown_to, &to)] {
-            if let Some(e) = protected_tree(vm, shown, &t.path) {
+        // Moving a directory moves its tree to below `to`, and replacing a
+        // directory `to` replaces its tree.
+        let moves_tree = is_dir(vm, &from);
+        for (shown, t, tree) in [(&shown, &from, moves_tree), (&shown_to, &to, moves_tree || is_dir(vm, &to))] {
+            if tree && let Some(e) = protected_tree(vm, shown, &t.path) {
                 return Ok(e);
             }
         }
@@ -185,7 +187,7 @@ pub fn register(r: &mut Registry) {
         let (shown, mut from) = target!(vm, a[0]);
         let (shown_to, mut to) = target!(vm, a[1]);
         for (t, access, shown) in [(&mut from, Access::Read, &shown), (&mut to, Access::Write, &shown_to)] {
-            if let Some(e) = refuse(vm, t, access, shown)? {
+            if let Some(e) = check(vm, t, access, shown)? {
                 return Ok(e);
             }
         }
@@ -196,7 +198,7 @@ pub fn register(r: &mut Registry) {
     });
     r.add_builtin("fs.stat", |vm, a| {
         let (shown, mut t) = target!(vm, a[0]);
-        if let Some(e) = refuse(vm, &mut t, Access::Read, &shown)? {
+        if let Some(e) = check(vm, &mut t, Access::Read, &shown)? {
             return Ok(e);
         }
         let stat = move |fs: &Fs| match fs.stat(&t)? {
@@ -245,7 +247,7 @@ pub fn register(r: &mut Registry) {
 }
 
 /// The script-supplied path `p` and its resolved form (in `mode`).
-/// Overlong paths are refused (kind `"invalid"`) before resolution, which
+/// Overlong paths are denied (kind `"invalid"`) before resolution, which
 /// is charged per component, for the symlinks it follows and for the
 /// directory entries it reads.
 fn target(vm: &mut Vm, p: Value, mode: Mode) -> Result<Result<(String, Target), Value>, Ctl> {
@@ -298,7 +300,7 @@ fn denied(vm: &mut Vm, cap: &Capability, shown: &str) -> Value {
 /// looked up as stored first (`Target::fix_spelling`) only if the decision
 /// may depend on it: on a case-insensitive file system that costs a system
 /// call or two, and most decisions are the same for every spelling.
-fn refuse(vm: &mut Vm, t: &mut Target, access: Access, shown: &str) -> Result<Option<Value>, Ctl> {
+fn check(vm: &mut Vm, t: &mut Target, access: Access, shown: &str) -> Result<Option<Value>, Ctl> {
     let cap = |p: &Path| match access {
         Access::Read => Capability::FsRead(p.to_path_buf()),
         Access::Write => Capability::FsWrite(p.to_path_buf()),
@@ -318,22 +320,27 @@ fn refuse(vm: &mut Vm, t: &mut Target, access: Access, shown: &str) -> Result<Op
             }
         }
     }
-    refuse_path(vm, cap(&t.path), shown)
+    deny_path(vm, cap(&t.path), shown)
 }
 
 /// Checks `cap` (whose path is normalized) against the policy.
-fn refuse_path(vm: &mut Vm, cap: Capability, shown: &str) -> Result<Option<Value>, Ctl> {
+fn deny_path(vm: &mut Vm, cap: Capability, shown: &str) -> Result<Option<Value>, Ctl> {
     if vm.permit_normalized(&cap)? {
         return Ok(None);
     }
     Ok(Some(denied(vm, &cap, shown)))
 }
 
-/// The `Err(permission_denied)` value if a deny rule protects something in
+/// The `Err(permission_denied)` value if a deny rule may match something in
 /// the tree at `path` (which is about to be moved, replaced or removed).
 fn protected_tree(vm: &mut Vm, shown: &str, path: &Path) -> Option<Value> {
     let protected = vm.host.policy.denies_under_normalized_in(path, vm.host.fs.space());
     protected.then(|| vm.err_value("permission_denied", &format!("permission denied: {shown} contains paths protected by the policy")))
+}
+
+/// Whether `t` is a directory (not a symlink to one).
+fn is_dir(vm: &Vm, t: &Target) -> bool {
+    vm.host.fs.stat(t).is_ok_and(|m| m.kind == EntryKind::Dir)
 }
 
 /// Runs the file system operation `op`, then `finish` converts its result.
@@ -359,14 +366,16 @@ fn ok_bool(vm: &mut Vm, b: bool) -> NResult {
 
 /// `remove_tree(path)`: removes the directory `path` (not a symlink to
 /// one) and everything below it. The whole tree must be writable (no deny
-/// rule below it), and each entry is checked against the policy before it
+/// rule may match below it), and each entry is checked against the policy before it
 /// is removed; the walk opens each directory once (`Fs::remove_tree`).
 fn remove_tree(vm: &mut Vm, a: &[Value]) -> NResult {
     let (shown, mut t) = entry_target!(vm, a[0]);
-    if let Some(e) = refuse(vm, &mut t, Access::Write, &shown)? {
+    if let Some(e) = check(vm, &mut t, Access::Write, &shown)? {
         return Ok(e);
     }
-    if let Some(e) = protected_tree(vm, &shown, &t.path) {
+    if is_dir(vm, &t)
+        && let Some(e) = protected_tree(vm, &shown, &t.path)
+    {
         return Ok(e);
     }
     let fs = vm.host.fs.clone();
@@ -398,7 +407,7 @@ fn remove_tree(vm: &mut Vm, a: &[Value]) -> NResult {
 /// Writes `data` (whose copy is reserved in `res` until the write is done).
 fn write(vm: &mut Vm, path: Value, data: Vec<u8>, res: Reservation) -> NResult {
     let (shown, mut t) = target!(vm, path);
-    if let Some(e) = refuse(vm, &mut t, Access::Write, &shown)? {
+    if let Some(e) = check(vm, &mut t, Access::Write, &shown)? {
         return Ok(e);
     }
     let op = move |fs: &Fs| {
@@ -421,7 +430,7 @@ fn lexical_cost(vm: &Vm, p: Value) -> Result<(), Ctl> {
 /// was not resolved by the policy check) is at the path.
 fn file_kind(vm: &mut Vm, p: Value, test: fn(EntryKind) -> bool) -> NResult {
     let (shown, mut t) = target!(vm, p);
-    if let Some(e) = refuse(vm, &mut t, Access::Read, &shown)? {
+    if let Some(e) = check(vm, &mut t, Access::Read, &shown)? {
         return Ok(e);
     }
     let op = move |fs: &Fs| match fs.stat(&t) {
@@ -589,12 +598,12 @@ fn with_file(vm: &mut Vm, v: Value, needs: Needs, op: impl FnOnce(&mut Vm, &mut 
         return Ok(vm.err_value("closed", &msg));
     }
     let mode = f.mode;
-    let refused = match needs {
+    let denied = match needs {
         Needs::Read if !mode.reads() => Some("the file was not opened for reading"),
         Needs::Write if !mode.writes() => Some("the file was not opened for writing"),
         _ => None,
     };
-    if let Some(why) = refused {
+    if let Some(why) = denied {
         let msg = format!("{}: {why}", f.shown);
         return Ok(vm.err_value("invalid", &msg));
     }
@@ -804,7 +813,7 @@ fn open_file(vm: &mut Vm, a: &[Value]) -> NResult {
     let mode = *MODES.get(to_usize_saturating(a[1].as_int())).ok_or_else(|| Ctl::panic("invalid file mode"))?;
     let (shown, mut t) = target!(vm, a[0]);
     for (needed, access) in [(mode.reads(), Access::Read), (mode.writes(), Access::Write)] {
-        if needed && let Some(e) = refuse(vm, &mut t, access, &shown)? {
+        if needed && let Some(e) = check(vm, &mut t, access, &shown)? {
             return Ok(e);
         }
     }

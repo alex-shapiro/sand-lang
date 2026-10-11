@@ -23,14 +23,12 @@ needs a browser with module workers and works offline once loaded.
   **+** adds a file; double-click a tab to rename it. The program sees the
   other files at `/notes.txt`, `/data/sales.csv`, ..., and can import `.sand`
   files (`import "lib/util"`). Files it writes are listed below the console.
-- **Policy, environment, input.** The Policy tab is a policy file
-  (`docs/SPEC.md` §14.7) of rules and limits (`allow read /data`, `limit time
-  2s`). Whatever it does not decide, the program asks you about: once, or
-  "Always"/"Never", which adds the rule to the policy. Waiting for your
-  answer does not count against time limits. Env holds `NAME=value` lines for
-  `env.get`; Input is the program's standard input.
-- **Network.** `http` goes through `fetch` to the hosts the policy or you
-  allow. The site must allow CORS reads; redirects are not followed.
+- **Policy, environment, input.**
+  - The Policy tab contains rules defining the system resources that a sandbox engine can access (`docs/SPEC.md` §14.7).
+  - The Env tab defines environment variables
+  - The Input tab contains the program's standard input.
+- **Network.** `http` executes via `fetch` for allowed requests.
+  The site must allow CORS reads; redirects are not followed.
 - **Running.** ▶ (Ctrl-Enter / ⌘-Enter) runs the program in a new session;
   ■ stops it at once by terminating its worker. Output streams in.
 - **The console.** After a run, type at its `›` prompt to continue the
@@ -38,9 +36,9 @@ needs a browser with module workers and works offline once loaded.
   input; Up and Down recall earlier inputs. Tasks the program spawned keep
   running between inputs. Run again to start over.
 - **Checking.** As you type, the program is type checked and linted and the
-  policy parsed, off the page's thread; hover a mark or its line number to
-  read a problem. Lint lists the linter's warnings in the console; Format
-  (Ctrl-S / ⌘-S) formats the open `.sand` file.
+  policy parsed and linted, off the page's thread. Hover over a mark or its
+  line number to inspect a problem. Linter warnings are printed in the console;
+  Format (Ctrl-S / ⌘-S) formats the open `.sand` or `.policy` file.
 - **Keeping and sharing.** Sandboxes are kept in local storage. Share copies
   a link holding every sandbox in its fragment, never sent to a server.
 

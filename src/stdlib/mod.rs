@@ -31,6 +31,7 @@ mod uuid;
 use crate::engine::Registry;
 #[cfg(feature = "os")]
 pub(crate) use net::TlsSettings;
+pub(crate) use uri::encode as uri_encode;
 
 /// Standard modules that need operating-system access: without the `os`
 /// feature they do not exist, and importing them is an error that says why.

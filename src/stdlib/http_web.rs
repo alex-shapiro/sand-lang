@@ -1,7 +1,7 @@
 //! The `http` module on the web: a client over the browser's `fetch`.
 //!
-//! The policy decides `Net(host:port)` before anything is sent, as in other
-//! builds. Redirects are refused (`redirect: "manual"`): the browser hides
+//! The policy determines whether a request is allowed bfore anything is sent.
+//! Redirects are denied (`redirect: "manual"`): the browser hides
 //! where they lead, so following them could reach hosts the policy never
 //! saw. Responses are read as a stream and abandoned once they exceed
 //! `max_http_body`; their buffers count against the memory limit.
@@ -16,7 +16,6 @@ use super::http_common::{BodyReader, MemoryBody, Url, alloc_body, header_list, h
 use super::stream::IoFailure;
 use crate::check::ModKind;
 use crate::engine::Registry;
-use crate::policy::Capability;
 use crate::vm::iomem::Reservation;
 use crate::vm::value::Value;
 use crate::vm::{Ctl, Finisher, NResult, Vm};
@@ -63,7 +62,7 @@ fn send(vm: &mut Vm, a: &[Value]) -> NResult {
         Ok(h) => h,
         Err(e) => return Ok(vm.err_value("invalid", &e)),
     };
-    let cap = Capability::Net { host: url.host.clone(), port: url.port };
+    let cap = url.capability(&method);
     if !vm.permit(&cap)? {
         return Ok(vm.err_value("permission_denied", &format!("permission denied: {cap}")));
     }
