@@ -336,8 +336,8 @@ pub const MAX_LINK_SCAN: usize = 4096;
 /// same form.
 pub(crate) fn fold_name(name: &str) -> std::borrow::Cow<'_, str> {
     use unicode_normalization::UnicodeNormalization;
-    if name.bytes().all(|b| b.is_ascii() && !b.is_ascii_uppercase()) {
-        return name.into();
+    if name.is_ascii() {
+        return if name.bytes().any(|b| b.is_ascii_uppercase()) { name.to_ascii_lowercase().into() } else { name.into() };
     }
     let mut s: String = name.nfd().collect();
     for _ in 0..2 {
@@ -458,6 +458,39 @@ mod tests {
         assert_eq!(normalize_path(&base.join("DIR/FILE.TXT")), base.join("Dir/File.txt"));
         assert_eq!(normalize_entry_path(&base.join("dir/file.txt")), base.join("Dir/File.txt"));
         assert_eq!(normalize_path(&base.join("dir/new.TXT")), base.join("Dir/new.TXT"));
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[cfg(all(feature = "os", target_os = "macos"))]
+    #[test]
+    fn checks_decide_by_stored_names() {
+        let base = normalize_path(&std::env::temp_dir()).join(format!("sand-policy-spelling-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("Dir/Sub")).unwrap();
+        for f in ["Dir/File.txt", "Dir/Other.txt", "Dir/Sub/Secret.txt", "Dir/Sub/x.txt"] {
+            std::fs::write(base.join(f), "").unwrap();
+        }
+        if !base.join("dir").exists() {
+            std::fs::remove_dir_all(&base).unwrap();
+            return;
+        }
+        let p = Policy::rules(
+            RulePolicy::new()
+                .allow_read(base.join("Dir/File.txt"))
+                .allow_read(base.join("Dir/Sub"))
+                .deny_read(base.join("Dir/Sub/Secret.txt")),
+        );
+        for (given, want) in [
+            ("dir/file.txt", Decision::Allow),
+            ("DIR/FILE.TXT", Decision::Allow),
+            ("dir/other.txt", Decision::Deny),
+            ("dir/sub/X.TXT", Decision::Allow),
+            ("dir/sub/SECRET.txt", Decision::Deny),
+            ("dir/sub/new.txt", Decision::Allow),
+        ] {
+            assert_eq!(p.check(&Capability::FsRead(base.join(given))), want, "{given}");
+            assert_eq!(p.check_entry(&Capability::FsRead(base.join(given))), want, "{given}");
+        }
         std::fs::remove_dir_all(&base).unwrap();
     }
 }

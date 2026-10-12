@@ -354,7 +354,10 @@ impl<V> Trie<V> {
             let child = match seg {
                 Seg::Lit(s) => {
                     node.has_names = true;
-                    *self.names.entry(Edge(n, s.clone())).or_insert(next)
+                    match self.names.get(&EdgeRef(n, s)) {
+                        Some(&c) => c,
+                        None => *self.names.entry(Edge(n, s.clone())).or_insert(next),
+                    }
                 }
                 Seg::Glob(g) => match node.globs.iter().find(|(h, _)| h == g) {
                     Some(&(_, c)) => c,

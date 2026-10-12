@@ -8,7 +8,8 @@
 
 use super::net::{Dest, HostIndex, NetPattern, UrlPattern, is_localhost, is_private_address, listen_match, parse_ip, url_segments};
 use super::path::{Glob, Seg, Trie, path_segments};
-use super::{Capability, Decision, PathSpace, fold_name, normalize_entry_path, normalize_path};
+use super::{Capability, Decision, PathSpace, fold_name, lexical, normalize_path};
+use crate::files::Mode;
 use crate::vm::value::FxHashMap;
 use std::borrow::Cow;
 use std::fmt;
@@ -303,24 +304,42 @@ impl RulePolicy {
     }
 
     pub(crate) fn check_in(&self, cap: &Capability, space: PathSpace) -> Decision {
-        let normal = |p: &Path| match space {
-            PathSpace::Host => normalize_path(p),
-            PathSpace::Memory => crate::files::memory_path(p),
-        };
         match cap {
-            Capability::FsRead(p) => self.check_normalized_in(&Capability::FsRead(normal(p)), space),
-            Capability::FsWrite(p) => self.check_normalized_in(&Capability::FsWrite(normal(p)), space),
-            Capability::Import(p) => self.check_normalized_in(&Capability::Import(normal(p)), space),
+            Capability::FsRead(p) | Capability::FsWrite(p) | Capability::Import(p) => self.check_path(cap, p, Mode::Follow, space),
             _ => self.check_normalized_in(cap, space),
         }
     }
 
     pub(crate) fn check_entry_in(&self, cap: &Capability, space: PathSpace) -> Decision {
         match cap {
-            Capability::FsRead(p) => self.check_normalized_in(&Capability::FsRead(entry_path(p, space)), space),
-            Capability::FsWrite(p) => self.check_normalized_in(&Capability::FsWrite(entry_path(p, space)), space),
+            Capability::FsRead(p) | Capability::FsWrite(p) => self.check_path(cap, p, Mode::Entry, space),
             _ => self.check_in(cap, space),
         }
+    }
+
+    fn check_path(&self, cap: &Capability, p: &Path, mode: Mode, space: PathSpace) -> Decision {
+        let with = |p: PathBuf| match cap {
+            Capability::FsRead(_) => Capability::FsRead(p),
+            Capability::FsWrite(_) => Capability::FsWrite(p),
+            _ => Capability::Import(p),
+        };
+        #[cfg(feature = "os")]
+        if space == PathSpace::Host {
+            let mut t = crate::files::Fs::Host.target(&lexical(p), mode);
+            if !t.exact() {
+                if let Some(d) = self.spelling_free_decision(&with(t.path.clone()), space) {
+                    return d;
+                }
+                t.fix_spelling();
+            }
+            return self.check_normalized_in(&with(t.path), space);
+        }
+        let _ = mode;
+        let normal = match space {
+            PathSpace::Host => lexical(p),
+            PathSpace::Memory => crate::files::memory_path(p),
+        };
+        self.check_normalized_in(&with(normal), space)
     }
 
     /// Decides `cap`, whose path (if any) is normalized in `space`.
@@ -357,13 +376,17 @@ impl RulePolicy {
     /// its final name, if it is the same for every spelling (see
     /// [`super::Policy::decision_for_any_spelling`]).
     pub(crate) fn decision_for_any_spelling(&self, cap: &Capability, space: PathSpace) -> Option<Decision> {
+        self.spelling_free_decision(cap, space).filter(|&d| d != Decision::Prompt)
+    }
+
+    fn spelling_free_decision(&self, cap: &Capability, space: PathSpace) -> Option<Decision> {
         let (Capability::FsRead(p) | Capability::FsWrite(p) | Capability::Import(p)) = cap else { return None };
         let index = self.files(space);
         // Deny rules compare folded names, which are the same for every spelling.
         if index.allow.names_last(&refs(&index.allow_input(&path_segments(p)))) {
             return None;
         }
-        Some(self.check_normalized_in(cap, space)).filter(|&d| d != Decision::Prompt)
+        Some(self.check_normalized_in(cap, space))
     }
 
     /// The rule deciding `cap` (normalized in `space`), leaving out the
@@ -537,10 +560,14 @@ impl RulePolicy {
     }
 }
 
-/// The path of the entry `p` itself, normalized in `space`.
+/// The path of the entry `p` itself, normalized in `space` without resolving
+/// the final name's spelling.
 pub(crate) fn entry_path(p: &Path, space: PathSpace) -> PathBuf {
     match space {
-        PathSpace::Host => normalize_entry_path(p),
+        #[cfg(feature = "os")]
+        PathSpace::Host => crate::files::Fs::Host.target(&lexical(p), Mode::Entry).path,
+        #[cfg(not(feature = "os"))]
+        PathSpace::Host => lexical(p),
         PathSpace::Memory => crate::files::memory_path(p),
     }
 }
@@ -643,8 +670,13 @@ struct Resolver {
 enum Listing {
     /// The directory does not exist, so nothing in it does.
     Missing,
-    /// The names of its regular files.
-    Files(hashbrown::HashSet<std::ffi::OsString, crate::vm::value::FxBuild>),
+    Names {
+        /// The names of its regular files.
+        files: hashbrown::HashSet<std::ffi::OsString, crate::vm::value::FxBuild>,
+        /// The folded names of all entries (see [`fold_name`]); `None` if
+        /// the listing was incomplete.
+        folded: Option<hashbrown::HashSet<String, crate::vm::value::FxBuild>>,
+    },
 }
 
 /// The most entries listed of a directory.
@@ -652,32 +684,51 @@ const MAX_LISTING: usize = 1 << 20;
 
 impl Resolver {
     fn normalize(&mut self, p: &Path) -> PathBuf {
-        let (Some(dir), Some(name)) = (p.parent(), p.file_name()) else { return normalize_path(p) };
         if !cfg!(feature = "os") {
             return normalize_path(p);
         }
+        if let Some((resolved, _)) = self.dirs.get(p) {
+            return resolved.clone();
+        }
+        let (Some(dir), Some(name)) = (p.parent(), p.file_name()) else { return normalize_path(p) };
         let (resolved, listing) = self.dirs.entry(dir.to_path_buf()).or_insert_with(|| {
             let resolved = normalize_path(dir);
             let listing = match std::fs::read_dir(&resolved) {
                 Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => Some(Listing::Missing),
                 Err(_) => None,
-                // Names left out (beyond the limit, or unreadable) take the walk.
-                Ok(entries) => Some(Listing::Files(
-                    entries
-                        .take(MAX_LISTING)
-                        .flatten()
-                        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
-                        .map(|e| e.file_name())
-                        .collect(),
-                )),
+                Ok(entries) => {
+                    let mut files = hashbrown::HashSet::default();
+                    let mut folded = Some(hashbrown::HashSet::default());
+                    for (i, e) in entries.enumerate() {
+                        if i == MAX_LISTING {
+                            folded = None;
+                            break;
+                        }
+                        let Ok(e) = e else {
+                            folded = None;
+                            continue;
+                        };
+                        let name = e.file_name();
+                        if let Some(f) = &mut folded {
+                            f.insert(fold_name(&name.to_string_lossy()).into_owned());
+                        }
+                        if e.file_type().is_ok_and(|t| t.is_file()) {
+                            files.insert(name);
+                        }
+                    }
+                    Some(Listing::Names { files, folded })
+                }
             };
             (resolved, listing)
         });
         match listing {
-            // A regular file named exactly so is itself; a directory may be
-            // a firmlink or junction, which the full walk resolves.
+            // Regular files and nonexistent entries resolve directly;
+            // directories may be firmlinks or junctions requiring a full walk.
             Some(Listing::Missing) => resolved.join(name),
-            Some(Listing::Files(files)) if files.contains(name) => resolved.join(name),
+            Some(Listing::Names { files, .. }) if files.contains(name) => resolved.join(name),
+            Some(Listing::Names { folded: Some(folded), .. }) if !folded.contains(&*fold_name(&name.to_string_lossy())) => {
+                resolved.join(name)
+            }
             _ => normalize_path(p),
         }
     }
@@ -792,6 +843,11 @@ mod tests {
             "dir/dangling/x",
             "missing/x",
             "dir/File.txt/x",
+            "dir/new.TXT",
+            "dir/FILE-LINK",
+            "dir/sub/x",
+            "dir/sub",
+            "dir/SUB/x",
         ] {
             let p = base.join(rest);
             assert_eq!(resolver.normalize(&p), normalize_path(&p), "{rest}");
