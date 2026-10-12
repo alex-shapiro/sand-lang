@@ -415,7 +415,7 @@ pub(crate) struct Registry {
     /// The modules checked and compiled, made on first use.
     snapshot: OnceLock<Result<Arc<Snapshot>, Error>>,
     /// The prelude and `task` checked and compiled, which the standard
-    /// registry's `snapshot` extends (REPL sessions start from it).
+    /// registry's `snapshot` extends.
     core: OnceLock<Result<Arc<Snapshot>, Error>>,
     /// The core extended with some standard modules, by their names
     /// (sorted), until the full snapshot is made.
@@ -490,25 +490,29 @@ impl Registry {
         self.sources.insert(module.into(), (kind, src.into()));
     }
 
-    /// The registry's modules, checked and compiled (on first use, on a
-    /// stack big enough for the compiler).
-    pub(crate) fn snapshot(&self) -> Result<Arc<Snapshot>, Error> {
+    /// The registry's modules, checked and compiled (on first use).
+    pub(crate) fn snapshot(self: &Arc<Self>) -> Result<Arc<Snapshot>, Error> {
         if let Some(s) = self.snapshot.get() {
             return s.clone();
         }
+        let r = self.clone();
+        on_compile_stack(move || r.build_snapshot())
+    }
+
+    fn build_snapshot(&self) -> Result<Arc<Snapshot>, Error> {
         let build = || {
             let base = match &self.base {
-                Some(b) => b.snapshot()?,
-                None => self.core()?,
+                Some(b) => b.build_snapshot()?,
+                None => self.build_core()?,
             };
             Snapshot::build(self, Some(&base), None).map(Arc::new)
         };
-        on_compile_stack(|| Ok(self.snapshot.get_or_init(build).clone()))?
+        self.snapshot.get_or_init(build).clone()
     }
 
     /// The full snapshot if it is made already (always, for a registry with
     /// host modules: their programs need it).
-    pub(crate) fn ready(&self) -> Option<Arc<Snapshot>> {
+    pub(crate) fn ready(self: &Arc<Self>) -> Option<Arc<Snapshot>> {
         if self.base.is_some() {
             return self.snapshot().ok();
         }
@@ -518,7 +522,7 @@ impl Registry {
     /// A snapshot holding the standard modules `names` (and the core): the
     /// core extended with them, made once per set of names, or the full
     /// snapshot (if made already, or after `MAX_PARTIAL_SNAPSHOTS` sets).
-    pub(crate) fn extended(&self, names: &[&str]) -> Result<Arc<Snapshot>, Error> {
+    pub(crate) fn extended(self: &Arc<Self>, names: &[&str]) -> Result<Arc<Snapshot>, Error> {
         if let Some(full) = self.ready() {
             return Ok(full);
         }
@@ -533,25 +537,35 @@ impl Registry {
             drop(partial);
             return self.snapshot();
         }
-        let core = self.core()?;
-        let only: Vec<&str> = key.iter().map(String::as_str).collect();
-        let s = on_compile_stack(|| Snapshot::build(self, Some(&core), Some(&only)).map(Arc::new))?;
+        let (r, only) = (self.clone(), key.clone());
+        let s = on_compile_stack(move || {
+            let core = r.build_core()?;
+            let only: Vec<&str> = only.iter().map(String::as_str).collect();
+            Snapshot::build(&r, Some(&core), Some(&only)).map(Arc::new)
+        })?;
         partial.insert(key, s.clone());
         Ok(s)
     }
 
-    /// The prelude and `task` checked and compiled. A REPL session starts
-    /// from it and checks the modules it imports itself, which is cheaper
-    /// than copying the whole library's checker for each input.
-    pub(crate) fn core(&self) -> Result<Arc<Snapshot>, Error> {
+    /// The prelude and `task` checked and compiled, on which compilations
+    /// that import few standard modules start (see [`Registry::extended`]).
+    pub(crate) fn core(self: &Arc<Self>) -> Result<Arc<Snapshot>, Error> {
         if let Some(b) = &self.base {
             return b.core();
         }
         if let Some(s) = self.core.get() {
             return s.clone();
         }
+        let r = self.clone();
+        on_compile_stack(move || r.build_core())
+    }
+
+    fn build_core(&self) -> Result<Arc<Snapshot>, Error> {
+        if let Some(b) = &self.base {
+            return b.build_core();
+        }
         let build = || Snapshot::build(self, None, Some(&["prelude", "task"])).map(Arc::new);
-        on_compile_stack(|| Ok(self.core.get_or_init(build).clone()))?
+        self.core.get_or_init(build).clone()
     }
 }
 
@@ -595,12 +609,11 @@ pub(crate) struct CompileOptions {
     pub lint: bool,
 }
 
-/// The size of the stack the compiler runs on.
-pub(crate) const COMPILE_STACK: usize = 256 << 20;
-
-/// Runs `f` on a thread with a stack big enough for checking and compiling.
-pub(crate) fn on_compile_stack<R: Send>(f: impl FnOnce() -> Result<R, Error> + Send) -> Result<R, Error> {
-    crate::platform::with_stack(COMPILE_STACK, f).map_err(|e| Error::Io(format!("internal compiler error: {e}")))?
+/// Runs `f` on a stack deep enough for checking and compiling
+/// (`platform::on_deep_stack`). A panic is an internal compiler error.
+pub(crate) fn on_compile_stack<R: Send + 'static>(f: impl FnOnce() -> Result<R, Error> + Send + 'static) -> Result<R, Error> {
+    crate::platform::on_deep_stack(f)
+        .unwrap_or_else(|p| Err(Error::Io(format!("internal compiler error: {}", crate::unwind::panic_text(&*p)))))
 }
 
 impl Engine {
@@ -991,13 +1004,14 @@ impl Engine {
         // Time spent waiting for prompt answers does not count.
         let deadline = deadline.map(|d| d + prompted);
         let budget = self.compile_budget(deadline);
-        let registry = &*self.registry;
         let spare = match self.spare.lock().unwrap_or_else(|e| e.into_inner()).take() {
             Some((s, p)) if Arc::ptr_eq(&s, &snap) => Some(p),
             _ => None,
         };
         let natives = g.has_natives(&g.order);
-        let (program, lints) = on_compile_stack(|| compile_program(&snap, &mut g, registry, &budget, main_file, options.lint, spare))?;
+        let (base, registry) = (snap.clone(), self.registry.clone());
+        let (program, lints) =
+            on_compile_stack(move || compile_program(&base, &mut g, &registry, &budget, main_file, options.lint, spare))?;
         Ok(Compiled { program, lints, deadline, snapshot: (!natives).then_some(snap) })
     }
 
@@ -1088,7 +1102,7 @@ impl Engine {
                         g.modules[mi].imports.push((span, Target::Snapshot(id)));
                     } else if let Some(&(kind, ref src)) = registered {
                         // A module that is not in the snapshot: a host module
-                        // with errors, or a standard module in a session.
+                        // with errors, or a standard module not in the core.
                         let key = format!("std:{name}");
                         if path_stack.contains(&key) {
                             errors.push(Diag::error(span, format!("import cycle through module `{name}`")));
@@ -1275,7 +1289,7 @@ fn compile_program(
     };
     let (native_names, native_argc) = if host { native_info(&cp, registry) } else { (Vec::new(), Vec::new()) };
     let mut program = spare.unwrap_or_else(|| snap.program.clone());
-    let input = CompileInput { checked: &cp, sm, natives: &registry.by_name, native_names, native_argc, budget };
+    let input = CompileInput { checked: &cp, sm, natives: &registry.by_name, native_names, native_argc, budget, initialized: None };
     let entry = compile_more(input, &mut program, &mut snap.compiler.clone(), &inits);
     if let Some(stop) = budget.stopped() {
         return Err(budget_error(stop, sm, main_file));

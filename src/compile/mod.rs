@@ -1,5 +1,6 @@
 //! Compiles checked HIR into register bytecode.
 
+mod init_order;
 mod inline;
 mod reflect;
 
@@ -11,6 +12,7 @@ use crate::hir::*;
 use crate::types::{FnId, Ty, TypeArena, TypeDefId, TypeId};
 use crate::vm::bytecode::*;
 use crate::vm::value::FxHashMap;
+use init_order::{InitOrder, Time};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -34,6 +36,9 @@ pub struct CompileInput<'a> {
     /// the rest of the code (callers check `budget.stopped()` and discard
     /// the result).
     pub budget: &'a CompileBudget,
+    /// For a REPL session's input: which of the program's globals are
+    /// initialized (see `init_order`).
+    pub initialized: Option<Vec<bool>>,
 }
 
 struct Compiler<'a> {
@@ -58,6 +63,7 @@ struct Compiler<'a> {
     inline: HashMap<u32, Inline>,
     /// The bodies of the functions to compile, with calls inlined.
     bodies: HashMap<FnId, &'a HFn>,
+    order: InitOrder,
 }
 
 #[derive(Clone, Copy)]
@@ -112,6 +118,8 @@ struct FnState<'h> {
     hoisted: FxHashMap<HoistKey<'h>, Reg>,
     /// Inside an outermost loop whose invariants were already hoisted.
     hoisting: bool,
+    /// When the code being compiled can first run (see `init_order`).
+    time: Time,
     /// Deferred expressions of the enclosing blocks (innermost last), compiled
     /// again at every exit edge that leaves their block, with their `pads`.
     defers: Vec<Vec<(&'h HExpr, usize)>>,
@@ -178,7 +186,7 @@ enum HoistKey<'h> {
     Bytes(&'h [u8]),
     Dur(i64),
     Tag(u32),
-    /// An immutable global (hoisted with a guard, see `hoisted_loop`).
+    /// An immutable global, initialized wherever the loop runs.
     Global(u32),
     /// An immutable field of a struct or tuple in a local that is never
     /// assigned (`it.next`, the function of an `Iter`).
@@ -231,8 +239,6 @@ struct Finished {
 
 /// Hoisting is skipped when the function already uses this many registers.
 const HOIST_REG_BUDGET: u32 = 1000;
-/// Loops are duplicated for global hoisting only up to this many HIR nodes.
-const MAX_VERSIONED_NODES: usize = 400;
 
 /// What the compiler remembers between the compilations of a REPL session,
 /// each of which appends to the same [`Program`] (and between the standard
@@ -305,7 +311,7 @@ impl ProgramMark {
 /// VM stay valid. Returns a new entry proto that calls `inits` in order and
 /// returns the result of the last. On error, `prog` may be partially
 /// extended (see [`ProgramMark`]).
-pub(crate) fn compile_more(input: CompileInput, prog: &mut Program, inc: &mut Incremental, inits: &[FnId]) -> Result<u32, Vec<Diag>> {
+pub(crate) fn compile_more(mut input: CompileInput, prog: &mut Program, inc: &mut Incremental, inits: &[FnId]) -> Result<u32, Vec<Diag>> {
     let cp = input.checked;
     let first = inc.fn_protos.len();
     for (f, body) in cp.bodies.from(first as FnId) {
@@ -316,6 +322,7 @@ pub(crate) fn compile_more(input: CompileInput, prog: &mut Program, inc: &mut In
     let inlined: Vec<Option<HFn>> =
         cp.bodies.from(first as FnId).map(|(_, b)| inline::inline_calls(b, &inc.inline, input.budget)).collect();
     let bodies: HashMap<FnId, &HFn> = cp.bodies.from(first as FnId).zip(&inlined).map(|((f, b), i)| (f, i.as_ref().unwrap_or(b))).collect();
+    let order = InitOrder::new(cp, &bodies, inits, prog.global_names.len(), input.initialized.take(), input.budget);
     let mut c = Compiler {
         cp,
         arena: cp.arena.clone(),
@@ -331,6 +338,7 @@ pub(crate) fn compile_more(input: CompileInput, prog: &mut Program, inc: &mut In
         recv_native: input.natives.get("Channel.recv").copied(),
         inline: HashMap::new(),
         bodies,
+        order,
     };
     c.descs.start();
     let entry = c.compile_new(input, inits, &mut inc.tests);
@@ -783,6 +791,7 @@ impl<'a> Compiler<'a> {
             too_big: false,
             hoisted: FxHashMap::default(),
             hoisting: false,
+            time: self.order.first_run(fid),
             defers: Vec::new(),
             pads: Vec::new(),
             pending: None,
@@ -801,7 +810,12 @@ impl<'a> Compiler<'a> {
             let r = self.alloc(&mut f);
             f.set_reg(p, r);
         }
-        self.ret_expr(&mut f, &body.body);
+        match (self.order.init_pos(fid), &body.body.kind) {
+            (Some(pos), HKind::Block(items)) if !items.is_empty() && self.struct_literal(&f, items).is_none() => {
+                self.ret_block(&mut f, items, Some(pos))
+            }
+            _ => self.ret_expr(&mut f, &body.body),
+        }
         let nregs = f.max_reg.max(1) as u16;
         let Finished { code, lines, cleanups, sites, inlined } = self.finish(f);
         self.prog.protos[proto_idx as usize] = Proto {
@@ -1218,6 +1232,27 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    /// Compiles the block `items` as the return value of the current
+    /// function. If it is the body of the initializer at position `init`,
+    /// each statement is compiled at its own time.
+    fn ret_block(&mut self, f: &mut FnState<'a>, items: &'a [HExpr], init: Option<usize>) {
+        let (mark, pending) = (f.next_reg, f.pending);
+        f.defers.push(Vec::new());
+        for (j, it) in items.iter().enumerate() {
+            if let Some(pos) = init {
+                f.time = init_order::at(pos, j);
+            }
+            if j + 1 < items.len() {
+                self.discard(f, it);
+            } else {
+                self.ret_expr(f, it);
+            }
+        }
+        f.defers.pop();
+        self.set_pending(f, pending);
+        f.next_reg = mark;
+    }
+
     /// Compiles `e` as the return value of the current function (tail position).
     fn ret_expr(&mut self, f: &mut FnState<'a>, e: &'a HExpr) {
         self.set_line(f, e.span);
@@ -1225,17 +1260,7 @@ impl<'a> Compiler<'a> {
         // calls cannot be tail calls.
         let tail = !defers_pending(f);
         match &e.kind {
-            HKind::Block(items) if !items.is_empty() && self.struct_literal(f, items).is_none() => {
-                let (mark, pending) = (f.next_reg, f.pending);
-                f.defers.push(Vec::new());
-                for it in &items[..items.len() - 1] {
-                    self.discard(f, it);
-                }
-                self.ret_expr(f, items.last().unwrap());
-                f.defers.pop();
-                self.set_pending(f, pending);
-                f.next_reg = mark;
-            }
+            HKind::Block(items) if !items.is_empty() && self.struct_literal(f, items).is_none() => self.ret_block(f, items, None),
             HKind::Call { func, args } if tail && self.fn_protos[*func as usize].is_some() => {
                 let proto = self.fn_protos[*func as usize].unwrap();
                 let base = self.call_args(f, args, 0);
@@ -2817,7 +2842,8 @@ impl<'a> Compiler<'a> {
     // ------------------------------------------------------------------
     // Loop-invariant hoisting
 
-    /// The hoisting key of a constant or immutable-global expression.
+    /// The hoisting key of a constant, or of an immutable global initialized
+    /// wherever the code being compiled runs.
     fn hoist_key(&self, f: &FnState<'a>, e: &'a HExpr) -> Option<HoistKey<'a>> {
         if let Some(i) = int_lit(e) {
             return Some(HoistKey::Int(i));
@@ -2830,7 +2856,9 @@ impl<'a> Compiler<'a> {
             HKind::Bytes(b) => HoistKey::Bytes(b),
             HKind::Dur(d) => HoistKey::Dur(*d),
             HKind::Tag(t) => HoistKey::Tag(*t),
-            HKind::Global(g) if self.cp.globals.get(*g as usize).is_some_and(|gi| !gi.mutable) => HoistKey::Global(*g),
+            HKind::Global(g) if self.cp.globals.get(*g as usize).is_some_and(|gi| !gi.mutable) && self.order.ready(self.cp, *g, f.time) => {
+                HoistKey::Global(*g)
+            }
             HKind::Field { obj, index } => {
                 let HKind::Local(l) = obj.kind else { return None };
                 let fixed = match self.arena.get(obj.ty) {
@@ -2851,15 +2879,14 @@ impl<'a> Compiler<'a> {
     }
 
     /// Hoistable values used in loop `e` outside nested lambdas, most
-    /// frequent first, plus whether `e` contains lambdas and its size.
+    /// frequent first, and the size of `e`.
     ///
     /// Constants only count where the compiler evaluates them with
     /// `expr_reg` (as instruction operands): elsewhere they are materialized
     /// into a fixed register anyway, so hoisting would not save anything.
     /// Immutable globals count everywhere, since a `Move` from a register is
     /// cheaper than a checked `LoadGlobal`.
-    fn hoist_candidates(&self, f: &FnState<'a>, e: &'a HExpr) -> (Vec<HoistKey<'a>>, bool, usize) {
-        let mut has_lambda = false;
+    fn hoist_candidates(&self, f: &FnState<'a>, e: &'a HExpr) -> (Vec<HoistKey<'a>>, usize) {
         let mut nodes = 0;
         let mut found: Vec<(HoistKey<'a>, usize)> = Vec::new();
         let mut index: FxHashMap<HoistKey<'a>, usize> = FxHashMap::default();
@@ -2874,7 +2901,6 @@ impl<'a> Compiler<'a> {
             nodes += 1;
             if let HKind::Lambda(_) = &x.kind {
                 // A separate function with its own registers.
-                has_lambda = true;
                 return false;
             }
             if let Some(k @ HoistKey::Global(_)) = self.hoist_key(f, x) {
@@ -2902,7 +2928,7 @@ impl<'a> Compiler<'a> {
             _ => true,
         });
         found.sort_by_key(|e| std::cmp::Reverse(e.1));
-        (found.into_iter().map(|(k, _)| k).collect(), has_lambda, nodes)
+        (found.into_iter().map(|(k, _)| k).collect(), nodes)
     }
 
     /// Calls `out` for the direct sub-expressions of `x` that the compiler
@@ -3020,67 +3046,24 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    /// Compiles the outermost loop `e` with its loop-invariant constants and
-    /// immutable globals loaded into registers once, before the loop.
-    ///
-    /// Constants are pure. An immutable global never changes once
-    /// initialized, but reading it before its initializer has run must
-    /// panic at the point of use, so hoisted globals are loaded with
-    /// `HoistGlobal`, which jumps to a second, unhoisted copy of the loop if
-    /// any of them is still uninitialized. Loops containing lambdas (whose
-    /// prototypes would be duplicated) or larger than `MAX_VERSIONED_NODES`
-    /// only get their constants hoisted.
+    /// Compiles the outermost loop `e` with its loop-invariant constants,
+    /// immutable globals and fields loaded into registers once, before it.
     fn hoisted_loop(&mut self, f: &mut FnState<'a>, e: &'a HExpr, dst: Reg) {
         let mark = f.next_reg;
         f.hoisting = true;
-        let (cands, has_lambda, nodes) = self.hoist_candidates(f, e);
+        let (cands, nodes) = self.hoist_candidates(f, e);
         if !self.budget.charge(nodes as u64) {
             f.hoisting = false;
             return;
         }
-        let cands: Vec<HoistKey> = cands.into_iter().take(MAX_HOISTED).collect();
-        if cands.is_empty() || f.next_reg + cands.len() as u32 > HOIST_REG_BUDGET {
-            self.expr_to(f, e, dst);
-            f.hoisting = false;
-            return;
-        }
-        let version = !has_lambda && nodes <= MAX_VERSIONED_NODES;
-        let mut globals = Vec::new();
-        for k in &cands {
-            match k {
-                HoistKey::Global(g) => {
-                    if version && *g <= u16::MAX as u32 {
-                        globals.push((*g as u16, k.clone()));
-                    }
-                }
-                _ => {
-                    let r = self.alloc(f);
-                    self.load_hoisted(f, k, r);
-                    f.hoisted.insert(k.clone(), r);
-                }
-            }
-        }
-        if globals.is_empty() {
-            self.expr_to(f, e, dst);
-        } else {
-            let mut guards = Vec::new();
-            for (g, k) in &globals {
+        if f.next_reg + cands.len().min(MAX_HOISTED) as u32 <= HOIST_REG_BUDGET {
+            for k in cands.into_iter().take(MAX_HOISTED) {
                 let r = self.alloc(f);
-                guards.push(self.emit(f, Op::HoistGlobal { dst: r, g: *g, off: 0 }));
-                f.hoisted.insert(k.clone(), r);
+                self.load_hoisted(f, &k, r);
+                f.hoisted.insert(k, r);
             }
-            let locals = f.reg_log.len();
-            self.expr_to(f, e, dst);
-            let jend = self.emit_jump(f);
-            // Some global was not initialized yet: run the loop without them.
-            self.patch_list(f, guards);
-            for (_, k) in &globals {
-                f.hoisted.remove(k);
-            }
-            f.reset_regs(locals);
-            self.expr_to(f, e, dst);
-            self.patch_here(f, jend);
         }
+        self.expr_to(f, e, dst);
         f.hoisted.clear();
         f.hoisting = false;
         f.next_reg = mark;
@@ -3667,6 +3650,7 @@ impl<'a> Compiler<'a> {
             too_big: false,
             hoisted: FxHashMap::default(),
             hoisting: false,
+            time: f.time,
             defers: Vec::new(),
             pads: Vec::new(),
             pending: None,
@@ -4288,6 +4272,7 @@ fn walk_pruned<'e>(e: &'e HExpr, f: &mut impl FnMut(&'e HExpr) -> bool) {
             walk_pruned(end, f);
         }
         HKind::Lambda(l) => walk_pruned(&l.body, f),
+        HKind::Inlined { body, .. } => walk_pruned(body, f),
         HKind::Interp(parts) => {
             for p in parts {
                 if let InterpPart::Expr(x, _) = p {
@@ -4366,7 +4351,40 @@ mod tests {
         );
         let (body, pre) = first_loop(&prog, "f");
         assert_eq!(loads(body), 0, "{body:#?}");
-        assert_eq!(pre.iter().filter(|op| matches!(op, Op::HoistGlobal { .. })).count(), 2, "{pre:#?}");
+        assert_eq!(global_loads(pre), 2, "{pre:#?}");
+    }
+
+    fn global_loads(ops: &[Op]) -> usize {
+        ops.iter().filter(|op| matches!(op, Op::LoadGlobal { .. })).count()
+    }
+
+    #[test]
+    fn globals_are_hoisted_where_they_are_initialized() {
+        // `f` first runs from the third statement, after `K` and before `L`.
+        let src = "let K = 1\nfn f(n: int) -> int {\n    var t = 0\n    for i in 0..n {\n        print(i)\n        t += K + L\n    }\n    t\n}\nprint(f(0))\nlet L = 2\nprint(f(2))";
+        let prog = compile(src);
+        let (body, pre) = first_loop(&prog, "f");
+        assert_eq!((global_loads(pre), global_loads(body)), (1, 1), "{pre:#?}\n{body:#?}");
+        assert_eq!(run(src), "0\n0\n1\n6\n");
+        // A top-level loop after the declaration (`K` is a global, as `g` reads it).
+        let prog = compile("let K = 3\nfn g() -> int { K }\nvar t = 0\nfor i in 0..10 { t += K }\nprint(t)");
+        let (body, pre) = first_loop(&prog, "<main>");
+        assert_eq!((global_loads(pre), global_loads(body)), (1, 0), "{pre:#?}\n{body:#?}");
+    }
+
+    #[test]
+    fn loops_with_lambdas_and_large_loops_hoist_globals() {
+        let prog = compile(
+            "let K = 2\nfn f(xs: [int]) -> int {\n    var t = 0\n    for x in xs {\n        let add = (y: int) => y + K\n        t += add(x) + K\n    }\n    t\n}\nprint(f([1, 2]))",
+        );
+        let (body, pre) = first_loop(&prog, "f");
+        assert_eq!((global_loads(pre), global_loads(body)), (1, 0), "{pre:#?}\n{body:#?}");
+        let big = "        t += i % 7 + K\n".repeat(100);
+        let prog = compile(&format!(
+            "let K = 2\nfn f(n: int) -> int {{\n    var t = 0\n    for i in 0..n {{\n{big}    }}\n    t\n}}\nprint(f(3))"
+        ));
+        let (body, pre) = first_loop(&prog, "f");
+        assert_eq!((global_loads(pre), global_loads(body)), (1, 0));
     }
 
     #[test]
@@ -4374,6 +4392,6 @@ mod tests {
         let prog = compile("var g = 1\nfn h(n: int) -> int {\n    var t = 0\n    for i in 0..n { t += g }\n    t\n}\nprint(h(3))");
         let (body, pre) = first_loop(&prog, "h");
         assert_eq!(body.iter().filter(|op| matches!(op, Op::LoadGlobal { .. })).count(), 1, "{body:#?}");
-        assert!(!pre.iter().any(|op| matches!(op, Op::HoistGlobal { .. })), "{pre:#?}");
+        assert_eq!(global_loads(pre), 0, "{pre:#?}");
     }
 }

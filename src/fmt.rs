@@ -17,6 +17,7 @@ use crate::diag::{SourceFile, Span};
 use crate::syntax::ast::*;
 use crate::syntax::lexer::{Comment, CommentKind, Tok, Token};
 use crate::syntax::parse_module;
+use std::sync::Arc;
 
 /// Maximum line width.
 const WIDTH: usize = 100;
@@ -25,18 +26,19 @@ const INDENT: usize = 4;
 
 /// Formats a source file in canonical style.
 pub fn format_source(src: &str) -> Result<String, String> {
-    format_source_with(src, &CompileBudget::new(Some(tool_fuel(src.len())), None, None))
+    format_source_with(src, CompileBudget::new(Some(tool_fuel(src.len())), None, None))
 }
 
 /// Like [`format_source`], with the work bounded by a budget.
-pub fn format_source_with(src: &str, budget: &CompileBudget) -> Result<String, String> {
+pub fn format_source_with(src: &str, budget: CompileBudget) -> Result<String, String> {
     if !budget.check() {
         return Err(stop_message(budget.stopped().unwrap_or(Stop::Interrupted), "format"));
     }
-    // Like the compiler, the formatter recurses, so it needs a large stack.
-    let out = crate::platform::with_stack(64 << 20, || format_on_this_thread(src, budget))
-        .map_err(|e| format!("internal formatter error: {e}"))
-        .and_then(|r| r);
+    // Like the compiler, the formatter recurses, so it needs a deep stack.
+    let (src, budget) = (src.to_owned(), Arc::new(budget));
+    let theirs = budget.clone();
+    let out = crate::platform::on_deep_stack(move || format_on_this_thread(&src, &theirs))
+        .unwrap_or_else(|p| Err(format!("internal formatter error: {}", crate::unwind::panic_text(&*p))));
     match budget.stopped() {
         Some(stop) => Err(stop_message(stop, "format")),
         None => out,

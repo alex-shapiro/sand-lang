@@ -59,24 +59,6 @@ Follow-up work, roughly in priority order.
       (one function per instruction with guaranteed tail calls, Rust's
       `become`) would remove the shared register allocation once `become`
       is stable.
-- [ ] **A thread per compile.** Every compile (with its lints) and format
-      runs on a new stack thread (`platform::with_stack`, from `engine.rs`
-      and `fmt.rs`), about 70% of the ~45 us that `check_source("print(1)")`
-      costs. One long-lived compile thread would remove it; in safe Rust
-      that needs compile inputs that own their data instead of borrowing the
-      engine.
-- [ ] **REPL sessions check the standard modules they import.** A session
-      starts from the core snapshot and type checks each std module the
-      first time an input imports it. Snapshots are cheap to copy (shared
-      tables), so sessions could start from the full standard-library
-      snapshot instead.
-- [ ] A loop that reads immutable globals is compiled twice
-      (`compile::hoisted_loop`): the hoisted copy, and an unhoisted one that
-      `HoistGlobal` jumps to if a global is not initialized yet (so the read
-      panics where it happens). Loops with lambdas or over
-      `MAX_VERSIONED_NODES` get no global hoisting. Proving initialization
-      (constant initializers, or a call graph from the checker) would drop
-      the second copy and lift both restrictions.
 
 ### Language
 

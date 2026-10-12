@@ -643,6 +643,11 @@ impl Vm {
         }
     }
 
+    /// Which globals are initialized, by id.
+    pub(crate) fn initialized_globals(&self) -> Vec<bool> {
+        self.globals.iter().map(|v| !matches!(v, Value::Uninit)).collect()
+    }
+
     /// Ends every task: after the main task of a REPL session input has
     /// failed, the session continues with a VM that runs nothing. Tasks that
     /// were running are marked cancelled; heap and globals are kept.

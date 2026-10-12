@@ -31,8 +31,8 @@ bytecode  ─VM───────▶ effects    src/vm/
   rule indices: a trie of path patterns, hash tables of hosts); policy files
   (`file.rs`) and their formatter and linter; `src/files/`: the file systems
   scripts see (the host's through `unix.rs`/`windows.rs`, or a `MemFs`).
-- `src/platform.rs`: time, timers, randomness, threads (including the
-  worker threads for blocking calls, `offload`), deep stacks;
+- `src/platform.rs`: time, timers, randomness, threads (`offload` for
+  blocking calls, `on_deep_stack` for the compiler and formatter);
   `src/stdio.rs`: the writer for the process's standard output and error.
 - `src/session.rs`: REPL sessions; `src/feed.rs`: standard input that the
   host passes to scripts; `src/fmt.rs`, `src/lint.rs`: tools (the linter

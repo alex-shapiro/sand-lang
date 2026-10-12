@@ -652,13 +652,6 @@ impl Vm {
                         r!(dst) = *v;
                     }
                     Op::StoreGlobal { g, src } => self.globals[g as usize] = r!(src),
-                    Op::HoistGlobal { dst, g, off } => {
-                        let v = &self.globals[g as usize];
-                        r!(dst) = *v;
-                        if let Value::Uninit = v {
-                            jump!(off);
-                        }
-                    }
                     Op::NewCell { dst, src } => {
                         let v = r!(src);
                         r!(dst) = self.heap.alloc(Obj::Cell(v));

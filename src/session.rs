@@ -8,16 +8,18 @@
 //! tasks persist. A session only appends to the checker's tables and the
 //! program, so nothing a live value refers to is ever renumbered.
 
+use crate::check::budget::CompileBudget;
 use crate::check::{Checker, ModKind, ParsedModule};
 use crate::compile::{CompileInput, Incremental, ProgramMark, compile_more};
-use crate::diag::{Diag, Span};
-use crate::engine::{Discovery, Engine, Error, InterruptHandle, TestReport, TestResult, on_compile_stack};
+use crate::diag::{Diag, FileId, Span};
+use crate::engine::{Discovery, Engine, Error, InterruptHandle, Registry, TestReport, TestResult, on_compile_stack};
 use crate::modules::{GraphMark, ModuleGraph, Snapshot, budget_error, native_info};
 use crate::platform::Instant;
 use crate::policy::{Capability, PromptAnswer};
 use crate::syntax::ast::{ItemKind, StmtKind};
 use crate::types::{FnId, ModId, TypeId};
 use crate::unwind::CatchUnwind;
+use crate::vm::bytecode::Program;
 use crate::vm::sched::{RunEnd, Stop};
 use crate::vm::value::Value;
 use crate::vm::{CtlKind, Trap, Vm};
@@ -162,38 +164,36 @@ impl Session {
         let st = self.state()?;
         let mark = st.graph.mark();
         let file = st.graph.sm.add("<type>", expr);
-        let (graph, checker) = (&st.graph, &st.checker);
-        let r = on_compile_stack(|| {
-            let resolve = |sm: &crate::diag::SourceMap, ds: &[Diag]| Error::Compile(ds.iter().map(|d| sm.resolve(d)).collect());
-            let res = crate::syntax::parse_module(expr, file);
+        let (sm, mut checker, expr) = (st.graph.sm.clone(), st.checker.clone(), expr.to_owned());
+        st.graph.rollback(&mark);
+        on_compile_stack(move || {
+            let resolve = |ds: &[Diag]| Error::Compile(ds.iter().map(|d| sm.resolve(d)).collect());
+            let res = crate::syntax::parse_module(&expr, file);
             let mut errors = res.errors;
             let is_expr = matches!(res.module.items.as_slice(), [item] if matches!(&item.kind, ItemKind::Stmt(s) if matches!(s.kind, StmtKind::Expr(_))));
             if errors.is_empty() && !is_expr {
                 errors.push(Diag::error(Span::new(file, 0, expr.len() as u32), "expected an expression"));
             }
             if !errors.is_empty() {
-                return Err(resolve(&graph.sm, &errors));
+                return Err(resolve(&errors));
             }
             let cell = ParsedModule {
                 name: SESSION_MODULE.into(),
                 file,
-                source: graph.sm.file(file).clone(),
+                source: sm.file(file).clone(),
                 ast: res.module,
                 comments: Vec::new(),
                 kind: ModKind::Script { main: true },
                 imports: HashMap::new(),
             };
-            let mut checker = checker.clone();
             checker.type_query = Some(Default::default());
             let checked = checker.check_cell(&[], &cell, true, &registry.by_name, &budget);
             if let Some(stop) = budget.stopped() {
-                return Err(budget_error(stop, &graph.sm, file));
+                return Err(budget_error(stop, &sm, file));
             }
-            checked.map_err(|ds| resolve(&graph.sm, &ds))?;
+            checked.map_err(|ds| resolve(&ds))?;
             Ok(checker.cell_value.map(|t| checker.show_value_type(t)).unwrap_or_else(|| "()".into()))
-        });
-        st.graph.rollback(&mark);
-        r
+        })
     }
 
     /// Runs every `test` block entered so far (the latest of those with the
@@ -375,8 +375,8 @@ impl Session {
 
     // ------------------------------------------------------------------
 
-    /// The session's state, created on first use: the prelude and `task`
-    /// checked and compiled, and a VM for the program.
+    /// The session's state, created on first use: the registry's snapshot
+    /// and a VM for its program.
     fn state(&mut self) -> Result<&mut State, Error> {
         if self.state.is_none() {
             self.state = Some(Box::new(self.init()?));
@@ -395,7 +395,7 @@ impl Session {
 
     fn init(&self) -> Result<State, Error> {
         let registry = self.engine.registry();
-        let snapshot = registry.core()?;
+        let snapshot = registry.snapshot()?;
         let mut graph = ModuleGraph::new(&snapshot);
         // The module the inputs are added to; its own source is empty.
         let file = graph.sm.add("<repl>", "");
@@ -465,53 +465,38 @@ impl Session {
             return Err(e);
         }
         let new_mods: Vec<usize> = st.graph.order[mark.order..].iter().copied().filter(|&mi| mi != cell).collect();
-        let session = st.checker.session.unwrap_or_default();
-        // The new standard modules, then the new loaded ones, then the input.
-        let new_std: Vec<ModId> = st.graph.std[mark.std..].to_vec();
-        let natives = st.graph.has_natives(&new_mods);
-        // Compilation appends to the program; a failure (even an internal
-        // error) truncates it again.
-        let prog_mark = ProgramMark::of(&st.vm.prog);
-        let (graph, checker, compiler, prog, snapshot) = (&mut st.graph, &st.checker, &st.compiler, &mut st.vm.prog, &st.snapshot);
         let deadline = deadline.map(|d| d + prompted);
-        let budget = engine.compile_budget(deadline);
-        let result = on_compile_stack(|| {
-            let first = checker.mods.len();
-            let parsed = graph.parse(&new_mods, first as ModId).and_then(|modules| {
-                let mut cell = graph.parse(&[cell], session)?;
-                Ok((modules, cell.pop().expect("one module")))
-            });
-            let sm = &graph.sm;
-            let resolve = |ds: Vec<Diag>| Error::Compile(ds.iter().map(|d| sm.resolve(d)).collect());
-            let (modules, cell_module) = parsed.map_err(resolve)?;
-            let mut checker = checker.clone();
-            let added = modules.len();
-            let checked = checker.check_cell(&modules, &cell_module, want_value, &registry.by_name, &budget);
-            if let Some(stop) = budget.stopped() {
-                return Err(budget_error(stop, sm, file));
-            }
-            checked.map_err(resolve)?;
-            let value = checker.cell_value.take();
-            let std_inits = new_std.iter().map(|&id| snapshot.mods[id as usize].init);
-            let inits = (first..first + added).chain([session as usize]).map(|m| checker.mods[m].init);
-            let inits: Vec<FnId> = std_inits.chain(inits).flatten().collect();
-            let cp = checker.take_checked();
-            let (native_names, native_argc) = if natives { native_info(&cp, registry) } else { (Vec::new(), Vec::new()) };
-            let mut compiler = compiler.clone();
-            let input = CompileInput { checked: &cp, sm, natives: &registry.by_name, native_names, native_argc, budget: &budget };
-            let entry = compile_more(input, Arc::make_mut(prog), &mut compiler, &inits);
-            if let Some(stop) = budget.stopped() {
-                return Err(budget_error(stop, sm, file));
-            }
-            let entry = entry.map_err(resolve)?;
-            checker.restore_checked(cp);
-            checker.release_bodies();
-            Ok((checker, compiler, entry, value))
-        });
+        // Compilation appends to the program; a failure truncates it again.
+        let prog_mark = ProgramMark::of(&st.vm.prog);
+        let mut job = CellJob {
+            natives: st.graph.has_natives(&new_mods),
+            initialized: st.vm.initialized_globals(),
+            new_std: st.graph.std[mark.std..].to_vec(),
+            graph: std::mem::take(&mut st.graph),
+            prog: std::mem::take(&mut st.vm.prog),
+            checker: st.checker.clone(),
+            compiler: st.compiler.clone(),
+            snapshot: st.snapshot.clone(),
+            registry: registry.clone(),
+            budget: engine.compile_budget(deadline),
+            new_mods,
+            cell,
+            file,
+            want_value,
+        };
+        // The graph and program come back with the result. If the compiler
+        // panics they are lost, and the panic resets the session.
+        let (job, result) = crate::platform::on_deep_stack(move || {
+            let r = job.run();
+            (job, r)
+        })
+        .unwrap_or_else(|p| std::panic::resume_unwind(p));
+        st.graph = job.graph;
+        st.vm.prog = job.prog;
         match result {
-            Ok((checker, compiler, entry, value)) => {
-                st.checker = checker;
-                st.compiler = compiler;
+            Ok((entry, value)) => {
+                st.checker = job.checker;
+                st.compiler = job.compiler;
                 st.vm.load_program();
                 Ok((entry, value, deadline))
             }
@@ -603,6 +588,71 @@ fn conclude(vm: &mut Vm, r: Result<RunEnd, Trap>, exit_code: &mut Option<i32>) -
         vm.collect_garbage(None);
     }
     Err(e)
+}
+
+/// What compiling an input needs, owned so that it can move to the
+/// compiler's thread.
+struct CellJob {
+    graph: ModuleGraph,
+    prog: Arc<Program>,
+    /// Copies of the session's, which the input extends.
+    checker: Checker,
+    compiler: Incremental,
+    snapshot: Arc<Snapshot>,
+    registry: Arc<Registry>,
+    budget: Arc<CompileBudget>,
+    /// The modules the input loaded (by index in `graph`), and the standard
+    /// modules it uses for the first time.
+    new_mods: Vec<usize>,
+    new_std: Vec<ModId>,
+    /// Whether a module of `new_mods` declares natives.
+    natives: bool,
+    /// Which globals of the program are initialized.
+    initialized: Vec<bool>,
+    /// The input's module (in `graph`) and file.
+    cell: usize,
+    file: FileId,
+    want_value: bool,
+}
+
+impl CellJob {
+    /// Checks the new modules and the input, and compiles them by appending
+    /// to `prog`. Returns the entry that initializes them and runs the input,
+    /// and the type of the input's value (if `want_value` and it has one).
+    fn run(&mut self) -> Result<(u32, Option<TypeId>), Error> {
+        let session = self.checker.session.unwrap_or_default();
+        let first = self.checker.mods.len();
+        let parsed = self.graph.parse(&self.new_mods, first as ModId).and_then(|modules| {
+            let mut cell = self.graph.parse(&[self.cell], session)?;
+            Ok((modules, cell.pop().expect("one module")))
+        });
+        let (checker, sm, budget) = (&mut self.checker, &self.graph.sm, &self.budget);
+        let resolve = |ds: Vec<Diag>| Error::Compile(ds.iter().map(|d| sm.resolve(d)).collect());
+        let (modules, cell_module) = parsed.map_err(resolve)?;
+        let added = modules.len();
+        let checked = checker.check_cell(&modules, &cell_module, self.want_value, &self.registry.by_name, budget);
+        if let Some(stop) = budget.stopped() {
+            return Err(budget_error(stop, sm, self.file));
+        }
+        checked.map_err(resolve)?;
+        let value = checker.cell_value.take();
+        let std_inits = self.new_std.iter().map(|&id| self.snapshot.mods[id as usize].init);
+        let inits = (first..first + added).chain([session as usize]).map(|m| checker.mods[m].init);
+        let inits: Vec<FnId> = std_inits.chain(inits).flatten().collect();
+        let cp = checker.take_checked();
+        let registry = &*self.registry;
+        let (native_names, native_argc) = if self.natives { native_info(&cp, registry) } else { (Vec::new(), Vec::new()) };
+        let initialized = Some(std::mem::take(&mut self.initialized));
+        let input = CompileInput { checked: &cp, sm, natives: &registry.by_name, native_names, native_argc, budget, initialized };
+        let entry = compile_more(input, Arc::make_mut(&mut self.prog), &mut self.compiler, &inits);
+        if let Some(stop) = budget.stopped() {
+            return Err(budget_error(stop, sm, self.file));
+        }
+        let entry = entry.map_err(resolve)?;
+        checker.restore_checked(cp);
+        checker.release_bodies();
+        Ok((entry, value))
+    }
 }
 
 impl State {

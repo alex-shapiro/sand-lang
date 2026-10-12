@@ -134,3 +134,12 @@ fn takes(f: fn(int, str) -> bool) {}
 takes(1)
 --- error
 2: expected fn(int, str) -> bool, found int
+
+=== closures capture locals passed only to inlined calls
+fn add1(a: int) -> int { a + 1 }
+fn adder(x: int) -> fn() -> int {
+    () => add1(x)
+}
+print(adder(5)())
+--- stdout
+6

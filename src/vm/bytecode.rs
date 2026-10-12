@@ -46,13 +46,6 @@ pub enum Op {
         g: u32,
         src: Reg,
     },
-    /// Loads global `g` into `dst` before a loop that uses it; jumps if the
-    /// global is not initialized yet (to an unhoisted copy of the loop).
-    HoistGlobal {
-        dst: Reg,
-        g: u16,
-        off: i16,
-    },
     NewCell {
         dst: Reg,
         src: Reg,
@@ -961,7 +954,6 @@ impl Op {
             | Op::JNotOk { off, .. }
             | Op::JNotVariant { off, .. }
             | Op::JStrClass { off, .. }
-            | Op::HoistGlobal { off, .. }
             | Op::JListLen { off, .. }
             | Op::JListMinLen { off, .. }
             | Op::ForList { off, .. }
@@ -1024,7 +1016,6 @@ impl Op {
             | Op::JNotOk { off, .. }
             | Op::JNotVariant { off, .. }
             | Op::JStrClass { off, .. }
-            | Op::HoistGlobal { off, .. }
             | Op::JListLen { off, .. }
             | Op::JListMinLen { off, .. }
             | Op::ForList { off, .. }

@@ -139,7 +139,15 @@ impl Snapshot {
         let mut compiler = base.map(|b| b.compiler.clone()).unwrap_or_default();
         let cp = checker.take_checked();
         let (native_names, native_argc) = native_info(&cp, registry);
-        let input = CompileInput { checked: &cp, sm: &sm, natives: &registry.by_name, native_names, native_argc, budget: &budget };
+        let input = CompileInput {
+            checked: &cp,
+            sm: &sm,
+            natives: &registry.by_name,
+            native_names,
+            native_argc,
+            budget: &budget,
+            initialized: None,
+        };
         let inits: Vec<FnId> = ["prelude", "task"].iter().filter_map(|n| mods[by_name[*n] as usize].init).collect();
         program.entry = compile_more(input, &mut program, &mut compiler, &inits).map_err(|ds| resolve(&sm, &ds))?;
         checker.restore_checked(cp);
@@ -323,6 +331,7 @@ pub(crate) enum Target {
 }
 
 /// The modules of a compilation (or of a REPL session, which adds to them).
+#[derive(Default)]
 pub(crate) struct ModuleGraph {
     /// The snapshot's sources, then those loaded.
     pub sm: SourceMap,

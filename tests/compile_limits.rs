@@ -243,13 +243,13 @@ fn the_formatter_is_bounded() {
     let e = format_source(&src).unwrap_err();
     assert!(e.contains("source too complex to format"), "{e}");
     assert!(start.elapsed() < FAST, "took {:?}", start.elapsed());
-    let out = format_source_with(&src, &CompileBudget::new(Some(100_000_000), None, None)).unwrap();
+    let out = format_source_with(&src, CompileBudget::new(Some(100_000_000), None, None)).unwrap();
     assert!(out.len() > 20 * src.len());
     assert_eq!(format_source("let  x = [1,2]\n").unwrap(), "let x = [1, 2]\n");
-    let e = format_source_with(&src, &CompileBudget::new(None, Some(Instant::now()), None)).unwrap_err();
+    let e = format_source_with(&src, CompileBudget::new(None, Some(Instant::now()), None)).unwrap_err();
     assert!(e.starts_with("time limit exceeded"), "{e}");
     let interrupted = CompileBudget::new(None, None, Some(Arc::new(AtomicBool::new(true))));
-    assert_eq!(format_source_with("let x = 1\n", &interrupted).unwrap_err(), "interrupted");
+    assert_eq!(format_source_with("let x = 1\n", interrupted).unwrap_err(), "interrupted");
 }
 
 #[test]

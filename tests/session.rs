@@ -296,6 +296,22 @@ fn panics_keep_earlier_effects_and_the_session_usable() {
     }
 }
 
+/// The functions of an input that fails outlive the globals it did not
+/// initialize: their loops read those globals only where they do.
+#[test]
+fn loops_of_a_failed_input_read_its_uninitialized_globals_where_they_do() {
+    let mut r = Repl::new();
+    let late = "fn late(n: int) -> int {\n    var t = 0\n    for i in 0..n {\n        if i == 2 {\n            t += LATE\n        }\n        t += 1\n    }\n    t\n}\n";
+    let msg = r.runtime_error(&format!("{late}panic(\"boom\")\nlet LATE = 10"));
+    assert_eq!(msg, "boom");
+    assert_eq!(r.value("late(2)"), "2");
+    let msg = r.runtime_error("late(3)");
+    assert!(msg.contains("global used before initialization: `LATE`"), "{msg}");
+    // Later inputs read the globals of earlier ones that are initialized.
+    r.ok("let K = 4");
+    assert_eq!(r.value("fn sum(n: int) -> int {\n    var t = 0\n    for i in 0..n { t += K }\n    t\n}\nsum(3)"), "12");
+}
+
 #[test]
 fn exit_ends_the_input() {
     let mut r = Repl::new();

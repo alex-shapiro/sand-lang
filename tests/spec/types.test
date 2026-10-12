@@ -170,7 +170,6 @@ fn worker() -> int {
     n
 }
 
-// The unhoisted copy of a loop that declares pattern locals.
 fn label_pairs(pairs: [(int, str)], use_late: bool) -> str {
     var out = ""
     for (n, s) in pairs {
@@ -202,6 +201,53 @@ a2;b4;
 3
 --- panic
 global used before initialization: `LATE`
+
+=== loops reached through values, dictionaries and defaults before a global they read
+trait Count {
+    fn count(self, n: int) -> int
+}
+struct Bag {}
+impl Count for Bag {
+    fn count(self, n: int) -> int {
+        var t = 0
+        for i in 0..n {
+            if i == 2 {
+                t += LATE
+            }
+            t += 1
+        }
+        t
+    }
+}
+fn generic<T: Count>(x: T, n: int) -> int {
+    x.count(n)
+}
+fn direct(n: int) -> int {
+    Bag {}.count(n)
+}
+fn with_default(n: int, k: int = direct(n)) -> int {
+    k
+}
+let by_value = direct
+let by_lambda = (n: int) => direct(n)
+print(generic(Bag {}, 2))
+print(by_value(2))
+print(by_lambda(2))
+print(with_default(2))
+let LATE = 10
+print(generic(Bag {}, 3))
+print(by_value(3))
+print(by_lambda(3))
+print(with_default(3))
+--- stdout
+2
+2
+2
+2
+13
+13
+13
+13
 
 === never fits a whole value, not part of a type
 fn run(f: fn() -> never) -> str {
