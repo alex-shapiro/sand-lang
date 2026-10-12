@@ -39,7 +39,7 @@ fn main() {
         ("parse", Box::new(|src| assert!(parse_module(src, 0).errors.is_empty()))),
         ("check", Box::new(move |src| engine().check_source("main.sand", src).map(|_| ()).unwrap())),
         ("format", Box::new(|src| assert_eq!(sandlang::fmt::format_source(src).unwrap(), src))),
-        ("lint", Box::new(move |src| drop(sandlang::lint::lint_source_with(&engine(), "main.sand", src).unwrap()))),
+        ("lint", Box::new(move |src| drop(engine().lint_source("main.sand", src).unwrap()))),
     ];
 
     println!("{:<10} {:>10} {:>10} {:>10}", "stage", "best", "median", "MB/s");

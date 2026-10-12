@@ -54,7 +54,7 @@ fn examples_type_check_lint_and_are_formatted() {
     for rel in ALL_EXAMPLES {
         let path = example(rel);
         let source = std::fs::read_to_string(&path).unwrap();
-        let warnings = sandlang::lint::lint_file(&path).unwrap_or_else(|e| panic!("{rel}: {e}"));
+        let warnings = Engine::new(Config::new().policy(Policy::deny_all())).lint_file(&path).unwrap_or_else(|e| panic!("{rel}: {e}"));
         assert!(warnings.is_empty(), "{rel} has lint warnings: {warnings:?}");
         let formatted = sandlang::fmt::format_source(&source).unwrap();
         assert!(formatted == source, "{rel} is not formatted:\n{}", first_diff(&source, &formatted));

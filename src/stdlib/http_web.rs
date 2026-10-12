@@ -90,7 +90,7 @@ fn send(vm: &mut Vm, a: &[Value]) -> NResult {
             };
             let headers = header_list(vm, headers)?;
             // The browser read the body: it stays reserved while it is read.
-            let reader = BodyReader::new(Box::new(MemoryBody::new(body)), None, max_body, Some(res));
+            let reader = BodyReader::new(Box::new(MemoryBody::new(body)), max_body, Some(res));
             let body = alloc_body(vm, reader);
             let tuple = vm.heap.new_tuple(&[Value::Int(status), headers, body]);
             Ok(vm.ok(tuple))

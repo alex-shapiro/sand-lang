@@ -60,7 +60,7 @@ fn check_only(src: &str) {
         let mut engine = Engine::new(Config::new());
         let _ = engine.check_source("fuzz.sand", src);
         let _ = sandlang::fmt::format_source(src);
-        let _ = sandlang::lint::lint_source("fuzz.sand", src);
+        let _ = engine.lint_source("fuzz.sand", src);
     }));
     if result.is_err() {
         panic!("host panic in front end on input:\n-----\n{src:?}\n-----");

@@ -307,14 +307,14 @@ for _ in 0..2 {
     };
     // A chunked body.
     let mut s = std::net::TcpStream::connect(&addr).unwrap();
-    write!(s, "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nabcd\r\n6\r\nefghij\r\n0\r\n\r\n").unwrap();
+    write!(s, "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n4\r\nabcd\r\n6\r\nefghij\r\n0\r\n\r\n").unwrap();
     let mut resp = String::new();
     s.read_to_string(&mut resp).unwrap();
     assert!(resp.ends_with("4 + 6 bytes"), "{resp}");
     assert!(resp.contains("set-cookie: a=1\r\nset-cookie: b=2\r\n"), "{resp}");
     // `100 Continue` is sent when the handler starts reading the body.
     let mut s = std::net::TcpStream::connect(&addr).unwrap();
-    write!(s, "PUT / HTTP/1.1\r\nContent-Length: 8\r\nExpect: 100-continue\r\n\r\n").unwrap();
+    write!(s, "PUT / HTTP/1.1\r\nContent-Length: 8\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n").unwrap();
     let mut buf = [0u8; 25];
     s.read_exact(&mut buf).unwrap();
     assert_eq!(&buf, b"HTTP/1.1 100 Continue\r\n\r\n");

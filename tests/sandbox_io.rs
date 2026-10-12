@@ -1132,7 +1132,7 @@ print("still running")
     let _ = hostile.write_all(&vec![b'a'; 12 << 20]);
     let _ = hostile.read_to_end(&mut Vec::new());
     let mut ok = std::net::TcpStream::connect(&http_addr).unwrap();
-    write!(ok, "GET / HTTP/1.1\r\n\r\n").unwrap();
+    write!(ok, "GET / HTTP/1.1\r\nConnection: close\r\n\r\n").unwrap();
     let mut resp = String::new();
     ok.read_to_string(&mut resp).unwrap();
     assert!(resp.ends_with("served after the hostile request"), "{resp}");

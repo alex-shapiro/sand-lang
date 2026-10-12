@@ -34,7 +34,9 @@ bytecode  ─VM───────▶ effects    src/vm/
 - `src/platform.rs`: time, timers, randomness, threads (including the
   worker threads for blocking calls, `offload`), deep stacks;
   `src/stdio.rs`: the writer for the process's standard output and error.
-- `src/session.rs`: REPL sessions; `src/fmt.rs`, `src/lint.rs`: tools.
+- `src/session.rs`: REPL sessions; `src/feed.rs`: standard input that the
+  host passes to scripts; `src/fmt.rs`, `src/lint.rs`: tools (the linter
+  runs inside a compilation).
 - `cli/`: the `sand` command; `wasm/`: the JavaScript API and playground.
 
 ## Natives

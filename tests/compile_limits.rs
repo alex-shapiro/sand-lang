@@ -265,17 +265,19 @@ fn the_linter_is_bounded() {
         }
         src
     };
+    let engine = Engine::new(Config::new());
+    let lint = |src: &str| engine.lint_source("main.sand", src).map_err(|e| e.to_string());
     let start = Instant::now();
-    let e = sandlang::lint::lint_source("main.sand", &nested(120)).unwrap_err();
+    let e = lint(&nested(120)).unwrap_err();
     assert!(e.contains("source too complex to lint"), "{e}");
     assert!(start.elapsed() < FAST, "took {:?}", start.elapsed());
-    assert_eq!(sandlang::lint::lint_source("main.sand", &nested(20)).unwrap(), vec![]);
-    let e = sandlang::lint::lint_source("main.sand", &slow_program()).unwrap_err();
+    assert_eq!(lint(&nested(20)).unwrap(), vec![]);
+    let e = lint(&slow_program()).unwrap_err();
     assert!(e.contains("program too complex to compile"), "{e}");
     let lets: String = (0..20_000).map(|i| format!("let _v{i} = {i}; ")).collect();
     let src = format!("// \u{e9}\nfn f() {{ {lets}}}\nf()\n");
     let start = Instant::now();
-    assert_eq!(sandlang::lint::lint_source("main.sand", &src).unwrap(), vec![]);
+    assert_eq!(lint(&src).unwrap(), vec![]);
     assert!(start.elapsed() < FAST, "took {:?}", start.elapsed());
 }
 

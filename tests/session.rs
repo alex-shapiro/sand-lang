@@ -7,7 +7,9 @@ mod common;
 
 use common::{TempDir, rt};
 use sandlang::session::RESET_NOTE;
-use sandlang::{Capability, Config, Engine, Error, LimitKind, Limits, MemorySink, NativeModule, Policy, PromptAnswer, RulePolicy, Session};
+use sandlang::{
+    Capability, Config, Engine, Error, LimitKind, Limits, MemorySink, NativeModule, Policy, PromptAnswer, RulePolicy, Session, StdinFeed,
+};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -752,6 +754,41 @@ fn types_of_generic_functions() {
     assert_eq!(ty("(x, y) => pair(id(x), y)"), "fn<A, B>(A, B) -> (A, B)");
     assert_eq!(ty("id(3)"), "int");
     assert_eq!(ty("[]"), "[_]");
+}
+
+#[test]
+fn scripts_read_the_input_the_host_feeds() {
+    let feed = StdinFeed::new();
+    let mut r = Repl::with(Config::new().policy(Policy::allow_all()).stdin_feed(&feed));
+    r.ok("import io");
+    // Data sent ahead is kept until read.
+    feed.send("early\npart");
+    assert_eq!(r.value("io.stdin.read_line()?"), "Some(\"early\")");
+    assert!(!feed.is_wanted());
+    // A read that waits, with nothing else to run, asks for input.
+    let Repl { session, rt, .. } = &mut r;
+    let (value, ()) = rt.block_on(async {
+        let answer = async {
+            feed.wanted().await;
+            feed.send("ial\n");
+        };
+        tokio::join!(session.eval("io.stdin.read_line()?"), answer)
+    });
+    assert_eq!(value.unwrap().as_deref(), Some("Some(\"partial\")"));
+    // An end of input ends one read.
+    feed.end();
+    assert_eq!(r.value("io.stdin.read_line()?"), "None");
+    feed.send("again\n");
+    assert_eq!(r.value("io.stdin.read_line()?"), "Some(\"again\")");
+    // A task's read waits between inputs, until the host sends a line.
+    r.ok("let t = spawn io.stdin.read_line()");
+    let got = r.rt.block_on(r.session.run_tasks_until(feed.wanted(), |e| panic!("{e}")));
+    assert_eq!(got, Some(()));
+    assert!(r.idle(50).is_empty());
+    assert_eq!(r.value("t.is_done()"), "false");
+    feed.send("late\n");
+    assert_eq!(r.value("t.wait()?"), "Some(\"late\")");
+    assert!(!feed.is_wanted());
 }
 
 #[test]

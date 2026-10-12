@@ -1,65 +1,58 @@
-//! The `http` module: an HTTP/1.1 client and server written directly on top
-//! of tokio TCP streams (and rustls for `https`).
+//! The `http` module's client, on tokio TCP streams (and rustls for
+//! `https`), and the message syntax and body framing it shares with the
+//! server (`http_server.rs`).
 //!
-//! Redirects are followed in Sand (`http.sand`) so that every hop goes
-//! through `send`, which checks the policy before connecting. Bodies are
-//! read as scripts read them (`http.Body`, through [`Framed`]): a client's
-//! `send` returns at the response's head, and a server's `accept` at the
-//! request's head.
+//! Redirects are followed in Sand (`http.sand`), so every hop goes through
+//! `send` and its policy check. A response whose body is read to its end
+//! leaves its connection in the run's [`Pool`].
 
 use super::http_common::*;
-use super::net::{self, ConnHandle, TlsSettings, check_permission, finish, suspend};
+use super::net::{self, ConnHandle, TlsSettings, check_permission, suspend};
 use super::stream::{IoFailure, read_line_bytes, strip_eol};
 use crate::check::ModKind;
 use crate::engine::Registry;
-use crate::policy::{Capability, Policy};
-use crate::vm::iomem::{IoMemory, Reservation, ResourceSlot};
+use crate::platform::Instant;
+use crate::policy::Policy;
+use crate::vm::iomem::{Reservation, ResourceSlot};
 use crate::vm::value::{NativeObject, Obj, Value};
 use crate::vm::{Ctl, NResult, Vm};
 use std::any::Any;
-use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
-use std::task::Poll;
+use std::task::{Context, Waker};
 use std::time::Duration;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::watch;
 
 /// Maximum size of a request or response head (start line and headers).
-const MAX_HEAD: usize = 64 << 10;
-/// How long a server connection may take to deliver its request's head.
-const HEAD_TIMEOUT: Duration = Duration::from_secs(30);
-/// How long a server's body read waits for data.
-const SERVER_BODY_TIMEOUT: Duration = Duration::from_secs(30);
+pub(super) const MAX_HEAD: usize = 64 << 10;
 const USER_AGENT: &str = concat!("sand/", env!("CARGO_PKG_VERSION"));
+/// How long an idle client connection is kept for another request.
+const POOL_IDLE: Duration = Duration::from_secs(20);
+/// The most idle client connections kept per origin.
+const POOL_PER_ORIGIN: usize = 4;
+/// The most idle client connections kept in all (and at most a quarter of
+/// `max_open_resources`).
+const POOL_MAX: usize = 16;
 
 pub fn register(r: &mut Registry) {
     r.source("http", ModKind::Std, concat!(include_str!("http_os.sand"), include_str!("http.sand")));
     super::http_common::register(r);
+    super::http_server::register(r);
     r.add_builtin("http.send", send);
-    r.add_builtin("http.serve", serve);
-    r.add_builtin("http.Server.addr", |vm, a| {
-        let addr = server(vm, a[0])?.addr.clone();
-        Ok(vm.new_str(addr))
-    });
-    r.add_method("http.Server.close", |vm, a| {
-        vm.heap.native_mut::<Server>(a[0]).ok_or_else(|| Ctl::panic("not a server"))?.close();
-        Ok(Value::Unit)
-    });
-    r.add_builtin("http.next_request", next_request);
-    r.add_builtin("http.write_response", write_response);
     r.add_builtin("http.start_upload", start_upload);
-    r.add_builtin("http.reply_body", reply_body);
     r.add_builtin("http.write_body", write_body);
     r.add_builtin("http.read_response", read_response);
 }
 
-/// Reads `name: value` header lines up to the blank line ending the head,
-/// after the start line. Names are lower-cased; repeated headers are kept,
-/// in order. The lines are reserved in `res`.
-async fn read_head<R: AsyncBufRead + Unpin>(r: &mut R, res: &mut Reservation) -> Result<(String, Vec<(String, String)>), IoFailure> {
+// ----------------------------------------------------------------------
+// Message heads
+
+/// Reads a message head: the start line, and the headers in order with
+/// lower-cased names. The lines are reserved in `res`.
+pub(super) async fn read_head<R: AsyncBufRead + Unpin>(
+    r: &mut R,
+    res: &mut Reservation,
+) -> Result<(String, Vec<(String, String)>), IoFailure> {
     let mut budget = MAX_HEAD;
     let mut next_line = async |budget: &mut usize, res: &mut Reservation| -> Result<Option<String>, IoFailure> {
         let line = read_line_bytes(&mut *r, *budget, res).await.map_err(|e| match e.kind {
@@ -95,14 +88,32 @@ async fn read_head<R: AsyncBufRead + Unpin>(r: &mut R, res: &mut Reservation) ->
 }
 
 /// The values of header `name` (lower-case), in order.
-fn values<'a>(headers: &'a [(String, String)], name: &'a str) -> impl Iterator<Item = &'a str> {
+pub(super) fn values<'a>(headers: &'a [(String, String)], name: &'a str) -> impl Iterator<Item = &'a str> {
     headers.iter().filter(move |(k, _)| k == name).map(|(_, v)| v.as_str())
 }
 
-/// How a message's body is delimited (RFC 9112 §6.3). Without
+/// Whether a `Connection` header lists `option`.
+pub(super) fn connection_has(headers: &[(String, String)], option: &str) -> bool {
+    headers
+        .iter()
+        .filter(|(k, _)| k.eq_ignore_ascii_case("connection"))
+        .flat_map(|(_, v)| v.split(','))
+        .any(|o| o.trim().eq_ignore_ascii_case(option))
+}
+
+/// Whether a message of HTTP `version` with `headers` lets its connection
+/// carry another exchange (RFC 9112 §9.3).
+pub(super) fn persists(version: &str, headers: &[(String, String)]) -> bool {
+    match version {
+        "HTTP/1.0" => connection_has(headers, "keep-alive") && !connection_has(headers, "close"),
+        v => v.starts_with("HTTP/1.") && !connection_has(headers, "close"),
+    }
+}
+
+/// How a received message's body is delimited (RFC 9112 §6.3). Without
 /// `Content-Length` or chunked encoding a body extends to the end of the
 /// stream if `read_to_close` (responses), otherwise it is empty (requests).
-fn framing(headers: &[(String, String)], read_to_close: bool) -> Result<Framing, IoFailure> {
+pub(super) fn framing(headers: &[(String, String)], read_to_close: bool) -> Result<Framing, IoFailure> {
     let chunked = values(headers, "transfer-encoding")
         .flat_map(|v| v.split(','))
         .last()
@@ -115,20 +126,56 @@ fn framing(headers: &[(String, String)], read_to_close: bool) -> Result<Framing,
         let first = lengths.next().and_then(|v| v.ok());
         // Repeated values must agree.
         return match first.filter(|&n| lengths.all(|v| v.ok() == Some(n))) {
+            Some(0) => Ok(Framing::Done),
             Some(n) => Ok(Framing::Length(n)),
             None => Err(IoFailure::new("http", "invalid content-length")),
         };
     }
-    Ok(if read_to_close { Framing::UntilClose } else { Framing::Length(0) })
+    Ok(if read_to_close { Framing::UntilClose } else { Framing::Done })
+}
+
+/// How the body of a message being sent is delimited.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Delimit {
+    /// The message has no body.
+    None,
+    /// By `Content-Length`.
+    Length(u64),
+    Chunked,
+    /// By closing the connection (a response to HTTP/1.0).
+    Close,
+}
+
+/// Appends `headers`, except the framing and `Connection` headers, which
+/// [`end_head`] adds.
+pub(super) fn push_headers(head: &mut String, headers: &[(String, String)]) {
+    for (k, v) in headers {
+        if !["content-length", "transfer-encoding", "connection"].iter().any(|h| k.eq_ignore_ascii_case(h)) {
+            *head += &format!("{k}: {v}\r\n");
+        }
+    }
+}
+
+/// Ends a head with the framing headers and an optional `Connection` header.
+pub(super) fn end_head(mut head: String, body: Delimit, connection: Option<&str>) -> String {
+    match body {
+        Delimit::Length(n) => head += &format!("Content-Length: {n}\r\n"),
+        Delimit::Chunked => head += "Transfer-Encoding: chunked\r\n",
+        Delimit::None | Delimit::Close => {}
+    }
+    if let Some(c) = connection {
+        head += &format!("Connection: {c}\r\n");
+    }
+    head + "\r\n"
 }
 
 // ----------------------------------------------------------------------
 // Bodies
 
-/// What remains of a body.
+/// What remains of a received body.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Framing {
-    /// This many bytes.
+pub(super) enum Framing {
+    /// This many bytes (at least one).
     Length(u64),
     Chunked(Chunk),
     /// Everything up to the end of the stream.
@@ -137,7 +184,7 @@ enum Framing {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Chunk {
+pub(super) enum Chunk {
     /// Next is a chunk-size line.
     Size,
     /// This many bytes of the chunk remain.
@@ -146,18 +193,17 @@ enum Chunk {
     DataEnd,
 }
 
-/// A buffered stream that a client's response owns.
+/// A client connection's stream: TCP, or TLS over TCP.
 trait AsyncStream: AsyncRead + AsyncWrite + Send + Unpin {}
 impl<S: AsyncRead + AsyncWrite + Send + Unpin> AsyncStream for S {}
 
 /// Where a body's bytes come from.
 enum Source {
-    /// A client's connection (a response's body).
-    Owned(BufReader<Box<dyn AsyncStream>>),
-    /// A server's connection (a request's body): its halves, held weakly
-    /// (closing the `net.Conn` closes the socket), and its reader, locked
-    /// during each read of the body only (so the script may use the
-    /// connection between them).
+    /// A client connection, until the body ends. A body read to its end
+    /// puts it in `reuse`.
+    Owned { conn: Option<ClientConn>, reuse: Option<Weak<Pool>> },
+    /// A `net.Conn`'s halves, held weakly so that closing the `net.Conn`
+    /// closes the socket. `guard` holds the reader during a read only.
     Conn {
         reader: Weak<tokio::sync::Mutex<net::ReadHalf>>,
         writer: Weak<tokio::sync::Mutex<net::WriteHalf>>,
@@ -166,20 +212,8 @@ enum Source {
     },
 }
 
-impl Source {
-    /// The source of a request's body on the connection `handle`.
-    fn conn(handle: &ConnHandle) -> Source {
-        Source::Conn {
-            reader: Arc::downgrade(&handle.reader),
-            writer: Arc::downgrade(&handle.writer),
-            closed: handle.closed.clone(),
-            guard: None,
-        }
-    }
-}
-
 /// A body decoded from its framing, as a [`BodyStream`].
-struct Framed {
+pub(super) struct Framed {
     source: Source,
     framing: Framing,
     /// The most a wait for data may take.
@@ -189,10 +223,22 @@ struct Framed {
 }
 
 impl Framed {
+    /// A body read from the `net.Conn` of `handle` (a server's request, or
+    /// the response to an upload).
+    pub(super) fn on_conn(handle: &ConnHandle, framing: Framing, timeout: Duration, continue_first: bool) -> Framed {
+        let source = Source::Conn {
+            reader: Arc::downgrade(&handle.reader),
+            writer: Arc::downgrade(&handle.writer),
+            closed: handle.closed.clone(),
+            guard: None,
+        };
+        Framed { source, framing, timeout, continue_first }
+    }
+
     /// The source, locked (waiting for the connection's reader if need be).
     async fn reader(&mut self) -> Result<&mut (dyn AsyncBufRead + Send + Unpin), IoFailure> {
         match &mut self.source {
-            Source::Owned(r) => Ok(r),
+            Source::Owned { conn, .. } => Ok(&mut conn.as_mut().ok_or_else(net::closed)?.stream),
             Source::Conn { reader, closed, guard, .. } => {
                 if closed.is_closed() {
                     return Err(net::closed());
@@ -215,7 +261,7 @@ impl Framed {
         // A request's body stops when its connection is closed.
         let closed = match &self.source {
             Source::Conn { closed, .. } => Some(closed.clone()),
-            Source::Owned(_) => None,
+            Source::Owned { .. } => None,
         };
         let r = self.reader().await?;
         let fill = async move {
@@ -266,10 +312,7 @@ impl Framed {
         }
         loop {
             match self.framing {
-                Framing::Done | Framing::Length(0) => {
-                    self.framing = Framing::Done;
-                    return Ok(0);
-                }
+                Framing::Done => return Ok(0),
                 Framing::Length(n) => {
                     let got = self.source_buf().await?;
                     if got == 0 {
@@ -336,45 +379,212 @@ impl BodyStream for Framed {
         })
     }
 
+    fn consume(&mut self, n: usize) {
+        let r: &mut (dyn AsyncBufRead + Send + Unpin) = match &mut self.source {
+            Source::Owned { conn: Some(c), .. } => &mut c.stream,
+            Source::Conn { guard: Some(g), .. } => &mut **g,
+            Source::Owned { conn: None, .. } | Source::Conn { guard: None, .. } => return,
+        };
+        Pin::new(r).consume(n);
+        let n = n as u64;
+        self.framing = match self.framing {
+            Framing::Length(left) if left <= n => Framing::Done,
+            Framing::Length(left) => Framing::Length(left - n),
+            Framing::Chunked(Chunk::Data(left)) if left <= n => Framing::Chunked(Chunk::DataEnd),
+            Framing::Chunked(Chunk::Data(left)) => Framing::Chunked(Chunk::Data(left - n)),
+            f => f,
+        };
+    }
+
+    fn at_end(&self) -> bool {
+        self.framing == Framing::Done
+    }
+
+    fn owns_conn(&self) -> bool {
+        matches!(self.source, Source::Owned { .. })
+    }
+
     fn release(&mut self) {
         if let Source::Conn { guard, .. } = &mut self.source {
             *guard = None;
         }
     }
 
-    fn shutdown(&mut self) {
-        if let Source::Owned(r) = &mut self.source {
-            net::shutdown_now(r.get_mut());
+    fn end(&mut self, complete: bool) {
+        let Source::Owned { conn, reuse } = &mut self.source else { return };
+        let Some(mut conn) = conn.take() else { return };
+        match reuse.take().and_then(|p| p.upgrade()) {
+            Some(pool) if complete && self.framing == Framing::Done => pool.put(conn),
+            _ => net::shutdown_now(conn.stream.get_mut()),
         }
-    }
-
-    fn consume(&mut self, n: usize) {
-        let r: &mut (dyn AsyncBufRead + Send + Unpin) = match &mut self.source {
-            Source::Owned(r) => r,
-            Source::Conn { guard: Some(g), .. } => &mut **g,
-            Source::Conn { guard: None, .. } => return,
-        };
-        Pin::new(r).consume(n);
-        let n = n as u64;
-        self.framing = match self.framing {
-            Framing::Length(left) => Framing::Length(left.saturating_sub(n)),
-            Framing::Chunked(Chunk::Data(left)) if left <= n => Framing::Chunked(Chunk::DataEnd),
-            Framing::Chunked(Chunk::Data(left)) => Framing::Chunked(Chunk::Data(left - n)),
-            f => f,
-        };
     }
 }
 
 // ----------------------------------------------------------------------
-// Client
+// Client connections
 
-/// A response's head, with its connection.
-struct Head {
+/// A client's connection to an origin, counted by its slot.
+pub(crate) struct ClientConn {
+    stream: BufReader<Box<dyn AsyncStream>>,
+    slot: ResourceSlot,
+    /// `scheme://host[:port]`.
+    origin: String,
+}
+
+impl ClientConn {
+    /// Whether the server has neither closed the connection nor sent
+    /// anything since the last response.
+    fn is_ready(&mut self) -> bool {
+        let mut cx = Context::from_waker(Waker::noop());
+        Pin::new(&mut self.stream).poll_fill_buf(&mut cx).is_pending()
+    }
+}
+
+/// A run's idle client connections, kept for later requests to their
+/// origin. When a limit forces a collection, [`Pool::clear`] closes them and
+/// the servers' kept-alive connections.
+pub(crate) struct Pool {
+    /// Oldest first, with when each became idle.
+    idle: std::sync::Mutex<Vec<(ClientConn, Instant)>>,
+    max: usize,
+    servers: std::sync::Mutex<Vec<Weak<super::http_server::Shared>>>,
+}
+
+impl Pool {
+    pub fn new(max_open_resources: usize) -> Arc<Pool> {
+        let max = (max_open_resources / 4).min(POOL_MAX);
+        Arc::new(Pool { idle: std::sync::Mutex::default(), max, servers: std::sync::Mutex::default() })
+    }
+
+    /// Lets [`Pool::clear`] close the idle connections of `server`.
+    pub(super) fn watch(&self, server: &Arc<super::http_server::Shared>) {
+        let mut servers = self.servers.lock().unwrap_or_else(|e| e.into_inner());
+        servers.retain(|s| s.strong_count() > 0);
+        servers.push(Arc::downgrade(server));
+    }
+
+    fn idle(&self) -> std::sync::MutexGuard<'_, Vec<(ClientConn, Instant)>> {
+        self.idle.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The most recently used idle connection to `origin` that is ready for
+    /// a request, after closing those idle for longer than [`POOL_IDLE`].
+    fn take(&self, origin: &str) -> Option<ClientConn> {
+        let mut idle = self.idle();
+        idle.retain(|(_, since)| since.elapsed() < POOL_IDLE);
+        while let Some(i) = idle.iter().rposition(|(c, _)| c.origin == origin) {
+            let (mut conn, _) = idle.remove(i);
+            if conn.is_ready() {
+                return Some(conn);
+            }
+        }
+        None
+    }
+
+    /// Keeps `conn` idle, closing the oldest beyond the pool's bounds.
+    fn put(&self, mut conn: ClientConn) {
+        if self.max == 0 || !conn.stream.buffer().is_empty() || !conn.is_ready() {
+            net::shutdown_now(conn.stream.get_mut());
+            return;
+        }
+        let mut idle = self.idle();
+        if idle.iter().filter(|(c, _)| c.origin == conn.origin).count() >= POOL_PER_ORIGIN {
+            let oldest = idle.iter().position(|(c, _)| c.origin == conn.origin).expect("counted");
+            idle.remove(oldest);
+        }
+        if idle.len() >= self.max {
+            idle.remove(0);
+        }
+        idle.push((conn, Instant::now()));
+    }
+
+    /// Closes every idle connection.
+    pub fn clear(&self) {
+        self.idle().clear();
+        let servers = std::mem::take(&mut *self.servers.lock().unwrap_or_else(|e| e.into_inner()));
+        for server in servers.iter().filter_map(Weak::upgrade) {
+            server.close_idle();
+            self.watch(&server);
+        }
+    }
+}
+
+/// Connects to `url` at an address the policy allows.
+async fn connect(policy: &Policy, tls: &TlsSettings, url: &Url, slot: ResourceSlot) -> Result<ClientConn, IoFailure> {
+    let tcp = net::connect_checked(policy, &url.host, url.port).await?;
+    let stream: Box<dyn AsyncStream> =
+        if url.scheme == "https" { Box::new(net::tls::connect(tls, &url.host, tcp).await?) } else { Box::new(tcp) };
+    Ok(ClientConn { stream: BufReader::with_capacity(net::CONN_BUFFER, stream), slot, origin: url.origin() })
+}
+
+/// A response's head.
+struct ResponseHead {
     status: i64,
     headers: Vec<(String, String)>,
-    stream: BufReader<Box<dyn AsyncStream>>,
     framing: Framing,
+    /// Whether the connection may carry another request after the body.
+    persists: bool,
 }
+
+/// Sends `request` on `conn` and reads the response's head. A failure
+/// before any of the response arrives returns the slot, to send the request
+/// again on a new connection.
+async fn exchange(
+    mut conn: ClientConn,
+    request: &[u8],
+    head_only: bool,
+    res: &mut Reservation,
+) -> Result<(ClientConn, ResponseHead), (IoFailure, Option<ResourceSlot>)> {
+    let sent = async {
+        conn.stream.write_all(request).await?;
+        conn.stream.flush().await?;
+        if conn.stream.fill_buf().await?.is_empty() {
+            return Err(IoFailure::new("io", "connection closed before a response was received"));
+        }
+        Ok(())
+    };
+    if let Err(e) = sent.await {
+        return Err((e, Some(conn.slot)));
+    }
+    match read_response_head(&mut conn.stream, head_only, res).await {
+        Ok(head) => Ok((conn, head)),
+        Err(e) => Err((e, None)),
+    }
+}
+
+/// Reads a response's head (skipping interim responses).
+async fn read_response_head<R: AsyncBufRead + Unpin>(
+    stream: &mut R,
+    head_only: bool,
+    res: &mut Reservation,
+) -> Result<ResponseHead, IoFailure> {
+    loop {
+        // Interim responses are discarded with their reservation.
+        let mut head_res = res.sibling();
+        let (start, headers) = read_head(&mut *stream, &mut head_res).await.map_err(|e| match e.kind {
+            "closed" => IoFailure::new("io", "connection closed before a response was received"),
+            _ => e,
+        })?;
+        let mut parts = start.splitn(3, ' ');
+        let version = parts.next().unwrap_or("");
+        let status = parts.next().and_then(|s| s.parse::<i64>().ok()).filter(|s| (100..=999).contains(s));
+        let Some(status) = status.filter(|_| version.starts_with("HTTP/")) else {
+            return Err(IoFailure::new("http", format!("malformed status line {start:?}")));
+        };
+        if (100..200).contains(&status) && status != 101 {
+            continue;
+        }
+        let no_body = head_only || status < 200 || status == 204 || status == 304;
+        let framing = if no_body { Framing::Done } else { framing(&headers, true)? };
+        let persists = persists(version, &headers) && status != 101 && framing != Framing::UntilClose;
+        res.absorb(head_res);
+        return Ok(ResponseHead { status, headers, framing, persists });
+    }
+}
+
+/// Methods that may be sent again when a reused connection closes before
+/// responding (RFC 9110 §9.2.2).
+const IDEMPOTENT: &[&str] = &["GET", "HEAD", "OPTIONS", "TRACE", "PUT", "DELETE"];
 
 fn send(vm: &mut Vm, a: &[Value]) -> NResult {
     let (method, text) = (vm.str(a[0]), vm.str(a[1]));
@@ -396,42 +606,64 @@ fn send(vm: &mut Vm, a: &[Value]) -> NResult {
     }
     // The request is held outside the heap while it is sent.
     let mut res = super::or_return!(vm.reserve_io(vm.heap.bytes_of(a[3]).len()));
-    // The connection counts as an open resource, with its buffers, until
-    // its body has been read (or closed).
-    let buffers = if url.scheme == "https" { net::CONN_BUFFER + net::TLS_BUFFERS } else { net::CONN_BUFFER };
-    let slot = super::or_return!(vm.resource_slot_with(buffers, "a connection"));
+    let pool = vm.host.http_pool.clone();
+    let idle = pool.take(&url.origin());
+    let slot = match idle {
+        Some(_) => None,
+        None => {
+            let buffers = if url.scheme == "https" { net::CONN_BUFFER + net::TLS_BUFFERS } else { net::CONN_BUFFER };
+            Some(super::or_return!(vm.resource_slot_with(buffers, "a connection")))
+        }
+    };
     let body = vm.heap.bytes_of(a[3]);
     vm.charge_bytes(body.len())?;
-    let request = encode_request(&method, &url, &headers, body);
+    let close = connection_has(&headers, "close");
+    let sized = !body.is_empty() || ["POST", "PUT", "PATCH"].iter().any(|m| method.eq_ignore_ascii_case(m));
+    let mut request =
+        request_head(&method, &url, &headers, if sized { Delimit::Length(body.len() as u64) } else { Delimit::None }, close).into_bytes();
+    request.extend_from_slice(body);
     if let Err(e) = res.ensure(request.len()) {
         return Ok(vm.err_value("limit", &format!("cannot buffer the request: {e}")));
     }
     let timeout = Duration::from_nanos(a[4].as_int().max(0) as u64);
     let head_only = method.eq_ignore_ascii_case("HEAD");
+    let replayable = IDEMPOTENT.iter().any(|m| method.eq_ignore_ascii_case(m));
     let max_body = vm.host.limits.max_http_body;
     let policy = vm.host.policy.clone();
     let tls = vm.host.tls.clone();
     suspend(
         async move {
             let mut head_res = res.sibling();
-            let exchange = fetch(&policy, &tls, &url, &request, head_only, &mut head_res);
-            let head = match tokio::time::timeout(timeout, exchange).await {
+            let run = async {
+                let mut slot = slot;
+                if let Some(conn) = idle {
+                    match exchange(conn, &request, head_only, &mut head_res).await {
+                        Ok(r) => return Ok(r),
+                        Err((_, Some(s))) if replayable => slot = Some(s),
+                        Err((e, _)) => return Err(e),
+                    }
+                }
+                let conn = connect(&policy, &tls, &url, slot.expect("a slot for a new connection")).await?;
+                exchange(conn, &request, head_only, &mut head_res).await.map_err(|(e, _)| e)
+            };
+            let r = match tokio::time::timeout(timeout, run).await {
                 Ok(r) => r?,
                 Err(_) => return Err(IoFailure::new("timeout", format!("request to {text} timed out"))),
             };
             drop(res);
-            Ok((head, head_res))
+            Ok((r, head_res))
         },
-        move |vm, (head, head_res): (Head, Reservation)| {
+        move |vm, ((conn, head), head_res): ((ClientConn, ResponseHead), Reservation)| {
             drop(head_res);
-            let Head { status, headers, stream, framing } = head;
+            let ResponseHead { status, headers, framing, persists } = head;
             let headers = header_list(vm, headers)?;
+            let reuse = (persists && !close).then(|| Arc::downgrade(&pool));
+            let mut framed = Framed { source: Source::Owned { conn: Some(conn), reuse }, framing, timeout, continue_first: false };
             let reader = if framing == Framing::Done {
-                // Nothing to read: the connection closes now.
-                BodyReader::new(Box::new(MemoryBody::new(Vec::new())), None, max_body, None)
+                framed.end(true);
+                BodyReader::empty(max_body)
             } else {
-                let framed = Framed { source: Source::Owned(stream), framing, timeout, continue_first: false };
-                BodyReader::new(Box::new(framed), Some(slot), max_body, None)
+                BodyReader::new(Box::new(framed), max_body, None)
             };
             let body = alloc_body(vm, reader);
             Ok(vm.heap.new_tuple(&[Value::Int(status), headers, body]))
@@ -439,15 +671,8 @@ fn send(vm: &mut Vm, a: &[Value]) -> NResult {
     )
 }
 
-fn encode_request(method: &str, url: &Url, headers: &[(String, String)], body: &[u8]) -> Vec<u8> {
-    let sized = !body.is_empty() || ["POST", "PUT", "PATCH"].iter().any(|m| method.eq_ignore_ascii_case(m));
-    let mut out = request_head(method, url, headers, sized.then_some(body.len() as u64)).into_bytes();
-    out.extend_from_slice(body);
-    out
-}
-
-/// A request's head; `length` is the body's `Content-Length`, if it has one.
-fn request_head(method: &str, url: &Url, headers: &[(String, String)], length: Option<u64>) -> String {
+/// A request's head, with a `Connection: close` header if `close`.
+fn request_head(method: &str, url: &Url, headers: &[(String, String)], body: Delimit, close: bool) -> String {
     let has = |name: &str| headers.iter().any(|(k, _)| k.eq_ignore_ascii_case(name));
     let mut head = format!("{method} {} HTTP/1.1\r\n", url.target);
     if !has("host") {
@@ -457,91 +682,24 @@ fn request_head(method: &str, url: &Url, headers: &[(String, String)], length: O
     if !has("user-agent") {
         head += &format!("User-Agent: {USER_AGENT}\r\n");
     }
-    end_head(head, length)
-}
-
-/// Appends `headers`, except those that frame the body or manage the
-/// connection (which are ours).
-fn push_headers(head: &mut String, headers: &[(String, String)]) {
-    for (k, v) in headers {
-        if !["content-length", "transfer-encoding", "connection"].iter().any(|h| k.eq_ignore_ascii_case(h)) {
-            *head += &format!("{k}: {v}\r\n");
-        }
-    }
-}
-
-fn end_head(mut head: String, length: Option<u64>) -> String {
-    if let Some(n) = length {
-        head += &format!("Content-Length: {n}\r\n");
-    }
-    head + "Connection: close\r\n\r\n"
-}
-
-/// Connects to `url` (at an address the policy allows), sends the request
-/// and reads the response's head.
-async fn fetch(
-    policy: &Policy,
-    tls: &TlsSettings,
-    url: &Url,
-    request: &[u8],
-    head_only: bool,
-    res: &mut Reservation,
-) -> Result<Head, IoFailure> {
-    // The overall timeout is applied by the caller.
-    let tcp = net::connect_checked(policy, &url.host, url.port).await?;
-    let stream: Box<dyn AsyncStream> =
-        if url.scheme == "https" { Box::new(net::tls::connect(tls, &url.host, tcp).await?) } else { Box::new(tcp) };
-    let mut stream = BufReader::with_capacity(net::CONN_BUFFER, stream);
-    stream.write_all(request).await?;
-    stream.flush().await?;
-    let (status, headers, framing) = read_response_head(&mut stream, head_only, res).await?;
-    Ok(Head { status, headers, stream, framing })
-}
-
-/// Reads a response's head (skipping interim responses): its status,
-/// headers and body framing.
-async fn read_response_head<R: AsyncBufRead + Unpin>(
-    stream: &mut R,
-    head_only: bool,
-    res: &mut Reservation,
-) -> Result<(i64, Vec<(String, String)>, Framing), IoFailure> {
-    loop {
-        // Interim responses are discarded with their reservation.
-        let mut head_res = res.sibling();
-        let (start, headers) = read_head(&mut *stream, &mut head_res).await.map_err(|e| match e.kind {
-            "closed" => IoFailure::new("io", "connection closed before a response was received"),
-            _ => e,
-        })?;
-        let mut parts = start.splitn(3, ' ');
-        let version = parts.next().unwrap_or("");
-        let status = parts.next().and_then(|s| s.parse::<i64>().ok()).filter(|s| (100..=999).contains(s));
-        let Some(status) = status.filter(|_| version.starts_with("HTTP/")) else {
-            return Err(IoFailure::new("http", format!("malformed status line {start:?}")));
-        };
-        if (100..200).contains(&status) && status != 101 {
-            continue;
-        }
-        let no_body = head_only || status < 200 || status == 204 || status == 304;
-        let framing = if no_body { Framing::Done } else { framing(&headers, true)? };
-        res.absorb(head_res);
-        return Ok((status, headers, framing));
-    }
+    end_head(head, body, close.then_some("close"))
 }
 
 // ----------------------------------------------------------------------
 // Bodies written as they go
 
-/// The `http.Outgoing` type: the framing of a body that a script writes
-/// (an upload's request, a reply's response), and the head still to send
-/// before it.
-struct Outgoing {
-    head: Option<Vec<u8>>,
-    /// The bytes left of a body with a `Content-Length`; `None` if chunked.
-    left: Option<u64>,
-    /// False when the body is not sent (a reply to `HEAD`, or a status
-    /// without a body): writes are dropped.
-    sent: bool,
-    finished: bool,
+/// The `http.Outgoing` type: a body that a script writes (an upload's or a
+/// reply's), and the head still to send before it.
+pub(super) struct Outgoing {
+    pub head: Option<Vec<u8>>,
+    /// `Delimit::None` drops writes (a reply to `HEAD`, or a status without
+    /// a body).
+    pub delimit: Delimit,
+    /// The bytes left of a body with a `Content-Length`.
+    pub left: Option<u64>,
+    pub finished: bool,
+    /// For a reply: what becomes of the connection after the body.
+    pub after: Option<super::http_server::After>,
 }
 
 impl NativeObject for Outgoing {
@@ -560,19 +718,15 @@ impl NativeObject for Outgoing {
 }
 
 /// The `Content-Length` that `headers` give the body, if any.
-fn given_length(headers: &[(String, String)]) -> Result<Option<u64>, String> {
+pub(super) fn given_length(headers: &[(String, String)]) -> Result<Option<u64>, String> {
     match headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("content-length")) {
         Some((_, v)) => v.trim().parse().map(Some).map_err(|_| format!("invalid content-length {v:?}")),
         None => Ok(None),
     }
 }
 
-fn alloc_outgoing(vm: &mut Vm, head: String, left: Option<u64>, sent: bool) -> Value {
-    vm.heap.alloc(Obj::Native(Box::new(Outgoing { head: Some(head.into_bytes()), left, sent, finished: false })))
-}
-
-/// `start_upload(method, url, headers, timeout)`: connects for a request
-/// whose body is written as it goes: `(net.Conn, Outgoing)`.
+/// `start_upload(method, url, headers, timeout)`: connects for a streamed
+/// request: `(net.Conn, Outgoing)`. The connection is not reused.
 fn start_upload(vm: &mut Vm, a: &[Value]) -> NResult {
     let (method, text) = (vm.str(a[0]).to_string(), vm.str(a[1]).to_string());
     vm.charge_slow_bytes(method.len() + text.len())?;
@@ -596,10 +750,8 @@ fn start_upload(vm: &mut Vm, a: &[Value]) -> NResult {
     }
     let buffers = if url.scheme == "https" { net::CONN_BUFFER + net::TLS_BUFFERS } else { net::CONN_BUFFER };
     let slot = super::or_return!(vm.resource_slot_with(buffers, "a connection"));
-    let mut head = request_head(&method, &url, &headers, length);
-    if length.is_none() {
-        head.insert_str(head.len() - "Connection: close\r\n\r\n".len(), "Transfer-Encoding: chunked\r\n");
-    }
+    let delimit = length.map_or(Delimit::Chunked, Delimit::Length);
+    let head = request_head(&method, &url, &headers, delimit, true);
     let timeout = Duration::from_nanos(a[3].as_int().max(0) as u64);
     let (policy, tls) = (vm.host.policy.clone(), vm.host.tls.clone());
     let open = async move {
@@ -621,37 +773,11 @@ fn start_upload(vm: &mut Vm, a: &[Value]) -> NResult {
         },
         move |vm, (conn, slot)| {
             let conn = net::alloc_resource(vm, conn, slot);
-            let body = alloc_outgoing(vm, head, length, true);
+            let out = Outgoing { head: Some(head.into_bytes()), delimit, left: length, finished: false, after: None };
+            let body = vm.heap.alloc(Obj::Native(Box::new(out)));
             Ok(vm.heap.new_tuple(&[conn, body]))
         },
     )
-}
-
-/// `reply_body(status, headers, include_body)`: the `Outgoing` of a
-/// response whose body is written as it goes.
-fn reply_body(vm: &mut Vm, a: &[Value]) -> NResult {
-    let status = a[0].as_int();
-    if !(100..=999).contains(&status) {
-        return Ok(vm.err_value("invalid", &format!("invalid HTTP status {status}")));
-    }
-    let headers = match header_pairs(vm, a[1])? {
-        Ok(h) => h,
-        Err(e) => return Ok(vm.err_value("invalid", &e)),
-    };
-    let length = match given_length(&headers) {
-        Ok(n) => n,
-        Err(e) => return Ok(vm.err_value("invalid", &e)),
-    };
-    let has_body = status >= 200 && status != 204 && status != 304;
-    let mut head = format!("HTTP/1.1 {status} {}\r\n", reason_phrase(status));
-    push_headers(&mut head, &headers);
-    if has_body && length.is_none() {
-        head += "Transfer-Encoding: chunked\r\n";
-    }
-    let head = end_head(head, length.filter(|_| has_body));
-    vm.charge_bytes(head.len())?;
-    let body = alloc_outgoing(vm, head, length, has_body && a[2].as_bool());
-    Ok(vm.ok(body))
 }
 
 /// `write_body(conn, body, data, last)`: writes `data` to the body (an
@@ -664,33 +790,40 @@ fn write_body(vm: &mut Vm, a: &[Value]) -> NResult {
         return Ok(vm.err_value("closed", "the body has been finished"));
     }
     let left = out.left.map(|left| left.checked_sub(n as u64));
+    let sent = out.delimit != Delimit::None;
     match left {
         Some(None) => return Ok(vm.err_value("invalid", "the body is longer than its content-length")),
-        Some(Some(more)) if last && more > 0 && out.sent => {
+        Some(Some(more)) if last && more > 0 && sent => {
             return Ok(vm.err_value("invalid", &format!("the body is {more} bytes shorter than its content-length")));
         }
         _ => {}
     }
-    let (chunked, sent) = (out.left.is_none(), out.sent);
     let len = out.head.as_ref().map_or(0, Vec::len) + if sent { n + 32 } else { 0 };
     vm.charge_bytes(len)?;
     let res = super::or_return!(vm.reserve_io(len));
     let out = vm.heap.native_mut::<Outgoing>(a[1]).expect("checked above");
     out.left = left.flatten();
     out.finished = last;
+    let delimit = out.delimit;
+    let after = if last { out.after.take() } else { None };
     let mut data = out.head.take().unwrap_or_default();
-    if sent {
-        let body = vm.heap.bytes_of(a[2]);
-        if chunked && !body.is_empty() {
-            data.extend_from_slice(format!("{:x}\r\n", body.len()).as_bytes());
-            data.extend_from_slice(body);
-            data.extend_from_slice(b"\r\n");
-        } else if !chunked {
-            data.extend_from_slice(body);
+    let body = vm.heap.bytes_of(a[2]);
+    match delimit {
+        Delimit::Chunked => {
+            if !body.is_empty() {
+                data.extend_from_slice(format!("{:x}\r\n", body.len()).as_bytes());
+                data.extend_from_slice(body);
+                data.extend_from_slice(b"\r\n");
+            }
+            if last {
+                data.extend_from_slice(b"0\r\n\r\n");
+            }
         }
-        if chunked && last {
-            data.extend_from_slice(b"0\r\n\r\n");
-        }
+        Delimit::Length(_) | Delimit::Close => data.extend_from_slice(body),
+        Delimit::None => {}
+    }
+    if let Some(after) = after {
+        return super::http_server::end_response(vm, a[0], data, res, after);
     }
     if data.is_empty() {
         return Ok(vm.ok(Value::Unit));
@@ -723,349 +856,17 @@ fn read_response(vm: &mut Vm, a: &[Value]) -> NResult {
                 Err(_) => Err(IoFailure::new("timeout", "timed out waiting for the response")),
             }
         }),
-        move |vm, (status, headers, framing)| {
-            let headers = header_list(vm, headers)?;
-            let reader = if framing == Framing::Done {
-                BodyReader::new(Box::new(MemoryBody::new(Vec::new())), None, max_body, None)
+        move |vm, head: ResponseHead| {
+            let headers = header_list(vm, head.headers)?;
+            let reader = if head.framing == Framing::Done {
+                BodyReader::empty(max_body)
             } else {
-                let framed = Framed { source: Source::conn(&h), framing, timeout, continue_first: false };
-                BodyReader::new(Box::new(framed), None, max_body, None)
+                BodyReader::new(Box::new(Framed::on_conn(&h, head.framing, timeout, false)), max_body, None)
             };
             let body = alloc_body(vm, reader);
-            Ok(vm.heap.new_tuple(&[Value::Int(status), headers, body]))
+            Ok(vm.heap.new_tuple(&[Value::Int(head.status), headers, body]))
         },
     )
-}
-
-// ----------------------------------------------------------------------
-// Server
-
-/// A request's head, read by the server: method, path, query, headers.
-type RawHead = (String, String, String, Vec<(String, String)>);
-
-/// A request whose head has been read, with its connection.
-struct Received {
-    head: RawHead,
-    framing: Framing,
-    expects_continue: bool,
-    conn: net::Conn,
-    /// The head's buffers, until they become values.
-    res: Reservation,
-    /// Counts the connection; its `net.Conn` object keeps it.
-    slot: ResourceSlot,
-}
-
-/// Reading the head of one accepted connection: `None` if it did not
-/// deliver one (it was answered with an error and closed, freeing its slot).
-type Reading = Pin<Box<dyn Future<Output = Option<Received>> + Send>>;
-
-/// A connection whose head is being read, and the flag that tells it to
-/// give up (to make room for a newer one).
-struct Pending {
-    reading: Reading,
-    evict: Arc<AtomicBool>,
-}
-
-#[derive(Default)]
-struct PendingShared {
-    /// Locked by the `next_request` call that drives the readings; oldest first.
-    reads: tokio::sync::Mutex<Vec<Pending>>,
-}
-
-/// The `http.Server` type: a listening socket (counted by its slot while
-/// open), and the connections accepted whose requests' heads are being
-/// read (each with a slot of its own).
-struct Server {
-    listener: Option<Arc<TcpListener>>,
-    slot: Option<ResourceSlot>,
-    addr: String,
-    closed: watch::Sender<bool>,
-    pending: Arc<PendingShared>,
-}
-
-impl Server {
-    fn new(socket: TcpListener) -> std::io::Result<Server> {
-        let addr = socket.local_addr()?.to_string();
-        let closed = watch::Sender::new(false);
-        Ok(Server { listener: Some(Arc::new(socket)), slot: None, addr, closed, pending: Arc::default() })
-    }
-
-    /// Stops listening; the connections being read are closed with the last
-    /// reference to them: now, or when a pending `next_request` ends.
-    fn close(&mut self) {
-        self.closed.send_replace(true);
-        self.listener = None;
-        self.slot = None;
-        self.pending = Arc::default();
-    }
-}
-
-impl net::Resource for Server {
-    fn attach(&mut self, slot: ResourceSlot) {
-        self.slot = Some(slot);
-    }
-}
-
-impl NativeObject for Server {
-    fn type_name(&self) -> &'static str {
-        "Server"
-    }
-    fn is_resource(&self) -> bool {
-        self.listener.is_some()
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-}
-
-fn server(vm: &Vm, v: Value) -> Result<&Server, Ctl> {
-    vm.heap.native::<Server>(v).ok_or_else(|| Ctl::panic("not a server"))
-}
-
-fn serve(vm: &mut Vm, a: &[Value]) -> NResult {
-    let addr = vm.str(a[0]).to_string();
-    if let Some(denied) = check_permission(vm, Capability::NetListen(addr.clone()))? {
-        return Ok(denied);
-    }
-    let slot = super::or_return!(vm.resource_slot());
-    net::suspend_resource(slot, async move { Ok(Server::new(TcpListener::bind(addr).await?)?) })
-}
-
-/// `next_request(server)`: accepts connections and reads their requests'
-/// heads concurrently (each within `HEAD_TIMEOUT`) until one is complete.
-/// Each accepted connection takes an open-resource slot; while none is
-/// free, connections wait in the backlog. At most half of
-/// `max_open_resources` are read at once: beyond, the oldest is answered
-/// with 408 and closed. Readings in progress when the call returns or is
-/// cancelled stay in `pending` for the next call.
-fn next_request(vm: &mut Vm, a: &[Value]) -> NResult {
-    let srv = server(vm, a[0])?;
-    let Some(socket) = srv.listener.clone() else { return Ok(vm.err_value("closed", "server closed")) };
-    let closed = net::CloseSignal::of(&srv.closed);
-    let shared = srv.pending.clone();
-    let mem = vm.heap.io_memory.clone();
-    let cap = (mem.max_resources() / 2).max(1);
-    let serve = async move {
-        let mut reads = shared.reads.lock().await;
-        // Retries taking a slot while none is free.
-        let mut retry: Option<Pin<Box<tokio::time::Sleep>>> = None;
-        std::future::poll_fn(|cx| {
-            loop {
-                let mut progress = false;
-                if retry.as_mut().is_none_or(|t| t.as_mut().poll(cx).is_ready()) {
-                    retry = None;
-                    match ResourceSlot::try_new(&mem) {
-                        Some(slot) => match socket.poll_accept(cx) {
-                            Poll::Ready(Ok((stream, _))) => {
-                                let evict = Arc::new(AtomicBool::new(false));
-                                let reading = Box::pin(read_connection(stream, mem.clone(), slot, evict.clone()));
-                                reads.push(Pending { reading, evict });
-                                // Beyond the cap, the oldest gives up.
-                                let reading: Vec<&Pending> = reads.iter().filter(|p| !p.evict.load(Ordering::Relaxed)).collect();
-                                if reading.len() > cap {
-                                    reading[0].evict.store(true, Ordering::Relaxed);
-                                }
-                                progress = true;
-                            }
-                            Poll::Ready(Err(e)) => return Poll::Ready(Err(IoFailure::from(e))),
-                            Poll::Pending => {}
-                        },
-                        None => retry = Some(Box::pin(tokio::time::sleep(Duration::from_millis(50)))),
-                    }
-                }
-                let mut i = 0;
-                while i < reads.len() {
-                    match reads[i].reading.as_mut().poll(cx) {
-                        Poll::Ready(done) => {
-                            drop(reads.remove(i));
-                            if let Some(r) = done {
-                                return Poll::Ready(Ok(r));
-                            }
-                            progress = true;
-                        }
-                        Poll::Pending => i += 1,
-                    }
-                }
-                if !progress {
-                    if let Some(t) = &mut retry
-                        && t.as_mut().poll(cx).is_ready()
-                    {
-                        continue;
-                    }
-                    return Poll::Pending;
-                }
-            }
-        })
-        .await
-    };
-    let max_body = vm.host.limits.max_http_body;
-    Err(Ctl::suspend(Box::pin(async move {
-        finish(closed.guard(serve).await, move |vm, received: Received| {
-            let Received { head: (method, path, query, headers), framing, expects_continue, conn, res, slot } = received;
-            drop(res);
-            let fields = [method, path, query].map(|s| vm.new_str(s));
-            let headers = header_list(vm, headers)?;
-            let handle = conn.handle().expect("a new connection is open");
-            let body = if framing == Framing::Done || framing == Framing::Length(0) {
-                BodyReader::new(Box::new(MemoryBody::new(Vec::new())), None, max_body, None)
-            } else {
-                let source = Source::conn(&handle);
-                let framed = Framed { source, framing, timeout: SERVER_BODY_TIMEOUT, continue_first: expects_continue };
-                BodyReader::new(Box::new(framed), None, max_body, None)
-            };
-            let body = alloc_body(vm, body);
-            let conn = net::alloc_resource(vm, conn, slot);
-            Ok(vm.heap.new_tuple(&[fields[0], fields[1], fields[2], headers, body, conn]))
-        })
-    })))
-}
-
-/// Answers a connection that does not deliver a valid request head with
-/// `status` (best effort: a client that does not read cannot hold the slot).
-async fn deny<W: AsyncWrite + Unpin>(w: &mut W, status: &str, message: &str) {
-    let body = format!("{message}\n");
-    let response = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
-    let send = async {
-        w.write_all(response.as_bytes()).await?;
-        w.flush().await
-    };
-    let _ = tokio::time::timeout(Duration::from_secs(5), send).await;
-}
-
-/// Reads the head of an accepted connection's request (see [`Reading`]).
-async fn read_connection(stream: TcpStream, mem: Arc<IoMemory>, mut slot: ResourceSlot, evict: Arc<AtomicBool>) -> Option<Received> {
-    let peer = stream.peer_addr().ok()?.to_string();
-    let (r, mut w) = stream.into_split();
-    if slot.reserve_buffers(net::CONN_BUFFER).is_err() {
-        deny(&mut w, "503 Service Unavailable", "the server is out of memory").await;
-        return None;
-    }
-    // Bytes buffered past the head stay in this reader for the body.
-    let mut reader = net::read_half(Box::new(r));
-    let mut res = Reservation::new(&mem);
-    let evicted = std::future::poll_fn(|cx| {
-        // Checked whenever the reading is polled (which the server does
-        // right after setting the flag).
-        if evict.load(Ordering::Relaxed) {
-            return Poll::Ready(());
-        }
-        let _ = cx;
-        Poll::Pending
-    });
-    let read = tokio::time::timeout(HEAD_TIMEOUT, read_request_head(&mut reader, &mut res));
-    let result = tokio::select! {
-        r = read => r.unwrap_or_else(|_| Err(IoFailure::new("timeout", "timed out reading the request"))),
-        () = evicted => Err(IoFailure::new("timeout", "closed to serve newer connections")),
-    };
-    match result {
-        Ok((head, framing, expects_continue)) => {
-            let conn = net::Conn::with_reader(reader, Box::new(w), peer);
-            Some(Received { head, framing, expects_continue, conn, res, slot })
-        }
-        Err(e) => {
-            drop(res);
-            match e.kind {
-                "closed" => {}
-                "timeout" => deny(&mut w, "408 Request Timeout", &e.message).await,
-                _ => deny(&mut w, "400 Bad Request", &e.message).await,
-            }
-            None
-        }
-    }
-}
-
-/// Reads a request's head from `reader`: the head, how its body is framed
-/// and whether the client expects `100 Continue` before sending it.
-async fn read_request_head<R: AsyncBufRead + Unpin>(reader: &mut R, res: &mut Reservation) -> Result<(RawHead, Framing, bool), IoFailure> {
-    let (start, headers) = read_head(&mut *reader, res).await?;
-    let parts: Vec<&str> = start.split(' ').collect();
-    let [method, target, version] = parts[..] else {
-        return Err(IoFailure::new("http", format!("malformed request line {start:?}")));
-    };
-    if !is_token(method) || !version.starts_with("HTTP/1.") || target.is_empty() {
-        return Err(IoFailure::new("http", format!("malformed request line {start:?}")));
-    }
-    // Absolute-form targets (`GET http://host/path`) carry the path after the authority.
-    let absolute = (!target.starts_with('/')).then(|| super::uri::parse(target, true).ok()).flatten().filter(|p| p.authority.is_some());
-    let (path, query) = match &absolute {
-        Some(p) => (if p.path.is_empty() { "/" } else { p.path.as_str() }, p.query.as_deref().unwrap_or("")),
-        None => target.split_once('?').unwrap_or((target, "")),
-    };
-    let expects_continue = values(&headers, "expect").any(|e| e.eq_ignore_ascii_case("100-continue"));
-    let framing = framing(&headers, false)?;
-    let head = (method.to_string(), path.to_string(), query.to_string(), headers);
-    Ok((head, framing, expects_continue))
-}
-
-fn reason_phrase(status: i64) -> &'static str {
-    match status {
-        100 => "Continue",
-        101 => "Switching Protocols",
-        200 => "OK",
-        201 => "Created",
-        202 => "Accepted",
-        204 => "No Content",
-        206 => "Partial Content",
-        301 => "Moved Permanently",
-        302 => "Found",
-        303 => "See Other",
-        304 => "Not Modified",
-        307 => "Temporary Redirect",
-        308 => "Permanent Redirect",
-        400 => "Bad Request",
-        401 => "Unauthorized",
-        403 => "Forbidden",
-        404 => "Not Found",
-        405 => "Method Not Allowed",
-        408 => "Request Timeout",
-        409 => "Conflict",
-        410 => "Gone",
-        413 => "Content Too Large",
-        415 => "Unsupported Media Type",
-        422 => "Unprocessable Content",
-        429 => "Too Many Requests",
-        500 => "Internal Server Error",
-        501 => "Not Implemented",
-        502 => "Bad Gateway",
-        503 => "Service Unavailable",
-        504 => "Gateway Timeout",
-        _ => "",
-    }
-}
-
-/// `write_response(conn, status, body, headers, include_body)`: writes the
-/// head and (unless `include_body` is false) the body to `conn`.
-fn write_response(vm: &mut Vm, a: &[Value]) -> NResult {
-    let status = a[1].as_int();
-    if !(100..=999).contains(&status) {
-        return Ok(vm.err_value("invalid", &format!("invalid HTTP status {status}")));
-    }
-    let headers = match header_pairs(vm, a[3])? {
-        Ok(h) => h,
-        Err(e) => return Ok(vm.err_value("invalid", &e)),
-    };
-    let mut head = format!("HTTP/1.1 {status} {}\r\n", reason_phrase(status));
-    for (k, v) in &headers {
-        if !["content-length", "transfer-encoding", "connection"].iter().any(|h| k.eq_ignore_ascii_case(h)) {
-            head += &format!("{k}: {v}\r\n");
-        }
-    }
-    let has_body = status >= 200 && status != 204 && status != 304;
-    let body = if has_body && a[4].as_bool() { vm.heap.bytes_of(a[2]) } else { &[] };
-    if has_body {
-        head += &format!("Content-Length: {}\r\n", vm.heap.bytes_of(a[2]).len());
-    }
-    head += "Connection: close\r\n\r\n";
-    let len = head.len().saturating_add(body.len());
-    vm.charge_bytes(len)?;
-    let res = super::or_return!(vm.reserve_io(len));
-    let body = if has_body && a[4].as_bool() { vm.heap.bytes_of(a[2]) } else { &[] };
-    let mut data = head.into_bytes();
-    data.extend_from_slice(body);
-    net::write_bytes(vm, a[0], data, res)
 }
 
 #[cfg(test)]

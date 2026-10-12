@@ -236,7 +236,7 @@ impl Engine {
     pub fn check(&self, source: &str, name: Option<String>) -> Result<JsValue, JsValue> {
         let name = name.unwrap_or_else(|| "main.sand".into());
         let engine = take(&self.engine)?;
-        let r = sandlang::lint::check_and_lint(&engine, &name, source);
+        let r = engine.lint_source(&name, source);
         *self.engine.borrow_mut() = Some(engine);
         let (ok, diagnostics, lint, error) = match r {
             Ok(warnings) => (true, Array::new().into(), array(&warnings, lint_warning), JsValue::UNDEFINED),
@@ -252,9 +252,9 @@ impl Engine {
     pub fn lint(&self, source: &str, name: Option<String>) -> Result<JsValue, JsValue> {
         let name = name.unwrap_or_else(|| "main.sand".into());
         let engine = take(&self.engine)?;
-        let r = sandlang::lint::lint_source_with(&engine, &name, source);
+        let r = engine.lint_source(&name, source);
         *self.engine.borrow_mut() = Some(engine);
-        Ok(array(&r.map_err(|e| error(&e))?, lint_warning))
+        Ok(array(&r.map_err(|e| error(&e.to_string()))?, lint_warning))
     }
 
     /// Stops the current run (or session input) as soon as it waits or

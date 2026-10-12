@@ -15,7 +15,7 @@ use reedline::{
     default_emacs_keybindings,
 };
 use sandlang::syntax::highlight::{Highlight, highlight};
-use sandlang::{Engine, Error, Session};
+use sandlang::{Engine, Error, Session, StdinFeed};
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::io::{BufRead, IsTerminal, Write};
@@ -64,16 +64,29 @@ pub(crate) fn cmd_repl(args: &[String]) -> Result<u8, String> {
     }
     let rt = runtime()?;
     let screen = Screen::default();
-    let config =
+    let mut config =
         opts.config.stdout(ReplSink { screen: screen.clone(), stderr: false }).stderr(ReplSink { screen: screen.clone(), stderr: true });
+    let feed = opts.script_stdin.then(StdinFeed::new);
+    if let Some(feed) = &feed {
+        config = config.stdin_feed(feed);
+    }
     let mut session = Engine::new(config).session();
     let reader = if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         Reader::Editor(EditorReader::new(screen.clone()))
     } else {
         Reader::Plain(LineReader::new())
     };
+    let mut io = Io { reader, feed, ended: false };
     println!("sand {} — help() for documentation, :help for the REPL's commands, :quit to exit", env!("CARGO_PKG_VERSION"));
-    Ok(rt.block_on(repl(&mut session, &screen, reader)))
+    Ok(rt.block_on(repl(&mut session, &screen, &mut io)))
+}
+
+/// The REPL's standard input: its reader, and the scripts' feed of it.
+struct Io {
+    reader: Reader,
+    feed: Option<StdinFeed>,
+    /// Whether the reader reached the end of a piped input (which is final).
+    ended: bool,
 }
 
 /// What the front end read.
@@ -86,14 +99,14 @@ enum Got {
     End,
 }
 
-async fn repl(session: &mut Session, screen: &Screen, mut reader: Reader) -> u8 {
+async fn repl(session: &mut Session, screen: &Screen, io: &mut Io) -> u8 {
     let mut input = String::new();
     loop {
         let prompt = if input.is_empty() { "> " } else { "... " };
         // Background tasks run while the REPL waits for an input (or Ctrl-C).
         let next = async {
             tokio::select! {
-                got = reader.next(screen, prompt) => got,
+                got = io.reader.next(screen, prompt) => got,
                 Ok(()) = tokio::signal::ctrl_c() => Got::Interrupt { discarded: false },
             }
         };
@@ -110,7 +123,7 @@ async fn repl(session: &mut Session, screen: &Screen, mut reader: Reader) -> u8 
         let line = match got {
             Got::Line(line) => line,
             Got::Interrupt { discarded } => {
-                if reader.echoes_interrupt() {
+                if io.reader.echoes_interrupt() {
                     println!();
                 }
                 if input.is_empty() && !discarded {
@@ -127,7 +140,8 @@ async fn repl(session: &mut Session, screen: &Screen, mut reader: Reader) -> u8 
                 // End of input: run what was entered.
                 if !input.trim().is_empty() {
                     println!();
-                    eval(session, &input).await;
+                    io.ended = true;
+                    eval(session, io, &input).await;
                 }
                 break;
             }
@@ -147,7 +161,7 @@ async fn repl(session: &mut Session, screen: &Screen, mut reader: Reader) -> u8 
                         Ok(t) => println!("{t}"),
                         Err(e) => eprint!("{}", e.render()),
                     },
-                    "test" => match interruptible(session.interrupt_handle(), session.run_tests()).await {
+                    "test" => match foreground(session.interrupt_handle(), io, session.run_tests()).await {
                         Ok(report) => print!("{}", report.render()),
                         Err(e) => eprint!("{}", e.render()),
                     },
@@ -160,7 +174,7 @@ async fn repl(session: &mut Session, screen: &Screen, mut reader: Reader) -> u8 
         if !Session::is_complete(&input) {
             continue;
         }
-        eval(session, &std::mem::take(&mut input)).await;
+        eval(session, io, &std::mem::take(&mut input)).await;
         if let Some(code) = session.exit_code() {
             return exit_status(code);
         }
@@ -169,22 +183,48 @@ async fn repl(session: &mut Session, screen: &Screen, mut reader: Reader) -> u8 
 }
 
 /// Runs one input, printing its value or error.
-async fn eval(session: &mut Session, input: &str) {
+async fn eval(session: &mut Session, io: &mut Io, input: &str) {
     let handle = session.interrupt_handle();
-    match interruptible(handle, session.eval(input)).await {
+    match foreground(handle, io, session.eval(input)).await {
         Ok(Some(value)) => println!("{value}"),
         Ok(None) => {}
         Err(e) => eprint!("{}", e.render()),
     }
 }
 
-/// Awaits `fut`, interrupting the session it runs on when Ctrl-C is pressed.
-async fn interruptible<T>(handle: sandlang::InterruptHandle, fut: impl std::future::Future<Output = T>) -> T {
+/// Awaits `fut` and interrupts the session if Ctrl-C is pressed.
+async fn foreground<T>(handle: sandlang::InterruptHandle, io: &mut Io, fut: impl std::future::Future<Output = T>) -> T {
     let mut fut = std::pin::pin!(fut);
+    let mut reading = false;
     loop {
+        let wanted = async {
+            match &io.feed {
+                Some(feed) if !reading => feed.wanted().await,
+                _ => std::future::pending().await,
+            }
+        };
         tokio::select! {
             r = &mut fut => return r,
             Ok(()) = tokio::signal::ctrl_c() => handle.interrupt(),
+            () = wanted => {
+                if io.ended {
+                    io.feed.as_ref().expect("wanted").end();
+                } else {
+                    reading = true;
+                }
+            }
+            got = io.reader.script_line(), if reading => {
+                reading = false;
+                let feed = io.feed.as_ref().expect("wanted");
+                match got {
+                    Got::Line(line) => feed.send(line),
+                    Got::End => {
+                        io.ended = io.reader.ends_for_good();
+                        feed.end();
+                    }
+                    Got::Interrupt { .. } => {}
+                }
+            }
         }
     }
 }
@@ -374,6 +414,22 @@ impl Reader {
         }
     }
 
+    /// A line for a script's read of standard input.
+    async fn script_line(&mut self) -> Got {
+        match self {
+            Reader::Plain(lines) => match lines.next().await {
+                Some(line) => Got::Line(line),
+                None => Got::End,
+            },
+            Reader::Editor(editor) => editor.script_line().await,
+        }
+    }
+
+    /// Whether the end of the input is final.
+    fn ends_for_good(&self) -> bool {
+        matches!(self, Reader::Plain(_))
+    }
+
     /// Whether the terminal shows Ctrl-C without ending the line (so the
     /// REPL ends it); the line editor ends it itself.
     fn echoes_interrupt(&self) -> bool {
@@ -388,10 +444,10 @@ impl Reader {
 struct Requests<Q, A> {
     requests: std::sync::mpsc::Sender<Q>,
     answers: tokio::sync::mpsc::UnboundedReceiver<A>,
-    pending: bool,
+    pending: Option<Q>,
 }
 
-impl<Q: Send + 'static, A: Send + 'static> Requests<Q, A> {
+impl<Q: Clone + Send + 'static, A: Send + 'static> Requests<Q, A> {
     /// Starts the thread: `serve` answers a request, and says whether it was
     /// the last answer (the end of the input).
     fn spawn(mut serve: impl FnMut(Q) -> (A, bool) + Send + 'static) -> Requests<Q, A> {
@@ -405,19 +461,19 @@ impl<Q: Send + 'static, A: Send + 'static> Requests<Q, A> {
                 }
             }
         });
-        Requests { requests, answers, pending: false }
+        Requests { requests, answers, pending: None }
     }
 
     /// The answer to `request` (`None` once the thread has ended).
     /// Cancel-safe: if the future is dropped, the next call gets the answer
     /// (to the request made then).
     async fn ask(&mut self, request: Q) -> Option<A> {
-        if !self.pending {
-            self.requests.send(request).ok()?;
-            self.pending = true;
+        if self.pending.is_none() {
+            self.requests.send(request.clone()).ok()?;
+            self.pending = Some(request);
         }
         let answer = self.answers.recv().await;
-        self.pending = false;
+        self.pending = None;
         answer
     }
 }
@@ -442,11 +498,18 @@ impl LineReader {
     }
 }
 
-/// Reads inputs with the line editor, after a prompt; the terminal is left
-/// alone between requests, for permission prompts and running inputs.
+/// Reads inputs with the line editor, after a prompt.
 struct EditorReader {
-    requests: Requests<&'static str, Got>,
+    requests: Requests<EditorRequest, Got>,
     screen: Screen,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum EditorRequest {
+    /// An input, after this prompt.
+    Input(&'static str),
+    /// A line for a script.
+    ScriptLine,
 }
 
 impl EditorReader {
@@ -455,7 +518,22 @@ impl EditorReader {
         let buffer = Arc::new(BufferState::default());
         let mut editor = None;
         let thread_screen = screen.clone();
-        let requests = Requests::spawn(move |prompt| {
+        let requests = Requests::spawn(move |request| {
+            let prompt = match request {
+                EditorRequest::Input(prompt) => prompt,
+                EditorRequest::ScriptLine => {
+                    let mut line = String::new();
+                    return match std::io::stdin().lock().read_line(&mut line) {
+                        Ok(1..) => (Got::Line(line), false),
+                        // Ctrl-D ends this read only.
+                        Ok(0) => (Got::End, false),
+                        Err(e) => {
+                            eprintln!("sand: cannot read the terminal: {e}");
+                            (Got::End, true)
+                        }
+                    };
+                }
+            };
             let editor = editor.get_or_insert_with(|| line_editor(printer.clone(), buffer.clone()));
             loop {
                 thread_screen.start_editing(printer.clone());
@@ -480,12 +558,22 @@ impl EditorReader {
     /// The next input (after `prompt`). Cancel-safe. Meanwhile, output held
     /// for the editor is passed on as it takes it.
     async fn next(&mut self, prompt: &'static str) -> Got {
+        if self.requests.pending == Some(EditorRequest::ScriptLine) {
+            let mut out = std::io::stdout().lock();
+            let _ = out.write_all(prompt.as_bytes());
+            let _ = out.flush();
+        }
         loop {
             tokio::select! {
-                got = self.requests.ask(prompt) => return got.unwrap_or(Got::End),
+                got = self.requests.ask(EditorRequest::Input(prompt)) => return got.unwrap_or(Got::End),
                 () = tokio::time::sleep(Duration::from_millis(25)) => self.screen.flush_backlog(),
             }
         }
+    }
+
+    /// A line for a script (see [`Reader::script_line`]).
+    async fn script_line(&mut self) -> Got {
+        self.requests.ask(EditorRequest::ScriptLine).await.unwrap_or(Got::End)
     }
 }
 

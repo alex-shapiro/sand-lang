@@ -285,6 +285,8 @@ pub enum StdinSource {
     /// The host process's standard input.
     #[cfg(feature = "os")]
     Inherit(tokio::io::BufReader<tokio::io::Stdin>),
+    /// Input the host sends ([`crate::StdinFeed`]).
+    Fed(crate::feed::FedReader),
 }
 
 /// Output sink for standard streams and logs. `write` must not block for
@@ -434,6 +436,8 @@ pub struct Host {
     pub stdout: SharedSink,
     pub stderr: SharedSink,
     pub stdin: Arc<tokio::sync::Mutex<StdinSource>>,
+    /// The feed of a [`StdinSource::Fed`], told when the VM waits.
+    pub(crate) stdin_feed: Option<Arc<crate::feed::Shared>>,
     pub output_bytes: u64,
     pub limits: Limits,
     pub cwd: PathBuf,
@@ -446,6 +450,9 @@ pub struct Host {
     pub stream_decisions: [Option<bool>; 2],
     #[cfg(feature = "os")]
     pub(crate) tls: crate::stdlib::TlsSettings,
+    /// The run's idle `http` connections.
+    #[cfg(feature = "os")]
+    pub(crate) http_pool: Arc<crate::stdlib::HttpPool>,
     pub(crate) regex_cache: Vec<(u64, u32)>,
     /// The file system of the `fs` module.
     pub(crate) fs: crate::files::Fs,
@@ -1425,7 +1432,11 @@ impl Vm {
 
     /// A major collection, freeing all unreachable objects; used before
     /// reporting a memory limit, since a minor collection leaves old garbage.
+    /// Also closes idle `http` connections, which hold resource slots and
+    /// buffers.
     pub fn collect_all_garbage(&mut self, current: Option<&mut Fiber>) {
+        #[cfg(feature = "os")]
+        self.host.http_pool.clear();
         self.collect_garbage_with(current, true);
     }
 

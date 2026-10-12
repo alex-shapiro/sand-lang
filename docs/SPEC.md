@@ -1758,7 +1758,15 @@ memory can be processed a chunk at a time (`io.copy(resp.body, file)`);
 `max_http_body` applies only to its `read_all` and `read_text`. `Stream`
 has `ok`, `header` and `header_values`, and implements `Close` (closing its
 body). A body holds its connection, counted against `max_open_resources`,
-until it is read to its end (closing the connection), closed, or collected.
+until it is read to its end, closed (closing the connection), or collected.
+
+Once a response's body is read to its end, its connection is kept for the
+next request to the same origin, unless either side sent `Connection:
+close`. Up to 16 idle connections are kept, 4 per origin, for up to 20
+seconds; they count against `max_open_resources` and `max_memory`. A server
+may close an idle connection just as a request is sent on it. If that happens before any
+of the response arrives, a `GET`, `HEAD`, `PUT`, `DELETE`, `OPTIONS` or
+`TRACE` request is sent again on a new connection; other requests fail.
 
 `upload` connects and returns an `Upload`, an `io.Writer` for the request's
 body: chunked, or exactly as long as a `content-length` in `headers` (a
@@ -1787,9 +1795,8 @@ request.header_values(name: str) -> [str]
 
 `Server` and `Request` implement `Close` (`Server.close` stops accepting
 and closes the connections being read; `Request.close` closes the
-request's body and connection). Each connection carries one request (no
-keep-alive). `accept` returns a request once its **head** has arrived;
-`path` and `query` are the parts of the target before and after `?`. The
+request's body and connection). `accept` returns a request once its head
+has arrived; `path` and `query` are the parts of the target before and after `?`. The
 handler reads the body (`request.body`, or `bytes`, `text`, `json`, which
 read the rest of it, at most `max_http_body` bytes), each wait bounded by
 30 seconds. A client that sent `Expect: 100-continue` is answered `100
@@ -1799,26 +1806,38 @@ Continue` when the handler starts reading the body.
 The body is read from it; `conn` may be used between reads of the body
 (reading `conn` reads past what the body has read), and closing the
 connection or the request ends the body. `respond` writes a response with
-`content-length` and `connection: close` headers (and no body for `HEAD`
-requests or statuses without one) to `conn`, then closes the request.
-`respond_stream` returns a `Reply`, an `io.Writer` for a body framed as an
-upload's is; the head is sent with the first write or `finish`, and closing
-the reply finishes it. A script may also write to `conn` directly,
-producing the HTTP framing itself. Constructing a
-`Request` value directly has no special meaning.
+a `content-length` header (and no body for `HEAD` requests or statuses
+without one) to `conn`, then closes the request. `respond_stream` returns
+a `Reply`, an `io.Writer` for a body framed as an upload's is (to an
+HTTP/1.0 client without a `content-length`, the body ends with the
+connection); the head is sent with the first write or `finish`, and
+closing the reply finishes it. A script may also write to `conn` directly,
+producing the HTTP framing itself, and close it. Constructing a `Request`
+value directly has no special meaning.
 
-While `accept` waits, it accepts connections and reads their heads
-concurrently, returning the first that is complete; reading continues with
-the next `accept`. A `Server` (opaque) counts against `max_open_resources`
-like a listener, as does each connection being read, which on acceptance
-takes a slot and an 8 KiB read buffer (counted against `max_memory`);
-while no slot is free, connections wait in the listener's backlog. At most
-half of `max_open_resources` connections are read at once: beyond that,
-the earliest accepted is answered `408 Request Timeout` and closed. A
-connection is also answered and closed with `408` if its head is not
-complete within 30 seconds of acceptance, `400 Bad Request` if the head is
-malformed, and `503 Service Unavailable` if its buffer does not fit in
-memory.
+After `respond` or `finish`, the server reads the client's next request
+from the connection (and `conn` is closed) if the client allows it
+(HTTP/1.1 without `Connection: close`, or HTTP/1.0 with `Connection:
+keep-alive`) and the handler read the request's body to its end before
+responding. Otherwise the response says `Connection: close` and the
+connection is closed.
+
+While `accept` waits, it reads the heads of requests concurrently from
+the connections it accepts and those waiting for their next request,
+returning the first that is complete; reading continues with the next
+`accept`. A `Server` (opaque) counts against `max_open_resources` like a
+listener, as does each connection being read, which on acceptance takes a
+slot and an 8 KiB read buffer (counted against `max_memory`); while no
+slot is free, connections wait in the listener's backlog. At most half of
+`max_open_resources` connections are read at once: beyond that, the
+earliest is answered `408 Request Timeout` and closed. A connection is
+also answered and closed with `408` if its head is not complete within 30
+seconds of acceptance (or of its first byte), `400 Bad Request` if the
+head is malformed, and `503 Service Unavailable` if its buffer does not
+fit in memory. A connection waiting for its next request is closed
+without an answer if none of it arrives within 30 seconds, if newer
+connections take its place, or if the run reaches `max_open_resources` or
+`max_memory`.
 
 On the web (§16.2), `http` is a client over the browser's `fetch` with the
 same `Response`, `Stream`, `get`, `post`, `request` and `open`, and no
@@ -2334,7 +2353,8 @@ reports:
 | `bypassable-http-deny` | a `deny http` rule for a host that a net rule lets scripts connect to                 |
 | `unused-set`           | a `let` set no rule uses                                                              |
 
-The first two compare rules naming one path (no wildcards) lexically, without resolving symlinks.
+The first two compare paths as written, without resolving symlinks, and report
+a rule only when a single other rule shows that it is not needed.
 
 `sandlang::policy::rule_for(capability, allow)` gives, as a policy file
 line, the rule that decides a promptable request for good (e.g. `allow read
@@ -2505,8 +2525,12 @@ let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 
   `run_*`, on whichever thread polls it. Engines share no mutable state, so any
   number may run concurrently on different threads or tasks (or, on the web,
   interleaved on one thread, §16.2).
-- `run_source(name, source)`, `run_file(path)`, `check_source`, `run_tests`.
-- Captured streams: `Config::stdout(Box<dyn OutputSink>)`, `stderr`, `stdin`.
+- `run_source(name, source)`, `run_file(path)`, `check_source`, `run_tests`,
+  `lint_source`, `lint_file` (lint warnings, §17.2).
+- Captured streams: `Config::stdout(Box<dyn OutputSink>)`, `stderr`,
+  `stdin_bytes`. With `Config::stdin_feed(&StdinFeed)`, scripts read what
+  the host `send`s (`end()` ends one read); `wanted()` resolves when a script
+  waits for input with nothing else to run.
 - `Config::memory_fs(MemFs)` gives scripts a memory file system (§16.1).
 - `Config::tls_root_certificates(Vec<Vec<u8>>)` trusts additional
   DER-encoded root certificates (e.g. a private CA) besides the bundled web
@@ -2584,7 +2608,7 @@ let config = Config::new().memory_fs(fs.clone()).policy(Policy::rules(
 let report = fs.read("/out/report.txt")?;
 ```
 
-`check_source`, `check_file` and `lint::lint_source_with(&engine, ...)` load
+`check_source`, `check_file`, `lint_source` and `lint_file` load
 imports like a run (from the engine's file system, under its policy), but
 never prompt: imports the policy would prompt for are denied.
 
@@ -2634,10 +2658,10 @@ N>` (e.g. `main.sand` for a program the session continues). After
   inputs left running until the future `until` completes, and returns its
   output; front ends call it while waiting for input (§17.6). The
   instruction, CPU time and output limits apply to each call; the wall-time
-  limit does not. Permission prompts and standard input reads wait until
-  `until` completes. If a task fails (panic, limit, interruption), all tasks
-  are cancelled and the error goes to `on_error` at once; the call goes on
-  waiting. If a task calls `exit`, it returns `None` at once.
+  limit does not. Permission prompts wait until `until` completes. If a
+  task fails (panic, limit, interruption), all tasks are cancelled and the
+  error goes to `on_error` at once; the call goes on waiting. If a task
+  calls `exit`, it returns `None` at once.
   `cancel_tasks()` cancels the tasks left running, without running their
   defers.
 - After an internal error (a caught Rust panic) in `eval`, `run_tests`,
@@ -2839,8 +2863,8 @@ between inputs.
   failed input or task, all tasks are cancelled. While the REPL waits, the
   tasks' output appears above the input being edited (on a terminal, on
   standard output whichever stream it was written to) or starts on a new
-  line followed by the prompt again; their permission prompts and reads of
-  standard input wait until an input has been entered.
+  line followed by the prompt again; their permission prompts wait until
+  an input has been entered.
 - `exit(code)` ends the session with exit code `code`.
 - The instruction, CPU time, wall time and output limits apply to each
   input; the memory limit to the session's heap. Between inputs, the
@@ -2858,9 +2882,11 @@ always complete. Ctrl-C interrupts the input being run (the session
 continues), discards a partially entered input, or, at an empty prompt,
 cancels the tasks left running. End of input (Ctrl-D, on an empty input in
 the line editor) ends the session, running any partial input first. Results
-go to standard output, diagnostics and errors to standard error. The REPL's
-input is also the scripts' standard input (`--allow-stdin`); when it is not
-a terminal, a script that reads it may consume input meant for the REPL.
+go to standard output, diagnostics and errors to standard error. Scripts
+read standard input through the REPL (`--allow-stdin`): while an input runs,
+if a script waits for standard input and nothing else can run, the next line
+goes to the script (without the line editor), and Ctrl-D ends that read.
+Between inputs, lines go to the REPL and a task's read waits.
 
 When standard input and output are a terminal, inputs are edited with a line
 editor. An incomplete input continues on `...` lines (Enter on an incomplete

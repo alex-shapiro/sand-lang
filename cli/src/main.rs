@@ -100,6 +100,7 @@ struct RunOptions {
     config: Config,
     file: Option<PathBuf>,
     script_args: Vec<String>,
+    script_stdin: bool,
 }
 
 /// Parses run options into an engine configuration.
@@ -240,7 +241,8 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
     if let Some(s) = seed {
         config = config.seed(s);
     }
-    Ok(RunOptions { config, file, script_args })
+    let script_stdin = prompt != Some(PromptVia::Stdin);
+    Ok(RunOptions { config, file, script_args, script_stdin })
 }
 
 /// Reads and parses a policy file (relative paths in it are relative to
@@ -486,7 +488,7 @@ fn cmd_lint(args: &[String]) -> Result<u8, String> {
                 Err(errors) => return Ok(report_policy_errors(f, &errors)),
             }
         } else {
-            sandlang::lint::lint_file(Path::new(f))
+            Engine::new(Config::new().policy(Policy::deny_all())).lint_file(f).map_err(|e| e.to_string())
         };
         match warnings {
             Ok(ws) => {

@@ -235,8 +235,35 @@ pub(crate) fn read_half(reader: Box<dyn AsyncRead + Send + Unpin>) -> ReadHalf {
     BufReader::with_capacity(CONN_BUFFER, Box::new(StickyEof { inner: reader, eof: false }))
 }
 pub(crate) type WriteHalf = Box<dyn AsyncWrite + Send + Unpin>;
-type SharedReader = Arc<Mutex<ReadHalf>>;
-type SharedWriter = Arc<Mutex<WriteHalf>>;
+pub(crate) type SharedReader = Arc<Mutex<ReadHalf>>;
+pub(crate) type SharedWriter = Arc<Mutex<WriteHalf>>;
+
+/// An open connection outside of a `net.Conn` object, with its slot.
+pub(crate) struct Detached {
+    pub reader: SharedReader,
+    pub writer: SharedWriter,
+    pub peer: String,
+    pub slot: ResourceSlot,
+}
+
+impl Detached {
+    pub fn new(reader: ReadHalf, writer: WriteHalf, peer: String, slot: ResourceSlot) -> Detached {
+        Detached { reader: Arc::new(Mutex::new(reader)), writer: Arc::new(Mutex::new(writer)), peer, slot }
+    }
+
+    /// Allocates a `net.Conn` object for the connection.
+    pub fn alloc(self, vm: &mut Vm) -> Value {
+        let conn = Conn { halves: Some((self.reader, self.writer)), slot: None, peer: self.peer, closed: watch::Sender::new(false) };
+        alloc_resource(vm, conn, self.slot)
+    }
+
+    /// Starts closing the connection without waiting (see [`shutdown_now`]).
+    pub fn close(self) {
+        if let Ok(mut w) = self.writer.try_lock() {
+            shutdown_now(&mut **w);
+        }
+    }
+}
 
 /// The shareable parts of an open connection.
 #[derive(Clone)]
@@ -285,14 +312,8 @@ impl<R: AsyncRead + Unpin> AsyncRead for StickyEof<R> {
 impl Conn {
     /// A connection over `reader` and `writer`; its slot reserves their buffers.
     pub fn new(reader: Box<dyn AsyncRead + Send + Unpin>, writer: WriteHalf, peer: String) -> Conn {
-        Conn::with_reader(read_half(reader), writer, peer)
-    }
-
-    /// A connection over a reader made by [`read_half`] (which may have
-    /// been read from already).
-    pub fn with_reader(reader: ReadHalf, writer: WriteHalf, peer: String) -> Conn {
         Conn {
-            halves: Some((Arc::new(Mutex::new(reader)), Arc::new(Mutex::new(writer)))),
+            halves: Some((Arc::new(Mutex::new(read_half(reader))), Arc::new(Mutex::new(writer)))),
             slot: None,
             peer,
             closed: watch::Sender::new(false),
@@ -309,6 +330,15 @@ impl Conn {
     pub fn handle(&self) -> Option<ConnHandle> {
         let (reader, writer) = self.halves.clone()?;
         Some(ConnHandle { reader, writer, closed: CloseSignal(self.closed.subscribe()) })
+    }
+
+    /// Takes the connection out of the object, which is then closed as far as
+    /// the script can tell; `None` if it was closed.
+    pub fn detach(&mut self) -> Option<Detached> {
+        self.closed.send_replace(true);
+        let (reader, writer) = self.halves.take()?;
+        let slot = self.slot.take()?;
+        Some(Detached { reader, writer, peer: self.peer.clone(), slot })
     }
 
     /// Closes the connection: the socket is closed once pending operations
@@ -354,6 +384,15 @@ impl NativeObject for Conn {
 
 fn conn(vm: &Vm, v: Value) -> Result<&Conn, Ctl> {
     vm.heap.native::<Conn>(v).ok_or_else(|| Ctl::panic("not a connection"))
+}
+
+/// Takes the connection out of the `net.Conn` object `v` (see
+/// [`Conn::detach`]), or returns the `Err(closed)` value.
+pub(crate) fn detach(vm: &mut Vm, v: Value) -> Result<Result<Detached, Value>, Ctl> {
+    match vm.heap.native_mut::<Conn>(v).ok_or_else(|| Ctl::panic("not a connection"))?.detach() {
+        Some(d) => Ok(Ok(d)),
+        None => Ok(Err(vm.err_value("closed", "connection closed"))),
+    }
 }
 
 /// The operation handle of the connection `v`, or the `Err(closed)` value.

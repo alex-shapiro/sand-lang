@@ -158,6 +158,10 @@ const STDIN_CHUNK: usize = 64 << 10;
 /// read must wait, another is under way, or the line does not fit in memory.
 fn buffered_line(vm: &Vm) -> Option<Option<Vec<u8>>> {
     let mut source = vm.host.stdin.try_lock().ok()?;
+    let _op = match &mut *source {
+        StdinSource::Fed(r) => Some(r.begin()),
+        _ => None,
+    };
     let (buf, at_end) = match &mut *source {
         StdinSource::None => return Some(None),
         StdinSource::Bytes(c) => {
@@ -166,6 +170,7 @@ fn buffered_line(vm: &Vm) -> Option<Option<Vec<u8>>> {
         }
         #[cfg(feature = "os")]
         StdinSource::Inherit(r) => (r.buffer(), false),
+        StdinSource::Fed(r) => r.available(),
     };
     let take = match buf.iter().position(|&b| b == b'\n') {
         Some(nl) => nl + 1,
@@ -183,6 +188,7 @@ fn buffered_line(vm: &Vm) -> Option<Option<Vec<u8>>> {
         StdinSource::Bytes(c) => c.set_position(c.position() + take as u64),
         #[cfg(feature = "os")]
         StdinSource::Inherit(r) => std::pin::Pin::new(r).consume(take),
+        StdinSource::Fed(r) => std::pin::Pin::new(r).consume(take),
         StdinSource::None => {}
     }
     strip_eol(&mut data);
@@ -198,6 +204,10 @@ async fn read_input(stdin: &Mutex<StdinSource>, what: Read, res: &mut Reservatio
         StdinSource::Bytes(c) => read_from(c, what, res).await,
         #[cfg(feature = "os")]
         StdinSource::Inherit(r) => read_from(r, what, res).await,
+        StdinSource::Fed(r) => {
+            let _op = r.begin();
+            read_from(r, what, res).await
+        }
     }
 }
 

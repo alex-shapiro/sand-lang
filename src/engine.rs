@@ -5,7 +5,7 @@ use crate::check::{Checker, ModKind};
 use crate::compile::{CompileInput, compile_more};
 use crate::diag::{Diag, Diagnostic, FileId, Span};
 use crate::files::{Fs, MemFs};
-use crate::modules::{ImportRef, ModuleGraph, ResolvedFacts, Snapshot, Target, budget_error, native_info};
+use crate::modules::{ImportRef, ModuleGraph, Snapshot, Target, budget_error, native_info};
 use crate::native::NativeModule;
 use crate::platform::Instant;
 use crate::policy::{Capability, Decision, Policy, PromptAnswer, Prompter};
@@ -192,6 +192,7 @@ enum StdinConfig {
     Bytes(Vec<u8>),
     #[cfg(feature = "os")]
     Inherit,
+    Feed(crate::StdinFeed),
 }
 
 /// Engine configuration (builder style).
@@ -284,6 +285,11 @@ impl Config {
     #[cfg(feature = "os")]
     pub fn inherit_stdin(mut self) -> Self {
         self.stdin = StdinConfig::Inherit;
+        self
+    }
+    /// Scripts read the input the host sends through `feed`.
+    pub fn stdin_feed(mut self, feed: &crate::StdinFeed) -> Self {
+        self.stdin = StdinConfig::Feed(feed.clone());
         self
     }
     /// Scripts, their imports and the main file of [`Engine::run_file`] use
@@ -574,8 +580,8 @@ pub struct Engine {
 /// A compiled program.
 pub(crate) struct Compiled {
     pub program: Arc<Program>,
-    /// Checker facts about the main module, for the linter (if asked for).
-    pub facts: Option<ResolvedFacts>,
+    /// The main module's lint warnings (if asked for).
+    pub lints: Option<Vec<crate::lint::LintWarning>>,
     /// When the run's wall-time limit passes, counted from the start of
     /// compilation, excluding import prompts.
     pub deadline: Option<Instant>,
@@ -590,8 +596,8 @@ pub(crate) struct CompileOptions {
     /// Whether imports the policy would prompt for are prompted for
     /// (otherwise they are denied).
     pub prompt: bool,
-    /// Whether to gather lint facts.
-    pub facts: bool,
+    /// Whether to lint the main module.
+    pub lint: bool,
 }
 
 /// The size of the stack the compiler runs on.
@@ -622,20 +628,21 @@ impl Engine {
         self.gc_stats
     }
 
-    /// Compiles a file and returns checker facts for the linter.
-    #[cfg(feature = "os")]
-    pub(crate) fn lint_facts(&self, path: &Path) -> Result<ResolvedFacts, Error> {
-        let (name, source, root) = self.read_main(path)?;
-        let c = self.compile_now(&name, &source, &root, Some(path), true)?;
-        self.recycle(c.program, c.snapshot);
-        Ok(c.facts.unwrap_or_default())
-    }
-
-    /// Compiles source text and returns checker facts for the linter.
-    pub(crate) fn lint_facts_source(&self, name: &str, source: &str) -> Result<ResolvedFacts, Error> {
+    /// Type checks source text as [`Engine::check_source`] does, and lints
+    /// it. Compile errors are an [`Error::Compile`]; a lint that runs out of
+    /// budget or time is an [`Error::Io`].
+    pub fn lint_source(&self, name: &str, source: &str) -> Result<Vec<crate::lint::LintWarning>, Error> {
         let c = self.compile_now(name, source, &self.source_root().1, None, true)?;
         self.recycle(c.program, c.snapshot);
-        Ok(c.facts.unwrap_or_default())
+        Ok(c.lints.unwrap_or_default())
+    }
+
+    /// Lints a file and its imports, like [`Engine::lint_source`].
+    pub fn lint_file(&self, path: impl AsRef<Path>) -> Result<Vec<crate::lint::LintWarning>, Error> {
+        let (name, source, root) = self.read_main(path.as_ref())?;
+        let c = self.compile_now(&name, &source, &root, Some(path.as_ref()), true)?;
+        self.recycle(c.program, c.snapshot);
+        Ok(c.lints.unwrap_or_default())
     }
 
     pub fn interrupt_handle(&self) -> InterruptHandle {
@@ -711,8 +718,8 @@ impl Engine {
     }
 
     /// Compiles synchronously: without prompts, it never waits.
-    fn compile_now(&self, name: &str, source: &str, root: &Path, path: Option<&Path>, facts: bool) -> Result<Compiled, Error> {
-        let options = CompileOptions { prompt: false, facts };
+    fn compile_now(&self, name: &str, source: &str, root: &Path, path: Option<&Path>, lint: bool) -> Result<Compiled, Error> {
+        let options = CompileOptions { prompt: false, lint };
         let compiling = std::pin::pin!(self.compile_with(name, source, root, path, options));
         let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
         match crate::unwind::catch(|| compiling.poll(&mut cx)) {
@@ -819,6 +826,11 @@ impl Engine {
             StdinConfig::Bytes(b) => StdinSource::Bytes(std::io::Cursor::new(b.clone())),
             #[cfg(feature = "os")]
             StdinConfig::Inherit => StdinSource::Inherit(tokio::io::BufReader::new(tokio::io::stdin())),
+            StdinConfig::Feed(feed) => StdinSource::Fed(crate::feed::FedReader::new(feed)),
+        };
+        let stdin_feed = match &c.stdin {
+            StdinConfig::Feed(feed) => Some(feed.shared()),
+            _ => None,
         };
         let (stdout, stderr): (SharedSink, SharedSink) =
             if quiet { (Arc::new(NullSink), Arc::new(NullSink)) } else { (c.stdout.clone(), c.stderr.clone()) };
@@ -831,6 +843,7 @@ impl Engine {
             stdout,
             stderr,
             stdin: Arc::new(tokio::sync::Mutex::new(stdin)),
+            stdin_feed,
             output_bytes: 0,
             limits: c.limits.clone(),
             cwd,
@@ -842,6 +855,8 @@ impl Engine {
             stream_decisions: [None; 2],
             #[cfg(feature = "os")]
             tls: c.tls.clone(),
+            #[cfg(feature = "os")]
+            http_pool: crate::stdlib::HttpPool::new(c.limits.max_open_resources),
             fs: c.fs.clone(),
             regex_cache: Vec::new(),
         };
@@ -987,8 +1002,8 @@ impl Engine {
             _ => None,
         };
         let natives = g.has_natives(&g.order);
-        let (program, facts) = on_compile_stack(|| compile_program(&snap, &mut g, registry, &budget, main_file, options.facts, spare))?;
-        Ok(Compiled { program, facts, deadline, snapshot: (!natives).then_some(snap) })
+        let (program, lints) = on_compile_stack(|| compile_program(&snap, &mut g, registry, &budget, main_file, options.lint, spare))?;
+        Ok(Compiled { program, lints, deadline, snapshot: (!natives).then_some(snap) })
     }
 
     /// Runs `job`, file system work for module discovery, on a worker
@@ -1191,8 +1206,8 @@ impl Engine {
     }
 }
 
-/// The run's compile options: imports are prompted for, no lint facts.
-const RUN: CompileOptions = CompileOptions { prompt: true, facts: false };
+/// The run's compile options: imports are prompted for, no linting.
+const RUN: CompileOptions = CompileOptions { prompt: true, lint: false };
 
 /// What module discovery needs besides the graph.
 pub(crate) struct Discovery<'a> {
@@ -1234,16 +1249,16 @@ fn compile_program(
     registry: &Registry,
     budget: &Arc<CompileBudget>,
     main_file: FileId,
-    facts: bool,
+    lint: bool,
     spare: Option<Program>,
-) -> Result<(Arc<Program>, Option<ResolvedFacts>), Error> {
+) -> Result<(Arc<Program>, Option<Vec<crate::lint::LintWarning>>), Error> {
     let lookup = |name: &str| registry.native(name);
     let order = g.order.clone();
     let modules =
         g.parse(&order, snap.checker.mods.len() as ModId).map_err(|ds| Error::Compile(ds.iter().map(|d| g.sm.resolve(d)).collect()))?;
     let mut checker = Checker::attach(snap.checker.clone(), &g.sm, &lookup, budget.clone());
-    checker.lint_facts = facts;
-    let checked = checker.check_modules(modules);
+    checker.lint_facts = lint;
+    let checked = checker.check_modules(&modules);
     let sm = &g.sm;
     if let Some(stop) = budget.stopped() {
         // Diagnostics after the budget ran out are not meaningful.
@@ -1254,13 +1269,16 @@ fn compile_program(
     let ids = order.iter().filter_map(|&mi| g.modules[mi].id);
     let inits: Vec<FnId> =
         g.std.iter().map(|&id| snap.mods[id as usize].init).chain(ids.map(|id| checker.mods[id as usize].init)).flatten().collect();
-    if facts {
+    if lint {
         checker.lint.main_imports = checker.main_imports();
     }
     // Only host modules declare natives.
     let host = g.has_natives(&order);
     let cp = checker.take_checked();
-    let facts = facts.then(|| ResolvedFacts::of(&cp, sm, main_file));
+    let lints = match modules.iter().find(|m| m.file == main_file).filter(|_| lint) {
+        Some(main) => Some(crate::lint::lint_module(main, sm.file(main_file), &cp, budget)?),
+        None => None,
+    };
     let (native_names, native_argc) = if host { native_info(&cp, registry) } else { (Vec::new(), Vec::new()) };
     let mut program = spare.unwrap_or_else(|| snap.program.clone());
     let input = CompileInput { checked: &cp, sm, native_lookup: &lookup, native_names, native_argc, budget };
@@ -1269,7 +1287,7 @@ fn compile_program(
         return Err(budget_error(stop, sm, main_file));
     }
     program.entry = entry.map_err(|ds| Error::Compile(ds.iter().map(|d| sm.resolve(d)).collect()))?;
-    Ok((Arc::new(program), facts))
+    Ok((Arc::new(program), lints))
 }
 
 #[cfg(test)]

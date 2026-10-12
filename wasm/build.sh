@@ -44,13 +44,18 @@ if [ "$have" != "$want" ]; then
     exit 1
 fi
 
+# Cargo's target directory (CARGO_TARGET_DIR or build.target-dir may move it),
+# with JSON's escaped backslashes (Windows paths) turned into slashes.
+target_dir=$(cargo metadata --format-version 1 --no-deps |
+    sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p' | sed 's/\\\\/\//g')
+build="$target_dir/wasm32-unknown-unknown"
 if [ "$profile" = release ]; then
     cargo build -p sandlang-wasm --target wasm32-unknown-unknown --profile wasm-release
     wasm-bindgen --target "$target" --remove-name-section --remove-producers-section --out-dir "$out" \
-        target/wasm32-unknown-unknown/wasm-release/sandlang_wasm.wasm
+        "$build/wasm-release/sandlang_wasm.wasm"
 else
     cargo build -p sandlang-wasm --target wasm32-unknown-unknown
-    wasm-bindgen --target "$target" --out-dir "$out" target/wasm32-unknown-unknown/debug/sandlang_wasm.wasm
+    wasm-bindgen --target "$target" --out-dir "$out" "$build/debug/sandlang_wasm.wasm"
 fi
 
 module="$out/sandlang_wasm_bg.wasm"

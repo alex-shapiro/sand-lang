@@ -25,14 +25,14 @@ pub(crate) enum Access {
     Any,
 }
 
-const READ: u8 = 1;
-const WRITE: u8 = 2;
-const IMPORT: u8 = 4;
+pub(crate) const READ: u8 = 1;
+pub(crate) const WRITE: u8 = 2;
+pub(crate) const IMPORT: u8 = 4;
 
 impl Access {
     /// The requests a rule decides: writing implies reading, and what may
     /// not be read may not be written or imported either.
-    fn mask(self, allow: bool) -> u8 {
+    pub(crate) fn mask(self, allow: bool) -> u8 {
         match (self, allow) {
             (Access::Read, true) => READ,
             (Access::Write | Access::Any, true) => READ | WRITE,

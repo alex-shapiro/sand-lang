@@ -614,6 +614,15 @@ fn repl_exit_ends_the_session() {
 }
 
 #[test]
+fn repl_passes_lines_to_scripts_that_wait_for_them() {
+    let dir = TempDir::new("repl-stdin");
+    let input = "import io\nio.stdin.read_line()?\nfor the script\nlet t = spawn io.stdin.read_line()\n40 + 2\nt.wait()?\nlate\nio.stdin.read_line()?\n";
+    let o = sand_in(dir.path(), &["repl", "--allow-stdin"], input, &[]);
+    assert_eq!(o.code, 0, "{o:?}");
+    assert_eq!(repl_shown(&o.stdout), ["Some(\"for the script\")", "42", "Some(\"late\")", "None"], "{o:?}");
+}
+
+#[test]
 fn repl_prompts_with_the_prompter() {
     let dir = TempDir::new("repl-prompt");
     dir.write("a.txt", "A");

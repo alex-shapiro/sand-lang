@@ -504,7 +504,7 @@ for i in 0..2 {
     for path in ["/one", "/two"] {
         let start = Instant::now();
         let mut s = std::net::TcpStream::connect(&addr).unwrap();
-        write!(s, "GET {path} HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        write!(s, "GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").unwrap();
         let mut resp = String::new();
         s.read_to_string(&mut resp).unwrap();
         assert!(resp.ends_with(&format!("served {path}")), "{resp}");
@@ -677,17 +677,332 @@ for _ in 0..4 {
         s.read_to_string(&mut resp).unwrap();
         resp
     };
-    let resp = exchange("GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+    let resp = exchange("GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
     assert!(resp.starts_with("HTTP/1.1 200 OK\r\n"), "{resp}");
     assert!(resp.contains("x-a: 1\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"), "{resp}");
     assert!(resp.ends_with("\r\n\r\n2\r\nhe\r\n3\r\nllo\r\n0\r\n\r\n"), "{resp}");
-    let resp = exchange("GET /finish HTTP/1.1\r\nHost: x\r\n\r\n");
+    let resp = exchange("GET /finish HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
     assert!(resp.ends_with("\r\n\r\n2\r\nhe\r\n3\r\nllo\r\n0\r\n\r\n"), "{resp}");
-    let resp = exchange("GET /sized HTTP/1.1\r\nHost: x\r\n\r\n");
+    let resp = exchange("GET /sized HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
     assert!(resp.contains("Content-Length: 5\r\nConnection: close\r\n\r\nhello"), "{resp}");
     assert!(!resp.contains("chunked"), "{resp}");
-    let resp = exchange("HEAD / HTTP/1.1\r\nHost: x\r\n\r\n");
+    let resp = exchange("HEAD / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
     assert!(resp.ends_with("Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n"), "{resp}");
     let r = handle.join().unwrap();
     assert!(r.is_ok(), "{r:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Persistent connections
+// ---------------------------------------------------------------------------
+
+/// Reads one response from `r`: its head (without the blank line) and its
+/// body, delimited by `Content-Length`, chunked encoding or the end of the
+/// connection.
+fn read_response(r: &mut impl BufRead) -> (String, String) {
+    let mut head = String::new();
+    loop {
+        let mut line = String::new();
+        assert!(r.read_line(&mut line).unwrap() > 0, "connection closed in the head: {head}");
+        if line == "\r\n" {
+            break;
+        }
+        head.push_str(&line);
+    }
+    let header = |name: &str| {
+        head.lines().find_map(|l| l.split_once(':').filter(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.trim().to_string()))
+    };
+    let mut body = Vec::new();
+    if let Some(n) = header("content-length") {
+        body.resize(n.parse().unwrap(), 0);
+        r.read_exact(&mut body).unwrap();
+    } else if header("transfer-encoding").is_some() {
+        loop {
+            let mut size = String::new();
+            r.read_line(&mut size).unwrap();
+            let n = usize::from_str_radix(size.trim(), 16).unwrap();
+            let mut chunk = vec![0; n + 2];
+            r.read_exact(&mut chunk).unwrap();
+            body.extend_from_slice(&chunk[..n]);
+            if n == 0 {
+                break;
+            }
+        }
+    } else {
+        r.read_to_end(&mut body).unwrap();
+    }
+    (head, String::from_utf8(body).unwrap())
+}
+
+/// Whether the peer has closed `r`'s connection.
+fn closed(r: &mut BufReader<std::net::TcpStream>) -> bool {
+    r.get_ref().set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    matches!(r.read(&mut [0; 1]), Ok(0))
+}
+
+#[test]
+fn http_clients_reuse_connections() {
+    let server = http_server(|req| match req.path() {
+        "/close" => HttpResponse::new(200, "closing").header("connection", "close"),
+        "/moved" => HttpResponse::new(302, "see /chunked").header("location", "/chunked"),
+        "/chunked" => {
+            let mut r = HttpResponse::new(200, "a body in several chunks");
+            r.chunked = true;
+            r
+        }
+        _ => HttpResponse::new(200, format!("{} {}", req.method, String::from_utf8_lossy(&req.body))),
+    });
+    let base = format!("http://{}", server.addr);
+    let src = format!(
+        r#"
+import http
+print(http.get("{base}/")?.text()?)
+print(http.post("{base}/", b"data")?.text()?)
+print(http.request("HEAD", "{base}/")?.status)
+print(http.get("{base}/moved")?.text()?)
+use s = http.open("GET", "{base}/")?
+print(s.body.read_text()?)
+"#
+    );
+    assert_eq!(run_net(&src), "GET \nPOST data\n200\na body in several chunks\nGET \n");
+    assert_eq!(server.connections.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    // A response with `connection: close`, a body that is not read to its
+    // end and a request with `connection: close` do not leave their
+    // connections for the next request.
+    let src = format!(
+        r#"
+import http
+print(http.get("{base}/close")?.text()?)
+print(http.get("{base}/")?.text()?)
+use s = http.open("GET", "{base}/")?
+s.close()
+print(http.get("{base}/", headers: [("Connection", "close")])?.text()?)
+print(http.get("{base}/")?.text()?)
+"#
+    );
+    let before = server.connections.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(run_net(&src), "closing\nGET \nGET \nGET \n");
+    assert_eq!(server.connections.load(std::sync::atomic::Ordering::SeqCst) - before, 4);
+    let reqs = server.requests.lock().unwrap();
+    assert_eq!(reqs.iter().filter(|r| r.header("connection") == Some("close")).count(), 1);
+}
+
+#[test]
+fn http_clients_send_requests_again_on_closed_connections() {
+    // Each connection answers its first request, then reads the next one and
+    // closes without answering, as a server whose idle timeout passed as the
+    // request arrived would.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for (n, conn) in listener.incoming().enumerate() {
+            let mut r = BufReader::new(conn.unwrap());
+            for answer in [true, false] {
+                let mut line = String::new();
+                while r.read_line(&mut line).unwrap_or(0) > 0 && !line.ends_with("\r\n\r\n") {}
+                if answer {
+                    let body = format!("conn {n}");
+                    write!(r.get_mut(), "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+                }
+            }
+        }
+    });
+    let src = format!(
+        r#"
+import http
+print(http.get("http://{addr}/")?.text()?)
+print(http.get("http://{addr}/")?.text()?)
+print(http.post("http://{addr}/", b"").unwrap_err().kind)
+"#
+    );
+    // The `GET` is sent again on a new connection; the `POST` is not.
+    assert_eq!(run_net(&src), "conn 0\nconn 1\nio\n");
+}
+
+#[test]
+fn idle_client_connections_give_way_to_new_ones() {
+    // Idle connections hold resource slots: at the limit, they are closed.
+    let servers: Vec<_> = (0..4).map(|_| http_server(|_| HttpResponse::new(200, "ok"))).collect();
+    let urls: Vec<String> = servers.iter().map(|s| format!("\"http://{}/\"", s.addr)).collect();
+    let src = format!(
+        r#"
+import fs
+import http
+for url in [{}] {{
+    print(http.get(url)?.text()?)
+}}
+use f = fs.open("a.txt", fs.Mode.Write)?
+print(http.get({})?.text()?)
+"#,
+        urls.join(", "),
+        urls[0]
+    );
+    let limits = Limits { max_open_resources: 2, ..Limits::default() };
+    let r = run_with(&src, |c| c.policy(Policy::allow_all()).limits(limits));
+    assert_eq!(r.ok_stdout(), "ok\nok\nok\nok\nok\n");
+}
+
+#[test]
+fn http_servers_keep_connections_alive() {
+    let (addr, handle) = start_server_script(
+        r#"
+import http
+let server = http.serve("127.0.0.1:0")?
+print("ready \(server.addr())")
+for _ in 0..11 {
+    use req = server.accept()?
+    if req.path == "/unread" {
+        req.respond(200, b"not read")?
+        continue
+    }
+    let body = req.text()?
+    if req.path == "/stream" {
+        use out = req.respond_stream(200)?
+        out.write_str("streamed \(body)")?
+        continue
+    }
+    req.respond(200, "\(req.method) \(req.path) \(body) \(req.conn.peer_addr())".bytes())?
+}
+"#,
+        Limits::default(),
+    );
+    let connect = || BufReader::new(std::net::TcpStream::connect(&addr).unwrap());
+
+    // Requests one after another, then two sent at once, on one connection.
+    let mut a = connect();
+    let peer = a.get_ref().local_addr().unwrap().to_string();
+    for path in ["/a", "/b"] {
+        write!(a.get_mut(), "GET {path} HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        let (head, body) = read_response(&mut a);
+        assert!(!head.to_lowercase().contains("connection:"), "{head}");
+        assert_eq!(body, format!("GET {path}  {peer}"));
+    }
+    write!(a.get_mut(), "POST /c HTTP/1.1\r\nContent-Length: 3\r\n\r\nxyzGET /stream HTTP/1.1\r\n\r\n").unwrap();
+    assert_eq!(read_response(&mut a).1, format!("POST /c xyz {peer}"));
+    let (head, body) = read_response(&mut a);
+    assert!(head.contains("Transfer-Encoding: chunked"), "{head}");
+    assert_eq!(body, "streamed ");
+    // A request whose body the handler does not read ends the connection.
+    write!(a.get_mut(), "POST /unread HTTP/1.1\r\nContent-Length: 5\r\n\r\n12345").unwrap();
+    let (head, body) = read_response(&mut a);
+    assert!(head.contains("Connection: close"), "{head}");
+    assert_eq!(body, "not read");
+    assert!(closed(&mut a));
+
+    // HTTP/1.0 keeps a connection only if asked to, and has no chunked encoding.
+    let mut b = connect();
+    write!(b.get_mut(), "GET /d HTTP/1.0\r\n\r\n").unwrap();
+    assert!(read_response(&mut b).0.contains("Connection: close"));
+    assert!(closed(&mut b));
+    let mut c = connect();
+    write!(c.get_mut(), "GET /e HTTP/1.0\r\nConnection: keep-alive\r\n\r\n").unwrap();
+    assert!(read_response(&mut c).0.contains("Connection: keep-alive"));
+    write!(c.get_mut(), "GET /stream HTTP/1.0\r\nConnection: keep-alive\r\n\r\n").unwrap();
+    let (head, body) = read_response(&mut c);
+    assert!(head.contains("Connection: close") && !head.contains("chunked"), "{head}");
+    assert_eq!(body, "streamed ");
+
+    // A client that asks for it has its connection closed after the response.
+    let mut d = connect();
+    write!(d.get_mut(), "GET /f HTTP/1.1\r\nConnection: close\r\n\r\n").unwrap();
+    assert!(read_response(&mut d).0.contains("Connection: close"));
+    assert!(closed(&mut d));
+
+    // A connection waiting for its next request does not hold up others.
+    let mut e = connect();
+    write!(e.get_mut(), "GET /g HTTP/1.1\r\n\r\n").unwrap();
+    read_response(&mut e);
+    let mut f = connect();
+    write!(f.get_mut(), "GET /h HTTP/1.1\r\n\r\n").unwrap();
+    assert!(read_response(&mut f).1.starts_with("GET /h"));
+    handle.join().unwrap().unwrap();
+}
+
+#[test]
+fn http_clients_and_servers_share_connections() {
+    let src = r#"
+import http
+let server = http.serve("127.0.0.1:0")?
+let base = "http://\(server.addr())"
+let served = spawn {
+    for _ in 0..3 {
+        use req = server.accept().unwrap()
+        req.respond(200, req.conn.peer_addr().bytes()).unwrap()
+    }
+}
+let peers = [http.get(base).unwrap().text().unwrap() for _ in 0..3]
+served.wait()
+print(peers.len())
+print(peers[0] == peers[1] and peers[1] == peers[2])
+"#;
+    assert_eq!(run_net(src), "3\ntrue\n");
+}
+
+#[test]
+fn idle_server_connections_give_way_to_new_resources() {
+    // The server's listener, the idle client connection and the server's
+    // connection waiting for its next request take 3 of the 4 slots.
+    let src = r#"
+import fs
+import http
+let server = http.serve("127.0.0.1:0")?
+let served = spawn {
+    use req = server.accept().unwrap()
+    req.respond(200, b"ok").unwrap()
+}
+print(http.get("http://\(server.addr())/")?.text()?)
+served.wait()
+use a = fs.open("a.txt", fs.Mode.Write)?
+use b = fs.open("b.txt", fs.Mode.Write)?
+print("opened")
+"#;
+    let limits = Limits { max_open_resources: 4, ..Limits::default() };
+    let r = run_with(src, |c| c.policy(Policy::allow_all()).limits(limits));
+    assert_eq!(r.ok_stdout(), "ok\nopened\n");
+}
+
+#[test]
+fn waiting_server_connections_give_way_to_new_resources() {
+    // The server's listener and the connection waiting for its next request
+    // (read by the `accept` in progress) take 2 of the 3 slots.
+    let src = r#"
+import fs
+import http
+let server = http.serve("127.0.0.1:0")?
+print("ready \(server.addr())")
+let served: Channel<()> = task.channel()
+let serving = spawn {
+    use req = server.accept().unwrap()
+    req.respond(200, b"ok").unwrap()
+    served.send(())
+    server.accept()
+}
+served.recv()
+task.yield_now()
+use a = fs.open("a.txt", fs.Mode.Write)?
+use b = fs.open("b.txt", fs.Mode.Write)?
+print("opened")
+serving.cancel()
+"#;
+    let dir = common::TempDir::new("waiting");
+    let out = MemorySink::new();
+    let limits = Limits { max_open_resources: 3, max_wall_time: Some(Duration::from_secs(20)), ..Limits::default() };
+    let config = Config::new().policy(Policy::allow_all()).limits(limits).stdout(out.clone()).cwd(dir.path());
+    let mut engine = Engine::new(config);
+    let handle = std::thread::spawn(move || common::rt().block_on(engine.run_source("server.sand", src)));
+    let start = Instant::now();
+    let addr = loop {
+        if let Some(l) = out.contents().lines().next() {
+            break l.trim_start_matches("ready ").to_string();
+        }
+        assert!(start.elapsed() < Duration::from_secs(10) && !handle.is_finished(), "{:?}", handle.join());
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let mut c = BufReader::new(std::net::TcpStream::connect(&addr).unwrap());
+    write!(c.get_mut(), "GET / HTTP/1.1\r\n\r\n").unwrap();
+    assert_eq!(read_response(&mut c).1, "ok");
+    assert!(closed(&mut c));
+    handle.join().unwrap().unwrap();
+    assert_eq!(out.contents(), format!("ready {addr}\nopened\n"));
 }

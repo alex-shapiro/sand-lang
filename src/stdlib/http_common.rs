@@ -4,7 +4,7 @@
 
 use super::stream::IoFailure;
 use super::uri;
-use crate::vm::iomem::{Reservation, ResourceSlot};
+use crate::vm::iomem::Reservation;
 use crate::vm::value::{NativeObject, Obj, Value};
 use crate::vm::{Ctl, Finisher, NResult, Vm};
 use std::future::Future;
@@ -193,11 +193,18 @@ pub(crate) trait BodyStream: Send {
     fn fill(&mut self) -> Filled<'_>;
     /// Consumes `n` of the bytes `fill` returned.
     fn consume(&mut self, n: usize);
+    /// Whether every byte of the body has been consumed.
+    fn at_end(&self) -> bool;
+    /// Whether the stream owns an open connection.
+    fn owns_conn(&self) -> bool {
+        false
+    }
     /// Called after each read of the body: releases what the stream holds
     /// only while it is read (a connection's lock).
     fn release(&mut self) {}
-    /// Called when the body ends: starts closing a connection it owns.
-    fn shutdown(&mut self) {}
+    /// Called when the body ends, read to its end if `complete`: a
+    /// connection the stream owns goes back to its pool, or is closed.
+    fn end(&mut self, _complete: bool) {}
 }
 
 /// A body received whole (on the web, where the browser reads it).
@@ -219,15 +226,17 @@ impl BodyStream for MemoryBody {
     fn consume(&mut self, n: usize) {
         self.at += n;
     }
+    fn at_end(&self) -> bool {
+        self.at == self.data.len()
+    }
 }
 
 /// Reading a body: its stream, and what reading it holds.
 pub(crate) struct BodyReader {
-    /// `None` once the body has been read to its end (or failed).
+    /// `None` once the body has ended (read to its end, or failed).
     stream: Option<Box<dyn BodyStream>>,
-    /// The connection's slot (if the body owns its connection), released
-    /// with the stream.
-    slot: Option<ResourceSlot>,
+    /// Whether the body was read to its end.
+    complete: bool,
     /// The most `read_all` reads (`max_http_body`).
     max_all: usize,
     /// Memory reserved for the stream's buffers (a memory body's data),
@@ -236,17 +245,22 @@ pub(crate) struct BodyReader {
 }
 
 impl BodyReader {
-    pub fn new(stream: Box<dyn BodyStream>, slot: Option<ResourceSlot>, max_all: usize, held: Option<Reservation>) -> BodyReader {
-        BodyReader { stream: Some(stream), slot, max_all, _held: held }
+    pub fn new(stream: Box<dyn BodyStream>, max_all: usize, held: Option<Reservation>) -> BodyReader {
+        BodyReader { stream: Some(stream), complete: false, max_all, _held: held }
+    }
+
+    /// An empty body.
+    #[cfg_attr(not(feature = "os"), allow(dead_code))]
+    pub fn empty(max_all: usize) -> BodyReader {
+        BodyReader::new(Box::new(MemoryBody::new(Vec::new())), max_all, None)
     }
 
     /// Ends the body: the stream (and its connection) is released.
-    fn end(&mut self) {
-        if let Some(s) = &mut self.stream {
-            s.shutdown();
+    fn end(&mut self, complete: bool) {
+        if let Some(mut s) = self.stream.take() {
+            s.end(complete);
+            self.complete = complete;
         }
-        self.stream = None;
-        self.slot = None;
         self._held = None;
     }
 
@@ -255,12 +269,12 @@ impl BodyReader {
         let Some(stream) = &mut self.stream else { return Ok(0) };
         match stream.fill().await {
             Ok([]) => {
-                self.end();
+                self.end(true);
                 Ok(0)
             }
             Ok(b) => Ok(b.len()),
             Err(e) => {
-                self.end();
+                self.end(false);
                 Err(e)
             }
         }
@@ -281,17 +295,17 @@ impl BodyReader {
     }
 
     /// Runs `op`, a read of the body. A body that fails is ended (its
-    /// connection released), unless the data read did not fit in memory
+    /// connection closed), unless the data read did not fit in memory
     /// (where `read` consumed nothing; `read_line` drops the partial line).
+    /// A body whose last byte was read ends at once, releasing its
+    /// connection.
     async fn reading<T>(&mut self, op: impl AsyncFnOnce(&mut Self) -> Result<T, IoFailure>) -> Result<T, IoFailure> {
         let r = op(self).await;
-        match &r {
-            Err(e) if e.kind != "limit" => self.end(),
-            _ => {
-                if let Some(s) = &mut self.stream {
-                    s.release();
-                }
-            }
+        match (&r, &mut self.stream) {
+            (Err(e), _) if e.kind != "limit" => self.end(false),
+            (_, Some(s)) if s.at_end() => self.end(true),
+            (_, Some(s)) => s.release(),
+            (_, None) => {}
         }
         r
     }
@@ -336,7 +350,7 @@ impl BodyReader {
                 return Ok(data);
             }
             if data.len().saturating_add(n) > self.max_all {
-                self.end();
+                self.end(false);
                 return Err(IoFailure::new("limit", format!("HTTP body larger than the limit of {} bytes", self.max_all)));
             }
             res.reserve_buf(&mut data, n)?;
@@ -347,19 +361,26 @@ impl BodyReader {
 }
 
 /// The `http.Body` type: a message body read as it arrives. A body that
-/// owns its connection (a response's) counts as an open resource until it
-/// has been read to its end or is closed.
+/// owns its connection (a client's response) counts as an open resource
+/// until it is closed.
 pub(crate) struct Body {
     reader: Option<Arc<tokio::sync::Mutex<BodyReader>>>,
     closed: tokio::sync::watch::Sender<bool>,
-    /// Whether the body holds a connection's slot.
     owns_conn: bool,
 }
 
 impl Body {
     pub fn new(reader: BodyReader) -> Body {
-        let owns_conn = reader.slot.is_some();
+        let owns_conn = reader.stream.as_ref().is_some_and(|s| s.owns_conn());
         Body { reader: Some(Arc::new(tokio::sync::Mutex::new(reader))), closed: tokio::sync::watch::Sender::new(false), owns_conn }
+    }
+
+    /// Whether the body has been read to its end (false while a read is
+    /// pending).
+    #[cfg_attr(not(feature = "os"), allow(dead_code))]
+    pub fn is_complete(&self) -> bool {
+        let Some(reader) = &self.reader else { return false };
+        reader.try_lock().is_ok_and(|r| r.complete || r.stream.as_ref().is_some_and(|s| s.at_end()))
     }
 }
 

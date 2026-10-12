@@ -504,6 +504,7 @@ impl Vm {
                 return Ok(Stop::Idle);
             }
             clock.read();
+            let blocked = self.host.stdin_feed.as_ref().map(|f| f.blocked());
             let mut sleep = self.deadline.map(|d| Box::pin(crate::platform::sleep(d.saturating_duration_since(Instant::now()))));
             let interrupt = self.host.interrupt.clone();
             let done = std::future::poll_fn(|cx| {
@@ -522,6 +523,7 @@ impl Vm {
                 Poll::Pending
             })
             .await;
+            drop(blocked);
             clock.resume();
             clock.last_yield = clock.now;
             self.apply_completions(done, &clock)?;

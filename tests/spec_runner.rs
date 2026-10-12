@@ -190,7 +190,7 @@ fn run_case(case: &Case, gc_stress: bool, backend: Backend) -> Result<(), String
     if let Some(expected) = get("lint") {
         dir.write("main.sand", &case.source);
         let engine = Engine::new(dir.configure(Config::new().policy(Policy::allow_all())));
-        let warnings = sandlang::lint::lint_source_with(&engine, "main.sand", &case.source).map_err(|e| format!("lint failed: {e}"))?;
+        let warnings = engine.lint_source("main.sand", &case.source).map_err(|e| format!("lint failed: {e}"))?;
         let mut got: Vec<String> = warnings.iter().map(|w| format!("{}: {}", w.line, w.code)).collect();
         got.sort();
         let mut want: Vec<String> = expected.lines().filter(|l| !l.trim().is_empty()).map(|l| l.trim().to_string()).collect();

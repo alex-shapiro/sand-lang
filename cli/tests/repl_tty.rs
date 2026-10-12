@@ -45,6 +45,11 @@ impl Repl {
     /// Starts `sand repl` in `dir` with `history` as its history file; `None`
     /// if no pseudo-terminal is available.
     fn start(dir: &Path, history: &Path) -> Option<Repl> {
+        Repl::start_with(dir, history, &[])
+    }
+
+    /// Like [`Repl::start`], with options for `sand repl`.
+    fn start_with(dir: &Path, history: &Path, args: &[&str]) -> Option<Repl> {
         let pair = match native_pty_system().openpty(PtySize { rows: 50, cols: 200, pixel_width: 0, pixel_height: 0 }) {
             Ok(p) => p,
             Err(e) => {
@@ -54,6 +59,7 @@ impl Repl {
         };
         let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_sand"));
         cmd.arg("repl");
+        cmd.args(args);
         cmd.cwd(dir);
         cmd.env("TERM", "xterm-256color");
         cmd.env("SAND_HISTORY", history);
@@ -256,4 +262,33 @@ fn background_output_and_ctrl_c_leave_the_edited_input_alone() {
         assert!(start.elapsed() < TIMEOUT, "sand did not exit; the terminal shows:\n{}", repl.text());
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[test]
+fn scripts_read_lines_typed_while_an_input_runs() {
+    let dir = TempDir::new("repl-tty-stdin");
+    let history = dir.path().join("history");
+    let Some(mut repl) = Repl::start_with(dir.path(), &history, &["--allow-stdin"]) else { return };
+    let mut reads = 0;
+    repl.enter(&mut reads, "import io", None);
+    repl.enter(&mut reads, "io.stdin.read_line()?", None);
+    std::thread::sleep(Duration::from_millis(500));
+    repl.keys("typed (\r");
+    repl.wait("the script's line", |r| r.count("Some(\"typed (\")") == 1);
+    repl.enter(&mut reads, "io.stdin.read_line()?", None);
+    std::thread::sleep(Duration::from_millis(500));
+    repl.keys(CTRL_D);
+    repl.wait("the end of the script's input", |r| r.text().lines().any(|l| l.trim().ends_with("None")));
+    repl.enter(&mut reads, "40 + 2", Some("42"));
+
+    reads += 1;
+    repl.wait_for_read(reads);
+    repl.keys(CTRL_D);
+    let start = Instant::now();
+    while repl.child.try_wait().unwrap().is_none() {
+        assert!(start.elapsed() < TIMEOUT, "sand did not exit; the terminal shows:\n{}", repl.text());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let saved = std::fs::read_to_string(&history).expect("history file");
+    assert_eq!(saved.lines().collect::<Vec<_>>(), ["import io", "io.stdin.read_line()?", "40 + 2"], "{saved}");
 }

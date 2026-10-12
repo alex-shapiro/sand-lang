@@ -35,6 +35,8 @@ pub struct ParsedModule {
     pub name: String,
     pub file: FileId,
     pub ast: ast::Module,
+    /// The module's comments (for the linter: only the main module's).
+    pub comments: Vec<crate::syntax::lexer::Comment>,
     pub kind: ModKind,
     /// For each `import` item (by item index): the target module index.
     pub imports: HashMap<usize, ModId>,
@@ -896,7 +898,7 @@ impl<'a> Checker<'a> {
 
     /// Checks `modules`, in dependency order, after the modules checked so
     /// far: a module's [`ModId`] is its position in the combined list.
-    fn add_modules(&mut self, modules: Vec<ParsedModule>) {
+    fn add_modules(&mut self, modules: &[ParsedModule]) {
         let base = self.mods.len();
         for (i, m) in modules.iter().enumerate() {
             let i = base + i;
@@ -976,7 +978,7 @@ impl<'a> Checker<'a> {
     /// Starts a session: checks `modules` (on a checker that has checked the
     /// standard library, an empty module, `session`, which will receive the
     /// inputs).
-    pub(crate) fn begin_session(&mut self, modules: Vec<ParsedModule>, session: ModId) -> Result<(), Vec<Diag>> {
+    pub(crate) fn begin_session(&mut self, modules: &[ParsedModule], session: ModId) -> Result<(), Vec<Diag>> {
         self.session = Some(session);
         self.lint_facts = false;
         self.check_modules(modules)
@@ -986,7 +988,7 @@ impl<'a> Checker<'a> {
     /// `self.mods.len()`) after the modules checked so far, keeping the
     /// checker's state: the standard library is checked once and extended
     /// by each program.
-    pub(crate) fn check_modules(&mut self, modules: Vec<ParsedModule>) -> Result<(), Vec<Diag>> {
+    pub(crate) fn check_modules(&mut self, modules: &[ParsedModule]) -> Result<(), Vec<Diag>> {
         self.add_modules(modules);
         let errors = self.errors();
         if errors.is_empty() { Ok(()) } else { Err(errors) }
@@ -998,7 +1000,7 @@ impl<'a> Checker<'a> {
     /// they shadow those of earlier inputs. With `want_value`, a final
     /// expression statement is the value of the input; its type is then left
     /// in [`Checker::cell_value`].
-    pub(crate) fn check_cell(&mut self, modules: Vec<ParsedModule>, cell: &ParsedModule, want_value: bool) -> Result<(), Vec<Diag>> {
+    pub(crate) fn check_cell(&mut self, modules: &[ParsedModule], cell: &ParsedModule, want_value: bool) -> Result<(), Vec<Diag>> {
         let session = self.session.expect("not a session");
         self.diags.clear();
         self.add_modules(modules);

@@ -169,7 +169,7 @@ fn checks_and_lints_see_the_memory_file_system() {
         Err(Error::Compile(d)) => assert!(d[0].message.contains("cannot load module `missing`"), "{d:?}"),
         other => panic!("{other:?}"),
     }
-    let warnings = sandlang::lint::lint_source_with(&engine, "main.sand", "import \"lib\"\nlet unused = lib.f()\n").unwrap();
+    let warnings = engine.lint_source("main.sand", "import \"lib\"\nlet unused = lib.f()\n").unwrap();
     assert!(warnings.iter().any(|w| w.message.contains("unused")), "{warnings:?}");
 }
 

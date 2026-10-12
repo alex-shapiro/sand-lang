@@ -22,7 +22,7 @@ use crate::syntax::ast::{self, ImportSource, ItemKind};
 use crate::syntax::lexer::{Tok, lex};
 use crate::types::{FnId, ModId};
 use crate::vm::bytecode::Program;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// The modules of a registry, checked and compiled. Immutable once built:
@@ -68,7 +68,7 @@ impl Pending {
         let mut deps: Vec<ModId> = imports.values().copied().collect();
         deps.sort_unstable();
         deps.dedup();
-        (ParsedModule { name: self.name, file: self.file, ast: self.ast, kind: self.kind, imports }, deps)
+        (ParsedModule { name: self.name, file: self.file, ast: self.ast, comments: Vec::new(), kind: self.kind, imports }, deps)
     }
 }
 
@@ -111,7 +111,7 @@ impl Snapshot {
             mods.push(SnapModule { deps, init: None });
             parsed.push(m);
         }
-        checker.check_modules(parsed).map_err(|ds| resolve(&sm, &ds))?;
+        checker.check_modules(&parsed).map_err(|ds| resolve(&sm, &ds))?;
         // Host modules one at a time, each on a copy of the checker.
         for p in hosts {
             if p.imports.iter().any(|(_, dep)| !by_name.contains_key(dep)) {
@@ -121,7 +121,7 @@ impl Snapshot {
             let (id, name) = (checker.mods.len() as ModId, p.name.clone());
             let (m, deps) = p.resolve(&by_name);
             let mut attempt = checker.clone();
-            if attempt.check_modules(vec![m]).is_ok() {
+            if attempt.check_modules(std::slice::from_ref(&m)).is_ok() {
                 checker = attempt;
                 by_name.insert(name, id);
                 mods.push(SnapModule { deps, init: None });
@@ -483,7 +483,8 @@ impl ModuleGraph {
                     imports.insert(item, id);
                 }
             }
-            parsed.push(ParsedModule { name: m.name.clone(), file: m.file, ast: res.module, kind: m.kind, imports });
+            let comments = if m.kind == (ModKind::Script { main: true }) { res.comments } else { Vec::new() };
+            parsed.push(ParsedModule { name: m.name.clone(), file: m.file, ast: res.module, comments, kind: m.kind, imports });
         }
         if errors.is_empty() { Ok(parsed) } else { Err(errors) }
     }
@@ -524,62 +525,4 @@ pub(crate) fn native_info(checked: &crate::check::CheckedProgram, registry: &Reg
         }
     }
     (native_names, native_argc)
-}
-
-/// Lint facts with spans resolved to (line, column) in the main file.
-#[derive(Debug, Default)]
-pub(crate) struct ResolvedFacts {
-    pub unused_results: Vec<(usize, usize)>,
-    /// The resource lints: (line, column, code, message).
-    pub resources: Vec<(usize, usize, &'static str, String)>,
-    pub locals: Vec<(usize, usize, crate::check::LocalFact)>,
-    pub imports: Vec<(usize, usize, String)>,
-    pub used_names: HashSet<String>,
-    /// Unused private functions and methods: (line, column, display name, is method).
-    pub unused_fns: Vec<(usize, usize, String, bool)>,
-}
-
-impl ResolvedFacts {
-    /// The checker's facts about the main module (file `main_file`).
-    pub(crate) fn of(checked: &crate::check::CheckedProgram, sm: &SourceMap, main_file: FileId) -> ResolvedFacts {
-        let mut facts = ResolvedFacts::default();
-        let f = sm.file(main_file);
-        for sp in &checked.lint.unused_results {
-            if sp.file == main_file {
-                let (l, c) = f.line_col(sp.lo);
-                facts.unused_results.push((l, c));
-            }
-        }
-        for (sp, code, msg) in &checked.lint.resources {
-            if sp.file == main_file {
-                let (l, c) = f.line_col(sp.lo);
-                facts.resources.push((l, c, code, msg.clone()));
-            }
-        }
-        for lf in &checked.lint.locals {
-            if lf.span.file == main_file {
-                let (l, c) = f.line_col(lf.span.lo);
-                facts.locals.push((l, c, lf.clone()));
-            }
-        }
-        for (name, sp) in &checked.lint.main_imports {
-            let (l, c) = f.line_col(sp.lo);
-            facts.imports.push((l, c, name.clone()));
-        }
-        facts.used_names = checked.lint.used_names.iter().filter(|(m, _)| *m == checked.main_module).map(|(_, n)| n.clone()).collect();
-        for id in crate::lint::unused_functions(checked) {
-            let fi = &checked.fns[id as usize];
-            if fi.span.file == main_file {
-                let (l, c) = f.line_col(fi.span.lo);
-                let name = match fi.owner {
-                    Some(crate::check::Ctor::Def(d)) => {
-                        format!("{}.{}", checked.name(checked.types[d as usize].name), checked.name(fi.name))
-                    }
-                    _ => checked.name(fi.name).to_string(),
-                };
-                facts.unused_fns.push((l, c, name, fi.owner.is_some()));
-            }
-        }
-        facts
-    }
 }

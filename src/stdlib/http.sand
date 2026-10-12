@@ -1,5 +1,7 @@
 /// Redirects followed before a request fails with "too many redirects".
 let MAX_REDIRECTS = 10
+/// The longest body of a redirect that is read rather than discarded.
+let MAX_DRAINED = 64 * 1024
 
 /// An HTTP response, read completely (see `request`). Header names are
 /// lower-cased; a header sent several times occurs several times, in order.
@@ -39,8 +41,8 @@ pub struct Response {
 
 /// A response whose body is read as it arrives (see `open`): a body that
 /// does not fit in memory can be processed, or copied to a file
-/// (`io.copy(resp.body, file)`), a chunk at a time. Its connection stays
-/// open until the body has been read to its end or the response is closed.
+/// (`io.copy(resp.body, file)`), a chunk at a time. The response holds its
+/// connection until the body is read to its end or the response is closed.
 pub struct Stream {
     status: int
     headers: [(str, str)]
@@ -72,10 +74,10 @@ impl Close for Stream {
     }
 }
 
-/// A message body, read as it arrives. Reading it to its end releases its
-/// connection. `read_all` and `read_text` read at most `max_http_body`
-/// bytes (kind `"limit"` beyond); each wait for data is bounded by the
-/// request's `timeout`.
+/// A message body, read as it arrives. Reading a response's body to its end
+/// releases its connection. `read_all` and `read_text` read at most
+/// `max_http_body` bytes (kind `"limit"` beyond); each wait for data is
+/// bounded by the request's `timeout`.
 pub native type Body
 
 impl io.Reader for Body {
@@ -85,7 +87,7 @@ impl io.Reader for Body {
 }
 
 impl Close for Body {
-    /// Stops reading; the connection is closed.
+    /// Stops reading; a response's connection is closed.
     native fn close(self)
 }
 
@@ -177,6 +179,10 @@ pub fn open(
             return Ok(response)
         }
         let Some(location) = response.header("location") else { return Ok(response) }
+        // Reading a short body lets its connection carry the next request.
+        if (response.header("content-length") ?? "").parse_int().unwrap_or(MAX_DRAINED + 1) <= MAX_DRAINED {
+            let _ = response.body.read_all()
+        }
         response.close()
         if redirects == MAX_REDIRECTS {
             return Err(error("too many redirects", kind: "http"))

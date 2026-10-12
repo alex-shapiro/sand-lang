@@ -165,6 +165,11 @@ impl CompileBudget {
         true
     }
 
+    /// A budget of `fuel` units with this budget's deadline and interrupt flag.
+    pub fn with_fuel(&self, fuel: u64) -> CompileBudget {
+        CompileBudget::new(Some(fuel), self.deadline, self.interrupt.clone())
+    }
+
     /// Checks the deadline and interrupt flag now (between compiler phases).
     pub fn check(&self) -> bool {
         self.stop.get().is_none() && self.poll()

@@ -8,6 +8,7 @@ pub mod check;
 mod compile;
 pub mod diag;
 pub mod engine;
+mod feed;
 mod files;
 pub mod fmt;
 pub mod hir;
@@ -26,6 +27,7 @@ pub mod vm;
 
 pub use diag::{Diagnostic, Severity};
 pub use engine::{Config, Engine, Error, InterruptHandle, LimitKind, Limits, MemorySink, Outcome, TestReport, TestResult, TraceFrame};
+pub use feed::StdinFeed;
 pub use files::MemFs;
 pub use native::{Conversion, FromValue, HostError, IntoHostError, IntoValue, ListElem, NativeModule, SandType};
 pub use policy::{Capability, Decision, Policy, PromptAnswer, Prompter, RulePolicy};

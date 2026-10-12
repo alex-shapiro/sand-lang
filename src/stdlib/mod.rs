@@ -11,6 +11,8 @@ mod fs;
 mod http;
 #[cfg(any(feature = "os", web))]
 mod http_common;
+#[cfg(feature = "os")]
+mod http_server;
 #[cfg(all(web, not(feature = "os")))]
 mod http_web;
 mod io;
@@ -29,6 +31,8 @@ mod uri;
 mod uuid;
 
 use crate::engine::Registry;
+#[cfg(feature = "os")]
+pub(crate) use http::Pool as HttpPool;
 #[cfg(feature = "os")]
 pub(crate) use net::TlsSettings;
 pub(crate) use uri::encode as uri_encode;

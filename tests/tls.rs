@@ -75,6 +75,8 @@ print(resp.body.read_text()?)
     assert_eq!(r.ok_stdout(), "200\nsecure hello\nSome(\"text/plain\")\ntrue\nsecure hello\nchunked over tls\nchunked over tls\n");
     assert_eq!(server.requests.lock().unwrap().len(), 5);
     assert_eq!(server.requests.lock().unwrap()[4].body, b"streamed");
+    // The requests share a connection; the upload has its own.
+    assert_eq!(server.connections.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
 
 #[test]

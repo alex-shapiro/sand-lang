@@ -141,6 +141,8 @@ impl HttpResponse {
 pub struct TestServer {
     pub addr: std::net::SocketAddr,
     pub requests: std::sync::Arc<std::sync::Mutex<Vec<HttpRequest>>>,
+    /// The connections accepted so far.
+    pub connections: std::sync::Arc<AtomicUsize>,
 }
 
 type Handler = std::sync::Arc<dyn Fn(&HttpRequest) -> HttpResponse + Send + Sync>;
@@ -193,6 +195,8 @@ fn serve(handler: Handler, tls: Option<TlsAcceptor>) -> TestServer {
     use std::sync::{Arc, Mutex};
     let requests = Arc::new(Mutex::new(Vec::new()));
     let reqs = requests.clone();
+    let connections = Arc::new(AtomicUsize::new(0));
+    let accepted = connections.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let rt = rt();
@@ -204,6 +208,7 @@ fn serve(handler: Handler, tls: Option<TlsAcceptor>) -> TestServer {
                     Ok(s) => s,
                     Err(_) => continue,
                 };
+                accepted.fetch_add(1, Ordering::SeqCst);
                 let handler = handler.clone();
                 let reqs = reqs.clone();
                 let tls = tls.clone();
@@ -224,7 +229,7 @@ fn serve(handler: Handler, tls: Option<TlsAcceptor>) -> TestServer {
         });
     });
     let addr = rx.recv().unwrap();
-    TestServer { addr, requests }
+    TestServer { addr, requests, connections }
 }
 
 /// Answers the requests arriving on one connection.
@@ -318,6 +323,9 @@ where
             }
         }
         if sock.write_all(&out).await.is_err() || sock.flush().await.is_err() {
+            return;
+        }
+        if resp.headers.iter().any(|(k, v)| k.eq_ignore_ascii_case("connection") && v.eq_ignore_ascii_case("close")) {
             return;
         }
     }

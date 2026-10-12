@@ -12,11 +12,6 @@ Follow-up work, roughly in priority order.
       parent that is emptied and turned into a junction during the call is
       still possible; it is detected after the rename, not prevented.
 
-### Standard library
-
-- [ ] **HTTP keep-alive.** Every client request and server connection
-      carries one exchange (`Connection: close`).
-
 ### Test coverage
 
 - [ ] Run the CI workflow on Windows and Linux, where nothing has run
@@ -52,17 +47,10 @@ Follow-up work, roughly in priority order.
 
 ### Tooling
 
-- [ ] Policy lints (`redundant-rule`, `overridden-rule`) only judge rules
-      that name one path. Rules with wildcards could be judged by whether
-      one pattern covers another.
-- [ ] **The linter parses every file a second time.** `lint::run_lints`
-      calls `syntax::parse_module` on the source the engine already parsed,
-      and matches the checker's facts to it by (line, column). The engine
-      could hand the linter its syntax tree and span-keyed facts.
-- [ ] `wasm/build.sh` reads the build from `target/`, so it fails when
-      `CARGO_TARGET_DIR` is set; use `cargo metadata`'s target directory.
-- [ ] REPL standard input: a script's read of standard input still pending
-      between inputs competes with the REPL for lines.
+- [ ] Policy lints judge `http` rules only by their exact text (and
+      `bypassable-http-deny`); rules with wildcards in hosts or paths could
+      be compared as file rules are. A rule made unnecessary only by several
+      other rules together is not reported.
 
 ### Performance
 
@@ -71,12 +59,12 @@ Follow-up work, roughly in priority order.
       (one function per instruction with guaranteed tail calls, Rust's
       `become`) would remove the shared register allocation once `become`
       is stable.
-- [ ] **A thread per compile.** Every compile, format and lint runs on a
-      new 64 MB-stack thread (`platform::with_stack`, from `engine.rs`,
-      `fmt.rs`, `lint.rs`), about 70% of the ~45 us that
-      `check_source("print(1)")` costs. One long-lived compile thread would
-      remove it; in safe Rust that needs compile inputs that own their data
-      instead of borrowing the engine.
+- [ ] **A thread per compile.** Every compile (with its lints) and format
+      runs on a new stack thread (`platform::with_stack`, from `engine.rs`
+      and `fmt.rs`), about 70% of the ~45 us that `check_source("print(1)")`
+      costs. One long-lived compile thread would remove it; in safe Rust
+      that needs compile inputs that own their data instead of borrowing the
+      engine.
 - [ ] **REPL sessions check the standard modules they import.** A session
       starts from the core snapshot and type checks each std module the
       first time an input imports it. Snapshots are cheap to copy (shared

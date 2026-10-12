@@ -4,7 +4,7 @@
 //! redirect hop); `serve` needs `NetListen(addr)`. `https` URLs use TLS when
 //! the engine is built with the `tls` feature. Response bodies larger than
 //! the `max_http_body` limit fail with kind `"limit"` (unless read as they
-//! arrive, with `open`).
+//! arrive, with `open`). Connections are kept open for further requests.
 
 import io
 import json
@@ -14,19 +14,20 @@ import net
 /// free port).
 pub native fn serve(addr: str) -> Result<Server>
 
-/// An HTTP/1.1 server. Each connection carries one request and is closed
-/// after the response. Closing the server stops accepting connections and
-/// closes those whose requests were still being read.
+/// An HTTP/1.1 server. After a response, it waits for the client's next
+/// request on the same connection. Closing the server stops accepting
+/// connections and closes those whose requests were still being read.
 pub native type Server
 
 extend Server {
     /// Waits for the next request's head; the body is read as the handler
     /// reads it. Heads are read from many connections at once. A connection
     /// that sends no head within 30 seconds, or the oldest when the server
-    /// reads as many as it may, is answered with `408 Request Timeout`.
+    /// reads as many as it may, is answered with `408 Request Timeout`; one
+    /// waiting for its next request is closed instead.
     pub fn accept(self) -> Result<Request> {
-        let (method, path, query, headers, body, conn) = next_request(self)?
-        Ok(Request { method, path, query, headers, body, conn })
+        let (method, path, query, headers, body, conn, exchange) = next_request(self)?
+        Ok(Request { method, path, query, headers, body, conn, exchange })
     }
 
     /// The local address (`host:port`) the server listens on.
@@ -48,23 +49,25 @@ pub struct Request {
     /// The request's body, read as it arrives (at most `max_http_body`
     /// bytes with `read_all`, `bytes`, `text` or `json`).
     body: Body
-    /// The client connection. `respond` writes the response to it and closes
-    /// it; a script may instead write a response to it directly.
+    /// The client connection. `respond` and `respond_stream` write the
+    /// response to it; a script may instead write one directly, and close it.
     conn: net.Conn
+    exchange: Exchange
 
-    /// Sends the response and closes the connection (and the request's
-    /// body, if it was not read).
+    /// Sends the response and closes the request. The connection is kept
+    /// for the client's next request only if the client allows it and the
+    /// request's body was read to its end.
     fn respond(self, status: int, body: bytes, headers: [(str, str)] = []) -> Result<()> {
-        let sent = write_response(self.conn, status, body, headers, self.method != "HEAD")
+        let sent = write_response(self.conn, self.exchange, self.body, status, body, headers, self.method != "HEAD")
         self.close()
         sent
     }
 
-    /// Starts a response whose body is written as it goes: chunked, or
-    /// exactly as long as a `content-length` in `headers`. Closing the reply
-    /// ends the body.
+    /// Starts a response whose body is written as it goes: chunked, exactly
+    /// as long as a `content-length` in `headers`, or, to an HTTP/1.0 client,
+    /// up to the end of the connection. Closing the reply ends the body.
     fn respond_stream(self, status: int, headers: [(str, str)] = []) -> Result<Reply> {
-        Ok(Reply { conn: self.conn, body: reply_body(status, headers, self.method != "HEAD")? })
+        Ok(Reply { conn: self.conn, body: reply_body(self.exchange, self.body, status, headers, self.method != "HEAD")? })
     }
 
     /// The (rest of the) body.
@@ -95,8 +98,8 @@ pub struct Request {
 }
 
 impl Close for Request {
-    /// Closes the request's body and its connection (without a response,
-    /// if none was sent).
+    /// Closes the request's body and, unless a response was sent, its
+    /// connection.
     fn close(self) {
         self.body.close()
         self.conn.close()
@@ -177,9 +180,18 @@ impl Close for Upload {
 /// The framing of a body written as it goes.
 native type Outgoing
 
+/// What the response to a request needs to know about its connection.
+native type Exchange
+
 native fn start_upload(method: str, url: str, headers: [(str, str)], timeout: duration) -> Result<(net.Conn, Outgoing)>
 
-native fn reply_body(status: int, headers: [(str, str)], include_body: bool) -> Result<Outgoing>
+native fn reply_body(
+    exchange: Exchange,
+    request_body: Body,
+    status: int,
+    headers: [(str, str)],
+    include_body: bool,
+) -> Result<Outgoing>
 
 /// Writes `data` to `body`, then ends it if `last`.
 native fn write_body(conn: net.Conn, body: Outgoing, data: bytes, last: bool) -> Result<()>
@@ -187,13 +199,15 @@ native fn write_body(conn: net.Conn, body: Outgoing, data: bytes, last: bool) ->
 /// Reads the response to an upload: `(status, headers, body)`.
 native fn read_response(conn: net.Conn, head_only: bool, timeout: duration) -> Result<(int, [(str, str)], Body)>
 
-/// Accepts connections and reads their requests' heads concurrently until
-/// one is complete: `(method, path, query, headers, body, conn)`.
-native fn next_request(server: Server) -> Result<(str, str, str, [(str, str)], Body, net.Conn)>
+/// Accepts connections and reads requests' heads concurrently until one is
+/// complete: `(method, path, query, headers, body, conn, exchange)`.
+native fn next_request(server: Server) -> Result<(str, str, str, [(str, str)], Body, net.Conn, Exchange)>
 
-/// Writes a response (with `content-length` and `connection: close`) to `conn`.
+/// Writes a response (with a `content-length`) to `conn`.
 native fn write_response(
     conn: net.Conn,
+    exchange: Exchange,
+    request_body: Body,
     status: int,
     body: bytes,
     headers: [(str, str)],

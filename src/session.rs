@@ -178,13 +178,14 @@ impl Session {
                 name: SESSION_MODULE.into(),
                 file,
                 ast: res.module,
+                comments: Vec::new(),
                 kind: ModKind::Script { main: true },
                 imports: HashMap::new(),
             };
             let lookup = |name: &str| registry.native(name);
             let mut checker = Checker::attach(detached.clone(), &graph.sm, &lookup, budget.clone());
             checker.type_query = Some(Default::default());
-            let checked = checker.check_cell(Vec::new(), &cell, true);
+            let checked = checker.check_cell(&[], &cell, true);
             if let Some(stop) = budget.stopped() {
                 return Err(budget_error(stop, &graph.sm, file));
             }
@@ -267,8 +268,9 @@ impl Session {
     /// an input; the wall-time limit does not apply (waiting for input may
     /// take any time). Permission prompts wait until `until` has completed,
     /// so that they do not compete with the front end for its input; no
-    /// script code runs while one waits. Likewise, reads of standard input
-    /// wait (unless one was already in progress).
+    /// script code runs while one waits. A front end that reads the
+    /// process's standard input should pass it on through a
+    /// [`crate::StdinFeed`].
     ///
     /// If a task panics, exceeds a limit or is interrupted, every task is
     /// cancelled (as after a failed input), the error is passed to `on_error`
@@ -403,11 +405,12 @@ impl Session {
             name: SESSION_MODULE.into(),
             file,
             ast: crate::syntax::parse_module("", file).module,
+            comments: Vec::new(),
             kind: ModKind::Script { main: true },
             imports: HashMap::new(),
         };
         let session = checker.mods.len() as ModId;
-        checker.begin_session(vec![module], session).map_err(|ds| Error::Compile(ds.iter().map(|d| graph.sm.resolve(d)).collect()))?;
+        checker.begin_session(&[module], session).map_err(|ds| Error::Compile(ds.iter().map(|d| graph.sm.resolve(d)).collect()))?;
         let checker = checker.detach();
         // The standard library's program; its entry initializes the prelude and `task`.
         let prog = snapshot.program.clone();
@@ -485,7 +488,7 @@ impl Session {
             let lookup = |name: &str| registry.native(name);
             let mut checker = Checker::attach(detached.clone(), sm, &lookup, budget.clone());
             let added = modules.len();
-            let checked = checker.check_cell(modules, &cell_module, want_value);
+            let checked = checker.check_cell(&modules, &cell_module, want_value);
             if let Some(stop) = budget.stopped() {
                 return Err(budget_error(stop, sm, file));
             }
@@ -567,8 +570,6 @@ impl Session {
         vm.host.output_bytes = 0;
         // Waiting for input may take any time.
         vm.deadline = None;
-        // Reads of standard input wait until the front end has its input.
-        let _stdin = vm.host.stdin.clone().try_lock_owned().ok();
         let r = vm.drive(None).await;
         let r = r.and_then(|stop| vm.drain_output().map(|()| stop).map_err(Trap::from_ctl));
         let r = match r {

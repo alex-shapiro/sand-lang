@@ -1,18 +1,14 @@
 //! The linter: style and correctness warnings on top of the type checker.
 
+use crate::Error;
 use crate::check::budget::{CompileBudget, tool_fuel};
-use crate::check::{CheckedProgram, Ctor, FnInfo, FnKind};
-use crate::diag::SourceFile;
-use crate::engine::Engine;
+use crate::check::{CheckedProgram, Ctor, FnInfo, FnKind, ParsedModule};
+use crate::diag::{FileId, SourceFile};
 use crate::hir::{HArg, HKind};
-use crate::modules::ResolvedFacts;
 use crate::syntax::ast::*;
 use crate::syntax::lexer::CommentKind;
 use crate::types::FnId;
-use crate::{Config, Error, Policy};
 use std::collections::{HashMap, HashSet};
-#[cfg(feature = "os")]
-use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LintWarning {
@@ -28,92 +24,66 @@ impl std::fmt::Display for LintWarning {
     }
 }
 
-/// Lints a file of the host's file system, loading its imports as `sand
-/// check` does.
-#[cfg(feature = "os")]
-pub fn lint_file(path: &Path) -> Result<Vec<LintWarning>, String> {
-    let src = std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    let engine = Engine::new(Config::new().policy(Policy::deny_all()));
-    let facts = engine.lint_facts(path).map_err(|e| e.to_string())?;
-    lint_with(&src, facts)
-}
-
-/// Lints source text, resolving imports against the current directory.
-pub fn lint_source(name: &str, src: &str) -> Result<Vec<LintWarning>, String> {
-    lint_source_with(&Engine::new(Config::new().policy(Policy::deny_all())), name, src)
-}
-
-/// Lints source text as `engine` would run it: imports come from its file
-/// system and module root, as its policy allows (without prompting).
-pub fn lint_source_with(engine: &Engine, name: &str, src: &str) -> Result<Vec<LintWarning>, String> {
-    check_and_lint(engine, name, src).map_err(|e| e.to_string())
-}
-
-/// Like [`lint_source_with`], but returns compile errors as [`Error::Compile`].
-/// A lint that cannot finish is an [`Error::Io`].
-pub fn check_and_lint(engine: &Engine, name: &str, src: &str) -> Result<Vec<LintWarning>, Error> {
-    let facts = engine.lint_facts_source(name, src)?;
-    lint_with(src, facts).map_err(Error::Io)
-}
-
-fn lint_with(src: &str, facts: ResolvedFacts) -> Result<Vec<LintWarning>, String> {
-    let src = src.to_string();
-    let budget = CompileBudget::new(Some(tool_fuel(src.len())), None, None);
-    let out = crate::platform::with_stack(64 << 20, || run_lints(&src, &facts, &budget))
-        .map_err(|e| format!("internal linter error: {e}"))
-        .and_then(|r| r);
+/// Lints `main`, the main module of `checked`, whose source is `file`, with
+/// fuel of its own ([`tool_fuel`]) and `compile`'s deadline and interrupt
+/// flag. Running out is an [`Error::Io`].
+pub(crate) fn lint_module(
+    main: &ParsedModule,
+    file: &SourceFile,
+    checked: &CheckedProgram,
+    compile: &CompileBudget,
+) -> Result<Vec<LintWarning>, Error> {
+    let budget = compile.with_fuel(tool_fuel(file.text.len()));
+    let warnings = run_lints(main, file, checked, &budget);
     match budget.stopped() {
-        Some(stop) => Err(crate::fmt::stop_message(stop, "lint")),
-        None => out,
+        Some(stop) => Err(Error::Io(crate::fmt::stop_message(stop, "lint"))),
+        None => Ok(warnings),
     }
 }
 
 struct Linter<'a> {
-    file: SourceFile,
+    file: &'a SourceFile,
     out: Vec<LintWarning>,
-    facts: &'a ResolvedFacts,
-    /// Types of bindings by (line, column), from the checker (empty for
-    /// top-level bindings).
-    types: HashMap<(usize, usize), String>,
+    checked: &'a CheckedProgram,
+    /// Types of the main module's bindings by the offset of their name,
+    /// from the checker (empty for top-level bindings).
+    types: HashMap<u32, &'a str>,
     /// The payload-less variants of the enum type of capitalized bindings
-    /// by (line, column), from the checker (`variant-like-binding`).
-    variants: HashMap<(usize, usize), Vec<String>>,
+    /// by the offset of their name, from the checker (`variant-like-binding`).
+    variants: HashMap<u32, &'a [String]>,
     /// The names of the bindings (with known types) of each scope enclosing
     /// the current point of the current function, innermost last.
     let_scopes: Vec<Vec<String>>,
     /// The types of the bindings in `let_scopes` by name, innermost last.
-    in_scope: HashMap<String, Vec<String>>,
+    in_scope: HashMap<String, Vec<&'a str>>,
     /// Names that may shadow the prelude's (see [`declarations`]).
     declared: HashSet<String>,
     budget: &'a CompileBudget,
 }
 
-fn run_lints(src: &str, facts: &ResolvedFacts, budget: &CompileBudget) -> Result<Vec<LintWarning>, String> {
-    if !budget.charge((src.len() / 64) as u64) {
-        return Ok(vec![]);
+fn run_lints(main: &ParsedModule, file: &SourceFile, checked: &CheckedProgram, budget: &CompileBudget) -> Vec<LintWarning> {
+    if !budget.charge((file.text.len() / 64) as u64) {
+        return vec![];
     }
-    let parsed = crate::syntax::parse_module(src, 0);
-    if !parsed.errors.is_empty() {
-        return Err("cannot lint a file with syntax errors".into());
-    }
-    let declared = declarations(&parsed.module);
+    let locals = || checked.lint.locals.iter().filter(|f| f.span.file == main.file);
     let mut l = Linter {
-        file: SourceFile::new("", src),
+        file,
         out: Vec::new(),
-        facts,
-        types: facts.locals.iter().map(|(ln, c, f)| ((*ln, *c), f.ty.clone())).collect(),
-        variants: facts.locals.iter().filter(|(.., f)| !f.variants.is_empty()).map(|(ln, c, f)| ((*ln, *c), f.variants.clone())).collect(),
+        checked,
+        types: locals().map(|f| (f.span.lo, f.ty.as_str())).collect(),
+        variants: locals().filter(|f| !f.variants.is_empty()).map(|f| (f.span.lo, f.variants.as_slice())).collect(),
         let_scopes: vec![vec![]],
         in_scope: HashMap::new(),
-        declared,
+        declared: declarations(&main.ast),
         budget,
     };
-    l.module(&parsed.module);
-    l.fact_lints();
+    l.module(&main.ast);
+    l.fact_lints(main.file);
 
+    let src = &*file.text;
     let mut file_allow: HashSet<String> = HashSet::new();
     let mut line_allow: HashMap<usize, HashSet<String>> = HashMap::new();
-    for c in &parsed.comments {
+    for c in &main.comments {
         let text = match c.kind {
             CommentKind::ModuleDoc => c.text(src).trim_start_matches("//!").trim(),
             CommentKind::Line => c.text(src).trim_start_matches("//").trim(),
@@ -124,7 +94,7 @@ fn run_lints(src: &str, facts: &ResolvedFacts, budget: &CompileBudget) -> Result
         if c.kind == CommentKind::ModuleDoc {
             file_allow.extend(names);
         } else {
-            let line = l.line_of(c.lo as usize);
+            let line = l.line_of(c.lo);
             line_allow.entry(line + 1).or_default().extend(names);
         }
     }
@@ -135,7 +105,7 @@ fn run_lints(src: &str, facts: &ResolvedFacts, budget: &CompileBudget) -> Result
         .collect();
     out.sort_by(|a, b| (a.line, a.column, a.code).cmp(&(b.line, b.column, b.code)));
     out.dedup();
-    Ok(out)
+    out
 }
 
 /// The edit distance between `a` and `b` (insertions, deletions,
@@ -307,8 +277,8 @@ fn uses_label(b: &CompileBudget, e: &Expr, name: &str) -> bool {
 }
 
 impl<'a> Linter<'a> {
-    fn line_of(&self, pos: usize) -> usize {
-        self.file.line_col(pos as u32).0
+    fn line_of(&self, pos: u32) -> usize {
+        self.file.line_col(pos).0
     }
 
     fn warn(&mut self, pos: u32, code: &'static str, message: String) {
@@ -426,8 +396,8 @@ impl<'a> Linter<'a> {
     }
 
     /// The checker's type of the binding introduced at `id`, if known.
-    fn binding_type(&self, id: &Ident) -> Option<String> {
-        self.types.get(&self.file.line_col(id.span.lo)).filter(|t| !t.is_empty()).cloned()
+    fn binding_type(&self, id: &Ident) -> Option<&'a str> {
+        self.types.get(&id.span.lo).copied().filter(|t| !t.is_empty())
     }
 
     /// Brings a binding into the innermost scope. Names without a checker type
@@ -566,7 +536,7 @@ impl<'a> Linter<'a> {
         for id in ids {
             let constant = top_level_let && is_screaming(&id.name);
             if id.name.starts_with(|c: char| c.is_ascii_uppercase()) && !constant {
-                if self.types.contains_key(&self.file.line_col(id.span.lo)) {
+                if self.types.contains_key(&id.span.lo) {
                     self.variant_like_binding(&id);
                     continue;
                 }
@@ -583,7 +553,7 @@ impl<'a> Linter<'a> {
     /// new variable, most likely a misspelled variant without a payload.
     fn variant_like_binding(&mut self, id: &Ident) {
         let name = id.name.to_ascii_lowercase();
-        let close = self.variants.get(&self.file.line_col(id.span.lo)).and_then(|variants| {
+        let close = self.variants.get(&id.span.lo).and_then(|variants| {
             variants
                 .iter()
                 .map(|v| (edit_distance(&name, &v.rsplit('.').next().unwrap_or(v).to_ascii_lowercase()), v))
@@ -836,53 +806,44 @@ impl<'a> Linter<'a> {
     // ------------------------------------------------------------------
     // Lints from checker facts
 
-    fn fact_lints(&mut self) {
-        let facts = self.facts;
-        for (line, col, f) in &facts.locals {
+    /// The lints decided by the checker's facts.
+    fn fact_lints(&mut self, main: FileId) {
+        let lint = &self.checked.lint;
+        for f in lint.locals.iter().filter(|f| f.span.file == main) {
             if f.name.starts_with('_') || f.name == "self" || f.name.starts_with('<') {
                 continue;
             }
             if !f.used {
-                self.out.push(LintWarning {
-                    code: "unused-variable",
-                    message: format!("unused variable `{}`", f.name),
-                    line: *line,
-                    column: *col,
-                });
+                self.warn(f.span.lo, "unused-variable", format!("unused variable `{}`", f.name));
             }
             if f.mutable && !f.assigned {
-                self.out.push(LintWarning {
-                    code: "unnecessary-var",
-                    message: format!("`{}` is never reassigned; use `let`", f.name),
-                    line: *line,
-                    column: *col,
-                });
+                self.warn(f.span.lo, "unnecessary-var", format!("`{}` is never reassigned; use `let`", f.name));
             }
         }
-        for (line, col) in &facts.unused_results {
-            self.out.push(LintWarning {
-                code: "unused-result",
-                message: "this `Result` is discarded; handle it with `?`, `match` or `let _ =`".into(),
-                line: *line,
-                column: *col,
-            });
+        for sp in lint.unused_results.iter().filter(|sp| sp.file == main) {
+            self.warn(sp.lo, "unused-result", "this `Result` is discarded; handle it with `?`, `match` or `let _ =`".into());
         }
-        for (line, col, code, message) in &facts.resources {
-            self.out.push(LintWarning { code, message: message.clone(), line: *line, column: *col });
+        for (sp, code, message) in lint.resources.iter().filter(|(sp, ..)| sp.file == main) {
+            self.warn(sp.lo, code, message.clone());
         }
-        for (line, col, name) in &facts.imports {
-            if !facts.used_names.contains(name) {
-                self.out.push(LintWarning { code: "unused-import", message: format!("unused import `{name}`"), line: *line, column: *col });
+        let module = self.checked.main_module;
+        for (name, sp) in &lint.main_imports {
+            if !lint.used_names.contains(&(module, name.clone())) {
+                self.warn(sp.lo, "unused-import", format!("unused import `{name}`"));
             }
         }
-        for (line, col, name, is_method) in &facts.unused_fns {
-            let what = if *is_method { "method" } else { "function" };
-            self.out.push(LintWarning {
-                code: "unused-function",
-                message: format!("{what} `{name}` is never used"),
-                line: *line,
-                column: *col,
-            });
+        let checked = self.checked;
+        for id in unused_functions(checked) {
+            let f = &checked.fns[id as usize];
+            if f.span.file != main {
+                continue;
+            }
+            let (what, name) = match f.owner {
+                Some(Ctor::Def(d)) => ("method", format!("{}.{}", checked.name(checked.types[d as usize].name), checked.name(f.name))),
+                Some(_) => ("method", checked.name(f.name).to_string()),
+                None => ("function", checked.name(f.name).to_string()),
+            };
+            self.warn(f.span.lo, "unused-function", format!("{what} `{name}` is never used"));
         }
     }
 }
@@ -894,7 +855,7 @@ impl<'a> Linter<'a> {
 /// (including pipes and method calls), function values and default-argument
 /// helpers. Reachability (rather than "referenced anywhere") means a function
 /// used only by itself or by other unused functions is unused too.
-pub(crate) fn unused_functions(checked: &CheckedProgram) -> Vec<FnId> {
+fn unused_functions(checked: &CheckedProgram) -> Vec<FnId> {
     let main = checked.main_module;
     let n = checked.fns.len();
     let is_root = |f: &FnInfo| -> bool {
@@ -969,8 +930,13 @@ mod tests {
     #[test]
     fn variant_like_bindings_suggest_the_closest_variant() {
         let src = "enum State {\n    Empty\n    Closed\n    Full(int)\n}\nfn f(s: State) -> int {\n    match s {\n        Full(n) => n\n        Closed => 1\n        Emtpy => 0\n    }\n}\nfn g(s: State) -> int {\n    match s {\n        Full(n) => n\n        Rest => 1\n    }\n}\nprint(f(State.Empty) + g(State.Empty))\n";
-        let messages: Vec<String> =
-            lint_source("main.sand", src).unwrap().into_iter().filter(|w| w.code == "variant-like-binding").map(|w| w.message).collect();
+        let messages: Vec<String> = crate::Engine::new(crate::Config::new())
+            .lint_source("main.sand", src)
+            .unwrap()
+            .into_iter()
+            .filter(|w| w.code == "variant-like-binding")
+            .map(|w| w.message)
+            .collect();
         assert_eq!(
             messages,
             [
