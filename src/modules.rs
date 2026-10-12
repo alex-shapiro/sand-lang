@@ -24,6 +24,7 @@ use crate::types::{FnId, ModId};
 use crate::vm::bytecode::Program;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// The modules of a registry, checked and compiled. Immutable once built:
 /// every compilation works on its own copy of the parts it extends.
@@ -33,7 +34,7 @@ pub(crate) struct Snapshot {
     pub mods: Vec<SnapModule>,
     /// Module name -> module id.
     pub by_name: HashMap<String, ModId>,
-    pub checker: Checker<'static>,
+    pub checker: Checker,
     pub compiler: Incremental,
     /// The compiled modules; its entry initializes the prelude and `task`.
     pub program: Program,
@@ -63,12 +64,13 @@ struct Pending {
 impl Pending {
     /// The module for the checker, with its imports resolved by `by_name`
     /// (which has them all), and the ids of the modules it imports.
-    fn resolve(self, by_name: &HashMap<String, ModId>) -> (ParsedModule, Vec<ModId>) {
+    fn resolve(self, by_name: &HashMap<String, ModId>, sm: &SourceMap) -> (ParsedModule, Vec<ModId>) {
         let imports: HashMap<usize, ModId> = self.imports.iter().map(|(item, dep)| (*item, by_name[dep])).collect();
         let mut deps: Vec<ModId> = imports.values().copied().collect();
         deps.sort_unstable();
         deps.dedup();
-        (ParsedModule { name: self.name, file: self.file, ast: self.ast, comments: Vec::new(), kind: self.kind, imports }, deps)
+        let source = sm.file(self.file).clone();
+        (ParsedModule { name: self.name, file: self.file, source, ast: self.ast, comments: Vec::new(), kind: self.kind, imports }, deps)
     }
 }
 
@@ -94,11 +96,7 @@ impl Snapshot {
         if !errors.is_empty() {
             return Err(resolve(&sm, &errors));
         }
-        let lookup = |name: &str| registry.native(name);
-        let mut checker = match base {
-            Some(b) => Checker::attach(b.checker.clone(), &sm, &lookup, Default::default()),
-            None => Checker::new(&sm, &lookup),
-        };
+        let mut checker = base.map(|b| b.checker.clone()).unwrap_or_default();
         checker.lint_facts = false;
         // The standard modules at once (they import only each other).
         let (std, hosts): (Vec<Pending>, Vec<Pending>) = pending.into_iter().partition(|p| p.kind != ModKind::Host);
@@ -107,11 +105,12 @@ impl Snapshot {
         }
         let mut parsed = Vec::new();
         for p in std {
-            let (m, deps) = p.resolve(&by_name);
+            let (m, deps) = p.resolve(&by_name, &sm);
             mods.push(SnapModule { deps, init: None });
             parsed.push(m);
         }
-        checker.check_modules(&parsed).map_err(|ds| resolve(&sm, &ds))?;
+        let budget = Arc::new(CompileBudget::default());
+        checker.check_modules(&parsed, &registry.by_name, &budget).map_err(|ds| resolve(&sm, &ds))?;
         // Host modules one at a time, each on a copy of the checker.
         for p in hosts {
             if p.imports.iter().any(|(_, dep)| !by_name.contains_key(dep)) {
@@ -119,9 +118,9 @@ impl Snapshot {
                 continue;
             }
             let (id, name) = (checker.mods.len() as ModId, p.name.clone());
-            let (m, deps) = p.resolve(&by_name);
+            let (m, deps) = p.resolve(&by_name, &sm);
             let mut attempt = checker.clone();
-            if attempt.check_modules(std::slice::from_ref(&m)).is_ok() {
+            if attempt.check_modules(std::slice::from_ref(&m), &registry.by_name, &budget).is_ok() {
                 checker = attempt;
                 by_name.insert(name, id);
                 mods.push(SnapModule { deps, init: None });
@@ -140,8 +139,7 @@ impl Snapshot {
         let mut compiler = base.map(|b| b.compiler.clone()).unwrap_or_default();
         let cp = checker.take_checked();
         let (native_names, native_argc) = native_info(&cp, registry);
-        let budget = CompileBudget::default();
-        let input = CompileInput { checked: &cp, sm: &sm, native_lookup: &lookup, native_names, native_argc, budget: &budget };
+        let input = CompileInput { checked: &cp, sm: &sm, natives: &registry.by_name, native_names, native_argc, budget: &budget };
         let inits: Vec<FnId> = ["prelude", "task"].iter().filter_map(|n| mods[by_name[*n] as usize].init).collect();
         program.entry = compile_more(input, &mut program, &mut compiler, &inits).map_err(|ds| resolve(&sm, &ds))?;
         checker.restore_checked(cp);
@@ -150,7 +148,6 @@ impl Snapshot {
         checker.diags.clear();
         checker.lint = Default::default();
         checker.global_facts.clear();
-        let checker = checker.detach();
         let mark = ProgramMark::of(&program);
         Ok(Snapshot { sm, mods, by_name, checker, compiler, program, mark })
     }
@@ -484,7 +481,8 @@ impl ModuleGraph {
                 }
             }
             let comments = if m.kind == (ModKind::Script { main: true }) { res.comments } else { Vec::new() };
-            parsed.push(ParsedModule { name: m.name.clone(), file: m.file, ast: res.module, comments, kind: m.kind, imports });
+            let source = self.sm.file(m.file).clone();
+            parsed.push(ParsedModule { name: m.name.clone(), file: m.file, source, ast: res.module, comments, kind: m.kind, imports });
         }
         if errors.is_empty() { Ok(parsed) } else { Err(errors) }
     }

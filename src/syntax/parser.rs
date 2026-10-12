@@ -1370,6 +1370,11 @@ impl<'a> Parser<'a> {
                 self.bump();
                 Ok(self.mk(ExprKind::Float(v), self.span_from(lo)))
             }
+            Tok::Inf | Tok::Nan => {
+                let v = if self.at(&Tok::Inf) { f64::INFINITY } else { f64::NAN };
+                self.bump();
+                Ok(self.mk(ExprKind::Float(v), self.span_from(lo)))
+            }
             Tok::Duration(v) => {
                 self.bump();
                 Ok(self.mk(ExprKind::Duration(v), self.span_from(lo)))

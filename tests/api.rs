@@ -67,9 +67,8 @@ fn compile_errors_are_reported_as_diagnostics() {
 
 #[test]
 fn check_source_does_not_run() {
-    let mut engine = Engine::new(Config::new());
-    let diags = engine.check_source("main.sand", "print(1)\nlet x: int = 2").unwrap();
-    assert!(diags.is_empty());
+    let engine = Engine::new(Config::new());
+    engine.check_source("main.sand", "print(1)\nlet x: int = 2").unwrap();
     let err = engine.check_source("main.sand", "let x: int = true").unwrap_err();
     assert!(matches!(err, Error::Compile(_)));
 }

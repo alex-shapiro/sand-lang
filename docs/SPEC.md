@@ -136,8 +136,8 @@ Reserved keywords:
 
 ```
 and as break continue defer else enum extend false fn for from if impl import
-in let loop match native not or pub return self Self spawn struct trait true
-type use var while
+in inf let loop match nan native not or pub return self Self spawn struct trait
+true type use var while
 ```
 
 `test` is a contextual keyword: it begins a test block only when followed by a
@@ -157,8 +157,9 @@ A hexadecimal, binary or octal literal may be any 64-bit pattern, read as a
 two's complement integer: `0x7FFF_FFFF_FFFF_FFFF` is the largest `int`,
 `0x8000_0000_0000_0000` the smallest and `0xFFFF_FFFF_FFFF_FFFF` is `-1`.
 
-**Floats**: `1.0`, `0.5`, `1e9`, `2.5e-3`, `1_000.5`. A float must have digits
-on both sides of a `.`; `1.` and `.5` are not floats.
+**Floats**: `1.0`, `0.5`, `1e9`, `2.5e-3`, `1_000.5`, `inf` (positive
+infinity), `nan` (not a number). A float must have digits on both sides of a
+`.`; `1.` and `.5` are not floats.
 
 **Durations**: an integer or float literal immediately followed by a unit:
 `ns`, `us`, `ms`, `s`, `m`, `h`. Examples: `250ms`, `1.5s`, `2h`. The value is
@@ -757,7 +758,7 @@ Integer semantics:
 - `a ** b` with `b < 0` panics with `negative exponent`.
 
 Float semantics: IEEE-754 with round-to-nearest. `/` by zero yields `inf`,
-`-inf` or `NaN`. `%` is floor modulo (`a - b * floor(a / b)`). `**` is `powf`.
+`-inf` or `nan`. `%` is floor modulo (`a - b * floor(a / b)`). `**` is `powf`.
 
 **Bitwise** `& | ^ << >> ~` operate on `int`. `>>` is arithmetic. A shift
 amount outside `0..64` panics with `shift out of range`.
@@ -768,7 +769,7 @@ numeric for numbers (NaN compares false with everything); lexicographic by
 bytes for `str` and `bytes`; `false < true`; lexicographic for tuples and lists;
 for enums, by variant declaration order then payload; for structs, field by
 field in declaration order. Floats inside composites use the total order where
-`NaN` is greater than every other float and equal to itself.
+`nan` is greater than every other float and equal to itself.
 
 Values of reference types (lists, maps, sets, structs) compare **by
 content**. Tasks, channels and opaque handles compare by identity.
@@ -1040,7 +1041,8 @@ A binding pattern `name` that coincides with a payload-less variant of the
 scrutinee's enum type refers to that variant (`Empty` for a `Shape`, §4.3). A
 capitalized name that is not such a variant is a binding, which the linter
 reports as a likely misspelled variant (`variant-like-binding`, §17.2). Struct
-patterns must either mention every field or end with `..`.
+patterns must either mention every field or end with `..`. A pattern binds a
+name at most once.
 
 ### 8.2 Guards
 
@@ -1160,7 +1162,7 @@ system's open-file limit is reached.
 | Value                               | Display                             | Debug                                                                           |
 | ----------------------------------- | ----------------------------------- | ------------------------------------------------------------------------------- |
 | `42`                                | `42`                                | `42`                                                                            |
-| `1.0`, `0.1`, `1e100`, `NaN`, `inf` | `1.0`, `0.1`, `1e100`, `NaN`, `inf` | same                                                                            |
+| `1.0`, `0.1`, `1e100`, `nan`, `inf` | `1.0`, `0.1`, `1e100`, `nan`, `inf` | same                                                                            |
 | `true`                              | `true`                              | `true`                                                                          |
 | `"hi"`                              | `hi`                                | `"hi"` (escaped with `\"`, `\\`, `\n`, `\r`, `\t`, `\u{..}` for other controls) |
 | `b"a\x00"`                          | `b"a\x00"`                          | same                                                                            |
@@ -1332,7 +1334,7 @@ int) -> str`. `min` and `max` ignore a NaN argument. Parsing: `str.parse_float`
 | `to_upper()`, `to_lower()`                                                         | Unicode-aware                                                                         |
 | `repeat(n: int) -> str`                                                            |                                                                                       |
 | `pad_start(width: int, fill: str = " ")`, `pad_end(...)`                           | pad to `width` characters                                                             |
-| `parse_int(radix: int = 10) -> int?`, `parse_float() -> float?`                    | strict (no whitespace); radix 2..36; floats also `inf`, `-inf`, `NaN`                 |
+| `parse_int(radix: int = 10) -> int?`, `parse_float() -> float?`                    | strict (no whitespace); radix 2..36; floats also `inf`, `-inf`, `nan`                 |
 | `is_digit()`, `is_alpha()`, `is_alnum()`, `is_space()`, `is_upper()`, `is_lower()` | true if non-empty and all chars satisfy (ASCII classes for digit; Unicode for others) |
 | `char_at(i: int) -> str?`                                                          | the scalar starting at byte offset `i`                                                |
 | `ord() -> int`                                                                     | scalar value of a one-char string (panics otherwise)                                  |
@@ -1941,7 +1943,7 @@ each accepts `fields: [str: str] = [:]`. `set_level(level: str)` with `"debug"`,
 
 ### 13.9 `math`
 
-Constants (`pub let` values): `pi`, `e`, `tau`, `inf`, `nan`. Functions on
+Constants (`pub let` values): `pi`, `e`, `tau`. Functions on
 `float`: `cbrt`, `exp`, `ln`, `log2`, `log10`, `log(x, base)`, `sin`,
 `cos`, `tan`, `asin`, `acos`, `atan`, `atan2(y, x)`, `sinh`, `cosh`, `tanh`,
 `hypot(x, y)`, `to_radians`, `to_degrees`,
@@ -2709,6 +2711,7 @@ these:
 | `bool-comparison`      | comparing with `true`/`false` literal                                                                                                                                                                                                |
 | `self-assignment`      | `x = x`                                                                                                                                                                                                                              |
 | `len-zero`             | `x.len() == 0` (use `is_empty()`)                                                                                                                                                                                                    |
+| `nan-comparison`       | a comparison with `nan`, which is always false (`!=` is always true); use `is_nan()`                                                                                                                                                 |
 | `empty-block`          | empty `if`/`else`/loop body                                                                                                                                                                                                          |
 | `todo`                 | call to `todo()`                                                                                                                                                                                                                     |
 | `shadowed-variable`    | `let`/`var` binding a name that is already bound, with a different type, by a binding of the same function that is still in scope (see below)                                                                                        |

@@ -467,9 +467,9 @@ fn cmd_check(args: &[String]) -> Result<u8, String> {
             continue;
         }
         // Checking runs no script code; imports are confined to the module root.
-        let mut engine = Engine::new(Config::new().policy(Policy::deny_all()));
+        let engine = Engine::new(Config::new().policy(Policy::deny_all()));
         match engine.check_file(path) {
-            Ok(_) => println!("{f}: ok"),
+            Ok(()) => println!("{f}: ok"),
             Err(e) => code = code.max(report_error(&e)),
         }
     }

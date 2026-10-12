@@ -98,6 +98,49 @@ match Some(1) {
 --- error
 2: must bind the same
 
+=== a pattern binds each name once
+let (a, a) = (1, 2)
+--- error
+1: `a` is bound more than once in the pattern
+
+=== struct and list patterns bind each name once
+struct P { x: int, y: int }
+let P { x, y: x } = P { x: 1, y: 2 }
+match [1, 2] {
+    [a, ..a] => print(a)
+    _ => print("other")
+}
+--- error
+2: `x` is bound more than once in the pattern
+4: `a` is bound more than once in the pattern
+
+=== or pattern alternatives each bind a name once
+enum E { A(int), B(int, int) }
+fn f(e: E) -> int {
+    match e {
+        E.A(y) | E.B(y, y) => y
+    }
+}
+fn g(t: (int, E)) -> int {
+    match t {
+        (y, E.A(y) | E.B(y, _)) => y
+    }
+}
+--- error
+4: `y` is bound more than once in the pattern
+9: `y` is bound more than once in the pattern
+
+=== or patterns in separate positions may bind different names
+enum E { A(int), B(int) }
+fn f(t: (E, E)) -> int {
+    match t {
+        (E.A(x) | E.B(x), E.A(y) | E.B(y)) => x * 10 + y
+    }
+}
+print(f((E.A(1), E.B(2))))
+--- stdout
+12
+
 === non exhaustive enum match
 enum C { R, G, B }
 fn f(c: C) -> int {

@@ -437,9 +437,9 @@ fn register_str(r: &mut Registry) {
         let t = vm.str(a[0]);
         vm.charge_bytes(t.len())?;
         // Decimal and scientific notation, and the non-finite values as
-        // floats display them (Rust's parser also takes `infinity`, `nan`, ...).
+        // floats display them (Rust's parser also takes `infinity`, `NaN`, ...).
         let ok = !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit() || matches!(b, b'.' | b'-' | b'+' | b'e' | b'E'))
-            || matches!(t, "inf" | "-inf" | "NaN");
+            || matches!(t, "inf" | "-inf" | "nan");
         let v = if ok { t.parse::<f64>().ok() } else { None };
         Ok(vm.option(v.map(Value::Float)))
     });

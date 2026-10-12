@@ -89,7 +89,7 @@ fn imports_and_main_files_come_from_the_memory_file_system() {
     let mut engine = Engine::new(Config::new().memory_fs(fs.clone()).stdout(out.clone()));
     rt().block_on(engine.run_file("/app/main.sand")).unwrap();
     assert_eq!(out.contents(), "42\n");
-    assert!(engine.check_file("/app/main.sand").unwrap().is_empty());
+    engine.check_file("/app/main.sand").unwrap();
     // Imports stay under the module root.
     fs.write("/outside.sand", "pub fn f() -> int { 1 }\n").unwrap();
     fs.write("/app/escape.sand", "import \"../outside\"\nprint(outside.f())\n").unwrap();
@@ -163,8 +163,8 @@ fn engines_can_share_a_file_system() {
 fn checks_and_lints_see_the_memory_file_system() {
     let fs = MemFs::new();
     fs.write("/lib.sand", "pub fn f() -> int { 1 }\n").unwrap();
-    let mut engine = Engine::new(Config::new().memory_fs(fs));
-    assert!(engine.check_source("main.sand", "import \"lib\"\nprint(lib.f())").unwrap().is_empty());
+    let engine = Engine::new(Config::new().memory_fs(fs));
+    engine.check_source("main.sand", "import \"lib\"\nprint(lib.f())").unwrap();
     match engine.check_source("main.sand", "import \"missing\"") {
         Err(Error::Compile(d)) => assert!(d[0].message.contains("cannot load module `missing`"), "{d:?}"),
         other => panic!("{other:?}"),

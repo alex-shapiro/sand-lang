@@ -10,7 +10,7 @@ use crate::diag::Span;
 use crate::hir::*;
 use crate::types::*;
 
-impl Checker<'_> {
+impl Checker {
     pub fn fresh(&mut self) -> TypeId {
         self.subst.push(None);
         self.arena.var((self.subst.len() - 1) as VarId)

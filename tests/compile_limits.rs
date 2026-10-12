@@ -15,9 +15,9 @@ use std::time::{Duration, Instant};
 const FAST: Duration = Duration::from_secs(10);
 
 fn check(config: Config, src: &str) -> (Result<(), Error>, Duration) {
-    let mut engine = Engine::new(config.stdout(MemorySink::new()));
+    let engine = Engine::new(config.stdout(MemorySink::new()));
     let start = Instant::now();
-    let r = engine.check_source("main.sand", src).map(|_| ());
+    let r = engine.check_source("main.sand", src);
     (r, start.elapsed())
 }
 

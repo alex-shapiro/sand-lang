@@ -638,6 +638,11 @@ impl<'a> Linter<'a> {
                         self.warn(e.span.lo, "len-zero", "use `is_empty()` instead of comparing `len()` with 0".into());
                     }
                 }
+                let is_nan = |x: &Expr| matches!(x.kind, ExprKind::Float(v) if v.is_nan());
+                if matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) && (is_nan(a) || is_nan(b)) {
+                    let always = if *op == BinOp::Ne { "true" } else { "false" };
+                    self.warn(e.span.lo, "nan-comparison", format!("a comparison with `nan` is always {always}; use `is_nan()`"));
+                }
                 self.expr(a);
                 self.expr(b);
             }

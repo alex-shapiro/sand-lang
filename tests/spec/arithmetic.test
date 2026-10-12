@@ -116,6 +116,28 @@ false
 false
 false
 
+=== non-finite float literals
+print([nan, inf, -inf])
+print(nan.is_nan())
+print(inf == 1.0 / 0.0)
+print(-inf == -1.0 / 0.0)
+print("nan".parse_float().unwrap().is_nan())
+print("inf".parse_float())
+print("NaN".parse_float())
+--- stdout
+[nan, inf, -inf]
+true
+true
+true
+true
+Some(inf)
+None
+
+=== nan and inf are keywords
+let inf = 1
+--- error
+1: expected pattern, found `inf`
+
 === bitwise
 print(12 & 10)
 print(12 | 10)
@@ -309,7 +331,7 @@ print(3.14159.to_str_fixed(2))
 print("2.5".parse_float())
 print("nope".parse_float())
 print("-inf".parse_float())
-print((0.0 / 0.0).to_str().parse_float().unwrap().is_nan())
+print(nan.to_str().parse_float().unwrap().is_nan())
 print("infinity".parse_float())
 print((1.0 / 0.0).is_infinite())
 print(1.0.is_finite())

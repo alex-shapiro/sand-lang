@@ -104,7 +104,7 @@ fn same_dict(a: &HExpr, b: &HExpr) -> bool {
     }
 }
 
-impl Checker<'_> {
+impl Checker {
     pub fn show_trait(&self, tr: &TraitRef) -> String {
         let mut s = self.name(self.traits[tr.trait_id as usize].name).to_string();
         let args = self.arena.list(tr.args);
@@ -485,7 +485,8 @@ impl Checker<'_> {
                     remove_impl(&mut self.impls_by_ctor, &(ctor, arity), other);
                     continue;
                 }
-                let line = self.sm.file(self.impls[other as usize].span.file).line_col(self.impls[other as usize].span.lo).0;
+                let other_span = self.impls[other as usize].span;
+                let line = self.sources.get(&other_span.file).map_or(0, |f| f.line_col(other_span.lo).0);
                 let msg = format!("conflicting impls of {}: it is already implemented (line {line})", shown(self));
                 self.error(span, msg);
                 return None;

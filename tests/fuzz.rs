@@ -57,7 +57,7 @@ fn exercise(src: &str) {
 
 fn check_only(src: &str) {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let mut engine = Engine::new(Config::new());
+        let engine = Engine::new(Config::new());
         let _ = engine.check_source("fuzz.sand", src);
         let _ = sandlang::fmt::format_source(src);
         let _ = engine.lint_source("fuzz.sand", src);
@@ -112,6 +112,8 @@ const TOKENS: &[&str] = &[
     "Self",
     "true",
     "false",
+    "inf",
+    "nan",
     "x",
     "y",
     "f",

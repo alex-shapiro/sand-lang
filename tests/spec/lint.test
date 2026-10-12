@@ -127,6 +127,15 @@ if "s".len() == 0 { print("empty") }
 2: len-zero
 3: len-zero
 
+=== nan comparison
+let x = 1.0
+if x == nan { print("nan") }
+if nan != x { print("not nan") }
+if x.is_nan() { print("nan") }
+--- lint
+2: nan-comparison
+3: nan-comparison
+
 === empty block
 let x = 1
 if x > 0 {

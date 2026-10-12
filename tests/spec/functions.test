@@ -107,6 +107,24 @@ print(f(1, a: 2))
 --- error
 2: given more than once
 
+=== a parameter name is declared once
+fn f(a: int, a: int) -> int { a }
+let g = (b: int, b: int) => b
+fn h() {
+    fn local(c: int, c: int) -> int { c }
+}
+--- error
+1: parameter `a` is declared twice
+2: parameter `b` is declared twice
+4: parameter `c` is declared twice
+
+=== several parameters may be named _
+fn f(_: int, _: int) -> int { 1 }
+let g: fn(int, int) -> int = (_, _) => 2
+print(f(1, 2) + g(1, 2))
+--- stdout
+3
+
 === argument type mismatch
 fn f(a: int) -> int { a }
 print(f("x"))

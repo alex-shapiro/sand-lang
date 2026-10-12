@@ -11,12 +11,6 @@ pub let e = 2.718281828459045
 /// The full turn, `2 * pi`.
 pub let tau = 6.283185307179586
 
-/// Positive infinity.
-pub let inf = 1.0 / 0.0
-
-/// A quiet NaN ("not a number").
-pub let nan = 0.0 / 0.0
-
 /// Cube root.
 pub native fn cbrt(x: float) -> float
 /// `e` raised to the power `x`.

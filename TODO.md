@@ -78,26 +78,9 @@ Follow-up work, roughly in priority order.
       (constant initializers, or a call graph from the checker) would drop
       the second copy and lift both restrictions.
 
-### Code health
-
-- [ ] `Checker::detach` exists because the checker borrows the source map
-      and the native lookup while its tables are owned; a session keeps a
-      detached checker and re-attaches it per input. Splitting the checker
-      into owned tables and a per-compile borrowing context would remove
-      `detach`/`attach`.
-- [ ] `Engine::check_source` and `check_file` return a list of warnings
-      that is always empty: return just the result.
-
 ### Language
 
 - [ ] Trait objects (`dyn Trait`), associated types and constants, and
       blanket impls (`impl<T> X for T`).
 - [ ] Trait bounds on struct/enum type parameters.
 - [ ] Non-constant trait method defaults.
-- [ ] **A pattern may bind a name twice.** `let (a, a) = (1, 2)` checks and
-      binds the last value; it should be an error, as in an or-pattern
-      that binds different names.
-- [ ] **NaN and infinity have no literals.** Floats display as `NaN` and
-      `inf`, but neither is valid source (only `math.nan`, `math.inf`,
-      `1.0 / 0.0` or `"inf".parse_float()`), so float display and debug
-      forms do not read back the way a string's debug form does.

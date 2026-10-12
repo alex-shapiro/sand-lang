@@ -489,7 +489,7 @@ extend str {
     /// The integer written in `radix` (2..36), with an optional `-`.
     pub native fn parse_int(self, radix: int = 10) -> int?
     /// The float written in decimal or scientific notation, or `inf`,
-    /// `-inf` or `NaN` (as floats are displayed).
+    /// `-inf` or `nan` (as floats are displayed).
     pub native fn parse_float(self) -> float?
     /// True if non-empty and every character is an ASCII digit.
     pub native fn is_digit(self) -> bool

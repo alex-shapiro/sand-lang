@@ -47,7 +47,7 @@ const ITEM_DOC: &str = "        ";
 /// The built-in types, as the overview lists them.
 const BUILTIN_TYPES: &[&str] = &["int", "float", "bool", "str", "bytes", "duration", "Range", "[T]", "[K: V]", "Set<T>"];
 
-impl Checker<'_> {
+impl Checker {
     pub(crate) fn check_intrinsic(&mut self, which: Intrinsic, args: &CallArgs, span: Span) -> HExpr {
         let name = match which {
             Intrinsic::Help => "help",
@@ -937,7 +937,7 @@ impl Checker<'_> {
 
     /// The source text at `span` on one line, shortened if long.
     fn source_text(&self, span: Span) -> String {
-        let file = self.sm.files.get(span.file as usize);
+        let file = self.sources.get(&span.file);
         let text = file.and_then(|f| f.text.get(span.lo as usize..span.hi as usize)).unwrap_or("...");
         let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
         let short = crate::stdlib::truncate(&line, 60);

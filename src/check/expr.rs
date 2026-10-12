@@ -82,7 +82,7 @@ fn err(span: Span) -> HExpr {
     mk(HKind::Error, TypeId::ERROR, span)
 }
 
-impl Checker<'_> {
+impl Checker {
     // ------------------------------------------------------------------
     // Entry points
 
@@ -560,6 +560,7 @@ impl Checker<'_> {
                 }
             }
             let mut ptys = Vec::new();
+            self.check_param_names(f.params.iter().map(|p| &p.name));
             for p in &f.params {
                 let t = match &p.ty {
                     Some(t) => self.resolve_type_in(t, &scope, self_ty),
@@ -2520,6 +2521,7 @@ impl Checker<'_> {
         self.push_scope();
         let mut locals = Vec::new();
         let mut ptys = Vec::new();
+        self.check_param_names(params.iter().map(|p| &p.name));
         for (i, p) in params.iter().enumerate() {
             let t = match (&p.ty, &hinted) {
                 (Some(t), h) => {

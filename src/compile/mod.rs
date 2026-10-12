@@ -5,7 +5,7 @@ mod reflect;
 
 use crate::check::budget::CompileBudget;
 use crate::check::persist::{PMap, PVec};
-use crate::check::{CheckedProgram, FnKind};
+use crate::check::{CheckedProgram, FnKind, NativeIds};
 use crate::diag::{Diag, SourceMap, Span};
 use crate::hir::*;
 use crate::types::{FnId, Ty, TypeArena, TypeDefId, TypeId};
@@ -26,7 +26,7 @@ enum Target {
 pub struct CompileInput<'a> {
     pub checked: &'a CheckedProgram,
     pub sm: &'a SourceMap,
-    pub native_lookup: &'a dyn Fn(&str) -> Option<u32>,
+    pub natives: &'a NativeIds,
     pub native_names: Vec<String>,
     pub native_argc: Vec<u16>,
     /// Charged one unit per expression compiled, instruction emitted and
@@ -328,7 +328,7 @@ pub(crate) fn compile_more(input: CompileInput, prog: &mut Program, inc: &mut In
         dict_consts: std::mem::take(&mut inc.dict_consts),
         descs: std::mem::take(&mut inc.descs),
         errors: Vec::new(),
-        recv_native: (input.native_lookup)("Channel.recv"),
+        recv_native: input.natives.get("Channel.recv").copied(),
         inline: HashMap::new(),
         bodies,
     };
@@ -367,7 +367,7 @@ impl<'a> Compiler<'a> {
             ("str.is_upper", Inline::StrClass(4)),
             ("str.is_lower", Inline::StrClass(5)),
         ] {
-            if let Some(id) = (input.native_lookup)(name) {
+            if let Some(&id) = input.natives.get(name) {
                 self.inline.insert(id, op);
             }
         }

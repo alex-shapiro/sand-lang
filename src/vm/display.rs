@@ -11,7 +11,7 @@ use std::fmt::Write as _;
 
 pub fn fmt_float(f: f64) -> String {
     if f.is_nan() {
-        return "NaN".into();
+        return "nan".into();
     }
     if f.is_infinite() {
         return if f > 0.0 { "inf".into() } else { "-inf".into() };

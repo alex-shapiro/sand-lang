@@ -37,7 +37,7 @@ fn main() {
     let stages: [(&str, Stage); 5] = [
         ("lex", Box::new(|src| assert!(lexer::lex(src, 0).errors.is_empty()))),
         ("parse", Box::new(|src| assert!(parse_module(src, 0).errors.is_empty()))),
-        ("check", Box::new(move |src| engine().check_source("main.sand", src).map(|_| ()).unwrap())),
+        ("check", Box::new(move |src| engine().check_source("main.sand", src).unwrap())),
         ("format", Box::new(|src| assert_eq!(sandlang::fmt::format_source(src).unwrap(), src))),
         ("lint", Box::new(move |src| drop(engine().lint_source("main.sand", src).unwrap()))),
     ];

@@ -10,13 +10,14 @@ mod resources;
 mod traits;
 mod unify;
 
-use crate::diag::{Diag, FileId, SourceMap, Span};
+use crate::diag::{Diag, FileId, SourceFile, Span};
 use crate::hir::*;
 use crate::syntax::ast::{self, ItemKind, TypeExpr, TypeExprKind};
 use crate::types::*;
 use crate::vm::value::{FxBuild, FxHashMap};
 use budget::{CompileBudget, MAX_TYPE_SIZE};
 use persist::{PMap, PVec};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -34,6 +35,7 @@ pub enum ModKind {
 pub struct ParsedModule {
     pub name: String,
     pub file: FileId,
+    pub source: Arc<SourceFile>,
     pub ast: ast::Module,
     /// The module's comments (for the linter: only the main module's).
     pub comments: Vec<crate::syntax::lexer::Comment>,
@@ -355,7 +357,8 @@ impl CheckedProgram {
     }
 }
 
-pub type NativeLookup<'a> = &'a (dyn Fn(&str) -> Option<u32> + Sync);
+/// Native ids by qualified name (`foo.bar`, `str.len`, ...).
+pub type NativeIds = HashMap<Cow<'static, str>, u32>;
 
 #[derive(Clone)]
 pub(crate) struct LocalData {
@@ -483,9 +486,11 @@ pub(crate) struct FnState {
 /// the standard library's checker is copied by every compilation that
 /// extends it, and a REPL session checks each input on a copy.
 #[derive(Clone)]
-pub struct Checker<'a> {
-    pub sm: &'a SourceMap,
-    pub natives: NativeLookup<'a>,
+pub struct Checker {
+    /// The sources of the files checked, for diagnostics and `help`.
+    sources: PMap<FileId, Arc<SourceFile>>,
+    /// The natives that the modules being checked can declare.
+    natives: Arc<NativeIds>,
     pub arena: TypeArena,
     pub syms: Symbols,
     pub mods: PVec<ModInfo>,
@@ -533,7 +538,7 @@ pub struct Checker<'a> {
     pub(crate) impls_by_ctor: PMap<(Ctor, u32), Arc<[ImplId]>>,
     /// Records variable bindings made by `unify` so they can be undone.
     pub(crate) unify_log: Option<Vec<VarId>>,
-    /// Bounds the work of checking (see `budget`).
+    /// Bounds the work of the check in progress (see `budget`).
     pub budget: Arc<CompileBudget>,
     /// The module of a REPL session, whose inputs are checked one at a time
     /// ([`Checker::check_cell`]).
@@ -560,11 +565,11 @@ pub struct Checker<'a> {
 
 const MAX_ERRORS: usize = 50;
 
-impl<'a> Checker<'a> {
-    pub fn new(sm: &'a SourceMap, natives: NativeLookup<'a>) -> Checker<'a> {
+impl Default for Checker {
+    fn default() -> Checker {
         Checker {
-            sm,
-            natives,
+            sources: PMap::new(),
+            natives: Arc::default(),
             arena: TypeArena::new(),
             syms: Symbols::new(),
             mods: PVec::new(),
@@ -612,7 +617,9 @@ impl<'a> Checker<'a> {
             fuse_fns: None,
         }
     }
+}
 
+impl Checker {
     // ------------------------------------------------------------------
     // Types and names
 
@@ -785,7 +792,7 @@ impl<'a> Checker<'a> {
     /// session) or "defined in module geo"; `exact` adds the position.
     fn def_origin(&self, d: TypeDefId, exact: bool) -> String {
         let def = &self.types[d as usize];
-        let file = self.sm.files.get(def.span.file as usize);
+        let file = self.sources.get(&def.span.file);
         let name = file.map_or("", |f| f.name.as_str());
         let place = match name.strip_prefix("<input ").and_then(|f| f.strip_suffix('>')) {
             Some(n) => format!("input {n}"),
@@ -902,6 +909,7 @@ impl<'a> Checker<'a> {
         let base = self.mods.len();
         for (i, m) in modules.iter().enumerate() {
             let i = base + i;
+            self.sources.insert(m.file, m.source.clone());
             let name = self.sym(&m.name);
             self.mods.push(ModInfo {
                 name,
@@ -971,9 +979,8 @@ impl<'a> Checker<'a> {
     //
     // A session is one script module whose items arrive one input ("cell") at
     // a time: `check_cell` checks each input as more items of that module,
-    // after the modules it imports for the first time. Between inputs the
-    // checker is stored detached from its source map (`detach`, `attach`);
-    // each input is checked on a copy, so a rejected input leaves no trace.
+    // after the modules it imports for the first time. Each input is checked
+    // on a copy, so a rejected input leaves no trace.
 
     /// Starts a session: checks `modules` (on a checker that has checked the
     /// standard library, an empty module, `session`, which will receive the
@@ -981,14 +988,21 @@ impl<'a> Checker<'a> {
     pub(crate) fn begin_session(&mut self, modules: &[ParsedModule], session: ModId) -> Result<(), Vec<Diag>> {
         self.session = Some(session);
         self.lint_facts = false;
-        self.check_modules(modules)
+        self.check_modules(modules, &Default::default(), &Default::default())
     }
 
     /// Checks `modules` (in dependency order, numbered from
     /// `self.mods.len()`) after the modules checked so far, keeping the
     /// checker's state: the standard library is checked once and extended
     /// by each program.
-    pub(crate) fn check_modules(&mut self, modules: &[ParsedModule]) -> Result<(), Vec<Diag>> {
+    pub(crate) fn check_modules(
+        &mut self,
+        modules: &[ParsedModule],
+        natives: &Arc<NativeIds>,
+        budget: &Arc<CompileBudget>,
+    ) -> Result<(), Vec<Diag>> {
+        self.natives = natives.clone();
+        self.budget = budget.clone();
         self.add_modules(modules);
         let errors = self.errors();
         if errors.is_empty() { Ok(()) } else { Err(errors) }
@@ -1000,10 +1014,20 @@ impl<'a> Checker<'a> {
     /// they shadow those of earlier inputs. With `want_value`, a final
     /// expression statement is the value of the input; its type is then left
     /// in [`Checker::cell_value`].
-    pub(crate) fn check_cell(&mut self, modules: &[ParsedModule], cell: &ParsedModule, want_value: bool) -> Result<(), Vec<Diag>> {
+    pub(crate) fn check_cell(
+        &mut self,
+        modules: &[ParsedModule],
+        cell: &ParsedModule,
+        want_value: bool,
+        natives: &Arc<NativeIds>,
+        budget: &Arc<CompileBudget>,
+    ) -> Result<(), Vec<Diag>> {
         let session = self.session.expect("not a session");
+        self.natives = natives.clone();
+        self.budget = budget.clone();
         self.diags.clear();
         self.add_modules(modules);
+        self.sources.insert(cell.file, cell.source.clone());
         self.cur_mod = session;
         let m = &mut self.mods[session as usize];
         m.file = cell.file;
@@ -1035,128 +1059,6 @@ impl<'a> Checker<'a> {
             self.fns[f as usize].decl = None;
         }
         self.bodies = Bodies { first: self.fns.len(), items: Vec::new() };
-    }
-
-    /// The checker without its borrows, to be kept between the inputs of a
-    /// session and resumed with [`Checker::attach`].
-    pub(crate) fn detach(self) -> Checker<'static> {
-        static NO_SOURCES: SourceMap = SourceMap { files: Vec::new() };
-        fn no_natives(_: &str) -> Option<u32> {
-            None
-        }
-        let Checker {
-            sm: _,
-            natives: _,
-            arena,
-            syms,
-            mods,
-            types,
-            aliases,
-            params,
-            fns,
-            bodies,
-            globals,
-            methods,
-            ctor_docs,
-            module_index,
-            variants,
-            subst,
-            derived,
-            diags,
-            wk,
-            prelude,
-            task_mod,
-            cur_mod,
-            fs,
-            lint,
-            tests,
-            main_module,
-            fs_unused,
-            global_facts,
-            lint_facts,
-            lint_func,
-            fn_names,
-            traits,
-            impls,
-            impls_by,
-            impls_by_ctor,
-            unify_log,
-            session,
-            want_cell_value,
-            cell_value,
-            type_query: _,
-            budget: _,
-            num_trait,
-            iter_trait,
-            close_trait,
-            flows,
-            iter_struct,
-            fuse_fns,
-        } = self;
-        Checker {
-            sm: &NO_SOURCES,
-            natives: &no_natives,
-            arena,
-            syms,
-            mods,
-            types,
-            aliases,
-            params,
-            fns,
-            bodies,
-            globals,
-            methods,
-            ctor_docs,
-            module_index,
-            variants,
-            subst,
-            derived,
-            diags,
-            wk,
-            prelude,
-            task_mod,
-            cur_mod,
-            fs,
-            lint,
-            tests,
-            main_module,
-            fs_unused,
-            global_facts,
-            lint_facts,
-            lint_func,
-            fn_names,
-            traits,
-            impls,
-            impls_by,
-            impls_by_ctor,
-            unify_log,
-            session,
-            want_cell_value,
-            cell_value,
-            type_query: None,
-            // Each input gets its own budget (see `attach`).
-            budget: Arc::new(CompileBudget::default()),
-            num_trait,
-            iter_trait,
-            close_trait,
-            flows,
-            iter_struct,
-            fuse_fns,
-        }
-    }
-
-    /// Resumes a detached checker with the session's sources and natives.
-    pub(crate) fn attach(
-        detached: Checker<'static>,
-        sm: &'a SourceMap,
-        natives: NativeLookup<'a>,
-        budget: Arc<CompileBudget>,
-    ) -> Checker<'a> {
-        let mut c: Checker<'a> = detached;
-        c.sm = sm;
-        c.natives = natives;
-        c.budget = budget;
-        c
     }
 
     fn find_well_known(&mut self) {
@@ -1864,11 +1766,8 @@ impl<'a> Checker<'a> {
             f.where_clause.iter().filter(|w| !rules.skip_where.iter().any(|(n, _)| self.syms.str(*n) == w.name.name)).collect::<Vec<_>>();
         self.apply_where(preds, &scope, self_ty);
         let mut params = Vec::new();
-        let mut seen = HashSet::new();
+        self.check_param_names(f.params.iter().map(|p| &p.name));
         for (i, p) in f.params.iter().enumerate() {
-            if !seen.insert(p.name.name.as_str()) {
-                self.error(p.name.span, format!("parameter `{}` is declared twice", p.name.name));
-            }
             let ty = match &p.ty {
                 Some(t) => self.resolve_type_in(t, &scope, self_ty),
                 None => match self_ty {
@@ -1902,8 +1801,8 @@ impl<'a> Checker<'a> {
                 (None, ModKind::Prelude) => f.name.name.clone(),
                 (None, _) => format!("{module_name}.{}", f.name.name),
             };
-            match (self.natives)(&qual_name) {
-                Some(n) => FnKind::Native(n),
+            match self.natives.get(qual_name.as_str()) {
+                Some(&n) => FnKind::Native(n),
                 None => {
                     self.error(f.name.span, format!("no native implementation registered for `{qual_name}`"));
                     FnKind::Native(u32::MAX)
@@ -2335,6 +2234,16 @@ impl<'a> Checker<'a> {
 
     // ------------------------------------------------------------------
     // Locals and scopes
+
+    /// Reports parameters with the same name (other than `_`).
+    pub(crate) fn check_param_names<'p>(&mut self, names: impl Iterator<Item = &'p ast::Ident>) {
+        let mut seen = HashSet::new();
+        for id in names {
+            if id.name != "_" && !seen.insert(id.name.as_str()) {
+                self.error(id.span, format!("parameter `{}` is declared twice", id.name));
+            }
+        }
+    }
 
     pub(crate) fn declare_local(&mut self, name: &str, ty: TypeId, mutable: bool, span: Span, is_param: bool) -> LocalId {
         let name = self.sym(name);

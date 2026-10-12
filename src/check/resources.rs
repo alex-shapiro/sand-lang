@@ -87,15 +87,15 @@ struct Flow<'b> {
 }
 
 /// What the pass needs of the checker, borrowed while bodies are walked.
-struct Ctx<'c, 'a> {
-    ck: &'c mut Checker<'a>,
+struct Ctx<'c> {
+    ck: &'c mut Checker,
     close: TraitId,
     natives: HashMap<u32, FnId>,
     resource: HashMap<TypeId, bool>,
     plain: HashMap<TypeId, bool>,
 }
 
-impl Ctx<'_, '_> {
+impl Ctx<'_> {
     /// Whether values of type `t` are resources.
     fn is_resource(&mut self, t: TypeId) -> bool {
         let t = self.ck.resolve(t);
@@ -313,7 +313,7 @@ impl<'b> Flow<'b> {
     }
 }
 
-impl<'c, 'a> Ctx<'c, 'a> {
+impl Ctx<'_> {
     /// Walks `e`: what its value may carry, recording sinks.
     fn carry(&mut self, f: &mut Flow<'_>, e: &HExpr) -> Set {
         let set = self.carry_any(f, e);
@@ -655,7 +655,7 @@ impl<'c, 'a> Ctx<'c, 'a> {
     }
 }
 
-impl<'a> Checker<'a> {
+impl Checker {
     /// Analyses the resource flows of the functions of the module being
     /// checked (those from `first_fn` on), recording what their parameters
     /// may do, and, for the main module when linting, the resource lints.
@@ -723,7 +723,7 @@ fn tail(e: &HExpr) -> &HExpr {
 
 /// Analyses the body of function `id` until what its locals carry is
 /// settled.
-fn analyse<'b>(ctx: &mut Ctx<'_, '_>, id: FnId, body: &'b HFn) -> Flow<'b> {
+fn analyse<'b>(ctx: &mut Ctx<'_>, id: FnId, body: &'b HFn) -> Flow<'b> {
     let fi = ctx.ck.fns[id as usize].clone();
     let first_param = fi.dicts.len();
     let mut f = Flow::new(body, first_param);
@@ -748,7 +748,7 @@ fn analyse<'b>(ctx: &mut Ctx<'_, '_>, id: FnId, body: &'b HFn) -> Flow<'b> {
     f
 }
 
-impl Ctx<'_, '_> {
+impl Ctx<'_> {
     /// The `unclosed-resource` and `resource-escapes` warnings of a function.
     fn lint_flow(&mut self, f: &Flow<'_>) {
         let mut handed_on: Set = 0;

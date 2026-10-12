@@ -74,7 +74,7 @@ pub fn highlight(source: &str) -> Vec<(usize, usize, Highlight)> {
                 add(hi - 1, hi, Highlight::Interpolation);
                 continue;
             }
-            Tok::Int(_) | Tok::IntOverflow(_) | Tok::Float(_) | Tok::Duration(_) => Highlight::Number,
+            Tok::Int(_) | Tok::IntOverflow(_) | Tok::Float(_) | Tok::Inf | Tok::Nan | Tok::Duration(_) => Highlight::Number,
             Tok::True | Tok::False | Tok::SelfLower | Tok::SelfUpper => Highlight::Constant,
             Tok::Ident => {
                 if source[lo..hi].starts_with(|c: char| c.is_ascii_uppercase()) {

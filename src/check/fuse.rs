@@ -153,7 +153,7 @@ fn arity(kind: Adapter) -> usize {
     }
 }
 
-impl Checker<'_> {
+impl Checker {
     fn fuse_role(&mut self, f: FnId) -> Option<Role> {
         if self.fuse_fns.is_none() {
             let found = self.find_fuse_fns();

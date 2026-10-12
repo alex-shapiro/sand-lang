@@ -103,15 +103,15 @@ impl SourceFile {
 /// All source files known to a compilation.
 #[derive(Clone, Debug, Default)]
 pub struct SourceMap {
-    pub files: Vec<SourceFile>,
+    pub files: Vec<Arc<SourceFile>>,
 }
 
 impl SourceMap {
     pub fn add(&mut self, name: impl Into<String>, text: impl Into<Arc<str>>) -> FileId {
-        self.files.push(SourceFile::new(name, text));
+        self.files.push(Arc::new(SourceFile::new(name, text)));
         (self.files.len() - 1) as FileId
     }
-    pub fn file(&self, id: FileId) -> &SourceFile {
+    pub fn file(&self, id: FileId) -> &Arc<SourceFile> {
         &self.files[id as usize]
     }
     pub fn text(&self, id: FileId) -> &str {

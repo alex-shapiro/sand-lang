@@ -34,10 +34,43 @@ enum SPat {
     Or(Vec<SPat>),
 }
 
-impl Checker<'_> {
+/// The names bound so far by the pattern being checked.
+#[derive(Default)]
+struct Binds {
+    /// Each name's position in `order`.
+    pos: HashMap<Symbol, usize>,
+    order: Vec<Symbol>,
+    /// Names before this position are bound outside the or-pattern
+    /// alternative being checked. In an alternative after the first, binding
+    /// one again is not reported as a duplicate, since it is reported either
+    /// in the first alternative or as a name the first does not bind.
+    floor: usize,
+    /// In an or-pattern alternative after the first, the locals that the
+    /// first alternative binds.
+    first_alt: Option<HashMap<Symbol, LocalId>>,
+}
+
+impl Binds {
+    /// Records `name`. Returns false if it is already bound (see `floor`).
+    fn add(&mut self, name: Symbol) -> bool {
+        if let Some(&i) = self.pos.get(&name) {
+            return i < self.floor;
+        }
+        self.pos.insert(name, self.order.len());
+        self.order.push(name);
+        true
+    }
+
+    fn truncate(&mut self, len: usize) {
+        for name in self.order.drain(len..) {
+            self.pos.remove(&name);
+        }
+    }
+}
+
+impl Checker {
     pub(crate) fn check_pattern(&mut self, p: &Pattern, ty: TypeId, mutable: bool) -> HPat {
-        let mut or_map = None;
-        self.check_pat_inner(p, ty, mutable, &mut or_map)
+        self.check_pat_inner(p, ty, mutable, &mut Binds::default())
     }
 
     /// Checks that a pattern of type `pat_ty` can match values of type
@@ -51,9 +84,13 @@ impl Checker<'_> {
         HPat { kind, ty, span }
     }
 
-    fn bind_name(&mut self, id: &ast::Ident, ty: TypeId, mutable: bool, or_map: &mut Option<HashMap<Symbol, LocalId>>) -> HPat {
-        if let Some(map) = or_map {
-            match self.syms.get(&id.name).and_then(|s| map.get(&s)) {
+    fn bind_name(&mut self, id: &ast::Ident, ty: TypeId, mutable: bool, binds: &mut Binds) -> HPat {
+        let name = self.sym(&id.name);
+        if !binds.add(name) {
+            self.error(id.span, format!("`{}` is bound more than once in the pattern", id.name));
+        }
+        if let Some(map) = &binds.first_alt {
+            match map.get(&name) {
                 Some(&l) => {
                     let lt = self.fs.data[l as usize].ty;
                     self.expect_type(lt, ty, id.span);
@@ -68,7 +105,7 @@ impl Checker<'_> {
                 }
             }
         }
-        let l = self.declare_local(&id.name, ty, mutable, id.span, false);
+        let l = self.declare_local_sym(name, ty, mutable, id.span, false);
         self.pat(HPatKind::Bind(l), ty, id.span)
     }
 
@@ -164,7 +201,7 @@ impl Checker<'_> {
         }
     }
 
-    fn check_pat_inner(&mut self, p: &Pattern, ty: TypeId, mutable: bool, or_map: &mut Option<HashMap<Symbol, LocalId>>) -> HPat {
+    fn check_pat_inner(&mut self, p: &Pattern, ty: TypeId, mutable: bool, binds: &mut Binds) -> HPat {
         let span = p.span;
         match &p.kind {
             PatternKind::Wildcard => self.pat(HPatKind::Wildcard, ty, span),
@@ -188,7 +225,7 @@ impl Checker<'_> {
                         return self.pat(HPatKind::Variant { rt_id, args: vec![] }, ty, span);
                     }
                 }
-                self.bind_name(id, ty, mutable, or_map)
+                self.bind_name(id, ty, mutable, binds)
             }
             PatternKind::Literal(lit) => {
                 let (kind, lt) = match lit {
@@ -224,14 +261,14 @@ impl Checker<'_> {
                         vec![TypeId::ERROR; ps.len()]
                     }
                 };
-                let hs = ps.iter().zip(tys).map(|(p, t)| self.check_pat_inner(p, t, mutable, or_map)).collect();
+                let hs = ps.iter().zip(tys).map(|(p, t)| self.check_pat_inner(p, t, mutable, binds)).collect();
                 self.pat(HPatKind::Tuple(hs), ty, span)
             }
             PatternKind::Variant { path, args } => {
                 let Some((d, i, targs)) = self.pattern_variant(path, ty) else {
                     if let Some(args) = args {
                         for a in args {
-                            self.check_pat_inner(a, TypeId::ERROR, mutable, or_map);
+                            self.check_pat_inner(a, TypeId::ERROR, mutable, binds);
                         }
                     }
                     return self.pat(HPatKind::Wildcard, ty, span);
@@ -250,7 +287,7 @@ impl Checker<'_> {
                     self.error(span, msg);
                     return self.pat(HPatKind::Wildcard, ty, span);
                 }
-                let hs = args.iter().zip(ftys).map(|(p, t)| self.check_pat_inner(p, t, mutable, or_map)).collect();
+                let hs = args.iter().zip(ftys).map(|(p, t)| self.check_pat_inner(p, t, mutable, binds)).collect();
                 self.pat(HPatKind::Variant { rt_id, args: hs }, ty, span)
             }
             PatternKind::Struct { path, fields, rest } => {
@@ -279,8 +316,8 @@ impl Checker<'_> {
                     seen[idx] = true;
                     let fty = self.field_type(d, idx, &targs);
                     let h = match &f.pattern {
-                        Some(p) => self.check_pat_inner(p, fty, mutable, or_map),
-                        None => self.bind_name(&f.name, fty, mutable, or_map),
+                        Some(p) => self.check_pat_inner(p, fty, mutable, binds),
+                        None => self.bind_name(&f.name, fty, mutable, binds),
                     };
                     hs.push((idx as u32, h));
                 }
@@ -310,11 +347,11 @@ impl Checker<'_> {
                         TypeId::ERROR
                     }
                 };
-                let b = before.iter().map(|p| self.check_pat_inner(p, elem, mutable, or_map)).collect();
+                let b = before.iter().map(|p| self.check_pat_inner(p, elem, mutable, binds)).collect();
                 let r = match rest {
                     Some(Some(id)) => {
                         let lt = self.list_ty(elem);
-                        match self.bind_name(id, lt, mutable, or_map).kind {
+                        match self.bind_name(id, lt, mutable, binds).kind {
                             HPatKind::Bind(l) => Some(Some(l)),
                             _ => Some(None),
                         }
@@ -322,16 +359,20 @@ impl Checker<'_> {
                     Some(None) => Some(None),
                     None => None,
                 };
-                let a = after.iter().map(|p| self.check_pat_inner(p, elem, mutable, or_map)).collect();
+                let a = after.iter().map(|p| self.check_pat_inner(p, elem, mutable, binds)).collect();
                 self.pat(HPatKind::List { before: b, rest: r, after: a }, ty, span)
             }
             PatternKind::Or(alts) => {
-                let first = self.check_pat_inner(&alts[0], ty, mutable, or_map);
+                let outer = binds.order.len();
+                let first = self.check_pat_inner(&alts[0], ty, mutable, binds);
+                let first_names = binds.order[outer..].to_vec();
                 let names: HashMap<Symbol, LocalId> = self.pattern_bindings(&first).into_iter().collect();
+                let saved = (std::mem::replace(&mut binds.floor, outer), binds.first_alt.take());
                 let mut hs = vec![first];
                 for alt in &alts[1..] {
-                    let mut sub = Some(names.clone());
-                    let h = self.check_pat_inner(alt, ty, mutable, &mut sub);
+                    binds.truncate(outer);
+                    binds.first_alt = Some(names.clone());
+                    let h = self.check_pat_inner(alt, ty, mutable, binds);
                     let bound: HashSet<Symbol> = self.pattern_bindings(&h).into_iter().map(|(n, _)| n).collect();
                     let mut missing: Vec<&Symbol> = names.keys().filter(|n| !bound.contains(n)).collect();
                     missing.sort_by_key(|n| names[n]);
@@ -340,6 +381,11 @@ impl Checker<'_> {
                         self.error(alt.span, msg);
                     }
                     hs.push(h);
+                }
+                binds.truncate(outer);
+                (binds.floor, binds.first_alt) = saved;
+                for n in first_names {
+                    binds.add(n);
                 }
                 self.pat(HPatKind::Or(hs), ty, span)
             }

@@ -3,14 +3,10 @@ import math
 print(math.pi)
 print(math.e)
 print(math.tau)
-print(math.inf)
-print(math.nan.is_nan())
 --- stdout
 3.141592653589793
 2.718281828459045
 6.283185307179586
-inf
-true
 
 === functions
 import math

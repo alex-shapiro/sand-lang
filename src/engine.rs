@@ -1,7 +1,7 @@
 //! The embedding API: `Engine`, `Config`, errors and module loading.
 
 use crate::check::budget::CompileBudget;
-use crate::check::{Checker, ModKind};
+use crate::check::{ModKind, NativeIds};
 use crate::compile::{CompileInput, compile_more};
 use crate::diag::{Diag, Diagnostic, FileId, Span};
 use crate::files::{Fs, MemFs};
@@ -407,7 +407,7 @@ impl TestReport {
 pub(crate) struct Registry {
     /// Natives by id.
     pub natives: Arc<Vec<NativeEntry>>,
-    by_name: HashMap<Cow<'static, str>, u32>,
+    pub by_name: Arc<NativeIds>,
     /// Module name -> kind and Sand source.
     pub sources: BTreeMap<Cow<'static, str>, (ModKind, Cow<'static, str>)>,
     /// The standard library's registry, whose snapshot this one's extends.
@@ -431,7 +431,7 @@ const MAX_PARTIAL_SNAPSHOTS: usize = 16;
 static STD: LazyLock<Arc<Registry>> = LazyLock::new(|| {
     let mut r = Registry {
         natives: Arc::default(),
-        by_name: HashMap::new(),
+        by_name: Arc::default(),
         sources: BTreeMap::new(),
         base: None,
         snapshot: OnceLock::new(),
@@ -467,16 +467,11 @@ impl Registry {
         Arc::new(r)
     }
 
-    /// The id of the native `name`.
-    pub fn native(&self, name: &str) -> Option<u32> {
-        self.by_name.get(name).copied()
-    }
-
     pub fn add(&mut self, name: impl Into<Cow<'static, str>>, imp: crate::vm::NativeImpl) {
         let name = name.into();
         let id = self.natives.len() as u32;
         Arc::make_mut(&mut self.natives).push(NativeEntry { name: name.clone(), imp });
-        self.by_name.insert(name, id);
+        Arc::make_mut(&mut self.by_name).insert(name, id);
     }
 
     pub fn add_builtin(&mut self, name: impl Into<Cow<'static, str>>, f: crate::vm::NativeFn) {
@@ -694,18 +689,18 @@ impl Engine {
 
     /// Type checks a source without running it. Imports the policy would
     /// prompt for are denied.
-    pub fn check_source(&mut self, name: &str, source: &str) -> Result<Vec<Diagnostic>, Error> {
+    pub fn check_source(&self, name: &str, source: &str) -> Result<(), Error> {
         let c = self.compile_now(name, source, &self.source_root().1, None, false)?;
         self.recycle(c.program, c.snapshot);
-        Ok(Vec::new())
+        Ok(())
     }
 
     /// Type checks a file and its imports, like [`Engine::check_source`].
-    pub fn check_file(&mut self, path: impl AsRef<Path>) -> Result<Vec<Diagnostic>, Error> {
+    pub fn check_file(&self, path: impl AsRef<Path>) -> Result<(), Error> {
         let (name, source, root) = self.read_main(path.as_ref())?;
         let c = self.compile_now(&name, &source, &root, Some(path.as_ref()), false)?;
         self.recycle(c.program, c.snapshot);
-        Ok(Vec::new())
+        Ok(())
     }
 
     /// Keeps `prog` (if `snapshot` is given and nothing else holds it),
@@ -1252,13 +1247,12 @@ fn compile_program(
     lint: bool,
     spare: Option<Program>,
 ) -> Result<(Arc<Program>, Option<Vec<crate::lint::LintWarning>>), Error> {
-    let lookup = |name: &str| registry.native(name);
     let order = g.order.clone();
     let modules =
         g.parse(&order, snap.checker.mods.len() as ModId).map_err(|ds| Error::Compile(ds.iter().map(|d| g.sm.resolve(d)).collect()))?;
-    let mut checker = Checker::attach(snap.checker.clone(), &g.sm, &lookup, budget.clone());
+    let mut checker = snap.checker.clone();
     checker.lint_facts = lint;
-    let checked = checker.check_modules(&modules);
+    let checked = checker.check_modules(&modules, &registry.by_name, budget);
     let sm = &g.sm;
     if let Some(stop) = budget.stopped() {
         // Diagnostics after the budget ran out are not meaningful.
@@ -1276,12 +1270,12 @@ fn compile_program(
     let host = g.has_natives(&order);
     let cp = checker.take_checked();
     let lints = match modules.iter().find(|m| m.file == main_file).filter(|_| lint) {
-        Some(main) => Some(crate::lint::lint_module(main, sm.file(main_file), &cp, budget)?),
+        Some(main) => Some(crate::lint::lint_module(main, &main.source, &cp, budget)?),
         None => None,
     };
     let (native_names, native_argc) = if host { native_info(&cp, registry) } else { (Vec::new(), Vec::new()) };
     let mut program = spare.unwrap_or_else(|| snap.program.clone());
-    let input = CompileInput { checked: &cp, sm, native_lookup: &lookup, native_names, native_argc, budget };
+    let input = CompileInput { checked: &cp, sm, natives: &registry.by_name, native_names, native_argc, budget };
     let entry = compile_more(input, &mut program, &mut snap.compiler.clone(), &inits);
     if let Some(stop) = budget.stopped() {
         return Err(budget_error(stop, sm, main_file));
