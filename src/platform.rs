@@ -143,3 +143,221 @@ pub(crate) fn with_stack<R: Send>(size: usize, f: impl FnOnce() -> R + Send) -> 
         Ok(f())
     }
 }
+
+#[cfg(feature = "os")]
+pub(crate) use offload::offload;
+
+/// Blocking system calls run on worker threads, so that the engine can stop
+/// waiting for a call that does not return, for example a read from an
+/// unresponsive network file system or a write to a full pipe. The engine
+/// can then enforce its limits and interrupts while the call is pending.
+#[cfg(feature = "os")]
+mod offload {
+    use std::collections::VecDeque;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
+    use std::task::{Context, Poll, Waker};
+    use std::time::{Duration, Instant};
+
+    /// How often a waiting thread checks whether to stop waiting.
+    const POLL: Duration = Duration::from_millis(5);
+    /// Idle workers exit after this long.
+    const IDLE: Duration = Duration::from_secs(20);
+    /// How long a worker looks for its next job, and a waiting thread for
+    /// its result, before going to sleep. Most jobs take a few
+    /// microseconds, less than it takes to put a thread to sleep and wake it.
+    const SPIN: Duration = Duration::from_micros(50);
+
+    /// Spins until `ready` returns true or [`SPIN`] has passed. Returns the
+    /// last result of `ready`.
+    fn spin(ready: impl Fn() -> bool) -> bool {
+        let start = Instant::now();
+        loop {
+            for _ in 0..64 {
+                if ready() {
+                    return true;
+                }
+                std::hint::spin_loop();
+            }
+            if start.elapsed() >= SPIN {
+                return ready();
+            }
+        }
+    }
+
+    type Job = Box<dyn FnOnce() + Send>;
+
+    #[derive(Default)]
+    struct Pool {
+        state: Mutex<Queue>,
+        work: Condvar,
+        /// The length of `state.jobs`, which spinning workers read without the lock.
+        queued: AtomicUsize,
+        /// The number of workers spinning for a job. They need no wakeup.
+        spinning: AtomicUsize,
+    }
+
+    #[derive(Default)]
+    struct Queue {
+        jobs: VecDeque<Job>,
+        idle: usize,
+    }
+
+    fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+        m.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn pool() -> &'static Pool {
+        static POOL: OnceLock<Pool> = OnceLock::new();
+        POOL.get_or_init(Pool::default)
+    }
+
+    impl Pool {
+        /// Runs `job` on an idle worker. If no worker is idle, starts a new
+        /// one, so that a job that never returns does not delay later jobs.
+        fn submit(&'static self, job: Job) {
+            let mut q = lock(&self.state);
+            q.jobs.push_back(job);
+            self.queued.store(q.jobs.len(), Ordering::SeqCst);
+            if q.jobs.len() <= self.spinning.load(Ordering::SeqCst) {
+                return;
+            }
+            if q.jobs.len() <= q.idle + self.spinning.load(Ordering::SeqCst) {
+                self.work.notify_one();
+                return;
+            }
+            drop(q);
+            let spawned = std::thread::Builder::new().name("sand-io".into()).spawn(move || self.work_loop());
+            if spawned.is_err() {
+                // No thread could be started, so run the job on this thread.
+                let mut q = lock(&self.state);
+                let job = q.jobs.pop_back();
+                self.queued.store(q.jobs.len(), Ordering::SeqCst);
+                drop(q);
+                if let Some(job) = job {
+                    job();
+                }
+            }
+        }
+
+        fn work_loop(&self) {
+            let mut q = lock(&self.state);
+            loop {
+                if let Some(job) = q.jobs.pop_front() {
+                    self.queued.store(q.jobs.len(), Ordering::SeqCst);
+                    drop(q);
+                    job();
+                    self.spinning.fetch_add(1, Ordering::SeqCst);
+                    spin(|| self.queued.load(Ordering::SeqCst) > 0);
+                    q = lock(&self.state);
+                    self.spinning.fetch_sub(1, Ordering::SeqCst);
+                    continue;
+                }
+                q.idle += 1;
+                let (guard, waited) = self.work.wait_timeout(q, IDLE).unwrap_or_else(|e| e.into_inner());
+                q = guard;
+                q.idle -= 1;
+                if waited.timed_out() && q.jobs.is_empty() {
+                    return;
+                }
+            }
+        }
+    }
+
+    struct Slot<T> {
+        state: Mutex<(Option<std::thread::Result<T>>, Option<Waker>)>,
+        done: Condvar,
+        ready: AtomicBool,
+    }
+
+    /// The result of a job running on a worker thread.
+    pub(crate) struct Pending<T>(Arc<Slot<T>>);
+
+    /// Runs `job` on a worker thread. If the job panics, the panic is caught
+    /// and the result is `Err`.
+    pub(crate) fn offload<T: Send + 'static>(job: impl FnOnce() -> T + Send + 'static) -> Pending<T> {
+        let slot = Arc::new(Slot { state: Mutex::new((None, None)), done: Condvar::new(), ready: AtomicBool::new(false) });
+        let theirs = slot.clone();
+        pool().submit(Box::new(move || {
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+            let mut s = lock(&theirs.state);
+            s.0 = Some(r);
+            theirs.ready.store(true, Ordering::Release);
+            let waker = s.1.take();
+            drop(s);
+            theirs.done.notify_one();
+            if let Some(w) = waker {
+                w.wake();
+            }
+        }));
+        Pending(slot)
+    }
+
+    impl<T> Pending<T> {
+        /// Waits for the result, calling `check` every few milliseconds while
+        /// it waits. If `check` returns an error, the wait ends with that
+        /// error. The job keeps running on the worker, and its result is
+        /// dropped. If the job panicked, the result is `Ok(Err(message))`.
+        pub(crate) fn wait<E>(self, mut check: impl FnMut() -> Result<(), E>) -> Result<Result<T, String>, E> {
+            spin(|| self.0.ready.load(Ordering::Acquire));
+            let mut s = lock(&self.0.state);
+            loop {
+                if let Some(r) = s.0.take() {
+                    return Ok(r.map_err(|p| crate::unwind::panic_text(&*p)));
+                }
+                s = self.0.done.wait_timeout(s, POLL).unwrap_or_else(|e| e.into_inner()).0;
+                if s.0.is_none() {
+                    drop(s);
+                    check()?;
+                    s = lock(&self.0.state);
+                }
+            }
+        }
+    }
+
+    impl<T> Future for Pending<T> {
+        type Output = Result<T, String>;
+
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            let mut s = lock(&self.0.state);
+            match s.0.take() {
+                Some(r) => Poll::Ready(r.map_err(|p| crate::unwind::panic_text(&*p))),
+                None => {
+                    s.1 = Some(cx.waker().clone());
+                    Poll::Pending
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        #[test]
+        fn results_panics_and_abandoned_jobs() {
+            assert_eq!(offload(|| 6 * 7).wait(|| Ok::<_, ()>(())), Ok(Ok(42)));
+            let r = offload(|| -> u8 { panic!("boom") }).wait(|| Ok::<_, ()>(()));
+            assert_eq!(r, Ok(Err("boom".to_string())));
+            // Stop waiting for a job that does not return. A later job still runs.
+            let release = Arc::new(AtomicBool::new(false));
+            let stuck = release.clone();
+            let mut checks = 0;
+            let r = offload(move || {
+                while !stuck.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            })
+            .wait(|| {
+                checks += 1;
+                if checks < 3 { Ok(()) } else { Err("stop") }
+            });
+            assert_eq!(r, Err("stop"));
+            assert_eq!(offload(|| 1).wait(|| Ok::<_, ()>(())), Ok(Ok(1)));
+            release.store(true, Ordering::SeqCst);
+        }
+    }
+}

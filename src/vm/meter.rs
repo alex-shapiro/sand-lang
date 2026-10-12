@@ -271,6 +271,75 @@ impl Budget for Meter {
     }
 }
 
+impl Meter {
+    /// A new allowance for work about to run off the VM thread.
+    pub(crate) fn allowance(&self) -> Allowance {
+        Allowance {
+            interrupt: self.interrupt.clone(),
+            abandoned: Arc::new(AtomicBool::new(false)),
+            deadline: self.wall_deadline.get(),
+            left: self.max_instructions.map_or(u64::MAX, |max| max.saturating_sub(self.used())),
+            used: 0,
+            next_check: 0,
+            stopped: false,
+        }
+    }
+}
+
+/// Fuel for work done off the VM thread, such as walking a directory tree
+/// on a worker. The meter cannot see that work while it runs, so the work
+/// charges its allowance instead. A charge fails once the engine is
+/// interrupted, the wall-time deadline passes, the instructions left when
+/// the work started are spent, or the VM stops waiting for it; the work
+/// must then stop. Afterwards the VM charges the meter for what was used.
+pub(crate) struct Allowance {
+    interrupt: Arc<AtomicBool>,
+    abandoned: Arc<AtomicBool>,
+    deadline: Option<Instant>,
+    left: u64,
+    used: u64,
+    next_check: u64,
+    stopped: bool,
+}
+
+/// The error of a failed [`Allowance`] charge: the work must stop.
+#[derive(Debug)]
+pub(crate) struct Stopped;
+
+impl Allowance {
+    /// Charges `units` of fuel.
+    pub fn charge(&mut self, units: u64) -> Result<(), Stopped> {
+        self.used = self.used.saturating_add(units);
+        self.stopped |= self.used > self.left || self.interrupt.load(Ordering::Relaxed) || self.abandoned.load(Ordering::Relaxed);
+        if !self.stopped && self.used >= self.next_check {
+            self.next_check = self.used.saturating_add(CHECK_INTERVAL as u64 / 16);
+            self.stopped = self.deadline.is_some_and(|d| Instant::now() >= d);
+        }
+        if self.stopped { Err(Stopped) } else { Ok(()) }
+    }
+
+    /// Whether a charge has failed.
+    pub fn stopped(&self) -> bool {
+        self.stopped
+    }
+
+    /// Charges for `n` bytes of memcpy-like work.
+    pub fn charge_bytes(&mut self, n: usize) -> Result<(), Stopped> {
+        self.charge((n / BYTES_PER_UNIT) as u64)
+    }
+
+    pub fn used(&self) -> u64 {
+        self.used
+    }
+
+    /// The flag that makes further charges fail. The VM sets it when it
+    /// stops waiting for the work.
+    #[cfg(feature = "os")]
+    pub fn abandon_flag(&self) -> Arc<AtomicBool> {
+        self.abandoned.clone()
+    }
+}
+
 /// Tracks a growing Rust-side buffer (output string, scratch vector) against
 /// the memory limit, checking every [`SCRATCH_STEP`] bytes of growth.
 pub struct Scratch {

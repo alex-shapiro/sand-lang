@@ -101,6 +101,39 @@ fn types_that_double_in_size() {
     rejects(&src, "type too large");
 }
 
+/// A function whose trait evidence takes `chain` passes to resolve, one
+/// placeholder per pass, and that also has `stuck` placeholders that never
+/// resolve.
+fn evidence_chain(chain: usize, stuck: usize) -> String {
+    let mut src = String::from(
+        "trait Conv<T> {\n    fn conv(self) -> T\n}\nimpl Conv<str> for int {\n    fn conv(self) -> str { \"\\(self)\" }\n}\n\
+         impl Conv<int> for str {\n    fn conv(self) -> int { self.len() }\n}\ntrait Show {\n    fn show(self) -> str\n}\n\
+         fn c<T: Conv<U>, U>(x: T) -> U { x.conv() }\nfn needs<T: Show>(x: T) -> int { 0 }\nfn g<P>(p: P) -> int {\n",
+    );
+    for i in 0..chain {
+        src += &format!("    let xs{i} = []\n");
+    }
+    src += &format!("    let xs{chain} = [1]\n");
+    // The type of each `xs{i}` becomes known only after the evidence on the next line resolves.
+    for i in 0..chain {
+        src += &format!("    xs{i}.push(c(xs{}[0]))\n", i + 1);
+    }
+    src += &"    needs(p)\n".repeat(stuck);
+    src + "    xs0.len()\n}\n"
+}
+
+#[test]
+fn retried_trait_evidence_is_charged() {
+    let fuel = || limits(|l| l.max_compile_fuel = Some(3_000_000));
+    let (r, _) = check(fuel(), &evidence_chain(1000, 1));
+    match r {
+        Err(Error::Compile(ds)) => assert!(ds.iter().all(|d| d.message.contains("does not implement `Show`")), "{ds:?}"),
+        other => panic!("{other:?}"),
+    }
+    // Each pass tries the placeholders that never resolve again.
+    rejects_with(fuel(), &evidence_chain(1000, 3000), "program too complex to compile");
+}
+
 #[test]
 fn bound_checks_on_structs_sharing_field_types() {
     let mut src = String::from("struct S0 { x: int }\n");

@@ -300,8 +300,11 @@ impl Vm {
             },
             Err(t) => Err(t),
         };
-        self.flush_stdout();
-        r
+        let drained = self.drain_output();
+        match drained {
+            Err(c) if r.is_ok() => Err(Trap::from_ctl(c)),
+            _ => r,
+        }
     }
 
     fn start_main(&mut self, proto: u32) -> Result<u32, Trap> {
@@ -325,8 +328,7 @@ impl Vm {
     /// dropped where it waits: every task is then in the scheduler's tables.
     pub(crate) async fn drive(&mut self, main: Option<u32>) -> Result<Stop, Trap> {
         let mut clock = Clock::start();
-        // Where an instruction was retried after a memory limit error, until
-        // the task makes progress.
+        // Where an instruction was retried after a memory limit error.
         let mut gc_retried: Option<(u32, usize, u32)> = None;
         loop {
             while let Some(fid) = self.ready.pop_front() {
@@ -338,6 +340,7 @@ impl Vm {
                 self.current = fid;
                 // Deadlines let long natives check the time limits mid-call.
                 let mut fuel = self.meter.start_slice(clock.cpu_deadline(self.host.limits.max_cpu_time), self.deadline);
+                let slice = fuel;
                 // A Rust panic in the interpreter or a native (a bug) ends
                 // the run as a panic instead of unwinding into the host;
                 // caught per slice, which costs nothing per native call.
@@ -359,11 +362,16 @@ impl Vm {
                         e
                     }
                     Err(Trap::Limit(LimitKind::Memory)) if std::mem::take(&mut self.gc_retry) => {
-                        // Memory checks count uncollected garbage: collect and
-                        // run the failed instruction once more (unless that
-                        // is what just failed).
-                        let at = (fid, f.frames.len(), f.frames.last().map_or(0, |fr| fr.ip));
-                        if gc_retried == Some(at) {
+                        // Memory checks count garbage that has not been
+                        // collected yet, so collect and run the failed
+                        // instruction again. If the retry itself failed, report
+                        // the limit. A retry is told apart from a later run of
+                        // the same instruction by the fuel spent: reaching it
+                        // again takes a back edge or a call, which cost fuel.
+                        let Some(&fr) = f.frames.last() else { return Err(Trap::Limit(LimitKind::Memory)) };
+                        let at = (fid, f.frames.len(), fr.ip);
+                        let op = self.prog.protos[fr.proto as usize].code[fr.ip as usize];
+                        if gc_retried == Some(at) && slice - fuel <= super::interp::call_tick(op) {
                             return Err(Trap::Limit(LimitKind::Memory));
                         }
                         gc_retried = Some(at);
@@ -411,7 +419,8 @@ impl Vm {
                         if main.is_none() {
                             return Ok(Stop::Prompt(cap));
                         }
-                        self.flush_stdout();
+                        // Write the script's output before showing the prompt.
+                        self.drain_output().map_err(Trap::from_ctl)?;
                         clock.read();
                         let asked = Instant::now();
                         let answer = match self.host.prompter.clone() {

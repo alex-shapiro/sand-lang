@@ -31,7 +31,9 @@ bytecode  ─VM───────▶ effects    src/vm/
   rule indices: a trie of path patterns, hash tables of hosts); policy files
   (`file.rs`) and their formatter and linter; `src/files/`: the file systems
   scripts see (the host's through `unix.rs`/`windows.rs`, or a `MemFs`).
-- `src/platform.rs`: time, timers, randomness, threads, deep stacks.
+- `src/platform.rs`: time, timers, randomness, threads (including the
+  worker threads for blocking calls, `offload`), deep stacks;
+  `src/stdio.rs`: the writer for the process's standard output and error.
 - `src/session.rs`: REPL sessions; `src/fmt.rs`, `src/lint.rs`: tools.
 - `cli/`: the `sand` command; `wasm/`: the JavaScript API and playground.
 
@@ -98,8 +100,9 @@ through the meter. Work it does not see is unbounded (cost model:
 
 `max_memory` counts heap objects, fiber stacks and reserved buffers.
 
-- Reserve Rust-side buffers before allocating (`vm.reserve`); grow buffers
-  of unknown size through `meter::Scratch`.
+- Reserve Rust-side buffers and container growth before allocating
+  (`vm.reserve`, `Heap::grown_capacity`); grow buffers of unknown size
+  through `meter::Scratch`.
 - Buffers that pending I/O fills off the heap are reserved in `vm/iomem.rs`
   and released in the finisher just before the value is allocated. Never
   reserve a size a peer merely announces (`Content-Length`).
@@ -119,9 +122,12 @@ keep it in the pending operation, and move it into the object in the finisher
 ## Sandboxed I/O
 
 - Files: resolve script paths with `vm.host.fs.target` and act only through
-  the returned `Target` and `files::Fs`. Never call path-based `std::fs` or
-  `tokio::fs` on script paths. Operations on whole trees also check
-  `policy.denies_under_normalized_in`.
+  the returned `Target` and `files::Fs`, inside `vm.offload`. It runs the
+  work on a worker thread and stops waiting when the meter reports a limit
+  or an interrupt. Work that grows with its input charges the job's
+  `Allowance`. Never call path-based `std::fs` or `tokio::fs` on script
+  paths. Operations on whole trees first scan them for protected entries
+  (`fs::scan_tree`).
 - Network: connect only through `net::connect_checked` (it checks every
   resolved address against the policy), TLS through `net::tls::connect`,
   and bound every wait on a peer with a timeout.

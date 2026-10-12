@@ -95,7 +95,7 @@ fn read_stdin(vm: &mut Vm, what: Read) -> NResult {
         return Ok(vm.err_value("permission_denied", "permission denied: read standard input"));
     }
     // A prompt written before reading must be visible (on a terminal).
-    vm.flush_before_input();
+    vm.flush_before_input()?;
     if what == Read::Line
         && let Some(data) = buffered_line(vm)
     {

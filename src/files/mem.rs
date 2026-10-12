@@ -1,6 +1,6 @@
 //! An in-memory file system: [`MemFs`].
 
-use super::{EntryKind, EntryMeta, OpenMode};
+use super::{ENTRY_OVERHEAD, EntryKind, EntryMeta, OpenMode};
 use crate::vm::iomem::Reservation;
 use std::collections::BTreeMap;
 use std::io::{self, ErrorKind};
@@ -701,7 +701,7 @@ impl MemFs {
         let dir = t.root.dir(&parts)?;
         let mut names = Vec::with_capacity(dir.entries.len());
         for name in dir.entries.keys() {
-            res.grow(name.len() + 2 * std::mem::size_of::<String>())?;
+            res.grow(name.len() + ENTRY_OVERHEAD)?;
             names.push(name.clone());
         }
         Ok(names)
@@ -733,20 +733,26 @@ impl MemFs {
     /// Removes the directory `path` and everything below it, entry by
     /// entry; `check` is asked about each entry below before it is removed
     /// (see `files::Fs::remove_tree`).
-    pub(crate) fn remove_tree<E>(
+    /// See [`super::Fs::walk_tree`].
+    pub(crate) fn walk_tree<E>(
         &self,
         path: &Path,
-        mut check: impl FnMut(&Path) -> Result<io::Result<()>, E>,
+        res: &mut Reservation,
+        remove: bool,
+        mut visit: impl FnMut(&Path) -> Result<io::Result<()>, E>,
     ) -> Result<io::Result<()>, E> {
-        let names = |p: &Path| -> io::Result<Vec<String>> {
+        let names = |p: &Path, res: &mut Reservation| -> io::Result<Vec<String>> {
             let parts = parts(p)?;
             let t = self.lock();
             match t.root.get(&parts)? {
-                Node::Dir(d) => Ok(d.entries.keys().cloned().collect()),
+                Node::Dir(d) => {
+                    res.grow(d.entries.keys().map(|n| n.len() + ENTRY_OVERHEAD).sum())?;
+                    Ok(d.entries.keys().cloned().collect())
+                }
                 Node::File(_) => Err(error(ErrorKind::NotADirectory, "not a directory")),
             }
         };
-        let first = match names(path) {
+        let first = match names(path, res) {
             Ok(n) => n,
             Err(e) => return Ok(Err(e)),
         };
@@ -754,17 +760,23 @@ impl MemFs {
         while let Some((dir, left)) = levels.last_mut() {
             let Some(name) = left.pop() else {
                 let (done, _) = levels.pop().expect("a level");
-                if let Err(e) = self.remove_dir(&done) {
+                if remove && let Err(e) = self.remove_dir(&done) {
                     return Ok(Err(e));
                 }
                 continue;
             };
             let child = dir.join(&name);
-            if let Err(e) = check(&child)? {
+            if let Err(e) = visit(&child)? {
                 return Ok(Err(e));
             }
             let is_dir = matches!(self.stat(&child), Ok(m) if m.kind == EntryKind::Dir);
-            let r = if is_dir { names(&child).map(|n| levels.push((child, n))) } else { self.remove_file(&child) };
+            let r = if is_dir {
+                names(&child, res).map(|n| levels.push((child, n)))
+            } else if remove {
+                self.remove_file(&child)
+            } else {
+                Ok(())
+            };
             if let Err(e) = r {
                 return Ok(Err(e));
             }

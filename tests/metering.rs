@@ -399,6 +399,30 @@ fn memory_checks_do_not_count_collectable_garbage() {
     assert!(matches!(r, Err(Error::Limit(LimitKind::Memory))), "{r:?}");
 }
 
+#[test]
+fn containers_grow_to_nearly_the_memory_limit() {
+    // 3M ints take 48 MiB. Doubling the list from 2M slots (32 MiB) to 64 MiB would not fit.
+    let src = "let xs = []\nfor i in 0..3000000 { xs.push(i) }\nprint(xs.len())";
+    let (r, out) = run(limits(|l| l.max_memory = Some(64 << 20)), src);
+    r.unwrap();
+    assert_eq!(out, "3000000\n");
+    let (r, _) = run(limits(|l| l.max_memory = Some(40 << 20)), src);
+    assert!(matches!(r, Err(Error::Limit(LimitKind::Memory))), "{r:?}");
+}
+
+#[test]
+fn rest_patterns_check_the_memory_limit() {
+    let src = "let xs = (0..1000000).to_list()\nvar n = 0\nfor round in 0..10 {\n    match xs {\n        [a, ..rest] => { n += rest.len() }\n        _ => {}\n    }\n}\nprint(n)";
+    // The limit must hold the list, the previous round's copy (until it is replaced) and the new copy.
+    let (r, out) = run(limits(|l| l.max_memory = Some(56 << 20)), src);
+    r.unwrap();
+    assert_eq!(out, "9999990\n");
+    let (r, _) = run(limits(|l| l.max_memory = Some(24 << 20)), src);
+    assert!(matches!(r, Err(Error::Limit(LimitKind::Memory))), "{r:?}");
+    let (r, _) = run(limits(|l| l.max_instructions = Some(1_000_000)), src);
+    assert!(matches!(r, Err(Error::Limit(LimitKind::Instructions))), "copying is charged: {r:?}");
+}
+
 fn mem_limit(mib: usize) -> Config {
     limits(|l| {
         l.max_memory = Some(mib << 20);

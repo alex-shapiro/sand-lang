@@ -267,6 +267,17 @@ pub enum Trap {
     Exit(i32),
 }
 
+impl Trap {
+    /// The trap for an error from the meter: a limit or an interrupt.
+    pub(crate) fn from_ctl(c: Ctl) -> Trap {
+        match c.into_kind() {
+            CtlKind::Limit(k) => Trap::Limit(k),
+            CtlKind::Interrupted => Trap::Interrupted,
+            other => Trap::Panic { message: format!("internal error: unexpected {other:?}"), trace: vec![] },
+        }
+    }
+}
+
 /// Standard input source for an engine.
 pub enum StdinSource {
     None,
@@ -276,9 +287,13 @@ pub enum StdinSource {
     Inherit(tokio::io::BufReader<tokio::io::Stdin>),
 }
 
-/// Output sink for standard streams and logs.
+/// Output sink for standard streams and logs. `write` must not block for
+/// long, because an engine cannot interrupt it. A sink whose destination
+/// can block should buffer the data and report the size of the buffer as
+/// its backlog; the engine waits for the backlog to shrink instead.
 pub trait OutputSink: Send + Sync {
     fn write(&self, data: &[u8]) -> std::io::Result<()>;
+    /// Starts writing the buffered data.
     fn flush(&self) -> std::io::Result<()> {
         Ok(())
     }
@@ -286,12 +301,73 @@ pub trait OutputSink: Send + Sync {
     fn flush_before_input(&self) -> std::io::Result<()> {
         self.flush()
     }
+    /// The bytes accepted but not yet written.
+    fn backlog(&self) -> usize {
+        0
+    }
+    /// Waits at most `timeout` for the backlog to drop to `max` bytes, and
+    /// returns whether it did. With `max` 0, waits until everything this
+    /// sink accepted and flushed has been written.
+    fn wait_backlog(&self, max: usize, timeout: std::time::Duration) -> bool {
+        let _ = (max, timeout);
+        true
+    }
 }
+
+/// When a sink's backlog exceeds this many bytes, the engine waits until
+/// half of it has been written.
+const MAX_OUTPUT_BACKLOG: usize = 1 << 20;
 
 pub type SharedSink = Arc<dyn OutputSink>;
 
 /// "Always" answers to permission prompts, shared by an engine's runs.
 pub type Always = Arc<Mutex<HashMap<Capability, bool>>>;
+
+/// Decides `cap` from the user's earlier answers to prompts, or else with
+/// `check`. Returns `Err` if the user must be asked.
+fn decide(
+    grants_once: &[Capability],
+    denies_once: &[Capability],
+    always: &Always,
+    prompts: bool,
+    cap: &Capability,
+    check: impl FnOnce() -> Decision,
+) -> Result<bool, ()> {
+    // "Once" answers given for the call being retried (see `forget_once_answers`).
+    if grants_once.contains(cap) {
+        return Ok(true);
+    }
+    if denies_once.contains(cap) {
+        return Ok(false);
+    }
+    if let Some(&d) = always.lock().unwrap_or_else(|e| e.into_inner()).get(cap) {
+        return Ok(d);
+    }
+    match check() {
+        Decision::Allow => Ok(true),
+        Decision::Deny => Ok(false),
+        Decision::Prompt if prompts => Err(()),
+        Decision::Prompt => Ok(false),
+    }
+}
+
+/// A copy of a VM's permission state (see [`Vm::permits`]).
+pub(crate) struct Permits {
+    pub policy: Policy,
+    space: crate::policy::PathSpace,
+    grants_once: Vec<Capability>,
+    denies_once: Vec<Capability>,
+    always: Always,
+    prompts: bool,
+}
+
+impl Permits {
+    /// Like [`Vm::permit_normalized`], but returns `Err` if the user must be
+    /// asked.
+    pub fn permit_normalized(&self, cap: &Capability) -> Result<bool, ()> {
+        decide(&self.grants_once, &self.denies_once, &self.always, self.prompts, cap, || self.policy.check_normalized_in(cap, self.space))
+    }
+}
 
 /// A small deterministic PRNG (xoshiro256**).
 #[derive(Clone, Debug)]
@@ -868,27 +944,65 @@ impl Vm {
     }
 
     fn permit_by(&mut self, cap: &Capability, check: impl FnOnce(&Policy, &Capability) -> Decision) -> Result<bool, Ctl> {
-        // "Once" answers given for the call being retried (see `forget_once_answers`).
-        if self.host.grants_once.contains(cap) {
-            return Ok(true);
+        let h = &self.host;
+        decide(&h.grants_once, &h.denies_once, &h.always, h.prompter.is_some(), cap, || check(&h.policy, cap))
+            .map_err(|()| Ctl::need_permission(cap.clone()))
+    }
+
+    /// A copy of the permission state, for deciding on normalized paths on
+    /// another thread.
+    pub(crate) fn permits(&self) -> Permits {
+        let h = &self.host;
+        Permits {
+            policy: h.policy.clone(),
+            space: h.fs.space(),
+            grants_once: h.grants_once.clone(),
+            denies_once: h.denies_once.clone(),
+            always: h.always.clone(),
+            prompts: h.prompter.is_some(),
         }
-        if self.host.denies_once.contains(cap) {
-            return Ok(false);
+    }
+
+    /// Runs `job`, which may block. With the host's file system, the job
+    /// runs on a worker thread, and the VM stops waiting for it when the
+    /// meter reports an interrupt or a limit. With a memory file system,
+    /// the job runs on this thread. The job charges its
+    /// [`meter::Allowance`], and the meter is then charged the same amount.
+    /// If a charge to the allowance failed, the job's result is discarded
+    /// and the meter's error is returned.
+    pub(crate) fn offload<T: Send + 'static>(&self, job: impl FnOnce(&mut meter::Allowance) -> T + Send + 'static) -> Result<T, Ctl> {
+        let mut allowance = self.meter.allowance();
+        let finish = |t: T, used: u64, stopped: bool| {
+            self.meter.charge(used)?;
+            if stopped { Err(self.stopped()) } else { Ok(t) }
+        };
+        if self.host.fs.memory().is_some() {
+            let t = job(&mut allowance);
+            return finish(t, allowance.used(), allowance.stopped());
         }
-        if let Some(&d) = self.host.always.lock().unwrap_or_else(|e| e.into_inner()).get(cap) {
-            return Ok(d);
-        }
-        match check(&self.host.policy, cap) {
-            Decision::Allow => Ok(true),
-            Decision::Deny => Ok(false),
-            Decision::Prompt => {
-                if self.host.prompter.is_some() {
-                    Err(Ctl::need_permission(cap.clone()))
-                } else {
-                    Ok(false)
+        #[cfg(feature = "os")]
+        {
+            let abandon = allowance.abandon_flag();
+            let pending = crate::platform::offload(move || {
+                let t = job(&mut allowance);
+                (t, allowance.used(), allowance.stopped())
+            });
+            match pending.wait(|| self.meter.check()) {
+                Ok(Ok((t, used, stopped))) => finish(t, used, stopped),
+                Ok(Err(panic)) => Err(Ctl::panic(format!("internal error: {panic}"))),
+                Err(c) => {
+                    abandon.store(true, std::sync::atomic::Ordering::Relaxed);
+                    Err(c)
                 }
             }
         }
+        #[cfg(not(feature = "os"))]
+        unreachable!("without the `os` feature, the file system is in memory")
+    }
+
+    /// The error to return when a charge to a [`meter::Allowance`] failed.
+    fn stopped(&self) -> Ctl {
+        self.meter.check().err().unwrap_or_else(Ctl::interrupted)
     }
 
     /// Forgets "once" answers. They hold while a native is retried after
@@ -913,15 +1027,36 @@ impl Vm {
         }
     }
 
-    /// Flushes buffered standard output (see `Engine`'s stdout sink).
+    /// Starts writing the buffered standard output, without waiting for it.
     pub fn flush_stdout(&self) {
         let _ = self.host.stdout.flush();
     }
 
+    /// Flushes standard output and error, and waits until they are written.
+    /// Fails if the meter reports an interrupt or a limit first.
+    pub fn drain_output(&self) -> Result<(), Ctl> {
+        self.flush_stdout();
+        for sink in [&self.host.stdout, &self.host.stderr] {
+            self.wait_backlog(sink, 0)?;
+        }
+        Ok(())
+    }
+
+    /// Waits until `sink`'s backlog is at most `max` bytes. Fails if the
+    /// meter reports an interrupt or a limit first.
+    fn wait_backlog(&self, sink: &SharedSink, max: usize) -> Result<(), Ctl> {
+        while !sink.wait_backlog(max, std::time::Duration::from_millis(5)) {
+            self.meter.check()?;
+        }
+        Ok(())
+    }
+
     /// Flushes standard output before reading standard input, if the sink
-    /// wants to (see [`OutputSink::flush_before_input`]).
-    pub fn flush_before_input(&self) {
+    /// wants to (see [`OutputSink::flush_before_input`]), and waits until it
+    /// is written.
+    pub fn flush_before_input(&self) -> Result<(), Ctl> {
         let _ = self.host.stdout.flush_before_input();
+        self.wait_backlog(&self.host.stdout, 0)
     }
 
     /// Writes to stdout (1) or stderr (2), enforcing policy and output
@@ -929,7 +1064,7 @@ impl Vm {
     pub fn write_stream(&mut self, which: u8, data: &[u8]) -> Result<(), Ctl> {
         self.admit_output(which, data.len())?;
         let _ = self.stream_sink(which).write(data);
-        Ok(())
+        self.limit_backlog(which)
     }
 
     /// Writes string `s` (a heap value) to stdout (1) or stderr (2), like
@@ -937,6 +1072,16 @@ impl Vm {
     pub fn write_stream_str(&mut self, which: u8, s: Value) -> Result<(), Ctl> {
         self.admit_output(which, self.heap.str(s).len())?;
         let _ = self.stream_sink(which).write(self.heap.str(s).as_bytes());
+        self.limit_backlog(which)
+    }
+
+    /// If the backlog of stream `which` exceeds [`MAX_OUTPUT_BACKLOG`], waits
+    /// until half of it has been written.
+    fn limit_backlog(&self, which: u8) -> Result<(), Ctl> {
+        let sink = self.stream_sink(which);
+        if sink.backlog() > MAX_OUTPUT_BACKLOG {
+            self.wait_backlog(sink, MAX_OUTPUT_BACKLOG / 2)?;
+        }
         Ok(())
     }
 
@@ -959,7 +1104,10 @@ impl Vm {
             _ => self.heap.bytes_of(v),
         };
         match self.stream_sink(which).write(data) {
-            Ok(()) => Ok(self.ok(Value::Unit)),
+            Ok(()) => {
+                self.limit_backlog(which)?;
+                Ok(self.ok(Value::Unit))
+            }
             Err(e) => Ok(self.err_value(crate::stdlib::io_kind(&e), &e.to_string())),
         }
     }
@@ -1260,7 +1408,7 @@ impl Vm {
         self.ending = true;
         let r = self.drive(None).await;
         self.ending = false;
-        self.flush_stdout();
+        let r = r.and_then(|stop| self.drain_output().map(|()| stop).map_err(Trap::from_ctl));
         match r {
             Ok(sched::Stop::Exit(c)) => Ok(Some(c)),
             Ok(_) => Ok(None),

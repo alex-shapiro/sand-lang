@@ -1658,10 +1658,10 @@ Symbolic links (§14.1):
 - `remove_file`, `remove_dir` and `rename` act on the entry itself: a final
   symlink is removed or renamed, never its target, and the capability
   ("entry") is checked for the link's own path (its directory resolved).
-- `rename` fails with `"permission_denied"` if a deny rule protects a path
-  inside the tree being moved or replaced at `to`; `remove_dir(path,
-recursive: true)` checks the same for `path` before removing anything,
-  and checks each entry before removing it.
+- `rename` fails with `"permission_denied"` if a deny rule decides an entry
+  of the tree it moves or replaces, at either the entry's old path or its
+  new one. `remove_dir(path, recursive: true)` makes the same check before
+  removing anything, and also checks each entry before removing it.
 
 On Windows, a junction counts as a symlink, and names that Win32 would
 alter or treat specially (ending in `.` or a space, containing `:`, or a
@@ -1864,10 +1864,13 @@ denied write fails with kind `"permission_denied"` (`print` and `eprint`,
 §12.1, panic). The output limit applies (§15.1).
 
 The CLI buffers standard output like C's stdio (by line on a terminal, in
-blocks otherwise) and flushes it on `io.stdout.flush()`, at the end of the
-run, before writing to standard error, before a permission prompt, whenever
-every task is waiting, and, on a terminal, before reading standard input.
-Standard error is not buffered.
+blocks otherwise). It flushes it on `io.stdout.flush()`, before writing to
+standard error, and when every task is waiting. At the end of the run,
+before a permission prompt and, on a terminal, before reading standard
+input, it also waits until the output is written. Standard error is not
+buffered. A separate thread writes both streams. When the destination does
+not accept data (a full pipe), a script continues until 1 MiB of output is
+pending, then waits; the run's limits and interrupts apply while it waits.
 
 ### 13.6 `env`
 
@@ -2101,14 +2104,13 @@ so a symlink swapped in after the check cannot redirect it. On macOS,
 existing entries are named as stored (volumes are usually case-insensitive
 and always normalization-insensitive) and without firmlinks
 (`/System/Volumes/Data/Users/...` is `/Users/...`); on other Unix systems
-names are kept as given. On Windows, paths are canonicalized, then each
-component is opened relative to its parent's handle without following
-symlinks or junctions; paths compare case-insensitively and use the plain
-`C:\...` / `\\server\share\...` form (not `\\?\...`). `rename` is
-path-based there, but holds every directory on both paths open and checks
-each is the one the no-follow walk finds, leaving only a narrow race in
-which an entry's parent is emptied and turned into a junction during the
-rename.
+names are kept as given. Windows paths are resolved the same way, and a
+junction is treated as a symlink. Existing entries are named as stored,
+paths compare case-insensitively, and they use the plain `C:\...` /
+`\\server\share\...` form (not `\\?\...`). On Windows, `rename` works by
+path, but it keeps every directory on both paths open so that none of them
+can be renamed or replaced. One race remains: an entry's parent can be
+emptied and turned into a junction during the rename.
 
 ### 14.2 Capabilities
 
@@ -2211,9 +2213,10 @@ and names it with its stored spelling. If the system cannot give a final entry's
 stored name (a symlink outside macOS, a device, a file that cannot be opened), it
 is looked up in its directory, unless the directory holds more than 4096 entries.
 
-A deny rule that may match something inside a directory protects the directory from
-being renamed, replaced or recursively removed as a whole (`Policy::denies_under`).
-Custom policies are asked only about the top-level paths of such operations.
+A directory that holds an entry decided by a deny rule cannot be renamed, replaced
+or recursively removed as a whole. The tree is scanned for such entries only if
+`Policy::denies_under` reports that a deny rule may match a path in it. Custom
+policies are asked only about the top-level paths of these operations.
 
 ### 14.6 Network destinations
 
@@ -2436,7 +2439,9 @@ overrun it by the bytecode fuel spent since the last library call, less
 than 20,000 units. Operations that cannot be interrupted internally (a
 single regex search) are charged before they start, so they fail at once
 when the remaining budget cannot cover them. A task whose library calls use
-up its slice is preempted when the call returns.
+up its slice is preempted when the call returns. System calls that may block,
+such as file system operations and writes to standard output, run on other
+threads. While the run waits for them, its limits and interrupts still apply.
 
 ### 15.3 Compile-time limits
 

@@ -1,332 +1,56 @@
-//! The host's file system on Windows.
+//! The host's file system on Windows. As in `unix.rs`, each operation
+//! resolves its path in a single walk.
 //!
-//! A path is resolved by canonicalising its longest existing prefix
-//! (`std::fs::canonicalize` follows symlinks and junctions and spells names
-//! as stored). The operation then walks it again, opening each component
-//! relative to its parent's handle with `FILE_OPEN_REPARSE_POINT`, so a
-//! symlink, junction or other name-surrogate reparse point is opened itself,
-//! never followed: it is denied, or acted on by entry operations. Only
-//! `rename` is path-based (no safe handle-based form): every directory
-//! leading to both entries is held open, and checked against the handle
-//! walk, so none can be renamed, deleted or replaced meanwhile.
+//! [`resolve`] walks an absolute, lexically normal path from its root
+//! (`C:\`, `\\server\share\`). It opens each name relative to its parent's
+//! handle without following it (`FILE_OPEN_REPARSE_POINT`). When it meets a
+//! symlink or junction, it reads the target through the link's handle
+//! (`winx`) and continues with the target in place of the link, as
+//! `realpath` does. The walk keeps the directories it passes open. The
+//! canonical path the policy decides on is the system's path of the
+//! directory holding the final entry (`GetFinalPathNameByHandleW`), followed
+//! by the final name. The system spells names as stored, and its path stays
+//! correct even if a directory on the way was renamed during the walk.
 //!
-//! Unlike `unix.rs`, this takes two walks: one would need reparse points and
-//! `GetFinalPathNameByHandleW`, which neither the standard library nor
-//! `fs_at` offers without `unsafe`.
+//! The operation then opens the final name relative to the held directory,
+//! without following it, so it reaches exactly the entry that was checked.
+//! `rename` is the exception, because safe Rust has no way to rename by
+//! handle. It renames by path, and while it does, it holds every directory
+//! on both paths open without `FILE_SHARE_DELETE`, so none of them can be
+//! renamed, deleted or replaced. It fails if either parent became a
+//! junction. That can still happen to a parent that is emptied between the
+//! check and the rename.
 //!
-//! Names that Win32 path functions alter (a trailing `.` or space, `:` for
-//! alternate data streams, reserved device names such as `CON`) are denied:
-//! handle-relative opens take them literally, so they would name entries
-//! the canonicalisation does not see.
+//! Names that Win32 path functions change are denied: a trailing `.` or
+//! space, a `:` (which names an alternate data stream), and reserved device
+//! names such as `CON`. Handle-relative opens take such names literally, so
+//! they would reach entries that path-based functions, and the policy's
+//! rules, would not.
 
-use super::{EntryKind, EntryMeta, Mode, OpenMode, Work, plain_from_verbatim, unchecked_symlink};
+use super::{ENTRY_OVERHEAD, EntryKind, EntryMeta, Mode, OpenMode, Work, plain_from_verbatim, unchecked_symlink};
 use crate::policy::{MAX_LINK_SCAN, fold_name, lexical};
 use crate::vm::iomem::Reservation;
-use std::ffi::OsStr;
-use std::io;
-use std::path::{Component, Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
-
-/// Bytes counted per directory entry besides its name.
-const ENTRY_OVERHEAD: usize = 2 * std::mem::size_of::<std::ffi::OsString>();
-
-fn not_regular(path: &Path) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidInput, format!("{} is not a regular file", path.display()))
-}
-
-/// A host path resolved for an operation: its canonical form, on which
-/// the operation then walks again without following reparse points.
-pub(crate) struct Resolved {
-    path: PathBuf,
-    missing: Vec<PathBuf>,
-    pub work: Work,
-}
-
-/// Resolves the absolute path `p` (with `mode` `Entry`, a final symlink or
-/// junction is not followed).
-pub(crate) fn resolve(p: &Path, mode: Mode) -> Resolved {
-    let lexical = lexical(p);
-    let mut work = Work::default();
-    let path = match mode {
-        Mode::Follow => canonicalize_existing(lexical),
-        Mode::Entry => {
-            let e = entry_path_on_host(&lexical);
-            work.scanned = e.scanned;
-            work.scanned_bytes = e.scanned_bytes;
-            e.path
-        }
-    };
-    let mut missing: Vec<PathBuf> =
-        path.ancestors().skip(1).take_while(|a| std::fs::symlink_metadata(a).is_err()).map(Path::to_path_buf).collect();
-    missing.reverse();
-    Resolved { path, missing, work }
-}
-
-impl Resolved {
-    pub fn path(&self) -> PathBuf {
-        self.path.clone()
-    }
-
-    /// Paths are canonicalised whole (see the module documentation).
-    pub fn exact(&self) -> bool {
-        true
-    }
-
-    pub fn fix_spelling(&mut self) {}
-
-    pub fn size(&self) -> Option<u64> {
-        stat(&self.path).ok().map(|m| m.size)
-    }
-
-    pub fn missing_ancestors(&self) -> Vec<PathBuf> {
-        self.missing.clone()
-    }
-
-    pub fn open_read(self, _: &Path) -> io::Result<std::fs::File> {
-        open_read(&self.path)
-    }
-
-    pub fn open_write(self, _: &Path, append: bool) -> io::Result<std::fs::File> {
-        open_write(&self.path, append)
-    }
-
-    /// Opens the regular file for `mode`.
-    pub fn open(self, _: &Path, mode: OpenMode) -> io::Result<std::fs::File> {
-        open_mode(&self.path, mode)
-    }
-
-    pub fn stat(&self) -> io::Result<EntryMeta> {
-        let m = stat(&self.path)?;
-        Ok(EntryMeta { kind: m.kind, size: m.size, modified: m.modified.map(unix_nanos) })
-    }
-
-    pub fn list_dir(self, res: &mut Reservation) -> io::Result<Vec<String>> {
-        Ok(list_dir(&self.path, res)?.into_iter().map(|n| n.to_string_lossy().into_owned()).collect())
-    }
-
-    pub fn create_dir(self) -> io::Result<()> {
-        create_dir(&self.path)
-    }
-
-    /// Creates the path and the missing directories above it; the others
-    /// must exist (they were not checked as directories that may be created).
-    pub fn create_dir_all(self, _: &Path) -> io::Result<()> {
-        let names = self.path.components().filter(|c| matches!(c, Component::Normal(_))).count();
-        create_dir_all(&self.path, names.saturating_sub(self.missing.len() + 1))
-    }
-
-    pub fn remove_file(self) -> io::Result<()> {
-        remove_file(&self.path)
-    }
-
-    pub fn remove_dir(self) -> io::Result<()> {
-        remove_dir(&self.path)
-    }
-
-    pub fn rename(from: Resolved, to: Resolved) -> io::Result<()> {
-        rename(&from.path, &to.path)
-    }
-
-    /// Removes the directory entry and everything below it, asking `check`
-    /// about each entry below first (see the Unix version). Each step opens
-    /// its path without following reparse points.
-    pub fn remove_tree<E>(
-        self,
-        res: &mut Reservation,
-        mut check: impl FnMut(&Path) -> Result<io::Result<()>, E>,
-    ) -> Result<io::Result<()>, E> {
-        macro_rules! io {
-            ($e:expr) => {
-                match $e {
-                    Ok(v) => v,
-                    Err(e) => return Ok(Err(e)),
-                }
-            };
-        }
-        if io!(stat(&self.path)).kind != EntryKind::Dir {
-            return Ok(Err(io::Error::new(io::ErrorKind::NotADirectory, format!("{} is not a directory", self.path.display()))));
-        }
-        let names = io!(list_dir(&self.path, res));
-        let mut levels = vec![(self.path.clone(), names)];
-        while let Some((dir, names)) = levels.last_mut() {
-            let Some(name) = names.pop() else {
-                let (done, _) = levels.pop().expect("a level");
-                io!(remove_dir(&done));
-                continue;
-            };
-            let path = dir.join(&name);
-            if let Err(e) = check(&path)? {
-                return Ok(Err(e));
-            }
-            if io!(stat(&path)).kind == EntryKind::Dir {
-                let names = io!(list_dir(&path, res));
-                levels.push((path, names));
-            } else {
-                io!(remove(&path, |_| Ok(())));
-            }
-        }
-        Ok(Ok(()))
-    }
-}
-
-fn unix_nanos(t: SystemTime) -> i64 {
-    let clamp = |n: u128| i64::try_from(n).unwrap_or(i64::MAX);
-    match t.duration_since(UNIX_EPOCH) {
-        Ok(d) => clamp(d.as_nanos()),
-        Err(e) => -clamp(e.duration().as_nanos()),
-    }
-}
-
-/// Metadata of a directory entry (a final symlink is not followed).
-#[derive(Clone, Copy, Debug)]
-struct Meta {
-    kind: EntryKind,
-    size: u64,
-    modified: Option<SystemTime>,
-}
-
-/// Canonicalises the longest prefix of the lexically normal path `p` that
-/// resolves, keeping the rest as it is. If a prefix resolves, so do the
-/// shorter ones, so the prefix is found by binary search: a path of n
-/// components takes O(log n) `canonicalize` calls rather than n.
-fn canonicalize_existing(p: PathBuf) -> PathBuf {
-    if let Ok(c) = p.canonicalize() {
-        return simplify_verbatim(c);
-    }
-    let parts: Vec<&std::ffi::OsStr> = p.components().map(|c| c.as_os_str()).collect();
-    // The root (`/`, `C:\`) is not split: `C:` alone is relative.
-    let root = p.components().take_while(|c| matches!(c, Component::Prefix(_) | Component::RootDir)).count();
-    let prefix = |k: usize| parts[..k].iter().collect::<PathBuf>();
-    // Invariant: `prefix(hi)` does not resolve; `best` is the canonical
-    // `prefix(lo)` once one was found.
-    let (mut lo, mut hi, mut best) = (root, parts.len(), None);
-    while hi - lo > 1 {
-        let mid = lo + (hi - lo) / 2;
-        match prefix(mid).canonicalize() {
-            Ok(c) => {
-                lo = mid;
-                best = Some(c);
-            }
-            Err(_) => hi = mid,
-        }
-    }
-    let best = match best {
-        Some(b) => b,
-        None if root > 0 => match prefix(root).canonicalize() {
-            Ok(b) => b,
-            Err(_) => return p,
-        },
-        None => return p,
-    };
-    let mut r = simplify_verbatim(best);
-    for part in &parts[lo..] {
-        r.push(part);
-    }
-    r
-}
-
-/// A path with the symlinks before its final name resolved (see
-/// `policy::normalize_entry_path`) and the directory entries read to find a
-/// symlink's stored name.
-struct EntryPath {
-    path: PathBuf,
-    scanned: usize,
-    scanned_bytes: usize,
-}
-
-fn entry_path_on_host(p: &Path) -> EntryPath {
-    let lexical = lexical(p);
-    let (Some(parent), Some(name)) = (lexical.parent(), lexical.file_name()) else {
-        return EntryPath { path: normalize_path(&lexical), scanned: 0, scanned_bytes: 0 };
-    };
-    let parent = normalize_path(parent);
-    let entry = parent.join(name);
-    let path = match std::fs::symlink_metadata(&entry) {
-        Ok(m) if m.file_type().is_symlink() => {
-            let (stored, scanned, scanned_bytes) = stored_link_name(&parent, name, MAX_LINK_SCAN);
-            let path = stored.map_or(entry, |n| parent.join(n));
-            return EntryPath { path, scanned, scanned_bytes };
-        }
-        Ok(_) => match entry.canonicalize().map(simplify_verbatim) {
-            // If it became a symlink meanwhile, its target is ignored.
-            Ok(c) if c.parent() == Some(parent.as_path()) => c,
-            _ => entry,
-        },
-        Err(_) => entry,
-    };
-    EntryPath { path, scanned: 0, scanned_bytes: 0 }
-}
-
-/// The stored name of the symlink `parent/name` if it is spelled
-/// differently, with the number of entries read and the bytes of
-/// their names. The stored name is the entry whose name folds like
-/// `name` (see [`fold_name`]) and that is the same directory entry
-/// as `parent/name`; an exact match is preferred.
-fn stored_link_name(parent: &Path, name: &std::ffi::OsStr, limit: usize) -> (Option<std::ffi::OsString>, usize, usize) {
-    let Ok(entries) = std::fs::read_dir(parent) else {
-        return (None, 0, 0);
-    };
-    let link = parent.join(name);
-    let folded = fold_name(&name.to_string_lossy()).into_owned();
-    let (mut found, mut scanned, mut bytes) = (None, 0, 0);
-    for entry in entries {
-        if scanned == limit {
-            return (None, scanned, bytes);
-        }
-        scanned += 1;
-        let Ok(entry) = entry else { continue };
-        let candidate = entry.file_name();
-        bytes += candidate.len();
-        if candidate == name {
-            return (None, scanned, bytes);
-        }
-        if found.is_none() && fold_name(&candidate.to_string_lossy()) == folded && same_entry(&link, &parent.join(&candidate)) {
-            found = Some(candidate);
-        }
-    }
-    (found, scanned, bytes)
-}
-
-/// Whether `a` and `b` name the same directory entry (final symlinks not
-/// followed).
-fn same_entry(a: &Path, b: &Path) -> bool {
-    use std::os::windows::fs::OpenOptionsExt;
-    // FILE_READ_ATTRIBUTES; FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT.
-    let open = |p: &Path| {
-        std::fs::OpenOptions::new().access_mode(0x80).custom_flags(0x0200_0000 | 0x0020_0000).open(p).and_then(same_file::Handle::from_file)
-    };
-    matches!((open(a), open(b)), (Ok(a), Ok(b)) if a == b)
-}
-
-/// Converts a "verbatim" canonical path (`\\?\C:\x`, `\\?\UNC\server\share\x`)
-/// to its plain form (`C:\x`, `\\server\share\x`), so that normalized paths
-/// have one form whether or not they exist. The standard library re-adds the
-/// prefix where needed.
-fn simplify_verbatim(p: PathBuf) -> PathBuf {
-    if let Some(s) = p.to_str()
-        && let Some(plain) = plain_from_verbatim(s)
-    {
-        return PathBuf::from(plain);
-    }
-    p
-}
-
-/// `p` normalized lexically, with the longest prefix that resolves canonicalised.
-fn normalize_path(p: &Path) -> PathBuf {
-    canonicalize_existing(lexical(p))
-}
-
 use fs_at::os::windows::{FileExt, OpenOptionsExt};
 use same_file::Handle;
+use std::collections::VecDeque;
+use std::ffi::{OsStr, OsString};
 use std::fs::{File, Metadata};
+use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::OpenOptionsExt as _;
+use std::os::windows::io::AsHandle;
+use std::path::{Component, Path, PathBuf, Prefix};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// At most this many symlinks are followed in one path.
+const MAX_LINKS: usize = 40;
 
 // Access rights, `NtCreateFile` create options and `CreateFileW` flags
 // (winnt.h, ntifs.h, winbase.h).
 const FILE_WRITE_DATA: u32 = 0x2;
 const FILE_READ_ATTRIBUTES: u32 = 0x80;
 const DELETE: u32 = 0x1_0000;
+const SYNCHRONIZE: u32 = 0x10_0000;
 /// READ_CONTROL | FILE_READ_DATA (FILE_LIST_DIRECTORY) | FILE_READ_ATTRIBUTES | FILE_READ_EA | SYNCHRONIZE.
 const FILE_GENERIC_READ: u32 = 0x12_0089;
 /// READ_CONTROL | FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_ATTRIBUTES | FILE_WRITE_EA | SYNCHRONIZE.
@@ -341,181 +65,25 @@ const FILE_SHARE_READ: u32 = 0x1;
 const FILE_SHARE_WRITE: u32 = 0x2;
 const ERROR_DIRECTORY: i32 = 267;
 
-fn invalid(path: &Path, what: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidInput, format!("{} {what}", path.display()))
+fn not_regular(path: &Path) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, format!("{} is not a regular file", path.display()))
 }
 
-/// The error for a file system that changed while an operation checked it.
+fn invalid(what: impl std::fmt::Display) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, what.to_string())
+}
+
+/// The error for a directory that changed while an operation was checking it.
 fn changed(path: &Path) -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, format!("{} changed during the operation", path.display()))
 }
 
-/// Splits the absolute, normalized `path` into its root (`C:\`,
-/// `\\server\share\`) and the names below it.
-fn split(path: &Path) -> io::Result<(PathBuf, Vec<&OsStr>)> {
-    let mut root = PathBuf::new();
-    let mut names = Vec::new();
-    for c in path.components() {
-        match c {
-            Component::Prefix(_) | Component::RootDir if names.is_empty() => root.push(c),
-            Component::Normal(name) if root.is_absolute() => {
-                check_name(path, name)?;
-                names.push(name);
-            }
-            _ if !root.is_absolute() => return Err(invalid(path, "is not an absolute path")),
-            _ => return Err(invalid(path, "is not a normalized path")),
-        }
-    }
-    if !root.is_absolute() {
-        return Err(invalid(path, "is not an absolute path"));
-    }
-    Ok((root, names))
-}
-
-/// Checks for names that Win32 path functions treat specially.
-fn check_name(path: &Path, name: &OsStr) -> io::Result<()> {
-    let wide: Vec<u16> = name.encode_wide().collect();
-    if wide.contains(&0) {
-        // `NtCreateFile` names would end there.
-        return Err(invalid(path, "contains a NUL character"));
-    }
-    if wide.contains(&u16::from(b':')) {
-        return Err(invalid(path, "names an alternate data stream (`:` in a file name)"));
-    }
-    if matches!(wide.last(), Some(&c) if c == u16::from(b'.') || c == u16::from(b' ')) {
-        return Err(invalid(path, "has a file name ending in `.` or a space"));
-    }
-    let name = name.to_string_lossy();
-    let stem = name.split('.').next().unwrap_or_default().trim_end_matches(' ').to_uppercase();
-    let numbered = |prefix: &str| {
-        let mut rest = stem.strip_prefix(prefix).unwrap_or_default().chars();
-        matches!((rest.next(), rest.next()), (Some('0'..='9' | '¹' | '²' | '³'), None))
-    };
-    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$") || numbered("COM") || numbered("LPT");
-    if reserved {
-        return Err(invalid(path, "names a reserved device"));
-    }
-    Ok(())
-}
-
-/// Options to open an entry relative to a directory handle.
-fn options(access: u32, create_options: u32) -> fs_at::OpenOptions {
-    let mut o = fs_at::OpenOptions::default();
-    o.follow(true).desired_access(access).create_options(create_options | FILE_OPEN_REPARSE_POINT).object_attributes(OBJ_CASE_INSENSITIVE);
-    o
-}
-
-/// Opens `name` in `dir` with `o`.
-fn open_in(dir: &File, name: &OsStr, o: &fs_at::OpenOptions) -> io::Result<File> {
-    o.open_at(dir, name).map_err(|e| {
-        // `fs_at` reports ERROR_DIRECTORY (with FILE_DIRECTORY_FILE, the
-        // entry is not a directory) as an `AlreadyExists` error wrapping it.
-        let inner = e.get_ref().and_then(|i| i.downcast_ref::<io::Error>()).and_then(io::Error::raw_os_error);
-        if inner == Some(ERROR_DIRECTORY) { io::Error::from_raw_os_error(ERROR_DIRECTORY) } else { e }
-    })
-}
-
-/// The metadata of the entry `name` in `dir` itself (not followed).
-fn lstat(dir: &File, name: &OsStr) -> io::Result<Metadata> {
-    open_in(dir, name, &options(FILE_READ_ATTRIBUTES, 0))?.metadata()
-}
-
-/// Converts an error of opening `name` in `dir`: if a symlink is there
-/// (e.g. a file symlink where a directory was expected),
-/// [`unchecked_symlink`].
-fn nofollow_error(e: io::Error, dir: &File, name: &OsStr) -> io::Error {
-    if e.kind() != io::ErrorKind::NotFound && lstat(dir, name).is_ok_and(|m| m.file_type().is_symlink()) {
-        return unchecked_symlink(name);
-    }
-    e
-}
-
-fn open_root(root: &Path) -> io::Result<File> {
-    std::fs::OpenOptions::new().access_mode(FILE_GENERIC_READ).custom_flags(FILE_FLAG_BACKUP_SEMANTICS).open(root)
-}
-
-/// Opens the directory `name` in `dir`, refusing a symlink or junction.
-fn open_subdir(dir: &File, name: &OsStr) -> io::Result<File> {
-    let sub = open_in(dir, name, &options(FILE_GENERIC_READ, FILE_DIRECTORY_FILE)).map_err(|e| nofollow_error(e, dir, name))?;
-    if sub.metadata()?.file_type().is_symlink() {
-        return Err(unchecked_symlink(name));
-    }
-    Ok(sub)
-}
-
-/// Opens the directory `path` without following symlinks in any component.
-fn open_dir(path: &Path) -> io::Result<File> {
-    let (root, names) = split(path)?;
-    let mut dir = open_root(&root)?;
-    for name in names {
-        dir = open_subdir(&dir, name)?;
-    }
-    Ok(dir)
-}
-
-/// The parent directory of `path` and the final name.
-fn parent(path: &Path) -> io::Result<(File, &OsStr)> {
-    let (root, mut names) = split(path)?;
-    let name = names.pop().ok_or_else(|| invalid(path, "is a root directory"))?;
-    let mut dir = open_root(&root)?;
-    for name in names {
-        dir = open_subdir(&dir, name)?;
-    }
-    Ok((dir, name))
-}
-
-/// `f` (opened as `name` of `path`) if it is a regular file.
-fn regular(path: &Path, name: &OsStr, f: File) -> io::Result<File> {
-    let t = f.metadata()?.file_type();
-    if t.is_symlink() {
-        Err(unchecked_symlink(name))
-    } else if t.is_file() {
-        Ok(f)
-    } else {
-        Err(not_regular(path))
-    }
-}
-
-fn open_read(path: &Path) -> io::Result<File> {
-    let (dir, name) = parent(path)?;
-    let f = open_in(&dir, name, &options(FILE_GENERIC_READ, 0)).map_err(|e| nofollow_error(e, &dir, name))?;
-    regular(path, name, f)
-}
-
-/// Opens a regular file for writing, creating it if needed; truncates it
-/// unless `append`.
-fn open_write(path: &Path, append: bool) -> io::Result<File> {
-    open_mode(path, if append { OpenMode::Append } else { OpenMode::Write })
-}
-
-/// Opens a regular file for `mode`.
-fn open_mode(path: &Path, mode: OpenMode) -> io::Result<File> {
-    if mode == OpenMode::Read {
-        return open_read(path);
-    }
-    let (dir, name) = parent(path)?;
-    // Without FILE_WRITE_DATA, every write appends. Truncation is done
-    // after the checks: truncating on open would turn a symlink into an
-    // empty regular file.
-    let write = if mode == OpenMode::Append { FILE_GENERIC_WRITE & !FILE_WRITE_DATA } else { FILE_GENERIC_WRITE };
-    let read = if mode.reads() { FILE_GENERIC_READ } else { FILE_READ_ATTRIBUTES };
-    let mut o = options(write | read, FILE_NON_DIRECTORY_FILE);
-    match mode {
-        OpenMode::CreateNew => o.create_new(true),
-        _ => o.create(mode.creates()),
-    };
-    let opened = open_in(&dir, name, &o).map_err(|e| match nofollow_error(e, &dir, name) {
-        // FILE_NON_DIRECTORY_FILE fails with "access denied" for a directory.
-        e if e.kind() == io::ErrorKind::PermissionDenied && lstat(&dir, name).is_ok_and(|m| m.is_dir()) => {
-            io::Error::new(io::ErrorKind::IsADirectory, format!("{} is a directory", path.display()))
-        }
-        e => e,
-    })?;
-    let f = regular(path, name, opened)?;
-    if mode.truncates() {
-        f.set_len(0)?;
-    }
-    Ok(f)
+/// Metadata of an entry. For a symlink or junction, it describes the link itself.
+#[derive(Clone, Copy, Debug)]
+struct Meta {
+    kind: EntryKind,
+    size: u64,
+    modified: Option<SystemTime>,
 }
 
 fn entry_meta(m: &Metadata) -> Meta {
@@ -532,18 +100,110 @@ fn entry_meta(m: &Metadata) -> Meta {
     Meta { kind, size: m.len(), modified: m.modified().ok() }
 }
 
-fn stat(path: &Path) -> io::Result<Meta> {
-    if path.parent().is_none() {
-        return Ok(entry_meta(&open_dir(path)?.metadata()?));
+fn unix_nanos(t: SystemTime) -> i64 {
+    let clamp = |n: u128| i64::try_from(n).unwrap_or(i64::MAX);
+    match t.duration_since(UNIX_EPOCH) {
+        Ok(d) => clamp(d.as_nanos()),
+        Err(e) => -clamp(e.duration().as_nanos()),
     }
-    let (dir, name) = parent(path)?;
-    Ok(entry_meta(&lstat(&dir, name)?))
 }
 
-/// The names of the entries of the directory `path` (unsorted, without
-/// `.` and `..`), reserving their memory in `res`.
-fn list_dir(path: &Path, res: &mut Reservation) -> io::Result<Vec<std::ffi::OsString>> {
-    let mut dir = open_dir(path)?;
+/// Checks for names that Win32 path functions treat specially.
+fn check_name(name: &OsStr) -> io::Result<()> {
+    let shown = || name.to_string_lossy().into_owned();
+    let wide: Vec<u16> = name.encode_wide().collect();
+    if wide.contains(&0) {
+        // `NtCreateFile` would end the name at the NUL.
+        return Err(invalid(format_args!("{:?} contains a NUL character", shown())));
+    }
+    if wide.contains(&u16::from(b':')) {
+        return Err(invalid(format_args!("{:?} names an alternate data stream (`:` in a file name)", shown())));
+    }
+    if matches!(wide.last(), Some(&c) if c == u16::from(b'.') || c == u16::from(b' ')) {
+        return Err(invalid(format_args!("{:?} ends in `.` or a space", shown())));
+    }
+    let name = name.to_string_lossy();
+    let stem = name.split('.').next().unwrap_or_default().trim_end_matches(' ').to_uppercase();
+    let numbered = |prefix: &str| {
+        let mut rest = stem.strip_prefix(prefix).unwrap_or_default().chars();
+        matches!((rest.next(), rest.next()), (Some('0'..='9' | '¹' | '²' | '³'), None))
+    };
+    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$") || numbered("COM") || numbered("LPT");
+    if reserved {
+        return Err(invalid(format_args!("{:?} names a reserved device", shown())));
+    }
+    Ok(())
+}
+
+/// Options to open an entry relative to a directory handle. A symlink or
+/// junction is opened itself, never followed.
+fn options(access: u32, create_options: u32) -> fs_at::OpenOptions {
+    let mut o = fs_at::OpenOptions::default();
+    o.follow(true).desired_access(access).create_options(create_options | FILE_OPEN_REPARSE_POINT).object_attributes(OBJ_CASE_INSENSITIVE);
+    o
+}
+
+/// Opens `name` in `dir` with `o`.
+fn open_in(dir: &File, name: &OsStr, o: &fs_at::OpenOptions) -> io::Result<File> {
+    o.open_at(dir, name).map_err(|e| {
+        // With FILE_DIRECTORY_FILE, opening something that is not a
+        // directory fails with ERROR_DIRECTORY, which `fs_at` wraps in an
+        // `AlreadyExists` error.
+        let inner = e.get_ref().and_then(|i| i.downcast_ref::<io::Error>()).and_then(io::Error::raw_os_error);
+        if inner == Some(ERROR_DIRECTORY) { io::Error::from_raw_os_error(ERROR_DIRECTORY) } else { e }
+    })
+}
+
+/// Opens the entry `name` of `dir` to read its metadata.
+fn open_entry(dir: &File, name: &OsStr) -> io::Result<File> {
+    open_in(dir, name, &options(FILE_READ_ATTRIBUTES | SYNCHRONIZE, 0))
+}
+
+/// The metadata of the entry `name` in `dir`.
+fn lstat(dir: &File, name: &OsStr) -> io::Result<Metadata> {
+    open_entry(dir, name)?.metadata()
+}
+
+/// Converts an error from opening `name` in `dir`. If the entry is a
+/// symlink (for example, a file symlink where a directory was expected),
+/// the error becomes [`unchecked_symlink`].
+fn nofollow_error(e: io::Error, dir: &File, name: &OsStr) -> io::Error {
+    if e.kind() != io::ErrorKind::NotFound && lstat(dir, name).is_ok_and(|m| m.file_type().is_symlink()) {
+        return unchecked_symlink(name);
+    }
+    e
+}
+
+/// Opens the directory `name` in `dir` with `access`. A symlink or
+/// junction is denied.
+fn open_subdir(dir: &File, name: &OsStr, access: u32) -> io::Result<File> {
+    let sub = open_in(dir, name, &options(access, FILE_DIRECTORY_FILE)).map_err(|e| nofollow_error(e, dir, name))?;
+    if sub.metadata()?.file_type().is_symlink() {
+        return Err(unchecked_symlink(name));
+    }
+    Ok(sub)
+}
+
+/// Opens the root directory `root` (`C:\`, `\\server\share\`) by path.
+fn open_root(root: &Path) -> io::Result<File> {
+    std::fs::OpenOptions::new().access_mode(FILE_READ_ATTRIBUTES | SYNCHRONIZE).custom_flags(FILE_FLAG_BACKUP_SEMANTICS).open(root)
+}
+
+/// Opens the directory `dir` again, with the access needed to list it.
+fn listable(dir: &File) -> io::Result<File> {
+    use winx::file::{AccessMode, Flags, ShareMode};
+    winx::file::reopen_file(
+        dir.as_handle(),
+        AccessMode::FILE_LIST_DIRECTORY | AccessMode::FILE_READ_ATTRIBUTES | AccessMode::SYNCHRONIZE,
+        ShareMode::FILE_SHARE_READ | ShareMode::FILE_SHARE_WRITE | ShareMode::FILE_SHARE_DELETE,
+        Flags::FILE_FLAG_BACKUP_SEMANTICS | Flags::FILE_FLAG_OPEN_REPARSE_POINT,
+    )
+}
+
+/// The names of the entries of the directory `dir`, unsorted and without
+/// `.` and `..`. Their memory is reserved in `res`.
+fn read_names(dir: &File, res: &mut Reservation) -> io::Result<Vec<OsString>> {
+    let mut dir = listable(dir)?;
     let mut names = Vec::new();
     for entry in fs_at::read_dir(&mut dir)? {
         let entry = entry?;
@@ -558,125 +218,714 @@ fn list_dir(path: &Path, res: &mut Reservation) -> io::Result<Vec<std::ffi::OsSt
 
 /// Creates the directory `name` in `dir` and opens it.
 fn mkdir(dir: &File, name: &OsStr) -> io::Result<File> {
-    // FILE_CREATE with FILE_DIRECTORY_FILE creates a directory and never
-    // opens an existing entry (or follows a symlink).
-    let mut o = options(FILE_GENERIC_READ, FILE_DIRECTORY_FILE);
+    // With FILE_DIRECTORY_FILE, FILE_CREATE creates a directory and fails
+    // on any existing entry, so it never follows a symlink.
+    let mut o = options(FILE_READ_ATTRIBUTES | SYNCHRONIZE, FILE_DIRECTORY_FILE);
     o.create_new(true);
     open_in(dir, name, &o)
 }
 
-fn create_dir(path: &Path) -> io::Result<()> {
-    let (dir, name) = parent(path)?;
-    mkdir(&dir, name).map(drop)
-}
-
-/// Creates `path` and missing parents; an existing directory is fine.
-/// The first `keep` components below the root must exist already.
-fn create_dir_all(path: &Path, keep: usize) -> io::Result<()> {
-    let (root, names) = split(path)?;
-    let mut dir = open_root(&root)?;
-    let last = names.len();
-    for (i, name) in names.into_iter().enumerate() {
-        let opened = match open_subdir(&dir, name) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound && i >= keep => match mkdir(&dir, name) {
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => open_subdir(&dir, name),
-                r => r,
-            },
-            r => r,
-        };
-        dir = match opened {
-            Ok(d) => d,
-            Err(e) if i + 1 == last && e.kind() == io::ErrorKind::NotADirectory => {
-                return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{} exists and is not a directory", path.display())));
-            }
-            Err(e) => return Err(e),
-        };
-    }
-    Ok(())
-}
-
-/// Opens the entry `path` itself for deletion and deletes it if allowed.
-fn remove(path: &Path, accept: impl FnOnce(&Metadata) -> io::Result<()>) -> io::Result<()> {
-    let (dir, name) = parent(path)?;
-    let entry = open_in(&dir, name, &options(DELETE | FILE_READ_ATTRIBUTES, 0))?;
+/// Deletes the entry `name` of `dir` (a link itself, not its target) if
+/// `accept` allows it.
+fn delete(dir: &File, name: &OsStr, accept: impl FnOnce(&Metadata) -> io::Result<()>) -> io::Result<()> {
+    let entry = open_in(dir, name, &options(DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE, 0))?;
     accept(&entry.metadata()?)?;
     entry.delete_by_handle().map_err(|(_, e)| e)
 }
 
-/// Removes the file or symlink `path` (not a symlink's target).
-fn remove_file(path: &Path) -> io::Result<()> {
-    remove(path, |m| {
-        if m.is_dir() {
-            return Err(io::Error::new(io::ErrorKind::IsADirectory, format!("{} is a directory", path.display())));
-        }
-        Ok(())
-    })
-}
-
-fn remove_dir(path: &Path) -> io::Result<()> {
-    remove(path, |m| {
-        if !m.is_dir() {
-            return Err(io::Error::new(io::ErrorKind::NotADirectory, format!("{} is not a directory", path.display())));
-        }
-        Ok(())
-    })
-}
-
-/// Opens the directory `path` by path, without `FILE_SHARE_DELETE`: while
-/// the handle is open, the directory cannot be renamed or deleted.
-fn lock(path: &Path) -> io::Result<File> {
-    std::fs::OpenOptions::new()
-        .access_mode(FILE_GENERIC_READ)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)
-}
-
-/// Holds the directories from `root` along `names` open so that none of
-/// them can be renamed, deleted or replaced: a path through them keeps
-/// naming the same directories. Each is opened by path and must be the
-/// directory that the handle-relative, no-follow walk finds there.
-fn lock_dirs(root: &Path, names: &[&OsStr]) -> io::Result<Vec<Handle>> {
-    let mut path = root.to_path_buf();
-    let mut held = vec![Handle::from_file(lock(&path)?)?];
-    for &name in names {
-        let dir = held.last().map(Handle::as_file).ok_or_else(|| changed(&path))?;
-        let genuine = Handle::from_file(open_subdir(dir, name)?)?;
-        path.push(name);
-        let locked = Handle::from_file(lock(&path)?)?;
-        if locked != genuine {
-            return Err(changed(&path));
-        }
-        held.push(locked);
+/// Returns `f`, opened as `name` of `path`, if it is a regular file.
+fn regular(path: &Path, name: &OsStr, f: File) -> io::Result<File> {
+    let t = f.metadata()?.file_type();
+    if t.is_symlink() {
+        Err(unchecked_symlink(name))
+    } else if t.is_file() {
+        Ok(f)
+    } else {
+        Err(not_regular(path))
     }
-    Ok(held)
 }
 
-/// Renames the entry `from` (a final symlink itself) to `to`.
-fn rename(from: &Path, to: &Path) -> io::Result<()> {
-    let (from_root, mut from_names) = split(from)?;
-    let (to_root, mut to_names) = split(to)?;
-    if from_names.pop().is_none() || to_names.pop().is_none() {
-        return Err(invalid(from, "cannot be renamed (a root directory is involved)"));
+/// Converts a "verbatim" path (`\\?\C:\x`, `\\?\UNC\server\share\x`) to
+/// its plain form (`C:\x`, `\\server\share\x`), so that a normal path has
+/// the same form whether or not it exists. Returns `None` if there is no
+/// plain form.
+fn plain(p: PathBuf) -> Option<PathBuf> {
+    let s = p.to_str()?;
+    if s.starts_with(r"\\?\") {
+        return plain_from_verbatim(s).map(PathBuf::from);
     }
-    let from_dirs = lock_dirs(&from_root, &from_names)?;
-    let to_dirs = lock_dirs(&to_root, &to_names)?;
-    // The held directories cannot be replaced, and those that contain
-    // another held directory cannot become junctions (only an empty
-    // directory can). The two parents could, so they are checked right
-    // before and after the path-based rename.
-    let parents = [from_dirs.last(), to_dirs.last()];
-    let unchanged = || -> io::Result<()> {
-        for (dir, path) in parents.iter().zip([from, to]) {
-            if dir.ok_or_else(|| changed(path))?.as_file().metadata()?.file_type().is_symlink() {
-                return Err(changed(path));
+    Some(p)
+}
+
+/// The system's path of the open directory `dir`.
+fn final_path(dir: &File) -> Option<PathBuf> {
+    winx::file::get_file_path(dir).ok().and_then(plain)
+}
+
+/// Splits an absolute path into its root (`C:\`, `\\server\share\`) and
+/// the names below it. Returns `None` if it has no drive or share root.
+fn split_root(path: &Path) -> Option<(PathBuf, Vec<OsString>)> {
+    let mut comps = path.components();
+    let root = match comps.next()? {
+        Component::Prefix(p) => match p.kind() {
+            Prefix::Disk(d) | Prefix::VerbatimDisk(d) => PathBuf::from(format!("{}:\\", d as char)),
+            Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => {
+                let mut r = OsString::from(r"\\");
+                r.push(server);
+                r.push(r"\");
+                r.push(share);
+                r.push(r"\");
+                PathBuf::from(r)
+            }
+            _ => return None,
+        },
+        _ => return None,
+    };
+    if comps.next() != Some(Component::RootDir) {
+        return None;
+    }
+    let mut names = Vec::new();
+    for c in comps {
+        match c {
+            Component::Normal(n) => names.push(n.to_os_string()),
+            Component::ParentDir => names.push(OsString::from("..")),
+            _ => {}
+        }
+    }
+    Some((root, names))
+}
+
+/// Why a walk stopped before the final entry's directory.
+enum Stop {
+    /// A component could not be opened. `NotFound` means it does not exist.
+    Io(io::ErrorKind, String),
+    /// The symlink with this name in the original path does not resolve.
+    /// Operations deny it, because they would follow a symlink the policy
+    /// did not see.
+    Dangling(OsString),
+}
+
+impl Stop {
+    fn from(e: io::Error) -> Stop {
+        Stop::Io(e.kind(), e.to_string())
+    }
+
+    fn error(&self) -> io::Error {
+        match self {
+            Stop::Io(kind, message) => io::Error::new(*kind, message.clone()),
+            Stop::Dangling(link) => unchecked_symlink(link),
+        }
+    }
+}
+
+/// A host path after [`resolve`]: the directories leading to the final
+/// entry, kept open, and the names below them.
+pub(crate) struct Resolved {
+    /// The root and the directories below it, down to the deepest one the
+    /// walk reached. Empty if the root could not be opened.
+    dirs: Vec<File>,
+    root: PathBuf,
+    /// The names of `dirs[1..]`.
+    names: Vec<OsString>,
+    /// The canonical path of the last of `dirs`.
+    dir_path: PathBuf,
+    /// The names below that directory. Normally this is the final name.
+    /// If the walk stopped early, it is every name from the one that could
+    /// not be opened. It is empty if the target is the directory itself.
+    rest: Vec<OsString>,
+    stop: Option<Stop>,
+    /// The final entry's metadata and handle, if it exists (a final symlink
+    /// is not followed). The handle gives its name as stored.
+    entry: Option<Meta>,
+    entry_file: Option<File>,
+    exact: bool,
+    mode: Mode,
+    pub work: Work,
+}
+
+/// The state of the walk at the outermost symlink being followed, so that
+/// the walk can return there if the target does not resolve.
+struct Site {
+    dirs: Vec<File>,
+    root: PathBuf,
+    names: Vec<OsString>,
+    /// The link's name and the original names after it.
+    rest: VecDeque<OsString>,
+    /// The link is resolved once the queue is back to this length.
+    resume: usize,
+}
+
+struct Walk {
+    dirs: Vec<File>,
+    root: PathBuf,
+    names: Vec<OsString>,
+    /// The names still to resolve. Only symlink targets add `..`.
+    queue: VecDeque<OsString>,
+    links: usize,
+    site: Option<Site>,
+    work: Work,
+}
+
+/// Resolves the path `p`, after making it absolute against the process's
+/// working directory and normalizing it lexically. In `Entry` mode, a final
+/// symlink or junction is not followed.
+pub(crate) fn resolve(p: &Path, mode: Mode) -> Resolved {
+    let absolute = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+    let lexical = lexical(&absolute);
+    let Some((root, names)) = split_root(&lexical) else {
+        let stop = Stop::Io(io::ErrorKind::InvalidInput, format!("{} is not a path on a drive or share", lexical.display()));
+        return Resolved {
+            dirs: Vec::new(),
+            root: PathBuf::new(),
+            names: Vec::new(),
+            dir_path: lexical,
+            rest: Vec::new(),
+            stop: Some(stop),
+            entry: None,
+            entry_file: None,
+            exact: true,
+            mode,
+            work: Work::default(),
+        };
+    };
+    let mut walk = Walk { dirs: Vec::new(), root, names: Vec::new(), queue: names.into(), links: 0, site: None, work: Work::default() };
+    match open_root(&walk.root) {
+        Ok(d) => walk.dirs.push(d),
+        Err(e) => return walk.stop(Stop::from(e), mode),
+    }
+    walk.run(mode)
+}
+
+impl Walk {
+    fn here(&self) -> &File {
+        self.dirs.last().expect("the walk holds the root")
+    }
+
+    fn run(mut self, mode: Mode) -> Resolved {
+        loop {
+            let Some(first) = self.queue.front() else {
+                return self.finish_here(mode);
+            };
+            if first == ".." {
+                // The root's parent is the root.
+                if self.names.pop().is_some() {
+                    self.dirs.pop();
+                }
+                self.work.steps += 1;
+                self.queue.pop_front();
+                self.left_site();
+                continue;
+            }
+            if let Err(e) = check_name(first) {
+                return self.fail_with(Stop::from(e), mode);
+            }
+            let name = first.clone();
+            let last = self.queue.len() == 1;
+            let opened = open_entry(self.here(), &name).and_then(|f| f.metadata().map(|m| (f, entry_meta(&m))));
+            match opened {
+                Ok((f, m)) if m.kind == EntryKind::Symlink && !(last && mode == Mode::Entry) => {
+                    if let Some(r) = self.follow(&f, mode) {
+                        return r;
+                    }
+                }
+                Ok((f, m)) if last => {
+                    self.site = None;
+                    self.work.steps += 1;
+                    return self.finish(Some((m, f)), mode);
+                }
+                Ok((_, m)) if m.kind == EntryKind::Dir => match open_subdir(self.here(), &name, FILE_READ_ATTRIBUTES | SYNCHRONIZE) {
+                    Ok(d) => {
+                        self.dirs.push(d);
+                        self.names.push(name);
+                        self.queue.pop_front();
+                        self.work.steps += 1;
+                        self.left_site();
+                    }
+                    Err(e) => return self.fail_with(Stop::from(e), mode),
+                },
+                Ok(_) => {
+                    // A symlink to something other than a directory still
+                    // resolves. The next name then fails to open in it.
+                    if self.site.as_ref().is_some_and(|s| self.queue.len() == s.resume + 1) {
+                        self.site = None;
+                    }
+                    let e = io::Error::new(io::ErrorKind::NotADirectory, format!("{:?} is not a directory", name));
+                    return self.fail_with(Stop::from(e), mode);
+                }
+                Err(e) if last && e.kind() == io::ErrorKind::NotFound && self.site.is_none() => return self.finish(None, mode),
+                Err(e) => return self.fail_with(Stop::from(e), mode),
             }
         }
-        Ok(())
-    };
-    unchanged()?;
-    std::fs::rename(from, to)?;
-    unchanged()
+    }
+
+    /// Replaces the symlink at the front of the queue, opened as `link`,
+    /// with its target.
+    fn follow(&mut self, link: &File, mode: Mode) -> Option<Resolved> {
+        self.links += 1;
+        self.work.steps += 1;
+        if self.site.is_none() {
+            let dirs = match self.dirs.iter().map(File::try_clone).collect::<io::Result<Vec<_>>>() {
+                Ok(d) => d,
+                Err(e) => return Some(self.stop(Stop::from(e), mode)),
+            };
+            let resume = self.queue.len() - 1;
+            self.site = Some(Site { dirs, root: self.root.clone(), names: self.names.clone(), rest: self.queue.clone(), resume });
+        }
+        if self.links > MAX_LINKS {
+            return Some(self.revert(mode));
+        }
+        // Only junctions and symlinks can be read. Other reparse points are not followed.
+        let Ok(target) = winx::file::read_link(link) else { return Some(self.revert(mode)) };
+        self.work.bytes += target.as_os_str().len();
+        // `winx` turns an absolute target from its NT form into `C:\x` or `UNC\server\share\x`.
+        let target = match target.to_str().and_then(|s| s.strip_prefix(r"UNC\")) {
+            Some(unc) => PathBuf::from(format!(r"\\{unc}")),
+            None => target,
+        };
+        let mut names = Vec::new();
+        match target.components().next() {
+            Some(Component::Prefix(_)) => {
+                let Some((root, below)) = split_root(&target) else { return Some(self.revert(mode)) };
+                match open_root(&root) {
+                    Ok(d) => self.dirs = vec![d],
+                    Err(_) => return Some(self.revert(mode)),
+                }
+                self.root = root;
+                self.names.clear();
+                names = below;
+            }
+            first => {
+                if first == Some(Component::RootDir) {
+                    // The root of the current drive.
+                    self.dirs.truncate(1);
+                    self.names.clear();
+                }
+                for c in target.components() {
+                    match c {
+                        Component::Normal(n) => names.push(n.to_os_string()),
+                        Component::ParentDir => names.push(OsString::from("..")),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        self.queue.pop_front();
+        for n in names.into_iter().rev() {
+            self.queue.push_front(n);
+        }
+        None
+    }
+
+    /// Forgets the symlink being followed once its target is resolved.
+    fn left_site(&mut self) {
+        if self.site.as_ref().is_some_and(|s| self.queue.len() <= s.resume) {
+            self.site = None;
+        }
+    }
+
+    fn fail_with(&mut self, why: Stop, mode: Mode) -> Resolved {
+        if self.site.is_some() { self.revert(mode) } else { self.stop(why, mode) }
+    }
+
+    /// Stops at the symlink being followed, whose target does not resolve.
+    fn revert(&mut self, mode: Mode) -> Resolved {
+        let Some(site) = self.site.take() else {
+            let e = io::Error::new(io::ErrorKind::InvalidInput, "too many levels of symbolic links");
+            return self.stop(Stop::from(e), mode);
+        };
+        self.dirs = site.dirs;
+        self.root = site.root;
+        self.names = site.names;
+        self.queue = site.rest;
+        let link = self.queue[0].clone();
+        self.stop(Stop::Dangling(link), mode)
+    }
+
+    fn stop(&mut self, why: Stop, mode: Mode) -> Resolved {
+        let mut r = self.finish(None, mode);
+        r.stop = Some(why);
+        r
+    }
+
+    /// Ends the walk when the target is the directory it reached.
+    fn finish_here(&mut self, mode: Mode) -> Resolved {
+        let mut r = self.finish(None, mode);
+        r.entry = r.dirs.last().and_then(|d| d.metadata().ok()).map(|m| entry_meta(&m));
+        r
+    }
+
+    fn finish(&mut self, entry: Option<(Meta, File)>, mode: Mode) -> Resolved {
+        let dirs = std::mem::take(&mut self.dirs);
+        let names = std::mem::take(&mut self.names);
+        let walked = || {
+            let mut p = self.root.clone();
+            p.extend(&names);
+            p
+        };
+        let dir_path = dirs.last().and_then(final_path).unwrap_or_else(walked);
+        let (entry, entry_file) = entry.map_or((None, None), |(m, f)| (Some(m), Some(f)));
+        Resolved {
+            dirs,
+            root: std::mem::take(&mut self.root),
+            names,
+            dir_path,
+            rest: self.queue.drain(..).collect(),
+            stop: None,
+            exact: entry.is_none(),
+            entry,
+            entry_file,
+            mode,
+            work: std::mem::take(&mut self.work),
+        }
+    }
+}
+
+impl Resolved {
+    /// The canonical path.
+    pub fn path(&self) -> PathBuf {
+        let mut p = self.dir_path.clone();
+        p.extend(&self.rest);
+        p
+    }
+
+    /// Whether the final name is known to be spelled as it is stored.
+    pub fn exact(&self) -> bool {
+        self.exact
+    }
+
+    /// Replaces the final name with the name stored on disk, if the entry
+    /// exists. For most entries that is the name the system gives the
+    /// entry's handle. For a link, the system names the handle by the path
+    /// used to open it, so the name comes from scanning the directory for an
+    /// entry whose name folds to the same form.
+    pub fn fix_spelling(&mut self) {
+        if self.exact {
+            return;
+        }
+        self.exact = true;
+        let (Some(file), [name]) = (&self.entry_file, &self.rest[..]) else { return };
+        let stored = match self.entry.map(|m| m.kind) {
+            Some(EntryKind::Symlink) => self.dirs.last().and_then(|d| stored_by_scan(d, file, name, &mut self.work)),
+            _ => final_path(file).and_then(|p| p.file_name().map(OsStr::to_os_string)),
+        };
+        if let Some(stored) = stored.filter(|s| fold_name(&s.to_string_lossy()) == fold_name(&name.to_string_lossy())) {
+            self.rest[0] = stored;
+        }
+    }
+
+    pub fn size(&self) -> Option<u64> {
+        self.entry.map(|m| m.size)
+    }
+
+    /// The paths of the directories that do not exist above the final
+    /// entry, outermost first.
+    pub fn missing_ancestors(&self) -> Vec<PathBuf> {
+        if !matches!(self.stop, Some(Stop::Io(io::ErrorKind::NotFound, _))) {
+            return Vec::new();
+        }
+        let mut p = self.dir_path.clone();
+        let mut missing = Vec::new();
+        for name in &self.rest[..self.rest.len().saturating_sub(1)] {
+            p.push(name);
+            missing.push(p.clone());
+        }
+        missing
+    }
+
+    /// The directory holding the final entry and the final name, which is
+    /// `None` if the target is the directory itself. Fails if the walk
+    /// stopped early.
+    fn at(&self) -> io::Result<(&File, Option<&OsStr>)> {
+        match (&self.stop, self.dirs.last()) {
+            (Some(why), _) => Err(why.error()),
+            (None, Some(dir)) => Ok((dir, self.rest.first().map(OsString::as_os_str))),
+            (None, None) => Err(io::ErrorKind::NotFound.into()),
+        }
+    }
+
+    /// The directory and the final name, for operations on an entry in it.
+    fn entry_at(&self) -> io::Result<(&File, &OsStr)> {
+        match self.at()? {
+            (dir, Some(name)) => Ok((dir, name)),
+            (_, None) => Err(invalid(format_args!("{} is a root directory", self.path().display()))),
+        }
+    }
+
+    pub fn open_read(self, path: &Path) -> io::Result<File> {
+        self.open(path, OpenMode::Read)
+    }
+
+    pub fn open_write(self, path: &Path, append: bool) -> io::Result<File> {
+        self.open(path, if append { OpenMode::Append } else { OpenMode::Write })
+    }
+
+    /// Opens the regular file for `mode`.
+    pub fn open(self, path: &Path, mode: OpenMode) -> io::Result<File> {
+        let (dir, Some(name)) = self.at()? else {
+            return Err(not_regular(path));
+        };
+        if mode == OpenMode::Read {
+            let f = open_in(dir, name, &options(FILE_GENERIC_READ, 0)).map_err(|e| nofollow_error(e, dir, name))?;
+            return regular(path, name, f);
+        }
+        // Without FILE_WRITE_DATA, every write appends. Truncation happens
+        // after the checks, because truncating on open would turn a symlink
+        // into an empty regular file.
+        let write = if mode == OpenMode::Append { FILE_GENERIC_WRITE & !FILE_WRITE_DATA } else { FILE_GENERIC_WRITE };
+        let read = if mode.reads() { FILE_GENERIC_READ } else { FILE_READ_ATTRIBUTES };
+        let mut o = options(write | read, FILE_NON_DIRECTORY_FILE);
+        match mode {
+            OpenMode::CreateNew => o.create_new(true),
+            _ => o.create(mode.creates()),
+        };
+        let opened = open_in(dir, name, &o).map_err(|e| match nofollow_error(e, dir, name) {
+            // FILE_NON_DIRECTORY_FILE fails with "access denied" for a directory.
+            e if e.kind() == io::ErrorKind::PermissionDenied && lstat(dir, name).is_ok_and(|m| m.is_dir()) => {
+                io::Error::new(io::ErrorKind::IsADirectory, format!("{} is a directory", path.display()))
+            }
+            e => e,
+        })?;
+        let f = regular(path, name, opened)?;
+        if mode.truncates() {
+            f.set_len(0)?;
+        }
+        Ok(f)
+    }
+
+    /// Metadata of the final entry, as the walk found it. A final symlink is
+    /// followed unless the mode is `Entry`.
+    pub fn stat(&self) -> io::Result<EntryMeta> {
+        let (_, name) = self.at()?;
+        let m = self.entry.ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+        if m.kind == EntryKind::Symlink && self.mode == Mode::Follow {
+            return Err(unchecked_symlink(name.unwrap_or_default()));
+        }
+        Ok(EntryMeta { kind: m.kind, size: m.size, modified: m.modified.map(unix_nanos) })
+    }
+
+    /// The names of the entries of the directory, unsorted and without `.`
+    /// and `..`. Their memory is reserved in `res`.
+    pub fn list_dir(self, res: &mut Reservation) -> io::Result<Vec<String>> {
+        let names = match self.at()? {
+            (dir, None) => read_names(dir, res)?,
+            (dir, Some(name)) => read_names(&open_subdir(dir, name, FILE_READ_ATTRIBUTES | SYNCHRONIZE)?, res)?,
+        };
+        Ok(names.into_iter().map(|n| n.to_string_lossy().into_owned()).collect())
+    }
+
+    pub fn create_dir(self) -> io::Result<()> {
+        let (dir, name) = self.entry_at()?;
+        mkdir(dir, name).map(drop)
+    }
+
+    /// Creates the final directory and the directories above it that were
+    /// missing when the walk ended. It is not an error if the final
+    /// directory exists.
+    pub fn create_dir_all(self, path: &Path) -> io::Result<()> {
+        let exists = || io::Error::new(io::ErrorKind::AlreadyExists, format!("{} exists and is not a directory", path.display()));
+        if let (Some(Stop::Io(io::ErrorKind::NotFound, _)), Some(dir)) = (&self.stop, self.dirs.last()) {
+            let mut dir = dir.try_clone()?;
+            for (i, name) in self.rest.iter().enumerate() {
+                check_name(name)?;
+                dir = match mkdir(&dir, name) {
+                    Err(e) if e.kind() == io::ErrorKind::AlreadyExists => match open_subdir(&dir, name, FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+                    {
+                        // As in `std::fs::create_dir_all`, an existing entry that is not a directory is an error.
+                        Err(e) if i + 1 == self.rest.len() && e.raw_os_error() == Some(ERROR_DIRECTORY) => return Err(exists()),
+                        r => r?,
+                    },
+                    r => r?,
+                };
+            }
+            return Ok(());
+        }
+        let (dir, Some(name)) = self.at()? else {
+            return Ok(());
+        };
+        match self.entry {
+            Some(m) if m.kind == EntryKind::Dir => Ok(()),
+            Some(_) => Err(exists()),
+            None => match mkdir(dir, name) {
+                Ok(_) => Ok(()),
+                // Another process created it after the walk.
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => match lstat(dir, name) {
+                    Ok(m) if m.file_type().is_symlink() => Err(unchecked_symlink(name)),
+                    Ok(m) if m.is_dir() => Ok(()),
+                    _ => Err(exists()),
+                },
+                Err(e) => Err(e),
+            },
+        }
+    }
+
+    /// Removes the file or symlink. A symlink's target is not removed.
+    pub fn remove_file(self) -> io::Result<()> {
+        let (dir, name) = self.entry_at()?;
+        let shown = self.path();
+        delete(dir, name, |m| {
+            if m.is_dir() && !m.file_type().is_symlink() {
+                return Err(io::Error::new(io::ErrorKind::IsADirectory, format!("{} is a directory", shown.display())));
+            }
+            Ok(())
+        })
+    }
+
+    pub fn remove_dir(self) -> io::Result<()> {
+        let (dir, name) = self.entry_at()?;
+        let shown = self.path();
+        delete(dir, name, |m| {
+            if !m.is_dir() || m.file_type().is_symlink() {
+                return Err(io::Error::new(io::ErrorKind::NotADirectory, format!("{} is not a directory", shown.display())));
+            }
+            Ok(())
+        })
+    }
+
+    /// See [`super::Fs::walk_tree`]. Each directory is opened relative to
+    /// its parent without following symlinks or junctions.
+    pub fn walk_tree<E>(
+        &self,
+        res: &mut Reservation,
+        remove: bool,
+        mut visit: impl FnMut(&Path) -> Result<io::Result<()>, E>,
+    ) -> Result<io::Result<()>, E> {
+        macro_rules! io {
+            ($e:expr) => {
+                match $e {
+                    Ok(v) => v,
+                    Err(e) => return Ok(Err(e)),
+                }
+            };
+        }
+        let (dir, name) = io!(self.entry_at());
+        if lstat(dir, name).is_ok_and(|m| !m.is_dir() || m.file_type().is_symlink()) {
+            return Ok(Err(io::Error::new(io::ErrorKind::NotADirectory, format!("{} is not a directory", self.path().display()))));
+        }
+        /// A directory being walked: its handle, its path, the names not
+        /// yet visited, and its own name in its parent.
+        struct Level {
+            dir: File,
+            path: PathBuf,
+            names: Vec<OsString>,
+            name: OsString,
+        }
+        let first = io!(open_subdir(dir, name, FILE_READ_ATTRIBUTES | SYNCHRONIZE));
+        let names = io!(read_names(&first, res));
+        let mut levels = vec![Level { dir: first, path: self.path(), names, name: name.to_os_string() }];
+        while let Some(top) = levels.last_mut() {
+            let Some(name) = top.names.pop() else {
+                let done = levels.pop().expect("a level");
+                drop(done.dir);
+                if remove {
+                    let parent = levels.last().map_or(dir, |l| &l.dir);
+                    io!(delete(parent, &done.name, |_| Ok(())));
+                }
+                continue;
+            };
+            let path = top.path.join(&name);
+            if let Err(e) = visit(&path)? {
+                return Ok(Err(e));
+            }
+            let m = io!(lstat(&top.dir, &name));
+            if m.is_dir() && !m.file_type().is_symlink() {
+                let sub = io!(open_subdir(&top.dir, &name, FILE_READ_ATTRIBUTES | SYNCHRONIZE));
+                let names = io!(read_names(&sub, res));
+                levels.push(Level { dir: sub, path, names, name });
+            } else if remove {
+                io!(delete(&top.dir, &name, |_| Ok(())));
+            }
+        }
+        Ok(Ok(()))
+    }
+
+    /// Renames the entry `from` to `to`. A final symlink is renamed itself.
+    /// See the module documentation for how the paths are protected.
+    pub fn rename(from: Resolved, to: Resolved) -> io::Result<()> {
+        let (from_name, to_name) = (from.entry_at()?.1, to.entry_at()?.1);
+        let from_held = from.hold()?;
+        let to_held = to.hold()?;
+        let (from_path, to_path) = (from.walked().join(from_name), to.walked().join(to_name));
+        // A held directory cannot be replaced. Only an empty directory can
+        // become a junction, so a held directory that contains another held
+        // directory cannot. The two parents have no held directory inside
+        // them, so they are checked right before and right after the rename.
+        let unchanged = || -> io::Result<()> {
+            for (held, path) in [(&from_held, &from_path), (&to_held, &to_path)] {
+                let parent = held.last().ok_or_else(|| changed(path))?;
+                if parent.as_file().metadata()?.file_type().is_symlink() {
+                    return Err(changed(path));
+                }
+            }
+            Ok(())
+        };
+        unchanged()?;
+        std::fs::rename(&from_path, &to_path)?;
+        unchanged()
+    }
+
+    /// The path the walk took to the last directory it holds.
+    fn walked(&self) -> PathBuf {
+        let mut p = self.root.clone();
+        p.extend(&self.names);
+        p
+    }
+
+    /// Opens each directory of the walk again by path, without
+    /// `FILE_SHARE_DELETE`, so that none can be renamed, deleted or replaced
+    /// while the handles are open. Fails unless each one is the same
+    /// directory the walk holds.
+    fn hold(&self) -> io::Result<Vec<Handle>> {
+        let lock = |p: &Path| {
+            std::fs::OpenOptions::new()
+                .access_mode(FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(p)
+        };
+        let mut path = self.root.clone();
+        let mut held = Vec::with_capacity(self.dirs.len());
+        for (i, walked) in self.dirs.iter().enumerate() {
+            if i > 0 {
+                path.push(&self.names[i - 1]);
+            }
+            let locked = Handle::from_file(lock(&path)?)?;
+            if locked != Handle::from_file(walked.try_clone()?)? {
+                return Err(changed(&path));
+            }
+            held.push(locked);
+        }
+        Ok(held)
+    }
+}
+
+/// The stored name of the link `name` in `dir`, opened as `link`. It is
+/// the name of the entry that folds to the same form and is the same link,
+/// looked for among at most [`MAX_LINK_SCAN`] entries. Returns `None` if
+/// `name` itself is in the directory or no match is found.
+fn stored_by_scan(dir: &File, link: &File, name: &OsStr, work: &mut Work) -> Option<OsString> {
+    let mut listed = listable(dir).ok()?;
+    let link = Handle::from_file(link.try_clone().ok()?).ok()?;
+    let folded = fold_name(&name.to_string_lossy()).into_owned();
+    let mut found = None;
+    for (i, entry) in fs_at::read_dir(&mut listed).ok()?.enumerate() {
+        if i == MAX_LINK_SCAN {
+            return None;
+        }
+        work.scanned += 1;
+        let Ok(entry) = entry else { continue };
+        let candidate = entry.name();
+        work.scanned_bytes += candidate.len();
+        if candidate == name {
+            return None;
+        }
+        if found.is_none()
+            && fold_name(&candidate.to_string_lossy()) == folded
+            && open_entry(dir, candidate).and_then(Handle::from_file).is_ok_and(|h| h == link)
+        {
+            found = Some(candidate.to_os_string());
+        }
+    }
+    found
 }
 
 #[cfg(all(test, windows))]
@@ -684,19 +933,18 @@ mod windows_tests {
     use super::super::is_unchecked_symlink;
     use super::*;
     use std::io::{Read, Write};
-    use std::path::PathBuf;
 
-    /// Creates the junction `link` to the directory `target` (junctions need
-    /// no privilege, unlike symlinks).
+    /// Creates the junction `link` to the directory `target`. Unlike
+    /// symlinks, junctions need no privilege.
     fn junction(link: &Path, target: &Path) {
         junction::create(target, link).unwrap();
     }
 
-    /// The Unix fixture, with a junction `link` to `outside` and, if the
-    /// process may create symlinks, a file symlink `real/link.txt` (whether
-    /// it could is returned).
+    /// The Unix fixture, with a junction `link` to `outside`. If the process
+    /// may create symlinks, it also has a file symlink `real/link.txt`;
+    /// the returned flag says whether it does.
     fn temp(tag: &str) -> (PathBuf, bool) {
-        let dir = std::env::temp_dir().join(format!("sand-fs-safe-{tag}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("sand-fs-win-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("real")).unwrap();
         std::fs::create_dir_all(dir.join("outside")).unwrap();
@@ -708,135 +956,89 @@ mod windows_tests {
         (dir, file_link)
     }
 
-    /// The number of names below the root.
-    fn depth(p: &Path) -> usize {
-        p.components().filter(|c| matches!(c, std::path::Component::Normal(_))).count()
+    fn follow(p: &Path) -> Resolved {
+        resolve(p, Mode::Follow)
+    }
+
+    fn entry(p: &Path) -> Resolved {
+        resolve(p, Mode::Entry)
     }
 
     #[test]
-    fn junctions_and_symlinks_are_never_followed() {
-        let (dir, file_link) = temp("nofollow");
+    fn links_are_followed_by_the_walk_and_never_by_operations() {
+        let (dir, file_link) = temp("follow");
         let mut s = String::new();
-        open_read(&dir.join("real/file.txt")).unwrap().read_to_string(&mut s).unwrap();
+        follow(&dir.join("real/file.txt")).open_read(Path::new("x")).unwrap().read_to_string(&mut s).unwrap();
         assert_eq!(s, "inside");
-        let mut links = vec!["link/file.txt"];
+        // The walk resolves junctions and symlinks, so the policy sees where they lead.
+        assert_eq!(follow(&dir.join("link/file.txt")).path(), dir.join("outside/file.txt"));
+        assert_eq!(follow(&dir.join("link/new.txt")).path(), dir.join("outside/new.txt"));
+        assert_eq!(entry(&dir.join("link")).path(), dir.join("link"));
+        assert_eq!(entry(&dir.join("link")).stat().unwrap().kind, EntryKind::Symlink);
         if file_link {
-            links.push("real/link.txt");
+            assert_eq!(follow(&dir.join("real/link.txt")).path(), dir.join("outside/file.txt"));
+            assert_eq!(entry(&dir.join("real/link.txt")).path(), dir.join("real/link.txt"));
         }
-        for p in links {
-            let e = open_read(&dir.join(p)).unwrap_err();
-            assert!(is_unchecked_symlink(&e), "{p}: {e}");
-            let e = open_write(&dir.join(p), false).unwrap_err();
-            assert!(is_unchecked_symlink(&e), "{p}: {e}");
-        }
-        assert!(is_unchecked_symlink(&open_write(&dir.join("link/new.txt"), true).unwrap_err()));
-        let mem = crate::vm::iomem::IoMemory::new(None, usize::MAX);
-        assert!(is_unchecked_symlink(&list_dir(&dir.join("link"), &mut Reservation::new(&mem)).unwrap_err()));
-        assert!(is_unchecked_symlink(&create_dir(&dir.join("link/sub")).unwrap_err()));
-        assert!(is_unchecked_symlink(&create_dir_all(&dir.join("link/a/b"), 0).unwrap_err()));
-        assert!(is_unchecked_symlink(&stat(&dir.join("link/file.txt")).unwrap_err()));
-        assert!(is_unchecked_symlink(&remove_file(&dir.join("link/file.txt")).unwrap_err()));
-        assert!(is_unchecked_symlink(&rename(&dir.join("link/file.txt"), &dir.join("stolen.txt")).unwrap_err()));
-        assert!(is_unchecked_symlink(&rename(&dir.join("real/file.txt"), &dir.join("link/stolen.txt")).unwrap_err()));
-        assert!(!dir.join("outside/new.txt").exists() && !dir.join("outside/sub").exists() && !dir.join("outside/a").exists());
-        assert!(!dir.join("outside/stolen.txt").exists() && dir.join("real/file.txt").exists());
-        assert_eq!(std::fs::read_to_string(dir.join("outside/file.txt")).unwrap(), "outside");
-        // Links are entries in their own right for stat, remove and rename.
-        assert_eq!(stat(&dir.join("link")).unwrap().kind, EntryKind::Symlink);
-        if file_link {
-            assert_eq!(stat(&dir.join("real/link.txt")).unwrap().kind, EntryKind::Symlink);
-            rename(&dir.join("real/link.txt"), &dir.join("real/moved.txt")).unwrap();
-            remove_file(&dir.join("real/moved.txt")).unwrap();
-        }
-        assert_eq!(remove_dir(&dir.join("link")).unwrap_err().kind(), io::ErrorKind::NotADirectory);
-        rename(&dir.join("link"), &dir.join("real/moved_link")).unwrap();
-        remove_file(&dir.join("real/moved_link")).unwrap();
-        assert!(std::fs::symlink_metadata(dir.join("real/moved_link")).is_err());
-        assert_eq!(std::fs::read_to_string(dir.join("outside/file.txt")).unwrap(), "outside");
+        // Names are spelled as they are stored.
+        let mut r = follow(&dir.join("REAL/FILE.TXT"));
+        r.fix_spelling();
+        assert_eq!(r.path(), dir.join("real/file.txt"));
+        // A junction that replaces the final entry after the walk is not followed.
+        let r = follow(&dir.join("real/sub"));
+        junction(&dir.join("real/sub"), &dir.join("outside"));
+        assert!(r.list_dir(&mut Reservation::new(&crate::vm::iomem::IoMemory::new(None, usize::MAX))).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
-    fn walking_refuses_junctions() {
-        let (dir, _) = temp("walk");
-        assert!(open_dir(&dir.join("real")).is_ok());
-        assert!(is_unchecked_symlink(&open_dir(&dir.join("link")).unwrap_err()));
-        assert!(is_unchecked_symlink(&open_dir(&dir.join("link/deeper")).unwrap_err()));
-        assert_eq!(open_dir(&dir.join("real/file.txt")).unwrap_err().kind(), io::ErrorKind::NotADirectory);
-        assert_eq!(open_dir(&dir.join("missing")).unwrap_err().kind(), io::ErrorKind::NotFound);
-        assert!(open_dir(&dir.join("REAL")).is_ok());
+    fn dangling_links_and_missing_components() {
+        let (dir, _) = temp("dangling");
+        junction(&dir.join("real/dangling"), &dir.join("outside/missing"));
+        let r = follow(&dir.join("real/dangling/x"));
+        assert_eq!(r.path(), dir.join("real/dangling/x"));
+        assert!(is_unchecked_symlink(&r.stat().unwrap_err()));
+        let r = follow(&dir.join("real/x/y/z"));
+        assert_eq!(r.missing_ancestors(), [dir.join("real/x"), dir.join("real/x/y")]);
+        follow(&dir.join("real/x/y/z")).create_dir_all(Path::new("x")).unwrap();
+        assert!(dir.join("real/x/y/z").is_dir());
+        assert!(!dir.join("outside/missing").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn regular_files_and_directories() {
         let (dir, _) = temp("ops");
-        let mut f = open_write(&dir.join("real/new.txt"), false).unwrap();
-        f.write_all(b"one").unwrap();
-        drop(f);
-        open_write(&dir.join("real/new.txt"), true).unwrap().write_all(b"two").unwrap();
+        follow(&dir.join("real/new.txt")).open_write(Path::new("x"), false).unwrap().write_all(b"one").unwrap();
+        follow(&dir.join("real/new.txt")).open_write(Path::new("x"), true).unwrap().write_all(b"two").unwrap();
         assert_eq!(std::fs::read_to_string(dir.join("real/new.txt")).unwrap(), "onetwo");
-        open_write(&dir.join("real/NEW.txt"), true).unwrap().write_all(b"!").unwrap();
-        let m = stat(&dir.join("real/new.txt")).unwrap();
-        assert_eq!((m.kind, m.size), (EntryKind::File, 7));
-        assert!(m.modified.is_some());
-        // Writing truncates.
-        open_write(&dir.join("real/new.txt"), false).unwrap().write_all(b"3").unwrap();
-        assert_eq!(std::fs::read_to_string(dir.join("real/new.txt")).unwrap(), "3");
-        assert_eq!(stat(&dir).unwrap().kind, EntryKind::Dir);
-        let root = dir.ancestors().last().unwrap();
-        assert_eq!(stat(root).unwrap().kind, EntryKind::Dir);
-        create_dir_all(&dir.join("real/a/b/c"), 0).unwrap();
-        create_dir_all(&dir.join("real/a/b/c"), 0).unwrap();
-        assert_eq!(create_dir_all(&dir.join("real/file.txt"), 0).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
-        assert_eq!(create_dir_all(&dir.join("real/file.txt/sub"), 0).unwrap_err().kind(), io::ErrorKind::NotADirectory);
-        // Components that must exist are not created.
-        let depth = depth(&dir.join("real/x"));
-        assert_eq!(create_dir_all(&dir.join("real/x/y"), depth).unwrap_err().kind(), io::ErrorKind::NotFound);
-        assert!(!dir.join("real/x").exists());
-        create_dir_all(&dir.join("real/x/y"), depth - 1).unwrap();
-        create_dir(&dir.join("real/a/d")).unwrap();
-        assert_eq!(create_dir(&dir.join("real/a/d")).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        let m = follow(&dir.join("real/new.txt")).stat().unwrap();
+        assert_eq!((m.kind, m.size), (EntryKind::File, 6));
+        follow(&dir.join("real/a")).create_dir().unwrap();
+        follow(&dir.join("real/a/b")).create_dir().unwrap();
         let mem = crate::vm::iomem::IoMemory::new(None, usize::MAX);
-        let mut names = list_dir(&dir.join("real/a"), &mut Reservation::new(&mem)).unwrap();
-        names.sort();
-        assert_eq!(names, ["b", "d"]);
-        assert!(!list_dir(root, &mut Reservation::new(&mem)).unwrap().is_empty());
-        assert_eq!(open_read(&dir.join("real/a")).unwrap_err().kind(), io::ErrorKind::InvalidInput);
-        assert_eq!(open_write(&dir.join("real/a"), false).unwrap_err().kind(), io::ErrorKind::IsADirectory);
-        assert_eq!(open_read(&dir.join("real/missing")).unwrap_err().kind(), io::ErrorKind::NotFound);
-        assert_eq!(remove_file(&dir.join("real/a/d")).unwrap_err().kind(), io::ErrorKind::IsADirectory);
-        assert_eq!(remove_dir(&dir.join("real/file.txt")).unwrap_err().kind(), io::ErrorKind::NotADirectory);
-        assert_eq!(remove_dir(&dir.join("real/a")).unwrap_err().kind(), io::ErrorKind::DirectoryNotEmpty);
-        remove_dir(&dir.join("real/a/d")).unwrap();
-        rename(&dir.join("real/a"), &dir.join("real/z")).unwrap();
-        assert!(dir.join("real/z/b/c").is_dir());
-        // Across directories, replacing a file.
-        rename(&dir.join("real/new.txt"), &dir.join("real/z/b/file.txt")).unwrap();
-        rename(&dir.join("real/z/b/file.txt"), &dir.join("real/file.txt")).unwrap();
-        assert_eq!(std::fs::read_to_string(dir.join("real/file.txt")).unwrap(), "3");
-        let e = rename(&dir.join("real/file.txt"), &dir.join("real/missing/f.txt")).unwrap_err();
-        assert_eq!(e.kind(), io::ErrorKind::NotFound);
-        remove_file(&dir.join("real/file.txt")).unwrap();
-        assert!(!dir.join("real/file.txt").exists());
+        assert_eq!(follow(&dir.join("real/a")).list_dir(&mut Reservation::new(&mem)).unwrap(), ["b"]);
+        assert_eq!(entry(&dir.join("real/a")).remove_dir().unwrap_err().kind(), io::ErrorKind::DirectoryNotEmpty);
+        entry(&dir.join("real/a/b")).remove_dir().unwrap();
+        Resolved::rename(entry(&dir.join("real/a")), entry(&dir.join("real/z"))).unwrap();
+        assert!(dir.join("real/z").is_dir());
+        assert!(is_unchecked_symlink(&Resolved::rename(entry(&dir.join("link/file.txt")), entry(&dir.join("stolen.txt"))).unwrap_err()));
+        entry(&dir.join("real/new.txt")).remove_file().unwrap();
+        assert!(!dir.join("real/new.txt").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Handle-relative opens take names literally, so names that Win32
-    /// path functions would alter (and the policy would not see) are denied.
+    /// Handle-relative opens take names literally, so names that Win32 path
+    /// functions would change, and the policy would not see, are denied.
     #[test]
     fn names_win32_treats_specially_are_denied() {
         let (dir, _) = temp("names");
-        for name in ["x.", "x ", "file.txt:stream", "file.txt::$DATA", "CON", "nul.txt", "Com1", "LPT9.log", "aux ", "file.txt\0x"] {
-            let e = open_write(&dir.join("real").join(name), false).unwrap_err();
+        for name in ["x.", "x ", "file.txt:stream", "file.txt::$DATA", "CON", "nul.txt", "Com1", "LPT9.log", "aux "] {
+            let e = follow(&dir.join("real").join(name)).open_write(Path::new("x"), false).unwrap_err();
             assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{name}: {e}");
-            assert_eq!(open_read(&dir.join(name).join("x.txt")).unwrap_err().kind(), io::ErrorKind::InvalidInput, "{name}");
-            assert_eq!(create_dir(&dir.join("real").join(name)).unwrap_err().kind(), io::ErrorKind::InvalidInput, "{name}");
         }
         for name in ["console", "COM10", "x.y", "LPT"] {
-            open_write(&dir.join("real").join(name), false).unwrap();
+            follow(&dir.join("real").join(name)).open_write(Path::new("x"), false).unwrap();
         }
-        assert_eq!(std::fs::read_to_string(dir.join("real/file.txt")).unwrap(), "inside");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

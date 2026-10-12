@@ -570,7 +570,7 @@ impl Session {
         // Reads of standard input wait until the front end has its input.
         let _stdin = vm.host.stdin.clone().try_lock_owned().ok();
         let r = vm.drive(None).await;
-        vm.flush_stdout();
+        let r = r.and_then(|stop| vm.drain_output().map(|()| stop).map_err(Trap::from_ctl));
         let r = match r {
             Ok(Stop::Prompt(cap)) => {
                 st.deferred_prompt = Some(cap);

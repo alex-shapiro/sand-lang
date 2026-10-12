@@ -927,9 +927,12 @@ impl Checker<'_> {
         let mut found: Vec<Option<HExpr>> = vec![None; reqs.len()];
         // Resolving a placeholder can determine the type of another one (that
         // may come earlier), so retry until nothing changes before reporting.
-        loop {
+        'retry: loop {
             let (mut progress, mut pending) = (false, false);
             for (r, slot) in reqs.iter().zip(&mut found).filter(|(_, s)| s.is_none()) {
+                if !self.budget.charge(1) {
+                    break 'retry;
+                }
                 match self.resolve_evidence(r.ty, r.tr, 0) {
                     Ok(x) => {
                         *slot = Some(x);

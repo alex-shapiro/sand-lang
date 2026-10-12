@@ -224,9 +224,9 @@ impl Policy {
         }
     }
 
-    /// Whether a deny rule may match `path` or its subpaths, so that moving
-    /// or removing the whole tree at `path` must be denied even if `path`
-    /// itself is allowed.
+    /// Whether a deny rule may match `path` or a path below it. If one may,
+    /// the tree at `path` must be scanned for protected entries
+    /// ([`Policy::protects_normalized_in`]) before it is moved or removed.
     pub fn denies_under(&self, path: &Path) -> bool {
         self.denies_under_in(path, PathSpace::Host)
     }
@@ -244,6 +244,17 @@ impl Policy {
     pub(crate) fn denies_under_normalized_in(&self, path: &Path, space: PathSpace) -> bool {
         match self {
             Policy::Rules(r) => r.denies_under_normalized_in(path, space),
+            _ => false,
+        }
+    }
+
+    /// Whether a deny rule decides reading or writing the entry at `path`
+    /// (normalized in `space`). Such an entry protects every tree it is in:
+    /// none of them may be moved or removed as a whole, even if the policy
+    /// allows writing the tree's root.
+    pub(crate) fn protects_normalized_in(&self, path: &Path, space: PathSpace) -> bool {
+        match self {
+            Policy::Rules(r) => r.protects_normalized_in(path, space),
             _ => false,
         }
     }

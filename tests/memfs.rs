@@ -64,6 +64,19 @@ print(fs.rename("/data/in.txt", "/out/in.txt").is_ok())
     r.unwrap();
     assert_eq!(out, "permission_denied\npermission_denied\ntrue\n");
     assert_eq!(fs.read("/data/secret/key.txt").unwrap(), b"s3cret");
+    // A tree without a protected entry can be moved and removed.
+    fs.write("/data/secret/id.key", "k").unwrap();
+    fs.write("/out/sub/a.txt", "a").unwrap();
+    let rules = RulePolicy::new().allow_write("/").deny_read("/data/secret/id.key").deny_read("/out/sub/missing.key");
+    let src = r#"import fs
+print(fs.rename("/data", "/elsewhere").unwrap_err().kind)
+fs.rename("/out", "/out2")?
+fs.remove_dir("/out2", recursive: true)?
+print(fs.exists("/out2")?)
+"#;
+    let (r, out) = run(Config::new().policy(Policy::rules(rules)).memory_fs(fs.clone()), src);
+    r.unwrap();
+    assert_eq!(out, "permission_denied\nfalse\n");
 }
 
 #[test]

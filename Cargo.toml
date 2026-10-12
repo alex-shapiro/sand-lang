@@ -20,7 +20,7 @@ default = ["os"]
 # module and script imports use an in-memory file system, `MemFs`), network
 # sockets (the `net` and `http` modules), the process's standard input and
 # environment. Not available on wasm32-unknown-unknown.
-os = ["dep:rustix", "dep:fs_at", "dep:same-file", "tokio/net", "tokio/io-std", "tokio/macros"]
+os = ["dep:rustix", "dep:fs_at", "dep:same-file", "dep:winx", "tokio/net", "tokio/io-std", "tokio/macros"]
 # TLS for `https` and `net.connect_tls` (rustls with ring).
 tls = ["os", "dep:rustls", "dep:tokio-rustls", "dep:webpki-roots"]
 
@@ -58,6 +58,8 @@ rustix = { version = "1", optional = true, default-features = false, features = 
 [target.'cfg(windows)'.dependencies]
 fs_at = { version = "0.2.1", optional = true }
 same-file = { version = "1.0.6", optional = true }
+# Reads link targets and final paths through handles (`files/windows.rs`).
+winx = { version = "0.36", optional = true }
 
 [dev-dependencies]
 proptest = "1"
@@ -65,6 +67,9 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "io
 
 [target.'cfg(windows)'.dev-dependencies]
 junction = "2"
+
+[target.'cfg(unix)'.dev-dependencies]
+nix = { version = "0.29", default-features = false, features = ["resource"] }
 
 [[test]]
 name = "examples"

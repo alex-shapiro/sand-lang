@@ -886,3 +886,30 @@ fn private_networks_are_denied_by_default() {
         run(&["--allow-net=*", "--allow-private-net", "--deny-net=127.0.0.0/8"]).starts_with("Err(Error { kind: \"permission_denied\"")
     );
 }
+
+/// If a script's standard output is a full pipe, then the script stops at its
+/// time limit.
+#[test]
+fn a_blocked_stdout_does_not_outlast_the_time_limit() {
+    let dir = script("blocked", "while true { print(\"x\".repeat(1000)) }");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sand"))
+        .args(["run", "main.sand", "--max-time=300ms"])
+        .current_dir(dir.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("cannot start sand");
+    let mut stderr = child.stderr.take().unwrap();
+    let mut err = String::new();
+    // Read the error message while the pipe for standard output is still full.
+    let mut buf = [0u8; 256];
+    while !err.contains("time limit exceeded") {
+        let n = stderr.read(&mut buf).unwrap();
+        assert!(n > 0, "stderr closed: {err}");
+        err.push_str(&String::from_utf8_lossy(&buf[..n]));
+    }
+    let mut out = Vec::new();
+    child.stdout.take().unwrap().read_to_end(&mut out).unwrap();
+    assert_eq!(child.wait().unwrap().code(), Some(3));
+    assert!(out.len() > 1 << 20);
+}

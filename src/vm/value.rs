@@ -569,6 +569,26 @@ impl KeyIndex {
         }
     }
 
+    /// For adding key `k` as the `count`th key, densifying first as
+    /// `map_push` does: an upper bound of the bytes the index allocates, and
+    /// the index's length if it is then dense.
+    fn insert_growth(&self, k: Value, count: usize) -> (usize, Option<usize>) {
+        const SLOT: usize = std::mem::size_of::<u32>();
+        match (self, k) {
+            (KeyIndex::Dense { slots, count: n }, Value::Int(i)) if dense_fits(i, *n) => {
+                let len = slots.len().max(i as usize + 1);
+                let cap = slots.capacity();
+                (if len <= cap { 0 } else { len.max(2 * cap).max(4) * SLOT }, Some(len))
+            }
+            (KeyIndex::Dense { count: n, .. }, _) => (KeyTable::bytes_for(n + 1), None),
+            (KeyIndex::Hashed(t), _) if t.len() < t.capacity() => (0, None),
+            (KeyIndex::Hashed(t), _) => {
+                let dense = 8 * count + 64;
+                (KeyTable::bytes_for(t.capacity() + 1).max(dense * SLOT), Some(dense))
+            }
+        }
+    }
+
     /// The memory the index owns.
     pub fn bytes(&self) -> usize {
         match self {
@@ -659,6 +679,28 @@ impl MapObj {
         self.index.bytes() + self.vals.capacity() * VALUE_SIZE
     }
 
+    /// An upper bound of the bytes that adding the new key `k` allocates for
+    /// the index and the dense values (not the entries).
+    pub fn index_growth(&self, k: Value) -> usize {
+        let count = self.live + 1;
+        let (index, dense) = self.index.insert_growth(k, count);
+        // The dense values, sized as `set_dense` sizes them.
+        let vals = match dense {
+            Some(len) if count * 8 >= len => {
+                let cap = self.vals.capacity();
+                if self.vals.is_empty() {
+                    if count * 4 >= len { len * VALUE_SIZE } else { 0 }
+                } else if len > cap {
+                    len.max(2 * cap) * VALUE_SIZE
+                } else {
+                    0
+                }
+            }
+            _ => 0,
+        };
+        index + vals
+    }
+
     /// Keeps `vals` in step after key `k` was given value `v` (or removed:
     /// `Value::Uninit`), the index and entries being up to date.
     pub fn set_dense(&mut self, k: Value, v: Value) {
@@ -704,6 +746,12 @@ impl SetObj {
     pub fn clear(&mut self) {
         *self = SetObj::default();
     }
+
+    /// An upper bound of the bytes that adding the new key `k` allocates for
+    /// the index (not the entries).
+    pub fn index_growth(&self, k: Value) -> usize {
+        self.index.insert_growth(k, self.live + 1).0
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -720,9 +768,16 @@ pub struct TaskObj {
     pub result: Value,
 }
 
+/// A channel. Values enter its queue only at the back ([`ChannelObj::push`])
+/// and leave it only at the front. The collector relies on this (see
+/// `Heap::channel_mut`).
 #[derive(Debug, Default)]
 pub struct ChannelObj {
-    pub queue: VecDeque<Value>,
+    queue: VecDeque<Value>,
+    /// The number of values pushed since the heap last remembered the
+    /// channel. Only these values of the queue can be young.
+    pub(super) pushed: usize,
+    /// The most values the queue holds, or 0 if it is unbounded.
     pub capacity: usize,
     pub closed: bool,
     /// Fibers blocked in `recv`: (fiber, wait generation).
@@ -731,6 +786,58 @@ pub struct ChannelObj {
     pub receivers_prune_at: usize,
     /// Fibers blocked in `send`, with their pending values.
     pub senders: VecDeque<(u32, u64, Value)>,
+}
+
+impl ChannelObj {
+    pub fn new(capacity: usize) -> ChannelObj {
+        ChannelObj { capacity, ..Default::default() }
+    }
+
+    /// The number of values queued.
+    pub fn len(&self) -> usize {
+        self.queue.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
+    /// Whether a value can be queued without blocking the sender.
+    pub fn has_room(&self) -> bool {
+        self.capacity == 0 || self.queue.len() < self.capacity
+    }
+
+    pub(super) fn queue(&self) -> &VecDeque<Value> {
+        &self.queue
+    }
+
+    /// Makes room in the queue for `extra` more values.
+    pub(super) fn reserve_exact(&mut self, extra: usize) {
+        self.queue.reserve_exact(extra);
+    }
+
+    /// Appends `v` to the queue.
+    pub(super) fn push(&mut self, v: Value) {
+        self.queue.push_back(v);
+        self.pushed = self.pushed.saturating_add(1);
+    }
+
+    /// Takes the value at the front of the queue and moves the first blocked
+    /// sender's value into the queue. If the queue is empty, takes the first
+    /// blocked sender's value directly. Returns the value and the sender to
+    /// wake, if any.
+    pub fn take(&mut self) -> Option<(Value, Option<(u32, u64)>)> {
+        match self.queue.pop_front() {
+            Some(v) => {
+                let woken = self.senders.pop_front().map(|(f, g, sv)| {
+                    self.push(sv);
+                    (f, g)
+                });
+                Some((v, woken))
+            }
+            None => self.senders.pop_front().map(|(f, g, v)| (v, Some((f, g)))),
+        }
+    }
 }
 
 /// An object owned by a native module (sockets, compiled regexes, ...).
@@ -893,7 +1000,8 @@ impl std::fmt::Debug for Obj {
     }
 }
 
-const VALUE_SIZE: usize = std::mem::size_of::<Value>();
+/// The size of a value in bytes.
+pub const VALUE_SIZE: usize = std::mem::size_of::<Value>();
 
 const _: () = assert!(std::mem::size_of::<Obj>() == 32);
 

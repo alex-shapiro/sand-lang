@@ -5,14 +5,17 @@
 //! escape, holding the directories it passes), checks the policy on the
 //! resolved path, then acts through the held directories without following
 //! a symlink, so it reaches exactly the checked location even if the file
-//! system changes in between.
+//! system changes in between. Host system calls run on worker threads
+//! (`Vm::offload`), so the run's limits apply even if a call does not
+//! return.
 
 use super::io_kind;
 use crate::check::ModKind;
 use crate::engine::Registry;
 use crate::files::{EntryKind, Fs, Mode, OpenMode, OpenedFile, Target, is_unchecked_symlink, too_many_open_files, unchecked_symlink};
-use crate::policy::{Capability, Decision, MAX_PATH_BYTES};
+use crate::policy::{Capability, Decision, MAX_PATH_BYTES, Policy};
 use crate::vm::iomem::{Reservation, ResourceSlot};
+use crate::vm::meter::{Allowance, Stopped};
 use crate::vm::value::{NativeObject, Obj, Value, to_usize_saturating};
 use crate::vm::{Ctl, CtlKind, NResult, Vm};
 use std::io;
@@ -169,19 +172,30 @@ pub fn register(r: &mut Registry) {
                 return Ok(e);
             }
         }
-        // Moving a directory moves its tree to below `to`, and replacing a
-        // directory `to` replaces its tree.
-        let moves_tree = is_dir(vm, &from);
-        for (shown, t, tree) in [(&shown, &from, moves_tree), (&shown_to, &to, moves_tree || is_dir(vm, &to))] {
-            if tree && let Some(e) = protected_tree(vm, shown, &t.path) {
-                return Ok(e);
-            }
-        }
         // A memory file system walks the moved tree (to check its paths' lengths).
         if let Some(m) = vm.host.fs.memory() {
             vm.charge(m.entries_below(&from.path) as u64)?;
         }
-        run(vm, shown, move |fs| fs.rename(from, to), ok_unit)
+        // Moving a directory moves every entry below it, and replacing the
+        // directory `to` removes every entry below that.
+        let (fs, policy) = (vm.host.fs.clone(), vm.host.policy.clone());
+        let mut res = vm.io_reservation();
+        let renamed = vm.offload(move |allowance| -> Result<io::Result<()>, (Halt, bool)> {
+            for (t, moved_to, is_to) in [(&from, Some(to.path.as_path()), false), (&to, None, true)] {
+                if fs.stat(t).is_ok_and(|m| m.kind == EntryKind::Dir)
+                    && let Err(e) = scan_tree(&fs, &policy, t, moved_to, &mut res, allowance).map_err(|h| (h, is_to))?
+                {
+                    return Ok(Err(e));
+                }
+            }
+            Ok(fs.rename(from, to))
+        })?;
+        Ok(match renamed {
+            Ok(Ok(())) => vm.ok(Value::Unit),
+            Ok(Err(e)) => vm.err_value(io_kind(&e), &format!("{shown}: {e}")),
+            Err((Halt::Stopped, _)) => unreachable!("`offload` reports a stopped walk"),
+            Err((_, is_to)) => protected(vm, if is_to { &shown_to } else { &shown }),
+        })
     });
     r.add_builtin("fs.copy", |vm, a| {
         let (shown, mut from) = target!(vm, a[0]);
@@ -201,11 +215,11 @@ pub fn register(r: &mut Registry) {
         if let Some(e) = check(vm, &mut t, Access::Read, &shown)? {
             return Ok(e);
         }
-        let stat = move |fs: &Fs| match fs.stat(&t)? {
-            m if m.kind == EntryKind::Symlink => Err(unchecked_symlink(t.path.file_name().unwrap_or_default())),
-            m => Ok(m),
+        let stat = match vm.host.fs.stat(&t) {
+            Ok(m) if m.kind == EntryKind::Symlink => Err(unchecked_symlink(t.path.file_name().unwrap_or_default())),
+            r => r,
         };
-        run(vm, shown, stat, |vm, m| {
+        settle(vm, shown, stat, |vm, m| {
             let modified = vm.option(m.modified.map(Value::Int));
             let size = Value::Int(i64::try_from(m.size).unwrap_or(i64::MAX));
             let (is_file, is_dir) = (Value::Bool(m.kind == EntryKind::File), Value::Bool(m.kind == EntryKind::Dir));
@@ -264,7 +278,8 @@ fn target(vm: &mut Vm, p: Value, mode: Mode) -> Result<Result<(String, Target), 
     // in the length.
     vm.charge(4 * joined.components().count() as u64)?;
     vm.charge_bytes(joined.as_os_str().len().saturating_mul(4))?;
-    let t = vm.host.fs.target(&crate::policy::lexical(&joined), mode);
+    let (fs, lexical) = (vm.host.fs.clone(), crate::policy::lexical(&joined));
+    let t = vm.offload(move |_| fs.target(&lexical, mode))?;
     charge_work(vm, &t)?;
     Ok(Ok((shown, t)))
 }
@@ -313,7 +328,11 @@ fn check(vm: &mut Vm, t: &mut Target, access: Access, shown: &str) -> Result<Opt
             Some(_) => return Ok(Some(denied(vm, &cap(&t.path), shown))),
             None => {
                 let before = t.work();
-                t.fix_spelling();
+                let mut owned = t.take();
+                *t = vm.offload(move |_| {
+                    owned.fix_spelling();
+                    owned
+                })?;
                 let after = t.work();
                 vm.charge(4 * after.scanned.saturating_sub(before.scanned) as u64)?;
                 vm.charge_bytes(after.scanned_bytes.saturating_sub(before.scanned_bytes).saturating_mul(4))?;
@@ -331,26 +350,80 @@ fn deny_path(vm: &mut Vm, cap: Capability, shown: &str) -> Result<Option<Value>,
     Ok(Some(denied(vm, &cap, shown)))
 }
 
-/// The `Err(permission_denied)` value if a deny rule may match something in
-/// the tree at `path` (which is about to be moved, replaced or removed).
-fn protected_tree(vm: &mut Vm, shown: &str, path: &Path) -> Option<Value> {
-    let protected = vm.host.policy.denies_under_normalized_in(path, vm.host.fs.space());
-    protected.then(|| vm.err_value("permission_denied", &format!("permission denied: {shown} contains paths protected by the policy")))
+/// Why a walk of a directory tree on a worker thread stopped early.
+enum Halt {
+    /// A charge to its [`Allowance`] failed.
+    Stopped,
+    /// The policy needs to ask the user about this capability.
+    Prompt(Capability),
+    /// The policy protects an entry of the tree (see [`scan_tree`]).
+    Protected,
+    /// The policy denies writing this entry.
+    Denied(PathBuf),
 }
 
-/// Whether `t` is a directory (not a symlink to one).
-fn is_dir(vm: &Vm, t: &Target) -> bool {
-    vm.host.fs.stat(t).is_ok_and(|m| m.kind == EntryKind::Dir)
+impl From<Stopped> for Halt {
+    fn from(_: Stopped) -> Halt {
+        Halt::Stopped
+    }
 }
 
-/// Runs the file system operation `op`, then `finish` converts its result.
-/// I/O errors become `Err(Error)` values mentioning `shown`. Operations run
-/// on the VM thread: on the host they are system calls (a few microseconds
-/// each), cheaper than handing them to another thread, and they count
-/// towards the run's CPU time.
-fn run<T>(vm: &mut Vm, shown: String, op: impl FnOnce(&Fs) -> io::Result<T>, finish: impl FnOnce(&mut Vm, T) -> NResult) -> NResult {
-    let result = op(&vm.host.fs);
-    match result {
+/// Charges for visiting the entry `path` of a tree, which includes reading
+/// the entry, checking it against the policy and acting on it.
+fn charge_entry(allowance: &mut Allowance, path: &Path) -> Result<(), Stopped> {
+    allowance.charge(4 + SYSCALL_FUEL)?;
+    allowance.charge_bytes(path.as_os_str().len().saturating_mul(4))
+}
+
+/// Fails with [`Halt::Protected`] if the policy protects an entry of the
+/// directory tree at `t` (see [`Policy::protects_normalized_in`]). If the
+/// tree is being moved to `to`, the entry's new path is checked as well. A
+/// tree with a protected entry may not be moved or removed as a whole. The
+/// tree is scanned only if a deny rule may match a path in it.
+fn scan_tree(
+    fs: &Fs,
+    policy: &Policy,
+    t: &Target,
+    to: Option<&Path>,
+    res: &mut Reservation,
+    allowance: &mut Allowance,
+) -> Result<io::Result<()>, Halt> {
+    let space = fs.space();
+    if !policy.denies_under_normalized_in(&t.path, space) && to.is_none_or(|to| !policy.denies_under_normalized_in(to, space)) {
+        return Ok(Ok(()));
+    }
+    fs.walk_tree(t, res, false, |path| {
+        charge_entry(allowance, path)?;
+        let moved = to.map(|to| to.join(path.strip_prefix(&t.path).unwrap_or(path)));
+        if policy.protects_normalized_in(path, space) || moved.is_some_and(|m| policy.protects_normalized_in(&m, space)) {
+            return Err(Halt::Protected);
+        }
+        Ok(Ok(()))
+    })
+}
+
+/// The error value for a tree that holds an entry the policy protects.
+fn protected(vm: &mut Vm, shown: &str) -> Value {
+    vm.err_value("permission_denied", &format!("permission denied: {shown} contains paths protected by the policy"))
+}
+
+/// Runs the file system operation `op` on a worker thread (see
+/// `Vm::offload`) and converts its result with [`settle`].
+fn run<T: Send + 'static>(
+    vm: &mut Vm,
+    shown: String,
+    op: impl FnOnce(&Fs) -> io::Result<T> + Send + 'static,
+    finish: impl FnOnce(&mut Vm, T) -> NResult,
+) -> NResult {
+    let fs = vm.host.fs.clone();
+    let r = vm.offload(move |_| op(&fs))?;
+    settle(vm, shown, r, finish)
+}
+
+/// Converts the result `r` of an operation on `shown` with `finish`. An I/O
+/// error becomes an `Err(Error)` value that names `shown`.
+fn settle<T>(vm: &mut Vm, shown: String, r: io::Result<T>, finish: impl FnOnce(&mut Vm, T) -> NResult) -> NResult {
+    match r {
         Ok(v) => finish(vm, v),
         Err(e) => Ok(vm.err_value(io_kind(&e), &format!("{shown}: {e}"))),
     }
@@ -365,42 +438,44 @@ fn ok_bool(vm: &mut Vm, b: bool) -> NResult {
 }
 
 /// `remove_tree(path)`: removes the directory `path` (not a symlink to
-/// one) and everything below it. The whole tree must be writable (no deny
-/// rule may match below it), and each entry is checked against the policy before it
-/// is removed; the walk opens each directory once (`Fs::remove_tree`).
+/// one) and everything below it. If the policy protects an entry of the
+/// tree ([`scan_tree`]), nothing is removed. Each entry is also checked
+/// against the policy just before it is removed.
 fn remove_tree(vm: &mut Vm, a: &[Value]) -> NResult {
     let (shown, mut t) = entry_target!(vm, a[0]);
     if let Some(e) = check(vm, &mut t, Access::Write, &shown)? {
         return Ok(e);
     }
-    if is_dir(vm, &t)
-        && let Some(e) = protected_tree(vm, &shown, &t.path)
-    {
-        return Ok(e);
-    }
-    let fs = vm.host.fs.clone();
-    let root = t.path.clone();
+    let (fs, permits, root) = (vm.host.fs.clone(), vm.permits(), t.path.clone());
     let mut res = vm.io_reservation();
-    let removed = fs.remove_tree(t, &mut res, |path| -> Result<io::Result<()>, Ctl> {
-        // Reading the entry, checking it and removing it.
-        vm.charge(4 + SYSCALL_FUEL)?;
-        vm.charge_bytes(path.as_os_str().len().saturating_mul(4))?;
-        let cap = Capability::FsWrite(path.to_path_buf());
-        if vm.permit_normalized(&cap)? {
-            return Ok(Ok(()));
+    let removed = vm.offload(move |allowance| -> Result<io::Result<()>, Halt> {
+        if fs.stat(&t).is_ok_and(|m| m.kind == EntryKind::Dir)
+            && let Err(e) = scan_tree(&fs, &permits.policy, &t, None, &mut res, allowance)?
+        {
+            return Ok(Err(e));
         }
+        fs.walk_tree(&t, &mut res, true, |path| {
+            charge_entry(allowance, path)?;
+            let cap = Capability::FsWrite(path.to_path_buf());
+            match permits.permit_normalized(&cap) {
+                Ok(true) => Ok(Ok(())),
+                Ok(false) => Err(Halt::Denied(path.to_path_buf())),
+                Err(()) => Err(Halt::Prompt(cap)),
+            }
+        })
+    })?;
+    Ok(match removed {
+        Ok(Ok(())) => vm.ok(Value::Unit),
+        Ok(Err(e)) => vm.err_value(io_kind(&e), &format!("{shown}: {e}")),
+        Err(Halt::Protected) => protected(vm, &shown),
         // Named as the script would name it: below the path it gave.
-        let below = path.strip_prefix(&root).unwrap_or(path);
-        let message = format!("permission denied: write {}", Path::new(&shown).join(below).display());
-        Ok(Err(io::Error::new(io::ErrorKind::PermissionDenied, message)))
-    });
-    drop(res);
-    Ok(match removed? {
-        Ok(()) => vm.ok(Value::Unit),
-        Err(e) if e.kind() == io::ErrorKind::PermissionDenied && e.to_string().starts_with("permission denied: write") => {
-            vm.err_value("permission_denied", &e.to_string())
+        Err(Halt::Denied(path)) => {
+            let below = path.strip_prefix(&root).unwrap_or(&path);
+            let message = format!("permission denied: write {}", Path::new(&shown).join(below).display());
+            vm.err_value("permission_denied", &message)
         }
-        Err(e) => vm.err_value(io_kind(&e), &format!("{shown}: {e}")),
+        Err(Halt::Prompt(cap)) => return Err(Ctl::need_permission(cap)),
+        Err(Halt::Stopped) => unreachable!("`offload` reports a stopped walk"),
     })
 }
 
@@ -433,12 +508,12 @@ fn file_kind(vm: &mut Vm, p: Value, test: fn(EntryKind) -> bool) -> NResult {
     if let Some(e) = check(vm, &mut t, Access::Read, &shown)? {
         return Ok(e);
     }
-    let op = move |fs: &Fs| match fs.stat(&t) {
+    let kind = match vm.host.fs.stat(&t) {
         Ok(m) => Ok(test(m.kind)),
         Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) || is_unchecked_symlink(&e) => Ok(false),
         Err(e) => Err(e),
     };
-    run(vm, shown, op, ok_bool)
+    settle(vm, shown, kind, ok_bool)
 }
 
 // ----------------------------------------------------------------------
@@ -462,7 +537,9 @@ struct FileObj {
 }
 
 struct OpenState {
-    file: OpenedFile,
+    /// `None` if an operation on a worker still holds the file because the
+    /// VM stopped waiting for it.
+    file: Option<OpenedFile>,
     /// Counts the file against `max_open_resources` while it is open.
     _slot: ResourceSlot,
     /// Read ahead of the position: `buf[at..]` has not been read yet. Its
@@ -492,7 +569,30 @@ impl NativeObject for FileObj {
     }
 }
 
+impl Drop for FileObj {
+    fn drop(&mut self) {
+        // Closing a file can block, so a file that is garbage collected while open is closed on a worker.
+        #[cfg(feature = "os")]
+        if let Some(st) = &mut self.open
+            && let Some(file @ OpenedFile::Host(_)) = st.file.take()
+        {
+            crate::platform::offload(move || drop(file));
+        }
+    }
+}
+
 impl OpenState {
+    /// Runs `op` on the file on a worker thread (see `Vm::offload`).
+    fn io<T: Send + 'static>(&mut self, vm: &Vm, op: impl FnOnce(&mut OpenedFile) -> T + Send + 'static) -> Result<T, Ctl> {
+        let mut file = self.file.take().ok_or_else(|| Ctl::panic("internal error: a file without its file"))?;
+        let (file, t) = vm.offload(move |_| {
+            let t = op(&mut file);
+            (file, t)
+        })?;
+        self.file = Some(file);
+        Ok(t)
+    }
+
     fn unread(&self) -> usize {
         self.buf.len() - self.at
     }
@@ -529,9 +629,14 @@ impl OpenState {
     fn fill(&mut self, vm: &Vm) -> Result<io::Result<usize>, Ctl> {
         vm.charge(SYSCALL_FUEL)?;
         let old = self.buf.len();
-        self.buf.resize(old + FILE_BUFFER, 0);
-        let r = self.file.read(&mut self.buf[old..]);
-        self.buf.truncate(old + *r.as_ref().unwrap_or(&0));
+        let mut buf = std::mem::take(&mut self.buf);
+        buf.resize(old + FILE_BUFFER, 0);
+        let (mut buf, r) = self.io(vm, move |f| {
+            let r = f.read(&mut buf[old..]);
+            (buf, r)
+        })?;
+        buf.truncate(old + *r.as_ref().unwrap_or(&0));
+        self.buf = buf;
         Ok(r)
     }
 
@@ -544,23 +649,25 @@ impl OpenState {
         }
     }
 
-    /// Drops what was read ahead, moving the file back to the position the
-    /// script sees (before writing or seeking).
-    fn unbuffer(&mut self) -> io::Result<()> {
+    /// Discards the data read ahead, before a write or a seek, and returns
+    /// its length. The caller must then move the file's position back by
+    /// that length (see [`unbuffer`]).
+    fn take_unread(&mut self) -> u64 {
         let unread = self.unread() as u64;
-        if unread > 0 {
-            let pos = self.file.position()?;
-            self.file.seek(pos.saturating_sub(unread))?;
-        }
         self.buf.clear();
         self.at = 0;
-        Ok(())
+        unread
     }
+}
 
-    /// The position the script sees.
-    fn position(&mut self) -> io::Result<u64> {
-        Ok(self.file.position()?.saturating_sub(self.unread() as u64))
+/// Moves the position of `f` back by the `unread` bytes that were read
+/// ahead, to the position the script expects.
+fn unbuffer(f: &mut OpenedFile, unread: u64) -> io::Result<()> {
+    if unread > 0 {
+        let pos = f.position()?;
+        f.seek(pos.saturating_sub(unread))?;
     }
+    Ok(())
 }
 
 /// Whether `bytes` more fit in the memory limit, asking for a collection
@@ -593,7 +700,7 @@ enum Needs {
 /// opened for what `needs`, is an error too.
 fn with_file(vm: &mut Vm, v: Value, needs: Needs, op: impl FnOnce(&mut Vm, &mut OpenState) -> Result<io::Result<Value>, Ctl>) -> NResult {
     let f = vm.heap.native_mut::<FileObj>(v).ok_or_else(|| Ctl::panic("not a file"))?;
-    if f.open.is_none() {
+    if f.open.as_ref().is_none_or(|o| o.file.is_none()) {
         let msg = format!("{}: file closed", f.shown);
         return Ok(vm.err_value("closed", &msg));
     }
@@ -641,17 +748,20 @@ fn register_file(r: &mut Registry) {
                 // A large read goes straight into its value: at most what
                 // is left of the file (as far as it is known).
                 vm.charge(2 * SYSCALL_FUEL)?;
-                let left = match (st.file.meta(), st.file.position()) {
-                    (Ok(m), Ok(pos)) => usize::try_from(m.size.saturating_sub(pos)).unwrap_or(usize::MAX),
-                    (Err(e), _) | (_, Err(e)) => return Ok(Err(e)),
+                let left = match st.io(vm, |f| f.meta().and_then(|m| Ok(m.size.saturating_sub(f.position()?))))? {
+                    Ok(left) => usize::try_from(left).unwrap_or(usize::MAX),
+                    Err(e) => return Ok(Err(e)),
                 };
                 // A file that grows meanwhile is read on by the next call.
                 let n = max.min(MAX_READ).min(left.max(1));
                 if !fits(vm, n)? {
                     return Ok(Err(too_large()));
                 }
-                let mut data = vec![0; n];
-                let r = st.file.read(&mut data);
+                let (mut data, r) = st.io(vm, move |f| {
+                    let mut data = vec![0; n];
+                    let r = f.read(&mut data);
+                    (data, r)
+                })?;
                 return Ok(match r {
                     Ok(got) => {
                         data.truncate(got);
@@ -731,13 +841,24 @@ fn register_file(r: &mut Registry) {
         r.add_method(key, |vm, a| {
             let data = a[1];
             with_file(vm, a[0], Needs::Write, move |vm, st| {
-                let bytes = match vm.heap.get(data) {
-                    Obj::Str(s) => s.as_bytes(),
-                    _ => vm.heap.bytes_of(data),
-                };
+                fn bytes(vm: &Vm, v: Value) -> &[u8] {
+                    match vm.heap.get(v) {
+                        Obj::Str(s) => s.as_bytes(),
+                        _ => vm.heap.bytes_of(v),
+                    }
+                }
+                let len = bytes(vm, data).len();
                 vm.charge(SYSCALL_FUEL)?;
-                vm.charge_bytes(bytes.len())?;
-                let r = st.unbuffer().and_then(|()| st.file.write_all(bytes));
+                vm.charge_bytes(len)?;
+                // Reserve memory for the copy of the data that the worker writes.
+                let Ok(res) = vm.reserve_io(len)? else { return Ok(Err(too_large())) };
+                let bytes = bytes(vm, data).to_vec();
+                let unread = st.take_unread();
+                let r = st.io(vm, move |f| {
+                    let r = unbuffer(f, unread).and_then(|()| f.write_all(&bytes));
+                    drop(res);
+                    r
+                })?;
                 // A write past the end of a memory file fills the gap.
                 let filled = r.as_ref().map_or(0, |&n| n);
                 vm.charge_bytes(usize::try_from(filled).unwrap_or(usize::MAX))?;
@@ -748,10 +869,16 @@ fn register_file(r: &mut Registry) {
     r.add_method("fs.File.close", |vm, a| {
         let f = vm.heap.native_mut::<FileObj>(a[0]).ok_or_else(|| Ctl::panic("not a file"))?;
         let before = f.size();
-        // Dropping the file closes it and releases its slot.
-        f.open = None;
+        let open = f.open.take();
         let after = f.size();
         vm.heap.account(before, after);
+        // Closing can block, for example while data is flushed to a network
+        // file system. Dropping the state releases its resource slot.
+        if let Some(mut st) = open
+            && let Some(file) = st.file.take()
+        {
+            vm.offload(move |_| drop(file))?;
+        }
         Ok(Value::Unit)
     });
     r.add_builtin("fs.File.seek", |vm, a| {
@@ -760,21 +887,22 @@ fn register_file(r: &mut Registry) {
         };
         with_file(vm, a[0], Needs::Nothing, |vm, st| {
             vm.charge(SYSCALL_FUEL)?;
-            st.buf.clear();
-            st.at = 0;
-            Ok(st.file.seek(pos).map(|()| Value::Unit))
+            st.take_unread();
+            Ok(st.io(vm, move |f| f.seek(pos))?.map(|()| Value::Unit))
         })
     });
     r.add_builtin("fs.File.position", |vm, a| {
         with_file(vm, a[0], Needs::Nothing, |vm, st| {
             vm.charge(SYSCALL_FUEL)?;
-            Ok(st.position().map(|p| Value::Int(i64::try_from(p).unwrap_or(i64::MAX))))
+            let unread = st.unread() as u64;
+            let pos = st.io(vm, |f| f.position())?;
+            Ok(pos.map(|p| Value::Int(i64::try_from(p.saturating_sub(unread)).unwrap_or(i64::MAX))))
         })
     });
     r.add_builtin("fs.file_stat", |vm, a| {
         with_file(vm, a[0], Needs::Nothing, |vm, st| {
             vm.charge(SYSCALL_FUEL)?;
-            let m = match st.file.meta() {
+            let m = match st.io(vm, |f| f.meta())? {
                 Ok(m) => m,
                 Err(e) => return Ok(Err(e)),
             };
@@ -788,7 +916,8 @@ fn register_file(r: &mut Registry) {
         };
         with_file(vm, a[0], Needs::Write, |vm, st| {
             vm.charge(SYSCALL_FUEL)?;
-            let r = st.unbuffer().and_then(|()| st.file.set_len(len));
+            let unread = st.take_unread();
+            let r = st.io(vm, move |f| unbuffer(f, unread).and_then(|()| f.set_len(len)))?;
             let filled = r.as_ref().map_or(0, |&n| n);
             vm.charge_bytes(usize::try_from(filled).unwrap_or(usize::MAX))?;
             Ok(r.map(|_| Value::Unit))
@@ -797,7 +926,7 @@ fn register_file(r: &mut Registry) {
     r.add_builtin("fs.File.sync", |vm, a| {
         with_file(vm, a[0], Needs::Nothing, |vm, st| {
             vm.charge(SYSCALL_FUEL)?;
-            Ok(st.file.sync().map(|()| Value::Unit))
+            Ok(st.io(vm, |f| f.sync())?.map(|()| Value::Unit))
         })
     });
     r.add_builtin("fs.File.path", |vm, a| {
@@ -819,13 +948,14 @@ fn open_file(vm: &mut Vm, a: &[Value]) -> NResult {
     }
     let slot = super::or_return!(vm.resource_slot());
     vm.charge(SYSCALL_FUEL)?;
-    let file = match vm.host.fs.open(t, mode) {
+    let fs = vm.host.fs.clone();
+    let file = match vm.offload(move |_| fs.open(t, mode))? {
         Ok(f) => f,
         // Closing unreachable files may make room.
         Err(e) if too_many_open_files(&e) && !vm.collected => return Err(CtlKind::Collect.into()),
         Err(e) => return Ok(vm.err_value(io_kind(&e), &format!("{shown}: {e}"))),
     };
-    let obj = FileObj { open: Some(OpenState { file, _slot: slot, buf: Vec::new(), at: 0, counted: 0 }), shown, mode };
+    let obj = FileObj { open: Some(OpenState { file: Some(file), _slot: slot, buf: Vec::new(), at: 0, counted: 0 }), shown, mode };
     let v = vm.heap.alloc(Obj::Native(Box::new(obj)));
     Ok(vm.ok(v))
 }
@@ -836,9 +966,9 @@ fn open_file(vm: &mut Vm, a: &[Value]) -> NResult {
 fn read_rest(vm: &mut Vm, file: Value, text: bool) -> NResult {
     with_file(vm, file, Needs::Read, |vm, st| {
         vm.charge(SYSCALL_FUEL)?;
-        let size = match (st.file.meta(), st.file.position()) {
-            (Ok(m), Ok(pos)) => m.size.saturating_sub(pos),
-            (Err(e), _) | (_, Err(e)) => return Ok(Err(e)),
+        let size = match st.io(vm, |f| f.meta().and_then(|m| Ok(m.size.saturating_sub(f.position()?))))? {
+            Ok(size) => size,
+            Err(e) => return Ok(Err(e)),
         };
         let size = usize::try_from(size).unwrap_or(usize::MAX).saturating_add(st.unread());
         let too_large = || io::Error::new(io::ErrorKind::OutOfMemory, "the rest of the file does not fit in the memory limit");
@@ -848,31 +978,19 @@ fn read_rest(vm: &mut Vm, file: Value, text: bool) -> NResult {
             return Ok(Err(e.into()));
         }
         data.extend_from_slice(&st.buf[st.at..]);
-        st.buf.clear();
-        st.at = 0;
+        st.take_unread();
         st.shrink();
-        let mut chunk = [0u8; 8192];
-        loop {
-            vm.charge(SYSCALL_FUEL)?;
-            let start = data.len();
-            let n = if data.capacity() > start {
-                data.resize(data.capacity(), 0);
-                let n = st.file.read(&mut data[start..]);
-                data.truncate(start + *n.as_ref().unwrap_or(&0));
-                n
-            } else {
-                st.file.read(&mut chunk).and_then(|n| {
-                    res.reserve_buf(&mut data, n)?;
-                    data.extend_from_slice(&chunk[..n]);
-                    Ok(n)
-                })
-            };
-            match n {
-                Ok(0) => break,
-                Ok(_) => {}
-                Err(e) => return Ok(Err(e)),
-            }
-        }
+        let mut file = st.file.take().ok_or_else(|| Ctl::panic("internal error: a file without its file"))?;
+        let (file, read) = vm.offload(move |allowance| {
+            let r = read_to_end(&mut file, &mut data, &mut res, allowance);
+            (file, r.map(|r| r.map(|()| (data, res))))
+        })?;
+        st.file = Some(file);
+        let (data, res) = match read {
+            Ok(Ok(read)) => read,
+            Ok(Err(e)) => return Ok(Err(e)),
+            Err(Stopped) => unreachable!("`offload` reports a stopped read"),
+        };
         // What was read is consumed: from here on, a failure is not a retry.
         drop(res);
         if vm.heap.would_exceed(data.len()) {
@@ -888,4 +1006,35 @@ fn read_rest(vm: &mut Vm, file: Value, text: bool) -> NResult {
             Err(_) => Err(io::Error::new(io::ErrorKind::InvalidData, "file is not valid UTF-8")),
         })
     })
+}
+
+/// Reads the rest of `f` into `data`, reserving its growth in `res`.
+fn read_to_end(
+    f: &mut OpenedFile,
+    data: &mut Vec<u8>,
+    res: &mut Reservation,
+    allowance: &mut Allowance,
+) -> Result<io::Result<()>, Stopped> {
+    let mut chunk = [0u8; 8192];
+    loop {
+        allowance.charge(SYSCALL_FUEL)?;
+        let start = data.len();
+        let n = if data.capacity() > start {
+            data.resize(data.capacity(), 0);
+            let n = f.read(&mut data[start..]);
+            data.truncate(start + *n.as_ref().unwrap_or(&0));
+            n
+        } else {
+            f.read(&mut chunk).and_then(|n| {
+                res.reserve_buf(data, n)?;
+                data.extend_from_slice(&chunk[..n]);
+                Ok(n)
+            })
+        };
+        match n {
+            Ok(0) => return Ok(Ok(())),
+            Ok(_) => {}
+            Err(e) => return Ok(Err(e)),
+        }
+    }
 }

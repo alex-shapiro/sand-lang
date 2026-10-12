@@ -27,7 +27,11 @@
 //!   remembered: the minor collection scans just the stored indices (entries)
 //!   and the pushed tail (`DirtyList`) instead of the whole object. Any other
 //!   mutation, or too many scattered stores, makes the remembered entry a
-//!   full one.
+//!   full one. A channel remembered through `channel_mut` is partially
+//!   remembered too. Values enter its queue only at the back, so the young
+//!   values are among the last `ChannelObj::pushed` values of the queue.
+//! * Tracing scans big containers `SCAN_CHUNK` children at a time, so that
+//!   its worklist stays small.
 //!
 //! Major collections of large heaps are **incremental**: instead of marking
 //! and sweeping the whole heap in one pause, a *cycle* does the work in
@@ -151,6 +155,8 @@ pub struct Heap {
     /// Buffers of pending I/O, counted against `limit` with the heap.
     pub io_memory: Arc<IoMemory>,
     worklist: Vec<u32>,
+    /// Big containers being traced, each with the index of the next child to scan.
+    scan: Vec<(u32, usize)>,
     pub stats: GcStats,
     phase: Phase,
     /// Mark bits of the incremental cycle.
@@ -159,7 +165,7 @@ pub struct Heap {
     gray_bits: Vec<u64>,
     /// Objects to scan in the incremental marking, with the first child to
     /// scan (chunks of big containers).
-    gray: Vec<(u32, u32)>,
+    gray: Vec<(u32, usize)>,
     /// The next slot to sweep.
     sweep_at: usize,
     /// `bytes` when the cycle's last step ran (steps are paced by allocation).
@@ -344,6 +350,7 @@ impl Heap {
             stress: false,
             io_memory: IoMemory::new(limit, max_resources),
             worklist: Vec::new(),
+            scan: Vec::new(),
             stats: GcStats::default(),
             phase: Phase::Idle,
             cmarks: Vec::new(),
@@ -872,22 +879,128 @@ impl Heap {
         &mut self.objs[h as usize]
     }
 
-    pub fn list_push(&mut self, list: Value, v: Value) {
-        let Value::Obj(h) = list else { return };
+    /// Appends `v` to list `list`. If the list must grow and the growth does
+    /// not fit in the memory limit, fails without changing anything.
+    #[inline]
+    pub fn list_push(&mut self, list: Value, v: Value) -> Result<(), LimitKind> {
+        let Value::Obj(h) = list else { return Ok(()) };
+        let Obj::List(l) = &self.objs[h as usize] else { return Ok(()) };
+        let len = l.len();
+        if len == l.capacity() {
+            self.list_reserve(list, 1)?;
+        }
         if v.handle().is_some_and(|c| !self.is_marked(c)) {
-            let len = self.list(list).len();
             self.list_barrier(h, len, true);
         }
         if matches!(self.phase, Phase::Marking) {
             self.shade(v);
         }
-        let Obj::List(l) = &mut self.objs[h as usize] else { return };
-        let before = l.capacity();
-        l.push(v);
-        let after = l.capacity();
-        if after != before {
-            self.bytes += (after - before) * std::mem::size_of::<Value>();
+        if let Obj::List(l) = &mut self.objs[h as usize] {
+            l.push(v);
         }
+        Ok(())
+    }
+
+    /// Makes room in list `list` for `extra` more elements (see
+    /// [`Heap::grown_capacity`]). If they do not fit in the memory limit,
+    /// fails without changing anything.
+    #[cold]
+    #[inline(never)]
+    pub fn list_reserve(&mut self, list: Value, extra: usize) -> Result<(), LimitKind> {
+        let Value::Obj(h) = list else { return Ok(()) };
+        let Obj::List(l) = &self.objs[h as usize] else { return Ok(()) };
+        let (len, cap) = (l.len(), l.capacity());
+        let need = len.checked_add(extra).ok_or(LimitKind::Memory)?;
+        if need <= cap {
+            return Ok(());
+        }
+        let new_cap = self.grown_capacity(cap, need, VALUE_SIZE, 0)?;
+        let Obj::List(l) = &mut self.objs[h as usize] else { unreachable!() };
+        l.reserve_exact(new_cap - len);
+        self.bytes += (l.capacity() - cap) * VALUE_SIZE;
+        Ok(())
+    }
+
+    /// Appends the elements of list `src` to list `dst`. The caller must
+    /// first make room for them in `dst` (see [`Heap::list_reserve`]).
+    pub fn list_extend(&mut self, dst: Value, src: Value) {
+        if dst == src {
+            self.list_mut(dst).extend_from_within(..);
+            return;
+        }
+        let mut l = std::mem::take(self.list_mut(dst));
+        l.extend_from_slice(self.list(src));
+        *self.list_mut(dst) = l;
+    }
+
+    /// The new capacity for a vector of capacity `cap` and `elem`-byte
+    /// elements that must hold `need` elements, when `extra` more bytes are
+    /// allocated along with it. The capacity normally doubles. If doubling
+    /// does not fit in the memory limit, it grows by an eighth instead, which
+    /// keeps appends amortized constant time and lets a script use almost
+    /// all of its memory. Fails if that does not fit either.
+    pub fn grown_capacity(&self, cap: usize, need: usize, elem: usize, extra: usize) -> Result<usize, LimitKind> {
+        let fits = |c: usize| !self.would_exceed((c - cap).saturating_mul(elem).saturating_add(extra));
+        let doubled = need.max(cap.saturating_mul(2)).max(4);
+        if fits(doubled) {
+            return Ok(doubled);
+        }
+        let least = need.max(cap + cap / 8);
+        if fits(least) { Ok(least) } else { Err(LimitKind::Memory) }
+    }
+
+    /// Mutable access to channel `ch`, for taking values from it and for
+    /// storing `stored`, if any, as a blocked sender's value. Values must
+    /// enter the queue only through [`Heap::channel_push`] and
+    /// `ChannelObj::take`. The write barrier remembers the channel partially
+    /// (see the module documentation).
+    pub fn channel_mut(&mut self, ch: Value, stored: Option<Value>) -> Option<&mut ChannelObj> {
+        let Value::Obj(h) = ch else { return None };
+        if let Some(v) = stored {
+            if v.handle().is_some_and(|c| !self.is_marked(c)) && self.is_marked(h) {
+                self.channel_barrier_old(h);
+            }
+            if matches!(self.phase, Phase::Marking) {
+                self.shade(v);
+            }
+        }
+        match &mut self.objs[h as usize] {
+            Obj::Channel(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn channel_barrier_old(&mut self, h: u32) {
+        let (w, b) = ((h / 64) as usize, 1u64 << (h % 64));
+        if self.remembered_bits[w] & b == 0 {
+            self.remembered_bits[w] |= b;
+            self.remembered.push(h);
+            self.partial_bits[w] |= b;
+            if let Obj::Channel(c) = &mut self.objs[h as usize] {
+                c.pushed = 0;
+            }
+        }
+    }
+
+    /// Appends `v` to the queue of channel `ch`. If the queue must grow and
+    /// the growth does not fit in the memory limit, fails without changing
+    /// anything.
+    pub fn channel_push(&mut self, ch: Value, v: Value) -> Result<(), LimitKind> {
+        let Value::Obj(h) = ch else { return Ok(()) };
+        let Obj::Channel(c) = &self.objs[h as usize] else { return Ok(()) };
+        let (len, cap) = (c.len(), c.queue().capacity());
+        if len == cap {
+            let new_cap = self.grown_capacity(cap, len + 1, VALUE_SIZE, 0)?;
+            let Obj::Channel(c) = &mut self.objs[h as usize] else { unreachable!() };
+            c.reserve_exact(new_cap - len);
+            self.bytes += (c.queue().capacity() - cap) * VALUE_SIZE;
+        }
+        if let Some(c) = self.channel_mut(ch, Some(v)) {
+            c.push(v);
+        }
+        Ok(())
     }
 
     /// The payload of `v` if it is the single-payload variant `id`, else
@@ -1018,25 +1131,21 @@ impl Heap {
         self.marks[(h / 64) as usize] & (1 << (h % 64)) != 0
     }
 
-    #[inline]
-    fn mark_value(&mut self, v: Value) {
-        if let Some(h) = v.handle() {
-            let (w, b) = ((h / 64) as usize, h % 64);
-            if self.marks[w] & (1 << b) == 0 {
-                self.marks[w] |= 1 << b;
-                self.worklist.push(h);
-            }
-        }
-    }
-
-    /// Marks everything reachable from the worklist that is not yet marked.
+    /// Marks every unmarked object reachable from the worklist and from the
+    /// containers on `scan`. The worklist is emptied first, so that it never
+    /// holds more than one chunk of a big container's children.
     fn trace(&mut self) {
-        let mut children = Vec::new();
-        while let Some(h) = self.worklist.pop() {
-            children.clear();
-            self.objs[h as usize].children(|v| children.push(v));
-            for c in &children {
-                self.mark_value(*c);
+        let Heap { objs, marks, worklist, scan, .. } = self;
+        loop {
+            let (h, start) = match worklist.pop() {
+                Some(h) => (h, 0),
+                None => match scan.pop() {
+                    Some(c) => c,
+                    None => break,
+                },
+            };
+            if let Some(next) = chunk_children(&objs[h as usize], start, |v| mark(marks, worklist, v)) {
+                scan.push((h, next));
             }
         }
     }
@@ -1080,55 +1189,49 @@ impl Heap {
             self.marks.iter_mut().for_each(|m| *m = 0);
         }
         for r in roots {
-            self.mark_value(r);
+            mark(&mut self.marks, &mut self.worklist, r);
         }
-        let remembered = std::mem::take(&mut self.remembered);
-        let mut children = Vec::new();
-        for &h in &remembered {
+        let Heap { objs, marks, worklist, scan, remembered, remembered_bits, partial_bits, tail_bits, dirty, .. } = self;
+        for &h in remembered.iter() {
             let (w, b) = ((h / 64) as usize, 1u64 << (h % 64));
-            self.remembered_bits[w] &= !b;
-            self.partial_bits[w] &= !b;
-            self.tail_bits[w] &= !b;
-            if !major {
-                // Old objects that may point to young ones: scan their fields
-                // (only the dirty parts of partially remembered lists).
-                children.clear();
-                match (self.dirty.remove(&h), &self.objs[h as usize]) {
-                    (Some(d), Obj::List(l)) => {
-                        children.extend(d.idx.iter().filter_map(|&i| l.get(i as usize).copied()));
-                        if let Some(tail) = l.get(d.from as usize..) {
-                            children.extend_from_slice(tail);
+            let partial = partial_bits[w] & b != 0;
+            remembered_bits[w] &= !b;
+            partial_bits[w] &= !b;
+            tail_bits[w] &= !b;
+            if major {
+                continue;
+            }
+            // Scan the old objects that may point to young ones. For a
+            // partially remembered object, scan only the changed parts.
+            let mut mark = |v: Value| mark(marks, worklist, v);
+            match (partial, &objs[h as usize]) {
+                (true, Obj::Channel(c)) => {
+                    let q = c.queue();
+                    q.range(q.len() - c.pushed.min(q.len())..).for_each(|&v| mark(v));
+                    c.senders.iter().for_each(|&(_, _, v)| mark(v));
+                }
+                (true, obj @ (Obj::List(_) | Obj::Map(_) | Obj::Set(_))) => {
+                    let d = dirty.remove(&h).unwrap_or_default();
+                    for &i in &d.idx {
+                        match obj {
+                            Obj::List(l) => l.get(i as usize).into_iter().for_each(|&v| mark(v)),
+                            Obj::Map(m) => m.entries.get(i as usize).into_iter().flatten().for_each(|&(k, v)| {
+                                mark(k);
+                                mark(v);
+                            }),
+                            Obj::Set(s) => s.entries.get(i as usize).into_iter().flatten().for_each(|&v| mark(v)),
+                            _ => {}
                         }
                     }
-                    (Some(d), Obj::Map(m)) => {
-                        let entries = d
-                            .idx
-                            .iter()
-                            .filter_map(|&i| m.entries.get(i as usize))
-                            .chain(m.entries.get(d.from as usize..).unwrap_or_default());
-                        for (k, v) in entries.flatten() {
-                            children.push(*k);
-                            children.push(*v);
-                        }
+                    if d.from != NONE {
+                        scan.push((h, d.from as usize));
                     }
-                    (Some(d), Obj::Set(st)) => {
-                        let entries = d
-                            .idx
-                            .iter()
-                            .filter_map(|&i| st.entries.get(i as usize))
-                            .chain(st.entries.get(d.from as usize..).unwrap_or_default());
-                        children.extend(entries.flatten());
-                    }
-                    (_, obj) => obj.children(|v| children.push(v)),
                 }
-                for c in &children {
-                    self.mark_value(*c);
-                }
+                _ => scan.push((h, 0)),
             }
         }
-        self.dirty.clear();
-        self.remembered = remembered;
-        self.remembered.clear();
+        dirty.clear();
+        remembered.clear();
         self.trace();
         if major {
             self.sweep_all();
@@ -1324,10 +1427,10 @@ impl Heap {
                 clear_bit(&mut self.gray_bits, h);
             }
             children.clear();
-            let next = chunk_children(&self.objs[h as usize], start as usize, &mut children);
+            let next = chunk_children(&self.objs[h as usize], start, |v| children.push(v));
             budget = budget.saturating_sub(children.len() + 1);
             if let Some(k) = next {
-                self.gray.push((h, k as u32));
+                self.gray.push((h, k));
             }
             for &c in &children {
                 self.shade(c);
@@ -1370,9 +1473,15 @@ fn clear_bit(bits: &mut [u64], h: u32) {
     bits[(h / 64) as usize] &= !(1 << (h % 64));
 }
 
-/// Appends the children of `obj` from child `start` on to `out`, at most
-/// `SCAN_CHUNK` of them for big containers; returns where to continue.
-fn chunk_children(obj: &Obj, start: usize, out: &mut Vec<Value>) -> Option<usize> {
+/// Calls `f` on the children of `obj`, starting at child `start`. For a big
+/// container it stops after `SCAN_CHUNK` children and returns the index to
+/// continue from.
+///
+/// A channel's queue is scanned from the back: child `i` is the `i`th value
+/// from the back. Values taken from the front between two chunks then do not
+/// shift the values not yet scanned past the scan's position.
+#[inline]
+fn chunk_children(obj: &Obj, start: usize, mut f: impl FnMut(Value)) -> Option<usize> {
     let chunk = |len: usize| {
         let end = start.saturating_add(SCAN_CHUNK).min(len);
         (start.min(end)..end, (end < len).then_some(end))
@@ -1380,35 +1489,49 @@ fn chunk_children(obj: &Obj, start: usize, out: &mut Vec<Value>) -> Option<usize
     match obj {
         Obj::List(l) => {
             let (r, next) = chunk(l.len());
-            out.extend_from_slice(&l[r]);
+            l[r].iter().for_each(|&v| f(v));
             next
         }
         Obj::Map(m) => {
             let (r, next) = chunk(m.entries.len());
-            for (k, v) in m.entries[r].iter().flatten() {
-                out.push(*k);
-                out.push(*v);
+            for &(k, v) in m.entries[r].iter().flatten() {
+                f(k);
+                f(v);
             }
             next
         }
         Obj::Set(s) => {
             let (r, next) = chunk(s.entries.len());
-            out.extend(s.entries[r].iter().flatten());
+            s.entries[r].iter().flatten().for_each(|&v| f(v));
             next
         }
         Obj::Channel(c) => {
-            let (r, next) = chunk(c.queue.len());
-            out.extend(c.queue.range(r));
+            let q = c.queue();
+            let (r, next) = chunk(q.len());
+            q.range(q.len() - r.end..q.len() - r.start).for_each(|&v| f(v));
             if start == 0 {
-                out.extend(c.senders.iter().map(|&(_, _, v)| v));
+                c.senders.iter().for_each(|&(_, _, v)| f(v));
             }
             next
         }
         _ => {
             if start == 0 {
-                obj.children(|v| out.push(v));
+                obj.children(f);
             }
             None
+        }
+    }
+}
+
+/// Marks `v` and queues it for tracing, if it was not already marked. Mark
+/// bits stay set between minor collections.
+#[inline]
+fn mark(marks: &mut [u64], worklist: &mut Vec<u32>, v: Value) {
+    if let Some(h) = v.handle() {
+        let (w, b) = ((h / 64) as usize, 1u64 << (h % 64));
+        if marks[w] & b == 0 {
+            marks[w] |= b;
+            worklist.push(h);
         }
     }
 }
@@ -1456,5 +1579,138 @@ mod tests {
         heap.collect(roots.iter().copied(), false);
         assert_eq!(heap.str(heap.list(big)[0]), "young");
         assert_eq!(heap.str(heap.list(lists[7])[0]), "young");
+    }
+
+    fn new_channel(heap: &mut Heap) -> Value {
+        heap.alloc(Obj::Channel(Box::new(ChannelObj::new(0))))
+    }
+
+    fn queued(heap: &Heap, ch: Value) -> Vec<String> {
+        let Obj::Channel(c) = heap.get(ch) else { panic!("not a channel") };
+        c.queue().iter().map(|&v| heap.str(v).to_string()).collect()
+    }
+
+    #[test]
+    fn young_values_in_old_channels_survive_minor_collections() {
+        let mut heap = Heap::new(None, usize::MAX);
+        let ch = new_channel(&mut heap);
+        for i in 0..1000 {
+            let v = heap.new_str(format!("old value {i}"));
+            heap.channel_push(ch, v).unwrap();
+        }
+        heap.collect([ch], false);
+        let v = heap.new_str("a young value, then ints");
+        heap.channel_push(ch, v).unwrap();
+        for i in 0..100 {
+            heap.channel_push(ch, Value::Int(i)).unwrap();
+        }
+        let Obj::Channel(c) = heap.get(ch) else { unreachable!() };
+        assert_eq!(c.pushed, 101, "only the values pushed since the channel was remembered are scanned");
+        // After values are taken from the front, the young value is still among the last pushed.
+        for _ in 0..500 {
+            heap.channel_mut(ch, None).unwrap().take();
+        }
+        heap.collect([ch], false);
+        let Obj::Channel(c) = heap.get(ch) else { unreachable!() };
+        assert_eq!(heap.str(c.queue()[500]), "a young value, then ints");
+    }
+
+    #[test]
+    fn values_of_blocked_senders_survive_minor_collections() {
+        let mut heap = Heap::new(None, usize::MAX);
+        let ch = heap.alloc(Obj::Channel(Box::new(ChannelObj::new(1))));
+        let first = heap.new_str("first");
+        heap.channel_push(ch, first).unwrap();
+        heap.collect([ch], false);
+        let blocked = heap.new_str("blocked");
+        heap.channel_mut(ch, Some(blocked)).unwrap().senders.push_back((7, 1, blocked));
+        heap.collect([ch], false);
+        // Taking a value moves the blocked sender's value into the queue.
+        let (v, woken) = heap.channel_mut(ch, None).unwrap().take().unwrap();
+        assert_eq!((heap.str(v), woken), ("first", Some((7, 1))));
+        let other = heap.new_str("other");
+        heap.collect([ch, other], false);
+        heap.collect([ch], false);
+        assert_eq!(queued(&heap, ch), ["blocked"]);
+        let more = heap.new_str("more");
+        heap.channel_mut(ch, Some(more)).unwrap().senders.push_back((8, 1, more));
+        heap.channel_mut(ch, None).unwrap().take();
+        heap.collect([ch], false);
+        assert_eq!(queued(&heap, ch), ["more"]);
+    }
+
+    #[test]
+    fn incremental_marking_of_a_channel_skips_nothing_taken_meanwhile() {
+        let mut heap = Heap::new(None, usize::MAX);
+        let ch = new_channel(&mut heap);
+        let n = 3 * SCAN_CHUNK;
+        for i in 0..n {
+            let v = heap.new_str(format!("value number {i}"));
+            heap.channel_push(ch, v).unwrap();
+        }
+        heap.collect([ch], true);
+        heap.start_cycle([ch]);
+        heap.mark_some(SCAN_CHUNK + 2);
+        // Take values from the front while the queue is partly scanned.
+        for _ in 0..SCAN_CHUNK {
+            heap.channel_mut(ch, None).unwrap().take();
+        }
+        for i in 0..10 {
+            let v = heap.new_str(format!("pushed meanwhile {i}"));
+            heap.channel_push(ch, v).unwrap();
+        }
+        heap.finish_marking([ch]);
+        while heap.cycle_active() {
+            heap.cycle_step();
+        }
+        let q = queued(&heap, ch);
+        assert_eq!(q.len(), n - SCAN_CHUNK + 10);
+        assert_eq!(q[0], format!("value number {SCAN_CHUNK}"));
+        assert_eq!(q[n - SCAN_CHUNK - 1], format!("value number {}", n - 1));
+        assert_eq!(q[n - SCAN_CHUNK + 9], "pushed meanwhile 9");
+    }
+
+    #[test]
+    fn tracing_keeps_big_containers_in_chunks() {
+        let mut heap = Heap::new(None, usize::MAX);
+        let items: Vec<Value> = (0..10 * SCAN_CHUNK).map(|i| heap.new_str(format!("an item, {i}"))).collect();
+        let list = heap.new_list(items.clone());
+        let ch = new_channel(&mut heap);
+        for &v in &items {
+            heap.channel_push(ch, v).unwrap();
+        }
+        heap.collect([list, ch], true);
+        assert!(heap.worklist.capacity() <= 4 * SCAN_CHUNK, "worklist of {}", heap.worklist.capacity());
+        assert_eq!(heap.str(heap.list(list)[10 * SCAN_CHUNK - 1]), format!("an item, {}", 10 * SCAN_CHUNK - 1));
+        // A minor collection also scans a fully remembered old container in chunks.
+        let young = heap.new_str("young");
+        heap.list_mut(list)[0] = young;
+        heap.worklist = Vec::new();
+        heap.collect([list], false);
+        assert!(heap.worklist.capacity() <= 4 * SCAN_CHUNK, "worklist of {}", heap.worklist.capacity());
+        assert_eq!(heap.str(heap.list(list)[0]), "young");
+    }
+
+    #[test]
+    fn containers_grow_only_within_the_memory_limit() {
+        let limit = 1 << 20;
+        let mut heap = Heap::new(Some(limit), usize::MAX);
+        let list = heap.new_list(Vec::new());
+        let mut n = 0;
+        while heap.list_push(list, Value::Int(n)).is_ok() {
+            n += 1;
+        }
+        let cap = heap.list(list).len();
+        assert!(heap.used() <= limit, "{} bytes used", heap.used());
+        // Near the limit, the list grew by less than double.
+        assert!(cap * VALUE_SIZE > limit * 3 / 4, "only {cap} elements fit");
+        let Obj::List(l) = heap.get(list) else { unreachable!() };
+        assert_eq!(l.len(), l.capacity(), "a failed push changes nothing");
+        assert_eq!(heap.list_reserve(list, 1), Err(LimitKind::Memory));
+        let ch = new_channel(&mut heap);
+        while heap.channel_push(ch, Value::Int(0)).is_ok() {}
+        assert!(heap.used() <= limit, "{} bytes used", heap.used());
+        heap.collect([ch], true);
+        heap.channel_push(ch, Value::Int(0)).unwrap();
     }
 }

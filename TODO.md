@@ -6,35 +6,11 @@ Follow-up work, roughly in priority order.
 
 ### Sandbox
 
-- [ ] **Deny patterns protect whole trees.** With `deny ./**/.env`, every
-      directory under `.` may hold a denied file, so none can be renamed
-      or removed recursively (`Policy::denies_under`). Scanning the tree
-      for entries the rules deny would refuse only trees that hold one.
-- [ ] **Windows paths take two walks.** `files/windows.rs` canonicalizes,
-      then walks again by handle; macOS and Linux resolve in one walk. One
-      walk needs reparse-point targets and `GetFinalPathNameByHandleW`, which
-      no dependency exposes safely (a vetted crate or `fs_at` could).
-- [ ] **Windows rename.** No safe API renames by handle, so on Windows
-      `rename` is path-based: it holds the directories on both paths open,
-      but an entry's parent could still be emptied and turned into a
-      junction during the call (usually detected afterwards, not prevented).
-- [ ] **Linux canonical paths can go stale.** The policy checks a path
-      built from the names walked, which a concurrent rename makes stale.
-      macOS asks the held directory for its path (`F_GETPATH`); Linux could
-      read `/proc/self/fd/N`, falling back to the walked names.
-- [ ] **Channel queues are undercounted against the memory limit.**
-      `while true { ch.send([1, 2, 3]) }` on an unbounded channel peaks at
-      2.5 GB RSS under the default 512M limit before it stops (a list
-      peaks at 1.2-1.3x the limit, a map at 1.7x). Charge what the queue
-      holds outside the heap's accounting (buffer capacity, per-message
-      nodes) and test peak RSS against the limit.
-- [ ] **Suspected metering gaps.** Path resolution and `fs.File` reads
-      and writes run on the VM thread, so a hung network file system could
-      block them beyond the interrupt and wall-time limits; buffered
-      standard output is flushed synchronously; list and map growth doubles
-      capacity before the next memory check; `[a, ..rest]` patterns copy
-      without a memory check; `check::traits::resolve_holes` re-walks a body
-      per progress pass without charging the compile budget.
+- [ ] **Windows rename.** No safe API renames by handle (`fs_at`, `winx`
+      and `cap-std` all rename by path). `rename` keeps every directory on
+      both paths open, so that none of them can be renamed or replaced. A
+      parent that is emptied and turned into a junction during the call is
+      still possible; it is detected after the rename, not prevented.
 
 ### Standard library
 
@@ -47,13 +23,13 @@ Follow-up work, roughly in priority order.
       yet (Windows is only cross-checked with `--no-default-features
   --features os`), including the ConPTY variant of
       `cli/tests/prompt_tty.rs` and the REPL's line editor.
-- [ ] Opening files for each `fs.Mode` on Windows (`open_mode` in
-      `files/windows.rs`, through `fs_at` with `create_new`) has only been
-      cross-compiled.
+- [ ] The Windows resolver and file operations (`files/windows.rs`,
+      through `fs_at` and `winx`) have only been cross-compiled.
 - [ ] The one-walk resolver's Linux path (`openat2` with
-      `RESOLVE_NO_SYMLINKS`, and its fallback when `openat2` is missing or
-      filtered by seccomp) has only been compiled, and the non-UTF-8 file
-      name tests in `tests/sandbox_io.rs` skip on APFS.
+      `RESOLVE_NO_SYMLINKS`, its fallback when `openat2` is missing or
+      filtered by seccomp, and `/proc/self/fd` paths) has only been
+      compiled, and the non-UTF-8 file name tests in `tests/sandbox_io.rs`
+      skip on APFS.
 - [ ] **Wall-clock bounds make tests flaky under load:**
       `hostile_runtime_programs_are_contained` (`tests/fuzz.rs`, 10s bound),
       `code_generation_is_covered_by_the_compile_budget`

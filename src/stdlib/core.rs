@@ -74,20 +74,15 @@ pub fn register(r: &mut Registry) {
     r.add_builtin("Channel.send", |vm, a| vm.block(BlockOn::Send(a[0], a[1])));
     r.add_builtin("Channel.recv", |vm, a| vm.block(BlockOn::Recv(a[0])));
     r.add_builtin("Channel.try_recv", |vm, a| {
-        let Obj::Channel(c) = vm.heap.get_mut(a[0]) else { return panic("not a channel") };
-        let v = c.queue.pop_front();
-        // Admit a blocked sender.
-        let woken = if v.is_some() { c.senders.pop_front() } else { None };
-        if let Some((sf, sg, sv)) = woken {
-            if let Obj::Channel(c) = vm.heap.get_mut(a[0]) {
-                c.queue.push_back(sv);
-            }
+        let Some(c) = vm.heap.channel_mut(a[0], None) else { return panic("not a channel") };
+        let Some((v, woken)) = c.take() else { return Ok(vm.none()) };
+        if let Some((sf, sg)) = woken {
             vm.deliver(sf, sg, Value::Bool(true));
         }
-        Ok(vm.option(v))
+        Ok(vm.some(v))
     });
     r.add_builtin("Channel.close", |vm, a| {
-        let Obj::Channel(c) = vm.heap.get_mut(a[0]) else { return panic("not a channel") };
+        let Some(c) = vm.heap.channel_mut(a[0], None) else { return panic("not a channel") };
         c.closed = true;
         let receivers: Vec<(u32, u64)> = c.receivers.drain(..).collect();
         let senders: Vec<(u32, u64, Value)> = c.senders.drain(..).collect();
@@ -102,7 +97,7 @@ pub fn register(r: &mut Registry) {
     });
     r.add_builtin("Channel.len", |vm, a| {
         Ok(Value::Int(match vm.heap.get(a[0]) {
-            Obj::Channel(c) => c.queue.len() as i64,
+            Obj::Channel(c) => c.len() as i64,
             _ => 0,
         }))
     });
@@ -135,7 +130,7 @@ pub fn register(r: &mut Registry) {
         if cap < 0 {
             return panic("channel capacity must not be negative");
         }
-        Ok(vm.heap.alloc(Obj::Channel(Box::new(ChannelObj { capacity: to_usize_saturating(cap), ..Default::default() }))))
+        Ok(vm.heap.alloc(Obj::Channel(Box::new(ChannelObj::new(to_usize_saturating(cap))))))
     });
 
     register_numbers(r);
@@ -645,7 +640,7 @@ fn register_list(r: &mut Registry) {
     r.add_builtin("List.len", |vm, a| Ok(Value::Int(list_len(vm, a[0]) as i64)));
     r.add_builtin("List.is_empty", |vm, a| Ok(Value::Bool(list_len(vm, a[0]) == 0)));
     r.add_builtin("List.push", |vm, a| {
-        vm.heap.list_push(a[0], a[1]);
+        vm.heap.list_push(a[0], a[1]).map_err(Ctl::limit)?;
         Ok(Value::Unit)
     });
     r.add_builtin("List.iter_next", |vm, a| {
@@ -660,10 +655,8 @@ fn register_list(r: &mut Registry) {
         let n = list_len(vm, a[0]);
         let i = index_check(int(a[1]), n, true)?;
         vm.charge_bytes((n - i) * SLOT)?;
-        let before = vm.heap.get(a[0]).size();
+        vm.heap.list_reserve(a[0], 1).map_err(Ctl::limit)?;
         vm.heap.list_mut(a[0]).insert(i, a[2]);
-        let after = vm.heap.get(a[0]).size();
-        vm.heap.account(before, after);
         Ok(Value::Unit)
     });
     r.add_builtin("List.remove", |vm, a| {
@@ -673,13 +666,10 @@ fn register_list(r: &mut Registry) {
         Ok(vm.heap.list_mut(a[0]).remove(i))
     });
     r.add_builtin("List.extend", |vm, a| {
-        produce(vm, list_len(vm, a[1]), 0)?;
-        // A copy: the list may extend itself.
-        let other = vm.heap.list(a[1]).to_vec();
-        let before = vm.heap.get(a[0]).size();
-        vm.heap.list_mut(a[0]).extend(other);
-        let after = vm.heap.get(a[0]).size();
-        vm.heap.account(before, after);
+        let n = list_len(vm, a[1]);
+        vm.charge(n as u64)?;
+        vm.heap.list_reserve(a[0], n).map_err(Ctl::limit)?;
+        vm.heap.list_extend(a[0], a[1]);
         Ok(Value::Unit)
     });
     r.add_builtin("List.clear", |vm, a| {

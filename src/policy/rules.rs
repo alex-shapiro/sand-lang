@@ -344,6 +344,15 @@ impl RulePolicy {
         !index.deny.is_empty() && index.deny.any_below(&refs(&folded(&path_segments(path))), READ | WRITE)
     }
 
+    /// See [`super::Policy::protects_normalized_in`].
+    pub(crate) fn protects_normalized_in(&self, path: &Path, space: PathSpace) -> bool {
+        [READ, WRITE].into_iter().any(|op| {
+            let mut best = Best::new(&[]);
+            self.file_verdict(path, op, space, &mut best);
+            matches!(best.verdict(), Some((false, _)))
+        })
+    }
+
     /// The decision on a file capability normalized but for the spelling of
     /// its final name, if it is the same for every spelling (see
     /// [`super::Policy::decision_for_any_spelling`]).

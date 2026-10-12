@@ -179,75 +179,6 @@ impl OutputSink for MemorySink {
     }
 }
 
-/// The process's standard output, buffered: each sink (each configuration)
-/// has its own buffer, so engines never flush each other's output.
-#[derive(Default)]
-struct StdoutSink(Mutex<StdoutBuffer>);
-
-const STDOUT_BUFFER: usize = 8 << 10;
-
-#[derive(Default)]
-struct StdoutBuffer {
-    data: Vec<u8>,
-    tty: Option<bool>,
-}
-
-impl StdoutBuffer {
-    fn flush(&mut self) -> std::io::Result<()> {
-        use std::io::Write;
-        if self.data.is_empty() {
-            return Ok(());
-        }
-        let mut o = std::io::stdout().lock();
-        let r = o.write_all(&self.data).and_then(|()| o.flush());
-        self.data.clear();
-        r
-    }
-}
-
-impl StdoutSink {
-    fn buffer(&self) -> std::sync::MutexGuard<'_, StdoutBuffer> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
-    }
-}
-
-impl OutputSink for StdoutSink {
-    fn write(&self, data: &[u8]) -> std::io::Result<()> {
-        use std::io::IsTerminal;
-        let mut b = self.buffer();
-        let tty = *b.tty.get_or_insert_with(|| std::io::stdout().is_terminal());
-        b.data.extend_from_slice(data);
-        if b.data.len() >= STDOUT_BUFFER || (tty && data.contains(&b'\n')) {
-            b.flush()?;
-        }
-        Ok(())
-    }
-
-    fn flush(&self) -> std::io::Result<()> {
-        self.buffer().flush()
-    }
-
-    fn flush_before_input(&self) -> std::io::Result<()> {
-        let mut b = self.buffer();
-        // Like C's stdio: only a line-buffered (terminal) stream.
-        if b.tty == Some(true) { b.flush() } else { Ok(()) }
-    }
-}
-
-impl Drop for StdoutSink {
-    fn drop(&mut self) {
-        let _ = self.buffer().flush();
-    }
-}
-
-struct StderrSink;
-impl OutputSink for StderrSink {
-    fn write(&self, data: &[u8]) -> std::io::Result<()> {
-        use std::io::Write;
-        std::io::stderr().lock().write_all(data)
-    }
-}
-
 struct NullSink;
 impl OutputSink for NullSink {
     fn write(&self, _: &[u8]) -> std::io::Result<()> {
@@ -299,8 +230,8 @@ impl Config {
             prompter: None,
             limits: Limits::default(),
             modules: Vec::new(),
-            stdout: Arc::new(StdoutSink::default()),
-            stderr: Arc::new(StderrSink),
+            stdout: Arc::new(crate::stdio::StdoutSink::default()),
+            stderr: Arc::new(crate::stdio::StderrSink::default()),
             stdin: StdinConfig::None,
             cwd: None,
             module_root: None,
@@ -1060,6 +991,42 @@ impl Engine {
         Ok(Compiled { program, facts, deadline, snapshot: (!natives).then_some(snap) })
     }
 
+    /// Runs `job`, file system work for module discovery, on a worker
+    /// thread (see `Vm::offload`). Returns an error if the engine is
+    /// interrupted or the wall-time limit passes before the job finishes.
+    /// `prompted` is the time spent on prompts, which extends the deadline.
+    fn discovery_io<T: Send + 'static>(
+        &self,
+        d: &Discovery<'_>,
+        prompted: Duration,
+        job: impl FnOnce() -> T + Send + 'static,
+    ) -> Result<T, Error> {
+        if self.config.fs.memory().is_some() {
+            return Ok(job());
+        }
+        // Waits synchronously: discovery can run outside a runtime with a timer.
+        #[cfg(feature = "os")]
+        {
+            let check = || {
+                if self.interrupt.load(Ordering::Relaxed) {
+                    return Err(Error::Interrupted);
+                }
+                if d.deadline.is_some_and(|t| Instant::now() >= t + prompted) {
+                    return Err(Error::Limit(LimitKind::WallTime));
+                }
+                Ok(())
+            };
+            crate::platform::offload(job)
+                .wait(check)?
+                .map_err(|panic| Error::Runtime { message: format!("internal error: {panic}"), trace: vec![] })
+        }
+        #[cfg(not(feature = "os"))]
+        {
+            let _ = (d, prompted);
+            unreachable!("without the `os` feature, the file system is in memory")
+        }
+    }
+
     /// Loads, depth first, the modules `imports` of module `start` (keyed
     /// `key`) and their imports, checking script imports against the policy.
     /// Appends the new modules to `g.order` in dependency order, followed by
@@ -1156,9 +1123,17 @@ impl Engine {
                         errors.push(Diag::error(span, format!("cannot import `{p}`: script modules are `.sand` files")));
                         continue;
                     }
-                    let mut resolved = self.config.fs.target(&crate::policy::lexical(&target), crate::files::Mode::Follow);
-                    // Modules are told apart by their paths: name them as stored.
-                    resolved.fix_spelling();
+                    let (fs, lexical) = (self.config.fs.clone(), crate::policy::lexical(&target));
+                    let resolve = move || {
+                        let mut t = fs.target(&lexical, crate::files::Mode::Follow);
+                        // Modules are identified by path, so use the name as stored on disk.
+                        t.fix_spelling();
+                        t
+                    };
+                    let resolved = match self.discovery_io(d, *prompted, resolve) {
+                        Ok(t) => t,
+                        Err(e) => return Some(e),
+                    };
                     let target = resolved.path.clone();
                     if !target.starts_with(d.root) {
                         errors.push(Diag::error(span, format!("cannot import `{p}`: the path is outside the module root")));
@@ -1183,9 +1158,11 @@ impl Engine {
                         break;
                     }
                     // Read the checked file without following symlinks swapped in since.
-                    let text = match self.config.fs.read_source(resolved, self.config.limits.max_source_bytes) {
-                        Ok(t) => t,
-                        Err(e) => {
+                    let (fs, max) = (self.config.fs.clone(), self.config.limits.max_source_bytes);
+                    let text = match self.discovery_io(d, *prompted, move || fs.read_source(resolved, max)) {
+                        Ok(Ok(t)) => t,
+                        Err(e) => return Some(e),
+                        Ok(Err(e)) => {
                             errors.push(Diag::error(span, format!("cannot load module `{p}`: {e}")));
                             continue;
                         }
@@ -1321,5 +1298,74 @@ mod registry_tests {
         for name in stdlib::STD_MODULES {
             assert!(STD.sources.contains_key(*name) || stdlib::OS_MODULES.contains(name), "{name}");
         }
+    }
+}
+
+#[cfg(all(test, feature = "os"))]
+mod offload_tests {
+    use super::*;
+    use crate::native::NativeModule;
+    use crate::vm::value::Value;
+    use std::sync::atomic::AtomicUsize;
+
+    /// A module with two natives. `hang()` blocks a worker until `release`
+    /// is set. `walk()` charges its allowance one unit at a time, counting
+    /// each step in `progress`, until the allowance stops it.
+    fn hang_module(release: Arc<AtomicBool>, progress: Arc<AtomicUsize>) -> NativeModule {
+        let mut m = NativeModule::new("hung");
+        m.source("pub native fn hang()\npub native fn walk()");
+        let r = release.clone();
+        m.raw_function("hang", move |vm: &mut Vm, _: &[Value]| {
+            let r = r.clone();
+            vm.offload(move |_| {
+                while !r.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            })?;
+            Ok(Value::Unit)
+        });
+        m.raw_function("walk", move |vm: &mut Vm, _: &[Value]| {
+            let p = progress.clone();
+            vm.offload(move |allowance| {
+                while allowance.charge(1).is_ok() {
+                    p.fetch_add(1, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_micros(100));
+                }
+            })?;
+            Ok(Value::Unit)
+        });
+        m
+    }
+
+    fn rt() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
+    }
+
+    /// If a run makes a system call that does not return, as on an
+    /// unresponsive network file system, then the run ends at its time limit
+    /// or when it is interrupted.
+    #[test]
+    fn hung_io_is_abandoned_at_limits_and_interrupts() {
+        let (release, progress) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicUsize::new(0)));
+        let limits = Limits { max_wall_time: Some(Duration::from_millis(100)), ..Limits::default() };
+        let config = Config::new().module(hang_module(release.clone(), progress.clone())).limits(limits);
+        let mut engine = Engine::new(config.clone());
+        let r = rt().block_on(engine.run_source("main.sand", "import hung\nhung.hang()"));
+        assert!(matches!(r, Err(Error::Limit(LimitKind::WallTime))), "{r:?}");
+
+        let mut engine = Engine::new(config.limits(Limits::default()));
+        let handle = engine.interrupt_handle();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            handle.interrupt();
+        });
+        let r = rt().block_on(engine.run_source("main.sand", "import hung\nhung.walk()"));
+        assert!(matches!(r, Err(Error::Interrupted)), "{r:?} after {} steps", progress.load(Ordering::SeqCst));
+        // The job on the worker no longer makes progress.
+        std::thread::sleep(Duration::from_millis(20));
+        let seen = progress.load(Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(progress.load(Ordering::SeqCst), seen);
+        release.store(true, Ordering::SeqCst);
     }
 }

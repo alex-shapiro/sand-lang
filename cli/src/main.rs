@@ -81,6 +81,8 @@ fn main() -> ExitCode {
         }
         other => Err(format!("unknown command `{other}`\n\n{USAGE}")),
     };
+    // A run that hit a limit may have left unflushed output. Write it before exiting.
+    sandlang::flush_stdio();
     match result {
         Ok(code) => ExitCode::from(code.clamp(0, 255)),
         Err(msg) => {

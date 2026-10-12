@@ -1392,7 +1392,7 @@ fn rust_panics_in_host_code_become_internal_errors() {
 #[test]
 fn module_discovery_is_bounded() {
     let dir = TempDir::new("discovery");
-    // A huge import path is refused at once.
+    // An import path that is too long is rejected before it is resolved.
     let main = dir.write("main.sand", &format!("import \"{}b\"\nprint(1)", "a/".repeat(400_000)));
     let start = Instant::now();
     let r = rt().block_on(Engine::new(Config::new()).run_file(&main));

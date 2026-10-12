@@ -4,8 +4,8 @@
 //!
 //! [`Fs::target`] first resolves an operation's path into a [`Target`]: the
 //! normal form the policy checks and, on the host, the directory handles of
-//! the walk, through which the operation then acts (see `unix.rs`). Host
-//! system calls run on the VM thread and count towards the run's CPU time.
+//! the walk, through which the operation then acts (see `unix.rs`). Callers
+//! run host file system calls on worker threads (`Vm::offload`).
 
 #[cfg(feature = "os")]
 mod host;
@@ -28,6 +28,9 @@ use crate::vm::iomem::Reservation;
 use std::ffi::OsStr;
 use std::io;
 use std::path::{Path, PathBuf};
+
+/// The bytes reserved for each directory entry read, in addition to its name.
+const ENTRY_OVERHEAD: usize = 2 * std::mem::size_of::<std::ffi::OsString>();
 
 /// The type of a directory entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -164,6 +167,11 @@ impl Target {
             return h.work;
         }
         Work::default()
+    }
+
+    /// Moves the target out and leaves an empty one in its place.
+    pub fn take(&mut self) -> Target {
+        std::mem::replace(self, Target::memory(PathBuf::new()))
     }
 
     fn memory(path: PathBuf) -> Target {
@@ -312,8 +320,8 @@ impl Fs {
         }
     }
 
-    /// Metadata of the target (a final symlink is not followed in `Entry`
-    /// mode).
+    /// Metadata of the target, recorded when it was resolved, so this does
+    /// no I/O. In `Entry` mode, a final symlink is not followed.
     pub fn stat(&self, t: &Target) -> io::Result<EntryMeta> {
         match self {
             #[cfg(feature = "os")]
@@ -372,27 +380,27 @@ impl Fs {
         }
     }
 
-    /// Removes the directory entry `t` (a final symlink is not followed: it
-    /// must be a directory) and everything below it, descending through
-    /// the directories it opens. `check` is asked about each entry below
-    /// `t`, by its normal path, before it is removed: its `Err` (a denial)
-    /// stops the removal. The names read are reserved in `res`.
-    pub fn remove_tree<E>(
+    /// Walks the tree below the directory `t` depth first, without
+    /// following symlinks (`t` itself must be a directory, not a symlink to
+    /// one). Calls `visit` with each entry's normal path before descending
+    /// into it. If `remove` is set, removes each entry after visiting it,
+    /// and each directory, including `t`, once it is empty. The walk stops
+    /// if `visit` returns `Err` or `Ok(Err)`. The memory for the names read
+    /// is reserved in `res`.
+    pub fn walk_tree<E>(
         &self,
-        t: Target,
+        t: &Target,
         res: &mut Reservation,
-        check: impl FnMut(&Path) -> Result<io::Result<()>, E>,
+        remove: bool,
+        visit: impl FnMut(&Path) -> Result<io::Result<()>, E>,
     ) -> Result<io::Result<()>, E> {
         match self {
             #[cfg(feature = "os")]
-            Fs::Host => match t.host() {
-                Ok((_, h)) => h.remove_tree(res, check),
-                Err(e) => Ok(Err(e)),
+            Fs::Host => match &t.host {
+                Some(h) => h.walk_tree(res, remove, visit),
+                None => Ok(Err(io::Error::other("not a host path"))),
             },
-            Fs::Memory(m) => {
-                let _ = res;
-                m.remove_tree(&t.path, check)
-            }
+            Fs::Memory(m) => m.walk_tree(&t.path, res, remove, visit),
         }
     }
 

@@ -442,11 +442,12 @@ print(fs.list_dir("allowed")?)
 }
 
 #[test]
-fn deny_patterns_protect_matching_files_and_the_trees_that_may_hold_them() {
+fn deny_patterns_protect_matching_files_and_the_trees_that_hold_them() {
     let dir = TempDir::new("deny-patterns");
     dir.write("project/src/a.txt", "a");
     dir.write("project/src/.env", "SECRET=1");
     dir.write("project/Docs/notes.md", "notes");
+    dir.write("project/tmp/a/b/c.txt", "c");
     let policy =
         sandlang::policy::PolicyFile::parse("allow ./project\ndeny ./project/**/.env\ndeny write ./project/*/*.md", dir.path(), None)
             .unwrap()
@@ -458,13 +459,21 @@ print(fs.read_text("project/src/.env").unwrap_err().kind)
 print(fs.write_text("project/new/.ENV", "x").unwrap_err().kind)
 print(fs.read_text("project/Docs/notes.md")?)
 print(fs.write_text("project/Docs/notes.md", "x").unwrap_err().kind)
-// Files have nothing below them; a directory may hold a `.env`.
+// Only a tree that holds a protected entry cannot be moved or removed.
 fs.rename("project/src/a.txt", "project/src/b.txt")?
 print(fs.rename("project/src", "project/lib").unwrap_err().kind)
+print(fs.remove_dir("project/src", recursive: true).unwrap_err().kind)
 print(fs.list_dir("project/src")?)
+print(fs.rename("project/Docs", "project/Docs2").unwrap_err().kind)
+fs.rename("project/tmp", "project/tmp2")?
+fs.remove_dir("project/tmp2", recursive: true)?
+print(fs.list_dir("project")?)
 "#;
     let r = run_with(src, move |c| c.policy(policy).cwd(cwd));
-    assert_eq!(r.ok_stdout(), "permission_denied\npermission_denied\nnotes\npermission_denied\npermission_denied\n[\".env\", \"b.txt\"]\n");
+    assert_eq!(
+        r.ok_stdout(),
+        "permission_denied\npermission_denied\nnotes\npermission_denied\npermission_denied\npermission_denied\n[\".env\", \"b.txt\"]\npermission_denied\n[\"Docs\", \"src\"]\n"
+    );
 }
 
 #[test]
@@ -473,6 +482,7 @@ fn renaming_or_removing_trees_respects_deny_rules_inside() {
     dir.write("data/a/secret/key.txt", "key");
     dir.write("data/a/public.txt", "pub");
     dir.write("data/b/notes.txt", "notes");
+    dir.write("data/b/inner/n.txt", "n");
     dir.write("data/c/x.txt", "x");
     let data = dir.path().join("data");
     let policy = RulePolicy::new().allow_write(&data).deny_read(data.join("a/secret")).deny_write(data.join("locked/inner"));
@@ -485,7 +495,7 @@ print(fs.rename("data", "elsewhere").unwrap_err().kind)
 // Removing `a` recursively fails before removing anything.
 print(fs.remove_dir("data/a", recursive: true).unwrap_err().kind)
 print(fs.exists("data/a/public.txt")?)
-// A destination with protected paths below it cannot be replaced either.
+// A tree also cannot be moved if an entry would move to a protected path (`b/inner` to `locked/inner`).
 print(fs.rename("data/b", "data/locked").unwrap_err().kind)
 // Unrelated trees are fine.
 fs.rename("data/b", "data/b2")?

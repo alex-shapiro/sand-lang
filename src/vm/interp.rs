@@ -454,8 +454,9 @@ impl Vm {
     /// garbage that has not been collected yet, so for the memory limit the
     /// frame is rewound to that instruction and the scheduler collects and
     /// runs it once more (the operations that check memory have no side
-    /// effects before the check).
+    /// effects before the check, other than charging [`call_tick`]).
     #[cold]
+    #[inline(never)]
     fn limit_trap(&mut self, fiber: &mut Fiber, ip: usize, k: LimitKind) -> Trap {
         if k == LimitKind::Memory
             && let Some(fr) = fiber.frames.last_mut()
@@ -548,7 +549,7 @@ impl Vm {
             };
         }
         // A safe point of a call instruction: on preemption the call is
-        // re-executed when the fiber resumes.
+        // re-executed when the fiber resumes. It charges `call_tick`.
         macro_rules! tick_call {
             () => {
                 safe_point!(ip - 1, 1)
@@ -1266,7 +1267,9 @@ impl Vm {
                     }
                     Op::ListPush { list, src } => {
                         let (l, v) = (r!(list), r!(src));
-                        self.heap.list_push(l, v);
+                        if self.heap.list_push(l, v).is_err() {
+                            return Err(self.limit_trap(fiber, ip, LimitKind::Memory));
+                        }
                     }
                     Op::CheckRepeat { src } => {
                         let n = int!(src);
@@ -1521,15 +1524,10 @@ impl Vm {
                             r!(dst) = *v;
                         }
                     }
-                    Op::ListRest { dst, list, before, after } => {
-                        let l = self.heap.list(r!(list));
-                        let end = l.len().saturating_sub(after as usize);
-                        let items = l.get(before as usize..end.max(before as usize)).map(|s| s.to_vec()).unwrap_or_default();
-                        if let Err(c) = self.meter.charge(items.len() as u64) {
-                            fail_ctl!(c);
-                        }
-                        r!(dst) = self.heap.new_list(items);
-                    }
+                    Op::ListRest { dst, list, before, after } => match self.list_rest(r!(list), before as usize, after as usize) {
+                        Ok(v) => r!(dst) = v,
+                        Err(c) => fail_ctl!(c),
+                    },
 
                     // ---------------- strings
                     Op::ToStr { dst, src } => {
@@ -1906,25 +1904,13 @@ impl Vm {
                 Ok(None)
             }
             BlockOn::Recv(ch) => {
-                // Values only leave the channel or move within it, so the
-                // write barrier is told nothing is stored.
-                let Obj::Channel(c) = self.heap.get_mut_storing(ch, &[]) else { return Err(internal("not a channel")) };
-                if let Some(v) = c.queue.pop_front() {
-                    // Move a blocked sender's value into the queue.
-                    let woken = c.senders.pop_front().map(|(sf, sg, sv)| {
-                        c.queue.push_back(sv);
-                        (sf, sg)
-                    });
+                let Some(c) = self.heap.channel_mut(ch, None) else { return Err(internal("not a channel")) };
+                if let Some((v, woken)) = c.take() {
                     let some = self.some(v);
                     if let Some((sf, sg)) = woken {
                         // If the sender went away, its value stays queued.
                         self.deliver(sf, sg, Value::Bool(true));
                     }
-                    return Ok(Some(some));
-                }
-                if let Some((sf, sg, sv)) = c.senders.pop_front() {
-                    let some = self.some(sv);
-                    self.deliver(sf, sg, Value::Bool(true));
                     return Ok(Some(some));
                 }
                 if c.closed {
@@ -1944,9 +1930,7 @@ impl Vm {
                 Ok(None)
             }
             BlockOn::Send(ch, v) => {
-                // Handing the value to a receiver stores nothing, and the
-                // empty precise barrier keeps the queue from being rescanned.
-                let Obj::Channel(c) = self.heap.get_mut_storing(ch, &[]) else { return Err(internal("not a channel")) };
+                let Some(c) = self.heap.channel_mut(ch, None) else { return Err(internal("not a channel")) };
                 if c.closed {
                     return Ok(Some(Value::Bool(false)));
                 }
@@ -1957,22 +1941,11 @@ impl Vm {
                         return Ok(Some(Value::Bool(true)));
                     }
                 }
-                let Obj::Channel(c) = self.heap.get(ch) else { unreachable!() };
-                if c.capacity == 0 || c.queue.len() < c.capacity {
-                    // Count the queue's growth before it happens (it doubles).
-                    let (len, cap) = (c.queue.len(), c.queue.capacity());
-                    let more = if len == cap { cap.max(4) } else { 0 };
-                    if more > 0 && self.heap.would_exceed(more * std::mem::size_of::<Value>()) {
-                        return Err(Ctl::limit(LimitKind::Memory));
-                    }
-                    let Obj::Channel(c) = self.heap.get_mut_storing(ch, &[v]) else { unreachable!() };
-                    c.queue.reserve_exact(more);
-                    c.queue.push_back(v);
-                    let grown = c.queue.capacity() - cap;
-                    self.heap.bytes += grown * std::mem::size_of::<Value>();
+                if c.has_room() {
+                    self.heap.channel_push(ch, v).map_err(Ctl::limit)?;
                     return Ok(Some(Value::Bool(true)));
                 }
-                let Obj::Channel(c) = self.heap.get_mut(ch) else { unreachable!() };
+                let Some(c) = self.heap.channel_mut(ch, Some(v)) else { unreachable!() };
                 let before = c.senders.capacity();
                 c.senders.push_back((me, g, v));
                 let grown = c.senders.capacity().saturating_sub(before);
@@ -2201,11 +2174,13 @@ impl Vm {
         if !slot_fits(end) {
             return Err(Ctl::panic("map too large"));
         }
+        let new_cap = self.entries_capacity(end, mo.entries.capacity(), MAP_ENTRY_SIZE, mo.index_growth(k))?;
         self.unpin(m)?;
         let Obj::Map(mo) = self.heap.entries_mut_storing(m, end, true, &[k, v]) else { unreachable!() };
         let keys = mo.entries.iter().enumerate().filter_map(|(s, e)| e.map(|(k, _)| (s, k)));
         mo.index.densify(mo.live + 1, keys);
         let (cap, index) = (mo.entries.capacity(), mo.index_bytes());
+        mo.entries.reserve_exact(new_cap - end);
         mo.entries.push(Some((k, v)));
         mo.live += 1;
         mo.index.insert(k, hash, end);
@@ -2215,6 +2190,28 @@ impl Vm {
             self.heap.bytes = (self.heap.bytes + grown).saturating_sub(index);
         }
         Ok(())
+    }
+
+    /// The capacity the entries of a map or set need for one more entry.
+    /// The entries hold `len` of `cap` slots of `elem` bytes, and adding the
+    /// entry allocates `index` bytes for the index. Fails with the memory
+    /// limit, before anything changes, if the growth does not fit.
+    #[inline]
+    fn entries_capacity(&self, len: usize, cap: usize, elem: usize, index: usize) -> Result<usize, Ctl> {
+        if len < cap && index == 0 {
+            return Ok(cap);
+        }
+        self.entries_capacity_slow(len, cap, elem, index)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn entries_capacity_slow(&self, len: usize, cap: usize, elem: usize, index: usize) -> Result<usize, Ctl> {
+        if len < cap {
+            self.reserve(index)?;
+            return Ok(cap);
+        }
+        self.heap.grown_capacity(cap, len + 1, elem, index).map_err(Ctl::limit)
     }
 
     /// Removes `k` from map `m`; returns its value.
@@ -2251,11 +2248,13 @@ impl Vm {
         if !slot_fits(end) {
             return Err(Ctl::panic("set too large"));
         }
+        let new_cap = self.entries_capacity(end, so.entries.capacity(), SET_ENTRY_SIZE, so.index_growth(k))?;
         self.unpin(s)?;
         let Obj::Set(so) = self.heap.entries_mut_storing(s, end, true, &[k]) else { unreachable!() };
         let keys = so.entries.iter().enumerate().filter_map(|(s, e)| e.map(|k| (s, k)));
         so.index.densify(so.live + 1, keys);
         let (cap, index) = (so.entries.capacity(), so.index.bytes());
+        so.entries.reserve_exact(new_cap - end);
         so.entries.push(Some(k));
         so.live += 1;
         so.index.insert(k, hash, end);
@@ -2306,6 +2305,19 @@ impl Vm {
         Ok(true)
     }
 
+    /// `Op::ListRest`: a copy of `list` without its first `before` and last
+    /// `after` elements.
+    #[inline(never)]
+    fn list_rest(&mut self, list: Value, before: usize, after: usize) -> Result<Value, Ctl> {
+        let l = self.heap.list(list);
+        let end = l.len().saturating_sub(after).max(before);
+        let n = end.saturating_sub(before);
+        self.reserve(n * std::mem::size_of::<Value>())?;
+        self.meter.charge(n as u64)?;
+        let items = self.heap.list(list).get(before..end).map(<[Value]>::to_vec).unwrap_or_default();
+        Ok(self.heap.new_list(items))
+    }
+
     #[inline(never)]
     fn slice(&mut self, o: Value, start: Option<i64>, end: Option<i64>, inclusive: bool) -> Result<Value, Ctl> {
         let len = match self.heap.get(o) {
@@ -2347,6 +2359,20 @@ impl Vm {
             }
             _ => unreachable!(),
         })
+    }
+}
+
+/// The fuel that instruction `op` spends before it can fail. Only calls
+/// spend any, at their safe point (`tick_call!`).
+pub(super) fn call_tick(op: Op) -> i64 {
+    match op {
+        Op::CallDirect { .. }
+        | Op::CallR { .. }
+        | Op::CallDirectTo { .. }
+        | Op::CallSelf { .. }
+        | Op::TailCallDirect { .. }
+        | Op::TailCall { .. } => 1,
+        _ => 0,
     }
 }
 

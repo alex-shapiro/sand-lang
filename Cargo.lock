@@ -1013,6 +1013,7 @@ dependencies = [
  "js-sys",
  "junction",
  "md-5",
+ "nix 0.29.0",
  "proptest",
  "regex-automata",
  "rustix",
@@ -1027,6 +1028,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-time",
  "webpki-roots",
+ "winx",
 ]
 
 [[package]]
@@ -1702,6 +1704,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "80d0f4e272c85def139476380b12f9ac60926689dd2e01d4923222f40580869d"
 dependencies = [
  "winapi",
+]
+
+[[package]]
+name = "winx"
+version = "0.36.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f3fd376f71958b862e7afb20cfe5a22830e1963462f3a17f49d82a6c1d1f42d"
+dependencies = [
+ "bitflags 2.13.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

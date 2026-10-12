@@ -6,9 +6,13 @@
 //! `RESOLVE_NO_SYMLINKS` on Linux). A symlink met on the way is read and its
 //! target spliced into the rest of the path, as `realpath` does. The walk
 //! ends holding the directory containing the final entry ([`Resolved`]),
-//! with the canonical path the policy decides on: the names walked, or on
-//! macOS the kernel's path of the held directory (`F_GETPATH`), which spells
-//! directories as stored and resolves firmlinks.
+//! with the canonical path the policy decides on. The directory's part of
+//! that path is the one the kernel reports for the open directory, so it
+//! stays correct even if a directory on the way was renamed during the
+//! walk. The kernel reports it through `F_GETPATH` on macOS, which also
+//! spells names as stored and resolves firmlinks, and through
+//! `/proc/self/fd` on Linux. On other systems, or when `/proc` is not
+//! mounted, the path is built from the names walked.
 //!
 //! The operation then acts on the final name relative to the held
 //! directory, never following a final symlink, so it reaches exactly the
@@ -19,7 +23,7 @@
 //! stored under another spelling (`data/SECRETS` for `data/secrets`);
 //! [`Resolved::fix_spelling`] looks it up on demand.
 
-use super::{EntryKind, EntryMeta, Mode, OpenMode, Work, unchecked_symlink};
+use super::{ENTRY_OVERHEAD, EntryKind, EntryMeta, Mode, OpenMode, Work, unchecked_symlink};
 use crate::policy::{MAX_LINK_SCAN, fold_name};
 use crate::vm::iomem::Reservation;
 use rustix::fs::{AtFlags, FileType, Mode as Perm, OFlags, Stat};
@@ -34,9 +38,6 @@ use std::path::{Component, Path, PathBuf};
 
 /// At most this many symlinks are followed in one path (Linux's limit).
 const MAX_LINKS: usize = 40;
-
-/// Bytes counted per directory entry besides its name.
-const ENTRY_OVERHEAD: usize = 2 * std::mem::size_of::<OsString>();
 
 /// Flags for directories that are only traversed (`O_PATH` needs no read
 /// permission; `O_SEARCH` is added on macOS by [`open_dir_at`]).
@@ -528,7 +529,24 @@ fn dir_path(dir: &OwnedFd, names: &[OsString]) -> PathBuf {
     }
 }
 
-#[cfg(not(target_vendor = "apple"))]
+/// The canonical path of the directory `dir`, which the walk reached
+/// through `names`. It is read from `/proc/self/fd`, so it is still correct
+/// if a directory on the way was renamed after the walk.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn dir_path(dir: &OwnedFd, names: &[OsString]) -> PathBuf {
+    use std::os::fd::AsRawFd;
+    let link = format!("/proc/self/fd/{}", dir.as_raw_fd());
+    match rustix::fs::readlink(link, Vec::new()) {
+        // Paths outside the process's root start with `(unreachable)`.
+        Ok(p) if p.as_bytes().first() == Some(&b'/') && !p.as_bytes().ends_with(b" (deleted)") => {
+            PathBuf::from(OsString::from_vec(p.into_bytes()))
+        }
+        // `/proc` is not mounted, or the directory was deleted.
+        _ => names_path(names),
+    }
+}
+
+#[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "android")))]
 fn dir_path(_: &OwnedFd, names: &[OsString]) -> PathBuf {
     names_path(names)
 }
@@ -826,15 +844,14 @@ impl Resolved {
         Ok(rustix::fs::unlinkat(dir, name, AtFlags::REMOVEDIR)?)
     }
 
-    /// Removes the directory entry and everything below it, opening each
-    /// directory relative to its parent without following symlinks. `check`
-    /// is asked about each entry below (by its stored path) before it is
-    /// removed; its error stops the removal. The names read are reserved in
-    /// `res`.
-    pub fn remove_tree<E>(
-        self,
+    /// See [`super::Fs::walk_tree`]. Each directory is opened relative to
+    /// its parent without following symlinks, and each entry is named by
+    /// the path stored on disk.
+    pub fn walk_tree<E>(
+        &self,
         res: &mut Reservation,
-        mut check: impl FnMut(&Path) -> Result<io::Result<()>, E>,
+        remove: bool,
+        mut visit: impl FnMut(&Path) -> Result<io::Result<()>, E>,
     ) -> Result<io::Result<()>, E> {
         macro_rules! io {
             ($e:expr) => {
@@ -901,11 +918,13 @@ impl Resolved {
                         levels[n - 1].fd.as_ref().expect("reopened")
                     }
                 };
-                io!(rustix::fs::unlinkat(parent, &done.name, AtFlags::REMOVEDIR));
+                if remove {
+                    io!(rustix::fs::unlinkat(parent, &done.name, AtFlags::REMOVEDIR));
+                }
                 continue;
             };
             let path = top.path.join(&name);
-            if let Err(e) = check(&path)? {
+            if let Err(e) = visit(&path)? {
                 return Ok(Err(e));
             }
             let at = top.fd.as_ref().expect("the innermost level is open");
@@ -921,7 +940,7 @@ impl Resolved {
                 {
                     l.fd = None;
                 }
-            } else {
+            } else if remove {
                 io!(rustix::fs::unlinkat(at, &name, AtFlags::empty()));
             }
         }
