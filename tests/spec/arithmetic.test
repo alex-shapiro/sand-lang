@@ -378,6 +378,41 @@ print(duration.from_secs(0.5))
 250ms
 500ms
 
+=== durations scale by any Num
+fn scale<T: Num>(d: duration, k: T) -> duration {
+    d * k
+}
+print(1s * 1.5)
+print(0.5 * 1m)
+print(1d * -0.25)
+print(3s * 0.1)
+print(1ns * 0.9)
+print(-1ns * 0.9)
+print(scale(2s, 3))
+print(scale(2s, 0.25))
+let d = 3s
+print(2 * d)
+print(d * 2)
+let max = duration.from_nanos(int.max_value())
+let min = duration.from_nanos(int.min_value())
+print(max * 1.0 == max)
+print(min * 1.0 == min)
+print((max * 0.5).nanos())
+--- stdout
+1.5s
+30s
+-6h
+300ms
+0s
+0s
+6s
+500ms
+6s
+6s
+true
+true
+4611686018427387903
+
 === unary minus on float and bitwise not
 print(-1.5)
 print(~5)

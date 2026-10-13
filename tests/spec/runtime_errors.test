@@ -76,6 +76,16 @@ panic("then fail")
 --- panic
 then fail
 
+=== scaling a duration beyond its range causes a panic
+print(1s * 1e10)
+--- panic
+duration overflow
+
+=== scaling a duration by nan causes a panic
+print(1s * nan)
+--- panic
+duration overflow
+
 === duration division overflow is a panic, not a host crash
 let d = duration.from_nanos(int.min_value())
 print(d / -1)

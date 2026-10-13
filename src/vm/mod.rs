@@ -364,10 +364,10 @@ pub(crate) struct Permits {
 }
 
 impl Permits {
-    /// Like [`Vm::permit_normalized`], but returns `Err` if the user must be
-    /// asked.
-    pub fn permit_normalized(&self, cap: &Capability) -> Result<bool, ()> {
-        decide(&self.grants_once, &self.denies_once, &self.always, self.prompts, cap, || self.policy.check_normalized_in(cap, self.space))
+    pub fn permit_path(&self, cap: &Capability, entry: bool) -> Result<bool, ()> {
+        decide(&self.grants_once, &self.denies_once, &self.always, self.prompts, cap, || {
+            if entry { self.policy.check_entry_normalized_in(cap, self.space) } else { self.policy.check_normalized_in(cap, self.space) }
+        })
     }
 }
 
@@ -456,6 +456,8 @@ pub struct Host {
     pub(crate) regex_cache: Vec<(u64, u32)>,
     /// The file system of the `fs` module.
     pub(crate) fs: crate::files::Fs,
+    /// Rewrites or refuses outgoing HTTP requests (see [`crate::Config::request_filter`]).
+    pub(crate) request_filter: Option<crate::engine::RequestFilter>,
 }
 
 pub struct Vm {
@@ -928,23 +930,18 @@ impl Vm {
         self.permit_by(cap, |p, c| p.check_in(c, space))
     }
 
-    /// Like [`Vm::permit`] for a file capability whose path is already
-    /// normalized (see [`Policy::check_normalized`]).
     pub fn permit_normalized(&mut self, cap: &Capability) -> Result<bool, Ctl> {
         self.permit_path(cap, false)
     }
 
-    /// Like [`Vm::permit`] for an operation on a directory entry itself
-    /// (see [`Policy::check_entry`]).
     pub fn permit_entry(&mut self, cap: &Capability) -> Result<bool, Ctl> {
-        self.permit_path(cap, true)
+        let space = self.host.fs.space();
+        self.permit_by(cap, |p, c| p.check_entry_in(c, space))
     }
 
-    /// [`Vm::permit_normalized`] (or, with `entry`, [`Vm::permit_entry`])
-    /// in the engine's file system.
     pub(crate) fn permit_path(&mut self, cap: &Capability, entry: bool) -> Result<bool, Ctl> {
         let space = self.host.fs.space();
-        self.permit_by(cap, |p, c| if entry { p.check_entry_in(c, space) } else { p.check_normalized_in(c, space) })
+        self.permit_by(cap, |p, c| if entry { p.check_entry_normalized_in(c, space) } else { p.check_normalized_in(c, space) })
     }
 
     /// Whether prompt answers are remembered (for this call or for good):

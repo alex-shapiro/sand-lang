@@ -1006,3 +1006,36 @@ serving.cancel()
     handle.join().unwrap().unwrap();
     assert_eq!(out.contents(), format!("ready {addr}\nopened\n"));
 }
+
+#[test]
+fn request_filters_rewrite_and_refuse_requests() {
+    let server = http_server(|req| HttpResponse::new(200, req.header("authorization").unwrap_or("-").to_string()));
+    let base = format!("http://{}", server.addr);
+    let src = format!(
+        r#"
+import http
+print(http.get("{base}/a", headers: [("Authorization", "Bearer secret-marker")])?.text()?)
+print(http.get("{base}/b")?.text()?)
+print(http.get("{base}/c", headers: [("X-Refuse", "yes")]).unwrap_err().kind)
+"#
+    );
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = seen.clone();
+    let r = run_with(&src, move |c| {
+        c.request_filter(move |target, headers| {
+            log.lock().unwrap().push(target.clone());
+            if headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("x-refuse")) {
+                return Err("refused by the host".into());
+            }
+            for (_, value) in headers.iter_mut() {
+                *value = value.replace("secret-marker", "real-token");
+            }
+            Ok(())
+        })
+    });
+    assert_eq!(r.ok_stdout(), "Bearer real-token\n-\npermission_denied\n");
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 3);
+    assert_eq!(seen[0].scheme, "http");
+    assert_eq!(seen[0].host, "127.0.0.1");
+}

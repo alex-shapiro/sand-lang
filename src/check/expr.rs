@@ -208,6 +208,33 @@ impl Checker {
             None => self.infer(value, None),
         };
         let vty = annotated.unwrap_or(init.ty);
+        let rty = self.resolve(vty);
+        let close = self.close_trait.filter(|&t| self.implements_trait(rty, t));
+        if close.is_none() {
+            self.not_closeable(rty, value.span);
+        }
+        if self.fs.top_level && self.in_session() {
+            let g = self.globals.len() as GlobalId;
+            let sym = self.sym(&name.name);
+            self.globals.push(GlobalInfo {
+                name: sym,
+                module: self.cur_mod,
+                ty: vty,
+                mutable: false,
+                is_pub: false,
+                span: name.span,
+                doc: None,
+            });
+            if name.name != "_" {
+                self.define(sym, Def::Global(g), false, name.span);
+            }
+            self.global_fact(g);
+            return vec![mk(
+                HKind::Assign { place: Place::Global(g), op: None, op_ty: TypeId::UNIT, value: Box::new(init) },
+                TypeId::UNIT,
+                s.span,
+            )];
+        }
         let local = if name.name == "_" {
             self.hidden_local(vty, name.span)
         } else {
@@ -218,28 +245,7 @@ impl Checker {
         };
         let pat = HPat { kind: HPatKind::Bind(local), ty: vty, span: name.span };
         let bind = mk(HKind::Let { pat, init: Box::new(init), else_: None }, TypeId::UNIT, s.span);
-        let rty = self.resolve(vty);
-        let close = self.close_trait.filter(|&t| self.implements_trait(rty, t));
         let Some(t) = close else {
-            match self.ty(rty) {
-                Ty::Error => {}
-                Ty::Var(_) => self.error(value.span, "type annotation needed: a `use` binding's type must be known where it is bound"),
-                ty => {
-                    // `use f = fs.open(path)` without the `?`.
-                    let ok = match ty {
-                        Ty::Named(d, args) if d == self.wk.result => Some(self.arena.elem(args, 0)),
-                        _ => None,
-                    };
-                    let hint = match ok {
-                        Some(t) if self.close_trait.is_some_and(|c| self.implements_trait(t, c)) => {
-                            "; add `?` to bind the value of `Ok` (and return the error)"
-                        }
-                        _ => "",
-                    };
-                    let msg = format!("`use` needs a value whose type implements `Close`, found {}{hint}", self.show(rty));
-                    self.error(value.span, msg);
-                }
-            }
             return vec![bind];
         };
         let recv = mk(HKind::Local(local), vty, name.span);
@@ -247,6 +253,28 @@ impl Checker {
         let tr = TraitRef { trait_id: t, args: self.arena.intern_list(&[]) };
         let call = self.call_trait_method(tr, slot, rty, Some(recv), &CallArgs::default(), s.span);
         vec![bind, mk(HKind::Defer(Box::new(call)), TypeId::UNIT, s.span)]
+    }
+
+    /// Reports `use` on a value whose type does not implement `Close`.
+    fn not_closeable(&mut self, t: TypeId, span: Span) {
+        match self.ty(t) {
+            Ty::Error => {}
+            Ty::Var(_) => self.error(span, "type annotation needed: a `use` binding's type must be known where it is bound"),
+            ty => {
+                let ok = match ty {
+                    Ty::Named(d, args) if d == self.wk.result => Some(self.arena.elem(args, 0)),
+                    _ => None,
+                };
+                let hint = match ok {
+                    Some(ok) if self.close_trait.is_some_and(|c| self.implements_trait(ok, c)) => {
+                        "; add `?` to bind the value of `Ok` (and return the error)"
+                    }
+                    _ => "",
+                };
+                let msg = format!("`use` needs a value whose type implements `Close`, found {}{hint}", self.show(t));
+                self.error(span, msg);
+            }
+        }
     }
 
     /// `defer e`: `e` must have type `()` and cannot leave the deferred
@@ -1892,6 +1920,19 @@ impl Checker {
         }
     }
 
+    /// Whether `t` may scale a duration: `int`, `float`, or a type parameter,
+    /// which must then be bounded by `Num`.
+    fn num_factor(&mut self, t: TypeId, span: Span) -> bool {
+        match self.rty(t) {
+            Ty::Int | Ty::Float => true,
+            Ty::Param(_) => {
+                self.require_bound(t, Bound::Num, span);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Result type of an arithmetic operation, reporting errors.
     fn arith_type(&mut self, op: ArithOp, lt: TypeId, rt: TypeId, span: Span) -> TypeId {
         let l = self.resolve(lt);
@@ -1915,7 +1956,7 @@ impl Checker {
             (false, true) => (l, l),
             (false, false) => (l, r),
         };
-        if l == TypeId::INT && r == TypeId::DURATION && op == Mul {
+        if op == Mul && r == TypeId::DURATION && self.num_factor(l, span) {
             return TypeId::DURATION;
         }
         if l == TypeId::DURATION {
@@ -1925,7 +1966,18 @@ impl Checker {
                     TypeId::DURATION
                 }
                 Mul => {
-                    self.expect_type(TypeId::INT, r, span);
+                    if !self.num_factor(r, span) {
+                        match self.rty(r) {
+                            Ty::Var(_) => {
+                                self.expect_type(TypeId::INT, r, span);
+                            }
+                            Ty::Error => {}
+                            _ => {
+                                let msg = format!("expected Num, found {}", self.show(r));
+                                self.error(span, msg);
+                            }
+                        }
+                    }
                     TypeId::DURATION
                 }
                 Div if r == TypeId::DURATION => TypeId::FLOAT,
@@ -1938,6 +1990,9 @@ impl Checker {
                     TypeId::ERROR
                 }
             };
+        }
+        if let Some(t) = [l, r].into_iter().find(|&t| !self.has_arith(t, op)) {
+            return self.no_operator(op, t, span);
         }
         if !self.unify(l, r) {
             let (e, f) = self.show_pair(l, r);
@@ -1958,12 +2013,22 @@ impl Checker {
                 self.require_bound(t, Bound::Num, span);
                 t
             }
-            _ => {
-                let msg = format!("operator `{}` is not defined for {}; it requires Num", arith_text(op), self.show(t));
-                self.error(span, msg);
-                TypeId::ERROR
-            }
+            _ => self.no_operator(op, t, span),
         }
+    }
+
+    fn has_arith(&self, t: TypeId, op: ArithOp) -> bool {
+        match self.rty(t) {
+            Ty::Int | Ty::Float | Ty::Duration | Ty::Param(_) | Ty::Var(_) | Ty::Error | Ty::Never => true,
+            Ty::Str | Ty::Bytes | Ty::List(_) => op == ArithOp::Add,
+            _ => false,
+        }
+    }
+
+    fn no_operator(&mut self, op: ArithOp, t: TypeId, span: Span) -> TypeId {
+        let msg = format!("operator `{}` is not defined for {}", arith_text(op), self.show(t));
+        self.error(span, msg);
+        TypeId::ERROR
     }
 
     fn check_binary(&mut self, op: BinOp, l: &Expr, r: &Expr, span: Span) -> HExpr {

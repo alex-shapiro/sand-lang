@@ -75,6 +75,8 @@ pub struct Session {
     exit_code: Option<i32>,
     /// Whether the last call reset the session after an internal error.
     was_reset: bool,
+    /// The wall-time limit of each input (see [`Session::set_wall_time`]).
+    wall_time: Option<std::time::Duration>,
 }
 
 /// The suffix of the error message of a call that reset the session.
@@ -108,7 +110,8 @@ impl Session {
         let root = config.module_root.clone().or_else(|| config.cwd.clone()).unwrap_or_else(|| fs.default_dir());
         let cwd = config.cwd.clone().unwrap_or_else(|| root.clone());
         let root = fs.resolve(&fs.absolute(&root));
-        Session { engine, root, cwd, state: None, inputs: 0, exit_code: None, was_reset: false }
+        let wall_time = config.limits.max_wall_time;
+        Session { engine, root, cwd, state: None, inputs: 0, exit_code: None, was_reset: false, wall_time }
     }
 
     /// Checks, compiles and runs one input. Returns the debug form of its
@@ -143,7 +146,7 @@ impl Session {
         let name = name.map_or_else(|| format!("<input {}>", self.inputs), str::to_string);
         let want_value = !source.trim_end().ends_with(';');
         // The wall-time limit counts from here, for compiling and running.
-        let deadline = self.engine.deadline();
+        let deadline = self.deadline();
         let (entry, value, deadline) = self.compile_input(&name, source, want_value, deadline).await?;
         let show = value.is_some_and(|t| !matches!(t, TypeId::UNIT | TypeId::NEVER));
         self.run(entry, show, deadline).await
@@ -160,7 +163,7 @@ impl Session {
     fn type_of_inner(&mut self, expr: &str) -> Result<String, Error> {
         self.engine.clear_interrupt();
         let registry = self.engine.registry().clone();
-        let budget = self.engine.compile_budget(self.engine.deadline());
+        let budget = self.engine.compile_budget(self.deadline());
         let st = self.state()?;
         let mark = st.graph.mark();
         let file = st.graph.sm.add("<type>", expr);
@@ -217,7 +220,7 @@ impl Session {
         let mut report = TestReport::default();
         for (name, proto) in tests {
             self.exit_code = None;
-            let deadline = self.engine.deadline();
+            let deadline = self.deadline();
             let message = match self.run(proto, false, deadline).await {
                 Ok(_) => match self.exit_code {
                     Some(0) | None => None,
@@ -238,6 +241,16 @@ impl Session {
         }
         self.exit_code = None;
         Ok(report)
+    }
+
+    /// Sets the wall-time limit.
+    pub fn set_wall_time(&mut self, limit: Option<std::time::Duration>) {
+        self.wall_time = limit;
+    }
+
+    /// Get the deadline, if a wall-time limit is set.
+    fn deadline(&self) -> Option<Instant> {
+        self.wall_time.and_then(|t| Instant::now().checked_add(t))
     }
 
     /// The code passed to `exit` by the last input, if it called `exit`.
@@ -387,7 +400,7 @@ impl Session {
     /// Makes sure the session is started and its standard modules initialized.
     async fn start(&mut self) -> Result<(), Error> {
         if let Some(entry) = self.state()?.pending.take() {
-            let deadline = self.engine.deadline();
+            let deadline = self.deadline();
             self.run(entry, false, deadline).await?;
         }
         Ok(())

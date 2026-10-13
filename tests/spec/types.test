@@ -139,6 +139,17 @@ print(d > 1s)
 --- stdout
 true
 
+=== a duration scales only by a Num
+fn scale<T>(d: duration, k: T) -> duration {
+    d * k
+}
+let a = 1s * "x"
+let b = 1s * 2s
+--- error
+2: type parameter `T` does not satisfy Num
+4: expected Num, found str
+5: expected Num, found duration
+
 === duration and int are distinct
 let d: duration = 5
 --- error
@@ -300,6 +311,23 @@ print(twice(1s, (a, b) => a + b))
 abab
 [1, 1]
 2s
+
+=== operators are not defined for types
+struct V { x: float }
+let a = V { x: 1.0 }
+let b = a * 2.0
+let c = 2.0 * a
+let d = a + a
+let e = a * 1s
+let f = "a" - "b"
+let g = 1 + 2.0
+--- error
+3: operator `*` is not defined for V
+4: operator `*` is not defined for V
+5: operator `+` is not defined for V
+6: operator `*` is not defined for V
+7: operator `-` is not defined for str
+8: type mismatch: expected int, found float
 
 === plus on values of a type parameter's type requires Num
 fn f<T>(x: T) -> T {

@@ -3703,13 +3703,14 @@ fn defers_pending(f: &FnState) -> bool {
 }
 
 /// The operands of `l op r` as `x op k` when one is an integer literal that
-/// can be an immediate.
+/// can be an immediate and `x` is an `int`.
 fn imm_operands<'e>(op: ArithOp, l: &'e HExpr, r: &'e HExpr) -> Option<(&'e HExpr, i64)> {
-    match (int_lit(l), int_lit(r)) {
-        (_, Some(k)) => Some((l, k)),
-        (Some(k), None) if matches!(op, ArithOp::Add | ArithOp::Mul) => Some((r, k)),
-        _ => None,
-    }
+    let (x, k) = match (int_lit(l), int_lit(r)) {
+        (_, Some(k)) => (l, k),
+        (Some(k), None) if matches!(op, ArithOp::Add | ArithOp::Mul) => (r, k),
+        _ => return None,
+    };
+    matches!(x.ty, TypeId::INT).then_some((x, k))
 }
 
 /// The instruction for `a op k` with an immediate, if there is one for `op`

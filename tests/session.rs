@@ -468,6 +468,35 @@ fn reset_starts_over() {
     assert_eq!(r.value("x"), "\"fresh\"");
 }
 
+#[test]
+fn top_level_use_bindings_persist_across_inputs() {
+    let mut r = Repl::new();
+    r.ok("struct Res {\n    name: str\n    var closed: bool = false\n}");
+    r.ok("impl Close for Res {\n    fn close(self) {\n        self.closed = true\n        print(\"closed \\(self.name)\")\n    }\n}");
+    r.ok("let res = [1, 2]");
+    r.ok("use res = Res { name: \"a\" }");
+    assert_eq!(r.value("res.closed"), "false");
+    assert_eq!(r.value("res.name"), "\"a\"");
+    r.ok("use _ = Res { name: \"b\" }");
+    assert_eq!(r.take_out(), "");
+    r.ok("{\n    use inner = Res { name: \"c\" }\n}");
+    assert_eq!(r.take_out(), "closed c\n");
+    let msg = r.compile_error("use n = 1");
+    assert!(msg.contains("`use` needs a value whose type implements `Close`"), "{msg}");
+}
+
+#[cfg(feature = "os")]
+#[test]
+fn a_file_bound_with_top_level_use_stays_open_for_later_inputs() {
+    let dir = TempDir::new("session-use");
+    std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
+    let policy = Policy::rules(RulePolicy::new().fallback(sandlang::Decision::Allow));
+    let mut r = Repl::with(Config::new().policy(policy).cwd(dir.path()).module_root(dir.path()));
+    r.ok("import fs");
+    r.ok("use f = fs.open(\"a.txt\")?");
+    assert_eq!(r.value("f.read_text()?"), "\"hello\"");
+}
+
 #[cfg(feature = "os")]
 #[test]
 fn always_answers_persist_and_prompts_happen_once() {
@@ -831,4 +860,17 @@ fn inputs_can_be_named() {
     }
     rt().block_on(session.eval_as("main.sand", "fn f() -> int { 7 }")).unwrap();
     assert_eq!(rt().block_on(session.eval("f() * 6")).unwrap().as_deref(), Some("42"));
+}
+
+#[test]
+fn wall_time_set_per_session() {
+    let limits = Limits { max_wall_time: Some(Duration::from_millis(50)), ..Limits::default() };
+    let mut r = Repl::with(Config::new().limits(limits));
+    assert!(matches!(r.eval("task.sleep(200ms)"), Err(Error::Limit(LimitKind::WallTime))));
+    r.session.set_wall_time(Some(Duration::from_secs(5)));
+    r.ok("task.sleep(200ms)");
+    r.session.set_wall_time(Some(Duration::from_millis(20)));
+    assert!(matches!(r.eval("task.sleep(200ms)"), Err(Error::Limit(LimitKind::WallTime))));
+    r.session.set_wall_time(None);
+    r.ok("task.sleep(100ms)");
 }

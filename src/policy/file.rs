@@ -636,11 +636,12 @@ fn parse_size_u64(s: &str) -> Result<u64, String> {
     num.parse::<u64>().map(|n| n.saturating_mul(mult)).map_err(|_| format!("invalid size `{s}` (use e.g. 4096, 64K, 256M, 1G)"))
 }
 
-/// Parses a duration: a number with a unit, `ns`, `us`, `ms`, `s`, `m` or
-/// `h`, e.g. `500ms`, `10s`, `1.5m`.
+/// Parses a duration: a number with a unit, `ns`, `us`, `ms`, `s`, `m`, `h`,
+/// `d` or `w`, e.g. `500ms`, `10s`, `1.5m`.
 pub fn parse_duration(s: &str) -> Result<Duration, String> {
     let s = s.trim();
-    let units: [(&str, f64); 6] = [("ms", 1e-3), ("us", 1e-6), ("ns", 1e-9), ("s", 1.0), ("m", 60.0), ("h", 3600.0)];
+    let units: [(&str, f64); 8] =
+        [("ms", 1e-3), ("us", 1e-6), ("ns", 1e-9), ("s", 1.0), ("m", 60.0), ("h", 3600.0), ("d", 86400.0), ("w", 604800.0)];
     for (u, mult) in units {
         if let Some(n) = s.strip_suffix(u)
             && let Ok(v) = n.parse::<f64>()

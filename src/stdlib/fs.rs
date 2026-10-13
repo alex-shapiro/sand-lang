@@ -143,7 +143,7 @@ pub fn register(r: &mut Registry) {
         // Every directory to be created must be writable, not just the last.
         // Those that exist are not created, whatever happens meanwhile.
         for dir in vm.host.fs.missing_ancestors(&t) {
-            if let Some(e) = deny_path(vm, Capability::FsWrite(dir), &shown)? {
+            if let Some(e) = deny_path(vm, Capability::FsWrite(dir), &shown, false)? {
                 return Ok(e);
             }
         }
@@ -339,12 +339,12 @@ fn check(vm: &mut Vm, t: &mut Target, access: Access, shown: &str) -> Result<Opt
             }
         }
     }
-    deny_path(vm, cap(&t.path), shown)
+    deny_path(vm, cap(&t.path), shown, t.mode == Mode::Entry)
 }
 
-/// Checks `cap` (whose path is normalized) against the policy.
-fn deny_path(vm: &mut Vm, cap: Capability, shown: &str) -> Result<Option<Value>, Ctl> {
-    if vm.permit_normalized(&cap)? {
+/// Checks `cap` against the policy.
+fn deny_path(vm: &mut Vm, cap: Capability, shown: &str, entry: bool) -> Result<Option<Value>, Ctl> {
+    if vm.permit_path(&cap, entry)? {
         return Ok(None);
     }
     Ok(Some(denied(vm, &cap, shown)))
@@ -457,7 +457,7 @@ fn remove_tree(vm: &mut Vm, a: &[Value]) -> NResult {
         fs.walk_tree(&t, &mut res, true, |path| {
             charge_entry(allowance, path)?;
             let cap = Capability::FsWrite(path.to_path_buf());
-            match permits.permit_normalized(&cap) {
+            match permits.permit_path(&cap, true) {
                 Ok(true) => Ok(Ok(())),
                 Ok(false) => Err(Halt::Denied(path.to_path_buf())),
                 Err(()) => Err(Halt::Prompt(cap)),

@@ -597,12 +597,15 @@ fn send(vm: &mut Vm, a: &[Value]) -> NResult {
         return Ok(vm.err_value("invalid", &format!("invalid HTTP method {:?}", super::truncate(method, 64))));
     }
     let (method, text) = (method.to_string(), text.to_string());
-    let headers = match header_pairs(vm, a[2])? {
+    let mut headers = match header_pairs(vm, a[2])? {
         Ok(h) => h,
         Err(e) => return Ok(vm.err_value("invalid", &e)),
     };
     if let Some(denied) = check_permission(vm, url.capability(&method))? {
         return Ok(denied);
+    }
+    if let Err(reason) = filter_request(vm, &url, &mut headers) {
+        return Ok(vm.err_value("permission_denied", &reason));
     }
     // The request is held outside the heap while it is sent.
     let mut res = super::or_return!(vm.reserve_io(vm.heap.bytes_of(a[3]).len()));
@@ -671,6 +674,13 @@ fn send(vm: &mut Vm, a: &[Value]) -> NResult {
     )
 }
 
+/// Passes the headers of a request to `url` through the host's request filter, if it has one.
+fn filter_request(vm: &Vm, url: &Url, headers: &mut Vec<(String, String)>) -> Result<(), String> {
+    let Some(filter) = &vm.host.request_filter else { return Ok(()) };
+    let target = crate::engine::RequestTarget { scheme: url.scheme.clone(), host: url.host.clone(), port: url.port };
+    filter(&target, headers)
+}
+
 /// A request's head, with a `Connection: close` header if `close`.
 fn request_head(method: &str, url: &Url, headers: &[(String, String)], body: Delimit, close: bool) -> String {
     let has = |name: &str| headers.iter().any(|(k, _)| k.eq_ignore_ascii_case(name));
@@ -737,7 +747,7 @@ fn start_upload(vm: &mut Vm, a: &[Value]) -> NResult {
     if !is_token(&method) {
         return Ok(vm.err_value("invalid", &format!("invalid HTTP method {:?}", super::truncate(&method, 64))));
     }
-    let headers = match header_pairs(vm, a[2])? {
+    let mut headers = match header_pairs(vm, a[2])? {
         Ok(h) => h,
         Err(e) => return Ok(vm.err_value("invalid", &e)),
     };
@@ -747,6 +757,9 @@ fn start_upload(vm: &mut Vm, a: &[Value]) -> NResult {
     };
     if let Some(denied) = check_permission(vm, url.capability(&method))? {
         return Ok(denied);
+    }
+    if let Err(reason) = filter_request(vm, &url, &mut headers) {
+        return Ok(vm.err_value("permission_denied", &reason));
     }
     let buffers = if url.scheme == "https" { net::CONN_BUFFER + net::TLS_BUFFERS } else { net::CONN_BUFFER };
     let slot = super::or_return!(vm.resource_slot_with(buffers, "a connection"));

@@ -285,6 +285,32 @@ pub fn float_rem(a: f64, b: f64) -> f64 {
     if r != 0.0 && ((r < 0.0) != (b < 0.0)) { r + b } else { r }
 }
 
+/// `nanos * k` truncated toward zero to whole nanoseconds.
+/// `None` if `k` is not finite or the product does not fit in a duration.
+pub fn dur_scale(nanos: i64, k: f64) -> Option<i64> {
+    if !k.is_finite() {
+        return None;
+    }
+    let bits = k.to_bits();
+    let exp = ((bits >> 52) & 0x7ff) as i32;
+    let frac = (bits & ((1 << 52) - 1)) as u128;
+    // |k| == mantissa * 2^shift exactly.
+    let (mantissa, shift) = if exp == 0 { (frac, -1074) } else { (frac | 1 << 52, exp - 1075) };
+    let magnitude = u128::from(nanos.unsigned_abs()) * mantissa;
+    let scaled = if magnitude == 0 {
+        0
+    } else if shift >= 0 {
+        if shift >= 64 || magnitude > (1u128 << 63) >> shift {
+            return None;
+        }
+        magnitude << shift
+    } else {
+        magnitude.checked_shr(shift.unsigned_abs()).unwrap_or(0)
+    };
+    let negative = (nanos < 0) != (bits >> 63 == 1);
+    i64::try_from(if negative { -(scaled as i128) } else { scaled as i128 }).ok()
+}
+
 fn shift_amount(b: i64) -> Result<u32, &'static str> {
     if (0..64).contains(&b) { Ok(b as u32) } else { Err("shift out of range") }
 }
@@ -310,6 +336,7 @@ impl Vm {
             (0, Dur(x), Dur(y)) => Dur(x.checked_add(y).ok_or_else(|| overflow("duration"))?),
             (1, Dur(x), Dur(y)) => Dur(x.checked_sub(y).ok_or_else(|| overflow("duration"))?),
             (2, Dur(x), Int(y)) | (2, Int(y), Dur(x)) => Dur(x.checked_mul(y).ok_or_else(|| overflow("duration"))?),
+            (2, Dur(x), Float(y)) | (2, Float(y), Dur(x)) => Dur(dur_scale(x, y).ok_or_else(|| overflow("duration"))?),
             (3, Dur(x), Int(y)) => {
                 if y == 0 {
                     return Err(Ctl::panic("division by zero"));

@@ -23,7 +23,7 @@ pub fn fmt_duration(nanos: i64) -> String {
     if nanos == 0 {
         return "0s".into();
     }
-    let units: [(&str, f64); 6] = [("h", 3600e9), ("m", 60e9), ("s", 1e9), ("ms", 1e6), ("us", 1e3), ("ns", 1.0)];
+    let units: [(&str, f64); 7] = [("d", 86400e9), ("h", 3600e9), ("m", 60e9), ("s", 1e9), ("ms", 1e6), ("us", 1e3), ("ns", 1.0)];
     let abs = (nanos as f64).abs();
     for (name, size) in units {
         if abs >= size || name == "ns" {

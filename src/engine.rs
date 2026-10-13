@@ -216,7 +216,21 @@ pub struct Config {
     #[cfg(feature = "os")]
     pub(crate) tls: crate::stdlib::TlsSettings,
     pub(crate) fs: Fs,
+    pub(crate) request_filter: Option<RequestFilter>,
 }
+
+/// HTTP request destination.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequestTarget {
+    /// `http` or `https`.
+    pub scheme: String,
+    /// The lowercased host name or an IP address.
+    pub host: String,
+    pub port: u16,
+}
+
+/// Rewrites outgoing HTTP request headers or rejects the request with a reason.
+pub type RequestFilter = Arc<dyn Fn(&RequestTarget, &mut Vec<(String, String)>) -> Result<(), String> + Send + Sync>;
 
 impl Default for Config {
     fn default() -> Self {
@@ -245,7 +259,17 @@ impl Config {
             #[cfg(feature = "os")]
             tls: Default::default(),
             fs: Fs::default(),
+            request_filter: None,
         }
+    }
+
+    /// Filters the headers of every HTTP request.
+    pub fn request_filter(
+        mut self,
+        filter: impl Fn(&RequestTarget, &mut Vec<(String, String)>) -> Result<(), String> + Send + Sync + 'static,
+    ) -> Self {
+        self.request_filter = Some(Arc::new(filter));
+        self
     }
     pub fn policy(mut self, p: Policy) -> Self {
         self.policy = p;
@@ -866,6 +890,7 @@ impl Engine {
             #[cfg(feature = "os")]
             http_pool: crate::stdlib::HttpPool::new(c.limits.max_open_resources),
             fs: c.fs.clone(),
+            request_filter: c.request_filter.clone(),
             regex_cache: Vec::new(),
         };
         let mut vm = Vm::new(prog, self.registry.natives.clone(), host);

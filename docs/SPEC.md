@@ -162,7 +162,8 @@ infinity), `nan` (not a number). A float must have digits on both sides of a
 `.`; `1.` and `.5` are not floats.
 
 **Durations**: an integer or float literal immediately followed by a unit:
-`ns`, `us`, `ms`, `s`, `m`, `h`. Examples: `250ms`, `1.5s`, `2h`. The value is
+`ns`, `us`, `ms`, `s`, `m`, `h`, `d` (24 hours), `w` (7 days). Examples: `250ms`,
+`1.5s`, `2h`, `3d`. The value is
 stored as a signed 64-bit number of nanoseconds, computed exactly from the
 decimal literal (`1.005s` is 1,005,000,000 ns); fractional nanoseconds are
 truncated.
@@ -746,7 +747,11 @@ same `Num` type, with these additions:
   requires that it be one of these (a number, `duration`, `str`, `bytes` or a
   list) once inferred: `add(true, false)` is a compile error.
 - `duration + duration`, `duration - duration`, `-duration`,
-  `duration * int`, `duration / int` produce `duration`;
+  `duration * k`, `k * duration` and `duration / int` produce `duration`,
+  where `k` is any `Num` (a type parameter `k: T` needs the bound `T: Num`);
+  a `float` factor gives the exact product truncated toward zero to whole
+  nanoseconds, and panics with `duration overflow` if it is not finite or
+  the product is out of range;
   `duration / duration` produces `float`.
 
 Integer semantics:
@@ -1005,8 +1010,10 @@ fn first_line(path: str) -> Result<str?> {
   `Result` of one needs `?` first. The trait's method is called even if the
   type also has an inherent `close`.
 - A `use` binding is a name or `_`, not a pattern, and is local to its block;
-  at a module's top level it is closed when the top-level code finishes (in
-  the REPL, at the end of the input).
+  at a module's top level it is closed when the top-level code finishes. In a
+  session (§17.6), a top-level `use` binds a session variable, as `let` does:
+  later inputs may read it, and no input closes it (it is closed like a
+  resource that no `use` closes, below).
 - A copy of the value kept beyond the block (stored, returned, captured by a
   task) refers to a closed resource, whose operations fail with kind `"closed"`. The
   linter reports such escapes (`resource-escapes`, §17.2) and resources
@@ -1184,9 +1191,9 @@ system's open-file limit is reached.
 
 Composite values print their components in debug form. The debug form of a
 string is a string literal that evaluates to it. Durations display with
-the largest unit among `h`, `m`, `s`, `ms`, `us`, `ns` that keeps the value
+the largest unit among `d`, `h`, `m`, `s`, `ms`, `us`, `ns` that keeps the value
 `>= 1`, using the shortest float representation of the value in that unit:
-`90s` displays as `1.5m`, `1500ms` as `1.5s`, `0ns` as `0s`.
+`90s` displays as `1.5m`, `36h` as `1.5d`, `1500ms` as `1.5s`, `0ns` as `0s`.
 
 ### 10.10 Format specifications
 
@@ -2236,8 +2243,10 @@ is looked up in its directory, unless the directory holds more than 4096 entries
 
 A directory that holds an entry decided by a deny rule cannot be renamed, replaced
 or recursively removed as a whole. The tree is scanned for such entries only if
-`Policy::denies_under` reports that a deny rule may match a path in it. Custom
-policies are asked only about the top-level paths of these operations.
+`Policy::denies_under` reports that a deny rule may match a path in it. A
+custom policy (`CustomPolicy`) is asked `denies_under` and `protects` for the
+tree; by default every tree is scanned and an entry is protected if reading
+it or writing it as an entry is denied.
 
 ### 14.6 Network destinations
 
@@ -2333,7 +2342,7 @@ are denied as by `deny_private_networks()`.
 A policy file may contain limit rules:
 
 - `memory`, `output`, `source` and `http-body` take sizes (`4096`, `64K`, `256M`, `1G`)
-- `time` (wall clock) and `cpu` durations (`500ms`, `10s`, `1.5m`, `2h`)
+- `time` (wall clock) and `cpu` durations (`500ms`, `10s`, `1.5m`, `2h`, `1d`)
 - `instructions`, `compile-fuel`, `tasks`, `call-depth` and `open-resources` counts (`1_000_000`)
 - `none` removes `memory`, `time`, `cpu`, `instructions`, `compile-fuel` and `output` limits.
 
@@ -2656,6 +2665,8 @@ N>` (e.g. `main.sand` for a program the session continues). After
   far, against the current state.
 - `reset()` forgets all inputs. `interrupt_handle()` interrupts the input being
   run (the engine's own handle does not affect sessions).
+- `set_wall_time(limit)` replaces the engine's `max_wall_time` for the
+  session's later inputs (e.g. a per-input timeout chosen by the host).
 - `run_tasks_until(until, on_error) -> Option<T>` runs the tasks earlier
   inputs left running until the future `until` completes, and returns its
   output; front ends call it while waiting for input (§17.6). The
@@ -2845,10 +2856,11 @@ between inputs.
   single module scope.
 - If the input's last item is an expression statement, its value is printed
   in debug form (§10.9), unless it has type `()` or the input ends with `;`.
-- Top-level `let`/`var` bindings are globals that later inputs may read; a
-  `var` declared by an earlier input may be assigned. Within one input, names
-  must be unique as in a module; a later input may define any name again (as
-  any kind of item), which shadows the earlier definition for later inputs.
+- Top-level `let`, `var` and `use` bindings are globals that later inputs may
+  read (§7.2); a `var` declared by an earlier input may be assigned. Within one
+  input, names must be unique as in a module; a later input may define any
+  name again (as any kind of item), which shadows the earlier definition for
+  later inputs.
   Code checked earlier keeps referring to what it referred to then. Methods
   (`extend`) and impls (§4.9) of a later input likewise replace those of
   earlier inputs with the same name or for the same type.

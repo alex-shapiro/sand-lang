@@ -382,13 +382,22 @@ fn removing_a_tree_checks_each_entry() {
     let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let log = asked.clone();
     let base = root.clone();
-    let policy = Policy::custom(move |cap| match cap {
+    struct Unscanned<F>(F);
+    impl<F: Fn(&sandlang::Capability) -> sandlang::Decision + Send + Sync> sandlang::CustomPolicy for Unscanned<F> {
+        fn check(&self, cap: &sandlang::Capability) -> sandlang::Decision {
+            (self.0)(cap)
+        }
+        fn denies_under(&self, _: &std::path::Path) -> bool {
+            false
+        }
+    }
+    let policy = Policy::custom(Unscanned(move |cap: &sandlang::Capability| match cap {
         sandlang::Capability::FsWrite(p) | sandlang::Capability::FsRead(p) => {
             log.lock().unwrap().push(p.strip_prefix(&base).unwrap_or(p).display().to_string());
             if p.ends_with("keep.txt") { sandlang::Decision::Deny } else { sandlang::Decision::Allow }
         }
         _ => sandlang::Decision::Allow,
-    });
+    }));
     let src = r#"
 import fs
 let e = fs.remove_dir("tree", recursive: true).unwrap_err()

@@ -53,7 +53,7 @@ wasm-bindgen = "0.2.128"
 wasm-bindgen-futures = "0.4.78"
 
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1", optional = true, default-features = false, features = ["fs", "std", "time"] }
+rustix = { version = "1.1.5", optional = true, default-features = false, features = ["fs", "std", "time"] }
 
 [target.'cfg(windows)'.dependencies]
 fs_at = { version = "0.2.1", optional = true }
