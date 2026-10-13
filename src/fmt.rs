@@ -78,14 +78,54 @@ pub fn meaning(src: &str) -> Result<String, String> {
         return Err(err.message.clone());
     }
     let mut out = without_spans(&format!("{:#?}", parsed.module));
-    let tokens: Vec<&Token> = parsed.tokens.iter().filter(|t| !matches!(t.tok, Tok::Comma | Tok::Semi)).collect();
-    let text = |t: Option<&&Token>| t.map_or("", |t| &src[t.lo as usize..t.hi as usize]);
+    let args = macro_args(&parsed.tokens);
+    let in_arg = |t: &Token| args.iter().any(|&(lo, hi)| t.lo > lo && t.hi <= hi);
+    let all = &parsed.tokens;
+    // The formatter prints `[:]` in a macro argument as `{}`.
+    let empty_object = |i: usize| {
+        all[i].tok == Tok::Colon
+            && in_arg(&all[i])
+            && all[i - 1].tok == Tok::LBracket
+            && all.get(i + 1).is_some_and(|t| t.tok == Tok::RBracket)
+    };
+    let tokens: Vec<&Token> =
+        all.iter().enumerate().filter(|&(i, t)| !matches!(t.tok, Tok::Comma | Tok::Semi) && !empty_object(i)).map(|(_, t)| t).collect();
+    // In a macro argument, `[` and `{` both open an object.
+    let text = |t: Option<&&Token>| match t {
+        Some(t) if in_arg(t) && matches!(t.tok, Tok::LBracket | Tok::LBrace) => "{",
+        Some(t) if in_arg(t) && matches!(t.tok, Tok::RBracket | Tok::RBrace) => "}",
+        Some(t) => &src[t.lo as usize..t.hi as usize],
+        None => "",
+    };
     for c in parsed.comments.iter().filter(|c| c.kind == CommentKind::Block) {
         let next = tokens.partition_point(|t| t.lo < c.lo);
         let before = next.checked_sub(1).and_then(|i| tokens.get(i));
         out.push_str(&format!("\n{} {} {}", text(before), c.text(src), text(tokens.get(next))));
     }
     Ok(out)
+}
+
+/// The source ranges between the parentheses of the macro calls (`name!(...)`).
+fn macro_args(tokens: &[Token]) -> Vec<(u32, u32)> {
+    let mut out = Vec::new();
+    for (i, t) in tokens.iter().enumerate() {
+        if t.tok != Tok::Bang || i == 0 || tokens[i - 1].tok != Tok::Ident || tokens.get(i + 1).is_none_or(|t| t.tok != Tok::LParen) {
+            continue;
+        }
+        let mut depth = 0;
+        for c in &tokens[i + 1..] {
+            match c.tok {
+                Tok::LParen | Tok::LBracket | Tok::LBrace => depth += 1,
+                Tok::RParen | Tok::RBracket | Tok::RBrace => depth -= 1,
+                _ => {}
+            }
+            if depth == 0 {
+                out.push((tokens[i + 1].lo, c.lo));
+                break;
+            }
+        }
+    }
+    out
 }
 
 /// `Debug` output without the `Span { .. }`s in it.
@@ -439,6 +479,8 @@ enum CElem<'a> {
     /// `..base` in a struct literal, with the position of `..`.
     Base(&'a Expr, u32),
     Param(&'a Param),
+    Data(&'a Data),
+    DataEntry(&'a Expr, &'a Data),
 }
 
 impl CElem<'_> {
@@ -450,6 +492,8 @@ impl CElem<'_> {
             CElem::Field(f) => f.name.span.lo,
             CElem::Base(_, lo) => *lo,
             CElem::Param(p) => p.span.lo,
+            CElem::Data(d) => d.span().lo,
+            CElem::DataEntry(k, _) => k.span.lo,
         }
     }
 
@@ -460,6 +504,7 @@ impl CElem<'_> {
             CElem::Entry(_, v) => v.span.hi,
             CElem::Field(f) => f.value.as_ref().map_or(f.name.span.hi, |v| v.span.hi),
             CElem::Param(p) => p.span.hi,
+            CElem::Data(d) | CElem::DataEntry(_, d) => d.span().hi,
         }
     }
 }
@@ -1008,6 +1053,8 @@ impl<'a> Formatter<'a> {
             },
             CElem::Base(e, _) => cat(vec![text(".."), self.expr(e)]),
             CElem::Param(p) => self.param(p),
+            CElem::Data(d) => self.data(d),
+            CElem::DataEntry(k, v) => cat(vec![self.expr(k), self.punct(k.span.hi, &Tok::Colon, ": "), self.data(v)]),
         }
     }
 
@@ -1350,6 +1397,18 @@ impl<'a> Formatter<'a> {
             ExprKind::Ident(id) => text(&id.name),
             ExprKind::SelfValue => text("self"),
             ExprKind::SelfType => text("Self"),
+            ExprKind::ModuleRef(name) => text(name),
+            ExprKind::Macro(m) => {
+                let bang = self.find_tok(m.name.span.hi, &Tok::Bang);
+                let parts = vec![
+                    text(&m.name.name),
+                    self.text_at(bang, "!"),
+                    self.punct(bang + 1, &Tok::LParen, "("),
+                    self.data(&m.arg),
+                    self.text_at(e.span.hi - 1, ")"),
+                ];
+                cat(parts)
+            }
             ExprKind::List(items) => {
                 let elems: Vec<CElem> = items.iter().map(CElem::Expr).collect();
                 self.bracket_list(e, &elems)
@@ -1485,6 +1544,24 @@ impl<'a> Formatter<'a> {
     }
 
     /// A list or map literal; it stays broken if the source broke the line after `[`.
+    /// A data macro's argument; an object is always printed as `{...}`.
+    fn data(&mut self, d: &'a Data) -> Doc {
+        match d {
+            Data::Null(span) => self.text_at(span.lo, "null"),
+            Data::Value(e) => self.expr(e),
+            Data::List(xs, span) => {
+                let elems: Vec<CElem> = xs.iter().map(CElem::Data).collect();
+                let opts = ListOpts { force: self.newline_after(span.lo), ..LIST };
+                self.comma_list(("[", "]"), span.lo, span.hi - 1, &elems, opts)
+            }
+            Data::Object(kvs, span) => {
+                let elems: Vec<CElem> = kvs.iter().map(|(k, v)| CElem::DataEntry(k, v)).collect();
+                let opts = ListOpts { force: self.newline_after(span.lo), ..LIST };
+                self.comma_list(("{", "}"), span.lo, span.hi - 1, &elems, opts)
+            }
+        }
+    }
+
     fn bracket_list(&mut self, e: &'a Expr, elems: &[CElem<'a>]) -> Doc {
         let opts = ListOpts { force: self.newline_after(e.span.lo), ..LIST };
         self.comma_list(("[", "]"), e.span.lo, e.span.hi - 1, elems, opts)

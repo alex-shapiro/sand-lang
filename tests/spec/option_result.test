@@ -27,16 +27,16 @@ Err("missing")
 None
 5
 
-=== unwrap on none panics
+=== unwrap on none fails
 let n: int? = None
 print(n.unwrap())
---- panic
+--- fail
 unwrap on None
 
-=== expect on none panics with message
+=== expect on none fails with its message
 let n: str? = None
 print(n.expect("config value"))
---- panic
+--- fail
 config value
 
 === result methods
@@ -66,10 +66,10 @@ Some(2)
 None
 Some("nope")
 
-=== unwrap on err panics with error
+=== unwrap on err fails with the error
 let r: Result<int> = Err(error("disk full"))
 print(r.unwrap())
---- panic
+--- fail
 unwrap on Err: error: disk full
 
 === question mark on option
@@ -125,13 +125,13 @@ let v = fails()?
 print("unreachable")
 --- stdout
 start
---- exit 1
+--- fail
+parse: bad input
 
-=== top level question mark reports the error on stderr
+=== top level question mark fails with the error
 let v: int = Err(error("bad input", kind: "parse"))?
---- stderr
-error: parse: bad input
---- exit 1
+--- fail
+parse: bad input
 
 === coalesce operator
 let n: int? = None
@@ -148,7 +148,7 @@ default
 3
 
 === coalesce is lazy
-fn boom() -> int { panic("evaluated") }
+fn boom() -> int { fail("evaluated") }
 print(Some(1) ?? boom())
 --- stdout
 1

@@ -10,17 +10,17 @@ print(xs)
 3
 [10, 20, 30]
 
-=== list index out of bounds panics
+=== list index out of bounds fails
 let xs = [1, 2, 3]
 print(xs[3])
---- panic
+--- fail
 index out of bounds
 
-=== negative index panics
+=== negative index fails
 let xs = [1, 2, 3]
 let i = -1
 print(xs[i])
---- panic
+--- fail
 index out of bounds
 
 === list mutation
@@ -95,10 +95,10 @@ print([1; 0])
 [1, 2, 3]
 []
 
-=== repeat with negative count panics
+=== repeat with negative count fails
 let n = -1
 print([0; n])
---- panic
+--- fail
 negative
 
 === list access helpers
@@ -258,12 +258,12 @@ print(xs[5..])
 [1, 2, 3]
 []
 
-=== list slice with start after end panics
+=== list slice with start after end fails
 let xs = [0, 1, 2]
 let a = 2
 let b = 1
 print(xs[a..b])
---- panic
+--- fail
 out of range
 
 === list comprehensions
@@ -308,10 +308,10 @@ None
 [100, 3]
 [("one", 100), ("three", 3)]
 
-=== missing map key panics
+=== missing map key fails
 let m = ["a": 1]
 print(m["b"])
---- panic
+--- fail
 key not found
 
 === map insertion order is preserved and reinsertion keeps position
@@ -633,3 +633,24 @@ print("\(arms(m, 3)) \(arms(m, 30)) \(arms(m, 99))")
 --- stdout
 hit 49 miss miss
 small 9 big 900 none
+
+=== list methods on maps and sets point to their lists
+let m = ["a": 1]
+let s = set([3, 1])
+let a = m.map((k, v) => k)
+let b = s.sorted()
+let c = m.nope()
+--- error
+3: no method `map` on type [str: int]; call it on `entries()`, a list of (key, value) pairs
+4: no method `sorted` on type Set<int>; call it on `to_list()`
+5: no method `nope` on type [str: int]
+
+=== mixed map values suggest a struct
+let body = ["range": "A1", "values": [["x"]]]
+--- error
+1: all values of a map have one type, so use a struct or a tuple for mixed values
+
+=== mixed list elements suggest a struct
+let xs = [1, "a"]
+--- error
+1: all elements of a list have one type, so use a struct or a tuple for mixed values

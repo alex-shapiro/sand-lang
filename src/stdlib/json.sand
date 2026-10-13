@@ -107,7 +107,7 @@ pub native fn parse(text: str) -> Result<Json>
 
 /// Encodes any value, including a `Json`, as JSON text (see `to_json` for
 /// the mapping): compact for `indent == 0`, otherwise pretty-printed with
-/// `indent` spaces per level. Non-finite numbers print as `null`. Panics on
+/// `indent` spaces per level. Non-finite numbers print as `null`. Fails on
 /// values that have no JSON form (functions, tasks, channels).
 pub native fn encode<T>(value: T, indent: int = 0) -> str
 

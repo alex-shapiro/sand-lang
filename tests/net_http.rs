@@ -86,6 +86,33 @@ print(http.request("HEAD", "{base}/h")?.body.len())
 }
 
 #[test]
+fn http_json_requests() {
+    let server = http_server(|req| {
+        let types = req.headers.iter().filter(|(k, _)| k.eq_ignore_ascii_case("content-type")).count();
+        let body = String::from_utf8_lossy(&req.body).into_owned();
+        HttpResponse::new(200, format!("{} {} {} {}", req.method, req.header("content-type").unwrap_or("-"), types, body))
+    });
+    let base = format!("http://{}", server.addr);
+    let src = format!(
+        r#"
+import http
+struct Update {{
+    range: str
+    values: [[int]]
+}}
+print(http.post_json("{base}/a", Update {{ range: "A1:A3", values: [[1, 2, 3]] }})?.text()?)
+print(http.request_json("PATCH", "{base}/b", [1, 2], headers: [("content-type", "application/merge-patch+json")])?.text()?)
+print(http.put_json("{base}/c", ["k": 1])?.text()?)
+print(http.patch_json("{base}/d", "s")?.text()?)
+"#
+    );
+    assert_eq!(
+        run_net(&src),
+        "POST application/json 1 {\"range\":\"A1:A3\",\"values\":[[1,2,3]]}\nPATCH application/merge-patch+json 1 [1,2]\nPUT application/json 1 {\"k\":1}\nPATCH application/json 1 \"s\"\n"
+    );
+}
+
+#[test]
 fn http_redirects() {
     let server = http_server(|req| match req.path() {
         "/a" => HttpResponse::new(302, "").header("Location", "/b"),
@@ -396,11 +423,7 @@ fn closing_engine_closes_sockets() {
 #[test]
 fn errors_are_distinguishable() {
     let r = run_with("import net\nlet c = net.connect(\"nonsense\")?", |c| c.policy(Policy::allow_all()));
-    match r.result {
-        Ok(o) => assert_eq!(o.exit_code, 1),
-        Err(e) => panic!("{e:?}"),
-    }
-    assert!(r.stderr.contains("error:"));
+    assert!(r.failure().starts_with("invalid: "), "{}", r.failure());
     let _ = Error::Interrupted;
 }
 
@@ -1005,4 +1028,37 @@ serving.cancel()
     assert!(closed(&mut c));
     handle.join().unwrap().unwrap();
     assert_eq!(out.contents(), format!("ready {addr}\nopened\n"));
+}
+
+#[test]
+fn request_filters_rewrite_and_refuse_requests() {
+    let server = http_server(|req| HttpResponse::new(200, req.header("authorization").unwrap_or("-").to_string()));
+    let base = format!("http://{}", server.addr);
+    let src = format!(
+        r#"
+import http
+print(http.get("{base}/a", headers: [("Authorization", "Bearer secret-marker")])?.text()?)
+print(http.get("{base}/b")?.text()?)
+print(http.get("{base}/c", headers: [("X-Refuse", "yes")]).unwrap_err().kind)
+"#
+    );
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = seen.clone();
+    let r = run_with(&src, move |c| {
+        c.request_filter(move |target, headers| {
+            log.lock().unwrap().push(target.clone());
+            if headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("x-refuse")) {
+                return Err("refused by the host".into());
+            }
+            for (_, value) in headers.iter_mut() {
+                *value = value.replace("secret-marker", "real-token");
+            }
+            Ok(())
+        })
+    });
+    assert_eq!(r.ok_stdout(), "Bearer real-token\n-\npermission_denied\n");
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 3);
+    assert_eq!(seen[0].scheme, "http");
+    assert_eq!(seen[0].host, "127.0.0.1");
 }

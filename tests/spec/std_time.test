@@ -59,7 +59,7 @@ print(t.sub(1s).to_iso())
 print(later > t)
 --- stdout
 2024-03-02T01:05:09Z
-36h
+1.5d
 2024-02-29T13:05:08Z
 true
 

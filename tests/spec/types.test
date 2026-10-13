@@ -62,7 +62,7 @@ let m: [str: [int]] = ["a": ["b"]]
 
 === never unifies with anything
 fn f(x: int) -> str {
-    let s: str = if x > 0 { "pos" } else { panic("neg") }
+    let s: str = if x > 0 { "pos" } else { fail("neg") }
     s
 }
 print(f(1))
@@ -119,11 +119,11 @@ print(counter)
 --- stdout
 2
 
-=== global used before initialization panics
+=== global used before initialization fails
 fn read() -> int { late }
 print(read())
 let late = 5
---- panic
+--- fail
 global used before initialization
 
 === unit type annotation
@@ -138,6 +138,19 @@ let d: duration = 5s
 print(d > 1s)
 --- stdout
 true
+
+=== a duration scales only by a Num
+fn scale<T>(d: duration, k: T) -> duration {
+    d * k
+}
+let a = 1s * "x"
+let b = 1s * 2s
+let c = 1s / "x"
+--- error
+2: type parameter `T` does not satisfy Num
+4: expected Num, found str
+5: expected Num, found duration
+6: expected Num, found str
 
 === duration and int are distinct
 let d: duration = 5
@@ -199,7 +212,7 @@ a2;b4;
 7
 0
 3
---- panic
+--- fail
 global used before initialization: `LATE`
 
 === loops reached through values, dictionaries and defaults before a global they read
@@ -267,10 +280,10 @@ let s: str = xs[0]
 fn f(x: int) -> int {
     let a = if x > 0 { x } else { return -1 } + 1
     let b = x + (if x > 0 { 1 } else { return -2 })
-    if x == (if x > 0 { x } else { panic("unreachable") }) {
+    if x == (if x > 0 { x } else { fail("unreachable") }) {
         print("same")
     }
-    let (p, q) = if x > 0 { (x, x) } else { panic("unreachable") }
+    let (p, q) = if x > 0 { (x, x) } else { fail("unreachable") }
     a + b + p + q
 }
 print(f(2))
@@ -300,6 +313,23 @@ print(twice(1s, (a, b) => a + b))
 abab
 [1, 1]
 2s
+
+=== operators are not defined for types
+struct V { x: float }
+let a = V { x: 1.0 }
+let b = a * 2.0
+let c = 2.0 * a
+let d = a + a
+let e = a * 1s
+let f = "a" - "b"
+let g = 1 + 2.0
+--- error
+3: operator `*` is not defined for V
+4: operator `*` is not defined for V
+5: operator `+` is not defined for V
+6: operator `*` is not defined for V
+7: operator `-` is not defined for str
+8: type mismatch: expected int, found float
 
 === plus on values of a type parameter's type requires Num
 fn f<T>(x: T) -> T {
@@ -348,3 +378,14 @@ fn f() {
 4: cannot assign to `f`
 5: undefined name `y`
 6: cannot assign to a tuple element
+
+=== let mut names var
+let mut n = 1
+--- error
+1: Sand has no `let mut`; use `var`
+
+=== a binding named mut is allowed
+let mut = 2
+print(mut)
+--- stdout
+2

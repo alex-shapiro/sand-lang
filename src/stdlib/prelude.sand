@@ -23,19 +23,19 @@ pub enum Option<T> {
         }
     }
 
-    /// The payload; panics on `None`.
+    /// The payload; fails on `None`.
     pub fn unwrap(self) -> T {
         match self {
             Some(x) => x
-            None => panic("unwrap on None")
+            None => fail("unwrap on None", kind: "unwrap")
         }
     }
 
-    /// The payload; panics with `msg` on `None`.
+    /// The payload; fails with `msg` on `None`.
     pub fn expect(self, msg: str) -> T {
         match self {
             Some(x) => x
-            None => panic(msg)
+            None => fail(msg, kind: "unwrap")
         }
     }
 
@@ -112,19 +112,19 @@ pub enum Result<T, E> {
         }
     }
 
-    /// The `Ok` payload; panics on `Err`.
+    /// The `Ok` payload; fails on `Err`.
     pub fn unwrap(self) -> T {
         match self {
             Ok(x) => x
-            Err(e) => panic("unwrap on Err: \(e)")
+            Err(e) => fail("unwrap on Err: \(e)", kind: "unwrap")
         }
     }
 
-    /// The `Ok` payload; panics with `msg` on `Err`.
+    /// The `Ok` payload; fails with `msg` on `Err`.
     pub fn expect(self, msg: str) -> T {
         match self {
             Ok(x) => x
-            Err(e) => panic("\(msg): \(e)")
+            Err(e) => fail("\(msg): \(e)", kind: "unwrap")
         }
     }
 
@@ -136,10 +136,10 @@ pub enum Result<T, E> {
         }
     }
 
-    /// The `Err` payload; panics on `Ok`.
+    /// The `Err` payload; fails on `Ok`.
     pub fn unwrap_err(self) -> E {
         match self {
-            Ok(x) => panic("unwrap_err on Ok: \(x.debug())")
+            Ok(x) => fail("unwrap_err on Ok: \(x.debug())", kind: "unwrap")
             Err(e) => e
         }
     }
@@ -277,19 +277,19 @@ pub native fn print<T>(x: T)
 /// Prints the display form of `x` and a newline to standard error.
 pub native fn eprint<T>(x: T)
 
-/// Stops the program with an error message.
-pub native fn panic(message: str) -> never
+/// Fails with an error: the input of a session, or the program.
+pub native fn fail(message: str, kind: str = "error") -> never
 
-/// Panics with `message` unless `cond` is true.
-pub fn assert(cond: bool, message: str = "assertion failed") {
+/// Fails with `message` (kind `"assert"`) unless `cond` is true.
+pub fn assert(cond: bool, message: str = "condition is false") {
     if not cond {
-        panic(message)
+        fail(message, kind: "assert")
     }
 }
 
-/// Marks unfinished code; panics when reached.
+/// Marks unfinished code; fails (kind `"todo"`) when reached.
 pub fn todo() -> never {
-    panic("not yet implemented")
+    fail("not yet implemented", kind: "todo")
 }
 
 /// Stops the program with an exit code.
@@ -332,7 +332,7 @@ impl Num for float {
 }
 
 /// 64-bit signed integers. Arithmetic is checked: overflow and division by
-/// zero panic. `int` and `float` never convert implicitly.
+/// zero fail. `int` and `float` never convert implicitly.
 extend int {
     /// Absolute value.
     pub fn abs(self) -> int {
@@ -418,7 +418,7 @@ extend float {
     pub native fn is_finite(self) -> bool
     /// True if `self` is `inf` or `-inf`.
     pub native fn is_infinite(self) -> bool
-    /// Truncates toward zero; panics on NaN or out of range.
+    /// Truncates toward zero; fails on NaN or out of range.
     pub native fn to_int(self) -> int
     /// Formats with a fixed number of digits after the point.
     pub native fn to_str_fixed(self, digits: int) -> str
@@ -457,7 +457,7 @@ extend str {
     /// Replaces all occurrences.
     pub native fn replace(self, pattern: str, replacement: str) -> str
     /// The pieces between occurrences of `sep`: `"a,,b".split(",")` is
-    /// `["a", "", "b"]`, `"".split(",")` is `[""]`. Panics if `sep` is empty.
+    /// `["a", "", "b"]`, `"".split(",")` is `[""]`. Fails if `sep` is empty.
     pub native fn split(self, sep: str) -> [str]
     /// The pieces before and after the first occurrence of `sep`.
     pub native fn split_once(self, sep: str) -> (str, str)?
@@ -480,7 +480,7 @@ extend str {
     pub native fn to_upper(self) -> str
     /// Lower-cased (Unicode-aware).
     pub native fn to_lower(self) -> str
-    /// `n` copies concatenated; panics if `n` is negative.
+    /// `n` copies concatenated; fails if `n` is negative.
     pub native fn repeat(self, n: int) -> str
     /// Pads on the left to `width` characters.
     pub native fn pad_start(self, width: int, fill: str = " ") -> str
@@ -538,7 +538,7 @@ extend bytes {
     pub native fn contains(self, needle: bytes) -> bool
     /// Index of the first occurrence of `needle`.
     pub native fn find(self, needle: bytes) -> int?
-    /// Bytes from integers; panics on one outside `0..=255`.
+    /// Bytes from integers; fails on one outside `0..=255`.
     pub native fn from_list(items: [int]) -> bytes
     /// Bytes from hexadecimal digits (either case, two per byte); `None` if
     /// `text` is not that.
@@ -559,9 +559,9 @@ extend duration {
     pub native fn abs(self) -> duration
     /// `n` nanoseconds.
     pub native fn from_nanos(n: int) -> duration
-    /// `n` milliseconds; panics on overflow.
+    /// `n` milliseconds; fails on overflow.
     pub native fn from_millis(n: int) -> duration
-    /// `s` seconds, truncated to nanoseconds; panics on overflow or NaN.
+    /// `s` seconds, truncated to nanoseconds; fails on overflow or NaN.
     pub native fn from_secs(s: float) -> duration
 }
 
@@ -576,11 +576,11 @@ extend<T> [T] {
     pub native fn push(self, x: T)
     /// Removes and returns the last element.
     pub native fn pop(self) -> T?
-    /// Inserts `x` at index `i` (`0..=len()`), moving later elements up; panics
+    /// Inserts `x` at index `i` (`0..=len()`), moving later elements up; fails
     /// out of range.
     pub native fn insert(self, i: int, x: T)
     /// Removes and returns the element at index `i`, moving later elements
-    /// down; panics out of range.
+    /// down; fails out of range.
     pub native fn remove(self, i: int) -> T
     /// Appends the elements of `items`.
     pub native fn extend(self, items: [T])
@@ -606,16 +606,16 @@ extend<T> [T] {
     pub native fn sorted(self) -> [T] where T: Ord
     /// A shallow copy.
     pub native fn copy(self) -> [T]
-    /// Exchanges the elements at `i` and `j`; panics out of range.
+    /// Exchanges the elements at `i` and `j`; fails out of range.
     pub native fn swap(self, i: int, j: int)
     /// The first `n` elements (all if fewer).
     pub native fn take(self, n: int) -> [T]
     /// All but the first `n` elements (none if fewer).
     pub native fn skip(self, n: int) -> [T]
-    /// Consecutive pieces of `n` elements, the last possibly shorter; panics
+    /// Consecutive pieces of `n` elements, the last possibly shorter; fails
     /// unless `n > 0`.
     pub native fn chunks(self, n: int) -> [[T]]
-    /// Every run of `n` consecutive elements, overlapping; panics unless
+    /// Every run of `n` consecutive elements, overlapping; fails unless
     /// `n > 0`.
     pub native fn windows(self, n: int) -> [[T]]
     /// Pairs of each element's index and the element.
@@ -997,7 +997,7 @@ extend Range {
     pub native fn contains(self, i: int) -> bool
     /// The integers, in order.
     pub native fn to_list(self) -> [int]
-    /// Every `step`-th integer from the start; panics unless `step > 0`.
+    /// Every `step`-th integer from the start; fails unless `step > 0`.
     pub native fn step_by(self, step: int) -> [int]
     /// The integers, in reverse order.
     pub native fn reversed(self) -> [int]
@@ -1274,10 +1274,10 @@ pub struct Iter<T> {
         Iter { next: step }
     }
 
-    /// The first element and then every `step`-th; panics if `step <= 0`.
+    /// The first element and then every `step`-th; fails if `step <= 0`.
     pub fn step_by(self, step: int) -> Iter<T> {
         if step <= 0 {
-            panic("step must be positive, found \(step)")
+            fail("step must be positive, found \(step)", kind: "invalid")
         }
         let next = self.next
         var first = true

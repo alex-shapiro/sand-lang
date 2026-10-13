@@ -60,12 +60,12 @@ test("reports compile errors with rendered diagnostics", async () => {
   assert.match(d.rendered, /let x: int = "no"/);
 });
 
-test("reports panics with a trace and exit codes", async () => {
-  const panic = await run("fn f() -> int { panic(\"boom\") }\nprint(f())");
-  assert.equal(panic.result.exitCode, 1);
-  assert.equal(panic.result.error.kind, "runtime");
-  assert.match(panic.result.error.message, /boom/);
-  assert.equal(panic.result.error.trace[0].function, "f");
+test("reports errors with a trace and exit codes", async () => {
+  const failure = await run("fn f() -> int { fail(\"boom\") }\nprint(f())");
+  assert.equal(failure.result.exitCode, 1);
+  assert.equal(failure.result.error.kind, "runtime");
+  assert.equal(failure.result.error.message, "error: boom");
+  assert.equal(failure.result.error.trace[0].function, "f");
   const exit = await run("exit(7)");
   assert.deepEqual([exit.result.ok, exit.result.exitCode], [false, 7]);
 });
@@ -290,7 +290,7 @@ test("files changed since a generation", async () => {
 });
 
 test("errors carry their exit code", async () => {
-  const { result } = await run('panic("boom")');
+  const { result } = await run('fail("boom")');
   assert.deepEqual([result.exitCode, result.error.exitCode, result.error.kind], [1, 1, "runtime"]);
   const session = new sand.Engine({}, {}).session();
   assert.equal((await session.eval("nope")).error.exitCode, 2);
@@ -436,7 +436,7 @@ test("sessions continue a program, and run its tasks between inputs", async () =
   const failed = await session.eval("let x: int = \"no\"", "main.sand");
   assert.equal(failed.error.diagnostics[0].file, "main.sand");
   // A failing task is reported, and exit in a task ends runTasks.
-  await session.eval("spawn { task.sleep(5ms)\n panic(\"boom\") }");
+  await session.eval("spawn { task.sleep(5ms)\n fail(\"boom\") }");
   out = "";
   const failing = session.runTasks();
   await new Promise((r) => setTimeout(r, 40));

@@ -208,6 +208,33 @@ impl Checker {
             None => self.infer(value, None),
         };
         let vty = annotated.unwrap_or(init.ty);
+        let rty = self.resolve(vty);
+        let close = self.close_trait.filter(|&t| self.implements_trait(rty, t));
+        if close.is_none() {
+            self.not_closeable(rty, value.span);
+        }
+        if self.fs.top_level && self.in_session() {
+            let g = self.globals.len() as GlobalId;
+            let sym = self.sym(&name.name);
+            self.globals.push(GlobalInfo {
+                name: sym,
+                module: self.cur_mod,
+                ty: vty,
+                mutable: false,
+                is_pub: false,
+                span: name.span,
+                doc: None,
+            });
+            if name.name != "_" {
+                self.define(sym, Def::Global(g), false, name.span);
+            }
+            self.global_fact(g);
+            return vec![mk(
+                HKind::Assign { place: Place::Global(g), op: None, op_ty: TypeId::UNIT, value: Box::new(init) },
+                TypeId::UNIT,
+                s.span,
+            )];
+        }
         let local = if name.name == "_" {
             self.hidden_local(vty, name.span)
         } else {
@@ -218,28 +245,7 @@ impl Checker {
         };
         let pat = HPat { kind: HPatKind::Bind(local), ty: vty, span: name.span };
         let bind = mk(HKind::Let { pat, init: Box::new(init), else_: None }, TypeId::UNIT, s.span);
-        let rty = self.resolve(vty);
-        let close = self.close_trait.filter(|&t| self.implements_trait(rty, t));
         let Some(t) = close else {
-            match self.ty(rty) {
-                Ty::Error => {}
-                Ty::Var(_) => self.error(value.span, "type annotation needed: a `use` binding's type must be known where it is bound"),
-                ty => {
-                    // `use f = fs.open(path)` without the `?`.
-                    let ok = match ty {
-                        Ty::Named(d, args) if d == self.wk.result => Some(self.arena.elem(args, 0)),
-                        _ => None,
-                    };
-                    let hint = match ok {
-                        Some(t) if self.close_trait.is_some_and(|c| self.implements_trait(t, c)) => {
-                            "; add `?` to bind the value of `Ok` (and return the error)"
-                        }
-                        _ => "",
-                    };
-                    let msg = format!("`use` needs a value whose type implements `Close`, found {}{hint}", self.show(rty));
-                    self.error(value.span, msg);
-                }
-            }
             return vec![bind];
         };
         let recv = mk(HKind::Local(local), vty, name.span);
@@ -247,6 +253,56 @@ impl Checker {
         let tr = TraitRef { trait_id: t, args: self.arena.intern_list(&[]) };
         let call = self.call_trait_method(tr, slot, rty, Some(recv), &CallArgs::default(), s.span);
         vec![bind, mk(HKind::Defer(Box::new(call)), TypeId::UNIT, s.span)]
+    }
+
+    /// A top-level `return`, which ends the program or the session input. It
+    /// returns a value of any type; an `Err` fails with its error, as `?` does.
+    fn check_top_return(&mut self, v: Option<&Expr>, main: bool, span: Span) -> HExpr {
+        if !main {
+            self.error(span, "`return` is not allowed at the top level of an imported module");
+        }
+        let Some(v) = v else { return mk(HKind::Return(None), TypeId::NEVER, span) };
+        let h = self.infer(v, None);
+        self.cell_returns = true;
+        let t = self.resolve(h.ty);
+        let Ty::Named(d, args) = self.ty(t) else { return mk(HKind::Return(Some(Box::new(h))), TypeId::NEVER, span) };
+        if d != self.wk.result {
+            return mk(HKind::Return(Some(Box::new(h))), TypeId::NEVER, span);
+        }
+        // `return Err(e)` leaves the `Ok` type open.
+        let ok = self.arena.elem(args, 0);
+        if matches!(self.rty(ok), Ty::Var(_)) {
+            self.unify(ok, TypeId::UNIT);
+        }
+        let local = self.hidden_local(t, span);
+        let pat = HPat { kind: HPatKind::Bind(local), ty: t, span };
+        let bind = mk(HKind::Let { pat, init: Box::new(h), else_: None }, TypeId::UNIT, span);
+        let read = || Box::new(mk(HKind::Local(local), t, span));
+        let fail = mk(HKind::Try { e: read(), kind: TryKind::TopLevel }, ok, span);
+        let ret = mk(HKind::Return(Some(read())), TypeId::NEVER, span);
+        mk(HKind::Block(vec![bind, fail, ret]), TypeId::NEVER, span)
+    }
+
+    /// Reports `use` on a value whose type does not implement `Close`.
+    fn not_closeable(&mut self, t: TypeId, span: Span) {
+        match self.ty(t) {
+            Ty::Error => {}
+            Ty::Var(_) => self.infer_error(span, "type annotation needed: a `use` binding's type must be known where it is bound"),
+            ty => {
+                let ok = match ty {
+                    Ty::Named(d, args) if d == self.wk.result => Some(self.arena.elem(args, 0)),
+                    _ => None,
+                };
+                let hint = match ok {
+                    Some(ok) if self.close_trait.is_some_and(|c| self.implements_trait(ok, c)) => {
+                        "; add `?` to bind the value of `Ok` (and return the error)"
+                    }
+                    _ => "",
+                };
+                let msg = format!("`use` needs a value whose type implements `Close`, found {}{hint}", self.show(t));
+                self.error(span, msg);
+            }
+        }
     }
 
     /// `defer e`: `e` must have type `()` and cannot leave the deferred
@@ -338,7 +394,7 @@ impl Checker {
                     self.fs.scopes.declare(n, id);
                 }
                 if !self.resolve(h.ty).is_never() {
-                    self.error(b.span, "the `else` block of `let ... else` must diverge (return, break, continue or panic)");
+                    self.error(b.span, "the `else` block of `let ... else` must diverge (return, break, continue or fail)");
                 }
                 Some(Box::new(h))
             }
@@ -467,7 +523,7 @@ impl Checker {
                     }
                     Ty::Error => (None, TypeId::ERROR),
                     Ty::Var(_) => {
-                        self.error(obj.span, "type annotation needed before indexing");
+                        self.infer_error(obj.span, "type annotation needed before indexing");
                         (None, TypeId::ERROR)
                     }
                     _ => {
@@ -656,6 +712,11 @@ impl Checker {
                 err(span)
             }
             ExprKind::Paren(inner) => self.infer_inner(inner, hint, want),
+            ExprKind::Macro(m) => self.infer_inner(&m.expansion, hint, want),
+            ExprKind::ModuleRef(name) => {
+                self.error(span, format!("`{name}` is a module, not a value"));
+                err(span)
+            }
             ExprKind::List(items) => {
                 let elem_hint = match hint.map(|h| self.rty(h)) {
                     Some(Ty::List(t)) => Some(t),
@@ -666,7 +727,7 @@ impl Checker {
                 for it in items {
                     let h = if is_lambda(it) { elem_hint } else { None };
                     let x = self.infer(it, h.or(Some(elem)));
-                    self.expect_type(elem, x.ty, it.span);
+                    self.expect_elem(elem, x.ty, it.span, "elements of a list");
                     hs.push(x);
                 }
                 let t = self.list_ty(elem);
@@ -693,7 +754,7 @@ impl Checker {
                     let kk = self.check_expr(k, kh);
                     let h = if is_lambda(v) { vhint } else { None };
                     let vv = self.infer(v, h.or(Some(vh)));
-                    self.expect_type(vh, vv.ty, v.span);
+                    self.expect_elem(vh, vv.ty, v.span, "values of a map");
                     hs.push((kk, vv));
                 }
                 if let Some((k, _)) = pairs.first() {
@@ -736,7 +797,7 @@ impl Checker {
                     }
                     Ty::Error => err(span),
                     Ty::Var(_) => {
-                        self.error(l.span, "type annotation needed before `??`");
+                        self.infer_error(l.span, "type annotation needed before `??`");
                         err(span)
                     }
                     _ => {
@@ -772,7 +833,7 @@ impl Checker {
                     },
                     Ty::Error => err(span),
                     Ty::Var(_) => {
-                        self.error(obj.span, "type annotation needed before tuple field access");
+                        self.infer_error(obj.span, "type annotation needed before tuple field access");
                         err(span)
                     }
                     _ => {
@@ -812,10 +873,10 @@ impl Checker {
             ExprKind::Lambda { params, body, .. } => self.check_lambda(params, body, hint, span),
             ExprKind::Return(v) => {
                 self.check_not_in_defer("`return`", span);
-                let ret = self.fs.ctx.last().map(|c| c.ret).unwrap_or(TypeId::UNIT);
-                if let Some(CtxKind::TopLevel { .. }) = self.fs.ctx.last().map(|c| c.kind) {
-                    self.error(span, "`return` is not allowed at the top level; use `exit`");
+                if let Some(CtxKind::TopLevel { main }) = self.fs.ctx.last().map(|c| c.kind) {
+                    return self.check_top_return(v.as_deref(), main, span);
                 }
+                let ret = self.fs.ctx.last().map(|c| c.ret).unwrap_or(TypeId::UNIT);
                 let vh = match v {
                     Some(v) => Some(Box::new(self.check_expr(v, ret))),
                     None => {
@@ -1091,6 +1152,13 @@ impl Checker {
                     _ => None,
                 }
             }
+            ExprKind::ModuleRef(name) => match self.module_named(name) {
+                Some(m) => Some(Ns::Module(m)),
+                None => {
+                    self.error(e.span, format!("module `{name}` is not loaded"));
+                    None
+                }
+            },
             ExprKind::SelfType => match self.fs.self_ty {
                 Some(t) => Some(Ns::Type(t)),
                 None => {
@@ -1215,7 +1283,7 @@ impl Checker {
         match self.ty(ot) {
             Ty::Error => err(span),
             Ty::Var(_) => {
-                self.error(name.span, "type annotation needed before field access");
+                self.infer_error(name.span, "type annotation needed before field access");
                 err(span)
             }
             other => {
@@ -1459,10 +1527,25 @@ impl Checker {
         mk(HKind::MakeVariant { rt_id, args: hs }, enum_ty, span)
     }
 
-    /// Infers the arguments of a call that cannot be made, for their errors.
+    /// Infers the arguments of a failed call. Lambdas get error-typed parameters, so they report no extra errors.
+    /// Coerces an element of a collection literal, with a hint for mixed values.
+    fn expect_elem(&mut self, expected: TypeId, found: TypeId, span: Span, what: &str) {
+        if !self.coerce(expected, found) {
+            let (e, f) = self.show_pair(expected, found);
+            self.error(
+                span,
+                format!("type mismatch: expected {e}, found {f}; all {what} have one type, so use a struct or a tuple for mixed values"),
+            );
+        }
+    }
+
     fn infer_args(&mut self, args: &CallArgs) {
         for a in args.exprs() {
-            self.infer(a, None);
+            let hint = match &a.kind {
+                ExprKind::Lambda { params, .. } => Some(self.fn_ty(&vec![TypeId::ERROR; params.len()], TypeId::ERROR)),
+                _ => None,
+            };
+            self.infer(a, hint);
         }
     }
 
@@ -1631,7 +1714,7 @@ impl Checker {
                 return err(span);
             }
             Ty::Var(_) => {
-                self.error(method.span, format!("type annotation needed before calling `{}`", method.name));
+                self.infer_error(method.span, format!("type annotation needed before calling `{}`", method.name));
                 self.infer_args(args);
                 return err(span);
             }
@@ -1687,6 +1770,17 @@ impl Checker {
                         msg.push_str(&format!("; add a bound `{}: {t}`", self.show(rt)));
                     } else {
                         msg.push_str(&format!(" (the trait `{t}` has it but is not implemented for {})", self.show(rt)));
+                    }
+                }
+                let as_list = match self.ty(rt) {
+                    Ty::Map(..) => Some("`entries()`, a list of (key, value) pairs"),
+                    Ty::Set(_) => Some("`to_list()`"),
+                    _ => None,
+                };
+                if let Some(as_list) = as_list {
+                    let list = self.list_ty(TypeId::ERROR);
+                    if self.lookup_method(list, &method.name).is_some() {
+                        msg.push_str(&format!("; call it on {as_list}"));
                     }
                 }
                 self.error(method.span, msg);
@@ -1892,6 +1986,18 @@ impl Checker {
         }
     }
 
+    /// Whether `t` can scale a duration. A type parameter must then be `Num`.
+    fn num_factor(&mut self, t: TypeId, span: Span) -> bool {
+        match self.rty(t) {
+            Ty::Int | Ty::Float => true,
+            Ty::Param(_) => {
+                self.require_bound(t, Bound::Num, span);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Result type of an arithmetic operation, reporting errors.
     fn arith_type(&mut self, op: ArithOp, lt: TypeId, rt: TypeId, span: Span) -> TypeId {
         let l = self.resolve(lt);
@@ -1915,7 +2021,7 @@ impl Checker {
             (false, true) => (l, l),
             (false, false) => (l, r),
         };
-        if l == TypeId::INT && r == TypeId::DURATION && op == Mul {
+        if op == Mul && r == TypeId::DURATION && self.num_factor(l, span) {
             return TypeId::DURATION;
         }
         if l == TypeId::DURATION {
@@ -1924,13 +2030,20 @@ impl Checker {
                     self.expect_type(TypeId::DURATION, r, span);
                     TypeId::DURATION
                 }
-                Mul => {
-                    self.expect_type(TypeId::INT, r, span);
-                    TypeId::DURATION
-                }
                 Div if r == TypeId::DURATION => TypeId::FLOAT,
-                Div => {
-                    self.expect_type(TypeId::INT, r, span);
+                Mul | Div => {
+                    if !self.num_factor(r, span) {
+                        match self.rty(r) {
+                            Ty::Var(_) => {
+                                self.expect_type(TypeId::INT, r, span);
+                            }
+                            Ty::Error => {}
+                            _ => {
+                                let msg = format!("expected Num, found {}", self.show(r));
+                                self.error(span, msg);
+                            }
+                        }
+                    }
                     TypeId::DURATION
                 }
                 _ => {
@@ -1938,6 +2051,9 @@ impl Checker {
                     TypeId::ERROR
                 }
             };
+        }
+        if let Some(t) = [l, r].into_iter().find(|&t| !self.has_arith(t, op)) {
+            return self.no_operator(op, t, span);
         }
         if !self.unify(l, r) {
             let (e, f) = self.show_pair(l, r);
@@ -1958,12 +2074,22 @@ impl Checker {
                 self.require_bound(t, Bound::Num, span);
                 t
             }
-            _ => {
-                let msg = format!("operator `{}` is not defined for {}; it requires Num", arith_text(op), self.show(t));
-                self.error(span, msg);
-                TypeId::ERROR
-            }
+            _ => self.no_operator(op, t, span),
         }
+    }
+
+    fn has_arith(&self, t: TypeId, op: ArithOp) -> bool {
+        match self.rty(t) {
+            Ty::Int | Ty::Float | Ty::Duration | Ty::Param(_) | Ty::Var(_) | Ty::Error | Ty::Never => true,
+            Ty::Str | Ty::Bytes | Ty::List(_) => op == ArithOp::Add,
+            _ => false,
+        }
+    }
+
+    fn no_operator(&mut self, op: ArithOp, t: TypeId, span: Span) -> TypeId {
+        let msg = format!("operator `{}` is not defined for {}", arith_text(op), self.show(t));
+        self.error(span, msg);
+        TypeId::ERROR
     }
 
     fn check_binary(&mut self, op: BinOp, l: &Expr, r: &Expr, span: Span) -> HExpr {
@@ -2029,7 +2155,7 @@ impl Checker {
                 Ty::Bytes => SeqKind::Bytes,
                 Ty::Error => return err(span),
                 Ty::Var(_) => {
-                    self.error(obj.span, "type annotation needed before slicing");
+                    self.infer_error(obj.span, "type annotation needed before slicing");
                     return err(span);
                 }
                 _ => {
@@ -2067,7 +2193,7 @@ impl Checker {
             }
             Ty::Error => err(span),
             Ty::Var(_) => {
-                self.error(obj.span, "type annotation needed before indexing");
+                self.infer_error(obj.span, "type annotation needed before indexing");
                 err(span)
             }
             _ => {
@@ -2149,7 +2275,7 @@ impl Checker {
             }
             Ty::Error => err(span),
             Ty::Var(_) => {
-                self.error(inner.span, "type annotation needed before `?`");
+                self.infer_error(inner.span, "type annotation needed before `?`");
                 err(span)
             }
             _ => {
@@ -2259,7 +2385,7 @@ impl Checker {
             Ty::Named(d, args) if d == self.wk.channel => builtin(IterKind::Channel, self.arena.elem(args, 0)),
             Ty::Error => builtin(IterKind::List, TypeId::ERROR),
             Ty::Var(_) => {
-                self.error(span, "type annotation needed before iterating");
+                self.infer_error(span, "type annotation needed before iterating");
                 builtin(IterKind::List, TypeId::ERROR)
             }
             _ => {

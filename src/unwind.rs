@@ -65,7 +65,7 @@ impl<F: Future> Future for CatchUnwind<F> {
 pub(crate) async fn guard<T>(f: impl Future<Output = Result<T, crate::Error>>) -> Result<T, crate::Error> {
     match CatchUnwind::new(f).await {
         Ok(r) => r,
-        Err(msg) => Err(crate::Error::Runtime { message: format!("internal error: {msg}"), trace: vec![] }),
+        Err(msg) => Err(crate::Error::Internal { message: msg, trace: vec![] }),
     }
 }
 
@@ -80,7 +80,7 @@ mod tests {
             tokio::task::yield_now().await;
             panic!("boom {}", 1)
         }));
-        assert!(matches!(r, Err(crate::Error::Runtime { ref message, .. }) if message == "internal error: boom 1"), "{r:?}");
+        assert!(matches!(r, Err(crate::Error::Internal { ref message, .. }) if message == "boom 1"), "{r:?}");
         assert_eq!(rt.block_on(guard(async { Ok::<_, crate::Error>(5) })).unwrap(), 5);
         assert_eq!(catch(|| panic!("static")), Err::<(), _>("static".to_string()));
     }

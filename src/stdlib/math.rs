@@ -3,7 +3,7 @@
 use crate::check::ModKind;
 use crate::engine::Registry;
 use crate::vm::value::Value;
-use crate::vm::{NResult, panic};
+use crate::vm::{NResult, fail};
 
 pub fn register(r: &mut Registry) {
     r.source("math", ModKind::Std, include_str!("math.sand"));
@@ -54,7 +54,7 @@ pub fn register(r: &mut Registry) {
     r.add_builtin("math.isqrt", |_, a| {
         let n = a[0].as_int();
         if n < 0 {
-            return panic(format!("isqrt of negative number {n}"));
+            return fail("invalid", format!("isqrt of negative number {n}"));
         }
         Ok(Value::Int(n.isqrt()))
     });
@@ -68,10 +68,10 @@ fn gcd(a: i64, b: i64) -> u64 {
     a
 }
 
-/// Converts a non-negative result to `int`, panicking if it does not fit.
+/// Converts a non-negative result to `int`, failing if it does not fit.
 fn int_result(v: u64) -> NResult {
     match i64::try_from(v) {
         Ok(i) => Ok(Value::Int(i)),
-        Err(_) => panic("integer overflow"),
+        Err(_) => fail("overflow", "integer overflow"),
     }
 }

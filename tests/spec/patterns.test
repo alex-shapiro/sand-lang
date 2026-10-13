@@ -292,23 +292,23 @@ a x2
 
 === match on a never-typed scrutinee
 fn f() -> int {
-    match panic("boom") {
+    match fail("boom") {
         Some(v) => v
         None => 0
     }
 }
 fn g() -> int {
-    match (panic("nested"), 1) {
+    match (fail("nested"), 1) {
         (Ok(v), 1) => v
         _ => 0
     }
 }
 fn h() -> int {
-    let Some(x) = panic("let")
+    let Some(x) = fail("let")
     x
 }
 print(f() + g() + h())
---- panic
+--- fail
 boom
 
 === match on an erroneous scrutinee reports the error

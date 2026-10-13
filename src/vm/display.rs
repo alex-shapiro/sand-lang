@@ -23,7 +23,7 @@ pub fn fmt_duration(nanos: i64) -> String {
     if nanos == 0 {
         return "0s".into();
     }
-    let units: [(&str, f64); 6] = [("h", 3600e9), ("m", 60e9), ("s", 1e9), ("ms", 1e6), ("us", 1e3), ("ns", 1.0)];
+    let units: [(&str, f64); 7] = [("d", 86400e9), ("h", 3600e9), ("m", 60e9), ("s", 1e9), ("ms", 1e6), ("us", 1e3), ("ns", 1.0)];
     let abs = (nanos as f64).abs();
     for (name, size) in units {
         if abs >= size || name == "ns" {
@@ -158,10 +158,10 @@ pub fn render_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Valu
             }
             Work::Val(v, depth, debug) => {
                 if depth > MAX_DEPTH {
-                    return Err(Ctl::panic("value too deeply nested to display"));
+                    return Err(Ctl::fail("limit", "value too deeply nested to display"));
                 }
                 if out.len() > MAX_OUTPUT {
-                    return Err(Ctl::panic("value too large to display"));
+                    return Err(Ctl::fail("limit", "value too large to display"));
                 }
                 budget.charge(1)?;
                 match v {

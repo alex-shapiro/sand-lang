@@ -69,6 +69,13 @@ impl Repl {
         }
     }
 
+    fn internal_error(&mut self, src: &str) -> String {
+        match self.eval(src) {
+            Err(Error::Internal { message, .. }) => message,
+            other => panic!("{src:?}: expected an internal error, got {other:?}"),
+        }
+    }
+
     /// Output printed since the last call.
     fn take_out(&self) -> String {
         let s = self.out.contents();
@@ -267,28 +274,28 @@ fn compile_errors_leave_the_session_unchanged() {
 }
 
 #[test]
-fn panics_keep_earlier_effects_and_the_session_usable() {
+fn errors_keep_earlier_effects_and_the_session_usable() {
     let mut r = Repl::new();
     r.ok("var a = 1");
     let msg = r.runtime_error("a = 2\nlet b = 10\nlet c = [1][5]\nlet d = 4");
     assert!(msg.contains("index out of bounds"), "{msg}");
-    // Assignments before the panic happened, and its declarations exist.
+    // Assignments before the error happened, and its declarations exist.
     assert_eq!(r.value("a"), "2");
     assert_eq!(r.value("b"), "10");
     let msg = r.runtime_error("d");
     assert!(msg.contains("global used before initialization: `d`"), "{msg}");
     assert_eq!(r.value("a + b"), "12");
-    // A failed top-level `?` aborts the input like a panic.
+    // A failed top-level `?` fails the input with its error.
     r.ok("import json");
     let msg = r.runtime_error("let n = json.parse(\"x\")?\nprint(\"not reached\")");
     assert!(msg.contains("parse"), "{msg}");
     assert_eq!(r.value("[a].len()"), "1");
     assert_eq!(r.take_out(), "");
-    // Panics inside functions have a trace.
-    r.ok("fn boom() { panic(\"boom\") }");
+    // Errors inside functions have a trace.
+    r.ok("fn boom() { fail(\"boom\") }");
     match r.eval("boom()") {
         Err(Error::Runtime { message, trace }) => {
-            assert_eq!(message, "boom");
+            assert_eq!(message, "error: boom");
             assert_eq!(trace[0].function, "boom");
             assert!(trace[0].file.starts_with("<input "), "{trace:?}");
         }
@@ -302,8 +309,8 @@ fn panics_keep_earlier_effects_and_the_session_usable() {
 fn loops_of_a_failed_input_read_its_uninitialized_globals_where_they_do() {
     let mut r = Repl::new();
     let late = "fn late(n: int) -> int {\n    var t = 0\n    for i in 0..n {\n        if i == 2 {\n            t += LATE\n        }\n        t += 1\n    }\n    t\n}\n";
-    let msg = r.runtime_error(&format!("{late}panic(\"boom\")\nlet LATE = 10"));
-    assert_eq!(msg, "boom");
+    let msg = r.runtime_error(&format!("{late}fail(\"boom\")\nlet LATE = 10"));
+    assert_eq!(msg, "error: boom");
     assert_eq!(r.value("late(2)"), "2");
     let msg = r.runtime_error("late(3)");
     assert!(msg.contains("global used before initialization: `LATE`"), "{msg}");
@@ -337,7 +344,7 @@ fn tasks_persist_across_inputs() {
     assert_eq!(r.value("log"), "[\"started\", \"done\"]");
     // A failed input cancels all tasks.
     r.ok("let slow = spawn { task.sleep(10s)\n1 }");
-    let _ = r.runtime_error("panic(\"stop\")");
+    let _ = r.runtime_error("fail(\"stop\")");
     let msg = r.runtime_error("slow.wait()");
     assert!(msg.contains("task cancelled"), "{msg}");
 }
@@ -450,7 +457,7 @@ fn test_blocks_run_on_request() {
     r.ok("test \"doubles\" { assert(double(2) == 4) }");
     r.ok("test \"fails\" { assert(double(2) == 5, \"wrong\") }");
     let report = r.rt.block_on(r.session.run_tests()).unwrap();
-    assert_eq!(report.render(), "ok doubles\nFAIL fails: wrong\n1 passed, 1 failed\n");
+    assert_eq!(report.render(), "ok doubles\nFAIL fails: assert: wrong\n1 passed, 1 failed\n");
     // A test defined again replaces the earlier one with that name.
     r.ok("test \"fails\" { assert(double(3) == 6) }");
     let report = r.rt.block_on(r.session.run_tests()).unwrap();
@@ -466,6 +473,35 @@ fn reset_starts_over() {
     assert!(msg.contains("undefined name `x`"), "{msg}");
     r.ok("let x = \"fresh\"");
     assert_eq!(r.value("x"), "\"fresh\"");
+}
+
+#[test]
+fn top_level_use_bindings_persist_across_inputs() {
+    let mut r = Repl::new();
+    r.ok("struct Res {\n    name: str\n    var closed: bool = false\n}");
+    r.ok("impl Close for Res {\n    fn close(self) {\n        self.closed = true\n        print(\"closed \\(self.name)\")\n    }\n}");
+    r.ok("let res = [1, 2]");
+    r.ok("use res = Res { name: \"a\" }");
+    assert_eq!(r.value("res.closed"), "false");
+    assert_eq!(r.value("res.name"), "\"a\"");
+    r.ok("use _ = Res { name: \"b\" }");
+    assert_eq!(r.take_out(), "");
+    r.ok("{\n    use inner = Res { name: \"c\" }\n}");
+    assert_eq!(r.take_out(), "closed c\n");
+    let msg = r.compile_error("use n = 1");
+    assert!(msg.contains("`use` needs a value whose type implements `Close`"), "{msg}");
+}
+
+#[cfg(feature = "os")]
+#[test]
+fn a_file_bound_with_top_level_use_stays_open_for_later_inputs() {
+    let dir = TempDir::new("session-use");
+    std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
+    let policy = Policy::rules(RulePolicy::new().fallback(sandlang::Decision::Allow));
+    let mut r = Repl::with(Config::new().policy(policy).cwd(dir.path()).module_root(dir.path()));
+    r.ok("import fs");
+    r.ok("use f = fs.open(\"a.txt\")?");
+    assert_eq!(r.value("f.read_text()?"), "\"hello\"");
 }
 
 #[cfg(feature = "os")]
@@ -555,7 +591,7 @@ fn buggy_module() -> NativeModule {
 }
 
 fn assert_reset(r: &Repl, message: &str, panic: &str) {
-    assert!(message.starts_with(&format!("internal error: {panic}")), "{message}");
+    assert!(message.starts_with(panic), "{message}");
     assert!(message.ends_with(RESET_NOTE), "{message}");
     assert!(r.session.was_reset());
 }
@@ -566,14 +602,14 @@ fn internal_panics_reset_the_session() {
     r.ok("import bug\nlet x = 1");
     assert_eq!(r.value("bug.crash(0) + x"), "1");
     assert!(!r.session.was_reset());
-    let msg = r.runtime_error("let y = x + 1\nbug.crash(1)");
+    let msg = r.internal_error("let y = x + 1\nbug.crash(1)");
     assert_reset(&r, &msg, "host bug 1");
     let msg = r.compile_error("x");
     assert!(msg.contains("undefined name `x`"), "{msg}");
     assert!(!r.session.was_reset());
     r.ok("import bug\nlet x = 2");
     assert_eq!(r.value("bug.crash(0) + x"), "2");
-    let msg = r.runtime_error("let t = spawn bug.crash(2)\ntask.sleep(50ms)");
+    let msg = r.internal_error("let t = spawn bug.crash(2)\ntask.sleep(50ms)");
     assert_reset(&r, &msg, "host bug 2");
     r.compile_error("t");
     r.ok("import bug");
@@ -595,7 +631,7 @@ fn internal_panics_in_background_tasks_reset_the_session() {
     let got = r.rt.block_on(r.session.run_tasks_until(async { tokio::time::sleep(Duration::from_millis(300)).await }, |e| errors.push(e)));
     assert_eq!(got, Some(()));
     match &errors[..] {
-        [Error::Runtime { message, .. }] => assert_reset(&r, message, "host bug 1"),
+        [Error::Internal { message, .. }] => assert_reset(&r, message, "host bug 1"),
         other => panic!("{other:?}"),
     }
     r.compile_error("t");
@@ -618,7 +654,7 @@ fn always_answers_survive_a_reset() {
     };
     let policy = Policy::rules(RulePolicy::new().fallback(sandlang::Decision::Prompt));
     let mut r = Repl::with(Config::new().policy(policy).prompter(prompter).cwd(dir.path()).module_root(dir.path()));
-    let msg = r.runtime_error("import fs\nlet a = fs.read_text(\"a.txt\")?\nlet b = fs.read_text(\"b.txt\")?");
+    let msg = r.internal_error("import fs\nlet a = fs.read_text(\"a.txt\")?\nlet b = fs.read_text(\"b.txt\")?");
     assert_reset(&r, &msg, "prompter bug");
     let asked_before = asked.load(Ordering::SeqCst);
     r.ok("import fs");
@@ -656,10 +692,10 @@ fn tasks_run_between_inputs() {
     assert!(r.idle(50).is_empty());
     r.ok("ch.send(4);");
     assert_eq!(r.value("reader.wait()"), "Some(4)");
-    r.ok("let slow = spawn { task.sleep(10s) }\nlet bad = spawn { task.sleep(10ms)\npanic(\"bad task\") }");
+    r.ok("let slow = spawn { task.sleep(10s) }\nlet bad = spawn { task.sleep(10ms)\nfail(\"bad task\") }");
     match &r.idle(300)[..] {
         [Error::Runtime { message, trace }] => {
-            assert_eq!(message, "bad task");
+            assert_eq!(message, "error: bad task");
             assert!(!trace.is_empty());
         }
         other => panic!("{other:?}"),
@@ -831,4 +867,17 @@ fn inputs_can_be_named() {
     }
     rt().block_on(session.eval_as("main.sand", "fn f() -> int { 7 }")).unwrap();
     assert_eq!(rt().block_on(session.eval("f() * 6")).unwrap().as_deref(), Some("42"));
+}
+
+#[test]
+fn wall_time_set_per_session() {
+    let limits = Limits { max_wall_time: Some(Duration::from_millis(50)), ..Limits::default() };
+    let mut r = Repl::with(Config::new().limits(limits));
+    assert!(matches!(r.eval("task.sleep(200ms)"), Err(Error::Limit(LimitKind::WallTime))));
+    r.session.set_wall_time(Some(Duration::from_secs(5)));
+    r.ok("task.sleep(200ms)");
+    r.session.set_wall_time(Some(Duration::from_millis(20)));
+    assert!(matches!(r.eval("task.sleep(200ms)"), Err(Error::Limit(LimitKind::WallTime))));
+    r.session.set_wall_time(None);
+    r.ok("task.sleep(100ms)");
 }

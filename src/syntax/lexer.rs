@@ -168,6 +168,7 @@ tokens! {
         Colon ":" 0,
         Semi ";" 0,
         At "@" 0,
+        Bang "!" 0,
         LParen "(" 0,
         RParen ")" ENDS,
         LBracket "[" 0,
@@ -587,6 +588,8 @@ impl<'a> Lexer<'a> {
                 "s" => Some(1_000_000_000),
                 "m" => Some(60_000_000_000),
                 "h" => Some(3_600_000_000_000),
+                "d" => Some(86_400_000_000_000),
+                "w" => Some(604_800_000_000_000),
                 _ => None,
             };
             self.pos = suffix_end;
@@ -1012,6 +1015,7 @@ impl<'a> Lexer<'a> {
             (b':', _) => (Tok::Colon, 1),
             (b';', _) => (Tok::Semi, 1),
             (b'@', _) => (Tok::At, 1),
+            (b'!', _) => (Tok::Bang, 1),
             (b'(', _) => (Tok::LParen, 1),
             (b')', _) => (Tok::RParen, 1),
             (b'[', _) => (Tok::LBracket, 1),
@@ -1021,12 +1025,7 @@ impl<'a> Lexer<'a> {
             _ => {
                 let ch = self.src[self.pos..].chars().next().unwrap();
                 self.pos += ch.len_utf8();
-                let msg = if ch == '!' {
-                    "unexpected character `!`; use `not` for negation".to_string()
-                } else {
-                    format!("unexpected character `{}`", ch.escape_debug())
-                };
-                self.error(lo, self.pos, msg);
+                self.error(lo, self.pos, format!("unexpected character `{}`", ch.escape_debug()));
                 return;
             }
         };

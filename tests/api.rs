@@ -66,6 +66,30 @@ fn compile_errors_are_reported_as_diagnostics() {
 }
 
 #[test]
+fn a_failed_call_reports_nothing_about_the_lambdas_after_it() {
+    let src = "let counts = [\"a\": 2]\nlet top = counts\n    .map((k, v) => (k, v))\n    .sorted_by(t => (-t.1, t.0))\n    .take(10)";
+    match Engine::new(Config::new()).check_source("main.sand", src) {
+        Err(Error::Compile(diags)) => {
+            let messages: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
+            assert_eq!(messages, ["no method `map` on type [str: int]; call it on `entries()`, a list of (key, value) pairs"]);
+        }
+        other => panic!("expected compile error, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_undefined_name_reports_nothing_about_the_types_it_hides() {
+    let src = "fn f() -> Result<int> {\n    let p = jsn.parse(\"[]\")?\n    let Some(xs) = p.get(\"a\").and_then(x => x.as_list()) else {\n        return Ok(0)\n    }\n    for x in xs {\n        print(x)\n    }\n    Ok(1)\n}\nlet rs = nope([1])\nfor r in rs {\n    print(r?)\n}";
+    match Engine::new(Config::new()).check_source("main.sand", src) {
+        Err(Error::Compile(diags)) => {
+            let messages: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
+            assert_eq!(messages, ["undefined name `nope`", "undefined name `jsn`"]);
+        }
+        other => panic!("expected compile error, got {other:?}"),
+    }
+}
+
+#[test]
 fn check_source_does_not_run() {
     let engine = Engine::new(Config::new());
     engine.check_source("main.sand", "print(1)\nlet x: int = 2").unwrap();
@@ -94,7 +118,7 @@ fn deferred_code_copies_are_bounded() {
 #[test]
 fn runtime_errors_have_stack_traces() {
     // Non-tail calls, so every frame appears in the trace.
-    let src = "fn a() -> int { panic(\"boom\") }\nfn b() -> int { a() + 1 }\nprint(b())\n";
+    let src = "fn a() -> int { fail(\"boom\") }\nfn b() -> int { a() + 1 }\nprint(b())\n";
     let (r, _, _) = run_src(Config::new(), src);
     match r {
         Err(Error::Runtime { message, trace }) => {
@@ -273,7 +297,7 @@ print(a.wait())
 "#;
     let (r, out, _) = run_src(Config::new().module(m), src);
     match r {
-        // `a` was cancelled by race, so waiting on it panics.
+        // `a` was cancelled by race, so waiting on it fails.
         Err(Error::Runtime { message, .. }) => assert!(message.contains("task cancelled")),
         other => panic!("{other:?}"),
     }
@@ -1269,7 +1293,7 @@ fn run_tests_api() {
     assert_eq!(report.passed(), 1);
     assert_eq!(report.failed(), 1);
     assert_eq!(report.results[1].name, "b");
-    assert_eq!(report.results[1].message.as_deref(), Some("nope"));
+    assert_eq!(report.results[1].message.as_deref(), Some("assert: nope"));
 }
 
 #[cfg(feature = "os")]
@@ -1320,13 +1344,13 @@ fn implementation_has_no_unsafe_or_process_access() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn panic_messages_cannot_impersonate_limits_or_interrupts() {
+fn error_messages_cannot_impersonate_limits_or_interrupts() {
     let srcs = [
-        r#"panic("\u{0}memory")"#,
-        r#"panic("\u{0}interrupted")"#,
+        r#"fail("\u{0}memory")"#,
+        r#"fail("\u{0}interrupted")"#,
         r#"assert(false, "\u{0}instructions")"#,
         "let x: int? = None\nlet y = x.expect(\"\\u{0}cpu\")",
-        "let t = spawn { panic(\"\\u{0}wall\") }\nt.wait()",
+        "let t = spawn { fail(\"\\u{0}wall\") }\nt.wait()",
     ];
     for src in srcs {
         let (r, _, _) = run_src(Config::new(), src);
@@ -1335,7 +1359,7 @@ fn panic_messages_cannot_impersonate_limits_or_interrupts() {
             other => panic!("{src}: {other:?}"),
         }
     }
-    // A failed top-level `?` in a session panics with the error's text.
+    // A failed top-level `?` in a session fails with the error's text.
     let mut session = Engine::new(Config::new()).session();
     let r = rt().block_on(session.eval("let r: Result<int> = Err(error(\"\\u{0}memory\"))\nr?"));
     assert!(matches!(r, Err(Error::Runtime { .. })), "{r:?}");
@@ -1357,13 +1381,13 @@ fn rust_panics_in_natives_do_not_unwind_into_the_host() {
     let src = "import buggy\nprint(buggy.boom(1))\nprint(buggy.boom(3))\nprint(\"unreachable\")";
     let (r, out, _) = run_src(Config::new().module(module()), src);
     match r {
-        Err(Error::Runtime { message, .. }) => assert!(message.contains("internal error") && message.contains("native bug 3"), "{message}"),
+        Err(Error::Internal { message, .. }) => assert!(message.contains("native bug 3"), "{message}"),
         other => panic!("{other:?}"),
     }
     assert_eq!(out, "1\n");
     // In a task, in tests, and in a session (which keeps working).
     let (r, _, _) = run_src(Config::new().module(module()), "import buggy\nlet t = spawn { buggy.boom(5) }\nprint(t.wait())");
-    assert!(matches!(r, Err(Error::Runtime { ref message, .. }) if message.contains("native bug 5")), "{r:?}");
+    assert!(matches!(r, Err(Error::Internal { ref message, .. }) if message.contains("native bug 5")), "{r:?}");
     let dir = TempDir::new("panic-tests");
     dir.write("t.sand", "import buggy\ntest \"bad\" {\n    buggy.boom(9)\n}\ntest \"good\" {\n    assert(buggy.boom(2) == 2)\n}\n");
     let report = rt().block_on(Engine::new(Config::new().module(module())).run_tests(dir.path().join("t.sand"))).unwrap();
@@ -1384,7 +1408,7 @@ fn rust_panics_in_host_code_become_internal_errors() {
         PromptAnswer::DenyOnce
     });
     let (r, _, _) = run_src(config, "import env\nprint(env.get(\"HOME\"))");
-    assert!(matches!(r, Err(Error::Runtime { ref message, .. }) if message.contains("internal error: prompter bug")), "{r:?}");
+    assert!(matches!(r, Err(Error::Internal { ref message, .. }) if message.contains("prompter bug")), "{r:?}");
 }
 
 #[cfg(feature = "os")]

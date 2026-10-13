@@ -85,30 +85,30 @@ fn floor_rem(a: i64, b: i64) -> i64 {
 
 pub fn int_div(a: i64, b: i64) -> Result<i64, &'static str> {
     if b == 0 {
-        return Err("division by zero");
+        return Err("invalid: division by zero");
     }
-    floor_div(a, b).ok_or("integer overflow")
+    floor_div(a, b).ok_or("overflow: integer overflow")
 }
 
 pub fn int_rem(a: i64, b: i64) -> Result<i64, &'static str> {
     if b == 0 {
-        return Err("division by zero");
+        return Err("invalid: division by zero");
     }
     Ok(floor_rem(a, b))
 }
 
 pub fn int_pow(a: i64, b: i64) -> Result<i64, &'static str> {
     if b < 0 {
-        return Err("negative exponent");
+        return Err("invalid: negative exponent");
     }
     if b > u32::MAX as i64 {
         return match a {
             0 | 1 => Ok(a),
             -1 => Ok(if b % 2 == 0 { 1 } else { -1 }),
-            _ => Err("integer overflow"),
+            _ => Err("overflow: integer overflow"),
         };
     }
-    a.checked_pow(b as u32).ok_or("integer overflow")
+    a.checked_pow(b as u32).ok_or("overflow: integer overflow")
 }
 
 /// A lookup in the dense values of a map (`MapObj::vals`).
@@ -190,13 +190,13 @@ fn inline_field(v: &Value, idx: u16) -> Value {
 #[cold]
 #[inline(never)]
 fn index_error(i: i64, len: usize) -> String {
-    format!("index out of bounds: index {i}, length {len}")
+    format!("bounds: index out of bounds: index {i}, length {len}")
 }
 
 #[cold]
 #[inline(never)]
 fn uninit_global(prog: &Program, g: u32) -> String {
-    format!("global used before initialization: `{}`", prog.global_names[g as usize])
+    format!("uninitialized: global used before initialization: `{}`", prog.global_names[g as usize])
 }
 
 /// `a == b` where it needs no fuel: the same object, or two strings one of
@@ -285,8 +285,72 @@ pub fn float_rem(a: f64, b: f64) -> f64 {
     if r != 0.0 && ((r < 0.0) != (b < 0.0)) { r + b } else { r }
 }
 
+/// The exact `nanos * k`, truncated toward zero; `None` if `k` is not finite or the product overflows.
+pub fn dur_scale(nanos: i64, k: f64) -> Option<i64> {
+    if !k.is_finite() {
+        return None;
+    }
+    let (mantissa, shift) = float_parts(k);
+    let magnitude = u128::from(nanos.unsigned_abs()) * mantissa;
+    let scaled = if magnitude == 0 {
+        0
+    } else if shift >= 0 {
+        if shift >= 64 || magnitude > (1u128 << 63) >> shift {
+            return None;
+        }
+        magnitude << shift
+    } else {
+        magnitude.checked_shr(shift.unsigned_abs()).unwrap_or(0)
+    };
+    signed_nanos(scaled, (nanos < 0) != k.is_sign_negative())
+}
+
+/// The exact `nanos / k`, truncated toward zero; `None` if `k` is NaN or the quotient overflows.
+/// The caller rejects a zero `k`.
+pub fn dur_div(nanos: i64, k: f64) -> Option<i64> {
+    if k.is_nan() {
+        return None;
+    }
+    if k.is_infinite() || nanos == 0 {
+        return Some(0);
+    }
+    let (mantissa, shift) = float_parts(k);
+    let n = u128::from(nanos.unsigned_abs());
+    let quotient = if shift > 64 {
+        // |k| >= 2^64 > |nanos|.
+        0
+    } else if shift >= 0 {
+        n / (mantissa << shift)
+    } else {
+        // n * 2^t / mantissa, by long division in two steps so that each shift fits in u128.
+        let t = shift.unsigned_abs();
+        let (head, tail) = (t.min(64), t.saturating_sub(64));
+        let (q, r) = ((n << head) / mantissa, (n << head) % mantissa);
+        if tail == 0 {
+            q
+        } else if tail > 63 || q > (1u128 << 63) >> tail {
+            return None;
+        } else {
+            (q << tail) + (r << tail) / mantissa
+        }
+    };
+    signed_nanos(quotient, (nanos < 0) != k.is_sign_negative())
+}
+
+/// `(mantissa, shift)` with `|k| == mantissa * 2^shift` exactly, for a finite `k`.
+fn float_parts(k: f64) -> (u128, i32) {
+    let bits = k.to_bits();
+    let exp = ((bits >> 52) & 0x7ff) as i32;
+    let frac = (bits & ((1 << 52) - 1)) as u128;
+    if exp == 0 { (frac, -1074) } else { (frac | 1 << 52, exp - 1075) }
+}
+
+fn signed_nanos(magnitude: u128, negative: bool) -> Option<i64> {
+    i64::try_from(if negative { -(magnitude as i128) } else { magnitude as i128 }).ok()
+}
+
 fn shift_amount(b: i64) -> Result<u32, &'static str> {
-    if (0..64).contains(&b) { Ok(b as u32) } else { Err("shift out of range") }
+    if (0..64).contains(&b) { Ok(b as u32) } else { Err("invalid: shift out of range") }
 }
 
 impl Vm {
@@ -310,11 +374,18 @@ impl Vm {
             (0, Dur(x), Dur(y)) => Dur(x.checked_add(y).ok_or_else(|| overflow("duration"))?),
             (1, Dur(x), Dur(y)) => Dur(x.checked_sub(y).ok_or_else(|| overflow("duration"))?),
             (2, Dur(x), Int(y)) | (2, Int(y), Dur(x)) => Dur(x.checked_mul(y).ok_or_else(|| overflow("duration"))?),
+            (2, Dur(x), Float(y)) | (2, Float(y), Dur(x)) => Dur(dur_scale(x, y).ok_or_else(|| overflow("duration"))?),
             (3, Dur(x), Int(y)) => {
                 if y == 0 {
-                    return Err(Ctl::panic("division by zero"));
+                    return Err(Ctl::fail("invalid", "division by zero"));
                 }
                 Dur(x.checked_div(y).ok_or_else(|| overflow("duration"))?)
+            }
+            (3, Dur(x), Float(y)) => {
+                if y == 0.0 {
+                    return Err(Ctl::fail("invalid", "division by zero"));
+                }
+                Dur(dur_div(x, y).ok_or_else(|| overflow("duration"))?)
             }
             (3, Dur(x), Dur(y)) => Float(x as f64 / y as f64),
             (0, Obj(_), Obj(_)) => {
@@ -379,39 +450,29 @@ impl Vm {
     #[cold]
     #[inline(never)]
     fn key_error(&self, k: Value) -> Ctl {
-        Ctl::panic(format!("key not found: {}", self.debug(k).unwrap_or_default()))
+        Ctl::fail("not_found", format!("key not found: {}", self.debug(k).unwrap_or_default()))
     }
 
     /// `Op::TryTop`: a top-level `?` met `Err(e)` (`res`).
     #[cold]
     #[inline(never)]
-    fn try_top(&mut self, fiber: &mut Fiber, ip: usize, prog: &Program, res: Value) -> Result<Exit, Trap> {
+    fn try_top(&mut self, fiber: &mut Fiber, ip: usize, prog: &Program, res: Value) -> Trap {
         let e = self.heap.field(res, 0).unwrap_or(Value::Unit);
-        let text = match display::to_display_metered(prog, &self.heap, &self.meter, e) {
-            Ok(t) => t,
-            Err(c) => return Err(self.ctl_trap(fiber, ip, c)),
-        };
-        if self.session {
-            return Err(self.panic_trap(fiber, ip, text));
+        match display::to_display_metered(prog, &self.heap, &self.meter, e) {
+            Ok(text) => self.error_trap(fiber, ip, text),
+            Err(c) => self.ctl_trap(fiber, ip, c),
         }
-        let msg = format!("error: {text}\n");
-        if let Err(c) = self.write_stream(2, msg.as_bytes())
-            && let Some(k) = c.as_limit()
-        {
-            return Err(Trap::Limit(k));
-        }
-        Ok(Exit::Terminate(1))
     }
 
-    /// `Op::Panic`: a panic with constant message `msg`.
+    /// `Op::Internal`: an internal error with constant message `msg`.
     #[cold]
     #[inline(never)]
-    fn const_panic(&mut self, fiber: &mut Fiber, ip: usize, prog: &Program, msg: u32) -> Trap {
+    fn const_internal(&mut self, fiber: &mut Fiber, ip: usize, prog: &Program, msg: u32) -> Trap {
         let m = match &prog.consts[msg as usize] {
             Const::Str(s) => s.clone(),
-            _ => "panic".into(),
+            _ => "unknown".into(),
         };
-        self.panic_trap(fiber, ip, m)
+        self.internal_trap(fiber, ip, m)
     }
 
     /// The trap for an operand of the wrong type (a compiler bug).
@@ -419,7 +480,7 @@ impl Vm {
     #[inline(never)]
     fn operand_trap(&mut self, fiber: &mut Fiber, ip: usize, v: Value, want: &str) -> Trap {
         fiber.frames.last_mut().unwrap().ip = ip as u32;
-        self.panic_trap(fiber, ip, format!("internal error: expected {want}, found {v:?}"))
+        self.internal_trap(fiber, ip, format!("expected {want}, found {v:?}"))
     }
 
     /// The trap for a `GetField` on a value without that field (a compiler bug).
@@ -427,15 +488,23 @@ impl Vm {
     #[inline(never)]
     fn field_trap(&mut self, fiber: &mut Fiber, ip: usize, v: Value, idx: u16) -> Trap {
         fiber.frames.last_mut().unwrap().ip = ip as u32;
-        let msg = format!("internal error: field {idx} of {v:?} {:?}", self.heap.get(v));
-        self.panic_trap(fiber, ip, msg)
+        let msg = format!("field {idx} of {v:?} {:?}", self.heap.get(v));
+        self.internal_trap(fiber, ip, msg)
     }
 
-    /// The trap for a panic with message `msg`.
+    /// The trap for an error whose message `msg` is `kind: message`.
     #[cold]
     #[inline(never)]
-    fn panic_trap(&mut self, fiber: &mut Fiber, ip: usize, msg: String) -> Trap {
-        Trap::Panic { message: msg, trace: self.trace_of(fiber, Some(ip as u32)) }
+    fn error_trap(&mut self, fiber: &mut Fiber, ip: usize, msg: String) -> Trap {
+        Trap::Error { message: msg, trace: self.trace_of(fiber, Some(ip as u32)) }
+    }
+
+    /// The trap for an internal error, which marks the engine broken.
+    #[cold]
+    #[inline(never)]
+    fn internal_trap(&mut self, fiber: &mut Fiber, ip: usize, msg: String) -> Trap {
+        self.broken = true;
+        Trap::Internal { message: msg, trace: self.trace_of(fiber, Some(ip as u32)) }
     }
 
     /// The trap for a failed metered operation.
@@ -443,10 +512,11 @@ impl Vm {
     #[inline(never)]
     fn ctl_trap(&mut self, fiber: &mut Fiber, ip: usize, c: Ctl) -> Trap {
         match c.into_kind() {
-            CtlKind::Panic(m) => self.panic_trap(fiber, ip, m),
+            CtlKind::Error(m) => self.error_trap(fiber, ip, m),
+            CtlKind::Internal(m) => self.internal_trap(fiber, ip, m),
             CtlKind::Limit(k) => self.limit_trap(fiber, ip, k),
             CtlKind::Interrupted => Trap::Interrupted,
-            other => self.panic_trap(fiber, ip, format!("internal error: unexpected {other:?}")),
+            other => self.internal_trap(fiber, ip, format!("unexpected {other:?}")),
         }
     }
 
@@ -469,9 +539,9 @@ impl Vm {
 
     /// Runs `fiber` until it finishes, blocks, or exhausts `fuel`.
     pub(crate) fn interp(&mut self, fiber: &mut Fiber, fuel_out: &mut i64) -> Result<Exit, Trap> {
-        if let Some(msg) = fiber.pending_panic.take() {
+        if let Some(msg) = fiber.pending_error.take() {
             let ip = fiber.frames.last().map(|f| f.ip).unwrap_or(0) as usize;
-            return Err(self.panic_trap(fiber, ip, msg));
+            return Err(self.error_trap(fiber, ip, msg));
         }
         let prog = self.prog.clone();
         let natives = self.natives.clone();
@@ -502,10 +572,17 @@ impl Vm {
                 fiber.frames.last_mut().unwrap().ip = ip as u32;
             };
         }
+        // Fails with an error whose message is `kind: message`.
         macro_rules! fail {
             ($msg:expr) => {{
                 save!();
-                return Err(self.panic_trap(fiber, ip, String::from($msg)));
+                return Err(self.error_trap(fiber, ip, String::from($msg)));
+            }};
+        }
+        macro_rules! internal {
+            ($msg:expr) => {{
+                save!();
+                return Err(self.internal_trap(fiber, ip, String::from($msg)));
             }};
         }
         macro_rules! fail_ctl {
@@ -573,7 +650,7 @@ impl Vm {
         macro_rules! enter {
             ($proto:expr, $new_base:expr, $ret:expr, $closure:expr) => {{
                 if fiber.frames.len() >= self.host.limits.max_call_depth {
-                    fail!("stack overflow");
+                    fail!("limit: stack overflow");
                 }
                 save!();
                 let p = &protos[$proto as usize];
@@ -675,15 +752,15 @@ impl Vm {
                     // ---------------- integer arithmetic
                     Op::AddI { dst, a, b } => match int!(a).checked_add(int!(b)) {
                         Some(v) => r!(dst) = Value::Int(v),
-                        None => fail!("integer overflow"),
+                        None => fail!("overflow: integer overflow"),
                     },
                     Op::SubI { dst, a, b } => match int!(a).checked_sub(int!(b)) {
                         Some(v) => r!(dst) = Value::Int(v),
-                        None => fail!("integer overflow"),
+                        None => fail!("overflow: integer overflow"),
                     },
                     Op::MulI { dst, a, b } => match int!(a).checked_mul(int!(b)) {
                         Some(v) => r!(dst) = Value::Int(v),
-                        None => fail!("integer overflow"),
+                        None => fail!("overflow: integer overflow"),
                     },
                     Op::DivI { dst, a, b } => match int_div(int!(a), int!(b)) {
                         Ok(v) => r!(dst) = Value::Int(v),
@@ -699,24 +776,24 @@ impl Vm {
                     },
                     Op::AddIK { dst, a, k } => match int!(a).checked_add(k as i64) {
                         Some(v) => r!(dst) = Value::Int(v),
-                        None => fail!("integer overflow"),
+                        None => fail!("overflow: integer overflow"),
                     },
                     Op::MulIK { dst, a, k } => match int!(a).checked_mul(k as i64) {
                         Some(v) => r!(dst) = Value::Int(v),
-                        None => fail!("integer overflow"),
+                        None => fail!("overflow: integer overflow"),
                     },
                     // Floor division and modulo by a positive power of two
                     // are a shift and a mask.
                     Op::DivIK { dst, a, k } if k > 0 && k & (k - 1) == 0 => r!(dst) = Value::Int(int!(a) >> k.trailing_zeros()),
                     Op::DivIK { dst, a, k } => match floor_div(int!(a), k as i64) {
                         Some(v) => r!(dst) = Value::Int(v),
-                        None => fail!("integer overflow"),
+                        None => fail!("overflow: integer overflow"),
                     },
                     Op::RemIK { dst, a, k } if k > 0 && k & (k - 1) == 0 => r!(dst) = Value::Int(int!(a) & (k as i64 - 1)),
                     Op::RemIK { dst, a, k } => r!(dst) = Value::Int(floor_rem(int!(a), k as i64)),
                     Op::NegI { dst, a } => match int!(a).checked_neg() {
                         Some(v) => r!(dst) = Value::Int(v),
-                        None => fail!("integer overflow"),
+                        None => fail!("overflow: integer overflow"),
                     },
                     Op::BitAnd { dst, a, b } => r!(dst) = Value::Int(int!(a) & int!(b)),
                     Op::BitOr { dst, a, b } => r!(dst) = Value::Int(int!(a) | int!(b)),
@@ -765,14 +842,14 @@ impl Vm {
                         r!(dst) = match r!(a) {
                             Value::Int(i) => match i.checked_neg() {
                                 Some(v) => Value::Int(v),
-                                None => fail!("integer overflow"),
+                                None => fail!("overflow: integer overflow"),
                             },
                             Value::Float(f) => Value::Float(-f),
                             Value::Dur(d) => match d.checked_neg() {
                                 Some(v) => Value::Dur(v),
-                                None => fail!("duration overflow"),
+                                None => fail!("overflow: duration overflow"),
                             },
-                            other => fail!(format!("cannot negate {other:?}")),
+                            other => internal!(format!("cannot negate {other:?}")),
                         }
                     }
                     Op::Not { dst, a } => r!(dst) = Value::Bool(!r!(a).as_bool()),
@@ -1023,7 +1100,7 @@ impl Vm {
                                 let n = *n;
                                 native_call!(n, base + b as usize, argc as usize, base + dst as usize);
                             }
-                            _ => fail!("internal error: call of a non-function"),
+                            _ => internal!("call of a non-function"),
                         }
                     }
                     // `tick_call!` may reload `regs`, which `enter!` overwrites unread.
@@ -1108,7 +1185,7 @@ impl Vm {
                                 native_call!(n, start, argc as usize, start);
                             }
                             Obj::IterFn(_) => r!(b) = self.iter_step(callee),
-                            _ => fail!("internal error: call of a non-function"),
+                            _ => internal!("call of a non-function"),
                         }
                     }
                     Op::Ret { src } => {
@@ -1210,7 +1287,7 @@ impl Vm {
                         let v = r!(src);
                         match self.heap.get_mut_storing(o, &[v]) {
                             Obj::Struct(_, f) => f[idx as usize] = v,
-                            _ => fail!("internal error: set field on non-struct"),
+                            _ => internal!("set field on non-struct"),
                         }
                     }
                     Op::Index { dst, obj, idx } => {
@@ -1234,7 +1311,7 @@ impl Vm {
                         let i = int!(idx);
                         let v = r!(src);
                         let at = to_index(i).unwrap_or(usize::MAX);
-                        let Some(l) = self.heap.list_mut_storing(o, at, v) else { fail!("internal error: set index on non-list") };
+                        let Some(l) = self.heap.list_mut_storing(o, at, v) else { internal!("set index on non-list") };
                         match l.get_mut(at) {
                             Some(slot) => *slot = v,
                             None => {
@@ -1267,7 +1344,7 @@ impl Vm {
                     Op::CheckRepeat { src } => {
                         let n = int!(src);
                         if n < 0 {
-                            fail!(format!("negative repeat count: {n}"));
+                            fail!(format!("invalid: negative repeat count: {n}"));
                         }
                         if self.heap.would_exceed(to_usize_saturating(n).saturating_mul(16)) {
                             save!();
@@ -1494,7 +1571,7 @@ impl Vm {
                             r!(b + 1) = Value::Int(last);
                             r!(b + 2) = Value::Bool(done);
                         }
-                        None => fail!("internal error: not a range"),
+                        None => internal!("not a range"),
                     },
                     Op::NewIter { dst, src } => match self.container_iter(r!(src)) {
                         Ok(v) => r!(dst) = v,
@@ -1560,11 +1637,11 @@ impl Vm {
                     Op::TryTop { src } => {
                         save!();
                         let e = r!(src);
-                        return self.try_top(fiber, ip, &prog, e);
+                        return Err(self.try_top(fiber, ip, &prog, e));
                     }
-                    Op::Panic { msg } => {
+                    Op::Internal { msg } => {
                         save!();
-                        return Err(self.const_panic(fiber, ip, &prog, msg));
+                        return Err(self.const_internal(fiber, ip, &prog, msg));
                     }
                 }
                 continue 'dispatch;
@@ -1659,7 +1736,8 @@ impl Vm {
             _ => {}
         }
         match r.into_kind() {
-            CtlKind::Panic(m) => Err(self.panic_trap(fiber, ip, m)),
+            CtlKind::Error(m) => Err(self.error_trap(fiber, ip, m)),
+            CtlKind::Internal(m) => Err(self.internal_trap(fiber, ip, m)),
             // Already retried after a collection.
             CtlKind::Limit(k) => Err(Trap::Limit(k)),
             CtlKind::Interrupted => Err(Trap::Interrupted),
@@ -1674,7 +1752,7 @@ impl Vm {
                 Ok(Some(Exit::Async(fut)))
             }
             CtlKind::Yield | CtlKind::Blocked => unreachable!("handled above"),
-            CtlKind::Collect => Err(self.panic_trap(fiber, ip, "internal error: a native asked for a collection twice".into())),
+            CtlKind::Collect => Err(self.internal_trap(fiber, ip, "a native asked for a collection twice".into())),
         }
     }
 
@@ -1853,10 +1931,10 @@ impl Vm {
                 };
                 match state {
                     TaskState::Done => Ok(Some(result)),
-                    TaskState::Cancelled => Err(Ctl::panic("task cancelled")),
+                    TaskState::Cancelled => Err(Ctl::fail("cancelled", "task cancelled")),
                     TaskState::Running => {
                         if fid == me {
-                            return Err(Ctl::panic("deadlock: a task cannot wait for itself"));
+                            return Err(Ctl::fail("deadlock", "a task cannot wait for itself"));
                         }
                         self.add_waiter(fid, (me, g))?;
                         Ok(None)
@@ -1865,7 +1943,7 @@ impl Vm {
             }
             BlockOn::Race(tasks) => {
                 if tasks.is_empty() {
-                    return Err(Ctl::panic("task.race called with an empty list"));
+                    return Err(Ctl::fail("invalid", "task.race called with an empty list"));
                 }
                 // One waiter per task, and the list of tasks to cancel.
                 self.meter.charge(tasks.len() as u64)?;
@@ -2083,7 +2161,7 @@ impl Vm {
         Ok(map_slot_tuple(&self.heap, &self.meter, mo, items)?.is_some())
     }
 
-    /// `m[k]`: the value, or a panic if the key is missing. It copies the
+    /// `m[k]`: the value, or an error if the key is missing. It copies the
     /// value out of the entry directly rather than through `map_get`'s
     /// `Option<Value>`, whose niche makes LLVM write the result piecewise and
     /// stalls the caller's 16-byte load on store forwarding.
@@ -2165,7 +2243,7 @@ impl Vm {
         let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
         let end = mo.entries.len();
         if !slot_fits(end) {
-            return Err(Ctl::panic("map too large"));
+            return Err(Ctl::fail("limit", "map too large"));
         }
         let new_cap = self.entries_capacity(end, mo.entries.capacity(), MAP_ENTRY_SIZE, mo.index_growth(k))?;
         self.unpin(m)?;
@@ -2239,7 +2317,7 @@ impl Vm {
         }
         let end = so.entries.len();
         if !slot_fits(end) {
-            return Err(Ctl::panic("set too large"));
+            return Err(Ctl::fail("limit", "set too large"));
         }
         let new_cap = self.entries_capacity(end, so.entries.capacity(), SET_ENTRY_SIZE, so.index_growth(k))?;
         self.unpin(s)?;
@@ -2322,10 +2400,10 @@ impl Vm {
         let a = start.unwrap_or(0);
         let mut b = end.unwrap_or(len);
         if inclusive {
-            b = b.checked_add(1).ok_or_else(|| Ctl::panic("slice end out of range"))?;
+            b = b.checked_add(1).ok_or_else(|| Ctl::fail("bounds", "slice end out of range"))?;
         }
         if a < 0 || b > len || a > b {
-            return Err(Ctl::panic(format!("slice {a}..{b} out of range for length {len}")));
+            return Err(Ctl::fail("bounds", format!("slice {a}..{b} out of range for length {len}")));
         }
         let (a, b) = (a as usize, b as usize);
         let list = matches!(self.heap.get(o), Obj::List(_));
@@ -2341,7 +2419,7 @@ impl Vm {
             }
             Obj::Str(s) => {
                 if !s.is_char_boundary(a) || !s.is_char_boundary(b) {
-                    return Err(Ctl::panic(format!("slice {a}..{b} is not on a character boundary")));
+                    return Err(Ctl::fail("bounds", format!("slice {a}..{b} is not on a character boundary")));
                 }
                 let t = s[a..b].to_string();
                 self.heap.new_str(t)
@@ -2369,13 +2447,13 @@ pub(super) fn call_tick(op: Op) -> i64 {
     }
 }
 
-/// An internal error (a compiler or runtime bug) as a panic.
+/// An internal error: a compiler or runtime bug.
 #[cold]
 pub(crate) fn internal(msg: impl std::fmt::Display) -> Ctl {
-    Ctl::panic(format!("internal error: {msg}"))
+    Ctl::internal(msg.to_string())
 }
 
 #[cold]
 fn overflow(what: &str) -> Ctl {
-    Ctl::panic(format!("{what} overflow"))
+    Ctl::fail("overflow", format!("{what} overflow"))
 }

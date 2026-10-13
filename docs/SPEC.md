@@ -162,7 +162,8 @@ infinity), `nan` (not a number). A float must have digits on both sides of a
 `.`; `1.` and `.5` are not floats.
 
 **Durations**: an integer or float literal immediately followed by a unit:
-`ns`, `us`, `ms`, `s`, `m`, `h`. Examples: `250ms`, `1.5s`, `2h`. The value is
+`ns`, `us`, `ms`, `s`, `m`, `h`, `d` (24 hours), `w` (7 days). Examples: `250ms`,
+`1.5s`, `2h`, `3d`. The value is
 stored as a signed 64-bit number of nanoseconds, computed exactly from the
 decimal literal (`1.005s` is 1,005,000,000 ns); fractional nanoseconds are
 truncated.
@@ -205,9 +206,11 @@ are encoded as UTF-8.
 ```
 +  -  *  /  %  **  &  |  ^  ~  <<  >>
 == != <  <= >  >=  =  += -= *= /= %=
-.. ..= => -> |> ?? ? . , : ; @
+.. ..= => -> |> ?? ? . , : ; @ !
 ( ) [ ] { }
 ```
+
+`!` occurs only in a macro call (§6.13). Negation is written `not`.
 
 ---
 
@@ -222,7 +225,7 @@ comment, `import` declarations, then any mix of item declarations (§4),
 When a module is executed, its top-level statements and top-level `let`/`var`
 initializers run in source order. Functions, types and methods may be referred
 to before their textual definition. A top-level variable read before its
-initializer has run causes a panic (`global used before initialization`).
+initializer has run fails (kind `uninitialized`).
 
 The **main module** is the module the host asks the engine to run. Each imported
 module is executed exactly once, before the first module that imports it,
@@ -589,7 +592,7 @@ enum.
 | `never`    | the type of expressions that do not produce a value |
 
 `never` is a subtype of every type: an expression of type `never` (`return`,
-`break`, `continue`, `panic(...)`) may appear where any type is expected.
+`break`, `continue`, `fail(...)`) may appear where any type is expected.
 Inside other types it is ordinary: `[never]` and `fn() -> never` are distinct
 types, so `let xs: [never] = [1]` and passing `() => 5` where a
 `fn() -> never` is expected are type errors.
@@ -718,7 +721,7 @@ module, imported name, or prelude item.
 ```
 
 `[e; n]` evaluates `e` **once per element** (so nested lists are never
-aliased). `n` must be an `int`; a negative `n` panics.
+aliased). `n` must be an `int`; a negative `n` fails.
 
 Comprehensions may have several `for` clauses and `if` filters, evaluated left
 to right as nested loops: `[(x, y) for x in xs for y in ys if x != y]`.
@@ -746,22 +749,30 @@ same `Num` type, with these additions:
   requires that it be one of these (a number, `duration`, `str`, `bytes` or a
   list) once inferred: `add(true, false)` is a compile error.
 - `duration + duration`, `duration - duration`, `-duration`,
-  `duration * int`, `duration / int` produce `duration`;
+  `duration * k`, `k * duration` and `duration / k` produce `duration`,
+  where `k` is any `Num` (a type parameter `k: T` needs the bound `T: Num`);
+  a `float` factor gives the exact product truncated toward zero to whole
+  nanoseconds, and fails (kind `overflow`) if it is not finite or
+  the product is out of range;
+  a `float` divisor gives the exact quotient truncated toward zero to whole
+  nanoseconds, is `0s` if the divisor is infinite, fails (kind `invalid`)
+  if it is zero, and fails (kind `overflow`) if it is `nan` or the quotient
+  is out of range;
   `duration / duration` produces `float`.
 
 Integer semantics:
 
-- Overflow in `+ - * **`, unary `-`, and `/` panics with `integer overflow`.
+- Overflow in `+ - * **`, unary `-`, and `/` fails with `overflow: integer overflow`.
 - `/` is **floor division** and `%` is **floor modulo**: `-7 / 2 == -4`,
-  `-7 % 2 == 1`, `7 % -2 == -1`. Division or modulo by zero panics with
+  `-7 % 2 == 1`, `7 % -2 == -1`. Division or modulo by zero fails with
   `division by zero`.
-- `a ** b` with `b < 0` panics with `negative exponent`.
+- `a ** b` with `b < 0` fails with `invalid: negative exponent`.
 
 Float semantics: IEEE-754 with round-to-nearest. `/` by zero yields `inf`,
 `-inf` or `nan`. `%` is floor modulo (`a - b * floor(a / b)`). `**` is `powf`.
 
 **Bitwise** `& | ^ << >> ~` operate on `int`. `>>` is arithmetic. A shift
-amount outside `0..64` panics with `shift out of range`.
+amount outside `0..64` fails with `invalid: shift out of range`.
 
 **Comparison** `== !=` require `Eq` operands of the same type and compare
 structurally. `< <= > >=` require `Ord` operands of the same type. Ordering is:
@@ -804,13 +815,13 @@ only.
 ### 6.7 Field access, indexing and slicing
 
 - `s.f` reads struct field `f`; `t.0`, `t.1` read tuple elements.
-- `xs[i]` indexes a list (panics `index out of bounds` unless `0 <= i < len`).
-- `m[k]` looks up a map key (panics `key not found` if absent).
+- `xs[i]` indexes a list (fails with kind `bounds` unless `0 <= i < len`).
+- `m[k]` looks up a map key (fails with kind `not_found` if absent).
 - `s[i]` on `str` and `bytes` is not permitted; use slices or methods.
 - `xs[a..b]`, `xs[a..]`, `xs[..b]`, `xs[a..=b]` produce a new list. On `str`
   and `bytes`, slices produce new values and indices are **byte** offsets. A
   slice bound out of range, `a > b`, or a `str` bound that is not on a
-  character boundary panics.
+  character boundary fails.
 
 ### 6.8 Option and error propagation
 
@@ -819,9 +830,9 @@ only.
 - Postfix `e?` where `e: Result<T, E>` evaluates to the `Ok` payload or returns
   `Err(err)` from the enclosing function, whose return type must be
   `Result<_, E>` with the same `E`.
-- At the top level of the main module, `e?` on `Err(err)` aborts the program
-  with exit code 1 and reports the error. At the top level of an imported module
-  it is an error to use `?`.
+- At the top level of the main module, `e?` on `Err(err)` fails the program
+  (or the session input) with the error `err` (§10.3). At the top level of an
+  imported module it is an error to use `?`.
 - `?` is not permitted inside a lambda unless the lambda's return type is an
   appropriate `Option`/`Result`.
 
@@ -857,7 +868,10 @@ for x in iterable { ... }
   reading each element when visited and stopping early if the list shrinks.
   Maps and sets are iterated over a snapshot taken when the loop starts.
 - `break` and `continue` refer to the innermost loop. `return e` returns from
-  the innermost function or lambda. All three have type `never`.
+  the innermost function or lambda. At the top level of the main module,
+  `return` ends the program (or the session input, §17.6) and may return a
+  value of any type; returning `Err(err)` fails with `err` (§10.3). At the
+  top level of an imported module it is an error. All three have type `never`.
 - **Labels.** A loop may be labeled by writing `@name` before `loop`, `while`
   or `for`, on the same line; `break @name` and `continue @name` then refer to
   that loop from anywhere in its body, including nested loops:
@@ -911,6 +925,35 @@ embedded expressions, which may have any type. Lexical rules: §2.5.
 `spawn e` evaluates expression `e` in a new task and returns a `Task<T>` where
 `T` is the type of `e`. Variables are captured as for lambdas. See §11.
 
+### 6.13 Macros
+
+A macro call is written `name!(argument)`, always with parentheses. The only
+macro is `json!`, which builds a `json.Json` value (§13.7) from JSON syntax
+whose values can be Sand expressions:
+
+```
+let body = json!({
+    "requests": [{"range": {"sheetId": id}, "fields": "bold"}],
+    "values": rows,
+    "note": null,
+})
+```
+
+The argument is a **data value**, one of:
+
+- an object, `{k: v, ...}` or `[k: v, ...]`, where each key `k` is an
+  expression of type `str` and each value `v` is a data value. `{}` and `[:]`
+  are empty objects;
+- an array, `[v, ...]` of data values. `[]` is an empty array;
+- `null`;
+- any other expression `e`, converted with `json.to_json(e)`. A `Json` value
+  is used as it is, and a value with no JSON form fails at run time.
+
+`json!` expands to calls of the `json` module, which it loads without an
+import; a binding named `json` does not change it. Newlines inside a data
+value do not end statements, and a trailing comma is allowed. The formatter
+writes every object with braces.
+
 ---
 
 ## 7. Statements
@@ -962,8 +1005,8 @@ fn copy(src: str, dst: str) -> Result<()> {
   `defer` in a loop body runs at the end of each iteration that reached it.
   The blocks of function bodies, lambdas, `spawn` expressions, `test` blocks
   and the top level of a module are blocks too: top-level defers run when the
-  module's top-level code finishes (or when a top-level `?` stops the
-  program).
+  module's top-level code finishes (or when a top-level `?` or `return`
+  stops the program).
 - **Order.** Defers run in reverse order of declaration (last first); when an
   exit leaves several blocks, the innermost block's defers run first.
 - **Values.** A block's value, a `break` value and a `return` value are
@@ -979,7 +1022,7 @@ fn copy(src: str, dst: str) -> Result<()> {
   errors (loops, lambdas and `let ... else` inside it are fine). Deferred
   code is compiled into every exit of its block, so a function with very many
   defers and exits can exceed a compile-time limit (§15.3).
-- **Panics and cancellation.** A panic (§10.3) or `exit` aborts the run
+- **Errors and cancellation.** An error (§10.3) or `exit` aborts the run
   without running defers. A cancelled task (§11.2) runs its pending defers,
   innermost first; cancelling it again has no effect. Deferred code may
   suspend like any code.
@@ -1005,8 +1048,10 @@ fn first_line(path: str) -> Result<str?> {
   `Result` of one needs `?` first. The trait's method is called even if the
   type also has an inherent `close`.
 - A `use` binding is a name or `_`, not a pattern, and is local to its block;
-  at a module's top level it is closed when the top-level code finishes (in
-  the REPL, at the end of the input).
+  at a module's top level it is closed when the top-level code finishes. In a
+  session (§17.6), a top-level `use` binds a session variable, as `let` does:
+  later inputs may read it, and no input closes it (it is closed like a
+  resource that no `use` closes, below).
 - A copy of the value kept beyond the block (stored, returned, captured by a
   task) refers to a closed resource, whose operations fail with kind `"closed"`. The
   linter reports such escapes (`resource-escapes`, §17.2) and resources
@@ -1111,16 +1156,36 @@ afterwards in declaration order. For assignment `a[i] = e`, `a` and `i` are
 evaluated before `e`; for compound assignment `a[i] += e`, `a` and `i` are
 evaluated once.
 
-### 10.3 Panics
+### 10.3 Errors
 
-A panic aborts the whole engine run (all tasks) with a runtime error carrying a
-message and a stack trace of `file:line` entries. Panics are raised by integer
-overflow, division by zero, index/key/slice errors, `panic(msg)`, failed
-`assert`, `unwrap`/`expect` on `None`/`Err`, unreachable code, use of a global
-before initialization, stack overflow, nesting beyond 2,000 levels while
-printing, comparing or hashing a value, and waiting on a cancelled task.
-Scripts cannot catch panics, and panics do not run deferred expressions
-(§7.1); the test runner isolates panics per test.
+A run **fails with an error** when the script cannot go on. The run ends (all
+tasks), or in a session (§16.3, §17.6) the input does, with a runtime error:
+`<kind>: <message>`, the display form of an `Error` (§5.4), and a stack trace
+of `file:line` entries. Tools report it as `error: <kind>: <message>`, leaving
+out a kind of `error`. A run fails with an error from:
+
+- a top-level `?` on `Err(err)` (§6.8) or a top-level `return` of `Err(err)`
+  (§6.9): the error `err`;
+- `fail(message, kind)` (§12.1), whose kind defaults to `"error"`;
+- faults detected while the script runs, with these kinds: `bounds` (an index,
+  slice or byte out of range), `not_found` (a missing map key), `overflow`
+  (integer or duration overflow), `invalid` (division by zero, a negative
+  exponent, an argument out of its domain, a value JSON cannot encode),
+  `limit` (stack overflow, nesting beyond 2,000 levels while printing,
+  comparing or hashing a value, too many tasks), `unwrap` (`unwrap`/`expect`
+  on `None`/`Err`), `assert` (a failed `assert`), `todo` (`todo()`),
+  `cancelled` (waiting on a cancelled task), `deadlock` and `uninitialized`
+  (a global used before initialization), and `permission_denied` (a denied
+  `print`).
+
+Scripts cannot catch errors, and failing does not run deferred expressions
+(§7.1), except those of the top level for a top-level `?` or `return`; the
+test runner isolates errors per test.
+
+An **internal error** is a bug: an invariant of the engine broke, or a Rust
+panic was caught in the engine or in a host native. It also ends the run, and
+tools report it as `internal error: <message>`; a session in which one happens
+is reset (§16.3).
 
 ### 10.4 Exit
 
@@ -1130,7 +1195,7 @@ code. It does not terminate the host process.
 ### 10.5 Functions and closures
 
 Calls are by value (references for reference types). Recursion depth is bounded
-by the `max_call_depth` limit (default 10,000); exceeding it panics with
+by the `max_call_depth` limit (default 10,000); exceeding it fails with
 `stack overflow`. Tail calls (`return f(x)` or a call in tail position of the
 function body) do not consume stack depth, except while deferred expressions
 (§7.1) are pending, since they run after the call returns.
@@ -1184,9 +1249,9 @@ system's open-file limit is reached.
 
 Composite values print their components in debug form. The debug form of a
 string is a string literal that evaluates to it. Durations display with
-the largest unit among `h`, `m`, `s`, `ms`, `us`, `ns` that keeps the value
+the largest unit among `d`, `h`, `m`, `s`, `ms`, `us`, `ns` that keeps the value
 `>= 1`, using the shortest float representation of the value in that unit:
-`90s` displays as `1.5m`, `1500ms` as `1.5s`, `0ns` as `0s`.
+`90s` displays as `1.5m`, `36h` as `1.5d`, `1500ms` as `1.5s`, `0ns` as `0s`.
 
 ### 10.10 Format specifications
 
@@ -1232,14 +1297,14 @@ t.cancel()                        // cancels if still running
 ```
 
 - `spawn e` creates a task which starts running at the next scheduling point.
-- `t.wait()` returns the task's result. Waiting on a cancelled task panics
+- `t.wait()` returns the task's result. Waiting on a cancelled task fails
   with `task cancelled`. Waiting on a task more than once returns the same
   value.
 - Cancelling a task stops it at its next suspension point or instruction
   boundary and drops its pending I/O; it is done at once (waiting on it
-  panics) and then runs its pending deferred expressions (§7.1). A deferred
+  fails) and then runs its pending deferred expressions (§7.1). A deferred
   expression interrupted by the cancellation does not resume.
-- A panic in any task aborts the run (§10.3).
+- An error in any task aborts the run (§10.3).
 
 ### 11.3 The `task` module (prelude-visible as `task`)
 
@@ -1248,7 +1313,7 @@ t.cancel()                        // cancels if still running
 | `task.sleep(d: duration)`                          | suspend for `d`                                                     |
 | `task.yield_now()`                                 | let other tasks run                                                 |
 | `task.all<T>(ts: [Task<T>]) -> [T]`                | wait for all, results in order                                      |
-| `task.race<T>(ts: [Task<T>]) -> T`                 | wait for the first to finish; cancel the rest; panics on empty list |
+| `task.race<T>(ts: [Task<T>]) -> T`                 | wait for the first to finish; cancel the rest; fails on empty list |
 | `task.timeout<T>(d: duration, f: fn() -> T) -> T?` | run `f` in a task; `None` (and cancel) if not done within `d`       |
 | `task.channel<T>(capacity: int = 0) -> Channel<T>` | create a channel; `0` means unbounded                               |
 
@@ -1282,9 +1347,9 @@ Always in scope without import.
 | --------------------------------------------------- | ------------------------------------- |
 | `print<T>(x: T)`                                    | write display form + `"\n"` to stdout |
 | `eprint<T>(x: T)`                                   | write display form + `"\n"` to stderr |
-| `panic(msg: str) -> never`                          | panic                                 |
-| `assert(cond: bool, msg: str = "assertion failed")` | panic with `msg` if false             |
-| `todo() -> never`                                   | panic `not yet implemented`           |
+| `fail(message: str, kind: str = "error") -> never`  | fail with an error (§10.3)            |
+| `assert(cond: bool, msg: str = "condition is false")` | fail with `msg` (kind `assert`) if false |
+| `todo() -> never`                                   | fail (kind `todo`): `not yet implemented` |
 | `exit(code: int) -> never`                          | stop the run (§10.4)                  |
 | `error(message: str, kind: str = "error") -> Error` | construct an `Error`                  |
 | `set<T: Hash>(items: [T] = []) -> Set<T>`           | build a set                           |
@@ -1307,7 +1372,7 @@ Every value has `to_str() -> str` and `debug() -> str`.
 
 `abs`, `floor`, `ceil`, `round` (half away from zero), `trunc`, `sqrt`, `pow(e:
 float)`, `min`, `max`, `clamp`, `is_nan`, `is_finite`, `is_infinite`,
-`to_int() -> int` (truncates; panics on NaN or out of range), `to_str_fixed(digits:
+`to_int() -> int` (truncates; fails on NaN or out of range), `to_str_fixed(digits:
 int) -> str`. `min` and `max` ignore a NaN argument. Parsing: `str.parse_float`
 (§12.5).
 
@@ -1325,7 +1390,7 @@ int) -> str`. `min` and `max` ignore a NaN argument. Parsing: `str.parse_float`
 | `starts_with(p: str)`, `ends_with(s: str)`                                         |                                                                                       |
 | `find(sub: str) -> int?`, `rfind(sub: str) -> int?`                                | byte offset                                                                           |
 | `replace(from: str, to: str) -> str`                                               | all occurrences; an empty `from` returns the string unchanged                         |
-| `split(sep: str) -> [str]`                                                         | `"".split(",") == [""]`; empty `sep` panics                                           |
+| `split(sep: str) -> [str]`                                                         | `"".split(",") == [""]`; empty `sep` fails                                            |
 | `split_once(sep: str) -> (str, str)?`                                              |                                                                                       |
 | `split_whitespace() -> [str]`                                                      |                                                                                       |
 | `lines() -> [str]`                                                                 | splits on `\n`, strips a trailing `\r` from each line, no final empty line            |
@@ -1337,7 +1402,7 @@ int) -> str`. `min` and `max` ignore a NaN argument. Parsing: `str.parse_float`
 | `parse_int(radix: int = 10) -> int?`, `parse_float() -> float?`                    | strict (no whitespace); radix 2..36; floats also `inf`, `-inf`, `nan`                 |
 | `is_digit()`, `is_alpha()`, `is_alnum()`, `is_space()`, `is_upper()`, `is_lower()` | true if non-empty and all chars satisfy (ASCII classes for digit; Unicode for others) |
 | `char_at(i: int) -> str?`                                                          | the scalar starting at byte offset `i`                                                |
-| `ord() -> int`                                                                     | scalar value of a one-char string (panics otherwise)                                  |
+| `ord() -> int`                                                                     | scalar value of a one-char string (fails otherwise)                                   |
 | `reversed() -> str`                                                                | by scalars                                                                            |
 | `chars_iter() -> Iter<str>`                                                        | lazy iterator over the scalars (§12.13)                                               |
 
@@ -1346,7 +1411,7 @@ int) -> str`. `min` and `max` ignore a NaN argument. Parsing: `str.parse_float`
 `len`, `is_empty`, `get(i) -> int?`, `to_list() -> [int]`, `to_str() -> Result<str>`
 (strict UTF-8; this shadows the universal `to_str`, use `debug()` for display),
 `to_str_lossy() -> str`, `to_hex() -> str`, `contains(b: bytes)`, `find(b: bytes)
--> int?`, slicing. Static: `bytes.from_list(xs: [int]) -> bytes` (panics if any
+-> int?`, slicing. Static: `bytes.from_list(xs: [int]) -> bytes` (fails if any
 element outside `0..=255`), `bytes.from_hex(s: str) -> bytes?`.
 
 ### 12.7 `duration`
@@ -1361,7 +1426,7 @@ element outside `0..=255`), `bytes.from_hex(s: str) -> bytes?`.
 | ------------------------------------------------------------------------------- | --------------------------------------- |
 | `len()`, `is_empty()`                                                           |                                         |
 | `push(x: T)`, `pop() -> T?`                                                     | at the end                              |
-| `insert(i: int, x: T)`, `remove(i: int) -> T`                                   | panics if out of range                  |
+| `insert(i: int, x: T)`, `remove(i: int) -> T`                                   | fail if out of range                    |
 | `extend(xs: [T])`, `clear()`                                                    |                                         |
 | `get(i: int) -> T?`, `first() -> T?`, `last() -> T?`                            |                                         |
 | `contains(x: T) -> bool`, `index_of(x: T) -> int?`                              | `T: Eq`                                 |
@@ -1414,12 +1479,12 @@ when absent and returns the stored value), `iter() -> Iter<(K, V)>` (§12.13).
 
 ### 12.11 `Option<T>` and `Result<T, E>`
 
-Option: `is_some`, `is_none`, `unwrap() -> T` (panics `unwrap on None`),
+Option: `is_some`, `is_none`, `unwrap() -> T` (fails with `unwrap: unwrap on None`),
 `expect(msg: str) -> T`, `unwrap_or(d: T) -> T`, `map<U>(f) -> U?`,
 `and_then<U>(f: fn(T) -> U?) -> U?`, `or_else(f: fn() -> T?) -> T?`,
 `ok_or<E>(e: E) -> Result<T, E>`, `filter(f: fn(T) -> bool) -> T?`.
 
-Result: `is_ok`, `is_err`, `unwrap() -> T` (panics `unwrap on Err: <err>`),
+Result: `is_ok`, `is_err`, `unwrap() -> T` (fails with `unwrap: unwrap on Err: <err>`),
 `expect(msg: str) -> T`, `unwrap_or(d: T) -> T`, `unwrap_err() -> E`,
 `map<U>(f) -> Result<U, E>`, `map_err<F>(f: fn(E) -> F) -> Result<T, F>`,
 `and_then<U>(f: fn(T) -> Result<U, E>) -> Result<U, E>`, `ok() -> T?`,
@@ -1492,7 +1557,7 @@ U?)`, `flat_map<U>(f: fn(T) -> Iter<U>)`, `enumerate() -> Iter<(int, T)>`,
 `zip<U>(other: Iter<U>) -> Iter<(T, U)>` (ends with the shorter), `chain(other:
 Iter<T>)`, `take(n: int)` (pulls at most `n` elements from its source),
 `skip(n: int)`, `take_while(f)`, `skip_while(f)`, `step_by(n: int)` (the first
-element, then every `n`-th; panics if `n <= 0`), `inspect(f: fn(T))` (calls `f`
+element, then every `n`-th; fails if `n <= 0`), `inspect(f: fn(T))` (calls `f`
 on each element as it passes).
 
 **Consumers** pull elements: `to_list() -> [T]`, `to_set() -> Set<T>` (`T:
@@ -1735,6 +1800,11 @@ pub fn get(url: str, headers: [(str, str)] = [], timeout: duration = 30s) -> Res
 pub fn request(method: str, url: str, headers: [(str, str)] = [], body: bytes = b"",
                timeout: duration = 30s, follow_redirects: bool = true) -> Result<Response>
 pub fn post(url: str, body: bytes, headers: [(str, str)] = [], timeout: duration = 30s) -> Result<Response>
+pub fn post_json<T>(url: str, value: T, headers: [(str, str)] = [], timeout: duration = 30s) -> Result<Response>
+pub fn put_json<T>(url: str, value: T, headers: [(str, str)] = [], timeout: duration = 30s) -> Result<Response>
+pub fn patch_json<T>(url: str, value: T, headers: [(str, str)] = [], timeout: duration = 30s) -> Result<Response>
+pub fn request_json<T>(method: str, url: str, value: T, headers: [(str, str)] = [], timeout: duration = 30s,
+                       follow_redirects: bool = true) -> Result<Response>
 pub fn open(method: str, url: str, headers: [(str, str)] = [], body: bytes = b"",
             timeout: duration = 30s, follow_redirects: bool = true) -> Result<Stream>
 pub struct Stream { status: int, headers: [(str, str)], body: Body, url: str }
@@ -1742,17 +1812,19 @@ pub fn upload(method: str, url: str, headers: [(str, str)] = [], timeout: durati
 upload.finish() -> Result<Stream>
 ```
 
-`get`, `post` and `request` read the whole response. Response methods:
-`text() -> Result<str>`, `json() -> Result<json.Json>`, `ok() -> bool`
+`get`, `post` and `request` read the whole response. `post_json`, `put_json`,
+`patch_json` and `request_json` send `json.encode(value)` as the body, with
+`Content-Type: application/json` unless `headers` set a content type. Response
+methods: `text() -> Result<str>`, `json() -> Result<json.Json>`, `ok() -> bool`
 (200..=299), `header(name: str) -> str?` (case-insensitive; the first value),
-`header_values(name: str) -> [str]`. HTTP/1.1 over TCP; `https` uses TLS
-with the `tls` feature (as in `sand`). Up to 10 redirects (301, 302, 303,
-307, 308) are followed. Bodies may be delimited by `Content-Length`,
-chunked encoding or connection close; one larger than `max_http_body` fails
-with kind `"limit"`. Non-2xx statuses are **not** errors. At every hop,
-`timeout` bounds connecting and receiving the head (then each wait for body
-data), and the capabilities `Net(host:port)`, then `NetAddr` for the
-resolved addresses (§14.6), are checked.
+`header_values(name: str) -> [str]`. HTTP/1.1 over TCP; `https` uses TLS with
+the `tls` feature (as in `sand`). Up to 10 redirects (301, 302, 303, 307, 308)
+are followed. Bodies may be delimited by `Content-Length`, chunked encoding or
+connection close; one larger than `max_http_body` fails with kind `"limit"`.
+Non-2xx statuses are **not** errors. At every hop, `timeout` bounds connecting
+and receiving the head (then each wait for body data), and the capabilities
+`Net(host:port)`, then `NetAddr` for the resolved addresses (§14.6), are
+checked.
 
 `open` returns once the response's head has arrived. Its `body`, an
 `http.Body` (an `io.Reader`), is read as it arrives, so a body larger than
@@ -1882,7 +1954,7 @@ implement the traits.
 Reading `stdin` needs the capability `Stdin`; writing `stdout` and `stderr`
 needs `Stdout` and `Stderr`, allowed unless the policy denies them. A
 denied write fails with kind `"permission_denied"` (`print` and `eprint`,
-§12.1, panic). The output limit applies (§15.1).
+§12.1, fail). The output limit applies (§15.1).
 
 The CLI buffers standard output like C's stdio (by line on a terminal, in
 blocks otherwise). It flushes it on `io.stdout.flush()`, before writing to
@@ -1926,6 +1998,8 @@ name, `None` → `null`, `Some(x)` → `x`; other enums: a payload-less variant
 → `"Variant"`, otherwise `{"Variant": [payload...]}` (an object for named
 payloads); `bytes` → base64 string; `duration` → nanoseconds; `Json` →
 itself.
+
+`json!` (§6.13) builds a `Json` from JSON syntax with embedded Sand values.
 
 `decode<T>` is the inverse for types built from those components. A struct
 field missing from the object takes its declared default if that is a
@@ -1981,13 +2055,13 @@ the limit (after a collection, §10.8), such operations fail with kind
 (kind `"timeout"`). The server certificate is verified for `host` against
 the bundled web PKI roots plus any the host added
 (`Config::tls_root_certificates`, §16). Verification and handshake failures
-are errors (kind `"invalid"` for certificate problems), never panics; the
+are errors (kind `"invalid"` for certificate problems) that scripts can handle; the
 same holds for `https` requests.
 
 ### 13.11 `random`
 
 Engine-local PRNG (xoshiro256\*\*), seeded from host entropy unless the host
-sets a seed. `int(lo: int, hi: int) -> int` (uniform in `lo..hi`; panics if
+sets a seed. `int(lo: int, hi: int) -> int` (uniform in `lo..hi`; fails if
 empty), `float() -> float` (`[0, 1)`), `bool() -> bool`,
 `choice<T>(xs: [T]) -> T?`, `shuffle<T>(xs: [T])`, `sample<T>(xs: [T], k: int)
 -> [T]`, `bytes(n: int) -> bytes`, `seed(s: int)`, `normal(mean: float = 0.0,
@@ -2041,7 +2115,7 @@ empty input (variance/stdev need at least two values). Also `mean_int([int])
 `assert_err<T, E>(r: Result<T, E>)`, `assert_ok`, `fail(msg: str) -> never`,
 `property<T>(name: str, gen: fn(random.Rng) -> T, prop: fn(T) -> bool,
 cases: int = 100, seed: int = 20240611)` (runs `prop` on `cases` values
-`gen` produces from a `random.Rng` seeded with `seed`; on failure panics
+`gen` produces from a `random.Rng` seeded with `seed`; on failure fails
 with the failing input's debug form). The fixed default seed makes property
 tests reproducible; pass another `seed` to explore other inputs. `assert_eq`
 fails with `assertion failed: left == right\n  left: <debug>\n right: <debug>`.
@@ -2165,7 +2239,7 @@ resolved absolute path.
 
 - I/O functions return `Err` with kind `"permission_denied"`.
 - A denied environment variable is treated as unset.
-- `print` and `eprint` panic with `permission denied: stdout` / `stderr`
+- `print` and `eprint` fail (kind `permission_denied`) with `permission denied: stdout` / `stderr`
 - writes to `io.stdout` and `io.stderr` fail with kind `"permission_denied"`.
 - A denied `Import` raises a compile-time error.
 
@@ -2236,8 +2310,10 @@ is looked up in its directory, unless the directory holds more than 4096 entries
 
 A directory that holds an entry decided by a deny rule cannot be renamed, replaced
 or recursively removed as a whole. The tree is scanned for such entries only if
-`Policy::denies_under` reports that a deny rule may match a path in it. Custom
-policies are asked only about the top-level paths of these operations.
+`Policy::denies_under` reports that a deny rule may match a path in it. A
+custom policy (`CustomPolicy`) is asked `denies_under` and `protects` for the
+tree; by default every tree is scanned and an entry is protected if reading
+it or writing it as an entry is denied.
 
 ### 14.6 Network destinations
 
@@ -2333,7 +2409,7 @@ are denied as by `deny_private_networks()`.
 A policy file may contain limit rules:
 
 - `memory`, `output`, `source` and `http-body` take sizes (`4096`, `64K`, `256M`, `1G`)
-- `time` (wall clock) and `cpu` durations (`500ms`, `10s`, `1.5m`, `2h`)
+- `time` (wall clock) and `cpu` durations (`500ms`, `10s`, `1.5m`, `2h`, `1d`)
 - `instructions`, `compile-fuel`, `tasks`, `call-depth` and `open-resources` counts (`1_000_000`)
 - `none` removes `memory`, `time`, `cpu`, `instructions`, `compile-fuel` and `output` limits.
 
@@ -2377,8 +2453,8 @@ Configurable per engine:
 | `max_instructions`   | unlimited  | run fails: `instruction limit exceeded` (counted in fuel units, §15.2)                                                                                         |
 | `max_cpu_time`       | unlimited  | run fails: `cpu time limit exceeded` (the engine thread's CPU time executing, excluding waits and prompts; without a thread CPU clock, elapsed time executing) |
 | `max_wall_time`      | unlimited  | run fails: `time limit exceeded` (covers compiling and running, from the start of compilation, excluding waits for prompt answers)                             |
-| `max_call_depth`     | 10,000     | panic: `stack overflow`                                                                                                                                        |
-| `max_tasks`          | 10,000     | `spawn` panics: `task limit exceeded`                                                                                                                          |
+| `max_call_depth`     | 10,000     | fails: `limit: stack overflow`                                                                                                                                 |
+| `max_tasks`          | 10,000     | `spawn` fails: `limit: task limit exceeded`                                                                                                                    |
 | `max_open_resources` | 1,024      | opening files, connect/listen/accept and HTTP requests fail with kind `"limit"` (after a collection, §10.8; pending operations' sockets count, §13.10)         |
 | `max_output_bytes`   | unlimited  | writes fail: `output limit exceeded`                                                                                                                           |
 | `max_http_body`      | 64 MiB     | HTTP read fails with kind `"limit"`                                                                                                                            |
@@ -2566,13 +2642,14 @@ normalize_path, normalize_entry_path}` for hosts writing their own
   (`NativeModule::new`), adding a module twice (`Config::module`) or
   registering a function twice panics.
 - `Outcome { exit_code: i32 }`; errors are `Error::Compile(diagnostics)`,
-  `Error::Runtime { message, trace }`, `Error::Limit(kind)`, `Error::Interrupted`.
-- A Rust panic inside the engine (a bug in a library or host native, an I/O
-  operation or a prompter) does not unwind into the host: it ends the run
-  (or session input, or test) like a script panic, with `Error::Runtime`
-  whose message starts with `internal error:`. This requires
-  `panic = "unwind"` (the default). A session in which this happens is
-  reset (§16.3).
+  `Error::Runtime { message, trace }` (the run failed with an error whose
+  display form is `message`, §10.3), `Error::Internal { message, trace }`,
+  `Error::Limit(kind)`, `Error::Interrupted`.
+- An internal error (§10.3) is `Error::Internal`. A Rust panic inside the
+  engine (a bug in a library or host native, an I/O operation or a prompter)
+  does not unwind into the host: it is an internal error. This requires
+  `panic = "unwind"` (the default). A session in which an internal error
+  happens is reset (§16.3).
 
 ### 16.1 Operating-system access and file systems
 
@@ -2656,17 +2733,19 @@ N>` (e.g. `main.sand` for a program the session continues). After
   far, against the current state.
 - `reset()` forgets all inputs. `interrupt_handle()` interrupts the input being
   run (the engine's own handle does not affect sessions).
+- `set_wall_time(limit)` replaces the engine's `max_wall_time` for the
+  session's later inputs (e.g. a per-input timeout chosen by the host).
 - `run_tasks_until(until, on_error) -> Option<T>` runs the tasks earlier
   inputs left running until the future `until` completes, and returns its
   output; front ends call it while waiting for input (§17.6). The
   instruction, CPU time and output limits apply to each call; the wall-time
   limit does not. Permission prompts wait until `until` completes. If a
-  task fails (panic, limit, interruption), all tasks are cancelled and the
+  task fails (an error, a limit, an interruption), all tasks are cancelled and the
   error goes to `on_error` at once; the call goes on waiting. If a task
   calls `exit`, it returns `None` at once.
   `cancel_tasks()` cancels the tasks left running, without running their
   defers.
-- After an internal error (a caught Rust panic) in `eval`, `run_tests`,
+- After an internal error (§10.3) in `eval`, `run_tests`,
   `type_of` or `run_tasks_until`, the session is reset as by `reset()`: the
   error's message ends with `" (the session was reset)"`
   (`sandlang::session::RESET_NOTE`), and `was_reset()` returns true until
@@ -2705,7 +2784,7 @@ these:
 | `unnecessary-var`      | `var` never reassigned (use `let`)                                                                                                                                                                                                   |
 | `unused-result`        | a `Result` value is discarded                                                                                                                                                                                                        |
 | `no-effect`            | an expression statement that only computes a value which is discarded (`x + 1`, `-3`: §2.3); not the last statement of a block, which is its value                                                                                   |
-| `unreachable-code`     | statement after `return`, `break`, `continue`, a call of the prelude's `panic`, `exit` or `todo` (not of a function of the module with that name), or after a `loop` that no `break` leaves (labeled breaks from nested loops count) |
+| `unreachable-code`     | statement after `return`, `break`, `continue`, a call of the prelude's `fail`, `exit` or `todo` (not of a function of the module with that name), or after a `loop` that no `break` leaves (labeled breaks from nested loops count) |
 | `unused-label`         | loop label that no `break` or `continue` refers to                                                                                                                                                                                   |
 | `naming`               | violates naming conventions (§2.4)                                                                                                                                                                                                   |
 | `bool-comparison`      | comparing with `true`/`false` literal                                                                                                                                                                                                |
@@ -2794,7 +2873,7 @@ complex to format` (exit code 2).
 
 Runs the module's top-level code with output captured, then every `test` block
 as a separate task with a fresh view of top-level state _as initialized_. Each
-test passes if it completes without panicking. Output: one line per test
+test passes if it completes without an error. Output: one line per test
 (`ok name` / `FAIL name: message`) and a summary `N passed, M failed`. Exit
 code 1 if any test failed, 2 for compile errors. `sand test` takes the
 policy and limit options of `sand run` (§17.5) and, like it, denies what
@@ -2845,23 +2924,26 @@ between inputs.
   single module scope.
 - If the input's last item is an expression statement, its value is printed
   in debug form (§10.9), unless it has type `()` or the input ends with `;`.
-- Top-level `let`/`var` bindings are globals that later inputs may read; a
-  `var` declared by an earlier input may be assigned. Within one input, names
-  must be unique as in a module; a later input may define any name again (as
-  any kind of item), which shadows the earlier definition for later inputs.
+- Top-level `let`, `var` and `use` bindings are globals that later inputs may
+  read (§7.2); a `var` declared by an earlier input may be assigned. Within one
+  input, names must be unique as in a module; a later input may define any
+  name again (as any kind of item), which shadows the earlier definition for
+  later inputs.
   Code checked earlier keeps referring to what it referred to then. Methods
   (`extend`) and impls (§4.9) of a later input likewise replace those of
   earlier inputs with the same name or for the same type.
 - A top-level variable's type must be inferred within the input that declares
   it.
-- An input that fails to compile has no effect. An input that panics, exceeds
-  a limit or is interrupted keeps its declarations and every effect that
-  happened before the failure, including assignments to globals; globals it
-  had not initialized yet remain uninitialized (reading them panics, §3.1). A
-  top-level `?` that meets an `Err` aborts the input like a panic whose
-  message is the error.
+- An input that fails to compile has no effect. An input that fails with an
+  error (§10.3), exceeds a limit or is interrupted keeps its declarations and
+  every effect that happened before the failure, including assignments to
+  globals; globals it had not initialized yet remain uninitialized (reading
+  them fails, §3.1).
+- A top-level `return` ends the input. The value it returns is shown like the
+  value of a final expression statement, unless it is `()` or the input ends
+  with `;`; returning `Err(err)` fails the input with `err`.
 - Tasks spawned by an input keep running during later inputs and while the
-  REPL waits for input, and can be awaited by later inputs. A panic in any
+  REPL waits for input, and can be awaited by later inputs. An error in any
   task fails the input being run (or, between inputs, is reported). After a
   failed input or task, all tasks are cancelled. While the REPL waits, the
   tasks' output appears above the input being edited (on a terminal, on

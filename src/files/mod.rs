@@ -131,6 +131,7 @@ pub(crate) struct Target {
     /// name resolved (and the final one unless the mode is `Entry`), and
     /// existing directories named as stored.
     pub path: PathBuf,
+    pub mode: Mode,
     #[cfg(feature = "os")]
     host: Option<host::Resolved>,
 }
@@ -171,12 +172,13 @@ impl Target {
 
     /// Moves the target out and leaves an empty one in its place.
     pub fn take(&mut self) -> Target {
-        std::mem::replace(self, Target::memory(PathBuf::new()))
+        std::mem::replace(self, Target::memory(PathBuf::new(), self.mode))
     }
 
-    fn memory(path: PathBuf) -> Target {
+    fn memory(path: PathBuf, mode: Mode) -> Target {
         Target {
             path,
+            mode,
             #[cfg(feature = "os")]
             host: None,
         }
@@ -256,12 +258,9 @@ impl Fs {
             #[cfg(feature = "os")]
             Fs::Host => {
                 let h = host::resolve(p, mode);
-                Target { path: h.path(), host: Some(h) }
+                Target { path: h.path(), mode, host: Some(h) }
             }
-            Fs::Memory(_) => {
-                let _ = mode;
-                Target::memory(mem::normalize(p))
-            }
+            Fs::Memory(_) => Target::memory(mem::normalize(p), mode),
         }
     }
 

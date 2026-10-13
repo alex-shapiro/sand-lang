@@ -70,5 +70,5 @@ pub native fn gcd(a: int, b: int) -> int
 /// Least common multiple (always non-negative; `0` if either is `0`).
 pub native fn lcm(a: int, b: int) -> int
 
-/// The largest integer whose square is at most `n`; panics if `n` is negative.
+/// The largest integer whose square is at most `n`; fails if `n` is negative.
 pub native fn isqrt(n: int) -> int

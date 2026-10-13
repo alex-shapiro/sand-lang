@@ -143,7 +143,7 @@ pub fn register(r: &mut Registry) {
         // Every directory to be created must be writable, not just the last.
         // Those that exist are not created, whatever happens meanwhile.
         for dir in vm.host.fs.missing_ancestors(&t) {
-            if let Some(e) = deny_path(vm, Capability::FsWrite(dir), &shown)? {
+            if let Some(e) = deny_path(vm, Capability::FsWrite(dir), &shown, false)? {
                 return Ok(e);
             }
         }
@@ -339,12 +339,12 @@ fn check(vm: &mut Vm, t: &mut Target, access: Access, shown: &str) -> Result<Opt
             }
         }
     }
-    deny_path(vm, cap(&t.path), shown)
+    deny_path(vm, cap(&t.path), shown, t.mode == Mode::Entry)
 }
 
-/// Checks `cap` (whose path is normalized) against the policy.
-fn deny_path(vm: &mut Vm, cap: Capability, shown: &str) -> Result<Option<Value>, Ctl> {
-    if vm.permit_normalized(&cap)? {
+/// Checks `cap` against the policy.
+fn deny_path(vm: &mut Vm, cap: Capability, shown: &str, entry: bool) -> Result<Option<Value>, Ctl> {
+    if vm.permit_path(&cap, entry)? {
         return Ok(None);
     }
     Ok(Some(denied(vm, &cap, shown)))
@@ -457,7 +457,7 @@ fn remove_tree(vm: &mut Vm, a: &[Value]) -> NResult {
         fs.walk_tree(&t, &mut res, true, |path| {
             charge_entry(allowance, path)?;
             let cap = Capability::FsWrite(path.to_path_buf());
-            match permits.permit_normalized(&cap) {
+            match permits.permit_path(&cap, true) {
                 Ok(true) => Ok(Ok(())),
                 Ok(false) => Err(Halt::Denied(path.to_path_buf())),
                 Err(()) => Err(Halt::Prompt(cap)),
@@ -584,7 +584,7 @@ impl Drop for FileObj {
 impl OpenState {
     /// Runs `op` on the file on a worker thread (see `Vm::offload`).
     fn io<T: Send + 'static>(&mut self, vm: &Vm, op: impl FnOnce(&mut OpenedFile) -> T + Send + 'static) -> Result<T, Ctl> {
-        let mut file = self.file.take().ok_or_else(|| Ctl::panic("internal error: a file without its file"))?;
+        let mut file = self.file.take().ok_or_else(|| Ctl::internal("a file without its file"))?;
         let (file, t) = vm.offload(move |_| {
             let t = op(&mut file);
             (file, t)
@@ -699,7 +699,7 @@ enum Needs {
 /// an `Err(Error)` value naming the file's path; a closed file, or one not
 /// opened for what `needs`, is an error too.
 fn with_file(vm: &mut Vm, v: Value, needs: Needs, op: impl FnOnce(&mut Vm, &mut OpenState) -> Result<io::Result<Value>, Ctl>) -> NResult {
-    let f = vm.heap.native_mut::<FileObj>(v).ok_or_else(|| Ctl::panic("not a file"))?;
+    let f = vm.heap.native_mut::<FileObj>(v).ok_or_else(|| Ctl::internal("not a file"))?;
     if f.open.as_ref().is_none_or(|o| o.file.is_none()) {
         let msg = format!("{}: file closed", f.shown);
         return Ok(vm.err_value("closed", &msg));
@@ -867,7 +867,7 @@ fn register_file(r: &mut Registry) {
         });
     }
     r.add_method("fs.File.close", |vm, a| {
-        let f = vm.heap.native_mut::<FileObj>(a[0]).ok_or_else(|| Ctl::panic("not a file"))?;
+        let f = vm.heap.native_mut::<FileObj>(a[0]).ok_or_else(|| Ctl::internal("not a file"))?;
         let before = f.size();
         let open = f.open.take();
         let after = f.size();
@@ -930,7 +930,7 @@ fn register_file(r: &mut Registry) {
         })
     });
     r.add_builtin("fs.File.path", |vm, a| {
-        let shown = vm.heap.native::<FileObj>(a[0]).ok_or_else(|| Ctl::panic("not a file"))?.shown.clone();
+        let shown = vm.heap.native::<FileObj>(a[0]).ok_or_else(|| Ctl::internal("not a file"))?.shown.clone();
         vm.charge_bytes(shown.len())?;
         Ok(vm.new_str(shown))
     });
@@ -939,7 +939,7 @@ fn register_file(r: &mut Registry) {
 /// `fs.open_file(path, mode)`: `mode` is the index of an `fs.Mode` variant.
 fn open_file(vm: &mut Vm, a: &[Value]) -> NResult {
     const MODES: [OpenMode; 5] = [OpenMode::Read, OpenMode::Write, OpenMode::Append, OpenMode::CreateNew, OpenMode::ReadWrite];
-    let mode = *MODES.get(to_usize_saturating(a[1].as_int())).ok_or_else(|| Ctl::panic("invalid file mode"))?;
+    let mode = *MODES.get(to_usize_saturating(a[1].as_int())).ok_or_else(|| Ctl::fail("invalid", "invalid file mode"))?;
     let (shown, mut t) = target!(vm, a[0]);
     for (needed, access) in [(mode.reads(), Access::Read), (mode.writes(), Access::Write)] {
         if needed && let Some(e) = check(vm, &mut t, access, &shown)? {
@@ -980,7 +980,7 @@ fn read_rest(vm: &mut Vm, file: Value, text: bool) -> NResult {
         data.extend_from_slice(&st.buf[st.at..]);
         st.take_unread();
         st.shrink();
-        let mut file = st.file.take().ok_or_else(|| Ctl::panic("internal error: a file without its file"))?;
+        let mut file = st.file.take().ok_or_else(|| Ctl::internal("a file without its file"))?;
         let (file, read) = vm.offload(move |allowance| {
             let r = read_to_end(&mut file, &mut data, &mut res, allowance);
             (file, r.map(|r| r.map(|()| (data, res))))

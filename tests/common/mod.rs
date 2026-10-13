@@ -55,6 +55,14 @@ impl RunResult {
         }
         &self.stdout
     }
+
+    /// The message of the error the run failed with.
+    pub fn failure(&self) -> &str {
+        match &self.result {
+            Err(Error::Runtime { message, .. }) => message,
+            other => panic!("expected a failure, got {other:?}\nstdout:\n{}\nstderr:\n{}", self.stdout, self.stderr),
+        }
+    }
 }
 
 pub fn rt() -> tokio::runtime::Runtime {

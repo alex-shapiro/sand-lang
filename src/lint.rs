@@ -228,6 +228,7 @@ fn any_sub_expr(e: &Expr, f: &mut dyn FnMut(&Expr) -> bool) -> bool {
         ExprKind::Call { callee, args } => f(callee) || args.iter().any(|a| f(&a.value)),
         ExprKind::MethodCall { receiver, args, .. } => f(receiver) || args.iter().any(|a| f(&a.value)),
         ExprKind::Return(Some(x)) | ExprKind::Break { value: Some(x), .. } => f(x),
+        ExprKind::Macro(m) => f(&m.expansion),
         _ => false,
     }
 }
@@ -465,7 +466,7 @@ impl<'a> Linter<'a> {
         match &e.kind {
             ExprKind::Return(_) | ExprKind::Break { .. } | ExprKind::Continue(_) => true,
             ExprKind::Call { callee, .. } => {
-                matches!(&callee.kind, ExprKind::Ident(id) if matches!(id.name.as_str(), "panic" | "exit" | "todo") && self.is_prelude(&id.name))
+                matches!(&callee.kind, ExprKind::Ident(id) if matches!(id.name.as_str(), "fail" | "exit" | "todo") && self.is_prelude(&id.name))
             }
             // A `loop` that nothing breaks out of never completes.
             ExprKind::Loop { label, body } => !block_any(body, &mut |x| breaks_to(self.budget, x, label.as_ref(), 0)),
@@ -728,6 +729,7 @@ impl<'a> Linter<'a> {
                 }
             }
             ExprKind::List(xs) | ExprKind::Tuple(xs) => xs.iter().for_each(|x| self.expr(x)),
+            ExprKind::Macro(m) => self.expr(&m.expansion),
             ExprKind::Repeat(a, b) | ExprKind::Pipe(a, b) | ExprKind::Coalesce(a, b) | ExprKind::Index(a, b) => {
                 self.expr(a);
                 self.expr(b);

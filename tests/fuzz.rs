@@ -382,8 +382,8 @@ fn fuzz_regressions() {
         "let d = 3333333333333333333333333333333333333333h",
         // Variant patterns on a scrutinee of error type or `never`.
         "let tasks = urks.map(u => spawn fetch(u))\nfor (url, t) in urls.zip(tasks) {\n    match t.wait() {\n        Ok(page) => print(page)\n        Err(e) => print(\"\\(url): \\(e)\")\n    }\n}\n",
-        "fn f() -> int {\n    match panic(\"x\") {\n        Some(v) => v\n        None => 0\n    }\n}\nprint(f())\n",
-        "fn f() -> int {\n    match [panic(\"x\")] {\n        [Ok(Some((a, b)))] => a + b\n        _ => 0\n    }\n}\nprint(f())\n",
+        "fn f() -> int {\n    match fail(\"x\") {\n        Some(v) => v\n        None => 0\n    }\n}\nprint(f())\n",
+        "fn f() -> int {\n    match [fail(\"x\")] {\n        [Ok(Some((a, b)))] => a + b\n        _ => 0\n    }\n}\nprint(f())\n",
         // A trailing comment ending in `}` after a one-line declaration.
         "import json\nstruct Item { name: str }//\0\0\0\0e name: str }//\0\0\0\0e mOrdson.decodesth.\u{19}\u{12}\0\0e",
         "enum E { A } // }",

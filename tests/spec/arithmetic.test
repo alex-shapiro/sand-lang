@@ -155,69 +155,69 @@ print(5 >> 1)
 -4
 2
 
-=== shift out of range panics
+=== shift out of range fails
 let n = 64
 print(1 << n)
---- panic
+--- fail
 shift out of range
 
-=== negative shift panics
+=== negative shift fails
 let n = -1
 print(1 >> n)
---- panic
+--- fail
 shift out of range
 
-=== addition overflow panics
+=== addition overflow fails
 let x = 9223372036854775807
 print(x + 1)
---- panic
+--- fail
 integer overflow
 
-=== subtraction overflow panics
+=== subtraction overflow fails
 let x = -9223372036854775807
 print(x - 2)
---- panic
+--- fail
 integer overflow
 
-=== multiplication overflow panics
+=== multiplication overflow fails
 let x = 4611686018427387904
 print(x * 2)
---- panic
+--- fail
 integer overflow
 
-=== power overflow panics
+=== power overflow fails
 print(2 ** 63)
---- panic
+--- fail
 integer overflow
 
-=== negation overflow panics
+=== negation overflow fails
 let x = -9223372036854775807 - 1
 print(-x)
---- panic
+--- fail
 integer overflow
 
 === min int divided by minus one overflows
 let x = -9223372036854775807 - 1
 print(x / -1)
---- panic
+--- fail
 integer overflow
 
-=== division by zero panics
+=== division by zero fails
 let z = 0
 print(10 / z)
---- panic
+--- fail
 division by zero
 
-=== modulo by zero panics
+=== modulo by zero fails
 let z = 0
 print(10 % z)
---- panic
+--- fail
 division by zero
 
-=== negative exponent panics
+=== negative exponent fails
 let e = -1
 print(2 ** e)
---- panic
+--- fail
 negative exponent
 
 === mixing int and float is a type error
@@ -244,14 +244,14 @@ print(2.2.ceil())
 2.0
 3.0
 
-=== float to int panics on nan
+=== float to int fails on nan
 let n = 0.0 / 0.0
 print(n.to_int())
---- panic
+--- fail
 cannot convert
 
 === logical operators short circuit
-fn boom() -> bool { panic("evaluated") }
+fn boom() -> bool { fail("evaluated") }
 print(false and boom())
 print(true or boom())
 print(true and false)
@@ -377,6 +377,75 @@ print(duration.from_secs(0.5))
 1500000000
 250ms
 500ms
+
+=== durations scale by any Num
+fn scale<T: Num>(d: duration, k: T) -> duration {
+    d * k
+}
+print(1s * 1.5)
+print(0.5 * 1m)
+print(1d * -0.25)
+print(3s * 0.1)
+print(1ns * 0.9)
+print(-1ns * 0.9)
+print(scale(2s, 3))
+print(scale(2s, 0.25))
+let d = 3s
+print(2 * d)
+print(d * 2)
+let max = duration.from_nanos(int.max_value())
+let min = duration.from_nanos(int.min_value())
+print(max * 1.0 == max)
+print(min * 1.0 == min)
+print((max * 0.5).nanos())
+--- stdout
+1.5s
+30s
+-6h
+300ms
+0s
+0s
+6s
+500ms
+6s
+6s
+true
+true
+4611686018427387903
+
+=== durations divide by any Num
+fn split<T: Num>(d: duration, k: T) -> duration {
+    d / k
+}
+print(3s / 1.5)
+print(1m / -4.0)
+print(1s / 3.0)
+print(-1s / 3.0)
+print(1ns / 0.3)
+print((1ns / 1e-12).nanos())
+print(5s / inf)
+print(0s / 5e-324)
+print(split(6s, 4))
+print(split(6s, 0.5))
+let max = duration.from_nanos(int.max_value())
+let min = duration.from_nanos(int.min_value())
+print(max / 1.0 == max)
+print(min / 1.0 == min)
+print((min / 2.0).nanos())
+--- stdout
+2s
+-15s
+333.333333ms
+-333.333333ms
+3ns
+1000000000000
+0s
+0s
+1.5s
+12s
+true
+true
+-4611686018427387904
 
 === unary minus on float and bitwise not
 print(-1.5)

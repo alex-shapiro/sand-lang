@@ -64,7 +64,7 @@ pub(crate) fn sha256_parts(parts: &[&[u8]], budget: &impl Budget) -> Result<[u8;
 pub(crate) fn hmac_sha256(key: &[u8], data: &[u8], budget: &impl Budget) -> Result<[u8; 32], Ctl> {
     // A key longer than a block is hashed first.
     budget.charge((key.len() / SLOW_BYTES_PER_UNIT) as u64)?;
-    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(key).map_err(|_| Ctl::panic("internal error: HMAC key"))?;
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(key).map_err(|_| Ctl::internal("HMAC key"))?;
     feed(&[data], budget, |chunk| mac.update(chunk))?;
     Ok(mac.finalize().into_bytes().into())
 }

@@ -242,15 +242,16 @@ let n = "x".parse_int().ok_or(error("bad"))?
 print(n)
 --- stdout
 cleanup
---- exit 1
+--- fail
+error: bad
 
-=== panics do not run defers
+=== failures do not run defers
 fn f() {
     defer print("never printed")
-    panic("boom")
+    fail("boom")
 }
 f()
---- panic
+--- fail
 boom
 
 === deferred expressions must be unit and stay inside
@@ -271,7 +272,7 @@ fn f(o: int?) -> int? {
     defer [1].each(x => {
         if x > 0 { return }
     })
-    defer panic("boom")
+    defer fail("boom")
     o
 }
 --- error

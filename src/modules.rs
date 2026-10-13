@@ -255,9 +255,10 @@ fn import_refs(m: &ast::Module) -> Vec<(usize, ImportRef)> {
     out
 }
 
-/// Finds the import declarations of a module, and the modules named by
-/// `help` and `members` (`help(json)`, `help("json.Json")`), with the lexer
-/// only (which, unlike the parser, needs no deep stack).
+/// Finds the import declarations of a module, the modules named by
+/// `help` and `members` (`help(json)`, `help("json.Json")`), and the modules
+/// that macros use, with the lexer only (which, unlike the parser, needs no
+/// deep stack).
 pub(crate) fn scan_imports(text: &str, file: FileId) -> Vec<ImportRef> {
     let toks = lex(text, file).tokens;
     let mut out = Vec::new();
@@ -279,6 +280,12 @@ pub(crate) fn scan_imports(text: &str, file: FileId) -> Vec<ImportRef> {
             if let Some(name) = name.filter(|n| !n.is_empty()) {
                 out.push(ImportRef::Help(name.to_string(), Span::new(file, arg.lo, arg.hi)));
             }
+        }
+        if toks[i].tok == Tok::Ident
+            && toks.get(i + 1).is_some_and(|t| t.tok == Tok::Bang)
+            && let Some(m) = crate::syntax::ast::MACROS.iter().find(|m| m.name == word(&toks[i]))
+        {
+            out.push(ImportRef::Help(m.module.to_string(), Span::new(file, toks[i].lo, toks[i].hi)));
         }
         match &toks[i].tok {
             Tok::LParen | Tok::LBracket | Tok::LBrace => depth += 1,

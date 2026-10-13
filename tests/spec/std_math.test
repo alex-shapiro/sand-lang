@@ -80,8 +80,8 @@ print(math.isqrt(17))
 12
 4
 
-=== isqrt of negative panics
+=== isqrt of negative fails
 import math
 print(math.isqrt(-1))
---- panic
+--- fail
 negative

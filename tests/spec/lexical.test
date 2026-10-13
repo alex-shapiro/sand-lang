@@ -49,10 +49,14 @@ let a = 9223372036854775807ns
 let b = 3333333333333333333333333333333333333333h
 let c = 9223372036854775808ns
 let d = 2562048h
+let e = 106752d
+let f = 15251w
 --- error
 2: duration literal out of range
 3: duration literal out of range
 4: duration literal out of range
+5: duration literal out of range
+6: duration literal out of range
 
 === largest duration literals
 print(9223372036854775807ns.nanos())
@@ -87,6 +91,12 @@ print(10us)
 print(7ns)
 print(0s)
 print(1m)
+print(1d)
+print(36h)
+print(2w)
+print(1d == 24h)
+print(1w == 7d)
+print(106751d > 0s)
 --- stdout
 250ms
 1.5s
@@ -96,6 +106,12 @@ print(1m)
 7ns
 0s
 1m
+1d
+1.5d
+14d
+true
+true
+true
 
 === string escapes
 print("tab:\tend")
@@ -484,3 +500,14 @@ print(b"\xП")
 --- error
 1: invalid escape: expected two hex digits after \x
 2: invalid escape: expected two hex digits after \x
+
+=== prefix bang suggests not
+let a = !true
+--- error
+1: unexpected `!`; use `not` for negation
+
+=== postfix bang suggests unwrap
+let b: int? = 1
+let a = b!
+--- error
+2: Sand has no postfix `!`

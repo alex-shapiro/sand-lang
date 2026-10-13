@@ -379,7 +379,7 @@ fn denies_under_finds_deny_rules_inside_a_tree() {
     assert!(!p.denies_under(&d.join("a/other")));
     assert!(!p.denies_under(&d.join("ab")));
     assert!(!Policy::allow_all().denies_under(d));
-    assert!(!Policy::custom(|_: &Capability| Decision::Deny).denies_under(d));
+    assert!(Policy::custom(|_: &Capability| Decision::Deny).denies_under(d));
 }
 
 #[cfg(unix)]
@@ -509,12 +509,26 @@ print(fs.list_dir("data")?)
     );
     assert!(dir.path().join("data/a/secret/key.txt").exists());
 
-    // Custom policies decide on the top-level paths alone.
     let custom = Policy::custom(|_: &Capability| Decision::Allow);
     let cwd = dir.path().to_path_buf();
     let src = "import fs\nfs.rename(\"data/a\", \"data/moved\")?\nprint(fs.exists(\"data/moved/secret/key.txt\")?)";
     let r = run_with(src, move |c| c.policy(custom).cwd(cwd));
     assert_eq!(r.ok_stdout(), "true\n");
+
+    let secret = sandlang::policy::normalize_path(&dir.path().join("data/moved/secret/key.txt"));
+    let custom = Policy::custom(move |cap: &Capability| match cap {
+        Capability::FsRead(p) | Capability::FsWrite(p) if *p == secret => Decision::Deny,
+        _ => Decision::Allow,
+    });
+    let cwd = dir.path().to_path_buf();
+    let src = r#"
+import fs
+print(fs.remove_dir("data/moved", recursive: true).unwrap_err().kind)
+print(fs.rename("data/moved", "data/again").unwrap_err().kind)
+print(fs.exists("data/moved/public.txt")?)
+"#;
+    let r = run_with(src, move |c| c.policy(custom).cwd(cwd));
+    assert_eq!(r.ok_stdout(), "permission_denied\npermission_denied\ntrue\n");
 }
 
 #[cfg(unix)]
@@ -1422,4 +1436,35 @@ fn path_helpers_are_metered() {
     let src = "import fs\nlet s = \"x/\".repeat(1 << 20)\nvar n = 0\nfor i in 0..100000 { n += fs.basename(s).len() + fs.dirname(s).len() }\nprint(n)";
     let r = run_with(src, |c| c.limits(Limits { max_instructions: Some(5_000_000), ..Limits::default() }));
     assert!(matches!(r.result, Err(sandlang::Error::Limit(sandlang::LimitKind::Instructions))), "{:?}", r.result);
+}
+
+#[test]
+fn custom_policies_decide_entry_operations_apart() {
+    struct NoRemoval;
+    impl sandlang::CustomPolicy for NoRemoval {
+        fn check(&self, _: &Capability) -> Decision {
+            Decision::Allow
+        }
+        fn check_entry(&self, cap: &Capability) -> Decision {
+            if matches!(cap, Capability::FsWrite(_)) { Decision::Deny } else { Decision::Allow }
+        }
+        fn protects(&self, _: &std::path::Path) -> bool {
+            false
+        }
+    }
+    let dir = TempDir::new("entry-ops");
+    dir.write("a.txt", "a");
+    dir.write("d/b.txt", "b");
+    let cwd = dir.path().to_path_buf();
+    let src = r#"
+import fs
+fs.write_text("a.txt", "rewritten")?
+fs.write_text("new.txt", "new")?
+print(fs.remove_file("a.txt").unwrap_err().kind)
+print(fs.rename("new.txt", "renamed.txt").unwrap_err().kind)
+print(fs.remove_dir("d", recursive: true).unwrap_err().kind)
+print(fs.read_text("a.txt")?)
+"#;
+    let r = run_with(src, move |c| c.policy(Policy::custom(NoRemoval)).cwd(cwd));
+    assert_eq!(r.ok_stdout(), "permission_denied\npermission_denied\npermission_denied\nrewritten\n");
 }

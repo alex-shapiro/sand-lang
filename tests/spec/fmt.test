@@ -349,3 +349,16 @@ var x = base
 --- fmt
 var x = base - discount
 -x
+
+=== json macro objects are printed with braces
+let y = json!(["k":   1, "e": [:], "l": [1,2]])
+let x = json!({"a": 1,
+  // kept
+  "b": null})
+--- fmt
+let y = json!({"k": 1, "e": {}, "l": [1, 2]})
+let x = json!({
+    "a": 1,
+    // kept
+    "b": null,
+})

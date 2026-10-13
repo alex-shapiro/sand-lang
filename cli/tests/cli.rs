@@ -108,13 +108,13 @@ fn run_exit_codes_from_the_script() {
 fn run_runtime_errors_exit_1() {
     let o = run("fn f(n: int) -> int { 10 / n }\nprint(f(0))", &[]);
     assert_eq!(o.code, 1, "{o:?}");
-    assert!(o.stderr.contains("panic: division by zero"), "{o:?}");
+    assert!(o.stderr.contains("error: invalid: division by zero"), "{o:?}");
     assert!(o.stderr.contains("main.sand:1"), "{o:?}");
 
     // `?` on an error at the top level of the main module.
     let o = run("fn f() -> Result<int> { Err(error(\"nope\", kind: \"invalid\")) }\nlet x = f()?\nprint(x)", &[]);
     assert_eq!(o.code, 1, "{o:?}");
-    assert!(o.stderr.contains("nope"), "{o:?}");
+    assert!(o.stderr.contains("error: invalid: nope\n    at <top level> (main.sand:2)"), "{o:?}");
     assert_eq!(o.stdout, "");
 }
 
@@ -485,7 +485,7 @@ fn test_command() {
     dir.write("passing.sand", "test \"one\" {\n    assert(true)\n}\ntest \"two\" {\n    assert(1 < 2)\n}\n");
     dir.write("broken.sand", "test \"x\" { assert(1) }\n");
     let o = sand(dir.path(), &["test", "mixed.sand"]);
-    assert_eq!((o.code, o.stdout.as_str()), (1, "ok doubles\nFAIL fails: wrong answer\n1 passed, 1 failed\n"), "{o:?}");
+    assert_eq!((o.code, o.stdout.as_str()), (1, "ok doubles\nFAIL fails: assert: wrong answer\n1 passed, 1 failed\n"), "{o:?}");
     let o = sand(dir.path(), &["test", "passing.sand"]);
     assert_eq!((o.code, o.stdout.as_str()), (0, "ok one\nok two\n2 passed, 0 failed\n"), "{o:?}");
     let o = sand(dir.path(), &["test", "passing.sand", "mixed.sand"]);
@@ -505,7 +505,7 @@ fn test_command_denies_by_default_and_takes_run_options() {
     );
     let o = sand(dir.path(), &["test", "t.sand"]);
     assert_eq!(o.code, 1, "{o:?}");
-    assert!(o.stdout.contains("FAIL reads: denied") && o.stdout.contains("FAIL env: no env"), "{o:?}");
+    assert!(o.stdout.contains("FAIL reads: assert: denied") && o.stdout.contains("FAIL env: assert: no env"), "{o:?}");
     let allow = format!("--allow-read={}", dir.path().display());
     let o = sand(dir.path(), &["test", "t.sand", &allow, "--allow-env=HOME"]);
     assert_eq!((o.code, o.stdout.as_str()), (0, "ok reads\nok env\n2 passed, 0 failed\n"), "{o:?}");
@@ -574,14 +574,14 @@ fn repl_multi_line_input() {
 #[test]
 fn repl_reports_errors_and_continues() {
     let dir = TempDir::new("repl-errors");
-    let input = "var x = 1\nx = \"s\"\nx\nfn boom() { panic(\"boom\") }\nx = 2\nboom()\nx\nlet y = [1][9]\n:quit\n";
+    let input = "var x = 1\nx = \"s\"\nx\nfn boom() { fail(\"boom\") }\nx = 2\nboom()\nx\nlet y = [1][9]\n:quit\n";
     let o = sand_in(dir.path(), &["repl"], input, &[]);
     assert_eq!(o.code, 0, "{o:?}");
     assert_eq!(repl_shown(&o.stdout), ["1", "2"], "{o:?}");
     assert!(o.stderr.contains("error: type mismatch: expected int, found str\n  --> <input 2>:1:5"), "{o:?}");
     assert!(o.stderr.contains("1 | x = \"s\""), "{o:?}");
-    assert!(o.stderr.contains("panic: boom\n    at boom (<input 4>:1)\n"), "{o:?}");
-    assert!(o.stderr.contains("panic: index out of bounds"), "{o:?}");
+    assert!(o.stderr.contains("error: boom\n    at boom (<input 4>:1)\n"), "{o:?}");
+    assert!(o.stderr.contains("error: bounds: index out of bounds"), "{o:?}");
 }
 
 #[test]
@@ -594,7 +594,7 @@ fn repl_commands() {
     assert!(o.stdout.contains(":type EXPR"), "{o:?}");
     assert!(o.stdout.contains("> [float]\n"), "{o:?}");
     assert!(o.stdout.contains("> fn<T>(T) -> T\n"), "{o:?}");
-    assert!(o.stdout.contains("ok len\nFAIL bad: nope\n1 passed, 1 failed\n"), "{o:?}");
+    assert!(o.stdout.contains("ok len\nFAIL bad: assert: nope\n1 passed, 1 failed\n"), "{o:?}");
     assert!(o.stderr.contains("undefined name `undefined_name`"), "{o:?}");
     assert!(o.stderr.contains("expected an expression"), "{o:?}");
     assert!(o.stderr.contains("undefined name `xs`"), "{o:?}");
@@ -752,7 +752,7 @@ fn repl_runs_tasks_while_waiting_for_input() {
     let mut repl = LiveRepl::start(dir.path());
     repl.send("var n = 0\nlet t = spawn {\ntask.sleep(200ms)\nn = 1\nprint(\"tick\")\n}\n");
     repl.wait_for(0, "tick\n");
-    repl.send("n\nspawn { task.sleep(100ms)\npanic(\"bad task\") };\n");
+    repl.send("n\nspawn { task.sleep(100ms)\nfail(\"bad task\") };\n");
     repl.wait_for(1, "(in a background task; all tasks were cancelled)\n");
     repl.send("spawn { task.sleep(100ms)\nexit(3) };\n");
     repl.wait_exit();
@@ -761,7 +761,7 @@ fn repl_runs_tasks_while_waiting_for_input() {
     assert!(o.stdout.contains("> \ntick\n> "), "{o:?}");
     assert_eq!(repl_shown(&o.stdout), ["tick", "1"], "{o:?}");
     assert!(
-        o.stderr.contains("panic: bad task\n    at <spawn> (<input 4>:2)\n(in a background task; all tasks were cancelled)\n"),
+        o.stderr.contains("error: bad task\n    at <spawn> (<input 4>:2)\n(in a background task; all tasks were cancelled)\n"),
         "{o:?}"
     );
 }

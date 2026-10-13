@@ -19,7 +19,7 @@ fn import_free() {
 }
 --- test
 ok addition
-FAIL failure: math is broken
+FAIL failure: assert: math is broken
 ok assert_eq message
 2 passed, 1 failed
 
@@ -52,13 +52,13 @@ test "fail" {
 }
 --- test
 ok eq
-FAIL eq failure: assertion failed: left == right
+FAIL eq failure: assert: left == right
   left: [1, 2]
  right: [1, 3]
 ok close
 ok ne
 ok err
-FAIL fail: explicit
+FAIL fail: assert: explicit
 4 passed, 2 failed
 
 === tests see initialized top level state and are isolated
@@ -110,7 +110,7 @@ test "seed controls inputs" {
 }
 --- test
 ok reverse twice is identity
-FAIL false property: property `small` failed for input: 5
+FAIL false property: assert: property `small` failed for input: 5
 ok seed controls inputs
 2 passed, 1 failed
 

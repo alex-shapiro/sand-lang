@@ -167,3 +167,12 @@ pub let A = 1
 pub let B = 1
 --- error
 2: `dup` is already defined
+
+=== return is not allowed at the top level of an imported module
+import "./early.sand"
+print(early.X)
+--- file early.sand
+pub let X = 1
+return
+--- error
+`return` is not allowed at the top level of an imported module

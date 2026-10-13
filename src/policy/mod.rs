@@ -124,6 +124,40 @@ where
     }
 }
 
+/// A host-defined policy (see [`Policy::custom`]).
+///
+/// Only [`CustomPolicy::check`] is required.
+pub trait CustomPolicy: Send + Sync {
+    /// Decides `cap`. File paths are normalized as [`normalize_path`] does.
+    fn check(&self, cap: &Capability) -> Decision;
+
+    /// Custome check on directory entry operation.
+    /// The path is normalized.
+    fn check_entry(&self, cap: &Capability) -> Decision {
+        self.check(cap)
+    }
+
+    /// Whether the policy may deny an entry at or below `path` (normalized
+    /// as an entry). If it may, the tree is scanned with
+    /// [`CustomPolicy::protects`] before it is moved or removed as a whole.
+    /// By default, always.
+    fn denies_under(&self, _path: &Path) -> bool {
+        true
+    }
+
+    /// Whether the entry at `path` (normalized) is protected.
+    fn protects(&self, path: &Path) -> bool {
+        self.check(&Capability::FsRead(path.to_path_buf())) == Decision::Deny
+            || self.check_entry(&Capability::FsWrite(path.to_path_buf())) == Decision::Deny
+    }
+}
+
+impl<F: Fn(&Capability) -> Decision + Send + Sync> CustomPolicy for F {
+    fn check(&self, cap: &Capability) -> Decision {
+        self(cap)
+    }
+}
+
 /// A policy deciding capability requests.
 #[derive(Clone, Default)]
 pub enum Policy {
@@ -131,7 +165,7 @@ pub enum Policy {
     #[default]
     DenyAll,
     Rules(Arc<RulePolicy>),
-    Custom(Arc<dyn Fn(&Capability) -> Decision + Send + Sync>),
+    Custom(Arc<dyn CustomPolicy>),
 }
 
 impl fmt::Debug for Policy {
@@ -157,8 +191,9 @@ impl Policy {
     pub fn rules(r: RulePolicy) -> Policy {
         Policy::Rules(Arc::new(r))
     }
-    pub fn custom(f: impl Fn(&Capability) -> Decision + Send + Sync + 'static) -> Policy {
-        Policy::Custom(Arc::new(f))
+    /// A host-defined policy.
+    pub fn custom(p: impl CustomPolicy + 'static) -> Policy {
+        Policy::Custom(Arc::new(p))
     }
 
     /// Decides `cap`. A rule policy first normalizes a file capability's path
@@ -176,7 +211,7 @@ impl Policy {
                 _ => Decision::Deny,
             },
             Policy::Rules(r) => r.check_in(cap, space),
-            Policy::Custom(f) => f(cap),
+            Policy::Custom(p) => p.check(cap),
         }
     }
 
@@ -208,6 +243,15 @@ impl Policy {
     pub(crate) fn check_entry_in(&self, cap: &Capability, space: PathSpace) -> Decision {
         match self {
             Policy::Rules(r) => r.check_entry_in(cap, space),
+            Policy::Custom(p) => p.check_entry(cap),
+            _ => self.check_in(cap, space),
+        }
+    }
+
+    pub(crate) fn check_entry_normalized_in(&self, cap: &Capability, space: PathSpace) -> Decision {
+        match self {
+            Policy::Rules(r) => r.check_normalized_in(cap, space),
+            Policy::Custom(p) => p.check_entry(cap),
             _ => self.check_in(cap, space),
         }
     }
@@ -235,6 +279,7 @@ impl Policy {
     pub(crate) fn denies_under_in(&self, path: &Path, space: PathSpace) -> bool {
         match self {
             Policy::Rules(r) => r.denies_under_normalized_in(&rules::entry_path(path, space), space),
+            Policy::Custom(p) => p.denies_under(&rules::entry_path(path, space)),
             _ => false,
         }
     }
@@ -244,6 +289,7 @@ impl Policy {
     pub(crate) fn denies_under_normalized_in(&self, path: &Path, space: PathSpace) -> bool {
         match self {
             Policy::Rules(r) => r.denies_under_normalized_in(path, space),
+            Policy::Custom(p) => p.denies_under(path),
             _ => false,
         }
     }
@@ -255,6 +301,7 @@ impl Policy {
     pub(crate) fn protects_normalized_in(&self, path: &Path, space: PathSpace) -> bool {
         match self {
             Policy::Rules(r) => r.protects_normalized_in(path, space),
+            Policy::Custom(p) => p.protects(path),
             _ => false,
         }
     }

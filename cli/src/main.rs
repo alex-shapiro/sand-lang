@@ -404,7 +404,7 @@ fn prompter(via: PromptVia) -> impl Fn(Capability) -> sandlang::policy::PromptFu
 /// Reports an error on standard error; returns the exit status for it.
 fn report_error(e: &Error) -> u8 {
     match e {
-        Error::Compile(_) | Error::Runtime { .. } => eprint!("{}", e.render()),
+        Error::Compile(_) | Error::Runtime { .. } | Error::Internal { .. } => eprint!("{}", e.render()),
         e => eprintln!("sand: {e}"),
     }
     exit_status(e.exit_code())

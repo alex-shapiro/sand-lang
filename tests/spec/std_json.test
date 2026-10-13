@@ -310,3 +310,64 @@ other Obj(["b": Arr([])])
 Ok([Some(1), None, Some(3)])
 Ok(Nested(Circle(2.0)))
 Arr([Num(1.0), Num(2.0)])
+
+=== json macro builds nested values from JSON syntax and Sand values
+import json
+let rows = [["a", "b"]]
+let id = 7
+let missing: int? = None
+let body = json!({
+    "requests": [{"range": {"sheetId": id}, "fields": "bold"}],
+    "values": rows,
+    "note": null,
+    "flags": [true, 1.5, -2, "x"],
+    "missing": missing,
+    "empty": {},
+})
+print(json.encode(body))
+--- stdout
+{"requests":[{"range":{"sheetId":7},"fields":"bold"}],"values":[["a","b"]],"note":null,"flags":[true,1.5,-2,"x"],"missing":null,"empty":{}}
+
+=== json macro accepts sand map syntax for objects
+import json
+print(json.encode(json!(["a": 1, "b": [], "c": [:], "d": ["k": "v"]])))
+--- stdout
+{"a":1,"b":[],"c":{},"d":{"k":"v"}}
+
+=== json macro needs no import and is not shadowed by a json binding
+let json = "text"
+let v = json!({"a": json})
+print(v.get("a").and_then(x => x.as_str()))
+--- stdout
+Some("text")
+
+=== json macro in a lambda captures its values
+let f = (n: int) => json!({"n": n})
+print(f(3).get("n").and_then(x => x.as_int()))
+--- stdout
+Some(3)
+
+=== json macro object keys are strings
+let a = json!({1: 2})
+--- error
+1: type mismatch
+
+=== json macro object entries are separated by commas
+let a = json!({"a": 1 "b": 2})
+--- error
+1: expected `,` or `}`
+
+=== json macro calls use parentheses
+let a = json!{"a": 1}
+--- error
+1: a macro call is written `json!(...)`
+
+=== unknown macro
+let a = yaml!({})
+--- error
+1: unknown macro `yaml!`; the only macro is `json!`
+
+=== json macro value without a json form fails
+let a = json!({"f": (x: int) => x})
+--- fail
+cannot encode a function as JSON

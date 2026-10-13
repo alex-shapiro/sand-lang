@@ -251,12 +251,12 @@ impl Vm {
             if !wait_is_live(&self.fibers, (fid, wgen)) {
                 continue;
             }
-            // A Rust panic in the finisher (a bug) becomes a script panic.
+            // A Rust panic in the finisher (a bug) becomes an internal error.
             let r = match crate::unwind::catch(|| fin(self)) {
                 Ok(r) => r,
                 Err(msg) => {
-                    self.caught_panic = true;
-                    Err(Ctl::panic(format!("internal error: {msg}")))
+                    self.broken = true;
+                    Err(Ctl::internal(msg))
                 }
             };
             match r {
@@ -264,19 +264,22 @@ impl Vm {
                     self.deliver(fid, wgen, v);
                 }
                 Err(c) => {
+                    let trace = match &self.fibers[fid as usize] {
+                        Some(f) => self.trace_of(f, None),
+                        None => vec![],
+                    };
                     return Err(match c.into_kind() {
-                        CtlKind::Panic(m) => {
-                            let trace = match &self.fibers[fid as usize] {
-                                Some(f) => self.trace_of(f, None),
-                                None => vec![],
-                            };
-                            Trap::Panic { message: m, trace }
+                        CtlKind::Error(message) => Trap::Error { message, trace },
+                        CtlKind::Internal(message) => {
+                            self.broken = true;
+                            Trap::Internal { message, trace }
                         }
                         CtlKind::Limit(k) => Trap::Limit(k),
                         CtlKind::Interrupted => Trap::Interrupted,
                         CtlKind::Exit(c) => Trap::Exit(c),
                         other => {
-                            Trap::Panic { message: format!("internal error: unexpected {other:?} from an I/O operation"), trace: vec![] }
+                            self.broken = true;
+                            Trap::Internal { message: format!("unexpected {other:?} from an I/O operation"), trace }
                         }
                     });
                 }
@@ -312,7 +315,7 @@ impl Vm {
         let task = self.heap.alloc(Obj::Task(Box::new(TaskObj { fiber: 0, state: TaskState::Running, result: Value::Unit })));
         let fid = self.spawn_fiber(closure, task).map_err(|c| match c.as_limit() {
             Some(k) => Trap::Limit(k),
-            None => Trap::Panic { message: "internal error: cannot start main task".into(), trace: vec![] },
+            None => Trap::Internal { message: "cannot start main task".into(), trace: vec![] },
         })?;
         if let Obj::Task(t) = self.heap.get_mut(task) {
             t.fiber = fid;
@@ -342,13 +345,13 @@ impl Vm {
                 let mut fuel = self.meter.start_slice(clock.cpu_deadline(self.host.limits.max_cpu_time), self.deadline);
                 let slice = fuel;
                 // A Rust panic in the interpreter or a native (a bug) ends
-                // the run as a panic instead of unwinding into the host;
-                // caught per slice, which costs nothing per native call.
+                // the run as an internal error instead of unwinding into the
+                // host; caught per slice, which costs nothing per native call.
                 let r = match crate::unwind::catch(|| self.interp(&mut f, &mut fuel)) {
                     Ok(r) => r,
                     Err(msg) => {
-                        self.caught_panic = true;
-                        Err(Trap::Panic { message: format!("internal error: {msg}"), trace: self.trace_of(&f, None) })
+                        self.broken = true;
+                        Err(Trap::Internal { message: msg, trace: self.trace_of(&f, None) })
                     }
                 };
                 self.meter.sync(fuel);
@@ -492,7 +495,7 @@ impl Vm {
                     Some(Some(f)) => self.trace_of(f, None),
                     _ => vec![],
                 };
-                return Err(Trap::Panic { message: "deadlock: all tasks are blocked".into(), trace });
+                return Err(Trap::Error { message: "deadlock: all tasks are blocked".into(), trace });
             }
             let done = self.io.poll_ready(None);
             if !done.is_empty() {

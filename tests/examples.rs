@@ -20,6 +20,16 @@ struct Output {
     stderr: String,
 }
 
+impl Output {
+    /// The message of the error the run failed with.
+    fn failure(&self) -> &str {
+        match &self.result {
+            Err(Error::Runtime { message, .. }) => message,
+            other => panic!("expected a failure, got {other:?}\nstdout:\n{}\nstderr:\n{}", self.stdout, self.stderr),
+        }
+    }
+}
+
 fn run_example(rel: &str, args: &[&str], config: Config) -> Output {
     let out = MemorySink::new();
     let err = MemorySink::new();
@@ -133,8 +143,7 @@ fn template_engine_reports_errors() {
         &[tmpl.to_str().unwrap(), data.to_str().unwrap()],
         Config::new().policy(Policy::rules(RulePolicy::new().allow_read(dir.path()))),
     );
-    assert_eq!(o.result.as_ref().unwrap().exit_code, 1);
-    assert!(o.stderr.contains("unexpected end of template"), "{}", o.stderr);
+    assert!(o.failure().contains("unexpected end of template"), "{}", o.failure());
 }
 
 #[test]
@@ -199,8 +208,7 @@ fn persisted_inverted_index() {
         &["index", "idx.json", "docs"],
         Config::new().cwd(dir.path()).policy(Policy::rules(RulePolicy::new().allow_read(dir.path()))),
     );
-    assert_eq!(o.result.as_ref().unwrap().exit_code, 1);
-    assert!(o.stderr.contains("permission_denied"), "{}", o.stderr);
+    assert!(o.failure().contains("permission_denied"), "{}", o.failure());
 }
 
 /// Runs the CPU-bound examples with a garbage collection at every safe point
@@ -353,8 +361,7 @@ fn tcp_chat_server() {
 #[test]
 fn chat_server_cannot_listen_without_permission() {
     let o = run_example("chat_server.sand", &["127.0.0.1:0"], Config::new().policy(Policy::deny_all()));
-    assert_eq!(o.result.as_ref().unwrap().exit_code, 1);
-    assert!(o.stderr.contains("permission_denied"), "{}", o.stderr);
+    assert!(o.failure().contains("permission_denied"), "{}", o.failure());
 }
 
 #[test]
