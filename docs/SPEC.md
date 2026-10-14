@@ -1743,6 +1743,8 @@ pub fn request(method: str, url: str, headers: [(str, str)] = [], body: bytes = 
                timeout: duration = 30s, follow_redirects: bool = true) -> Result<Response>
 pub fn post(url: str, body: bytes, headers: [(str, str)] = [], timeout: duration = 30s) -> Result<Response>
 pub fn post_json<T>(url: str, value: T, headers: [(str, str)] = [], timeout: duration = 30s) -> Result<Response>
+pub fn put_json<T>(url: str, value: T, headers: [(str, str)] = [], timeout: duration = 30s) -> Result<Response>
+pub fn patch_json<T>(url: str, value: T, headers: [(str, str)] = [], timeout: duration = 30s) -> Result<Response>
 pub fn request_json<T>(method: str, url: str, value: T, headers: [(str, str)] = [], timeout: duration = 30s,
                        follow_redirects: bool = true) -> Result<Response>
 pub fn open(method: str, url: str, headers: [(str, str)] = [], body: bytes = b"",
@@ -1752,10 +1754,10 @@ pub fn upload(method: str, url: str, headers: [(str, str)] = [], timeout: durati
 upload.finish() -> Result<Stream>
 ```
 
-`get`, `post` and `request` read the whole response. `post_json` and
-`request_json` send `json.encode(value)` as the body, with `Content-Type:
-application/json` unless `headers` set a content type. Response methods:
-`text() -> Result<str>`, `json() -> Result<json.Json>`, `ok() -> bool`
+`get`, `post` and `request` read the whole response. `post_json`, `put_json`,
+`patch_json` and `request_json` send `json.encode(value)` as the body, with
+`Content-Type: application/json` unless `headers` set a content type. Response
+methods: `text() -> Result<str>`, `json() -> Result<json.Json>`, `ok() -> bool`
 (200..=299), `header(name: str) -> str?` (case-insensitive; the first value),
 `header_values(name: str) -> [str]`. HTTP/1.1 over TCP; `https` uses TLS with
 the `tls` feature (as in `sand`). Up to 10 redirects (301, 302, 303, 307, 308)

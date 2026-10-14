@@ -102,11 +102,13 @@ struct Update {{
 }}
 print(http.post_json("{base}/a", Update {{ range: "A1:A3", values: [[1, 2, 3]] }})?.text()?)
 print(http.request_json("PATCH", "{base}/b", [1, 2], headers: [("content-type", "application/merge-patch+json")])?.text()?)
+print(http.put_json("{base}/c", ["k": 1])?.text()?)
+print(http.patch_json("{base}/d", "s")?.text()?)
 "#
     );
     assert_eq!(
         run_net(&src),
-        "POST application/json 1 {\"range\":\"A1:A3\",\"values\":[[1,2,3]]}\nPATCH application/merge-patch+json 1 [1,2]\n"
+        "POST application/json 1 {\"range\":\"A1:A3\",\"values\":[[1,2,3]]}\nPATCH application/merge-patch+json 1 [1,2]\nPUT application/json 1 {\"k\":1}\nPATCH application/json 1 \"s\"\n"
     );
 }
 

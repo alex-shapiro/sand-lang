@@ -133,6 +133,26 @@ pub fn post_json<T>(
     request_json("POST", url, value, headers: headers, timeout: timeout)
 }
 
+/// Sends a `PUT` request whose body is `value` as JSON, following redirects.
+pub fn put_json<T>(
+    url: str,
+    value: T,
+    headers: [(str, str)] = [],
+    timeout: duration = 30s,
+) -> Result<Response> {
+    request_json("PUT", url, value, headers: headers, timeout: timeout)
+}
+
+/// Sends a `PATCH` request whose body is `value` as JSON, following redirects.
+pub fn patch_json<T>(
+    url: str,
+    value: T,
+    headers: [(str, str)] = [],
+    timeout: duration = 30s,
+) -> Result<Response> {
+    request_json("PATCH", url, value, headers: headers, timeout: timeout)
+}
+
 /// Sends a request like `request` whose body is `value` as JSON, such as a
 /// `PUT` or `PATCH`. Adds `Content-Type: application/json` unless `headers`
 /// set a content type.
