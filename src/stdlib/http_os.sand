@@ -57,7 +57,7 @@ pub struct Request {
     /// Sends the response and closes the request. The connection is kept
     /// for the client's next request only if the client allows it and the
     /// request's body was read to its end.
-    fn respond(self, status: int, body: bytes, headers: [(str, str)] = []) -> Result<()> {
+    pub fn respond(self, status: int, body: bytes, headers: [(str, str)] = []) -> Result<()> {
         let sent = write_response(
             self.conn,
             self.exchange,
@@ -74,7 +74,7 @@ pub struct Request {
     /// Starts a response whose body is written as it goes: chunked, exactly
     /// as long as a `content-length` in `headers`, or, to an HTTP/1.0 client,
     /// up to the end of the connection. Closing the reply ends the body.
-    fn respond_stream(self, status: int, headers: [(str, str)] = []) -> Result<Reply> {
+    pub fn respond_stream(self, status: int, headers: [(str, str)] = []) -> Result<Reply> {
         Ok(Reply {
             conn: self.conn,
             body: reply_body(self.exchange, self.body, status, headers, self.method != "HEAD")?,
@@ -82,28 +82,28 @@ pub struct Request {
     }
 
     /// The (rest of the) body.
-    fn bytes(self) -> Result<bytes> {
+    pub fn bytes(self) -> Result<bytes> {
         self.body.read_all()
     }
 
     /// The (rest of the) body decoded as UTF-8.
-    fn text(self) -> Result<str> {
+    pub fn text(self) -> Result<str> {
         self.body.read_text()
     }
 
     /// The (rest of the) body parsed as JSON.
-    fn json(self) -> Result<json.Json> {
+    pub fn json(self) -> Result<json.Json> {
         json.parse(self.text()?)
     }
 
     /// The value of header `name` (case-insensitive); the first if it was
     /// sent several times.
-    fn header(self, name: str) -> str? {
+    pub fn header(self, name: str) -> str? {
         find_header(self.headers, name)
     }
 
     /// Every value of header `name` (case-insensitive), in order.
-    fn header_values(self, name: str) -> [str] {
+    pub fn header_values(self, name: str) -> [str] {
         header_values(self.headers, name)
     }
 }
@@ -124,7 +124,7 @@ pub struct Reply {
 
     /// Ends the body. It fails if the body is shorter than its
     /// `content-length`.
-    fn finish(self) -> Result<()> {
+    pub fn finish(self) -> Result<()> {
         write_body(self.conn, self.body, b"", true)
     }
 }
@@ -174,7 +174,7 @@ pub struct Upload {
     /// Ends the body and waits for the response's head; the response's body
     /// is read from the upload's connection. It fails if the body is
     /// shorter than its `content-length`.
-    fn finish(self) -> Result<Stream> {
+    pub fn finish(self) -> Result<Stream> {
         write_body(self.conn, self.body, b"", true)?
         let (status, headers, body) = read_response(self.conn, self.head_only, self.timeout)?
         Ok(Stream { status, headers, body, url: self.url })

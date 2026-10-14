@@ -13,28 +13,28 @@ pub struct Response {
     url: str
 
     /// The body decoded as UTF-8.
-    fn text(self) -> Result<str> {
+    pub fn text(self) -> Result<str> {
         self.body.to_str()
     }
 
     /// The body parsed as JSON.
-    fn json(self) -> Result<json.Json> {
+    pub fn json(self) -> Result<json.Json> {
         json.parse(self.text()?)
     }
 
     /// True for a 2xx status.
-    fn ok(self) -> bool {
+    pub fn ok(self) -> bool {
         self.status >= 200 and self.status <= 299
     }
 
     /// The value of header `name` (case-insensitive); the first if it was
     /// sent several times.
-    fn header(self, name: str) -> str? {
+    pub fn header(self, name: str) -> str? {
         find_header(self.headers, name)
     }
 
     /// Every value of header `name` (case-insensitive), in order.
-    fn header_values(self, name: str) -> [str] {
+    pub fn header_values(self, name: str) -> [str] {
         header_values(self.headers, name)
     }
 }
@@ -51,18 +51,18 @@ pub struct Stream {
     url: str
 
     /// True for a 2xx status.
-    fn ok(self) -> bool {
+    pub fn ok(self) -> bool {
         self.status >= 200 and self.status <= 299
     }
 
     /// The value of header `name` (case-insensitive); the first if it was
     /// sent several times.
-    fn header(self, name: str) -> str? {
+    pub fn header(self, name: str) -> str? {
         find_header(self.headers, name)
     }
 
     /// Every value of header `name` (case-insensitive), in order.
-    fn header_values(self, name: str) -> [str] {
+    pub fn header_values(self, name: str) -> [str] {
         header_values(self.headers, name)
     }
 }
