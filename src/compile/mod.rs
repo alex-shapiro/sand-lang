@@ -1650,8 +1650,8 @@ impl<'a> Compiler<'a> {
         }
         match &e.kind {
             HKind::Error | HKind::Evidence(_) => {
-                let k = self.const_idx(Const::Str("internal error: unchecked expression".into()));
-                self.emit(f, Op::Panic { msg: k });
+                let k = self.const_idx(Const::Str("unchecked expression".into()));
+                self.emit(f, Op::Internal { msg: k });
             }
             HKind::Unit => {
                 self.unit_to(f, dst);
@@ -3541,8 +3541,8 @@ impl<'a> Compiler<'a> {
         let nowhere = self.here(f);
         if !unmatched.is_empty() || arms.is_empty() || switch.is_some() {
             self.patch_list(f, unmatched);
-            let k = self.const_idx(Const::Str("internal error: no match arm matched".into()));
-            self.emit(f, Op::Panic { msg: k });
+            let k = self.const_idx(Const::Str("no match arm matched".into()));
+            self.emit(f, Op::Internal { msg: k });
         }
         if let (Some(table), Some((plan, _))) = (switch, plan) {
             // Each value goes to the first arm that can match it, past the
@@ -3614,8 +3614,8 @@ impl<'a> Compiler<'a> {
                 if !fails.is_empty() {
                     let jok = self.emit_jump(f);
                     self.patch_list(f, fails);
-                    let k = self.const_idx(Const::Str("internal error: refutable let".into()));
-                    self.emit(f, Op::Panic { msg: k });
+                    let k = self.const_idx(Const::Str("refutable let".into()));
+                    self.emit(f, Op::Internal { msg: k });
                     self.patch_here(f, jok);
                 }
             }
@@ -3714,7 +3714,7 @@ fn imm_operands<'e>(op: ArithOp, l: &'e HExpr, r: &'e HExpr) -> Option<(&'e HExp
 }
 
 /// The instruction for `a op k` with an immediate, if there is one for `op`
-/// and `k` (division and remainder by 0 panic, through the general ones).
+/// and `k` (division and remainder by 0 fail, through the general ones).
 fn imm_op(op: ArithOp, k: i64) -> Option<impl Fn(Reg, Reg) -> Op> {
     let k = match op {
         ArithOp::Sub => k.checked_neg()?,

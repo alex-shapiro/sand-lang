@@ -32,7 +32,7 @@ pub fn register(r: &mut Registry) {
         Ok(vm.new_str(addr))
     });
     r.add_method("net.Listener.close", |vm, a| {
-        vm.heap.native_mut::<Listener>(a[0]).ok_or_else(|| Ctl::panic("not a listener"))?.close();
+        vm.heap.native_mut::<Listener>(a[0]).ok_or_else(|| Ctl::internal("not a listener"))?.close();
         Ok(Value::Unit)
     });
     r.add_method("net.Conn.read", conn_read);
@@ -45,7 +45,7 @@ pub fn register(r: &mut Registry) {
         Ok(vm.new_str(peer))
     });
     r.add_method("net.Conn.close", |vm, a| {
-        vm.heap.native_mut::<Conn>(a[0]).ok_or_else(|| Ctl::panic("not a connection"))?.close();
+        vm.heap.native_mut::<Conn>(a[0]).ok_or_else(|| Ctl::internal("not a connection"))?.close();
         Ok(Value::Unit)
     });
 }
@@ -190,7 +190,7 @@ impl NativeObject for Listener {
 }
 
 fn listener(vm: &Vm, v: Value) -> Result<&Listener, Ctl> {
-    vm.heap.native::<Listener>(v).ok_or_else(|| Ctl::panic("not a listener"))
+    vm.heap.native::<Listener>(v).ok_or_else(|| Ctl::internal("not a listener"))
 }
 
 fn listen(vm: &mut Vm, a: &[Value]) -> NResult {
@@ -383,13 +383,13 @@ impl NativeObject for Conn {
 }
 
 fn conn(vm: &Vm, v: Value) -> Result<&Conn, Ctl> {
-    vm.heap.native::<Conn>(v).ok_or_else(|| Ctl::panic("not a connection"))
+    vm.heap.native::<Conn>(v).ok_or_else(|| Ctl::internal("not a connection"))
 }
 
 /// Takes the connection out of the `net.Conn` object `v` (see
 /// [`Conn::detach`]), or returns the `Err(closed)` value.
 pub(crate) fn detach(vm: &mut Vm, v: Value) -> Result<Result<Detached, Value>, Ctl> {
-    match vm.heap.native_mut::<Conn>(v).ok_or_else(|| Ctl::panic("not a connection"))?.detach() {
+    match vm.heap.native_mut::<Conn>(v).ok_or_else(|| Ctl::internal("not a connection"))?.detach() {
         Some(d) => Ok(Ok(d)),
         None => Ok(Err(vm.err_value("closed", "connection closed"))),
     }

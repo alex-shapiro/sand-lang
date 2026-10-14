@@ -153,7 +153,7 @@ pub(crate) fn header_pairs(vm: &Vm, list: Value) -> Result<Result<Vec<(String, S
     let mut pairs = Vec::with_capacity(items.len());
     let mut size = 0usize;
     for &item in items {
-        let [k, v] = vm.heap.fields(item) else { return Err(Ctl::panic("a header is not a pair")) };
+        let [k, v] = vm.heap.fields(item) else { return Err(Ctl::internal("a header is not a pair")) };
         let (k, v) = (vm.str(*k), vm.str(*v));
         size = size.saturating_add(k.len() + v.len() + 64);
         vm.charge_bytes(k.len() + v.len())?;
@@ -409,7 +409,7 @@ enum BodyRead {
 
 /// Reads from body `v` until the read completes or the body is closed.
 fn read_body(vm: &mut Vm, v: Value, what: BodyRead) -> NResult {
-    let body = vm.heap.native::<Body>(v).ok_or_else(|| Ctl::panic("not a body"))?;
+    let body = vm.heap.native::<Body>(v).ok_or_else(|| Ctl::internal("not a body"))?;
     let Some(reader) = body.reader.clone() else { return Ok(vm.err_value("closed", "body closed")) };
     let mut closed = body.closed.subscribe();
     let mut res = match what {
@@ -490,7 +490,7 @@ pub(crate) fn register_body(r: &mut crate::engine::Registry) {
     r.add_method("http.Body.read_line", |vm, a| read_body(vm, a[0], BodyRead::Line));
     r.add_method("http.Body.read_all", |vm, a| read_body(vm, a[0], BodyRead::All));
     r.add_method("http.Body.close", |vm, a| {
-        let b = vm.heap.native_mut::<Body>(a[0]).ok_or_else(|| Ctl::panic("not a body"))?;
+        let b = vm.heap.native_mut::<Body>(a[0]).ok_or_else(|| Ctl::internal("not a body"))?;
         b.closed.send_replace(true);
         // The stream and the connection go with the last reference to the
         // reader: now, or when a pending read ends.

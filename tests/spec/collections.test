@@ -10,17 +10,17 @@ print(xs)
 3
 [10, 20, 30]
 
-=== list index out of bounds panics
+=== list index out of bounds fails
 let xs = [1, 2, 3]
 print(xs[3])
---- panic
+--- fail
 index out of bounds
 
-=== negative index panics
+=== negative index fails
 let xs = [1, 2, 3]
 let i = -1
 print(xs[i])
---- panic
+--- fail
 index out of bounds
 
 === list mutation
@@ -95,10 +95,10 @@ print([1; 0])
 [1, 2, 3]
 []
 
-=== repeat with negative count panics
+=== repeat with negative count fails
 let n = -1
 print([0; n])
---- panic
+--- fail
 negative
 
 === list access helpers
@@ -258,12 +258,12 @@ print(xs[5..])
 [1, 2, 3]
 []
 
-=== list slice with start after end panics
+=== list slice with start after end fails
 let xs = [0, 1, 2]
 let a = 2
 let b = 1
 print(xs[a..b])
---- panic
+--- fail
 out of range
 
 === list comprehensions
@@ -308,10 +308,10 @@ None
 [100, 3]
 [("one", 100), ("three", 3)]
 
-=== missing map key panics
+=== missing map key fails
 let m = ["a": 1]
 print(m["b"])
---- panic
+--- fail
 key not found
 
 === map insertion order is preserved and reinsertion keeps position

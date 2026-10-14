@@ -465,7 +465,7 @@ impl<'a> Linter<'a> {
         match &e.kind {
             ExprKind::Return(_) | ExprKind::Break { .. } | ExprKind::Continue(_) => true,
             ExprKind::Call { callee, .. } => {
-                matches!(&callee.kind, ExprKind::Ident(id) if matches!(id.name.as_str(), "panic" | "exit" | "todo") && self.is_prelude(&id.name))
+                matches!(&callee.kind, ExprKind::Ident(id) if matches!(id.name.as_str(), "fail" | "exit" | "todo") && self.is_prelude(&id.name))
             }
             // A `loop` that nothing breaks out of never completes.
             ExprKind::Loop { label, body } => !block_any(body, &mut |x| breaks_to(self.budget, x, label.as_ref(), 0)),

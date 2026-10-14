@@ -45,7 +45,7 @@ pub struct NativeEntry {
     pub imp: NativeImpl,
 }
 
-/// A non-local outcome of a native call or a VM helper: a panic, a limit, a
+/// A non-local outcome of a native call or a VM helper: an error, a limit, a
 /// request to the scheduler, ...
 ///
 /// One pointer, so that `Result<Value, Ctl>` is 16 bytes like a `Value`
@@ -59,7 +59,10 @@ const _: () = assert!(std::mem::size_of::<Result<Option<Value>, Ctl>>() == 16);
 
 /// What a [`Ctl`] is.
 pub enum CtlKind {
-    Panic(String),
+    /// The script failed with an error, `kind: message`.
+    Error(String),
+    /// An invariant of the engine broke: a bug, which ends a session.
+    Internal(String),
     Limit(LimitKind),
     Exit(i32),
     /// Ask the user; the call is retried afterwards.
@@ -80,10 +83,16 @@ pub enum CtlKind {
 }
 
 impl Ctl {
-    /// A panic with message `msg`.
+    /// The script fails with an error of kind `kind`.
     #[cold]
-    pub fn panic(msg: impl Into<String>) -> Ctl {
-        Ctl(Box::new(CtlKind::Panic(msg.into())))
+    pub fn fail(kind: &str, msg: impl std::fmt::Display) -> Ctl {
+        Ctl(Box::new(CtlKind::Error(format!("{kind}: {msg}"))))
+    }
+
+    /// An internal error: an invariant of the engine broke.
+    #[cold]
+    pub fn internal(msg: impl Into<String>) -> Ctl {
+        Ctl(Box::new(CtlKind::Internal(msg.into())))
     }
 
     /// A limit was exceeded.
@@ -145,7 +154,8 @@ impl std::fmt::Debug for Ctl {
 impl std::fmt::Debug for CtlKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CtlKind::Panic(m) => write!(f, "Panic({m})"),
+            CtlKind::Error(m) => write!(f, "Error({m})"),
+            CtlKind::Internal(m) => write!(f, "Internal({m})"),
             CtlKind::Limit(k) => write!(f, "Limit({k:?})"),
             CtlKind::Exit(c) => write!(f, "Exit({c})"),
             CtlKind::NeedPermission(c) => write!(f, "NeedPermission({c})"),
@@ -159,14 +169,20 @@ impl std::fmt::Debug for CtlKind {
 }
 
 impl From<&str> for Ctl {
-    /// A panic with message `msg`.
+    /// An error whose message `msg` is `kind: message`.
     fn from(msg: &str) -> Ctl {
-        Ctl::panic(msg)
+        Ctl(Box::new(CtlKind::Error(msg.to_string())))
     }
 }
 
-pub fn panic<T>(msg: impl Into<String>) -> Result<T, Ctl> {
-    Err(Ctl::panic(msg))
+/// Fails with an error of kind `kind`.
+pub fn fail<T>(kind: &str, msg: impl std::fmt::Display) -> Result<T, Ctl> {
+    Err(Ctl::fail(kind, msg))
+}
+
+/// Fails with an internal error.
+pub fn internal<T>(msg: impl Into<String>) -> Result<T, Ctl> {
+    Err(Ctl::internal(msg))
 }
 
 /// What [`Vm::block`] waits for.
@@ -247,8 +263,8 @@ pub struct Fiber {
     pub waiters_prune_at: usize,
     /// Pending IO operation id, if waiting on IO.
     pub io: Option<u64>,
-    /// A panic to raise when the fiber resumes.
-    pub pending_panic: Option<String>,
+    /// An error (`kind: message`) to raise when the fiber resumes.
+    pub pending_error: Option<String>,
 }
 
 /// One frame of a runtime error's stack trace.
@@ -261,7 +277,16 @@ pub struct TraceEntry {
 
 #[derive(Debug)]
 pub enum Trap {
-    Panic { message: String, trace: Vec<TraceEntry> },
+    /// The script failed with an error, `kind: message`.
+    Error {
+        message: String,
+        trace: Vec<TraceEntry>,
+    },
+    /// An invariant of the engine broke.
+    Internal {
+        message: String,
+        trace: Vec<TraceEntry>,
+    },
     Limit(LimitKind),
     Interrupted,
     Exit(i32),
@@ -273,7 +298,7 @@ impl Trap {
         match c.into_kind() {
             CtlKind::Limit(k) => Trap::Limit(k),
             CtlKind::Interrupted => Trap::Interrupted,
-            other => Trap::Panic { message: format!("internal error: unexpected {other:?}"), trace: vec![] },
+            other => Trap::Internal { message: format!("unexpected {other:?}"), trace: vec![] },
         }
     }
 }
@@ -503,17 +528,14 @@ pub struct Vm {
     /// The map handle and slot of the last lookup of a key other than an
     /// int, which a store to the same key reuses (see `Vm::map_set`).
     last_slot: std::cell::Cell<(u32, u32)>,
-    /// Runs the inputs of a REPL session: a top-level `?` that meets an
-    /// `Err` panics (aborting the input) instead of ending the program.
-    pub session: bool,
     /// Strings of one ASCII character, by byte (`Unit` until first
     /// made); shared, since strings are immutable. GC roots.
     ascii_strs: Vec<Value>,
 
-    /// Set when a Rust panic (a bug) was caught in the interpreter, a native
-    /// or an I/O finisher: the VM is memory safe but may be inconsistent, so
-    /// a REPL session discards it.
-    pub(crate) caught_panic: bool,
+    /// Set by an internal error (a bug), including a Rust panic caught in the
+    /// interpreter, a native or an I/O finisher: the VM is memory safe but may
+    /// be inconsistent, so a REPL session discards it.
+    pub(crate) broken: bool,
 }
 
 pub const SLICE_FUEL: i64 = 20_000;
@@ -535,7 +557,7 @@ impl Fiber {
     #[inline(never)]
     pub fn grow_stack(&mut self, need: usize, heap: &mut Heap) -> Result<(), Ctl> {
         if need > MAX_STACK_SLOTS {
-            return Err(Ctl::panic("stack overflow"));
+            return Err(Ctl::fail("limit", "stack overflow"));
         }
         let n = need.max(self.stack.len() * 2).min(MAX_STACK_SLOTS);
         let before = self.stack.capacity();
@@ -607,9 +629,8 @@ impl Vm {
             spare_ctl: None,
             wait_gen: 0,
             last_slot: std::cell::Cell::new((u32::MAX, 0)),
-            session: false,
             ascii_strs: Vec::new(),
-            caught_panic: false,
+            broken: false,
         };
         vm.load_program();
         vm
@@ -998,7 +1019,7 @@ impl Vm {
             });
             match pending.wait(|| self.meter.check()) {
                 Ok(Ok((t, used, stopped))) => finish(t, used, stopped),
-                Ok(Err(panic)) => Err(Ctl::panic(format!("internal error: {panic}"))),
+                Ok(Err(panic)) => Err(Ctl::internal(panic)),
                 Err(c) => {
                     abandon.store(true, std::sync::atomic::Ordering::Relaxed);
                     Err(c)
@@ -1069,7 +1090,7 @@ impl Vm {
     }
 
     /// Writes to stdout (1) or stderr (2), enforcing policy and output
-    /// limits; a denial panics (as `print` does).
+    /// limits; a denial fails (as `print` does).
     pub fn write_stream(&mut self, which: u8, data: &[u8]) -> Result<(), Ctl> {
         self.admit_output(which, data.len())?;
         let _ = self.stream_sink(which).write(data);
@@ -1122,10 +1143,10 @@ impl Vm {
     }
 
     /// Checks the policy and the output limit for writing `len` bytes to
-    /// stream `which`, and counts them; a denial panics.
+    /// stream `which`, and counts them; a denial fails.
     fn admit_output(&mut self, which: u8, len: usize) -> Result<(), Ctl> {
         if !self.output_allowed(which)? {
-            return panic(if which == 1 { "permission denied: stdout" } else { "permission denied: stderr" });
+            return fail("permission_denied", if which == 1 { "permission denied: stdout" } else { "permission denied: stderr" });
         }
         self.count_output(which, len)
     }
@@ -1178,10 +1199,10 @@ impl Vm {
     pub fn spawn_fiber(&mut self, closure: Value, task: Value) -> Result<u32, Ctl> {
         let (proto, ncaps) = match self.heap.get(closure) {
             Obj::Closure(p, caps) => (*p, caps.len()),
-            _ => return panic("spawn: not a closure"),
+            _ => return internal("spawn: not a closure"),
         };
         let nregs = self.prog.protos[proto as usize].nregs as usize;
-        let Value::Obj(closure) = closure else { return panic("spawn: not a closure") };
+        let Value::Obj(closure) = closure else { return internal("spawn: not a closure") };
         let frame = Frame { proto, ip: 0, base: 0, ret: 0, closure };
         let fiber = match self.spare_fibers.pop() {
             // A recycled fiber is already counted in `fiber_bytes`.
@@ -1211,7 +1232,7 @@ impl Vm {
                     waiters: vec![],
                     waiters_prune_at: MIN_PRUNE,
                     io: None,
-                    pending_panic: None,
+                    pending_error: None,
                 });
                 self.heap.fiber_bytes += fiber.footprint();
                 fiber
@@ -1258,7 +1279,7 @@ impl Vm {
         f.waiters.clear();
         f.waiters_prune_at = MIN_PRUNE;
         f.io = None;
-        f.pending_panic = None;
+        f.pending_error = None;
         self.spare_fibers.push(f);
     }
 
@@ -1272,7 +1293,7 @@ impl Vm {
     /// Spawns a new task running `closure`; returns the task handle.
     pub fn spawn_task(&mut self, closure: Value) -> NResult {
         if self.live_tasks >= self.host.limits.max_tasks {
-            return panic("task limit exceeded");
+            return fail("limit", "task limit exceeded");
         }
         if let Obj::Closure(p, _) = self.heap.get(closure) {
             let p = &self.prog.protos[*p as usize];
@@ -1307,13 +1328,13 @@ impl Vm {
         true
     }
 
-    /// Wakes a waiting fiber with a panic.
-    pub fn deliver_panic(&mut self, fid: u32, wgen: u64, msg: &str) {
+    /// Wakes a waiting fiber with an error, `kind: message`.
+    pub fn deliver_error(&mut self, fid: u32, wgen: u64, msg: &str) {
         if let Some(Some(f)) = self.fibers.get_mut(fid as usize)
             && f.state == FiberState::Waiting
             && f.wgen == wgen
         {
-            f.pending_panic = Some(msg.to_string());
+            f.pending_error = Some(msg.to_string());
             f.state = FiberState::Ready;
             self.ready.push_back(fid);
         }
@@ -1364,17 +1385,17 @@ impl Vm {
         }
     }
 
-    /// Ends the fiber of a cancelled task: wakes its waiters with a panic,
+    /// Ends the fiber of a cancelled task: wakes its waiters with an error,
     /// then resumes it at its pending deferred code (`unwind_to_pad`), or
     /// frees it if there is none.
     pub(crate) fn end_cancelled(&mut self, fid: u32, mut f: Box<Fiber>) {
         for (w, g) in std::mem::take(&mut f.waiters) {
-            self.deliver_panic(w, g, "task cancelled");
+            self.deliver_error(w, g, "cancelled: task cancelled");
         }
-        // A fiber waiting in a call, or woken to panic in it, stopped before the call completed.
-        let in_call = f.state == FiberState::Waiting || f.pending_panic.is_some();
+        // A fiber waiting in a call, or woken to fail in it, stopped before the call completed.
+        let in_call = f.state == FiberState::Waiting || f.pending_error.is_some();
         if self.unwind_to_pad(&mut f, in_call) {
-            f.pending_panic = None;
+            f.pending_error = None;
             f.state = FiberState::Ready;
             self.fibers[fid as usize] = Some(f);
         } else {

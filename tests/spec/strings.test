@@ -60,9 +60,9 @@ None
 ["many", "spaces", "here"]
 ["l1", "l2", "l3"]
 
-=== split with empty separator panics
+=== split with empty separator fails
 print("abc".split(""))
---- panic
+--- fail
 empty separator
 
 === trimming
@@ -152,9 +152,9 @@ None
 65
 233
 
-=== ord on multi-char string panics
+=== ord on multi-char string fails
 print("ab".ord())
---- panic
+--- fail
 ord
 
 === reversed and join
@@ -180,16 +180,16 @@ world
 hello
 hello
 
-=== slicing out of range panics
+=== slicing out of range fails
 let s = "abc"
 print(s[1..10])
---- panic
+--- fail
 out of range
 
-=== slicing inside a character panics
+=== slicing inside a character fails
 let s = "é"
 print(s[0..1])
---- panic
+--- fail
 character boundary
 
 === indexing a string is rejected
@@ -257,9 +257,9 @@ b"el"
 Some(2)
 false
 
-=== bytes from_list out of range panics
+=== bytes from_list out of range fails
 print(bytes.from_list([256]))
---- panic
+--- fail
 byte out of range
 
 === strings are immutable values

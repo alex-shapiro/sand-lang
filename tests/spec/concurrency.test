@@ -90,14 +90,14 @@ print(slow)
 Some("quick")
 None
 
-=== waiting on cancelled task panics
+=== waiting on cancelled task fails
 let t = spawn {
     task.sleep(1s)
     1
 }
 t.cancel()
 print(t.wait())
---- panic
+--- fail
 task cancelled
 
 === channels
@@ -161,7 +161,7 @@ None
 === deadlock is detected
 let ch: Channel<int> = task.channel()
 print(ch.recv())
---- panic
+--- fail
 deadlock
 
 === busy tasks are preempted
@@ -177,11 +177,11 @@ print(spinner.wait())
 --- stdout
 true
 
-=== panics in tasks abort the run
-let t = spawn panic("task failed")
+=== errors in tasks abort the run
+let t = spawn fail("task failed")
 task.sleep(10ms)
 print("unreachable")
---- panic
+--- fail
 task failed
 
 === main finishing cancels other tasks

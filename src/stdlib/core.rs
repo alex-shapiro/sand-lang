@@ -4,7 +4,7 @@ use crate::engine::Registry;
 use crate::vm::compare::{find_key, hash_key, set_slot, try_sort_by, try_sort_numbers, values_cmp_metered, values_eq_metered};
 use crate::vm::heap::Heap;
 use crate::vm::value::*;
-use crate::vm::{BlockOn, Ctl, NResult, Vm, panic};
+use crate::vm::{BlockOn, Ctl, NResult, Vm, fail, internal};
 use std::cmp::Ordering;
 
 /// Approximate heap cost of a small object (a string, tuple or list header)
@@ -52,7 +52,10 @@ pub fn register(r: &mut Registry) {
         vm.write_stream(2, s.as_bytes())?;
         Ok(Value::Unit)
     });
-    r.add_builtin("panic", |vm, a| panic(vm.str(a[0]).to_string()));
+    r.add_builtin("fail", |vm, a| {
+        let kind = vm.str(a[1]).to_string();
+        fail(&kind, vm.str(a[0]))
+    });
     r.add_builtin("exit", |_, a| Err(Ctl::exit(int(a[0]).clamp(i32::MIN as i64, i32::MAX as i64) as i32)));
     r.add_builtin("set", |vm, a| {
         let set = set_of(vm, vm.heap.list(a[0]))?;
@@ -74,7 +77,7 @@ pub fn register(r: &mut Registry) {
     r.add_builtin("Channel.send", |vm, a| vm.block(BlockOn::Send(a[0], a[1])));
     r.add_builtin("Channel.recv", |vm, a| vm.block(BlockOn::Recv(a[0])));
     r.add_builtin("Channel.try_recv", |vm, a| {
-        let Some(c) = vm.heap.channel_mut(a[0], None) else { return panic("not a channel") };
+        let Some(c) = vm.heap.channel_mut(a[0], None) else { return internal("not a channel") };
         let Some((v, woken)) = c.take() else { return Ok(vm.none()) };
         if let Some((sf, sg)) = woken {
             vm.deliver(sf, sg, Value::Bool(true));
@@ -82,7 +85,7 @@ pub fn register(r: &mut Registry) {
         Ok(vm.some(v))
     });
     r.add_builtin("Channel.close", |vm, a| {
-        let Some(c) = vm.heap.channel_mut(a[0], None) else { return panic("not a channel") };
+        let Some(c) = vm.heap.channel_mut(a[0], None) else { return internal("not a channel") };
         c.closed = true;
         let receivers: Vec<(u32, u64)> = c.receivers.drain(..).collect();
         let senders: Vec<(u32, u64, Value)> = c.senders.drain(..).collect();
@@ -121,14 +124,14 @@ pub fn register(r: &mut Registry) {
         vm.reserve(std::mem::size_of_val(vm.heap.list(a[0])))?;
         let tasks = vm.heap.list(a[0]).to_vec();
         if tasks.is_empty() {
-            return panic("task.race called with an empty list");
+            return fail("invalid", "task.race called with an empty list");
         }
         vm.block(BlockOn::Race(tasks))
     });
     r.add_builtin("task.channel", |vm, a| {
         let cap = int(a[0]);
         if cap < 0 {
-            return panic("channel capacity must not be negative");
+            return fail("invalid", "channel capacity must not be negative");
         }
         Ok(vm.heap.alloc(Obj::Channel(Box::new(ChannelObj::new(to_usize_saturating(cap))))))
     });
@@ -145,7 +148,7 @@ fn register_numbers(r: &mut Registry) {
     r.add_builtin("int.to_str_radix", |vm, a| {
         let radix = int(a[1]);
         if !(2..=36).contains(&radix) {
-            return panic(format!("radix must be between 2 and 36, found {radix}"));
+            return fail("invalid", format!("radix must be between 2 and 36, found {radix}"));
         }
         let v = int(a[0]);
         let mut mag = v.unsigned_abs();
@@ -189,7 +192,7 @@ fn register_numbers(r: &mut Registry) {
         let f = float(a[0]).trunc();
         // NaN is in no range.
         if !(-9223372036854775808.0..9223372036854775808.0).contains(&f) {
-            return panic(format!("cannot convert {} to int", crate::vm::display::fmt_float(float(a[0]))));
+            return fail("invalid", format!("cannot convert {} to int", crate::vm::display::fmt_float(float(a[0]))));
         }
         Ok(Value::Int(f as i64))
     });
@@ -204,17 +207,17 @@ fn register_numbers(r: &mut Registry) {
     r.add_builtin("duration.secs", |_, a| Ok(Value::Float(int(a[0]) as f64 / 1e9)));
     r.add_builtin("duration.abs", |_, a| match int(a[0]).checked_abs() {
         Some(v) => Ok(Value::Dur(v)),
-        None => panic("duration overflow"),
+        None => fail("overflow", "duration overflow"),
     });
     r.add_builtin("duration.from_nanos", |_, a| Ok(Value::Dur(int(a[0]))));
     r.add_builtin("duration.from_millis", |_, a| match int(a[0]).checked_mul(1_000_000) {
         Some(v) => Ok(Value::Dur(v)),
-        None => panic("duration overflow"),
+        None => fail("overflow", "duration overflow"),
     });
     r.add_builtin("duration.from_secs", |_, a| {
         let n = float(a[0]) * 1e9;
         if !n.is_finite() || n.abs() > 9.2e18 {
-            return panic("duration overflow");
+            return fail("overflow", "duration overflow");
         }
         Ok(Value::Dur(n as i64))
     });
@@ -334,7 +337,7 @@ fn register_str(r: &mut Registry) {
     r.add_builtin("str.split", |vm, a| {
         let (t, sep) = (vm.str(a[0]), vm.str(a[1]));
         if sep.is_empty() {
-            return panic("split with an empty separator");
+            return fail("invalid", "split with an empty separator");
         }
         vm.charge_bytes(t.len().saturating_add(sep.len()))?;
         split_list(vm, a[0], |heap, f| heap.str(a[0]).split(heap.str(a[1])).for_each(f))
@@ -399,7 +402,7 @@ fn register_str(r: &mut Registry) {
     r.add_builtin("str.repeat", |vm, a| {
         let n = int(a[1]);
         if n < 0 {
-            return panic(format!("negative repeat count: {n}"));
+            return fail("invalid", format!("negative repeat count: {n}"));
         }
         let n = to_usize_saturating(n);
         let total = vm.str(a[0]).len().checked_mul(n).ok_or(Ctl::limit(crate::LimitKind::Memory))?;
@@ -426,7 +429,7 @@ fn register_str(r: &mut Registry) {
     r.add_builtin("str.parse_int", |vm, a| {
         let radix = int(a[1]);
         if !(2..=36).contains(&radix) {
-            return panic(format!("radix must be between 2 and 36, found {radix}"));
+            return fail("invalid", format!("radix must be between 2 and 36, found {radix}"));
         }
         let t = vm.str(a[0]);
         vm.charge_bytes(t.len())?;
@@ -461,7 +464,7 @@ fn register_str(r: &mut Registry) {
         let mut it = t.chars();
         match (it.next(), it.next()) {
             (Some(c), None) => Ok(Value::Int(c as i64)),
-            _ => panic(format!("ord requires a one-character string, found {:?}", super::truncate(t, 64))),
+            _ => fail("invalid", format!("ord requires a one-character string, found {:?}", super::truncate(t, 64))),
         }
     });
     r.add_builtin("str.reversed", |vm, a| {
@@ -545,7 +548,7 @@ fn register_bytes(r: &mut Registry) {
         for x in vm.heap.list(a[0]) {
             let i = x.as_int();
             if !(0..=255).contains(&i) {
-                return panic(format!("byte out of range: {i}"));
+                return fail("bounds", format!("byte out of range: {i}"));
             }
             out.push(i as u8);
         }
@@ -621,7 +624,7 @@ fn index_check(i: i64, len: usize, inclusive: bool) -> Result<usize, Ctl> {
     let max = if inclusive { len } else { len.saturating_sub(1) };
     match to_index(i) {
         Some(at) if at <= max && (inclusive || len > 0) => Ok(at),
-        _ => Err(Ctl::panic(format!("index out of bounds: index {i}, length {len}"))),
+        _ => Err(Ctl::fail("bounds", format!("index out of bounds: index {i}, length {len}"))),
     }
 }
 
@@ -723,7 +726,7 @@ fn register_list(r: &mut Registry) {
         let items = std::mem::take(vm.heap.list_mut(a[0]));
         if keys.len() != items.len() {
             *vm.heap.list_mut(a[0]) = items;
-            return panic("list changed while computing sort keys");
+            return fail("invalid", "list changed while computing sort keys");
         }
         let mut idx: Vec<usize> = (0..items.len()).collect();
         let r = produce(vm, 2 * items.len(), 0).and_then(|()| {
@@ -766,7 +769,7 @@ fn register_list(r: &mut Registry) {
     r.add_builtin("List.chunks", |vm, a| {
         let n = int(a[1]);
         if n <= 0 {
-            return panic(format!("chunk size must be positive, found {n}"));
+            return fail("invalid", format!("chunk size must be positive, found {n}"));
         }
         let (n, len) = (to_usize_saturating(n), list_len(vm, a[0]));
         produce(vm, len, len.div_ceil(n))?;
@@ -778,7 +781,7 @@ fn register_list(r: &mut Registry) {
     r.add_builtin("List.windows", |vm, a| {
         let n = int(a[1]);
         if n <= 0 {
-            return panic(format!("window size must be positive, found {n}"));
+            return fail("invalid", format!("window size must be positive, found {n}"));
         }
         let (n, l) = (to_usize_saturating(n), vm.heap.list(a[0]));
         let windows = (l.len() + 1).saturating_sub(n);
@@ -893,7 +896,7 @@ fn register_list(r: &mut Registry) {
         let (s, e) = range(vm, a[0]);
         let step = int(a[1]);
         if step <= 0 {
-            return panic(format!("step must be positive, found {step}"));
+            return fail("invalid", format!("step must be positive, found {step}"));
         }
         let n = to_usize_saturating(e.saturating_sub(s) / step);
         produce(vm, n, 0)?;
@@ -929,7 +932,7 @@ fn set_insert(vm: &Vm, set: &mut SetObj, x: Value) -> Result<bool, Ctl> {
 /// Appends `x`, which is not in `set` and has hash `hash`.
 fn set_push(set: &mut SetObj, hash: u64, x: Value) -> Result<(), Ctl> {
     if !slot_fits(set.entries.len()) {
-        return panic("set too large");
+        return fail("limit", "set too large");
     }
     set.index.insert(x, hash, set.entries.len());
     set.entries.push(Some(x));
@@ -972,7 +975,7 @@ fn copy_container(vm: &mut Vm, v: Value) -> NResult {
     let copy = match vm.heap.get(v) {
         Obj::Map(m) => Obj::Map(m.clone()),
         Obj::Set(s) => Obj::Set(s.clone()),
-        _ => return panic("not a map or set"),
+        _ => return internal("not a map or set"),
     };
     let size = copy.size();
     vm.reserve(size)?;
@@ -1093,7 +1096,7 @@ fn register_map_set(r: &mut Registry) {
         Ok(vm.heap.new_list(items))
     });
     r.add_builtin("Set.union", |vm, a| {
-        let Obj::Set(first) = vm.heap.get(a[0]) else { return panic("not a set") };
+        let Obj::Set(first) = vm.heap.get(a[0]) else { return internal("not a set") };
         let mut set = (**first).clone();
         let more = set_items(vm, a[1]);
         produce(vm, (set.entries.len() + more.len()).saturating_mul(ENTRY / SLOT), 0)?;
@@ -1103,7 +1106,7 @@ fn register_map_set(r: &mut Registry) {
         Ok(new_set(vm, set))
     });
     r.add_builtin("Set.intersection", |vm, a| {
-        let (Obj::Set(x), Obj::Set(y)) = (vm.heap.get(a[0]), vm.heap.get(a[1])) else { return panic("not a set") };
+        let (Obj::Set(x), Obj::Set(y)) = (vm.heap.get(a[0]), vm.heap.get(a[1])) else { return internal("not a set") };
         if x.live <= y.live {
             let set = set_filter(vm, a[0], |e| vm.set_contains(a[1], e))?;
             return Ok(new_set(vm, set));

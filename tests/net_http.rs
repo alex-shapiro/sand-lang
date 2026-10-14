@@ -423,11 +423,7 @@ fn closing_engine_closes_sockets() {
 #[test]
 fn errors_are_distinguishable() {
     let r = run_with("import net\nlet c = net.connect(\"nonsense\")?", |c| c.policy(Policy::allow_all()));
-    match r.result {
-        Ok(o) => assert_eq!(o.exit_code, 1),
-        Err(e) => panic!("{e:?}"),
-    }
-    assert!(r.stderr.contains("error:"));
+    assert!(r.failure().starts_with("invalid: "), "{}", r.failure());
     let _ = Error::Interrupted;
 }
 

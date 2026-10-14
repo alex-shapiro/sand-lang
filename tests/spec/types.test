@@ -62,7 +62,7 @@ let m: [str: [int]] = ["a": ["b"]]
 
 === never unifies with anything
 fn f(x: int) -> str {
-    let s: str = if x > 0 { "pos" } else { panic("neg") }
+    let s: str = if x > 0 { "pos" } else { fail("neg") }
     s
 }
 print(f(1))
@@ -119,11 +119,11 @@ print(counter)
 --- stdout
 2
 
-=== global used before initialization panics
+=== global used before initialization fails
 fn read() -> int { late }
 print(read())
 let late = 5
---- panic
+--- fail
 global used before initialization
 
 === unit type annotation
@@ -210,7 +210,7 @@ a2;b4;
 7
 0
 3
---- panic
+--- fail
 global used before initialization: `LATE`
 
 === loops reached through values, dictionaries and defaults before a global they read
@@ -278,10 +278,10 @@ let s: str = xs[0]
 fn f(x: int) -> int {
     let a = if x > 0 { x } else { return -1 } + 1
     let b = x + (if x > 0 { 1 } else { return -2 })
-    if x == (if x > 0 { x } else { panic("unreachable") }) {
+    if x == (if x > 0 { x } else { fail("unreachable") }) {
         print("same")
     }
-    let (p, q) = if x > 0 { (x, x) } else { panic("unreachable") }
+    let (p, q) = if x > 0 { (x, x) } else { fail("unreachable") }
     a + b + p + q
 }
 print(f(2))

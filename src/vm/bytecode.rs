@@ -670,7 +670,7 @@ pub enum Op {
         list: Reg,
         src: Reg,
     },
-    /// Repeat count check: panics if negative.
+    /// Repeat count check: fails if negative.
     CheckRepeat {
         src: Reg,
     },
@@ -913,11 +913,12 @@ pub enum Op {
         dst: Reg,
         closure: Reg,
     },
-    /// Top-level `?` on an `Err`: report and exit with code 1.
+    /// Top-level `?` on an `Err`: fail with the error.
     TryTop {
         src: Reg,
     },
-    Panic {
+    /// An internal error with the constant message `msg`.
+    Internal {
         msg: u32,
     },
 }
@@ -1108,7 +1109,7 @@ impl Op {
                 | Op::RetUnit
                 | Op::Unwind
                 | Op::TailCallDirect { .. }
-                | Op::Panic { .. }
+                | Op::Internal { .. }
         )
     }
 }

@@ -547,6 +547,8 @@ pub struct Checker {
     /// checked is its value, and then (after checking) the value's type.
     pub(crate) want_cell_value: bool,
     pub(crate) cell_value: Option<TypeId>,
+    /// Whether the session input being checked has a top-level `return` of a value.
+    pub(crate) cell_returns: bool,
     /// Set while checking an expression for `Session::type_of`.
     pub(crate) type_query: Option<TypeQuery>,
     /// The prelude's private trait `Num` (static `zero` and `one`): the
@@ -607,6 +609,7 @@ impl Default for Checker {
             session: None,
             want_cell_value: false,
             cell_value: None,
+            cell_returns: false,
             type_query: None,
             budget: Arc::new(CompileBudget::default()),
             num_trait: None,
@@ -1034,6 +1037,7 @@ impl Checker {
         m.import_spans.clear();
         self.want_cell_value = want_value;
         self.cell_value = None;
+        self.cell_returns = false;
         self.check_module(cell);
         self.want_cell_value = false;
         let errors = self.errors();

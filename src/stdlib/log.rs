@@ -3,7 +3,7 @@
 use crate::check::ModKind;
 use crate::engine::Registry;
 use crate::vm::value::{Obj, Value};
-use crate::vm::{NResult, Vm, panic};
+use crate::vm::{NResult, Vm, fail};
 
 /// Level names, indexed by `Host::log_level` (`"off"` is one past the last).
 const LEVELS: [&str; 4] = ["DEBUG", "INFO", "WARN", "ERROR"];
@@ -17,7 +17,10 @@ pub fn register(r: &mut Registry) {
     r.add_builtin("log.set_level", |vm, a| {
         let name = vm.str(a[0]);
         let Some(level) = LEVELS.iter().chain(&["OFF"]).position(|l| l.eq_ignore_ascii_case(name)) else {
-            return panic(format!("unknown log level {:?} (expected debug, info, warn, error or off)", super::truncate(name, 64)));
+            return fail(
+                "invalid",
+                format!("unknown log level {:?} (expected debug, info, warn, error or off)", super::truncate(name, 64)),
+            );
         };
         vm.host.log_level = level as u8;
         Ok(Value::Unit)

@@ -89,7 +89,16 @@ pub type TraceFrame = TraceEntry;
 #[derive(Debug, Clone)]
 pub enum Error {
     Compile(Vec<Diagnostic>),
-    Runtime { message: String, trace: Vec<TraceFrame> },
+    /// The script failed with an error; `message` is `kind: message`.
+    Runtime {
+        message: String,
+        trace: Vec<TraceFrame>,
+    },
+    /// An invariant of the engine broke: a bug in Sand or in a host module.
+    Internal {
+        message: String,
+        trace: Vec<TraceFrame>,
+    },
     Limit(LimitKind),
     Interrupted,
     Io(String),
@@ -108,11 +117,14 @@ impl fmt::Display for Error {
                 Ok(())
             }
             Error::Runtime { message, trace } => {
-                write!(f, "panic: {message}")?;
-                for t in trace {
-                    write!(f, "\n    at {} ({}:{})", t.function, t.file, t.line)?;
-                }
-                Ok(())
+                // A message of kind `error` already starts with the word.
+                let message = message.strip_prefix("error: ").unwrap_or(message);
+                write!(f, "error: {message}")?;
+                write_trace(f, trace)
+            }
+            Error::Internal { message, trace } => {
+                write!(f, "internal error: {message}")?;
+                write_trace(f, trace)
             }
             Error::Limit(k) => write!(f, "{k}"),
             Error::Interrupted => write!(f, "interrupted"),
@@ -123,12 +135,21 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+fn write_trace(f: &mut fmt::Formatter<'_>, trace: &[TraceFrame]) -> fmt::Result {
+    for t in trace {
+        write!(f, "\n    at {} ({}:{})", t.function, t.file, t.line)?;
+    }
+    Ok(())
+}
+
 impl Error {
     /// The exit status of the `sand` tools for the error: 1 for a runtime
-    /// error, 2 for compile and I/O errors, 3 for a limit, 130 if interrupted.
+    /// error, 2 for compile and I/O errors, 3 for a limit, 70 for an internal
+    /// error, 130 if interrupted.
     pub fn exit_code(&self) -> i32 {
         match self {
             Error::Runtime { .. } => 1,
+            Error::Internal { .. } => 70,
             Error::Compile(_) | Error::Io(_) => 2,
             Error::Limit(_) => 3,
             Error::Interrupted => 130,
@@ -930,7 +951,8 @@ impl Engine {
             Ok(RunEnd::Finished(_)) => Ok(crate::Outcome { exit_code: 0 }),
             Ok(RunEnd::Exit(c)) => Ok(crate::Outcome { exit_code: c }),
             Err(Trap::Exit(c)) => Ok(crate::Outcome { exit_code: c }),
-            Err(Trap::Panic { message, trace }) => Err(Error::Runtime { message, trace }),
+            Err(Trap::Error { message, trace }) => Err(Error::Runtime { message, trace }),
+            Err(Trap::Internal { message, trace }) => Err(Error::Internal { message, trace }),
             Err(Trap::Limit(k)) => Err(Error::Limit(k)),
             Err(Trap::Interrupted) => Err(Error::Interrupted),
         }
@@ -1065,9 +1087,7 @@ impl Engine {
                 }
                 Ok(())
             };
-            crate::platform::offload(job)
-                .wait(check)?
-                .map_err(|panic| Error::Runtime { message: format!("internal error: {panic}"), trace: vec![] })
+            crate::platform::offload(job).wait(check)?.map_err(|panic| Error::Internal { message: panic, trace: vec![] })
         }
         #[cfg(not(feature = "os"))]
         {
@@ -1266,7 +1286,8 @@ async fn end_run(vm: &mut Vm, r: Result<RunEnd, Trap>) -> Result<RunEnd, Trap> {
 
 fn trap_message(t: Trap) -> String {
     match t {
-        Trap::Panic { message, .. } => message,
+        Trap::Error { message, .. } => message,
+        Trap::Internal { message, .. } => format!("internal error: {message}"),
         Trap::Limit(k) => k.to_string(),
         Trap::Interrupted => "interrupted".into(),
         Trap::Exit(c) => format!("exited with code {c}"),

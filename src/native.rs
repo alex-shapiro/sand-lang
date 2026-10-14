@@ -115,7 +115,7 @@ sand_type! {
 }
 
 fn mismatch<T>(what: &str) -> Result<T, Ctl> {
-    Err(Ctl::panic(format!("host function argument: expected {what}")))
+    Err(Ctl::internal(format!("host function argument: expected {what}")))
 }
 
 /// Scalars convert without allocating.
@@ -393,7 +393,7 @@ macro_rules! tuple_impls {
                         _ => return mismatch("tuple"),
                     },
                 };
-                Ok(($($n::from_value(vm, *f.get($i).ok_or_else(|| Ctl::panic("tuple too short"))?, conv)?,)+))
+                Ok(($($n::from_value(vm, *f.get($i).ok_or_else(|| Ctl::internal("tuple too short"))?, conv)?,)+))
             }
         }
         impl<$($n: IntoValue),+> IntoValue for ($($n,)+) {
@@ -436,7 +436,7 @@ pub trait GuardedFunction<Marker, G>: Send + Sync + 'static {
 /// The error for too few arguments, possible only when the module's source
 /// declares the function.
 fn missing() -> Ctl {
-    Ctl::panic("host function called with too few arguments")
+    Ctl::internal("host function called with too few arguments")
 }
 
 macro_rules! host_fn_impls {

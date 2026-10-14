@@ -97,18 +97,18 @@ export interface Diagnostic {
 }
 
 export interface SandError {
-  kind: "compile" | "runtime" | "limit" | "interrupted" | "io";
+  kind: "compile" | "runtime" | "internal" | "limit" | "interrupted" | "io";
   message: string;
-  /** How `sand run` exits for it: 1 runtime error, 2 compile error, 3 limit, 130 interrupted. */
+  /** How `sand run` exits for it: 1 runtime error, 2 compile error, 3 limit, 70 internal error, 130 interrupted. */
   exitCode: number;
   diagnostics: Diagnostic[];
-  /** For runtime errors: the stack, innermost first. */
+  /** For runtime and internal errors: the stack, innermost first. */
   trace: { function: string; file: string; line: number }[];
 }
 
 export interface RunResult {
   ok: boolean;
-  /** The script's exit code, or as `sand run` exits: 1 panic, 2 compile error, 3 limit, 130 interrupted. */
+  /** The script's exit code, or as `sand run` exits: 1 runtime error, 2 compile error, 3 limit, 70 internal error, 130 interrupted. */
   exitCode: number;
   error?: SandError;
   elapsedMs: number;
@@ -626,24 +626,25 @@ fn write_files(fs: &MemFs, options: &JsValue) -> Result<(), JsValue> {
     Ok(())
 }
 
+/// The frames of a trace, innermost first.
+fn frames(trace: &[sandlang::TraceFrame]) -> JsValue {
+    array(trace, |t| object(&[("function", t.function.as_str().into()), ("file", t.file.as_str().into()), ("line", t.line.into())]))
+}
+
 /// A `SandError`.
 fn error_info(e: &Error) -> JsValue {
     let (kind, diagnostics, trace) = match e {
         Error::Compile(ds) => ("compile", array(ds, diagnostic), Array::new().into()),
-        Error::Runtime { trace, .. } => (
-            "runtime",
-            Array::new().into(),
-            array(trace, |t| {
-                object(&[("function", t.function.as_str().into()), ("file", t.file.as_str().into()), ("line", t.line.into())])
-            }),
-        ),
+        Error::Runtime { trace, .. } => ("runtime", Array::new().into(), frames(trace)),
+        Error::Internal { trace, .. } => ("internal", Array::new().into(), frames(trace)),
         Error::Limit(_) => ("limit", Array::new().into(), Array::new().into()),
         Error::Interrupted => ("interrupted", Array::new().into(), Array::new().into()),
         Error::Io(_) => ("io", Array::new().into(), Array::new().into()),
     };
     let message = match e {
         Error::Compile(_) => e.render(),
-        Error::Runtime { message, .. } => format!("panic: {message}"),
+        Error::Runtime { message, .. } => format!("error: {}", message.strip_prefix("error: ").unwrap_or(message)),
+        Error::Internal { message, .. } => format!("internal error: {message}"),
         e => e.to_string(),
     };
     object(&[

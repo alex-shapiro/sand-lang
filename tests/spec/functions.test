@@ -208,10 +208,10 @@ print(depth(5000))
 --- stdout
 5000
 
-=== stack overflow panics
+=== stack overflow fails
 fn forever(n: int) -> int { 1 + forever(n + 1) }
 print(forever(0))
---- panic
+--- fail
 stack overflow
 
 === tail calls do not grow the stack
@@ -272,28 +272,67 @@ print([Some(1)])
 s
 [Some(1)]
 
-=== panic and assert
+=== fail and assert
 assert(1 + 1 == 2)
 assert(true, "fine")
 assert(false, "custom message")
---- panic
-custom message
+--- fail
+assert: custom message
 
 === assert default message
 assert(1 > 2)
---- panic
-assertion failed
+--- fail
+assert: condition is false
 
-=== todo panics
+=== todo fails
 fn later() -> int { todo() }
 print(later())
---- panic
-not yet implemented
+--- fail
+todo: not yet implemented
 
-=== panic message
-panic("something broke")
---- panic
-something broke
+=== fail message
+fail("something broke")
+--- fail
+error: something broke
+
+=== fail with a kind
+fn first_row(rows: [str]) -> str {
+    rows.first() ?? fail("no rows", kind: "empty")
+}
+print(first_row(["a"]))
+print(first_row([]))
+--- stdout
+a
+--- fail
+empty: no rows
+
+=== top-level return ends the program
+print("a")
+return
+print("b")
+--- stdout
+a
+
+=== top-level return of a value ends the program
+print("a")
+if true {
+    return 5
+}
+print("b")
+--- stdout
+a
+
+=== top-level return of an Err fails with its error
+defer print("cleanup")
+let n = 3
+if n > 2 {
+    return Err(error("too big", kind: "invalid"))
+}
+print("not reached")
+--- stdout
+cleanup
+--- fail
+invalid: too big
 
 === argument evaluation order is left to right
 fn t(label: str, v: int) -> int {

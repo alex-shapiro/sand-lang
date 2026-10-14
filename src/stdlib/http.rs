@@ -798,7 +798,7 @@ fn start_upload(vm: &mut Vm, a: &[Value]) -> NResult {
 fn write_body(vm: &mut Vm, a: &[Value]) -> NResult {
     let n = vm.heap.bytes_of(a[2]).len();
     let last = a[3].as_bool();
-    let out = vm.heap.native::<Outgoing>(a[1]).ok_or_else(|| Ctl::panic("not an outgoing body"))?;
+    let out = vm.heap.native::<Outgoing>(a[1]).ok_or_else(|| Ctl::internal("not an outgoing body"))?;
     if out.finished {
         return Ok(vm.err_value("closed", "the body has been finished"));
     }

@@ -10,7 +10,7 @@ use crate::engine::Registry;
 use crate::platform::Instant;
 use crate::vm::meter::{SLOW_BYTES_PER_UNIT, Scratch};
 use crate::vm::value::{NativeObject, Obj, Value};
-use crate::vm::{Ctl, NResult, Vm, panic};
+use crate::vm::{Ctl, NResult, Vm, internal};
 use regex_automata::meta::{self, Cache};
 use regex_automata::util::captures::Captures;
 use regex_automata::util::interpolate;
@@ -160,7 +160,7 @@ impl NativeObject for RegexObj {
 }
 
 fn regex_obj(vm: &Vm, v: Value) -> Result<&RegexObj, Ctl> {
-    vm.heap.native::<RegexObj>(v).ok_or_else(|| Ctl::panic("not a Regex"))
+    vm.heap.native::<RegexObj>(v).ok_or_else(|| Ctl::internal("not a Regex"))
 }
 
 /// Slots of the per-engine cache of compiled regexes (direct-mapped by the
@@ -377,7 +377,7 @@ pub fn register(r: &mut Registry) {
             }
         };
         let Some(match_def) = vm.prog.types.iter().position(|t| t.name == "Match" && t.module == "regex") else {
-            return panic("regex.Match is not defined");
+            return internal("regex.Match is not defined");
         };
         let obj = RegexObj::new(re, vm.str(a[0]), match_def as u32);
         vm.reserve(obj.size())?;

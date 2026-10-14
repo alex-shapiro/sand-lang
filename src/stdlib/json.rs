@@ -18,7 +18,7 @@ use crate::vm::meter::{BYTES_PER_UNIT, Meter, SLOW_BYTES_PER_UNIT, Scratch};
 use crate::vm::value::{
     FieldDesc, FxHashMap, KeyTable, MAP_ENTRY_SIZE, MapObj, Obj, TypeDesc, Value, VariantDesc, slot_fits, to_usize_saturating,
 };
-use crate::vm::{Ctl, NResult, Vm, panic};
+use crate::vm::{Ctl, NResult, Vm, fail, internal};
 use hashbrown::HashTable;
 use std::borrow::Cow;
 use std::fmt::Write;
@@ -62,7 +62,7 @@ pub fn register(r: &mut Registry) {
         Ok(vm.new_str(out))
     });
     r.add_builtin("json.decode", |vm, a| {
-        let Obj::TypeDesc(desc) = vm.heap.get(a[0]) else { return panic("json.decode: missing type description") };
+        let Obj::TypeDesc(desc) = vm.heap.get(a[0]) else { return internal("json.decode: missing type description") };
         let desc = desc.clone();
         let ids = vm.prog.ids;
         let (text, meter) = (a[1], &vm.meter);
@@ -105,7 +105,7 @@ pub fn register(r: &mut Registry) {
 fn json_ids(vm: &Vm) -> Result<JsonIds, Ctl> {
     match vm.prog.ids.json {
         Some(ids) => Ok(ids),
-        None => panic("the json module is not loaded"),
+        None => internal("the json module is not loaded"),
     }
 }
 
@@ -113,7 +113,7 @@ fn json_ids(vm: &Vm) -> Result<JsonIds, Ctl> {
 enum Error {
     /// Invalid JSON or a mismatch with the target type: becomes `Err(Error { kind: "parse" })`.
     Parse(String),
-    /// Aborts the native call (memory limit, panic).
+    /// Aborts the native call (memory limit, error).
     Ctl(Ctl),
 }
 
@@ -257,7 +257,7 @@ impl<'a, 's, 'h> Build<'a, 's, 'h> {
         }
         let slot = segment.len();
         if !slot_fits(slot) {
-            return panic("map too large");
+            return fail("limit", "map too large");
         }
         self.pending += ENTRY_PENDING;
         self.entries.push(Entry { hash, text, key, value });
@@ -896,7 +896,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                 r
             }
             TypeDesc::Json => {
-                let Some(ids) = self.ids.json else { return Err(Error::Ctl(Ctl::panic("the json module is not loaded"))) };
+                let Some(ids) = self.ids.json else { return Err(Error::Ctl(Ctl::internal("the json module is not loaded"))) };
                 self.p.parse_json(&mut self.b, &ids)
             }
             TypeDesc::Recur(id) => {
@@ -907,10 +907,12 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                 });
                 match found {
                     Some(&d) => self.decode(d),
-                    None => Err(Error::Ctl(Ctl::panic("json.decode: internal error: unresolved recursive type"))),
+                    None => Err(Error::Ctl(Ctl::internal("json.decode: unresolved recursive type"))),
                 }
             }
-            TypeDesc::Unsupported(name) => Err(Error::Ctl(Ctl::panic(format!("json.decode: cannot decode values of type {name}")))),
+            TypeDesc::Unsupported(name) => {
+                Err(Error::Ctl(Ctl::fail("invalid", format!("json.decode: cannot decode values of type {name}"))))
+            }
         }
     }
 
@@ -956,7 +958,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                 Some(i) => Value::Tag(variants[i].1),
                 None => return Err(bad(self)),
             },
-            _ => return Err(Error::Ctl(Ctl::panic("json.decode: unsupported map key type"))),
+            _ => return Err(Error::Ctl(Ctl::fail("invalid", "json.decode: unsupported map key type"))),
         };
         Ok((k, hash_key(self.b.heap, self.b.meter, k)?, None))
     }
@@ -1101,7 +1103,7 @@ impl Encoder<'_> {
             return Ok(());
         }
         if level >= MAX_DEPTH {
-            return panic("value too deeply nested to encode as JSON");
+            return fail("limit", "value too deeply nested to encode as JSON");
         }
         self.out.push('[');
         for (i, x) in items.enumerate() {
@@ -1130,7 +1132,7 @@ impl Encoder<'_> {
             return Ok(());
         }
         if level >= MAX_DEPTH {
-            return panic("value too deeply nested to encode as JSON");
+            return fail("limit", "value too deeply nested to encode as JSON");
         }
         self.out.push('{');
         for (i, e) in entries.enumerate() {
@@ -1202,11 +1204,11 @@ impl Encoder<'_> {
                     })?
                 }
                 Obj::Variant(id, fields) => self.variant(*id, fields, level)?,
-                Obj::Closure(..) | Obj::NativeFn(_) | Obj::IterFn(_) => return panic("cannot encode a function as JSON"),
-                Obj::Task(_) => return panic("cannot encode a task as JSON"),
-                Obj::Channel(_) => return panic("cannot encode a channel as JSON"),
-                Obj::Native(n) => return panic(format!("cannot encode a {} as JSON", n.type_name())),
-                Obj::TypeDesc(_) | Obj::Cell(_) | Obj::Free(_) => return panic("cannot encode this value as JSON"),
+                Obj::Closure(..) | Obj::NativeFn(_) | Obj::IterFn(_) => return fail("invalid", "cannot encode a function as JSON"),
+                Obj::Task(_) => return fail("invalid", "cannot encode a task as JSON"),
+                Obj::Channel(_) => return fail("invalid", "cannot encode a channel as JSON"),
+                Obj::Native(n) => return fail("invalid", format!("cannot encode a {} as JSON", n.type_name())),
+                Obj::TypeDesc(_) | Obj::Cell(_) | Obj::Free(_) => return fail("invalid", "cannot encode this value as JSON"),
             },
             _ => {
                 let (id, payload) = v.as_inline_variant().unwrap_or((u32::MAX, Value::Unit));
@@ -1219,12 +1221,12 @@ impl Encoder<'_> {
     /// An enum variant with a payload: `Json` values as their payload's
     /// JSON, other variants as `{"Name": payload}`.
     fn variant(&mut self, id: u32, fields: &[Value], level: usize) -> Result<(), Ctl> {
-        let Some(rt) = self.prog.variants.get(id as usize) else { return panic("cannot encode this value as JSON") };
+        let Some(rt) = self.prog.variants.get(id as usize) else { return fail("invalid", "cannot encode this value as JSON") };
         if rt.def == self.ids.def {
             return self.value(fields.first().copied().unwrap_or(Value::Unit), level);
         }
         if level >= MAX_DEPTH {
-            return panic("value too deeply nested to encode as JSON");
+            return fail("limit", "value too deeply nested to encode as JSON");
         }
         self.out.push('{');
         self.newline(level + 1)?;
@@ -1401,11 +1403,11 @@ impl<'a> Converter<'a, '_, '_> {
                     self.b.st.new_variant(ids.obj, &[map])
                 }
                 Obj::Variant(id, fields) => self.variant(*id, fields, depth)?,
-                Obj::Closure(..) | Obj::NativeFn(_) | Obj::IterFn(_) => return panic("cannot encode a function as JSON"),
-                Obj::Task(_) => return panic("cannot encode a task as JSON"),
-                Obj::Channel(_) => return panic("cannot encode a channel as JSON"),
-                Obj::Native(n) => return panic(format!("cannot encode a {} as JSON", n.type_name())),
-                Obj::TypeDesc(_) | Obj::Cell(_) | Obj::Free(_) => return panic("cannot encode this value as JSON"),
+                Obj::Closure(..) | Obj::NativeFn(_) | Obj::IterFn(_) => return fail("invalid", "cannot encode a function as JSON"),
+                Obj::Task(_) => return fail("invalid", "cannot encode a task as JSON"),
+                Obj::Channel(_) => return fail("invalid", "cannot encode a channel as JSON"),
+                Obj::Native(n) => return fail("invalid", format!("cannot encode a {} as JSON", n.type_name())),
+                Obj::TypeDesc(_) | Obj::Cell(_) | Obj::Free(_) => return fail("invalid", "cannot encode this value as JSON"),
             },
             _ => {
                 let (id, payload) = v.as_inline_variant().unwrap_or((u32::MAX, Value::Unit));
@@ -1421,7 +1423,7 @@ impl<'a> Converter<'a, '_, '_> {
     }
 
     fn check_depth(&self, depth: usize) -> Result<(), Ctl> {
-        if depth >= MAX_DEPTH { panic("value too deeply nested to convert to JSON") } else { Ok(()) }
+        if depth >= MAX_DEPTH { fail("limit", "value too deeply nested to convert to JSON") } else { Ok(()) }
     }
 
     /// The string of the name of variant `id` (one per call).
@@ -1444,7 +1446,7 @@ impl<'a> Converter<'a, '_, '_> {
     /// A variant with a payload: `{"Name": payload}`.
     fn variant(&mut self, id: u32, fields: &[Value], depth: usize) -> NResult {
         let (prog, ids) = (self.prog, self.ids);
-        let Some(rt) = prog.variants.get(id as usize) else { return panic("cannot encode this value as JSON") };
+        let Some(rt) = prog.variants.get(id as usize) else { return fail("invalid", "cannot encode this value as JSON") };
         self.check_depth(depth)?;
         let payload = match &rt.field_names {
             Some(names) => {

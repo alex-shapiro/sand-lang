@@ -36,7 +36,7 @@ pub(super) fn register(r: &mut Registry) {
         Ok(vm.new_str(addr))
     });
     r.add_method("http.Server.close", |vm, a| {
-        vm.heap.native_mut::<Server>(a[0]).ok_or_else(|| Ctl::panic("not a server"))?.close();
+        vm.heap.native_mut::<Server>(a[0]).ok_or_else(|| Ctl::internal("not a server"))?.close();
         Ok(Value::Unit)
     });
     r.add_builtin("http.next_request", next_request);
@@ -176,7 +176,7 @@ impl NativeObject for Server {
 }
 
 fn server(vm: &Vm, v: Value) -> Result<&Server, Ctl> {
-    vm.heap.native::<Server>(v).ok_or_else(|| Ctl::panic("not a server"))
+    vm.heap.native::<Server>(v).ok_or_else(|| Ctl::internal("not a server"))
 }
 
 fn serve(vm: &mut Vm, a: &[Value]) -> NResult {
@@ -456,8 +456,8 @@ pub(super) struct After {
 /// the request `body` was read to its end, `delimit` is not `Close`, and the
 /// server is open. Also returns the response's `Connection` header.
 fn after(vm: &Vm, exchange: Value, body: Value, delimit: Delimit) -> Result<(After, Option<&'static str>), Ctl> {
-    let ex = vm.heap.native::<Exchange>(exchange).ok_or_else(|| Ctl::panic("not an exchange"))?;
-    let complete = vm.heap.native::<Body>(body).ok_or_else(|| Ctl::panic("not a body"))?.is_complete();
+    let ex = vm.heap.native::<Exchange>(exchange).ok_or_else(|| Ctl::internal("not an exchange"))?;
+    let complete = vm.heap.native::<Body>(body).ok_or_else(|| Ctl::internal("not a body"))?.is_complete();
     let persists = ex.persists && complete && delimit != Delimit::Close && ex.server.strong_count() > 0;
     let header = match (persists, ex.http10) {
         (false, _) => Some("close"),
@@ -547,7 +547,7 @@ fn reply_body(vm: &mut Vm, a: &[Value]) -> NResult {
         Ok(n) => n,
         Err(e) => return Ok(vm.err_value("invalid", &e)),
     };
-    let http10 = vm.heap.native::<Exchange>(a[0]).ok_or_else(|| Ctl::panic("not an exchange"))?.http10;
+    let http10 = vm.heap.native::<Exchange>(a[0]).ok_or_else(|| Ctl::internal("not an exchange"))?.http10;
     let advertised = match (has_body(status), length) {
         (false, _) => Delimit::None,
         (true, Some(n)) => Delimit::Length(n),

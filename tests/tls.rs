@@ -185,7 +185,7 @@ fn https_with_private_network_policy() {
     assert_eq!(r.ok_stdout(), "ok\n");
     let wildcard = RulePolicy::new().allow_net("*").deny_private_networks();
     let r = run_with(&src, |c| trusting(c).policy(Policy::rules(wildcard)));
-    assert!(r.stderr.contains(&format!("permission denied: GET https://localhost:{port}/")), "{}", r.stderr);
+    assert!(r.failure().contains(&format!("permission denied: GET https://localhost:{port}/")), "{}", r.failure());
 }
 
 #[test]

@@ -158,10 +158,10 @@ pub fn render_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Valu
             }
             Work::Val(v, depth, debug) => {
                 if depth > MAX_DEPTH {
-                    return Err(Ctl::panic("value too deeply nested to display"));
+                    return Err(Ctl::fail("limit", "value too deeply nested to display"));
                 }
                 if out.len() > MAX_OUTPUT {
-                    return Err(Ctl::panic("value too large to display"));
+                    return Err(Ctl::fail("limit", "value too large to display"));
                 }
                 budget.charge(1)?;
                 match v {

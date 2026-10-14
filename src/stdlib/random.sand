@@ -7,7 +7,7 @@
 /// Reseeds the engine's generator, making later results reproducible.
 pub native fn seed(s: int)
 
-/// A uniformly distributed integer in `lo..hi`; panics if the range is empty.
+/// A uniformly distributed integer in `lo..hi`; fails if the range is empty.
 pub native fn int(lo: int, hi: int) -> int
 
 /// A uniformly distributed float in `[0, 1)`.
@@ -39,7 +39,7 @@ pub native fn rng(seed: int) -> Rng
 pub native type Rng
 
 extend Rng {
-    /// A uniformly distributed integer in `lo..hi`; panics if the range is empty.
+    /// A uniformly distributed integer in `lo..hi`; fails if the range is empty.
     pub native fn int(self, lo: int, hi: int) -> int
     /// A uniformly distributed float in `[0, 1)`.
     pub native fn float(self) -> float

@@ -794,7 +794,7 @@ fn push_container(heap: &Heap, stack: &mut HashStack, v: Value) -> Result<(), Ct
         return Ok(());
     }
     if stack.len() >= MAX_DEPTH {
-        return Err(Ctl::panic("value too deeply nested to hash"));
+        return Err(Ctl::fail("limit", "value too deeply nested to hash"));
     }
     if stack.big.len() == stack.big.capacity() && heap.would_exceed(stack.len().max(4) * 2 * std::mem::size_of::<HashFrame>()) {
         return Err(Ctl::limit(crate::LimitKind::Memory));

@@ -3,7 +3,7 @@
 use crate::check::ModKind;
 use crate::engine::Registry;
 use crate::vm::value::{FxHashMap, NativeObject, Obj, Value, to_usize_saturating};
-use crate::vm::{NResult, Rng, Vm, panic};
+use crate::vm::{NResult, Rng, Vm, fail, internal};
 use std::any::Any;
 
 /// The opaque `random.Rng` type: an independent generator.
@@ -39,7 +39,7 @@ fn with_engine(vm: &mut Vm, args: &[Value], op: Op) -> NResult {
 
 /// Runs `op` with the `Rng` object in `args[0]`.
 fn with_object(vm: &mut Vm, args: &[Value], op: Op) -> NResult {
-    let Some(RngObj(rng)) = vm.heap.native::<RngObj>(args[0]) else { return panic("not an Rng") };
+    let Some(RngObj(rng)) = vm.heap.native::<RngObj>(args[0]) else { return internal("not an Rng") };
     let mut rng = rng.clone();
     let result = op(vm, &mut rng, &args[1..]);
     if let Some(obj) = vm.heap.native_mut::<RngObj>(args[0]) {
@@ -78,7 +78,7 @@ pub fn register(r: &mut Registry) {
 fn int(_: &mut Vm, rng: &mut Rng, a: &[Value]) -> NResult {
     let (lo, hi) = (a[0].as_int(), a[1].as_int());
     if lo >= hi {
-        return panic(format!("random.int: empty range {lo}..{hi}"));
+        return fail("invalid", format!("random.int: empty range {lo}..{hi}"));
     }
     let span = (hi as i128 - lo as i128) as u64;
     Ok(Value::Int((lo as i128 + rng.below(span) as i128) as i64))
@@ -124,7 +124,7 @@ fn sample(vm: &mut Vm, rng: &mut Rng, a: &[Value]) -> NResult {
 fn bytes(vm: &mut Vm, rng: &mut Rng, a: &[Value]) -> NResult {
     let n = a[0].as_int();
     if n < 0 {
-        return panic("random.bytes: negative length");
+        return fail("invalid", "random.bytes: negative length");
     }
     let n = to_usize_saturating(n);
     vm.reserve(n)?;

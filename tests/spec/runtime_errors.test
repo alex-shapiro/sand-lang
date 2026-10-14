@@ -1,93 +1,93 @@
-=== panic reports message
-fn inner() { panic("deep problem") }
+=== fail reports its message
+fn inner() { fail("deep problem") }
 fn outer() { inner() }
 outer()
---- panic
+--- fail
 deep problem
 
 === integer overflow inside nested call
 fn f(x: int) -> int { x * x }
 print(f(4000000000))
 print(f(4000000000))
---- panic
+--- fail
 integer overflow
 
 === index error message includes index and length
 let xs = [1, 2]
 let i = 5
 print(xs[i])
---- panic
+--- fail
 index out of bounds: index 5, length 2
 
 === key error message includes key
 let m = ["a": 1]
 print(m["zz"])
---- panic
+--- fail
 key not found: "zz"
 
-=== list remove out of range panics
+=== list remove out of range fails
 let xs = [1]
 xs.remove(3)
---- panic
+--- fail
 index out of bounds
 
-=== list insert out of range panics
+=== list insert out of range fails
 let xs = [1]
 xs.insert(5, 1)
---- panic
+--- fail
 index out of bounds
 
-=== chunks with zero panics
+=== chunks with zero fails
 print([1].chunks(0))
---- panic
+--- fail
 must be positive
 
-=== random int empty range panics
+=== random int empty range fails
 import random
 print(random.int(5, 5))
---- panic
+--- fail
 empty range
 
-=== race on empty list panics
+=== race on empty list fails
 let ts: [Task<int>] = []
 print(task.race(ts))
---- panic
+--- fail
 empty
 
-=== printing extremely deep values panics instead of crashing
+=== printing extremely deep values fails instead of crashing
 enum L { Cons(L), Nil }
 var l = L.Nil
 for i in 0..100000 { l = L.Cons(l) }
 print(l)
---- panic
+--- fail
 too deeply nested
 
-=== hashing extremely deep values panics instead of crashing
+=== hashing extremely deep values fails instead of crashing
 enum L { Cons(L), Nil }
 var l = L.Nil
 for i in 0..100000 { l = L.Cons(l) }
 let m = [l: 1]
---- panic
+--- fail
 too deeply nested
 
 === error after output keeps the output
 print("partial")
-panic("then fail")
---- panic
+fail("then fail")
+--- fail
 then fail
 
-=== scaling a duration beyond its range causes a panic
+=== scaling a duration beyond its range fails
 print(1s * 1e10)
---- panic
+--- fail
 duration overflow
 
-=== scaling a duration by nan causes a panic
+=== scaling a duration by nan fails
 print(1s * nan)
---- panic
+--- fail
 duration overflow
 
-=== duration division overflow is a panic, not a host crash
+=== duration division overflow fails, and does not crash the host
 let d = duration.from_nanos(int.min_value())
 print(d / -1)
---- panic
+--- fail
 duration overflow

@@ -793,7 +793,7 @@ impl Checker {
         let arity = match c {
             SCtor::ListAtLeast(n, 0) if vhead.is_empty() => *n,
             // The type does not determine the fields (a `never` or erroneous
-            // type, e.g. a variant pattern on `panic(..)`): the pattern does.
+            // type, e.g. a variant pattern on `fail(..)`): the pattern does.
             _ if !vhead.is_empty() => vhead.len(),
             _ => args.len(),
         };

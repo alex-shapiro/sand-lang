@@ -255,6 +255,34 @@ impl Checker {
         vec![bind, mk(HKind::Defer(Box::new(call)), TypeId::UNIT, s.span)]
     }
 
+    /// A top-level `return`, which ends the program or the session input. It
+    /// returns a value of any type; an `Err` fails with its error, as `?` does.
+    fn check_top_return(&mut self, v: Option<&Expr>, main: bool, span: Span) -> HExpr {
+        if !main {
+            self.error(span, "`return` is not allowed at the top level of an imported module");
+        }
+        let Some(v) = v else { return mk(HKind::Return(None), TypeId::NEVER, span) };
+        let h = self.infer(v, None);
+        self.cell_returns = true;
+        let t = self.resolve(h.ty);
+        let Ty::Named(d, args) = self.ty(t) else { return mk(HKind::Return(Some(Box::new(h))), TypeId::NEVER, span) };
+        if d != self.wk.result {
+            return mk(HKind::Return(Some(Box::new(h))), TypeId::NEVER, span);
+        }
+        // `return Err(e)` leaves the `Ok` type open.
+        let ok = self.arena.elem(args, 0);
+        if matches!(self.rty(ok), Ty::Var(_)) {
+            self.unify(ok, TypeId::UNIT);
+        }
+        let local = self.hidden_local(t, span);
+        let pat = HPat { kind: HPatKind::Bind(local), ty: t, span };
+        let bind = mk(HKind::Let { pat, init: Box::new(h), else_: None }, TypeId::UNIT, span);
+        let read = || Box::new(mk(HKind::Local(local), t, span));
+        let fail = mk(HKind::Try { e: read(), kind: TryKind::TopLevel }, ok, span);
+        let ret = mk(HKind::Return(Some(read())), TypeId::NEVER, span);
+        mk(HKind::Block(vec![bind, fail, ret]), TypeId::NEVER, span)
+    }
+
     /// Reports `use` on a value whose type does not implement `Close`.
     fn not_closeable(&mut self, t: TypeId, span: Span) {
         match self.ty(t) {
@@ -366,7 +394,7 @@ impl Checker {
                     self.fs.scopes.declare(n, id);
                 }
                 if !self.resolve(h.ty).is_never() {
-                    self.error(b.span, "the `else` block of `let ... else` must diverge (return, break, continue or panic)");
+                    self.error(b.span, "the `else` block of `let ... else` must diverge (return, break, continue or fail)");
                 }
                 Some(Box::new(h))
             }
@@ -840,10 +868,10 @@ impl Checker {
             ExprKind::Lambda { params, body, .. } => self.check_lambda(params, body, hint, span),
             ExprKind::Return(v) => {
                 self.check_not_in_defer("`return`", span);
-                let ret = self.fs.ctx.last().map(|c| c.ret).unwrap_or(TypeId::UNIT);
-                if let Some(CtxKind::TopLevel { .. }) = self.fs.ctx.last().map(|c| c.kind) {
-                    self.error(span, "`return` is not allowed at the top level; use `exit`");
+                if let Some(CtxKind::TopLevel { main }) = self.fs.ctx.last().map(|c| c.kind) {
+                    return self.check_top_return(v.as_deref(), main, span);
                 }
+                let ret = self.fs.ctx.last().map(|c| c.ret).unwrap_or(TypeId::UNIT);
                 let vh = match v {
                     Some(v) => Some(Box::new(self.check_expr(v, ret))),
                     None => {

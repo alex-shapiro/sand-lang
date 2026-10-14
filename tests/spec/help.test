@@ -59,7 +59,7 @@ fn [T].len(self) -> int
 Number of elements.
 fn Option.unwrap(self) -> T
 
-The payload; panics on `None`.
+The payload; fails on `None`.
 
 === types show their variants, fields, methods and traits
 /// A shape.
@@ -284,9 +284,9 @@ Functions:
     error    An `Error` with `message` and `kind`.
     print    Prints the display form of `x` and a newline to standard output.
     eprint   Prints the display form of `x` and a newline to standard error.
-    panic    Stops the program with an error message.
-    assert   Panics with `message` unless `cond` is true.
-    todo     Marks unfinished code; panics when reached.
+    fail     Fails with an error: the input of a session, or the program.
+    assert   Fails with `message` (kind `"assert"`) unless `cond` is true.
+    todo     Marks unfinished code; fails (kind `"todo"`) when reached.
     exit     Stops the program with an exit code.
     set      Builds a set from a list.
     help     Shows the documentation of `x`: a module, type, trait, function,

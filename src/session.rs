@@ -50,8 +50,8 @@ use std::task::Poll;
 ///   definitions of a name shadow earlier ones for later inputs, while
 ///   functions and values created earlier keep referring to the definitions
 ///   they were checked against.
-/// * An input that fails to compile has no effect. An input that panics (or
-///   exceeds a limit, is interrupted or calls `exit`) keeps its declarations
+/// * An input that fails to compile has no effect. An input that fails with an
+///   error (or exceeds a limit, is interrupted or calls `exit`) keeps its declarations
 ///   and the effects that happened before the failure, including global
 ///   assignments; its remaining globals stay uninitialized. All tasks are
 ///   then cancelled.
@@ -59,10 +59,10 @@ use std::task::Poll;
 ///   between inputs while the front end calls [`Session::run_tasks_until`].
 /// * The instruction, CPU time, wall time and output limits apply to each
 ///   input separately; the memory limit applies to the session's heap.
-/// * After a Rust panic (a bug in the engine or in a host native) is caught
-///   while the session's code runs, the VM may be inconsistent, so the
-///   session is reset (as by [`Session::reset`]): the call fails with an
-///   `internal error` whose message ends with [`RESET_NOTE`], and
+/// * After an internal error (a bug in the engine or in a host native,
+///   including a caught Rust panic), the VM may be inconsistent, so the
+///   session is reset (as by [`Session::reset`]): the call fails with
+///   [`Error::Internal`], whose message ends with [`RESET_NOTE`], and
 ///   [`Session::was_reset`] returns true.
 pub struct Session {
     /// Shares the configuration, natives and "always" answers of the engine
@@ -115,11 +115,10 @@ impl Session {
     }
 
     /// Checks, compiles and runs one input. Returns the debug form of its
-    /// value: that of its final expression statement, unless the input ends
-    /// with `;` or the value has type `()`.
+    /// value: that of its final expression statement or of a top-level
+    /// `return`, unless the input ends with `;` or the value is `()`.
     ///
-    /// A failed top-level `?` aborts the input like a panic whose message is
-    /// the error. If the input calls `exit(code)`, the result is `Ok(None)`
+    /// A failed top-level `?` fails the input with the error. If the input calls `exit(code)`, the result is `Ok(None)`
     /// and [`Session::exit_code`] returns the code.
     pub async fn eval(&mut self, source: &str) -> Result<Option<String>, Error> {
         self.eval_named(None, source).await
@@ -147,8 +146,8 @@ impl Session {
         let want_value = !source.trim_end().ends_with(';');
         // The wall-time limit counts from here, for compiling and running.
         let deadline = self.deadline();
-        let (entry, value, deadline) = self.compile_input(&name, source, want_value, deadline).await?;
-        let show = value.is_some_and(|t| !matches!(t, TypeId::UNIT | TypeId::NEVER));
+        let (entry, value, returns, deadline) = self.compile_input(&name, source, want_value, deadline).await?;
+        let show = want_value && (returns || value.is_some_and(|t| !matches!(t, TypeId::UNIT | TypeId::NEVER)));
         self.run(entry, show, deadline).await
     }
 
@@ -268,7 +267,7 @@ impl Session {
 
     /// Whether the last call of [`Session::eval`], [`Session::run_tests`],
     /// [`Session::type_of`] or [`Session::run_tasks_until`] reset the session
-    /// because a Rust panic (an internal error) was caught while it ran.
+    /// because of an internal error.
     pub fn was_reset(&self) -> bool {
         self.was_reset
     }
@@ -285,7 +284,7 @@ impl Session {
     /// process's standard input should pass it on through a
     /// [`crate::StdinFeed`].
     ///
-    /// If a task panics, exceeds a limit or is interrupted, every task is
+    /// If a task fails with an error, exceeds a limit or is interrupted, every task is
     /// cancelled (as after a failed input), the error is passed to `on_error`
     /// right away, and the call goes on waiting for `until`. If a task calls
     /// `exit`, the call returns `None` at once ([`Session::exit_code`] has the
@@ -353,19 +352,19 @@ impl Session {
         n
     }
 
-    /// Whether a Rust panic was caught while the session's VM ran.
+    /// Whether an internal error broke the session's VM.
     fn poisoned(&self) -> bool {
-        self.state.as_ref().is_some_and(|st| st.vm.caught_panic)
+        self.state.as_ref().is_some_and(|st| st.vm.broken)
     }
 
-    /// The result of a call, given `r` (`Err` if it panicked). After a caught
-    /// panic, resets the session and says so in the error.
+    /// The result of a call, given `r` (`Err` if a Rust panic was caught).
+    /// After an internal error, resets the session and says so in the error.
     fn settle<T>(&mut self, r: Result<Result<T, Error>, String>) -> Result<T, Error> {
         let r = match r {
             Ok(r) if !self.poisoned() => return r,
-            Ok(Err(Error::Runtime { message, trace })) => Err(Error::Runtime { message: format!("{message}{RESET_NOTE}"), trace }),
+            Ok(Err(Error::Internal { message, trace })) => Err(Error::Internal { message: format!("{message}{RESET_NOTE}"), trace }),
             Ok(r) => r,
-            Err(msg) => Err(Error::Runtime { message: format!("internal error: {msg}{RESET_NOTE}"), trace: vec![] }),
+            Err(msg) => Err(Error::Internal { message: format!("{msg}{RESET_NOTE}"), trace: vec![] }),
         };
         self.reset();
         self.was_reset = true;
@@ -427,16 +426,16 @@ impl Session {
         // The standard library's program; its entry initializes the prelude and `task`.
         let prog = snapshot.program.clone();
         let pending = Some(prog.entry);
-        let mut vm = self.engine.new_vm(Arc::new(prog), self.cwd.clone(), false);
-        vm.session = true;
+        let vm = self.engine.new_vm(Arc::new(prog), self.cwd.clone(), false);
         let compiler = snapshot.compiler.clone();
         Ok(State { snapshot, graph, checker, compiler, vm, pending, loading: None, running: false, deferred_prompt: None })
     }
 
     /// Loads the modules `source` imports for the first time, then checks and
     /// compiles them and the input. Returns the entry that initializes them
-    /// and runs the input, and the type of the input's value (if
-    /// `want_value` and it has one). On error, the session is unchanged.
+    /// and runs the input, the type of the input's value (if `want_value` and
+    /// it has one), and whether the input returns a value with a top-level
+    /// `return`. On error, the session is unchanged.
     /// The wall-time limit passes at `deadline`, and for the input's run at
     /// the deadline returned (later by the time spent on prompts).
     async fn compile_input(
@@ -445,7 +444,7 @@ impl Session {
         source: &str,
         want_value: bool,
         deadline: Option<Instant>,
-    ) -> Result<(u32, Option<TypeId>, Option<Instant>), Error> {
+    ) -> Result<(u32, Option<TypeId>, bool, Option<Instant>), Error> {
         let max_source = self.engine.config().limits.max_source_bytes;
         let Session { engine, root, state, .. } = self;
         let registry = engine.registry();
@@ -507,11 +506,11 @@ impl Session {
         st.graph = job.graph;
         st.vm.prog = job.prog;
         match result {
-            Ok((entry, value)) => {
+            Ok((entry, value, returns)) => {
                 st.checker = job.checker;
                 st.compiler = job.compiler;
                 st.vm.load_program();
-                Ok((entry, value, deadline))
+                Ok((entry, value, returns, deadline))
             }
             Err(e) => {
                 st.graph.rollback(&mark);
@@ -541,15 +540,15 @@ impl Session {
         let r = vm.run_main(proto).await;
         st.running = false;
         let Some(v) = conclude(vm, r, exit_code)? else { return Ok(None) };
-        let shown = if show { Some(vm.debug(v)) } else { None };
+        let shown = if show && v != Value::Unit { Some(vm.debug(v)) } else { None };
         vm.release_main();
         match shown {
             None => Ok(None),
             Some(Ok(s)) => Ok(Some(s)),
             Some(Err(c)) => match c.into_kind() {
                 CtlKind::Limit(k) => Err(Error::Limit(k)),
-                CtlKind::Panic(message) => Err(Error::Runtime { message, trace: vec![] }),
-                other => Err(Error::Runtime { message: format!("cannot show the value: {other:?}"), trace: vec![] }),
+                CtlKind::Error(message) => Err(Error::Runtime { message, trace: vec![] }),
+                other => Err(Error::Internal { message: format!("cannot show the value: {other:?}"), trace: vec![] }),
             },
         }
     }
@@ -592,7 +591,8 @@ fn conclude(vm: &mut Vm, r: Result<RunEnd, Trap>, exit_code: &mut Option<i32>) -
             vm.abandon_tasks();
             return Ok(None);
         }
-        Err(Trap::Panic { message, trace }) => Error::Runtime { message, trace },
+        Err(Trap::Error { message, trace }) => Error::Runtime { message, trace },
+        Err(Trap::Internal { message, trace }) => Error::Internal { message, trace },
         Err(Trap::Limit(k)) => Error::Limit(k),
         Err(Trap::Interrupted) => Error::Interrupted,
     };
@@ -631,8 +631,9 @@ struct CellJob {
 impl CellJob {
     /// Checks the new modules and the input, and compiles them by appending
     /// to `prog`. Returns the entry that initializes them and runs the input,
-    /// and the type of the input's value (if `want_value` and it has one).
-    fn run(&mut self) -> Result<(u32, Option<TypeId>), Error> {
+    /// the type of the input's value (if `want_value` and it has one), and
+    /// whether the input has a top-level `return` of a value.
+    fn run(&mut self) -> Result<(u32, Option<TypeId>, bool), Error> {
         let session = self.checker.session.unwrap_or_default();
         let first = self.checker.mods.len();
         let parsed = self.graph.parse(&self.new_mods, first as ModId).and_then(|modules| {
@@ -649,6 +650,7 @@ impl CellJob {
         }
         checked.map_err(resolve)?;
         let value = checker.cell_value.take();
+        let returns = checker.cell_returns;
         let std_inits = self.new_std.iter().map(|&id| self.snapshot.mods[id as usize].init);
         let inits = (first..first + added).chain([session as usize]).map(|m| checker.mods[m].init);
         let inits: Vec<FnId> = std_inits.chain(inits).flatten().collect();
@@ -664,7 +666,7 @@ impl CellJob {
         let entry = entry.map_err(resolve)?;
         checker.restore_checked(cp);
         checker.release_bodies();
-        Ok((entry, value))
+        Ok((entry, value, returns))
     }
 }
 

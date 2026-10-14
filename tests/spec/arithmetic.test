@@ -155,69 +155,69 @@ print(5 >> 1)
 -4
 2
 
-=== shift out of range panics
+=== shift out of range fails
 let n = 64
 print(1 << n)
---- panic
+--- fail
 shift out of range
 
-=== negative shift panics
+=== negative shift fails
 let n = -1
 print(1 >> n)
---- panic
+--- fail
 shift out of range
 
-=== addition overflow panics
+=== addition overflow fails
 let x = 9223372036854775807
 print(x + 1)
---- panic
+--- fail
 integer overflow
 
-=== subtraction overflow panics
+=== subtraction overflow fails
 let x = -9223372036854775807
 print(x - 2)
---- panic
+--- fail
 integer overflow
 
-=== multiplication overflow panics
+=== multiplication overflow fails
 let x = 4611686018427387904
 print(x * 2)
---- panic
+--- fail
 integer overflow
 
-=== power overflow panics
+=== power overflow fails
 print(2 ** 63)
---- panic
+--- fail
 integer overflow
 
-=== negation overflow panics
+=== negation overflow fails
 let x = -9223372036854775807 - 1
 print(-x)
---- panic
+--- fail
 integer overflow
 
 === min int divided by minus one overflows
 let x = -9223372036854775807 - 1
 print(x / -1)
---- panic
+--- fail
 integer overflow
 
-=== division by zero panics
+=== division by zero fails
 let z = 0
 print(10 / z)
---- panic
+--- fail
 division by zero
 
-=== modulo by zero panics
+=== modulo by zero fails
 let z = 0
 print(10 % z)
---- panic
+--- fail
 division by zero
 
-=== negative exponent panics
+=== negative exponent fails
 let e = -1
 print(2 ** e)
---- panic
+--- fail
 negative exponent
 
 === mixing int and float is a type error
@@ -244,14 +244,14 @@ print(2.2.ceil())
 2.0
 3.0
 
-=== float to int panics on nan
+=== float to int fails on nan
 let n = 0.0 / 0.0
 print(n.to_int())
---- panic
+--- fail
 cannot convert
 
 === logical operators short circuit
-fn boom() -> bool { panic("evaluated") }
+fn boom() -> bool { fail("evaluated") }
 print(false and boom())
 print(true or boom())
 print(true and false)

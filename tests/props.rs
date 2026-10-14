@@ -121,7 +121,7 @@ proptest! {
             let r = run(&format!("let a = {}\nlet b = {}\nprint(a {op} b)\n", int_lit(a), int_lit(b)));
             match r.result {
                 Err(sandlang::Error::Runtime { message, .. }) => prop_assert!(message.contains(msg), "{} {} {}: {}", a, op, b, message),
-                other => prop_assert!(false, "expected panic for {} {} {}, got {:?}", a, op, b, other),
+                other => prop_assert!(false, "expected failure for {} {} {}, got {:?}", a, op, b, other),
             }
         }
     }

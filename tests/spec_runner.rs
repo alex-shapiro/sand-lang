@@ -14,7 +14,7 @@
 //! Sections:
 //! * `--- stdout` / `--- stderr`: exact expected output (a trailing newline is implied).
 //! * `--- error`: compile errors; each line is `LINE: substring` or `substring`.
-//! * `--- panic`: substring of the runtime error message.
+//! * `--- fail`: substring of the message of the error the run fails with.
 //! * `--- exit N`: expected exit code.
 //! * `--- stdin`: data supplied on standard input.
 //! * `--- file PATH`: an extra file written next to `main.sand`.
@@ -260,18 +260,18 @@ fn run_case(case: &Case, gc_stress: bool, backend: Backend) -> Result<(), String
         return Ok(());
     }
 
-    if let Some(expected) = get("panic") {
+    if let Some(expected) = get("fail") {
         match &result {
             Err(Error::Runtime { message, .. }) => {
                 if !message.contains(expected.trim()) {
-                    return Err(format!("panic message {message:?} does not contain {:?}", expected.trim()));
+                    return Err(format!("error message {message:?} does not contain {:?}", expected.trim()));
                 }
             }
             Err(other) => {
-                return Err(format!("expected panic {:?}, got error: {other}", expected.trim()));
+                return Err(format!("expected failure {:?}, got: {other}", expected.trim()));
             }
             Ok(_) => {
-                return Err(format!("expected panic {:?}, but run succeeded. stdout:\n{stdout}", expected.trim()));
+                return Err(format!("expected failure {:?}, but run succeeded. stdout:\n{stdout}", expected.trim()));
             }
         }
     } else if let Some(code) = case.sections.iter().find_map(|(h, _)| h.strip_prefix("exit ")) {
