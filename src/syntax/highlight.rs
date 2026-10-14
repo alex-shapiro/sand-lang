@@ -81,6 +81,9 @@ pub fn highlight(source: &str) -> Vec<(usize, usize, Highlight)> {
                     Highlight::Type
                 } else if matches!(tokens.get(i + 1), Some(n) if n.tok == Tok::LParen && n.lo == t.hi) {
                     Highlight::Call
+                } else if let Some(n) = tokens.get(i + 1).filter(|n| n.tok == Tok::Bang && n.lo == t.hi) {
+                    add(lo, n.hi as usize, Highlight::Call);
+                    continue;
                 } else {
                     continue;
                 }
@@ -144,6 +147,7 @@ mod tests {
     #[test]
     fn incomplete_source_is_highlighted() {
         assert_eq!(show("fn f() { \"unterminated"), [("fn", "keyword"), ("f", "call"), ("\"unterminated", "string")]);
+        assert_eq!(show("json!({\"a\": null})"), [("json!", "call"), ("\"a\"", "string")]);
         assert_eq!(show("/* open"), [("/* open", "comment")]);
         assert!(highlight("\"\\(\"").iter().all(|&(lo, hi, _)| lo < hi && hi <= 4));
     }

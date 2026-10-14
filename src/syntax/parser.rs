@@ -1085,6 +1085,10 @@ impl<'a> Parser<'a> {
     fn prefix(&mut self, min_bp: u8) -> PResult<Expr> {
         let lo = self.lo();
         match self.tok() {
+            Tok::Bang => {
+                self.error_here("unexpected `!`; use `not` for negation");
+                Err(())
+            }
             Tok::Not => {
                 self.bump();
                 self.enter()?;
@@ -1198,6 +1202,10 @@ impl<'a> Parser<'a> {
                 Tok::Question => {
                     self.bump();
                     e = self.mk(ExprKind::Try(Box::new(e)), self.span_from(lo));
+                }
+                Tok::Bang if !self.toks[self.pos].newline_before => {
+                    self.error_here("Sand has no postfix `!`; use `?`, `??`, or `unwrap()`");
+                    return Err(());
                 }
                 Tok::Dot => {
                     self.bump();
@@ -1406,6 +1414,12 @@ impl<'a> Parser<'a> {
                 if matches!(self.peek_tok(1), Tok::FatArrow) && !self.in_guard {
                     return self.lambda(lo);
                 }
+                if matches!(self.peek_tok(1), Tok::Bang)
+                    && (matches!(self.peek_tok(2), Tok::LParen | Tok::LBrace | Tok::LBracket)
+                        || MACROS.iter().any(|m| m.name == self.cur_text()))
+                {
+                    return self.macro_call(lo);
+                }
                 let id = self.ident("expression")?;
                 Ok(self.mk(ExprKind::Ident(id), self.span_from(lo)))
             }
@@ -1586,6 +1600,105 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(clauses)
+    }
+
+    /// `name!(data)`: a call of a data macro.
+    fn macro_call(&mut self, lo: u32) -> PResult<Expr> {
+        let name = self.ident("macro name")?;
+        self.bump();
+        let Some(mac) = MACROS.iter().find(|m| m.name == name.name) else {
+            let names: Vec<String> = MACROS.iter().map(|m| format!("`{}!`", m.name)).collect();
+            let known =
+                if names.len() == 1 { format!("the only macro is {}", names[0]) } else { format!("the macros are {}", names.join(", ")) };
+            self.errors.push(Diag::error(name.span, format!("unknown macro `{}!`; {known}", name.name)));
+            return Err(());
+        };
+        if !self.at(&Tok::LParen) {
+            self.error_here(format!("a macro call is written `{}!(...)`", name.name));
+            return Err(());
+        }
+        self.bump();
+        let saved = std::mem::replace(&mut self.no_struct, false);
+        let arg = self.data();
+        self.no_struct = saved;
+        let arg = arg?;
+        self.expect(&Tok::RParen, "`)`")?;
+        let expansion = expand_data(mac, &arg);
+        Ok(self.mk(ExprKind::Macro(Box::new(MacroCall { name, arg, expansion })), self.span_from(lo)))
+    }
+
+    /// A data macro's argument: an object, a list, `null`, or a Sand expression.
+    fn data(&mut self) -> PResult<Data> {
+        self.enter()?;
+        let r = self.data_inner();
+        self.leave();
+        r
+    }
+
+    fn data_inner(&mut self) -> PResult<Data> {
+        let lo = self.lo();
+        if self.at(&Tok::Ident) && self.cur_text() == "null" {
+            self.bump();
+            return Ok(Data::Null(self.span_from(lo)));
+        }
+        if self.eat(&Tok::LBrace) {
+            let mut entries = Vec::new();
+            loop {
+                self.skip_newlines();
+                if self.eat(&Tok::RBrace) {
+                    break;
+                }
+                let k = self.expr()?;
+                self.expect(&Tok::Colon, "`:`")?;
+                entries.push((k, self.data()?));
+                self.skip_newlines();
+                if !self.eat(&Tok::Comma) {
+                    self.skip_newlines();
+                    self.expect(&Tok::RBrace, "`,` or `}`")?;
+                    break;
+                }
+            }
+            return Ok(Data::Object(entries, self.span_from(lo)));
+        }
+        if !self.eat(&Tok::LBracket) {
+            return Ok(Data::Value(self.expr()?));
+        }
+        if self.at(&Tok::Colon) && matches!(self.peek_tok(1), Tok::RBracket) {
+            self.bump();
+            self.bump();
+            return Ok(Data::Object(Vec::new(), self.span_from(lo)));
+        }
+        if self.eat(&Tok::RBracket) {
+            return Ok(Data::List(Vec::new(), self.span_from(lo)));
+        }
+        let first = self.data()?;
+        if !self.eat(&Tok::Colon) {
+            let mut items = vec![first];
+            while self.eat(&Tok::Comma) && !self.at(&Tok::RBracket) {
+                items.push(self.data()?);
+            }
+            self.expect(&Tok::RBracket, "`,` or `]`")?;
+            return Ok(Data::List(items, self.span_from(lo)));
+        }
+        let Data::Value(k) = first else {
+            self.errors.push(Diag::error(first.span(), "an object key must be a string"));
+            return Err(());
+        };
+        let mut entries = vec![(k, self.data()?)];
+        while self.eat(&Tok::Comma) && !self.at(&Tok::RBracket) {
+            let k = self.expr()?;
+            self.expect(&Tok::Colon, "`:`")?;
+            entries.push((k, self.data()?));
+        }
+        self.expect(&Tok::RBracket, "`,` or `]`")?;
+        Ok(Data::Object(entries, self.span_from(lo)))
+    }
+
+    /// Skips the statement ends that newlines insert.
+    fn skip_newlines(&mut self) {
+        while self.at(&Tok::Semi) && self.toks[self.pos].lo == self.toks[self.pos].hi {
+            self.bump();
+        }
     }
 
     fn bracket(&mut self, lo: u32) -> PResult<Expr> {
@@ -1850,5 +1963,27 @@ impl<'a> Parser<'a> {
             }
         };
         Ok(Pattern { kind, span: self.span_from(lo) })
+    }
+}
+
+/// The expansion of a data macro's argument into calls of the macro's module.
+fn expand_data(mac: &DataMacro, d: &Data) -> Expr {
+    let span = d.span();
+    let path = |names: &[&str]| {
+        names.iter().fold(Expr { kind: ExprKind::ModuleRef(mac.module.to_string()), span }, |e, n| Expr {
+            kind: ExprKind::Field(Box::new(e), Ident { name: n.to_string(), span }),
+            span,
+        })
+    };
+    let call =
+        |callee: Expr, value: Expr| Expr { kind: ExprKind::Call { callee: Box::new(callee), args: vec![Arg { name: None, value }] }, span };
+    match d {
+        Data::Null(_) => path(mac.null),
+        Data::Value(e) => call(path(mac.value), e.clone()),
+        Data::List(xs, _) => call(path(mac.list), Expr { kind: ExprKind::List(xs.iter().map(|x| expand_data(mac, x)).collect()), span }),
+        Data::Object(kvs, _) => {
+            let pairs = kvs.iter().map(|(k, v)| (k.clone(), expand_data(mac, v))).collect();
+            call(path(mac.object), Expr { kind: ExprKind::Map(pairs), span })
+        }
     }
 }

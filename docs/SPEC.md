@@ -206,9 +206,11 @@ are encoded as UTF-8.
 ```
 +  -  *  /  %  **  &  |  ^  ~  <<  >>
 == != <  <= >  >=  =  += -= *= /= %=
-.. ..= => -> |> ?? ? . , : ; @
+.. ..= => -> |> ?? ? . , : ; @ !
 ( ) [ ] { }
 ```
+
+`!` occurs only in a macro call (§6.13). Negation is written `not`.
 
 ---
 
@@ -918,6 +920,35 @@ embedded expressions, which may have any type. Lexical rules: §2.5.
 
 `spawn e` evaluates expression `e` in a new task and returns a `Task<T>` where
 `T` is the type of `e`. Variables are captured as for lambdas. See §11.
+
+### 6.13 Macros
+
+A macro call is written `name!(argument)`, always with parentheses. The only
+macro is `json!`, which builds a `json.Json` value (§13.7) from JSON syntax
+whose values can be Sand expressions:
+
+```
+let body = json!({
+    "requests": [{"range": {"sheetId": id}, "fields": "bold"}],
+    "values": rows,
+    "note": null,
+})
+```
+
+The argument is a **data value**, one of:
+
+- an object, `{k: v, ...}` or `[k: v, ...]`, where each key `k` is an
+  expression of type `str` and each value `v` is a data value. `{}` and `[:]`
+  are empty objects;
+- an array, `[v, ...]` of data values. `[]` is an empty array;
+- `null`;
+- any other expression `e`, converted with `json.to_json(e)`. A `Json` value
+  is used as it is, and a value with no JSON form fails at run time.
+
+`json!` expands to calls of the `json` module, which it loads without an
+import; a binding named `json` does not change it. Newlines inside a data
+value do not end statements, and a trailing comma is allowed. The formatter
+writes every object with braces.
 
 ---
 
@@ -1963,6 +1994,8 @@ name, `None` → `null`, `Some(x)` → `x`; other enums: a payload-less variant
 → `"Variant"`, otherwise `{"Variant": [payload...]}` (an object for named
 payloads); `bytes` → base64 string; `duration` → nanoseconds; `Json` →
 itself.
+
+`json!` (§6.13) builds a `Json` from JSON syntax with embedded Sand values.
 
 `decode<T>` is the inverse for types built from those components. A struct
 field missing from the object takes its declared default if that is a

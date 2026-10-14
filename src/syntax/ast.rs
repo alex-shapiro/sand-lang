@@ -482,8 +482,59 @@ pub enum ExprKind {
     },
     Continue(Option<Ident>),
     Spawn(Box<Expr>),
+    /// A macro call: its source form for the formatter, and its expansion for the other passes.
+    Macro(Box<MacroCall>),
+    /// A standard module that a macro expansion names; no binding can shadow it.
+    ModuleRef(String),
     /// Placeholder produced after a parse error.
     Error,
+}
+
+/// A data macro: the standard module that its expansion calls, and the paths in it that build each kind of value.
+pub struct DataMacro {
+    pub name: &'static str,
+    pub module: &'static str,
+    pub null: &'static [&'static str],
+    pub list: &'static [&'static str],
+    pub object: &'static [&'static str],
+    pub value: &'static [&'static str],
+}
+
+/// The macros.
+pub const MACROS: [DataMacro; 1] = [DataMacro {
+    name: "json",
+    module: "json",
+    null: &["Json", "Null"],
+    list: &["Json", "Arr"],
+    object: &["Json", "Obj"],
+    value: &["to_json"],
+}];
+
+/// A call `name!(arg)` of a data macro.
+#[derive(Clone, Debug)]
+pub struct MacroCall {
+    pub name: Ident,
+    pub arg: Data,
+    pub expansion: Expr,
+}
+
+/// The argument of a data macro: JSON syntax whose values can be Sand expressions.
+#[derive(Clone, Debug)]
+pub enum Data {
+    Null(Span),
+    Value(Expr),
+    List(Vec<Data>, Span),
+    /// An object, written `{k: v}` or `[k: v]`.
+    Object(Vec<(Expr, Data)>, Span),
+}
+
+impl Data {
+    pub fn span(&self) -> Span {
+        match self {
+            Data::Null(s) | Data::List(_, s) | Data::Object(_, s) => *s,
+            Data::Value(e) => e.span,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

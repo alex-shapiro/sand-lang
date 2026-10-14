@@ -208,7 +208,7 @@ impl Checker {
 
     /// The standard, host or prelude module named `name` (whether or not
     /// the current module imports it).
-    fn module_named(&self, name: &str) -> Option<ModId> {
+    pub(crate) fn module_named(&self, name: &str) -> Option<ModId> {
         self.mods.iter().position(|m| !matches!(m.kind, ModKind::Script { .. }) && self.name(m.name) == name).map(|i| i as ModId)
     }
 

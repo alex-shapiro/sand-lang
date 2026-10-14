@@ -500,3 +500,14 @@ print(b"\xП")
 --- error
 1: invalid escape: expected two hex digits after \x
 2: invalid escape: expected two hex digits after \x
+
+=== prefix bang suggests not
+let a = !true
+--- error
+1: unexpected `!`; use `not` for negation
+
+=== postfix bang suggests unwrap
+let b: int? = 1
+let a = b!
+--- error
+2: Sand has no postfix `!`

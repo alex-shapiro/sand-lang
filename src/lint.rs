@@ -228,6 +228,7 @@ fn any_sub_expr(e: &Expr, f: &mut dyn FnMut(&Expr) -> bool) -> bool {
         ExprKind::Call { callee, args } => f(callee) || args.iter().any(|a| f(&a.value)),
         ExprKind::MethodCall { receiver, args, .. } => f(receiver) || args.iter().any(|a| f(&a.value)),
         ExprKind::Return(Some(x)) | ExprKind::Break { value: Some(x), .. } => f(x),
+        ExprKind::Macro(m) => f(&m.expansion),
         _ => false,
     }
 }
@@ -728,6 +729,7 @@ impl<'a> Linter<'a> {
                 }
             }
             ExprKind::List(xs) | ExprKind::Tuple(xs) => xs.iter().for_each(|x| self.expr(x)),
+            ExprKind::Macro(m) => self.expr(&m.expansion),
             ExprKind::Repeat(a, b) | ExprKind::Pipe(a, b) | ExprKind::Coalesce(a, b) | ExprKind::Index(a, b) => {
                 self.expr(a);
                 self.expr(b);

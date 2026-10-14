@@ -712,6 +712,11 @@ impl Checker {
                 err(span)
             }
             ExprKind::Paren(inner) => self.infer_inner(inner, hint, want),
+            ExprKind::Macro(m) => self.infer_inner(&m.expansion, hint, want),
+            ExprKind::ModuleRef(name) => {
+                self.error(span, format!("`{name}` is a module, not a value"));
+                err(span)
+            }
             ExprKind::List(items) => {
                 let elem_hint = match hint.map(|h| self.rty(h)) {
                     Some(Ty::List(t)) => Some(t),
@@ -1147,6 +1152,13 @@ impl Checker {
                     _ => None,
                 }
             }
+            ExprKind::ModuleRef(name) => match self.module_named(name) {
+                Some(m) => Some(Ns::Module(m)),
+                None => {
+                    self.error(e.span, format!("module `{name}` is not loaded"));
+                    None
+                }
+            },
             ExprKind::SelfType => match self.fs.self_ty {
                 Some(t) => Some(Ns::Type(t)),
                 None => {
