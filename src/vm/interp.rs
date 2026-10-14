@@ -285,8 +285,7 @@ pub fn float_rem(a: f64, b: f64) -> f64 {
     if r != 0.0 && ((r < 0.0) != (b < 0.0)) { r + b } else { r }
 }
 
-/// `nanos * k` truncated toward zero to whole nanoseconds.
-/// `None` if `k` is not finite or the product does not fit in a duration.
+/// The exact `nanos * k`, truncated toward zero; `None` if `k` is not finite or the product overflows.
 pub fn dur_scale(nanos: i64, k: f64) -> Option<i64> {
     if !k.is_finite() {
         return None;

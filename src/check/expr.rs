@@ -1487,9 +1487,7 @@ impl Checker {
         mk(HKind::MakeVariant { rt_id, args: hs }, enum_ty, span)
     }
 
-    /// Infers the arguments of a call that cannot be made, for their errors.
-    /// A lambda's parameters and result take the error type, so its body
-    /// reports no errors about them.
+    /// Infers the arguments of a failed call. Lambdas get error-typed parameters, so they report no extra errors.
     fn infer_args(&mut self, args: &CallArgs) {
         for a in args.exprs() {
             let hint = match &a.kind {
@@ -1937,8 +1935,7 @@ impl Checker {
         }
     }
 
-    /// Whether `t` may scale a duration: `int`, `float`, or a type parameter,
-    /// which must then be bounded by `Num`.
+    /// Whether `t` can scale a duration. A type parameter must then be `Num`.
     fn num_factor(&mut self, t: TypeId, span: Span) -> bool {
         match self.rty(t) {
             Ty::Int | Ty::Float => true,
