@@ -881,8 +881,13 @@ impl<'a> Parser<'a> {
 
     fn let_stmt(&mut self) -> PResult<Stmt> {
         let lo = self.lo();
-        let mutable = self.at(&Tok::Var);
+        let mut mutable = self.at(&Tok::Var);
         self.bump();
+        if !mutable && self.cur_text() == "mut" && matches!(self.peek_tok(1), Tok::Ident | Tok::LParen) {
+            self.error_here("Sand has no `let mut`; use `var` for a binding that can change");
+            self.bump();
+            mutable = true;
+        }
         let pattern = self.pattern()?;
         let ty = if self.eat(&Tok::Colon) { Some(self.ty()?) } else { None };
         self.expect(&Tok::Eq, "`=`")?;

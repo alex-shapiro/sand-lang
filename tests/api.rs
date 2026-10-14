@@ -78,6 +78,18 @@ fn a_failed_call_reports_nothing_about_the_lambdas_after_it() {
 }
 
 #[test]
+fn an_undefined_name_reports_nothing_about_the_types_it_hides() {
+    let src = "fn f() -> Result<int> {\n    let p = jsn.parse(\"[]\")?\n    let Some(xs) = p.get(\"a\").and_then(x => x.as_list()) else {\n        return Ok(0)\n    }\n    for x in xs {\n        print(x)\n    }\n    Ok(1)\n}\nlet rs = nope([1])\nfor r in rs {\n    print(r?)\n}";
+    match Engine::new(Config::new()).check_source("main.sand", src) {
+        Err(Error::Compile(diags)) => {
+            let messages: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
+            assert_eq!(messages, ["undefined name `nope`", "undefined name `jsn`"]);
+        }
+        other => panic!("expected compile error, got {other:?}"),
+    }
+}
+
+#[test]
 fn check_source_does_not_run() {
     let engine = Engine::new(Config::new());
     engine.check_source("main.sand", "print(1)\nlet x: int = 2").unwrap();

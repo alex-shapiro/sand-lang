@@ -644,3 +644,13 @@ let c = m.nope()
 3: no method `map` on type [str: int]; call it on `entries()`, a list of (key, value) pairs
 4: no method `sorted` on type Set<int>; call it on `to_list()`
 5: no method `nope` on type [str: int]
+
+=== mixed map values suggest a struct
+let body = ["range": "A1", "values": [["x"]]]
+--- error
+1: all values of a map have one type, so use a struct or a tuple for mixed values
+
+=== mixed list elements suggest a struct
+let xs = [1, "a"]
+--- error
+1: all elements of a list have one type, so use a struct or a tuple for mixed values

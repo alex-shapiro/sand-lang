@@ -287,7 +287,7 @@ impl Checker {
     fn not_closeable(&mut self, t: TypeId, span: Span) {
         match self.ty(t) {
             Ty::Error => {}
-            Ty::Var(_) => self.error(span, "type annotation needed: a `use` binding's type must be known where it is bound"),
+            Ty::Var(_) => self.infer_error(span, "type annotation needed: a `use` binding's type must be known where it is bound"),
             ty => {
                 let ok = match ty {
                     Ty::Named(d, args) if d == self.wk.result => Some(self.arena.elem(args, 0)),
@@ -523,7 +523,7 @@ impl Checker {
                     }
                     Ty::Error => (None, TypeId::ERROR),
                     Ty::Var(_) => {
-                        self.error(obj.span, "type annotation needed before indexing");
+                        self.infer_error(obj.span, "type annotation needed before indexing");
                         (None, TypeId::ERROR)
                     }
                     _ => {
@@ -722,7 +722,7 @@ impl Checker {
                 for it in items {
                     let h = if is_lambda(it) { elem_hint } else { None };
                     let x = self.infer(it, h.or(Some(elem)));
-                    self.expect_type(elem, x.ty, it.span);
+                    self.expect_elem(elem, x.ty, it.span, "elements of a list");
                     hs.push(x);
                 }
                 let t = self.list_ty(elem);
@@ -749,7 +749,7 @@ impl Checker {
                     let kk = self.check_expr(k, kh);
                     let h = if is_lambda(v) { vhint } else { None };
                     let vv = self.infer(v, h.or(Some(vh)));
-                    self.expect_type(vh, vv.ty, v.span);
+                    self.expect_elem(vh, vv.ty, v.span, "values of a map");
                     hs.push((kk, vv));
                 }
                 if let Some((k, _)) = pairs.first() {
@@ -792,7 +792,7 @@ impl Checker {
                     }
                     Ty::Error => err(span),
                     Ty::Var(_) => {
-                        self.error(l.span, "type annotation needed before `??`");
+                        self.infer_error(l.span, "type annotation needed before `??`");
                         err(span)
                     }
                     _ => {
@@ -828,7 +828,7 @@ impl Checker {
                     },
                     Ty::Error => err(span),
                     Ty::Var(_) => {
-                        self.error(obj.span, "type annotation needed before tuple field access");
+                        self.infer_error(obj.span, "type annotation needed before tuple field access");
                         err(span)
                     }
                     _ => {
@@ -1271,7 +1271,7 @@ impl Checker {
         match self.ty(ot) {
             Ty::Error => err(span),
             Ty::Var(_) => {
-                self.error(name.span, "type annotation needed before field access");
+                self.infer_error(name.span, "type annotation needed before field access");
                 err(span)
             }
             other => {
@@ -1516,6 +1516,17 @@ impl Checker {
     }
 
     /// Infers the arguments of a failed call. Lambdas get error-typed parameters, so they report no extra errors.
+    /// Coerces an element of a collection literal, with a hint for mixed values.
+    fn expect_elem(&mut self, expected: TypeId, found: TypeId, span: Span, what: &str) {
+        if !self.coerce(expected, found) {
+            let (e, f) = self.show_pair(expected, found);
+            self.error(
+                span,
+                format!("type mismatch: expected {e}, found {f}; all {what} have one type, so use a struct or a tuple for mixed values"),
+            );
+        }
+    }
+
     fn infer_args(&mut self, args: &CallArgs) {
         for a in args.exprs() {
             let hint = match &a.kind {
@@ -1691,7 +1702,7 @@ impl Checker {
                 return err(span);
             }
             Ty::Var(_) => {
-                self.error(method.span, format!("type annotation needed before calling `{}`", method.name));
+                self.infer_error(method.span, format!("type annotation needed before calling `{}`", method.name));
                 self.infer_args(args);
                 return err(span);
             }
@@ -2136,7 +2147,7 @@ impl Checker {
                 Ty::Bytes => SeqKind::Bytes,
                 Ty::Error => return err(span),
                 Ty::Var(_) => {
-                    self.error(obj.span, "type annotation needed before slicing");
+                    self.infer_error(obj.span, "type annotation needed before slicing");
                     return err(span);
                 }
                 _ => {
@@ -2174,7 +2185,7 @@ impl Checker {
             }
             Ty::Error => err(span),
             Ty::Var(_) => {
-                self.error(obj.span, "type annotation needed before indexing");
+                self.infer_error(obj.span, "type annotation needed before indexing");
                 err(span)
             }
             _ => {
@@ -2256,7 +2267,7 @@ impl Checker {
             }
             Ty::Error => err(span),
             Ty::Var(_) => {
-                self.error(inner.span, "type annotation needed before `?`");
+                self.infer_error(inner.span, "type annotation needed before `?`");
                 err(span)
             }
             _ => {
@@ -2366,7 +2377,7 @@ impl Checker {
             Ty::Named(d, args) if d == self.wk.channel => builtin(IterKind::Channel, self.arena.elem(args, 0)),
             Ty::Error => builtin(IterKind::List, TypeId::ERROR),
             Ty::Var(_) => {
-                self.error(span, "type annotation needed before iterating");
+                self.infer_error(span, "type annotation needed before iterating");
                 builtin(IterKind::List, TypeId::ERROR)
             }
             _ => {

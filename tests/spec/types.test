@@ -376,3 +376,14 @@ fn f() {
 4: cannot assign to `f`
 5: undefined name `y`
 6: cannot assign to a tuple element
+
+=== let mut names var
+let mut n = 1
+--- error
+1: Sand has no `let mut`; use `var`
+
+=== a binding named mut is allowed
+let mut = 2
+print(mut)
+--- stdout
+2

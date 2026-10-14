@@ -480,6 +480,8 @@ pub(crate) struct FnState {
     pub old_bound: Vec<VarId>,
     /// See [`HFn::doc_refs`].
     pub doc_refs: Vec<FnId>,
+    /// The number of errors when the function was started.
+    pub error_mark: usize,
 }
 
 /// The checker. Its tables are persistent (`persist`), so a copy is cheap:
@@ -730,6 +732,13 @@ impl Checker {
         let dup = self.diags.iter().any(|x| x.span == d.span && x.message == d.message);
         if self.diags.len() < MAX_ERRORS && !dup {
             self.diags.push(d);
+        }
+    }
+
+    /// Reports a missing type unless an earlier error in the function can be its cause.
+    pub(crate) fn infer_error(&mut self, span: Span, msg: impl Into<String>) {
+        if self.diags.len() == self.fs.error_mark {
+            self.error(span, msg);
         }
     }
 
@@ -1110,6 +1119,7 @@ impl Checker {
     fn check_module(&mut self, pm: &ParsedModule) {
         let mi = self.cur_mod;
         let first_global = self.globals.len();
+        let error_mark = self.diags.len();
         let first_fn = self.fns.len();
         let first_type = self.types.len();
         let items = &pm.ast.items;
@@ -1325,8 +1335,10 @@ impl Checker {
             if self.globals[g].module == mi {
                 let t = self.zonk(self.globals[g].ty);
                 if self.arena.has_vars(t) {
-                    let span = self.globals[g].span;
-                    self.error(span, format!("cannot infer type of `{}`; add a type annotation", self.name(self.globals[g].name)));
+                    if self.diags.len() == error_mark {
+                        let span = self.globals[g].span;
+                        self.error(span, format!("cannot infer type of `{}`; add a type annotation", self.name(self.globals[g].name)));
+                    }
                     self.globals[g].ty = TypeId::ERROR;
                 } else {
                     self.globals[g].ty = t;
@@ -1987,7 +1999,7 @@ impl Checker {
     // Bodies
 
     fn begin_fn(&mut self, generics: Vec<(Symbol, ParamId)>, self_ty: Option<TypeId>) {
-        self.fs = FnState { var_mark: self.subst.len() as VarId, ..FnState::default() };
+        self.fs = FnState { var_mark: self.subst.len() as VarId, error_mark: self.diags.len(), ..FnState::default() };
         self.fs_unused.clear();
         self.fs.generics = generics;
         self.fs.self_ty = self_ty;
@@ -2176,14 +2188,14 @@ impl Checker {
         for (t, sp) in checks {
             let z = self.zonk(t);
             if self.arena.has_vars(z) {
-                self.error(sp, "cannot infer type; add a type annotation");
+                self.infer_error(sp, "cannot infer type; add a type annotation");
             }
         }
         let reflect = std::mem::take(&mut self.fs.reflect_checks);
         for (t, sp) in reflect {
             let z = self.zonk(t);
             if self.arena.has_vars(z) || self.arena.has_params(z) {
-                self.error(sp, "cannot infer type for this call; add a type annotation");
+                self.infer_error(sp, "cannot infer type for this call; add a type annotation");
             }
         }
         // Cells are decided by the final walk.
