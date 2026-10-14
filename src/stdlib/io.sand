@@ -39,7 +39,7 @@ pub trait Reader {
                 return None
             }
             match self.read_line() {
-                Ok(Some(line)) => Some(Ok(line)),
+                Ok(Some(line)) => Some(Ok(line))
                 Ok(None) => {
                     done = true
                     None

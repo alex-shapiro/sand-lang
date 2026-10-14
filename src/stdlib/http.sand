@@ -123,6 +123,42 @@ pub fn post(
     request("POST", url, headers: headers, body: body, timeout: timeout)
 }
 
+/// Sends a `POST` request whose body is `value` as JSON, following redirects.
+pub fn post_json<T>(
+    url: str,
+    value: T,
+    headers: [(str, str)] = [],
+    timeout: duration = 30s,
+) -> Result<Response> {
+    request_json("POST", url, value, headers: headers, timeout: timeout)
+}
+
+/// Sends a request like `request` whose body is `value` as JSON, such as a
+/// `PUT` or `PATCH`. Adds `Content-Type: application/json` unless `headers`
+/// set a content type.
+pub fn request_json<T>(
+    method: str,
+    url: str,
+    value: T,
+    headers: [(str, str)] = [],
+    timeout: duration = 30s,
+    follow_redirects: bool = true,
+) -> Result<Response> {
+    let content_type = if find_header(headers, "content-type").is_some() {
+        []
+    } else {
+        [("Content-Type", "application/json")]
+    }
+    request(
+        method,
+        url,
+        headers: headers + content_type,
+        body: json.encode(value).bytes(),
+        timeout: timeout,
+        follow_redirects: follow_redirects,
+    )
+}
+
 /// Sends a request and reads the whole response. `timeout` bounds
 /// connecting and receiving the response's head (at every redirect hop),
 /// and then each wait for its body. Redirects (301, 302, 303, 307, 308)
@@ -139,7 +175,14 @@ pub fn request(
     timeout: duration = 30s,
     follow_redirects: bool = true,
 ) -> Result<Response> {
-    use s = open(method, url, headers: headers, body: body, timeout: timeout, follow_redirects: follow_redirects)?
+    use s = open(
+        method,
+        url,
+        headers: headers,
+        body: body,
+        timeout: timeout,
+        follow_redirects: follow_redirects,
+    )?
     let data = s.body.read_all()?
     Ok(Response { status: s.status, headers: s.headers, body: data, url: s.url })
 }
@@ -180,7 +223,8 @@ pub fn open(
         }
         let Some(location) = response.header("location") else { return Ok(response) }
         // Reading a short body lets its connection carry the next request.
-        if (response.header("content-length") ?? "").parse_int().unwrap_or(MAX_DRAINED + 1) <= MAX_DRAINED {
+        if (response.header("content-length") ?? "").parse_int().unwrap_or(MAX_DRAINED + 1)
+            <= MAX_DRAINED {
             let _ = response.body.read_all()
         }
         response.close()
@@ -198,7 +242,9 @@ pub fn open(
         if status == 303 and current_method != "HEAD" {
             current_method = "GET"
             current_body = b""
-            current_headers = current_headers.filter(h => not h.0.to_lower().starts_with("content-"))
+            current_headers = current_headers.filter(
+                h => not h.0.to_lower().starts_with("content-"),
+            )
         }
         current_url = next
     }

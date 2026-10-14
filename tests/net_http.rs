@@ -86,6 +86,31 @@ print(http.request("HEAD", "{base}/h")?.body.len())
 }
 
 #[test]
+fn http_json_requests() {
+    let server = http_server(|req| {
+        let types = req.headers.iter().filter(|(k, _)| k.eq_ignore_ascii_case("content-type")).count();
+        let body = String::from_utf8_lossy(&req.body).into_owned();
+        HttpResponse::new(200, format!("{} {} {} {}", req.method, req.header("content-type").unwrap_or("-"), types, body))
+    });
+    let base = format!("http://{}", server.addr);
+    let src = format!(
+        r#"
+import http
+struct Update {{
+    range: str
+    values: [[int]]
+}}
+print(http.post_json("{base}/a", Update {{ range: "A1:A3", values: [[1, 2, 3]] }})?.text()?)
+print(http.request_json("PATCH", "{base}/b", [1, 2], headers: [("content-type", "application/merge-patch+json")])?.text()?)
+"#
+    );
+    assert_eq!(
+        run_net(&src),
+        "POST application/json 1 {\"range\":\"A1:A3\",\"values\":[[1,2,3]]}\nPATCH application/merge-patch+json 1 [1,2]\n"
+    );
+}
+
+#[test]
 fn http_redirects() {
     let server = http_server(|req| match req.path() {
         "/a" => HttpResponse::new(302, "").header("Location", "/b"),

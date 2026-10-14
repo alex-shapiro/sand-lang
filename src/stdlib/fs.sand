@@ -82,11 +82,13 @@ extend File {
     pub native fn seek(self, pos: int) -> Result<()>
     /// The byte offset that the next read or write uses.
     pub native fn position(self) -> Result<int>
+
     /// Size and modification time of the file (`is_file` is true).
     pub fn metadata(self) -> Result<Metadata> {
         let (size, modified) = file_stat(self)?
         Ok(to_metadata(size, true, false, modified))
     }
+
     /// Truncates the file, or extends it with zeros, to `len` bytes.
     pub native fn set_len(self, len: int) -> Result<()>
     /// Waits until what was written is stored durably (`fsync`).

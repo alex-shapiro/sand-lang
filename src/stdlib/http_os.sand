@@ -58,7 +58,15 @@ pub struct Request {
     /// for the client's next request only if the client allows it and the
     /// request's body was read to its end.
     fn respond(self, status: int, body: bytes, headers: [(str, str)] = []) -> Result<()> {
-        let sent = write_response(self.conn, self.exchange, self.body, status, body, headers, self.method != "HEAD")
+        let sent = write_response(
+            self.conn,
+            self.exchange,
+            self.body,
+            status,
+            body,
+            headers,
+            self.method != "HEAD",
+        )
         self.close()
         sent
     }
@@ -67,7 +75,10 @@ pub struct Request {
     /// as long as a `content-length` in `headers`, or, to an HTTP/1.0 client,
     /// up to the end of the connection. Closing the reply ends the body.
     fn respond_stream(self, status: int, headers: [(str, str)] = []) -> Result<Reply> {
-        Ok(Reply { conn: self.conn, body: reply_body(self.exchange, self.body, status, headers, self.method != "HEAD")? })
+        Ok(Reply {
+            conn: self.conn,
+            body: reply_body(self.exchange, self.body, status, headers, self.method != "HEAD")?,
+        })
     }
 
     /// The (rest of the) body.
@@ -141,7 +152,12 @@ impl Close for Reply {
 /// io.copy(src, up)?
 /// use resp = up.finish()?
 /// ```
-pub fn upload(method: str, url: str, headers: [(str, str)] = [], timeout: duration = 30s) -> Result<Upload> {
+pub fn upload(
+    method: str,
+    url: str,
+    headers: [(str, str)] = [],
+    timeout: duration = 30s,
+) -> Result<Upload> {
     let (conn, body) = start_upload(method, url, headers, timeout)?
     Ok(Upload { url, conn, body, head_only: method.to_upper() == "HEAD", timeout })
 }
@@ -183,7 +199,12 @@ native type Outgoing
 /// What the response to a request needs to know about its connection.
 native type Exchange
 
-native fn start_upload(method: str, url: str, headers: [(str, str)], timeout: duration) -> Result<(net.Conn, Outgoing)>
+native fn start_upload(
+    method: str,
+    url: str,
+    headers: [(str, str)],
+    timeout: duration,
+) -> Result<(net.Conn, Outgoing)>
 
 native fn reply_body(
     exchange: Exchange,
@@ -197,11 +218,17 @@ native fn reply_body(
 native fn write_body(conn: net.Conn, body: Outgoing, data: bytes, last: bool) -> Result<()>
 
 /// Reads the response to an upload: `(status, headers, body)`.
-native fn read_response(conn: net.Conn, head_only: bool, timeout: duration) -> Result<(int, [(str, str)], Body)>
+native fn read_response(
+    conn: net.Conn,
+    head_only: bool,
+    timeout: duration,
+) -> Result<(int, [(str, str)], Body)>
 
 /// Accepts connections and reads requests' heads concurrently until one is
 /// complete: `(method, path, query, headers, body, conn, exchange)`.
-native fn next_request(server: Server) -> Result<(str, str, str, [(str, str)], Body, net.Conn, Exchange)>
+native fn next_request(
+    server: Server,
+) -> Result<(str, str, str, [(str, str)], Body, net.Conn, Exchange)>
 
 /// Writes a response (with a `content-length`) to `conn`.
 native fn write_response(
