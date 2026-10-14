@@ -1488,9 +1488,15 @@ impl Checker {
     }
 
     /// Infers the arguments of a call that cannot be made, for their errors.
+    /// A lambda's parameters and result take the error type, so its body
+    /// reports no errors about them.
     fn infer_args(&mut self, args: &CallArgs) {
         for a in args.exprs() {
-            self.infer(a, None);
+            let hint = match &a.kind {
+                ExprKind::Lambda { params, .. } => Some(self.fn_ty(&vec![TypeId::ERROR; params.len()], TypeId::ERROR)),
+                _ => None,
+            };
+            self.infer(a, hint);
         }
     }
 
@@ -1715,6 +1721,17 @@ impl Checker {
                         msg.push_str(&format!("; add a bound `{}: {t}`", self.show(rt)));
                     } else {
                         msg.push_str(&format!(" (the trait `{t}` has it but is not implemented for {})", self.show(rt)));
+                    }
+                }
+                let as_list = match self.ty(rt) {
+                    Ty::Map(..) => Some("`entries()`, a list of (key, value) pairs"),
+                    Ty::Set(_) => Some("`to_list()`"),
+                    _ => None,
+                };
+                if let Some(as_list) = as_list {
+                    let list = self.list_ty(TypeId::ERROR);
+                    if self.lookup_method(list, &method.name).is_some() {
+                        msg.push_str(&format!("; call it on {as_list}"));
                     }
                 }
                 self.error(method.span, msg);

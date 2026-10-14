@@ -633,3 +633,14 @@ print("\(arms(m, 3)) \(arms(m, 30)) \(arms(m, 99))")
 --- stdout
 hit 49 miss miss
 small 9 big 900 none
+
+=== list methods on maps and sets point to their lists
+let m = ["a": 1]
+let s = set([3, 1])
+let a = m.map((k, v) => k)
+let b = s.sorted()
+let c = m.nope()
+--- error
+3: no method `map` on type [str: int]; call it on `entries()`, a list of (key, value) pairs
+4: no method `sorted` on type Set<int>; call it on `to_list()`
+5: no method `nope` on type [str: int]

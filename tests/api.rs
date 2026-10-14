@@ -66,6 +66,18 @@ fn compile_errors_are_reported_as_diagnostics() {
 }
 
 #[test]
+fn a_failed_call_reports_nothing_about_the_lambdas_after_it() {
+    let src = "let counts = [\"a\": 2]\nlet top = counts\n    .map((k, v) => (k, v))\n    .sorted_by(t => (-t.1, t.0))\n    .take(10)";
+    match Engine::new(Config::new()).check_source("main.sand", src) {
+        Err(Error::Compile(diags)) => {
+            let messages: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
+            assert_eq!(messages, ["no method `map` on type [str: int]; call it on `entries()`, a list of (key, value) pairs"]);
+        }
+        other => panic!("expected compile error, got {other:?}"),
+    }
+}
+
+#[test]
 fn check_source_does_not_run() {
     let engine = Engine::new(Config::new());
     engine.check_source("main.sand", "print(1)\nlet x: int = 2").unwrap();
