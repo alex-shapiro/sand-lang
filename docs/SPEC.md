@@ -749,11 +749,15 @@ same `Num` type, with these additions:
   requires that it be one of these (a number, `duration`, `str`, `bytes` or a
   list) once inferred: `add(true, false)` is a compile error.
 - `duration + duration`, `duration - duration`, `-duration`,
-  `duration * k`, `k * duration` and `duration / int` produce `duration`,
+  `duration * k`, `k * duration` and `duration / k` produce `duration`,
   where `k` is any `Num` (a type parameter `k: T` needs the bound `T: Num`);
   a `float` factor gives the exact product truncated toward zero to whole
   nanoseconds, and fails (kind `overflow`) if it is not finite or
   the product is out of range;
+  a `float` divisor gives the exact quotient truncated toward zero to whole
+  nanoseconds, is `0s` if the divisor is infinite, fails (kind `invalid`)
+  if it is zero, and fails (kind `overflow`) if it is `nan` or the quotient
+  is out of range;
   `duration / duration` produces `float`.
 
 Integer semantics:

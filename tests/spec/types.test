@@ -145,10 +145,12 @@ fn scale<T>(d: duration, k: T) -> duration {
 }
 let a = 1s * "x"
 let b = 1s * 2s
+let c = 1s / "x"
 --- error
 2: type parameter `T` does not satisfy Num
 4: expected Num, found str
 5: expected Num, found duration
+6: expected Num, found str
 
 === duration and int are distinct
 let d: duration = 5

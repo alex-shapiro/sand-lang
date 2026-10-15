@@ -413,6 +413,40 @@ true
 true
 4611686018427387903
 
+=== durations divide by any Num
+fn split<T: Num>(d: duration, k: T) -> duration {
+    d / k
+}
+print(3s / 1.5)
+print(1m / -4.0)
+print(1s / 3.0)
+print(-1s / 3.0)
+print(1ns / 0.3)
+print((1ns / 1e-12).nanos())
+print(5s / inf)
+print(0s / 5e-324)
+print(split(6s, 4))
+print(split(6s, 0.5))
+let max = duration.from_nanos(int.max_value())
+let min = duration.from_nanos(int.min_value())
+print(max / 1.0 == max)
+print(min / 1.0 == min)
+print((min / 2.0).nanos())
+--- stdout
+2s
+-15s
+333.333333ms
+-333.333333ms
+3ns
+1000000000000
+0s
+0s
+1.5s
+12s
+true
+true
+-4611686018427387904
+
 === unary minus on float and bitwise not
 print(-1.5)
 print(~5)

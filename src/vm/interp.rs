@@ -290,11 +290,7 @@ pub fn dur_scale(nanos: i64, k: f64) -> Option<i64> {
     if !k.is_finite() {
         return None;
     }
-    let bits = k.to_bits();
-    let exp = ((bits >> 52) & 0x7ff) as i32;
-    let frac = (bits & ((1 << 52) - 1)) as u128;
-    // |k| == mantissa * 2^shift exactly.
-    let (mantissa, shift) = if exp == 0 { (frac, -1074) } else { (frac | 1 << 52, exp - 1075) };
+    let (mantissa, shift) = float_parts(k);
     let magnitude = u128::from(nanos.unsigned_abs()) * mantissa;
     let scaled = if magnitude == 0 {
         0
@@ -306,8 +302,51 @@ pub fn dur_scale(nanos: i64, k: f64) -> Option<i64> {
     } else {
         magnitude.checked_shr(shift.unsigned_abs()).unwrap_or(0)
     };
-    let negative = (nanos < 0) != (bits >> 63 == 1);
-    i64::try_from(if negative { -(scaled as i128) } else { scaled as i128 }).ok()
+    signed_nanos(scaled, (nanos < 0) != k.is_sign_negative())
+}
+
+/// The exact `nanos / k`, truncated toward zero; `None` if `k` is NaN or the quotient overflows.
+/// The caller rejects a zero `k`.
+pub fn dur_div(nanos: i64, k: f64) -> Option<i64> {
+    if k.is_nan() {
+        return None;
+    }
+    if k.is_infinite() || nanos == 0 {
+        return Some(0);
+    }
+    let (mantissa, shift) = float_parts(k);
+    let n = u128::from(nanos.unsigned_abs());
+    let quotient = if shift > 64 {
+        // |k| >= 2^64 > |nanos|.
+        0
+    } else if shift >= 0 {
+        n / (mantissa << shift)
+    } else {
+        // n * 2^t / mantissa, by long division in two steps so that each shift fits in u128.
+        let t = shift.unsigned_abs();
+        let (head, tail) = (t.min(64), t.saturating_sub(64));
+        let (q, r) = ((n << head) / mantissa, (n << head) % mantissa);
+        if tail == 0 {
+            q
+        } else if tail > 63 || q > (1u128 << 63) >> tail {
+            return None;
+        } else {
+            (q << tail) + (r << tail) / mantissa
+        }
+    };
+    signed_nanos(quotient, (nanos < 0) != k.is_sign_negative())
+}
+
+/// `(mantissa, shift)` with `|k| == mantissa * 2^shift` exactly, for a finite `k`.
+fn float_parts(k: f64) -> (u128, i32) {
+    let bits = k.to_bits();
+    let exp = ((bits >> 52) & 0x7ff) as i32;
+    let frac = (bits & ((1 << 52) - 1)) as u128;
+    if exp == 0 { (frac, -1074) } else { (frac | 1 << 52, exp - 1075) }
+}
+
+fn signed_nanos(magnitude: u128, negative: bool) -> Option<i64> {
+    i64::try_from(if negative { -(magnitude as i128) } else { magnitude as i128 }).ok()
 }
 
 fn shift_amount(b: i64) -> Result<u32, &'static str> {
@@ -341,6 +380,12 @@ impl Vm {
                     return Err(Ctl::fail("invalid", "division by zero"));
                 }
                 Dur(x.checked_div(y).ok_or_else(|| overflow("duration"))?)
+            }
+            (3, Dur(x), Float(y)) => {
+                if y == 0.0 {
+                    return Err(Ctl::fail("invalid", "division by zero"));
+                }
+                Dur(dur_div(x, y).ok_or_else(|| overflow("duration"))?)
             }
             (3, Dur(x), Dur(y)) => Float(x as f64 / y as f64),
             (0, Obj(_), Obj(_)) => {

@@ -86,6 +86,22 @@ print(1s * nan)
 --- fail
 duration overflow
 
+=== dividing a duration by zero fails
+let z = 0.0
+print(1s / z)
+--- fail
+division by zero
+
+=== dividing a duration by nan fails
+print(1s / nan)
+--- fail
+duration overflow
+
+=== dividing a duration beyond its range fails
+print(1s / 1e-10)
+--- fail
+duration overflow
+
 === duration division overflow fails, and does not crash the host
 let d = duration.from_nanos(int.min_value())
 print(d / -1)

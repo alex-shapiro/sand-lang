@@ -2030,7 +2030,8 @@ impl Checker {
                     self.expect_type(TypeId::DURATION, r, span);
                     TypeId::DURATION
                 }
-                Mul => {
+                Div if r == TypeId::DURATION => TypeId::FLOAT,
+                Mul | Div => {
                     if !self.num_factor(r, span) {
                         match self.rty(r) {
                             Ty::Var(_) => {
@@ -2043,11 +2044,6 @@ impl Checker {
                             }
                         }
                     }
-                    TypeId::DURATION
-                }
-                Div if r == TypeId::DURATION => TypeId::FLOAT,
-                Div => {
-                    self.expect_type(TypeId::INT, r, span);
                     TypeId::DURATION
                 }
                 _ => {
