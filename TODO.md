@@ -66,3 +66,9 @@ Follow-up work, roughly in priority order.
       blanket impls (`impl<T> X for T`).
 - [ ] Trait bounds on struct/enum type parameters.
 - [ ] Non-constant trait method defaults.
+- [ ] **Range methods.** Models write `(1..=100).sum()` and
+      `(1..=100).fold(0, (a, b) => a + b)`, and both fail with
+      `no method on type Range`. gpt-5.4 and Nemotron did so on the first try
+      in Ash Control's `sum_with_code` scenario. Give ranges the list methods
+      that do not need storage (`sum`, `fold`, `map`, `filter`, `any`, `all`,
+      `count`, `min`, `max`), or make a range convert to a list implicitly.
