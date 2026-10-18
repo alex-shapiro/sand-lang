@@ -2610,6 +2610,16 @@ let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 
   the host `send`s (`end()` ends one read); `wanted()` resolves when a script
   waits for input with nothing else to run.
 - `Config::memory_fs(MemFs)` gives scripts a memory file system (§16.1).
+- `Config::clock(Arc<dyn platform::Clock>)` replaces the operating system's
+  clocks and tokio's timers. Scripts read the time of day, the monotonic
+  clock, `uuid.v7` timestamps and their sleeps from it, and the time limits
+  are measured on it. The engine reports the fuel of each scheduling slice
+  to `Clock::work` and yields through `Clock::yield_now`, so a host can
+  simulate time and turn the engine's work into simulated time.
+- `Config::network(Arc<dyn network::Network>)` replaces the resolver and the
+  sockets of outgoing `net` and `http` connections. The policy is checked
+  as with the default network, and TLS runs in the engine over the stream
+  the network opens. Listeners still use the operating system.
 - `Config::tls_root_certificates(Vec<Vec<u8>>)` trusts additional
   DER-encoded root certificates (e.g. a private CA) besides the bundled web
   PKI roots; calls accumulate. An invalid one makes TLS connections fail
