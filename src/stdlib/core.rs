@@ -110,10 +110,11 @@ pub fn register(r: &mut Registry) {
             _ => true,
         }))
     });
-    r.add_builtin("task.sleep", |_, a| {
+    r.add_builtin("task.sleep", |vm, a| {
         let d = int(a[0]).max(0) as u64;
+        let sleep = vm.host.clock.sleep(std::time::Duration::from_nanos(d));
         Err(Ctl::suspend(Box::pin(async move {
-            crate::platform::sleep(std::time::Duration::from_nanos(d)).await;
+            sleep.await;
             Box::new(|_: &mut Vm| Ok(Value::Unit)) as crate::vm::Finisher
         })))
     });

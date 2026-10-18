@@ -7,7 +7,7 @@ use crate::diag::{Diag, Diagnostic, FileId, Span};
 use crate::files::{Fs, MemFs};
 use crate::modules::{ImportRef, ModuleGraph, Snapshot, Target, budget_error, native_info};
 use crate::native::NativeModule;
-use crate::platform::Instant;
+use crate::platform::{Clock, Instant, SystemClock};
 use crate::policy::{Capability, Decision, Policy, PromptAnswer, Prompter};
 use crate::session::Session;
 use crate::stdlib;
@@ -238,6 +238,9 @@ pub struct Config {
     pub(crate) tls: crate::stdlib::TlsSettings,
     pub(crate) fs: Fs,
     pub(crate) request_filter: Option<RequestFilter>,
+    pub(crate) clock: Arc<dyn Clock>,
+    #[cfg(feature = "os")]
+    pub(crate) network: Option<Arc<dyn crate::network::Network>>,
 }
 
 /// HTTP request destination.
@@ -281,7 +284,26 @@ impl Config {
             tls: Default::default(),
             fs: Fs::default(),
             request_filter: None,
+            clock: Arc::new(SystemClock),
+            #[cfg(feature = "os")]
+            network: None,
         }
+    }
+
+    /// Reads time from `clock` and waits through its timers, instead of the
+    /// operating system's clocks.
+    pub fn clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// Opens outgoing connections (of the `net` and `http` modules) through
+    /// `network`, instead of the operating system's resolver and sockets.
+    /// TLS still runs in the engine, over the streams that `network` opens.
+    #[cfg(feature = "os")]
+    pub fn network(mut self, network: Arc<dyn crate::network::Network>) -> Self {
+        self.network = Some(network);
+        self
     }
 
     /// Filters the headers of every HTTP request.
@@ -629,6 +651,8 @@ pub struct Engine {
     /// A copy of the snapshot's program, to compile the next program on
     /// (see [`Engine::recycle`]).
     spare: Mutex<Option<(Arc<Snapshot>, Program)>>,
+    /// The engine's first reading of its monotonic clock, which `time.Instant` counts from.
+    origin: Instant,
 }
 
 /// A compiled program.
@@ -664,7 +688,9 @@ pub(crate) fn on_compile_stack<R: Send + 'static>(f: impl FnOnce() -> Result<R, 
 impl Engine {
     pub fn new(config: Config) -> Engine {
         let registry = Registry::for_config(&config);
+        let origin = config.clock.now();
         Engine {
+            origin,
             config: Arc::new(config),
             registry,
             interrupt: Arc::new(AtomicBool::new(false)),
@@ -716,6 +742,7 @@ impl Engine {
             gc_stats: GcStats::default(),
             root: OnceLock::new(),
             spare: Mutex::default(),
+            origin: self.origin,
         })
     }
 
@@ -733,15 +760,21 @@ impl Engine {
         self.interrupt.store(false, Ordering::SeqCst);
     }
 
+    /// The clock of the engine's limits and timers.
+    pub(crate) fn clock(&self) -> &Arc<dyn Clock> {
+        &self.config.clock
+    }
+
     /// The point at which a run starting now (with its compilation)
     /// exceeds the wall-time limit.
     pub(crate) fn deadline(&self) -> Option<Instant> {
-        self.config.limits.max_wall_time.and_then(|t| Instant::now().checked_add(t))
+        self.config.limits.max_wall_time.and_then(|t| self.config.clock.now().checked_add(t))
     }
 
     /// A compile budget for a compilation that must end by `deadline`.
     pub(crate) fn compile_budget(&self, deadline: Option<Instant>) -> Arc<CompileBudget> {
         let limits = &self.config.limits;
+        let deadline = deadline.map(|at| crate::platform::Deadline { at, clock: self.config.clock.clone() });
         Arc::new(CompileBudget::new(limits.max_compile_fuel, deadline, Some(self.interrupt.clone())))
     }
 
@@ -909,10 +942,14 @@ impl Engine {
             #[cfg(feature = "os")]
             tls: c.tls.clone(),
             #[cfg(feature = "os")]
-            http_pool: crate::stdlib::HttpPool::new(c.limits.max_open_resources),
+            http_pool: crate::stdlib::HttpPool::new(c.limits.max_open_resources, c.clock.clone()),
             fs: c.fs.clone(),
             request_filter: c.request_filter.clone(),
             regex_cache: Vec::new(),
+            clock: c.clock.clone(),
+            origin: self.origin,
+            #[cfg(feature = "os")]
+            network: c.network.clone().unwrap_or_else(|| Arc::new(crate::network::OsNetwork)),
         };
         let mut vm = Vm::new(prog, self.registry.natives.clone(), host);
         vm.io = IoTable::with_shared(self.shared.clone());
@@ -1082,7 +1119,7 @@ impl Engine {
                 if self.interrupt.load(Ordering::Relaxed) {
                     return Err(Error::Interrupted);
                 }
-                if d.deadline.is_some_and(|t| Instant::now() >= t + prompted) {
+                if d.deadline.is_some_and(|t| self.config.clock.now() >= t + prompted) {
                     return Err(Error::Limit(LimitKind::WallTime));
                 }
                 Ok(())
@@ -1125,7 +1162,7 @@ impl Engine {
             if self.interrupt.load(Ordering::Relaxed) {
                 return Some(Error::Interrupted);
             }
-            if d.deadline.is_some_and(|t| Instant::now() >= t + *prompted) {
+            if d.deadline.is_some_and(|t| self.config.clock.now() >= t + *prompted) {
                 return Some(Error::Limit(LimitKind::WallTime));
             }
             if errors.len() >= MAX_DISCOVERY_ERRORS {
@@ -1218,9 +1255,9 @@ impl Engine {
                         g.modules[mi].imports.push((span, Target::Loaded(idx)));
                         continue;
                     }
-                    let asked = Instant::now();
+                    let asked = self.config.clock.now();
                     let allowed = self.check_import(&target, d.prompt).await;
-                    *prompted += asked.elapsed();
+                    *prompted += self.config.clock.now().saturating_duration_since(asked);
                     if !allowed {
                         errors.push(Diag::error(span, format!("cannot import `{p}`: permission denied")));
                         // Compilation has failed: do not prompt for further imports.

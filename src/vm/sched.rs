@@ -164,40 +164,42 @@ pub(crate) enum Stop {
     Prompt(Capability),
 }
 
-/// The clocks of a run's time limits. CPU time is read from the thread's
-/// CPU clock (`platform::cpu_time`) for the stretches between waits, during
-/// which the run stays on one thread.
-struct Clock {
+/// The readings of a run's clocks. CPU time is read from the engine's
+/// [`crate::platform::Clock`] for the stretches between waits, during which
+/// the run stays on one thread.
+struct Times {
+    clock: Arc<dyn crate::platform::Clock>,
     /// CPU time used by the run, up to `cpu_mark`.
     cpu: Duration,
     /// The thread's CPU clock when `cpu` was last brought up to date.
     cpu_mark: Duration,
-    /// The wall clock, read with the CPU clock.
+    /// The monotonic clock, read with the CPU clock.
     now: Instant,
     last_yield: Instant,
     /// Slices run and fuel spent since the clocks were last read.
     unclocked: (u32, u64),
 }
 
-impl Clock {
-    fn start() -> Clock {
-        let now = Instant::now();
-        Clock { cpu: Duration::ZERO, cpu_mark: crate::platform::cpu_time(), now, last_yield: now, unclocked: (0, 0) }
+impl Times {
+    fn start(clock: Arc<dyn crate::platform::Clock>) -> Times {
+        let now = clock.now();
+        let cpu_mark = clock.cpu_time();
+        Times { clock, cpu: Duration::ZERO, cpu_mark, now, last_yield: now, unclocked: (0, 0) }
     }
 
     /// Brings the CPU time up to date (before waiting).
     fn read(&mut self) {
-        let mark = crate::platform::cpu_time();
+        let mark = self.clock.cpu_time();
         self.cpu += mark.saturating_sub(self.cpu_mark);
         self.cpu_mark = mark;
-        self.now = Instant::now();
+        self.now = self.clock.now();
         self.unclocked = (0, 0);
     }
 
     /// Starts a stretch on (possibly) another thread, after a wait.
     fn resume(&mut self) {
-        self.cpu_mark = crate::platform::cpu_time();
-        self.now = Instant::now();
+        self.cpu_mark = self.clock.cpu_time();
+        self.now = self.clock.now();
         self.unclocked = (0, 0);
     }
 
@@ -205,6 +207,7 @@ impl Clock {
     /// `CLOCK_SLICES` slices or `SLICE_FUEL` units of fuel (tasks that
     /// finish or block quickly make slices far shorter than a reading).
     fn ran(&mut self, fuel: u64) {
+        self.clock.work(fuel);
         self.unclocked.0 += 1;
         self.unclocked.1 += fuel;
         if self.unclocked.0 >= CLOCK_SLICES || self.unclocked.1 >= SLICE_FUEL as u64 {
@@ -219,7 +222,7 @@ impl Clock {
 }
 
 impl Vm {
-    fn check_limits(&self, clock: &Clock) -> Result<(), Trap> {
+    fn check_limits(&self, clock: &Times) -> Result<(), Trap> {
         if self.host.interrupt.load(Ordering::Relaxed) {
             return Err(Trap::Interrupted);
         }
@@ -234,7 +237,7 @@ impl Vm {
         {
             return Err(Trap::Limit(LimitKind::CpuTime));
         }
-        if self.deadline.is_some_and(|d| Instant::now() >= d) {
+        if self.deadline.is_some_and(|d| clock.clock.now() >= d) {
             return Err(Trap::Limit(LimitKind::WallTime));
         }
         Ok(())
@@ -242,7 +245,7 @@ impl Vm {
 
     /// Runs the finishers of completed I/O operations, which charge the
     /// meter like natives.
-    fn apply_completions(&mut self, done: Vec<(u32, u64, Finisher)>, clock: &Clock) -> Result<(), Trap> {
+    fn apply_completions(&mut self, done: Vec<(u32, u64, Finisher)>, clock: &Times) -> Result<(), Trap> {
         if done.is_empty() {
             return Ok(());
         }
@@ -330,7 +333,7 @@ impl Vm {
     /// needs a permission prompt ([`Stop::Prompt`]). The future may be
     /// dropped where it waits: every task is then in the scheduler's tables.
     pub(crate) async fn drive(&mut self, main: Option<u32>) -> Result<Stop, Trap> {
-        let mut clock = Clock::start();
+        let mut clock = Times::start(self.host.clock.clone());
         // Where an instruction was retried after a memory limit error.
         let mut gc_retried: Option<(u32, usize, u32)> = None;
         loop {
@@ -425,7 +428,7 @@ impl Vm {
                         // Write the script's output before showing the prompt.
                         self.drain_output().map_err(Trap::from_ctl)?;
                         clock.read();
-                        let asked = Instant::now();
+                        let asked = clock.now;
                         let answer = match self.host.prompter.clone() {
                             Some(p) => {
                                 // A host interrupt stops the run while a prompt is pending.
@@ -448,7 +451,7 @@ impl Vm {
                         };
                         // Time spent waiting for the answer does not count.
                         if let Some(d) = &mut self.deadline {
-                            *d += asked.elapsed();
+                            *d += clock.clock.now().saturating_duration_since(asked);
                         }
                         clock.resume();
                         self.apply_answer(cap, answer);
@@ -482,7 +485,7 @@ impl Vm {
                     #[cfg(web)]
                     self.flush_stdout();
                     clock.read();
-                    crate::platform::yield_now().await;
+                    clock.clock.yield_now().await;
                     clock.resume();
                     clock.last_yield = clock.now;
                 }
@@ -508,7 +511,7 @@ impl Vm {
             }
             clock.read();
             let blocked = self.host.stdin_feed.as_ref().map(|f| f.blocked());
-            let mut sleep = self.deadline.map(|d| Box::pin(crate::platform::sleep(d.saturating_duration_since(Instant::now()))));
+            let mut sleep = self.deadline.map(|d| clock.clock.sleep(d.saturating_duration_since(clock.clock.now())));
             let interrupt = self.host.interrupt.clone();
             let done = std::future::poll_fn(|cx| {
                 let done = self.io.poll_ready(Some(cx.waker()));

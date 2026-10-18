@@ -2,14 +2,15 @@
 //! way to let other tasks of the host's executor run, entropy and deep
 //! stacks for the recursive compiler passes.
 //!
-//! Natively these come from the standard library and tokio. On the web
+//! An engine reads its clocks and timers through a [`Clock`]. The default,
+//! [`SystemClock`], uses the standard library and tokio. On the web
 //! (`wasm32-unknown-unknown` in a JavaScript host, `cfg(web)`) the clock and
 //! timers come from JavaScript (`performance.now()`, `Date.now()`,
 //! `setTimeout`), entropy from `crypto.getRandomValues`, and there are no
 //! threads: the compiler runs on the module's own stack, whose size is set
 //! when the WebAssembly module is linked (see `wasm/build.rs`).
 
-#[cfg(web)]
+use std::future::Future;
 use std::pin::Pin;
 #[cfg(web)]
 use std::task::{Context, Poll};
@@ -20,11 +21,86 @@ pub use std::time::{Instant, SystemTime, UNIX_EPOCH};
 #[cfg(web)]
 pub use web_time::{Instant, SystemTime, UNIX_EPOCH};
 
+/// A future that a [`Clock`] returns.
+pub type ClockFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+/// The clocks and timers of an engine.
+///
+/// A host that simulates time sets its own clock with
+/// [`Config::clock`](crate::Config::clock). The engine then reads every
+/// clock through it, waits through [`Clock::sleep`], reports its work
+/// through [`Clock::work`] and lets other tasks run through
+/// [`Clock::yield_now`]. Time limits are measured on this clock.
+pub trait Clock: Send + Sync {
+    /// The time of day.
+    fn wall(&self) -> SystemTime;
+
+    /// The current point of the monotonic clock.
+    fn now(&self) -> Instant;
+
+    /// The CPU time that the calling thread has used.
+    fn cpu_time(&self) -> Duration;
+
+    /// Waits for `duration` on the host's executor.
+    fn sleep(&self, duration: Duration) -> ClockFuture;
+
+    /// Lets the other tasks of the host's executor run. The engine calls it
+    /// about every 2 ms of [`Clock::now`] while it computes.
+    fn yield_now(&self) -> ClockFuture;
+
+    /// Records that the engine did `fuel` units of work (see
+    /// [`crate::vm::meter`]) since its last call. Called once per
+    /// scheduling slice.
+    fn work(&self, fuel: u64) {
+        let _ = fuel;
+    }
+}
+
+/// A point in time on a [`Clock`].
+#[derive(Clone)]
+pub struct Deadline {
+    pub at: Instant,
+    pub clock: std::sync::Arc<dyn Clock>,
+}
+
+impl Deadline {
+    /// Whether the clock has reached the deadline.
+    pub fn passed(&self) -> bool {
+        self.clock.now() >= self.at
+    }
+}
+
+/// The clocks of the operating system (or, on the web, of JavaScript) and the timers of tokio.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn wall(&self) -> SystemTime {
+        SystemTime::now()
+    }
+
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn cpu_time(&self) -> Duration {
+        cpu_time()
+    }
+
+    fn sleep(&self, duration: Duration) -> ClockFuture {
+        Box::pin(sleep(duration))
+    }
+
+    fn yield_now(&self) -> ClockFuture {
+        Box::pin(yield_now())
+    }
+}
+
 /// The CPU time (user and system) the calling thread has used, from the
 /// thread's CPU clock on Unix with the `os` feature. Elsewhere (Windows, the
 /// web, builds without `os`) it is the time elapsed since the first call:
 /// the CPU time limit then counts elapsed time while the engine runs.
-pub(crate) fn cpu_time() -> Duration {
+fn cpu_time() -> Duration {
     #[cfg(all(feature = "os", unix))]
     {
         let t = rustix::time::clock_gettime(rustix::time::ClockId::ThreadCPUTime);
@@ -38,13 +114,13 @@ pub(crate) fn cpu_time() -> Duration {
 }
 
 #[cfg(not(web))]
-pub(crate) async fn sleep(d: Duration) {
+async fn sleep(d: Duration) {
     tokio::time::sleep(d).await
 }
 
 /// Waits for `d` (with JavaScript timers, which wait at most 2^31 - 1 ms).
 #[cfg(web)]
-pub(crate) async fn sleep(d: Duration) {
+async fn sleep(d: Duration) {
     const MAX_MS: f64 = 2_147_483_647.0;
     let mut ms = d.as_secs_f64() * 1000.0;
     loop {
@@ -84,7 +160,7 @@ mod web {
 }
 
 /// Lets other tasks of the host's executor run.
-pub(crate) async fn yield_now() {
+async fn yield_now() {
     #[cfg(not(web))]
     tokio::task::yield_now().await;
     #[cfg(web)]

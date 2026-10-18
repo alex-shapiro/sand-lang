@@ -47,7 +47,7 @@
 use super::Ctl;
 use super::heap::Heap;
 use crate::LimitKind;
-use crate::platform::Instant;
+use crate::platform::{Clock, Deadline, Instant};
 use std::cell::Cell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -129,15 +129,16 @@ pub struct Meter {
     /// Fuel used by the run before the current slice.
     base: Cell<u64>,
     max_instructions: Option<u64>,
-    /// Where the thread's CPU clock (`platform::cpu_time`) passes the CPU
-    /// time limit, and the wall clock the wall-time limit.
+    /// Where the thread's CPU clock ([`Clock::cpu_time`]) passes the CPU
+    /// time limit, and the monotonic clock the wall-time limit.
     cpu_deadline: Cell<Option<Duration>>,
     wall_deadline: Cell<Option<Instant>>,
     interrupt: Arc<AtomicBool>,
+    clock: Arc<dyn Clock>,
 }
 
 impl Meter {
-    pub fn new(max_instructions: Option<u64>, interrupt: Arc<AtomicBool>) -> Meter {
+    pub fn new(max_instructions: Option<u64>, interrupt: Arc<AtomicBool>, clock: Arc<dyn Clock>) -> Meter {
         Meter {
             fuel: Cell::new(0),
             synced: Cell::new(0),
@@ -148,6 +149,7 @@ impl Meter {
             cpu_deadline: Cell::new(None),
             wall_deadline: Cell::new(None),
             interrupt,
+            clock,
         }
     }
 
@@ -254,10 +256,10 @@ impl Meter {
         {
             return Err(Ctl::limit(LimitKind::Instructions));
         }
-        if self.cpu_deadline.get().is_some_and(|d| crate::platform::cpu_time() >= d) {
+        if self.cpu_deadline.get().is_some_and(|d| self.clock.cpu_time() >= d) {
             return Err(Ctl::limit(LimitKind::CpuTime));
         }
-        if self.wall_deadline.get().is_some_and(|d| Instant::now() >= d) {
+        if self.wall_deadline.get().is_some_and(|d| self.clock.now() >= d) {
             return Err(Ctl::limit(LimitKind::WallTime));
         }
         Ok(())
@@ -277,7 +279,7 @@ impl Meter {
         Allowance {
             interrupt: self.interrupt.clone(),
             abandoned: Arc::new(AtomicBool::new(false)),
-            deadline: self.wall_deadline.get(),
+            deadline: self.wall_deadline.get().map(|at| Deadline { at, clock: self.clock.clone() }),
             left: self.max_instructions.map_or(u64::MAX, |max| max.saturating_sub(self.used())),
             used: 0,
             next_check: 0,
@@ -295,7 +297,7 @@ impl Meter {
 pub(crate) struct Allowance {
     interrupt: Arc<AtomicBool>,
     abandoned: Arc<AtomicBool>,
-    deadline: Option<Instant>,
+    deadline: Option<Deadline>,
     left: u64,
     used: u64,
     next_check: u64,
@@ -313,7 +315,7 @@ impl Allowance {
         self.stopped |= self.used > self.left || self.interrupt.load(Ordering::Relaxed) || self.abandoned.load(Ordering::Relaxed);
         if !self.stopped && self.used >= self.next_check {
             self.next_check = self.used.saturating_add(CHECK_INTERVAL as u64 / 16);
-            self.stopped = self.deadline.is_some_and(|d| Instant::now() >= d);
+            self.stopped = self.deadline.as_ref().is_some_and(Deadline::passed);
         }
         if self.stopped { Err(Stopped) } else { Ok(()) }
     }
@@ -387,9 +389,13 @@ mod tests {
     use super::super::{CtlKind, SLICE_FUEL};
     use super::*;
 
+    fn system() -> Arc<dyn Clock> {
+        Arc::new(crate::platform::SystemClock)
+    }
+
     #[test]
     fn charges_are_free_until_the_slice_is_spent() {
-        let m = Meter::new(Some(100_000), Arc::new(AtomicBool::new(false)));
+        let m = Meter::new(Some(100_000), Arc::new(AtomicBool::new(false)), system());
         assert_eq!(m.start_slice(None, None), SLICE_FUEL);
         assert!(m.charge(50).is_ok());
         assert_eq!((m.fuel(), m.used()), (SLICE_FUEL - 50, 50));
@@ -401,7 +407,7 @@ mod tests {
 
     #[test]
     fn the_instruction_limit_is_checked_exactly() {
-        let m = Meter::new(Some(1000), Arc::new(AtomicBool::new(false)));
+        let m = Meter::new(Some(1000), Arc::new(AtomicBool::new(false)), system());
         // The slice ends where the budget does.
         assert_eq!(m.start_slice(None, None), 1000);
         // The interpreter spends 300 units, then a native the rest.
@@ -411,14 +417,14 @@ mod tests {
         assert!(matches!(m.charge(1).map_err(Ctl::into_kind), Err(CtlKind::Limit(LimitKind::Instructions))));
         assert_eq!(m.resync(), -1);
         // Past the end of a slice, checks stay no later than the limit.
-        let m = Meter::new(Some(1_000_000), Arc::new(AtomicBool::new(false)));
+        let m = Meter::new(Some(1_000_000), Arc::new(AtomicBool::new(false)), system());
         m.start_slice(None, None);
         assert!(m.charge(SLICE_FUEL as u64 + 1).is_ok());
         assert_eq!(m.check_at.get(), -1 - CHECK_INTERVAL);
         assert!(m.charge(1_000_000 - SLICE_FUEL as u64 - 1).is_ok(), "1,000,000 units used");
         assert!(matches!(m.charge(1).map_err(Ctl::into_kind), Err(CtlKind::Limit(LimitKind::Instructions))));
         // Charges between slices count too.
-        let m = Meter::new(Some(100), Arc::new(AtomicBool::new(false)));
+        let m = Meter::new(Some(100), Arc::new(AtomicBool::new(false)), system());
         assert!(m.charge(60).is_ok());
         assert_eq!(m.start_slice(None, None), 40);
         m.reset();
@@ -428,7 +434,7 @@ mod tests {
     #[test]
     fn interrupt_is_seen_at_checkpoints() {
         let flag = Arc::new(AtomicBool::new(false));
-        let m = Meter::new(None, flag.clone());
+        let m = Meter::new(None, flag.clone(), system());
         m.start_slice(None, None);
         flag.store(true, Ordering::SeqCst);
         assert!(m.charge(5).is_ok(), "no check while fuel is left");
@@ -437,8 +443,8 @@ mod tests {
 
     #[test]
     fn deadlines() {
-        let m = Meter::new(None, Arc::new(AtomicBool::new(false)));
-        m.start_slice(Some(crate::platform::cpu_time()), None);
+        let m = Meter::new(None, Arc::new(AtomicBool::new(false)), system());
+        m.start_slice(Some(system().cpu_time()), None);
         assert!(matches!(m.charge(SLICE_FUEL as u64 + 1).map_err(Ctl::into_kind), Err(CtlKind::Limit(LimitKind::CpuTime))));
         m.start_slice(None, Some(Instant::now()));
         assert!(matches!(m.charge(SLICE_FUEL as u64 + 1).map_err(Ctl::into_kind), Err(CtlKind::Limit(LimitKind::WallTime))));

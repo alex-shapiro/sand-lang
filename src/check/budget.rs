@@ -22,7 +22,7 @@
 //! budget at a time): charging works through `&self`, and a checker holding a
 //! budget stays `Send`, which REPL sessions need to keep it between inputs.
 
-use crate::platform::Instant;
+use crate::platform::Deadline;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
@@ -110,7 +110,7 @@ pub enum Stop {
 pub struct CompileBudget {
     fuel: Counter,
     next_poll: Counter,
-    deadline: Option<Instant>,
+    deadline: Option<Deadline>,
     interrupt: Option<Arc<AtomicBool>>,
     stop: StopCell,
     /// Work done by the current exhaustiveness check.
@@ -124,7 +124,7 @@ impl Default for CompileBudget {
 }
 
 impl CompileBudget {
-    pub fn new(fuel: Option<u64>, deadline: Option<Instant>, interrupt: Option<Arc<AtomicBool>>) -> CompileBudget {
+    pub fn new(fuel: Option<u64>, deadline: Option<Deadline>, interrupt: Option<Arc<AtomicBool>>) -> CompileBudget {
         let fuel = fuel.unwrap_or(u64::MAX);
         CompileBudget {
             fuel: Counter::new(fuel),
@@ -158,7 +158,7 @@ impl CompileBudget {
             self.stop.set(Some(Stop::Interrupted));
             return false;
         }
-        if self.deadline.is_some_and(|d| Instant::now() >= d) {
+        if self.deadline.as_ref().is_some_and(Deadline::passed) {
             self.stop.set(Some(Stop::Time));
             return false;
         }
@@ -167,7 +167,7 @@ impl CompileBudget {
 
     /// A budget of `fuel` units with this budget's deadline and interrupt flag.
     pub fn with_fuel(&self, fuel: u64) -> CompileBudget {
-        CompileBudget::new(Some(fuel), self.deadline, self.interrupt.clone())
+        CompileBudget::new(Some(fuel), self.deadline.clone(), self.interrupt.clone())
     }
 
     /// Checks the deadline and interrupt flag now (between compiler phases).
@@ -220,7 +220,8 @@ mod tests {
 
     #[test]
     fn deadline_and_interrupt_are_polled() {
-        let b = CompileBudget::new(None, Some(Instant::now()), None);
+        let now = Deadline { at: crate::platform::Instant::now(), clock: Arc::new(crate::platform::SystemClock) };
+        let b = CompileBudget::new(None, Some(now), None);
         assert!(!b.charge(POLL_INTERVAL + 1));
         assert_eq!(b.stopped(), Some(Stop::Time));
         let flag = Arc::new(AtomicBool::new(true));
