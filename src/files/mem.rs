@@ -68,13 +68,13 @@ impl Shared {
     fn take(&self, n: usize) -> io::Result<()> {
         let capacity = self.capacity;
         self.used
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| used.checked_add(n).filter(|&t| t <= capacity))
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| used.checked_add(n).filter(|&t| t <= capacity))
             .map(|_| ())
             .map_err(|_| error(ErrorKind::QuotaExceeded, &format!("file system full (its capacity is {capacity} bytes)")))
     }
 
     fn give_back(&self, n: usize) {
-        let _ = self.used.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| Some(used.saturating_sub(n)));
+        let _ = self.used.try_update(Ordering::Relaxed, Ordering::Relaxed, |used| Some(used.saturating_sub(n)));
     }
 
     fn next_generation(&self) -> u64 {
