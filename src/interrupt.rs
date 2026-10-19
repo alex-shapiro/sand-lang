@@ -4,19 +4,19 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// A host's own request to stop an engine, which the engine polls wherever
-/// it checks its interrupt flag: between slices of execution, during
-/// compilation, and when it wakes while waiting. Set it with
-/// [`crate::Config::interrupt_signal`].
+/// A request from the host to stop an engine. Set it with
+/// [`crate::Config::interrupt_signal`]. The engine reads the signal where it
+/// reads its interrupt flag: between slices of execution, during
+/// compilation, and when it wakes while it waits.
 ///
-/// Polling reaches an engine that is busy on a thread the host cannot call
-/// into, such as a Web Worker whose page shares memory with it. A waiting
-/// engine does not poll until something wakes it: to stop one, also call
-/// [`crate::InterruptHandle::interrupt`].
+/// Use a signal when the engine is busy on a thread that the host cannot
+/// call into, for example a Web Worker that shares memory with its page. An
+/// engine that waits does not read the signal until something wakes it. To
+/// stop such an engine, also call [`crate::InterruptHandle::interrupt`].
 pub trait InterruptSignal: Send + Sync {
-    /// Whether the host asks the engine to stop.
+    /// Returns true if the host tells the engine to stop.
     fn is_set(&self) -> bool;
-    /// Forgets the request. The engine calls this when a run or session
+    /// Clears the request. The engine calls this when a run or a session
     /// input starts.
     fn clear(&self);
 }

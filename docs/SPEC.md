@@ -2451,13 +2451,14 @@ reports:
 | `bypassable-http-deny` | a `deny http` rule for hosts that a net rule lets scripts connect to               |
 | `unused-set`           | a `let` set that is never referenced in a rule                                     |
 
-The first two judge file and `http` rules (with the `net` rules that also
-decide http requests), wildcards included. They report a rule when removing
-it changes no decision, also when that takes several other rules to show,
-and removing every rule they report changes none either. They compare paths
-as written, without resolving symlinks. Some unneeded rules go unreported:
-those whose analysis would take too long, and rules for addresses where
-`net` rules name address ranges.
+The first two lints examine file rules and `http` rules. They also use the
+`net` rules, because `net` rules also decide http requests. Patterns can have
+wildcards. A lint reports a rule if no decision changes when you remove the
+rule. It can find this result from the effect of many rules together. If you
+remove all the rules that it reports, no decision changes. The lints compare
+paths as they are written and do not resolve symlinks. They do not report
+all unnecessary rules: they stop when the analysis of a rule takes too long,
+and they do not examine address rules when `net` rules have address ranges.
 
 `sandlang::policy::rule_for(capability, allow)` gives, as a policy file
 line, the rule that decides a promptable request for good (e.g. `allow read
@@ -2514,9 +2515,10 @@ persistent heap. Limit violations are reported to the host as distinct
 error variants and cannot be intercepted by scripts. The host may also
 interrupt an engine from another thread with an `InterruptHandle`, which
 stops compilation, bytecode, long-running library functions, and waits for
-I/O or prompt answers. A host that cannot call into the engine's thread
-gives it an `InterruptSignal` (`Config::interrupt_signal`), which the
-engine polls where it checks its limits and clears when a run or input
+I/O or prompt answers. A host can also give the engine an
+`InterruptSignal` (`Config::interrupt_signal`). Use it when the host cannot
+call into the thread of the engine. The engine reads the signal when it
+checks its limits. The engine clears the signal when a run or an input
 starts.
 
 ### 15.2 Fuel
@@ -2744,10 +2746,11 @@ standard input, with `onOutput` and `onPrompt` callbacks (requests the
 policy does not decide go to `onPrompt`, and are denied without it), `run`,
 `check`, `lint`, sessions (`eval(source, name?)`, and
 `runTasks`/`stopTasks` to run tasks between inputs), `format` and
-`highlight`. `interrupt()` reaches only a run that waits; a page stops a
-busy engine in a worker through an `interruptBuffer`, an `Int32Array` over a
-`SharedArrayBuffer` it shares with the worker (which needs cross-origin
-isolation). `playground/` is a web page built on it.
+`highlight`. `interrupt()` stops only a run that waits. To stop a busy
+engine in a worker, the page uses an `interruptBuffer`. This is an
+`Int32Array` on a `SharedArrayBuffer` that the page and the worker share.
+Shared memory needs cross-origin isolation. `playground/` is a web page that
+uses these bindings.
 
 ### 16.3 Sessions
 

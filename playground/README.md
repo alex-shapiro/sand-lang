@@ -15,11 +15,10 @@ sand playground        # serves this directory at http://127.0.0.1:8000/
 --port=PORT` serves another copy or uses another port. Any static file
 server works (`python3 -m http.server -d playground`), but not `file://`
 pages; to host it, copy the directory (with `pkg/`) to a static host. It
-needs a browser with module workers and works offline once loaded. Served
-with `Cross-Origin-Opener-Policy: same-origin` and
-`Cross-Origin-Embedder-Policy: require-corp`, as `sand playground` serves
-it, the page stops a busy program without restarting its worker; elsewhere
-■ terminates the worker.
+needs a browser with module workers and works offline after it loads.
+`sand playground` sends `Cross-Origin-Opener-Policy: same-origin` and
+`Cross-Origin-Embedder-Policy: require-corp`. With these headers, ■ stops a
+busy program and keeps its worker. Without them, ■ terminates the worker.
 
 ## Using it
 
@@ -56,11 +55,11 @@ Engine(options, hooks).session()` and evaluates the program as its first
   input (`session.eval(source, "main.sand")`); console inputs are further
   `eval`s, and between them `session.runTasks()` keeps the program's tasks
   running. Output and permission prompts are posted to the page as they
-  happen. To stop a session, the page stores 1 in the `interruptBuffer` it
-  shares with the worker, which the engine polls as it computes, and sends
-  `stop`, which interrupts an engine that waits. It terminates the worker
-  if the page is not cross-origin isolated or the run has not ended within
-  a second.
+  happen. To stop a session, the page stores 1 in the `interruptBuffer`
+  that it shares with the worker. A busy engine reads this buffer. The page
+  also sends `stop`, which interrupts an engine that waits. If the page is
+  not cross-origin isolated, or if the run does not stop in one second, the
+  page terminates the worker.
 - `sandbox.js` — what a sandbox is, without the page: its files, policy,
   environment and input, the engine options they become, and share links.
 - `editor.js` — the code editor: a textarea over a highlighted copy of its

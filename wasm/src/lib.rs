@@ -12,14 +12,15 @@
 //! thread that calls it, so long computations block that thread: run
 //! engines in Web Workers, one or more per worker, to keep a page
 //! responsive and to run several at once. A run returns to the JavaScript
-//! event loop only while it waits (for a timer or a prompt), so only then
-//! can `engine.interrupt()` reach it. To stop a busy engine, give it an
-//! `interruptBuffer`, an `Int32Array` over a `SharedArrayBuffer` the page
-//! also holds, and set it from the page with `Atomics.store(buffer, 0, 1)`.
-//! Pages share memory with workers only when cross-origin isolated (served
-//! with `Cross-Origin-Opener-Policy: same-origin` and
-//! `Cross-Origin-Embedder-Policy: require-corp`); without that, terminate the
-//! worker instead.
+//! event loop only while it waits (for a timer or a prompt). Thus
+//! `engine.interrupt()` stops only a run that waits. To stop a busy engine,
+//! give it an `interruptBuffer`: an `Int32Array` on a `SharedArrayBuffer`
+//! that the page also has. Then set the buffer from the page with
+//! `Atomics.store(buffer, 0, 1)`. A page shares memory with workers only when
+//! it is cross-origin isolated (with the headers
+//! `Cross-Origin-Opener-Policy: same-origin` and
+//! `Cross-Origin-Embedder-Policy: require-corp`). Without isolation,
+//! terminate the worker.
 //!
 //! ```js
 //! import init, { Engine } from "./pkg/sandlang_wasm.js";
@@ -66,10 +67,10 @@ export interface EngineOptions {
   /** The working directory and module root (default `/`). */
   cwd?: string;
   /**
-   * An `Int32Array` over a `SharedArrayBuffer` that stops the running script
-   * or session input when another thread stores a nonzero value in its first
-   * element (`Atomics.store(buffer, 0, 1)`), even while it computes. The
-   * engine stores 0 when each run or input starts.
+   * An `Int32Array` on a `SharedArrayBuffer`. When a different thread stores
+   * a value that is not zero in its first element (`Atomics.store(buffer, 0, 1)`),
+   * the script or session input stops, also while it computes. The engine
+   * stores 0 when each run or input starts.
    */
   interruptBuffer?: Int32Array;
 }

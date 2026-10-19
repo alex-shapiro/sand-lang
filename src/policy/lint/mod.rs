@@ -20,20 +20,21 @@ use std::rc::Rc;
 
 /// Lints a policy file (parsed as by [`super::PolicyFile::parse`]):
 ///
-/// - `redundant-rule`: a rule repeats another, or other rules already
-///   decide everything it decides the same way;
-/// - `overridden-rule`: rules that take precedence decide everything the
-///   rule covers, some the other way;
+/// - `redundant-rule`: a rule is the same as a different rule, or other
+///   rules make the same decisions as the rule;
+/// - `overridden-rule`: rules with higher precedence decide all the requests
+///   of the rule, and some of these decisions are different;
 /// - `bypassable-http-deny`: a `deny http` rule for a host that `net` rules
-///   let scripts connect to (and send it anything);
-/// - `unused-set`: a `let` set that is never referenced in a rule.
+///   let scripts connect to (a script can then send it any request);
+/// - `unused-set`: no rule uses a `let` set.
 ///
-/// The first two judge file and `http` rules, with paths compared as
-/// written (without resolving symlinks). A rule is reported if removing it
-/// changes no decision, also when it takes several other rules to show
-/// this; removing every rule reported changes none either. Some rules that
-/// could go are not reported: those whose analysis would take too long,
-/// and rules for addresses where `net` rules name address ranges.
+/// The first two lints examine file rules and `http` rules. They compare
+/// paths as they are written (they do not resolve symlinks). A lint reports
+/// a rule if no decision changes when you remove the rule, also when this
+/// result comes from many rules together. If you remove all the rules that
+/// it reports, no decision changes. Some unnecessary rules are not reported:
+/// rules whose analysis takes too long, and address rules when `net` rules
+/// have address ranges.
 pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<LintWarning>, Vec<PolicyError>> {
     let parsed = parse(text, base, home)?;
     let deny_private = !parsed.file.private_net;

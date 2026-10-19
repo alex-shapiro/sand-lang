@@ -117,6 +117,8 @@ opt-level = 2
 [profile.test]
 opt-level = 1
 
+# opt-level 3 (from `release`): `opt-level = "s"` makes the module 15%
+# smaller (brotli: 0.89 MB, not 1.05 MB) and the interpreter 40% slower in V8.
 [profile.wasm-release]
 inherits = "release"
 lto = "fat"

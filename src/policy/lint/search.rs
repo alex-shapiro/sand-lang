@@ -1,13 +1,14 @@
-//! Whether removing a rule changes a decision: a search through every kind
-//! of path the rule applies to, tracking which rule decides each with and
-//! without it.
+//! Finds if a decision changes when you remove a rule. The search examines
+//! each type of path that the rule applies to. For each path, it finds the
+//! rule that decides with the rule and without the rule.
 //!
-//! The search walks paths one name at a time. Names are not enumerated:
-//! at each step they fall into a few classes by the patterns they match
-//! (one class per name a rule spells out, plus classes for every way other
-//! names can match the wildcard patterns), and the search follows one path
-//! per class. It may consider combinations no real name produces, never
-//! the other way around: what it finds unneeded is unneeded.
+//! The search moves along paths one name at a time. It does not examine all
+//! names. At each step, it puts the names into a small number of classes: one
+//! class for each name that a rule writes in full, and classes for each
+//! combination of wildcard patterns that other names can match. The search
+//! follows one path for each class. It can examine combinations that no real
+//! name makes, but it does not miss a combination that a real name makes.
+//! Thus, if the search finds that a rule is not necessary, this is correct.
 
 use super::super::fold_name;
 use super::super::path::{Glob, Seg};

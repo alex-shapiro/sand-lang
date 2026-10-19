@@ -39,22 +39,11 @@ Follow-up work, roughly in priority order.
 - [ ] `help.test` fails with `--no-default-features` because the overview
       includes modules that require the `os` feature.
 
-### Web
-
-- [ ] Stopping a busy engine in the browser terminates its worker, since
-      `Engine::interrupt` only reaches an engine while it waits. With
-      cross-origin isolation (COOP/COEP), the interrupt flag could live in a
-      `SharedArrayBuffer` the page sets directly.
-- [ ] WebAssembly size: the `wasm-release` profile gives 3.3 MB before
-      wasm-opt, `opt-level = "s"` 2.8 MB at similar speed. Measure on a
-      quiet machine and choose.
-
 ### Tooling
 
-- [ ] Policy lints judge `http` rules only by their exact text (and
-      `bypassable-http-deny`); rules with wildcards in hosts or paths could
-      be compared as file rules are. A rule made unnecessary only by several
-      other rules together is not reported.
+- [ ] Policy lints do not examine `net`, `listen`, `env` and `custom`
+      rules. They also do not examine address rules when `net` rules have
+      address ranges (`10.0.0.0/8`).
 
 ### Performance
 
