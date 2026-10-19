@@ -490,9 +490,7 @@ impl Checker {
         items.into_iter().map(|(n, b)| (n, b.def)).collect()
     }
 
-    /// The names bound in module `m` (only its public ones, with `public`).
-    /// `: add `import m`` for a name that is a standard module, or a public
-    /// item of one, that the current module does not import.
+    /// Returns a diagnostic hint if `name` matches an unimported module or standard-library function.
     pub(crate) fn import_hint(&self, name: &str) -> String {
         if self.module_index.iter().any(|(m, _)| m == name) {
             return format!(": add `import {name}`");
@@ -1061,7 +1059,6 @@ pub(crate) fn summary(doc: &str) -> String {
     text[..end].to_string()
 }
 
-/// The names of the top-level public functions declared in `src`.
 pub(crate) fn public_functions(src: &str) -> Vec<String> {
     src.lines()
         .filter_map(|l| l.strip_prefix("pub fn ").or_else(|| l.strip_prefix("pub native fn ")))

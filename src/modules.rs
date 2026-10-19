@@ -215,7 +215,7 @@ fn load_registered(
                     }
                 }
             }
-            ImportRef::Help(..) => unreachable!("not an import declaration"),
+            ImportRef::Implicit(..) => unreachable!("not an import declaration"),
             ImportRef::Path(_, span) => {
                 ok = false;
                 if *kind != ModKind::Host {
@@ -231,26 +231,23 @@ fn load_registered(
     ok || *kind != ModKind::Host
 }
 
-/// An import declaration: of a standard or host module by name, or of a
-/// script by path, with the span of the name or path. `Help` is a name that
-/// starts the argument of `help` or `members`: the module of that name, if
-/// there is one, is loaded (and checked) but not bound.
 #[derive(Clone, Debug)]
 pub(crate) enum ImportRef {
     Name(String, Span),
     Path(String, Span),
-    Help(String, Span),
+    /// A module referenced implicitly by `help`, `members`, a `test` block, or a macro.
+    /// If the module exists, the engine loads and checks it without binding its name.
+    Implicit(String, Span),
 }
 
 impl ImportRef {
     fn span(&self) -> Span {
         match self {
-            ImportRef::Name(_, s) | ImportRef::Path(_, s) | ImportRef::Help(_, s) => *s,
+            ImportRef::Name(_, s) | ImportRef::Path(_, s) | ImportRef::Implicit(_, s) => *s,
         }
     }
 }
 
-/// The imports of a syntax tree, by item index.
 fn import_refs(m: &ast::Module) -> Vec<(usize, ImportRef)> {
     let mut out = Vec::new();
     for (i, item) in m.items.iter().enumerate() {
@@ -265,10 +262,7 @@ fn import_refs(m: &ast::Module) -> Vec<(usize, ImportRef)> {
     out
 }
 
-/// Finds the import declarations of a module, the modules named by
-/// `help` and `members` (`help(json)`, `help("json.Json")`), and the modules
-/// that macros use, with the lexer only (which, unlike the parser, needs no
-/// deep stack).
+/// Scans `text` with the lexer to collect explicit and implicit module imports.
 pub(crate) fn scan_imports(text: &str, file: FileId) -> Vec<ImportRef> {
     let toks = lex(text, file).tokens;
     let mut out = Vec::new();
@@ -288,23 +282,22 @@ pub(crate) fn scan_imports(text: &str, file: FileId) -> Vec<ImportRef> {
                 _ => None,
             };
             if let Some(name) = name.filter(|n| !n.is_empty()) {
-                out.push(ImportRef::Help(name.to_string(), Span::new(file, arg.lo, arg.hi)));
+                out.push(ImportRef::Implicit(name.to_string(), Span::new(file, arg.lo, arg.hi)));
             }
         }
-        // A test block may name the `test` module without importing it.
         if toks[i].tok == Tok::Ident
             && depth == 0
             && at_start
             && word(&toks[i]) == "test"
             && toks.get(i + 1).is_some_and(|t| matches!(t.tok, Tok::Str(_)))
         {
-            out.push(ImportRef::Help("test".to_string(), Span::new(file, toks[i].lo, toks[i].hi)));
+            out.push(ImportRef::Implicit("test".to_string(), Span::new(file, toks[i].lo, toks[i].hi)));
         }
         if toks[i].tok == Tok::Ident
             && toks.get(i + 1).is_some_and(|t| t.tok == Tok::Bang)
             && let Some(m) = crate::syntax::ast::MACROS.iter().find(|m| m.name == word(&toks[i]))
         {
-            out.push(ImportRef::Help(m.module.to_string(), Span::new(file, toks[i].lo, toks[i].hi)));
+            out.push(ImportRef::Implicit(m.module.to_string(), Span::new(file, toks[i].lo, toks[i].hi)));
         }
         match &toks[i].tok {
             Tok::LParen | Tok::LBracket | Tok::LBrace => depth += 1,
@@ -347,7 +340,7 @@ pub(crate) struct LoadedModule {
     pub kind: ModKind,
     /// The directory relative imports start from (scripts).
     pub dir: Option<PathBuf>,
-    /// The file it was loaded from (imported scripts).
+    /// Resolved file path for an imported script module.
     pub path: Option<PathBuf>,
     /// The modules it imports, by the span of their name or path in its
     /// import declarations.

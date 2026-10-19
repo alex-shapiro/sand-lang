@@ -80,9 +80,7 @@ pub enum SeqKind {
 pub enum TryKind {
     Option,
     Result,
-    /// `?` on a `Result` at the top level of the main module or in a test.
-    TopLevel,
-    /// `?` on an `Option` at the top level of the main module or in a test.
+    TopLevelResult,
     TopLevelOption,
 }
 

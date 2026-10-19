@@ -378,8 +378,8 @@ impl Config {
         self.module_root = Some(p.as_ref().to_path_buf());
         self
     }
-    /// Sets the library: a directory of script modules that `import name`
-    /// loads (as `<dir>/name.sand`) when no standard or host module has that name.
+    /// Sets the fallback directory for `import <name>`. If `<name>` does not
+    /// match a standard or host module, the engine loads `<dir>/<name>.sand`.
     pub fn library(mut self, dir: impl AsRef<Path>) -> Self {
         self.library = Some(dir.as_ref().to_path_buf());
         self
@@ -716,7 +716,7 @@ impl Engine {
         }
     }
 
-    /// The names of the standard and host modules that scripts import by name.
+    /// Returns the sorted names of all registered standard and host modules.
     pub fn module_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.registry.sources.keys().filter(|n| *n != "prelude").map(|n| n.to_string()).collect();
         names.sort_unstable();
@@ -1174,8 +1174,7 @@ impl Engine {
         // the keys of the modules on it (to detect cycles).
         let mut stack: Vec<ImportFrame> = vec![(start, imports, 0)];
         let mut path_stack: Vec<String> = vec![key];
-        // Whether a module loaded by an earlier session input is stale, by module index.
-        let mut stale: HashMap<usize, bool> = HashMap::new();
+        let mut stale_cache: HashMap<usize, bool> = HashMap::new();
         while let Some((mi, imports, pos)) = stack.pop() {
             if self.interrupt.load(Ordering::Relaxed) {
                 return Some(Error::Interrupted);
@@ -1193,17 +1192,15 @@ impl Engine {
             }
             let imp = imports[pos].clone();
             stack.push((mi, imports, pos + 1));
-            let optional = matches!(imp, ImportRef::Help(..));
-            let script = match imp {
-                ImportRef::Name(name, span) | ImportRef::Help(name, span) => {
+            let optional = matches!(imp, ImportRef::Implicit(..));
+            let script_import = match imp {
+                ImportRef::Name(name, span) | ImportRef::Implicit(name, span) => {
                     let registered = self.registry.sources.get(name.as_str()).filter(|_| name != "prelude");
                     if let Some(id) = d.snap.module(&name).filter(|_| name != "prelude") {
                         g.use_std(d.snap, id);
                         g.modules[mi].imports.push((span, Target::Snapshot(id)));
                         None
                     } else if let Some(&(kind, ref src)) = registered {
-                        // A module that is not in the snapshot: a host module
-                        // with errors, or a standard module not in the core.
                         let key = format!("std:{name}");
                         if path_stack.contains(&key) {
                             errors.push(Diag::error(span, format!("import cycle through module `{name}`")));
@@ -1221,7 +1218,7 @@ impl Engine {
                         stack.push((idx, imports, 0));
                         None
                     } else {
-                        let library = match self.library_module(d, *prompted, &name) {
+                        let library = match self.resolve_library_module(d, *prompted, &name) {
                             Ok(found) => found,
                             Err(e) => return Some(e),
                         };
@@ -1260,21 +1257,21 @@ impl Engine {
                     if target.extension().is_none() {
                         target.set_extension("sand");
                     }
-                    // Only scripts: a diagnostic would quote other files.
+                    // Reject non-`.sand` paths before reading so diagnostics do not quote arbitrary files.
                     if target.extension().is_none_or(|e| e != "sand") {
                         errors.push(Diag::error(span, format!("cannot import `{p}`: script modules are `.sand` files")));
                         continue;
                     }
-                    match self.discovery_io(d, *prompted, self.script_target(&target)) {
+                    match self.discovery_io(d, *prompted, self.resolve_script_target(&target)) {
                         Ok(t) => Some((t, p, span, true)),
                         Err(e) => return Some(e),
                     }
                 }
             };
-            let Some((resolved, p, span, under_root)) = script else { continue };
+            let Some((resolved, import_label, span, require_module_root)) = script_import else { continue };
             let target = resolved.path.clone();
-            if under_root && !target.starts_with(d.root) {
-                errors.push(Diag::error(span, format!("cannot import `{p}`: the path is outside the module root")));
+            if require_module_root && !target.starts_with(d.root) {
+                errors.push(Diag::error(span, format!("cannot import `{import_label}`: the path is outside the module root")));
                 continue;
             }
             let key = format!("file:{}", target.display());
@@ -1284,8 +1281,7 @@ impl Engine {
                 continue;
             }
             if let Some(&idx) = g.index.get(&key) {
-                // A module from an earlier session input is loaded again if its source has changed since.
-                match self.stale(d, *prompted, g, idx, start, &mut stale) {
+                match self.is_module_stale(d, *prompted, g, idx, start, &mut stale_cache) {
                     Ok(false) => {
                         g.modules[mi].imports.push((span, Target::Loaded(idx)));
                         continue;
@@ -1298,17 +1294,16 @@ impl Engine {
             let allowed = self.check_import(&target, d.prompt).await;
             *prompted += self.config.clock.now().saturating_duration_since(asked);
             if !allowed {
-                errors.push(Diag::error(span, format!("cannot import `{p}`: permission denied")));
-                // Compilation has failed: do not prompt for further imports.
+                errors.push(Diag::error(span, format!("cannot import `{import_label}`: permission denied")));
+                // Stop after a denied import to avoid prompting for remaining imports.
                 break;
             }
-            // Read the checked file without following symlinks swapped in since.
             let (fs, max) = (self.config.fs.clone(), self.config.limits.max_source_bytes);
             let text = match self.discovery_io(d, *prompted, move || fs.read_source(resolved, max)) {
                 Ok(Ok(t)) => t,
                 Err(e) => return Some(e),
                 Ok(Err(e)) => {
-                    errors.push(Diag::error(span, format!("cannot load module `{p}`: {e}")));
+                    errors.push(Diag::error(span, format!("cannot load module `{import_label}`: {e}")));
                     continue;
                 }
             };
@@ -1316,7 +1311,7 @@ impl Engine {
             if g.source_bytes > self.config.limits.max_source_bytes {
                 errors.push(Diag::error(
                     span,
-                    format!("cannot load module `{p}`: source too large (the program's sources exceed the limit in total)"),
+                    format!("cannot load module `{import_label}`: source too large (the program's sources exceed the limit in total)"),
                 ));
                 continue;
             }
@@ -1333,24 +1328,22 @@ impl Engine {
         None
     }
 
-    /// A job that resolves the script path `target` to the file it names.
-    fn script_target(&self, target: &Path) -> impl FnOnce() -> crate::files::Target + Send + 'static {
-        let (fs, lexical) = (self.config.fs.clone(), crate::policy::lexical(target));
+    fn resolve_script_target(&self, path: &Path) -> impl FnOnce() -> crate::files::Target + Send + 'static {
+        let (fs, lexical) = (self.config.fs.clone(), crate::policy::lexical(path));
         move || {
             let mut t = fs.target(&lexical, crate::files::Mode::Follow);
-            // Modules are identified by path, so use the name as stored on disk.
+            // Normalize path casing so that case-insensitive imports share a single module key.
             t.fix_spelling();
             t
         }
     }
 
-    /// The script that the import of module `name` loads from the library, if the library has it.
-    fn library_module(&self, d: &Discovery<'_>, prompted: Duration, name: &str) -> Result<Option<crate::files::Target>, Error> {
+    fn resolve_library_module(&self, d: &Discovery<'_>, prompted: Duration, name: &str) -> Result<Option<crate::files::Target>, Error> {
         let Some(library) = &self.config.library else { return Ok(None) };
         if !crate::check::help::is_ident(name) {
             return Ok(None);
         }
-        let resolve = self.script_target(&self.config.fs.absolute(library).join(format!("{name}.sand")));
+        let resolve = self.resolve_script_target(&self.config.fs.absolute(library).join(format!("{name}.sand")));
         let fs = self.config.fs.clone();
         self.discovery_io(d, prompted, move || {
             let t = resolve();
@@ -1358,26 +1351,26 @@ impl Engine {
         })
     }
 
-    /// Whether module `idx`, or a module it imports, was loaded before
-    /// module `fresh` and its file has changed since.
-    fn stale(
+    /// Returns true if module `idx` was loaded in an earlier compilation and its
+    /// source file or a transitive dependency has changed.
+    fn is_module_stale(
         &self,
         d: &Discovery<'_>,
         prompted: Duration,
         g: &ModuleGraph,
         idx: usize,
-        fresh: usize,
-        memo: &mut HashMap<usize, bool>,
+        first_new_module: usize,
+        stale_cache: &mut HashMap<usize, bool>,
     ) -> Result<bool, Error> {
-        if idx >= fresh {
+        if idx >= first_new_module {
             return Ok(false);
         }
-        if let Some(&known) = memo.get(&idx) {
+        if let Some(&known) = stale_cache.get(&idx) {
             return Ok(known);
         }
         let m = &g.modules[idx];
         let Some(path) = m.path.clone() else { return Ok(false) };
-        let (resolve, fs, max) = (self.script_target(&path), self.config.fs.clone(), self.config.limits.max_source_bytes);
+        let (resolve, fs, max) = (self.resolve_script_target(&path), self.config.fs.clone(), self.config.limits.max_source_bytes);
         let current = self.discovery_io(d, prompted, move || fs.read_source(resolve(), max).ok())?;
         let mut changed = current.as_deref() != Some(g.sm.text(m.file));
         for &(_, target) in &m.imports {
@@ -1385,10 +1378,10 @@ impl Engine {
                 break;
             }
             if let Target::Loaded(dep) = target {
-                changed = self.stale(d, prompted, g, dep, fresh, memo)?;
+                changed = self.is_module_stale(d, prompted, g, dep, first_new_module, stale_cache)?;
             }
         }
-        memo.insert(idx, changed);
+        stale_cache.insert(idx, changed);
         Ok(changed)
     }
 }

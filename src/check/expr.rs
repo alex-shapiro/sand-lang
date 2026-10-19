@@ -278,7 +278,7 @@ impl Checker {
         let pat = HPat { kind: HPatKind::Bind(local), ty: t, span };
         let bind = mk(HKind::Let { pat, init: Box::new(h), else_: None }, TypeId::UNIT, span);
         let read = || Box::new(mk(HKind::Local(local), t, span));
-        let fail = mk(HKind::Try { e: read(), kind: TryKind::TopLevel }, ok, span);
+        let fail = mk(HKind::Try { e: read(), kind: TryKind::TopLevelResult }, ok, span);
         let ret = mk(HKind::Return(Some(read())), TypeId::NEVER, span);
         mk(HKind::Block(vec![bind, fail, ret]), TypeId::NEVER, span)
     }
@@ -2252,7 +2252,7 @@ impl Checker {
             Ty::Named(d, args) if d == self.wk.result => {
                 let err_ty = self.arena.elem(args, 1);
                 let kind = match ctx_kind {
-                    CtxKind::TopLevel { main: true } | CtxKind::Test => TryKind::TopLevel,
+                    CtxKind::TopLevel { main: true } | CtxKind::Test => TryKind::TopLevelResult,
                     CtxKind::TopLevel { main: false } => {
                         self.error(span, "`?` is not allowed at the top level of an imported module");
                         return err(span);

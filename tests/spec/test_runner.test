@@ -149,20 +149,20 @@ ok parses
 FAIL does not parse: parse: unexpected end of input at line 1, column 3
 1 passed, 1 failed
 
-=== a test needs a name
+=== reject unnamed test block
 test {
     assert(true)
 }
 --- error
-1: a test needs a name: `test "what it checks" { ... }`
+1: expected a test name: `test "..." { ... }`
 
-=== imports belong at the top level
+=== reject import inside a block
 test "t" {
     import test
     test.assert_true(true)
 }
 --- error
-2: an import goes at the top level of a module, not in a block; test blocks can use `test` without an import
+2: `import` is only allowed at the top level; `test` is already in scope in test blocks
 
 === test blocks use the test module without an import
 fn double(x: int) -> int { x * 2 }

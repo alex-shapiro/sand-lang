@@ -252,7 +252,7 @@ fn imports_mid_session() {
 }
 
 #[test]
-fn library_modules_import_by_name() {
+fn import_library_module_by_name() {
     let dir = TempDir::new("session-library");
     dir.write("tools/geo.sand", "import units\npub fn area(w: float, h: float) -> float { units.scale(w * h) }\n");
     dir.write("tools/units.sand", "pub fn scale(x: float) -> float { x * 2.0 }\n");
@@ -269,7 +269,7 @@ fn library_modules_import_by_name() {
 }
 
 #[test]
-fn library_imports_are_checked_against_the_policy() {
+fn check_library_import_policy() {
     let dir = TempDir::new("session-library-policy");
     dir.write("tools/geo.sand", "pub fn one() -> int { 1 }\n");
     let library = dir.path().join("tools");
@@ -280,7 +280,7 @@ fn library_imports_are_checked_against_the_policy() {
 }
 
 #[test]
-fn a_changed_module_is_loaded_again_on_its_next_import() {
+fn reload_modified_module_on_import() {
     let dir = TempDir::new("session-reload");
     dir.write("tools/geo.sand", "import units\npub fn area() -> float { units.scale(1.0) }\nprint(\"geo v1\")\n");
     dir.write("tools/units.sand", "pub fn scale(x: float) -> float { x * 2.0 }\n");

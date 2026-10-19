@@ -397,10 +397,7 @@ pub(crate) struct FnCtx {
 pub(crate) enum CtxKind {
     Function,
     Lambda,
-    TopLevel {
-        main: bool,
-    },
-    /// A `test` block, where a failed `?` on a Result fails the test.
+    TopLevel { main: bool },
     Test,
 }
 
@@ -512,7 +509,7 @@ pub struct Checker {
     /// The modules scripts can import by name, with the summaries of their
     /// docs (for `help()`).
     pub module_index: Arc<[(String, String)]>,
-    /// The public functions of those modules, by name, with the module that declares them.
+    /// Maps each public standard-library function name to the module that defines it.
     pub module_exports: Arc<HashMap<String, String>>,
     pub variants: PVec<(TypeDefId, u32)>,
     /// The bindings of the inference variables of the module being checked
