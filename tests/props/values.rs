@@ -201,6 +201,7 @@ enum J {
     Null,
     Bool(bool),
     Int(i64),
+    Float(f64),
     Str(String),
     Arr(Vec<J>),
     Obj(Vec<(String, J)>),
@@ -210,8 +211,8 @@ fn json_value() -> impl Strategy<Value = J> {
     let leaf = prop_oneof![
         Just(J::Null),
         any::<bool>().prop_map(J::Bool),
-        // JSON numbers are decoded as `f64`, which represents integers up to 2^53 exactly.
-        int().prop_filter("exact as a float", |i| i.unsigned_abs() <= 1 << 53).prop_map(J::Int),
+        int().prop_map(J::Int),
+        any::<f64>().prop_filter("finite", |f| f.is_finite()).prop_map(J::Float),
         "[a-z \"\\\\é\n]{0,8}".prop_map(J::Str),
     ];
     leaf.prop_recursive(4, 32, 5, |inner| {
@@ -227,6 +228,8 @@ fn render_json(j: &J) -> String {
         J::Null => "null".into(),
         J::Bool(b) => b.to_string(),
         J::Int(i) => i.to_string(),
+        // As Sand encodes floats: with a fraction or an exponent.
+        J::Float(f) => format!("{f:?}"),
         J::Str(s) => {
             let mut out = String::from("\"");
             for c in s.chars() {

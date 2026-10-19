@@ -33,19 +33,21 @@ fn describe(j: json.Json) -> str {
     match j {
         Null => "null"
         Bool(b) => "bool \(b)"
-        Num(n) => "num \(n)"
+        Int(i) => "int \(i)"
+        Float(f) => "float \(f)"
         Str(s) => "str \(s)"
         Arr(items) => "arr of \(items.len())"
         Obj(fields) => "obj with \(fields.len())"
     }
 }
-for text in ["null", "true", "1.5", "\"x\"", "[1,2]", "{\"a\":1}"] {
+for text in ["null", "true", "7", "1.5", "\"x\"", "[1,2]", "{\"a\":1}"] {
     print(describe(json.parse(text)?))
 }
 --- stdout
 null
 bool true
-num 1.5
+int 7
+float 1.5
 str x
 arr of 2
 obj with 1
@@ -112,11 +114,33 @@ nesting too deep at line 1, column 513
 
 === numbers
 import json
-print(json.encode(json.parse("[0, -1, 1e3, 1.5e-2, 123456789012]")?))
-print(json.encode(json.Json.Num(0.0 / 0.0)))
+print(json.encode(json.parse("[0, -1, 1e3, 1.5e-2, 123456789012, 2.0]")?))
+print(json.encode(json.Json.Float(0.0 / 0.0)))
+print(json.encode([1.0, 2.5, 1e20, -0.0]))
 --- stdout
-[0,-1,1000,0.015,123456789012]
+[0,-1,1000.0,0.015,123456789012,2.0]
 null
+[1.0,2.5,1e20,-0.0]
+
+=== integers keep every digit
+import json
+let j = json.parse("[9007199254740993, -9223372036854775808, 9223372036854775807, 18446744073709551616, -0, 1.0]")?
+print(j)
+print(json.encode(j))
+print(json.parse(json.encode(j))? == j)
+let xs = j.as_list().unwrap()
+print(xs.map(x => x.as_int()))
+print(xs.map(x => x.as_float()))
+print(json.parse("1e300")?.as_int())
+print(json!({"id": 9007199254740993, "ms": 1500ms}))
+--- stdout
+Arr([Int(9007199254740993), Int(-9223372036854775808), Int(9223372036854775807), Float(1.8446744073709552e19), Float(-0.0), Float(1.0)])
+[9007199254740993,-9223372036854775808,9223372036854775807,1.8446744073709552e19,-0.0,1.0]
+true
+[Some(9007199254740993), Some(-9223372036854775808), Some(9223372036854775807), None, Some(0), Some(1)]
+[Some(9007199254740992.0), Some(-9.223372036854776e18), Some(9.223372036854776e18), Some(1.8446744073709552e19), Some(-0.0), Some(1.0)]
+None
+Obj(["id": Int(9007199254740993), "ms": Int(1500000000)])
 
 === encode arbitrary values
 import json
@@ -214,13 +238,13 @@ import json
 let j = json.to_json(["a": [1, 2]])
 print(j.path("a.1"))
 --- stdout
-Some(Num(2.0))
+Some(Int(2))
 
 === json values print readably
 import json
 print(json.parse("[1, {\"a\": null}]")?)
 --- stdout
-Arr([Num(1.0), Obj(["a": Null])])
+Arr([Int(1), Obj(["a": Null])])
 
 === json with options, single-payload enums and nested variants
 import json
@@ -260,7 +284,8 @@ match j {
             json.Json.Arr(items) => {
                 for it in items {
                     match it {
-                        json.Json.Num(n) => print("num \(n)")
+                        json.Json.Int(i) => print("int \(i)")
+                        json.Json.Float(f) => print("float \(f)")
                         json.Json.Str(s) => print("str \(s)")
                         json.Json.Bool(b) => print("bool \(b)")
                         json.Json.Null => print("null")
@@ -283,8 +308,8 @@ print(json.to_json(Some([1, 2])))
 Ok(Doc { name: "d", tag: Some("t"), shape: Nested(Circle(1.5)), shapes: [Label("x"), Pair(1, 2), Empty, Nested(Empty)], count: None, flags: [Some(true), None] })
 true
 3
-[{"Circle":[1]},{"Label":["q"]}]
-Obj(["a": Arr([Num(1.0), Num(2.5), Str("s"), Bool(true), Null, Obj(["b": Arr([])])]), "c": Obj(["d": Null])])
+[{"Circle":[1.0]},{"Label":["q"]}]
+Obj(["a": Arr([Int(1), Float(2.5), Str("s"), Bool(true), Null, Obj(["b": Arr([])])]), "c": Obj(["d": Null])])
 {"a":[1,2.5,"s",true,null,{"b":[]}],"c":{"d":null}}
 {
   "a": [
@@ -301,15 +326,15 @@ Obj(["a": Arr([Num(1.0), Num(2.5), Str("s"), Bool(true), Null, Obj(["b": Arr([])
     "d": null
   }
 }
-num 1.0
-num 2.5
+int 1
+float 2.5
 str s
 bool true
 null
 other Obj(["b": Arr([])])
 Ok([Some(1), None, Some(3)])
 Ok(Nested(Circle(2.0)))
-Arr([Num(1.0), Num(2.0)])
+Arr([Int(1), Int(2)])
 
 === json macro builds nested values from JSON syntax and Sand values
 import json
