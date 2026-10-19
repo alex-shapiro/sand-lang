@@ -102,7 +102,6 @@ tokens! {
         False "false" ENDS,
         Fn "fn" 0,
         For "for" 0,
-        From "from" 0,
         If "if" 0,
         Impl "impl" 0,
         Import "import" 0,

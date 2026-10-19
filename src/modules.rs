@@ -300,7 +300,14 @@ pub(crate) fn scan_imports(text: &str, file: FileId) -> Vec<ImportRef> {
         match &toks[i].tok {
             Tok::LParen | Tok::LBracket | Tok::LBrace => depth += 1,
             Tok::RParen | Tok::RBracket | Tok::RBrace => depth -= 1,
-            Tok::Import | Tok::From if depth == 0 && at_start => {
+            Tok::Import | Tok::Ident
+                if depth == 0
+                    && at_start
+                    && (toks[i].tok == Tok::Import
+                        || (word(&toks[i]) == "from"
+                            && toks.get(i + 1).is_some_and(|t| matches!(t.tok, Tok::Ident | Tok::Str(_)))
+                            && toks.get(i + 2).is_some_and(|t| t.tok == Tok::Import))) =>
+            {
                 if let Some(t) = toks.get(i + 1) {
                     let span = Span::new(file, t.lo, t.hi);
                     match &t.tok {

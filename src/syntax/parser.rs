@@ -288,7 +288,7 @@ impl<'a> Parser<'a> {
         let doc = self.doc_before(lo);
         let kind = match self.tok() {
             Tok::Import => ItemKind::Import(self.import()?),
-            Tok::From => ItemKind::Import(self.selective_import()?),
+            Tok::Ident if self.at_selective_import() => ItemKind::Import(self.selective_import()?),
             Tok::Pub => {
                 self.bump();
                 match self.tok() {
@@ -403,6 +403,11 @@ impl<'a> Parser<'a> {
         let alias = if self.eat(&Tok::As) { Some(self.ident("alias")?) } else { None };
         self.end_of_item()?;
         Ok(Import { source, alias, names: None })
+    }
+
+    /// Whether the next tokens start `from <module> import`; `from` is a keyword only there.
+    fn at_selective_import(&self) -> bool {
+        self.cur_text() == "from" && matches!(self.peek_tok(1), Tok::Ident | Tok::Str(_)) && matches!(self.peek_tok(2), Tok::Import)
     }
 
     fn selective_import(&mut self) -> PResult<Import> {
@@ -926,7 +931,11 @@ impl<'a> Parser<'a> {
     fn stmt(&mut self) -> PResult<Stmt> {
         let lo = self.lo();
         match self.tok() {
-            Tok::Import | Tok::From => {
+            Tok::Import => {
+                self.errors.push(Diag::error(self.span_here(), "an import goes at the top level of a module, not in a block"));
+                Err(())
+            }
+            Tok::Ident if self.at_selective_import() => {
                 self.errors.push(Diag::error(self.span_here(), "an import goes at the top level of a module, not in a block"));
                 Err(())
             }

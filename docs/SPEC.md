@@ -135,13 +135,15 @@ ident = [A-Za-z_][A-Za-z0-9_]*
 Reserved keywords:
 
 ```
-and as break continue defer else enum extend false fn for from if impl import
-in inf let loop match nan native not or pub return self Self spawn struct trait
+and as break continue defer else enum extend false fn for if impl import in
+inf let loop match nan native not or pub return self Self spawn struct trait
 true type use var while
 ```
 
-`test` is a contextual keyword: it begins a test block only when followed by a
-string literal at the top level of a module.
+`test` and `from` are contextual keywords. `test` begins a test block only when
+followed by a string literal at the top level of a module, and `from` begins a
+selective import only when followed by a module name or path and `import`.
+Elsewhere both are ordinary identifiers.
 
 By convention (enforced by the linter): types, traits, enum variants and type
 parameters are `UpperCamelCase`; functions, variables, fields, modules and loop

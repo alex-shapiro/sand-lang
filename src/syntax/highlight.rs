@@ -77,7 +77,9 @@ pub fn highlight(source: &str) -> Vec<(usize, usize, Highlight)> {
             Tok::Int(_) | Tok::IntOverflow(_) | Tok::Float(_) | Tok::Inf | Tok::Nan | Tok::Duration(_) => Highlight::Number,
             Tok::True | Tok::False | Tok::SelfLower | Tok::SelfUpper => Highlight::Constant,
             Tok::Ident => {
-                if source[lo..hi].starts_with(|c: char| c.is_ascii_uppercase()) {
+                if &source[lo..hi] == "from" && tokens.get(i + 2).is_some_and(|n| n.tok == Tok::Import) {
+                    Highlight::Keyword
+                } else if source[lo..hi].starts_with(|c: char| c.is_ascii_uppercase()) {
                     Highlight::Type
                 } else if matches!(tokens.get(i + 1), Some(n) if n.tok == Tok::LParen && n.lo == t.hi) {
                     Highlight::Call
