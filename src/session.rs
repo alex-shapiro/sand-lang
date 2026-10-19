@@ -249,7 +249,7 @@ impl Session {
 
     /// Get the deadline, if a wall-time limit is set.
     fn deadline(&self) -> Option<Instant> {
-        self.wall_time.and_then(|t| self.engine.clock().now().checked_add(t))
+        self.wall_time.and_then(|t| self.engine.config().clock.now().checked_add(t))
     }
 
     /// The code passed to `exit` by the last input, if it called `exit`.

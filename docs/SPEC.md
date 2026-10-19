@@ -2613,9 +2613,11 @@ let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 
 - `Config::clock(Arc<dyn platform::Clock>)` replaces the operating system's
   clocks and tokio's timers. Scripts read the time of day, the monotonic
   clock, `uuid.v7` timestamps and their sleeps from it, and the time limits
-  are measured on it. The engine reports the fuel of each scheduling slice
-  to `Clock::work` and yields through `Clock::yield_now`, so a host can
-  simulate time and turn the engine's work into simulated time.
+  and the timeouts of `net` and `http` clients are measured on it. The
+  engine reports its fuel to `Clock::work` before each reading of the clock
+  and yields through `Clock::yield_now`, so a host can simulate time and
+  turn the engine's work into simulated time.
+  `MemFs::with_capacity_and_clock` stamps modification times from a clock.
 - `Config::network(Arc<dyn network::Network>)` replaces the resolver and the
   sockets of outgoing `net` and `http` connections. The policy is checked
   as with the default network, and TLS runs in the engine over the stream

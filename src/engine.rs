@@ -760,11 +760,6 @@ impl Engine {
         self.interrupt.store(false, Ordering::SeqCst);
     }
 
-    /// The clock of the engine's limits and timers.
-    pub(crate) fn clock(&self) -> &Arc<dyn Clock> {
-        &self.config.clock
-    }
-
     /// The point at which a run starting now (with its compilation)
     /// exceeds the wall-time limit.
     pub(crate) fn deadline(&self) -> Option<Instant> {

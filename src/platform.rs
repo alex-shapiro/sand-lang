@@ -48,8 +48,9 @@ pub trait Clock: Send + Sync {
     fn yield_now(&self) -> ClockFuture;
 
     /// Records that the engine did `fuel` units of work (see
-    /// [`crate::vm::meter`]) since its last call. Called once per
-    /// scheduling slice.
+    /// [`crate::vm::meter`]) since its last call. Called before the engine
+    /// reads the clock to check its limits or to yield, and when a run
+    /// stops, so that [`Clock::now`] then counts all the work.
     fn work(&self, fuel: u64) {
         let _ = fuel;
     }
@@ -70,7 +71,7 @@ impl Deadline {
 }
 
 /// Waits for `future`, for at most `duration` of `clock`. Returns `None` if the time runs out first.
-pub async fn timeout<F: Future>(clock: &dyn Clock, duration: Duration, future: F) -> Option<F::Output> {
+pub(crate) async fn timeout<F: Future>(clock: &dyn Clock, duration: Duration, future: F) -> Option<F::Output> {
     let mut future = std::pin::pin!(future);
     let mut expiry = clock.sleep(duration);
     std::future::poll_fn(|cx: &mut Context<'_>| {

@@ -187,8 +187,9 @@ impl Times {
         Times { clock, cpu: Duration::ZERO, cpu_mark, now, last_yield: now, unclocked: (0, 0) }
     }
 
-    /// Brings the CPU time up to date (before waiting).
+    /// Reports the work since the last reading and brings the CPU time up to date (before waiting).
     fn read(&mut self) {
+        self.clock.work(self.unclocked.1);
         let mark = self.clock.cpu_time();
         self.cpu += mark.saturating_sub(self.cpu_mark);
         self.cpu_mark = mark;
@@ -203,11 +204,11 @@ impl Times {
         self.unclocked = (0, 0);
     }
 
-    /// Records a slice that spent `fuel`; reads the clocks every
-    /// `CLOCK_SLICES` slices or `SLICE_FUEL` units of fuel (tasks that
-    /// finish or block quickly make slices far shorter than a reading).
+    /// Records a slice that spent `fuel`; reports the work and reads the
+    /// clocks every `CLOCK_SLICES` slices or `SLICE_FUEL` units of fuel
+    /// (tasks that finish or block quickly make slices far shorter than a
+    /// reading).
     fn ran(&mut self, fuel: u64) {
-        self.clock.work(fuel);
         self.unclocked.0 += 1;
         self.unclocked.1 += fuel;
         if self.unclocked.0 >= CLOCK_SLICES || self.unclocked.1 >= SLICE_FUEL as u64 {
@@ -218,6 +219,12 @@ impl Times {
     /// The point of the thread's CPU clock at which `max` is exceeded.
     fn cpu_deadline(&self, max: Option<Duration>) -> Option<Duration> {
         max.map(|m| self.cpu_mark.saturating_add(m.saturating_sub(self.cpu)))
+    }
+}
+
+impl Drop for Times {
+    fn drop(&mut self) {
+        self.clock.work(self.unclocked.1);
     }
 }
 
