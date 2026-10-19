@@ -12,8 +12,14 @@
 //! thread that calls it, so long computations block that thread: run
 //! engines in Web Workers, one or more per worker, to keep a page
 //! responsive and to run several at once. A run returns to the JavaScript
-//! event loop only while it waits (for a timer or a prompt); a worker that
-//! must stop a busy engine at once can be terminated.
+//! event loop only while it waits (for a timer or a prompt), so only then
+//! can `engine.interrupt()` reach it. To stop a busy engine, give it an
+//! `interruptBuffer`, an `Int32Array` over a `SharedArrayBuffer` the page
+//! also holds, and set it from the page with `Atomics.store(buffer, 0, 1)`.
+//! Pages share memory with workers only when cross-origin isolated (served
+//! with `Cross-Origin-Opener-Policy: same-origin` and
+//! `Cross-Origin-Embedder-Policy: require-corp`); without that, terminate the
+//! worker instead.
 //!
 //! ```js
 //! import init, { Engine } from "./pkg/sandlang_wasm.js";
@@ -27,6 +33,7 @@
 #![forbid(unsafe_code)]
 
 mod hooks;
+mod signal;
 
 use hooks::{Hooks, JsOutput, JsPrompter};
 use js_sys::{Array, Object, Reflect};
@@ -58,6 +65,13 @@ export interface EngineOptions {
   fileSystemCapacity?: number;
   /** The working directory and module root (default `/`). */
   cwd?: string;
+  /**
+   * An `Int32Array` over a `SharedArrayBuffer` that stops the running script
+   * or session input when another thread stores a nonzero value in its first
+   * element (`Atomics.store(buffer, 0, 1)`), even while it computes. The
+   * engine stores 0 when each run or input starts.
+   */
+  interruptBuffer?: Int32Array;
 }
 
 /** Callbacks of `new Engine(options, hooks)`. */
@@ -137,7 +151,7 @@ export interface FileEntry { path: string; data: Uint8Array; }
 "#;
 
 /// The fields of `EngineOptions` (unknown ones, typically misspelt, are denied).
-const OPTION_KEYS: &[&str] = &["policy", "files", "env", "args", "stdin", "seed", "fileSystemCapacity", "cwd"];
+const OPTION_KEYS: &[&str] = &["policy", "files", "env", "args", "stdin", "seed", "fileSystemCapacity", "cwd", "interruptBuffer"];
 
 /// The JavaScript callbacks of an engine and its sessions, unregistered when
 /// the last of them is freed.
@@ -199,6 +213,14 @@ impl Engine {
         if let Some(seed) = number_option(&options, "seed")? {
             config = config.seed(seed as u64);
         }
+        if let Some(buffer) = option(&options, "interruptBuffer")? {
+            let bad = || error("`interruptBuffer` must be an Int32Array over a SharedArrayBuffer");
+            let buffer = buffer.dyn_into::<js_sys::Int32Array>().map_err(|_| bad())?;
+            if !signal::is_shared(&buffer) {
+                return Err(bad());
+            }
+            config = config.interrupt_signal(std::sync::Arc::new(signal::JsSignal::new(buffer)));
+        }
         let engine = sandlang::Engine::new(config);
         let interrupt = engine.interrupt_handle();
         Ok(Engine { engine: Rc::new(RefCell::new(Some(engine))), fs, interrupt, hooks: key })
@@ -257,7 +279,9 @@ impl Engine {
     }
 
     /// Stops the current run (or session input) as soon as it waits or
-    /// checks its limits; it fails with an `interrupted` error.
+    /// checks its limits; it fails with an `interrupted` error. A busy run
+    /// cannot be reached this way, since it holds the thread: see the
+    /// `interruptBuffer` option.
     pub fn interrupt(&self) {
         self.interrupt.interrupt();
     }

@@ -15,7 +15,11 @@ sand playground        # serves this directory at http://127.0.0.1:8000/
 --port=PORT` serves another copy or uses another port. Any static file
 server works (`python3 -m http.server -d playground`), but not `file://`
 pages; to host it, copy the directory (with `pkg/`) to a static host. It
-needs a browser with module workers and works offline once loaded.
+needs a browser with module workers and works offline once loaded. Served
+with `Cross-Origin-Opener-Policy: same-origin` and
+`Cross-Origin-Embedder-Policy: require-corp`, as `sand playground` serves
+it, the page stops a busy program without restarting its worker; elsewhere
+■ terminates the worker.
 
 ## Using it
 
@@ -30,7 +34,7 @@ needs a browser with module workers and works offline once loaded.
 - **Network.** `http` executes via `fetch` for allowed requests.
   The site must allow CORS reads; redirects are not followed.
 - **Running.** ▶ (Ctrl-Enter / ⌘-Enter) runs the program in a new session;
-  ■ stops it at once by terminating its worker. Output streams in.
+  ■ stops it at once and ends the session. Output streams in.
 - **The console.** After a run, type at its `›` prompt to continue the
   program with its variables, functions and heap. Enter runs a complete
   input; Up and Down recall earlier inputs. Tasks the program spawned keep
@@ -52,7 +56,11 @@ Engine(options, hooks).session()` and evaluates the program as its first
   input (`session.eval(source, "main.sand")`); console inputs are further
   `eval`s, and between them `session.runTasks()` keeps the program's tasks
   running. Output and permission prompts are posted to the page as they
-  happen.
+  happen. To stop a session, the page stores 1 in the `interruptBuffer` it
+  shares with the worker, which the engine polls as it computes, and sends
+  `stop`, which interrupts an engine that waits. It terminates the worker
+  if the page is not cross-origin isolated or the run has not ended within
+  a second.
 - `sandbox.js` — what a sandbox is, without the page: its files, policy,
   environment and input, the engine options they become, and share links.
 - `editor.js` — the code editor: a textarea over a highlighted copy of its

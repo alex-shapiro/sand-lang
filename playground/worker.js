@@ -1,14 +1,17 @@
 // A worker running Sand engines for the page (see app.js): scripts run here,
 // off the page's thread, so the page stays responsive and several sandboxes,
-// each with its own worker, run in parallel. The page stops a run by
-// terminating its worker.
+// each with its own worker, run in parallel. To stop a run, the page sets the
+// interrupt buffer it shares with the worker (which reaches a busy engine)
+// and sends "stop" (which reaches a waiting one); without shared memory, it
+// terminates the worker.
 //
 // A run starts a session: the program is its first input, and the console's
 // inputs continue it, in the same engine (its globals, functions, heap and
 // tasks). Between inputs the tasks the program left running keep running.
 //
 // Requests from the page (answered with a message of the same `id`):
-//   {type: "init", module}                  the compiled WebAssembly module
+//   {type: "init", module, interrupt}       the compiled WebAssembly module, and
+//                                           an Int32Array over a SharedArrayBuffer (or null)
 //   {type: "run", id, sandbox}              start a session with the program
 //       -> {type: "done", id, result, written, policyErrors?}
 //   {type: "input", id, source}             evaluate an input in the session
@@ -18,6 +21,8 @@
 //   {type: "lint", id, sandbox}             -> {type: "linted", id, lint, error}
 //   {type: "format", id, source, policy?}   -> {type: "formatted", id, text | error}
 //   {type: "answer", promptId, answer}      the answer to a permission prompt
+//   {type: "stop"}                          interrupt the run or input and end the session
+//       -> {type: "stopped"}
 // Events (no id):
 //   {type: "ready"} | {type: "failed", message}
 //   {type: "output", stream, text}
@@ -31,16 +36,23 @@ const pendingPrompts = new Map();
 let nextPrompt = 1;
 let queue = Promise.resolve();
 let current = null;
+let interruptBuffer = null;
 
 self.onmessage = (event) => {
   const message = event.data;
   if (message.type === "init") {
     try {
       initSync({ module: message.module });
+      interruptBuffer = message.interrupt ?? null;
       self.postMessage({ type: "ready" });
     } catch (e) {
       self.postMessage({ type: "failed", message: String(e?.message ?? e) });
     }
+  } else if (message.type === "stop") {
+    // The page set the interrupt buffer, which a busy engine sees; this
+    // reaches one that waits.
+    current?.session.interrupt();
+    queue = queue.then(endSession).catch(() => {}).then(() => self.postMessage({ type: "stopped" }));
   } else if (message.type === "answer") {
     pendingPrompts.get(message.promptId)?.(message.answer);
     pendingPrompts.delete(message.promptId);
@@ -86,9 +98,11 @@ const hooks = {
 };
 
 /** An engine for `sandbox` (or the policy's errors). */
-function engineFor(sandbox, engineHooks = {}) {
+function engineFor(sandbox, engineHooks = {}, interruptBuffer = null) {
+  const options = engineOptions(sandbox);
+  if (interruptBuffer) options.interruptBuffer = interruptBuffer;
   try {
-    return { engine: new Engine(engineOptions(sandbox), engineHooks) };
+    return { engine: new Engine(options, engineHooks) };
   } catch (e) {
     if (e?.policyErrors) return { policyErrors: e.policyErrors };
     throw e;
@@ -125,7 +139,7 @@ function resumeTasks() {
 
 async function run(id, sandbox) {
   await endSession();
-  const { engine, policyErrors } = engineFor(sandbox, hooks);
+  const { engine, policyErrors } = engineFor(sandbox, hooks, interruptBuffer);
   if (!engine) {
     const message = "The policy has errors:\n" + policyErrors.map((e) => `  line ${e.line}: ${e.message}`).join("\n");
     const result = { ok: false, exitCode: 2, error: { kind: "policy", message, diagnostics: [], trace: [] } };

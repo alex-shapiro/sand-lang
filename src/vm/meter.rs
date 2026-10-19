@@ -47,6 +47,7 @@
 use super::Ctl;
 use super::heap::Heap;
 use crate::LimitKind;
+use crate::interrupt::Interrupt;
 use crate::platform::{Clock, Deadline, Instant};
 use std::cell::Cell;
 use std::sync::Arc;
@@ -131,12 +132,12 @@ pub struct Meter {
     max_instructions: Option<u64>,
     cpu_deadline: Cell<Option<Duration>>,
     wall_deadline: Cell<Option<Instant>>,
-    interrupt: Arc<AtomicBool>,
+    interrupt: Arc<Interrupt>,
     clock: Arc<dyn Clock>,
 }
 
 impl Meter {
-    pub fn new(max_instructions: Option<u64>, interrupt: Arc<AtomicBool>, clock: Arc<dyn Clock>) -> Meter {
+    pub(crate) fn new(max_instructions: Option<u64>, interrupt: Arc<Interrupt>, clock: Arc<dyn Clock>) -> Meter {
         Meter {
             fuel: Cell::new(0),
             synced: Cell::new(0),
@@ -243,7 +244,7 @@ impl Meter {
     /// Checks the interrupt flag, the instruction budget and the time
     /// limits now.
     pub fn check(&self) -> Result<(), Ctl> {
-        if self.interrupt.load(Ordering::Relaxed) {
+        if self.interrupt.is_set() {
             return Err(Ctl::interrupted());
         }
         if let Some(max) = self.max_instructions
@@ -290,7 +291,7 @@ impl Meter {
 /// the work started are spent, or the VM stops waiting for it; the work
 /// must then stop. Afterwards the VM charges the meter for what was used.
 pub(crate) struct Allowance {
-    interrupt: Arc<AtomicBool>,
+    interrupt: Arc<Interrupt>,
     abandoned: Arc<AtomicBool>,
     deadline: Option<Deadline>,
     left: u64,
@@ -307,7 +308,7 @@ impl Allowance {
     /// Charges `units` of fuel.
     pub fn charge(&mut self, units: u64) -> Result<(), Stopped> {
         self.used = self.used.saturating_add(units);
-        self.stopped |= self.used > self.left || self.interrupt.load(Ordering::Relaxed) || self.abandoned.load(Ordering::Relaxed);
+        self.stopped |= self.used > self.left || self.interrupt.is_set() || self.abandoned.load(Ordering::Relaxed);
         if !self.stopped && self.used >= self.next_check {
             self.next_check = self.used.saturating_add(CHECK_INTERVAL as u64 / 16);
             self.stopped = self.deadline.as_ref().is_some_and(Deadline::passed);
@@ -390,7 +391,7 @@ mod tests {
 
     #[test]
     fn charges_are_free_until_the_slice_is_spent() {
-        let m = Meter::new(Some(100_000), Arc::new(AtomicBool::new(false)), system());
+        let m = Meter::new(Some(100_000), Interrupt::new(None), system());
         assert_eq!(m.start_slice(None, None), SLICE_FUEL);
         assert!(m.charge(50).is_ok());
         assert_eq!((m.fuel(), m.used()), (SLICE_FUEL - 50, 50));
@@ -402,7 +403,7 @@ mod tests {
 
     #[test]
     fn the_instruction_limit_is_checked_exactly() {
-        let m = Meter::new(Some(1000), Arc::new(AtomicBool::new(false)), system());
+        let m = Meter::new(Some(1000), Interrupt::new(None), system());
         // The slice ends where the budget does.
         assert_eq!(m.start_slice(None, None), 1000);
         // The interpreter spends 300 units, then a native the rest.
@@ -412,14 +413,14 @@ mod tests {
         assert!(matches!(m.charge(1).map_err(Ctl::into_kind), Err(CtlKind::Limit(LimitKind::Instructions))));
         assert_eq!(m.resync(), -1);
         // Past the end of a slice, checks stay no later than the limit.
-        let m = Meter::new(Some(1_000_000), Arc::new(AtomicBool::new(false)), system());
+        let m = Meter::new(Some(1_000_000), Interrupt::new(None), system());
         m.start_slice(None, None);
         assert!(m.charge(SLICE_FUEL as u64 + 1).is_ok());
         assert_eq!(m.check_at.get(), -1 - CHECK_INTERVAL);
         assert!(m.charge(1_000_000 - SLICE_FUEL as u64 - 1).is_ok(), "1,000,000 units used");
         assert!(matches!(m.charge(1).map_err(Ctl::into_kind), Err(CtlKind::Limit(LimitKind::Instructions))));
         // Charges between slices count too.
-        let m = Meter::new(Some(100), Arc::new(AtomicBool::new(false)), system());
+        let m = Meter::new(Some(100), Interrupt::new(None), system());
         assert!(m.charge(60).is_ok());
         assert_eq!(m.start_slice(None, None), 40);
         m.reset();
@@ -428,17 +429,17 @@ mod tests {
 
     #[test]
     fn interrupt_is_seen_at_checkpoints() {
-        let flag = Arc::new(AtomicBool::new(false));
+        let flag = Interrupt::new(None);
         let m = Meter::new(None, flag.clone(), system());
         m.start_slice(None, None);
-        flag.store(true, Ordering::SeqCst);
+        flag.set();
         assert!(m.charge(5).is_ok(), "no check while fuel is left");
         assert!(matches!(m.charge(SLICE_FUEL as u64).map_err(Ctl::into_kind), Err(CtlKind::Interrupted)));
     }
 
     #[test]
     fn deadlines() {
-        let m = Meter::new(None, Arc::new(AtomicBool::new(false)), system());
+        let m = Meter::new(None, Interrupt::new(None), system());
         m.start_slice(Some(system().cpu_time()), None);
         assert!(matches!(m.charge(SLICE_FUEL as u64 + 1).map_err(Ctl::into_kind), Err(CtlKind::Limit(LimitKind::CpuTime))));
         m.start_slice(None, Some(Instant::now()));

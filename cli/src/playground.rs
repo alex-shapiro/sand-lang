@@ -2,6 +2,11 @@
 //! local host, so it opens in a browser (which will not run its workers
 //! from `file://` pages). A minimal static file server: GET and HEAD of
 //! files under the directory, one request per connection, nothing else.
+//!
+//! Every response isolates the page from other origins (COOP and COEP), so
+//! that it may share memory with its workers: a `SharedArrayBuffer` through
+//! which it stops a busy engine without terminating the worker. Requests
+//! scripts make with `fetch` are CORS requests, which isolation allows.
 
 use crate::runtime;
 use std::path::{Component, Path, PathBuf};
@@ -183,7 +188,8 @@ impl Response {
     fn head(&self) -> Vec<u8> {
         let allow = if self.status == 405 { "Allow: GET, HEAD\r\n" } else { "" };
         format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nX-Content-Type-Options: nosniff\r\n{allow}Connection: close\r\n\r\n",
+            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nX-Content-Type-Options: nosniff\r\n\
+             Cross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Embedder-Policy: require-corp\r\n{allow}Connection: close\r\n\r\n",
             self.status,
             self.reason,
             self.content_type,

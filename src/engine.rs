@@ -5,6 +5,7 @@ use crate::check::{ModKind, NativeIds};
 use crate::compile::{CompileInput, compile_more};
 use crate::diag::{Diag, Diagnostic, FileId, Span};
 use crate::files::{Fs, MemFs};
+use crate::interrupt::{Interrupt, InterruptSignal};
 use crate::modules::{ImportRef, ModuleGraph, Snapshot, Target, budget_error, native_info};
 use crate::native::NativeModule;
 use crate::platform::{Clock, Instant, SystemClock};
@@ -21,7 +22,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -240,6 +240,7 @@ pub struct Config {
     pub(crate) fs: Fs,
     pub(crate) request_filter: Option<RequestFilter>,
     pub(crate) clock: Arc<dyn Clock>,
+    pub(crate) interrupt_signal: Option<Arc<dyn InterruptSignal>>,
     #[cfg(feature = "os")]
     pub(crate) network: Option<Arc<dyn crate::network::Network>>,
 }
@@ -287,9 +288,18 @@ impl Config {
             fs: Fs::default(),
             request_filter: None,
             clock: Arc::new(SystemClock),
+            interrupt_signal: None,
             #[cfg(feature = "os")]
             network: None,
         }
+    }
+
+    /// Stops runs, session inputs and compilations whenever `signal` is
+    /// set, as [`InterruptHandle::interrupt`] does (see [`InterruptSignal`]).
+    /// The engine and its sessions clear it when a run or input starts.
+    pub fn interrupt_signal(mut self, signal: Arc<dyn InterruptSignal>) -> Self {
+        self.interrupt_signal = Some(signal);
+        self
     }
 
     /// Sets the clock and timer provider for the engine.
@@ -431,13 +441,13 @@ impl Config {
 /// Stops a running engine from another thread.
 #[derive(Clone)]
 pub struct InterruptHandle {
-    flag: Arc<AtomicBool>,
+    interrupt: Arc<Interrupt>,
     shared: Arc<IoShared>,
 }
 
 impl InterruptHandle {
     pub fn interrupt(&self) {
-        self.flag.store(true, Ordering::SeqCst);
+        self.interrupt.set();
         self.shared.wake();
     }
 }
@@ -645,7 +655,7 @@ impl Registry {
 pub struct Engine {
     config: Arc<Config>,
     registry: Arc<Registry>,
-    interrupt: Arc<AtomicBool>,
+    interrupt: Arc<Interrupt>,
     shared: Arc<IoShared>,
     /// "Always" prompt answers, remembered for the lifetime of the engine
     /// (SPEC 14.3): shared by import checks and every run (and VM).
@@ -697,9 +707,9 @@ impl Engine {
         let origin = config.clock.now();
         Engine {
             origin,
+            interrupt: Interrupt::new(config.interrupt_signal.clone()),
             config: Arc::new(config),
             registry,
-            interrupt: Arc::new(AtomicBool::new(false)),
             shared: Arc::new(IoShared::default()),
             always: Arc::default(),
             gc_stats: GcStats::default(),
@@ -731,18 +741,18 @@ impl Engine {
     }
 
     pub fn interrupt_handle(&self) -> InterruptHandle {
-        InterruptHandle { flag: self.interrupt.clone(), shared: self.shared.clone() }
+        InterruptHandle { interrupt: self.interrupt.clone(), shared: self.shared.clone() }
     }
 
     /// Starts an interactive session ([`Session`]) with this engine's
     /// configuration. The session shares the engine's "always" answers to
-    /// permission prompts, but not its interrupt handle: use
-    /// [`Session::interrupt_handle`].
+    /// permission prompts and its interrupt signal, but not its interrupt
+    /// handle: use [`Session::interrupt_handle`].
     pub fn session(&self) -> Session {
         Session::new(Engine {
             config: self.config.clone(),
             registry: self.registry.clone(),
-            interrupt: Arc::new(AtomicBool::new(false)),
+            interrupt: Interrupt::new(self.config.interrupt_signal.clone()),
             shared: Arc::new(IoShared::default()),
             always: self.always.clone(),
             gc_stats: GcStats::default(),
@@ -763,7 +773,7 @@ impl Engine {
     /// Forgets interrupts of earlier runs; interrupts from now on stop the
     /// next compilation or run.
     pub(crate) fn clear_interrupt(&self) {
-        self.interrupt.store(false, Ordering::SeqCst);
+        self.interrupt.clear();
     }
 
     /// The point at which a run starting now (with its compilation)
@@ -776,7 +786,7 @@ impl Engine {
     pub(crate) fn compile_budget(&self, deadline: Option<Instant>) -> Arc<CompileBudget> {
         let limits = &self.config.limits;
         let deadline = deadline.map(|at| crate::platform::Deadline { at, clock: self.config.clock.clone() });
-        Arc::new(CompileBudget::new(limits.max_compile_fuel, deadline, Some(self.interrupt.clone())))
+        Arc::new(CompileBudget::stopped_by(limits.max_compile_fuel, deadline, Some(self.interrupt.clone())))
     }
 
     /// Type checks a source without running it. Imports the policy would
@@ -1117,7 +1127,7 @@ impl Engine {
         #[cfg(feature = "os")]
         {
             let check = || {
-                if self.interrupt.load(Ordering::Relaxed) {
+                if self.interrupt.is_set() {
                     return Err(Error::Interrupted);
                 }
                 if d.deadline.is_some_and(|t| self.config.clock.now() >= t + prompted) {
@@ -1160,7 +1170,7 @@ impl Engine {
         let mut stack: Vec<ImportFrame> = vec![(start, imports, 0)];
         let mut path_stack: Vec<String> = vec![key];
         while let Some((mi, imports, pos)) = stack.pop() {
-            if self.interrupt.load(Ordering::Relaxed) {
+            if self.interrupt.is_set() {
                 return Some(Error::Interrupted);
             }
             if d.deadline.is_some_and(|t| self.config.clock.now() >= t + *prompted) {
@@ -1420,7 +1430,7 @@ mod offload_tests {
     use super::*;
     use crate::native::NativeModule;
     use crate::vm::value::Value;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     /// A module with two natives. `hang()` blocks a worker until `release`
     /// is set. `walk()` charges its allowance one unit at a time, counting

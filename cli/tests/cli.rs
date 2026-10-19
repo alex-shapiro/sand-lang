@@ -839,6 +839,8 @@ fn playground_serves_its_directory_on_localhost() {
 
     let (head, body) = http_get(port, "GET", "/");
     assert!(head.starts_with("HTTP/1.1 200") && head.contains("text/html") && body == "<p>hi</p>", "{head}");
+    // Cross-origin isolated, so that the page shares memory with its workers.
+    assert!(head.contains("Cross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Embedder-Policy: require-corp"), "{head}");
     let (head, _) = http_get(port, "GET", "/pkg/sandlang_wasm_bg.wasm");
     assert!(head.contains("Content-Type: application/wasm"), "{head}");
     let (head, _) = http_get(port, "GET", "/app.js?v=1");
