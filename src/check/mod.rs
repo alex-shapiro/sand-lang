@@ -1601,6 +1601,12 @@ impl Checker {
         {
             return Some(Def::Module(t));
         }
+        if name == "test"
+            && matches!(self.fs.ctx.first().map(|c| c.kind), Some(CtxKind::Test))
+            && let Some(t) = self.module_named("test")
+        {
+            return Some(Def::Module(t));
+        }
         if let (Some(s), Some(p)) = (sym, self.prelude)
             && p != self.cur_mod
             && let Some(Binding { def, is_pub: true, .. }) = self.mods[p as usize].scope.get(&s)

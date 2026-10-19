@@ -162,4 +162,14 @@ test "t" {
     test.assert_true(true)
 }
 --- error
-2: an import goes at the top level of a module, not in a block
+2: an import goes at the top level of a module, not in a block; test blocks can use `test` without an import
+
+=== test blocks use the test module without an import
+fn double(x: int) -> int { x * 2 }
+
+test "doubles" {
+    test.assert_eq(double(2), 4)
+}
+--- test
+ok doubles
+1 passed, 0 failed

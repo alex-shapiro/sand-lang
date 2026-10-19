@@ -431,7 +431,8 @@ test "addition is commutative" {
 
 The name is a string literal without interpolation. Test blocks are ignored by
 `run` and executed by the test runner (§17.4). In a test block, `?` on an `Err`
-fails the test with the error, as it stops a run at the top level (§6.8).
+fails the test with the error, as it stops a run at the top level (§6.8), and
+the name `test` refers to the `test` module (§13.14) without an import.
 
 ### 4.9 Traits and impls
 

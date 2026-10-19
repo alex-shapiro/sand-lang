@@ -291,6 +291,15 @@ pub(crate) fn scan_imports(text: &str, file: FileId) -> Vec<ImportRef> {
                 out.push(ImportRef::Help(name.to_string(), Span::new(file, arg.lo, arg.hi)));
             }
         }
+        // A test block may name the `test` module without importing it.
+        if toks[i].tok == Tok::Ident
+            && depth == 0
+            && at_start
+            && word(&toks[i]) == "test"
+            && toks.get(i + 1).is_some_and(|t| matches!(t.tok, Tok::Str(_)))
+        {
+            out.push(ImportRef::Help("test".to_string(), Span::new(file, toks[i].lo, toks[i].hi)));
+        }
         if toks[i].tok == Tok::Ident
             && toks.get(i + 1).is_some_and(|t| t.tok == Tok::Bang)
             && let Some(m) = crate::syntax::ast::MACROS.iter().find(|m| m.name == word(&toks[i]))

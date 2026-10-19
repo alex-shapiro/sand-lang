@@ -124,6 +124,11 @@ impl<'a> Parser<'a> {
     fn cur_text(&self) -> &'a str {
         self.slice(self.span_here())
     }
+    /// The source text of the token `n` places ahead.
+    fn peek_text(&self, n: usize) -> &'a str {
+        let t = &self.toks[(self.pos + n).min(self.toks.len() - 1)];
+        &self.src[t.lo as usize..t.hi as usize]
+    }
     fn error_here(&mut self, msg: impl Into<String>) {
         let span = self.span_here();
         self.errors.push(Diag::error(span, msg));
@@ -932,7 +937,12 @@ impl<'a> Parser<'a> {
         let lo = self.lo();
         match self.tok() {
             Tok::Import => {
-                self.errors.push(Diag::error(self.span_here(), "an import goes at the top level of a module, not in a block"));
+                let msg = if matches!(self.peek_tok(1), Tok::Ident) && self.peek_text(1) == "test" {
+                    "an import goes at the top level of a module, not in a block; test blocks can use `test` without an import"
+                } else {
+                    "an import goes at the top level of a module, not in a block"
+                };
+                self.errors.push(Diag::error(self.span_here(), msg));
                 Err(())
             }
             Tok::Ident if self.at_selective_import() => {
