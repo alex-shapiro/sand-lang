@@ -1610,7 +1610,18 @@ impl Checker {
         {
             return Some(*def);
         }
-        builtin_type(name).map(Def::Type)
+        if let Some(t) = builtin_type(name) {
+            return Some(Def::Type(t));
+        }
+        // A test block also sees the public items of the `test` module, after every other scope.
+        if let Some(s) = sym
+            && matches!(self.fs.ctx.first().map(|c| c.kind), Some(CtxKind::Test))
+            && let Some(t) = self.module_named("test")
+            && let Some(Binding { def, is_pub: true, .. }) = self.mods[t as usize].scope.get(&s)
+        {
+            return Some(*def);
+        }
+        None
     }
 
     /// Looks up a public member of a module.

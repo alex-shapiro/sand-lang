@@ -574,7 +574,7 @@ fn f() -> str {
 2: undefined name `json`: add `import json`
 
 === import hint for an unimported standard-library function
-test "t" {
+fn check() {
     assert_eq(1, 1)
 }
 --- error
