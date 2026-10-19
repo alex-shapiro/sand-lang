@@ -136,7 +136,9 @@ impl Snapshot {
             .map(|(name, (_, src))| (name.to_string(), crate::check::help::module_summary(src)))
             .collect();
         let mut exports = HashMap::new();
-        for (module, src) in registry.sources.iter().filter(|(name, (kind, _))| *name != "prelude" && *kind == ModKind::Std).map(|(n, (_, s))| (n, s)) {
+        for (module, src) in
+            registry.sources.iter().filter(|(name, (kind, _))| *name != "prelude" && *kind == ModKind::Std).map(|(n, (_, s))| (n, s))
+        {
             for name in crate::check::help::public_functions(src) {
                 exports.entry(name).or_insert_with(|| module.to_string());
             }

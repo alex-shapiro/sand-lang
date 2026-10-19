@@ -397,7 +397,9 @@ pub(crate) struct FnCtx {
 pub(crate) enum CtxKind {
     Function,
     Lambda,
-    TopLevel { main: bool },
+    TopLevel {
+        main: bool,
+    },
     /// A `test` block, where a failed `?` on a Result fails the test.
     Test,
 }

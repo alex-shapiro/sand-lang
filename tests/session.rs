@@ -8,7 +8,8 @@ mod common;
 use common::{TempDir, rt};
 use sandlang::session::RESET_NOTE;
 use sandlang::{
-    Capability, Config, Decision, Engine, Error, LimitKind, Limits, MemorySink, NativeModule, Policy, PromptAnswer, RulePolicy, Session, StdinFeed,
+    Capability, Config, Decision, Engine, Error, LimitKind, Limits, MemorySink, NativeModule, Policy, PromptAnswer, RulePolicy, Session,
+    StdinFeed,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
