@@ -565,6 +565,7 @@ pub struct Checker {
     pub(crate) iter_struct: Option<TypeDefId>,
     /// Prelude functions taking part in iterator fusion (found on first use).
     pub(crate) fuse_fns: Option<Arc<fuse::FuseFns>>,
+    pub(crate) optimize: bool,
 }
 
 const MAX_ERRORS: usize = 50;
@@ -620,6 +621,7 @@ impl Default for Checker {
             flows: PMap::new(),
             iter_struct: None,
             fuse_fns: None,
+            optimize: true,
         }
     }
 }

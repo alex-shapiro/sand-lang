@@ -154,8 +154,11 @@ keep it in the pending operation, and move it into the object in the finisher
 ## Tests
 
 - `cargo test --test spec_runner <file>` runs `tests/spec/<file>.test`;
-  `SPEC_FILTER=substring` limits it to matching cases. Every spec case runs
-  on the host and memory file systems, and under `Config::gc_stress`.
+  `SPEC_FILTER=substring` limits it to matching cases. Every spec case is run
+  on the host and memory file systems, with `Config::gc_stress`, and with
+  `Config::optimize(false)`.
+- `tests/props/` compares Sand execution against reference models on
+  generated inputs. Set `PROPTEST_CASES=n` to increase the case count.
 - `cli/tests/cli.rs` runs the `sand` binary; `cli/tests/prompt_tty.rs`
   drives prompts on a pseudo-terminal.
 - `tests/fuzz.rs` holds randomised tests and the reproducers found by the

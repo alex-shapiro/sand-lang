@@ -34,6 +34,10 @@ Follow-up work, roughly in priority order.
       the ratio between two input sizes in the same run).
 - [ ] The playground page is tested by hand in headless Chrome, not in CI,
       Firefox or Safari.
+- [ ] Run the `cargo fuzz` targets on a schedule (or on OSS-Fuzz). Update the
+      `run` target to compare optimized and unoptimized executions.
+- [ ] `help.test` fails with `--no-default-features` because the overview
+      includes modules that require the `os` feature.
 
 ### Web
 
@@ -66,6 +70,3 @@ Follow-up work, roughly in priority order.
       blanket impls (`impl<T> X for T`).
 - [ ] Trait bounds on struct/enum type parameters.
 - [ ] Non-constant trait method defaults.
-- [ ] Range methods: implement zero-allocation collection methods
-      (`sum`, `fold`, `map`, `filter`, `any`, `all`, `count`, `min`, `max`)
-      on ranges, or convert ranges to lists.

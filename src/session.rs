@@ -412,6 +412,7 @@ impl Session {
         // The module the inputs are added to; its own source is empty.
         let file = graph.sm.add("<repl>", "");
         let mut checker = snapshot.checker.clone();
+        checker.optimize = self.engine.config().optimize;
         let module = ParsedModule {
             name: SESSION_MODULE.into(),
             file,
@@ -491,6 +492,7 @@ impl Session {
             snapshot: st.snapshot.clone(),
             registry: registry.clone(),
             budget: engine.compile_budget(deadline),
+            optimize: engine.config().optimize,
             new_mods,
             cell,
             file,
@@ -626,6 +628,7 @@ struct CellJob {
     cell: usize,
     file: FileId,
     want_value: bool,
+    optimize: bool,
 }
 
 impl CellJob {
@@ -658,7 +661,16 @@ impl CellJob {
         let registry = &*self.registry;
         let (native_names, native_argc) = if self.natives { native_info(&cp, registry) } else { (Vec::new(), Vec::new()) };
         let initialized = Some(std::mem::take(&mut self.initialized));
-        let input = CompileInput { checked: &cp, sm, natives: &registry.by_name, native_names, native_argc, budget, initialized };
+        let input = CompileInput {
+            checked: &cp,
+            sm,
+            natives: &registry.by_name,
+            native_names,
+            native_argc,
+            budget,
+            initialized,
+            optimize: self.optimize,
+        };
         let entry = compile_more(input, Arc::make_mut(&mut self.prog), &mut self.compiler, &inits);
         if let Some(stop) = budget.stopped() {
             return Err(budget_error(stop, sm, self.file));

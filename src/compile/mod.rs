@@ -39,10 +39,12 @@ pub struct CompileInput<'a> {
     /// For a REPL session's input: which of the program's globals are
     /// initialized (see `init_order`).
     pub initialized: Option<Vec<bool>>,
+    pub optimize: bool,
 }
 
 struct Compiler<'a> {
     cp: &'a CheckedProgram,
+    optimize: bool,
     /// The program's types, which `reflect` extends with the instances it
     /// describes (a private copy: they are not needed after compiling).
     arena: TypeArena,
@@ -314,17 +316,21 @@ impl ProgramMark {
 pub(crate) fn compile_more(mut input: CompileInput, prog: &mut Program, inc: &mut Incremental, inits: &[FnId]) -> Result<u32, Vec<Diag>> {
     let cp = input.checked;
     let first = inc.fn_protos.len();
-    for (f, body) in cp.bodies.from(first as FnId) {
+    for (f, body) in cp.bodies.from(first as FnId).filter(|_| input.optimize) {
         if let Some(b) = inline::inlinable(cp, f, body) {
             inc.inline.insert(f, b);
         }
     }
-    let inlined: Vec<Option<HFn>> =
-        cp.bodies.from(first as FnId).map(|(_, b)| inline::inline_calls(b, &inc.inline, input.budget)).collect();
+    let inlined: Vec<Option<HFn>> = cp
+        .bodies
+        .from(first as FnId)
+        .map(|(_, b)| if input.optimize { inline::inline_calls(b, &inc.inline, input.budget) } else { None })
+        .collect();
     let bodies: HashMap<FnId, &HFn> = cp.bodies.from(first as FnId).zip(&inlined).map(|((f, b), i)| (f, i.as_ref().unwrap_or(b))).collect();
     let order = InitOrder::new(cp, &bodies, inits, prog.global_names.len(), input.initialized.take(), input.budget);
     let mut c = Compiler {
         cp,
+        optimize: input.optimize,
         arena: cp.arena.clone(),
         budget: input.budget,
         sm: input.sm,
@@ -375,7 +381,7 @@ impl<'a> Compiler<'a> {
             ("str.is_upper", Inline::StrClass(4)),
             ("str.is_lower", Inline::StrClass(5)),
         ] {
-            if let Some(&id) = input.natives.get(name) {
+            if let Some(&id) = input.natives.get(name).filter(|_| self.optimize) {
                 self.inline.insert(id, op);
             }
         }
@@ -1642,7 +1648,8 @@ impl<'a> Compiler<'a> {
             return;
         }
         self.set_line(f, e.span);
-        if !f.hoisting
+        if self.optimize
+            && !f.hoisting
             && matches!(e.kind, HKind::Loop(_) | HKind::While { .. } | HKind::WhileLet { .. } | HKind::ForRange { .. } | HKind::For { .. })
         {
             self.hoisted_loop(f, e, dst);

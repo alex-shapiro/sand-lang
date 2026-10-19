@@ -1772,12 +1772,21 @@ impl Checker {
                         msg.push_str(&format!(" (the trait `{t}` has it but is not implemented for {})", self.show(rt)));
                     }
                 }
+                let range_iter = match (self.ty(rt), self.iter_struct) {
+                    (Ty::Range, Some(iter)) => {
+                        let iter = self.named_ty(iter, &[TypeId::INT]);
+                        self.lookup_method(iter, &method.name).is_some()
+                    }
+                    _ => false,
+                };
                 let as_list = match self.ty(rt) {
                     Ty::Map(..) => Some("`entries()`, a list of (key, value) pairs"),
-                    Ty::Set(_) => Some("`to_list()`"),
+                    Ty::Set(_) | Ty::Range => Some("`to_list()`"),
                     _ => None,
                 };
-                if let Some(as_list) = as_list {
+                if range_iter {
+                    msg.push_str("; call it on `iter()`, a lazy iterator");
+                } else if let Some(as_list) = as_list {
                     let list = self.list_ty(TypeId::ERROR);
                     if self.lookup_method(list, &method.name).is_some() {
                         msg.push_str(&format!("; call it on {as_list}"));
@@ -2500,7 +2509,9 @@ impl Checker {
 
     fn check_for(&mut self, label: Option<&ast::Ident>, pattern: &ast::Pattern, iter: &Expr, body: &Block, span: Span) -> HExpr {
         // Literal ranges are iterated without allocating.
-        if let ExprKind::Range { start: Some(s), end: Some(e), inclusive } = &iter.kind {
+        if let ExprKind::Range { start: Some(s), end: Some(e), inclusive } = &iter.kind
+            && self.optimize
+        {
             let sh = self.check_expr(s, TypeId::INT);
             let eh = self.check_expr(e, TypeId::INT);
             self.push_scope();
@@ -2602,7 +2613,9 @@ impl Checker {
                 mk(HKind::If { cond: Box::new(ch), then: Box::new(inner), else_: None }, TypeId::UNIT, span)
             }
             CompClause::For(p, it) => {
-                if let ExprKind::Range { start: Some(s), end: Some(e), inclusive } = &it.kind {
+                if let ExprKind::Range { start: Some(s), end: Some(e), inclusive } = &it.kind
+                    && self.optimize
+                {
                     let sh = self.check_expr(s, TypeId::INT);
                     let eh = self.check_expr(e, TypeId::INT);
                     self.push_scope();
