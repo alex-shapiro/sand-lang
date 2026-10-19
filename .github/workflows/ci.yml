@@ -22,7 +22,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all -- --check
-      # The library and the command line (which enables TLS).
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
       - name: Clippy (library, without TLS)
@@ -48,10 +47,8 @@ jobs:
       - name: Clippy
         if: matrix.os != 'ubuntu-latest'
         run: cargo clippy --all-targets -- -D warnings
-      # The library (with TLS) and the command line.
       - name: Test
         run: cargo test
-      # One checked run of each benchmark program (optimized: they are long).
       - name: Benchmarks still run
         if: matrix.os == 'ubuntu-latest'
         run: cargo test --release -p sandlang --benches
@@ -86,7 +83,6 @@ jobs:
         run: cargo clippy -p sandlang-wasm --target wasm32-unknown-unknown -- -D warnings
       - name: Build for Node.js
         run: wasm/build.sh nodejs target/wasm-node
-      # The bindings, and every example of the playground.
       - name: Test
         run: node --test --test-timeout=120000 wasm/tests/
       - name: Build the playground
@@ -105,7 +101,5 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fuzz
-      # A plain check needs neither nightly nor cargo-fuzz; it keeps the
-      # targets compiling against the current crate.
       - name: Check
         run: cargo check --manifest-path fuzz/Cargo.toml
