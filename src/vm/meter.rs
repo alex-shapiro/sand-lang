@@ -308,10 +308,10 @@ impl Allowance {
     /// Charges `units` of fuel.
     pub fn charge(&mut self, units: u64) -> Result<(), Stopped> {
         self.used = self.used.saturating_add(units);
-        self.stopped |= self.used > self.left || self.interrupt.is_set() || self.abandoned.load(Ordering::Relaxed);
+        self.stopped |= self.used > self.left || self.abandoned.load(Ordering::Relaxed);
         if !self.stopped && self.used >= self.next_check {
             self.next_check = self.used.saturating_add(CHECK_INTERVAL as u64 / 16);
-            self.stopped = self.deadline.as_ref().is_some_and(Deadline::passed);
+            self.stopped = self.interrupt.is_set() || self.deadline.as_ref().is_some_and(Deadline::passed);
         }
         if self.stopped { Err(Stopped) } else { Ok(()) }
     }
