@@ -135,6 +135,13 @@ impl Snapshot {
             .filter(|(name, (kind, _))| *name != "prelude" && (*kind != ModKind::Host || by_name.contains_key(name.as_ref())))
             .map(|(name, (_, src))| (name.to_string(), crate::check::help::module_summary(src)))
             .collect();
+        let mut exports = HashMap::new();
+        for (module, src) in registry.sources.iter().filter(|(name, (kind, _))| *name != "prelude" && *kind == ModKind::Std).map(|(n, (_, s))| (n, s)) {
+            for name in crate::check::help::public_functions(src) {
+                exports.entry(name).or_insert_with(|| module.to_string());
+            }
+        }
+        checker.module_exports = Arc::new(exports);
         let mut program = base.map(|b| b.program.clone()).unwrap_or_default();
         let mut compiler = base.map(|b| b.compiler.clone()).unwrap_or_default();
         let cp = checker.take_checked();
@@ -322,6 +329,8 @@ pub(crate) struct LoadedModule {
     pub kind: ModKind,
     /// The directory relative imports start from (scripts).
     pub dir: Option<PathBuf>,
+    /// The file it was loaded from (imported scripts).
+    pub path: Option<PathBuf>,
     /// The modules it imports, by the span of their name or path in its
     /// import declarations.
     pub imports: Vec<(Span, Target)>,
@@ -424,7 +433,15 @@ impl ModuleGraph {
             let file = g.sm.add(f.name.clone(), f.text.clone());
             files.insert(m.file, file);
             index.push(Target::Loaded(g.modules.len()));
-            g.modules.push(LoadedModule { name: m.name.clone(), file, kind: m.kind, dir: m.dir.clone(), imports: Vec::new(), id: None });
+            g.modules.push(LoadedModule {
+                name: m.name.clone(),
+                file,
+                kind: m.kind,
+                dir: m.dir.clone(),
+                path: m.path.clone(),
+                imports: Vec::new(),
+                id: None,
+            });
         }
         let target = |t: Target| match t {
             Target::Loaded(i) => index[i],
@@ -469,7 +486,7 @@ impl ModuleGraph {
     /// and the imports to load.
     pub(crate) fn add(&mut self, name: String, file: FileId, kind: ModKind, dir: Option<PathBuf>) -> (usize, Vec<ImportRef>) {
         let imports = scan_imports(self.sm.text(file), file);
-        self.modules.push(LoadedModule { name, file, kind, dir, imports: Vec::new(), id: None });
+        self.modules.push(LoadedModule { name, file, kind, dir, path: None, imports: Vec::new(), id: None });
         (self.modules.len() - 1, imports)
     }
 

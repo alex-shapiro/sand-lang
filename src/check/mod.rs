@@ -398,6 +398,8 @@ pub(crate) enum CtxKind {
     Function,
     Lambda,
     TopLevel { main: bool },
+    /// A `test` block, where a failed `?` on a Result fails the test.
+    Test,
 }
 
 /// The local names in scope in a function: a stack of scopes, also indexed
@@ -508,6 +510,8 @@ pub struct Checker {
     /// The modules scripts can import by name, with the summaries of their
     /// docs (for `help()`).
     pub module_index: Arc<[(String, String)]>,
+    /// The public functions of those modules, by name, with the module that declares them.
+    pub module_exports: Arc<HashMap<String, String>>,
     pub variants: PVec<(TypeDefId, u32)>,
     /// The bindings of the inference variables of the module being checked
     /// (cleared when it is done: its types are all resolved by then).
@@ -587,6 +591,7 @@ impl Default for Checker {
             methods: PMap::new(),
             ctor_docs: PMap::new(),
             module_index: Arc::from([]),
+            module_exports: Arc::default(),
             variants: PVec::new(),
             subst: Vec::new(),
             derived: PVec::new(),
@@ -2037,7 +2042,8 @@ impl Checker {
             }
             param_locals.push(l);
         }
-        self.fs.ctx.push(FnCtx { ret, kind: CtxKind::Function, loops: vec![], lambda: 0, in_defer: None });
+        let kind = if matches!(decl, FnDeclRef::Test { .. }) { CtxKind::Test } else { CtxKind::Function };
+        self.fs.ctx.push(FnCtx { ret, kind, loops: vec![], lambda: 0, in_defer: None });
         let (body, span) = match decl {
             FnDeclRef::Fn(at) => {
                 let f = at.get(m);

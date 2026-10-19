@@ -8,7 +8,7 @@ mod common;
 use common::{TempDir, rt};
 use sandlang::session::RESET_NOTE;
 use sandlang::{
-    Capability, Config, Engine, Error, LimitKind, Limits, MemorySink, NativeModule, Policy, PromptAnswer, RulePolicy, Session, StdinFeed,
+    Capability, Config, Decision, Engine, Error, LimitKind, Limits, MemorySink, NativeModule, Policy, PromptAnswer, RulePolicy, Session, StdinFeed,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -248,6 +248,58 @@ fn imports_mid_session() {
     assert_eq!(r.value("regex.new(\"a+\")?.is_match(\"caat\")"), "true");
     let msg = r.compile_error("import nope");
     assert!(msg.contains("unknown module `nope`"), "{msg}");
+}
+
+#[test]
+fn library_modules_import_by_name() {
+    let dir = TempDir::new("session-library");
+    dir.write("tools/geo.sand", "import units\npub fn area(w: float, h: float) -> float { units.scale(w * h) }\n");
+    dir.write("tools/units.sand", "pub fn scale(x: float) -> float { x * 2.0 }\n");
+    let library = dir.path().join("tools");
+    let mut r = Repl::with(Config::new().policy(Policy::allow_all()).module_root(dir.path()).cwd(dir.path()).library(&library));
+    r.ok("import geo");
+    assert_eq!(r.value("geo.area(2.0, 3.0)"), "12.0");
+    r.ok("from units import scale");
+    assert_eq!(r.value("scale(1.5)"), "3.0");
+    let msg = r.compile_error("import nope");
+    assert!(msg.contains("unknown module `nope`"), "{msg}");
+    let msg = r.compile_error("import json\nlet x: int = json");
+    assert!(!msg.contains("unknown module"), "{msg}");
+}
+
+#[test]
+fn library_imports_are_checked_against_the_policy() {
+    let dir = TempDir::new("session-library-policy");
+    dir.write("tools/geo.sand", "pub fn one() -> int { 1 }\n");
+    let library = dir.path().join("tools");
+    let policy = Policy::custom(|cap: &Capability| if matches!(cap, Capability::Import(_)) { Decision::Deny } else { Decision::Allow });
+    let mut r = Repl::with(Config::new().policy(policy).module_root(dir.path()).library(&library));
+    let msg = r.compile_error("import geo");
+    assert!(msg.contains("cannot import `geo`: permission denied"), "{msg}");
+}
+
+#[test]
+fn a_changed_module_is_loaded_again_on_its_next_import() {
+    let dir = TempDir::new("session-reload");
+    dir.write("tools/geo.sand", "import units\npub fn area() -> float { units.scale(1.0) }\nprint(\"geo v1\")\n");
+    dir.write("tools/units.sand", "pub fn scale(x: float) -> float { x * 2.0 }\n");
+    let library = dir.path().join("tools");
+    let mut r = Repl::with(Config::new().policy(Policy::allow_all()).module_root(dir.path()).library(&library));
+    r.ok("import geo");
+    assert_eq!(r.take_out(), "geo v1\n");
+    r.ok("let before = geo.area");
+    r.ok("import geo");
+    assert_eq!(r.take_out(), "");
+    dir.write("tools/units.sand", "pub fn scale(x: float) -> float { x * 3.0 }\n");
+    r.ok("import geo");
+    assert_eq!(r.take_out(), "geo v1\n");
+    assert_eq!(r.value("geo.area()"), "3.0");
+    assert_eq!(r.value("before()"), "2.0");
+    dir.write("tools/geo.sand", "pub fn area() -> float { 5.0 }\n");
+    let msg = r.compile_error("import geo\nlet bad: int = \"x\"");
+    assert!(msg.contains("type mismatch"), "{msg}");
+    r.ok("import geo");
+    assert_eq!(r.value("geo.area()"), "5.0");
 }
 
 #[test]

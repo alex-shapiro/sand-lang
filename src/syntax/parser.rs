@@ -329,6 +329,13 @@ impl<'a> Parser<'a> {
                 let body = self.block()?;
                 ItemKind::Test(TestDecl { name, name_span, body })
             }
+            Tok::Ident if self.cur_text() == "test" && matches!(self.peek_tok(1), Tok::LBrace) => {
+                let name_span = self.span_here();
+                self.errors.push(Diag::error(name_span, "a test needs a name: `test \"what it checks\" { ... }`"));
+                self.bump();
+                let body = self.block()?;
+                ItemKind::Test(TestDecl { name: String::new(), name_span, body })
+            }
             _ => {
                 let mut s = self.stmt()?;
                 if let StmtKind::Let { doc: d, .. } = &mut s.kind {

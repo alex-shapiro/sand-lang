@@ -255,7 +255,10 @@ root are those of its target. Every script import is checked against the
 policy as `Import(path)` (§14).
 
 A module name (`json`) refers to a host-registered native module, else to a
-standard-library module. Only `pub` items are visible to importers; accessing
+standard-library module, else to the script `name.sand` in the host's library
+directory (`Config::library`), if the host configures one. A library module is
+checked against the policy as `Import(path)` like a script path, and it need
+not lie within the module root. Only `pub` items are visible to importers; accessing
 a non-`pub` item or importing a name that is not exported is an error.
 Qualified names are written `module.name` and `module.Type`.
 
@@ -425,7 +428,8 @@ test "addition is commutative" {
 ```
 
 The name is a string literal without interpolation. Test blocks are ignored by
-`run` and executed by the test runner (§17.4).
+`run` and executed by the test runner (§17.4). In a test block, `?` on an `Err`
+fails the test with the error, as it stops a run at the top level (§6.8).
 
 ### 4.9 Traits and impls
 
@@ -2630,6 +2634,9 @@ let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 
   the host `send`s (`end()` ends one read); `wanted()` is resolved if a script
   is waiting for input and has nothing else to run.
 - `Config::memory_fs(MemFs)` gives scripts a memory file system (§16.1).
+- `Config::library(dir)` sets the library directory, whose scripts `import
+  name` loads (§3.2). `Engine::module_names()` lists the standard and host
+  modules, whose names a library module cannot take.
 - `Config::clock(Arc<dyn platform::Clock>)` sets the clock and timer provider
   for the engine. The engine uses this provider for system time, monotonic time,
   UUIDv7 generation, sleep timers, execution limits, and network timeouts.
@@ -2757,6 +2764,10 @@ source)` uses `name` in diagnostics and traces instead of `<input
 N>` (e.g. `main.sand` for a program the session continues). After
   `exit(code)`, `eval` returns `Ok(None)` and `exit_code()` returns
   `Some(code)` until the next input; the session remains usable.
+- A script module that an earlier input imported is loaded again by a later
+  input that imports it, if its source or the source of a module it imports
+  has changed since. Earlier inputs keep the version they were checked
+  against.
 - `type_of(expr) -> Result<String, Error>` checks an expression without
   running it or changing the session.
 - `run_tests() -> Result<TestReport, Error>` runs the `test` blocks entered so

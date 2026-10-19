@@ -130,3 +130,28 @@ ok async
 let x = 1
 --- test
 0 passed, 0 failed
+
+=== a failed question mark fails the test
+import json
+import test
+
+test "parses" {
+    let v = json.parse("[1]")?
+    test.assert_true(v.as_list().is_some())
+}
+
+test "does not parse" {
+    let v = json.parse("[1")?
+    test.assert_true(v.as_list().is_some())
+}
+--- test
+ok parses
+FAIL does not parse: parse: unexpected end of input at line 1, column 3
+1 passed, 1 failed
+
+=== a test needs a name
+test {
+    assert(true)
+}
+--- error
+1: a test needs a name: `test "what it checks" { ... }`

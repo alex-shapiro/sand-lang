@@ -1022,7 +1022,8 @@ impl Checker {
                 err(span)
             }
             None => {
-                self.error(span, format!("undefined name `{}`", id.name));
+                let hint = self.import_hint(&id.name);
+                self.error(span, format!("undefined name `{}`{hint}", id.name));
                 err(span)
             }
         }
@@ -2245,7 +2246,7 @@ impl Checker {
             Ty::Named(d, args) if d == self.wk.result => {
                 let err_ty = self.arena.elem(args, 1);
                 let kind = match ctx_kind {
-                    CtxKind::TopLevel { main: true } => TryKind::TopLevel,
+                    CtxKind::TopLevel { main: true } | CtxKind::Test => TryKind::TopLevel,
                     CtxKind::TopLevel { main: false } => {
                         self.error(span, "`?` is not allowed at the top level of an imported module");
                         return err(span);

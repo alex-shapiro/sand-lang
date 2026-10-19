@@ -565,3 +565,17 @@ print(out)
 [[0, 10, 20], [2, 12, 22]]
 []
 
+
+=== an undefined name suggests the import that defines it
+fn f() -> str {
+    json.encode(1)
+}
+--- error
+2: undefined name `json`: add `import json`
+
+=== an undefined name suggests the standard function of that name
+test "t" {
+    assert_eq(1, 1)
+}
+--- error
+2: undefined name `assert_eq`; did you mean `test.assert_eq`? (add `import test`)
