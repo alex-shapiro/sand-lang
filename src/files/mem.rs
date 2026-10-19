@@ -544,8 +544,8 @@ impl MemFs {
         MemFs::with_capacity_and_clock(bytes, Arc::new(SystemClock))
     }
 
-    /// Creates an empty in-memory filesystem with a maximum capacity in bytes,
-    /// using `clock` for file modification timestamps.
+    /// Creates an empty in-memory filesystem with a max capacity and a clock
+    /// for file modification timestamps.
     pub fn with_capacity_and_clock(bytes: usize, clock: Arc<dyn Clock>) -> MemFs {
         let modified = now(&*clock);
         let shared = Arc::new(Shared { used: AtomicUsize::new(0), capacity: bytes, generation: AtomicU64::new(0), clock });

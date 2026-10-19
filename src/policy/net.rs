@@ -95,8 +95,8 @@ impl NetPattern {
         matches!(self.kind, HostKind::Host(_) | HostKind::Ip(..))
     }
 
-    /// How narrowly the pattern matches hosts: exact names and addresses
-    /// most, then ranges and domains (longer ones more narrowly), then `*`.
+    /// Specificity score of a pattern match: exact names and addresses highest,
+    /// then ranges and domains (longer is more specific), then `*`.
     fn score(&self) -> u32 {
         match &self.kind {
             HostKind::Host(_) => 3000,

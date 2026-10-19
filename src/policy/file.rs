@@ -23,19 +23,14 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// A parsed policy file: rules, limits, and the fallback decision for unmatched requests.
+/// A parsed policy file.
 #[derive(Clone, Debug)]
 pub struct PolicyFile {
-    /// The rules (`allow`/`deny` lines). [`PolicyFile::policy`] adds the
-    /// `default` decision and the private-network rule.
+    /// Policy rules.
     pub rules: RulePolicy,
-    /// The fallback decision for unmatched requests (the `default` line), if
-    /// given. Hosts choose what applies otherwise ([`PolicyFile::policy_or`]);
-    /// [`PolicyFile::policy`] denies.
+    /// The fallback action for unmatched requests, if given.
     pub default: Option<Decision>,
-    /// Whether `allow private-net` was given: connections to private and
-    /// internal addresses are then not denied (see
-    /// [`RulePolicy::deny_private_networks`]).
+    /// Whether `allow private-net` was set.
     pub private_net: bool,
     /// [`Limits::default`] changed by the `limit` lines.
     pub limits: Limits,
@@ -572,10 +567,9 @@ fn limit(l: &mut Limits, args: &[Word]) -> Result<(), String> {
     Ok(())
 }
 
-/// The policy-file line that allows (or, unless `allow`, denies) `cap`,
-/// e.g. `allow read /data/a.txt`, for a prompt's "always" or "never"
-/// answer. Returns `None` when rules cannot represent the capability: `NetAddr`,
-/// standard stream permissions, or requests without an exact rule match.
+/// The policy file line that allows (or denies) a capability, e.g.
+/// `allow read /data/a.txt`, for a prompt's "always" or "never" answer.
+/// Returns `None` if rules cannot represent the capability.
 pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
     let verb = if allow { "allow" } else { "deny" };
     let path = |p: &Path| p.to_str().map(|s| quote_part(s, true));

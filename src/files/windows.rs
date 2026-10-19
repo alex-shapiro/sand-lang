@@ -593,11 +593,10 @@ impl Resolved {
         self.exact
     }
 
-    /// Replaces the final name with the name stored on disk, if the entry
-    /// exists. For most entries that is the name returned for the
-    /// entry's handle. For a link, the handle is labeled with the path
-    /// used to open it, so the name is found by scanning the directory for an
-    /// entry whose folded name matches.
+    /// Replaces a path name with its name stored on disk, if an entry exists.
+    /// For most entries, this is the name returned for the entry's handle.
+    /// For a link, the handle is labeled with the path used to open it, so the
+    /// name is found by scanning the directory for an entry whose folded name matches.
     pub fn fix_spelling(&mut self) {
         if self.exact {
             return;

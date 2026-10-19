@@ -4015,12 +4015,10 @@ fn check_back_edges(code: &[Op]) -> bool {
 
 /// Facts about the locals of a function body (indexed by `LocalId`).
 struct LocalFacts {
-    /// The string locals that `+=` appends to without closure capture
-    /// (cells): they are appended to in place. Such a local holds a private
+    /// String locals that `+=` appends to in place. Such a local holds a private
     /// buffer (`Obj::StrBuf`) while it is being appended to; every other
-    /// read of it first freezes the buffer into an ordinary string
-    /// (`Op::FreezeStr`, in place), so other registers, objects, and closures
-    /// never see a buffer, and appending cannot change a value seen elsewhere.
+    /// read first freezes the buffer into an ordinary string
+    /// (`Op::FreezeStr`, in place).
     builder: Vec<bool>,
     /// Locals that share the register of the local they are initialized
     /// from (`let v = x`, copy propagation): neither is a cell, `v` is

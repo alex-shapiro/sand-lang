@@ -2428,7 +2428,7 @@ reports:
 | `redundant-rule`       | a rule repeats another, or a broader rule already decides what it covers the same way |
 | `overridden-rule`      | a rule taking precedence decides everything a rule covers the other way               |
 | `bypassable-http-deny` | a `deny http` rule for a host that a net rule lets scripts connect to                 |
-| `unused-set`           | a `let` set unreferenced by any rule                                                  |
+| `unused-set`           | a `let` set that is never referenced in a rule                                        |
 
 The first two compare paths as written, without resolving symlinks, and report
 a rule only when a single other rule shows that it is not needed.

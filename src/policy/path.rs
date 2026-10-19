@@ -432,9 +432,8 @@ impl<V> Trie<V> {
         found
     }
 
-    /// Returns whether a pattern matches the last component of `input` (either
-    /// exactly or with wildcards around text), making the match dependent
-    /// on the component's exact casing.
+    /// Checks whether a pattern matches the last component of `input`,
+    /// either exactly or with wildcards around text.
     pub(crate) fn matches_last(&self, input: &[&str]) -> bool {
         let mut found = false;
         self.states(input, |node, i| found |= i + 1 == input.len() && (node.has_names || !node.globs.is_empty()));

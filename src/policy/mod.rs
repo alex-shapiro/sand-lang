@@ -351,12 +351,10 @@ pub fn normalize_path(p: &Path) -> PathBuf {
     return lexical(p);
 }
 
-/// Like [`normalize_path`], but a final symlink is not resolved: the path of
-/// a directory entry itself (its parent directory normalized). An existing
-/// entry is resolved to its on-disk name, so that on a case- or
-/// normalization-insensitive file system `data/ſecrets` becomes
-/// `data/secrets`; for a symlink this may require scanning its directory (see
-/// [`MAX_LINK_SCAN`]).
+/// Normalizes a path without resolving symlinks. On a case- or
+/// normalization-insensitive file system, `data/ſecrets` becomes
+/// `data/secrets`; for a symlink this may require scanning its
+/// directory (see [`MAX_LINK_SCAN`]).
 pub fn normalize_entry_path(p: &Path) -> PathBuf {
     #[cfg(feature = "os")]
     {
@@ -485,8 +483,7 @@ mod tests {
         std::fs::remove_dir_all(&base).unwrap();
     }
 
-    /// On a case-insensitive file system (macOS's default), entries are resolved
-    /// to their on-disk names, including symlinks.
+    /// On a case-insensitive file system, all entries are resolved to their hardlink names.
     #[cfg(all(feature = "os", target_os = "macos"))]
     #[test]
     fn entries_are_resolved_to_on_disk_names() {

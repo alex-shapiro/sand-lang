@@ -300,8 +300,7 @@ enum Access {
 }
 
 /// Constructs a permission-denied error for `cap`. Uses the path as written by
-/// the script (`shown`) to avoid leaking symlink targets or on-disk names of
-/// inaccessible entries.
+/// the script to avoid leaking symlink targets or inaccessible entries.
 fn denied(vm: &mut Vm, cap: &Capability, shown: &str) -> Value {
     let verb = match cap {
         Capability::FsRead(_) => "read",
@@ -420,8 +419,7 @@ fn run<T: Send + 'static>(
     settle(vm, shown, r, finish)
 }
 
-/// Converts the result `r` of an operation on `shown` with `finish`. An I/O
-/// error becomes an `Err(Error)` value with `shown` as its path.
+/// Converts the result of an operation on `shown` with `finish`.
 fn settle<T>(vm: &mut Vm, shown: String, r: io::Result<T>, finish: impl FnOnce(&mut Vm, T) -> NResult) -> NResult {
     match r {
         Ok(v) => finish(vm, v),

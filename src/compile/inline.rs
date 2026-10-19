@@ -1,6 +1,5 @@
 //! Inlining of small functions. A call to a small, non-generic script
-//! function whose body cannot leave early (no `return`, `?` or loops) and
-//! does not create closures is replaced by
+//! function without an early return or closure is replaced by:
 //!
 //! ```text
 //! { let p1 = a1; let p2 = a2; body }
@@ -60,7 +59,7 @@ pub(super) fn inlinable(cp: &CheckedProgram, f: FnId, body: &HFn) -> Option<Arc<
     if !ok {
         return None;
     }
-    // A function returning `()` discards the value of its body.
+    // if a function returns `()`, its value body is discarded.
     if fi.ret == TypeId::UNIT && body.body.ty != TypeId::UNIT {
         let span = body.body.span;
         let b = std::mem::replace(&mut body.body, HExpr { kind: HKind::Unit, ty: TypeId::UNIT, span });

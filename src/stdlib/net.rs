@@ -456,7 +456,7 @@ pub(crate) async fn resolve_allowed(policy: &Policy, network: &dyn Network, host
     }
 }
 
-/// Opens a stream to one of the addresses of `host` the policy allows.
+/// Opens a stream to an allowed host address.
 pub(crate) async fn connect_checked(
     policy: &Policy,
     network: &dyn Network,
@@ -701,7 +701,7 @@ pub(crate) mod tls {
         }
     }
 
-    /// Performs a TLS handshake over `stream`, verifying the certificate for `host`.
+    /// Performs a TLS handshake over a stream and verifies the host certificate.
     pub async fn connect(settings: &TlsSettings, host: &str, stream: Box<dyn Stream>) -> Result<TlsStream<Box<dyn Stream>>, IoFailure> {
         let name = ServerName::try_from(host.to_string())
             .map_err(|_| IoFailure::new("invalid", format!("invalid TLS server name {:?}", crate::stdlib::truncate(host, 200))))?;
