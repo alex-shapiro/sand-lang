@@ -24,9 +24,11 @@
 //! * `--- args`: whitespace-separated script arguments.
 //! * `--- env`: `NAME=value` lines forming the script's environment.
 //!
-//! Every file is also run a second time with `Config::gc_stress`, which
-//! collects garbage at every safe point (alternating minor and major
-//! collections), to check that the collector never frees live values.
+//! Every file also runs in two more modes (`Mode`), whose results must be
+//! the same: with `Config::gc_stress`, which collects garbage at every safe
+//! point (alternating minor and major collections), to check that the
+//! collector never frees live values; and with `Config::optimize(false)`,
+//! to check that optimized code behaves like the plain code.
 //!
 //! Every case runs with scripts seeing the host's file system (a temporary
 //! directory; with the `os` feature) and with a memory file system
@@ -38,6 +40,24 @@ use common::rt;
 use sandlang::{Config, Engine, Error, MemFs, MemorySink, Policy};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
+/// How a case's program is compiled and run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    Plain,
+    GcStress,
+    Unoptimized,
+}
+
+impl Mode {
+    fn note(self) -> &'static str {
+        match self {
+            Mode::Plain => "",
+            Mode::GcStress => " (under GC stress)",
+            Mode::Unoptimized => " (unoptimized)",
+        }
+    }
+}
 
 /// The file system a case runs against.
 #[derive(Clone, Copy, Debug)]
@@ -164,7 +184,7 @@ fn parse_cases(text: &str) -> Vec<Case> {
     cases
 }
 
-fn run_case(case: &Case, gc_stress: bool, backend: Backend) -> Result<(), String> {
+fn run_case(case: &Case, mode: Mode, backend: Backend) -> Result<(), String> {
     let get = |name: &str| case.sections.iter().find(|(h, _)| h == name).map(|(_, b)| b.clone());
     let dir = CaseDir::new(backend, &case.name);
     for (h, body) in &case.sections {
@@ -205,8 +225,8 @@ fn run_case(case: &Case, gc_stress: bool, backend: Backend) -> Result<(), String
     let main = dir.write("main.sand", &case.source);
     let out = MemorySink::new();
     let err = MemorySink::new();
-    let mut config =
-        dir.configure(Config::new().policy(Policy::allow_all()).stdout(out.clone()).stderr(err.clone()).seed(42).gc_stress(gc_stress));
+    let config = Config::new().policy(Policy::allow_all()).stdout(out.clone()).stderr(err.clone()).seed(42);
+    let mut config = dir.configure(config.gc_stress(mode == Mode::GcStress).optimize(mode != Mode::Unoptimized));
     if let Some(stdin) = get("stdin") {
         config = config.stdin_bytes(stdin.into_bytes());
     }
@@ -300,7 +320,7 @@ fn run_case(case: &Case, gc_stress: bool, backend: Backend) -> Result<(), String
     Ok(())
 }
 
-fn run_file(name: &str, gc_stress: bool, backend: Backend) {
+fn run_file(name: &str, mode: Mode, backend: Backend) {
     let path = format!("{}/tests/spec/{name}.test", env!("CARGO_MANIFEST_DIR"));
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
     let cases = parse_cases(&text);
@@ -315,8 +335,8 @@ fn run_file(name: &str, gc_stress: bool, backend: Backend) {
             continue;
         }
         ran += 1;
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_case(case, gc_stress, backend)));
-        let note = format!("{} ({backend:?} file system)", stress_note(gc_stress));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_case(case, mode, backend)));
+        let note = format!("{} ({backend:?} file system)", mode.note());
         match outcome {
             Ok(Ok(())) => {}
             Ok(Err(msg)) => failures.push(format!("[{name}.test:{}] {}{note}\n{msg}", case.line, case.name)),
@@ -328,48 +348,42 @@ fn run_file(name: &str, gc_stress: bool, backend: Backend) {
     }
 }
 
-fn stress_note(gc_stress: bool) -> &'static str {
-    if gc_stress { " (under GC stress)" } else { "" }
-}
-
 macro_rules! spec_files {
     ($($name:ident),* $(,)?) => {
         #[cfg(feature = "os")]
         mod host {
-            use super::{Backend, run_file};
-            $(
-                #[test]
-                fn $name() {
-                    run_file(stringify!($name), false, Backend::Host);
-                }
-            )*
-            mod gc_stress {
-                use super::{Backend, run_file};
-                $(
-                    #[test]
-                    fn $name() {
-                        run_file(stringify!($name), true, Backend::Host);
-                    }
-                )*
-            }
+            use super::{Backend, Mode, run_file};
+            spec_files!(@modes Backend::Host; $($name),*);
         }
         mod memory {
-            use super::{Backend, run_file};
+            use super::{Backend, Mode, run_file};
+            spec_files!(@modes Backend::Memory; $($name),*);
+        }
+    };
+    (@modes $backend:expr; $($name:ident),*) => {
+        $(
+            #[test]
+            fn $name() {
+                run_file(stringify!($name), Mode::Plain, $backend);
+            }
+        )*
+        mod gc_stress {
+            use super::{Backend, Mode, run_file};
             $(
                 #[test]
                 fn $name() {
-                    run_file(stringify!($name), false, Backend::Memory);
+                    run_file(stringify!($name), Mode::GcStress, $backend);
                 }
             )*
-            mod gc_stress {
-                use super::{Backend, run_file};
-                $(
-                    #[test]
-                    fn $name() {
-                        run_file(stringify!($name), true, Backend::Memory);
-                    }
-                )*
-            }
+        }
+        mod unoptimized {
+            use super::{Backend, Mode, run_file};
+            $(
+                #[test]
+                fn $name() {
+                    run_file(stringify!($name), Mode::Unoptimized, $backend);
+                }
+            )*
         }
     };
 }

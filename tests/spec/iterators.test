@@ -427,6 +427,14 @@ print((t, (0..4).map(i => i * i), (0..10).filter(i => i % 4 == 0)))
 [3, 1, 0, 1, 0]
 (10, [0, 1, 4, 9], [0, 4, 8])
 
+=== skip and step_by stop at the end of their source
+// Stored iterators are not fused: these run the prelude's adapters.
+let skipped = [1, 2].iter().skip(4611686018427387904)
+let stepped = [1, 2, 3].iter().step_by(4611686018427387904)
+print((skipped.to_list(), stepped.to_list()))
+--- stdout
+([], [1])
+
 === fused range loops evaluate the bounds once, in order
 let log = []
 fn at(x: int) -> int {

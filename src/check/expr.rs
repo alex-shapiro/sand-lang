@@ -2509,7 +2509,9 @@ impl Checker {
 
     fn check_for(&mut self, label: Option<&ast::Ident>, pattern: &ast::Pattern, iter: &Expr, body: &Block, span: Span) -> HExpr {
         // Literal ranges are iterated without allocating.
-        if let ExprKind::Range { start: Some(s), end: Some(e), inclusive } = &iter.kind {
+        if let ExprKind::Range { start: Some(s), end: Some(e), inclusive } = &iter.kind
+            && self.optimize
+        {
             let sh = self.check_expr(s, TypeId::INT);
             let eh = self.check_expr(e, TypeId::INT);
             self.push_scope();
@@ -2611,7 +2613,9 @@ impl Checker {
                 mk(HKind::If { cond: Box::new(ch), then: Box::new(inner), else_: None }, TypeId::UNIT, span)
             }
             CompClause::For(p, it) => {
-                if let ExprKind::Range { start: Some(s), end: Some(e), inclusive } = &it.kind {
+                if let ExprKind::Range { start: Some(s), end: Some(e), inclusive } = &it.kind
+                    && self.optimize
+                {
                     let sh = self.check_expr(s, TypeId::INT);
                     let eh = self.check_expr(e, TypeId::INT);
                     self.push_scope();

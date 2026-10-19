@@ -232,6 +232,7 @@ pub struct Config {
     pub(crate) env: Option<Vec<(String, String)>>,
     pub(crate) seed: Option<u64>,
     pub(crate) gc_stress: bool,
+    pub(crate) optimize: bool,
     pub(crate) dump_bytecode: bool,
     pub(crate) exit_after_run: bool,
     #[cfg(feature = "os")]
@@ -278,6 +279,7 @@ impl Config {
             env: None,
             seed: None,
             gc_stress: false,
+            optimize: true,
             dump_bytecode: false,
             exit_after_run: false,
             #[cfg(feature = "os")]
@@ -393,6 +395,15 @@ impl Config {
     #[doc(hidden)]
     pub fn gc_stress(mut self, on: bool) -> Self {
         self.gc_stress = on;
+        self
+    }
+    /// Testing aid: with `false`, compile the program's own code without the
+    /// optimizations that must not change what it does (fused iterator
+    /// pipelines, specialized loops, inlining, hoisting), to compare its
+    /// behavior with the optimized code's.
+    #[doc(hidden)]
+    pub fn optimize(mut self, on: bool) -> Self {
+        self.optimize = on;
         self
     }
     /// Debugging aid: print the bytecode of the program's own functions to
@@ -1085,9 +1096,9 @@ impl Engine {
             _ => None,
         };
         let natives = g.has_natives(&g.order);
-        let (base, registry) = (snap.clone(), self.registry.clone());
+        let (base, registry, optimize) = (snap.clone(), self.registry.clone(), self.config.optimize);
         let (program, lints) =
-            on_compile_stack(move || compile_program(&base, &mut g, &registry, &budget, main_file, options.lint, spare))?;
+            on_compile_stack(move || compile_program(&base, &mut g, &registry, &budget, main_file, options.lint, optimize, spare))?;
         Ok(Compiled { program, lints, deadline, snapshot: (!natives).then_some(snap) })
     }
 
@@ -1327,6 +1338,7 @@ type ImportFrame = (usize, Vec<ImportRef>, usize);
 
 /// Checks and compiles the modules of `g` (in `g.order`; the main module is
 /// in `main_file`) on top of the snapshot `snap`.
+#[allow(clippy::too_many_arguments)]
 fn compile_program(
     snap: &Snapshot,
     g: &mut ModuleGraph,
@@ -1334,6 +1346,7 @@ fn compile_program(
     budget: &Arc<CompileBudget>,
     main_file: FileId,
     lint: bool,
+    optimize: bool,
     spare: Option<Program>,
 ) -> Result<(Arc<Program>, Option<Vec<crate::lint::LintWarning>>), Error> {
     let order = g.order.clone();
@@ -1341,6 +1354,7 @@ fn compile_program(
         g.parse(&order, snap.checker.mods.len() as ModId).map_err(|ds| Error::Compile(ds.iter().map(|d| g.sm.resolve(d)).collect()))?;
     let mut checker = snap.checker.clone();
     checker.lint_facts = lint;
+    checker.optimize = optimize;
     let checked = checker.check_modules(&modules, &registry.by_name, budget);
     let sm = &g.sm;
     if let Some(stop) = budget.stopped() {
@@ -1364,7 +1378,8 @@ fn compile_program(
     };
     let (native_names, native_argc) = if host { native_info(&cp, registry) } else { (Vec::new(), Vec::new()) };
     let mut program = spare.unwrap_or_else(|| snap.program.clone());
-    let input = CompileInput { checked: &cp, sm, natives: &registry.by_name, native_names, native_argc, budget, initialized: None };
+    let input =
+        CompileInput { checked: &cp, sm, natives: &registry.by_name, native_names, native_argc, budget, initialized: None, optimize };
     let entry = compile_more(input, &mut program, &mut snap.compiler.clone(), &inits);
     if let Some(stop) = budget.stopped() {
         return Err(budget_error(stop, sm, main_file));

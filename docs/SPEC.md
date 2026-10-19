@@ -1461,6 +1461,10 @@ element outside `0..=255`), `bytes.from_hex(s: str) -> bytes?`.
 | `to_set() -> Set<T>`                                                            | `T: Hash`                               |
 | `iter() -> Iter<T>`                                                             | lazy iterator (§12.13)                  |
 
+The methods taking a function visit the elements like a `for` loop (§6.9):
+those the function adds to the list meanwhile are not visited, nor part of
+the result.
+
 ### 12.9 `[K: V]`
 
 `len`, `is_empty`, `get(k) -> V?`, `get_or(k, default: V) -> V`,
@@ -1601,8 +1605,9 @@ T?` (`T: Ord`; the first minimal/maximal), `min_by`/`max_by<K: Ord>(key: fn(T)
   elements.
 - **Exhaustion.** The iterators of lists, ranges, maps, sets, strings and
   channels keep returning `None` once they have; `Iter.from_fn` iterators
-  return whatever their function returns. Whether an adapter asks an
-  exhausted source for more elements (`skip` may) is unspecified.
+  return whatever their function returns. Adapters stop asking their source
+  for elements when it returns `None`: `skip(n)` and `step_by(n)` do not
+  pull `n` times from an exhausted source.
 - **Mutation.** A list iterator behaves like a `for` loop (§6.9), with the
   length taken when `iter()` is called. Map and set iterators work on a
   snapshot of the entries taken by `iter()`, unaffected by later changes. A

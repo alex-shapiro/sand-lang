@@ -789,14 +789,16 @@ extend<T> [T] {
 
     /// Everything after the longest prefix for which `f` is true.
     pub fn skip_while(self, f: fn(T) -> bool) -> [T] {
-        var i = 0
+        let out = []
+        var skipping = true
         for x in self {
-            if not f(x) {
-                break
+            if skipping and f(x) {
+                continue
             }
-            i += 1
+            skipping = false
+            out.push(x)
         }
-        self.skip(i)
+        out
     }
 
     /// Groups elements by key, in order of first appearance.
@@ -1430,7 +1432,7 @@ pub struct Iter<T> {
         fn step() -> T? {
             while left > 0 {
                 left -= 1
-                let _ = next()
+                let _ = next()?
             }
             next()
         }
@@ -1489,7 +1491,7 @@ pub struct Iter<T> {
                 first = false
             } else {
                 for _ in 1..step {
-                    let _ = next()
+                    let _ = next()?
                 }
             }
             next()

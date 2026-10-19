@@ -168,9 +168,11 @@ enum Doc {
     /// fits, a hug group is assumed to break, as it will be forced to once it has
     /// been printed broken; this keeps formatting idempotent.
     ///
-    /// A `strict` group is printed flat only if all of it fits on the line. It is
-    /// used for constructs kept on one line because they were on one line in the
-    /// source, which must not end up spanning several lines.
+    /// A `strict` group is printed flat only if all of it fits on the line, and
+    /// then all of it is flat but its forced groups, hug groups included. It
+    /// is used for constructs kept on one line because they were on one line
+    /// in the source (at their own level: see `on_one_line`), which must not
+    /// end up spanning several lines, or formatting again would break them.
     Group {
         doc: Box<Doc>,
         force: bool,
@@ -267,6 +269,10 @@ fn contains_hard(b: &CompileBudget, doc: &Doc) -> bool {
 enum Mode {
     Flat,
     Break,
+    /// Inside a strict group printed flat: every group but forced ones is
+    /// flat, hug groups included, so that a construct printed on one line
+    /// is still on one line when formatted again.
+    Strict,
 }
 
 struct Printer {
@@ -313,16 +319,18 @@ fn render(doc: &Doc, b: &CompileBudget) -> String {
         }
         match doc {
             Doc::Text(s) | Doc::Trailing(s) => p.text(s),
-            Doc::Line if mode == Mode::Flat => p.text(" "),
-            Doc::SoftLine if mode == Mode::Flat => {}
+            Doc::Line if mode != Mode::Break => p.text(" "),
+            Doc::SoftLine if mode != Mode::Break => {}
             Doc::Line | Doc::SoftLine | Doc::HardLine => p.newline(ind),
             Doc::IfBreak(broken, flat) => p.text(if mode == Mode::Break { broken } else { flat }),
             Doc::Indent(d) => stack.push((if mode == Mode::Break { ind + INDENT } else { ind }, mode, d)),
             Doc::Group { doc: d, force, hug, strict } => {
                 let m = if *force {
                     Mode::Break
+                } else if mode == Mode::Strict {
+                    Mode::Strict
                 } else if (mode == Mode::Flat && !hug) || fits(d, &stack, WIDTH as isize - p.col as isize, *strict, b) {
-                    Mode::Flat
+                    if *strict { Mode::Strict } else { Mode::Flat }
                 } else {
                     Mode::Break
                 };
@@ -720,6 +728,21 @@ impl<'a> Formatter<'a> {
 
     fn newline_between(&self, a: u32, b: u32) -> bool {
         a < b && self.line_of(b) > self.line_of(a)
+    }
+
+    /// Whether `members`, between the braces at `open` and `close`, are on
+    /// one line at their own level: no line break between the braces and the
+    /// members or between members. A member may span lines of its own: a
+    /// lambda's body broken by the formatter leaves its block on one line.
+    fn on_one_line(&self, open: u32, members: &[Member], close: u32) -> bool {
+        let mut prev = open;
+        for m in members {
+            if self.newline_between(prev, m.lo()) {
+                return false;
+            }
+            prev = m.hi();
+        }
+        !self.newline_between(prev, close)
     }
 
     /// Position of the first token at or after `pos`.
@@ -1368,7 +1391,8 @@ impl<'a> Formatter<'a> {
     fn block_parts(&mut self, b: &'a Block) -> (Doc, bool) {
         let members: Vec<Member> = b.stmts.iter().map(Member::Stmt).collect();
         let close = b.span.hi - 1;
-        self.braced(ListKind::Block, &members, b.span.lo, close, b.stmts.len() <= 1 && !self.newline_between(b.span.lo, close))
+        let inline = b.stmts.len() <= 1 && self.on_one_line(b.span.lo, &members, close);
+        self.braced(ListKind::Block, &members, b.span.lo, close, inline)
     }
 
     fn block(&mut self, b: &'a Block) -> Doc {
@@ -1476,7 +1500,7 @@ impl<'a> Formatter<'a> {
                 let members: Vec<Member> = arms.iter().map(Member::Arm).collect();
                 let close = e.span.hi - 1;
                 let open = self.find_tok(scrutinee.span.hi, &Tok::LBrace);
-                let (body, flat) = self.braced(ListKind::Arms, &members, open, close, !self.newline_between(e.span.lo, close));
+                let (body, flat) = self.braced(ListKind::Arms, &members, open, close, self.on_one_line(open, &members, close));
                 cat(vec![head, strict_group(self.budget, !flat, body)])
             }
             ExprKind::Block(b) => self.block(b),

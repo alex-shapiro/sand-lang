@@ -17,8 +17,7 @@
 //! The lowering keeps the lazy semantics exactly: the source and the
 //! adapters' arguments are evaluated once, in order, before the loop; each
 //! adapter's function runs for the same elements and in the same order; and
-//! the source is pulled the same number of times. The one difference: a pipeline stops at the first `None` of
-//! its source, where a lazy `skip` would call an exhausted source again.
+//! the source is pulled the same number of times.
 //! A list source becomes a native list loop, which reads the list's length
 //! when it starts, only if evaluating the adapters' and the consumer's
 //! arguments cannot run code.
@@ -206,8 +205,7 @@ impl Checker {
                         "all" => eager(range, None, Consumer::All),
                         "find" => eager(range, None, Consumer::Find),
                         "find_index" => eager(range, None, Consumer::FindIndex),
-                        // A list's `skip_while` copies the list after its prefix is found.
-                        "skip_while" if range => eager(range, Some(Adapter::SkipWhile), Consumer::ToList),
+                        "skip_while" => eager(range, Some(Adapter::SkipWhile), Consumer::ToList),
                         _ => continue,
                     }
                 }
@@ -541,6 +539,9 @@ impl Checker {
     /// The string `s` of `s.chars()` (`Err(e)` for any other `e`), whose
     /// characters a loop can visit without building the list.
     pub(crate) fn chars_source(&mut self, e: HExpr) -> Result<HExpr, HExpr> {
+        if !self.optimize {
+            return Err(e);
+        }
         if self.fuse_fns.is_none() {
             let _ = self.fuse_role(0);
         }
@@ -557,6 +558,9 @@ impl Checker {
     /// Whether a loop over `iter` binding `pat` is `for (i, x) in
     /// xs.enumerate()`, which `enumerate_for` lowers.
     pub(crate) fn is_enumerate_for(&mut self, iter: &HExpr, pat: &HPat) -> bool {
+        if !self.optimize {
+            return false;
+        }
         if self.fuse_fns.is_none() {
             // Builds the tables; any prelude function will do.
             let _ = self.fuse_role(0);
@@ -600,7 +604,7 @@ impl Checker {
     }
 
     pub(crate) fn can_fuse(&mut self, iter: &HExpr) -> bool {
-        self.chain_shape(iter, true).is_some()
+        self.optimize && self.chain_shape(iter, true).is_some()
     }
 
     /// A `for` loop (or comprehension clause) over the fusible pipeline
@@ -617,6 +621,9 @@ impl Checker {
     /// pipeline, as a fused loop; any other call is returned unchanged.
     pub(crate) fn fuse_consumer(&mut self, call: HExpr) -> HExpr {
         let HKind::Call { func, args } = &call.kind else { return call };
+        if !self.optimize {
+            return call;
+        }
         let role = self.fuse_role(*func);
         let ndicts = self.fns[*func as usize].dicts.len();
         if !args.iter().all(|a| matches!(a, HArg::Expr(_))) || args.len() <= ndicts {
