@@ -3823,7 +3823,7 @@ const ISLAND_REACH: usize = 30000;
 /// then routes each branch in `far` (instruction, target), whose target is
 /// out of the range of its offset field, through a branch island: a `Jmp`
 /// (or, backward, a `Loop`) to the target. An island goes into a gap
-/// between the branch and its target that no code falls through to (after
+/// between the branch and its target that is unreachable by fall-through (after
 /// an unconditional instruction) when there is one within reach, so it
 /// costs nothing on other paths; otherwise right after the branch, behind
 /// a jump over it.
@@ -3852,7 +3852,7 @@ fn assemble(mut code: Vec<Op>, mut lines: Vec<u32>, far: &[(usize, usize)], tabl
         debug_assert!(check_back_edges(&code));
         return (code, lines);
     }
-    // Positions (before an instruction, or `n`) no code falls through to.
+    // Positions (before an instruction, or `n`) unreachable by fall-through.
     let gaps: Vec<usize> = (1..=n).filter(|&p| code[p - 1].is_unconditional()).collect();
     loop {
         // (position, index in `needs`), in code order.
@@ -4015,12 +4015,12 @@ fn check_back_edges(code: &[Op]) -> bool {
 
 /// Facts about the locals of a function body (indexed by `LocalId`).
 struct LocalFacts {
-    /// The string locals that `+=` appends to and no closure captures
+    /// The string locals that `+=` appends to without closure capture
     /// (cells): they are appended to in place. Such a local holds a private
     /// buffer (`Obj::StrBuf`) while it is being appended to; every other
     /// read of it first freezes the buffer into an ordinary string
-    /// (`Op::FreezeStr`, in place), so no other register, object or closure
-    /// ever sees a buffer, and appending cannot change a value seen elsewhere.
+    /// (`Op::FreezeStr`, in place), so other registers, objects, and closures
+    /// never see a buffer, and appending cannot change a value seen elsewhere.
     builder: Vec<bool>,
     /// Locals that share the register of the local they are initialized
     /// from (`let v = x`, copy propagation): neither is a cell, `v` is

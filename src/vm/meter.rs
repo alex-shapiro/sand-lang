@@ -129,9 +129,9 @@ pub struct Meter {
     /// Fuel used by the run before the current slice.
     base: Cell<u64>,
     max_instructions: Option<u64>,
-    /// Where the thread's CPU clock ([`Clock::cpu_time`]) passes the CPU
-    /// time limit, and the monotonic clock the wall-time limit.
+    /// Deadline for the CPU time limit.
     cpu_deadline: Cell<Option<Duration>>,
+    /// Deadline for the wall-clock time limit.
     wall_deadline: Cell<Option<Instant>>,
     interrupt: Arc<AtomicBool>,
     clock: Arc<dyn Clock>,
@@ -156,7 +156,7 @@ impl Meter {
     /// Starts a slice: the fuel for the work until the next scheduling
     /// point (at most `SLICE_FUEL`, and at most what is left of the
     /// instruction budget), which it returns for the interpreter. The
-    /// deadlines are where the CPU and wall clocks pass their limits.
+    /// deadlines specify CPU and wall-clock limits.
     pub(crate) fn start_slice(&self, cpu_deadline: Option<Duration>, wall_deadline: Option<Instant>) -> i64 {
         let used = self.used();
         let fuel = match self.max_instructions {

@@ -62,7 +62,7 @@ struct Shared {
     capacity: usize,
     /// Counts the writes and moves of files (see [`MemFs::generation`]).
     generation: AtomicU64,
-    /// Stamps modification times.
+    /// Clock used for file modification timestamps.
     clock: Arc<dyn Clock>,
 }
 
@@ -258,7 +258,7 @@ impl Node {
     }
 }
 
-/// `clock`'s time of day, in Unix nanoseconds.
+/// Returns the current wall-clock time from `clock` in Unix nanoseconds.
 fn now(clock: &dyn Clock) -> i64 {
     let since = clock.wall().duration_since(crate::platform::UNIX_EPOCH);
     since.map(|d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX)).unwrap_or(0)
@@ -544,8 +544,8 @@ impl MemFs {
         MemFs::with_capacity_and_clock(bytes, Arc::new(SystemClock))
     }
 
-    /// Like [`MemFs::with_capacity`], with modification times read from `clock`, such as the
-    /// clock of the engines that use the file system (see [`crate::Config::clock`]).
+    /// Creates an empty in-memory filesystem with a maximum capacity in bytes,
+    /// using `clock` for file modification timestamps.
     pub fn with_capacity_and_clock(bytes: usize, clock: Arc<dyn Clock>) -> MemFs {
         let modified = now(&*clock);
         let shared = Arc::new(Shared { used: AtomicUsize::new(0), capacity: bytes, generation: AtomicU64::new(0), clock });

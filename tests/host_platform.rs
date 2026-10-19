@@ -1,4 +1,4 @@
-//! Acceptance tests for a host's own clock and network.
+//! Tests for custom host clock and network implementations.
 
 mod common;
 
@@ -8,7 +8,7 @@ use sandlang::{Error, LimitKind, Limits};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// A clock that only moves when the engine works or sleeps.
+/// A simulated clock that advances upon recorded work or sleep duration.
 struct ManualClock {
     origin: Instant,
     elapsed: Mutex<Duration>,
@@ -61,7 +61,7 @@ impl Clock for ManualClock {
 }
 
 #[test]
-fn scripts_read_the_time_of_the_hosts_clock() {
+fn scripts_read_host_clock() {
     let clock = ManualClock::new();
     let src = "import time\nimport uuid\nprint(time.now().to_iso())\nprint(uuid.v7()[0..8])";
     let r = run_with(src, |c| c.clock(clock.clone()));
@@ -69,7 +69,7 @@ fn scripts_read_the_time_of_the_hosts_clock() {
 }
 
 #[test]
-fn sleeps_wait_on_the_hosts_timers() {
+fn sleeps_await_host_timers() {
     let clock = ManualClock::new();
     let src = "import task\nimport time\nlet start = time.monotonic()\ntask.sleep(5s)\nprint(start.elapsed() >= 5s)";
     let r = run_with(src, |c| c.clock(clock.clone()));
@@ -78,7 +78,7 @@ fn sleeps_wait_on_the_hosts_timers() {
 }
 
 #[test]
-fn the_time_limit_is_measured_on_the_hosts_clock() {
+fn wall_time_limit_measured_by_host_clock() {
     let clock = ManualClock::new();
     let limits = Limits { max_wall_time: Some(Duration::from_millis(50)), ..Limits::default() };
     let r = run_with("var n = 0\nwhile true { n += 1 }", |c| c.clock(clock.clone()).limits(limits));
@@ -88,7 +88,7 @@ fn the_time_limit_is_measured_on_the_hosts_clock() {
 }
 
 #[test]
-fn memory_files_take_their_times_from_the_hosts_clock() {
+fn memfs_timestamps_sourced_from_host_clock() {
     let clock = ManualClock::new();
     let fs = sandlang::MemFs::with_capacity_and_clock(1 << 20, clock.clone());
     fs.write("/run/.keep", "").unwrap();
@@ -109,7 +109,7 @@ mod network {
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    /// Answers every connection with one HTTP response from memory, or with silence.
+    /// In-memory network answering HTTP requests from memory or timing out.
     #[derive(Default)]
     struct MemoryNetwork {
         silent: bool,
@@ -147,7 +147,7 @@ mod network {
     }
 
     #[test]
-    fn requests_go_through_the_hosts_network() {
+    fn http_requests_route_through_host_network() {
         let network = std::sync::Arc::new(MemoryNetwork::default());
         let src = "import http\nprint(http.get(\"http://example.test/page\")?.text()?)";
         let r = run_with(src, |c| c.network(network.clone()));
@@ -158,7 +158,7 @@ mod network {
     }
 
     #[test]
-    fn raw_connections_go_through_the_hosts_network() {
+    fn tcp_connections_route_through_host_network() {
         let network = std::sync::Arc::new(MemoryNetwork::default());
         let src = "import net\nlet c = net.connect(\"example.test:80\")?\nc.write_str(\"GET / HTTP/1.1\\r\\n\\r\\n\")?\nprint(c.peer_addr())\nprint(c.read_all()?.len())";
         let r = run_with(src, |c| c.network(network.clone()));
@@ -167,7 +167,7 @@ mod network {
     }
 
     #[test]
-    fn request_timeouts_are_measured_on_the_hosts_clock() {
+    fn http_timeouts_measured_by_host_clock() {
         let network = std::sync::Arc::new(MemoryNetwork { silent: true, ..MemoryNetwork::default() });
         let clock = ManualClock::new();
         let src = "import http\nprint(http.get(\"http://example.test/\", timeout: 30s).map_err(e => e.kind))";

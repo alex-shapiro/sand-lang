@@ -219,7 +219,7 @@ pub(crate) fn covers(a: Pattern, b: Pattern) -> bool {
         }
         let r = match (a.get(i), b.get(j)) {
             (None, None) => true,
-            // `a`'s `**` matches no more names, or also those of `b`'s next segment.
+            // `a`'s `**` matches nothing further, or also matches `b`'s next segment.
             (Some(Seg::GlobStar), _) => go(a, b, i + 1, j, memo) || (j < b.len() && go(a, b, i, j + 1, memo)),
             (None, Some(_)) | (Some(_), None) | (Some(_), Some(Seg::GlobStar)) => false,
             (Some(x), Some(y)) => name_covers(x, y) && go(a, b, i + 1, j + 1, memo),
@@ -432,10 +432,10 @@ impl<V> Trie<V> {
         found
     }
 
-    /// Whether some pattern names the last name of `input` (exactly or
-    /// with wildcards around text), so that whether it matches may depend
-    /// on the name's spelling.
-    pub(crate) fn names_last(&self, input: &[&str]) -> bool {
+    /// Returns whether a pattern matches the last component of `input` (either
+    /// exactly or with wildcards around text), making the match dependent
+    /// on the component's exact casing.
+    pub(crate) fn matches_last(&self, input: &[&str]) -> bool {
         let mut found = false;
         self.states(input, |node, i| found |= i + 1 == input.len() && (node.has_names || !node.globs.is_empty()));
         found
@@ -530,11 +530,11 @@ mod tests {
         assert!(t.any_below(&input("r/a/q"), 1), "r/a/*/c");
         assert!(t.any_below(&input("r/z/y"), 1), "r/**/x.pem");
         assert!(!t.any_below(&input("s"), 1));
-        assert!(t.names_last(&input("r/a")));
-        assert!(t.names_last(&input("r/q/q")), "r/**/x.pem");
+        assert!(t.matches_last(&input("r/a")));
+        assert!(t.matches_last(&input("r/q/q")), "r/**/x.pem");
         let mut t = Trie::default();
         t.insert(&pattern("r/a/*"), "", 1);
-        assert!(!t.names_last(&input("r/a/q")));
-        assert!(t.names_last(&input("r/q")));
+        assert!(!t.matches_last(&input("r/a/q")));
+        assert!(t.matches_last(&input("r/q")));
     }
 }

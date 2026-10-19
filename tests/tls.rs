@@ -106,7 +106,7 @@ print(c.unwrap_err().message.contains("certificate"))
 fn certificates_must_match_the_host_name() {
     let server = https_server(|_| HttpResponse::new(200, "should not be read"));
     let echo = tls_echo_server();
-    // The certificate names only `localhost`, not the address.
+    // The certificate matches only `localhost`, not the address.
     let src = format!(
         r#"
 import http

@@ -44,7 +44,7 @@ Functions:
         The version number of a UUID (e.g. 4 or 7), or `None` if `s` is not a
         UUID.
 
-=== a string names a module or an item
+=== a string identifies a module or an item
 import json
 help("json.parse")
 help("[T].len")
@@ -276,7 +276,7 @@ help()
 --- stdout
 help(x) shows the documentation of x: a module, type, trait, function,
 method, field, variant or variable, or the type of any other expression
-(which is not evaluated). A string names an item too: help("json.Json").
+(which is not evaluated). A string identifies an item too: help("json.Json").
 members(x) lists the names that may follow `x.`, and members() those
 in scope.
 

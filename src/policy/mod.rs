@@ -353,9 +353,9 @@ pub fn normalize_path(p: &Path) -> PathBuf {
 
 /// Like [`normalize_path`], but a final symlink is not resolved: the path of
 /// a directory entry itself (its parent directory normalized). An existing
-/// entry is named as stored, so that on a case- or
+/// entry resolves to its on-disk name, so that on a case- or
 /// normalization-insensitive file system `data/ſecrets` becomes
-/// `data/secrets`; for a symlink this may take a scan of its directory (see
+/// `data/secrets`; for a symlink this may require scanning its directory (see
 /// [`MAX_LINK_SCAN`]).
 pub fn normalize_entry_path(p: &Path) -> PathBuf {
     #[cfg(feature = "os")]
@@ -485,11 +485,11 @@ mod tests {
         std::fs::remove_dir_all(&base).unwrap();
     }
 
-    /// On a case-insensitive file system (macOS's default), entries are
-    /// named as stored, symlinks too.
+    /// On a case-insensitive file system (macOS's default), entries resolve
+    /// to their on-disk names, including symlinks.
     #[cfg(all(feature = "os", target_os = "macos"))]
     #[test]
-    fn entries_are_named_as_stored() {
+    fn entries_resolve_to_on_disk_names() {
         let base = normalize_path(&std::env::temp_dir()).join(format!("sand-policy-links-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(base.join("Dir")).unwrap();

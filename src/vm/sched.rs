@@ -3,7 +3,7 @@
 use super::interp::Exit;
 use super::*;
 use crate::LimitKind;
-use crate::platform::Instant;
+use crate::platform::{ClockFuture, Instant};
 use std::sync::atomic::Ordering;
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
@@ -164,10 +164,8 @@ pub(crate) enum Stop {
     Prompt(Capability),
 }
 
-/// The readings of a run's clocks. CPU time is read from the engine's
-/// [`crate::platform::Clock`] for the stretches between waits, during which
-/// the run stays on one thread.
-struct Times {
+/// Tracks elapsed execution time and limits during a run.
+struct RunTimer {
     clock: Arc<dyn crate::platform::Clock>,
     /// CPU time used by the run, up to `cpu_mark`.
     cpu: Duration,
@@ -176,60 +174,74 @@ struct Times {
     /// The monotonic clock, read with the CPU clock.
     now: Instant,
     last_yield: Instant,
-    /// Slices run and fuel spent since the clocks were last read.
-    unclocked: (u32, u64),
+    /// Slices run since the clocks were last read.
+    unrecorded_slices: u32,
+    /// Fuel spent since the clocks were last read.
+    unrecorded_fuel: u64,
 }
 
-impl Times {
-    fn start(clock: Arc<dyn crate::platform::Clock>) -> Times {
+impl RunTimer {
+    fn start(clock: Arc<dyn crate::platform::Clock>) -> RunTimer {
         let now = clock.now();
         let cpu_mark = clock.cpu_time();
-        Times { clock, cpu: Duration::ZERO, cpu_mark, now, last_yield: now, unclocked: (0, 0) }
+        RunTimer { clock, cpu: Duration::ZERO, cpu_mark, now, last_yield: now, unrecorded_slices: 0, unrecorded_fuel: 0 }
     }
 
-    /// Reports the work since the last reading and brings the CPU time up to date (before waiting).
+    /// Reports work performed since the last reading and updates CPU and monotonic times.
     fn read(&mut self) {
-        self.clock.work(self.unclocked.1);
+        self.clock.work(self.unrecorded_fuel);
         let mark = self.clock.cpu_time();
         self.cpu += mark.saturating_sub(self.cpu_mark);
         self.cpu_mark = mark;
         self.now = self.clock.now();
-        self.unclocked = (0, 0);
+        self.unrecorded_slices = 0;
+        self.unrecorded_fuel = 0;
     }
 
-    /// Starts a stretch on (possibly) another thread, after a wait.
+    /// Resumes time tracking after a wait, possibly on another thread.
     fn resume(&mut self) {
         self.cpu_mark = self.clock.cpu_time();
         self.now = self.clock.now();
-        self.unclocked = (0, 0);
+        self.unrecorded_slices = 0;
+        self.unrecorded_fuel = 0;
     }
 
-    /// Records a slice that spent `fuel`; reports the work and reads the
-    /// clocks every `CLOCK_SLICES` slices or `SLICE_FUEL` units of fuel
-    /// (tasks that finish or block quickly make slices far shorter than a
-    /// reading).
+    /// Records a slice that spent `fuel`, reporting work and reading clocks
+    /// when thresholds are reached.
     fn ran(&mut self, fuel: u64) {
-        self.unclocked.0 += 1;
-        self.unclocked.1 += fuel;
-        if self.unclocked.0 >= CLOCK_SLICES || self.unclocked.1 >= SLICE_FUEL as u64 {
+        self.unrecorded_slices += 1;
+        self.unrecorded_fuel += fuel;
+        if self.unrecorded_slices >= CLOCK_SLICES || self.unrecorded_fuel >= SLICE_FUEL as u64 {
             self.read();
         }
     }
 
-    /// The point of the thread's CPU clock at which `max` is exceeded.
+    /// Returns the CPU time mark at which `max` is exceeded.
     fn cpu_deadline(&self, max: Option<Duration>) -> Option<Duration> {
         max.map(|m| self.cpu_mark.saturating_add(m.saturating_sub(self.cpu)))
     }
+
+    fn now(&self) -> Instant {
+        self.clock.now()
+    }
+
+    fn yield_now(&self) -> ClockFuture {
+        self.clock.yield_now()
+    }
+
+    fn sleep(&self, duration: Duration) -> ClockFuture {
+        self.clock.sleep(duration)
+    }
 }
 
-impl Drop for Times {
+impl Drop for RunTimer {
     fn drop(&mut self) {
-        self.clock.work(self.unclocked.1);
+        self.clock.work(self.unrecorded_fuel);
     }
 }
 
 impl Vm {
-    fn check_limits(&self, clock: &Times) -> Result<(), Trap> {
+    fn check_limits(&self, timer: &RunTimer) -> Result<(), Trap> {
         if self.host.interrupt.load(Ordering::Relaxed) {
             return Err(Trap::Interrupted);
         }
@@ -240,11 +252,11 @@ impl Vm {
             return Err(Trap::Limit(LimitKind::Instructions));
         }
         if let Some(max) = l.max_cpu_time
-            && clock.cpu > max
+            && timer.cpu > max
         {
             return Err(Trap::Limit(LimitKind::CpuTime));
         }
-        if self.deadline.is_some_and(|d| clock.clock.now() >= d) {
+        if self.deadline.is_some_and(|d| timer.now() >= d) {
             return Err(Trap::Limit(LimitKind::WallTime));
         }
         Ok(())
@@ -252,11 +264,11 @@ impl Vm {
 
     /// Runs the finishers of completed I/O operations, which charge the
     /// meter like natives.
-    fn apply_completions(&mut self, done: Vec<(u32, u64, Finisher)>, clock: &Times) -> Result<(), Trap> {
+    fn apply_completions(&mut self, done: Vec<(u32, u64, Finisher)>, timer: &RunTimer) -> Result<(), Trap> {
         if done.is_empty() {
             return Ok(());
         }
-        self.meter.start_slice(clock.cpu_deadline(self.host.limits.max_cpu_time), self.deadline);
+        self.meter.start_slice(timer.cpu_deadline(self.host.limits.max_cpu_time), self.deadline);
         for (fid, wgen, fin) in done {
             if !wait_is_live(&self.fibers, (fid, wgen)) {
                 continue;
@@ -340,7 +352,7 @@ impl Vm {
     /// needs a permission prompt ([`Stop::Prompt`]). The future may be
     /// dropped where it waits: every task is then in the scheduler's tables.
     pub(crate) async fn drive(&mut self, main: Option<u32>) -> Result<Stop, Trap> {
-        let mut clock = Times::start(self.host.clock.clone());
+        let mut timer = RunTimer::start(self.host.clock.clone());
         // Where an instruction was retried after a memory limit error.
         let mut gc_retried: Option<(u32, usize, u32)> = None;
         loop {
@@ -352,7 +364,7 @@ impl Vm {
                 }
                 self.current = fid;
                 // Deadlines let long natives check the time limits mid-call.
-                let mut fuel = self.meter.start_slice(clock.cpu_deadline(self.host.limits.max_cpu_time), self.deadline);
+                let mut fuel = self.meter.start_slice(timer.cpu_deadline(self.host.limits.max_cpu_time), self.deadline);
                 let slice = fuel;
                 // A Rust panic in the interpreter or a native (a bug) ends
                 // the run as an internal error instead of unwinding into the
@@ -365,7 +377,7 @@ impl Vm {
                     }
                 };
                 self.meter.sync(fuel);
-                clock.ran(self.meter.spent());
+                timer.ran(self.meter.spent());
                 // Pending I/O checks its buffers against the heap's size.
                 self.heap.io_memory.publish_heap(self.heap.used());
                 self.current = u32::MAX;
@@ -422,7 +434,7 @@ impl Vm {
                         f.io = added.as_ref().ok().copied();
                         self.fibers[fid as usize] = Some(f);
                         if let Err(fin) = added {
-                            self.apply_completions(vec![(fid, g, fin)], &clock)?;
+                            self.apply_completions(vec![(fid, g, fin)], &timer)?;
                         }
                     }
                     Exit::Prompt(cap) => {
@@ -434,8 +446,8 @@ impl Vm {
                         }
                         // Write the script's output before showing the prompt.
                         self.drain_output().map_err(Trap::from_ctl)?;
-                        clock.read();
-                        let asked = clock.now;
+                        timer.read();
+                        let asked = timer.now;
                         let answer = match self.host.prompter.clone() {
                             Some(p) => {
                                 // A host interrupt stops the run while a prompt is pending.
@@ -458,9 +470,9 @@ impl Vm {
                         };
                         // Time spent waiting for the answer does not count.
                         if let Some(d) = &mut self.deadline {
-                            *d += clock.clock.now().saturating_duration_since(asked);
+                            *d += timer.now().saturating_duration_since(asked);
                         }
-                        clock.resume();
+                        timer.resume();
                         self.apply_answer(cap, answer);
                     }
                     Exit::Terminate(c) => return Ok(Stop::Exit(c)),
@@ -482,19 +494,19 @@ impl Vm {
                         }
                     }
                 }
-                self.check_limits(&clock)?;
-                if clock.now.saturating_duration_since(clock.last_yield) > YIELD_EVERY {
+                self.check_limits(&timer)?;
+                if timer.now.saturating_duration_since(timer.last_yield) > YIELD_EVERY {
                     let done = self.io.poll_ready(None);
-                    self.apply_completions(done, &clock)?;
+                    self.apply_completions(done, &timer)?;
                     // On the web a computing engine keeps the thread (yielding
                     // does not reach the event loop), so output reaches the
                     // host only when flushed: flush it as it runs.
                     #[cfg(web)]
                     self.flush_stdout();
-                    clock.read();
-                    clock.clock.yield_now().await;
-                    clock.resume();
-                    clock.last_yield = clock.now;
+                    timer.read();
+                    timer.yield_now().await;
+                    timer.resume();
+                    timer.last_yield = timer.now;
                 }
             }
             // Nothing is ready: wait for I/O.
@@ -509,16 +521,16 @@ impl Vm {
             }
             let done = self.io.poll_ready(None);
             if !done.is_empty() {
-                self.apply_completions(done, &clock)?;
-                self.check_limits(&clock)?;
+                self.apply_completions(done, &timer)?;
+                self.check_limits(&timer)?;
                 continue;
             }
             if self.ending {
                 return Ok(Stop::Idle);
             }
-            clock.read();
+            timer.read();
             let blocked = self.host.stdin_feed.as_ref().map(|f| f.blocked());
-            let mut sleep = self.deadline.map(|d| clock.clock.sleep(d.saturating_duration_since(clock.clock.now())));
+            let mut sleep = self.deadline.map(|d| timer.sleep(d.saturating_duration_since(timer.now())));
             let interrupt = self.host.interrupt.clone();
             let done = std::future::poll_fn(|cx| {
                 let done = self.io.poll_ready(Some(cx.waker()));
@@ -537,10 +549,10 @@ impl Vm {
             })
             .await;
             drop(blocked);
-            clock.resume();
-            clock.last_yield = clock.now;
-            self.apply_completions(done, &clock)?;
-            self.check_limits(&clock)?;
+            timer.resume();
+            timer.last_yield = timer.now;
+            self.apply_completions(done, &timer)?;
+            self.check_limits(&timer)?;
         }
     }
 }

@@ -20,37 +20,36 @@ pub use std::time::{Instant, SystemTime, UNIX_EPOCH};
 #[cfg(web)]
 pub use web_time::{Instant, SystemTime, UNIX_EPOCH};
 
-/// A future that a [`Clock`] returns.
+/// A future returned by a [`Clock`].
 pub type ClockFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 /// The clocks and timers of an engine.
 ///
-/// A host that simulates time sets its own clock with
-/// [`Config::clock`](crate::Config::clock). The engine then reads every
-/// clock through it, waits through [`Clock::sleep`], reports its work
-/// through [`Clock::work`] and lets other tasks run through
-/// [`Clock::yield_now`]. Time limits are measured on this clock.
+/// A custom clock can be configured using [`Config::clock`](crate::Config::clock)
+/// for deterministic time simulation. Time of day, monotonic timestamps, and
+/// sleeps are driven by this clock; execution time limits are measured against
+/// it, work is reported through [`Clock::work`], and cooperative yields run
+/// through [`Clock::yield_now`].
 pub trait Clock: Send + Sync {
-    /// The time of day.
+    /// Returns the current wall-clock time.
     fn wall(&self) -> SystemTime;
 
-    /// The current point of the monotonic clock.
+    /// Returns the current monotonic time.
     fn now(&self) -> Instant;
 
-    /// The CPU time that the calling thread has used.
+    /// Returns the CPU time consumed by the calling thread.
     fn cpu_time(&self) -> Duration;
 
-    /// Waits for `duration` on the host's executor.
+    /// Returns a future that completes after `duration`.
     fn sleep(&self, duration: Duration) -> ClockFuture;
 
-    /// Lets the other tasks of the host's executor run. The engine calls it
-    /// about every 2 ms of [`Clock::now`] while it computes.
+    /// Yields execution to allow other host executor tasks to run. Called
+    /// periodically during long-running computation.
     fn yield_now(&self) -> ClockFuture;
 
-    /// Records that the engine did `fuel` units of work (see
-    /// [`crate::vm::meter`]) since its last call. Called before the engine
-    /// reads the clock to check its limits or to yield, and when a run
-    /// stops, so that [`Clock::now`] then counts all the work.
+    /// Records `fuel` units of work consumed by the engine since the last call
+    /// (see [`crate::vm::meter`]). Invoked before checking limits or yielding,
+    /// and upon execution completion.
     fn work(&self, fuel: u64) {
         let _ = fuel;
     }
@@ -64,13 +63,13 @@ pub struct Deadline {
 }
 
 impl Deadline {
-    /// Whether the clock has reached the deadline.
+    /// Returns whether the deadline has passed.
     pub fn passed(&self) -> bool {
         self.clock.now() >= self.at
     }
 }
 
-/// Waits for `future`, for at most `duration` of `clock`. Returns `None` if the time runs out first.
+/// Runs `future` for at most `duration` according to `clock`. Returns `None` if `duration` elapses before completion.
 pub(crate) async fn timeout<F: Future>(clock: &dyn Clock, duration: Duration, future: F) -> Option<F::Output> {
     let mut future = std::pin::pin!(future);
     let mut expiry = clock.sleep(duration);

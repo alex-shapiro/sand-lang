@@ -299,9 +299,9 @@ enum Access {
     Write,
 }
 
-/// The error for a denied `cap`. It names the path as the script spelled it
-/// (`shown`): the resolved path may reveal symlink targets or the stored
-/// spelling of names the script may not access.
+/// Constructs a permission-denied error for `cap`. Uses the path as written by
+/// the script (`shown`) to avoid leaking symlink targets or on-disk names of
+/// inaccessible entries.
 fn denied(vm: &mut Vm, cap: &Capability, shown: &str) -> Value {
     let verb = match cap {
         Capability::FsRead(_) => "read",
@@ -421,7 +421,7 @@ fn run<T: Send + 'static>(
 }
 
 /// Converts the result `r` of an operation on `shown` with `finish`. An I/O
-/// error becomes an `Err(Error)` value that names `shown`.
+/// error becomes an `Err(Error)` value with `shown` as its path.
 fn settle<T>(vm: &mut Vm, shown: String, r: io::Result<T>, finish: impl FnOnce(&mut Vm, T) -> NResult) -> NResult {
     match r {
         Ok(v) => finish(vm, v),

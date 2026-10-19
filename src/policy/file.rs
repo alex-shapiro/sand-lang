@@ -23,14 +23,13 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// A parsed policy file: rules, what happens to requests no rule decides,
-/// and limits.
+/// A parsed policy file: rules, limits, and the fallback decision for unmatched requests.
 #[derive(Clone, Debug)]
 pub struct PolicyFile {
     /// The rules (`allow`/`deny` lines). [`PolicyFile::policy`] adds the
     /// `default` decision and the private-network rule.
     pub rules: RulePolicy,
-    /// The decision for requests no rule decides (the `default` line), if
+    /// The fallback decision for unmatched requests (the `default` line), if
     /// given. Hosts choose what applies otherwise ([`PolicyFile::policy_or`]);
     /// [`PolicyFile::policy`] denies.
     pub default: Option<Decision>,
@@ -575,8 +574,8 @@ fn limit(l: &mut Limits, args: &[Word]) -> Result<(), String> {
 
 /// The policy-file line that allows (or, unless `allow`, denies) `cap`,
 /// e.g. `allow read /data/a.txt`, for a prompt's "always" or "never"
-/// answer. `None` where no rule applies: `NetAddr`, allowing standard
-/// output or error, and requests no rule names exactly.
+/// answer. Returns `None` when rules cannot represent the capability: `NetAddr`,
+/// standard stream permissions, or requests without an exact rule match.
 pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
     let verb = if allow { "allow" } else { "deny" };
     let path = |p: &Path| p.to_str().map(|s| quote_part(s, true));

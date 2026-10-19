@@ -328,7 +328,7 @@ struct Counter {
 - Methods are `fn` declarations inside the body. A method whose first parameter
   is `self` (no annotation) is an instance method, called as `value.method(...)`.
   Other methods are static, called as `Type.method(...)`.
-- Within the body, `Self` names the struct type (with its type parameters).
+- Within the body, `Self` refers to the struct type (with its type parameters).
 - Structs may be generic: `struct Pair<A, B> { first: A, second: B }`.
 - Structs have reference semantics: assigning a struct value shares it.
 
@@ -429,7 +429,7 @@ The name is a string literal without interpolation. Test blocks are ignored by
 
 ### 4.9 Traits and impls
 
-A **trait** names a set of methods that types can implement. Generic code
+A **trait** defines a set of methods that types can implement. Generic code
 bounded by a trait can call its methods.
 
 ```
@@ -1700,10 +1700,10 @@ directory (set by the host; default: the module root).
 the platform's separator, and a part that is an absolute path replaces the
 parts before it; `basename`, `dirname` and `extension` are lexical. A path
 longer than 4096 bytes or containing NUL fails with kind `"invalid"` before
-anything else is done. Capabilities and prompts name paths absolute and
-normalized (§14.1). Permission errors name the path as the script spelled
-it (`permission denied: read data/x.txt`), revealing neither symlink
-targets nor the stored spelling of names the script may not access.
+anything else is done. Capabilities and prompts report absolute, normalized paths (§14.1).
+Permission errors report the path as written by the script
+(`permission denied: read data/x.txt`), revealing neither symlink
+targets nor the on-disk names of inaccessible entries.
 
 Reading, writing and copying accept regular files only (kind `"invalid"`
 otherwise, e.g. for directories and FIFOs). `copy` copies the contents
@@ -2196,11 +2196,11 @@ without following symlinks (reading each symlink and continuing with its
 target) and keeps the directories open; the access then acts relative to
 the directory holding the final entry, without following a final symlink,
 so a symlink swapped in after the check cannot redirect it. On macOS,
-existing entries are named as stored (volumes are usually case-insensitive
+existing entries resolve to their on-disk names (volumes are usually case-insensitive
 and always normalization-insensitive) and without firmlinks
 (`/System/Volumes/Data/Users/...` is `/Users/...`); on other Unix systems
 names are kept as given. Windows paths are resolved the same way, and a
-junction is treated as a symlink. Existing entries are named as stored,
+junction is treated as a symlink. Existing entries resolve to their on-disk names,
 paths compare case-insensitively, and they use the plain `C:\...` /
 `\\server\share\...` form (not `\\?\...`). On Windows, `rename` works by
 path, but it keeps every directory on both paths open so that none of them
@@ -2301,12 +2301,12 @@ decomposition, full case folding, default-ignorable characters removed), so
 they also cover other spellings, including of paths that do not exist yet
 (`data/ſecrets`, `café` precomposed or with a combining accent)
 
-On macOS, existing files are named with their stored spelling, so case-insensitive
-file systems `data/SECRETS` may name `data/secrets`. For entry operations (§13.3),
+On macOS, existing files resolve to their on-disk names, so on case-insensitive
+file systems `data/SECRETS` resolves to `data/secrets`. For entry operations (§13.3),
 the engine uses `Policy::check_entry`. This check does not resolve a final symlink
-and names it with its stored spelling. If the system cannot give a final entry's
-stored name (a symlink outside macOS, a device, a file that cannot be opened), it
-is looked up in its directory, unless the directory holds more than 4096 entries.
+and evaluates it against its on-disk name. If a final entry's on-disk name cannot
+be determined (a symlink outside macOS, a device, or a file that cannot be opened),
+it is looked up in its directory, unless the directory holds more than 4096 entries.
 
 A directory that holds an entry decided by a deny rule cannot be renamed, replaced
 or recursively removed as a whole. The tree is scanned for such entries only if
@@ -2378,7 +2378,7 @@ limit memory 64M
 | `allow env NAME...`, `deny env NAME...`                   | environment variables (`AWS_*`; `*`: all)                                       |
 | `allow stdin`, `deny stdin`, `deny stdout`, `deny stderr` | standard streams                                                                |
 | `allow custom NAME [DETAIL]`, `deny custom NAME [DETAIL]` | a host-defined capability (any detail if omitted)                               |
-| `default deny` \| `default prompt` \| `default allow`     | the decision for requests no rule decides (once per file)                       |
+| `default deny` \| `default prompt` \| `default allow`     | fallback decision for unmatched requests (once per file)                       |
 | `limit NAME VALUE`                                        | a limit (§15.1), below                                                          |
 | `let NAME = VALUE...`                                     | a set: `{NAME}` in any rule's word stands for each value                        |
 
@@ -2429,7 +2429,7 @@ reports:
 | `redundant-rule`       | a rule repeats another, or a broader rule already decides what it covers the same way |
 | `overridden-rule`      | a rule taking precedence decides everything a rule covers the other way               |
 | `bypassable-http-deny` | a `deny http` rule for a host that a net rule lets scripts connect to                 |
-| `unused-set`           | a `let` set no rule uses                                                              |
+| `unused-set`           | a `let` set unreferenced by any rule                                                  |
 
 The first two compare paths as written, without resolving symlinks, and report
 a rule only when a single other rule shows that it is not needed.
@@ -2610,18 +2610,18 @@ let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 
   the host `send`s (`end()` ends one read); `wanted()` resolves when a script
   waits for input with nothing else to run.
 - `Config::memory_fs(MemFs)` gives scripts a memory file system (§16.1).
-- `Config::clock(Arc<dyn platform::Clock>)` replaces the operating system's
-  clocks and tokio's timers. Scripts read the time of day, the monotonic
-  clock, `uuid.v7` timestamps and their sleeps from it, and the time limits
-  and the timeouts of `net` and `http` clients are measured on it. The
-  engine reports its fuel to `Clock::work` before each reading of the clock
-  and yields through `Clock::yield_now`, so a host can simulate time and
-  turn the engine's work into simulated time.
-  `MemFs::with_capacity_and_clock` stamps modification times from a clock.
-- `Config::network(Arc<dyn network::Network>)` replaces the resolver and the
-  sockets of outgoing `net` and `http` connections. The policy is checked
-  as with the default network, and TLS runs in the engine over the stream
-  the network opens. Listeners still use the operating system.
+- `Config::clock(Arc<dyn platform::Clock>)` configures clocks and timers for
+  the engine. Time of day, monotonic timestamps, UUIDv7 generation, and sleep
+  timers are driven by this clock; execution time limits and network timeouts
+  are measured against it. Consumed fuel is reported through `Clock::work` and
+  cooperative yields run through `Clock::yield_now`, enabling deterministic
+  simulated time. `MemFs::with_capacity_and_clock` sets modification times from
+  a clock.
+- `Config::network(Arc<dyn network::Network>)` configures address resolution
+  and outgoing socket connections for `net` and `http`. Network policies are
+  enforced before connection attempts, and TLS is handled in-engine over the
+  stream returned by the network. Socket listeners continue using the
+  operating system.
 - `Config::tls_root_certificates(Vec<Vec<u8>>)` trusts additional
   DER-encoded root certificates (e.g. a private CA) besides the bundled web
   PKI roots; calls accumulate. An invalid one makes TLS connections fail
@@ -2735,7 +2735,7 @@ assert_eq!(session.eval("hit() + hit()").await?, Some("3".to_string()));
 
 - `eval(source) -> Result<Option<String>, Error>` checks, compiles and runs
   one input; `Some` holds the debug form of its value. `eval_as(name,
-source)` names the input in diagnostics and traces instead of `<input
+source)` uses `name` in diagnostics and traces instead of `<input
 N>` (e.g. `main.sand` for a program the session continues). After
   `exit(code)`, `eval` returns `Ok(None)` and `exit_code()` returns
   `Some(code)` until the next input; the session remains usable.

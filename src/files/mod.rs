@@ -126,10 +126,10 @@ pub(crate) struct Work {
 
 /// A path resolved by an [`Fs`] for an operation.
 pub(crate) struct Target {
-    /// The normal form, which the policy decides on: absolute, without
+    /// The normal form evaluated by the policy: absolute, without
     /// `.` and `..`, and on the host with every symlink before the final
-    /// name resolved (and the final one unless the mode is `Entry`), and
-    /// existing directories named as stored.
+    /// name resolved (and the final one unless the mode is `Entry`), with
+    /// existing directories resolved to their on-disk names.
     pub path: PathBuf,
     pub mode: Mode,
     #[cfg(feature = "os")]
@@ -137,11 +137,11 @@ pub(crate) struct Target {
 }
 
 impl Target {
-    /// Whether the final name is known to be spelled as stored. On a case-
+    /// Whether the final name is known to match its on-disk name. On a case-
     /// or normalization-insensitive file system an existing entry can be
-    /// named differently; the policy's deny rules equate every such
-    /// spelling (`policy::fold_name`), so only decisions that compare it
-    /// exactly need [`Target::fix_spelling`].
+    /// accessed under different casing or normalization; the policy's deny
+    /// rules equate all such variants (`policy::fold_name`), so only decisions
+    /// that require an exact match need [`Target::fix_spelling`].
     pub fn exact(&self) -> bool {
         #[cfg(feature = "os")]
         if let Some(h) = &self.host {

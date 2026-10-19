@@ -199,7 +199,7 @@ impl VariantRef<'_> {
 /// the key affect the low bits that pick the bucket (with plain FxHash they
 /// depend only on the key's low bits, so all multiples of 2^32 collide). The
 /// seed keeps colliding keys from being computed in advance; scripts cannot
-/// observe it, since no iteration order depends on hashes.
+/// observe it, as iteration order does not depend on hashes.
 #[derive(Clone, Copy)]
 pub struct FxHasher {
     hash: u64,

@@ -90,12 +90,12 @@ impl NetPattern {
         Some(NetPattern { kind, port })
     }
 
-    /// Whether the pattern names hosts or addresses explicitly (no wildcard).
+    /// Whether the pattern specifies hosts or addresses explicitly (no wildcard).
     pub(crate) fn is_explicit(&self) -> bool {
         matches!(self.kind, HostKind::Host(_) | HostKind::Ip(..))
     }
 
-    /// How narrowly the pattern names hosts: exact names and addresses
+    /// How narrowly the pattern matches hosts: exact names and addresses
     /// most, then ranges and domains (longer ones more narrowly), then `*`.
     fn score(&self) -> u32 {
         match &self.kind {

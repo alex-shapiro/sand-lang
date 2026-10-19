@@ -18,7 +18,7 @@ use std::path::Path;
 ///   deny as specific) decides everything it covers the other way;
 /// - `bypassable-http-deny`: a `deny http` rule for a host that `net` rules
 ///   let scripts connect to (and send it anything);
-/// - `unused-set`: a `let` set no rule uses.
+/// - `unused-set`: a `let` set unreferenced by any rule.
 ///
 /// Rules about paths are compared as written, without resolving symlinks.
 /// A rule is reported only when a single other rule shows it is not needed.

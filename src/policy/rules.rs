@@ -383,7 +383,7 @@ impl RulePolicy {
         let (Capability::FsRead(p) | Capability::FsWrite(p) | Capability::Import(p)) = cap else { return None };
         let index = self.files(space);
         // Deny rules compare folded names, which are the same for every spelling.
-        if index.allow.names_last(&refs(&index.allow_input(&path_segments(p)))) {
+        if index.allow.matches_last(&refs(&index.allow_input(&path_segments(p)))) {
             return None;
         }
         Some(self.check_normalized_in(cap, space))

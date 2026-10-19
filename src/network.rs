@@ -1,13 +1,14 @@
-//! The network that an engine's `net` and `http` modules connect through.
+//! Network abstraction for outgoing `net` and `http` connections.
 //!
-//! An engine resolves names and opens connections through a [`Network`].
-//! The default, [`OsNetwork`], uses the operating system's resolver and TCP
-//! sockets. A host sets its own with [`Config::network`](crate::Config::network),
-//! for example to serve connections from memory in a simulation.
+//! Hostnames are resolved and connections opened through a [`Network`].
+//! The default implementation, [`OsNetwork`], uses the operating system's
+//! resolver and TCP sockets. A custom implementation can be provided via
+//! [`Config::network`](crate::Config::network), for example to simulate
+//! networking in-memory.
 //!
-//! The engine checks the policy before it resolves a name, and connects only
-//! to the resolved addresses that the policy allows. TLS runs in the engine,
-//! over the streams that the network opens.
+//! Network policies are enforced before address resolution, and connections
+//! are opened only to allowed destinations. TLS is handled in-engine over
+//! the streams opened by the network.
 
 use std::future::Future;
 use std::io;
@@ -15,13 +16,12 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-/// Resolves names and opens connections for an engine.
+/// Resolves hostnames and opens connections for an engine.
 pub trait Network: Send + Sync {
-    /// The addresses of `host`, a name that is not an IP address.
+    /// Resolves `host` and `port` to socket addresses.
     fn resolve<'a>(&'a self, host: &'a str, port: u16) -> NetworkFuture<'a, Vec<SocketAddr>>;
 
-    /// Opens a stream to the first of `addrs` that accepts, and returns it
-    /// with the address it reached.
+    /// Connects to the first reachable address in `addrs`, returning the stream and the connected address.
     fn connect<'a>(&'a self, addrs: &'a [SocketAddr]) -> NetworkFuture<'a, (Box<dyn Stream>, SocketAddr)>;
 }
 

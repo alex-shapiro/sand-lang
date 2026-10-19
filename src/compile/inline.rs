@@ -1,6 +1,6 @@
 //! Inlining of small functions. A call to a small, non-generic script
 //! function whose body cannot leave early (no `return`, `?` or loops) and
-//! creates no closures is replaced by
+//! does not create closures is replaced by
 //!
 //! ```text
 //! { let p1 = a1; let p2 = a2; body }

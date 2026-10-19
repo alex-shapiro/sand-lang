@@ -321,7 +321,7 @@ impl Conn {
         }
     }
 
-    /// A connection over `stream`, which a [`crate::network::Network`] opened.
+    /// Creates a connection over `stream`, opened by a [`Network`].
     pub(crate) fn from_stream(stream: Box<dyn Stream>, peer: SocketAddr) -> Conn {
         let (r, w) = tokio::io::split(stream);
         Conn::new(Box::new(r), Box::new(w), peer.to_string())
@@ -701,11 +701,11 @@ pub(crate) mod tls {
         }
     }
 
-    /// Performs a TLS handshake over `tcp`, verifying the certificate for `host`.
-    pub async fn connect(settings: &TlsSettings, host: &str, tcp: Box<dyn Stream>) -> Result<TlsStream<Box<dyn Stream>>, IoFailure> {
+    /// Performs a TLS handshake over `stream`, verifying the certificate for `host`.
+    pub async fn connect(settings: &TlsSettings, host: &str, stream: Box<dyn Stream>) -> Result<TlsStream<Box<dyn Stream>>, IoFailure> {
         let name = ServerName::try_from(host.to_string())
             .map_err(|_| IoFailure::new("invalid", format!("invalid TLS server name {:?}", crate::stdlib::truncate(host, 200))))?;
-        connector(settings)?.connect(name, tcp).await.map_err(|e| {
+        connector(settings)?.connect(name, stream).await.map_err(|e| {
             let e = IoFailure::from(e);
             IoFailure::new(e.kind, format!("TLS handshake with {host} failed: {}", e.message))
         })
@@ -718,7 +718,7 @@ pub(crate) mod tls {
     use crate::network::Stream;
 
     /// TLS is unavailable without the `tls` feature.
-    pub async fn connect(_settings: &TlsSettings, _host: &str, _tcp: Box<dyn Stream>) -> Result<Box<dyn Stream>, IoFailure> {
+    pub async fn connect(_settings: &TlsSettings, _host: &str, _stream: Box<dyn Stream>) -> Result<Box<dyn Stream>, IoFailure> {
         Err(IoFailure::new("invalid", "TLS support is not enabled in this build"))
     }
 }

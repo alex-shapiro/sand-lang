@@ -213,7 +213,7 @@ enum Source {
 pub(super) struct Framed {
     source: Source,
     framing: Framing,
-    /// The most a wait for data may take, on `clock`.
+    /// Maximum duration to wait for data according to `clock`.
     timeout: Duration,
     clock: Arc<dyn Clock>,
     /// Sends `100 Continue` before the first read (a request that asked for it).
@@ -518,8 +518,8 @@ async fn connect(
     url: &Url,
     slot: ResourceSlot,
 ) -> Result<ClientConn, IoFailure> {
-    let (tcp, _) = net::connect_checked(policy, network, &url.host, url.port).await?;
-    let stream = if url.scheme == "https" { Box::new(net::tls::connect(tls, &url.host, tcp).await?) } else { tcp };
+    let (stream, _) = net::connect_checked(policy, network, &url.host, url.port).await?;
+    let stream = if url.scheme == "https" { Box::new(net::tls::connect(tls, &url.host, stream).await?) } else { stream };
     Ok(ClientConn { stream: BufReader::with_capacity(net::CONN_BUFFER, stream), slot, origin: url.origin() })
 }
 

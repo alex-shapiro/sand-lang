@@ -484,7 +484,7 @@ pub enum ExprKind {
     Spawn(Box<Expr>),
     /// A macro call: its source form for the formatter, and its expansion for the other passes.
     Macro(Box<MacroCall>),
-    /// A standard module that a macro expansion names; no binding can shadow it.
+    /// A standard module referenced by macro expansion.
     ModuleRef(String),
     /// Placeholder produced after a parse error.
     Error,

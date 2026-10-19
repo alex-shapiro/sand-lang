@@ -92,7 +92,7 @@ fn net_pattern_edge_cases() {
     // Non-ASCII hosts never panic and never match ASCII patterns.
     assert_eq!(p.check(&net("ab\u{e9}xample.com", 80)), Decision::Deny);
     assert_eq!(p.check(&net("\u{e9}.example.com", 80)), Decision::Allow);
-    // A trailing dot names the same host.
+    // A trailing dot is ignored during host pattern matching.
     assert_eq!(p.check(&net("api.example.com.", 80)), Decision::Allow);
     assert_eq!(RulePolicy::new().allow_net("*").deny_net("evil.com").check(&net("EVIL.com.", 80)), Decision::Deny);
     assert_eq!(RulePolicy::new().allow_net("*").deny_net("*.bad.org").check(&net("x.bad.org.", 80)), Decision::Deny);
@@ -1280,7 +1280,7 @@ print(fs.list_dir("data")?)
     assert_eq!(r.ok_stdout(), format!("{}[\"config.json\", \"secrets\"]\n", "permission_denied\n".repeat(9)));
     assert!(dir.path().join("data/secrets/key.txt").exists() && dir.path().join("data/config.json").exists());
 
-    // Existing entries are named as stored: the policy sees `secrets`.
+    // Existing entries resolve to their on-disk names: the policy sees `secrets`.
     let p = Policy::rules(policy());
     let stored = sandlang::policy::normalize_entry_path(&data.join("ſecrets"));
     assert_eq!(stored, data.join("secrets"));
@@ -1288,11 +1288,11 @@ print(fs.list_dir("data")?)
 }
 
 /// A symlink's own name (which cannot be canonicalised without following
-/// the link) is named as stored too, so allow rules, which compare exactly,
-/// see the same path for every spelling the file system accepts.
+/// the link) also resolves to its on-disk name, so allow rules, which compare exactly,
+/// evaluate the same path for any accepted casing or normalization.
 #[cfg(target_os = "macos")]
 #[test]
-fn symlink_entries_are_named_as_stored() {
+fn symlink_entries_resolve_to_on_disk_names() {
     use sandlang::policy::normalize_entry_path;
     use std::os::unix::fs::symlink;
     let dir = TempDir::new("link-names");
