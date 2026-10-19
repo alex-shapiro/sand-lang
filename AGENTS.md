@@ -14,6 +14,8 @@ SandLang is a sandboxed bytecode interpreter with the following requirements:
 - extensible standard library written in Rust
 - runs on every major platform: iOS, macOS, Windows, Linux, Android, and Web
 
+## Be Bold
+
 Treat every request as though you own the whole codebase and can make any change, anywhere.
 There is zero legacy code to maintain, so every task MUST be approached from first principles.
 Ignore any previous instructions to limit the scope of changes; if you see an approach that is subpar,
@@ -31,6 +33,7 @@ prefer to rip it out wholesale and replace it with the better alternative.
 
 ## Writing Guidelines
 
+- All writing, including comments, must be written in AST-STE100 English.
 - If you find redundancies or overly verbose phrases while reading through a doc, remove them.
 - LLM written docs tend to turn into factslop over time. If you find that a doc contains lots of
   facts and symbols prior to communicating a key idea, restructure it to explain exactly what you
