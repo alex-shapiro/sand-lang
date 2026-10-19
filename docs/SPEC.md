@@ -1308,14 +1308,14 @@ t.cancel()                        // cancels if still running
 
 ### 11.3 The `task` module (prelude-visible as `task`)
 
-| Function                                           | Description                                                         |
-| -------------------------------------------------- | ------------------------------------------------------------------- |
-| `task.sleep(d: duration)`                          | suspend for `d`                                                     |
-| `task.yield_now()`                                 | let other tasks run                                                 |
-| `task.all<T>(ts: [Task<T>]) -> [T]`                | wait for all, results in order                                      |
+| Function                                           | Description                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------------ |
+| `task.sleep(d: duration)`                          | suspend for `d`                                                    |
+| `task.yield_now()`                                 | let other tasks run                                                |
+| `task.all<T>(ts: [Task<T>]) -> [T]`                | wait for all, results in order                                     |
 | `task.race<T>(ts: [Task<T>]) -> T`                 | wait for the first to finish; cancel the rest; fails on empty list |
-| `task.timeout<T>(d: duration, f: fn() -> T) -> T?` | run `f` in a task; `None` (and cancel) if not done within `d`       |
-| `task.channel<T>(capacity: int = 0) -> Channel<T>` | create a channel; `0` means unbounded                               |
+| `task.timeout<T>(d: duration, f: fn() -> T) -> T?` | run `f` in a task; `None` (and cancel) if not done within `d`      |
+| `task.channel<T>(capacity: int = 0) -> Channel<T>` | create a channel; `0` means unbounded                              |
 
 ### 11.4 Channels
 
@@ -1343,18 +1343,18 @@ Always in scope without import.
 
 ### 12.1 Functions
 
-| Function                                            | Description                           |
-| --------------------------------------------------- | ------------------------------------- |
-| `print<T>(x: T)`                                    | write display form + `"\n"` to stdout |
-| `eprint<T>(x: T)`                                   | write display form + `"\n"` to stderr |
-| `fail(message: str, kind: str = "error") -> never`  | fail with an error (§10.3)            |
-| `assert(cond: bool, msg: str = "condition is false")` | fail with `msg` (kind `assert`) if false |
-| `todo() -> never`                                   | fail (kind `todo`): `not yet implemented` |
-| `exit(code: int) -> never`                          | stop the run (§10.4)                  |
-| `error(message: str, kind: str = "error") -> Error` | construct an `Error`                  |
-| `set<T: Hash>(items: [T] = []) -> Set<T>`           | build a set                           |
-| `help(x)`, `help()`                                 | print documentation (§12.15)          |
-| `members(x) -> [str]`, `members() -> [str]`         | list member names (§12.15)            |
+| Function                                              | Description                               |
+| ----------------------------------------------------- | ----------------------------------------- |
+| `print<T>(x: T)`                                      | write display form + `"\n"` to stdout     |
+| `eprint<T>(x: T)`                                     | write display form + `"\n"` to stderr     |
+| `fail(message: str, kind: str = "error") -> never`    | fail with an error (§10.3)                |
+| `assert(cond: bool, msg: str = "condition is false")` | fail with `msg` (kind `assert`) if false  |
+| `todo() -> never`                                     | fail (kind `todo`): `not yet implemented` |
+| `exit(code: int) -> never`                            | stop the run (§10.4)                      |
+| `error(message: str, kind: str = "error") -> Error`   | construct an `Error`                      |
+| `set<T: Hash>(items: [T] = []) -> Set<T>`             | build a set                               |
+| `help(x)`, `help()`                                   | print documentation (§12.15)              |
+| `members(x) -> [str]`, `members() -> [str]`           | list member names (§12.15)                |
 
 ### 12.2 Universal methods
 
@@ -1701,9 +1701,8 @@ the platform's separator, and a part that is an absolute path replaces the
 parts before it; `basename`, `dirname` and `extension` are lexical. A path
 longer than 4096 bytes or containing NUL fails with kind `"invalid"` before
 anything else is done. Capabilities and prompts report absolute, normalized paths (§14.1).
-Permission errors report the path as written by the script
-(`permission denied: read data/x.txt`), revealing neither symlink
-targets nor the on-disk names of inaccessible entries.
+Permission errors report the path (`permission denied: read data/x.txt`),
+revealing neither symlink targets nor the on-disk names of inaccessible entries.
 
 Reading, writing and copying accept regular files only (kind `"invalid"`
 otherwise, e.g. for directories and FIFOs). `copy` copies the contents
@@ -2196,12 +2195,12 @@ without following symlinks (reading each symlink and continuing with its
 target) and keeps the directories open; the access then acts relative to
 the directory holding the final entry, without following a final symlink,
 so a symlink swapped in after the check cannot redirect it. On macOS,
-existing entries resolve to their on-disk names (volumes are usually case-insensitive
+existing entries are resolved to their on-disk names (volumes are usually case-insensitive
 and always normalization-insensitive) and without firmlinks
 (`/System/Volumes/Data/Users/...` is `/Users/...`); on other Unix systems
 names are kept as given. Windows paths are resolved the same way, and a
-junction is treated as a symlink. Existing entries resolve to their on-disk names,
-paths compare case-insensitively, and they use the plain `C:\...` /
+junction is treated as a symlink. Existing entries are resolved to their on-disk names,
+paths are compared case-insensitively, and they use the plain `C:\...` /
 `\\server\share\...` form (not `\\?\...`). On Windows, `rename` works by
 path, but it keeps every directory on both paths open so that none of them
 can be renamed or replaced. One race remains: an entry's parent can be
@@ -2301,10 +2300,10 @@ decomposition, full case folding, default-ignorable characters removed), so
 they also cover other spellings, including of paths that do not exist yet
 (`data/ſecrets`, `café` precomposed or with a combining accent)
 
-On macOS, existing files resolve to their on-disk names, so on case-insensitive
-file systems `data/SECRETS` resolves to `data/secrets`. For entry operations (§13.3),
-the engine uses `Policy::check_entry`. This check does not resolve a final symlink
-and evaluates it against its on-disk name. If a final entry's on-disk name cannot
+On macOS, existing files are resolved to their on-disk names, so on case-insensitive
+file systems `data/SECRETS` is resolved to `data/secrets`. For entry operations (§13.3),
+the engine uses `Policy::check_entry`. This check does not resolve a final symlink;
+the entry is evaluated against its on-disk name. If a final entry's on-disk name cannot
 be determined (a symlink outside macOS, a device, or a file that cannot be opened),
 it is looked up in its directory, unless the directory holds more than 4096 entries.
 
@@ -2378,7 +2377,7 @@ limit memory 64M
 | `allow env NAME...`, `deny env NAME...`                   | environment variables (`AWS_*`; `*`: all)                                       |
 | `allow stdin`, `deny stdin`, `deny stdout`, `deny stderr` | standard streams                                                                |
 | `allow custom NAME [DETAIL]`, `deny custom NAME [DETAIL]` | a host-defined capability (any detail if omitted)                               |
-| `default deny` \| `default prompt` \| `default allow`     | fallback decision for unmatched requests (once per file)                       |
+| `default deny` \| `default prompt` \| `default allow`     | fallback decision for unmatched requests (once per file)                        |
 | `limit NAME VALUE`                                        | a limit (§15.1), below                                                          |
 | `let NAME = VALUE...`                                     | a set: `{NAME}` in any rule's word stands for each value                        |
 
@@ -2614,7 +2613,7 @@ let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 
   the engine. Time of day, monotonic timestamps, UUIDv7 generation, and sleep
   timers are driven by this clock; execution time limits and network timeouts
   are measured against it. Consumed fuel is reported through `Clock::work` and
-  cooperative yields run through `Clock::yield_now`, enabling deterministic
+  cooperative yields are performed through `Clock::yield_now`, enabling deterministic
   simulated time. `MemFs::with_capacity_and_clock` sets modification times from
   a clock.
 - `Config::network(Arc<dyn network::Network>)` configures address resolution
@@ -2788,28 +2787,28 @@ Reports warnings (exit code 1 if any, unless `--allow-warnings`; 2 if a file
 cannot be read or has errors). Policy files get the lints of §14.7; scripts
 these:
 
-| Lint                   | Description                                                                                                                                                                                                                          |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `unused-variable`      | local binding or parameter never read (names starting with `_` are exempt)                                                                                                                                                           |
-| `unused-import`        | import never referenced                                                                                                                                                                                                              |
-| `unused-function`      | private function or method not reachable from the module's public items, top-level code or tests (see below)                                                                                                                         |
-| `unnecessary-var`      | `var` never reassigned (use `let`)                                                                                                                                                                                                   |
-| `unused-result`        | a `Result` value is discarded                                                                                                                                                                                                        |
-| `no-effect`            | an expression statement that only computes a value which is discarded (`x + 1`, `-3`: §2.3); not the last statement of a block, which is its value                                                                                   |
+| Lint                   | Description                                                                                                                                                                                                                         |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `unused-variable`      | local binding or parameter never read (names starting with `_` are exempt)                                                                                                                                                          |
+| `unused-import`        | import never referenced                                                                                                                                                                                                             |
+| `unused-function`      | private function or method not reachable from the module's public items, top-level code or tests (see below)                                                                                                                        |
+| `unnecessary-var`      | `var` never reassigned (use `let`)                                                                                                                                                                                                  |
+| `unused-result`        | a `Result` value is discarded                                                                                                                                                                                                       |
+| `no-effect`            | an expression statement that only computes a value which is discarded (`x + 1`, `-3`: §2.3); not the last statement of a block, which is its value                                                                                  |
 | `unreachable-code`     | statement after `return`, `break`, `continue`, a call of the prelude's `fail`, `exit` or `todo` (not of a function of the module with that name), or after a `loop` that no `break` leaves (labeled breaks from nested loops count) |
-| `unused-label`         | loop label that no `break` or `continue` refers to                                                                                                                                                                                   |
-| `naming`               | violates naming conventions (§2.4)                                                                                                                                                                                                   |
-| `bool-comparison`      | comparing with `true`/`false` literal                                                                                                                                                                                                |
-| `self-assignment`      | `x = x`                                                                                                                                                                                                                              |
-| `len-zero`             | `x.len() == 0` (use `is_empty()`)                                                                                                                                                                                                    |
-| `nan-comparison`       | a comparison with `nan`, which is always false (`!=` is always true); use `is_nan()`                                                                                                                                                 |
-| `empty-block`          | empty `if`/`else`/loop body                                                                                                                                                                                                          |
-| `todo`                 | call to `todo()`                                                                                                                                                                                                                     |
-| `shadowed-variable`    | `let`/`var` binding a name that is already bound, with a different type, by a binding of the same function that is still in scope (see below)                                                                                        |
-| `variant-like-binding` | a name starting with an upper-case letter that binds a new variable in a pattern (`match`, `if let`, `while let`, `let`, `for`), usually a misspelled variant without a payload (see below)                                          |
-| `unclosed-resource`    | a resource (§7.2) created and never closed: bound with `let`/`var` or used as a temporary, and neither closed by `use` nor handed on (see below)                                                                                     |
-| `resource-field`       | a struct field or enum variant holding a resource, in a type that does not implement `Close`                                                                                                                                         |
-| `resource-escapes`     | a resource bound with `use`, or received as a parameter, that is kept beyond the call: returned (`use` only), stored, captured by a task, or passed to a function that keeps it                                                      |
+| `unused-label`         | loop label that no `break` or `continue` refers to                                                                                                                                                                                  |
+| `naming`               | violates naming conventions (§2.4)                                                                                                                                                                                                  |
+| `bool-comparison`      | comparing with `true`/`false` literal                                                                                                                                                                                               |
+| `self-assignment`      | `x = x`                                                                                                                                                                                                                             |
+| `len-zero`             | `x.len() == 0` (use `is_empty()`)                                                                                                                                                                                                   |
+| `nan-comparison`       | a comparison with `nan`, which is always false (`!=` is always true); use `is_nan()`                                                                                                                                                |
+| `empty-block`          | empty `if`/`else`/loop body                                                                                                                                                                                                         |
+| `todo`                 | call to `todo()`                                                                                                                                                                                                                    |
+| `shadowed-variable`    | `let`/`var` binding a name that is already bound, with a different type, by a binding of the same function that is still in scope (see below)                                                                                       |
+| `variant-like-binding` | a name starting with an upper-case letter that binds a new variable in a pattern (`match`, `if let`, `while let`, `let`, `for`), usually a misspelled variant without a payload (see below)                                         |
+| `unclosed-resource`    | a resource (§7.2) created and never closed: bound with `let`/`var` or used as a temporary, and neither closed by `use` nor handed on (see below)                                                                                    |
+| `resource-field`       | a struct field or enum variant holding a resource, in a type that does not implement `Close`                                                                                                                                        |
+| `resource-escapes`     | a resource bound with `use`, or received as a parameter, that is kept beyond the call: returned (`use` only), stored, captured by a task, or passed to a function that keeps it                                                     |
 
 `unused-function`: public items are `pub` top-level functions and all
 methods of `pub` types. A private function is used only if reachable from

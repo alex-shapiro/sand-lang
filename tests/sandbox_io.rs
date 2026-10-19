@@ -1280,7 +1280,7 @@ print(fs.list_dir("data")?)
     assert_eq!(r.ok_stdout(), format!("{}[\"config.json\", \"secrets\"]\n", "permission_denied\n".repeat(9)));
     assert!(dir.path().join("data/secrets/key.txt").exists() && dir.path().join("data/config.json").exists());
 
-    // Existing entries resolve to their on-disk names: the policy sees `secrets`.
+    // Existing entries are resolved to their on-disk names: the policy sees `secrets`.
     let p = Policy::rules(policy());
     let stored = sandlang::policy::normalize_entry_path(&data.join("ſecrets"));
     assert_eq!(stored, data.join("secrets"));
@@ -1288,11 +1288,11 @@ print(fs.list_dir("data")?)
 }
 
 /// A symlink's own name (which cannot be canonicalised without following
-/// the link) also resolves to its on-disk name, so allow rules, which compare exactly,
+/// the link) is also resolved to its on-disk name, so allow rules, which compare paths exactly,
 /// evaluate the same path for any accepted casing or normalization.
 #[cfg(target_os = "macos")]
 #[test]
-fn symlink_entries_resolve_to_on_disk_names() {
+fn symlink_entries_are_resolved_to_on_disk_names() {
     use sandlang::policy::normalize_entry_path;
     use std::os::unix::fs::symlink;
     let dir = TempDir::new("link-names");

@@ -28,8 +28,8 @@ pub type ClockFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 /// A custom clock can be configured using [`Config::clock`](crate::Config::clock)
 /// for deterministic time simulation. Time of day, monotonic timestamps, and
 /// sleeps are driven by this clock; execution time limits are measured against
-/// it, work is reported through [`Clock::work`], and cooperative yields run
-/// through [`Clock::yield_now`].
+/// it, work is reported through [`Clock::work`], and cooperative yields are
+/// performed through [`Clock::yield_now`].
 pub trait Clock: Send + Sync {
     /// Returns the current wall-clock time.
     fn wall(&self) -> SystemTime;
