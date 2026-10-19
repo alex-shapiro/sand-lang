@@ -64,7 +64,7 @@ impl Seg {
     pub(crate) fn map(&self, f: impl Fn(&str) -> String) -> Seg {
         match self {
             Seg::Lit(s) => Seg::Lit(f(s).into()),
-            Seg::Glob(g) => Seg::Glob(Glob(g.0.iter().map(|p| f(p).into()).collect())),
+            Seg::Glob(g) => Seg::Glob(g.map(f)),
             other => other.clone(),
         }
     }
@@ -96,166 +96,10 @@ impl Glob {
         &self.0
     }
 
-    /// Whether this glob matches every name `other` matches. False when
-    /// unsure: it must find its first piece at the start of `other`'s first,
-    /// its last at the end of `other`'s last, and the pieces in between, in
-    /// order, within `other`'s pieces.
-    fn covers(&self, other: &Glob) -> bool {
-        let (p, q) = (&self.0, &other.0);
-        let (first, last) = (&*p[0], &*p[p.len() - 1]);
-        if !q[0].starts_with(first) || !q[q.len() - 1].ends_with(last) {
-            return false;
-        }
-        // Where the next middle piece may start: a piece of `other`, and an offset in it.
-        let mut at = (0, first.len());
-        for mid in &p[1..p.len() - 1] {
-            loop {
-                let (k, start) = at;
-                let piece = &*q[k];
-                let end = if k == q.len() - 1 { piece.len() - last.len() } else { piece.len() };
-                if let Some(i) = piece.get(start..end).and_then(|s| s.find(&**mid)) {
-                    at = (k, start + i + mid.len());
-                    break;
-                }
-                if k + 1 == q.len() {
-                    return false;
-                }
-                at = (k + 1, 0);
-            }
-        }
-        true
+    /// The glob with its pieces mapped by `f`.
+    pub(crate) fn map(&self, f: impl Fn(&str) -> String) -> Glob {
+        Glob(self.0.iter().map(|p| f(p).into()).collect())
     }
-
-    /// Whether some name may match both globs. True when unsure.
-    fn may_meet(&self, other: &Glob) -> bool {
-        let (p, q) = (&self.0, &other.0);
-        let prefixed = |a: &str, b: &str| a.starts_with(b) || b.starts_with(a);
-        let suffixed = |a: &str, b: &str| a.ends_with(b) || b.ends_with(a);
-        prefixed(&p[0], &q[0]) && suffixed(&p[p.len() - 1], &q[q.len() - 1])
-    }
-}
-
-/// Whether `a` matches every name `b` matches (single-name segments; false
-/// when unsure).
-fn name_covers(a: &Seg, b: &Seg) -> bool {
-    match (a, b) {
-        (Seg::Star, _) => true,
-        (Seg::Lit(x), Seg::Lit(y)) => x == y,
-        (Seg::Glob(g), Seg::Lit(y)) => g.matches(y),
-        (Seg::Glob(g), Seg::Glob(h)) => g.covers(h),
-        _ => false,
-    }
-}
-
-/// Whether some name may match both `a` and `b` (single-name segments;
-/// true when unsure).
-fn names_meet(a: &Seg, b: &Seg) -> bool {
-    match (a, b) {
-        (Seg::Star, _) | (_, Seg::Star) => true,
-        (Seg::Lit(x), Seg::Lit(y)) => x == y,
-        (Seg::Glob(g), Seg::Lit(y)) | (Seg::Lit(y), Seg::Glob(g)) => g.matches(y),
-        (Seg::Glob(g), Seg::Glob(h)) => g.may_meet(h),
-        _ => true,
-    }
-}
-
-/// A pattern as [`covers`] and [`may_meet`] compare them: it matches whole
-/// paths only, and with `below` also the paths below them.
-#[derive(Clone, Copy)]
-pub(crate) struct Pattern<'a> {
-    pub segs: &'a [Seg],
-    pub below: bool,
-}
-
-static GLOBSTAR: Seg = Seg::GlobStar;
-
-impl<'a> Pattern<'a> {
-    fn len(&self) -> usize {
-        self.segs.len() + self.below as usize
-    }
-
-    fn get(&self, i: usize) -> Option<&'a Seg> {
-        self.segs.get(i).or((self.below && i == self.segs.len()).then_some(&GLOBSTAR))
-    }
-}
-
-/// The number of leading names `a` and `b` have in common, or `None` if
-/// they differ in a name before either has a wildcard.
-fn common_names(a: Pattern, b: Pattern) -> Option<usize> {
-    let mut n = 0;
-    loop {
-        match (a.get(n), b.get(n)) {
-            (Some(Seg::Lit(x)), Some(Seg::Lit(y))) if x == y => n += 1,
-            (Some(Seg::Lit(_)), Some(Seg::Lit(_))) => return None,
-            _ => return Some(n),
-        }
-    }
-}
-
-/// Memoized results of comparing the segments of two patterns from
-/// position `start` on.
-struct Memo {
-    start: usize,
-    width: usize,
-    results: Vec<Option<bool>>,
-}
-
-impl Memo {
-    fn new(a: Pattern, b: Pattern, start: usize) -> Memo {
-        let width = b.len() + 1 - start;
-        Memo { start, width, results: vec![None; (a.len() + 1 - start) * width] }
-    }
-
-    fn slot(&mut self, i: usize, j: usize) -> &mut Option<bool> {
-        &mut self.results[(i - self.start) * self.width + j - self.start]
-    }
-}
-
-/// Whether `a` matches every path that `b` matches. False when unsure.
-pub(crate) fn covers(a: Pattern, b: Pattern) -> bool {
-    fn go(a: Pattern, b: Pattern, i: usize, j: usize, memo: &mut Memo) -> bool {
-        if let Some(r) = *memo.slot(i, j) {
-            return r;
-        }
-        let r = match (a.get(i), b.get(j)) {
-            (None, None) => true,
-            // Recursion base case: ** consumes zero components, or consumes the next component of b.
-            (Some(Seg::GlobStar), _) => go(a, b, i + 1, j, memo) || (j < b.len() && go(a, b, i, j + 1, memo)),
-            (None, Some(_)) | (Some(_), None) | (Some(_), Some(Seg::GlobStar)) => false,
-            (Some(x), Some(y)) => name_covers(x, y) && go(a, b, i + 1, j + 1, memo),
-        };
-        *memo.slot(i, j) = Some(r);
-        r
-    }
-    let Some(n) = common_names(a, b) else { return false };
-    go(a, b, n, n, &mut Memo::new(a, b, n))
-}
-
-/// Whether some path may match both patterns. True when unsure.
-pub(crate) fn may_meet(a: Pattern, b: Pattern) -> bool {
-    fn go(a: Pattern, b: Pattern, i: usize, j: usize, memo: &mut Memo) -> bool {
-        if let Some(r) = *memo.slot(i, j) {
-            return r;
-        }
-        let r = match (a.get(i), b.get(j)) {
-            (None, None) => true,
-            (Some(Seg::GlobStar), _) => go(a, b, i + 1, j, memo) || (j < b.len() && go(a, b, i, j + 1, memo)),
-            (_, Some(Seg::GlobStar)) => go(a, b, i, j + 1, memo) || (i < a.len() && go(a, b, i + 1, j, memo)),
-            (None, Some(_)) | (Some(_), None) => false,
-            (Some(x), Some(y)) => names_meet(x, y) && go(a, b, i + 1, j + 1, memo),
-        };
-        *memo.slot(i, j) = Some(r);
-        r
-    }
-    let Some(n) = common_names(a, b) else { return false };
-    go(a, b, n, n, &mut Memo::new(a, b, n))
-}
-
-/// The fewest names a path matching `pattern` has, and the most (`None`:
-/// any number, after a `**`).
-pub(crate) fn name_counts(pattern: &[Seg]) -> (usize, Option<usize>) {
-    let fixed = pattern.iter().filter(|s| **s != Seg::GlobStar).count();
-    (fixed, (fixed == pattern.len()).then_some(fixed))
 }
 
 /// The names of a normalized path, its root (`/`, or a Windows prefix and
@@ -489,28 +333,6 @@ mod tests {
         assert!(!g("a*b*c").matches("ac"));
         assert!(!g("ab*ba").matches("aba"));
         assert_eq!(Seg::parse(&[('a', false), ('*', true), ('*', true)]), Err("`**` must be a whole path segment".into()));
-    }
-
-    #[test]
-    fn covering_and_meeting_patterns() {
-        fn exact(segs: &[Seg]) -> Pattern<'_> {
-            Pattern { segs, below: false }
-        }
-        let covers = |a: &str, b: &str| super::covers(exact(&pattern(a)), exact(&pattern(b)));
-        let meet = |a: &str, b: &str| may_meet(exact(&pattern(a)), exact(&pattern(b)));
-        assert!(covers("r/**", "r/*") && covers("r/**", "r/a/**/b") && covers("r/**", "r"));
-        assert!(!covers("r/*", "r/**") && !covers("r/*", "r"));
-        assert!(covers("r/**/b", "r/*/b") && covers("r/**/b", "r/**/b") && covers("**/x", "r/**/x"));
-        assert!(!covers("r/*/b", "r/**/b") && !covers("r/**/b", "r/*/c"));
-        assert!(covers("r/*/b", "r/a/b") && !covers("r/a/b", "r/*/b"));
-        assert!(covers("r/*.pem", "r/key*.pem") && covers("r/*.pem", "r/k.pem") && !covers("r/k*.pem", "r/*.pem"));
-        assert!(covers("a*b*c", "ab*xbx*c") && covers("*b*", "x*b") && !covers("*b*", "x*y"));
-        // `a*a` matches `aa`, which `aa*a` does not.
-        assert!(covers("a*a", "aa*a") && !covers("aa*a", "a*a"));
-        assert!(meet("r/*.pem", "r/key*") && meet("r/**/x", "r/a/b/x") && meet("r/**", "r") && meet("r/*/**", "**/b"));
-        assert!(!meet("r/a", "r/b") && !meet("r/*.pem", "r/*.key") && !meet("r/*", "r") && !meet("r/**/x", "s/**"));
-        assert_eq!(name_counts(&pattern("r/*/x")), (3, Some(3)));
-        assert_eq!(name_counts(&pattern("r/**/x")), (2, None));
     }
 
     #[test]

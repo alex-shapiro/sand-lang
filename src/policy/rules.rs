@@ -347,7 +347,7 @@ impl RulePolicy {
         if let Capability::NetAddr { host, addr } = cap {
             return self.check_addr(host, *addr);
         }
-        match self.verdict(cap, space, &[]) {
+        match self.verdict(cap, space, &|_| false) {
             Some((true, _)) => Decision::Allow,
             Some((false, _)) => Decision::Deny,
             None => match cap {
@@ -366,7 +366,7 @@ impl RulePolicy {
     /// See [`super::Policy::protects_normalized_in`].
     pub(crate) fn protects_normalized_in(&self, path: &Path, space: PathSpace) -> bool {
         [READ, WRITE].into_iter().any(|op| {
-            let mut best = Best::new(&[]);
+            let mut best = Best::new(&|_| false);
             self.file_verdict(path, op, space, &mut best);
             matches!(best.verdict(), Some((false, _)))
         })
@@ -390,9 +390,9 @@ impl RulePolicy {
     }
 
     /// The rule deciding `cap` (normalized in `space`), leaving out the
-    /// rules `exclude`: whether it allows, and its index. `None` if no rule
-    /// matches.
-    pub(crate) fn verdict(&self, cap: &Capability, space: PathSpace, exclude: &[usize]) -> Option<(bool, usize)> {
+    /// rules `exclude` picks: whether it allows, and its index. `None` if no
+    /// rule matches.
+    pub(crate) fn verdict(&self, cap: &Capability, space: PathSpace, exclude: &dyn Fn(usize) -> bool) -> Option<(bool, usize)> {
         let mut best = Best::new(exclude);
         let index = self.others();
         match cap {
@@ -427,7 +427,7 @@ impl RulePolicy {
                 // All variables cannot be had while some are denied.
                 let named = index.env_names.values().flatten().map(|&(allow, rule)| (allow, rule));
                 let denies = named.chain(index.env.iter().map(|&(_, allow, rule)| (allow, rule)));
-                if let Some((_, rule)) = denies.filter(|&(allow, rule)| !allow && !exclude.contains(&(rule as usize))).min_by_key(|e| e.1) {
+                if let Some((_, rule)) = denies.filter(|&(allow, rule)| !allow && !exclude(rule as usize)).min_by_key(|e| e.1) {
                     return Some((false, rule as usize));
                 }
                 for &(ref pattern, allow, rule) in &index.env {
@@ -534,7 +534,7 @@ impl RulePolicy {
         if let Some(literal) = parse_ip(host) {
             return if literal == ip { Decision::Allow } else { Decision::Deny };
         }
-        let mut best = Best::new(&[]);
+        let mut best = Best::new(&|_| false);
         self.others().net.find_ip(ip, addr.port(), |score, spelled, e| {
             if !(e.allow && spelled) {
                 best.offer([score, 0, 0, 0, 0], e.allow, e.rule);
@@ -587,19 +587,19 @@ type Spec = [u32; 5];
 /// The deciding rule among those offered: the most specific, deny at a
 /// tie, then the first.
 struct Best<'a> {
-    exclude: &'a [usize],
+    exclude: &'a dyn Fn(usize) -> bool,
     best: Option<(Spec, bool, std::cmp::Reverse<usize>)>,
 }
 
 impl<'a> Best<'a> {
-    fn new(exclude: &'a [usize]) -> Best<'a> {
+    fn new(exclude: &'a dyn Fn(usize) -> bool) -> Best<'a> {
         Best { exclude, best: None }
     }
 
     fn offer(&mut self, spec: Spec, allow: bool, rule: u32) {
         let rule = rule as usize;
         let candidate = (spec, !allow, std::cmp::Reverse(rule));
-        if !self.exclude.contains(&rule) && self.best.is_none_or(|b| candidate > b) {
+        if !(self.exclude)(rule) && self.best.is_none_or(|b| candidate > b) {
             self.best = Some(candidate);
         }
     }

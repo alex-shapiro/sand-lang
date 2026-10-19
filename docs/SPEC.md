@@ -2444,15 +2444,20 @@ writes methods in upper case, aligns the trailing comments of consecutive
 lines and removes runs of blank lines. `sandlang::policy::lint_policy`
 reports:
 
-| Lint                   | Description                                                                           |
-| ---------------------- | ------------------------------------------------------------------------------------- |
-| `redundant-rule`       | a rule repeats another, or a broader rule already decides what it covers the same way |
-| `overridden-rule`      | a rule taking precedence decides everything a rule covers the other way               |
-| `bypassable-http-deny` | a `deny http` rule for a host that a net rule lets scripts connect to                 |
-| `unused-set`           | a `let` set that is never referenced in a rule                                        |
+| Lint                   | Description                                                                        |
+| ---------------------- | ---------------------------------------------------------------------------------- |
+| `redundant-rule`       | a rule repeats another, or other rules already decide what it decides the same way |
+| `overridden-rule`      | rules taking precedence decide everything a rule covers, some the other way        |
+| `bypassable-http-deny` | a `deny http` rule for hosts that a net rule lets scripts connect to               |
+| `unused-set`           | a `let` set that is never referenced in a rule                                     |
 
-The first two compare paths as written, without resolving symlinks, and report
-a rule only when a single other rule shows that it is not needed.
+The first two judge file and `http` rules (with the `net` rules that also
+decide http requests), wildcards included. They report a rule when removing
+it changes no decision, also when that takes several other rules to show,
+and removing every rule they report changes none either. They compare paths
+as written, without resolving symlinks. Some unneeded rules go unreported:
+those whose analysis would take too long, and rules for addresses where
+`net` rules name address ranges.
 
 `sandlang::policy::rule_for(capability, allow)` gives, as a policy file
 line, the rule that decides a promptable request for good (e.g. `allow read

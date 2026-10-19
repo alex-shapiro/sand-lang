@@ -90,11 +90,6 @@ impl NetPattern {
         Some(NetPattern { kind, port })
     }
 
-    /// True if the pattern specifies explicit hosts or addresses without wildcards.
-    pub(crate) fn is_explicit(&self) -> bool {
-        matches!(self.kind, HostKind::Host(_) | HostKind::Ip(..))
-    }
-
     /// Specificity score for pattern matching.
     fn score(&self) -> u32 {
         match &self.kind {
@@ -262,7 +257,7 @@ impl<T> HostIndex<T> {
 /// local host (`127.0.0.1`, `::1`), and IPv6 addresses embedding an IPv4
 /// address (IPv4-compatible, IPv4-translated, NAT64 `64:ff9b::/96`, 6to4
 /// `2002::/16`) reach that address.
-fn ip_spellings(ip: IpAddr) -> Vec<IpAddr> {
+pub(crate) fn ip_spellings(ip: IpAddr) -> Vec<IpAddr> {
     if ip.is_unspecified() {
         return vec![IpAddr::V4(Ipv4Addr::LOCALHOST), IpAddr::V6(Ipv6Addr::LOCALHOST)];
     }

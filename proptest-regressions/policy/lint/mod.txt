@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 8b70d46fbd64aee79e6a4ed77be866cdc774d0c59d5f86474d69bfdcdee51b98 # shrinks to rules = [(1, true, 0, 0, [0]), (1, false, 0, 1, [0])], private_net = false, paths = [[], [], [], [], [], [], [], [], [], [], [0], []]
+cc 3d6b4603cf00f9ca6c8f9bd5dcebbcb9401bc41cec63b09fe18f48dee806dd98 # shrinks to rules = [(2, true, 0, 3, []), (1, true, 0, 4, [])], private_net = false, paths = [[], [], [], [], [], [], [], [], [], [], [], []]
