@@ -589,6 +589,11 @@ impl<'a> Parser<'a> {
                 methods.push(self.fn_decl(p, mdoc)?);
                 continue;
             }
+            if self.at(&Tok::Pub) {
+                // Recover as if the `pub` were absent.
+                self.error_here("a field has no `pub` of its own: the fields of a `pub` struct are public");
+                self.bump();
+            }
             let mutable = self.eat(&Tok::Var);
             let fname = self.ident("field name")?;
             self.expect(&Tok::Colon, "`:`")?;

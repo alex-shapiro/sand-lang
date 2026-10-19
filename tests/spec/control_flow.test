@@ -598,3 +598,10 @@ print(json.parse("[")?)
 Int(1)
 --- fail
 parse: unexpected end of input at line 1, column 2
+
+=== a struct field has no pub
+pub struct Point {
+    pub x: int
+}
+--- error
+2: a field has no `pub` of its own: the fields of a `pub` struct are public
