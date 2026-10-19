@@ -8,6 +8,7 @@
 use super::stream::{IoFailure, read_line_bytes, read_to_end_reserved, strip_eol};
 use crate::check::ModKind;
 use crate::engine::Registry;
+use crate::network::{Network, Stream};
 use crate::policy::{Capability, Decision, Policy, is_private_address};
 use crate::vm::iomem::{Reservation, ResourceSlot};
 use crate::vm::value::{NativeObject, Obj, Value};
@@ -320,6 +321,12 @@ impl Conn {
         }
     }
 
+    /// Creates a connection wrapping a network stream.
+    pub(crate) fn from_stream(stream: Box<dyn Stream>, peer: SocketAddr) -> Conn {
+        let (r, w) = tokio::io::split(stream);
+        Conn::new(Box::new(r), Box::new(w), peer.to_string())
+    }
+
     fn from_tcp(stream: TcpStream) -> std::io::Result<Conn> {
         let peer = stream.peer_addr()?.to_string();
         let (r, w) = stream.into_split();
@@ -421,10 +428,10 @@ fn split_host_port(addr: &str) -> Option<(String, u16)> {
 /// (`Capability::NetAddr`), so that a name cannot lead to an address the
 /// policy forbids (e.g. through DNS rebinding). Fails with kind
 /// `"permission_denied"` if every address is denied.
-pub(crate) async fn resolve_allowed(policy: &Policy, host: &str, port: u16) -> Result<Vec<SocketAddr>, IoFailure> {
+pub(crate) async fn resolve_allowed(policy: &Policy, network: &dyn Network, host: &str, port: u16) -> Result<Vec<SocketAddr>, IoFailure> {
     let addrs: Vec<SocketAddr> = match host.parse::<IpAddr>() {
         Ok(ip) => vec![SocketAddr::new(ip, port)],
-        Err(_) => tokio::net::lookup_host((host, port)).await?.collect(),
+        Err(_) => network.resolve(host, port).await?,
     };
     let mut denied = None;
     let mut allowed = Vec::with_capacity(addrs.len());
@@ -449,19 +456,15 @@ pub(crate) async fn resolve_allowed(policy: &Policy, host: &str, port: u16) -> R
     }
 }
 
-/// Opens a TCP connection to one of the addresses of `host` the policy allows.
-pub(crate) async fn connect_checked(policy: &Policy, host: &str, port: u16) -> Result<TcpStream, IoFailure> {
-    let addrs = resolve_allowed(policy, host, port).await?;
-    // Connects to the checked addresses only (in order); never resolves again.
-    Ok(TcpStream::connect(&addrs[..]).await?)
-}
-
-/// Like [`connect_checked`], failing with kind `"timeout"` after `timeout`.
-pub(crate) async fn tcp_connect(policy: &Policy, host: &str, port: u16, timeout: Duration) -> Result<TcpStream, IoFailure> {
-    match tokio::time::timeout(timeout, connect_checked(policy, host, port)).await {
-        Ok(r) => r,
-        Err(_) => Err(IoFailure::new("timeout", format!("connecting to {host}:{port} timed out"))),
-    }
+/// Connects to a resolved address allowed by policy.
+pub(crate) async fn connect_checked(
+    policy: &Policy,
+    network: &dyn Network,
+    host: &str,
+    port: u16,
+) -> Result<(Box<dyn Stream>, SocketAddr), IoFailure> {
+    let addrs = resolve_allowed(policy, network, host, port).await?;
+    Ok(network.connect(&addrs).await?)
 }
 
 fn connect(vm: &mut Vm, a: &[Value]) -> NResult {
@@ -475,8 +478,14 @@ fn connect(vm: &mut Vm, a: &[Value]) -> NResult {
     // Counted from the start: a connection attempt holds a socket.
     let slot = super::or_return!(vm.resource_slot_with(CONN_BUFFER, "a connection"));
     let timeout = Duration::from_nanos(a[1].as_int().max(0) as u64);
-    let policy = vm.host.policy.clone();
-    suspend_resource(slot, async move { Ok(Conn::from_tcp(tcp_connect(&policy, &host, port, timeout).await?)?) })
+    let (policy, network, clock) = (vm.host.policy.clone(), vm.host.network.clone(), vm.host.clock.clone());
+    suspend_resource(slot, async move {
+        let open = connect_checked(&policy, &*network, &host, port);
+        match crate::platform::timeout(&*clock, timeout, open).await {
+            Some(r) => r.map(|(stream, peer)| Conn::from_stream(stream, peer)),
+            None => Err(IoFailure::new("timeout", format!("connecting to {host}:{port} timed out"))),
+        }
+    })
 }
 
 fn connect_tls(vm: &mut Vm, a: &[Value]) -> NResult {
@@ -492,22 +501,21 @@ fn connect_tls(vm: &mut Vm, a: &[Value]) -> NResult {
     }
     let slot = super::or_return!(vm.resource_slot_with(CONN_BUFFER + TLS_BUFFERS, "a connection"));
     let timeout = Duration::from_nanos(a[1].as_int().max(0) as u64);
-    let policy = vm.host.policy.clone();
+    let (policy, network, clock) = (vm.host.policy.clone(), vm.host.network.clone(), vm.host.clock.clone());
     let settings = vm.host.tls.clone();
     // The timeout covers connecting and the handshake, so a peer that
     // accepts but never answers cannot hold the socket indefinitely.
     let target = format!("{host}:{port}");
     let open = async move {
-        let tcp = connect_checked(&policy, &host, port).await?;
-        let peer = tcp.peer_addr()?.to_string();
-        let tls = tls::connect(&settings, &host, tcp).await?;
+        let (stream, peer) = connect_checked(&policy, &*network, &host, port).await?;
+        let tls = tls::connect(&settings, &host, stream).await?;
         let (r, w) = tokio::io::split(tls);
-        Ok(Conn::new(Box::new(r), Box::new(w), peer))
+        Ok(Conn::new(Box::new(r), Box::new(w), peer.to_string()))
     };
     suspend_resource(slot, async move {
-        match tokio::time::timeout(timeout, open).await {
-            Ok(r) => r,
-            Err(_) => Err(IoFailure::new("timeout", format!("TLS connection to {target} timed out"))),
+        match crate::platform::timeout(&*clock, timeout, open).await {
+            Some(r) => r,
+            None => Err(IoFailure::new("timeout", format!("TLS connection to {target} timed out"))),
         }
     })
 }
@@ -660,9 +668,9 @@ impl TlsSettings {
 #[cfg(feature = "tls")]
 pub(crate) mod tls {
     use super::{IoFailure, TlsSettings};
+    use crate::network::Stream;
     use rustls::pki_types::{CertificateDer, ServerName};
     use std::sync::{Arc, OnceLock};
-    use tokio::net::TcpStream;
     use tokio_rustls::TlsConnector;
     use tokio_rustls::client::TlsStream;
 
@@ -692,11 +700,11 @@ pub(crate) mod tls {
         }
     }
 
-    /// Performs a TLS handshake over `tcp`, verifying the certificate for `host`.
-    pub async fn connect(settings: &TlsSettings, host: &str, tcp: TcpStream) -> Result<TlsStream<TcpStream>, IoFailure> {
+    /// Performs a TLS handshake over a stream and verifies the host certificate.
+    pub async fn connect(settings: &TlsSettings, host: &str, stream: Box<dyn Stream>) -> Result<TlsStream<Box<dyn Stream>>, IoFailure> {
         let name = ServerName::try_from(host.to_string())
             .map_err(|_| IoFailure::new("invalid", format!("invalid TLS server name {:?}", crate::stdlib::truncate(host, 200))))?;
-        connector(settings)?.connect(name, tcp).await.map_err(|e| {
+        connector(settings)?.connect(name, stream).await.map_err(|e| {
             let e = IoFailure::from(e);
             IoFailure::new(e.kind, format!("TLS handshake with {host} failed: {}", e.message))
         })
@@ -706,10 +714,10 @@ pub(crate) mod tls {
 #[cfg(not(feature = "tls"))]
 pub(crate) mod tls {
     use super::{IoFailure, TlsSettings};
-    use tokio::net::TcpStream;
+    use crate::network::Stream;
 
     /// TLS is unavailable without the `tls` feature.
-    pub async fn connect(_settings: &TlsSettings, _host: &str, _tcp: TcpStream) -> Result<TcpStream, IoFailure> {
+    pub async fn connect(_settings: &TlsSettings, _host: &str, _stream: Box<dyn Stream>) -> Result<Box<dyn Stream>, IoFailure> {
         Err(IoFailure::new("invalid", "TLS support is not enabled in this build"))
     }
 }

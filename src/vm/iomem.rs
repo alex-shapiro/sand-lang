@@ -94,7 +94,7 @@ impl IoMemory {
             None => (UNLIMITED, 0),
         };
         self.reserved
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |r| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |r| {
                 let total = r.checked_add(n)?;
                 (total.saturating_add(heap).saturating_add(spare) <= limit).then_some(total)
             })
@@ -201,7 +201,7 @@ impl ResourceSlot {
     /// Takes a slot, if fewer than `max_open_resources` are open.
     pub fn try_new(mem: &Arc<IoMemory>) -> Option<ResourceSlot> {
         let max = mem.max_resources;
-        mem.resources.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| (n < max).then_some(n + 1)).ok()?;
+        mem.resources.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| (n < max).then_some(n + 1)).ok()?;
         Some(ResourceSlot { mem: mem.clone(), buffers: Reservation::new(mem) })
     }
 

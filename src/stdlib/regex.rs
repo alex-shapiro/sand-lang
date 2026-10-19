@@ -72,8 +72,8 @@ struct Scan {
 const CLOCK_EVERY: u32 = 32;
 
 impl Scan {
-    fn new() -> Scan {
-        Scan { searched: 0, charged: 0, start: Instant::now(), unclocked: 0, scratch: Scratch::new() }
+    fn new(vm: &Vm) -> Scan {
+        Scan { searched: 0, charged: 0, start: vm.host.clock.now(), unclocked: 0, scratch: Scratch::new() }
     }
 
     /// Charges `units`, plus whatever the time floor requires.
@@ -83,7 +83,8 @@ impl Scan {
         let mut extra = 0;
         if self.unclocked >= CLOCK_EVERY || units >= u64::from(CLOCK_EVERY) {
             self.unclocked = 0;
-            let floor = u64::try_from(self.start.elapsed().as_nanos() / FLOOR_NANOS).unwrap_or(u64::MAX);
+            let elapsed = vm.host.clock.now().saturating_duration_since(self.start);
+            let floor = u64::try_from(elapsed.as_nanos() / FLOOR_NANOS).unwrap_or(u64::MAX);
             extra = floor.saturating_sub(self.charged);
             self.charged = self.charged.saturating_add(extra);
         }
@@ -289,7 +290,7 @@ fn expansion_len(caps: &Captures, rep: &str, literal: &mut String) -> usize {
 fn replace(vm: &mut Vm, a: &[Value], all: bool) -> NResult {
     let out = with_regex(vm, a[0], |vm, obj, cache| {
         let (text, rep) = (vm.str(a[1]), vm.str(a[2]));
-        let mut scan = Scan::new();
+        let mut scan = Scan::new(vm);
         if !all {
             scan.search(vm, text)?;
         }
@@ -359,7 +360,7 @@ pub fn register(r: &mut Registry) {
             vm.charge_bytes(vm.str(a[0]).len())?;
             return Ok(vm.ok(re));
         }
-        let mut scan = Scan::new();
+        let mut scan = Scan::new(vm);
         scan.charge(vm, COMPILE_BASE + COMPILE_PER_BYTE * vm.str(a[0]).len() as u64)?;
         let built = builder().build(vm.str(a[0]));
         // Compiling does work in proportion to the program it builds.
@@ -394,7 +395,7 @@ pub fn register(r: &mut Registry) {
     r.add_builtin("regex.Regex.is_match", |vm, a| {
         let found = with_regex(vm, a[0], |vm, obj, cache| {
             let text = vm.str(a[1]);
-            let mut scan = Scan::new();
+            let mut scan = Scan::new(vm);
             scan.search(vm, text)?;
             let found = obj.re.search_half_with(cache, &Input::new(text).earliest(true)).is_some();
             scan.finish(vm)?;
@@ -405,7 +406,7 @@ pub fn register(r: &mut Registry) {
     r.add_builtin("regex.Regex.find", |vm, a| {
         let found = with_regex(vm, a[0], |vm, obj, cache| {
             let text = vm.str(a[1]);
-            let mut scan = Scan::new();
+            let mut scan = Scan::new(vm);
             scan.search(vm, text)?;
             let m = obj.re.search_with(cache, &Input::new(text));
             scan.finish(vm)?;
@@ -418,7 +419,7 @@ pub fn register(r: &mut Registry) {
     r.add_builtin("regex.Regex.find_all", |vm, a| {
         let (def, spans, cost) = with_regex(vm, a[0], |vm, obj, cache| {
             let text = vm.str(a[1]);
-            let (mut spans, mut cost, mut scan) = (Vec::new(), 0, Scan::new());
+            let (mut spans, mut cost, mut scan) = (Vec::new(), 0, Scan::new(vm));
             each_match(vm, obj, cache, text, &mut scan, |m| {
                 spans.push((m.start(), m.end()));
                 cost += MATCH_COST + m.len();
@@ -442,7 +443,7 @@ pub fn register(r: &mut Registry) {
     r.add_builtin("regex.Regex.capture_spans", |vm, a| {
         let spans = with_regex(vm, a[0], |vm, obj, cache| {
             let text = vm.str(a[1]);
-            let mut scan = Scan::new();
+            let mut scan = Scan::new(vm);
             scan.search(vm, text)?;
             let mut caps = obj.re.create_captures();
             obj.re.search_captures_with(cache, &Input::new(text), &mut caps);
@@ -457,7 +458,7 @@ pub fn register(r: &mut Registry) {
     r.add_builtin("regex.Regex.capture_spans_all", |vm, a| {
         let all = with_regex(vm, a[0], |vm, obj, cache| {
             let text = vm.str(a[1]);
-            let (mut all, mut cost, mut scan) = (Vec::new(), 0, Scan::new());
+            let (mut all, mut cost, mut scan) = (Vec::new(), 0, Scan::new(vm));
             each_captures(vm, obj, cache, text, &mut scan, |caps| {
                 vm.charge(caps.group_len() as u64)?;
                 cost += 64 + SPAN_COST * caps.group_len();
@@ -479,7 +480,7 @@ pub fn register(r: &mut Registry) {
     r.add_builtin("regex.Regex.split", |vm, a| {
         let (spans, cost) = with_regex(vm, a[0], |vm, obj, cache| {
             let text = vm.str(a[1]);
-            let (mut spans, mut cost, mut scan) = (Vec::new(), 0, Scan::new());
+            let (mut spans, mut cost, mut scan) = (Vec::new(), 0, Scan::new(vm));
             let mut last = 0;
             each_match(vm, obj, cache, text, &mut scan, |m| {
                 spans.push((last, m.start()));

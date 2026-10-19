@@ -298,10 +298,7 @@ pub native fn exit(code: int) -> never
 /// Builds a set from a list.
 pub native fn set<T: Hash>(items: [T] = []) -> Set<T>
 
-/// Shows the documentation of `x`: a module, type, trait, function, method,
-/// field, variant or variable (`help(json)`, `help(str.split)`), or the type
-/// of any other expression, which is not evaluated (`help(xs.first())`). A
-/// string names an item too (`help("json.Json")`). `help()` shows an overview.
+/// Displays documentation for x or an item identified by string.
 pub native fn help<T>(x: T)
 
 /// The names that may follow `x.`: a module's public items, or the

@@ -29,9 +29,11 @@ prefer to rip it out wholesale and replace it with the better alternative.
 - Avoid changelog-style comments at all cost. They pollute the codebase and harm the reader's
   understanding of the code as it exists.
 
-## Doc Guidelines
+## Writing Guidelines
 
 - If you find redundancies or overly verbose phrases while reading through a doc, remove them.
-- LLM written docs tend to turn into factslop over time. If you find that a doc seems to contain
-  a lot of facts but takes too many words to communicate an idea, restructure it to explain
-  exactly what you were looking for, concisely.
+- LLM written docs tend to turn into factslop over time. If you find that a doc contains lots of
+  facts and symbols prior to communicating a key idea, restructure it to explain exactly what you
+  were looking for, concisely.
+- Never write docs with middle voice. If you are editing a doc that already contains middle voice,
+  eliminate it.

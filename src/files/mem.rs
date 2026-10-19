@@ -1,6 +1,7 @@
 //! An in-memory file system: [`MemFs`].
 
 use super::{ENTRY_OVERHEAD, EntryKind, EntryMeta, OpenMode};
+use crate::platform::{Clock, SystemClock};
 use crate::vm::iomem::Reservation;
 use std::collections::BTreeMap;
 use std::io::{self, ErrorKind};
@@ -61,6 +62,8 @@ struct Shared {
     capacity: usize,
     /// Counts the writes and moves of files (see [`MemFs::generation`]).
     generation: AtomicU64,
+    /// Clock used for file modification timestamps.
+    clock: Arc<dyn Clock>,
 }
 
 impl Shared {
@@ -68,13 +71,13 @@ impl Shared {
     fn take(&self, n: usize) -> io::Result<()> {
         let capacity = self.capacity;
         self.used
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| used.checked_add(n).filter(|&t| t <= capacity))
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| used.checked_add(n).filter(|&t| t <= capacity))
             .map(|_| ())
             .map_err(|_| error(ErrorKind::QuotaExceeded, &format!("file system full (its capacity is {capacity} bytes)")))
     }
 
     fn give_back(&self, n: usize) {
-        let _ = self.used.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| Some(used.saturating_sub(n)));
+        let _ = self.used.try_update(Ordering::Relaxed, Ordering::Relaxed, |used| Some(used.saturating_sub(n)));
     }
 
     fn next_generation(&self) -> u64 {
@@ -106,7 +109,7 @@ struct Content {
 impl FileCell {
     /// A new file holding `data`, whose bytes the caller has accounted for.
     fn new(shared: &Arc<Shared>, data: Vec<u8>, generation: u64) -> Arc<FileCell> {
-        Arc::new(FileCell { content: Mutex::new(Content { data, modified: now(), generation }), shared: shared.clone() })
+        Arc::new(FileCell { content: Mutex::new(Content { data, modified: now(&*shared.clock), generation }), shared: shared.clone() })
     }
 
     fn lock(&self) -> MutexGuard<'_, Content> {
@@ -128,7 +131,7 @@ impl FileCell {
             c.data.resize(end, 0);
         }
         c.data[start..end].copy_from_slice(data);
-        c.modified = now();
+        c.modified = now(&*self.shared.clock);
         c.generation = self.shared.next_generation();
         Ok(end as u64)
     }
@@ -145,7 +148,7 @@ impl FileCell {
         c.data.resize(len, 0);
         let keep = len.max(c.data.capacity() / 2);
         c.data.shrink_to(keep);
-        c.modified = now();
+        c.modified = now(&*self.shared.clock);
         c.generation = self.shared.next_generation();
         Ok(())
     }
@@ -255,8 +258,9 @@ impl Node {
     }
 }
 
-fn now() -> i64 {
-    let since = crate::platform::SystemTime::now().duration_since(crate::platform::UNIX_EPOCH);
+/// Returns current time from clock in Unix nanoseconds.
+fn now(clock: &dyn Clock) -> i64 {
+    let since = clock.wall().duration_since(crate::platform::UNIX_EPOCH);
     since.map(|d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX)).unwrap_or(0)
 }
 
@@ -376,7 +380,7 @@ impl Tree {
                 let cell = FileCell::new(&self.shared, data.to_vec(), generation);
                 let (dir, name) = self.root.parent_mut(parts)?;
                 dir.entries.insert(name.to_string(), Node::File(cell));
-                dir.modified = now();
+                dir.modified = now(&*self.shared.clock);
                 return Ok(());
             }
         };
@@ -390,7 +394,7 @@ impl Tree {
             c.data = data.to_vec();
             self.give_back(old.saturating_sub(data.len()));
         }
-        c.modified = now();
+        c.modified = now(&*self.shared.clock);
         c.generation = self.shared.next_generation();
         Ok(())
     }
@@ -421,7 +425,7 @@ impl Tree {
         let cell = FileCell::new(&self.shared, Vec::new(), generation);
         let (dir, name) = self.root.parent_mut(parts)?;
         dir.entries.insert(name.to_string(), Node::File(cell.clone()));
-        dir.modified = now();
+        dir.modified = now(&*self.shared.clock);
         Ok(cell)
     }
 
@@ -436,7 +440,7 @@ impl Tree {
         check_path_len(path_len(parts))?;
         self.take(NODE_OVERHEAD + name.len())?;
         let (dir, name) = self.root.parent_mut(parts)?;
-        let t = now();
+        let t = now(&*self.shared.clock);
         dir.entries.insert(name.to_string(), Node::Dir(Dir { entries: BTreeMap::new(), modified: t }));
         dir.modified = t;
         Ok(())
@@ -462,7 +466,7 @@ impl Tree {
         let (dir, name) = self.root.parent_mut(parts)?;
         check(dir.entries.get(name).ok_or_else(not_found)?)?;
         let node = dir.entries.remove(name).ok_or_else(not_found)?;
-        dir.modified = now();
+        dir.modified = now(&*self.shared.clock);
         let freed = node.footprint(name);
         self.give_back(freed);
         Ok(())
@@ -503,7 +507,7 @@ impl Tree {
         if to_name.len() > freed {
             self.take(to_name.len() - freed)?;
         }
-        let t = now();
+        let t = now(&*self.shared.clock);
         let (dir, name) = self.root.parent_mut(from)?;
         let node = dir.entries.remove(name).ok_or_else(not_found)?;
         dir.modified = t;
@@ -537,8 +541,14 @@ impl MemFs {
     /// An empty file system holding at most `bytes` bytes of contents and
     /// names (each file and directory counts 64 bytes more).
     pub fn with_capacity(bytes: usize) -> MemFs {
-        let shared = Arc::new(Shared { used: AtomicUsize::new(0), capacity: bytes, generation: AtomicU64::new(0) });
-        MemFs { tree: Arc::new(Mutex::new(Tree { root: Dir { entries: BTreeMap::new(), modified: now() }, shared })) }
+        MemFs::with_capacity_and_clock(bytes, Arc::new(SystemClock))
+    }
+
+    /// Creates an empty in-memory filesystem with capacity limit and clock provider.
+    pub fn with_capacity_and_clock(bytes: usize, clock: Arc<dyn Clock>) -> MemFs {
+        let modified = now(&*clock);
+        let shared = Arc::new(Shared { used: AtomicUsize::new(0), capacity: bytes, generation: AtomicU64::new(0), clock });
+        MemFs { tree: Arc::new(Mutex::new(Tree { root: Dir { entries: BTreeMap::new(), modified }, shared })) }
     }
 
     fn lock(&self) -> MutexGuard<'_, Tree> {

@@ -588,16 +588,12 @@ impl Resolved {
         p
     }
 
-    /// Whether the final name is known to be spelled as it is stored.
+    /// True if the final component matches its on-disk casing.
     pub fn exact(&self) -> bool {
         self.exact
     }
 
-    /// Replaces the final name with the name stored on disk, if the entry
-    /// exists. For most entries that is the name the system gives the
-    /// entry's handle. For a link, the system names the handle by the path
-    /// used to open it, so the name comes from scanning the directory for an
-    /// entry whose name folds to the same form.
+    /// Replaces the final path component with its on-disk name.
     pub fn fix_spelling(&mut self) {
         if self.exact {
             return;
@@ -979,7 +975,6 @@ mod windows_tests {
             assert_eq!(follow(&dir.join("real/link.txt")).path(), dir.join("outside/file.txt"));
             assert_eq!(entry(&dir.join("real/link.txt")).path(), dir.join("real/link.txt"));
         }
-        // Names are spelled as they are stored.
         let mut r = follow(&dir.join("REAL/FILE.TXT"));
         r.fix_spelling();
         assert_eq!(r.path(), dir.join("real/file.txt"));

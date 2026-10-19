@@ -187,7 +187,7 @@ fn rules_match_memory_paths_as_written() {
 }
 
 #[test]
-fn trees_cannot_grow_deeper_than_paths_can_name() {
+fn trees_cannot_grow_deeper_than_max_path_depth() {
     // Each step uses short paths but nests the tree one level deeper.
     let src = r#"import fs
 fs.create_dir("/x")?

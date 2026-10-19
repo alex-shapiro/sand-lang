@@ -189,17 +189,7 @@ impl VariantRef<'_> {
     }
 }
 
-/// The fast hasher of map and set keys: FxHash, but each 8-byte word is mixed
-/// in with a folded multiply (the two halves of a 128-bit product XORed, as in
-/// foldhash), starting from a random per-process seed.
-///
-/// Scripts choose map and set keys, so they must not be able to make keys
-/// collide: in a table full of collisions every operation, charged about one
-/// unit, scans all the colliding keys. The folded multiply makes every bit of
-/// the key affect the low bits that pick the bucket (with plain FxHash they
-/// depend only on the key's low bits, so all multiples of 2^32 collide). The
-/// seed keeps colliding keys from being computed in advance; scripts cannot
-/// observe it, since no iteration order depends on hashes.
+/// Fast hasher for map and set keys. A folded multiply and random seed prevent hash collision attacks.
 #[derive(Clone, Copy)]
 pub struct FxHasher {
     hash: u64,

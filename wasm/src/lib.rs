@@ -204,9 +204,8 @@ impl Engine {
         Ok(Engine { engine: Rc::new(RefCell::new(Some(engine))), fs, interrupt, hooks: key })
     }
 
-    /// Runs a script (`name` names it in messages; default `main.sand`).
-    /// Resolves to a `RunResult` (it does not reject for errors of the
-    /// script); rejects if the engine is already running.
+    /// Executes a script with an optional name for diagnostics.
+    /// Returns a promise for the `RunResult`, or fails if the engine is already running.
     #[wasm_bindgen(unchecked_return_type = "Promise<RunResult>")]
     pub fn run(&self, source: String, name: Option<String>) -> js_sys::Promise {
         let slot = self.engine.clone();

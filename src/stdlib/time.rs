@@ -2,7 +2,7 @@
 
 use crate::check::ModKind;
 use crate::engine::Registry;
-use crate::platform::{Instant, SystemTime, UNIX_EPOCH};
+use crate::platform::UNIX_EPOCH;
 use crate::vm::value::Value;
 use crate::vm::{NResult, Vm};
 use std::fmt::Write;
@@ -14,11 +14,10 @@ const WEEKDAYS: [&str; 7] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Frid
 const MONTHS: [&str; 12] =
     ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 
-/// Nanoseconds since the process's first monotonic reading (`time.Instant`).
-fn monotonic_nanos() -> i64 {
-    static ORIGIN: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-    let origin = *ORIGIN.get_or_init(Instant::now);
-    i64::try_from(origin.elapsed().as_nanos()).unwrap_or(i64::MAX)
+/// Nanoseconds elapsed since the monotonic clock baseline.
+fn monotonic_nanos(vm: &Vm) -> i64 {
+    let elapsed = vm.host.clock.now().saturating_duration_since(vm.host.origin);
+    i64::try_from(elapsed.as_nanos()).unwrap_or(i64::MAX)
 }
 
 /// Days since 1970-01-01 of a proleptic Gregorian date (Hinnant's `days_from_civil`).
@@ -297,15 +296,15 @@ pub fn register(r: &mut Registry) {
         Ok(vm.new_str(s))
     });
 
-    r.add_builtin("time.now_nanos", |_, _| {
-        let now = SystemTime::now();
+    r.add_builtin("time.now_nanos", |vm, _| {
+        let now = vm.host.clock.wall();
         let nanos = match now.duration_since(UNIX_EPOCH) {
             Ok(d) => i64::try_from(d.as_nanos()).unwrap_or(i64::MAX),
             Err(e) => -i64::try_from(e.duration().as_nanos()).unwrap_or(i64::MAX),
         };
         Ok(Value::Int(nanos))
     });
-    r.add_builtin("time.monotonic_nanos", |_, _| Ok(Value::Int(monotonic_nanos())));
+    r.add_builtin("time.monotonic_nanos", |vm, _| Ok(Value::Int(monotonic_nanos(vm))));
 
     r.add_builtin("time.parse_nanos", |vm, a| {
         vm.charge_bytes(vm.str(a[0]).len())?;

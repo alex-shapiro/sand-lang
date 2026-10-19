@@ -23,22 +23,16 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// A parsed policy file: rules, what happens to requests no rule decides,
-/// and limits.
+/// A parsed security policy file.
 #[derive(Clone, Debug)]
 pub struct PolicyFile {
-    /// The rules (`allow`/`deny` lines). [`PolicyFile::policy`] adds the
-    /// `default` decision and the private-network rule.
+    /// Policy rules.
     pub rules: RulePolicy,
-    /// The decision for requests no rule decides (the `default` line), if
-    /// given. Hosts choose what applies otherwise ([`PolicyFile::policy_or`]);
-    /// [`PolicyFile::policy`] denies.
+    /// Fallback decision for unmatched requests.
     pub default: Option<Decision>,
-    /// Whether `allow private-net` was given: connections to private and
-    /// internal addresses are then not denied (see
-    /// [`RulePolicy::deny_private_networks`]).
+    /// True if private network connections are allowed.
     pub private_net: bool,
-    /// [`Limits::default`] changed by the `limit` lines.
+    /// Execution limits configured by policy limit directives.
     pub limits: Limits,
 }
 
@@ -573,10 +567,7 @@ fn limit(l: &mut Limits, args: &[Word]) -> Result<(), String> {
     Ok(())
 }
 
-/// The policy-file line that allows (or, unless `allow`, denies) `cap`,
-/// e.g. `allow read /data/a.txt`, for a prompt's "always" or "never"
-/// answer. `None` where no rule applies: `NetAddr`, allowing standard
-/// output or error, and requests no rule names exactly.
+/// Generates a policy rule string for a capability prompt response.
 pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
     let verb = if allow { "allow" } else { "deny" };
     let path = |p: &Path| p.to_str().map(|s| quote_part(s, true));

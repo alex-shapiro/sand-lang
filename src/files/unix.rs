@@ -179,7 +179,7 @@ pub(crate) struct Resolved {
     stop: Option<Stop>,
     /// The final entry (a final symlink not followed), if it exists.
     entry: Option<Stat>,
-    /// Whether the final name is spelled as stored (see [`Resolved::fix_spelling`]).
+    /// True if the final component matches its on-disk name.
     exact: bool,
     /// The final entry opened for reading while its spelling was fixed.
     file: Option<OwnedFd>,
@@ -626,7 +626,7 @@ impl Resolved {
         p
     }
 
-    /// Whether the final name is spelled as stored (or does not exist).
+    /// True if the final component matches its on-disk name or does not exist.
     pub fn exact(&self) -> bool {
         self.exact
     }

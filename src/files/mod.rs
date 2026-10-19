@@ -126,10 +126,7 @@ pub(crate) struct Work {
 
 /// A path resolved by an [`Fs`] for an operation.
 pub(crate) struct Target {
-    /// The normal form, which the policy decides on: absolute, without
-    /// `.` and `..`, and on the host with every symlink before the final
-    /// name resolved (and the final one unless the mode is `Entry`), and
-    /// existing directories named as stored.
+    /// The fully resolved absolute path evaluated by the policy.
     pub path: PathBuf,
     pub mode: Mode,
     #[cfg(feature = "os")]
@@ -137,11 +134,7 @@ pub(crate) struct Target {
 }
 
 impl Target {
-    /// Whether the final name is known to be spelled as stored. On a case-
-    /// or normalization-insensitive file system an existing entry can be
-    /// named differently; the policy's deny rules equate every such
-    /// spelling (`policy::fold_name`), so only decisions that compare it
-    /// exactly need [`Target::fix_spelling`].
+    /// True if the resolved path matches its on-disk name.
     pub fn exact(&self) -> bool {
         #[cfg(feature = "os")]
         if let Some(h) = &self.host {
@@ -150,7 +143,7 @@ impl Target {
         true
     }
 
-    /// Names an existing final entry as stored.
+    /// Replaces the final path component with its on-disk name.
     pub fn fix_spelling(&mut self) {
         #[cfg(feature = "os")]
         if let Some(h) = &mut self.host
@@ -203,8 +196,7 @@ pub(crate) enum Fs {
 }
 
 impl Default for Fs {
-    /// The host's file system with the `os` feature, otherwise an empty
-    /// memory file system.
+    /// Host file system if the os feature is enabled, otherwise an in-memory file system.
     fn default() -> Fs {
         #[cfg(feature = "os")]
         return Fs::Host;
@@ -214,7 +206,7 @@ impl Default for Fs {
 }
 
 impl Fs {
-    /// The namespace of this file system's paths (for policy checks).
+    /// The namespace of this file system's paths.
     pub fn space(&self) -> PathSpace {
         match self {
             #[cfg(feature = "os")]
@@ -223,7 +215,7 @@ impl Fs {
         }
     }
 
-    /// The memory file system, if this is one.
+    /// Returns the in-memory file system if active.
     pub fn memory(&self) -> Option<&MemFs> {
         match self {
             #[cfg(feature = "os")]
@@ -232,8 +224,7 @@ impl Fs {
         }
     }
 
-    /// The directory of relative paths when none is configured: the
-    /// process's working directory, or the root of a memory file system.
+    /// Base directory for relative paths.
     pub fn default_dir(&self) -> PathBuf {
         match self {
             #[cfg(feature = "os")]
@@ -242,8 +233,7 @@ impl Fs {
         }
     }
 
-    /// `p` made absolute (against the process's working directory, or the
-    /// root of a memory file system), not otherwise normalized.
+    /// Converts a path to an absolute path.
     pub fn absolute(&self, p: &Path) -> PathBuf {
         match self {
             #[cfg(feature = "os")]
@@ -252,7 +242,7 @@ impl Fs {
         }
     }
 
-    /// Resolves the absolute path `p` for an operation (lexically in memory).
+    /// Resolves a path for an operation.
     pub fn target(&self, p: &Path, mode: Mode) -> Target {
         match self {
             #[cfg(feature = "os")]
@@ -264,8 +254,7 @@ impl Fs {
         }
     }
 
-    /// The normal form of the absolute path `p` that the policy decides on
-    /// (see [`crate::policy::normalize_path`]; lexical in memory).
+    /// Resolves a path to its normalized form.
     pub fn resolve(&self, p: &Path) -> PathBuf {
         let mut t = self.target(p, Mode::Follow);
         t.fix_spelling();

@@ -1,17 +1,7 @@
-//! What the engine needs from the platform it runs on: clocks, timers, a
-//! way to let other tasks of the host's executor run, entropy and deep
-//! stacks for the recursive compiler passes.
-//!
-//! Natively these come from the standard library and tokio. On the web
-//! (`wasm32-unknown-unknown` in a JavaScript host, `cfg(web)`) the clock and
-//! timers come from JavaScript (`performance.now()`, `Date.now()`,
-//! `setTimeout`), entropy from `crypto.getRandomValues`, and there are no
-//! threads: the compiler runs on the module's own stack, whose size is set
-//! when the WebAssembly module is linked (see `wasm/build.rs`).
+//! Platform abstractions for clocks, timers, entropy, and execution stacks.
 
-#[cfg(web)]
+use std::future::Future;
 use std::pin::Pin;
-#[cfg(web)]
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -20,11 +10,86 @@ pub use std::time::{Instant, SystemTime, UNIX_EPOCH};
 #[cfg(web)]
 pub use web_time::{Instant, SystemTime, UNIX_EPOCH};
 
-/// The CPU time (user and system) the calling thread has used, from the
-/// thread's CPU clock on Unix with the `os` feature. Elsewhere (Windows, the
-/// web, builds without `os`) it is the time elapsed since the first call:
-/// the CPU time limit then counts elapsed time while the engine runs.
-pub(crate) fn cpu_time() -> Duration {
+pub type ClockFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+/// Clocks and timers for engine execution.
+pub trait Clock: Send + Sync {
+    /// Returns the current system time.
+    fn wall(&self) -> SystemTime;
+
+    /// Returns the current monotonic time.
+    fn now(&self) -> Instant;
+
+    /// Returns the CPU time of the current thread.
+    fn cpu_time(&self) -> Duration;
+
+    /// Pauses execution for duration.
+    fn sleep(&self, duration: Duration) -> ClockFuture;
+
+    /// Yields execution to the host scheduler.
+    fn yield_now(&self) -> ClockFuture;
+
+    /// Records fuel units of work completed by the engine.
+    fn work(&self, fuel: u64) {
+        let _ = fuel;
+    }
+}
+
+/// Execution deadline evaluated against a clock.
+#[derive(Clone)]
+pub struct Deadline {
+    pub at: Instant,
+    pub clock: std::sync::Arc<dyn Clock>,
+}
+
+impl Deadline {
+    /// Returns true if the deadline time has passed.
+    pub fn passed(&self) -> bool {
+        self.clock.now() >= self.at
+    }
+}
+
+/// Awaits future until duration elapses on clock.
+pub(crate) async fn timeout<F: Future>(clock: &dyn Clock, duration: Duration, future: F) -> Option<F::Output> {
+    let mut future = std::pin::pin!(future);
+    let mut expiry = clock.sleep(duration);
+    std::future::poll_fn(|cx: &mut Context<'_>| {
+        if let Poll::Ready(output) = future.as_mut().poll(cx) {
+            return Poll::Ready(Some(output));
+        }
+        expiry.as_mut().poll(cx).map(|()| None)
+    })
+    .await
+}
+
+/// Clock implementation using standard system clocks and timers.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn wall(&self) -> SystemTime {
+        SystemTime::now()
+    }
+
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn cpu_time(&self) -> Duration {
+        cpu_time()
+    }
+
+    fn sleep(&self, duration: Duration) -> ClockFuture {
+        Box::pin(sleep(duration))
+    }
+
+    fn yield_now(&self) -> ClockFuture {
+        Box::pin(yield_now())
+    }
+}
+
+/// Returns thread CPU time on Unix, or elapsed process time on other platforms.
+fn cpu_time() -> Duration {
     #[cfg(all(feature = "os", unix))]
     {
         let t = rustix::time::clock_gettime(rustix::time::ClockId::ThreadCPUTime);
@@ -38,14 +103,15 @@ pub(crate) fn cpu_time() -> Duration {
 }
 
 #[cfg(not(web))]
-pub(crate) async fn sleep(d: Duration) {
+async fn sleep(d: Duration) {
     tokio::time::sleep(d).await
 }
 
 /// Waits for `d` (with JavaScript timers, which wait at most 2^31 - 1 ms).
 #[cfg(web)]
-pub(crate) async fn sleep(d: Duration) {
+async fn sleep(d: Duration) {
     const MAX_MS: f64 = 2_147_483_647.0;
+    /// Pauses execution on WebAssembly hosts.
     let mut ms = d.as_secs_f64() * 1000.0;
     loop {
         let step = ms.min(MAX_MS);
@@ -64,8 +130,7 @@ mod web {
     use wasm_bindgen::JsValue;
     use wasm_bindgen::closure::Closure;
 
-    /// Starts a JavaScript timer of `ms` milliseconds; the receiver resolves
-    /// when it fires. (A dropped receiver leaves the timer to fire unheard.)
+    /// Starts a JavaScript timer for ms milliseconds.
     pub(super) fn timeout(ms: f64) -> tokio::sync::oneshot::Receiver<()> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let callback = Closure::once_into_js(move || {
@@ -74,8 +139,6 @@ mod web {
         let set_timeout = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("setTimeout"))
             .ok()
             .and_then(|f| wasm_bindgen::JsCast::dyn_into::<js_sys::Function>(f).ok());
-        // Without `setTimeout` (no such host) the timer never fires; the
-        // engine's wall-time limit and interrupts still end the wait.
         if let Some(set_timeout) = set_timeout {
             let _ = set_timeout.call2(&JsValue::UNDEFINED, &callback, &JsValue::from_f64(ms));
         }
@@ -83,15 +146,13 @@ mod web {
     }
 }
 
-/// Lets other tasks of the host's executor run.
-pub(crate) async fn yield_now() {
+async fn yield_now() {
     #[cfg(not(web))]
     tokio::task::yield_now().await;
     #[cfg(web)]
     YieldNow(false).await;
 }
 
-/// Ready on its second poll, having woken its task on the first.
 #[cfg(web)]
 struct YieldNow(bool);
 
@@ -131,15 +192,11 @@ static DEEP: pool::Pool = pool::Pool::new("sand-compile", Some(DEEP_STACK));
 
 #[cfg(not(web))]
 std::thread_local! {
-    /// Whether this thread is one of `DEEP`'s.
+    /// True if the current thread is in the DEEP pool.
     static ON_DEEP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Runs `f` on a stack deep enough for the compiler's recursive passes and
-/// returns its result, or the payload of its panic. Natively it runs on one
-/// of a pool of long-lived threads (directly, if the caller is one of
-/// them). On the web it runs on the module's stack (see the module
-/// documentation), and a panic aborts.
+/// Runs `f` on a large stack for recursive compiler operations.
 pub(crate) fn on_deep_stack<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> std::thread::Result<R> {
     #[cfg(not(web))]
     {
@@ -161,22 +218,15 @@ pub(crate) fn on_deep_stack<R: Send + 'static>(f: impl FnOnce() -> R + Send + 's
     }
 }
 
-/// Runs `job` on a worker thread. If the job panics, the panic is caught
-/// and the result is `Err`.
-///
-/// Blocking system calls run on these workers, so that the engine can stop
-/// waiting for a call that does not return, for example a read from an
-/// unresponsive network file system or a write to a full pipe. The engine
-/// can then enforce its limits and interrupts while the call is pending.
+/// Executes a blocking operation on a background worker thread.
 #[cfg(feature = "os")]
 pub(crate) fn offload<T: Send + 'static>(job: impl FnOnce() -> T + Send + 'static) -> pool::Pending<T> {
     static IO: pool::Pool = pool::Pool::new("sand-io", None);
-    // No thread could be started, so the job runs on this thread.
+    // Run inline if thread creation fails.
     IO.run(job).unwrap_or_else(|(job, _)| pool::Pending::now(job))
 }
 
-/// Pools of worker threads, started as jobs need them and stopped after
-/// `IDLE` without work.
+/// Worker thread pool for background tasks.
 #[cfg(not(web))]
 mod pool {
     use std::collections::VecDeque;
@@ -221,7 +271,7 @@ mod pool {
         work: Condvar,
         /// The length of `state.jobs`, which spinning workers read without the lock.
         queued: AtomicUsize,
-        /// The number of workers spinning for a job. They need no wakeup.
+        /// Count of active spinning workers.
         spinning: AtomicUsize,
     }
 
@@ -246,9 +296,7 @@ mod pool {
             }
         }
 
-        /// Runs `job` on an idle worker. If no worker is idle, starts a new
-        /// one, so that a job that never returns does not delay later jobs.
-        /// If no thread can be started, returns the job and the error.
+        /// Runs `job` on an idle worker, or spawns a worker thread.
         pub(crate) fn run<T, F>(&'static self, job: F) -> Result<Pending<T>, (F, std::io::Error)>
         where
             T: Send + 'static,
@@ -329,10 +377,7 @@ mod pool {
             Pending(Arc::new(Slot { state: Mutex::new((Some(r), None)), done: Condvar::new(), ready: AtomicBool::new(true) }))
         }
 
-        /// Waits for the result, calling `check` every few milliseconds while
-        /// it waits. If `check` returns an error, the wait ends with that
-        /// error. The job keeps running on the worker, and its result is
-        /// dropped. If the job panicked, the result is `Ok(Err(message))`.
+        /// Waits for the worker result while periodically calling check.
         #[cfg(feature = "os")]
         pub(crate) fn wait<E>(self, mut check: impl FnMut() -> Result<(), E>) -> Result<Result<T, String>, E> {
             spin(|| self.0.ready.load(Ordering::Acquire));
@@ -350,7 +395,7 @@ mod pool {
             }
         }
 
-        /// Waits for the result, or the payload of the job's panic.
+        /// Waits for the worker result.
         pub(crate) fn wait_raw(self) -> std::thread::Result<T> {
             spin(|| self.0.ready.load(Ordering::Acquire));
             let mut s = lock(&self.0.state);
@@ -391,7 +436,6 @@ mod tests {
         assert_eq!(offload(|| 6 * 7).wait(|| Ok::<_, ()>(())), Ok(Ok(42)));
         let r = offload(|| -> u8 { panic!("boom") }).wait(|| Ok::<_, ()>(()));
         assert_eq!(r, Ok(Err("boom".to_string())));
-        // Stop waiting for a job that does not return. A later job still runs.
         let release = Arc::new(AtomicBool::new(false));
         let stuck = release.clone();
         let mut checks = 0;
@@ -413,7 +457,6 @@ mod tests {
     fn deep_stack_jobs_and_their_panics() {
         let id = || std::thread::current().id();
         assert_ne!(on_deep_stack(id).unwrap(), id());
-        // A nested call runs on the same thread.
         assert!(on_deep_stack(move || on_deep_stack(id).unwrap() == id()).unwrap());
         let panic = on_deep_stack(|| -> u8 { panic!("boom") }).unwrap_err();
         assert_eq!(crate::unwind::panic_text(&*panic), "boom");

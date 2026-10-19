@@ -642,7 +642,9 @@ impl NativeModule {
     pub fn params(&mut self, names: &[&str]) -> &mut Self {
         let last = self.functions.last().map(|(n, _)| n.as_str());
         let Some(decl) = self.decls.last_mut().filter(|d| Some(d.name.as_str()) == last) else {
-            panic!("`params` names the parameters of the function registered last by `function`, `async_function` or `guarded_function`")
+            panic!(
+                "`params` specifies the parameters of the function registered last by `function`, `async_function` or `guarded_function`"
+            )
         };
         assert_eq!(names.len(), decl.params.len(), "function `{}` has {} parameters", decl.name, decl.params.len());
         decl.names = Some(names.iter().map(|n| n.to_string()).collect());

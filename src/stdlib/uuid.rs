@@ -13,8 +13,8 @@ pub fn register(r: &mut Registry) {
         b[8] = (b[8] & 0x3f) | 0x80;
         Ok(vm.new_str(format_uuid(&b)))
     });
-    r.add_builtin("uuid.unix_millis", |_, _| {
-        let ms = crate::platform::SystemTime::now().duration_since(crate::platform::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    r.add_builtin("uuid.unix_millis", |vm, _| {
+        let ms = vm.host.clock.wall().duration_since(crate::platform::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
         Ok(Value::Int(ms.min(i64::MAX as u128) as i64))
     });
     // Starts each millisecond's counter at a random value in the lower half

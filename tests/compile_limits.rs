@@ -7,6 +7,7 @@ mod common;
 
 use common::{TempDir, rt};
 use sandlang::check::budget::CompileBudget;
+use sandlang::platform::{Deadline, SystemClock};
 use sandlang::{Config, Engine, Error, LimitKind, Limits, MemorySink, Policy};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -246,7 +247,8 @@ fn the_formatter_is_bounded() {
     let out = format_source_with(&src, CompileBudget::new(Some(100_000_000), None, None)).unwrap();
     assert!(out.len() > 20 * src.len());
     assert_eq!(format_source("let  x = [1,2]\n").unwrap(), "let x = [1, 2]\n");
-    let e = format_source_with(&src, CompileBudget::new(None, Some(Instant::now()), None)).unwrap_err();
+    let now = Deadline { at: Instant::now(), clock: Arc::new(SystemClock) };
+    let e = format_source_with(&src, CompileBudget::new(None, Some(now), None)).unwrap_err();
     assert!(e.starts_with("time limit exceeded"), "{e}");
     let interrupted = CompileBudget::new(None, None, Some(Arc::new(AtomicBool::new(true))));
     assert_eq!(format_source_with("let x = 1\n", interrupted).unwrap_err(), "interrupted");

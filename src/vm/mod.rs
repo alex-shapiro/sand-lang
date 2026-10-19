@@ -483,6 +483,13 @@ pub struct Host {
     pub(crate) fs: crate::files::Fs,
     /// Rewrites or refuses outgoing HTTP requests (see [`crate::Config::request_filter`]).
     pub(crate) request_filter: Option<crate::engine::RequestFilter>,
+    /// Clock and timer provider for the engine.
+    pub clock: Arc<dyn crate::platform::Clock>,
+    /// Monotonic clock baseline for time measurements.
+    pub origin: crate::platform::Instant,
+    /// Network provider for outgoing connections.
+    #[cfg(feature = "os")]
+    pub(crate) network: Arc<dyn crate::network::Network>,
 }
 
 pub struct Vm {
@@ -601,7 +608,7 @@ impl Vm {
         let heap = Heap::new(host.limits.max_memory, host.limits.max_open_resources);
         let consts = Vec::with_capacity(prog.consts.len());
         let globals = vec![Value::Uninit; prog.nglobals];
-        let meter = Meter::new(host.limits.max_instructions, host.interrupt.clone());
+        let meter = Meter::new(host.limits.max_instructions, host.interrupt.clone(), host.clock.clone());
         let mut vm = Vm {
             prog,
             natives,

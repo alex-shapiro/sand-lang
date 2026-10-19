@@ -576,7 +576,7 @@ impl Checker {
         out.push_str(
             "help(x) shows the documentation of x: a module, type, trait, function,\n\
              method, field, variant or variable, or the type of any other expression\n\
-             (which is not evaluated). A string names an item too: help(\"json.Json\").\n\
+             (which is not evaluated). A string identifies an item too: help(\"json.Json\").\n\
              members(x) lists the names that may follow `x.`, and members() those\n\
              in scope.\n\n",
         );

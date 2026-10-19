@@ -15,6 +15,8 @@ pub mod hir;
 pub mod lint;
 mod modules;
 pub mod native;
+#[cfg(feature = "os")]
+pub mod network;
 pub mod platform;
 pub mod policy;
 pub mod session;
