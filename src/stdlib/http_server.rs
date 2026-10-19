@@ -268,6 +268,7 @@ fn next_request(vm: &mut Vm, a: &[Value]) -> NResult {
         .await
     };
     let max_body = vm.host.limits.max_http_body;
+    let clock = vm.host.clock.clone();
     Err(Ctl::suspend(Box::pin(async move {
         finish(closed.guard(serve).await, move |vm, received: Received| {
             let Received { head: (method, path, query, headers), framing, expects_continue, persists, http10, conn, res } = received;
@@ -279,7 +280,7 @@ fn next_request(vm: &mut Vm, a: &[Value]) -> NResult {
             let body = if framing == Framing::Done {
                 BodyReader::empty(max_body)
             } else {
-                BodyReader::new(Box::new(Framed::on_conn(&handle, framing, BODY_TIMEOUT, expects_continue)), max_body, None)
+                BodyReader::new(Box::new(Framed::on_conn(&handle, framing, BODY_TIMEOUT, clock, expects_continue)), max_body, None)
             };
             let body = alloc_body(vm, body);
             let exchange = vm.heap.alloc(Obj::Native(Box::new(Exchange { persists, http10, server: weak })));

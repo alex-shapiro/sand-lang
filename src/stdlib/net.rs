@@ -468,20 +468,6 @@ pub(crate) async fn connect_checked(
     Ok(network.connect(&addrs).await?)
 }
 
-/// Like [`connect_checked`], failing with kind `"timeout"` after `timeout`.
-async fn tcp_connect(
-    policy: &Policy,
-    network: &dyn Network,
-    host: &str,
-    port: u16,
-    timeout: Duration,
-) -> Result<(Box<dyn Stream>, SocketAddr), IoFailure> {
-    match tokio::time::timeout(timeout, connect_checked(policy, network, host, port)).await {
-        Ok(r) => r,
-        Err(_) => Err(IoFailure::new("timeout", format!("connecting to {host}:{port} timed out"))),
-    }
-}
-
 fn connect(vm: &mut Vm, a: &[Value]) -> NResult {
     let addr = vm.str(a[0]).to_string();
     let Some((host, port)) = split_host_port(&addr) else {
@@ -493,10 +479,13 @@ fn connect(vm: &mut Vm, a: &[Value]) -> NResult {
     // Counted from the start: a connection attempt holds a socket.
     let slot = super::or_return!(vm.resource_slot_with(CONN_BUFFER, "a connection"));
     let timeout = Duration::from_nanos(a[1].as_int().max(0) as u64);
-    let (policy, network) = (vm.host.policy.clone(), vm.host.network.clone());
+    let (policy, network, clock) = (vm.host.policy.clone(), vm.host.network.clone(), vm.host.clock.clone());
     suspend_resource(slot, async move {
-        let (stream, peer) = tcp_connect(&policy, &*network, &host, port, timeout).await?;
-        Ok(Conn::from_stream(stream, peer))
+        let open = connect_checked(&policy, &*network, &host, port);
+        match crate::platform::timeout(&*clock, timeout, open).await {
+            Some(r) => r.map(|(stream, peer)| Conn::from_stream(stream, peer)),
+            None => Err(IoFailure::new("timeout", format!("connecting to {host}:{port} timed out"))),
+        }
     })
 }
 
@@ -513,7 +502,7 @@ fn connect_tls(vm: &mut Vm, a: &[Value]) -> NResult {
     }
     let slot = super::or_return!(vm.resource_slot_with(CONN_BUFFER + TLS_BUFFERS, "a connection"));
     let timeout = Duration::from_nanos(a[1].as_int().max(0) as u64);
-    let (policy, network) = (vm.host.policy.clone(), vm.host.network.clone());
+    let (policy, network, clock) = (vm.host.policy.clone(), vm.host.network.clone(), vm.host.clock.clone());
     let settings = vm.host.tls.clone();
     // The timeout covers connecting and the handshake, so a peer that
     // accepts but never answers cannot hold the socket indefinitely.
@@ -525,9 +514,9 @@ fn connect_tls(vm: &mut Vm, a: &[Value]) -> NResult {
         Ok(Conn::new(Box::new(r), Box::new(w), peer.to_string()))
     };
     suspend_resource(slot, async move {
-        match tokio::time::timeout(timeout, open).await {
-            Ok(r) => r,
-            Err(_) => Err(IoFailure::new("timeout", format!("TLS connection to {target} timed out"))),
+        match crate::platform::timeout(&*clock, timeout, open).await {
+            Some(r) => r,
+            None => Err(IoFailure::new("timeout", format!("TLS connection to {target} timed out"))),
         }
     })
 }

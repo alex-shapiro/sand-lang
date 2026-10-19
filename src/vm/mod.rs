@@ -485,8 +485,8 @@ pub struct Host {
     pub(crate) request_filter: Option<crate::engine::RequestFilter>,
     /// The clocks and timers of the engine (see [`crate::Config::clock`]).
     pub clock: Arc<dyn crate::platform::Clock>,
-    /// The engine's first reading of `clock`'s monotonic clock.
-    pub(crate) origin: crate::platform::Instant,
+    /// The engine's first reading of `clock`'s monotonic clock, which `time.Instant` counts from.
+    pub origin: crate::platform::Instant,
     /// Opens outgoing connections (see [`crate::Config::network`]).
     #[cfg(feature = "os")]
     pub(crate) network: Arc<dyn crate::network::Network>,

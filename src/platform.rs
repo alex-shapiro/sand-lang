@@ -12,7 +12,6 @@
 
 use std::future::Future;
 use std::pin::Pin;
-#[cfg(web)]
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -68,6 +67,19 @@ impl Deadline {
     pub fn passed(&self) -> bool {
         self.clock.now() >= self.at
     }
+}
+
+/// Waits for `future`, for at most `duration` of `clock`. Returns `None` if the time runs out first.
+pub async fn timeout<F: Future>(clock: &dyn Clock, duration: Duration, future: F) -> Option<F::Output> {
+    let mut future = std::pin::pin!(future);
+    let mut expiry = clock.sleep(duration);
+    std::future::poll_fn(|cx: &mut Context<'_>| {
+        if let Poll::Ready(output) = future.as_mut().poll(cx) {
+            return Poll::Ready(Some(output));
+        }
+        expiry.as_mut().poll(cx).map(|()| None)
+    })
+    .await
 }
 
 /// The clocks of the operating system (or, on the web, of JavaScript) and the timers of tokio.
