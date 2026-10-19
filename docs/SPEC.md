@@ -837,9 +837,10 @@ only.
 - Postfix `e?` where `e: Result<T, E>` evaluates to the `Ok` payload or returns
   `Err(err)` from the enclosing function, whose return type must be
   `Result<_, E>` with the same `E`.
-- At the top level of the main module, `e?` on `Err(err)` fails the program
-  (or the session input) with the error `err` (§10.3). At the top level of an
-  imported module it is an error to use `?`.
+- At the top level of the main module and in a test block, `e?` on
+  `Err(err)` fails the program (or the session input, or the test) with the
+  error `err` (§10.3), and `e?` on `None` fails it with an error of kind
+  `none`. At the top level of an imported module it is an error to use `?`.
 - `?` is not permitted inside a lambda unless the lambda's return type is an
   appropriate `Option`/`Result`.
 

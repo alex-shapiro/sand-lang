@@ -2222,9 +2222,15 @@ impl Checker {
         let ret = self.fs.ctx.last().map(|c| c.ret).unwrap_or(TypeId::UNIT);
         match self.ty(t) {
             Ty::Named(d, args) if d == self.wk.option => {
-                if let CtxKind::TopLevel { .. } = ctx_kind {
-                    self.error(span, "`?` on an Option is not allowed at the top level");
-                    return err(span);
+                match ctx_kind {
+                    CtxKind::TopLevel { main: true } | CtxKind::Test => {
+                        return mk(HKind::Try { e: Box::new(h), kind: TryKind::TopLevelOption }, self.arena.elem(args, 0), span);
+                    }
+                    CtxKind::TopLevel { main: false } => {
+                        self.error(span, "`?` is not allowed at the top level of an imported module");
+                        return err(span);
+                    }
+                    _ => {}
                 }
                 let ok = match self.rty(ret) {
                     Ty::Named(rd, _) if rd == self.wk.option => true,

@@ -579,3 +579,22 @@ test "t" {
 }
 --- error
 2: undefined name `assert_eq`; did you mean `test.assert_eq`? (add `import test`)
+
+=== a top level question mark on None stops the run
+fn find(xs: [int], x: int) -> int? { xs.index_of(x) }
+print(find([1, 2], 2)?)
+print(find([1, 2], 3)?)
+print("unreachable")
+--- stdout
+1
+--- fail
+none: `?` found None
+
+=== each failed question mark reports its own line
+import json
+print(json.parse("1")?)
+print(json.parse("[")?)
+--- stdout
+Int(1)
+--- fail
+parse: unexpected end of input at line 1, column 2
