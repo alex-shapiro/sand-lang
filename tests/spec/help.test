@@ -289,10 +289,7 @@ Functions:
     todo     Marks unfinished code; fails (kind `"todo"`) when reached.
     exit     Stops the program with an exit code.
     set      Builds a set from a list.
-    help     Shows the documentation of `x`: a module, type, trait, function,
-             method, field, variant or variable (`help(json)`,
-             `help(str.split)`), or the type of any other expression, which is
-             not evaluated (`help(xs.first())`).
+    help     Displays documentation for x or an item identified by string.
     members  The names that may follow `x.`: a module's public items, or the
              variants, fields and methods of a type or of a value's type,
              sorted.

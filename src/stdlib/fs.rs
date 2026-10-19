@@ -299,8 +299,7 @@ enum Access {
     Write,
 }
 
-/// Constructs a permission-denied error for `cap`. Uses the path as written by
-/// the script to avoid leaking symlink targets or inaccessible entries.
+/// Returns a permission-denied error using the user-supplied path string.
 fn denied(vm: &mut Vm, cap: &Capability, shown: &str) -> Value {
     let verb = match cap {
         Capability::FsRead(_) => "read",
@@ -309,11 +308,8 @@ fn denied(vm: &mut Vm, cap: &Capability, shown: &str) -> Value {
     vm.err_value("permission_denied", &format!("permission denied: {verb} {shown}"))
 }
 
-/// Checks `access` to `t` against the policy: `Some(Err(Error))` to return
-/// if it is denied, `None` if the effect may proceed. The final name is
-/// looked up as stored first (`Target::fix_spelling`) only if the decision
-/// may depend on it: on a case-insensitive file system that costs a system
-/// call or two, and most decisions are the same for every spelling.
+/// Checks access to target against the policy.
+/// Returns an error value if denied, or None if allowed. Resolves on-disk names on case-insensitive file systems only when necessary.
 fn check(vm: &mut Vm, t: &mut Target, access: Access, shown: &str) -> Result<Option<Value>, Ctl> {
     let cap = |p: &Path| match access {
         Access::Read => Capability::FsRead(p.to_path_buf()),
@@ -419,7 +415,7 @@ fn run<T: Send + 'static>(
     settle(vm, shown, r, finish)
 }
 
-/// Converts the result of an operation on `shown` with `finish`.
+/// Converts an I/O result into an engine result.
 fn settle<T>(vm: &mut Vm, shown: String, r: io::Result<T>, finish: impl FnOnce(&mut Vm, T) -> NResult) -> NResult {
     match r {
         Ok(v) => finish(vm, v),

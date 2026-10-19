@@ -134,9 +134,7 @@ pub(crate) struct Target {
 }
 
 impl Target {
-    /// Whether a fully-resolved path matches its on-disk name exactly.
-    /// Used for any decision on a case- or normalization-insensitive filesystem
-    /// that requires a strict, exact match.
+    /// True if the resolved path matches its on-disk name.
     pub fn exact(&self) -> bool {
         #[cfg(feature = "os")]
         if let Some(h) = &self.host {
@@ -145,7 +143,7 @@ impl Target {
         true
     }
 
-    /// Names an existing final entry as stored.
+    /// Replaces the final path component with its on-disk name.
     pub fn fix_spelling(&mut self) {
         #[cfg(feature = "os")]
         if let Some(h) = &mut self.host
@@ -198,8 +196,7 @@ pub(crate) enum Fs {
 }
 
 impl Default for Fs {
-    /// The host file system, if the `os` feature is enabled.
-    /// If not, an empty in-memory file system.
+    /// Host file system if the os feature is enabled, otherwise an in-memory file system.
     fn default() -> Fs {
         #[cfg(feature = "os")]
         return Fs::Host;
@@ -218,7 +215,7 @@ impl Fs {
         }
     }
 
-    /// The memory file system.
+    /// Returns the in-memory file system if active.
     pub fn memory(&self) -> Option<&MemFs> {
         match self {
             #[cfg(feature = "os")]
@@ -227,8 +224,7 @@ impl Fs {
         }
     }
 
-    /// The directory of relative paths if none is configured: the
-    /// process's working directory, or the root of a memory file system.
+    /// Base directory for relative paths.
     pub fn default_dir(&self) -> PathBuf {
         match self {
             #[cfg(feature = "os")]
@@ -237,7 +233,7 @@ impl Fs {
         }
     }
 
-    /// The absolute value of a path. Not otherwise normalized.
+    /// Converts a path to an absolute path.
     pub fn absolute(&self, p: &Path) -> PathBuf {
         match self {
             #[cfg(feature = "os")]
@@ -246,7 +242,7 @@ impl Fs {
         }
     }
 
-    /// Returns the resolved, absolute form of a path `p`.
+    /// Resolves a path for an operation.
     pub fn target(&self, p: &Path, mode: Mode) -> Target {
         match self {
             #[cfg(feature = "os")]
@@ -258,7 +254,7 @@ impl Fs {
         }
     }
 
-    /// Resolves an absolute path `p`.
+    /// Resolves a path to its normalized form.
     pub fn resolve(&self, p: &Path) -> PathBuf {
         let mut t = self.target(p, Mode::Follow);
         t.fix_spelling();

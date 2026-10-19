@@ -14,7 +14,7 @@ const WEEKDAYS: [&str; 7] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Frid
 const MONTHS: [&str; 12] =
     ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 
-/// Nanoseconds since the engine's first monotonic reading (`time.Instant`).
+/// Nanoseconds elapsed since the monotonic clock baseline.
 fn monotonic_nanos(vm: &Vm) -> i64 {
     let elapsed = vm.host.clock.now().saturating_duration_since(vm.host.origin);
     i64::try_from(elapsed.as_nanos()).unwrap_or(i64::MAX)

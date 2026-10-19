@@ -198,10 +198,7 @@ fn evict_beyond(reads: &[Pending], cap: usize) {
     }
 }
 
-/// `next_request(server)`: accepts connections and reads request heads
-/// until one is complete. Accepting waits for a free resource slot. At most
-/// half of `max_open_resources` connections are read at once; beyond that,
-/// the oldest gives up. Unfinished readings carry over to the next call.
+/// Accepts connections and reads request heads until a complete request is available.
 fn next_request(vm: &mut Vm, a: &[Value]) -> NResult {
     let srv = server(vm, a[0])?;
     let Some(socket) = srv.listener.clone() else { return Ok(vm.err_value("closed", "server closed")) };
@@ -297,7 +294,7 @@ struct Received {
     head: RawHead,
     framing: Framing,
     expects_continue: bool,
-    /// Whether the client lets the connection carry another request.
+    /// True if the client connection can be reused.
     persists: bool,
     http10: bool,
     conn: Detached,
@@ -408,7 +405,7 @@ async fn read_request_head<R: AsyncBufRead + Unpin>(
     if !is_token(method) || !version.starts_with("HTTP/1.") || target.is_empty() {
         return Err(IoFailure::new("http", format!("malformed request line {start:?}")));
     }
-    // Absolute-form targets (`GET http://host/path`) carry the path after the authority.
+    // Absolute-form targets (`GET http://host/path`) contain the path after the authority.
     let absolute = (!target.starts_with('/')).then(|| super::uri::parse(target, true).ok()).flatten().filter(|p| p.authority.is_some());
     let (path, query) = match &absolute {
         Some(p) => (if p.path.is_empty() { "/" } else { p.path.as_str() }, p.query.as_deref().unwrap_or("")),
@@ -427,7 +424,7 @@ async fn read_request_head<R: AsyncBufRead + Unpin>(
 /// The `http.Exchange` type: what the response to a request needs to know
 /// about its connection.
 struct Exchange {
-    /// Whether the client lets the connection carry another request.
+    /// True if the client connection can be reused.
     persists: bool,
     /// Whether the client speaks HTTP/1.0, which has no chunked encoding.
     http10: bool,
@@ -453,9 +450,7 @@ pub(super) struct After {
     server: Weak<Shared>,
 }
 
-/// Whether the connection carries another request: the client allows it,
-/// the request `body` was read to its end, `delimit` is not `Close`, and the
-/// server is open. Also returns the response's `Connection` header.
+/// True if the connection is reused for subsequent requests.
 fn after(vm: &Vm, exchange: Value, body: Value, delimit: Delimit) -> Result<(After, Option<&'static str>), Ctl> {
     let ex = vm.heap.native::<Exchange>(exchange).ok_or_else(|| Ctl::internal("not an exchange"))?;
     let complete = vm.heap.native::<Body>(body).ok_or_else(|| Ctl::internal("not a body"))?.is_complete();

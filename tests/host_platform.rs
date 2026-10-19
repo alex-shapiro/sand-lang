@@ -8,7 +8,6 @@ use sandlang::{Error, LimitKind, Limits};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// A simulated clock advanced by recorded work or sleep duration.
 struct ManualClock {
     origin: Instant,
     elapsed: Mutex<Duration>,
@@ -109,7 +108,6 @@ mod network {
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    /// In-memory network answering HTTP requests from memory or timing out.
     #[derive(Default)]
     struct MemoryNetwork {
         silent: bool,

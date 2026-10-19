@@ -321,7 +321,7 @@ impl Conn {
         }
     }
 
-    /// Creates a connection over `stream`, opened by a [`Network`].
+    /// Creates a connection wrapping a network stream.
     pub(crate) fn from_stream(stream: Box<dyn Stream>, peer: SocketAddr) -> Conn {
         let (r, w) = tokio::io::split(stream);
         Conn::new(Box::new(r), Box::new(w), peer.to_string())
@@ -456,7 +456,7 @@ pub(crate) async fn resolve_allowed(policy: &Policy, network: &dyn Network, host
     }
 }
 
-/// Opens a stream to an allowed host address.
+/// Connects to a resolved address allowed by policy.
 pub(crate) async fn connect_checked(
     policy: &Policy,
     network: &dyn Network,
@@ -464,7 +464,6 @@ pub(crate) async fn connect_checked(
     port: u16,
 ) -> Result<(Box<dyn Stream>, SocketAddr), IoFailure> {
     let addrs = resolve_allowed(policy, network, host, port).await?;
-    // Connects to the checked addresses only (in order); never resolves again.
     Ok(network.connect(&addrs).await?)
 }
 

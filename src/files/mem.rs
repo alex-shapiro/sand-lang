@@ -258,7 +258,7 @@ impl Node {
     }
 }
 
-/// Returns the current wall-clock time from `clock` in Unix nanoseconds.
+/// Returns current time from clock in Unix nanoseconds.
 fn now(clock: &dyn Clock) -> i64 {
     let since = clock.wall().duration_since(crate::platform::UNIX_EPOCH);
     since.map(|d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX)).unwrap_or(0)
@@ -544,8 +544,7 @@ impl MemFs {
         MemFs::with_capacity_and_clock(bytes, Arc::new(SystemClock))
     }
 
-    /// Creates an empty in-memory filesystem with a max capacity and a clock
-    /// for file modification timestamps.
+    /// Creates an empty in-memory filesystem with capacity limit and clock provider.
     pub fn with_capacity_and_clock(bytes: usize, clock: Arc<dyn Clock>) -> MemFs {
         let modified = now(&*clock);
         let shared = Arc::new(Shared { used: AtomicUsize::new(0), capacity: bytes, generation: AtomicU64::new(0), clock });

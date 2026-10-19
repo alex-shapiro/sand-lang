@@ -157,26 +157,20 @@ pub(crate) enum Stop {
     Main(Value),
     /// A task called `exit`.
     Exit(i32),
-    /// Without a main task: no task can run and no I/O is pending.
+    /// Idle state when all tasks are blocked and all I/O is complete.
     Idle,
-    /// Without a main task: a task needs a permission prompt. It is not
-    /// asked; the task retries the call when it runs again.
+    /// Suspended state awaiting permission prompt.
     Prompt(Capability),
 }
 
-/// Tracks elapsed execution time and limits during a run.
+/// Execution timer tracking elapsed CPU and clock time.
 struct RunTimer {
     clock: Arc<dyn crate::platform::Clock>,
-    /// CPU time used by the run, up to `cpu_mark`.
     cpu: Duration,
-    /// The thread's CPU clock when `cpu` was last brought up to date.
     cpu_mark: Duration,
-    /// The monotonic clock, read with the CPU clock.
     now: Instant,
     last_yield: Instant,
-    /// Slices run since the clocks were last read.
     unrecorded_slices: u32,
-    /// Fuel spent since the clocks were last read.
     unrecorded_fuel: u64,
 }
 
@@ -187,7 +181,7 @@ impl RunTimer {
         RunTimer { clock, cpu: Duration::ZERO, cpu_mark, now, last_yield: now, unrecorded_slices: 0, unrecorded_fuel: 0 }
     }
 
-    /// Reports work performed since the last reading and updates CPU and monotonic times.
+    /// Updates CPU and monotonic times, and reports completed work.
     fn read(&mut self) {
         self.clock.work(self.unrecorded_fuel);
         let mark = self.clock.cpu_time();
@@ -198,7 +192,7 @@ impl RunTimer {
         self.unrecorded_fuel = 0;
     }
 
-    /// Resumes time tracking after a wait, possibly on another thread.
+    /// Resumes time tracking after an asynchronous wait.
     fn resume(&mut self) {
         self.cpu_mark = self.clock.cpu_time();
         self.now = self.clock.now();
@@ -206,8 +200,7 @@ impl RunTimer {
         self.unrecorded_fuel = 0;
     }
 
-    /// Records a slice that spent `fuel`, reporting work and reading clocks
-    /// when thresholds are reached.
+    /// Records consumed fuel and updates times when thresholds are reached.
     fn ran(&mut self, fuel: u64) {
         self.unrecorded_slices += 1;
         self.unrecorded_fuel += fuel;
@@ -216,7 +209,7 @@ impl RunTimer {
         }
     }
 
-    /// Returns the CPU time mark at which `max` is exceeded.
+    /// Returns the CPU time deadline for max.
     fn cpu_deadline(&self, max: Option<Duration>) -> Option<Duration> {
         max.map(|m| self.cpu_mark.saturating_add(m.saturating_sub(self.cpu)))
     }
@@ -509,7 +502,6 @@ impl Vm {
                     timer.last_yield = timer.now;
                 }
             }
-            // Nothing is ready: wait for I/O.
             self.flush_stdout();
             if self.io.is_empty() {
                 let Some(main) = main else { return Ok(Stop::Idle) };

@@ -483,11 +483,11 @@ pub struct Host {
     pub(crate) fs: crate::files::Fs,
     /// Rewrites or refuses outgoing HTTP requests (see [`crate::Config::request_filter`]).
     pub(crate) request_filter: Option<crate::engine::RequestFilter>,
-    /// The clocks and timers of the engine (see [`crate::Config::clock`]).
+    /// Clock and timer provider for the engine.
     pub clock: Arc<dyn crate::platform::Clock>,
-    /// Monotonic clock origin, used as baseline for `time.Instant`.
+    /// Monotonic clock baseline for time measurements.
     pub origin: crate::platform::Instant,
-    /// Network implementation for outgoing connections (see [`crate::Config::network`]).
+    /// Network provider for outgoing connections.
     #[cfg(feature = "os")]
     pub(crate) network: Arc<dyn crate::network::Network>,
 }

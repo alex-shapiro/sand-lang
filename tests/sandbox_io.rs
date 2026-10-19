@@ -1287,9 +1287,6 @@ print(fs.list_dir("data")?)
     assert_eq!(p.check_entry(&Capability::FsWrite(data.join("CONFIG.JSON"))), Decision::Deny);
 }
 
-/// A symlink's own name (which cannot be canonicalised without following
-/// the link) is also resolved to its on-disk name, so allow rules, which compare paths exactly,
-/// evaluate the same path for any accepted casing or normalization.
 #[cfg(target_os = "macos")]
 #[test]
 fn symlink_entries_are_resolved_to_on_disk_names() {

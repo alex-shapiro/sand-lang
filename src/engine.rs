@@ -290,14 +290,13 @@ impl Config {
         }
     }
 
-    /// Sets the clock and timers used by the engine for timekeeping and sleeps.
+    /// Sets the clock and timer provider for the engine.
     pub fn clock(mut self, clock: Arc<dyn Clock>) -> Self {
         self.clock = clock;
         self
     }
 
-    /// Sets the network implementation used for hostname resolution and outgoing TCP connections.
-    /// TLS is negotiated in-engine over the streams returned by the network.
+    /// Sets the network provider for host resolution and outgoing TCP connections.
     #[cfg(feature = "os")]
     pub fn network(mut self, network: Arc<dyn crate::network::Network>) -> Self {
         self.network = Some(network);
@@ -649,7 +648,7 @@ pub struct Engine {
     /// A copy of the snapshot's program, to compile the next program on
     /// (see [`Engine::recycle`]).
     spare: Mutex<Option<(Arc<Snapshot>, Program)>>,
-    /// The initial monotonic clock reading, used as the baseline for `time.Instant`.
+    /// Initial monotonic clock reading.
     origin: Instant,
 }
 

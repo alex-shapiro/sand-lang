@@ -219,7 +219,7 @@ pub(crate) fn covers(a: Pattern, b: Pattern) -> bool {
         }
         let r = match (a.get(i), b.get(j)) {
             (None, None) => true,
-            // `a`'s `**` matches nothing further, or also matches `b`'s next segment.
+            // Recursion base case: ** consumes zero components, or consumes the next component of b.
             (Some(Seg::GlobStar), _) => go(a, b, i + 1, j, memo) || (j < b.len() && go(a, b, i, j + 1, memo)),
             (None, Some(_)) | (Some(_), None) | (Some(_), Some(Seg::GlobStar)) => false,
             (Some(x), Some(y)) => name_covers(x, y) && go(a, b, i + 1, j + 1, memo),
@@ -432,8 +432,7 @@ impl<V> Trie<V> {
         found
     }
 
-    /// Checks whether a pattern matches the last component of `input`,
-    /// either exactly or with wildcards around text.
+    /// Returns true if a pattern matches the final component of `input`.
     pub(crate) fn matches_last(&self, input: &[&str]) -> bool {
         let mut found = false;
         self.states(input, |node, i| found |= i + 1 == input.len() && (node.has_names || !node.globs.is_empty()));

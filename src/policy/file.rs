@@ -23,16 +23,16 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// A parsed policy file.
+/// A parsed security policy file.
 #[derive(Clone, Debug)]
 pub struct PolicyFile {
     /// Policy rules.
     pub rules: RulePolicy,
-    /// The fallback action for unmatched requests, if given.
+    /// Fallback decision for unmatched requests.
     pub default: Option<Decision>,
-    /// Whether `allow private-net` was set.
+    /// True if private network connections are allowed.
     pub private_net: bool,
-    /// [`Limits::default`] changed by the `limit` lines.
+    /// Execution limits configured by policy limit directives.
     pub limits: Limits,
 }
 
@@ -567,9 +567,7 @@ fn limit(l: &mut Limits, args: &[Word]) -> Result<(), String> {
     Ok(())
 }
 
-/// The policy file line that allows (or denies) a capability, e.g.
-/// `allow read /data/a.txt`, for a prompt's "always" or "never" answer.
-/// Returns `None` if rules cannot represent the capability.
+/// Generates a policy rule string for a capability prompt response.
 pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
     let verb = if allow { "allow" } else { "deny" };
     let path = |p: &Path| p.to_str().map(|s| quote_part(s, true));

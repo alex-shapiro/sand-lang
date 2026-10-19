@@ -588,15 +588,12 @@ impl Resolved {
         p
     }
 
-    /// Whether the final name matches its on-disk casing.
+    /// True if the final component matches its on-disk casing.
     pub fn exact(&self) -> bool {
         self.exact
     }
 
-    /// Replaces a path name with its name stored on disk, if an entry exists.
-    /// For most entries, this is the name returned for the entry's handle.
-    /// For a link, the handle is labeled with the path used to open it, so the
-    /// name is found by scanning the directory for an entry whose folded name matches.
+    /// Replaces the final path component with its on-disk name.
     pub fn fix_spelling(&mut self) {
         if self.exact {
             return;
@@ -978,7 +975,6 @@ mod windows_tests {
             assert_eq!(follow(&dir.join("real/link.txt")).path(), dir.join("outside/file.txt"));
             assert_eq!(entry(&dir.join("real/link.txt")).path(), dir.join("real/link.txt"));
         }
-        // Names match their on-disk names.
         let mut r = follow(&dir.join("REAL/FILE.TXT"));
         r.fix_spelling();
         assert_eq!(r.path(), dir.join("real/file.txt"));

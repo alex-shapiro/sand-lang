@@ -102,8 +102,7 @@ pub(super) fn connection_has(headers: &[(String, String)], option: &str) -> bool
         .any(|o| o.trim().eq_ignore_ascii_case(option))
 }
 
-/// Whether a message of HTTP `version` with `headers` lets its connection
-/// carry another exchange (RFC 9112 §9.3).
+/// True if the HTTP message permits persistent connection reuse (RFC 9112 §9.3).
 pub(super) fn persists(version: &str, headers: &[(String, String)]) -> bool {
     match version {
         "HTTP/1.0" => connection_has(headers, "keep-alive") && !connection_has(headers, "close"),
@@ -528,7 +527,7 @@ struct ResponseHead {
     status: i64,
     headers: Vec<(String, String)>,
     framing: Framing,
-    /// Whether the connection may carry another request after the body.
+    /// True if the connection can be reused for subsequent requests.
     persists: bool,
 }
 

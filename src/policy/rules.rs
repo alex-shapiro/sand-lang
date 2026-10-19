@@ -382,7 +382,7 @@ impl RulePolicy {
     fn spelling_free_decision(&self, cap: &Capability, space: PathSpace) -> Option<Decision> {
         let (Capability::FsRead(p) | Capability::FsWrite(p) | Capability::Import(p)) = cap else { return None };
         let index = self.files(space);
-        // Deny rules compare folded names, which are the same for every spelling.
+        // Deny rules compare case-folded names.
         if index.allow.matches_last(&refs(&index.allow_input(&path_segments(p)))) {
             return None;
         }

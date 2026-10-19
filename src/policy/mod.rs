@@ -351,10 +351,7 @@ pub fn normalize_path(p: &Path) -> PathBuf {
     return lexical(p);
 }
 
-/// Normalizes a path without resolving symlinks. On a case- or
-/// normalization-insensitive file system, `data/ſecrets` becomes
-/// `data/secrets`; for a symlink this may require scanning its
-/// directory (see [`MAX_LINK_SCAN`]).
+/// Normalizes parent path components without resolving a final symlink component.
 pub fn normalize_entry_path(p: &Path) -> PathBuf {
     #[cfg(feature = "os")]
     {
@@ -483,7 +480,6 @@ mod tests {
         std::fs::remove_dir_all(&base).unwrap();
     }
 
-    /// On a case-insensitive file system, all entries are resolved to their hardlink names.
     #[cfg(all(feature = "os", target_os = "macos"))]
     #[test]
     fn entries_are_resolved_to_on_disk_names() {

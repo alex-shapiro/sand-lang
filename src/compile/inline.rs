@@ -1,14 +1,13 @@
-//! Inlining of small functions. A call to a small, non-generic script
-//! function without an early return or closure is replaced by:
+//! Function inlining for small non-generic functions without early returns or closures.
+//!
+//! Inlined calls expand to:
 //!
 //! ```text
 //! { let p1 = a1; let p2 = a2; body }
 //! ```
 //!
-//! with the callee's locals appended to the caller's, the body marked as
-//! `HKind::Inlined` (stack traces show its frame). Arguments that are
-//! immutable plain locals are substituted for their parameters instead of
-//! copied.
+//! Inlining appends callee locals to caller locals and marks inlined bodies with `HKind::Inlined`.
+//! Immutable local arguments replace parameter bindings directly.
 
 use crate::check::budget::CompileBudget;
 use crate::check::persist::PMap;
@@ -59,7 +58,6 @@ pub(super) fn inlinable(cp: &CheckedProgram, f: FnId, body: &HFn) -> Option<Arc<
     if !ok {
         return None;
     }
-    // if a function returns `()`, its value body is discarded.
     if fi.ret == TypeId::UNIT && body.body.ty != TypeId::UNIT {
         let span = body.body.span;
         let b = std::mem::replace(&mut body.body, HExpr { kind: HKind::Unit, ty: TypeId::UNIT, span });
