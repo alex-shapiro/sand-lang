@@ -866,51 +866,98 @@ fn register_list(r: &mut Registry) {
     r.add_builtin("List.max", |vm, a| extreme(vm, a[0], Ordering::Greater));
 
     // Ranges.
-    fn range(vm: &Vm, v: Value) -> (i64, i64) {
-        match vm.heap.get(v) {
-            Obj::Range(a, b, incl) => (*a, if *incl { b.saturating_add(1) } else { *b }),
-            _ => (0, 0),
+    fn range(vm: &Vm, v: Value) -> (i64, i64, bool) {
+        match *vm.heap.get(v) {
+            Obj::Range(a, b, incl) => (a, b, incl),
+            _ => (0, 0, false),
         }
     }
+    /// The first and last integers of a range; `None` if it is empty.
+    fn bounds(vm: &Vm, v: Value) -> Option<(i64, i64)> {
+        let (a, b, incl) = range(vm, v);
+        let last = if incl { b } else { b.checked_sub(1)? };
+        (a <= last).then_some((a, last))
+    }
+    /// The number of integers of a range, which may exceed `i64::MAX`.
+    fn range_len(vm: &Vm, v: Value) -> i128 {
+        bounds(vm, v).map_or(0, |(first, last)| last as i128 - first as i128 + 1)
+    }
+    fn exact(n: i128) -> NResult {
+        i64::try_from(n).map(Value::Int).map_err(|_| Ctl::fail("overflow", "integer overflow"))
+    }
     r.add_builtin("Range.iter_next", |vm, a| {
-        let (i, end) = range(vm, a[0]);
-        Ok(vm.iter_fn(IterSrc::Range { i, end }))
+        let src = match bounds(vm, a[0]) {
+            Some((i, last)) => IterSrc::Range { i, last },
+            None => IterSrc::Done,
+        };
+        Ok(vm.iter_fn(src))
     });
     r.add_builtin("Range.start", |vm, a| Ok(Value::Int(range(vm, a[0]).0)));
-    r.add_builtin("Range.end", |vm, a| Ok(Value::Int(range(vm, a[0]).1)));
-    r.add_builtin("Range.len", |vm, a| {
-        let (s, e) = range(vm, a[0]);
-        Ok(Value::Int(e.saturating_sub(s).max(0)))
+    r.add_builtin("Range.end", |vm, a| match range(vm, a[0]) {
+        (_, b, true) => exact(b as i128 + 1),
+        (_, b, false) => Ok(Value::Int(b)),
     });
+    r.add_builtin("Range.len", |vm, a| exact(range_len(vm, a[0])));
+    r.add_builtin("Range.is_empty", |vm, a| Ok(Value::Bool(bounds(vm, a[0]).is_none())));
     r.add_builtin("Range.contains", |vm, a| {
-        let (s, e) = range(vm, a[0]);
-        Ok(Value::Bool((s..e).contains(&int(a[1]))))
+        let i = int(a[1]);
+        Ok(Value::Bool(bounds(vm, a[0]).is_some_and(|(first, last)| (first..=last).contains(&i))))
+    });
+    for name in ["Range.first", "Range.min"] {
+        r.add_builtin(name, |vm, a| {
+            let first = bounds(vm, a[0]).map(|(first, _)| Value::Int(first));
+            Ok(vm.option(first))
+        });
+    }
+    for name in ["Range.last", "Range.max"] {
+        r.add_builtin(name, |vm, a| {
+            let last = bounds(vm, a[0]).map(|(_, last)| Value::Int(last));
+            Ok(vm.option(last))
+        });
+    }
+    r.add_builtin("Range.sum", |vm, a| {
+        let Some((first, last)) = bounds(vm, a[0]) else { return Ok(Value::Int(0)) };
+        // `n * (first + last)` is even, and overflows `i128` only if the sum overflows `i64`.
+        let n = range_len(vm, a[0]);
+        let twice = n.checked_mul(first as i128 + last as i128).ok_or_else(|| Ctl::fail("overflow", "integer overflow"))?;
+        exact(twice / 2)
+    });
+    r.add_builtin("Range.product", |vm, a| {
+        let Some((first, last)) = bounds(vm, a[0]) else { return Ok(Value::Int(1)) };
+        if first <= 0 && 0 <= last {
+            return Ok(Value::Int(0));
+        }
+        // Without 0, every factor but ±1 at least doubles the magnitude: the
+        // loop ends within 64 factors, before the product leaves `i128`.
+        let mut acc: i128 = 1;
+        for i in first..=last {
+            acc *= i as i128;
+            if i64::try_from(acc).is_err() {
+                break;
+            }
+        }
+        exact(acc)
     });
     r.add_builtin("Range.to_list", |vm, a| {
-        let (s, e) = range(vm, a[0]);
-        let n = to_usize_saturating(e.saturating_sub(s));
-        produce(vm, n, 0)?;
-        let items: Vec<Value> = (s..e).map(Value::Int).collect();
+        produce(vm, usize::try_from(range_len(vm, a[0])).unwrap_or(usize::MAX), 0)?;
+        let items: Vec<Value> = bounds(vm, a[0]).into_iter().flat_map(|(first, last)| first..=last).map(Value::Int).collect();
         Ok(vm.heap.new_list(items))
     });
     r.add_builtin("Range.step_by", |vm, a| {
-        let (s, e) = range(vm, a[0]);
         let step = int(a[1]);
         if step <= 0 {
             return fail("invalid", format!("step must be positive, found {step}"));
         }
-        let n = to_usize_saturating(e.saturating_sub(s) / step);
-        produce(vm, n, 0)?;
+        let Some((first, last)) = bounds(vm, a[0]) else { return Ok(vm.heap.new_list(vec![])) };
+        produce(vm, usize::try_from(last.abs_diff(first) / step as u64 + 1).unwrap_or(usize::MAX), 0)?;
         // Stepped in `i64`: a step past `usize::MAX` (32-bit targets) must not be truncated.
         let items: Vec<Value> =
-            std::iter::successors((s < e).then_some(s), |i| i.checked_add(step).filter(|i| *i < e)).map(Value::Int).collect();
+            std::iter::successors(Some(first), |i| i.checked_add(step).filter(|i| *i <= last)).map(Value::Int).collect();
         Ok(vm.heap.new_list(items))
     });
     r.add_builtin("Range.reversed", |vm, a| {
-        let (s, e) = range(vm, a[0]);
-        let n = to_usize_saturating(e.saturating_sub(s));
-        produce(vm, n, 0)?;
-        let items: Vec<Value> = (s..e).rev().map(Value::Int).collect();
+        produce(vm, usize::try_from(range_len(vm, a[0])).unwrap_or(usize::MAX), 0)?;
+        let items: Vec<Value> = bounds(vm, a[0]).into_iter().flat_map(|(first, last)| (first..=last).rev()).map(Value::Int).collect();
         Ok(vm.heap.new_list(items))
     });
 }

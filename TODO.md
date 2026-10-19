@@ -66,6 +66,3 @@ Follow-up work, roughly in priority order.
       blanket impls (`impl<T> X for T`).
 - [ ] Trait bounds on struct/enum type parameters.
 - [ ] Non-constant trait method defaults.
-- [ ] Range methods: implement zero-allocation collection methods
-      (`sum`, `fold`, `map`, `filter`, `any`, `all`, `count`, `min`, `max`)
-      on ranges, or convert ranges to lists.

@@ -982,16 +982,33 @@ extend<T: Hash> Set<T> {
     native fn iter_next(self) -> fn() -> T?
 }
 
-/// Integer ranges: `a..b` excludes `b`, `a..=b` includes it.
+/// Integer ranges: `a..b` excludes `b`, `a..=b` includes it. Their methods
+/// build no list unless they return one.
 extend Range {
-    /// The first integer.
+    /// The start bound.
     pub native fn start(self) -> int
-    /// The exclusive end.
+    /// The exclusive end bound; fails if it does not fit in an `int`.
     pub native fn end(self) -> int
-    /// Number of integers (0 if the range is empty).
+    /// Number of integers; fails if it does not fit in an `int`.
     pub native fn len(self) -> int
+    /// True if the range has no integers.
+    pub native fn is_empty(self) -> bool
     /// True if `i` is in the range.
     pub native fn contains(self, i: int) -> bool
+    /// The first integer; `None` if empty.
+    pub native fn first(self) -> int?
+    /// The last integer; `None` if empty.
+    pub native fn last(self) -> int?
+    /// The smallest integer (the first); `None` if empty.
+    pub native fn min(self) -> int?
+    /// The largest integer (the last); `None` if empty.
+    pub native fn max(self) -> int?
+    /// The sum of the integers; zero if empty. Fails if it does not fit in
+    /// an `int`.
+    pub native fn sum(self) -> int
+    /// The product of the integers; one if empty. Fails if it does not fit
+    /// in an `int`.
+    pub native fn product(self) -> int
     /// The integers, in order.
     pub native fn to_list(self) -> [int]
     /// Every `step`-th integer from the start; fails unless `step > 0`.
@@ -1026,11 +1043,200 @@ extend Range {
         out
     }
 
+    /// Applies `f` and keeps the `Some` results.
+    pub fn filter_map<U>(self, f: fn(int) -> U?) -> [U] {
+        let out = []
+        for i in self {
+            if let Some(y) = f(i) {
+                out.push(y)
+            }
+        }
+        out
+    }
+
+    /// Applies `f` and concatenates the results.
+    pub fn flat_map<U>(self, f: fn(int) -> [U]) -> [U] {
+        let out = []
+        for i in self {
+            out.extend(f(i))
+        }
+        out
+    }
+
     /// Calls `f` on every integer.
     pub fn each(self, f: fn(int)) {
         for i in self {
             f(i)
         }
+    }
+
+    /// Combines integers from the left, starting with `init`.
+    pub fn fold<A>(self, init: A, f: fn(A, int) -> A) -> A {
+        var acc = init
+        for i in self {
+            acc = f(acc, i)
+        }
+        acc
+    }
+
+    /// Combines integers from the left; `None` if empty.
+    pub fn reduce(self, f: fn(int, int) -> int) -> int? {
+        var acc = self.first()?
+        var first = true
+        for i in self {
+            if first {
+                first = false
+            } else {
+                acc = f(acc, i)
+            }
+        }
+        Some(acc)
+    }
+
+    /// True if `f` is true for any integer.
+    pub fn any(self, f: fn(int) -> bool) -> bool {
+        for i in self {
+            if f(i) {
+                return true
+            }
+        }
+        false
+    }
+
+    /// True if `f` is true for every integer.
+    pub fn all(self, f: fn(int) -> bool) -> bool {
+        for i in self {
+            if not f(i) {
+                return false
+            }
+        }
+        true
+    }
+
+    /// The first integer for which `f` is true.
+    pub fn find(self, f: fn(int) -> bool) -> int? {
+        for i in self {
+            if f(i) {
+                return Some(i)
+            }
+        }
+        None
+    }
+
+    /// The position (from 0) of the first integer for which `f` is true.
+    pub fn find_index(self, f: fn(int) -> bool) -> int? {
+        var n = 0
+        for i in self {
+            if f(i) {
+                return Some(n)
+            }
+            n += 1
+        }
+        None
+    }
+
+    /// Number of integers for which `f` is true.
+    pub fn count(self, f: fn(int) -> bool) -> int {
+        var n = 0
+        for i in self {
+            if f(i) {
+                n += 1
+            }
+        }
+        n
+    }
+
+    /// The longest prefix for which `f` is true.
+    pub fn take_while(self, f: fn(int) -> bool) -> [int] {
+        let out = []
+        for i in self {
+            if not f(i) {
+                break
+            }
+            out.push(i)
+        }
+        out
+    }
+
+    /// Everything after the longest prefix for which `f` is true.
+    pub fn skip_while(self, f: fn(int) -> bool) -> [int] {
+        let out = []
+        var skipping = true
+        for i in self {
+            if skipping and f(i) {
+                continue
+            }
+            skipping = false
+            out.push(i)
+        }
+        out
+    }
+
+    /// Groups integers by key, in order of first appearance.
+    pub fn group_by<K: Hash>(self, key: fn(int) -> K) -> [K: [int]] {
+        let out: [K: [int]] = [:]
+        for i in self {
+            let k = key(i)
+            match out.get(k) {
+                Some(group) => group.push(i)
+                None => {
+                    out[k] = [i]
+                }
+            }
+        }
+        out
+    }
+
+    /// Splits into (matching, not matching).
+    pub fn partition(self, f: fn(int) -> bool) -> ([int], [int]) {
+        let yes = []
+        let no = []
+        for i in self {
+            if f(i) {
+                yes.push(i)
+            } else {
+                no.push(i)
+            }
+        }
+        (yes, no)
+    }
+
+    /// The first integer with the smallest key.
+    pub fn min_by<K: Ord>(self, key: fn(int) -> K) -> int? {
+        var best = self.first()?
+        var best_key = key(best)
+        var first = true
+        for i in self {
+            if first {
+                first = false
+                continue
+            }
+            let k = key(i)
+            if k < best_key {
+                best = i
+                best_key = k
+            }
+        }
+        Some(best)
+    }
+
+    /// The first integer with the largest key.
+    pub fn max_by<K: Ord>(self, key: fn(int) -> K) -> int? {
+        var best = self.first()?
+        var best_key = key(best)
+        var first = true
+        for i in self {
+            if first {
+                first = false
+                continue
+            }
+            let k = key(i)
+            if k > best_key {
+                best = i
+                best_key = k
+            }
+        }
+        Some(best)
     }
 }
 

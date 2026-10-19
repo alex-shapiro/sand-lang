@@ -159,7 +159,10 @@ impl Vm {
                 Some(&x) if i < n => (Some(x), IterSrc::List { list, i: i + 1, n }),
                 _ => (None, IterSrc::List { list, i: n, n }),
             },
-            IterSrc::Range { i, end } if i < end => (Some(Value::Int(i)), IterSrc::Range { i: i + 1, end }),
+            IterSrc::Range { i, last } if i <= last => {
+                let state = if i < last { IterSrc::Range { i: i + 1, last } } else { IterSrc::Done };
+                (Some(Value::Int(i)), state)
+            }
             IterSrc::Range { .. } | IterSrc::Done => return None,
             IterSrc::Chars { s, i } => {
                 let c = self.heap.str(Value::Obj(s)).get(i as usize..).and_then(|t| t.chars().next())?;

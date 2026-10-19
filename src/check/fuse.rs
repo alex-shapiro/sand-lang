@@ -117,6 +117,14 @@ enum Func {
     Fn(FnId),
 }
 
+/// What the fused loop iterates over.
+enum LoopSrc {
+    /// A temporary holding the source.
+    Value { local: LocalId, ty: TypeId, kind: IterKind },
+    /// The bounds of a range literal.
+    Bounds { start: LocalId, end: LocalId, inclusive: bool },
+}
+
 /// The run-time state of a stage in the fused loop.
 struct StageVars {
     kind: Adapter,
@@ -190,7 +198,6 @@ impl Checker {
                         "map" => eager(range, Some(Adapter::Map), Consumer::ToList),
                         "filter" => eager(range, Some(Adapter::Filter), Consumer::ToList),
                         "each" => eager(range, None, Consumer::Each),
-                        _ if range => continue,
                         "filter_map" => eager(range, Some(Adapter::FilterMap), Consumer::ToList),
                         "take_while" => eager(range, Some(Adapter::TakeWhile), Consumer::ToList),
                         "count" => eager(range, Some(Adapter::Filter), Consumer::Count),
@@ -199,6 +206,8 @@ impl Checker {
                         "all" => eager(range, None, Consumer::All),
                         "find" => eager(range, None, Consumer::Find),
                         "find_index" => eager(range, None, Consumer::FindIndex),
+                        // A list's `skip_while` copies the list after its prefix is found.
+                        "skip_while" if range => eager(range, Some(Adapter::SkipWhile), Consumer::ToList),
                         _ => continue,
                     }
                 }
@@ -388,13 +397,25 @@ impl Checker {
             }
             _ => source,
         };
-        // `s.chars()` is a loop over the characters of `s`.
-        let (source, list_kind) = match self.chars_source(source) {
-            Ok(s) => (s, IterKind::Chars),
-            Err(source) => (source, IterKind::List),
+        let src = match (kind, source.kind) {
+            // A range literal is looped over without allocating the range.
+            (SourceKind::Range, HKind::Range { start, end, inclusive }) => {
+                LoopSrc::Bounds { start: self.bind_tmp(*start, &mut setup), end: self.bind_tmp(*end, &mut setup), inclusive }
+            }
+            (_, source_kind) => {
+                let source = HExpr { kind: source_kind, ..source };
+                // `s.chars()` is a loop over the characters of `s`.
+                let (source, iter_kind) = match kind {
+                    SourceKind::Range => (source, IterKind::Range),
+                    _ => match self.chars_source(source) {
+                        Ok(s) => (s, IterKind::Chars),
+                        Err(source) => (source, IterKind::List),
+                    },
+                };
+                let ty = source.ty;
+                LoopSrc::Value { local: self.bind_tmp(source, &mut setup), ty, kind: iter_kind }
+            }
         };
-        let src_ty = source.ty;
-        let src = self.bind_tmp(source, &mut setup);
         let mut vars = Vec::new();
         for st in stages {
             let mut v = StageVars { kind: st.kind, out: st.out, func: None, count: None, flag: None };
@@ -475,19 +496,20 @@ impl Checker {
         }
         stmts.extend(body(self, cur));
 
-        let lp = match kind {
-            SourceKind::List | SourceKind::Range => {
-                let iter_kind = if kind == SourceKind::List { list_kind } else { IterKind::Range };
+        let lp = match (kind, src) {
+            (_, LoopSrc::Bounds { start, end, inclusive }) => {
+                top.extend(stmts);
+                let (start, end) = (Box::new(local(start, TypeId::INT, span)), Box::new(local(end, TypeId::INT, span)));
+                let pat = bind(x0, elem, span);
+                mk(HKind::ForRange { pat, start, end, inclusive, body: Box::new(block(top, span)) }, TypeId::UNIT, span)
+            }
+            (SourceKind::List | SourceKind::Range, LoopSrc::Value { local: src, ty, kind }) => {
                 top.extend(stmts);
                 let pat = bind(x0, elem, span);
-                mk(
-                    HKind::For { pat, iter: Box::new(local(src, src_ty, span)), kind: iter_kind, body: Box::new(block(top, span)) },
-                    TypeId::UNIT,
-                    span,
-                )
+                mk(HKind::For { pat, iter: Box::new(local(src, ty, span)), kind, body: Box::new(block(top, span)) }, TypeId::UNIT, span)
             }
-            SourceKind::Iter => {
-                let next = mk(HKind::CallValue { callee: Box::new(local(src, src_ty, span)), args: vec![] }, opt, span);
+            (SourceKind::Iter, LoopSrc::Value { local: src, ty, .. }) => {
+                let next = mk(HKind::CallValue { callee: Box::new(local(src, ty, span)), args: vec![] }, opt, span);
                 let pat = HPat { kind: HPatKind::Variant { rt_id: self.some_rt(), args: vec![bind(x0, elem, span)] }, ty: opt, span };
                 if top.is_empty() {
                     mk(HKind::WhileLet { pat, value: Box::new(next), body: Box::new(block(stmts, span)) }, TypeId::UNIT, span)

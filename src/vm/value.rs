@@ -921,8 +921,8 @@ pub enum IterSrc {
     /// when the iterator was made), stopping early if it shrinks; `i` is
     /// the next one.
     List { list: u32, i: i64, n: i64 },
-    /// The integers from `i` below `end`.
-    Range { i: i64, end: i64 },
+    /// The integers from `i` to `last`, inclusive.
+    Range { i: i64, last: i64 },
     /// The characters of string `s` (a heap handle) from byte offset `i`.
     Chars { s: u32, i: i64 },
     /// The (key, value) entries of map `map` (a heap handle: the map

@@ -493,6 +493,7 @@ print(r.start())
 print(r.end())
 print((5..2).len())
 print((1..=3).to_list())
+print(((1..=3).end(), (5..2).is_empty(), (2..2).to_list()))
 --- stdout
 2..5
 3
@@ -507,6 +508,82 @@ false
 5
 0
 [1, 2, 3]
+(4, true, [])
+
+=== range aggregates
+let r = 1..=10
+print((r.sum(), r.product(), r.min(), r.max(), r.first(), r.last()))
+let e = 5..5
+print((e.sum(), e.product(), e.min(), e.max(), e.first(), e.last()))
+print(((-3..=3).sum(), (-3..=3).product(), (-4..=-1).product(), (5..1).sum()))
+let n = 20
+print((1..=n).product())
+// Exact results, even where adding or multiplying in order would overflow.
+let big = 9223372036854775807
+print(((-big - 1..=big).sum(), (-5000000000..=0).product()))
+--- stdout
+(55, 3628800, Some(1), Some(10), Some(1), Some(10))
+(0, 1, None, None, None, None)
+(0, 0, 24, 0)
+2432902008176640000
+(-9223372036854775808, 0)
+
+=== range methods taking functions
+let r = 0..6
+print((r.fold(0, (a, i) => a + i * i), r.reduce((a, i) => a * 10 + i), (5..5).reduce((a, i) => a + i)))
+print((r.any(i => i == 4), r.all(i => i < 6), r.count(i => i % 3 == 0)))
+print((r.find(i => i * i > 10), (3..9).find_index(i => i * i > 30), r.find(i => i > 9)))
+print((r.take_while(i => i < 3), r.skip_while(i => i < 3), r.partition(i => i % 2 == 0)))
+print((r.flat_map(i => [i; 2]), r.filter_map(i => if i % 2 == 0 { Some(i * 10) } else { None })))
+print((r.group_by(i => i % 3), r.min_by(i => (i - 3) * (i - 3)), r.max_by(i => i % 4), (1..1).min_by(i => i)))
+let seen = []
+(0..=3).map(i => seen.push(i))
+print(seen)
+--- stdout
+(55, Some(12345), None)
+(true, true, 2)
+(Some(4), Some(3), None)
+([0, 1, 2], [3, 4, 5], ([0, 2, 4], [1, 3, 5]))
+([0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5], [0, 20, 40])
+([0: [0, 3], 1: [1, 4], 2: [2, 5]], Some(3), Some(3), None)
+[0, 1, 2, 3]
+
+=== ranges reaching the largest int
+let big = 9223372036854775807
+let r = big - 2..=big
+print((r.len(), r.contains(big), r.last(), r.max()))
+print((r.to_list(), r.reversed(), r.step_by(2), r.iter().to_list()))
+print((r.map(i => big - i), r.count(i => i > 0), r.fold(0, (n, _) => n + 1)))
+var n = 0
+for _ in r {
+    n += 1
+}
+print(n)
+--- stdout
+(3, true, Some(9223372036854775807), Some(9223372036854775807))
+([9223372036854775805, 9223372036854775806, 9223372036854775807], [9223372036854775807, 9223372036854775806, 9223372036854775805], [9223372036854775805, 9223372036854775807], [9223372036854775805, 9223372036854775806, 9223372036854775807])
+([2, 1, 0], 3, 3)
+3
+
+=== range sums and products fail when the result does not fit
+print((1..=5000000000).sum())
+--- fail
+integer overflow
+
+=== range products fail when the result does not fit
+print((1..=21).product())
+--- fail
+integer overflow
+
+=== the exclusive end of a range to the largest int does not fit
+print((0..=9223372036854775807).end())
+--- fail
+integer overflow
+
+=== the length of a range must fit in an int
+print((-9223372036854775807 - 1..9223372036854775807).len())
+--- fail
+integer overflow
 
 === nested data structures
 let db = ["users": [["name": "ann"], ["name": "bob"]]]
@@ -644,6 +721,16 @@ let c = m.nope()
 3: no method `map` on type [str: int]; call it on `entries()`, a list of (key, value) pairs
 4: no method `sorted` on type Set<int>; call it on `to_list()`
 5: no method `nope` on type [str: int]
+
+=== iterator and list methods on ranges point to them
+let r = 0..3
+let a = r.zip([1, 2].iter())
+let b = r.sorted()
+let c = r.nope()
+--- error
+2: no method `zip` on type Range; call it on `iter()`, a lazy iterator
+3: no method `sorted` on type Range; call it on `to_list()`
+4: no method `nope` on type Range
 
 === mixed map values suggest a struct
 let body = ["range": "A1", "values": [["x"]]]

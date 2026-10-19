@@ -427,6 +427,25 @@ print((t, (0..4).map(i => i * i), (0..10).filter(i => i % 4 == 0)))
 [3, 1, 0, 1, 0]
 (10, [0, 1, 4, 9], [0, 4, 8])
 
+=== fused range loops evaluate the bounds once, in order
+let log = []
+fn at(x: int) -> int {
+    log.push(x)
+    x
+}
+print((at(1)..=at(4)).iter().map(i => i * 10).filter(i => i != 20).to_list())
+print((at(0)..at(3)).fold(at(7), (a, i) => a + i))
+for i in (at(5)..at(7)).iter().map(i => i + 100) {
+    log.push(i)
+}
+print((at(2)..at(8)).skip_while(i => i < at(4)))
+print(log)
+--- stdout
+[10, 30, 40]
+10
+[4, 5, 6, 7]
+[1, 4, 0, 3, 7, 5, 7, 105, 106, 2, 8, 4, 4, 4]
+
 === for loops over enumerate keep its snapshot
 // `for (i, x) in xs.enumerate()` runs without building the pairs, over the
 // elements as they were when `enumerate` was called.

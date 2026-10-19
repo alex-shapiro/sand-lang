@@ -1492,9 +1492,26 @@ Result: `is_ok`, `is_err`, `unwrap() -> T` (fails with `unwrap: unwrap on Err: <
 
 ### 12.12 `Range`
 
-`start() -> int`, `end() -> int` (exclusive), `len() -> int`, `contains(i: int)
--> bool`, `to_list() -> [int]`, `map`, `filter`, `each`, `step_by(n: int) -> [int]`,
-`reversed() -> [int]`, `iter() -> Iter<int>` (§12.13).
+A range's methods build no list unless they return one.
+
+- `start() -> int`, `end() -> int` (the exclusive end bound), `len() -> int`,
+  `is_empty() -> bool`, `contains(i: int) -> bool`. `end` and `len` fail with
+  `overflow` if the result does not fit in an `int` (`(0..=i).end()` for the
+  largest `i`).
+- `first()`, `last()`, `min()`, `max() -> int?`: `None` if empty.
+- `sum() -> int`, `product() -> int`: the exact result (`0` / `1` if empty),
+  computed in constant time; fail with `overflow` if it does not fit in an `int`.
+- The list methods that take a function (§12.8), with `int` elements:
+  `map`, `filter`, `filter_map`, `flat_map`, `each`, `fold`, `reduce`, `any`,
+  `all`, `find`, `find_index` (the position from the start, counting from 0),
+  `count`, `take_while`, `skip_while`, `partition`, `group_by`, `min_by`,
+  `max_by`.
+- `to_list() -> [int]`, `reversed() -> [int]`, `step_by(n: int) -> [int]`
+  (every `n`-th integer from the first; fails unless `n > 0`), `iter() ->
+  Iter<int>` (§12.13).
+
+Calling any other method of `[int]` or `Iter<int>` on a range is a compile
+error that names the conversion (`to_list()` or `iter()`) providing it.
 
 ### 12.13 Iterators
 
