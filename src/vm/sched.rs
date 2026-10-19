@@ -4,7 +4,6 @@ use super::interp::Exit;
 use super::*;
 use crate::LimitKind;
 use crate::platform::{ClockFuture, Instant};
-use std::sync::atomic::Ordering;
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
@@ -235,7 +234,7 @@ impl Drop for RunTimer {
 
 impl Vm {
     fn check_limits(&self, timer: &RunTimer) -> Result<(), Trap> {
-        if self.host.interrupt.load(Ordering::Relaxed) {
+        if self.host.interrupt.is_set() {
             return Err(Trap::Interrupted);
         }
         let l = &self.host.limits;
@@ -448,7 +447,7 @@ impl Vm {
                                 let (interrupt, shared) = (self.host.interrupt.clone(), self.io.shared.clone());
                                 let answer = std::future::poll_fn(|cx| {
                                     shared.set_waker(cx.waker());
-                                    if interrupt.load(Ordering::Relaxed) {
+                                    if interrupt.is_set() {
                                         return Poll::Ready(None);
                                     }
                                     prompt.as_mut().poll(cx).map(Some)
@@ -529,7 +528,7 @@ impl Vm {
                 if !done.is_empty() {
                     return Poll::Ready(done);
                 }
-                if interrupt.load(Ordering::Relaxed) {
+                if interrupt.is_set() {
                     return Poll::Ready(vec![]);
                 }
                 if let Some(s) = sleep.as_mut()

@@ -20,7 +20,6 @@ use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use value::*;
 
@@ -470,7 +469,7 @@ pub struct Host {
     pub env: Option<Vec<(String, String)>>,
     pub rng: Rng,
     pub log_level: u8,
-    pub interrupt: Arc<AtomicBool>,
+    pub(crate) interrupt: Arc<crate::interrupt::Interrupt>,
     /// Cached decisions for stdout (index 0) and stderr (1).
     pub stream_decisions: [Option<bool>; 2],
     #[cfg(feature = "os")]

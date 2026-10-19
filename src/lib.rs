@@ -12,6 +12,7 @@ mod feed;
 mod files;
 pub mod fmt;
 pub mod hir;
+mod interrupt;
 pub mod lint;
 mod modules;
 pub mod native;
@@ -34,6 +35,7 @@ pub use engine::{
 };
 pub use feed::StdinFeed;
 pub use files::MemFs;
+pub use interrupt::InterruptSignal;
 pub use native::{Conversion, FromValue, HostError, IntoHostError, IntoValue, ListElem, NativeModule, SandType};
 pub use policy::{Capability, CustomPolicy, Decision, Policy, PromptAnswer, Prompter, RulePolicy};
 pub use session::Session;

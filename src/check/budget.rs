@@ -22,9 +22,10 @@
 //! budget at a time): charging works through `&self`, and a checker holding a
 //! budget stays `Send`, which REPL sessions need to keep it between inputs.
 
+use crate::interrupt::{Interrupt, InterruptSignal};
 use crate::platform::Deadline;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 /// A `Cell<u64>`-like counter that is `Sync`.
 #[derive(Default)]
@@ -111,7 +112,7 @@ pub struct CompileBudget {
     fuel: Counter,
     next_poll: Counter,
     deadline: Option<Deadline>,
-    interrupt: Option<Arc<AtomicBool>>,
+    interrupt: Option<Arc<Interrupt>>,
     stop: StopCell,
     /// Work done by the current exhaustiveness check.
     pattern_work: Counter,
@@ -124,7 +125,14 @@ impl Default for CompileBudget {
 }
 
 impl CompileBudget {
-    pub fn new(fuel: Option<u64>, deadline: Option<Deadline>, interrupt: Option<Arc<AtomicBool>>) -> CompileBudget {
+    /// A budget of `fuel` units (`None`: unlimited) that also stops at
+    /// `deadline` and once `signal` is set.
+    pub fn new(fuel: Option<u64>, deadline: Option<Deadline>, signal: Option<Arc<dyn InterruptSignal>>) -> CompileBudget {
+        CompileBudget::stopped_by(fuel, deadline, signal.map(|s| Interrupt::new(Some(s))))
+    }
+
+    /// A budget that stops when the engine is interrupted.
+    pub(crate) fn stopped_by(fuel: Option<u64>, deadline: Option<Deadline>, interrupt: Option<Arc<Interrupt>>) -> CompileBudget {
         let fuel = fuel.unwrap_or(u64::MAX);
         CompileBudget {
             fuel: Counter::new(fuel),
@@ -154,7 +162,7 @@ impl CompileBudget {
     #[cold]
     fn poll(&self) -> bool {
         self.next_poll.set(self.fuel.get().saturating_sub(POLL_INTERVAL));
-        if self.interrupt.as_ref().is_some_and(|i| i.load(Ordering::Relaxed)) {
+        if self.interrupt.as_ref().is_some_and(|i| i.is_set()) {
             self.stop.set(Some(Stop::Interrupted));
             return false;
         }
@@ -167,7 +175,7 @@ impl CompileBudget {
 
     /// A budget of `fuel` units with this budget's deadline and interrupt flag.
     pub fn with_fuel(&self, fuel: u64) -> CompileBudget {
-        CompileBudget::new(Some(fuel), self.deadline.clone(), self.interrupt.clone())
+        CompileBudget::stopped_by(Some(fuel), self.deadline.clone(), self.interrupt.clone())
     }
 
     /// Checks the deadline and interrupt flag now (between compiler phases).
@@ -224,8 +232,7 @@ mod tests {
         let b = CompileBudget::new(None, Some(now), None);
         assert!(!b.charge(POLL_INTERVAL + 1));
         assert_eq!(b.stopped(), Some(Stop::Time));
-        let flag = Arc::new(AtomicBool::new(true));
-        let b = CompileBudget::new(None, None, Some(flag));
+        let b = CompileBudget::new(None, None, Some(Arc::new(std::sync::atomic::AtomicBool::new(true))));
         assert!(!b.check());
         assert_eq!(b.stopped(), Some(Stop::Interrupted));
     }

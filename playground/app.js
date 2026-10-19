@@ -10,6 +10,8 @@ const STORAGE_KEY = "sand-playground/v1";
 const CHECK_DELAY = 300;
 const MAX_CONSOLE = 2 << 20;
 const MAX_HISTORY = 200;
+/** How long a stopped engine has to end before its worker is terminated. */
+const STOP_GRACE = 1000;
 
 const $ = (selector, root = document) => root.querySelector(selector);
 
@@ -36,18 +38,23 @@ class EngineWorker {
     this.requests = new Map();
     this.nextId = 1;
     this.onEvent = onEvent;
+    this.terminated = false;
+    // Memory shared with the worker stops a busy engine there; pages share
+    // memory only when cross-origin isolated (see cli/src/playground.rs).
+    this.interrupt = globalThis.crossOriginIsolated ? new Int32Array(new SharedArrayBuffer(4)) : null;
     this.ready = new Promise((resolve, reject) => {
       this.onReady = resolve;
       this.onFailed = reject;
     });
     this.worker.onmessage = (e) => this.receive(e.data);
     this.worker.onerror = (e) => this.fail(e.message || "the worker failed to start");
-    this.worker.postMessage({ type: "init", module });
+    this.worker.postMessage({ type: "init", module, interrupt: this.interrupt });
   }
 
   receive(message) {
     if (message.type === "ready") return this.onReady();
     if (message.type === "failed") return this.fail(message.message);
+    if (message.type === "stopped") return this.stopped();
     if (message.id === undefined) {
       return this.onEvent(message, (answer) => this.worker.postMessage({ type: "answer", promptId: message.promptId, answer }));
     }
@@ -74,7 +81,32 @@ class EngineWorker {
     });
   }
 
+  /**
+   * Stops the engine's run or input and ends its session: through the
+   * interrupt buffer and a message, or by terminating the worker if the page
+   * shares no memory with it or the engine does not stop in time (a native
+   * call may not look at the buffer). Resolves once it has.
+   */
+  stop() {
+    if (!this.interrupt) {
+      this.terminate();
+      return Promise.resolve();
+    }
+    Atomics.store(this.interrupt, 0, 1);
+    this.worker.postMessage({ type: "stop" });
+    this.stopTimer = setTimeout(() => this.terminate(), STOP_GRACE);
+    return new Promise((resolve) => (this.onStopped = resolve));
+  }
+
+  stopped() {
+    clearTimeout(this.stopTimer);
+    this.onStopped?.();
+    this.onStopped = null;
+  }
+
   terminate() {
+    this.terminated = true;
+    this.stopped();
     this.worker.terminate();
     for (const r of this.requests.values()) r.reject(new Error("stopped"));
     this.requests.clear();
@@ -462,6 +494,7 @@ class SandboxView {
 
   /** The worker of this sandbox's sessions. */
   sessionWorker() {
+    if (this.worker?.terminated) this.worker = null;
     this.worker ??= new EngineWorker(this.app.module, (event, reply) => this.event(event, reply));
     return this.worker;
   }
@@ -494,7 +527,10 @@ class SandboxView {
   /** Sends a request about the session; `null` if the run was stopped or the engine crashed. */
   async request(message, run) {
     try {
-      return await this.sessionWorker().request(message);
+      // A new session waits for the stopped one to end.
+      await this.stopping;
+      const answer = await this.sessionWorker().request(message);
+      return run.stopped ? null : answer;
     } catch (e) {
       if (!run.stopped) {
         // The engine crashed (a bug): its worker cannot be trusted any more.
@@ -503,18 +539,24 @@ class SandboxView {
       }
       return null;
     } finally {
-      this.running = null;
-      this.root.classList.remove("is-running");
-      this.hidePrompt();
-      this.app.updateRunning();
+      if (this.running === run) this.stopRunning();
     }
+  }
+
+  /** Marks the sandbox as not running. */
+  stopRunning() {
+    this.running = null;
+    this.root.classList.remove("is-running");
+    this.hidePrompt();
+    this.app.updateRunning();
   }
 
   stop() {
     if (!this.running) return;
     this.running.stopped = true;
-    // A busy engine cannot be interrupted from here: end its worker.
-    this.endSession();
+    this.stopping = this.worker?.stop();
+    this.stopRunning();
+    this.setSession(false);
     this.print("Stopped: the session ended.\n", "system");
   }
 

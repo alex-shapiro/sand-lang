@@ -9,6 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import http from "node:http";
+import { Worker } from "node:worker_threads";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -208,6 +209,49 @@ test("interrupting stops a waiting run", async () => {
   setTimeout(() => engine.interrupt(), 20);
   const result = await pending;
   assert.deepEqual([result.exitCode, result.error.kind], [130, "interrupted"]);
+});
+
+test("an interrupt buffer stops a busy run and is cleared by the next", async () => {
+  const buffer = new Int32Array(new SharedArrayBuffer(4));
+  const engine = new sand.Engine({ interruptBuffer: buffer }, { onOutput: () => Atomics.store(buffer, 0, 1) });
+  const result = await engine.run('print("spinning")\nwhile true {}');
+  assert.deepEqual([result.exitCode, result.error.kind], [130, "interrupted"]);
+  assert.equal(Atomics.load(buffer, 0), 1);
+  assert.equal((await engine.run("let x = 1")).ok, true);
+  assert.equal(Atomics.load(buffer, 0), 0);
+
+  const session = engine.session();
+  const busy = await session.eval('print("spinning")\nwhile true {}');
+  assert.equal(busy.error.kind, "interrupted");
+  assert.deepEqual(await session.eval("1 + 1"), { value: "2" });
+
+  assert.throws(() => new sand.Engine({ interruptBuffer: new Int32Array(1) }, {}), /SharedArrayBuffer/);
+  assert.throws(() => new sand.Engine({ interruptBuffer: new Uint8Array(new SharedArrayBuffer(4)) }, {}), /SharedArrayBuffer/);
+});
+
+test("another thread stops a busy engine through its interrupt buffer", async () => {
+  const buffer = new Int32Array(new SharedArrayBuffer(4));
+  const worker = new Worker(
+    `const { parentPort, workerData } = require("node:worker_threads");
+     const sand = require(workerData.module);
+     const engine = new sand.Engine({ interruptBuffer: workerData.buffer }, {});
+     parentPort.postMessage("started");
+     engine.run("while true {}").then((r) => parentPort.postMessage(r.error?.kind));`,
+    { eval: true, workerData: { buffer, module: path.join(pkg, "sandlang_wasm.js") } },
+  );
+  try {
+    const messages = [];
+    const next = () => new Promise((resolve, reject) => {
+      worker.once("message", resolve);
+      worker.once("error", reject);
+    });
+    messages.push(await next());
+    setTimeout(() => Atomics.store(buffer, 0, 1), 50);
+    messages.push(await next());
+    assert.deepEqual(messages, ["started", "interrupted"]);
+  } finally {
+    await worker.terminate();
+  }
 });
 
 test("prompts go to onPrompt", async () => {

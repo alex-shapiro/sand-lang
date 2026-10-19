@@ -2509,7 +2509,10 @@ persistent heap. Limit violations are reported to the host as distinct
 error variants and cannot be intercepted by scripts. The host may also
 interrupt an engine from another thread with an `InterruptHandle`, which
 stops compilation, bytecode, long-running library functions, and waits for
-I/O or prompt answers.
+I/O or prompt answers. A host that cannot call into the engine's thread
+gives it an `InterruptSignal` (`Config::interrupt_signal`), which the
+engine polls where it checks its limits and clears when a run or input
+starts.
 
 ### 15.2 Fuel
 
@@ -2736,7 +2739,10 @@ standard input, with `onOutput` and `onPrompt` callbacks (requests the
 policy does not decide go to `onPrompt`, and are denied without it), `run`,
 `check`, `lint`, sessions (`eval(source, name?)`, and
 `runTasks`/`stopTasks` to run tasks between inputs), `format` and
-`highlight`. `playground/` is a web page built on it.
+`highlight`. `interrupt()` reaches only a run that waits; a page stops a
+busy engine in a worker through an `interruptBuffer`, an `Int32Array` over a
+`SharedArrayBuffer` it shares with the worker (which needs cross-origin
+isolation). `playground/` is a web page built on it.
 
 ### 16.3 Sessions
 

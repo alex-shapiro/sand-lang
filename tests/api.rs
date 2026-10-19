@@ -1165,6 +1165,35 @@ fn interrupt_from_another_thread() {
     assert!(matches!(r, Err(Error::Interrupted)), "{r:?}");
 }
 
+/// A host's interrupt signal stops a busy run of the engine or of its
+/// sessions, and each run or input starts with it cleared.
+#[test]
+fn interrupt_signals_stop_busy_runs_and_are_cleared_by_the_next() {
+    let signal = Arc::new(AtomicBool::new(false));
+    let mut engine = Engine::new(Config::new().interrupt_signal(signal.clone()));
+    let set_soon = || {
+        let signal = signal.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            signal.store(true, Ordering::SeqCst);
+        })
+    };
+    let t = set_soon();
+    let r = rt().block_on(engine.run_source("main.sand", "while true {}"));
+    t.join().unwrap();
+    assert!(matches!(r, Err(Error::Interrupted)), "{r:?}");
+    assert!(signal.load(Ordering::SeqCst), "set until the next run");
+    rt().block_on(engine.run_source("main.sand", "let x = 1")).unwrap();
+    assert!(!signal.load(Ordering::SeqCst));
+
+    let mut session = engine.session();
+    let t = set_soon();
+    let r = rt().block_on(session.eval("while true {}"));
+    t.join().unwrap();
+    assert!(matches!(r, Err(Error::Interrupted)), "{r:?}");
+    assert_eq!(rt().block_on(session.eval("1 + 1")).unwrap().as_deref(), Some("2"));
+}
+
 #[test]
 fn interrupt_stops_a_run_waiting_for_a_prompt() {
     let (asked_tx, asked_rx) = std::sync::mpsc::channel();
