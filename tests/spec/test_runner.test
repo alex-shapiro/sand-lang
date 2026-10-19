@@ -155,3 +155,11 @@ test {
 }
 --- error
 1: a test needs a name: `test "what it checks" { ... }`
+
+=== imports belong at the top level
+test "t" {
+    import test
+    test.assert_true(true)
+}
+--- error
+2: an import goes at the top level of a module, not in a block

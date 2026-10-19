@@ -926,6 +926,10 @@ impl<'a> Parser<'a> {
     fn stmt(&mut self) -> PResult<Stmt> {
         let lo = self.lo();
         match self.tok() {
+            Tok::Import | Tok::From => {
+                self.errors.push(Diag::error(self.span_here(), "an import goes at the top level of a module, not in a block"));
+                Err(())
+            }
             Tok::Let | Tok::Var => self.let_stmt(),
             Tok::Defer => {
                 self.bump();
