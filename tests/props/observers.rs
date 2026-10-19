@@ -1,8 +1,5 @@
-//! Every way of observing a value agrees with one model. A range, for
-//! instance, is seen through its methods, `for` loops over it (a variable or
-//! a literal), comprehensions and iterator pipelines; each of these is
-//! implemented separately (natives, VM loop instructions, fused loops,
-//! prelude code), and they must all see the same integers.
+//! Verifies that methods, loops, iterators, and comprehensions over ranges,
+//! lists, strings, maps, and sets agree with reference models.
 
 use super::{Expect, check_prints, config, int, int_lit, list_str, opt_str, str_lit};
 use proptest::prelude::*;
@@ -13,22 +10,18 @@ fn ok(v: impl ToString) -> Expect {
     Ok(v.to_string())
 }
 
-/// `n` as an `int` result: an overflow if it does not fit.
 fn exact(n: i128) -> Expect {
     i64::try_from(n).map(|n| n.to_string()).map_err(|_| OVERFLOW)
 }
 
-/// The sum of `xs`, added from the left.
 fn sum_left(xs: &[i64]) -> Expect {
     xs.iter().try_fold(0i64, |acc, &x| acc.checked_add(x)).map(|s| s.to_string()).ok_or(OVERFLOW)
 }
 
-/// The product of `xs`, multiplied from the left.
 fn product_left(xs: &[i64]) -> Expect {
     xs.iter().try_fold(1i64, |acc, &x| acc.checked_mul(x)).map(|s| s.to_string()).ok_or(OVERFLOW)
 }
 
-/// Values worth probing near `vs`: each of them and its neighbours.
 fn probes(vs: &[i64]) -> Vec<i64> {
     let mut out: Vec<i64> = vs.iter().flat_map(|&v| [v.saturating_sub(1), v, v.saturating_add(1)]).collect();
     out.sort();
@@ -52,7 +45,6 @@ impl Range {
         format!("{}..{}{}", self.start, if self.inclusive { "=" } else { "" }, self.end)
     }
 
-    /// The first and last integers; `None` if the range is empty.
     fn bounds(&self) -> Option<(i64, i64)> {
         let last = if self.inclusive { self.end } else { self.end.checked_sub(1)? };
         (self.start <= last).then_some((self.start, last))
@@ -62,7 +54,6 @@ impl Range {
         self.bounds().map_or(0, |(a, b)| b as i128 - a as i128 + 1)
     }
 
-    /// The integers (of a narrow range).
     fn elems(&self) -> Vec<i64> {
         self.bounds().map_or(vec![], |(a, b)| (a..=b).collect())
     }
@@ -72,7 +63,6 @@ impl Range {
     }
 }
 
-/// A range a few integers wide (or reversed, so empty) ending at a boundary value.
 fn narrow_range() -> impl Strategy<Value = Range> {
     (int(), -2i64..6, any::<bool>()).prop_map(|(end, width, inclusive)| Range { start: end.saturating_sub(width), end, inclusive })
 }
@@ -81,7 +71,8 @@ fn wide_range() -> impl Strategy<Value = Range> {
     (int(), int(), any::<bool>()).prop_map(|(start, end, inclusive)| Range { start, end, inclusive })
 }
 
-/// Observations that take constant time or stop early, valid for any range.
+/// Returns constant-time or early-stopping observations that are valid for any
+/// range width.
 fn range_basics(r: Range) -> Vec<(String, Expect)> {
     let first = r.bounds().map(|b| b.0);
     let last = r.bounds().map(|b| b.1);
@@ -115,13 +106,10 @@ fn range_basics(r: Range) -> Vec<(String, Expect)> {
     prints
 }
 
-/// `n * (n + 1) / 2`, the sum of the integers from 1 to `n` (negative for
-/// negative `n`: `triangle(b) - triangle(a - 1)` sums `a..=b`).
 fn triangle(n: i128) -> i128 {
     n * (n + 1) / 2
 }
 
-/// The exact product of the integers of `r`.
 fn product(r: Range) -> Expect {
     let Some((a, b)) = r.bounds() else { return ok(1) };
     if a <= 0 && 0 <= b {
@@ -134,7 +122,6 @@ fn product(r: Range) -> Expect {
     p.map_or(Err(OVERFLOW), exact)
 }
 
-/// Observations of a narrow range's integers, which these build or visit.
 fn range_elements(r: Range) -> Vec<(String, Expect)> {
     let xs = r.elems();
     let all = ok(list_str(&xs));
@@ -170,7 +157,6 @@ fn range_elements(r: Range) -> Vec<(String, Expect)> {
         ("x.reduce((_, b) => b)".into(), ok(opt_str(xs.last().copied()))),
         ("x.min_by(_ => 0)".into(), ok(opt_str(xs.first().copied()))),
         ("x.max_by(_ => 0)".into(), ok(opt_str(xs.first().copied()))),
-        // `-i` overflows for the smallest int, which fails the whole call.
         ("x.max_by(i => -i)".into(), if xs.contains(&i64::MIN) { Err(OVERFLOW) } else { ok(opt_str(xs.first().copied())) }),
         ("x.iter().sum()".into(), sum_left(&xs)),
         (format!("{l}.fold(0, (a, i) => a + i)"), sum_left(&xs)),
@@ -305,8 +291,6 @@ fn string_observations(s: &str) -> Vec<(String, Expect)> {
     prints
 }
 
-/// A map built by inserting `entries` in order: insertion-ordered, a
-/// repeated key keeps its position and takes the last value.
 fn map_observations(entries: &[(i64, i64)]) -> (String, Vec<(String, Expect)>) {
     let mut model: Vec<(i64, i64)> = Vec::new();
     let mut setup = String::from("let m: [int: int] = [:]\n");

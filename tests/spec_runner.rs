@@ -24,11 +24,9 @@
 //! * `--- args`: whitespace-separated script arguments.
 //! * `--- env`: `NAME=value` lines forming the script's environment.
 //!
-//! Every file also runs in two more modes (`Mode`), whose results must be
-//! the same: with `Config::gc_stress`, which collects garbage at every safe
-//! point (alternating minor and major collections), to check that the
-//! collector never frees live values; and with `Config::optimize(false)`,
-//! to check that optimized code behaves like the plain code.
+//! Every file is also run with `Config::gc_stress` (to collect garbage at
+//! every safe point) and with `Config::optimize(false)` (to verify that
+//! optimizations preserve program behavior).
 //!
 //! Every case runs with scripts seeing the host's file system (a temporary
 //! directory; with the `os` feature) and with a memory file system
@@ -41,7 +39,6 @@ use sandlang::{Config, Engine, Error, MemFs, MemorySink, Policy};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// How a case's program is compiled and run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     Plain,

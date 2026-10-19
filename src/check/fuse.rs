@@ -116,11 +116,8 @@ enum Func {
     Fn(FnId),
 }
 
-/// What the fused loop iterates over.
 enum LoopSrc {
-    /// A temporary holding the source.
     Value { local: LocalId, ty: TypeId, kind: IterKind },
-    /// The bounds of a range literal.
     Bounds { start: LocalId, end: LocalId, inclusive: bool },
 }
 
@@ -396,13 +393,11 @@ impl Checker {
             _ => source,
         };
         let src = match (kind, source.kind) {
-            // A range literal is looped over without allocating the range.
             (SourceKind::Range, HKind::Range { start, end, inclusive }) => {
                 LoopSrc::Bounds { start: self.bind_tmp(*start, &mut setup), end: self.bind_tmp(*end, &mut setup), inclusive }
             }
             (_, source_kind) => {
                 let source = HExpr { kind: source_kind, ..source };
-                // `s.chars()` is a loop over the characters of `s`.
                 let (source, iter_kind) = match kind {
                     SourceKind::Range => (source, IterKind::Range),
                     _ => match self.chars_source(source) {

@@ -1,27 +1,13 @@
-//! Random programs against a reference evaluator.
+//! Generates random Sand programs and compares their execution against a
+//! reference interpreter (`Model`).
 //!
-//! A program is generated as a skeleton whose references to variables are
-//! indices. `Resolver` maps them to the variables in scope (or replaces
-//! them), so every skeleton is a valid program and shrinks to smaller valid
-//! programs. The resolved program is printed as Sand and evaluated by
-//! `Model`, an interpreter of the same constructs written from the
-//! specification; the two must print the same and fail the same way.
-//!
-//! Programs exercise the constructs with several implementations: list,
-//! range and iterator methods (eager, fused and lazy), loops over each kind
-//! of source, comprehensions, closures with effects and early returns,
-//! labeled `break` and `continue`, `match` and checked arithmetic. Lambdas
-//! and functions push to the list `log`, which records the order in which
-//! they run, and which they may be iterating over. Every push goes through
-//! `push`, which keeps lists below `CAP` elements, so that loops over lists
-//! they grow stay short.
+//! Programs are generated as skeletons (`SProgram`) with integer indices for
+//! variable references. `Resolver` maps those indices to in-scope variables so
+//! that every skeleton produces a valid program.
 
 use super::{BOUNDARY, Mode, Run, config, int_lit, list_str, run_modes};
 use proptest::prelude::*;
 use std::collections::HashMap;
-
-// ---------------------------------------------------------------------------
-// Skeletons, as generated.
 
 #[derive(Debug, Clone, Copy)]
 enum Bin {
@@ -49,12 +35,9 @@ enum SInt {
     Bin(Bin, Box<SInt>, Box<SInt>),
     Neg(Box<SInt>),
     If(Box<SCond>, Box<SInt>, Box<SInt>),
-    /// A call of a function of the program.
     Call(u8, Box<SInt>, Box<SInt>),
-    /// A call of a lambda stored in a variable.
     Apply(u8, Box<SInt>),
     Agg(Box<SSeq>, Box<SAgg>),
-    /// Arms `lo..=hi => e` (made disjoint by the resolver), then `_ => e`.
     Match(Box<SInt>, Vec<(i64, u8, SInt)>, Box<SInt>),
     Index(u8, Box<SInt>),
 }
@@ -69,7 +52,6 @@ enum SCond {
     Contains(SSrc, SInt),
     Any(Box<SSeq>, Box<SPred>),
     All(Box<SSeq>, Box<SPred>),
-    /// A stored predicate applied to an integer.
     Test(u8, SInt),
 }
 
@@ -87,7 +69,6 @@ struct SPred {
     body: SCond,
 }
 
-/// `x => if cond { Some(value) } else { None }`, for `filter_map`.
 #[derive(Debug, Clone)]
 struct SFilterMap {
     effect: bool,
@@ -95,7 +76,6 @@ struct SFilterMap {
     value: SInt,
 }
 
-/// A lambda of two integers.
 #[derive(Debug, Clone)]
 struct SLam2 {
     effect: bool,
@@ -107,15 +87,13 @@ enum SSrc {
     List(u8),
     Log,
     Lit(Vec<SInt>),
-    /// `lo..lo + width` (or `..=`), with a variable or literal `lo`.
     Range {
         lo: SLo,
         width: i8,
         inclusive: bool,
     },
     RangeVar(u8),
-    /// A range with arbitrary literal bounds, kept only where its integers
-    /// are not visited (constant-time aggregates).
+    /// Range with arbitrary literal bounds; used only for $O(1)$ aggregates.
     Wide(i64, i64, bool),
 }
 
@@ -162,7 +140,6 @@ enum SAdapter {
     TakeWhile(SPred),
     SkipWhile(SPred),
     Inspect,
-    /// `.enumerate().map(p => ...)`, its body over `p.0` and `p.1`.
     EnumerateMap(SLam2),
     StepBy(i64),
 }
@@ -185,12 +162,8 @@ enum SAgg {
 
 #[derive(Debug, Clone)]
 enum SStmt {
-    Let {
-        mutable: bool,
-        value: SInt,
-    },
+    Let { mutable: bool, value: SInt },
     LetList(SSeq),
-    /// `let l = other` (an alias) or `let l = other.copy()`.
     LetAlias(u8, bool),
     LetRange(SSrc),
     LetLam(SLam),
@@ -210,16 +183,10 @@ enum SStmt {
 
 #[derive(Debug, Clone)]
 struct SProgram {
-    /// Function bodies over their two parameters.
     fns: Vec<(bool, SInt)>,
     stmts: Vec<SStmt>,
 }
 
-// ---------------------------------------------------------------------------
-// Strategies.
-
-/// Mostly small integers, so that arithmetic overflows in some programs
-/// rather than in most.
 fn lit() -> impl Strategy<Value = i64> + Clone {
     prop_oneof![8 => -10i64..10, 1 => prop::sample::select(BOUNDARY.as_slice())]
 }
@@ -232,12 +199,10 @@ fn cmp() -> impl Strategy<Value = Cmp> {
     prop::sample::select(vec![Cmp::Lt, Cmp::Le, Cmp::Eq, Cmp::Ne])
 }
 
-/// Strategies for the kinds of expressions, which nest in each other.
 #[derive(Clone)]
 struct Exprs {
     int: BoxedStrategy<SInt>,
     cond: BoxedStrategy<SCond>,
-    /// Conditions that may also test sequences (`contains`, `any`, `all`).
     test: BoxedStrategy<SCond>,
     lam: BoxedStrategy<SLam>,
     pred: BoxedStrategy<SPred>,
@@ -267,7 +232,6 @@ fn exprs() -> Exprs {
     parts(int)
 }
 
-/// The other kinds of expressions, over integer expressions `int`.
 fn parts(int: BoxedStrategy<SInt>) -> Exprs {
     let base = prop_oneof![
         3 => (cmp(), int.clone(), int.clone()).prop_map(|(o, a, b)| SCond::Cmp(o, a, b)),
@@ -294,7 +258,7 @@ fn parts(int: BoxedStrategy<SInt>) -> Exprs {
     let src = prop_oneof![
         3 => any::<u8>().prop_map(SSrc::List),
         1 => Just(SSrc::Log),
-        // Not empty: the type of `[]` cannot be inferred from its methods.
+        // Non-empty so element type can be inferred when calling methods on the literal.
         2 => prop::collection::vec(int.clone(), 1..5).prop_map(SSrc::Lit),
         3 => (lo, -2i8..7, any::<bool>()).prop_map(|(lo, width, inclusive)| SSrc::Range { lo, width, inclusive }),
         1 => any::<u8>().prop_map(SSrc::RangeVar),
@@ -397,9 +361,6 @@ fn program() -> impl Strategy<Value = SProgram> {
     (fns, stmts(&e)).prop_map(|(fns, stmts)| SProgram { fns, stmts })
 }
 
-// ---------------------------------------------------------------------------
-// Resolved programs: variables by name.
-
 #[derive(Debug, Clone)]
 enum E {
     Lit(i64),
@@ -451,7 +412,6 @@ struct FilterMap {
     value: E,
 }
 
-/// A lambda of two integers; with `effect`, it pushes `a` to the log.
 #[derive(Debug, Clone)]
 struct Lam2 {
     a: String,
@@ -464,7 +424,6 @@ struct Lam2 {
 enum Src {
     List(String),
     Lit(Vec<E>),
-    /// The bounds are literals, or a name and `name + k`.
     Range(E, E, bool),
     RangeVar(String),
 }
@@ -477,7 +436,6 @@ enum Pipe {
     Comp(Box<Comp>),
 }
 
-/// `[map for param in src if filter]`; with `.0`, `map` pushes `param` to the log.
 #[derive(Debug, Clone)]
 struct Comp {
     param: String,
@@ -514,7 +472,6 @@ enum Adapter {
     TakeWhile(Pred),
     SkipWhile(Pred),
     Inspect(String),
-    /// `.enumerate().map(p => ...)`: the lambda's parameters are `p.0` and `p.1`.
     EnumerateMap(String, Lam2),
     StepBy(i64),
 }
@@ -561,7 +518,6 @@ struct Function {
     name: String,
     a: String,
     b: String,
-    /// Whether it pushes `a` to the log.
     effect: bool,
     body: E,
 }
@@ -572,14 +528,9 @@ struct Program {
     stmts: Vec<Stmt>,
 }
 
-// ---------------------------------------------------------------------------
-// Resolution.
-
-/// The variables in scope, by type.
 #[derive(Clone)]
 struct Scope {
     ints: Vec<String>,
-    /// The mutable integers (`var`).
     vars: Vec<String>,
     lists: Vec<String>,
     ranges: Vec<String>,
@@ -598,17 +549,15 @@ impl Default for Scope {
 #[derive(Default)]
 struct Resolver {
     scope: Scope,
-    /// The enclosing loops' labels, and whether a `break` or `continue` uses each.
+    /// `(label, is_referenced)` for each enclosing loop.
     loops: Vec<(String, bool)>,
     next: usize,
 }
 
-/// The `i`-th of `names` (cyclically).
 fn pick(names: &[String], i: u8) -> Option<String> {
     (!names.is_empty()).then(|| names[i as usize % names.len()].clone())
 }
 
-/// Whether `a` visits no integer of its receiver, so a wide range may stay.
 fn constant_time(a: &SAgg) -> bool {
     matches!(a, SAgg::Len | SAgg::Sum | SAgg::Product | SAgg::Min(_) | SAgg::Max(_) | SAgg::First(_) | SAgg::Last(_))
 }
@@ -619,7 +568,6 @@ impl Resolver {
         format!("{prefix}{}", self.next)
     }
 
-    /// Resolves `f` with the integers `names` in scope.
     fn with_ints<T>(&mut self, names: &[&str], f: impl FnOnce(&mut Self) -> T) -> T {
         let n = self.scope.ints.len();
         self.scope.ints.extend(names.iter().map(|s| s.to_string()));
@@ -646,7 +594,7 @@ impl Resolver {
             SInt::Agg(s, a) => E::Agg(Box::new(self.seq(s, constant_time(a))), Box::new(self.agg(a))),
             SInt::Match(s, arms, d) => {
                 let s = self.int(s);
-                // Arms must not be unreachable: each keeps clear of the earlier ones.
+                // Every arm must be reachable.
                 let mut kept: Vec<(i64, i64, E)> = Vec::new();
                 for (lo, w, e) in arms {
                     let hi = lo + *w as i64;
@@ -713,7 +661,6 @@ impl Resolver {
         self.lam2(l, a, b)
     }
 
-    /// `wide`: whether a wide range may stay wide (else it becomes narrow).
     fn src(&mut self, s: &SSrc, wide: bool) -> Src {
         match s {
             SSrc::List(l) => Src::List(pick(&self.scope.lists, *l).unwrap()),
@@ -809,7 +756,6 @@ impl Resolver {
         }
     }
 
-    /// A block: the variables it declares go out of scope at its end.
     fn block(&mut self, ss: &[SStmt]) -> Vec<Stmt> {
         let saved = self.scope.clone();
         let out = ss.iter().filter_map(|s| self.stmt(s)).collect();
@@ -817,8 +763,6 @@ impl Resolver {
         out
     }
 
-    /// A loop over `body`, binding `vars`; returns its label (if a `break`
-    /// or `continue` names it) and body.
     fn loop_body(&mut self, vars: &[&str], body: &[SStmt]) -> (Option<String>, Vec<Stmt>) {
         let label = self.fresh("o");
         self.loops.push((label, false));
@@ -852,7 +796,6 @@ impl Resolver {
                 Stmt::LetAlias(self.declare("l", |s| &mut s.lists), of, *copy)
             }
             SStmt::LetRange(src) => {
-                // Narrow: loops and pipelines may visit a range variable's integers.
                 let src = match self.src(src, false) {
                     r @ Src::Range(..) => r,
                     _ => Src::Range(E::Lit(-2), E::Lit(3), true),
@@ -901,7 +844,6 @@ impl Resolver {
                 }
                 let c = self.cond(c);
                 let depth = *d as usize % self.loops.len();
-                // The innermost loop is left unlabeled.
                 let label = (depth > 0).then(|| {
                     let n = self.loops.len() - 1 - depth;
                     self.loops[n].1 = true;
@@ -917,7 +859,6 @@ impl Resolver {
         let mut fns = Vec::new();
         for (effect, body) in &p.fns {
             let (name, a, b) = (r.fresh("f"), r.fresh("a"), r.fresh("b"));
-            // A function sees its parameters and the functions before it.
             let body = r.with_ints(&[&a, &b], |r| r.int(body));
             r.scope.fns.push(name.clone());
             fns.push(Function { name, a, b, effect: *effect, body });
@@ -986,7 +927,6 @@ fn show_c(c: &C) -> String {
     }
 }
 
-/// A lambda body: `push(log, pushed)` if given, an early return if any, then `tail`.
 fn show_body(pushed: Option<&str>, early: Option<(String, String)>, tail: String) -> String {
     if pushed.is_none() && early.is_none() {
         return tail;
@@ -1022,8 +962,6 @@ fn show_lam2(l: &Lam2, params: &str) -> String {
     format!("{params} => {}", show_body(l.effect.then_some(&l.a), None, show_e(&l.body)))
 }
 
-/// `src` as Sand; `paren` wraps a range literal in parentheses (for a
-/// method call).
 fn show_src(s: &Src, paren: bool) -> String {
     match s {
         Src::List(l) | Src::RangeVar(l) => l.clone(),
@@ -1039,7 +977,6 @@ fn is_range(s: &Src) -> bool {
     matches!(s, Src::Range(..) | Src::RangeVar(_))
 }
 
-/// What a sequence is, as the receiver of a method.
 #[derive(PartialEq, Clone, Copy)]
 enum Kind {
     List,
@@ -1055,13 +992,11 @@ fn kind(s: &Seq) -> Kind {
     }
 }
 
-/// A sequence as the receiver of a method: a list, a range or an `Iter`.
 fn show_recv(s: &Seq) -> String {
     let mut out = show_src(&s.src, true);
     match &s.pipe {
         Pipe::None => {}
         Pipe::Eager(ops) => {
-            // Ranges lack `take`, `skip` and `sorted`; every method returns a list.
             let mut range = is_range(&s.src);
             for op in ops {
                 if range && matches!(op, Eager::Take(_) | Eager::Skip(_) | Eager::Sorted) {
@@ -1111,7 +1046,6 @@ fn show_recv(s: &Seq) -> String {
     out
 }
 
-/// A sequence as a list.
 fn show_list(s: &Seq) -> String {
     match kind(s) {
         Kind::List => show_recv(s),
@@ -1210,41 +1144,32 @@ fn show_program(p: &Program) -> String {
     out
 }
 
-// ---------------------------------------------------------------------------
-// The reference evaluator.
-
-/// The most elements the program's `push` lets a list have.
 const CAP: usize = 100;
 
-/// The message a failing program's error contains.
 type Fail = &'static str;
 const OVERFLOW: Fail = "integer overflow";
 
 #[derive(Clone, Copy)]
 enum Val<'p> {
     Int(i64),
-    /// A list, by its index in `Model::lists`.
     List(usize),
     Range(i64, i64, bool),
     Lam(&'p Lam),
     Pred(&'p Pred),
 }
 
-/// How a statement ends.
 enum Flow {
     Next,
     Break(Option<String>),
     Continue(Option<String>),
 }
 
-/// A value whose elements a method visits.
 enum Recv<'p> {
     List(usize),
     Range(i64, i64, bool),
     Iter(Stream<'p>),
 }
 
-/// The first and last integers of a range; `None` if it is empty.
 fn bounds(a: i64, b: i64, inclusive: bool) -> Option<(i64, i64)> {
     let last = if inclusive { b } else { b.checked_sub(1)? };
     (a <= last).then_some((a, last))
@@ -1275,25 +1200,16 @@ struct Model<'p> {
     fns: HashMap<&'p str, &'p Function>,
     lists: Vec<Vec<i64>>,
     out: String,
-    /// Elements visited and functions called so far.
     steps: u64,
 }
 
-/// Programs taking more steps are not checked: they would take too long to
-/// run, and some nested loops visit lists of `CAP` elements.
 const MAX_STEPS: u64 = 200_000;
-/// Programs taking more steps are not run under GC stress, which collects at
-/// every step.
 const GC_STRESS_STEPS: u64 = 2_000;
-/// The failure of a program that takes more than `MAX_STEPS`.
 const TOO_LONG: Fail = "(the model gave up)";
 
-/// Where a lazy iterator's elements come from.
 #[derive(Clone, Copy)]
 enum Source {
-    /// The indices of a list below its length when the iterator was made.
     List { id: usize, i: usize, n: usize },
-    /// The next and last integers; `None` once exhausted.
     Range(Option<(i64, i64)>),
 }
 
@@ -1311,8 +1227,6 @@ enum Stage<'p> {
     StepBy(i64, bool),
 }
 
-/// A lazy iterator (`Iter`): a source and its adapters, pulled one element
-/// at a time as the prelude's `Iter` methods do.
 struct Stream<'p> {
     src: Source,
     stages: Vec<Stage<'p>>,
@@ -1323,7 +1237,6 @@ impl<'p> Stream<'p> {
         self.pull(m, self.stages.len())
     }
 
-    /// The next element after the first `k` stages.
     fn pull(&mut self, m: &mut Model<'p>, k: usize) -> Result<Option<i64>, Fail> {
         if k == 0 {
             m.step()?;
@@ -1439,8 +1352,8 @@ impl<'p> Stream<'p> {
 }
 
 impl<'p> Model<'p> {
-    /// What `p` prints, the failure it ends with, if any, and the steps it
-    /// takes; `None` if it takes more than `MAX_STEPS`.
+    /// Evaluates `p` and returns `(Run, steps)`, or `None` if execution
+    /// exceeds `MAX_STEPS`.
     fn run(p: &'p Program) -> Option<(Run, u64)> {
         let mut m = Model {
             env: HashMap::new(),
@@ -1486,7 +1399,6 @@ impl<'p> Model<'p> {
         }
     }
 
-    /// The program's `push`.
     fn push(&mut self, id: usize, x: i64) {
         if self.lists[id].len() < CAP {
             self.lists[id].push(x);
@@ -1498,7 +1410,6 @@ impl<'p> Model<'p> {
         self.lists.len() - 1
     }
 
-    /// Evaluates `f` with `bindings` added, restoring what they shadowed.
     fn with<T>(&mut self, bindings: &[(&str, i64)], f: impl FnOnce(&mut Self) -> Result<T, Fail>) -> Result<T, Fail> {
         self.step()?;
         let saved: Vec<_> = bindings.iter().map(|(n, v)| (n.to_string(), self.env.insert(n.to_string(), Val::Int(*v)))).collect();
@@ -1679,9 +1590,9 @@ impl<'p> Model<'p> {
         })
     }
 
-    /// Calls `f` on each element of `r` until it returns false: a list's
-    /// indices below its length when this starts, stopping early if it
-    /// shrinks; a range's integers; an iterator's remaining elements.
+    /// Calls `f` on each element of `r` until `f` returns `false`. For lists,
+    /// iterates up to the initial list length and stops early if the list
+    /// shrinks.
     fn each(&mut self, r: &mut Recv<'p>, f: &mut dyn FnMut(&mut Self, i64) -> Result<bool, Fail>) -> Result<(), Fail> {
         match r {
             Recv::List(id) => {
@@ -1716,7 +1627,6 @@ impl<'p> Model<'p> {
         Ok(())
     }
 
-    /// The elements of `r`, visited as by `each`.
     fn collect(&mut self, r: &mut Recv<'p>) -> Result<Vec<i64>, Fail> {
         let mut out = Vec::new();
         self.each(r, &mut |_, x| {
@@ -1726,7 +1636,6 @@ impl<'p> Model<'p> {
         Ok(out)
     }
 
-    /// Evaluates a sequence to the value its methods are called on.
     fn recv(&mut self, s: &'p Seq) -> Result<Recv<'p>, Fail> {
         let mut r = self.src(&s.src)?;
         match &s.pipe {
@@ -1768,7 +1677,6 @@ impl<'p> Model<'p> {
                             })?
                         }
                         Eager::Take(n) | Eager::Skip(n) => {
-                            // The argument runs before the method reads the list.
                             let n = self.int(n)?;
                             let xs = self.collect(&mut r)?;
                             let n = n.clamp(0, xs.len() as i64) as usize;
@@ -1838,7 +1746,6 @@ impl<'p> Model<'p> {
         Ok(r)
     }
 
-    /// A sequence as a list: an alias of a list variable, else a new list.
     fn list(&mut self, s: &'p Seq) -> Result<usize, Fail> {
         match self.recv(s)? {
             Recv::List(id) => Ok(id),
@@ -1851,7 +1758,6 @@ impl<'p> Model<'p> {
 
     fn agg(&mut self, s: &'p Seq, a: &'p Agg) -> Result<i64, Fail> {
         let mut r = self.recv(s)?;
-        // Ranges compute these from their bounds.
         if let Recv::Range(lo, hi, incl) = r {
             let b = bounds(lo, hi, incl);
             let len = b.map_or(0, |(a, b)| b as i128 - a as i128 + 1);
@@ -1873,7 +1779,6 @@ impl<'p> Model<'p> {
         }
         Ok(match a {
             Agg::Len => self.collect(&mut r)?.len() as i64,
-            // An overflow ends the loop: no more elements are pulled.
             Agg::Sum | Agg::Product => {
                 let mut acc = if matches!(a, Agg::Sum) { 0i64 } else { 1 };
                 self.each(&mut r, &mut |_, x| {
@@ -1956,8 +1861,6 @@ impl<'p> Model<'p> {
         Ok(Flow::Next)
     }
 
-    /// Runs a loop body for one element; returns whether to go on, or the
-    /// flow leaving an enclosing loop.
     fn iteration(&mut self, label: &Option<String>, body: &'p [Stmt]) -> Result<Result<bool, Flow>, Fail> {
         Ok(match self.block(body)? {
             Flow::Next => Ok(true),
@@ -2064,10 +1967,6 @@ impl<'p> Model<'p> {
     }
 }
 
-// ---------------------------------------------------------------------------
-
-/// Whether `got` is what `want` (the model's run) says: the same output,
-/// and a failure whose message contains the model's.
 fn matches(got: &Run, want: &Run) -> bool {
     got.stdout == want.stdout
         && match (&got.failure, &want.failure) {

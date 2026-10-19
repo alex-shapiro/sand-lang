@@ -168,11 +168,9 @@ enum Doc {
     /// fits, a hug group is assumed to break, as it will be forced to once it has
     /// been printed broken; this keeps formatting idempotent.
     ///
-    /// A `strict` group is printed flat only if all of it fits on the line, and
-    /// then all of it is flat but its forced groups, hug groups included. It
-    /// is used for constructs kept on one line because they were on one line
-    /// in the source (at their own level: see `on_one_line`), which must not
-    /// end up spanning several lines, or formatting again would break them.
+    /// A `strict` group is printed flat only if the entire group fits on the
+    /// current line. When printed flat, nested non-forced groups (including
+    /// `hug` groups) are also printed flat.
     Group {
         doc: Box<Doc>,
         force: bool,
@@ -269,9 +267,8 @@ fn contains_hard(b: &CompileBudget, doc: &Doc) -> bool {
 enum Mode {
     Flat,
     Break,
-    /// Inside a strict group printed flat: every group but forced ones is
-    /// flat, hug groups included, so that a construct printed on one line
-    /// is still on one line when formatted again.
+    /// Flat mode for a `strict` group: keeps all non-forced nested groups
+    /// flat, including `hug` groups.
     Strict,
 }
 
@@ -730,10 +727,8 @@ impl<'a> Formatter<'a> {
         a < b && self.line_of(b) > self.line_of(a)
     }
 
-    /// Whether `members`, between the braces at `open` and `close`, are on
-    /// one line at their own level: no line break between the braces and the
-    /// members or between members. A member may span lines of its own: a
-    /// lambda's body broken by the formatter leaves its block on one line.
+    /// Returns true if `open`, `close`, and the gaps between `members` do not
+    /// contain a newline. Newlines inside a member's own span are ignored.
     fn on_one_line(&self, open: u32, members: &[Member], close: u32) -> bool {
         let mut prev = open;
         for m in members {

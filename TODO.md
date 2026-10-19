@@ -34,11 +34,10 @@ Follow-up work, roughly in priority order.
       the ratio between two input sizes in the same run).
 - [ ] The playground page is tested by hand in headless Chrome, not in CI,
       Firefox or Safari.
-- [ ] The `cargo fuzz` targets only build in CI. Run them on a schedule (or
-      on OSS-Fuzz), and give the `run` target the differential oracle of
-      `tests/props` (optimized against unoptimized code).
-- [ ] `help.test` fails with `--no-default-features`: the overview lists
-      modules that need the `os` feature.
+- [ ] Run the `cargo fuzz` targets on a schedule (or on OSS-Fuzz). Update the
+      `run` target to compare optimized and unoptimized executions.
+- [ ] `help.test` fails with `--no-default-features` because the overview
+      includes modules that require the `os` feature.
 
 ### Web
 

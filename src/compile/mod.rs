@@ -39,15 +39,11 @@ pub struct CompileInput<'a> {
     /// For a REPL session's input: which of the program's globals are
     /// initialized (see `init_order`).
     pub initialized: Option<Vec<bool>>,
-    /// Whether to inline functions and natives and hoist loop invariants.
-    /// Off only to test that the optimized code behaves like the plain code
-    /// (`Config::optimize`).
     pub optimize: bool,
 }
 
 struct Compiler<'a> {
     cp: &'a CheckedProgram,
-    /// See `CompileInput::optimize`.
     optimize: bool,
     /// The program's types, which `reflect` extends with the instances it
     /// describes (a private copy: they are not needed after compiling).

@@ -984,32 +984,29 @@ extend<T: Hash> Set<T> {
     native fn iter_next(self) -> fn() -> T?
 }
 
-/// Integer ranges: `a..b` excludes `b`, `a..=b` includes it. Their methods
-/// build no list unless they return one.
+/// Integer ranges: `a..b` excludes `b`, `a..=b` includes it.
 extend Range {
     /// The start bound.
     pub native fn start(self) -> int
-    /// The exclusive end bound; fails if it does not fit in an `int`.
+    /// The exclusive end bound. Fails on `int` overflow.
     pub native fn end(self) -> int
-    /// Number of integers; fails if it does not fit in an `int`.
+    /// Number of integers. Fails on `int` overflow.
     pub native fn len(self) -> int
-    /// True if the range has no integers.
+    /// True if the range is empty.
     pub native fn is_empty(self) -> bool
     /// True if `i` is in the range.
     pub native fn contains(self, i: int) -> bool
-    /// The first integer; `None` if empty.
+    /// The first integer, or `None` if empty.
     pub native fn first(self) -> int?
-    /// The last integer; `None` if empty.
+    /// The last integer, or `None` if empty.
     pub native fn last(self) -> int?
-    /// The smallest integer (the first); `None` if empty.
+    /// The smallest integer, or `None` if empty.
     pub native fn min(self) -> int?
-    /// The largest integer (the last); `None` if empty.
+    /// The largest integer, or `None` if empty.
     pub native fn max(self) -> int?
-    /// The sum of the integers; zero if empty. Fails if it does not fit in
-    /// an `int`.
+    /// The sum of the integers (0 if empty). Fails on `int` overflow.
     pub native fn sum(self) -> int
-    /// The product of the integers; one if empty. Fails if it does not fit
-    /// in an `int`.
+    /// The product of the integers (1 if empty). Fails on `int` overflow.
     pub native fn product(self) -> int
     /// The integers, in order.
     pub native fn to_list(self) -> [int]

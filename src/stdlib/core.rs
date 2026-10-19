@@ -872,13 +872,12 @@ fn register_list(r: &mut Registry) {
             _ => (0, 0, false),
         }
     }
-    /// The first and last integers of a range; `None` if it is empty.
+    /// Returns the inclusive `(first, last)` bounds, or `None` if empty.
     fn bounds(vm: &Vm, v: Value) -> Option<(i64, i64)> {
         let (a, b, incl) = range(vm, v);
         let last = if incl { b } else { b.checked_sub(1)? };
         (a <= last).then_some((a, last))
     }
-    /// The number of integers of a range, which may exceed `i64::MAX`.
     fn range_len(vm: &Vm, v: Value) -> i128 {
         bounds(vm, v).map_or(0, |(first, last)| last as i128 - first as i128 + 1)
     }
@@ -917,7 +916,6 @@ fn register_list(r: &mut Registry) {
     }
     r.add_builtin("Range.sum", |vm, a| {
         let Some((first, last)) = bounds(vm, a[0]) else { return Ok(Value::Int(0)) };
-        // `n * (first + last)` is even, and overflows `i128` only if the sum overflows `i64`.
         let n = range_len(vm, a[0]);
         let twice = n.checked_mul(first as i128 + last as i128).ok_or_else(|| Ctl::fail("overflow", "integer overflow"))?;
         exact(twice / 2)
@@ -927,8 +925,8 @@ fn register_list(r: &mut Registry) {
         if first <= 0 && 0 <= last {
             return Ok(Value::Int(0));
         }
-        // Without 0, every factor but ±1 at least doubles the magnitude: the
-        // loop ends within 64 factors, before the product leaves `i128`.
+        // Any non-zero factor other than ±1 at least doubles the magnitude, so
+        // the loop exits within 64 iterations before `i128` can overflow.
         let mut acc: i128 = 1;
         for i in first..=last {
             acc *= i as i128;

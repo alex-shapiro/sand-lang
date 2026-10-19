@@ -397,10 +397,8 @@ impl Config {
         self.gc_stress = on;
         self
     }
-    /// Testing aid: with `false`, compile the program's own code without the
-    /// optimizations that must not change what it does (fused iterator
-    /// pipelines, specialized loops, inlining, hoisting), to compare its
-    /// behavior with the optimized code's.
+    /// Enables or disables loop fusion, loop specialization, inlining, and
+    /// loop-invariant hoisting.
     #[doc(hidden)]
     pub fn optimize(mut self, on: bool) -> Self {
         self.optimize = on;

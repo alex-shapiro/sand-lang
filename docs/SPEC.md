@@ -1461,9 +1461,9 @@ element outside `0..=255`), `bytes.from_hex(s: str) -> bytes?`.
 | `to_set() -> Set<T>`                                                            | `T: Hash`                               |
 | `iter() -> Iter<T>`                                                             | lazy iterator (§12.13)                  |
 
-The methods taking a function visit the elements like a `for` loop (§6.9):
-those the function adds to the list meanwhile are not visited, nor part of
-the result.
+Methods that take a function iterate over the initial list length in the same
+way as a `for` loop (§6.9). Elements appended by the function during iteration
+are excluded.
 
 ### 12.9 `[K: V]`
 
@@ -1496,26 +1496,23 @@ Result: `is_ok`, `is_err`, `unwrap() -> T` (fails with `unwrap: unwrap on Err: <
 
 ### 12.12 `Range`
 
-A range's methods build no list unless they return one.
+Range methods allocate a list only if the return type is `[int]`.
 
-- `start() -> int`, `end() -> int` (the exclusive end bound), `len() -> int`,
+- `start() -> int`, `end() -> int` (exclusive end bound), `len() -> int`,
   `is_empty() -> bool`, `contains(i: int) -> bool`. `end` and `len` fail with
-  `overflow` if the result does not fit in an `int` (`(0..=i).end()` for the
-  largest `i`).
-- `first()`, `last()`, `min()`, `max() -> int?`: `None` if empty.
-- `sum() -> int`, `product() -> int`: the exact result (`0` / `1` if empty),
-  computed in constant time; fail with `overflow` if it does not fit in an `int`.
-- The list methods that take a function (§12.8), with `int` elements:
-  `map`, `filter`, `filter_map`, `flat_map`, `each`, `fold`, `reduce`, `any`,
-  `all`, `find`, `find_index` (the position from the start, counting from 0),
-  `count`, `take_while`, `skip_while`, `partition`, `group_by`, `min_by`,
-  `max_by`.
+  `overflow` if the result exceeds `int::MAX`.
+- `first() -> int?`, `last() -> int?`, `min() -> int?`, `max() -> int?`:
+  return `None` if the range is empty.
+- `sum() -> int`, `product() -> int`: compute the exact result (`0` or `1` if
+  empty) in `O(1)` time, or fail with `overflow` if the result is out of
+  `int` bounds.
+- Function-taking methods (§12.8) for `int` elements: `map`, `filter`,
+  `filter_map`, `flat_map`, `each`, `fold`, `reduce`, `any`, `all`, `find`,
+  `find_index` (0-based offset from `start`), `count`, `take_while`,
+  `skip_while`, `partition`, `group_by`, `min_by`, `max_by`.
 - `to_list() -> [int]`, `reversed() -> [int]`, `step_by(n: int) -> [int]`
-  (every `n`-th integer from the first; fails unless `n > 0`), `iter() ->
-  Iter<int>` (§12.13).
-
-Calling any other method of `[int]` or `Iter<int>` on a range is a compile
-error that names the conversion (`to_list()` or `iter()`) providing it.
+  (every `n`-th integer from the start; fails if `n <= 0`), `iter() ->
+Iter<int>` (§12.13).
 
 ### 12.13 Iterators
 
@@ -1603,11 +1600,10 @@ T?` (`T: Ord`; the first minimal/maximal), `min_by`/`max_by<K: Ord>(key: fn(T)
   by any consumer (or by `next()` on any copy of the iterator, including one
   wrapped by an adapter) are gone. Consuming an exhausted iterator yields no
   elements.
-- **Exhaustion.** The iterators of lists, ranges, maps, sets, strings and
-  channels keep returning `None` once they have; `Iter.from_fn` iterators
-  return whatever their function returns. Adapters stop asking their source
-  for elements when it returns `None`: `skip(n)` and `step_by(n)` do not
-  pull `n` times from an exhausted source.
+- **Exhaustion.** List, range, map, set, string, and channel iterators
+  return `None` after exhaustion; `Iter.from_fn` iterators call
+  their function on each request. Adapters stop pulling from their source as
+  soon as it returns `None`.
 - **Mutation.** A list iterator behaves like a `for` loop (§6.9), with the
   length taken when `iter()` is called. Map and set iterators work on a
   snapshot of the entries taken by `iter()`, unaffected by later changes. A

@@ -363,7 +363,7 @@ let x = json!({
     "b": null,
 })
 
-=== a match written on one line stays there when its scrutinee spans lines
+=== single-line match with multi-line scrutinee
 let log: [int] = []
 let n = (match [3].iter().map(x => {
     log.push(x)
@@ -376,7 +376,7 @@ let n = (match [3].iter().map(x => {
     x
 }).count() { 0..=1 => 4, _ => 6 })
 
-=== a construct printed on one line stays there when a lambda inside breaks
+=== single-line if with nested multi-line lambda
 let log: [int] = []
 let v = [1].filter_map(x => if ((x % 8 == 0) or (6 == log.count(y => { log.push(y); y == 0 })) or ((if [x].iter().filter_map(z => if ((not (6 == x)) or (z == 0)) { Some(x) } else { None }).all(w => w < x) { 1 } else { 2 }) < 5)) { Some(1) } else { None })
 --- fmt

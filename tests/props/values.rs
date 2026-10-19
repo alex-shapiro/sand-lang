@@ -1,5 +1,3 @@
-//! Operators, strings, collections and standard modules against Rust.
-
 use super::{Expect, check, check_prints, config, int, int_lit, list_str, opt_str, str_lit};
 use proptest::prelude::*;
 use std::collections::BTreeMap;
@@ -40,7 +38,6 @@ fn shift(a: i64, b: i64, left: bool) -> Result<i64, &'static str> {
     Ok(if left { a << b } else { a >> b })
 }
 
-/// The sum of `xs`, added from the left.
 fn checked_sum(xs: &[i64]) -> Expect {
     xs.iter().try_fold(0i64, |acc, &x| acc.checked_add(x)).map(|s| s.to_string()).ok_or(OVERFLOW)
 }
@@ -108,7 +105,6 @@ proptest! {
     fn sorting_matches_rust(xs in prop::collection::vec(int(), 0..40)) {
         let mut sorted = xs.clone();
         sorted.sort();
-        // Sand's % is floor modulo, which for a positive divisor equals rem_euclid.
         let mut keyed: Vec<(i64, usize)> = xs.iter().enumerate().map(|(i, x)| (x.rem_euclid(5), i)).collect();
         keyed.sort_by_key(|p| p.0);
         let order: Vec<i64> = keyed.iter().map(|p| p.1 as i64).collect();
@@ -127,7 +123,6 @@ proptest! {
 
     #[test]
     fn maps_behave_like_an_ordered_model(keys in prop::collection::vec(int(), 1..8), ops in prop::collection::vec((0u8..3, any::<prop::sample::Index>(), int()), 0..80)) {
-        // Model: insertion-ordered map; removal forgets position.
         let mut model: Vec<(i64, i64)> = Vec::new();
         let mut src = String::from("let m: [int: int] = [:]\nlet out = []\n");
         let mut out: Vec<String> = Vec::new();
@@ -215,7 +210,7 @@ fn json_value() -> impl Strategy<Value = J> {
     let leaf = prop_oneof![
         Just(J::Null),
         any::<bool>().prop_map(J::Bool),
-        // JSON numbers are floats: only these integers survive exactly.
+        // JSON numbers are decoded as `f64`, which represents integers up to 2^53 exactly.
         int().prop_filter("exact as a float", |i| i.unsigned_abs() <= 1 << 53).prop_map(J::Int),
         "[a-z \"\\\\é\n]{0,8}".prop_map(J::Str),
     ];

@@ -518,7 +518,6 @@ print((e.sum(), e.product(), e.min(), e.max(), e.first(), e.last()))
 print(((-3..=3).sum(), (-3..=3).product(), (-4..=-1).product(), (5..1).sum()))
 let n = 20
 print((1..=n).product())
-// Exact results, even where adding or multiplying in order would overflow.
 let big = 9223372036854775807
 print(((-big - 1..=big).sum(), (-5000000000..=0).product()))
 --- stdout
@@ -548,7 +547,7 @@ print(seen)
 ([0: [0, 3], 1: [1, 4], 2: [2, 5]], Some(3), Some(3), None)
 [0, 1, 2, 3]
 
-=== ranges reaching the largest int
+=== inclusive range at int::MAX
 let big = 9223372036854775807
 let r = big - 2..=big
 print((r.len(), r.contains(big), r.last(), r.max()))
@@ -565,22 +564,22 @@ print(n)
 ([2, 1, 0], 3, 3)
 3
 
-=== range sums and products fail when the result does not fit
+=== range sum overflow
 print((1..=5000000000).sum())
 --- fail
 integer overflow
 
-=== range products fail when the result does not fit
+=== range product overflow
 print((1..=21).product())
 --- fail
 integer overflow
 
-=== the exclusive end of a range to the largest int does not fit
+=== range end overflow
 print((0..=9223372036854775807).end())
 --- fail
 integer overflow
 
-=== the length of a range must fit in an int
+=== range len overflow
 print((-9223372036854775807 - 1..9223372036854775807).len())
 --- fail
 integer overflow
@@ -722,7 +721,7 @@ let c = m.nope()
 4: no method `sorted` on type Set<int>; call it on `to_list()`
 5: no method `nope` on type [str: int]
 
-=== iterator and list methods on ranges point to them
+=== iterator and list methods on ranges suggest conversions
 let r = 0..3
 let a = r.zip([1, 2].iter())
 let b = r.sorted()
