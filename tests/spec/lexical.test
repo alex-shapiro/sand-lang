@@ -196,7 +196,7 @@ print(doc.path("a.b.1"))
 --- stdout
 [0-9]{4} {x} }{ {{}}
 true
-Some(Num(2.0))
+Some(Int(2))
 
 === interpolations hold strings, parentheses and brackets
 fn add(a: int, b: int) -> int { a + b }

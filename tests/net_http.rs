@@ -59,7 +59,7 @@ print(missing.ok())
     assert_eq!(
         run_net(&src),
         format!(
-            "200\ntrue\nhello world\ntext/plain\nSome(\"yes\")\n[\"a=1; Expires=Wed, 21 Oct 2015 07:28:00 GMT\", \"b=2\"]\n2\n{base}/hello\nthis body arrives in several chunks\nSome(Num(2.0))\nabc|{}\n404\nfalse\n",
+            "200\ntrue\nhello world\ntext/plain\nSome(\"yes\")\n[\"a=1; Expires=Wed, 21 Oct 2015 07:28:00 GMT\", \"b=2\"]\n2\n{base}/hello\nthis body arrives in several chunks\nSome(Int(2))\nabc|{}\n404\nfalse\n",
             server.addr
         )
     );

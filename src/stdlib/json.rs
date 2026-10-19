@@ -15,9 +15,7 @@ use crate::vm::bytecode::{JsonIds, Program};
 use crate::vm::compare::{hash_key, str_hash};
 use crate::vm::heap::{Heap, Staging};
 use crate::vm::meter::{BYTES_PER_UNIT, Meter, SLOW_BYTES_PER_UNIT, Scratch};
-use crate::vm::value::{
-    FieldDesc, FxHashMap, KeyTable, MAP_ENTRY_SIZE, MapObj, Obj, TypeDesc, Value, VariantDesc, slot_fits, to_usize_saturating,
-};
+use crate::vm::value::{FieldDesc, FxHashMap, KeyTable, MAP_ENTRY_SIZE, MapObj, Obj, TypeDesc, Value, VariantDesc, slot_fits};
 use crate::vm::{Ctl, NResult, Vm, fail, internal};
 use hashbrown::HashTable;
 use std::borrow::Cow;
@@ -313,6 +311,15 @@ impl Number<'_> {
         self.text.parse().unwrap_or(f64::NAN)
     }
 
+    /// The number as a `json.Json` payload: an `int` if it is written without
+    /// a fraction or exponent and fits (`-0` stays a float, keeping its sign).
+    fn value(&self) -> Value {
+        match self.text.parse::<i64>() {
+            Ok(i) if self.is_int && !(i == 0 && self.text.starts_with('-')) => Value::Int(i),
+            _ => Value::Float(self.float()),
+        }
+    }
+
     /// The value if it is integral and fits in an `int`.
     fn int(&self) -> Option<i64> {
         if self.is_int {
@@ -562,10 +569,7 @@ impl<'a> Parser<'a> {
                 let s = b.st.new_str(&*s);
                 b.st.new_variant(ids.str_, &[s])
             }
-            Some(b'-' | b'0'..=b'9') => {
-                let n = self.number()?.float();
-                b.st.new_variant(ids.num, &[Value::Float(n)])
-            }
+            Some(b'-' | b'0'..=b'9') => json_number(b.st, ids, self.number()?.value()),
             Some(b'[') => {
                 let mut items = Vec::new();
                 self.array(|p, _| {
@@ -1183,8 +1187,8 @@ impl Encoder<'_> {
                 Obj::Tuple(items) => self.array(items.len(), items.iter().copied(), level)?,
                 Obj::Set(s) => self.array(s.live, s.entries.iter().flatten().copied(), level)?,
                 Obj::Range(a, b, inclusive) => {
-                    let end = if *inclusive { b.saturating_add(1) } else { *b };
-                    self.array(to_usize_saturating(end.saturating_sub(*a)), (*a..end).map(Value::Int), level)?
+                    let (n, ints) = range_ints(*a, *b, *inclusive);
+                    self.array(n, ints.map(Value::Int), level)?
                 }
                 Obj::Map(m) => self.object(m.live, m.entries.iter().flatten(), level, |e, &(k, v)| {
                     match heap.get(k) {
@@ -1246,16 +1250,28 @@ impl Encoder<'_> {
     }
 }
 
-/// Integral floats within ±2^53 print without a fraction; non-finite
-/// numbers print as `null`.
+/// Floats print with a fraction or an exponent (`2.0`, `1e20`), so that they
+/// parse back as floats; non-finite numbers print as `null`.
 fn write_float(out: &mut String, f: f64) {
-    if !f.is_finite() {
-        out.push_str("null");
-    } else if f.fract() == 0.0 && f.abs() <= 9007199254740992.0 {
-        let _ = write!(out, "{}", f as i64);
-    } else {
+    if f.is_finite() {
         let _ = write!(out, "{f:?}");
+    } else {
+        out.push_str("null");
     }
+}
+
+/// `Json.Int(n)` or `Json.Float(n)` for a number `n`.
+fn json_number(st: &mut Staging, ids: &JsonIds, n: Value) -> Value {
+    let id = if matches!(n, Value::Int(_)) { ids.int } else { ids.float };
+    st.new_variant(id, &[n])
+}
+
+/// The number and the integers of the range `a..b` (`a..=b` if `inclusive`).
+fn range_ints(a: i64, b: i64, inclusive: bool) -> (usize, impl Iterator<Item = i64>) {
+    let last = if inclusive { Some(b) } else { b.checked_sub(1) };
+    let ints = last.filter(|&last| a <= last).map(|last| a..=last).into_iter().flatten();
+    let n = last.map_or(0, |last| (last as i128 - a as i128 + 1).max(0));
+    (usize::try_from(n).unwrap_or(usize::MAX), ints)
 }
 
 /// The length of `s` as written by [`write_str`].
@@ -1332,12 +1348,11 @@ impl<'a> Converter<'a, '_, '_> {
                 _ => break,
             }
         }
-        let num = |st: &mut Staging, f: f64| st.new_variant(ids.num, &[Value::Float(f)]);
         Ok(match v {
             Value::Unit | Value::Uninit => Value::Tag(ids.null),
             Value::Bool(b) => self.b.st.new_variant(ids.bool_, &[Value::Bool(b)]),
-            Value::Int(i) | Value::Dur(i) => num(self.b.st, i as f64),
-            Value::Float(f) => num(self.b.st, f),
+            Value::Int(i) | Value::Dur(i) => json_number(self.b.st, &ids, Value::Int(i)),
+            Value::Float(_) => json_number(self.b.st, &ids, v),
             Value::Pair(a, b) => self.array([Value::Int(a as i64), Value::Int(b)].into_iter(), depth)?,
             Value::Tag(id) if id == prog.ids.none => Value::Tag(ids.null),
             Value::Tag(id) => {
@@ -1361,11 +1376,10 @@ impl<'a> Converter<'a, '_, '_> {
                 Obj::Tuple(items) => self.array(items.iter().copied(), depth)?,
                 Obj::Set(s) => self.array(s.entries.iter().flatten().copied(), depth)?,
                 Obj::Range(a, b, inclusive) => {
-                    let end = if *inclusive { b.saturating_add(1) } else { *b };
-                    let n = to_usize_saturating(end.saturating_sub(*a));
+                    let (n, ints) = range_ints(*a, *b, *inclusive);
                     self.b.st.reserve(self.b.pending.saturating_add(n.saturating_mul(std::mem::size_of::<Value>())))?;
                     self.b.meter.charge(n as u64)?;
-                    let items = (*a..end).map(|i| num(self.b.st, i as f64)).collect();
+                    let items = ints.map(|i| json_number(self.b.st, &ids, Value::Int(i))).collect();
                     let list = self.b.st.new_list(items);
                     self.b.st.new_variant(ids.arr, &[list])
                 }

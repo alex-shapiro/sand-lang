@@ -89,8 +89,11 @@ fn parse_literal(text: str) -> Json? {
         and (t.starts_with("\"") and t.ends_with("\"") or t.starts_with("'") and t.ends_with("'")) {
         return Some(Json.Str(t[1..t.len() - 1]))
     }
-    if let Some(n) = t.parse_float() {
-        return Some(Json.Num(n))
+    if let Some(i) = t.parse_int() {
+        return Some(Json.Int(i))
+    }
+    if let Some(f) = t.parse_float() {
+        return Some(Json.Float(f))
     }
     match t {
         "true" => Some(Json.Bool(true))
@@ -271,7 +274,8 @@ fn truthy(v: Json) -> bool {
     match v {
         Null => false
         Bool(b) => b
-        Num(n) => n != 0.0
+        Int(i) => i != 0
+        Float(f) => f != 0.0
         Str(s) => not s.is_empty()
         Arr(items) => not items.is_empty()
         Obj(fields) => not fields.is_empty()
@@ -282,7 +286,8 @@ fn display(v: Json) -> str {
     match v {
         Null => ""
         Bool(b) => b.to_str()
-        Num(n) => if n == n.round() and n.abs() < 1e15 { n.to_int().to_str() } else { n.to_str() }
+        Int(i) => i.to_str()
+        Float(f) => if f == f.round() and f.abs() < 1e15 { f.to_int().to_str() } else { f.to_str() }
         Str(s) => s
         other => json.encode(other)
     }
@@ -301,11 +306,11 @@ fn apply_filter(v: Json, f: Filter) -> Result<Json> {
             Some(c) => c.to_upper() + w[c.len()..]
             None => w
         }).join(" ")))
-        "length" => Ok(Json.Num(match v {
-            Str(s) => s.char_count().to_float()
-            Arr(items) => items.len().to_float()
-            Obj(fields) => fields.len().to_float()
-            _ => 0.0
+        "length" => Ok(Json.Int(match v {
+            Str(s) => s.char_count()
+            Arr(items) => items.len()
+            Obj(fields) => fields.len()
+            _ => 0
         }))
         "default" => Ok(if truthy(v) { v } else { arg ?? Json.Str("") })
         "join" => {
@@ -331,22 +336,22 @@ fn eval_expr(e: Expr, scope: Scope) -> Result<Json> {
 
 fn compare(op: str, a: Json, b: Json) -> bool {
     match (a, b) {
-        (Num(x), Num(y)) => match op {
-            "==" => x == y
-            "!=" => x != y
-            "<" => x < y
-            "<=" => x <= y
-            ">" => x > y
-            _ => x >= y
+        (Int(x), Int(y)) => ordered(op, x, y)
+        _ => match (a.as_float(), b.as_float()) {
+            (Some(x), Some(y)) => ordered(op, x, y)
+            _ => ordered(op, display(a), display(b))
         }
-        _ => match op {
-            "==" => display(a) == display(b)
-            "!=" => display(a) != display(b)
-            "<" => display(a) < display(b)
-            "<=" => display(a) <= display(b)
-            ">" => display(a) > display(b)
-            _ => display(a) >= display(b)
-        }
+    }
+}
+
+fn ordered<T: Ord>(op: str, x: T, y: T) -> bool {
+    match op {
+        "==" => x == y
+        "!=" => x != y
+        "<" => x < y
+        "<=" => x <= y
+        ">" => x > y
+        _ => x >= y
     }
 }
 
@@ -367,7 +372,7 @@ fn render_nodes(nodes: [Node], scope: Scope, out: [str]) -> Result<()> {
                 let items = eval_expr(iterable, scope)?.as_list() ?? []
                 for (i, item) in items.enumerate() {
                     let loop_info = Json.Obj([
-                        "index": Json.Num((i + 1).to_float()),
+                        "index": Json.Int(i + 1),
                         "first": Json.Bool(i == 0),
                         "last": Json.Bool(i == items.len() - 1),
                     ])

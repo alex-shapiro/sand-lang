@@ -1,11 +1,14 @@
 //! JSON (RFC 8259): parsing, printing, and conversion between JSON and typed
 //! Sand values.
 
-/// A JSON value. Numbers are floats; object keys keep insertion order.
+/// A JSON value. A number written without a fraction or exponent that fits
+/// in an `int` is an `Int`, any other number a `Float`, so integers keep
+/// every digit. Object keys keep insertion order.
 pub enum Json {
     Null
     Bool(bool)
-    Num(float)
+    Int(int)
+    Float(float)
     Str(str)
     Arr([Json])
     Obj([str: Json])
@@ -34,20 +37,22 @@ pub enum Json {
         }
     }
 
-    /// The value of a number.
+    /// The value of a number, rounded to the nearest float for an `Int`
+    /// beyond ±2^53.
     pub fn as_float(self) -> float? {
         match self {
-            Num(n) => Some(n)
+            Int(i) => Some(i.to_float())
+            Float(f) => Some(f)
             _ => None
         }
     }
 
-    /// The value of a number that is integral and fits in an `int`.
+    /// The value of an `Int`, or of an integral `Float` within ±2^53 (larger
+    /// floats may differ from the integer the JSON text wrote).
     pub fn as_int(self) -> int? {
         match self {
-            Num(n) if n == n.floor()
-                and n >= -9223372036854775808.0
-                and n < 9223372036854775808.0 => Some(n.to_int())
+            Int(i) => Some(i)
+            Float(f) if f == f.floor() and f.abs() <= 9007199254740992.0 => Some(f.to_int())
             _ => None
         }
     }
@@ -107,8 +112,9 @@ pub native fn parse(text: str) -> Result<Json>
 
 /// Encodes any value, including a `Json`, as JSON text (see `to_json` for
 /// the mapping): compact for `indent == 0`, otherwise pretty-printed with
-/// `indent` spaces per level. Non-finite numbers print as `null`. Fails on
-/// values that have no JSON form (functions, tasks, channels).
+/// `indent` spaces per level. Floats print with a fraction or an exponent
+/// (`2.0`), non-finite ones as `null`. Fails on values that have no JSON
+/// form (functions, tasks, channels).
 pub native fn encode<T>(value: T, indent: int = 0) -> str
 
 /// Decodes JSON text into a value of type `T`, which must be known at the

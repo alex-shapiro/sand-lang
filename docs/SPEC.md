@@ -1991,24 +1991,31 @@ pending, then waits; the run's limits and interrupts apply while it waits.
 ### 13.7 `json`
 
 ```
-pub enum Json { Null, Bool(bool), Num(float), Str(str), Arr([Json]), Obj([str: Json]) }
+pub enum Json { Null, Bool(bool), Int(int), Float(float), Str(str), Arr([Json]), Obj([str: Json]) }
 pub native fn parse(text: str) -> Result<Json>
 pub native fn encode<T>(value: T, indent: int = 0) -> str
 pub native fn decode<reflect T>(text: str) -> Result<T>
 pub native fn to_json<T>(value: T) -> Json
 ```
 
+`parse` reads a number written without a fraction or exponent that fits in an
+`int` as an `Int`, exactly; any other number (`1.0`, `1e3`, `-0`, or an
+integer beyond the `int` range) as a `Float`. `Int(1)` and `Float(1.0)` are
+not equal.
+
 `Json` methods: `get(key: str) -> Json?`, `at(i: int) -> Json?`,
-`as_str() -> str?`, `as_float() -> float?`, `as_int() -> int?` (integral
-values only), `as_bool() -> bool?`, `as_list() -> [Json]?`,
+`as_str() -> str?`, `as_float() -> float?` (either number), `as_int() -> int?`
+(an `Int`, or an integral `Float` within ±2^53), `as_bool() -> bool?`, `as_list() -> [Json]?`,
 `as_map() -> [str: Json]?`, `is_null() -> bool`, `path(p: str) -> Json?`
 (dot-separated keys and indices: `"items.0.name"`).
 
 `encode` emits compact JSON for `indent == 0`, otherwise pretty-prints with
-`indent` spaces. Object keys keep insertion order. Non-finite numbers encode as
-`null`. Integral floats within ±2^53 print without a fraction (`1.0` → `1`).
+`indent` spaces. Object keys keep insertion order. Integers encode exactly.
+Floats encode with a fraction or an exponent (`2.0`, `1e20`), so that they
+parse back as floats; non-finite floats encode as `null`.
 
-`encode`/`to_json` map values structurally: `int`/`float` → number, `str` →
+`encode`/`to_json` map values structurally: `int` → number (`Int`), `float`
+→ number (`Float`), `str` →
 string, `bool`, `()` → `null`, lists/sets/tuples → arrays, maps → objects
 (non-`str` keys converted with `to_str`), structs → objects keyed by field
 name, `None` → `null`, `Some(x)` → `x`; other enums: a payload-less variant
