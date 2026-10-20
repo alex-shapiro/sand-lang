@@ -57,6 +57,15 @@ const _: () = assert!(std::mem::size_of::<Ctl>() == std::mem::size_of::<usize>()
 const _: () = assert!(std::mem::size_of::<Result<Value, Ctl>>() == 16);
 const _: () = assert!(std::mem::size_of::<Result<Option<Value>, Ctl>>() == 16);
 
+/// What a suspended task waits for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wait {
+    /// I/O or a timer.
+    Io,
+    /// An action of the user.
+    User,
+}
+
 /// What a [`Ctl`] is.
 pub enum CtlKind {
     /// The script failed with an error, `kind: message`.
@@ -68,7 +77,7 @@ pub enum CtlKind {
     /// Ask the user; the call is retried afterwards.
     NeedPermission(Capability),
     /// Suspend the task until the future completes.
-    Async(BoxFuture),
+    Async(BoxFuture, Wait),
     /// The task waits for the scheduler event that [`Vm::block`]
     /// registered; the call returns what wakes it.
     Blocked,
@@ -114,7 +123,15 @@ impl Ctl {
 
     /// Suspend the task until `fut` completes.
     pub fn suspend(fut: BoxFuture) -> Ctl {
-        Ctl(Box::new(CtlKind::Async(fut)))
+        Ctl(Box::new(CtlKind::Async(fut, Wait::Io)))
+    }
+
+    /// Suspend the task until `fut` completes, which happens when the user
+    /// acts (types a line, taps a control). While the engine has nothing
+    /// else to run, the time spent waiting for the user does not count
+    /// toward the wall-time limit.
+    pub fn suspend_for_user(fut: BoxFuture) -> Ctl {
+        Ctl(Box::new(CtlKind::Async(fut, Wait::User)))
     }
 
     /// Ask the user for `cap`.
@@ -159,7 +176,7 @@ impl std::fmt::Debug for CtlKind {
             CtlKind::Limit(k) => write!(f, "Limit({k:?})"),
             CtlKind::Exit(c) => write!(f, "Exit({c})"),
             CtlKind::NeedPermission(c) => write!(f, "NeedPermission({c})"),
-            CtlKind::Async(_) => write!(f, "Async"),
+            CtlKind::Async(_, wait) => write!(f, "Async({wait:?})"),
             CtlKind::Blocked => write!(f, "Blocked"),
             CtlKind::Yield => write!(f, "Yield"),
             CtlKind::Interrupted => write!(f, "Interrupted"),

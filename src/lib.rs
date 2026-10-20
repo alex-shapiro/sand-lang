@@ -32,7 +32,7 @@ pub use engine::{
     Config, Engine, Error, InterruptHandle, LimitKind, Limits, MemorySink, Outcome, RequestFilter, RequestTarget, TestReport, TestResult,
     TraceFrame,
 };
-pub use feed::StdinFeed;
+pub use feed::{ReadId, StdinFeed};
 pub use files::MemFs;
 pub use native::{Conversion, FromValue, HostError, IntoHostError, IntoValue, ListElem, NativeModule, SandType, TypeContext};
 pub use policy::{Capability, CustomPolicy, Decision, Policy, PromptAnswer, Prompter, RulePolicy};

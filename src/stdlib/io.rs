@@ -116,7 +116,7 @@ fn read_stdin(vm: &mut Vm, what: Read) -> NResult {
         },
         _ => vm.io_reservation(),
     };
-    Err(Ctl::suspend(Box::pin(async move {
+    Err(Ctl::suspend_for_user(Box::pin(async move {
         let result = read_input(&stdin, what, &mut res).await;
         Box::new(move |vm: &mut Vm| -> NResult {
             drop(res);

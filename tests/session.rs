@@ -8,6 +8,8 @@ mod common;
 use common::{TempDir, rt};
 use sandlang::platform::{Clock, ClockFuture, Instant, SystemTime, UNIX_EPOCH};
 use sandlang::session::RESET_NOTE;
+use sandlang::vm::value::Value;
+use sandlang::vm::{BoxFuture, Ctl, Finisher, NResult, Vm};
 use sandlang::{
     Capability, Config, Decision, Engine, Error, LimitKind, Limits, MemorySink, NativeModule, Policy, PromptAnswer, RulePolicy, Session,
     StdinFeed,
@@ -942,15 +944,61 @@ fn a_read_is_awaited_while_other_tasks_run() {
     let Repl { session, rt, .. } = &mut r;
     let (value, ()) = rt.block_on(async {
         let answer = async {
-            feed.awaited(true).await;
+            let read = feed.awaited_changed(None).await.unwrap();
             assert!(!feed.is_wanted());
-            feed.send("move\n");
-            assert!(!feed.is_awaited());
+            assert!(feed.answer(read, "move\n"));
+            assert_eq!(feed.awaited(), None);
         };
         tokio::join!(session.eval(src), answer)
     });
     assert_eq!(value.unwrap().as_deref(), Some("Some(\"move\")"));
-    assert!(!feed.is_awaited());
+    assert_eq!(feed.awaited(), None);
+}
+
+#[test]
+fn each_read_is_answered_on_its_own() {
+    let feed = StdinFeed::new();
+    let mut r = Repl::with(Config::new().policy(Policy::allow_all()).stdin_feed(&feed));
+    r.ok("import io");
+    let src = "let a = io.stdin.read_line()?\nlet b = io.stdin.read_line()?\n[a, b]";
+    let Repl { session, rt, .. } = &mut r;
+    let (value, ()) = rt.block_on(async {
+        let answer = async {
+            let first = feed.awaited_changed(None).await.unwrap();
+            assert!(feed.answer(first, "x\nleft over\n"));
+            let mut awaited = Some(first);
+            let second = loop {
+                awaited = feed.awaited_changed(awaited).await;
+                if let Some(read) = awaited {
+                    break read;
+                }
+            };
+            assert_ne!(first, second);
+            assert!(!feed.answer(first, "late\n"));
+            assert!(feed.answer(second, "y\n"));
+        };
+        tokio::join!(session.eval(src), answer)
+    });
+    assert_eq!(value.unwrap().as_deref(), Some("[Some(\"x\"), Some(\"y\")]"));
+}
+
+#[test]
+fn an_answer_does_not_outlive_its_read() {
+    let feed = StdinFeed::new();
+    let mut r = Repl::with(Config::new().policy(Policy::allow_all()).stdin_feed(&feed));
+    r.ok("import io");
+    let Repl { session, rt, .. } = &mut r;
+    let read = rt.block_on(async {
+        tokio::select! {
+            biased;
+            _ = session.eval("io.stdin.read_line()?") => panic!("the read finished without input"),
+            read = feed.awaited_changed(None) => read.unwrap(),
+        }
+    });
+    session.cancel_tasks();
+    assert!(!feed.answer(read, "stale\n"));
+    feed.send("fresh\n");
+    assert_eq!(r.value("io.stdin.read_line()?"), "Some(\"fresh\")");
 }
 
 #[test]
@@ -982,18 +1030,41 @@ fn a_background_timer_neither_hides_nor_times_out_a_read() {
     let Repl { session, rt, .. } = &mut r;
     let (value, ()) = rt.block_on(async {
         let player = async {
-            feed.awaited(true).await;
+            let read = feed.awaited_changed(None).await.unwrap();
             tokio::select! {
-                () = feed.awaited(false) => panic!("the read stopped waiting"),
+                _ = feed.awaited_changed(Some(read)) => panic!("the read stopped waiting"),
                 () = tokio::time::sleep(Duration::from_secs(10)) => {}
             }
-            feed.send("move\n");
+            assert!(feed.answer(read, "move\n"));
         };
         tokio::join!(session.eval("io.stdin.read_line()?"), player)
     });
     assert_eq!(value.unwrap().as_deref(), Some("Some(\"move\")"));
-    assert!(!feed.is_awaited());
+    assert_eq!(feed.awaited(), None);
     assert!(r.value("ticks").parse::<u32>().unwrap() >= 100);
+}
+
+fn waits_module() -> NativeModule {
+    fn wait(suspend: fn(BoxFuture) -> Ctl) -> NResult {
+        Err(suspend(Box::pin(async {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            Box::new(|_: &mut Vm| Ok(Value::Unit)) as Finisher
+        })))
+    }
+    let mut m = NativeModule::new("waits");
+    m.source("pub native fn user()\npub native fn io()");
+    m.raw_function("user", |_: &mut Vm, _: &[Value]| wait(Ctl::suspend_for_user));
+    m.raw_function("io", |_: &mut Vm, _: &[Value]| wait(Ctl::suspend));
+    m
+}
+
+#[test]
+fn a_host_wait_for_the_user_does_not_count_toward_the_wall_time() {
+    let limits = Limits { max_wall_time: Some(Duration::from_millis(100)), ..Limits::default() };
+    let mut r = Repl::paused(Config::new().module(waits_module()).limits(limits));
+    r.ok("import waits");
+    r.ok("waits.user()");
+    assert!(matches!(r.eval("waits.io()"), Err(Error::Limit(LimitKind::WallTime))));
 }
 
 #[test]
