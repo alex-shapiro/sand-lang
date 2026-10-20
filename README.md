@@ -1,7 +1,9 @@
 # Sand
 
-Sand is a sandboxed bytecode interpreter written in Rust. Its primary goal
-is to be the most ergonomic runtime for safely writing and running untrusted code.
+> [!NOTE]
+> Status: Alpha Software, Handle With Care
+
+Sand is a sandboxed, statically-typed bytecode interpreter written in Rust. Its goal is to be an ergonomic runtime for safely writing and running untrusted code.
 
 ```
 import http
@@ -30,8 +32,8 @@ for p in task.all(pages) {
 ## Highlights
 
 - Sandboxed, with policy-defined limits on the runtime and on resource access
-- Embeddable in a larger process, or in a web page via webassembly
-- Async by default
+- Embeddable in a Rust program, or in a web page via webassembly
+- Async IO by default
 - Support for types and traits
 - Standard library
 - Formatter, linter, and tester built in
@@ -53,25 +55,18 @@ sand check script.sand
 sand lint script.sand
 sand fmt script.sand
 sand test script.sand
-sand playground # the web playground on localhost
+sand playground
 ```
 
-The `sand run` command lets you apply a policy with either a policy file or with args.
+The `sand run` command can run with a security policy. See the [policy file spec §14.7]('docs/SPEC.md) for the full set of policy options ([`docs/SPEC.md` §14.7](docs/SPEC.md)).
 
 ```sh
 sand run script.sand --policy=app.policy
-sand run script.sand --allow-read=./data --allow-net=api.example.com -- arg1 arg2
-sand run script.sand --allow-net='*' --allow-private-net
-sand run script.sand --prompt # prompt the user whenever they Sand tries to access a new resource
 ```
-
-See the [policy file spec §14.7]('docs/SPEC.md) for the full set of policy options ([`docs/SPEC.md` §14.7](docs/SPEC.md)).
 
 ## Embedding
 
-Multiple sand-lang interpreters can be embedded in a larger Rust program.
-By default, an interpreter imports modules that permit policy-approved access
-to OS resources like the filesystem and network.
+A sand-lang interpreter can be embedded in Rust and import native modules:
 
 ```rust
 use sandlang::{Config, Engine, Limits, NativeModule, Policy, RulePolicy};
@@ -79,25 +74,19 @@ use sandlang::{Config, Engine, Limits, NativeModule, Policy, RulePolicy};
 let mut geo = NativeModule::new("geo");
 geo.function("dist", |a: f64, b: f64| -> f64 { (a * a + b * b).sqrt() });
 
-let config = Config::new()
-    .policy(Policy::rules(RulePolicy::new().allow_read("/srv/data")))
-    .limits(Limits { max_memory: Some(64 << 20), ..Limits::default() })
-    .module(geo);
-let mut engine = Engine::new(config);
-let outcome = engine.run_source("main.sand", "import geo\nprint(geo.dist(3.0, 4.0))").await?;
+let mut engine = Engine::new(Config::new().module(geo));
 let mut session = engine.session();
-session.eval("import geo\nlet d = geo.dist(3.0, 4.0)").await?;
-assert_eq!(session.eval("d * 2.0").await?, Some("10.0".to_string()));
+let result = session.eval("import geo\ngeo.dist(3.0, 4.0)").await?;
+assert_eq!(result, Some("5.0".to_string()));
 ```
 
 ## In the browser
 
-Sand runs on WebAssembly. You can try it out with the Sand Playground.
-More info at [`playground/README.md`](playground/README.md).
+Sand runs on WebAssembly. You can try it out with the Sand Playground. More info at [`playground/README.md`](playground/README.md).
 
 ```sh
-playground/build.sh # builds the engine for the web (needs wasm-bindgen-cli)
-sand playground     # serves it at http://127.0.0.1:8000/
+playground/build.sh
+sand playground
 ```
 
 ## Examples

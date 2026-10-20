@@ -7,8 +7,8 @@ resolver = "3"
 name = "sandlang"
 version = "0.1.0"
 edition = "2024"
-description = "Sand: a sandboxed, statically typed scripting language with a fast bytecode VM"
-license = "MIT OR Apache-2.0"
+description = "A sandboxed, statically typed bytecode interpreter"
+license = "AGPLv3"
 
 [lib]
 name = "sandlang"
@@ -16,12 +16,7 @@ path = "src/lib.rs"
 
 [features]
 default = ["os"]
-# Access to the host operating system: its file system (otherwise the `fs`
-# module and script imports use an in-memory file system, `MemFs`), network
-# sockets (the `net` and `http` modules), the process's standard input and
-# environment. Not available on wasm32-unknown-unknown.
 os = ["dep:rustix", "dep:fs_at", "dep:same-file", "dep:winx", "tokio/net", "tokio/io-std", "tokio/macros"]
-# TLS for `https` and `net.connect_tls` (rustls with ring).
 tls = ["os", "dep:rustls", "dep:tokio-rustls", "dep:webpki-roots"]
 
 [dependencies]
@@ -39,12 +34,9 @@ getrandom = "0.4"
 hashbrown = { version = "0.16", default-features = false, features = ["inline-more"] }
 compact_str = { version = "0.9", default-features = false }
 
-# Everywhere but the web: timers come from tokio.
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
 tokio = { version = "1", features = ["time"] }
 
-# The web (wasm32-unknown-unknown in a JavaScript host): the clock, timers
-# and entropy come from JavaScript.
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 getrandom = { version = "0.4", features = ["wasm_js"] }
 web-time = "1.1"
@@ -58,7 +50,6 @@ rustix = { version = "1.1.5", optional = true, default-features = false, feature
 [target.'cfg(windows)'.dependencies]
 fs_at = { version = "0.2.1", optional = true }
 same-file = { version = "1.0.6", optional = true }
-# Reads link targets and final paths through handles (`files/windows.rs`).
 winx = { version = "0.36", optional = true }
 
 [dev-dependencies]
