@@ -1,7 +1,9 @@
 //! Natives for the prelude and the `task` module.
 
 use crate::engine::Registry;
-use crate::vm::compare::{find_key, hash_key, set_slot, try_sort_by, try_sort_numbers, values_cmp_metered, values_eq_metered};
+use crate::vm::compare::{
+    find_key, hash_key, set_slot, try_sort_by, try_sort_numbers, try_sort_packed, values_cmp_metered, values_eq_metered,
+};
 use crate::vm::heap::Heap;
 use crate::vm::value::*;
 use crate::vm::{BlockOn, Ctl, NResult, Vm, fail, internal};
@@ -634,6 +636,9 @@ fn index_check(i: i64, len: usize, inclusive: bool) -> Result<usize, Ctl> {
 fn sort_values(vm: &Vm, items: &mut [Value]) -> Result<(), Ctl> {
     produce(vm, items.len(), 0)?; // scratch for the merge sort
     if let Some(r) = try_sort_numbers(items, &vm.meter) {
+        return r;
+    }
+    if let Some(r) = try_sort_packed(items, &vm.heap, &vm.meter) {
         return r;
     }
     let (prog, heap, meter) = (&vm.prog, &vm.heap, &vm.meter);

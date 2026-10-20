@@ -16,7 +16,7 @@ path = "src/lib.rs"
 
 [features]
 default = ["os"]
-os = ["dep:rustix", "dep:fs_at", "dep:same-file", "dep:winx", "tokio/net", "tokio/io-std", "tokio/macros"]
+os = ["dep:rustix", "dep:fs_at", "dep:same-file", "dep:winx", "tokio/net", "tokio/io-std", "tokio/macros", "jiff/tz-system"]
 tls = ["os", "dep:rustls", "dep:tokio-rustls", "dep:webpki-roots"]
 
 [dependencies]
@@ -33,6 +33,7 @@ hmac = { version = "0.13", default-features = false }
 getrandom = "0.4"
 hashbrown = { version = "0.16", default-features = false, features = ["inline-more"] }
 compact_str = { version = "0.9", default-features = false }
+jiff = { version = "0.2.38", default-features = false, features = ["std", "tzdb-bundle-always", "perf-inline"] }
 
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
 tokio = { version = "1", features = ["time"] }

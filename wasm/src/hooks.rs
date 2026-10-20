@@ -165,6 +165,7 @@ fn describe(cap: &Capability) -> (&'static str, String) {
         Capability::NetListen(a) => ("listen", a.clone()),
         Capability::Env(n) => ("env", n.clone()),
         Capability::Stdin => ("stdin", String::new()),
+        Capability::TimeZone => ("timezone", String::new()),
         Capability::Stdout => ("stdout", String::new()),
         Capability::Stderr => ("stderr", String::new()),
         Capability::Custom { name, detail } => ("custom", format!("{name} {detail}")),

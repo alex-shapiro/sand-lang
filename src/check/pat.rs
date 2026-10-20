@@ -604,7 +604,7 @@ impl Checker {
                 match &def.kind {
                     TypeDefKind::Enum { variants } => Some((0..variants.len()).map(|i| SCtor::Variant(d, i as u32)).collect()),
                     TypeDefKind::Struct { fields } => Some(vec![SCtor::Struct(fields.len(), Some(d))]),
-                    TypeDefKind::Opaque => None,
+                    TypeDefKind::Opaque(_) => None,
                 }
             }
             Ty::List(_) => {

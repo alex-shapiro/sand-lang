@@ -5,6 +5,7 @@ mod playground;
 mod repl;
 
 use sandlang::policy::{PolicyFile, parse_duration, parse_size};
+use sandlang::time::TimeZone;
 use sandlang::{Capability, Config, Decision, Engine, Error, Policy, PromptAnswer};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -40,6 +41,7 @@ RUN, TEST AND REPL OPTIONS (all access is denied unless allowed):
     --allow-listen=ADDRS     addresses the script may listen on (host:port, port 0 = any)
     --allow-env=NAMES        environment variables the script may read
     --allow-stdin            allow reading standard input
+    --allow-timezone         allow reading the local time zone (otherwise UTC)
     --allow-all              allow everything (trusted scripts only)
     --prompt                 ask on the terminal for anything not allowed
     --max-memory=SIZE        heap limit, e.g. 256M (default 512M)
@@ -183,10 +185,13 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
                     rules = rules.allow_env(&n);
                 }
             }
-            "--allow-stdin" | "--allow-all" | "--allow-private-net" | "--prompt" | "--prompt-stdin" if value.is_some() => {
+            "--allow-stdin" | "--allow-timezone" | "--allow-all" | "--allow-private-net" | "--prompt" | "--prompt-stdin"
+                if value.is_some() =>
+            {
                 return Err(format!("{flag} does not take a value"));
             }
             "--allow-stdin" => rules = rules.allow_stdin(),
+            "--allow-timezone" => rules = rules.allow_timezone(),
             "--allow-private-net" => allow_private_net = true,
             "--allow-all" => allow_all = true,
             "--prompt" => prompt = prompt.or(Some(PromptVia::Terminal)),
@@ -240,6 +245,9 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
     }
     if let Some(s) = seed {
         config = config.seed(s);
+    }
+    if let Some(zone) = TimeZone::system() {
+        config = config.time_zone(zone);
     }
     let script_stdin = prompt != Some(PromptVia::Stdin);
     Ok(RunOptions { config, file, script_args, script_stdin })

@@ -238,7 +238,7 @@ fn concurrent_http_requests() {
         r#"
 import http
 import time
-let start = time.monotonic()
+let start = time.stopwatch()
 let ts = (0..8).map(i => spawn http.get("{base}/" + i.to_str()))
 print(task.all(ts).map(r => r.unwrap().text().unwrap()))
 print(start.elapsed() < 350ms)

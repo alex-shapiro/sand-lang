@@ -148,6 +148,7 @@ fn cmp_small(prog: &Program, heap: &Heap, a: Value, b: Value, depth: u32, w: &mu
                 Ordering::Equal => fields(p, q, w)?,
                 o => o,
             },
+            (x, y) if let (Some(p), Some(q)) = (x.value(), y.value()) => p.value_cmp(q)?,
             _ => return None,
         },
         _ => {
@@ -185,6 +186,7 @@ fn eq_small(heap: &Heap, a: Value, b: Value, depth: u32, w: &mut Small) -> Optio
             (Obj::Tuple(p), Obj::Tuple(q)) => fields(p, q, w)?,
             (Obj::Struct(d1, p), Obj::Struct(d2, q)) | (Obj::Variant(d1, p), Obj::Variant(d2, q)) => d1 == d2 && fields(p, q, w)?,
             (Obj::List(p), Obj::List(q)) if p.len().max(q.len()) <= SMALL_LIST => fields(p, q, w)?,
+            (x, y) if let (Some(p), Some(q)) = (x.value(), y.value()) => p.value_eq(q),
             _ => return None,
         },
         (Value::Obj(_), _) | (_, Value::Obj(_)) => false,
@@ -346,6 +348,11 @@ pub fn values_eq_metered(heap: &Heap, budget: &impl Budget, a: Value, b: Value) 
             }
             (Obj::Range(a1, b1, i1), Obj::Range(a2, b2, i2)) => {
                 if (a1, b1, i1) != (a2, b2, i2) {
+                    return Ok(false);
+                }
+            }
+            (x, y) if let (Some(p), Some(q)) = (x.value(), y.value()) => {
+                if !p.value_eq(q) {
                     return Ok(false);
                 }
             }
@@ -706,6 +713,7 @@ fn leaf_hash(heap: &Heap, budget: &impl Budget, v: Value) -> Result<Option<u64>,
                 h.write_i64(*b);
                 h.write_u8(*incl as u8);
             }
+            o if let Some(x) = o.value() => return Ok(Some(x.value_hash())),
             // Identity types (tasks, channels, ...).
             _ => {
                 h.write_u8(11);
@@ -855,12 +863,20 @@ pub fn values_cmp_metered(prog: &Program, heap: &Heap, budget: &impl Budget, a: 
             budget.charge(1)?;
             return Ok(x.cmp(&y));
         }
-        (Value::Obj(_), Value::Obj(_)) => {
-            if let (Obj::Str(p), Obj::Str(q)) = (heap.get(a), heap.get(b)) {
+        (Value::Obj(_), Value::Obj(_)) => match (heap.get(a), heap.get(b)) {
+            (Obj::Str(p), Obj::Str(q)) => {
                 budget.charge(1 + (p.len().min(q.len()) / super::meter::BYTES_PER_UNIT) as u64)?;
                 return Ok(p.as_bytes().cmp(q.as_bytes()));
             }
-        }
+            (x, y)
+                if let (Some(p), Some(q)) = (x.value(), y.value())
+                    && let Some(o) = p.value_cmp(q) =>
+            {
+                budget.charge(1)?;
+                return Ok(o);
+            }
+            _ => {}
+        },
         _ => {}
     }
     let mut w = Small::default();
@@ -941,6 +957,10 @@ pub fn values_cmp_metered(prog: &Program, heap: &Heap, budget: &impl Budget, a: 
                                     Ordering::Equal
                                 }
                                 (Obj::Range(a1, b1, _), Obj::Range(a2, b2, _)) => (a1, b1).cmp(&(a2, b2)),
+                                (x, y) if let (Some(p), Some(q)) = (x.value(), y.value()) => match p.value_cmp(q) {
+                                    Some(o) => o,
+                                    None => return Err(Ctl::internal(format!("{} values are not ordered", p.type_name()))),
+                                },
                                 _ => x.cmp(&y),
                             }
                         }
@@ -989,6 +1009,24 @@ pub fn values_le_metered(prog: &Program, heap: &Heap, budget: &impl Budget, a: V
     })
 }
 
+/// If all elements in `v` have the same packed value type with `ordered_bits`,
+/// sorts `v` by its packed bits. Returns `None` otherwise.
+pub fn try_sort_packed(v: &mut [Value], heap: &Heap, budget: &impl Budget) -> Option<Result<(), Ctl>> {
+    let packed = |x: &Value| match x {
+        Value::Obj(h) => match heap.obj(*h) {
+            Obj::Packed(t, bits) => Some((*t, *bits)),
+            _ => None,
+        },
+        _ => None,
+    };
+    let (first, _) = packed(v.first()?)?;
+    if !first.ordered_bits || !v.iter().all(|x| packed(x).is_some_and(|(t, _)| t.is_same_type(first))) {
+        return None;
+    }
+    let key = |x: Value| (packed(&x).map_or([0; 2], |(_, bits)| bits), x);
+    Some(sort_keys(v, budget, key, |(_, x)| x, |a: &([u64; 2], Value), b| a.0.cmp(&b.0)))
+}
+
 /// Sorts a list whose elements are all ints, all floats or all durations
 /// without the generic comparator; `None` for other lists. The work is
 /// charged to `budget` before each bounded step (sorting one chunk, or one
@@ -1012,7 +1050,7 @@ pub fn try_sort_numbers(v: &mut [Value], budget: &impl Budget) -> Option<Result<
 fn sort_keys<K: Copy>(
     v: &mut [Value],
     budget: &impl Budget,
-    key: fn(Value) -> K,
+    key: impl Fn(Value) -> K,
     value: fn(K) -> Value,
     cmp: fn(&K, &K) -> Ordering,
 ) -> Result<(), Ctl> {

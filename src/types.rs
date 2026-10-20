@@ -591,7 +591,15 @@ pub struct VariantDef {
 pub enum TypeDefKind {
     Struct { fields: Vec<FieldDef> },
     Enum { variants: Vec<VariantDef> },
-    Opaque,
+    Opaque(Option<ValueTypeInfo>),
+}
+
+/// Metadata for a registered [`crate::vm::value::ValueType`].
+#[derive(Clone, Copy, Debug)]
+pub struct ValueTypeInfo {
+    pub ord: bool,
+    pub parse: crate::vm::value::ParseValue,
+    pub type_id: std::any::TypeId,
 }
 
 #[derive(Clone, Debug)]

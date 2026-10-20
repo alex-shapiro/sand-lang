@@ -1090,6 +1090,10 @@ impl Heap {
         }
     }
 
+    pub fn value<T: ValueType>(&self, v: Value) -> Option<T> {
+        value_of(self.get(v))
+    }
+
     pub fn native_mut<T: 'static>(&mut self, v: Value) -> Option<&mut T> {
         // Native objects hold no values: no write barrier needed.
         let Value::Obj(h) = v else { panic!("internal error: not an object") };

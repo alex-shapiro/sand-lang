@@ -836,7 +836,7 @@ impl Ctx<'_> {
                 let tys: Vec<TypeId> = match &def.kind {
                     TypeDefKind::Struct { fields } => fields.get(i).map(|fd| vec![fd.ty]).unwrap_or_default(),
                     TypeDefKind::Enum { variants } => variants.get(i).map(|v| v.fields.clone()).unwrap_or_default(),
-                    TypeDefKind::Opaque => vec![],
+                    TypeDefKind::Opaque(_) => vec![],
                 };
                 let Some(t) = tys.into_iter().find(|&t| self.holds_resource(t)) else { continue };
                 let ty = self.ck.show(t);

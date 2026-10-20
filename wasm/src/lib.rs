@@ -58,6 +58,8 @@ export interface EngineOptions {
   fileSystemCapacity?: number;
   /** The working directory and module root (default `/`). */
   cwd?: string;
+  /** Time zone returned by `time.local_zone()` if the policy allows `timezone` (default `UTC`). */
+  timeZone?: string;
 }
 
 /** Callbacks of `new Engine(options, hooks)`. */
@@ -69,7 +71,7 @@ export interface EngineHooks {
 }
 
 export interface PromptRequest {
-  kind: "read" | "write" | "import" | "net" | "http" | "listen" | "env" | "stdin" | "stdout" | "stderr" | "custom";
+  kind: "read" | "write" | "import" | "net" | "http" | "listen" | "env" | "stdin" | "stdout" | "stderr" | "timezone" | "custom";
   target: string;
   /** e.g. "read /data/a.txt" */
   description: string;
@@ -137,7 +139,7 @@ export interface FileEntry { path: string; data: Uint8Array; }
 "#;
 
 /// The fields of `EngineOptions` (unknown ones, typically misspelt, are denied).
-const OPTION_KEYS: &[&str] = &["policy", "files", "env", "args", "stdin", "seed", "fileSystemCapacity", "cwd"];
+const OPTION_KEYS: &[&str] = &["policy", "files", "env", "args", "stdin", "seed", "fileSystemCapacity", "cwd", "timeZone"];
 
 /// The JavaScript callbacks of an engine and its sessions, unregistered when
 /// the last of them is freed.
@@ -198,6 +200,10 @@ impl Engine {
         }
         if let Some(seed) = number_option(&options, "seed")? {
             config = config.seed(seed as u64);
+        }
+        if let Some(name) = string_option(&options, "timeZone")? {
+            let zone = sandlang::time::TimeZone::get(&name).ok_or_else(|| error(&format!("unknown timeZone {name:?}")))?;
+            config = config.time_zone(zone);
         }
         let engine = sandlang::Engine::new(config);
         let interrupt = engine.interrupt_handle();
@@ -487,6 +493,12 @@ const HIGHLIGHT_KINDS: [sandlang::syntax::highlight::Highlight; 9] = {
 #[wasm_bindgen(js_name = highlightKinds)]
 pub fn highlight_kinds() -> Vec<String> {
     HIGHLIGHT_KINDS.iter().map(|k| k.name().to_string()).collect()
+}
+
+/// Returns true if `name` is a supported time zone.
+#[wasm_bindgen(js_name = isTimeZone)]
+pub fn is_time_zone(name: &str) -> bool {
+    sandlang::time::TimeZone::get(name).is_some()
 }
 
 /// The version of Sand.

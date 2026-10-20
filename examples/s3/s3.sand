@@ -171,7 +171,7 @@ pub fn canonical_query(query: [(str, str)]) -> str {
 }
 
 /// Computes the SigV4 headers (including `authorization`) for a request.
-pub fn sign(req: SignedRequest, creds: Credentials, region: str, now: time.DateTime) -> [str: str] {
+pub fn sign(req: SignedRequest, creds: Credentials, region: str, now: time.Instant) -> [str: str] {
     let amz_date = now.format("%Y%m%dT%H%M%SZ")
     let date = now.format("%Y%m%d")
     let payload_hash = hex_sha256(req.payload)
@@ -254,7 +254,7 @@ test "signature matches the AWS documentation example" {
         headers: ["Range": "bytes=0-9"],
         payload: b"",
     }
-    let now = time.parse("2013-05-24T00:00:00Z").unwrap()
+    let now = time.Instant.parse("2013-05-24T00:00:00Z").unwrap()
     let headers = sign(req, creds, "us-east-1", now)
     let auth = headers["authorization"]
     assert(

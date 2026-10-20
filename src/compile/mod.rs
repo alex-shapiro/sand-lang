@@ -341,7 +341,7 @@ pub(crate) fn compile_more(mut input: CompileInput, prog: &mut Program, inc: &mu
         dict_consts: std::mem::take(&mut inc.dict_consts),
         descs: std::mem::take(&mut inc.descs),
         errors: Vec::new(),
-        recv_native: input.natives.get("Channel.recv").copied(),
+        recv_native: input.natives.fns.get("Channel.recv").copied(),
         inline: HashMap::new(),
         bodies,
         order,
@@ -381,7 +381,7 @@ impl<'a> Compiler<'a> {
             ("str.is_upper", Inline::StrClass(4)),
             ("str.is_lower", Inline::StrClass(5)),
         ] {
-            if let Some(&id) = input.natives.get(name).filter(|_| self.optimize) {
+            if let Some(&id) = input.natives.fns.get(name).filter(|_| self.optimize) {
                 self.inline.insert(id, op);
             }
         }

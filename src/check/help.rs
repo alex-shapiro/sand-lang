@@ -858,16 +858,16 @@ impl Checker {
         s
     }
 
-    /// `enum Json`, or `enum json.Json` with `qualify`.
     fn type_header(&self, d: TypeDefId, qualify: bool) -> String {
         let def = &self.types[d as usize];
-        let kw = match def.kind {
-            TypeDefKind::Struct { .. } => "struct",
-            TypeDefKind::Enum { .. } => "enum",
-            TypeDefKind::Opaque => "type",
+        let (kw, bounds) = match def.kind {
+            TypeDefKind::Struct { .. } => ("struct", ""),
+            TypeDefKind::Enum { .. } => ("enum", ""),
+            TypeDefKind::Opaque(Some(v)) => ("type", if v.ord { ": Ord + Hash" } else { ": Hash" }),
+            TypeDefKind::Opaque(None) => ("type", ""),
         };
         let prefix = if qualify { self.module_prefix(def.module) } else { String::new() };
-        format!("{kw} {prefix}{}", self.type_header_name(d))
+        format!("{kw} {prefix}{}{bounds}", self.type_header_name(d))
     }
 
     /// `Iterator<T>`

@@ -309,7 +309,8 @@ impl Builder<'_, '_> {
                     .collect();
                 TypeDesc::Enum { id, name, variants }
             }
-            TypeDefKind::Opaque => TypeDesc::Unsupported(name_of(def.name)),
+            TypeDefKind::Opaque(Some(v)) => TypeDesc::Value { name, parse: v.parse },
+            TypeDefKind::Opaque(None) => TypeDesc::Unsupported(name_of(def.name)),
         };
         // Descriptions made inside this instance are not reused outside it.
         for k in self.open_at.pop().unwrap_or_default() {

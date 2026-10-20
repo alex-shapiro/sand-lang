@@ -66,6 +66,16 @@ Follow-up work, roughly in priority order.
 
 ### Language
 
+- [ ] **Construct all types with `T(...)`.** Replace struct literals with
+      named-argument calls (`Point(x: 1.0, y: 2.0)`, with defaults and
+      `..base`) and struct patterns with `Point(x, ..)`. Allow a type to
+      declare an `init` method (or a native `init` for a native type) that
+      replaces field-by-field construction and can return a `Result`. Inside
+      `init`, `Self(...)` performs field-by-field construction. Remove
+      module-level constructor functions (`time.date`, `regex.new`,
+      `random.rng`, `task.channel`, `set`, `error`) and the parser restriction
+      on struct literals in `if`, `while`, `match`, and `for` headers. Keep
+      static factory methods (`T.parse`, `T.from_x`).
 - [ ] Trait objects (`dyn Trait`), associated types and constants, and
       blanket impls (`impl<T> X for T`).
 - [ ] Trait bounds on struct/enum type parameters.

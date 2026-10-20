@@ -243,6 +243,7 @@ pub struct Config {
     pub(crate) clock: Arc<dyn Clock>,
     #[cfg(feature = "os")]
     pub(crate) network: Option<Arc<dyn crate::network::Network>>,
+    pub(crate) time_zone: Option<crate::time::TimeZone>,
 }
 
 /// HTTP request destination.
@@ -291,6 +292,7 @@ impl Config {
             clock: Arc::new(SystemClock),
             #[cfg(feature = "os")]
             network: None,
+            time_zone: None,
         }
     }
 
@@ -391,6 +393,12 @@ impl Config {
     /// A virtual environment (instead of the host process environment).
     pub fn env(mut self, vars: Vec<(String, String)>) -> Self {
         self.env = Some(vars);
+        self
+    }
+    /// Sets the time zone returned by `time.local_zone()` if the policy allows
+    /// [`Capability::TimeZone`]. Defaults to `UTC`.
+    pub fn time_zone(mut self, zone: crate::time::TimeZone) -> Self {
+        self.time_zone = Some(zone);
         self
     }
     pub fn seed(mut self, s: u64) -> Self {
@@ -539,6 +547,9 @@ impl Registry {
             partial: Mutex::default(),
         };
         for m in &config.modules {
+            m.register_value_types(&mut r);
+        }
+        for m in &config.modules {
             m.register(&mut r);
         }
         // A host module replacing a standard one needs a snapshot of its own.
@@ -552,7 +563,19 @@ impl Registry {
         let name = name.into();
         let id = self.natives.len() as u32;
         Arc::make_mut(&mut self.natives).push(NativeEntry { name: name.clone(), imp });
-        Arc::make_mut(&mut self.by_name).insert(name, id);
+        Arc::make_mut(&mut self.by_name).fns.insert(name, id);
+    }
+
+    pub fn add_value_type<T: crate::vm::value::ValueType>(&mut self) {
+        let module = T::MODULE;
+        crate::vm::value::check_value_type_name::<T>();
+        let info = crate::types::ValueTypeInfo {
+            ord: T::ORDER.is_some(),
+            parse: crate::vm::value::parse_value::<T>,
+            type_id: std::any::TypeId::of::<T>(),
+        };
+        let old = Arc::make_mut(&mut self.by_name).values.insert(format!("{module}.{}", T::NAME).into(), info);
+        assert!(old.is_none(), "value type {module}.{} registered twice", T::NAME);
     }
 
     pub fn add_builtin(&mut self, name: impl Into<Cow<'static, str>>, f: crate::vm::NativeFn) {
@@ -966,6 +989,7 @@ impl Engine {
             origin: self.origin,
             #[cfg(feature = "os")]
             network: c.network.clone().unwrap_or_else(|| Arc::new(crate::network::OsNetwork)),
+            time_zone: c.time_zone.as_ref().map(|z| z.zone().clone()),
         };
         let mut vm = Vm::new(prog, self.registry.natives.clone(), host);
         vm.io = IoTable::with_shared(self.shared.clone());

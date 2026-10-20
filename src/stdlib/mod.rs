@@ -26,7 +26,7 @@ mod regex;
 mod statistics;
 mod stream;
 mod test;
-mod time;
+pub(crate) mod time;
 mod uri;
 mod uuid;
 

@@ -227,7 +227,7 @@ print(results)
 
 === sleep timing is honored
 import time
-let start = time.monotonic()
+let start = time.stopwatch()
 task.sleep(30ms)
 print(start.elapsed() >= 30ms)
 --- stdout

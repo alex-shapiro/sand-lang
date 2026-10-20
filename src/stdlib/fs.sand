@@ -13,7 +13,7 @@ pub struct Metadata {
     is_file: bool
     is_dir: bool
     /// Last modification time, if the platform records it.
-    modified: time.DateTime?
+    modified: time.Instant?
 }
 
 /// How `open` opens a file.
@@ -156,7 +156,7 @@ pub fn metadata(path: str) -> Result<Metadata> {
 }
 
 fn to_metadata(size: int, is_file: bool, is_dir: bool, modified: int?) -> Metadata {
-    Metadata { size, is_file, is_dir, modified: modified.map(n => time.DateTime { unix_nanos: n }) }
+    Metadata { size, is_file, is_dir, modified: modified.map(time.Instant.from_epoch_nanos) }
 }
 
 /// `(size, is_file, is_dir, modified)`, the modification time in
