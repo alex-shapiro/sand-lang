@@ -431,9 +431,9 @@ test "addition is commutative" {
 
 The name is a string literal without interpolation. Test blocks are ignored by
 `run` and executed by the test runner (§17.4). Inside a test block, the `test`
-module (§13.14) and its public items, such as `assert_eq`, are in scope
-without an import, after the names of the module and the prelude, and `?` propagates `None` and
-`Err` to fail the test (§6.8).
+module (§13.14) and its public items are imported automatically, at lower
+precedence than module definitions and the prelude. `?` propagates `None`
+and `Err` as test failures (§6.8).
 
 ### 4.9 Traits and impls
 

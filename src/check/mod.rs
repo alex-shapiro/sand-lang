@@ -1581,43 +1581,43 @@ impl Checker {
         t
     }
 
-    /// Looks up a name in the current module scope, then the prelude.
+    /// Resolves `name` in the current module scope, the prelude, built-in types,
+    /// and (inside a `test` block) the `test` module.
     pub fn lookup_global(&mut self, name: &str) -> Option<Def> {
         let sym = self.syms.get(name);
-        let m = self.cur_mod as usize;
-        if let Some(s) = sym
-            && let Some(b) = self.mods[m].scope.get(&s)
+        let cur_mod = self.cur_mod as usize;
+        if let Some(sym) = sym
+            && let Some(binding) = self.mods[cur_mod].scope.get(&sym)
         {
-            let d = b.def;
+            let def = binding.def;
             self.note_name_used(name);
-            return Some(d);
+            return Some(def);
         }
         if name == "task"
-            && let Some(t) = self.task_mod
-            && t != self.cur_mod
+            && let Some(task_mod) = self.task_mod
+            && task_mod != self.cur_mod
         {
-            return Some(Def::Module(t));
+            return Some(Def::Module(task_mod));
         }
         if name == "test"
             && matches!(self.fs.ctx.first().map(|c| c.kind), Some(CtxKind::Test))
-            && let Some(t) = self.module_named("test")
+            && let Some(test_mod) = self.module_named("test")
         {
-            return Some(Def::Module(t));
+            return Some(Def::Module(test_mod));
         }
-        if let (Some(s), Some(p)) = (sym, self.prelude)
-            && p != self.cur_mod
-            && let Some(Binding { def, is_pub: true, .. }) = self.mods[p as usize].scope.get(&s)
+        if let (Some(sym), Some(prelude)) = (sym, self.prelude)
+            && prelude != self.cur_mod
+            && let Some(Binding { def, is_pub: true, .. }) = self.mods[prelude as usize].scope.get(&sym)
         {
             return Some(*def);
         }
-        if let Some(t) = builtin_type(name) {
-            return Some(Def::Type(t));
+        if let Some(ty) = builtin_type(name) {
+            return Some(Def::Type(ty));
         }
-        // A test block also sees the public items of the `test` module, after every other scope.
-        if let Some(s) = sym
+        if let Some(sym) = sym
             && matches!(self.fs.ctx.first().map(|c| c.kind), Some(CtxKind::Test))
-            && let Some(t) = self.module_named("test")
-            && let Some(Binding { def, is_pub: true, .. }) = self.mods[t as usize].scope.get(&s)
+            && let Some(test_mod) = self.module_named("test")
+            && let Some(Binding { def, is_pub: true, .. }) = self.mods[test_mod as usize].scope.get(&sym)
         {
             return Some(*def);
         }
