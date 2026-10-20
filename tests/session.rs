@@ -6,6 +6,7 @@
 mod common;
 
 use common::{TempDir, rt};
+use sandlang::platform::{Clock, ClockFuture, Instant, SystemTime, UNIX_EPOCH};
 use sandlang::session::RESET_NOTE;
 use sandlang::{
     Capability, Config, Decision, Engine, Error, LimitKind, Limits, MemorySink, NativeModule, Policy, PromptAnswer, RulePolicy, Session,
@@ -32,6 +33,13 @@ impl Repl {
         let err = MemorySink::new();
         let engine = Engine::new(config.stdout(out.clone()).stderr(err.clone()));
         Repl { session: engine.session(), out, err, rt: rt() }
+    }
+
+    fn paused(config: Config) -> Repl {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().start_paused(true).build().unwrap();
+        let clock =
+            PausedClock { origin: Instant::now(), start: rt.block_on(async { tokio::time::Instant::now() }), rt: rt.handle().clone() };
+        Repl { rt, ..Repl::with(config.clock(Arc::new(clock))) }
     }
 
     fn eval(&mut self, src: &str) -> Result<Option<String>, Error> {
@@ -730,6 +738,35 @@ impl Repl {
     }
 }
 
+struct PausedClock {
+    origin: Instant,
+    start: tokio::time::Instant,
+    rt: tokio::runtime::Handle,
+}
+
+impl Clock for PausedClock {
+    fn wall(&self) -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(1_800_000_000) + (self.now() - self.origin)
+    }
+
+    fn now(&self) -> Instant {
+        let _rt = self.rt.enter();
+        self.origin + self.start.elapsed()
+    }
+
+    fn cpu_time(&self) -> Duration {
+        Duration::ZERO
+    }
+
+    fn sleep(&self, duration: Duration) -> ClockFuture {
+        Box::pin(tokio::time::sleep(duration))
+    }
+
+    fn yield_now(&self) -> ClockFuture {
+        Box::pin(tokio::task::yield_now())
+    }
+}
+
 #[test]
 fn tasks_run_between_inputs() {
     let mut r = Repl::new();
@@ -894,6 +931,69 @@ fn scripts_read_the_input_the_host_feeds() {
     feed.send("late\n");
     assert_eq!(r.value("t.wait()?"), "Some(\"late\")");
     assert!(!feed.is_wanted());
+}
+
+#[test]
+fn a_read_is_awaited_while_other_tasks_run() {
+    let feed = StdinFeed::new();
+    let mut r = Repl::with(Config::new().policy(Policy::allow_all()).stdin_feed(&feed));
+    r.ok("import io");
+    let src = "let t = spawn io.stdin.read_line()\nvar n = 0\nwhile not t.is_done() { n += 1 }\nt.wait()?";
+    let Repl { session, rt, .. } = &mut r;
+    let (value, ()) = rt.block_on(async {
+        let answer = async {
+            feed.awaited(true).await;
+            assert!(!feed.is_wanted());
+            feed.send("move\n");
+            assert!(!feed.is_awaited());
+        };
+        tokio::join!(session.eval(src), answer)
+    });
+    assert_eq!(value.unwrap().as_deref(), Some("Some(\"move\")"));
+    assert!(!feed.is_awaited());
+}
+
+#[test]
+fn waiting_for_host_input_does_not_count_toward_the_wall_time() {
+    let feed = StdinFeed::new();
+    let limits = Limits { max_wall_time: Some(Duration::from_millis(100)), ..Limits::default() };
+    let mut r = Repl::paused(Config::new().policy(Policy::allow_all()).limits(limits).stdin_feed(&feed));
+    r.ok("import io");
+    let Repl { session, rt, .. } = &mut r;
+    let (value, ()) = rt.block_on(async {
+        let answer = async {
+            feed.wanted().await;
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            feed.send("late\n");
+        };
+        tokio::join!(session.eval("io.stdin.read_line()?"), answer)
+    });
+    assert_eq!(value.unwrap().as_deref(), Some("Some(\"late\")"));
+    assert!(matches!(r.eval("task.sleep(200ms)"), Err(Error::Limit(LimitKind::WallTime))));
+}
+
+#[test]
+fn a_background_timer_neither_hides_nor_times_out_a_read() {
+    let feed = StdinFeed::new();
+    let limits = Limits { max_wall_time: Some(Duration::from_millis(100)), ..Limits::default() };
+    let mut r = Repl::paused(Config::new().policy(Policy::allow_all()).limits(limits).stdin_feed(&feed));
+    r.ok("import io");
+    r.ok("var ticks = 0\nlet spinner = spawn { while true { task.sleep(50ms)\nticks += 1 } }");
+    let Repl { session, rt, .. } = &mut r;
+    let (value, ()) = rt.block_on(async {
+        let player = async {
+            feed.awaited(true).await;
+            tokio::select! {
+                () = feed.awaited(false) => panic!("the read stopped waiting"),
+                () = tokio::time::sleep(Duration::from_secs(10)) => {}
+            }
+            feed.send("move\n");
+        };
+        tokio::join!(session.eval("io.stdin.read_line()?"), player)
+    });
+    assert_eq!(value.unwrap().as_deref(), Some("Some(\"move\")"));
+    assert!(!feed.is_awaited());
+    assert!(r.value("ticks").parse::<u32>().unwrap() >= 100);
 }
 
 #[test]

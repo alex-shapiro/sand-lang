@@ -11,7 +11,8 @@ use tokio::sync::Notify;
 /// Standard input that the host sends to scripts
 /// ([`crate::Config::stdin_feed`]). A front end that reads the process's
 /// standard input (such as a REPL) waits for [`StdinFeed::wanted`], reads
-/// what the user types, and passes it on with [`StdinFeed::send`]. Clones
+/// what the user types, and passes it on with [`StdinFeed::send`]. A front
+/// end that shows its own input field watches [`StdinFeed::awaited`]. Clones
 /// share the same input; data is kept until scripts read it.
 #[derive(Clone, Default)]
 pub struct StdinFeed {
@@ -21,7 +22,8 @@ pub struct StdinFeed {
 #[derive(Default)]
 pub(crate) struct Shared {
     state: Mutex<State>,
-    /// Woken whenever [`StdinFeed::is_wanted`] may have changed.
+    /// Woken whenever [`StdinFeed::is_wanted`] or [`StdinFeed::is_awaited`]
+    /// may have changed.
     changed: Notify,
 }
 
@@ -63,11 +65,26 @@ impl StdinFeed {
 
     /// Waits until [`StdinFeed::is_wanted`] is true.
     pub async fn wanted(&self) {
+        self.until(State::wanted).await;
+    }
+
+    /// Whether a script waits for input that has not been sent, whether or
+    /// not its engine has other tasks to run.
+    pub fn is_awaited(&self) -> bool {
+        self.shared.lock().awaited()
+    }
+
+    /// Waits until [`StdinFeed::is_awaited`] is `awaited`.
+    pub async fn awaited(&self, awaited: bool) {
+        self.until(|st| st.awaited() == awaited).await;
+    }
+
+    async fn until(&self, done: impl Fn(&State) -> bool) {
         loop {
             let changed = self.shared.changed.notified();
             let mut changed = std::pin::pin!(changed);
             changed.as_mut().enable();
-            if self.is_wanted() {
+            if done(&self.shared.lock()) {
                 return;
             }
             changed.await;
@@ -81,7 +98,11 @@ impl StdinFeed {
 
 impl State {
     fn wanted(&self) -> bool {
-        self.waiting && self.blocked && self.chunks.is_empty()
+        self.blocked && self.awaited()
+    }
+
+    fn awaited(&self) -> bool {
+        self.waiting && self.chunks.is_empty()
     }
 }
 
@@ -117,6 +138,13 @@ impl Shared {
 
 /// See [`Shared::blocked`].
 pub(crate) struct Blocked(Arc<Shared>);
+
+impl Blocked {
+    /// Whether the engine waits for input from the host ([`StdinFeed::is_wanted`]).
+    pub(crate) fn wants_input(&self) -> bool {
+        self.0.lock().wanted()
+    }
+}
 
 impl Drop for Blocked {
     fn drop(&mut self) {
@@ -160,7 +188,11 @@ impl FedReader {
     /// after it (an end of input is consumed if nothing precedes it).
     pub(crate) fn available(&mut self) -> (&[u8], bool) {
         if self.at == self.buf.len() && !self.ended {
-            match self.shared.lock().chunks.pop_front() {
+            let mut st = self.shared.lock();
+            let chunk = st.chunks.pop_front();
+            // The read has data now; it waits again only if the data is not enough.
+            st.waiting &= chunk.is_none();
+            match chunk {
                 Some(Some(data)) => (self.buf, self.at) = (data, 0),
                 Some(None) => self.ended = true,
                 None => {}

@@ -522,7 +522,7 @@ impl Vm {
             }
             timer.read();
             let blocked = self.host.stdin_feed.as_ref().map(|f| f.blocked());
-            let mut sleep = self.deadline.map(|d| timer.sleep(d.saturating_duration_since(timer.now())));
+            let mut wall = WallWait::new(self.deadline);
             let interrupt = self.host.interrupt.clone();
             let done = std::future::poll_fn(|cx| {
                 let done = self.io.poll_ready(Some(cx.waker()));
@@ -532,19 +532,62 @@ impl Vm {
                 if interrupt.load(Ordering::Relaxed) {
                     return Poll::Ready(vec![]);
                 }
-                if let Some(s) = sleep.as_mut()
-                    && s.as_mut().poll(cx).is_ready()
-                {
+                // Time spent waiting for input from the host does not count, as for prompts.
+                let paused = blocked.as_ref().is_some_and(|b| b.wants_input());
+                if wall.poll(cx, &timer, paused).is_ready() {
                     return Poll::Ready(vec![]);
                 }
                 Poll::Pending
             })
             .await;
             drop(blocked);
+            self.deadline = wall.end(&timer);
             timer.resume();
             timer.last_yield = timer.now;
             self.apply_completions(done, &timer)?;
             self.check_limits(&timer)?;
+        }
+    }
+}
+
+/// The wall-time deadline while the engine waits. It stops while the wait is
+/// paused and moves later by the time paused.
+struct WallWait {
+    deadline: Option<Instant>,
+    paused_at: Option<Instant>,
+    sleep: Option<ClockFuture>,
+}
+
+impl WallWait {
+    fn new(deadline: Option<Instant>) -> WallWait {
+        WallWait { deadline, paused_at: None, sleep: None }
+    }
+
+    /// Pauses or resumes the deadline as `paused` tells, then polls it.
+    fn poll(&mut self, cx: &mut Context<'_>, timer: &RunTimer, paused: bool) -> Poll<()> {
+        match (paused, self.paused_at) {
+            (true, None) => {
+                self.paused_at = Some(timer.now());
+                self.sleep = None;
+            }
+            (false, Some(_)) => self.resume(timer),
+            _ => {}
+        }
+        let Some(d) = self.deadline.filter(|_| !paused) else { return Poll::Pending };
+        self.sleep.get_or_insert_with(|| timer.sleep(d.saturating_duration_since(timer.now()))).as_mut().poll(cx)
+    }
+
+    /// Ends the wait and returns the deadline.
+    fn end(mut self, timer: &RunTimer) -> Option<Instant> {
+        self.resume(timer);
+        self.deadline
+    }
+
+    fn resume(&mut self, timer: &RunTimer) {
+        if let Some(at) = self.paused_at.take()
+            && let Some(d) = &mut self.deadline
+        {
+            *d += timer.now().saturating_duration_since(at);
         }
     }
 }

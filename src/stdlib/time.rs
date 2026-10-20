@@ -913,8 +913,8 @@ fn register_instant(r: &mut Registry) {
     r.add_builtin("time.Instant.round", |vm, a| {
         let (smallest, increment, mode) = rounding_args(vm, a, 1)?;
         check_clock_unit(smallest, "an Instant")?;
-        let t = instant(vm, a[0])?
-            .round(TimestampRound::new().smallest(smallest).increment(increment).mode(positive_epoch_round_mode(mode)));
+        let t =
+            instant(vm, a[0])?.round(TimestampRound::new().smallest(smallest).increment(increment).mode(positive_epoch_round_mode(mode)));
         alloc_or_fail(vm, t)
     });
     r.add_builtin("time.Instant.to_zoned_datetime", |vm, a| {
