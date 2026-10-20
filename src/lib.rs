@@ -37,7 +37,7 @@ pub use engine::{
     Config, Engine, Error, InterruptHandle, LimitKind, Limits, MemorySink, Outcome, RequestFilter, RequestTarget, TestReport, TestResult,
     TraceFrame,
 };
-pub use feed::StdinFeed;
+pub use feed::{ReadId, StdinFeed};
 pub use files::MemFs;
 pub use native::{
     Conversion, EnumType, EnumVariant, FromValue, HostError, IntoHostError, IntoValue, NamedType, NativeModule, NativeObject, ObjectType,

@@ -3,7 +3,7 @@
 use super::convert::{Conversion, FromValue, HostError, IntoValue};
 use super::ty::Type;
 use crate::vm::value::Value;
-use crate::vm::{BoxFuture, Ctl, Finisher, NResult, NativeFn, Vm};
+use crate::vm::{BoxFuture, Ctl, Finisher, NResult, NativeFn, Vm, Wait};
 use std::future::Future;
 use std::marker::PhantomData;
 
@@ -56,11 +56,11 @@ pub trait AsyncHostFunction<Marker>: Send + Sync + 'static {
 /// Return `Result<Later<T, E>, E>` from the function: if `E` is [`Ctl`], the
 /// Sand return type is `T`; if `E` is [`HostError`], the Sand return type is
 /// `Result<T, Error>`.
-pub struct Later<T, E>(Wait, PhantomData<fn() -> (T, E)>);
+pub struct Later<T, E>(Pending, PhantomData<fn() -> (T, E)>);
 
-enum Wait {
+enum Pending {
     Ready(Finisher),
-    Future(BoxFuture),
+    Future(BoxFuture, Wait),
 }
 
 /// Error type for a [`Later`] result ([`Ctl`] or [`HostError`]).
@@ -103,24 +103,42 @@ impl<T: IntoValue + Send + 'static, E: NativeError> Later<T, E> {
     where
         F: FnOnce(&mut Vm) -> Result<T, E> + Send + 'static,
     {
+        Later::pending(fut, Wait::Io)
+    }
+
+    /// Like [`Later::new`], for a future that completes when the user acts
+    /// (types a line, taps a control). While the engine has nothing else to
+    /// run, the time that it waits for the user does not count toward the
+    /// wall-time limit.
+    pub fn for_user<F>(fut: impl Future<Output = F> + Send + 'static) -> Later<T, E>
+    where
+        F: FnOnce(&mut Vm) -> Result<T, E> + Send + 'static,
+    {
+        Later::pending(fut, Wait::User)
+    }
+
+    fn pending<F>(fut: impl Future<Output = F> + Send + 'static, wait: Wait) -> Later<T, E>
+    where
+        F: FnOnce(&mut Vm) -> Result<T, E> + Send + 'static,
+    {
         let fut = async move {
             let finish = fut.await;
             Box::new(move |vm: &mut Vm| E::finish(finish(vm), vm)) as Finisher
         };
-        Later(Wait::Future(Box::pin(fut)), PhantomData)
+        Later(Pending::Future(Box::pin(fut), wait), PhantomData)
     }
 
     /// Completes immediately with `r` without suspending the calling task.
     pub fn ready(r: Result<T, E>) -> Later<T, E> {
-        Later(Wait::Ready(Box::new(move |vm: &mut Vm| E::finish(r, vm))), PhantomData)
+        Later(Pending::Ready(Box::new(move |vm: &mut Vm| E::finish(r, vm))), PhantomData)
     }
 }
 
 impl<T, E> Later<T, E> {
     pub(crate) fn finish(self, vm: &mut Vm) -> NResult {
         match self.0 {
-            Wait::Ready(f) => f(vm),
-            Wait::Future(fut) => Err(Ctl::suspend(fut)),
+            Pending::Ready(f) => f(vm),
+            Pending::Future(fut, wait) => Err(Ctl::suspend(fut, wait)),
         }
     }
 }
@@ -207,10 +225,11 @@ macro_rules! fn_impls {
                     let mut conv = Conversion::new();
                     $(let $a = $a::from_value(vm, $a, &mut conv)?;)*
                     let fut = self($($a),*);
-                    Err(Ctl::suspend(Box::pin(async move {
+                    let fut = async move {
                         let r = fut.await;
                         Box::new(move |vm: &mut Vm| r.into_value(vm)) as Finisher
-                    })))
+                    };
+                    Err(Ctl::suspend(Box::pin(fut), Wait::Io))
                 })
             }
         }

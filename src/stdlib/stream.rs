@@ -34,10 +34,23 @@ pub(crate) fn suspend<T: Send + 'static, R: IntoValue + Send + 'static>(
     fut: impl Future<Output = Result<T, IoFailure>> + Send + 'static,
     ok: impl FnOnce(&mut Vm, T) -> Result<R, HostError> + Send + 'static,
 ) -> Suspended<R> {
-    Ok(Later::new(async move {
-        let r = fut.await;
-        move |vm: &mut Vm| ok(vm, r?)
-    }))
+    Ok(Later::new(settle(fut, ok)))
+}
+
+/// Like [`suspend`], for a future that completes when the user acts.
+pub(crate) fn suspend_for_user<T: Send + 'static, R: IntoValue + Send + 'static>(
+    fut: impl Future<Output = Result<T, IoFailure>> + Send + 'static,
+    ok: impl FnOnce(&mut Vm, T) -> Result<R, HostError> + Send + 'static,
+) -> Suspended<R> {
+    Ok(Later::for_user(settle(fut, ok)))
+}
+
+async fn settle<T, R>(
+    fut: impl Future<Output = Result<T, IoFailure>>,
+    ok: impl FnOnce(&mut Vm, T) -> Result<R, HostError>,
+) -> impl FnOnce(&mut Vm) -> Result<R, HostError> {
+    let r = fut.await;
+    move |vm: &mut Vm| ok(vm, r?)
 }
 
 impl From<MemoryLimit> for IoFailure {
