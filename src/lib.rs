@@ -34,10 +34,21 @@ pub use engine::{
 };
 pub use feed::StdinFeed;
 pub use files::MemFs;
-pub use native::{Conversion, FromValue, HostError, IntoHostError, IntoValue, ListElem, NativeModule, SandType};
+pub use native::{Conversion, FromValue, HostError, IntoHostError, IntoValue, ListElem, NativeModule, SandType, TypeContext};
 pub use policy::{Capability, CustomPolicy, Decision, Policy, PromptAnswer, Prompter, RulePolicy};
 pub use session::Session;
 pub use stdio::flush_stdio;
 pub use vm::OutputSink;
 pub use vm::heap::GcStats;
-pub use vm::value::Value;
+pub use vm::value::{Packing, Value, ValueType};
+
+/// jiff, whose types implement the `time` module's values.
+pub use jiff;
+
+/// The Rust types of the `time` module's values. `Instant`,
+/// `PlainDateTime`, `PlainDate` and `PlainTime` are [`jiff::Timestamp`],
+/// [`jiff::civil::DateTime`], [`jiff::civil::Date`] and
+/// [`jiff::civil::Time`].
+pub mod time {
+    pub use crate::stdlib::time::{PlainMonthDay, PlainYearMonth, Span, TimeZone, ZonedDateTime};
+}

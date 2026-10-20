@@ -357,8 +357,14 @@ impl CheckedProgram {
     }
 }
 
-/// Native ids by qualified name (`foo.bar`, `str.len`, ...).
-pub type NativeIds = HashMap<Cow<'static, str>, u32>;
+/// What a registry provides to the modules it checks.
+#[derive(Clone, Debug, Default)]
+pub struct NativeIds {
+    /// Native function ids by qualified name (`foo.bar`, `str.len`, ...).
+    pub fns: HashMap<Cow<'static, str>, u32>,
+    /// Value types by qualified name (`time.PlainDate`).
+    pub values: HashMap<Cow<'static, str>, ValueTypeInfo>,
+}
 
 #[derive(Clone)]
 pub(crate) struct LocalData {
@@ -1169,7 +1175,12 @@ impl Checker {
                         self.error(n.name.span, "native types can only be declared by native modules");
                     }
                     let generics = self.declare_generics(&n.generics);
-                    let id = self.new_typedef(&n.name, generics, TypeDefKind::Opaque, n.is_pub, n.doc.as_deref());
+                    let module = self.name(self.mods[self.cur_mod as usize].name);
+                    let value = self.natives.values.get(format!("{module}.{}", n.name.name).as_str()).copied();
+                    if value.is_some() && !generics.is_empty() {
+                        self.error(n.name.span, "a native value type cannot have type parameters");
+                    }
+                    let id = self.new_typedef(&n.name, generics, TypeDefKind::Opaque(value), n.is_pub, n.doc.as_deref());
                     self.define_ident(&n.name, Def::Type(TyRef::Def(id)), n.is_pub);
                 }
                 ItemKind::TypeAlias(a) => {
@@ -1840,7 +1851,7 @@ impl Checker {
                 (None, ModKind::Prelude) => f.name.name.clone(),
                 (None, _) => format!("{module_name}.{}", f.name.name),
             };
-            match self.natives.get(qual_name.as_str()) {
+            match self.natives.fns.get(qual_name.as_str()) {
                 Some(&n) => FnKind::Native(n),
                 None => {
                     self.error(f.name.span, format!("no native implementation registered for `{qual_name}`"));

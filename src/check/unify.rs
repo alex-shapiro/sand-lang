@@ -214,7 +214,12 @@ impl Checker {
         let def = &self.types[d];
         let mut needs = Vec::new();
         let ok = match &def.kind {
-            TypeDefKind::Opaque => b == Bound::Eq,
+            TypeDefKind::Opaque(value) => match b {
+                Bound::Eq => true,
+                Bound::Hash => value.is_some(),
+                Bound::Ord => value.is_some_and(|v| v.ord),
+                _ => false,
+            },
             TypeDefKind::Struct { fields } => {
                 !(b == Bound::Hash && fields.iter().any(|f| f.mutable))
                     && fields.iter().all(|f| self.needs(f.ty, b, &def.generics, &mut needs))

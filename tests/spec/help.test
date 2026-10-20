@@ -323,8 +323,8 @@ Modules (help(name) describes one):
     statistics  Descriptive statistics on lists of floats.
     task        Tasks, timers and channels.
     test        Assertions and property-based testing for `test` blocks.
-    time        Wall-clock dates and times (UTC, proleptic Gregorian calendar)
-                and the monotonic clock.
+    time        Dates, times, time zones and clocks, after JavaScript's Temporal
+                API.
     uri         URIs (RFC 3986): parsing, recomposition, reference resolution,
                 percent encoding and query strings.
     uuid        UUIDs (RFC 9562): random (v4) and time-ordered (v7) identifiers,

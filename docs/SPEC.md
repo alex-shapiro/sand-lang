@@ -421,6 +421,8 @@ A native type parameter may be marked
 then passes a runtime description of the instantiated type, which must be fully
 known at the call site.
 
+`native type Name` declares an opaque type (§5.4).
+
 ### 4.8 Test blocks
 
 ```
@@ -644,7 +646,11 @@ The prelude also defines the lazy iterator struct `Iter<T>` and the trait
 
 Standard library modules define further nominal types (e.g. `json.Json`,
 `http.Response`, `net.Conn`). Some are _opaque_: they have no fields, cannot be
-constructed with a literal, and are manipulated only by methods.
+constructed with a literal, and are manipulated only by methods. An opaque
+type that its module's Rust code registers as a value type (§16, such as
+`time.PlainDate`) has immutable values that compare and hash by value, may
+be ordered (`Ord`), and display as text (`2024-02-29`). Other opaque values
+compare by identity and display as `<Type>`.
 
 ### 5.5 Type equality and subtyping
 
@@ -654,12 +660,12 @@ error. Use `x.to_float()` or `f.to_int()`.
 
 ### 5.6 Bounds
 
-| Bound  | Satisfied by                                                                                                                                                   |
-| ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Eq`   | every type except function types (and types containing them)                                                                                                   |
-| `Ord`  | `int`, `float`, `bool`, `str`, `bytes`, `duration`, `()`, and tuples, lists, `Option`, structs and enums all of whose components are `Ord`                     |
-| `Hash` | `int`, `bool`, `str`, `bytes`, `duration`, `()`, and tuples, `Option`, `Result`, enums and structs **without `var` fields** all of whose components are `Hash` |
-| `Num`  | `int`, `float`                                                                                                                                                 |
+| Bound  | Satisfied by                                                                                                                                                                       |
+| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Eq`   | every type except function types (and types containing them)                                                                                                                       |
+| `Ord`  | `int`, `float`, `bool`, `str`, `bytes`, `duration`, `()`, ordered value types (§5.4), and tuples, lists, `Option`, structs and enums all of whose components are `Ord`             |
+| `Hash` | `int`, `bool`, `str`, `bytes`, `duration`, `()`, value types (§5.4), and tuples, `Option`, `Result`, enums and structs **without `var` fields** all of whose components are `Hash` |
+| `Num`  | `int`, `float`                                                                                                                                                                     |
 
 Map keys and set elements must be `Hash`. Built-in bounds are satisfied
 structurally and cannot be implemented. Traits (§4.9) are user-defined bounds;
@@ -791,7 +797,8 @@ field in declaration order. Floats inside composites use the total order where
 `nan` is greater than every other float and equal to itself.
 
 Values of reference types (lists, maps, sets, structs) compare **by
-content**. Tasks, channels and opaque handles compare by identity.
+content**. Tasks, channels and opaque values compare by identity, except
+those of value types (§5.4).
 
 **Logical** `and`, `or`, `not` take and return `bool`; `and`/`or` short-circuit.
 
@@ -1255,6 +1262,8 @@ system's open-file limit is reached.
 | function                            | `<fn name>`                         | same                                                                            |
 | task / channel                      | `<task>` / `<channel>`              | same                                                                            |
 | `0..3`                              | `0..3`                              | same                                                                            |
+| `time.date(2024, 2, 29)?`           | `2024-02-29`                        | same                                                                            |
+| other opaque value                  | `<Regex>`                           | same                                                                            |
 
 Composite values print their components in debug form. The debug form of a
 string is a string literal that evaluates to it. Durations display with
@@ -1721,7 +1730,7 @@ directory (set by the host; default: the module root).
 | `open(path, mode: Mode = Mode.Read) -> Result<File>`                             | by mode, below                    |
 | `join(parts: [str]) -> str`, `basename(p)`, `dirname(p)`, `extension(p) -> str?` | none                              |
 
-`struct Metadata { size: int, is_file: bool, is_dir: bool, modified: time.DateTime? }`.
+`struct Metadata { size: int, is_file: bool, is_dir: bool, modified: time.Instant? }`.
 
 `/` is a separator on every platform (on Windows `\` is too). `join` inserts
 the platform's separator, and a part that is an absolute path replaces the
@@ -2029,8 +2038,8 @@ string, `bool`, `()` → `null`, lists/sets/tuples → arrays, maps → objects
 (non-`str` keys converted with `to_str`), structs → objects keyed by field
 name, `None` → `null`, `Some(x)` → `x`; other enums: a payload-less variant
 → `"Variant"`, otherwise `{"Variant": [payload...]}` (an object for named
-payloads); `bytes` → base64 string; `duration` → nanoseconds; `Json` →
-itself.
+payloads); `bytes` → base64 string; `duration` → nanoseconds; values of
+`time` types → their text (`"2024-02-29"`); `Json` → itself.
 
 `json!` (§6.13) builds a `Json` from JSON syntax with embedded Sand values.
 
@@ -2155,24 +2164,99 @@ fails with `assertion failed: left == right\n  left: <debug>\n right: <debug>`.
 
 ### 13.15 `time`
 
-```
-pub struct DateTime { unix_nanos: int }   // UTC instant
-pub native fn now() -> DateTime
-pub fn monotonic() -> Instant                             // Instant { nanos: int }
-pub native fn parse(text: str) -> Result<DateTime>        // RFC 3339 / ISO 8601
-pub native fn from_unix(secs: int) -> DateTime
-pub native fn from_unix_millis(ms: int) -> DateTime
-pub native fn date(year: int, month: int, day: int, hour: int = 0, minute: int = 0, second: int = 0) -> Result<DateTime>
-```
+Dates, times and time zones after JavaScript's Temporal API: the ISO 8601
+calendar from year -9999 to 9999, nanosecond precision, and the IANA time
+zone database, which is built in.
 
-`DateTime` methods: `year`, `month`, `day`, `hour`, `minute`, `second`,
-`nanosecond`, `weekday() -> int` (Monday = 1 ... Sunday = 7), `day_of_year`,
-`unix() -> int`, `unix_millis() -> int`, `add(d: duration) -> DateTime`,
-`sub(d: duration) -> DateTime`, `since(other: DateTime) -> duration`,
-`to_iso() -> str` (`2024-01-02T03:04:05Z`, with fractional seconds only if
-non-zero), `format(fmt: str) -> str` (strftime subset: `%Y %m %d %H %M %S %f %j
-%a %A %b %B %y %e %Z %z %s %%`, plus `%3f`/`%6f`/`%9f`). `Instant`: `elapsed() ->
-duration`, `since(earlier: Instant) -> duration`. To sleep, use `task.sleep(d)`.
+| Type             | Value                                         | Text form                                     |
+| ---------------- | --------------------------------------------- | --------------------------------------------- |
+| `Instant`        | an exact point in time                        | `2024-03-10T07:30:00Z`                        |
+| `ZonedDateTime`  | an instant in a time zone                     | `2024-03-10T03:30:00-04:00[America/New_York]` |
+| `PlainDateTime`  | a date and wall-clock time                    | `2024-03-10T03:30:00`                         |
+| `PlainDate`      | a date                                        | `2024-03-10`                                  |
+| `PlainTime`      | a wall-clock time                             | `03:30:00`                                    |
+| `PlainYearMonth` | a month                                       | `2024-03`                                     |
+| `PlainMonthDay`  | a day of a month                              | `03-10`                                       |
+| `Span`           | amounts of calendar and clock units, one sign | `P1M2DT3H`                                    |
+| `TimeZone`       | an IANA zone, `UTC` or a fixed offset         | `America/New_York`                            |
+
+They are value types (§5.4): `Span` and `TimeZone` are `Hash`, the others
+`Ord + Hash`, ordered chronologically (a `ZonedDateTime` by instant, then
+by zone). A span balances units below a second into seconds, as its text
+form writes them; spans are equal if their units are (`P1D != PT24H`), and
+zones if their names are. Values
+display, `json.encode` and `json.decode` as their text form, which each
+type's static `parse(text)` reads (errors of kind `"parse"`); `parse(text,
+format: f)` reads strftime format `f` instead.
+
+Construction: `date(year, month, day)`, `time(hour, minute = 0, second = 0,
+millisecond = 0, microsecond = 0, nanosecond = 0)`, `datetime(year, month,
+day, hour = 0, ...)`, `year_month(year, month)` and `month_day(month, day)`
+return a `Result` (kind `"invalid"` if there is no such value);
+`span(years = 0, months = 0, weeks = 0, days = 0, hours = 0, ...,
+nanoseconds = 0)` fails (kind `"invalid"`) if units have different signs;
+`zone(name) -> Result<TimeZone>` takes an IANA name, `UTC` or an offset
+in whole minutes up to 23:59 (`+00:00` is `UTC`; kind `"not_found"`
+otherwise); `Instant.from_epoch_seconds`,
+`from_epoch_millis`, `from_epoch_nanos`; the constants `UTC` and `MIDNIGHT`.
+
+Clocks: `now() -> Instant`; `local_zone() -> TimeZone`, the zone the host
+sets (§16) if the policy allows `TimeZone`, else `UTC`;
+`now_zoned(zone = local_zone())`;
+`today(zone = local_zone())`; `stopwatch()`, a `Stopwatch` whose
+`elapsed() -> duration` reads the monotonic clock.
+
+Methods:
+
+- Components: `year`, `month`, `day`, `day_of_week` (1 = Monday),
+  `day_of_year`, `week_of_year` and `year_of_week` (ISO 8601 weeks),
+  `days_in_month`, `days_in_year`, `in_leap_year`, `hour`, `minute`,
+  `second`, `millisecond`, `microsecond`, `nanosecond`, as the type has
+  them; `ZonedDateTime` also has `offset() -> duration`, `time_zone()` and
+  `hours_in_day() -> float`; `Instant` and `ZonedDateTime` have
+  `epoch_seconds` and `epoch_millis` (rounded down) and `epoch_nanos`.
+- `with(...)` replaces the named components, clamping values above their
+  range (day 31 in April is the 30th); a month or day below 1, or a year
+  outside -9999 to 9999, fails (kind `"invalid"`). A `ZonedDateTime` keeps
+  its offset if it is still valid.
+- `add(amount)` and `subtract(amount)` take a `Span`; plain types also
+  take a `duration` (the trait `ToSpan`), and `Instant` takes only a
+  `duration`. Calendar units move the wall-clock date, clamping the day to
+  the month's end (January 31 plus a month is the last day of February);
+  clock units add exact time. A `PlainDate` counts smaller units as whole
+  days, a `PlainTime` wraps around midnight and ignores days, and a
+  `PlainYearMonth` takes only years and months. A `ZonedDateTime` takes no
+  `duration`, so that `1d` (24 hours) is not taken for a calendar day.
+- `until(other, ...)` and `since(other, ...)` return a `Span` in units from
+  `largest: Unit` (or `smallest`, if larger) down to `smallest: Unit`, the
+  smallest rounded to a multiple of `increment` with `mode: RoundingMode`
+  (default `Trunc`). `largest` defaults to `Day` (`Hour` for a
+  `ZonedDateTime`, `Year` for a `PlainYearMonth`), `smallest` to the
+  smallest unit of the type. `Instant` and `PlainTime` return a `duration`.
+- `round(smallest, increment = 1, mode = RoundingMode.HalfExpand)`.
+- Conversions: `to_instant`, `to_zoned_datetime(zone)` (from a
+  `PlainDateTime`, with `disambiguation: Disambiguation = Compatible` for
+  wall-clock times that a zone's offset change skips or repeats; from a
+  `PlainDate`, midnight), `to_plain_datetime`,
+  `to_plain_date`, `to_plain_time`, `to_plain_year_month`,
+  `to_plain_month_day`, `PlainYearMonth.to_plain_date(day)`,
+  `PlainMonthDay.to_plain_date(year)`, `with_time_zone(zone)`,
+  `with_plain_time(time)`, `start_of_day()`, and `next_transition()` and
+  `previous_transition()`, the nearest changes of the zone's offset.
+- `format(f: str) -> str` formats with strftime directives (`%Y-%m-%d`);
+  an `Instant` formats in UTC.
+- `Span`: the ten units (`years()` ... `nanoseconds()`), `sign()`,
+  `is_zero()`, `negated()`, `abs()`, `with(...)`, `add` and `subtract`,
+  `round(smallest, largest, increment, mode)`, `total(unit) -> float`,
+  `compare(other) -> int` and `to_duration()`. These six take
+  `relative_to: ZonedDateTime?`, the start the span is measured from;
+  without it, a day is 24 hours, a week 7 days, and spans with years or
+  months fail.
+
+A result outside the supported range fails with kind `"overflow"`, as does
+`epoch_nanos` outside the years 1677 to 2262 and a difference too long for
+a `duration`; invalid options fail with kind `"invalid"`. To sleep, use
+`task.sleep(d)`.
 
 ### 13.16 `task`
 
@@ -2249,6 +2333,7 @@ emptied and converted into a junction during rename.
 | `NetListen(addr)`           | listening sockets                          |
 | `Env(name)`                 | environment variable reads (`"*"` for all) |
 | `Stdin`, `Stdout`, `Stderr` | standard streams                           |
+| `TimeZone`                  | `time.local_zone()`                        |
 | `Import(path)`              | loading a script module                    |
 | `Custom(name, detail)`      | host native modules may define their own   |
 
@@ -2406,6 +2491,7 @@ limit memory 64M
 | `allow listen ADDR...`, `deny listen ADDR...`             | listening addresses (`host:port`, port `0` = any)                               |
 | `allow env NAME...`, `deny env NAME...`                   | environment variables (`AWS_*`; `*`: all)                                       |
 | `allow stdin`, `deny stdin`, `deny stdout`, `deny stderr` | standard streams                                                                |
+| `allow timezone`, `deny timezone`                         | the local time zone                                                             |
 | `allow custom NAME [DETAIL]`, `deny custom NAME [DETAIL]` | a host-defined capability (any detail if omitted)                               |
 | `default deny` \| `default prompt` \| `default allow`     | fallback decision for unmatched requests (once per file)                        |
 | `limit NAME VALUE`                                        | a limit (§15.1), below                                                          |
@@ -2652,6 +2738,11 @@ let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 
   host resolution and outgoing TCP streams in `net` and `http`. The engine checks
   network policy before connecting, and negotiates TLS over the returned stream.
   Socket listeners always use the operating system.
+- `Config::time_zone(sandlang::time::TimeZone)` sets the zone
+  `time.local_zone()` returns where the policy allows `TimeZone`.
+  `TimeZone::get(name)` finds a zone as `time.zone` does;
+  `TimeZone::system()` (feature `os`) is the operating system's, if it has
+  an IANA name.
 - `Config::tls_root_certificates(Vec<Vec<u8>>)` trusts additional
   DER-encoded root certificates (e.g. a private CA) besides the bundled web
   PKI roots; calls accumulate. An invalid one makes TLS connections fail
@@ -2680,7 +2771,16 @@ normalize_path, normalize_entry_path}` for hosts writing their own
   on a denial). `NativeModule::source` may add Sand declarations (types,
   pure-Sand helpers, `native fn` with explicit signatures, which take
   precedence over derived ones and are required for
-  `NativeModule::raw_function`). Taking a standard module's name
+  `NativeModule::raw_function`). `NativeModule::value_type::<T>()` makes a
+  Rust type `T: ValueType` (`Clone + Eq + Hash + Display`, with the
+  module's name as `MODULE`, a `NAME`, a `parse` that reads what `Display`
+  writes, `ORDER = Some(Ord::cmp)` for an ordered type, and a `PACKING`
+  into 16 bytes for a small one) the value type `NAME` of the module
+  (§5.4), declared `pub native type NAME` unless the source declares it.
+  Equal values must display the same, and `parse` must read a value's text
+  back as an equal value. Host functions may take and return value types,
+  including the `time` module's: `jiff::Timestamp`, `jiff::civil::{Date,
+  Time, DateTime}` (`sandlang::jiff`) and the types in `sandlang::time`. Taking a standard module's name
   (`NativeModule::new`), adding a module twice (`Config::module`) or
   registering a function twice panics.
 - `Outcome { exit_code: i32 }`; errors are `Error::Compile(diagnostics)`,
@@ -2743,10 +2843,10 @@ parser accepts. A run executes on the calling thread and yields to the
 event loop only while it waits (for a timer, I/O or a prompt); hosts run
 engines in Web Workers to keep pages responsive and run several in
 parallel. The `sandlang-wasm` crate (`wasm/`) is the JavaScript API: an
-`Engine` built from a policy file, files, an environment, arguments and
-standard input, with `onOutput` and `onPrompt` callbacks (requests the
-policy does not decide go to `onPrompt`, and are denied without it), `run`,
-`check`, `lint`, sessions (`eval(source, name?)`, and
+`Engine` built from a policy file, files, an environment, arguments,
+standard input and a time zone, with `onOutput` and `onPrompt` callbacks
+(requests the policy does not decide go to `onPrompt`, and are denied
+without it), `run`, `check`, `lint`, sessions (`eval(source, name?)`, and
 `runTasks`/`stopTasks` to run tasks between inputs), `format` and
 `highlight`. `playground/` is a web page built on it.
 
@@ -2931,13 +3031,14 @@ Options: `--policy=FILE` (a policy file, §14.7: the other options add rules
 to it and override its limits; its `default prompt` prompts like
 `--prompt`), `--allow-read=PATHS`, `--allow-write=PATHS`, `--allow-net=HOSTS`,
 `--deny-net=HOSTS`, `--allow-private-net`, `--allow-listen=ADDRS`,
-`--allow-env=NAMES`, `--allow-stdin`, `--allow-all`,
+`--allow-env=NAMES`, `--allow-stdin`, `--allow-timezone`, `--allow-all`,
 `--prompt` (prompt on the terminal for unmatched requests), `--max-memory=BYTES`
 (suffixes K, M, G), `--max-time=DURATION`, `--max-cpu=DURATION`,
 `--max-instructions=N`, `--max-compile-fuel=N`, `--seed=N`. Arguments after `--`, and positional
 arguments after `FILE`, are passed to the script. Exit code: the script's exit
 code (codes outside `0..=255` exit with 255), 1 for a runtime error or `?`
-failure, 2 for compile errors, 3 for limit violations.
+failure, 2 for compile errors, 3 for limit violations. Where the policy
+allows `TimeZone`, `time.local_zone()` is the system's time zone.
 
 `--prompt` asks on the controlling terminal (`/dev/tty`; the console on
 Windows), never on the script's standard streams, so piped input cannot

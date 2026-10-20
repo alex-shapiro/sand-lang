@@ -66,6 +66,20 @@ Follow-up work, roughly in priority order.
 
 ### Language
 
+- [ ] **One way to construct a type: `T(...)`.** Today structs use literals
+      (`Point { x: 1.0 }`) while other types use module functions
+      (`time.date`, `regex.new`, `random.rng`, `task.channel`, `set`,
+      `error`) or static methods (`Iter.from_fn`), so nothing on a type says
+      how to make one. Replace struct literals with calls taking named
+      arguments only (`Point(x: 1.0, y: 2.0)`, with defaults and `..base`),
+      as enum variants already are; let a type declare one `init` that
+      replaces member-wise construction (it may return a `Result`; inside
+      it, `Self(...)` is member-wise construction); native types' `init`
+      is a native. Other sources stay static factories (`T.parse`,
+      `T.from_x`). Remove the module-level constructors, move patterns to
+      `Point(x, ..)`, and drop the rule against struct literals in `if`,
+      `while`, `match` and `for` heads. Errors on `T.new(...)` and the like
+      should name the right call.
 - [ ] Trait objects (`dyn Trait`), associated types and constants, and
       blanket impls (`impl<T> X for T`).
 - [ ] Trait bounds on struct/enum type parameters.

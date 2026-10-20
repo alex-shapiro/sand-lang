@@ -69,6 +69,11 @@ each native under its key:
 - Native objects (`NativeObject`) never hold `Value`s: the collector does
   not trace them and `native_mut` skips the write barrier. An object whose
   owned memory grows must report it with `vm.heap.account`.
+- A native type with value semantics is a `ValueType` registered with
+  `Registry::add_value_type`: the checker takes its bounds from the
+  registration, and equality, order, hashing and text come from its Rust
+  traits. Types with a `PACKING` are stored in their heap slot
+  (`Obj::Packed`), others in a `Box` (`Obj::Value`).
 - Natives return a struct's fields as a tuple and let Sand build the struct.
   Never build `Obj::Variant` by hand: variants with one payload are stored
   inline, and equality and hashing rely on the canonical form.

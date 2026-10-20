@@ -62,7 +62,7 @@ impl Clock for ManualClock {
 #[test]
 fn scripts_read_host_clock() {
     let clock = ManualClock::new();
-    let src = "import time\nimport uuid\nprint(time.now().to_iso())\nprint(uuid.v7()[0..8])";
+    let src = "import time\nimport uuid\nprint(time.now())\nprint(uuid.v7()[0..8])";
     let r = run_with(src, |c| c.clock(clock.clone()));
     assert_eq!(r.ok_stdout(), "2027-01-15T08:00:00Z\n01a3185c\n");
 }
@@ -70,7 +70,7 @@ fn scripts_read_host_clock() {
 #[test]
 fn sleeps_wait_on_host_timers() {
     let clock = ManualClock::new();
-    let src = "import task\nimport time\nlet start = time.monotonic()\ntask.sleep(5s)\nprint(start.elapsed() >= 5s)";
+    let src = "import task\nimport time\nlet start = time.stopwatch()\ntask.sleep(5s)\nprint(start.elapsed() >= 5s)";
     let r = run_with(src, |c| c.clock(clock.clone()));
     assert_eq!(r.ok_stdout(), "true\n");
     assert!(clock.sleeps.lock().unwrap().contains(&Duration::from_secs(5)));
@@ -91,7 +91,7 @@ fn memfs_timestamps_are_sourced_from_host_clock() {
     let clock = ManualClock::new();
     let fs = sandlang::MemFs::with_capacity_and_clock(1 << 20, clock.clone());
     fs.write("/run/.keep", "").unwrap();
-    let src = "import fs\nfs.write_text(\"/run/notes.txt\", \"hi\")?\nprint(fs.metadata(\"/run/notes.txt\")?.modified.unwrap().to_iso())";
+    let src = "import fs\nfs.write_text(\"/run/notes.txt\", \"hi\")?\nprint(fs.metadata(\"/run/notes.txt\")?.modified.unwrap())";
     let out = sandlang::MemorySink::new();
     let config = sandlang::Config::new().policy(sandlang::Policy::allow_all()).memory_fs(fs).cwd("/run").clock(clock).stdout(out.clone());
     let mut engine = sandlang::Engine::new(config);

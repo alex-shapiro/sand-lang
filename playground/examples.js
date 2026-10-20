@@ -294,7 +294,7 @@ import time
 
 let jobs: Channel<int> = task.channel()
 let results: Channel<str> = task.channel()
-let start = time.monotonic()
+let start = time.stopwatch()
 
 fn worker(name: str, jobs: Channel<int>, results: Channel<str>) {
     for n in jobs.iter() {

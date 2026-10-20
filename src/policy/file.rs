@@ -290,7 +290,7 @@ pub(crate) fn is_method(word: &str) -> bool {
             && word.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-' || b == b'_'))
 }
 
-const CAPABILITIES: &str = "read, write, import, net, http, private-net, listen, env, stdin, stdout, stderr or custom";
+const CAPABILITIES: &str = "read, write, import, net, http, private-net, listen, env, stdin, stdout, stderr, timezone or custom";
 
 /// The context rules are parsed in.
 struct Context<'a> {
@@ -396,7 +396,7 @@ impl Context<'_> {
         let keyword = what.plain().filter(|w| w.bytes().all(|b| b.is_ascii_lowercase() || b == b'-'));
         let (kind, items) = match keyword.as_deref() {
             Some(k @ ("read" | "write" | "import" | "net" | "http" | "listen" | "env" | "custom")) => (k, items),
-            Some(k @ ("stdin" | "stdout" | "stderr" | "private-net")) => {
+            Some(k @ ("stdin" | "stdout" | "stderr" | "timezone" | "private-net")) => {
                 if let Some(extra) = items.first() {
                     return Err((extra.column, format!("`{verb_text} {k}` takes no arguments")));
                 }
@@ -415,6 +415,7 @@ impl Context<'_> {
                         return Err((what.column, format!("standard {} is allowed unless denied (`deny {k}`)", &k[3..])));
                     }
                     (_, "stdin") => RuleKind::Stdin,
+                    (_, "timezone") => RuleKind::TimeZone,
                     (_, "stdout") => RuleKind::Stdout,
                     _ => RuleKind::Stderr,
                 };
@@ -599,6 +600,7 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
         Capability::NetListen(addr) => format!("listen {}", quote_part(addr, true)),
         Capability::Env(name) => format!("env {}", quote_part(name, true)),
         Capability::Stdin => "stdin".into(),
+        Capability::TimeZone => "timezone".into(),
         Capability::Stdout | Capability::Stderr if allow => return None,
         Capability::Stdout => "stdout".into(),
         Capability::Stderr => "stderr".into(),
@@ -913,6 +915,7 @@ mod tests {
             Capability::Env("HOME".into()),
             Capability::Env("*".into()),
             Capability::Stdin,
+            Capability::TimeZone,
             Capability::Custom { name: "db".into(), detail: "drop table".into() },
         ];
         for cap in &caps {
@@ -951,7 +954,7 @@ mod tests {
             ),
             [
                 "1:1: unknown rule `alow` (rules start with `allow`, `deny`, `default`, `limit` or `let`)",
-                "2:1: expected what to allow: a path, or read, write, import, net, http, private-net, listen, env, stdin, stdout, stderr or custom",
+                "2:1: expected what to allow: a path, or read, write, import, net, http, private-net, listen, env, stdin, stdout, stderr, timezone or custom",
                 "3:17: invalid network pattern `pattern!` (expected a host, host:port, *.domain, *, an IP address or a CIDR range)",
                 "4:7: invalid size `lots` (use e.g. 4096, 64K, 256M, 1G)",
                 "5:1: expected `limit NAME VALUE`, e.g. `limit memory 64M`",
@@ -959,7 +962,7 @@ mod tests {
                 "7:7: standard out is allowed unless denied (`deny stdout`)",
                 "8:6: expected `deny custom NAME [DETAIL]`",
                 "9:12: unterminated quotes",
-                "10:7: unknown capability `raed` (expected a path, or read, write, import, net, http, private-net, listen, env, stdin, stdout, stderr or custom)",
+                "10:7: unknown capability `raed` (expected a path, or read, write, import, net, http, private-net, listen, env, stdin, stdout, stderr, timezone or custom)",
                 "11:12: path `data` is not anchored: write `./data` for a path relative to the policy file, `~/...` or an absolute path",
                 "12:12: path `~user` is not anchored: write `./~user` for a path relative to the policy file, `~/...` or an absolute path",
                 "13:12: `allow http` needs a URL pattern after its methods, e.g. `api.example.com/v1`",

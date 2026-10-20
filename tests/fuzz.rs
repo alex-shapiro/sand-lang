@@ -361,7 +361,7 @@ fn random_json_and_uri_inputs() {
     }
     let lits: Vec<String> = cases.iter().map(|s| format!("{s:?}")).collect();
     let src = format!(
-        "import json\nimport uri\nimport base64\nimport regex\nimport time\nimport uuid\nvar n = 0\nfor s in [{}] {{\n    if json.parse(s).is_ok() {{ n += 1 }}\n    if uri.parse(s).is_ok() {{ n += 1 }}\n    if base64.decode(s).is_ok() {{ n += 1 }}\n    if regex.new(s).is_ok() {{ n += 1 }}\n    if time.parse(s).is_ok() {{ n += 1 }}\n    if uuid.parse(s).is_ok() {{ n += 1 }}\n    let _ = uri.decode_component(s)\n    let _ = s.parse_float()\n}}\nprint(n >= 0)\n",
+        "import json\nimport uri\nimport base64\nimport regex\nimport time\nimport uuid\nvar n = 0\nfor s in [{}] {{\n    if json.parse(s).is_ok() {{ n += 1 }}\n    if uri.parse(s).is_ok() {{ n += 1 }}\n    if base64.decode(s).is_ok() {{ n += 1 }}\n    if regex.new(s).is_ok() {{ n += 1 }}\n    if time.Instant.parse(s).is_ok() {{ n += 1 }}\n    if time.ZonedDateTime.parse(s).is_ok() {{ n += 1 }}\n    if time.PlainDate.parse(s).is_ok() {{ n += 1 }}\n    if time.Span.parse(s).is_ok() {{ n += 1 }}\n    if time.zone(s).is_ok() {{ n += 1 }}\n    if uuid.parse(s).is_ok() {{ n += 1 }}\n    let _ = uri.decode_component(s)\n    let _ = s.parse_float()\n}}\nprint(n >= 0)\n",
         lits.join(", ")
     );
     let out = MemorySink::new();

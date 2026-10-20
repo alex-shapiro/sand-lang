@@ -58,6 +58,11 @@ export interface EngineOptions {
   fileSystemCapacity?: number;
   /** The working directory and module root (default `/`). */
   cwd?: string;
+  /**
+   * The zone `time.local_zone()` returns where the policy allows `timezone` (otherwise `UTC`),
+   * such as `Intl.DateTimeFormat().resolvedOptions().timeZone`. An unknown zone is an error.
+   */
+  timeZone?: string;
 }
 
 /** Callbacks of `new Engine(options, hooks)`. */
@@ -69,7 +74,7 @@ export interface EngineHooks {
 }
 
 export interface PromptRequest {
-  kind: "read" | "write" | "import" | "net" | "http" | "listen" | "env" | "stdin" | "stdout" | "stderr" | "custom";
+  kind: "read" | "write" | "import" | "net" | "http" | "listen" | "env" | "stdin" | "stdout" | "stderr" | "timezone" | "custom";
   target: string;
   /** e.g. "read /data/a.txt" */
   description: string;
@@ -137,7 +142,7 @@ export interface FileEntry { path: string; data: Uint8Array; }
 "#;
 
 /// The fields of `EngineOptions` (unknown ones, typically misspelt, are denied).
-const OPTION_KEYS: &[&str] = &["policy", "files", "env", "args", "stdin", "seed", "fileSystemCapacity", "cwd"];
+const OPTION_KEYS: &[&str] = &["policy", "files", "env", "args", "stdin", "seed", "fileSystemCapacity", "cwd", "timeZone"];
 
 /// The JavaScript callbacks of an engine and its sessions, unregistered when
 /// the last of them is freed.
@@ -198,6 +203,10 @@ impl Engine {
         }
         if let Some(seed) = number_option(&options, "seed")? {
             config = config.seed(seed as u64);
+        }
+        if let Some(name) = string_option(&options, "timeZone")? {
+            let zone = sandlang::time::TimeZone::get(&name).ok_or_else(|| error(&format!("unknown timeZone {name:?}")))?;
+            config = config.time_zone(zone);
         }
         let engine = sandlang::Engine::new(config);
         let interrupt = engine.interrupt_handle();
@@ -490,6 +499,12 @@ pub fn highlight_kinds() -> Vec<String> {
 }
 
 /// The version of Sand.
+/// Whether the engine knows the time zone `name` (see `EngineOptions.timeZone`).
+#[wasm_bindgen(js_name = isTimeZone)]
+pub fn is_time_zone(name: &str) -> bool {
+    sandlang::time::TimeZone::get(name).is_some()
+}
+
 #[wasm_bindgen]
 pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()

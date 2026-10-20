@@ -4,7 +4,7 @@ use compact_str::CompactString;
 use hashbrown::HashTable;
 use std::any::Any;
 use std::collections::{HashMap, VecDeque};
-use std::hash::{BuildHasher, Hasher};
+use std::hash::{BuildHasher, Hash, Hasher};
 use std::sync::{Arc, OnceLock};
 
 /// A runtime value. Immediate values are stored inline; everything else is a
@@ -847,6 +847,240 @@ pub trait NativeObject: Any + Send {
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
+/// A Rust type that implements a Sand value type, a `native type`
+/// registered with [`crate::NativeModule::value_type`]. Its values are
+/// immutable; they compare and hash by value (`Eq`, `Hash`), order if
+/// `ORDER` is set (`Ord`), and display as their text form, which
+/// `json.encode` and `json.decode` write and read. Equal values must
+/// display the same, and `parse` must read a value's text back as an
+/// equal value. Comparing, hashing and displaying values is not metered, so
+/// it must be cheap.
+pub trait ValueType: Clone + Eq + Hash + std::fmt::Display + Send + Sync + 'static {
+    /// The module that registers the type (`time`).
+    const MODULE: &'static str;
+    /// The Sand type's name (`PlainDate`).
+    const NAME: &'static str;
+    /// `Some(Ord::cmp)` for a type that Sand may order.
+    const ORDER: Option<fn(&Self, &Self) -> std::cmp::Ordering> = None;
+    /// For a type whose values fit in 16 bytes: how to store a value in
+    /// them, so that the heap holds it without an allocation of its own.
+    const PACKING: Option<Packing<Self>> = None;
+    /// Reads the text that `Display` writes.
+    fn parse(text: &str) -> Result<Self, String>;
+    /// Approximate memory used, for accounting.
+    fn size(&self) -> usize {
+        std::mem::size_of::<Self>()
+    }
+}
+
+/// Stores a value in 16 bytes. Equal values must pack to equal bits, and
+/// `unpack` must restore an equal value. If `ordered`, the bits compare (as
+/// two unsigned numbers, the first first) in the values' order.
+pub struct Packing<T> {
+    pub pack: fn(&T) -> [u64; 2],
+    pub unpack: fn([u64; 2]) -> T,
+    pub ordered: bool,
+}
+
+impl<T> Clone for Packing<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T> Copy for Packing<T> {}
+
+/// The object-safe form of a [`ValueType`].
+pub trait ValueObj: Any + Send {
+    fn type_name(&self) -> &'static str;
+    /// Equality with a value of the same Sand type.
+    fn value_eq(&self, other: &dyn ValueObj) -> bool;
+    /// The order of a value of the same Sand type; `None` if the type is not
+    /// ordered.
+    fn value_cmp(&self, other: &dyn ValueObj) -> Option<std::cmp::Ordering>;
+    fn value_hash(&self) -> u64;
+    /// Appends the text form.
+    fn write_text(&self, out: &mut String);
+    fn size(&self) -> usize;
+    fn as_any(&self) -> &dyn Any;
+}
+
+impl<T: ValueType> ValueObj for T {
+    fn type_name(&self) -> &'static str {
+        T::NAME
+    }
+    fn value_eq(&self, other: &dyn ValueObj) -> bool {
+        other.as_any().downcast_ref::<T>() == Some(self)
+    }
+    fn value_cmp(&self, other: &dyn ValueObj) -> Option<std::cmp::Ordering> {
+        Some(T::ORDER?(self, other.as_any().downcast_ref::<T>()?))
+    }
+    fn value_hash(&self) -> u64 {
+        let mut h = FxHasher::default();
+        self.hash(&mut h);
+        h.finish()
+    }
+    fn write_text(&self, out: &mut String) {
+        use std::fmt::Write;
+        let _ = write!(out, "{self}");
+    }
+    fn size(&self) -> usize {
+        ValueType::size(self)
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Orders two packed values.
+type PackedOrder = fn([u64; 2], [u64; 2]) -> std::cmp::Ordering;
+
+/// The operations of a packed value type on the bytes holding a value.
+pub struct PackedType {
+    name: &'static str,
+    /// The order of an ordered type.
+    order: Option<PackedOrder>,
+    /// Whether the bits compare in the values' order.
+    pub(crate) ordered_bits: bool,
+    write_text: fn([u64; 2], &mut String),
+    type_id: fn() -> std::any::TypeId,
+}
+
+impl PackedType {
+    /// Whether `self` and `other` are the same type.
+    pub(crate) fn same(&self, other: &PackedType) -> bool {
+        std::ptr::eq(self, other) || (self.type_id)() == (other.type_id)()
+    }
+}
+
+struct PackedTypeOf<T>(std::marker::PhantomData<T>);
+
+impl<T: ValueType> PackedTypeOf<T> {
+    const ORDERED_BITS: bool = match T::PACKING {
+        Some(p) => p.ordered && T::ORDER.is_some(),
+        None => false,
+    };
+    const TYPE: PackedType = PackedType {
+        name: T::NAME,
+        order: match (T::ORDER, Self::ORDERED_BITS) {
+            (None, _) => None,
+            (Some(_), true) => Some(|a, b| a.cmp(&b)),
+            (Some(_), false) => Some(|a, b| match (unpack::<T>(a), unpack::<T>(b), T::ORDER) {
+                (Some(x), Some(y), Some(order)) => order(&x, &y),
+                _ => a.cmp(&b),
+            }),
+        },
+        ordered_bits: Self::ORDERED_BITS,
+        write_text: |a, out| {
+            if let Some(x) = unpack::<T>(a) {
+                x.write_text(out)
+            }
+        },
+        type_id: std::any::TypeId::of::<T>,
+    };
+}
+
+/// The value in `bits`, which `T`'s packing wrote.
+fn unpack<T: ValueType>(bits: [u64; 2]) -> Option<T> {
+    T::PACKING.map(|p| (p.unpack)(bits))
+}
+
+/// A value of a native value type on the heap: boxed or packed.
+#[derive(Clone, Copy)]
+pub enum ValueRef<'a> {
+    Boxed(&'a dyn ValueObj),
+    Packed(&'static PackedType, [u64; 2]),
+}
+
+impl ValueRef<'_> {
+    pub fn type_name(self) -> &'static str {
+        match self {
+            ValueRef::Boxed(x) => x.type_name(),
+            ValueRef::Packed(t, _) => t.name,
+        }
+    }
+
+    /// Equality with a value of the same Sand type.
+    pub fn value_eq(self, other: ValueRef<'_>) -> bool {
+        match (self, other) {
+            (ValueRef::Boxed(x), ValueRef::Boxed(y)) => x.value_eq(y),
+            (ValueRef::Packed(t, a), ValueRef::Packed(u, b)) => a == b && t.same(u),
+            _ => false,
+        }
+    }
+
+    /// The order of a value of the same Sand type; `None` if the type is not
+    /// ordered.
+    pub fn value_cmp(self, other: ValueRef<'_>) -> Option<std::cmp::Ordering> {
+        match (self, other) {
+            (ValueRef::Boxed(x), ValueRef::Boxed(y)) => x.value_cmp(y),
+            (ValueRef::Packed(t, a), ValueRef::Packed(u, b)) if t.same(u) => t.order.map(|order| order(a, b)),
+            _ => None,
+        }
+    }
+
+    pub fn value_hash(self) -> u64 {
+        match self {
+            ValueRef::Boxed(x) => x.value_hash(),
+            ValueRef::Packed(_, [a, b]) => {
+                let mut h = FxHasher::default();
+                h.write_u64(a);
+                h.write_u64(b);
+                h.finish()
+            }
+        }
+    }
+
+    /// Appends the text form.
+    pub fn write_text(self, out: &mut String) {
+        match self {
+            ValueRef::Boxed(x) => x.write_text(out),
+            ValueRef::Packed(t, a) => (t.write_text)(a, out),
+        }
+    }
+}
+
+impl Obj {
+    /// The value of a native value type, if this is one.
+    pub fn value(&self) -> Option<ValueRef<'_>> {
+        match self {
+            Obj::Value(x) => Some(ValueRef::Boxed(&**x)),
+            Obj::Packed(t, bits) => Some(ValueRef::Packed(t, *bits)),
+            _ => None,
+        }
+    }
+}
+
+/// The heap object holding `x`.
+pub(crate) fn value_obj<T: ValueType>(x: T) -> Obj {
+    match T::PACKING {
+        Some(p) => Obj::Packed(&PackedTypeOf::<T>::TYPE, (p.pack)(&x)),
+        None => Obj::Value(Box::new(x)),
+    }
+}
+
+/// The value of `T` that `obj` holds, if it holds one.
+pub(crate) fn value_of<T: ValueType>(obj: &Obj) -> Option<T> {
+    match obj {
+        Obj::Value(x) => x.as_any().downcast_ref::<T>().cloned(),
+        Obj::Packed(t, bits) if (t.type_id)() == std::any::TypeId::of::<T>() => unpack(*bits),
+        _ => None,
+    }
+}
+
+/// Panics unless `T::NAME` is a capitalized identifier.
+pub(crate) fn check_value_type_name<T: ValueType>() {
+    let name = T::NAME.as_bytes();
+    let ident = name.first().is_some_and(u8::is_ascii_uppercase) && name.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_');
+    assert!(ident, "value type name `{}` is not a capitalized identifier", T::NAME);
+}
+
+/// Reads a value of a value type from its text form, for `json.decode`.
+pub type ParseValue = fn(&str) -> Result<Obj, String>;
+
+pub(crate) fn parse_value<T: ValueType>(text: &str) -> Result<Obj, String> {
+    Ok(value_obj(T::parse(text)?))
+}
+
 /// A struct field: name, type and constant default.
 pub type FieldDesc = (String, Arc<TypeDesc>, Option<crate::types::ConstVal>);
 
@@ -885,6 +1119,11 @@ pub enum TypeDesc {
         variants: Vec<VariantDesc>,
     },
     Json,
+    /// A native value type, written as its text form.
+    Value {
+        name: String,
+        parse: ParseValue,
+    },
     /// Recursive reference to the enclosing struct or enum with this `id`.
     Recur(u32),
     Unsupported(String),
@@ -908,6 +1147,7 @@ impl std::fmt::Debug for TypeDesc {
             TypeDesc::Struct { id, name, .. } => write!(f, "Struct({name} #{id})"),
             TypeDesc::Enum { id, name, .. } => write!(f, "Enum({name} #{id})"),
             TypeDesc::Json => write!(f, "Json"),
+            TypeDesc::Value { name, .. } => write!(f, "{name}"),
             TypeDesc::Recur(id) => write!(f, "Recur(#{id})"),
             TypeDesc::Unsupported(name) => write!(f, "Unsupported({name})"),
         }
@@ -961,6 +1201,11 @@ pub enum Obj {
     Task(Box<TaskObj>),
     Channel(Box<ChannelObj>),
     Native(Box<dyn NativeObject>),
+    /// A value of a native value type ([`ValueType`]).
+    Value(Box<dyn ValueObj>),
+    /// A value of a native value type stored in 16 bytes (see
+    /// [`ValueType::PACKING`]).
+    Packed(&'static PackedType, [u64; 2]),
     TypeDesc(Arc<TypeDesc>),
 }
 
@@ -985,6 +1230,8 @@ impl std::fmt::Debug for Obj {
             Obj::Task(t) => write!(f, "Task({t:?})"),
             Obj::Channel(_) => write!(f, "Channel"),
             Obj::Native(n) => write!(f, "Native({})", n.type_name()),
+            Obj::Value(v) => write!(f, "Value({})", v.type_name()),
+            Obj::Packed(t, _) => write!(f, "Packed({})", t.name),
             Obj::TypeDesc(t) => write!(f, "TypeDesc({t:?})"),
         }
     }
@@ -1005,7 +1252,7 @@ impl Obj {
     pub fn size(&self) -> usize {
         let base = std::mem::size_of::<Obj>();
         base + match self {
-            Obj::Free(_) | Obj::NativeFn(_) | Obj::Cell(_) | Obj::Range(..) => 0,
+            Obj::Free(_) | Obj::NativeFn(_) | Obj::Cell(_) | Obj::Range(..) | Obj::Packed(..) => 0,
             Obj::Str(s) if s.is_heap_allocated() => s.capacity(),
             Obj::Str(_) => 0,
             Obj::StrBuf(s) => s.capacity(),
@@ -1022,6 +1269,7 @@ impl Obj {
                     + c.senders.capacity() * std::mem::size_of::<(u32, u64, Value)>()
             }
             Obj::Native(n) => n.size(),
+            Obj::Value(v) => v.size(),
             Obj::TypeDesc(_) => 64,
         }
     }

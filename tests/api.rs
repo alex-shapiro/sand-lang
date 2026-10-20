@@ -5,8 +5,10 @@
 mod common;
 
 use common::{TempDir, rt, run_with};
+use sandlang::jiff::civil::Date;
+use sandlang::time::TimeZone;
 use sandlang::{
-    Capability, Config, Decision, Engine, Error, LimitKind, Limits, MemorySink, NativeModule, Policy, PromptAnswer, RulePolicy,
+    Capability, Config, Decision, Engine, Error, LimitKind, Limits, MemorySink, NativeModule, Policy, PromptAnswer, RulePolicy, ValueType,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -200,6 +202,191 @@ help(geo.dist)
         out,
         "5.0\n5\n[\"a\", \"b\"]\nSome(2)\nNone\nOk(3)\nnegative: -1\n2\n(42, \"X\")\nb\"cba\"\ntrue\nfn geo.dist(a: float, b: float) -> float\n\nEuclidean length of (a, b).\n"
     );
+}
+
+/// An amount of money in cents, written `12.34`.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct Money(i64);
+
+impl std::fmt::Display for Money {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{:02}", self.0 / 100, self.0 % 100)
+    }
+}
+
+impl ValueType for Money {
+    const MODULE: &'static str = "bank";
+    const NAME: &'static str = "Money";
+    const ORDER: Option<fn(&Self, &Self) -> std::cmp::Ordering> = Some(Ord::cmp);
+    fn parse(text: &str) -> Result<Self, String> {
+        let (whole, cents) = text.split_once('.').ok_or("expected 0.00")?;
+        Ok(Money(whole.parse::<i64>().map_err(|e| e.to_string())? * 100 + cents.parse::<i64>().map_err(|e| e.to_string())?))
+    }
+}
+
+/// A position, which has no order.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct Cell(i64, i64);
+
+impl std::fmt::Display for Cell {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.0, self.1)
+    }
+}
+
+impl ValueType for Cell {
+    const MODULE: &'static str = "bank";
+    const NAME: &'static str = "Cell";
+    fn parse(text: &str) -> Result<Self, String> {
+        let (a, b) = text.split_once(':').ok_or("expected a:b")?;
+        Ok(Cell(a.parse().map_err(|_| "bad row")?, b.parse().map_err(|_| "bad column")?))
+    }
+}
+
+fn bank_module() -> NativeModule {
+    let mut m = NativeModule::new("bank");
+    m.value_type::<Money>().value_type::<Cell>();
+    m.function("cents", Money);
+    m.function("sum", |xs: Vec<Money>| Money(xs.iter().map(|m| m.0).sum()));
+    m.function("cell", |a: i64, b: i64| Cell(a, b));
+    m.function("due", |d: Date, days: i64| d.checked_add(sandlang::jiff::Span::new().days(days)).unwrap_or(d)).params(&["start", "days"]);
+    m.function("opened", || sandlang::jiff::Timestamp::UNIX_EPOCH);
+    m.function("zone_of", |z: sandlang::time::ZonedDateTime| z.zoned().time_zone().iana_name().map(String::from));
+    m
+}
+
+#[test]
+fn host_value_types_compare_hash_print_and_encode_by_value() {
+    let config = Config::new().module(bank_module());
+    let src = r#"
+import bank
+import json
+let xs = [bank.cents(250), bank.cents(1999), bank.cents(5)]
+print(xs.sorted())
+print(bank.sum(xs))
+print(bank.cents(5) == bank.cents(5))
+let seen = [bank.cents(5): "five"]
+print(seen[bank.cents(5)])
+print(json.encode(xs))
+let back: [bank.Money] = json.decode("[\"1.50\"]")?
+print(back)
+let bad: Result<[bank.Money]> = json.decode("[\"x\"]")
+print(bad.unwrap_err().message)
+print(set([bank.cell(1, 2), bank.cell(1, 2)]).len())
+help(bank.Money)
+help(bank.Cell)
+"#;
+    let (r, out, _) = run_src(config, src);
+    r.unwrap();
+    assert_eq!(
+        out,
+        "[0.05, 2.50, 19.99]\n22.54\ntrue\nfive\n[\"2.50\",\"19.99\",\"0.05\"]\n[1.50]\n$[0]: expected 0.00\n1\ntype bank.Money: Ord + Hash\ntype bank.Cell: Hash\n"
+    );
+}
+
+#[test]
+fn host_functions_take_and_return_values_of_other_modules() {
+    let config = Config::new().module(bank_module());
+    let src = r#"
+import bank
+import time
+print(bank.due(time.date(2024, 2, 28)?, 2))
+print(bank.opened())
+print(bank.zone_of(time.now_zoned(time.zone("Asia/Tokyo")?)))
+help(bank.due)
+"#;
+    let (r, out, _) = run_src(config, src);
+    r.unwrap();
+    assert_eq!(out, "2024-03-01\n1970-01-01T00:00:00Z\nSome(\"Asia/Tokyo\")\nfn bank.due(start: PlainDate, days: int) -> PlainDate\n");
+}
+
+#[test]
+#[should_panic(expected = "belongs to module `bank`")]
+fn value_types_belong_to_their_module() {
+    NativeModule::new("other").value_type::<Money>();
+}
+
+#[test]
+fn host_sources_with_crlf_lines_import_what_signatures_name() {
+    let mut m = NativeModule::new("geo");
+    m.source("//! Geometry.\r\n//! é\r\n");
+    m.function("start", || Date::constant(2024, 1, 1));
+    let (r, out, _) = run_src(Config::new().module(m), "import geo\nprint(geo.start())\nhelp(geo)");
+    r.unwrap();
+    assert!(out.starts_with("2024-01-01\nmodule geo\n\nGeometry.\né\n"), "{out}");
+}
+
+/// Implements `bank.Money` too, which `Money` already does.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct Impostor;
+
+impl std::fmt::Display for Impostor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("0.00")
+    }
+}
+
+impl ValueType for Impostor {
+    const MODULE: &'static str = "bank";
+    const NAME: &'static str = "Money";
+    fn parse(_: &str) -> Result<Self, String> {
+        Ok(Impostor)
+    }
+}
+
+#[test]
+#[should_panic(expected = "value type `bank.Money` is not registered")]
+fn value_types_in_signatures_must_be_registered() {
+    let mut m = NativeModule::new("bank");
+    m.function("zero", || Money(0));
+    Engine::new(Config::new().module(m));
+}
+
+#[test]
+#[should_panic(expected = "value type `bank.Money` is registered for another Rust type")]
+fn value_types_in_signatures_must_be_the_registered_rust_type() {
+    let mut m = bank_module();
+    m.function("fake", || Impostor);
+    Engine::new(Config::new().module(m));
+}
+
+#[test]
+fn unordered_value_types_cannot_be_sorted() {
+    let config = Config::new().module(bank_module());
+    let (r, _, _) = run_src(config, "import bank\nprint([bank.cell(1, 2)].sorted())");
+    let Err(Error::Compile(ds)) = r else { panic!("expected a compile error, got {r:?}") };
+    assert!(ds.iter().any(|d| d.message.contains("Ord")), "{ds:?}");
+}
+
+#[test]
+fn local_time_zone_needs_the_capability() {
+    assert!(TimeZone::get("Mars/Olympus_Mons").is_none());
+    let tokyo = || Config::new().time_zone(TimeZone::get("asia/tokyo").unwrap());
+    let src = "import time\nprint(time.local_zone())";
+    let (r, out, _) = run_src(tokyo(), src);
+    r.unwrap();
+    assert_eq!(out, "UTC\n", "denied by default");
+    let (r, out, _) = run_src(tokyo().policy(Policy::rules(RulePolicy::new().allow_timezone())), src);
+    r.unwrap();
+    assert_eq!(out, "Asia/Tokyo\n");
+    let (r, out, _) = run_src(Config::new().policy(Policy::allow_all()), src);
+    r.unwrap();
+    assert_eq!(out, "UTC\n", "no zone configured");
+    let deny = Policy::rules(RulePolicy::new().allow_timezone().deny_timezone());
+    let (r, out, _) = run_src(tokyo().policy(deny), src);
+    r.unwrap();
+    assert_eq!(out, "UTC\n", "deny wins a tie");
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let seen = asked.clone();
+    let prompter = move |cap: Capability| {
+        seen.lock().unwrap().push(cap.to_string());
+        std::future::ready(PromptAnswer::AllowOnce)
+    };
+    let prompting = Policy::custom(|cap: &Capability| if *cap == Capability::TimeZone { Decision::Prompt } else { Decision::Allow });
+    let (r, out, _) = run_src(tokyo().policy(prompting).prompter(prompter), src);
+    r.unwrap();
+    assert_eq!(out, "Asia/Tokyo\n");
+    assert_eq!(*asked.lock().unwrap(), ["read the local time zone"]);
 }
 
 #[test]

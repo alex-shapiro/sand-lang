@@ -84,6 +84,7 @@ pub(crate) enum RuleKind {
     Stdin,
     Stdout,
     Stderr,
+    TimeZone,
     Custom(String, Option<String>),
 }
 
@@ -271,6 +272,12 @@ impl RulePolicy {
     pub fn deny_stdin(self) -> Self {
         self.push(false, RuleKind::Stdin)
     }
+    pub fn allow_timezone(self) -> Self {
+        self.push(true, RuleKind::TimeZone)
+    }
+    pub fn deny_timezone(self) -> Self {
+        self.push(false, RuleKind::TimeZone)
+    }
     pub fn deny_stdout(self) -> Self {
         self.push(false, RuleKind::Stdout)
     }
@@ -449,8 +456,8 @@ impl RulePolicy {
                     best.offer(spec, *allow, *rule);
                 }
             }
-            Capability::Stdin | Capability::Stdout | Capability::Stderr => {
-                for &(ref kind, allow, rule) in &index.streams {
+            Capability::Stdin | Capability::Stdout | Capability::Stderr | Capability::TimeZone => {
+                for &(ref kind, allow, rule) in &index.unit {
                     if std::mem::discriminant(kind) == std::mem::discriminant(cap) {
                         best.offer([0; 5], allow, rule);
                     }
@@ -745,7 +752,8 @@ struct Index {
     /// Rules for variables by name, and those with patterns.
     env_names: FxHashMap<String, Vec<(bool, u32)>>,
     env: Vec<(NamePattern, bool, u32)>,
-    streams: Vec<(Capability, bool, u32)>,
+    /// Rules for capabilities without arguments (`Stdin`, `TimeZone`, ...).
+    unit: Vec<(Capability, bool, u32)>,
     /// Custom rules by name: their detail, if any.
     custom: FxHashMap<String, Vec<(Option<String>, bool, u32)>>,
     imports_restricted: bool,
@@ -806,9 +814,10 @@ impl Index {
                 RuleKind::Listen(p) => index.listen.push((p.clone(), allow, rule_id)),
                 RuleKind::Env(NamePattern::Exact(n)) => index.env_names.entry(n.clone()).or_default().push((allow, rule_id)),
                 RuleKind::Env(p) => index.env.push((p.clone(), allow, rule_id)),
-                RuleKind::Stdin => index.streams.push((Capability::Stdin, allow, rule_id)),
-                RuleKind::Stdout => index.streams.push((Capability::Stdout, allow, rule_id)),
-                RuleKind::Stderr => index.streams.push((Capability::Stderr, allow, rule_id)),
+                RuleKind::Stdin => index.unit.push((Capability::Stdin, allow, rule_id)),
+                RuleKind::Stdout => index.unit.push((Capability::Stdout, allow, rule_id)),
+                RuleKind::Stderr => index.unit.push((Capability::Stderr, allow, rule_id)),
+                RuleKind::TimeZone => index.unit.push((Capability::TimeZone, allow, rule_id)),
                 RuleKind::Custom(n, d) => index.custom.entry(n.clone()).or_default().push((d.clone(), allow, rule_id)),
             }
         }

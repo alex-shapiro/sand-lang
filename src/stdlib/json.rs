@@ -914,6 +914,14 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                     None => Err(Error::Ctl(Ctl::internal("json.decode: unresolved recursive type"))),
                 }
             }
+            TypeDesc::Value { name, parse } => {
+                let s = self.string(name)?;
+                self.b.meter.charge_bytes(s.len())?;
+                match parse(&s) {
+                    Ok(v) => Ok(self.b.st.alloc(v)),
+                    Err(msg) => Err(self.fail(&msg)),
+                }
+            }
             TypeDesc::Unsupported(name) => {
                 Err(Error::Ctl(Ctl::fail("invalid", format!("json.decode: cannot decode values of type {name}"))))
             }
@@ -962,6 +970,15 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                 Some(i) => Value::Tag(variants[i].1),
                 None => return Err(bad(self)),
             },
+            TypeDesc::Value { parse, .. } => {
+                self.b.meter.charge_bytes(key.len())?;
+                let v = parse(&key).map_err(|msg| self.fail(&format!("invalid map key `{key}`: {msg}")))?;
+                let Some(x) = v.value() else { return Err(Error::Ctl(Ctl::internal("json.decode: not a value"))) };
+                // Equal values have the same text, which identifies the key.
+                let (hash, mut text) = (x.value_hash(), String::new());
+                x.write_text(&mut text);
+                return Ok((self.b.st.alloc(v), hash, Some(Cow::Owned(text))));
+            }
             _ => return Err(Error::Ctl(Ctl::fail("invalid", "json.decode: unsupported map key type"))),
         };
         Ok((k, hash_key(self.b.heap, self.b.meter, k)?, None))
@@ -1212,6 +1229,13 @@ impl Encoder<'_> {
                 Obj::Task(_) => return fail("invalid", "cannot encode a task as JSON"),
                 Obj::Channel(_) => return fail("invalid", "cannot encode a channel as JSON"),
                 Obj::Native(n) => return fail("invalid", format!("cannot encode a {} as JSON", n.type_name())),
+                o @ (Obj::Value(_) | Obj::Packed(..)) => {
+                    let mut s = String::new();
+                    if let Some(x) = o.value() {
+                        x.write_text(&mut s);
+                    }
+                    self.string(&s)?
+                }
                 Obj::TypeDesc(_) | Obj::Cell(_) | Obj::Free(_) => return fail("invalid", "cannot encode this value as JSON"),
             },
             _ => {
@@ -1421,6 +1445,15 @@ impl<'a> Converter<'a, '_, '_> {
                 Obj::Task(_) => return fail("invalid", "cannot encode a task as JSON"),
                 Obj::Channel(_) => return fail("invalid", "cannot encode a channel as JSON"),
                 Obj::Native(n) => return fail("invalid", format!("cannot encode a {} as JSON", n.type_name())),
+                o @ (Obj::Value(_) | Obj::Packed(..)) => {
+                    let mut s = String::new();
+                    if let Some(x) = o.value() {
+                        x.write_text(&mut s);
+                    }
+                    self.b.meter.charge_bytes(s.len())?;
+                    let s = self.b.st.new_str(s);
+                    self.b.st.new_variant(ids.str_, &[s])
+                }
                 Obj::TypeDesc(_) | Obj::Cell(_) | Obj::Free(_) => return fail("invalid", "cannot encode this value as JSON"),
             },
             _ => {

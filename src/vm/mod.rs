@@ -490,6 +490,8 @@ pub struct Host {
     /// Network provider for outgoing connections.
     #[cfg(feature = "os")]
     pub(crate) network: Arc<dyn crate::network::Network>,
+    /// The zone `time.local_zone` returns (see [`crate::Config::time_zone`]).
+    pub(crate) time_zone: Option<jiff::tz::TimeZone>,
 }
 
 pub struct Vm {
@@ -816,6 +818,11 @@ impl Vm {
     pub fn err(&mut self, v: Value) -> Value {
         let id = self.prog.ids.err;
         self.heap.new_variant(id, &[v])
+    }
+
+    /// A value of a native value type (see [`value::ValueType`]).
+    pub fn new_value<T: value::ValueType>(&mut self, x: T) -> Value {
+        self.heap.alloc(value::value_obj(x))
     }
 
     #[inline]

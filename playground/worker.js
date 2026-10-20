@@ -24,7 +24,7 @@
 //   {type: "prompt", promptId, request}
 //   {type: "ended", exitCode}               a task called `exit`
 
-import { initSync, Engine, format, formatPolicy, lintPolicy } from "./pkg/sandlang_wasm.js";
+import { initSync, Engine, format, formatPolicy, isTimeZone, lintPolicy } from "./pkg/sandlang_wasm.js";
 import { engineOptions, program } from "./sandbox.js";
 
 const pendingPrompts = new Map();
@@ -87,8 +87,11 @@ const hooks = {
 
 /** An engine for `sandbox` (or the policy's errors). */
 function engineFor(sandbox, engineHooks = {}) {
+  const options = engineOptions(sandbox);
+  // A zone newer than the engine's database: scripts get UTC.
+  if (options.timeZone && !isTimeZone(options.timeZone)) delete options.timeZone;
   try {
-    return { engine: new Engine(engineOptions(sandbox), engineHooks) };
+    return { engine: new Engine(options, engineHooks) };
   } catch (e) {
     if (e?.policyErrors) return { policyErrors: e.policyErrors };
     throw e;

@@ -665,7 +665,7 @@ fn messages_quote_only_part_of_a_huge_argument() {
             other => panic!("{src}: {other:?}"),
         }
     }
-    for call in ["time.parse(s)", "http.get(s)", "net.connect(s)"] {
+    for call in ["time.Instant.parse(s)", "http.get(s)", "net.connect(s)"] {
         let module = call.split('.').next().unwrap();
         let src = format!("import {module}\n{big}match {call} {{\n    Ok(_) => print(-1),\n    Err(e) => print(e.message.len()),\n}}");
         let (r, out) = run(config(), &src);

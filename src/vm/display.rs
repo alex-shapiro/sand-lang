@@ -266,6 +266,11 @@ pub fn render_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Valu
                             Obj::Native(n) => {
                                 let _ = write!(out, "<{}>", n.type_name());
                             }
+                            o @ (Obj::Value(_) | Obj::Packed(..)) => {
+                                if let Some(x) = o.value() {
+                                    x.write_text(out)
+                                }
+                            }
                             Obj::TypeDesc(_) => out.push_str("<type>"),
                             Obj::Free(_) => out.push_str("<freed>"),
                         }

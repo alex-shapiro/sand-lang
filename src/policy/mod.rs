@@ -54,6 +54,8 @@ pub enum Capability {
     Stdin,
     Stdout,
     Stderr,
+    /// Reading the local time zone (`time.local_zone`).
+    TimeZone,
     /// Loading a script module.
     Import(PathBuf),
     /// Defined by host native modules.
@@ -85,6 +87,7 @@ impl fmt::Display for Capability {
             Capability::Stdin => write!(f, "read standard input"),
             Capability::Stdout => write!(f, "write standard output"),
             Capability::Stderr => write!(f, "write standard error"),
+            Capability::TimeZone => write!(f, "read the local time zone"),
             Capability::Import(p) => write!(f, "import {}", p.display()),
             Capability::Custom { name, detail } => write!(f, "{name} {detail}"),
         }
