@@ -1,74 +1,74 @@
 :root {
   color-scheme: light dark;
-  --bg: #f6f2ea;
-  --surface: #fffdf8;
-  --raised: #f1ebe0;
-  --editor: #fffefb;
-  --ink: #23201b;
-  --muted: #736b5f;
-  --faint: #a0978a;
-  --border: #e3dacb;
-  --border-strong: #cfc3ae;
-  --accent: #a8661a;
-  --accent-strong: #8c5310;
+  --bg: #f8f6f0;
+  --surface: #ffffff;
+  --raised: #f1eee6;
+  --editor: #fbfcfc;
+  --ink: #1b2a41;
+  --muted: #5b6675;
+  --faint: #8a94a1;
+  --border: #e3ded2;
+  --border-strong: #cdd5d9;
+  --accent: #8a5420;
+  --accent-strong: #6a3e14;
   --accent-ink: #fffaf2;
-  --accent-soft: #f6e5c8;
-  --error: #bf3b30;
-  --error-soft: #fbe7e4;
-  --warning: #9a6a08;
+  --accent-soft: #f4e8d2;
+  --error: #a3321f;
+  --error-soft: #fbeae5;
+  --warning: #8a5a00;
   --ok: #2f7a4d;
-  --selection: #f0d9b0;
-  --shadow: 0 1px 2px rgb(60 45 20 / 0.06), 0 4px 16px rgb(60 45 20 / 0.06);
+  --selection: #f0dcb4;
+  --shadow: 0 1px 2px rgb(27 42 65 / 0.06), 0 4px 16px rgb(27 42 65 / 0.07);
 
-  --syn-keyword: #8a3aa6;
-  --syn-constant: #b0521c;
-  --syn-number: #b0521c;
-  --syn-string: #3c7a24;
-  --syn-interp: #1d6aa1;
-  --syn-comment: #8c8476;
-  --syn-doc: #7a705e;
-  --syn-type: #1d6aa1;
-  --syn-call: #6e4a14;
+  --syn-keyword: #1f4f99;
+  --syn-constant: #9a3412;
+  --syn-number: #9a3412;
+  --syn-string: #3f6212;
+  --syn-interp: #9a3412;
+  --syn-comment: #5d6976;
+  --syn-doc: #56695b;
+  --syn-type: #0f6670;
+  --syn-call: #6b4510;
 
   --ui: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
   --radius: 10px;
   --control-h: 32px;
-  --setting-tab: #e9e1d2;
+  --setting-tab: #ebe6da;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #14120e;
-    --surface: #1c1915;
-    --raised: #24201b;
-    --editor: #181612;
-    --ink: #ece5d8;
-    --muted: #a69c8b;
-    --faint: #776e61;
-    --border: #332d26;
-    --border-strong: #4a4237;
-    --accent: #e2a24a;
-    --accent-strong: #f0b660;
-    --accent-ink: #1c1408;
-    --accent-soft: #3a2c17;
-    --error: #f0786c;
-    --error-soft: #3b1f1b;
+    --bg: #0e1624;
+    --surface: #142033;
+    --raised: #1a283d;
+    --editor: #111c2d;
+    --ink: #e9e4d8;
+    --muted: #99a4b4;
+    --faint: #6b778a;
+    --border: #223149;
+    --border-strong: #31435d;
+    --accent: #e2b878;
+    --accent-strong: #f2cf97;
+    --accent-ink: #1b2a41;
+    --accent-soft: #2a2b28;
+    --error: #f08a75;
+    --error-soft: #2c1a1c;
     --warning: #e3b24f;
     --ok: #72c592;
-    --selection: #4a3a20;
+    --selection: #2d3f5c;
     --shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 6px 20px rgb(0 0 0 / 0.25);
 
-    --syn-keyword: #d49af2;
-    --syn-constant: #f2a477;
-    --syn-number: #f2a477;
-    --syn-string: #a3d581;
-    --syn-interp: #7fbce9;
-    --syn-comment: #7e7669;
-    --syn-doc: #9a8f7c;
-    --syn-type: #7fbce9;
-    --syn-call: #e6c690;
-    --setting-tab: #120f0b;
+    --syn-keyword: #8fb4ff;
+    --syn-constant: #f0a070;
+    --syn-number: #f0a070;
+    --syn-string: #b5d68a;
+    --syn-interp: #f0a070;
+    --syn-comment: #8693a5;
+    --syn-doc: #9db1a3;
+    --syn-type: #6fd0d8;
+    --syn-call: #e2c08c;
+    --setting-tab: #0b111c;
   }
 }
 
@@ -96,24 +96,17 @@ code { font-family: var(--mono); font-size: 0.92em; }
 /* ---------------------------------------------------------------- header */
 
 .topbar {
-  position: sticky;
-  top: 0;
-  z-index: 10;
   display: flex;
   align-items: center;
   gap: 12px 24px;
   flex-wrap: wrap;
-  padding: calc(10px + env(safe-area-inset-top, 0px)) 20px 10px;
-  background: color-mix(in srgb, var(--bg) 88%, transparent);
-  backdrop-filter: blur(8px);
+  width: 100%;
+  max-width: 1500px;
+  margin: 0 auto;
+  padding: 16px 20px 0;
 }
 
-.brand { display: flex; align-items: center; gap: 10px; }
-.logo { width: 26px; height: 26px; }
-.logo path { fill: var(--accent); }
-.logo .grain { fill: none; stroke: var(--accent-ink); stroke-width: 2; stroke-linecap: round; opacity: 0.7; }
-h1 { margin: 0; font-size: 19px; letter-spacing: -0.01em; }
-h1 span { font-weight: 400; color: var(--muted); }
+.topbar h1 { margin: 0; font-size: 19px; letter-spacing: -0.01em; }
 
 .actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-left: auto; }
 .running { color: var(--accent-strong); font-weight: 600; font-size: 13px; font-variant-numeric: tabular-nums; }

@@ -5,7 +5,7 @@
 # (binaryen) if installed (in CI, where $CI is set, it must be).
 #
 #   wasm/build.sh web OUT_DIR [--dev]       ES module, for browsers (the playground)
-#   wasm/build.sh nodejs OUT_DIR [--dev]    CommonJS, for Node.js (wasm/tests)
+#   wasm/build.sh nodejs OUT_DIR [--dev]    CommonJS, for Node.js (wasm/tests, site/tests)
 #
 # Needs the wasm32-unknown-unknown target (rustup target add
 # wasm32-unknown-unknown) and wasm-bindgen-cli of exactly the version of the

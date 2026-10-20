@@ -1,16 +1,20 @@
-// Runs every example of the playground (playground/examples.js) with the
+// Runs every example of the playground (site/playground/examples.js) with the
 // WebAssembly build, as the playground does (as the first input of a
 // session), and checks its `expect`ations. Requests go to a stub of
-// `fetch` with canned answers, not to the network.
-// See node.test.mjs for how to build the package.
+// `fetch` with canned answers, not to the network. To run:
+//
+//   wasm/build.sh nodejs target/wasm-node
+//   node --test site/tests/
+//
+// SAND_WASM_PKG overrides the package directory.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { examples } from "../../playground/examples.js";
-import { engineOptions, MAIN } from "../../playground/sandbox.js";
+import { examples } from "../playground/examples.js";
+import { engineOptions, MAIN } from "../playground/sandbox.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const pkg = process.env.SAND_WASM_PKG ?? path.join(here, "../../target/wasm-node");

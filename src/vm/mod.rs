@@ -482,6 +482,7 @@ pub struct Host {
     /// The file system of the `fs` module.
     pub(crate) fs: crate::files::Fs,
     /// Rewrites or refuses outgoing HTTP requests (see [`crate::Config::request_filter`]).
+    #[cfg_attr(not(any(feature = "os", web)), expect(dead_code, reason = "this build has no HTTP client"))]
     pub(crate) request_filter: Option<crate::engine::RequestFilter>,
     /// Clock and timer provider for the engine.
     pub clock: Arc<dyn crate::platform::Clock>,

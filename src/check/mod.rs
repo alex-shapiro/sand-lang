@@ -1,6 +1,7 @@
 //! Name resolution and type checking: AST to typed HIR.
 
 pub mod budget;
+mod docs;
 mod expr;
 mod fuse;
 pub(crate) mod help;
@@ -58,7 +59,8 @@ pub enum Def {
 #[derive(Clone, Copy, Debug)]
 pub enum TyRef {
     Prim(TypeId),
-    Set,
+    /// `List`, `Map` or `Set`: a generic built-in collection.
+    Coll(Ctor),
     Def(TypeDefId),
     Alias(usize),
 }
@@ -1748,6 +1750,15 @@ impl Checker {
         }
     }
 
+    /// The collection type `c` with element (or key and value) types `args`.
+    pub(crate) fn coll_ty(&mut self, c: Ctor, args: &[TypeId]) -> TypeId {
+        match c {
+            Ctor::List => self.arena.list_of(args[0]),
+            Ctor::Map => self.arena.map_of(args[0], args[1]),
+            _ => self.arena.set_of(args[0]),
+        }
+    }
+
     fn instantiate_tyref(&mut self, r: TyRef, mut args: Vec<TypeId>, span: Span, name: &str) -> TypeId {
         match r {
             TyRef::Prim(t) => {
@@ -1756,12 +1767,14 @@ impl Checker {
                 }
                 t
             }
-            TyRef::Set => {
-                if args.len() != 1 {
-                    self.error(span, format!("expected 1 type argument for `Set`, found {}", args.len()));
+            TyRef::Coll(c) => {
+                let n = if c == Ctor::Map { 2 } else { 1 };
+                if args.len() != n {
+                    let plural = if n == 1 { "" } else { "s" };
+                    self.error(span, format!("expected {n} type argument{plural} for `{name}`, found {}", args.len()));
                     return TypeId::ERROR;
                 }
-                self.arena.set_of(args[0])
+                self.coll_ty(c, &args)
             }
             TyRef::Def(d) => {
                 let n = self.types[d as usize].generics.len();
@@ -2349,7 +2362,9 @@ pub fn builtin_type(name: &str) -> Option<TyRef> {
         "bytes" => TyRef::Prim(TypeId::BYTES),
         "duration" => TyRef::Prim(TypeId::DURATION),
         "Range" => TyRef::Prim(TypeId::RANGE),
-        "Set" => TyRef::Set,
+        "List" => TyRef::Coll(Ctor::List),
+        "Map" => TyRef::Coll(Ctor::Map),
+        "Set" => TyRef::Coll(Ctor::Set),
         _ => return None,
     })
 }

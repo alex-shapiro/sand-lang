@@ -54,7 +54,7 @@ fn json.parse(text: str) -> Result<Json, Error>
 
 Parses JSON text. Errors have kind `"parse"` and give the line and
 column. Nesting deeper than 512 arrays/objects is rejected.
-fn [T].len(self) -> int
+fn List.len(self) -> int
 
 Number of elements.
 fn Option.unwrap(self) -> T
@@ -190,7 +190,7 @@ evaluated
 field Point.x: float
 
 Horizontal.
-fn [T].len(self) -> int
+fn List.len(self) -> int
 
 Number of elements.
 variant Option.Some(T)
@@ -295,7 +295,7 @@ Functions:
              sorted.
 
 Types:
-    int, float, bool, str, bytes, duration, Range, [T], [K: V], Set<T>,
+    bool, int, float, str, bytes, duration, Range, List<T>, Map<K, V>, Set<T>,
     Option<T>, Result<T, E>, Error, Task<T>, Channel<T>, Iter<T>
 
 Traits:
@@ -334,6 +334,21 @@ fn help(x: int) -> int { x + 1 }
 print(help(1))
 --- stdout
 2
+
+=== List and Map name the list and map types
+print(members(List) == members([1]))
+print(members(Map) == members([1: 2]))
+help("List.len")
+help(Map.len)
+--- stdout
+true
+true
+fn List.len(self) -> int
+
+Number of elements.
+fn Map.len(self) -> int
+
+Number of entries.
 
 === unknown names get suggestions
 help(jsn)

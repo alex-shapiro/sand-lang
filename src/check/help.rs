@@ -45,7 +45,7 @@ const ITEM: &str = "    ";
 const ITEM_DOC: &str = "        ";
 
 /// The built-in types, as the overview lists them.
-const BUILTIN_TYPES: &[&str] = &["int", "float", "bool", "str", "bytes", "duration", "Range", "[T]", "[K: V]", "Set<T>"];
+const BUILTIN_TYPES: &[&str] = &["bool", "int", "float", "str", "bytes", "duration", "Range", "List<T>", "Map<K, V>", "Set<T>"];
 
 impl Checker {
     pub(crate) fn check_intrinsic(&mut self, which: Intrinsic, args: &CallArgs, span: Span) -> HExpr {
@@ -181,7 +181,7 @@ impl Checker {
         match def {
             Def::Fn(f) => Target::Fns(vec![f]),
             Def::Type(TyRef::Prim(t)) => self.type_target(t),
-            Def::Type(TyRef::Set) => Target::Type(Ctor::Set, 0),
+            Def::Type(TyRef::Coll(c)) => Target::Type(c, 0),
             Def::Type(TyRef::Def(d)) => Target::Type(Ctor::Def(d), 0),
             Def::Type(TyRef::Alias(i)) => Target::Alias(i),
             Def::Global(g) => {
@@ -213,7 +213,7 @@ impl Checker {
     }
 
     /// A name in a string: a path such as `json.Json.get`, whose first
-    /// segment may also be written as a type (`[T]`, `[K: V]`, `Set<T>`, `T?`).
+    /// segment may also be written as a type (`List<T>`, `[T]`, `[K: V]`, `T?`).
     fn named_target(&mut self, text: &str, span: Span) -> Option<Target> {
         let text = text.trim();
         let bad = |c: &mut Self| {
@@ -452,7 +452,7 @@ impl Checker {
     /// The methods of type `c` (not those of trait impls), in order of
     /// declaration. Of methods declared by the prelude, standard and host
     /// modules, only the `pub` ones: the others are their internal helpers.
-    fn methods_of(&self, c: Ctor) -> Vec<FnId> {
+    pub(super) fn methods_of(&self, c: Ctor) -> Vec<FnId> {
         let shown = |f: FnId| {
             let fi = &self.fns[f as usize];
             fi.is_pub || fi.module == self.cur_mod || matches!(self.mods[fi.module as usize].kind, ModKind::Script { .. })
@@ -738,7 +738,7 @@ impl Checker {
 
     /// `fn name<T: Ord>(a: T, b: str = "x") -> T where ...`, qualified with
     /// its module, type or trait (`fn json.parse`, `fn str.split`) if `qualify`.
-    fn signature(&self, f: FnId, qualify: bool) -> String {
+    pub(super) fn signature(&self, f: FnId, qualify: bool) -> String {
         let fi = &self.fns[f as usize];
         let mut s = String::from("fn ");
         if qualify {
@@ -819,7 +819,10 @@ impl Checker {
         }
         match fi.owner {
             Some(Ctor::Def(d)) => format!("{}.", self.type_name(d)),
-            Some(c) => format!("{}.", self.ctor_name(c, 0)),
+            Some(c) => {
+                let name = self.ctor_name(c, 0);
+                format!("{}.", name.split('<').next().unwrap_or(&name))
+            }
             None => self.module_prefix(fi.module),
         }
     }
@@ -831,7 +834,7 @@ impl Checker {
     }
 
     /// The doc comment of a function; an impl method without one has its trait method's.
-    fn fn_doc(&self, f: FnId) -> Option<Arc<str>> {
+    pub(super) fn fn_doc(&self, f: FnId) -> Option<Arc<str>> {
         let fi = &self.fns[f as usize];
         if fi.doc.is_some() {
             return fi.doc.clone();
@@ -848,7 +851,7 @@ impl Checker {
     }
 
     /// `Option<T>`
-    fn type_header_name(&self, d: TypeDefId) -> String {
+    pub(super) fn type_header_name(&self, d: TypeDefId) -> String {
         let def = &self.types[d as usize];
         let mut s = self.name(def.name).to_string();
         if !def.generics.is_empty() {
@@ -858,7 +861,7 @@ impl Checker {
         s
     }
 
-    fn type_header(&self, d: TypeDefId, qualify: bool) -> String {
+    pub(super) fn type_header(&self, d: TypeDefId, qualify: bool) -> String {
         let def = &self.types[d as usize];
         let (kw, bounds) = match def.kind {
             TypeDefKind::Struct { .. } => ("struct", ""),
@@ -871,7 +874,7 @@ impl Checker {
     }
 
     /// `Iterator<T>`
-    fn trait_header_name(&self, t: TraitId) -> String {
+    pub(super) fn trait_header_name(&self, t: TraitId) -> String {
         let td = &self.traits[t as usize];
         let mut s = self.name(td.name).to_string();
         if !td.generics.is_empty() {
@@ -881,8 +884,8 @@ impl Checker {
         s
     }
 
-    /// A type constructor written as a type: `str`, `[T]`, `(A, B)`, `Option<T>`.
-    fn ctor_name(&self, c: Ctor, arity: u32) -> String {
+    /// A type constructor written as a type: `str`, `List<T>`, `(A, B)`, `Option<T>`.
+    pub(super) fn ctor_name(&self, c: Ctor, arity: u32) -> String {
         match c {
             Ctor::Int => "int".into(),
             Ctor::Float => "float".into(),
@@ -892,8 +895,8 @@ impl Checker {
             Ctor::Duration => "duration".into(),
             Ctor::Unit => "()".into(),
             Ctor::Range => "Range".into(),
-            Ctor::List => "[T]".into(),
-            Ctor::Map => "[K: V]".into(),
+            Ctor::List => "List<T>".into(),
+            Ctor::Map => "Map<K, V>".into(),
             Ctor::Set => "Set<T>".into(),
             Ctor::Tuple => {
                 let names: Vec<String> = (0..arity).map(|i| ((b'A' + (i % 26) as u8) as char).to_string()).collect();
@@ -905,7 +908,7 @@ impl Checker {
     }
 
     /// `Circle(radius: float)`
-    fn variant_text(&self, d: TypeDefId, i: u32) -> String {
+    pub(super) fn variant_text(&self, d: TypeDefId, i: u32) -> String {
         let v = &self.types[d as usize].variants()[i as usize];
         let mut s = self.name(v.name).to_string();
         if !v.fields.is_empty() {
@@ -946,7 +949,7 @@ impl Checker {
     }
 
     /// The source text at `span` on one line, shortened if long.
-    fn source_text(&self, span: Span) -> String {
+    pub(super) fn source_text(&self, span: Span) -> String {
         let file = self.sources.get(&span.file);
         let text = file.and_then(|f| f.text.get(span.lo as usize..span.hi as usize)).unwrap_or("...");
         let line = text.split_whitespace().collect::<Vec<_>>().join(" ");

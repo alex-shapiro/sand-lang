@@ -22,7 +22,8 @@ bytecode  ─VM───────▶ effects    src/vm/
   persistent tables that make copying the checker cheap.
 - `src/check/help.rs`: `help` and `members`, which the checker evaluates
   to constants. `scan_imports` also loads the modules their arguments name,
-  so that the checker has them.
+  so that the checker has them. `src/check/docs.rs` gives the same
+  declarations as data (`Engine::docs`), for the website's library reference.
 - `src/vm/`: values, heap, interpreter, scheduler, metering (`meter.rs`),
   memory held by pending I/O (`iomem.rs`).
 - `src/stdlib/`: the standard library; `src/native.rs`: the `NativeModule`
@@ -37,7 +38,7 @@ bytecode  ─VM───────▶ effects    src/vm/
 - `src/session.rs`: REPL sessions; `src/feed.rs`: standard input that the
   host passes to scripts; `src/fmt.rs`, `src/lint.rs`: tools (the linter
   runs inside a compilation).
-- `cli/`: the `sand` command; `wasm/`: the JavaScript API and playground.
+- `cli/`: the `sand` command; `wasm/`: the JavaScript API; `site/`: the website and its playground.
 
 ## Natives
 

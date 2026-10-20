@@ -55,10 +55,9 @@ sand check script.sand
 sand lint script.sand
 sand fmt script.sand
 sand test script.sand
-sand playground
 ```
 
-The `sand run` command can run with a security policy. See the [policy file spec §14.7]('docs/SPEC.md) for the full set of policy options ([`docs/SPEC.md` §14.7](docs/SPEC.md)).
+The `sand run` command can run with a security policy. [`docs/SPEC.md` §14.7](docs/SPEC.md#147-policy-files) lists the policy options.
 
 ```sh
 sand run script.sand --policy=app.policy
@@ -80,14 +79,15 @@ let result = session.eval("import geo\ngeo.dist(3.0, 4.0)").await?;
 assert_eq!(result, Some("5.0".to_string()));
 ```
 
-## In the browser
+## Website
 
-Sand runs on WebAssembly. You can try it out with the Sand Playground. More info at [`playground/README.md`](playground/README.md).
+`site/` holds the website for sandlang.com: a guide, the library reference, the specification, and a playground that runs Sand in the browser through WebAssembly. Build it and serve it locally with:
 
 ```sh
-playground/build.sh
-sand playground
+cargo site serve
 ```
+
+See [`site/README.md`](site/README.md).
 
 ## Examples
 

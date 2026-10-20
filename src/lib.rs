@@ -7,6 +7,7 @@
 pub mod check;
 mod compile;
 pub mod diag;
+pub mod docs;
 pub mod engine;
 mod feed;
 mod files;

@@ -798,63 +798,6 @@ fn many_syntax_errors_are_reported_quickly() {
     assert!(took < std::time::Duration::from_secs(3), "took {took:?}");
 }
 
-// ---------------------------------------------------------------------------
-// playground
-// ---------------------------------------------------------------------------
-
-/// `GET`s `path` from a server on `port`: (status line, headers and body).
-fn http_get(port: u16, method: &str, path: &str) -> (String, String) {
-    let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-    write!(s, "{method} {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
-    let mut response = String::new();
-    s.read_to_string(&mut response).unwrap();
-    let (head, body) = response.split_once("\r\n\r\n").unwrap();
-    (head.to_string(), body.to_string())
-}
-
-#[test]
-fn playground_serves_its_directory_on_localhost() {
-    let dir = TempDir::new("playground");
-    dir.write("site/index.html", "<p>hi</p>");
-    dir.write("site/app.js", "export {}");
-    dir.write("secret.txt", "outside");
-    let site = dir.path().join("site");
-    // Without the built engine it explains what to do.
-    let o = sand(dir.path(), &["playground", "site"]);
-    assert!(o.code == 2 && o.stderr.contains("run playground/build.sh"), "{o:?}");
-    dir.write("site/pkg/sandlang_wasm_bg.wasm", "\0asm");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(dir.path().join("secret.txt"), site.join("link.txt")).unwrap();
-
-    let mut child = Command::new(env!("CARGO_BIN_EXE_sand"))
-        .args(["playground", "site", "--port=0"])
-        .current_dir(dir.path())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut first = String::new();
-    std::io::BufRead::read_line(&mut std::io::BufReader::new(child.stdout.take().unwrap()), &mut first).unwrap();
-    let port: u16 = first.split("http://127.0.0.1:").nth(1).and_then(|r| r.split('/').next()).and_then(|p| p.parse().ok()).expect(&first);
-
-    let (head, body) = http_get(port, "GET", "/");
-    assert!(head.starts_with("HTTP/1.1 200") && head.contains("text/html") && body == "<p>hi</p>", "{head}");
-    let (head, _) = http_get(port, "GET", "/pkg/sandlang_wasm_bg.wasm");
-    assert!(head.contains("Content-Type: application/wasm"), "{head}");
-    let (head, _) = http_get(port, "GET", "/app.js?v=1");
-    assert!(head.contains("text/javascript"), "{head}");
-    for path in ["/../secret.txt", "/%2e%2e/secret.txt", "/missing", "/link.txt"] {
-        let (head, _) = http_get(port, "GET", path);
-        assert!(head.starts_with("HTTP/1.1 404"), "{path}: {head}");
-    }
-    let (head, body) = http_get(port, "HEAD", "/");
-    assert!(head.starts_with("HTTP/1.1 200") && body.is_empty(), "{head}");
-    let (head, _) = http_get(port, "POST", "/");
-    assert!(head.starts_with("HTTP/1.1 405"), "{head}");
-    child.kill().unwrap();
-    let _ = child.wait();
-}
-
 /// A local HTTP server (on a thread) answering every request with `hi`;
 /// returns its port.
 fn hi_server() -> u16 {

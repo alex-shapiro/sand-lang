@@ -6,16 +6,11 @@ engine in its own Web Worker, so several run at the same time.
 
 ## Running it
 
-```
-playground/build.sh    # the engine, into playground/pkg (needs wasm-bindgen-cli)
-sand playground        # serves this directory at http://127.0.0.1:8000/
-```
-
-`build.sh --dev` builds faster and runs slower. `sand playground DIR
---port=PORT` serves another copy or uses another port. Any static file
-server works (`python3 -m http.server -d playground`), but not `file://`
-pages; to host it, copy the directory (with `pkg/`) to a static host. It
-needs a browser with module workers and works offline once loaded.
+The website serves the playground at `/play/` (see [`../README.md`](../README.md)):
+`cargo site serve` builds the engine and the site and opens them at
+http://127.0.0.1:8000/play/. The playground needs a browser with module
+workers, and works offline once loaded. `index.html` takes the site's
+stylesheet and header at `<!-- site-head -->` and `<!-- site-chrome -->`.
 
 ## Using it
 
@@ -57,7 +52,7 @@ Engine(options, hooks).session()` and evaluates the program as its first
   environment and input, the engine options they become, and share links.
 - `editor.js` — the code editor: a textarea over a highlighted copy of its
   text, with line numbers and diagnostics.
-- `examples.js` — the examples, which `wasm/tests/playground.test.mjs` runs.
+- `examples.js` — the examples, which `../tests/playground.test.mjs` runs.
 
 The engine is the command line's, built without operating-system access
 (`--no-default-features`): scripts see only what the page gives them, and

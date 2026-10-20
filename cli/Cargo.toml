@@ -2,7 +2,7 @@
 name = "sand-cli"
 version = "0.1.0"
 edition = "2024"
-description = "The `sand` command: run, check, lint, format and test Sand scripts, a REPL and the web playground"
+description = "The `sand` command: run, check, lint, format and test Sand scripts, and a REPL"
 license = "MIT OR Apache-2.0"
 publish = false
 

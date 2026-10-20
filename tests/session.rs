@@ -251,6 +251,8 @@ fn imports_mid_session() {
     assert!(msg.contains("unknown module `nope`"), "{msg}");
 }
 
+// Library modules are host files.
+#[cfg(feature = "os")]
 #[test]
 fn import_library_module_by_name() {
     let dir = TempDir::new("session-library");
@@ -268,6 +270,8 @@ fn import_library_module_by_name() {
     assert!(!msg.contains("unknown module"), "{msg}");
 }
 
+// Library modules are host files.
+#[cfg(feature = "os")]
 #[test]
 fn check_library_import_policy() {
     let dir = TempDir::new("session-library-policy");
@@ -279,6 +283,8 @@ fn check_library_import_policy() {
     assert!(msg.contains("cannot import `geo`: permission denied"), "{msg}");
 }
 
+// Library modules are host files.
+#[cfg(feature = "os")]
 #[test]
 fn reload_modified_module_on_import() {
     let dir = TempDir::new("session-reload");

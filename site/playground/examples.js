@@ -2,7 +2,7 @@
 // program; other files go into the in-memory file system at their path),
 // a policy, and optionally an environment and standard input.
 //
-// wasm/tests/playground.test.mjs runs every example and checks `expect`.
+// site/tests/playground.test.mjs runs every example and checks `expect`.
 
 export const examples = [
   {

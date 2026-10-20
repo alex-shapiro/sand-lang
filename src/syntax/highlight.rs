@@ -21,7 +21,7 @@ pub enum Highlight {
     /// An identifier starting with an upper-case letter (types, traits,
     /// enum variants).
     Type,
-    /// An identifier followed by `(`.
+    /// An identifier followed by `(`, and the name of a declared function.
     Call,
 }
 
@@ -64,6 +64,8 @@ pub fn highlight(source: &str) -> Vec<(usize, usize, Highlight)> {
         while let Some(c) = comments.next_if(|c| (c.lo as usize) < lo) {
             add(c.lo as usize, c.hi as usize, comment(c));
         }
+        let after_fn = i > 0 && tokens[i - 1].tok == Tok::Fn;
+        let after_dot = i > 0 && tokens[i - 1].tok == Tok::Dot;
         let kind = match &t.tok {
             Tok::Str(_) | Tok::Bytes(_) | Tok::StrStart | Tok::StrText(_) | Tok::StrEnd => Highlight::String,
             Tok::InterpStart => Highlight::Interpolation,
@@ -76,12 +78,14 @@ pub fn highlight(source: &str) -> Vec<(usize, usize, Highlight)> {
             }
             Tok::Int(_) | Tok::IntOverflow(_) | Tok::Float(_) | Tok::Inf | Tok::Nan | Tok::Duration(_) => Highlight::Number,
             Tok::True | Tok::False | Tok::SelfLower | Tok::SelfUpper => Highlight::Constant,
-            Tok::Ident => {
+            // After `fn` and `.`, a keyword is a method name (`fn extend`, `xs.extend(ys)`).
+            tok if tok.is_keyword() && !(after_fn || after_dot) => Highlight::Keyword,
+            tok if *tok == Tok::Ident || tok.is_keyword() => {
                 if &source[lo..hi] == "from" && tokens.get(i + 2).is_some_and(|n| n.tok == Tok::Import) {
                     Highlight::Keyword
                 } else if source[lo..hi].starts_with(|c: char| c.is_ascii_uppercase()) {
                     Highlight::Type
-                } else if matches!(tokens.get(i + 1), Some(n) if n.tok == Tok::LParen && n.lo == t.hi) {
+                } else if matches!(tokens.get(i + 1), Some(n) if n.tok == Tok::LParen && n.lo == t.hi) || after_fn {
                     Highlight::Call
                 } else if let Some(n) = tokens.get(i + 1).filter(|n| n.tok == Tok::Bang && n.lo == t.hi) {
                     add(lo, n.hi as usize, Highlight::Call);
@@ -90,7 +94,6 @@ pub fn highlight(source: &str) -> Vec<(usize, usize, Highlight)> {
                     continue;
                 }
             }
-            tok if tok.is_keyword() => Highlight::Keyword,
             _ => continue,
         };
         add(lo, hi, kind);
@@ -122,6 +125,12 @@ mod tests {
             show("/// Doc\nfn area(s: Shape) -> float { 3.5 * s.r // radius\n}"),
             [("/// Doc", "doc"), ("fn", "keyword"), ("area", "call"), ("Shape", "type"), ("3.5", "number"), ("// radius", "comment"),]
         );
+        assert_eq!(show("fn zip<U>(other: [U])"), [("fn", "keyword"), ("zip", "call"), ("U", "type"), ("U", "type")]);
+        assert_eq!(
+            show("fn extend(self) { xs.extend(ys) }"),
+            [("fn", "keyword"), ("extend", "call"), ("self", "constant"), ("extend", "call")]
+        );
+        assert_eq!(show("let f: fn(int) = g"), [("let", "keyword"), ("fn", "keyword")]);
         assert_eq!(
             show("let ok = true and 5s > 1ms"),
             [("let", "keyword"), ("true", "constant"), ("and", "keyword"), ("5s", "number"), ("1ms", "number")]

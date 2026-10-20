@@ -1,7 +1,7 @@
 //! The `http` module on the web: a client over the browser's `fetch`.
 //!
-//! The policy determines whether a request is allowed bfore anything is sent.
-//! Redirects are denied (`redirect: "manual"`): the browser hides
+//! The policy determines whether a request is allowed before anything is
+//! sent, and the host's request filter sees its headers. Redirects are denied (`redirect: "manual"`): the browser hides
 //! where they lead, so following them could reach hosts the policy never
 //! saw. Responses are read as a stream and abandoned once they exceed
 //! `max_http_body`; their buffers count against the memory limit.
@@ -12,7 +12,7 @@
 //! channel. Dropping that wait (a cancelled task, an interrupted run)
 //! aborts the request.
 
-use super::http_common::{BodyReader, MemoryBody, Url, alloc_body, header_list, header_pairs, is_token};
+use super::http_common::{BodyReader, MemoryBody, Url, alloc_body, filter_request, header_list, header_pairs, is_token};
 use super::stream::IoFailure;
 use crate::check::ModKind;
 use crate::engine::Registry;
@@ -58,13 +58,16 @@ fn send(vm: &mut Vm, a: &[Value]) -> NResult {
     if !is_token(&method) {
         return Ok(vm.err_value("invalid", &format!("invalid HTTP method {:?}", super::truncate(&method, 64))));
     }
-    let headers = match header_pairs(vm, a[2])? {
+    let mut headers = match header_pairs(vm, a[2])? {
         Ok(h) => h,
         Err(e) => return Ok(vm.err_value("invalid", &e)),
     };
     let cap = url.capability(&method);
     if !vm.permit(&cap)? {
         return Ok(vm.err_value("permission_denied", &format!("permission denied: {cap}")));
+    }
+    if let Err(reason) = filter_request(vm, &url, &mut headers) {
+        return Ok(vm.err_value("permission_denied", &reason));
     }
     // The request body is held, and the response buffered, outside the heap.
     let res = super::or_return!(vm.reserve_io(vm.heap.bytes_of(a[3]).len()));

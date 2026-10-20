@@ -1186,9 +1186,9 @@ impl Checker {
     fn tyref_open(&mut self, r: TyRef, span: Span, name: &str) -> TypeId {
         match r {
             TyRef::Prim(t) => t,
-            TyRef::Set => {
-                let v = self.fresh();
-                self.arena.set_of(v)
+            TyRef::Coll(c) => {
+                let args = [self.fresh(), self.fresh()];
+                self.coll_ty(c, &args)
             }
             TyRef::Def(d) => {
                 let n = self.types[d as usize].generics.len();
