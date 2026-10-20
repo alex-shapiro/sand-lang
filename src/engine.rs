@@ -547,6 +547,9 @@ impl Registry {
             partial: Mutex::default(),
         };
         for m in &config.modules {
+            m.register_value_types(&mut r);
+        }
+        for m in &config.modules {
             m.register(&mut r);
         }
         // A host module replacing a standard one needs a snapshot of its own.

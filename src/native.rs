@@ -9,7 +9,7 @@ use crate::vm::meter::Scratch;
 use crate::vm::value::{Obj, Value, ValueType};
 use crate::vm::{Ctl, Finisher, HostFn, NResult, NativeImpl, Vm};
 use std::any::TypeId;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Display;
 use std::future::Future;
 use std::sync::Arc;
@@ -773,34 +773,38 @@ impl NativeModule {
         self
     }
 
-    pub(crate) fn register(&self, r: &mut Registry) {
-        // Functions and types the source declares itself keep their declarations.
-        let declared: Vec<String> = crate::syntax::parse_module(&self.source, 0)
-            .module
-            .items
-            .into_iter()
-            .filter_map(|item| match item.kind {
-                ItemKind::Fn(f) if f.is_native => Some(f.name.name),
-                ItemKind::NativeType(t) => Some(t.name.name),
-                ItemKind::Import(Import { source: ImportSource::Name(m), alias: None, names: None }) => Some(m.name),
-                _ => None,
-            })
-            .collect();
-        let imports: String = self.imports.iter().filter(|m| !declared.iter().any(|d| d == *m)).map(|m| format!("import {m}\n")).collect();
-        let mut src = imports + &self.source;
-        for &(name, register) in &self.value_types {
+    /// Registers the module's value types. Every module's are registered
+    /// before any module's declarations (see [`NativeModule::register`]),
+    /// which may name them.
+    pub(crate) fn register_value_types(&self, r: &mut Registry) {
+        for &(_, register) in &self.value_types {
             register(r);
-            if !declared.iter().any(|d| d == name) {
-                src.push_str(&format!("pub native type {name}\n"));
-            }
         }
+    }
+
+    pub(crate) fn register(&self, r: &mut Registry) {
         for (name, id) in &self.named {
             match r.by_name.values.get(name.as_str()) {
                 Some(info) => assert!(info.type_id == *id, "value type `{name}` is registered for another Rust type"),
                 None => panic!("value type `{name}` is not registered (see `NativeModule::value_type`)"),
             }
         }
-        for decl in self.decls.iter().filter(|d| !declared.contains(&d.name)) {
+        // Functions, types and imports the source declares itself keep their declarations.
+        let (mut fns, mut types, mut imports) = (HashSet::new(), HashSet::new(), HashSet::new());
+        for item in crate::syntax::parse_module(&self.source, 0).module.items {
+            match item.kind {
+                ItemKind::Fn(f) if f.is_native => fns.insert(f.name.name),
+                ItemKind::NativeType(t) => types.insert(t.name.name),
+                ItemKind::Import(Import { source: ImportSource::Name(m), alias: None, names: None }) => imports.insert(m.name),
+                _ => false,
+            };
+        }
+        let mut src: String = self.imports.iter().filter(|m| !imports.contains(**m)).map(|m| format!("import {m}\n")).collect();
+        src.push_str(&self.source);
+        for &(name, _) in self.value_types.iter().filter(|(name, _)| !types.contains(*name)) {
+            src.push_str(&format!("pub native type {name}\n"));
+        }
+        for decl in self.decls.iter().filter(|d| !fns.contains(&d.name)) {
             if let Some(d) = self.docs.get(&decl.name) {
                 for line in d.lines() {
                     src.push_str(&format!("/// {line}\n"));

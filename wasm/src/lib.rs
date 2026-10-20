@@ -498,13 +498,13 @@ pub fn highlight_kinds() -> Vec<String> {
     HIGHLIGHT_KINDS.iter().map(|k| k.name().to_string()).collect()
 }
 
-/// The version of Sand.
 /// Whether the engine knows the time zone `name` (see `EngineOptions.timeZone`).
 #[wasm_bindgen(js_name = isTimeZone)]
 pub fn is_time_zone(name: &str) -> bool {
     sandlang::time::TimeZone::get(name).is_some()
 }
 
+/// The version of Sand.
 #[wasm_bindgen]
 pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()

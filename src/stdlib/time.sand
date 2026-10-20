@@ -60,7 +60,8 @@ pub native type PlainMonthDay
 pub native type Span
 
 /// A time zone: an IANA zone such as `America/New_York`, `UTC`, or a fixed
-/// offset such as `+05:30`. Zones are equal if their names are.
+/// offset such as `+05:30`. Zones are equal if their names are, so aliases
+/// differ: `zone("Etc/UTC") != UTC`.
 pub native type TimeZone
 
 /// Units of time, largest first.

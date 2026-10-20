@@ -137,10 +137,18 @@ fn zone_key(tz: &tz::TimeZone) -> ZoneKey<'_> {
 pub struct ZonedDateTime(Zoned);
 
 impl ZonedDateTime {
-    /// `z`, if Sand supports its zone (see [`TimeZone::get`]).
+    /// The instant of `z` in its zone as Sand knows it: an IANA zone takes
+    /// its rules from the built-in database (see [`TimeZone::get`]); `None`
+    /// if Sand does not support the zone.
     pub fn new(z: Zoned) -> Option<ZonedDateTime> {
-        supported(z.time_zone()).ok()?;
-        Some(ZonedDateTime(z))
+        let tz = match z.time_zone().iana_name() {
+            Some(name) => DB.get(name).ok()?,
+            None => {
+                supported(z.time_zone()).ok()?;
+                z.time_zone().clone()
+            }
+        };
+        Some(ZonedDateTime(z.timestamp().to_zoned(tz)))
     }
 
     pub fn zoned(&self) -> &Zoned {
@@ -1150,8 +1158,8 @@ fn register_date(r: &mut Registry) {
     });
     r.add_builtin("time.PlainDate.to_plain_month_day", |vm, a| {
         let d = date(vm, a[0])?;
-        let md = exact_date(MONTH_DAY_YEAR.into(), d.month().into(), d.day().into()).ok_or_else(|| Ctl::internal("no month-day"))?;
-        Ok(vm.new_value(PlainMonthDay(md)))
+        let md = PlainMonthDay::new(d.month(), d.day()).ok_or_else(|| Ctl::internal("no month-day"))?;
+        Ok(vm.new_value(md))
     });
     r.add_builtin("time.PlainDate.format", |vm, a| {
         let d = date(vm, a[0])?;
@@ -1371,6 +1379,23 @@ mod tests {
         for name in ["+05:30:15", "EST5EDT,M3.2.0,M11.1.0", "Mars/Olympus_Mons", ""] {
             assert!(parse_zone(name).is_err(), "{name}");
         }
+    }
+
+    #[test]
+    fn host_zones_take_the_built_in_rules_of_their_name() {
+        // A TZif file of one zone fixed at +09:00 (JST).
+        let mut tzif = b"TZif".to_vec();
+        tzif.extend([0; 16]);
+        for count in [0u32, 0, 0, 0, 1, 4] {
+            tzif.extend(count.to_be_bytes());
+        }
+        tzif.extend(32_400i32.to_be_bytes());
+        tzif.extend([0, 0]);
+        tzif.extend(b"JST\0");
+        let fake = tz::TimeZone::tzif("America/New_York", &tzif).unwrap();
+        let z = ZonedDateTime::new(Timestamp::UNIX_EPOCH.to_zoned(fake)).unwrap();
+        assert_eq!(z.to_string(), "1969-12-31T19:00:00-05:00[America/New_York]");
+        assert_eq!(ZonedDateTime::parse(&z.to_string()).ok(), Some(z));
     }
 
     #[test]

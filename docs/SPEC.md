@@ -2184,7 +2184,7 @@ They are value types (§5.4): `Span` and `TimeZone` are `Hash`, the others
 `Ord + Hash`, ordered chronologically (a `ZonedDateTime` by instant, then
 by zone). A span balances units below a second into seconds, as its text
 form writes them; spans are equal if their units are (`P1D != PT24H`), and
-zones if their names are. Values
+zones if their names are (`Etc/UTC != UTC`). Values
 display, `json.encode` and `json.decode` as their text form, which each
 type's static `parse(text)` reads (errors of kind `"parse"`); `parse(text,
 format: f)` reads strftime format `f` instead.
@@ -2771,18 +2771,17 @@ normalize_path, normalize_entry_path}` for hosts writing their own
   on a denial). `NativeModule::source` may add Sand declarations (types,
   pure-Sand helpers, `native fn` with explicit signatures, which take
   precedence over derived ones and are required for
-  `NativeModule::raw_function`). `NativeModule::value_type::<T>()` makes a
-  Rust type `T: ValueType` (`Clone + Eq + Hash + Display`, with the
-  module's name as `MODULE`, a `NAME`, a `parse` that reads what `Display`
-  writes, `ORDER = Some(Ord::cmp)` for an ordered type, and a `PACKING`
-  into 16 bytes for a small one) the value type `NAME` of the module
-  (§5.4), declared `pub native type NAME` unless the source declares it.
-  Equal values must display the same, and `parse` must read a value's text
-  back as an equal value. Host functions may take and return value types,
-  including the `time` module's: `jiff::Timestamp`, `jiff::civil::{Date,
-  Time, DateTime}` (`sandlang::jiff`) and the types in `sandlang::time`. Taking a standard module's name
-  (`NativeModule::new`), adding a module twice (`Config::module`) or
-  registering a function twice panics.
+  `NativeModule::raw_function`). `NativeModule::value_type::<T>()`
+  registers `T: ValueType` as the module's value type `T::NAME` (§5.4),
+  declared `pub native type NAME` unless the source declares it. `T` is
+  `Clone + Eq + Hash + Display`; `parse` must read what `Display` writes
+  back as an equal value, and equal values must display the same. Set
+  `ORDER` for an ordered type and `PACKING` to store a value in 16 bytes.
+  Host functions may take and return value types, including the `time`
+  module's: `jiff::Timestamp`, `jiff::civil::{Date, Time, DateTime}`
+  (`sandlang::jiff`) and the types in `sandlang::time`. Taking a standard
+  module's name (`NativeModule::new`), adding a module twice
+  (`Config::module`) or registering a function twice panics.
 - `Outcome { exit_code: i32 }`; errors are `Error::Compile(diagnostics)`,
   `Error::Runtime { message, trace }` (the run failed with an error whose
   display form is `message`, §10.3), `Error::Internal { message, trace }`,

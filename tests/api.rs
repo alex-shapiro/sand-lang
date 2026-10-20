@@ -301,6 +301,15 @@ help(bank.due)
 }
 
 #[test]
+fn host_functions_take_value_types_of_modules_added_later() {
+    let mut ledger = NativeModule::new("ledger");
+    ledger.function("fee", || Money(150));
+    let (r, out, _) = run_src(Config::new().module(ledger).module(bank_module()), "import ledger\nprint(ledger.fee())");
+    r.unwrap();
+    assert_eq!(out, "1.50\n");
+}
+
+#[test]
 #[should_panic(expected = "belongs to module `bank`")]
 fn value_types_belong_to_their_module() {
     NativeModule::new("other").value_type::<Money>();

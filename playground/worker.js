@@ -88,8 +88,9 @@ const hooks = {
 /** An engine for `sandbox` (or the policy's errors). */
 function engineFor(sandbox, engineHooks = {}) {
   const options = engineOptions(sandbox);
-  // A zone newer than the engine's database: scripts get UTC.
-  if (options.timeZone && !isTimeZone(options.timeZone)) delete options.timeZone;
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  // A zone newer than the engine's database leaves scripts in UTC.
+  if (isTimeZone(zone)) options.timeZone = zone;
   try {
     return { engine: new Engine(options, engineHooks) };
   } catch (e) {

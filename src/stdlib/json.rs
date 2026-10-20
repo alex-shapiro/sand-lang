@@ -15,7 +15,7 @@ use crate::vm::bytecode::{JsonIds, Program};
 use crate::vm::compare::{hash_key, str_hash};
 use crate::vm::heap::{Heap, Staging};
 use crate::vm::meter::{BYTES_PER_UNIT, Meter, SLOW_BYTES_PER_UNIT, Scratch};
-use crate::vm::value::{FieldDesc, FxHashMap, KeyTable, MAP_ENTRY_SIZE, MapObj, Obj, TypeDesc, Value, VariantDesc, slot_fits};
+use crate::vm::value::{FieldDesc, FxHashMap, KeyTable, MAP_ENTRY_SIZE, MapObj, Obj, TypeDesc, Value, ValueRef, VariantDesc, slot_fits};
 use crate::vm::{Ctl, NResult, Vm, fail, internal};
 use hashbrown::HashTable;
 use std::borrow::Cow;
@@ -975,8 +975,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                 let v = parse(&key).map_err(|msg| self.fail(&format!("invalid map key `{key}`: {msg}")))?;
                 let Some(x) = v.value() else { return Err(Error::Ctl(Ctl::internal("json.decode: not a value"))) };
                 // Equal values have the same text, which identifies the key.
-                let (hash, mut text) = (x.value_hash(), String::new());
-                x.write_text(&mut text);
+                let (hash, text) = (x.value_hash(), x.text());
                 return Ok((self.b.st.alloc(v), hash, Some(Cow::Owned(text))));
             }
             _ => return Err(Error::Ctl(Ctl::fail("invalid", "json.decode: unsupported map key type"))),
@@ -1229,13 +1228,7 @@ impl Encoder<'_> {
                 Obj::Task(_) => return fail("invalid", "cannot encode a task as JSON"),
                 Obj::Channel(_) => return fail("invalid", "cannot encode a channel as JSON"),
                 Obj::Native(n) => return fail("invalid", format!("cannot encode a {} as JSON", n.type_name())),
-                o @ (Obj::Value(_) | Obj::Packed(..)) => {
-                    let mut s = String::new();
-                    if let Some(x) = o.value() {
-                        x.write_text(&mut s);
-                    }
-                    self.string(&s)?
-                }
+                o @ (Obj::Value(_) | Obj::Packed(..)) => self.string(&o.value().map(ValueRef::text).unwrap_or_default())?,
                 Obj::TypeDesc(_) | Obj::Cell(_) | Obj::Free(_) => return fail("invalid", "cannot encode this value as JSON"),
             },
             _ => {
@@ -1446,10 +1439,7 @@ impl<'a> Converter<'a, '_, '_> {
                 Obj::Channel(_) => return fail("invalid", "cannot encode a channel as JSON"),
                 Obj::Native(n) => return fail("invalid", format!("cannot encode a {} as JSON", n.type_name())),
                 o @ (Obj::Value(_) | Obj::Packed(..)) => {
-                    let mut s = String::new();
-                    if let Some(x) = o.value() {
-                        x.write_text(&mut s);
-                    }
+                    let s = o.value().map(ValueRef::text).unwrap_or_default();
                     self.b.meter.charge_bytes(s.len())?;
                     let s = self.b.st.new_str(s);
                     self.b.st.new_variant(ids.str_, &[s])

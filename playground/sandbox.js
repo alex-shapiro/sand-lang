@@ -44,8 +44,7 @@ export function engineOptions(sandbox) {
   for (const [name, text] of Object.entries(sandbox.files ?? {})) {
     if (name !== program(sandbox)) files[filePath(name)] = text;
   }
-  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const options = { policy: sandbox.policy ?? "", files, env: parseEnv(sandbox.env), timeZone };
+  const options = { policy: sandbox.policy ?? "", files, env: parseEnv(sandbox.env) };
   if (sandbox.stdin) options.stdin = sandbox.stdin;
   return options;
 }

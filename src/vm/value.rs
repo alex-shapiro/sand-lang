@@ -1037,6 +1037,13 @@ impl ValueRef<'_> {
             ValueRef::Packed(t, a) => (t.write_text)(a, out),
         }
     }
+
+    /// The text form.
+    pub fn text(self) -> String {
+        let mut s = String::new();
+        self.write_text(&mut s);
+        s
+    }
 }
 
 impl Obj {
