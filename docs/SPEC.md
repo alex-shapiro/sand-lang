@@ -646,11 +646,11 @@ The prelude also defines the lazy iterator struct `Iter<T>` and the trait
 
 Standard library modules define further nominal types (e.g. `json.Json`,
 `http.Response`, `net.Conn`). Some are _opaque_: they have no fields, cannot be
-constructed with a literal, and are manipulated only by methods. An opaque
-type that its module's Rust code registers as a value type (§16, such as
-`time.PlainDate`) has immutable values that compare and hash by value, may
-be ordered (`Ord`), and display as text (`2024-02-29`). Other opaque values
-compare by identity and display as `<Type>`.
+constructed with a literal, and are manipulated only by methods. If a module
+registers an opaque type as a value type (§16, e.g. `time.PlainDate`), its
+values are immutable, are compared and hashed by value, can implement `Ord`,
+and are formatted as text (`2024-02-29`). Other opaque values are compared by
+identity and formatted as `<Type>`.
 
 ### 5.5 Type equality and subtyping
 
@@ -796,9 +796,9 @@ for enums, by variant declaration order then payload; for structs, field by
 field in declaration order. Floats inside composites use the total order where
 `nan` is greater than every other float and equal to itself.
 
-Values of reference types (lists, maps, sets, structs) compare **by
-content**. Tasks, channels and opaque values compare by identity, except
-those of value types (§5.4).
+Values of reference types (lists, maps, sets, structs) are compared **by
+content**. Tasks, channels, and non-value opaque types (§5.4) are compared by
+identity.
 
 **Logical** `and`, `or`, `not` take and return `bool`; `and`/`or` short-circuit.
 
@@ -2038,8 +2038,8 @@ string, `bool`, `()` → `null`, lists/sets/tuples → arrays, maps → objects
 (non-`str` keys converted with `to_str`), structs → objects keyed by field
 name, `None` → `null`, `Some(x)` → `x`; other enums: a payload-less variant
 → `"Variant"`, otherwise `{"Variant": [payload...]}` (an object for named
-payloads); `bytes` → base64 string; `duration` → nanoseconds; values of
-`time` types → their text (`"2024-02-29"`); `Json` → itself.
+payloads); `bytes` → base64 string; `duration` → nanoseconds; value types
+(§5.4) → their text form (`"2024-02-29"`); `Json` → itself.
 
 `json!` (§6.13) builds a `Json` from JSON syntax with embedded Sand values.
 
@@ -2164,99 +2164,58 @@ fails with `assertion failed: left == right\n  left: <debug>\n right: <debug>`.
 
 ### 13.15 `time`
 
-Dates, times and time zones after JavaScript's Temporal API: the ISO 8601
-calendar from year -9999 to 9999, nanosecond precision, and the IANA time
-zone database, which is built in.
+Dates, times, and time zones modeled on the JavaScript Temporal API. Uses the
+ISO 8601 calendar (years -9999 to 9999), nanosecond precision, and a bundled
+IANA time zone database.
 
-| Type             | Value                                         | Text form                                     |
-| ---------------- | --------------------------------------------- | --------------------------------------------- |
-| `Instant`        | an exact point in time                        | `2024-03-10T07:30:00Z`                        |
-| `ZonedDateTime`  | an instant in a time zone                     | `2024-03-10T03:30:00-04:00[America/New_York]` |
-| `PlainDateTime`  | a date and wall-clock time                    | `2024-03-10T03:30:00`                         |
-| `PlainDate`      | a date                                        | `2024-03-10`                                  |
-| `PlainTime`      | a wall-clock time                             | `03:30:00`                                    |
-| `PlainYearMonth` | a month                                       | `2024-03`                                     |
-| `PlainMonthDay`  | a day of a month                              | `03-10`                                       |
-| `Span`           | amounts of calendar and clock units, one sign | `P1M2DT3H`                                    |
-| `TimeZone`       | an IANA zone, `UTC` or a fixed offset         | `America/New_York`                            |
+| Type             | Meaning                                  | Text form                                     |
+| ---------------- | ---------------------------------------- | --------------------------------------------- |
+| `Instant`        | exact point in time                      | `2024-03-10T07:30:00Z`                        |
+| `ZonedDateTime`  | instant in a time zone                   | `2024-03-10T03:30:00-04:00[America/New_York]` |
+| `PlainDateTime`  | calendar date and wall-clock time        | `2024-03-10T03:30:00`                         |
+| `PlainDate`      | calendar date                            | `2024-03-10`                                  |
+| `PlainTime`      | wall-clock time                          | `03:30:00`                                    |
+| `PlainYearMonth` | year and month                           | `2024-03`                                     |
+| `PlainMonthDay`  | month and day                            | `03-10`                                       |
+| `Span`           | signed calendar and clock units          | `P1M2DT3H`                                    |
+| `TimeZone`       | IANA zone, `UTC`, or fixed minute offset | `America/New_York`                            |
 
-They are value types (§5.4): `Span` and `TimeZone` are `Hash`, the others
-`Ord + Hash`, ordered chronologically (a `ZonedDateTime` by instant, then
-by zone). A span balances units below a second into seconds, as its text
-form writes them; spans are equal if their units are (`P1D != PT24H`), and
-zones if their names are (`Etc/UTC != UTC`). Values
-display, `json.encode` and `json.decode` as their text form, which each
-type's static `parse(text)` reads (errors of kind `"parse"`); `parse(text,
-format: f)` reads strftime format `f` instead.
+All nine types are value types (§5.4). `Span` and `TimeZone` implement `Hash`;
+the other types implement `Ord + Hash` in chronological order (`ZonedDateTime`
+is ordered by instant, then by zone ID). In a `Span`, sub-second units are
+normalized into seconds (`1500ms` becomes `1s` and `500ms`). Two `Span` values
+are equal if all ten unit fields are equal (`P1D != PT24H`). Two `TimeZone`
+values are equal if their canonical IDs are equal (`Etc/UTC != UTC`). Each type
+is formatted, JSON-encoded, and JSON-decoded in its ISO 8601 / RFC 9557 text
+form. `T.parse(text)` parses this text form (or a `strftime` pattern if
+`format` is supplied) and returns an error of kind `"parse"` on invalid input.
 
-Construction: `date(year, month, day)`, `time(hour, minute = 0, second = 0,
-millisecond = 0, microsecond = 0, nanosecond = 0)`, `datetime(year, month,
-day, hour = 0, ...)`, `year_month(year, month)` and `month_day(month, day)`
-return a `Result` (kind `"invalid"` if there is no such value);
-`span(years = 0, months = 0, weeks = 0, days = 0, hours = 0, ...,
-nanoseconds = 0)` fails (kind `"invalid"`) if units have different signs;
-`zone(name) -> Result<TimeZone>` takes an IANA name, `UTC` or an offset
-in whole minutes up to 23:59 (`+00:00` is `UTC`; kind `"not_found"`
-otherwise); `Instant.from_epoch_seconds`,
-`from_epoch_millis`, `from_epoch_nanos`; the constants `UTC` and `MIDNIGHT`.
+Constructors:
 
-Clocks: `now() -> Instant`; `local_zone() -> TimeZone`, the zone the host
-sets (§16) if the policy allows `TimeZone`, else `UTC`;
-`now_zoned(zone = local_zone())`;
-`today(zone = local_zone())`; `stopwatch()`, a `Stopwatch` whose
-`elapsed() -> duration` reads the monotonic clock.
+- `date(year, month, day)`, `time(hour, minute = 0, second = 0, millisecond = 0, microsecond = 0, nanosecond = 0)`, `datetime(year, month, day, hour = 0, ...)`, `year_month(year, month)`, and `month_day(month, day)` validate their components and return `Result<T>` (error kind `"invalid"`).
+- `span(years = 0, months = 0, weeks = 0, days = 0, hours = 0, ..., nanoseconds = 0)` fails with kind `"invalid"` if units have mixed signs.
+- `zone(name) -> Result<TimeZone>` accepts an IANA name (case-insensitive), `UTC`, or a whole-minute offset within `±23:59` (`+00:00` returns `UTC`), and returns an error of kind `"not_found"` otherwise.
+- `Instant.from_epoch_seconds`, `from_epoch_millis`, `from_epoch_nanos`; constants `UTC` and `MIDNIGHT`.
+
+Clocks:
+
+- `now() -> Instant` returns the current wall-clock time.
+- `local_zone() -> TimeZone` returns the configured host time zone (§16) if the policy permits `TimeZone`, or `UTC` if denied.
+- `now_zoned(zone = local_zone()) -> ZonedDateTime` and `today(zone = local_zone()) -> PlainDate`.
+- `stopwatch() -> Stopwatch` starts a monotonic timer; `sw.elapsed() -> duration` returns the elapsed time.
 
 Methods:
 
-- Components: `year`, `month`, `day`, `day_of_week` (1 = Monday),
-  `day_of_year`, `week_of_year` and `year_of_week` (ISO 8601 weeks),
-  `days_in_month`, `days_in_year`, `in_leap_year`, `hour`, `minute`,
-  `second`, `millisecond`, `microsecond`, `nanosecond`, as the type has
-  them; `ZonedDateTime` also has `offset() -> duration`, `time_zone()` and
-  `hours_in_day() -> float`; `Instant` and `ZonedDateTime` have
-  `epoch_seconds` and `epoch_millis` (rounded down) and `epoch_nanos`.
-- `with(...)` replaces the named components, clamping values above their
-  range (day 31 in April is the 30th); a month or day below 1, or a year
-  outside -9999 to 9999, fails (kind `"invalid"`). A `ZonedDateTime` keeps
-  its offset if it is still valid.
-- `add(amount)` and `subtract(amount)` take a `Span`; plain types also
-  take a `duration` (the trait `ToSpan`), and `Instant` takes only a
-  `duration`. Calendar units move the wall-clock date, clamping the day to
-  the month's end (January 31 plus a month is the last day of February);
-  clock units add exact time. A `PlainDate` counts smaller units as whole
-  days, a `PlainTime` wraps around midnight and ignores days, and a
-  `PlainYearMonth` takes only years and months. A `ZonedDateTime` takes no
-  `duration`, so that `1d` (24 hours) is not taken for a calendar day.
-- `until(other, ...)` and `since(other, ...)` return a `Span` in units from
-  `largest: Unit` (or `smallest`, if larger) down to `smallest: Unit`, the
-  smallest rounded to a multiple of `increment` with `mode: RoundingMode`
-  (default `Trunc`). `largest` defaults to `Day` (`Hour` for a
-  `ZonedDateTime`, `Year` for a `PlainYearMonth`), `smallest` to the
-  smallest unit of the type. `Instant` and `PlainTime` return a `duration`.
-- `round(smallest, increment = 1, mode = RoundingMode.HalfExpand)`.
-- Conversions: `to_instant`, `to_zoned_datetime(zone)` (from a
-  `PlainDateTime`, with `disambiguation: Disambiguation = Compatible` for
-  wall-clock times that a zone's offset change skips or repeats; from a
-  `PlainDate`, midnight), `to_plain_datetime`,
-  `to_plain_date`, `to_plain_time`, `to_plain_year_month`,
-  `to_plain_month_day`, `PlainYearMonth.to_plain_date(day)`,
-  `PlainMonthDay.to_plain_date(year)`, `with_time_zone(zone)`,
-  `with_plain_time(time)`, `start_of_day()`, and `next_transition()` and
-  `previous_transition()`, the nearest changes of the zone's offset.
-- `format(f: str) -> str` formats with strftime directives (`%Y-%m-%d`);
-  an `Instant` formats in UTC.
-- `Span`: the ten units (`years()` ... `nanoseconds()`), `sign()`,
-  `is_zero()`, `negated()`, `abs()`, `with(...)`, `add` and `subtract`,
-  `round(smallest, largest, increment, mode)`, `total(unit) -> float`,
-  `compare(other) -> int` and `to_duration()`. These six take
-  `relative_to: ZonedDateTime?`, the start the span is measured from;
-  without it, a day is 24 hours, a week 7 days, and spans with years or
-  months fail.
+- Accessors: `year`, `month`, `day`, `day_of_week` (1 = Monday .. 7 = Sunday), `day_of_year`, `week_of_year`, `year_of_week` (ISO 8601 week calendar), `days_in_month`, `days_in_year`, `in_leap_year`, `hour`, `minute`, `second`, `millisecond`, `microsecond`, `nanosecond` on applicable types; `offset() -> duration`, `time_zone() -> TimeZone`, and `hours_in_day() -> float` on `ZonedDateTime`; `epoch_seconds`, `epoch_millis` (floored), and `epoch_nanos` on `Instant` and `ZonedDateTime`; `id() -> str` on `TimeZone`.
+- `with(...)` replaces specified components and clamps values that exceed their upper bound (e.g. April 31 becomes April 30). Fails with kind `"invalid"` if `month < 1`, `day < 1`, or `year` is outside `-9999..=9999`. On `ZonedDateTime`, `with` preserves the offset if it remains valid for the new wall-clock time; otherwise gaps and folds are resolved using `disambiguation: Disambiguation`.
+- `add(amount)` and `subtract(amount)`: `Instant` accepts `duration`; `ZonedDateTime` accepts `Span` only (so `1d`, which is 24 hours, is not confused with a calendar day); plain types accept `Span` or `duration` via `ToSpan`. Calendar units advance the date and clamp the day to the end of the month, then clock units advance exact time. `PlainDate` truncates sub-day units to whole days, `PlainTime` wraps around midnight and ignores day and larger units, and `PlainYearMonth` rejects units smaller than a month.
+- `until(other, ...)` and `since(other, ...)` compute the difference from `largest: Unit` down to `smallest: Unit`, rounded to a multiple of `increment` using `mode: RoundingMode` (default `Trunc`). `Instant` and `PlainTime` return `duration`; other types return `Span`.
+- `round(smallest, increment = 1, mode = RoundingMode.HalfExpand)` rounds to a multiple of `increment` in unit `smallest`.
+- Conversions: `to_instant`, `to_zoned_datetime(zone)` (takes `disambiguation: Disambiguation = Compatible` on `PlainDateTime`; uses midnight on `PlainDate`), `to_plain_datetime`, `to_plain_date`, `to_plain_time`, `to_plain_year_month`, `to_plain_month_day`, `PlainYearMonth.to_plain_date(day)`, `PlainMonthDay.to_plain_date(year)`, `with_time_zone(zone)`, `with_plain_time(time)`, `start_of_day()`, `next_transition()`, and `previous_transition()`.
+- `format(pattern: str) -> str` formats a value with `strftime` directives (`Instant` is formatted in UTC).
+- `Span` methods: unit accessors (`years()` .. `nanoseconds()`), `sign()`, `is_zero()`, `negated()`, `abs()`, `with(...)`, `add`, `subtract`, `round(smallest, largest, increment, mode)`, `total(unit) -> float`, `compare(other) -> int`, and `to_duration()`. The last six methods accept `relative_to: ZonedDateTime?`; if `relative_to` is `None`, days are 24 hours, weeks are 7 days, and spans with nonzero years or months fail with kind `"invalid"`.
 
-A result outside the supported range fails with kind `"overflow"`, as does
-`epoch_nanos` outside the years 1677 to 2262 and a difference too long for
-a `duration`; invalid options fail with kind `"invalid"`. To sleep, use
-`task.sleep(d)`.
+Results outside years `-9999..=9999`, `epoch_nanos` outside years `1677..=2262`, and durations outside the 64-bit nanosecond range fail with kind `"overflow"`. Invalid options fail with kind `"invalid"`. Use `task.sleep(d)` to sleep.
 
 ### 13.16 `task`
 
@@ -2738,11 +2697,10 @@ let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 
   host resolution and outgoing TCP streams in `net` and `http`. The engine checks
   network policy before connecting, and negotiates TLS over the returned stream.
   Socket listeners always use the operating system.
-- `Config::time_zone(sandlang::time::TimeZone)` sets the zone
-  `time.local_zone()` returns where the policy allows `TimeZone`.
-  `TimeZone::get(name)` finds a zone as `time.zone` does;
-  `TimeZone::system()` (feature `os`) is the operating system's, if it has
-  an IANA name.
+- `Config::time_zone(sandlang::time::TimeZone)` sets the time zone returned by
+  `time.local_zone()` if the policy allows `TimeZone`. Use `TimeZone::get(name)`
+  to look up a zone by name or offset, or `TimeZone::system()` (feature `os`)
+  to read the operating system's IANA time zone.
 - `Config::tls_root_certificates(Vec<Vec<u8>>)` trusts additional
   DER-encoded root certificates (e.g. a private CA) besides the bundled web
   PKI roots; calls accumulate. An invalid one makes TLS connections fail
@@ -2771,17 +2729,18 @@ normalize_path, normalize_entry_path}` for hosts writing their own
   on a denial). `NativeModule::source` may add Sand declarations (types,
   pure-Sand helpers, `native fn` with explicit signatures, which take
   precedence over derived ones and are required for
-  `NativeModule::raw_function`). `NativeModule::value_type::<T>()`
-  registers `T: ValueType` as the module's value type `T::NAME` (§5.4),
-  declared `pub native type NAME` unless the source declares it. `T` is
-  `Clone + Eq + Hash + Display`; `parse` must read what `Display` writes
-  back as an equal value, and equal values must display the same. Set
-  `ORDER` for an ordered type and `PACKING` to store a value in 16 bytes.
-  Host functions may take and return value types, including the `time`
-  module's: `jiff::Timestamp`, `jiff::civil::{Date, Time, DateTime}`
-  (`sandlang::jiff`) and the types in `sandlang::time`. Taking a standard
-  module's name (`NativeModule::new`), adding a module twice
-  (`Config::module`) or registering a function twice panics.
+  `NativeModule::raw_function`). `NativeModule::value_type::<T>()` registers
+  `T: ValueType` as the module's value type `T::NAME` (§5.4) and adds `pub
+  native type NAME` if the module source does not declare it. `T` must
+  implement `Clone + Eq + Hash + Display`, equal values must produce identical
+  `Display` output, and `T::parse` must parse that output back into an equal
+  value. Set `ValueType::ORDER` to support `Ord` and `ValueType::PACKING` to
+  pack values into 16 bytes on the heap. Host functions can accept and return
+  any registered value type, including the `time` module types
+  (`sandlang::jiff::Timestamp`, `sandlang::jiff::civil::{Date, Time,
+  DateTime}`, and `sandlang::time::*`). Using a standard module name
+  (`NativeModule::new`), registering a module twice (`Config::module`), or
+  registering a function twice panics.
 - `Outcome { exit_code: i32 }`; errors are `Error::Compile(diagnostics)`,
   `Error::Runtime { message, trace }` (the run failed with an error whose
   display form is `message`, §10.3), `Error::Internal { message, trace }`,
@@ -3036,8 +2995,8 @@ to it and override its limits; its `default prompt` prompts like
 `--max-instructions=N`, `--max-compile-fuel=N`, `--seed=N`. Arguments after `--`, and positional
 arguments after `FILE`, are passed to the script. Exit code: the script's exit
 code (codes outside `0..=255` exit with 255), 1 for a runtime error or `?`
-failure, 2 for compile errors, 3 for limit violations. Where the policy
-allows `TimeZone`, `time.local_zone()` is the system's time zone.
+failure, 2 for compile errors, 3 for limit violations. If the policy allows
+`TimeZone`, `time.local_zone()` returns the system time zone.
 
 `--prompt` asks on the controlling terminal (`/dev/tty`; the console on
 Windows), never on the script's standard streams, so piped input cannot

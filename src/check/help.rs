@@ -858,8 +858,6 @@ impl Checker {
         s
     }
 
-    /// `enum Json`, or `enum json.Json` with `qualify`; a native type
-    /// with its bounds (`type time.PlainDate: Ord + Hash`).
     fn type_header(&self, d: TypeDefId, qualify: bool) -> String {
         let def = &self.types[d as usize];
         let (kw, bounds) = match def.kind {

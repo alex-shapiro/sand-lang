@@ -16,17 +16,15 @@ use std::sync::Arc;
 
 /// A Rust type with a Sand equivalent.
 pub trait SandType {
-    /// The Sand type, as written in the declarations `cx` describes.
+    /// Returns the Sand type name and records any required imports in `cx`.
     fn sand_type(cx: &mut TypeContext) -> String;
 }
 
-/// Where a derived Sand type is written: in the declarations of a host
-/// module, which import the modules of the value types they name.
+/// Tracks module imports and value types referenced in a derived signature.
 pub struct TypeContext {
     module: String,
     imports: BTreeSet<&'static str>,
-    /// The value types named (`time.PlainDate`) and their Rust types.
-    named: Vec<(String, TypeId)>,
+    used_value_types: Vec<(String, TypeId)>,
 }
 
 /// Conversion of an argument from a Sand value.
@@ -584,7 +582,7 @@ impl Decl {
 impl<T: ValueType> SandType for T {
     fn sand_type(cx: &mut TypeContext) -> String {
         let name = format!("{}.{}", T::MODULE, T::NAME);
-        cx.named.push((name.clone(), TypeId::of::<T>()));
+        cx.used_value_types.push((name.clone(), TypeId::of::<T>()));
         if T::MODULE == cx.module {
             return T::NAME.into();
         }
@@ -592,7 +590,6 @@ impl<T: ValueType> SandType for T {
         name
     }
 }
-/// Value types convert by cloning.
 impl<T: ValueType> FromValue for T {
     type Item<'a> = T;
     fn from_value(vm: &Vm, v: Value, _: &mut Conversion) -> Result<T, Ctl> {
@@ -611,7 +608,6 @@ impl<T: ValueType> IntoValue for T {
     }
 }
 
-/// Registers a value type.
 type RegisterValueType = fn(&mut Registry);
 
 /// A host-provided module, imported by scripts with `import <name>`.
@@ -621,12 +617,9 @@ pub struct NativeModule {
     source: String,
     decls: Vec<Decl>,
     functions: Vec<(String, HostFn)>,
-    /// The value types' names and registrations.
     value_types: Vec<(&'static str, RegisterValueType)>,
-    /// The modules the derived declarations name value types of.
     imports: BTreeSet<&'static str>,
-    /// The value types the derived declarations name, and their Rust types.
-    named: Vec<(String, TypeId)>,
+    used_value_types: Vec<(String, TypeId)>,
     docs: HashMap<String, String>,
 }
 
@@ -645,7 +638,7 @@ impl NativeModule {
             functions: Vec::new(),
             value_types: Vec::new(),
             imports: BTreeSet::new(),
-            named: Vec::new(),
+            used_value_types: Vec::new(),
             docs: HashMap::new(),
         }
     }
@@ -661,15 +654,13 @@ impl NativeModule {
         self.functions.push((name.to_string(), f));
     }
 
-    /// Registers `T` as the value type `T::NAME` of this module (see
-    /// [`ValueType`]), declared `pub native type` unless the module's source
-    /// declares it. Host functions may take and return `T`, and the value
-    /// types of other modules (`time.PlainDate`).
+    /// Registers `T` as a value type of this module (see [`ValueType`]).
+    /// Adds `pub native type <T::NAME>` if the module source does not declare it.
     ///
     /// # Panics
     ///
-    /// If `T::MODULE` is not this module, `T::NAME` is not a capitalized
-    /// identifier, or a value type of this name is already registered.
+    /// Panics if `T::MODULE` does not match this module's name, if `T::NAME` is
+    /// not a capitalized identifier, or if `T::NAME` is already registered.
     pub fn value_type<T: ValueType>(&mut self) -> &mut Self {
         assert_eq!(T::MODULE, self.name, "value type `{}` belongs to module `{}`", T::NAME, T::MODULE);
         crate::vm::value::check_value_type_name::<T>();
@@ -683,12 +674,11 @@ impl NativeModule {
         self
     }
 
-    /// The declaration of function `name` with the types `params` and `ret` derive.
-    fn decl(&mut self, name: &str, params: fn(&mut TypeContext) -> Vec<String>, ret: fn(&mut TypeContext) -> String) -> Decl {
-        let mut cx = TypeContext { module: self.name.clone(), imports: BTreeSet::new(), named: Vec::new() };
+    fn derive_decl(&mut self, name: &str, params: fn(&mut TypeContext) -> Vec<String>, ret: fn(&mut TypeContext) -> String) -> Decl {
+        let mut cx = TypeContext { module: self.name.clone(), imports: BTreeSet::new(), used_value_types: Vec::new() };
         let decl = Decl { name: name.into(), params: params(&mut cx), names: None, ret: ret(&mut cx) };
         self.imports.extend(cx.imports);
-        self.named.extend(cx.named);
+        self.used_value_types.extend(cx.used_value_types);
         decl
     }
 
@@ -701,14 +691,14 @@ impl NativeModule {
     ///
     /// If a function of this name is already registered.
     pub fn function<M, F: HostFunction<M>>(&mut self, name: &str, f: F) -> &mut Self {
-        let decl = self.decl(name, F::param_types, F::ret_type);
+        let decl = self.derive_decl(name, F::param_types, F::ret_type);
         self.add(name, Some(decl), f.into_host());
         self
     }
 
     /// Registers an async function: the calling task is suspended until the future completes.
     pub fn async_function<M, F: AsyncHostFunction<M>>(&mut self, name: &str, f: F) -> &mut Self {
-        let decl = self.decl(name, F::param_types, F::ret_type);
+        let decl = self.derive_decl(name, F::param_types, F::ret_type);
         self.add(name, Some(decl), f.into_host());
         self
     }
@@ -717,7 +707,7 @@ impl NativeModule {
     /// from the arguments (given by reference). The Sand return type is
     /// `Result<R, Error>`; a denial yields a `permission_denied` error.
     pub fn guarded_function<M, G, F: GuardedFunction<M, G>>(&mut self, name: &str, guard: G, f: F) -> &mut Self {
-        let decl = self.decl(name, F::param_types, F::ret_type);
+        let decl = self.derive_decl(name, F::param_types, F::ret_type);
         self.add(name, Some(decl), f.into_host(guard));
         self
     }
@@ -773,9 +763,6 @@ impl NativeModule {
         self
     }
 
-    /// Registers the module's value types. Every module's are registered
-    /// before any module's declarations (see [`NativeModule::register`]),
-    /// which may name them.
     pub(crate) fn register_value_types(&self, r: &mut Registry) {
         for &(_, register) in &self.value_types {
             register(r);
@@ -783,13 +770,12 @@ impl NativeModule {
     }
 
     pub(crate) fn register(&self, r: &mut Registry) {
-        for (name, id) in &self.named {
+        for (name, id) in &self.used_value_types {
             match r.by_name.values.get(name.as_str()) {
                 Some(info) => assert!(info.type_id == *id, "value type `{name}` is registered for another Rust type"),
                 None => panic!("value type `{name}` is not registered (see `NativeModule::value_type`)"),
             }
         }
-        // Functions, types and imports the source declares itself keep their declarations.
         let (mut fns, mut types, mut imports) = (HashSet::new(), HashSet::new(), HashSet::new());
         for item in crate::syntax::parse_module(&self.source, 0).module.items {
             match item.kind {

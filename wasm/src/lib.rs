@@ -58,10 +58,7 @@ export interface EngineOptions {
   fileSystemCapacity?: number;
   /** The working directory and module root (default `/`). */
   cwd?: string;
-  /**
-   * The zone `time.local_zone()` returns where the policy allows `timezone` (otherwise `UTC`),
-   * such as `Intl.DateTimeFormat().resolvedOptions().timeZone`. An unknown zone is an error.
-   */
+  /** Time zone returned by `time.local_zone()` if the policy allows `timezone` (default `UTC`). */
   timeZone?: string;
 }
 
@@ -498,7 +495,7 @@ pub fn highlight_kinds() -> Vec<String> {
     HIGHLIGHT_KINDS.iter().map(|k| k.name().to_string()).collect()
 }
 
-/// Whether the engine knows the time zone `name` (see `EngineOptions.timeZone`).
+/// Returns true if `name` is a supported time zone.
 #[wasm_bindgen(js_name = isTimeZone)]
 pub fn is_time_zone(name: &str) -> bool {
     sandlang::time::TimeZone::get(name).is_some()

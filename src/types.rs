@@ -589,25 +589,16 @@ pub struct VariantDef {
 
 #[derive(Clone, Debug)]
 pub enum TypeDefKind {
-    Struct {
-        fields: Vec<FieldDef>,
-    },
-    Enum {
-        variants: Vec<VariantDef>,
-    },
-    /// A native type: a value type if the registry has one by its name,
-    /// else compared by identity.
+    Struct { fields: Vec<FieldDef> },
+    Enum { variants: Vec<VariantDef> },
     Opaque(Option<ValueTypeInfo>),
 }
 
-/// A native value type's registration (see [`crate::vm::value::ValueType`]).
+/// Metadata for a registered [`crate::vm::value::ValueType`].
 #[derive(Clone, Copy, Debug)]
 pub struct ValueTypeInfo {
-    /// Whether values are ordered (`Ord`).
     pub ord: bool,
-    /// Reads a value from its text, for `json.decode`.
     pub parse: crate::vm::value::ParseValue,
-    /// The Rust type that implements it.
     pub type_id: std::any::TypeId,
 }
 

@@ -1,70 +1,59 @@
-//! Dates, times, time zones and clocks, after JavaScript's Temporal API.
+//! Dates, times, time zones, and clocks.
 //!
-//! - `Instant`: an exact point in time, independent of time zones.
-//! - `ZonedDateTime`: an instant in a time zone, with its local date and time.
-//! - `PlainDateTime`, `PlainDate`, `PlainTime`, `PlainYearMonth` and
-//!   `PlainMonthDay`: wall-clock values without a time zone.
-//! - `Span`: an amount of calendar and clock units, such as 1 month and 2 days.
-//! - `TimeZone`: an IANA time zone, `UTC`, or a fixed offset from UTC.
+//! `duration` represents exact elapsed time (`1d` is always 24 hours). `Span`
+//! represents calendar and clock units (`span(days: 1)` preserves wall-clock
+//! time across a daylight saving transition). `ZonedDateTime` arithmetic
+//! accepts `Span` only, so `1d` is not confused with a calendar day.
 //!
-//! The built-in `duration` is exact time: `1d` is always 24 hours. A `Span`
-//! counts calendar units: `span(days: 1)` added to a `ZonedDateTime` keeps
-//! the wall-clock time across a daylight saving change. So that a duration
-//! is not taken for calendar days, `ZonedDateTime` arithmetic takes only
-//! spans.
+//! Dates use the ISO 8601 (proleptic Gregorian) calendar from year -9999 to
+//! 9999, and times have nanosecond precision. Values are immutable, are
+//! compared and hashed by value, and are formatted and JSON-encoded in ISO
+//! 8601 / RFC 9557 text form. `parse` returns an error of kind `"parse"` on
+//! invalid input. Operations fail with kind `"overflow"` if a result exceeds
+//! the supported range, and `"invalid"` if an option is invalid.
 //!
-//! Dates use the ISO 8601 (proleptic Gregorian) calendar, from year -9999 to
-//! 9999, and times have nanosecond precision. Values are immutable and
-//! compare by value; dates, times and instants sort chronologically. Values
-//! print in ISO 8601 / RFC 9557 form, which
-//! `parse` reads back and `json.encode` writes. Errors of `parse` have kind
-//! `"parse"`; a result outside the supported range fails with kind
-//! `"overflow"`; invalid options fail with kind `"invalid"`.
-//!
-//! `format` and `parse(text, format: ...)` use strftime directives: `%Y`
+//! `format` and `parse(text, format: ...)` accept `strftime` directives: `%Y`
 //! year, `%m` month, `%d` day, `%e` space-padded day, `%H` hour, `%I` 12-hour
-//! hour, `%p` AM/PM, `%M` minute, `%S` second, `%f` fraction of a second (`%3f`
+//! hour, `%p` AM/PM, `%M` minute, `%S` second, `%f` fractional seconds (`%3f`
 //! milliseconds), `%j` day of year, `%a`/`%A` weekday name, `%b`/`%B` month
 //! name, `%y` two-digit year, `%z` offset (`-0500`), `%:z` (`-05:00`), `%Z`
-//! zone abbreviation, `%Q` IANA zone name, `%s` Unix seconds, `%%` `%`.
+//! zone abbreviation, `%Q` IANA zone name, `%s` Unix seconds, and `%%` literal
+//! `%`.
 
-/// An exact point in time, such as `2024-03-10T07:30:00Z`.
+/// An exact point in time (e.g. `2024-03-10T07:30:00Z`).
 pub native type Instant
 
-/// An instant in a time zone, such as
-/// `2024-03-10T03:30:00-04:00[America/New_York]`. Values in different zones
-/// are different, and order by their instant, then by zone.
+/// An instant in a time zone (e.g. `2024-03-10T03:30:00-04:00[America/New_York]`).
+/// Ordered by instant, then by zone ID.
 pub native type ZonedDateTime
 
-/// A date and wall-clock time without a time zone, such as `2024-03-10T03:30:00`.
+/// A calendar date and wall-clock time without a time zone (e.g. `2024-03-10T03:30:00`).
 pub native type PlainDateTime
 
-/// A calendar date, such as `2024-03-10`.
+/// A calendar date without a time zone (e.g. `2024-03-10`).
 pub native type PlainDate
 
-/// A wall-clock time, such as `03:30:00`.
+/// A wall-clock time without a date or time zone (e.g. `03:30:00`).
 pub native type PlainTime
 
-/// A month of a year, such as `2024-03`.
+/// A year and month (e.g. `2024-03`).
 pub native type PlainYearMonth
 
-/// A day of a month in no particular year, such as `03-10`.
+/// A month and day without a year (e.g. `03-10`).
 pub native type PlainMonthDay
 
-/// Amounts of years, months, weeks, days, hours, minutes, seconds,
-/// milliseconds, microseconds and nanoseconds, all with the same sign,
-/// written in ISO 8601 form (`P1M2DT3H`). Units below a second are balanced
-/// into seconds, as the text form writes them: `span(milliseconds: 1500)`
-/// has 1 second and 500 milliseconds. Spans are equal if their units are:
-/// `span(hours: 24) != span(days: 1)`.
+/// A signed calendar and clock duration (e.g. `P1M2DT3H`). Sub-second units
+/// are normalized into seconds (`span(milliseconds: 1500)` has 1 second and
+/// 500 milliseconds). Two spans are equal only if all unit fields are equal
+/// (`span(hours: 24) != span(days: 1)`).
 pub native type Span
 
-/// A time zone: an IANA zone such as `America/New_York`, `UTC`, or a fixed
-/// offset such as `+05:30`. Zones are equal if their names are, so aliases
-/// differ: `zone("Etc/UTC") != UTC`.
+/// A time zone: an IANA zone (`America/New_York`), `UTC`, or a fixed minute
+/// offset (`+05:30`). Two zones are equal if their canonical IDs are equal
+/// (`zone("Etc/UTC") != UTC`).
 pub native type TimeZone
 
-/// Units of time, largest first.
+/// A calendar or clock unit, from largest to smallest.
 pub enum Unit {
     Year
     Month
@@ -78,42 +67,40 @@ pub enum Unit {
     Nanosecond
 }
 
-/// How rounding resolves a value between two multiples of the increment.
+/// Rounding mode for `round`, `until`, and `since`.
 pub enum RoundingMode {
-    /// Toward positive infinity.
+    /// Rounds toward positive infinity.
     Ceil
-    /// Toward negative infinity.
+    /// Rounds toward negative infinity.
     Floor
-    /// Away from zero.
+    /// Rounds away from zero.
     Expand
-    /// Toward zero.
+    /// Rounds toward zero.
     Trunc
-    /// To the nearest; ties toward positive infinity.
+    /// Rounds to the nearest multiple; ties round toward positive infinity.
     HalfCeil
-    /// To the nearest; ties toward negative infinity.
+    /// Rounds to the nearest multiple; ties round toward negative infinity.
     HalfFloor
-    /// To the nearest; ties away from zero.
+    /// Rounds to the nearest multiple; ties round away from zero.
     HalfExpand
-    /// To the nearest; ties toward zero.
+    /// Rounds to the nearest multiple; ties round toward zero.
     HalfTrunc
-    /// To the nearest; ties to the even multiple.
+    /// Rounds to the nearest multiple; ties round to the even multiple.
     HalfEven
 }
 
-/// Which instant a wall-clock time denotes when a time zone's offset change
-/// skips it (a gap) or repeats it (a fold).
+/// How to resolve a wall-clock time that is skipped (a gap) or repeated (a
+/// fold) by a time zone offset transition.
 pub enum Disambiguation {
-    /// In a gap, the time moved forward by the gap's length; in a fold, the
-    /// earlier instant.
+    /// Advances by the gap length in a gap; selects the earlier instant in a fold.
     Compatible
-    /// The earlier instant: in a gap, moved backward by the gap's length.
+    /// Selects the earlier instant (moves backward by the gap length in a gap).
     Earlier
-    /// The later instant: in a gap, moved forward by the gap's length.
+    /// Selects the later instant (moves forward by the gap length in a gap).
     Later
 }
 
-/// Amounts that date and time arithmetic accepts: a `Span`, or a `duration`
-/// (exact time).
+/// A value that can be converted to a `Span`.
 pub trait ToSpan {
     fn to_span(self) -> Span
 }
@@ -128,43 +115,39 @@ impl ToSpan for duration {
 
 native fn duration_span(d: duration) -> Span
 
-/// The UTC time zone.
 pub let UTC: TimeZone = utc()
 
 native fn utc() -> TimeZone
 
-/// The time 00:00.
 pub let MIDNIGHT: PlainTime = midnight()
 
 native fn midnight() -> PlainTime
 
-/// The time zone named `name`: an IANA name (`Europe/Paris`, matched
-/// ignoring case), `UTC`, or an offset in whole minutes up to 23:59
-/// (`+05:30`; `+00:00` is `UTC`). Any
-/// other name is an error of kind `"not_found"`.
+/// Looks up a time zone by IANA name (case-insensitive), `UTC`, or
+/// whole-minute offset within `±23:59` (`+00:00` returns `UTC`). Returns an
+/// error of kind `"not_found"` if the name is unknown.
 pub native fn zone(name: str) -> Result<TimeZone>
 
-/// The host's time zone if the policy allows `TimeZone`, else `UTC`.
+/// Returns the host time zone if the policy allows `TimeZone`, or `UTC` if denied.
 pub native fn local_zone() -> TimeZone
 
-/// The current time.
+/// Returns the current wall-clock time.
 pub native fn now() -> Instant
 
-/// The current time in `zone`.
 pub fn now_zoned(zone: TimeZone = local_zone()) -> ZonedDateTime {
     now().to_zoned_datetime(zone)
 }
 
-/// The current date in `zone`.
 pub fn today(zone: TimeZone = local_zone()) -> PlainDate {
     now_zoned(zone).to_plain_date()
 }
 
-/// The date `year`-`month`-`day`; an error of kind `"invalid"` if there is
-/// no such date.
+/// Constructs a `PlainDate`, or returns an error of kind `"invalid"` if the
+/// components do not form a valid date.
 pub native fn date(year: int, month: int, day: int) -> Result<PlainDate>
 
-/// The wall-clock time; an error of kind `"invalid"` if a component is out of range.
+/// Constructs a `PlainTime`, or returns an error of kind `"invalid"` if a
+/// component is out of range.
 pub native fn time(
     hour: int,
     minute: int = 0,
@@ -174,7 +157,8 @@ pub native fn time(
     nanosecond: int = 0,
 ) -> Result<PlainTime>
 
-/// The date and wall-clock time; an error of kind `"invalid"` if there is no such date or time.
+/// Constructs a `PlainDateTime`, or returns an error of kind `"invalid"` if a
+/// component is out of range.
 pub native fn datetime(
     year: int,
     month: int,
@@ -187,15 +171,16 @@ pub native fn datetime(
     nanosecond: int = 0,
 ) -> Result<PlainDateTime>
 
-/// The month `year`-`month`; an error of kind `"invalid"` if `month` is not 1 to 12.
+/// Constructs a `PlainYearMonth`, or returns an error of kind `"invalid"` if
+/// `year` or `month` is out of range.
 pub native fn year_month(year: int, month: int) -> Result<PlainYearMonth>
 
-/// The day `month`-`day` (February 29 included); an error of kind
-/// `"invalid"` if there is no such day.
+/// Constructs a `PlainMonthDay` (including February 29), or returns an error
+/// of kind `"invalid"` if `month` or `day` is out of range.
 pub native fn month_day(month: int, day: int) -> Result<PlainMonthDay>
 
-/// A span of the given units, which must not have different signs (it
-/// fails with kind `"invalid"` otherwise, and `"overflow"` if a unit is too large).
+/// Constructs a `Span`. Fails with kind `"invalid"` if units have mixed signs,
+/// or `"overflow"` if a unit exceeds its range.
 pub native fn span(
     years: int = 0,
     months: int = 0,
@@ -209,55 +194,47 @@ pub native fn span(
     nanoseconds: int = 0,
 ) -> Span
 
-/// Measures elapsed time with the monotonic clock, which wall-clock changes
-/// do not affect.
+/// A monotonic timer that is unaffected by wall-clock adjustments.
 pub native type Stopwatch
 
 extend Stopwatch {
-    /// The time since the stopwatch started.
     pub native fn elapsed(self) -> duration
 }
 
-/// A stopwatch started now.
+/// Starts a new `Stopwatch`.
 pub native fn stopwatch() -> Stopwatch
 
 extend Instant {
-    /// Parses an RFC 3339 instant, which must have an offset or `Z`
-    /// (`2024-03-10T07:30:00Z`, `2024-03-10T02:30:00.5-05:00`), or with
-    /// `format`, text in that strftime format with an offset (`%z`).
+    /// Parses an RFC 3339 timestamp with `Z` or a numeric offset, or parses
+    /// `text` with the `strftime` pattern `format`.
     pub native fn parse(text: str, format: str = "") -> Result<Instant>
-    /// The instant `seconds` seconds after 1970-01-01T00:00:00Z.
     pub native fn from_epoch_seconds(seconds: int) -> Instant
-    /// The instant `millis` milliseconds after 1970-01-01T00:00:00Z.
     pub native fn from_epoch_millis(millis: int) -> Instant
-    /// The instant `nanos` nanoseconds after 1970-01-01T00:00:00Z.
     pub native fn from_epoch_nanos(nanos: int) -> Instant
 
-    /// Whole seconds since 1970-01-01T00:00:00Z, rounded down.
+    /// Whole seconds since 1970-01-01T00:00:00Z, rounded toward negative infinity.
     pub native fn epoch_seconds(self) -> int
-    /// Whole milliseconds since 1970-01-01T00:00:00Z, rounded down.
+    /// Whole milliseconds since 1970-01-01T00:00:00Z, rounded toward negative infinity.
     pub native fn epoch_millis(self) -> int
-    /// Nanoseconds since 1970-01-01T00:00:00Z; fails with kind `"overflow"`
-    /// outside the years 1677 to 2262.
+    /// Nanoseconds since 1970-01-01T00:00:00Z. Fails with kind `"overflow"`
+    /// outside years 1677 to 2262.
     pub native fn epoch_nanos(self) -> int
 
-    /// The instant `d` later.
     pub native fn add(self, d: duration) -> Instant
 
-    /// The instant `d` earlier.
     pub fn subtract(self, d: duration) -> Instant {
         self.add(-d)
     }
 
-    /// The time from this instant to `other` (negative if `other` is earlier).
+    /// Returns `other - self`.
     pub fn until(self, other: Instant) -> duration {
         other.since(self)
     }
 
-    /// The time from `other` to this instant (negative if `other` is later).
+    /// Returns `self - other`.
     pub native fn since(self, other: Instant) -> duration
-    /// Rounded to a multiple of `increment` `smallest` units (at most
-    /// hours) since the epoch.
+    /// Rounds to a multiple of `increment` in unit `smallest` (at most `Hour`)
+    /// relative to the Unix epoch.
     pub native fn round(
         self,
         smallest: Unit,
@@ -265,60 +242,53 @@ extend Instant {
         mode: RoundingMode = RoundingMode.HalfExpand,
     ) -> Instant
 
-    /// This instant in `zone`.
     pub native fn to_zoned_datetime(self, zone: TimeZone) -> ZonedDateTime
-    /// Formats in UTC with strftime directives (see the module documentation).
+    /// Formats `self` in UTC using `strftime` directives.
     pub native fn format(self, format: str) -> str
 }
 
 extend ZonedDateTime {
-    /// Parses RFC 9557 text with a time zone annotation
-    /// (`2024-03-10T03:30:00-04:00[America/New_York]`; the offset may be
-    /// left out), or with `format`, text in that strftime format with a zone
-    /// (`%Q` or `%z`). An offset that does not match the zone is an error.
+    /// Parses an RFC 9557 timestamp with a bracketed time zone annotation
+    /// (`2024-03-10T03:30:00-04:00[America/New_York]`), or parses `text` with
+    /// the `strftime` pattern `format`.
     pub native fn parse(text: str, format: str = "") -> Result<ZonedDateTime>
 
     pub native fn year(self) -> int
-    /// 1 (January) to 12.
     pub native fn month(self) -> int
     pub native fn day(self) -> int
     pub native fn hour(self) -> int
     pub native fn minute(self) -> int
     pub native fn second(self) -> int
-    /// 0 to 999.
     pub native fn millisecond(self) -> int
-    /// 0 to 999, after the milliseconds.
     pub native fn microsecond(self) -> int
-    /// 0 to 999, after the microseconds.
     pub native fn nanosecond(self) -> int
-    /// 1 (Monday) to 7 (Sunday).
+    /// Returns the ISO 8601 weekday from 1 (Monday) to 7 (Sunday).
     pub native fn day_of_week(self) -> int
-    /// 1 to 366.
     pub native fn day_of_year(self) -> int
-    /// The ISO 8601 week number, 1 to 53.
+    /// Returns the ISO 8601 week number (1..=53).
     pub native fn week_of_year(self) -> int
-    /// The year of the ISO 8601 week, which differs from `year` near January 1.
+    /// Returns the ISO 8601 week-based year.
     pub native fn year_of_week(self) -> int
     pub native fn days_in_month(self) -> int
     pub native fn days_in_year(self) -> int
     pub native fn in_leap_year(self) -> bool
-    /// The length of this day in hours: 24 unless the zone's offset changes during it.
+    /// Returns the length of this calendar day in hours.
     pub native fn hours_in_day(self) -> float
-    /// The offset from UTC, such as `-4h`.
+    /// Returns the UTC offset at this instant.
     pub native fn offset(self) -> duration
     pub native fn time_zone(self) -> TimeZone
-    /// Whole seconds since 1970-01-01T00:00:00Z, rounded down.
+    /// Whole seconds since 1970-01-01T00:00:00Z, rounded toward negative infinity.
     pub native fn epoch_seconds(self) -> int
-    /// Whole milliseconds since 1970-01-01T00:00:00Z, rounded down.
+    /// Whole milliseconds since 1970-01-01T00:00:00Z, rounded toward negative infinity.
     pub native fn epoch_millis(self) -> int
-    /// Nanoseconds since 1970-01-01T00:00:00Z; fails with kind `"overflow"`
-    /// outside the years 1677 to 2262.
+    /// Nanoseconds since 1970-01-01T00:00:00Z. Fails with kind `"overflow"`
+    /// outside years 1677 to 2262.
     pub native fn epoch_nanos(self) -> int
 
-    /// With the given components replaced; values above their range are
-    /// clamped (day 31 in April is the 30th), and a month or day below 1, or
-    /// a year outside -9999 to 9999, fails with kind `"invalid"`. The offset is kept if it is still valid
-    /// for the new wall-clock time, else `disambiguation` decides.
+    /// Replaces the specified components and clamps values that exceed their
+    /// upper bound. Fails with kind `"invalid"` if `month < 1`, `day < 1`, or
+    /// `year` is outside `-9999..=9999`. Preserves the current offset if it
+    /// remains valid; otherwise the new time is resolved using `disambiguation`.
     pub native fn with(
         self,
         year: int = self.year(),
@@ -332,25 +302,20 @@ extend ZonedDateTime {
         nanosecond: int = self.nanosecond(),
         disambiguation: Disambiguation = Disambiguation.Compatible,
     ) -> ZonedDateTime
-    /// The same date at wall-clock time `time`.
     pub native fn with_plain_time(self, time: PlainTime) -> ZonedDateTime
-    /// The same instant in `zone`.
     pub native fn with_time_zone(self, zone: TimeZone) -> ZonedDateTime
 
-    /// `amount` later: calendar units move the wall-clock date (keeping the
-    /// time across offset changes, clamping the day to the month's end), then
-    /// clock units add exact time.
+    /// Adds `amount` by advancing calendar units (clamping the day to the end
+    /// of the month) and then advancing exact clock units.
     pub native fn add(self, amount: Span) -> ZonedDateTime
 
-    /// `amount` earlier (see `add`).
     pub fn subtract(self, amount: Span) -> ZonedDateTime {
         self.add(amount.negated())
     }
 
-    /// The span from this value to `other`, in units from `largest` (or
-    /// `smallest`, if larger) down to `smallest`, the smallest rounded to a
-    /// multiple of `increment` with `mode`. A `largest` calendar unit needs
-    /// both values in the same zone.
+    /// Computes the span from `self` to `other` in units from `largest` down
+    /// to `smallest`, rounded to a multiple of `increment` with `mode`. If
+    /// `largest` is a calendar unit, both values must have the same time zone.
     pub native fn until(
         self,
         other: ZonedDateTime,
@@ -359,7 +324,6 @@ extend ZonedDateTime {
         increment: int = 1,
         mode: RoundingMode = RoundingMode.Trunc,
     ) -> Span
-    /// The span from `other` to this value (see `until`).
     pub native fn since(
         self,
         other: ZonedDateTime,
@@ -368,62 +332,56 @@ extend ZonedDateTime {
         increment: int = 1,
         mode: RoundingMode = RoundingMode.Trunc,
     ) -> Span
-    /// Rounded to a multiple of `increment` `smallest` units (at most days).
+    /// Rounds to a multiple of `increment` in unit `smallest` (at most `Day`).
     pub native fn round(
         self,
         smallest: Unit,
         increment: int = 1,
         mode: RoundingMode = RoundingMode.HalfExpand,
     ) -> ZonedDateTime
-    /// This day at midnight, or if the zone skips midnight, as a gap moves
-    /// it (see `Disambiguation.Compatible`).
+    /// Returns the start of this calendar day (normally midnight, or the first
+    /// valid time after a gap).
     pub native fn start_of_day(self) -> ZonedDateTime
-    /// The zone's next offset change after this instant, if any.
+    /// Returns the next instant after `self` at which the zone's UTC offset changes.
     pub native fn next_transition(self) -> ZonedDateTime?
-    /// The zone's last offset change before this instant, if any.
+    /// Returns the most recent instant before `self` at which the zone's UTC offset changed.
     pub native fn previous_transition(self) -> ZonedDateTime?
 
     pub native fn to_instant(self) -> Instant
     pub native fn to_plain_datetime(self) -> PlainDateTime
     pub native fn to_plain_date(self) -> PlainDate
     pub native fn to_plain_time(self) -> PlainTime
-    /// Formats with strftime directives (see the module documentation).
     pub native fn format(self, format: str) -> str
 }
 
 extend PlainDateTime {
-    /// Parses ISO 8601 text (`2024-03-10T03:30:00`, `2024-03-10 03:30`,
-    /// `2024-03-10`), or with `format`, text in that strftime format.
+    /// Parses an ISO 8601 date-time (`2024-03-10T03:30:00`), or parses `text`
+    /// with the `strftime` pattern `format`.
     pub native fn parse(text: str, format: str = "") -> Result<PlainDateTime>
 
     pub native fn year(self) -> int
-    /// 1 (January) to 12.
     pub native fn month(self) -> int
     pub native fn day(self) -> int
     pub native fn hour(self) -> int
     pub native fn minute(self) -> int
     pub native fn second(self) -> int
-    /// 0 to 999.
     pub native fn millisecond(self) -> int
-    /// 0 to 999, after the milliseconds.
     pub native fn microsecond(self) -> int
-    /// 0 to 999, after the microseconds.
     pub native fn nanosecond(self) -> int
-    /// 1 (Monday) to 7 (Sunday).
+    /// Returns the ISO 8601 weekday from 1 (Monday) to 7 (Sunday).
     pub native fn day_of_week(self) -> int
-    /// 1 to 366.
     pub native fn day_of_year(self) -> int
-    /// The ISO 8601 week number, 1 to 53.
+    /// Returns the ISO 8601 week number (1..=53).
     pub native fn week_of_year(self) -> int
-    /// The year of the ISO 8601 week, which differs from `year` near January 1.
+    /// Returns the ISO 8601 week-based year.
     pub native fn year_of_week(self) -> int
     pub native fn days_in_month(self) -> int
     pub native fn days_in_year(self) -> int
     pub native fn in_leap_year(self) -> bool
 
-    /// With the given components replaced; values above their range are
-    /// clamped (day 31 in April is the 30th), and a month or day below 1, or
-    /// a year outside -9999 to 9999, fails with kind `"invalid"`.
+    /// Replaces the specified components and clamps values that exceed their
+    /// upper bound. Fails with kind `"invalid"` if `month < 1`, `day < 1`, or
+    /// `year` is outside `-9999..=9999`.
     pub native fn with(
         self,
         year: int = self.year(),
@@ -436,24 +394,21 @@ extend PlainDateTime {
         microsecond: int = self.microsecond(),
         nanosecond: int = self.nanosecond(),
     ) -> PlainDateTime
-    /// The same date at `time`.
     pub native fn with_plain_time(self, time: PlainTime) -> PlainDateTime
 
-    /// `amount` later; calendar units clamp the day to the month's end
-    /// (January 31 plus a month is the last day of February).
+    /// Adds `amount` and clamps the day to the end of the month for calendar
+    /// units.
     pub fn add<S: ToSpan>(self, amount: S) -> PlainDateTime {
         self.add_span(amount.to_span())
     }
 
-    /// `amount` earlier (see `add`).
     pub fn subtract<S: ToSpan>(self, amount: S) -> PlainDateTime {
         self.add_span(amount.to_span().negated())
     }
 
     native fn add_span(self, s: Span) -> PlainDateTime
-    /// The span from this value to `other`, in units from `largest` (or
-    /// `smallest`, if larger) down to `smallest`, the smallest rounded to a
-    /// multiple of `increment` with `mode`.
+    /// Computes the span from `self` to `other` in units from `largest` down
+    /// to `smallest`, rounded to a multiple of `increment` with `mode`.
     pub native fn until(
         self,
         other: PlainDateTime,
@@ -462,7 +417,6 @@ extend PlainDateTime {
         increment: int = 1,
         mode: RoundingMode = RoundingMode.Trunc,
     ) -> Span
-    /// The span from `other` to this value (see `until`).
     pub native fn since(
         self,
         other: PlainDateTime,
@@ -471,7 +425,7 @@ extend PlainDateTime {
         increment: int = 1,
         mode: RoundingMode = RoundingMode.Trunc,
     ) -> Span
-    /// Rounded to a multiple of `increment` `smallest` units (at most days).
+    /// Rounds to a multiple of `increment` in unit `smallest` (at most `Day`).
     pub native fn round(
         self,
         smallest: Unit,
@@ -479,7 +433,6 @@ extend PlainDateTime {
         mode: RoundingMode = RoundingMode.HalfExpand,
     ) -> PlainDateTime
 
-    /// This wall-clock time in `zone`.
     pub native fn to_zoned_datetime(
         self,
         zone: TimeZone,
@@ -487,34 +440,31 @@ extend PlainDateTime {
     ) -> ZonedDateTime
     pub native fn to_plain_date(self) -> PlainDate
     pub native fn to_plain_time(self) -> PlainTime
-    /// Formats with strftime directives (see the module documentation).
     pub native fn format(self, format: str) -> str
 }
 
 extend PlainDate {
-    /// Parses ISO 8601 text (`2024-03-10`), or with `format`, text in that
-    /// strftime format.
+    /// Parses an ISO 8601 date (`2024-03-10`), or parses `text` with the
+    /// `strftime` pattern `format`.
     pub native fn parse(text: str, format: str = "") -> Result<PlainDate>
 
     pub native fn year(self) -> int
-    /// 1 (January) to 12.
     pub native fn month(self) -> int
     pub native fn day(self) -> int
-    /// 1 (Monday) to 7 (Sunday).
+    /// Returns the ISO 8601 weekday from 1 (Monday) to 7 (Sunday).
     pub native fn day_of_week(self) -> int
-    /// 1 to 366.
     pub native fn day_of_year(self) -> int
-    /// The ISO 8601 week number, 1 to 53.
+    /// Returns the ISO 8601 week number (1..=53).
     pub native fn week_of_year(self) -> int
-    /// The year of the ISO 8601 week, which differs from `year` near January 1.
+    /// Returns the ISO 8601 week-based year.
     pub native fn year_of_week(self) -> int
     pub native fn days_in_month(self) -> int
     pub native fn days_in_year(self) -> int
     pub native fn in_leap_year(self) -> bool
 
-    /// With the given components replaced; values above their range are
-    /// clamped (day 31 in April is the 30th), and a month or day below 1, or
-    /// a year outside -9999 to 9999, fails with kind `"invalid"`.
+    /// Replaces the specified components and clamps `month` and `day` to their
+    /// upper bounds. Fails with kind `"invalid"` if `month < 1`, `day < 1`, or
+    /// `year` is outside `-9999..=9999`.
     pub native fn with(
         self,
         year: int = self.year(),
@@ -522,22 +472,20 @@ extend PlainDate {
         day: int = self.day(),
     ) -> PlainDate
 
-    /// `amount` later; the day is clamped to the month's end (January 31
-    /// plus a month is the last day of February), and units smaller than
-    /// days count only as whole days.
+    /// Adds `amount`, clamping the day to the end of the month and truncating
+    /// sub-day units to whole days.
     pub fn add<S: ToSpan>(self, amount: S) -> PlainDate {
         self.add_span(amount.to_span())
     }
 
-    /// `amount` earlier (see `add`).
     pub fn subtract<S: ToSpan>(self, amount: S) -> PlainDate {
         self.add_span(amount.to_span().negated())
     }
 
     native fn add_span(self, s: Span) -> PlainDate
-    /// The span from this date to `other`, in units from `largest` (or
-    /// `smallest`, if larger) down to `smallest`, both days or larger, the
-    /// smallest rounded to a multiple of `increment` with `mode`.
+    /// Computes the span from `self` to `other` in units from `largest` down
+    /// to `smallest` (at least `Day`), rounded to a multiple of `increment`
+    /// with `mode`.
     pub native fn until(
         self,
         other: PlainDate,
@@ -546,7 +494,6 @@ extend PlainDate {
         increment: int = 1,
         mode: RoundingMode = RoundingMode.Trunc,
     ) -> Span
-    /// The span from `other` to this date (see `until`).
     pub native fn since(
         self,
         other: PlainDate,
@@ -556,32 +503,26 @@ extend PlainDate {
         mode: RoundingMode = RoundingMode.Trunc,
     ) -> Span
 
-    /// This date at `time`.
     pub native fn to_plain_datetime(self, time: PlainTime = MIDNIGHT) -> PlainDateTime
-    /// This date at midnight in `zone` (see `ZonedDateTime.start_of_day`).
     pub native fn to_zoned_datetime(self, zone: TimeZone) -> ZonedDateTime
     pub native fn to_plain_year_month(self) -> PlainYearMonth
     pub native fn to_plain_month_day(self) -> PlainMonthDay
-    /// Formats with strftime directives for dates (see the module documentation).
     pub native fn format(self, format: str) -> str
 }
 
 extend PlainTime {
-    /// Parses ISO 8601 text (`03:30`, `03:30:00.5`), or with `format`, text
-    /// in that strftime format.
+    /// Parses an ISO 8601 time (`03:30:00`), or parses `text` with the
+    /// `strftime` pattern `format`.
     pub native fn parse(text: str, format: str = "") -> Result<PlainTime>
 
     pub native fn hour(self) -> int
     pub native fn minute(self) -> int
     pub native fn second(self) -> int
-    /// 0 to 999.
     pub native fn millisecond(self) -> int
-    /// 0 to 999, after the milliseconds.
     pub native fn microsecond(self) -> int
-    /// 0 to 999, after the microseconds.
     pub native fn nanosecond(self) -> int
 
-    /// With the given components replaced, each clamped to its range.
+    /// Replaces the specified components, clamping each to its valid range.
     pub native fn with(
         self,
         hour: int = self.hour(),
@@ -592,92 +533,86 @@ extend PlainTime {
         nanosecond: int = self.nanosecond(),
     ) -> PlainTime
 
-    /// `amount` later, wrapping around midnight; days and larger units are ignored.
+    /// Adds `amount`, wrapping around midnight and ignoring day and larger units.
     pub fn add<S: ToSpan>(self, amount: S) -> PlainTime {
         self.add_span(amount.to_span())
     }
 
-    /// `amount` earlier, wrapping around midnight (see `add`).
     pub fn subtract<S: ToSpan>(self, amount: S) -> PlainTime {
         self.add_span(amount.to_span().negated())
     }
 
     native fn add_span(self, s: Span) -> PlainTime
 
-    /// The time from this value to `other` on the same day (negative if `other` is earlier).
+    /// Returns `other - self` on the same day.
     pub fn until(self, other: PlainTime) -> duration {
         other.since(self)
     }
 
-    /// The time from `other` to this value on the same day (negative if `other` is later).
+    /// Returns `self - other` on the same day.
     pub native fn since(self, other: PlainTime) -> duration
-    /// Rounded to a multiple of `increment` `smallest` units (at most hours);
-    /// rounding up from the last hour wraps to midnight.
+    /// Rounds to a multiple of `increment` in unit `smallest` (at most `Hour`),
+    /// wrapping to `00:00:00` if rounded to 24:00.
     pub native fn round(
         self,
         smallest: Unit,
         increment: int = 1,
         mode: RoundingMode = RoundingMode.HalfExpand,
     ) -> PlainTime
-    /// Formats with strftime directives for times (see the module documentation).
     pub native fn format(self, format: str) -> str
 }
 
 extend PlainYearMonth {
-    /// Parses ISO 8601 text (`2024-03`).
+    /// Parses an ISO 8601 year-month (`2024-03`).
     pub native fn parse(text: str) -> Result<PlainYearMonth>
 
     pub native fn year(self) -> int
-    /// 1 (January) to 12.
     pub native fn month(self) -> int
     pub native fn days_in_month(self) -> int
     pub native fn days_in_year(self) -> int
     pub native fn in_leap_year(self) -> bool
 
-    /// With the given components replaced; a month above 12 is clamped.
+    /// Replaces `year` and `month`, clamping `month` to `12` if above 12.
     pub native fn with(self, year: int = self.year(), month: int = self.month()) -> PlainYearMonth
 
-    /// `amount` later; it fails with kind `"invalid"` if `amount` has units smaller than months.
+    /// Adds `amount`. Fails with kind `"invalid"` if `amount` has nonzero units
+    /// smaller than a month.
     pub fn add<S: ToSpan>(self, amount: S) -> PlainYearMonth {
         self.add_span(amount.to_span())
     }
 
-    /// `amount` earlier (see `add`).
     pub fn subtract<S: ToSpan>(self, amount: S) -> PlainYearMonth {
         self.add_span(amount.to_span().negated())
     }
 
     native fn add_span(self, s: Span) -> PlainYearMonth
-    /// The span from this month to `other` in years and months (or only
-    /// months, with `largest: Unit.Month`).
     pub native fn until(self, other: PlainYearMonth, largest: Unit = Unit.Year) -> Span
 
-    /// The span from `other` to this month (see `until`).
     pub fn since(self, other: PlainYearMonth, largest: Unit = Unit.Year) -> Span {
         other.until(self, largest: largest)
     }
 
-    /// Day `day` of this month, clamped to the month's end.
+    /// Combines `self` with `day`, clamping `day` to the end of the month.
     pub native fn to_plain_date(self, day: int) -> PlainDate
 }
 
 extend PlainMonthDay {
-    /// Parses ISO 8601 text (`03-10` or `--03-10`).
+    /// Parses an ISO 8601 month-day (`03-10` or `--03-10`).
     pub native fn parse(text: str) -> Result<PlainMonthDay>
 
-    /// 1 (January) to 12.
     pub native fn month(self) -> int
     pub native fn day(self) -> int
-    /// With the given components replaced; values above their range are
-    /// clamped, and a month or day below 1 fails with kind `"invalid"`.
+    /// Replaces `month` and `day`, clamping values above their upper bounds.
+    /// Fails with kind `"invalid"` if `month < 1` or `day < 1`.
     pub native fn with(self, month: int = self.month(), day: int = self.day()) -> PlainMonthDay
-    /// This day in `year`; February 29 becomes February 28 outside leap years.
+    /// Combines `self` with `year`, clamping February 29 to February 28 in
+    /// non-leap years.
     pub native fn to_plain_date(self, year: int) -> PlainDate
 }
 
 extend Span {
-    /// Parses ISO 8601 text (`P1Y2M3DT4H5M6.5S`, `-PT90M`) or a friendly
-    /// form (`1 year, 2 months`, `4h 30m`).
+    /// Parses an ISO 8601 duration (`P1Y2M3DT4H5M6.5S`) or human-readable
+    /// duration (`1 year, 2 months`, `4h 30m`).
     pub native fn parse(text: str) -> Result<Span>
 
     pub native fn years(self) -> int
@@ -690,15 +625,12 @@ extend Span {
     pub native fn milliseconds(self) -> int
     pub native fn microseconds(self) -> int
     pub native fn nanoseconds(self) -> int
-    /// -1, 0 or 1.
+    /// Returns `-1`, `0`, or `1`.
     pub native fn sign(self) -> int
-    /// True if every unit is zero.
     pub native fn is_zero(self) -> bool
-    /// The span with the opposite sign.
     pub native fn negated(self) -> Span
     pub native fn abs(self) -> Span
 
-    /// With the given units replaced (see `span`).
     pub fn with(
         self,
         years: int = self.years(),
@@ -726,23 +658,21 @@ extend Span {
         )
     }
 
-    /// The sum, balanced up to the larger of the two spans' largest units.
-    /// Spans with years or months need `relative_to`, the start the span is
-    /// measured from; without it, a day is 24 hours and a week 7 days.
+    /// Adds `other` to `self`. Requires `relative_to` if either span contains
+    /// nonzero years or months; if `relative_to` is `None`, days are 24 hours
+    /// and weeks are 7 days.
     pub fn add<S: ToSpan>(self, other: S, relative_to: ZonedDateTime? = None) -> Span {
         self.add_span(other.to_span(), relative_to)
     }
 
-    /// The difference (see `add`).
     pub fn subtract<S: ToSpan>(self, other: S, relative_to: ZonedDateTime? = None) -> Span {
         self.add_span(other.to_span().negated(), relative_to)
     }
 
     native fn add_span(self, s: Span, relative_to: ZonedDateTime?) -> Span
-    /// Rebalanced into units from `largest` (by default, this span's
-    /// largest unit or `smallest`, whichever is larger) down to `smallest`,
-    /// the smallest rounded to a multiple of `increment` with `mode`
-    /// (`relative_to` as in `add`).
+    /// Rebalances and rounds `self` into units from `largest` down to
+    /// `smallest`. Requires `relative_to` if `self` or `largest` uses years or
+    /// months.
     pub native fn round(
         self,
         smallest: Unit = Unit.Nanosecond,
@@ -751,17 +681,15 @@ extend Span {
         mode: RoundingMode = RoundingMode.HalfExpand,
         relative_to: ZonedDateTime? = None,
     ) -> Span
-    /// The whole span in `unit`, such as `1.5` hours (`relative_to` as in `add`).
+    /// Expresses `self` as a floating-point multiple of `unit`.
     pub native fn total(self, unit: Unit, relative_to: ZonedDateTime? = None) -> float
-    /// -1, 0 or 1 as this span is shorter than, as long as, or longer than
-    /// `other` (`relative_to` as in `add`).
+    /// Returns `-1`, `0`, or `1` by comparing the total length of `self` and `other`.
     pub native fn compare(self, other: Span, relative_to: ZonedDateTime? = None) -> int
-    /// The exact time this span covers (`relative_to` as in `add`); fails
-    /// with kind `"overflow"` beyond the range of `duration`.
+    /// Converts `self` to an exact `duration`.
     pub native fn to_duration(self, relative_to: ZonedDateTime? = None) -> duration
 }
 
 extend TimeZone {
-    /// The zone's name: an IANA name, `UTC`, or an offset such as `+05:30`.
+    /// Returns the canonical zone ID (`America/New_York`, `UTC`, or `+05:30`).
     pub native fn id(self) -> str
 }

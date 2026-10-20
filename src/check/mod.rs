@@ -357,12 +357,10 @@ impl CheckedProgram {
     }
 }
 
-/// What a registry provides to the modules it checks.
+/// Registered native functions and value types, keyed by qualified name.
 #[derive(Clone, Debug, Default)]
 pub struct NativeIds {
-    /// Native function ids by qualified name (`foo.bar`, `str.len`, ...).
     pub fns: HashMap<Cow<'static, str>, u32>,
-    /// Value types by qualified name (`time.PlainDate`).
     pub values: HashMap<Cow<'static, str>, ValueTypeInfo>,
 }
 

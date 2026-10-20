@@ -1090,8 +1090,6 @@ impl Heap {
         }
     }
 
-    /// The value of a native value type (see [`ValueType`]). Values are
-    /// immutable: there is no mutable access.
     pub fn value<T: ValueType>(&self, v: Value) -> Option<T> {
         value_of(self.get(v))
     }

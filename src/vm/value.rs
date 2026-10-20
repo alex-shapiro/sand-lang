@@ -847,35 +847,36 @@ pub trait NativeObject: Any + Send {
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
-/// A Rust type that implements a Sand value type, a `native type`
-/// registered with [`crate::NativeModule::value_type`]. Its values are
-/// immutable; they compare and hash by value (`Eq`, `Hash`), order if
-/// `ORDER` is set (`Ord`), and display as their text form, which
-/// `json.encode` and `json.decode` write and read. Equal values must
-/// display the same, and `parse` must read a value's text back as an
-/// equal value. Comparing, hashing and displaying values is not metered, so
-/// it must be cheap.
+/// A Rust type that implements an immutable Sand value type (registered with
+/// [`crate::NativeModule::value_type`]).
+///
+/// Values are compared, hashed, and formatted using `Eq`, `Hash`, and
+/// `Display`, and are encoded and decoded in JSON as strings. Equal values
+/// must produce identical `Display` output, and [`Self::parse`] must parse that
+/// output back into an equal value. Comparison, hashing, and formatting are
+/// not metered, so these operations must execute in constant time.
 pub trait ValueType: Clone + Eq + Hash + std::fmt::Display + Send + Sync + 'static {
-    /// The module that registers the type (`time`).
+    /// Name of the module that declares this type (e.g. `"time"`).
     const MODULE: &'static str;
-    /// The Sand type's name (`PlainDate`).
+    /// Name of the Sand type (e.g. `"PlainDate"`).
     const NAME: &'static str;
-    /// `Some(Ord::cmp)` for a type that Sand may order.
+    /// Comparison function for types that satisfy `Ord` (typically `Some(Ord::cmp)`).
     const ORDER: Option<fn(&Self, &Self) -> std::cmp::Ordering> = None;
-    /// For a type whose values fit in 16 bytes: how to store a value in
-    /// them, so that the heap holds it without an allocation of its own.
+    /// Optional 16-byte inline heap representation.
     const PACKING: Option<Packing<Self>> = None;
-    /// Reads the text that `Display` writes.
+    /// Parses the text output of `Display`.
     fn parse(text: &str) -> Result<Self, String>;
-    /// Approximate memory used, for accounting.
+    /// Approximate heap memory used by `self`, in bytes.
     fn size(&self) -> usize {
         std::mem::size_of::<Self>()
     }
 }
 
-/// Stores a value in 16 bytes. Equal values must pack to equal bits, and
-/// `unpack` must restore an equal value. If `ordered`, the bits compare (as
-/// two unsigned numbers, the first first) in the values' order.
+/// Packs a [`ValueType`] into 16 bytes so it can be stored inline in a heap slot.
+///
+/// `pack` must map equal values to identical `[u64; 2]` words, and `unpack`
+/// must reconstruct an equal value. Set `ordered` to `true` if lexicographic
+/// comparison of the `[u64; 2]` words matches [`ValueType::ORDER`].
 pub struct Packing<T> {
     pub pack: fn(&T) -> [u64; 2],
     pub unpack: fn([u64; 2]) -> T,
@@ -889,16 +890,12 @@ impl<T> Clone for Packing<T> {
 }
 impl<T> Copy for Packing<T> {}
 
-/// The object-safe form of a [`ValueType`].
+/// Object-safe trait for boxed [`ValueType`] values.
 pub trait ValueObj: Any + Send {
     fn type_name(&self) -> &'static str;
-    /// Equality with a value of the same Sand type.
     fn value_eq(&self, other: &dyn ValueObj) -> bool;
-    /// The order of a value of the same Sand type; `None` if the type is not
-    /// ordered.
     fn value_cmp(&self, other: &dyn ValueObj) -> Option<std::cmp::Ordering>;
     fn value_hash(&self) -> u64;
-    /// Appends the text form.
     fn write_text(&self, out: &mut String);
     fn size(&self) -> usize;
     fn as_any(&self) -> &dyn Any;
@@ -931,23 +928,19 @@ impl<T: ValueType> ValueObj for T {
     }
 }
 
-/// Orders two packed values.
 type PackedOrder = fn([u64; 2], [u64; 2]) -> std::cmp::Ordering;
 
-/// The operations of a packed value type on the bytes holding a value.
+/// Type descriptor for an inline 16-byte [`ValueType`].
 pub struct PackedType {
     name: &'static str,
-    /// The order of an ordered type.
     order: Option<PackedOrder>,
-    /// Whether the bits compare in the values' order.
     pub(crate) ordered_bits: bool,
     write_text: fn([u64; 2], &mut String),
     type_id: fn() -> std::any::TypeId,
 }
 
 impl PackedType {
-    /// Whether `self` and `other` are the same type.
-    pub(crate) fn same(&self, other: &PackedType) -> bool {
+    pub(crate) fn is_same_type(&self, other: &PackedType) -> bool {
         std::ptr::eq(self, other) || (self.type_id)() == (other.type_id)()
     }
 }
@@ -979,12 +972,10 @@ impl<T: ValueType> PackedTypeOf<T> {
     };
 }
 
-/// The value in `bits`, which `T`'s packing wrote.
 fn unpack<T: ValueType>(bits: [u64; 2]) -> Option<T> {
     T::PACKING.map(|p| (p.unpack)(bits))
 }
 
-/// A value of a native value type on the heap: boxed or packed.
 #[derive(Clone, Copy)]
 pub enum ValueRef<'a> {
     Boxed(&'a dyn ValueObj),
@@ -999,21 +990,18 @@ impl ValueRef<'_> {
         }
     }
 
-    /// Equality with a value of the same Sand type.
     pub fn value_eq(self, other: ValueRef<'_>) -> bool {
         match (self, other) {
             (ValueRef::Boxed(x), ValueRef::Boxed(y)) => x.value_eq(y),
-            (ValueRef::Packed(t, a), ValueRef::Packed(u, b)) => a == b && t.same(u),
+            (ValueRef::Packed(t, a), ValueRef::Packed(u, b)) => a == b && t.is_same_type(u),
             _ => false,
         }
     }
 
-    /// The order of a value of the same Sand type; `None` if the type is not
-    /// ordered.
     pub fn value_cmp(self, other: ValueRef<'_>) -> Option<std::cmp::Ordering> {
         match (self, other) {
             (ValueRef::Boxed(x), ValueRef::Boxed(y)) => x.value_cmp(y),
-            (ValueRef::Packed(t, a), ValueRef::Packed(u, b)) if t.same(u) => t.order.map(|order| order(a, b)),
+            (ValueRef::Packed(t, a), ValueRef::Packed(u, b)) if t.is_same_type(u) => t.order.map(|order| order(a, b)),
             _ => None,
         }
     }
@@ -1030,7 +1018,6 @@ impl ValueRef<'_> {
         }
     }
 
-    /// Appends the text form.
     pub fn write_text(self, out: &mut String) {
         match self {
             ValueRef::Boxed(x) => x.write_text(out),
@@ -1038,7 +1025,6 @@ impl ValueRef<'_> {
         }
     }
 
-    /// The text form.
     pub fn text(self) -> String {
         let mut s = String::new();
         self.write_text(&mut s);
@@ -1047,7 +1033,6 @@ impl ValueRef<'_> {
 }
 
 impl Obj {
-    /// The value of a native value type, if this is one.
     pub fn value(&self) -> Option<ValueRef<'_>> {
         match self {
             Obj::Value(x) => Some(ValueRef::Boxed(&**x)),
@@ -1057,7 +1042,6 @@ impl Obj {
     }
 }
 
-/// The heap object holding `x`.
 pub(crate) fn value_obj<T: ValueType>(x: T) -> Obj {
     match T::PACKING {
         Some(p) => Obj::Packed(&PackedTypeOf::<T>::TYPE, (p.pack)(&x)),
@@ -1065,7 +1049,6 @@ pub(crate) fn value_obj<T: ValueType>(x: T) -> Obj {
     }
 }
 
-/// The value of `T` that `obj` holds, if it holds one.
 pub(crate) fn value_of<T: ValueType>(obj: &Obj) -> Option<T> {
     match obj {
         Obj::Value(x) => x.as_any().downcast_ref::<T>().cloned(),
@@ -1074,14 +1057,12 @@ pub(crate) fn value_of<T: ValueType>(obj: &Obj) -> Option<T> {
     }
 }
 
-/// Panics unless `T::NAME` is a capitalized identifier.
 pub(crate) fn check_value_type_name<T: ValueType>() {
     let name = T::NAME.as_bytes();
     let ident = name.first().is_some_and(u8::is_ascii_uppercase) && name.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_');
     assert!(ident, "value type name `{}` is not a capitalized identifier", T::NAME);
 }
 
-/// Reads a value of a value type from its text form, for `json.decode`.
 pub type ParseValue = fn(&str) -> Result<Obj, String>;
 
 pub(crate) fn parse_value<T: ValueType>(text: &str) -> Result<Obj, String> {
@@ -1126,7 +1107,6 @@ pub enum TypeDesc {
         variants: Vec<VariantDesc>,
     },
     Json,
-    /// A native value type, written as its text form.
     Value {
         name: String,
         parse: ParseValue,
@@ -1208,10 +1188,7 @@ pub enum Obj {
     Task(Box<TaskObj>),
     Channel(Box<ChannelObj>),
     Native(Box<dyn NativeObject>),
-    /// A value of a native value type ([`ValueType`]).
     Value(Box<dyn ValueObj>),
-    /// A value of a native value type stored in 16 bytes (see
-    /// [`ValueType::PACKING`]).
     Packed(&'static PackedType, [u64; 2]),
     TypeDesc(Arc<TypeDesc>),
 }

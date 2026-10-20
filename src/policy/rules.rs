@@ -752,7 +752,6 @@ struct Index {
     /// Rules for variables by name, and those with patterns.
     env_names: FxHashMap<String, Vec<(bool, u32)>>,
     env: Vec<(NamePattern, bool, u32)>,
-    /// Rules for capabilities without arguments (`Stdin`, `TimeZone`, ...).
     unit: Vec<(Capability, bool, u32)>,
     /// Custom rules by name: their detail, if any.
     custom: FxHashMap<String, Vec<(Option<String>, bool, u32)>>,

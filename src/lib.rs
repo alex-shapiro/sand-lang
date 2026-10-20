@@ -42,13 +42,11 @@ pub use vm::OutputSink;
 pub use vm::heap::GcStats;
 pub use vm::value::{Packing, Value, ValueType};
 
-/// jiff, whose types implement the `time` module's values.
 pub use jiff;
 
-/// The Rust types of the `time` module's values. `Instant`,
-/// `PlainDateTime`, `PlainDate` and `PlainTime` are [`jiff::Timestamp`],
-/// [`jiff::civil::DateTime`], [`jiff::civil::Date`] and
-/// [`jiff::civil::Time`].
+/// Rust types for `time` module values. `Instant`, `PlainDateTime`,
+/// `PlainDate`, and `PlainTime` are [`jiff::Timestamp`],
+/// [`jiff::civil::DateTime`], [`jiff::civil::Date`], and [`jiff::civil::Time`].
 pub mod time {
     pub use crate::stdlib::time::{PlainMonthDay, PlainYearMonth, Span, TimeZone, ZonedDateTime};
 }

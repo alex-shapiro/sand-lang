@@ -204,7 +204,6 @@ help(geo.dist)
     );
 }
 
-/// An amount of money in cents, written `12.34`.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct Money(i64);
 
@@ -224,7 +223,6 @@ impl ValueType for Money {
     }
 }
 
-/// A position, which has no order.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct Cell(i64, i64);
 
@@ -316,7 +314,7 @@ fn value_types_belong_to_their_module() {
 }
 
 #[test]
-fn host_sources_with_crlf_lines_import_what_signatures_name() {
+fn host_sources_with_crlf_lines_import_referenced_modules() {
     let mut m = NativeModule::new("geo");
     m.source("//! Geometry.\r\n//! é\r\n");
     m.function("start", || Date::constant(2024, 1, 1));
@@ -325,7 +323,6 @@ fn host_sources_with_crlf_lines_import_what_signatures_name() {
     assert!(out.starts_with("2024-01-01\nmodule geo\n\nGeometry.\né\n"), "{out}");
 }
 
-/// Implements `bank.Money` too, which `Money` already does.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct Impostor;
 

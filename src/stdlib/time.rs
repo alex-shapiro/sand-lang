@@ -1,5 +1,4 @@
-//! The `time` module: the types of JavaScript's Temporal API (see
-//! `time.sand`), implemented with `jiff` as native value types.
+//! Implementation of the `time` standard library module.
 
 use crate::check::ModKind;
 use crate::engine::Registry;
@@ -21,27 +20,19 @@ use std::hash::{Hash, Hasher};
 use std::sync::LazyLock;
 
 static PARSER: DateTimeParser = DateTimeParser::new();
-/// The compiled-in time zone database. Lookups use it explicitly: jiff's
-/// global database reads the host's zone files if any crate in the build
-/// enables that.
+/// Bundled IANA database. Used explicitly so the engine never reads host zone files.
 static DB: LazyLock<TimeZoneDatabase> = LazyLock::new(TimeZoneDatabase::bundled);
 static PRINTER: DateTimePrinter = DateTimePrinter::new();
 
-// ----------------------------------------------------------------------
-// The value types
-
-/// The error for text that is not in the strftime format `format`.
-fn unformatted(text: &str, name: &str, format: &str) -> String {
-    format!("{} in the format {:?}", unreadable(text, name), super::truncate(format, 64))
+fn format_parse_error(text: &str, name: &str, format: &str) -> String {
+    format!("{} in the format {:?}", parse_error(text, name), super::truncate(format, 64))
 }
 
-/// The error for text that is not the text form of type `name`.
-fn unreadable(text: &str, name: &str) -> String {
+fn parse_error(text: &str, name: &str) -> String {
     format!("cannot read {:?} as a {name}", super::truncate(text, 64))
 }
 
-/// The year, offset to be positive, then the month and the day: the bits
-/// order as the dates do.
+/// Packs a date into a `u64` whose unsigned bit order matches chronological order.
 fn pack_date(d: &Date) -> u64 {
     ((i64::from(d.year()) + 0x8000) as u64) << 16 | (u64::from(d.month() as u8) << 8) | u64::from(d.day() as u8)
 }
@@ -66,7 +57,7 @@ impl ValueType for Timestamp {
     const MODULE: &'static str = "time";
     const NAME: &'static str = "Instant";
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
-    // The nanoseconds since the epoch, offset to be positive.
+    // Flip the sign bit so unsigned comparison matches chronological order.
     const PACKING: Option<Packing<Self>> = Some(Packing {
         pack: |t| {
             let n = (t.as_nanosecond() as u128) ^ (1 << 127);
@@ -79,7 +70,7 @@ impl ValueType for Timestamp {
         ordered: true,
     });
     fn parse(text: &str) -> Result<Self, String> {
-        text.parse().map_err(|_| unreadable(text, Self::NAME))
+        text.parse().map_err(|_| parse_error(text, Self::NAME))
     }
 }
 
@@ -93,7 +84,7 @@ impl ValueType for DateTime {
         ordered: true,
     });
     fn parse(text: &str) -> Result<Self, String> {
-        text.parse().map_err(|_| unreadable(text, Self::NAME))
+        text.parse().map_err(|_| parse_error(text, Self::NAME))
     }
 }
 
@@ -103,7 +94,7 @@ impl ValueType for Date {
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
     const PACKING: Option<Packing<Self>> = Some(Packing { pack: |d| [pack_date(d), 0], unpack: |[d, _]| unpack_date(d), ordered: true });
     fn parse(text: &str) -> Result<Self, String> {
-        text.parse().map_err(|_| unreadable(text, Self::NAME))
+        text.parse().map_err(|_| parse_error(text, Self::NAME))
     }
 }
 
@@ -113,11 +104,10 @@ impl ValueType for Time {
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
     const PACKING: Option<Packing<Self>> = Some(Packing { pack: |t| [pack_time(t), 0], unpack: |[t, _]| unpack_time(t), ordered: true });
     fn parse(text: &str) -> Result<Self, String> {
-        text.parse().map_err(|_| unreadable(text, Self::NAME))
+        text.parse().map_err(|_| parse_error(text, Self::NAME))
     }
 }
 
-/// What identifies a time zone: its IANA name, else its offset.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum ZoneKey<'a> {
     Iana(&'a str),
@@ -131,20 +121,19 @@ fn zone_key(tz: &tz::TimeZone) -> ZoneKey<'_> {
     }
 }
 
-/// `time.ZonedDateTime`: an instant in a supported zone (see
-/// [`TimeZone`]). Unlike [`Zoned`] values, values in different zones differ.
+/// An instant in a supported [`TimeZone`] (`time.ZonedDateTime`).
+/// Two values are equal only if both their instants and their zone IDs match.
 #[derive(Clone, Debug)]
 pub struct ZonedDateTime(Zoned);
 
 impl ZonedDateTime {
-    /// The instant of `z` in its zone as Sand knows it: an IANA zone takes
-    /// its rules from the built-in database (see [`TimeZone::get`]); `None`
-    /// if Sand does not support the zone.
+    /// Wraps `z` using the bundled IANA rules for its zone name.
+    /// Returns `None` if the time zone is not supported by [`TimeZone`].
     pub fn new(z: Zoned) -> Option<ZonedDateTime> {
         let tz = match z.time_zone().iana_name() {
             Some(name) => DB.get(name).ok()?,
             None => {
-                supported(z.time_zone()).ok()?;
+                check_supported_zone(z.time_zone()).ok()?;
                 z.time_zone().clone()
             }
         };
@@ -188,28 +177,25 @@ impl ValueType for ZonedDateTime {
     const NAME: &'static str = "ZonedDateTime";
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
     fn parse(text: &str) -> Result<Self, String> {
-        let z = PARSER.parse_zoned_with(&DB, text).map_err(|_| unreadable(text, Self::NAME))?;
-        supported(z.time_zone())?;
+        let z = PARSER.parse_zoned_with(&DB, text).map_err(|_| parse_error(text, Self::NAME))?;
+        check_supported_zone(z.time_zone())?;
         Ok(ZonedDateTime(z))
     }
 }
 
-/// Writes a year as ISO 8601 does: 4 digits, or a sign and 6 digits.
 fn write_year(f: &mut fmt::Formatter<'_>, year: i16) -> fmt::Result {
     if (0..=9999).contains(&year) { write!(f, "{year:04}") } else { write!(f, "{year:+07}") }
 }
 
-/// `time.PlainYearMonth`.
+/// A year and month (`time.PlainYearMonth`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PlainYearMonth(Date);
 
 impl PlainYearMonth {
-    /// The month `year`-`month`, if there is one.
     pub fn new(year: i16, month: i8) -> Option<PlainYearMonth> {
         Date::new(year, month, 1).ok().map(PlainYearMonth)
     }
 
-    /// The month's first day.
     pub fn first_day(self) -> Date {
         self.0
     }
@@ -227,25 +213,24 @@ impl ValueType for PlainYearMonth {
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
     const PACKING: Option<Packing<Self>> =
         Some(Packing { pack: |ym| [pack_date(&ym.0), 0], unpack: |[d, _]| PlainYearMonth(unpack_date(d)), ordered: true });
-    /// `2024-03`, or a date in the month.
     fn parse(text: &str) -> Result<Self, String> {
         format!("{text}-01")
             .parse::<Date>()
             .or_else(|_| text.parse::<Date>())
             .map(|d| PlainYearMonth(d.first_of_month()))
-            .map_err(|_| unreadable(text, Self::NAME))
+            .map_err(|_| parse_error(text, Self::NAME))
     }
 }
 
-/// The year of the dates that `PlainMonthDay` values are stored as, a leap year.
+/// Reference leap year used to store `PlainMonthDay` as a `Date`.
 const MONTH_DAY_YEAR: i16 = 1972;
 
-/// `time.PlainMonthDay`.
+/// A month and day without a year (`time.PlainMonthDay`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PlainMonthDay(Date);
 
 impl PlainMonthDay {
-    /// The day `month`-`day`, if there is one (February 29 included).
+    /// Constructs a month-day (including February 29), or returns `None` if out of range.
     pub fn new(month: i8, day: i8) -> Option<PlainMonthDay> {
         Date::new(MONTH_DAY_YEAR, month, day).ok().map(PlainMonthDay)
     }
@@ -270,26 +255,23 @@ impl ValueType for PlainMonthDay {
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
     const PACKING: Option<Packing<Self>> =
         Some(Packing { pack: |md| [pack_date(&md.0), 0], unpack: |[d, _]| PlainMonthDay(unpack_date(d)), ordered: true });
-    /// `03-10`, `--03-10`, or a date on the day.
     fn parse(text: &str) -> Result<Self, String> {
         let short = text.strip_prefix("--").unwrap_or(text);
         let two_digits = |s: &str| (s.len() == 2 && s.bytes().all(|b| b.is_ascii_digit())).then(|| s.parse::<i8>().ok()).flatten();
         let (month, day) = match short.split_once('-').and_then(|(m, d)| Some((two_digits(m)?, two_digits(d)?))) {
             Some(md) => md,
-            None => text.parse::<Date>().map(|d| (d.month(), d.day())).map_err(|_| unreadable(text, Self::NAME))?,
+            None => text.parse::<Date>().map(|d| (d.month(), d.day())).map_err(|_| parse_error(text, Self::NAME))?,
         };
         PlainMonthDay::new(month, day).ok_or_else(|| format!("no such day: {month:02}-{day:02}"))
     }
 }
 
-/// `time.Span`. Its units below a second are balanced into seconds, as its
-/// text form writes them, so equal spans have the same units.
+/// A calendar and clock duration (`time.Span`) with sub-second units normalized into seconds.
 #[derive(Clone, Copy, Debug)]
 pub struct Span(jiff::Span);
 
 impl Span {
-    /// `s` with its milliseconds, microseconds and nanoseconds balanced into
-    /// seconds; an error if the seconds are then out of range.
+    /// Normalizes sub-second units of `s` into seconds so that equal spans have identical unit fields.
     pub fn new(s: jiff::Span) -> Result<Span, jiff::Error> {
         let [y, mo, w, d, h, mi, sec, ms, us, ns] = span_units(&s);
         let sub = i128::from(sec) * 1_000_000_000 + i128::from(ms) * 1_000_000 + i128::from(us) * 1000 + i128::from(ns);
@@ -302,11 +284,8 @@ impl Span {
     }
 }
 
-/// Sets a unit of a span (`Span::try_years`, ...).
 type SetUnit = fn(jiff::Span, i64) -> Result<jiff::Span, jiff::Error>;
 
-/// The span with the given units, from years to nanoseconds, which must not
-/// have different signs.
 fn build_span(units: [i64; 10]) -> Result<jiff::Span, jiff::Error> {
     let setters: [SetUnit; 10] = [
         jiff::Span::try_years,
@@ -358,24 +337,21 @@ impl ValueType for Span {
     const MODULE: &'static str = "time";
     const NAME: &'static str = "Span";
     fn parse(text: &str) -> Result<Self, String> {
-        text.parse().and_then(Span::new).map_err(|_| unreadable(text, Self::NAME))
+        text.parse().and_then(Span::new).map_err(|_| parse_error(text, Self::NAME))
     }
 }
 
-/// `time.TimeZone`: an IANA zone or an offset in whole minutes, whose text
-/// forms read back as the same zone.
+/// An IANA time zone, `UTC`, or a fixed whole-minute offset (`time.TimeZone`).
 #[derive(Clone, Debug)]
 pub struct TimeZone(tz::TimeZone);
 
 impl TimeZone {
-    /// The zone named `name`: an IANA name (`Europe/Paris`, matched ignoring
-    /// case), `UTC`, or an offset in whole minutes (`+05:30`); `None` if
-    /// there is none.
+    /// Looks up a time zone by IANA name (case-insensitive), `UTC`, or whole-minute offset (`+05:30`).
     pub fn get(name: &str) -> Option<TimeZone> {
         parse_zone(name).ok().map(TimeZone)
     }
 
-    /// The operating system's time zone, if it has an IANA name.
+    /// Returns the operating system's IANA time zone, if available.
     #[cfg(feature = "os")]
     pub fn system() -> Option<TimeZone> {
         TimeZone::get(tz::TimeZone::try_system().ok()?.iana_name()?)
@@ -413,18 +389,15 @@ impl ValueType for TimeZone {
     }
 }
 
-/// The zone named `name`: an IANA name, `UTC`, or an offset in whole minutes.
 fn parse_zone(name: &str) -> Result<tz::TimeZone, String> {
     let unknown = || format!("unknown time zone {:?}", super::truncate(name, 64));
     let tz = PARSER.parse_time_zone_with(&DB, name).map_err(|_| unknown())?;
-    supported(&tz).map_err(|_| unknown())?;
+    check_supported_zone(&tz).map_err(|_| unknown())?;
     Ok(tz)
 }
 
-/// Accepts IANA zones and offsets in whole minutes up to 23:59 (as Temporal
-/// does), whose text forms read back as the same zone, unlike POSIX rules
-/// and offsets with seconds.
-fn supported(tz: &tz::TimeZone) -> Result<(), String> {
+/// Rejects POSIX TZ strings and sub-minute offsets because their formatted output cannot be parsed back.
+fn check_supported_zone(tz: &tz::TimeZone) -> Result<(), String> {
     match (tz.iana_name(), tz.to_fixed_offset()) {
         (Some(_), _) => Ok(()),
         (None, Ok(offset)) if offset.seconds() % 60 == 0 && offset.seconds().abs() < 24 * 3600 => Ok(()),
@@ -432,41 +405,35 @@ fn supported(tz: &tz::TimeZone) -> Result<(), String> {
     }
 }
 
-// ----------------------------------------------------------------------
-// Arguments and results
-
-fn wrong<T>(what: &str) -> Result<T, Ctl> {
+fn expected_type_error<T>(what: &str) -> Result<T, Ctl> {
     Err(Ctl::internal(format!("expected a time.{what}")))
 }
 
-fn get<T: ValueType>(vm: &Vm, v: Value) -> Result<T, Ctl> {
+fn extract_value<T: ValueType>(vm: &Vm, v: Value) -> Result<T, Ctl> {
     match vm.heap.value::<T>(v) {
         Some(x) => Ok(x),
-        None => wrong(T::NAME),
+        None => expected_type_error(T::NAME),
     }
 }
 
-/// The instant of an `Instant` or `ZonedDateTime`.
 fn instant(vm: &Vm, v: Value) -> Result<Timestamp, Ctl> {
     if let Some(t) = vm.heap.value::<Timestamp>(v) {
         Ok(t)
     } else if let Some(z) = vm.heap.value::<ZonedDateTime>(v) {
         Ok(z.0.timestamp())
     } else {
-        wrong("Instant")
+        expected_type_error("Instant")
     }
 }
 
 fn zoned(vm: &Vm, v: Value) -> Result<Zoned, Ctl> {
-    get::<ZonedDateTime>(vm, v).map(|z| z.0)
+    extract_value::<ZonedDateTime>(vm, v).map(|z| z.0)
 }
 
 fn opt_zoned(vm: &Vm, v: Value) -> Result<Option<Zoned>, Ctl> {
     vm.as_option(v).map(|z| zoned(vm, z)).transpose()
 }
 
-/// The date of a `PlainDate`, `PlainDateTime`, `ZonedDateTime`,
-/// `PlainYearMonth` (its first day) or `PlainMonthDay` (in 1972).
 fn date(vm: &Vm, v: Value) -> Result<Date, Ctl> {
     let heap = &vm.heap;
     if let Some(d) = heap.value::<Date>(v) {
@@ -480,11 +447,10 @@ fn date(vm: &Vm, v: Value) -> Result<Date, Ctl> {
     } else if let Some(md) = heap.value::<PlainMonthDay>(v) {
         Ok(md.0)
     } else {
-        wrong("PlainDate")
+        expected_type_error("PlainDate")
     }
 }
 
-/// The wall-clock time of a `PlainTime`, `PlainDateTime` or `ZonedDateTime`.
 fn time_of(vm: &Vm, v: Value) -> Result<Time, Ctl> {
     let heap = &vm.heap;
     if let Some(t) = heap.value::<Time>(v) {
@@ -494,32 +460,29 @@ fn time_of(vm: &Vm, v: Value) -> Result<Time, Ctl> {
     } else if let Some(z) = heap.value::<ZonedDateTime>(v) {
         Ok(z.0.time())
     } else {
-        wrong("PlainTime")
+        expected_type_error("PlainTime")
     }
 }
 
-/// The date-time of a `PlainDateTime` or `ZonedDateTime`.
 fn datetime(vm: &Vm, v: Value) -> Result<DateTime, Ctl> {
     if let Some(dt) = vm.heap.value::<DateTime>(v) { Ok(dt) } else { Ok(zoned(vm, v)?.datetime()) }
 }
 
 fn span(vm: &Vm, v: Value) -> Result<jiff::Span, Ctl> {
-    get::<Span>(vm, v).map(|s| s.0)
+    extract_value::<Span>(vm, v).map(|s| s.0)
 }
 
 fn zone(vm: &Vm, v: Value) -> Result<tz::TimeZone, Ctl> {
-    get::<TimeZone>(vm, v).map(|z| z.0)
+    extract_value::<TimeZone>(vm, v).map(|z| z.0)
 }
 
-/// Declaration order of the variant `v` of an enum without payloads.
-fn variant(vm: &Vm, v: Value) -> usize {
+fn enum_tag_index(vm: &Vm, v: Value) -> usize {
     match v {
         Value::Tag(id) => vm.prog.variants.get(id as usize).map_or(usize::MAX, |r| r.index as usize),
         _ => usize::MAX,
     }
 }
 
-/// The `time.Unit` variants, in order.
 const UNITS: [Unit; 10] = [
     Unit::Year,
     Unit::Month,
@@ -533,7 +496,6 @@ const UNITS: [Unit; 10] = [
     Unit::Nanosecond,
 ];
 
-/// The `time.RoundingMode` variants, in order.
 const MODES: [RoundMode; 9] = [
     RoundMode::Ceil,
     RoundMode::Floor,
@@ -546,53 +508,44 @@ const MODES: [RoundMode; 9] = [
     RoundMode::HalfEven,
 ];
 
-/// The `time.Disambiguation` variants, in order.
 const DISAMBIGUATIONS: [Disambiguation; 3] = [Disambiguation::Compatible, Disambiguation::Earlier, Disambiguation::Later];
 
 fn unit(vm: &Vm, v: Value) -> Result<Unit, Ctl> {
-    UNITS.get(variant(vm, v)).copied().ok_or_else(|| Ctl::internal("expected a time.Unit"))
+    UNITS.get(enum_tag_index(vm, v)).copied().ok_or_else(|| Ctl::internal("expected a time.Unit"))
 }
 
 fn mode(vm: &Vm, v: Value) -> Result<RoundMode, Ctl> {
-    MODES.get(variant(vm, v)).copied().ok_or_else(|| Ctl::internal("expected a time.RoundingMode"))
+    MODES.get(enum_tag_index(vm, v)).copied().ok_or_else(|| Ctl::internal("expected a time.RoundingMode"))
 }
 
 fn disambiguation(vm: &Vm, v: Value) -> Result<Disambiguation, Ctl> {
-    DISAMBIGUATIONS.get(variant(vm, v)).copied().ok_or_else(|| Ctl::internal("expected a time.Disambiguation"))
+    DISAMBIGUATIONS.get(enum_tag_index(vm, v)).copied().ok_or_else(|| Ctl::internal("expected a time.Disambiguation"))
 }
 
-/// The rounding options `smallest`, `increment` and `mode` at `a[i..]`.
-fn rounding(vm: &Vm, a: &[Value], i: usize) -> Result<(Unit, i64, RoundMode), Ctl> {
-    Ok((unit(vm, a[i])?, increment(a[i + 1])?, mode(vm, a[i + 2])?))
+fn rounding_args(vm: &Vm, a: &[Value], i: usize) -> Result<(Unit, i64, RoundMode), Ctl> {
+    Ok((unit(vm, a[i])?, parse_increment(a[i + 1])?, mode(vm, a[i + 2])?))
 }
 
-/// A rounding increment, 1 to 10⁹.
-fn increment(v: Value) -> Result<i64, Ctl> {
+fn parse_increment(v: Value) -> Result<i64, Ctl> {
     match v.as_int() {
         i @ 1..=1_000_000_000 => Ok(i),
         i => Err(Ctl::fail("invalid", format!("the rounding increment must be from 1 to 1000000000, not {i}"))),
     }
 }
 
-/// Fails unless `smallest` is at most hours: instants and wall-clock times
-/// have no calendar units.
-fn clock_unit(smallest: Unit, what: &str) -> Result<(), Ctl> {
+fn check_clock_unit(smallest: Unit, what: &str) -> Result<(), Ctl> {
     if smallest > Unit::Hour {
         return Err(Ctl::fail("invalid", format!("{what} can only be rounded to hours or smaller units")));
     }
     Ok(())
 }
 
-/// The difference options `largest`, `smallest`, `increment` and `mode` at
-/// `a[2..]`. A `largest` smaller than `smallest` is raised to it.
-fn difference(vm: &Vm, a: &[Value]) -> Result<(Unit, Unit, i64, RoundMode), Ctl> {
-    let (smallest, increment, mode) = rounding(vm, a, 3)?;
+fn difference_args(vm: &Vm, a: &[Value]) -> Result<(Unit, Unit, i64, RoundMode), Ctl> {
+    let (smallest, increment, mode) = rounding_args(vm, a, 3)?;
     Ok((unit(vm, a[2])?.max(smallest), smallest, increment, mode))
 }
 
-/// Fails with an error of jiff: kind `"overflow"` for a result outside
-/// the supported range, else `"invalid"`.
-fn failure(e: jiff::Error) -> Ctl {
+fn jiff_error(e: jiff::Error) -> Ctl {
     if e.is_range() {
         Ctl::fail("overflow", "the result is outside the supported range (years -9999 to 9999)")
     } else {
@@ -600,16 +553,14 @@ fn failure(e: jiff::Error) -> Ctl {
     }
 }
 
-/// Allocates `x`, or fails (see [`failure`]).
-fn made<T: ValueType>(vm: &mut Vm, x: Result<T, jiff::Error>) -> NResult {
+fn alloc_or_fail<T: ValueType>(vm: &mut Vm, x: Result<T, jiff::Error>) -> NResult {
     match x {
         Ok(x) => Ok(vm.new_value(x)),
-        Err(e) => Err(failure(e)),
+        Err(e) => Err(jiff_error(e)),
     }
 }
 
-/// `Ok(x)`, or `Err(Error { kind, message })`.
-fn result<T: ValueType>(vm: &mut Vm, x: Result<T, String>, kind: &str) -> NResult {
+fn into_sand_result<T: ValueType>(vm: &mut Vm, x: Result<T, String>, kind: &str) -> NResult {
     Ok(match x {
         Ok(x) => {
             let v = vm.new_value(x);
@@ -619,37 +570,31 @@ fn result<T: ValueType>(vm: &mut Vm, x: Result<T, String>, kind: &str) -> NResul
     })
 }
 
-fn int(n: impl Into<i64>) -> Value {
+fn int_val(n: impl Into<i64>) -> Value {
     Value::Int(n.into())
 }
 
-/// `d` as a `duration`, failing outside its range.
-fn dur(d: SignedDuration) -> NResult {
+fn duration_val(d: SignedDuration) -> NResult {
     match i64::try_from(d.as_nanos()) {
         Ok(n) => Ok(Value::Dur(n)),
         Err(_) => Err(Ctl::fail("overflow", "the time is too long for a duration")),
     }
 }
 
-/// `x` if it fits in `T` and is in `range`.
-fn small<T: TryFrom<i64> + PartialOrd>(x: i64, range: std::ops::RangeInclusive<T>) -> Option<T> {
+fn in_range<T: TryFrom<i64> + PartialOrd>(x: i64, range: std::ops::RangeInclusive<T>) -> Option<T> {
     T::try_from(x).ok().filter(|x| range.contains(x))
 }
 
-/// The date with the given components, or `None` if there is no such date.
 fn exact_date(year: i64, month: i64, day: i64) -> Option<Date> {
-    Date::new(small(year, -9999..=9999)?, small(month, 1..=12)?, small(day, 1..=31)?).ok()
+    Date::new(in_range(year, -9999..=9999)?, in_range(month, 1..=12)?, in_range(day, 1..=31)?).ok()
 }
 
-/// The time with the given components, or `None` if one is out of range.
 fn exact_time([h, m, s, ms, us, ns]: [i64; 6]) -> Option<Time> {
-    let subsec = |x: i64| small::<i32>(x, 0..=999);
+    let subsec = |x: i64| in_range::<i32>(x, 0..=999);
     let nanos = subsec(ms)? * 1_000_000 + subsec(us)? * 1000 + subsec(ns)?;
-    Time::new(small(h, 0..=23)?, small(m, 0..=59)?, small(s, 0..=59)?, nanos).ok()
+    Time::new(in_range(h, 0..=23)?, in_range(m, 0..=59)?, in_range(s, 0..=59)?, nanos).ok()
 }
 
-/// The date with the given components, the month and day clamped to their
-/// ranges; they must be positive.
 fn constrain_date(year: i64, month: i64, day: i64) -> Result<Date, Ctl> {
     if month < 1 || day < 1 {
         return Err(Ctl::fail("invalid", format!("month and day must be positive: {month}, {day}")));
@@ -661,51 +606,43 @@ fn constrain_date(year: i64, month: i64, day: i64) -> Result<Date, Ctl> {
     exact_date(year, month.min(12), day).ok_or_else(|| Ctl::internal("a clamped date is invalid"))
 }
 
-/// The time with the given components, each clamped to its range.
 fn constrain_time([h, m, s, ms, us, ns]: [i64; 6]) -> Result<Time, Ctl> {
     let parts = [h.clamp(0, 23), m.clamp(0, 59), s.clamp(0, 59), ms.clamp(0, 999), us.clamp(0, 999), ns.clamp(0, 999)];
     exact_time(parts).ok_or_else(|| Ctl::internal("a clamped time is invalid"))
 }
 
-fn ints<const N: usize>(a: &[Value], from: usize) -> [i64; N] {
+fn int_args<const N: usize>(a: &[Value], from: usize) -> [i64; N] {
     std::array::from_fn(|i| a[from + i].as_int())
 }
 
-/// The start that span arithmetic measures from: `rel`, or without one, a
-/// day of 24 hours (and a week of 7 days).
-fn relative(rel: &Option<Zoned>) -> SpanRelativeTo<'_> {
+fn span_relative_to(rel: &Option<Zoned>) -> SpanRelativeTo<'_> {
     match rel {
         Some(z) => z.into(),
         None => SpanRelativeTo::days_are_24_hours(),
     }
 }
 
-/// Parses `a[0]` as the text form of `T`, or if the format `a[1]` is not
-/// empty, with strptime and `formatted`.
 fn parse_with<T: ValueType>(vm: &mut Vm, a: &[Value], formatted: fn(&BrokenDownTime) -> Result<T, jiff::Error>) -> NResult {
     let (text, format) = (vm.str(a[0]), vm.str(a[1]));
     vm.charge_bytes(text.len() + format.len())?;
     let x = if format.is_empty() {
         T::parse(text)
     } else {
-        strtime::parse(format, text).and_then(|b| formatted(&b)).map_err(|_| unformatted(text, T::NAME, format))
+        strtime::parse(format, text).and_then(|b| formatted(&b)).map_err(|_| format_parse_error(text, T::NAME, format))
     };
-    result(vm, x, "parse")
+    into_sand_result(vm, x, "parse")
 }
 
-/// Parses `a[0]` as the text form of `T`.
 fn parse<T: ValueType>(vm: &mut Vm, a: &[Value]) -> NResult {
     let text = vm.str(a[0]);
     vm.charge_bytes(text.len())?;
     let x = T::parse(text);
-    result(vm, x, "parse")
+    into_sand_result(vm, x, "parse")
 }
 
-/// Formats `t` with the strftime format `a[1]`.
 fn format(vm: &mut Vm, a: &[Value], t: impl Into<BrokenDownTime>) -> NResult {
     let format = vm.str(a[1]);
-    // A directive of at least 5 bytes (`%255Y`) expands to at most 255
-    // bytes, and a shorter one to at most a zone name.
+    // Bound output size before formatting.
     vm.reserve(format.len().saturating_mul(64))?;
     vm.charge_slow_bytes(format.len())?;
     let s = strtime::format(format, t).map_err(|e| Ctl::fail("invalid", e))?;
@@ -713,16 +650,14 @@ fn format(vm: &mut Vm, a: &[Value], t: impl Into<BrokenDownTime>) -> NResult {
     Ok(vm.new_str(s))
 }
 
-/// The first of `transitions` that changes the offset (the database also
-/// records changes of only a zone's abbreviation or daylight saving flag).
-fn offset_change<'t>(
+/// Returns the first transition that changes the UTC offset (ignoring abbreviation-only transitions).
+fn find_offset_transition<'t>(
     vm: &Vm,
     tz: &tz::TimeZone,
     transitions: impl Iterator<Item = TimeZoneTransition<'t>>,
 ) -> Result<Option<Timestamp>, Ctl> {
     for t in transitions {
         vm.charge(1)?;
-        // Transitions fall on whole seconds, so a second before is still the previous period.
         let before = t.timestamp().checked_sub(SignedDuration::from_secs(1)).map(|b| tz.to_offset(b));
         if before.is_ok_and(|o| o != t.offset()) {
             return Ok(Some(t.timestamp()));
@@ -731,8 +666,9 @@ fn offset_change<'t>(
     Ok(None)
 }
 
-/// Temporal rounds an instant as if the time since the epoch were positive.
-fn as_if_positive(mode: RoundMode) -> RoundMode {
+/// Maps signed rounding modes (`Trunc`, `Expand`) to directional modes (`Floor`, `Ceil`) so
+/// negative pre-epoch timestamps round in the same direction as positive timestamps.
+fn positive_epoch_round_mode(mode: RoundMode) -> RoundMode {
     match mode {
         RoundMode::Trunc => RoundMode::Floor,
         RoundMode::Expand => RoundMode::Ceil,
@@ -742,8 +678,7 @@ fn as_if_positive(mode: RoundMode) -> RoundMode {
     }
 }
 
-/// Fails unless `spans` can be measured: years and months need a start.
-fn measurable(spans: &[jiff::Span], largest: Option<Unit>, rel: &Option<Zoned>) -> Result<(), Ctl> {
+fn require_relative_to(spans: &[jiff::Span], largest: Option<Unit>, rel: &Option<Zoned>) -> Result<(), Ctl> {
     let calendar = spans.iter().any(|s| s.get_years() != 0 || s.get_months() != 0) || matches!(largest, Some(Unit::Year | Unit::Month));
     if calendar && rel.is_none() {
         return Err(Ctl::fail("invalid", "a span with years or months needs `relative_to`"));
@@ -751,7 +686,6 @@ fn measurable(spans: &[jiff::Span], largest: Option<Unit>, rel: &Option<Zoned>) 
     Ok(())
 }
 
-/// `time.Stopwatch`: when it started, by the host's monotonic clock.
 struct Stopwatch(Monotonic);
 
 impl NativeObject for Stopwatch {
@@ -766,7 +700,6 @@ impl NativeObject for Stopwatch {
     }
 }
 
-/// The current time by the host's clock.
 fn now(vm: &Vm) -> Result<Timestamp, Ctl> {
     let nanos = match vm.host.clock.wall().duration_since(UNIX_EPOCH) {
         Ok(d) => i128::try_from(d.as_nanos()),
@@ -775,19 +708,14 @@ fn now(vm: &Vm) -> Result<Timestamp, Ctl> {
     nanos.ok().and_then(|n| Timestamp::from_nanosecond(n).ok()).ok_or_else(|| Ctl::internal("the system clock is out of range"))
 }
 
-/// Floor division of the nanoseconds since the epoch by `unit` nanoseconds.
-fn epoch(t: Timestamp, unit: i128) -> NResult {
+fn epoch_div(t: Timestamp, unit: i128) -> NResult {
     match i64::try_from(t.as_nanosecond().div_euclid(unit)) {
         Ok(n) => Ok(Value::Int(n)),
         Err(_) => Err(Ctl::fail("overflow", "the time is too far from 1970 for nanoseconds in an int")),
     }
 }
 
-// ----------------------------------------------------------------------
-// Registration
-
-/// Registers `natives` as methods `time.<ty>.<name>` for each type in `types`.
-fn methods(r: &mut Registry, types: &[&str], natives: &[(&str, NativeFn)]) {
+fn register_methods(r: &mut Registry, types: &[&str], natives: &[(&str, NativeFn)]) {
     for ty in types {
         for &(name, f) in natives {
             r.add_builtin(format!("time.{ty}.{name}"), f);
@@ -795,8 +723,8 @@ fn methods(r: &mut Registry, types: &[&str], natives: &[(&str, NativeFn)]) {
     }
 }
 
-const DATED: &[&str] = &["PlainDate", "PlainDateTime", "ZonedDateTime"];
-const TIMED: &[&str] = &["PlainTime", "PlainDateTime", "ZonedDateTime"];
+const DATE_TYPES: &[&str] = &["PlainDate", "PlainDateTime", "ZonedDateTime"];
+const TIME_TYPES: &[&str] = &["PlainTime", "PlainDateTime", "ZonedDateTime"];
 
 pub fn register(r: &mut Registry) {
     r.source("time", ModKind::Std, include_str!("time.sand"));
@@ -825,10 +753,9 @@ fn register_module(r: &mut Registry) {
     r.add_builtin("time.zone", |vm, a| {
         let name = vm.str(a[0]);
         vm.charge_bytes(name.len())?;
-        // Loading a zone's rules the first time parses them.
         vm.charge(64)?;
         let tz = parse_zone(name).map(TimeZone);
-        result(vm, tz, "not_found")
+        into_sand_result(vm, tz, "not_found")
     });
     r.add_builtin("time.local_zone", |vm, _| {
         let tz = match vm.host.time_zone.clone() {
@@ -853,99 +780,102 @@ fn register_module(r: &mut Registry) {
     r.add_builtin("time.midnight", |vm, _| Ok(vm.new_value(Time::midnight())));
     r.add_builtin("time.duration_span", |vm, a| {
         let s = jiff::Span::try_from(SignedDuration::from_nanos(a[0].as_int())).and_then(Span::new);
-        made(vm, s)
+        alloc_or_fail(vm, s)
     });
 
     r.add_builtin("time.date", |vm, a| {
-        let [y, m, d] = ints(a, 0);
+        let [y, m, d] = int_args(a, 0);
         let date = exact_date(y, m, d).ok_or_else(|| format!("no such date: {y:04}-{m:02}-{d:02}"));
-        result(vm, date, "invalid")
+        into_sand_result(vm, date, "invalid")
     });
     r.add_builtin("time.time", |vm, a| {
-        let parts: [i64; 6] = ints(a, 0);
+        let parts: [i64; 6] = int_args(a, 0);
         let [h, m, s, ..] = parts;
         let t = exact_time(parts).ok_or_else(|| format!("no such time: {h:02}:{m:02}:{s:02}"));
-        result(vm, t, "invalid")
+        into_sand_result(vm, t, "invalid")
     });
     r.add_builtin("time.datetime", |vm, a| {
-        let [y, m, d, h, mi, s] = ints(a, 0);
-        let dt = match (exact_date(y, m, d), exact_time(ints(a, 3))) {
+        let [y, m, d, h, mi, s] = int_args(a, 0);
+        let dt = match (exact_date(y, m, d), exact_time(int_args(a, 3))) {
             (Some(date), Some(time)) => Ok(date.to_datetime(time)),
             (None, _) => Err(format!("no such date: {y:04}-{m:02}-{d:02}")),
             (_, None) => Err(format!("no such time: {h:02}:{mi:02}:{s:02}")),
         };
-        result(vm, dt, "invalid")
+        into_sand_result(vm, dt, "invalid")
     });
     r.add_builtin("time.year_month", |vm, a| {
-        let [y, m] = ints(a, 0);
+        let [y, m] = int_args(a, 0);
         let ym = exact_date(y, m, 1).map(PlainYearMonth).ok_or_else(|| format!("no such month: {y:04}-{m:02}"));
-        result(vm, ym, "invalid")
+        into_sand_result(vm, ym, "invalid")
     });
     r.add_builtin("time.month_day", |vm, a| {
-        let [m, d] = ints(a, 0);
+        let [m, d] = int_args(a, 0);
         let md = exact_date(MONTH_DAY_YEAR.into(), m, d).map(PlainMonthDay).ok_or_else(|| format!("no such day: {m:02}-{d:02}"));
-        result(vm, md, "invalid")
+        into_sand_result(vm, md, "invalid")
     });
     r.add_builtin("time.span", |vm, a| {
-        let units: [i64; 10] = ints(a, 0);
+        let units: [i64; 10] = int_args(a, 0);
         if units.iter().any(|&u| u > 0) && units.iter().any(|&u| u < 0) {
             return Err(Ctl::fail("invalid", "the units of a span must not have different signs"));
         }
-        made(vm, build_span(units).and_then(Span::new))
+        alloc_or_fail(vm, build_span(units).and_then(Span::new))
     });
     r.add_builtin("time.TimeZone.id", |vm, a| {
-        let id = get::<TimeZone>(vm, a[0])?.to_string();
+        let id = extract_value::<TimeZone>(vm, a[0])?.to_string();
         Ok(vm.new_str(id))
     });
 }
 
-/// The component methods shared by several types.
 fn register_parts(r: &mut Registry) {
-    methods(
+    register_methods(
         r,
         &["PlainDate", "PlainDateTime", "ZonedDateTime", "PlainYearMonth"],
         &[
-            ("year", |vm, a| Ok(int(date(vm, a[0])?.year()))),
-            ("month", |vm, a| Ok(int(date(vm, a[0])?.month()))),
-            ("days_in_month", |vm, a| Ok(int(date(vm, a[0])?.days_in_month()))),
-            ("days_in_year", |vm, a| Ok(int(date(vm, a[0])?.days_in_year()))),
+            ("year", |vm, a| Ok(int_val(date(vm, a[0])?.year()))),
+            ("month", |vm, a| Ok(int_val(date(vm, a[0])?.month()))),
+            ("days_in_month", |vm, a| Ok(int_val(date(vm, a[0])?.days_in_month()))),
+            ("days_in_year", |vm, a| Ok(int_val(date(vm, a[0])?.days_in_year()))),
             ("in_leap_year", |vm, a| Ok(Value::Bool(date(vm, a[0])?.in_leap_year()))),
         ],
     );
-    methods(r, &["PlainDate", "PlainDateTime", "ZonedDateTime", "PlainMonthDay"], &[("day", |vm, a| Ok(int(date(vm, a[0])?.day())))]);
-    methods(r, &["PlainMonthDay"], &[("month", |vm, a| Ok(int(date(vm, a[0])?.month())))]);
-    methods(
+    register_methods(
         r,
-        DATED,
+        &["PlainDate", "PlainDateTime", "ZonedDateTime", "PlainMonthDay"],
+        &[("day", |vm, a| Ok(int_val(date(vm, a[0])?.day())))],
+    );
+    register_methods(r, &["PlainMonthDay"], &[("month", |vm, a| Ok(int_val(date(vm, a[0])?.month())))]);
+    register_methods(
+        r,
+        DATE_TYPES,
         &[
-            ("day_of_week", |vm, a| Ok(int(date(vm, a[0])?.weekday().to_monday_one_offset()))),
-            ("day_of_year", |vm, a| Ok(int(date(vm, a[0])?.day_of_year()))),
-            ("week_of_year", |vm, a| Ok(int(date(vm, a[0])?.iso_week_date().week()))),
-            ("year_of_week", |vm, a| Ok(int(date(vm, a[0])?.iso_week_date().year()))),
+            ("day_of_week", |vm, a| Ok(int_val(date(vm, a[0])?.weekday().to_monday_one_offset()))),
+            ("day_of_year", |vm, a| Ok(int_val(date(vm, a[0])?.day_of_year()))),
+            ("week_of_year", |vm, a| Ok(int_val(date(vm, a[0])?.iso_week_date().week()))),
+            ("year_of_week", |vm, a| Ok(int_val(date(vm, a[0])?.iso_week_date().year()))),
         ],
     );
-    methods(
+    register_methods(
         r,
-        TIMED,
+        TIME_TYPES,
         &[
-            ("hour", |vm, a| Ok(int(time_of(vm, a[0])?.hour()))),
-            ("minute", |vm, a| Ok(int(time_of(vm, a[0])?.minute()))),
-            ("second", |vm, a| Ok(int(time_of(vm, a[0])?.second()))),
-            ("millisecond", |vm, a| Ok(int(time_of(vm, a[0])?.millisecond()))),
-            ("microsecond", |vm, a| Ok(int(time_of(vm, a[0])?.microsecond()))),
-            ("nanosecond", |vm, a| Ok(int(time_of(vm, a[0])?.nanosecond()))),
+            ("hour", |vm, a| Ok(int_val(time_of(vm, a[0])?.hour()))),
+            ("minute", |vm, a| Ok(int_val(time_of(vm, a[0])?.minute()))),
+            ("second", |vm, a| Ok(int_val(time_of(vm, a[0])?.second()))),
+            ("millisecond", |vm, a| Ok(int_val(time_of(vm, a[0])?.millisecond()))),
+            ("microsecond", |vm, a| Ok(int_val(time_of(vm, a[0])?.microsecond()))),
+            ("nanosecond", |vm, a| Ok(int_val(time_of(vm, a[0])?.nanosecond()))),
         ],
     );
-    methods(
+    register_methods(
         r,
         &["Instant", "ZonedDateTime"],
         &[
-            ("epoch_seconds", |vm, a| epoch(instant(vm, a[0])?, 1_000_000_000)),
-            ("epoch_millis", |vm, a| epoch(instant(vm, a[0])?, 1_000_000)),
-            ("epoch_nanos", |vm, a| epoch(instant(vm, a[0])?, 1)),
+            ("epoch_seconds", |vm, a| epoch_div(instant(vm, a[0])?, 1_000_000_000)),
+            ("epoch_millis", |vm, a| epoch_div(instant(vm, a[0])?, 1_000_000)),
+            ("epoch_nanos", |vm, a| epoch_div(instant(vm, a[0])?, 1)),
         ],
     );
-    methods(
+    register_methods(
         r,
         &["ZonedDateTime", "PlainDateTime"],
         &[
@@ -965,26 +895,27 @@ fn register_instant(r: &mut Registry) {
     r.add_builtin("time.Instant.parse", |vm, a| parse_with(vm, a, BrokenDownTime::to_timestamp));
     r.add_builtin("time.Instant.from_epoch_seconds", |vm, a| {
         let t = Timestamp::from_second(a[0].as_int());
-        made(vm, t)
+        alloc_or_fail(vm, t)
     });
     r.add_builtin("time.Instant.from_epoch_millis", |vm, a| {
         let t = Timestamp::from_millisecond(a[0].as_int());
-        made(vm, t)
+        alloc_or_fail(vm, t)
     });
     r.add_builtin("time.Instant.from_epoch_nanos", |vm, a| {
         let t = Timestamp::from_nanosecond(a[0].as_int().into());
-        made(vm, t)
+        alloc_or_fail(vm, t)
     });
     r.add_builtin("time.Instant.add", |vm, a| {
         let t = instant(vm, a[0])?.checked_add(SignedDuration::from_nanos(a[1].as_int()));
-        made(vm, t)
+        alloc_or_fail(vm, t)
     });
-    r.add_builtin("time.Instant.since", |vm, a| dur(instant(vm, a[0])?.duration_since(instant(vm, a[1])?)));
+    r.add_builtin("time.Instant.since", |vm, a| duration_val(instant(vm, a[0])?.duration_since(instant(vm, a[1])?)));
     r.add_builtin("time.Instant.round", |vm, a| {
-        let (smallest, increment, mode) = rounding(vm, a, 1)?;
-        clock_unit(smallest, "an Instant")?;
-        let t = instant(vm, a[0])?.round(TimestampRound::new().smallest(smallest).increment(increment).mode(as_if_positive(mode)));
-        made(vm, t)
+        let (smallest, increment, mode) = rounding_args(vm, a, 1)?;
+        check_clock_unit(smallest, "an Instant")?;
+        let t = instant(vm, a[0])?
+            .round(TimestampRound::new().smallest(smallest).increment(increment).mode(positive_epoch_round_mode(mode)));
+        alloc_or_fail(vm, t)
     });
     r.add_builtin("time.Instant.to_zoned_datetime", |vm, a| {
         let z = instant(vm, a[0])?.to_zoned(zone(vm, a[1])?);
@@ -1005,18 +936,18 @@ fn register_zoned(r: &mut Registry) {
         } else {
             strtime::parse(format, text)
                 .and_then(|b| b.to_zoned_with(&DB))
-                .map_err(|_| unformatted(text, "ZonedDateTime", format))
+                .map_err(|_| format_parse_error(text, "ZonedDateTime", format))
                 .and_then(|z| {
-                    supported(z.time_zone())?;
+                    check_supported_zone(z.time_zone())?;
                     Ok(ZonedDateTime(z))
                 })
         };
-        result(vm, z, "parse")
+        into_sand_result(vm, z, "parse")
     });
     r.add_builtin("time.ZonedDateTime.hours_in_day", |vm, a| {
         let z = zoned(vm, a[0])?;
-        let start = z.start_of_day().map_err(failure)?;
-        let end = z.date().tomorrow().and_then(|d| d.to_zoned(z.time_zone().clone())).map_err(failure)?;
+        let start = z.start_of_day().map_err(jiff_error)?;
+        let end = z.date().tomorrow().and_then(|d| d.to_zoned(z.time_zone().clone())).map_err(jiff_error)?;
         Ok(Value::Float(end.timestamp().duration_since(start.timestamp()).as_secs_f64() / 3600.0))
     });
     r.add_builtin("time.ZonedDateTime.offset", |vm, a| Ok(Value::Dur(i64::from(zoned(vm, a[0])?.offset().seconds()) * 1_000_000_000)));
@@ -1025,15 +956,15 @@ fn register_zoned(r: &mut Registry) {
         Ok(vm.new_value(TimeZone(tz)))
     });
     r.add_builtin("time.ZonedDateTime.with", |vm, a| {
-        let [y, m, d] = ints(a, 1);
-        let (date, time) = (constrain_date(y, m, d)?, constrain_time(ints(a, 4))?);
+        let [y, m, d] = int_args(a, 1);
+        let (date, time) = (constrain_date(y, m, d)?, constrain_time(int_args(a, 4))?);
         let z = zoned(vm, a[0])?.with().date(date).time(time).disambiguation(disambiguation(vm, a[10])?).build();
-        made(vm, z.map(ZonedDateTime))
+        alloc_or_fail(vm, z.map(ZonedDateTime))
     });
     r.add_builtin("time.ZonedDateTime.with_plain_time", |vm, a| {
         let z = zoned(vm, a[0])?;
         let z = z.date().to_datetime(time_of(vm, a[1])?).to_zoned(z.time_zone().clone());
-        made(vm, z.map(ZonedDateTime))
+        alloc_or_fail(vm, z.map(ZonedDateTime))
     });
     r.add_builtin("time.ZonedDateTime.with_time_zone", |vm, a| {
         let z = zoned(vm, a[0])?.with_time_zone(zone(vm, a[1])?);
@@ -1041,31 +972,34 @@ fn register_zoned(r: &mut Registry) {
     });
     r.add_builtin("time.ZonedDateTime.add", |vm, a| {
         let z = zoned(vm, a[0])?.checked_add(span(vm, a[1])?);
-        made(vm, z.map(ZonedDateTime))
+        alloc_or_fail(vm, z.map(ZonedDateTime))
     });
     fn diff(vm: &mut Vm, a: &[Value], since: bool) -> NResult {
-        let (largest, smallest, increment, mode) = difference(vm, a)?;
+        let (largest, smallest, increment, mode) = difference_args(vm, a)?;
         let (z, other) = (zoned(vm, a[0])?, zoned(vm, a[1])?);
         let options = ZonedDifference::new(&other).largest(largest).smallest(smallest).increment(increment).mode(mode);
         let s = if since { z.since(options) } else { z.until(options) };
-        made(vm, s.and_then(Span::new))
+        alloc_or_fail(vm, s.and_then(Span::new))
     }
     r.add_builtin("time.ZonedDateTime.until", |vm, a| diff(vm, a, false));
     r.add_builtin("time.ZonedDateTime.since", |vm, a| diff(vm, a, true));
     r.add_builtin("time.ZonedDateTime.round", |vm, a| {
-        let (smallest, increment, mode) = rounding(vm, a, 1)?;
+        let (smallest, increment, mode) = rounding_args(vm, a, 1)?;
         let z = zoned(vm, a[0])?.round(ZonedRound::new().smallest(smallest).increment(increment).mode(mode));
-        made(vm, z.map(ZonedDateTime))
+        alloc_or_fail(vm, z.map(ZonedDateTime))
     });
     r.add_builtin("time.ZonedDateTime.start_of_day", |vm, a| {
         let z = zoned(vm, a[0])?.start_of_day();
-        made(vm, z.map(ZonedDateTime))
+        alloc_or_fail(vm, z.map(ZonedDateTime))
     });
     fn transition(vm: &mut Vm, a: &[Value], next: bool) -> NResult {
         let z = zoned(vm, a[0])?;
         let tz = z.time_zone();
-        let t =
-            if next { offset_change(vm, tz, tz.following(z.timestamp()))? } else { offset_change(vm, tz, tz.preceding(z.timestamp()))? };
+        let t = if next {
+            find_offset_transition(vm, tz, tz.following(z.timestamp()))?
+        } else {
+            find_offset_transition(vm, tz, tz.preceding(z.timestamp()))?
+        };
         let t = t.map(|t| vm.new_value(ZonedDateTime(t.to_zoned(tz.clone()))));
         Ok(vm.option(t))
     }
@@ -1088,8 +1022,8 @@ fn register_zoned(r: &mut Registry) {
 fn register_datetime(r: &mut Registry) {
     r.add_builtin("time.PlainDateTime.parse", |vm, a| parse_with(vm, a, BrokenDownTime::to_datetime));
     r.add_builtin("time.PlainDateTime.with", |vm, a| {
-        let [y, m, d] = ints(a, 1);
-        let dt = constrain_date(y, m, d)?.to_datetime(constrain_time(ints(a, 4))?);
+        let [y, m, d] = int_args(a, 1);
+        let dt = constrain_date(y, m, d)?.to_datetime(constrain_time(int_args(a, 4))?);
         Ok(vm.new_value(dt))
     });
     r.add_builtin("time.PlainDateTime.with_plain_time", |vm, a| {
@@ -1098,25 +1032,25 @@ fn register_datetime(r: &mut Registry) {
     });
     r.add_builtin("time.PlainDateTime.add_span", |vm, a| {
         let dt = datetime(vm, a[0])?.checked_add(span(vm, a[1])?);
-        made(vm, dt)
+        alloc_or_fail(vm, dt)
     });
     fn diff(vm: &mut Vm, a: &[Value], since: bool) -> NResult {
-        let (largest, smallest, increment, mode) = difference(vm, a)?;
+        let (largest, smallest, increment, mode) = difference_args(vm, a)?;
         let (dt, other) = (datetime(vm, a[0])?, datetime(vm, a[1])?);
         let options = DateTimeDifference::new(other).largest(largest).smallest(smallest).increment(increment).mode(mode);
         let s = if since { dt.since(options) } else { dt.until(options) };
-        made(vm, s.and_then(Span::new))
+        alloc_or_fail(vm, s.and_then(Span::new))
     }
     r.add_builtin("time.PlainDateTime.until", |vm, a| diff(vm, a, false));
     r.add_builtin("time.PlainDateTime.since", |vm, a| diff(vm, a, true));
     r.add_builtin("time.PlainDateTime.round", |vm, a| {
-        let (smallest, increment, mode) = rounding(vm, a, 1)?;
+        let (smallest, increment, mode) = rounding_args(vm, a, 1)?;
         let dt = datetime(vm, a[0])?.round(DateTimeRound::new().smallest(smallest).increment(increment).mode(mode));
-        made(vm, dt)
+        alloc_or_fail(vm, dt)
     });
     r.add_builtin("time.PlainDateTime.to_zoned_datetime", |vm, a| {
         let z = zone(vm, a[1])?.to_ambiguous_zoned(datetime(vm, a[0])?).disambiguate(disambiguation(vm, a[2])?);
-        made(vm, z.map(ZonedDateTime))
+        alloc_or_fail(vm, z.map(ZonedDateTime))
     });
     r.add_builtin("time.PlainDateTime.format", |vm, a| {
         let dt = datetime(vm, a[0])?;
@@ -1127,20 +1061,20 @@ fn register_datetime(r: &mut Registry) {
 fn register_date(r: &mut Registry) {
     r.add_builtin("time.PlainDate.parse", |vm, a| parse_with(vm, a, BrokenDownTime::to_date));
     r.add_builtin("time.PlainDate.with", |vm, a| {
-        let [y, m, d] = ints(a, 1);
+        let [y, m, d] = int_args(a, 1);
         let d = constrain_date(y, m, d)?;
         Ok(vm.new_value(d))
     });
     r.add_builtin("time.PlainDate.add_span", |vm, a| {
         let d = date(vm, a[0])?.checked_add(span(vm, a[1])?);
-        made(vm, d)
+        alloc_or_fail(vm, d)
     });
     fn diff(vm: &mut Vm, a: &[Value], since: bool) -> NResult {
-        let (largest, smallest, increment, mode) = difference(vm, a)?;
+        let (largest, smallest, increment, mode) = difference_args(vm, a)?;
         let (d, other) = (date(vm, a[0])?, date(vm, a[1])?);
         let options = DateDifference::new(other).largest(largest).smallest(smallest).increment(increment).mode(mode);
         let s = if since { d.since(options) } else { d.until(options) };
-        made(vm, s.and_then(Span::new))
+        alloc_or_fail(vm, s.and_then(Span::new))
     }
     r.add_builtin("time.PlainDate.until", |vm, a| diff(vm, a, false));
     r.add_builtin("time.PlainDate.since", |vm, a| diff(vm, a, true));
@@ -1150,7 +1084,7 @@ fn register_date(r: &mut Registry) {
     });
     r.add_builtin("time.PlainDate.to_zoned_datetime", |vm, a| {
         let z = date(vm, a[0])?.to_zoned(zone(vm, a[1])?);
-        made(vm, z.map(ZonedDateTime))
+        alloc_or_fail(vm, z.map(ZonedDateTime))
     });
     r.add_builtin("time.PlainDate.to_plain_year_month", |vm, a| {
         let d = date(vm, a[0])?.first_of_month();
@@ -1170,19 +1104,19 @@ fn register_date(r: &mut Registry) {
 fn register_time(r: &mut Registry) {
     r.add_builtin("time.PlainTime.parse", |vm, a| parse_with(vm, a, BrokenDownTime::to_time));
     r.add_builtin("time.PlainTime.with", |vm, a| {
-        let t = constrain_time(ints(a, 1))?;
+        let t = constrain_time(int_args(a, 1))?;
         Ok(vm.new_value(t))
     });
     r.add_builtin("time.PlainTime.add_span", |vm, a| {
         let t = time_of(vm, a[0])?.wrapping_add(span(vm, a[1])?);
         Ok(vm.new_value(t))
     });
-    r.add_builtin("time.PlainTime.since", |vm, a| dur(time_of(vm, a[0])?.duration_since(time_of(vm, a[1])?)));
+    r.add_builtin("time.PlainTime.since", |vm, a| duration_val(time_of(vm, a[0])?.duration_since(time_of(vm, a[1])?)));
     r.add_builtin("time.PlainTime.round", |vm, a| {
-        let (smallest, increment, mode) = rounding(vm, a, 1)?;
-        clock_unit(smallest, "a PlainTime")?;
+        let (smallest, increment, mode) = rounding_args(vm, a, 1)?;
+        check_clock_unit(smallest, "a PlainTime")?;
         let t = time_of(vm, a[0])?.round(TimeRound::new().smallest(smallest).increment(increment).mode(mode));
-        made(vm, t)
+        alloc_or_fail(vm, t)
     });
     r.add_builtin("time.PlainTime.format", |vm, a| {
         let t = time_of(vm, a[0])?;
@@ -1193,7 +1127,7 @@ fn register_time(r: &mut Registry) {
 fn register_year_month(r: &mut Registry) {
     r.add_builtin("time.PlainYearMonth.parse", parse::<PlainYearMonth>);
     r.add_builtin("time.PlainYearMonth.with", |vm, a| {
-        let [y, m] = ints(a, 1);
+        let [y, m] = int_args(a, 1);
         let d = constrain_date(y, m, 1)?;
         Ok(vm.new_value(PlainYearMonth(d)))
     });
@@ -1203,7 +1137,7 @@ fn register_year_month(r: &mut Registry) {
             return Err(Ctl::fail("invalid", format!("a PlainYearMonth can only add years and months, not {s}")));
         }
         let d = date(vm, a[0])?.checked_add(s);
-        made(vm, d.map(PlainYearMonth))
+        alloc_or_fail(vm, d.map(PlainYearMonth))
     });
     r.add_builtin("time.PlainYearMonth.until", |vm, a| {
         let largest = unit(vm, a[2])?;
@@ -1211,7 +1145,7 @@ fn register_year_month(r: &mut Registry) {
             return Err(Ctl::fail("invalid", "the largest unit between months must be years or months"));
         }
         let s = date(vm, a[0])?.until(DateDifference::new(date(vm, a[1])?).largest(largest).smallest(Unit::Month));
-        made(vm, s.and_then(Span::new))
+        alloc_or_fail(vm, s.and_then(Span::new))
     });
     r.add_builtin("time.PlainYearMonth.to_plain_date", |vm, a| {
         let d = date(vm, a[0])?;
@@ -1221,7 +1155,7 @@ fn register_year_month(r: &mut Registry) {
 
     r.add_builtin("time.PlainMonthDay.parse", parse::<PlainMonthDay>);
     r.add_builtin("time.PlainMonthDay.with", |vm, a| {
-        let [m, d] = ints(a, 1);
+        let [m, d] = int_args(a, 1);
         let d = constrain_date(MONTH_DAY_YEAR.into(), m, d)?;
         Ok(vm.new_value(PlainMonthDay(d)))
     });
@@ -1234,67 +1168,67 @@ fn register_year_month(r: &mut Registry) {
 
 fn register_span(r: &mut Registry) {
     r.add_builtin("time.Span.parse", parse::<Span>);
-    methods(
+    register_methods(
         r,
         &["Span"],
         &[
-            ("years", |vm, a| Ok(int(span(vm, a[0])?.get_years()))),
-            ("months", |vm, a| Ok(int(span(vm, a[0])?.get_months()))),
-            ("weeks", |vm, a| Ok(int(span(vm, a[0])?.get_weeks()))),
-            ("days", |vm, a| Ok(int(span(vm, a[0])?.get_days()))),
-            ("hours", |vm, a| Ok(int(span(vm, a[0])?.get_hours()))),
-            ("minutes", |vm, a| Ok(int(span(vm, a[0])?.get_minutes()))),
-            ("seconds", |vm, a| Ok(int(span(vm, a[0])?.get_seconds()))),
-            ("milliseconds", |vm, a| Ok(int(span(vm, a[0])?.get_milliseconds()))),
-            ("microseconds", |vm, a| Ok(int(span(vm, a[0])?.get_microseconds()))),
-            ("nanoseconds", |vm, a| Ok(int(span(vm, a[0])?.get_nanoseconds()))),
-            ("sign", |vm, a| Ok(int(span(vm, a[0])?.signum()))),
+            ("years", |vm, a| Ok(int_val(span(vm, a[0])?.get_years()))),
+            ("months", |vm, a| Ok(int_val(span(vm, a[0])?.get_months()))),
+            ("weeks", |vm, a| Ok(int_val(span(vm, a[0])?.get_weeks()))),
+            ("days", |vm, a| Ok(int_val(span(vm, a[0])?.get_days()))),
+            ("hours", |vm, a| Ok(int_val(span(vm, a[0])?.get_hours()))),
+            ("minutes", |vm, a| Ok(int_val(span(vm, a[0])?.get_minutes()))),
+            ("seconds", |vm, a| Ok(int_val(span(vm, a[0])?.get_seconds()))),
+            ("milliseconds", |vm, a| Ok(int_val(span(vm, a[0])?.get_milliseconds()))),
+            ("microseconds", |vm, a| Ok(int_val(span(vm, a[0])?.get_microseconds()))),
+            ("nanoseconds", |vm, a| Ok(int_val(span(vm, a[0])?.get_nanoseconds()))),
+            ("sign", |vm, a| Ok(int_val(span(vm, a[0])?.signum()))),
             ("is_zero", |vm, a| Ok(Value::Bool(span(vm, a[0])?.is_zero()))),
             ("negated", |vm, a| {
                 let s = span(vm, a[0])?.negate();
-                made(vm, Span::new(s))
+                alloc_or_fail(vm, Span::new(s))
             }),
             ("abs", |vm, a| {
                 let s = span(vm, a[0])?.abs();
-                made(vm, Span::new(s))
+                alloc_or_fail(vm, Span::new(s))
             }),
         ],
     );
     r.add_builtin("time.Span.add_span", |vm, a| {
         let (s, other, rel) = (span(vm, a[0])?, span(vm, a[1])?, opt_zoned(vm, a[2])?);
-        measurable(&[s, other], None, &rel)?;
-        let sum = s.checked_add(SpanArithmetic::from((other, relative(&rel))));
-        made(vm, sum.and_then(Span::new))
+        require_relative_to(&[s, other], None, &rel)?;
+        let sum = s.checked_add(SpanArithmetic::from((other, span_relative_to(&rel))));
+        alloc_or_fail(vm, sum.and_then(Span::new))
     });
     r.add_builtin("time.Span.round", |vm, a| {
-        let (smallest, increment, mode) = (unit(vm, a[1])?, increment(a[3])?, mode(vm, a[4])?);
+        let (smallest, increment, mode) = (unit(vm, a[1])?, parse_increment(a[3])?, mode(vm, a[4])?);
         let largest = vm.as_option(a[2]).map(|u| unit(vm, u)).transpose()?;
         let (s, rel) = (span(vm, a[0])?, opt_zoned(vm, a[5])?);
-        measurable(&[s], largest.or(Some(smallest)), &rel)?;
-        let mut options = SpanRound::new().smallest(smallest).increment(increment).mode(mode).relative(relative(&rel));
+        require_relative_to(&[s], largest.or(Some(smallest)), &rel)?;
+        let mut options = SpanRound::new().smallest(smallest).increment(increment).mode(mode).relative(span_relative_to(&rel));
         if let Some(largest) = largest {
             options = options.largest(largest);
         }
-        made(vm, s.round(options).and_then(Span::new))
+        alloc_or_fail(vm, s.round(options).and_then(Span::new))
     });
     r.add_builtin("time.Span.total", |vm, a| {
         let (s, unit, rel) = (span(vm, a[0])?, unit(vm, a[1])?, opt_zoned(vm, a[2])?);
-        measurable(&[s], Some(unit), &rel)?;
-        s.total((unit, relative(&rel))).map(Value::Float).map_err(failure)
+        require_relative_to(&[s], Some(unit), &rel)?;
+        s.total((unit, span_relative_to(&rel))).map(Value::Float).map_err(jiff_error)
     });
     r.add_builtin("time.Span.compare", |vm, a| {
         let (s, other, rel) = (span(vm, a[0])?, span(vm, a[1])?, opt_zoned(vm, a[2])?);
         if span_units(&s) == span_units(&other) {
-            return Ok(int(0));
+            return Ok(int_val(0));
         }
-        measurable(&[s, other], None, &rel)?;
-        let o = s.compare((other, relative(&rel))).map_err(failure)?;
-        Ok(int(o as i8))
+        require_relative_to(&[s, other], None, &rel)?;
+        let o = s.compare((other, span_relative_to(&rel))).map_err(jiff_error)?;
+        Ok(int_val(o as i8))
     });
     r.add_builtin("time.Span.to_duration", |vm, a| {
         let (s, rel) = (span(vm, a[0])?, opt_zoned(vm, a[1])?);
-        measurable(&[s], None, &rel)?;
-        dur(s.to_duration(relative(&rel)).map_err(failure)?)
+        require_relative_to(&[s], None, &rel)?;
+        duration_val(s.to_duration(span_relative_to(&rel)).map_err(jiff_error)?)
     });
 }
 
@@ -1302,7 +1236,6 @@ fn register_span(r: &mut Registry) {
 mod tests {
     use super::*;
 
-    /// Every type's text form reads back as the same value.
     fn round_trip<T: ValueType + fmt::Debug>(text: &str) {
         let x = T::parse(text).unwrap_or_else(|e| panic!("{text}: {e}"));
         assert_eq!(x.to_string(), text);
@@ -1328,8 +1261,7 @@ mod tests {
         assert!(PlainMonthDay::parse("+1-05").is_err());
     }
 
-    /// Every value survives being packed.
-    fn packs<T: ValueType + fmt::Debug>(xs: &[T]) {
+    fn assert_pack_round_trip<T: ValueType + fmt::Debug>(xs: &[T]) {
         let p = T::PACKING.expect("a packed type");
         for x in xs {
             assert_eq!(&(p.unpack)((p.pack)(x)), x);
@@ -1340,22 +1272,22 @@ mod tests {
     fn packed_values_unpack_equal() {
         let d = |y, m, d| Date::new(y, m, d).unwrap();
         let t = |h, m, s, ns| Time::new(h, m, s, ns).unwrap();
-        packs(&[
+        assert_pack_round_trip(&[
             Timestamp::MIN,
             Timestamp::MAX,
             Timestamp::UNIX_EPOCH,
             Timestamp::new(-1, -1).unwrap(),
             Timestamp::new(1, 999_999_999).unwrap(),
         ]);
-        packs(&[d(-9999, 1, 1), d(9999, 12, 31), d(1970, 1, 1), d(-1, 2, 28)]);
-        packs(&[t(0, 0, 0, 0), t(23, 59, 59, 999_999_999)]);
-        packs(&[DateTime::MIN, DateTime::MAX, d(2024, 2, 29).to_datetime(t(13, 5, 9, 1))]);
-        packs(&[PlainYearMonth::new(-9999, 1).unwrap(), PlainYearMonth::new(9999, 12).unwrap()]);
-        packs(&[PlainMonthDay::new(2, 29).unwrap(), PlainMonthDay::new(12, 31).unwrap()]);
+        assert_pack_round_trip(&[d(-9999, 1, 1), d(9999, 12, 31), d(1970, 1, 1), d(-1, 2, 28)]);
+        assert_pack_round_trip(&[t(0, 0, 0, 0), t(23, 59, 59, 999_999_999)]);
+        assert_pack_round_trip(&[DateTime::MIN, DateTime::MAX, d(2024, 2, 29).to_datetime(t(13, 5, 9, 1))]);
+        assert_pack_round_trip(&[PlainYearMonth::new(-9999, 1).unwrap(), PlainYearMonth::new(9999, 12).unwrap()]);
+        assert_pack_round_trip(&[PlainMonthDay::new(2, 29).unwrap(), PlainMonthDay::new(12, 31).unwrap()]);
     }
 
     #[test]
-    fn spans_balance_units_below_a_second() {
+    fn spans_normalize_subsecond_units() {
         let spans = [
             jiff::Span::new().milliseconds(1500),
             jiff::Span::new().seconds(1).milliseconds(500),
@@ -1372,7 +1304,7 @@ mod tests {
     }
 
     #[test]
-    fn only_zones_with_text_that_reads_back_are_accepted() {
+    fn unsupported_zone_formats_are_rejected() {
         for name in ["America/New_York", "UTC", "+05:30", "-00:01"] {
             assert!(parse_zone(name).is_ok(), "{name}");
         }
@@ -1382,8 +1314,8 @@ mod tests {
     }
 
     #[test]
-    fn host_zones_take_the_built_in_rules_of_their_name() {
-        // A TZif file of one zone fixed at +09:00 (JST).
+    fn host_zones_use_bundled_iana_rules() {
+        // Minimal TZif v1 header for a fixed +09:00 (JST) zone.
         let mut tzif = b"TZif".to_vec();
         tzif.extend([0; 16]);
         for count in [0u32, 0, 0, 0, 1, 4] {
@@ -1399,7 +1331,7 @@ mod tests {
     }
 
     #[test]
-    fn zones_compare_by_identity_of_the_zone() {
+    fn zones_are_compared_by_zone_id() {
         let at = |zone: &str| ZonedDateTime(Timestamp::UNIX_EPOCH.to_zoned(parse_zone(zone).unwrap()));
         assert_eq!(at("America/New_York"), at("america/new_york"));
         assert_eq!(at("+05:30"), at("+05:30"));

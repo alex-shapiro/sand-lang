@@ -89,7 +89,6 @@ const hooks = {
 function engineFor(sandbox, engineHooks = {}) {
   const options = engineOptions(sandbox);
   const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  // A zone newer than the engine's database leaves scripts in UTC.
   if (isTimeZone(zone)) options.timeZone = zone;
   try {
     return { engine: new Engine(options, engineHooks) };

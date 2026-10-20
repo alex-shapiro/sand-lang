@@ -974,7 +974,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                 self.b.meter.charge_bytes(key.len())?;
                 let v = parse(&key).map_err(|msg| self.fail(&format!("invalid map key `{key}`: {msg}")))?;
                 let Some(x) = v.value() else { return Err(Error::Ctl(Ctl::internal("json.decode: not a value"))) };
-                // Equal values have the same text, which identifies the key.
+                // Staged object keys are deduplicated by their canonical text.
                 let (hash, text) = (x.value_hash(), x.text());
                 return Ok((self.b.st.alloc(v), hash, Some(Cow::Owned(text))));
             }

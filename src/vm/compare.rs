@@ -1009,10 +1009,8 @@ pub fn values_le_metered(prog: &Program, heap: &Heap, budget: &impl Budget, a: V
     })
 }
 
-/// Sorts a list whose elements are all packed values of one type whose bits
-/// order as its values do (see `Packing::ordered`) by their bits, without
-/// the generic comparator; `None` for other lists. Charges as
-/// [`try_sort_numbers`] does.
+/// If all elements in `v` have the same packed value type with `ordered_bits`,
+/// sorts `v` by its packed bits. Returns `None` otherwise.
 pub fn try_sort_packed(v: &mut [Value], heap: &Heap, budget: &impl Budget) -> Option<Result<(), Ctl>> {
     let packed = |x: &Value| match x {
         Value::Obj(h) => match heap.obj(*h) {
@@ -1022,7 +1020,7 @@ pub fn try_sort_packed(v: &mut [Value], heap: &Heap, budget: &impl Budget) -> Op
         _ => None,
     };
     let (first, _) = packed(v.first()?)?;
-    if !first.ordered_bits || !v.iter().all(|x| packed(x).is_some_and(|(t, _)| t.same(first))) {
+    if !first.ordered_bits || !v.iter().all(|x| packed(x).is_some_and(|(t, _)| t.is_same_type(first))) {
         return None;
     }
     let key = |x: Value| (packed(&x).map_or([0; 2], |(_, bits)| bits), x);

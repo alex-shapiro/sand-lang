@@ -42,7 +42,7 @@ print(t.add(36h) > t)
 2024-02-29T13:15:00Z
 true
 
-=== epoch nanoseconds outside the range of an int fail
+=== epoch nanoseconds outside the range of an int
 import time
 print(time.Instant.parse("2300-01-01T00:00:00Z")?.epoch_seconds())
 print(time.Instant.parse("2300-01-01T00:00:00Z")?.epoch_nanos())
@@ -51,7 +51,7 @@ print(time.Instant.parse("2300-01-01T00:00:00Z")?.epoch_nanos())
 --- fail
 overflow
 
-=== instants beyond the year 9999 fail
+=== instants beyond the year 9999
 import time
 print(time.Instant.from_epoch_seconds(1000000000000))
 --- fail
@@ -77,7 +77,7 @@ print(time.date(2024, 13, 1).is_err())
 Err(Error { kind: "invalid", message: "no such date: 2023-02-29" })
 true
 
-=== date arithmetic clamps to the end of the month
+=== date arithmetic and end-of-month clamping
 import time
 from time import span
 let d = time.date(2024, 1, 31)?
@@ -126,7 +126,7 @@ P13M
 P13M
 395
 
-=== date differences take no time units
+=== date differences with time units
 import time
 let a = time.date(2024, 1, 1)?
 print(a.until(a, smallest: time.Unit.Hour))
@@ -313,7 +313,7 @@ P18M
 true
 Err(Error { kind: "invalid", message: "no such day: 02-30" })
 
-=== year-months add only years and months
+=== adding sub-month units to PlainYearMonth
 import time
 print(time.year_month(2024, 1)?.add(time.span(days: 1)))
 --- fail
@@ -380,19 +380,19 @@ P2M
 1d
 23h
 
-=== spans with months need a start
+=== spans with months require relative_to
 import time
 print(time.span(months: 1).total(time.Unit.Day))
 --- fail
 invalid
 
-=== span units must share a sign
+=== span units cannot have mixed signs
 import time
 print(time.span(hours: 1, minutes: -30))
 --- fail
 invalid: the units of a span must not have different signs
 
-=== values compare, sort and hash by value
+=== comparing, sorting, and hashing value types
 import time
 let dates = [time.date(2024, 5, 1)?, time.date(2024, 1, 31)?, time.date(2023, 12, 25)?]
 print(dates.sorted())
@@ -515,7 +515,7 @@ true
 true
 true
 
-=== span text reads back as an equal span
+=== span text round-trip
 import time
 import json
 from time import span, Span
@@ -532,7 +532,7 @@ print(counts[span(seconds: 1, milliseconds: 500)])
 (PT1H1S, true, true)
 1
 
-=== maps keyed by value types decode
+=== decoding maps with value-type keys
 import time
 import json
 let m = [time.date(2024, 2, 29)?: 1, time.date(2023, 1, 1)?: 2]
@@ -547,7 +547,7 @@ true
 [America/New_York: 2]
 true
 
-=== zones whose text would not read back are rejected
+=== unsupported time zone formats are rejected
 import time
 print(time.zone("+05:30:15").is_err())
 print(time.zone("EST5EDT,M3.2.0,M11.1.0").is_err())
@@ -559,7 +559,7 @@ true
 true
 -08:00
 
-=== transitions skip records that keep the offset
+=== transitions only include offset changes
 import time
 let london = time.zone("Europe/London")?
 let z = time.datetime(1968, 1, 1)?.to_zoned_datetime(london)
@@ -575,7 +575,7 @@ true
 None
 25.0
 
-=== instants round as if the time since the epoch were positive
+=== rounding pre-epoch instants
 import time
 from time import Unit, RoundingMode
 let t = time.Instant.parse("1969-12-31T23:59:59.5Z")?
@@ -585,7 +585,7 @@ print(t.round(Unit.Second))
 1969-12-31T23:59:59Z
 1970-01-01T00:00:00Z
 
-=== spans without a start
+=== spans without relative_to
 import time
 from time import span, Unit
 print(span(weeks: 1).total(Unit.Day))
@@ -597,13 +597,13 @@ print(span(years: 1).total(Unit.Day))
 --- fail
 invalid: a span with years or months needs `relative_to`
 
-=== results beyond the supported range fail with kind overflow
+=== overflow beyond the supported range
 import time
 print(time.datetime(9999, 12, 31, hour: 23)?.round(time.Unit.Day))
 --- fail
 overflow
 
-=== spans balance units below a second
+=== sub-second span normalization
 import time
 import json
 from time import span, Span
@@ -615,19 +615,19 @@ print(span(nanoseconds: -1500).to_str())
 (true, 1, 500, 1, 500)
 -PT0.0000015S
 
-=== rounding increments are options
+=== invalid rounding increment
 import time
 print(time.span(hours: 1).round(smallest: time.Unit.Minute, increment: 0))
 --- fail
 invalid: the rounding increment must be from 1 to 1000000000, not 0
 
-=== instants round to hours or smaller units
+=== rounding an Instant to a calendar unit
 import time
 print(time.now().round(time.Unit.Day))
 --- fail
 invalid: an Instant can only be rounded to hours or smaller units
 
-=== offsets reach 23:59
+=== fixed-offset bounds and error formatting
 import time
 print((time.zone("+23:59").is_ok(), time.zone("+24:00").is_err(), time.zone("+00:00")?))
 print(time.PlainDate.parse("2024-02-30").unwrap_err().message)

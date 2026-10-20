@@ -395,8 +395,8 @@ impl Config {
         self.env = Some(vars);
         self
     }
-    /// The time zone that `time.local_zone` returns where the policy allows
-    /// `TimeZone` (otherwise, and by default, `UTC`).
+    /// Sets the time zone returned by `time.local_zone()` if the policy allows
+    /// [`Capability::TimeZone`]. Defaults to `UTC`.
     pub fn time_zone(mut self, zone: crate::time::TimeZone) -> Self {
         self.time_zone = Some(zone);
         self
@@ -566,11 +566,6 @@ impl Registry {
         Arc::make_mut(&mut self.by_name).fns.insert(name, id);
     }
 
-    /// Registers `T` as the value type `MODULE.NAME` (see [`ValueType`]).
-    ///
-    /// # Panics
-    ///
-    /// If `NAME` is not a capitalized identifier, or is registered twice.
     pub fn add_value_type<T: crate::vm::value::ValueType>(&mut self) {
         let module = T::MODULE;
         crate::vm::value::check_value_type_name::<T>();
