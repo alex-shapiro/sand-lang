@@ -228,6 +228,7 @@ pub struct Config {
     stdin: StdinConfig,
     pub(crate) cwd: Option<PathBuf>,
     pub(crate) module_root: Option<PathBuf>,
+    pub(crate) library: Option<PathBuf>,
     pub(crate) args: Vec<String>,
     pub(crate) env: Option<Vec<(String, String)>>,
     pub(crate) seed: Option<u64>,
@@ -275,6 +276,7 @@ impl Config {
             stdin: StdinConfig::None,
             cwd: None,
             module_root: None,
+            library: None,
             args: Vec::new(),
             env: None,
             seed: None,
@@ -374,6 +376,12 @@ impl Config {
     }
     pub fn module_root(mut self, p: impl AsRef<Path>) -> Self {
         self.module_root = Some(p.as_ref().to_path_buf());
+        self
+    }
+    /// Sets the fallback directory for `import <name>`. If `<name>` does not
+    /// match a standard or host module, the engine loads `<dir>/<name>.sand`.
+    pub fn library(mut self, dir: impl AsRef<Path>) -> Self {
+        self.library = Some(dir.as_ref().to_path_buf());
         self
     }
     pub fn args(mut self, a: Vec<String>) -> Self {
@@ -706,6 +714,13 @@ impl Engine {
             root: OnceLock::new(),
             spare: Mutex::default(),
         }
+    }
+
+    /// Returns the sorted names of all registered standard and host modules.
+    pub fn module_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.registry.sources.keys().filter(|n| *n != "prelude").map(|n| n.to_string()).collect();
+        names.sort_unstable();
+        names
     }
 
     /// Garbage collector statistics of the most recent run.
@@ -1159,6 +1174,7 @@ impl Engine {
         // the keys of the modules on it (to detect cycles).
         let mut stack: Vec<ImportFrame> = vec![(start, imports, 0)];
         let mut path_stack: Vec<String> = vec![key];
+        let mut stale_cache: HashMap<usize, bool> = HashMap::new();
         while let Some((mi, imports, pos)) = stack.pop() {
             if self.interrupt.load(Ordering::Relaxed) {
                 return Some(Error::Interrupted);
@@ -1176,16 +1192,15 @@ impl Engine {
             }
             let imp = imports[pos].clone();
             stack.push((mi, imports, pos + 1));
-            let optional = matches!(imp, ImportRef::Help(..));
-            match imp {
-                ImportRef::Name(name, span) | ImportRef::Help(name, span) => {
+            let optional = matches!(imp, ImportRef::Implicit(..));
+            let script_import = match imp {
+                ImportRef::Name(name, span) | ImportRef::Implicit(name, span) => {
                     let registered = self.registry.sources.get(name.as_str()).filter(|_| name != "prelude");
                     if let Some(id) = d.snap.module(&name).filter(|_| name != "prelude") {
                         g.use_std(d.snap, id);
                         g.modules[mi].imports.push((span, Target::Snapshot(id)));
+                        None
                     } else if let Some(&(kind, ref src)) = registered {
-                        // A module that is not in the snapshot: a host module
-                        // with errors, or a standard module not in the core.
                         let key = format!("std:{name}");
                         if path_stack.contains(&key) {
                             errors.push(Diag::error(span, format!("import cycle through module `{name}`")));
@@ -1201,19 +1216,36 @@ impl Engine {
                         g.modules[mi].imports.push((span, Target::Loaded(idx)));
                         path_stack.push(key);
                         stack.push((idx, imports, 0));
-                    } else if optional {
-                        continue;
-                    } else if crate::stdlib::OS_MODULES.contains(&name.as_str()) {
-                        errors.push(Diag::error(
-                            span,
-                            format!("module `{name}` is not available: this build of Sand has no operating-system access"),
-                        ));
+                        None
                     } else {
-                        errors.push(Diag::error(span, format!("unknown module `{name}`")));
+                        let library = match self.resolve_library_module(d, *prompted, &name) {
+                            Ok(found) => found,
+                            Err(e) => return Some(e),
+                        };
+                        if library.is_some() && !matches!(g.modules[mi].kind, ModKind::Script { .. }) {
+                            errors.push(Diag::error(span, "native modules cannot import script files"));
+                            continue;
+                        }
+                        match library {
+                            Some(resolved) => Some((resolved, name, span, false)),
+                            None if optional => continue,
+                            None if crate::stdlib::OS_MODULES.contains(&name.as_str()) => {
+                                errors.push(Diag::error(
+                                    span,
+                                    format!("module `{name}` is not available: this build of Sand has no operating-system access"),
+                                ));
+                                continue;
+                            }
+                            None => {
+                                errors.push(Diag::error(span, format!("unknown module `{name}`")));
+                                continue;
+                            }
+                        }
                     }
                 }
                 ImportRef::Path(_, span) if !matches!(g.modules[mi].kind, ModKind::Script { .. }) => {
                     errors.push(Diag::error(span, "native modules cannot import script files"));
+                    None
                 }
                 ImportRef::Path(p, span) => {
                     if p.len() > crate::policy::MAX_PATH_BYTES {
@@ -1225,76 +1257,132 @@ impl Engine {
                     if target.extension().is_none() {
                         target.set_extension("sand");
                     }
-                    // Only scripts: a diagnostic would quote other files.
+                    // Reject non-`.sand` paths before reading so diagnostics do not quote arbitrary files.
                     if target.extension().is_none_or(|e| e != "sand") {
                         errors.push(Diag::error(span, format!("cannot import `{p}`: script modules are `.sand` files")));
                         continue;
                     }
-                    let (fs, lexical) = (self.config.fs.clone(), crate::policy::lexical(&target));
-                    let resolve = move || {
-                        let mut t = fs.target(&lexical, crate::files::Mode::Follow);
-                        // Modules are identified by path, so use the name as stored on disk.
-                        t.fix_spelling();
-                        t
-                    };
-                    let resolved = match self.discovery_io(d, *prompted, resolve) {
-                        Ok(t) => t,
+                    match self.discovery_io(d, *prompted, self.resolve_script_target(&target)) {
+                        Ok(t) => Some((t, p, span, true)),
                         Err(e) => return Some(e),
-                    };
-                    let target = resolved.path.clone();
-                    if !target.starts_with(d.root) {
-                        errors.push(Diag::error(span, format!("cannot import `{p}`: the path is outside the module root")));
-                        continue;
                     }
-                    let key = format!("file:{}", target.display());
-                    if path_stack.contains(&key) {
-                        let cycle: Vec<String> = path_stack.iter().map(|k| k.trim_start_matches("file:").to_string()).collect();
-                        errors.push(Diag::error(span, format!("import cycle: {} -> {}", cycle.join(" -> "), target.display())));
-                        continue;
-                    }
-                    if let Some(&idx) = g.index.get(&key) {
+                }
+            };
+            let Some((resolved, import_label, span, require_module_root)) = script_import else { continue };
+            let target = resolved.path.clone();
+            if require_module_root && !target.starts_with(d.root) {
+                errors.push(Diag::error(span, format!("cannot import `{import_label}`: the path is outside the module root")));
+                continue;
+            }
+            let key = format!("file:{}", target.display());
+            if path_stack.contains(&key) {
+                let cycle: Vec<String> = path_stack.iter().map(|k| k.trim_start_matches("file:").to_string()).collect();
+                errors.push(Diag::error(span, format!("import cycle: {} -> {}", cycle.join(" -> "), target.display())));
+                continue;
+            }
+            if let Some(&idx) = g.index.get(&key) {
+                match self.is_module_stale(d, *prompted, g, idx, start, &mut stale_cache) {
+                    Ok(false) => {
                         g.modules[mi].imports.push((span, Target::Loaded(idx)));
                         continue;
                     }
-                    let asked = self.config.clock.now();
-                    let allowed = self.check_import(&target, d.prompt).await;
-                    *prompted += self.config.clock.now().saturating_duration_since(asked);
-                    if !allowed {
-                        errors.push(Diag::error(span, format!("cannot import `{p}`: permission denied")));
-                        // Compilation has failed: do not prompt for further imports.
-                        break;
-                    }
-                    // Read the checked file without following symlinks swapped in since.
-                    let (fs, max) = (self.config.fs.clone(), self.config.limits.max_source_bytes);
-                    let text = match self.discovery_io(d, *prompted, move || fs.read_source(resolved, max)) {
-                        Ok(Ok(t)) => t,
-                        Err(e) => return Some(e),
-                        Ok(Err(e)) => {
-                            errors.push(Diag::error(span, format!("cannot load module `{p}`: {e}")));
-                            continue;
-                        }
-                    };
-                    g.source_bytes = g.source_bytes.saturating_add(text.len());
-                    if g.source_bytes > self.config.limits.max_source_bytes {
-                        errors.push(Diag::error(
-                            span,
-                            format!("cannot load module `{p}`: source too large (the program's sources exceed the limit in total)"),
-                        ));
-                        continue;
-                    }
-                    let display =
-                        target.strip_prefix(d.root).map(|r| r.display().to_string()).unwrap_or_else(|_| target.display().to_string());
-                    let f = g.sm.add(display, text);
-                    let name = target.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-                    let (idx, imports) = g.add(name, f, ModKind::Script { main: false }, target.parent().map(|d| d.to_path_buf()));
-                    g.index.insert(key.clone(), idx);
-                    g.modules[mi].imports.push((span, Target::Loaded(idx)));
-                    path_stack.push(key);
-                    stack.push((idx, imports, 0));
+                    Ok(true) => {}
+                    Err(e) => return Some(e),
                 }
             }
+            let asked = self.config.clock.now();
+            let allowed = self.check_import(&target, d.prompt).await;
+            *prompted += self.config.clock.now().saturating_duration_since(asked);
+            if !allowed {
+                errors.push(Diag::error(span, format!("cannot import `{import_label}`: permission denied")));
+                // Stop after a denied import to avoid prompting for remaining imports.
+                break;
+            }
+            let (fs, max) = (self.config.fs.clone(), self.config.limits.max_source_bytes);
+            let text = match self.discovery_io(d, *prompted, move || fs.read_source(resolved, max)) {
+                Ok(Ok(t)) => t,
+                Err(e) => return Some(e),
+                Ok(Err(e)) => {
+                    errors.push(Diag::error(span, format!("cannot load module `{import_label}`: {e}")));
+                    continue;
+                }
+            };
+            g.source_bytes = g.source_bytes.saturating_add(text.len());
+            if g.source_bytes > self.config.limits.max_source_bytes {
+                errors.push(Diag::error(
+                    span,
+                    format!("cannot load module `{import_label}`: source too large (the program's sources exceed the limit in total)"),
+                ));
+                continue;
+            }
+            let display = target.strip_prefix(d.root).map(|r| r.display().to_string()).unwrap_or_else(|_| target.display().to_string());
+            let f = g.sm.add(display, text);
+            let name = target.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            let (idx, imports) = g.add(name, f, ModKind::Script { main: false }, target.parent().map(|d| d.to_path_buf()));
+            g.modules[idx].path = Some(target);
+            g.index.insert(key.clone(), idx);
+            g.modules[mi].imports.push((span, Target::Loaded(idx)));
+            path_stack.push(key);
+            stack.push((idx, imports, 0));
         }
         None
+    }
+
+    fn resolve_script_target(&self, path: &Path) -> impl FnOnce() -> crate::files::Target + Send + 'static {
+        let (fs, lexical) = (self.config.fs.clone(), crate::policy::lexical(path));
+        move || {
+            let mut t = fs.target(&lexical, crate::files::Mode::Follow);
+            // Normalize path casing so that case-insensitive imports share a single module key.
+            t.fix_spelling();
+            t
+        }
+    }
+
+    fn resolve_library_module(&self, d: &Discovery<'_>, prompted: Duration, name: &str) -> Result<Option<crate::files::Target>, Error> {
+        let Some(library) = &self.config.library else { return Ok(None) };
+        if !crate::check::help::is_ident(name) {
+            return Ok(None);
+        }
+        let resolve = self.resolve_script_target(&self.config.fs.absolute(library).join(format!("{name}.sand")));
+        let fs = self.config.fs.clone();
+        self.discovery_io(d, prompted, move || {
+            let t = resolve();
+            fs.stat(&t).ok().filter(|m| m.kind == crate::files::EntryKind::File).map(|_| t)
+        })
+    }
+
+    /// Returns true if module `idx` was loaded in an earlier compilation and its
+    /// source file or a transitive dependency has changed.
+    fn is_module_stale(
+        &self,
+        d: &Discovery<'_>,
+        prompted: Duration,
+        g: &ModuleGraph,
+        idx: usize,
+        first_new_module: usize,
+        stale_cache: &mut HashMap<usize, bool>,
+    ) -> Result<bool, Error> {
+        if idx >= first_new_module {
+            return Ok(false);
+        }
+        if let Some(&known) = stale_cache.get(&idx) {
+            return Ok(known);
+        }
+        let m = &g.modules[idx];
+        let Some(path) = m.path.clone() else { return Ok(false) };
+        let (resolve, fs, max) = (self.resolve_script_target(&path), self.config.fs.clone(), self.config.limits.max_source_bytes);
+        let current = self.discovery_io(d, prompted, move || fs.read_source(resolve(), max).ok())?;
+        let mut changed = current.as_deref() != Some(g.sm.text(m.file));
+        for &(_, target) in &m.imports {
+            if changed {
+                break;
+            }
+            if let Target::Loaded(dep) = target {
+                changed = self.is_module_stale(d, prompted, g, dep, first_new_module, stale_cache)?;
+            }
+        }
+        stale_cache.insert(idx, changed);
+        Ok(changed)
     }
 }
 

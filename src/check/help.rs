@@ -490,7 +490,17 @@ impl Checker {
         items.into_iter().map(|(n, b)| (n, b.def)).collect()
     }
 
-    /// The names bound in module `m` (only its public ones, with `public`).
+    /// Returns a diagnostic hint if `name` matches an unimported module or standard-library function.
+    pub(crate) fn import_hint(&self, name: &str) -> String {
+        if self.module_index.iter().any(|(m, _)| m == name) {
+            return format!(": add `import {name}`");
+        }
+        match self.module_exports.get(name) {
+            Some(module) => format!("; did you mean `{module}.{name}`? (add `import {module}`)"),
+            None => String::new(),
+        }
+    }
+
     fn scope_names(&self, m: ModId, public: bool) -> Vec<String> {
         let scope = &self.mods[m as usize].scope;
         scope.entries().into_iter().filter(|(_, b)| b.is_pub || !public).map(|(&n, _)| self.name(n).to_string()).collect()
@@ -1049,6 +1059,15 @@ pub(crate) fn summary(doc: &str) -> String {
     text[..end].to_string()
 }
 
+pub(crate) fn public_functions(src: &str) -> Vec<String> {
+    src.lines()
+        .filter_map(|l| l.strip_prefix("pub fn ").or_else(|| l.strip_prefix("pub native fn ")))
+        .filter_map(|rest| rest.split(['(', '<']).next())
+        .filter(|name| is_ident(name))
+        .map(str::to_string)
+        .collect()
+}
+
 /// The summary of a module's doc comment (its leading `//!` lines).
 pub(crate) fn module_summary(src: &str) -> String {
     let doc: Vec<&str> = src
@@ -1060,7 +1079,7 @@ pub(crate) fn module_summary(src: &str) -> String {
     summary(&doc.join("\n"))
 }
 
-fn is_ident(s: &str) -> bool {
+pub(crate) fn is_ident(s: &str) -> bool {
     s.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 

@@ -453,11 +453,13 @@ impl Vm {
         Ctl::fail("not_found", format!("key not found: {}", self.debug(k).unwrap_or_default()))
     }
 
-    /// `Op::TryTop`: a top-level `?` met `Err(e)` (`res`).
     #[cold]
     #[inline(never)]
     fn try_top(&mut self, fiber: &mut Fiber, ip: usize, prog: &Program, res: Value) -> Trap {
-        let e = self.heap.field(res, 0).unwrap_or(Value::Unit);
+        // `Option::None` has 0 fields; `Result::Err(e)` stores `e` at field 0.
+        let Some(e) = self.heap.field(res, 0) else {
+            return self.ctl_trap(fiber, ip, Ctl::fail("none", "`?` found None"));
+        };
         match display::to_display_metered(prog, &self.heap, &self.meter, e) {
             Ok(text) => self.error_trap(fiber, ip, text),
             Err(c) => self.ctl_trap(fiber, ip, c),

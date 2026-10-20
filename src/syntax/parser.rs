@@ -120,9 +120,12 @@ impl<'a> Parser<'a> {
     fn slice(&self, span: Span) -> &'a str {
         &self.src[span.lo as usize..span.hi as usize]
     }
-    /// The source text of the current token.
     fn cur_text(&self) -> &'a str {
         self.slice(self.span_here())
+    }
+    fn peek_text(&self, n: usize) -> &'a str {
+        let t = &self.toks[(self.pos + n).min(self.toks.len() - 1)];
+        &self.src[t.lo as usize..t.hi as usize]
     }
     fn error_here(&mut self, msg: impl Into<String>) {
         let span = self.span_here();
@@ -288,7 +291,7 @@ impl<'a> Parser<'a> {
         let doc = self.doc_before(lo);
         let kind = match self.tok() {
             Tok::Import => ItemKind::Import(self.import()?),
-            Tok::From => ItemKind::Import(self.selective_import()?),
+            Tok::Ident if self.is_at_selective_import() => ItemKind::Import(self.selective_import()?),
             Tok::Pub => {
                 self.bump();
                 match self.tok() {
@@ -328,6 +331,13 @@ impl<'a> Parser<'a> {
                 let name = self.plain_string("a test name")?;
                 let body = self.block()?;
                 ItemKind::Test(TestDecl { name, name_span, body })
+            }
+            Tok::Ident if self.cur_text() == "test" && matches!(self.peek_tok(1), Tok::LBrace) => {
+                let name_span = self.span_here();
+                self.errors.push(Diag::error(name_span, "expected a test name: `test \"...\" { ... }`"));
+                self.bump();
+                let body = self.block()?;
+                ItemKind::Test(TestDecl { name: String::new(), name_span, body })
             }
             _ => {
                 let mut s = self.stmt()?;
@@ -396,6 +406,10 @@ impl<'a> Parser<'a> {
         let alias = if self.eat(&Tok::As) { Some(self.ident("alias")?) } else { None };
         self.end_of_item()?;
         Ok(Import { source, alias, names: None })
+    }
+
+    fn is_at_selective_import(&self) -> bool {
+        self.cur_text() == "from" && matches!(self.peek_tok(1), Tok::Ident | Tok::Str(_)) && matches!(self.peek_tok(2), Tok::Import)
     }
 
     fn selective_import(&mut self) -> PResult<Import> {
@@ -571,6 +585,10 @@ impl<'a> Parser<'a> {
                 let p = self.eat(&Tok::Pub);
                 methods.push(self.fn_decl(p, mdoc)?);
                 continue;
+            }
+            if self.at(&Tok::Pub) {
+                self.error_here("`pub` is not allowed on struct fields; they are public if the struct is");
+                self.bump();
             }
             let mutable = self.eat(&Tok::Var);
             let fname = self.ident("field name")?;
@@ -919,6 +937,19 @@ impl<'a> Parser<'a> {
     fn stmt(&mut self) -> PResult<Stmt> {
         let lo = self.lo();
         match self.tok() {
+            Tok::Import => {
+                let msg = if matches!(self.peek_tok(1), Tok::Ident) && self.peek_text(1) == "test" {
+                    "`import` is only allowed at the top level; `test` is already in scope in test blocks"
+                } else {
+                    "`import` is only allowed at the top level"
+                };
+                self.errors.push(Diag::error(self.span_here(), msg));
+                Err(())
+            }
+            Tok::Ident if self.is_at_selective_import() => {
+                self.errors.push(Diag::error(self.span_here(), "`import` is only allowed at the top level"));
+                Err(())
+            }
             Tok::Let | Tok::Var => self.let_stmt(),
             Tok::Defer => {
                 self.bump();

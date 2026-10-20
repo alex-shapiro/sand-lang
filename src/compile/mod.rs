@@ -966,7 +966,8 @@ impl<'a> Compiler<'a> {
 
     /// Makes the branch at `at` go to `stub` (emitted by `emit_stubs`).
     fn jump_to_stub(&mut self, f: &mut FnState<'a>, at: usize, stub: Stub) {
-        match f.stubs.iter_mut().find(|s| s.0 == stub) {
+        // Reuse a stub only on the same source line so that stack traces report the line of the failing instruction.
+        match f.stubs.iter_mut().find(|s| s.0 == stub && s.2 == f.line) {
             Some(s) => s.1.push(at),
             None => f.stubs.push((stub, vec![at], f.line)),
         }
@@ -2483,7 +2484,7 @@ impl<'a> Compiler<'a> {
             HKind::Try { e: inner, kind } => {
                 let mark = f.next_reg;
                 let test = |src: Reg| match kind {
-                    TryKind::Option => Op::JNotSome { src, dst, off: 0 },
+                    TryKind::Option | TryKind::TopLevelOption => Op::JNotSome { src, dst, off: 0 },
                     _ => Op::JNotOk { src, dst, off: 0 },
                 };
                 if defers_pending(f) {
@@ -2503,7 +2504,7 @@ impl<'a> Compiler<'a> {
                         TryKind::Result => {
                             self.emit(f, Op::Ret { src: v });
                         }
-                        TryKind::TopLevel => {
+                        TryKind::TopLevelResult | TryKind::TopLevelOption => {
                             self.emit(f, Op::TryTop { src: v });
                         }
                     }
@@ -2515,7 +2516,7 @@ impl<'a> Compiler<'a> {
                     let stub = match kind {
                         TryKind::Option => Stub::RetNone,
                         TryKind::Result => Stub::Ret(v),
-                        TryKind::TopLevel => Stub::TryTop(v),
+                        TryKind::TopLevelResult | TryKind::TopLevelOption => Stub::TryTop(v),
                     };
                     self.jump_to_stub(f, fail, stub);
                 }

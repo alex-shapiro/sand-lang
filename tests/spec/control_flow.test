@@ -565,3 +565,43 @@ print(out)
 [[0, 10, 20], [2, 12, 22]]
 []
 
+
+=== import hint for an unimported module
+fn f() -> str {
+    json.encode(1)
+}
+--- error
+2: undefined name `json`: add `import json`
+
+=== import hint for an unimported standard-library function
+fn check() {
+    assert_eq(1, 1)
+}
+--- error
+2: undefined name `assert_eq`; did you mean `test.assert_eq`? (add `import test`)
+
+=== top-level question mark on None fails the run
+fn find(xs: [int], x: int) -> int? { xs.index_of(x) }
+print(find([1, 2], 2)?)
+print(find([1, 2], 3)?)
+print("unreachable")
+--- stdout
+1
+--- fail
+none: `?` found None
+
+=== failed question mark reports its source line
+import json
+print(json.parse("1")?)
+print(json.parse("[")?)
+--- stdout
+Int(1)
+--- fail
+parse: unexpected end of input at line 1, column 2
+
+=== reject pub on a struct field
+pub struct Point {
+    pub x: int
+}
+--- error
+2: `pub` is not allowed on struct fields; they are public if the struct is

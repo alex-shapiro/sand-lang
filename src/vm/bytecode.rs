@@ -913,7 +913,7 @@ pub enum Op {
         dst: Reg,
         closure: Reg,
     },
-    /// Top-level `?` on an `Err`: fail with the error.
+    /// Fails execution for a top-level or test `?` on `Err` or `None`.
     TryTop {
         src: Reg,
     },

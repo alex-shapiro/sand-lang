@@ -398,6 +398,7 @@ pub(crate) enum CtxKind {
     Function,
     Lambda,
     TopLevel { main: bool },
+    Test,
 }
 
 /// The local names in scope in a function: a stack of scopes, also indexed
@@ -508,6 +509,8 @@ pub struct Checker {
     /// The modules scripts can import by name, with the summaries of their
     /// docs (for `help()`).
     pub module_index: Arc<[(String, String)]>,
+    /// Maps each public standard-library function name to the module that defines it.
+    pub module_exports: Arc<HashMap<String, String>>,
     pub variants: PVec<(TypeDefId, u32)>,
     /// The bindings of the inference variables of the module being checked
     /// (cleared when it is done: its types are all resolved by then).
@@ -587,6 +590,7 @@ impl Default for Checker {
             methods: PMap::new(),
             ctor_docs: PMap::new(),
             module_index: Arc::from([]),
+            module_exports: Arc::default(),
             variants: PVec::new(),
             subst: Vec::new(),
             derived: PVec::new(),
@@ -1577,30 +1581,47 @@ impl Checker {
         t
     }
 
-    /// Looks up a name in the current module scope, then the prelude.
+    /// Resolves `name` in the current module scope, the prelude, built-in types,
+    /// and (inside a `test` block) the `test` module.
     pub fn lookup_global(&mut self, name: &str) -> Option<Def> {
         let sym = self.syms.get(name);
-        let m = self.cur_mod as usize;
-        if let Some(s) = sym
-            && let Some(b) = self.mods[m].scope.get(&s)
+        let cur_mod = self.cur_mod as usize;
+        if let Some(sym) = sym
+            && let Some(binding) = self.mods[cur_mod].scope.get(&sym)
         {
-            let d = b.def;
+            let def = binding.def;
             self.note_name_used(name);
-            return Some(d);
+            return Some(def);
         }
         if name == "task"
-            && let Some(t) = self.task_mod
-            && t != self.cur_mod
+            && let Some(task_mod) = self.task_mod
+            && task_mod != self.cur_mod
         {
-            return Some(Def::Module(t));
+            return Some(Def::Module(task_mod));
         }
-        if let (Some(s), Some(p)) = (sym, self.prelude)
-            && p != self.cur_mod
-            && let Some(Binding { def, is_pub: true, .. }) = self.mods[p as usize].scope.get(&s)
+        if name == "test"
+            && matches!(self.fs.ctx.first().map(|c| c.kind), Some(CtxKind::Test))
+            && let Some(test_mod) = self.module_named("test")
+        {
+            return Some(Def::Module(test_mod));
+        }
+        if let (Some(sym), Some(prelude)) = (sym, self.prelude)
+            && prelude != self.cur_mod
+            && let Some(Binding { def, is_pub: true, .. }) = self.mods[prelude as usize].scope.get(&sym)
         {
             return Some(*def);
         }
-        builtin_type(name).map(Def::Type)
+        if let Some(ty) = builtin_type(name) {
+            return Some(Def::Type(ty));
+        }
+        if let Some(sym) = sym
+            && matches!(self.fs.ctx.first().map(|c| c.kind), Some(CtxKind::Test))
+            && let Some(test_mod) = self.module_named("test")
+            && let Some(Binding { def, is_pub: true, .. }) = self.mods[test_mod as usize].scope.get(&sym)
+        {
+            return Some(*def);
+        }
+        None
     }
 
     /// Looks up a public member of a module.
@@ -2037,7 +2058,8 @@ impl Checker {
             }
             param_locals.push(l);
         }
-        self.fs.ctx.push(FnCtx { ret, kind: CtxKind::Function, loops: vec![], lambda: 0, in_defer: None });
+        let kind = if matches!(decl, FnDeclRef::Test { .. }) { CtxKind::Test } else { CtxKind::Function };
+        self.fs.ctx.push(FnCtx { ret, kind, loops: vec![], lambda: 0, in_defer: None });
         let (body, span) = match decl {
             FnDeclRef::Fn(at) => {
                 let f = at.get(m);

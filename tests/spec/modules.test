@@ -176,3 +176,15 @@ pub let X = 1
 return
 --- error
 `return` is not allowed at the top level of an imported module
+
+=== from is a keyword only in a selective import
+from math import pi
+
+fn convert(amount: float, from: str, to: str) -> str {
+    "\(amount) \(from) -> \(to)"
+}
+
+let from = "x"
+print(convert(pi.round(), from, "y"))
+--- stdout
+3.0 x -> y
