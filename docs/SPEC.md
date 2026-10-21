@@ -2905,10 +2905,9 @@ in parallel.
 The `sandlang-wasm` crate (`wasm/`) exposes this build as a JavaScript `Engine`
 class configured with a policy file, initial virtual files, environment
 variables, arguments, standard input, a time zone, and `onOutput` and
-`onPrompt` callbacks (prompts without an `onPrompt` callback are denied). It
-provides methods for execution (`run`), static analysis (`check`, `lint`,
-`format`, `highlight`), and interactive sessions (`eval`, `runTasks`,
-`stopTasks`). The web playground (`site/playground/`) is built on this package.
+`onPrompt` callbacks. A prompt without an `onPrompt` callback is denied.
+The library provides `run`, `check`, `lint`, `format`, and `highlight` methods
+for typical execution and static analysis tasks.
 
 ### 16.6 Sessions
 
@@ -2923,11 +2922,10 @@ session.eval("var hits = 0\nfn hit() -> int { hits += 1\n hits }").await?;   // 
 assert_eq!(session.eval("hit() + hit()").await?, Some("3".to_string()));
 ```
 
-`Session::eval(source)` (or `eval_as(name, source)` to use a custom source name
-in diagnostics and stack traces) type-checks, compiles, and executes a single
-input, returning `Ok(Some(value))` with the debug representation of a trailing
-expression or `Ok(None)` for statements and declarations. If an input calls
-`exit(code)`, `eval` returns `Ok(None)`, `exit_code()` returns `Some(code)`
+`Session::eval(source)` or `eval_as(name, source)` type-checks, compiles, and
+executes a single input, returning `Ok(Some(value))` with the debug representation
+of a trailing expression or `Ok(None)` for statements and declarations. If an
+input calls `exit(code)`, `eval` returns `Ok(None)`, `exit_code()` returns `Some(code)`
 until the next input, and the session remains usable. If an input imports a
 script module whose file or transitive script dependencies changed since the
 previous load, the session reloads that module while bindings from earlier
