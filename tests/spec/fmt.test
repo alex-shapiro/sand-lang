@@ -146,22 +146,27 @@ let r = r"raw\n"
 let s = "a  \(x+1)  b"
 let r = r"raw\n"
 
-=== lambdas and pipes
+=== lambdas
 let f = (a,b)=>a+b
 let g = x=>x*2
-let y = 3|>g
 --- fmt
 let f = (a, b) => a + b
 let g = x => x * 2
-let y = 3 |> g
 
 === method chains that are too long are broken
-let total = items.filter(item => item.price > 100).map(item => item.price * item.quantity).sum()
+let total = items.filter(item => item.price > 100).map(item => item.price * item.quantity * item.rate).sum()
 --- fmt
 let total = items
     .filter(item => item.price > 100)
-    .map(item => item.price * item.quantity)
+    .map(item => item.price * item.quantity * item.rate)
     .sum()
+
+=== method chains with lambdas that fit stay on one line
+let total = [1, 2, 3].map(x => x * 2).filter(x => x > 2).sum()
+let firsts = Iter.count_from(1).map(n => n * n).filter(n => n % 3 == 0).take(3)
+--- fmt
+let total = [1, 2, 3].map(x => x * 2).filter(x => x > 2).sum()
+let firsts = Iter.count_from(1).map(n => n * n).filter(n => n % 3 == 0).take(3)
 
 === imports and generics
 import json
@@ -319,14 +324,6 @@ let total = first_quantity_with_a_long_name
 let diff = first_quantity_with_a_long_name * 2
     - second_quantity_with_a_long_name * 3
     - third_quantity_x
-
-=== pipe chains break one per line
-let result = input_values_from_the_user |> remove_duplicate_entries |> sort_by_priority |> take_first_ten
---- fmt
-let result = input_values_from_the_user
-    |> remove_duplicate_entries
-    |> sort_by_priority
-    |> take_first_ten
 
 === comments stay next to the operator
 let x = 1 /* one */ + 2

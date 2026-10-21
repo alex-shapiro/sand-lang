@@ -29,8 +29,7 @@ pub struct CompileInput<'a> {
     pub checked: &'a CheckedProgram,
     pub sm: &'a SourceMap,
     pub natives: &'a NativeIds,
-    pub native_names: Vec<String>,
-    pub native_argc: Vec<u16>,
+    pub native_info: crate::modules::NativeInfo,
     /// Charged one unit per expression compiled, instruction emitted and
     /// node visited by an analysis. Once it is exhausted the compiler skips
     /// the rest of the code (callers check `budget.stopped()` and discard
@@ -385,10 +384,11 @@ impl<'a> Compiler<'a> {
                 self.inline.insert(id, op);
             }
         }
-        // Native names are only given when (new) natives were checked.
-        if !input.native_names.is_empty() {
-            self.prog.native_names = input.native_names.into();
-            self.prog.native_argc = input.native_argc.into();
+        if !input.native_info.names.is_empty() {
+            let info = input.native_info;
+            self.prog.native_names = info.names.into();
+            self.prog.native_argc = info.argc.into();
+            self.prog.native_returns_result = info.returns_result.into();
         }
         // The program's files are a prefix of the source map's (those of a
         // failed compilation are removed by `ProgramMark`): only add the new.

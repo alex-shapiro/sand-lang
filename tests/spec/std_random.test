@@ -21,13 +21,9 @@ let mean = fs.sum() / 2000.0
 print(mean > 0.4 and mean < 0.6)
 let bools = [random.bool() for _ in 0..200]
 print(bools.contains(true) and bools.contains(false))
-let normals = [random.normal(mean: 10.0, stdev: 2.0) for _ in 0..4000]
-let nm = normals.sum() / 4000.0
-print(nm > 9.8 and nm < 10.2)
 --- stdout
 true
 6
-true
 true
 true
 true

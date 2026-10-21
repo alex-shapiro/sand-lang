@@ -8,7 +8,8 @@ use common::{TempDir, rt, run_with};
 use sandlang::jiff::civil::Date;
 use sandlang::time::TimeZone;
 use sandlang::{
-    Capability, Config, Decision, Engine, Error, LimitKind, Limits, MemorySink, NativeModule, Policy, PromptAnswer, RulePolicy, ValueType,
+    Capability, Config, Decision, Engine, Error, LimitKind, Limits, LogLevel, LogRecord, LogSink, MemorySink, NativeModule, Policy,
+    PromptAnswer, RulePolicy, ValueType,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -618,7 +619,7 @@ let r = fs.read_text("secret.txt")
 print(r.unwrap_err().kind)
 print(fs.write_text("out.txt", "x").unwrap_err().kind)
 print(env.get("HOME"))
-print(net.connect("127.0.0.1:1").unwrap_err().kind)
+print(net.connect("127.0.0.1", 1).unwrap_err().kind)
 "#;
     let (r, out, _) = run_src(config, src);
     r.unwrap();
@@ -637,6 +638,90 @@ fn stdout_can_be_denied() {
         other => panic!("{other:?}"),
     }
     assert_eq!(out, "");
+}
+
+#[test]
+fn log_records_go_to_the_host_sink() {
+    let records = Arc::new(Mutex::new(Vec::<LogRecord>::new()));
+    let r2 = records.clone();
+    let policy = Policy::custom(|cap: &Capability| if matches!(cap, Capability::Stderr) { Decision::Deny } else { Decision::Allow });
+    let config = Config::new().policy(policy).log_sink(move |r: &LogRecord| r2.lock().unwrap().push(r.clone()));
+    let src = r#"
+import log
+fn start(user: str) {
+    log.info("started", fields: ["user": user, "note": "a b"])
+}
+log.debug("hidden")
+log.set_level("debug")
+log.debug("details")
+start("ann")
+log.set_level("error")
+log.warn("hidden")
+log.error("failed")
+"#;
+    let (r, _, err) = run_src(config, src);
+    r.unwrap();
+    assert_eq!(err, "");
+    let records = records.lock().unwrap();
+    let summary: Vec<_> =
+        records.iter().map(|r| (r.level, r.message.as_str(), r.location.as_ref().map(|l| (l.function.as_str(), l.line)))).collect();
+    assert_eq!(
+        summary,
+        [
+            (LogLevel::Debug, "details", Some(("<top level>", 8))),
+            (LogLevel::Info, "started", Some(("start", 4))),
+            (LogLevel::Error, "failed", Some(("<top level>", 12))),
+        ]
+    );
+    assert_eq!(records[1].fields, [("user".to_string(), "ann".to_string()), ("note".to_string(), "a b".to_string())]);
+}
+
+#[test]
+fn log_sinks_select_levels() {
+    struct WarnSink(Arc<Mutex<Vec<String>>>);
+    impl LogSink for WarnSink {
+        fn enabled(&self, level: LogLevel) -> bool {
+            level >= LogLevel::Warn
+        }
+        fn log(&self, record: &LogRecord) {
+            self.0.lock().unwrap().push(record.message.clone());
+        }
+    }
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let config = Config::new().log_sink(WarnSink(messages.clone()));
+    let src = "import log\nlog.debug(\"d\")\nlog.info(\"i\")\nlog.warn(\"w\")\nlog.set_level(\"off\")\nlog.error(\"e\")";
+    let (r, _, _) = run_src(config, src);
+    r.unwrap();
+    assert_eq!(*messages.lock().unwrap(), ["w"]);
+}
+
+#[test]
+fn hosts_set_the_starting_log_level() {
+    let src = "import log\nlog.debug(\"d\")\nlog.set_level(\"info\")\nlog.debug(\"hidden\")";
+    let (r, _, err) = run_src(Config::new().policy(Policy::allow_all()).log_level(LogLevel::Debug), src);
+    r.unwrap();
+    assert_eq!(err, "DEBUG d\n");
+}
+
+#[test]
+fn log_records_are_dropped_if_stderr_is_denied() {
+    let policy = Policy::custom(|cap: &Capability| if matches!(cap, Capability::Stderr) { Decision::Deny } else { Decision::Allow });
+    let (r, out, err) = run_src(Config::new().policy(policy), "import log\nlog.error(\"failed\")\nprint(\"done\")");
+    r.unwrap();
+    assert_eq!((out.as_str(), err.as_str()), ("done\n", ""));
+}
+
+#[test]
+fn log_records_count_against_the_output_limit() {
+    let count = Arc::new(AtomicUsize::new(0));
+    let c2 = count.clone();
+    let config = Config::new()
+        .limits(Limits { max_output_bytes: Some(1000), ..Limits::default() })
+        .log_sink(move |_: &LogRecord| _ = c2.fetch_add(1, Ordering::Relaxed));
+    let (r, _, _) = run_src(config, "import log\nfor i in 0..1000 { log.info(\"record\", fields: [\"i\": \"\\(i)\"]) }");
+    assert!(matches!(r, Err(Error::Limit(LimitKind::Output))), "{r:?}");
+    let n = count.load(Ordering::Relaxed);
+    assert!(n > 50 && n < 125, "{n}");
 }
 
 #[test]
@@ -714,12 +799,40 @@ fn rule_policy_network_hosts() {
 
 #[test]
 fn rule_policy_env_and_listen() {
-    let p = RulePolicy::new().allow_env("HOME").allow_listen("127.0.0.1:0").allow_stdin();
+    let p = RulePolicy::new().allow_env("HOME").allow_listen("127.0.0.1:*").allow_listen("[::1]:0").allow_stdin();
     assert_eq!(p.check(&Capability::Env("HOME".into())), Decision::Allow);
     assert_eq!(p.check(&Capability::Env("SECRET".into())), Decision::Deny);
-    assert_eq!(p.check(&Capability::NetListen("127.0.0.1:9000".into())), Decision::Allow);
-    assert_eq!(p.check(&Capability::NetListen("0.0.0.0:9000".into())), Decision::Deny);
+    let listen = |ip: &str, port| Capability::NetListen(std::net::SocketAddr::new(ip.parse().unwrap(), port));
+    assert_eq!(p.check(&listen("127.0.0.1", 9000)), Decision::Allow);
+    assert_eq!(p.check(&listen("::ffff:127.0.0.1", 9000)), Decision::Allow);
+    assert_eq!(p.check(&listen("0.0.0.0", 9000)), Decision::Deny);
+    assert_eq!(p.check(&listen("::1", 0)), Decision::Allow);
+    assert_eq!(p.check(&listen("::1", 9000)), Decision::Deny, "port 0 allows only an ephemeral port");
+    assert_eq!(listen("::1", 0).to_string(), "listen on an ephemeral port at ::1");
     assert_eq!(p.check(&Capability::Stdin), Decision::Allow);
+
+    let p = RulePolicy::new().allow_listen("LocalHost").allow_listen("[::]:80").allow_listen("*:8080").deny_listen("localhost:22");
+    assert_eq!(p.check(&listen("127.0.0.2", 3000)), Decision::Allow);
+    assert_eq!(p.check(&listen("::1", 3000)), Decision::Allow);
+    assert_eq!(p.check(&listen("127.0.0.1", 22)), Decision::Deny);
+    assert_eq!(p.check(&listen("::ffff:127.0.0.1", 22)), Decision::Deny);
+    assert_eq!(p.check(&listen("0:0::0", 80)), Decision::Allow);
+    assert_eq!(p.check(&listen("::", 81)), Decision::Deny);
+    assert_eq!(p.check(&listen("10.0.0.1", 8080)), Decision::Allow);
+    assert_eq!(p.check(&listen("10.0.0.1", 8081)), Decision::Deny);
+    for invalid in [
+        "[::1",
+        "[::1]x",
+        "[localhost]:80",
+        "[127.0.0.1]:80",
+        "127.0.0.1:http",
+        "127.0.0.1:+80",
+        "example.com",
+        "example.com:80",
+        "127.0.0.1:65536",
+    ] {
+        assert!(!sandlang::policy::is_valid_listen_pattern(invalid), "{invalid}");
+    }
 }
 
 #[cfg(feature = "os")]
@@ -1323,12 +1436,12 @@ fn open_resource_limit() {
     let config = Config::new().limits(Limits { max_open_resources: 2, ..Limits::default() });
     let src = r#"
 import net
-let a = net.listen("127.0.0.1:0")?
-let b = net.listen("127.0.0.1:0")?
-let c = net.listen("127.0.0.1:0")
+let a = net.listen("127.0.0.1", 0)?
+let b = net.listen("127.0.0.1", 0)?
+let c = net.listen("127.0.0.1", 0)
 print(c.unwrap_err().kind)
 a.close()
-print(net.listen("127.0.0.1:0").is_ok())
+print(net.listen("127.0.0.1", 0).is_ok())
 "#;
     let (r, out, _) = run_src(config.policy(Policy::allow_all()), src);
     r.unwrap();
@@ -1711,10 +1824,7 @@ fn host_modules_can_define_resources() {
     m.source("pub native type Conn\nimpl Close for Conn {\n    native fn close(self)\n}\npub native fn connect() -> Result<Conn>");
     let c = closed.clone();
     m.raw_function("connect", move |vm: &mut Vm, _: &[Value]| {
-        let slot = match vm.resource_slot()? {
-            Ok(s) => s,
-            Err(e) => return Ok(vm.err(e)),
-        };
+        let slot = vm.resource_slot()?;
         let conn = vm.heap.alloc(Obj::Native(Box::new(Conn { slot: Some(slot), closed: c.clone() })));
         Ok(vm.ok(conn))
     });
@@ -1732,6 +1842,30 @@ fn host_modules_can_define_resources() {
     assert!(r.is_ok(), "{r:?} {err}");
     assert!(out.contains("too many open resources"), "{out}");
     assert_eq!(closed.load(Ordering::Relaxed), 5);
+}
+
+#[test]
+fn native_errors_reach_only_natives_returning_results() {
+    use sandlang::Value;
+    use sandlang::vm::{Ctl, Finisher, Vm};
+    let mut m = NativeModule::new("errs");
+    m.source("pub native fn checked() -> Result<int>\npub native fn unchecked() -> int\npub native fn later() -> Result<int>\npub native fn later_unchecked() -> int");
+    let fail = |_: &mut Vm, _: &[Value]| Err(Ctl::native_err("invalid", "bad input"));
+    let fail_later = |_: &mut Vm, _: &[Value]| {
+        Err(Ctl::suspend(Box::pin(async { Box::new(|_: &mut Vm| Err(Ctl::native_err("io", "broken pipe"))) as Finisher })))
+    };
+    m.raw_function("checked", fail)
+        .raw_function("unchecked", fail)
+        .raw_function("later", fail_later)
+        .raw_function("later_unchecked", fail_later);
+    let run = |src: &str| run_src(Config::new().module(m.clone()), &format!("import errs\n{src}"));
+    let (r, out, _) = run("print(errs.checked())\nprint(errs.later())");
+    r.unwrap();
+    assert_eq!(out, "Err(Error { kind: \"invalid\", message: \"bad input\" })\nErr(Error { kind: \"io\", message: \"broken pipe\" })\n");
+    for call in ["errs.unchecked()", "errs.later_unchecked()"] {
+        let (r, _, _) = run(call);
+        assert!(matches!(&r, Err(Error::Internal { message, .. }) if message.contains("does not return a Result")), "{call}: {r:?}");
+    }
 }
 
 #[test]

@@ -147,13 +147,11 @@ impl Snapshot {
         let mut program = base.map(|b| b.program.clone()).unwrap_or_default();
         let mut compiler = base.map(|b| b.compiler.clone()).unwrap_or_default();
         let cp = checker.take_checked();
-        let (native_names, native_argc) = native_info(&cp, registry);
         let input = CompileInput {
             checked: &cp,
             sm: &sm,
             natives: &registry.by_name,
-            native_names,
-            native_argc,
+            native_info: native_info(&cp, registry),
             budget: &budget,
             initialized: None,
             optimize: true,
@@ -551,21 +549,28 @@ pub(crate) fn budget_error(stop: Stop, sm: &SourceMap, main_file: u32) -> Error 
     }
 }
 
-/// Names and argument counts (by native id) of the natives declared by the
-/// checked modules.
-pub(crate) fn native_info(checked: &crate::check::CheckedProgram, registry: &Registry) -> (Vec<String>, Vec<u16>) {
+/// Metadata for each native function, indexed by native ID.
+#[derive(Default)]
+pub(crate) struct NativeInfo {
+    pub names: Vec<String>,
+    pub argc: Vec<u16>,
+    pub returns_result: Vec<bool>,
+}
+
+pub(crate) fn native_info(checked: &crate::check::CheckedProgram, registry: &Registry) -> NativeInfo {
     let n = registry.natives.len();
-    let mut native_names = vec![String::new(); n];
-    let mut native_argc = vec![0u16; n];
+    let mut info = NativeInfo { names: vec![String::new(); n], argc: vec![0; n], returns_result: vec![false; n] };
     for f in &checked.fns {
         if let crate::check::FnKind::Native(n) = f.kind
-            && (n as usize) < native_names.len()
+            && (n as usize) < info.names.len()
         {
-            native_names[n as usize] = checked.name(f.name).to_string();
+            let n = n as usize;
+            info.names[n] = checked.name(f.name).to_string();
             let reflect = f.generics.iter().filter(|g| checked.params[**g as usize].reflect).count();
             // A native implementing a trait method also receives its impl's dictionary.
-            native_argc[n as usize] = (f.dicts.len() + f.params.len() + reflect) as u16;
+            info.argc[n] = (f.dicts.len() + f.params.len() + reflect) as u16;
+            info.returns_result[n] = matches!(checked.arena.get(f.ret), crate::types::Ty::Named(d, _) if d == checked.wk.result);
         }
     }
-    (native_names, native_argc)
+    info
 }

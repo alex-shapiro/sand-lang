@@ -90,7 +90,7 @@ import net
 let e = http.get("https://localhost:{}/").unwrap_err()
 print(e.kind)
 print(e.message.contains("certificate"))
-let c = net.connect_tls("localhost:{}")
+let c = net.connect_tls("localhost", {})
 print(c.unwrap_err().message.contains("certificate"))
 "#,
         server.addr.port(),
@@ -114,7 +114,7 @@ import net
 let e = http.get("https://127.0.0.1:{}/").unwrap_err()
 print(e.kind)
 print(e.message)
-print(net.connect_tls("127.0.0.1:{}").is_err())
+print(net.connect_tls("127.0.0.1", {}).is_err())
 "#,
         server.addr.port(),
         echo.port()
@@ -133,12 +133,12 @@ fn connect_tls_reads_and_writes() {
     let src = format!(
         r#"
 import net
-let c = net.connect_tls("localhost:{}")?
+let c = net.connect_tls("localhost", {})?
 c.write_str("hello tls\n")?
 print(c.read_line()?)
 c.write(b"second\n")?
 print(c.read_line()?)
-print(c.peer_addr() == "{echo}")
+print("\(c.peer_addr())" == "{echo}")
 c.close()
 print(c.read().unwrap_err().kind)
 "#,
@@ -217,7 +217,7 @@ fn closing_a_tls_connection_sends_close_notify() {
         });
     });
     let addr: std::net::SocketAddr = addr_rx.recv().unwrap();
-    let src = format!("import net\nuse c = net.connect_tls(\"localhost:{}\")?\nc.write_str(\"bye\")?", addr.port());
+    let src = format!("import net\nuse c = net.connect_tls(\"localhost\", {})?\nc.write_str(\"bye\")?", addr.port());
     let r = run_with(&src, trusting);
     assert_eq!(r.ok_stdout(), "");
     let end = end_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();

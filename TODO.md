@@ -31,7 +31,8 @@ Follow-up work, roughly in priority order.
       skip on APFS.
 - [ ] **Wall-clock bounds make tests flaky under load:**
       `hostile_runtime_programs_are_contained` (`tests/fuzz.rs`, 10s bound),
-      `code_generation_is_covered_by_the_compile_budget`
+      `code_generation_is_covered_by_the_compile_budget`,
+      `many_loop_constants_compile_in_linear_time`
       (`tests/compile_limits.rs`), `keys_chosen_to_collide_do_not_slow_down_maps`
       (`tests/metering.rs`), `many_locals_resolve_in_linear_time`
       (`tests/compile_limits.rs`). Bound the work instead (fuel, instructions,
@@ -40,19 +41,11 @@ Follow-up work, roughly in priority order.
       Firefox or Safari.
 - [ ] Run the `cargo fuzz` targets on a schedule (or on OSS-Fuzz). Update the
       `run` target to compare optimized and unoptimized executions.
-- [ ] `help.test` fails with `--no-default-features` because the overview
-      includes modules that require the `os` feature.
 
 ### Spec
 
 - [ ] Document in §14.4 that `time.local_zone()` returns `UTC` if the
       `TimeZone` capability is denied (currently documented only in §13).
-
-### Standard Library
-
-- [ ] Separate IP address and port arguments in `http.serve`, `http.Server.addr`, `net.listen`, `net.connect`, and `net.connect_tls`.
-- [ ] Allow the host to configure `log` with a custom sink function and log level at engine creation time (defaulting to `stderr`), so host applications (e.g. using `tracing`) can forward Sand logs while still enforcing sandbox policy.
-- [ ] Remove `random.normal`. If needed later, add `statistics.Normal` and `statistics.sample<D>(dist: D) -> float` for sampling from parameterized distributions.
 
 ### Web
 
@@ -70,12 +63,6 @@ Follow-up work, roughly in priority order.
       `bypassable-http-deny`); rules with wildcards in hosts or paths could
       be compared as file rules are. A rule made unnecessary only by several
       other rules together is not reported.
-
-- [ ] `sand fmt` breaks any method chain of three or more calls that contains
-      a lambda argument (`[1, 2, 3].map(x => x * 2).filter(x => x > 2).sum()`),
-      even if the chain fits on a single line. §17.3 specifies breaking only
-      lines longer than 100 characters, and the first example in §12.13 is
-      unformatted. Align `sand fmt` and §17.3.
 
 ### Diagnostics
 
@@ -97,6 +84,9 @@ Follow-up work, roughly in priority order.
 
 ### Language
 
+- [ ] Support enum parameters in native functions so modules such as `fs` and
+      `log` do not need to convert enums to integers or strings.
+
 - [ ] **Construct all types with `T(...)`.** Replace struct literals with
       named-argument calls (`Point(x: 1.0, y: 2.0)`, with defaults and
       `..base`) and struct patterns with `Point(x, ..)`. Allow a type to
@@ -116,4 +106,3 @@ Follow-up work, roughly in priority order.
       blanket impls (`impl<T> X for T`).
 - [ ] Trait bounds on struct/enum type parameters.
 - [ ] Non-constant trait method defaults.
-- [ ] Remove the `|>` operator.

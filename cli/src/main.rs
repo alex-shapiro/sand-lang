@@ -35,7 +35,8 @@ RUN, TEST AND REPL OPTIONS (all access is denied unless allowed):
     --allow-private-net      allow connections to private and internal addresses
                              (loopback, RFC 1918, link-local, ...); by default only
                              IP literals, ranges and localhost allowed explicitly
-    --allow-listen=ADDRS     addresses the script may listen on (host:port, port 0 = any)
+    --allow-listen=ADDRS     addresses the script may listen on (ip:port, ip, localhost
+                             or *:port; port * = any, 0 = ephemeral port)
     --allow-env=NAMES        environment variables the script may read
     --allow-stdin            allow reading standard input
     --allow-timezone         allow reading the local time zone (otherwise UTC)
@@ -173,7 +174,7 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
             }
             "--allow-listen" => {
                 for h in list(&value)? {
-                    rules = rules.allow_listen(&h);
+                    rules = rules.allow_listen(&listen_pattern(&h)?);
                 }
             }
             "--allow-env" => {
@@ -280,6 +281,10 @@ fn report_policy_errors(file: &str, errors: &[sandlang::policy::PolicyError]) ->
 /// Rejects malformed network patterns (which would silently match nothing).
 fn net_pattern(p: &str) -> Result<String, String> {
     if sandlang::policy::is_valid_net_pattern(p) { Ok(p.to_string()) } else { Err(format!("invalid network pattern `{p}`")) }
+}
+
+fn listen_pattern(p: &str) -> Result<String, String> {
+    if sandlang::policy::is_valid_listen_pattern(p) { Ok(p.to_string()) } else { Err(format!("invalid listen pattern `{p}`")) }
 }
 
 fn absolute(p: &str) -> PathBuf {

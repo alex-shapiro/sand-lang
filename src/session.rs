@@ -13,7 +13,7 @@ use crate::check::{Checker, ModKind, ParsedModule};
 use crate::compile::{CompileInput, Incremental, ProgramMark, compile_more};
 use crate::diag::{Diag, FileId, Span};
 use crate::engine::{Discovery, Engine, Error, InterruptHandle, Registry, TestReport, TestResult, on_compile_stack};
-use crate::modules::{GraphMark, ModuleGraph, Snapshot, budget_error, native_info};
+use crate::modules::{GraphMark, ModuleGraph, NativeInfo, Snapshot, budget_error, native_info};
 use crate::platform::Instant;
 use crate::policy::{Capability, PromptAnswer};
 use crate::syntax::ast::{ItemKind, StmtKind};
@@ -549,7 +549,7 @@ impl Session {
             Some(Ok(s)) => Ok(Some(s)),
             Some(Err(c)) => match c.into_kind() {
                 CtlKind::Limit(k) => Err(Error::Limit(k)),
-                CtlKind::Error(message) => Err(Error::Runtime { message, trace: vec![] }),
+                CtlKind::RuntimeError(message) => Err(Error::Runtime { message, trace: vec![] }),
                 other => Err(Error::Internal { message: format!("cannot show the value: {other:?}"), trace: vec![] }),
             },
         }
@@ -659,18 +659,10 @@ impl CellJob {
         let inits: Vec<FnId> = std_inits.chain(inits).flatten().collect();
         let cp = checker.take_checked();
         let registry = &*self.registry;
-        let (native_names, native_argc) = if self.natives { native_info(&cp, registry) } else { (Vec::new(), Vec::new()) };
+        let native_info = if self.natives { native_info(&cp, registry) } else { NativeInfo::default() };
         let initialized = Some(std::mem::take(&mut self.initialized));
-        let input = CompileInput {
-            checked: &cp,
-            sm,
-            natives: &registry.by_name,
-            native_names,
-            native_argc,
-            budget,
-            initialized,
-            optimize: self.optimize,
-        };
+        let input =
+            CompileInput { checked: &cp, sm, natives: &registry.by_name, native_info, budget, initialized, optimize: self.optimize };
         let entry = compile_more(input, Arc::make_mut(&mut self.prog), &mut self.compiler, &inits);
         if let Some(stop) = budget.stopped() {
             return Err(budget_error(stop, sm, self.file));

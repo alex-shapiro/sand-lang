@@ -138,19 +138,6 @@ print(next_id())
 print(next_id())
 ```
 
-## Pipes
-
-The pipe operator `|>` passes its left operand as the first argument to the call on the right (`x |> f` evaluates `f(x)`, and `x |> f(a)` evaluates `f(x, a)`):
-
-```sand
-fn double(x: int) -> int { x * 2 }
-
-fn add(x: int, y: int) -> int { x + y }
-
-print(5 |> double |> add(1))
-print(add(double(5), 1))
-```
-
 ## Local functions and recursion
 
 Functions can be declared inside any block, capture enclosing bindings, and call themselves recursively:

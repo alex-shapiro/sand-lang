@@ -1272,6 +1272,7 @@ pub struct Program {
     /// The names of the natives, by id.
     pub native_names: Arc<[String]>,
     pub native_argc: Arc<[u16]>,
+    pub native_returns_result: Arc<[bool]>,
     /// The templates of string interpolations (`Op::Interp`).
     pub templates: Vec<Template>,
     /// The jump tables of `SwitchVariant`, `SwitchInt` and `SwitchChar`.

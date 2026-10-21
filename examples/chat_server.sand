@@ -1,6 +1,6 @@
 //! A line-oriented TCP chat server.
 //!
-//! Usage: sand run --allow-listen=127.0.0.1:7000 examples/chat_server.sand -- 127.0.0.1:7000
+//! Usage: sand run --allow-listen=127.0.0.1:7000 examples/chat_server.sand -- 7000
 //!
 //! Commands: `/nick NAME`, `/who`, `/quit`. Any other line is broadcast.
 
@@ -66,8 +66,11 @@ fn handle(c: Client) {
     }
 }
 
-let addr = env.args().first() ?? "127.0.0.1:7000"
-use listener = net.listen(addr)?
+let port = match env.args().first() {
+    Some(arg) => arg.parse_int().ok_or(error("invalid port \(arg)", kind: "invalid"))?
+    None => 7000
+}
+use listener = net.listen("127.0.0.1", port)?
 print("listening on \(listener.addr())")
 
 loop {
@@ -75,6 +78,6 @@ loop {
     next_id += 1
     let client = Client { id: next_id, name: "guest\(next_id)", conn }
     clients[client.id] = client
-    log.info("client joined", fields: ["peer": conn.peer_addr()])
+    log.info("client joined", fields: ["peer": "\(conn.peer_addr())"])
     spawn handle(client)
 }

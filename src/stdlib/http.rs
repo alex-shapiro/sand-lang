@@ -596,31 +596,26 @@ fn send(vm: &mut Vm, a: &[Value]) -> NResult {
     vm.charge_slow_bytes(method.len().saturating_add(text.len()))?;
     let url = match Url::parse(text) {
         Ok(u) => u,
-        Err(e) => return Ok(vm.err_value(e.kind, &e.message)),
+        Err(e) => return Err(Ctl::native_err(e.kind, e.message)),
     };
     if !is_token(method) {
-        return Ok(vm.err_value("invalid", &format!("invalid HTTP method {:?}", super::truncate(method, 64))));
+        return Err(Ctl::native_err("invalid", format!("invalid HTTP method {:?}", super::truncate(method, 64))));
     }
     let (method, text) = (method.to_string(), text.to_string());
-    let mut headers = match header_pairs(vm, a[2])? {
-        Ok(h) => h,
-        Err(e) => return Ok(vm.err_value("invalid", &e)),
-    };
-    if let Some(denied) = check_permission(vm, url.capability(&method))? {
-        return Ok(denied);
-    }
+    let mut headers = header_pairs(vm, a[2])?;
+    check_permission(vm, url.capability(&method))?;
     if let Err(reason) = filter_request(vm, &url, &mut headers) {
-        return Ok(vm.err_value("permission_denied", &reason));
+        return Err(Ctl::native_err("permission_denied", reason));
     }
     // The request is held outside the heap while it is sent.
-    let mut res = super::or_return!(vm.reserve_io(vm.heap.bytes_of(a[3]).len()));
+    let mut res = vm.reserve_io(vm.heap.bytes_of(a[3]).len())?;
     let pool = vm.host.http_pool.clone();
     let idle = pool.take(&url.origin());
     let slot = match idle {
         Some(_) => None,
         None => {
             let buffers = if url.scheme == "https" { net::CONN_BUFFER + net::TLS_BUFFERS } else { net::CONN_BUFFER };
-            Some(super::or_return!(vm.resource_slot_with(buffers, "a connection")))
+            Some(vm.resource_slot_with(buffers, "a connection")?)
         }
     };
     let body = vm.heap.bytes_of(a[3]);
@@ -631,7 +626,7 @@ fn send(vm: &mut Vm, a: &[Value]) -> NResult {
         request_head(&method, &url, &headers, if sized { Delimit::Length(body.len() as u64) } else { Delimit::None }, close).into_bytes();
     request.extend_from_slice(body);
     if let Err(e) = res.ensure(request.len()) {
-        return Ok(vm.err_value("limit", &format!("cannot buffer the request: {e}")));
+        return Err(Ctl::native_err("limit", format!("cannot buffer the request: {e}")));
     }
     let timeout = Duration::from_nanos(a[4].as_int().max(0) as u64);
     let head_only = method.eq_ignore_ascii_case("HEAD");
@@ -742,27 +737,22 @@ fn start_upload(vm: &mut Vm, a: &[Value]) -> NResult {
     vm.charge_slow_bytes(method.len() + text.len())?;
     let url = match Url::parse(&text) {
         Ok(u) => u,
-        Err(e) => return Ok(vm.err_value(e.kind, &e.message)),
+        Err(e) => return Err(Ctl::native_err(e.kind, e.message)),
     };
     if !is_token(&method) {
-        return Ok(vm.err_value("invalid", &format!("invalid HTTP method {:?}", super::truncate(&method, 64))));
+        return Err(Ctl::native_err("invalid", format!("invalid HTTP method {:?}", super::truncate(&method, 64))));
     }
-    let mut headers = match header_pairs(vm, a[2])? {
-        Ok(h) => h,
-        Err(e) => return Ok(vm.err_value("invalid", &e)),
-    };
+    let mut headers = header_pairs(vm, a[2])?;
     let length = match given_length(&headers) {
         Ok(n) => n,
-        Err(e) => return Ok(vm.err_value("invalid", &e)),
+        Err(e) => return Err(Ctl::native_err("invalid", e)),
     };
-    if let Some(denied) = check_permission(vm, url.capability(&method))? {
-        return Ok(denied);
-    }
+    check_permission(vm, url.capability(&method))?;
     if let Err(reason) = filter_request(vm, &url, &mut headers) {
-        return Ok(vm.err_value("permission_denied", &reason));
+        return Err(Ctl::native_err("permission_denied", reason));
     }
     let buffers = if url.scheme == "https" { net::CONN_BUFFER + net::TLS_BUFFERS } else { net::CONN_BUFFER };
-    let slot = super::or_return!(vm.resource_slot_with(buffers, "a connection"));
+    let slot = vm.resource_slot_with(buffers, "a connection")?;
     let delimit = length.map_or(Delimit::Chunked, Delimit::Length);
     let head = request_head(&method, &url, &headers, delimit, true);
     let timeout = Duration::from_nanos(a[3].as_int().max(0) as u64);
@@ -774,7 +764,7 @@ fn start_upload(vm: &mut Vm, a: &[Value]) -> NResult {
             return Ok(net::Conn::from_stream(stream, peer));
         }
         let (r, w) = tokio::io::split(net::tls::connect(&tls, &url.host, stream).await?);
-        Ok(net::Conn::new(Box::new(r), Box::new(w), peer.to_string()))
+        Ok(net::Conn::new(Box::new(r), Box::new(w), peer.into()))
     };
     suspend(
         async move {
@@ -799,20 +789,20 @@ fn write_body(vm: &mut Vm, a: &[Value]) -> NResult {
     let last = a[3].as_bool();
     let out = vm.heap.native::<Outgoing>(a[1]).ok_or_else(|| Ctl::internal("not an outgoing body"))?;
     if out.finished {
-        return Ok(vm.err_value("closed", "the body has been finished"));
+        return Err(Ctl::native_err("closed", "the body has been finished"));
     }
     let left = out.left.map(|left| left.checked_sub(n as u64));
     let sent = out.delimit != Delimit::None;
     match left {
-        Some(None) => return Ok(vm.err_value("invalid", "the body is longer than its content-length")),
+        Some(None) => return Err(Ctl::native_err("invalid", "the body is longer than its content-length")),
         Some(Some(more)) if last && more > 0 && sent => {
-            return Ok(vm.err_value("invalid", &format!("the body is {more} bytes shorter than its content-length")));
+            return Err(Ctl::native_err("invalid", format!("the body is {more} bytes shorter than its content-length")));
         }
         _ => {}
     }
     let len = out.head.as_ref().map_or(0, Vec::len) + if sent { n + 32 } else { 0 };
     vm.charge_bytes(len)?;
-    let res = super::or_return!(vm.reserve_io(len));
+    let res = vm.reserve_io(len)?;
     let out = vm.heap.native_mut::<Outgoing>(a[1]).expect("checked above");
     out.left = left.flatten();
     out.finished = last;
@@ -846,10 +836,7 @@ fn write_body(vm: &mut Vm, a: &[Value]) -> NResult {
 /// `read_response(conn, head_only, timeout)`: reads the response to an
 /// upload: `(status, headers, body)`, the body read from `conn`.
 fn read_response(vm: &mut Vm, a: &[Value]) -> NResult {
-    let h = match net::conn_handle(vm, a[0])? {
-        Ok(h) => h,
-        Err(e) => return Ok(e),
-    };
+    let h = net::conn_handle(vm, a[0])?;
     let head_only = a[1].as_bool();
     let timeout = Duration::from_nanos(a[2].as_int().max(0) as u64);
     let max_body = vm.host.limits.max_http_body;

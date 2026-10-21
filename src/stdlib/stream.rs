@@ -2,8 +2,8 @@
 //! thread (`io`'s standard input, `net`, `http`).
 
 use super::io_kind;
+use crate::vm::Ctl;
 use crate::vm::iomem::{MemoryLimit, Reservation};
-use crate::vm::{NResult, Vm};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt};
 
 /// An error produced off the VM thread, turned into a Sand `Error` on it.
@@ -17,10 +17,11 @@ impl IoFailure {
     pub fn new(kind: &'static str, message: impl Into<String>) -> IoFailure {
         IoFailure { kind, message: message.into() }
     }
+}
 
-    /// The `Err(Error)` value for `self`.
-    pub fn into_value(self, vm: &mut Vm) -> NResult {
-        Ok(vm.err_value(self.kind, &self.message))
+impl From<IoFailure> for Ctl {
+    fn from(e: IoFailure) -> Ctl {
+        Ctl::native_err(e.kind, e.message)
     }
 }
 

@@ -533,7 +533,7 @@ macro_rules! host_fn_impls {
                         guard($(&$a),*)
                     };
                     if !vm.permit(&cap)? {
-                        return Ok(vm.err_value("permission_denied", &format!("permission denied: {cap}")));
+                        return Err(Ctl::native_err("permission_denied", format!("permission denied: {cap}")));
                     }
                     let r = {
                         let (mut it, mut conv) = (args.iter(), Conversion::new());

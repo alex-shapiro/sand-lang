@@ -3,7 +3,7 @@
 use crate::check::ModKind;
 use crate::engine::Registry;
 use crate::vm::value::Value;
-use crate::vm::{NResult, Vm};
+use crate::vm::{Ctl, NResult, Vm};
 
 const STANDARD: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 const URL_SAFE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -31,7 +31,7 @@ fn decode_native(vm: &mut Vm, text: Value, url: bool) -> NResult {
             let b = vm.heap.new_bytes(bytes);
             Ok(vm.ok(b))
         }
-        Err(msg) => Ok(vm.err_value("parse", &msg)),
+        Err(msg) => Err(Ctl::native_err("parse", msg)),
     }
 }
 

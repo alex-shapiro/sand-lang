@@ -4,7 +4,7 @@
 use super::path::{Seg, Tok};
 use crate::vm::value::FxHashMap;
 use std::borrow::Cow;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 /// A host pattern: `host`, `*.domain`, `*`, an IP address or a CIDR range,
 /// optionally with a port.
@@ -27,17 +27,29 @@ pub(crate) enum HostKind {
     Ip(IpAddr, u8),
 }
 
-/// Whether `pattern` is a valid network pattern (see [`super::RulePolicy::allow_net`]).
+/// Returns true if `pattern` is a valid network pattern (see [`super::RulePolicy::allow_net`]).
 pub fn is_valid_net_pattern(pattern: &str) -> bool {
     NetPattern::parse(pattern).is_some()
 }
 
-/// A host name in canonical form (lower case, without a trailing dot), if
-/// `name` is one.
-fn host_name(name: &str) -> Option<String> {
+/// Returns true if `pattern` is a valid listen pattern (see [`super::RulePolicy::allow_listen`]).
+pub fn is_valid_listen_pattern(pattern: &str) -> bool {
+    ListenPattern::parse(pattern).is_some()
+}
+
+/// Returns true if `host` is an unbracketed IP address or a valid hostname.
+#[cfg(feature = "os")]
+pub(crate) fn is_valid_host(host: &str) -> bool {
+    host.parse::<IpAddr>().is_ok() || canonical_hostname(host).is_some()
+}
+
+/// Validates `name` as a hostname (at most 253 bytes of `.`-separated labels of
+/// 1 to 63 ASCII alphanumeric, `-`, or `_` characters) and returns it in
+/// lowercase without a trailing dot.
+fn canonical_hostname(name: &str) -> Option<String> {
     let name = name.strip_suffix('.').unwrap_or(name);
-    let valid = !name.is_empty() && !name.starts_with('.') && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b));
-    valid.then(|| name.to_ascii_lowercase())
+    let label_ok = |l: &str| (1..=63).contains(&l.len()) && l.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b));
+    (name.len() <= 253 && name.split('.').all(label_ok)).then(|| name.to_ascii_lowercase())
 }
 
 impl NetPattern {
@@ -65,13 +77,13 @@ impl NetPattern {
             }
         };
         let port = match port {
-            Some(p) => Some(p.parse::<u16>().ok()?),
+            Some(p) => Some(parse_port(p)?),
             None => None,
         };
         let kind = if body == "*" {
             HostKind::Any
         } else if let Some(suffix) = body.strip_prefix("*.") {
-            HostKind::Suffix(host_name(suffix)?)
+            HostKind::Suffix(canonical_hostname(suffix)?)
         } else if let Some((ip, len)) = body.split_once('/') {
             let ip: IpAddr = ip.parse().ok()?;
             let len: u8 = len.parse().ok()?;
@@ -85,7 +97,7 @@ impl NetPattern {
         } else if let Some(ip) = body_ip(&body) {
             HostKind::Ip(ip, full_len(ip))
         } else {
-            HostKind::Host(host_name(&body)?)
+            HostKind::Host(canonical_hostname(&body)?)
         };
         Some(NetPattern { kind, port })
     }
@@ -359,20 +371,79 @@ fn is_private_v6(ip: Ipv6Addr) -> bool {
     }
 }
 
-/// A listen address pattern: `host:port`, either part `*`, port `0` any.
-/// Returns how narrowly it matches `addr` (if it does): host and port
-/// given count 2 and 1.
-pub(crate) fn listen_match(pattern: &str, addr: &str) -> Option<u32> {
-    if pattern == "*" {
-        return Some(0);
+/// Formats `host` and `port` as `host:port`, enclosing IPv6 addresses in brackets.
+pub fn format_host_port(host: &str, port: u16) -> String {
+    if host.contains(':') { format!("[{host}]:{port}") } else { format!("{host}:{port}") }
+}
+
+/// Formats `scheme://host[:port]`, omitting the port if it is the default for `scheme`.
+pub(crate) fn format_url_origin(scheme: &str, host: &str, port: u16) -> String {
+    let default = if scheme == "http" { 80 } else { 443 };
+    let host = if host.contains(':') { format!("[{host}]") } else { host.to_string() };
+    if port == default { format!("{scheme}://{host}") } else { format!("{scheme}://{host}:{port}") }
+}
+
+/// Splits `host`, `host:port`, `[ipv6]`, or `[ipv6]:port` into an unbracketed
+/// host and an optional port string. Unbracketed IPv6 addresses are returned
+/// without a port.
+pub(crate) fn split_port(text: &str) -> Option<(&str, Option<&str>)> {
+    match text.strip_prefix('[') {
+        Some(rest) => {
+            let (ip, after) = rest.split_once(']')?;
+            ip.parse::<Ipv6Addr>().ok()?;
+            Some((ip, if after.is_empty() { None } else { Some(after.strip_prefix(':')?) }))
+        }
+        None => Some(match text.split_once(':') {
+            Some((host, port)) if !port.contains(':') => (host, Some(port)),
+            _ => (text, None),
+        }),
     }
-    let (ph, pp) = pattern.rsplit_once(':').unwrap_or((pattern, "0"));
-    let (ah, ap) = addr.rsplit_once(':').unwrap_or((addr, "0"));
-    let any_host = ph == "*";
-    let host_ok =
-        any_host || ph.trim_matches(['[', ']']) == ah.trim_matches(['[', ']']) || (ph == "localhost" && (ah == "127.0.0.1" || ah == "::1"));
-    let any_port = pp == "0" || pp == "*";
-    (host_ok && (any_port || pp == ap)).then_some(2 * !any_host as u32 + !any_port as u32)
+}
+
+/// Parses an ASCII decimal port number.
+pub(crate) fn parse_port(text: &str) -> Option<u16> {
+    if text.bytes().all(|b| b.is_ascii_digit()) { text.parse().ok() } else { None }
+}
+
+/// A parsed listen rule pattern (see [`super::RulePolicy::allow_listen`]).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct ListenPattern {
+    host: ListenHost,
+    port: Option<u16>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum ListenHost {
+    Any,
+    Loopback,
+    Ip(IpAddr),
+}
+
+impl ListenPattern {
+    pub(crate) fn parse(text: &str) -> Option<ListenPattern> {
+        let (host, port) = split_port(text)?;
+        let host = match host {
+            "*" => ListenHost::Any,
+            _ if is_localhost(host) => ListenHost::Loopback,
+            _ => ListenHost::Ip(parse_ip(host)?),
+        };
+        let port = match port {
+            None | Some("*") => None,
+            Some(p) => Some(parse_port(p)?),
+        };
+        Some(ListenPattern { host, port })
+    }
+
+    /// Returns the specificity score if `self` matches `addr`.
+    pub(crate) fn matches(&self, addr: SocketAddr) -> Option<u32> {
+        let host_ok = match self.host {
+            ListenHost::Any => true,
+            ListenHost::Loopback => addr.ip().to_canonical().is_loopback(),
+            ListenHost::Ip(ip) => addr.ip().to_canonical() == ip,
+        };
+        let port_ok = self.port.is_none_or(|p| p == addr.port());
+        (host_ok && port_ok).then_some(2 * (self.host != ListenHost::Any) as u32 + self.port.is_some() as u32)
+    }
 }
 
 /// A URL pattern of an `http` rule: `[scheme://]host[:port][/path]`.

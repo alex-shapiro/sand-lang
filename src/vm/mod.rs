@@ -16,6 +16,7 @@ use crate::{LimitKind, Limits};
 use bytecode::*;
 use heap::{Heap, Staging};
 use meter::Meter;
+use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::path::PathBuf;
@@ -59,8 +60,13 @@ const _: () = assert!(std::mem::size_of::<Result<Option<Value>, Ctl>>() == 16);
 
 /// What a [`Ctl`] is.
 pub enum CtlKind {
-    /// The script failed with an error, `kind: message`.
-    Error(String),
+    /// Uncaught runtime error (`kind: message`) that terminates the run (see [`Ctl::fail`]).
+    RuntimeError(String),
+    /// Recoverable native failure returned to the script as `Err(Error { kind, message })` (see [`Ctl::native_err`]).
+    NativeErr {
+        kind: Cow<'static, str>,
+        message: String,
+    },
     /// An invariant of the engine broke: a bug, which ends a session.
     Internal(String),
     Limit(LimitKind),
@@ -83,10 +89,19 @@ pub enum CtlKind {
 }
 
 impl Ctl {
-    /// The script fails with an error of kind `kind`.
+    /// Aborts execution with a runtime error of kind `kind`. Use
+    /// [`Ctl::native_err`] to return a recoverable `Err` to the script.
     #[cold]
     pub fn fail(kind: &str, msg: impl std::fmt::Display) -> Ctl {
-        Ctl(Box::new(CtlKind::Error(format!("{kind}: {msg}"))))
+        Ctl(Box::new(CtlKind::RuntimeError(format!("{kind}: {msg}"))))
+    }
+
+    /// Returns `Err(Error { kind, message })` from a native function that
+    /// returns `Result`. Returning this from a native with any other return
+    /// type is an internal error.
+    #[cold]
+    pub fn native_err(kind: impl Into<Cow<'static, str>>, message: impl Into<String>) -> Ctl {
+        Ctl(Box::new(CtlKind::NativeErr { kind: kind.into(), message: message.into() }))
     }
 
     /// An internal error: an invariant of the engine broke.
@@ -154,7 +169,8 @@ impl std::fmt::Debug for Ctl {
 impl std::fmt::Debug for CtlKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CtlKind::Error(m) => write!(f, "Error({m})"),
+            CtlKind::RuntimeError(m) => write!(f, "RuntimeError({m})"),
+            CtlKind::NativeErr { kind, message } => write!(f, "NativeErr({kind}: {message})"),
             CtlKind::Internal(m) => write!(f, "Internal({m})"),
             CtlKind::Limit(k) => write!(f, "Limit({k:?})"),
             CtlKind::Exit(c) => write!(f, "Exit({c})"),
@@ -171,11 +187,11 @@ impl std::fmt::Debug for CtlKind {
 impl From<&str> for Ctl {
     /// An error whose message `msg` is `kind: message`.
     fn from(msg: &str) -> Ctl {
-        Ctl(Box::new(CtlKind::Error(msg.to_string())))
+        Ctl(Box::new(CtlKind::RuntimeError(msg.to_string())))
     }
 }
 
-/// Fails with an error of kind `kind`.
+/// Aborts execution with a runtime error of kind `kind` (see [`Ctl::fail`]).
 pub fn fail<T>(kind: &str, msg: impl std::fmt::Display) -> Result<T, Ctl> {
     Err(Ctl::fail(kind, msg))
 }
@@ -255,6 +271,8 @@ pub struct Fiber {
     pub wgen: u64,
     /// Absolute stack slot receiving the result of a blocking call.
     pub result_slot: usize,
+    /// Native ID of the suspended call writing to `result_slot`.
+    pub result_native: u32,
     /// Tasks to cancel when a `race` completes.
     pub race: Vec<Value>,
     /// Fibers waiting for this one: (fiber, generation).
@@ -268,7 +286,7 @@ pub struct Fiber {
 }
 
 /// One frame of a runtime error's stack trace.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraceEntry {
     pub function: String,
     pub file: String,
@@ -469,7 +487,9 @@ pub struct Host {
     pub args: Vec<String>,
     pub env: Option<Vec<(String, String)>>,
     pub rng: Rng,
-    pub log_level: u8,
+    /// Minimum active script log level, or `None` if logging is disabled.
+    pub log_level: Option<crate::LogLevel>,
+    pub(crate) log_sink: Option<Arc<dyn crate::LogSink>>,
     pub interrupt: Arc<AtomicBool>,
     /// Cached decisions for stdout (index 0) and stderr (1).
     pub stream_decisions: [Option<bool>; 2],
@@ -523,6 +543,8 @@ pub struct Vm {
     /// Set while a native that asked for a collection (`CtlKind::Collect`)
     /// is called again after it.
     pub(crate) collected: bool,
+    /// Function and instruction pointer of the active native call.
+    caller_site: (u32, u32),
     pub cancel_current: bool,
     /// Set while the tasks left at the end of a run unwind (`end_tasks`):
     /// `drive` stops instead of waiting for I/O.
@@ -631,6 +653,7 @@ impl Vm {
             deadline: None,
             gc_retry: false,
             collected: false,
+            caller_site: (0, 0),
             cancel_current: false,
             ending: false,
             pinned: Vec::new(),
@@ -886,46 +909,45 @@ impl Vm {
         iomem::Reservation::new(&self.heap.io_memory)
     }
 
-    /// Like [`Vm::io_reservation`], reserving `bytes` at once. `Err` asks for
-    /// a collection and a retry (propagate it with `?`); `Ok(Err(e))`: they
-    /// still do not fit, and `e` is the `"limit"` error value to return.
-    pub fn reserve_io(&mut self, bytes: usize) -> Result<Result<iomem::Reservation, Value>, Ctl> {
+    /// Reserves `bytes` of off-heap I/O memory before a side effect. Triggers a
+    /// garbage collection and retry if the limit is reached, then fails with
+    /// kind `"limit"` if `bytes` still do not fit.
+    pub fn reserve_io(&mut self, bytes: usize) -> Result<iomem::Reservation, Ctl> {
+        self.try_reserve_io(bytes)?.ok_or_else(|| Ctl::native_err("limit", format!("cannot buffer {bytes} bytes: {}", iomem::MemoryLimit)))
+    }
+
+    /// Like [`Vm::reserve_io`], but returns `Ok(None)` if `bytes` do not fit
+    /// after a retry.
+    pub fn try_reserve_io(&mut self, bytes: usize) -> Result<Option<iomem::Reservation>, Ctl> {
         let mut r = self.io_reservation();
         match r.ensure(bytes) {
-            Ok(()) => Ok(Ok(r)),
+            Ok(()) => Ok(Some(r)),
             Err(_) if !self.collected => Err(CtlKind::Collect.into()),
-            Err(e) => Ok(Err(self.err_value("limit", &format!("cannot buffer {bytes} bytes: {e}")))),
+            Err(_) => Ok(None),
         }
     }
 
-    /// A slot for a resource about to be opened, counted against
-    /// `max_open_resources` until dropped. At the limit, `Err` asks for a
-    /// collection (which closes dropped resources) and a retry: propagate it
-    /// with `?` before any side effect. `Ok(Err(e))`: still at the limit, and
-    /// `e` is the `"limit"` error value to return.
-    pub fn resource_slot(&mut self) -> Result<Result<iomem::ResourceSlot, Value>, Ctl> {
+    /// Acquires an open-resource slot counted against `max_open_resources`
+    /// before a side effect. Triggers a garbage collection and retry if the
+    /// limit is reached, then fails with kind `"limit"` if the limit is still
+    /// reached.
+    pub fn resource_slot(&mut self) -> Result<iomem::ResourceSlot, Ctl> {
         match iomem::ResourceSlot::try_new(&self.heap.io_memory) {
-            Some(slot) => Ok(Ok(slot)),
+            Some(slot) => Ok(slot),
             None if !self.collected => Err(CtlKind::Collect.into()),
-            None => {
-                let max = self.heap.io_memory.max_resources();
-                Ok(Err(self.err_value("limit", &format!("too many open resources (limit {max})"))))
-            }
+            None => Err(Ctl::native_err("limit", format!("too many open resources (limit {})", self.heap.io_memory.max_resources()))),
         }
     }
 
     /// Like [`Vm::resource_slot`], also reserving `buffers` bytes for the
-    /// fixed buffers of the resource (`what`, for the message: "a connection").
-    pub fn resource_slot_with(&mut self, buffers: usize, what: &str) -> Result<Result<iomem::ResourceSlot, Value>, Ctl> {
-        let mut slot = match self.resource_slot()? {
-            Ok(s) => s,
-            Err(e) => return Ok(Err(e)),
-        };
+    /// fixed buffers of `what` (such as `"a connection"`).
+    pub fn resource_slot_with(&mut self, buffers: usize, what: &str) -> Result<iomem::ResourceSlot, Ctl> {
+        let mut slot = self.resource_slot()?;
         self.heap.io_memory.publish_heap(self.heap.used());
         match slot.reserve_buffers(buffers) {
-            Ok(()) => Ok(Ok(slot)),
+            Ok(()) => Ok(slot),
             Err(_) if !self.collected => Err(CtlKind::Collect.into()),
-            Err(e) => Ok(Err(self.err_value("limit", &format!("cannot open {what}: its buffers ({buffers} bytes) do not fit: {e}")))),
+            Err(e) => Err(Ctl::native_err("limit", format!("cannot open {what}: its buffers ({buffers} bytes) do not fit: {e}"))),
         }
     }
 
@@ -1106,6 +1128,10 @@ impl Vm {
     /// limits; a denial fails (as `print` does).
     pub fn write_stream(&mut self, which: u8, data: &[u8]) -> Result<(), Ctl> {
         self.admit_output(which, data.len())?;
+        self.write_counted(which, data)
+    }
+
+    pub(crate) fn write_counted(&mut self, which: u8, data: &[u8]) -> Result<(), Ctl> {
         let _ = self.stream_sink(which).write(data);
         self.limit_backlog(which)
     }
@@ -1139,7 +1165,7 @@ impl Vm {
         };
         if !self.output_allowed(which)? {
             let name = if which == 1 { "stdout" } else { "stderr" };
-            return Ok(self.err_value("permission_denied", &format!("permission denied: {name}")));
+            return Err(Ctl::native_err("permission_denied", format!("permission denied: {name}")));
         }
         self.count_output(which, len)?;
         let data = match self.heap.get(v) {
@@ -1151,7 +1177,7 @@ impl Vm {
                 self.limit_backlog(which)?;
                 Ok(self.ok(Value::Unit))
             }
-            Err(e) => Ok(self.err_value(crate::stdlib::io_kind(&e), &e.to_string())),
+            Err(e) => Err(Ctl::native_err(crate::stdlib::io_kind(&e), e.to_string())),
         }
     }
 
@@ -1165,7 +1191,7 @@ impl Vm {
     }
 
     /// Whether the policy allows writing to stream `which`.
-    fn output_allowed(&mut self, which: u8) -> Result<bool, Ctl> {
+    pub(crate) fn output_allowed(&mut self, which: u8) -> Result<bool, Ctl> {
         let slot = usize::from(which != 1);
         let allowed = match self.host.stream_decisions[slot] {
             Some(d) => d,
@@ -1187,7 +1213,7 @@ impl Vm {
     }
 
     /// Counts `len` bytes written to stream `which` against the output limit.
-    fn count_output(&mut self, which: u8, len: usize) -> Result<(), Ctl> {
+    pub(crate) fn count_output(&mut self, which: u8, len: usize) -> Result<(), Ctl> {
         self.host.output_bytes += len as u64;
         if let Some(max) = self.host.limits.max_output_bytes
             && self.host.output_bytes > max
@@ -1241,6 +1267,7 @@ impl Vm {
                     state: FiberState::Ready,
                     wgen: 0,
                     result_slot: 0,
+                    result_native: 0,
                     race: vec![],
                     waiters: vec![],
                     waiters_prune_at: MIN_PRUNE,
@@ -1563,30 +1590,56 @@ impl Vm {
         let mut out = Vec::new();
         let n = fiber.frames.len();
         for (i, fr) in fiber.frames.iter().enumerate().rev() {
-            let proto = &self.prog.protos[fr.proto as usize];
             let at = if i + 1 == n { ip.unwrap_or(fr.ip) } else { fr.ip };
-            let idx = (at as usize).saturating_sub(1).min(proto.lines.len().saturating_sub(1));
-            let mut line = proto.lines.get(idx).copied().unwrap_or(0) as usize;
-            if proto.name == "<entry>" {
-                continue;
-            }
-            let mut site = proto.sites.get(idx).copied().unwrap_or(0);
-            while let Some(s) = (site as usize).checked_sub(1).and_then(|i| proto.inlined.get(i)) {
-                out.push(TraceEntry {
-                    function: s.name.clone(),
-                    file: self.prog.files.get(s.file as usize).cloned().unwrap_or_default(),
-                    line,
-                });
-                line = s.line as usize;
-                site = s.parent;
-            }
-            let name = if proto.name.starts_with('<') && proto.name.ends_with('>') && proto.name != "<lambda>" && proto.name != "<spawn>" {
-                "<top level>".to_string()
-            } else {
-                proto.name.clone()
-            };
-            out.push(TraceEntry { function: name, file: self.prog.files.get(proto.file as usize).cloned().unwrap_or_default(), line });
+            self.trace_frame(fr.proto, at, &mut out);
         }
         out
+    }
+
+    /// Converts a [`CtlKind::NativeErr`] from `native` into an `Err(Error)`
+    /// value, or returns an internal error if `native` does not return `Result`.
+    #[cold]
+    pub(crate) fn native_err_value(&mut self, native: u32, c: Ctl) -> NResult {
+        let CtlKind::NativeErr { kind, message } = c.into_kind() else { unreachable!("not a NativeErr") };
+        if !self.prog.native_returns_result.get(native as usize).copied().unwrap_or(false) {
+            let name = self.prog.native_names.get(native as usize).map_or("?", |n| n.as_str());
+            return internal(format!("{name} returned Err({kind}: {message}) but does not return a Result"));
+        }
+        self.reserve(kind.len() + message.len())?;
+        Ok(self.err_value(&kind, &message))
+    }
+
+    /// Returns the innermost script frame that called the active native function.
+    pub(crate) fn native_caller(&self) -> Option<TraceEntry> {
+        let mut out = Vec::new();
+        self.trace_frame(self.caller_site.0, self.caller_site.1, &mut out);
+        out.into_iter().next()
+    }
+
+    /// Appends the stack trace entries for `proto` at instruction `at` to `out`,
+    /// from innermost inlined call to outermost.
+    fn trace_frame(&self, proto: u32, at: u32, out: &mut Vec<TraceEntry>) {
+        let proto = &self.prog.protos[proto as usize];
+        if proto.name == "<entry>" {
+            return;
+        }
+        let idx = (at as usize).saturating_sub(1).min(proto.lines.len().saturating_sub(1));
+        let mut line = proto.lines.get(idx).copied().unwrap_or(0) as usize;
+        let mut site = proto.sites.get(idx).copied().unwrap_or(0);
+        while let Some(s) = (site as usize).checked_sub(1).and_then(|i| proto.inlined.get(i)) {
+            out.push(TraceEntry {
+                function: s.name.clone(),
+                file: self.prog.files.get(s.file as usize).cloned().unwrap_or_default(),
+                line,
+            });
+            line = s.line as usize;
+            site = s.parent;
+        }
+        let name = if proto.name.starts_with('<') && proto.name.ends_with('>') && proto.name != "<lambda>" && proto.name != "<spawn>" {
+            "<top level>".to_string()
+        } else {
+            proto.name.clone()
+        };
+        out.push(TraceEntry { function: name, file: self.prog.files.get(proto.file as usize).cloned().unwrap_or_default(), line });
     }
 }

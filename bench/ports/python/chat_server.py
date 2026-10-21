@@ -2,7 +2,7 @@
 
 CPython port of examples/chat_server.sand, using asyncio streams.
 
-Usage: python3 chat_server.py 127.0.0.1:7000
+Usage: python3 chat_server.py 7000
 
 Commands: `/nick NAME`, `/who`, `/quit`. Any other line is broadcast.
 """
@@ -87,9 +87,8 @@ async def on_connect(reader: asyncio.StreamReader, writer: asyncio.StreamWriter)
 
 
 async def main() -> None:
-    addr = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1:7000"
-    host, _, port = addr.rpartition(":")
-    server = await asyncio.start_server(on_connect, host, int(port))
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 7000
+    server = await asyncio.start_server(on_connect, "127.0.0.1", port)
     async with server:
         bound = server.sockets[0].getsockname()
         print(f"listening on {bound[0]}:{bound[1]}", flush=True)

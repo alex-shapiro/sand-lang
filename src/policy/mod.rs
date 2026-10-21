@@ -17,7 +17,10 @@ mod rules;
 pub use file::{PolicyError, PolicyFile, parse_duration, parse_size, rule_for};
 pub use format::format_policy;
 pub use lint::lint_policy;
-pub use net::{is_private_address, is_valid_net_pattern};
+use net::format_url_origin;
+pub use net::{format_host_port, is_private_address, is_valid_listen_pattern, is_valid_net_pattern};
+#[cfg(feature = "os")]
+pub(crate) use net::{is_valid_host, parse_port, split_port};
 pub use rules::RulePolicy;
 
 /// A request to perform an effect outside the sandbox.
@@ -25,7 +28,7 @@ pub use rules::RulePolicy;
 pub enum Capability {
     FsRead(PathBuf),
     FsWrite(PathBuf),
-    /// Outgoing connection, by the host name (or IP literal) the script used.
+    /// Outgoing connection to a hostname or unbracketed IP address.
     Net {
         host: String,
         port: u16,
@@ -47,8 +50,8 @@ pub enum Capability {
         host: String,
         addr: SocketAddr,
     },
-    /// Listening socket address (`host:port`).
-    NetListen(String),
+    /// Binding a listener to `SocketAddr` (port `0` requests an ephemeral port).
+    NetListen(SocketAddr),
     /// Environment variable (`"*"` for all).
     Env(String),
     Stdin,
@@ -70,19 +73,14 @@ impl fmt::Display for Capability {
         match self {
             Capability::FsRead(p) => write!(f, "read {}", p.display()),
             Capability::FsWrite(p) => write!(f, "write {}", p.display()),
-            Capability::Net { host, port } => write!(f, "connect to {host}:{port}"),
+            Capability::Net { host, port } => write!(f, "connect to {}", format_host_port(host, *port)),
             Capability::Http { method, scheme, host, port, path } => {
-                let host = if host.contains(':') { format!("[{host}]") } else { host.clone() };
-                let default = if scheme == "http" { 80 } else { 443 };
-                if *port == default {
-                    write!(f, "{method} {scheme}://{host}{path}")
-                } else {
-                    write!(f, "{method} {scheme}://{host}:{port}{path}")
-                }
+                write!(f, "{method} {}{path}", format_url_origin(scheme, host, *port))
             }
             Capability::NetAddr { host, addr } if *host == addr.ip().to_string() => write!(f, "connect to {addr}"),
             Capability::NetAddr { host, addr } => write!(f, "connect to {host} at {addr}"),
-            Capability::NetListen(a) => write!(f, "listen on {a}"),
+            Capability::NetListen(addr) if addr.port() == 0 => write!(f, "listen on an ephemeral port at {}", addr.ip()),
+            Capability::NetListen(addr) => write!(f, "listen on {addr}"),
             Capability::Env(n) => write!(f, "read environment variable {n}"),
             Capability::Stdin => write!(f, "read standard input"),
             Capability::Stdout => write!(f, "write standard output"),

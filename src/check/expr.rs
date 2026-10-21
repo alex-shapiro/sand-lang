@@ -19,9 +19,8 @@ pub(crate) struct CallArgs<'e> {
 }
 
 impl<'e> CallArgs<'e> {
-    /// `args`, after `first` if given (the left side of `|>`).
-    pub(crate) fn new(first: Option<&'e Expr>, args: &'e [Arg]) -> CallArgs<'e> {
-        let mut positional: Vec<&Expr> = first.into_iter().collect();
+    pub(crate) fn new(args: &'e [Arg]) -> CallArgs<'e> {
+        let mut positional = Vec::new();
         let mut named = Vec::new();
         for a in args {
             match &a.name {
@@ -784,7 +783,6 @@ impl Checker {
             ExprKind::StructLit { path, fields, base } => self.check_struct_lit(path, fields, base.as_deref(), span),
             ExprKind::Unary(op, inner) => self.check_unary(*op, inner, span),
             ExprKind::Binary(op, l, r) => self.check_binary(*op, l, r, span),
-            ExprKind::Pipe(l, r) => self.check_pipe(l, r, span),
             ExprKind::Coalesce(l, r) => {
                 let lh = self.infer(l, None);
                 let lt = self.resolve(lh.ty);
@@ -816,8 +814,8 @@ impl Checker {
                 let eh = self.check_expr(en, TypeId::INT);
                 mk(HKind::Range { start: Box::new(sh), end: Box::new(eh), inclusive: *inclusive }, TypeId::RANGE, span)
             }
-            ExprKind::Call { callee, args } => self.check_call(callee, &CallArgs::new(None, args), span),
-            ExprKind::MethodCall { receiver, method, args } => self.check_method_call(receiver, method, &CallArgs::new(None, args), span),
+            ExprKind::Call { callee, args } => self.check_call(callee, &CallArgs::new(args), span),
+            ExprKind::MethodCall { receiver, method, args } => self.check_method_call(receiver, method, &CallArgs::new(args), span),
             ExprKind::Field(obj, name) => self.check_field(obj, name, hint, span),
             ExprKind::TupleField(obj, idx, ispan) => {
                 let o = self.infer(obj, None);
@@ -1795,26 +1793,6 @@ impl Checker {
                 }
                 self.error(method.span, msg);
                 self.infer_args(args);
-                err(span)
-            }
-        }
-    }
-
-    /// `l |> r`: `l` is the first argument of the call `r`.
-    fn check_pipe(&mut self, l: &Expr, r: &Expr, span: Span) -> HExpr {
-        match &r.kind {
-            ExprKind::Call { callee, args } => self.check_call(callee, &CallArgs::new(Some(l), args), span),
-            ExprKind::MethodCall { receiver, method, args } => {
-                self.check_method_call(receiver, method, &CallArgs::new(Some(l), args), span)
-            }
-            ExprKind::Ident(_) | ExprKind::Field(..) => self.check_call(r, &CallArgs::new(Some(l), &[]), span),
-            ExprKind::Lambda { .. } | ExprKind::Paren(_) => {
-                let c = self.infer(r, None);
-                self.call_value(c, &CallArgs::new(Some(l), &[]), span)
-            }
-            _ => {
-                self.error(r.span, "the right side of `|>` must be a function name or call");
-                self.infer(l, None);
                 err(span)
             }
         }

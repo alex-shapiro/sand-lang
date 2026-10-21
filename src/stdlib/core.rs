@@ -515,7 +515,7 @@ fn register_bytes(r: &mut Registry) {
                 let v = vm.new_str(s);
                 Ok(vm.ok(v))
             }
-            Err(e) => Ok(vm.err_value("invalid", &format!("invalid UTF-8: {e}"))),
+            Err(e) => Err(Ctl::native_err("invalid", format!("invalid UTF-8: {e}"))),
         }
     });
     r.add_builtin("bytes.to_str_lossy", |vm, a| {

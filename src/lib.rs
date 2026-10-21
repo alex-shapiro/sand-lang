@@ -39,6 +39,7 @@ pub use native::{Conversion, FromValue, HostError, IntoHostError, IntoValue, Lis
 pub use policy::{Capability, CustomPolicy, Decision, Policy, PromptAnswer, Prompter, RulePolicy};
 pub use session::Session;
 pub use stdio::flush_stdio;
+pub use stdlib::log::{LogLevel, LogRecord, LogSink};
 pub use vm::OutputSink;
 pub use vm::heap::GcStats;
 pub use vm::value::{Packing, Value, ValueType};

@@ -21,39 +21,13 @@ use crate::vm::{Ctl, CtlKind, NResult, Vm};
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// `target!(vm, value)`: the script-supplied path (for messages) and its
-/// resolved form (see [`target`]); returns the `Err(Error)` value from the
-/// native for an unusable path.
-macro_rules! target {
-    ($vm:expr, $p:expr) => {
-        match target($vm, $p, Mode::Follow)? {
-            Ok(t) => t,
-            Err(e) => return Ok(e),
-        }
-    };
-}
-
-/// Like `target!`, but a final symlink is not followed: for operations on
-/// the directory entry itself (removing or renaming a link must not affect,
-/// or require permission for, its target).
-macro_rules! entry_target {
-    ($vm:expr, $p:expr) => {
-        match target($vm, $p, Mode::Entry)? {
-            Ok(t) => t,
-            Err(e) => return Ok(e),
-        }
-    };
-}
-
 pub fn register(r: &mut Registry) {
     r.source("fs", ModKind::Std, include_str!("fs.sand"));
     register_file(r);
 
     r.add_builtin("fs.read_bytes", |vm, a| {
-        let (shown, mut t) = target!(vm, a[0]);
-        if let Some(e) = check(vm, &mut t, Access::Read, &shown)? {
-            return Ok(e);
-        }
+        let (shown, mut t) = target(vm, a[0], Mode::Follow)?;
+        check(vm, &mut t, Access::Read, &shown)?;
         let res = vm.io_reservation();
         run(
             vm,
@@ -69,10 +43,8 @@ pub fn register(r: &mut Registry) {
         )
     });
     r.add_builtin("fs.read_text", |vm, a| {
-        let (shown, mut t) = target!(vm, a[0]);
-        if let Some(e) = check(vm, &mut t, Access::Read, &shown)? {
-            return Ok(e);
-        }
+        let (shown, mut t) = target(vm, a[0], Mode::Follow)?;
+        check(vm, &mut t, Access::Read, &shown)?;
         let res = vm.io_reservation();
         run(
             vm,
@@ -88,19 +60,19 @@ pub fn register(r: &mut Registry) {
                         let s = vm.new_str(text);
                         Ok(vm.ok(s))
                     }
-                    Err(_) => Ok(vm.err_value("invalid", &format!("{shown}: file is not valid UTF-8"))),
+                    Err(_) => Err(Ctl::native_err("invalid", format!("{shown}: file is not valid UTF-8"))),
                 }
             },
         )
     });
     r.add_builtin("fs.write_text", |vm, a| {
-        let res = super::or_return!(vm.reserve_io(vm.str(a[1]).len()));
+        let res = vm.reserve_io(vm.str(a[1]).len())?;
         vm.charge_bytes(vm.str(a[1]).len())?;
         let data = vm.str(a[1]).as_bytes().to_vec();
         write(vm, a[0], data, res)
     });
     r.add_builtin("fs.write_bytes", |vm, a| {
-        let res = super::or_return!(vm.reserve_io(vm.heap.bytes_of(a[1]).len()));
+        let res = vm.reserve_io(vm.heap.bytes_of(a[1]).len())?;
         vm.charge_bytes(vm.heap.bytes_of(a[1]).len())?;
         let data = vm.heap.bytes_of(a[1]).to_vec();
         write(vm, a[0], data, res)
@@ -109,10 +81,8 @@ pub fn register(r: &mut Registry) {
     r.add_builtin("fs.is_file", |vm, a| file_kind(vm, a[0], |k| k == EntryKind::File));
     r.add_builtin("fs.is_dir", |vm, a| file_kind(vm, a[0], |k| k == EntryKind::Dir));
     r.add_builtin("fs.list_dir", |vm, a| {
-        let (shown, mut t) = target!(vm, a[0]);
-        if let Some(e) = check(vm, &mut t, Access::Read, &shown)? {
-            return Ok(e);
-        }
+        let (shown, mut t) = target(vm, a[0], Mode::Follow)?;
+        check(vm, &mut t, Access::Read, &shown)?;
         let res = vm.io_reservation();
         run(
             vm,
@@ -133,44 +103,34 @@ pub fn register(r: &mut Registry) {
         )
     });
     r.add_builtin("fs.create_dir", |vm, a| {
-        let (shown, mut t) = target!(vm, a[0]);
-        if let Some(e) = check(vm, &mut t, Access::Write, &shown)? {
-            return Ok(e);
-        }
+        let (shown, mut t) = target(vm, a[0], Mode::Follow)?;
+        check(vm, &mut t, Access::Write, &shown)?;
         if !a[1].as_bool() {
             return run(vm, shown, move |fs| fs.create_dir(t), ok_unit);
         }
         // Every directory to be created must be writable, not just the last.
         // Those that exist are not created, whatever happens meanwhile.
         for dir in vm.host.fs.missing_ancestors(&t) {
-            if let Some(e) = deny_path(vm, Capability::FsWrite(dir), &shown, false)? {
-                return Ok(e);
-            }
+            check_path(vm, Capability::FsWrite(dir), &shown, false)?;
         }
         run(vm, shown, move |fs| fs.create_dir_all(t), ok_unit)
     });
     r.add_builtin("fs.remove_file", |vm, a| {
-        let (shown, mut t) = entry_target!(vm, a[0]);
-        if let Some(e) = check(vm, &mut t, Access::Write, &shown)? {
-            return Ok(e);
-        }
+        let (shown, mut t) = target(vm, a[0], Mode::Entry)?;
+        check(vm, &mut t, Access::Write, &shown)?;
         run(vm, shown, move |fs| fs.remove_file(t), ok_unit)
     });
     r.add_builtin("fs.remove_empty_dir", |vm, a| {
-        let (shown, mut t) = entry_target!(vm, a[0]);
-        if let Some(e) = check(vm, &mut t, Access::Write, &shown)? {
-            return Ok(e);
-        }
+        let (shown, mut t) = target(vm, a[0], Mode::Entry)?;
+        check(vm, &mut t, Access::Write, &shown)?;
         run(vm, shown, move |fs| fs.remove_dir(t), ok_unit)
     });
     r.add_builtin("fs.remove_tree", remove_tree);
     r.add_builtin("fs.rename", |vm, a| {
-        let (shown, mut from) = entry_target!(vm, a[0]);
-        let (shown_to, mut to) = entry_target!(vm, a[1]);
+        let (shown, mut from) = target(vm, a[0], Mode::Entry)?;
+        let (shown_to, mut to) = target(vm, a[1], Mode::Entry)?;
         for (t, shown) in [(&mut from, &shown), (&mut to, &shown_to)] {
-            if let Some(e) = check(vm, t, Access::Write, shown)? {
-                return Ok(e);
-            }
+            check(vm, t, Access::Write, shown)?;
         }
         // A memory file system walks the moved tree (to check its paths' lengths).
         if let Some(m) = vm.host.fs.memory() {
@@ -190,20 +150,17 @@ pub fn register(r: &mut Registry) {
             }
             Ok(fs.rename(from, to))
         })?;
-        Ok(match renamed {
-            Ok(Ok(())) => vm.ok(Value::Unit),
-            Ok(Err(e)) => vm.err_value(io_kind(&e), &format!("{shown}: {e}")),
+        match renamed {
+            Ok(r) => settle(vm, shown, r, ok_unit),
             Err((Halt::Stopped, _)) => unreachable!("`offload` reports a stopped walk"),
-            Err((_, is_to)) => protected(vm, if is_to { &shown_to } else { &shown }),
-        })
+            Err((_, is_to)) => Err(protected(if is_to { &shown_to } else { &shown })),
+        }
     });
     r.add_builtin("fs.copy", |vm, a| {
-        let (shown, mut from) = target!(vm, a[0]);
-        let (shown_to, mut to) = target!(vm, a[1]);
+        let (shown, mut from) = target(vm, a[0], Mode::Follow)?;
+        let (shown_to, mut to) = target(vm, a[1], Mode::Follow)?;
         for (t, access, shown) in [(&mut from, Access::Read, &shown), (&mut to, Access::Write, &shown_to)] {
-            if let Some(e) = check(vm, t, access, shown)? {
-                return Ok(e);
-            }
+            check(vm, t, access, shown)?;
         }
         if let Some(size) = vm.host.fs.size(&from) {
             vm.charge_bytes(usize::try_from(size).unwrap_or(usize::MAX))?;
@@ -211,10 +168,8 @@ pub fn register(r: &mut Registry) {
         run(vm, shown, move |fs| fs.copy(from, to), ok_unit)
     });
     r.add_builtin("fs.stat", |vm, a| {
-        let (shown, mut t) = target!(vm, a[0]);
-        if let Some(e) = check(vm, &mut t, Access::Read, &shown)? {
-            return Ok(e);
-        }
+        let (shown, mut t) = target(vm, a[0], Mode::Follow)?;
+        check(vm, &mut t, Access::Read, &shown)?;
         let stat = match vm.host.fs.stat(&t) {
             Ok(m) if m.kind == EntryKind::Symlink => Err(unchecked_symlink(t.path.file_name().unwrap_or_default())),
             r => r,
@@ -264,13 +219,13 @@ pub fn register(r: &mut Registry) {
 /// Overlong paths are denied (kind `"invalid"`) before resolution, which
 /// is charged per component, for the symlinks it follows and for the
 /// directory entries it reads.
-fn target(vm: &mut Vm, p: Value, mode: Mode) -> Result<Result<(String, Target), Value>, Ctl> {
+fn target(vm: &mut Vm, p: Value, mode: Mode) -> Result<(String, Target), Ctl> {
     let shown = vm.str(p);
     if shown.len() > MAX_PATH_BYTES {
-        return Ok(Err(vm.err_value("invalid", &format!("path too long ({} bytes; the limit is {MAX_PATH_BYTES})", shown.len()))));
+        return Err(Ctl::native_err("invalid", format!("path too long ({} bytes; the limit is {MAX_PATH_BYTES})", shown.len())));
     }
     if shown.contains('\0') {
-        return Ok(Err(vm.err_value("invalid", "path contains a NUL character")));
+        return Err(Ctl::native_err("invalid", "path contains a NUL character"));
     }
     let shown = shown.to_string();
     let joined = vm.host.cwd.join(&shown);
@@ -281,7 +236,7 @@ fn target(vm: &mut Vm, p: Value, mode: Mode) -> Result<Result<(String, Target), 
     let (fs, lexical) = (vm.host.fs.clone(), crate::policy::lexical(&joined));
     let t = vm.offload(move |_| fs.target(&lexical, mode))?;
     charge_work(vm, &t)?;
-    Ok(Ok((shown, t)))
+    Ok((shown, t))
 }
 
 /// Charges for the symlinks followed and the entries scanned resolving `t`
@@ -299,18 +254,17 @@ enum Access {
     Write,
 }
 
-/// Returns a permission-denied error using the user-supplied path string.
-fn denied(vm: &mut Vm, cap: &Capability, shown: &str) -> Value {
+fn denied(cap: &Capability, shown: &str) -> Ctl {
     let verb = match cap {
         Capability::FsRead(_) => "read",
         _ => "write",
     };
-    vm.err_value("permission_denied", &format!("permission denied: {verb} {shown}"))
+    Ctl::native_err("permission_denied", format!("permission denied: {verb} {shown}"))
 }
 
-/// Checks access to target against the policy.
-/// Returns an error value if denied, or None if allowed. Resolves on-disk names on case-insensitive file systems only when necessary.
-fn check(vm: &mut Vm, t: &mut Target, access: Access, shown: &str) -> Result<Option<Value>, Ctl> {
+/// Checks `access` to `t` against the policy, resolving on-disk case on
+/// case-insensitive file systems only if required by the policy.
+fn check(vm: &mut Vm, t: &mut Target, access: Access, shown: &str) -> Result<(), Ctl> {
     let cap = |p: &Path| match access {
         Access::Read => Capability::FsRead(p.to_path_buf()),
         Access::Write => Capability::FsWrite(p.to_path_buf()),
@@ -319,8 +273,8 @@ fn check(vm: &mut Vm, t: &mut Target, access: Access, shown: &str) -> Result<Opt
         let space = vm.host.fs.space();
         let decided = if vm.has_answers() { None } else { vm.host.policy.decision_for_any_spelling(&cap(&t.path), space) };
         match decided {
-            Some(Decision::Allow) => return Ok(None),
-            Some(_) => return Ok(Some(denied(vm, &cap(&t.path), shown))),
+            Some(Decision::Allow) => return Ok(()),
+            Some(_) => return Err(denied(&cap(&t.path), shown)),
             None => {
                 let before = t.work();
                 let mut owned = t.take();
@@ -334,15 +288,11 @@ fn check(vm: &mut Vm, t: &mut Target, access: Access, shown: &str) -> Result<Opt
             }
         }
     }
-    deny_path(vm, cap(&t.path), shown, t.mode == Mode::Entry)
+    check_path(vm, cap(&t.path), shown, t.mode == Mode::Entry)
 }
 
-/// Checks `cap` against the policy.
-fn deny_path(vm: &mut Vm, cap: Capability, shown: &str, entry: bool) -> Result<Option<Value>, Ctl> {
-    if vm.permit_path(&cap, entry)? {
-        return Ok(None);
-    }
-    Ok(Some(denied(vm, &cap, shown)))
+fn check_path(vm: &mut Vm, cap: Capability, shown: &str, entry: bool) -> Result<(), Ctl> {
+    if vm.permit_path(&cap, entry)? { Ok(()) } else { Err(denied(&cap, shown)) }
 }
 
 /// Why a walk of a directory tree on a worker thread stopped early.
@@ -397,9 +347,8 @@ fn scan_tree(
     })
 }
 
-/// The error value for a tree that holds an entry the policy protects.
-fn protected(vm: &mut Vm, shown: &str) -> Value {
-    vm.err_value("permission_denied", &format!("permission denied: {shown} contains paths protected by the policy"))
+fn protected(shown: &str) -> Ctl {
+    Ctl::native_err("permission_denied", format!("permission denied: {shown} contains paths protected by the policy"))
 }
 
 /// Runs the file system operation `op` on a worker thread (see
@@ -419,7 +368,7 @@ fn run<T: Send + 'static>(
 fn settle<T>(vm: &mut Vm, shown: String, r: io::Result<T>, finish: impl FnOnce(&mut Vm, T) -> NResult) -> NResult {
     match r {
         Ok(v) => finish(vm, v),
-        Err(e) => Ok(vm.err_value(io_kind(&e), &format!("{shown}: {e}"))),
+        Err(e) => Err(Ctl::native_err(io_kind(&e), format!("{shown}: {e}"))),
     }
 }
 
@@ -436,10 +385,8 @@ fn ok_bool(vm: &mut Vm, b: bool) -> NResult {
 /// tree ([`scan_tree`]), nothing is removed. Each entry is also checked
 /// against the policy just before it is removed.
 fn remove_tree(vm: &mut Vm, a: &[Value]) -> NResult {
-    let (shown, mut t) = entry_target!(vm, a[0]);
-    if let Some(e) = check(vm, &mut t, Access::Write, &shown)? {
-        return Ok(e);
-    }
+    let (shown, mut t) = target(vm, a[0], Mode::Entry)?;
+    check(vm, &mut t, Access::Write, &shown)?;
     let (fs, permits, root) = (vm.host.fs.clone(), vm.permits(), t.path.clone());
     let mut res = vm.io_reservation();
     let removed = vm.offload(move |allowance| -> Result<io::Result<()>, Halt> {
@@ -458,27 +405,23 @@ fn remove_tree(vm: &mut Vm, a: &[Value]) -> NResult {
             }
         })
     })?;
-    Ok(match removed {
-        Ok(Ok(())) => vm.ok(Value::Unit),
-        Ok(Err(e)) => vm.err_value(io_kind(&e), &format!("{shown}: {e}")),
-        Err(Halt::Protected) => protected(vm, &shown),
+    match removed {
+        Ok(r) => settle(vm, shown, r, ok_unit),
+        Err(Halt::Protected) => Err(protected(&shown)),
         // Named as the script would name it: below the path it gave.
         Err(Halt::Denied(path)) => {
             let below = path.strip_prefix(&root).unwrap_or(&path);
-            let message = format!("permission denied: write {}", Path::new(&shown).join(below).display());
-            vm.err_value("permission_denied", &message)
+            Err(Ctl::native_err("permission_denied", format!("permission denied: write {}", Path::new(&shown).join(below).display())))
         }
-        Err(Halt::Prompt(cap)) => return Err(Ctl::need_permission(cap)),
+        Err(Halt::Prompt(cap)) => Err(Ctl::need_permission(cap)),
         Err(Halt::Stopped) => unreachable!("`offload` reports a stopped walk"),
-    })
+    }
 }
 
 /// Writes `data` (whose copy is reserved in `res` until the write is done).
 fn write(vm: &mut Vm, path: Value, data: Vec<u8>, res: Reservation) -> NResult {
-    let (shown, mut t) = target!(vm, path);
-    if let Some(e) = check(vm, &mut t, Access::Write, &shown)? {
-        return Ok(e);
-    }
+    let (shown, mut t) = target(vm, path, Mode::Follow)?;
+    check(vm, &mut t, Access::Write, &shown)?;
     let op = move |fs: &Fs| {
         let r = fs.write(t, &data);
         drop(res);
@@ -498,10 +441,8 @@ fn lexical_cost(vm: &Vm, p: Value) -> Result<(), Ctl> {
 /// `exists` / `is_file` / `is_dir`: `false` when nothing (or a symlink that
 /// was not resolved by the policy check) is at the path.
 fn file_kind(vm: &mut Vm, p: Value, test: fn(EntryKind) -> bool) -> NResult {
-    let (shown, mut t) = target!(vm, p);
-    if let Some(e) = check(vm, &mut t, Access::Read, &shown)? {
-        return Ok(e);
-    }
+    let (shown, mut t) = target(vm, p, Mode::Follow)?;
+    check(vm, &mut t, Access::Read, &shown)?;
     let kind = match vm.host.fs.stat(&t) {
         Ok(m) => Ok(test(m.kind)),
         Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) || is_unchecked_symlink(&e) => Ok(false),
@@ -696,7 +637,7 @@ fn with_file(vm: &mut Vm, v: Value, needs: Needs, op: impl FnOnce(&mut Vm, &mut 
     let f = vm.heap.native_mut::<FileObj>(v).ok_or_else(|| Ctl::internal("not a file"))?;
     if f.open.as_ref().is_none_or(|o| o.file.is_none()) {
         let msg = format!("{}: file closed", f.shown);
-        return Ok(vm.err_value("closed", &msg));
+        return Err(Ctl::native_err("closed", msg));
     }
     let mode = f.mode;
     let denied = match needs {
@@ -706,12 +647,12 @@ fn with_file(vm: &mut Vm, v: Value, needs: Needs, op: impl FnOnce(&mut Vm, &mut 
     };
     if let Some(why) = denied {
         let msg = format!("{}: {why}", f.shown);
-        return Ok(vm.err_value("invalid", &msg));
+        return Err(Ctl::native_err("invalid", msg));
     }
     let before = f.size();
     let Some(mut st) = f.open.take() else {
         let msg = format!("{}: file closed", f.shown);
-        return Ok(vm.err_value("closed", &msg));
+        return Err(Ctl::native_err("closed", msg));
     };
     st.counted = st.buf.capacity();
     let r = op(vm, &mut st);
@@ -723,7 +664,7 @@ fn with_file(vm: &mut Vm, v: Value, needs: Needs, op: impl FnOnce(&mut Vm, &mut 
         Ok(value) => Ok(vm.ok(value)),
         Err(e) => {
             let msg = format!("{}: {e}", vm.heap.native::<FileObj>(v).map_or("", |f| f.shown.as_str()));
-            Ok(vm.err_value(io_kind(&e), &msg))
+            Err(Ctl::native_err(io_kind(&e), msg))
         }
     }
 }
@@ -733,7 +674,7 @@ fn register_file(r: &mut Registry) {
     r.add_method("fs.File.read", |vm, a| {
         let max = a[1].as_int();
         if max <= 0 {
-            return Ok(vm.err_value("invalid", "read: max must be positive"));
+            return Err(Ctl::native_err("invalid", "read: max must be positive"));
         }
         let max = to_usize_saturating(max);
         with_file(vm, a[0], Needs::Read, |vm, st| {
@@ -845,7 +786,7 @@ fn register_file(r: &mut Registry) {
                 vm.charge(SYSCALL_FUEL)?;
                 vm.charge_bytes(len)?;
                 // Reserve memory for the copy of the data that the worker writes.
-                let Ok(res) = vm.reserve_io(len)? else { return Ok(Err(too_large())) };
+                let Some(res) = vm.try_reserve_io(len)? else { return Ok(Err(too_large())) };
                 let bytes = bytes(vm, data).to_vec();
                 let unread = st.take_unread();
                 let r = st.io(vm, move |f| {
@@ -877,7 +818,7 @@ fn register_file(r: &mut Registry) {
     });
     r.add_builtin("fs.File.seek", |vm, a| {
         let Ok(pos) = u64::try_from(a[1].as_int()) else {
-            return Ok(vm.err_value("invalid", &format!("seek: negative position {}", a[1].as_int())));
+            return Err(Ctl::native_err("invalid", format!("seek: negative position {}", a[1].as_int())));
         };
         with_file(vm, a[0], Needs::Nothing, |vm, st| {
             vm.charge(SYSCALL_FUEL)?;
@@ -906,7 +847,7 @@ fn register_file(r: &mut Registry) {
     });
     r.add_builtin("fs.File.set_len", |vm, a| {
         let Ok(len) = u64::try_from(a[1].as_int()) else {
-            return Ok(vm.err_value("invalid", &format!("set_len: negative length {}", a[1].as_int())));
+            return Err(Ctl::native_err("invalid", format!("set_len: negative length {}", a[1].as_int())));
         };
         with_file(vm, a[0], Needs::Write, |vm, st| {
             vm.charge(SYSCALL_FUEL)?;
@@ -934,20 +875,20 @@ fn register_file(r: &mut Registry) {
 fn open_file(vm: &mut Vm, a: &[Value]) -> NResult {
     const MODES: [OpenMode; 5] = [OpenMode::Read, OpenMode::Write, OpenMode::Append, OpenMode::CreateNew, OpenMode::ReadWrite];
     let mode = *MODES.get(to_usize_saturating(a[1].as_int())).ok_or_else(|| Ctl::fail("invalid", "invalid file mode"))?;
-    let (shown, mut t) = target!(vm, a[0]);
+    let (shown, mut t) = target(vm, a[0], Mode::Follow)?;
     for (needed, access) in [(mode.reads(), Access::Read), (mode.writes(), Access::Write)] {
-        if needed && let Some(e) = check(vm, &mut t, access, &shown)? {
-            return Ok(e);
+        if needed {
+            check(vm, &mut t, access, &shown)?;
         }
     }
-    let slot = super::or_return!(vm.resource_slot());
+    let slot = vm.resource_slot()?;
     vm.charge(SYSCALL_FUEL)?;
     let fs = vm.host.fs.clone();
     let file = match vm.offload(move |_| fs.open(t, mode))? {
         Ok(f) => f,
         // Closing unreachable files may make room.
         Err(e) if too_many_open_files(&e) && !vm.collected => return Err(CtlKind::Collect.into()),
-        Err(e) => return Ok(vm.err_value(io_kind(&e), &format!("{shown}: {e}"))),
+        Err(e) => return Err(Ctl::native_err(io_kind(&e), format!("{shown}: {e}"))),
     };
     let obj = FileObj { open: Some(OpenState { file: Some(file), _slot: slot, buf: Vec::new(), at: 0, counted: 0 }), shown, mode };
     let v = vm.heap.alloc(Obj::Native(Box::new(obj)));
@@ -966,7 +907,7 @@ fn read_rest(vm: &mut Vm, file: Value, text: bool) -> NResult {
         };
         let size = usize::try_from(size).unwrap_or(usize::MAX).saturating_add(st.unread());
         let too_large = || io::Error::new(io::ErrorKind::OutOfMemory, "the rest of the file does not fit in the memory limit");
-        let Ok(mut res) = vm.reserve_io(size)? else { return Ok(Err(too_large())) };
+        let Some(mut res) = vm.try_reserve_io(size)? else { return Ok(Err(too_large())) };
         let mut data = Vec::new();
         if let Err(e) = res.reserve_buf(&mut data, size.min(64 << 20)) {
             return Ok(Err(e.into()));

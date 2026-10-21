@@ -247,7 +247,7 @@ def examples(b: Bench) -> list[Workload]:
 
     # chat_server ---------------------------------------------------------------------
     def chat(impl: str) -> tuple[float, bytes]:
-        s = step(EXAMPLES / "chat_server.sand", PY / "chat_server.py", args=["127.0.0.1:0"], flags=["--allow-listen=127.0.0.1:0"])
+        s = step(EXAMPLES / "chat_server.sand", PY / "chat_server.py", args=["0"], flags=["--allow-listen=127.0.0.1:0"])
         cmd = b.command(impl, s)
         start = time.perf_counter()
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=b.env())

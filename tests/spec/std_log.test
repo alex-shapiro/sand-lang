@@ -22,8 +22,18 @@ log.error("hidden too")
 DEBUG now visible
 ERROR shown
 
-=== field values with spaces are quoted
+=== keys and values with spaces are quoted
 import log
-log.info("msg", fields: ["path": "a b"])
+log.info("msg", fields: ["path": "a b", "a=b": "", "q": "say \"hi\""])
 --- stderr
-INFO msg path="a b"
+INFO msg path="a b" "a=b"="" q="say \"hi\""
+
+=== messages with control characters are quoted
+import log
+log.info("two\nlines", fields: ["x": "1"])
+log.info("one line")
+log.info("", fields: ["x": "1"])
+--- stderr
+INFO "two\nlines" x=1
+INFO one line
+INFO "" x=1

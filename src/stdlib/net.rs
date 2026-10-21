@@ -8,29 +8,36 @@
 use super::stream::{IoFailure, read_line_bytes, read_to_end_reserved, strip_eol};
 use crate::check::ModKind;
 use crate::engine::Registry;
-use crate::network::{Network, Stream};
-use crate::policy::{Capability, Decision, Policy, is_private_address};
+use crate::network::{self, Network, Stream};
+use crate::policy::{Capability, Decision, Policy, format_host_port, is_private_address, is_valid_host, parse_port, split_port};
 use crate::vm::iomem::{Reservation, ResourceSlot};
-use crate::vm::value::{NativeObject, Obj, Value};
+use crate::vm::value::{NativeObject, Obj, Value, ValueType};
 use crate::vm::{Ctl, Finisher, NResult, Vm};
 use std::any::Any;
+use std::fmt;
 use std::future::Future;
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, watch};
 
 pub fn register(r: &mut Registry) {
     r.source("net", ModKind::Std, include_str!("net.sand"));
+    r.add_value_type::<SocketAddr>();
+    r.add_builtin("net.SocketAddr.ip", |vm, a| {
+        let ip = socket_addr(vm, a[0])?.0.ip().to_string();
+        Ok(vm.new_str(ip))
+    });
+    r.add_builtin("net.SocketAddr.port", |vm, a| Ok(Value::Int(socket_addr(vm, a[0])?.0.port().into())));
+    r.add_builtin("net.split_host_port", split_host_port);
     r.add_builtin("net.listen", listen);
     r.add_builtin("net.connect", connect);
     r.add_builtin("net.connect_tls", connect_tls);
     r.add_builtin("net.Listener.accept", listener_accept);
     r.add_builtin("net.Listener.addr", |vm, a| {
-        let addr = listener(vm, a[0])?.addr.clone();
-        Ok(vm.new_str(addr))
+        let addr = listener(vm, a[0])?.addr;
+        Ok(vm.new_value(addr))
     });
     r.add_method("net.Listener.close", |vm, a| {
         vm.heap.native_mut::<Listener>(a[0]).ok_or_else(|| Ctl::internal("not a listener"))?.close();
@@ -42,8 +49,8 @@ pub fn register(r: &mut Registry) {
     r.add_method("net.Conn.write", |vm, a| conn_write(vm, a[0], a[1]));
     r.add_method("net.Conn.write_str", |vm, a| conn_write(vm, a[0], a[1]));
     r.add_builtin("net.Conn.peer_addr", |vm, a| {
-        let peer = conn(vm, a[0])?.peer.clone();
-        Ok(vm.new_str(peer))
+        let peer = conn(vm, a[0])?.peer;
+        Ok(vm.new_value(peer))
     });
     r.add_method("net.Conn.close", |vm, a| {
         vm.heap.native_mut::<Conn>(a[0]).ok_or_else(|| Ctl::internal("not a connection"))?.close();
@@ -65,7 +72,7 @@ pub(crate) fn finish<T: Send + 'static>(r: Result<T, IoFailure>, ok: impl FnOnce
             let v = ok(vm, v)?;
             Ok(vm.ok(v))
         }
-        Err(e) => e.into_value(vm),
+        Err(e) => Err(e.into()),
     })
 }
 
@@ -77,9 +84,9 @@ pub(crate) fn suspend<T: Send + 'static>(
     Err(Ctl::suspend(Box::pin(async move { finish(fut.await, ok) })))
 }
 
-/// Checks `cap`; `Ok(Some(err))` is the `Err(permission_denied)` value to return.
-pub(crate) fn check_permission(vm: &mut Vm, cap: Capability) -> Result<Option<Value>, Ctl> {
-    if vm.permit(&cap)? { Ok(None) } else { Ok(Some(vm.err_value("permission_denied", &format!("permission denied: {cap}")))) }
+/// Checks `cap` against the policy, or fails with kind `"permission_denied"`.
+pub(crate) fn check_permission(vm: &mut Vm, cap: Capability) -> Result<(), Ctl> {
+    if vm.permit(&cap)? { Ok(()) } else { Err(Ctl::native_err("permission_denied", format!("permission denied: {cap}"))) }
 }
 
 /// A native object holding an open resource, counted by its slot (see
@@ -99,10 +106,7 @@ pub(crate) fn alloc_resource<T: Resource>(vm: &mut Vm, mut obj: T, slot: Resourc
 /// Like [`suspend`] for operations that produce a resource object,
 /// counted by `slot` from the start (a socket being connected or accepted
 /// is open already).
-pub(crate) fn suspend_resource<T: Resource>(
-    slot: ResourceSlot,
-    fut: impl Future<Output = Result<T, IoFailure>> + Send + 'static,
-) -> NResult {
+fn suspend_resource<T: Resource>(slot: ResourceSlot, fut: impl Future<Output = Result<T, IoFailure>> + Send + 'static) -> NResult {
     Err(Ctl::suspend(Box::pin(async move {
         let r = fut.await;
         Box::new(move |vm: &mut Vm| match r {
@@ -110,7 +114,7 @@ pub(crate) fn suspend_resource<T: Resource>(
                 let v = alloc_resource(vm, obj, slot);
                 Ok(vm.ok(v))
             }
-            Err(e) => e.into_value(vm),
+            Err(e) => Err(e.into()),
         }) as Finisher
     })))
 }
@@ -146,19 +150,99 @@ impl CloseSignal {
 }
 
 // ----------------------------------------------------------------------
+// Addresses
+
+/// Backing value for `net.SocketAddr`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct SocketAddr(std::net::SocketAddr);
+
+impl From<std::net::SocketAddr> for SocketAddr {
+    fn from(mut addr: std::net::SocketAddr) -> SocketAddr {
+        // `SocketAddrV6` omits `flowinfo` in `Display` and `FromStr`.
+        if let std::net::SocketAddr::V6(v6) = &mut addr {
+            v6.set_flowinfo(0);
+        }
+        SocketAddr(addr)
+    }
+}
+
+impl fmt::Display for SocketAddr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl ValueType for SocketAddr {
+    const MODULE: &'static str = "net";
+    const NAME: &'static str = "SocketAddr";
+    const ORDER: Option<fn(&Self, &Self) -> std::cmp::Ordering> = Some(Ord::cmp);
+    fn parse(text: &str) -> Result<Self, String> {
+        let addr: std::net::SocketAddr = text.parse().map_err(|_| format!("invalid socket address {:?}", super::truncate(text, 200)))?;
+        Ok(addr.into())
+    }
+}
+
+fn socket_addr(vm: &Vm, v: Value) -> Result<SocketAddr, Ctl> {
+    vm.heap.value::<SocketAddr>(v).ok_or_else(|| Ctl::internal("not a socket address"))
+}
+
+fn split_host_port(vm: &mut Vm, a: &[Value]) -> NResult {
+    let text = vm.str(a[0]);
+    let parts = split_port(text).and_then(|(host, port)| Some((host, parse_port(port?)?))).filter(|&(host, _)| is_valid_host(host));
+    let Some((host, port)) = parts else {
+        let msg = format!("invalid address {:?} (expected host:port or [ipv6]:port)", super::truncate(text, 200));
+        return Err(Ctl::native_err("parse", msg));
+    };
+    let host = vm.new_str(host.to_string());
+    let pair = vm.heap.new_tuple(&[host, Value::Int(port.into())]);
+    Ok(vm.ok(pair))
+}
+
+fn check_port(port: Value) -> Result<u16, Ctl> {
+    u16::try_from(port.as_int()).map_err(|_| Ctl::native_err("invalid", format!("invalid port {} (expected 0 to 65535)", port.as_int())))
+}
+
+fn check_endpoint(vm: &Vm, host: Value, port: Value) -> Result<(String, u16), Ctl> {
+    let host = vm.str(host);
+    if !is_valid_host(host) {
+        let msg = format!("invalid host {:?} (expected a host name or an IP address without brackets)", super::truncate(host, 200));
+        return Err(Ctl::native_err("invalid", msg));
+    }
+    Ok((host.to_string(), check_port(port)?))
+}
+
+/// Checks `NetListen` for `ip` and `port`, binds a listener, and wraps it with `open`.
+pub(crate) fn listen_with<T: Resource>(
+    vm: &mut Vm,
+    ip: Value,
+    port: Value,
+    open: impl FnOnce(Box<dyn network::Listener>) -> std::io::Result<T> + Send + 'static,
+) -> NResult {
+    let Ok(ip) = vm.str(ip).parse::<IpAddr>().map(|ip| ip.to_canonical()) else {
+        let msg = format!("invalid IP address {:?} (expected an address such as 127.0.0.1 or ::1)", super::truncate(vm.str(ip), 200));
+        return Err(Ctl::native_err("invalid", msg));
+    };
+    let addr = std::net::SocketAddr::new(ip, check_port(port)?);
+    check_permission(vm, Capability::NetListen(addr))?;
+    let slot = vm.resource_slot()?;
+    let network = vm.host.network.clone();
+    suspend_resource(slot, async move { Ok(open(network.listen(addr).await?)?) })
+}
+
+// ----------------------------------------------------------------------
 // Listener
 
 pub(crate) struct Listener {
-    socket: Option<Arc<TcpListener>>,
+    socket: Option<Arc<dyn network::Listener>>,
     slot: Option<ResourceSlot>,
-    addr: String,
+    addr: SocketAddr,
     closed: watch::Sender<bool>,
 }
 
 impl Listener {
-    fn new(socket: TcpListener) -> std::io::Result<Listener> {
-        let addr = socket.local_addr()?.to_string();
-        Ok(Listener { socket: Some(Arc::new(socket)), slot: None, addr, closed: watch::Sender::new(false) })
+    fn new(socket: Box<dyn network::Listener>) -> std::io::Result<Listener> {
+        let addr = socket.local_addr()?.into();
+        Ok(Listener { socket: Some(socket.into()), slot: None, addr, closed: watch::Sender::new(false) })
     }
 
     /// Closes the listener (the socket once pending accepts have ended).
@@ -195,25 +279,20 @@ fn listener(vm: &Vm, v: Value) -> Result<&Listener, Ctl> {
 }
 
 fn listen(vm: &mut Vm, a: &[Value]) -> NResult {
-    let addr = vm.str(a[0]).to_string();
-    if let Some(denied) = check_permission(vm, Capability::NetListen(addr.clone()))? {
-        return Ok(denied);
-    }
-    let slot = super::or_return!(vm.resource_slot());
-    suspend_resource(slot, async move { Ok(Listener::new(TcpListener::bind(addr).await?)?) })
+    listen_with(vm, a[0], a[1], Listener::new)
 }
 
 fn listener_accept(vm: &mut Vm, a: &[Value]) -> NResult {
     let l = listener(vm, a[0])?;
-    let Some(socket) = l.socket.clone() else { return Ok(vm.err_value("closed", "listener closed")) };
+    let Some(socket) = l.socket.clone() else { return Err(Ctl::native_err("closed", "listener closed")) };
     let closed = CloseSignal(l.closed.subscribe());
     // A pending accept holds a slot for the connection it will produce.
-    let slot = super::or_return!(vm.resource_slot_with(CONN_BUFFER, "a connection"));
+    let slot = vm.resource_slot_with(CONN_BUFFER, "a connection")?;
     suspend_resource(
         slot,
         closed.guard(async move {
-            let (stream, _) = socket.accept().await?;
-            Ok(Conn::from_tcp(stream)?)
+            let (stream, peer) = socket.accept().await?;
+            Ok(Conn::from_stream(stream, peer))
         }),
     )
 }
@@ -243,12 +322,12 @@ pub(crate) type SharedWriter = Arc<Mutex<WriteHalf>>;
 pub(crate) struct Detached {
     pub reader: SharedReader,
     pub writer: SharedWriter,
-    pub peer: String,
+    pub peer: SocketAddr,
     pub slot: ResourceSlot,
 }
 
 impl Detached {
-    pub fn new(reader: ReadHalf, writer: WriteHalf, peer: String, slot: ResourceSlot) -> Detached {
+    pub fn new(reader: ReadHalf, writer: WriteHalf, peer: SocketAddr, slot: ResourceSlot) -> Detached {
         Detached { reader: Arc::new(Mutex::new(reader)), writer: Arc::new(Mutex::new(writer)), peer, slot }
     }
 
@@ -278,7 +357,7 @@ pub(crate) struct Conn {
     halves: Option<(SharedReader, SharedWriter)>,
     /// Counts the connection, and reserves its fixed buffers, while open.
     slot: Option<ResourceSlot>,
-    peer: String,
+    peer: SocketAddr,
     closed: watch::Sender<bool>,
 }
 
@@ -312,7 +391,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for StickyEof<R> {
 
 impl Conn {
     /// A connection over `reader` and `writer`; its slot reserves their buffers.
-    pub fn new(reader: Box<dyn AsyncRead + Send + Unpin>, writer: WriteHalf, peer: String) -> Conn {
+    pub fn new(reader: Box<dyn AsyncRead + Send + Unpin>, writer: WriteHalf, peer: SocketAddr) -> Conn {
         Conn {
             halves: Some((Arc::new(Mutex::new(read_half(reader))), Arc::new(Mutex::new(writer)))),
             slot: None,
@@ -322,15 +401,9 @@ impl Conn {
     }
 
     /// Creates a connection wrapping a network stream.
-    pub(crate) fn from_stream(stream: Box<dyn Stream>, peer: SocketAddr) -> Conn {
+    pub(crate) fn from_stream(stream: Box<dyn Stream>, peer: std::net::SocketAddr) -> Conn {
         let (r, w) = tokio::io::split(stream);
-        Conn::new(Box::new(r), Box::new(w), peer.to_string())
-    }
-
-    fn from_tcp(stream: TcpStream) -> std::io::Result<Conn> {
-        let peer = stream.peer_addr()?.to_string();
-        let (r, w) = stream.into_split();
-        Ok(Conn::new(Box::new(r), Box::new(w), peer))
+        Conn::new(Box::new(r), Box::new(w), peer.into())
     }
 
     /// The handle for an operation, or `None` if the connection is closed.
@@ -345,7 +418,7 @@ impl Conn {
         self.closed.send_replace(true);
         let (reader, writer) = self.halves.take()?;
         let slot = self.slot.take()?;
-        Some(Detached { reader, writer, peer: self.peer.clone(), slot })
+        Some(Detached { reader, writer, peer: self.peer, slot })
     }
 
     /// Closes the connection: the socket is closed once pending operations
@@ -393,44 +466,28 @@ fn conn(vm: &Vm, v: Value) -> Result<&Conn, Ctl> {
     vm.heap.native::<Conn>(v).ok_or_else(|| Ctl::internal("not a connection"))
 }
 
-/// Takes the connection out of the `net.Conn` object `v` (see
-/// [`Conn::detach`]), or returns the `Err(closed)` value.
-pub(crate) fn detach(vm: &mut Vm, v: Value) -> Result<Result<Detached, Value>, Ctl> {
-    match vm.heap.native_mut::<Conn>(v).ok_or_else(|| Ctl::internal("not a connection"))?.detach() {
-        Some(d) => Ok(Ok(d)),
-        None => Ok(Err(vm.err_value("closed", "connection closed"))),
-    }
+/// Detaches the connection from `v` (see [`Conn::detach`]), or fails with kind `"closed"`.
+pub(crate) fn detach(vm: &mut Vm, v: Value) -> Result<Detached, Ctl> {
+    vm.heap.native_mut::<Conn>(v).ok_or_else(|| Ctl::internal("not a connection"))?.detach().ok_or_else(|| closed().into())
 }
 
-/// The operation handle of the connection `v`, or the `Err(closed)` value.
-pub(crate) fn conn_handle(vm: &mut Vm, v: Value) -> Result<Result<ConnHandle, Value>, Ctl> {
-    match conn(vm, v)?.handle() {
-        Some(h) => Ok(Ok(h)),
-        None => Ok(Err(vm.err_value("closed", "connection closed"))),
-    }
-}
-
-/// Splits `addr` (`host:port` or `[v6]:port`) into host and port.
-fn split_host_port(addr: &str) -> Option<(String, u16)> {
-    let (host, port) = addr.rsplit_once(':')?;
-    let host = match host.strip_prefix('[') {
-        Some(h) => h.strip_suffix(']')?,
-        None if host.contains(':') => return None,
-        None => host,
-    };
-    if host.is_empty() {
-        return None;
-    }
-    Some((host.to_string(), port.parse().ok()?))
+/// Returns the active handle for connection `v`, or fails with kind `"closed"`.
+pub(crate) fn conn_handle(vm: &Vm, v: Value) -> Result<ConnHandle, Ctl> {
+    conn(vm, v)?.handle().ok_or_else(|| closed().into())
 }
 
 /// Resolves `host` once and returns the addresses the policy allows
 /// (`Capability::NetAddr`), so that a name cannot lead to an address the
 /// policy forbids (e.g. through DNS rebinding). Fails with kind
 /// `"permission_denied"` if every address is denied.
-pub(crate) async fn resolve_allowed(policy: &Policy, network: &dyn Network, host: &str, port: u16) -> Result<Vec<SocketAddr>, IoFailure> {
-    let addrs: Vec<SocketAddr> = match host.parse::<IpAddr>() {
-        Ok(ip) => vec![SocketAddr::new(ip, port)],
+pub(crate) async fn resolve_allowed(
+    policy: &Policy,
+    network: &dyn Network,
+    host: &str,
+    port: u16,
+) -> Result<Vec<std::net::SocketAddr>, IoFailure> {
+    let addrs: Vec<std::net::SocketAddr> = match host.parse::<IpAddr>() {
+        Ok(ip) => vec![std::net::SocketAddr::new(ip, port)],
         Err(_) => network.resolve(host, port).await?,
     };
     let mut denied = None;
@@ -448,7 +505,7 @@ pub(crate) async fn resolve_allowed(policy: &Policy, network: &dyn Network, host
             let class = if is_private_address(addr.ip()) { " (private or internal)" } else { "" };
             Err(IoFailure::new(
                 "permission_denied",
-                format!("permission denied: connect to {host}:{port}: address {}{class} is not allowed", addr.ip()),
+                format!("permission denied: connect to {}: address {}{class} is not allowed", format_host_port(host, port), addr.ip()),
             ))
         }
         _ if allowed.is_empty() => Err(IoFailure::new("not_found", format!("no addresses found for {host}"))),
@@ -462,55 +519,45 @@ pub(crate) async fn connect_checked(
     network: &dyn Network,
     host: &str,
     port: u16,
-) -> Result<(Box<dyn Stream>, SocketAddr), IoFailure> {
+) -> Result<(Box<dyn Stream>, std::net::SocketAddr), IoFailure> {
     let addrs = resolve_allowed(policy, network, host, port).await?;
     Ok(network.connect(&addrs).await?)
 }
 
 fn connect(vm: &mut Vm, a: &[Value]) -> NResult {
-    let addr = vm.str(a[0]).to_string();
-    let Some((host, port)) = split_host_port(&addr) else {
-        return Ok(vm.err_value("invalid", &format!("invalid address {:?} (expected host:port)", super::truncate(&addr, 200))));
-    };
-    if let Some(denied) = check_permission(vm, Capability::Net { host: host.clone(), port })? {
-        return Ok(denied);
-    }
+    let (host, port) = check_endpoint(vm, a[0], a[1])?;
+    check_permission(vm, Capability::Net { host: host.clone(), port })?;
     // Counted from the start: a connection attempt holds a socket.
-    let slot = super::or_return!(vm.resource_slot_with(CONN_BUFFER, "a connection"));
-    let timeout = Duration::from_nanos(a[1].as_int().max(0) as u64);
+    let slot = vm.resource_slot_with(CONN_BUFFER, "a connection")?;
+    let timeout = Duration::from_nanos(a[2].as_int().max(0) as u64);
     let (policy, network, clock) = (vm.host.policy.clone(), vm.host.network.clone(), vm.host.clock.clone());
     suspend_resource(slot, async move {
         let open = connect_checked(&policy, &*network, &host, port);
         match crate::platform::timeout(&*clock, timeout, open).await {
             Some(r) => r.map(|(stream, peer)| Conn::from_stream(stream, peer)),
-            None => Err(IoFailure::new("timeout", format!("connecting to {host}:{port} timed out"))),
+            None => Err(IoFailure::new("timeout", format!("connecting to {} timed out", format_host_port(&host, port)))),
         }
     })
 }
 
 fn connect_tls(vm: &mut Vm, a: &[Value]) -> NResult {
     if !cfg!(feature = "tls") {
-        return Ok(vm.err_value("invalid", "TLS support is not enabled in this build"));
+        return Err(Ctl::native_err("invalid", "TLS support is not enabled in this build"));
     }
-    let addr = vm.str(a[0]);
-    let Some((host, port)) = split_host_port(addr) else {
-        return Ok(vm.err_value("invalid", &format!("invalid address {:?} (expected host:port)", super::truncate(addr, 200))));
-    };
-    if let Some(denied) = check_permission(vm, Capability::Net { host: host.clone(), port })? {
-        return Ok(denied);
-    }
-    let slot = super::or_return!(vm.resource_slot_with(CONN_BUFFER + TLS_BUFFERS, "a connection"));
-    let timeout = Duration::from_nanos(a[1].as_int().max(0) as u64);
+    let (host, port) = check_endpoint(vm, a[0], a[1])?;
+    check_permission(vm, Capability::Net { host: host.clone(), port })?;
+    let slot = vm.resource_slot_with(CONN_BUFFER + TLS_BUFFERS, "a connection")?;
+    let timeout = Duration::from_nanos(a[2].as_int().max(0) as u64);
     let (policy, network, clock) = (vm.host.policy.clone(), vm.host.network.clone(), vm.host.clock.clone());
     let settings = vm.host.tls.clone();
     // The timeout covers connecting and the handshake, so a peer that
     // accepts but never answers cannot hold the socket indefinitely.
-    let target = format!("{host}:{port}");
+    let target = format_host_port(&host, port);
     let open = async move {
         let (stream, peer) = connect_checked(&policy, &*network, &host, port).await?;
         let tls = tls::connect(&settings, &host, stream).await?;
         let (r, w) = tokio::io::split(tls);
-        Ok(Conn::new(Box::new(r), Box::new(w), peer.to_string()))
+        Ok(Conn::new(Box::new(r), Box::new(w), peer.into()))
     };
     suspend_resource(slot, async move {
         match crate::platform::timeout(&*clock, timeout, open).await {
@@ -523,17 +570,14 @@ fn connect_tls(vm: &mut Vm, a: &[Value]) -> NResult {
 fn conn_read(vm: &mut Vm, a: &[Value]) -> NResult {
     let max = a[1].as_int();
     if max <= 0 {
-        return Ok(vm.err_value("invalid", "read: max must be positive"));
+        return Err(Ctl::native_err("invalid", "read: max must be positive"));
     }
     // A read returns what the connection's buffer holds (filling it first if
     // it is empty), at most `CONN_BUFFER` bytes.
     let max = (max as usize).min(CONN_BUFFER);
-    let h = match conn_handle(vm, a[0])? {
-        Ok(h) => h,
-        Err(e) => return Ok(e),
-    };
+    let h = conn_handle(vm, a[0])?;
     // The buffer is counted against the memory limit while the read is pending.
-    let res = super::or_return!(vm.reserve_io(max));
+    let res = vm.reserve_io(max)?;
     suspend(
         h.closed.guard(async move {
             let mut reader = h.reader.lock().await;
@@ -552,10 +596,7 @@ fn conn_read(vm: &mut Vm, a: &[Value]) -> NResult {
 }
 
 fn conn_read_line(vm: &mut Vm, a: &[Value]) -> NResult {
-    let h = match conn_handle(vm, a[0])? {
-        Ok(h) => h,
-        Err(e) => return Ok(e),
-    };
+    let h = conn_handle(vm, a[0])?;
     // The line may grow until it exhausts the memory limit.
     let mut res = vm.io_reservation();
     suspend(
@@ -584,10 +625,7 @@ fn conn_read_line(vm: &mut Vm, a: &[Value]) -> NResult {
 /// Reads until the peer has finished sending; the data is reserved as it
 /// arrives.
 fn conn_read_all(vm: &mut Vm, a: &[Value]) -> NResult {
-    let h = match conn_handle(vm, a[0])? {
-        Ok(h) => h,
-        Err(e) => return Ok(e),
-    };
+    let h = conn_handle(vm, a[0])?;
     let mut res = vm.io_reservation();
     suspend(
         h.closed.guard(async move {
@@ -616,17 +654,14 @@ fn conn_write(vm: &mut Vm, c: Value, v: Value) -> NResult {
     }
     let len = bytes(vm, v).len();
     vm.charge_bytes(len)?;
-    let res = super::or_return!(vm.reserve_io(len));
+    let res = vm.reserve_io(len)?;
     let data = bytes(vm, v).to_vec();
     write_bytes(vm, c, data, res)
 }
 
 /// Writes `data` to connection `c`; `res` reserves `data` until the write is done.
 pub(crate) fn write_bytes(vm: &mut Vm, c: Value, data: Vec<u8>, res: Reservation) -> NResult {
-    let h = match conn_handle(vm, c)? {
-        Ok(h) => h,
-        Err(e) => return Ok(e),
-    };
+    let h = conn_handle(vm, c)?;
     suspend(
         h.closed.guard(async move {
             let mut writer = h.writer.lock().await;

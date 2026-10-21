@@ -12,7 +12,7 @@
 //! limit memory 64M
 //! ```
 
-use super::net::{NetPattern, UrlPattern, url_segments};
+use super::net::{ListenPattern, NetPattern, UrlPattern, format_host_port, format_url_origin, url_segments};
 use super::path::{Seg, Tok};
 use super::rules::{Access, NamePattern, Origin, PathPattern, Rule, RuleKind};
 use super::{Capability, Decision, Policy, RulePolicy};
@@ -481,7 +481,9 @@ impl Context<'_> {
                         urls += 1;
                         RuleKind::Http(methods.clone(), UrlPattern::parse(&word.tokens()).map_err(|m| (item.column, m))?)
                     }
-                    "listen" => RuleKind::Listen(word.text()),
+                    "listen" => RuleKind::Listen(ListenPattern::parse(&word.text()).ok_or_else(|| {
+                        (item.column, format!("invalid listen pattern `{}` (expected ip:port, ip, localhost, *:port or *)", word.text()))
+                    })?),
                     _ => RuleKind::Env(NamePattern::parse(&word.text())),
                 };
                 rules.push(Rule { allow, kind, origin });
@@ -577,8 +579,7 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
         Capability::FsWrite(p) => format!("write {}", path(p)?),
         Capability::Import(p) => format!("import {}", path(p)?),
         Capability::Net { host, port } => {
-            let host = host.trim_start_matches('[').trim_end_matches(']');
-            let pattern = if host.contains(':') { format!("[{host}]:{port}") } else { format!("{host}:{port}") };
+            let pattern = format_host_port(host, *port);
             NetPattern::parse(&pattern)?;
             format!("net {pattern}")
         }
@@ -587,9 +588,7 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
             if alt.is_some() || !is_method(&method.to_ascii_uppercase()) || !matches!(scheme.as_str(), "http" | "https") {
                 return None;
             }
-            let host = if host.contains(':') { format!("[{host}]") } else { host.clone() };
-            let default = if scheme == "http" { 80 } else { 443 };
-            let mut url = if *port == default { format!("{scheme}://{host}") } else { format!("{scheme}://{host}:{port}") };
+            let mut url = format_url_origin(scheme, host, *port);
             for name in &names {
                 url.push('/');
                 url.push_str(&crate::stdlib::uri_encode(name, b"!$&'()+;=:@-._~"));
@@ -597,7 +596,7 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
             UrlPattern::parse(&url.chars().map(|c| (c, false)).collect::<Vec<_>>()).ok()?;
             format!("http {} {url}", method.to_ascii_uppercase())
         }
-        Capability::NetListen(addr) => format!("listen {}", quote_part(addr, true)),
+        Capability::NetListen(addr) => format!("listen {}", quote_part(&addr.to_string(), true)),
         Capability::Env(name) => format!("env {}", quote_part(name, true)),
         Capability::Stdin => "stdin".into(),
         Capability::TimeZone => "timezone".into(),
@@ -870,8 +869,8 @@ mod tests {
         assert_eq!(decide(&p, Capability::Env("OTHER".into())), Allow);
         assert_eq!(decide(&p, Capability::Env("*".into())), Deny, "all variables would include the denied one");
         assert_eq!(decide(&p, Capability::Stdin), Deny);
-        assert_eq!(decide(&p, Capability::NetListen("0.0.0.0:22".into())), Deny);
-        assert_eq!(decide(&p, Capability::NetListen("0.0.0.0:80".into())), Allow);
+        assert_eq!(decide(&p, Capability::NetListen("0.0.0.0:22".parse().unwrap())), Deny);
+        assert_eq!(decide(&p, Capability::NetListen("0.0.0.0:80".parse().unwrap())), Allow);
         assert_eq!(decide(&p, Capability::Import(PathBuf::from("/base/vendor/x.sand"))), Deny);
         assert_eq!(decide(&p, Capability::Custom { name: "db".into(), detail: "write".into() }), Deny);
         assert_eq!(decide(&p, Capability::Custom { name: "db".into(), detail: "read".into() }), Allow);
@@ -901,7 +900,7 @@ mod tests {
             Capability::FsRead(PathBuf::from("/data/*/{x}")),
             Capability::Import(PathBuf::from("/lib/util.sand")),
             Capability::Net { host: "api.example.com".into(), port: 443 },
-            Capability::Net { host: "[::1]".into(), port: 8080 },
+            Capability::Net { host: "::1".into(), port: 8080 },
             Capability::Net { host: "10.0.0.5".into(), port: 80 },
             Capability::Http {
                 method: "GET".into(),
@@ -911,12 +910,13 @@ mod tests {
                 path: "/a b/*/%25/x?y".into(),
             },
             Capability::Http { method: "post".into(), scheme: "http".into(), host: "::1".into(), port: 8080, path: "/".into() },
-            Capability::NetListen("127.0.0.1:8080".into()),
+            Capability::NetListen("127.0.0.1:8080".parse().unwrap()),
             Capability::Env("HOME".into()),
             Capability::Env("*".into()),
             Capability::Stdin,
             Capability::TimeZone,
             Capability::Custom { name: "db".into(), detail: "drop table".into() },
+            Capability::NetListen("[::1]:0".parse().unwrap()),
         ];
         for cap in &caps {
             for allow in [true, false] {
@@ -933,6 +933,8 @@ mod tests {
         assert_eq!(rule_for(&caps[8], false).unwrap(), "deny http POST http://[::1]:8080");
         assert_eq!(rule_for(&Capability::Stdout, true), None);
         assert_eq!(rule_for(&Capability::Stdout, false).as_deref(), Some("deny stdout"));
+        let p = parse(&format!("default prompt\n{}", rule_for(caps.last().unwrap(), true).unwrap()));
+        assert_eq!(decide(&p, Capability::NetListen("[::1]:22".parse().unwrap())), Prompt);
     }
 
     #[test]

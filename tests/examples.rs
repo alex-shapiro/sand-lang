@@ -298,7 +298,7 @@ fn tcp_chat_server() {
     let out = MemorySink::new();
     let err = MemorySink::new();
     let policy = RulePolicy::new().allow_listen("127.0.0.1:0");
-    let config = Config::new().policy(Policy::rules(policy)).stdout(out.clone()).stderr(err.clone()).args(vec!["127.0.0.1:0".into()]);
+    let config = Config::new().policy(Policy::rules(policy)).stdout(out.clone()).stderr(err.clone()).args(vec!["0".into()]);
     let mut engine = Engine::new(config);
     let interrupt = engine.interrupt_handle();
     let server = std::thread::spawn(move || rt().block_on(engine.run_file(example("chat_server.sand"))));
@@ -360,7 +360,7 @@ fn tcp_chat_server() {
 
 #[test]
 fn chat_server_cannot_listen_without_permission() {
-    let o = run_example("chat_server.sand", &["127.0.0.1:0"], Config::new().policy(Policy::deny_all()));
+    let o = run_example("chat_server.sand", &["0"], Config::new().policy(Policy::deny_all()));
     assert!(o.failure().contains("permission_denied"), "{}", o.failure());
 }
 

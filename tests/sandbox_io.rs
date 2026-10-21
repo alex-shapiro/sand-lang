@@ -124,6 +124,9 @@ fn net_pattern_edge_cases() {
         "",
         "host:99999",
         "host:x",
+        "host:+80",
+        "a..b",
+        "*.a..b",
         "10.0.0.0/33",
         "fc00::/129",
         "[::1",
@@ -244,7 +247,7 @@ for host in ["127.1", "2130706433", "localhost", "127.0.0.1"] {{
     let e = http.get("http://\(host):{port}/").unwrap_err()
     print("\(e.kind): \(e.message.contains("127.0.0.1") or e.message.contains("::1"))")
 }}
-print(net.connect("127.1:{port}").unwrap_err().kind)
+print(net.connect("127.1", {port}).unwrap_err().kind)
 "#
     );
     let r = run_with(&src, |c| c.policy(private_policy()));
@@ -268,7 +271,7 @@ import net
 print(http.get("http://127.0.0.1:{port}/").map(r => r.text().unwrap()))
 print(http.get("http://localhost:{port}/").map(r => r.text().unwrap()))
 print(http.get("http://127.1:{port}/").map(r => r.text().unwrap()))
-print(net.connect("127.0.0.1:{port}").is_ok())
+print(net.connect("127.0.0.1", {port}).is_ok())
 "#
     );
     // `127.1` is allowed by name only through `*`; its address by the explicit IP rule.
@@ -316,7 +319,7 @@ fn custom_policies_see_resolved_addresses_without_extra_prompts() {
         }
     });
     let src =
-        format!("import net\nprint(net.connect(\"127.0.0.1:{port}\").is_ok())\nprint(net.connect(\"[::1]:{port}\").unwrap_err().message)");
+        format!("import net\nprint(net.connect(\"127.0.0.1\", {port}).is_ok())\nprint(net.connect(\"::1\", {port}).unwrap_err().message)");
     let r = run_with(&src, |c| {
         c.policy(policy).prompter(move |cap: Capability| {
             prompts2.lock().unwrap().push(cap.to_string());
@@ -325,10 +328,10 @@ fn custom_policies_see_resolved_addresses_without_extra_prompts() {
     });
     assert_eq!(
         r.ok_stdout(),
-        format!("true\npermission denied: connect to ::1:{port}: address ::1 (private or internal) is not allowed\n")
+        format!("true\npermission denied: connect to [::1]:{port}: address ::1 (private or internal) is not allowed\n")
     );
     // One prompt per connection: the `Prompt` answer for the resolved address counts as `Allow`.
-    assert_eq!(*prompts.lock().unwrap(), vec![format!("connect to 127.0.0.1:{port}"), format!("connect to ::1:{port}")]);
+    assert_eq!(*prompts.lock().unwrap(), vec![format!("connect to 127.0.0.1:{port}"), format!("connect to [::1]:{port}")]);
     let seen = seen.lock().unwrap();
     assert!(seen.contains(&format!("connect to 127.0.0.1:{port}")), "{seen:?}");
     assert!(seen.contains(&format!("connect to [::1]:{port}")), "{seen:?}");
@@ -1072,11 +1075,11 @@ print(results.recv())
 fn pending_socket_buffers_count_against_the_memory_limit() {
     let src = r#"
 import net
-let listener = net.listen("127.0.0.1:0")?
+let listener = net.listen("127.0.0.1", 0)?
 let addr = listener.addr()
 var conns = []
 for _ in 0..64 {
-    conns.push((net.connect(addr)?, listener.accept()?))
+    conns.push((net.connect("127.0.0.1", addr.port())?, listener.accept()?))
 }
 let readers = conns.map(p => spawn p.0.read(max: 1048576))
 task.sleep(100ms)
@@ -1088,8 +1091,8 @@ print(readers.filter(t => t.is_done()).len())
 
     let src = r#"
 import net
-let listener = net.listen("127.0.0.1:0")?
-let c = net.connect(listener.addr())?
+let listener = net.listen("127.0.0.1", 0)?
+let c = net.connect("127.0.0.1", listener.addr().port())?
 let peer = listener.accept()?
 let data = "x".repeat(2000000).bytes()
 let writers = (0..20).map(_ => spawn c.write(data))
@@ -1108,8 +1111,8 @@ fn hostile_peers_cannot_end_a_server_run() {
     let src = r#"
 import http
 import net
-let server = http.serve("127.0.0.1:0")?
-let raw = net.listen("127.0.0.1:0")?
+let server = http.serve("127.0.0.1", 0)?
+let raw = net.listen("127.0.0.1", 0)?
 print("ready \(server.addr()) \(raw.addr())")
 // The hostile request's body does not fit in memory: reading it fails.
 for _ in 0..2 {
@@ -1173,8 +1176,8 @@ for _ in 0..60 {{
     total += http.get("http://{}/")?.body.len()
     fs.write_text("copy.txt", fs.read_text("big.txt")?)?
 }}
-let listener = net.listen("127.0.0.1:0")?
-let c = net.connect(listener.addr())?
+let listener = net.listen("127.0.0.1", 0)?
+let c = net.connect("127.0.0.1", listener.addr().port())?
 let peer = listener.accept()?
 for _ in 0..60 {{
     peer.write("x".repeat(100000).bytes())?

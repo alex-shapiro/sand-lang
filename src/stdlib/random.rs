@@ -71,7 +71,6 @@ pub fn register(r: &mut Registry) {
         "shuffle" => shuffle,
         "sample" => sample,
         "bytes" => bytes,
-        "normal" => normal,
     }
 }
 
@@ -135,13 +134,4 @@ fn bytes(vm: &mut Vm, rng: &mut Rng, a: &[Value]) -> NResult {
         out.extend_from_slice(&word[..(n - out.len()).min(8)]);
     }
     Ok(vm.heap.new_bytes(out))
-}
-
-/// Box-Muller transform.
-fn normal(_: &mut Vm, rng: &mut Rng, a: &[Value]) -> NResult {
-    let (mean, stdev) = (a[0].as_float(), a[1].as_float());
-    let u1 = 1.0 - rng.float(); // in (0, 1], so ln is finite
-    let u2 = rng.float();
-    let z = (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos();
-    Ok(Value::Float(mean + stdev * z))
 }

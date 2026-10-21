@@ -1,7 +1,7 @@
 //! HTTP/1.1 client and server.
 //!
 //! Outgoing requests require the `Net(host:port)` capability (checked on every
-//! redirect hop), and `serve` requires `NetListen(addr)`. `https` URLs use TLS
+//! redirect hop), and `serve` requires `NetListen(ip:port)`. `https` URLs use TLS
 //! if the engine is built with the `tls` feature. Buffered response bodies
 //! larger than `max_http_body` fail with kind `"limit"`; use `open` to stream
 //! larger bodies incrementally.
@@ -10,9 +10,9 @@ import io
 import json
 import net
 
-/// Starts an HTTP/1.1 server listening on `addr` (`host:port`; port `0` selects
-/// an available ephemeral port).
-pub native fn serve(addr: str) -> Result<Server>
+/// Starts an HTTP/1.1 server listening on `ip` and `port`. If `port` is `0`,
+/// the operating system assigns an ephemeral port.
+pub native fn serve(ip: str, port: int) -> Result<Server>
 
 /// An HTTP/1.1 server listening for incoming requests. Closing the server stops
 /// accepting new connections and closes in-flight request readers.
@@ -28,8 +28,8 @@ extend Server {
         Ok(Request { method, path, query, headers, body, conn, exchange })
     }
 
-    /// Returns the local socket address (`host:port`) that the server is bound to.
-    pub native fn addr(self) -> str
+    /// Returns the bound local address.
+    pub native fn addr(self) -> net.SocketAddr
 }
 
 impl Close for Server {

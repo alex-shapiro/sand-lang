@@ -3,7 +3,7 @@
 use crate::check::ModKind;
 use crate::engine::Registry;
 use crate::vm::value::Value;
-use crate::vm::{NResult, Vm};
+use crate::vm::{Ctl, NResult, Vm};
 
 pub fn register(r: &mut Registry) {
     r.source("uri", ModKind::Std, include_str!("uri.sand"));
@@ -32,7 +32,7 @@ pub fn register(r: &mut Registry) {
                 let s = vm.new_str(s);
                 Ok(vm.ok(s))
             }
-            Err(msg) => Ok(vm.err_value("parse", &msg)),
+            Err(msg) => Err(Ctl::native_err("parse", msg)),
         }
     });
     r.add_builtin("uri.parse_query", |vm, a| {
@@ -113,7 +113,7 @@ impl std::fmt::Display for Parts {
 fn result(vm: &mut Vm, parsed: Result<Parts, String>) -> NResult {
     let p = match parsed {
         Ok(p) => p,
-        Err(msg) => return Ok(vm.err_value("parse", &msg)),
+        Err(msg) => return Err(Ctl::native_err("parse", msg)),
     };
     let opt_str = |vm: &mut Vm, s: Option<String>| {
         let v = s.map(|s| vm.new_str(s));

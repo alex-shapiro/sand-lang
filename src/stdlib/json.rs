@@ -126,7 +126,7 @@ type PResult<T> = Result<T, Error>;
 fn into_result(vm: &mut Vm, r: PResult<Value>) -> NResult {
     match r {
         Ok(v) => Ok(vm.ok(v)),
-        Err(Error::Parse(msg)) => Ok(vm.err_value("parse", &msg)),
+        Err(Error::Parse(msg)) => Err(Ctl::native_err("parse", msg)),
         Err(Error::Ctl(c)) => Err(c),
     }
 }
