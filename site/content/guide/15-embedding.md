@@ -81,7 +81,7 @@ let report = files.read("/out/report.txt")?;
 - **Limits.** `Limits` configures every resource bound described in [Sandbox and policies](/guide/sandbox/).
 - **Virtual file system.** `Config::memory_fs` replaces host disk access with an in-memory `MemFs`. Clones of a `MemFs` share the same underlying storage so the host can populate input files before a run and read output files afterward.
 - **Streams.** `Config::stdout` and `Config::stderr` redirect script output to a `MemorySink` or custom sink. `Config::stdin_bytes` supplies fixed input bytes (which still require the `stdin` capability).
-- **Logging.** `Config::log_sink` routes `log` records to a host `LogSink` as a `LogRecord` containing the level, message, fields, and caller location. `LogSink::enabled` filters levels before record construction, and `Config::log_level` sets the starting script log level (`None` turns logging off). Emitted records count against the output limit.
+- **Logging.** `Config::log_sink` routes `log` records to a host `LogSink` as a `LogRecord` containing the level, message, fields, and caller location. `LogSink::enabled` filters levels before record construction, and `Config::log_level` sets the initial script log level (or disables logging if set to `None`). Emitted records count against the output limit.
 - **Environment.** `Config::args` and `Config::env` set the command-line arguments and environment map exposed to the script. If `Config::env` is not set, `env.get` reads the host process environment subject to the policy.
 
 To load a `.policy` file from disk, parse it with `sandlang::policy::PolicyFile`:
@@ -144,16 +144,16 @@ Sand infers the Sand function signature from the Rust parameter and return types
 | `Result<T, E>`                              | `Result<T, Error>`           |
 | `HashMap<String, T>`, `BTreeMap<String, T>` | `[str: T]`                   |
 | tuples of up to 4 elements                  | tuples                       |
-| an enum with `#[derive(SandEnum)]`          | the same Sand enum           |
+| Rust enum with `#[derive(SandEnum)]`        | matching Sand `enum`         |
 
 Returning `Err(HostError::new(kind, message))` preserves `kind` on the Sand `Error`; any other Rust error type converts to an `Error` with kind `"error"` and its `Display` message.
 
-`#[derive(SandEnum)]` makes a Rust enum without payloads a Sand enum with the same variants, in the same order, and the same doc comments. `NativeModule::enum_type` registers the enum in its module:
+Derive `SandEnum` on a unit-only Rust enum and register it with `NativeModule::enum_type` to pass enum values between Rust and Sand:
 
 ```rust
 use sandlang::{NativeModule, SandEnum};
 
-/// A plane figure.
+/// A two-dimensional shape.
 #[derive(Clone, Copy, SandEnum)]
 #[sand(module = "geo")]
 enum Shape {
@@ -169,9 +169,7 @@ geo.function("sides", |s: Shape| match s {
 });
 ```
 
-Scripts call `geo.sides(geo.Shape.Square)`. The Rust enum is the only declaration of `Shape`: the module source must not declare it. `#[sand(name = "Kind")]` gives the Sand enum another name.
-
-A `native fn` declaration in the module source replaces the signature that Sand derives for a function of the same name. Use it to name the parameters and give them defaults. Its types must be the derived types, and every registered function must have a declaration (compile errors otherwise).
+`NativeModule::enum_type` generates the `pub enum Shape` declaration in `geo` from the Rust variants and doc comments, so scripts can call `geo.sides(geo.Shape.Square)`. Do not redeclare a registered enum in `NativeModule::source`. Use `#[sand(name = "Kind")]` to expose the enum under a different Sand name.
 
 `NativeModule::async_function` registers an async Rust function; while its future is pending, only the calling Sand task suspends.
 
@@ -202,7 +200,7 @@ Ok("opened front")
 Err(Error { kind: "permission_denied", message: "permission denied: door back" })
 ```
 
-`NativeModule::source` attaches Sand source declarations (such as structs, enums, and Sand wrapper functions) to the same module.
+`NativeModule::source` adds Sand declarations (structs, enums, helper functions, and `native fn` declarations) to the module. A `native fn` declaration in the module source overrides the derived signature for a registered function of the same name so that you can specify parameter names and default values; its parameter and return types must match the derived signature.
 
 ## Interactive sessions
 

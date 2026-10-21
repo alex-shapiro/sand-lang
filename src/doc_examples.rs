@@ -1,4 +1,5 @@
-//! Compiles and runs the Rust examples of the site's pages as doctests.
+//! Exposes Markdown files in `site/content/` as doc-test targets so `cargo test --doc`
+//! verifies their Rust code blocks.
 
 macro_rules! doc_examples {
     ($($name:ident = $path:literal),* $(,)?) => {

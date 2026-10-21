@@ -358,8 +358,8 @@ impl Config {
         self.log_sink = Some(Arc::new(sink));
         self
     }
-    /// Sets the lowest level of the records that scripts log, or turns
-    /// logging off with `None` (default [`LogLevel::Info`](crate::LogLevel::Info)).
+    /// Sets the initial minimum script log level (default [`LogLevel::Info`](crate::LogLevel::Info)),
+    /// or disables script logging if `level` is `None`.
     pub fn log_level(mut self, level: impl Into<Option<crate::LogLevel>>) -> Self {
         self.log_level = level.into();
         self
@@ -576,7 +576,6 @@ impl Registry {
         Arc::new(r)
     }
 
-    /// Registers the native `name`. Panics if a native has the name.
     pub fn add(&mut self, name: impl Into<Cow<'static, str>>, imp: crate::vm::NativeImpl) {
         let name = name.into();
         let id = self.natives.len() as u32;
@@ -585,14 +584,12 @@ impl Registry {
         Arc::make_mut(&mut self.natives).push(NativeEntry { name, imp });
     }
 
-    /// Records `sig`, the signature derived from the Rust types of the host
-    /// function `name`, which the module source declares.
     pub fn add_signature(&mut self, name: impl Into<Cow<'static, str>>, sig: String) {
         Arc::make_mut(&mut self.by_name).signatures.insert(name.into(), sig.into());
     }
 
     pub fn add_value_type<T: crate::vm::value::ValueType>(&mut self) {
-        let qual = self.new_type_name(T::MODULE, T::NAME);
+        let qual = self.check_unique_type_name(T::MODULE, T::NAME);
         let info = crate::types::ValueTypeInfo {
             ord: T::ORDER.is_some(),
             parse: crate::vm::value::parse_value::<T>,
@@ -603,7 +600,7 @@ impl Registry {
     }
 
     pub fn add_enum_type<T: crate::native::EnumType>(&mut self) {
-        let qual = self.new_type_name(T::MODULE, T::NAME);
+        let qual = self.check_unique_type_name(T::MODULE, T::NAME);
         let info = crate::types::EnumTypeInfo {
             type_id: std::any::TypeId::of::<T>(),
             name: T::NAME,
@@ -613,9 +610,7 @@ impl Registry {
         Arc::make_mut(&mut self.by_name).enums.insert(qual.into(), info);
     }
 
-    /// Returns `module.name`. Panics if `name` is not a capitalized
-    /// identifier or if a value type or enum type already has the name.
-    fn new_type_name(&self, module: &str, name: &str) -> String {
+    fn check_unique_type_name(&self, module: &str, name: &str) -> String {
         crate::vm::value::check_type_name(name);
         let qual = format!("{module}.{name}");
         let ids = &self.by_name;
@@ -635,15 +630,12 @@ impl Registry {
         self.add(name, crate::vm::NativeImpl::Method(f));
     }
 
-    /// Registers the source of `module`. Panics if `module` is a host module
-    /// whose name starts the name of a native of the prelude (`str` for
-    /// `str.len`).
     pub fn source(&mut self, module: impl Into<Cow<'static, str>>, kind: ModKind, src: impl Into<Cow<'static, str>>) {
         let module = module.into();
         if kind != ModKind::Prelude {
             let prefix = format!("{module}.");
             let taken = kind == ModKind::Host && self.by_name.fns.keys().any(|n| n.starts_with(&prefix));
-            assert!(!taken, "a host module cannot be named `{module}`: it is the name of a type of the prelude");
+            assert!(!taken, "a host module cannot be named `{module}` because `{module}` is a prelude type");
             Arc::make_mut(&mut self.by_name).modules.insert(module.clone());
         }
         self.sources.insert(module, (kind, src.into()));

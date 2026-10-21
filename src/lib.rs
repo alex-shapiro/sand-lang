@@ -4,7 +4,6 @@
 //! See `docs/SPEC.md` for the language specification.
 #![forbid(unsafe_code)]
 
-// `#[derive(SandEnum)]` names this crate `::sandlang`, also inside it.
 extern crate self as sandlang;
 
 pub mod check;

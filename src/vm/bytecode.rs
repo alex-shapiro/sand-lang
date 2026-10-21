@@ -1265,8 +1265,8 @@ pub struct Program {
     pub global_names: Vec<String>,
     pub types: Vec<StructRt>,
     pub variants: Vec<VariantRt>,
-    /// The runtime id of the first variant of the Sand enum of each Rust enum
-    /// (`EnumType`), whose variants have consecutive ids.
+    /// Maps each registered [`EnumType`](crate::EnumType) `TypeId` to the
+    /// runtime ID of its first variant. Subsequent variants have consecutive IDs.
     pub enum_types: FxHashMap<std::any::TypeId, u32>,
     pub ids: RtIds,
     pub entry: u32,

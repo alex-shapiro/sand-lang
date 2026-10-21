@@ -1057,8 +1057,6 @@ pub(crate) fn value_of<T: ValueType>(obj: &Obj) -> Option<T> {
     }
 }
 
-/// Panics if `name`, the name of a host-registered type, is not a capitalized
-/// identifier.
 pub(crate) fn check_type_name(name: &str) {
     let b = name.as_bytes();
     let ident = b.first().is_some_and(u8::is_ascii_uppercase) && b.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_');

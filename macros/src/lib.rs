@@ -1,17 +1,19 @@
-//! Derive macros for embedding SandLang. Use them through the `sandlang`
-//! crate, which re-exports them.
+//! Derive macros for `sandlang`, re-exported at the root of the `sandlang` crate.
 
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::quote;
 use syn::{Attribute, Data, DeriveInput, Error, Expr, ExprLit, Fields, Lit, LitStr, Meta, parse_macro_input};
 
-/// Makes a Rust enum a Sand enum with the same variants, in the same order,
-/// and the same doc comments. See `sandlang::native::EnumType`.
+/// Derives `EnumType`, `SandType`, `FromValue`, `IntoValue`, and `ListElem` for
+/// a unit-only Rust enum so that host functions can accept and return it.
 ///
-/// `#[sand(module = "geo")]` names the module that declares the Sand enum.
-/// `#[sand(name = "Kind")]` gives the Sand enum a name other than the Rust
-/// one. Variants cannot have payloads.
+/// Required attribute:
+/// - `#[sand(module = "<module>")]` sets the Sand module that owns the enum.
+///
+/// Optional attribute:
+/// - `#[sand(name = "<Name>")]` overrides the Sand enum name (defaults to the
+///   Rust identifier).
 #[proc_macro_derive(SandEnum, attributes(sand))]
 pub fn derive_sand_enum(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -45,14 +47,14 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let Some(module) = module else {
         return Err(Error::new(Span::call_site(), "`SandEnum` requires `#[sand(module = \"...\")]`"));
     };
-    let enum_doc = doc(&input.attrs);
+    let enum_doc = extract_doc_comment(&input.attrs);
     let mut variants = Vec::new();
     let mut arms = Vec::new();
     for (i, v) in data.variants.iter().enumerate() {
         if !matches!(v.fields, Fields::Unit) {
-            return Err(Error::new_spanned(&v.fields, "the variants of a Sand enum cannot have payloads"));
+            return Err(Error::new_spanned(&v.fields, "`SandEnum` variants cannot have fields"));
         }
-        let (ident, vname, vdoc) = (&v.ident, v.ident.to_string(), doc(&v.attrs));
+        let (ident, vname, vdoc) = (&v.ident, v.ident.to_string(), extract_doc_comment(&v.attrs));
         variants.push(quote! { ::sandlang::native::EnumVariant { name: #vname, doc: #vdoc, value: #ty::#ident } });
         arms.push(quote! { #ty::#ident => #i });
     }
@@ -92,8 +94,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     })
 }
 
-/// The text of the `///` comments in `attrs`.
-fn doc(attrs: &[Attribute]) -> String {
+fn extract_doc_comment(attrs: &[Attribute]) -> String {
     let lines = attrs.iter().filter_map(|a| match &a.meta {
         Meta::NameValue(nv) if nv.path.is_ident("doc") => match &nv.value {
             Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) => Some(s.value()),

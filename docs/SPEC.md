@@ -2054,8 +2054,9 @@ pub enum Level { Debug, Info, Warn, Error }
 
 `debug`, `info`, `warn`, and `error` emit structured log records with signature
 `(msg: str, fields: [str: str] = [:])`. `set_level(level: Level)` sets the
-lowest level that the engine writes (`Level.Info` unless the host sets another,
-§16). `disable()` turns logging off until the next `set_level`.
+minimum active script log level (default `Level.Info`, unless configured by the
+host; see §16). `disable()` disables script logging until the next `set_level`
+call.
 
 The engine drops records below the active script or host sink level, and counts
 emitted records against `max_output_bytes`. If the host configures a log sink
@@ -2709,8 +2710,8 @@ let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 
   records before the engine constructs a `LogRecord`; any
   `Fn(&LogRecord) + Send + Sync` implements `LogSink` for all levels. `Display`
   formats `LogRecord` in the default standard error format.
-  `Config::log_level(level)` sets the starting script log level (default
-  `LogLevel::Info`; `None` turns logging off).
+  `Config::log_level(level)` sets the initial script log level (default
+  `LogLevel::Info`), or disables script logging if `level` is `None`.
 - `Config::memory_fs(MemFs)` gives scripts a memory file system (§16.1).
 - `Config::library(dir)` sets the directory of library scripts for
   `import <name>` (§3.2). `Engine::module_names()` returns the registered
@@ -2755,34 +2756,31 @@ normalize_path, normalize_entry_path}` for hosts writing their own
   unless `.params(&["x", "y"])` follows. `guarded_function(name, guard, f)`
   checks the capability `guard` computes from (references to) the arguments
   before calling `f`, and returns `Result<R, Error>` (`permission_denied`
-  on a denial). `NativeModule::source` may add Sand declarations (types,
-  pure-Sand helpers, and `native fn` declarations). A `native fn` declaration
-  is required for `NativeModule::raw_function` and replaces the derived
-  signature of another host function: it can name the parameters and give
-  them defaults, but must have the derived types. Every registered function
-  must have a declaration, and public functions can use only public types of
-  the module (compile errors otherwise). `NativeModule::value_type::<T>()` registers
-  `T: ValueType` as the module's value type `T::NAME` (§5.4) and adds `pub
-  native type NAME` unless the module source declares `NAME`, which must then
-  be a public native type (a compile error otherwise). `T` must
-  implement `Clone + Eq + Hash + Display`, equal values must produce identical
-  `Display` output, and `T::parse` must parse that output back into an equal
-  value. Set `ValueType::ORDER` to support `Ord` and `ValueType::PACKING` to
-  pack values into 16 bytes on the heap. Host functions can accept and return
-  any registered value type, including the `time` module types
-  (`sandlang::jiff::Timestamp`, `sandlang::jiff::civil::{Date, Time,
-  DateTime}`, and `sandlang::time::*`).
-  `#[derive(sandlang::SandEnum)]` with `#[sand(module = "geo")]` makes a
-  Rust enum without payloads a Sand enum of module `geo`, so that host
-  functions can take and return it. The Sand enum has the Rust name (or
-  `#[sand(name = "...")]`), variants, order and doc comments.
-  `NativeModule::enum_type::<T>()` registers it, and the module source must
-  not declare it. Host functions can also take and return the standard enums
-  `time.Unit`, `time.RoundingMode`, `time.Disambiguation`
-  (`sandlang::time::{Unit, RoundingMode, Disambiguation}`, which convert into
-  their `jiff` equivalents) and `log.Level` (`LogLevel`). Using the name of a
-  standard module or of a prelude type (`str`) as a module name, registering
-  a module twice (`Config::module`), or registering a function twice panics.
+  on a denial). `NativeModule::source` adds Sand declarations (types,
+  helper functions, and `native fn` declarations) to the module. A `native fn`
+  declaration is required for `NativeModule::raw_function` and overrides the
+  derived signature of a typed host function so that parameters can have custom
+  names and default values. Compilation fails if a registered function lacks a
+  declaration, if a `native fn` declaration does not match the parameter and
+  return types of its Rust function, or if a public function signature
+  references a private type. `NativeModule::value_type::<T>()` registers
+  `T: ValueType` as the value type `T::NAME` (§5.4) and adds
+  `pub native type NAME` unless the module source declares `NAME` as a public
+  native type. `T` must implement `Clone + Eq + Hash + Display`, equal values
+  must produce identical `Display` output, and `T::parse` must parse that
+  output back into an equal value. Set `ValueType::ORDER` to support `Ord` and
+  `ValueType::PACKING` to pack values into 16 bytes on the heap.
+  `#[derive(sandlang::SandEnum)]` with `#[sand(module = "...")]` (and optional
+  `#[sand(name = "...")]`) implements `EnumType` for a unit-only Rust enum so
+  that host functions can accept and return it. `NativeModule::enum_type::<T>()`
+  registers `T` and generates its `pub enum` declaration from the Rust variants
+  and doc comments; compilation fails if the module source also declares
+  `T::NAME`. Host functions can also accept and return standard library value
+  and enum types (`sandlang::jiff::Timestamp`,
+  `sandlang::jiff::civil::{Date, Time, DateTime}`, `sandlang::time::*`, and
+  `LogLevel`). Using a standard module name or a prelude type name (such as
+  `str`) for a host module, registering a module twice (`Config::module`), or
+  registering a function or type twice panics.
 - `Outcome { exit_code: i32 }`; errors are `Error::Compile(diagnostics)`,
   `Error::Runtime { message, trace }` (the run failed with an error whose
   display form is `message`, §10.3), `Error::Internal { message, trace }`,
@@ -2804,9 +2802,10 @@ The crate's features choose what an engine can reach at all:
   exist, the environment is empty unless given, standard input is what the
   host gives (`Config::stdin_bytes`), scripts see a memory file system, and
   the engine builds for `wasm32-unknown-unknown` (§16.2).
-- `tls` (default; implies `os`): TLS for `https` and `net.connect_tls`
-  (rustls with ring, which needs a C compiler for the target). Build with
-  `default-features = false, features = ["os"]` to leave it out.
+- `tls` (default; implies `os`): TLS support for `https` and `net.connect_tls`
+  (uses `rustls` and `ring`, which requires a C compiler for the target). Build
+  with `default-features = false, features = ["os"]` to disable TLS while
+  keeping OS access.
 
 `Config::memory_fs(fs)` makes a `MemFs`, an in-memory file system, the file
 system of the engine's scripts (the `fs` module, script imports and the

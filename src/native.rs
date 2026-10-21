@@ -29,8 +29,6 @@ pub struct TypeContext {
 }
 
 impl TypeContext {
-    /// Returns the Sand name of the type `T` registered as `module.name`,
-    /// importing `module` if it is another module.
     fn registered<T: 'static>(&mut self, module: &'static str, name: &'static str) -> String {
         let qual = format!("{module}.{name}");
         self.used_types.push((qual.clone(), TypeId::of::<T>()));
@@ -41,18 +39,19 @@ impl TypeContext {
         qual
     }
 
-    /// Returns the Sand name of the enum type `T`.
+    /// Records `T` as a referenced enum type and returns its Sand type name.
     pub fn enum_type<T: EnumType>(&mut self) -> String {
         self.registered::<T>(T::MODULE, T::NAME)
     }
 }
 
-/// A Rust enum that is also a Sand enum, with the same variants in the same
-/// order, so that host functions can take and return it. Implement it with
-/// `#[derive(SandEnum)]` and register it with [`NativeModule::enum_type`]:
+/// A unit-only Rust enum that maps to a Sand `enum` of the same variants.
+///
+/// Derive this trait with [`#[derive(SandEnum)]`](crate::SandEnum) and register
+/// the type with [`NativeModule::enum_type`]:
 ///
 /// ```
-/// /// A plane figure.
+/// /// A two-dimensional shape.
 /// #[derive(Clone, Copy, sandlang::SandEnum)]
 /// #[sand(module = "geo")]
 /// pub enum Shape {
@@ -60,25 +59,19 @@ impl TypeContext {
 ///     Square,
 /// }
 /// ```
-///
-/// The Rust enum is the only declaration of the Sand enum: the checker
-/// declares it in the module, with the doc comments of the Rust enum.
 pub trait EnumType: SandType + Copy + 'static {
-    /// The module of the Sand enum (`#[sand(module = "...")]`).
+    /// Name of the Sand module that owns the enum (`#[sand(module = "...")]`).
     const MODULE: &'static str;
-    /// The name of the Sand enum: the Rust name, or `#[sand(name = "...")]`.
+    /// Sand enum name (defaults to the Rust identifier, or `#[sand(name = "...")]`).
     const NAME: &'static str;
-    /// The doc comment of the enum.
+    /// Doc comment attached to the enum declaration.
     const DOC: &'static str;
-    /// The variants, in declaration order.
+    /// Variants in declaration order.
     const VARIANTS: &'static [EnumVariant<Self>];
-    /// The position of `self` in [`EnumType::VARIANTS`].
+    /// Returns the zero-based index of `self` in [`Self::VARIANTS`].
     fn index(self) -> usize;
 }
 
-/// `#[derive(SandEnum)]` denies payloads, type parameters, enums without
-/// variants, and a missing module:
-///
 /// ```compile_fail
 /// #[derive(Clone, Copy, sandlang::SandEnum)]
 /// #[sand(module = "geo")]
@@ -104,7 +97,7 @@ pub trait EnumType: SandType + Copy + 'static {
 #[cfg(doctest)]
 struct SandEnumErrors;
 
-/// A variant of an [`EnumType`].
+/// A variant descriptor for an [`EnumType`].
 pub struct EnumVariant<T> {
     pub name: &'static str,
     pub doc: &'static str,
@@ -112,7 +105,7 @@ pub struct EnumVariant<T> {
 }
 
 impl Vm {
-    /// Converts `v`, a value of the Sand enum of `T`.
+    /// Converts a Sand enum value `v` into `T`.
     pub fn enum_value<T: EnumType>(&self, v: Value) -> Result<T, Ctl> {
         let index = match v {
             Value::Tag(id) => self.prog.enum_types.get(&TypeId::of::<T>()).and_then(|&first| id.checked_sub(first)),
@@ -124,7 +117,8 @@ impl Vm {
         }
     }
 
-    /// The Sand value of `x`. Fails if no loaded module declares the enum.
+    /// Converts `x` into a Sand enum `Value`. Returns an internal error if the
+    /// module that owns `T` is not loaded in the current program.
     pub fn new_enum<T: EnumType>(&self, x: T) -> Result<Value, Ctl> {
         match self.prog.enum_types.get(&TypeId::of::<T>()) {
             Some(&first) => Ok(Value::Tag(first + x.index() as u32)),
@@ -229,13 +223,10 @@ sand_type! {
     () => "()",
 }
 
-/// The internal error of a native that converts a Sand value of another type
-/// than `what`.
 fn mismatch<T>(what: &str) -> Result<T, Ctl> {
     Err(Ctl::internal(format!("a native function expected a value of type `{what}`")))
 }
 
-/// The Sand name of `S`, qualified with its module if it is a host type.
 fn sand_name<S: SandType>() -> String {
     S::sand_type(&mut TypeContext { module: String::new(), imports: BTreeSet::new(), used_types: Vec::new() })
 }
@@ -715,13 +706,12 @@ impl<T: ValueType> IntoValue for T {
     }
 }
 
-/// A value or enum type of a host module.
 #[derive(Clone)]
 struct HostType {
     name: &'static str,
     register: fn(&mut Registry),
-    /// The declaration added if the module source does not declare the type
-    /// (none for an enum type, which the checker declares).
+    /// Synthetic Sand declaration appended to the module source if the source
+    /// does not declare `name`.
     decl: Option<String>,
 }
 
@@ -780,8 +770,9 @@ impl NativeModule {
         self.add_type(T::MODULE, T::NAME, |r| r.add_value_type::<T>(), Some(format!("pub native type {}", T::NAME)))
     }
 
-    /// Registers `T` as an enum type of this module (see [`EnumType`]). The
-    /// module source must not declare `T::NAME`: the enum is declared from `T`.
+    /// Registers `T` as an enum type of this module (see [`EnumType`]).
+    /// The type checker generates the `pub enum` declaration from `T`; do not
+    /// redeclare `T::NAME` in [`NativeModule::source`].
     ///
     /// # Panics
     ///
@@ -873,20 +864,21 @@ impl NativeModule {
         self
     }
 
-    /// Adds Sand declarations (types, helper functions, `native fn`
-    /// signatures). A `native fn` declared here replaces the signature derived
-    /// for a function of the same name. It can name the parameters and give
-    /// them defaults, but its types must be the derived types (a compile error
-    /// otherwise).
+    /// Appends Sand declarations (types, helper functions, and `native fn`
+    /// signatures) to the module. A `native fn` declaration overrides the
+    /// derived signature for a registered function of the same name so that
+    /// parameters can have custom names and default values; its parameter and
+    /// return types must match the derived signature.
     pub fn source(&mut self, src: &str) -> &mut Self {
         self.source.push_str(src);
         self.source.push('\n');
         self
     }
 
-    /// Documents the function or value type `name` (shown by `help`).
-    /// Declarations in [`NativeModule::source`] take their doc comments from
-    /// the source, and enum types from the Rust enum.
+    /// Attaches a doc comment (shown by `help`) to a derived function or value
+    /// type `name`. For items declared in [`NativeModule::source`] or derived
+    /// with [`#[derive(SandEnum)]`](crate::SandEnum), write `///` doc comments
+    /// directly on the declaration instead.
     pub fn doc(&mut self, name: &str, text: &str) -> &mut Self {
         self.docs.insert(name.to_string(), text.to_string());
         self

@@ -476,7 +476,6 @@ fn zone(vm: &Vm, v: Value) -> Result<tz::TimeZone, Ctl> {
     extract_value::<TimeZone>(vm, v).map(|z| z.0)
 }
 
-/// The enums of the `time` module. Each converts into its `jiff` equivalent.
 pub mod enums {
     /// A calendar or clock unit, ordered from largest to smallest.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, crate::SandEnum)]

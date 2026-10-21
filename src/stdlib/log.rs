@@ -8,7 +8,7 @@ use crate::vm::{NResult, Vm};
 use std::borrow::Cow;
 use std::fmt;
 
-/// The severity of a log record, from lowest to highest.
+/// Severity level of a log record, ordered from lowest to highest.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, crate::SandEnum)]
 #[sand(module = "log", name = "Level")]
 pub enum LogLevel {

@@ -59,48 +59,27 @@ Follow-up work, roughly in priority order.
 
 ### Embedding
 
-- [ ] Report every host module mistake to the host, in `Engine::new`. Some
-      panic there (a function registered twice, an unregistered type in a
-      signature). Others are compile errors in the scripts that import the
-      module (a `native fn` with other types than the Rust function, an
-      undeclared native, a private type in a public function): the script
-      author cannot fix them, and the host never sees them if no script
-      imports the module. The snapshot build checks every host module
-      already, but it skips a module that fails (`Snapshot::build`).
-- [ ] `SandType::sand_type` returns Sand source text, so the checker parses
-      the derived signature of a host function again to compare it with the
-      `native fn` declaration (`Checker::check_host_signature`). Describe
-      derived types with a typed value instead of text.
-- [ ] The module of a native comes from its name: the first segment, or the
-      prelude if there is none (`NativeIds::module_of`). Host modules cannot
-      take the name of a prelude type (`str`) so that this stays unambiguous.
-      Name the natives of the prelude `prelude.…` so that every native names
-      its module.
-- [ ] `#[derive(SandEnum)]` supports only enums without payloads. Support
-      payloads (field types from `SandType`) so that natives such as `json`
-      stop building `json.Json` values through the variant ids in `JsonIds`.
-- [ ] Raw natives (`NativeModule::raw_function`, `raw_method`, and every
-      standard `Registry::add_builtin`) read `&[Value]`, so nothing compares
-      their Rust code with their `native fn` declarations. A value of the
-      wrong type fails only when a conversion (`vm.enum_value`,
-      `extract_value`, a native object downcast) checks it, as an internal
-      error. Give raw natives typed access to their arguments, derived from
-      the declaration, so that a mismatch is a compile error.
-- [ ] Opaque native types (`native type File` without a `ValueType`) are not
-      bound to a Rust type: the checker cannot tell which `NativeObject` a
-      native returns as a `File`, and a wrong one fails only at the next
-      downcast. Bind each opaque native type to its Rust type at
-      registration, as value types are bound.
-- [ ] Sand has no private fields, so a public type can expose a private type
-      through a field (`http.Request.exchange: Exchange`). Add field
-      visibility, then require the public fields of public types of native
-      modules to use public types (as public functions already must).
+- [ ] Validate all host module declarations in `Engine::new` instead of
+      deferring checks until a script imports the module.
+- [ ] Return a structured type from `SandType::sand_type` instead of Sand
+      source text so `Checker` does not re-parse derived host signatures.
+- [ ] Prefix prelude native functions with `prelude.` so that every native
+      function key starts with its module name and host modules can use prelude
+      type names such as `str`.
+- [ ] Support enum variant payloads in `#[derive(SandEnum)]` so native modules
+      such as `json` do not construct variant values by runtime ID.
+- [ ] Check raw native function implementations against their `native fn`
+      declarations at compile time instead of failing with an internal error on
+      argument conversion at runtime.
+- [ ] Bind each opaque `native type` to a Rust `NativeObject` type at
+      registration time so the type checker can verify opaque parameter and
+      return types.
+- [ ] Add struct field visibility and require public fields of public types in
+      native modules to use public types.
 
 ### Tooling
 
-- [ ] `cargo doc` reports 12 warnings, mostly public docs that link to
-      private items (`Checker::release_bodies`, `fmt::Doc`,
-      `Policy::protects_normalized_in`). Fix them and build the docs with
+- [ ] Fix broken intra-doc links to private items and run `cargo doc` with
       `-D warnings` in CI.
 
 - [ ] Policy lints judge `http` rules only by their exact text (and
@@ -128,20 +107,17 @@ Follow-up work, roughly in priority order.
 
 ### Language
 
-- [ ] Infer the enum of a variant from the expected type in expressions, as
-      patterns already do. Enum arguments now repeat the module and enum
-      (`fs.open(path, fs.Mode.Write)`, `log.set_level(log.Level.Debug)`).
-      This needs a syntax decision (`Write`, `.Write`).
-- [ ] The prelude has no `Ordering` enum, so `time.Span.compare` returns
-      `-1`, `0` or `1`.
-- [ ] `day_of_week()` of the `time` types returns an `int` (`1` to `7`).
-      Decide whether to return a `time.Weekday` enum bound to
-      `jiff::civil::Weekday`.
-- [ ] `fs.Metadata` encodes the entry kind as two `bool` fields (`is_file`,
-      `is_dir`). Decide whether to replace them with an `fs.Kind` enum bound
-      to `EntryKind`.
-- [ ] Error kinds are strings (`"not_found"`, `"invalid"`), so a typo in a
-      comparison is not a compile error. Decide whether to make them an enum.
+- [ ] Infer the enum type of a variant expression from the expected type, as
+      pattern matching does (for example, `fs.open(path, Write)` or
+      `fs.open(path, .Write)`).
+- [ ] Add an `Ordering` enum to the prelude and return it from
+      `time.Span.compare` instead of `-1`, `0`, or `1`.
+- [ ] Evaluate returning a `time.Weekday` enum instead of an `int` (`1` to `7`)
+      from `day_of_week()` in the `time` module.
+- [ ] Evaluate replacing `is_file` and `is_dir` on `fs.Metadata` with an
+      `fs.Kind` enum.
+- [ ] Evaluate replacing string error kinds (`"not_found"`, `"invalid"`) with
+      an enum.
 
 - [ ] **Construct all types with `T(...)`.** Replace struct literals with
       named-argument calls (`Point(x: 1.0, y: 2.0)`, with defaults and

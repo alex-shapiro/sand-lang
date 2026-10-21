@@ -4395,7 +4395,7 @@ mod tests {
     }
 
     #[test]
-    fn rollback_drops_the_enum_bindings_of_the_undone_compile() {
+    fn rollback_removes_enum_bindings_from_reverted_compile() {
         let mut prog = (*compile("import log\nlog.info(\"x\")")).clone();
         let level = std::any::TypeId::of::<crate::LogLevel>();
         assert!(prog.enum_types.contains_key(&level));

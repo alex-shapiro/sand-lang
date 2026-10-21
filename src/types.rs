@@ -600,7 +600,6 @@ pub struct ValueTypeInfo {
     pub ord: bool,
     pub parse: crate::vm::value::ParseValue,
     pub type_id: std::any::TypeId,
-    /// The Rust type name, for diagnostics.
     pub rust_name: &'static str,
 }
 
@@ -610,7 +609,7 @@ pub struct EnumTypeInfo {
     pub type_id: std::any::TypeId,
     pub name: &'static str,
     pub doc: &'static str,
-    /// The name and doc comment of each variant, in declaration order.
+    /// `(name, doc)` for each variant in declaration order.
     pub variants: Arc<[(&'static str, &'static str)]>,
 }
 
