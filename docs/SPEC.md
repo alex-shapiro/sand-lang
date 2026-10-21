@@ -2787,31 +2787,28 @@ and `Config::prompter` set the active `Policy` and interactive `Prompter`
 ### 16.3 Native modules
 
 A `NativeModule` exposes host Rust functions and types to Sand scripts as an
-importable, statically typed module. Registered on a `Config` via
-`Config::module`, a native module integrates into both the compiler and the
-virtual machine: the compiler derives Sand signatures from the registered Rust
-types so that calls are type-checked statically, and the VM converts arguments
-and return values across the host boundary while enforcing the engine's fuel and
-memory limits. Module, function, and type names must be unique and cannot shadow
-a standard library module or prelude type.
+importable, statically typed module. Registered via `Config::module`, a native
+module integrates into both the compiler and the virtual machine: the compiler
+derives Sand signatures from the registered Rust types for type-checking, and
+the VM converts arguments and return values across the host boundary while
+enforcing fuel and memory limits. Module, function, and type names must be
+unique and cannot shadow a standard library module or prelude type.
 
-Host functions can execute synchronously, asynchronously, or behind a capability
-check. `NativeModule::function` registers a synchronous closure, whereas
+Host functions can execute synchronously or asynchronously, optionally behind
+a capability check. `NativeModule::function` registers a synchronous closure.
 `NativeModule::async_function` registers a closure returning a `Future` that
 suspends only the calling Sand task until completion.
 `NativeModule::guarded_function(name, guard, f)` integrates a synchronous
 function with the engine's security policy (§14): before calling `f`, the engine
 passes references to the converted arguments to `guard` and checks the resulting
-`Capability`, returning `Result<R, Error>` (`"permission_denied"` if denied).
+`Capability`, returning a `"permission_denied"` error if denied.
 
 Values and errors cross the host boundary through the `FromValue`, `IntoValue`,
-and `IntoHostError` traits. Because a synchronous or guarded host function runs
-without re-entering the VM, it can borrow `&str` and `&[u8]` slices directly
-from the VM heap for the duration of the call; asynchronous functions require
-owned argument types. Fallible functions return `Result<T, E>`
-(`E: IntoHostError`), where `HostError { kind, message }` preserves `kind` on
-the resulting Sand `Error` and any other `E: Display` produces an `Error` with
-kind `"error"`:
+and `IntoHostError` traits. A synchronous or guarded host function runs without
+re-entering the VM and can borrow `&str` and `&[u8]` slices directly from the VM
+heap for the duration of the call; asynchronous functions require owned argument
+types. Fallible functions return `Result<T, E>` (`E: IntoHostError`).
+`HostError { kind, message }` preserves the `Error` kind.
 
 | Rust type                                   | Sand type                    |
 | ------------------------------------------- | ---------------------------- |
@@ -2842,21 +2839,16 @@ type with value semantics. Registering `T: ValueType` with
 `NativeModule::value_type::<T>()` declares `pub native type NAME` in the module
 unless the module source already declares it. A value type implements
 `Clone + Eq + Hash + Display` and a `T::parse` constructor so that the compiler
-can validate type-annotated string literals (`"..." as T`) and guarantee
-round-trip formatting (`ValueType::ORDER` adds `<`, `<=`, `>`, and `>=`, and
-`ValueType::PACKING` stores values inline in 16 bytes without heap allocation).
-The standard library's time types (`sandlang::jiff::Timestamp`,
-`sandlang::jiff::civil::{Date, Time, DateTime}`, and `sandlang::time::*`)
-implement `ValueType` and can be used directly in host function signatures.
+can validate type-annotated string literals and guarantee round-trip formatting.
+The standard library's time types implement `ValueType` and can be used directly
+in host function signatures.
 
-`EnumType` exposes a unit-only Rust enum to Sand as a transparent `pub enum`
-whose variants scripts can construct and pattern-match. Deriving
-`#[derive(sandlang::SandEnum)]` with `#[sand(module = "...")]` (and optional
-`#[sand(name = "...")]`) implements `EnumType`, and
-`NativeModule::enum_type::<T>()` generates the Sand `pub enum` declaration
-directly from the Rust variants and doc comments (so the module source must not
-redeclare `T::NAME`). Standard library enums
-(`sandlang::time::{Unit, RoundingMode, Disambiguation}` and `LogLevel`) also
+`EnumType` exposes unit enums to Sand as transparent `pub enum` types.
+An enum type is derived with `#[derive(sandlang::SandEnum)]`. An enum
+has a require`#[sand(module = "...")]` attribute and an optional
+`#[sand(name = "...")]` attribute. `NativeModule::enum_type::<T>()` generates
+the Sand `pub enum` declaration directly from the Rust variants and doc comments.
+Module source must not redeclare a natively-declared type. Standard library enums
 implement `EnumType` for use in host functions.
 
 ### 16.4 Operating-system access and file systems
