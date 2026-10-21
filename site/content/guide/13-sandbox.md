@@ -20,7 +20,7 @@ Each external operation requests a capability from the policy:
 | `import`                    | script module imports, by file path                      |
 | `custom`                    | guarded functions in [native modules](/guide/embedding/) |
 
-Sand has neither a foreign function interface nor process-spawning APIs; every host interaction passes through these capabilities.
+Sand has neither a foreign function interface nor process-spawning APIs. Every host interaction passes through these capabilities.
 
 ## Policy decisions
 
@@ -103,7 +103,7 @@ sand run main.sand --policy=app.policy
 
 File paths in a policy file must start with `/`, `./` (resolved relative to the policy file directory), `../`, or `~/`. `allow PATH` grants both read and write access; `allow read PATH` grants read-only access. `default` sets the fallback decision (`deny`, `allow`, or `prompt`) for unmatched requests.
 
-`sand check`, `sand lint`, and `sand fmt` also operate on `.policy` files, and `sand lint` warns about shadowed or redundant rules.
+`sand check`, `sand lint`, and `sand fmt` also operate on `.policy` files. `sand lint` warns about shadowed or redundant rules.
 
 ### Rule precedence
 
@@ -118,7 +118,7 @@ Sand canonicalizes paths and resolves `..` and symbolic links before checking th
 
 ### Private network protection
 
-By default, Sand blocks connections to loopback, link-local, and RFC 1918 private addresses (`localhost`, `127.0.0.1`, `10.0.0.0/8`, and similar ranges) even if `--allow-net=*` is set. To permit private network access, either name the target host explicitly in an allow rule (`--allow-net=localhost:8080`) or pass `--allow-private-net` (`allow private-net` in a policy file).
+By default, Sand blocks connections to loopback, link-local, and RFC 1918 private addresses (`localhost`, `127.0.0.1`, `10.0.0.0/8`, and similar ranges) even if `--allow-net=*` is set. To permit private network access, either provide the target host explicitly in an allow rule (`--allow-net=localhost:8080`) or pass `--allow-private-net` (`allow private-net` in a policy file).
 
 Sand also checks every IP address returned by DNS resolution so that a public hostname resolving to an internal IP address cannot bypass private network protection.
 

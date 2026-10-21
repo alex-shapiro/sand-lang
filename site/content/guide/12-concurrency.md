@@ -7,7 +7,7 @@ A Sand engine multiplexes concurrent tasks on a single OS thread. If a task bloc
 
 ## Suspending functions
 
-I/O functions suspend only the calling task while the operation completes, allowing other ready tasks to run:
+I/O functions suspend only the calling task while the operation completes. Other ready tasks will run while the suspended task waits:
 
 ```sand
 import fs
@@ -130,7 +130,7 @@ print(ch.recv())
 
 ## Preemption
 
-The VM counts bytecode instructions executed by each task and yields to the scheduler after a fixed fuel slice. A CPU-bound loop in a task cannot starve other ready tasks:
+The VM counts bytecode instructions executed by each task and yields to the scheduler after a fixed limit. This prevents a CPU-bound task from starving other ready tasks:
 
 ```sand
 var stop = false

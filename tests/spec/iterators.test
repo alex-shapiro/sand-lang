@@ -322,10 +322,11 @@ help([1].iter().map)
 --- stdout
 fn Iter.from_fn(f: fn() -> T?) -> Iter<T>
 
-An iterator over the results of `f`, until it returns `None`.
+Constructs an iterator that calls `f()` to produce each element until
+`f()` returns `None`.
 fn Iter.map<U>(self, f: fn(T) -> U) -> Iter<U>
 
-`f` applied to each element.
+Applies `f` lazily to each element.
 
 === fused pipelines match unfused ones
 // A pipeline written in one expression is fused into one loop; bound to a

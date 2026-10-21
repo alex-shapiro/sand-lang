@@ -3,7 +3,7 @@ title = "Traits and generics"
 description = "Generic functions, bounds, and traits."
 +++
 
-A generic function operates on values of any type that satisfies its bounds. A bound specifies the operations that a type must support. Sand provides four built-in bounds (`Eq`, `Ord`, `Hash`, and `Num`), and you can define custom traits with required and default methods.
+A generic function operates on values of any type that satisfies its bounds. A bound specifies the operations that a type must support. Sand provides built-in bounds, and you can define custom traits.
 
 ## Generic functions
 
@@ -59,7 +59,7 @@ print(total([1.5, 2.5]))
 print(counts(["a", "b", "a"]))
 ```
 
-A struct, enum, or tuple satisfies a bound if all of its fields satisfy that bound. A struct with a `var` field does not satisfy `Hash`. For the complete rules, see [§5.6 of the specification](/spec/#56-bounds).
+A struct, enum, or tuple satisfies a bound if all of its fields satisfy that bound. A struct with a `var` field does not satisfy `Hash`. For complete rules, see [§5.6 of the specification](/spec/#56-bounds).
 
 If a function uses an operation that its bounds do not permit, the compiler reports the missing bound:
 

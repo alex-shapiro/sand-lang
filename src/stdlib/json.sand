@@ -1,19 +1,25 @@
-//! JSON (RFC 8259): parsing, printing, and conversion between JSON and typed
-//! Sand values.
+//! JSON (RFC 8259) parsing, serialization, and typed conversion.
 
-/// A JSON value. A number written without a fraction or exponent that fits
-/// in an `int` is an `Int`, any other number a `Float`, so integers keep
-/// every digit. Object keys keep insertion order.
+/// A dynamic JSON value. Plain integers that fit in a 64-bit signed `int` parse
+/// as `Int`; all other numbers parse as `Float`. Object entries preserve
+/// insertion order.
 pub enum Json {
+    /// JSON `null`.
     Null
+    /// JSON boolean (`true` or `false`).
     Bool(bool)
+    /// Exact 64-bit signed integer.
     Int(int)
+    /// IEEE-754 floating-point number.
     Float(float)
+    /// UTF-8 string.
     Str(str)
+    /// JSON array.
     Arr([Json])
+    /// Insertion-ordered JSON object.
     Obj([str: Json])
 
-    /// The member `key` of an object; `None` for other values.
+    /// Returns the field `key` if `self` is an `Obj`, or `None` otherwise.
     pub fn get(self, key: str) -> Json? {
         match self {
             Obj(fields) => fields.get(key)
@@ -21,7 +27,8 @@ pub enum Json {
         }
     }
 
-    /// The element at index `i` of an array; `None` for other values.
+    /// Returns the element at index `i` if `self` is an `Arr` and `i` is in
+    /// bounds, or `None` otherwise.
     pub fn at(self, i: int) -> Json? {
         match self {
             Arr(items) => items.get(i)
@@ -29,7 +36,7 @@ pub enum Json {
         }
     }
 
-    /// The text of a string.
+    /// Returns the string payload if `self` is `Str`, or `None` otherwise.
     pub fn as_str(self) -> str? {
         match self {
             Str(s) => Some(s)
@@ -37,8 +44,8 @@ pub enum Json {
         }
     }
 
-    /// The value of a number, rounded to the nearest float for an `Int`
-    /// beyond ±2^53.
+    /// Returns the numeric value as a `float` if `self` is `Int` or `Float`, or
+    /// `None` otherwise.
     pub fn as_float(self) -> float? {
         match self {
             Int(i) => Some(i.to_float())
@@ -47,8 +54,8 @@ pub enum Json {
         }
     }
 
-    /// The value of an `Int`, or of an integral `Float` within ±2^53 (larger
-    /// floats may differ from the integer the JSON text wrote).
+    /// Returns the numeric value as an `int` if `self` is `Int` or an integral
+    /// `Float` within `±2^53`, or `None` otherwise.
     pub fn as_int(self) -> int? {
         match self {
             Int(i) => Some(i)
@@ -57,7 +64,7 @@ pub enum Json {
         }
     }
 
-    /// The value of a boolean.
+    /// Returns the boolean payload if `self` is `Bool`, or `None` otherwise.
     pub fn as_bool(self) -> bool? {
         match self {
             Bool(b) => Some(b)
@@ -65,7 +72,7 @@ pub enum Json {
         }
     }
 
-    /// The elements of an array.
+    /// Returns the array elements if `self` is `Arr`, or `None` otherwise.
     pub fn as_list(self) -> [Json]? {
         match self {
             Arr(items) => Some(items)
@@ -73,7 +80,7 @@ pub enum Json {
         }
     }
 
-    /// The members of an object.
+    /// Returns the object entries if `self` is `Obj`, or `None` otherwise.
     pub fn as_map(self) -> [str: Json]? {
         match self {
             Obj(fields) => Some(fields)
@@ -81,7 +88,7 @@ pub enum Json {
         }
     }
 
-    /// True for `null`.
+    /// Returns `true` if `self` is `Null`.
     pub fn is_null(self) -> bool {
         match self {
             Null => true
@@ -89,8 +96,8 @@ pub enum Json {
         }
     }
 
-    /// Follows a dot-separated path of object keys and array indices, e.g.
-    /// `"items.0.name"`. An empty path returns the value itself.
+    /// Traverses a dot-separated path of object keys and array indices (such as
+    /// `"items.0.name"`). Returns `Some(self)` if `p` is empty.
     pub fn path(self, p: str) -> Json? {
         if p.is_empty() {
             return Some(self)
@@ -106,26 +113,24 @@ pub enum Json {
     }
 }
 
-/// Parses JSON text. Errors have kind `"parse"` and give the line and
-/// column. Nesting deeper than 512 arrays/objects is rejected.
+/// Parses `text` as a `Json` value. Fails with kind `"parse"` on invalid syntax
+/// or if array/object nesting exceeds 512 levels.
 pub native fn parse(text: str) -> Result<Json>
 
-/// Encodes any value, including a `Json`, as JSON text (see `to_json` for
-/// the mapping): compact for `indent == 0`, otherwise pretty-printed with
-/// `indent` spaces per level. Floats print with a fraction or an exponent
-/// (`2.0`), non-finite ones as `null`. Fails on values that have no JSON
-/// form (functions, tasks, channels).
+/// Serializes `value` as JSON text (compact if `indent == 0`, or pretty-printed
+/// with `indent` spaces per level). Finite floats include a decimal point or
+/// exponent (`2.0`), and `NaN` or infinite floats serialize as `null`. Aborts
+/// if `value` contains a function, task, channel, or native resource.
 pub native fn encode<T>(value: T, indent: int = 0) -> str
 
-/// Decodes JSON text into a value of type `T`, which must be known at the
-/// call site. Missing struct fields take their constant default or `None`;
-/// mismatches fail with kind `"parse"` and a path such as
-/// `$.items[2].name: expected str`.
+/// Parses `text` and converts it into type `T`. Missing struct fields use their
+/// declared default or `None`; type mismatches fail with kind `"parse"` and a
+/// JSON path diagnostic.
 pub native fn decode<reflect T>(text: str) -> Result<T>
 
-/// Converts a value to `Json`: numbers, strings and booleans map directly,
-/// `()` and `None` to `null`, `Some(x)` to `x`, lists, sets and tuples to
-/// arrays, maps and structs to objects, payload-less enum variants to their
-/// name and others to `{"Variant": payload}`, bytes to base64 and durations
-/// to nanoseconds.
+/// Converts `value` into a `Json` value: primitives map directly, `()` and
+/// `None` map to `Null`, `Some(x)` maps to `x`, lists, sets, and tuples map to
+/// `Arr`, `[str: V]` maps and structs map to `Obj`, unit enum variants map to
+/// `Str`, payload variants map to `{"Variant": payload}`, `bytes` maps to
+/// Base64, and `duration` maps to nanoseconds.
 pub native fn to_json<T>(value: T) -> Json

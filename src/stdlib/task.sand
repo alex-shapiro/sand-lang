@@ -1,21 +1,22 @@
-//! Tasks, timers and channels. Visible in every module as `task`.
+//! Task coordination, timers, and channels (always in scope as `task`).
 
-/// Suspends the current task for `d`.
+/// Suspends the calling task for duration `d`.
 pub native fn sleep(d: duration)
 
-/// Lets other ready tasks run.
+/// Yields execution of the calling task so other ready tasks can run.
 pub native fn yield_now()
 
-/// Waits for every task; results are in the same order.
+/// Waits for all tasks in `tasks` to complete and returns their results in order.
 pub fn all<T>(tasks: [Task<T>]) -> [T] {
     tasks.map(t => t.wait())
 }
 
-/// Waits for the first task to finish and cancels the others.
+/// Waits for the first task in `tasks` to complete, cancels the remaining
+/// tasks, and returns the winning result.
 pub native fn race<T>(tasks: [Task<T>]) -> T
 
-/// Runs `f` in a task; `None` (and the task is cancelled) if it does not
-/// finish within `d`.
+/// Runs `f` in a spawned task and returns `Some(result)` if it completes within
+/// duration `d`, or cancels the task and returns `None`.
 pub fn timeout<T>(d: duration, f: fn() -> T) -> T? {
     let work = spawn Some(f())
     let timer = spawn {
@@ -25,5 +26,5 @@ pub fn timeout<T>(d: duration, f: fn() -> T) -> T? {
     race([work, timer])
 }
 
-/// Creates a channel; `capacity` 0 means unbounded.
+/// Creates a message channel (`capacity == 0` creates an unbounded channel).
 pub native fn channel<T>(capacity: int = 0) -> Channel<T>

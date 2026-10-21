@@ -3,7 +3,7 @@ title = "Errors"
 description = "Option, Result, and unrecoverable faults."
 +++
 
-Sand represents absent values with `Option<T>` (`T?`) and recoverable errors with `Result<T, E>`, rather than null references or exceptions. Unrecoverable faults and failed assertions immediately terminate execution.
+Sand represents absent values with `Option<T>` (`T?`) and recoverable errors with `Result<T, E>`. Unrecoverable faults and failed assertions terminate execution immediately.
 
 ## Optional values
 
@@ -16,7 +16,7 @@ print(names.find(n => n.starts_with("z")))
 print("42".parse_int())
 ```
 
-Because `T?` and `T` are distinct types, you must unwrap an optional value before using it as `T`:
+`T?` and `T` are distinct types. You must unwrap an optional value before using it as `T`:
 
 ```sand error
 let i = [4, 5].find_index(x => x == 5)
@@ -51,7 +51,7 @@ See the [`Result` reference](/std/prelude/Result/) for transformation methods su
 
 ### The `Error` struct
 
-The prelude `Error` struct has two `str` fields: `kind` (a machine-readable category tag) and `message` (a human-readable description). Construct an `Error` with `error(message, kind: "error")`:
+The `Error` struct has two `str` fields: `kind` (a machine-readable category tag) and `message` (a human-readable description). Construct an `Error` with `error(message, kind: "error")`:
 
 ```sand
 let e = error("disk is full", kind: "io")
@@ -59,7 +59,7 @@ print(e)
 print(e.kind)
 ```
 
-Standard library functions return errors with standard `kind` tags (`"error"`, `"not_found"`, `"permission_denied"`, `"already_exists"`, `"io"`, `"timeout"`, `"parse"`, `"invalid"`, `"http"`, `"closed"`, and `"limit"`).
+Standard library functions return errors with standard `kind` tags.
 
 ## Propagation with `?`
 
@@ -130,7 +130,7 @@ Top-level `?` is rejected at compile time inside imported library modules.
 
 ## Do not ignore results
 
-If an expression statement produces an unhandled `Result`, `sand lint` emits an `unused-result` warning. Handle the result with `?` or `match`, or explicitly discard it with `let _ =`:
+If an expression statement produces an unhandled `Result`, the linter emits an `unused-result` warning. Handle the result with `?` or `match`, or explicitly discard it with `let _ =`:
 
 ```sand
 import fs

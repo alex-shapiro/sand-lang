@@ -1,20 +1,20 @@
-//! Cryptographic hash functions and message authentication.
+//! Cryptographic digests, HMAC authentication, and constant-time comparison.
 //!
-//! SHA-1 and MD5 are provided for interoperability only; they are not
-//! collision resistant.
+//! SHA-1 and MD5 are provided only for legacy interoperability and are not
+//! collision-resistant.
 
-/// The SHA-256 digest of `data` (32 bytes).
+/// Returns the 32-byte SHA-256 digest of `data`.
 pub native fn sha256(data: bytes) -> bytes
 
-/// The SHA-1 digest of `data` (20 bytes).
+/// Returns the 20-byte SHA-1 digest of `data`.
 pub native fn sha1(data: bytes) -> bytes
 
-/// HMAC-SHA256 of `data` under `key` (32 bytes).
+/// Returns the 32-byte HMAC-SHA256 tag of `data` authenticated with `key`.
 pub native fn hmac_sha256(key: bytes, data: bytes) -> bytes
 
-/// The MD5 digest of `data` (16 bytes).
+/// Returns the 16-byte MD5 digest of `data`.
 pub native fn md5(data: bytes) -> bytes
 
-/// Compares two byte strings in time that depends only on their lengths,
-/// not on their contents. Use it to compare MACs and tokens.
+/// Compares `a` and `b` in time proportional only to their lengths. Use this
+/// function to verify MAC tags and secret tokens.
 pub native fn constant_time_eq(a: bytes, b: bytes) -> bool

@@ -1,58 +1,59 @@
-//! Mathematical constants and functions on `float` and `int`. Rounding,
-//! `abs`, `min`, `max`, `clamp`, `sqrt` and `pow` are methods of `float`
-//! and `int` (`x.sqrt()`).
+//! Mathematical constants and functions on `float` and `int`.
+//!
+//! Rounding, `abs`, `min`, `max`, `clamp`, `sqrt`, and `pow` are also available
+//! as methods on `float` and `int` (`x.sqrt()`).
 
-/// The ratio of a circle's circumference to its diameter.
+/// Ratio of a circle's circumference to its diameter (`π`).
 pub let pi = 3.141592653589793
 
-/// Euler's number, the base of the natural logarithm.
+/// Base of the natural logarithm (`e`).
 pub let e = 2.718281828459045
 
-/// The full turn, `2 * pi`.
+/// Ratio of a circle's circumference to its radius (`2 * pi`).
 pub let tau = 6.283185307179586
 
-/// Cube root.
+/// Returns the cube root of `x`.
 pub native fn cbrt(x: float) -> float
-/// `e` raised to the power `x`.
+/// Returns `e` raised to the power `x`.
 pub native fn exp(x: float) -> float
-/// Natural logarithm.
+/// Returns the natural logarithm of `x`.
 pub native fn ln(x: float) -> float
-/// Base-2 logarithm.
+/// Returns the base-2 logarithm of `x`.
 pub native fn log2(x: float) -> float
-/// Base-10 logarithm.
+/// Returns the base-10 logarithm of `x`.
 pub native fn log10(x: float) -> float
-/// Logarithm of `x` in the given `base`.
+/// Returns the logarithm of `x` in `base`.
 pub native fn log(x: float, base: float) -> float
-/// Sine of `x` (radians).
+/// Returns the sine of `x` (in radians).
 pub native fn sin(x: float) -> float
-/// Cosine of `x` (radians).
+/// Returns the cosine of `x` (in radians).
 pub native fn cos(x: float) -> float
-/// Tangent of `x` (radians).
+/// Returns the tangent of `x` (in radians).
 pub native fn tan(x: float) -> float
-/// Arcsine, in radians.
+/// Returns the arcsine of `x` in radians.
 pub native fn asin(x: float) -> float
-/// Arccosine, in radians.
+/// Returns the arccosine of `x` in radians.
 pub native fn acos(x: float) -> float
-/// Arctangent, in radians.
+/// Returns the arctangent of `x` in radians.
 pub native fn atan(x: float) -> float
-/// The angle of the point `(x, y)` in radians, in `-pi..=pi`.
+/// Returns the four-quadrant arctangent of `(y, x)` in radians (`-pi..=pi`).
 pub native fn atan2(y: float, x: float) -> float
-/// Hyperbolic sine.
+/// Returns the hyperbolic sine of `x`.
 pub native fn sinh(x: float) -> float
-/// Hyperbolic cosine.
+/// Returns the hyperbolic cosine of `x`.
 pub native fn cosh(x: float) -> float
-/// Hyperbolic tangent.
+/// Returns the hyperbolic tangent of `x`.
 pub native fn tanh(x: float) -> float
-/// `sqrt(x * x + y * y)` without intermediate overflow.
+/// Returns `sqrt(x * x + y * y)` without intermediate overflow or underflow.
 pub native fn hypot(x: float, y: float) -> float
-/// Converts degrees to radians.
+/// Converts `degrees` to radians.
 pub native fn to_radians(degrees: float) -> float
-/// Converts radians to degrees.
+/// Converts `radians` to degrees.
 pub native fn to_degrees(radians: float) -> float
 
-/// True if `a` and `b` are equal within a relative tolerance (scaled by the
-/// larger magnitude) or an absolute tolerance. Infinities are close only to
-/// themselves; NaN is close to nothing.
+/// Returns `true` if `a` and `b` are within relative tolerance `rel_tol`
+/// (scaled by the larger magnitude) or absolute tolerance `abs_tol`. Equal
+/// infinities return `true`, and `NaN` always returns `false`.
 pub fn is_close(a: float, b: float, rel_tol: float = 1e-9, abs_tol: float = 0.0) -> bool {
     if a == b {
         return true
@@ -64,11 +65,11 @@ pub fn is_close(a: float, b: float, rel_tol: float = 1e-9, abs_tol: float = 0.0)
     diff <= rel_tol * a.abs().max(b.abs()) or diff <= abs_tol
 }
 
-/// Greatest common divisor (always non-negative; `gcd(0, 0) == 0`).
+/// Returns the non-negative greatest common divisor of `a` and `b` (`gcd(0, 0) == 0`).
 pub native fn gcd(a: int, b: int) -> int
 
-/// Least common multiple (always non-negative; `0` if either is `0`).
+/// Returns the non-negative least common multiple of `a` and `b` (`0` if either input is `0`).
 pub native fn lcm(a: int, b: int) -> int
 
-/// The largest integer whose square is at most `n`; fails if `n` is negative.
+/// Returns the integer square root `floor(sqrt(n))`, or aborts if `n < 0`.
 pub native fn isqrt(n: int) -> int

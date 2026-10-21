@@ -17,32 +17,34 @@ help(base64.encode)
 --- stdout
 fn base64.encode(data: bytes) -> str
 
-Encodes `data` with the standard alphabet (`+`, `/`) and `=` padding.
+Encodes `data` using the standard Base64 alphabet (`+`, `/`) with `=` padding.
 
 === modules list their items with the first sentence of their docs
 help(uuid)
 --- stdout
 module uuid
 
-UUIDs (RFC 9562): random (v4) and time-ordered (v7) identifiers, parsing
-and validation. UUIDs are represented as lower-case hyphenated strings.
+UUID generation, parsing, and validation (RFC 9562).
+
+UUIDs are represented as lowercase hyphenated strings.
 
 Functions:
     fn v4() -> str
-        A random (version 4) UUID.
+        Generates a random version 4 UUID.
     fn v7() -> str
-        A time-ordered (version 7) UUID: a 48-bit Unix millisecond timestamp, a
-        12-bit counter and 62 random bits.
+        Generates a time-ordered version 7 UUID composed of a 48-bit Unix
+        millisecond timestamp, a 12-bit monotonic counter, and 62 random bits.
     fn nil() -> str
-        The nil UUID `00000000-0000-0000-0000-000000000000`.
+        Returns the nil UUID (`"00000000-0000-0000-0000-000000000000"`).
     fn parse(s: str) -> Result<str, Error>
-        Parses a UUID in hyphenated, simple (32 hex digits), braced (`{...}`) or
-        URN (`urn:uuid:...`) form; returns the lower-case hyphenated form.
+        Parses a UUID in hyphenated, 32-digit hex, braced (`{...}`), or URN
+        (`urn:uuid:...`) format and returns its canonical lowercase hyphenated
+        form.
     fn is_valid(s: str) -> bool
-        True if `s` is a UUID in any form accepted by `parse`.
+        Returns `true` if `s` is a valid UUID in any format accepted by `parse`.
     fn version(s: str) -> int?
-        The version number of a UUID (e.g. 4 or 7), or `None` if `s` is not a
-        UUID.
+        Returns the version number of UUID `s` (such as `4` or `7`), or `None`
+        if `s` is not a valid UUID.
 
 === a string identifies a module or an item
 import json
@@ -52,14 +54,14 @@ help("Option<T>.unwrap")
 --- stdout
 fn json.parse(text: str) -> Result<Json, Error>
 
-Parses JSON text. Errors have kind `"parse"` and give the line and
-column. Nesting deeper than 512 arrays/objects is rejected.
+Parses `text` as a `Json` value. Fails with kind `"parse"` on invalid syntax
+or if array/object nesting exceeds 512 levels.
 fn List.len(self) -> int
 
-Number of elements.
+Returns the number of elements in the list.
 fn Option.unwrap(self) -> T
 
-The payload; fails on `None`.
+Returns the inner value of `Some`, or aborts if `self` is `None`.
 
 === types show their variants, fields, methods and traits
 /// A shape.
@@ -115,49 +117,50 @@ f(1)
 --- stdout
 type Set<T>
 
-Hash sets, built with `set([...])`, mutable, shared by reference and
-iterated in insertion order. Elements must be `Hash`.
+Insertion-ordered hash set constructed with `set([...])`. Sets are mutable
+reference types, and elements must implement `Hash`.
 
 Methods:
     fn len(self) -> int
-        Number of elements.
+        Returns the number of elements in the set.
     fn is_empty(self) -> bool
-        True if there are no elements.
+        Returns `true` if the set contains zero elements.
     fn add(self, x: T) -> bool
-        Adds; true if newly added.
+        Inserts `x` into the set and returns `true` if `x` was not already
+        present.
     fn remove(self, x: T) -> bool
-        Removes; true if it was present.
+        Removes `x` from the set and returns `true` if `x` was present.
     fn contains(self, x: T) -> bool
-        True if `x` is an element.
+        Returns `true` if `x` is in the set.
     fn to_list(self) -> [T]
-        The elements, in insertion order.
+        Returns the elements of the set in insertion order as a list.
     fn union(self, other: Set<T>) -> Set<T>
-        The elements of either set.
+        Returns a new set containing elements present in `self` or `other`.
     fn intersection(self, other: Set<T>) -> Set<T>
-        The elements of both sets, in the order of `self`.
+        Returns a new set containing elements present in both `self` and
+        `other`.
     fn difference(self, other: Set<T>) -> Set<T>
-        The elements of `self` that are not in `other`.
+        Returns a new set containing elements in `self` that are not in `other`.
     fn is_subset(self, other: Set<T>) -> bool
-        True if every element is also in `other`.
+        Returns `true` if every element of `self` is also in `other`.
     fn copy(self) -> Set<T>
-        A shallow copy.
+        Returns a shallow copy of the set.
     fn clear(self)
-        Removes all elements.
+        Removes all elements from the set.
     fn iter(self) -> Iter<T>
-        A lazy iterator over the elements as they are now (a change of the set
-        meanwhile does not affect it).
+        Returns a lazy iterator over a snapshot of the elements in insertion
+        order.
 trait Iterator<T>
 
-A source of elements produced one at a time. `for` loops iterate over any
-type that implements it, and `iter()` turns it into an `Iter`, whose lazy
-adapters (`map`, `filter`, ...) and consumers (`to_list`, `sum`, ...) work
-for every iterator.
+Sequential element source supporting `for` loops and lazy `Iter<T>` pipelines.
 
 Methods:
     fn next(self) -> T?
-        The next element, or `None` once there are no more.
+        Advances the iterator and returns the next element, or `None` if
+        exhausted.
     fn iter(self) -> Iter<T>
-        A lazy `Iter` over the remaining elements.
+        Wraps `self` in a lazy `Iter<T>` that provides adapter and consumer
+        methods.
 
 Implemented for:
     Iter<T>
@@ -192,10 +195,10 @@ field Point.x: float
 Horizontal.
 fn List.len(self) -> int
 
-Number of elements.
+Returns the number of elements in the list.
 variant Option.Some(T)
 
-A value.
+Present value of type `T`.
 fn to_str(self) -> str
 
 The display form of the value, as `print` and string interpolation show it. Every value has this method.
@@ -214,7 +217,7 @@ help(p)
 --- stdout
 let math.pi: float
 
-The ratio of a circle's circumference to its diameter.
+Ratio of a circle's circumference to its diameter (`π`).
 let RETRIES: int
 
 How many retries.
@@ -281,18 +284,22 @@ members(x) lists the names that may follow `x.`, and members() those
 in scope.
 
 Functions:
-    error    An `Error` with `message` and `kind`.
-    print    Prints the display form of `x` and a newline to standard output.
-    eprint   Prints the display form of `x` and a newline to standard error.
-    fail     Fails with an error: the input of a session, or the program.
-    assert   Fails with `message` (kind `"assert"`) unless `cond` is true.
-    todo     Marks unfinished code; fails (kind `"todo"`) when reached.
-    exit     Stops the program with an exit code.
-    set      Builds a set from a list.
-    help     Displays documentation for x or an item identified by string.
-    members  The names that may follow `x.`: a module's public items, or the
-             variants, fields and methods of a type or of a value's type,
-             sorted.
+    error    Constructs an `Error` with `message` and `kind`.
+    print    Prints the display representation of `x` followed by a newline to
+             standard output.
+    eprint   Prints the display representation of `x` followed by a newline to
+             standard error.
+    fail     Aborts execution immediately with an uncaught runtime error.
+    assert   Aborts execution with `message` (kind `"assert"`) if `cond` is
+             `false`.
+    todo     Aborts execution with kind `"todo"` to mark unimplemented code.
+    exit     Terminates the program immediately with exit status `code`.
+    set      Constructs a `Set<T>` containing the unique elements of `items` in
+             insertion order.
+    help     Prints documentation for `x` (a module, type, trait, function,
+             method, or string path).
+    members  Returns the sorted member names accessible after `x.`, or the names
+             in scope if called as `members()`.
 
 Types:
     bool, int, float, str, bytes, duration, Range, List<T>, Map<K, V>, Set<T>,
@@ -302,32 +309,31 @@ Traits:
     Close, Iterator<T>
 
 Modules (help(name) describes one):
-    base64      Base64 encoding (RFC 4648) with the standard and URL-safe
-                alphabets.
-    crypto      Cryptographic hash functions and message authentication.
-    env         The script's environment: variables and arguments.
-    fs          Files and directories.
-    http        An HTTP/1.1 client and a minimal HTTP/1.1 server.
-    io          Reading and writing bytes: the `Reader` and `Writer` traits,
-                which files, connections, HTTP bodies and the standard streams
-                implement, and the standard streams themselves.
-    json        JSON (RFC 8259): parsing, printing, and conversion between JSON
-                and typed Sand values.
-    log         Leveled logging to standard error.
+    base64      Base64 encoding and decoding (RFC 4648) with standard and
+                URL-safe alphabets.
+    crypto      Cryptographic digests, HMAC authentication, and constant-time
+                comparison.
+    env         Process environment variables and command-line arguments.
+    fs          File system operations on files, directories, and paths.
+    http        HTTP/1.1 client and server.
+    io          Byte streams (`Reader` and `Writer`) and the standard input,
+                output, and error handles.
+    json        JSON (RFC 8259) parsing, serialization, and typed conversion.
+    log         Structured leveled logging to standard error.
     math        Mathematical constants and functions on `float` and `int`.
-    net         TCP networking: listening sockets and connections.
-    random      Pseudo-random numbers (xoshiro256**).
-    regex       Regular expressions with the syntax of Rust's `regex` crate:
-                matching takes linear time and there are no backreferences or
-                look-around.
-    statistics  Descriptive statistics on lists of floats.
-    task        Tasks, timers and channels.
-    test        Assertions and property-based testing for `test` blocks.
-    time        Dates, times, time zones, and clocks.
-    uri         URIs (RFC 3986): parsing, recomposition, reference resolution,
-                percent encoding and query strings.
-    uuid        UUIDs (RFC 9562): random (v4) and time-ordered (v7) identifiers,
-                parsing and validation.
+    net         TCP listeners and client connections (including TLS).
+    random      Pseudo-random number generation (`xoshiro256**`,
+                non-cryptographic).
+    regex       Linear-time regular expressions backed by the Rust `regex`
+                engine.
+    statistics  Descriptive statistics and linear regression on numeric lists.
+    task        Task coordination, timers, and channels (always in scope as
+                `task`).
+    test        Assertions and property-based testing helpers for `test` blocks.
+    time        Dates, times, calendar spans, time zones, and clocks.
+    uri         URI parsing, resolution, percent-encoding, and query string
+                handling (RFC 3986).
+    uuid        UUID generation, parsing, and validation (RFC 9562).
 
 === a user-defined help shadows the prelude's
 fn help(x: int) -> int { x + 1 }
@@ -345,10 +351,10 @@ true
 true
 fn List.len(self) -> int
 
-Number of elements.
+Returns the number of elements in the list.
 fn Map.len(self) -> int
 
-Number of entries.
+Returns the number of key-value entries in the map.
 
 === unknown names get suggestions
 help(jsn)

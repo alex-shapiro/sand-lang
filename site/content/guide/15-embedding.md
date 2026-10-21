@@ -202,7 +202,7 @@ To cancel an individual `Session::eval` call, use `session.interrupt_handle()`.
 
 ## Multiple engines
 
-`Engine` instances share zero mutable global state. A single process can embed any number of engines with independent policies, resource limits, and virtual file systems. `Engine` implements `Send`, so engines can move across threads or run concurrently on `LocalSet` tasks.
+All `Engine` state is local. A single process can embed any number of engines with independent policies, resource limits, and virtual file systems. `Engine` implements `Send`, so engines can move across threads or run concurrently on `LocalSet` tasks.
 
 ## WebAssembly
 

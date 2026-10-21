@@ -3,7 +3,7 @@ title = "Collections"
 description = "Lists, maps, sets, tuples, comprehensions, and lazy iterators."
 +++
 
-Sand provides four built-in collection types: lists (`List<T>`, written `[T]`), maps (`Map<K, V>`, written `[K: V]`), sets (`Set<T>`), and tuples (`(A, B)`). Lists, maps, and sets are mutable heap references. Tuples are immutable values.
+Sand provides four built-in collection types: lists, maps, sets, and tuples.
 
 ## Lists
 
@@ -21,16 +21,16 @@ print(primes)
 print(primes.pop())
 ```
 
-Indexing with `xs[i]` terminates execution with an error if `i` is out of bounds, whereas `xs.get(i)` returns `Some(x)` or `None`:
+Indexing with `xs[i]` terminates execution with an error if `i` is out of bounds. `xs.get(i)` returns `Some(x)` or `None`:
 
 ```sand fails
 let primes = [2, 3, 5]
 print(primes[3])
 ```
 
-The repeat syntax `[value; n]` evaluates `value` once for each of the `n` elements, so `[[0; 3]; 2]` allocates two distinct inner lists.
+The repeat syntax `[value; n]` evaluates `value` once for each of the `n` elements. `[[0; 3]; 2]` allocates two distinct inner lists.
 
-An empty list literal requires a type annotation if the element type cannot be inferred from later use:
+An empty list literal requires a type annotation if the element type cannot be inferred:
 
 ```sand
 let names: [str] = []
@@ -108,7 +108,7 @@ print("\(distance) steps \(direction)")
 
 ## Reference semantics
 
-Lists, maps, and sets use reference semantics: assigning or passing a collection shares the underlying storage rather than copying it. A `let` binding prevents reassigning the variable, but does not prevent mutating the collection's contents:
+Lists, maps, and sets use reference semantics: assigning or passing a collection shares the underlying storage rather than copying it. A `let` binding prevents variable reassigment but does not prevent mutation of collection contents:
 
 ```sand
 let a = [1, 2]
@@ -142,7 +142,7 @@ print(lengths)
 
 ## Common methods
 
-Lists provide functional methods (`filter`, `map`, `fold`, `any`, `find`, `sorted_by`, `group_by`) that return a new value without modifying the receiver:
+Lists provide functional methods that transform its elements without modifying the original value:
 
 ```sand
 let words = ["apple", "fig", "banana", "cherry", "date"]
@@ -158,7 +158,7 @@ print(words.enumerate().take(2))
 print(words.join(", "))
 ```
 
-`sorted`, `reversed`, and `sorted_by` allocate a new list, whereas `sort`, `reverse`, and `sort_by` mutate the list in place. Numeric lists also provide `sum`, `product`, `min`, and `max`:
+Some functional methods have in-place alternatives: `sort`, `reverse`, and `sort_by` mutate a list in place. Numeric lists also provide `sum`, `product`, `min`, and `max`:
 
 ```sand
 let scores = [72, 95, 88]
@@ -171,7 +171,7 @@ See the [prelude reference](/std/prelude/) for the complete list of collection m
 
 ## Lazy iterators
 
-Unlike eager list methods (`xs.map(f)`), a lazy iterator (`Iter<T>`) computes elements on demand without allocating intermediate lists. Call `iter()` on a collection or range, or construct a generator with `Iter.count_from`, `Iter.repeat`, `Iter.once`, `Iter.from_fn`, or `Iter.successors`:
+Unlike the functional list methods above, an iterator computes elements on demand without allocating intermediate lists. Call `iter()` on a collection or range, or construct a generator with `Iter.count_from`, `Iter.repeat`, `Iter.once`, `Iter.from_fn`, or `Iter.successors`:
 
 ```sand
 let firsts = Iter.count_from(1)
@@ -184,7 +184,7 @@ let total = [1, 2, 3, 4].iter().map(x => x * x).sum()
 print(total)
 ```
 
-Adapters (`map`, `filter`, `take`, `skip`, `enumerate`) return a new `Iter<T>` without advancing the source. Terminal consumers (`to_list`, `sum`, `count`, `find`, `first`, `join`, and `for` loops) pull elements from the iterator:
+Adapters return a new `Iter<T>` without advancing. Consumers pull elements from the iterator:
 
 ```sand
 let log = "header\nfirst\nsecond"
@@ -207,4 +207,4 @@ print(powers.to_list())
 print(Iter.repeat("ab").take(3).join("-"))
 ```
 
-Custom types can also integrate with `for` loops and `Iter<T>` by implementing `Iterator<T>` (see [Traits and generics](/guide/traits/)).
+Custom types can integrate with `for` loops and `Iter<T>` by implementing `Iterator<T>`. For more, see [Traits and generics](/guide/traits/)).

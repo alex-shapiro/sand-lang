@@ -7,7 +7,7 @@ Sand provides two constructs for defining custom data types: `struct` groups nam
 
 ## Structs
 
-A `struct` declaration lists its fields and their types, and a struct literal initializes every field that does not have a default value:
+A `struct` declaration lists its fields and their types. It can be initialized with a literal:
 
 ```sand
 struct Point {

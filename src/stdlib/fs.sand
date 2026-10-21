@@ -1,39 +1,40 @@
-//! Files and directories.
+//! File system operations on files, directories, and paths.
 //!
-//! Relative paths are resolved against the engine's working directory; every
-//! access is checked against the policy.
+//! Relative paths are resolved against the engine working directory, and every
+//! operation is checked against the active sandbox policy.
 
 import io
 import time
 
-/// Information about a file or directory.
+/// Metadata for a file or directory.
 pub struct Metadata {
     /// Size in bytes.
     size: int
+    /// `true` if the entry is a regular file.
     is_file: bool
+    /// `true` if the entry is a directory.
     is_dir: bool
-    /// Last modification time, if the platform records it.
+    /// Last modification timestamp, if supported by the platform.
     modified: time.Instant?
 }
 
-/// How `open` opens a file.
+/// File access mode for `open`.
 pub enum Mode {
-    /// Read an existing file (needs `FsRead`).
+    /// Opens an existing file for reading (requires `FsRead`).
     Read
-    /// Write from the start, creating the file or truncating it (`FsWrite`).
+    /// Creates or truncates a file for writing from the start (requires `FsWrite`).
     Write
-    /// Write at the end, creating the file if needed (`FsWrite`).
+    /// Opens or creates a file for appending at the end (requires `FsWrite`).
     Append
-    /// Create a new file for writing; fails with kind `"already_exists"` if
-    /// something is there (`FsWrite`).
+    /// Creates a new file for writing, or fails with kind `"already_exists"` if
+    /// the path exists (requires `FsWrite`).
     CreateNew
-    /// Read and write an existing file in place (`FsRead` and `FsWrite`).
+    /// Opens an existing file for reading and writing in place (requires `FsRead` and `FsWrite`).
     ReadWrite
 }
 
-/// Opens the regular file at `path` for reading and writing incrementally.
-/// The policy is checked here, once: the file stays accessible as opened
-/// even if it is renamed, removed or replaced meanwhile.
+/// Opens the regular file at `path` with `mode`. The sandbox policy is checked
+/// at the time of the `open` call.
 ///
 /// ```
 /// use f = fs.open("data.csv")?
@@ -53,11 +54,10 @@ pub fn open(path: str, mode: Mode = Mode.Read) -> Result<File> {
 
 native fn open_file(path: str, mode: int) -> Result<File>
 
-/// An open file (see `open`). It reads and writes at its position, which
-/// each read and write moves on; appending files write at the end. Reads
-/// are buffered; writes go to the file at once. Closing it (when a `use`
-/// binding's block ends, or with `close`) releases it; operations on a
-/// closed file fail with kind `"closed"`.
+/// An open file handle returned by `open`. Reads and writes advance the file
+/// cursor (`Mode.Append` always writes at the end). Bind a `File` with `use`
+/// or call `close` to release the underlying descriptor; operations on a
+/// closed file return an `Err` with kind `"closed"`.
 pub native type File
 
 impl io.Reader for File {
@@ -77,79 +77,75 @@ impl Close for File {
 }
 
 extend File {
-    /// Moves to byte offset `pos` from the start (it may be past the end: a
-    /// write there fills the gap with zeros).
+    /// Moves the file cursor to byte offset `pos` from the start of the file.
     pub native fn seek(self, pos: int) -> Result<()>
-    /// The byte offset that the next read or write uses.
+    /// Returns the current byte offset of the file cursor.
     pub native fn position(self) -> Result<int>
 
-    /// Size and modification time of the file (`is_file` is true).
+    /// Returns the size and modification timestamp of the open file.
     pub fn metadata(self) -> Result<Metadata> {
         let (size, modified) = file_stat(self)?
         Ok(to_metadata(size, true, false, modified))
     }
 
-    /// Truncates the file, or extends it with zeros, to `len` bytes.
+    /// Truncates or zero-extends the file to `len` bytes.
     pub native fn set_len(self, len: int) -> Result<()>
-    /// Waits until what was written is stored durably (`fsync`).
+    /// Flushes buffered file data and metadata to persistent storage (`fsync`).
     pub native fn sync(self) -> Result<()>
-    /// The path the file was opened with, as given to `open`.
+    /// Returns the path string passed to `open`.
     pub native fn path(self) -> str
 }
 
-/// `(size, modified)` of an open file, the modification time in
-/// nanoseconds since the Unix epoch.
 native fn file_stat(f: File) -> Result<(int, int?)>
 
-/// Reads a whole file as UTF-8 text (kind `invalid` if it is not UTF-8).
+/// Reads the entire file at `path` as UTF-8 text, or fails with kind
+/// `"invalid"` if the file contains invalid UTF-8.
 pub native fn read_text(path: str) -> Result<str>
 
-/// Reads a whole file as bytes.
+/// Reads the entire file at `path` as raw bytes.
 pub native fn read_bytes(path: str) -> Result<bytes>
 
-/// Writes `text` to a file, creating or truncating it.
+/// Writes `text` to `path`, creating or truncating the file.
 pub native fn write_text(path: str, text: str) -> Result<()>
 
-/// Writes `data` to a file, creating or truncating it.
+/// Writes `data` to `path`, creating or truncating the file.
 pub native fn write_bytes(path: str, data: bytes) -> Result<()>
 
-/// Whether a file or directory exists at `path`.
+/// Returns `true` if a file or directory exists at `path`.
 pub native fn exists(path: str) -> Result<bool>
 
-/// Whether `path` is a regular file (following symlinks).
+/// Returns `true` if `path` resolves to a regular file.
 pub native fn is_file(path: str) -> Result<bool>
 
-/// Whether `path` is a directory (following symlinks).
+/// Returns `true` if `path` resolves to a directory.
 pub native fn is_dir(path: str) -> Result<bool>
 
-/// The names of the entries of a directory, sorted.
+/// Returns the entry names in directory `path` in sorted order.
 pub native fn list_dir(path: str) -> Result<[str]>
 
-/// Creates a directory.
-/// With `recursive`, also creates missing parents, and an existing directory
-/// is not an error.
+/// Creates a directory at `path`. If `recursive` is `true`, creates missing
+/// parent directories and succeeds if the directory already exists.
 pub native fn create_dir(path: str, recursive: bool = false) -> Result<()>
 
-/// Removes a file (or a symlink, not its target).
+/// Removes the file or symbolic link at `path`.
 pub native fn remove_file(path: str) -> Result<()>
 
-/// Removes an empty directory, or with `recursive` a directory and its contents.
-/// A recursive removal fails before removing anything if a deny rule protects
-/// a path inside the directory; every entry is also checked against the policy
-/// before it is removed. Symlinks are removed, never followed.
+/// Removes an empty directory at `path`, or removes the directory and all of
+/// its contents if `recursive` is `true`. Checks every entry against the
+/// sandbox policy before deletion and removes symbolic links without following
+/// them.
 pub fn remove_dir(path: str, recursive: bool = false) -> Result<()> {
     if recursive { remove_tree(path) } else { remove_empty_dir(path) }
 }
 
-/// Renames or moves a file or directory (a symlink itself, not its target),
-/// replacing `dst` if it is a file. Fails if a deny rule of the policy
-/// protects a path inside either tree.
+/// Renames or moves `src` to `dst`, replacing `dst` if it is an existing file.
+/// Fails if any path inside `src` or `dst` is denied by the sandbox policy.
 pub native fn rename(src: str, dst: str) -> Result<()>
 
-/// Copies the contents of file `src` to `dst`.
+/// Copies the contents of regular file `src` to `dst`.
 pub native fn copy(src: str, dst: str) -> Result<()>
 
-/// Size, kind and modification time of a file or directory.
+/// Returns metadata for the file or directory at `path`.
 pub fn metadata(path: str) -> Result<Metadata> {
     let (size, is_file, is_dir, modified) = stat(path)?
     Ok(to_metadata(size, is_file, is_dir, modified))
@@ -159,26 +155,23 @@ fn to_metadata(size: int, is_file: bool, is_dir: bool, modified: int?) -> Metada
     Metadata { size, is_file, is_dir, modified: modified.map(time.Instant.from_epoch_nanos) }
 }
 
-/// `(size, is_file, is_dir, modified)`, the modification time in
-/// nanoseconds since the Unix epoch.
 native fn stat(path: str) -> Result<(int, bool, bool, int?)>
 
-/// Joins path components with the platform separator.
-/// An absolute component replaces everything before it.
+/// Joins path segments using the platform path separator. An absolute segment
+/// replaces all preceding segments.
 pub native fn join(parts: [str]) -> str
 
-/// The final component of a path (`""` if there is none).
+/// Returns the final component of `path`, or `""` if `path` has none.
 pub native fn basename(path: str) -> str
 
-/// The path without its final component (`""` if there is none).
+/// Returns `path` without its final component, or `""` if `path` has a single
+/// component.
 pub native fn dirname(path: str) -> str
 
-/// The extension of the final component, without the dot.
+/// Returns the file extension of `path` without the leading dot, or `None` if
+/// the final component does not have an extension.
 pub native fn extension(path: str) -> str?
 
-/// Removes an empty directory.
 native fn remove_empty_dir(path: str) -> Result<()>
 
-/// Removes the directory `path` (not a symlink to one) and everything
-/// below it, checking each entry before removing it.
 native fn remove_tree(path: str) -> Result<()>

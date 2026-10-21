@@ -91,7 +91,7 @@ Importing modules can read a `pub var` binding, but only the declaring module ca
 
 Sand executes the top-level statements of each imported module a single time, before the first module that imports it runs. If multiple modules import the same file, they share the same module state.
 
-Import cycles are rejected at compile time.
+Cyclical imports are rejected at compile time.
 
 Top-level `?` is allowed only in the entry module (see [Errors](/guide/errors/#at-the-top-level)); in an imported module, place fallible initialization inside a function that returns a `Result`.
 
