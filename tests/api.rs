@@ -697,6 +697,14 @@ fn log_sinks_select_levels() {
 }
 
 #[test]
+fn hosts_set_the_starting_log_level() {
+    let src = "import log\nlog.debug(\"d\")\nlog.set_level(\"info\")\nlog.debug(\"hidden\")";
+    let (r, _, err) = run_src(Config::new().policy(Policy::allow_all()).log_level(LogLevel::Debug), src);
+    r.unwrap();
+    assert_eq!(err, "DEBUG d\n");
+}
+
+#[test]
 fn log_records_are_dropped_if_stderr_is_denied() {
     let policy = Policy::custom(|cap: &Capability| if matches!(cap, Capability::Stderr) { Decision::Deny } else { Decision::Allow });
     let (r, out, err) = run_src(Config::new().policy(policy), "import log\nlog.error(\"failed\")\nprint(\"done\")");
@@ -1817,10 +1825,7 @@ fn host_modules_can_define_resources() {
     m.source("pub native type Conn\nimpl Close for Conn {\n    native fn close(self)\n}\npub native fn connect() -> Result<Conn>");
     let c = closed.clone();
     m.raw_function("connect", move |vm: &mut Vm, _: &[Value]| {
-        let slot = match vm.resource_slot()? {
-            Ok(s) => s,
-            Err(e) => return Ok(vm.err(e)),
-        };
+        let slot = vm.resource_slot()?;
         let conn = vm.heap.alloc(Obj::Native(Box::new(Conn { slot: Some(slot), closed: c.clone() })));
         Ok(vm.ok(conn))
     });
@@ -1838,6 +1843,33 @@ fn host_modules_can_define_resources() {
     assert!(r.is_ok(), "{r:?} {err}");
     assert!(out.contains("too many open resources"), "{out}");
     assert_eq!(closed.load(Ordering::Relaxed), 5);
+}
+
+/// A native fails with `Ctl::native_err`: a native returning a `Result`
+/// returns `Err` to the script, and the others fail with an internal error,
+/// before and after suspending.
+#[test]
+fn native_errors_reach_only_natives_returning_results() {
+    use sandlang::Value;
+    use sandlang::vm::{Ctl, Finisher, Vm};
+    let mut m = NativeModule::new("errs");
+    m.source("pub native fn checked() -> Result<int>\npub native fn unchecked() -> int\npub native fn later() -> Result<int>\npub native fn later_unchecked() -> int");
+    let fail = |_: &mut Vm, _: &[Value]| Err(Ctl::native_err("invalid", "bad input"));
+    let fail_later = |_: &mut Vm, _: &[Value]| {
+        Err(Ctl::suspend(Box::pin(async { Box::new(|_: &mut Vm| Err(Ctl::native_err("io", "broken pipe"))) as Finisher })))
+    };
+    m.raw_function("checked", fail)
+        .raw_function("unchecked", fail)
+        .raw_function("later", fail_later)
+        .raw_function("later_unchecked", fail_later);
+    let run = |src: &str| run_src(Config::new().module(m.clone()), &format!("import errs\n{src}"));
+    let (r, out, _) = run("print(errs.checked())\nprint(errs.later())");
+    r.unwrap();
+    assert_eq!(out, "Err(Error { kind: \"invalid\", message: \"bad input\" })\nErr(Error { kind: \"io\", message: \"broken pipe\" })\n");
+    for call in ["errs.unchecked()", "errs.later_unchecked()"] {
+        let (r, _, _) = run(call);
+        assert!(matches!(&r, Err(Error::Internal { message, .. }) if message.contains("does not return a Result")), "{call}: {r:?}");
+    }
 }
 
 #[test]

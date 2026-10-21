@@ -560,14 +560,14 @@ fn alloc_or_fail<T: ValueType>(vm: &mut Vm, x: Result<T, jiff::Error>) -> NResul
     }
 }
 
-fn into_sand_result<T: ValueType>(vm: &mut Vm, x: Result<T, String>, kind: &str) -> NResult {
-    Ok(match x {
+fn into_sand_result<T: ValueType>(vm: &mut Vm, x: Result<T, String>, kind: &'static str) -> NResult {
+    match x {
         Ok(x) => {
             let v = vm.new_value(x);
-            vm.ok(v)
+            Ok(vm.ok(v))
         }
-        Err(msg) => vm.err_value(kind, &msg),
-    })
+        Err(msg) => Err(Ctl::native_err(kind, msg)),
+    }
 }
 
 fn int_val(n: impl Into<i64>) -> Value {

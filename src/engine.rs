@@ -226,6 +226,7 @@ pub struct Config {
     pub(crate) stdout: SharedSink,
     pub(crate) stderr: SharedSink,
     log_sink: Option<Arc<dyn crate::LogSink>>,
+    log_level: crate::LogLevel,
     stdin: StdinConfig,
     pub(crate) cwd: Option<PathBuf>,
     pub(crate) module_root: Option<PathBuf>,
@@ -276,6 +277,7 @@ impl Config {
             stdout: Arc::new(crate::stdio::StdoutSink::default()),
             stderr: Arc::new(crate::stdio::StderrSink::default()),
             log_sink: None,
+            log_level: crate::LogLevel::Info,
             stdin: StdinConfig::None,
             cwd: None,
             module_root: None,
@@ -355,6 +357,13 @@ impl Config {
     /// but do not need [`Capability::Stderr`].
     pub fn log_sink(mut self, sink: impl crate::LogSink + 'static) -> Self {
         self.log_sink = Some(Arc::new(sink));
+        self
+    }
+    /// Sets the lowest level of `log` records at the start of a run (default
+    /// [`LogLevel::Info`](crate::LogLevel::Info)). Scripts change it with
+    /// `log.set_level`.
+    pub fn log_level(mut self, level: crate::LogLevel) -> Self {
+        self.log_level = level;
         self
     }
     pub fn stdin_bytes(mut self, data: Vec<u8>) -> Self {
@@ -1009,7 +1018,7 @@ impl Engine {
             args: c.args.clone(),
             env: c.env.clone(),
             rng: Rng::new(c.seed.unwrap_or_else(entropy_seed)),
-            log_level: Some(crate::LogLevel::Info),
+            log_level: Some(c.log_level),
             log_sink: if quiet { Some(Arc::new(crate::stdlib::log::NullLogSink)) } else { c.log_sink.clone() },
             interrupt: self.interrupt.clone(),
             stream_decisions: [None; 2],
@@ -1521,10 +1530,9 @@ fn compile_program(
         Some(main) => Some(crate::lint::lint_module(main, &main.source, &cp, budget)?),
         None => None,
     };
-    let (native_names, native_argc) = if host { native_info(&cp, registry) } else { (Vec::new(), Vec::new()) };
+    let natives_info = if host { native_info(&cp, registry) } else { crate::modules::NativeInfo::default() };
     let mut program = spare.unwrap_or_else(|| snap.program.clone());
-    let input =
-        CompileInput { checked: &cp, sm, natives: &registry.by_name, native_names, native_argc, budget, initialized: None, optimize };
+    let input = CompileInput { checked: &cp, sm, natives: &registry.by_name, natives_info, budget, initialized: None, optimize };
     let entry = compile_more(input, &mut program, &mut snap.compiler.clone(), &inits);
     if let Some(stop) = budget.stopped() {
         return Err(budget_error(stop, sm, main_file));

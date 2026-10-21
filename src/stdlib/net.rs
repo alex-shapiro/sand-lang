@@ -72,7 +72,7 @@ pub(crate) fn finish<T: Send + 'static>(r: Result<T, IoFailure>, ok: impl FnOnce
             let v = ok(vm, v)?;
             Ok(vm.ok(v))
         }
-        Err(e) => e.into_value(vm),
+        Err(e) => Err(e.into()),
     })
 }
 
@@ -84,9 +84,9 @@ pub(crate) fn suspend<T: Send + 'static>(
     Err(Ctl::suspend(Box::pin(async move { finish(fut.await, ok) })))
 }
 
-/// Checks `cap`; `Ok(Some(err))` is the `Err(permission_denied)` value to return.
-pub(crate) fn check_permission(vm: &mut Vm, cap: Capability) -> Result<Option<Value>, Ctl> {
-    if vm.permit(&cap)? { Ok(None) } else { Ok(Some(vm.err_value("permission_denied", &format!("permission denied: {cap}")))) }
+/// Checks `cap`, failing with kind `"permission_denied"` if it is denied.
+pub(crate) fn check_permission(vm: &mut Vm, cap: Capability) -> Result<(), Ctl> {
+    if vm.permit(&cap)? { Ok(()) } else { Err(Ctl::native_err("permission_denied", format!("permission denied: {cap}"))) }
 }
 
 /// A native object holding an open resource, counted by its slot (see
@@ -114,7 +114,7 @@ fn suspend_resource<T: Resource>(slot: ResourceSlot, fut: impl Future<Output = R
                 let v = alloc_resource(vm, obj, slot);
                 Ok(vm.ok(v))
             }
-            Err(e) => e.into_value(vm),
+            Err(e) => Err(e.into()),
         }) as Finisher
     })))
 }
@@ -193,28 +193,28 @@ fn split_host_port(vm: &mut Vm, a: &[Value]) -> NResult {
     let parts = split_port(text).and_then(|(host, port)| Some((host, parse_port(port?)?))).filter(|&(host, _)| is_valid_host(host));
     let Some((host, port)) = parts else {
         let msg = format!("invalid address {:?} (expected host:port or [ipv6]:port)", super::truncate(text, 200));
-        return Ok(vm.err_value("parse", &msg));
+        return Err(Ctl::native_err("parse", msg));
     };
     let host = vm.new_str(host.to_string());
     let pair = vm.heap.new_tuple(&[host, Value::Int(port.into())]);
     Ok(vm.ok(pair))
 }
 
-/// The `port` argument of a socket function, or the `Err(invalid)` value.
-fn port(vm: &mut Vm, port: Value) -> Result<u16, Value> {
-    u16::try_from(port.as_int()).map_err(|_| vm.err_value("invalid", &format!("invalid port {} (expected 0 to 65535)", port.as_int())))
+/// The `port` argument of a socket function. Fails with kind `"invalid"`
+/// outside `0..=65535`.
+fn port(port: Value) -> Result<u16, Ctl> {
+    u16::try_from(port.as_int()).map_err(|_| Ctl::native_err("invalid", format!("invalid port {} (expected 0 to 65535)", port.as_int())))
 }
 
-/// The `host` and `port` arguments of a connecting function, or the
-/// `Err(invalid)` value.
-fn endpoint(vm: &mut Vm, host: Value, port_arg: Value) -> Result<(String, u16), Value> {
+/// The `host` and `port` arguments of a connecting function. Fails with
+/// kind `"invalid"`.
+fn endpoint(vm: &Vm, host: Value, port_arg: Value) -> Result<(String, u16), Ctl> {
     let host = vm.str(host);
     if !is_valid_host(host) {
         let msg = format!("invalid host {:?} (expected a host name or an IP address without brackets)", super::truncate(host, 200));
-        return Err(vm.err_value("invalid", &msg));
+        return Err(Ctl::native_err("invalid", msg));
     }
-    let host = host.to_string();
-    Ok((host, port(vm, port_arg)?))
+    Ok((host.to_string(), port(port_arg)?))
 }
 
 /// Checks `NetListen` for the `ip` and `port` arguments of a listening
@@ -228,16 +228,11 @@ pub(crate) fn listen_with<T: Resource>(
 ) -> NResult {
     let Ok(ip) = vm.str(ip).parse::<IpAddr>().map(|ip| ip.to_canonical()) else {
         let msg = format!("invalid IP address {:?} (expected an address such as 127.0.0.1 or ::1)", super::truncate(vm.str(ip), 200));
-        return Ok(vm.err_value("invalid", &msg));
+        return Err(Ctl::native_err("invalid", msg));
     };
-    let addr = match port(vm, port_arg) {
-        Ok(port) => std::net::SocketAddr::new(ip, port),
-        Err(e) => return Ok(e),
-    };
-    if let Some(denied) = check_permission(vm, Capability::NetListen(addr))? {
-        return Ok(denied);
-    }
-    let slot = super::or_return!(vm.resource_slot());
+    let addr = std::net::SocketAddr::new(ip, port(port_arg)?);
+    check_permission(vm, Capability::NetListen(addr))?;
+    let slot = vm.resource_slot()?;
     let network = vm.host.network.clone();
     suspend_resource(slot, async move { Ok(open(network.listen(addr).await?)?) })
 }
@@ -297,14 +292,14 @@ fn listen(vm: &mut Vm, a: &[Value]) -> NResult {
 
 fn listener_accept(vm: &mut Vm, a: &[Value]) -> NResult {
     let l = listener(vm, a[0])?;
-    let Some(socket) = l.socket.clone() else { return Ok(vm.err_value("closed", "listener closed")) };
+    let Some(socket) = l.socket.clone() else { return Err(Ctl::native_err("closed", "listener closed")) };
     let closed = CloseSignal(l.closed.subscribe());
     // A pending accept holds a slot for the connection it will produce.
-    let slot = super::or_return!(vm.resource_slot_with(CONN_BUFFER, "a connection"));
+    let slot = vm.resource_slot_with(CONN_BUFFER, "a connection")?;
     suspend_resource(
         slot,
         closed.guard(async move {
-            let (stream, peer) = std::future::poll_fn(|cx| socket.poll_accept(cx)).await?;
+            let (stream, peer) = socket.accept().await?;
             Ok(Conn::from_stream(stream, peer))
         }),
     )
@@ -480,20 +475,14 @@ fn conn(vm: &Vm, v: Value) -> Result<&Conn, Ctl> {
 }
 
 /// Takes the connection out of the `net.Conn` object `v` (see
-/// [`Conn::detach`]), or returns the `Err(closed)` value.
-pub(crate) fn detach(vm: &mut Vm, v: Value) -> Result<Result<Detached, Value>, Ctl> {
-    match vm.heap.native_mut::<Conn>(v).ok_or_else(|| Ctl::internal("not a connection"))?.detach() {
-        Some(d) => Ok(Ok(d)),
-        None => Ok(Err(vm.err_value("closed", "connection closed"))),
-    }
+/// [`Conn::detach`]). Fails with kind `"closed"`.
+pub(crate) fn detach(vm: &mut Vm, v: Value) -> Result<Detached, Ctl> {
+    vm.heap.native_mut::<Conn>(v).ok_or_else(|| Ctl::internal("not a connection"))?.detach().ok_or_else(|| closed().into())
 }
 
-/// The operation handle of the connection `v`, or the `Err(closed)` value.
-pub(crate) fn conn_handle(vm: &mut Vm, v: Value) -> Result<Result<ConnHandle, Value>, Ctl> {
-    match conn(vm, v)?.handle() {
-        Some(h) => Ok(Ok(h)),
-        None => Ok(Err(vm.err_value("closed", "connection closed"))),
-    }
+/// The operation handle of the connection `v`. Fails with kind `"closed"`.
+pub(crate) fn conn_handle(vm: &Vm, v: Value) -> Result<ConnHandle, Ctl> {
+    conn(vm, v)?.handle().ok_or_else(|| closed().into())
 }
 
 /// Resolves `host` once and returns the addresses the policy allows
@@ -545,15 +534,10 @@ pub(crate) async fn connect_checked(
 }
 
 fn connect(vm: &mut Vm, a: &[Value]) -> NResult {
-    let (host, port) = match endpoint(vm, a[0], a[1]) {
-        Ok(e) => e,
-        Err(e) => return Ok(e),
-    };
-    if let Some(denied) = check_permission(vm, Capability::Net { host: host.clone(), port })? {
-        return Ok(denied);
-    }
+    let (host, port) = endpoint(vm, a[0], a[1])?;
+    check_permission(vm, Capability::Net { host: host.clone(), port })?;
     // Counted from the start: a connection attempt holds a socket.
-    let slot = super::or_return!(vm.resource_slot_with(CONN_BUFFER, "a connection"));
+    let slot = vm.resource_slot_with(CONN_BUFFER, "a connection")?;
     let timeout = Duration::from_nanos(a[2].as_int().max(0) as u64);
     let (policy, network, clock) = (vm.host.policy.clone(), vm.host.network.clone(), vm.host.clock.clone());
     suspend_resource(slot, async move {
@@ -567,16 +551,11 @@ fn connect(vm: &mut Vm, a: &[Value]) -> NResult {
 
 fn connect_tls(vm: &mut Vm, a: &[Value]) -> NResult {
     if !cfg!(feature = "tls") {
-        return Ok(vm.err_value("invalid", "TLS support is not enabled in this build"));
+        return Err(Ctl::native_err("invalid", "TLS support is not enabled in this build"));
     }
-    let (host, port) = match endpoint(vm, a[0], a[1]) {
-        Ok(e) => e,
-        Err(e) => return Ok(e),
-    };
-    if let Some(denied) = check_permission(vm, Capability::Net { host: host.clone(), port })? {
-        return Ok(denied);
-    }
-    let slot = super::or_return!(vm.resource_slot_with(CONN_BUFFER + TLS_BUFFERS, "a connection"));
+    let (host, port) = endpoint(vm, a[0], a[1])?;
+    check_permission(vm, Capability::Net { host: host.clone(), port })?;
+    let slot = vm.resource_slot_with(CONN_BUFFER + TLS_BUFFERS, "a connection")?;
     let timeout = Duration::from_nanos(a[2].as_int().max(0) as u64);
     let (policy, network, clock) = (vm.host.policy.clone(), vm.host.network.clone(), vm.host.clock.clone());
     let settings = vm.host.tls.clone();
@@ -600,17 +579,14 @@ fn connect_tls(vm: &mut Vm, a: &[Value]) -> NResult {
 fn conn_read(vm: &mut Vm, a: &[Value]) -> NResult {
     let max = a[1].as_int();
     if max <= 0 {
-        return Ok(vm.err_value("invalid", "read: max must be positive"));
+        return Err(Ctl::native_err("invalid", "read: max must be positive"));
     }
     // A read returns what the connection's buffer holds (filling it first if
     // it is empty), at most `CONN_BUFFER` bytes.
     let max = (max as usize).min(CONN_BUFFER);
-    let h = match conn_handle(vm, a[0])? {
-        Ok(h) => h,
-        Err(e) => return Ok(e),
-    };
+    let h = conn_handle(vm, a[0])?;
     // The buffer is counted against the memory limit while the read is pending.
-    let res = super::or_return!(vm.reserve_io(max));
+    let res = vm.reserve_io(max)?;
     suspend(
         h.closed.guard(async move {
             let mut reader = h.reader.lock().await;
@@ -629,10 +605,7 @@ fn conn_read(vm: &mut Vm, a: &[Value]) -> NResult {
 }
 
 fn conn_read_line(vm: &mut Vm, a: &[Value]) -> NResult {
-    let h = match conn_handle(vm, a[0])? {
-        Ok(h) => h,
-        Err(e) => return Ok(e),
-    };
+    let h = conn_handle(vm, a[0])?;
     // The line may grow until it exhausts the memory limit.
     let mut res = vm.io_reservation();
     suspend(
@@ -661,10 +634,7 @@ fn conn_read_line(vm: &mut Vm, a: &[Value]) -> NResult {
 /// Reads until the peer has finished sending; the data is reserved as it
 /// arrives.
 fn conn_read_all(vm: &mut Vm, a: &[Value]) -> NResult {
-    let h = match conn_handle(vm, a[0])? {
-        Ok(h) => h,
-        Err(e) => return Ok(e),
-    };
+    let h = conn_handle(vm, a[0])?;
     let mut res = vm.io_reservation();
     suspend(
         h.closed.guard(async move {
@@ -693,17 +663,14 @@ fn conn_write(vm: &mut Vm, c: Value, v: Value) -> NResult {
     }
     let len = bytes(vm, v).len();
     vm.charge_bytes(len)?;
-    let res = super::or_return!(vm.reserve_io(len));
+    let res = vm.reserve_io(len)?;
     let data = bytes(vm, v).to_vec();
     write_bytes(vm, c, data, res)
 }
 
 /// Writes `data` to connection `c`; `res` reserves `data` until the write is done.
 pub(crate) fn write_bytes(vm: &mut Vm, c: Value, data: Vec<u8>, res: Reservation) -> NResult {
-    let h = match conn_handle(vm, c)? {
-        Ok(h) => h,
-        Err(e) => return Ok(e),
-    };
+    let h = conn_handle(vm, c)?;
     suspend(
         h.closed.guard(async move {
             let mut writer = h.writer.lock().await;

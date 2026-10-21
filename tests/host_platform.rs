@@ -105,7 +105,6 @@ mod network {
     use sandlang::network::{Listener, Network, NetworkFuture, Stream};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::Mutex;
-    use std::task::{Context, Poll};
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -128,11 +127,14 @@ mod network {
             Ok(self.addr)
         }
 
-        fn poll_accept(&self, _: &mut Context<'_>) -> Poll<std::io::Result<(Box<dyn Stream>, SocketAddr)>> {
-            match self.pending.lock().unwrap().take() {
-                Some(s) => Poll::Ready(Ok((Box::new(s), "10.9.9.9:5555".parse().unwrap()))),
-                None => Poll::Pending,
-            }
+        fn accept(&self) -> NetworkFuture<'_, (Box<dyn Stream>, SocketAddr)> {
+            let pending = self.pending.lock().unwrap().take();
+            Box::pin(async move {
+                match pending {
+                    Some(s) => Ok((Box::new(s) as Box<dyn Stream>, "10.9.9.9:5555".parse().unwrap())),
+                    None => std::future::pending().await,
+                }
+            })
         }
     }
 

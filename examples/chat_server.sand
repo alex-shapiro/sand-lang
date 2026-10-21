@@ -66,7 +66,10 @@ fn handle(c: Client) {
     }
 }
 
-let port = env.args().first().and_then(a => a.parse_int()) ?? 7000
+let port = match env.args().first() {
+    Some(arg) => arg.parse_int().ok_or(error("invalid port \(arg)", kind: "invalid"))?
+    None => 7000
+}
 use listener = net.listen("127.0.0.1", port)?
 print("listening on \(listener.addr())")
 

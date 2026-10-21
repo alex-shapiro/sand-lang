@@ -1,7 +1,7 @@
 //! The policy file linter.
 
 use super::file::parse;
-use super::net::HostKind;
+use super::net::{HostKind, host_port};
 use super::path::{self, Pattern, Seg, name_counts, path_segments};
 use super::rules::{IMPORT, READ, Rule, RuleKind, WRITE};
 use super::{Capability, PathSpace, PolicyError, fold_name};
@@ -76,7 +76,11 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
                 };
                 let port = url.host.port.unwrap_or(443);
                 if let Some((true, j)) = policy.verdict(&Capability::Net { host: host.clone(), port }, PathSpace::Memory, &[]) {
-                    warn(i, "bypassable-http-deny", format!("{} lets scripts connect to {host}:{port} and send any request", describe(j)));
+                    warn(
+                        i,
+                        "bypassable-http-deny",
+                        format!("{} lets scripts connect to {} and send any request", describe(j), host_port(&host, port)),
+                    );
                 }
             }
             _ => {}

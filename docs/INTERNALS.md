@@ -63,6 +63,12 @@ each native under its key:
 - Reserve memory and take resource slots before mutating anything: on a
   memory or resource limit (`CtlKind::Collect`) the native is called again
   after a collection.
+- A native that returns a `Result` fails with
+  `Err(Ctl::native_err(kind, message))`, which the call returns to the
+  script as `Err(Error)`; helpers fail the same way, so natives propagate
+  their failures with `?`. `Ctl::fail` is a runtime error, which ends the
+  run. A `NativeErr` from a native that does not return a `Result` is an
+  internal error.
 - An async native returns `Ctl::suspend(future)`. The future must not hold
   `Value`s; it yields a `Finisher` that builds the result on the VM thread
   (`stdlib::net::suspend` wraps the pattern).

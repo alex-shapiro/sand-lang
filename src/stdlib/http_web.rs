@@ -50,24 +50,21 @@ fn send(vm: &mut Vm, a: &[Value]) -> NResult {
     vm.charge_slow_bytes(method.len() + text.len())?;
     let url = match Url::parse(&text) {
         Ok(u) => u,
-        Err(e) => return Ok(vm.err_value(e.kind, &e.message)),
+        Err(e) => return Err(Ctl::native_err(e.kind, e.message)),
     };
     if !is_token(&method) {
-        return Ok(vm.err_value("invalid", &format!("invalid HTTP method {:?}", super::truncate(&method, 64))));
+        return Err(Ctl::native_err("invalid", format!("invalid HTTP method {:?}", super::truncate(&method, 64))));
     }
-    let mut headers = match header_pairs(vm, a[2])? {
-        Ok(h) => h,
-        Err(e) => return Ok(vm.err_value("invalid", &e)),
-    };
+    let mut headers = header_pairs(vm, a[2])?;
     let cap = url.capability(&method);
     if !vm.permit(&cap)? {
-        return Ok(vm.err_value("permission_denied", &format!("permission denied: {cap}")));
+        return Err(Ctl::native_err("permission_denied", format!("permission denied: {cap}")));
     }
     if let Err(reason) = filter_request(vm, &url, &mut headers) {
-        return Ok(vm.err_value("permission_denied", &reason));
+        return Err(Ctl::native_err("permission_denied", reason));
     }
     // The request body is held, and the response buffered, outside the heap.
-    let res = super::or_return!(vm.reserve_io(vm.heap.bytes_of(a[3]).len()));
+    let res = vm.reserve_io(vm.heap.bytes_of(a[3]).len())?;
     let body = vm.heap.bytes_of(a[3]).to_vec();
     vm.charge_bytes(body.len())?;
     let request = Request {
@@ -84,10 +81,7 @@ fn send(vm: &mut Vm, a: &[Value]) -> NResult {
         let _abort = AbortOnDrop(id);
         let result = done.await.unwrap_or_else(|_| Err(IoFailure::new("io", "the request was abandoned")));
         Box::new(move |vm: &mut Vm| -> NResult {
-            let (status, headers, body, res) = match result {
-                Ok(r) => r,
-                Err(e) => return e.into_value(vm),
-            };
+            let (status, headers, body, res) = result?;
             let headers = header_list(vm, headers)?;
             // The browser read the body: it stays reserved while it is read.
             let reader = BodyReader::new(Box::new(MemoryBody::new(body)), max_body, Some(res));

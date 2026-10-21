@@ -7,7 +7,7 @@ use super::http_common::*;
 use super::net::{self, Detached, finish};
 use super::stream::IoFailure;
 use crate::engine::Registry;
-use crate::network::{Listener, Stream};
+use crate::network::{Listener, NetworkFuture, Stream};
 use crate::vm::iomem::{IoMemory, Reservation, ResourceSlot};
 use crate::vm::value::{NativeObject, Obj, Value};
 use crate::vm::{Ctl, NResult, Vm};
@@ -195,7 +195,7 @@ fn evict_beyond(reads: &[Pending], cap: usize) {
 /// Accepts connections and reads request heads until a complete request is available.
 fn next_request(vm: &mut Vm, a: &[Value]) -> NResult {
     let srv = server(vm, a[0])?;
-    let Some(socket) = srv.listener.clone() else { return Ok(vm.err_value("closed", "server closed")) };
+    let Some(socket) = srv.listener.clone() else { return Err(Ctl::native_err("closed", "server closed")) };
     let closed = net::CloseSignal::of(&srv.closed);
     let shared = srv.shared.clone();
     let weak = Arc::downgrade(&shared);
@@ -204,6 +204,7 @@ fn next_request(vm: &mut Vm, a: &[Value]) -> NResult {
     let serve = async move {
         let mut reads = shared.reads.lock().await;
         let mut retry: Option<Pin<Box<tokio::time::Sleep>>> = None;
+        let mut accepting: Option<NetworkFuture<'static, (Box<dyn Stream>, std::net::SocketAddr)>> = None;
         std::future::poll_fn(|cx| {
             loop {
                 let mut progress = false;
@@ -219,8 +220,9 @@ fn next_request(vm: &mut Vm, a: &[Value]) -> NResult {
                 if retry.as_mut().is_none_or(|t| t.as_mut().poll(cx).is_ready()) {
                     retry = None;
                     match ResourceSlot::try_new(&mem) {
-                        Some(slot) => match socket.poll_accept(cx) {
+                        Some(slot) => match accepting.get_or_insert_with(|| accept(socket.clone())).as_mut().poll(cx) {
                             Poll::Ready(Ok((stream, peer))) => {
+                                accepting = None;
                                 let state = Arc::new(ReadState::default());
                                 let reading = Box::pin(read_connection(stream, peer, mem.clone(), slot, state.clone()));
                                 reads.push(Pending { reading, state });
@@ -307,6 +309,10 @@ async fn deny(conn: &Detached, status: &str, message: &str) {
         w.flush().await
     };
     let _ = tokio::time::timeout(Duration::from_secs(5), send).await;
+}
+
+fn accept(socket: Arc<dyn Listener>) -> NetworkFuture<'static, (Box<dyn Stream>, std::net::SocketAddr)> {
+    Box::pin(async move { socket.accept().await })
 }
 
 /// Reads the request of a newly accepted connection (see [`read_request`]).
@@ -465,7 +471,7 @@ fn after(vm: &Vm, exchange: Value, body: Value, delimit: Delimit) -> Result<(Aft
 /// Takes the connection out of `net.Conn` `c`, writes `data` (the end of a
 /// response) to it, then hands it back to the server or closes it.
 pub(super) fn end_response(vm: &mut Vm, c: Value, data: Vec<u8>, res: Reservation, after: After) -> NResult {
-    let conn = super::or_return!(net::detach(vm, c));
+    let conn = net::detach(vm, c)?;
     let mem = vm.heap.io_memory.clone();
     net::suspend(
         async move {
@@ -492,16 +498,13 @@ struct Parts {
     headers: Vec<(String, String)>,
 }
 
-/// Validates a response's status and headers.
-fn response_parts(vm: &mut Vm, status: Value, headers: Value) -> Result<Result<Parts, Value>, Ctl> {
+/// Validates a response's status and headers, failing with kind `"invalid"`.
+fn response_parts(vm: &Vm, status: Value, headers: Value) -> Result<Parts, Ctl> {
     let status = status.as_int();
     if !(100..=999).contains(&status) {
-        return Ok(Err(vm.err_value("invalid", &format!("invalid HTTP status {status}"))));
+        return Err(Ctl::native_err("invalid", format!("invalid HTTP status {status}")));
     }
-    match header_pairs(vm, headers)? {
-        Ok(headers) => Ok(Ok(Parts { status, headers })),
-        Err(e) => Ok(Err(vm.err_value("invalid", &e))),
-    }
+    Ok(Parts { status, headers: header_pairs(vm, headers)? })
 }
 
 /// A response's start line and headers, without framing headers.
@@ -519,7 +522,7 @@ fn has_body(status: i64) -> bool {
 /// `write_response(conn, exchange, request_body, status, body, headers,
 /// include_body)`: writes a response with a `content-length` to `conn`.
 fn write_response(vm: &mut Vm, a: &[Value]) -> NResult {
-    let Parts { status, headers } = super::or_return!(response_parts(vm, a[3], a[5]));
+    let Parts { status, headers } = response_parts(vm, a[3], a[5])?;
     let has_body = has_body(status);
     let delimit = if has_body { Delimit::Length(vm.heap.bytes_of(a[4]).len() as u64) } else { Delimit::None };
     let (after, connection) = after(vm, a[1], a[2], delimit)?;
@@ -527,7 +530,7 @@ fn write_response(vm: &mut Vm, a: &[Value]) -> NResult {
     let body = if has_body && a[6].as_bool() { vm.heap.bytes_of(a[4]) } else { &[] };
     let len = head.len().saturating_add(body.len());
     vm.charge_bytes(len)?;
-    let res = super::or_return!(vm.reserve_io(len));
+    let res = vm.reserve_io(len)?;
     let body = if has_body && a[6].as_bool() { vm.heap.bytes_of(a[4]) } else { &[] };
     let mut data = head.into_bytes();
     data.extend_from_slice(body);
@@ -537,10 +540,10 @@ fn write_response(vm: &mut Vm, a: &[Value]) -> NResult {
 /// `reply_body(exchange, request_body, status, headers, include_body)`: the
 /// `Outgoing` of a streamed response.
 fn reply_body(vm: &mut Vm, a: &[Value]) -> NResult {
-    let Parts { status, headers } = super::or_return!(response_parts(vm, a[2], a[3]));
+    let Parts { status, headers } = response_parts(vm, a[2], a[3])?;
     let length = match given_length(&headers) {
         Ok(n) => n,
-        Err(e) => return Ok(vm.err_value("invalid", &e)),
+        Err(e) => return Err(Ctl::native_err("invalid", e)),
     };
     let http10 = vm.heap.native::<Exchange>(a[0]).ok_or_else(|| Ctl::internal("not an exchange"))?.http10;
     let advertised = match (has_body(status), length) {

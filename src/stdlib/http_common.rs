@@ -114,15 +114,10 @@ pub(crate) fn register(r: &mut crate::engine::Registry) {
     register_body(r);
     r.add_builtin("http.resolve", |vm, a| {
         vm.charge_slow_bytes(vm.str(a[0]).len().saturating_add(vm.str(a[1]).len()))?;
-        let resolved = resolve(vm.str(a[0]), vm.str(a[1]));
-        Ok(match resolved {
-            Ok(url) => {
-                vm.reserve(url.len())?;
-                let s = vm.new_str(url);
-                vm.ok(s)
-            }
-            Err(e) => vm.err_value(e.kind, &e.message),
-        })
+        let url = resolve(vm.str(a[0]), vm.str(a[1]))?;
+        vm.reserve(url.len())?;
+        let s = vm.new_str(url);
+        Ok(vm.ok(s))
     });
     r.add_builtin("http.same_origin", |vm, a| {
         vm.charge_slow_bytes(vm.str(a[0]).len().saturating_add(vm.str(a[1]).len()))?;
@@ -145,9 +140,9 @@ pub(crate) fn valid_header(name: &str, value: &str) -> bool {
     is_token(name) && !value.contains(['\r', '\n', '\0'])
 }
 
-/// Converts a `[(str, str)]` list into validated header pairs; `Ok(Err(..))`
-/// describes an invalid header.
-pub(crate) fn header_pairs(vm: &Vm, list: Value) -> Result<Result<Vec<(String, String)>, String>, Ctl> {
+/// Converts a `[(str, str)]` list into validated header pairs. Fails with
+/// kind `"invalid"` for an invalid header.
+pub(crate) fn header_pairs(vm: &Vm, list: Value) -> Result<Vec<(String, String)>, Ctl> {
     let items = vm.heap.list(list);
     vm.charge(items.len() as u64)?;
     let mut pairs = Vec::with_capacity(items.len());
@@ -159,11 +154,11 @@ pub(crate) fn header_pairs(vm: &Vm, list: Value) -> Result<Result<Vec<(String, S
         vm.charge_bytes(k.len() + v.len())?;
         vm.reserve(size)?;
         if !valid_header(k, v) {
-            return Ok(Err(format!("invalid header {:?}: {:?}", super::truncate(k, 64), super::truncate(v, 64))));
+            return Err(Ctl::native_err("invalid", format!("invalid header {:?}: {:?}", super::truncate(k, 64), super::truncate(v, 64))));
         }
         pairs.push((k.to_string(), v.to_string()));
     }
-    Ok(Ok(pairs))
+    Ok(pairs)
 }
 
 /// Builds a `[(str, str)]` list from header pairs.
@@ -410,10 +405,10 @@ enum BodyRead {
 /// Reads from body `v` until the read completes or the body is closed.
 fn read_body(vm: &mut Vm, v: Value, what: BodyRead) -> NResult {
     let body = vm.heap.native::<Body>(v).ok_or_else(|| Ctl::internal("not a body"))?;
-    let Some(reader) = body.reader.clone() else { return Ok(vm.err_value("closed", "body closed")) };
+    let Some(reader) = body.reader.clone() else { return Err(Ctl::native_err("closed", "body closed")) };
     let mut closed = body.closed.subscribe();
     let mut res = match what {
-        BodyRead::Upto(n) => super::or_return!(vm.reserve_io(n.min(64 << 10))),
+        BodyRead::Upto(n) => vm.reserve_io(n.min(64 << 10))?,
         _ => vm.io_reservation(),
     };
     let op = async move {
@@ -449,17 +444,14 @@ fn read_body(vm: &mut Vm, v: Value, what: BodyRead) -> NResult {
     Err(Ctl::suspend(Box::pin(async move {
         let r = op.await;
         Box::new(move |vm: &mut Vm| -> NResult {
-            let (data, res) = match r {
-                Ok(x) => x,
-                Err(e) => return e.into_value(vm),
-            };
+            let (data, res) = r?;
             drop(res);
             let v = match (what, data) {
                 (BodyRead::Line, None) => vm.none(),
                 (BodyRead::Line, Some(line)) => {
                     vm.reserve(line.len())?;
                     vm.charge_slow_bytes(line.len())?;
-                    let Ok(text) = String::from_utf8(line) else { return Ok(vm.err_value("invalid", "line is not valid UTF-8")) };
+                    let Ok(text) = String::from_utf8(line) else { return Err(Ctl::native_err("invalid", "line is not valid UTF-8")) };
                     let s = vm.new_str(text);
                     vm.some(s)
                 }
@@ -483,7 +475,7 @@ pub(crate) fn register_body(r: &mut crate::engine::Registry) {
     r.add_method("http.Body.read", |vm, a| {
         let max = a[1].as_int();
         if max <= 0 {
-            return Ok(vm.err_value("invalid", "read: max must be positive"));
+            return Err(Ctl::native_err("invalid", "read: max must be positive"));
         }
         read_body(vm, a[0], BodyRead::Upto(crate::vm::value::to_usize_saturating(max)))
     });

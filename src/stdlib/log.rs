@@ -49,12 +49,12 @@ pub struct LogRecord {
 }
 
 /// The line that the engine writes to standard error without a host sink:
-/// `LEVEL message key=value ...`. A message with control characters is
-/// quoted, as is a key or value that is empty or contains whitespace,
-/// control characters, `"` or `=`.
+/// `LEVEL message key=value ...`. A message that is empty or contains
+/// control characters is quoted, as is a key or value that is empty or
+/// contains whitespace, control characters, `"` or `=`.
 impl fmt::Display for LogRecord {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} {}", self.level, quote_if(&self.message, self.message.contains(char::is_control)))?;
+        write!(f, "{} {}", self.level, quote_if(&self.message, self.message.is_empty() || self.message.contains(char::is_control)))?;
         for (key, value) in &self.fields {
             write!(f, " {}={}", quote_if(key, needs_quotes(key)), quote_if(value, needs_quotes(value)))?;
         }

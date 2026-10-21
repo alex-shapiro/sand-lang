@@ -12,7 +12,7 @@
 //! limit memory 64M
 //! ```
 
-use super::net::{ListenPattern, NetPattern, UrlPattern, host_port, url_segments};
+use super::net::{ListenPattern, NetPattern, UrlPattern, host_port, url_origin, url_segments};
 use super::path::{Seg, Tok};
 use super::rules::{Access, NamePattern, Origin, PathPattern, Rule, RuleKind};
 use super::{Capability, Decision, Policy, RulePolicy};
@@ -579,7 +579,7 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
         Capability::FsWrite(p) => format!("write {}", path(p)?),
         Capability::Import(p) => format!("import {}", path(p)?),
         Capability::Net { host, port } => {
-            let pattern = host_port(host.trim_start_matches('[').trim_end_matches(']'), *port);
+            let pattern = host_port(host, *port);
             NetPattern::parse(&pattern)?;
             format!("net {pattern}")
         }
@@ -588,9 +588,7 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
             if alt.is_some() || !is_method(&method.to_ascii_uppercase()) || !matches!(scheme.as_str(), "http" | "https") {
                 return None;
             }
-            let host = if host.contains(':') { format!("[{host}]") } else { host.clone() };
-            let default = if scheme == "http" { 80 } else { 443 };
-            let mut url = if *port == default { format!("{scheme}://{host}") } else { format!("{scheme}://{host}:{port}") };
+            let mut url = url_origin(scheme, host, *port);
             for name in &names {
                 url.push('/');
                 url.push_str(&crate::stdlib::uri_encode(name, b"!$&'()+;=:@-._~"));
@@ -902,7 +900,7 @@ mod tests {
             Capability::FsRead(PathBuf::from("/data/*/{x}")),
             Capability::Import(PathBuf::from("/lib/util.sand")),
             Capability::Net { host: "api.example.com".into(), port: 443 },
-            Capability::Net { host: "[::1]".into(), port: 8080 },
+            Capability::Net { host: "::1".into(), port: 8080 },
             Capability::Net { host: "10.0.0.5".into(), port: 80 },
             Capability::Http {
                 method: "GET".into(),

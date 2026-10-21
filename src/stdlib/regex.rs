@@ -370,10 +370,10 @@ pub fn register(r: &mut Registry) {
         let re = match built {
             Ok(re) => re,
             Err(e) => {
-                return Ok(match (e.size_limit(), e.syntax_error()) {
-                    (Some(limit), _) => vm.err_value("limit", &format!("regex is too large: the compiled program exceeds {limit} bytes")),
-                    (None, Some(syntax)) => vm.err_value("parse", &syntax.to_string()),
-                    (None, None) => vm.err_value("parse", &e.to_string()),
+                return Err(match (e.size_limit(), e.syntax_error()) {
+                    (Some(limit), _) => Ctl::native_err("limit", format!("regex is too large: the compiled program exceeds {limit} bytes")),
+                    (None, Some(syntax)) => Ctl::native_err("parse", syntax.to_string()),
+                    (None, None) => Ctl::native_err("parse", e.to_string()),
                 });
             }
         };

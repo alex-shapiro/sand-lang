@@ -423,6 +423,20 @@ print(net.listen("::ffff:127.0.0.1", 0)?.addr().ip())
 }
 
 #[test]
+fn concurrent_accepts_on_one_listener_all_complete() {
+    let src = r#"
+import net
+let listener = net.listen("127.0.0.1", 0)?
+let port = listener.addr().port()
+let accepts = (0..3).map(_ => spawn listener.accept())
+task.sleep(50ms)
+let clients = (0..3).map(_ => net.connect("127.0.0.1", port).unwrap())
+print(accepts.map(t => t.wait().is_ok()))
+"#;
+    assert_eq!(run_net(src), "[true, true, true]\n");
+}
+
+#[test]
 fn net_permissions() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();

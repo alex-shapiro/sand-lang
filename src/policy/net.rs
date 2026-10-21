@@ -376,6 +376,13 @@ pub fn host_port(host: &str, port: u16) -> String {
     if host.contains(':') { format!("[{host}]:{port}") } else { format!("{host}:{port}") }
 }
 
+/// `scheme://host[:port]`, without the port if it is the scheme's default.
+pub(crate) fn url_origin(scheme: &str, host: &str, port: u16) -> String {
+    let default = if scheme == "http" { 80 } else { 443 };
+    let host = if host.contains(':') { format!("[{host}]") } else { host.to_string() };
+    if port == default { format!("{scheme}://{host}") } else { format!("{scheme}://{host}:{port}") }
+}
+
 /// Splits `host:port` or `[v6]:port` into the host (without brackets) and
 /// the text of the port, if there is one. Text with two or more colons and
 /// no brackets is a host (an IPv6 address) without a port.

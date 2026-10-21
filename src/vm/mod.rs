@@ -16,6 +16,7 @@ use crate::{LimitKind, Limits};
 use bytecode::*;
 use heap::{Heap, Staging};
 use meter::Meter;
+use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::path::PathBuf;
@@ -59,8 +60,14 @@ const _: () = assert!(std::mem::size_of::<Result<Option<Value>, Ctl>>() == 16);
 
 /// What a [`Ctl`] is.
 pub enum CtlKind {
-    /// The script failed with an error, `kind: message`.
-    Error(String),
+    /// A runtime error, `kind: message`: the run ends (see [`Ctl::fail`]).
+    RuntimeError(String),
+    /// The native call returns `Err(Error { kind, message })`, and the
+    /// script continues (see [`Ctl::native_err`]).
+    NativeErr {
+        kind: Cow<'static, str>,
+        message: String,
+    },
     /// An invariant of the engine broke: a bug, which ends a session.
     Internal(String),
     Limit(LimitKind),
@@ -83,10 +90,19 @@ pub enum CtlKind {
 }
 
 impl Ctl {
-    /// The script fails with an error of kind `kind`.
+    /// A runtime error of kind `kind`: the run ends. To return an `Err` to
+    /// the script instead, use [`Ctl::native_err`].
     #[cold]
     pub fn fail(kind: &str, msg: impl std::fmt::Display) -> Ctl {
-        Ctl(Box::new(CtlKind::Error(format!("{kind}: {msg}"))))
+        Ctl(Box::new(CtlKind::RuntimeError(format!("{kind}: {msg}"))))
+    }
+
+    /// The native call returns `Err(Error { kind, message })`, and the
+    /// script continues. Only natives that return a `Result` can use it; for
+    /// the others, it is an internal error.
+    #[cold]
+    pub fn native_err(kind: impl Into<Cow<'static, str>>, message: impl Into<String>) -> Ctl {
+        Ctl(Box::new(CtlKind::NativeErr { kind: kind.into(), message: message.into() }))
     }
 
     /// An internal error: an invariant of the engine broke.
@@ -154,7 +170,8 @@ impl std::fmt::Debug for Ctl {
 impl std::fmt::Debug for CtlKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CtlKind::Error(m) => write!(f, "Error({m})"),
+            CtlKind::RuntimeError(m) => write!(f, "RuntimeError({m})"),
+            CtlKind::NativeErr { kind, message } => write!(f, "NativeErr({kind}: {message})"),
             CtlKind::Internal(m) => write!(f, "Internal({m})"),
             CtlKind::Limit(k) => write!(f, "Limit({k:?})"),
             CtlKind::Exit(c) => write!(f, "Exit({c})"),
@@ -171,11 +188,11 @@ impl std::fmt::Debug for CtlKind {
 impl From<&str> for Ctl {
     /// An error whose message `msg` is `kind: message`.
     fn from(msg: &str) -> Ctl {
-        Ctl(Box::new(CtlKind::Error(msg.to_string())))
+        Ctl(Box::new(CtlKind::RuntimeError(msg.to_string())))
     }
 }
 
-/// Fails with an error of kind `kind`.
+/// A runtime error of kind `kind` (see [`Ctl::fail`]).
 pub fn fail<T>(kind: &str, msg: impl std::fmt::Display) -> Result<T, Ctl> {
     Err(Ctl::fail(kind, msg))
 }
@@ -255,6 +272,8 @@ pub struct Fiber {
     pub wgen: u64,
     /// Absolute stack slot receiving the result of a blocking call.
     pub result_slot: usize,
+    /// The native whose suspended call `result_slot` receives.
+    pub result_native: u32,
     /// Tasks to cancel when a `race` completes.
     pub race: Vec<Value>,
     /// Fibers waiting for this one: (fiber, generation).
@@ -892,46 +911,46 @@ impl Vm {
         iomem::Reservation::new(&self.heap.io_memory)
     }
 
-    /// Like [`Vm::io_reservation`], reserving `bytes` at once. `Err` asks for
-    /// a collection and a retry (propagate it with `?`); `Ok(Err(e))`: they
-    /// still do not fit, and `e` is the `"limit"` error value to return.
-    pub fn reserve_io(&mut self, bytes: usize) -> Result<Result<iomem::Reservation, Value>, Ctl> {
+    /// Like [`Vm::io_reservation`], reserving `bytes` at once. If they do
+    /// not fit, asks for a collection and a retry, and after the retry fails
+    /// with kind `"limit"`. Call it with `?` before any side effect.
+    pub fn reserve_io(&mut self, bytes: usize) -> Result<iomem::Reservation, Ctl> {
+        self.try_reserve_io(bytes)?.ok_or_else(|| Ctl::native_err("limit", format!("cannot buffer {bytes} bytes: {}", iomem::MemoryLimit)))
+    }
+
+    /// Like [`Vm::reserve_io`], but `None` if the bytes do not fit after
+    /// the retry.
+    pub fn try_reserve_io(&mut self, bytes: usize) -> Result<Option<iomem::Reservation>, Ctl> {
         let mut r = self.io_reservation();
         match r.ensure(bytes) {
-            Ok(()) => Ok(Ok(r)),
+            Ok(()) => Ok(Some(r)),
             Err(_) if !self.collected => Err(CtlKind::Collect.into()),
-            Err(e) => Ok(Err(self.err_value("limit", &format!("cannot buffer {bytes} bytes: {e}")))),
+            Err(_) => Ok(None),
         }
     }
 
     /// A slot for a resource about to be opened, counted against
-    /// `max_open_resources` until dropped. At the limit, `Err` asks for a
-    /// collection (which closes dropped resources) and a retry: propagate it
-    /// with `?` before any side effect. `Ok(Err(e))`: still at the limit, and
-    /// `e` is the `"limit"` error value to return.
-    pub fn resource_slot(&mut self) -> Result<Result<iomem::ResourceSlot, Value>, Ctl> {
+    /// `max_open_resources` until dropped. At the limit, asks for a
+    /// collection (which closes dropped resources) and a retry, and after
+    /// the retry fails with kind `"limit"`. Call it with `?` before any side
+    /// effect.
+    pub fn resource_slot(&mut self) -> Result<iomem::ResourceSlot, Ctl> {
         match iomem::ResourceSlot::try_new(&self.heap.io_memory) {
-            Some(slot) => Ok(Ok(slot)),
+            Some(slot) => Ok(slot),
             None if !self.collected => Err(CtlKind::Collect.into()),
-            None => {
-                let max = self.heap.io_memory.max_resources();
-                Ok(Err(self.err_value("limit", &format!("too many open resources (limit {max})"))))
-            }
+            None => Err(Ctl::native_err("limit", format!("too many open resources (limit {})", self.heap.io_memory.max_resources()))),
         }
     }
 
     /// Like [`Vm::resource_slot`], also reserving `buffers` bytes for the
     /// fixed buffers of the resource (`what`, for the message: "a connection").
-    pub fn resource_slot_with(&mut self, buffers: usize, what: &str) -> Result<Result<iomem::ResourceSlot, Value>, Ctl> {
-        let mut slot = match self.resource_slot()? {
-            Ok(s) => s,
-            Err(e) => return Ok(Err(e)),
-        };
+    pub fn resource_slot_with(&mut self, buffers: usize, what: &str) -> Result<iomem::ResourceSlot, Ctl> {
+        let mut slot = self.resource_slot()?;
         self.heap.io_memory.publish_heap(self.heap.used());
         match slot.reserve_buffers(buffers) {
-            Ok(()) => Ok(Ok(slot)),
+            Ok(()) => Ok(slot),
             Err(_) if !self.collected => Err(CtlKind::Collect.into()),
-            Err(e) => Ok(Err(self.err_value("limit", &format!("cannot open {what}: its buffers ({buffers} bytes) do not fit: {e}")))),
+            Err(e) => Err(Ctl::native_err("limit", format!("cannot open {what}: its buffers ({buffers} bytes) do not fit: {e}"))),
         }
     }
 
@@ -1151,7 +1170,7 @@ impl Vm {
         };
         if !self.output_allowed(which)? {
             let name = if which == 1 { "stdout" } else { "stderr" };
-            return Ok(self.err_value("permission_denied", &format!("permission denied: {name}")));
+            return Err(Ctl::native_err("permission_denied", format!("permission denied: {name}")));
         }
         self.count_output(which, len)?;
         let data = match self.heap.get(v) {
@@ -1163,7 +1182,7 @@ impl Vm {
                 self.limit_backlog(which)?;
                 Ok(self.ok(Value::Unit))
             }
-            Err(e) => Ok(self.err_value(crate::stdlib::io_kind(&e), &e.to_string())),
+            Err(e) => Err(Ctl::native_err(crate::stdlib::io_kind(&e), e.to_string())),
         }
     }
 
@@ -1253,6 +1272,7 @@ impl Vm {
                     state: FiberState::Ready,
                     wgen: 0,
                     result_slot: 0,
+                    result_native: 0,
                     race: vec![],
                     waiters: vec![],
                     waiters_prune_at: MIN_PRUNE,
@@ -1579,6 +1599,20 @@ impl Vm {
             self.trace_frame(fr.proto, at, &mut out);
         }
         out
+    }
+
+    /// The `Err` value that native `native` returns for `c`, a
+    /// [`CtlKind::NativeErr`]. For a native that does not return a `Result`,
+    /// it is an internal error.
+    #[cold]
+    pub(crate) fn native_err_value(&mut self, native: u32, c: Ctl) -> NResult {
+        let CtlKind::NativeErr { kind, message } = c.into_kind() else { unreachable!("not a NativeErr") };
+        if !self.prog.native_returns_result.get(native as usize).copied().unwrap_or(false) {
+            let name = self.prog.native_names.get(native as usize).map_or("?", |n| n.as_str());
+            return internal(format!("{name} returned Err({kind}: {message}) but does not return a Result"));
+        }
+        self.reserve(kind.len() + message.len())?;
+        Ok(self.err_value(&kind, &message))
     }
 
     /// The script location that called the running native, or `None` if

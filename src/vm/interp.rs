@@ -514,7 +514,7 @@ impl Vm {
     #[inline(never)]
     fn ctl_trap(&mut self, fiber: &mut Fiber, ip: usize, c: Ctl) -> Trap {
         match c.into_kind() {
-            CtlKind::Error(m) => self.error_trap(fiber, ip, m),
+            CtlKind::RuntimeError(m) => self.error_trap(fiber, ip, m),
             CtlKind::Internal(m) => self.internal_trap(fiber, ip, m),
             CtlKind::Limit(k) => self.limit_trap(fiber, ip, k),
             CtlKind::Interrupted => Trap::Interrupted,
@@ -1707,6 +1707,10 @@ impl Vm {
             self.forget_once_answers();
         }
         let r = match r {
+            Err(c) if matches!(c.kind(), CtlKind::NativeErr { .. }) => self.native_err_value(n, c),
+            r => r,
+        };
+        let r = match r {
             Ok(v) => {
                 fiber.stack[slot] = v;
                 if self.cancel_current {
@@ -1740,7 +1744,7 @@ impl Vm {
             _ => {}
         }
         match r.into_kind() {
-            CtlKind::Error(m) => Err(self.error_trap(fiber, ip, m)),
+            CtlKind::RuntimeError(m) => Err(self.error_trap(fiber, ip, m)),
             CtlKind::Internal(m) => Err(self.internal_trap(fiber, ip, m)),
             // Already retried after a collection.
             CtlKind::Limit(k) => Err(Trap::Limit(k)),
@@ -1753,9 +1757,10 @@ impl Vm {
             }
             CtlKind::Async(fut) => {
                 fiber.result_slot = slot;
+                fiber.result_native = n;
                 Ok(Some(Exit::Async(fut)))
             }
-            CtlKind::Yield | CtlKind::Blocked => unreachable!("handled above"),
+            CtlKind::Yield | CtlKind::Blocked | CtlKind::NativeErr { .. } => unreachable!("handled above"),
             CtlKind::Collect => Err(self.internal_trap(fiber, ip, "a native asked for a collection twice".into())),
         }
     }

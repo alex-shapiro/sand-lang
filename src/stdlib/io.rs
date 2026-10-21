@@ -24,7 +24,7 @@ fn register_io(r: &mut Registry) {
     r.add_method("io.Stdin.read", |vm, a| {
         let max = a[1].as_int();
         if max <= 0 {
-            return Ok(vm.err_value("invalid", "read: max must be positive"));
+            return Err(Ctl::native_err("invalid", "read: max must be positive"));
         }
         read_stdin(vm, Read::Upto(to_usize_saturating(max)))
     });
@@ -73,10 +73,10 @@ fn write_out(vm: &mut Vm, which: u8, v: Value) -> NResult {
 
 fn flush_out(vm: &mut Vm, which: u8) -> NResult {
     let sink = if which == 1 { &vm.host.stdout } else { &vm.host.stderr };
-    Ok(match sink.flush() {
-        Ok(()) => vm.ok(Value::Unit),
-        Err(e) => vm.err_value(super::io_kind(&e), &e.to_string()),
-    })
+    match sink.flush() {
+        Ok(()) => Ok(vm.ok(Value::Unit)),
+        Err(e) => Err(Ctl::native_err(super::io_kind(&e), e.to_string())),
+    }
 }
 
 /// What a read of standard input reads.
@@ -92,7 +92,7 @@ enum Read {
 
 fn read_stdin(vm: &mut Vm, what: Read) -> NResult {
     if !vm.permit(&Capability::Stdin)? {
-        return Ok(vm.err_value("permission_denied", "permission denied: read standard input"));
+        return Err(Ctl::native_err("permission_denied", "permission denied: read standard input"));
     }
     // A prompt written before reading must be visible (on a terminal).
     vm.flush_before_input()?;
@@ -110,10 +110,7 @@ fn read_stdin(vm: &mut Vm, what: Read) -> NResult {
     let stdin = vm.host.stdin.clone();
     // The input is buffered outside the heap until it is complete.
     let mut res = match what {
-        Read::Upto(max) => match vm.reserve_io(max.min(STDIN_CHUNK))? {
-            Ok(r) => r,
-            Err(e) => return Ok(e),
-        },
+        Read::Upto(max) => vm.reserve_io(max.min(STDIN_CHUNK))?,
         _ => vm.io_reservation(),
     };
     Err(Ctl::suspend(Box::pin(async move {
@@ -126,7 +123,7 @@ fn read_stdin(vm: &mut Vm, what: Read) -> NResult {
                     let none = vm.none();
                     return Ok(vm.ok(none));
                 }
-                Err(e) => return IoFailure::new(e.kind, format!("stdin: {}", e.message)).into_value(vm),
+                Err(e) => return Err(IoFailure::new(e.kind, format!("stdin: {}", e.message)).into()),
             };
             vm.reserve(data.len())?;
             if what != Read::Line {
@@ -143,7 +140,7 @@ fn read_stdin(vm: &mut Vm, what: Read) -> NResult {
 fn line_result(vm: &mut Vm, line: Vec<u8>) -> NResult {
     vm.charge_slow_bytes(line.len())?;
     let Ok(text) = String::from_utf8(line) else {
-        return Ok(vm.err_value("invalid", "stdin: input is not valid UTF-8"));
+        return Err(Ctl::native_err("invalid", "stdin: input is not valid UTF-8"));
     };
     let s = vm.new_str(text);
     let v = vm.some(s);

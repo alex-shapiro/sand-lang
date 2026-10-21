@@ -2050,12 +2050,12 @@ nesting depth of 512.
 
 `debug(msg: str)`, `info(msg: str)`, `warn(msg: str)`, `error(msg: str)`;
 each accepts `fields: [str: str] = [:]`. `set_level(level: str)` with `"debug"`,
-`"info"` (default), `"warn"`, `"error"`, `"off"`. Records below the script's
-level are dropped. The others go to the host log sink (§16), which also
+`"info"` (default; the host can set another, §16), `"warn"`, `"error"`, `"off"`.
+Records below the script's level are dropped. The others go to the host log sink (§16), which also
 selects levels, and count against `max_output_bytes`. Without a host sink,
 records go to stderr as `LEVEL message key=value ...`, with quotes around a
-message with control characters and around keys and values that are empty
-or contain whitespace, control characters, `"` or `=`. If the policy denies
+message that is empty or contains control characters, and around keys and
+values that are empty or contain whitespace, control characters, `"` or `=`. If the policy denies
 `Stderr`, the engine drops them.
 
 ### 13.9 `math`
@@ -2703,7 +2703,8 @@ let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 
   records it rejects. Any `Fn(&LogRecord) + Send + Sync` is a `LogSink` that
   accepts all levels. The engine calls the sink on the thread that runs the
   script. `LogRecord`'s `Display` form is the line written to standard error
-  without a sink.
+  without a sink. `Config::log_level(LogLevel)` sets the level that runs
+  start at (default `Info`).
 - `Config::memory_fs(MemFs)` gives scripts a memory file system (§16.1).
 - `Config::library(dir)` sets the directory of library scripts for
   `import <name>` (§3.2). `Engine::module_names()` returns the registered

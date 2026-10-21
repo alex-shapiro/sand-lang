@@ -16,6 +16,6 @@ pub native fn warn(msg: str, fields: [str: str] = [:])
 /// Logs `msg` and optional `fields` at level `error`.
 pub native fn error(msg: str, fields: [str: str] = [:])
 
-/// Sets the lowest level to log (`"debug"`, `"info"` by default, `"warn"`,
-/// `"error"`, or `"off"`).
+/// Sets the lowest level to log (`"debug"`, `"info"`, `"warn"`, `"error"`, or
+/// `"off"`). The host sets the level at the start, by default `"info"`.
 pub native fn set_level(level: str)

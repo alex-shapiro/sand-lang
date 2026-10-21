@@ -4,7 +4,6 @@ use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 /// Resolves host names, opens network connections and binds listeners.
@@ -26,8 +25,10 @@ pub trait Listener: Send + Sync {
     /// The address that the listener is bound to.
     fn local_addr(&self) -> io::Result<SocketAddr>;
 
-    /// Polls for the next incoming connection and the address of its peer.
-    fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<io::Result<(Box<dyn Stream>, SocketAddr)>>;
+    /// Waits for the next incoming connection and returns it with the
+    /// address of its peer. Several calls can wait at the same time, and
+    /// dropping the future before it completes loses no connection.
+    fn accept(&self) -> NetworkFuture<'_, (Box<dyn Stream>, SocketAddr)>;
 }
 
 /// A bidirectional byte stream.
@@ -71,7 +72,7 @@ fn bind(addr: SocketAddr) -> io::Result<tokio::net::TcpListener> {
     #[cfg(not(windows))]
     socket.set_reuse_address(true)?;
     socket.bind(&addr.into())?;
-    socket.listen(128)?;
+    socket.listen(1024)?;
     socket.set_nonblocking(true)?;
     tokio::net::TcpListener::from_std(socket.into())
 }
@@ -81,7 +82,10 @@ impl Listener for tokio::net::TcpListener {
         tokio::net::TcpListener::local_addr(self)
     }
 
-    fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<io::Result<(Box<dyn Stream>, SocketAddr)>> {
-        tokio::net::TcpListener::poll_accept(self, cx).map_ok(|(tcp, peer)| (Box::new(tcp) as Box<dyn Stream>, peer))
+    fn accept(&self) -> NetworkFuture<'_, (Box<dyn Stream>, SocketAddr)> {
+        Box::pin(async move {
+            let (tcp, peer) = tokio::net::TcpListener::accept(self).await?;
+            Ok((Box::new(tcp) as Box<dyn Stream>, peer))
+        })
     }
 }

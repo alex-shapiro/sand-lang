@@ -69,19 +69,6 @@ pub(crate) const STD_MODULES: &[&str] = &[
     "uuid",
 ];
 
-/// Unwraps a `Result<Result<T, Value>, Ctl>` (as `Vm::resource_slot` and
-/// `Vm::reserve_io` return): propagates the `Ctl`, and returns the
-/// `Err(Error)` value from the native.
-macro_rules! or_return {
-    ($e:expr) => {
-        match $e? {
-            Ok(x) => x,
-            Err(v) => return Ok(v),
-        }
-    };
-}
-pub(crate) use or_return;
-
 /// At most the first `max` characters of `s`.
 pub(crate) fn truncate(s: &str, max: usize) -> &str {
     match s.char_indices().nth(max) {

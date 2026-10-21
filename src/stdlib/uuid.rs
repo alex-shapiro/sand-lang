@@ -2,8 +2,8 @@
 
 use crate::check::ModKind;
 use crate::engine::Registry;
-use crate::vm::Vm;
 use crate::vm::value::Value;
+use crate::vm::{Ctl, Vm};
 
 pub fn register(r: &mut Registry) {
     r.source("uuid", ModKind::Std, include_str!("uuid.sand"));
@@ -32,16 +32,13 @@ pub fn register(r: &mut Registry) {
     });
     r.add_builtin("uuid.parse", |vm, a| {
         let parsed = parse(vm.str(a[0]));
-        Ok(match parsed {
+        match parsed {
             Some(b) => {
                 let s = vm.new_str(format_uuid(&b));
-                vm.ok(s)
+                Ok(vm.ok(s))
             }
-            None => {
-                let msg = format!("invalid UUID: {:?}", super::truncate(vm.str(a[0]), 64));
-                vm.err_value("parse", &msg)
-            }
-        })
+            None => Err(Ctl::native_err("parse", format!("invalid UUID: {:?}", super::truncate(vm.str(a[0]), 64)))),
+        }
     });
 }
 
