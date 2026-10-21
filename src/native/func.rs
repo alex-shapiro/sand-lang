@@ -3,7 +3,7 @@
 use super::convert::{Conversion, FromValue, HostError, IntoValue};
 use super::ty::Type;
 use crate::vm::value::Value;
-use crate::vm::{BoxFuture, Ctl, Finisher, NResult, NativeFn, Vm, Wait};
+use crate::vm::{BoxFuture, Ctl, Finisher, NResult, NativeFn, Vm, WaitKind};
 use std::future::Future;
 use std::marker::PhantomData;
 
@@ -60,7 +60,7 @@ pub struct Later<T, E>(Pending, PhantomData<fn() -> (T, E)>);
 
 enum Pending {
     Ready(Finisher),
-    Future(BoxFuture, Wait),
+    Future(BoxFuture, WaitKind),
 }
 
 /// Error type for a [`Later`] result ([`Ctl`] or [`HostError`]).
@@ -103,7 +103,7 @@ impl<T: IntoValue + Send + 'static, E: NativeError> Later<T, E> {
     where
         F: FnOnce(&mut Vm) -> Result<T, E> + Send + 'static,
     {
-        Later::pending(fut, Wait::Io)
+        Later::pending(fut, WaitKind::Io)
     }
 
     /// Like [`Later::new`], for a future that completes when the user acts
@@ -114,10 +114,10 @@ impl<T: IntoValue + Send + 'static, E: NativeError> Later<T, E> {
     where
         F: FnOnce(&mut Vm) -> Result<T, E> + Send + 'static,
     {
-        Later::pending(fut, Wait::User)
+        Later::pending(fut, WaitKind::User)
     }
 
-    fn pending<F>(fut: impl Future<Output = F> + Send + 'static, wait: Wait) -> Later<T, E>
+    fn pending<F>(fut: impl Future<Output = F> + Send + 'static, wait: WaitKind) -> Later<T, E>
     where
         F: FnOnce(&mut Vm) -> Result<T, E> + Send + 'static,
     {
@@ -229,7 +229,7 @@ macro_rules! fn_impls {
                         let r = fut.await;
                         Box::new(move |vm: &mut Vm| r.into_value(vm)) as Finisher
                     };
-                    Err(Ctl::suspend(Box::pin(fut), Wait::Io))
+                    Err(Ctl::suspend(Box::pin(fut), WaitKind::Io))
                 })
             }
         }

@@ -1800,7 +1800,7 @@ Configurable per engine:
 | `max_memory`         | 512 MiB    | run fails: `memory limit exceeded` (I/O whose buffers do not fit fails with kind `"limit"`)                                                                    |
 | `max_instructions`   | unlimited  | run fails: `instruction limit exceeded` (counted in fuel units, §15.2)                                                                                         |
 | `max_cpu_time`       | unlimited  | run fails: `cpu time limit exceeded` (the engine thread's CPU time executing, excluding waits and prompts; without a thread CPU clock, elapsed time executing) |
-| `max_wall_time`      | unlimited  | run fails: `time limit exceeded` (covers compiling and running, from the start of compilation, excluding waits for prompt answers and for the user, §16)      |
+| `max_wall_time`      | unlimited  | run fails: `time limit exceeded` (elapsed time for compilation and execution, excluding waits for permission prompts and for the user, §16.2)                  |
 | `max_call_depth`     | 10,000     | fails: `limit: stack overflow`                                                                                                                                 |
 | `max_tasks`          | 10,000     | `spawn` fails: `limit: task limit exceeded`                                                                                                                    |
 | `max_open_resources` | 1,024      | opening files, connect/listen/accept and HTTP requests fail with kind `"limit"` (after a collection, §10.8; pending operations' sockets count)                 |
@@ -2004,10 +2004,27 @@ standard streams and provides an empty standard input.
 The host can capture standard output and standard error or feed standard input
 into a running script. `Config::stdout` and `Config::stderr` redirect script
 output to an `OutputSink`, while `Config::stdin_bytes`, `Config::inherit_stdin`
-with feature `os`, and `Config::stdin_feed` configure standard input. With
-`StdinFeed`, scripts read chunks pushed via `StdinFeed::send`, where
-`StdinFeed::end` terminates a single read, and `StdinFeed::wanted` is resolved
-if a script is waiting for input and all other tasks are blocked.
+with feature `os`, and `Config::stdin_feed` configure standard input.
+
+A `StdinFeed` supplies standard input while a script runs. It serves two kinds
+of hosts:
+
+- A terminal host waits for `StdinFeed::wanted` and then sends what the user
+  types with `StdinFeed::send`. `wanted` completes when a read waits for input
+  and no other task can run. Sent data stays queued across reads until scripts
+  read it, and `StdinFeed::end` gives the next read an end of input.
+- An app with its own input field shows the field while a read waits. Each read
+  has a new `ReadId`. `StdinFeed::awaited` returns the `ReadId` of the read
+  that waits for input, also while other tasks run, and
+  `StdinFeed::awaited_changed` waits until that value changes.
+  `StdinFeed::answer(read, data)` gives `data` to that read only, and returns
+  false if the read has ended. When the read ends, the engine discards the
+  part of `data` that the read did not use.
+
+A read of standard input waits for the user. A host native waits for the user
+if it returns `Later::for_user` (§16.3). While a task waits for the user and no
+task can run, the time does not count toward `max_wall_time`. The time that
+the engine runs other tasks counts.
 
 The host can intercept and filter structured log records instead of
 writing them to standard error. `Config::log_sink` routes records to a
@@ -2122,7 +2139,9 @@ kind: kind))` in Sand, whereas `?` converts a `Ctl` into a `HostError` that
   aborts the run with a runtime error via `Ctl::fail`, a resource limit error,
   or an exit code.
 - `Result<Later<T, E>, E>` suspends the calling task on a future and maps to
-  the same Sand return type as `Result<T, E>`.
+  the same Sand return type as `Result<T, E>`. Use `Later::for_user` instead
+  of `Later::new` for a future that completes when the user acts, so that the
+  wait does not count toward `max_wall_time` (§16.2).
 
 To check a sandbox capability inside a `vm_function`, call
 `Vm::require(&capability)` (§14), which returns an error of kind

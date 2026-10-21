@@ -59,7 +59,7 @@ pub enum Exit {
     Preempt,
     /// Waiting on a scheduler event (already registered).
     Blocked,
-    Async(BoxFuture, Wait),
+    Async(BoxFuture, WaitKind),
     Prompt(Capability),
     /// `exit(code)` or a top-level `?` failure.
     Terminate(i32),

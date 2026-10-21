@@ -64,12 +64,10 @@ const _: () = assert!(std::mem::size_of::<Ctl>() == std::mem::size_of::<usize>()
 const _: () = assert!(std::mem::size_of::<Result<Value, Ctl>>() == 16);
 const _: () = assert!(std::mem::size_of::<Result<Option<Value>, Ctl>>() == 16);
 
-/// What a suspended task waits for.
+/// Category of asynchronous wait for a suspended task.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Wait {
-    /// I/O or a timer.
+pub enum WaitKind {
     Io,
-    /// An action of the user.
     User,
 }
 
@@ -84,7 +82,7 @@ pub enum CtlKind {
     /// Ask the user; the call is retried afterwards.
     NeedPermission(Capability),
     /// Suspend the task until the future completes.
-    Async(BoxFuture, Wait),
+    Async(BoxFuture, WaitKind),
     /// The task waits for the scheduler event that [`Vm::block`]
     /// registered; the call returns what wakes it.
     Blocked,
@@ -129,7 +127,7 @@ impl Ctl {
     }
 
     /// Suspend the task until `fut` completes.
-    pub(crate) fn suspend(fut: BoxFuture, wait: Wait) -> Ctl {
+    pub(crate) fn suspend(fut: BoxFuture, wait: WaitKind) -> Ctl {
         Ctl(Box::new(CtlKind::Async(fut, wait)))
     }
 
