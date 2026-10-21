@@ -746,6 +746,30 @@ impl Engine {
         names
     }
 
+    /// Returns documentation for the prelude, standard library modules, and
+    /// host modules, sorted by kind and then by module name.
+    pub fn docs(&self) -> Result<Vec<crate::docs::ModuleDoc>, Error> {
+        use crate::check::ModKind;
+        use crate::docs::ModuleKind;
+        let snapshot = self.registry.snapshot()?;
+        let mut checker = snapshot.checker.clone();
+        let mut mods: Vec<(ModuleKind, &str, ModId)> = snapshot
+            .by_name
+            .iter()
+            .filter_map(|(name, &m)| {
+                let kind = match checker.mods[m as usize].kind {
+                    ModKind::Prelude => ModuleKind::Prelude,
+                    ModKind::Std => ModuleKind::Std,
+                    ModKind::Host => ModuleKind::Host,
+                    ModKind::Script { .. } => return None,
+                };
+                Some((kind, name.as_str(), m))
+            })
+            .collect();
+        mods.sort_by_key(|&(kind, name, _)| (kind, name));
+        Ok(mods.into_iter().map(|(kind, _, m)| checker.module_doc(m, kind)).collect())
+    }
+
     /// Garbage collector statistics of the most recent run.
     pub fn gc_stats(&self) -> GcStats {
         self.gc_stats

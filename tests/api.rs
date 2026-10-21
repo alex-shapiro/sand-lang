@@ -1733,3 +1733,37 @@ fn host_modules_can_define_resources() {
     assert!(out.contains("too many open resources"), "{out}");
     assert_eq!(closed.load(Ordering::Relaxed), 5);
 }
+
+#[test]
+fn engine_docs_include_prelude_std_and_host_modules() {
+    use sandlang::docs::{ItemKind, MemberKind, ModuleKind};
+    let mut geo = NativeModule::new("geo");
+    geo.function("dist", |a: f64, b: f64| -> f64 { (a * a + b * b).sqrt() }).params(&["a", "b"]);
+    let docs = Engine::new(Config::new().module(geo)).docs().unwrap();
+    assert_eq!((docs[0].name.as_str(), docs[0].kind), ("prelude", ModuleKind::Prelude));
+    let prelude = &docs[0];
+    let str_type = prelude.items.iter().find(|i| i.name == "str").unwrap();
+    assert_eq!((str_type.kind, str_type.decl.as_str()), (ItemKind::Builtin, "type str"));
+    let len = str_type.members.iter().find(|m| m.name == "len").unwrap();
+    assert_eq!((len.kind, len.decl.as_str()), (MemberKind::Method, "fn len(self) -> int"));
+    assert!(prelude.items.iter().any(|i| i.name == "Iterator" && i.kind == ItemKind::Trait && i.related.contains(&"Iter<T>".to_string())));
+    let close = prelude.items.iter().find(|i| i.name == "Close").unwrap();
+    assert!(["Option<T>", "List<T>"].iter().all(|n| close.related.contains(&n.to_string())), "{:?}", close.related);
+
+    let json = docs.iter().find(|m| m.name == "json").unwrap();
+    assert_eq!(json.kind, ModuleKind::Std);
+    assert!(json.doc.as_deref().unwrap().starts_with("JSON"));
+    let parse = json.items.iter().find(|i| i.name == "parse").unwrap();
+    assert_eq!(parse.decl, "fn parse(text: str) -> Result<Json, Error>");
+    assert!(parse.doc.is_some());
+    let value = json.items.iter().find(|i| i.name == "Json").unwrap();
+    assert!(value.members.iter().any(|m| m.kind == MemberKind::Variant && m.decl == "Int(int)"));
+
+    let regex = docs.iter().find(|m| m.name == "regex").unwrap();
+    let r = regex.items.iter().find(|i| i.name == "Regex").unwrap();
+    assert!(r.members.iter().all(|m| m.name != "capture_spans"));
+
+    let host = docs.last().unwrap();
+    assert_eq!((host.name.as_str(), host.kind), ("geo", ModuleKind::Host));
+    assert_eq!(host.items[0].decl, "fn dist(a: float, b: float) -> float");
+}

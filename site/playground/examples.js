@@ -1,22 +1,16 @@
-// Example sandboxes of the playground. Each has files (`main.sand` is the
-// program; other files go into the in-memory file system at their path),
-// a policy, and optionally an environment and standard input.
-//
-// wasm/tests/playground.test.mjs runs every example and checks `expect`.
+// Built-in playground examples verified by site/tests/playground.test.mjs.
 
 export const examples = [
   {
     id: "welcome",
     title: "Welcome",
     files: {
-      "main.sand": `//! Welcome to the Sand playground!
+      "main.sand": `//! Welcome to the Sand playground.
 //!
-//! Edit the program, press Run (or Ctrl-Enter / Cmd-Enter), then keep
-//! going in the console below the output: the program's variables and
-//! functions live on, so try \`planets.len()\` or \`size(planets[4])\`.
-//! The Policy tab says what the program may do.
+//! Press Run (` + "`Ctrl-Enter` / `Cmd-Enter`" + `) to execute this program, then evaluate
+//! expressions such as \`planets.len()\` or \`size(planets[4])\` in the console
+//! below. Edit the Policy tab to configure capability rules and limits.
 
-/// A planet and how many moons it has.
 struct Planet {
     name: str
     moons: int
@@ -46,7 +40,7 @@ let planets = [
 
 for p in planets {
     let description = match size(p) {
-        Size.Lonely => "no moons at all"
+        Size.Lonely => "0 moons"
         Size.Few(n) => "\\(n) moon\\(if n == 1 { "" } else { "s" })"
         Size.Many(n) => "a crowd of \\(n) moons"
     }
@@ -58,9 +52,7 @@ let most = planets.max_by(p => p.moons).unwrap()
 print("\\n\\(planets.len()) planets, \\(total) moons; \\(most.name) has the most.")
 `,
     },
-    policy: `# The policy decides what the script may do.
-# Nothing is allowed unless a rule allows it
-# (output is allowed unless denied).
+    policy: `# Allow standard output and set resource limits.
 limit time 5s
 limit memory 64M
 `,
@@ -70,19 +62,15 @@ limit memory 64M
     id: "capabilities",
     title: "Capabilities tour",
     files: {
-      "main.sand": `//! A program reaches only what its policy allows: files, environment
-//! variables, standard input and the network. The Policy tab (left of the
-//! files) allows some things and denies others; about everything else the
-//! program asks you first, in a bar above the console. Change the policy
-//! and run again.
+      "main.sand": `//! Programs can access only the capabilities permitted by the sandbox policy.
+//! Operations not covered by an \`allow\` or \`deny\` rule in the Policy tab
+//! trigger an interactive prompt above the console.
 
 import env
 import fs
 import http
 import io
 
-/// Prints whether trying \`what\` worked: allowed, denied by the policy
-/// (or by you), or allowed but failed.
 fn report<T>(what: str, result: Result<T>) {
     match result {
         Ok(_) => print("allowed  \\(what)")
@@ -91,15 +79,14 @@ fn report<T>(what: str, result: Result<T>) {
     }
 }
 
-print("Files (the files are in the tabs above):")
+print("Files (configured in the file tabs above):")
 report("read /data/greeting.txt", fs.read_text("/data/greeting.txt"))
 report("read /data/private/key.txt", fs.read_text("/data/private/key.txt"))
-// \`..\` is resolved before the policy decides, so it cannot escape.
 report("read /data/../data/private/key.txt", fs.read_text("/data/../data/private/key.txt"))
 report("write /out/note.txt", fs.create_dir("/out", recursive: true).and_then(_ => fs.write_text("/out/note.txt", "hello")))
 report("write /data/greeting.txt", fs.write_text("/data/greeting.txt", "overwritten"))
 
-print("\nEnvironment (the Environment tab) and input (the Input tab):")
+print("\nEnvironment and standard input:")
 print("         USER is \\(env.get("USER") ?? "not visible"), TOKEN is \\(env.get("TOKEN") ?? "not visible")")
 report("read standard input", io.stdin.read_line())
 
@@ -111,24 +98,22 @@ report("GET http://192.168.0.1/ (a private address)", http.get("http://192.168.0
       "data/greeting.txt": "Hello from a file!\n",
       "data/private/key.txt": "the key to everything\n",
     },
-    policy: `# Allowed and denied; anything else is asked about.
-# Files: read the data, but never its private part; write /out.
+    policy: `# File access rules.
 allow read /data
 deny read /data/private
 allow write /out
 
-# Environment and input: USER, and standard input.
+# Environment and standard input rules.
 allow env USER
 allow stdin
 
-# Network: GET requests to one host.
+# Network rules.
 allow http GET api.github.com
 
 limit time 10s
 `,
     env: "USER=sandy\nTOKEN=s3cret-token\n",
     stdin: "a line from the Input tab\n",
-    // Questions: TOKEN, writing /data/greeting.txt, en.wikipedia.org, 192.168.0.1.
     expect: {
       ok: true,
       prompts: 4,
@@ -151,10 +136,7 @@ limit time 10s
     id: "network",
     title: "Network",
     files: {
-      "main.sand": `//! Reads public web APIs with \`http\`. In the browser the requests go
-//! through fetch, to the hosts the policy allows; for any other host you
-//! are asked first, and if you deny it no request is made. (A site must
-//! also let pages of other sites read its answers, as these do: CORS.)
+      "main.sand": `//! Queries public HTTP APIs using \`http\` and \`json\`.
 
 import http
 import json
@@ -182,17 +164,15 @@ struct Current {
 let response = http.get("https://api.github.com/repos/rust-lang/rust")?
 if response.ok() {
     let repo: Repo = json.decode(response.text()?)?
-    print("\\(repo.full_name): \\(repo.description ?? "(no description)")")
+    print("\\(repo.full_name): \\(repo.description ?? "(none)")")
     print("  \\(repo.stargazers_count) stars, written in \\(repo.language ?? "?")")
 } else {
-    // GitHub limits how often each address may ask.
     print("GitHub answered \\(response.status)")
 }
 
 let page: Page = json.decode(http.get("https://en.wikipedia.org/api/rest_v1/page/summary/Sand")?.text()?)?
 print("\\(page.title): \\(page.extract.split(". ")[0]).")
 
-// Not in the policy: you are asked first. Allow it to see the weather.
 match http.get("https://api.open-meteo.com/v1/forecast?latitude=52.52&longitude=13.41&current=temperature_2m") {
     Ok(r) => {
         let weather: Weather = json.decode(r.text()?)?
@@ -202,8 +182,7 @@ match http.get("https://api.open-meteo.com/v1/forecast?latitude=52.52&longitude=
 }
 `,
     },
-    policy: `# What the program may fetch: methods, then URL patterns (a host,
-# *.domain or *, then a path, where \`*\` is any name and \`**\` any depth).
+    policy: `# Allow GET requests matching these URL patterns.
 allow http GET api.github.com/repos/**
 allow http GET en.wikipedia.org/api/rest_v1/page/summary/*
 limit time 20s
@@ -214,9 +193,8 @@ limit time 20s
     id: "files",
     title: "Files and the policy",
     files: {
-      "main.sand": `//! Reads sales data, writes a report, and tries to peek at a file the
-//! policy protects. The data files are in the tabs above. Try changing the
-//! policy: remove the \`deny\` rule or the \`allow write\` rule and run again.
+      "main.sand": `//! Aggregates CSV sales data from \`/data/sales.csv\` and writes a report to
+//! \`/out/report.txt\`.
 
 import fs
 
@@ -236,11 +214,10 @@ fn parse(line: str) -> Result<Sale> {
     Ok(Sale { region: cols[0], units, price })
 }
 
-// The file is read a line at a time, and closed when the block ends.
 let totals: [str: float] = [:]
 {
     use sales = fs.open("/data/sales.csv")?
-    sales.read_line()?  // the header
+    sales.read_line()?
     while let Some(line) = sales.read_line()? {
         let s = parse(line)?
         totals[s.region] = totals.get_or(s.region, 0.0) + s.units.to_float() * s.price
@@ -275,9 +252,8 @@ east,widget,9,2.50
 ada,1000000
 `,
     },
-    policy: `# Read the data, write the report, and nothing else.
-allow read /data
-deny read /data/private     # the more specific rule wins
+    policy: `allow read /data
+deny read /data/private
 allow write /out
 limit time 5s
 `,
@@ -287,8 +263,7 @@ limit time 5s
     id: "tasks",
     title: "Tasks and channels",
     files: {
-      "main.sand": `//! Tasks run concurrently: three workers take jobs from a channel and
-//! report back on another. Output appears as it is produced.
+      "main.sand": `//! Processes jobs concurrently across three worker tasks using typed channels.
 
 import time
 
@@ -298,7 +273,6 @@ let start = time.stopwatch()
 
 fn worker(name: str, jobs: Channel<int>, results: Channel<str>) {
     for n in jobs.iter() {
-        // Pretend that bigger jobs take longer.
         task.sleep(n * 40ms)
         results.send("\\(start.elapsed().millis():>4) ms  \\(name) finished job \\(n)")
     }
@@ -310,7 +284,6 @@ for n in [5, 1, 3, 2, 4, 1] {
 }
 jobs.close()
 
-// Close the results once every worker is done.
 spawn {
     task.all(workers)
     results.close()
@@ -329,9 +302,7 @@ print("\\(start.elapsed().millis():>4) ms  all jobs done")
     id: "limits",
     title: "Limits stop runaway code",
     files: {
-      "main.sand": `//! This program never stops on its own: the policy's limits end it.
-//! Try a different limit: \`limit instructions 1000000\`, or remove the
-//! time limit and let the memory limit stop the growing list.
+      "main.sand": `//! Demonstrates how resource limits terminate an infinite loop.
 
 let primes: [int] = []
 var n = 2
@@ -355,10 +326,7 @@ limit memory 16M
     id: "prompt",
     title: "Ask before access",
     files: {
-      "main.sand": `//! The policy allows nothing here, so the program asks about each thing
-//! it needs: answer in the bar above the console. "Always" and "Never"
-//! add a rule to the policy (look at the Policy tab afterwards), so the
-//! next run does not ask again.
+      "main.sand": `//! Prompts for permission before reading environment variables or files.
 
 import env
 import fs
@@ -374,8 +342,7 @@ for path in ["/notes/todo.txt", "/notes/diary.txt"] {
       "notes/todo.txt": "Water the plants.\n",
       "notes/diary.txt": "Dear diary, today I wrote a sandbox.\n",
     },
-    policy: `# No rules: anything the program needs is asked about.
-limit time 5s
+    policy: `limit time 5s
 `,
     env: "USER=sandy\n",
     expect: { ok: true, prompts: 3, answer: "once" },
@@ -384,8 +351,8 @@ limit time 5s
     id: "json",
     title: "JSON, regex and types",
     files: {
-      "main.sand": `//! Decodes JSON from standard input (the Input tab) into typed structs,
-//! then pulls numbers out of text with a regular expression.
+      "main.sand": `//! Decodes JSON from standard input into typed structs and extracts integers
+//! with a regular expression.
 
 import io
 import json
@@ -438,13 +405,12 @@ limit time 5s
     id: "traits",
     title: "Traits and generics",
     files: {
-      "main.sand": `//! Traits name what types can do; generic functions use them.
+      "main.sand": `//! Defines a trait with a default method and uses it as a generic bound.
 
 trait Shape {
     fn area(self) -> float
     fn name(self) -> str
 
-    /// A default method, built on the others.
     fn describe(self) -> str { "\\(self.name()) with area \\(self.area():.2)" }
 }
 

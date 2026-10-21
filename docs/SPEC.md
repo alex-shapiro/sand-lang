@@ -13,24 +13,24 @@ This document is normative. Sections marked _(informative)_ are not.
 
 ## Contents
 
-1. Design goals _(informative)_
-2. Source text and lexical structure
-3. Programs, modules and imports
-4. Declarations
-5. Types
-6. Expressions
-7. Statements
-8. Patterns
-9. Type checking and inference
-10. Runtime semantics
-11. Concurrency and asynchronous I/O
-12. The prelude
-13. Standard library
-14. Sandbox and policy
-15. Resource limits
-16. Embedding API (Rust)
-17. Tooling: checker, linter, formatter, test runner, CLI
-18. Diagnostics
+1. [Design goals](#1-design-goals-informative) _(informative)_
+2. [Source text and lexical structure](#2-source-text-and-lexical-structure)
+3. [Programs, modules and imports](#3-programs-modules-and-imports)
+4. [Declarations](#4-declarations)
+5. [Types](#5-types)
+6. [Expressions](#6-expressions)
+7. [Statements](#7-statements)
+8. [Patterns](#8-patterns)
+9. [Type checking and inference](#9-type-checking-and-inference)
+10. [Runtime semantics](#10-runtime-semantics)
+11. [Concurrency and asynchronous I/O](#11-concurrency-and-asynchronous-io)
+12. [The prelude](#12-the-prelude)
+13. [Standard library](#13-standard-library)
+14. [Sandbox and policy](#14-sandbox-and-policy)
+15. [Resource limits](#15-resource-limits)
+16. [Embedding API (Rust)](#16-embedding-api-rust)
+17. [Tooling](#17-tooling)
+18. [Diagnostics](#18-diagnostics)
 
 ---
 
@@ -65,7 +65,7 @@ literals.
 
 ### 2.2 Comments
 
-```
+```sand
 // line comment
 /* block comment, /* may nest */ */
 /// documentation comment for the following item, field, variant or method
@@ -93,7 +93,7 @@ No terminator is inserted if the next non-blank line starts with `.`, `|>`,
 `else`, `and`, `or`, `=>`, a binary operator, or a `-` followed by whitespace
 (see below). This permits chains such as:
 
-```
+```sand
 let total = items
     .filter(x => x.price > 0)
     .map(x => x.price)
@@ -117,7 +117,7 @@ Every other `-` subtracts after an operand and negates elsewhere: `a - b`,
 `-` of `a - -b` negate. So a line starting with `-` and whitespace continues
 the previous line:
 
-```
+```sand
 let total = base
     - discount
 ```
@@ -128,13 +128,13 @@ statements on one line; redundant terminators are ignored.
 
 ### 2.4 Identifiers and keywords
 
-```
+```text
 ident = [A-Za-z_][A-Za-z0-9_]*
 ```
 
 Reserved keywords:
 
-```
+```text
 and as break continue defer else enum extend false fn for if impl import in
 inf let loop match nan native not or pub return self Self spawn struct trait
 true type use var while
@@ -205,7 +205,7 @@ are encoded as UTF-8.
 
 ### 2.6 Operators and punctuation
 
-```
+```text
 +  -  *  /  %  **  &  |  ^  ~  <<  >>
 == != <  <= >  >=  =  += -= *= /= %=
 .. ..= => -> |> ?? ? . , : ; @ !
@@ -240,7 +240,7 @@ names of earlier inputs.
 
 ### 3.2 Imports
 
-```
+```sand
 import json                         // standard or host-native module, bound as `json`
 import math as m                    // renamed
 import "./geometry.sand"            // script module, bound as `geometry` (file stem)
@@ -278,7 +278,7 @@ them.
 
 ### 4.1 Functions
 
-```
+```sand
 /// Returns the larger of two values.
 pub fn max<T: Ord>(a: T, b: T) -> T {
     if a >= b { a } else { b }
@@ -309,7 +309,7 @@ fn greet(name: str, greeting: str = "Hello") {
 
 ### 4.2 Structs
 
-```
+```sand
 pub struct Point {
     x: float
     y: float
@@ -339,7 +339,7 @@ struct Counter {
 
 ### 4.3 Enums
 
-```
+```sand
 pub enum Shape {
     Circle(radius: float)
     Rect(w: float, h: float)
@@ -372,7 +372,7 @@ enum Tree<T> {
 
 ### 4.4 Extending types
 
-```
+```sand
 extend Point {
     fn scale(self, k: float) -> Point { Point { x: self.x * k, y: self.y * k } }
 }
@@ -386,7 +386,7 @@ methods to built-in types by implementing one of its own traits for them
 
 ### 4.5 Type aliases
 
-```
+```sand
 type Grid = [[bool]]
 type Pair<T> = (T, T)
 ```
@@ -396,7 +396,7 @@ not be recursive.
 
 ### 4.6 Top-level variables
 
-```
+```sand
 let GREETING = "hi"
 pub let LIMITS = [1, 2, 3]
 var counter = 0
@@ -412,7 +412,7 @@ In the prelude, standard library and host native modules, functions and
 supplies the Rust implementation. User scripts may not declare `native`
 functions.
 
-```
+```sand
 pub native fn parse(text: str) -> Result<Json>
 ```
 
@@ -425,7 +425,7 @@ known at the call site.
 
 ### 4.8 Test blocks
 
-```
+```sand
 test "addition is commutative" {
     assert(1 + 2 == 2 + 1)
 }
@@ -442,7 +442,7 @@ and `Err` as test failures (§6.8).
 A **trait** defines a set of methods that types can implement. Generic code
 bounded by a trait can call its methods.
 
-```
+```sand
 /// Things with a textual description.
 pub trait Describe {
     fn describe(self) -> str                // required method
@@ -562,7 +562,7 @@ traits, local functions or native functions.
 If several traits provide `m`, the call is ambiguous and an error. Every
 trait method can also be called in qualified form:
 
-```
+```sand
 Describe.describe(p)          // Self is inferred from the arguments
 geo.Shape.area(c)             // a module-qualified trait
 Point.describe(p)             // through the type
@@ -592,9 +592,9 @@ enum.
 
 | Type       | Values                                              |
 | ---------- | --------------------------------------------------- |
+| `bool`     | `true`, `false`                                     |
 | `int`      | 64-bit signed integers                              |
 | `float`    | IEEE-754 binary64                                   |
-| `bool`     | `true`, `false`                                     |
 | `str`      | immutable UTF-8 text                                |
 | `bytes`    | immutable byte strings                              |
 | `duration` | signed 64-bit nanosecond spans                      |
@@ -611,8 +611,8 @@ types, so `let xs: [never] = [1]` and passing `() => 5` where a
 
 | Syntax          | Meaning                                                                                                            |
 | --------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `[T]`           | growable list (reference type, mutable)                                                                            |
-| `[K: V]`        | hash map, insertion ordered (reference type, mutable)                                                              |
+| `[T]`           | growable list (reference type, mutable); shorthand for `List<T>`                                                   |
+| `[K: V]`        | hash map, insertion ordered (reference type, mutable); shorthand for `Map<K, V>`                                   |
 | `Set<T>`        | hash set, insertion ordered (reference type, mutable)                                                              |
 | `(A, B, ...)`   | tuple of two or more elements (immutable); `(A,)` is an error, as are the pattern `(p,)` and the expression `(e,)` |
 | `T?`            | shorthand for `Option<T>`                                                                                          |
@@ -631,7 +631,7 @@ same declaration with equal type arguments.
 
 The prelude defines:
 
-```
+```sand
 pub enum Option<T> { Some(T), None }
 pub enum Result<T, E = Error> { Ok(T), Err(E) }
 pub struct Error { kind: str, message: str }
@@ -676,7 +676,7 @@ trait with `Num` as a supertrait) also has the static methods `T.zero()` and
 `T.one()`, the additive and multiplicative identities (`0`/`1` for `int`,
 `0.0`/`1.0` for `float`), so generic code can sum even an empty list:
 
-```
+```sand
 fn total<T: Num>(xs: [T]) -> T {
     xs.fold(T.zero(), (a, b) => a + b)
 }
@@ -722,7 +722,7 @@ module, imported name, or prelude item.
 
 ### 6.3 Collections
 
-```
+```sand
 [1, 2, 3]                 // [int]
 []                        // [T], T inferred
 [0; 10]                   // ten zeros
@@ -742,7 +742,7 @@ to right as nested loops: `[(x, y) for x in xs for y in ys if x != y]`.
 
 ### 6.4 Struct literals
 
-```
+```sand
 Point { x: 1.0, y: 2.0 }
 Point { x, y }                // field shorthand
 Point { x: 5.0, ..p }         // copy remaining fields from p
@@ -813,7 +813,7 @@ evaluates `b: T`. If `a: Result<T, E>`, yields the `Ok` payload or else `b`.
 
 ### 6.6 Calls
 
-```
+```sand
 f(1, 2)
 f(1, scale: 2.0)              // named argument
 point.norm()                  // method call
@@ -854,7 +854,7 @@ only.
 
 ### 6.9 Blocks and control flow expressions
 
-```
+```sand
 { stmt; stmt; expr }
 if cond { a } else if cond2 { b } else { c }
 if let Some(x) = opt { x } else { 0 }
@@ -892,7 +892,7 @@ for x in iterable { ... }
   or `for`, on the same line; `break @name` and `continue @name` then refer to
   that loop from anywhere in its body, including nested loops:
 
-  ```
+  ```sand
   @rows for row in grid {
       for x in row {
           if x < 0 { break @rows }       // leaves both loops
@@ -915,7 +915,7 @@ for x in iterable { ... }
 
 ### 6.10 Lambdas
 
-```
+```sand
 x => x * 2
 (a, b) => a + b
 (acc: int, x: int) => acc + x
@@ -947,7 +947,7 @@ A macro call is written `name!(argument)`, always with parentheses. The only
 macro is `json!`, which builds a `json.Json` value (§13.7) from JSON syntax
 whose values can be Sand expressions:
 
-```
+```sand
 let body = json!({
     "requests": [{"range": {"sheetId": id}, "fields": "bold"}],
     "values": rows,
@@ -974,7 +974,7 @@ writes every object with braces.
 
 ## 7. Statements
 
-```
+```sand
 let x = 1                     // immutable binding
 let y: float = 2.0            // annotated
 var n = 0                     // mutable binding
@@ -1002,7 +1002,7 @@ use f = fs.open(path)?        // close `f` when the enclosing block exits (§7.2
 `defer e` (usually `defer { ... }` or `defer x.close()`) schedules `e` to run
 when the **enclosing block** exits, however it exits:
 
-```
+```sand
 fn copy(src: str, dst: str) -> Result<()> {
     let conn = net.connect(dst)?
     defer conn.close()                  // runs on every exit below
@@ -1049,7 +1049,7 @@ A **resource** is a value whose type implements the prelude trait `Close`
 (§12.14), such as an open file, a connection or an HTTP body. `use` binds one
 and closes it when the enclosing block exits:
 
-```
+```sand
 fn first_line(path: str) -> Result<str?> {
     use f = fs.open(path)?
     f.read_line()                       // f is closed after this, on every path
@@ -1082,7 +1082,7 @@ garbage collector finds it unreachable (§10.8).
 
 ### 8.1 Syntax
 
-```
+```text
 _                     wildcard
 name                  binding
 42  -1  "text"  true  literal (int, str, bool)
@@ -1307,7 +1307,7 @@ fails with `deadlock: all tasks are blocked`.
 
 ### 11.2 Tasks
 
-```
+```sand
 let t = spawn fetch(url)          // Task<Result<Response>>
 let r = t.wait()                  // suspends until done
 t.is_done()                       // bool
@@ -1539,7 +1539,7 @@ The methods of lists, maps and ranges above are **eager**: `xs.map(f)` calls
 work only when elements are requested, one at a time, so pipelines build no
 intermediate lists, can stop early, and can draw from endless sources:
 
-```
+```sand
 let firsts = Iter.count_from(1).map(n => n * n).filter(n => n % 3 == 0).take(3)
 print(firsts.to_list())                       // [9, 36, 81]
 for (i, line) in text.lines().iter().enumerate().skip(1) { ... }
@@ -1547,7 +1547,7 @@ for (i, line) in text.lines().iter().enumerate().skip(1) { ... }
 
 **The trait.** The prelude declares
 
-```
+```sand
 pub trait Iterator<T> {
     fn next(self) -> T?                 // the next element; None once exhausted
     fn iter(self) -> Iter<T> { ... }    // a lazy Iter over the remaining elements
@@ -1557,7 +1557,7 @@ pub trait Iterator<T> {
 `for` loops and comprehensions iterate over any value whose type implements
 `Iterator<T>` (§6.9). User types implement it like any trait (§4.9):
 
-```
+```sand
 struct Countdown { var n: int }
 impl Iterator<int> for Countdown {
     fn next(self) -> int? {
@@ -1638,7 +1638,7 @@ T?` (`T: Ord`; the first minimal/maximal), `min_by`/`max_by<K: Ord>(key: fn(T)
 
 ### 12.14 `Close`
 
-```
+```sand
 pub trait Close {
     fn close(self)
 }
@@ -1664,9 +1664,9 @@ be what no other function takes:
 - a function, method, trait method, field, variant or variable
   (`help(print)`, `help(str.split)`, `help(xs.map)`, `help(p.x)`,
   `help(Some)`, `help(math.pi)`, `help(xs)`);
-- a string literal naming one of these (`help("json.Json.get")`); its
-  first segment may be written as a type (`"[T].map"`, `"Set<T>.add"`,
-  `"int?.unwrap"`);
+- a string literal that identifies any of those targets (`help("json.Json.get")`);
+  its first segment may be written as a type (`"List.map"`, `"[T].map"`,
+  `"Set<T>.add"`, `"int?.unwrap"`);
 - any other expression, which stands for its type and is not evaluated
   (`help(f())`, `help([1, 2])`).
 
@@ -1777,7 +1777,7 @@ untrusted parties can write hard links into.
 **Open files.** `open` opens a regular file for incremental reading and
 writing, returning a `File` (a resource, §7.2):
 
-```
+```sand
 pub enum Mode { Read, Write, Append, CreateNew, ReadWrite }
 use f = fs.open("data.csv")?
 while let Some(line) = f.read_line()? { ... }
@@ -1829,7 +1829,7 @@ Headers are lists of `(name, value)` pairs, in order; a header sent several
 times (such as `Set-Cookie`) occurs several times. Names of received
 headers are lower-cased.
 
-```
+```sand
 pub struct Response { status: int, headers: [(str, str)], body: bytes, url: str }
 pub fn get(url: str, headers: [(str, str)] = [], timeout: duration = 30s) -> Result<Response>
 pub fn request(method: str, url: str, headers: [(str, str)] = [], body: bytes = b"",
@@ -1887,7 +1887,7 @@ not followed.
 
 Server:
 
-```
+```sand
 pub fn serve(addr: str) -> Result<Server>        // capability NetListen(addr)
 server.accept() -> Result<Request>
 server.addr() -> str
@@ -1963,7 +1963,7 @@ is read whole, so `max_http_body` also applies to `open`.
 Files (§13.3), connections (§13.10), HTTP bodies (§13.4) and the standard
 streams implement two traits:
 
-```
+```sand
 pub trait Reader {
     fn read(self, max: int = 65536) -> Result<bytes>  // at most max bytes, waiting until some are available; empty at the end
     fn read_line(self) -> Result<str?>                // without its \n or \r\n; None at the end; kind "invalid" if not UTF-8
@@ -2008,7 +2008,7 @@ pending, then waits; the run's limits and interrupts apply while it waits.
 
 ### 13.7 `json`
 
-```
+```sand
 pub enum Json { Null, Bool(bool), Int(int), Float(float), Str(str), Arr([Json]), Obj([str: Json]) }
 pub native fn parse(text: str) -> Result<Json>
 pub native fn encode<T>(value: T, indent: int = 0) -> str
@@ -2070,7 +2070,7 @@ Rounding, `abs`, `min`, `max`, `clamp`, `sqrt` and `pow` are methods of
 
 ### 13.10 `net`
 
-```
+```sand
 pub native fn listen(addr: str) -> Result<Listener>    // NetListen(addr)
 pub native fn connect(addr: str, timeout: duration = 30s) -> Result<Conn>      // Net(host:port)
 pub native fn connect_tls(addr: str, timeout: duration = 30s) -> Result<Conn>  // Net(host:port); feature tls
@@ -2112,7 +2112,7 @@ generator independent of the engine's, with the same methods except `seed`.
 
 ### 13.12 `regex`
 
-```
+```sand
 pub native fn new(pattern: str) -> Result<Regex>
 regex.is_match(pattern, text) -> Result<bool>      // convenience
 r.is_match(text) -> bool
@@ -2223,7 +2223,7 @@ See §11.3.
 
 ### 13.17 `uri`
 
-```
+```sand
 pub struct Uri {
     scheme: str, userinfo: str?, host: str?, port: int?,
     path: str, query: str?, fragment: str?
@@ -2424,7 +2424,7 @@ Quoted text `"..."` (with `\"` and `\\` escapes) is parsed literally, so a quote
 `*` is not considered a wildcard. A word may contain both quoted and unquoted text
 (`"/my data"/**`).
 
-```
+```policy
 # Read the system and the project; keep secrets out.
 let owners = alice bob
 allow read /usr /System ~/.gitconfig
@@ -2806,7 +2806,7 @@ standard input and a time zone, with `onOutput` and `onPrompt` callbacks
 (requests the policy does not decide go to `onPrompt`, and are denied
 without it), `run`, `check`, `lint`, sessions (`eval(source, name?)`, and
 `runTasks`/`stopTasks` to run tasks between inputs), `format` and
-`highlight`. `playground/` is a web page built on it.
+`highlight`. The web playground (`site/playground/`) is built on this package.
 
 ### 16.3 Sessions
 
@@ -3108,16 +3108,6 @@ Commands (on a line of their own):
 | `:reset`      | forget all inputs and start a fresh session ("always" answers are kept)                                                                                |
 | `:quit`, `:q` | end the session (exit code 0)                                                                                                                          |
 
-### 17.7 `sand playground [DIR] [--port=PORT]`
-
-Serves the web playground (§16.2) at `http://127.0.0.1:PORT/`, on the
-loopback address only (default port 8000; `--port=0` picks a free one and
-prints the address). `DIR` defaults to `playground/` of the source tree the
-binary was built from, else `./playground`; its engine must be built first
-(`playground/build.sh`). It serves `GET` and `HEAD` of regular files inside
-`DIR` (a directory serves its `index.html`; paths with `..`, and symlinks
-leading outside, are not found). Ctrl-C stops it.
-
 ---
 
 ## 18. Diagnostics
@@ -3125,7 +3115,7 @@ leading outside, are not found). Ctrl-C stops it.
 Each diagnostic contains a severity (error/warning), a code, a message, and a primary
 span (file, line, column) with optional notes. Rendered form:
 
-```
+```text
 error[E0308]: type mismatch: expected int, found str
   --> main.sand:3:9
    |

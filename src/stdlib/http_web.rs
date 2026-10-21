@@ -1,18 +1,15 @@
-//! The `http` module on the web: a client over the browser's `fetch`.
+//! Browser `fetch` implementation of the `http` module.
 //!
-//! The policy determines whether a request is allowed bfore anything is sent.
-//! Redirects are denied (`redirect: "manual"`): the browser hides
-//! where they lead, so following them could reach hosts the policy never
-//! saw. Responses are read as a stream and abandoned once they exceed
-//! `max_http_body`; their buffers count against the memory limit.
+//! Policy rules and the host request filter are evaluated before a request is
+//! sent. Redirects are denied (`redirect: "manual"`) because the browser hides
+//! redirect targets from policy checks. Response bodies are streamed into
+//! memory-tracked buffers and aborted if they exceed `max_http_body`.
 //!
-//! `fetch` and its results are JavaScript objects, which are not `Send`,
-//! while the engine's I/O futures must be: the request runs in a local task
-//! of the JavaScript event loop, and the engine waits for its result on a
-//! channel. Dropping that wait (a cancelled task, an interrupted run)
-//! aborts the request.
+//! Because JavaScript `fetch` objects are not `Send`, each request runs on the
+//! local JavaScript event loop and sends its result back over a channel.
+//! Dropping the receiver aborts the in-flight request.
 
-use super::http_common::{BodyReader, MemoryBody, Url, alloc_body, header_list, header_pairs, is_token};
+use super::http_common::{BodyReader, MemoryBody, Url, alloc_body, filter_request, header_list, header_pairs, is_token};
 use super::stream::IoFailure;
 use crate::check::ModKind;
 use crate::engine::Registry;
@@ -58,13 +55,16 @@ fn send(vm: &mut Vm, a: &[Value]) -> NResult {
     if !is_token(&method) {
         return Ok(vm.err_value("invalid", &format!("invalid HTTP method {:?}", super::truncate(&method, 64))));
     }
-    let headers = match header_pairs(vm, a[2])? {
+    let mut headers = match header_pairs(vm, a[2])? {
         Ok(h) => h,
         Err(e) => return Ok(vm.err_value("invalid", &e)),
     };
     let cap = url.capability(&method);
     if !vm.permit(&cap)? {
         return Ok(vm.err_value("permission_denied", &format!("permission denied: {cap}")));
+    }
+    if let Err(reason) = filter_request(vm, &url, &mut headers) {
+        return Ok(vm.err_value("permission_denied", &reason));
     }
     // The request body is held, and the response buffered, outside the heap.
     let res = super::or_return!(vm.reserve_io(vm.heap.bytes_of(a[3]).len()));

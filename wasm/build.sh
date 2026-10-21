@@ -1,15 +1,13 @@
 #!/bin/sh
-# Builds the engine for JavaScript hosts: compiles `sandlang-wasm` for
-# wasm32-unknown-unknown (the `wasm-release` profile), generates its
-# JavaScript bindings with wasm-bindgen, and optimizes it with wasm-opt
-# (binaryen) if installed (in CI, where $CI is set, it must be).
+# Builds the `sandlang-wasm` crate for `wasm32-unknown-unknown`, generates
+# JavaScript bindings with `wasm-bindgen`, and optimizes the output with
+# `wasm-opt` in release builds.
 #
-#   wasm/build.sh web OUT_DIR [--dev]       ES module, for browsers (the playground)
-#   wasm/build.sh nodejs OUT_DIR [--dev]    CommonJS, for Node.js (wasm/tests)
+#   wasm/build.sh web OUT_DIR [--dev]       ES module for browsers
+#   wasm/build.sh nodejs OUT_DIR [--dev]    CommonJS module for Node.js tests
 #
-# Needs the wasm32-unknown-unknown target (rustup target add
-# wasm32-unknown-unknown) and wasm-bindgen-cli of exactly the version of the
-# wasm-bindgen crate in Cargo.lock; the script says how to install it.
+# Requires the `wasm32-unknown-unknown` target and a `wasm-bindgen-cli` binary
+# whose version matches the `wasm-bindgen` crate in Cargo.lock.
 set -eu
 
 usage() {
@@ -44,8 +42,7 @@ if [ "$have" != "$want" ]; then
     exit 1
 fi
 
-# Cargo's target directory (CARGO_TARGET_DIR or build.target-dir may move it),
-# with JSON's escaped backslashes (Windows paths) turned into slashes.
+# Normalize backslashes in Cargo's target_directory on Windows.
 target_dir=$(cargo metadata --format-version 1 --no-deps |
     sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p' | sed 's/\\\\/\//g')
 build="$target_dir/wasm32-unknown-unknown"

@@ -1,19 +1,19 @@
-//! Leveled logging to standard error.
+//! Structured leveled logging to standard error.
 //!
-//! Records are written as `LEVEL message key=value ...`.
+//! Log records are formatted as `LEVEL message key=value ...`.
 
-/// Logs `msg` at level `debug`.
+/// Logs `msg` and optional `fields` at level `debug`.
 pub native fn debug(msg: str, fields: [str: str] = [:])
 
-/// Logs `msg` at level `info`.
+/// Logs `msg` and optional `fields` at level `info`.
 pub native fn info(msg: str, fields: [str: str] = [:])
 
-/// Logs `msg` at level `warn`.
+/// Logs `msg` and optional `fields` at level `warn`.
 pub native fn warn(msg: str, fields: [str: str] = [:])
 
-/// Logs `msg` at level `error`.
+/// Logs `msg` and optional `fields` at level `error`.
 pub native fn error(msg: str, fields: [str: str] = [:])
 
-/// Sets the minimum level that is logged.
-/// One of `"debug"`, `"info"` (the default), `"warn"`, `"error"` or `"off"`.
+/// Sets the minimum active log level (`"debug"`, `"info"` by default, `"warn"`,
+/// `"error"`, or `"off"`).
 pub native fn set_level(level: str)

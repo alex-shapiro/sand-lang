@@ -1,0 +1,16 @@
+[package]
+name = "sandlang-site"
+version = "0.1.0"
+edition = "2024"
+description = "Static site generator and local server for sandlang.com"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[[bin]]
+name = "site"
+path = "src/main.rs"
+
+[dependencies]
+sandlang = { path = "..", features = ["tls"] }
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+tokio = { version = "1", features = ["rt", "net", "fs", "io-util", "time", "signal", "macros"] }

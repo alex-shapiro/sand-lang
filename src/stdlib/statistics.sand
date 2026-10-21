@@ -1,50 +1,56 @@
-//! Descriptive statistics on lists of floats.
+//! Descriptive statistics and linear regression on numeric lists.
 //!
-//! Functions return `None` for empty input (`variance` and `stdev` need at
-//! least two values), except `sum`, which is `0.0`.
+//! Functions return `None` for empty inputs (`variance` and `stdev` require at
+//! least two elements), except `sum`, which returns `0.0`.
 
-/// Arithmetic mean.
+/// Returns the arithmetic mean of `xs`, or `None` if `xs` is empty.
 pub native fn mean(xs: [float]) -> float?
 
-/// Arithmetic mean of integers.
+/// Returns the arithmetic mean of integer list `xs`, or `None` if `xs` is empty.
 pub native fn mean_int(xs: [int]) -> float?
 
-/// The middle value; the mean of the two middle values for even lengths.
+/// Returns the median of `xs` (averaging the two middle values for even
+/// lengths), or `None` if `xs` is empty.
 pub native fn median(xs: [float]) -> float?
 
-/// The most common value; the first to occur on ties.
+/// Returns the most frequent value in `xs` (breaking ties by first appearance),
+/// or `None` if `xs` is empty.
 pub native fn mode(xs: [float]) -> float?
 
-/// Sample variance (divides by `n - 1`).
+/// Returns the sample variance of `xs` (divided by `n - 1`), or `None` if
+/// `xs.len() < 2`.
 pub native fn variance(xs: [float]) -> float?
 
-/// Sample standard deviation.
+/// Returns the sample standard deviation of `xs`, or `None` if `xs.len() < 2`.
 pub native fn stdev(xs: [float]) -> float?
 
-/// Population variance (divides by `n`).
+/// Returns the population variance of `xs` (divided by `n`), or `None` if `xs`
+/// is empty.
 pub native fn pvariance(xs: [float]) -> float?
 
-/// Population standard deviation.
+/// Returns the population standard deviation of `xs`, or `None` if `xs` is empty.
 pub native fn pstdev(xs: [float]) -> float?
 
-/// The smallest value.
+/// Returns the minimum value in `xs`, or `None` if `xs` is empty.
 pub native fn min(xs: [float]) -> float?
 
-/// The largest value.
+/// Returns the maximum value in `xs`, or `None` if `xs` is empty.
 pub native fn max(xs: [float]) -> float?
 
-/// Sum of the values (compensated, so rounding errors do not accumulate).
+/// Returns the compensated sum of `xs` (`0.0` if `xs` is empty).
 pub native fn sum(xs: [float]) -> float
 
-/// The `q`-quantile (`0 <= q <= 1`) with linear interpolation between the
-/// closest ranks; `None` if `xs` is empty or `q` is out of range.
+/// Returns the `q`-quantile (`0.0 <= q <= 1.0`) of `xs` using linear
+/// interpolation between adjacent ranks, or `None` if `xs` is empty or `q` is
+/// out of range.
 pub native fn quantile(xs: [float], q: float) -> float?
 
-/// Pearson correlation coefficient; `None` unless both lists have the same
-/// length of at least two and neither is constant.
+/// Returns the Pearson correlation coefficient of `xs` and `ys`, or `None` if
+/// the lists differ in length, have fewer than two elements, or have zero
+/// variance.
 pub native fn correlation(xs: [float], ys: [float]) -> float?
 
-/// Ordinary least-squares fit `y = slope * x + intercept`, returned as
-/// `(slope, intercept)`; `None` unless both lists have the same length of at
-/// least two and `xs` is not constant.
+/// Fits the ordinary least-squares line `y = slope * x + intercept` and returns
+/// `(slope, intercept)`, or `None` if `xs` and `ys` differ in length, have
+/// fewer than two elements, or `xs` has zero variance.
 pub native fn linear_regression(xs: [float], ys: [float]) -> (float, float)?

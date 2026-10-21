@@ -1,10 +1,9 @@
-//! TCP networking: listening sockets and connections.
+//! TCP listeners and client connections (including TLS).
 //!
-//! Connecting requires the `Net(host:port)` capability, listening the
-//! `NetListen(addr)` capability. Sockets count against the
-//! `max_open_resources` limit until they are closed (or collected), and so
-//! do connections being established and pending `accept` calls. Bind them
-//! with `use` to close them when the block ends:
+//! Outgoing connections require the `Net(host:port)` capability, and listeners
+//! require `NetListen(addr)`. Open sockets and in-flight connection attempts
+//! count toward `max_open_resources` until closed. Bind sockets with `use` to
+//! close them at block exit:
 //!
 //! ```
 //! use conn = net.connect("example.com:80")?
@@ -14,46 +13,46 @@
 
 import io
 
-/// Starts listening for TCP connections on `addr` (`host:port`; port `0`
-/// picks a free port).
+/// Binds a TCP listener to `addr` (`host:port`; port `0` selects an available
+/// ephemeral port).
 pub native fn listen(addr: str) -> Result<Listener>
 
-/// Opens a TCP connection to `addr` (`host:port`), failing with kind
-/// `"timeout"` if it is not established within `timeout`.
+/// Opens a TCP connection to `addr` (`host:port`), or fails with kind
+/// `"timeout"` if the connection does not complete within `timeout`.
 pub native fn connect(addr: str, timeout: duration = 30s) -> Result<Conn>
 
-/// Opens a TLS connection to `addr` (`host:port`), verifying the server
-/// certificate for `host` against the bundled web PKI roots and any roots
-/// trusted by the host application (requires the `tls` feature). Fails with
-/// kind `"timeout"` if the connection and the TLS handshake are not
-/// completed within `timeout`.
+/// Opens a TLS-encrypted TCP connection to `addr` (`host:port`) and verifies
+/// the server certificate against the bundled Web PKI roots and any custom host
+/// roots (requires the `tls` feature). Fails with kind `"timeout"` if the TCP
+/// connection and TLS handshake do not complete within `timeout`.
 pub native fn connect_tls(addr: str, timeout: duration = 30s) -> Result<Conn>
 
-/// A listening TCP socket.
+/// A listening TCP socket returned by `listen`.
 pub native type Listener
 
 extend Listener {
-    /// Waits for the next incoming connection.
+    /// Waits for and returns the next incoming TCP connection.
     pub native fn accept(self) -> Result<Conn>
-    /// The local address (`host:port`) the listener is bound to.
+    /// Returns the local socket address (`host:port`) that the listener is bound to.
     pub native fn addr(self) -> str
 }
 
 impl Close for Listener {
-    /// Stops listening. Pending and later `accept` calls fail with kind `"closed"`.
+    /// Closes the listener. In-flight and subsequent `accept` calls fail with
+    /// kind `"closed"`.
     native fn close(self)
 }
 
-/// A TCP (or TLS) connection. One task may read while another writes.
+/// An open TCP or TLS stream connection. Separate tasks can read and write
+/// concurrently on the same `Conn`.
 pub native type Conn
 
 impl io.Reader for Conn {
-    /// Reads up to `max` bytes as soon as some are available (at most what
-    /// the connection's 8 KiB buffer holds); empty once the peer has
-    /// finished sending.
+    /// Reads up to `max` bytes as soon as data is available (up to the 8 KiB
+    /// read buffer), or returns `b""` at end-of-stream.
     native fn read(self, max: int) -> Result<bytes>
     native fn read_line(self) -> Result<str?>
-    /// Reads until the peer has finished sending.
+    /// Reads all remaining bytes until the remote peer closes its write half.
     native fn read_all(self) -> Result<bytes>
 }
 
@@ -63,11 +62,12 @@ impl io.Writer for Conn {
 }
 
 impl Close for Conn {
-    /// Closes the connection. Pending and later operations fail with kind `"closed"`.
+    /// Closes the connection. In-flight and subsequent operations fail with
+    /// kind `"closed"`.
     native fn close(self)
 }
 
 extend Conn {
-    /// The remote address (`host:port`).
+    /// Returns the remote peer socket address (`host:port`).
     pub native fn peer_addr(self) -> str
 }

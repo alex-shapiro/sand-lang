@@ -1,0 +1,2 @@
+[alias]
+site = "run -p sandlang-site --"

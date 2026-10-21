@@ -1,36 +1,34 @@
-//! An HTTP/1.1 client and a minimal HTTP/1.1 server.
+//! HTTP/1.1 client and server.
 //!
-//! Requests need the `Net(host:port)` capability (checked again for every
-//! redirect hop); `serve` needs `NetListen(addr)`. `https` URLs use TLS when
-//! the engine is built with the `tls` feature. Response bodies larger than
-//! the `max_http_body` limit fail with kind `"limit"` (unless read as they
-//! arrive, with `open`). Connections are kept open for further requests.
+//! Outgoing requests require the `Net(host:port)` capability (checked on every
+//! redirect hop), and `serve` requires `NetListen(addr)`. `https` URLs use TLS
+//! if the engine is built with the `tls` feature. Buffered response bodies
+//! larger than `max_http_body` fail with kind `"limit"`; use `open` to stream
+//! larger bodies incrementally.
 
 import io
 import json
 import net
 
-/// Starts an HTTP server listening on `addr` (`host:port`; port `0` picks a
-/// free port).
+/// Starts an HTTP/1.1 server listening on `addr` (`host:port`; port `0` selects
+/// an available ephemeral port).
 pub native fn serve(addr: str) -> Result<Server>
 
-/// An HTTP/1.1 server. After a response, it waits for the client's next
-/// request on the same connection. Closing the server stops accepting
-/// connections and closes those whose requests were still being read.
+/// An HTTP/1.1 server listening for incoming requests. Closing the server stops
+/// accepting new connections and closes in-flight request readers.
 pub native type Server
 
 extend Server {
-    /// Waits for the next request's head; the body is read as the handler
-    /// reads it. Heads are read from many connections at once. A connection
-    /// that sends no head within 30 seconds, or the oldest when the server
-    /// reads as many as it may, is answered with `408 Request Timeout`; one
-    /// waiting for its next request is closed instead.
+    /// Waits for and returns the next incoming HTTP request. Request headers
+    /// are read concurrently across connections, and the request body is
+    /// streamed on demand. Connections that do not send a complete request
+    /// header within 30 seconds receive `408 Request Timeout`.
     pub fn accept(self) -> Result<Request> {
         let (method, path, query, headers, body, conn, exchange) = next_request(self)?
         Ok(Request { method, path, query, headers, body, conn, exchange })
     }
 
-    /// The local address (`host:port`) the server listens on.
+    /// Returns the local socket address (`host:port`) that the server is bound to.
     pub native fn addr(self) -> str
 }
 
@@ -38,25 +36,25 @@ impl Close for Server {
     native fn close(self)
 }
 
-/// A request received by a `Server`. Header names are lower-cased (a
-/// header sent several times occurs several times, in order); `path` and
-/// `query` are the parts of the request target before and after `?`.
+/// An incoming HTTP request received by a `Server`. Header names are normalized
+/// to lowercase.
 pub struct Request {
+    /// HTTP request method (such as `"GET"` or `"POST"`).
     method: str
+    /// Request path before `?`.
     path: str
+    /// Raw query string after `?` (or `""` if absent).
     query: str
+    /// Request headers in receipt order, with lowercase names.
     headers: [(str, str)]
-    /// The request's body, read as it arrives (at most `max_http_body`
-    /// bytes with `read_all`, `bytes`, `text` or `json`).
+    /// Streaming request body (`read_all`, `bytes`, `text`, and `json` enforce `max_http_body`).
     body: Body
-    /// The client connection. `respond` and `respond_stream` write the
-    /// response to it; a script may instead write one directly, and close it.
+    /// Underlying client connection.
     conn: net.Conn
     exchange: Exchange
 
-    /// Sends the response and closes the request. The connection is kept
-    /// for the client's next request only if the client allows it and the
-    /// request's body was read to its end.
+    /// Sends a complete HTTP response with `status`, `body`, and `headers`, and
+    /// closes the request.
     pub fn respond(self, status: int, body: bytes, headers: [(str, str)] = []) -> Result<()> {
         let sent = write_response(
             self.conn,
@@ -71,9 +69,9 @@ pub struct Request {
         sent
     }
 
-    /// Starts a response whose body is written as it goes: chunked, exactly
-    /// as long as a `content-length` in `headers`, or, to an HTTP/1.0 client,
-    /// up to the end of the connection. Closing the reply ends the body.
+    /// Begins a streaming HTTP response with `status` and `headers`, returning
+    /// a `Reply` writer. Close the `Reply` or call `finish` to complete the
+    /// response body.
     pub fn respond_stream(self, status: int, headers: [(str, str)] = []) -> Result<Reply> {
         Ok(Reply {
             conn: self.conn,
@@ -81,49 +79,48 @@ pub struct Request {
         })
     }
 
-    /// The (rest of the) body.
+    /// Reads and returns the remaining request body as bytes.
     pub fn bytes(self) -> Result<bytes> {
         self.body.read_all()
     }
 
-    /// The (rest of the) body decoded as UTF-8.
+    /// Reads and decodes the remaining request body as UTF-8 text.
     pub fn text(self) -> Result<str> {
         self.body.read_text()
     }
 
-    /// The (rest of the) body parsed as JSON.
+    /// Reads and parses the remaining request body as JSON.
     pub fn json(self) -> Result<json.Json> {
         json.parse(self.text()?)
     }
 
-    /// The value of header `name` (case-insensitive); the first if it was
-    /// sent several times.
+    /// Returns the first value for header `name` (case-insensitive).
     pub fn header(self, name: str) -> str? {
         find_header(self.headers, name)
     }
 
-    /// Every value of header `name` (case-insensitive), in order.
+    /// Returns all values for header `name` (case-insensitive) in receipt order.
     pub fn header_values(self, name: str) -> [str] {
         header_values(self.headers, name)
     }
 }
 
 impl Close for Request {
-    /// Closes the request's body and, unless a response was sent, its
-    /// connection.
+    /// Closes the request body and closes the client connection if a response
+    /// has not been sent.
     fn close(self) {
         self.body.close()
         self.conn.close()
     }
 }
 
-/// A response body written as it goes (see `Request.respond_stream`).
+/// A streaming HTTP response body returned by `Request.respond_stream`.
 pub struct Reply {
     conn: net.Conn
     body: Outgoing
 
-    /// Ends the body. It fails if the body is shorter than its
-    /// `content-length`.
+    /// Completes the response body, or fails if fewer bytes were written than
+    /// declared by `Content-Length`.
     pub fn finish(self) -> Result<()> {
         write_body(self.conn, self.body, b"", true)
     }
@@ -136,15 +133,14 @@ impl io.Writer for Reply {
 }
 
 impl Close for Reply {
-    /// Ends the body, as `finish` does (ignoring its error).
+    /// Completes the response body, ignoring any write error.
     fn close(self) {
         let _ = self.finish()
     }
 }
 
-/// Starts a request whose body is written as it goes: chunked, or exactly
-/// as long as a `content-length` in `headers`. `timeout` bounds connecting
-/// and then waiting for the response's head. Redirects are not followed.
+/// Starts a streaming HTTP request whose body is written incrementally via the
+/// returned `Upload`. Redirects are not followed.
 ///
 /// ```
 /// use src = fs.open("backup.tar")?
@@ -162,8 +158,7 @@ pub fn upload(
     Ok(Upload { url, conn, body, head_only: method.to_upper() == "HEAD", timeout })
 }
 
-/// A request whose body is written as it goes (see `upload`). Closing it
-/// closes its connection, and with it the response's body.
+/// An in-progress streaming HTTP request returned by `upload`.
 pub struct Upload {
     url: str
     conn: net.Conn
@@ -171,9 +166,9 @@ pub struct Upload {
     head_only: bool
     timeout: duration
 
-    /// Ends the body and waits for the response's head; the response's body
-    /// is read from the upload's connection. It fails if the body is
-    /// shorter than its `content-length`.
+    /// Finishes the request body and waits for the response header, returning a
+    /// `Stream` for reading the response body. Fails if fewer bytes were
+    /// written than declared by `Content-Length`.
     pub fn finish(self) -> Result<Stream> {
         write_body(self.conn, self.body, b"", true)?
         let (status, headers, body) = read_response(self.conn, self.head_only, self.timeout)?
@@ -193,10 +188,8 @@ impl Close for Upload {
     }
 }
 
-/// The framing of a body written as it goes.
 native type Outgoing
 
-/// What the response to a request needs to know about its connection.
 native type Exchange
 
 native fn start_upload(
@@ -214,23 +207,18 @@ native fn reply_body(
     include_body: bool,
 ) -> Result<Outgoing>
 
-/// Writes `data` to `body`, then ends it if `last`.
 native fn write_body(conn: net.Conn, body: Outgoing, data: bytes, last: bool) -> Result<()>
 
-/// Reads the response to an upload: `(status, headers, body)`.
 native fn read_response(
     conn: net.Conn,
     head_only: bool,
     timeout: duration,
 ) -> Result<(int, [(str, str)], Body)>
 
-/// Accepts connections and reads requests' heads concurrently until one is
-/// complete: `(method, path, query, headers, body, conn, exchange)`.
 native fn next_request(
     server: Server,
 ) -> Result<(str, str, str, [(str, str)], Body, net.Conn, Exchange)>
 
-/// Writes a response (with a `content-length`) to `conn`.
 native fn write_response(
     conn: net.Conn,
     exchange: Exchange,

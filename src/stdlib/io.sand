@@ -1,6 +1,5 @@
-//! Reading and writing bytes: the `Reader` and `Writer` traits, which
-//! files, connections, HTTP bodies and the standard streams implement, and
-//! the standard streams themselves.
+//! Byte streams (`Reader` and `Writer`) and the standard input, output, and
+//! error handles.
 //!
 //! ```
 //! use f = fs.open("notes.txt")?
@@ -9,29 +8,28 @@
 //! }
 //! ```
 
-/// A source of bytes, read in order: a file, a connection, an HTTP body,
-/// standard input.
+/// A readable byte stream, such as a file, socket, HTTP body, or standard input.
 pub trait Reader {
-    /// Reads at most `max` bytes, waiting until some are available; empty
-    /// at the end of the stream. It may return fewer bytes than are left
-    /// (a connection returns at most what its buffer holds).
+    /// Reads up to `max` bytes, suspending until data is available or the
+    /// stream reaches end-of-file (which returns `b""`).
     fn read(self, max: int = 65536) -> Result<bytes>
 
-    /// Reads one line, without its `\n` or `\r\n`; `None` at the end of the
-    /// stream (kind `"invalid"` if the line is not UTF-8).
+    /// Reads the next line with any trailing `\n` or `\r\n` stripped, or
+    /// returns `Ok(None)` at end-of-file. Fails with kind `"invalid"` if the
+    /// line is not valid UTF-8.
     fn read_line(self) -> Result<str?>
 
-    /// Reads everything up to the end of the stream.
+    /// Reads all remaining bytes until end-of-file.
     fn read_all(self) -> Result<bytes>
 
-    /// Reads everything up to the end of the stream as UTF-8 text (kind
-    /// `"invalid"` if it is not).
+    /// Reads all remaining bytes until end-of-file as UTF-8 text, or fails with
+    /// kind `"invalid"` if the stream is not valid UTF-8.
     fn read_text(self) -> Result<str> {
         self.read_all()?.to_str()
     }
 
-    /// The remaining lines (as `read_line` reads them), read as the
-    /// iterator is consumed. An error is the last element.
+    /// Returns a lazy iterator over the remaining lines of the stream. If a
+    /// read fails, the iterator yields `Some(Err(e))` and then stops.
     fn lines(self) -> Iter<Result<str>> {
         var done = false
         Iter.from_fn(() => {
@@ -53,24 +51,24 @@ pub trait Reader {
     }
 }
 
-/// A destination of bytes: a file, a connection, standard output.
+/// A writable byte stream, such as a file, socket, or standard output.
 pub trait Writer {
-    /// Writes all of `data`.
+    /// Writes all bytes in `data` to the stream.
     fn write(self, data: bytes) -> Result<()>
 
-    /// Writes all of `text`, encoded as UTF-8.
+    /// Writes `text` encoded as UTF-8 to the stream.
     fn write_str(self, text: str) -> Result<()> {
         self.write(text.bytes())
     }
 
-    /// Passes on what the writer buffers, if anything.
+    /// Flushes any buffered output to the underlying destination.
     fn flush(self) -> Result<()> {
         Ok(())
     }
 }
 
-/// Copies what `src` reads, up to its end, to `dst`; returns the number of
-/// bytes copied. Only a chunk at a time is held in memory.
+/// Copies all remaining bytes from `src` to `dst` in chunks and returns the
+/// total number of bytes copied.
 pub fn copy<R: Reader, W: Writer>(src: R, dst: W) -> Result<int> {
     var total = 0
     loop {
@@ -83,7 +81,7 @@ pub fn copy<R: Reader, W: Writer>(src: R, dst: W) -> Result<int> {
     }
 }
 
-/// Standard input. Reading it needs the `Stdin` capability.
+/// The type of `io.stdin`. Reading requires the `Stdin` capability.
 pub native type Stdin
 
 impl Reader for Stdin {
@@ -92,8 +90,8 @@ impl Reader for Stdin {
     native fn read_all(self) -> Result<bytes>
 }
 
-/// Standard output. Writing it needs the `Stdout` capability (allowed
-/// unless the policy denies it); the output limit applies.
+/// The type of `io.stdout`. Writing requires the `Stdout` capability and counts
+/// toward `max_output_bytes`.
 pub native type Stdout
 
 impl Writer for Stdout {
@@ -102,8 +100,8 @@ impl Writer for Stdout {
     native fn flush(self) -> Result<()>
 }
 
-/// Standard error. Writing it needs the `Stderr` capability (allowed
-/// unless the policy denies it); the output limit applies.
+/// The type of `io.stderr`. Writing requires the `Stderr` capability and counts
+/// toward `max_output_bytes`.
 pub native type Stderr
 
 impl Writer for Stderr {
@@ -112,13 +110,13 @@ impl Writer for Stderr {
     native fn flush(self) -> Result<()>
 }
 
-/// The standard input stream.
+/// Standard input stream handle.
 pub let stdin: Stdin = new_stdin()
 
-/// The standard output stream (also written by `print`).
+/// Standard output stream handle (also written by `print`).
 pub let stdout: Stdout = new_stdout()
 
-/// The standard error stream (also written by `eprint`).
+/// Standard error stream handle (also written by `eprint`).
 pub let stderr: Stderr = new_stderr()
 
 native fn new_stdin() -> Stdin

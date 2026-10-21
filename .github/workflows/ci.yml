@@ -29,6 +29,8 @@ jobs:
         run: cargo clippy -p sandlang --all-targets -- -D warnings
       - name: Clippy (library, without operating-system access)
         run: cargo clippy -p sandlang --all-targets --no-default-features -- -D warnings
+      - name: Clippy (website)
+        run: cargo clippy -p sandlang-site --all-targets -- -D warnings
 
   test:
     name: test (${{ matrix.os }})
@@ -61,7 +63,7 @@ jobs:
         run: cargo test -p sandlang --no-default-features
 
   wasm:
-    name: WebAssembly and playground
+    name: WebAssembly and website
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -85,9 +87,11 @@ jobs:
       - name: Build for Node.js
         run: wasm/build.sh nodejs target/wasm-node
       - name: Test
-        run: node --test --test-timeout=120000 wasm/tests/
-      - name: Build the playground
-        run: playground/build.sh
+        run: node --test --test-timeout=120000 wasm/tests/ site/tests/
+      - name: Test the website generator
+        run: cargo test -p sandlang-site
+      - name: Build the website
+        run: cargo site build
 
   fuzz-targets:
     name: fuzz targets build

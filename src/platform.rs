@@ -2,6 +2,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+#[cfg(any(feature = "os", web))]
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -50,6 +51,7 @@ impl Deadline {
 }
 
 /// Awaits future until duration elapses on clock.
+#[cfg(feature = "os")]
 pub(crate) async fn timeout<F: Future>(clock: &dyn Clock, duration: Duration, future: F) -> Option<F::Output> {
     let mut future = std::pin::pin!(future);
     let mut expiry = clock.sleep(duration);
@@ -111,7 +113,6 @@ async fn sleep(d: Duration) {
 #[cfg(web)]
 async fn sleep(d: Duration) {
     const MAX_MS: f64 = 2_147_483_647.0;
-    /// Pauses execution on WebAssembly hosts.
     let mut ms = d.as_secs_f64() * 1000.0;
     loop {
         let step = ms.min(MAX_MS);

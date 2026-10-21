@@ -1,7 +1,6 @@
 //! The `sand` command-line tool.
 #![forbid(unsafe_code)]
 
-mod playground;
 mod repl;
 
 use sandlang::policy::{PolicyFile, parse_duration, parse_size};
@@ -22,8 +21,6 @@ USAGE:
     sand fmt - [--check]                   format standard input to standard output
     sand test FILE... [OPTIONS]            run test blocks (options as for run)
     sand repl [OPTIONS]                    interactive session
-    sand playground [DIR] [--port=PORT]    serve the web playground on localhost
-                                           (build it first: playground/build.sh)
     sand --version
     sand COMMAND --help                    show this help
 
@@ -72,7 +69,6 @@ fn main() -> ExitCode {
         "fmt" => cmd_fmt(rest),
         "test" => cmd_test(rest),
         "repl" => repl::cmd_repl(rest),
-        "playground" => playground::cmd_playground(rest),
         "--version" | "-V" | "version" => {
             println!("sand {}", env!("CARGO_PKG_VERSION"));
             Ok(0)

@@ -681,13 +681,6 @@ fn send(vm: &mut Vm, a: &[Value]) -> NResult {
     )
 }
 
-/// Passes the headers of a request to `url` through the host's request filter, if it has one.
-fn filter_request(vm: &Vm, url: &Url, headers: &mut Vec<(String, String)>) -> Result<(), String> {
-    let Some(filter) = &vm.host.request_filter else { return Ok(()) };
-    let target = crate::engine::RequestTarget { scheme: url.scheme.clone(), host: url.host.clone(), port: url.port };
-    filter(&target, headers)
-}
-
 /// A request's head, with a `Connection: close` header if `close`.
 fn request_head(method: &str, url: &Url, headers: &[(String, String)], body: Delimit, close: bool) -> String {
     let has = |name: &str| headers.iter().any(|(k, _)| k.eq_ignore_ascii_case(name));

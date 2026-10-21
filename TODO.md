@@ -4,6 +4,10 @@ Follow-up work, roughly in priority order.
 
 ## Open
 
+### Miscellaneous
+
+- [ ] Move all crates into a `crates/` directory and standardize all crate metadata (versions, licenses, etc.) to use workspace values.
+
 ### Sandbox
 
 - [ ] **Windows rename.** No safe API renames by handle (`fs_at`, `winx`
@@ -15,8 +19,8 @@ Follow-up work, roughly in priority order.
 ### Test coverage
 
 - [ ] Run the CI workflow on Windows and Linux, where nothing has run
-      yet (Windows is only cross-checked with `--no-default-features
-  --features os`), including the ConPTY variant of
+      yet (Windows is only cross-checked with
+      `--no-default-features --features os`), including the ConPTY variant of
       `cli/tests/prompt_tty.rs` and the REPL's line editor.
 - [ ] The Windows resolver and file operations (`files/windows.rs`,
       through `fs_at` and `winx`) have only been cross-compiled.
@@ -39,6 +43,17 @@ Follow-up work, roughly in priority order.
 - [ ] `help.test` fails with `--no-default-features` because the overview
       includes modules that require the `os` feature.
 
+### Spec
+
+- [ ] Document in §14.4 that `time.local_zone()` returns `UTC` if the
+      `TimeZone` capability is denied (currently documented only in §13).
+
+### Standard Library
+
+- [ ] Separate IP address and port arguments in `http.serve`, `http.Server.addr`, `net.listen`, `net.connect`, and `net.connect_tls`.
+- [ ] Allow the host to configure `log` with a custom sink function and log level at engine creation time (defaulting to `stderr`), so host applications (e.g. using `tracing`) can forward Sand logs while still enforcing sandbox policy.
+- [ ] Remove `random.normal`. If needed later, add `statistics.Normal` and `statistics.sample<D>(dist: D) -> float` for sampling from parameterized distributions.
+
 ### Web
 
 - [ ] Stopping a busy engine in the browser terminates its worker, since
@@ -55,6 +70,22 @@ Follow-up work, roughly in priority order.
       `bypassable-http-deny`); rules with wildcards in hosts or paths could
       be compared as file rules are. A rule made unnecessary only by several
       other rules together is not reported.
+
+- [ ] `sand fmt` breaks any method chain of three or more calls that contains
+      a lambda argument (`[1, 2, 3].map(x => x * 2).filter(x => x > 2).sum()`),
+      even if the chain fits on a single line. §17.3 specifies breaking only
+      lines longer than 100 characters, and the first example in §12.13 is
+      unformatted. Align `sand fmt` and §17.3.
+
+### Diagnostics
+
+- [ ] Recover at the next `match` arm after an invalid pattern
+      (`1..5 =>`, `Rect(..) =>`) instead of reporting a spurious
+      `unexpected }` at the end of the `match`.
+- [ ] Suggest an enum in addition to a struct or tuple for mixed-type list
+      literals (`[1, "a"]`).
+- [ ] Include the `<top level>` stack frame if a failing `assert` is the
+      final top-level statement.
 
 ### Performance
 
@@ -76,7 +107,13 @@ Follow-up work, roughly in priority order.
       `random.rng`, `task.channel`, `set`, `error`) and the parser restriction
       on struct literals in `if`, `while`, `match`, and `for` headers. Keep
       static factory methods (`T.parse`, `T.from_x`).
+- [ ] Support `Rect(..)` and `Rect(w: w, h: h)` in enum variant patterns to
+      match variant construction (`Shape.Rect(w: 2.0, h: 3.0)`), as part of
+      the `T(...)` item above.
+- [ ] Reject `import` statements after non-import items or statements, as
+      specified in §3.1.
 - [ ] Trait objects (`dyn Trait`), associated types and constants, and
       blanket impls (`impl<T> X for T`).
 - [ ] Trait bounds on struct/enum type parameters.
 - [ ] Non-constant trait method defaults.
+- [ ] Remove the `|>` operator.

@@ -740,3 +740,25 @@ let body = ["range": "A1", "values": [["x"]]]
 let xs = [1, "a"]
 --- error
 1: all elements of a list have one type, so use a struct or a tuple for mixed values
+
+=== List and Map type constructors
+let xs: List<int> = [1, 2]
+let m: Map<str, [int]> = ["a": xs]
+fn first(x: [int]) -> List<int> { x }
+print(m["a"] == first([1, 2]))
+--- stdout
+true
+
+=== List and Map type argument arity
+let a: List<int, int> = []
+let b: Map<int> = [:]
+--- error
+1: expected 1 type argument for `List`, found 2
+2: expected 2 type arguments for `Map`, found 1
+
+=== user-defined List type shadows the built-in
+struct List { n: int }
+let l: List = List { n: 1 }
+print(l.n)
+--- stdout
+1
