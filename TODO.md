@@ -101,6 +101,9 @@ Follow-up work, roughly in priority order.
       This needs a syntax decision (`Write`, `.Write`).
 - [ ] The prelude has no `Ordering` enum, so `time.Span.compare` returns
       `-1`, `0` or `1`.
+- [ ] `day_of_week()` of the `time` types returns an `int` (`1` to `7`).
+      Decide whether to return a `time.Weekday` enum bound to
+      `jiff::civil::Weekday`.
 
 - [ ] **Construct all types with `T(...)`.** Replace struct literals with
       named-argument calls (`Point(x: 1.0, y: 2.0)`, with defaults and

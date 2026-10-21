@@ -51,7 +51,7 @@ impl TypeContext {
 /// host functions can take and return it. Implement it with
 /// [`sand_enum!`](crate::sand_enum) and register it with
 /// [`NativeModule::enum_type`].
-pub trait EnumType: Copy + Send + Sync + 'static {
+pub trait EnumType: Copy + 'static {
     /// Name of the module that declares the Sand enum (e.g. `"fs"`).
     const MODULE: &'static str;
     /// Name of the Sand enum (e.g. `"Mode"`).

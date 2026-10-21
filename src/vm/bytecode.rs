@@ -3,9 +3,8 @@
 //! Every instruction is 8 bytes. Registers are frame-relative `u16` slots.
 //! Jump offsets are relative to the instruction *after* the jump.
 
-use super::value::TypeDesc;
+use super::value::{FxHashMap, TypeDesc};
 use crate::hir::FormatSpec;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 pub type Reg = u16;
@@ -1268,7 +1267,7 @@ pub struct Program {
     pub variants: Vec<VariantRt>,
     /// The runtime id of the first variant of each enum bound to a Rust type
     /// (`EnumType`), whose variants have consecutive ids.
-    pub enum_types: HashMap<std::any::TypeId, u32>,
+    pub enum_types: FxHashMap<std::any::TypeId, u32>,
     pub ids: RtIds,
     pub entry: u32,
     pub tests: Vec<(String, u32)>,

@@ -584,26 +584,33 @@ impl Registry {
     }
 
     pub fn add_value_type<T: crate::vm::value::ValueType>(&mut self) {
-        let module = T::MODULE;
-        crate::vm::value::check_type_name(T::NAME);
+        let qual = self.new_type_name(T::MODULE, T::NAME);
         let info = crate::types::ValueTypeInfo {
             ord: T::ORDER.is_some(),
             parse: crate::vm::value::parse_value::<T>,
             type_id: std::any::TypeId::of::<T>(),
         };
-        let old = Arc::make_mut(&mut self.by_name).values.insert(format!("{module}.{}", T::NAME).into(), info);
-        assert!(old.is_none(), "value type {module}.{} registered twice", T::NAME);
+        Arc::make_mut(&mut self.by_name).values.insert(qual.into(), info);
     }
 
     pub fn add_enum_type<T: crate::native::EnumType>(&mut self) {
-        crate::vm::value::check_type_name(T::NAME);
+        let qual = self.new_type_name(T::MODULE, T::NAME);
         let info = crate::types::EnumTypeInfo {
             type_id: std::any::TypeId::of::<T>(),
             rust_name: std::any::type_name::<T>(),
             variants: T::VARIANTS.iter().map(|&(name, _)| name).collect(),
         };
-        let old = Arc::make_mut(&mut self.by_name).enums.insert(format!("{}.{}", T::MODULE, T::NAME).into(), info);
-        assert!(old.is_none(), "enum type {}.{} registered twice", T::MODULE, T::NAME);
+        Arc::make_mut(&mut self.by_name).enums.insert(qual.into(), info);
+    }
+
+    /// Returns `module.name`. Panics if `name` is not a capitalized
+    /// identifier or if a value type or enum type already has the name.
+    fn new_type_name(&self, module: &str, name: &str) -> String {
+        crate::vm::value::check_type_name(name);
+        let qual = format!("{module}.{name}");
+        let ids = &self.by_name;
+        assert!(!ids.values.contains_key(qual.as_str()) && !ids.enums.contains_key(qual.as_str()), "type {qual} registered twice");
+        qual
     }
 
     pub fn add_builtin(&mut self, name: impl Into<Cow<'static, str>>, f: crate::vm::NativeFn) {
