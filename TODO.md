@@ -15,6 +15,9 @@ Follow-up work, roughly in priority order.
       both paths open, so that none of them can be renamed or replaced. A
       parent that is emptied and turned into a junction during the call is
       still possible; it is detected after the rename, not prevented.
+- [ ] `host_name` (`policy/net.rs`) accepts empty labels (`a..b`) and
+      labels longer than 63 bytes, so `net.connect` sends such names to the
+      resolver instead of failing with kind `"invalid"`.
 
 ### Test coverage
 

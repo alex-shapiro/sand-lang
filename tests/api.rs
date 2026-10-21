@@ -792,23 +792,29 @@ fn rule_policy_network_hosts() {
 
 #[test]
 fn rule_policy_env_and_listen() {
-    let p = RulePolicy::new().allow_env("HOME").allow_listen("127.0.0.1:0").allow_stdin();
+    let p = RulePolicy::new().allow_env("HOME").allow_listen("127.0.0.1:*").allow_listen("[::1]:0").allow_stdin();
     assert_eq!(p.check(&Capability::Env("HOME".into())), Decision::Allow);
     assert_eq!(p.check(&Capability::Env("SECRET".into())), Decision::Deny);
     let listen = |ip: &str, port| Capability::NetListen(std::net::SocketAddr::new(ip.parse().unwrap(), port));
     assert_eq!(p.check(&listen("127.0.0.1", 9000)), Decision::Allow);
+    assert_eq!(p.check(&listen("::ffff:127.0.0.1", 9000)), Decision::Allow);
     assert_eq!(p.check(&listen("0.0.0.0", 9000)), Decision::Deny);
+    assert_eq!(p.check(&listen("::1", 0)), Decision::Allow);
+    assert_eq!(p.check(&listen("::1", 9000)), Decision::Deny, "port 0 allows only an ephemeral port");
     assert_eq!(p.check(&Capability::Stdin), Decision::Allow);
 
     let p = RulePolicy::new().allow_listen("LocalHost").allow_listen("[::]:80").allow_listen("*:8080").deny_listen("localhost:22");
     assert_eq!(p.check(&listen("127.0.0.2", 3000)), Decision::Allow);
     assert_eq!(p.check(&listen("::1", 3000)), Decision::Allow);
     assert_eq!(p.check(&listen("127.0.0.1", 22)), Decision::Deny);
+    assert_eq!(p.check(&listen("::ffff:127.0.0.1", 22)), Decision::Deny);
     assert_eq!(p.check(&listen("0:0::0", 80)), Decision::Allow);
     assert_eq!(p.check(&listen("::", 81)), Decision::Deny);
     assert_eq!(p.check(&listen("10.0.0.1", 8080)), Decision::Allow);
     assert_eq!(p.check(&listen("10.0.0.1", 8081)), Decision::Deny);
-    for invalid in ["[::1", "[::1]x", "[localhost]:80", "127.0.0.1:http", "example.com", "example.com:80", "127.0.0.1:65536"] {
+    for invalid in
+        ["[::1", "[::1]x", "[localhost]:80", "127.0.0.1:http", "127.0.0.1:+80", "example.com", "example.com:80", "127.0.0.1:65536"]
+    {
         assert!(!sandlang::policy::is_valid_listen_pattern(invalid), "{invalid}");
     }
 }

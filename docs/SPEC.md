@@ -2053,7 +2053,9 @@ each accepts `fields: [str: str] = [:]`. `set_level(level: str)` with `"debug"`,
 `"info"` (default), `"warn"`, `"error"`, `"off"`. Records below the script's
 level are dropped. The others go to the host log sink (§16), which also
 selects levels, and count against `max_output_bytes`. Without a host sink,
-records go to stderr as `LEVEL message key=value ...`; if the policy denies
+records go to stderr as `LEVEL message key=value ...`, with quotes around a
+message with control characters and around keys and values that are empty
+or contain whitespace, control characters, `"` or `=`. If the policy denies
 `Stderr`, the engine drops them.
 
 ### 13.9 `math`
@@ -2084,7 +2086,9 @@ addr.port() -> int
 `host` is a host name or an IP address without brackets (`"::1"`), `ip` is
 an IP address, and `port` is in `0..=65535`; other values fail with kind
 `"invalid"`. Port `0` makes `listen` and `http.serve` select an ephemeral
-port. `split_host_port` splits text such as `"example.com:80"` or
+port. A listener on an IPv6 address accepts only IPv6 connections, and one
+on an IPv4-mapped address (`::ffff:127.0.0.1`) listens on the IPv4 address.
+`split_host_port` splits text such as `"example.com:80"` or
 `"[::1]:80"` and fails with kind `"parse"` on other text. `SocketAddr` is a
 value type (§5.4) formatted as `127.0.0.1:8080` or `[::1]:8080`.
 
@@ -2370,7 +2374,8 @@ If two opposing rules have equal specificity, deny wins. Rules:
 
 - **Listen addresses** (`NetListen`)
   - `ip:port`, `[v6]:port`, `ip`, `localhost` (the loopback addresses), `*:port` or `*`
-  - host `*`, port `*` and port `0` match any address or port
+  - host `*` and port `*` match any address or port; port `0` matches only a request for an ephemeral port
+  - IPv4-mapped IPv6 addresses are compared as IPv4
   - a rule with an address is more specific than one without, then a rule with a port
 
 - **Custom capabilities**:
@@ -2697,7 +2702,8 @@ let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 
   `LogSink::enabled(level)` selects the levels; the engine does not build the
   records it rejects. Any `Fn(&LogRecord) + Send + Sync` is a `LogSink` that
   accepts all levels. The engine calls the sink on the thread that runs the
-  script.
+  script. `LogRecord`'s `Display` form is the line written to standard error
+  without a sink.
 - `Config::memory_fs(MemFs)` gives scripts a memory file system (§16.1).
 - `Config::library(dir)` sets the directory of library scripts for
   `import <name>` (§3.2). `Engine::module_names()` returns the registered
@@ -2711,7 +2717,8 @@ let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 
 - `Config::network(Arc<dyn network::Network>)` sets the network provider for
   host resolution, outgoing TCP streams and listeners in `net` and `http`. The
   engine checks network policy before connecting or listening, and negotiates
-  TLS over the returned stream.
+  TLS over the returned stream. `Network::listen` must bind exactly the
+  checked address: an IPv6 listener must not accept IPv4 connections.
 - `Config::time_zone(sandlang::time::TimeZone)` sets the time zone returned by
   `time.local_zone()` if the policy allows `TimeZone`. Use `TimeZone::get(name)`
   to look up a zone by name or offset, or `TimeZone::system()` (feature `os`)

@@ -2,8 +2,10 @@
 
 use crate::check::ModKind;
 use crate::engine::Registry;
+use crate::vm::display::escape_str_debug;
 use crate::vm::value::{Obj, Value};
 use crate::vm::{NResult, Vm, fail};
+use std::borrow::Cow;
 use std::fmt;
 
 /// The level of a log record.
@@ -42,9 +44,35 @@ pub struct LogRecord {
     pub message: String,
     /// The `fields` argument, in insertion order.
     pub fields: Vec<(String, String)>,
-    /// The script location of the `log` call, or `None` if the host called
-    /// the `log` function directly.
+    /// The script location of the `log` call, if known.
     pub location: Option<crate::TraceFrame>,
+}
+
+/// The line that the engine writes to standard error without a host sink:
+/// `LEVEL message key=value ...`. A message with control characters is
+/// quoted, as is a key or value that is empty or contains whitespace,
+/// control characters, `"` or `=`.
+impl fmt::Display for LogRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} {}", self.level, quote_if(&self.message, self.message.contains(char::is_control)))?;
+        for (key, value) in &self.fields {
+            write!(f, " {}={}", quote_if(key, needs_quotes(key)), quote_if(value, needs_quotes(value)))?;
+        }
+        Ok(())
+    }
+}
+
+fn needs_quotes(s: &str) -> bool {
+    s.is_empty() || s.contains(|c: char| c.is_whitespace() || c.is_control() || c == '"' || c == '=')
+}
+
+fn quote_if(s: &str, quote: bool) -> Cow<'_, str> {
+    if !quote {
+        return Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len() + 2);
+    escape_str_debug(s, &mut out);
+    Cow::Owned(out)
 }
 
 /// Receives the records of the `log` module (see [`crate::Config::log_sink`]).
@@ -103,45 +131,41 @@ pub fn register(r: &mut Registry) {
 }
 
 /// Sends a record to the log sink if both the script and the sink enable
-/// `level`.
+/// `level`. Without a host sink, writes the record's text to stderr if the
+/// policy allows it.
 fn record(vm: &mut Vm, level: LogLevel, a: &[Value]) -> NResult {
     if vm.host.log_level.is_none_or(|l| level < l) {
         return Ok(Value::Unit);
     }
-    let entries = |vm: &Vm| -> Vec<(Value, Value)> {
-        match vm.heap.get(a[1]) {
-            Obj::Map(m) => m.entries.iter().flatten().copied().collect(),
-            _ => Vec::new(),
-        }
+    let sink = vm.host.log_sink.clone();
+    let enabled = match &sink {
+        Some(sink) => sink.enabled(level),
+        None => vm.output_allowed(2)?,
     };
-    match vm.host.log_sink.clone() {
+    if !enabled {
+        return Ok(Value::Unit);
+    }
+    let fields: Vec<(Value, Value)> = match vm.heap.get(a[1]) {
+        Obj::Map(m) => m.entries.iter().flatten().copied().collect(),
+        _ => Vec::new(),
+    };
+    let len = vm.str(a[0]).len() + fields.iter().map(|&(k, v)| vm.str(k).len() + vm.str(v).len()).sum::<usize>();
+    vm.reserve(len)?;
+    vm.charge_bytes(len)?;
+    let record = LogRecord {
+        level,
+        message: vm.str(a[0]).to_string(),
+        fields: fields.iter().map(|&(k, v)| (vm.str(k).to_string(), vm.str(v).to_string())).collect(),
+        location: vm.native_caller(),
+    };
+    match sink {
         Some(sink) => {
-            if !sink.enabled(level) {
-                return Ok(Value::Unit);
-            }
-            let entries = entries(vm);
-            let len = vm.str(a[0]).len() + entries.iter().map(|&(k, v)| vm.str(k).len() + vm.str(v).len()).sum::<usize>();
-            vm.reserve(len)?;
-            vm.charge_bytes(len)?;
             vm.count_output(2, len)?;
-            let message = vm.str(a[0]).to_string();
-            let fields = entries.iter().map(|&(k, v)| (vm.str(k).to_string(), vm.str(v).to_string())).collect();
-            sink.log(&LogRecord { level, message, fields, location: vm.native_caller() });
+            sink.log(&record);
         }
         None => {
-            if !vm.output_allowed(2)? {
-                return Ok(Value::Unit);
-            }
-            let mut line = format!("{level} {}", vm.str(a[0]));
-            for (k, v) in entries(vm) {
-                let value = vm.str(v);
-                let quote = value.is_empty() || value.chars().any(|c| c.is_whitespace() || c.is_control() || c == '"' || c == '=');
-                let value = if quote { vm.debug(v)? } else { value.to_string() };
-                line.push_str(&format!(" {}={value}", vm.str(k)));
-                vm.reserve(line.len())?;
-            }
-            line.push('\n');
-            vm.charge_bytes(line.len())?;
+            let line = format!("{record}\n");
+            vm.reserve(line.len())?;
             vm.count_output(2, line.len())?;
             vm.write_counted(2, line.as_bytes())?;
         }

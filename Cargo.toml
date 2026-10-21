@@ -16,7 +16,7 @@ path = "src/lib.rs"
 
 [features]
 default = ["os"]
-os = ["dep:rustix", "dep:fs_at", "dep:same-file", "dep:winx", "tokio/net", "tokio/io-std", "tokio/macros", "jiff/tz-system"]
+os = ["dep:rustix", "dep:fs_at", "dep:same-file", "dep:winx", "dep:socket2", "tokio/net", "tokio/io-std", "tokio/macros", "jiff/tz-system"]
 tls = ["os", "dep:rustls", "dep:tokio-rustls", "dep:webpki-roots"]
 
 [dependencies]
@@ -25,6 +25,7 @@ regex-automata = { version = "0.4.16", default-features = false, features = ["st
 rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = { version = "0.26", optional = true, default-features = false, features = ["ring", "tls12"] }
 webpki-roots = { version = "1", optional = true }
+socket2 = { version = "0.6", optional = true }
 unicode-normalization = "0.1"
 sha2 = { version = "0.11", default-features = false }
 sha1 = { version = "0.11", default-features = false }

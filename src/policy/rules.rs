@@ -254,8 +254,9 @@ impl RulePolicy {
         self
     }
     /// Allows listening. Patterns: `ip:port`, `[v6]:port`, `ip`,
-    /// `localhost` (the loopback addresses), `*:port` or `*`; host `*`,
-    /// port `*` or port `0` matches any address or port.
+    /// `localhost` (the loopback addresses), `*:port` or `*`. Host `*` or
+    /// port `*` matches any address or port, and port `0` matches only a
+    /// request for an ephemeral port.
     ///
     /// # Panics
     ///

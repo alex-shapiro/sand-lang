@@ -225,13 +225,14 @@ fn endpoint(vm: &mut Vm, host: Value, port_arg: Value) -> Result<(String, u16), 
 
 /// Checks `NetListen` for the `ip` and `port` arguments of a listening
 /// function, binds a listener, and makes it a resource object with `open`.
+/// An IPv4-mapped IPv6 address binds its IPv4 address.
 pub(crate) fn listen_with<T: Resource>(
     vm: &mut Vm,
     ip: Value,
     port_arg: Value,
     open: impl FnOnce(Box<dyn network::Listener>) -> std::io::Result<T> + Send + 'static,
 ) -> NResult {
-    let Ok(ip) = vm.str(ip).parse::<IpAddr>() else {
+    let Ok(ip) = vm.str(ip).parse::<IpAddr>().map(|ip| ip.to_canonical()) else {
         let msg = format!("invalid IP address {:?}", super::truncate(vm.str(ip), 200));
         return Ok(vm.err_value("invalid", &msg));
     };

@@ -376,8 +376,9 @@ pub fn host_port(host: &str, port: u16) -> String {
 }
 
 /// A listen address pattern: `ip:port`, `[v6]:port`, `ip`, `localhost` (the
-/// loopback addresses), `*:port` or `*`. A missing part, `*`, or port `0`
-/// matches any address or port.
+/// loopback addresses), `*:port` or `*`. A missing part or `*` matches any
+/// address or port, and port `0` matches only a request for an ephemeral
+/// port. IPv4-mapped IPv6 addresses match as IPv4.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ListenPattern {
     host: ListenHost,
@@ -396,7 +397,7 @@ impl ListenPattern {
         let (host, port) = match text.strip_prefix('[') {
             Some(rest) => {
                 let (ip, port) = rest.split_once(']')?;
-                (ip.parse().ok().map(ListenHost::Ip)?, if port.is_empty() { None } else { Some(port.strip_prefix(':')?) })
+                (ListenHost::Ip(parse_ip(ip)?), if port.is_empty() { None } else { Some(port.strip_prefix(':')?) })
             }
             None => {
                 let (host, port) = match text.split_once(':') {
@@ -406,14 +407,15 @@ impl ListenPattern {
                 let host = match host {
                     "*" => ListenHost::Any,
                     _ if is_localhost(host) => ListenHost::Loopback,
-                    _ => ListenHost::Ip(host.parse().ok()?),
+                    _ => ListenHost::Ip(parse_ip(host)?),
                 };
                 (host, port)
             }
         };
         let port = match port {
             None | Some("*") => None,
-            Some(p) => Some(p.parse::<u16>().ok()?).filter(|&p| p != 0),
+            Some(p) if p.bytes().all(|b| b.is_ascii_digit()) => Some(p.parse().ok()?),
+            Some(_) => return None,
         };
         Some(ListenPattern { host, port })
     }
@@ -423,8 +425,8 @@ impl ListenPattern {
     pub(crate) fn matches(&self, addr: SocketAddr) -> Option<u32> {
         let host_ok = match self.host {
             ListenHost::Any => true,
-            ListenHost::Loopback => addr.ip().is_loopback(),
-            ListenHost::Ip(ip) => addr.ip() == ip,
+            ListenHost::Loopback => addr.ip().to_canonical().is_loopback(),
+            ListenHost::Ip(ip) => addr.ip().to_canonical() == ip,
         };
         let port_ok = self.port.is_none_or(|p| p == addr.port());
         (host_ok && port_ok).then_some(2 * (self.host != ListenHost::Any) as u32 + self.port.is_some() as u32)

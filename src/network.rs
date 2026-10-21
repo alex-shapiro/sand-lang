@@ -15,7 +15,9 @@ pub trait Network: Send + Sync {
     /// Connects to the first reachable address in `addrs`.
     fn connect<'a>(&'a self, addrs: &'a [SocketAddr]) -> NetworkFuture<'a, (Box<dyn Stream>, SocketAddr)>;
 
-    /// Binds a listener to `addr` (port `0`: an ephemeral port).
+    /// Binds a listener to exactly `addr` (port `0`: an ephemeral port). A
+    /// listener on an IPv6 address must not accept IPv4 connections, so that
+    /// the policy decision for `addr` covers all of its connections.
     fn listen(&self, addr: SocketAddr) -> NetworkFuture<'_, Box<dyn Listener>>;
 }
 
@@ -53,8 +55,25 @@ impl Network for OsNetwork {
     }
 
     fn listen(&self, addr: SocketAddr) -> NetworkFuture<'_, Box<dyn Listener>> {
-        Box::pin(async move { Ok(Box::new(tokio::net::TcpListener::bind(addr).await?) as Box<dyn Listener>) })
+        Box::pin(async move { Ok(Box::new(bind(addr)?) as Box<dyn Listener>) })
     }
+}
+
+/// Binds a TCP listener as `tokio::net::TcpListener::bind` does, with
+/// `IPV6_V6ONLY` set on IPv6 sockets.
+fn bind(addr: SocketAddr) -> io::Result<tokio::net::TcpListener> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
+    if addr.is_ipv6() {
+        socket.set_only_v6(true)?;
+    }
+    // On Windows, `SO_REUSEADDR` lets other sockets take over the port.
+    #[cfg(not(windows))]
+    socket.set_reuse_address(true)?;
+    socket.bind(&addr.into())?;
+    socket.listen(128)?;
+    socket.set_nonblocking(true)?;
+    tokio::net::TcpListener::from_std(socket.into())
 }
 
 impl Listener for tokio::net::TcpListener {

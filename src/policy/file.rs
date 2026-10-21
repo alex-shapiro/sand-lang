@@ -12,7 +12,7 @@
 //! limit memory 64M
 //! ```
 
-use super::net::{ListenPattern, NetPattern, UrlPattern, url_segments};
+use super::net::{ListenPattern, NetPattern, UrlPattern, host_port, url_segments};
 use super::path::{Seg, Tok};
 use super::rules::{Access, NamePattern, Origin, PathPattern, Rule, RuleKind};
 use super::{Capability, Decision, Policy, RulePolicy};
@@ -579,8 +579,7 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
         Capability::FsWrite(p) => format!("write {}", path(p)?),
         Capability::Import(p) => format!("import {}", path(p)?),
         Capability::Net { host, port } => {
-            let host = host.trim_start_matches('[').trim_end_matches(']');
-            let pattern = if host.contains(':') { format!("[{host}]:{port}") } else { format!("{host}:{port}") };
+            let pattern = host_port(host.trim_start_matches('[').trim_end_matches(']'), *port);
             NetPattern::parse(&pattern)?;
             format!("net {pattern}")
         }
@@ -919,6 +918,7 @@ mod tests {
             Capability::Stdin,
             Capability::TimeZone,
             Capability::Custom { name: "db".into(), detail: "drop table".into() },
+            Capability::NetListen("[::1]:0".parse().unwrap()),
         ];
         for cap in &caps {
             for allow in [true, false] {
@@ -935,6 +935,9 @@ mod tests {
         assert_eq!(rule_for(&caps[8], false).unwrap(), "deny http POST http://[::1]:8080");
         assert_eq!(rule_for(&Capability::Stdout, true), None);
         assert_eq!(rule_for(&Capability::Stdout, false).as_deref(), Some("deny stdout"));
+        // The rule for an ephemeral port covers no other port.
+        let p = parse(&format!("default prompt\n{}", rule_for(caps.last().unwrap(), true).unwrap()));
+        assert_eq!(decide(&p, Capability::NetListen("[::1]:22".parse().unwrap())), Prompt);
     }
 
     #[test]

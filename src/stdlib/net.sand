@@ -15,6 +15,7 @@ import io
 
 /// Binds a TCP listener to `port` on the IP address `ip` (such as
 /// `"127.0.0.1"` or `"::"`). Port `0` selects an available ephemeral port.
+/// A listener on an IPv6 address accepts only IPv6 connections.
 pub native fn listen(ip: str, port: int) -> Result<Listener>
 
 /// Opens a TCP connection to `port` on `host` (a host name or an IP

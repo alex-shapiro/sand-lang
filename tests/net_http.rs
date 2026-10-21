@@ -412,6 +412,17 @@ for text in ["example.com:80", "127.0.0.1:0", "[::1]:8080", "::1:80", "[::1]", "
 }
 
 #[test]
+fn listeners_bind_exactly_the_checked_address() {
+    let src = r#"
+import net
+let v6 = net.listen("::", 0)?
+print(net.connect("127.0.0.1", v6.addr().port(), timeout: 5s).unwrap_err().kind)
+print(net.listen("::ffff:127.0.0.1", 0)?.addr().ip())
+"#;
+    assert_eq!(run_net(src), "io\n127.0.0.1\n");
+}
+
+#[test]
 fn net_permissions() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
