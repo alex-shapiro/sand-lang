@@ -1849,7 +1849,7 @@ upload.finish() -> Result<Stream>
 methods: `text() -> Result<str>`, `json() -> Result<json.Json>`, `ok() -> bool`
 (200..=299), `header(name: str) -> str?` (case-insensitive; the first value),
 `header_values(name: str) -> [str]`. HTTP/1.1 over TCP; `https` uses TLS with
-the `tls` feature (as in `sand`). Up to 10 redirects (301, 302, 303, 307, 308)
+the `tls` feature (default). Up to 10 redirects (301, 302, 303, 307, 308)
 are followed. Bodies may be delimited by `Content-Length`, chunked encoding or
 connection close; one larger than `max_http_body` fails with kind `"limit"`.
 Non-2xx statuses are **not** errors. At every hop, `timeout` bounds connecting
@@ -2804,8 +2804,9 @@ The crate's features choose what an engine can reach at all:
   exist, the environment is empty unless given, standard input is what the
   host gives (`Config::stdin_bytes`), scripts see a memory file system, and
   the engine builds for `wasm32-unknown-unknown` (§16.2).
-- `tls` (implies `os`): TLS for `https` and `net.connect_tls` (rustls with
-  ring). The `sand` command (the `sand-cli` package) enables it.
+- `tls` (default; implies `os`): TLS for `https` and `net.connect_tls`
+  (rustls with ring, which needs a C compiler for the target). Build with
+  `default-features = false, features = ["os"]` to leave it out.
 
 `Config::memory_fs(fs)` makes a `MemFs`, an in-memory file system, the file
 system of the engine's scripts (the `fs` module, script imports and the

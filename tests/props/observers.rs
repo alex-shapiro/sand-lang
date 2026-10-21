@@ -1,7 +1,7 @@
 //! Verifies that methods, loops, iterators, and comprehensions over ranges,
 //! lists, strings, maps, and sets agree with reference models.
 
-use super::{Expect, check_prints, config, int, int_lit, list_str, opt_str, str_lit};
+use super::{Expect, check_prints, int, int_lit, list_str, opt_str, str_lit};
 use proptest::prelude::*;
 
 const OVERFLOW: &str = "integer overflow";
@@ -331,8 +331,6 @@ fn map_observations(entries: &[(i64, i64)]) -> (String, Vec<(String, Expect)>) {
 }
 
 proptest! {
-    #![proptest_config(config(48))]
-
     #[test]
     fn narrow_ranges_agree_with_the_model(r in narrow_range()) {
         let mut prints = range_basics(r);

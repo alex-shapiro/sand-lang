@@ -10,11 +10,6 @@ use proptest::test_runner::TestCaseError;
 use sandlang::{Config, Engine, Error, MemorySink, Policy};
 use std::sync::LazyLock;
 
-fn config(cases: u32) -> ProptestConfig {
-    let cases = std::env::var("PROPTEST_CASES").ok().and_then(|s| s.parse().ok()).unwrap_or(cases);
-    ProptestConfig::with_cases(cases)
-}
-
 static BOUNDARY: LazyLock<Vec<i64>> = LazyLock::new(|| {
     let mut v = vec![0, 1, -1, i64::MIN, i64::MIN + 1, i64::MAX, i64::MAX - 1];
     let powers = (1..63).map(|n| 1i64 << n).chain((1..19).map(|n| 10i64.pow(n)));
