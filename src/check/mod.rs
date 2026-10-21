@@ -361,8 +361,7 @@ impl CheckedProgram {
     }
 }
 
-/// Registered native functions, value types, and enum types, keyed by
-/// qualified name.
+/// Registered native functions, value types, and enum types, keyed by qualified name.
 #[derive(Clone, Debug, Default)]
 pub struct NativeIds {
     pub fns: HashMap<Cow<'static, str>, u32>,

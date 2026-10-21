@@ -200,7 +200,7 @@ Ok("opened front")
 Err(Error { kind: "permission_denied", message: "permission denied: door back" })
 ```
 
-`NativeModule::source` adds Sand declarations (structs, enums, helper functions, and `native fn` declarations) to the module. A `native fn` declaration in the module source overrides the derived signature for a registered function of the same name so that you can specify parameter names and default values; its parameter and return types must match the derived signature.
+`NativeModule::source` adds Sand declarations to the module. A `native fn` declaration in the module source overrides the derived signature for a registered function of the same name, letting you specify parameter names and default values. Parameter and return types must match the derived signature.
 
 ## Interactive sessions
 

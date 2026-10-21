@@ -6,14 +6,13 @@ use quote::quote;
 use syn::{Attribute, Data, DeriveInput, Error, Expr, ExprLit, Fields, Lit, LitStr, Meta, parse_macro_input};
 
 /// Derives `EnumType`, `SandType`, `FromValue`, `IntoValue`, and `ListElem` for
-/// a unit-only Rust enum so that host functions can accept and return it.
+/// a unit enum so that host functions can accept and return it.
 ///
 /// Required attribute:
 /// - `#[sand(module = "<module>")]` sets the Sand module that owns the enum.
 ///
 /// Optional attribute:
-/// - `#[sand(name = "<Name>")]` overrides the Sand enum name (defaults to the
-///   Rust identifier).
+/// - `#[sand(name = "<Name>")]` overrides the Sand enum name.
 #[proc_macro_derive(SandEnum, attributes(sand))]
 pub fn derive_sand_enum(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);

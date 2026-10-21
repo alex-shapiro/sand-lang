@@ -2715,14 +2715,14 @@ immediately.
 A completed run returns `Outcome { exit_code: i32 }`, and a failed operation
 returns an `Error`:
 
-| Variant                             | Meaning                                                              |
-| ----------------------------------- | -------------------------------------------------------------------- |
-| `Error::Compile(diagnostics)`       | Syntax or static type errors occurred during compilation (§18).      |
-| `Error::Runtime { message, trace }` | Execution failed with an uncaught runtime error (§10.3).             |
-| `Error::Limit(kind)`                | Execution or compilation exceeded a configured resource limit (§15). |
-| `Error::Interrupted`                | The host cancelled execution through an `InterruptHandle`.           |
-| `Error::Io(message)`                | The entry script file could not be read.                             |
-| `Error::Internal { message, trace }`| An internal invariant failed or a host callback panicked (§10.3).    |
+| Variant                              | Meaning                                                              |
+| ------------------------------------ | -------------------------------------------------------------------- |
+| `Error::Compile(diagnostics)`        | Syntax or static type errors occurred during compilation (§18).      |
+| `Error::Runtime { message, trace }`  | Execution failed with an uncaught runtime error (§10.3).             |
+| `Error::Limit(kind)`                 | Execution or compilation exceeded a configured resource limit (§15). |
+| `Error::Interrupted`                 | The host cancelled execution through an `InterruptHandle`.           |
+| `Error::Io(message)`                 | The entry script file could not be read.                             |
+| `Error::Internal { message, trace }` | An internal invariant failed or a host callback panicked (§10.3).    |
 
 If `sandlang` is compiled with `panic = "unwind"` (the default), the engine
 catches Rust panics inside library native functions, host callbacks, I/O
@@ -2732,64 +2732,67 @@ so that panics do not unwind into the host.
 ### 16.2 Host environment and providers
 
 `Config` allows the host to virtualize every external input, output, and source
-of nondeterminism—streams, logging, environment variables, arguments,
-randomness, clocks, time zones, file systems (§16.4), and networking—so that
-script execution can be made completely deterministic. By default,
-`Config::new()` denies all capabilities except `Stdout`, `Stderr`, and imports
-within the module root, writes output to the process's standard streams, and
-provides an empty standard input.
+of nondeterminism—streams, logging, process metadata, randomness, time, file
+systems (§16.4), and networking—so that script execution can be made completely
+deterministic. By default, `Config::new()` denies all capabilities except
+`Stdout`, `Stderr`, and imports within the module root, writes output to the
+process's standard streams, and provides an empty standard input.
 
-Standard streams, logging, arguments, environment variables, and random number
-generation can all be supplied by the host. `Config::stdout` and
-`Config::stderr` route script output to an `OutputSink`, while
-`Config::stdin_bytes`, `Config::inherit_stdin` (feature `os`), and
-`Config::stdin_feed` supply standard input. With `StdinFeed`, scripts read
-chunks sent via `StdinFeed::send` (`StdinFeed::end` terminates a single read),
-and `StdinFeed::wanted` is resolved if a script is waiting for input and all
-other tasks are blocked. `Config::log_sink` routes `log` records (§13.8) to a
-host `LogSink` as `LogRecord { level, message, fields, location }` on the
-polling thread instead of writing to standard error (`LogSink::enabled` filters
-records by level before construction; any `Fn(&LogRecord) + Send + Sync`
-implements `LogSink` for all levels, and `Display` formats `LogRecord` in the
-default standard error format). `Config::log_level` sets the initial minimum
-script log level (default `LogLevel::Info`), or disables script logging if set
-to `None`. `Config::args` and `Config::env` set the command-line arguments and
-environment variables visible to `env` (§13.6), and `Config::seed` seeds the
-engine's pseudorandom number generator used by `random` (§13.11) and `uuid`
-(§13.18).
+The host can capture standard output and standard error or feed standard input
+into a running script. `Config::stdout` and `Config::stderr` redirect script
+output to an `OutputSink`, while `Config::stdin_bytes`, `Config::inherit_stdin`
+(feature `os`), and `Config::stdin_feed` configure standard input. With
+`StdinFeed`, scripts read chunks pushed via `StdinFeed::send` (`StdinFeed::end`
+terminates a single read), and `StdinFeed::wanted` is resolved if a script is
+waiting for input and all other tasks are blocked.
 
-Host providers can also replace the operating system's clock, time zone, and
-network stack. `Config::clock` supplies a `platform::Clock` used for wall time,
-monotonic time, `MemFs` modification timestamps, UUIDv7 timestamps, sleep
-timers, execution deadlines, and network timeouts; the scheduler reports
-consumed fuel through `Clock::work` and yields execution through
-`Clock::yield_now`. `Config::time_zone` sets the `time::TimeZone` returned by
-`time.local_zone()` if the policy allows `Capability::TimeZone` (`TimeZone::get`
-looks up a zone by IANA name or offset, and `TimeZone::system` reads the host
-OS zone under feature `os`). `Config::network` supplies a `network::Network`
-for host resolution, outgoing TCP streams, and TCP listeners in `net` and
-`http`. The engine checks the network policy before connecting or listening and
-negotiates TLS over the returned stream; `Network::listen` must bind only the
-requested address and must not accept IPv4 connections on an IPv6 listener.
+The host can intercept and filter structured log records (§13.8) instead of
+writing them to standard error. `Config::log_sink` routes records to a
+`LogSink` as `LogRecord { level, message, fields, location }` on the polling
+thread, using `LogSink::enabled` to filter records by level before allocation.
+`Config::log_level` sets the initial minimum script log level (default
+`LogLevel::Info`), or disables script logging if set to `None`.
+
+Command-line arguments, environment variables, and random number generation can
+be fixed per engine. `Config::args` and `Config::env` replace the process
+arguments and environment variables exposed by `env` (§13.6), and
+`Config::seed` seeds the pseudorandom number generator used by `random`
+(§13.11) and `uuid` (§13.18).
+
+Custom clock and time zone providers decouple script execution from the system
+clock. `Config::clock` supplies a `platform::Clock` that drives wall time,
+monotonic time, `MemFs` timestamps, UUIDv7 timestamps, sleep timers, execution
+deadlines, and network timeouts, while receiving fuel consumption reports via
+`Clock::work` and scheduler yields via `Clock::yield_now`. `Config::time_zone`
+sets the `time::TimeZone` returned by `time.local_zone()` if the policy allows
+`Capability::TimeZone`.
+
+A custom `network::Network` provider can intercept all DNS resolution, outgoing
+TCP streams, and TCP listeners in `net` and `http`. If `Config::network` is
+set, the engine still checks the network policy before connecting or listening
+and negotiates TLS over the returned stream; `Network::listen` must bind only
+the requested address and must not accept IPv4 connections on an IPv6 listener.
 `Config::tls_root_certificates` adds DER-encoded root certificates to the
-bundled Web PKI roots (calls accumulate, and an invalid certificate causes TLS
-handshakes to fail with error kind `"io"`).
+bundled Web PKI roots (an invalid certificate causes TLS handshakes to fail
+with error kind `"io"`).
 
-`Config::module_root`, `Config::cwd`, and `Config::library` configure file paths
-and module imports (§3.2); registered standard and host modules
+Module search paths and capability policies are configured on `Config` before
+constructing an `Engine`. `Config::module_root`, `Config::cwd`, and
+`Config::library` set the directories used for relative file paths and `import`
+resolution (§3.2), where registered standard and host modules
 (`Engine::module_names`) take precedence over library scripts. `Config::policy`
-and `Config::prompter` configure capability checks (§14), and the
-`sandlang::policy` module provides `PolicyFile`, `RulePolicy`, `format_policy`,
-`lint_policy`, `rule_for`, and path and address normalization functions for
-hosts implementing custom policies or native functions.
+and `Config::prompter` set the active `Policy` and interactive `Prompter`
+(§14).
 
 ### 16.3 Native modules
 
 `NativeModule` exposes Rust functions and types to Sand scripts as an
-importable module registered with `Config::module`. `NativeModule::function`
-registers a synchronous closure whose parameter and return types implement
-`FromValue` and `IntoValue`, `NativeModule::async_function` registers a closure
-returning a `Future` (suspending only the calling Sand task while pending), and
+importable module registered with `Config::module` (using a standard module
+name or a prelude type name such as `str`, or registering a module, function,
+or type twice, panics). `NativeModule::function` registers a synchronous
+closure whose parameter and return types implement `FromValue` and `IntoValue`,
+`NativeModule::async_function` registers a closure returning a `Future`
+(suspending only the calling Sand task while pending), and
 `NativeModule::guarded_function(name, guard, f)` checks the `Capability`
 computed by `guard` from references to the arguments before calling `f`,
 returning `Result<R, Error>` (`"permission_denied"` if denied). Argument and
@@ -2827,22 +2830,23 @@ Compilation fails if a registered function lacks a declaration, if an explicit
 Rust function, or if a public function signature references a private type of
 the module.
 
-Host functions can accept and return custom value types, custom enum types, and
-standard library types (`sandlang::jiff::Timestamp`,
-`sandlang::jiff::civil::{Date, Time, DateTime}`, `sandlang::time::*`, and
-`LogLevel`). `NativeModule::value_type::<T>()` registers `T: ValueType` (§5.4)
-and adds `pub native type NAME` unless the module source declares `NAME` as a
-public native type. `T` must implement `Clone + Eq + Hash + Display`, equal
-values must produce identical `Display` output, and `T::parse` must parse that
-output back into an equal value (`ValueType::ORDER` enables `Ord`, and
+Host functions can accept and return custom value types (`ValueType`, §5.4) as
+well as standard library value types (`sandlang::jiff::Timestamp`,
+`sandlang::jiff::civil::{Date, Time, DateTime}`, and `sandlang::time::*`).
+`NativeModule::value_type::<T>()` registers `T: ValueType` and adds
+`pub native type NAME` unless the module source declares `NAME` as a public
+native type. `T` must implement `Clone + Eq + Hash + Display`, equal values
+must produce identical `Display` output, and `T::parse` must parse that output
+back into an equal value (`ValueType::ORDER` enables `Ord`, and
 `ValueType::PACKING` stores values inline in 16 bytes on the heap).
-`#[derive(sandlang::SandEnum)]` with `#[sand(module = "...")]` (and optional
-`#[sand(name = "...")]`) implements `EnumType` for a unit-only Rust enum.
-`NativeModule::enum_type::<T>()` registers `T` and generates its `pub enum`
-declaration from the Rust variants and doc comments; compilation fails if the
-module source also declares `T::NAME`. Using a standard module name or a
-prelude type name (such as `str`) for a host module, registering a module
-twice, or registering a function or type twice panics.
+
+Host functions can also accept and return unit-only Rust enums (`EnumType`) and
+standard library enums (`sandlang::time::{Unit, RoundingMode, Disambiguation}`
+and `LogLevel`). `#[derive(sandlang::SandEnum)]` with `#[sand(module = "...")]`
+(and optional `#[sand(name = "...")]`) implements `EnumType` for a unit-only
+Rust enum. `NativeModule::enum_type::<T>()` registers `T` and generates its
+`pub enum` declaration from the Rust variants and doc comments; compilation
+fails if the module source also declares `T::NAME`.
 
 ### 16.4 Operating-system access and file systems
 

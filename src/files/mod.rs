@@ -76,16 +76,16 @@ pub(crate) fn is_unchecked_symlink(e: &io::Error) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, crate::SandEnum)]
 #[sand(module = "fs", name = "Mode")]
 pub(crate) enum OpenMode {
-    /// Opens an existing file for reading (requires `FsRead`).
+    /// Opens an existing file for reading. Requires `FsRead`.
     Read,
-    /// Creates or truncates a file for writing from the start (requires `FsWrite`).
+    /// Creates or truncates a file for writing from the start. Requires `FsWrite`.
     Write,
-    /// Opens or creates a file for appending at the end (requires `FsWrite`).
+    /// Opens or creates a file for appending at the end. Requires `FsWrite`.
     Append,
     /// Creates a new file for writing, or fails with kind `"already_exists"` if
-    /// the path exists (requires `FsWrite`).
+    /// the path exists. Requires `FsWrite`.
     CreateNew,
-    /// Opens an existing file for reading and writing in place (requires `FsRead` and `FsWrite`).
+    /// Opens an existing file for reading and writing in place. Requires `FsRead` and `FsWrite`.
     ReadWrite,
 }
 
