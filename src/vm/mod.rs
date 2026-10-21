@@ -57,6 +57,13 @@ const _: () = assert!(std::mem::size_of::<Ctl>() == std::mem::size_of::<usize>()
 const _: () = assert!(std::mem::size_of::<Result<Value, Ctl>>() == 16);
 const _: () = assert!(std::mem::size_of::<Result<Option<Value>, Ctl>>() == 16);
 
+/// Category of asynchronous wait for a suspended task.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaitKind {
+    Io,
+    User,
+}
+
 /// What a [`Ctl`] is.
 pub enum CtlKind {
     /// The script failed with an error, `kind: message`.
@@ -68,7 +75,7 @@ pub enum CtlKind {
     /// Ask the user; the call is retried afterwards.
     NeedPermission(Capability),
     /// Suspend the task until the future completes.
-    Async(BoxFuture),
+    Async(BoxFuture, WaitKind),
     /// The task waits for the scheduler event that [`Vm::block`]
     /// registered; the call returns what wakes it.
     Blocked,
@@ -114,7 +121,14 @@ impl Ctl {
 
     /// Suspend the task until `fut` completes.
     pub fn suspend(fut: BoxFuture) -> Ctl {
-        Ctl(Box::new(CtlKind::Async(fut)))
+        Ctl(Box::new(CtlKind::Async(fut, WaitKind::Io)))
+    }
+
+    /// Suspends the task until `fut` completes in response to user input.
+    /// The engine pauses the wall-time limit while all runnable tasks are idle
+    /// and a task is waiting for the user.
+    pub fn suspend_for_user(fut: BoxFuture) -> Ctl {
+        Ctl(Box::new(CtlKind::Async(fut, WaitKind::User)))
     }
 
     /// Ask the user for `cap`.
@@ -159,7 +173,7 @@ impl std::fmt::Debug for CtlKind {
             CtlKind::Limit(k) => write!(f, "Limit({k:?})"),
             CtlKind::Exit(c) => write!(f, "Exit({c})"),
             CtlKind::NeedPermission(c) => write!(f, "NeedPermission({c})"),
-            CtlKind::Async(_) => write!(f, "Async"),
+            CtlKind::Async(_, wait) => write!(f, "Async({wait:?})"),
             CtlKind::Blocked => write!(f, "Blocked"),
             CtlKind::Yield => write!(f, "Yield"),
             CtlKind::Interrupted => write!(f, "Interrupted"),

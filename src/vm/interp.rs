@@ -59,7 +59,7 @@ pub enum Exit {
     Preempt,
     /// Waiting on a scheduler event (already registered).
     Blocked,
-    Async(BoxFuture),
+    Async(BoxFuture, WaitKind),
     Prompt(Capability),
     /// `exit(code)` or a top-level `?` failure.
     Terminate(i32),
@@ -1749,9 +1749,9 @@ impl Vm {
                 fiber.frames.last_mut().unwrap().ip = (ip - 1) as u32;
                 Ok(Some(Exit::Prompt(cap)))
             }
-            CtlKind::Async(fut) => {
+            CtlKind::Async(fut, wait) => {
                 fiber.result_slot = slot;
-                Ok(Some(Exit::Async(fut)))
+                Ok(Some(Exit::Async(fut, wait)))
             }
             CtlKind::Yield | CtlKind::Blocked => unreachable!("handled above"),
             CtlKind::Collect => Err(self.internal_trap(fiber, ip, "a native asked for a collection twice".into())),

@@ -12,6 +12,14 @@ Follow-up work, roughly in priority order.
       parent that is emptied and turned into a junction during the call is
       still possible; it is detected after the rename, not prevented.
 
+- [ ] **User waits pause the wall-time limit for all tasks.** If any task is
+      waiting for the user (`Ctl::suspend_for_user` or a standard input read),
+      the engine pauses `max_wall_time` during idle periods, including time
+      that other tasks spend waiting on timers or HTTP. This allows a script to
+      run a background timer while waiting for input, but a script with a
+      pending read can also sleep past `max_wall_time` (`max_cpu_time` still
+      limits computation). Consider a separate limit for idle time.
+
 ### Test coverage
 
 - [ ] Run the CI workflow on Windows and Linux, where nothing has run

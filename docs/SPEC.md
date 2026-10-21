@@ -2526,7 +2526,7 @@ Configurable per engine:
 | `max_memory`         | 512 MiB    | run fails: `memory limit exceeded` (I/O whose buffers do not fit fails with kind `"limit"`)                                                                    |
 | `max_instructions`   | unlimited  | run fails: `instruction limit exceeded` (counted in fuel units, §15.2)                                                                                         |
 | `max_cpu_time`       | unlimited  | run fails: `cpu time limit exceeded` (the engine thread's CPU time executing, excluding waits and prompts; without a thread CPU clock, elapsed time executing) |
-| `max_wall_time`      | unlimited  | run fails: `time limit exceeded` (covers compiling and running, from the start of compilation, excluding waits for prompt answers)                             |
+| `max_wall_time`      | unlimited  | run fails: `time limit exceeded` (elapsed time for compilation and execution, excluding waits for permission prompts and user input, §16)                     |
 | `max_call_depth`     | 10,000     | fails: `limit: stack overflow`                                                                                                                                 |
 | `max_tasks`          | 10,000     | `spawn` fails: `limit: task limit exceeded`                                                                                                                    |
 | `max_open_resources` | 1,024      | opening files, connect/listen/accept and HTTP requests fail with kind `"limit"` (after a collection, §10.8; pending operations' sockets count, §13.10)         |
@@ -2680,9 +2680,17 @@ let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 
 - `run_source(name, source)`, `run_file(path)`, `check_source`, `run_tests`,
   `lint_source`, `lint_file` (lint warnings, §17.2).
 - Captured streams: `Config::stdout(Box<dyn OutputSink>)`, `stderr`,
-  `stdin_bytes`. With `Config::stdin_feed(&StdinFeed)`, scripts read what
-  the host `send`s (`end()` ends one read); `wanted()` is resolved if a script
-  is waiting for input and has nothing else to run.
+  `stdin_bytes`. With `Config::stdin_feed(&StdinFeed)`, the host supplies
+  standard input dynamically. `StdinFeed::send` appends input to the stream,
+  `end` signals EOF to the current read, and `wanted` is resolved if a read is
+  waiting for input and all other tasks are idle. `StdinFeed::awaited` returns
+  the `ReadId` of an active read that is waiting for input (even if other tasks
+  are running), `awaited_changed` waits for that state to change, and `answer`
+  delivers input to a specific `ReadId` (discarding any bytes left unread when
+  that read finishes).
+- User waits: the engine pauses `max_wall_time` while all runnable tasks are
+  idle and at least one task is waiting on a standard input read or a native
+  function suspended with `Ctl::suspend_for_user`.
 - `Config::memory_fs(MemFs)` gives scripts a memory file system (§16.1).
 - `Config::library(dir)` sets the directory of library scripts for
   `import <name>` (§3.2). `Engine::module_names()` returns the registered

@@ -56,6 +56,7 @@ struct IoOp {
     fid: u32,
     wgen: u64,
     fut: BoxFuture,
+    wait: WaitKind,
 }
 
 /// The pending I/O operations of a VM, in slots (an operation's id is its
@@ -66,6 +67,7 @@ pub struct IoTable {
     wakers: Vec<Waker>,
     free: Vec<u32>,
     pending: usize,
+    user_waits: usize,
     pub shared: Arc<IoShared>,
 }
 
@@ -74,9 +76,9 @@ impl IoTable {
         IoTable { shared, ..IoTable::default() }
     }
 
-    /// Adds the operation `fut` of task `fid` (waiting as `wgen`), polling
-    /// it once: returns its id, or its result if it is done already.
-    pub fn add(&mut self, fid: u32, wgen: u64, mut fut: BoxFuture) -> Result<u64, Finisher> {
+    /// Polls `fut` once and registers it for task `fid` if still pending.
+    /// Returns the slot ID, or the finisher if ready immediately.
+    pub fn add(&mut self, fid: u32, wgen: u64, mut fut: BoxFuture, wait: WaitKind) -> Result<u64, Finisher> {
         let slot = match self.free.pop() {
             Some(s) => s,
             None => {
@@ -90,22 +92,26 @@ impl IoTable {
             self.free.push(slot);
             return Err(fin);
         }
-        self.ops[slot as usize] = Some(IoOp { fid, wgen, fut });
+        self.ops[slot as usize] = Some(IoOp { fid, wgen, fut, wait });
         self.pending += 1;
+        self.user_waits += usize::from(wait == WaitKind::User);
         Ok(u64::from(slot))
     }
 
     pub fn cancel(&mut self, id: u64) {
-        if let Some(op) = self.ops.get_mut(id as usize)
-            && op.take().is_some()
-        {
+        if let Some(op) = self.ops.get_mut(id as usize).and_then(Option::take) {
             self.free.push(id as u32);
-            self.pending -= 1;
+            self.release(&op);
         }
     }
 
     pub fn is_empty(&self) -> bool {
         self.pending == 0
+    }
+
+    /// Returns `true` if any pending operation is waiting for the user.
+    pub fn awaits_user(&self) -> bool {
+        self.user_waits > 0
     }
 
     /// Cancels every pending operation.
@@ -116,6 +122,12 @@ impl IoTable {
             }
         }
         self.pending = 0;
+        self.user_waits = 0;
+    }
+
+    fn release(&mut self, op: &IoOp) {
+        self.pending -= 1;
+        self.user_waits -= usize::from(op.wait == WaitKind::User);
     }
 
     /// Polls the operations that were woken. Returns those completed.
@@ -128,10 +140,10 @@ impl IoTable {
         for slot in slots {
             let Some(Some(op)) = self.ops.get_mut(slot as usize) else { continue };
             if let Poll::Ready(fin) = op.fut.as_mut().poll(&mut Context::from_waker(&self.wakers[slot as usize])) {
-                let IoOp { fid, wgen, .. } = self.ops[slot as usize].take().expect("polled");
+                let op = self.ops[slot as usize].take().expect("polled");
                 self.free.push(slot);
-                self.pending -= 1;
-                done.push((fid, wgen, fin));
+                self.release(&op);
+                done.push((op.fid, op.wgen, fin));
             }
         }
         done
@@ -419,11 +431,11 @@ impl Vm {
                         f.state = FiberState::Waiting;
                         self.fibers[fid as usize] = Some(f);
                     }
-                    Exit::Async(fut) => {
+                    Exit::Async(fut, wait) => {
                         let g = self.next_gen();
                         f.wgen = g;
                         f.state = FiberState::Waiting;
-                        let added = self.io.add(fid, g, fut);
+                        let added = self.io.add(fid, g, fut, wait);
                         f.io = added.as_ref().ok().copied();
                         self.fibers[fid as usize] = Some(f);
                         if let Err(fin) = added {
@@ -522,7 +534,8 @@ impl Vm {
             }
             timer.read();
             let blocked = self.host.stdin_feed.as_ref().map(|f| f.blocked());
-            let mut sleep = self.deadline.map(|d| timer.sleep(d.saturating_duration_since(timer.now())));
+            let pause_start = self.io.awaits_user().then_some(timer.now);
+            let mut sleep = self.deadline.filter(|_| pause_start.is_none()).map(|d| timer.sleep(d.saturating_duration_since(timer.now())));
             let interrupt = self.host.interrupt.clone();
             let done = std::future::poll_fn(|cx| {
                 let done = self.io.poll_ready(Some(cx.waker()));
@@ -541,6 +554,9 @@ impl Vm {
             })
             .await;
             drop(blocked);
+            if let (Some(start), Some(deadline)) = (pause_start, &mut self.deadline) {
+                *deadline += timer.now().saturating_duration_since(start);
+            }
             timer.resume();
             timer.last_yield = timer.now;
             self.apply_completions(done, &timer)?;

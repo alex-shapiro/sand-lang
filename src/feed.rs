@@ -1,39 +1,56 @@
-//! Standard input that the host passes to scripts ([`StdinFeed`]).
+//! Host-supplied standard input stream ([`StdinFeed`]).
 
 use std::collections::VecDeque;
 use std::io;
+use std::num::NonZeroU64;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll, Waker};
 use tokio::io::{AsyncBufRead, AsyncRead, ReadBuf};
 use tokio::sync::Notify;
 
-/// Standard input that the host sends to scripts
-/// ([`crate::Config::stdin_feed`]). A front end that reads the process's
-/// standard input (such as a REPL) waits for [`StdinFeed::wanted`], reads
-/// what the user types, and passes it on with [`StdinFeed::send`]. Clones
-/// share the same input; data is kept until scripts read it.
+/// A channel that supplies standard input from the host to scripts
+/// ([`crate::Config::stdin_feed`]). A terminal host can await
+/// [`StdinFeed::wanted`] and forward input with [`StdinFeed::send`]. A GUI
+/// host can monitor [`StdinFeed::awaited_changed`] and reply to individual
+/// reads with [`StdinFeed::answer`]. Clones share the same underlying stream.
 #[derive(Clone, Default)]
 pub struct StdinFeed {
     shared: Arc<Shared>,
 }
 
+/// Unique identifier for a single standard input read operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ReadId(NonZeroU64);
+
 #[derive(Default)]
 pub(crate) struct Shared {
     state: Mutex<State>,
-    /// Woken whenever [`StdinFeed::is_wanted`] may have changed.
     changed: Notify,
 }
 
 #[derive(Default)]
 struct State {
-    /// Data sent and not yet read; `None` marks an end of input.
-    chunks: VecDeque<Option<Vec<u8>>>,
-    /// Whether a read waits for data.
+    chunks: VecDeque<Chunk>,
+    active_read: Option<ReadId>,
+    read_count: u64,
     waiting: bool,
-    /// Whether the engine has nothing to run until some operation completes.
     blocked: bool,
     reader: Option<Waker>,
+}
+
+struct Chunk {
+    /// Target read, or `None` for any read.
+    target: Option<ReadId>,
+    /// Input bytes, or `None` for EOF.
+    data: Option<Vec<u8>>,
+}
+
+impl ReadId {
+    /// Returns the 1-based sequential number of this read.
+    pub fn get(self) -> u64 {
+        self.0.get()
+    }
 }
 
 impl StdinFeed {
@@ -41,34 +58,71 @@ impl StdinFeed {
         StdinFeed::default()
     }
 
-    /// Passes `data` to the scripts' reads of standard input.
+    /// Appends `data` to the input stream. Buffered bytes remain queued across
+    /// reads until consumed.
     pub fn send(&self, data: impl Into<Vec<u8>>) {
         let data = data.into();
         if !data.is_empty() {
-            self.shared.push(Some(data));
+            self.shared.push(Chunk { target: None, data: Some(data) });
         }
     }
 
-    /// Ends the input at this point: the read that reaches it sees the end
-    /// of input (`read_line` returns `None`); later reads wait for more data.
+    /// Enqueues an end-of-input marker for the next read that reaches it.
+    /// Subsequent reads wait for new input.
     pub fn end(&self) {
-        self.shared.push(None);
+        self.shared.push(Chunk { target: None, data: None });
     }
 
-    /// Whether a script waits for input that has not been sent, while its
-    /// engine has nothing else to run.
+    /// Sends `data` exclusively to `read_id`, or returns `false` if that read
+    /// is no longer active. Any bytes from `data` that remain unread when the
+    /// read completes are discarded.
+    pub fn answer(&self, read_id: ReadId, data: impl Into<Vec<u8>>) -> bool {
+        let data = data.into();
+        let mut state = self.shared.lock();
+        if state.active_read != Some(read_id) {
+            return false;
+        }
+        if !data.is_empty() {
+            state.chunks.push_back(Chunk { target: Some(read_id), data: Some(data) });
+            self.shared.notify(state);
+        }
+        true
+    }
+
+    /// Returns `true` if a read is waiting for input and all other engine
+    /// tasks are idle.
     pub fn is_wanted(&self) -> bool {
         self.shared.lock().wanted()
     }
 
-    /// Waits until [`StdinFeed::is_wanted`] is true.
+    /// Waits until [`StdinFeed::is_wanted`] becomes `true`.
     pub async fn wanted(&self) {
+        self.wait_until(|state| state.wanted().then_some(())).await;
+    }
+
+    /// Returns the [`ReadId`] of the active read if it is waiting for input,
+    /// even if other tasks are running.
+    pub fn awaited(&self) -> Option<ReadId> {
+        self.shared.lock().awaited()
+    }
+
+    /// Waits until [`StdinFeed::awaited`] differs from `from` and returns the
+    /// new value.
+    pub async fn awaited_changed(&self, from: Option<ReadId>) -> Option<ReadId> {
+        self.wait_until(|state| {
+            let awaited = state.awaited();
+            (awaited != from).then_some(awaited)
+        })
+        .await
+    }
+
+    async fn wait_until<T>(&self, predicate: impl Fn(&State) -> Option<T>) -> T {
         loop {
             let changed = self.shared.changed.notified();
             let mut changed = std::pin::pin!(changed);
             changed.as_mut().enable();
-            if self.is_wanted() {
-                return;
+            if let Some(value) = predicate(&self.shared.lock()) {
+                return value;
             }
             changed.await;
         }
@@ -81,7 +135,11 @@ impl StdinFeed {
 
 impl State {
     fn wanted(&self) -> bool {
-        self.waiting && self.blocked && self.chunks.is_empty()
+        self.blocked && self.awaited().is_some()
+    }
+
+    fn awaited(&self) -> Option<ReadId> {
+        self.active_read.filter(|_| self.waiting && self.chunks.is_empty())
     }
 }
 
@@ -90,14 +148,17 @@ impl Shared {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn push(&self, chunk: Option<Vec<u8>>) {
-        let reader = {
-            let mut st = self.lock();
-            st.chunks.push_back(chunk);
-            st.reader.take()
-        };
-        if let Some(w) = reader {
-            w.wake();
+    fn push(&self, chunk: Chunk) {
+        let mut state = self.lock();
+        state.chunks.push_back(chunk);
+        self.notify(state);
+    }
+
+    fn notify(&self, mut state: MutexGuard<'_, State>) {
+        let reader = state.reader.take();
+        drop(state);
+        if let Some(waker) = reader {
+            waker.wake();
         }
         self.changed.notify_waiters();
     }
@@ -107,63 +168,79 @@ impl Shared {
         self.changed.notify_waiters();
     }
 
-    /// Marks the engine as having nothing to run until the returned guard is
-    /// dropped.
+    /// Marks the engine as idle until the returned guard is dropped.
     pub(crate) fn blocked(self: &Arc<Self>) -> Blocked {
-        self.update(|st| st.blocked = true);
+        self.update(|state| state.blocked = true);
         Blocked(self.clone())
     }
 }
 
-/// See [`Shared::blocked`].
+/// Guard that marks the engine as idle while held.
 pub(crate) struct Blocked(Arc<Shared>);
 
 impl Drop for Blocked {
     fn drop(&mut self) {
-        self.0.update(|st| st.blocked = false);
+        self.0.update(|state| state.blocked = false);
     }
 }
 
-/// One read of a [`FedReader`] under way; it no longer waits once dropped.
-pub(crate) struct ReadOp(Arc<Shared>);
+/// Guard for an active [`FedReader`] read. Dropping the guard ends the read
+/// and discards any unread targeted chunks.
+pub(crate) struct ReadOp(Arc<Shared>, ReadId);
 
 impl Drop for ReadOp {
     fn drop(&mut self) {
-        self.0.update(|st| {
-            st.waiting = false;
-            st.reader = None;
+        let read_id = self.1;
+        self.0.update(|state| {
+            state.chunks.retain(|chunk| chunk.target != Some(read_id));
+            state.active_read = None;
+            state.waiting = false;
+            state.reader = None;
         });
     }
 }
 
-/// The reading end of a [`StdinFeed`].
+/// Reader half of a [`StdinFeed`].
 pub struct FedReader {
     shared: Arc<Shared>,
     buf: Vec<u8>,
+    buf_target: Option<ReadId>,
     at: usize,
-    /// Set once the current read has reached an end of input.
     ended: bool,
 }
 
 impl FedReader {
     pub(crate) fn new(feed: &StdinFeed) -> FedReader {
-        FedReader { shared: feed.shared(), buf: Vec::new(), at: 0, ended: false }
+        FedReader { shared: feed.shared(), buf: Vec::new(), buf_target: None, at: 0, ended: false }
     }
 
-    /// Starts a read: an end of input reached by an earlier read is over.
+    /// Starts a new read operation, resetting EOF state and discarding any
+    /// leftover targeted buffer from the previous read.
     pub(crate) fn begin(&mut self) -> ReadOp {
         self.ended = false;
-        ReadOp(self.shared.clone())
+        let mut state = self.shared.lock();
+        state.read_count += 1;
+        let read_id = ReadId(NonZeroU64::new(state.read_count).expect("read count overflow"));
+        state.active_read = Some(read_id);
+        drop(state);
+        if self.buf_target.is_some() {
+            self.at = self.buf.len();
+        }
+        ReadOp(self.shared.clone(), read_id)
     }
 
-    /// The data available without waiting, and whether the input ends
-    /// after it (an end of input is consumed if nothing precedes it).
+    /// Returns buffered bytes available without waiting and whether the
+    /// current read has reached EOF.
     pub(crate) fn available(&mut self) -> (&[u8], bool) {
         if self.at == self.buf.len() && !self.ended {
-            match self.shared.lock().chunks.pop_front() {
-                Some(Some(data)) => (self.buf, self.at) = (data, 0),
-                Some(None) => self.ended = true,
-                None => {}
+            let mut state = self.shared.lock();
+            if let Some(chunk) = state.chunks.pop_front() {
+                state.waiting = false;
+                self.buf_target = chunk.target;
+                match chunk.data {
+                    Some(data) => (self.buf, self.at) = (data, 0),
+                    None => self.ended = true,
+                }
             }
         }
         (&self.buf[self.at..], self.ended)
@@ -188,12 +265,11 @@ impl AsyncBufRead for FedReader {
             if !data.is_empty() || ended {
                 return Poll::Ready(Ok(&this.buf[this.at..]));
             }
-            let mut st = this.shared.lock();
-            // Data may have arrived since `available` looked.
-            if st.chunks.is_empty() {
-                st.waiting = true;
-                st.reader = Some(cx.waker().clone());
-                drop(st);
+            let mut state = this.shared.lock();
+            if state.chunks.is_empty() {
+                state.waiting = true;
+                state.reader = Some(cx.waker().clone());
+                drop(state);
                 this.shared.changed.notify_waiters();
                 return Poll::Pending;
             }
