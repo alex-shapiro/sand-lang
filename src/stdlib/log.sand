@@ -16,14 +16,6 @@ pub native fn warn(msg: str, fields: [str: str] = [:])
 /// Logs `msg` and optional `fields` at level `error`.
 pub native fn error(msg: str, fields: [str: str] = [:])
 
-/// The severity of a log record, from lowest to highest.
-pub enum Level {
-    Debug
-    Info
-    Warn
-    Error
-}
-
 /// Sets the lowest level that `log` writes. The host sets the starting level
 /// (by default `Level.Info`).
 pub native fn set_level(level: Level)

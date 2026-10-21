@@ -576,11 +576,19 @@ impl Registry {
         Arc::new(r)
     }
 
+    /// Registers the native `name`. Panics if a native has the name.
     pub fn add(&mut self, name: impl Into<Cow<'static, str>>, imp: crate::vm::NativeImpl) {
         let name = name.into();
         let id = self.natives.len() as u32;
-        Arc::make_mut(&mut self.natives).push(NativeEntry { name: name.clone(), imp });
-        Arc::make_mut(&mut self.by_name).fns.insert(name, id);
+        let old = Arc::make_mut(&mut self.by_name).fns.insert(name.clone(), id);
+        assert!(old.is_none(), "native `{name}` registered twice");
+        Arc::make_mut(&mut self.natives).push(NativeEntry { name, imp });
+    }
+
+    /// Records `sig`, the signature derived from the Rust types of the host
+    /// function `name`, which the module source declares.
+    pub fn add_signature(&mut self, name: impl Into<Cow<'static, str>>, sig: String) {
+        Arc::make_mut(&mut self.by_name).signatures.insert(name.into(), sig.into());
     }
 
     pub fn add_value_type<T: crate::vm::value::ValueType>(&mut self) {
@@ -589,6 +597,7 @@ impl Registry {
             ord: T::ORDER.is_some(),
             parse: crate::vm::value::parse_value::<T>,
             type_id: std::any::TypeId::of::<T>(),
+            rust_name: std::any::type_name::<T>(),
         };
         Arc::make_mut(&mut self.by_name).values.insert(qual.into(), info);
     }
@@ -597,8 +606,9 @@ impl Registry {
         let qual = self.new_type_name(T::MODULE, T::NAME);
         let info = crate::types::EnumTypeInfo {
             type_id: std::any::TypeId::of::<T>(),
-            rust_name: std::any::type_name::<T>(),
-            variants: T::VARIANTS.iter().map(|&(name, _)| name).collect(),
+            name: T::NAME,
+            doc: T::DOC,
+            variants: T::VARIANTS.iter().map(|v| (v.name, v.doc)).collect(),
         };
         Arc::make_mut(&mut self.by_name).enums.insert(qual.into(), info);
     }
@@ -625,8 +635,18 @@ impl Registry {
         self.add(name, crate::vm::NativeImpl::Method(f));
     }
 
+    /// Registers the source of `module`. Panics if `module` is a host module
+    /// whose name starts the name of a native of the prelude (`str` for
+    /// `str.len`).
     pub fn source(&mut self, module: impl Into<Cow<'static, str>>, kind: ModKind, src: impl Into<Cow<'static, str>>) {
-        self.sources.insert(module.into(), (kind, src.into()));
+        let module = module.into();
+        if kind != ModKind::Prelude {
+            let prefix = format!("{module}.");
+            let taken = kind == ModKind::Host && self.by_name.fns.keys().any(|n| n.starts_with(&prefix));
+            assert!(!taken, "a host module cannot be named `{module}`: it is the name of a type of the prelude");
+            Arc::make_mut(&mut self.by_name).modules.insert(module.clone());
+        }
+        self.sources.insert(module, (kind, src.into()));
     }
 
     /// The registry's modules, checked and compiled (on first use).

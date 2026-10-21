@@ -59,9 +59,25 @@ Follow-up work, roughly in priority order.
 
 ### Embedding
 
-- [ ] `sand_enum!` binds only enums whose variants have no payloads. Support
-      payloads so that natives such as `json` stop building `json.Json`
-      values through the variant ids in `JsonIds`.
+- [ ] `#[derive(SandEnum)]` supports only enums without payloads. Support
+      payloads (field types from `SandType`) so that natives such as `json`
+      stop building `json.Json` values through the variant ids in `JsonIds`.
+- [ ] Raw natives (`NativeModule::raw_function`, `raw_method`, and every
+      standard `Registry::add_builtin`) read `&[Value]`, so nothing compares
+      their Rust code with their `native fn` declarations. A value of the
+      wrong type fails only when a conversion (`vm.enum_value`,
+      `extract_value`, a native object downcast) checks it, as an internal
+      error. Give raw natives typed access to their arguments, derived from
+      the declaration, so that a mismatch is a compile error.
+- [ ] Opaque native types (`native type File` without a `ValueType`) are not
+      bound to a Rust type: the checker cannot tell which `NativeObject` a
+      native returns as a `File`, and a wrong one fails only at the next
+      downcast. Bind each opaque native type to its Rust type at
+      registration, as value types are bound.
+- [ ] Sand has no private fields, so a public type can expose a private type
+      through a field (`http.Request.exchange: Exchange`). Add field
+      visibility, then require the public fields of public types of native
+      modules to use public types (as public functions already must).
 
 ### Tooling
 
@@ -104,6 +120,11 @@ Follow-up work, roughly in priority order.
 - [ ] `day_of_week()` of the `time` types returns an `int` (`1` to `7`).
       Decide whether to return a `time.Weekday` enum bound to
       `jiff::civil::Weekday`.
+- [ ] `fs.Metadata` encodes the entry kind as two `bool` fields (`is_file`,
+      `is_dir`). Decide whether to replace them with an `fs.Kind` enum bound
+      to `EntryKind`.
+- [ ] Error kinds are strings (`"not_found"`, `"invalid"`), so a typo in a
+      comparison is not a compile error. Decide whether to make them an enum.
 
 - [ ] **Construct all types with `T(...)`.** Replace struct literals with
       named-argument calls (`Point(x: 1.0, y: 2.0)`, with defaults and

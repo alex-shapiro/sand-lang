@@ -2756,11 +2756,15 @@ normalize_path, normalize_entry_path}` for hosts writing their own
   checks the capability `guard` computes from (references to) the arguments
   before calling `f`, and returns `Result<R, Error>` (`permission_denied`
   on a denial). `NativeModule::source` may add Sand declarations (types,
-  pure-Sand helpers, `native fn` with explicit signatures, which take
-  precedence over derived ones and are required for
-  `NativeModule::raw_function`). `NativeModule::value_type::<T>()` registers
+  pure-Sand helpers, and `native fn` declarations). A `native fn` declaration
+  is required for `NativeModule::raw_function` and replaces the derived
+  signature of another host function: it can name the parameters and give
+  them defaults, but must have the derived types. Every registered function
+  must have a declaration, and public functions can use only public types of
+  the module (compile errors otherwise). `NativeModule::value_type::<T>()` registers
   `T: ValueType` as the module's value type `T::NAME` (§5.4) and adds `pub
-  native type NAME` if the module source does not declare it. `T` must
+  native type NAME` unless the module source declares `NAME`, which must then
+  be a public native type (a compile error otherwise). `T` must
   implement `Clone + Eq + Hash + Display`, equal values must produce identical
   `Display` output, and `T::parse` must parse that output back into an equal
   value. Set `ValueType::ORDER` to support `Ord` and `ValueType::PACKING` to
@@ -2768,20 +2772,17 @@ normalize_path, normalize_entry_path}` for hosts writing their own
   any registered value type, including the `time` module types
   (`sandlang::jiff::Timestamp`, `sandlang::jiff::civil::{Date, Time,
   DateTime}`, and `sandlang::time::*`).
-  `sandlang::sand_enum!(Shape => geo.Shape { Circle, Square })` binds a Rust
-  enum to a Sand enum whose variants have no payloads, so that host functions
-  can take and return it. `NativeModule::enum_type::<Shape>()` registers it
-  and adds `pub enum Shape { Circle, Square }` if the module source does not
-  declare it. A declaration in the source must have the listed variants, in
-  order, without payloads (a compile error otherwise). The list must name
-  every Rust variant unless it ends with `..`; a host function that returns
-  an unlisted variant fails with an internal error. Host functions can
-  also take and return the standard enums `time.Unit`, `time.RoundingMode`,
-  `time.Disambiguation` (`sandlang::jiff::{Unit, RoundMode,
-  tz::Disambiguation}`, without `Disambiguation::Reject`) and `log.Level`
-  (`LogLevel`). Using a standard module name
-  (`NativeModule::new`), registering a module twice (`Config::module`), or
-  registering a function twice panics.
+  `#[derive(sandlang::SandEnum)]` with `#[sand(module = "geo")]` makes a
+  Rust enum without payloads a Sand enum of module `geo`, so that host
+  functions can take and return it. The Sand enum has the Rust name (or
+  `#[sand(name = "...")]`), variants, order and doc comments.
+  `NativeModule::enum_type::<T>()` registers it, and the module source must
+  not declare it. Host functions can also take and return the standard enums
+  `time.Unit`, `time.RoundingMode`, `time.Disambiguation`
+  (`sandlang::time::{Unit, RoundingMode, Disambiguation}`, which convert into
+  their `jiff` equivalents) and `log.Level` (`LogLevel`). Using the name of a
+  standard module or of a prelude type (`str`) as a module name, registering
+  a module twice (`Config::module`), or registering a function twice panics.
 - `Outcome { exit_code: i32 }`; errors are `Error::Compile(diagnostics)`,
   `Error::Runtime { message, trace }` (the run failed with an error whose
   display form is `message`, §10.3), `Error::Internal { message, trace }`,

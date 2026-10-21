@@ -75,12 +75,16 @@ each native under its key:
 - Register a native value type (`ValueType`) with `Registry::add_value_type`.
   If `ValueType::PACKING` is set, values are stored inline in `Obj::Packed`;
   otherwise they are boxed in `Obj::Value`.
-- Take enum arguments as Rust enums: bind the Rust enum to the Sand enum
-  with `sand_enum!`, register it with `Registry::add_enum_type`, and convert
-  with `vm.enum_value` and `vm.new_enum`. The checker rejects a Sand
-  declaration whose variants differ from the binding, and records the runtime
-  id of the first variant in `Program::enum_types`. Never pass a variant
-  index or name as an `int` or `str`.
+- Take enum arguments as Rust enums: derive `SandEnum`, register the enum
+  with `Registry::add_enum_type`, and convert with `vm.enum_value` and
+  `vm.new_enum`. Do not declare the enum in the module source:
+  `Checker::declare_host_enums` declares it from the Rust enum.
+  `Program::enum_types` holds the runtime id of the first variant of each
+  such enum. Never pass a variant index or name as an `int` or `str`.
+- The checker makes the Sand declarations of natives match the registry: a
+  registered value type must be a public native type, every registered
+  native must have a `native fn` declaration, and a declaration of a typed
+  host function must have the types derived from Rust.
 - Natives return a struct's fields as a tuple and let Sand build the struct.
   Never build `Obj::Variant` by hand: variants with one payload are stored
   inline, and equality and hashing rely on the canonical form.

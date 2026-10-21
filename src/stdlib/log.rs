@@ -8,16 +8,15 @@ use crate::vm::{NResult, Vm};
 use std::borrow::Cow;
 use std::fmt;
 
-/// Severity level of a [`LogRecord`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// The severity of a log record, from lowest to highest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, crate::SandEnum)]
+#[sand(module = "log", name = "Level")]
 pub enum LogLevel {
     Debug,
     Info,
     Warn,
     Error,
 }
-
-crate::sand_enum!(LogLevel => log.Level { Debug, Info, Warn, Error });
 
 impl LogLevel {
     /// Returns the uppercase level name (such as `"INFO"`).

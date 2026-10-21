@@ -340,7 +340,7 @@ pub struct CheckedProgram {
     pub wk: WellKnown,
     /// Runtime variant id -> (enum def, index within enum).
     pub variants: PVec<(TypeDefId, u32)>,
-    /// The runtime id of the first variant of each enum bound to a Rust type
+    /// The runtime id of the first variant of the Sand enum of each Rust enum
     /// (see `NativeIds::enums`).
     pub enum_bindings: PVec<(std::any::TypeId, u32)>,
     pub globals: PVec<GlobalInfo>,
@@ -367,8 +367,23 @@ impl CheckedProgram {
 #[derive(Clone, Debug, Default)]
 pub struct NativeIds {
     pub fns: HashMap<Cow<'static, str>, u32>,
+    /// The signatures derived from the Rust types of host functions that the
+    /// module source declares (`native fn` declarations), keyed by qualified
+    /// name.
+    pub signatures: HashMap<Cow<'static, str>, Arc<str>>,
     pub values: HashMap<Cow<'static, str>, ValueTypeInfo>,
     pub enums: HashMap<Cow<'static, str>, EnumTypeInfo>,
+    /// The names of the registered modules other than the prelude. The first
+    /// segment of the name of a native is the module that declares it, or
+    /// else the prelude.
+    pub modules: HashSet<Cow<'static, str>>,
+}
+
+impl NativeIds {
+    /// The name of the module that declares the native `qual`.
+    pub fn module_of<'a>(&self, qual: &'a str) -> &'a str {
+        qual.split_once('.').map(|(m, _)| m).filter(|m| self.modules.contains(*m)).unwrap_or("prelude")
+    }
 }
 
 #[derive(Clone)]
@@ -523,7 +538,7 @@ pub struct Checker {
     /// Maps each public standard-library function name to the module that defines it.
     pub module_exports: Arc<HashMap<String, String>>,
     pub variants: PVec<(TypeDefId, u32)>,
-    /// The runtime id of the first variant of each enum bound to a Rust type.
+    /// The runtime id of the first variant of the Sand enum of each Rust enum.
     pub enum_bindings: PVec<(std::any::TypeId, u32)>,
     /// The bindings of the inference variables of the module being checked
     /// (cleared when it is done: its types are all resolved by then).
@@ -1162,6 +1177,9 @@ impl Checker {
                 trait_ids.push(id);
             }
         }
+        if self.allows_native() {
+            self.declare_host_enums();
+        }
         let mut struct_ids = Vec::new();
         for item in items {
             match &item.kind {
@@ -1244,7 +1262,7 @@ impl Checker {
             }
         }
         if self.allows_native() {
-            self.check_enum_bindings();
+            self.check_value_types();
         }
         self.derive_bounds(first_type);
         if pm.kind == ModKind::Prelude {
@@ -1292,6 +1310,9 @@ impl Checker {
         }
         for id in impl_ids {
             self.check_impl_supertraits(id);
+        }
+        if self.allows_native() {
+            self.check_natives_declared(first_fn);
         }
         // 5. Top-level code.
         let mod_name = self.name(self.mods[mi as usize].name).to_string();
@@ -1580,43 +1601,128 @@ impl Checker {
         self.types[id as usize].kind = TypeDefKind::Enum { variants };
     }
 
-    /// Checks that each enum the registry binds to a Rust type in this module
-    /// is declared with the Rust type's variants, in order, without payloads,
-    /// and records the binding.
-    fn check_enum_bindings(&mut self) {
-        let mi = self.cur_mod;
-        let module = self.name(self.mods[mi as usize].name).to_string();
-        let mut bound: Vec<(String, EnumTypeInfo)> = self
-            .natives
-            .enums
-            .iter()
-            .filter_map(|(qual, info)| Some((qual.strip_prefix(module.as_str())?.strip_prefix('.')?.to_string(), info.clone())))
-            .collect();
-        bound.sort_by(|a, b| a.0.cmp(&b.0));
-        for (name, info) in bound {
-            let def = match self.scope_def(mi, &name) {
+    /// The entries of `types` that belong to this module, by their names in
+    /// it and sorted by name.
+    fn host_types<'a, T>(&self, types: &'a HashMap<Cow<'static, str>, T>) -> Vec<(&'a str, &'a T)> {
+        let module = self.name(self.mods[self.cur_mod as usize].name);
+        let local = |qual: &'a str| qual.strip_prefix(module)?.strip_prefix('.');
+        let mut found: Vec<(&str, &T)> = types.iter().filter_map(|(q, t)| Some((local(q)?, t))).collect();
+        found.sort_by_key(|&(name, _)| name);
+        found
+    }
+
+    /// Declares the enum types of this module that Rust enums define
+    /// (`#[derive(SandEnum)]`), and records the runtime id of the first
+    /// variant of each.
+    fn declare_host_enums(&mut self) {
+        let natives = self.natives.clone();
+        let span = Span::new(self.mods[self.cur_mod as usize].file, 0, 0);
+        for (name, info) in self.host_types(&natives.enums) {
+            let ident = ast::Ident { name: name.to_string(), span };
+            let doc = Some(info.doc).filter(|d| !d.is_empty());
+            let id = self.new_typedef(&ident, vec![], TypeDefKind::Enum { variants: vec![] }, true, doc);
+            self.define_ident(&ident, Def::Type(TyRef::Def(id)), true);
+            let mut variants = Vec::new();
+            for (i, &(vname, vdoc)) in info.variants.iter().enumerate() {
+                self.variants.push((id, i as u32));
+                let rt_id = (self.variants.len() - 1) as u32;
+                let doc = Some(vdoc).filter(|d| !d.is_empty()).map(Arc::from);
+                variants.push(VariantDef { name: self.sym(vname), fields: vec![], field_names: None, rt_id, doc });
+            }
+            self.enum_bindings.push((info.type_id, variants[0].rt_id));
+            self.types[id as usize].kind = TypeDefKind::Enum { variants };
+        }
+    }
+
+    /// Checks that this module declares each value type that the registry
+    /// binds to a Rust type in it as a public native type.
+    fn check_value_types(&mut self) {
+        let (mi, natives) = (self.cur_mod, self.natives.clone());
+        for (name, info) in self.host_types(&natives.values) {
+            let def = match self.scope_def(mi, name) {
                 Some(Def::Type(TyRef::Def(d))) if self.types[d as usize].module == mi => Some(&self.types[d as usize]),
                 _ => None,
             };
-            let matching = def.filter(|t| {
-                t.is_enum()
-                    && t.generics.is_empty()
-                    && t.variants().len() == info.variants.len()
-                    && t.variants().iter().zip(info.variants.iter()).all(|(v, n)| v.fields.is_empty() && self.name(v.name) == *n)
-            });
-            match matching.and_then(|t| t.variants().first()) {
-                Some(v) => self.enum_bindings.push((info.type_id, v.rt_id)),
-                None => {
-                    let span = def.map_or(Span::new(self.mods[mi as usize].file, 0, 0), |t| t.span);
-                    let msg = format!(
-                        "Rust type `{}` is bound to `{module}.{name}`, so the module must declare `enum {name} {{ {} }}`",
-                        info.rust_name,
-                        info.variants.join(", ")
-                    );
-                    self.error(span, msg);
-                }
+            if def.is_some_and(|t| t.is_pub && matches!(t.kind, TypeDefKind::Opaque(Some(_)))) {
+                continue;
             }
+            let span = def.map_or(Span::new(self.mods[mi as usize].file, 0, 0), |t| t.span);
+            let module = self.name(self.mods[mi as usize].name);
+            let msg = format!(
+                "Rust type `{}` is bound to `{module}.{name}`, so the module must declare `pub native type {name}`",
+                info.rust_name
+            );
+            self.error(span, msg);
         }
+    }
+
+    /// Checks that this module declares each native registered for it (the
+    /// functions from `first_fn` are its functions).
+    fn check_natives_declared(&mut self, first_fn: usize) {
+        let span = Span::new(self.mods[self.cur_mod as usize].file, 0, 0);
+        let declared: HashSet<u32> =
+            self.fns.iter_from(first_fn).filter_map(|f| if let FnKind::Native(n) = f.kind { Some(n) } else { None }).collect();
+        let module = self.name(self.mods[self.cur_mod as usize].name);
+        let natives = &self.natives;
+        let mut missing: Vec<String> = natives
+            .fns
+            .iter()
+            .filter(|&(q, id)| natives.module_of(q) == module && !declared.contains(id))
+            .map(|(q, _)| q.to_string())
+            .collect();
+        missing.sort();
+        for q in missing {
+            self.error(span, format!("native `{q}` is registered, but the module does not declare it with `native fn`"));
+        }
+    }
+
+    /// Checks that the public function `f` of a native module uses only
+    /// public types of the module, which scripts can name.
+    fn check_public_signature(&mut self, f: &ast::FnDecl, params: &[ParamSig], ret: TypeId) {
+        let mi = self.cur_mod;
+        let mut private = None;
+        for t in params.iter().map(|p| p.ty).chain([ret]) {
+            self.arena.any(t, &mut |ty| match ty {
+                Ty::Named(d, _) if self.types[d as usize].module == mi && !self.types[d as usize].is_pub => {
+                    private = Some(d);
+                    true
+                }
+                _ => false,
+            });
+        }
+        if let Some(d) = private {
+            let ty = self.name(self.types[d as usize].name).to_string();
+            self.error(f.name.span, format!("public function `{}` uses the private type `{ty}`; make `{ty}` public", f.name.name));
+        }
+    }
+
+    /// Checks that `f`, the `native fn` declaration of a host function, has
+    /// the parameter and result types of `sig`, the signature derived from the
+    /// Rust function.
+    fn check_host_signature(&mut self, f: &ast::FnDecl, sig: &str, params: &[ParamSig], ret: TypeId) {
+        let parsed = crate::syntax::parse_module(sig, self.mods[self.cur_mod as usize].file);
+        let Some(ItemKind::Fn(rust)) = parsed.module.items.first().map(|i| &i.kind) else {
+            return;
+        };
+        let mark = self.diags.len();
+        let want: Vec<TypeId> = rust.params.iter().filter_map(|p| p.ty.as_ref()).map(|t| self.resolve_type_in(t, &[], None)).collect();
+        let want_ret = rust.ret.as_ref().map_or(TypeId::UNIT, |t| self.resolve_type_in(t, &[], None));
+        // The derived signature is not in any source: its errors have no location.
+        self.diags.truncate(mark);
+        let have: Vec<TypeId> = params.iter().map(|p| p.ty).collect();
+        if have == want && ret == want_ret {
+            return;
+        }
+        let show = |c: &Self, ps: &[TypeId], r: TypeId| {
+            format!("fn({}) -> {}", ps.iter().map(|&t| c.show(t)).collect::<Vec<_>>().join(", "), c.show(r))
+        };
+        let msg = format!(
+            "native function `{}` is declared `{}`, but its Rust function is `{}`",
+            f.name.name,
+            show(self, &have, ret),
+            show(self, &want, want_ret)
+        );
+        self.error(f.name.span, msg);
     }
 
     fn resolve_alias(&mut self, i: usize, span: Span) -> TypeId {
@@ -1896,6 +2002,10 @@ impl Checker {
             Some(t) => self.resolve_type_in(t, &scope, self_ty),
             None => TypeId::UNIT,
         };
+        let public = f.is_pub && !matches!(owner, Some(Ctor::Def(d)) if !self.types[d as usize].is_pub);
+        if public && self.allows_native() {
+            self.check_public_signature(f, &params, ret);
+        }
         let intrinsic = match f.name.name.as_str() {
             "help" => Some(Intrinsic::Help),
             "members" => Some(Intrinsic::Members),
@@ -1913,7 +2023,12 @@ impl Checker {
                 (None, _) => format!("{module_name}.{}", f.name.name),
             };
             match self.natives.fns.get(qual_name.as_str()) {
-                Some(&n) => FnKind::Native(n),
+                Some(&n) => {
+                    if let Some(sig) = self.natives.signatures.get(qual_name.as_str()).cloned() {
+                        self.check_host_signature(f, &sig, &params, ret);
+                    }
+                    FnKind::Native(n)
+                }
                 None => {
                     self.error(f.name.span, format!("no native implementation registered for `{qual_name}`"));
                     FnKind::Native(u32::MAX)

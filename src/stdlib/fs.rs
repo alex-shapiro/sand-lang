@@ -872,8 +872,6 @@ fn register_file(r: &mut Registry) {
     });
 }
 
-crate::sand_enum!(OpenMode => fs.Mode { Read, Write, Append, CreateNew, ReadWrite });
-
 fn open(vm: &mut Vm, a: &[Value]) -> NResult {
     let mode: OpenMode = vm.enum_value(a[1])?;
     let (shown, mut t) = target(vm, a[0], Mode::Follow)?;

@@ -357,14 +357,16 @@ fn value_types_in_signatures_must_be_the_registered_rust_type() {
     Engine::new(Config::new().module(m));
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// A plane figure.
+#[derive(Clone, Copy, Debug, PartialEq, sandlang::SandEnum)]
+#[sand(module = "shapes")]
 enum Shape {
+    /// Round.
     Circle,
     Square,
+    /// Three-sided.
     Triangle,
 }
-
-sandlang::sand_enum!(Shape => shapes.Shape { Circle, Square, Triangle });
 
 fn shapes_module() -> NativeModule {
     let mut m = NativeModule::new("shapes");
@@ -396,20 +398,26 @@ match shapes.with_sides(0) {
     Some(Circle) => print("round")
     _ => print("other")
 }
-help(shapes.Shape)
 help(shapes.count)
 "#;
     let (r, out, _) = run_src(Config::new().module(shapes_module()), src);
     r.unwrap();
+    assert_eq!(out, "4\nSome(Triangle)\nNone\n2\nround\nfn shapes.count(shapes: [Shape], of: Shape) -> int\n");
+}
+
+#[test]
+fn host_enums_take_their_docs_from_rust() {
+    let (r, out, _) = run_src(Config::new().module(shapes_module()), "import shapes\nhelp(shapes.Shape)");
+    r.unwrap();
     assert_eq!(
         out,
-        "4\nSome(Triangle)\nNone\n2\nround\nenum shapes.Shape\n\nVariants:\n    Circle\n    Square\n    Triangle\nfn shapes.count(shapes: [Shape], of: Shape) -> int\n"
+        "enum shapes.Shape\n\nA plane figure.\n\nVariants:\n    Circle\n        Round.\n    Square\n    Triangle\n        Three-sided.\n"
     );
 }
 
 #[test]
 fn host_functions_take_and_return_enums_of_standard_modules() {
-    use sandlang::jiff::Unit;
+    use sandlang::time::Unit;
     let mut m = NativeModule::new("units");
     m.function("smaller", |u: Unit| -> Option<Unit> {
         let all = [Unit::Year, Unit::Month, Unit::Week, Unit::Day, Unit::Hour];
@@ -423,30 +431,83 @@ fn host_functions_take_and_return_enums_of_standard_modules() {
 }
 
 #[test]
-fn host_enum_declarations_must_match_the_rust_variants() {
-    for decl in [
-        "pub enum Shape { Circle, Square }",
-        "pub enum Shape { Circle, Triangle, Square }",
-        "pub enum Shape { Circle, Square(int), Triangle }",
-        "pub enum Shape<T> { Circle, Square, Triangle }",
-        "pub native type Shape",
-        "pub struct Shape { sides: int }",
-    ] {
+fn host_enums_cannot_be_declared_in_the_module_source() {
+    for decl in ["pub enum Shape { Circle, Square, Triangle }", "pub native type Shape", "pub struct Shape { sides: int }"] {
         let mut m = shapes_module();
         m.source(decl);
         let (r, _, _) = run_src(Config::new().module(m), "import shapes\nprint(shapes.sides(shapes.Shape.Circle))");
         let Err(Error::Compile(ds)) = r else { panic!("{decl}: expected a compile error, got {r:?}") };
-        assert!(ds.iter().any(|d| d.message.contains("must declare `enum Shape { Circle, Square, Triangle }`")), "{decl}: {ds:?}");
+        assert_eq!((ds[0].message.as_str(), ds[0].source_line.as_deref()), ("`Shape` is already defined", Some(decl)), "{ds:?}");
     }
 }
 
 #[test]
-fn host_enums_have_docs() {
+fn host_value_type_declarations_must_be_public_native_types() {
+    for decl in ["pub enum Money { Cents }", "pub struct Money { cents: int }", "pub type Money = int", "native type Money"] {
+        let mut m = bank_module();
+        m.source(decl);
+        let (r, _, _) = run_src(Config::new().module(m), "import bank\nprint(bank.cents(3))");
+        let Err(Error::Compile(ds)) = r else { panic!("{decl}: expected a compile error, got {r:?}") };
+        assert!(ds[0].message.contains("must declare `pub native type Money`"), "{decl}: {ds:?}");
+    }
+}
+
+#[test]
+fn host_function_declarations_must_have_the_rust_types() {
+    let cases = [
+        ("pub native fn sides(s: str) -> int", "is declared `fn(str) -> int`, but its Rust function is `fn(Shape) -> int`"),
+        ("pub native fn with_sides(n: int) -> Shape", "is declared `fn(int) -> Shape`, but its Rust function is `fn(int) -> Shape?`"),
+        (
+            "pub native fn count(shapes: [Shape]) -> int",
+            "is declared `fn([Shape]) -> int`, but its Rust function is `fn([Shape], Shape) -> int`",
+        ),
+    ];
+    for (decl, msg) in cases {
+        let mut m = shapes_module();
+        m.source(decl);
+        let (r, _, _) = run_src(Config::new().module(m), "import shapes");
+        let Err(Error::Compile(ds)) = r else { panic!("{decl}: expected a compile error, got {r:?}") };
+        assert!(ds[0].message.contains(msg), "{decl}: {ds:?}");
+    }
     let mut m = shapes_module();
-    m.doc("Shape", "A plane figure.");
-    let (r, out, _) = run_src(Config::new().module(m), "import shapes\nhelp(shapes.Shape)");
+    m.source("pub native fn sides(shape: Shape = Shape.Square) -> int");
+    let (r, out, _) =
+        run_src(Config::new().module(m), "import shapes\nprint(shapes.sides())\nprint(shapes.sides(shape: shapes.Shape.Circle))");
     r.unwrap();
-    assert!(out.starts_with("enum shapes.Shape\n\nA plane figure.\n"), "{out}");
+    assert_eq!(out, "4\n0\n");
+}
+
+#[test]
+fn registered_natives_must_be_declared() {
+    let mut m = shapes_module();
+    m.raw_function("ghost", |_, _| Ok(sandlang::Value::Unit));
+    let (r, _, _) = run_src(Config::new().module(m), "import shapes");
+    let Err(Error::Compile(ds)) = r else { panic!("expected a compile error, got {r:?}") };
+    assert!(ds[0].message.contains("native `shapes.ghost` is registered, but the module does not declare it"), "{ds:?}");
+}
+
+#[test]
+fn public_functions_of_host_modules_use_public_types() {
+    let cases = [
+        ("enum Color { Red }\npub native fn color() -> Color", "public function `color` uses the private type `Color`"),
+        ("struct Hidden { x: int }\npub native fn color(h: [Hidden]) -> int", "public function `color` uses the private type `Hidden`"),
+    ];
+    for (src, msg) in cases {
+        let mut m = shapes_module();
+        m.source(src);
+        m.raw_function("color", |_, _| Ok(sandlang::Value::Unit));
+        let (r, _, _) = run_src(Config::new().module(m), "import shapes");
+        let Err(Error::Compile(ds)) = r else { panic!("{src}: expected a compile error, got {r:?}") };
+        assert!(ds.iter().any(|d| d.message.contains(msg)), "{src}: {ds:?}");
+    }
+}
+
+#[test]
+#[should_panic(expected = "a host module cannot be named `str`")]
+fn host_modules_cannot_take_the_names_of_prelude_types() {
+    let mut m = NativeModule::new("str");
+    m.function("shout", |s: String| s.to_uppercase());
+    Engine::new(Config::new().module(m));
 }
 
 #[test]
@@ -465,25 +526,6 @@ fn enums_in_signatures_must_be_registered() {
     let mut m = NativeModule::new("shapes");
     m.function("square", || Shape::Square);
     Engine::new(Config::new().module(m));
-}
-
-#[derive(Clone, Copy)]
-enum Partial {
-    Bound,
-    Unbound,
-}
-
-sandlang::sand_enum!(Partial => part.Partial { Bound, .. });
-
-#[test]
-fn unbound_rust_variants_are_internal_errors() {
-    let mut m = NativeModule::new("part");
-    m.enum_type::<Partial>();
-    m.function("get", |b: bool| if b { Partial::Bound } else { Partial::Unbound });
-    let (r, out, _) = run_src(Config::new().module(m), "import part\nprint(part.get(true))\nprint(part.get(false))");
-    assert_eq!(out, "Bound\n");
-    let Err(Error::Internal { message, .. }) = r else { panic!("expected an internal error, got {r:?}") };
-    assert!(message.contains("has no part.Partial variant"), "{message}");
 }
 
 #[test]

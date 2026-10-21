@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "cli", "wasm", "site"]
+members = [".", "cli", "macros", "wasm", "site"]
 default-members = [".", "cli"]
 resolver = "3"
 
@@ -20,6 +20,7 @@ os = ["dep:rustix", "dep:fs_at", "dep:same-file", "dep:winx", "dep:socket2", "to
 tls = ["os", "dep:rustls", "dep:tokio-rustls", "dep:webpki-roots"]
 
 [dependencies]
+sandlang-macros = { path = "macros" }
 tokio = { version = "1", features = ["rt", "sync", "io-util"] }
 regex-automata = { version = "0.4.16", default-features = false, features = ["std", "syntax", "meta", "nfa-pikevm", "nfa-backtrack", "hybrid", "dfa-onepass", "perf-inline", "perf-literal", "unicode"] }
 rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std", "tls12"] }

@@ -137,21 +137,22 @@ Sand infers the Sand function signature from the Rust parameter and return types
 | `Result<T, E>`                              | `Result<T, Error>`           |
 | `HashMap<String, T>`, `BTreeMap<String, T>` | `[str: T]`                   |
 | tuples of up to 4 elements                  | tuples                       |
-| an enum bound with `sand_enum!`             | the bound Sand enum          |
+| an enum with `#[derive(SandEnum)]`          | the same Sand enum           |
 
 Returning `Err(HostError::new(kind, message))` preserves `kind` on the Sand `Error`; any other Rust error type converts to an `Error` with kind `"error"` and its `Display` message.
 
-`sand_enum!` binds a Rust enum to a Sand enum whose variants have no payloads. `NativeModule::enum_type` registers the enum and declares it in the module:
+`#[derive(SandEnum)]` makes a Rust enum without payloads a Sand enum with the same variants, in the same order, and the same doc comments. `NativeModule::enum_type` registers the enum in its module:
 
 ```rust
-use sandlang::NativeModule;
+use sandlang::{NativeModule, SandEnum};
 
-#[derive(Clone, Copy)]
+/// A plane figure.
+#[derive(Clone, Copy, SandEnum)]
+#[sand(module = "geo")]
 enum Shape {
     Circle,
     Square,
 }
-sandlang::sand_enum!(Shape => geo.Shape { Circle, Square });
 
 let mut geo = NativeModule::new("geo");
 geo.enum_type::<Shape>();
@@ -161,7 +162,9 @@ geo.function("sides", |s: Shape| match s {
 });
 ```
 
-Scripts call `geo.sides(geo.Shape.Square)`. If the module source declares `Shape`, the declaration must have the same variants in the same order. The list must name every Rust variant. To bind only some variants (for example, of a `#[non_exhaustive]` enum from another crate), end the list with `..`: a host function that returns an unlisted variant then fails with an internal error.
+Scripts call `geo.sides(geo.Shape.Square)`. The Rust enum is the only declaration of `Shape`: the module source must not declare it. `#[sand(name = "Kind")]` gives the Sand enum another name.
+
+A `native fn` declaration in the module source replaces the signature that Sand derives for a function of the same name. Use it to name the parameters and give them defaults. Its types must be the derived types, and every registered function must have a declaration (compile errors otherwise).
 
 `NativeModule::async_function` registers an async Rust function; while its future is pending, only the calling Sand task suspends.
 
