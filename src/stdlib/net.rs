@@ -9,7 +9,7 @@ use super::stream::{IoFailure, read_line_bytes, read_to_end_reserved, strip_eol}
 use crate::check::ModKind;
 use crate::engine::Registry;
 use crate::network::{self, Network, Stream};
-use crate::policy::{Capability, Decision, Policy, host_port, is_private_address, is_valid_host};
+use crate::policy::{Capability, Decision, Policy, host_port, is_private_address, is_valid_host, parse_port, split_port};
 use crate::vm::iomem::{Reservation, ResourceSlot};
 use crate::vm::value::{NativeObject, Obj, Value, ValueType};
 use crate::vm::{Ctl, Finisher, NResult, Vm};
@@ -190,18 +190,12 @@ fn socket_addr(vm: &Vm, v: Value) -> Result<SocketAddr, Ctl> {
 /// Splits `host:port` or `[ipv6]:port` into a host and a port.
 fn split_host_port(vm: &mut Vm, a: &[Value]) -> NResult {
     let text = vm.str(a[0]);
-    let parts = match text.strip_prefix('[') {
-        Some(rest) => rest.split_once("]:").filter(|(host, _)| host.parse::<std::net::Ipv6Addr>().is_ok()),
-        None => text.rsplit_once(':').filter(|(host, _)| !host.contains(':') && is_valid_host(host)),
-    };
-    let parts = parts
-        .filter(|(_, port)| port.bytes().all(|b| b.is_ascii_digit()))
-        .and_then(|(host, port)| Some((host.to_string(), port.parse::<u16>().ok()?)));
+    let parts = split_port(text).and_then(|(host, port)| Some((host, parse_port(port?)?))).filter(|&(host, _)| is_valid_host(host));
     let Some((host, port)) = parts else {
         let msg = format!("invalid address {:?} (expected host:port or [ipv6]:port)", super::truncate(text, 200));
         return Ok(vm.err_value("parse", &msg));
     };
-    let host = vm.new_str(host);
+    let host = vm.new_str(host.to_string());
     let pair = vm.heap.new_tuple(&[host, Value::Int(port.into())]);
     Ok(vm.ok(pair))
 }
@@ -233,7 +227,7 @@ pub(crate) fn listen_with<T: Resource>(
     open: impl FnOnce(Box<dyn network::Listener>) -> std::io::Result<T> + Send + 'static,
 ) -> NResult {
     let Ok(ip) = vm.str(ip).parse::<IpAddr>().map(|ip| ip.to_canonical()) else {
-        let msg = format!("invalid IP address {:?}", super::truncate(vm.str(ip), 200));
+        let msg = format!("invalid IP address {:?} (expected an address such as 127.0.0.1 or ::1)", super::truncate(vm.str(ip), 200));
         return Ok(vm.err_value("invalid", &msg));
     };
     let addr = match port(vm, port_arg) {

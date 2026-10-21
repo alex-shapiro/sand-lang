@@ -17,9 +17,9 @@ mod rules;
 pub use file::{PolicyError, PolicyFile, parse_duration, parse_size, rule_for};
 pub use format::format_policy;
 pub use lint::lint_policy;
-#[cfg(feature = "os")]
-pub(crate) use net::is_valid_host;
 pub use net::{host_port, is_private_address, is_valid_listen_pattern, is_valid_net_pattern};
+#[cfg(feature = "os")]
+pub(crate) use net::{is_valid_host, parse_port, split_port};
 pub use rules::RulePolicy;
 
 /// A request to perform an effect outside the sandbox.
@@ -84,6 +84,7 @@ impl fmt::Display for Capability {
             }
             Capability::NetAddr { host, addr } if *host == addr.ip().to_string() => write!(f, "connect to {addr}"),
             Capability::NetAddr { host, addr } => write!(f, "connect to {host} at {addr}"),
+            Capability::NetListen(addr) if addr.port() == 0 => write!(f, "listen on an ephemeral port at {}", addr.ip()),
             Capability::NetListen(addr) => write!(f, "listen on {addr}"),
             Capability::Env(n) => write!(f, "read environment variable {n}"),
             Capability::Stdin => write!(f, "read standard input"),

@@ -40,15 +40,16 @@ pub fn is_valid_listen_pattern(pattern: &str) -> bool {
 /// Whether `host` is an IP address (without brackets) or a host name.
 #[cfg(feature = "os")]
 pub(crate) fn is_valid_host(host: &str) -> bool {
-    host.len() <= 253 && (host.parse::<IpAddr>().is_ok() || host_name(host).is_some())
+    host.parse::<IpAddr>().is_ok() || host_name(host).is_some()
 }
 
 /// A host name in canonical form (lower case, without a trailing dot), if
-/// `name` is one.
+/// `name` is one: at most 253 bytes, in labels of 1 to 63 letters, digits,
+/// `-` or `_`.
 fn host_name(name: &str) -> Option<String> {
     let name = name.strip_suffix('.').unwrap_or(name);
-    let valid = !name.is_empty() && !name.starts_with('.') && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b));
-    valid.then(|| name.to_ascii_lowercase())
+    let label_ok = |l: &str| (1..=63).contains(&l.len()) && l.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b));
+    (name.len() <= 253 && name.split('.').all(label_ok)).then(|| name.to_ascii_lowercase())
 }
 
 impl NetPattern {
@@ -76,7 +77,7 @@ impl NetPattern {
             }
         };
         let port = match port {
-            Some(p) => Some(p.parse::<u16>().ok()?),
+            Some(p) => Some(parse_port(p)?),
             None => None,
         };
         let kind = if body == "*" {
@@ -375,6 +376,28 @@ pub fn host_port(host: &str, port: u16) -> String {
     if host.contains(':') { format!("[{host}]:{port}") } else { format!("{host}:{port}") }
 }
 
+/// Splits `host:port` or `[v6]:port` into the host (without brackets) and
+/// the text of the port, if there is one. Text with two or more colons and
+/// no brackets is a host (an IPv6 address) without a port.
+pub(crate) fn split_port(text: &str) -> Option<(&str, Option<&str>)> {
+    match text.strip_prefix('[') {
+        Some(rest) => {
+            let (ip, after) = rest.split_once(']')?;
+            ip.parse::<Ipv6Addr>().ok()?;
+            Some((ip, if after.is_empty() { None } else { Some(after.strip_prefix(':')?) }))
+        }
+        None => Some(match text.split_once(':') {
+            Some((host, port)) if !port.contains(':') => (host, Some(port)),
+            _ => (text, None),
+        }),
+    }
+}
+
+/// A port written in decimal digits only.
+pub(crate) fn parse_port(text: &str) -> Option<u16> {
+    if text.bytes().all(|b| b.is_ascii_digit()) { text.parse().ok() } else { None }
+}
+
 /// A listen address pattern: `ip:port`, `[v6]:port`, `ip`, `localhost` (the
 /// loopback addresses), `*:port` or `*`. A missing part or `*` matches any
 /// address or port, and port `0` matches only a request for an ephemeral
@@ -394,28 +417,15 @@ enum ListenHost {
 
 impl ListenPattern {
     pub(crate) fn parse(text: &str) -> Option<ListenPattern> {
-        let (host, port) = match text.strip_prefix('[') {
-            Some(rest) => {
-                let (ip, port) = rest.split_once(']')?;
-                (ListenHost::Ip(parse_ip(ip)?), if port.is_empty() { None } else { Some(port.strip_prefix(':')?) })
-            }
-            None => {
-                let (host, port) = match text.split_once(':') {
-                    Some((host, port)) if !port.contains(':') => (host, Some(port)),
-                    _ => (text, None),
-                };
-                let host = match host {
-                    "*" => ListenHost::Any,
-                    _ if is_localhost(host) => ListenHost::Loopback,
-                    _ => ListenHost::Ip(parse_ip(host)?),
-                };
-                (host, port)
-            }
+        let (host, port) = split_port(text)?;
+        let host = match host {
+            "*" => ListenHost::Any,
+            _ if is_localhost(host) => ListenHost::Loopback,
+            _ => ListenHost::Ip(parse_ip(host)?),
         };
         let port = match port {
             None | Some("*") => None,
-            Some(p) if p.bytes().all(|b| b.is_ascii_digit()) => Some(p.parse().ok()?),
-            Some(_) => return None,
+            Some(p) => Some(parse_port(p)?),
         };
         Some(ListenPattern { host, port })
     }

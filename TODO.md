@@ -15,9 +15,6 @@ Follow-up work, roughly in priority order.
       both paths open, so that none of them can be renamed or replaced. A
       parent that is emptied and turned into a junction during the call is
       still possible; it is detected after the rename, not prevented.
-- [ ] `host_name` (`policy/net.rs`) accepts empty labels (`a..b`) and
-      labels longer than 63 bytes, so `net.connect` sends such names to the
-      resolver instead of failing with kind `"invalid"`.
 
 ### Test coverage
 
@@ -86,6 +83,10 @@ Follow-up work, roughly in priority order.
       is stable.
 
 ### Language
+
+- [ ] Let native functions take enum arguments. `fs.open` maps
+      `fs.Mode` to an `int` in Sand before it calls the native `open_file`,
+      and other modules take strings (`log.set_level`) for the same reason.
 
 - [ ] **Construct all types with `T(...)`.** Replace struct literals with
       named-argument calls (`Point(x: 1.0, y: 2.0)`, with defaults and

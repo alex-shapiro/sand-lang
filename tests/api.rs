@@ -801,6 +801,7 @@ fn rule_policy_env_and_listen() {
     assert_eq!(p.check(&listen("0.0.0.0", 9000)), Decision::Deny);
     assert_eq!(p.check(&listen("::1", 0)), Decision::Allow);
     assert_eq!(p.check(&listen("::1", 9000)), Decision::Deny, "port 0 allows only an ephemeral port");
+    assert_eq!(listen("::1", 0).to_string(), "listen on an ephemeral port at ::1");
     assert_eq!(p.check(&Capability::Stdin), Decision::Allow);
 
     let p = RulePolicy::new().allow_listen("LocalHost").allow_listen("[::]:80").allow_listen("*:8080").deny_listen("localhost:22");
@@ -812,9 +813,17 @@ fn rule_policy_env_and_listen() {
     assert_eq!(p.check(&listen("::", 81)), Decision::Deny);
     assert_eq!(p.check(&listen("10.0.0.1", 8080)), Decision::Allow);
     assert_eq!(p.check(&listen("10.0.0.1", 8081)), Decision::Deny);
-    for invalid in
-        ["[::1", "[::1]x", "[localhost]:80", "127.0.0.1:http", "127.0.0.1:+80", "example.com", "example.com:80", "127.0.0.1:65536"]
-    {
+    for invalid in [
+        "[::1",
+        "[::1]x",
+        "[localhost]:80",
+        "[127.0.0.1]:80",
+        "127.0.0.1:http",
+        "127.0.0.1:+80",
+        "example.com",
+        "example.com:80",
+        "127.0.0.1:65536",
+    ] {
         assert!(!sandlang::policy::is_valid_listen_pattern(invalid), "{invalid}");
     }
 }

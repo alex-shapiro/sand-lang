@@ -452,8 +452,10 @@ fn closing_engine_closes_sockets() {
 
 #[test]
 fn errors_are_distinguishable() {
-    for call in
-        ["net.connect(\"[::1]\", 80)", "net.connect(\"a b\", 80)", "net.connect(\"localhost\", 65536)", "net.listen(\"localhost\", -1)"]
+    for call in ["net.connect(\"[::1]\", 80)", "net.connect(\"a b\", 80)", "net.connect(\"a..b\", 80)", "net.connect(\"localhost\", 65536)"]
+        .into_iter()
+        .map(String::from)
+        .chain([format!("net.connect(\"{}.com\", 80)", "a".repeat(64)), "net.listen(\"localhost\", 8080)".into()])
     {
         let r = run_with(&format!("import net\nlet c = {call}?"), |c| c.policy(Policy::allow_all()));
         assert!(r.failure().starts_with("invalid: "), "{call}: {}", r.failure());
