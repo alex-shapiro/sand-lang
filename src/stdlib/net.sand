@@ -28,6 +28,14 @@ pub native fn connect(host: str, port: int, timeout: duration = 30s) -> Result<C
 /// connection and TLS handshake do not complete within `timeout`.
 pub native fn connect_tls(host: str, port: int, timeout: duration = 30s) -> Result<Conn>
 
+/// Splits `"host:port"` or `"[ipv6]:port"` into a host and a port, or fails
+/// with kind `"parse"`.
+///
+/// ```
+/// let (host, port) = net.split_host_port("example.com:80")?
+/// ```
+pub native fn split_host_port(text: str) -> Result<(str, int)>
+
 /// An IP address and port, formatted as `127.0.0.1:8080` or `[::1]:8080`.
 pub native type SocketAddr
 

@@ -2050,10 +2050,12 @@ nesting depth of 512.
 
 `debug(msg: str)`, `info(msg: str)`, `warn(msg: str)`, `error(msg: str)`;
 each accepts `fields: [str: str] = [:]`. `set_level(level: str)` with `"debug"`,
-`"info"` (default), `"warn"`, `"error"`, `"off"`. A record is logged only if
-its level is at least the script's level and the host's level (§16). Records
-go to the host log sink (default: stderr as `LEVEL message key=value ...`,
-needing capability `Stderr`) and count against `max_output_bytes`.
+`"info"`, `"warn"`, `"error"`, `"off"`. Records below the script's level are
+dropped. The others go to the host log sink (§16), which also selects levels,
+and count against `max_output_bytes`. Without a host sink, the default level
+is `"info"` and records go to stderr as `LEVEL message key=value ...`; if the
+policy denies `Stderr`, the engine drops them. With a host sink, the default
+level is `"debug"`.
 
 ### 13.9 `math`
 
@@ -2072,6 +2074,7 @@ Rounding, `abs`, `min`, `max`, `clamp`, `sqrt` and `pow` are methods of
 pub native fn listen(ip: str, port: int) -> Result<Listener>      // NetListen(ip:port)
 pub native fn connect(host: str, port: int, timeout: duration = 30s) -> Result<Conn>      // Net(host, port)
 pub native fn connect_tls(host: str, port: int, timeout: duration = 30s) -> Result<Conn>  // Net(host, port); feature tls
+pub native fn split_host_port(text: str) -> Result<(str, int)>
 listener.accept() -> Result<Conn>
 listener.addr() -> SocketAddr
 conn.peer_addr() -> SocketAddr
@@ -2082,7 +2085,8 @@ addr.port() -> int
 `host` is a host name or an IP address without brackets (`"::1"`), `ip` is
 an IP address, and `port` is in `0..=65535`; other values fail with kind
 `"invalid"`. Port `0` makes `listen` and `http.serve` select an ephemeral
-port. `SocketAddr` is a
+port. `split_host_port` splits text such as `"example.com:80"` or
+`"[::1]:80"` and fails with kind `"parse"` on other text. `SocketAddr` is a
 value type (§5.4) formatted as `127.0.0.1:8080` or `[::1]:8080`.
 
 `Listener` implements `Close`; `Conn` implements `io.Reader`, `io.Writer`
@@ -2690,11 +2694,11 @@ let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 
   the host `send`s (`end()` ends one read); `wanted()` is resolved if a script
   is waiting for input and has nothing else to run.
 - `Config::log_sink(impl LogSink)` receives each `log` record as a
-  `LogRecord { level, message, fields }` instead of standard error; any
-  `Fn(&LogRecord) + Send + Sync` is a `LogSink`. The engine calls the sink on
-  the thread that runs the script. `Config::log_level(LogLevel)` sets the
-  lowest level the engine passes on (default `LogLevel::Debug`); scripts
-  cannot log below it.
+  `LogRecord { level, message, fields, location }` instead of standard error.
+  `LogSink::enabled(level)` selects the levels; the engine does not build the
+  records it rejects. Any `Fn(&LogRecord) + Send + Sync` is a `LogSink` that
+  accepts all levels. The engine calls the sink on the thread that runs the
+  script.
 - `Config::memory_fs(MemFs)` gives scripts a memory file system (§16.1).
 - `Config::library(dir)` sets the directory of library scripts for
   `import <name>` (§3.2). `Engine::module_names()` returns the registered

@@ -1689,7 +1689,9 @@ impl Vm {
         slot: usize,
         ip: usize,
     ) -> Result<Option<Exit>, Trap> {
-        fiber.frames.last_mut().unwrap().ip = ip as u32;
+        let frame = fiber.frames.last_mut().unwrap();
+        frame.ip = ip as u32;
+        self.caller_site = (frame.proto, frame.ip);
         let mut r = Self::invoke_native(self, natives, n, &fiber.stack[start..start + argc]);
         if r.is_memory_limit() || matches!(&r, Err(c) if matches!(c.kind(), CtlKind::Collect)) {
             // Natives check memory (and open resources) against counts that

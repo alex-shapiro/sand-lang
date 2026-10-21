@@ -47,14 +47,6 @@ Follow-up work, roughly in priority order.
 - [ ] Document in §14.4 that `time.local_zone()` returns `UTC` if the
       `TimeZone` capability is denied (currently documented only in §13).
 
-### Standard Library
-
-- [ ] Give `LogRecord` the script location (module and line) of the `log`
-      call, so that hosts can forward it as `tracing` metadata.
-- [ ] If a policy denies `Stderr`, a `log` call with the default sink stops
-      the run (as `print` does if `Stdout` is denied). Decide whether the
-      engine should drop the record instead.
-
 ### Web
 
 - [ ] Stopping a busy engine in the browser terminates its worker, since

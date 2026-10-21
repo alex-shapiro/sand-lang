@@ -398,6 +398,20 @@ print(c.peer_addr().port() == {port})
 }
 
 #[test]
+fn split_host_port_accepts_names_and_bracketed_ipv6() {
+    let src = r#"
+import net
+for text in ["example.com:80", "127.0.0.1:0", "[::1]:8080", "::1:80", "[::1]", "host:", "host:+80", "host:65536", ":80", "[example.com]:80"] {
+    match net.split_host_port(text) {
+        Ok((host, port)) => print("\(host) \(port)"),
+        Err(e) => print(e.kind),
+    }
+}
+"#;
+    assert_eq!(run_net(src), "example.com 80\n127.0.0.1 0\n::1 8080\n".to_string() + &"parse\n".repeat(7));
+}
+
+#[test]
 fn net_permissions() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();

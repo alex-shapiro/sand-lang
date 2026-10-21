@@ -30,6 +30,7 @@ pub fn register(r: &mut Registry) {
         Ok(vm.new_str(ip))
     });
     r.add_builtin("net.SocketAddr.port", |vm, a| Ok(Value::Int(socket_addr(vm, a[0])?.0.port().into())));
+    r.add_builtin("net.split_host_port", split_host_port);
     r.add_builtin("net.listen", listen);
     r.add_builtin("net.connect", connect);
     r.add_builtin("net.connect_tls", connect_tls);
@@ -184,6 +185,25 @@ impl ValueType for SocketAddr {
 
 fn socket_addr(vm: &Vm, v: Value) -> Result<SocketAddr, Ctl> {
     vm.heap.value::<SocketAddr>(v).ok_or_else(|| Ctl::internal("not a socket address"))
+}
+
+/// Splits `host:port` or `[ipv6]:port` into a host and a port.
+fn split_host_port(vm: &mut Vm, a: &[Value]) -> NResult {
+    let text = vm.str(a[0]);
+    let parts = match text.strip_prefix('[') {
+        Some(rest) => rest.split_once("]:").filter(|(host, _)| host.parse::<std::net::Ipv6Addr>().is_ok()),
+        None => text.rsplit_once(':').filter(|(host, _)| !host.contains(':') && is_valid_host(host)),
+    };
+    let parts = parts
+        .filter(|(_, port)| port.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|(host, port)| Some((host.to_string(), port.parse::<u16>().ok()?)));
+    let Some((host, port)) = parts else {
+        let msg = format!("invalid address {:?} (expected host:port or [ipv6]:port)", super::truncate(text, 200));
+        return Ok(vm.err_value("parse", &msg));
+    };
+    let host = vm.new_str(host);
+    let pair = vm.heap.new_tuple(&[host, Value::Int(port.into())]);
+    Ok(vm.ok(pair))
 }
 
 /// The `port` argument of a socket function, or the `Err(invalid)` value.

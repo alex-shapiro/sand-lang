@@ -33,7 +33,6 @@ mod uuid;
 use crate::engine::Registry;
 #[cfg(feature = "os")]
 pub(crate) use http::Pool as HttpPool;
-pub(crate) use log::LogConfig;
 #[cfg(feature = "os")]
 pub(crate) use net::TlsSettings;
 pub(crate) use uri::encode as uri_encode;

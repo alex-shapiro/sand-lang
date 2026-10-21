@@ -268,7 +268,7 @@ pub struct Fiber {
 }
 
 /// One frame of a runtime error's stack trace.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraceEntry {
     pub function: String,
     pub file: String,
@@ -471,7 +471,8 @@ pub struct Host {
     pub rng: Rng,
     /// The lowest level of `log` records the script writes (`None`: off).
     pub log_level: Option<crate::LogLevel>,
-    pub(crate) log: crate::stdlib::LogConfig,
+    /// `None`: standard error, as text.
+    pub(crate) log_sink: Option<Arc<dyn crate::LogSink>>,
     pub interrupt: Arc<AtomicBool>,
     /// Cached decisions for stdout (index 0) and stderr (1).
     pub stream_decisions: [Option<bool>; 2],
@@ -525,6 +526,8 @@ pub struct Vm {
     /// Set while a native that asked for a collection (`CtlKind::Collect`)
     /// is called again after it.
     pub(crate) collected: bool,
+    /// The function and instruction that called the running native.
+    caller_site: (u32, u32),
     pub cancel_current: bool,
     /// Set while the tasks left at the end of a run unwind (`end_tasks`):
     /// `drive` stops instead of waiting for I/O.
@@ -633,6 +636,7 @@ impl Vm {
             deadline: None,
             gc_retry: false,
             collected: false,
+            caller_site: (0, 0),
             cancel_current: false,
             ending: false,
             pinned: Vec::new(),
@@ -1108,6 +1112,12 @@ impl Vm {
     /// limits; a denial fails (as `print` does).
     pub fn write_stream(&mut self, which: u8, data: &[u8]) -> Result<(), Ctl> {
         self.admit_output(which, data.len())?;
+        self.write_counted(which, data)
+    }
+
+    /// Writes `data` to stream `which` after the caller checked the policy
+    /// and counted the bytes.
+    pub(crate) fn write_counted(&mut self, which: u8, data: &[u8]) -> Result<(), Ctl> {
         let _ = self.stream_sink(which).write(data);
         self.limit_backlog(which)
     }
@@ -1167,7 +1177,7 @@ impl Vm {
     }
 
     /// Whether the policy allows writing to stream `which`.
-    fn output_allowed(&mut self, which: u8) -> Result<bool, Ctl> {
+    pub(crate) fn output_allowed(&mut self, which: u8) -> Result<bool, Ctl> {
         let slot = usize::from(which != 1);
         let allowed = match self.host.stream_decisions[slot] {
             Some(d) => d,
@@ -1565,30 +1575,44 @@ impl Vm {
         let mut out = Vec::new();
         let n = fiber.frames.len();
         for (i, fr) in fiber.frames.iter().enumerate().rev() {
-            let proto = &self.prog.protos[fr.proto as usize];
             let at = if i + 1 == n { ip.unwrap_or(fr.ip) } else { fr.ip };
-            let idx = (at as usize).saturating_sub(1).min(proto.lines.len().saturating_sub(1));
-            let mut line = proto.lines.get(idx).copied().unwrap_or(0) as usize;
-            if proto.name == "<entry>" {
-                continue;
-            }
-            let mut site = proto.sites.get(idx).copied().unwrap_or(0);
-            while let Some(s) = (site as usize).checked_sub(1).and_then(|i| proto.inlined.get(i)) {
-                out.push(TraceEntry {
-                    function: s.name.clone(),
-                    file: self.prog.files.get(s.file as usize).cloned().unwrap_or_default(),
-                    line,
-                });
-                line = s.line as usize;
-                site = s.parent;
-            }
-            let name = if proto.name.starts_with('<') && proto.name.ends_with('>') && proto.name != "<lambda>" && proto.name != "<spawn>" {
-                "<top level>".to_string()
-            } else {
-                proto.name.clone()
-            };
-            out.push(TraceEntry { function: name, file: self.prog.files.get(proto.file as usize).cloned().unwrap_or_default(), line });
+            self.trace_frame(fr.proto, at, &mut out);
         }
         out
+    }
+
+    /// The script location that called the running native, or `None` if
+    /// the host called it.
+    pub(crate) fn native_caller(&self) -> Option<TraceEntry> {
+        let mut out = Vec::new();
+        self.trace_frame(self.caller_site.0, self.caller_site.1, &mut out);
+        out.into_iter().next()
+    }
+
+    /// Adds the entries of function `proto` at instruction `at` to `out`,
+    /// innermost inlined call first.
+    fn trace_frame(&self, proto: u32, at: u32, out: &mut Vec<TraceEntry>) {
+        let proto = &self.prog.protos[proto as usize];
+        if proto.name == "<entry>" {
+            return;
+        }
+        let idx = (at as usize).saturating_sub(1).min(proto.lines.len().saturating_sub(1));
+        let mut line = proto.lines.get(idx).copied().unwrap_or(0) as usize;
+        let mut site = proto.sites.get(idx).copied().unwrap_or(0);
+        while let Some(s) = (site as usize).checked_sub(1).and_then(|i| proto.inlined.get(i)) {
+            out.push(TraceEntry {
+                function: s.name.clone(),
+                file: self.prog.files.get(s.file as usize).cloned().unwrap_or_default(),
+                line,
+            });
+            line = s.line as usize;
+            site = s.parent;
+        }
+        let name = if proto.name.starts_with('<') && proto.name.ends_with('>') && proto.name != "<lambda>" && proto.name != "<spawn>" {
+            "<top level>".to_string()
+        } else {
+            proto.name.clone()
+        };
+        out.push(TraceEntry { function: name, file: self.prog.files.get(proto.file as usize).cloned().unwrap_or_default(), line });
     }
 }

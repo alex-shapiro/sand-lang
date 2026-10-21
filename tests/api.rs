@@ -8,8 +8,8 @@ use common::{TempDir, rt, run_with};
 use sandlang::jiff::civil::Date;
 use sandlang::time::TimeZone;
 use sandlang::{
-    Capability, Config, Decision, Engine, Error, LimitKind, Limits, LogLevel, LogRecord, MemorySink, NativeModule, Policy, PromptAnswer,
-    RulePolicy, ValueType,
+    Capability, Config, Decision, Engine, Error, LimitKind, Limits, LogLevel, LogRecord, LogSink, MemorySink, NativeModule, Policy,
+    PromptAnswer, RulePolicy, ValueType,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -649,8 +649,11 @@ fn log_records_go_to_the_host_sink() {
     let config = Config::new().policy(policy).log_sink(move |r: &LogRecord| r2.lock().unwrap().push(r.clone()));
     let src = r#"
 import log
-log.debug("hidden")
-log.info("started", fields: ["user": "ann", "note": "a b"])
+fn start(user: str) {
+    log.info("started", fields: ["user": user, "note": "a b"])
+}
+log.debug("details")
+start("ann")
 log.set_level("error")
 log.warn("hidden")
 log.error("failed")
@@ -658,29 +661,45 @@ log.error("failed")
     let (r, _, err) = run_src(config, src);
     r.unwrap();
     assert_eq!(err, "");
-    let fields = vec![("user".to_string(), "ann".to_string()), ("note".to_string(), "a b".to_string())];
+    let records = records.lock().unwrap();
+    let summary: Vec<_> =
+        records.iter().map(|r| (r.level, r.message.as_str(), r.location.as_ref().map(|l| (l.function.as_str(), l.line)))).collect();
     assert_eq!(
-        *records.lock().unwrap(),
+        summary,
         [
-            LogRecord { level: LogLevel::Info, message: "started".into(), fields },
-            LogRecord { level: LogLevel::Error, message: "failed".into(), fields: vec![] },
+            (LogLevel::Debug, "details", Some(("<top level>", 6))),
+            (LogLevel::Info, "started", Some(("start", 4))),
+            (LogLevel::Error, "failed", Some(("<top level>", 10))),
         ]
     );
+    assert_eq!(records[1].fields, [("user".to_string(), "ann".to_string()), ("note".to_string(), "a b".to_string())]);
 }
 
 #[test]
-fn scripts_cannot_log_below_the_host_level() {
-    let config = Config::new().log_level(LogLevel::Warn);
-    let src = "import log
-log.set_level(\"debug\")
-log.debug(\"d\")
-log.info(\"i\")
-log.warn(\"w\")
-log.set_level(\"off\")
-log.error(\"e\")";
-    let (r, _, err) = run_src(config, src);
+fn log_sinks_select_levels() {
+    struct WarnSink(Arc<Mutex<Vec<String>>>);
+    impl LogSink for WarnSink {
+        fn enabled(&self, level: LogLevel) -> bool {
+            level >= LogLevel::Warn
+        }
+        fn log(&self, record: &LogRecord) {
+            self.0.lock().unwrap().push(record.message.clone());
+        }
+    }
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let config = Config::new().log_sink(WarnSink(messages.clone()));
+    let src = "import log\nlog.debug(\"d\")\nlog.info(\"i\")\nlog.warn(\"w\")\nlog.set_level(\"off\")\nlog.error(\"e\")";
+    let (r, _, _) = run_src(config, src);
     r.unwrap();
-    assert_eq!(err, "WARN w\n");
+    assert_eq!(*messages.lock().unwrap(), ["w"]);
+}
+
+#[test]
+fn log_records_are_dropped_if_stderr_is_denied() {
+    let policy = Policy::custom(|cap: &Capability| if matches!(cap, Capability::Stderr) { Decision::Deny } else { Decision::Allow });
+    let (r, out, err) = run_src(Config::new().policy(policy), "import log\nlog.error(\"failed\")\nprint(\"done\")");
+    r.unwrap();
+    assert_eq!((out.as_str(), err.as_str()), ("done\n", ""));
 }
 
 #[test]

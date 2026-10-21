@@ -5,7 +5,6 @@ use crate::engine::Registry;
 use crate::vm::value::{Obj, Value};
 use crate::vm::{NResult, Vm, fail};
 use std::fmt;
-use std::sync::Arc;
 
 /// The level of a log record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -43,13 +42,23 @@ pub struct LogRecord {
     pub message: String,
     /// The `fields` argument, in insertion order.
     pub fields: Vec<(String, String)>,
+    /// The script location of the `log` call, or `None` if the host called
+    /// the `log` function directly.
+    pub location: Option<crate::TraceFrame>,
 }
 
 /// Receives the records of the `log` module (see [`crate::Config::log_sink`]).
 ///
 /// The engine calls the sink on the thread that runs the script, and the
-/// script waits until the call returns.
+/// script waits until the call returns. Any `Fn(&LogRecord) + Send + Sync`
+/// is a sink that accepts all levels.
 pub trait LogSink: Send + Sync {
+    /// Whether the sink accepts records at `level`. The engine calls it for
+    /// each record and does not build the records that it rejects.
+    fn enabled(&self, _level: LogLevel) -> bool {
+        true
+    }
+
     fn log(&self, record: &LogRecord);
 }
 
@@ -59,18 +68,15 @@ impl<F: Fn(&LogRecord) + Send + Sync> LogSink for F {
     }
 }
 
-/// Where the records of an engine go, and the lowest level that goes there.
-#[derive(Clone)]
-pub(crate) struct LogConfig {
-    /// `None`: standard error, as text.
-    pub sink: Option<Arc<dyn LogSink>>,
-    pub min: LogLevel,
-}
+/// A sink that rejects all records.
+pub(crate) struct NullLogSink;
 
-impl Default for LogConfig {
-    fn default() -> LogConfig {
-        LogConfig { sink: None, min: LogLevel::Debug }
+impl LogSink for NullLogSink {
+    fn enabled(&self, _: LogLevel) -> bool {
+        false
     }
+
+    fn log(&self, _: &LogRecord) {}
 }
 
 pub fn register(r: &mut Registry) {
@@ -96,29 +102,38 @@ pub fn register(r: &mut Registry) {
     });
 }
 
-/// Sends a record to the log sink if both the script and the host enable
+/// Sends a record to the log sink if both the script and the sink enable
 /// `level`.
 fn record(vm: &mut Vm, level: LogLevel, a: &[Value]) -> NResult {
-    if vm.host.log_level.is_none_or(|l| level < l) || level < vm.host.log.min {
+    if vm.host.log_level.is_none_or(|l| level < l) {
         return Ok(Value::Unit);
     }
-    let entries: Vec<(Value, Value)> = match vm.heap.get(a[1]) {
-        Obj::Map(m) => m.entries.iter().flatten().copied().collect(),
-        _ => Vec::new(),
+    let entries = |vm: &Vm| -> Vec<(Value, Value)> {
+        match vm.heap.get(a[1]) {
+            Obj::Map(m) => m.entries.iter().flatten().copied().collect(),
+            _ => Vec::new(),
+        }
     };
-    match vm.host.log.sink.clone() {
+    match vm.host.log_sink.clone() {
         Some(sink) => {
+            if !sink.enabled(level) {
+                return Ok(Value::Unit);
+            }
+            let entries = entries(vm);
             let len = vm.str(a[0]).len() + entries.iter().map(|&(k, v)| vm.str(k).len() + vm.str(v).len()).sum::<usize>();
             vm.reserve(len)?;
             vm.charge_bytes(len)?;
             vm.count_output(2, len)?;
             let message = vm.str(a[0]).to_string();
             let fields = entries.iter().map(|&(k, v)| (vm.str(k).to_string(), vm.str(v).to_string())).collect();
-            sink.log(&LogRecord { level, message, fields });
+            sink.log(&LogRecord { level, message, fields, location: vm.native_caller() });
         }
         None => {
+            if !vm.output_allowed(2)? {
+                return Ok(Value::Unit);
+            }
             let mut line = format!("{level} {}", vm.str(a[0]));
-            for (k, v) in entries {
+            for (k, v) in entries(vm) {
                 let value = vm.str(v);
                 let quote = value.is_empty() || value.chars().any(|c| c.is_whitespace() || c.is_control() || c == '"' || c == '=');
                 let value = if quote { vm.debug(v)? } else { value.to_string() };
@@ -127,7 +142,8 @@ fn record(vm: &mut Vm, level: LogLevel, a: &[Value]) -> NResult {
             }
             line.push('\n');
             vm.charge_bytes(line.len())?;
-            vm.write_stream(2, line.as_bytes())?;
+            vm.count_output(2, line.len())?;
+            vm.write_counted(2, line.as_bytes())?;
         }
     }
     Ok(Value::Unit)
