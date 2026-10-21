@@ -10,8 +10,8 @@ import io
 import json
 import net
 
-/// Starts an HTTP/1.1 server listening on `port` on the IP address `ip`. Port
-/// `0` selects an available ephemeral port.
+/// Starts an HTTP/1.1 server listening on `ip` and `port`. If `port` is `0`,
+/// the operating system assigns an ephemeral port.
 pub native fn serve(ip: str, port: int) -> Result<Server>
 
 /// An HTTP/1.1 server listening for incoming requests. Closing the server stops
@@ -28,7 +28,7 @@ extend Server {
         Ok(Request { method, path, query, headers, body, conn, exchange })
     }
 
-    /// Returns the local address that the server is bound to.
+    /// Returns the bound local address.
     pub native fn addr(self) -> net.SocketAddr
 }
 

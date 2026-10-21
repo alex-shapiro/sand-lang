@@ -140,8 +140,8 @@ pub(crate) fn valid_header(name: &str, value: &str) -> bool {
     is_token(name) && !value.contains(['\r', '\n', '\0'])
 }
 
-/// Converts a `[(str, str)]` list into validated header pairs. Fails with
-/// kind `"invalid"` for an invalid header.
+/// Validates and converts a `[(str, str)]` list into header pairs, or fails
+/// with kind `"invalid"`.
 pub(crate) fn header_pairs(vm: &Vm, list: Value) -> Result<Vec<(String, String)>, Ctl> {
     let items = vm.heap.list(list);
     vm.charge(items.len() as u64)?;

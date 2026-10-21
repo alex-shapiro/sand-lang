@@ -84,9 +84,8 @@ Follow-up work, roughly in priority order.
 
 ### Language
 
-- [ ] Let native functions take enum arguments. `fs.open` maps
-      `fs.Mode` to an `int` in Sand before it calls the native `open_file`,
-      and other modules take strings (`log.set_level`) for the same reason.
+- [ ] Support enum parameters in native functions so modules such as `fs` and
+      `log` do not need to convert enums to integers or strings.
 
 - [ ] **Construct all types with `T(...)`.** Replace struct literals with
       named-argument calls (`Point(x: 1.0, y: 2.0)`, with defaults and

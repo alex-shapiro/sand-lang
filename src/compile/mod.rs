@@ -29,7 +29,7 @@ pub struct CompileInput<'a> {
     pub checked: &'a CheckedProgram,
     pub sm: &'a SourceMap,
     pub natives: &'a NativeIds,
-    pub natives_info: crate::modules::NativeInfo,
+    pub native_info: crate::modules::NativeInfo,
     /// Charged one unit per expression compiled, instruction emitted and
     /// node visited by an analysis. Once it is exhausted the compiler skips
     /// the rest of the code (callers check `budget.stopped()` and discard
@@ -384,9 +384,8 @@ impl<'a> Compiler<'a> {
                 self.inline.insert(id, op);
             }
         }
-        // Native names are only given when (new) natives were checked.
-        if !input.natives_info.names.is_empty() {
-            let info = input.natives_info;
+        if !input.native_info.names.is_empty() {
+            let info = input.native_info;
             self.prog.native_names = info.names.into();
             self.prog.native_argc = info.argc.into();
             self.prog.native_returns_result = info.returns_result.into();

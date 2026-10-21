@@ -116,7 +116,6 @@ mod network {
         listened: Mutex<Vec<SocketAddr>>,
     }
 
-    /// Accepts one connection, whose peer has sent a line.
     struct MemoryListener {
         addr: SocketAddr,
         pending: Mutex<Option<tokio::io::DuplexStream>>,

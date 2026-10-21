@@ -1,7 +1,7 @@
 //! The policy file linter.
 
 use super::file::parse;
-use super::net::{HostKind, host_port};
+use super::net::{HostKind, format_host_port};
 use super::path::{self, Pattern, Seg, name_counts, path_segments};
 use super::rules::{IMPORT, READ, Rule, RuleKind, WRITE};
 use super::{Capability, PathSpace, PolicyError, fold_name};
@@ -79,7 +79,7 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
                     warn(
                         i,
                         "bypassable-http-deny",
-                        format!("{} lets scripts connect to {} and send any request", describe(j), host_port(&host, port)),
+                        format!("{} lets scripts connect to {} and send any request", describe(j), format_host_port(&host, port)),
                     );
                 }
             }

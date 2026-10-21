@@ -151,7 +151,7 @@ impl Snapshot {
             checked: &cp,
             sm: &sm,
             natives: &registry.by_name,
-            natives_info: native_info(&cp, registry),
+            native_info: native_info(&cp, registry),
             budget: &budget,
             initialized: None,
             optimize: true,
@@ -549,9 +549,7 @@ pub(crate) fn budget_error(stop: Stop, sm: &SourceMap, main_file: u32) -> Error 
     }
 }
 
-/// Names and argument counts (by native id) of the natives declared by the
-/// checked modules.
-/// What the compiled program knows about each native, by id.
+/// Metadata for each native function, indexed by native ID.
 #[derive(Default)]
 pub(crate) struct NativeInfo {
     pub names: Vec<String>,

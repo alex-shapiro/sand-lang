@@ -5,7 +5,7 @@
 //! live in a thread-local table and the sinks and prompters hold their key.
 
 use js_sys::Function;
-use sandlang::policy::host_port;
+use sandlang::policy::format_host_port;
 use sandlang::{Capability, OutputSink, PromptAnswer, Prompter};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -159,8 +159,7 @@ fn describe(cap: &Capability) -> (&'static str, String) {
         Capability::FsRead(p) => ("read", p.display().to_string()),
         Capability::FsWrite(p) => ("write", p.display().to_string()),
         Capability::Import(p) => ("import", p.display().to_string()),
-        Capability::Net { host, port } => ("net", host_port(host, *port)),
-        // The URL, after the method.
+        Capability::Net { host, port } => ("net", format_host_port(host, *port)),
         Capability::Http { .. } => ("http", cap.to_string().split_once(' ').map_or_else(String::new, |(_, url)| url.to_string())),
         Capability::NetAddr { addr, .. } => ("net", addr.to_string()),
         Capability::NetListen(addr) => ("listen", addr.to_string()),

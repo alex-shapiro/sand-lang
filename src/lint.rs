@@ -853,13 +853,8 @@ impl<'a> Linter<'a> {
     }
 }
 
-/// Private functions and methods of the main module that are unreachable from
-/// its public API, top-level code and tests (`unused-function`).
-///
-/// References are the resolved function ids in the checked HIR: direct calls
-/// (including method calls), function values and default-argument
-/// helpers. Reachability (rather than "referenced anywhere") means a function
-/// used only by itself or by other unused functions is unused too.
+/// Returns private functions and methods in the main module that are not
+/// reachable from public items, top-level code, or tests.
 fn unused_functions(checked: &CheckedProgram) -> Vec<FnId> {
     let main = checked.main_module;
     let n = checked.fns.len();

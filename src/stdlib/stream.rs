@@ -19,7 +19,6 @@ impl IoFailure {
     }
 }
 
-/// A native returns an `IoFailure` to the script as `Err(Error)`.
 impl From<IoFailure> for Ctl {
     fn from(e: IoFailure) -> Ctl {
         Ctl::native_err(e.kind, e.message)

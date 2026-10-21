@@ -36,7 +36,7 @@ RUN, TEST AND REPL OPTIONS (all access is denied unless allowed):
                              (loopback, RFC 1918, link-local, ...); by default only
                              IP literals, ranges and localhost allowed explicitly
     --allow-listen=ADDRS     addresses the script may listen on (ip:port, ip, localhost
-                             or *:port; port * = any, 0 = an ephemeral port)
+                             or *:port; port * = any, 0 = ephemeral port)
     --allow-env=NAMES        environment variables the script may read
     --allow-stdin            allow reading standard input
     --allow-timezone         allow reading the local time zone (otherwise UTC)

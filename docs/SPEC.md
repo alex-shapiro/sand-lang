@@ -2048,15 +2048,18 @@ nesting depth of 512.
 
 ### 13.8 `log`
 
-`debug(msg: str)`, `info(msg: str)`, `warn(msg: str)`, `error(msg: str)`;
-each accepts `fields: [str: str] = [:]`. `set_level(level: str)` with `"debug"`,
-`"info"` (default; the host can set another, §16), `"warn"`, `"error"`, `"off"`.
-Records below the script's level are dropped. The others go to the host log sink (§16), which also
-selects levels, and count against `max_output_bytes`. Without a host sink,
-records go to stderr as `LEVEL message key=value ...`, with quotes around a
-message that is empty or contains control characters, and around keys and
-values that are empty or contain whitespace, control characters, `"` or `=`. If the policy denies
-`Stderr`, the engine drops them.
+`debug`, `info`, `warn`, and `error` emit structured log records with signature
+`(msg: str, fields: [str: str] = [:])`. `set_level(level: str)` sets the minimum
+script log level to `"debug"`, `"info"` (the default unless overridden by the
+host, §16), `"warn"`, `"error"`, or `"off"`.
+
+The engine drops records below the active script or host sink level, and counts
+emitted records against `max_output_bytes`. If the host configures a log sink
+(§16), the engine passes each enabled record to the sink. Otherwise, if the
+policy allows `Stderr`, the engine writes `LEVEL message key=value ...` to
+standard error, quoting empty messages, messages with control characters, and
+empty keys or values or those containing whitespace, control characters, `"`, or
+`=`.
 
 ### 13.9 `math`
 
@@ -2083,14 +2086,13 @@ addr.ip() -> str
 addr.port() -> int
 ```
 
-`host` is a host name or an IP address without brackets (`"::1"`), `ip` is
-an IP address, and `port` is in `0..=65535`; other values fail with kind
-`"invalid"`. Port `0` makes `listen` and `http.serve` select an ephemeral
-port. A listener on an IPv6 address accepts only IPv6 connections, and one
-on an IPv4-mapped address (`::ffff:127.0.0.1`) listens on the IPv4 address.
-`split_host_port` splits text such as `"example.com:80"` or
-`"[::1]:80"` and fails with kind `"parse"` on other text. `SocketAddr` is a
-value type (§5.4) formatted as `127.0.0.1:8080` or `[::1]:8080`.
+`host` must be a hostname or unbracketed IP address (`"::1"`), `ip` must be an
+IP address, and `port` must be in `0..=65535`; otherwise the call fails with
+kind `"invalid"`. If `port` is `0`, `listen` and `http.serve` bind an ephemeral
+port. An IPv6 listener accepts only IPv6 connections, and an IPv4-mapped IPv6
+address (`::ffff:127.0.0.1`) is bound as IPv4. `split_host_port` parses
+`"host:port"` or `"[ipv6]:port"`, or fails with kind `"parse"`. `SocketAddr` is
+a value type (§5.4) formatted as `127.0.0.1:8080` or `[::1]:8080`.
 
 `Listener` implements `Close`; `Conn` implements `io.Reader`, `io.Writer`
 (§13.5) and `Close`. A connection's `read` returns at most what its 8 KiB
@@ -2373,10 +2375,10 @@ If two opposing rules have equal specificity, deny wins. Rules:
   - specific names are prioritized above wildcard patterns
 
 - **Listen addresses** (`NetListen`)
-  - `ip:port`, `[v6]:port`, `ip`, `localhost` (the loopback addresses), `*:port` or `*`
-  - host `*` and port `*` match any address or port; port `0` matches only a request for an ephemeral port
+  - patterns are `ip:port`, `[ipv6]:port`, `ip`, `localhost` (any loopback address), `*:port`, or `*`
+  - host `*` matches any address, port `*` matches any port, and port `0` matches only an ephemeral port request
   - IPv4-mapped IPv6 addresses are compared as IPv4
-  - a rule with an address is more specific than one without, then a rule with a port
+  - specificity compares the host (`ip` or `localhost` before `*`), then the port
 
 - **Custom capabilities**:
   - a native module may define its own capabilities
@@ -2697,14 +2699,14 @@ let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 
   `stdin_bytes`. With `Config::stdin_feed(&StdinFeed)`, scripts read what
   the host `send`s (`end()` ends one read); `wanted()` is resolved if a script
   is waiting for input and has nothing else to run.
-- `Config::log_sink(impl LogSink)` receives each `log` record as a
-  `LogRecord { level, message, fields, location }` instead of standard error.
-  `LogSink::enabled(level)` selects the levels; the engine does not build the
-  records it rejects. Any `Fn(&LogRecord) + Send + Sync` is a `LogSink` that
-  accepts all levels. The engine calls the sink on the thread that runs the
-  script. `LogRecord`'s `Display` form is the line written to standard error
-  without a sink. `Config::log_level(LogLevel)` sets the level that runs
-  start at (default `Info`).
+- `Config::log_sink(impl LogSink)` routes `log` records to a host sink as
+  `LogRecord { level, message, fields, location }` on the executing thread
+  instead of writing to standard error. `LogSink::enabled(level)` filters
+  records before the engine constructs a `LogRecord`; any
+  `Fn(&LogRecord) + Send + Sync` implements `LogSink` for all levels. `Display`
+  formats `LogRecord` in the default standard error format.
+  `Config::log_level(LogLevel)` sets the initial script log level (default
+  `Info`).
 - `Config::memory_fs(MemFs)` gives scripts a memory file system (§16.1).
 - `Config::library(dir)` sets the directory of library scripts for
   `import <name>` (§3.2). `Engine::module_names()` returns the registered
@@ -2716,10 +2718,10 @@ let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 
   through `Clock::yield_now`. `MemFs::with_capacity_and_clock` sets file
   modification timestamps from this clock.
 - `Config::network(Arc<dyn network::Network>)` sets the network provider for
-  host resolution, outgoing TCP streams and listeners in `net` and `http`. The
-  engine checks network policy before connecting or listening, and negotiates
-  TLS over the returned stream. `Network::listen` must bind exactly the
-  checked address: an IPv6 listener must not accept IPv4 connections.
+  host resolution, outgoing TCP streams, and TCP listeners in `net` and `http`.
+  The engine checks the network policy before connecting or listening, and
+  negotiates TLS over the returned stream. `Network::listen` must bind only the
+  requested address; an IPv6 listener must not accept IPv4 connections.
 - `Config::time_zone(sandlang::time::TimeZone)` sets the time zone returned by
   `time.local_zone()` if the policy allows `TimeZone`. Use `TimeZone::get(name)`
   to look up a zone by name or offset, or `TimeZone::system()` (feature `os`)
@@ -2929,7 +2931,7 @@ these:
 methods of `pub` types. A private function is used only if reachable from
 top-level code, a `test` block or a public item, through calls (including
 method calls), function values, default arguments and the
-arguments of `help` and `members`; one referenced only by itself or by
+arguments of `help` and `members`; a function referenced only by itself or by
 unused functions is reported.
 
 `shadowed-variable`: the earlier binding may be a parameter, a `let`/`var`

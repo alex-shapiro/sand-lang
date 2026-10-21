@@ -12,7 +12,7 @@
 //! limit memory 64M
 //! ```
 
-use super::net::{ListenPattern, NetPattern, UrlPattern, host_port, url_origin, url_segments};
+use super::net::{ListenPattern, NetPattern, UrlPattern, format_host_port, format_url_origin, url_segments};
 use super::path::{Seg, Tok};
 use super::rules::{Access, NamePattern, Origin, PathPattern, Rule, RuleKind};
 use super::{Capability, Decision, Policy, RulePolicy};
@@ -579,7 +579,7 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
         Capability::FsWrite(p) => format!("write {}", path(p)?),
         Capability::Import(p) => format!("import {}", path(p)?),
         Capability::Net { host, port } => {
-            let pattern = host_port(host, *port);
+            let pattern = format_host_port(host, *port);
             NetPattern::parse(&pattern)?;
             format!("net {pattern}")
         }
@@ -588,7 +588,7 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
             if alt.is_some() || !is_method(&method.to_ascii_uppercase()) || !matches!(scheme.as_str(), "http" | "https") {
                 return None;
             }
-            let mut url = url_origin(scheme, host, *port);
+            let mut url = format_url_origin(scheme, host, *port);
             for name in &names {
                 url.push('/');
                 url.push_str(&crate::stdlib::uri_encode(name, b"!$&'()+;=:@-._~"));
@@ -933,7 +933,6 @@ mod tests {
         assert_eq!(rule_for(&caps[8], false).unwrap(), "deny http POST http://[::1]:8080");
         assert_eq!(rule_for(&Capability::Stdout, true), None);
         assert_eq!(rule_for(&Capability::Stdout, false).as_deref(), Some("deny stdout"));
-        // The rule for an ephemeral port covers no other port.
         let p = parse(&format!("default prompt\n{}", rule_for(caps.last().unwrap(), true).unwrap()));
         assert_eq!(decide(&p, Capability::NetListen("[::1]:22".parse().unwrap())), Prompt);
     }

@@ -307,7 +307,7 @@ impl Config {
     }
 
     /// Sets the network provider for host resolution, outgoing TCP
-    /// connections and listeners.
+    /// connections, and TCP listeners.
     #[cfg(feature = "os")]
     pub fn network(mut self, network: Arc<dyn crate::network::Network>) -> Self {
         self.network = Some(network);
@@ -352,16 +352,13 @@ impl Config {
         self.stderr = Arc::new(s);
         self
     }
-    /// Sends the records of the `log` module to `sink` instead of writing
-    /// them to standard error. Records still count against the output limit,
-    /// but do not need [`Capability::Stderr`].
+    /// Routes `log` records to `sink` instead of standard error. Records count
+    /// against `max_output_bytes`, but do not require [`Capability::Stderr`].
     pub fn log_sink(mut self, sink: impl crate::LogSink + 'static) -> Self {
         self.log_sink = Some(Arc::new(sink));
         self
     }
-    /// Sets the lowest level of `log` records at the start of a run (default
-    /// [`LogLevel::Info`](crate::LogLevel::Info)). Scripts change it with
-    /// `log.set_level`.
+    /// Sets the initial script log level (default [`LogLevel::Info`](crate::LogLevel::Info)).
     pub fn log_level(mut self, level: crate::LogLevel) -> Self {
         self.log_level = level;
         self
@@ -1530,9 +1527,9 @@ fn compile_program(
         Some(main) => Some(crate::lint::lint_module(main, &main.source, &cp, budget)?),
         None => None,
     };
-    let natives_info = if host { native_info(&cp, registry) } else { crate::modules::NativeInfo::default() };
+    let native_info = if host { native_info(&cp, registry) } else { crate::modules::NativeInfo::default() };
     let mut program = spare.unwrap_or_else(|| snap.program.clone());
-    let input = CompileInput { checked: &cp, sm, natives: &registry.by_name, natives_info, budget, initialized: None, optimize };
+    let input = CompileInput { checked: &cp, sm, natives: &registry.by_name, native_info, budget, initialized: None, optimize };
     let entry = compile_more(input, &mut program, &mut snap.compiler.clone(), &inits);
     if let Some(stop) = budget.stopped() {
         return Err(budget_error(stop, sm, main_file));

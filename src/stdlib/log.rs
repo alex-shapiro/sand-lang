@@ -8,7 +8,7 @@ use crate::vm::{NResult, Vm, fail};
 use std::borrow::Cow;
 use std::fmt;
 
-/// The level of a log record.
+/// Severity level of a [`LogRecord`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum LogLevel {
     Debug,
@@ -20,7 +20,7 @@ pub enum LogLevel {
 impl LogLevel {
     const ALL: [LogLevel; 4] = [LogLevel::Debug, LogLevel::Info, LogLevel::Warn, LogLevel::Error];
 
-    /// The upper-case name (`"DEBUG"`).
+    /// Returns the uppercase level name (such as `"INFO"`).
     pub fn name(self) -> &'static str {
         match self {
             LogLevel::Debug => "DEBUG",
@@ -37,21 +37,20 @@ impl fmt::Display for LogLevel {
     }
 }
 
-/// A record that a script wrote with the `log` module.
+/// A structured log record emitted by the `log` module.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LogRecord {
     pub level: LogLevel,
     pub message: String,
-    /// The `fields` argument, in insertion order.
+    /// Key-value fields in insertion order.
     pub fields: Vec<(String, String)>,
-    /// The script location of the `log` call, if known.
+    /// Source location of the `log` call.
     pub location: Option<crate::TraceFrame>,
 }
 
-/// The line that the engine writes to standard error without a host sink:
-/// `LEVEL message key=value ...`. A message that is empty or contains
-/// control characters is quoted, as is a key or value that is empty or
-/// contains whitespace, control characters, `"` or `=`.
+/// Formats the record as `LEVEL message key=value ...`, quoting empty messages,
+/// messages with control characters, and empty keys or values or those
+/// containing whitespace, control characters, `"`, or `=`.
 impl fmt::Display for LogRecord {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} {}", self.level, quote_if(&self.message, self.message.is_empty() || self.message.contains(char::is_control)))?;
@@ -75,14 +74,14 @@ fn quote_if(s: &str, quote: bool) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
-/// Receives the records of the `log` module (see [`crate::Config::log_sink`]).
+/// Consumer for records emitted by the `log` module (see [`crate::Config::log_sink`]).
 ///
-/// The engine calls the sink on the thread that runs the script, and the
-/// script waits until the call returns. Any `Fn(&LogRecord) + Send + Sync`
-/// is a sink that accepts all levels.
+/// The engine invokes [`LogSink::log`] synchronously on the thread executing the
+/// script. Any `Fn(&LogRecord) + Send + Sync` implements `LogSink` for all
+/// levels.
 pub trait LogSink: Send + Sync {
-    /// Whether the sink accepts records at `level`. The engine calls it for
-    /// each record and does not build the records that it rejects.
+    /// Returns true if the sink accepts records at `level`. The engine skips
+    /// constructing [`LogRecord`] values for disabled levels.
     fn enabled(&self, _level: LogLevel) -> bool {
         true
     }
@@ -96,7 +95,6 @@ impl<F: Fn(&LogRecord) + Send + Sync> LogSink for F {
     }
 }
 
-/// A sink that rejects all records.
 pub(crate) struct NullLogSink;
 
 impl LogSink for NullLogSink {
@@ -109,10 +107,10 @@ impl LogSink for NullLogSink {
 
 pub fn register(r: &mut Registry) {
     r.source("log", ModKind::Std, include_str!("log.sand"));
-    r.add_builtin("log.debug", |vm, a| record(vm, LogLevel::Debug, a));
-    r.add_builtin("log.info", |vm, a| record(vm, LogLevel::Info, a));
-    r.add_builtin("log.warn", |vm, a| record(vm, LogLevel::Warn, a));
-    r.add_builtin("log.error", |vm, a| record(vm, LogLevel::Error, a));
+    r.add_builtin("log.debug", |vm, a| emit_record(vm, LogLevel::Debug, a));
+    r.add_builtin("log.info", |vm, a| emit_record(vm, LogLevel::Info, a));
+    r.add_builtin("log.warn", |vm, a| emit_record(vm, LogLevel::Warn, a));
+    r.add_builtin("log.error", |vm, a| emit_record(vm, LogLevel::Error, a));
     r.add_builtin("log.set_level", |vm, a| {
         let name = vm.str(a[0]);
         if name.eq_ignore_ascii_case("off") {
@@ -130,10 +128,7 @@ pub fn register(r: &mut Registry) {
     });
 }
 
-/// Sends a record to the log sink if both the script and the sink enable
-/// `level`. Without a host sink, writes the record's text to stderr if the
-/// policy allows it.
-fn record(vm: &mut Vm, level: LogLevel, a: &[Value]) -> NResult {
+fn emit_record(vm: &mut Vm, level: LogLevel, a: &[Value]) -> NResult {
     if vm.host.log_level.is_none_or(|l| level < l) {
         return Ok(Value::Unit);
     }

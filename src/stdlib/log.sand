@@ -1,8 +1,8 @@
 //! Structured leveled logging.
 //!
-//! The host receives the records. By default, it writes them to standard
-//! error as `LEVEL message key=value ...`, and drops them if the policy
-//! denies `Stderr`.
+//! By default, the engine writes records to standard error as
+//! `LEVEL message key=value ...` if the policy allows `Stderr`. The host can
+//! redirect records to a custom sink.
 
 /// Logs `msg` and optional `fields` at level `debug`.
 pub native fn debug(msg: str, fields: [str: str] = [:])
@@ -16,6 +16,6 @@ pub native fn warn(msg: str, fields: [str: str] = [:])
 /// Logs `msg` and optional `fields` at level `error`.
 pub native fn error(msg: str, fields: [str: str] = [:])
 
-/// Sets the lowest level to log (`"debug"`, `"info"`, `"warn"`, `"error"`, or
-/// `"off"`). The host sets the level at the start, by default `"info"`.
+/// Sets the minimum active log level (`"debug"`, `"info"`, `"warn"`, `"error"`,
+/// or `"off"`). Defaults to `"info"` unless configured by the host.
 pub native fn set_level(level: str)

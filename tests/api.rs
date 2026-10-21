@@ -644,7 +644,6 @@ fn stdout_can_be_denied() {
 fn log_records_go_to_the_host_sink() {
     let records = Arc::new(Mutex::new(Vec::<LogRecord>::new()));
     let r2 = records.clone();
-    // A sink replaces standard error, so denying it does not matter.
     let policy = Policy::custom(|cap: &Capability| if matches!(cap, Capability::Stderr) { Decision::Deny } else { Decision::Allow });
     let config = Config::new().policy(policy).log_sink(move |r: &LogRecord| r2.lock().unwrap().push(r.clone()));
     let src = r#"
@@ -1845,9 +1844,6 @@ fn host_modules_can_define_resources() {
     assert_eq!(closed.load(Ordering::Relaxed), 5);
 }
 
-/// A native fails with `Ctl::native_err`: a native returning a `Result`
-/// returns `Err` to the script, and the others fail with an internal error,
-/// before and after suspending.
 #[test]
 fn native_errors_reach_only_natives_returning_results() {
     use sandlang::Value;

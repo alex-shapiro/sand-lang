@@ -13,24 +13,24 @@
 
 import io
 
-/// Binds a TCP listener to `port` on the IP address `ip` (such as
-/// `"127.0.0.1"` or `"::"`). Port `0` selects an available ephemeral port.
-/// A listener on an IPv6 address accepts only IPv6 connections.
+/// Binds a TCP listener to `ip` and `port` (such as `"127.0.0.1"` or `"::"`).
+/// If `port` is `0`, the operating system assigns an ephemeral port. An IPv6
+/// listener accepts only IPv6 connections.
 pub native fn listen(ip: str, port: int) -> Result<Listener>
 
-/// Opens a TCP connection to `port` on `host` (a host name or an IP
-/// address), or fails with kind `"timeout"` if the connection does not
-/// complete within `timeout`.
+/// Opens a TCP connection to `host` (a hostname or unbracketed IP address) and
+/// `port`, or fails with kind `"timeout"` if the connection does not complete
+/// within `timeout`.
 pub native fn connect(host: str, port: int, timeout: duration = 30s) -> Result<Conn>
 
-/// Opens a TLS-encrypted TCP connection to `port` on `host` and verifies the
+/// Opens a TLS-encrypted TCP connection to `host` and `port`, and verifies the
 /// server certificate against the bundled Web PKI roots and any custom host
 /// roots (requires the `tls` feature). Fails with kind `"timeout"` if the TCP
 /// connection and TLS handshake do not complete within `timeout`.
 pub native fn connect_tls(host: str, port: int, timeout: duration = 30s) -> Result<Conn>
 
-/// Splits `"host:port"` or `"[ipv6]:port"` into a host and a port, or fails
-/// with kind `"parse"`.
+/// Parses `"host:port"` or `"[ipv6]:port"` into an unbracketed host and port,
+/// or fails with kind `"parse"`.
 ///
 /// ```
 /// let (host, port) = net.split_host_port("example.com:80")?
@@ -41,9 +41,9 @@ pub native fn split_host_port(text: str) -> Result<(str, int)>
 pub native type SocketAddr
 
 extend SocketAddr {
-    /// Returns the IP address (`"127.0.0.1"`, `"::1"`).
+    /// Returns the IP address string (such as `"127.0.0.1"` or `"::1"`).
     pub native fn ip(self) -> str
-    /// Returns the port.
+    /// Returns the port number.
     pub native fn port(self) -> int
 }
 
@@ -53,7 +53,7 @@ pub native type Listener
 extend Listener {
     /// Waits for and returns the next incoming TCP connection.
     pub native fn accept(self) -> Result<Conn>
-    /// Returns the local address that the listener is bound to.
+    /// Returns the bound local address.
     pub native fn addr(self) -> SocketAddr
 }
 
@@ -88,6 +88,6 @@ impl Close for Conn {
 }
 
 extend Conn {
-    /// Returns the address of the remote peer.
+    /// Returns the remote peer address.
     pub native fn peer_addr(self) -> SocketAddr
 }

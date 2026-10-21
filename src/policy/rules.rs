@@ -253,18 +253,22 @@ impl RulePolicy {
         self.deny_private = true;
         self
     }
-    /// Allows listening. Patterns: `ip:port`, `[v6]:port`, `ip`,
-    /// `localhost` (the loopback addresses), `*:port` or `*`. Host `*` or
-    /// port `*` matches any address or port, and port `0` matches only a
-    /// request for an ephemeral port.
+    /// Allows binding a listener matching `pattern` (`ip:port`, `[ipv6]:port`,
+    /// `ip`, `localhost`, `*:port`, or `*`). Host `*` matches any address, port
+    /// `*` matches any port, and port `0` matches only an ephemeral port
+    /// request.
     ///
     /// # Panics
     ///
-    /// If the pattern is invalid.
+    /// Panics if `pattern` is invalid.
     pub fn allow_listen(self, pattern: &str) -> Self {
         self.push(true, RuleKind::Listen(listen_pattern(pattern)))
     }
-    /// Denies listening ([`RulePolicy::allow_listen`]'s patterns).
+    /// Denies binding a listener matching `pattern` (see [`RulePolicy::allow_listen`]).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `pattern` is invalid.
     pub fn deny_listen(self, pattern: &str) -> Self {
         self.push(false, RuleKind::Listen(listen_pattern(pattern)))
     }

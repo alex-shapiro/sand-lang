@@ -498,8 +498,7 @@ struct Parts {
     headers: Vec<(String, String)>,
 }
 
-/// Validates a response's status and headers, failing with kind `"invalid"`.
-fn response_parts(vm: &Vm, status: Value, headers: Value) -> Result<Parts, Ctl> {
+fn validate_response(vm: &Vm, status: Value, headers: Value) -> Result<Parts, Ctl> {
     let status = status.as_int();
     if !(100..=999).contains(&status) {
         return Err(Ctl::native_err("invalid", format!("invalid HTTP status {status}")));
@@ -522,7 +521,7 @@ fn has_body(status: i64) -> bool {
 /// `write_response(conn, exchange, request_body, status, body, headers,
 /// include_body)`: writes a response with a `content-length` to `conn`.
 fn write_response(vm: &mut Vm, a: &[Value]) -> NResult {
-    let Parts { status, headers } = response_parts(vm, a[3], a[5])?;
+    let Parts { status, headers } = validate_response(vm, a[3], a[5])?;
     let has_body = has_body(status);
     let delimit = if has_body { Delimit::Length(vm.heap.bytes_of(a[4]).len() as u64) } else { Delimit::None };
     let (after, connection) = after(vm, a[1], a[2], delimit)?;
@@ -540,7 +539,7 @@ fn write_response(vm: &mut Vm, a: &[Value]) -> NResult {
 /// `reply_body(exchange, request_body, status, headers, include_body)`: the
 /// `Outgoing` of a streamed response.
 fn reply_body(vm: &mut Vm, a: &[Value]) -> NResult {
-    let Parts { status, headers } = response_parts(vm, a[2], a[3])?;
+    let Parts { status, headers } = validate_response(vm, a[2], a[3])?;
     let length = match given_length(&headers) {
         Ok(n) => n,
         Err(e) => return Err(Ctl::native_err("invalid", e)),

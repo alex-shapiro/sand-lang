@@ -111,7 +111,7 @@ pub fn register(r: &mut Registry) {
         // Every directory to be created must be writable, not just the last.
         // Those that exist are not created, whatever happens meanwhile.
         for dir in vm.host.fs.missing_ancestors(&t) {
-            deny_path(vm, Capability::FsWrite(dir), &shown, false)?;
+            check_path(vm, Capability::FsWrite(dir), &shown, false)?;
         }
         run(vm, shown, move |fs| fs.create_dir_all(t), ok_unit)
     });
@@ -254,8 +254,6 @@ enum Access {
     Write,
 }
 
-/// Fails with kind `"permission_denied"`, showing the path as the script
-/// wrote it.
 fn denied(cap: &Capability, shown: &str) -> Ctl {
     let verb = match cap {
         Capability::FsRead(_) => "read",
@@ -264,9 +262,8 @@ fn denied(cap: &Capability, shown: &str) -> Ctl {
     Ctl::native_err("permission_denied", format!("permission denied: {verb} {shown}"))
 }
 
-/// Checks access to `t` against the policy, failing with kind
-/// `"permission_denied"`. Resolves on-disk names on case-insensitive file
-/// systems only when necessary.
+/// Checks `access` to `t` against the policy, resolving on-disk case on
+/// case-insensitive file systems only if required by the policy.
 fn check(vm: &mut Vm, t: &mut Target, access: Access, shown: &str) -> Result<(), Ctl> {
     let cap = |p: &Path| match access {
         Access::Read => Capability::FsRead(p.to_path_buf()),
@@ -291,11 +288,10 @@ fn check(vm: &mut Vm, t: &mut Target, access: Access, shown: &str) -> Result<(),
             }
         }
     }
-    deny_path(vm, cap(&t.path), shown, t.mode == Mode::Entry)
+    check_path(vm, cap(&t.path), shown, t.mode == Mode::Entry)
 }
 
-/// Checks `cap` against the policy, failing with kind `"permission_denied"`.
-fn deny_path(vm: &mut Vm, cap: Capability, shown: &str, entry: bool) -> Result<(), Ctl> {
+fn check_path(vm: &mut Vm, cap: Capability, shown: &str, entry: bool) -> Result<(), Ctl> {
     if vm.permit_path(&cap, entry)? { Ok(()) } else { Err(denied(&cap, shown)) }
 }
 
@@ -351,7 +347,6 @@ fn scan_tree(
     })
 }
 
-/// The error value for a tree that holds an entry the policy protects.
 fn protected(shown: &str) -> Ctl {
     Ctl::native_err("permission_denied", format!("permission denied: {shown} contains paths protected by the policy"))
 }

@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-/// Resolves host names, opens network connections and binds listeners.
+/// Resolves host names, opens network connections, and binds listeners.
 pub trait Network: Send + Sync {
     /// Resolves a host name and port to socket addresses.
     fn resolve<'a>(&'a self, host: &'a str, port: u16) -> NetworkFuture<'a, Vec<SocketAddr>>;
@@ -14,20 +14,19 @@ pub trait Network: Send + Sync {
     /// Connects to the first reachable address in `addrs`.
     fn connect<'a>(&'a self, addrs: &'a [SocketAddr]) -> NetworkFuture<'a, (Box<dyn Stream>, SocketAddr)>;
 
-    /// Binds a listener to exactly `addr` (port `0`: an ephemeral port). A
-    /// listener on an IPv6 address must not accept IPv4 connections, so that
-    /// the policy decision for `addr` covers all of its connections.
+    /// Binds a listener to `addr` (port `0` binds an ephemeral port). An IPv6
+    /// listener must not accept IPv4 connections.
     fn listen(&self, addr: SocketAddr) -> NetworkFuture<'_, Box<dyn Listener>>;
 }
 
 /// A listening socket.
 pub trait Listener: Send + Sync {
-    /// The address that the listener is bound to.
+    /// Returns the bound local address.
     fn local_addr(&self) -> io::Result<SocketAddr>;
 
-    /// Waits for the next incoming connection and returns it with the
-    /// address of its peer. Several calls can wait at the same time, and
-    /// dropping the future before it completes loses no connection.
+    /// Accepts the next incoming connection and returns the stream and peer
+    /// address. Implementations must support concurrent calls and must be
+    /// cancel-safe.
     fn accept(&self) -> NetworkFuture<'_, (Box<dyn Stream>, SocketAddr)>;
 }
 
@@ -60,15 +59,14 @@ impl Network for OsNetwork {
     }
 }
 
-/// Binds a TCP listener as `tokio::net::TcpListener::bind` does, with
-/// `IPV6_V6ONLY` set on IPv6 sockets.
+/// Binds a nonblocking TCP listener with `IPV6_V6ONLY` enabled on IPv6 sockets.
 fn bind(addr: SocketAddr) -> io::Result<tokio::net::TcpListener> {
     use socket2::{Domain, Protocol, Socket, Type};
     let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
     if addr.is_ipv6() {
         socket.set_only_v6(true)?;
     }
-    // On Windows, `SO_REUSEADDR` lets other sockets take over the port.
+    // On Windows, `SO_REUSEADDR` allows another socket to hijack an active port.
     #[cfg(not(windows))]
     socket.set_reuse_address(true)?;
     socket.bind(&addr.into())?;

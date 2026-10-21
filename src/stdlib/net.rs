@@ -9,7 +9,7 @@ use super::stream::{IoFailure, read_line_bytes, read_to_end_reserved, strip_eol}
 use crate::check::ModKind;
 use crate::engine::Registry;
 use crate::network::{self, Network, Stream};
-use crate::policy::{Capability, Decision, Policy, host_port, is_private_address, is_valid_host, parse_port, split_port};
+use crate::policy::{Capability, Decision, Policy, format_host_port, is_private_address, is_valid_host, parse_port, split_port};
 use crate::vm::iomem::{Reservation, ResourceSlot};
 use crate::vm::value::{NativeObject, Obj, Value, ValueType};
 use crate::vm::{Ctl, Finisher, NResult, Vm};
@@ -84,7 +84,7 @@ pub(crate) fn suspend<T: Send + 'static>(
     Err(Ctl::suspend(Box::pin(async move { finish(fut.await, ok) })))
 }
 
-/// Checks `cap`, failing with kind `"permission_denied"` if it is denied.
+/// Checks `cap` against the policy, or fails with kind `"permission_denied"`.
 pub(crate) fn check_permission(vm: &mut Vm, cap: Capability) -> Result<(), Ctl> {
     if vm.permit(&cap)? { Ok(()) } else { Err(Ctl::native_err("permission_denied", format!("permission denied: {cap}"))) }
 }
@@ -152,14 +152,13 @@ impl CloseSignal {
 // ----------------------------------------------------------------------
 // Addresses
 
-/// An IP address and port (`net.SocketAddr`), formatted as `127.0.0.1:80`
-/// or `[::1]:80`. The IPv6 flow label is always zero, so that the text
-/// form holds the whole value.
+/// Backing value for `net.SocketAddr`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct SocketAddr(std::net::SocketAddr);
 
 impl From<std::net::SocketAddr> for SocketAddr {
     fn from(mut addr: std::net::SocketAddr) -> SocketAddr {
+        // `SocketAddrV6` omits `flowinfo` in `Display` and `FromStr`.
         if let std::net::SocketAddr::V6(v6) = &mut addr {
             v6.set_flowinfo(0);
         }
@@ -187,7 +186,6 @@ fn socket_addr(vm: &Vm, v: Value) -> Result<SocketAddr, Ctl> {
     vm.heap.value::<SocketAddr>(v).ok_or_else(|| Ctl::internal("not a socket address"))
 }
 
-/// Splits `host:port` or `[ipv6]:port` into a host and a port.
 fn split_host_port(vm: &mut Vm, a: &[Value]) -> NResult {
     let text = vm.str(a[0]);
     let parts = split_port(text).and_then(|(host, port)| Some((host, parse_port(port?)?))).filter(|&(host, _)| is_valid_host(host));
@@ -200,37 +198,31 @@ fn split_host_port(vm: &mut Vm, a: &[Value]) -> NResult {
     Ok(vm.ok(pair))
 }
 
-/// The `port` argument of a socket function. Fails with kind `"invalid"`
-/// outside `0..=65535`.
-fn port(port: Value) -> Result<u16, Ctl> {
+fn check_port(port: Value) -> Result<u16, Ctl> {
     u16::try_from(port.as_int()).map_err(|_| Ctl::native_err("invalid", format!("invalid port {} (expected 0 to 65535)", port.as_int())))
 }
 
-/// The `host` and `port` arguments of a connecting function. Fails with
-/// kind `"invalid"`.
-fn endpoint(vm: &Vm, host: Value, port_arg: Value) -> Result<(String, u16), Ctl> {
+fn check_endpoint(vm: &Vm, host: Value, port: Value) -> Result<(String, u16), Ctl> {
     let host = vm.str(host);
     if !is_valid_host(host) {
         let msg = format!("invalid host {:?} (expected a host name or an IP address without brackets)", super::truncate(host, 200));
         return Err(Ctl::native_err("invalid", msg));
     }
-    Ok((host.to_string(), port(port_arg)?))
+    Ok((host.to_string(), check_port(port)?))
 }
 
-/// Checks `NetListen` for the `ip` and `port` arguments of a listening
-/// function, binds a listener, and makes it a resource object with `open`.
-/// An IPv4-mapped IPv6 address binds its IPv4 address.
+/// Checks `NetListen` for `ip` and `port`, binds a listener, and wraps it with `open`.
 pub(crate) fn listen_with<T: Resource>(
     vm: &mut Vm,
     ip: Value,
-    port_arg: Value,
+    port: Value,
     open: impl FnOnce(Box<dyn network::Listener>) -> std::io::Result<T> + Send + 'static,
 ) -> NResult {
     let Ok(ip) = vm.str(ip).parse::<IpAddr>().map(|ip| ip.to_canonical()) else {
         let msg = format!("invalid IP address {:?} (expected an address such as 127.0.0.1 or ::1)", super::truncate(vm.str(ip), 200));
         return Err(Ctl::native_err("invalid", msg));
     };
-    let addr = std::net::SocketAddr::new(ip, port(port_arg)?);
+    let addr = std::net::SocketAddr::new(ip, check_port(port)?);
     check_permission(vm, Capability::NetListen(addr))?;
     let slot = vm.resource_slot()?;
     let network = vm.host.network.clone();
@@ -474,13 +466,12 @@ fn conn(vm: &Vm, v: Value) -> Result<&Conn, Ctl> {
     vm.heap.native::<Conn>(v).ok_or_else(|| Ctl::internal("not a connection"))
 }
 
-/// Takes the connection out of the `net.Conn` object `v` (see
-/// [`Conn::detach`]). Fails with kind `"closed"`.
+/// Detaches the connection from `v` (see [`Conn::detach`]), or fails with kind `"closed"`.
 pub(crate) fn detach(vm: &mut Vm, v: Value) -> Result<Detached, Ctl> {
     vm.heap.native_mut::<Conn>(v).ok_or_else(|| Ctl::internal("not a connection"))?.detach().ok_or_else(|| closed().into())
 }
 
-/// The operation handle of the connection `v`. Fails with kind `"closed"`.
+/// Returns the active handle for connection `v`, or fails with kind `"closed"`.
 pub(crate) fn conn_handle(vm: &Vm, v: Value) -> Result<ConnHandle, Ctl> {
     conn(vm, v)?.handle().ok_or_else(|| closed().into())
 }
@@ -514,7 +505,7 @@ pub(crate) async fn resolve_allowed(
             let class = if is_private_address(addr.ip()) { " (private or internal)" } else { "" };
             Err(IoFailure::new(
                 "permission_denied",
-                format!("permission denied: connect to {}: address {}{class} is not allowed", host_port(host, port), addr.ip()),
+                format!("permission denied: connect to {}: address {}{class} is not allowed", format_host_port(host, port), addr.ip()),
             ))
         }
         _ if allowed.is_empty() => Err(IoFailure::new("not_found", format!("no addresses found for {host}"))),
@@ -534,7 +525,7 @@ pub(crate) async fn connect_checked(
 }
 
 fn connect(vm: &mut Vm, a: &[Value]) -> NResult {
-    let (host, port) = endpoint(vm, a[0], a[1])?;
+    let (host, port) = check_endpoint(vm, a[0], a[1])?;
     check_permission(vm, Capability::Net { host: host.clone(), port })?;
     // Counted from the start: a connection attempt holds a socket.
     let slot = vm.resource_slot_with(CONN_BUFFER, "a connection")?;
@@ -544,7 +535,7 @@ fn connect(vm: &mut Vm, a: &[Value]) -> NResult {
         let open = connect_checked(&policy, &*network, &host, port);
         match crate::platform::timeout(&*clock, timeout, open).await {
             Some(r) => r.map(|(stream, peer)| Conn::from_stream(stream, peer)),
-            None => Err(IoFailure::new("timeout", format!("connecting to {} timed out", host_port(&host, port)))),
+            None => Err(IoFailure::new("timeout", format!("connecting to {} timed out", format_host_port(&host, port)))),
         }
     })
 }
@@ -553,7 +544,7 @@ fn connect_tls(vm: &mut Vm, a: &[Value]) -> NResult {
     if !cfg!(feature = "tls") {
         return Err(Ctl::native_err("invalid", "TLS support is not enabled in this build"));
     }
-    let (host, port) = endpoint(vm, a[0], a[1])?;
+    let (host, port) = check_endpoint(vm, a[0], a[1])?;
     check_permission(vm, Capability::Net { host: host.clone(), port })?;
     let slot = vm.resource_slot_with(CONN_BUFFER + TLS_BUFFERS, "a connection")?;
     let timeout = Duration::from_nanos(a[2].as_int().max(0) as u64);
@@ -561,7 +552,7 @@ fn connect_tls(vm: &mut Vm, a: &[Value]) -> NResult {
     let settings = vm.host.tls.clone();
     // The timeout covers connecting and the handshake, so a peer that
     // accepts but never answers cannot hold the socket indefinitely.
-    let target = host_port(&host, port);
+    let target = format_host_port(&host, port);
     let open = async move {
         let (stream, peer) = connect_checked(&policy, &*network, &host, port).await?;
         let tls = tls::connect(&settings, &host, stream).await?;
