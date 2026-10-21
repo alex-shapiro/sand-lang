@@ -17,7 +17,9 @@ mod rules;
 pub use file::{PolicyError, PolicyFile, parse_duration, parse_size, rule_for};
 pub use format::format_policy;
 pub use lint::lint_policy;
-pub use net::{is_private_address, is_valid_net_pattern};
+#[cfg(feature = "os")]
+pub(crate) use net::is_valid_host;
+pub use net::{host_port, is_private_address, is_valid_listen_pattern, is_valid_net_pattern};
 pub use rules::RulePolicy;
 
 /// A request to perform an effect outside the sandbox.
@@ -47,8 +49,8 @@ pub enum Capability {
         host: String,
         addr: SocketAddr,
     },
-    /// Listening socket address (`host:port`).
-    NetListen(String),
+    /// Listening on an address (port `0`: an ephemeral port).
+    NetListen(SocketAddr),
     /// Environment variable (`"*"` for all).
     Env(String),
     Stdin,
@@ -70,7 +72,7 @@ impl fmt::Display for Capability {
         match self {
             Capability::FsRead(p) => write!(f, "read {}", p.display()),
             Capability::FsWrite(p) => write!(f, "write {}", p.display()),
-            Capability::Net { host, port } => write!(f, "connect to {host}:{port}"),
+            Capability::Net { host, port } => write!(f, "connect to {}", host_port(host, *port)),
             Capability::Http { method, scheme, host, port, path } => {
                 let host = if host.contains(':') { format!("[{host}]") } else { host.clone() };
                 let default = if scheme == "http" { 80 } else { 443 };
@@ -82,7 +84,7 @@ impl fmt::Display for Capability {
             }
             Capability::NetAddr { host, addr } if *host == addr.ip().to_string() => write!(f, "connect to {addr}"),
             Capability::NetAddr { host, addr } => write!(f, "connect to {host} at {addr}"),
-            Capability::NetListen(a) => write!(f, "listen on {a}"),
+            Capability::NetListen(addr) => write!(f, "listen on {addr}"),
             Capability::Env(n) => write!(f, "read environment variable {n}"),
             Capability::Stdin => write!(f, "read standard input"),
             Capability::Stdout => write!(f, "write standard output"),

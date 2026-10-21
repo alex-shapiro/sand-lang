@@ -8,7 +8,8 @@ use common::{TempDir, rt, run_with};
 use sandlang::jiff::civil::Date;
 use sandlang::time::TimeZone;
 use sandlang::{
-    Capability, Config, Decision, Engine, Error, LimitKind, Limits, MemorySink, NativeModule, Policy, PromptAnswer, RulePolicy, ValueType,
+    Capability, Config, Decision, Engine, Error, LimitKind, Limits, LogLevel, LogRecord, MemorySink, NativeModule, Policy, PromptAnswer,
+    RulePolicy, ValueType,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -618,7 +619,7 @@ let r = fs.read_text("secret.txt")
 print(r.unwrap_err().kind)
 print(fs.write_text("out.txt", "x").unwrap_err().kind)
 print(env.get("HOME"))
-print(net.connect("127.0.0.1:1").unwrap_err().kind)
+print(net.connect("127.0.0.1", 1).unwrap_err().kind)
 "#;
     let (r, out, _) = run_src(config, src);
     r.unwrap();
@@ -637,6 +638,62 @@ fn stdout_can_be_denied() {
         other => panic!("{other:?}"),
     }
     assert_eq!(out, "");
+}
+
+#[test]
+fn log_records_go_to_the_host_sink() {
+    let records = Arc::new(Mutex::new(Vec::<LogRecord>::new()));
+    let r2 = records.clone();
+    // A sink replaces standard error, so denying it does not matter.
+    let policy = Policy::custom(|cap: &Capability| if matches!(cap, Capability::Stderr) { Decision::Deny } else { Decision::Allow });
+    let config = Config::new().policy(policy).log_sink(move |r: &LogRecord| r2.lock().unwrap().push(r.clone()));
+    let src = r#"
+import log
+log.debug("hidden")
+log.info("started", fields: ["user": "ann", "note": "a b"])
+log.set_level("error")
+log.warn("hidden")
+log.error("failed")
+"#;
+    let (r, _, err) = run_src(config, src);
+    r.unwrap();
+    assert_eq!(err, "");
+    let fields = vec![("user".to_string(), "ann".to_string()), ("note".to_string(), "a b".to_string())];
+    assert_eq!(
+        *records.lock().unwrap(),
+        [
+            LogRecord { level: LogLevel::Info, message: "started".into(), fields },
+            LogRecord { level: LogLevel::Error, message: "failed".into(), fields: vec![] },
+        ]
+    );
+}
+
+#[test]
+fn scripts_cannot_log_below_the_host_level() {
+    let config = Config::new().log_level(LogLevel::Warn);
+    let src = "import log
+log.set_level(\"debug\")
+log.debug(\"d\")
+log.info(\"i\")
+log.warn(\"w\")
+log.set_level(\"off\")
+log.error(\"e\")";
+    let (r, _, err) = run_src(config, src);
+    r.unwrap();
+    assert_eq!(err, "WARN w\n");
+}
+
+#[test]
+fn log_records_count_against_the_output_limit() {
+    let count = Arc::new(AtomicUsize::new(0));
+    let c2 = count.clone();
+    let config = Config::new()
+        .limits(Limits { max_output_bytes: Some(1000), ..Limits::default() })
+        .log_sink(move |_: &LogRecord| _ = c2.fetch_add(1, Ordering::Relaxed));
+    let (r, _, _) = run_src(config, "import log\nfor i in 0..1000 { log.info(\"record\", fields: [\"i\": \"\\(i)\"]) }");
+    assert!(matches!(r, Err(Error::Limit(LimitKind::Output))), "{r:?}");
+    let n = count.load(Ordering::Relaxed);
+    assert!(n > 50 && n < 125, "{n}");
 }
 
 #[test]
@@ -717,9 +774,22 @@ fn rule_policy_env_and_listen() {
     let p = RulePolicy::new().allow_env("HOME").allow_listen("127.0.0.1:0").allow_stdin();
     assert_eq!(p.check(&Capability::Env("HOME".into())), Decision::Allow);
     assert_eq!(p.check(&Capability::Env("SECRET".into())), Decision::Deny);
-    assert_eq!(p.check(&Capability::NetListen("127.0.0.1:9000".into())), Decision::Allow);
-    assert_eq!(p.check(&Capability::NetListen("0.0.0.0:9000".into())), Decision::Deny);
+    let listen = |ip: &str, port| Capability::NetListen(std::net::SocketAddr::new(ip.parse().unwrap(), port));
+    assert_eq!(p.check(&listen("127.0.0.1", 9000)), Decision::Allow);
+    assert_eq!(p.check(&listen("0.0.0.0", 9000)), Decision::Deny);
     assert_eq!(p.check(&Capability::Stdin), Decision::Allow);
+
+    let p = RulePolicy::new().allow_listen("LocalHost").allow_listen("[::]:80").allow_listen("*:8080").deny_listen("localhost:22");
+    assert_eq!(p.check(&listen("127.0.0.2", 3000)), Decision::Allow);
+    assert_eq!(p.check(&listen("::1", 3000)), Decision::Allow);
+    assert_eq!(p.check(&listen("127.0.0.1", 22)), Decision::Deny);
+    assert_eq!(p.check(&listen("0:0::0", 80)), Decision::Allow);
+    assert_eq!(p.check(&listen("::", 81)), Decision::Deny);
+    assert_eq!(p.check(&listen("10.0.0.1", 8080)), Decision::Allow);
+    assert_eq!(p.check(&listen("10.0.0.1", 8081)), Decision::Deny);
+    for invalid in ["[::1", "[::1]x", "[localhost]:80", "127.0.0.1:http", "example.com", "example.com:80", "127.0.0.1:65536"] {
+        assert!(!sandlang::policy::is_valid_listen_pattern(invalid), "{invalid}");
+    }
 }
 
 #[cfg(feature = "os")]
@@ -1323,12 +1393,12 @@ fn open_resource_limit() {
     let config = Config::new().limits(Limits { max_open_resources: 2, ..Limits::default() });
     let src = r#"
 import net
-let a = net.listen("127.0.0.1:0")?
-let b = net.listen("127.0.0.1:0")?
-let c = net.listen("127.0.0.1:0")
+let a = net.listen("127.0.0.1", 0)?
+let b = net.listen("127.0.0.1", 0)?
+let c = net.listen("127.0.0.1", 0)
 print(c.unwrap_err().kind)
 a.close()
-print(net.listen("127.0.0.1:0").is_ok())
+print(net.listen("127.0.0.1", 0).is_ok())
 "#;
     let (r, out, _) = run_src(config.policy(Policy::allow_all()), src);
     r.unwrap();

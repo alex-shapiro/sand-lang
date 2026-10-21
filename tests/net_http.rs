@@ -251,7 +251,7 @@ print(start.elapsed() < 350ms)
 fn http_server_requests_expose_their_connection() {
     let src = r#"
 import http
-let server = http.serve("127.0.0.1:0")?
+let server = http.serve("127.0.0.1", 0)?
 let addr = server.addr()
 let client = spawn http.get("http://\(addr)/stream?x=1")
 let req = server.accept()?
@@ -276,7 +276,7 @@ fn http_server_api() {
     let out = MemorySink::new();
     let src = r#"
 import http
-let server = http.serve("127.0.0.1:0")?
+let server = http.serve("127.0.0.1", 0)?
 print("addr \(server.addr())")
 for _ in 0..2 {
     let req = server.accept()?
@@ -316,7 +316,7 @@ for _ in 0..2 {
 fn tcp_client_and_server_in_one_script() {
     let src = r#"
 import net
-let listener = net.listen("127.0.0.1:0")?
+let listener = net.listen("127.0.0.1", 0)?
 let addr = listener.addr()
 let server = spawn {
     let conn = listener.accept().unwrap()
@@ -334,7 +334,7 @@ let server = spawn {
     conn.close()
     lines
 }
-let client = net.connect(addr)?
+let client = net.connect("127.0.0.1", addr.port())?
 client.write_str("hello\nworld\n")?
 print(client.read_line()?)
 print(client.read_line()?)
@@ -351,8 +351,8 @@ fn reads_after_end_of_stream_keep_returning_eof() {
     // platforms the next read would then fail even though EOF was already seen.
     let src = r#"
 import net
-let listener = net.listen("127.0.0.1:0")?
-let client = net.connect(listener.addr())?
+let listener = net.listen("127.0.0.1", 0)?
+let client = net.connect("127.0.0.1", listener.addr().port())?
 let conn = listener.accept()?
 client.write(b"last")?
 client.close()
@@ -380,7 +380,7 @@ fn tcp_reads_raw_bytes_and_eof() {
     let src = format!(
         r#"
 import net
-let c = net.connect("{addr}")?
+let c = net.connect("127.0.0.1", {port})?
 var got = b""
 while got.len() < 7 {{
     got = got + c.read(max: 3)?
@@ -389,10 +389,12 @@ print(got)
 c.write_str("ping\n")?
 print(c.read_line()?)
 print(c.read()?)
-print(c.peer_addr() == "{addr}")
-"#
+print("\(c.peer_addr())" == "{addr}")
+print(c.peer_addr().port() == {port})
+"#,
+        port = addr.port()
     );
-    assert_eq!(run_net(&src), "b\"\\x00\\x01\\x02rest\"\nSome(\"PING\")\nb\"\"\ntrue\n");
+    assert_eq!(run_net(&src), "b\"\\x00\\x01\\x02rest\"\nSome(\"PING\")\nb\"\"\ntrue\ntrue\n");
 }
 
 #[test]
@@ -400,7 +402,10 @@ fn net_permissions() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let policy = RulePolicy::new().allow_net("localhost");
-    let src = format!("import net\nprint(net.connect(\"{addr}\").unwrap_err().kind)\nprint(net.listen(\"127.0.0.1:0\").unwrap_err().kind)");
+    let src = format!(
+        "import net\nprint(net.connect(\"127.0.0.1\", {}).unwrap_err().kind)\nprint(net.listen(\"127.0.0.1\", 0).unwrap_err().kind)",
+        addr.port()
+    );
     let r = run_with(&src, |c| c.policy(Policy::rules(policy)));
     assert_eq!(r.ok_stdout(), "permission_denied\npermission_denied\n");
 }
@@ -409,7 +414,7 @@ fn net_permissions() {
 fn closing_engine_closes_sockets() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    let src = format!("import net\nlet c = net.connect(\"{addr}\")?\nc.write_str(\"hi\")?");
+    let src = format!("import net\nlet c = net.connect(\"127.0.0.1\", {})?\nc.write_str(\"hi\")?", addr.port());
     let r = run_with(&src, |c| c.policy(Policy::allow_all()));
     r.ok_stdout();
     let (mut s, _) = listener.accept().unwrap();
@@ -422,8 +427,12 @@ fn closing_engine_closes_sockets() {
 
 #[test]
 fn errors_are_distinguishable() {
-    let r = run_with("import net\nlet c = net.connect(\"nonsense\")?", |c| c.policy(Policy::allow_all()));
-    assert!(r.failure().starts_with("invalid: "), "{}", r.failure());
+    for call in
+        ["net.connect(\"[::1]\", 80)", "net.connect(\"a b\", 80)", "net.connect(\"localhost\", 65536)", "net.listen(\"localhost\", -1)"]
+    {
+        let r = run_with(&format!("import net\nlet c = {call}?"), |c| c.policy(Policy::allow_all()));
+        assert!(r.failure().starts_with("invalid: "), "{call}: {}", r.failure());
+    }
     let _ = Error::Interrupted;
 }
 
@@ -454,19 +463,19 @@ fn sockets_of_pending_operations_count_as_open_resources() {
         r#"
 import http
 import net
-let handshakes = (0..2).map(_ => spawn net.connect_tls("127.0.0.1:{port}", timeout: 30s))
+let handshakes = (0..2).map(_ => spawn net.connect_tls("127.0.0.1", {port}, timeout: 30s))
 let requests = (0..2).map(_ => spawn http.get("http://{addr}/", timeout: 30s))
 task.sleep(200ms)
-print(net.listen("127.0.0.1:0").unwrap_err().kind)
-print(net.connect("{addr}").unwrap_err().kind)
+print(net.listen("127.0.0.1", 0).unwrap_err().kind)
+print(net.connect("127.0.0.1", {port}).unwrap_err().kind)
 print(http.get("http://{addr}/").unwrap_err().kind)
 for t in handshakes {{ t.cancel() }}
 for t in requests {{ t.cancel() }}
-let l = net.listen("127.0.0.1:0")?
+let l = net.listen("127.0.0.1", 0)?
 print("listening on a released slot")
 let pending = spawn l.accept()
 task.sleep(50ms)
-let others = (0..3).map(_ => net.listen("127.0.0.1:0"))
+let others = (0..3).map(_ => net.listen("127.0.0.1", 0))
 print(others.filter(r => r.is_ok()).len())
 pending.cancel()
 "#
@@ -481,7 +490,7 @@ pending.cancel()
 #[test]
 fn tls_handshakes_time_out() {
     let addr = silent_server();
-    let src = format!("import net\nlet e = net.connect_tls(\"127.0.0.1:{}\", timeout: 200ms).unwrap_err()\nprint(e.kind)", addr.port());
+    let src = format!("import net\nlet e = net.connect_tls(\"127.0.0.1\", {}, timeout: 200ms).unwrap_err()\nprint(e.kind)", addr.port());
     let start = Instant::now();
     let r = run_with(&src, |c| c.policy(Policy::allow_all()));
     assert_eq!(r.ok_stdout(), "timeout\n");
@@ -510,7 +519,7 @@ fn start_server_script(src: &'static str, limits: Limits) -> (String, std::threa
 fn idle_connections_do_not_delay_http_requests() {
     let src = r#"
 import http
-let server = http.serve("127.0.0.1:0")?
+let server = http.serve("127.0.0.1", 0)?
 print("ready \(server.addr())")
 for i in 0..2 {
     let req = server.accept()?
@@ -541,7 +550,7 @@ for i in 0..2 {
 fn connection_buffers_count_against_the_memory_limit() {
     let src = r#"
 import net
-let listener = net.listen("127.0.0.1:0")?
+let listener = net.listen("127.0.0.1", 0)?
 let addr = listener.addr()
 let server = spawn {
     var accepted: [net.Conn] = []
@@ -551,7 +560,7 @@ let server = spawn {
 var conns: [net.Conn] = []
 var err = ""
 while conns.len() < 1000 {
-    match net.connect(addr) {
+    match net.connect("127.0.0.1", addr.port()) {
         Ok(c) => conns.push(c)
         Err(e) => {
             err = "\(e.kind): \(e.message)"
@@ -562,7 +571,7 @@ while conns.len() < 1000 {
 print(err)
 print(conns.len())
 for c in conns[0..10] { c.close() }
-print(net.connect(addr).is_ok())
+print(net.connect("127.0.0.1", addr.port()).is_ok())
 listener.close()
 print(server.wait() > 0)
 "#;
@@ -577,7 +586,7 @@ print(server.wait() > 0)
 
     let src = r#"
 import http
-let server = http.serve("127.0.0.1:0")?
+let server = http.serve("127.0.0.1", 0)?
 print("ready \(server.addr())")
 let req = server.accept()?
 req.respond(200, "served".bytes())?
@@ -676,7 +685,7 @@ fn http_servers_stream_responses() {
     let (addr, handle) = start_server_script(
         r#"
 import http
-let server = http.serve("127.0.0.1:0")?
+let server = http.serve("127.0.0.1", 0)?
 print("ready \(server.addr())")
 for _ in 0..4 {
     use req = server.accept()?
@@ -871,7 +880,7 @@ fn http_servers_keep_connections_alive() {
     let (addr, handle) = start_server_script(
         r#"
 import http
-let server = http.serve("127.0.0.1:0")?
+let server = http.serve("127.0.0.1", 0)?
 print("ready \(server.addr())")
 for _ in 0..11 {
     use req = server.accept()?
@@ -946,12 +955,12 @@ for _ in 0..11 {
 fn http_clients_and_servers_share_connections() {
     let src = r#"
 import http
-let server = http.serve("127.0.0.1:0")?
+let server = http.serve("127.0.0.1", 0)?
 let base = "http://\(server.addr())"
 let served = spawn {
     for _ in 0..3 {
         use req = server.accept().unwrap()
-        req.respond(200, req.conn.peer_addr().bytes()).unwrap()
+        req.respond(200, "\(req.conn.peer_addr())".bytes()).unwrap()
     }
 }
 let peers = [http.get(base).unwrap().text().unwrap() for _ in 0..3]
@@ -969,7 +978,7 @@ fn idle_server_connections_give_way_to_new_resources() {
     let src = r#"
 import fs
 import http
-let server = http.serve("127.0.0.1:0")?
+let server = http.serve("127.0.0.1", 0)?
 let served = spawn {
     use req = server.accept().unwrap()
     req.respond(200, b"ok").unwrap()
@@ -992,7 +1001,7 @@ fn waiting_server_connections_give_way_to_new_resources() {
     let src = r#"
 import fs
 import http
-let server = http.serve("127.0.0.1:0")?
+let server = http.serve("127.0.0.1", 0)?
 print("ready \(server.addr())")
 let served: Channel<()> = task.channel()
 let serving = spawn {

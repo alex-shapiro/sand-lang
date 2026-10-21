@@ -174,10 +174,7 @@ See the [prelude reference](/std/prelude/) for the complete list of collection m
 Unlike the functional list methods above, an iterator computes elements on demand without allocating intermediate lists. Call `iter()` on a collection or range, or construct a generator with `Iter.count_from`, `Iter.repeat`, `Iter.once`, `Iter.from_fn`, or `Iter.successors`:
 
 ```sand
-let firsts = Iter.count_from(1)
-    .map(n => n * n)
-    .filter(n => n % 3 == 0)
-    .take(3)
+let firsts = Iter.count_from(1).map(n => n * n).filter(n => n % 3 == 0).take(3)
 print(firsts.to_list())
 
 let total = [1, 2, 3, 4].iter().map(x => x * x).sum()

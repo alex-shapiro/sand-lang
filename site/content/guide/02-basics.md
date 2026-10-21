@@ -21,7 +21,7 @@ help(answer)
 
 ## Statements and newlines
 
-A newline terminates a statement without requiring a semicolon. A line that begins with `.`, `|>`, or a binary operator continues the expression from the previous line:
+A newline terminates a statement without requiring a semicolon. A line that begins with `.` or a binary operator continues the expression from the previous line:
 
 ```sand
 let scores = [72, 95, 88, 41, 63]
@@ -29,7 +29,7 @@ let report = scores
     .filter(s => s >= 60)
     .sorted()
     .reversed()
-    .map(s => "score \(s)")
+    .map(s => "passing score: \(s)")
     .join(", ")
 print(report)
 ```

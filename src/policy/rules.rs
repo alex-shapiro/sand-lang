@@ -6,7 +6,7 @@
 //! names in a trie, hosts in hash tables), so a check costs about the same
 //! whatever the number of rules.
 
-use super::net::{Dest, HostIndex, NetPattern, UrlPattern, is_localhost, is_private_address, listen_match, parse_ip, url_segments};
+use super::net::{Dest, HostIndex, ListenPattern, NetPattern, UrlPattern, is_localhost, is_private_address, parse_ip, url_segments};
 use super::path::{Glob, Seg, Trie, path_segments};
 use super::{Capability, Decision, PathSpace, fold_name, lexical, normalize_path};
 use crate::files::Mode;
@@ -79,7 +79,7 @@ pub(crate) enum RuleKind {
     Net(NetPattern),
     /// Methods (upper case; `None`: any) and a URL pattern.
     Http(Option<Vec<String>>, UrlPattern),
-    Listen(String),
+    Listen(ListenPattern),
     Env(NamePattern),
     Stdin,
     Stdout,
@@ -135,6 +135,10 @@ impl Default for RulePolicy {
 
 fn net_pattern(pattern: &str) -> NetPattern {
     NetPattern::parse(pattern).unwrap_or_else(|| panic!("invalid network pattern {pattern:?}"))
+}
+
+fn listen_pattern(pattern: &str) -> ListenPattern {
+    ListenPattern::parse(pattern).unwrap_or_else(|| panic!("invalid listen pattern {pattern:?}"))
 }
 
 /// The paths of rules are taken literally (no wildcards) and cover what is
@@ -249,12 +253,19 @@ impl RulePolicy {
         self.deny_private = true;
         self
     }
-    /// `host:port`, either `*`; port `0` allows any port.
-    pub fn allow_listen(self, addr: &str) -> Self {
-        self.push(true, RuleKind::Listen(addr.to_string()))
+    /// Allows listening. Patterns: `ip:port`, `[v6]:port`, `ip`,
+    /// `localhost` (the loopback addresses), `*:port` or `*`; host `*`,
+    /// port `*` or port `0` matches any address or port.
+    ///
+    /// # Panics
+    ///
+    /// If the pattern is invalid.
+    pub fn allow_listen(self, pattern: &str) -> Self {
+        self.push(true, RuleKind::Listen(listen_pattern(pattern)))
     }
-    pub fn deny_listen(self, addr: &str) -> Self {
-        self.push(false, RuleKind::Listen(addr.to_string()))
+    /// Denies listening ([`RulePolicy::allow_listen`]'s patterns).
+    pub fn deny_listen(self, pattern: &str) -> Self {
+        self.push(false, RuleKind::Listen(listen_pattern(pattern)))
     }
     /// Allows reading environment variables: a name, a pattern with `*`
     /// (`AWS_*`), or `*` for all of them.
@@ -425,7 +436,7 @@ impl RulePolicy {
             }
             Capability::NetListen(addr) => {
                 for &(ref pattern, allow, rule) in &index.listen {
-                    if let Some(score) = listen_match(pattern, addr) {
+                    if let Some(score) = pattern.matches(*addr) {
                         best.offer([score, 0, 0, 0, 0], allow, rule);
                     }
                 }
@@ -748,7 +759,7 @@ struct Index {
     /// Groups of http rules by host pattern.
     http: HostIndex<u32>,
     groups: Vec<HttpGroup>,
-    listen: Vec<(String, bool, u32)>,
+    listen: Vec<(ListenPattern, bool, u32)>,
     /// Rules for variables by name, and those with patterns.
     env_names: FxHashMap<String, Vec<(bool, u32)>>,
     env: Vec<(NamePattern, bool, u32)>,

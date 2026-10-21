@@ -423,7 +423,6 @@ pub enum ExprKind {
     },
     Unary(UnOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
-    Pipe(Box<Expr>, Box<Expr>),
     Coalesce(Box<Expr>, Box<Expr>),
     Range {
         start: Option<Box<Expr>>,

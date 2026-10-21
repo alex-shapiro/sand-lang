@@ -370,15 +370,6 @@ let xs = [
 --- error
 3: ambiguous `-`
 
-=== pipe continues across lines
-fn double(x: int) -> int { x * 2 }
-let r = 5
-    |> double
-    |> double
-print(r)
---- stdout
-20
-
 === else on next line continues if
 let x = 5
 let y = if x > 3 {

@@ -1,31 +1,42 @@
 //! TCP listeners and client connections (including TLS).
 //!
 //! Outgoing connections require the `Net(host:port)` capability, and listeners
-//! require `NetListen(addr)`. Open sockets and in-flight connection attempts
-//! count toward `max_open_resources` until closed. Bind sockets with `use` to
-//! close them at block exit:
+//! require `NetListen(ip:port)`. Open sockets and in-flight connection
+//! attempts count toward `max_open_resources` until closed. Bind sockets with
+//! `use` to close them at block exit:
 //!
 //! ```
-//! use conn = net.connect("example.com:80")?
+//! use conn = net.connect("example.com", 80)?
 //! conn.write_str("GET / HTTP/1.0\r\n\r\n")?
 //! print(conn.read_text()?)
 //! ```
 
 import io
 
-/// Binds a TCP listener to `addr` (`host:port`; port `0` selects an available
-/// ephemeral port).
-pub native fn listen(addr: str) -> Result<Listener>
+/// Binds a TCP listener to `port` on the IP address `ip` (such as
+/// `"127.0.0.1"` or `"::"`). Port `0` selects an available ephemeral port.
+pub native fn listen(ip: str, port: int) -> Result<Listener>
 
-/// Opens a TCP connection to `addr` (`host:port`), or fails with kind
-/// `"timeout"` if the connection does not complete within `timeout`.
-pub native fn connect(addr: str, timeout: duration = 30s) -> Result<Conn>
+/// Opens a TCP connection to `port` on `host` (a host name or an IP
+/// address), or fails with kind `"timeout"` if the connection does not
+/// complete within `timeout`.
+pub native fn connect(host: str, port: int, timeout: duration = 30s) -> Result<Conn>
 
-/// Opens a TLS-encrypted TCP connection to `addr` (`host:port`) and verifies
-/// the server certificate against the bundled Web PKI roots and any custom host
+/// Opens a TLS-encrypted TCP connection to `port` on `host` and verifies the
+/// server certificate against the bundled Web PKI roots and any custom host
 /// roots (requires the `tls` feature). Fails with kind `"timeout"` if the TCP
 /// connection and TLS handshake do not complete within `timeout`.
-pub native fn connect_tls(addr: str, timeout: duration = 30s) -> Result<Conn>
+pub native fn connect_tls(host: str, port: int, timeout: duration = 30s) -> Result<Conn>
+
+/// An IP address and port, formatted as `127.0.0.1:8080` or `[::1]:8080`.
+pub native type SocketAddr
+
+extend SocketAddr {
+    /// Returns the IP address (`"127.0.0.1"`, `"::1"`).
+    pub native fn ip(self) -> str
+    /// Returns the port.
+    pub native fn port(self) -> int
+}
 
 /// A listening TCP socket returned by `listen`.
 pub native type Listener
@@ -33,8 +44,8 @@ pub native type Listener
 extend Listener {
     /// Waits for and returns the next incoming TCP connection.
     pub native fn accept(self) -> Result<Conn>
-    /// Returns the local socket address (`host:port`) that the listener is bound to.
-    pub native fn addr(self) -> str
+    /// Returns the local address that the listener is bound to.
+    pub native fn addr(self) -> SocketAddr
 }
 
 impl Close for Listener {
@@ -68,6 +79,6 @@ impl Close for Conn {
 }
 
 extend Conn {
-    /// Returns the remote peer socket address (`host:port`).
-    pub native fn peer_addr(self) -> str
+    /// Returns the address of the remote peer.
+    pub native fn peer_addr(self) -> SocketAddr
 }

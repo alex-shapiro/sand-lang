@@ -39,7 +39,7 @@ print("done")
 fn dropped_connections_are_closed_before_the_limit_is_reported() {
     let src = r#"
 import net
-let listener = net.listen("127.0.0.1:0")?
+let listener = net.listen("127.0.0.1", 0)?
 let addr = listener.addr()
 spawn {
     loop {
@@ -47,7 +47,7 @@ spawn {
     }
 }
 for i in 0..300 {
-    let c = net.connect(addr)?
+    let c = net.connect("127.0.0.1", addr.port())?
     c.write_str("x")?
 }
 print("done")
@@ -285,7 +285,7 @@ fn http_server_bodies_are_read_by_the_handler() {
     let out = MemorySink::new();
     let src = r#"
 import http
-let server = http.serve("127.0.0.1:0")?
+let server = http.serve("127.0.0.1", 0)?
 print("ready \(server.addr())")
 for _ in 0..2 {
     use req = server.accept()?
@@ -332,7 +332,7 @@ fn idle_connections_do_not_hold_up_new_requests() {
     let out = MemorySink::new();
     let src = r#"
 import http
-let server = http.serve("127.0.0.1:0")?
+let server = http.serve("127.0.0.1", 0)?
 print("ready \(server.addr())")
 use req = server.accept()?
 req.respond(200, b"served")?
@@ -498,7 +498,7 @@ fn closing_a_request_closes_its_socket_even_if_its_body_is_kept() {
     // are closed (and stop counting) when the script closes them.
     let src = r#"
 import http
-let server = http.serve("127.0.0.1:0")?
+let server = http.serve("127.0.0.1", 0)?
 print("ready \(server.addr())")
 var bodies: [http.Body] = []
 for _ in 0..20 {
@@ -528,7 +528,7 @@ print(bodies.len())
 fn a_request_body_leaves_its_connection_usable_between_reads() {
     let src = r#"
 import http
-let server = http.serve("127.0.0.1:0")?
+let server = http.serve("127.0.0.1", 0)?
 print("ready \(server.addr())")
 use req = server.accept()?
 print(req.body.read(2)?)

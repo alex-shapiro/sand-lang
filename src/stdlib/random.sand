@@ -29,9 +29,6 @@ pub native fn sample<T>(xs: [T], k: int) -> [T]
 /// Returns `n` pseudo-random bytes.
 pub native fn bytes(n: int) -> bytes
 
-/// Returns a normally distributed float with `mean` and standard deviation `stdev`.
-pub native fn normal(mean: float = 0.0, stdev: float = 1.0) -> float
-
 /// Creates an independent `Rng` seeded with `seed`.
 pub native fn rng(seed: int) -> Rng
 
@@ -53,6 +50,4 @@ extend Rng {
     pub native fn sample<T>(self, xs: [T], k: int) -> [T]
     /// Returns `n` pseudo-random bytes.
     pub native fn bytes(self, n: int) -> bytes
-    /// Returns a normally distributed float with `mean` and standard deviation `stdev`.
-    pub native fn normal(self, mean: float = 0.0, stdev: float = 1.0) -> float
 }

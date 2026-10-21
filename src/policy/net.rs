@@ -4,7 +4,7 @@
 use super::path::{Seg, Tok};
 use crate::vm::value::FxHashMap;
 use std::borrow::Cow;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 /// A host pattern: `host`, `*.domain`, `*`, an IP address or a CIDR range,
 /// optionally with a port.
@@ -30,6 +30,17 @@ pub(crate) enum HostKind {
 /// Whether `pattern` is a valid network pattern (see [`super::RulePolicy::allow_net`]).
 pub fn is_valid_net_pattern(pattern: &str) -> bool {
     NetPattern::parse(pattern).is_some()
+}
+
+/// Whether `pattern` is a valid listen pattern (see [`super::RulePolicy::allow_listen`]).
+pub fn is_valid_listen_pattern(pattern: &str) -> bool {
+    ListenPattern::parse(pattern).is_some()
+}
+
+/// Whether `host` is an IP address (without brackets) or a host name.
+#[cfg(feature = "os")]
+pub(crate) fn is_valid_host(host: &str) -> bool {
+    host.len() <= 253 && (host.parse::<IpAddr>().is_ok() || host_name(host).is_some())
 }
 
 /// A host name in canonical form (lower case, without a trailing dot), if
@@ -359,20 +370,65 @@ fn is_private_v6(ip: Ipv6Addr) -> bool {
     }
 }
 
-/// A listen address pattern: `host:port`, either part `*`, port `0` any.
-/// Returns how narrowly it matches `addr` (if it does): host and port
-/// given count 2 and 1.
-pub(crate) fn listen_match(pattern: &str, addr: &str) -> Option<u32> {
-    if pattern == "*" {
-        return Some(0);
+/// `host:port`, with an IPv6 address in brackets.
+pub fn host_port(host: &str, port: u16) -> String {
+    if host.contains(':') { format!("[{host}]:{port}") } else { format!("{host}:{port}") }
+}
+
+/// A listen address pattern: `ip:port`, `[v6]:port`, `ip`, `localhost` (the
+/// loopback addresses), `*:port` or `*`. A missing part, `*`, or port `0`
+/// matches any address or port.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct ListenPattern {
+    host: ListenHost,
+    port: Option<u16>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum ListenHost {
+    Any,
+    Loopback,
+    Ip(IpAddr),
+}
+
+impl ListenPattern {
+    pub(crate) fn parse(text: &str) -> Option<ListenPattern> {
+        let (host, port) = match text.strip_prefix('[') {
+            Some(rest) => {
+                let (ip, port) = rest.split_once(']')?;
+                (ip.parse().ok().map(ListenHost::Ip)?, if port.is_empty() { None } else { Some(port.strip_prefix(':')?) })
+            }
+            None => {
+                let (host, port) = match text.split_once(':') {
+                    Some((host, port)) if !port.contains(':') => (host, Some(port)),
+                    _ => (text, None),
+                };
+                let host = match host {
+                    "*" => ListenHost::Any,
+                    _ if is_localhost(host) => ListenHost::Loopback,
+                    _ => ListenHost::Ip(host.parse().ok()?),
+                };
+                (host, port)
+            }
+        };
+        let port = match port {
+            None | Some("*") => None,
+            Some(p) => Some(p.parse::<u16>().ok()?).filter(|&p| p != 0),
+        };
+        Some(ListenPattern { host, port })
     }
-    let (ph, pp) = pattern.rsplit_once(':').unwrap_or((pattern, "0"));
-    let (ah, ap) = addr.rsplit_once(':').unwrap_or((addr, "0"));
-    let any_host = ph == "*";
-    let host_ok =
-        any_host || ph.trim_matches(['[', ']']) == ah.trim_matches(['[', ']']) || (ph == "localhost" && (ah == "127.0.0.1" || ah == "::1"));
-    let any_port = pp == "0" || pp == "*";
-    (host_ok && (any_port || pp == ap)).then_some(2 * !any_host as u32 + !any_port as u32)
+
+    /// How narrowly the pattern matches `addr`, if it does: a given host
+    /// counts 2 and a given port 1.
+    pub(crate) fn matches(&self, addr: SocketAddr) -> Option<u32> {
+        let host_ok = match self.host {
+            ListenHost::Any => true,
+            ListenHost::Loopback => addr.ip().is_loopback(),
+            ListenHost::Ip(ip) => addr.ip() == ip,
+        };
+        let port_ok = self.port.is_none_or(|p| p == addr.port());
+        (host_ok && port_ok).then_some(2 * (self.host != ListenHost::Any) as u32 + self.port.is_some() as u32)
+    }
 }
 
 /// A URL pattern of an `http` rule: `[scheme://]host[:port][/path]`.

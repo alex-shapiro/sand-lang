@@ -17,7 +17,7 @@ mod http_server;
 mod http_web;
 mod io;
 mod json;
-mod log;
+pub(crate) mod log;
 mod math;
 #[cfg(feature = "os")]
 mod net;
@@ -33,6 +33,7 @@ mod uuid;
 use crate::engine::Registry;
 #[cfg(feature = "os")]
 pub(crate) use http::Pool as HttpPool;
+pub(crate) use log::LogConfig;
 #[cfg(feature = "os")]
 pub(crate) use net::TlsSettings;
 pub(crate) use uri::encode as uri_encode;

@@ -208,9 +208,7 @@ fn any_sub_expr(e: &Expr, f: &mut dyn FnMut(&Expr) -> bool) -> bool {
         ExprKind::Match { scrutinee, arms, .. } => f(scrutinee) || arms.iter().any(|a| a.guard.as_ref().is_some_and(&mut *f) || f(&a.body)),
         ExprKind::Str(segs) => segs.iter().any(|s| matches!(s, StrSeg::Expr(x, _) if f(x))),
         ExprKind::List(xs) | ExprKind::Tuple(xs) => xs.iter().any(&mut *f),
-        ExprKind::Repeat(a, b) | ExprKind::Pipe(a, b) | ExprKind::Coalesce(a, b) | ExprKind::Index(a, b) | ExprKind::Binary(_, a, b) => {
-            f(a) || f(b)
-        }
+        ExprKind::Repeat(a, b) | ExprKind::Coalesce(a, b) | ExprKind::Index(a, b) | ExprKind::Binary(_, a, b) => f(a) || f(b),
         ExprKind::Map(kvs) => kvs.iter().any(|(k, v)| f(k) || f(v)),
         ExprKind::ListComp(x, cs) => f(x) || clauses_any(cs, f),
         ExprKind::MapComp(k, v, cs) => f(k) || f(v) || clauses_any(cs, f),
@@ -730,7 +728,7 @@ impl<'a> Linter<'a> {
             }
             ExprKind::List(xs) | ExprKind::Tuple(xs) => xs.iter().for_each(|x| self.expr(x)),
             ExprKind::Macro(m) => self.expr(&m.expansion),
-            ExprKind::Repeat(a, b) | ExprKind::Pipe(a, b) | ExprKind::Coalesce(a, b) | ExprKind::Index(a, b) => {
+            ExprKind::Repeat(a, b) | ExprKind::Coalesce(a, b) | ExprKind::Index(a, b) => {
                 self.expr(a);
                 self.expr(b);
             }
@@ -859,7 +857,7 @@ impl<'a> Linter<'a> {
 /// its public API, top-level code and tests (`unused-function`).
 ///
 /// References are the resolved function ids in the checked HIR: direct calls
-/// (including pipes and method calls), function values and default-argument
+/// (including method calls), function values and default-argument
 /// helpers. Reachability (rather than "referenced anywhere") means a function
 /// used only by itself or by other unused functions is unused too.
 fn unused_functions(checked: &CheckedProgram) -> Vec<FnId> {

@@ -4,10 +4,10 @@
 
 use super::http::{Delimit, Framed, Framing, Outgoing, end_head, framing, given_length, persists, push_headers, read_head, values};
 use super::http_common::*;
-use super::net::{self, Detached, check_permission, finish};
+use super::net::{self, Detached, finish};
 use super::stream::IoFailure;
 use crate::engine::Registry;
-use crate::policy::Capability;
+use crate::network::{Listener, Stream};
 use crate::vm::iomem::{IoMemory, Reservation, ResourceSlot};
 use crate::vm::value::{NativeObject, Obj, Value};
 use crate::vm::{Ctl, NResult, Vm};
@@ -19,7 +19,6 @@ use std::sync::{Arc, Weak};
 use std::task::{Poll, Waker};
 use std::time::Duration;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 
 /// How long a request's head may take, from accept or from its first byte.
@@ -32,8 +31,8 @@ const BODY_TIMEOUT: Duration = Duration::from_secs(30);
 pub(super) fn register(r: &mut Registry) {
     r.add_builtin("http.serve", serve);
     r.add_builtin("http.Server.addr", |vm, a| {
-        let addr = server(vm, a[0])?.addr.clone();
-        Ok(vm.new_str(addr))
+        let addr = server(vm, a[0])?.addr;
+        Ok(vm.new_value(addr))
     });
     r.add_method("http.Server.close", |vm, a| {
         vm.heap.native_mut::<Server>(a[0]).ok_or_else(|| Ctl::internal("not a server"))?.close();
@@ -130,18 +129,18 @@ impl Shared {
 
 /// The `http.Server` type.
 struct Server {
-    listener: Option<Arc<TcpListener>>,
+    listener: Option<Arc<dyn Listener>>,
     slot: Option<ResourceSlot>,
-    addr: String,
+    addr: net::SocketAddr,
     closed: watch::Sender<bool>,
     shared: Arc<Shared>,
 }
 
 impl Server {
-    fn new(socket: TcpListener, shared: Arc<Shared>) -> std::io::Result<Server> {
-        let addr = socket.local_addr()?.to_string();
+    fn new(socket: Box<dyn Listener>, shared: Arc<Shared>) -> std::io::Result<Server> {
+        let addr = socket.local_addr()?.into();
         let closed = watch::Sender::new(false);
-        Ok(Server { listener: Some(Arc::new(socket)), slot: None, addr, closed, shared })
+        Ok(Server { listener: Some(socket.into()), slot: None, addr, closed, shared })
     }
 
     /// Stops listening and closes the connections being read (or, if a
@@ -180,14 +179,9 @@ fn server(vm: &Vm, v: Value) -> Result<&Server, Ctl> {
 }
 
 fn serve(vm: &mut Vm, a: &[Value]) -> NResult {
-    let addr = vm.str(a[0]).to_string();
-    if let Some(denied) = check_permission(vm, Capability::NetListen(addr.clone()))? {
-        return Ok(denied);
-    }
-    let slot = super::or_return!(vm.resource_slot());
     let shared = Arc::default();
     vm.host.http_pool.watch(&shared);
-    net::suspend_resource(slot, async move { Ok(Server::new(TcpListener::bind(addr).await?, shared)?) })
+    net::listen_with(vm, a[0], a[1], move |socket| Server::new(socket, shared))
 }
 
 /// Tells the oldest readings beyond the newest `cap` to give up.
@@ -226,9 +220,9 @@ fn next_request(vm: &mut Vm, a: &[Value]) -> NResult {
                     retry = None;
                     match ResourceSlot::try_new(&mem) {
                         Some(slot) => match socket.poll_accept(cx) {
-                            Poll::Ready(Ok((stream, _))) => {
+                            Poll::Ready(Ok((stream, peer))) => {
                                 let state = Arc::new(ReadState::default());
-                                let reading = Box::pin(read_connection(stream, mem.clone(), slot, state.clone()));
+                                let reading = Box::pin(read_connection(stream, peer, mem.clone(), slot, state.clone()));
                                 reads.push(Pending { reading, state });
                                 evict_beyond(&reads, cap);
                                 progress = true;
@@ -316,11 +310,16 @@ async fn deny(conn: &Detached, status: &str, message: &str) {
 }
 
 /// Reads the request of a newly accepted connection (see [`read_request`]).
-async fn read_connection(stream: TcpStream, mem: Arc<IoMemory>, mut slot: ResourceSlot, state: Arc<ReadState>) -> Option<Received> {
-    let peer = stream.peer_addr().ok()?.to_string();
-    let (r, w) = stream.into_split();
+async fn read_connection(
+    stream: Box<dyn Stream>,
+    peer: std::net::SocketAddr,
+    mem: Arc<IoMemory>,
+    mut slot: ResourceSlot,
+    state: Arc<ReadState>,
+) -> Option<Received> {
+    let (r, w) = tokio::io::split(stream);
     let enough = slot.reserve_buffers(net::CONN_BUFFER).is_ok();
-    let conn = Detached::new(net::read_half(Box::new(r)), Box::new(w), peer, slot);
+    let conn = Detached::new(net::read_half(Box::new(r)), Box::new(w), peer.into(), slot);
     if !enough {
         deny(&conn, "503 Service Unavailable", "the server is out of memory").await;
         return None;

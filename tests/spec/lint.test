@@ -304,14 +304,14 @@ fn ping(n: int) -> int { if n > 0 { pong(n - 1) } else { 0 } }
 fn pong(n: int) -> int { ping(n) }
 fn called_by_unused() -> int { 1 }
 fn unused_caller() -> int { called_by_unused() }
-fn piped(n: int) -> int { n + 1 }
+fn called(n: int) -> int { n + 1 }
 fn as_value(n: int) -> int { n * 2 }
 fn in_default() -> int { 4 }
 fn with_default(n: int = in_default()) -> int { n }
 fn by_test() -> int { 3 }
 fn recursive_used(n: int) -> int { if n > 0 { recursive_used(n - 1) } else { 0 } }
 pub fn api() -> int { 0 }
-print(1 |> piped)
+print(called(1))
 let f = as_value
 print(f(1) + with_default() + recursive_used(2))
 test "uses a helper" {

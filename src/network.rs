@@ -1,18 +1,31 @@
-//! Network abstraction for outgoing connections.
+//! Network abstraction for connections and listeners.
 
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite};
 
-/// Resolves host names and opens network connections.
+/// Resolves host names, opens network connections and binds listeners.
 pub trait Network: Send + Sync {
     /// Resolves a host name and port to socket addresses.
     fn resolve<'a>(&'a self, host: &'a str, port: u16) -> NetworkFuture<'a, Vec<SocketAddr>>;
 
     /// Connects to the first reachable address in `addrs`.
     fn connect<'a>(&'a self, addrs: &'a [SocketAddr]) -> NetworkFuture<'a, (Box<dyn Stream>, SocketAddr)>;
+
+    /// Binds a listener to `addr` (port `0`: an ephemeral port).
+    fn listen(&self, addr: SocketAddr) -> NetworkFuture<'_, Box<dyn Listener>>;
+}
+
+/// A listening socket.
+pub trait Listener: Send + Sync {
+    /// The address that the listener is bound to.
+    fn local_addr(&self) -> io::Result<SocketAddr>;
+
+    /// Polls for the next incoming connection and the address of its peer.
+    fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<io::Result<(Box<dyn Stream>, SocketAddr)>>;
 }
 
 /// A bidirectional byte stream.
@@ -37,5 +50,19 @@ impl Network for OsNetwork {
             let peer = tcp.peer_addr()?;
             Ok((Box::new(tcp) as Box<dyn Stream>, peer))
         })
+    }
+
+    fn listen(&self, addr: SocketAddr) -> NetworkFuture<'_, Box<dyn Listener>> {
+        Box::pin(async move { Ok(Box::new(tokio::net::TcpListener::bind(addr).await?) as Box<dyn Listener>) })
+    }
+}
+
+impl Listener for tokio::net::TcpListener {
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        tokio::net::TcpListener::local_addr(self)
+    }
+
+    fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<io::Result<(Box<dyn Stream>, SocketAddr)>> {
+        tokio::net::TcpListener::poll_accept(self, cx).map_ok(|(tcp, peer)| (Box::new(tcp) as Box<dyn Stream>, peer))
     }
 }

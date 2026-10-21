@@ -1003,7 +1003,6 @@ impl<'a> Parser<'a> {
     /// Binding powers: (left, right). Higher binds tighter.
     fn infix_bp(&self) -> Option<(u8, u8)> {
         Some(match self.tok() {
-            Tok::PipeGt => (2, 3),
             Tok::QQ => (5, 4),
             Tok::Or => (6, 7),
             Tok::And => (8, 9),
@@ -1045,10 +1044,6 @@ impl<'a> Parser<'a> {
             let op_tok = self.tok().clone();
             self.bump();
             let kind = match op_tok {
-                Tok::PipeGt => {
-                    let rhs = self.expr_bp(rbp)?;
-                    ExprKind::Pipe(Box::new(lhs), Box::new(rhs))
-                }
                 Tok::QQ => {
                     let rhs = self.expr_bp(rbp)?;
                     ExprKind::Coalesce(Box::new(lhs), Box::new(rhs))

@@ -77,6 +77,7 @@ let report = files.read("/out/report.txt")?;
 - **Limits.** `Limits` configures every resource bound described in [Sandbox and policies](/guide/sandbox/).
 - **Virtual file system.** `Config::memory_fs` replaces host disk access with an in-memory `MemFs`. Clones of a `MemFs` share the same underlying storage so the host can populate input files before a run and read output files afterward.
 - **Streams.** `Config::stdout` and `Config::stderr` redirect script output to a `MemorySink` or custom sink. `Config::stdin_bytes` supplies fixed input bytes (which still require the `stdin` capability).
+- **Logging.** `Config::log_sink` receives each `log` record as a `LogRecord` with a level, a message, and fields, so the host can forward it (for example, to `tracing`). `Config::log_level` sets the lowest level the engine passes on; scripts cannot log below it. Records count against the output limit.
 - **Environment.** `Config::args` and `Config::env` set the command-line arguments and environment map exposed to the script. If `Config::env` is not set, `env.get` reads the host process environment subject to the policy.
 
 To load a `.policy` file from disk, parse it with `sandlang::policy::PolicyFile`:

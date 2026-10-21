@@ -225,6 +225,7 @@ pub struct Config {
     pub(crate) modules: Vec<NativeModule>,
     pub(crate) stdout: SharedSink,
     pub(crate) stderr: SharedSink,
+    log: crate::stdlib::LogConfig,
     stdin: StdinConfig,
     pub(crate) cwd: Option<PathBuf>,
     pub(crate) module_root: Option<PathBuf>,
@@ -274,6 +275,7 @@ impl Config {
             modules: Vec::new(),
             stdout: Arc::new(crate::stdio::StdoutSink::default()),
             stderr: Arc::new(crate::stdio::StderrSink::default()),
+            log: Default::default(),
             stdin: StdinConfig::None,
             cwd: None,
             module_root: None,
@@ -302,7 +304,8 @@ impl Config {
         self
     }
 
-    /// Sets the network provider for host resolution and outgoing TCP connections.
+    /// Sets the network provider for host resolution, outgoing TCP
+    /// connections and listeners.
     #[cfg(feature = "os")]
     pub fn network(mut self, network: Arc<dyn crate::network::Network>) -> Self {
         self.network = Some(network);
@@ -345,6 +348,21 @@ impl Config {
     }
     pub fn stderr(mut self, s: impl OutputSink + 'static) -> Self {
         self.stderr = Arc::new(s);
+        self
+    }
+    /// Sends the records of the `log` module to `sink` instead of writing
+    /// them to standard error. Records still count against the output limit,
+    /// but do not need [`Capability::Stderr`].
+    pub fn log_sink(mut self, sink: impl crate::LogSink + 'static) -> Self {
+        self.log.sink = Some(Arc::new(sink));
+        self
+    }
+    /// Sets the lowest level of `log` records that the engine passes on
+    /// (by default [`LogLevel::Debug`](crate::LogLevel::Debug)). Scripts can
+    /// raise their own level with `log.set_level`, but cannot go below this
+    /// one.
+    pub fn log_level(mut self, level: crate::LogLevel) -> Self {
+        self.log.min = level;
         self
     }
     pub fn stdin_bytes(mut self, data: Vec<u8>) -> Self {
@@ -999,7 +1017,12 @@ impl Engine {
             args: c.args.clone(),
             env: c.env.clone(),
             rng: Rng::new(c.seed.unwrap_or_else(entropy_seed)),
-            log_level: 1,
+            log_level: Some(crate::LogLevel::Info),
+            log: if quiet {
+                crate::stdlib::LogConfig { sink: Some(Arc::new(|_: &crate::LogRecord| {})), min: c.log.min }
+            } else {
+                c.log.clone()
+            },
             interrupt: self.interrupt.clone(),
             stream_decisions: [None; 2],
             #[cfg(feature = "os")]

@@ -774,7 +774,7 @@ fn start_upload(vm: &mut Vm, a: &[Value]) -> NResult {
             return Ok(net::Conn::from_stream(stream, peer));
         }
         let (r, w) = tokio::io::split(net::tls::connect(&tls, &url.host, stream).await?);
-        Ok(net::Conn::new(Box::new(r), Box::new(w), peer.to_string()))
+        Ok(net::Conn::new(Box::new(r), Box::new(w), peer.into()))
     };
     suspend(
         async move {

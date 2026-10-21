@@ -102,9 +102,10 @@ fn memfs_timestamps_are_sourced_from_host_clock() {
 #[cfg(feature = "os")]
 mod network {
     use super::{ManualClock, run_with};
-    use sandlang::network::{Network, NetworkFuture, Stream};
+    use sandlang::network::{Listener, Network, NetworkFuture, Stream};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::Mutex;
+    use std::task::{Context, Poll};
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -113,6 +114,26 @@ mod network {
         silent: bool,
         resolved: Mutex<Vec<String>>,
         requests: std::sync::Arc<Mutex<Vec<String>>>,
+        listened: Mutex<Vec<SocketAddr>>,
+    }
+
+    /// Accepts one connection, whose peer has sent a line.
+    struct MemoryListener {
+        addr: SocketAddr,
+        pending: Mutex<Option<tokio::io::DuplexStream>>,
+    }
+
+    impl Listener for MemoryListener {
+        fn local_addr(&self) -> std::io::Result<SocketAddr> {
+            Ok(self.addr)
+        }
+
+        fn poll_accept(&self, _: &mut Context<'_>) -> Poll<std::io::Result<(Box<dyn Stream>, SocketAddr)>> {
+            match self.pending.lock().unwrap().take() {
+                Some(s) => Poll::Ready(Ok((Box::new(s), "10.9.9.9:5555".parse().unwrap()))),
+                None => Poll::Pending,
+            }
+        }
     }
 
     impl Network for MemoryNetwork {
@@ -142,6 +163,24 @@ mod network {
             let peer = addrs[0];
             Box::pin(async move { Ok((Box::new(client) as Box<dyn Stream>, peer)) })
         }
+
+        fn listen(&self, addr: SocketAddr) -> NetworkFuture<'_, Box<dyn Listener>> {
+            self.listened.lock().unwrap().push(addr);
+            let (server, mut client) = tokio::io::duplex(1 << 16);
+            Box::pin(async move {
+                client.write_all(b"from memory listener\n").await?;
+                Ok(Box::new(MemoryListener { addr, pending: Mutex::new(Some(server)) }) as Box<dyn Listener>)
+            })
+        }
+    }
+
+    #[test]
+    fn listeners_are_opened_through_host_network() {
+        let network = std::sync::Arc::new(MemoryNetwork::default());
+        let src = "import net\nlet l = net.listen(\"10.1.2.3\", 80)?\nprint(l.addr())\nlet c = l.accept()?\nprint(c.peer_addr())\nprint(c.read_line()?)";
+        let r = run_with(src, |c| c.network(network.clone()));
+        assert_eq!(r.ok_stdout(), "10.1.2.3:80\n10.9.9.9:5555\nSome(\"from memory listener\")\n");
+        assert_eq!(*network.listened.lock().unwrap(), ["10.1.2.3:80".parse::<SocketAddr>().unwrap()]);
     }
 
     #[test]
@@ -158,7 +197,7 @@ mod network {
     #[test]
     fn tcp_connections_are_routed_through_host_network() {
         let network = std::sync::Arc::new(MemoryNetwork::default());
-        let src = "import net\nlet c = net.connect(\"example.test:80\")?\nc.write_str(\"GET / HTTP/1.1\\r\\n\\r\\n\")?\nprint(c.peer_addr())\nprint(c.read_all()?.len())";
+        let src = "import net\nlet c = net.connect(\"example.test\", 80)?\nc.write_str(\"GET / HTTP/1.1\\r\\n\\r\\n\")?\nprint(c.peer_addr())\nprint(c.read_all()?.len())";
         let r = run_with(src, |c| c.network(network.clone()));
         assert_eq!(r.ok_stdout(), "93.184.216.34:80\n69\n");
         assert_eq!(*network.resolved.lock().unwrap(), ["example.test"]);

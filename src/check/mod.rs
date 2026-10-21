@@ -2495,7 +2495,7 @@ pub(crate) fn names_used_in_functions(m: &ast::Module) -> HashSet<String, FxBuil
                 }
             }
             K::List(xs) | K::Tuple(xs) => xs.iter().for_each(|x| expr(x, out)),
-            K::Repeat(a, b) | K::Pipe(a, b) | K::Coalesce(a, b) | K::Index(a, b) | K::Binary(_, a, b) => {
+            K::Repeat(a, b) | K::Coalesce(a, b) | K::Index(a, b) | K::Binary(_, a, b) => {
                 expr(a, out);
                 expr(b, out);
             }

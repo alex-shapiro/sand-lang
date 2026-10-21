@@ -90,7 +90,7 @@ See [Tools](/guide/tools/) for details.
 
 1. [Introduction](/guide/introduction/): overview and installation.
 2. [Basics](/guide/basics/): bindings, primitive types, arithmetic, and strings.
-3. [Functions](/guide/functions/): parameters, lambdas, closures, and pipes.
+3. [Functions](/guide/functions/): parameters, lambdas, and closures.
 4. [Control flow](/guide/control-flow/): blocks, `if`, `match`, and loops.
 5. [Collections](/guide/collections/): lists, maps, sets, tuples, and iterators.
 6. [Structs and enums](/guide/structs-and-enums/): user-defined types and methods.

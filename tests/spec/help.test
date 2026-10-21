@@ -319,7 +319,7 @@ Modules (help(name) describes one):
     io          Byte streams (`Reader` and `Writer`) and the standard input,
                 output, and error handles.
     json        JSON (RFC 8259) parsing, serialization, and typed conversion.
-    log         Structured leveled logging to standard error.
+    log         Structured leveled logging.
     math        Mathematical constants and functions on `float` and `int`.
     net         TCP listeners and client connections (including TLS).
     random      Pseudo-random number generation (`xoshiro256**`,

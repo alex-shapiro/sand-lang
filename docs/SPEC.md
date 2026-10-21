@@ -42,7 +42,7 @@ This document is normative. Sections marked _(informative)_ are not.
 - **Well typed, lightly annotated.** Function signatures are annotated; everything
   inside a function body is inferred.
 - **Elegant.** Few keywords, expression-oriented blocks, string interpolation,
-  comprehensions, method chaining, pipes, named and default arguments, duration
+  comprehensions, method chaining, named and default arguments, duration
   literals.
 - **Fast without a JIT.** Static types let the compiler emit specialised
   instructions (integer add, float compare-and-branch, direct calls) for a
@@ -89,14 +89,14 @@ terminator (`;`) when the last token on the line is one of:
 and the newline is **not** inside a `(...)` or `[...]` group. Inside `{...}`
 newlines are significant again, even when nested inside parentheses.
 
-No terminator is inserted if the next non-blank line starts with `.`, `|>`,
+No terminator is inserted if the next non-blank line starts with `.`,
 `else`, `and`, `or`, `=>`, a binary operator, or a `-` followed by whitespace
 (see below). This permits chains such as:
 
 ```sand
 let total = items
-    .filter(x => x.price > 0)
-    .map(x => x.price)
+    .filter(item => item.price > 0 and item.in_stock)
+    .map(item => item.price * item.quantity)
     .sum()
 ```
 
@@ -208,7 +208,7 @@ are encoded as UTF-8.
 ```text
 +  -  *  /  %  **  &  |  ^  ~  <<  >>
 == != <  <= >  >=  =  += -= *= /= %=
-.. ..= => -> |> ?? ? . , : ; @ !
+.. ..= => -> ?? ? . , : ; @ !
 ( ) [ ] { }
 ```
 
@@ -694,22 +694,21 @@ From lowest to highest binding power:
 
 | Level | Operators                                            | Associativity |
 | ----- | ---------------------------------------------------- | ------------- |
-| 1     | `\|>`                                                | left          |
-| 2     | `??`                                                 | right         |
-| 3     | `or`                                                 | left          |
-| 4     | `and`                                                | left          |
-| 5     | `not` (prefix)                                       | —             |
-| 6     | `==` `!=` `<` `<=` `>` `>=`                          | none          |
-| 7     | `\|`                                                 | left          |
-| 8     | `^`                                                  | left          |
-| 9     | `&`                                                  | left          |
-| 10    | `<<` `>>`                                            | left          |
-| 11    | `..` `..=`                                           | none          |
-| 12    | `+` `-`                                              | left          |
-| 13    | `*` `/` `%`                                          | left          |
-| 14    | `-` `~` (prefix)                                     | —             |
-| 15    | `**`                                                 | right         |
-| 16    | postfix: call, `.field`, `.method()`, `[index]`, `?` | left          |
+| 1     | `??`                                                 | right         |
+| 2     | `or`                                                 | left          |
+| 3     | `and`                                                | left          |
+| 4     | `not` (prefix)                                       | —             |
+| 5     | `==` `!=` `<` `<=` `>` `>=`                          | none          |
+| 6     | `\|`                                                 | left          |
+| 7     | `^`                                                  | left          |
+| 8     | `&`                                                  | left          |
+| 9     | `<<` `>>`                                            | left          |
+| 10    | `..` `..=`                                           | none          |
+| 11    | `+` `-`                                              | left          |
+| 12    | `*` `/` `%`                                          | left          |
+| 13    | `-` `~` (prefix)                                     | —             |
+| 14    | `**`                                                 | right         |
+| 15    | postfix: call, `.field`, `.method()`, `[index]`, `?` | left          |
 
 Comparison operators do not chain: `a < b < c` is a syntax error. `-2 ** 2` is
 `-(2 ** 2)`.
@@ -804,9 +803,6 @@ identity.
 
 **Range** `a..b` (exclusive) and `a..=b` (inclusive) require `int` operands and
 produce a `Range`.
-
-**Pipe** `x |> f` is `f(x)`; `x |> f(a, b)` is `f(x, a, b)`; `x |> obj.m(a)` is
-`obj.m(x, a)`. The right-hand side must be a name, a qualified name or a call.
 
 **Coalesce** `a ?? b`: if `a: T?`, yields the payload of `Some` or else
 evaluates `b: T`. If `a: Result<T, E>`, yields the `Ok` payload or else `b`.
@@ -1003,8 +999,8 @@ use f = fs.open(path)?        // close `f` when the enclosing block exits (§7.2
 when the **enclosing block** exits, however it exits:
 
 ```sand
-fn copy(src: str, dst: str) -> Result<()> {
-    let conn = net.connect(dst)?
+fn copy(src: str, host: str, port: int) -> Result<()> {
+    let conn = net.connect(host, port)?
     defer conn.close()                  // runs on every exit below
     for line in fs.read_text(src)?.lines() {
         conn.write_str(line + "\n")?    // an error returns, closing conn
@@ -1888,9 +1884,9 @@ not followed.
 Server:
 
 ```sand
-pub fn serve(addr: str) -> Result<Server>        // capability NetListen(addr)
+pub fn serve(ip: str, port: int) -> Result<Server>      // capability NetListen(ip:port)
 server.accept() -> Result<Request>
-server.addr() -> str
+server.addr() -> net.SocketAddr
 pub struct Request { method: str, path: str, query: str, headers: [(str, str)], body: Body, conn: net.Conn }
 request.respond(status: int, body: bytes, headers: [(str, str)] = []) -> Result<()>
 request.respond_stream(status: int, headers: [(str, str)] = []) -> Result<Reply>
@@ -2054,8 +2050,10 @@ nesting depth of 512.
 
 `debug(msg: str)`, `info(msg: str)`, `warn(msg: str)`, `error(msg: str)`;
 each accepts `fields: [str: str] = [:]`. `set_level(level: str)` with `"debug"`,
-`"info"` (default), `"warn"`, `"error"`, `"off"`. Records go to the host log sink
-(default: stderr as `LEVEL message key=value ...`, needing capability `Stderr`).
+`"info"` (default), `"warn"`, `"error"`, `"off"`. A record is logged only if
+its level is at least the script's level and the host's level (§16). Records
+go to the host log sink (default: stderr as `LEVEL message key=value ...`,
+needing capability `Stderr`) and count against `max_output_bytes`.
 
 ### 13.9 `math`
 
@@ -2071,13 +2069,21 @@ Rounding, `abs`, `min`, `max`, `clamp`, `sqrt` and `pow` are methods of
 ### 13.10 `net`
 
 ```sand
-pub native fn listen(addr: str) -> Result<Listener>    // NetListen(addr)
-pub native fn connect(addr: str, timeout: duration = 30s) -> Result<Conn>      // Net(host:port)
-pub native fn connect_tls(addr: str, timeout: duration = 30s) -> Result<Conn>  // Net(host:port); feature tls
+pub native fn listen(ip: str, port: int) -> Result<Listener>      // NetListen(ip:port)
+pub native fn connect(host: str, port: int, timeout: duration = 30s) -> Result<Conn>      // Net(host, port)
+pub native fn connect_tls(host: str, port: int, timeout: duration = 30s) -> Result<Conn>  // Net(host, port); feature tls
 listener.accept() -> Result<Conn>
-listener.addr() -> str
-conn.peer_addr() -> str
+listener.addr() -> SocketAddr
+conn.peer_addr() -> SocketAddr
+addr.ip() -> str
+addr.port() -> int
 ```
+
+`host` is a host name or an IP address without brackets (`"::1"`), `ip` is
+an IP address, and `port` is in `0..=65535`; other values fail with kind
+`"invalid"`. Port `0` makes `listen` and `http.serve` select an ephemeral
+port. `SocketAddr` is a
+value type (§5.4) formatted as `127.0.0.1:8080` or `[::1]:8080`.
 
 `Listener` implements `Close`; `Conn` implements `io.Reader`, `io.Writer`
 (§13.5) and `Close`. A connection's `read` returns at most what its 8 KiB
@@ -2106,8 +2112,7 @@ Engine-local PRNG (xoshiro256\*\*), seeded from host entropy unless the host
 sets a seed. `int(lo: int, hi: int) -> int` (uniform in `lo..hi`; fails if
 empty), `float() -> float` (`[0, 1)`), `bool() -> bool`,
 `choice<T>(xs: [T]) -> T?`, `shuffle<T>(xs: [T])`, `sample<T>(xs: [T], k: int)
--> [T]`, `bytes(n: int) -> bytes`, `seed(s: int)`, `normal(mean: float = 0.0,
-stdev: float = 1.0) -> float`. `random.rng(seed: int) -> Rng` returns a
+-> [T]`, `bytes(n: int) -> bytes`, `seed(s: int)`. `random.rng(seed: int) -> Rng` returns a
 generator independent of the engine's, with the same methods except `seed`.
 
 ### 13.12 `regex`
@@ -2289,7 +2294,7 @@ emptied and converted into a junction during rename.
 | `Net(host, port)`           | outgoing TCP and TLS connections (`net`)   |
 | `Http(method, url)`         | each `http` request and redirect hop       |
 | `NetAddr(host, addr)`       | each address `host` resolved to (§14.6)    |
-| `NetListen(addr)`           | listening sockets                          |
+| `NetListen(ip:port)`        | listening sockets                          |
 | `Env(name)`                 | environment variable reads (`"*"` for all) |
 | `Stdin`, `Stdout`, `Stderr` | standard streams                           |
 | `TimeZone`                  | `time.local_zone()`                        |
@@ -2360,9 +2365,10 @@ If two opposing rules have equal specificity, deny wins. Rules:
   - supports a name `AWS_SECRET_KEY` or a pattern (`AWS_*`)
   - specific names are prioritized above wildcard patterns
 
-- **Listen addresses** (`NetAddr`)
-  - specify a `host` and `port`
-  - a host name and port makes a rule more specific.
+- **Listen addresses** (`NetListen`)
+  - `ip:port`, `[v6]:port`, `ip`, `localhost` (the loopback addresses), `*:port` or `*`
+  - host `*`, port `*` and port `0` match any address or port
+  - a rule with an address is more specific than one without, then a rule with a port
 
 - **Custom capabilities**:
   - a native module may define its own capabilities
@@ -2447,7 +2453,7 @@ limit memory 64M
 | `allow net HOST...`, `deny net HOST...`                   | connections, and any HTTP request, to hosts (§14.5)                             |
 | `allow http [METHOD...] URL...`, `deny http ...`          | HTTP requests                                                                   |
 | `allow private-net`                                       | do not deny private and internal destinations (§14.6)                           |
-| `allow listen ADDR...`, `deny listen ADDR...`             | listening addresses (`host:port`, port `0` = any)                               |
+| `allow listen ADDR...`, `deny listen ADDR...`             | listening addresses (§14.5)                                                     |
 | `allow env NAME...`, `deny env NAME...`                   | environment variables (`AWS_*`; `*`: all)                                       |
 | `allow stdin`, `deny stdin`, `deny stdout`, `deny stderr` | standard streams                                                                |
 | `allow timezone`, `deny timezone`                         | the local time zone                                                             |
@@ -2683,6 +2689,12 @@ let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 
   `stdin_bytes`. With `Config::stdin_feed(&StdinFeed)`, scripts read what
   the host `send`s (`end()` ends one read); `wanted()` is resolved if a script
   is waiting for input and has nothing else to run.
+- `Config::log_sink(impl LogSink)` receives each `log` record as a
+  `LogRecord { level, message, fields }` instead of standard error; any
+  `Fn(&LogRecord) + Send + Sync` is a `LogSink`. The engine calls the sink on
+  the thread that runs the script. `Config::log_level(LogLevel)` sets the
+  lowest level the engine passes on (default `LogLevel::Debug`); scripts
+  cannot log below it.
 - `Config::memory_fs(MemFs)` gives scripts a memory file system (§16.1).
 - `Config::library(dir)` sets the directory of library scripts for
   `import <name>` (§3.2). `Engine::module_names()` returns the registered
@@ -2694,9 +2706,9 @@ let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 
   through `Clock::yield_now`. `MemFs::with_capacity_and_clock` sets file
   modification timestamps from this clock.
 - `Config::network(Arc<dyn network::Network>)` sets the network provider for
-  host resolution and outgoing TCP streams in `net` and `http`. The engine checks
-  network policy before connecting, and negotiates TLS over the returned stream.
-  Socket listeners always use the operating system.
+  host resolution, outgoing TCP streams and listeners in `net` and `http`. The
+  engine checks network policy before connecting or listening, and negotiates
+  TLS over the returned stream.
 - `Config::time_zone(sandlang::time::TimeZone)` sets the time zone returned by
   `time.local_zone()` if the policy allows `TimeZone`. Use `TimeZone::get(name)`
   to look up a zone by name or offset, or `TimeZone::system()` (feature `os`)
@@ -2905,7 +2917,7 @@ these:
 `unused-function`: public items are `pub` top-level functions and all
 methods of `pub` types. A private function is used only if reachable from
 top-level code, a `test` block or a public item, through calls (including
-method calls and pipes), function values, default arguments and the
+method calls), function values, default arguments and the
 arguments of `help` and `members`; one referenced only by itself or by
 unused functions is reported.
 
@@ -2958,7 +2970,8 @@ line, spaces around binary operators, no space before `(` in calls, `{` on
 the same line, trailing commas in multi-line lists/arguments/fields, at most
 one blank line in a row, one blank line around functions with a body,
 types, `extend`, traits, impls and tests, line width 100 (calls, lists,
-maps and parameter lists that do not fit are broken one element per line),
+maps and parameter lists that do not fit are broken one element per line,
+and method chains that do not fit are broken before each method call),
 comments preserved. Trait and impl bodies are laid out like struct bodies,
 one method per line, with a blank line around methods with a body. String
 literals, including their interpolations, are copied verbatim. Formatting

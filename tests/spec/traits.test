@@ -468,7 +468,7 @@ print([1, 2].map(Describe.describe))
 let f = describe_one
 print(f(3))
 help(describe_one)
-print(Point { x: 5 } |> describe_one)
+print(describe_one(Point { x: 5 }))
 --- stdout
 ["P1", "P2"]
 ["P1", "P2"]

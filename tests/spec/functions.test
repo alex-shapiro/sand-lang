@@ -223,27 +223,6 @@ print(count(1000000, 0))
 --- stdout
 1000000
 
-=== pipe operator
-fn double(x: int) -> int { x * 2 }
-fn add(x: int, y: int) -> int { x + y }
-print(3 |> double)
-print(3 |> add(4))
-print([1, 2, 3] |> double_all)
-fn double_all(xs: [int]) -> [int] { xs.map(double) }
-print(" hi " |> str_trim)
-fn str_trim(s: str) -> str { s.trim() }
---- stdout
-6
-7
-[2, 4, 6]
-hi
-
-=== pipe into module function
-import math
-print(64.0 |> math.cbrt)
---- stdout
-4.0
-
 === static methods on builtin types
 print(int.max_value())
 print(duration.from_millis(1500).millis())

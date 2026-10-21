@@ -469,7 +469,9 @@ pub struct Host {
     pub args: Vec<String>,
     pub env: Option<Vec<(String, String)>>,
     pub rng: Rng,
-    pub log_level: u8,
+    /// The lowest level of `log` records the script writes (`None`: off).
+    pub log_level: Option<crate::LogLevel>,
+    pub(crate) log: crate::stdlib::LogConfig,
     pub interrupt: Arc<AtomicBool>,
     /// Cached decisions for stdout (index 0) and stderr (1).
     pub stream_decisions: [Option<bool>; 2],
@@ -1187,7 +1189,7 @@ impl Vm {
     }
 
     /// Counts `len` bytes written to stream `which` against the output limit.
-    fn count_output(&mut self, which: u8, len: usize) -> Result<(), Ctl> {
+    pub(crate) fn count_output(&mut self, which: u8, len: usize) -> Result<(), Ctl> {
         self.host.output_bytes += len as u64;
         if let Some(max) = self.host.limits.max_output_bytes
             && self.host.output_bytes > max

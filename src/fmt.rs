@@ -532,7 +532,6 @@ const LIST: ListOpts = ListOpts { force: false, pad: false, trailing_comma: true
 fn binary_parts(e: &Expr) -> Option<(&'static str, &Expr, &Expr)> {
     match &e.kind {
         ExprKind::Binary(op, l, r) => Some((op.text(), l, r)),
-        ExprKind::Pipe(l, r) => Some(("|>", l, r)),
         ExprKind::Coalesce(l, r) => Some(("??", l, r)),
         _ => None,
     }
@@ -540,19 +539,18 @@ fn binary_parts(e: &Expr) -> Option<(&'static str, &Expr, &Expr)> {
 
 fn binary_level(e: &Expr) -> u8 {
     match &e.kind {
-        ExprKind::Pipe(..) => 1,
-        ExprKind::Coalesce(..) => 2,
+        ExprKind::Coalesce(..) => 1,
         ExprKind::Binary(op, ..) => match op {
-            BinOp::Or => 3,
-            BinOp::And => 4,
-            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => 6,
-            BinOp::BitOr => 7,
-            BinOp::BitXor => 8,
-            BinOp::BitAnd => 9,
-            BinOp::Shl | BinOp::Shr => 10,
-            BinOp::Add | BinOp::Sub => 12,
-            BinOp::Mul | BinOp::Div | BinOp::Rem => 13,
-            BinOp::Pow => 15,
+            BinOp::Or => 2,
+            BinOp::And => 3,
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => 5,
+            BinOp::BitOr => 6,
+            BinOp::BitXor => 7,
+            BinOp::BitAnd => 8,
+            BinOp::Shl | BinOp::Shr => 9,
+            BinOp::Add | BinOp::Sub => 11,
+            BinOp::Mul | BinOp::Div | BinOp::Rem => 12,
+            BinOp::Pow => 14,
         },
         _ => 0,
     }
@@ -1470,7 +1468,7 @@ impl<'a> Formatter<'a> {
                 cat(vec![self.path(path), text(" "), self.comma_list(("{", "}"), open, e.span.hi - 1, &elems, opts)])
             }
             ExprKind::Unary(op, x) => cat(vec![text(unop_text(*op)), self.expr(x)]),
-            ExprKind::Binary(..) | ExprKind::Pipe(..) | ExprKind::Coalesce(..) => self.binary(e),
+            ExprKind::Binary(..) | ExprKind::Coalesce(..) => self.binary(e),
             ExprKind::Range { start, end, inclusive } => {
                 let mut parts = Vec::new();
                 if let Some(s) = start {
@@ -1734,14 +1732,6 @@ impl<'a> Formatter<'a> {
             }
             return cat(head);
         }
-        // Long chains of calls taking lambdas are always broken.
-        let has_lambda = |op: &Expr| match &op.kind {
-            ExprKind::MethodCall { args, .. } => {
-                args.iter().any(|a| matches!(&a.value.kind, ExprKind::Lambda { body, .. } if !is_block_like(body)))
-            }
-            _ => false,
-        };
-        let force = links.iter().filter(|op| is_call(op)).count() >= 3 && links.iter().any(|op| has_lambda(op));
         let mut tail = Vec::new();
         for op in links {
             if is_call(op) {
@@ -1749,7 +1739,7 @@ impl<'a> Formatter<'a> {
             }
             tail.push(self.postfix(op));
         }
-        group(self.budget, force, cat(vec![cat(head), indent(cat(tail))]))
+        group(self.budget, false, cat(vec![cat(head), indent(cat(tail))]))
     }
 
     fn postfix(&mut self, op: &'a Expr) -> Doc {
