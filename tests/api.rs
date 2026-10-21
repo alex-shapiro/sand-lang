@@ -1743,10 +1743,13 @@ fn docs_describe_the_prelude_and_the_modules() {
     assert_eq!((docs[0].name.as_str(), docs[0].kind), ("prelude", ModuleKind::Prelude));
     let prelude = &docs[0];
     let str_type = prelude.items.iter().find(|i| i.name == "str").unwrap();
-    assert_eq!((str_type.kind, str_type.decl.as_str()), (ItemKind::Type, "type str"));
+    assert_eq!((str_type.kind, str_type.decl.as_str()), (ItemKind::Builtin, "type str"));
     let len = str_type.members.iter().find(|m| m.name == "len").unwrap();
     assert_eq!((len.kind, len.decl.as_str()), (MemberKind::Method, "fn len(self) -> int"));
     assert!(prelude.items.iter().any(|i| i.name == "Iterator" && i.kind == ItemKind::Trait && i.related.contains(&"Iter<T>".to_string())));
+    // Implementors have the names of their items.
+    let close = prelude.items.iter().find(|i| i.name == "Close").unwrap();
+    assert!(["Option<T>", "List<T>"].iter().all(|n| close.related.contains(&n.to_string())), "{:?}", close.related);
 
     let json = docs.iter().find(|m| m.name == "json").unwrap();
     assert_eq!(json.kind, ModuleKind::Std);

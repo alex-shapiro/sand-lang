@@ -99,7 +99,7 @@ In an imported module, top-level `?` is a compile error, because the module cann
 
 A script import must stay in the module root. By default, the module root is the directory of the main module. An import of a path outside it, such as `"../shared.sand"`, is a compile error.
 
-The sandbox also checks each script import against the policy before Sand loads the file. If the policy denies the import, the compiler reports an error. By default, the `sand` tool permits all imports in the module root. An `allow import` rule limits imports to its paths, and a `deny import` rule denies its paths. For example, this policy file denies one module:
+The sandbox also checks each script import against the policy before Sand loads the file. If the policy denies the import, the compiler reports an error. By default, the `sand` tool allows all imports in the module root. An `allow import` rule limits imports to its paths, and a `deny import` rule denies its paths. For example, this policy file denies one module:
 
 ```policy
 deny import ./geometry.sand
@@ -113,7 +113,7 @@ error: cannot import `./geometry.sand`: permission denied
   |        ^^^^^^^^^^^^^^^^^
 ```
 
-[The sandbox](/guide/sandbox/) explains policies. An application that embeds Sand can set a different module root and add its own native modules (see [Embedding](/guide/embedding/)).
+[Sandbox and policies](/guide/sandbox/) explains policies. An application that embeds Sand can set a different module root and add its own native modules (see [Embedding](/guide/embedding/)).
 
 ## Documentation of a module
 
@@ -121,7 +121,6 @@ Write a `//!` comment at the start of a file to document the module. Write `///`
 
 ```sand
 help(math.hypot)
-help(str.split)
 ```
 
 For `help(geometry)`, Sand prints the module comment and a list of the public items, each with the first sentence of its documentation:

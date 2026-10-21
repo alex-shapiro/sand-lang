@@ -13,40 +13,47 @@ use crate::search::Entry;
 use sandlang::docs::{ItemDoc, ItemKind, MemberDoc, MemberKind, ModuleDoc, ModuleKind};
 use std::collections::HashMap;
 
+/// An item with a page of its own: indices of its module and of the item.
+type PageRef = (usize, usize);
+
 pub struct Reference {
     modules: Vec<ModuleDoc>,
-    /// Type and trait names (as written in Sand) by module.
-    types: HashMap<String, HashMap<String, String>>,
+    /// Types and traits by module, by name (`List<T>` also as `List`).
+    types: HashMap<String, HashMap<String, PageRef>>,
 }
 
 impl Reference {
     pub fn new(modules: Vec<ModuleDoc>) -> Reference {
-        let mut types: HashMap<String, HashMap<String, String>> = HashMap::new();
-        for m in &modules {
+        let mut types: HashMap<String, HashMap<String, PageRef>> = HashMap::new();
+        for (mi, m) in modules.iter().enumerate() {
             let names = types.entry(m.name.clone()).or_default();
-            for item in m.items.iter().filter(|i| has_page(i)) {
-                let url = item_url(&m.name, item);
-                names.insert(item_slug(item).to_string(), url.clone());
-                names.insert(item.name.clone(), url);
+            for (ii, item) in m.items.iter().enumerate().filter(|(_, i)| has_page(i)) {
+                names.insert(item_slug(item).to_string(), (mi, ii));
+                names.insert(item.name.clone(), (mi, ii));
             }
         }
         Reference { modules, types }
     }
 
-    /// The URL of the type or trait `name` as code in module `module` sees
-    /// it: its own, the prelude's, or the only one of that name.
+    /// The type or trait `name` as code in module `module` sees it: its
+    /// own, the prelude's, or the only one of that name.
+    fn type_ref(&self, module: &str, name: &str) -> Option<PageRef> {
+        let in_module = |m: &str| self.types.get(m).and_then(|t| t.get(name)).copied();
+        in_module(module).or_else(|| in_module("prelude")).or_else(|| {
+            let mut found = self.types.values().filter_map(|t| t.get(name));
+            match (found.next(), found.next()) {
+                (Some(&r), None) => Some(r),
+                _ => None,
+            }
+        })
+    }
+
     fn type_url(&self, module: &str, name: &str) -> Option<String> {
-        if let Some(url) = self.types.get(module).and_then(|t| t.get(name)) {
-            return Some(url.clone());
-        }
-        if let Some(url) = self.types.get("prelude").and_then(|t| t.get(name)) {
-            return Some(url.clone());
-        }
-        let mut found = self.types.values().filter_map(|t| t.get(name));
-        match (found.next(), found.next()) {
-            (Some(url), None) => Some(url.clone()),
-            _ => None,
-        }
+        self.type_ref(module, name).map(|r| self.page_url(r))
+    }
+
+    fn page_url(&self, (m, i): PageRef) -> String {
+        item_url(&self.modules[m].name, &self.modules[m].items[i])
     }
 
     fn module(&self, name: &str) -> Option<&ModuleDoc> {
@@ -64,9 +71,12 @@ impl Reference {
         match parts.as_slice() {
             [name] => self.type_url(module, name).or_else(|| self.item_anchor(module, name)).or_else(|| self.item_anchor("prelude", name)),
             [first, second] => match self.module(first) {
-                Some(_) if *first != module || self.type_url(module, first).is_none() => {
-                    self.types.get(*first).and_then(|t| t.get(*second)).cloned().or_else(|| self.item_anchor(first, second))
-                }
+                Some(_) if *first != module || self.type_ref(module, first).is_none() => self
+                    .types
+                    .get(*first)
+                    .and_then(|t| t.get(*second))
+                    .map(|&r| self.page_url(r))
+                    .or_else(|| self.item_anchor(first, second)),
                 _ => self.member_anchor(module, first, second),
             },
             [m, ty, member] if self.module(m).is_some() => self.member_anchor(m, ty, member),
@@ -82,14 +92,10 @@ impl Reference {
     }
 
     fn member_anchor(&self, module: &str, ty: &str, member: &str) -> Option<String> {
-        let url = self.type_url(module, ty)?;
-        let mut segments = url.trim_matches('/').split('/').skip(1);
-        let (mname, slug) = (segments.next()?, segments.next()?);
-        let m = self.module(mname)?;
-        let item = m.items.iter().find(|i| item_slug(i) == slug)?;
-        let anchors = member_anchors(&item.members);
-        let i = item.members.iter().position(|x| x.name == member)?;
-        Some(format!("{url}#{}", anchors[i]))
+        let r = self.type_ref(module, ty)?;
+        let members = &self.modules[r.0].items[r.1].members;
+        let i = members.iter().position(|x| x.name == member)?;
+        Some(format!("{}#{}", self.page_url(r), member_anchors(members)[i]))
     }
 
     /// The pages of the reference and their search entries.
@@ -153,16 +159,16 @@ impl Reference {
             body.push_str(&self.doc_html(&m.name, doc, &format!("module {}", m.name), checks));
         }
         let mut toc = Vec::new();
-        type Belongs = fn(&ItemDoc) -> bool;
-        let groups: [(&str, Belongs); 5] = [
-            ("Built-in types", |i| i.kind == ItemKind::Type && i.decl.starts_with("type ") && is_builtin(i)),
-            ("Types", |i| i.kind == ItemKind::Type && !is_builtin(i)),
-            ("Traits", |i| i.kind == ItemKind::Trait),
-            ("Functions", |i| i.kind == ItemKind::Function),
-            ("Values", |i| i.kind == ItemKind::Value),
+        let groups = [
+            ("Built-in types", ItemKind::Builtin),
+            ("Types", ItemKind::Type),
+            ("Type aliases", ItemKind::Alias),
+            ("Traits", ItemKind::Trait),
+            ("Functions", ItemKind::Function),
+            ("Values", ItemKind::Value),
         ];
-        for (heading, belongs) in groups {
-            let items: Vec<&ItemDoc> = m.items.iter().filter(|i| belongs(i)).collect();
+        for (heading, kind) in groups {
+            let items: Vec<&ItemDoc> = m.items.iter().filter(|i| i.kind == kind).collect();
             if items.is_empty() {
                 continue;
             }
@@ -329,12 +335,7 @@ fn with_sand_fences(doc: &str) -> String {
 }
 
 fn has_page(item: &ItemDoc) -> bool {
-    matches!(item.kind, ItemKind::Type | ItemKind::Trait) && !item.decl.contains(" = ")
-}
-
-fn is_builtin(item: &ItemDoc) -> bool {
-    item.decl == format!("type {}", item.name)
-        && (item.name.contains('<') || item.name == "Range" || item.name.starts_with(|c: char| c.is_lowercase()))
+    matches!(item.kind, ItemKind::Builtin | ItemKind::Type | ItemKind::Trait)
 }
 
 pub fn module_url(name: &str) -> String {
@@ -381,7 +382,7 @@ fn kind_label(kind: MemberKind) -> &'static str {
 
 fn kind_name(item: &ItemDoc) -> &'static str {
     match item.kind {
-        ItemKind::Type => "type",
+        ItemKind::Builtin | ItemKind::Type | ItemKind::Alias => "type",
         ItemKind::Trait => "trait",
         ItemKind::Function => "fn",
         ItemKind::Value => "value",

@@ -19,8 +19,8 @@ Follow-up work, roughly in priority order.
 ### Test coverage
 
 - [ ] Run the CI workflow on Windows and Linux, where nothing has run
-      yet (Windows is only cross-checked with `--no-default-features
---features os`), including the ConPTY variant of
+      yet (Windows is only cross-checked with
+      `--no-default-features --features os`), including the ConPTY variant of
       `cli/tests/prompt_tty.rs` and the REPL's line editor.
 - [ ] The Windows resolver and file operations (`files/windows.rs`,
       through `fs_at` and `winx`) have only been cross-compiled.

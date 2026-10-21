@@ -60,7 +60,7 @@ To suppress a lint for the next line, write `// lint: allow(name)`. To suppress 
 let kept_for_later = [1, 2, 3]
 ```
 
-[§17.2 of the specification](https://github.com/alex-shapiro/sand-lang/blob/main/docs/SPEC.md#172-sand-lint-file) lists every lint.
+[§17.2 of the specification](/spec/#172-sand-lint-file) lists every lint.
 
 ## `sand fmt`
 
@@ -111,7 +111,7 @@ FAIL a failing test: assert: left == right
 
 A test passes if it finishes without an error. A failure in one test does not stop the other tests. Each test starts with the top-level state as the top-level code made it.
 
-`test.property(name, gen, prop)` is a property test. It calls `gen` to make 100 random inputs and checks that `prop` is true for each one. The random seed is fixed, so a failing property fails again with the same input. For all assertions, see the [`test` reference](/std/test/).
+`test.property(name, gen, prop)` is a property test. It calls `gen` to make 100 random inputs and checks that `prop` is true for each one. Sand fixes the random seed, so a failing property fails again with the same input. For all assertions, see the [`test` reference](/std/test/).
 
 `sand test` uses the same policy flags as `sand run`. A test that needs a file must have permission to read it.
 
@@ -168,11 +168,11 @@ Both functions work in programs and in the REPL. The type checker evaluates them
 
 All tools use the same exit codes:
 
-| Code | Meaning                                                                         |
-| ---- | ------------------------------------------------------------------------------- |
-| 0    | success                                                                         |
-| 1    | a runtime error, a lint warning, a failed test, or a file that is not formatted |
-| 2    | a compile error, a file that Sand cannot read, or an incorrect command          |
-| 3    | a resource limit (see [Sandbox and policies](/guide/sandbox/))                  |
+| Code | Meaning                                                                                                          |
+| ---- | ---------------------------------------------------------------------------------------------------------------- |
+| 0    | success                                                                                                          |
+| 1    | a runtime error, a lint warning, a failed test, or a file that is not formatted                                  |
+| 2    | a compile error, a file that Sand cannot read, or an incorrect command                                           |
+| 3    | the memory, time, CPU, instruction or output limit (see [Sandbox and policies](/guide/sandbox/#resource-limits)) |
 
 A script can also stop with its own code: `exit(4)` makes `sand run` exit with code 4. An internal error of the engine gives code 70, and an interrupted run gives code 130.

@@ -211,29 +211,9 @@ print(parse_pair("3, x"))
 
 This form keeps the main path of a function at the left margin. [Errors](/guide/errors/) shows `?`, which is shorter when you only pass on a `None` or an `Err`.
 
-### `if let`
+### `if let` and `while let`
 
-Use `if let` when you need only one pattern. Add an `else` branch for the other values.
-
-```sand
-let ages = ["ann": 31]
-if let Some(age) = ages.get("ann") {
-    print("ann is \(age)")
-} else {
-    print("no ann")
-}
-```
-
-### `while let`
-
-A `while let` loop runs while its pattern matches.
-
-```sand
-let stack = [1, 2, 3]
-while let Some(top) = stack.pop() {
-    print(top)
-}
-```
+`if let` and `while let` also take a pattern that can fail. [Control flow](/guide/control-flow/#if-let) shows both.
 
 ## Patterns in `for`
 

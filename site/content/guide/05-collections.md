@@ -226,4 +226,4 @@ print(Iter.repeat("ab").take(3).join("-"))
 ```
 
 Use a lazy iterator for long or endless sequences, or when you stop early. For short lists, the eager methods are simpler.
-Your own types can be iterators too: the [Traits](/guide/traits/) chapter shows how to implement `Iterator<T>`.
+Your own types can be iterators too: the [Traits and generics](/guide/traits/) chapter shows how to implement `Iterator<T>`.

@@ -73,7 +73,7 @@ task.sleep(1ms)
 
 An error in any task stops the whole run. Return a `Result` from a task to give an error to the task that waits.
 
-When the top-level code of the main module finishes, the run ends. Sand cancels the tasks that are not done.
+When the top-level code of the main module finishes, Sand ends the run and cancels the tasks that are not done.
 
 ## Waiting for many tasks
 
@@ -154,4 +154,4 @@ print("busy task stopped: \(busy.wait())")
 
 The main task sleeps while `busy` runs its loop. When the sleep ends, the engine switches from `busy` to the main task, which sets `stop`.
 
-[§11 of the specification](https://github.com/alex-shapiro/sand-lang/blob/main/docs/SPEC.md#11-concurrency-and-asynchronous-io) gives the full rules.
+[§11 of the specification](/spec/#11-concurrency-and-asynchronous-io) gives the full rules.

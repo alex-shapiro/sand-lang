@@ -1187,7 +1187,7 @@ impl Checker {
         match r {
             TyRef::Prim(t) => t,
             TyRef::Coll(c) => {
-                let args = [self.fresh(), self.fresh()];
+                let args: Vec<TypeId> = (0..coll_arity(c)).map(|_| self.fresh()).collect();
                 self.coll_ty(c, &args)
             }
             TyRef::Def(d) => {

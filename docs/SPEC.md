@@ -13,24 +13,24 @@ This document is normative. Sections marked _(informative)_ are not.
 
 ## Contents
 
-1. Design goals _(informative)_
-2. Source text and lexical structure
-3. Programs, modules and imports
-4. Declarations
-5. Types
-6. Expressions
-7. Statements
-8. Patterns
-9. Type checking and inference
-10. Runtime semantics
-11. Concurrency and asynchronous I/O
-12. The prelude
-13. Standard library
-14. Sandbox and policy
-15. Resource limits
-16. Embedding API (Rust)
-17. Tooling: checker, linter, formatter, test runner, CLI
-18. Diagnostics
+1. [Design goals](#1-design-goals-informative) _(informative)_
+2. [Source text and lexical structure](#2-source-text-and-lexical-structure)
+3. [Programs, modules and imports](#3-programs-modules-and-imports)
+4. [Declarations](#4-declarations)
+5. [Types](#5-types)
+6. [Expressions](#6-expressions)
+7. [Statements](#7-statements)
+8. [Patterns](#8-patterns)
+9. [Type checking and inference](#9-type-checking-and-inference)
+10. [Runtime semantics](#10-runtime-semantics)
+11. [Concurrency and asynchronous I/O](#11-concurrency-and-asynchronous-io)
+12. [The prelude](#12-the-prelude)
+13. [Standard library](#13-standard-library)
+14. [Sandbox and policy](#14-sandbox-and-policy)
+15. [Resource limits](#15-resource-limits)
+16. [Embedding API (Rust)](#16-embedding-api-rust)
+17. [Tooling](#17-tooling)
+18. [Diagnostics](#18-diagnostics)
 
 ---
 

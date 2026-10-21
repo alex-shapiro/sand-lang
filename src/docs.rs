@@ -15,11 +15,11 @@ pub struct ModuleDoc {
     /// The module's doc comment (its `//!` lines).
     pub doc: Option<String>,
     /// The public items, in order of declaration. The prelude lists the
-    /// built-in types (`int`, `[T]`, ...) first.
+    /// built-in types (`int`, `List<T>`, ...) first.
     pub items: Vec<ItemDoc>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ModuleKind {
     Prelude,
     Std,
@@ -40,14 +40,18 @@ pub struct ItemDoc {
     /// A type's variants, fields and methods, or a trait's methods.
     pub members: Vec<MemberDoc>,
     /// The traits a type implements, or the types that implement a trait
-    /// (`Iterator<T>`, `[T]`).
+    /// (`Iterator<T>`, `List<T>`).
     pub related: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ItemKind {
-    /// A struct, enum, opaque, built-in type or type alias.
+    /// A type that the language defines: `int`, `str`, `List<T>`, `Range`.
+    Builtin,
+    /// A struct, enum or opaque type.
     Type,
+    /// A type alias.
+    Alias,
     Trait,
     Function,
     /// A top-level `let` or `var`.

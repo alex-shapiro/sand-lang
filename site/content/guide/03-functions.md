@@ -3,7 +3,7 @@ title = "Functions"
 description = "Declare functions in Sand, call them with named and default arguments, and use lambdas, closures and pipes."
 +++
 
-A function declaration names its parameters and their types. The checker infers everything inside the body.
+A function declaration names its parameters and their types. The checker infers most types inside the body.
 The body is a block, and the value of its last expression is the return value.
 
 ```sand
@@ -176,8 +176,7 @@ fn count_paths(width: int, height: int) -> int {
 print(count_paths(3, 3))
 ```
 
-Top-level functions can call each other in any order.
-A call in tail position, such as `return f(x)`, does not use stack space, so a tail-recursive loop can run for any number of steps:
+A call in tail position, such as `return f(x)`, does not use stack space while the function has no pending `defer`. Thus a tail-recursive loop can run for any number of steps:
 
 ```sand
 fn sum_to(n: int, acc: int = 0) -> int {
@@ -191,21 +190,4 @@ Other recursion has a depth limit (10,000 calls by default). A deeper recursion 
 
 ## Generic functions
 
-A type parameter in `<...>` lets one function work for many types.
-A bound after a colon states what the type must support:
-
-```sand
-fn largest<T: Ord>(xs: [T], fallback: T) -> T {
-    var best = fallback
-    for x in xs {
-        if x > best { best = x }
-    }
-    best
-}
-
-print(largest([3, 9, 2], 0))
-print(largest(["pear", "fig"], ""))
-```
-
-The built-in bounds are `Eq` (`==`), `Ord` (`<` and the other comparisons), `Hash` (map keys and set elements) and `Num` (arithmetic).
-Combine bounds with `+`, as in `T: Ord + Hash`. Your own traits are bounds too. The [Traits](/guide/traits/) chapter shows how to write them.
+A type parameter in `<...>` lets one function work for many types, and a bound such as `T: Ord` states what the type must support. The [Traits and generics](/guide/traits/) chapter explains both.

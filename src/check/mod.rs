@@ -1768,7 +1768,7 @@ impl Checker {
                 t
             }
             TyRef::Coll(c) => {
-                let n = if c == Ctor::Map { 2 } else { 1 };
+                let n = coll_arity(c);
                 if args.len() != n {
                     let plural = if n == 1 { "" } else { "s" };
                     self.error(span, format!("expected {n} type argument{plural} for `{name}`, found {}", args.len()));
@@ -2351,6 +2351,11 @@ impl Checker {
     pub(crate) fn use_local(&mut self, id: LocalId) {
         self.fs.data[id as usize].used = true;
     }
+}
+
+/// The number of type arguments of the collection type `c`.
+fn coll_arity(c: Ctor) -> usize {
+    if c == Ctor::Map { 2 } else { 1 }
 }
 
 pub fn builtin_type(name: &str) -> Option<TyRef> {

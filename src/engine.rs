@@ -766,7 +766,7 @@ impl Engine {
                 Some((kind, name.as_str(), m))
             })
             .collect();
-        mods.sort_by_key(|&(kind, name, _)| (kind as u8, name));
+        mods.sort_by_key(|&(kind, name, _)| (kind, name));
         Ok(mods.into_iter().map(|(kind, _, m)| checker.module_doc(m, kind)).collect())
     }
 

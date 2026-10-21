@@ -1,7 +1,7 @@
 # sandlang.com
 
-The website: a home page, the guide, the library reference and the
-playground. A Rust program in this crate builds it
+The website: a home page, the guide, the library reference, the
+specification and the playground. A Rust program in this crate builds it
 into static files.
 
 ```sh
@@ -12,7 +12,7 @@ cargo site build            # build into target/site; exit code 1 if a check fai
 `build` makes the playground's engine with `wasm/build.sh` (it needs the
 `wasm32-unknown-unknown` target and `wasm-bindgen-cli`; the script says how
 to install them). `--engine=dev` builds it faster, and `--engine=none`
-keeps the engine of the previous build. `serve` uses `--engine=dev` unless
+keeps the engine of the previous build, and fails if there is none. `serve` uses `--engine=dev` unless
 told otherwise, and serves the site even if a check fails.
 
 ## Why a custom generator
@@ -20,8 +20,8 @@ told otherwise, and serves the site even if a check fails.
 The generator uses the Sand compiler as a library, so the site cannot
 drift from the language:
 
-- It checks every example in the guide and on the home page, runs it, and
-  shows what it printed.
+- It checks the Sand examples of the guide and the home page, runs them,
+  and shows what they printed.
 - It highlights Sand with the compiler's own lexer.
 - It generates the library reference from the declarations and doc
   comments of the standard library (`Engine::docs`).
@@ -68,9 +68,9 @@ after `sand` changes the check:
 | `sand ignore` | no check (for fragments)                           |
 
 Lines that start with `# ` are part of the program but are not shown.
-Examples run like the playground's programs: with an empty memory file
-system that they may read and write, no other access, and a fixed random
-seed. In doc comments, Sand blocks are highlighted but not checked.
+Examples run with an empty memory file system, a fixed random seed and the
+policy `POLICY` of `src/examples.rs`: they may read and write files, and do
+nothing else. "Open in playground" gives the playground the same policy. In doc comments and in the specification (`docs/SPEC.md`, served at `/spec/`), Sand blocks are fragments: the generator highlights them, but does not check them.
 
 A `rust` block must compile. `cargo test -p sandlang-site` compiles each
 one as the body of an async function that returns a `Result`, or as it is

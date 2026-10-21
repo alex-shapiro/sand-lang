@@ -3,6 +3,7 @@
 //! repository's main branch on GitHub must lead to a file of `repo`, and to
 //! a heading of it if it is Markdown.
 
+use crate::markdown::github_slug;
 use crate::page::REPO;
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 use std::collections::{HashMap, HashSet};
@@ -65,9 +66,8 @@ fn repo_file(link: &str) -> Option<&str> {
     rest.strip_prefix("/blob/main/").or_else(|| rest.strip_prefix("/tree/main/"))
 }
 
-/// The anchors GitHub gives the headings of a Markdown file: lower case,
-/// spaces as hyphens, without other punctuation, and with `-1`, `-2`, ...
-/// after repeated ones.
+/// The anchors GitHub gives the headings of a Markdown file, with `-1`,
+/// `-2`, ... after repeated ones.
 fn github_anchors(markdown: &str) -> HashSet<String> {
     let mut anchors = HashSet::new();
     let mut text: Option<String> = None;
@@ -76,16 +76,7 @@ fn github_anchors(markdown: &str) -> HashSet<String> {
             Event::Start(Tag::Heading { .. }) => text = Some(String::new()),
             Event::Text(t) | Event::Code(t) if text.is_some() => text.as_mut().unwrap().push_str(&t),
             Event::End(TagEnd::Heading(_)) => {
-                let base: String = text
-                    .take()
-                    .unwrap_or_default()
-                    .chars()
-                    .filter_map(|c| match c {
-                        ' ' => Some('-'),
-                        c if c.is_alphanumeric() || c == '-' || c == '_' => Some(c.to_ascii_lowercase()),
-                        _ => None,
-                    })
-                    .collect();
+                let base = github_slug(&text.take().unwrap_or_default());
                 let mut anchor = base.clone();
                 let mut n = 1;
                 while anchors.contains(&anchor) {

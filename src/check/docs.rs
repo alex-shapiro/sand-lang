@@ -18,7 +18,7 @@ impl Checker {
             for &c in BUILTIN_CTORS {
                 let doc = self.ctor_docs.get(&c).map(|d| d.to_string());
                 let name = self.ctor_name(c, 0);
-                items.push(self.type_item(c, name.clone(), format!("type {name}"), doc));
+                items.push(self.type_item(ItemKind::Builtin, c, name.clone(), format!("type {name}"), doc));
             }
         }
         for (name, def) in self.public_items(m) {
@@ -28,12 +28,12 @@ impl Checker {
                     let td = &self.types[d as usize];
                     let doc = td.doc.as_deref().map(str::to_string);
                     let decl = self.type_header(d, false);
-                    self.type_item(Ctor::Def(d), name, decl, doc)
+                    self.type_item(ItemKind::Type, Ctor::Def(d), name, decl, doc)
                 }
                 Def::Type(TyRef::Alias(i)) => {
                     let ty = self.resolve_alias(i, Span::default());
                     let decl = format!("type {name} = {}", self.show(ty));
-                    item(ItemKind::Type, name, decl, None)
+                    item(ItemKind::Alias, name, decl, None)
                 }
                 Def::Trait(t) => self.trait_item(t, name),
                 Def::Fn(f) => {
@@ -68,7 +68,7 @@ impl Checker {
         items.into_iter().map(|(n, b)| (n, b.def)).collect()
     }
 
-    fn type_item(&mut self, c: Ctor, name: String, decl: String, doc: Option<String>) -> ItemDoc {
+    fn type_item(&mut self, kind: ItemKind, c: Ctor, name: String, decl: String, doc: Option<String>) -> ItemDoc {
         let mut members = Vec::new();
         if let Ctor::Def(d) = c {
             let def = &self.types[d as usize];
@@ -96,7 +96,7 @@ impl Checker {
                 related.push(self.show_trait(tr));
             }
         }
-        ItemDoc { kind: ItemKind::Type, name, decl, doc, members, related }
+        ItemDoc { kind, name, decl, doc, members, related }
     }
 
     fn trait_item(&mut self, t: TraitId, name: String) -> ItemDoc {
@@ -114,12 +114,22 @@ impl Checker {
             .collect();
         let mut related: Vec<String> = Vec::new();
         for imp in self.impls.iter().filter(|i| i.trait_ref.trait_id == t) {
-            let shown = self.show(imp.target);
-            if !related.contains(&shown) {
-                related.push(shown);
+            let name = self.item_name(imp.target);
+            if !related.contains(&name) {
+                related.push(name);
             }
         }
         ItemDoc { kind: ItemKind::Trait, name, decl, doc: td.doc.as_deref().map(str::to_string), members, related }
+    }
+
+    /// The name of the item that documents type `t`: `List<T>` for `[int]`,
+    /// `Option<T>` for `str?`.
+    fn item_name(&self, t: TypeId) -> String {
+        match traits::impl_key(&self.arena, t) {
+            Some((Ctor::Def(d), _)) => self.type_header_name(d),
+            Some((c, arity)) => self.ctor_name(c, arity),
+            None => self.show(t),
+        }
     }
 }
 

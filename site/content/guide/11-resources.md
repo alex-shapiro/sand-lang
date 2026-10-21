@@ -73,7 +73,7 @@ fn save() -> Result<()> {
 }
 ```
 
-When a run fails with an error (for example from `fail`) or calls `exit`, Sand stops at once and does not run the deferred code. A top-level `?` is different: it runs the deferred code of the top level before the run stops.
+When a script fails (for example with `fail`) or calls `exit(code)`, Sand stops it at once and does not run the deferred code. A top-level `?` is different: Sand runs the deferred code of the top level, then ends the run with the error.
 
 ## `use` and `Close`
 

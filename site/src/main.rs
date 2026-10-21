@@ -16,7 +16,7 @@ mod rust_examples {
     include!(concat!(env!("OUT_DIR"), "/rust_examples.rs"));
 }
 
-use markdown::{Checks, Heading, Style};
+use markdown::{Checks, Style};
 use page::{Assets, Page, Section};
 use search::Entry;
 use std::path::{Path, PathBuf};
@@ -114,10 +114,14 @@ fn report(errors: &[String]) -> bool {
 /// Writes the site to `out`; returns the checks that failed.
 fn build(repo: &Path, out: &Path, engine: EngineBuild) -> Result<Vec<String>, String> {
     let site = repo.join("site");
+    let pkg = out.join("play/pkg");
+    if engine == EngineBuild::None && !pkg.join("sandlang_wasm_bg.wasm").is_file() {
+        return Err(format!("{} has no engine to keep; build one with --engine=dev or --engine=release", out.display()));
+    }
     prepare_output(out, engine)?;
     let assets = copy_static(&site.join("static"), out)?;
     if engine != EngineBuild::None {
-        build_engine(repo, &out.join("play/pkg"), engine)?;
+        build_engine(repo, &pkg, engine)?;
     }
     copy_playground(&site.join("playground"), &out.join("play"), &assets)?;
 
@@ -133,6 +137,10 @@ fn build(repo: &Path, out: &Path, engine: EngineBuild) -> Result<Vec<String>, St
     pages.extend(guide_pages);
     entries.extend(guide_entries);
     entries.extend(reference_entries);
+
+    let (spec_page, spec_entries) = spec(&repo.join("docs/SPEC.md"), &mut checks)?;
+    pages.push(spec_page);
+    entries.extend(spec_entries);
 
     pages.push(home(&site.join("content/index.md"), &mut checks)?);
     pages.push(not_found());
@@ -224,7 +232,7 @@ fn build_engine(repo: &Path, pkg: &Path, engine: EngineBuild) -> Result<(), Stri
     Ok(())
 }
 
-/// Copies the playground, giving its page the site's header.
+/// Copies the playground, giving its page the site's head and header.
 fn copy_playground(from: &Path, to: &Path, assets: &Assets) -> Result<(), String> {
     for entry in std::fs::read_dir(from).map_err(|e| format!("{}: {e}", from.display()))? {
         let path = entry.map_err(|e| e.to_string())?.path();
@@ -232,8 +240,10 @@ fn copy_playground(from: &Path, to: &Path, assets: &Assets) -> Result<(), String
         match name.as_str() {
             "README.md" => {}
             "index.html" => {
+                let description =
+                    "Write Sand programs and the policies that sandbox them, and run several engines at once, in your browser.";
                 let html = read(&path)?
-                    .replace("<!-- site-head -->", &format!(r#"<link rel="stylesheet" href="{}">"#, assets.css))
+                    .replace("<!-- site-head -->", &page::head("Playground – Sand", description, assets))
                     .replace("<!-- site-chrome -->", &page::chrome(Section::Playground));
                 write(&to.join(name), &html)?;
             }
@@ -275,7 +285,7 @@ fn guide(dir: &Path, checks: &mut Checks) -> Result<(Vec<Page>, Vec<Entry>), Str
     let mut entries = vec![Entry::new("Guide", "guide", "/guide/", "A tour of the Sand language.")];
     let mut index = String::from(
         r#"<h1>The Sand guide</h1>
-<p class="lede">This guide teaches Sand chapter by chapter, from the first program to embedding the engine in Rust. The Sand compiler checks every example when the site is built, and the output below an example is what it printed.</p>
+<p class="lede">This guide teaches Sand chapter by chapter, from the first program to embedding the engine in Rust. The site's build checks the Sand examples, and the output below an example is what it printed.</p>
 <ol class="chapters">"#,
     );
     for (i, c) in chapters.iter().enumerate() {
@@ -309,7 +319,7 @@ fn guide(dir: &Path, checks: &mut Checks) -> Result<(Vec<Page>, Vec<Entry>), Str
             description: c.description.clone(),
             section: Section::Guide,
             sidebar: sidebar(&url),
-            toc: c.rendered.headings.iter().map(|h| Heading { level: h.level, text: h.text.clone(), id: h.id.clone() }).collect(),
+            toc: c.rendered.headings.clone(),
             body,
         });
     }
@@ -324,6 +334,33 @@ fn guide(dir: &Path, checks: &mut Checks) -> Result<(Vec<Page>, Vec<Entry>), Str
         body: index,
     });
     Ok((pages, entries))
+}
+
+/// The specification as one page, with its sections in the sidebar. Its
+/// examples are fragments, so they are highlighted but not checked.
+fn spec(path: &Path, checks: &mut Checks) -> Result<(Page, Vec<Entry>), String> {
+    const URL: &str = "/spec/";
+    let rendered = markdown::render(&read(path)?, &Style::page("docs/SPEC.md", false), checks);
+    let sections: Vec<(String, String)> = rendered
+        .headings
+        .iter()
+        .filter(|h| h.level == 2 && h.text != "Contents")
+        .map(|h| (format!("{URL}#{}", h.id), highlight::escape(&h.text)))
+        .collect();
+    let mut entries = vec![Entry::new("Specification", "spec", URL, "The definition of the Sand language.")];
+    for h in rendered.headings.iter().filter(|h| h.level == 2 || h.level == 3) {
+        entries.push(Entry::new(&h.text, "spec", &format!("{URL}#{}", h.id), ""));
+    }
+    let page = Page {
+        path: URL.into(),
+        title: "Specification".into(),
+        description: "The definition of the Sand language, its standard library, sandbox and tools.".into(),
+        section: Section::Spec,
+        sidebar: format!(r#"<h2><a href="{URL}">Specification</a></h2>{}"#, page::link_list(&sections, "")),
+        toc: rendered.headings.into_iter().filter(|h| h.level == 3).collect(),
+        body: rendered.html,
+    };
+    Ok((page, entries))
 }
 
 fn home(path: &Path, checks: &mut Checks) -> Result<Page, String> {

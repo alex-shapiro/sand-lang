@@ -902,21 +902,31 @@ function bytes(n) {
   return n < 1024 ? `${n} B` : n < 1 << 20 ? `${(n / 1024).toFixed(1)} KB` : `${(n / (1 << 20)).toFixed(1)} MB`;
 }
 
+/**
+ * The sandboxes of a share link (`#share=`) first, then the saved ones.
+ * The link leaves the address bar, so that a reload keeps the edits.
+ */
 async function initialSandboxes() {
+  let saved = [];
+  try {
+    const list = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null");
+    if (Array.isArray(list)) saved = list.map((s) => newSandbox(s));
+  } catch {
+    // Unreadable storage: start over.
+  }
   const share = new URLSearchParams(location.hash.slice(1)).get("share");
   if (share) {
+    history.replaceState(null, "", location.pathname + location.search);
     try {
-      return await decodeShare(share);
+      const shared = await decodeShare(share);
+      const key = (s) => JSON.stringify([s.title, s.main, s.files, s.policy, s.env, s.stdin]);
+      const keys = new Set(shared.map(key));
+      return [...shared, ...saved.filter((s) => !keys.has(key(s)))];
     } catch (e) {
       console.warn("invalid share link", e);
     }
   }
-  try {
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null");
-    if (Array.isArray(saved) && saved.length) return saved.map((s) => newSandbox(s));
-  } catch {
-    // Unreadable storage: start over.
-  }
+  if (saved.length) return saved;
   return ["welcome", "capabilities"].map((id) => fromExample(examples.find((e) => e.id === id)));
 }
 
@@ -933,7 +943,7 @@ async function main() {
     status.textContent = `Sand ${wasm.version()} · loaded in ${millis(performance.now() - started)}`;
     document.body.classList.add("ready");
   } catch (e) {
-    status.textContent = `The engine failed to load: ${e.message}. Build it first: playground/build.sh`;
+    status.textContent = `The engine failed to load: ${e.message}. Build it with the site: cargo site serve`;
     status.classList.add("error");
     throw e;
   }

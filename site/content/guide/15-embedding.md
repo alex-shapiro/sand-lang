@@ -32,13 +32,14 @@ The script runs inside the future, on the thread that polls it. The first argume
 | `Error::Runtime { message, .. }`  | the script failed with an error           |
 | `Error::Limit(kind)`              | the script went over a resource limit     |
 | `Error::Interrupted`              | the host interrupted the run              |
+| `Error::Io(message)`              | Sand cannot read a script file            |
 | `Error::Internal { message, .. }` | a bug in the engine or in a native module |
 
 `err.render()` formats the error as `sand run` shows it. `check_source(name, source)` type checks a script without running it, and `lint_source` returns its lint warnings.
 
 ## Configuration
 
-`Config::new()` denies all access except standard output and standard error. Add a policy, limits and other settings with builder methods:
+`Config::new()` denies all access except standard output, standard error and imports in the module root. Add a policy, limits and other settings with builder methods:
 
 ```rust
 use sandlang::{Config, Engine, Limits, MemFs, MemorySink, Policy, RulePolicy};
@@ -143,7 +144,7 @@ A `HostError` keeps its kind. Any other error type becomes an `Error` of kind `e
 `guarded_function` checks a capability before it calls the function. The guard computes the capability from the arguments. In Sand, the function returns a `Result`, which is an `Err` of kind `permission_denied` if the policy denies the capability:
 
 ```rust
-use sandlang::{Capability, NativeModule, Policy, RulePolicy};
+use sandlang::{Capability, Config, Engine, NativeModule, Policy, RulePolicy};
 
 let mut door = NativeModule::new("door");
 door.guarded_function(
@@ -152,6 +153,15 @@ door.guarded_function(
     |name: String| -> String { format!("opened {name}") },
 );
 let policy = Policy::rules(RulePolicy::new().allow_custom("door", Some("front")));
+let mut engine = Engine::new(Config::new().module(door).policy(policy));
+engine.run_source("main.sand", "import door\nprint(door.open(\"front\"))\nprint(door.open(\"back\"))").await?;
+```
+
+The script prints:
+
+```text
+Ok("opened front")
+Err(Error { kind: "permission_denied", message: "permission denied: door back" })
 ```
 
 `NativeModule::source` adds Sand declarations to a module, such as types and helper functions written in Sand.
@@ -214,4 +224,4 @@ console.log(result.ok, result.exitCode);
 
 The options take a policy file as text, the files, the environment, the arguments and standard input. The `onPrompt` hook answers requests that the policy does not decide. A run uses the thread of the page while it computes, so run engines in Web Workers to keep the page responsive. The [playground](/play/) uses this API.
 
-[§16 of the specification](https://github.com/alex-shapiro/sand-lang/blob/main/docs/SPEC.md#16-embedding-api-rust) describes the full API.
+[§16 of the specification](/spec/#16-embedding-api-rust) describes the full API.

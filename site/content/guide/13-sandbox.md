@@ -9,16 +9,16 @@ A Sand script has no access to the outside world by default. It cannot read file
 
 Each effect makes a capability request. The policy decides each request. These are the capabilities:
 
-| Capability                  | Requested by                                   |
-| --------------------------- | ---------------------------------------------- |
-| `read`, `write`             | file system access, for each path              |
-| `net`, `http`               | network connections and HTTP requests, by host |
-| `listen`                    | sockets that accept connections                |
-| `env`                       | environment variables, by name                 |
-| `stdin`, `stdout`, `stderr` | the standard streams                           |
-| `timezone`                  | `time.local_zone()`                            |
-| `import`                    | script modules, by path                        |
-| `custom`                    | functions of [host modules](/guide/embedding/) |
+| Capability                  | Requested by                                     |
+| --------------------------- | ------------------------------------------------ |
+| `read`, `write`             | file system access, for each path                |
+| `net`, `http`               | network connections and HTTP requests, by host   |
+| `listen`                    | sockets that accept connections                  |
+| `env`                       | environment variables, by name                   |
+| `stdin`, `stdout`, `stderr` | the standard streams                             |
+| `timezone`                  | `time.local_zone()`                              |
+| `import`                    | script modules, by path                          |
+| `custom`                    | functions of [native modules](/guide/embedding/) |
 
 The script has no other path to the system. Sand has no foreign function interface, and it does not start processes.
 
@@ -32,7 +32,7 @@ The policy gives one of three decisions for each request:
 
 ## What a script sees
 
-A denied I/O function returns an `Err` of kind `permission_denied`. The script can handle it like any other error. A denied environment variable looks like an unset variable.
+A denied I/O function returns an `Err` of kind `permission_denied`. The script can handle it like any other error. A denied environment variable looks like an unset variable, and when the policy denies the local time zone, `time.local_zone()` returns `UTC`.
 
 ```sand
 import env
@@ -58,7 +58,7 @@ A denied `print` stops the run. A denied `import` is a compile error.
 
 ## Command-line flags
 
-`sand run`, `sand test` and `sand repl` deny everything except output unless you allow it. Use flags to allow access:
+`sand run`, `sand test` and `sand repl` deny everything except output and imports in the module root unless you allow it. Use flags to allow access:
 
 ```sh
 sand run main.sand --allow-read=data --allow-write=out
@@ -124,7 +124,7 @@ Sand also checks each address that a host name resolves to. Thus a public host n
 
 ## Resource limits
 
-Limits stop a script that uses too much memory or time. When a script goes over a limit, the run stops at once. The script cannot catch this error, and `sand run` exits with code 3. For example, for a script with an endless loop:
+Limits stop a script that uses too much memory or time. When a script goes over the memory, time, CPU, instruction or output limit, Sand stops the run at once. The script cannot catch this error, and `sand run` exits with code 3. For example, for a script with an endless loop:
 
 ```sh
 $ sand run loop.sand --max-time=50ms
@@ -140,4 +140,4 @@ The most important limits are these:
 | CPU time        | `--max-cpu=DURATION`   | unlimited |
 | instructions    | `--max-instructions=N` | unlimited |
 
-In a policy file, write `limit memory 64M`, `limit time 10s`, `limit cpu 2s` or `limit instructions 1_000_000`. Other limits control the output size, the number of tasks, the number of open files and connections, and the size of HTTP bodies. [§15 of the specification](https://github.com/alex-shapiro/sand-lang/blob/main/docs/SPEC.md#15-resource-limits) lists every limit and its default, and [§14.7](https://github.com/alex-shapiro/sand-lang/blob/main/docs/SPEC.md#147-policy-files) every policy rule.
+In a policy file, write `limit memory 64M`, `limit time 10s`, `limit cpu 2s` or `limit instructions 1_000_000`. Other limits control the output size, the call depth, the number of tasks, the number of open files and connections, and the size of HTTP bodies. A script that goes over the call depth or the number of tasks fails with an error, and `sand run` exits with code 1. When a script opens too many files or connections, or reads an HTTP body that is too large, the function returns an `Err` of kind `"limit"`, and the script can handle it. [§15 of the specification](/spec/#15-resource-limits) lists every limit and its default, and [§14.7](/spec/#147-policy-files) every policy rule.

@@ -59,7 +59,7 @@ print(total([1.5, 2.5]))
 print(counts(["a", "b", "a"]))
 ```
 
-Structs, enums and tuples satisfy a bound when all their parts do. A struct with a `var` field is not `Hash`. [§5.6 of the specification](https://github.com/alex-shapiro/sand-lang/blob/main/docs/SPEC.md#56-bounds) gives the full rules.
+Structs, enums and tuples satisfy a bound when all their parts do. A struct with a `var` field is not `Hash`. [§5.6 of the specification](/spec/#56-bounds) gives the full rules.
 
 If the function uses an operation that its bounds do not allow, the compiler tells you which bound to add:
 
@@ -200,7 +200,7 @@ print([true, false].describe())
 print([[true], [false, true]].describe())
 ```
 
-This is called a conditional impl. A call with `[int]` is a compile error, because `int` does not implement `Describe`.
+This impl is a conditional impl. A call with `[int]` is a compile error, because `int` does not implement `Describe`.
 
 ## Implementing `Iterator<T>`
 
@@ -227,11 +227,11 @@ for x in (Countdown { n: 3 }) {
 print(Countdown { n: 4 }.iter().map(x => x * 10).to_list())
 ```
 
-The [Iterator reference](/std/prelude/Iterator/) lists the adapters and consumers.
+A struct literal in the header of a `for` loop needs parentheses. The [Iterator reference](/std/prelude/Iterator/) lists the adapters and consumers.
 
 ## Qualified calls
 
-You can call a trait method through the trait, as `Trait.method(value)`, or through the type, as `Type.method(value)`. Use this form when two traits give a type methods with the same name. A plain method call is then ambiguous, and the compiler reports an error.
+You can call a trait method through the trait, as `Trait.method(value)`, or through the type, as `Type.method(value)`. When two traits give a type methods with the same name, a call through the value or the type is ambiguous, and the compiler reports an error. Call the method through its trait to choose one:
 
 ```sand
 trait English {

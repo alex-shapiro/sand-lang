@@ -31,8 +31,8 @@ let total = cart.map(i => i.price * i.quantity.to_float()).sum()
 print("\(cart.len()) items, total \(total:.2)")
 ```
 
-The checker infers the types inside the script. Only function signatures and struct fields need annotations.
-Integer arithmetic is checked, there is no null, and `if`, `match` and blocks are expressions.
+Function signatures and struct fields declare their types, and the checker infers most other types.
+Integer overflow stops the script, there is no null, and `if`, `match` and blocks are expressions.
 
 ## Install
 
@@ -60,7 +60,7 @@ sand run hello.sand
 
 `sand run` denies all access to the outside world by default.
 Options such as `--allow-read=DIR` and `--allow-net=HOST` grant access, and options such as `--max-time=5s` set limits.
-The [Sandbox](/guide/sandbox/) chapter explains the options.
+The [Sandbox and policies](/guide/sandbox/) chapter explains the options.
 
 ## The REPL
 
@@ -81,7 +81,7 @@ Enter `:help` for the REPL's commands, and `:quit` to end the session.
 ## The playground
 
 The [playground](/play/) runs Sand in your browser, with no install.
-The examples in this guide run the same way: the site runs each one and shows its output below it.
+The Sand examples in this guide run in the same sandbox: the site's build runs each one and shows its output below it.
 
 ## Other tools
 
@@ -104,14 +104,14 @@ The [Tools](/guide/tools/) chapter describes them.
 4. [Control flow](/guide/control-flow/): blocks, `if`, `match` and loops.
 5. [Collections](/guide/collections/): lists, maps, sets, tuples and iterators.
 6. [Structs and enums](/guide/structs-and-enums/): your own types and their methods.
-7. [Patterns](/guide/patterns/): destructuring and exhaustive `match`.
+7. [Pattern matching](/guide/patterns/): destructuring and exhaustive `match`.
 8. [Errors](/guide/errors/): `Option`, `Result` and the `?` operator.
-9. [Traits](/guide/traits/): shared behavior and generic bounds.
+9. [Traits and generics](/guide/traits/): shared behavior and generic bounds.
 10. [Modules](/guide/modules/): imports and visibility.
 11. [Concurrency](/guide/concurrency/): tasks, channels and asynchronous I/O.
 12. [Resources](/guide/resources/): files, connections, `use` and `defer`.
-13. [Sandbox](/guide/sandbox/): policies and resource limits.
+13. [Sandbox and policies](/guide/sandbox/): policies and resource limits.
 14. [Tools](/guide/tools/): the checker, linter, formatter and test runner.
 15. [Embedding](/guide/embedding/): Sand in a Rust program.
 
-The [specification](https://github.com/alex-shapiro/sand-lang/blob/main/docs/SPEC.md) defines the language exactly. The [library reference](/std/) documents every module.
+The [specification](/spec/) defines the language exactly. The [library reference](/std/) documents every module.

@@ -7,11 +7,14 @@ const list = document.getElementById("search-results");
 let index = null;
 let selected = -1;
 
-async function loadIndex() {
-  if (!index) {
-    const rows = await (await fetch("/search-index.json")).json();
-    index = rows.map(([name, kind, url, summary]) => ({ name, kind, url, summary, key: name.toLowerCase() }));
-  }
+function loadIndex() {
+  index ??= fetch("/search-index.json")
+    .then((response) => response.json())
+    .then((rows) => rows.map(([name, kind, url, summary]) => ({ name, kind, url, summary, key: name.toLowerCase() })))
+    .catch((error) => {
+      index = null; // Try again at the next search.
+      throw error;
+    });
   return index;
 }
 
@@ -42,12 +45,11 @@ function summaryHtml(text) {
 }
 
 function show(results) {
-  selected = results.length ? 0 : -1;
   list.innerHTML = results.length
     ? results
         .map(
           (r, i) =>
-            `<li role="option" id="result-${i}" aria-selected="${i === 0}"><a href="${r.url}"><span class="kind">${r.kind}</span>` +
+            `<li role="option" id="result-${i}"><a href="${r.url}" tabindex="-1"><span class="kind">${r.kind}</span>` +
             `<span class="name">${escapeHtml(r.name)}</span>` +
             (r.summary ? `<span class="summary">${summaryHtml(r.summary)}</span>` : "") +
             `</a></li>`,
@@ -56,11 +58,14 @@ function show(results) {
     : `<li class="empty">No results</li>`;
   list.hidden = false;
   input.setAttribute("aria-expanded", "true");
+  select(0);
 }
 
 function hide() {
   list.hidden = true;
+  selected = -1;
   input.setAttribute("aria-expanded", "false");
+  input.removeAttribute("aria-activedescendant");
 }
 
 async function search() {
@@ -92,7 +97,7 @@ if (input) {
     if (event.key === "ArrowDown") select(selected + 1);
     else if (event.key === "ArrowUp") select(selected - 1);
     else if (event.key === "Enter") {
-      const link = list.querySelectorAll("[role=option] a")[selected];
+      const link = !list.hidden && list.querySelectorAll("[role=option] a")[selected];
       if (link) location.href = link.href;
     } else if (event.key === "Escape") {
       input.value = "";
@@ -120,22 +125,31 @@ document.addEventListener("click", async (event) => {
   if (!button) return;
   const figure = button.closest("figure");
   if (button.classList.contains("copy")) {
-    await navigator.clipboard.writeText(figure.querySelector("pre code").textContent);
-    button.textContent = "Copied";
+    try {
+      await navigator.clipboard.writeText(figure.querySelector("pre code").textContent);
+      button.textContent = "Copied";
+    } catch {
+      button.textContent = "Copy failed";
+    }
     setTimeout(() => (button.textContent = "Copy"), 1500);
   } else if (button.classList.contains("play")) {
     const { encodeShare, newSandbox } = await import("/play/sandbox.js");
-    const files = { "main.sand": button.dataset.program, ...JSON.parse(button.dataset.files || "{}") };
-    const sandbox = newSandbox({ title: document.title.split(" – ")[0], files });
+    const { program, files, policy } = button.dataset;
+    const sandbox = newSandbox({ title: document.title.split(" – ")[0], files: { "main.sand": program, ...JSON.parse(files) }, policy });
     location.href = "/play/#share=" + (await encodeShare([sandbox]));
   }
 });
 
 // ---------- Navigation ----------
 
-// On narrow screens the sidebar starts closed, above the content.
+// On narrow screens the sidebar is a menu above the content, closed at first.
 const menu = document.querySelector(".sidebar-menu");
-if (menu && matchMedia("(max-width: 860px)").matches) menu.open = false;
+if (menu) {
+  const narrow = matchMedia("(max-width: 860px)");
+  const fit = () => (menu.open = !narrow.matches);
+  fit();
+  narrow.addEventListener("change", fit);
+}
 
 // "On this page" marks the section at the top of the viewport.
 const tocLinks = [...document.querySelectorAll(".toc a")];

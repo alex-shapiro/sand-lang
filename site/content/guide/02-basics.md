@@ -101,7 +101,7 @@ print(count.to_float() / 2.0)
 print(3.9.to_int())
 ```
 
-Integer arithmetic is checked. An overflow stops the script with an error, so a wrong result never goes unnoticed:
+Sand checks integer arithmetic. An overflow stops the script with an error, so a wrong result never goes unnoticed:
 
 ```sand fails
 let big = int.max_value()
@@ -159,7 +159,7 @@ print("\(255:x)")
 print("\("tea":?)")
 ```
 
-The `?` type gives the debug form: a string in quotes. [§10.10 of the specification](https://github.com/alex-shapiro/sand-lang/blob/main/docs/SPEC.md#1010-format-specifications) lists all the format options.
+The `?` type gives the debug form: a string in quotes. [§10.10 of the specification](/spec/#1010-format-specifications) lists all the format options.
 
 ### Multi-line and raw strings
 

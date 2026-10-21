@@ -187,7 +187,7 @@ impl Policy {
     pub fn allow_all() -> Policy {
         Policy::AllowAll
     }
-    /// Everything denied except standard output and error.
+    /// Everything denied except standard output and error, and imports.
     pub fn deny_all() -> Policy {
         Policy::DenyAll
     }

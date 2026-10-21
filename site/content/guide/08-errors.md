@@ -101,7 +101,7 @@ print("x".parse_int() ?? 0)
 
 ## Failures
 
-Some errors are not values. They are failures, and a failure ends the run. A script cannot catch a failure, and deferred code does not run. The tool prints the kind, the message and a stack trace, and `sand run` exits with code 1.
+Some errors are not values. They are failures, and a failure ends the run. A script cannot catch a failure, and [deferred code](/guide/resources/) does not run. The tool prints the kind, the message and a stack trace, and `sand run` exits with code 1.
 
 These functions cause a failure:
 
@@ -122,7 +122,7 @@ Use a failure for a bug in the program, or for a condition from which the progra
 
 ## `?` at the top level
 
-At the top level of the main module, there is no function to return from. There, `?` unwraps the value, and on `Err` it fails the run with that error. On `None`, it fails with the kind `"none"`. This keeps short scripts short:
+At the top level of the main module, there is no function to return from. There, `?` unwraps the value, and on `Err` it ends the run with that error. On `None`, it ends the run with the kind `"none"`. This is not a failure: before the run ends, Sand runs the deferred code of the top level. Then `sand run` exits with code 1. This keeps short scripts short:
 
 ```sand fails
 fn parse_age(text: str) -> Result<int> {
@@ -135,13 +135,13 @@ let other = parse_age("old")?
 print("not printed")
 ```
 
-Before the run ends, Sand runs the deferred code of the top level. Top-level `?` is permitted only in the main module and in `test` blocks. In a module that other modules import, it is a compile error. There, return a `Result` from a function instead.
+You can use top-level `?` only in the main module and in `test` blocks. In a module that other modules import, it is a compile error. There, return a `Result` from a function instead.
 
 ## Do not ignore results
 
 If an expression statement gives a `Result` and the code does not use it, `sand lint` reports an `unused-result` warning. Handle the result with `?` or `match`, or discard it explicitly with `let _ =`.
 
-```sand no_run
+```sand
 import fs
 
 let _ = fs.remove_file("cache.tmp")

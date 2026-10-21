@@ -8,6 +8,7 @@ use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use std::collections::BTreeMap;
 
 /// A heading of a rendered document.
+#[derive(Clone)]
 pub struct Heading {
     pub level: u8,
     pub text: String,
@@ -218,9 +219,10 @@ fn figure(lang: &str, code: &str, output: Option<(&str, &str, String)>, play: &s
     } else {
         let files: Vec<String> = files.iter().map(|(n, t)| format!("{}:{}", json_string(n), json_string(t))).collect();
         format!(
-            r#"<button type="button" class="play" data-program="{}" data-files="{}">Open in playground</button>"#,
+            r#"<button type="button" class="play" data-program="{}" data-files="{}" data-policy="{}">Open in playground</button>"#,
             escape(play),
-            escape(&format!("{{{}}}", files.join(",")))
+            escape(&format!("{{{}}}", files.join(","))),
+            escape(examples::POLICY)
         )
     };
     let output = match output {
@@ -232,18 +234,21 @@ fn figure(lang: &str, code: &str, output: Option<(&str, &str, String)>, play: &s
     )
 }
 
-/// The anchor GitHub gives a heading, without hyphens at its ends:
-/// `13.4 The http module` -> `134-the-http-module`, `` `?` at the top`` -> `at-the-top`.
-pub fn slug(text: &str) -> String {
-    let slug: String = text
-        .chars()
+/// The anchor GitHub gives a heading: lower case, with spaces as hyphens
+/// and without other punctuation (`13.4 The http module` -> `134-the-http-module`).
+pub fn github_slug(text: &str) -> String {
+    text.chars()
         .filter_map(|c| match c {
             ' ' => Some('-'),
             c if c.is_alphanumeric() || c == '-' || c == '_' => Some(c.to_ascii_lowercase()),
             _ => None,
         })
-        .collect();
-    slug.trim_matches('-').to_string()
+        .collect()
+}
+
+/// `github_slug` without hyphens at its ends: `` `?` at the top`` -> `at-the-top`.
+pub fn slug(text: &str) -> String {
+    github_slug(text).trim_matches('-').to_string()
 }
 
 fn unique_id(base: &str, headings: &[Heading]) -> String {

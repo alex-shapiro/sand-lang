@@ -31,7 +31,7 @@ This site documents Sand as it is today.
 
 ## No access without a policy
 
-A Sand script cannot touch the outside world unless its host allows it. The engine checks every file, network, environment and standard stream access against a policy before the access happens. A denied access is an ordinary error value that the script can handle.
+A Sand script cannot touch the outside world unless its host allows it. The engine checks every file, network, environment and standard stream access against a policy before the access happens. A denied I/O function returns an ordinary error value that the script can handle.
 
 The host also sets hard limits on memory, CPU time, instructions and output for each engine. Sand has no FFI, no subprocesses and no JIT.
 
@@ -41,7 +41,7 @@ The host also sets hard limits on memory, CPU time, instructions and output for 
 ```sand
 import http
 
-match http.get("https://example.com") {
+match http.get("https://api.example.com/v1/status") {
     Ok(response) => print("status \(response.status)")
     Err(e) => print("no network: \(e)")
 }
@@ -62,7 +62,7 @@ limit time 10s
 
 ## Mistakes stop at compile time
 
-Sand checks types before a script runs. Function signatures carry types, and Sand infers the rest. There is no null: a value that can be absent has an `Option` type. A `match` must handle every case, and integer overflow is an error, not a silent wrap.
+Sand checks types before a script runs. Function signatures carry types, and Sand infers the rest. There is no null: a value that can be absent has an `Option` type. A `match` must handle every case.
 
 </div>
 <div>
@@ -122,7 +122,7 @@ print("total: \(planets.map(p => p.moons).sum())")
 
 ## Concurrency without colored functions
 
-All I/O is asynchronous, but no function is marked `async`. `spawn` starts a task, and any function can wait for a task, a channel or a timer. The engine runs one task at a time on one thread, so several engines can share a process safely.
+All I/O is asynchronous, but you do not mark functions `async`. `spawn` starts a task, and any function can wait for a task, a channel or a timer. The engine runs one task at a time on one thread, so several engines can share a process safely.
 
 </div>
 <div>
@@ -183,7 +183,7 @@ The compiler and the bytecode VM are 100% safe Rust. Static types let the compil
 
 ### Documented as it is
 
-The [specification](https://github.com/alex-shapiro/sand-lang/blob/main/docs/SPEC.md) is normative, and the compiler checks every example on this site when the site is built.
+The [specification](/spec/) is normative. The site's build checks the Sand examples on this site and shows what they printed.
 
 </div>
 </section>

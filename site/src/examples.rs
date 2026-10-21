@@ -8,8 +8,9 @@
 //! `file=NAME` is a module that later blocks of the page can import. A
 //! `policy` block must parse as a policy file.
 
-use sandlang::{Config, Engine, Error, Limits, MemFs, MemorySink, Policy, RulePolicy};
-use std::time::Duration;
+use sandlang::policy::PolicyFile;
+use sandlang::{Config, Engine, Error, MemFs, MemorySink};
+use std::path::Path;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -101,29 +102,32 @@ pub fn check_sand(runtime: &tokio::runtime::Runtime, source: &str, mode: Mode, f
     }
 }
 
+/// The policy of every example. "Open in playground" gives it to the
+/// playground, so that the example runs there as it ran here.
+pub const POLICY: &str = "\
+# Read and write the files in memory, and nothing else.
+allow write /
+default deny
+limit time 10s
+";
+
 /// Checks a `policy` block.
-pub fn check_policy(source: &str) -> Result<(), String> {
-    let base = std::path::Path::new("/project");
-    let home = Some(std::path::Path::new("/home/user"));
-    sandlang::policy::PolicyFile::parse(source, base, home).map(|_| ()).map_err(|errors| errors.iter().map(|e| format!("{e}\n")).collect())
+pub fn check_policy(source: &str) -> Result<PolicyFile, String> {
+    PolicyFile::parse(source, Path::new("/project"), Some(Path::new("/home/user")))
+        .map_err(|errors| errors.iter().map(|e| format!("{e}\n")).collect())
 }
 
-/// An engine like the playground's: a memory file system with `files` that
-/// scripts may read and write, nothing else, and fixed randomness.
+/// An engine like the playground's, with `POLICY`, the page's modules
+/// `files` in a memory file system, and fixed randomness.
 fn engine(files: &[(String, String)]) -> (Engine, MemorySink) {
     let sink = MemorySink::new();
     let fs = MemFs::new();
     for (name, text) in files {
         fs.write(format!("/{name}"), text).expect("a page's module fits in memory");
     }
-    let limits = Limits { max_wall_time: Some(Duration::from_secs(20)), max_instructions: Some(1_000_000_000), ..Limits::default() };
-    let config = Config::new()
-        .memory_fs(fs)
-        .policy(Policy::rules(RulePolicy::new().allow_write("/")))
-        .limits(limits)
-        .seed(42)
-        .stdout(sink.clone())
-        .stderr(sink.clone());
+    let policy = check_policy(POLICY).expect("the examples' policy parses");
+    let config =
+        Config::new().memory_fs(fs).policy(policy.policy()).limits(policy.limits).seed(42).stdout(sink.clone()).stderr(sink.clone());
     (Engine::new(config), sink)
 }
 

@@ -108,7 +108,7 @@ let name = match n {
 }
 ```
 
-`match` is most useful with enums and structs. The [Patterns](/guide/patterns/) chapter covers it in full.
+`match` is most useful with enums and structs. The [Pattern matching](/guide/patterns/) chapter covers it in full.
 
 ## loop
 

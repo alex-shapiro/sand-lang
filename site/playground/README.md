@@ -9,8 +9,8 @@ engine in its own Web Worker, so several run at the same time.
 The website serves the playground at `/play/` (see [`../README.md`](../README.md)):
 `cargo site serve` builds the engine and the site and opens them at
 http://127.0.0.1:8000/play/. The playground needs a browser with module
-workers, and works offline once loaded. `index.html` takes the site's
-stylesheet and header at `<!-- site-head -->` and `<!-- site-chrome -->`.
+workers, and works offline once loaded. The site's generator puts the site's
+`<head>` contents and header at `<!-- site-head -->` and `<!-- site-chrome -->` of `index.html`.
 
 ## Using it
 
@@ -34,16 +34,18 @@ stylesheet and header at `<!-- site-head -->` and `<!-- site-chrome -->`.
   policy parsed and linted, off the page's thread. Hover over a mark or its
   line number to inspect a problem. Linter warnings are printed in the console;
   Format (Ctrl-S / ⌘-S) formats the open `.sand` or `.policy` file.
-- **Keeping and sharing.** Sandboxes are kept in local storage. Share copies
-  a link holding every sandbox in its fragment, never sent to a server.
+- **Keeping and sharing.** The page keeps the sandboxes in local storage.
+  Share copies a link that holds every sandbox in its fragment, which the
+  browser never sends to a server. Opening a link adds its sandboxes before
+  the kept ones. "Open in playground" on the site's examples opens such a link.
 
 ## How it works
 
 - `app.js` — the page. It compiles the WebAssembly module once, uses it
   only for syntax highlighting, and hands it to the workers.
 - `worker.js` — runs engines: one worker per sandbox for its session, and one
-  shared worker for checking, linting and formatting. A run makes `new
-Engine(options, hooks).session()` and evaluates the program as its first
+  shared worker for checking, linting and formatting. A run makes
+  `new Engine(options, hooks).session()` and evaluates the program as its first
   input (`session.eval(source, "main.sand")`); console inputs are further
   `eval`s, and between them `session.runTasks()` keeps the program's tasks
   running. Output and permission prompts are posted to the page as they

@@ -11,6 +11,7 @@ pub enum Section {
     Home,
     Guide,
     Library,
+    Spec,
     Playground,
     Other,
 }
@@ -35,8 +36,12 @@ pub struct Assets {
     pub js: String,
 }
 
-const NAV: &[(&str, &str, Section)] =
-    &[("Guide", "/guide/", Section::Guide), ("Library", "/std/", Section::Library), ("Playground", "/play/", Section::Playground)];
+const NAV: &[(&str, &str, Section)] = &[
+    ("Guide", "/guide/", Section::Guide),
+    ("Library", "/std/", Section::Library),
+    ("Spec", "/spec/", Section::Spec),
+    ("Playground", "/play/", Section::Playground),
+];
 
 pub fn render(page: &Page, assets: &Assets) -> String {
     let title = if page.section == Section::Home { "Sand".to_string() } else { format!("{} – Sand", page.title) };
@@ -63,7 +68,28 @@ pub fn render(page: &Page, assets: &Assets) -> String {
         r##"<!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
+{head}
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+{chrome}
+{main}
+{footer}
+</body>
+</html>
+"##,
+        head = head(&title, &page.description, assets),
+        chrome = chrome(page.section),
+        footer = FOOTER,
+    )
+}
+
+/// The contents of the `<head>` of every page: metadata, icons, and the
+/// site's stylesheet and script.
+pub fn head(title: &str, description: &str, assets: &Assets) -> String {
+    let (title, description) = (escape(title), escape(description));
+    format!(
+        r##"<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title}</title>
 <meta name="description" content="{description}">
@@ -75,22 +101,9 @@ pub fn render(page: &Page, assets: &Assets) -> String {
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="stylesheet" href="{css}">
-<script type="module" src="{js}"></script>
-</head>
-<body>
-<a class="skip" href="#main">Skip to content</a>
-{chrome}
-{main}
-{footer}
-</body>
-</html>
-"##,
-        title = escape(&title),
-        description = escape(&page.description),
+<script type="module" src="{js}"></script>"##,
         css = assets.css,
         js = assets.js,
-        chrome = chrome(page.section),
-        footer = FOOTER,
     )
 }
 
@@ -109,7 +122,7 @@ pub fn chrome(section: Section) -> String {
 <a class="brand" href="/" aria-label="Sand home"><img src="/logo.svg" alt="" width="28" height="32"><span>Sand</span></a>
 <nav class="site-nav" aria-label="Site">{nav}</nav>
 <div class="search" role="search">
-<input id="search" type="search" placeholder="Search" aria-label="Search the guide and library" autocomplete="off" spellcheck="false" aria-controls="search-results" aria-expanded="false">
+<input id="search" type="search" role="combobox" placeholder="Search" aria-label="Search the guide, library and specification" autocomplete="off" spellcheck="false" aria-autocomplete="list" aria-controls="search-results" aria-expanded="false">
 <kbd aria-hidden="true">/</kbd>
 <ul id="search-results" class="search-results" role="listbox" hidden></ul>
 </div>
@@ -144,7 +157,7 @@ pub fn link_list(links: &[(String, String)], current: &str) -> String {
 
 const FOOTER: &str = r#"<footer class="site-footer">
 <p>Sand is alpha software, developed in the open on <a href="https://github.com/alex-shapiro/sand-lang">GitHub</a>.
-The Sand compiler checks every example on this site when the site is built.</p>
+The site's build checks the Sand examples on this site.</p>
 </footer>"#;
 
 const GITHUB: &str = r#"<svg viewBox="0 0 16 16" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>"#;
