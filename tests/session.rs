@@ -936,7 +936,7 @@ fn scripts_read_the_input_the_host_feeds() {
 }
 
 #[test]
-fn a_read_is_awaited_while_other_tasks_run() {
+fn read_is_awaited_while_other_tasks_run() {
     let feed = StdinFeed::new();
     let mut r = Repl::with(Config::new().policy(Policy::allow_all()).stdin_feed(&feed));
     r.ok("import io");
@@ -944,9 +944,9 @@ fn a_read_is_awaited_while_other_tasks_run() {
     let Repl { session, rt, .. } = &mut r;
     let (value, ()) = rt.block_on(async {
         let answer = async {
-            let read = feed.awaited_changed(None).await.unwrap();
+            let read_id = feed.awaited_changed(None).await.unwrap();
             assert!(!feed.is_wanted());
-            assert!(feed.answer(read, "move\n"));
+            assert!(feed.answer(read_id, "move\n"));
             assert_eq!(feed.awaited(), None);
         };
         tokio::join!(session.eval(src), answer)
@@ -956,7 +956,7 @@ fn a_read_is_awaited_while_other_tasks_run() {
 }
 
 #[test]
-fn each_read_is_answered_on_its_own() {
+fn answer_targets_specific_read() {
     let feed = StdinFeed::new();
     let mut r = Repl::with(Config::new().policy(Policy::allow_all()).stdin_feed(&feed));
     r.ok("import io");
@@ -969,8 +969,8 @@ fn each_read_is_answered_on_its_own() {
             let mut awaited = Some(first);
             let second = loop {
                 awaited = feed.awaited_changed(awaited).await;
-                if let Some(read) = awaited {
-                    break read;
+                if let Some(read_id) = awaited {
+                    break read_id;
                 }
             };
             assert_ne!(first, second);
@@ -983,26 +983,26 @@ fn each_read_is_answered_on_its_own() {
 }
 
 #[test]
-fn an_answer_does_not_outlive_its_read() {
+fn answer_fails_after_read_ends() {
     let feed = StdinFeed::new();
     let mut r = Repl::with(Config::new().policy(Policy::allow_all()).stdin_feed(&feed));
     r.ok("import io");
     let Repl { session, rt, .. } = &mut r;
-    let read = rt.block_on(async {
+    let read_id = rt.block_on(async {
         tokio::select! {
             biased;
-            _ = session.eval("io.stdin.read_line()?") => panic!("the read finished without input"),
-            read = feed.awaited_changed(None) => read.unwrap(),
+            _ = session.eval("io.stdin.read_line()?") => panic!("read completed without input"),
+            read_id = feed.awaited_changed(None) => read_id.unwrap(),
         }
     });
     session.cancel_tasks();
-    assert!(!feed.answer(read, "stale\n"));
+    assert!(!feed.answer(read_id, "stale\n"));
     feed.send("fresh\n");
     assert_eq!(r.value("io.stdin.read_line()?"), "Some(\"fresh\")");
 }
 
 #[test]
-fn waiting_for_host_input_does_not_count_toward_the_wall_time() {
+fn stdin_wait_pauses_wall_time_limit() {
     let feed = StdinFeed::new();
     let limits = Limits { max_wall_time: Some(Duration::from_millis(100)), ..Limits::default() };
     let mut r = Repl::paused(Config::new().policy(Policy::allow_all()).limits(limits).stdin_feed(&feed));
@@ -1021,7 +1021,7 @@ fn waiting_for_host_input_does_not_count_toward_the_wall_time() {
 }
 
 #[test]
-fn a_background_timer_neither_hides_nor_times_out_a_read() {
+fn background_timer_does_not_interrupt_or_time_out_awaited_read() {
     let feed = StdinFeed::new();
     let limits = Limits { max_wall_time: Some(Duration::from_millis(100)), ..Limits::default() };
     let mut r = Repl::paused(Config::new().policy(Policy::allow_all()).limits(limits).stdin_feed(&feed));
@@ -1030,12 +1030,12 @@ fn a_background_timer_neither_hides_nor_times_out_a_read() {
     let Repl { session, rt, .. } = &mut r;
     let (value, ()) = rt.block_on(async {
         let player = async {
-            let read = feed.awaited_changed(None).await.unwrap();
+            let read_id = feed.awaited_changed(None).await.unwrap();
             tokio::select! {
-                _ = feed.awaited_changed(Some(read)) => panic!("the read stopped waiting"),
+                _ = feed.awaited_changed(Some(read_id)) => panic!("read stopped waiting"),
                 () = tokio::time::sleep(Duration::from_secs(10)) => {}
             }
-            assert!(feed.answer(read, "move\n"));
+            assert!(feed.answer(read_id, "move\n"));
         };
         tokio::join!(session.eval("io.stdin.read_line()?"), player)
     });
@@ -1059,7 +1059,7 @@ fn waits_module() -> NativeModule {
 }
 
 #[test]
-fn a_host_wait_for_the_user_does_not_count_toward_the_wall_time() {
+fn host_user_wait_pauses_wall_time_limit() {
     let limits = Limits { max_wall_time: Some(Duration::from_millis(100)), ..Limits::default() };
     let mut r = Repl::paused(Config::new().module(waits_module()).limits(limits));
     r.ok("import waits");

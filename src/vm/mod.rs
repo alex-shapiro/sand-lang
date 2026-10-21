@@ -57,12 +57,10 @@ const _: () = assert!(std::mem::size_of::<Ctl>() == std::mem::size_of::<usize>()
 const _: () = assert!(std::mem::size_of::<Result<Value, Ctl>>() == 16);
 const _: () = assert!(std::mem::size_of::<Result<Option<Value>, Ctl>>() == 16);
 
-/// What a suspended task waits for.
+/// Category of asynchronous wait for a suspended task.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Wait {
-    /// I/O or a timer.
+pub enum WaitKind {
     Io,
-    /// An action of the user.
     User,
 }
 
@@ -77,7 +75,7 @@ pub enum CtlKind {
     /// Ask the user; the call is retried afterwards.
     NeedPermission(Capability),
     /// Suspend the task until the future completes.
-    Async(BoxFuture, Wait),
+    Async(BoxFuture, WaitKind),
     /// The task waits for the scheduler event that [`Vm::block`]
     /// registered; the call returns what wakes it.
     Blocked,
@@ -123,15 +121,14 @@ impl Ctl {
 
     /// Suspend the task until `fut` completes.
     pub fn suspend(fut: BoxFuture) -> Ctl {
-        Ctl(Box::new(CtlKind::Async(fut, Wait::Io)))
+        Ctl(Box::new(CtlKind::Async(fut, WaitKind::Io)))
     }
 
-    /// Suspend the task until `fut` completes, which happens when the user
-    /// acts (types a line, taps a control). While the engine has nothing
-    /// else to run, the time spent waiting for the user does not count
-    /// toward the wall-time limit.
+    /// Suspends the task until `fut` completes in response to user input.
+    /// The engine pauses the wall-time limit while all runnable tasks are idle
+    /// and a task is waiting for the user.
     pub fn suspend_for_user(fut: BoxFuture) -> Ctl {
-        Ctl(Box::new(CtlKind::Async(fut, Wait::User)))
+        Ctl(Box::new(CtlKind::Async(fut, WaitKind::User)))
     }
 
     /// Ask the user for `cap`.
