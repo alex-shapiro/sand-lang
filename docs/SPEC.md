@@ -2050,12 +2050,11 @@ nesting depth of 512.
 
 `debug(msg: str)`, `info(msg: str)`, `warn(msg: str)`, `error(msg: str)`;
 each accepts `fields: [str: str] = [:]`. `set_level(level: str)` with `"debug"`,
-`"info"`, `"warn"`, `"error"`, `"off"`. Records below the script's level are
-dropped. The others go to the host log sink (§16), which also selects levels,
-and count against `max_output_bytes`. Without a host sink, the default level
-is `"info"` and records go to stderr as `LEVEL message key=value ...`; if the
-policy denies `Stderr`, the engine drops them. With a host sink, the default
-level is `"debug"`.
+`"info"` (default), `"warn"`, `"error"`, `"off"`. Records below the script's
+level are dropped. The others go to the host log sink (§16), which also
+selects levels, and count against `max_output_bytes`. Without a host sink,
+records go to stderr as `LEVEL message key=value ...`; if the policy denies
+`Stderr`, the engine drops them.
 
 ### 13.9 `math`
 

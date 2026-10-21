@@ -352,8 +352,7 @@ impl Config {
     }
     /// Sends the records of the `log` module to `sink` instead of writing
     /// them to standard error. Records still count against the output limit,
-    /// but do not need [`Capability::Stderr`]. Scripts start at level
-    /// `debug` instead of `info`, so the sink selects the levels.
+    /// but do not need [`Capability::Stderr`].
     pub fn log_sink(mut self, sink: impl crate::LogSink + 'static) -> Self {
         self.log_sink = Some(Arc::new(sink));
         self
@@ -1010,7 +1009,7 @@ impl Engine {
             args: c.args.clone(),
             env: c.env.clone(),
             rng: Rng::new(c.seed.unwrap_or_else(entropy_seed)),
-            log_level: Some(if c.log_sink.is_some() { crate::LogLevel::Debug } else { crate::LogLevel::Info }),
+            log_level: Some(crate::LogLevel::Info),
             log_sink: if quiet { Some(Arc::new(crate::stdlib::log::NullLogSink)) } else { c.log_sink.clone() },
             interrupt: self.interrupt.clone(),
             stream_decisions: [None; 2],

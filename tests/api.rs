@@ -652,6 +652,8 @@ import log
 fn start(user: str) {
     log.info("started", fields: ["user": user, "note": "a b"])
 }
+log.debug("hidden")
+log.set_level("debug")
 log.debug("details")
 start("ann")
 log.set_level("error")
@@ -667,9 +669,9 @@ log.error("failed")
     assert_eq!(
         summary,
         [
-            (LogLevel::Debug, "details", Some(("<top level>", 6))),
+            (LogLevel::Debug, "details", Some(("<top level>", 8))),
             (LogLevel::Info, "started", Some(("start", 4))),
-            (LogLevel::Error, "failed", Some(("<top level>", 10))),
+            (LogLevel::Error, "failed", Some(("<top level>", 12))),
         ]
     );
     assert_eq!(records[1].fields, [("user".to_string(), "ann".to_string()), ("note".to_string(), "a b".to_string())]);
