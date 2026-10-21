@@ -109,8 +109,7 @@ pub fn chrome(section: Section) -> String {
         })
         .collect();
     format!(
-        r#"<div class="alpha" role="note"><strong>Alpha software.</strong> Sand changes without notice. Do not use it in production.</div>
-<header class="site-header">
+        r#"<header class="site-header">
 <a class="brand" href="/" aria-label="Sand home"><img src="/logo.svg" alt="" width="28" height="32"><span>Sand</span></a>
 <nav class="site-nav" aria-label="Site">{nav}</nav>
 <div class="search" role="search">

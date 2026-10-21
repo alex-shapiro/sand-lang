@@ -128,10 +128,10 @@ engine.run_source("main.sand", "import geo\nprint(geo.dist(3.0, 4.0))").await?;
 </div>
 </section>
 
-<section class="grid3">
+<section class="feature">
 <div>
 
-### Built-in tooling
+## Built-in tooling
 
 Sand includes a type checker, linter, formatter, test runner, and interactive REPL. All tools are accessible from both the CLI and from the Rust library. [Tools](/guide/tools/)
 
