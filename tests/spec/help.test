@@ -335,7 +335,7 @@ print(help(1))
 --- stdout
 2
 
-=== List and Map name the list and map types
+=== help and members for List and Map
 print(members(List) == members([1]))
 print(members(Map) == members([1: 2]))
 help("List.len")

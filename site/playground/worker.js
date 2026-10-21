@@ -1,28 +1,4 @@
-// A worker running Sand engines for the page (see app.js): scripts run here,
-// off the page's thread, so the page stays responsive and several sandboxes,
-// each with its own worker, run in parallel. The page stops a run by
-// terminating its worker.
-//
-// A run starts a session: the program is its first input, and the console's
-// inputs continue it, in the same engine (its globals, functions, heap and
-// tasks). Between inputs the tasks the program left running keep running.
-//
-// Requests from the page (answered with a message of the same `id`):
-//   {type: "init", module}                  the compiled WebAssembly module
-//   {type: "run", id, sandbox}              start a session with the program
-//       -> {type: "done", id, result, written, policyErrors?}
-//   {type: "input", id, source}             evaluate an input in the session
-//       -> {type: "evaluated", id, result, written}
-//   {type: "check", id, sandbox}            type check and lint the program and policy
-//       -> {type: "checked", id, check, lint, policyErrors, policyWarnings}
-//   {type: "lint", id, sandbox}             -> {type: "linted", id, lint, error}
-//   {type: "format", id, source, policy?}   -> {type: "formatted", id, text | error}
-//   {type: "answer", promptId, answer}      the answer to a permission prompt
-// Events (no id):
-//   {type: "ready"} | {type: "failed", message}
-//   {type: "output", stream, text}
-//   {type: "prompt", promptId, request}
-//   {type: "ended", exitCode}               a task called `exit`
+// Web Worker that executes Sand engines and interactive sessions off the main thread.
 
 import { initSync, Engine, format, formatPolicy, isTimeZone, lintPolicy } from "./pkg/sandlang_wasm.js";
 import { engineOptions, program } from "./sandbox.js";
@@ -45,9 +21,7 @@ self.onmessage = (event) => {
     pendingPrompts.get(message.promptId)?.(message.answer);
     pendingPrompts.delete(message.promptId);
   } else {
-    // One request at a time, in order (a run may wait for timers or prompts).
     queue = queue.then(() => handle(message)).catch((e) => {
-      // A Rust panic aborts the module: report its message (see wasm/src/lib.rs).
       const reason = self.sandPanic ?? String(e?.message ?? e);
       self.postMessage({ type: "error", id: message.id, message: reason });
     });
@@ -85,7 +59,6 @@ const hooks = {
     }),
 };
 
-/** An engine for `sandbox` (or the policy's errors). */
 function engineFor(sandbox, engineHooks = {}) {
   const options = engineOptions(sandbox);
   const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -98,7 +71,6 @@ function engineFor(sandbox, engineHooks = {}) {
   }
 }
 
-/** Ends the current session. */
 async function endSession() {
   if (!current) return;
   const { engine, session } = current;
@@ -108,7 +80,6 @@ async function endSession() {
   engine.free();
 }
 
-/** Stops running the session's tasks (until `resumeTasks`). */
 async function pauseTasks() {
   if (!current?.tasks) return;
   current.session.stopTasks();
@@ -116,7 +87,6 @@ async function pauseTasks() {
   current.tasks = null;
 }
 
-/** Runs the session's tasks while it waits for the next input. */
 function resumeTasks() {
   const session = current;
   session.tasks = session.session.runTasks().then((r) => {
@@ -146,7 +116,7 @@ async function run(id, sandbox) {
 
 async function input(id, source) {
   if (!current) {
-    self.postMessage({ type: "evaluated", id, result: { error: { kind: "io", message: "There is no session: run the program first.", diagnostics: [], trace: [] } }, written: [] });
+    self.postMessage({ type: "evaluated", id, result: { error: { kind: "io", message: "Run the program to start a session first.", diagnostics: [], trace: [] } }, written: [] });
     return;
   }
   await pauseTasks();
@@ -156,7 +126,6 @@ async function input(id, source) {
   if (result.exitCode === undefined) resumeTasks();
 }
 
-/** A session's first input as the result of a run. */
 function asRunResult(evaluated) {
   if (evaluated.error) {
     return { ok: false, exitCode: evaluated.exitCode ?? evaluated.error.exitCode, error: evaluated.error };

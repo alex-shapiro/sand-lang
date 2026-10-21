@@ -1,21 +1,16 @@
-//! Structured documentation of the prelude, the standard modules and host
-//! modules, for tools that render reference pages ([`Engine::docs`]).
-//!
-//! The text is what `help` shows: declarations as Sand source and doc
-//! comments as written (Markdown).
-//!
-//! [`Engine::docs`]: crate::Engine::docs
+//! Structured documentation for the prelude, standard library modules, and
+//! host modules (see [`Engine::docs`](crate::Engine::docs)).
 
-/// The documentation of a module.
+/// Documentation for a module.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModuleDoc {
-    /// `prelude`, or the name that scripts import.
+    /// Module name (`"prelude"` for the prelude).
     pub name: String,
     pub kind: ModuleKind,
-    /// The module's doc comment (its `//!` lines).
+    /// Module-level `//!` Markdown documentation.
     pub doc: Option<String>,
-    /// The public items, in order of declaration. The prelude lists the
-    /// built-in types (`int`, `List<T>`, ...) first.
+    /// Public items in declaration order. In the prelude, built-in types
+    /// (`int`, `List<T>`, ...) precede declared items.
     pub items: Vec<ItemDoc>,
 }
 
@@ -26,44 +21,41 @@ pub enum ModuleKind {
     Host,
 }
 
-/// A public item of a module.
+/// Documentation for a public module item.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ItemDoc {
     pub kind: ItemKind,
-    /// The name as scripts write it after the module's name: `Json`,
-    /// `parse`, `pi`, and for built-in types `str`, `List<T>`, `Map<K, V>`.
+    /// Unqualified item name (`Json`, `parse`, `str`, `List<T>`).
     pub name: String,
-    /// The declaration: `enum Json`, `fn parse(text: str) -> Result<Json, Error>`,
-    /// `let pi: float`, `trait Reader`.
+    /// Formatted Sand declaration (`enum Json`, `fn parse(text: str) -> Result<Json, Error>`).
     pub decl: String,
     pub doc: Option<String>,
-    /// A type's variants, fields and methods, or a trait's methods.
+    /// Variants, fields, and methods of a type, or methods of a trait.
     pub members: Vec<MemberDoc>,
-    /// The traits a type implements, or the types that implement a trait
-    /// (`Iterator<T>`, `List<T>`).
+    /// Implemented traits (if this item is a type) or implementing types (if
+    /// this item is a trait).
     pub related: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ItemKind {
-    /// A type that the language defines: `int`, `str`, `List<T>`, `Range`.
+    /// Built-in type (`int`, `str`, `List<T>`, `Range`).
     Builtin,
-    /// A struct, enum or opaque type.
+    /// Struct, enum, or opaque type.
     Type,
-    /// A type alias.
     Alias,
     Trait,
     Function,
-    /// A top-level `let` or `var`.
+    /// Top-level `let` or `var` binding.
     Value,
 }
 
-/// A variant, field or method of a type or trait.
+/// Documentation for a variant, field, or method.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemberDoc {
     pub kind: MemberKind,
     pub name: String,
-    /// `Circle(radius: float)`, `var count: int = 0`, `fn len(self) -> int`.
+    /// Formatted Sand declaration (`Circle(radius: float)`, `var count: int = 0`, `fn len(self) -> int`).
     pub decl: String,
     pub doc: Option<String>,
 }

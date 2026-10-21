@@ -1,3 +1,2 @@
 [alias]
-# Builds or serves the website (site/README.md).
 site = "run -p sandlang-site --"

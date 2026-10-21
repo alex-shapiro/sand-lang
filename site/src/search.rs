@@ -1,13 +1,9 @@
-//! The search index (`/search-index.json`) that `static/site.js` queries.
+//! Client-side search index serializer (`/search-index.json`).
 
-/// Something the search box finds.
 pub struct Entry {
-    /// What readers type: `json.parse`, `str.split`, `Concurrency`.
     pub name: String,
-    /// `module`, `type`, `fn`, `method`, `guide`, ...
     pub kind: String,
     pub url: String,
-    /// The first sentence of its documentation, as Markdown.
     pub summary: String,
 }
 
@@ -17,7 +13,7 @@ impl Entry {
     }
 }
 
-/// The index as a JSON array of `[name, kind, url, summary]` arrays.
+/// Serializes `entries` as a JSON array of `[name, kind, url, summary]` tuples.
 pub fn index_json(entries: &[Entry]) -> String {
     let rows: Vec<String> = entries
         .iter()

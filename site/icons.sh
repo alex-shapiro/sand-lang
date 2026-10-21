@@ -1,6 +1,6 @@
 #!/bin/sh
-# Renders static/apple-touch-icon.png and static/og.png from static/logo.svg
-# with headless Chrome. Set CHROME to the browser's executable.
+# Render static/apple-touch-icon.png and static/og.png from static/logo.svg
+# using headless Chrome. Override the browser binary with CHROME.
 set -eu
 
 site=$(cd "$(dirname "$0")" && pwd)

@@ -45,14 +45,14 @@ Follow-up work, roughly in priority order.
 
 ### Spec
 
-- [ ] §14.4 does not say that a denied `TimeZone` makes `time.local_zone()`
-      return `UTC`. §13 says it.
+- [ ] Document in §14.4 that `time.local_zone()` returns `UTC` if the
+      `TimeZone` capability is denied (currently documented only in §13).
 
 ### Standard Library
 
-- [ ] `http.serve` should separate IP address and port arguments, and so should `http.Server.addr`, and so should `net.listen`, `net.connect`, `net.connect_tls`, etc.
-- [ ] `log` should be configurable to use a non-stderr, host-defined sink. The host should be allowed to configure an arbitrary sink function and logging level at engine start time. The default sink is still stderr. E.g. a larger Rust app that uses `tracing` should be able to configure (not encessarily ergonomically, but it should be possible) a Sand engine to forward logs to an off-device subscriber. All logging must still be gated by the sandbox.
-- [ ] `random.normal` should be removed. If the function is required elsewhere then we should add a `statistics.Normal` type and a `statistics.sample<D>(dist: D) -> float` that allows a user to sample from a parameterized distribution (and which would be extensible to other distribution kinds).
+- [ ] Separate IP address and port arguments in `http.serve`, `http.Server.addr`, `net.listen`, `net.connect`, and `net.connect_tls`.
+- [ ] Allow the host to configure `log` with a custom sink function and log level at engine creation time (defaulting to `stderr`), so host applications (e.g. using `tracing`) can forward Sand logs while still enforcing sandbox policy.
+- [ ] Remove `random.normal`. If needed later, add `statistics.Normal` and `statistics.sample<D>(dist: D) -> float` for sampling from parameterized distributions.
 
 ### Web
 
@@ -71,22 +71,21 @@ Follow-up work, roughly in priority order.
       be compared as file rules are. A rule made unnecessary only by several
       other rules together is not reported.
 
-- [ ] `sand fmt` breaks every chain of three or more calls that has a
-      lambda argument, also when the chain fits on one line
-      (`[1, 2, 3].map(x => x * 2).filter(x => x > 2).sum()`). §17.3 breaks
-      only lines longer than 100 characters, and the first example of §12.13
-      is not formatted. Make the formatter or §17.3 agree.
+- [ ] `sand fmt` breaks any method chain of three or more calls that contains
+      a lambda argument (`[1, 2, 3].map(x => x * 2).filter(x => x > 2).sum()`),
+      even if the chain fits on a single line. §17.3 specifies breaking only
+      lines longer than 100 characters, and the first example in §12.13 is
+      unformatted. Align `sand fmt` and §17.3.
 
 ### Diagnostics
 
-- [ ] After a bad pattern (`1..5 =>`, `Rect(..) =>`), the parser also
-      reports `unexpected }` at the end of the `match`. Recover at the next
-      arm.
-- [ ] `[1, "a"]` gives "use a struct or a tuple for mixed values". An enum
-      is the usual fix for a list of mixed values.
-- [ ] When a failing `assert` is the last top-level statement, the stack
-      trace has no `<top level>` frame. When a statement follows it, the
-      frame is there.
+- [ ] Recover at the next `match` arm after an invalid pattern
+      (`1..5 =>`, `Rect(..) =>`) instead of reporting a spurious
+      `unexpected }` at the end of the `match`.
+- [ ] Suggest an enum in addition to a struct or tuple for mixed-type list
+      literals (`[1, "a"]`).
+- [ ] Include the `<top level>` stack frame if a failing `assert` is the
+      final top-level statement.
 
 ### Performance
 
@@ -108,13 +107,13 @@ Follow-up work, roughly in priority order.
       `random.rng`, `task.channel`, `set`, `error`) and the parser restriction
       on struct literals in `if`, `while`, `match`, and `for` headers. Keep
       static factory methods (`T.parse`, `T.from_x`).
-- [ ] Variant patterns take only positional payloads: `Rect(..)` and
-      `Rect(w: w, h: h)` do not parse, but `Shape.Rect(w: 2.0, h: 3.0)`
-      constructs a variant. Part of the `T(...)` item above.
-- [ ] The compiler accepts an `import` after other statements. §3.1 puts
-      imports before all items and statements.
+- [ ] Support `Rect(..)` and `Rect(w: w, h: h)` in enum variant patterns to
+      match variant construction (`Shape.Rect(w: 2.0, h: 3.0)`), as part of
+      the `T(...)` item above.
+- [ ] Reject `import` statements after non-import items or statements, as
+      specified in §3.1.
 - [ ] Trait objects (`dyn Trait`), associated types and constants, and
       blanket impls (`impl<T> X for T`).
 - [ ] Trait bounds on struct/enum type parameters.
 - [ ] Non-constant trait method defaults.
-- [ ] Remove the `|>` operator because basically nothing uses it.
+- [ ] Remove the `|>` operator.

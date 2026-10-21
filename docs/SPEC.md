@@ -611,8 +611,8 @@ types, so `let xs: [never] = [1]` and passing `() => 5` where a
 
 | Syntax          | Meaning                                                                                                            |
 | --------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `[T]`           | growable list (reference type, mutable); short for `List<T>`                                                       |
-| `[K: V]`        | hash map, insertion ordered (reference type, mutable); short for `Map<K, V>`                                       |
+| `[T]`           | growable list (reference type, mutable); shorthand for `List<T>`                                                   |
+| `[K: V]`        | hash map, insertion ordered (reference type, mutable); shorthand for `Map<K, V>`                                   |
 | `Set<T>`        | hash set, insertion ordered (reference type, mutable)                                                              |
 | `(A, B, ...)`   | tuple of two or more elements (immutable); `(A,)` is an error, as are the pattern `(p,)` and the expression `(e,)` |
 | `T?`            | shorthand for `Option<T>`                                                                                          |
@@ -1664,8 +1664,8 @@ be what no other function takes:
 - a function, method, trait method, field, variant or variable
   (`help(print)`, `help(str.split)`, `help(xs.map)`, `help(p.x)`,
   `help(Some)`, `help(math.pi)`, `help(xs)`);
-- a string literal naming one of these (`help("json.Json.get")`); its
-  first segment may be written as a type (`"List.map"`, `"[T].map"`,
+- a string literal that identifies one of those targets (`help("json.Json.get")`);
+  its first segment may be written as a type (`"List.map"`, `"[T].map"`,
   `"Set<T>.add"`, `"int?.unwrap"`);
 - any other expression, which stands for its type and is not evaluated
   (`help(f())`, `help([1, 2])`).
@@ -2806,7 +2806,7 @@ standard input and a time zone, with `onOutput` and `onPrompt` callbacks
 (requests the policy does not decide go to `onPrompt`, and are denied
 without it), `run`, `check`, `lint`, sessions (`eval(source, name?)`, and
 `runTasks`/`stopTasks` to run tasks between inputs), `format` and
-`highlight`. The playground of the website (`site/playground/`) is built on it.
+`highlight`. The web playground (`site/playground/`) is built on this package.
 
 ### 16.3 Sessions
 

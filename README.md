@@ -57,7 +57,7 @@ sand fmt script.sand
 sand test script.sand
 ```
 
-The `sand run` command can run with a security policy. [`docs/SPEC.md` §14.7](docs/SPEC.md#147-policy-files) lists the policy options.
+The `sand run` command can run with a security policy. See [`docs/SPEC.md` §14.7](docs/SPEC.md#147-policy-files) for the full set of policy options.
 
 ```sh
 sand run script.sand --policy=app.policy
@@ -81,13 +81,11 @@ assert_eq!(result, Some("5.0".to_string()));
 
 ## Website
 
-`site/` holds the website for sandlang.com: a guide, the library reference, the specification, and a playground that runs Sand in the browser through WebAssembly. Build it and serve it locally with:
+[`site/`](site/README.md) contains the static site generator and web playground for sandlang.com. To build and serve the site locally:
 
 ```sh
 cargo site serve
 ```
-
-See [`site/README.md`](site/README.md).
 
 ## Examples
 

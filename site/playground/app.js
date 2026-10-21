@@ -1,6 +1,4 @@
-// The Sand playground: sandboxes, each a program with its policy, files,
-// environment and input, run by its own engine in its own worker. Running a
-// program starts a session that the console continues.
+// Browser playground UI: manages sandbox editors, worker sessions, and state persistence.
 
 import { CodeEditor, highlightPolicy } from "./editor.js";
 import { examples } from "./examples.js";
@@ -13,24 +11,17 @@ const MAX_HISTORY = 200;
 
 const $ = (selector, root = document) => root.querySelector(selector);
 
-// ---------------------------------------------------------------------------
-// The engine
-
-/** Compiles the WebAssembly module once; every worker instantiates it. */
 async function compileModule(url) {
   try {
     return await WebAssembly.compileStreaming(fetch(url));
   } catch {
-    // Servers that do not send `application/wasm`.
     const response = await fetch(url);
     if (!response.ok) throw new Error(`cannot load ${url}: ${response.status} ${response.statusText}`);
     return WebAssembly.compile(await response.arrayBuffer());
   }
 }
 
-/** A worker running engines (see worker.js). */
 class EngineWorker {
-  /** `onEvent` receives the worker's events: output, prompts, ended sessions. */
   constructor(module, onEvent = () => {}) {
     this.worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
     this.requests = new Map();
@@ -64,7 +55,6 @@ class EngineWorker {
     this.requests.clear();
   }
 
-  /** Sends a request; resolves to the worker's answer to it. */
   async request(message) {
     await this.ready;
     const id = this.nextId++;
@@ -81,28 +71,24 @@ class EngineWorker {
   }
 }
 
-// ---------------------------------------------------------------------------
-// A sandbox on the page
-
-/** The tabs of a sandbox's settings, left of its files. */
 const SETTINGS = [
   {
     id: "policy",
     label: "Policy",
-    placeholder: "# What the program may and may not do; you are asked about the rest.\n# allow read /data\n# deny read /data/private\n# allow net api.github.com\n# limit time 5s",
-    hint: "The policy: what the program may (allow) and may not (deny) do, and its limits. You are asked about anything else.",
+    placeholder: "# Capability rules and resource limits.\n# allow read /data\n# deny read /data/private\n# allow net api.github.com\n# limit time 5s",
+    hint: "Capability rules (allow/deny) and resource limits. Unmatched operations prompt for permission.",
   },
   {
     id: "env",
     label: "Env",
     placeholder: "NAME=value, one per line",
-    hint: "Environment variables, one NAME=value per line: env.get reads them where the policy says `allow env NAME`.",
+    hint: "Environment variables (NAME=value per line), accessible via env.get if allowed by `allow env NAME`.",
   },
   {
     id: "stdin",
     label: "Input",
-    placeholder: "Program's standard input",
-    hint: "Standard input: io.stdin (its read_line, read_text, ...) reads it where the policy says `allow stdin`.",
+    placeholder: "Standard input",
+    hint: "Standard input read by io.stdin if allowed by `allow stdin`.",
   },
 ];
 
@@ -145,13 +131,11 @@ class SandboxView {
       highlight: app.highlightSand,
       onKeyDown: (e) => this.replKey(e),
     });
-    // The input wraps like the output above it.
     this.repl.textarea.wrap = "soft";
 
     for (const button of this.root.querySelectorAll("[data-action]")) {
       button.addEventListener("click", () => this[button.dataset.action]());
     }
-    // Clicking the console (without selecting text) goes to its input.
     $(".terminal", this.root).addEventListener("click", () => {
       if (this.session && !getSelection()?.toString()) this.repl.focus();
     });
@@ -159,30 +143,24 @@ class SandboxView {
     this.setSession(false);
   }
 
-  /** Sizes the title field to its text. */
   fitTitle() {
     this.title.size = Math.max(6, Math.min(40, this.title.value.length + 1));
   }
 
-  /** The model changed: save it and check the program again soon. */
   changed() {
     this.app.save();
     clearTimeout(this.checkTimer);
     this.checkTimer = setTimeout(() => this.check(), CHECK_DELAY);
   }
 
-  // Tabs: settings, then files
-
-  /** The files, the program first. */
   fileNames() {
     const main = program(this.model);
     return Object.keys(this.model.files).sort((a, b) => (a === main ? -1 : b === main ? 1 : a.localeCompare(b)));
   }
 
   /**
-   * Shows the tabs. They are rebuilt only when they change (names, error
-   * counts), so that switching tabs keeps their elements (a double-click
-   * on a tab that a first click activated is still a double-click).
+   * Updates tab selection and rebuilds tab DOM elements only if file names or
+   * error counts change, preserving double-click targets across clicks.
    */
   renderTabs() {
     const main = program(this.model);
@@ -285,7 +263,6 @@ class SandboxView {
     this.renderTabs();
   }
 
-  /** Under the editor, only while there are any: the problems of the caret's line. */
   showHint(found) {
     const hint = $(".tab-hint", this.root);
     hint.textContent = found.map((d) => `${d.severity}: ${d.message}`).join("  ·  ");
@@ -293,7 +270,6 @@ class SandboxView {
     $(".pane-foot", this.root).hidden = !found.length;
   }
 
-  /** Adds an empty file and lets its name be typed. */
   newFile() {
     let name = "untitled.txt";
     for (let n = 2; name in this.model.files; n++) name = `untitled-${n}.txt`;
@@ -304,7 +280,6 @@ class SandboxView {
     this.rename(name, tab);
   }
 
-  /** Lets the name of file `name` (whose tab is `tab`) be edited in place. */
   rename(name, tab) {
     const label = tab.querySelector(".tab-label");
     const input = document.createElement("input");
@@ -315,7 +290,6 @@ class SandboxView {
     input.size = Math.max(8, name.length + 2);
     label.replaceWith(input);
     input.focus();
-    // Select the name without its extension.
     const dot = name.lastIndexOf(".");
     input.setSelectionRange(name.lastIndexOf("/") + 1, dot > name.lastIndexOf("/") + 1 ? dot : name.length);
     let done = false;
@@ -333,7 +307,6 @@ class SandboxView {
       done = true;
       if (commit && to !== name) this.renameFile(name, to);
       else {
-        // Put the label back.
         this.tabSignature = null;
         this.renderTabs();
       }
@@ -394,15 +367,12 @@ class SandboxView {
     this.renderTabs();
   }
 
-  // Checking, linting and formatting
-
   async check() {
     const generation = (this.checkGeneration = (this.checkGeneration ?? 0) + 1);
     let answer;
     try {
       answer = await this.app.tools.request({ type: "check", sandbox: this.snapshot() });
     } catch {
-      // The checking engine crashed (a bug): start a new one.
       this.app.restartTools();
       return;
     }
@@ -411,7 +381,6 @@ class SandboxView {
     this.policyWarnings = answer.policyWarnings ?? [];
     const found = answer.check?.diagnostics ?? [];
     const main = program(this.model);
-    // Lint warnings have a position: mark the word there.
     const lines = (this.model.files[main] ?? "").split("\n");
     const wordAt = (line, column) => Array.from(lines[line - 1] ?? "").slice(column - 1).join("").match(/^[\p{L}\p{N}_]+/u)?.[0].length ?? 1;
     const lint = (answer.lint ?? []).map((w) => ({ ...w, file: main, width: wordAt(w.line, w.column), severity: "warning", message: `${w.message} [${w.code}]` }));
@@ -432,7 +401,7 @@ class SandboxView {
     }
     const n = answer.lint.length;
     if (!n) {
-      this.print("Lint: no warnings.\n", "system");
+      this.print("Lint: 0 warnings.\n", "system");
       return;
     }
     const main = program(this.model);
@@ -454,13 +423,10 @@ class SandboxView {
     else this.editor.replaceAll(answer.text);
   }
 
-  // Running, and the session
-
   snapshot() {
     return structuredClone(this.model);
   }
 
-  /** The worker of this sandbox's sessions. */
   sessionWorker() {
     this.worker ??= new EngineWorker(this.app.module, (event, reply) => this.event(event, reply));
     return this.worker;
@@ -483,7 +449,6 @@ class SandboxView {
     if (answer) this.showResult(answer.result, answer.written);
   }
 
-  /** Marks the sandbox as running (the stop button shows); returns the run. */
   startRunning() {
     const run = (this.running = { stopped: false });
     this.root.classList.add("is-running");
@@ -491,13 +456,11 @@ class SandboxView {
     return run;
   }
 
-  /** Sends a request about the session; `null` if the run was stopped or the engine crashed. */
   async request(message, run) {
     try {
       return await this.sessionWorker().request(message);
     } catch (e) {
       if (!run.stopped) {
-        // The engine crashed (a bug): its worker cannot be trusted any more.
         this.endSession();
         this.print(`internal error: ${e.message}\n`, "error");
       }
@@ -513,12 +476,10 @@ class SandboxView {
   stop() {
     if (!this.running) return;
     this.running.stopped = true;
-    // A busy engine cannot be interrupted from here: end its worker.
     this.endSession();
     this.print("Stopped: the session ended.\n", "system");
   }
 
-  /** Ends the session (and whatever its tasks are doing). */
   endSession() {
     this.worker?.terminate();
     this.worker = null;
@@ -536,7 +497,6 @@ class SandboxView {
     this.updateOutput();
   }
 
-  /** The console shows when it has something: output, a session or a question. */
   updateOutput() {
     const terminal = this.consoleEl.childElementCount > 0 || this.session;
     $(".terminal", this.root).hidden = !terminal;
@@ -550,10 +510,8 @@ class SandboxView {
       if (e.kind === "compile") this.showDiagnostics(e.diagnostics);
     } else {
       if (result.value !== undefined) this.print(result.value + "\n", "value");
-      // A program that calls `exit(n)` prints nothing about it itself.
       if (result.exitCode !== 0) this.print(`[exited with code ${result.exitCode}]\n`, "system");
     }
-    // A program that compiled (and did not exit) leaves a session to continue.
     this.setSession(e ? ["runtime", "limit", "interrupted"].includes(e.kind) : result.exitCode === 0);
     this.showWritten(written ?? []);
   }
@@ -562,7 +520,6 @@ class SandboxView {
     if (e.key === "Enter" && !e.shiftKey && !e.altKey) {
       const source = this.repl.value;
       if (!source.trim()) return true;
-      // An incomplete input continues on the next line (Ctrl-Enter runs it anyway).
       if (!this.app.isComplete(source) && !(e.metaKey || e.ctrlKey)) return false;
       this.submit(source);
       return true;
@@ -619,8 +576,6 @@ class SandboxView {
     }
   }
 
-  // The console
-
   clearOutput() {
     this.consoleEl.replaceChildren();
     this.consoleSize = 0;
@@ -656,7 +611,6 @@ class SandboxView {
     if (atBottom || kind === "input") terminal.scrollTop = terminal.scrollHeight;
   }
 
-  /** An echoed input, highlighted (its prompts and indents plain). */
   highlightInput(text) {
     const escape = (s) => s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
     return text
@@ -674,14 +628,11 @@ class SandboxView {
       .join("\n");
   }
 
-  // Permission prompts
-
   ask(request, reply) {
     const bar = $(".prompt-bar", this.root);
     $(".prompt-text", bar).textContent = `The program asks to ${request.description}.`;
     bar.hidden = false;
     this.updateOutput();
-    // "Always" and "Never" become rules of the policy, which later runs follow.
     const rules = { always: request.allowRule, never: request.denyRule };
     const answer = (value) => {
       bar.hidden = true;
@@ -700,7 +651,6 @@ class SandboxView {
     bar.querySelector("[data-answer=once]").focus();
   }
 
-  /** Adds `rule` to the policy (unless it has it already). */
   addRule(rule) {
     const policy = this.model.policy ?? "";
     if (policy.split("\n").some((line) => line.split("#")[0].trim() === rule)) return;
@@ -714,8 +664,6 @@ class SandboxView {
     this.updateOutput();
   }
 
-  // Sandbox actions
-
   remove() {
     this.app.remove(this);
   }
@@ -726,15 +674,11 @@ class SandboxView {
   }
 }
 
-/** The console text of an error. */
 function errorText(e) {
   let text = e.message.endsWith("\n") ? e.message : e.message + "\n";
   if (e.kind === "runtime") for (const t of e.trace) text += `    at ${t.function} (${t.file}:${t.line})\n`;
   return text;
 }
-
-// ---------------------------------------------------------------------------
-// The page
 
 class Playground {
   constructor(wasm, module) {
@@ -754,10 +698,6 @@ class Playground {
     this.examplesMenu();
   }
 
-  /**
-   * The examples menu: a popover (the browser closes it on Escape and on
-   * clicks elsewhere) placed under its button, with arrow-key navigation.
-   */
   examplesMenu() {
     const button = $("#examples-button");
     const menu = $("#examples-menu");
@@ -777,7 +717,6 @@ class Playground {
       const r = button.getBoundingClientRect();
       menu.style.minWidth = `${r.width}px`;
       menu.style.top = `${r.bottom + 4}px`;
-      // Left-aligned with the button, unless that runs off the right edge.
       menu.style.left = `${Math.max(8, Math.min(r.left, innerWidth - menu.offsetWidth - 8))}px`;
     };
     menu.addEventListener("toggle", (e) => {
@@ -848,7 +787,7 @@ class Playground {
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(this.views.map((v) => v.model)));
       } catch {
-        // Storage may be full or disabled; the page still works.
+        // Ignore storage quota or access errors.
       }
     }, 300);
   }
@@ -870,7 +809,6 @@ class Playground {
     }
   }
 
-  /** A short message, with an Undo button if `undo` is given. */
   toast(message, undo) {
     const toast = $("#toast");
     $(".toast-text", toast).textContent = message;
@@ -902,17 +840,13 @@ function bytes(n) {
   return n < 1024 ? `${n} B` : n < 1 << 20 ? `${(n / 1024).toFixed(1)} KB` : `${(n / (1 << 20)).toFixed(1)} MB`;
 }
 
-/**
- * The sandboxes of a share link (`#share=`) first, then the saved ones.
- * The link leaves the address bar, so that a reload keeps the edits.
- */
 async function initialSandboxes() {
   let saved = [];
   try {
     const list = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null");
     if (Array.isArray(list)) saved = list.map((s) => newSandbox(s));
   } catch {
-    // Unreadable storage: start over.
+    // Ignore corrupted localStorage state.
   }
   const share = new URLSearchParams(location.hash.slice(1)).get("share");
   if (share) {
@@ -936,7 +870,6 @@ async function main() {
   try {
     const wasm = await import("./pkg/sandlang_wasm.js");
     const module = await compileModule(new URL("./pkg/sandlang_wasm_bg.wasm", import.meta.url));
-    // Asynchronously: browsers refuse to instantiate large modules synchronously on the page's thread.
     await wasm.default({ module_or_path: module });
     const playground = new Playground(wasm, module);
     playground.load(await initialSandboxes());

@@ -59,7 +59,7 @@ pub enum Def {
 #[derive(Clone, Copy, Debug)]
 pub enum TyRef {
     Prim(TypeId),
-    /// `List`, `Map` or `Set`: a generic built-in collection.
+    /// Built-in generic collection (`List`, `Map`, or `Set`).
     Coll(Ctor),
     Def(TypeDefId),
     Alias(usize),
@@ -1750,7 +1750,6 @@ impl Checker {
         }
     }
 
-    /// The collection type `c` with element (or key and value) types `args`.
     pub(crate) fn coll_ty(&mut self, c: Ctor, args: &[TypeId]) -> TypeId {
         match c {
             Ctor::List => self.arena.list_of(args[0]),
@@ -2353,7 +2352,6 @@ impl Checker {
     }
 }
 
-/// The number of type arguments of the collection type `c`.
 fn coll_arity(c: Ctor) -> usize {
     if c == Ctor::Map { 2 } else { 1 }
 }

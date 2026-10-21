@@ -1,61 +1,36 @@
-# Sand playground
+# Sand Playground
 
-A web page to try Sand: write a program and the policy that sandboxes it
-side by side, and run it. Every sandbox on the page is a separate Sand
-engine in its own Web Worker, so several run at the same time.
+The browser playground lets you write Sand programs, configure sandbox policies, and run multiple isolated Sand engines concurrently in Web Workers.
 
-## Running it
+## Local Development
 
-The website serves the playground at `/play/` (see [`../README.md`](../README.md)):
-`cargo site serve` builds the engine and the site and opens them at
-http://127.0.0.1:8000/play/. The playground needs a browser with module
-workers, and works offline once loaded. The site's generator puts the site's
-`<head>` contents and header at `<!-- site-head -->` and `<!-- site-chrome -->` of `index.html`.
+The site generator serves the playground at `/play/` (see [`../README.md`](../README.md)):
 
-## Using it
+```sh
+cargo site serve
+```
 
-- **Program and files.** The first file tab (`main.sand`) is the program.
-  **+** adds a file; double-click a tab to rename it. The program sees the
-  other files at `/notes.txt`, `/data/sales.csv`, ..., and can import `.sand`
-  files (`import "lib/util"`). Files it writes are listed below the console.
-- **Policy, environment, input.**
-  - The Policy tab contains rules defining the system resources that a sandbox engine can access (`docs/SPEC.md` §14.7).
-  - The Env tab defines environment variables
-  - The Input tab contains the program's standard input.
-- **Network.** `http` executes via `fetch` for allowed requests.
-  The site must allow CORS reads; redirects are not followed.
-- **Running.** ▶ (Ctrl-Enter / ⌘-Enter) runs the program in a new session;
-  ■ stops it at once by terminating its worker. Output streams in.
-- **The console.** After a run, type at its `›` prompt to continue the
-  program with its variables, functions and heap. Enter runs a complete
-  input; Up and Down recall earlier inputs. Tasks the program spawned keep
-  running between inputs. Run again to start over.
-- **Checking.** As you type, the program is type checked and linted and the
-  policy parsed and linted, off the page's thread. Hover over a mark or its
-  line number to inspect a problem. Linter warnings are printed in the console;
-  Format (Ctrl-S / ⌘-S) formats the open `.sand` or `.policy` file.
-- **Keeping and sharing.** The page keeps the sandboxes in local storage.
-  Share copies a link that holds every sandbox in its fragment, which the
-  browser never sends to a server. Opening a link adds its sandboxes before
-  the kept ones. "Open in playground" on the site's examples opens such a link.
+This command builds the WebAssembly engine and serves the site at `http://127.0.0.1:8000/play/`. During the build, the generator replaces `<!-- site-head -->` and `<!-- site-chrome -->` in `index.html` with the shared site header and metadata.
 
-## How it works
+## Interface
 
-- `app.js` — the page. It compiles the WebAssembly module once, uses it
-  only for syntax highlighting, and hands it to the workers.
-- `worker.js` — runs engines: one worker per sandbox for its session, and one
-  shared worker for checking, linting and formatting. A run makes
-  `new Engine(options, hooks).session()` and evaluates the program as its first
-  input (`session.eval(source, "main.sand")`); console inputs are further
-  `eval`s, and between them `session.runTasks()` keeps the program's tasks
-  running. Output and permission prompts are posted to the page as they
-  happen.
-- `sandbox.js` — what a sandbox is, without the page: its files, policy,
-  environment and input, the engine options they become, and share links.
-- `editor.js` — the code editor: a textarea over a highlighted copy of its
-  text, with line numbers and diagnostics.
-- `examples.js` — the examples, which `../tests/playground.test.mjs` runs.
+- **Program and files:** The first file tab (`main.sand`) is the entry point. Click **+** to add a file into the in-memory file system (`/notes.txt`, `/data/sales.csv`), or double-click a tab to rename it. Programs can import `.sand` files from the virtual file system (`import "lib/util"`). Files written during execution appear below the console.
+- **Policy, environment, and input:**
+  - **Policy:** Defines capability rules and resource limits (`docs/SPEC.md` §14.7).
+  - **Env:** Defines `NAME=value` environment variables.
+  - **Input:** Provides standard input bytes to `io.stdin`.
+- **Network:** Allowed `http` requests are executed via the browser `fetch` API. Target servers must permit CORS reads, and HTTP redirects are rejected.
+- **Execution:** Click **▶** (`Ctrl-Enter` / `Cmd-Enter`) to start a new session and run the program. Click **■** to terminate the worker immediately.
+- **Interactive console:** After a program finishes without calling `exit`, type expressions or statements at the `›` prompt to evaluate them in the same session. Spawned background tasks continue running between console inputs.
+- **Checking and formatting:** A background worker type-checks and lints the program and policy as you type. Click **Format** (`Ctrl-S` / `Cmd-S`) to format the active `.sand` or policy tab.
+- **Persistence and sharing:** Sandboxes are saved in `localStorage`. Click **Share** to encode all sandboxes into the URL `#share=` fragment.
 
-The engine is the command line's, built without operating-system access
-(`--no-default-features`): scripts see only what the page gives them, and
-`net` (raw sockets) does not exist.
+## Architecture
+
+- `app.js` — Compiles the WebAssembly module, manages sandbox UI views, and coordinates workers.
+- `worker.js` — Hosts `Engine` and `Session` instances inside a Web Worker and forwards output and permission prompts to the main thread.
+- `sandbox.js` — Defines the sandbox state model, `Engine` options conversion, and `#share=` URL encoding.
+- `editor.js` — Implements the syntax-highlighted code editor and diagnostic overlays.
+- `examples.js` — Defines built-in playground examples verified by `../tests/playground.test.mjs`.
+
+The WebAssembly module is built without the `os` feature (`--no-default-features`), so scripts can access only the virtual file system, environment, streams, and browser `fetch` hooks provided by the page.

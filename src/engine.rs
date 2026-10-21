@@ -746,8 +746,8 @@ impl Engine {
         names
     }
 
-    /// The documentation of the prelude (with the built-in types), then the
-    /// standard modules and the host modules, each in order of name.
+    /// Returns documentation for the prelude, standard library modules, and
+    /// host modules, sorted by kind and then by module name.
     pub fn docs(&self) -> Result<Vec<crate::docs::ModuleDoc>, Error> {
         use crate::check::ModKind;
         use crate::docs::ModuleKind;

@@ -1,10 +1,4 @@
-//! The library reference (`/std/`), generated from the documentation the
-//! compiler extracts from the standard library (`Engine::docs`).
-//!
-//! Each module has a page listing its items, with its functions and values
-//! in full; each type and trait has a page of its own. Names of types in
-//! declarations, and inline code in doc comments that names an item, link
-//! to the item.
+//! Library reference generator (`/std/`) built from `Engine::docs`.
 
 use crate::highlight::{self, escape};
 use crate::markdown::{self, Checks, Heading, Style};
@@ -13,12 +7,11 @@ use crate::search::Entry;
 use sandlang::docs::{ItemDoc, ItemKind, MemberDoc, MemberKind, ModuleDoc, ModuleKind};
 use std::collections::HashMap;
 
-/// An item with a page of its own: indices of its module and of the item.
+/// Pair of `(module_index, item_index)` for an item with a dedicated page.
 type PageRef = (usize, usize);
 
 pub struct Reference {
     modules: Vec<ModuleDoc>,
-    /// Types and traits by module, by name (`List<T>` also as `List`).
     types: HashMap<String, HashMap<String, PageRef>>,
 }
 
@@ -35,8 +28,6 @@ impl Reference {
         Reference { modules, types }
     }
 
-    /// The type or trait `name` as code in module `module` sees it: its
-    /// own, the prelude's, or the only one of that name.
     fn type_ref(&self, module: &str, name: &str) -> Option<PageRef> {
         let in_module = |m: &str| self.types.get(m).and_then(|t| t.get(name)).copied();
         in_module(module).or_else(|| in_module("prelude")).or_else(|| {
@@ -60,8 +51,8 @@ impl Reference {
         self.modules.iter().find(|m| m.name == name)
     }
 
-    /// The URL of what the inline code `text` names, seen from `module`:
-    /// `Json`, `parse`, `json.parse`, `str.split`, `json.Json.get`, `print()`.
+    /// Resolves an inline code reference (`Json`, `parse`, `json.parse`,
+    /// `str.split`, `json.Json.get`, `print()`) relative to `module`.
     pub fn resolve(&self, module: &str, text: &str) -> Option<String> {
         let text = text.strip_suffix("()").unwrap_or(text);
         if !text.split('.').all(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')) {
@@ -84,7 +75,6 @@ impl Reference {
         }
     }
 
-    /// The anchor of a function or value of a module.
     fn item_anchor(&self, module: &str, name: &str) -> Option<String> {
         let m = self.module(module)?;
         let item = m.items.iter().find(|i| i.name == name && !has_page(i))?;
@@ -98,7 +88,6 @@ impl Reference {
         Some(format!("{}#{}", self.page_url(r), member_anchors(members)[i]))
     }
 
-    /// The pages of the reference and their search entries.
     pub fn pages(&self, checks: &mut Checks) -> (Vec<Page>, Vec<Entry>) {
         let mut pages = vec![self.index_page()];
         let mut entries = Vec::new();
@@ -114,7 +103,7 @@ impl Reference {
     fn index_page(&self) -> Page {
         let mut body = String::from(
             r#"<h1>Library reference</h1>
-<p class="lede">The prelude and the standard modules, generated from their source. Scripts use the prelude without an import, and import each module by name: <code>import json</code>.</p>"#,
+<p class="lede">Reference documentation for the Sand prelude and standard library. Prelude items are available without an import. Standard and host modules are imported by name: <code>import json</code>.</p>"#,
         );
         for (title, kind) in [("Prelude", ModuleKind::Prelude), ("Standard modules", ModuleKind::Std), ("Host modules", ModuleKind::Host)] {
             let rows: String = self
@@ -271,7 +260,6 @@ impl Reference {
         }
     }
 
-    /// A declaration with an anchor, and its documentation.
     fn entry_html(&self, module: &str, anchor: &str, decl: &str, doc: Option<&str>, page: &str, checks: &mut Checks) -> String {
         let self_url = |w: &str| self.type_url(module, w).filter(|u| u != page);
         let decl = highlight::sand_linked(decl, &self_url);
@@ -313,7 +301,6 @@ impl Reference {
     }
 }
 
-/// Doc comments write examples without a language; they are Sand.
 fn with_sand_fences(doc: &str) -> String {
     let mut out = String::new();
     let mut open = false;
@@ -342,7 +329,6 @@ pub fn module_url(name: &str) -> String {
     format!("/std/{name}/")
 }
 
-/// The name without type parameters: `List` for the built-in `List<T>`.
 fn item_slug(item: &ItemDoc) -> &str {
     item.name.split('<').next().unwrap_or(&item.name)
 }
@@ -351,12 +337,10 @@ fn item_url(module: &str, item: &ItemDoc) -> String {
     format!("/std/{module}/{}/", item_slug(item))
 }
 
-/// `json.Json`, but `str` and `Option` for the prelude's items.
 fn qualified(m: &ModuleDoc, name: &str) -> String {
     if m.kind == ModuleKind::Prelude { name.to_string() } else { format!("{}.{name}", m.name) }
 }
 
-/// Anchors of members, unique within their type: `method.sum`, `method.sum-2`.
 fn member_anchors(members: &[MemberDoc]) -> Vec<String> {
     let mut anchors: Vec<String> = Vec::new();
     for m in members {
@@ -389,7 +373,7 @@ fn kind_name(item: &ItemDoc) -> &'static str {
     }
 }
 
-/// The first sentence of the first paragraph of a doc comment.
+/// Extracts the first sentence of the first paragraph of `doc`.
 pub fn first_sentence(doc: &str) -> String {
     let para: Vec<&str> = doc.lines().map(str::trim).skip_while(|l| l.is_empty()).take_while(|l| !l.is_empty()).collect();
     let text = para.join(" ");
@@ -404,7 +388,6 @@ pub fn first_sentence(doc: &str) -> String {
     text[..end].to_string()
 }
 
-/// Inline Markdown (code spans) of a summary as HTML.
 fn inline_markdown(text: &str) -> String {
     let mut out = String::new();
     for (i, part) in text.split('`').enumerate() {
@@ -417,7 +400,6 @@ fn inline_markdown(text: &str) -> String {
     out
 }
 
-/// A summary without Markdown, for meta descriptions.
 fn plain(text: &str) -> String {
     text.replace('`', "")
 }

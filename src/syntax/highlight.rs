@@ -21,7 +21,7 @@ pub enum Highlight {
     /// An identifier starting with an upper-case letter (types, traits,
     /// enum variants).
     Type,
-    /// An identifier followed by `(`, and the name of a declared function.
+    /// An identifier followed by `(`, or the name in a `fn` declaration.
     Call,
 }
 
@@ -78,7 +78,7 @@ pub fn highlight(source: &str) -> Vec<(usize, usize, Highlight)> {
             }
             Tok::Int(_) | Tok::IntOverflow(_) | Tok::Float(_) | Tok::Inf | Tok::Nan | Tok::Duration(_) => Highlight::Number,
             Tok::True | Tok::False | Tok::SelfLower | Tok::SelfUpper => Highlight::Constant,
-            // After `fn` and `.`, a keyword is a method name (`fn extend`, `xs.extend(ys)`).
+            // Treat keywords after `fn` or `.` as method names (`fn extend`, `xs.extend(ys)`).
             tok if tok.is_keyword() && !(after_fn || after_dot) => Highlight::Keyword,
             tok if *tok == Tok::Ident || tok.is_keyword() => {
                 if &source[lo..hi] == "from" && tokens.get(i + 2).is_some_and(|n| n.tok == Tok::Import) {

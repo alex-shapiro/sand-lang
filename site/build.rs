@@ -1,8 +1,5 @@
-//! Turns the Rust code blocks of `content/` into a module that the crate's
-//! tests compile (`src/main.rs`), so that they follow the embedding API.
-//! A block that defines `fn main` is compiled as it is; any other block is
-//! the body of an async function that returns a `Result`. Lines that start
-//! with `# ` are compiled but not shown. `rust ignore` blocks are skipped.
+//! Extracts `rust` code blocks from `content/` into `$OUT_DIR/rust_examples.rs`
+//! so `cargo test -p sandlang-site` compiles them against the `sandlang` crate.
 
 use std::fmt::Write;
 use std::path::{Path, PathBuf};

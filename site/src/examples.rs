@@ -1,12 +1,4 @@
-//! Code examples in the site's Markdown, checked when the site is built.
-//!
-//! A `sand` block must be formatted as `sand fmt` formats it and run
-//! successfully; the page shows what it printed. The info string may add
-//! one mode: `no_run` (type check only), `error` (must fail to compile),
-//! `fails` (must fail at run time) or `ignore` (not checked). Lines that
-//! start with `# ` are part of the program but not shown. A block with
-//! `file=NAME` is a module that later blocks of the page can import. A
-//! `policy` block must parse as a policy file.
+//! Verification and execution of `sand` and `policy` code blocks in site Markdown.
 
 use sandlang::policy::PolicyFile;
 use sandlang::{Config, Engine, Error, MemFs, MemorySink};
@@ -22,8 +14,6 @@ pub enum Mode {
 }
 
 impl Mode {
-    /// The mode of a `sand` block from the words after `sand` in its info
-    /// string.
     pub fn parse(words: &[&str]) -> Result<Mode, String> {
         match words {
             [] => Ok(Mode::Run),
@@ -36,18 +26,15 @@ impl Mode {
     }
 }
 
-/// A checked example: the program, the part readers see, and what to show
-/// below it.
 #[derive(Debug)]
 pub struct Example {
-    /// The program, with hidden lines.
+    /// Complete program source, including lines prefixed with `# `.
     pub program: String,
-    /// The program without hidden lines.
+    /// Display source with `# ` prefix lines stripped.
     pub shown: String,
     pub result: Option<Shown>,
 }
 
-/// What an example shows below its code.
 #[derive(Debug)]
 pub enum Shown {
     Output(String),
@@ -55,8 +42,7 @@ pub enum Shown {
     RuntimeError { output: String, error: String },
 }
 
-/// Checks a `sand` block and runs it if its mode says so.
-/// `files` are the page's modules, by name.
+/// Formats, type-checks, and optionally runs a `sand` code block.
 pub fn check_sand(runtime: &tokio::runtime::Runtime, source: &str, mode: Mode, files: &[(String, String)]) -> Result<Example, String> {
     let program: String =
         source.lines().map(|l| l.strip_prefix("# ").unwrap_or(if l == "#" { "" } else { l })).map(|l| format!("{l}\n")).collect();
@@ -69,7 +55,6 @@ pub fn check_sand(runtime: &tokio::runtime::Runtime, source: &str, mode: Mode, f
         Ok(formatted) if formatted == program => {}
         Ok(formatted) => return Err(format!("not formatted as `sand fmt` formats it:\n{}", diff(&program, &formatted))),
         Err(e) if mode == Mode::CompileError => {
-            // Syntax errors are compile errors too.
             let _ = e;
         }
         Err(e) => return Err(format!("does not parse: {e}")),
@@ -102,36 +87,32 @@ pub fn check_sand(runtime: &tokio::runtime::Runtime, source: &str, mode: Mode, f
     }
 }
 
-/// The policy of every example. "Open in playground" gives it to the
-/// playground, so that the example runs there as it ran here.
+/// Default sandbox policy used when running documentation examples and opening
+/// them in the playground.
 pub const POLICY: &str = "\
-# Read and write the files in memory, and nothing else.
+# Allow reading and writing in-memory files; deny all other capabilities.
 allow write /
 default deny
 limit time 10s
 ";
 
-/// Checks a `policy` block.
 pub fn check_policy(source: &str) -> Result<PolicyFile, String> {
     PolicyFile::parse(source, Path::new("/project"), Some(Path::new("/home/user")))
         .map_err(|errors| errors.iter().map(|e| format!("{e}\n")).collect())
 }
 
-/// An engine like the playground's, with `POLICY`, the page's modules
-/// `files` in a memory file system, and fixed randomness.
 fn engine(files: &[(String, String)]) -> (Engine, MemorySink) {
     let sink = MemorySink::new();
     let fs = MemFs::new();
     for (name, text) in files {
-        fs.write(format!("/{name}"), text).expect("a page's module fits in memory");
+        fs.write(format!("/{name}"), text).expect("module fits in memory");
     }
-    let policy = check_policy(POLICY).expect("the examples' policy parses");
+    let policy = check_policy(POLICY).expect("default policy is valid");
     let config =
         Config::new().memory_fs(fs).policy(policy.policy()).limits(policy.limits).seed(42).stdout(sink.clone()).stderr(sink.clone());
     (Engine::new(config), sink)
 }
 
-/// The lines of `a` and `b` that differ, for error messages.
 fn diff(a: &str, b: &str) -> String {
     let (a, b): (Vec<&str>, Vec<&str>) = (a.lines().collect(), b.lines().collect());
     let mut out = String::new();

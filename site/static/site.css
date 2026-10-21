@@ -1,5 +1,4 @@
-/* sandlang.com. Colors come from the logo: navy ink, glass blue-grey,
-   sand. Every text color meets WCAG AA contrast on its background. */
+/* sandlang.com stylesheet. All text colors meet WCAG AA contrast ratios. */
 
 :root {
   color-scheme: light dark;

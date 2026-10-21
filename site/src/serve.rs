@@ -1,7 +1,4 @@
-//! A static file server for the built site on the local host, so that
-//! pages open in a browser (which will not run the playground's workers
-//! from `file://` pages): GET and HEAD of files under the directory, one
-//! request per connection, nothing else.
+//! Local HTTP static file server for previewing the built site.
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -9,18 +6,14 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-/// The longest request head read.
 const MAX_HEAD: usize = 16 << 10;
-
-/// How long a connection may take to send its request.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Serves `root` on `127.0.0.1:port` until Ctrl-C.
+/// Serves files under `root` on `127.0.0.1:port` until interrupted with Ctrl-C.
 pub fn serve(root: &Path, port: u16) -> Result<(), String> {
     let root = root.canonicalize().map_err(|e| format!("{}: {e}", root.display()))?;
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
     runtime.block_on(async {
-        // The local host only: the server is for whoever runs it.
         let listener = TcpListener::bind(("127.0.0.1", port)).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::AddrInUse {
                 format!("port {port} is in use; choose another with --port=PORT")
@@ -47,7 +40,6 @@ async fn accept(listener: TcpListener, root: Arc<PathBuf>) {
     }
 }
 
-/// Reads one request from `conn` and answers it.
 async fn respond(mut conn: TcpStream, root: &Path) -> std::io::Result<()> {
     let mut head = Vec::new();
     let mut buf = [0u8; 4096];
@@ -93,13 +85,11 @@ async fn not_found(root: &Path) -> Response {
 
 enum Found {
     File(PathBuf),
-    /// A directory named without its trailing `/`.
     Directory,
 }
 
-/// The file under `root` that the request target names: a directory is its
-/// `index.html`. `None` for paths with `..`, and for anything outside
-/// `root` (through a symlink) or not a regular file.
+/// Resolves a request target against `root`, rejecting path traversal and
+/// symlinks pointing outside `root`.
 fn resolve(root: &Path, target: &str) -> Option<Found> {
     let path = target.split(['?', '#']).next()?;
     let decoded = percent_decode(path.strip_prefix('/')?)?;
@@ -187,7 +177,6 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
 
-    /// Sends a request to a server on `port`: (status line and headers, body).
     fn request(port: u16, method: &str, path: &str) -> (String, String) {
         let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         write!(s, "{method} {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();

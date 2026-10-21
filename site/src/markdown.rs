@@ -1,5 +1,5 @@
-//! Markdown to HTML: headings get anchors, code blocks are checked
-//! (`examples`) and highlighted, and inline code may become a link.
+//! Markdown rendering with heading anchor generation, code block verification,
+//! and inline symbol linking.
 
 use crate::examples::{self, Mode, Shown};
 use crate::highlight::{self, escape};
@@ -7,7 +7,6 @@ use crate::search::json_string;
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use std::collections::BTreeMap;
 
-/// A heading of a rendered document.
 #[derive(Clone)]
 pub struct Heading {
     pub level: u8,
@@ -20,32 +19,25 @@ pub struct Rendered {
     pub headings: Vec<Heading>,
 }
 
-/// What rendering checks, and where it reports problems.
 pub struct Checks {
     pub runtime: tokio::runtime::Runtime,
-    /// The modules (`file=NAME` blocks) of the document being rendered.
+    /// Virtual module files defined via `file=NAME` code blocks in the current page.
     pub files: Vec<(String, String)>,
     pub errors: Vec<String>,
-    /// The number of examples run or checked.
     pub examples: usize,
 }
 
 impl Checks {
     pub fn new() -> Checks {
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("a Tokio runtime");
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("Tokio runtime");
         Checks { runtime, files: Vec::new(), errors: Vec::new(), examples: 0 }
     }
 }
 
-/// How to render a document.
 pub struct Style<'a> {
-    /// The document's name in error messages.
     pub source: &'a str,
-    /// Whether to check `sand` blocks; otherwise they are only highlighted.
     pub verify: bool,
-    /// Turns the text of inline code into a link target, if it names something.
     pub link_code: &'a dyn Fn(&str) -> Option<String>,
-    /// Added to the level of every heading (doc comments sit under an item's heading).
     pub heading_offset: u8,
 }
 
@@ -55,7 +47,8 @@ impl Style<'_> {
     }
 }
 
-/// The `+++` front matter of a document (`key = "value"` lines) and the rest.
+/// Parses `+++` front matter (`key = "value"` lines) and returns the fields and
+/// remaining Markdown body.
 pub fn front_matter(text: &str) -> (BTreeMap<String, String>, &str) {
     let mut fields = BTreeMap::new();
     let Some(rest) = text.strip_prefix("+++\n") else { return (fields, text) };
@@ -194,7 +187,6 @@ fn code_block(info: &str, text: &str, style: &Style, checks: &mut Checks) -> Str
     }
 }
 
-/// `play` is the program the playground opens (none if empty), with `files`.
 fn sand_example(shown: &str, play: &str, files: &[(String, String)], caption: Option<&str>, result: Option<&Shown>) -> String {
     let output = match result {
         None => None,
@@ -212,7 +204,6 @@ fn sand_example(shown: &str, play: &str, files: &[(String, String)], caption: Op
     figure
 }
 
-/// A code block with its actions and, below it, what it printed.
 fn figure(lang: &str, code: &str, output: Option<(&str, &str, String)>, play: &str, files: &[(String, String)]) -> String {
     let play = if play.is_empty() {
         String::new()
@@ -234,8 +225,7 @@ fn figure(lang: &str, code: &str, output: Option<(&str, &str, String)>, play: &s
     )
 }
 
-/// The anchor GitHub gives a heading: lower case, with spaces as hyphens
-/// and without other punctuation (`13.4 The http module` -> `134-the-http-module`).
+/// Converts a heading title into a GitHub-compatible anchor slug.
 pub fn github_slug(text: &str) -> String {
     text.chars()
         .filter_map(|c| match c {
@@ -246,7 +236,6 @@ pub fn github_slug(text: &str) -> String {
         .collect()
 }
 
-/// `github_slug` without hyphens at its ends: `` `?` at the top`` -> `at-the-top`.
 pub fn slug(text: &str) -> String {
     github_slug(text).trim_matches('-').to_string()
 }

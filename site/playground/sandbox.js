@@ -1,32 +1,21 @@
-// What a sandbox is, without the page: its files, policy, environment and
-// input, and how they become the options of an engine (see wasm/src/lib.rs).
-// Shared by the page, its workers and the tests.
+// Sandbox data model, Engine options builder, and #share= URL encoding.
 
-/** The default name of the program file. */
 export const MAIN = "main.sand";
 
-/**
- * A sandbox: `files` maps names (`main.sand`, `data/x.txt`, ...) to text,
- * `main` names the program among them (the others go to the program's file
- * system); `policy`, `env` (`NAME=value` lines) and `stdin` are text.
- */
 export function newSandbox(fields = {}) {
   const sandbox = { title: "Sandbox", main: MAIN, files: { [MAIN]: "" }, policy: "", env: "", stdin: "", ...structuredClone(fields) };
   if (!(sandbox.main in sandbox.files)) sandbox.files[sandbox.main] = "";
   return sandbox;
 }
 
-/** The name of a sandbox's program file. */
 export function program(sandbox) {
   return sandbox.main ?? MAIN;
 }
 
-/** The absolute path of a file of a sandbox in the file system. */
 export function filePath(name) {
   return "/" + name.replace(/^\/+/, "");
 }
 
-/** `NAME=value` lines (blank lines and `#` comments ignored) as an object. */
 export function parseEnv(text) {
   const env = {};
   for (const raw of (text ?? "").split("\n")) {
@@ -38,7 +27,6 @@ export function parseEnv(text) {
   return env;
 }
 
-/** The options of the engine that runs `sandbox`. */
 export function engineOptions(sandbox) {
   const files = {};
   for (const [name, text] of Object.entries(sandbox.files ?? {})) {
@@ -49,7 +37,7 @@ export function engineOptions(sandbox) {
   return options;
 }
 
-/** Encodes sandboxes for a link (deflated JSON, base64url). */
+/** Encodes `sandboxes` as a base64url-encoded raw-deflate JSON string. */
 export async function encodeShare(sandboxes) {
   const json = JSON.stringify(sandboxes.map(({ title, main, files, policy, env, stdin }) => ({ title, main, files, policy, env, stdin })));
   const stream = new Blob([json]).stream().pipeThrough(new CompressionStream("deflate-raw"));
@@ -59,7 +47,7 @@ export async function encodeShare(sandboxes) {
   return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
 }
 
-/** Decodes `encodeShare`'s text; throws if it is not valid. */
+/** Decodes a string produced by `encodeShare` into a list of sandboxes. */
 export async function decodeShare(text) {
   const binary = atob(text.replaceAll("-", "+").replaceAll("_", "/"));
   const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));

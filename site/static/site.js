@@ -1,6 +1,4 @@
-// sandlang.com: search, code block buttons, and the table of contents.
-
-// ---------- Search ----------
+// Client-side search, code block actions, and navigation for sandlang.com.
 
 const input = document.getElementById("search");
 const list = document.getElementById("search-results");
@@ -12,13 +10,13 @@ function loadIndex() {
     .then((response) => response.json())
     .then((rows) => rows.map(([name, kind, url, summary]) => ({ name, kind, url, summary, key: name.toLowerCase() })))
     .catch((error) => {
-      index = null; // Try again at the next search.
+      index = null;
       throw error;
     });
   return index;
 }
 
-/** Lower is better; `null` if `entry` does not match every word of `query`. */
+/** Scores `entry` against `words` (lower is better), or returns `null` if any word fails to match. */
 function rank(entry, words) {
   let score = 0;
   for (const word of words) {
@@ -32,7 +30,6 @@ function rank(entry, words) {
       return null;
     }
   }
-  // Prefer guide pages and short names among equals.
   return score + (entry.kind === "guide" ? -0.5 : 0) + entry.key.length / 1000;
 }
 
@@ -140,9 +137,6 @@ document.addEventListener("click", async (event) => {
   }
 });
 
-// ---------- Navigation ----------
-
-// On narrow screens the sidebar is a menu above the content, closed at first.
 const menu = document.querySelector(".sidebar-menu");
 if (menu) {
   const narrow = matchMedia("(max-width: 860px)");
@@ -151,7 +145,6 @@ if (menu) {
   narrow.addEventListener("change", fit);
 }
 
-// "On this page" marks the section at the top of the viewport.
 const tocLinks = [...document.querySelectorAll(".toc a")];
 if (tocLinks.length) {
   const targets = tocLinks.map((a) => document.getElementById(decodeURIComponent(a.hash.slice(1)))).filter(Boolean);

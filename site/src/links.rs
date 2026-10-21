@@ -1,7 +1,4 @@
-//! Checks that every internal link of the built site leads to a page, and
-//! to an element with the link's fragment as its `id`. Links to the
-//! repository's main branch on GitHub must lead to a file of `repo`, and to
-//! a heading of it if it is Markdown.
+//! Verification of internal links, heading anchors, and GitHub repository links.
 
 use crate::markdown::github_slug;
 use crate::page::REPO;
@@ -9,7 +6,8 @@ use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-/// The broken links of the HTML pages under `out`.
+/// Checks all `href` and `src` attributes in HTML files under `out` and returns
+/// any broken links or missing anchors.
 pub fn check(out: &Path, repo: &Path) -> Result<Vec<String>, String> {
     let mut pages = Vec::new();
     collect(out, &mut pages)?;
@@ -35,7 +33,6 @@ pub fn check(out: &Path, repo: &Path) -> Result<Vec<String>, String> {
                 let t = out.join(p);
                 if p.is_empty() || p.ends_with('/') { t.join("index.html") } else { t }
             } else {
-                // Relative links are the playground's own scripts.
                 page.parent().unwrap_or(out).join(path)
             };
             if !(target.is_file() || in_repo.is_some() && target.exists()) {
@@ -52,7 +49,7 @@ pub fn check(out: &Path, repo: &Path) -> Result<Vec<String>, String> {
                     }
                 });
                 if !known.contains(fragment) {
-                    errors.push(format!("{from}: link `{link}` names no element of its page"));
+                    errors.push(format!("{from}: link `{link}` has an unknown anchor"));
                 }
             }
         }
@@ -60,14 +57,11 @@ pub fn check(out: &Path, repo: &Path) -> Result<Vec<String>, String> {
     Ok(errors)
 }
 
-/// The path in the repository of a GitHub link to its main branch.
 fn repo_file(link: &str) -> Option<&str> {
     let rest = link.strip_prefix(REPO)?;
     rest.strip_prefix("/blob/main/").or_else(|| rest.strip_prefix("/tree/main/"))
 }
 
-/// The anchors GitHub gives the headings of a Markdown file, with `-1`,
-/// `-2`, ... after repeated ones.
 fn github_anchors(markdown: &str) -> HashSet<String> {
     let mut anchors = HashSet::new();
     let mut text: Option<String> = None;
@@ -103,7 +97,6 @@ fn collect(dir: &Path, pages: &mut Vec<PathBuf>) -> Result<(), String> {
     Ok(())
 }
 
-/// The values of the attribute `name` in `html`, with entities decoded.
 fn attributes(html: &str, name: &str) -> Vec<String> {
     let needle = format!(" {name}=\"");
     let mut values = Vec::new();
@@ -131,7 +124,7 @@ mod tests {
         let errors = check(&dir, &dir).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(errors.len(), 3, "{errors:?}");
-        assert!(errors[0].contains("`/a/#y` names no element"), "{errors:?}");
+        assert!(errors[0].contains("`/a/#y` has an unknown anchor"), "{errors:?}");
         assert!(errors[1].contains("broken link `/b/`"), "{errors:?}");
         assert!(errors[2].contains("`#top`"), "{errors:?}");
     }
@@ -153,7 +146,7 @@ mod tests {
         let errors = check(&out, &repo).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(errors.len(), 2, "{errors:?}");
-        assert!(errors[0].contains("A.md#nope` names no element"), "{errors:?}");
+        assert!(errors[0].contains("A.md#nope` has an unknown anchor"), "{errors:?}");
         assert!(errors[1].contains("broken link") && errors[1].contains("B.md"), "{errors:?}");
     }
 }

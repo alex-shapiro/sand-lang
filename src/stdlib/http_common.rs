@@ -499,7 +499,6 @@ pub(crate) fn register_body(r: &mut crate::engine::Registry) {
     });
 }
 
-/// Passes the headers of a request to `url` through the host's request filter, if it has one.
 pub(crate) fn filter_request(vm: &Vm, url: &Url, headers: &mut Vec<(String, String)>) -> Result<(), String> {
     let Some(filter) = &vm.host.request_filter else { return Ok(()) };
     let target = crate::engine::RequestTarget { scheme: url.scheme.clone(), host: url.host.clone(), port: url.port };

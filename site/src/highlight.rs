@@ -1,5 +1,4 @@
-//! HTML for code: Sand through the compiler's highlighter, policy files,
-//! Rust and JavaScript through small tokenizers, anything else escaped.
+//! Syntax highlighting and HTML escaping for Sand, policy files, Rust, and JavaScript.
 
 use sandlang::syntax::highlight::{Highlight, highlight};
 
@@ -17,13 +16,12 @@ pub fn escape(text: &str) -> String {
     out
 }
 
-/// Highlighted Sand source.
 pub fn sand(source: &str) -> String {
     sand_linked(source, &|_| None)
 }
 
-/// Highlighted Sand source in which `link` may turn a type name or a
-/// built-in type (`str`, `int`) into a link.
+/// Highlights Sand source code, wrapping type names for which `link` returns
+/// `Some(url)` in `<a>` elements.
 pub fn sand_linked(source: &str, link: &dyn Fn(&str) -> Option<String>) -> String {
     let mut out = String::new();
     let mut at = 0;
@@ -54,7 +52,6 @@ pub fn sand_linked(source: &str, link: &dyn Fn(&str) -> Option<String>) -> Strin
     out
 }
 
-/// Highlighted policy file (`docs/SPEC.md` §14.7).
 pub fn policy(source: &str) -> String {
     const STATEMENTS: &[&str] = &["allow", "deny", "default", "limit", "let"];
     let mut out = String::new();
@@ -96,14 +93,10 @@ pub fn policy(source: &str) -> String {
     out
 }
 
-/// A language for `clike`.
 pub struct Lang {
     keywords: &'static [&'static str],
     constants: &'static [&'static str],
-    /// Types with lower-case names.
     types: &'static [&'static str],
-    /// Rust: `'a` lifetimes, `r#"..."#` raw strings, `#[...]` attributes
-    /// and `name!` macros.
     rust: bool,
 }
 
@@ -161,7 +154,6 @@ pub const JS: Lang = Lang {
     rust: false,
 };
 
-/// Highlighted Rust or JavaScript source.
 pub fn clike(source: &str, lang: &Lang) -> String {
     let bytes = source.as_bytes();
     let mut out = String::new();
@@ -181,7 +173,6 @@ pub fn clike(source: &str, lang: &Lang) -> String {
             let quote = if c == 'b' { '"' } else { c };
             ("string", quoted(rest, quote))
         } else if lang.rust && c == '\'' {
-            // `'x'` and `'\n'` are characters; `'a` is a lifetime.
             let lifetime = rest[1..].chars().nth(1) != Some('\'') && !rest[1..].starts_with('\\');
             if lifetime { ("constant", 1 + word_len(&rest[1..])) } else { ("string", quoted(rest, '\'')) }
         } else if c.is_ascii_digit() {
@@ -225,8 +216,6 @@ pub fn clike(source: &str, lang: &Lang) -> String {
     out
 }
 
-/// The length of the quoted literal at the start of `text`, including its
-/// prefix (`b`) and closing quote.
 fn quoted(text: &str, quote: char) -> usize {
     let start = text.find(quote).unwrap_or(0) + 1;
     let mut escaped = false;
@@ -241,8 +230,6 @@ fn quoted(text: &str, quote: char) -> usize {
     text.len()
 }
 
-/// The length of the Rust raw string (`r#"..."#`, `br"..."`) at the start
-/// of `text`, if there is one.
 fn raw_string(text: &str) -> Option<usize> {
     let after_r = text.strip_prefix('r').or_else(|| text.strip_prefix("br"))?;
     let body = after_r.trim_start_matches('#');
@@ -257,7 +244,6 @@ fn word_len(text: &str) -> usize {
     text.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(text.len())
 }
 
-/// `text` split into words and runs of whitespace.
 fn split_keep_spaces(text: &str) -> Vec<&str> {
     let mut pieces = Vec::new();
     let mut start = 0;

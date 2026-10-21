@@ -1,5 +1,4 @@
 :root {
-  /* Tokens of the playground only; site.css defines the others. */
   --editor: #fbfcfc;
   --faint: #8a94a1;
   --border-strong: #cdd5d9;
@@ -64,7 +63,6 @@ code { font-family: var(--mono); font-size: 0.92em; }
   backdrop-filter: blur(8px);
 }
 
-/* The site's header does not stick on narrow screens. */
 @media (max-width: 640px) {
   .topbar { top: 0; }
 }
@@ -73,8 +71,6 @@ code { font-family: var(--mono); font-size: 0.92em; }
 
 .actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-left: auto; }
 .running { color: var(--accent-hover); font-weight: 600; font-size: 13px; font-variant-numeric: tabular-nums; }
-
-/* ---------------------------------------------------------------- buttons */
 
 button {
   height: var(--control-h);
@@ -89,7 +85,6 @@ button {
 .menu-button { display: inline-flex; align-items: center; gap: 22px; padding-right: 11px; }
 .menu-button svg { width: 10px; height: 6px; fill: none; stroke: var(--faint); stroke-width: 1.5; stroke-linecap: round; }
 
-/* The examples menu (a popover placed by app.js). */
 .menu {
   position: fixed;
   inset: auto;
@@ -116,7 +111,6 @@ button.icon { width: var(--control-h); padding: 0; display: inline-flex; align-i
 button.icon svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
 button.icon.run svg, button.icon.stop svg { fill: currentColor; stroke: none; }
 button.icon[data-action="remove"]:hover { color: var(--danger); border-color: var(--danger); }
-/* Hovering darkens the border only: a darker fill looks disabled. */
 button:hover { border-color: var(--muted); }
 button:focus-visible, input:focus-visible, .console:focus-visible {
   outline: 2px solid var(--accent);
@@ -348,8 +342,6 @@ main {
 .output { display: flex; flex-direction: column; background: var(--surface); }
 .output[hidden] { display: none; }
 
-
-/* The console: output and the session's input, as one terminal. */
 .terminal {
   max-height: 340px;
   overflow: auto;

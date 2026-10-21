@@ -562,8 +562,8 @@ extend duration {
     pub native fn from_secs(s: float) -> duration
 }
 
-/// Growable lists, written `[1, 2, 3]`. The type `[T]` is short for
-/// `List<T>`. Lists are mutable and shared by reference.
+/// Growable list (`[1, 2, 3]`). `[T]` is shorthand for `List<T>`. Lists are
+/// mutable reference types.
 extend<T> [T] {
     /// Number of elements.
     pub native fn len(self) -> int
@@ -886,9 +886,9 @@ extend [str] {
     pub native fn join(self, sep: str = "") -> str
 }
 
-/// Hash maps, written `["a": 1]` (`[:]` when empty). The type `[K: V]` is
-/// short for `Map<K, V>`. Maps are mutable, shared by reference and
-/// iterated in insertion order. Keys must be `Hash`.
+/// Insertion-ordered hash map (`["a": 1]`, or `[:]` if empty). `[K: V]` is
+/// shorthand for `Map<K, V>`. Maps are mutable reference types, and keys must
+/// implement `Hash`.
 extend<K: Hash, V> [K: V] {
     /// Number of entries.
     pub native fn len(self) -> int

@@ -1,5 +1,4 @@
-//! Builds the website at sandlang.com from `site/` and the standard
-//! library, and serves it locally. See `site/README.md`.
+//! Static site generator and local development server for `sandlang.com`.
 
 mod examples;
 mod highlight;
@@ -10,7 +9,6 @@ mod reference;
 mod search;
 mod serve;
 
-/// The Rust code blocks of `content/`, compiled to check them (`build.rs`).
 #[cfg(test)]
 mod rust_examples {
     include!(concat!(env!("OUT_DIR"), "/rust_examples.rs"));
@@ -26,16 +24,15 @@ const USAGE: &str = "\
 usage: cargo site build [--out=DIR] [--engine=release|dev|none]
        cargo site serve [--out=DIR] [--engine=release|dev|none] [--port=PORT]
 
-build   writes the site to DIR (default: target/site), checking every example
-        and internal link; exits with 1 if any check fails
-serve   builds the site, then serves it at http://127.0.0.1:PORT/ (default 8000)
-        even if checks fail
+build   write the site to DIR (default: target/site) and verify all examples
+        and internal links; exit with 1 if any check fails
+serve   build the site and serve it at http://127.0.0.1:PORT/ (default: 8000)
 
---engine  how to build the playground's WebAssembly engine (default: release
-          for build, dev for serve); `none` keeps the engine already in DIR
+--engine  WebAssembly build mode for the playground (default: release for build,
+          dev for serve); `none` reuses the existing engine in DIR
 ";
 
-/// Marks a directory as the site's output, which a build may clear.
+/// Marker file that identifies a directory created by `cargo site build`.
 const MARKER: &str = ".sand-site";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -62,7 +59,7 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
         return Ok(ExitCode::from(2));
     };
     let site = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let repo = site.parent().ok_or("the site crate has no parent directory")?;
+    let repo = site.parent().ok_or("missing parent directory")?;
     let mut out = repo.join("target/site");
     let mut engine = if command == "serve" { EngineBuild::Dev } else { EngineBuild::Release };
     let mut port = 8000;
@@ -100,7 +97,6 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
     }
 }
 
-/// Prints the failed checks; true if there were none.
 fn report(errors: &[String]) -> bool {
     for e in errors {
         eprintln!("error: {}\n", e.trim_end());
@@ -111,12 +107,11 @@ fn report(errors: &[String]) -> bool {
     errors.is_empty()
 }
 
-/// Writes the site to `out`; returns the checks that failed.
 fn build(repo: &Path, out: &Path, engine: EngineBuild) -> Result<Vec<String>, String> {
     let site = repo.join("site");
     let pkg = out.join("play/pkg");
     if engine == EngineBuild::None && !pkg.join("sandlang_wasm_bg.wasm").is_file() {
-        return Err(format!("{} has no engine to keep; build one with --engine=dev or --engine=release", out.display()));
+        return Err(format!("missing engine in {}; build with --engine=dev or --engine=release", out.display()));
     }
     prepare_output(out, engine)?;
     let assets = copy_static(&site.join("static"), out)?;
@@ -159,12 +154,11 @@ fn build(repo: &Path, out: &Path, engine: EngineBuild) -> Result<Vec<String>, St
     Ok(errors)
 }
 
-/// Makes `out` an empty output directory, keeping a built engine when it
-/// will not be rebuilt.
+/// Clears `out` before a build, preserving `play/pkg` if `engine` is `EngineBuild::None`.
 fn prepare_output(out: &Path, engine: EngineBuild) -> Result<(), String> {
     if out.exists() {
         if !out.join(MARKER).exists() && std::fs::read_dir(out).map_err(|e| e.to_string())?.next().is_some() {
-            return Err(format!("{} is not empty and was not made by this tool; choose another --out", out.display()));
+            return Err(format!("{} is not empty and was not created by this tool; choose another --out", out.display()));
         }
         for entry in std::fs::read_dir(out).map_err(|e| e.to_string())? {
             let path = entry.map_err(|e| e.to_string())?.path();
@@ -181,7 +175,7 @@ fn prepare_output(out: &Path, engine: EngineBuild) -> Result<(), String> {
         }
     }
     std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
-    write(&out.join(MARKER), "Built by `cargo site build`; the next build replaces everything here.\n")
+    write(&out.join(MARKER), "Created by `cargo site build`; replaced on each build.\n")
 }
 
 fn remove(path: &Path) -> Result<(), String> {
@@ -200,7 +194,6 @@ fn read(path: &Path) -> Result<String, String> {
     std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// Copies `site/static` and returns the URLs of the stylesheet and script.
 fn copy_static(from: &Path, out: &Path) -> Result<Assets, String> {
     for entry in std::fs::read_dir(from).map_err(|e| format!("{}: {e}", from.display()))? {
         let path = entry.map_err(|e| e.to_string())?.path();
@@ -218,7 +211,6 @@ fn fnv(data: &[u8]) -> u64 {
     data.iter().fold(0xcbf29ce484222325, |h, &b| (h ^ b as u64).wrapping_mul(0x100000001b3))
 }
 
-/// Builds the playground's engine into `pkg` with `wasm/build.sh`.
 fn build_engine(repo: &Path, pkg: &Path, engine: EngineBuild) -> Result<(), String> {
     let mut cmd = Command::new("sh");
     cmd.arg(repo.join("wasm/build.sh")).arg("web").arg(pkg);
@@ -227,12 +219,11 @@ fn build_engine(repo: &Path, pkg: &Path, engine: EngineBuild) -> Result<(), Stri
     }
     let status = cmd.status().map_err(|e| format!("cannot run wasm/build.sh: {e}"))?;
     if !status.success() {
-        return Err("wasm/build.sh failed; build without the engine with --engine=none".into());
+        return Err("wasm/build.sh failed; pass --engine=none to skip building the engine".into());
     }
     Ok(())
 }
 
-/// Copies the playground, giving its page the site's head and header.
 fn copy_playground(from: &Path, to: &Path, assets: &Assets) -> Result<(), String> {
     for entry in std::fs::read_dir(from).map_err(|e| format!("{}: {e}", from.display()))? {
         let path = entry.map_err(|e| e.to_string())?.path();
@@ -240,8 +231,7 @@ fn copy_playground(from: &Path, to: &Path, assets: &Assets) -> Result<(), String
         match name.as_str() {
             "README.md" => {}
             "index.html" => {
-                let description =
-                    "Write Sand programs and the policies that sandbox them, and run several engines at once, in your browser.";
+                let description = "Write Sand programs, configure sandbox policies, and run multiple isolated engines in your browser.";
                 let html = read(&path)?
                     .replace("<!-- site-head -->", &page::head("Playground – Sand", description, assets))
                     .replace("<!-- site-chrome -->", &page::chrome(Section::Playground));
@@ -253,7 +243,6 @@ fn copy_playground(from: &Path, to: &Path, assets: &Assets) -> Result<(), String
     Ok(())
 }
 
-/// The guide's chapters (`NN-slug.md`, in order) and its index page.
 fn guide(dir: &Path, checks: &mut Checks) -> Result<(Vec<Page>, Vec<Entry>), String> {
     let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
         .map_err(|e| format!("{}: {e}", dir.display()))?
@@ -274,7 +263,7 @@ fn guide(dir: &Path, checks: &mut Checks) -> Result<(Vec<Page>, Vec<Entry>), Str
         let text = read(file)?;
         let (fields, body) = markdown::front_matter(&text);
         let source = format!("site/content/guide/{}", file.file_name().unwrap_or_default().to_string_lossy());
-        let title = fields.get("title").cloned().ok_or(format!("{source}: no title"))?;
+        let title = fields.get("title").cloned().ok_or(format!("{source}: missing title"))?;
         let description = fields.get("description").cloned().unwrap_or_default();
         let rendered = markdown::render(body, &Style::page(&source, true), checks);
         chapters.push(Chapter { slug, title, description, rendered });
@@ -282,10 +271,10 @@ fn guide(dir: &Path, checks: &mut Checks) -> Result<(Vec<Page>, Vec<Entry>), Str
     let links: Vec<(String, String)> = chapters.iter().map(|c| (format!("/guide/{}/", c.slug), highlight::escape(&c.title))).collect();
     let sidebar = |current: &str| format!(r#"<h2><a href="/guide/">Guide</a></h2>{}"#, page::link_list(&links, current));
     let mut pages = Vec::new();
-    let mut entries = vec![Entry::new("Guide", "guide", "/guide/", "A tour of the Sand language.")];
+    let mut entries = vec![Entry::new("Guide", "guide", "/guide/", "Step-by-step guide to the Sand language.")];
     let mut index = String::from(
         r#"<h1>The Sand guide</h1>
-<p class="lede">This guide teaches Sand chapter by chapter, from the first program to embedding the engine in Rust. The site's build checks the Sand examples, and the output below an example is what it printed.</p>
+<p class="lede">This guide introduces Sand from your first program to embedding the engine in Rust. Every Sand example is verified during the site build.</p>
 <ol class="chapters">"#,
     );
     for (i, c) in chapters.iter().enumerate() {
@@ -327,7 +316,7 @@ fn guide(dir: &Path, checks: &mut Checks) -> Result<(Vec<Page>, Vec<Entry>), Str
     pages.push(Page {
         path: "/guide/".into(),
         title: "Guide".into(),
-        description: "A tour of the Sand language, from the first program to embedding.".into(),
+        description: "Step-by-step guide to the Sand language, from basic syntax to Rust embedding.".into(),
         section: Section::Guide,
         sidebar: sidebar("/guide/"),
         toc: Vec::new(),
@@ -336,8 +325,6 @@ fn guide(dir: &Path, checks: &mut Checks) -> Result<(Vec<Page>, Vec<Entry>), Str
     Ok((pages, entries))
 }
 
-/// The specification as one page, with its sections in the sidebar. Its
-/// examples are fragments, so they are highlighted but not checked.
 fn spec(path: &Path, checks: &mut Checks) -> Result<(Page, Vec<Entry>), String> {
     const URL: &str = "/spec/";
     let rendered = markdown::render(&read(path)?, &Style::page("docs/SPEC.md", false), checks);
@@ -347,14 +334,14 @@ fn spec(path: &Path, checks: &mut Checks) -> Result<(Page, Vec<Entry>), String> 
         .filter(|h| h.level == 2 && h.text != "Contents")
         .map(|h| (format!("{URL}#{}", h.id), highlight::escape(&h.text)))
         .collect();
-    let mut entries = vec![Entry::new("Specification", "spec", URL, "The definition of the Sand language.")];
+    let mut entries = vec![Entry::new("Specification", "spec", URL, "Formal specification of the Sand language.")];
     for h in rendered.headings.iter().filter(|h| h.level == 2 || h.level == 3) {
         entries.push(Entry::new(&h.text, "spec", &format!("{URL}#{}", h.id), ""));
     }
     let page = Page {
         path: URL.into(),
         title: "Specification".into(),
-        description: "The definition of the Sand language, its standard library, sandbox and tools.".into(),
+        description: "Formal specification of the Sand language, standard library, sandbox policy, and toolchain.".into(),
         section: Section::Spec,
         sidebar: format!(r#"<h2><a href="{URL}">Specification</a></h2>{}"#, page::link_list(&sections, "")),
         toc: rendered.headings.into_iter().filter(|h| h.level == 3).collect(),

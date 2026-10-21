@@ -1,12 +1,5 @@
-// Runs every example of the playground (site/playground/examples.js) with the
-// WebAssembly build, as the playground does (as the first input of a
-// session), and checks its `expect`ations. Requests go to a stub of
-// `fetch` with canned answers, not to the network. To run:
-//
-//   wasm/build.sh nodejs target/wasm-node
-//   node --test site/tests/
-//
-// SAND_WASM_PKG overrides the package directory.
+// Executes every example in site/playground/examples.js against the Node.js
+// WebAssembly build using a stubbed `fetch` implementation.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -20,7 +13,6 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const pkg = process.env.SAND_WASM_PKG ?? path.join(here, "../../target/wasm-node");
 const sand = createRequire(import.meta.url)(path.join(pkg, "sandlang_wasm.js"));
 
-/** Canned answers by URL; anything else fails as an unreachable host would. */
 const answers = {
   "https://api.github.com/zen": "Keep it logically awesome.",
   "https://api.github.com/repos/rust-lang/rust": JSON.stringify({
@@ -50,7 +42,6 @@ for (const example of examples) {
     requested.length = 0;
     const engine = new sand.Engine(engineOptions(example), {
       onOutput: (stream, text) => (stream === "stdout" ? (stdout += text) : (stderr += text)),
-      // The page asks the person; here every question gets the example's answer (deny by default).
       onPrompt: () => {
         prompts += 1;
         return example.expect.answer ?? "deny";
@@ -71,7 +62,6 @@ for (const example of examples) {
     for (const written of e.writes ?? []) {
       assert.ok(engine.readFile(written), `${example.id} did not write ${written}`);
     }
-    // Only allowed hosts are asked.
     for (const url of requested) assert.ok(url in answers, `${example.id} requested ${url}`);
     if (e.ok) assert.equal(stderr, "", context);
     session.free();
