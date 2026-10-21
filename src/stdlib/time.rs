@@ -476,54 +476,145 @@ fn zone(vm: &Vm, v: Value) -> Result<tz::TimeZone, Ctl> {
     extract_value::<TimeZone>(vm, v).map(|z| z.0)
 }
 
-fn enum_tag_index(vm: &Vm, v: Value) -> usize {
-    match v {
-        Value::Tag(id) => vm.prog.variants.get(id as usize).map_or(usize::MAX, |r| r.index as usize),
-        _ => usize::MAX,
+pub mod enums {
+    /// A calendar or clock unit, ordered from largest to smallest.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, crate::SandEnum)]
+    #[sand(module = "time")]
+    pub enum Unit {
+        /// Calendar year.
+        Year,
+        /// Calendar month.
+        Month,
+        /// Calendar week.
+        Week,
+        /// Calendar day.
+        Day,
+        /// Clock hour.
+        Hour,
+        /// Clock minute.
+        Minute,
+        /// Clock second.
+        Second,
+        /// Millisecond (`10^-3` seconds).
+        Millisecond,
+        /// Microsecond (`10^-6` seconds).
+        Microsecond,
+        /// Nanosecond (`10^-9` seconds).
+        Nanosecond,
+    }
+
+    /// Rounding mode for `round`, `until`, and `since`.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, crate::SandEnum)]
+    #[sand(module = "time")]
+    pub enum RoundingMode {
+        /// Rounds toward positive infinity.
+        Ceil,
+        /// Rounds toward negative infinity.
+        Floor,
+        /// Rounds away from zero.
+        Expand,
+        /// Rounds toward zero.
+        Trunc,
+        /// Rounds to the nearest multiple, breaking ties toward positive infinity.
+        HalfCeil,
+        /// Rounds to the nearest multiple, breaking ties toward negative infinity.
+        HalfFloor,
+        /// Rounds to the nearest multiple, breaking ties away from zero.
+        HalfExpand,
+        /// Rounds to the nearest multiple, breaking ties toward zero.
+        HalfTrunc,
+        /// Rounds to the nearest multiple, breaking ties toward the even multiple.
+        HalfEven,
+    }
+
+    /// Strategy for resolving wall-clock times that fall in a daylight saving gap
+    /// (skipped time) or fold (repeated time).
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, crate::SandEnum)]
+    #[sand(module = "time")]
+    pub enum Disambiguation {
+        /// Advances by the gap length in a gap, and selects the earlier occurrence in a fold.
+        Compatible,
+        /// Selects the earlier instant (moving backward by the gap length in a gap).
+        Earlier,
+        /// Selects the later instant (moving forward by the gap length in a gap).
+        Later,
+    }
+
+    impl From<Unit> for jiff::Unit {
+        fn from(u: Unit) -> Self {
+            match u {
+                Unit::Year => jiff::Unit::Year,
+                Unit::Month => jiff::Unit::Month,
+                Unit::Week => jiff::Unit::Week,
+                Unit::Day => jiff::Unit::Day,
+                Unit::Hour => jiff::Unit::Hour,
+                Unit::Minute => jiff::Unit::Minute,
+                Unit::Second => jiff::Unit::Second,
+                Unit::Millisecond => jiff::Unit::Millisecond,
+                Unit::Microsecond => jiff::Unit::Microsecond,
+                Unit::Nanosecond => jiff::Unit::Nanosecond,
+            }
+        }
+    }
+
+    impl From<jiff::Unit> for Unit {
+        fn from(u: jiff::Unit) -> Self {
+            match u {
+                jiff::Unit::Year => Unit::Year,
+                jiff::Unit::Month => Unit::Month,
+                jiff::Unit::Week => Unit::Week,
+                jiff::Unit::Day => Unit::Day,
+                jiff::Unit::Hour => Unit::Hour,
+                jiff::Unit::Minute => Unit::Minute,
+                jiff::Unit::Second => Unit::Second,
+                jiff::Unit::Millisecond => Unit::Millisecond,
+                jiff::Unit::Microsecond => Unit::Microsecond,
+                jiff::Unit::Nanosecond => Unit::Nanosecond,
+            }
+        }
+    }
+
+    impl From<RoundingMode> for jiff::RoundMode {
+        fn from(m: RoundingMode) -> Self {
+            match m {
+                RoundingMode::Ceil => jiff::RoundMode::Ceil,
+                RoundingMode::Floor => jiff::RoundMode::Floor,
+                RoundingMode::Expand => jiff::RoundMode::Expand,
+                RoundingMode::Trunc => jiff::RoundMode::Trunc,
+                RoundingMode::HalfCeil => jiff::RoundMode::HalfCeil,
+                RoundingMode::HalfFloor => jiff::RoundMode::HalfFloor,
+                RoundingMode::HalfExpand => jiff::RoundMode::HalfExpand,
+                RoundingMode::HalfTrunc => jiff::RoundMode::HalfTrunc,
+                RoundingMode::HalfEven => jiff::RoundMode::HalfEven,
+            }
+        }
+    }
+
+    impl From<Disambiguation> for jiff::tz::Disambiguation {
+        fn from(d: Disambiguation) -> Self {
+            match d {
+                Disambiguation::Compatible => jiff::tz::Disambiguation::Compatible,
+                Disambiguation::Earlier => jiff::tz::Disambiguation::Earlier,
+                Disambiguation::Later => jiff::tz::Disambiguation::Later,
+            }
+        }
     }
 }
 
-const UNITS: [Unit; 10] = [
-    Unit::Year,
-    Unit::Month,
-    Unit::Week,
-    Unit::Day,
-    Unit::Hour,
-    Unit::Minute,
-    Unit::Second,
-    Unit::Millisecond,
-    Unit::Microsecond,
-    Unit::Nanosecond,
-];
-
-const MODES: [RoundMode; 9] = [
-    RoundMode::Ceil,
-    RoundMode::Floor,
-    RoundMode::Expand,
-    RoundMode::Trunc,
-    RoundMode::HalfCeil,
-    RoundMode::HalfFloor,
-    RoundMode::HalfExpand,
-    RoundMode::HalfTrunc,
-    RoundMode::HalfEven,
-];
-
-const DISAMBIGUATIONS: [Disambiguation; 3] = [Disambiguation::Compatible, Disambiguation::Earlier, Disambiguation::Later];
-
 fn unit(vm: &Vm, v: Value) -> Result<Unit, Ctl> {
-    UNITS.get(enum_tag_index(vm, v)).copied().ok_or_else(|| Ctl::internal("expected a time.Unit"))
+    Ok(vm.enum_value::<enums::Unit>(v)?.into())
 }
 
-fn mode(vm: &Vm, v: Value) -> Result<RoundMode, Ctl> {
-    MODES.get(enum_tag_index(vm, v)).copied().ok_or_else(|| Ctl::internal("expected a time.RoundingMode"))
+fn rounding_mode(vm: &Vm, v: Value) -> Result<RoundMode, Ctl> {
+    Ok(vm.enum_value::<enums::RoundingMode>(v)?.into())
 }
 
 fn disambiguation(vm: &Vm, v: Value) -> Result<Disambiguation, Ctl> {
-    DISAMBIGUATIONS.get(enum_tag_index(vm, v)).copied().ok_or_else(|| Ctl::internal("expected a time.Disambiguation"))
+    Ok(vm.enum_value::<enums::Disambiguation>(v)?.into())
 }
 
 fn rounding_args(vm: &Vm, a: &[Value], i: usize) -> Result<(Unit, i64, RoundMode), Ctl> {
-    Ok((unit(vm, a[i])?, parse_increment(a[i + 1])?, mode(vm, a[i + 2])?))
+    Ok((unit(vm, a[i])?, parse_increment(a[i + 1])?, rounding_mode(vm, a[i + 2])?))
 }
 
 fn parse_increment(v: Value) -> Result<i64, Ctl> {
@@ -728,6 +819,9 @@ const TIME_TYPES: &[&str] = &["PlainTime", "PlainDateTime", "ZonedDateTime"];
 
 pub fn register(r: &mut Registry) {
     r.source("time", ModKind::Std, include_str!("time.sand"));
+    r.add_enum_type::<enums::Unit>();
+    r.add_enum_type::<enums::RoundingMode>();
+    r.add_enum_type::<enums::Disambiguation>();
     r.add_value_type::<Timestamp>();
     r.add_value_type::<ZonedDateTime>();
     r.add_value_type::<DateTime>();
@@ -1201,7 +1295,7 @@ fn register_span(r: &mut Registry) {
         alloc_or_fail(vm, sum.and_then(Span::new))
     });
     r.add_builtin("time.Span.round", |vm, a| {
-        let (smallest, increment, mode) = (unit(vm, a[1])?, parse_increment(a[3])?, mode(vm, a[4])?);
+        let (smallest, increment, mode) = (unit(vm, a[1])?, parse_increment(a[3])?, rounding_mode(vm, a[4])?);
         let largest = vm.as_option(a[2]).map(|u| unit(vm, u)).transpose()?;
         let (s, rel) = (span(vm, a[0])?, opt_zoned(vm, a[5])?);
         require_relative_to(&[s], largest.or(Some(smallest)), &rel)?;

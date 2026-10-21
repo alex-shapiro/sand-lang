@@ -600,6 +600,17 @@ pub struct ValueTypeInfo {
     pub ord: bool,
     pub parse: crate::vm::value::ParseValue,
     pub type_id: std::any::TypeId,
+    pub rust_name: &'static str,
+}
+
+/// Metadata for a registered [`crate::native::EnumType`].
+#[derive(Clone, Debug)]
+pub struct EnumTypeInfo {
+    pub type_id: std::any::TypeId,
+    pub name: &'static str,
+    pub doc: &'static str,
+    /// `(name, doc)` for each variant in declaration order.
+    pub variants: Arc<[(&'static str, &'static str)]>,
 }
 
 #[derive(Clone, Debug)]

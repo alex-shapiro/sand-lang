@@ -14,6 +14,9 @@ pub use web_time::{Instant, SystemTime, UNIX_EPOCH};
 pub type ClockFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 /// Clocks and timers for engine execution.
+///
+/// Drives wall time, monotonic time, `MemFs` modification timestamps, UUIDv7
+/// timestamps, sleep timers, execution deadlines, and network timeouts.
 pub trait Clock: Send + Sync {
     /// Returns the current system time.
     fn wall(&self) -> SystemTime;

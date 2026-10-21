@@ -4,12 +4,13 @@ use crate::check::ModKind;
 use crate::engine::Registry;
 use crate::vm::display::escape_str_debug;
 use crate::vm::value::{Obj, Value};
-use crate::vm::{NResult, Vm, fail};
+use crate::vm::{NResult, Vm};
 use std::borrow::Cow;
 use std::fmt;
 
-/// Severity level of a [`LogRecord`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// Severity level of a log record, ordered from lowest to highest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, crate::SandEnum)]
+#[sand(module = "log", name = "Level")]
 pub enum LogLevel {
     Debug,
     Info,
@@ -18,8 +19,6 @@ pub enum LogLevel {
 }
 
 impl LogLevel {
-    const ALL: [LogLevel; 4] = [LogLevel::Debug, LogLevel::Info, LogLevel::Warn, LogLevel::Error];
-
     /// Returns the uppercase level name (such as `"INFO"`).
     pub fn name(self) -> &'static str {
         match self {
@@ -111,19 +110,13 @@ pub fn register(r: &mut Registry) {
     r.add_builtin("log.info", |vm, a| emit_record(vm, LogLevel::Info, a));
     r.add_builtin("log.warn", |vm, a| emit_record(vm, LogLevel::Warn, a));
     r.add_builtin("log.error", |vm, a| emit_record(vm, LogLevel::Error, a));
+    r.add_enum_type::<LogLevel>();
     r.add_builtin("log.set_level", |vm, a| {
-        let name = vm.str(a[0]);
-        if name.eq_ignore_ascii_case("off") {
-            vm.host.log_level = None;
-            return Ok(Value::Unit);
-        }
-        let Some(&level) = LogLevel::ALL.iter().find(|l| l.name().eq_ignore_ascii_case(name)) else {
-            return fail(
-                "invalid",
-                format!("unknown log level {:?} (expected debug, info, warn, error or off)", super::truncate(name, 64)),
-            );
-        };
-        vm.host.log_level = Some(level);
+        vm.host.log_level = Some(vm.enum_value(a[0])?);
+        Ok(Value::Unit)
+    });
+    r.add_builtin("log.disable", |vm, _| {
+        vm.host.log_level = None;
         Ok(Value::Unit)
     });
 }

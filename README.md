@@ -5,7 +5,7 @@
 
 Sand is a sandboxed, statically-typed bytecode interpreter written in Rust. Its goal is to be an ergonomic runtime for safely writing and running untrusted code.
 
-```
+```sand
 import http
 import regex
 
@@ -42,7 +42,7 @@ for p in task.all(pages) {
 
 Install the `sand` command line tool:
 
-```
+```sh
 cargo install --path cli
 ```
 

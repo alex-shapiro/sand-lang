@@ -295,6 +295,7 @@ impl ProgramMark {
         p.consts.truncate(self.consts);
         p.types.truncate(self.types);
         p.variants.truncate(self.variants);
+        p.enum_types.retain(|_, &mut first| first < self.variants as u32);
         p.templates.truncate(self.templates);
         p.switches.truncate(self.switches);
         p.tests.truncate(self.tests);
@@ -431,6 +432,7 @@ impl<'a> Compiler<'a> {
             error_def: wk.error,
             json: None,
         };
+        self.prog.enum_types.extend(cp.enum_bindings.iter().copied());
         let (json, json_mod) = (cp.syms.get("Json"), cp.syms.get("json"));
         if let Some(jd) = cp.types.iter().position(|t| Some(t.name) == json && Some(t.module_name) == json_mod) {
             let jd = jd as u32;
@@ -4390,5 +4392,18 @@ mod tests {
         let (body, pre) = first_loop(&prog, "h");
         assert_eq!(body.iter().filter(|op| matches!(op, Op::LoadGlobal { .. })).count(), 1, "{body:#?}");
         assert_eq!(global_loads(pre), 0, "{pre:#?}");
+    }
+
+    #[test]
+    fn rollback_removes_enum_bindings_from_reverted_compile() {
+        let mut prog = (*compile("import log\nlog.info(\"x\")")).clone();
+        let level = std::any::TypeId::of::<crate::LogLevel>();
+        assert!(prog.enum_types.contains_key(&level));
+        let mark = super::ProgramMark::of(&prog);
+        let first_new = prog.variants.len() as u32;
+        prog.enum_types.insert(std::any::TypeId::of::<u8>(), first_new);
+        mark.rollback(&mut prog);
+        assert!(prog.enum_types.contains_key(&level));
+        assert!(!prog.enum_types.contains_key(&std::any::TypeId::of::<u8>()));
     }
 }

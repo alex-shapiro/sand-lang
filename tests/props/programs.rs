@@ -5,7 +5,7 @@
 //! variable references. `Resolver` maps those indices to in-scope variables so
 //! that every skeleton produces a valid program.
 
-use super::{BOUNDARY, Mode, Run, config, int_lit, list_str, run_modes};
+use super::{BOUNDARY, Mode, Run, int_lit, list_str, run_modes};
 use proptest::prelude::*;
 use std::collections::HashMap;
 
@@ -1977,8 +1977,6 @@ fn matches(got: &Run, want: &Run) -> bool {
 }
 
 proptest! {
-    #![proptest_config(config(64))]
-
     #[test]
     fn generated_programs_match_the_model(p in program()) {
         let p = Resolver::program(&p);

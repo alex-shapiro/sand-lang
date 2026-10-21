@@ -42,6 +42,8 @@ Failed runs return a `sandlang::Error`:
 `Config::new()` denies all host capabilities except `stdout`, `stderr`, and imports within the module root. Use builder methods on `Config` to configure policies, limits, virtual files, and streams:
 
 ```rust
+# #[tokio::main(flavor = "current_thread")]
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
 use sandlang::{Config, Engine, Limits, MemFs, MemorySink, Policy, RulePolicy};
 use std::time::Duration;
 
@@ -71,18 +73,21 @@ let mut engine = Engine::new(config);
 engine.run_source("main.sand", script).await?;
 println!("{}", out.contents());
 let report = files.read("/out/report.txt")?;
+# Ok(())
+# }
 ```
 
 - **Policy.** `RulePolicy` provides builder methods for each policy rule (`allow_read`, `allow_write`, `allow_net`, `allow_http`, `allow_env`, `deny_read`, `deny_net`, `fallback`, and others). `Policy::allow_all()` grants all capabilities and should be used only for trusted scripts.
 - **Limits.** `Limits` configures every resource bound described in [Sandbox and policies](/guide/sandbox/).
 - **Virtual file system.** `Config::memory_fs` replaces host disk access with an in-memory `MemFs`. Clones of a `MemFs` share the same underlying storage so the host can populate input files before a run and read output files afterward.
-- **Streams.** `Config::stdout` and `Config::stderr` redirect script output to a `MemorySink` or custom sink. `Config::stdin_bytes` supplies fixed input bytes (which still require the `stdin` capability).
+- **Streams.** `Config::stdout` and `Config::stderr` redirect script output to a `MemorySink` or custom sink. `Config::stdin_bytes` supplies fixed input bytes.
 - **Logging.** `Config::log_sink` routes `log` records to a host `LogSink` as a `LogRecord` containing the level, message, fields, and caller location. `LogSink::enabled` filters levels before record construction, and `Config::log_level` sets the initial script log level. Emitted records count against the output limit.
 - **Environment.** `Config::args` and `Config::env` set the command-line arguments and environment map exposed to the script. If `Config::env` is not set, `env.get` reads the host process environment subject to the policy.
 
 To load a `.policy` file from disk, parse it with `sandlang::policy::PolicyFile`:
 
-```rust
+```rust no_run
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
 # use sandlang::Config;
 use sandlang::policy::PolicyFile;
 use std::path::Path;
@@ -90,6 +95,8 @@ use std::path::Path;
 let text = std::fs::read_to_string("app.policy")?;
 let file = PolicyFile::parse(&text, Path::new("."), None).expect("a valid policy file");
 let config = Config::new().policy(file.policy()).limits(file.limits.clone());
+# Ok(())
+# }
 ```
 
 The second argument is the base directory for `./` paths, and the third argument is the optional home directory for `~/` paths.
@@ -137,14 +144,40 @@ Sand infers the Sand function signature from the Rust parameter and return types
 | `Result<T, E>`                              | `Result<T, Error>`           |
 | `HashMap<String, T>`, `BTreeMap<String, T>` | `[str: T]`                   |
 | tuples of up to 4 elements                  | tuples                       |
+| Rust enum with `#[derive(SandEnum)]`        | matching Sand `enum`         |
 
 Returning `Err(HostError::new(kind, message))` preserves `kind` on the Sand `Error`; any other Rust error type converts to an `Error` with kind `"error"` and its `Display` message.
+
+Derive `SandEnum` on a unit-only Rust enum and register it with `NativeModule::enum_type` to pass enum values between Rust and Sand:
+
+```rust
+use sandlang::{NativeModule, SandEnum};
+
+/// A two-dimensional shape.
+#[derive(Clone, Copy, SandEnum)]
+#[sand(module = "geo")]
+enum Shape {
+    Circle,
+    Square,
+}
+
+let mut geo = NativeModule::new("geo");
+geo.enum_type::<Shape>();
+geo.function("sides", |s: Shape| match s {
+    Shape::Circle => 0,
+    Shape::Square => 4,
+});
+```
+
+`NativeModule::enum_type` generates the `pub enum Shape` declaration in `geo` from the Rust variants and doc comments, so scripts can call `geo.sides(geo.Shape.Square)`. Do not redeclare a registered enum in `NativeModule::source`. Use `#[sand(name = "Kind")]` to expose the enum under a different Sand name.
 
 `NativeModule::async_function` registers an async Rust function; while its future is pending, only the calling Sand task suspends.
 
 `NativeModule::guarded_function` checks a capability before invoking the function. The guard closure constructs a `Capability` from the call arguments, and the Sand signature wraps the return type in `Result<T, Error>`, returning an `Err` with kind `"permission_denied"` if the policy denies the request:
 
 ```rust
+# #[tokio::main(flavor = "current_thread")]
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
 use sandlang::{Capability, Config, Engine, NativeModule, Policy, RulePolicy};
 
 let mut door = NativeModule::new("door");
@@ -156,6 +189,8 @@ door.guarded_function(
 let policy = Policy::rules(RulePolicy::new().allow_custom("door", Some("front")));
 let mut engine = Engine::new(Config::new().module(door).policy(policy));
 engine.run_source("main.sand", "import door\nprint(door.open(\"front\"))\nprint(door.open(\"back\"))").await?;
+# Ok(())
+# }
 ```
 
 The script prints:
@@ -165,18 +200,22 @@ Ok("opened front")
 Err(Error { kind: "permission_denied", message: "permission denied: door back" })
 ```
 
-`NativeModule::source` attaches Sand source declarations (such as structs, enums, and Sand wrapper functions) to the same module.
+`NativeModule::source` adds Sand declarations to the module. A `native fn` declaration in the module source overrides the derived signature for a registered function of the same name, letting you specify parameter names and default values. Parameter and return types must match the derived signature.
 
 ## Interactive sessions
 
 `Engine::session` creates a stateful `Session` that evaluates inputs incrementally, preserving bindings across calls:
 
 ```rust
+# #[tokio::main(flavor = "current_thread")]
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
 # use sandlang::{Config, Engine};
 # let config = Config::new();
 let mut session = Engine::new(config).session();
 session.eval("var hits = 0\nfn hit() -> int {\n    hits += 1\n    hits\n}").await?;
 assert_eq!(session.eval("hit() + hit()").await?, Some("3".to_string()));
+# Ok(())
+# }
 ```
 
 `Session::eval` returns the formatted value of a trailing expression, or `None` for statements and declarations. `Session::type_of(expr)` returns the static type of `expr` without executing it, and `Session::reset()` clears all session state.
@@ -186,6 +225,8 @@ assert_eq!(session.eval("hit() + hit()").await?, Some("3".to_string()));
 `Engine::interrupt_handle` returns a thread-safe `InterruptHandle` that cancels an in-progress compilation, VM execution, or I/O wait from another thread:
 
 ```rust
+# #[tokio::main(flavor = "current_thread")]
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
 use sandlang::{Config, Engine, Error};
 use std::time::Duration;
 
@@ -197,6 +238,8 @@ std::thread::spawn(move || {
 });
 let result = engine.run_source("main.sand", "while true {}").await;
 assert!(matches!(result, Err(Error::Interrupted)));
+# Ok(())
+# }
 ```
 
 To cancel an individual `Session::eval` call, use `session.interrupt_handle()`.

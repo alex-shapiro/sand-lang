@@ -3,7 +3,7 @@
 //! Every instruction is 8 bytes. Registers are frame-relative `u16` slots.
 //! Jump offsets are relative to the instruction *after* the jump.
 
-use super::value::TypeDesc;
+use super::value::{FxHashMap, TypeDesc};
 use crate::hir::FormatSpec;
 use std::sync::Arc;
 
@@ -1265,6 +1265,9 @@ pub struct Program {
     pub global_names: Vec<String>,
     pub types: Vec<StructRt>,
     pub variants: Vec<VariantRt>,
+    /// Maps each registered [`EnumType`](crate::EnumType) `TypeId` to the
+    /// runtime ID of its first variant. Subsequent variants have consecutive IDs.
+    pub enum_types: FxHashMap<std::any::TypeId, u32>,
     pub ids: RtIds,
     pub entry: u32,
     pub tests: Vec<(String, u32)>,

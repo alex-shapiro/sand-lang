@@ -1,4 +1,4 @@
-use super::{Expect, check, check_prints, config, int, int_lit, list_str, opt_str, str_lit};
+use super::{Expect, check, check_prints, int, int_lit, list_str, opt_str, str_lit};
 use proptest::prelude::*;
 use std::collections::BTreeMap;
 
@@ -43,8 +43,6 @@ fn checked_sum(xs: &[i64]) -> Expect {
 }
 
 proptest! {
-    #![proptest_config(config(48))]
-
     #[test]
     fn integer_arithmetic_matches_reference(a in int(), b in int()) {
         let ok = |v: Option<i64>| v.map(|v| v.to_string()).ok_or(OVERFLOW);

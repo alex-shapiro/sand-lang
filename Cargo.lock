@@ -1129,6 +1129,7 @@ dependencies = [
  "rustix",
  "rustls",
  "same-file",
+ "sandlang-macros",
  "sha1",
  "sha2",
  "socket2",
@@ -1140,6 +1141,15 @@ dependencies = [
  "web-time",
  "webpki-roots",
  "winx",
+]
+
+[[package]]
+name = "sandlang-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

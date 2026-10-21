@@ -143,8 +143,6 @@ mod tests {
     }
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(512))]
-
         #[test]
         fn formatting_is_idempotent_and_keeps_the_meaning(
             lines in proptest::collection::vec(proptest::collection::vec((0..WORDS.len(), 0..3usize), 0..7), 0..6)

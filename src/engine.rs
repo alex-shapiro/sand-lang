@@ -226,7 +226,7 @@ pub struct Config {
     pub(crate) stdout: SharedSink,
     pub(crate) stderr: SharedSink,
     log_sink: Option<Arc<dyn crate::LogSink>>,
-    log_level: crate::LogLevel,
+    log_level: Option<crate::LogLevel>,
     stdin: StdinConfig,
     pub(crate) cwd: Option<PathBuf>,
     pub(crate) module_root: Option<PathBuf>,
@@ -277,7 +277,7 @@ impl Config {
             stdout: Arc::new(crate::stdio::StdoutSink::default()),
             stderr: Arc::new(crate::stdio::StderrSink::default()),
             log_sink: None,
-            log_level: crate::LogLevel::Info,
+            log_level: Some(crate::LogLevel::Info),
             stdin: StdinConfig::None,
             cwd: None,
             module_root: None,
@@ -358,9 +358,10 @@ impl Config {
         self.log_sink = Some(Arc::new(sink));
         self
     }
-    /// Sets the initial script log level (default [`LogLevel::Info`](crate::LogLevel::Info)).
-    pub fn log_level(mut self, level: crate::LogLevel) -> Self {
-        self.log_level = level;
+    /// Sets the initial minimum script log level (default [`LogLevel::Info`](crate::LogLevel::Info)),
+    /// or disables script logging if `level` is `None`.
+    pub fn log_level(mut self, level: impl Into<Option<crate::LogLevel>>) -> Self {
+        self.log_level = level.into();
         self
     }
     pub fn stdin_bytes(mut self, data: Vec<u8>) -> Self {
@@ -563,7 +564,7 @@ impl Registry {
             partial: Mutex::default(),
         };
         for m in &config.modules {
-            m.register_value_types(&mut r);
+            m.register_types(&mut r);
         }
         for m in &config.modules {
             m.register(&mut r);
@@ -578,20 +579,43 @@ impl Registry {
     pub fn add(&mut self, name: impl Into<Cow<'static, str>>, imp: crate::vm::NativeImpl) {
         let name = name.into();
         let id = self.natives.len() as u32;
-        Arc::make_mut(&mut self.natives).push(NativeEntry { name: name.clone(), imp });
-        Arc::make_mut(&mut self.by_name).fns.insert(name, id);
+        let old = Arc::make_mut(&mut self.by_name).fns.insert(name.clone(), id);
+        assert!(old.is_none(), "native `{name}` registered twice");
+        Arc::make_mut(&mut self.natives).push(NativeEntry { name, imp });
+    }
+
+    pub fn add_signature(&mut self, name: impl Into<Cow<'static, str>>, sig: String) {
+        Arc::make_mut(&mut self.by_name).signatures.insert(name.into(), sig.into());
     }
 
     pub fn add_value_type<T: crate::vm::value::ValueType>(&mut self) {
-        let module = T::MODULE;
-        crate::vm::value::check_value_type_name::<T>();
+        let qual = self.check_unique_type_name(T::MODULE, T::NAME);
         let info = crate::types::ValueTypeInfo {
             ord: T::ORDER.is_some(),
             parse: crate::vm::value::parse_value::<T>,
             type_id: std::any::TypeId::of::<T>(),
+            rust_name: std::any::type_name::<T>(),
         };
-        let old = Arc::make_mut(&mut self.by_name).values.insert(format!("{module}.{}", T::NAME).into(), info);
-        assert!(old.is_none(), "value type {module}.{} registered twice", T::NAME);
+        Arc::make_mut(&mut self.by_name).values.insert(qual.into(), info);
+    }
+
+    pub fn add_enum_type<T: crate::native::EnumType>(&mut self) {
+        let qual = self.check_unique_type_name(T::MODULE, T::NAME);
+        let info = crate::types::EnumTypeInfo {
+            type_id: std::any::TypeId::of::<T>(),
+            name: T::NAME,
+            doc: T::DOC,
+            variants: T::VARIANTS.iter().map(|v| (v.name, v.doc)).collect(),
+        };
+        Arc::make_mut(&mut self.by_name).enums.insert(qual.into(), info);
+    }
+
+    fn check_unique_type_name(&self, module: &str, name: &str) -> String {
+        crate::vm::value::check_type_name(name);
+        let qual = format!("{module}.{name}");
+        let ids = &self.by_name;
+        assert!(!ids.values.contains_key(qual.as_str()) && !ids.enums.contains_key(qual.as_str()), "type {qual} registered twice");
+        qual
     }
 
     pub fn add_builtin(&mut self, name: impl Into<Cow<'static, str>>, f: crate::vm::NativeFn) {
@@ -607,7 +631,14 @@ impl Registry {
     }
 
     pub fn source(&mut self, module: impl Into<Cow<'static, str>>, kind: ModKind, src: impl Into<Cow<'static, str>>) {
-        self.sources.insert(module.into(), (kind, src.into()));
+        let module = module.into();
+        if kind != ModKind::Prelude {
+            let prefix = format!("{module}.");
+            let taken = kind == ModKind::Host && self.by_name.fns.keys().any(|n| n.starts_with(&prefix));
+            assert!(!taken, "a host module cannot be named `{module}` because `{module}` is a prelude type");
+            Arc::make_mut(&mut self.by_name).modules.insert(module.clone());
+        }
+        self.sources.insert(module, (kind, src.into()));
     }
 
     /// The registry's modules, checked and compiled (on first use).
@@ -1015,7 +1046,7 @@ impl Engine {
             args: c.args.clone(),
             env: c.env.clone(),
             rng: Rng::new(c.seed.unwrap_or_else(entropy_seed)),
-            log_level: Some(c.log_level),
+            log_level: c.log_level,
             log_sink: if quiet { Some(Arc::new(crate::stdlib::log::NullLogSink)) } else { c.log_sink.clone() },
             interrupt: self.interrupt.clone(),
             stream_decisions: [None; 2],

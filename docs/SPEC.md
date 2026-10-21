@@ -1171,7 +1171,7 @@ evaluated once.
 ### 10.3 Errors
 
 A run **fails with an error** when the script cannot go on. The run ends (all
-tasks), or in a session (§16.3, §17.6) the input does, with a runtime error:
+tasks), or in a session (§16.6, §17.6) the input does, with a runtime error:
 `<kind>: <message>`, the display form of an `Error` (§5.4), and a stack trace
 of `file:line` entries. Tools report it as `error: <kind>: <message>`, leaving
 out a kind of `error`. A run fails with an error from:
@@ -1197,7 +1197,7 @@ test runner isolates errors per test.
 An **internal error** is a bug: an invariant of the engine broke, or a Rust
 panic was caught in the engine or in a host native. It also ends the run, and
 tools report it as `internal error: <message>`; a session in which one happens
-is reset (§16.3).
+is reset (§16.6).
 
 ### 10.4 Exit
 
@@ -1808,7 +1808,7 @@ writing one not opened for writing, fails with kind `"invalid"`; any
 operation on a closed file with kind `"closed"`.
 
 **Memory file systems.** An engine may give scripts a memory file system
-instead of the host's (§16.1; always without the `os` feature). Paths are
+instead of the host's (§16.4; always without the `os` feature). Paths are
 absolute from its root `/` (the default working directory and module root)
 and normalized lexically. It has no symlinks, hard links or permissions,
 names are case sensitive everywhere, and a write that would exceed its
@@ -1818,7 +1818,7 @@ off the VM thread.
 ### 13.4 `http`
 
 `http` and `net` (§13.10) need operating-system access: without the `os`
-feature (§16.1) they do not exist, and importing them is a compile error
+feature (§16.4) they do not exist, and importing them is a compile error
 saying so.
 
 Headers are lists of `(name, value)` pairs, in order; a header sent several
@@ -1849,7 +1849,7 @@ upload.finish() -> Result<Stream>
 methods: `text() -> Result<str>`, `json() -> Result<json.Json>`, `ok() -> bool`
 (200..=299), `header(name: str) -> str?` (case-insensitive; the first value),
 `header_values(name: str) -> [str]`. HTTP/1.1 over TCP; `https` uses TLS with
-the `tls` feature (as in `sand`). Up to 10 redirects (301, 302, 303, 307, 308)
+the `tls` feature (default). Up to 10 redirects (301, 302, 303, 307, 308)
 are followed. Bodies may be delimited by `Content-Length`, chunked encoding or
 connection close; one larger than `max_http_body` fails with kind `"limit"`.
 Non-2xx statuses are **not** errors. At every hop, `timeout` bounds connecting
@@ -1944,7 +1944,7 @@ without an answer if none of it arrives within 30 seconds, if newer
 connections take its place, or if the run reaches `max_open_resources` or
 `max_memory`.
 
-On the web (§16.2), `http` is a client over the browser's `fetch` with the
+On the web (§16.5), `http` is a client over the browser's `fetch` with the
 same `Response`, `Stream`, `get`, `post`, `request` and `open`, and no
 `upload` or `serve`. `Net(host, port)` is decided for the host as written before
 anything is sent; the browser resolves names, so `NetAddr` is not checked.
@@ -2048,10 +2048,15 @@ nesting depth of 512.
 
 ### 13.8 `log`
 
+```sand
+pub enum Level { Debug, Info, Warn, Error }
+```
+
 `debug`, `info`, `warn`, and `error` emit structured log records with signature
-`(msg: str, fields: [str: str] = [:])`. `set_level(level: str)` sets the minimum
-script log level to `"debug"`, `"info"` (the default unless overridden by the
-host, §16), `"warn"`, `"error"`, or `"off"`.
+`(msg: str, fields: [str: str] = [:])`. `set_level(level: Level)` sets the
+minimum active script log level (default `Level.Info`, unless configured by the
+host; see §16). `disable()` disables script logging until the next `set_level`
+call.
 
 The engine drops records below the active script or host sink level, and counts
 emitted records against `max_output_bytes`. If the host configures a log sink
@@ -2278,7 +2283,7 @@ forms; returns lower-case hyphenated), `is_valid(s: str) -> bool`,
   prefix is then resolved like `realpath` (symlinks followed; `..` in a link
   target is the parent of the link directory). The engine checks the result so
   `..` and symlinks cannot escape an allowed directory. A symlink whose target
-  cannot be resolved is not followed (§13.3). Memory file system paths (§16.1)
+  cannot be resolved is not followed (§13.3). Memory file system paths (§16.4)
   are only normalized lexically.
 
 On the host, a path is resolved by walking recursively from root to subpaths
@@ -2573,7 +2578,7 @@ and lists, display and JSON text, sort buffers) before or while it grows,
 collecting garbage before reporting the limit, so a script cannot make the
 host allocate much beyond `max_memory`.
 
-In a session (§16.3, §17.6), the instruction, CPU time, wall time and
+In a session (§16.6, §17.6), the instruction, CPU time, wall time and
 output limits apply to each input; the memory limit to the session's
 persistent heap. Limit violations are reported to the host as distinct
 error variants and cannot be intercepted by scripts. The host may also
@@ -2674,8 +2679,16 @@ next: P<[T]>? }` cannot be described.
 
 ## 16. Embedding API (Rust)
 
+The `sandlang` crate embeds the Sand compiler and virtual machine in a Rust host
+application. Each `Engine` encapsulates an isolated execution environment
+configured through `Config` with a sandbox `Policy` (§14), resource `Limits`
+(§15), host I/O providers, and optional `NativeModule` definitions. Engines do
+not share mutable state and `Engine` implements `Send`, so a host can run
+multiple engines concurrently across threads or asynchronous tasks (or
+interleaved on a single thread in WebAssembly, §16.5).
+
 ```rust
-use sandlang::{Engine, Config, Limits, Policy, NativeModule, Value};
+use sandlang::{Config, Engine, Limits, NativeModule, Policy};
 
 let mut module = NativeModule::new("geo");
 module.function("dist", |a: f64, b: f64| -> f64 { (a * a + b * b).sqrt() });
@@ -2689,119 +2702,184 @@ let mut engine = Engine::new(config);
 let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 4.0))"#).await?;
 ```
 
-- `Engine: Send`. All script execution happens inside the future returned by
-  `run_*`, on whichever thread polls it. Engines share no mutable state, so any
-  number may run concurrently on different threads or tasks (or, on the web,
-  interleaved on one thread, §16.2).
-- `run_source(name, source)`, `run_file(path)`, `check_source`, `run_tests`,
-  `lint_source`, `lint_file` (lint warnings, §17.2).
-- Captured streams: `Config::stdout(Box<dyn OutputSink>)`, `stderr`,
-  `stdin_bytes`. With `Config::stdin_feed(&StdinFeed)`, scripts read what
-  the host `send`s (`end()` ends one read); `wanted()` is resolved if a script
-  is waiting for input and has nothing else to run.
-- `Config::log_sink(impl LogSink)` routes `log` records to a host sink as
-  `LogRecord { level, message, fields, location }` on the executing thread
-  instead of writing to standard error. `LogSink::enabled(level)` filters
-  records before the engine constructs a `LogRecord`; any
-  `Fn(&LogRecord) + Send + Sync` implements `LogSink` for all levels. `Display`
-  formats `LogRecord` in the default standard error format.
-  `Config::log_level(LogLevel)` sets the initial script log level (default
-  `Info`).
-- `Config::memory_fs(MemFs)` gives scripts a memory file system (§16.1).
-- `Config::library(dir)` sets the directory of library scripts for
-  `import <name>` (§3.2). `Engine::module_names()` returns the registered
-  standard and host module names, which take precedence over library scripts.
-- `Config::clock(Arc<dyn platform::Clock>)` sets the clock and timer provider
-  for the engine. The engine uses this provider for system time, monotonic time,
-  UUIDv7 generation, sleep timers, execution limits, and network timeouts.
-  The engine reports consumed fuel through `Clock::work` and yields execution
-  through `Clock::yield_now`. `MemFs::with_capacity_and_clock` sets file
-  modification timestamps from this clock.
-- `Config::network(Arc<dyn network::Network>)` sets the network provider for
-  host resolution, outgoing TCP streams, and TCP listeners in `net` and `http`.
-  The engine checks the network policy before connecting or listening, and
-  negotiates TLS over the returned stream. `Network::listen` must bind only the
-  requested address; an IPv6 listener must not accept IPv4 connections.
-- `Config::time_zone(sandlang::time::TimeZone)` sets the time zone returned by
-  `time.local_zone()` if the policy allows `TimeZone`. Use `TimeZone::get(name)`
-  to look up a zone by name or offset, or `TimeZone::system()` (feature `os`)
-  to read the operating system's IANA time zone.
-- `Config::tls_root_certificates(Vec<Vec<u8>>)` trusts additional
-  DER-encoded root certificates (e.g. a private CA) besides the bundled web
-  PKI roots; calls accumulate. An invalid one makes TLS connections fail
-  with kind `"io"`. Without the `tls` feature it has no effect.
-- Policies (§14): `Policy::check(&Capability)`, `Policy::check_entry`,
-  `Policy::denies_under(path)`;
-  `RulePolicy::{allow_read, allow_http, deny_net, deny_private_networks, ...}`;
-  `sandlang::policy::{PolicyFile, format_policy, lint_policy, rule_for}`
-  for policy files; `sandlang::policy::{is_private_address,
-normalize_path, normalize_entry_path}` for hosts writing their own
-  policies or natives.
-- `NativeModule::function` accepts closures whose argument and return types
-  implement `FromValue`/`IntoValue`: `i64`, `f64`, `bool`, `String` and `&str`,
-  `Vec<u8>` and `&[u8]` (as `bytes`), `()`, `Vec<T>` (any element type,
-  e.g. `Vec<Vec<i64>>`, `Vec<(String, i64)>`, `Vec<Option<T>>`), `Option<T>`,
-  `Result<T, E>` (as `Result<T, Error>`: a `HostError { kind, message }`
-  keeps its kind, any other `E: Display` has kind `"error"`),
-  `HashMap<String, T>` / `BTreeMap<String, T>` (as `[str: T]`), and tuples up
-  to 4. `&str` and `&[u8]` arguments borrow the script's values for the call
-  (async functions take owned arguments). Conversions are charged to the
-  fuel meter and checked against `max_memory`. The Sand signature is
-  derived from the Rust types, with parameters named `arg1`, `arg2`, ...
-  unless `.params(&["x", "y"])` follows. `guarded_function(name, guard, f)`
-  checks the capability `guard` computes from (references to) the arguments
-  before calling `f`, and returns `Result<R, Error>` (`permission_denied`
-  on a denial). `NativeModule::source` may add Sand declarations (types,
-  pure-Sand helpers, `native fn` with explicit signatures, which take
-  precedence over derived ones and are required for
-  `NativeModule::raw_function`). `NativeModule::value_type::<T>()` registers
-  `T: ValueType` as the module's value type `T::NAME` (§5.4) and adds `pub
-  native type NAME` if the module source does not declare it. `T` must
-  implement `Clone + Eq + Hash + Display`, equal values must produce identical
-  `Display` output, and `T::parse` must parse that output back into an equal
-  value. Set `ValueType::ORDER` to support `Ord` and `ValueType::PACKING` to
-  pack values into 16 bytes on the heap. Host functions can accept and return
-  any registered value type, including the `time` module types
-  (`sandlang::jiff::Timestamp`, `sandlang::jiff::civil::{Date, Time,
-  DateTime}`, and `sandlang::time::*`). Using a standard module name
-  (`NativeModule::new`), registering a module twice (`Config::module`), or
-  registering a function twice panics.
-- `Outcome { exit_code: i32 }`; errors are `Error::Compile(diagnostics)`,
-  `Error::Runtime { message, trace }` (the run failed with an error whose
-  display form is `message`, §10.3), `Error::Internal { message, trace }`,
-  `Error::Limit(kind)`, `Error::Interrupted`.
-- An internal error (§10.3) is `Error::Internal`. A Rust panic inside the
-  engine (a bug in a library or host native, an I/O operation or a prompter)
-  does not unwind into the host: it is an internal error. This requires
-  `panic = "unwind"` (the default). A session in which an internal error
-  happens is reset (§16.3).
+### 16.1 Execution and errors
 
-### 16.1 Operating-system access and file systems
+`Engine::run_source` and `Engine::run_file` compile and execute a script inside
+the returned future on the thread that polls it. `Engine::run_tests` compiles a
+module and executes its `test` blocks (§4.8). For static analysis without
+execution, `check_source`, `check_file`, `lint_source`, and `lint_file` (§17.2)
+resolve imported modules from the engine's file system under its policy, except
+that any import requiring an interactive permission prompt is denied
+immediately.
 
-The crate's features choose what an engine can reach at all:
+A completed run returns `Outcome { exit_code: i32 }`, and a failed operation
+returns an `Error`:
 
-- `os` (default): the host's file system, network sockets (`net`, `http`),
-  and the process's standard input (`Config::inherit_stdin`) and environment
-  (when `Config::env` gives none). Without it the engine cannot reach the
-  operating system, whatever the policy says: `net` and `http` do not
-  exist, the environment is empty unless given, standard input is what the
-  host gives (`Config::stdin_bytes`), scripts see a memory file system, and
-  the engine builds for `wasm32-unknown-unknown` (§16.2).
-- `tls` (implies `os`): TLS for `https` and `net.connect_tls` (rustls with
-  ring). The `sand` command (the `sand-cli` package) enables it.
+| Variant                              | Meaning                                                              |
+| ------------------------------------ | -------------------------------------------------------------------- |
+| `Error::Compile(diagnostics)`        | Syntax or static type errors occurred during compilation (§18).      |
+| `Error::Runtime { message, trace }`  | Execution failed with an uncaught runtime error (§10.3).             |
+| `Error::Limit(kind)`                 | Execution or compilation exceeded a configured resource limit (§15). |
+| `Error::Interrupted`                 | The host cancelled execution through an `InterruptHandle`.           |
+| `Error::Io(message)`                 | The entry script file could not be read.                             |
+| `Error::Internal { message, trace }` | An internal invariant failed or a host callback panicked (§10.3).    |
 
-`Config::memory_fs(fs)` makes a `MemFs`, an in-memory file system, the file
-system of the engine's scripts (the `fs` module, script imports and the
-main file of `run_file`) in any build; without `os`, an engine has an empty
-one unless given one. Clones of a `MemFs` share their files, so the host
-can prepare files and read back what scripts wrote, and engines can share
-one. `MemFs::with_capacity(bytes)` limits its contents (default 64 MiB;
-each entry counts 64 bytes more than its name and contents); `write`,
-`read`, `create_dir_all`, `remove`, `clear` and `files()` are for the host.
-The working directory and module root are then memory paths (default `/`).
-The policy decides on these paths as written: a `RulePolicy` keeps each
-path rule both canonicalized on the host and normalized lexically, and
-compares memory paths with the latter (exactly, also on Windows).
+If `sandlang` is compiled with `panic = "unwind"` (the default), the engine
+catches Rust panics inside library native functions, host callbacks, I/O
+operations, and permission prompters and converts them into `Error::Internal`
+so that panics do not unwind into the host.
+
+### 16.2 Host environment and providers
+
+`Config` allows the host to virtualize every external input, output, and source
+of nondeterminism—streams, logging, process metadata, randomness, time, file
+systems (§16.4), and networking—so that script execution can be made completely
+deterministic. By default, `Config::new()` denies all capabilities except
+`Stdout`, `Stderr`, and imports within the module root, writes output to the
+process's standard streams, and provides an empty standard input.
+
+The host can capture standard output and standard error or feed standard input
+into a running script. `Config::stdout` and `Config::stderr` redirect script
+output to an `OutputSink`, while `Config::stdin_bytes`, `Config::inherit_stdin`
+(feature `os`), and `Config::stdin_feed` configure standard input. With
+`StdinFeed`, scripts read chunks pushed via `StdinFeed::send` (`StdinFeed::end`
+terminates a single read), and `StdinFeed::wanted` is resolved if a script is
+waiting for input and all other tasks are blocked.
+
+The host can intercept and filter structured log records (§13.8) instead of
+writing them to standard error. `Config::log_sink` routes records to a
+`LogSink` as `LogRecord { level, message, fields, location }` on the polling
+thread, using `LogSink::enabled` to filter records by level before allocation.
+`Config::log_level` sets the initial minimum script log level (default
+`LogLevel::Info`), or disables script logging if set to `None`.
+
+Command-line arguments, environment variables, and random number generation can
+be fixed per engine. `Config::args` and `Config::env` replace the process
+arguments and environment variables exposed by `env` (§13.6), and
+`Config::seed` seeds the pseudorandom number generator used by `random`
+(§13.11) and `uuid` (§13.18).
+
+Custom clock and time zone providers decouple script execution from the system
+clock. `Config::clock` supplies a `platform::Clock` that drives wall time,
+monotonic time, `MemFs` timestamps, UUIDv7 timestamps, sleep timers, execution
+deadlines, and network timeouts, while receiving fuel consumption reports via
+`Clock::work` and scheduler yields via `Clock::yield_now`. `Config::time_zone`
+sets the `time::TimeZone` returned by `time.local_zone()` if the policy allows
+`Capability::TimeZone`.
+
+A custom `network::Network` provider can intercept all DNS resolution, outgoing
+TCP streams, and TCP listeners in `net` and `http`. If `Config::network` is
+set, the engine still checks the network policy before connecting or listening
+and negotiates TLS over the returned stream; `Network::listen` must bind only
+the requested address and must not accept IPv4 connections on an IPv6 listener.
+`Config::tls_root_certificates` adds DER-encoded root certificates to the
+bundled Web PKI roots (an invalid certificate causes TLS handshakes to fail
+with error kind `"io"`).
+
+Module search paths and capability policies are configured on `Config` before
+constructing an `Engine`. `Config::module_root`, `Config::cwd`, and
+`Config::library` set the directories used for relative file paths and `import`
+resolution (§3.2), where registered standard and host modules
+(`Engine::module_names`) take precedence over library scripts. `Config::policy`
+and `Config::prompter` set the active `Policy` and interactive `Prompter`
+(§14).
+
+### 16.3 Native modules
+
+A `NativeModule` exposes host Rust functions and types to Sand scripts as an
+importable, statically typed module. Registered via `Config::module`, a native
+module integrates into both the compiler and the virtual machine: the compiler
+derives Sand signatures from the registered Rust types for type-checking, and
+the VM converts arguments and return values across the host boundary while
+enforcing fuel and memory limits. Module, function, and type names must be
+unique and cannot shadow a standard library module or prelude type.
+
+Host functions can execute synchronously or asynchronously, optionally behind
+a capability check. `NativeModule::function` registers a synchronous closure.
+`NativeModule::async_function` registers a closure returning a `Future` that
+suspends only the calling Sand task until completion.
+`NativeModule::guarded_function(name, guard, f)` integrates a synchronous
+function with the engine's security policy (§14): before calling `f`, the engine
+passes references to the converted arguments to `guard` and checks the resulting
+`Capability`, returning a `"permission_denied"` error if denied.
+
+Values and errors cross the host boundary through the `FromValue`, `IntoValue`,
+and `IntoHostError` traits. A synchronous or guarded host function runs without
+re-entering the VM and can borrow `&str` and `&[u8]` slices directly from the VM
+heap for the duration of the call; asynchronous functions require owned argument
+types. Fallible functions return `Result<T, E>` (`E: IntoHostError`).
+`HostError { kind, message }` preserves the `Error` kind.
+
+| Rust type                                   | Sand type                    |
+| ------------------------------------------- | ---------------------------- |
+| `i64`, `f64`, `bool`, `()`                  | `int`, `float`, `bool`, `()` |
+| `String`, `&str`                            | `str`                        |
+| `Vec<u8>`, `&[u8]`                          | `bytes`                      |
+| `Vec<T>` (`T: ListElem`)                    | `[T]`                        |
+| `Option<T>`                                 | `T?`                         |
+| `Result<T, E>` (`E: IntoHostError`)         | `Result<T, Error>`           |
+| `HashMap<String, T>`, `BTreeMap<String, T>` | `[str: T]`                   |
+| 2-, 3-, and 4-element tuples                | tuples                       |
+| `T: ValueType`                              | value type `T::NAME`         |
+| `T: EnumType` (`#[derive(SandEnum)]`)       | enum `T::NAME`               |
+
+A native module's public interface combines automatically derived signatures
+with optional Sand source code. By default, the engine generates a
+`pub native fn` declaration for each typed Rust function using parameter names
+`arg1`, `arg2`, and so on (or custom names set with `NativeModule::params`).
+Adding Sand source via `NativeModule::source` allows a module to define Sand
+structs, enums, and helper functions alongside its Rust functions, or to write
+explicit `native fn` declarations that supply default argument values or
+signatures for untyped `NativeModule::raw_function` callbacks. At compile time,
+the engine verifies that every registered function has a matching declaration
+and that public signatures do not reference private module types.
+
+`ValueType` (§5.4) exposes an immutable Rust type to Sand as an opaque value
+type with value semantics. Registering `T: ValueType` with
+`NativeModule::value_type::<T>()` declares `pub native type NAME` in the module
+unless the module source already declares it. A value type implements
+`Clone + Eq + Hash + Display` and a `T::parse` constructor so that the compiler
+can validate type-annotated string literals and guarantee round-trip formatting.
+The standard library's time types implement `ValueType` and can be used directly
+in host function signatures.
+
+`EnumType` exposes unit enums to Sand as transparent `pub enum` types.
+An enum type is derived with `#[derive(sandlang::SandEnum)]`. An enum
+has a require`#[sand(module = "...")]` attribute and an optional
+`#[sand(name = "...")]` attribute. `NativeModule::enum_type::<T>()` generates
+the Sand `pub enum` declaration directly from the Rust variants and doc comments.
+Module source must not redeclare a natively-declared type. Standard library enums
+implement `EnumType` for use in host functions.
+
+### 16.4 Operating-system access and file systems
+
+Two Cargo features control whether an engine can access the host operating
+system:
+
+- `os` (enabled by default): enables access to the host file system, network
+  sockets (`net` and `http`), process standard input (`Config::inherit_stdin`),
+  and process environment variables (if `Config::env` is not set). If `sandlang`
+  is built without `os`, the engine cannot access the operating system
+  regardless of the configured policy: `net` and `http` are unavailable, the
+  environment is empty unless set via `Config::env`, standard input comes only
+  from `Config::stdin_bytes` or `Config::stdin_feed`, scripts use an in-memory
+  file system, and the crate compiles for `wasm32-unknown-unknown` (§16.5).
+- `tls` (enabled by default; implies `os`): enables TLS support for `https` and
+  `net.connect_tls` using `rustls` and `ring` (which requires a C compiler for
+  the target). Build with `default-features = false, features = ["os"]` to
+  disable TLS while keeping OS access.
+
+`Config::memory_fs` replaces host disk access with an in-memory `MemFs` for the
+`fs` module, script imports, and `Engine::run_file`. Without the `os` feature,
+each engine uses an empty `MemFs` unless `Config::memory_fs` provides a
+pre-populated instance. Clones of a `MemFs` share the same underlying files, so
+the host can populate input files before a run, inspect output files afterward,
+or share a virtual file system across engines (`write`, `read`,
+`create_dir_all`, `remove`, `clear`, and `files`). `MemFs::with_capacity`
+bounds total storage (default 64 MiB, counting 64 bytes of overhead per entry
+in addition to its name and contents). Working directory and module root paths
+are resolved inside the `MemFs` (default `/`), and `RulePolicy` evaluates `MemFs`
+paths against lexically normalized policy rules on all platforms.
 
 ```rust
 let fs = MemFs::new();
@@ -2812,33 +2890,31 @@ let config = Config::new().memory_fs(fs.clone()).policy(Policy::rules(
 let report = fs.read("/out/report.txt")?;
 ```
 
-`check_source`, `check_file`, `lint_source` and `lint_file` load
-imports like a run (from the engine's file system, under its policy), but
-never prompt: imports the policy would prompt for are denied.
+### 16.5 WebAssembly
 
-### 16.2 The web
+If built without the `os` feature, `sandlang` compiles to
+`wasm32-unknown-unknown` for execution in a JavaScript host via `wasm-bindgen`.
+JavaScript supplies the clock and timers, and the compiler's recursive passes
+run on the WebAssembly linear memory stack (sized for the maximum parser
+nesting depth). The engine executes code synchronously on the calling thread and
+yields to the JavaScript event loop only while waiting for a timer, an
+asynchronous I/O operation, or a permission prompt; hosts should run engines
+inside Web Workers to avoid blocking the UI thread and to run multiple engines
+in parallel.
 
-Built without `os`, the engine runs as WebAssembly in a JavaScript host
-(`wasm32-unknown-unknown` with `wasm-bindgen`). The clock and timers come
-from JavaScript; there are no threads, so the compiler's recursive passes
-run on the module's stack, linked large enough for the deepest nesting the
-parser accepts. A run executes on the calling thread and yields to the
-event loop only while it waits (for a timer, I/O or a prompt); hosts run
-engines in Web Workers to keep pages responsive and run several in
-parallel. The `sandlang-wasm` crate (`wasm/`) is the JavaScript API: an
-`Engine` built from a policy file, files, an environment, arguments,
-standard input and a time zone, with `onOutput` and `onPrompt` callbacks
-(requests the policy does not decide go to `onPrompt`, and are denied
-without it), `run`, `check`, `lint`, sessions (`eval(source, name?)`, and
-`runTasks`/`stopTasks` to run tasks between inputs), `format` and
-`highlight`. The web playground (`site/playground/`) is built on this package.
+The `sandlang-wasm` crate (`wasm/`) exposes this build as a JavaScript `Engine`
+class configured with a policy file, initial virtual files, environment
+variables, arguments, standard input, a time zone, and `onOutput` and
+`onPrompt` callbacks. A prompt without an `onPrompt` callback is denied.
+The library provides `run`, `check`, `lint`, `format`, and `highlight` methods
+for typical execution and static analysis tasks.
 
-### 16.3 Sessions
+### 16.6 Sessions
 
-`Engine::session()` returns a `Session`, which runs inputs one at a time
-with the semantics of `sand repl` (§17.6) and the engine's configuration
-(policy, prompter, limits, streams, host modules, module root and working
-directory):
+`Engine::session()` creates a stateful `Session` (`Send`, with `Send` futures)
+that evaluates inputs incrementally under the engine's configuration and shares
+the engine's remembered `"always"` prompt decisions (§14.3). `Session`
+implements the evaluation semantics of `sand repl` (§17.6):
 
 ```rust
 let mut session = Engine::new(config).session();
@@ -2846,44 +2922,39 @@ session.eval("var hits = 0\nfn hit() -> int { hits += 1\n hits }").await?;   // 
 assert_eq!(session.eval("hit() + hit()").await?, Some("3".to_string()));
 ```
 
-- `eval(source) -> Result<Option<String>, Error>` checks, compiles and runs
-  one input; `Some` holds the debug form of its value. `eval_as(name,
-source)` uses `name` in diagnostics and traces instead of `<input
-N>` (e.g. `main.sand` for a program the session continues). After
-  `exit(code)`, `eval` returns `Ok(None)` and `exit_code()` returns
-  `Some(code)` until the next input; the session remains usable.
-- If an input imports a script module whose source file or transitive script
-  dependencies changed since the previous load, the session reloads that module.
-  Bindings from earlier inputs keep their previously loaded module versions.
-- `type_of(expr) -> Result<String, Error>` checks an expression without
-  running it or changing the session.
-- `run_tests() -> Result<TestReport, Error>` runs the `test` blocks entered so
-  far, against the current state.
-- `reset()` forgets all inputs. `interrupt_handle()` interrupts the input being
-  run (the engine's own handle does not affect sessions).
-- `set_wall_time(limit)` replaces the engine's `max_wall_time` for the
-  session's later inputs (e.g. a per-input timeout chosen by the host).
-- `run_tasks_until(until, on_error) -> Option<T>` runs the tasks earlier
-  inputs left running until the future `until` completes, and returns its
-  output; front ends call it while waiting for input (§17.6). The
-  instruction, CPU time and output limits apply to each call; the wall-time
-  limit does not. Permission prompts wait until `until` completes. If a
-  task fails (an error, a limit, an interruption), all tasks are cancelled and the
-  error goes to `on_error` at once; the call goes on waiting. If a task
-  calls `exit`, it returns `None` at once.
-  `cancel_tasks()` cancels the tasks left running, without running their
-  defers.
-- After an internal error (§10.3) in `eval`, `run_tests`,
-  `type_of` or `run_tasks_until`, the session is reset as by `reset()`: the
-  error's message ends with `" (the session was reset)"`
-  (`sandlang::session::RESET_NOTE`), and `was_reset()` returns true until
-  the next call. "Always" answers given before are kept.
-- `Session::is_complete(source)` tells whether a line-based front end should
-  read more lines before evaluating (§17.6).
-- `Session: Send`; its futures are `Send`. A session shares the "always"
-  answers of its engine (§14.3). Dropping an `eval` future before it
-  completes (e.g. on a host timeout) is like interrupting the input; if it
-  was still loading imports, the input has no effect.
+`Session::eval(source)` or `eval_as(name, source)` type-checks, compiles, and
+executes a single input, returning `Ok(Some(value))` with the debug representation
+of a trailing expression or `Ok(None)` for statements and declarations. If an
+input calls `exit(code)`, `eval` returns `Ok(None)`, `exit_code()` returns `Some(code)`
+until the next input, and the session remains usable. If an input imports a
+script module whose file or transitive script dependencies changed since the
+previous load, the session reloads that module while bindings from earlier
+inputs keep their previously loaded versions. `type_of(expr)` returns the
+static type of an expression without executing it or mutating session state,
+`run_tests()` executes all `test` blocks defined in the session, and
+`Session::is_complete(source)` reports whether a multi-line input is
+syntactically complete (§17.6).
+
+`Session::run_tasks_until(until, on_error)` polls tasks spawned by earlier
+inputs until the future `until` completes, returning the output of `until` (or
+`None` immediately if a task calls `exit`). Instruction, CPU-time, and output
+limits apply to each call, whereas `max_wall_time` does not, and permission
+prompts wait until `until` completes. If a background task fails with an error,
+limit, or interruption, the session cancels all running tasks, passes the error
+to `on_error`, and continues waiting for `until`. `cancel_tasks()` cancels
+remaining background tasks without running their `defer` blocks.
+
+`Session::set_wall_time` overrides `max_wall_time` for subsequent inputs, and
+`session.interrupt_handle()` cancels the active session call (the parent
+engine's interrupt handle does not affect sessions). Dropping an `eval` future
+before completion cancels the input in the same way as an interrupt, and leaves
+the session state unchanged if the input was still loading imports. `reset()`
+clears all session bindings and state. If an internal error (§10.3) occurs
+during `eval`, `run_tests`, `type_of`, or `run_tasks_until`, the session
+automatically resets itself, appends `" (the session was reset)"`
+(`sandlang::session::RESET_NOTE`) to the error message, and sets `was_reset()`
+to `true` until the next call while preserving remembered `"always"` prompt
+decisions.
 
 ---
 
@@ -3045,7 +3116,7 @@ patterns are rejected.
 ### 17.6 `sand repl [OPTIONS]`
 
 Interactive read-eval-print loop, taking the options of `sand run` (§17.5).
-It runs a session (§16.3): each input is type checked in the context of the
+It runs a session (§16.6): each input is type checked in the context of the
 previous inputs, then compiled and run **exactly once**; state persists
 between inputs.
 

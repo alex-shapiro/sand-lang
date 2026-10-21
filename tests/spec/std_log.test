@@ -11,12 +11,12 @@ ERROR failed
 
 === set level
 import log
-log.set_level("debug")
+log.set_level(log.Level.Debug)
 log.debug("now visible")
-log.set_level("error")
+log.set_level(log.Level.Error)
 log.warn("hidden")
 log.error("shown")
-log.set_level("off")
+log.disable()
 log.error("hidden too")
 --- stderr
 DEBUG now visible

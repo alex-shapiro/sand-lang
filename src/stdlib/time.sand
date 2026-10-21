@@ -55,63 +55,6 @@ pub native type Span
 /// (`zone("Etc/UTC") != UTC`).
 pub native type TimeZone
 
-/// A calendar or clock unit, ordered from largest to smallest.
-pub enum Unit {
-    /// Calendar year.
-    Year
-    /// Calendar month.
-    Month
-    /// Calendar week.
-    Week
-    /// Calendar day.
-    Day
-    /// Clock hour.
-    Hour
-    /// Clock minute.
-    Minute
-    /// Clock second.
-    Second
-    /// Millisecond (`10^-3` seconds).
-    Millisecond
-    /// Microsecond (`10^-6` seconds).
-    Microsecond
-    /// Nanosecond (`10^-9` seconds).
-    Nanosecond
-}
-
-/// Rounding mode for `round`, `until`, and `since`.
-pub enum RoundingMode {
-    /// Rounds toward positive infinity.
-    Ceil
-    /// Rounds toward negative infinity.
-    Floor
-    /// Rounds away from zero.
-    Expand
-    /// Rounds toward zero.
-    Trunc
-    /// Rounds to the nearest multiple, breaking ties toward positive infinity.
-    HalfCeil
-    /// Rounds to the nearest multiple, breaking ties toward negative infinity.
-    HalfFloor
-    /// Rounds to the nearest multiple, breaking ties away from zero.
-    HalfExpand
-    /// Rounds to the nearest multiple, breaking ties toward zero.
-    HalfTrunc
-    /// Rounds to the nearest multiple, breaking ties toward the even multiple.
-    HalfEven
-}
-
-/// Strategy for resolving wall-clock times that fall in a daylight saving gap
-/// (skipped time) or fold (repeated time).
-pub enum Disambiguation {
-    /// Advances by the gap length in a gap, and selects the earlier occurrence in a fold.
-    Compatible
-    /// Selects the earlier instant (moving backward by the gap length in a gap).
-    Earlier
-    /// Selects the later instant (moving forward by the gap length in a gap).
-    Later
-}
-
 /// A value (`Span` or `duration`) that can be converted into a `Span`.
 pub trait ToSpan {
     /// Converts `self` into a `Span`.

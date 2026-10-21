@@ -11,6 +11,6 @@ name = "site"
 path = "src/main.rs"
 
 [dependencies]
-sandlang = { path = "..", features = ["tls"] }
+sandlang = { path = ".." }
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 tokio = { version = "1", features = ["rt", "net", "fs", "io-util", "time", "signal", "macros"] }

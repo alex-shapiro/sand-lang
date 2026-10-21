@@ -18,21 +18,6 @@ pub struct Metadata {
     modified: time.Instant?
 }
 
-/// File access mode for `open`.
-pub enum Mode {
-    /// Opens an existing file for reading (requires `FsRead`).
-    Read
-    /// Creates or truncates a file for writing from the start (requires `FsWrite`).
-    Write
-    /// Opens or creates a file for appending at the end (requires `FsWrite`).
-    Append
-    /// Creates a new file for writing, or fails with kind `"already_exists"` if
-    /// the path exists (requires `FsWrite`).
-    CreateNew
-    /// Opens an existing file for reading and writing in place (requires `FsRead` and `FsWrite`).
-    ReadWrite
-}
-
 /// Opens the regular file at `path` with `mode`. The sandbox policy is checked
 /// at the time of the `open` call.
 ///
@@ -42,17 +27,7 @@ pub enum Mode {
 ///     print(line.split(","))
 /// }
 /// ```
-pub fn open(path: str, mode: Mode = Mode.Read) -> Result<File> {
-    open_file(path, match mode {
-        Read => 0
-        Write => 1
-        Append => 2
-        CreateNew => 3
-        ReadWrite => 4
-    })
-}
-
-native fn open_file(path: str, mode: int) -> Result<File>
+pub native fn open(path: str, mode: Mode = Mode.Read) -> Result<File>
 
 /// An open file handle returned by `open`. Reads and writes advance the file
 /// cursor (`Mode.Append` always writes at the end). Bind a `File` with `use`

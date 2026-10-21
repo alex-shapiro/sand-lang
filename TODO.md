@@ -57,7 +57,30 @@ Follow-up work, roughly in priority order.
       wasm-opt, `opt-level = "s"` 2.8 MB at similar speed. Measure on a
       quiet machine and choose.
 
+### Embedding
+
+- [ ] Validate all host module declarations in `Engine::new` instead of
+      deferring checks until a script imports the module.
+- [ ] Return a structured type from `SandType::sand_type` instead of Sand
+      source text so `Checker` does not re-parse derived host signatures.
+- [ ] Prefix prelude native functions with `prelude.` so that every native
+      function key starts with its module name and host modules can use prelude
+      type names such as `str`.
+- [ ] Support enum variant payloads in `#[derive(SandEnum)]` so native modules
+      such as `json` do not construct variant values by runtime ID.
+- [ ] Check raw native function implementations against their `native fn`
+      declarations at compile time instead of failing with an internal error on
+      argument conversion at runtime.
+- [ ] Bind each opaque `native type` to a Rust `NativeObject` type at
+      registration time so the type checker can verify opaque parameter and
+      return types.
+- [ ] Add struct field visibility and require public fields of public types in
+      native modules to use public types.
+
 ### Tooling
+
+- [ ] Fix broken intra-doc links to private items and run `cargo doc` with
+      `-D warnings` in CI.
 
 - [ ] Policy lints judge `http` rules only by their exact text (and
       `bypassable-http-deny`); rules with wildcards in hosts or paths could
@@ -84,8 +107,17 @@ Follow-up work, roughly in priority order.
 
 ### Language
 
-- [ ] Support enum parameters in native functions so modules such as `fs` and
-      `log` do not need to convert enums to integers or strings.
+- [ ] Infer the enum type of a variant expression from the expected type, as
+      pattern matching does (for example, `fs.open(path, Write)` or
+      `fs.open(path, .Write)`).
+- [ ] Add an `Ordering` enum to the prelude and return it from
+      `time.Span.compare` instead of `-1`, `0`, or `1`.
+- [ ] Evaluate returning a `time.Weekday` enum instead of an `int` (`1` to `7`)
+      from `day_of_week()` in the `time` module.
+- [ ] Evaluate replacing `is_file` and `is_dir` on `fs.Metadata` with an
+      `fs.Kind` enum.
+- [ ] Evaluate replacing string error kinds (`"not_found"`, `"invalid"`) with
+      an enum.
 
 - [ ] **Construct all types with `T(...)`.** Replace struct literals with
       named-argument calls (`Point(x: 1.0, y: 2.0)`, with defaults and

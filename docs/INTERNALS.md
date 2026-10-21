@@ -75,6 +75,10 @@ each native under its key:
 - Register a native value type (`ValueType`) with `Registry::add_value_type`.
   If `ValueType::PACKING` is set, values are stored inline in `Obj::Packed`;
   otherwise they are boxed in `Obj::Value`.
+- Represent enum parameters and return values as Rust enums: derive `SandEnum`,
+  register the type with `Registry::add_enum_type`, and convert values with
+  `Vm::enum_value` and `Vm::new_enum`. Do not redeclare a registered enum in
+  the `.sand` module source.
 - Natives return a struct's fields as a tuple and let Sand build the struct.
   Never build `Obj::Variant` by hand: variants with one payload are stored
   inline, and equality and hashing rely on the canonical form.

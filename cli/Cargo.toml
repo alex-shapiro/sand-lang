@@ -11,7 +11,7 @@ name = "sand"
 path = "src/main.rs"
 
 [dependencies]
-sandlang = { path = "..", features = ["tls"] }
+sandlang = { path = ".." }
 tokio = { version = "1", features = ["rt", "net", "io-util", "time", "signal", "macros"] }
 reedline = { version = "0.51", features = ["external_printer"] }
 nu-ansi-term = "0.50"
