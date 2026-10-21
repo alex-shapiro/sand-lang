@@ -59,6 +59,23 @@ Follow-up work, roughly in priority order.
 
 ### Embedding
 
+- [ ] Report every host module mistake to the host, in `Engine::new`. Some
+      panic there (a function registered twice, an unregistered type in a
+      signature). Others are compile errors in the scripts that import the
+      module (a `native fn` with other types than the Rust function, an
+      undeclared native, a private type in a public function): the script
+      author cannot fix them, and the host never sees them if no script
+      imports the module. The snapshot build checks every host module
+      already, but it skips a module that fails (`Snapshot::build`).
+- [ ] `SandType::sand_type` returns Sand source text, so the checker parses
+      the derived signature of a host function again to compare it with the
+      `native fn` declaration (`Checker::check_host_signature`). Describe
+      derived types with a typed value instead of text.
+- [ ] The module of a native comes from its name: the first segment, or the
+      prelude if there is none (`NativeIds::module_of`). Host modules cannot
+      take the name of a prelude type (`str`) so that this stays unambiguous.
+      Name the natives of the prelude `prelude.…` so that every native names
+      its module.
 - [ ] `#[derive(SandEnum)]` supports only enums without payloads. Support
       payloads (field types from `SandType`) so that natives such as `json`
       stop building `json.Json` values through the variant ids in `JsonIds`.

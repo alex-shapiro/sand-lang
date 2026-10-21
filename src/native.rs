@@ -63,7 +63,7 @@ impl TypeContext {
 ///
 /// The Rust enum is the only declaration of the Sand enum: the checker
 /// declares it in the module, with the doc comments of the Rust enum.
-pub trait EnumType: Copy + 'static {
+pub trait EnumType: SandType + Copy + 'static {
     /// The module of the Sand enum (`#[sand(module = "...")]`).
     const MODULE: &'static str;
     /// The name of the Sand enum: the Rust name, or `#[sand(name = "...")]`.
@@ -120,7 +120,7 @@ impl Vm {
         };
         match index.and_then(|i| T::VARIANTS.get(i as usize)) {
             Some(v) => Ok(v.value),
-            None => mismatch(&format!("{}.{}", T::MODULE, T::NAME)),
+            None => mismatch(&sand_name::<T>()),
         }
     }
 
@@ -229,8 +229,15 @@ sand_type! {
     () => "()",
 }
 
+/// The internal error of a native that converts a Sand value of another type
+/// than `what`.
 fn mismatch<T>(what: &str) -> Result<T, Ctl> {
-    Err(Ctl::internal(format!("host function argument: expected {what}")))
+    Err(Ctl::internal(format!("a native function expected a value of type `{what}`")))
+}
+
+/// The Sand name of `S`, qualified with its module if it is a host type.
+fn sand_name<S: SandType>() -> String {
+    S::sand_type(&mut TypeContext { module: String::new(), imports: BTreeSet::new(), used_types: Vec::new() })
 }
 
 /// Scalars convert without allocating.
@@ -241,7 +248,7 @@ macro_rules! scalar {
             fn from_value(_: &Vm, v: Value, _: &mut Conversion) -> Result<$t, Ctl> {
                 match v {
                     $p => Ok($e),
-                    _ => mismatch(stringify!($t)),
+                    _ => mismatch(&sand_name::<$t>()),
                 }
             }
         }
@@ -287,7 +294,7 @@ impl FromValue for &str {
     fn from_value<'a>(vm: &'a Vm, v: Value, _: &mut Conversion) -> Result<&'a str, Ctl> {
         match vm.heap.get(v) {
             Obj::Str(s) => Ok(s),
-            _ => mismatch("str"),
+            _ => mismatch(&sand_name::<String>()),
         }
     }
 }
@@ -320,7 +327,7 @@ impl FromValue for &[u8] {
     fn from_value<'a>(vm: &'a Vm, v: Value, _: &mut Conversion) -> Result<&'a [u8], Ctl> {
         match vm.heap.get(v) {
             Obj::Bytes(b) => Ok(b),
-            _ => mismatch("bytes"),
+            _ => mismatch(&sand_name::<Vec<u8>>()),
         }
     }
 }
@@ -371,7 +378,7 @@ impl<T: ListElem> SandType for Vec<T> {
 impl<T: ListElem + FromValue> FromValue for Vec<T> {
     type Item<'a> = Vec<T::Item<'a>>;
     fn from_value<'a>(vm: &'a Vm, v: Value, conv: &mut Conversion) -> Result<Self::Item<'a>, Ctl> {
-        let Obj::List(items) = vm.heap.get(v) else { return mismatch("list") };
+        let Obj::List(items) = vm.heap.get(v) else { return mismatch(&sand_name::<Self>()) };
         conv.alloc(vm, items.len().saturating_mul(std::mem::size_of::<T::Item<'a>>()))?;
         vm.charge(items.len() as u64)?;
         items.iter().map(|&x| T::from_value(vm, x, conv)).collect()
@@ -445,7 +452,7 @@ impl<T: SandType> SandType for BTreeMap<String, T> {
 }
 /// The entries of a `[str: T]` map.
 fn read_map<'a, T: FromValue>(vm: &'a Vm, v: Value, conv: &mut Conversion) -> Result<Vec<(String, T::Item<'a>)>, Ctl> {
-    let Obj::Map(m) = vm.heap.get(v) else { return mismatch("map") };
+    let Obj::Map(m) = vm.heap.get(v) else { return mismatch(&sand_name::<HashMap<String, T>>()) };
     conv.alloc(vm, m.live.saturating_mul(std::mem::size_of::<(String, T::Item<'a>)>()))?;
     vm.charge(m.live as u64)?;
     m.entries.iter().flatten().map(|&(k, x)| Ok((String::from_value(vm, k, conv)?, T::from_value(vm, x, conv)?))).collect()
@@ -506,7 +513,7 @@ macro_rules! tuple_impls {
                     }
                     _ => match vm.heap.get(v) {
                         Obj::Tuple(f) => f,
-                        _ => return mismatch("tuple"),
+                        _ => return mismatch(&sand_name::<Self>()),
                     },
                 };
                 Ok(($($n::from_value(vm, *f.get($i).ok_or_else(|| Ctl::internal("tuple too short"))?, conv)?,)+))
@@ -695,7 +702,7 @@ impl<T: ValueType> FromValue for T {
     fn from_value(vm: &Vm, v: Value, _: &mut Conversion) -> Result<T, Ctl> {
         match vm.heap.value::<T>(v) {
             Some(x) => Ok(x),
-            None => mismatch(T::NAME),
+            None => mismatch(&format!("{}.{}", T::MODULE, T::NAME)),
         }
     }
 }

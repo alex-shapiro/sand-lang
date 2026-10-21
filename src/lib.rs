@@ -10,6 +10,8 @@ extern crate self as sandlang;
 pub mod check;
 mod compile;
 pub mod diag;
+#[cfg(any(test, doctest))]
+mod doc_examples;
 pub mod docs;
 pub mod engine;
 mod feed;

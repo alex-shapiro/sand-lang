@@ -517,7 +517,7 @@ fn raw_functions_reject_values_of_other_enums() {
     m.raw_function("sides_of", |vm, a| Ok(sandlang::Value::Int(vm.enum_value::<Shape>(a[0])? as i64)));
     let (r, _, _) = run_src(Config::new().module(m), "import shapes\nprint(shapes.sides_of(shapes.Color.Green))");
     let Err(Error::Internal { message, .. }) = r else { panic!("expected an internal error, got {r:?}") };
-    assert!(message.contains("expected shapes.Shape"), "{message}");
+    assert_eq!(message, "a native function expected a value of type `shapes.Shape`");
 }
 
 #[test]

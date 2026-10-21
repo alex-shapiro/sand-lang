@@ -42,6 +42,8 @@ Failed runs return a `sandlang::Error`:
 `Config::new()` denies all host capabilities except `stdout`, `stderr`, and imports within the module root. Use builder methods on `Config` to configure policies, limits, virtual files, and streams:
 
 ```rust
+# #[tokio::main(flavor = "current_thread")]
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
 use sandlang::{Config, Engine, Limits, MemFs, MemorySink, Policy, RulePolicy};
 use std::time::Duration;
 
@@ -71,6 +73,8 @@ let mut engine = Engine::new(config);
 engine.run_source("main.sand", script).await?;
 println!("{}", out.contents());
 let report = files.read("/out/report.txt")?;
+# Ok(())
+# }
 ```
 
 - **Policy.** `RulePolicy` provides builder methods for each policy rule (`allow_read`, `allow_write`, `allow_net`, `allow_http`, `allow_env`, `deny_read`, `deny_net`, `fallback`, and others). `Policy::allow_all()` grants all capabilities and should be used only for trusted scripts.
@@ -82,7 +86,8 @@ let report = files.read("/out/report.txt")?;
 
 To load a `.policy` file from disk, parse it with `sandlang::policy::PolicyFile`:
 
-```rust
+```rust no_run
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
 # use sandlang::Config;
 use sandlang::policy::PolicyFile;
 use std::path::Path;
@@ -90,6 +95,8 @@ use std::path::Path;
 let text = std::fs::read_to_string("app.policy")?;
 let file = PolicyFile::parse(&text, Path::new("."), None).expect("a valid policy file");
 let config = Config::new().policy(file.policy()).limits(file.limits.clone());
+# Ok(())
+# }
 ```
 
 The second argument is the base directory for `./` paths, and the third argument is the optional home directory for `~/` paths.
@@ -171,6 +178,8 @@ A `native fn` declaration in the module source replaces the signature that Sand 
 `NativeModule::guarded_function` checks a capability before invoking the function. The guard closure constructs a `Capability` from the call arguments, and the Sand signature wraps the return type in `Result<T, Error>`, returning an `Err` with kind `"permission_denied"` if the policy denies the request:
 
 ```rust
+# #[tokio::main(flavor = "current_thread")]
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
 use sandlang::{Capability, Config, Engine, NativeModule, Policy, RulePolicy};
 
 let mut door = NativeModule::new("door");
@@ -182,6 +191,8 @@ door.guarded_function(
 let policy = Policy::rules(RulePolicy::new().allow_custom("door", Some("front")));
 let mut engine = Engine::new(Config::new().module(door).policy(policy));
 engine.run_source("main.sand", "import door\nprint(door.open(\"front\"))\nprint(door.open(\"back\"))").await?;
+# Ok(())
+# }
 ```
 
 The script prints:
@@ -198,11 +209,15 @@ Err(Error { kind: "permission_denied", message: "permission denied: door back" }
 `Engine::session` creates a stateful `Session` that evaluates inputs incrementally, preserving bindings across calls:
 
 ```rust
+# #[tokio::main(flavor = "current_thread")]
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
 # use sandlang::{Config, Engine};
 # let config = Config::new();
 let mut session = Engine::new(config).session();
 session.eval("var hits = 0\nfn hit() -> int {\n    hits += 1\n    hits\n}").await?;
 assert_eq!(session.eval("hit() + hit()").await?, Some("3".to_string()));
+# Ok(())
+# }
 ```
 
 `Session::eval` returns the formatted value of a trailing expression, or `None` for statements and declarations. `Session::type_of(expr)` returns the static type of `expr` without executing it, and `Session::reset()` clears all session state.
@@ -212,6 +227,8 @@ assert_eq!(session.eval("hit() + hit()").await?, Some("3".to_string()));
 `Engine::interrupt_handle` returns a thread-safe `InterruptHandle` that cancels an in-progress compilation, VM execution, or I/O wait from another thread:
 
 ```rust
+# #[tokio::main(flavor = "current_thread")]
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
 use sandlang::{Config, Engine, Error};
 use std::time::Duration;
 
@@ -223,6 +240,8 @@ std::thread::spawn(move || {
 });
 let result = engine.run_source("main.sand", "while true {}").await;
 assert!(matches!(result, Err(Error::Interrupted)));
+# Ok(())
+# }
 ```
 
 To cancel an individual `Session::eval` call, use `session.interrupt_handle()`.
