@@ -375,8 +375,8 @@ pub struct NativeIds {
 }
 
 impl NativeIds {
-    /// Returns the module that owns the native function `qual_name` (or
-    /// `"prelude"` if the prefix is not a registered module).
+    /// Returns the module that owns the native function `qual_name`, or
+    /// `"prelude"` if the prefix is not a registered module.
     pub fn module_of<'a>(&self, qual_name: &'a str) -> &'a str {
         qual_name.split_once('.').map(|(m, _)| m).filter(|m| self.modules.contains(*m)).unwrap_or("prelude")
     }
