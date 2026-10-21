@@ -57,7 +57,18 @@ Follow-up work, roughly in priority order.
       wasm-opt, `opt-level = "s"` 2.8 MB at similar speed. Measure on a
       quiet machine and choose.
 
+### Embedding
+
+- [ ] `sand_enum!` binds only enums whose variants have no payloads. Support
+      payloads so that natives such as `json` stop building `json.Json`
+      values through the variant ids in `JsonIds`.
+
 ### Tooling
+
+- [ ] `cargo doc` reports 12 warnings, mostly public docs that link to
+      private items (`Checker::release_bodies`, `fmt::Doc`,
+      `Policy::protects_normalized_in`). Fix them and build the docs with
+      `-D warnings` in CI.
 
 - [ ] Policy lints judge `http` rules only by their exact text (and
       `bypassable-http-deny`); rules with wildcards in hosts or paths could
@@ -84,8 +95,12 @@ Follow-up work, roughly in priority order.
 
 ### Language
 
-- [ ] Support enum parameters in native functions so modules such as `fs` and
-      `log` do not need to convert enums to integers or strings.
+- [ ] Infer the enum of a variant from the expected type in expressions, as
+      patterns already do. Enum arguments now repeat the module and enum
+      (`fs.open(path, fs.Mode.Write)`, `log.set_level(log.Level.Debug)`).
+      This needs a syntax decision (`Write`, `.Write`).
+- [ ] The prelude has no `Ordering` enum, so `time.Span.compare` returns
+      `-1`, `0` or `1`.
 
 - [ ] **Construct all types with `T(...)`.** Replace struct literals with
       named-argument calls (`Point(x: 1.0, y: 2.0)`, with defaults and

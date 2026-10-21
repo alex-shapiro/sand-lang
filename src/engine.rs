@@ -226,7 +226,7 @@ pub struct Config {
     pub(crate) stdout: SharedSink,
     pub(crate) stderr: SharedSink,
     log_sink: Option<Arc<dyn crate::LogSink>>,
-    log_level: crate::LogLevel,
+    log_level: Option<crate::LogLevel>,
     stdin: StdinConfig,
     pub(crate) cwd: Option<PathBuf>,
     pub(crate) module_root: Option<PathBuf>,
@@ -277,7 +277,7 @@ impl Config {
             stdout: Arc::new(crate::stdio::StdoutSink::default()),
             stderr: Arc::new(crate::stdio::StderrSink::default()),
             log_sink: None,
-            log_level: crate::LogLevel::Info,
+            log_level: Some(crate::LogLevel::Info),
             stdin: StdinConfig::None,
             cwd: None,
             module_root: None,
@@ -358,9 +358,10 @@ impl Config {
         self.log_sink = Some(Arc::new(sink));
         self
     }
-    /// Sets the initial script log level (default [`LogLevel::Info`](crate::LogLevel::Info)).
-    pub fn log_level(mut self, level: crate::LogLevel) -> Self {
-        self.log_level = level;
+    /// Sets the lowest level of the records that scripts log, or turns
+    /// logging off with `None` (default [`LogLevel::Info`](crate::LogLevel::Info)).
+    pub fn log_level(mut self, level: impl Into<Option<crate::LogLevel>>) -> Self {
+        self.log_level = level.into();
         self
     }
     pub fn stdin_bytes(mut self, data: Vec<u8>) -> Self {
@@ -563,7 +564,7 @@ impl Registry {
             partial: Mutex::default(),
         };
         for m in &config.modules {
-            m.register_value_types(&mut r);
+            m.register_types(&mut r);
         }
         for m in &config.modules {
             m.register(&mut r);
@@ -584,7 +585,7 @@ impl Registry {
 
     pub fn add_value_type<T: crate::vm::value::ValueType>(&mut self) {
         let module = T::MODULE;
-        crate::vm::value::check_value_type_name::<T>();
+        crate::vm::value::check_type_name(T::NAME);
         let info = crate::types::ValueTypeInfo {
             ord: T::ORDER.is_some(),
             parse: crate::vm::value::parse_value::<T>,
@@ -592,6 +593,17 @@ impl Registry {
         };
         let old = Arc::make_mut(&mut self.by_name).values.insert(format!("{module}.{}", T::NAME).into(), info);
         assert!(old.is_none(), "value type {module}.{} registered twice", T::NAME);
+    }
+
+    pub fn add_enum_type<T: crate::native::EnumType>(&mut self) {
+        crate::vm::value::check_type_name(T::NAME);
+        let info = crate::types::EnumTypeInfo {
+            type_id: std::any::TypeId::of::<T>(),
+            rust_name: std::any::type_name::<T>(),
+            variants: T::VARIANTS.iter().map(|&(name, _)| name).collect(),
+        };
+        let old = Arc::make_mut(&mut self.by_name).enums.insert(format!("{}.{}", T::MODULE, T::NAME).into(), info);
+        assert!(old.is_none(), "enum type {}.{} registered twice", T::MODULE, T::NAME);
     }
 
     pub fn add_builtin(&mut self, name: impl Into<Cow<'static, str>>, f: crate::vm::NativeFn) {
@@ -1015,7 +1027,7 @@ impl Engine {
             args: c.args.clone(),
             env: c.env.clone(),
             rng: Rng::new(c.seed.unwrap_or_else(entropy_seed)),
-            log_level: Some(c.log_level),
+            log_level: c.log_level,
             log_sink: if quiet { Some(Arc::new(crate::stdlib::log::NullLogSink)) } else { c.log_sink.clone() },
             interrupt: self.interrupt.clone(),
             stream_decisions: [None; 2],

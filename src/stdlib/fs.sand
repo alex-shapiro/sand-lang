@@ -42,17 +42,7 @@ pub enum Mode {
 ///     print(line.split(","))
 /// }
 /// ```
-pub fn open(path: str, mode: Mode = Mode.Read) -> Result<File> {
-    open_file(path, match mode {
-        Read => 0
-        Write => 1
-        Append => 2
-        CreateNew => 3
-        ReadWrite => 4
-    })
-}
-
-native fn open_file(path: str, mode: int) -> Result<File>
+pub native fn open(path: str, mode: Mode = Mode.Read) -> Result<File>
 
 /// An open file handle returned by `open`. Reads and writes advance the file
 /// cursor (`Mode.Append` always writes at the end). Bind a `File` with `use`

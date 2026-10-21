@@ -2048,10 +2048,14 @@ nesting depth of 512.
 
 ### 13.8 `log`
 
+```sand
+pub enum Level { Debug, Info, Warn, Error }
+```
+
 `debug`, `info`, `warn`, and `error` emit structured log records with signature
-`(msg: str, fields: [str: str] = [:])`. `set_level(level: str)` sets the minimum
-script log level to `"debug"`, `"info"` (the default unless overridden by the
-host, §16), `"warn"`, `"error"`, or `"off"`.
+`(msg: str, fields: [str: str] = [:])`. `set_level(level: Level)` sets the
+lowest level that the engine writes (`Level.Info` unless the host sets another,
+§16). `disable()` turns logging off until the next `set_level`.
 
 The engine drops records below the active script or host sink level, and counts
 emitted records against `max_output_bytes`. If the host configures a log sink
@@ -2705,8 +2709,8 @@ let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 
   records before the engine constructs a `LogRecord`; any
   `Fn(&LogRecord) + Send + Sync` implements `LogSink` for all levels. `Display`
   formats `LogRecord` in the default standard error format.
-  `Config::log_level(LogLevel)` sets the initial script log level (default
-  `Info`).
+  `Config::log_level(level)` sets the starting script log level (default
+  `LogLevel::Info`; `None` turns logging off).
 - `Config::memory_fs(MemFs)` gives scripts a memory file system (§16.1).
 - `Config::library(dir)` sets the directory of library scripts for
   `import <name>` (§3.2). `Engine::module_names()` returns the registered
@@ -2763,7 +2767,16 @@ normalize_path, normalize_entry_path}` for hosts writing their own
   pack values into 16 bytes on the heap. Host functions can accept and return
   any registered value type, including the `time` module types
   (`sandlang::jiff::Timestamp`, `sandlang::jiff::civil::{Date, Time,
-  DateTime}`, and `sandlang::time::*`). Using a standard module name
+  DateTime}`, and `sandlang::time::*`).
+  `sandlang::sand_enum!(Shape => geo.Shape { Circle, Square })` binds a Rust
+  enum to a Sand enum whose variants have no payloads, so that host functions
+  can take and return it. `NativeModule::enum_type::<Shape>()` registers it
+  and adds `pub enum Shape { Circle, Square }` if the module source does not
+  declare it. A declaration in the source must have the listed variants, in
+  order, without payloads (a compile error otherwise). Host functions can
+  also take and return the standard enums `time.Unit`, `time.RoundingMode`,
+  `time.Disambiguation` (`sandlang::jiff::{Unit, RoundMode,
+  tz::Disambiguation}`) and `log.Level` (`LogLevel`). Using a standard module name
   (`NativeModule::new`), registering a module twice (`Config::module`), or
   registering a function twice panics.
 - `Outcome { exit_code: i32 }`; errors are `Error::Compile(diagnostics)`,

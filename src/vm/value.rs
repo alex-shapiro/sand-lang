@@ -1057,10 +1057,12 @@ pub(crate) fn value_of<T: ValueType>(obj: &Obj) -> Option<T> {
     }
 }
 
-pub(crate) fn check_value_type_name<T: ValueType>() {
-    let name = T::NAME.as_bytes();
-    let ident = name.first().is_some_and(u8::is_ascii_uppercase) && name.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_');
-    assert!(ident, "value type name `{}` is not a capitalized identifier", T::NAME);
+/// Panics if `name`, the name of a host-registered type, is not a capitalized
+/// identifier.
+pub(crate) fn check_type_name(name: &str) {
+    let b = name.as_bytes();
+    let ident = b.first().is_some_and(u8::is_ascii_uppercase) && b.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_');
+    assert!(ident, "type name `{name}` is not a capitalized identifier");
 }
 
 pub type ParseValue = fn(&str) -> Result<Obj, String>;

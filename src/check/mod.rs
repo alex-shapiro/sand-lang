@@ -359,11 +359,13 @@ impl CheckedProgram {
     }
 }
 
-/// Registered native functions and value types, keyed by qualified name.
+/// Registered native functions, value types and enum types, keyed by
+/// qualified name.
 #[derive(Clone, Debug, Default)]
 pub struct NativeIds {
     pub fns: HashMap<Cow<'static, str>, u32>,
     pub values: HashMap<Cow<'static, str>, ValueTypeInfo>,
+    pub enums: HashMap<Cow<'static, str>, EnumTypeInfo>,
 }
 
 #[derive(Clone)]
@@ -1234,6 +1236,9 @@ impl Checker {
                 _ => {}
             }
         }
+        if self.allows_native() {
+            self.check_enum_bindings(items);
+        }
         self.derive_bounds(first_type);
         if pm.kind == ModKind::Prelude {
             for name in ["Option", "Result"] {
@@ -1566,6 +1571,48 @@ impl Checker {
             self.variants[v.rt_id as usize] = (id, i as u32);
         }
         self.types[id as usize].kind = TypeDefKind::Enum { variants };
+    }
+
+    /// Checks that each enum the registry binds to a Rust type in this module
+    /// is declared with the Rust type's variants, in order, without payloads.
+    fn check_enum_bindings(&mut self, items: &[ast::Item]) {
+        let module = self.name(self.mods[self.cur_mod as usize].name).to_string();
+        let mut bound: Vec<(&str, &EnumTypeInfo)> = self
+            .natives
+            .enums
+            .iter()
+            .filter_map(|(name, info)| Some((name.strip_prefix(module.as_str())?.strip_prefix('.')?, info)))
+            .collect();
+        if bound.is_empty() {
+            return;
+        }
+        bound.sort_by_key(|(name, _)| *name);
+        let mut errors = Vec::new();
+        for (name, info) in bound {
+            let decl = items.iter().find_map(|item| match &item.kind {
+                ItemKind::Enum(e) if e.name.name == name => Some(e),
+                _ => None,
+            });
+            let Some(e) = decl else {
+                let span = Span::new(self.mods[self.cur_mod as usize].file, 0, 0);
+                errors.push((span, format!("Rust type `{}` is bound to enum `{module}.{name}`, which is not declared", info.rust_name)));
+                continue;
+            };
+            let matches = e.generics.is_empty()
+                && e.variants.len() == info.variants.len()
+                && e.variants.iter().zip(info.variants.iter()).all(|(v, n)| v.fields.is_empty() && v.name.name == *n);
+            if !matches {
+                let msg = format!(
+                    "enum `{name}` is bound to Rust type `{}`, so it must declare the variants {}, in order, without payloads or type parameters",
+                    info.rust_name,
+                    info.variants.join(", ")
+                );
+                errors.push((e.name.span, msg));
+            }
+        }
+        for (span, msg) in errors {
+            self.error(span, msg);
+        }
     }
 
     fn resolve_alias(&mut self, i: usize, span: Span) -> TypeId {

@@ -20,11 +20,118 @@ pub trait SandType {
     fn sand_type(cx: &mut TypeContext) -> String;
 }
 
-/// Tracks module imports and value types referenced in a derived signature.
+/// Tracks module imports and host-registered types referenced in a derived
+/// signature.
 pub struct TypeContext {
     module: String,
     imports: BTreeSet<&'static str>,
-    used_value_types: Vec<(String, TypeId)>,
+    used_types: Vec<(String, TypeId)>,
+}
+
+impl TypeContext {
+    /// Returns the Sand name of the type `T` registered as `module.name`,
+    /// importing `module` if it is another module.
+    fn registered<T: 'static>(&mut self, module: &'static str, name: &'static str) -> String {
+        let qual = format!("{module}.{name}");
+        self.used_types.push((qual.clone(), TypeId::of::<T>()));
+        if module == self.module {
+            return name.into();
+        }
+        self.imports.insert(module);
+        qual
+    }
+
+    /// Returns the Sand name of the enum type `T` (see [`sand_enum!`](crate::sand_enum)).
+    pub fn enum_type<T: EnumType>(&mut self) -> String {
+        self.registered::<T>(T::MODULE, T::NAME)
+    }
+}
+
+/// A Rust enum bound to a Sand enum whose variants have no payloads, so that
+/// host functions can take and return it. Implement it with
+/// [`sand_enum!`](crate::sand_enum) and register it with
+/// [`NativeModule::enum_type`].
+pub trait EnumType: Copy + Send + Sync + 'static {
+    /// Name of the module that declares the Sand enum (e.g. `"fs"`).
+    const MODULE: &'static str;
+    /// Name of the Sand enum (e.g. `"Mode"`).
+    const NAME: &'static str;
+    /// The name and Rust value of each Sand variant, in declaration order.
+    const VARIANTS: &'static [(&'static str, Self)];
+}
+
+/// Binds a Rust enum to a Sand enum whose variants have no payloads and the
+/// listed names, in the listed order:
+///
+/// ```
+/// #[derive(Clone, Copy)]
+/// pub enum Shape {
+///     Circle,
+///     Square,
+/// }
+/// sandlang::sand_enum!(Shape => geo.Shape { Circle, Square });
+/// ```
+///
+/// The macro implements [`EnumType`](crate::native::EnumType) and the
+/// conversions for host functions. A Rust variant not in the list cannot be
+/// returned to a script (the call fails with an internal error). The
+/// checker rejects a Sand declaration with other variants.
+#[macro_export]
+macro_rules! sand_enum {
+    ($ty:ty => $module:ident . $name:ident { $($variant:ident),+ $(,)? }) => {
+        impl $crate::native::EnumType for $ty {
+            const MODULE: &'static str = stringify!($module);
+            const NAME: &'static str = stringify!($name);
+            const VARIANTS: &'static [(&'static str, Self)] = &[$((stringify!($variant), <$ty>::$variant)),+];
+        }
+        impl $crate::native::SandType for $ty {
+            fn sand_type(cx: &mut $crate::native::TypeContext) -> String {
+                cx.enum_type::<Self>()
+            }
+        }
+        impl $crate::native::FromValue for $ty {
+            type Item<'a> = Self;
+            fn from_value(
+                vm: &$crate::vm::Vm,
+                v: $crate::Value,
+                _: &mut $crate::native::Conversion,
+            ) -> Result<Self, $crate::vm::Ctl> {
+                vm.enum_value(v)
+            }
+        }
+        impl $crate::native::IntoValue for $ty {
+            fn into_value(self, vm: &mut $crate::vm::Vm) -> Result<$crate::Value, $crate::vm::Ctl> {
+                vm.new_enum(self)
+            }
+        }
+        impl $crate::native::ListElem for $ty {}
+    };
+}
+
+impl Vm {
+    /// Converts `v`, a value of the Sand enum bound to `T`.
+    pub fn enum_value<T: EnumType>(&self, v: Value) -> Result<T, Ctl> {
+        let variant = match v {
+            Value::Tag(id) => self.prog.variants.get(id as usize),
+            _ => None,
+        };
+        match variant.and_then(|r| T::VARIANTS.get(r.index as usize)) {
+            Some(&(_, x)) => Ok(x),
+            None => mismatch(T::NAME),
+        }
+    }
+
+    /// The value of the Sand enum bound to `T` for `x`.
+    pub fn new_enum<T: EnumType>(&self, x: T) -> Result<Value, Ctl> {
+        let d = std::mem::discriminant(&x);
+        let Some(index) = T::VARIANTS.iter().position(|(_, v)| std::mem::discriminant(v) == d) else {
+            return Err(Ctl::internal(format!("a value of {} has no {}.{} variant", std::any::type_name::<T>(), T::MODULE, T::NAME)));
+        };
+        match self.prog.enum_types.get(&TypeId::of::<T>()) {
+            Some(&first) => Ok(Value::Tag(first + index as u32)),
+            None => Err(Ctl::internal(format!("enum {}.{} is not loaded", T::MODULE, T::NAME))),
+        }
+    }
 }
 
 /// Conversion of an argument from a Sand value.
@@ -581,13 +688,7 @@ impl Decl {
 
 impl<T: ValueType> SandType for T {
     fn sand_type(cx: &mut TypeContext) -> String {
-        let name = format!("{}.{}", T::MODULE, T::NAME);
-        cx.used_value_types.push((name.clone(), TypeId::of::<T>()));
-        if T::MODULE == cx.module {
-            return T::NAME.into();
-        }
-        cx.imports.insert(T::MODULE);
-        name
+        cx.registered::<T>(T::MODULE, T::NAME)
     }
 }
 impl<T: ValueType> FromValue for T {
@@ -608,7 +709,7 @@ impl<T: ValueType> IntoValue for T {
     }
 }
 
-type RegisterValueType = fn(&mut Registry);
+type RegisterType = fn(&mut Registry);
 
 /// A host-provided module, imported by scripts with `import <name>`.
 #[derive(Clone)]
@@ -617,9 +718,12 @@ pub struct NativeModule {
     source: String,
     decls: Vec<Decl>,
     functions: Vec<(String, HostFn)>,
-    value_types: Vec<(&'static str, RegisterValueType)>,
+    /// The value and enum types of the module: their names and how to register them.
+    types: Vec<(&'static str, RegisterType)>,
+    /// The variants of each enum type, by name.
+    enum_types: Vec<(&'static str, Vec<&'static str>)>,
     imports: BTreeSet<&'static str>,
-    used_value_types: Vec<(String, TypeId)>,
+    used_types: Vec<(String, TypeId)>,
     docs: HashMap<String, String>,
 }
 
@@ -636,9 +740,10 @@ impl NativeModule {
             source: String::new(),
             decls: Vec::new(),
             functions: Vec::new(),
-            value_types: Vec::new(),
+            types: Vec::new(),
+            enum_types: Vec::new(),
             imports: BTreeSet::new(),
-            used_value_types: Vec::new(),
+            used_types: Vec::new(),
             docs: HashMap::new(),
         }
     }
@@ -662,23 +767,35 @@ impl NativeModule {
     /// Panics if `T::MODULE` does not match this module's name, if `T::NAME` is
     /// not a capitalized identifier, or if `T::NAME` is already registered.
     pub fn value_type<T: ValueType>(&mut self) -> &mut Self {
-        assert_eq!(T::MODULE, self.name, "value type `{}` belongs to module `{}`", T::NAME, T::MODULE);
-        crate::vm::value::check_value_type_name::<T>();
-        assert!(
-            !self.value_types.iter().any(|(n, _)| *n == T::NAME),
-            "value type `{}` is registered twice in host module `{}`",
-            T::NAME,
-            self.name
-        );
-        self.value_types.push((T::NAME, |r| r.add_value_type::<T>()));
+        self.add_type(T::MODULE, T::NAME, |r| r.add_value_type::<T>())
+    }
+
+    /// Registers `T` as an enum type of this module (see [`EnumType`]). Adds
+    /// `pub enum <T::NAME> { ... }` with the variants of `T` if the module
+    /// source does not declare it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `T::MODULE` does not match this module's name, if `T::NAME` is
+    /// not a capitalized identifier, or if `T::NAME` is already registered.
+    pub fn enum_type<T: EnumType>(&mut self) -> &mut Self {
+        self.enum_types.push((T::NAME, T::VARIANTS.iter().map(|&(name, _)| name).collect()));
+        self.add_type(T::MODULE, T::NAME, |r| r.add_enum_type::<T>())
+    }
+
+    fn add_type(&mut self, module: &str, name: &'static str, register: RegisterType) -> &mut Self {
+        assert_eq!(module, self.name, "type `{name}` belongs to module `{module}`");
+        crate::vm::value::check_type_name(name);
+        assert!(!self.types.iter().any(|(n, _)| *n == name), "type `{name}` is registered twice in host module `{}`", self.name);
+        self.types.push((name, register));
         self
     }
 
     fn derive_decl(&mut self, name: &str, params: fn(&mut TypeContext) -> Vec<String>, ret: fn(&mut TypeContext) -> String) -> Decl {
-        let mut cx = TypeContext { module: self.name.clone(), imports: BTreeSet::new(), used_value_types: Vec::new() };
+        let mut cx = TypeContext { module: self.name.clone(), imports: BTreeSet::new(), used_types: Vec::new() };
         let decl = Decl { name: name.into(), params: params(&mut cx), names: None, ret: ret(&mut cx) };
         self.imports.extend(cx.imports);
-        self.used_value_types.extend(cx.used_value_types);
+        self.used_types.extend(cx.used_types);
         decl
     }
 
@@ -763,17 +880,19 @@ impl NativeModule {
         self
     }
 
-    pub(crate) fn register_value_types(&self, r: &mut Registry) {
-        for &(_, register) in &self.value_types {
+    pub(crate) fn register_types(&self, r: &mut Registry) {
+        for &(_, register) in &self.types {
             register(r);
         }
     }
 
     pub(crate) fn register(&self, r: &mut Registry) {
-        for (name, id) in &self.used_value_types {
-            match r.by_name.values.get(name.as_str()) {
-                Some(info) => assert!(info.type_id == *id, "value type `{name}` is registered for another Rust type"),
-                None => panic!("value type `{name}` is not registered (see `NativeModule::value_type`)"),
+        for (name, id) in &self.used_types {
+            let registered =
+                r.by_name.values.get(name.as_str()).map(|v| v.type_id).or_else(|| r.by_name.enums.get(name.as_str()).map(|e| e.type_id));
+            match registered {
+                Some(t) => assert!(t == *id, "type `{name}` is registered for another Rust type"),
+                None => panic!("type `{name}` is not registered (see `NativeModule::value_type` and `NativeModule::enum_type`)"),
             }
         }
         let (mut fns, mut types, mut imports) = (HashSet::new(), HashSet::new(), HashSet::new());
@@ -781,14 +900,18 @@ impl NativeModule {
             match item.kind {
                 ItemKind::Fn(f) if f.is_native => fns.insert(f.name.name),
                 ItemKind::NativeType(t) => types.insert(t.name.name),
+                ItemKind::Enum(e) => types.insert(e.name.name),
                 ItemKind::Import(Import { source: ImportSource::Name(m), alias: None, names: None }) => imports.insert(m.name),
                 _ => false,
             };
         }
         let mut src: String = self.imports.iter().filter(|m| !imports.contains(**m)).map(|m| format!("import {m}\n")).collect();
         src.push_str(&self.source);
-        for &(name, _) in self.value_types.iter().filter(|(name, _)| !types.contains(*name)) {
-            src.push_str(&format!("pub native type {name}\n"));
+        for &(name, _) in self.types.iter().filter(|(name, _)| !types.contains(*name)) {
+            match self.enum_types.iter().find(|(n, _)| *n == name) {
+                Some((_, variants)) => src.push_str(&format!("pub enum {name} {{ {} }}\n", variants.join(", "))),
+                None => src.push_str(&format!("pub native type {name}\n")),
+            }
         }
         for decl in self.decls.iter().filter(|d| !fns.contains(&d.name)) {
             if let Some(d) = self.docs.get(&decl.name) {

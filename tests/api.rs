@@ -342,7 +342,7 @@ impl ValueType for Impostor {
 }
 
 #[test]
-#[should_panic(expected = "value type `bank.Money` is not registered")]
+#[should_panic(expected = "type `bank.Money` is not registered")]
 fn value_types_in_signatures_must_be_registered() {
     let mut m = NativeModule::new("bank");
     m.function("zero", || Money(0));
@@ -350,11 +350,118 @@ fn value_types_in_signatures_must_be_registered() {
 }
 
 #[test]
-#[should_panic(expected = "value type `bank.Money` is registered for another Rust type")]
+#[should_panic(expected = "type `bank.Money` is registered for another Rust type")]
 fn value_types_in_signatures_must_be_the_registered_rust_type() {
     let mut m = bank_module();
     m.function("fake", || Impostor);
     Engine::new(Config::new().module(m));
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Shape {
+    Circle,
+    Square,
+    Triangle,
+}
+
+sandlang::sand_enum!(Shape => shapes.Shape { Circle, Square, Triangle });
+
+fn shapes_module() -> NativeModule {
+    let mut m = NativeModule::new("shapes");
+    m.enum_type::<Shape>();
+    m.function("sides", |s: Shape| match s {
+        Shape::Circle => 0,
+        Shape::Square => 4,
+        Shape::Triangle => 3,
+    });
+    m.function("with_sides", |n: i64| match n {
+        0 => Some(Shape::Circle),
+        3 => Some(Shape::Triangle),
+        4 => Some(Shape::Square),
+        _ => None,
+    });
+    m.function("count", |shapes: Vec<Shape>, of: Shape| shapes.iter().filter(|&&s| s == of).count() as i64).params(&["shapes", "of"]);
+    m
+}
+
+#[test]
+fn host_functions_take_and_return_enums() {
+    let src = r#"
+import shapes
+print(shapes.sides(shapes.Shape.Square))
+print(shapes.with_sides(3))
+print(shapes.with_sides(5))
+print(shapes.count([shapes.Shape.Circle, shapes.Shape.Square, shapes.Shape.Circle], of: shapes.Shape.Circle))
+match shapes.with_sides(0) {
+    Some(Circle) => print("round")
+    _ => print("other")
+}
+help(shapes.Shape)
+help(shapes.count)
+"#;
+    let (r, out, _) = run_src(Config::new().module(shapes_module()), src);
+    r.unwrap();
+    assert_eq!(
+        out,
+        "4\nSome(Triangle)\nNone\n2\nround\nenum shapes.Shape\n\nVariants:\n    Circle\n    Square\n    Triangle\nfn shapes.count(shapes: [Shape], of: Shape) -> int\n"
+    );
+}
+
+#[test]
+fn host_functions_take_and_return_enums_of_standard_modules() {
+    use sandlang::jiff::Unit;
+    let mut m = NativeModule::new("units");
+    m.function("smaller", |u: Unit| -> Option<Unit> {
+        let all = [Unit::Year, Unit::Month, Unit::Week, Unit::Day, Unit::Hour];
+        all.iter().position(|&x| x == u).and_then(|i| all.get(i + 1)).copied()
+    });
+    m.function("is_warning", |l: LogLevel| l >= LogLevel::Warn);
+    let src = "import units\nimport time\nimport log\nprint(units.smaller(time.Unit.Week))\nprint(units.is_warning(log.Level.Error))\nhelp(units.smaller)";
+    let (r, out, _) = run_src(Config::new().module(m), src);
+    r.unwrap();
+    assert_eq!(out, "Some(Day)\ntrue\nfn units.smaller(arg1: Unit) -> Unit?\n");
+}
+
+#[test]
+fn host_enum_declarations_must_match_the_rust_variants() {
+    for decl in [
+        "pub enum Shape { Circle, Square }",
+        "pub enum Shape { Circle, Triangle, Square }",
+        "pub enum Shape { Circle, Square(int), Triangle }",
+    ] {
+        let mut m = shapes_module();
+        m.source(decl);
+        let (r, _, _) = run_src(Config::new().module(m), "import shapes\nprint(shapes.sides(shapes.Shape.Circle))");
+        let Err(Error::Compile(ds)) = r else { panic!("{decl}: expected a compile error, got {r:?}") };
+        assert!(ds.iter().any(|d| d.message.contains("must declare the variants Circle, Square, Triangle, in order")), "{decl}: {ds:?}");
+    }
+}
+
+#[test]
+#[should_panic(expected = "type `shapes.Shape` is not registered")]
+fn enums_in_signatures_must_be_registered() {
+    let mut m = NativeModule::new("shapes");
+    m.function("square", || Shape::Square);
+    Engine::new(Config::new().module(m));
+}
+
+#[derive(Clone, Copy)]
+enum Partial {
+    Bound,
+    Unbound,
+}
+
+sandlang::sand_enum!(Partial => part.Partial { Bound });
+
+#[test]
+fn unbound_rust_variants_are_internal_errors() {
+    let mut m = NativeModule::new("part");
+    m.enum_type::<Partial>();
+    m.function("get", |b: bool| if b { Partial::Bound } else { Partial::Unbound });
+    let (r, out, _) = run_src(Config::new().module(m), "import part\nprint(part.get(true))\nprint(part.get(false))");
+    assert_eq!(out, "Bound\n");
+    let Err(Error::Internal { message, .. }) = r else { panic!("expected an internal error, got {r:?}") };
+    assert!(message.contains("has no part.Partial variant"), "{message}");
 }
 
 #[test]
@@ -652,10 +759,10 @@ fn start(user: str) {
     log.info("started", fields: ["user": user, "note": "a b"])
 }
 log.debug("hidden")
-log.set_level("debug")
+log.set_level(log.Level.Debug)
 log.debug("details")
 start("ann")
-log.set_level("error")
+log.set_level(log.Level.Error)
 log.warn("hidden")
 log.error("failed")
 "#;
@@ -689,7 +796,7 @@ fn log_sinks_select_levels() {
     }
     let messages = Arc::new(Mutex::new(Vec::new()));
     let config = Config::new().log_sink(WarnSink(messages.clone()));
-    let src = "import log\nlog.debug(\"d\")\nlog.info(\"i\")\nlog.warn(\"w\")\nlog.set_level(\"off\")\nlog.error(\"e\")";
+    let src = "import log\nlog.debug(\"d\")\nlog.info(\"i\")\nlog.warn(\"w\")\nlog.disable()\nlog.error(\"e\")";
     let (r, _, _) = run_src(config, src);
     r.unwrap();
     assert_eq!(*messages.lock().unwrap(), ["w"]);
@@ -697,7 +804,7 @@ fn log_sinks_select_levels() {
 
 #[test]
 fn hosts_set_the_starting_log_level() {
-    let src = "import log\nlog.debug(\"d\")\nlog.set_level(\"info\")\nlog.debug(\"hidden\")";
+    let src = "import log\nlog.debug(\"d\")\nlog.set_level(log.Level.Info)\nlog.debug(\"hidden\")";
     let (r, _, err) = run_src(Config::new().policy(Policy::allow_all()).log_level(LogLevel::Debug), src);
     r.unwrap();
     assert_eq!(err, "DEBUG d\n");

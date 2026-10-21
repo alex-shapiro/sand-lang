@@ -602,6 +602,16 @@ pub struct ValueTypeInfo {
     pub type_id: std::any::TypeId,
 }
 
+/// Metadata for a registered [`crate::native::EnumType`].
+#[derive(Clone, Debug)]
+pub struct EnumTypeInfo {
+    pub type_id: std::any::TypeId,
+    /// The Rust type name, for diagnostics.
+    pub rust_name: &'static str,
+    /// The variant names, in declaration order.
+    pub variants: Arc<[&'static str]>,
+}
+
 #[derive(Clone, Debug)]
 pub struct TypeDef {
     pub name: Symbol,

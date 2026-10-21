@@ -431,6 +431,14 @@ impl<'a> Compiler<'a> {
             error_def: wk.error,
             json: None,
         };
+        for (qual, info) in &input.natives.enums {
+            let Some((module, name)) = qual.rsplit_once('.') else { continue };
+            let (name, module) = (cp.syms.get(name), cp.syms.get(module));
+            let def = cp.types.iter().find(|t| Some(t.name) == name && Some(t.module_name) == module && t.is_enum());
+            if let Some(first) = def.and_then(|t| t.variants().first()) {
+                self.prog.enum_types.insert(info.type_id, first.rt_id);
+            }
+        }
         let (json, json_mod) = (cp.syms.get("Json"), cp.syms.get("json"));
         if let Some(jd) = cp.types.iter().position(|t| Some(t.name) == json && Some(t.module_name) == json_mod) {
             let jd = jd as u32;

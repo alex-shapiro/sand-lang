@@ -77,7 +77,7 @@ let report = files.read("/out/report.txt")?;
 - **Limits.** `Limits` configures every resource bound described in [Sandbox and policies](/guide/sandbox/).
 - **Virtual file system.** `Config::memory_fs` replaces host disk access with an in-memory `MemFs`. Clones of a `MemFs` share the same underlying storage so the host can populate input files before a run and read output files afterward.
 - **Streams.** `Config::stdout` and `Config::stderr` redirect script output to a `MemorySink` or custom sink. `Config::stdin_bytes` supplies fixed input bytes (which still require the `stdin` capability).
-- **Logging.** `Config::log_sink` routes `log` records to a host `LogSink` as a `LogRecord` containing the level, message, fields, and caller location. `LogSink::enabled` filters levels before record construction, and `Config::log_level` sets the initial script log level. Emitted records count against the output limit.
+- **Logging.** `Config::log_sink` routes `log` records to a host `LogSink` as a `LogRecord` containing the level, message, fields, and caller location. `LogSink::enabled` filters levels before record construction, and `Config::log_level` sets the starting script log level (`None` turns logging off). Emitted records count against the output limit.
 - **Environment.** `Config::args` and `Config::env` set the command-line arguments and environment map exposed to the script. If `Config::env` is not set, `env.get` reads the host process environment subject to the policy.
 
 To load a `.policy` file from disk, parse it with `sandlang::policy::PolicyFile`:
@@ -137,8 +137,31 @@ Sand infers the Sand function signature from the Rust parameter and return types
 | `Result<T, E>`                              | `Result<T, Error>`           |
 | `HashMap<String, T>`, `BTreeMap<String, T>` | `[str: T]`                   |
 | tuples of up to 4 elements                  | tuples                       |
+| an enum bound with `sand_enum!`             | the bound Sand enum          |
 
 Returning `Err(HostError::new(kind, message))` preserves `kind` on the Sand `Error`; any other Rust error type converts to an `Error` with kind `"error"` and its `Display` message.
+
+`sand_enum!` binds a Rust enum to a Sand enum whose variants have no payloads. `NativeModule::enum_type` registers the enum and declares it in the module:
+
+```rust
+use sandlang::NativeModule;
+
+#[derive(Clone, Copy)]
+enum Shape {
+    Circle,
+    Square,
+}
+sandlang::sand_enum!(Shape => geo.Shape { Circle, Square });
+
+let mut geo = NativeModule::new("geo");
+geo.enum_type::<Shape>();
+geo.function("sides", |s: Shape| match s {
+    Shape::Circle => 0,
+    Shape::Square => 4,
+});
+```
+
+Scripts call `geo.sides(geo.Shape.Square)`. If the module source declares `Shape`, the declaration must have the same variants in the same order.
 
 `NativeModule::async_function` registers an async Rust function; while its future is pending, only the calling Sand task suspends.
 

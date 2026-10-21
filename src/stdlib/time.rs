@@ -476,54 +476,12 @@ fn zone(vm: &Vm, v: Value) -> Result<tz::TimeZone, Ctl> {
     extract_value::<TimeZone>(vm, v).map(|z| z.0)
 }
 
-fn enum_tag_index(vm: &Vm, v: Value) -> usize {
-    match v {
-        Value::Tag(id) => vm.prog.variants.get(id as usize).map_or(usize::MAX, |r| r.index as usize),
-        _ => usize::MAX,
-    }
-}
-
-const UNITS: [Unit; 10] = [
-    Unit::Year,
-    Unit::Month,
-    Unit::Week,
-    Unit::Day,
-    Unit::Hour,
-    Unit::Minute,
-    Unit::Second,
-    Unit::Millisecond,
-    Unit::Microsecond,
-    Unit::Nanosecond,
-];
-
-const MODES: [RoundMode; 9] = [
-    RoundMode::Ceil,
-    RoundMode::Floor,
-    RoundMode::Expand,
-    RoundMode::Trunc,
-    RoundMode::HalfCeil,
-    RoundMode::HalfFloor,
-    RoundMode::HalfExpand,
-    RoundMode::HalfTrunc,
-    RoundMode::HalfEven,
-];
-
-const DISAMBIGUATIONS: [Disambiguation; 3] = [Disambiguation::Compatible, Disambiguation::Earlier, Disambiguation::Later];
-
-fn unit(vm: &Vm, v: Value) -> Result<Unit, Ctl> {
-    UNITS.get(enum_tag_index(vm, v)).copied().ok_or_else(|| Ctl::internal("expected a time.Unit"))
-}
-
-fn mode(vm: &Vm, v: Value) -> Result<RoundMode, Ctl> {
-    MODES.get(enum_tag_index(vm, v)).copied().ok_or_else(|| Ctl::internal("expected a time.RoundingMode"))
-}
-
-fn disambiguation(vm: &Vm, v: Value) -> Result<Disambiguation, Ctl> {
-    DISAMBIGUATIONS.get(enum_tag_index(vm, v)).copied().ok_or_else(|| Ctl::internal("expected a time.Disambiguation"))
-}
+crate::sand_enum!(Unit => time.Unit { Year, Month, Week, Day, Hour, Minute, Second, Millisecond, Microsecond, Nanosecond });
+crate::sand_enum!(RoundMode => time.RoundingMode { Ceil, Floor, Expand, Trunc, HalfCeil, HalfFloor, HalfExpand, HalfTrunc, HalfEven });
+crate::sand_enum!(Disambiguation => time.Disambiguation { Compatible, Earlier, Later });
 
 fn rounding_args(vm: &Vm, a: &[Value], i: usize) -> Result<(Unit, i64, RoundMode), Ctl> {
-    Ok((unit(vm, a[i])?, parse_increment(a[i + 1])?, mode(vm, a[i + 2])?))
+    Ok((vm.enum_value(a[i])?, parse_increment(a[i + 1])?, vm.enum_value(a[i + 2])?))
 }
 
 fn parse_increment(v: Value) -> Result<i64, Ctl> {
@@ -542,7 +500,7 @@ fn check_clock_unit(smallest: Unit, what: &str) -> Result<(), Ctl> {
 
 fn difference_args(vm: &Vm, a: &[Value]) -> Result<(Unit, Unit, i64, RoundMode), Ctl> {
     let (smallest, increment, mode) = rounding_args(vm, a, 3)?;
-    Ok((unit(vm, a[2])?.max(smallest), smallest, increment, mode))
+    Ok((vm.enum_value::<Unit>(a[2])?.max(smallest), smallest, increment, mode))
 }
 
 fn jiff_error(e: jiff::Error) -> Ctl {
@@ -728,6 +686,9 @@ const TIME_TYPES: &[&str] = &["PlainTime", "PlainDateTime", "ZonedDateTime"];
 
 pub fn register(r: &mut Registry) {
     r.source("time", ModKind::Std, include_str!("time.sand"));
+    r.add_enum_type::<Unit>();
+    r.add_enum_type::<RoundMode>();
+    r.add_enum_type::<Disambiguation>();
     r.add_value_type::<Timestamp>();
     r.add_value_type::<ZonedDateTime>();
     r.add_value_type::<DateTime>();
@@ -958,7 +919,7 @@ fn register_zoned(r: &mut Registry) {
     r.add_builtin("time.ZonedDateTime.with", |vm, a| {
         let [y, m, d] = int_args(a, 1);
         let (date, time) = (constrain_date(y, m, d)?, constrain_time(int_args(a, 4))?);
-        let z = zoned(vm, a[0])?.with().date(date).time(time).disambiguation(disambiguation(vm, a[10])?).build();
+        let z = zoned(vm, a[0])?.with().date(date).time(time).disambiguation(vm.enum_value(a[10])?).build();
         alloc_or_fail(vm, z.map(ZonedDateTime))
     });
     r.add_builtin("time.ZonedDateTime.with_plain_time", |vm, a| {
@@ -1049,7 +1010,7 @@ fn register_datetime(r: &mut Registry) {
         alloc_or_fail(vm, dt)
     });
     r.add_builtin("time.PlainDateTime.to_zoned_datetime", |vm, a| {
-        let z = zone(vm, a[1])?.to_ambiguous_zoned(datetime(vm, a[0])?).disambiguate(disambiguation(vm, a[2])?);
+        let z = zone(vm, a[1])?.to_ambiguous_zoned(datetime(vm, a[0])?).disambiguate(vm.enum_value(a[2])?);
         alloc_or_fail(vm, z.map(ZonedDateTime))
     });
     r.add_builtin("time.PlainDateTime.format", |vm, a| {
@@ -1140,7 +1101,7 @@ fn register_year_month(r: &mut Registry) {
         alloc_or_fail(vm, d.map(PlainYearMonth))
     });
     r.add_builtin("time.PlainYearMonth.until", |vm, a| {
-        let largest = unit(vm, a[2])?;
+        let largest: Unit = vm.enum_value(a[2])?;
         if !matches!(largest, Unit::Year | Unit::Month) {
             return Err(Ctl::fail("invalid", "the largest unit between months must be years or months"));
         }
@@ -1201,8 +1162,8 @@ fn register_span(r: &mut Registry) {
         alloc_or_fail(vm, sum.and_then(Span::new))
     });
     r.add_builtin("time.Span.round", |vm, a| {
-        let (smallest, increment, mode) = (unit(vm, a[1])?, parse_increment(a[3])?, mode(vm, a[4])?);
-        let largest = vm.as_option(a[2]).map(|u| unit(vm, u)).transpose()?;
+        let (smallest, increment, mode): (Unit, _, RoundMode) = (vm.enum_value(a[1])?, parse_increment(a[3])?, vm.enum_value(a[4])?);
+        let largest: Option<Unit> = vm.as_option(a[2]).map(|u| vm.enum_value(u)).transpose()?;
         let (s, rel) = (span(vm, a[0])?, opt_zoned(vm, a[5])?);
         require_relative_to(&[s], largest.or(Some(smallest)), &rel)?;
         let mut options = SpanRound::new().smallest(smallest).increment(increment).mode(mode).relative(span_relative_to(&rel));
@@ -1212,7 +1173,7 @@ fn register_span(r: &mut Registry) {
         alloc_or_fail(vm, s.round(options).and_then(Span::new))
     });
     r.add_builtin("time.Span.total", |vm, a| {
-        let (s, unit, rel) = (span(vm, a[0])?, unit(vm, a[1])?, opt_zoned(vm, a[2])?);
+        let (s, unit, rel): (_, Unit, _) = (span(vm, a[0])?, vm.enum_value(a[1])?, opt_zoned(vm, a[2])?);
         require_relative_to(&[s], Some(unit), &rel)?;
         s.total((unit, span_relative_to(&rel))).map(Value::Float).map_err(jiff_error)
     });

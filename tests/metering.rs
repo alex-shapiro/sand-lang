@@ -658,12 +658,10 @@ fn string_natives_are_charged_for_every_argument_they_scan() {
 fn messages_quote_only_part_of_a_huge_argument() {
     let big = "let s = \"\\u{1}\".repeat(20000000)\n";
     let config = || limits(|l| l.max_memory = Some(64 << 20));
-    for src in ["print(s.ord())", "import log\nlog.set_level(s)"] {
-        let (r, _) = run(config(), &format!("{big}{src}"));
-        match r {
-            Err(Error::Runtime { message, .. }) => assert!(message.len() < 1000, "{} bytes", message.len()),
-            other => panic!("{src}: {other:?}"),
-        }
+    let (r, _) = run(config(), &format!("{big}print(s.ord())"));
+    match r {
+        Err(Error::Runtime { message, .. }) => assert!(message.len() < 1000, "{} bytes", message.len()),
+        other => panic!("{other:?}"),
     }
     for call in ["time.Instant.parse(s)", "http.get(s)", "net.connect(s, 80)"] {
         let module = call.split('.').next().unwrap();

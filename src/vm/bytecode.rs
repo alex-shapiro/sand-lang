@@ -5,6 +5,7 @@
 
 use super::value::TypeDesc;
 use crate::hir::FormatSpec;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 pub type Reg = u16;
@@ -1265,6 +1266,9 @@ pub struct Program {
     pub global_names: Vec<String>,
     pub types: Vec<StructRt>,
     pub variants: Vec<VariantRt>,
+    /// The runtime id of the first variant of each enum bound to a Rust type
+    /// (`EnumType`), whose variants have consecutive ids.
+    pub enum_types: HashMap<std::any::TypeId, u32>,
     pub ids: RtIds,
     pub entry: u32,
     pub tests: Vec<(String, u32)>,

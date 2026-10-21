@@ -35,7 +35,7 @@ pub use engine::{
 };
 pub use feed::StdinFeed;
 pub use files::MemFs;
-pub use native::{Conversion, FromValue, HostError, IntoHostError, IntoValue, ListElem, NativeModule, SandType, TypeContext};
+pub use native::{Conversion, EnumType, FromValue, HostError, IntoHostError, IntoValue, ListElem, NativeModule, SandType, TypeContext};
 pub use policy::{Capability, CustomPolicy, Decision, Policy, PromptAnswer, Prompter, RulePolicy};
 pub use session::Session;
 pub use stdio::flush_stdio;

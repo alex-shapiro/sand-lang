@@ -670,7 +670,8 @@ fn with_file(vm: &mut Vm, v: Value, needs: Needs, op: impl FnOnce(&mut Vm, &mut 
 }
 
 fn register_file(r: &mut Registry) {
-    r.add_builtin("fs.open_file", open_file);
+    r.add_enum_type::<OpenMode>();
+    r.add_builtin("fs.open", open);
     r.add_method("fs.File.read", |vm, a| {
         let max = a[1].as_int();
         if max <= 0 {
@@ -871,10 +872,10 @@ fn register_file(r: &mut Registry) {
     });
 }
 
-/// `fs.open_file(path, mode)`: `mode` is the index of an `fs.Mode` variant.
-fn open_file(vm: &mut Vm, a: &[Value]) -> NResult {
-    const MODES: [OpenMode; 5] = [OpenMode::Read, OpenMode::Write, OpenMode::Append, OpenMode::CreateNew, OpenMode::ReadWrite];
-    let mode = *MODES.get(to_usize_saturating(a[1].as_int())).ok_or_else(|| Ctl::fail("invalid", "invalid file mode"))?;
+crate::sand_enum!(OpenMode => fs.Mode { Read, Write, Append, CreateNew, ReadWrite });
+
+fn open(vm: &mut Vm, a: &[Value]) -> NResult {
+    let mode: OpenMode = vm.enum_value(a[1])?;
     let (shown, mut t) = target(vm, a[0], Mode::Follow)?;
     for (needed, access) in [(mode.reads(), Access::Read), (mode.writes(), Access::Write)] {
         if needed {
