@@ -1,38 +1,38 @@
 +++
 title = "Sandbox and policies"
-description = "How Sand checks every effect of a script against a policy, and how to set the policy and resource limits."
+description = "Configure access to resources with policies and limits."
 +++
 
-A Sand script has no access to the outside world by default. It cannot read files, connect to the network, read environment variables or read standard input until a policy allows it. The engine checks each such effect against the policy before the effect happens.
+By default, a Sand script is isolated from the host system: it cannot access files, network sockets, environment variables, or standard input unless the active policy grants permission. The engine checks every external operation against the policy before executing it.
 
 ## Capabilities
 
-Each effect makes a capability request. The policy decides each request. These are the capabilities:
+Each external operation requests a capability from the policy:
 
-| Capability                  | Requested by                                     |
-| --------------------------- | ------------------------------------------------ |
-| `read`, `write`             | file system access, for each path                |
-| `net`, `http`               | network connections and HTTP requests, by host   |
-| `listen`                    | sockets that accept connections                  |
-| `env`                       | environment variables, by name                   |
-| `stdin`, `stdout`, `stderr` | the standard streams                             |
-| `timezone`                  | `time.local_zone()`                              |
-| `import`                    | script modules, by path                          |
-| `custom`                    | functions of [native modules](/guide/embedding/) |
+| Capability                  | Controlled operations                                    |
+| --------------------------- | -------------------------------------------------------- |
+| `read`, `write`             | file system access, checked per canonical path           |
+| `net`, `http`               | TCP/TLS connections and HTTP requests, by host:port      |
+| `listen`                    | TCP listeners, by bind address                           |
+| `env`                       | environment variable reads, by variable name             |
+| `stdin`, `stdout`, `stderr` | standard input, output, and error streams                |
+| `timezone`                  | `time.local_zone()`                                      |
+| `import`                    | script module imports, by file path                      |
+| `custom`                    | guarded functions in [native modules](/guide/embedding/) |
 
-The script has no other path to the system. Sand has no foreign function interface, and it does not start processes.
+Sand has neither a foreign function interface nor process-spawning APIs; every host interaction passes through these capabilities.
 
-## Decisions
+## Policy decisions
 
-The policy gives one of three decisions for each request:
+A policy evaluates each capability request to a decision:
 
-- **allow**: the effect happens.
-- **deny**: the effect does not happen, and the function returns an error.
-- **prompt**: the engine asks the host, and no task runs until the host answers. On the command line, `sand run --prompt` asks you on the terminal. If no one can answer, Sand denies the request.
+- **allow**: the engine performs the operation.
+- **deny**: the engine blocks the operation and returns a permission error to the script.
+- **prompt**: the engine suspends execution and asks the host prompter (`sand run --prompt` prompts on the terminal). If the host has not configured a prompter, the request is denied.
 
-## What a script sees
+## Behavior on denial
 
-A denied I/O function returns an `Err` of kind `permission_denied`. The script can handle it like any other error. A denied environment variable looks like an unset variable, and when the policy denies the local time zone, `time.local_zone()` returns `UTC`.
+If the policy denies a file or network operation, the standard library function returns an `Err` with kind `"permission_denied"`. A denied environment variable read returns `None`, and a denied `timezone` request causes `time.local_zone()` to return `UTC`:
 
 ```sand
 import env
@@ -45,7 +45,7 @@ match http.get("https://example.com/") {
 print(env.get("HOME"))
 ```
 
-If the script uses `?` at the top level, the denial stops the run:
+Unwrapping a denied `Result` with `?` at the top level terminates the run:
 
 ```sand fails
 import http
@@ -54,11 +54,11 @@ let resp = http.get("https://example.com/")?
 print(resp.status)
 ```
 
-A denied `print` stops the run. A denied `import` is a compile error.
+A denied write to `stdout` or `stderr` aborts the run immediately, and a denied `import` fails at compile time.
 
 ## Command-line flags
 
-`sand run`, `sand test` and `sand repl` deny everything except output and imports in the module root unless you allow it. Use flags to allow access:
+`sand run`, `sand test`, and `sand repl` deny all capabilities except `stdout`, `stderr`, and imports within the module root. Grant capabilities with CLI flags:
 
 ```sh
 sand run main.sand --allow-read=data --allow-write=out
@@ -66,25 +66,25 @@ sand run fetch.sand --allow-net=api.example.com --allow-env=HOME,LANG
 sand run main.sand --allow-stdin --max-time=10s
 ```
 
-| Flag                                | Allows                                       |
+| Flag                                | Granted capabilities                         |
 | ----------------------------------- | -------------------------------------------- |
-| `--allow-read=PATHS`                | reading these files and directories          |
-| `--allow-write=PATHS`               | reading and writing them                     |
-| `--allow-net=HOSTS`                 | connections and HTTP requests to these hosts |
-| `--allow-listen=ADDRS`              | listening on these addresses                 |
-| `--allow-env=NAMES`                 | these environment variables (`AWS_*`, `*`)   |
-| `--allow-stdin`, `--allow-timezone` | standard input, the local time zone          |
-| `--allow-all`                       | everything (use only for trusted scripts)    |
-| `--policy=FILE`                     | the rules and limits of a policy file        |
+| `--allow-read=PATHS`                | read access to the listed files/directories  |
+| `--allow-write=PATHS`               | read and write access to the listed paths    |
+| `--allow-net=HOSTS`                 | TCP and HTTP access to the listed hosts      |
+| `--allow-listen=ADDRS`              | bind access on the listed local addresses    |
+| `--allow-env=NAMES`                 | read access to matching env vars (`AWS_*`)   |
+| `--allow-stdin`, `--allow-timezone` | standard input and local time zone           |
+| `--allow-all`                       | all capabilities (use only for trusted code) |
+| `--policy=FILE`                     | rules and resource limits from a policy file |
 
-Separate values with commas. A directory rule also covers all files and directories in it.
+Separate multiple values with commas. Allowing a directory grants access to all files and subdirectories within it.
 
 ## Policy files
 
-A policy file keeps the rules and limits of a program in one place. Each line is one rule. A `#` starts a comment.
+A policy file declares capability rules and resource limits in a single file, with a rule per line and `#` comments:
 
 ```policy
-# Read and write the project, but keep secrets out.
+# Allow read/write in the project directory, except .env files.
 allow ./
 deny ./**/.env
 allow read ~/.gitconfig
@@ -95,43 +95,41 @@ limit memory 64M
 limit time 10s
 ```
 
-Run a script with it:
+Pass the policy file to `sand run`:
 
 ```sh
 sand run main.sand --policy=app.policy
 ```
 
-Each path must start with `/`, `./` (the directory of the policy file), `../` or `~/`. `allow PATH` allows reading and writing; `allow read PATH` allows only reading. `default` sets the decision for requests that no rule matches. Without it, Sand denies them.
+File paths in a policy file must start with `/`, `./` (resolved relative to the policy file directory), `../`, or `~/`. `allow PATH` grants both read and write access; `allow read PATH` grants read-only access. `default` sets the fallback decision (`deny`, `allow`, or `prompt`) for unmatched requests.
 
-`sand check`, `sand lint` and `sand fmt` also work on policy files. `sand lint` reports rules that have no effect.
+`sand check`, `sand lint`, and `sand fmt` also operate on `.policy` files, and `sand lint` warns about shadowed or redundant rules.
 
-### Which rule wins
+### Rule precedence
 
-When more than one rule matches a request, the most specific rule wins. In the file above, `deny ./**/.env` is more specific than `allow ./` for `./data/.env`, so Sand denies access to that file:
+If multiple rules match a request, the most specific rule takes precedence. In the policy above, `deny ./**/.env` is more specific than `allow ./` for `./data/.env`, so access is denied:
 
-- A path with more segments is more specific. If two paths have the same number of segments, the path with fewer wildcards wins.
-- An exact host is more specific than `*.example.com`, which is more specific than `*`. A port makes a rule more specific.
-- An exact environment variable name is more specific than a pattern.
-- If an allow rule and a deny rule are equally specific, the deny rule wins.
+- File paths with more path segments are more specific; ties break toward fewer wildcards.
+- Exact hostnames (`api.example.com`) are more specific than wildcard domains (`*.example.com`), which are more specific than `*`. A port constraint increases specificity.
+- Exact environment variable names are more specific than prefix patterns.
+- If an `allow` rule and a `deny` rule have equal specificity, `deny` wins.
 
-Sand resolves `..` and symbolic links before it checks a path, so a script cannot use them to leave an allowed directory.
+Sand canonicalizes paths and resolves `..` and symbolic links before checking the policy, preventing directory traversal outside allowed trees.
 
-### Private networks
+### Private network protection
 
-Sand denies connections to private and internal addresses, such as `localhost`, `127.0.0.1` and `10.0.0.0/8`. `--allow-net=*` does not allow them. To allow one, name it in a rule (`--allow-net=localhost:8080`) or use `--allow-private-net`. In a policy file, write `allow private-net`.
+By default, Sand blocks connections to loopback, link-local, and RFC 1918 private addresses (`localhost`, `127.0.0.1`, `10.0.0.0/8`, and similar ranges) even if `--allow-net=*` is set. To permit private network access, either name the target host explicitly in an allow rule (`--allow-net=localhost:8080`) or pass `--allow-private-net` (`allow private-net` in a policy file).
 
-Sand also checks each address that a host name resolves to. Thus a public host name that resolves to a private address cannot reach your internal network.
+Sand also checks every IP address returned by DNS resolution so that a public hostname resolving to an internal IP address cannot bypass private network protection.
 
 ## Resource limits
 
-Limits stop a script that uses too much memory or time. When a script goes over the memory, time, CPU, instruction or output limit, Sand stops the run at once. The script cannot catch this error, and `sand run` exits with code 3. For example, for a script with an endless loop:
+Resource limits bound the memory, time, and host handles that a script can consume. If a script exceeds the memory, wall-clock time, CPU time, instruction count, or output limit, Sand aborts execution immediately and `sand run` exits with code 3:
 
 ```sh
 $ sand run loop.sand --max-time=50ms
 sand: time limit exceeded
 ```
-
-The most important limits are these:
 
 | Limit           | Flag                   | Default   |
 | --------------- | ---------------------- | --------- |
@@ -140,4 +138,4 @@ The most important limits are these:
 | CPU time        | `--max-cpu=DURATION`   | unlimited |
 | instructions    | `--max-instructions=N` | unlimited |
 
-In a policy file, write `limit memory 64M`, `limit time 10s`, `limit cpu 2s` or `limit instructions 1_000_000`. Other limits control the output size, the call depth, the number of tasks, the number of open files and connections, and the size of HTTP bodies. A script that goes over the call depth or the number of tasks fails with an error, and `sand run` exits with code 1. When a script opens too many files or connections, or reads an HTTP body that is too large, the function returns an `Err` of kind `"limit"`, and the script can handle it. [§15 of the specification](/spec/#15-resource-limits) lists every limit and its default, and [§14.7](/spec/#147-policy-files) every policy rule.
+In a policy file, set limits with `limit memory 64M`, `limit time 10s`, `limit cpu 2s`, or `limit instructions 1_000_000`. Additional limits bound output bytes, call stack depth, concurrent task count, open file and connection handles, and HTTP body size. Exceeding the call stack depth or task limit aborts the run with exit code 1. Exceeding the open handle or HTTP body limit returns a recoverable `Err` with kind `"limit"`. For the complete list of limits and policy rules, see [§15](/spec/#15-resource-limits) and [§14.7](/spec/#147-policy-files) of the specification.

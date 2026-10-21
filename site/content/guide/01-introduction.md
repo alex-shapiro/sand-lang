@@ -1,17 +1,13 @@
 +++
 title = "Introduction"
-description = "What Sand is, how to install it, and how to run your first script."
+description = "Overview, installation instructions, and running your first script."
 +++
 
-Sand is a statically typed scripting language for code that you do not fully trust.
-A bytecode virtual machine, written in safe Rust, runs each script in a sandbox.
-The script cannot touch files, the network, the environment or the standard streams unless the host allows it.
-The host also sets hard limits on memory, CPU time and instructions.
+Sand is a statically typed scripting language designed to execute untrusted code inside a capability-based sandbox. A bytecode virtual machine written in safe Rust runs each script in-process, enforcing policy rules on files, network connections, environment variables, and standard streams, alongside hard limits on memory, execution time, and instruction count.
 
-You can run Sand from the command line, embed it in a Rust program, or run it in a web page.
+You can run Sand from the command line, embed it in a Rust application, or run it in a browser via WebAssembly.
 
-> **Sand is alpha software.** The language, the standard library and the embedding API can change without notice.
-> Do not use Sand in production yet.
+> **Sand is alpha software.** The language, standard library, and embedding API change without notice. Do not use Sand in production yet.
 
 ## What Sand code looks like
 
@@ -31,12 +27,11 @@ let total = cart.map(i => i.price * i.quantity.to_float()).sum()
 print("\(cart.len()) items, total \(total:.2)")
 ```
 
-Function signatures and struct fields declare their types, and the checker infers most other types.
-Integer overflow stops the script, there is no null, and `if`, `match` and blocks are expressions.
+Function signatures and struct fields declare explicit types, while local types are inferred. Integer arithmetic is checked for overflow, optional values use `Option<T>` instead of null references, and `if`, `match`, and blocks are expressions.
 
 ## Install
 
-Build the `sand` command from source with Cargo:
+Build and install the `sand` CLI from source with Cargo:
 
 ```sh
 git clone https://github.com/alex-shapiro/sand-lang
@@ -46,26 +41,23 @@ cargo install --path cli
 
 ## Hello, world
 
-Write this line to a file named `hello.sand`:
+Create a file named `hello.sand`:
 
 ```sand
 print("Hello, world!")
 ```
 
-Run the file:
+Run the script with `sand run`:
 
 ```sh
 sand run hello.sand
 ```
 
-`sand run` denies all access to the outside world by default.
-Options such as `--allow-read=DIR` and `--allow-net=HOST` grant access, and options such as `--max-time=5s` set limits.
-The [Sandbox and policies](/guide/sandbox/) chapter explains the options.
+`sand run` denies access to external files, network hosts, and environment variables by default. Pass flags such as `--allow-read=DIR` and `--allow-net=HOST` to grant capabilities, and flags such as `--max-time=5s` to set resource limits. See [Sandbox and policies](/guide/sandbox/) for details.
 
 ## The REPL
 
-`sand repl` starts an interactive session.
-Sand checks and runs each input when you enter it, and shows the value of a final expression:
+`sand repl` starts an interactive session that type-checks and evaluates each input and prints the value of a trailing expression:
 
 ```text
 > let xs = [1, 2, 3]
@@ -75,43 +67,41 @@ Sand checks and runs each input when you enter it, and shows the value of a fina
 int?
 ```
 
-Enter `help()` for an overview of the library, or `help(str)` for the documentation of one type.
-Enter `:help` for the REPL's commands, and `:quit` to end the session.
+Call `help()` to list standard library modules, or `help(str)` to view documentation for a specific symbol. Enter `:help` to list REPL commands and `:quit` to exit.
 
 ## The playground
 
-The [playground](/play/) runs Sand in your browser, with no install.
-The Sand examples in this guide run in the same sandbox: the site's build runs each one and shows its output below it.
+The browser [playground](/play/) runs the Sand engine via WebAssembly without local installation. Every executable example in this guide runs under the same sandbox configuration during the site build.
 
 ## Other tools
 
-The `sand` command also includes the checker, the linter, the formatter and the test runner:
+The `sand` CLI includes a type checker, linter, code formatter, and test runner:
 
 ```sh
-sand check script.sand   # type check
-sand lint script.sand    # report dubious code
+sand check script.sand   # type-check without running
+sand lint script.sand    # report lint warnings
 sand fmt script.sand     # format in place
-sand test script.sand    # run the test blocks
+sand test script.sand    # run test blocks
 ```
 
-The [Tools](/guide/tools/) chapter describes them.
+See [Tools](/guide/tools/) for details.
 
 ## The chapters
 
-1. [Introduction](/guide/introduction/): this page.
-2. [Basics](/guide/basics/): bindings, primitive types, arithmetic and strings.
-3. [Functions](/guide/functions/): parameters, lambdas, closures and pipes.
-4. [Control flow](/guide/control-flow/): blocks, `if`, `match` and loops.
-5. [Collections](/guide/collections/): lists, maps, sets, tuples and iterators.
-6. [Structs and enums](/guide/structs-and-enums/): your own types and their methods.
-7. [Pattern matching](/guide/patterns/): destructuring and exhaustive `match`.
-8. [Errors](/guide/errors/): `Option`, `Result` and the `?` operator.
-9. [Traits and generics](/guide/traits/): shared behavior and generic bounds.
+1. [Introduction](/guide/introduction/): overview and installation.
+2. [Basics](/guide/basics/): bindings, primitive types, arithmetic, and strings.
+3. [Functions](/guide/functions/): parameters, lambdas, closures, and pipes.
+4. [Control flow](/guide/control-flow/): blocks, `if`, `match`, and loops.
+5. [Collections](/guide/collections/): lists, maps, sets, tuples, and iterators.
+6. [Structs and enums](/guide/structs-and-enums/): user-defined types and methods.
+7. [Pattern matching](/guide/patterns/): destructuring and exhaustiveness checking.
+8. [Errors](/guide/errors/): `Option`, `Result`, and the `?` operator.
+9. [Traits and generics](/guide/traits/): traits, implementations, and generic bounds.
 10. [Modules](/guide/modules/): imports and visibility.
-11. [Concurrency](/guide/concurrency/): tasks, channels and asynchronous I/O.
-12. [Resources](/guide/resources/): files, connections, `use` and `defer`.
-13. [Sandbox and policies](/guide/sandbox/): policies and resource limits.
-14. [Tools](/guide/tools/): the checker, linter, formatter and test runner.
-15. [Embedding](/guide/embedding/): Sand in a Rust program.
+11. [Concurrency](/guide/concurrency/): tasks, channels, and asynchronous I/O.
+12. [Resources](/guide/resources/): resource cleanup with `use` and `defer`.
+13. [Sandbox and policies](/guide/sandbox/): capability policies and resource limits.
+14. [Tools](/guide/tools/): checker, linter, formatter, and test runner.
+15. [Embedding](/guide/embedding/): embedding Sand in a Rust application.
 
-The [specification](/spec/) defines the language exactly. The [library reference](/std/) documents every module.
+For complete reference material, see the [language specification](/spec/) and the [standard library reference](/std/).

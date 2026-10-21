@@ -1,13 +1,13 @@
 +++
 title = "Errors"
-description = "Handle missing values and failed operations in Sand with Option, Result, the ? operator and ??, and learn which failures end a run."
+description = "Option, Result, and unrecoverable faults."
 +++
 
-Sand has no `null` and no exceptions. A value that can be absent has an `Option` type. An operation that can fail returns a `Result`. The type checker makes you handle both cases before you use the value. A small set of failures, such as a failed `assert`, end the run.
+Sand represents absent values with `Option<T>` (`T?`) and recoverable errors with `Result<T, E>`, rather than null references or exceptions. Unrecoverable faults and failed assertions immediately terminate execution.
 
 ## Optional values
 
-The type `T?` is short for `Option<T>`. Its value is `Some(x)` or `None`.
+The type `T?` is shorthand for `Option<T>`, which is either `Some(x)` or `None`:
 
 ```sand
 let names = ["ann", "bo"]
@@ -16,18 +16,18 @@ print(names.find(n => n.starts_with("z")))
 print("42".parse_int())
 ```
 
-A `T?` is not a `T`. To use the value, you must first handle the `None` case:
+Because `T?` and `T` are distinct types, you must unwrap an optional value before using it as `T`:
 
 ```sand error
 let i = [4, 5].find_index(x => x == 5)
 print(i + 1)
 ```
 
-Use `match`, `if let` or `let ... else` (see [Pattern matching](/guide/patterns/)), or one of the operators below. The [Option reference](/std/prelude/Option/) lists the methods, such as `map`, `filter` and `ok_or`.
+Unwrap an `Option<T>` with pattern matching (`match`, `if let`, `let ... else`), the `?` or `??` operators, or methods on [`Option`](/std/prelude/Option/) such as `map`, `filter`, and `ok_or`.
 
 ## Results
 
-`Result<T, E>` is `Ok(T)` or `Err(E)`. Most code uses `Result<T>`, which is short for `Result<T, Error>`.
+`Result<T, E>` is either `Ok(T)` or `Err(E)`. Omitting the second type parameter (`Result<T>`) defaults the error type to the prelude `Error` struct:
 
 ```sand
 fn parse_age(text: str) -> Result<int> {
@@ -47,11 +47,11 @@ match parse_age("-4") {
 }
 ```
 
-The [Result reference](/std/prelude/Result/) lists the methods, such as `map`, `map_err` and `and_then`.
+See the [`Result` reference](/std/prelude/Result/) for transformation methods such as `map`, `map_err`, and `and_then`.
 
 ### The `Error` struct
 
-`Error` is a prelude struct with two fields. `kind` is a short tag for programs to test. `message` is a description for people. The function `error(message, kind)` makes an `Error`. If you omit `kind`, its value is `"error"`.
+The prelude `Error` struct has two `str` fields: `kind` (a machine-readable category tag) and `message` (a human-readable description). Construct an `Error` with `error(message, kind: "error")`:
 
 ```sand
 let e = error("disk is full", kind: "io")
@@ -59,11 +59,11 @@ print(e)
 print(e.kind)
 ```
 
-The standard library uses these kinds: `"error"`, `"not_found"`, `"permission_denied"`, `"already_exists"`, `"io"`, `"timeout"`, `"parse"`, `"invalid"`, `"http"`, `"closed"` and `"limit"`. Use them in your own errors when they apply.
+Standard library functions return errors with standard `kind` tags (`"error"`, `"not_found"`, `"permission_denied"`, `"already_exists"`, `"io"`, `"timeout"`, `"parse"`, `"invalid"`, `"http"`, `"closed"`, and `"limit"`).
 
 ## Propagation with `?`
 
-The `?` operator after an expression unwraps a `Some` or an `Ok`. On `None` or `Err`, it returns that value from the current function immediately.
+The postfix `?` operator unwraps `Some(v)` or `Ok(v)`, or returns `None` or `Err(e)` early from the enclosing function:
 
 ```sand
 fn total_age(a: str, b: str) -> Result<int> {
@@ -78,7 +78,7 @@ print(total_age("30", "12"))
 print(total_age("30", "x"))
 ```
 
-The current function must return the same kind of value. Use `?` on an `Option` in a function that returns an `Option`. Use `?` on a `Result<T, E>` in a function that returns a `Result` with the same `E`. Otherwise the compiler shows an error:
+The enclosing function must return a matching wrapper type (`Option` for `Option?`, or `Result<_, E>` for `Result<T, E>?`):
 
 ```sand error
 fn half(text: str) -> Result<int> {
@@ -87,11 +87,11 @@ fn half(text: str) -> Result<int> {
 }
 ```
 
-To convert, use `ok_or` (from `Option` to `Result`), `ok()` (from `Result` to `Option`) or `map_err` (to change the error type).
+Use `Option.ok_or`, `Result.ok`, or `Result.map_err` to convert between wrapper or error types before applying `?`.
 
 ## Default values with `??`
 
-The `??` operator gives the payload of a `Some` or an `Ok`. On `None` or `Err`, it evaluates the expression on its right side. Sand evaluates the right side only when it needs it.
+The coalescing operator `??` returns the payload of `Some(v)` or `Ok(v)`, or lazily evaluates its right operand if the left operand is `None` or `Err(_)`:
 
 ```sand
 let ports = ["http": 80]
@@ -101,28 +101,19 @@ print("x".parse_int() ?? 0)
 
 ## Failures
 
-Some errors are not values. They are failures, and a failure ends the run. A script cannot catch a failure, and [deferred code](/guide/resources/) does not run. The tool prints the kind, the message and a stack trace, and `sand run` exits with code 1.
-
-These functions cause a failure:
-
-- `fail(message, kind)` fails with the message. The default kind is `"error"`.
-- `assert(cond, message)` fails (kind `"assert"`) if `cond` is false.
-- `todo()` marks code that you did not write yet.
-- `unwrap()` gives the payload of `Some` or `Ok`, and fails on `None` or `Err`. `expect(message)` does the same with your message.
+An unrecoverable failure immediately aborts execution without running pending `defer` or `use` cleanup blocks. You can trigger a failure explicitly with `fail(message, kind)`, `assert(cond, message)`, `todo()`, `unwrap()`, or `expect(message)`:
 
 ```sand fails
 let scores: [int] = []
-let best = scores.max().expect("no scores yet")
+let best = scores.max().expect("missing scores")
 print(best)
 ```
 
-Faults that the program cannot recover from also fail the run. Examples are a list index out of range, a missing map key, integer overflow and division by zero.
-
-Use a failure for a bug in the program, or for a condition from which the program cannot continue. For problems that the caller can handle, return a `Result`.
+Runtime faults—such as out-of-bounds list indexing, missing map keys with `m[k]`, integer overflow, and division by zero—also abort execution. Use `Result` for recoverable errors and failures for invariant violations.
 
 ## `?` at the top level
 
-At the top level of the main module, there is no function to return from. There, `?` unwraps the value, and on `Err` it ends the run with that error. On `None`, it ends the run with the kind `"none"`. This is not a failure: before the run ends, Sand runs the deferred code of the top level. Then `sand run` exits with code 1. This keeps short scripts short:
+At the top level of the entry module (or inside a `test` block), applying `?` to `Err(e)` or `None` runs top-level `defer` and `use` cleanup blocks and terminates the run with an error:
 
 ```sand fails
 fn parse_age(text: str) -> Result<int> {
@@ -135,11 +126,11 @@ let other = parse_age("old")?
 print("not printed")
 ```
 
-You can use top-level `?` only in the main module and in `test` blocks. In a module that other modules import, it is a compile error. There, return a `Result` from a function instead.
+Top-level `?` is rejected at compile time inside imported library modules.
 
 ## Do not ignore results
 
-If an expression statement gives a `Result` and the code does not use it, `sand lint` reports an `unused-result` warning. Handle the result with `?` or `match`, or discard it explicitly with `let _ =`.
+If an expression statement produces an unhandled `Result`, `sand lint` emits an `unused-result` warning. Handle the result with `?` or `match`, or explicitly discard it with `let _ =`:
 
 ```sand
 import fs

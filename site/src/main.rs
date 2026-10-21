@@ -274,7 +274,7 @@ fn guide(dir: &Path, checks: &mut Checks) -> Result<(Vec<Page>, Vec<Entry>), Str
     let mut entries = vec![Entry::new("Guide", "guide", "/guide/", "Step-by-step guide to the Sand language.")];
     let mut index = String::from(
         r#"<h1>The Sand guide</h1>
-<p class="lede">This guide introduces Sand from your first program to embedding the engine in Rust. Every Sand example is verified during the site build.</p>
+<p class="lede">Welcome to the Sand guide. It introduces Sand, starting from the basics, and works up to more advanced features like the embedding API.</p>
 <ol class="chapters">"#,
     );
     for (i, c) in chapters.iter().enumerate() {

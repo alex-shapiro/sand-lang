@@ -1,13 +1,13 @@
 +++
 title = "Embedding"
-description = "Run Sand scripts from a Rust program or a web page, with your own policy, limits, files and native modules."
+description = "Embed in a Rust application or web page."
 +++
 
-The `sandlang` crate is the Sand engine as a Rust library. Your program creates an `Engine`, gives it a `Config`, and runs scripts. The script can do only what the configuration allows.
+The `sandlang` crate embeds the Sand compiler and VM as a Rust library. Construct a `Config`, create an `Engine`, and run scripts under the configured sandbox policy and resource limits.
 
-## Run a script
+## Running a script
 
-`Engine::run_source` compiles and runs a script. It returns a future: run it on a Tokio runtime with timers enabled.
+`Engine::run_source` compiles and executes a script, returning a future that runs on any Tokio runtime with timers enabled:
 
 ```rust
 use sandlang::{Config, Engine};
@@ -22,24 +22,24 @@ async fn main() {
 }
 ```
 
-The script runs inside the future, on the thread that polls it. The first argument is the file name that diagnostics and stack traces show. `run_file(path)` runs a file instead.
+The script executes inside the future on the polling thread. The first argument is the source name used in diagnostics and stack traces. Use `Engine::run_file(path)` to load the entry module from disk.
 
-`Error` tells you why a run failed:
+Failed runs return a `sandlang::Error`:
 
-| Variant                           | Cause                                     |
-| --------------------------------- | ----------------------------------------- |
-| `Error::Compile(diagnostics)`     | the script has syntax or type errors      |
-| `Error::Runtime { message, .. }`  | the script failed with an error           |
-| `Error::Limit(kind)`              | the script went over a resource limit     |
-| `Error::Interrupted`              | the host interrupted the run              |
-| `Error::Io(message)`              | Sand cannot read a script file            |
-| `Error::Internal { message, .. }` | a bug in the engine or in a native module |
+| Variant                           | Cause                                      |
+| --------------------------------- | ------------------------------------------ |
+| `Error::Compile(diagnostics)`     | syntax or static type errors               |
+| `Error::Runtime { message, .. }`  | uncaught runtime failure                   |
+| `Error::Limit(kind)`              | resource limit exceeded                    |
+| `Error::Interrupted`              | execution cancelled via `InterruptHandle`  |
+| `Error::Io(message)`              | entry script file could not be read        |
+| `Error::Internal { message, .. }` | internal engine or native module invariant |
 
-`err.render()` formats the error as `sand run` shows it. `check_source(name, source)` type checks a script without running it, and `lint_source` returns its lint warnings.
+`err.render()` formats the error with source snippets and stack traces. `Engine::check_source` type-checks a script without executing it, and `Engine::lint_source` returns lint diagnostics.
 
 ## Configuration
 
-`Config::new()` denies all access except standard output, standard error and imports in the module root. Add a policy, limits and other settings with builder methods:
+`Config::new()` denies all host capabilities except `stdout`, `stderr`, and imports within the module root. Use builder methods on `Config` to configure policies, limits, virtual files, and streams:
 
 ```rust
 use sandlang::{Config, Engine, Limits, MemFs, MemorySink, Policy, RulePolicy};
@@ -73,13 +73,13 @@ println!("{}", out.contents());
 let report = files.read("/out/report.txt")?;
 ```
 
-- **Policy.** `RulePolicy` has a method for each rule of a policy file: `allow_read`, `allow_write`, `allow_net`, `allow_http`, `allow_env`, `deny_read`, `deny_net`, `fallback` and more. `Policy::allow_all()` allows everything; use it only for trusted scripts.
-- **Limits.** `Limits` has a field for each limit of [Sandbox and policies](/guide/sandbox/). Start from `Limits::default()`.
-- **Files.** `memory_fs` gives the scripts an in-memory file system instead of the disk. Clones of a `MemFs` share their files, so the host can write input files and read the output files.
-- **Streams.** `stdout` and `stderr` capture the output of the script. `stdin_bytes` gives it a fixed standard input, which the policy must allow with `stdin`.
-- **Environment.** `args` and `env` set what `env.args()` and `env.get` return. Without `env`, scripts read the environment of your process, if the policy allows it.
+- **Policy.** `RulePolicy` provides builder methods for each policy rule (`allow_read`, `allow_write`, `allow_net`, `allow_http`, `allow_env`, `deny_read`, `deny_net`, `fallback`, and others). `Policy::allow_all()` grants all capabilities and should be used only for trusted scripts.
+- **Limits.** `Limits` configures every resource bound described in [Sandbox and policies](/guide/sandbox/).
+- **Virtual file system.** `Config::memory_fs` replaces host disk access with an in-memory `MemFs`. Clones of a `MemFs` share the same underlying storage so the host can populate input files before a run and read output files afterward.
+- **Streams.** `Config::stdout` and `Config::stderr` redirect script output to a `MemorySink` or custom sink. `Config::stdin_bytes` supplies fixed input bytes (which still require the `stdin` capability).
+- **Environment.** `Config::args` and `Config::env` set the command-line arguments and environment map exposed to the script. If `Config::env` is not set, `env.get` reads the host process environment subject to the policy.
 
-To use a policy file, parse it with `sandlang::policy::PolicyFile`:
+To load a `.policy` file from disk, parse it with `sandlang::policy::PolicyFile`:
 
 ```rust
 # use sandlang::Config;
@@ -91,13 +91,13 @@ let file = PolicyFile::parse(&text, Path::new("."), None).expect("a valid policy
 let config = Config::new().policy(file.policy()).limits(file.limits.clone());
 ```
 
-The second argument is the directory for `./` paths, and the third is the directory for `~/` paths.
+The second argument is the base directory for `./` paths, and the third argument is the optional home directory for `~/` paths.
 
-To answer `prompt` decisions, give `Config::prompter` a function that takes a `Capability` and returns a future of a `PromptAnswer`. Without a prompter, Sand denies each request that the policy would prompt for.
+To handle `prompt` policy decisions, pass an async callback to `Config::prompter` that accepts a `Capability` and returns a `PromptAnswer`. If a prompter is not configured, `prompt` decisions default to `deny`.
 
 ## Native modules
 
-A `NativeModule` makes Rust functions available to scripts. Scripts import it like a standard module:
+`NativeModule` exposes Rust functions to Sand scripts as an importable module:
 
 ```rust
 use sandlang::{Config, HostError, NativeModule};
@@ -105,11 +105,11 @@ use sandlang::{Config, HostError, NativeModule};
 let mut geo = NativeModule::new("geo");
 geo.function("dist", |x: f64, y: f64| -> f64 { (x * x + y * y).sqrt() })
     .params(&["x", "y"]);
-geo.doc("dist", "The distance of (x, y) from the origin.");
+geo.doc("dist", "Returns the distance of (x, y) from the origin.");
 geo.function("country", |code: &str| -> Result<String, HostError> {
     match code {
         "NL" => Ok("Netherlands".to_string()),
-        _ => Err(HostError::new("not_found", format!("no country {code}"))),
+        _ => Err(HostError::new("not_found", format!("unknown country {code}"))),
     }
 });
 let config = Config::new().module(geo);
@@ -122,11 +122,11 @@ print(geo.dist(3.0, 4.0))
 print(geo.country("XX"))
 ```
 
-The script prints `5.0` and `Err(Error { kind: "not_found", message: "no country XX" })`.
+Running the script above prints `5.0` and `Err(Error { kind: "not_found", message: "unknown country XX" })`.
 
-Sand derives the signature of each function from its Rust types. Without `.params`, the parameters have the names `arg1`, `arg2` and so on. These Rust types convert to Sand types:
+Sand infers the Sand function signature from the Rust parameter and return types:
 
-| Rust                                        | Sand                         |
+| Rust type                                   | Sand type                    |
 | ------------------------------------------- | ---------------------------- |
 | `i64`, `f64`, `bool`, `()`                  | `int`, `float`, `bool`, `()` |
 | `String`, `&str`                            | `str`                        |
@@ -137,11 +137,11 @@ Sand derives the signature of each function from its Rust types. Without `.param
 | `HashMap<String, T>`, `BTreeMap<String, T>` | `[str: T]`                   |
 | tuples of up to 4 elements                  | tuples                       |
 
-A `HostError` keeps its kind. Any other error type becomes an `Error` of kind `error`, with the `Display` text of the error as its message.
+Returning `Err(HostError::new(kind, message))` preserves `kind` on the Sand `Error`; any other Rust error type converts to an `Error` with kind `"error"` and its `Display` message.
 
-`async_function` registers a function that returns a future. While the future runs, only the calling task waits; other tasks of the script continue.
+`NativeModule::async_function` registers an async Rust function; while its future is pending, only the calling Sand task suspends.
 
-`guarded_function` checks a capability before it calls the function. The guard computes the capability from the arguments. In Sand, the function returns a `Result`, which is an `Err` of kind `permission_denied` if the policy denies the capability:
+`NativeModule::guarded_function` checks a capability before invoking the function. The guard closure constructs a `Capability` from the call arguments, and the Sand signature wraps the return type in `Result<T, Error>`, returning an `Err` with kind `"permission_denied"` if the policy denies the request:
 
 ```rust
 use sandlang::{Capability, Config, Engine, NativeModule, Policy, RulePolicy};
@@ -164,11 +164,11 @@ Ok("opened front")
 Err(Error { kind: "permission_denied", message: "permission denied: door back" })
 ```
 
-`NativeModule::source` adds Sand declarations to a module, such as types and helper functions written in Sand.
+`NativeModule::source` attaches Sand source declarations (such as structs, enums, and Sand wrapper functions) to the same module.
 
-## Sessions
+## Interactive sessions
 
-A `Session` runs inputs one at a time, like `sand repl`. Each input can use the names of the inputs before it:
+`Engine::session` creates a stateful `Session` that evaluates inputs incrementally, preserving bindings across calls:
 
 ```rust
 # use sandlang::{Config, Engine};
@@ -178,11 +178,11 @@ session.eval("var hits = 0\nfn hit() -> int {\n    hits += 1\n    hits\n}").awai
 assert_eq!(session.eval("hit() + hit()").await?, Some("3".to_string()));
 ```
 
-`eval` returns the debug form of the value of the input, or `None` if it has no value. `type_of(expr)` gives the type of an expression without running it, and `reset()` forgets all inputs.
+`Session::eval` returns the formatted value of a trailing expression, or `None` for statements and declarations. `Session::type_of(expr)` returns the static type of `expr` without executing it, and `Session::reset()` clears all session state.
 
 ## Interrupts
 
-An `InterruptHandle` stops a run from another thread. It can stop the engine while the engine compiles, runs code, or waits for I/O:
+`Engine::interrupt_handle` returns a thread-safe `InterruptHandle` that cancels an in-progress compilation, VM execution, or I/O wait from another thread:
 
 ```rust
 use sandlang::{Config, Engine, Error};
@@ -198,17 +198,17 @@ let result = engine.run_source("main.sand", "while true {}").await;
 assert!(matches!(result, Err(Error::Interrupted)));
 ```
 
-For a fixed time limit, set `max_wall_time` in `Limits` instead. The handle of an engine does not stop its sessions. To stop a session input, use `session.interrupt_handle()`.
+To cancel an individual `Session::eval` call, use `session.interrupt_handle()`.
 
 ## Multiple engines
 
-Engines share no mutable state. One process can contain many engines, each with its own policy, limits and files. An `Engine` is `Send`, so you can run engines on different threads, or run many engines on one thread at the same time. A script in one engine cannot see or change another engine.
+`Engine` instances share zero mutable global state. A single process can embed any number of engines with independent policies, resource limits, and virtual file systems. `Engine` implements `Send`, so engines can move across threads or run concurrently on `LocalSet` tasks.
 
-## On the web
+## WebAssembly
 
-Without the default `os` feature (`default-features = false`), the engine cannot reach the operating system, whatever the policy says. The scripts get an in-memory file system, and the crate builds for `wasm32-unknown-unknown`.
+Building `sandlang` with `default-features = false` disables the `os` feature, removing all host OS dependencies and enabling compilation to `wasm32-unknown-unknown` with an in-memory file system.
 
-The `sandlang-wasm` crate in `wasm/` is a JavaScript API for this build. `wasm/build.sh web OUT_DIR` builds it as an ES module:
+The `sandlang-wasm` crate in `wasm/` wraps this build in a JavaScript API. Build the ES module bundle with `wasm/build.sh web OUT_DIR`:
 
 ```js
 import init, { Engine } from "./pkg/sandlang_wasm.js";
@@ -218,10 +218,10 @@ const engine = new Engine(
   { policy: "allow /data", files: { "/data/in.txt": "hello" } },
   { onOutput: (stream, text) => console.log(stream, text) },
 );
-const result = await engine.run('import fs\nprint(fs.read_text("/data/in.txt")?)');
+const result = await engine.run(
+  'import fs\nprint(fs.read_text("/data/in.txt")?)',
+);
 console.log(result.ok, result.exitCode);
 ```
 
-The options take a policy file as text, the files, the environment, the arguments and standard input. The `onPrompt` hook answers requests that the policy does not decide. A run uses the thread of the page while it computes, so run engines in Web Workers to keep the page responsive. The [playground](/play/) uses this API.
-
-[§16 of the specification](/spec/#16-embedding-api-rust) describes the full API.
+Run `Engine` inside a Web Worker so that CPU-intensive scripts do not block the browser UI thread. For the full Rust embedding specification, see [§16 of the specification](/spec/#16-embedding-api-rust).

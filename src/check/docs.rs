@@ -8,7 +8,7 @@ const BUILTIN_CTORS: &[Ctor] =
 
 impl Checker {
     pub(crate) fn module_doc(&mut self, m: ModId, kind: ModuleKind) -> ModuleDoc {
-        // Omit the current module prefix when formatting item signatures.
+        // Omit the current module prefix in item signatures.
         self.cur_mod = m;
         let mut items = Vec::new();
         if kind == ModuleKind::Prelude {

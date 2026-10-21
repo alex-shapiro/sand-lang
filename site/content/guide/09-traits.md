@@ -1,13 +1,13 @@
 +++
 title = "Traits and generics"
-description = "Write Sand code that works for many types with generic functions, built-in bounds and traits, and implement traits for your own and built-in types."
+description = "Generic functions, bounds, and traits."
 +++
 
-A generic function works for many types. A bound on a type parameter says what the function needs from the type, for example that values can be compared. Sand has four built-in bounds. A trait is a bound that you define yourself: a set of methods that a type implements.
+A generic function operates on values of any type that satisfies its bounds. A bound specifies the operations that a type must support. Sand provides four built-in bounds (`Eq`, `Ord`, `Hash`, and `Num`), and you can define custom traits with required and default methods.
 
 ## Generic functions
 
-Put type parameters in `<...>` after the function name. Sand infers the type arguments at each call.
+Place type parameters in `<...>` after the function name. Sand infers the type arguments at each call site.
 
 ```sand
 fn first_or<T>(xs: [T], default: T) -> T {
@@ -18,18 +18,18 @@ print(first_or([3, 4], 0))
 print(first_or([], "none"))
 ```
 
-Structs and enums can also be generic. [Structs and enums](/guide/structs-and-enums/#generic-types) shows examples.
+Structs and enums can also be generic (see [Structs and enums](/guide/structs-and-enums/#generic-types)).
 
 ## Built-in bounds
 
-Without a bound, a function can store, pass and print a `T` value, but it cannot compare or add it. To compare, hash or add values, add a bound with `T: Bound`. Combine bounds with `+`, as in `T: Ord + Hash`.
+An unconstrained type parameter `T` supports only storage, passing, and formatting. Add a bound (`T: Bound`) to compare, hash, or perform arithmetic on values of type `T`. Combine multiple bounds with `+`, as in `T: Ord + Hash`.
 
-| Bound  | Lets you                          | Examples of types              |
-| ------ | --------------------------------- | ------------------------------ |
-| `Eq`   | use `==` and `!=`                 | all types except functions     |
-| `Ord`  | use `<`, `>`, `sorted()`, `max()` | numbers, `str`, lists, tuples  |
-| `Hash` | use values as map keys or in sets | `int`, `bool`, `str`, tuples   |
-| `Num`  | use arithmetic, `T.zero()`        | `int`, `float`                 |
+| Bound  | Operations                     | Supporting types              |
+| ------ | ------------------------------ | ----------------------------- |
+| `Eq`   | `==`, `!=`                     | all types except functions    |
+| `Ord`  | `<`, `>`, `sorted()`, `max()`  | numbers, `str`, lists, tuples |
+| `Hash` | map keys and set elements      | `int`, `bool`, `str`, tuples  |
+| `Num`  | `+`, `-`, `*`, `/`, `T.zero()` | `int`, `float`                |
 
 ```sand
 fn largest<T: Ord>(xs: [T]) -> T? {
@@ -59,9 +59,9 @@ print(total([1.5, 2.5]))
 print(counts(["a", "b", "a"]))
 ```
 
-Structs, enums and tuples satisfy a bound when all their parts do. A struct with a `var` field is not `Hash`. [§5.6 of the specification](/spec/#56-bounds) gives the full rules.
+A struct, enum, or tuple satisfies a bound if all of its fields satisfy that bound. A struct with a `var` field does not satisfy `Hash`. For the complete rules, see [§5.6 of the specification](/spec/#56-bounds).
 
-If the function uses an operation that its bounds do not allow, the compiler tells you which bound to add:
+If a function uses an operation that its bounds do not permit, the compiler reports the missing bound:
 
 ```sand error
 fn bigger<T>(a: T, b: T) -> T {
@@ -71,10 +71,10 @@ fn bigger<T>(a: T, b: T) -> T {
 
 ## Defining traits
 
-A trait lists methods. A method without a body is required: each type must define it. A method with a body is a default method: types get it without writing it, and they can replace it.
+A `trait` block declares a set of methods. A method without a body is required: each implementing type must define it. A method with a body is a default method: implementing types inherit it automatically and can override it.
 
 ```sand
-/// Things with a short text description.
+/// Values with a short text description.
 trait Describe {
     fn describe(self) -> str
 
@@ -103,11 +103,11 @@ show(p)
 print(p.shout())
 ```
 
-An `impl Trait for Type` block defines the trait's methods for one type. Each method must have the same signature as in the trait. Inside a trait, `Self` stands for the type that implements it.
+An `impl Trait for Type` block defines the trait methods for a specific type. Each method signature must match the declaration in the trait. Inside a trait, `Self` refers to the implementing type.
 
 ### Static methods
 
-A trait method without `self` is static. Call it on the type, on a type parameter, or on `Self`. Sand can also infer the type from the expected result.
+A trait method without a `self` parameter is a static method. Call it on a concrete type, on a type parameter, or on `Self`. Sand can also infer the implementing type from the expected return type.
 
 ```sand
 trait Monoid {
@@ -141,13 +141,13 @@ fn concat_all<T: Monoid>(xs: [T]) -> T {
 
 print(concat_all([1, 2, 3]))
 print(concat_all(["a", "b", "c"]))
-let nothing: str = Monoid.empty()
-print(nothing.len())
+let empty_str: str = Monoid.empty()
+print(empty_str.len())
 ```
 
 ### Supertraits
 
-A trait can require other traits, or built-in bounds, with `trait Name: Other`. A type must implement the supertraits before it can implement the trait. Default methods can then call the supertrait methods.
+A trait can require other traits or built-in bounds with `trait Name: Super`. A type must satisfy all supertraits before it can implement the subtrait. Default methods in the subtrait can call methods from the supertraits.
 
 ```sand
 trait Named {
@@ -177,7 +177,7 @@ print(Dog { nick: "rex" }.greet())
 
 ## Impls for built-in types
 
-You can implement your own traits for built-in types such as `bool`, `str` and `[T]`. A generic impl can have bounds. Then it applies only to the types that satisfy them. Here, `[T]` implements `Describe` exactly when `T` does:
+You can implement custom traits for built-in types such as `bool`, `str`, and `[T]`. A generic `impl` can declare bounds on its type parameters so that the implementation applies only if the element types satisfy those bounds:
 
 ```sand
 trait Describe {
@@ -200,11 +200,11 @@ print([true, false].describe())
 print([[true], [false, true]].describe())
 ```
 
-This impl is a conditional impl. A call with `[int]` is a compile error, because `int` does not implement `Describe`.
+Calling `.describe()` on `[int]` is a compile error because `int` does not implement `Describe`.
 
 ## Implementing `Iterator<T>`
 
-The prelude trait `Iterator<T>` has one required method, `next`. Implement it, and you can use your type in `for` loops. Its default method `iter()` gives a lazy `Iter<T>` with adapters such as `map` and `filter`.
+The prelude trait `Iterator<T>` requires a `next` method. Any type that implements `Iterator<T>` can be used in a `for` loop. The default method `iter()` returns a lazy `Iter<T>` that provides adapters such as `map` and `filter`.
 
 ```sand
 struct Countdown {
@@ -227,11 +227,11 @@ for x in (Countdown { n: 3 }) {
 print(Countdown { n: 4 }.iter().map(x => x * 10).to_list())
 ```
 
-A struct literal in the header of a `for` loop needs parentheses. The [Iterator reference](/std/prelude/Iterator/) lists the adapters and consumers.
+Enclose a struct literal in parentheses if it appears directly in a `for` loop header. For the complete list of iterator adapters and consumers, see the [`Iterator` reference](/std/prelude/Iterator/).
 
 ## Qualified calls
 
-You can call a trait method through the trait, as `Trait.method(value)`, or through the type, as `Type.method(value)`. When two traits give a type methods with the same name, a call through the value or the type is ambiguous, and the compiler reports an error. Call the method through its trait to choose one:
+You can call a trait method through the trait (`Trait.method(value)`) or through the type (`Type.method(value)`). If two traits define a method with the same name on the same type, calling `value.method()` is ambiguous. Qualify the call with the trait name to select the method:
 
 ```sand
 trait English {
@@ -263,9 +263,9 @@ print(English.hello(g))
 print(French.hello(g))
 ```
 
-## Where you can write an impl
+## Orphan rule
 
-An impl must be in the module that declares the trait, or in the module that declares the type. This is the orphan rule. The prelude declares the built-in types and traits, so your modules cannot implement a prelude trait for a built-in type:
+An `impl` block must appear in the module that declares the trait or in the module that declares the target type. Because the prelude declares both the built-in types and the prelude traits, a user module cannot implement a prelude trait for a built-in type:
 
 ```sand error
 impl Close for int {
@@ -273,11 +273,11 @@ impl Close for int {
 }
 ```
 
-An impl has no name and no visibility. When Sand loads its module, the impl applies to the whole program.
+Trait implementations are always global once their defining module is loaded.
 
-## No trait objects
+## Heterogeneous collections
 
-A trait is a bound, not a type. You cannot make a list of "any type that implements `Shape`". To keep values of different types together, use an enum with one variant for each type:
+A trait is a type bound, not a value type. To store values of different concrete types in a single collection, wrap the types in an enum:
 
 ```sand
 import math
@@ -305,5 +305,3 @@ enum Shape {
 let shapes = [Shape.Round(Circle { r: 1.0 }), Shape.Boxy(Square { side: 2.0 })]
 print(shapes.map(s => s.area()))
 ```
-
-The compiler then checks that each `match` handles every kind of shape.

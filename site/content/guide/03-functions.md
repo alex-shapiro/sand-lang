@@ -1,10 +1,9 @@
 +++
 title = "Functions"
-description = "Declare functions in Sand, call them with named and default arguments, and use lambdas, closures and pipes."
+description = "Function declarations, arguments, and closures."
 +++
 
-A function declaration names its parameters and their types. The checker infers most types inside the body.
-The body is a block, and the value of its last expression is the return value.
+A function definition begins with `fn`, followed by the function name and a set of parentheses. Parameters are declared inside the parentheses. After the closing `)`, a function may optionally define a return type with `->` followed by the return type name. After the return type is defined, the function body is declared as a list of statements enclosed in braces.
 
 ```sand
 fn hypotenuse(a: float, b: float) -> float {
@@ -16,10 +15,9 @@ print(hypotenuse(3.0, 4.0))
 
 ## Parameters and return types
 
-Every parameter needs a type. The return type follows `->`.
-If you omit it, the function returns `()` and Sand discards the value of the last expression.
+Every parameter requires a type annotation. An optional return type follows `->`. If the return type is omitted, the function returns `()`.
 
-`return` leaves the function early:
+Use `return` to exit a function early:
 
 ```sand
 fn describe(n: int) -> str {
@@ -31,12 +29,11 @@ print(describe(-5))
 print(describe(8))
 ```
 
-You can call a function before its declaration in the file.
+Functions can be called before their declaration in the same file.
 
 ## Named and default arguments
 
-A parameter can have a default value. A default can refer to earlier parameters.
-At the call, positional arguments come first, then named arguments in any order:
+Parameters can define default values, which may reference earlier parameters. Callers pass positional arguments first, followed by named arguments in any order:
 
 ```sand
 fn area(width: float, height: float = width) -> float {
@@ -54,11 +51,9 @@ print(greet("Ada", end: "?"))
 print(greet(greeting: "Hi", name: "Grace"))
 ```
 
-Named arguments make a call such as `http.get(url, timeout: 5s)` clear without a comment.
-
 ## Functions are values
 
-A function name is a value of a function type such as `fn(int) -> int`. You can store it or pass it to another function:
+Functions are first-class values with types such as `fn(int) -> int`. They can be stored in variables or passed as arguments:
 
 ```sand
 fn double(x: int) -> int { x * 2 }
@@ -71,7 +66,7 @@ print(apply_twice(double, 5))
 print([1, 2, 3].map(double))
 ```
 
-A call through a function value takes positional arguments only:
+Calls through a `fn(...)` value accept positional arguments only:
 
 ```sand error
 fn greet(name: str, greeting: str = "Hello") -> str { "\(greeting), \(name)" }
@@ -82,7 +77,7 @@ print(g("Ada", greeting: "Hi"))
 
 ## Lambdas
 
-A lambda is an anonymous function, written with `=>`:
+A lambda expression defines an anonymous function using `=>`:
 
 ```sand
 let inc = x => x + 1
@@ -101,8 +96,7 @@ print(hello())
 print(clamp(-4))
 ```
 
-The checker infers the parameter types from the context, usually the function that receives the lambda.
-If the context does not give a type, add an annotation:
+The type checker infers lambda parameter types from surrounding types. If the parameter type cannot be inferred from context, annotate it explicitly:
 
 ```sand error
 let size = x => x.len()
@@ -110,8 +104,7 @@ let size = x => x.len()
 
 ## Closures
 
-A lambda can use the variables around it. It copies the value of each `let` binding when Sand creates the lambda.
-It shares each `var` binding, so a change on one side is visible on the other:
+A lambda can capture bindings from enclosing scopes. Captured `let` bindings are copied by value at closure creation. Captured `var` bindings are shared with the enclosing scope:
 
 ```sand
 var count = 0
@@ -127,9 +120,9 @@ for i in 0..3 {
 print(actions.map(f => f()))
 ```
 
-Each loop iteration has its own `i`, so each lambda keeps a different value.
+Each iteration of a `for` loop creates a fresh binding. A closure created in a loop captures that iteration's value.
 
-A closure can keep a `var` alive after its function returns. This makes a counter with private state:
+Captured `var` bindings remain alive for the lifetime of the closure:
 
 ```sand
 fn make_counter() -> fn() -> int {
@@ -147,7 +140,7 @@ print(next_id())
 
 ## Pipes
 
-`x |> f` calls `f(x)`. `x |> f(a)` calls `f(x, a)`. Pipes let you read a sequence of calls from left to right:
+The pipe operator `|>` passes its left operand as the first argument to the call on the right (`x |> f` evaluates `f(x)`, and `x |> f(a)` evaluates `f(x, a)`):
 
 ```sand
 fn double(x: int) -> int { x * 2 }
@@ -158,11 +151,9 @@ print(5 |> double |> add(1))
 print(add(double(5), 1))
 ```
 
-The two lines compute the same value.
-
 ## Local functions and recursion
 
-You can declare a function inside a block. A local function can use the variables around it and can call itself:
+Functions can be declared inside any block, capture enclosing bindings, and call themselves recursively:
 
 ```sand
 fn count_paths(width: int, height: int) -> int {
@@ -176,7 +167,7 @@ fn count_paths(width: int, height: int) -> int {
 print(count_paths(3, 3))
 ```
 
-A call in tail position, such as `return f(x)`, does not use stack space while the function has no pending `defer`. Thus a tail-recursive loop can run for any number of steps:
+Calls in tail position reuse the current call frame if the function does not have an active `defer` or `use` scope:
 
 ```sand
 fn sum_to(n: int, acc: int = 0) -> int {
@@ -186,8 +177,8 @@ fn sum_to(n: int, acc: int = 0) -> int {
 print(sum_to(1_000_000))
 ```
 
-Other recursion has a depth limit (10,000 calls by default). A deeper recursion stops the script with a `stack overflow` error.
+Non-tail recursion is bounded by the engine's call depth limit. The default limit is 10,000.
 
 ## Generic functions
 
-A type parameter in `<...>` lets one function work for many types, and a bound such as `T: Ord` states what the type must support. The [Traits and generics](/guide/traits/) chapter explains both.
+Functions can declare type parameters and trait bounds in `<...>`. See [Traits and generics](/guide/traits/) for more.

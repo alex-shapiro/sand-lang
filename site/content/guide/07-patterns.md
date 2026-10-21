@@ -1,13 +1,13 @@
 +++
 title = "Pattern matching"
-description = "Use match, if let, while let and let-else in Sand to test the shape of a value and take it apart, with exhaustiveness checked at compile time."
+description = "Match patterns, if let, while let, and let-else."
 +++
 
-A pattern describes the shape of a value. If the value has that shape, the pattern matches and binds names to its parts. Sand uses patterns in `match`, `let`, `if let`, `while let` and `for`. The compiler makes sure that every `match` covers all possible values.
+Patterns test the structure of a value and bind variables to its components. Sand supports patterns in `match`, `let`, `if let`, `while let`, and `for`, and verifies at compile time that every `match` expression is exhaustive.
 
 ## `match`
 
-A `match` compares a value against its arms from top to bottom. It runs the body of the first arm whose pattern matches. A `match` is an expression, so it has a value.
+A `match` expression tests a value against its arms from top to bottom and evaluates the body of the first matching arm:
 
 ```sand
 fn describe(n: int) -> str {
@@ -24,17 +24,17 @@ for n in [0, -1, 7, 42] {
 }
 ```
 
-Separate arms with newlines or commas. The `_` pattern matches any value and binds nothing.
+The wildcard pattern `_` matches any value without binding a variable.
 
 ## Pattern forms
 
 ### Literals and ranges
 
-Integer, string and `bool` literals match equal values. An inclusive range `a..=b` matches the integers from `a` to `b`. Sand does not support exclusive ranges (`a..b`) in patterns.
+Integer, string, and `bool` literals match equal values, and inclusive integer ranges (`a..=b`) match any integer from `a` through `b`.
 
 ### Bindings and tuples
 
-A name matches any value and binds it. A tuple pattern matches each element.
+An identifier pattern matches any value and binds it to that name, and a tuple pattern matches each element positionally:
 
 ```sand
 fn classify(p: (int, int)) -> str {
@@ -51,11 +51,11 @@ print(classify((2, 2)))
 print(classify((1, 2)))
 ```
 
-The second arm is an or-pattern: it matches if one of its alternatives matches. All alternatives must bind the same names with the same types. The third arm has a guard, described below.
+An or-pattern (`pat1 | pat2`) matches if any alternative matches; every alternative must bind the same variable names with identical types.
 
 ### Enum variants
 
-A variant pattern matches one variant and takes its payload apart by position. You can omit the enum name, because Sand knows the type of the value.
+A variant pattern matches a specific enum variant and destructures its payload positionally:
 
 ```sand
 enum Shape {
@@ -78,11 +78,9 @@ print(name(Shape.Rect(w: 2.0, h: 2.0)))
 print(name(Shape.Empty))
 ```
 
-`Some(x)`, `None`, `Ok(x)` and `Err(e)` are variant patterns too.
-
 ### Structs
 
-A struct pattern names the type and some of its fields. A field can have a sub-pattern (`admin: true`) or only a name, which binds the field. End the pattern with `..` to ignore the other fields. Without `..`, the pattern must mention every field.
+A struct pattern matches fields by name (`field: pattern` or shorthand `field`), and `..` ignores any remaining fields:
 
 ```sand
 struct User {
@@ -106,7 +104,7 @@ print(greet(User { name: "cy", age: 40, admin: false }))
 
 ### Lists
 
-A list pattern matches a list of a given length. A rest pattern `..` matches the remaining elements, and `..name` binds them as a new list.
+A list pattern matches lists by length and element patterns, with an optional `..` or `..rest` slice pattern:
 
 ```sand
 fn sum(xs: [int]) -> int {
@@ -131,9 +129,7 @@ print(ends(["a", "b", "c"]))
 
 ## Guards
 
-A guard is an `if` condition after the pattern. The arm matches only if the pattern matches and the condition is true. The guard can use the names that the pattern binds.
-
-The compiler cannot know the result of a guard. Thus a guard does not help to make a `match` exhaustive:
+An `if` guard after a pattern requires a boolean condition to evaluate to `true` for the arm to match. Because guards can execute arbitrary expressions, guarded arms do not contribute toward exhaustiveness checking:
 
 ```sand error
 fn sign(n: int) -> int {
@@ -146,7 +142,7 @@ fn sign(n: int) -> int {
 
 ## Exhaustiveness
 
-Every `match` must cover all values of its type. If it does not, the compiler shows one value that no arm matches:
+Every `match` expression must cover all possible values of the matched type:
 
 ```sand error
 enum Light {
@@ -163,9 +159,7 @@ fn next(l: Light) -> Light {
 }
 ```
 
-The check also looks inside tuples, variants and lists. For types with very many values, such as `int` and `str`, add a `_` arm or a binding arm. For lists, `[]` and `[_, .._]` together cover all lists.
-
-An arm that can never match, because earlier arms cover all its values, is also an error:
+The compiler also rejects unreachable arms that are already covered by earlier patterns:
 
 ```sand error
 fn f(n: int) -> str {
@@ -178,7 +172,7 @@ fn f(n: int) -> str {
 
 ## `let` with patterns
 
-A `let` can take a value apart with a pattern. The pattern must be irrefutable: it must match every value of the type.
+A plain `let` statement accepts any irrefutable pattern (a pattern that matches all values of its type):
 
 ```sand
 let pair = ("ann", 31)
@@ -188,7 +182,7 @@ print("\(name) is \(age)")
 
 ### `let ... else`
 
-If the pattern can fail, add an `else` block. The block runs when the pattern does not match, and it must leave the current scope, for example with `return`, `break` or `fail`. After the statement, the bindings are available in the rest of the block.
+To bind a refutable pattern in the current scope, attach an `else` block that diverges (`return`, `break`, `continue`, or `fail`) if the pattern does not match:
 
 ```sand
 fn parse_pair(text: str) -> (int, int)? {
@@ -209,15 +203,13 @@ print(parse_pair("3"))
 print(parse_pair("3, x"))
 ```
 
-This form keeps the main path of a function at the left margin. [Errors](/guide/errors/) shows `?`, which is shorter when you only pass on a `None` or an `Err`.
-
 ### `if let` and `while let`
 
-`if let` and `while let` also take a pattern that can fail. [Control flow](/guide/control-flow/#if-let) shows both.
+`if let` and `while let` conditionally execute a block if a refutable pattern matches (see [Control flow](/guide/control-flow/#if-let)).
 
 ## Patterns in `for`
 
-The binding of a `for` loop is a pattern. Map iteration gives `(key, value)` tuples, and `enumerate` gives `(index, element)` tuples.
+A `for` loop header accepts any irrefutable pattern to destructure each element:
 
 ```sand
 let ages = ["ann": 31, "bo": 12]
@@ -228,5 +220,3 @@ for (i, name) in ["x", "y"].enumerate() {
     print("\(i) \(name)")
 }
 ```
-
-As in `let`, the pattern of a `for` loop must be irrefutable. To skip some elements, use a `match` or an `if let` in the body.

@@ -1,14 +1,13 @@
 +++
 title = "Collections"
-description = "Lists, maps, sets and tuples in Sand, their common methods, comprehensions and lazy iterators."
+description = "Lists, maps, sets, tuples, comprehensions, and lazy iterators."
 +++
 
-Sand has four built-in collection types: lists `List<T>` (written `[T]`), maps `Map<K, V>` (written `[K: V]`), sets `Set<T>` and tuples `(A, B)`.
-Lists, maps and sets are mutable and have reference semantics. Tuples are immutable values.
+Sand provides four built-in collection types: lists (`List<T>`, written `[T]`), maps (`Map<K, V>`, written `[K: V]`), sets (`Set<T>`), and tuples (`(A, B)`). Lists, maps, and sets are mutable heap references. Tuples are immutable values.
 
 ## Lists
 
-A list holds values of one type, in order. Indices start at 0:
+A list stores an ordered sequence of elements of a single type, indexed from `0`:
 
 ```sand
 let primes = [2, 3, 5, 7, 11]
@@ -22,16 +21,16 @@ print(primes)
 print(primes.pop())
 ```
 
-`xs[i]` stops the script with an error if `i` is out of range. `xs.get(i)` returns an option instead: `Some(x)` or `None`.
+Indexing with `xs[i]` terminates execution with an error if `i` is out of bounds, whereas `xs.get(i)` returns `Some(x)` or `None`:
 
 ```sand fails
 let primes = [2, 3, 5]
 print(primes[3])
 ```
 
-`[value; n]` makes a list of `n` elements. Sand evaluates `value` once for each element, so `[[0; 3]; 2]` makes two separate rows.
+The repeat syntax `[value; n]` evaluates `value` once for each of the `n` elements, so `[[0; 3]; 2]` allocates two distinct inner lists.
 
-An empty list needs a type annotation if the checker cannot infer the element type from later use:
+An empty list literal requires a type annotation if the element type cannot be inferred from later use:
 
 ```sand
 let names: [str] = []
@@ -40,7 +39,7 @@ print(names.is_empty())
 
 ### Slices
 
-`xs[a..b]` makes a new list from index `a` up to, but not including, `b`. You can omit either bound:
+Slicing (`xs[a..b]` or `xs[a..=b]`) returns a new list containing the selected range of elements:
 
 ```sand
 let letters = ["a", "b", "c", "d", "e"]
@@ -50,11 +49,11 @@ print(letters[3..])
 print(letters[1..=3])
 ```
 
-Strings and bytes have slices too, but their indices are byte offsets. You cannot index a single character of a string with `s[i]`.
+Strings and `bytes` also support range slicing using byte offsets, though `s[i]` single-character indexing is not supported on `str`.
 
 ## Maps
 
-A map associates keys with values. It keeps its entries in insertion order. `[:]` is the empty map:
+A map associates unique keys with values in insertion order (`[:]` creates an empty map):
 
 ```sand
 let stock = ["apple": 3, "pear": 5]
@@ -68,8 +67,7 @@ print(stock.remove("pear"))
 print(stock.keys())
 ```
 
-`m[k]` stops the script with an error if the key is absent. `get` returns an option, and `get_or` returns a default value.
-This example counts words:
+`m[k]` terminates execution with an error if `k` is missing; use `get(k)` for `Option<V>` or `get_or(k, default)` for a fallback value:
 
 ```sand
 let counts: [str: int] = [:]
@@ -79,12 +77,11 @@ for word in "the cat saw the dog".split(" ") {
 print(counts)
 ```
 
-Map keys and set elements must be hashable. `int`, `str`, `bool`, `bytes` and `duration` are hashable, and so are tuples, enums and structs without `var` fields that contain only hashable values.
-A `float` or a list is not hashable.
+Map keys and set elements must be hashable (`int`, `str`, `bool`, `bytes`, `duration`, and tuples, enums, or immutable structs composed of hashable types).
 
 ## Sets
 
-A set holds unique values in insertion order. Make one with `set`:
+A `Set<T>` stores unique values in insertion order:
 
 ```sand
 let tags = set(["red", "blue"])
@@ -95,12 +92,11 @@ print(tags.union(set(["blue", "pink"])))
 print(tags.intersection(set(["blue", "pink"])))
 ```
 
-`add` returns `true` if the value was not in the set yet.
+`add` returns `true` if the value was newly inserted.
 
 ## Tuples
 
-A tuple groups a fixed number of values, which can have different types.
-Read an element with `.0`, `.1` and so on, or destructure the tuple with `let`:
+A tuple is an immutable fixed-length sequence of values that may have different types. Access elements with `.0`, `.1`, or destructure the tuple with a pattern:
 
 ```sand
 let point = (3, "north", true)
@@ -110,12 +106,9 @@ let (distance, direction, _) = point
 print("\(distance) steps \(direction)")
 ```
 
-Tuples are immutable. Functions often return a tuple to give back more than one value.
-
 ## Reference semantics
 
-A list, map or set is a reference to its contents. Assignment and function calls share the same contents; they do not copy them.
-`let` makes the binding immutable, not the contents:
+Lists, maps, and sets use reference semantics: assigning or passing a collection shares the underlying storage rather than copying it. A `let` binding prevents reassigning the variable, but does not prevent mutating the collection's contents:
 
 ```sand
 let a = [1, 2]
@@ -130,11 +123,11 @@ print(c)
 print(a == [1, 2, 3])
 ```
 
-Use `copy()` to get an independent shallow copy. `==` compares collections by content.
+Call `copy()` to create a shallow copy, and use `==` to compare collections structurally by element.
 
 ## Comprehensions
 
-A comprehension builds a list or a map from a loop, with an optional `if` filter:
+List and map comprehensions build a collection from a sequence of `for` clauses and optional `if` filters:
 
 ```sand
 let squares = [x * x for x in 1..=5]
@@ -147,11 +140,9 @@ print(pairs)
 print(lengths)
 ```
 
-Many `for` clauses work as nested loops, from left to right.
-
 ## Common methods
 
-Lists have methods that take functions. Each call makes a new list or value and leaves the original unchanged:
+Lists provide functional methods (`filter`, `map`, `fold`, `any`, `find`, `sorted_by`, `group_by`) that return a new value without modifying the receiver:
 
 ```sand
 let words = ["apple", "fig", "banana", "cherry", "date"]
@@ -167,8 +158,7 @@ print(words.enumerate().take(2))
 print(words.join(", "))
 ```
 
-`sorted`, `reversed` and `sorted_by` return a new list. `sort`, `reverse` and `sort_by` change the list in place.
-For a list of numbers, `sum`, `product`, `min` and `max` work without a function:
+`sorted`, `reversed`, and `sorted_by` allocate a new list, whereas `sort`, `reverse`, and `sort_by` mutate the list in place. Numeric lists also provide `sum`, `product`, `min`, and `max`:
 
 ```sand
 let scores = [72, 95, 88]
@@ -177,15 +167,11 @@ print(scores.max())
 print(scores.zip(["ann", "bob", "cy"]))
 ```
 
-Ranges have many of the same methods: `(1..=10).filter(n => n % 3 == 0)` works.
-The [prelude reference](/std/prelude/) lists the methods of every collection type.
+See the [prelude reference](/std/prelude/) for the complete list of collection methods.
 
 ## Lazy iterators
 
-The methods above are eager. `xs.map(f)` calls `f` on every element and builds the full result at once.
-A lazy iterator `Iter<T>` does no work until you ask for an element. It builds no intermediate lists, it can stop early, and it can read from an endless source.
-
-Call `iter()` on a list, map, set or range to get an iterator. Then chain adapters such as `map`, `filter`, `take` and `enumerate`:
+Unlike eager list methods (`xs.map(f)`), a lazy iterator (`Iter<T>`) computes elements on demand without allocating intermediate lists. Call `iter()` on a collection or range, or construct a generator with `Iter.count_from`, `Iter.repeat`, `Iter.once`, `Iter.from_fn`, or `Iter.successors`:
 
 ```sand
 let firsts = Iter.count_from(1)
@@ -198,9 +184,7 @@ let total = [1, 2, 3, 4].iter().map(x => x * x).sum()
 print(total)
 ```
 
-`Iter.count_from(1)` counts forever, but `take(3)` asks for three elements only. Thus the pipeline does a finite amount of work.
-
-Adapters return a new iterator and run no function. Consumers such as `to_list`, `sum`, `count`, `find`, `first` and `join` pull the elements. A `for` loop is a consumer too:
+Adapters (`map`, `filter`, `take`, `skip`, `enumerate`) return a new `Iter<T>` without advancing the source. Terminal consumers (`to_list`, `sum`, `count`, `find`, `first`, `join`, and `for` loops) pull elements from the iterator:
 
 ```sand
 let log = "header\nfirst\nsecond"
@@ -209,7 +193,7 @@ for (i, line) in log.lines().iter().enumerate().skip(1) {
 }
 ```
 
-An iterator gives each element once. Elements that a consumer takes are gone:
+Advancing an iterator consumes its elements in place:
 
 ```sand
 let numbers = Iter.count_from(10, step: 5)
@@ -217,13 +201,10 @@ print(numbers.take(3).to_list())
 print(numbers.next())
 ```
 
-Other sources are `Iter.repeat(x)`, `Iter.once(x)`, `Iter.from_fn(f)` and `Iter.successors(first, f)`:
-
 ```sand
 let powers = Iter.successors(Some(1), n => if n < 500 { Some(n * 3) } else { None })
 print(powers.to_list())
 print(Iter.repeat("ab").take(3).join("-"))
 ```
 
-Use a lazy iterator for long or endless sequences, or when you stop early. For short lists, the eager methods are simpler.
-Your own types can be iterators too: the [Traits and generics](/guide/traits/) chapter shows how to implement `Iterator<T>`.
+Custom types can also integrate with `for` loops and `Iter<T>` by implementing `Iterator<T>` (see [Traits and generics](/guide/traits/)).

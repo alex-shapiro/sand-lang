@@ -1,14 +1,13 @@
 +++
 title = "Control flow"
-description = "Blocks, if, match and loops in Sand, which are expressions that produce values."
+description = "Blocks, if, match, and loops."
 +++
 
-In Sand, blocks, `if`, `match` and `loop` are expressions: each one produces a value.
-You can assign the result directly, without a temporary `var`.
+In Sand, blocks, `if`, `match`, and `loop` are expressions that produce values. You can bind their results directly to a `let` variable without initializing a mutable `var`.
 
 ## Blocks
 
-A block `{ ... }` runs its statements in order. Its value is the value of its last expression:
+In a block `{ ... }`, statements execute in order and the final expression returns the value of the block:
 
 ```sand
 let area = {
@@ -19,12 +18,11 @@ let area = {
 print(area)
 ```
 
-The bindings inside the block do not exist outside it.
-A block that ends with a statement, such as an assignment, has the value `()`.
+Bindings declared inside a block are scoped to that block. A block that ends with a statement, such as an assignment, returns `()`.
 
 ## if and else
 
-`if` takes a `bool` condition. Sand has no "truthy" values, so `if count { ... }` with an `int` is a type error.
+An `if` expression requires a `bool` condition. Non-boolean values are not implicitly converted.
 
 ```sand
 let n = 7
@@ -40,18 +38,17 @@ if n > 5 {
 }
 ```
 
-When you use `if` as a value, both branches must have the same type:
+If an `if` expression is used as a value, both branches must have the same type:
 
 ```sand error
 let label = if true { 1 } else { "one" }
 ```
 
-An `if` without `else` has the type `()`.
+An `if` expression without an `else` branch has type `()`.
 
 ## if let
 
-`if let` runs a branch when a value matches a pattern, and binds the parts of the value.
-Use it to take the value out of an `Option`. Sand has no null; a value that can be absent has an option type such as `int?`.
+`if let` tests whether a value matches a pattern and binds the matched fields inside the branch. Use `if let` to unwrap optional values (`T?`):
 
 ```sand
 let ages = ["ada": 36, "alan": 41]
@@ -64,7 +61,7 @@ let grace = if let Some(age) = ages.get("grace") { age.to_str() } else { "unknow
 print(grace)
 ```
 
-`let ... else` binds a pattern or leaves the current scope. Its `else` block must not complete normally; it must `return`, `break`, `continue` or fail:
+`let ... else` binds a refutable pattern in the current scope or diverges (`return`, `break`, `continue`, or `fail`) in the `else` block:
 
 ```sand
 fn first_word(text: str) -> str {
@@ -76,12 +73,11 @@ print(first_word("hello world"))
 print(first_word("   "))
 ```
 
-The [Errors](/guide/errors/) chapter shows more ways to work with `Option` and `Result`.
+See [Errors](/guide/errors/) for additional ways to work with `Option` and `Result`.
 
 ## A first look at match
 
-`match` compares a value with a list of patterns, from top to bottom, and runs the first arm that matches.
-A pattern can be a literal, a list of alternatives with `|`, a binding with a guard after `if`, or `_` for any value:
+`match` compares a value against a sequence of patterns from top to bottom and evaluates the first matching arm:
 
 ```sand
 fn size(n: int) -> str {
@@ -98,7 +94,7 @@ print(size(-1))
 print(size(40))
 ```
 
-The arms must cover every possible value. The checker rejects a `match` that misses a case:
+Every `match` must be exhaustive; the compiler rejects a `match` that does not cover all possible values:
 
 ```sand error
 let n = 3
@@ -108,11 +104,11 @@ let name = match n {
 }
 ```
 
-`match` is most useful with enums and structs. The [Pattern matching](/guide/patterns/) chapter covers it in full.
+See [Pattern matching](/guide/patterns/) for full details on patterns and exhaustiveness.
 
 ## loop
 
-`loop` repeats its body until a `break`. `break value` makes `value` the result of the loop:
+`loop` repeats its body until exited with `break`. Passing a value to `break` sets the result of the `loop` expression:
 
 ```sand
 var n = 1
@@ -125,8 +121,7 @@ print(first)
 
 ## while and while let
 
-`while` repeats its body while a condition is true.
-`while let` repeats it while a value matches a pattern:
+`while` repeats its body while a `bool` condition is true, and `while let` repeats its body while a value matches a pattern:
 
 ```sand
 var steps = 0
@@ -143,11 +138,11 @@ while let Some(top) = stack.pop() {
 }
 ```
 
-`while` and `for` loops have the value `()`. Only `loop` can `break` with a value.
+`while` and `for` loops always evaluate to `()`; only `loop` can return a value via `break`.
 
 ## for
 
-`for` iterates over a range, a list, a map, a set or an iterator. `a..b` excludes `b` and `a..=b` includes it:
+`for` iterates over ranges (`a..b` exclusive, `a..=b` inclusive), lists, maps, sets, and iterators:
 
 ```sand
 for i in 1..=3 {
@@ -167,9 +162,9 @@ for (i, letter) in ["a", "b"].enumerate() {
 }
 ```
 
-The loop variable can be a pattern, as in `(city, temp)`. A map gives its entries as `(key, value)` tuples, in insertion order.
+The loop binding can be any irrefutable pattern, such as `(city, temp)` for map entries in insertion order.
 
-`continue` goes to the next iteration, and `break` ends the loop:
+Use `continue` to skip to the next iteration and `break` to exit the loop early:
 
 ```sand
 for i in 0..10 {
@@ -181,7 +176,7 @@ for i in 0..10 {
 
 ## Labels
 
-`break` and `continue` apply to the innermost loop. To leave an outer loop, give it a label with `@name`:
+Prefix a loop with `@label` to target an outer loop from `break` or `continue`:
 
 ```sand
 let grid = [[1, 2, 3], [4, -5, 6], [7, 8, 9]]
@@ -205,4 +200,4 @@ let position = @search loop {
 print(position)
 ```
 
-`break @name value` is valid only when `@name` labels a `loop`.
+`break @label value` is valid only if `@label` is attached to a `loop` expression.

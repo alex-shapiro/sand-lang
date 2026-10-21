@@ -87,8 +87,7 @@ pub fn check_sand(runtime: &tokio::runtime::Runtime, source: &str, mode: Mode, f
     }
 }
 
-/// Default sandbox policy used when running documentation examples and opening
-/// them in the playground.
+/// Default sandbox policy for documentation examples and playground snippets.
 pub const POLICY: &str = "\
 # Allow reading and writing in-memory files; deny all other capabilities.
 allow write /

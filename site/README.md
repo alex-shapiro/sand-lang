@@ -54,7 +54,7 @@ Every fenced code block in verified Markdown files requires a language tag (`san
 | `sand fails` | Expect a runtime error and render the error |
 | `sand ignore` | Highlight only (skip format and type checks) |
 
-Lines prefixed with `# ` are included when compiling and running an example, but hidden from the rendered code block. Examples run with a deterministic random seed (`42`), an empty in-memory file system, and the policy defined in `examples::POLICY` (read/write access to `/` and a 10-second time limit). Code blocks in doc comments and `docs/SPEC.md` are highlighted without execution.
+Lines prefixed with `# ` are included during compilation and execution, but hidden from the rendered code block. Examples run with a deterministic random seed (`42`), an empty in-memory file system, and the policy defined in `examples::POLICY` (read/write access to `/` and a 10-second time limit). Code blocks in doc comments and `docs/SPEC.md` are highlighted without execution.
 
 `rust` blocks are compiled by `cargo test -p sandlang-site` via `build.rs`. A block that defines `fn main` is compiled as a standalone module; all other blocks are wrapped in an `async fn` returning `Result<(), Box<dyn std::error::Error>>`. Use `rust ignore` to skip compilation.
 

@@ -1,29 +1,27 @@
 +++
 title = "Basics"
-description = "Bindings, primitive types, arithmetic, strings, durations and printing in Sand."
+description = "Bindings, primitive types, arithmetic, strings, durations, and printing."
 +++
 
-A Sand script is a sequence of statements. Sand runs them from top to bottom.
-This chapter shows the parts of the language that every script uses: bindings, the primitive types and their operators.
+A Sand script consists of statements executed from top to bottom. This chapter introduces comments, bindings, primitive types, operators, string interpolation, and standard output.
 
 ## Comments
 
+Line comments start with `//`, block comments use `/* ... */` and can nest, and doc comments (`///` or `//!`) attach documentation that `help()` can display at runtime:
+
 ```sand
 // A line comment.
-/* A block comment. /* Block comments can nest. */ */
+/* A block comment. /* Nested block comment. */ */
 
-/// A doc comment documents the item that follows it.
+/// Returns the ultimate answer.
 fn answer() -> int { 42 }
 
 help(answer)
 ```
 
-`help(answer)` shows the declaration and the doc comment of `answer`.
-
 ## Statements and newlines
 
-A newline ends a statement. You do not need semicolons.
-A line that starts with `.`, `|>` or a binary operator continues the previous line:
+A newline terminates a statement without requiring a semicolon. A line that begins with `.`, `|>`, or a binary operator continues the expression from the previous line:
 
 ```sand
 let scores = [72, 95, 88, 41, 63]
@@ -36,11 +34,9 @@ let report = scores
 print(report)
 ```
 
-`sand fmt` puts each call of a long chain on its own line, as in this example.
-
 ## Bindings
 
-`let` makes an immutable binding. `var` makes a mutable one.
+`let` declares an immutable binding, and `var` declares a mutable binding:
 
 ```sand
 let name = "Ada"
@@ -50,23 +46,23 @@ visits += 1
 print("\(name) has \(visits) visits")
 ```
 
-The checker rejects an assignment to a `let` binding:
+Reassigning a `let` binding is a compile error:
 
 ```sand error
 let limit = 10
 limit = 20
 ```
 
-Use `let` unless the value must change. The linter reports a `var` that the script never assigns.
+Prefer `let` unless the binding must be reassigned. The linter warns if a `var` binding is never mutated.
 
-Sand infers the type of a binding from its value. To state the type, write it after a colon:
+The type checker infers binding types from their initializers, or you can annotate the type explicitly after a colon:
 
 ```sand
 let ratio: float = 0.75
 print(ratio)
 ```
 
-A new `let` with the same name in the same block shadows the earlier binding.
+Declaring a new `let` binding with the same name in the same scope shadows the previous binding.
 
 ## Primitive types
 
@@ -78,22 +74,20 @@ A new `let` with the same name in the same block shadows the earlier binding.
 | `str`      | `"hello"`                       |
 | `bytes`    | `b"\x00\xff"`                   |
 | `duration` | `250ms`, `1.5s`, `2h`           |
-| `()`       | `()`, the unit value            |
+| `()`       | `()` (unit value)               |
 
-An `int` is a 64-bit signed integer. A `float` is a 64-bit IEEE-754 number.
-A float literal must have digits on both sides of the point: write `1.0`, not `1.` or `.5`.
+`int` is a 64-bit signed integer, and `float` is a 64-bit IEEE-754 floating-point number. Float literals require digits on both sides of the decimal point (`1.0` is correct, `1.` and `.5` are not).
 
 ## Arithmetic
 
-The operators are `+`, `-`, `*`, `/`, `%` and `**` (power).
-Both operands must have the same type. Sand never converts an `int` to a `float` for you:
+Supported arithmetic operators are `+`, `-`, `*`, `/`, `%`, and `**` (exponentiation). Both operands must have the same numeric type. Sand does not perform implicit numeric conversions:
 
 ```sand error
 let count = 3
 let half = count / 2.0
 ```
 
-Convert explicitly with `to_float()` or `to_int()`. `to_int()` truncates toward zero.
+Convert between numeric types explicitly with `to_float()` and `to_int()`, which truncates toward zero:
 
 ```sand
 let count = 3
@@ -101,14 +95,14 @@ print(count.to_float() / 2.0)
 print(3.9.to_int())
 ```
 
-Sand checks integer arithmetic. An overflow stops the script with an error, so a wrong result never goes unnoticed:
+Integer arithmetic is checked at runtime. Overflow terminates execution with a runtime error:
 
 ```sand fails
 let big = int.max_value()
 print(big + 1)
 ```
 
-Integer `/` is floor division and `%` is floor modulo. The result of `%` has the sign of the divisor:
+Integer `/` performs floor division, and `%` computes the floor remainder with the sign of the divisor:
 
 ```sand
 print(7 / 2)
@@ -117,14 +111,13 @@ print(-7 % 2)
 print(7 % -2)
 ```
 
-Integer division by zero is an error. Float division by zero gives `inf`, `-inf` or `nan`, as IEEE-754 specifies.
+Integer division by zero terminates execution with a runtime error. Float division by zero produces `inf`, `-inf`, or `nan` per IEEE-754.
 
-`and`, `or` and `not` operate on `bool` values. `and` and `or` evaluate the right operand only if they need it.
-Comparisons do not chain: write `0 <= x and x < 10`, not `0 <= x < 10`.
+Logical operators `and`, `or`, and `not` require `bool` operands. `and` and `or` short-circuit.
 
 ## Strings
 
-A `str` is immutable UTF-8 text. `len()` gives the length in bytes and `char_count()` gives the number of characters:
+A `str` value is an immutable UTF-8 string. `len()` returns the byte length, and `char_count()` returns the number of Unicode scalar values:
 
 ```sand
 let word = "naïve"
@@ -134,11 +127,11 @@ print(word.to_upper())
 print("a,b,c".split(","))
 ```
 
-`+` joins two strings. The [`str` reference](/std/prelude/str/) lists all the methods.
+The `+` operator concatenates two strings. See the [`str` reference](/std/prelude/str/) for all string methods.
 
 ### Interpolation
 
-`\(expr)` inserts the value of an expression into a string. The expression can have any type:
+`\(expr)` formats any expression and inserts the result into a string literal:
 
 ```sand
 let item = "tea"
@@ -147,8 +140,7 @@ print("\(cups) cups of \(item) cost \(cups * 2) coins")
 print("list: \([1, 2, 3])")
 ```
 
-A format specification after a colon controls the output.
-`.2` sets two digits after the point, `>6` aligns right in six characters, `03` pads with zeros, and `x` gives hexadecimal:
+Append `:spec` inside `\(...)` to control formatting, such as `.2` for precision, `>6` for width and alignment, `03` for zero-padding, `x` for hexadecimal, or `?` for debug output:
 
 ```sand
 let pi = 3.14159
@@ -159,11 +151,11 @@ print("\(255:x)")
 print("\("tea":?)")
 ```
 
-The `?` type gives the debug form: a string in quotes. [§10.10 of the specification](/spec/#1010-format-specifications) lists all the format options.
+See [specification §10.10](/spec/#1010-format-specifications) for the full format grammar.
 
 ### Multi-line and raw strings
 
-A string in `"""` can span many lines. Sand removes the newline after the opening `"""` and the indentation that all lines share:
+Triple-quoted strings (`"""..."""`) can span multiple lines. They automatically strip the leading newline and common indentation:
 
 ```sand
 let name = "Sand"
@@ -174,9 +166,7 @@ let note = """
 print(note)
 ```
 
-The text keeps the newline before the closing `"""`, so `print` writes an empty line after it.
-
-A raw string starts with `r"`. It has no escapes and no interpolation. Add `#` marks to put a `"` in it:
+Raw strings (`r"..."` or `r#"..."#`) disable escape sequences and interpolation:
 
 ```sand
 print(r"C:\temp\(not interpolated)")
@@ -185,7 +175,7 @@ print(r#"She said "hi"."#)
 
 ## Bytes
 
-A `bytes` value is an immutable sequence of bytes. Write it as `b"..."`, with `\xNN` for any byte:
+A `bytes` value is an immutable byte sequence written as `b"..."` with optional `\xNN` hex escapes:
 
 ```sand
 let data = b"OK\x00\xff"
@@ -196,8 +186,7 @@ print("hi".bytes())
 
 ## Durations
 
-A duration is a span of time, stored as a whole number of nanoseconds.
-Write it as a number and a unit: `ns`, `us`, `ms`, `s`, `m`, `h`, `d` or `w`.
+A `duration` value represents a signed nanosecond span. A duration literal is written as a number with unit suffix (`ns`, `us`, `ms`, `s`, `m`, `h`, `d`, or `w`):
 
 ```sand
 let timeout = 1.5s
@@ -207,17 +196,15 @@ print(total.millis())
 print(2h / 30m)
 ```
 
-You can add and subtract durations, and multiply or divide them by numbers.
-A duration divided by a duration gives a `float`. An `int` plus a duration is a type error.
+Durations can be added, subtracted, scaled by `int` or `float`, or divided by another `duration` to produce a `float` ratio.
 
 ## Unit
 
-`()` is the unit type. It has one value, also written `()`.
-A function without a return type returns `()`, and so does an `if` without an `else`.
+`()` is both the unit type and its sole value. Functions without an explicit return type and `if` expressions without an `else` branch evaluate to `()`.
 
 ## Printing
 
-`print` writes the display form of any value and a newline to standard output. `eprint` writes to standard error.
+`print` writes the display representation of a value followed by a newline to standard output, and `eprint` writes to standard error:
 
 ```sand
 print("text")
@@ -225,5 +212,3 @@ print(3.0)
 print(["tea", "milk"])
 eprint("a warning")
 ```
-
-Strings print without quotes at the top level, and with quotes inside collections.

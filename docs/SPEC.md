@@ -1664,7 +1664,7 @@ be what no other function takes:
 - a function, method, trait method, field, variant or variable
   (`help(print)`, `help(str.split)`, `help(xs.map)`, `help(p.x)`,
   `help(Some)`, `help(math.pi)`, `help(xs)`);
-- a string literal that identifies one of those targets (`help("json.Json.get")`);
+- a string literal that identifies any of those targets (`help("json.Json.get")`);
   its first segment may be written as a type (`"List.map"`, `"[T].map"`,
   `"Set<T>.add"`, `"int?.unwrap"`);
 - any other expression, which stands for its type and is not evaluated

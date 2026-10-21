@@ -1,13 +1,13 @@
 +++
 title = "Concurrency"
-description = "Run work in tasks with spawn, wait for results, and pass messages between tasks with channels."
+description = "Run concurrent tasks, coordinate work, and pass messages."
 +++
 
-A Sand engine runs one task at a time on one thread. When a task waits for I/O, a timer or another task, the engine runs a different task. You do not mark functions as `async` and you do not write `await`: any function can wait.
+A Sand engine multiplexes concurrent tasks on a single OS thread. If a task blocks on I/O, a timer, or another task, the scheduler switches to another ready task. Functions do not use `async` or `await` annotations; any function can suspend and resume transparently.
 
-## Functions that wait
+## Suspending functions
 
-This function writes a file. The task waits while the engine writes the file, and other ready tasks run. The caller sees an ordinary function call.
+I/O functions suspend only the calling task while the operation completes, allowing other ready tasks to run:
 
 ```sand
 import fs
@@ -20,11 +20,9 @@ fn save(name: str, text: str) -> Result<int> {
 print(save("notes.txt", "buy sand")?)
 ```
 
-Because no function is "async", you can call any function from any other function. To do two things at the same time, start a task.
-
 ## Tasks
 
-`spawn e` starts a task that evaluates the expression `e`. It returns a `Task<T>`, where `T` is the type of `e`. Call `wait()` to get the result.
+`spawn expr` creates a concurrent task that evaluates `expr` and returns a `Task<T>` handle. Call `wait()` on the handle to wait for the task result:
 
 ```sand
 fn slow_square(n: int) -> int {
@@ -37,7 +35,7 @@ let b = spawn slow_square(4)
 print(a.wait() + b.wait())
 ```
 
-Both tasks sleep at the same time, so the program takes about 10 ms, not 20 ms. A task starts at the next scheduling point, not at the `spawn`. A `spawn` block can contain statements, and it can read and assign the variables in scope:
+Both tasks sleep concurrently, so the program finishes in roughly 10 ms. A newly spawned task begins execution at the next scheduling point. A `spawn` block can contain multiple statements and can read and mutate variables in the enclosing scope:
 
 ```sand
 var count = 0
@@ -49,13 +47,13 @@ print(t.wait())
 print(count)
 ```
 
-A `Task<T>` has three methods:
+`Task<T>` provides three methods:
 
-- `wait()` makes the current task wait until `t` is done, then returns its value. A second `wait()` returns the same value.
-- `is_done()` tells whether `t` is done.
-- `cancel()` stops `t` if it is still running.
+- `wait()` suspends the calling task until the target task completes and returns its result. Subsequent calls to `wait()` return the same result.
+- `is_done()` returns `true` if the task has completed or been cancelled.
+- `cancel()` cancels the task if it is still running.
 
-A cancelled task is done at once. Then it runs its pending `defer` blocks (see [Resources](/guide/resources/)):
+Cancelling a task marks it done immediately and schedules its pending `defer` blocks (see [Resources](/guide/resources/)):
 
 ```sand
 let t = spawn {
@@ -69,20 +67,18 @@ print(t.is_done())
 task.sleep(1ms)
 ```
 
-`task.yield_now()` lets the task start before the cancellation. If you call `wait()` on a cancelled task, the run fails with `task cancelled`.
+Calling `wait()` on a cancelled task aborts the run with `task cancelled`. An unhandled failure in any task aborts the entire program; return a `Result` from a spawned task to propagate recoverable errors to the caller of `wait()`.
 
-An error in any task stops the whole run. Return a `Result` from a task to give an error to the task that waits.
+When the entry module finishes top-level execution, Sand cancels any remaining tasks.
 
-When the top-level code of the main module finishes, Sand ends the run and cancels the tasks that are not done.
+## Coordinating multiple tasks
 
-## Waiting for many tasks
+The prelude `task` module provides combinators for waiting on multiple tasks:
 
-The `task` module is always in scope. Its functions combine tasks:
-
-- `task.all(tasks)` waits for all tasks and returns their results in the same order.
-- `task.race(tasks)` returns the result of the first task to finish and cancels the others.
-- `task.timeout(d, f)` runs the function `f` in a task. It returns `None` and cancels the task if `f` does not finish within `d`.
-- `task.sleep(d)` makes the current task wait for the duration `d`.
+- `task.all(tasks)` waits for every task in `tasks` and returns their results in order.
+- `task.race(tasks)` returns the result of the first task to complete and cancels the remaining tasks.
+- `task.timeout(d, f)` runs `f()` in a task and returns `Some(result)` if it completes within duration `d`, or cancels the task and returns `None`.
+- `task.sleep(d)` suspends the calling task for duration `d`.
 
 ```sand
 fn after(d: duration, value: str) -> str {
@@ -101,9 +97,9 @@ print(task.timeout(5ms, () => after(1s, "too late")))
 
 ## Channels
 
-A channel is a queue of messages between tasks. `task.channel()` creates one. `send(v)` adds a message and `recv()` removes the oldest one. `recv()` waits while the channel is empty, and returns `None` after the channel is closed and empty.
+A `Channel<T>` is a FIFO message queue between tasks. Create a channel with `task.channel()`. `send(v)` enqueues a value, and `recv()` dequeues the oldest value, suspending while the channel is empty. Once the channel is closed and drained, `recv()` returns `None`.
 
-A `for` loop over a channel receives messages until the channel is closed and empty:
+Iterating over a channel with `for` receives values until the channel is closed and empty:
 
 ```sand
 let ch = task.channel()
@@ -119,15 +115,13 @@ for word in ch {
 producer.wait()
 ```
 
-Always close a channel when no more messages will come. Otherwise the loop waits for more messages, and the run can end in a deadlock.
+Close a channel after the last message is sent so that consumers waiting in `for` or `recv()` can finish.
 
-By default a channel has no size limit. `task.channel(capacity: n)` creates a bounded channel: `send` waits while it holds `n` messages. Use a bounded channel to stop a fast producer from getting too far ahead of a slow consumer.
+By default, channels are unbounded. `task.channel(capacity: n)` creates a bounded channel whose `send` method suspends the sender while the buffer holds `n` unread messages. `send` returns `false` if the channel is closed. `try_recv()` polls the channel without suspending, and `len()` returns the number of queued messages. See the [`task` reference](/std/task/) for all channel methods.
 
-`send` returns `false` if the channel is closed. `try_recv()` receives without waiting, and `len()` gives the number of queued messages. For all methods, see the [`task` reference](/std/task/).
+## Deadlock detection
 
-## Deadlocks
-
-If every task waits and no I/O or timer can wake one of them, no task can continue. Sand detects this and stops the run:
+If all tasks are suspended and zero pending I/O operations or timers remain to wake them, Sand detects the deadlock and aborts the run:
 
 ```sand fails
 let ch: Channel<int> = task.channel()
@@ -136,7 +130,7 @@ print(ch.recv())
 
 ## Preemption
 
-The engine counts the work that each task does. After a fixed amount of work, the engine lets another ready task run. Thus a busy loop in one task cannot block the other tasks:
+The VM counts bytecode instructions executed by each task and yields to the scheduler after a fixed fuel slice. A CPU-bound loop in a task cannot starve other ready tasks:
 
 ```sand
 var stop = false
@@ -152,6 +146,4 @@ stop = true
 print("busy task stopped: \(busy.wait())")
 ```
 
-The main task sleeps while `busy` runs its loop. When the sleep ends, the engine switches from `busy` to the main task, which sets `stop`.
-
-[§11 of the specification](/spec/#11-concurrency-and-asynchronous-io) gives the full rules.
+For the complete concurrency specification, see [§11 of the specification](/spec/#11-concurrency-and-asynchronous-io).
