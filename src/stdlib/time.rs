@@ -476,9 +476,9 @@ fn zone(vm: &Vm, v: Value) -> Result<tz::TimeZone, Ctl> {
     extract_value::<TimeZone>(vm, v).map(|z| z.0)
 }
 
-crate::sand_enum!(Unit => time.Unit { Year, Month, Week, Day, Hour, Minute, Second, Millisecond, Microsecond, Nanosecond });
-crate::sand_enum!(RoundMode => time.RoundingMode { Ceil, Floor, Expand, Trunc, HalfCeil, HalfFloor, HalfExpand, HalfTrunc, HalfEven });
-crate::sand_enum!(Disambiguation => time.Disambiguation { Compatible, Earlier, Later });
+crate::sand_enum!(Unit => time.Unit { Year, Month, Week, Day, Hour, Minute, Second, Millisecond, Microsecond, Nanosecond, .. });
+crate::sand_enum!(RoundMode => time.RoundingMode { Ceil, Floor, Expand, Trunc, HalfCeil, HalfFloor, HalfExpand, HalfTrunc, HalfEven, .. });
+crate::sand_enum!(Disambiguation => time.Disambiguation { Compatible, Earlier, Later, .. });
 
 fn rounding_args(vm: &Vm, a: &[Value], i: usize) -> Result<(Unit, i64, RoundMode), Ctl> {
     Ok((vm.enum_value(a[i])?, parse_increment(a[i + 1])?, vm.enum_value(a[i + 2])?))

@@ -2773,10 +2773,13 @@ normalize_path, normalize_entry_path}` for hosts writing their own
   can take and return it. `NativeModule::enum_type::<Shape>()` registers it
   and adds `pub enum Shape { Circle, Square }` if the module source does not
   declare it. A declaration in the source must have the listed variants, in
-  order, without payloads (a compile error otherwise). Host functions can
+  order, without payloads (a compile error otherwise). The list must name
+  every Rust variant unless it ends with `..`; a host function that returns
+  an unlisted variant fails with an internal error. Host functions can
   also take and return the standard enums `time.Unit`, `time.RoundingMode`,
   `time.Disambiguation` (`sandlang::jiff::{Unit, RoundMode,
-  tz::Disambiguation}`) and `log.Level` (`LogLevel`). Using a standard module name
+  tz::Disambiguation}`, without `Disambiguation::Reject`) and `log.Level`
+  (`LogLevel`). Using a standard module name
   (`NativeModule::new`), registering a module twice (`Config::module`), or
   registering a function twice panics.
 - `Outcome { exit_code: i32 }`; errors are `Error::Compile(diagnostics)`,

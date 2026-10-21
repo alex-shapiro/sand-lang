@@ -161,7 +161,7 @@ geo.function("sides", |s: Shape| match s {
 });
 ```
 
-Scripts call `geo.sides(geo.Shape.Square)`. If the module source declares `Shape`, the declaration must have the same variants in the same order.
+Scripts call `geo.sides(geo.Shape.Square)`. If the module source declares `Shape`, the declaration must have the same variants in the same order. The list must name every Rust variant. To bind only some variants (for example, of a `#[non_exhaustive]` enum from another crate), end the list with `..`: a host function that returns an unlisted variant then fails with an internal error.
 
 `NativeModule::async_function` registers an async Rust function; while its future is pending, only the calling Sand task suspends.
 

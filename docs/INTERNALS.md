@@ -78,7 +78,8 @@ each native under its key:
 - Take enum arguments as Rust enums: bind the Rust enum to the Sand enum
   with `sand_enum!`, register it with `Registry::add_enum_type`, and convert
   with `vm.enum_value` and `vm.new_enum`. The checker rejects a Sand
-  declaration whose variants differ from the binding. Never pass a variant
+  declaration whose variants differ from the binding, and records the runtime
+  id of the first variant in `Program::enum_types`. Never pass a variant
   index or name as an `int` or `str`.
 - Natives return a struct's fields as a tuple and let Sand build the struct.
   Never build `Obj::Variant` by hand: variants with one payload are stored

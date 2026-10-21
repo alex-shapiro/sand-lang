@@ -428,13 +428,35 @@ fn host_enum_declarations_must_match_the_rust_variants() {
         "pub enum Shape { Circle, Square }",
         "pub enum Shape { Circle, Triangle, Square }",
         "pub enum Shape { Circle, Square(int), Triangle }",
+        "pub enum Shape<T> { Circle, Square, Triangle }",
+        "pub native type Shape",
+        "pub struct Shape { sides: int }",
     ] {
         let mut m = shapes_module();
         m.source(decl);
         let (r, _, _) = run_src(Config::new().module(m), "import shapes\nprint(shapes.sides(shapes.Shape.Circle))");
         let Err(Error::Compile(ds)) = r else { panic!("{decl}: expected a compile error, got {r:?}") };
-        assert!(ds.iter().any(|d| d.message.contains("must declare the variants Circle, Square, Triangle, in order")), "{decl}: {ds:?}");
+        assert!(ds.iter().any(|d| d.message.contains("must declare `enum Shape { Circle, Square, Triangle }`")), "{decl}: {ds:?}");
     }
+}
+
+#[test]
+fn host_enums_have_docs() {
+    let mut m = shapes_module();
+    m.doc("Shape", "A plane figure.");
+    let (r, out, _) = run_src(Config::new().module(m), "import shapes\nhelp(shapes.Shape)");
+    r.unwrap();
+    assert!(out.starts_with("enum shapes.Shape\n\nA plane figure.\n"), "{out}");
+}
+
+#[test]
+fn raw_functions_reject_values_of_other_enums() {
+    let mut m = shapes_module();
+    m.source("pub enum Color { Red, Green, Blue }\npub native fn sides_of(c: Color) -> int");
+    m.raw_function("sides_of", |vm, a| Ok(sandlang::Value::Int(vm.enum_value::<Shape>(a[0])? as i64)));
+    let (r, _, _) = run_src(Config::new().module(m), "import shapes\nprint(shapes.sides_of(shapes.Color.Green))");
+    let Err(Error::Internal { message, .. }) = r else { panic!("expected an internal error, got {r:?}") };
+    assert!(message.contains("expected shapes.Shape"), "{message}");
 }
 
 #[test]
@@ -451,7 +473,7 @@ enum Partial {
     Unbound,
 }
 
-sandlang::sand_enum!(Partial => part.Partial { Bound });
+sandlang::sand_enum!(Partial => part.Partial { Bound, .. });
 
 #[test]
 fn unbound_rust_variants_are_internal_errors() {
