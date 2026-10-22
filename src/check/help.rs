@@ -10,6 +10,7 @@ use super::expr::{CallArgs, Ns, mk};
 use super::traits::impl_key;
 use super::*;
 use crate::syntax::ast::{Expr, ExprKind, StrSeg};
+use crate::syntax::lexer::is_ident;
 use std::fmt::Write;
 
 /// What the argument of `help` or `members` refers to.
@@ -1109,10 +1110,6 @@ pub(crate) fn module_summary(src: &str) -> String {
         .filter_map(|l| l.strip_prefix("//!"))
         .collect();
     summary(&doc.join("\n"))
-}
-
-pub(crate) fn is_ident(s: &str) -> bool {
-    s.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Where the first segment of a dotted name ends (at a `.` outside `<...>`).

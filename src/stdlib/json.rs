@@ -9,7 +9,8 @@
 
 use super::base64;
 use crate::check::ModKind;
-use crate::native::{HostError, NativeModule, Param, Reflect, ReflectCheck, SandType, Type, Val};
+use crate::native::{HostError, NativeModule, Param, Reflect, ReflectCheck, SandType, Type, TypeNames, Val};
+use crate::syntax::lexer::is_ident;
 use crate::types::ConstVal;
 use crate::vm::bytecode::{JsonIds, Program};
 use crate::vm::compare::{hash_key, str_hash};
@@ -41,11 +42,10 @@ impl SandType for JsonType {
 struct Decodable;
 
 impl ReflectCheck for Decodable {
-    fn check(node: &TypeDesc) -> Result<(), String> {
-        let no_recur = |_| "a recursive type".to_string();
+    fn check(node: &TypeDesc, names: &TypeNames) -> Result<(), String> {
         match node {
             TypeDesc::Unsupported(name) => Err(format!("`json.decode` cannot decode values of type `{name}`")),
-            TypeDesc::Map(k, _) if !is_map_key(k) => Err(format!("`json.decode` cannot decode map keys of type `{}`", k.name(&no_recur))),
+            TypeDesc::Map(k, _) if !is_map_key(k) => Err(format!("`json.decode` cannot decode map keys of type `{}`", names.of(k))),
             _ => Ok(()),
         }
     }
@@ -736,11 +736,6 @@ const LOOKUPS_PER_UNIT: usize = 16;
 fn lookup<T>(meter: &Meter, items: &[T], is: impl Fn(&T) -> bool) -> Result<Option<usize>, Ctl> {
     meter.charge(1 + (items.len() / LOOKUPS_PER_UNIT) as u64)?;
     Ok(items.iter().position(is))
-}
-
-fn is_ident(s: &str) -> bool {
-    let mut b = s.bytes();
-    b.next().is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') && b.all(|c| c.is_ascii_alphanumeric() || c == b'_')
 }
 
 const QUOTED_KEY: usize = 64;

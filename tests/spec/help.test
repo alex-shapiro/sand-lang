@@ -276,6 +276,7 @@ true
 
 === the overview lists functions, types and modules
 help()
+--- requires os
 --- stdout
 help(x) shows the documentation of x: a module, type, trait, function,
 method, field, variant or variable, or the type of any other expression

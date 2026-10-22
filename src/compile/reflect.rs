@@ -23,6 +23,7 @@
 
 use crate::check::CheckedProgram;
 use crate::check::persist::PMap;
+use crate::native::{ReflectCheckFn, TypeNames};
 use crate::types::{Opaque, Ty, TyList, TypeArena, TypeDefKind, TypeId, TypePrinter};
 use crate::vm::value::TypeDesc;
 use std::collections::{HashMap, HashSet};
@@ -110,18 +111,24 @@ impl DescCache {
 impl DescCache {
     /// Checks the description `desc` of constant `k` with `check`, calling it
     /// once for each distinct node.
-    pub(crate) fn check(&mut self, k: u32, desc: &TypeDesc, check: fn(&TypeDesc) -> Result<(), String>) -> Result<(), String> {
+    pub(crate) fn check(&mut self, k: u32, desc: &TypeDesc, check: ReflectCheckFn) -> Result<(), String> {
         let key = (k, check as usize);
         if self.accepted.get(&key).is_some() {
             return Ok(());
         }
         let mut seen: HashSet<*const TypeDesc> = HashSet::new();
+        // A node is visited before its children, so the struct or enum that a
+        // `TypeDesc::Recur` refers to is named before the `Recur` is checked.
+        let mut names = TypeNames::default();
         let mut todo = vec![desc];
         while let Some(d) = todo.pop() {
             if !seen.insert(d) {
                 continue;
             }
-            check(d)?;
+            if let TypeDesc::Struct { id, name, .. } | TypeDesc::Enum { id, name, .. } = d {
+                names.0.insert(*id, name.clone());
+            }
+            check(d, &names)?;
             match d {
                 TypeDesc::List(e) | TypeDesc::Set(e) | TypeDesc::Option(e) => todo.push(e),
                 TypeDesc::Map(k, v) => todo.extend([&**k, &**v]),

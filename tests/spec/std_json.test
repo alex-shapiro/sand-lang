@@ -224,6 +224,15 @@ let x = json.decode("1")
 --- error
 2: cannot infer type
 
+=== decode rejects types that JSON cannot represent
+import json
+struct Tree { kids: [Tree: int] }
+let a: Result<Tree> = json.decode("{}")
+let b: Result<[fn() -> int]> = json.decode("[]")
+--- error
+3: `json.decode` cannot decode map keys of type `Tree`
+4: `json.decode` cannot decode values of type `fn() -> int`
+
 === encode decode roundtrip
 import json
 struct P { x: int, y: [float], name: str, ok: bool }

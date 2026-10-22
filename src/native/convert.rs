@@ -55,7 +55,7 @@ impl Conversion {
 
     /// Converts the fields of a struct with `f`. Fails with a `"limit"`
     /// error if structs nest too deeply, as they do in a cyclic value.
-    pub fn nested<R>(&mut self, f: impl FnOnce(&mut Conversion) -> Result<R, Ctl>) -> Result<R, Ctl> {
+    pub(crate) fn nested<R>(&mut self, f: impl FnOnce(&mut Conversion) -> Result<R, Ctl>) -> Result<R, Ctl> {
         self.depth = deeper(self.depth)?;
         let r = f(self);
         self.depth -= 1;

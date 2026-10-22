@@ -1476,7 +1476,7 @@ impl Engine {
 
     fn resolve_library_module(&self, d: &Discovery<'_>, prompted: Duration, name: &str) -> Result<Option<crate::files::Target>, Error> {
         let Some(library) = &self.config.library else { return Ok(None) };
-        if !crate::check::help::is_ident(name) {
+        if !crate::syntax::lexer::is_ident(name) {
             return Ok(None);
         }
         let resolve = self.resolve_script_target(&self.config.fs.absolute(library).join(format!("{name}.sand")));

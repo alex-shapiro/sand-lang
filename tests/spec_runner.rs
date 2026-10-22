@@ -29,6 +29,8 @@
 //! * `--- test`: expected report from the test runner.
 //! * `--- args`: whitespace-separated command-line arguments.
 //! * `--- env`: `NAME=value` environment variables exposed to the script.
+//! * `--- requires FEATURE...`: the crate features (`os`, `tls`) the case
+//!   needs. Without them, the runner skips the case.
 
 mod common;
 
@@ -183,6 +185,15 @@ fn parse_cases(text: &str) -> Vec<Case> {
 
 fn run_case(case: &Case, mode: Mode, backend: Backend) -> Result<(), String> {
     let get = |name: &str| case.sections.iter().find(|(h, _)| h == name).map(|(_, b)| b.clone());
+    let enabled = |feature: &str| match feature {
+        "os" => cfg!(feature = "os"),
+        "tls" => cfg!(feature = "tls"),
+        _ => panic!("unknown feature `{feature}` in case {:?}", case.name),
+    };
+    let mut required = case.sections.iter().filter_map(|(h, _)| h.strip_prefix("requires ")).flat_map(str::split_whitespace);
+    if !required.all(enabled) {
+        return Ok(());
+    }
     let dir = CaseDir::new(backend, &case.name);
     for (h, body) in &case.sections {
         if let Some(path) = h.strip_prefix("file ") {

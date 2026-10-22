@@ -560,7 +560,7 @@ pub struct Vm {
     /// `vm_function` call fails (see `Config::retry_stress`).
     pub(crate) retry_stress: bool,
     /// The number of structs that the current conversion to Sand is inside
-    /// of (see [`Vm::nested`]).
+    /// of (see [`struct_into_value`](crate::native::struct_into_value)).
     pub(crate) nesting: usize,
 }
 

@@ -6,7 +6,9 @@ mod ty;
 
 pub use convert::{Conversion, FromValue, HostError, IntoHostError, IntoValue, value_from, value_into};
 pub use func::{AsyncHostFunction, HostFunction, Later, NativeError, Signature, VmFunction};
-pub use ty::{Bounds, Channel, Named, Never, Param, Range, Reflect, ReflectCheck, SandType, Task, Type, Val, bound};
+pub use ty::{
+    Bounds, Channel, Named, Never, Param, Range, Reflect, ReflectCheck, ReflectCheckFn, SandType, Task, Type, TypeNames, Val, bound,
+};
 
 pub(crate) use convert::mismatch;
 
@@ -146,9 +148,32 @@ pub fn struct_from_value<T: StructType>(
     conv: &mut Conversion,
     read: impl FnOnce(&[Value], &mut Conversion) -> Result<T, Ctl>,
 ) -> Result<T, Ctl> {
-    let fields = vm.struct_fields::<T>(v)?;
+    let def = vm.prog.struct_types.get(&TypeId::of::<T>());
+    let fields = match (def, v) {
+        (Some(&def), Value::Obj(_)) => match vm.heap.get(v) {
+            Obj::Struct(d, fields) if *d == def && fields.len() == T::FIELDS.len() => fields,
+            _ => return Err(mismatch::<T>()),
+        },
+        _ => return Err(mismatch::<T>()),
+    };
     vm.charge(1)?;
     conv.nested(|conv| read(fields, conv))
+}
+
+/// Allocates a value of the Sand struct bound to `T`, with the fields that
+/// `write` converts in declaration order. Fails with a `"limit"` error if
+/// structs nest too deeply. The derive macro calls this function.
+#[doc(hidden)]
+pub fn struct_into_value<T: StructType>(vm: &mut Vm, write: impl FnOnce(&mut Vm) -> Result<Box<[Value]>, Ctl>) -> Result<Value, Ctl> {
+    let Some(&def) = vm.prog.struct_types.get(&TypeId::of::<T>()) else {
+        return Err(Ctl::internal(format!("struct {}.{} is not loaded", T::MODULE, T::NAME)));
+    };
+    vm.nesting = convert::deeper(vm.nesting)?;
+    let fields = write(vm);
+    vm.nesting -= 1;
+    let fields = fields?;
+    vm.check_room(fields.len() * std::mem::size_of::<Value>())?;
+    Ok(vm.heap.alloc(Obj::Struct(def, fields)))
 }
 
 /// Converts the value `v` of a field of a [`StructType`] for
@@ -444,42 +469,6 @@ impl Vm {
     pub fn new_object<T: ObjectType>(&mut self, x: T) -> Result<Val<T>, Ctl> {
         self.check_room(NativeObject::size(&x))?;
         Ok(Val::from_raw(self.heap.alloc(Obj::Native(Box::new(x)))))
-    }
-
-    /// Converts the fields of a struct to Sand with `f`. Fails with a
-    /// `"limit"` error if structs nest too deeply.
-    pub fn nested<R>(&mut self, f: impl FnOnce(&mut Vm) -> Result<R, Ctl>) -> Result<R, Ctl> {
-        self.nesting = convert::deeper(self.nesting)?;
-        let r = f(self);
-        self.nesting -= 1;
-        r
-    }
-
-    /// Returns the fields of `v`, a value of the Sand struct bound to `T`, in
-    /// declaration order.
-    pub fn struct_fields<T: StructType>(&self, v: Value) -> Result<&[Value], Ctl> {
-        let def = self.prog.struct_types.get(&TypeId::of::<T>());
-        match (def, v) {
-            (Some(&def), Value::Obj(_)) => match self.heap.get(v) {
-                Obj::Struct(d, fields) if *d == def && fields.len() == T::FIELDS.len() => Ok(fields),
-                _ => Err(mismatch::<T>()),
-            },
-            _ => Err(mismatch::<T>()),
-        }
-    }
-
-    /// Allocates a value of the Sand struct bound to `T` with `fields` in
-    /// declaration order. Returns an internal error if the module that owns
-    /// `T` is not loaded in the current program.
-    pub fn new_struct<T: StructType>(&mut self, fields: Box<[Value]>) -> Result<Value, Ctl> {
-        let Some(&def) = self.prog.struct_types.get(&TypeId::of::<T>()) else {
-            return Err(Ctl::internal(format!("struct {}.{} is not loaded", T::MODULE, T::NAME)));
-        };
-        if fields.len() != T::FIELDS.len() {
-            return Err(mismatch::<T>());
-        }
-        self.check_room(fields.len() * std::mem::size_of::<Value>())?;
-        Ok(self.heap.alloc(Obj::Struct(def, fields)))
     }
 }
 

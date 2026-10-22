@@ -29,7 +29,7 @@ pub enum Type {
     Param(u8, Bounds),
     /// Runtime type description for the `reflect` type parameter at index
     /// `0..`, and the check of the types that the native accepts for it.
-    Reflect(u8, fn(&TypeDesc) -> Result<(), String>),
+    Reflect(u8, ReflectCheckFn),
     /// Nominal type declared in a module.
     Named(Named),
 }
@@ -392,20 +392,35 @@ impl<const N: u8, B: bound::ParamBounds> SandType for Param<N, B> {
     }
 }
 
+/// The signature of [`ReflectCheck::check`], which [`Type::Reflect`] holds.
+pub type ReflectCheckFn = fn(&TypeDesc, &TypeNames) -> Result<(), String>;
+
 /// Decides at compile time which types a native function accepts for a
 /// `reflect` type parameter (see [`Reflect`]).
 pub trait ReflectCheck {
     /// Returns the error message for a call site if the native cannot handle
     /// values of the type that `node` describes. The engine calls this function
     /// once for each distinct node of the description of the type argument.
-    /// [`TypeDesc::name`] gives the Sand name of a type for the message.
-    fn check(node: &TypeDesc) -> Result<(), String>;
+    /// [`TypeNames::of`] gives the Sand name of a type for the message.
+    fn check(node: &TypeDesc, names: &TypeNames) -> Result<(), String>;
 }
 
 /// Accepts every type.
 impl ReflectCheck for () {
-    fn check(_: &TypeDesc) -> Result<(), String> {
+    fn check(_: &TypeDesc, _: &TypeNames) -> Result<(), String> {
         Ok(())
+    }
+}
+
+/// The names of the structs and enums that enclose a node of a type
+/// description (see [`ReflectCheck`]).
+#[derive(Debug, Default)]
+pub struct TypeNames(pub(crate) HashMap<u32, String>);
+
+impl TypeNames {
+    /// The Sand name of the type that `t` describes.
+    pub fn of(&self, t: &TypeDesc) -> String {
+        t.name(&|id| self.0.get(&id).cloned().unwrap_or_default())
     }
 }
 

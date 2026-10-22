@@ -311,10 +311,7 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
         }
         impl #krate::native::IntoValue for #ty {
             fn into_value(self, vm: &mut #krate::vm::Vm) -> ::std::result::Result<#krate::Value, #krate::vm::Ctl> {
-                vm.nested(|vm| {
-                    let fields: ::std::boxed::Box<[#krate::Value]> = ::std::boxed::Box::new([#(#writes),*]);
-                    vm.new_struct::<Self>(fields)
-                })
+                #krate::native::struct_into_value::<Self>(vm, move |vm| ::std::result::Result::Ok(::std::boxed::Box::new([#(#writes),*])))
             }
         }
     })
