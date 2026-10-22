@@ -314,6 +314,7 @@ impl Checker {
                         continue;
                     };
                     seen[idx] = true;
+                    self.check_field_visible(d, idx, f.name.span);
                     let fty = self.field_type(d, idx, &targs);
                     let h = match &f.pattern {
                         Some(p) => self.check_pat_inner(p, fty, mutable, binds),

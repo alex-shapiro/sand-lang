@@ -14,10 +14,6 @@ import net
 /// the operating system assigns an ephemeral port.
 pub native fn serve(ip: str, port: int) -> Result<Server>
 
-/// An HTTP/1.1 server listening for incoming requests. Closing the server stops
-/// accepting new connections and closes in-flight request readers.
-pub native type Server
-
 extend Server {
     /// Waits for and returns the next incoming HTTP request. Request headers
     /// are read concurrently across connections, and the request body is
@@ -40,17 +36,17 @@ impl Close for Server {
 /// to lowercase.
 pub struct Request {
     /// HTTP request method (such as `"GET"` or `"POST"`).
-    method: str
+    pub method: str
     /// Request path before `?`.
-    path: str
+    pub path: str
     /// Raw query string after `?` (or `""` if absent).
-    query: str
+    pub query: str
     /// Request headers in receipt order, with lowercase names.
-    headers: [(str, str)]
+    pub headers: [(str, str)]
     /// Streaming request body (`read_all`, `bytes`, `text`, and `json` enforce `max_http_body`).
-    body: Body
+    pub body: Body
     /// Underlying client connection.
-    conn: net.Conn
+    pub conn: net.Conn
     exchange: Exchange
 
     /// Sends a complete HTTP response with `status`, `body`, and `headers`, and
@@ -187,10 +183,6 @@ impl Close for Upload {
         self.conn.close()
     }
 }
-
-native type Outgoing
-
-native type Exchange
 
 native fn start_upload(
     method: str,

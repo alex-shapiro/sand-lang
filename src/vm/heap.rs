@@ -1085,7 +1085,7 @@ impl Heap {
 
     pub fn native<T: 'static>(&self, v: Value) -> Option<&T> {
         match self.get(v) {
-            Obj::Native(n) => n.as_any().downcast_ref::<T>(),
+            Obj::Native(n) => (&**n as &dyn std::any::Any).downcast_ref::<T>(),
             _ => None,
         }
     }
@@ -1096,9 +1096,9 @@ impl Heap {
 
     pub fn native_mut<T: 'static>(&mut self, v: Value) -> Option<&mut T> {
         // Native objects hold no values: no write barrier needed.
-        let Value::Obj(h) = v else { panic!("internal error: not an object") };
+        let Value::Obj(h) = v else { return None };
         match &mut self.objs[h as usize] {
-            Obj::Native(n) => n.as_any_mut().downcast_mut::<T>(),
+            Obj::Native(n) => (&mut **n as &mut dyn std::any::Any).downcast_mut::<T>(),
             _ => None,
         }
     }

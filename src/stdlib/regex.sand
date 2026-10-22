@@ -6,23 +6,21 @@
 /// A substring match and its UTF-8 byte range `start..end`.
 pub struct Match {
     /// Matched substring.
-    text: str
+    pub text: str
     /// Inclusive start byte offset.
-    start: int
+    pub start: int
     /// Exclusive end byte offset.
-    end: int
+    pub end: int
 }
-
-/// A compiled regular expression created with `regex.new`.
-pub native type Regex
 
 /// Capture groups from a regular expression match. Group `0` corresponds to the
 /// full match.
 pub struct Captures {
     /// Input string that was searched.
-    text: str
+    pub text: str
     /// Start and end byte offsets for each group (`-1` if the group did not match).
     spans: [int]
+    /// The regex that matched, for the indexes of named groups.
     regex: Regex
 
     /// Returns capture group `i`, or `None` if group `i` did not participate or

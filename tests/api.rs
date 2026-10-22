@@ -19,14 +19,28 @@ use std::time::{Duration, Instant};
 fn engine_with(config: Config) -> (Engine, MemorySink, MemorySink) {
     let out = MemorySink::new();
     let err = MemorySink::new();
-    let engine = Engine::new(config.stdout(out.clone()).stderr(err.clone()));
+    let engine = Engine::new(config.stdout(out.clone()).stderr(err.clone())).unwrap();
     (engine, out, err)
 }
 
+/// Runs `src`; an engine that cannot be created is the run's error.
 fn run_src(config: Config, src: &str) -> (Result<sandlang::Outcome, Error>, String, String) {
-    let (mut engine, out, err) = engine_with(config);
+    let (out, err) = (MemorySink::new(), MemorySink::new());
+    let mut engine = match Engine::new(config.stdout(out.clone()).stderr(err.clone())) {
+        Ok(engine) => engine,
+        Err(e) => return (Err(e), String::new(), String::new()),
+    };
     let r = rt().block_on(engine.run_source("main.sand", src));
     (r, out.contents(), err.contents())
+}
+
+/// The messages of the error that creating an engine for `config` fails with.
+fn engine_errors(config: Config) -> Vec<String> {
+    match Engine::new(config) {
+        Err(Error::Compile(ds)) => ds.into_iter().map(|d| d.message).collect(),
+        Err(e) => panic!("expected a compile error, got {e:?}"),
+        Ok(_) => panic!("expected a compile error"),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -36,7 +50,7 @@ fn run_src(config: Config, src: &str) -> (Result<sandlang::Outcome, Error>, Stri
 #[test]
 fn engine_and_run_future_are_send() {
     fn assert_send<T: Send>(_: &T) {}
-    let mut engine = Engine::new(Config::new());
+    let mut engine = Engine::new(Config::new()).unwrap();
     assert_send(&engine);
     let fut = engine.run_source("main.sand", "print(1)");
     assert_send(&fut);
@@ -71,7 +85,7 @@ fn compile_errors_are_reported_as_diagnostics() {
 #[test]
 fn a_failed_call_reports_nothing_about_the_lambdas_after_it() {
     let src = "let counts = [\"a\": 2]\nlet top = counts\n    .map((k, v) => (k, v))\n    .sorted_by(t => (-t.1, t.0))\n    .take(10)";
-    match Engine::new(Config::new()).check_source("main.sand", src) {
+    match Engine::new(Config::new()).unwrap().check_source("main.sand", src) {
         Err(Error::Compile(diags)) => {
             let messages: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
             assert_eq!(messages, ["no method `map` on type [str: int]; call it on `entries()`, a list of (key, value) pairs"]);
@@ -83,7 +97,7 @@ fn a_failed_call_reports_nothing_about_the_lambdas_after_it() {
 #[test]
 fn an_undefined_name_reports_nothing_about_the_types_it_hides() {
     let src = "fn f() -> Result<int> {\n    let p = jsn.parse(\"[]\")?\n    let Some(xs) = p.get(\"a\").and_then(x => x.as_list()) else {\n        return Ok(0)\n    }\n    for x in xs {\n        print(x)\n    }\n    Ok(1)\n}\nlet rs = nope([1])\nfor r in rs {\n    print(r?)\n}";
-    match Engine::new(Config::new()).check_source("main.sand", src) {
+    match Engine::new(Config::new()).unwrap().check_source("main.sand", src) {
         Err(Error::Compile(diags)) => {
             let messages: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
             assert_eq!(messages, ["undefined name `nope`", "undefined name `jsn`"]);
@@ -94,7 +108,7 @@ fn an_undefined_name_reports_nothing_about_the_types_it_hides() {
 
 #[test]
 fn check_source_does_not_run() {
-    let engine = Engine::new(Config::new());
+    let engine = Engine::new(Config::new()).unwrap();
     engine.check_source("main.sand", "print(1)\nlet x: int = 2").unwrap();
     let err = engine.check_source("main.sand", "let x: int = true").unwrap_err();
     assert!(matches!(err, Error::Compile(_)));
@@ -342,19 +356,19 @@ impl ValueType for Impostor {
 }
 
 #[test]
-#[should_panic(expected = "type `bank.Money` is not registered")]
 fn value_types_in_signatures_must_be_registered() {
     let mut m = NativeModule::new("bank");
     m.function("zero", || Money(0));
-    Engine::new(Config::new().module(m));
+    let errors = engine_errors(Config::new().module(m));
+    assert!(errors[0].contains("native `bank.zero` uses `bank.Money`, which no module declares"), "{errors:?}");
 }
 
 #[test]
-#[should_panic(expected = "type `bank.Money` is registered for another Rust type")]
 fn value_types_in_signatures_must_be_the_registered_rust_type() {
     let mut m = bank_module();
     m.function("fake", || Impostor);
-    Engine::new(Config::new().module(m));
+    let errors = engine_errors(Config::new().module(m));
+    assert!(errors[0].contains("uses a Rust type that is not the one bound to `bank.Money`"), "{errors:?}");
 }
 
 /// A plane figure.
@@ -431,25 +445,26 @@ fn host_functions_take_and_return_enums_of_standard_modules() {
 }
 
 #[test]
-fn host_enums_cannot_be_declared_in_the_module_source() {
-    for decl in ["pub enum Shape { Circle, Square, Triangle }", "pub native type Shape", "pub struct Shape { sides: int }"] {
-        let mut m = shapes_module();
+fn registered_types_cannot_be_declared_in_the_module_source() {
+    let cases = [
+        (shapes_module(), "pub enum Shape { Circle, Square, Triangle }"),
+        (shapes_module(), "pub struct Shape { sides: int }"),
+        (bank_module(), "pub enum Money { Cents }"),
+        (bank_module(), "pub type Money = int"),
+    ];
+    for (mut m, decl) in cases {
         m.source(decl);
-        let (r, _, _) = run_src(Config::new().module(m), "import shapes\nprint(shapes.sides(shapes.Shape.Circle))");
-        let Err(Error::Compile(ds)) = r else { panic!("{decl}: expected a compile error, got {r:?}") };
-        assert_eq!((ds[0].message.as_str(), ds[0].source_line.as_deref()), ("`Shape` is already defined", Some(decl)), "{ds:?}");
+        let errors = engine_errors(Config::new().module(m));
+        assert!(errors[0].ends_with("is already defined"), "{decl}: {errors:?}");
     }
 }
 
 #[test]
-fn host_value_type_declarations_must_be_public_native_types() {
-    for decl in ["pub enum Money { Cents }", "pub struct Money { cents: int }", "pub type Money = int", "native type Money"] {
-        let mut m = bank_module();
-        m.source(decl);
-        let (r, _, _) = run_src(Config::new().module(m), "import bank\nprint(bank.cents(3))");
-        let Err(Error::Compile(ds)) = r else { panic!("{decl}: expected a compile error, got {r:?}") };
-        assert!(ds[0].message.contains("must declare `pub native type Money`"), "{decl}: {ds:?}");
-    }
+fn native_types_cannot_be_declared_in_sand() {
+    let mut m = NativeModule::new("bank");
+    m.source("pub native type Money");
+    let errors = engine_errors(Config::new().module(m));
+    assert!(errors[0].contains("native types are declared by registering Rust types"), "{errors:?}");
 }
 
 #[test]
@@ -478,12 +493,29 @@ fn host_function_declarations_must_have_the_rust_types() {
 }
 
 #[test]
-fn registered_natives_must_be_declared() {
+fn registered_methods_must_be_declared() {
     let mut m = shapes_module();
-    m.raw_function("ghost", |_, _| Ok(sandlang::Value::Unit));
-    let (r, _, _) = run_src(Config::new().module(m), "import shapes");
+    m.function("Shape.ghost", |s: Shape| s as i64);
+    let errors = engine_errors(Config::new().module(m));
+    assert!(errors[0].contains("native `shapes.Shape.ghost` is registered, but the module does not declare it"), "{errors:?}");
+}
+
+#[test]
+fn registered_functions_cannot_share_names_with_sand_items() {
+    let mut m = NativeModule::new("tally");
+    m.source("pub fn count() -> int { 0 }");
+    m.function("count", || 1i64);
+    let (r, _, _) = run_src(Config::new().module(m), "");
     let Err(Error::Compile(ds)) = r else { panic!("expected a compile error, got {r:?}") };
-    assert!(ds[0].message.contains("native `shapes.ghost` is registered, but the module does not declare it"), "{ds:?}");
+    let msg = "`count` is also the name of the registered native `tally.count`; declare the native with `native fn count`";
+    assert_eq!((ds[0].message.as_str(), ds[0].source_line.as_deref()), (msg, Some("pub fn count() -> int { 0 }")), "{ds:?}");
+}
+
+#[test]
+fn derived_natives_take_named_arguments() {
+    let (r, out, _) = run_src(Config::new().module(geo_module()), "import geo\nprint(geo.dist(b: 4.0, a: 3.0))");
+    r.unwrap();
+    assert_eq!(out, "5.0\n");
 }
 
 #[test]
@@ -495,37 +527,36 @@ fn public_functions_of_host_modules_use_public_types() {
     for (src, msg) in cases {
         let mut m = shapes_module();
         m.source(src);
-        m.raw_function("color", |_, _| Ok(sandlang::Value::Unit));
-        let (r, _, _) = run_src(Config::new().module(m), "import shapes");
-        let Err(Error::Compile(ds)) = r else { panic!("{src}: expected a compile error, got {r:?}") };
-        assert!(ds.iter().any(|d| d.message.contains(msg)), "{src}: {ds:?}");
+        m.function("color", || 0i64);
+        let errors = engine_errors(Config::new().module(m));
+        assert!(errors.iter().any(|e| e.contains(msg)), "{src}: {errors:?}");
     }
 }
 
 #[test]
-#[should_panic(expected = "a host module cannot be named `str`")]
-fn host_modules_cannot_take_the_names_of_prelude_types() {
+fn host_modules_can_take_the_names_of_prelude_types() {
     let mut m = NativeModule::new("str");
     m.function("shout", |s: String| s.to_uppercase());
-    Engine::new(Config::new().module(m));
+    let (r, out, _) = run_src(Config::new().module(m), "import str\nprint(str.shout(\"hi\"))\nprint(\"hi\".len())");
+    r.unwrap();
+    assert_eq!(out, "HI\n2\n");
 }
 
 #[test]
-fn raw_functions_reject_values_of_other_enums() {
+fn natives_declared_with_other_enums_do_not_check() {
     let mut m = shapes_module();
     m.source("pub enum Color { Red, Green, Blue }\npub native fn sides_of(c: Color) -> int");
-    m.raw_function("sides_of", |vm, a| Ok(sandlang::Value::Int(vm.enum_value::<Shape>(a[0])? as i64)));
-    let (r, _, _) = run_src(Config::new().module(m), "import shapes\nprint(shapes.sides_of(shapes.Color.Green))");
-    let Err(Error::Internal { message, .. }) = r else { panic!("expected an internal error, got {r:?}") };
-    assert_eq!(message, "a native function expected a value of type `shapes.Shape`");
+    m.function("sides_of", |s: Shape| s as i64);
+    let errors = engine_errors(Config::new().module(m));
+    assert!(errors[0].contains("is declared `fn(Color) -> int`, but its Rust function is `fn(Shape) -> int`"), "{errors:?}");
 }
 
 #[test]
-#[should_panic(expected = "type `shapes.Shape` is not registered")]
 fn enums_in_signatures_must_be_registered() {
     let mut m = NativeModule::new("shapes");
     m.function("square", || Shape::Square);
-    Engine::new(Config::new().module(m));
+    let errors = engine_errors(Config::new().module(m));
+    assert!(errors[0].contains("uses `shapes.Shape`, which no module declares"), "{errors:?}");
 }
 
 #[test]
@@ -675,7 +706,7 @@ fn native_module_with_sand_source() {
     m.source(
         r#"
 /// A square.
-pub struct Square { side: float }
+pub struct Square { pub side: float }
 pub fn area(s: Square) -> float { s.side * s.side }
 pub native fn scale(x: float, k: float) -> float
 "#,
@@ -734,12 +765,9 @@ help(units)
 fn help_describes_host_modules_that_are_not_imported() {
     let mut shapes = NativeModule::new("shapes");
     shapes.source(
-        "//! Shapes.\n/// A square.\npub struct Square { side: float }\n/// Area of a square.\npub fn area(s: Square) -> float { s.side * s.side }\n",
+        "//! Shapes.\n/// A square.\npub struct Square { pub side: float }\n/// Area of a square.\npub fn area(s: Square) -> float { s.side * s.side }\n",
     );
-    // A host module that does not type check must not break `help` for the others.
-    let mut broken = NativeModule::new("broken");
-    broken.source("pub fn bad() -> int { \"not an int\" }\n");
-    let config = || Config::new().module(shapes.clone()).module(broken.clone());
+    let config = || Config::new().module(shapes.clone());
     let (r, out, _) = run_src(config(), "help(shapes)\nprint(members(shapes))\nhelp(\"shapes.Square\")");
     r.unwrap();
     assert_eq!(
@@ -748,9 +776,175 @@ fn help_describes_host_modules_that_are_not_imported() {
     );
     let (r, out, _) = run_src(config(), "help()");
     r.unwrap();
-    assert!(out.contains("    shapes      Shapes.\n") && !out.contains("broken"), "{out}");
-    let (r, _, _) = run_src(config(), "help(broken)");
-    assert!(matches!(&r, Err(Error::Compile(d)) if d[0].message.contains("type mismatch")), "{r:?}");
+    assert!(out.contains("    shapes      Shapes.\n"), "{out}");
+}
+
+#[test]
+fn host_modules_cannot_import_each_other_in_a_cycle() {
+    let (mut a, mut b) = (NativeModule::new("ring_a"), NativeModule::new("ring_b"));
+    a.source("import ring_b\npub fn one() -> int { 1 }");
+    b.source("import ring_a\npub fn two() -> int { 2 }");
+    let errors = engine_errors(Config::new().module(a).module(b));
+    assert_eq!(errors, ["import cycle through module `ring_a`"]);
+}
+
+#[test]
+fn engines_check_host_modules_when_created() {
+    let mut broken = NativeModule::new("broken");
+    broken.source("pub fn bad() -> int { \"not an int\" }\n");
+    let errors = engine_errors(Config::new().module(broken));
+    assert!(errors[0].contains("type mismatch"), "{errors:?}");
+}
+
+/// A tally that functions of `stats` update.
+#[derive(sandlang::SandObject)]
+#[sand(module = "stats")]
+struct Counter(AtomicUsize);
+
+impl sandlang::native::NativeObject for Counter {}
+
+/// Scratch space, hidden from other modules.
+#[derive(sandlang::SandObject)]
+#[sand(module = "stats", private)]
+struct Scratch;
+
+impl sandlang::native::NativeObject for Scratch {}
+
+fn stats_module() -> NativeModule {
+    let mut m = NativeModule::new("stats");
+    m.object_type::<Counter>();
+    m.source("extend Counter {\n    /// Adds `n` and returns the total.\n    pub native fn add(self, n: int) -> int\n}");
+    m.function("counter", || Counter(AtomicUsize::new(0)));
+    m.function("total", |c: &Counter| c.0.load(Ordering::Relaxed) as i64);
+    m.function("Counter.add", |c: &Counter, n: i64| (c.0.fetch_add(n as usize, Ordering::Relaxed) + n as usize) as i64);
+    m
+}
+
+#[test]
+fn host_functions_take_and_return_objects() {
+    let src = r#"
+import stats
+let c = stats.counter()
+let d = stats.counter()
+print(c.add(2) + c.add(3))
+print("\(stats.total(c)) \(stats.total(d))")
+print("\(c == c) \(c == d) \(c)")
+help(stats.Counter)
+"#;
+    let (r, out, _) = run_src(Config::new().module(stats_module()), src);
+    r.unwrap();
+    assert_eq!(
+        out,
+        "7\n5 0\ntrue false <Counter>\ntype stats.Counter\n\nA tally that functions of `stats` update.\n\nMethods:\n    fn add(self, n: int) -> int\n        Adds `n` and returns the total.\n"
+    );
+}
+
+#[test]
+fn natives_must_be_declared_with_their_object_types() {
+    let mut m = stats_module();
+    m.object_type::<Scratch>();
+    m.function("scratch", || Scratch);
+    let errors = engine_errors(Config::new().module(m));
+    assert!(errors[0].contains("public function `scratch` uses the private type `Scratch`"), "{errors:?}");
+
+    let mut m = stats_module();
+    m.source("pub struct Box { pub n: int }\npub native fn peek(b: Box) -> int");
+    m.function("peek", |c: &Counter| c.0.load(Ordering::Relaxed) as i64);
+    let errors = engine_errors(Config::new().module(m));
+    assert!(errors[0].contains("is declared `fn(Box) -> int`, but its Rust function is `fn(Counter) -> int`"), "{errors:?}");
+}
+
+#[test]
+fn natives_cannot_use_private_types_of_other_modules() {
+    let mut stats = stats_module();
+    stats.object_type::<Scratch>();
+    let mut m = NativeModule::new("peek");
+    m.function("scratch", |_: &Scratch| 0i64);
+    let errors = engine_errors(Config::new().module(stats).module(m));
+    assert!(errors[0].contains("native `peek.scratch` uses `stats.Scratch`, which is private"), "{errors:?}");
+}
+
+#[test]
+fn generic_natives_take_type_parameters() {
+    use sandlang::native::{Param, Reflect, Val};
+    use sandlang::vm::{Ctl, Vm};
+    let module = |src: &str| {
+        let mut m = NativeModule::new("gen");
+        m.source(src);
+        m
+    };
+    let mut m = module("pub native fn second<T>(xs: [T]) -> T?\npub native fn swap<A, B>(p: (A, B)) -> (B, A)");
+    m.vm_function("second", |vm: &mut Vm, xs: Val<Vec<Param<0>>>| xs.items(&vm.heap).get(1).copied().map(Param::<0>::from_raw));
+    m.vm_function("swap", |vm: &mut Vm, p: Val<(Param<0>, Param<1>)>| -> Result<(Param<1>, Param<0>), Ctl> {
+        let (a, b) = (vm.heap.field(p.raw(), 0), vm.heap.field(p.raw(), 1));
+        Ok((Param::from_raw(b.unwrap()), Param::from_raw(a.unwrap())))
+    });
+    let (r, out, _) = run_src(Config::new().module(m), "import gen\nprint(gen.second([\"a\", \"b\"]))\nprint(gen.swap((1, \"x\")))");
+    r.unwrap();
+    assert_eq!(out, "Some(\"b\")\n(\"x\", 1)\n");
+
+    type Register = fn(&mut NativeModule);
+    let cases: [(&str, Register); 4] = [
+        ("is declared `fn([T]) -> T?`, but its Rust function is `fn([T]) -> T`", |m| {
+            m.vm_function("second", |_: &mut Vm, xs: Val<Vec<Param<0>>>| -> Result<Param<0>, Ctl> { Ok(Param::from_raw(xs.raw())) });
+        }),
+        ("uses type parameter 1, which its declaration does not have", |m| {
+            m.vm_function("second", |_: &mut Vm, _: Val<Vec<Param<1>>>| -> Result<Option<Param<1>>, Ctl> { Ok(None) });
+        }),
+        ("is declared `fn([T]) -> T?`, but its Rust function is `fn(<description of T>, [T]) -> T?`", |m| {
+            m.vm_function("second", |_: &mut Vm, _: Reflect<0>, _: Val<Vec<Param<0>>>| -> Result<Option<Param<0>>, Ctl> { Ok(None) });
+        }),
+        ("is declared `fn([T]) -> T?`, but its Rust function is `fn([int]) -> int?`", |m| {
+            m.function("second", |xs: Vec<i64>| xs.get(1).copied());
+        }),
+    ];
+    for (msg, register) in cases {
+        let mut m = module("pub native fn second<T>(xs: [T]) -> T?");
+        register(&mut m);
+        let errors = engine_errors(Config::new().module(m));
+        assert!(errors[0].contains(msg), "{msg}: {errors:?}");
+    }
+
+    let mut m = NativeModule::new("gen");
+    m.vm_function("second", |_: &mut Vm, _: Val<Vec<Param<0>>>| -> Result<Option<Param<0>>, Ctl> { Ok(None) });
+    let errors = engine_errors(Config::new().module(m));
+    assert!(errors[0].contains("native `gen.second` is generic, so the module must declare it with `native fn`"), "{errors:?}");
+}
+
+#[test]
+fn reflecting_natives_take_type_descriptions() {
+    use sandlang::native::{Param, Reflect};
+    use sandlang::vm::Ctl;
+    use sandlang::vm::Vm;
+    let mut m = NativeModule::new("desc");
+    m.source("pub native fn describe<reflect T>(x: T) -> str");
+    m.vm_function("describe", |vm: &mut Vm, t: Reflect<0>, _: Param<0>| -> Result<String, Ctl> { Ok(format!("{:?}", t.desc(&vm.heap)?)) });
+    let (r, out, _) = run_src(Config::new().module(m), "import desc\nprint(desc.describe([1]))");
+    r.unwrap();
+    assert_eq!(out, "List(Int)\n");
+}
+
+#[test]
+fn host_functions_take_and_return_durations_and_never() {
+    use sandlang::jiff::SignedDuration;
+    use sandlang::native::Never;
+    use sandlang::vm::{Ctl, Vm};
+    let mut m = NativeModule::new("clock");
+    m.function("double", |d: SignedDuration| d * 2);
+    m.function("forever", || SignedDuration::MAX);
+    m.vm_function("halt", |_: &mut Vm, code: i64| -> Result<Never, Ctl> { Err(Ctl::exit(code as i32)) });
+    let (r, out, _) = run_src(Config::new().module(m.clone()), "import clock\nprint(clock.double(1500ms))\nlet n: int = clock.halt(3)");
+    assert_eq!((r.unwrap().exit_code, out.as_str()), (3, "3s\n"));
+    let (r, _, _) = run_src(Config::new().module(m), "import clock\nprint(clock.forever())");
+    assert!(matches!(&r, Err(Error::Runtime { message, .. }) if message.contains("the duration is out of range")), "{r:?}");
+}
+
+#[test]
+fn public_fields_of_public_host_types_use_public_types() {
+    let mut m = NativeModule::new("shapes");
+    m.source("struct Hidden { x: int }\npub struct Shown { pub h: Hidden }\npub struct Fine { h: Hidden }");
+    let errors = engine_errors(Config::new().module(m));
+    assert_eq!(errors, ["public field `h` uses the private type `Hidden`; make `Hidden` public"]);
 }
 
 #[test]
@@ -1013,7 +1207,7 @@ fn denied_import_is_a_compile_error() {
     dir.write("lib.sand", "pub let X = 1");
     let main = dir.write("main.sand", "import \"./lib.sand\"\nprint(lib.X)");
     let policy = Policy::custom(|cap: &Capability| if matches!(cap, Capability::Import(_)) { Decision::Deny } else { Decision::Allow });
-    let mut engine = Engine::new(Config::new().policy(policy));
+    let mut engine = Engine::new(Config::new().policy(policy)).unwrap();
     match rt().block_on(engine.run_file(&main)) {
         Err(Error::Compile(d)) => assert!(d[0].message.contains("permission denied"), "{d:?}"),
         other => panic!("{other:?}"),
@@ -1150,7 +1344,7 @@ fn import_prompt_allow_once_asks_on_every_compile() {
     dir.write("lib.sand", "pub let X = 1");
     let main = dir.write("main.sand", "import \"./lib.sand\"\nprint(lib.X)");
     let prompter = ScriptedPrompter::new(&[PromptAnswer::AllowOnce, PromptAnswer::AllowOnce]);
-    let mut engine = Engine::new(prompter.config(prompt_for_imports()));
+    let mut engine = Engine::new(prompter.config(prompt_for_imports())).unwrap();
     rt().block_on(engine.run_file(&main)).unwrap();
     assert_eq!(prompter.asked(), vec![import_cap(&dir, "lib.sand")]);
     rt().block_on(engine.run_file(&main)).unwrap();
@@ -1164,7 +1358,7 @@ fn import_prompt_allow_always_is_remembered_by_the_engine() {
     dir.write("lib.sand", "pub let X = 1");
     let main = dir.write("main.sand", "import \"./lib.sand\"\nprint(lib.X)");
     let prompter = ScriptedPrompter::new(&[PromptAnswer::AllowAlways]);
-    let mut engine = Engine::new(prompter.config(prompt_for_imports()));
+    let mut engine = Engine::new(prompter.config(prompt_for_imports())).unwrap();
     rt().block_on(engine.run_file(&main)).unwrap();
     assert_eq!(prompter.asked(), vec![import_cap(&dir, "lib.sand")]);
     // Not asked again for later compilations by the same engine...
@@ -1177,7 +1371,7 @@ fn import_prompt_allow_always_is_remembered_by_the_engine() {
     assert_import_denied(rt().block_on(engine.run_file(&main2)), "./other.sand");
     assert_eq!(prompter.asked(), vec![import_cap(&dir, "other.sand")]);
     // A fresh engine asks again.
-    let mut fresh = Engine::new(prompter.config(prompt_for_imports()));
+    let mut fresh = Engine::new(prompter.config(prompt_for_imports())).unwrap();
     assert_import_denied(rt().block_on(fresh.run_file(&main)), "./lib.sand");
     assert_eq!(prompter.asked(), vec![import_cap(&dir, "lib.sand")]);
 }
@@ -1189,7 +1383,7 @@ fn import_prompt_deny_once_and_deny_always() {
     dir.write("lib.sand", "pub let X = 1");
     let main = dir.write("main.sand", "import \"./lib.sand\"\nprint(lib.X)");
     let prompter = ScriptedPrompter::new(&[PromptAnswer::DenyOnce, PromptAnswer::DenyAlways, PromptAnswer::AllowAlways]);
-    let mut engine = Engine::new(prompter.config(prompt_for_imports()));
+    let mut engine = Engine::new(prompter.config(prompt_for_imports())).unwrap();
     assert_import_denied(rt().block_on(engine.run_file(&main)), "./lib.sand");
     assert_eq!(prompter.asked().len(), 1);
     // `DenyOnce` is not remembered; `DenyAlways` is.
@@ -1206,11 +1400,11 @@ fn import_prompt_without_prompter_denies() {
     let dir = TempDir::new("impnoprompter");
     dir.write("lib.sand", "pub let X = 1");
     let main = dir.write("main.sand", "import \"./lib.sand\"\nprint(lib.X)");
-    let mut engine = Engine::new(Config::new().policy(prompt_for_imports()));
+    let mut engine = Engine::new(Config::new().policy(prompt_for_imports())).unwrap();
     assert_import_denied(rt().block_on(engine.run_file(&main)), "./lib.sand");
     // Standard modules are not script imports and are never prompted for.
     let prompter = ScriptedPrompter::new(&[]);
-    let mut engine = Engine::new(prompter.config(prompt_for_imports()));
+    let mut engine = Engine::new(prompter.config(prompt_for_imports())).unwrap();
     rt().block_on(engine.run_source("main.sand", "import json\nprint(json.encode(json.Json.Null))")).unwrap();
     assert_eq!(prompter.asked(), vec![]);
 }
@@ -1225,7 +1419,7 @@ fn nested_imports_are_prompted_with_resolved_paths() {
     let main = dir.write("main.sand", "import \"lib/a.sand\"\nimport \"./c.sand\"\nprint(a.X + c.Z)");
     let prompter = ScriptedPrompter::new(&[PromptAnswer::AllowOnce; 3]);
     let out = MemorySink::new();
-    let mut engine = Engine::new(prompter.config(prompt_for_imports()).stdout(out.clone()));
+    let mut engine = Engine::new(prompter.config(prompt_for_imports()).stdout(out.clone())).unwrap();
     rt().block_on(engine.run_file(&main)).unwrap();
     assert_eq!(out.contents(), "8\n");
     // Depth-first, each module once (c.sand is shared), with paths resolved
@@ -1235,7 +1429,7 @@ fn nested_imports_are_prompted_with_resolved_paths() {
     // Denying a nested import reports it in the importing module, and modules
     // after it are not loaded.
     let prompter = ScriptedPrompter::new(&[PromptAnswer::AllowOnce, PromptAnswer::DenyOnce]);
-    let mut engine = Engine::new(prompter.config(prompt_for_imports()));
+    let mut engine = Engine::new(prompter.config(prompt_for_imports())).unwrap();
     match rt().block_on(engine.run_file(&main)) {
         Err(Error::Compile(d)) => {
             let denied: Vec<_> = d.iter().filter(|d| d.message.contains("permission denied")).collect();
@@ -1256,7 +1450,7 @@ fn runtime_always_answers_last_for_the_engine() {
     let prompter = ScriptedPrompter::new(&[PromptAnswer::AllowAlways, PromptAnswer::DenyAlways]);
     let policy = Policy::rules(RulePolicy::new().fallback(Decision::Prompt));
     let out = MemorySink::new();
-    let mut engine = Engine::new(prompter.config(policy).cwd(dir.path()).stdout(out.clone()));
+    let mut engine = Engine::new(prompter.config(policy).cwd(dir.path()).stdout(out.clone())).unwrap();
     let src = "import fs\nimport env\nprint(fs.read_text(\"a.txt\").is_ok())\nprint(env.get(\"SAND_TEST_UNSET_VAR\"))";
     rt().block_on(engine.run_source("main.sand", src)).unwrap();
     assert_eq!(prompter.asked().len(), 2);
@@ -1631,7 +1825,7 @@ fn source_size_limit() {
 
 #[test]
 fn interrupt_from_another_thread() {
-    let mut engine = Engine::new(Config::new());
+    let mut engine = Engine::new(Config::new()).unwrap();
     let handle = engine.interrupt_handle();
     let t = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(50));
@@ -1650,7 +1844,7 @@ fn interrupt_stops_a_run_waiting_for_a_prompt() {
         let _ = asked_tx.lock().unwrap().send(());
         std::future::pending::<PromptAnswer>()
     });
-    let mut engine = Engine::new(config);
+    let mut engine = Engine::new(config).unwrap();
     let handle = engine.interrupt_handle();
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -1686,7 +1880,7 @@ fn engines_run_concurrently_on_threads() {
         .map(|i| {
             std::thread::spawn(move || {
                 let out = MemorySink::new();
-                let mut engine = Engine::new(Config::new().stdout(out.clone()).seed(i));
+                let mut engine = Engine::new(Config::new().stdout(out.clone()).seed(i)).unwrap();
                 rt().block_on(engine.run_source("main.sand", FIB)).unwrap();
                 out.contents()
             })
@@ -1705,7 +1899,7 @@ fn engines_run_concurrently_on_a_multithreaded_runtime() {
         for i in 0..16 {
             tasks.push(tokio::spawn(async move {
                 let out = MemorySink::new();
-                let mut engine = Engine::new(Config::new().stdout(out.clone()));
+                let mut engine = Engine::new(Config::new().stdout(out.clone())).unwrap();
                 let src = format!("task.sleep(10ms)\nprint({i} * 2)");
                 engine.run_source("main.sand", &src).await.unwrap();
                 out.contents()
@@ -1727,12 +1921,13 @@ fn engines_on_one_thread_interleave() {
             .run_until(async {
                 let busy = tokio::task::spawn_local(async {
                     let mut e =
-                        Engine::new(Config::new().limits(Limits { max_wall_time: Some(Duration::from_millis(500)), ..Limits::default() }));
+                        Engine::new(Config::new().limits(Limits { max_wall_time: Some(Duration::from_millis(500)), ..Limits::default() }))
+                            .unwrap();
                     e.run_source("busy.sand", "while true {}").await
                 });
                 let quick = tokio::task::spawn_local(async {
                     let out = MemorySink::new();
-                    let mut e = Engine::new(Config::new().stdout(out.clone()));
+                    let mut e = Engine::new(Config::new().stdout(out.clone())).unwrap();
                     let start = Instant::now();
                     e.run_source("quick.sand", "task.sleep(10ms)\nprint(\"done\")").await.unwrap();
                     (out.contents(), start.elapsed())
@@ -1765,7 +1960,7 @@ fn seeded_engines_are_deterministic() {
 fn run_tests_api() {
     let dir = TempDir::new("tests");
     let main = dir.write("t.sand", "test \"a\" { assert(true) }\ntest \"b\" { assert(false, \"nope\") }");
-    let mut engine = Engine::new(Config::new());
+    let mut engine = Engine::new(Config::new()).unwrap();
     let report = rt().block_on(engine.run_tests(&main)).unwrap();
     assert_eq!(report.passed(), 1);
     assert_eq!(report.failed(), 1);
@@ -1837,7 +2032,7 @@ fn error_messages_cannot_impersonate_limits_or_interrupts() {
         }
     }
     // A failed top-level `?` in a session fails with the error's text.
-    let mut session = Engine::new(Config::new()).session();
+    let mut session = Engine::new(Config::new()).unwrap().session();
     let r = rt().block_on(session.eval("let r: Result<int> = Err(error(\"\\u{0}memory\"))\nr?"));
     assert!(matches!(r, Err(Error::Runtime { .. })), "{r:?}");
 }
@@ -1867,9 +2062,9 @@ fn rust_panics_in_natives_do_not_unwind_into_the_host() {
     assert!(matches!(r, Err(Error::Internal { ref message, .. }) if message.contains("native bug 5")), "{r:?}");
     let dir = TempDir::new("panic-tests");
     dir.write("t.sand", "import buggy\ntest \"bad\" {\n    buggy.boom(9)\n}\ntest \"good\" {\n    assert(buggy.boom(2) == 2)\n}\n");
-    let report = rt().block_on(Engine::new(Config::new().module(module())).run_tests(dir.path().join("t.sand"))).unwrap();
+    let report = rt().block_on(Engine::new(Config::new().module(module())).unwrap().run_tests(dir.path().join("t.sand"))).unwrap();
     assert_eq!((report.passed(), report.failed()), (1, 1));
-    let mut session = Engine::new(Config::new().module(module())).session();
+    let mut session = Engine::new(Config::new().module(module())).unwrap().session();
     assert!(rt().block_on(session.eval("import buggy\nbuggy.boom(7)")).is_err());
     assert!(session.was_reset());
     assert!(matches!(rt().block_on(session.eval("buggy.boom(2)")), Err(Error::Compile(_))));
@@ -1895,7 +2090,7 @@ fn module_discovery_is_bounded() {
     // An import path that is too long is rejected before it is resolved.
     let main = dir.write("main.sand", &format!("import \"{}b\"\nprint(1)", "a/".repeat(400_000)));
     let start = Instant::now();
-    let r = rt().block_on(Engine::new(Config::new()).run_file(&main));
+    let r = rt().block_on(Engine::new(Config::new()).unwrap().run_file(&main));
     match r {
         Err(Error::Compile(d)) => assert!(d[0].message.contains("too long"), "{d:?}"),
         other => panic!("{other:?}"),
@@ -1904,13 +2099,13 @@ fn module_discovery_is_bounded() {
     // Many failing imports: discovery stops early.
     let src: String = (0..20_000).map(|i| format!("import \"missing{i}\"\n")).collect();
     let main = dir.write("many.sand", &src);
-    let r = rt().block_on(Engine::new(Config::new()).run_file(&main));
+    let r = rt().block_on(Engine::new(Config::new()).unwrap().run_file(&main));
     match r {
         Err(Error::Compile(d)) => assert!(d.len() <= 100, "{}", d.len()),
         other => panic!("{other:?}"),
     }
     // And it can be interrupted.
-    let mut engine = Engine::new(Config::new().limits(Limits { max_wall_time: Some(Duration::ZERO), ..Limits::default() }));
+    let mut engine = Engine::new(Config::new().limits(Limits { max_wall_time: Some(Duration::ZERO), ..Limits::default() })).unwrap();
     let r = rt().block_on(engine.run_file(&main));
     assert!(matches!(r, Err(Error::Limit(LimitKind::WallTime))), "{r:?}");
 }
@@ -1959,84 +2154,72 @@ fn a_symlinked_main_file_imports_from_its_own_directory() {
     std::fs::create_dir_all(dir.path().join("bin")).unwrap();
     std::os::unix::fs::symlink(dir.path().join("proj/main.sand"), dir.path().join("bin/tool.sand")).unwrap();
     let out = MemorySink::new();
-    let mut engine = Engine::new(Config::new().policy(Policy::allow_all()).stdout(out.clone()));
+    let mut engine = Engine::new(Config::new().policy(Policy::allow_all()).stdout(out.clone())).unwrap();
     rt().block_on(engine.run_file(dir.path().join("bin/tool.sand"))).unwrap();
     assert_eq!(out.contents(), "hello from lib\n");
 }
 
 #[test]
 fn host_modules_can_define_resources() {
-    use sandlang::Value;
-    use sandlang::vm::Vm;
+    use sandlang::native::{NativeObject, Val};
     use sandlang::vm::iomem::ResourceSlot;
-    use sandlang::vm::value::{NativeObject, Obj};
+    use sandlang::vm::{Ctl, Vm};
 
+    /// A pooled connection.
+    #[derive(sandlang::SandObject)]
+    #[sand(module = "pool")]
     struct Conn {
         slot: Option<ResourceSlot>,
         closed: Arc<AtomicUsize>,
     }
     impl NativeObject for Conn {
-        fn type_name(&self) -> &'static str {
-            "pool.Conn"
-        }
         fn is_resource(&self) -> bool {
             self.slot.is_some()
-        }
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
-        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-            self
         }
     }
 
     let closed = Arc::new(AtomicUsize::new(0));
     let mut m = NativeModule::new("pool");
-    m.source("pub native type Conn\nimpl Close for Conn {\n    native fn close(self)\n}\npub native fn connect() -> Result<Conn>");
+    m.object_type::<Conn>();
+    m.source("impl Close for Conn {\n    native fn close(self)\n}");
     let c = closed.clone();
-    m.raw_function("connect", move |vm: &mut Vm, _: &[Value]| {
+    m.vm_function("connect", move |vm: &mut Vm| -> Result<Conn, sandlang::HostError> {
         let slot = vm.resource_slot()?;
-        let conn = vm.heap.alloc(Obj::Native(Box::new(Conn { slot: Some(slot), closed: c.clone() })));
-        Ok(vm.ok(conn))
+        Ok(Conn { slot: Some(slot), closed: c.clone() })
     });
-    m.raw_method("Conn.close", |vm: &mut Vm, a: &[Value]| {
-        if let Some(conn) = vm.heap.native_mut::<Conn>(a[0])
-            && conn.slot.take().is_some()
-        {
+    m.vm_function("Conn.close", |vm: &mut Vm, conn: Val<Conn>| -> Result<(), Ctl> {
+        let conn = conn.get_mut(&mut vm.heap)?;
+        if conn.slot.take().is_some() {
             conn.closed.fetch_add(1, Ordering::Relaxed);
         }
-        Ok(Value::Unit)
+        Ok(())
     });
-    let src = "import pool\nfor _ in 0..5 {\n    use c = pool.connect()?\n}\nlet kept = [pool.connect()?, pool.connect()?]\nprint(pool.connect())";
+    let src = "import pool\nfor _ in 0..5 {\n    use c = pool.connect()?\n}\nlet kept = [pool.connect()?, pool.connect()?]\nprint(pool.connect())\nhelp(pool.Conn)";
     let config = Config::new().module(m).limits(Limits { max_open_resources: 2, ..Limits::default() });
     let (r, out, err) = run_src(config, src);
     assert!(r.is_ok(), "{r:?} {err}");
     assert!(out.contains("too many open resources"), "{out}");
+    assert!(out.ends_with("type pool.Conn\n\nA pooled connection.\n\nImplements: Close\n"), "{out}");
     assert_eq!(closed.load(Ordering::Relaxed), 5);
 }
 
 #[test]
-fn native_errors_reach_only_natives_returning_results() {
-    use sandlang::Value;
-    use sandlang::vm::{Ctl, Finisher, Vm};
+fn host_errors_are_err_values_and_aborts_end_the_run() {
+    use sandlang::HostError;
+    use sandlang::native::Later;
+    use sandlang::vm::{Ctl, Vm};
     let mut m = NativeModule::new("errs");
-    m.source("pub native fn checked() -> Result<int>\npub native fn unchecked() -> int\npub native fn later() -> Result<int>\npub native fn later_unchecked() -> int");
-    let fail = |_: &mut Vm, _: &[Value]| Err(Ctl::native_err("invalid", "bad input"));
-    let fail_later = |_: &mut Vm, _: &[Value]| {
-        Err(Ctl::suspend(Box::pin(async { Box::new(|_: &mut Vm| Err(Ctl::native_err("io", "broken pipe"))) as Finisher })))
-    };
-    m.raw_function("checked", fail)
-        .raw_function("unchecked", fail)
-        .raw_function("later", fail_later)
-        .raw_function("later_unchecked", fail_later);
+    m.function("now", || -> Result<i64, HostError> { Err(HostError::new("invalid", "bad input")) });
+    m.function("later", || -> Result<Later<i64, HostError>, HostError> {
+        Ok(Later::new(async { |_: &mut Vm| Err(HostError::new("io", "broken pipe")) }))
+    });
+    m.function("abort", || -> Result<i64, HostError> { Err(Ctl::fail("invalid", "no result").into()) });
     let run = |src: &str| run_src(Config::new().module(m.clone()), &format!("import errs\n{src}"));
-    let (r, out, _) = run("print(errs.checked())\nprint(errs.later())");
+    let (r, out, _) = run("print(errs.now())\nprint(errs.later())");
     r.unwrap();
     assert_eq!(out, "Err(Error { kind: \"invalid\", message: \"bad input\" })\nErr(Error { kind: \"io\", message: \"broken pipe\" })\n");
-    for call in ["errs.unchecked()", "errs.later_unchecked()"] {
-        let (r, _, _) = run(call);
-        assert!(matches!(&r, Err(Error::Internal { message, .. }) if message.contains("does not return a Result")), "{call}: {r:?}");
-    }
+    let (r, _, _) = run("print(errs.abort())");
+    assert!(matches!(&r, Err(Error::Runtime { message, .. }) if message.contains("no result")), "{r:?}");
 }
 
 #[test]
@@ -2044,7 +2227,7 @@ fn engine_docs_include_prelude_std_and_host_modules() {
     use sandlang::docs::{ItemKind, MemberKind, ModuleKind};
     let mut geo = NativeModule::new("geo");
     geo.function("dist", |a: f64, b: f64| -> f64 { (a * a + b * b).sqrt() }).params(&["a", "b"]);
-    let docs = Engine::new(Config::new().module(geo)).docs().unwrap();
+    let docs = Engine::new(Config::new().module(geo)).unwrap().docs().unwrap();
     assert_eq!((docs[0].name.as_str(), docs[0].kind), ("prelude", ModuleKind::Prelude));
     let prelude = &docs[0];
     let str_type = prelude.items.iter().find(|i| i.name == "str").unwrap();

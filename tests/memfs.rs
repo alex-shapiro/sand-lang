@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 fn run(config: Config, source: &str) -> (Result<sandlang::Outcome, Error>, String) {
     let out = MemorySink::new();
-    let mut engine = Engine::new(config.stdout(out.clone()));
+    let mut engine = Engine::new(config.stdout(out.clone())).unwrap();
     let r = rt().block_on(engine.run_source("main.sand", source));
     (r, out.contents())
 }
@@ -86,7 +86,7 @@ fn imports_and_main_files_come_from_the_memory_file_system() {
     fs.write("/app/lib/util.sand", "import \"helper\"\npub fn twice(x: int) -> int { helper.add(x, x) }\n").unwrap();
     fs.write("/app/lib/helper.sand", "pub fn add(a: int, b: int) -> int { a + b }\n").unwrap();
     let out = MemorySink::new();
-    let mut engine = Engine::new(Config::new().memory_fs(fs.clone()).stdout(out.clone()));
+    let mut engine = Engine::new(Config::new().memory_fs(fs.clone()).stdout(out.clone())).unwrap();
     rt().block_on(engine.run_file("/app/main.sand")).unwrap();
     assert_eq!(out.contents(), "42\n");
     engine.check_file("/app/main.sand").unwrap();
@@ -99,7 +99,7 @@ fn imports_and_main_files_come_from_the_memory_file_system() {
     }
     // `allow import` restricts them further.
     let rules = RulePolicy::new().allow_import("/app/lib");
-    let mut engine = Engine::new(Config::new().policy(Policy::rules(rules)).memory_fs(fs.clone()).stdout(MemorySink::new()));
+    let mut engine = Engine::new(Config::new().policy(Policy::rules(rules)).memory_fs(fs.clone()).stdout(MemorySink::new())).unwrap();
     rt().block_on(engine.run_file("/app/main.sand")).unwrap();
     fs.write("/app/other.sand", "pub fn f() -> int { 1 }\n").unwrap();
     match rt().block_on(engine.run_source("main.sand", "import \"other\"\nprint(other.f())")) {
@@ -163,7 +163,7 @@ fn engines_can_share_a_file_system() {
 fn checks_and_lints_see_the_memory_file_system() {
     let fs = MemFs::new();
     fs.write("/lib.sand", "pub fn f() -> int { 1 }\n").unwrap();
-    let engine = Engine::new(Config::new().memory_fs(fs));
+    let engine = Engine::new(Config::new().memory_fs(fs)).unwrap();
     engine.check_source("main.sand", "import \"lib\"\nprint(lib.f())").unwrap();
     match engine.check_source("main.sand", "import \"missing\"") {
         Err(Error::Compile(d)) => assert!(d[0].message.contains("cannot load module `missing`"), "{d:?}"),

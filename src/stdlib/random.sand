@@ -32,9 +32,6 @@ pub native fn bytes(n: int) -> bytes
 /// Creates an independent `Rng` seeded with `seed`.
 pub native fn rng(seed: int) -> Rng
 
-/// An isolated pseudo-random number generator created with `random.rng(seed)`.
-pub native type Rng
-
 extend Rng {
     /// Returns a uniformly distributed integer in `lo..hi`, or aborts if `lo >= hi`.
     pub native fn int(self, lo: int, hi: int) -> int

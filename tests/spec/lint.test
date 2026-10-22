@@ -345,10 +345,11 @@ enum Kind {
 pub struct Shown {
     v: int
 
-    fn public_api(self) -> int { self.v }
+    pub fn public_api(self) -> int { self.v }
+    fn private_unused(self) -> int { self.v }
 }
 extend Shown {
-    fn also_public(self) -> int { 0 }
+    pub fn also_public(self) -> int { 0 }
 }
 let h = Hidden.make()
 print(h.used() + h.ext_used())
@@ -359,6 +360,7 @@ print(Shown { v: 1 }.v)
 7: unused-function
 10: unused-function
 16: unused-function
+22: unused-function
 
 === unused method suppression
 struct Hidden {

@@ -9,13 +9,14 @@
 //! local JavaScript event loop and sends its result back over a channel.
 //! Dropping the receiver aborts the in-flight request.
 
-use super::http_common::{BodyReader, MemoryBody, Url, alloc_body, filter_request, header_list, header_pairs, is_token};
-use super::stream::IoFailure;
+use super::http_common::{Body, BodyReader, MemoryBody, Url, alloc_body, filter_request, header_list, header_pairs, is_token};
+use super::stream::{IoFailure, Suspended, suspend};
 use crate::check::ModKind;
-use crate::engine::Registry;
+use crate::native::{HostError, NativeModule, Val};
+use crate::vm::Vm;
 use crate::vm::iomem::Reservation;
 use crate::vm::value::Value;
-use crate::vm::{Ctl, Finisher, NResult, Vm};
+use jiff::SignedDuration;
 use js_sys::{Array, Function, Object, Promise, Reflect, Uint8Array};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -25,10 +26,11 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
-pub fn register(r: &mut Registry) {
-    r.source("http", ModKind::Std, concat!(include_str!("http_web.sand"), include_str!("http.sand")));
-    super::http_common::register(r);
-    r.add_builtin("http.send", send);
+pub(crate) fn module() -> NativeModule {
+    let mut m = NativeModule::std("http", ModKind::Std, concat!(include_str!("http_web.sand"), include_str!("http.sand")));
+    super::http_common::natives(&mut m);
+    m.vm_function("send", send);
+    m
 }
 
 /// A request to send.
@@ -44,52 +46,57 @@ struct Request {
 /// A response: status, headers and body (reserved in the reservation).
 type Response = (i64, Vec<(String, String)>, Vec<u8>, Reservation);
 
-fn send(vm: &mut Vm, a: &[Value]) -> NResult {
-    let method = vm.str(a[0]).to_string();
-    let text = vm.str(a[1]).to_string();
+fn send(
+    vm: &mut Vm,
+    method: Val<String>,
+    url: Val<String>,
+    headers: Val<Vec<(String, String)>>,
+    body: Val<Vec<u8>>,
+    timeout: SignedDuration,
+) -> Suspended<Val<(i64, Vec<(String, String)>, Body)>> {
+    let method = method.str(&vm.heap).to_string();
+    let text = url.str(&vm.heap).to_string();
     vm.charge_slow_bytes(method.len() + text.len())?;
     let url = match Url::parse(&text) {
         Ok(u) => u,
-        Err(e) => return Err(Ctl::native_err(e.kind, e.message)),
+        Err(e) => return Err(HostError::new(e.kind, e.message)),
     };
     if !is_token(&method) {
-        return Err(Ctl::native_err("invalid", format!("invalid HTTP method {:?}", super::truncate(&method, 64))));
+        return Err(HostError::new("invalid", format!("invalid HTTP method {:?}", super::truncate(&method, 64))));
     }
-    let mut headers = header_pairs(vm, a[2])?;
+    let mut headers = header_pairs(vm, headers)?;
     let cap = url.capability(&method);
     if !vm.permit(&cap)? {
-        return Err(Ctl::native_err("permission_denied", format!("permission denied: {cap}")));
+        return Err(HostError::new("permission_denied", format!("permission denied: {cap}")));
     }
     if let Err(reason) = filter_request(vm, &url, &mut headers) {
-        return Err(Ctl::native_err("permission_denied", reason));
+        return Err(HostError::new("permission_denied", reason));
     }
     // The request body is held, and the response buffered, outside the heap.
-    let res = vm.reserve_io(vm.heap.bytes_of(a[3]).len())?;
-    let body = vm.heap.bytes_of(a[3]).to_vec();
+    let res = vm.reserve_io(body.bytes(&vm.heap).len())?;
+    let body = body.bytes(&vm.heap).to_vec();
     vm.charge_bytes(body.len())?;
     let request = Request {
         method,
         url: format!("{}{}", url.origin(), url.target),
         headers,
         body,
-        timeout: Duration::from_nanos(a[4].as_int().max(0) as u64),
+        timeout: Duration::try_from(timeout).unwrap_or_default(),
         max_body: vm.host.limits.max_http_body,
     };
     let max_body = request.max_body;
     let (id, done) = start(request, res);
-    Err(Ctl::suspend(Box::pin(async move {
+    let response = async move {
         let _abort = AbortOnDrop(id);
-        let result = done.await.unwrap_or_else(|_| Err(IoFailure::new("io", "the request was abandoned")));
-        Box::new(move |vm: &mut Vm| -> NResult {
-            let (status, headers, body, res) = result?;
-            let headers = header_list(vm, headers)?;
-            // The browser read the body: it stays reserved while it is read.
-            let reader = BodyReader::new(Box::new(MemoryBody::new(body)), max_body, Some(res));
-            let body = alloc_body(vm, reader);
-            let tuple = vm.heap.new_tuple(&[Value::Int(status), headers, body]);
-            Ok(vm.ok(tuple))
-        }) as Finisher
-    })))
+        done.await.unwrap_or_else(|_| Err(IoFailure::new("io", "the request was abandoned")))
+    };
+    suspend(response, move |vm, (status, headers, body, res)| {
+        let headers = header_list(vm, headers)?;
+        // The browser read the body: it stays reserved while it is read.
+        let reader = BodyReader::new(Box::new(MemoryBody::new(body)), max_body, Some(res));
+        let body = alloc_body(vm, reader)?;
+        Ok(Val::from_raw(vm.heap.new_tuple(&[Value::Int(status), headers.raw(), body.raw()])))
+    })
 }
 
 thread_local! {

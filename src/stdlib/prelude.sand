@@ -190,18 +190,15 @@ pub enum Result<T, E> {
 /// `message`.
 pub struct Error {
     /// Machine-readable category tag (such as `"not_found"` or `"permission_denied"`).
-    kind: str
+    pub kind: str
     /// Human-readable error description.
-    message: str
+    pub message: str
 }
 
 /// Constructs an `Error` with `message` and `kind`.
 pub fn error(message: str, kind: str = "error") -> Error {
     Error { kind, message }
 }
-
-/// Handle to a concurrent task started with `spawn`.
-pub native type Task<T>
 
 extend<T> Task<T> {
     /// Suspends the calling task until `self` completes and returns its result.
@@ -211,9 +208,6 @@ extend<T> Task<T> {
     /// Cancels `self` if it is still running.
     pub native fn cancel(self)
 }
-
-/// FIFO message queue for communicating between tasks (created with `task.channel`).
-pub native type Channel<T>
 
 extend<T> Channel<T> {
     /// Sends `value` into the channel, suspending while a bounded channel is
@@ -1271,7 +1265,7 @@ pub trait Iterator<T> {
 /// elements on demand.
 pub struct Iter<T> {
     /// Closure that produces the next element or `None` once exhausted.
-    next: fn() -> T?
+    pub next: fn() -> T?
 
     /// Constructs an iterator that calls `f()` to produce each element until
     /// `f()` returns `None`.

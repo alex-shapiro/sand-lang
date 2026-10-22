@@ -830,23 +830,6 @@ impl ChannelObj {
     }
 }
 
-/// An object owned by a native module (sockets, compiled regexes, ...).
-pub trait NativeObject: Any + Send {
-    fn type_name(&self) -> &'static str;
-    /// Approximate memory used, for accounting.
-    fn size(&self) -> usize {
-        64
-    }
-    /// Whether this object holds an open resource (with its
-    /// `iomem::ResourceSlot`, which counts it against `max_open_resources`);
-    /// allocating such objects paces garbage collection.
-    fn is_resource(&self) -> bool {
-        false
-    }
-    fn as_any(&self) -> &dyn Any;
-    fn as_any_mut(&mut self) -> &mut dyn Any;
-}
-
 /// A Rust type that implements an immutable Sand value type (registered with
 /// [`crate::NativeModule::value_type`]).
 ///
@@ -860,6 +843,8 @@ pub trait ValueType: Clone + Eq + Hash + std::fmt::Display + Send + Sync + 'stat
     const MODULE: &'static str;
     /// Name of the Sand type (e.g. `"PlainDate"`).
     const NAME: &'static str;
+    /// Doc comment of the Sand type.
+    const DOC: &'static str = "";
     /// Comparison function for types that satisfy `Ord` (typically `Some(Ord::cmp)`).
     const ORDER: Option<fn(&Self, &Self) -> std::cmp::Ordering> = None;
     /// Optional 16-byte inline heap representation.
@@ -898,7 +883,6 @@ pub trait ValueObj: Any + Send {
     fn value_hash(&self) -> u64;
     fn write_text(&self, out: &mut String);
     fn size(&self) -> usize;
-    fn as_any(&self) -> &dyn Any;
 }
 
 impl<T: ValueType> ValueObj for T {
@@ -906,10 +890,10 @@ impl<T: ValueType> ValueObj for T {
         T::NAME
     }
     fn value_eq(&self, other: &dyn ValueObj) -> bool {
-        other.as_any().downcast_ref::<T>() == Some(self)
+        (other as &dyn Any).downcast_ref::<T>() == Some(self)
     }
     fn value_cmp(&self, other: &dyn ValueObj) -> Option<std::cmp::Ordering> {
-        Some(T::ORDER?(self, other.as_any().downcast_ref::<T>()?))
+        Some(T::ORDER?(self, (other as &dyn Any).downcast_ref::<T>()?))
     }
     fn value_hash(&self) -> u64 {
         let mut h = FxHasher::default();
@@ -922,9 +906,6 @@ impl<T: ValueType> ValueObj for T {
     }
     fn size(&self) -> usize {
         ValueType::size(self)
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }
 
@@ -1051,7 +1032,7 @@ pub(crate) fn value_obj<T: ValueType>(x: T) -> Obj {
 
 pub(crate) fn value_of<T: ValueType>(obj: &Obj) -> Option<T> {
     match obj {
-        Obj::Value(x) => x.as_any().downcast_ref::<T>().cloned(),
+        Obj::Value(x) => (&**x as &dyn Any).downcast_ref::<T>().cloned(),
         Obj::Packed(t, bits) if (t.type_id)() == std::any::TypeId::of::<T>() => unpack(*bits),
         _ => None,
     }
@@ -1187,7 +1168,7 @@ pub enum Obj {
     Range(i64, i64, bool),
     Task(Box<TaskObj>),
     Channel(Box<ChannelObj>),
-    Native(Box<dyn NativeObject>),
+    Native(Box<dyn crate::native::DynObject>),
     Value(Box<dyn ValueObj>),
     Packed(&'static PackedType, [u64; 2]),
     TypeDesc(Arc<TypeDesc>),

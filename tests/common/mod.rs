@@ -94,7 +94,7 @@ pub fn run_with(source: &str, f: impl FnOnce(Config) -> Config) -> RunResult {
         fs.write("/run/main.sand", source).unwrap();
         (PathBuf::from("/run/main.sand"), config.memory_fs(fs).cwd("/run"))
     };
-    let mut engine = Engine::new(f(config));
+    let mut engine = Engine::new(f(config)).unwrap();
     let result = rt().block_on(engine.run_file(&main));
     RunResult { result, stdout: out.contents(), stderr: err.contents() }
 }

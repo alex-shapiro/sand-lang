@@ -422,7 +422,7 @@ fn report_error(e: &Error) -> u8 {
 fn cmd_run(args: &[String]) -> Result<u8, String> {
     let opts = run_options(args)?;
     let file = opts.file.ok_or("missing FILE to run")?;
-    let mut engine = Engine::new(opts.config.exit_after_run(true));
+    let mut engine = Engine::new(opts.config.exit_after_run(true)).map_err(|e| e.render())?;
     let rt = runtime()?;
     let r = rt.block_on(engine.run_file(&file));
     if std::env::var_os("SAND_GC_STATS").is_some() {
@@ -476,7 +476,7 @@ fn cmd_check(args: &[String]) -> Result<u8, String> {
             continue;
         }
         // Checking runs no script code; imports are confined to the module root.
-        let engine = Engine::new(Config::new().policy(Policy::deny_all()));
+        let engine = Engine::new(Config::new().policy(Policy::deny_all())).map_err(|e| e.render())?;
         match engine.check_file(path) {
             Ok(()) => println!("{f}: ok"),
             Err(e) => code = code.max(report_error(&e)),
@@ -497,7 +497,7 @@ fn cmd_lint(args: &[String]) -> Result<u8, String> {
                 Err(errors) => return Ok(report_policy_errors(f, &errors)),
             }
         } else {
-            Engine::new(Config::new().policy(Policy::deny_all())).lint_file(f).map_err(|e| e.to_string())
+            Engine::new(Config::new().policy(Policy::deny_all())).and_then(|e| e.lint_file(f)).map_err(|e| e.to_string())
         };
         match warnings {
             Ok(ws) => {
@@ -588,7 +588,7 @@ fn cmd_test(args: &[String]) -> Result<u8, String> {
     let rt = runtime()?;
     let mut failed = 0;
     for f in &files {
-        let mut engine = Engine::new(opts.config.clone());
+        let mut engine = Engine::new(opts.config.clone()).map_err(|e| e.render())?;
         match rt.block_on(engine.run_tests(f)) {
             Ok(report) => {
                 print!("{}", report.render());

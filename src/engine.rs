@@ -1,12 +1,12 @@
 //! The embedding API: `Engine`, `Config`, errors and module loading.
 
+use crate::check::ModKind;
 use crate::check::budget::CompileBudget;
-use crate::check::{ModKind, NativeIds};
 use crate::compile::{CompileInput, compile_more};
 use crate::diag::{Diag, Diagnostic, FileId, Span};
 use crate::files::{Fs, MemFs};
 use crate::modules::{ImportRef, ModuleGraph, Snapshot, Target, budget_error, native_info};
-use crate::native::NativeModule;
+use crate::native::{BoundType, NativeDecl, NativeModule, Signature, Type};
 use crate::platform::{Clock, Instant, SystemClock};
 use crate::policy::{Capability, Decision, Policy, PromptAnswer, Prompter};
 use crate::session::Session;
@@ -15,7 +15,7 @@ use crate::types::{FnId, ModId};
 use crate::vm::bytecode::Program;
 use crate::vm::heap::GcStats;
 use crate::vm::sched::{IoShared, IoTable, RunEnd};
-use crate::vm::{Always, Host, NativeEntry, OutputSink, Rng, SharedSink, StdinSource, TraceEntry, Trap, Vm, entropy_seed};
+use crate::vm::{Always, Host, HostFn, NativeEntry, OutputSink, Rng, SharedSink, StdinSource, TraceEntry, Trap, Vm, entropy_seed};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -513,9 +513,10 @@ impl TestReport {
 pub(crate) struct Registry {
     /// Natives by id.
     pub natives: Arc<Vec<NativeEntry>>,
-    pub by_name: Arc<NativeIds>,
-    /// Module name -> kind and Sand source.
-    pub sources: BTreeMap<Cow<'static, str>, (ModKind, Cow<'static, str>)>,
+    /// What the checker knows about the natives and the types bound to Rust types.
+    pub decls: Arc<NativeDecls>,
+    /// The modules' Sand sources, by module name.
+    pub sources: BTreeMap<Cow<'static, str>, Source>,
     /// The standard library's registry, whose snapshot this one's extends.
     base: Option<Arc<Registry>>,
     /// The modules checked and compiled, made on first use.
@@ -528,6 +529,31 @@ pub(crate) struct Registry {
     partial: Mutex<HashMap<Vec<String>, Arc<Snapshot>>>,
 }
 
+/// The Sand source of a registered module.
+#[derive(Clone)]
+pub(crate) struct Source {
+    pub kind: ModKind,
+    pub text: Cow<'static, str>,
+    /// The other modules whose types the signatures of its natives use.
+    pub deps: Vec<&'static str>,
+}
+
+/// What the checker knows about registered natives and types.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct NativeDecls {
+    /// Natives by key: `module.name`, or `module.Type.name` for a method.
+    pub fns: HashMap<Cow<'static, str>, NativeDecl>,
+    /// Types bound to Rust types, by qualified name (`module.Name`).
+    pub types: HashMap<Cow<'static, str>, BoundType>,
+}
+
+impl NativeDecls {
+    /// The native with key `key`'s id.
+    pub(crate) fn id(&self, key: &str) -> Option<u32> {
+        self.fns.get(key).map(|d| d.id)
+    }
+}
+
 /// At most this many partial snapshots are made: then the full one is.
 const MAX_PARTIAL_SNAPSHOTS: usize = 16;
 
@@ -535,110 +561,85 @@ const MAX_PARTIAL_SNAPSHOTS: usize = 16;
 /// and so its snapshot, which is immutable: compilations copy what they
 /// extend.
 static STD: LazyLock<Arc<Registry>> = LazyLock::new(|| {
-    let mut r = Registry {
-        natives: Arc::default(),
-        by_name: Arc::default(),
-        sources: BTreeMap::new(),
-        base: None,
-        snapshot: OnceLock::new(),
-        core: OnceLock::new(),
-        partial: Mutex::default(),
-    };
-    stdlib::register(&mut r);
+    let mut r = Registry::empty();
+    let modules = stdlib::modules();
+    for m in &modules {
+        m.register_types(&mut r);
+    }
+    for m in &modules {
+        m.register(&mut r);
+    }
     Arc::new(r)
 });
 
 impl Registry {
+    fn empty() -> Registry {
+        Registry {
+            natives: Arc::default(),
+            decls: Arc::default(),
+            sources: BTreeMap::new(),
+            base: None,
+            snapshot: OnceLock::new(),
+            core: OnceLock::new(),
+            partial: Mutex::default(),
+        }
+    }
+
     fn for_config(config: &Config) -> Arc<Registry> {
         let std = STD.clone();
         if config.modules.is_empty() {
             return std;
         }
-        let mut r = Registry {
-            natives: std.natives.clone(),
-            by_name: std.by_name.clone(),
-            sources: std.sources.clone(),
-            base: None,
-            snapshot: OnceLock::new(),
-            core: OnceLock::new(),
-            partial: Mutex::default(),
-        };
+        let mut r = Registry { natives: std.natives.clone(), decls: std.decls.clone(), sources: std.sources.clone(), ..Registry::empty() };
         for m in &config.modules {
             m.register_types(&mut r);
         }
         for m in &config.modules {
             m.register(&mut r);
         }
-        // A host module replacing a standard one needs a snapshot of its own.
-        if !r.sources.iter().any(|(name, (kind, _))| *kind == ModKind::Host && std.sources.contains_key(name)) {
-            r.base = Some(std);
-        }
+        r.base = Some(std);
         Arc::new(r)
     }
 
-    pub fn add(&mut self, name: impl Into<Cow<'static, str>>, imp: crate::vm::NativeImpl) {
-        let name = name.into();
+    /// Registers the native `key` (`module.name` or `module.Type.name`).
+    pub fn add_native(&mut self, key: String, f: HostFn, sig: Signature, names: Arc<[String]>, doc: Option<Arc<str>>) {
+        assert!(!self.decls.fns.contains_key(key.as_str()), "native `{key}` registered twice");
         let id = self.natives.len() as u32;
-        let old = Arc::make_mut(&mut self.by_name).fns.insert(name.clone(), id);
-        assert!(old.is_none(), "native `{name}` registered twice");
-        Arc::make_mut(&mut self.natives).push(NativeEntry { name, imp });
+        Arc::make_mut(&mut self.natives).push(NativeEntry { name: key.clone().into(), f });
+        let decl = NativeDecl { id, sig: Arc::new(sig), names, doc };
+        Arc::make_mut(&mut self.decls).fns.insert(key.into(), decl);
     }
 
-    pub fn add_signature(&mut self, name: impl Into<Cow<'static, str>>, sig: String) {
-        Arc::make_mut(&mut self.by_name).signatures.insert(name.into(), sig.into());
-    }
-
-    pub fn add_value_type<T: crate::vm::value::ValueType>(&mut self) {
-        let qual = self.check_unique_type_name(T::MODULE, T::NAME);
-        let info = crate::types::ValueTypeInfo {
-            ord: T::ORDER.is_some(),
-            parse: crate::vm::value::parse_value::<T>,
-            type_id: std::any::TypeId::of::<T>(),
-            rust_name: std::any::type_name::<T>(),
-        };
-        Arc::make_mut(&mut self.by_name).values.insert(qual.into(), info);
-    }
-
-    pub fn add_enum_type<T: crate::native::EnumType>(&mut self) {
-        let qual = self.check_unique_type_name(T::MODULE, T::NAME);
-        let info = crate::types::EnumTypeInfo {
-            type_id: std::any::TypeId::of::<T>(),
-            name: T::NAME,
-            doc: T::DOC,
-            variants: T::VARIANTS.iter().map(|v| (v.name, v.doc)).collect(),
-        };
-        Arc::make_mut(&mut self.by_name).enums.insert(qual.into(), info);
-    }
-
-    fn check_unique_type_name(&self, module: &str, name: &str) -> String {
-        crate::vm::value::check_type_name(name);
-        let qual = format!("{module}.{name}");
-        let ids = &self.by_name;
-        assert!(!ids.values.contains_key(qual.as_str()) && !ids.enums.contains_key(qual.as_str()), "type {qual} registered twice");
-        qual
-    }
-
-    pub fn add_builtin(&mut self, name: impl Into<Cow<'static, str>>, f: crate::vm::NativeFn) {
-        self.add(name, crate::vm::NativeImpl::Builtin(f));
-    }
-
-    /// Registers the native implementing a trait method in an impl
-    /// (`impl Close for File { native fn close(self) }` is `fs.File.close`):
-    /// `f` receives `self` and the other arguments, without the impl's
-    /// dictionary that trait methods are passed first.
-    pub fn add_method(&mut self, name: impl Into<Cow<'static, str>>, f: crate::vm::NativeFn) {
-        self.add(name, crate::vm::NativeImpl::Method(f));
+    pub(crate) fn add_bound_type(&mut self, t: BoundType) {
+        let qual = format!("{}.{}", t.module, t.name);
+        let decls = Arc::make_mut(&mut self.decls);
+        if let Some(rust) = t.kind.rust_type() {
+            let other = decls.types.iter().find(|(_, b)| b.kind.rust_type() == Some(rust));
+            assert!(other.is_none(), "Rust type of `{qual}` is bound to `{}` already", other.map_or("", |(q, _)| q.as_ref()));
+        }
+        assert!(!decls.types.contains_key(qual.as_str()), "type `{qual}` registered twice");
+        decls.types.insert(qual.into(), t);
     }
 
     pub fn source(&mut self, module: impl Into<Cow<'static, str>>, kind: ModKind, src: impl Into<Cow<'static, str>>) {
         let module = module.into();
-        if kind != ModKind::Prelude {
-            let prefix = format!("{module}.");
-            let taken = kind == ModKind::Host && self.by_name.fns.keys().any(|n| n.starts_with(&prefix));
-            assert!(!taken, "a host module cannot be named `{module}` because `{module}` is a prelude type");
-            Arc::make_mut(&mut self.by_name).modules.insert(module.clone());
+        let prefix = format!("{module}.");
+        let mut deps: Vec<&'static str> = Vec::new();
+        for d in self.decls.fns.iter().filter(|(k, _)| k.starts_with(&prefix)).map(|(_, d)| &*d.sig) {
+            for t in d.params.iter().chain([&d.ret]) {
+                t.visit(&mut |t| {
+                    if let Type::Named(n) = t
+                        && n.module != module
+                        && n.module != "prelude"
+                        && !deps.contains(&n.module)
+                    {
+                        deps.push(n.module);
+                    }
+                });
+            }
         }
-        self.sources.insert(module, (kind, src.into()));
+        deps.sort_unstable();
+        self.sources.insert(module, Source { kind, text: src.into(), deps });
     }
 
     /// The registry's modules, checked and compiled (on first use).
@@ -770,10 +771,16 @@ pub(crate) fn on_compile_stack<R: Send + 'static>(f: impl FnOnce() -> Result<R, 
 }
 
 impl Engine {
-    pub fn new(config: Config) -> Engine {
+    /// An engine for `config`. Fails with [`Error::Compile`] if a host
+    /// module has errors, such as a `native fn` whose types differ from its
+    /// Rust function's.
+    pub fn new(config: Config) -> Result<Engine, Error> {
         let registry = Registry::for_config(&config);
+        if registry.base.is_some() {
+            registry.snapshot()?;
+        }
         let origin = config.clock.now();
-        Engine {
+        Ok(Engine {
             origin,
             config: Arc::new(config),
             registry,
@@ -783,7 +790,7 @@ impl Engine {
             gc_stats: GcStats::default(),
             root: OnceLock::new(),
             spare: Mutex::default(),
-        }
+        })
     }
 
     /// Returns the sorted names of all registered standard and host modules.
@@ -1296,7 +1303,7 @@ impl Engine {
                         g.use_std(d.snap, id);
                         g.modules[mi].imports.push((span, Target::Snapshot(id)));
                         None
-                    } else if let Some(&(kind, ref src)) = registered {
+                    } else if let Some(Source { kind, text: src, deps }) = registered {
                         let key = format!("std:{name}");
                         if path_stack.contains(&key) {
                             errors.push(Diag::error(span, format!("import cycle through module `{name}`")));
@@ -1307,7 +1314,8 @@ impl Engine {
                             continue;
                         }
                         let f = g.sm.add(format!("<{name}>"), src.as_ref());
-                        let (idx, imports) = g.add(name, f, kind, None);
+                        let (idx, mut imports) = g.add(name, f, *kind, None);
+                        imports.extend(deps.iter().map(|d| ImportRef::Implicit(d.to_string(), Span::new(f, 0, 0))));
                         g.index.insert(key.clone(), idx);
                         g.modules[mi].imports.push((span, Target::Loaded(idx)));
                         path_stack.push(key);
@@ -1537,7 +1545,7 @@ fn compile_program(
     let mut checker = snap.checker.clone();
     checker.lint_facts = lint;
     checker.optimize = optimize;
-    let checked = checker.check_modules(&modules, &registry.by_name, budget);
+    let checked = checker.check_modules(&modules, &registry.decls, budget);
     let sm = &g.sm;
     if let Some(stop) = budget.stopped() {
         // Diagnostics after the budget ran out are not meaningful.
@@ -1560,7 +1568,7 @@ fn compile_program(
     };
     let native_info = if host { native_info(&cp, registry) } else { crate::modules::NativeInfo::default() };
     let mut program = spare.unwrap_or_else(|| snap.program.clone());
-    let input = CompileInput { checked: &cp, sm, natives: &registry.by_name, native_info, budget, initialized: None, optimize };
+    let input = CompileInput { checked: &cp, sm, natives: &registry.decls, native_info, budget, initialized: None, optimize };
     let entry = compile_more(input, &mut program, &mut snap.compiler.clone(), &inits);
     if let Some(stop) = budget.stopped() {
         return Err(budget_error(stop, sm, main_file));
@@ -1575,7 +1583,7 @@ mod registry_tests {
     use crate::check::FnKind;
 
     /// Every native the standard library registers is declared by a `native
-    /// fn` (a mistyped `add_builtin` would never be called).
+    /// fn` (a native registered under a mistyped name would never be called).
     #[test]
     fn every_std_native_is_declared() {
         let snapshot = STD.snapshot().expect("the standard library compiles");
@@ -1602,7 +1610,6 @@ mod registry_tests {
 mod offload_tests {
     use super::*;
     use crate::native::NativeModule;
-    use crate::vm::value::Value;
     use std::sync::atomic::AtomicUsize;
 
     /// A module with two natives. `hang()` blocks a worker until `release`
@@ -1612,24 +1619,22 @@ mod offload_tests {
         let mut m = NativeModule::new("hung");
         m.source("pub native fn hang()\npub native fn walk()");
         let r = release.clone();
-        m.raw_function("hang", move |vm: &mut Vm, _: &[Value]| {
+        m.vm_function("hang", move |vm: &mut Vm| {
             let r = r.clone();
             vm.offload(move |_| {
                 while !r.load(Ordering::SeqCst) {
                     std::thread::sleep(Duration::from_millis(1));
                 }
-            })?;
-            Ok(Value::Unit)
+            })
         });
-        m.raw_function("walk", move |vm: &mut Vm, _: &[Value]| {
+        m.vm_function("walk", move |vm: &mut Vm| {
             let p = progress.clone();
             vm.offload(move |allowance| {
                 while allowance.charge(1).is_ok() {
                     p.fetch_add(1, Ordering::SeqCst);
                     std::thread::sleep(Duration::from_micros(100));
                 }
-            })?;
-            Ok(Value::Unit)
+            })
         });
         m
     }
@@ -1646,11 +1651,11 @@ mod offload_tests {
         let (release, progress) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicUsize::new(0)));
         let limits = Limits { max_wall_time: Some(Duration::from_millis(100)), ..Limits::default() };
         let config = Config::new().module(hang_module(release.clone(), progress.clone())).limits(limits);
-        let mut engine = Engine::new(config.clone());
+        let mut engine = Engine::new(config.clone()).unwrap();
         let r = rt().block_on(engine.run_source("main.sand", "import hung\nhung.hang()"));
         assert!(matches!(r, Err(Error::Limit(LimitKind::WallTime))), "{r:?}");
 
-        let mut engine = Engine::new(config.limits(Limits::default()));
+        let mut engine = Engine::new(config.limits(Limits::default())).unwrap();
         let handle = engine.interrupt_handle();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(50));

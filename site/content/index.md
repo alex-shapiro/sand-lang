@@ -123,7 +123,7 @@ let mut geo = NativeModule::new("geo");
 geo.function("dist", |a: f64, b: f64| -> f64 { (a * a + b * b).sqrt() });
 
 let config = Config::new().policy(Policy::deny_all()).module(geo);
-let mut engine = Engine::new(config);
+let mut engine = Engine::new(config)?;
 engine.run_source("main.sand", "import geo\nprint(geo.dist(3.0, 4.0))").await?;
 # Ok(())
 # }

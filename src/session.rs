@@ -38,7 +38,7 @@ use std::task::Poll;
 /// ```no_run
 /// # async fn demo() -> Result<(), sandlang::Error> {
 /// use sandlang::{Config, Engine};
-/// let mut session = Engine::new(Config::new()).session();
+/// let mut session = Engine::new(Config::new())?.session();
 /// session.eval("var count = 0\nfn bump() -> int { count += 1\n count }").await?;
 /// assert_eq!(session.eval("bump()").await?, Some("1".to_string()));
 /// assert_eq!(session.eval("bump() + 10").await?, Some("12".to_string()));
@@ -189,7 +189,7 @@ impl Session {
                 imports: HashMap::new(),
             };
             checker.type_query = Some(Default::default());
-            let checked = checker.check_cell(&[], &cell, true, &registry.by_name, &budget);
+            let checked = checker.check_cell(&[], &cell, true, &registry.decls, &budget);
             if let Some(stop) = budget.stopped() {
                 return Err(budget_error(stop, &sm, file));
             }
@@ -647,7 +647,7 @@ impl CellJob {
         let resolve = |ds: Vec<Diag>| Error::Compile(ds.iter().map(|d| sm.resolve(d)).collect());
         let (modules, cell_module) = parsed.map_err(resolve)?;
         let added = modules.len();
-        let checked = checker.check_cell(&modules, &cell_module, self.want_value, &self.registry.by_name, budget);
+        let checked = checker.check_cell(&modules, &cell_module, self.want_value, &self.registry.decls, budget);
         if let Some(stop) = budget.stopped() {
             return Err(budget_error(stop, sm, self.file));
         }
@@ -661,8 +661,7 @@ impl CellJob {
         let registry = &*self.registry;
         let native_info = if self.natives { native_info(&cp, registry) } else { NativeInfo::default() };
         let initialized = Some(std::mem::take(&mut self.initialized));
-        let input =
-            CompileInput { checked: &cp, sm, natives: &registry.by_name, native_info, budget, initialized, optimize: self.optimize };
+        let input = CompileInput { checked: &cp, sm, natives: &registry.decls, native_info, budget, initialized, optimize: self.optimize };
         let entry = compile_more(input, Arc::make_mut(&mut self.prog), &mut self.compiler, &inits);
         if let Some(stop) = budget.stopped() {
             return Err(budget_error(stop, sm, self.file));

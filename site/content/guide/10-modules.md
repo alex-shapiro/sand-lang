@@ -33,11 +33,11 @@ Suppose `geometry.sand` contains:
 
 /// A rectangle with width `w` and height `h`.
 pub struct Rect {
-    w: float
-    h: float
+    pub w: float
+    pub h: float
 
     /// Returns the area of the rectangle.
-    fn area(self) -> float {
+    pub fn area(self) -> float {
         self.w * self.h
     }
 }
@@ -77,7 +77,7 @@ print(square(1.0) == Rect { w: 1.0, h: 1.0 })
 
 ## Visibility
 
-Module items are private by default. Mark functions, structs, enums, traits, type aliases, and top-level `let` or `var` bindings with `pub` to export them. All fields and methods of a public type are public. Referencing a private item from another module is a compile error:
+Module items are private by default. Mark functions, structs, enums, traits, type aliases, and top-level `let` or `var` bindings with `pub` to export them, and the fields and methods of a type to let other modules use them. Another module cannot build a struct with a private field. Referencing a private item from another module is a compile error:
 
 ```sand error
 import "./geometry.sand"

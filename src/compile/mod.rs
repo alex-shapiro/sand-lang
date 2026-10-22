@@ -6,8 +6,9 @@ mod reflect;
 
 use crate::check::budget::CompileBudget;
 use crate::check::persist::{PMap, PVec};
-use crate::check::{CheckedProgram, FnKind, NativeIds};
+use crate::check::{CheckedProgram, FnKind};
 use crate::diag::{Diag, SourceMap, Span};
+use crate::engine::NativeDecls;
 use crate::hir::*;
 use crate::types::{FnId, Ty, TypeArena, TypeDefId, TypeId};
 use crate::vm::bytecode::*;
@@ -28,7 +29,7 @@ enum Target {
 pub struct CompileInput<'a> {
     pub checked: &'a CheckedProgram,
     pub sm: &'a SourceMap,
-    pub natives: &'a NativeIds,
+    pub natives: &'a NativeDecls,
     pub native_info: crate::modules::NativeInfo,
     /// Charged one unit per expression compiled, instruction emitted and
     /// node visited by an analysis. Once it is exhausted the compiler skips
@@ -341,7 +342,7 @@ pub(crate) fn compile_more(mut input: CompileInput, prog: &mut Program, inc: &mu
         dict_consts: std::mem::take(&mut inc.dict_consts),
         descs: std::mem::take(&mut inc.descs),
         errors: Vec::new(),
-        recv_native: input.natives.fns.get("Channel.recv").copied(),
+        recv_native: input.natives.id("prelude.Channel.recv"),
         inline: HashMap::new(),
         bodies,
         order,
@@ -360,28 +361,28 @@ impl<'a> Compiler<'a> {
     fn compile_new(&mut self, input: CompileInput, inits: &[FnId], ntests: &mut usize) -> u32 {
         let cp = self.cp;
         for (name, op) in [
-            ("List.len", Inline::Len),
-            ("str.len", Inline::Len),
-            ("bytes.len", Inline::Len),
-            ("Map.len", Inline::Len),
-            ("Set.len", Inline::Len),
-            ("List.push", Inline::Push),
-            ("List.get", Inline::ListGet),
-            ("List.pop", Inline::ListPop),
-            ("Map.get", Inline::MapGet),
-            ("Map.get_or", Inline::MapGetOr),
-            ("Map.contains", Inline::MapHas),
-            ("Set.contains", Inline::SetHas),
-            ("Set.add", Inline::SetAdd),
-            ("int.to_float", Inline::ToFloat),
-            ("str.is_digit", Inline::StrClass(0)),
-            ("str.is_alpha", Inline::StrClass(1)),
-            ("str.is_alnum", Inline::StrClass(2)),
-            ("str.is_space", Inline::StrClass(3)),
-            ("str.is_upper", Inline::StrClass(4)),
-            ("str.is_lower", Inline::StrClass(5)),
+            ("prelude.List.len", Inline::Len),
+            ("prelude.str.len", Inline::Len),
+            ("prelude.bytes.len", Inline::Len),
+            ("prelude.Map.len", Inline::Len),
+            ("prelude.Set.len", Inline::Len),
+            ("prelude.List.push", Inline::Push),
+            ("prelude.List.get", Inline::ListGet),
+            ("prelude.List.pop", Inline::ListPop),
+            ("prelude.Map.get", Inline::MapGet),
+            ("prelude.Map.get_or", Inline::MapGetOr),
+            ("prelude.Map.contains", Inline::MapHas),
+            ("prelude.Set.contains", Inline::SetHas),
+            ("prelude.Set.add", Inline::SetAdd),
+            ("prelude.int.to_float", Inline::ToFloat),
+            ("prelude.str.is_digit", Inline::StrClass(0)),
+            ("prelude.str.is_alpha", Inline::StrClass(1)),
+            ("prelude.str.is_alnum", Inline::StrClass(2)),
+            ("prelude.str.is_space", Inline::StrClass(3)),
+            ("prelude.str.is_upper", Inline::StrClass(4)),
+            ("prelude.str.is_lower", Inline::StrClass(5)),
         ] {
-            if let Some(&id) = input.natives.fns.get(name).filter(|_| self.optimize) {
+            if let Some(id) = input.natives.id(name).filter(|_| self.optimize) {
                 self.inline.insert(id, op);
             }
         }
@@ -389,7 +390,6 @@ impl<'a> Compiler<'a> {
             let info = input.native_info;
             self.prog.native_names = info.names.into();
             self.prog.native_argc = info.argc.into();
-            self.prog.native_returns_result = info.returns_result.into();
         }
         // The program's files are a prefix of the source map's (those of a
         // failed compilation are removed by `ProgramMark`): only add the new.
@@ -4290,7 +4290,7 @@ mod tests {
     use std::sync::Arc;
 
     fn compile(src: &str) -> Arc<Program> {
-        let engine = Engine::new(Config::new());
+        let engine = Engine::new(Config::new()).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let root = std::env::current_dir().unwrap();
         match rt.block_on(engine.compile("main.sand", src, &root, None)) {
@@ -4311,7 +4311,7 @@ mod tests {
 
     fn run(src: &str) -> String {
         let out = crate::MemorySink::new();
-        let mut engine = Engine::new(Config::new().stdout(out.clone()));
+        let mut engine = Engine::new(Config::new().stdout(out.clone())).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
         if let Err(e) = rt.block_on(engine.run_source("main.sand", src)) {
             panic!("{e}");

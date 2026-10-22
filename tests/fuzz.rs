@@ -47,7 +47,7 @@ fn limited_config() -> Config {
 /// Compiles and (if it compiles) runs `src`, asserting the host never panics.
 fn exercise(src: &str) {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let mut engine = Engine::new(limited_config());
+        let mut engine = Engine::new(limited_config()).unwrap();
         let _ = rt().block_on(engine.run_source("fuzz.sand", src));
     }));
     if result.is_err() {
@@ -57,7 +57,7 @@ fn exercise(src: &str) {
 
 fn check_only(src: &str) {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let engine = Engine::new(Config::new());
+        let engine = Engine::new(Config::new()).unwrap();
         let _ = engine.check_source("fuzz.sand", src);
         let _ = sandlang::fmt::format_source(src);
         let _ = engine.lint_source("fuzz.sand", src);
@@ -364,7 +364,7 @@ fn random_json_and_uri_inputs() {
         lits.join(", ")
     );
     let out = MemorySink::new();
-    let mut engine = Engine::new(Config::new().stdout(out.clone()));
+    let mut engine = Engine::new(Config::new().stdout(out.clone())).unwrap();
     let r = rt().block_on(engine.run_source("fuzz.sand", &src));
     assert!(r.is_ok(), "{r:?}");
     assert_eq!(out.contents(), "true\n");

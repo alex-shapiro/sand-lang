@@ -786,7 +786,7 @@ pub trait Shape {
     fn area(self) -> float
     fn name(self) -> str { "shape" }
 }
-pub struct Square { side: float }
+pub struct Square { pub side: float }
 impl Shape for Square {
     fn area(self) -> float { self.side * self.side }
 }

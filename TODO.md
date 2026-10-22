@@ -59,23 +59,38 @@ Follow-up work, roughly in priority order.
 
 ### Embedding
 
-- [ ] Validate all host module declarations in `Engine::new` instead of
-      deferring checks until a script imports the module.
-- [ ] Return a structured type from `SandType::sand_type` instead of Sand
-      source text so `Checker` does not re-parse derived host signatures.
-- [ ] Prefix prelude native functions with `prelude.` so that every native
-      function key starts with its module name and host modules can use prelude
-      type names such as `str`.
 - [ ] Support enum variant payloads in `#[derive(SandEnum)]` so native modules
       such as `json` do not construct variant values by runtime ID.
-- [ ] Check raw native function implementations against their `native fn`
-      declarations at compile time instead of failing with an internal error on
-      argument conversion at runtime.
-- [ ] Bind each opaque `native type` to a Rust `NativeObject` type at
-      registration time so the type checker can verify opaque parameter and
-      return types.
-- [ ] Add struct field visibility and require public fields of public types in
-      native modules to use public types.
+- [ ] Derive Sand structs from Rust structs (`#[derive(SandStruct)]`) so that
+      natives can take and return structs such as `regex.Match` and `uri.Uri`
+      without private tuple-returning natives and Sand wrappers.
+- [ ] Rust signatures cannot state the bounds of type parameters (`Eq`, `Ord`,
+      `Hash`): the checker does not detect a `native fn` declaration that omits
+      a bound its Rust function relies on.
+- [ ] Derive methods of registered types from `"Type.name"` registrations
+      (with `self` from the first parameter) so host modules need not declare
+      them in Sand source.
+- [ ] Each `Engine::new` with host modules checks and compiles them again.
+      Share the snapshot between engines whose configurations register the
+      same modules.
+- [ ] Natives build heap values with untyped constructors and wrap them in
+      `Val::from_raw` (about 120 calls). Give `Vm` constructors that return
+      typed handles (`new_str` → `Val<String>`, `new_bytes`, lists, tuples)
+      and accessors for map, set, task and channel handles, so that the
+      Rust types of results are correct by construction.
+- [ ] The checker accepts `json.decode<T>` for a `T` that contains a type
+      it cannot decode (a function, a task); the call then returns `Err`.
+      Reject such a `T` at the call, as private fields are.
+- [ ] `ValueType` sets `MODULE`, `NAME` and `DOC` by hand. Derive them as
+      `SandEnum` and `SandObject` do.
+- [ ] `io` registers `write`, `write_str` and `flush` separately for
+      `Stdout` and `Stderr`, with the stream as a number. Register them once
+      for both types.
+- [ ] `help` inside the module that owns a type does not mark which of its
+      fields and methods are `pub`.
+- [ ] Types bound to Rust types have no source position, so `help` lists
+      them before the module's other types (`Task`, `Channel` before
+      `Option`).
 
 ### Tooling
 
@@ -98,6 +113,17 @@ Follow-up work, roughly in priority order.
       final top-level statement.
 
 ### Performance
+
+- [ ] `task.race` charges fuel and checks memory for its list, and then
+      `BlockOn::Race` does both again.
+- [ ] `HostFn::Static` avoids an `Arc` dereference for standard natives at
+      the cost of a `Box::leak` and an enum. Measure whether it pays; if not,
+      use one `Arc` variant.
+- [ ] A call of a typed native costs about 0.5 ns more than a call of the
+      former untyped `fn` natives (`fannkuch` and `results` in
+      `bench/programs` are 2–3% slower; the others are unchanged). The
+      closures compile to the same code; the difference is in the call
+      through `HostFn` and the argument slice. Find where the time goes.
 
 - [ ] Dispatch loop: the cost of individual instructions shifts by up to
       ±15% between builds as LLVM reallocates registers. A threaded design

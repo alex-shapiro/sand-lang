@@ -1,42 +1,36 @@
 //! The `uri` module (RFC 3986).
 
 use crate::check::ModKind;
-use crate::engine::Registry;
-use crate::vm::value::Value;
-use crate::vm::{Ctl, NResult, Vm};
+use crate::native::{HostError, NativeModule, Val};
+use crate::vm::{Ctl, Vm};
 
-pub fn register(r: &mut Registry) {
-    r.source("uri", ModKind::Std, include_str!("uri.sand"));
-    r.add_builtin("uri.parse_parts", |vm, a| {
-        let n = vm.str(a[0]).len();
+/// The components of a `uri.Uri` (built in Sand): `(scheme, userinfo, host,
+/// port, path, query, fragment)`.
+type PartsTuple = (String, Option<String>, Option<String>, Option<i64>, String, Option<String>, Option<String>);
+
+pub(crate) fn module() -> NativeModule {
+    let mut m = NativeModule::std("uri", ModKind::Std, include_str!("uri.sand"));
+    m.vm_function("parse_parts", |vm: &mut Vm, text: Val<String>| -> Result<_, HostError> {
+        let n = text.str(&vm.heap).len();
         vm.reserve(n.saturating_mul(2))?;
         vm.charge_slow_bytes(n)?;
-        let parsed = parse(vm.str(a[0]), true);
-        result(vm, parsed)
+        result(parse(text.str(&vm.heap), true))
     });
-    r.add_builtin("uri.resolve_parts", |vm, a| {
-        let base = from_value(vm, a[0]);
-        let n = base.len().saturating_add(vm.str(a[1]).len());
+    m.vm_function("resolve_parts", |vm: &mut Vm, base: PartsTuple, reference: Val<String>| -> Result<_, HostError> {
+        let base = from_tuple(base);
+        let n = base.len().saturating_add(reference.str(&vm.heap).len());
         vm.reserve(n.saturating_mul(3))?;
         vm.charge_slow_bytes(n)?;
-        let resolved = parse(vm.str(a[1]), false).map(|r| resolve(&base, r));
-        result(vm, resolved)
+        result(parse(reference.str(&vm.heap), false).map(|r| resolve(&base, r)))
     });
-    r.add_builtin("uri.encode_component", |vm, a| encode_native(vm, a[0], b""));
-    r.add_builtin("uri.encode_path", |vm, a| encode_native(vm, a[0], b"/"));
-    r.add_builtin("uri.decode_component", |vm, a| {
-        vm.reserve(vm.str(a[0]).len())?;
-        vm.charge_slow_bytes(vm.str(a[0]).len())?;
-        match decode_component(vm.str(a[0])) {
-            Ok(s) => {
-                let s = vm.new_str(s);
-                Ok(vm.ok(s))
-            }
-            Err(msg) => Err(Ctl::native_err("parse", msg)),
-        }
+    m.vm_function("encode_component", |vm: &mut Vm, s: Val<String>| encode_native(vm, s, b""));
+    m.vm_function("encode_path", |vm: &mut Vm, s: Val<String>| encode_native(vm, s, b"/"));
+    m.vm_function("decode_component", |vm: &mut Vm, s: Val<String>| -> Result<String, HostError> {
+        vm.charge_slow_bytes(s.str(&vm.heap).len())?;
+        decode_component(s.str(&vm.heap)).map_err(|msg| HostError::new("parse", msg))
     });
-    r.add_builtin("uri.parse_query", |vm, a| {
-        let q = vm.str(a[0]);
+    m.vm_function("parse_query", |vm: &mut Vm, q: Val<String>| -> Result<Val<Vec<(String, String)>>, Ctl> {
+        let q = q.str(&vm.heap);
         vm.reserve(q.len().saturating_mul(4))?;
         vm.charge_slow_bytes(q.len())?;
         let pairs = parse_query(q);
@@ -47,8 +41,9 @@ pub fn register(r: &mut Registry) {
             let v = vm.new_str(v);
             items.push(vm.heap.new_tuple(&[k, v]));
         }
-        Ok(vm.heap.new_list(items))
+        Ok(Val::from_raw(vm.heap.new_list(items)))
     });
+    m
 }
 
 /// The components of a URI reference.
@@ -108,43 +103,19 @@ impl std::fmt::Display for Parts {
     }
 }
 
-/// `Ok((scheme, userinfo, host, port, path, query, fragment))`, the
-/// components of a `uri.Uri` (built in Sand), or `Err(Error { kind: "parse" })`.
-fn result(vm: &mut Vm, parsed: Result<Parts, String>) -> NResult {
-    let p = match parsed {
-        Ok(p) => p,
-        Err(msg) => return Err(Ctl::native_err("parse", msg)),
-    };
-    let opt_str = |vm: &mut Vm, s: Option<String>| {
-        let v = s.map(|s| vm.new_str(s));
-        vm.option(v)
-    };
-    let scheme = vm.new_str(p.scheme.unwrap_or_default());
+/// `Ok` of the components, or `Err(Error { kind: "parse" })`.
+fn result(parsed: Result<Parts, String>) -> Result<PartsTuple, HostError> {
+    let p = parsed.map_err(|msg| HostError::new("parse", msg))?;
     let (userinfo, host, port) = match p.authority {
-        Some(a) => (opt_str(vm, a.userinfo), opt_str(vm, Some(a.host)), vm.option(a.port.map(Value::Int))),
-        None => (vm.none(), vm.none(), vm.none()),
+        Some(a) => (a.userinfo, Some(a.host), a.port),
+        None => (None, None, None),
     };
-    let path = vm.new_str(p.path);
-    let query = opt_str(vm, p.query);
-    let fragment = opt_str(vm, p.fragment);
-    let parts = vm.heap.new_tuple(&[scheme, userinfo, host, port, path, query, fragment]);
-    Ok(vm.ok(parts))
+    Ok((p.scheme.unwrap_or_default(), userinfo, host, port, p.path, p.query, p.fragment))
 }
 
-/// The components of the `uri.Uri` `v`.
-fn from_value(vm: &Vm, v: Value) -> Parts {
-    let f = vm.heap.fields(v);
-    let field = |i: usize| f.get(i).copied().unwrap_or(Value::Unit);
-    let opt_str = |i: usize| vm.as_option(field(i)).map(|s| vm.str(s).to_string());
-    let port = vm.as_option(field(3)).map(Value::as_int);
-    let authority = opt_str(2).map(|host| Authority { userinfo: opt_str(1), host, port });
-    Parts {
-        scheme: Some(vm.str(field(0)).to_string()),
-        authority,
-        path: vm.str(field(4)).to_string(),
-        query: opt_str(5),
-        fragment: opt_str(6),
-    }
+fn from_tuple((scheme, userinfo, host, port, path, query, fragment): PartsTuple) -> Parts {
+    let authority = host.map(|host| Authority { userinfo, host, port });
+    Parts { scheme: Some(scheme), authority, path, query, fragment }
 }
 
 /// Characters that may never appear literally in a URI.
@@ -310,11 +281,12 @@ pub(crate) fn remove_dot_segments(path: &str) -> String {
     out
 }
 
-fn encode_native(vm: &mut Vm, s: Value, keep: &[u8]) -> NResult {
-    vm.reserve(vm.str(s).len().saturating_mul(3))?;
-    vm.charge_slow_bytes(vm.str(s).len())?;
-    let out = encode(vm.str(s), keep);
-    Ok(vm.new_str(out))
+fn encode_native(vm: &mut Vm, s: Val<String>, keep: &[u8]) -> Result<Val<String>, Ctl> {
+    let s = s.str(&vm.heap);
+    vm.reserve(s.len().saturating_mul(3))?;
+    vm.charge_slow_bytes(s.len())?;
+    let out = encode(s, keep);
+    Ok(Val::from_raw(vm.new_str(out)))
 }
 
 /// Percent-encodes every byte that is not unreserved or in `keep`.

@@ -9,7 +9,7 @@
 
 use super::base64;
 use crate::check::ModKind;
-use crate::engine::Registry;
+use crate::native::{HostError, NativeModule, Param, Reflect, SandType, Type, Val};
 use crate::types::ConstVal;
 use crate::vm::bytecode::{JsonIds, Program};
 use crate::vm::compare::{hash_key, str_hash};
@@ -28,23 +28,32 @@ const MAX_DEPTH: usize = 512;
 /// header), checked against the memory limit before each.
 const NODE: usize = 64;
 
-pub fn register(r: &mut Registry) {
-    r.source("json", ModKind::Std, include_str!("json.sand"));
-    r.add_builtin("json.parse", |vm, a| {
+/// The Sand type `json.Json`.
+struct JsonType;
+
+impl SandType for JsonType {
+    fn sand_type() -> Type {
+        Type::named("json", "Json", vec![])
+    }
+}
+
+pub(crate) fn module() -> NativeModule {
+    let mut m = NativeModule::std("json", ModKind::Std, include_str!("json.sand"));
+    m.vm_function("parse", |vm: &mut Vm, text: Val<String>| -> Result<Val<JsonType>, HostError> {
         let ids = json_ids(vm)?;
-        let (text, meter) = (a[0], &vm.meter);
+        let meter = &vm.meter;
         let r = vm.heap.staged(|heap, st| {
             let mut b = Build::new(heap, st, meter);
-            let mut p = Parser::new(heap.str(text));
+            let mut p = Parser::new(text.str(heap));
             let r = p.parse_json(&mut b, &ids).and_then(|v| p.finish().map(|()| v));
             p.charge(meter)?;
             r
         });
-        into_result(vm, r)
+        into_result(r)
     });
-    r.add_builtin("json.encode", |vm, a| {
+    m.vm_function("encode", |vm: &mut Vm, value: Param<0>, indent: i64| -> Result<Val<String>, Ctl> {
         let ids = json_ids(vm)?;
-        let indent = a[1].as_int().clamp(0, 1 << 16) as usize;
+        let indent = indent.clamp(0, 1 << 16) as usize;
         let mut e = Encoder {
             prog: &vm.prog,
             heap: &vm.heap,
@@ -55,18 +64,17 @@ pub fn register(r: &mut Registry) {
             charged: 0,
             scratch: Scratch::new(),
         };
-        e.value(a[0], 0)?;
+        e.value(value.raw(), 0)?;
         let out = e.out;
-        Ok(vm.new_str(out))
+        Ok(Val::from_raw(vm.new_str(out)))
     });
-    r.add_builtin("json.decode", |vm, a| {
-        let Obj::TypeDesc(desc) = vm.heap.get(a[0]) else { return internal("json.decode: missing type description") };
-        let desc = desc.clone();
+    m.vm_function("decode", |vm: &mut Vm, ty: Reflect<0>, text: Val<String>| -> Result<Val<Param<0>>, HostError> {
+        let desc = ty.desc(&vm.heap)?.clone();
         let ids = vm.prog.ids;
-        let (text, meter) = (a[1], &vm.meter);
+        let meter = &vm.meter;
         let (r, sets) = vm.heap.staged(|heap, st| {
             let mut d = Decoder {
-                p: Parser::new(heap.str(text)),
+                p: Parser::new(text.str(heap)),
                 b: Build::new(heap, st, meter),
                 ids,
                 path: Vec::new(),
@@ -87,17 +95,19 @@ pub fn register(r: &mut Registry) {
                 }
             }
         }
-        into_result(vm, r)
+        into_result(r)
     });
-    r.add_builtin("json.to_json", |vm, a| {
+    m.vm_function("to_json", |vm: &mut Vm, value: Param<0>| -> Result<Val<JsonType>, Ctl> {
         let ids = json_ids(vm)?;
         let (prog, meter) = (&vm.prog, &vm.meter);
-        vm.heap.staged(|heap, st| {
+        let v = vm.heap.staged(|heap, st| {
             let mut c =
                 Converter { prog, heap, b: Build::new(heap, st, meter), ids, fields: FxHashMap::default(), names: FxHashMap::default() };
-            c.convert(a[0], 0)
-        })
+            c.convert(value.raw(), 0)
+        })?;
+        Ok(Val::from_raw(v))
     });
+    m
 }
 
 fn json_ids(vm: &Vm) -> Result<JsonIds, Ctl> {
@@ -123,11 +133,11 @@ impl From<Ctl> for Error {
 
 type PResult<T> = Result<T, Error>;
 
-fn into_result(vm: &mut Vm, r: PResult<Value>) -> NResult {
+fn into_result<T>(r: PResult<Value>) -> Result<Val<T>, HostError> {
     match r {
-        Ok(v) => Ok(vm.ok(v)),
-        Err(Error::Parse(msg)) => Err(Ctl::native_err("parse", msg)),
-        Err(Error::Ctl(c)) => Err(c),
+        Ok(v) => Ok(Val::from_raw(v)),
+        Err(Error::Parse(msg)) => Err(HostError::new("parse", msg)),
+        Err(Error::Ctl(c)) => Err(c.into()),
     }
 }
 
@@ -922,9 +932,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                     Err(msg) => Err(self.fail(&msg)),
                 }
             }
-            TypeDesc::Unsupported(name) => {
-                Err(Error::Ctl(Ctl::fail("invalid", format!("json.decode: cannot decode values of type {name}"))))
-            }
+            TypeDesc::Unsupported(name) => Err(Error::Parse(format!("cannot decode values of type {name}"))),
         }
     }
 
@@ -978,7 +986,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                 let (hash, text) = (x.value_hash(), x.text());
                 return Ok((self.b.st.alloc(v), hash, Some(Cow::Owned(text))));
             }
-            _ => return Err(Error::Ctl(Ctl::fail("invalid", "json.decode: unsupported map key type"))),
+            _ => return Err(Error::Parse("cannot decode map keys of this type".to_string())),
         };
         Ok((k, hash_key(self.b.heap, self.b.meter, k)?, None))
     }

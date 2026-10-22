@@ -124,7 +124,7 @@ fn build(repo: &Path, out: &Path, engine: EngineBuild) -> Result<Vec<String>, St
     let mut pages = Vec::new();
     let mut entries = Vec::new();
 
-    let docs = sandlang::Engine::new(sandlang::Config::new()).docs().map_err(|e| e.render())?;
+    let docs = sandlang::Engine::new(sandlang::Config::new()).unwrap().docs().map_err(|e| e.render())?;
     let (reference_pages, reference_entries) = reference::Reference::new(docs).pages(&mut checks);
     pages.extend(reference_pages);
 

@@ -3,10 +3,12 @@
 //! and header syntax.
 
 use super::stream::IoFailure;
+use super::stream::{self, Suspended};
 use super::uri;
+use crate::native::{HostError, IntoValue, NativeModule, NativeObject, Val};
 use crate::vm::iomem::Reservation;
-use crate::vm::value::{NativeObject, Obj, Value};
-use crate::vm::{Ctl, Finisher, NResult, Vm};
+use crate::vm::value::to_usize_saturating;
+use crate::vm::{Ctl, Vm};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -109,23 +111,22 @@ pub(crate) fn resolve(base: &str, location: &str) -> Result<String, IoFailure> {
     Ok(text)
 }
 
-/// Registers the natives every client shares.
-pub(crate) fn register(r: &mut crate::engine::Registry) {
-    register_body(r);
-    r.add_builtin("http.resolve", |vm, a| {
-        vm.charge_slow_bytes(vm.str(a[0]).len().saturating_add(vm.str(a[1]).len()))?;
-        let url = resolve(vm.str(a[0]), vm.str(a[1]))?;
-        vm.reserve(url.len())?;
-        let s = vm.new_str(url);
-        Ok(vm.ok(s))
+/// Adds the types and natives that every client shares to `m`.
+pub(crate) fn natives(m: &mut NativeModule) {
+    m.object_type::<Body>();
+    body_natives(m);
+    m.vm_function("resolve", |vm: &mut Vm, base: Val<String>, location: Val<String>| -> Result<String, HostError> {
+        let (base, location) = (base.str(&vm.heap), location.str(&vm.heap));
+        vm.charge_slow_bytes(base.len().saturating_add(location.len()))?;
+        Ok(resolve(base, location)?)
     });
-    r.add_builtin("http.same_origin", |vm, a| {
-        vm.charge_slow_bytes(vm.str(a[0]).len().saturating_add(vm.str(a[1]).len()))?;
-        let same = match (Url::parse(vm.str(a[0])), Url::parse(vm.str(a[1]))) {
+    m.vm_function("same_origin", |vm: &mut Vm, a: Val<String>, b: Val<String>| -> Result<bool, Ctl> {
+        let (a, b) = (a.str(&vm.heap), b.str(&vm.heap));
+        vm.charge_slow_bytes(a.len().saturating_add(b.len()))?;
+        Ok(match (Url::parse(a), Url::parse(b)) {
             (Ok(x), Ok(y)) => x.origin() == y.origin(),
             _ => false,
-        };
-        Ok(crate::vm::value::Value::Bool(same))
+        })
     });
 }
 
@@ -142,19 +143,19 @@ pub(crate) fn valid_header(name: &str, value: &str) -> bool {
 
 /// Validates and converts a `[(str, str)]` list into header pairs, or fails
 /// with kind `"invalid"`.
-pub(crate) fn header_pairs(vm: &Vm, list: Value) -> Result<Vec<(String, String)>, Ctl> {
-    let items = vm.heap.list(list);
+pub(crate) fn header_pairs(vm: &Vm, list: Val<Vec<(String, String)>>) -> Result<Vec<(String, String)>, HostError> {
+    let items = list.items(&vm.heap);
     vm.charge(items.len() as u64)?;
     let mut pairs = Vec::with_capacity(items.len());
     let mut size = 0usize;
     for &item in items {
-        let [k, v] = vm.heap.fields(item) else { return Err(Ctl::internal("a header is not a pair")) };
+        let [k, v] = vm.heap.fields(item) else { return Err(Ctl::internal("a header is not a pair").into()) };
         let (k, v) = (vm.str(*k), vm.str(*v));
         size = size.saturating_add(k.len() + v.len() + 64);
         vm.charge_bytes(k.len() + v.len())?;
         vm.reserve(size)?;
         if !valid_header(k, v) {
-            return Err(Ctl::native_err("invalid", format!("invalid header {:?}: {:?}", super::truncate(k, 64), super::truncate(v, 64))));
+            return Err(HostError::new("invalid", format!("invalid header {:?}: {:?}", super::truncate(k, 64), super::truncate(v, 64))));
         }
         pairs.push((k.to_string(), v.to_string()));
     }
@@ -162,7 +163,7 @@ pub(crate) fn header_pairs(vm: &Vm, list: Value) -> Result<Vec<(String, String)>
 }
 
 /// Builds a `[(str, str)]` list from header pairs.
-pub(crate) fn header_list(vm: &mut Vm, headers: Vec<(String, String)>) -> NResult {
+pub(crate) fn header_list(vm: &mut Vm, headers: Vec<(String, String)>) -> Result<Val<Vec<(String, String)>>, Ctl> {
     let size = headers.iter().map(|(k, v)| k.len() + v.len() + 160).fold(0usize, usize::saturating_add);
     vm.reserve(size)?;
     vm.charge(headers.len() as u64)?;
@@ -173,7 +174,7 @@ pub(crate) fn header_list(vm: &mut Vm, headers: Vec<(String, String)>) -> NResul
             vm.heap.new_tuple(&[k, v])
         })
         .collect();
-    Ok(vm.heap.new_list(items))
+    Ok(Val::from_raw(vm.heap.new_list(items)))
 }
 
 // ----------------------------------------------------------------------
@@ -355,9 +356,11 @@ impl BodyReader {
     }
 }
 
-/// The `http.Body` type: a message body read as it arrives. A body that
-/// owns its connection (a client's response) counts as an open resource
-/// until it is closed.
+/// A streaming HTTP request or response body. `read_all` and `read_text` read
+/// at most `max_http_body` bytes (failing with kind `"limit"` if exceeded), and
+/// each read waits at most the request `timeout`.
+#[derive(crate::SandObject)]
+#[sand(module = "http")]
 pub(crate) struct Body {
     reader: Option<Arc<tokio::sync::Mutex<BodyReader>>>,
     closed: tokio::sync::watch::Sender<bool>,
@@ -380,17 +383,8 @@ impl Body {
 }
 
 impl NativeObject for Body {
-    fn type_name(&self) -> &'static str {
-        "Body"
-    }
     fn is_resource(&self) -> bool {
         self.owns_conn && self.reader.is_some()
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
     }
 }
 
@@ -402,10 +396,16 @@ enum BodyRead {
     All,
 }
 
-/// Reads from body `v` until the read completes or the body is closed.
-fn read_body(vm: &mut Vm, v: Value, what: BodyRead) -> NResult {
-    let body = vm.heap.native::<Body>(v).ok_or_else(|| Ctl::internal("not a body"))?;
-    let Some(reader) = body.reader.clone() else { return Err(Ctl::native_err("closed", "body closed")) };
+/// Reads from `body` until the read completes or the body is closed, and
+/// makes the result with `done`.
+fn read_body<R: IntoValue + Send + 'static>(
+    vm: &mut Vm,
+    body: Val<Body>,
+    what: BodyRead,
+    done: fn(&mut Vm, Option<Vec<u8>>) -> Result<R, HostError>,
+) -> Suspended<R> {
+    let body = body.get(&vm.heap)?;
+    let Some(reader) = body.reader.clone() else { return Err(HostError::new("closed", "body closed")) };
     let mut closed = body.closed.subscribe();
     let mut res = match what {
         BodyRead::Upto(n) => vm.reserve_io(n.min(64 << 10))?,
@@ -441,53 +441,49 @@ fn read_body(vm: &mut Vm, v: Value, what: BodyRead) -> NResult {
         };
         Ok((data, res))
     };
-    Err(Ctl::suspend(Box::pin(async move {
-        let r = op.await;
-        Box::new(move |vm: &mut Vm| -> NResult {
-            let (data, res) = r?;
-            drop(res);
-            let v = match (what, data) {
-                (BodyRead::Line, None) => vm.none(),
-                (BodyRead::Line, Some(line)) => {
-                    vm.reserve(line.len())?;
-                    vm.charge_slow_bytes(line.len())?;
-                    let Ok(text) = String::from_utf8(line) else { return Err(Ctl::native_err("invalid", "line is not valid UTF-8")) };
-                    let s = vm.new_str(text);
-                    vm.some(s)
-                }
-                (_, data) => {
-                    let data = data.unwrap_or_default();
-                    vm.reserve(data.len())?;
-                    vm.charge_bytes(data.len())?;
-                    vm.heap.new_bytes(data)
-                }
-            };
-            Ok(vm.ok(v))
-        }) as Finisher
-    })))
+    stream::suspend(op, move |vm, (data, res)| {
+        drop(res);
+        done(vm, data)
+    })
 }
 
-pub(crate) fn alloc_body(vm: &mut Vm, reader: BodyReader) -> Value {
-    vm.heap.alloc(Obj::Native(Box::new(Body::new(reader))))
+/// The data of a read, as `bytes`.
+fn read_bytes(vm: &mut Vm, data: Option<Vec<u8>>) -> Result<Val<Vec<u8>>, HostError> {
+    let data = data.unwrap_or_default();
+    vm.reserve(data.len())?;
+    vm.charge_bytes(data.len())?;
+    Ok(Val::from_raw(vm.heap.new_bytes(data)))
 }
 
-pub(crate) fn register_body(r: &mut crate::engine::Registry) {
-    r.add_method("http.Body.read", |vm, a| {
-        let max = a[1].as_int();
+/// The line of a read, as `str?`.
+fn read_text(vm: &mut Vm, line: Option<Vec<u8>>) -> Result<Option<Val<String>>, HostError> {
+    let Some(line) = line else { return Ok(None) };
+    vm.reserve(line.len())?;
+    vm.charge_slow_bytes(line.len())?;
+    let Ok(text) = String::from_utf8(line) else { return Err(HostError::new("invalid", "line is not valid UTF-8")) };
+    Ok(Some(Val::from_raw(vm.new_str(text))))
+}
+
+pub(crate) fn alloc_body(vm: &mut Vm, reader: BodyReader) -> Result<Val<Body>, Ctl> {
+    vm.new_object(Body::new(reader))
+}
+
+fn body_natives(m: &mut NativeModule) {
+    m.vm_function("Body.read", |vm: &mut Vm, body: Val<Body>, max: i64| {
         if max <= 0 {
-            return Err(Ctl::native_err("invalid", "read: max must be positive"));
+            return Err(HostError::new("invalid", "read: max must be positive"));
         }
-        read_body(vm, a[0], BodyRead::Upto(crate::vm::value::to_usize_saturating(max)))
+        read_body(vm, body, BodyRead::Upto(to_usize_saturating(max)), read_bytes)
     });
-    r.add_method("http.Body.read_line", |vm, a| read_body(vm, a[0], BodyRead::Line));
-    r.add_method("http.Body.read_all", |vm, a| read_body(vm, a[0], BodyRead::All));
-    r.add_method("http.Body.close", |vm, a| {
-        let b = vm.heap.native_mut::<Body>(a[0]).ok_or_else(|| Ctl::internal("not a body"))?;
+    m.vm_function("Body.read_line", |vm: &mut Vm, body: Val<Body>| read_body(vm, body, BodyRead::Line, read_text));
+    m.vm_function("Body.read_all", |vm: &mut Vm, body: Val<Body>| read_body(vm, body, BodyRead::All, read_bytes));
+    m.vm_function("Body.close", |vm: &mut Vm, body: Val<Body>| -> Result<_, Ctl> {
+        let b = body.get_mut(&mut vm.heap)?;
         b.closed.send_replace(true);
         // The stream and the connection go with the last reference to the
         // reader: now, or when a pending read ends.
         b.reader = None;
-        Ok(Value::Unit)
+        Ok(())
     });
 }
 

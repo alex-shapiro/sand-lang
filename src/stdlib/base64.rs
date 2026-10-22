@@ -1,37 +1,34 @@
 //! The `base64` module.
 
 use crate::check::ModKind;
-use crate::engine::Registry;
-use crate::vm::value::Value;
-use crate::vm::{Ctl, NResult, Vm};
+use crate::native::{HostError, NativeModule, Val};
+use crate::vm::{Ctl, Vm};
 
 const STANDARD: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 const URL_SAFE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
-pub fn register(r: &mut Registry) {
-    r.source("base64", ModKind::Std, include_str!("base64.sand"));
-    r.add_builtin("base64.encode", |vm, a| encode_native(vm, a[0], false));
-    r.add_builtin("base64.encode_url", |vm, a| encode_native(vm, a[0], true));
-    r.add_builtin("base64.decode", |vm, a| decode_native(vm, a[0], false));
-    r.add_builtin("base64.decode_url", |vm, a| decode_native(vm, a[0], true));
+pub(crate) fn module() -> NativeModule {
+    let mut m = NativeModule::std("base64", ModKind::Std, include_str!("base64.sand"));
+    m.vm_function("encode", |vm: &mut Vm, data: Val<Vec<u8>>| encode_native(vm, data, false));
+    m.vm_function("encode_url", |vm: &mut Vm, data: Val<Vec<u8>>| encode_native(vm, data, true));
+    m.vm_function("decode", |vm: &mut Vm, text: Val<String>| decode_native(vm, text, false));
+    m.vm_function("decode_url", |vm: &mut Vm, text: Val<String>| decode_native(vm, text, true));
+    m
 }
 
-fn encode_native(vm: &mut Vm, data: Value, url: bool) -> NResult {
-    vm.reserve(vm.heap.bytes_of(data).len() / 3 * 4 + 4)?;
-    vm.charge_slow_bytes(vm.heap.bytes_of(data).len())?;
-    let s = encode(vm.heap.bytes_of(data), url);
-    Ok(vm.new_str(s))
+fn encode_native(vm: &mut Vm, data: Val<Vec<u8>>, url: bool) -> Result<Val<String>, Ctl> {
+    vm.reserve(data.bytes(&vm.heap).len() / 3 * 4 + 4)?;
+    vm.charge_slow_bytes(data.bytes(&vm.heap).len())?;
+    let s = encode(data.bytes(&vm.heap), url);
+    Ok(Val::from_raw(vm.new_str(s)))
 }
 
-fn decode_native(vm: &mut Vm, text: Value, url: bool) -> NResult {
-    vm.reserve(vm.str(text).len() / 4 * 3 + 3)?;
-    vm.charge_slow_bytes(vm.str(text).len())?;
-    match decode(vm.str(text), url) {
-        Ok(bytes) => {
-            let b = vm.heap.new_bytes(bytes);
-            Ok(vm.ok(b))
-        }
-        Err(msg) => Err(Ctl::native_err("parse", msg)),
+fn decode_native(vm: &mut Vm, text: Val<String>, url: bool) -> Result<Val<Vec<u8>>, HostError> {
+    vm.reserve(text.str(&vm.heap).len() / 4 * 3 + 3)?;
+    vm.charge_slow_bytes(text.str(&vm.heap).len())?;
+    match decode(text.str(&vm.heap), url) {
+        Ok(bytes) => Ok(Val::from_raw(vm.heap.new_bytes(bytes))),
+        Err(msg) => Err(HostError::new("parse", msg)),
     }
 }
 

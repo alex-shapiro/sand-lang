@@ -268,10 +268,6 @@ impl Vm {
             }
             // A Rust panic in the finisher (a bug) becomes an internal error.
             let r = match crate::unwind::catch(|| fin(self)) {
-                Ok(Err(c)) if matches!(c.kind(), CtlKind::NativeErr { .. }) => {
-                    let native = self.fibers[fid as usize].as_ref().map_or(0, |f| f.result_native);
-                    self.native_err_value(native, c)
-                }
                 Ok(r) => r,
                 Err(msg) => {
                     self.broken = true;

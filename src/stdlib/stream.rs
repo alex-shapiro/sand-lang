@@ -2,8 +2,10 @@
 //! thread (`io`'s standard input, `net`, `http`).
 
 use super::io_kind;
-use crate::vm::Ctl;
+use crate::native::{HostError, IntoValue, Later};
+use crate::vm::Vm;
 use crate::vm::iomem::{MemoryLimit, Reservation};
+use std::future::Future;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt};
 
 /// An error produced off the VM thread, turned into a Sand `Error` on it.
@@ -19,10 +21,33 @@ impl IoFailure {
     }
 }
 
-impl From<IoFailure> for Ctl {
-    fn from(e: IoFailure) -> Ctl {
-        Ctl::native_err(e.kind, e.message)
+impl From<IoFailure> for HostError {
+    fn from(e: IoFailure) -> HostError {
+        HostError::new(e.kind, e.message)
     }
+}
+
+/// The result of a native that suspends the calling task until an I/O
+/// operation completes; its Sand result is `Result<T>`.
+pub(crate) type Suspended<T> = Result<Later<T, HostError>, HostError>;
+
+/// The result that `ok` makes from the output of `fut`.
+pub(crate) fn later<T: Send + 'static, R: IntoValue + Send + 'static>(
+    fut: impl Future<Output = Result<T, IoFailure>> + Send + 'static,
+    ok: impl FnOnce(&mut Vm, T) -> Result<R, HostError> + Send + 'static,
+) -> Later<R, HostError> {
+    Later::new(async move {
+        let r = fut.await;
+        move |vm: &mut Vm| ok(vm, r?)
+    })
+}
+
+/// Suspends the calling task on `fut`, finishing with `ok` on success.
+pub(crate) fn suspend<T: Send + 'static, R: IntoValue + Send + 'static>(
+    fut: impl Future<Output = Result<T, IoFailure>> + Send + 'static,
+    ok: impl FnOnce(&mut Vm, T) -> Result<R, HostError> + Send + 'static,
+) -> Suspended<R> {
+    Ok(later(fut, ok))
 }
 
 impl From<MemoryLimit> for IoFailure {

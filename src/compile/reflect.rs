@@ -23,7 +23,7 @@
 
 use crate::check::CheckedProgram;
 use crate::check::persist::PMap;
-use crate::types::{Ty, TyList, TypeArena, TypeDefKind, TypeId, TypePrinter};
+use crate::types::{Opaque, Ty, TyList, TypeArena, TypeDefKind, TypeId, TypePrinter};
 use crate::vm::value::TypeDesc;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -309,8 +309,8 @@ impl Builder<'_, '_> {
                     .collect();
                 TypeDesc::Enum { id, name, variants }
             }
-            TypeDefKind::Opaque(Some(v)) => TypeDesc::Value { name, parse: v.parse },
-            TypeDefKind::Opaque(None) => TypeDesc::Unsupported(name_of(def.name)),
+            TypeDefKind::Opaque(Opaque::Value(v)) => TypeDesc::Value { name, parse: v.parse },
+            TypeDefKind::Opaque(_) => TypeDesc::Unsupported(name_of(def.name)),
         };
         // Descriptions made inside this instance are not reused outside it.
         for k in self.open_at.pop().unwrap_or_default() {

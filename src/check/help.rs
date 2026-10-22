@@ -311,7 +311,7 @@ impl Checker {
             if let Some(i) = def.variants().iter().position(|v| Some(v.name) == sym) {
                 return Some(Target::Variant(d, i as u32));
             }
-            if let Some(i) = def.fields().iter().position(|f| Some(f.name) == sym) {
+            if let Some(i) = def.fields().iter().position(|f| Some(f.name) == sym && (f.is_pub || def.module == self.cur_mod)) {
                 let ty = match inst.map(|t| self.ty(t)) {
                     Some(Ty::Named(_, args)) => {
                         let args = self.elems(args);
@@ -429,7 +429,8 @@ impl Checker {
         if let Ctor::Def(d) = c {
             let def = &self.types[d as usize];
             names.extend(def.variants().iter().map(|v| self.name(v.name).to_string()));
-            names.extend(def.fields().iter().map(|f| self.name(f.name).to_string()));
+            let own = def.module == self.cur_mod;
+            names.extend(def.fields().iter().filter(|f| f.is_pub || own).map(|f| self.name(f.name).to_string()));
         }
         names.extend(self.methods_of(c).into_iter().map(|f| self.name(self.fns[f as usize].name).to_string()));
         for i in self.visible_impls(c, arity) {
@@ -447,12 +448,12 @@ impl Checker {
         names
     }
 
-    /// Returns inherent methods of `c` in declaration order, excluding
-    /// private helpers in non-script modules.
+    /// Returns the inherent methods of `c` that the current module can use,
+    /// in declaration order.
     pub(super) fn methods_of(&self, c: Ctor) -> Vec<FnId> {
         let shown = |f: FnId| {
             let fi = &self.fns[f as usize];
-            fi.is_pub || fi.module == self.cur_mod || matches!(self.mods[fi.module as usize].kind, ModKind::Script { .. })
+            fi.is_pub || fi.module == self.cur_mod
         };
         let mut fs: Vec<FnId> = self
             .methods
@@ -483,7 +484,7 @@ impl Checker {
             .map(|(&n, &b)| (n, b))
             .collect();
         self.budget.charge(items.len() as u64);
-        items.sort_by_key(|(_, b)| b.span.lo);
+        items.sort_by(|(m, a), (n, b)| (a.span.lo, self.name(*m)).cmp(&(b.span.lo, self.name(*n))));
         items.into_iter().map(|(n, b)| (n, b.def)).collect()
     }
 
@@ -664,9 +665,11 @@ impl Checker {
             let variants: Vec<(String, Option<Arc<str>>)> =
                 (0..def.variants().len()).map(|i| (self.variant_text(d, i as u32), def.variants()[i].doc.clone())).collect();
             section(out, "Variants", &variants);
+            let own = def.module == self.cur_mod;
             let fields: Vec<(String, Option<Arc<str>>)> = def
                 .fields()
                 .iter()
+                .filter(|f| f.is_pub || own)
                 .map(|f| {
                     let var = if f.mutable { "var " } else { "" };
                     let default = f.default.map(|h| format!(" = {}", self.source_text(self.fns[h as usize].span))).unwrap_or_default();
@@ -863,8 +866,8 @@ impl Checker {
         let (kw, bounds) = match def.kind {
             TypeDefKind::Struct { .. } => ("struct", ""),
             TypeDefKind::Enum { .. } => ("enum", ""),
-            TypeDefKind::Opaque(Some(v)) => ("type", if v.ord { ": Ord + Hash" } else { ": Hash" }),
-            TypeDefKind::Opaque(None) => ("type", ""),
+            TypeDefKind::Opaque(Opaque::Value(v)) => ("type", if v.ord { ": Ord + Hash" } else { ": Hash" }),
+            TypeDefKind::Opaque(_) => ("type", ""),
         };
         let prefix = if qualify { self.module_prefix(def.module) } else { String::new() };
         format!("{kw} {prefix}{}{bounds}", self.type_header_name(d))

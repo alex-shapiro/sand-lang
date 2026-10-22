@@ -9,13 +9,13 @@ import time
 /// Metadata for a file or directory.
 pub struct Metadata {
     /// Size in bytes.
-    size: int
+    pub size: int
     /// `true` if the entry is a regular file.
-    is_file: bool
+    pub is_file: bool
     /// `true` if the entry is a directory.
-    is_dir: bool
+    pub is_dir: bool
     /// Last modification timestamp, if supported by the platform.
-    modified: time.Instant?
+    pub modified: time.Instant?
 }
 
 /// Opens the regular file at `path` with `mode`. The sandbox policy is checked
@@ -28,12 +28,6 @@ pub struct Metadata {
 /// }
 /// ```
 pub native fn open(path: str, mode: Mode = Mode.Read) -> Result<File>
-
-/// An open file handle returned by `open`. Reads and writes advance the file
-/// cursor (`Mode.Append` always writes at the end). Bind a `File` with `use`
-/// or call `close` to release the underlying descriptor; operations on a
-/// closed file return an `Err` with kind `"closed"`.
-pub native type File
 
 impl io.Reader for File {
     native fn read(self, max: int) -> Result<bytes>

@@ -1,45 +1,43 @@
 //! The `uuid` module.
 
 use crate::check::ModKind;
-use crate::engine::Registry;
-use crate::vm::value::Value;
+use crate::native::{HostError, NativeModule, Val};
 use crate::vm::{Ctl, Vm};
 
-pub fn register(r: &mut Registry) {
-    r.source("uuid", ModKind::Std, include_str!("uuid.sand"));
-    r.add_builtin("uuid.v4", |vm, _| {
+pub(crate) fn module() -> NativeModule {
+    let mut m = NativeModule::std("uuid", ModKind::Std, include_str!("uuid.sand"));
+    m.vm_function("v4", |vm: &mut Vm| -> Result<_, Ctl> {
         let mut b = random_bytes(vm);
         b[6] = (b[6] & 0x0f) | 0x40;
         b[8] = (b[8] & 0x3f) | 0x80;
-        Ok(vm.new_str(format_uuid(&b)))
+        Ok(new_str(vm, format_uuid(&b)))
     });
-    r.add_builtin("uuid.unix_millis", |vm, _| {
+    m.vm_function("unix_millis", |vm: &mut Vm| -> Result<_, Ctl> {
         let ms = vm.host.clock.wall().duration_since(crate::platform::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-        Ok(Value::Int(ms.min(i64::MAX as u128) as i64))
+        Ok(ms.min(i64::MAX as u128) as i64)
     });
     // Starts each millisecond's counter at a random value in the lower half
     // of its range, leaving room for increments.
-    r.add_builtin("uuid.random_counter", |vm, _| Ok(Value::Int(vm.host.rng.below(0x800) as i64)));
-    r.add_builtin("uuid.v7_from", |vm, a| {
-        let millis = (a[0].as_int() as u64) & 0xffff_ffff_ffff;
-        let counter = (a[1].as_int() as u64) & 0xfff;
+    m.vm_function("random_counter", |vm: &mut Vm| vm.host.rng.below(0x800) as i64);
+    m.vm_function("v7_from", |vm: &mut Vm, millis: i64, counter: i64| -> Result<_, Ctl> {
+        let millis = (millis as u64) & 0xffff_ffff_ffff;
+        let counter = (counter as u64) & 0xfff;
         let mut b = random_bytes(vm);
         b[..6].copy_from_slice(&millis.to_be_bytes()[2..]);
         b[6] = 0x70 | (counter >> 8) as u8;
         b[7] = counter as u8;
         b[8] = (b[8] & 0x3f) | 0x80;
-        Ok(vm.new_str(format_uuid(&b)))
+        Ok(new_str(vm, format_uuid(&b)))
     });
-    r.add_builtin("uuid.parse", |vm, a| {
-        let parsed = parse(vm.str(a[0]));
-        match parsed {
-            Some(b) => {
-                let s = vm.new_str(format_uuid(&b));
-                Ok(vm.ok(s))
-            }
-            None => Err(Ctl::native_err("parse", format!("invalid UUID: {:?}", super::truncate(vm.str(a[0]), 64)))),
-        }
+    m.vm_function("parse", |vm: &mut Vm, s: Val<String>| match parse(s.str(&vm.heap)) {
+        Some(b) => Ok(new_str(vm, format_uuid(&b))),
+        None => Err(HostError::new("parse", format!("invalid UUID: {:?}", super::truncate(s.str(&vm.heap), 64)))),
     });
+    m
+}
+
+fn new_str(vm: &mut Vm, s: String) -> Val<String> {
+    Val::from_raw(vm.new_str(s))
 }
 
 fn random_bytes(vm: &mut Vm) -> [u8; 16] {

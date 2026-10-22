@@ -1121,10 +1121,6 @@ impl<'a> Formatter<'a> {
                 let eq = self.punct(t.generics.last().map_or(t.name.span.hi, |g| g.name.span.hi), &Tok::Eq, " = ");
                 cat(vec![head, name, generics, eq, self.ty(&t.ty)])
             }
-            ItemKind::NativeType(n) => {
-                let head = self.declared(n.is_pub, item.span.lo, "native type ".into());
-                cat(vec![head, self.name(&n.name), self.generics(&n.generics)])
-            }
             ItemKind::Test(t) => {
                 let name = prepend(self.inline_comments(t.name_span.lo), text(self.slice(t.name_span)));
                 cat(vec![text("test "), name, text(" "), self.block(&t.body)])
@@ -1268,7 +1264,12 @@ impl<'a> Formatter<'a> {
     }
 
     fn field_decl(&mut self, f: &'a FieldDecl) -> Doc {
-        let var = if f.mutable { "var " } else { "" };
+        let var = match (f.is_pub, f.mutable) {
+            (true, true) => "pub var ",
+            (true, false) => "pub ",
+            (false, true) => "var ",
+            (false, false) => "",
+        };
         let mut parts = vec![text(var), self.name(&f.name), self.punct(f.name.span.hi, &Tok::Colon, ": "), self.ty(&f.ty)];
         if let Some(d) = &f.default {
             parts.push(self.punct(f.ty.span.hi, &Tok::Eq, " = "));
