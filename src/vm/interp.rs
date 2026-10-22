@@ -1709,6 +1709,7 @@ impl Vm {
         let r = match r {
             Ok(v) => {
                 fiber.stack[slot] = v;
+                self.enforce_limit(Some(fiber)).map_err(Trap::Limit)?;
                 if self.cancel_current {
                     self.cancel_current = false;
                     return Ok(Some(Exit::Cancelled));

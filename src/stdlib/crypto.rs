@@ -8,37 +8,25 @@ use crate::vm::{Ctl, Vm};
 use hmac::{KeyInit, Mac};
 use sha2::Digest;
 
-/// A `bytes` value.
-type Bytes = Val<Vec<u8>>;
-
 pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("crypto", ModKind::Std, include_str!("crypto.sand"));
-    m.vm_function("sha256", |vm: &mut Vm, data: Bytes| -> Result<_, Ctl> {
-        let d = sha256_parts(&[data.bytes(&vm.heap)], &vm.meter)?;
-        Ok(new_bytes(vm, &d))
+    m.vm_function("sha256", |vm: &mut Vm, data: Val<Vec<u8>>| -> Result<_, Ctl> {
+        Ok(sha256_parts(&[data.bytes(&vm.heap)], &vm.meter)?.to_vec())
     });
-    m.vm_function("sha1", |vm: &mut Vm, data: Bytes| -> Result<_, Ctl> {
-        let d = digest::<sha1::Sha1>(&[data.bytes(&vm.heap)], &vm.meter)?;
-        Ok(new_bytes(vm, &d))
+    m.vm_function("sha1", |vm: &mut Vm, data: Val<Vec<u8>>| -> Result<_, Ctl> {
+        Ok(digest::<sha1::Sha1>(&[data.bytes(&vm.heap)], &vm.meter)?.to_vec())
     });
-    m.vm_function("md5", |vm: &mut Vm, data: Bytes| -> Result<_, Ctl> {
-        let d = digest::<md5::Md5>(&[data.bytes(&vm.heap)], &vm.meter)?;
-        Ok(new_bytes(vm, &d))
+    m.vm_function("md5", |vm: &mut Vm, data: Val<Vec<u8>>| -> Result<_, Ctl> {
+        Ok(digest::<md5::Md5>(&[data.bytes(&vm.heap)], &vm.meter)?.to_vec())
     });
-    m.vm_function("hmac_sha256", |vm: &mut Vm, key: Bytes, data: Bytes| -> Result<_, Ctl> {
-        let d = hmac_sha256(key.bytes(&vm.heap), data.bytes(&vm.heap), &vm.meter)?;
-        Ok(new_bytes(vm, &d))
+    m.vm_function("hmac_sha256", |vm: &mut Vm, key: Val<Vec<u8>>, data: Val<Vec<u8>>| -> Result<_, Ctl> {
+        Ok(hmac_sha256(key.bytes(&vm.heap), data.bytes(&vm.heap), &vm.meter)?.to_vec())
     });
-    m.vm_function("constant_time_eq", |vm: &mut Vm, a: Bytes, b: Bytes| -> Result<_, Ctl> {
+    m.vm_function("constant_time_eq", |vm: &mut Vm, a: Val<Vec<u8>>, b: Val<Vec<u8>>| -> Result<_, Ctl> {
         vm.charge_bytes(a.bytes(&vm.heap).len())?;
         Ok(constant_time_eq(a.bytes(&vm.heap), b.bytes(&vm.heap)))
     });
     m
-}
-
-/// A new `bytes` value holding a digest.
-fn new_bytes(vm: &mut Vm, digest: &[u8]) -> Bytes {
-    Val::from_raw(vm.heap.new_bytes(digest.to_vec()))
 }
 
 /// Bytes hashed between charges to the budget (4 KiB).

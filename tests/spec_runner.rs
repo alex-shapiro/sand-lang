@@ -263,16 +263,26 @@ fn run_case(case: &Case, mode: Mode, backend: Backend) -> Result<(), String> {
                 return Err(format!("expected compile error, but program ran. stdout:\n{stdout}"));
             }
         };
-        for want in expected.lines().filter(|l| !l.trim().is_empty()) {
-            let (line, text) = match want.split_once(": ") {
+        let wants: Vec<(Option<usize>, &str)> = expected
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|want| match want.split_once(": ") {
                 Some((l, t)) if l.trim().parse::<usize>().is_ok() => (Some(l.trim().parse::<usize>().unwrap()), t.trim()),
                 _ => (None, want.trim()),
-            };
-            let found = diags.iter().any(|d| d.message.contains(text) && line.is_none_or(|l| d.line == l));
-            if !found {
-                let all: Vec<String> = diags.iter().map(|d| format!("  {}: {}", d.line, d.message)).collect();
-                return Err(format!("missing compile error {want:?}; got:\n{}", all.join("\n")));
-            }
+            })
+            .collect();
+        let matches =
+            |d: &sandlang::Diagnostic, &(line, text): &(Option<usize>, &str)| d.message.contains(text) && line.is_none_or(|l| d.line == l);
+        let all = || diags.iter().map(|d| format!("  {}: {}", d.line, d.message)).collect::<Vec<_>>().join("\n");
+        if let Some((line, text)) = wants.iter().find(|w| !diags.iter().any(|d| matches(d, w))) {
+            return Err(format!(
+                "missing compile error {:?}; got:\n{}",
+                format!("{}{text}", line.map_or(String::new(), |l| format!("{l}: "))),
+                all()
+            ));
+        }
+        if diags.iter().any(|d| !wants.iter().any(|w| matches(d, w))) {
+            return Err(format!("unexpected compile errors; got:\n{}", all()));
         }
         return Ok(());
     }

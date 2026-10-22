@@ -249,11 +249,11 @@ const SPAN_COST: usize = 2 * std::mem::size_of::<Value>();
 
 /// The spans of the groups of a match, `start, end` per group (`-1, -1` for
 /// a group that did not participate), as `regex.Captures` holds them.
-fn spans(caps: &Captures) -> Vec<Value> {
+fn spans(caps: &Captures) -> Vec<i64> {
     let mut out = Vec::with_capacity(2 * caps.group_len());
     for i in 0..caps.group_len() {
         let (s, e) = caps.get_group(i).map_or((-1, -1), |s| (s.start as i64, s.end as i64));
-        out.extend([Value::Int(s), Value::Int(e)]);
+        out.extend([s, e]);
     }
     out
 }
@@ -275,8 +275,8 @@ fn expansion_len(caps: &Captures, rep: &str, literal: &mut String) -> usize {
 
 /// Replaces the first (or every) match, checking the memory limit as the
 /// output grows.
-fn replace(vm: &mut Vm, re: Val<RegexObj>, text: Val<String>, rep: Val<String>, all: bool) -> Result<Val<String>, Ctl> {
-    let out = with_regex(vm, re, |vm, obj, cache| {
+fn replace(vm: &mut Vm, re: Val<RegexObj>, text: Val<String>, rep: Val<String>, all: bool) -> Result<String, Ctl> {
+    with_regex(vm, re, |vm, obj, cache| {
         let (text, rep) = (text.str(&vm.heap), rep.str(&vm.heap));
         let mut scan = Scan::new(vm);
         if !all {
@@ -318,10 +318,18 @@ fn replace(vm: &mut Vm, re: Val<RegexObj>, text: Val<String>, rep: Val<String>, 
         scan.step(vm, text.len(), out.len())?;
         out.push_str(&text[last..]);
         Ok(out)
-    })?;
-    vm.reserve(out.len())?;
-    vm.charge_bytes(out.len())?;
-    Ok(Val::from_raw(vm.new_str(out)))
+    })
+}
+
+/// The message for a syntax error in `pattern`, from the error's display
+/// `error`, which repeats the whole pattern and marks the error under it.
+/// For a long pattern, only the error line is kept.
+fn syntax_message(pattern: &str, error: &str) -> String {
+    if pattern.len() <= 200 {
+        return error.to_string();
+    }
+    let what = error.lines().rev().find_map(|l| l.strip_prefix("error: ")).unwrap_or("invalid syntax");
+    format!("invalid regex {:?}: {}", super::truncate(pattern, 64), super::truncate(what, 256))
 }
 
 /// A builder compiling patterns as `regex::Regex::new` does, with this
@@ -379,21 +387,21 @@ pub(crate) fn module() -> NativeModule {
             Err(e) => {
                 return Err(match (e.size_limit(), e.syntax_error()) {
                     (Some(limit), _) => HostError::new("limit", format!("regex is too large: the compiled program exceeds {limit} bytes")),
-                    (None, Some(syntax)) => HostError::new("parse", syntax.to_string()),
+                    (None, Some(syntax)) => HostError::new("parse", syntax_message(pattern.str(&vm.heap), &syntax.to_string())),
                     (None, None) => HostError::new("parse", e.to_string()),
                 });
             }
         };
         let Some(match_def) = match_def(vm) else { return Err(Ctl::internal("regex.Match { text, start, end } is not defined").into()) };
-        let obj = vm.new_object(RegexObj::new(re, pattern.str(&vm.heap), match_def))?.raw();
-        if let Some(h) = obj.handle() {
+        let obj = vm.new_object(RegexObj::new(re, pattern.str(&vm.heap), match_def))?;
+        if let Some(h) = obj.raw().handle() {
             let cache = &mut vm.host.regex_cache;
             if cache.is_empty() {
                 cache.resize(REGEX_CACHE_SLOTS, (0, u32::MAX));
             }
             cache[slot.1] = (slot.0, h);
         }
-        Ok(Val::from_raw(obj))
+        Ok(obj)
     });
     m.vm_function("Regex.is_match", |vm: &mut Vm, re: Val<RegexObj>, text: Val<String>| {
         with_regex(vm, re, |vm, obj, cache| {
@@ -441,8 +449,8 @@ pub(crate) fn module() -> NativeModule {
             st.new_list(matches)
         })))
     });
-    m.vm_function("Regex.capture_spans", |vm: &mut Vm, re: Val<RegexObj>, text: Val<String>| -> Result<Option<Val<Vec<i64>>>, Ctl> {
-        let spans = with_regex(vm, re, |vm, obj, cache| {
+    m.vm_function("Regex.capture_spans", |vm: &mut Vm, re: Val<RegexObj>, text: Val<String>| -> Result<Option<Vec<i64>>, Ctl> {
+        with_regex(vm, re, |vm, obj, cache| {
             let text = text.str(&vm.heap);
             let mut scan = Scan::new(vm);
             scan.search(vm, text)?;
@@ -450,26 +458,21 @@ pub(crate) fn module() -> NativeModule {
             obj.re.search_captures_with(cache, &Input::new(text), &mut caps);
             scan.finish(vm)?;
             vm.reserve(SPAN_COST * caps.group_len())?;
-            vm.charge(caps.group_len() as u64)?;
             Ok(caps.is_match().then(|| spans(&caps)))
-        })?;
-        Ok(spans.map(|s| Val::from_raw(vm.heap.new_list(s))))
+        })
     });
-    m.vm_function("Regex.capture_spans_all", |vm: &mut Vm, re: Val<RegexObj>, text: Val<String>| -> Result<Val<Vec<Vec<i64>>>, Ctl> {
-        let all = with_regex(vm, re, |vm, obj, cache| {
+    m.vm_function("Regex.capture_spans_all", |vm: &mut Vm, re: Val<RegexObj>, text: Val<String>| -> Result<Vec<Vec<i64>>, Ctl> {
+        with_regex(vm, re, |vm, obj, cache| {
             let text = text.str(&vm.heap);
             let (mut all, mut cost, mut scan) = (Vec::new(), 0, Scan::new(vm));
             each_captures(vm, obj, cache, text, &mut scan, |caps| {
-                vm.charge(caps.group_len() as u64)?;
                 cost += 64 + SPAN_COST * caps.group_len();
                 all.push(spans(caps));
                 Ok(cost)
             })?;
             vm.reserve(cost)?;
             Ok(all)
-        })?;
-        let items = all.into_iter().map(|s| vm.heap.new_list(s)).collect();
-        Ok(Val::from_raw(vm.heap.new_list(items)))
+        })
     });
     m.vm_function("Regex.group_index", |vm: &mut Vm, re: Val<RegexObj>, name: Val<String>| -> Result<Option<i64>, Ctl> {
         let index = re.get(&vm.heap)?.re.group_info().to_index(PatternID::ZERO, name.str(&vm.heap));
@@ -500,9 +503,6 @@ pub(crate) fn module() -> NativeModule {
             st.new_list(items)
         })))
     });
-    m.vm_function("Regex.pattern", |vm: &mut Vm, re: Val<RegexObj>| -> Result<Val<String>, Ctl> {
-        let p = re.get(&vm.heap)?.pattern.to_string();
-        Ok(Val::from_raw(vm.new_str(p)))
-    });
+    m.function("Regex.pattern", |re: &RegexObj| re.pattern.to_string());
     m
 }

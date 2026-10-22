@@ -135,7 +135,8 @@ print("\q")
 === unterminated string
 print("abc
 --- error
-unterminated string
+1: unterminated string
+2: expected `)`, found end of file
 
 === interpolation
 let name = "world"
@@ -243,12 +244,14 @@ let s = "a \(x + 1
 print(s)
 --- error
 2: unterminated interpolation
+2: unterminated string
 
 === an interpolation does not continue on the next line outside brackets
 print("\(1 +
 2)")
 --- error
 1: unterminated interpolation
+1: expected expression, found end of interpolation
 
 === empty interpolation
 print("a \() b")

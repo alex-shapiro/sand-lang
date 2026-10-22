@@ -1,7 +1,6 @@
 //! The `io` and `env` modules.
 
-use super::stream::{self, Suspended};
-use super::stream::{IoFailure, read_line_bytes, read_to_end_reserved, strip_eol};
+use super::stream::{self, IoFailure, Suspended, bytes_read, line_read, read_line, read_to_end_reserved, read_upto, strip_eol};
 use crate::check::ModKind;
 use crate::native::{HostError, IntoValue, Later, NativeModule, NativeObject, ObjectType, Val};
 use crate::policy::Capability;
@@ -9,7 +8,7 @@ use crate::vm::iomem::Reservation;
 use crate::vm::value::{Obj, Value, to_usize_saturating, u64_to_usize_saturating};
 use crate::vm::{Ctl, StdinSource, Vm};
 use std::collections::BTreeMap;
-use tokio::io::{AsyncBufRead, AsyncBufReadExt};
+use tokio::io::AsyncBufRead;
 use tokio::sync::Mutex;
 
 pub(crate) fn module() -> NativeModule {
@@ -24,10 +23,10 @@ pub(crate) fn module() -> NativeModule {
         if max <= 0 {
             return Err(HostError::new("invalid", "read: max must be positive"));
         }
-        read_stdin(vm, Read::Upto(to_usize_saturating(max)), input_bytes)
+        read_stdin(vm, Read::Upto(to_usize_saturating(max)), bytes_read)
     });
     m.vm_function("Stdin.read_line", |vm: &mut Vm, _: Val<Stdin>| read_stdin(vm, Read::Line, input_line));
-    m.vm_function("Stdin.read_all", |vm: &mut Vm, _: Val<Stdin>| read_stdin(vm, Read::All, input_bytes));
+    m.vm_function("Stdin.read_all", |vm: &mut Vm, _: Val<Stdin>| read_stdin(vm, Read::All, bytes_read));
     output::<Stdout>(&mut m);
     output::<Stderr>(&mut m);
     m
@@ -133,19 +132,8 @@ fn read_stdin<R: IntoValue + Send + 'static>(
     })
 }
 
-/// The bytes of a read (which always has them).
-fn input_bytes(_: &mut Vm, data: Option<Vec<u8>>) -> Result<Vec<u8>, HostError> {
-    Ok(data.unwrap_or_default())
-}
-
-/// The line of a read, or kind `"invalid"` if it is not UTF-8.
 fn input_line(vm: &mut Vm, line: Option<Vec<u8>>) -> Result<Option<String>, HostError> {
-    let Some(line) = line else { return Ok(None) };
-    vm.charge_slow_bytes(line.len())?;
-    match String::from_utf8(line) {
-        Ok(text) => Ok(Some(text)),
-        Err(_) => Err(HostError::new("invalid", "stdin: input is not valid UTF-8")),
-    }
+    line_read(vm, line, "stdin: input is not valid UTF-8")
 }
 
 /// The most `read` returns at once from standard input.
@@ -211,22 +199,13 @@ async fn read_input(stdin: &Mutex<StdinSource>, what: Read, res: &mut Reservatio
 
 async fn read_from<R: AsyncBufRead + Unpin>(r: &mut R, what: Read, res: &mut Reservation) -> Result<Option<Vec<u8>>, IoFailure> {
     match what {
-        Read::Line => {
-            let Some(mut data) = read_line_bytes(r, usize::MAX, res).await? else { return Ok(None) };
-            strip_eol(&mut data);
-            Ok(Some(data))
-        }
+        Read::Line => read_line(r, res).await,
         Read::All => {
             let mut data = Vec::new();
             read_to_end_reserved(r, &mut data, res, usize::MAX).await?;
             Ok(Some(data))
         }
-        Read::Upto(max) => {
-            let available = r.fill_buf().await?;
-            let data = available[..available.len().min(max).min(STDIN_CHUNK)].to_vec();
-            r.consume(data.len());
-            Ok(Some(data))
-        }
+        Read::Upto(max) => read_upto(r, max.min(STDIN_CHUNK)).await.map(Some),
     }
 }
 

@@ -9,13 +9,12 @@
 //! local JavaScript event loop and sends its result back over a channel.
 //! Dropping the receiver aborts the in-flight request.
 
-use super::http_common::{Body, BodyReader, MemoryBody, Url, alloc_body, filter_request, header_list, header_pairs, is_token};
-use super::stream::{IoFailure, Suspended, suspend};
+use super::http_common::{BodyReader, MemoryBody, Prepared, Response, prepare_request, response};
+use super::stream::{self, IoFailure, Suspended, suspend};
 use crate::check::ModKind;
-use crate::native::{HostError, NativeModule, Val};
+use crate::native::{NativeModule, Val};
 use crate::vm::Vm;
 use crate::vm::iomem::Reservation;
-use crate::vm::value::Value;
 use jiff::SignedDuration;
 use js_sys::{Array, Function, Object, Promise, Reflect, Uint8Array};
 use std::cell::{Cell, RefCell};
@@ -43,8 +42,9 @@ struct Request {
     max_body: usize,
 }
 
-/// A response: status, headers and body (reserved in the reservation).
-type Response = (i64, Vec<(String, String)>, Vec<u8>, Reservation);
+/// A received response: status, headers and body (reserved in the
+/// reservation).
+type Received = (i64, Vec<(String, String)>, Vec<u8>, Reservation);
 
 fn send(
     vm: &mut Vm,
@@ -53,22 +53,10 @@ fn send(
     headers: Val<Vec<(String, String)>>,
     body: Val<Vec<u8>>,
     timeout: SignedDuration,
-) -> Suspended<Val<(i64, Vec<(String, String)>, Body)>> {
-    let method = method.str(&vm.heap).to_string();
-    let text = url.str(&vm.heap).to_string();
-    vm.charge_slow_bytes(method.len() + text.len())?;
-    let url = match Url::parse(&text) {
-        Ok(u) => u,
-        Err(e) => return Err(HostError::new(e.kind, e.message)),
-    };
-    if !is_token(&method) {
-        return Err(HostError::new("invalid", format!("invalid HTTP method {:?}", super::truncate(&method, 64))));
-    }
-    let mut headers = header_pairs(vm, headers)?;
-    vm.require(&url.capability(&method))?;
-    if let Err(reason) = filter_request(vm, &url, &mut headers) {
-        return Err(HostError::new("permission_denied", reason));
-    }
+) -> Suspended<Response> {
+    let mut req = prepare_request(vm, method, url, headers)?;
+    req.require(vm)?;
+    let Prepared { method, url, headers, .. } = req;
     // The request body is held, and the response buffered, outside the heap.
     let res = vm.reserve_io(body.bytes(&vm.heap).len())?;
     let body = body.bytes(&vm.heap).to_vec();
@@ -78,21 +66,18 @@ fn send(
         url: format!("{}{}", url.origin(), url.target),
         headers,
         body,
-        timeout: Duration::try_from(timeout).unwrap_or_default(),
+        timeout: stream::timeout(timeout),
         max_body: vm.host.limits.max_http_body,
     };
     let max_body = request.max_body;
     let (id, done) = start(request, res);
-    let response = async move {
+    let received = async move {
         let _abort = AbortOnDrop(id);
         done.await.unwrap_or_else(|_| Err(IoFailure::new("io", "the request was abandoned")))
     };
-    suspend(response, move |vm, (status, headers, body, res)| {
-        let headers = header_list(vm, headers)?;
+    suspend(received, move |_, (status, headers, body, res)| {
         // The browser read the body: it stays reserved while it is read.
-        let reader = BodyReader::new(Box::new(MemoryBody::new(body)), max_body, Some(res));
-        let body = alloc_body(vm, reader)?;
-        Ok(Val::from_raw(vm.heap.new_tuple(&[Value::Int(status), headers.raw(), body.raw()])))
+        Ok(response(status, headers, BodyReader::new(Box::new(MemoryBody::new(body)), max_body, Some(res))))
     })
 }
 
@@ -118,7 +103,7 @@ fn abort(id: u64) {
 }
 
 /// Starts `request` in a local task; the receiver gets its outcome.
-fn start(request: Request, res: Reservation) -> (u64, tokio::sync::oneshot::Receiver<Result<Response, IoFailure>>) {
+fn start(request: Request, res: Reservation) -> (u64, tokio::sync::oneshot::Receiver<Result<Received, IoFailure>>) {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let id = NEXT_ID.with(|n| {
         n.set(n.get() + 1);
@@ -132,7 +117,7 @@ fn start(request: Request, res: Reservation) -> (u64, tokio::sync::oneshot::Rece
     (id, rx)
 }
 
-async fn exchange(id: u64, request: &Request, mut res: Reservation) -> Result<Response, IoFailure> {
+async fn exchange(id: u64, request: &Request, mut res: Reservation) -> Result<Received, IoFailure> {
     let url = &request.url;
     let failed = |e: JsValue| IoFailure::new("io", format!("request to {url} failed: {}", describe(&e)));
     let global = js_sys::global();

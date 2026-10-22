@@ -730,14 +730,12 @@ fn parse<T: ValueType>(vm: &mut Vm, text: Val<String>) -> Result<T, HostError> {
     x.map_err(|e| HostError::new("parse", e))
 }
 
-fn format(vm: &mut Vm, format: Val<String>, t: impl Into<BrokenDownTime>) -> Result<Val<String>, Ctl> {
+fn format(vm: &mut Vm, format: Val<String>, t: impl Into<BrokenDownTime>) -> Result<String, Ctl> {
     let format = format.str(&vm.heap);
     // Bound output size before formatting.
     vm.reserve(format.len().saturating_mul(64))?;
     vm.charge_slow_bytes(format.len())?;
-    let s = strtime::format(format, t).map_err(|e| Ctl::fail("invalid", e))?;
-    vm.charge_bytes(s.len())?;
-    Ok(Val::from_raw(vm.new_str(s)))
+    strtime::format(format, t).map_err(|e| Ctl::fail("invalid", e))
 }
 
 /// Returns the first transition that changes the UTC offset (ignoring abbreviation-only transitions).
@@ -802,7 +800,7 @@ type Part<P, R> = (&'static str, fn(P) -> R);
 /// Registers each `(name, f)` of `natives` as the method `name` of `T` that returns `f(part(self))`.
 fn methods<T: ValueType, P: 'static, R: IntoValue + 'static>(m: &mut NativeModule, part: fn(&T) -> P, natives: &[Part<P, R>]) {
     for &(name, f) in natives {
-        m.vm_function(&format!("{}.{name}", T::NAME), move |_: &mut Vm, x: T| -> Result<R, Ctl> { Ok(f(part(&x))) });
+        m.function(&format!("{}.{name}", T::NAME), move |x: T| f(part(&x)));
     }
 }
 
@@ -933,7 +931,7 @@ fn register_module(m: &mut NativeModule) {
         }
         build_span(units).and_then(Span::new).map_err(jiff_error)
     });
-    m.vm_function("TimeZone.id", |vm: &mut Vm, z: TimeZone| -> Result<Val<String>, Ctl> { Ok(Val::from_raw(vm.new_str(z.to_string()))) });
+    m.function("TimeZone.id", |z: TimeZone| z.to_string());
 }
 
 fn register_parts(m: &mut NativeModule) {
@@ -950,8 +948,8 @@ fn register_parts(m: &mut NativeModule) {
     parts!(HasDate::date_part: ZonedDateTime, DateTime => TO_PLAIN_DATE);
     parts!(HasTime::time_part: ZonedDateTime, DateTime => TO_PLAIN_TIME);
     for (name, unit) in [("epoch_seconds", 1_000_000_000), ("epoch_millis", 1_000_000), ("epoch_nanos", 1)] {
-        m.vm_function(&format!("Instant.{name}"), move |_: &mut Vm, t: Timestamp| epoch_div(t, unit));
-        m.vm_function(&format!("ZonedDateTime.{name}"), move |_: &mut Vm, z: ZonedDateTime| epoch_div(z.0.timestamp(), unit));
+        m.function(&format!("Instant.{name}"), move |t: Timestamp| epoch_div(t, unit));
+        m.function(&format!("ZonedDateTime.{name}"), move |z: ZonedDateTime| epoch_div(z.0.timestamp(), unit));
     }
 }
 

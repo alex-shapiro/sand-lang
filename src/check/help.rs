@@ -341,6 +341,10 @@ impl Checker {
         if !impl_fns.is_empty() {
             return Some(Target::Fns(impl_fns));
         }
+        if let Some(msg) = self.hidden_member(c, name) {
+            self.error(span, msg);
+            return None;
+        }
         if let Some(u) = universal(name) {
             return Some(Target::Universal(u));
         }
@@ -423,9 +427,24 @@ impl Checker {
         }
     }
 
+    /// The error for a field or method `name` of type `c` that the current
+    /// module cannot use.
+    fn hidden_member(&self, c: Ctor, name: &str) -> Option<String> {
+        let s = self.syms.get(name)?;
+        if let Ctor::Def(d) = c
+            && self.types[d as usize].fields().iter().any(|f| f.name == s)
+        {
+            return Some(format!("field `{name}` of `{}` is private", self.ctor_name(c, 0)));
+        }
+        let hidden = self.methods_named(c, name).is_some() && self.methods_of(c).iter().all(|&f| self.fns[f as usize].name != s);
+        hidden.then(|| format!("method `{name}` of `{}` is private", self.ctor_name(c, 0)))
+    }
+
     /// The variants, fields and methods of type `c`, in no particular order.
     fn type_members(&self, c: Ctor, arity: u32) -> Vec<String> {
         let mut names = universal_names();
+        // A private method hides the built-in member of its name.
+        names.retain(|n| self.hidden_member(c, n).is_none());
         if let Ctor::Def(d) = c {
             let def = &self.types[d as usize];
             names.extend(def.variants().iter().map(|v| self.name(v.name).to_string()));

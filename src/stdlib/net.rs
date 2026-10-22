@@ -5,9 +5,9 @@
 //! Closing a socket wakes every pending operation on it (they fail with kind
 //! `"closed"`) and releases the OS socket once those operations have finished.
 
-use super::stream::{IoFailure, Suspended, read_line_bytes, read_to_end_reserved, strip_eol, suspend};
+use super::stream::{self, IoFailure, Suspended, line_read, read_line, read_to_end_reserved, read_upto, suspend};
 use crate::check::ModKind;
-use crate::native::{HostError, NativeModule, NativeObject, Val};
+use crate::native::{HostError, IntoValue, NativeModule, NativeObject, Val};
 use crate::network::{self, Network, Stream};
 use crate::policy::{Capability, Decision, Policy, format_host_port, is_private_address, is_valid_host, parse_port, split_port};
 use crate::vm::iomem::{Reservation, ResourceSlot};
@@ -18,8 +18,7 @@ use std::fmt;
 use std::future::Future;
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, watch};
 
 pub(crate) fn module() -> NativeModule {
@@ -27,17 +26,14 @@ pub(crate) fn module() -> NativeModule {
     m.value_type::<SocketAddr>();
     m.object_type::<Listener>();
     m.object_type::<Conn>();
-    m.vm_function("SocketAddr.ip", |vm: &mut Vm, addr: SocketAddr| Val::<String>::from_raw(vm.new_str(addr.0.ip().to_string())));
+    m.function("SocketAddr.ip", |addr: SocketAddr| addr.0.ip().to_string());
     m.function("SocketAddr.port", |addr: SocketAddr| i64::from(addr.0.port()));
     m.function("split_host_port", split_host_port);
     m.vm_function("listen", |vm: &mut Vm, ip: Val<String>, port: i64| listen_with(vm, ip, port, Listener::new));
     m.vm_function("connect", connect);
     m.vm_function("connect_tls", connect_tls);
     m.vm_function("Listener.accept", listener_accept);
-    m.vm_function("Listener.addr", |vm: &mut Vm, l: Val<Listener>| -> Result<_, Ctl> {
-        let addr = l.get(&vm.heap)?.addr;
-        Ok(Val::<SocketAddr>::from_raw(vm.new_value(addr)))
-    });
+    m.vm_function("Listener.addr", |vm: &mut Vm, l: Val<Listener>| -> Result<SocketAddr, Ctl> { Ok(l.get(&vm.heap)?.addr) });
     m.vm_function("Listener.close", |vm: &mut Vm, l: Val<Listener>| -> Result<_, Ctl> {
         l.get_mut(&mut vm.heap)?.close();
         Ok(())
@@ -47,10 +43,7 @@ pub(crate) fn module() -> NativeModule {
     m.vm_function("Conn.read_all", conn_read_all);
     m.vm_function("Conn.write", |vm: &mut Vm, c: Val<Conn>, data: Val<Vec<u8>>| conn_write(vm, c, |vm| data.bytes(&vm.heap)));
     m.vm_function("Conn.write_str", |vm: &mut Vm, c: Val<Conn>, text: Val<String>| conn_write(vm, c, |vm| text.str(&vm.heap).as_bytes()));
-    m.vm_function("Conn.peer_addr", |vm: &mut Vm, c: Val<Conn>| -> Result<_, Ctl> {
-        let peer = c.get(&vm.heap)?.peer;
-        Ok(Val::<SocketAddr>::from_raw(vm.new_value(peer)))
-    });
+    m.vm_function("Conn.peer_addr", |vm: &mut Vm, c: Val<Conn>| -> Result<SocketAddr, Ctl> { Ok(c.get(&vm.heap)?.peer) });
     m.vm_function("Conn.close", |vm: &mut Vm, c: Val<Conn>| -> Result<_, Ctl> {
         c.get_mut(&mut vm.heap)?.close();
         Ok(())
@@ -67,26 +60,20 @@ pub(crate) fn closed() -> IoFailure {
 
 /// A native object holding an open resource, counted by its slot (see
 /// `iomem::ResourceSlot`) until closed or collected.
-pub(crate) trait Resource: crate::native::ObjectType {
-    /// Takes the slot that counted the resource while it was being opened.
+pub(crate) trait Resource: crate::native::ObjectType + IntoValue {
+    /// Takes the slot that counted the resource while it was being opened
+    /// (the object keeps the slot until it is closed).
     fn attach(&mut self, slot: ResourceSlot);
-}
-
-/// Allocates the object of a resource that `slot` counted while it was
-/// being opened (the object keeps the slot until it is closed).
-pub(crate) fn alloc_resource<T: Resource>(vm: &mut Vm, mut obj: T, slot: ResourceSlot) -> Result<Val<T>, Ctl> {
-    obj.attach(slot);
-    vm.new_object(obj)
 }
 
 /// Like [`suspend`] for operations that produce a resource object,
 /// counted by `slot` from the start (a socket being connected or accepted
 /// is open already).
-fn suspend_resource<T: Resource>(
-    slot: ResourceSlot,
-    fut: impl Future<Output = Result<T, IoFailure>> + Send + 'static,
-) -> Suspended<Val<T>> {
-    suspend(fut, move |vm, obj| Ok(alloc_resource(vm, obj, slot)?))
+fn suspend_resource<T: Resource>(slot: ResourceSlot, fut: impl Future<Output = Result<T, IoFailure>> + Send + 'static) -> Suspended<T> {
+    suspend(fut, move |_, mut obj: T| {
+        obj.attach(slot);
+        Ok(obj)
+    })
 }
 
 // ----------------------------------------------------------------------
@@ -181,7 +168,7 @@ pub(crate) fn listen_with<T: Resource>(
     ip: Val<String>,
     port: i64,
     open: impl FnOnce(Box<dyn network::Listener>) -> std::io::Result<T> + Send + 'static,
-) -> Suspended<Val<T>> {
+) -> Suspended<T> {
     let ip = ip.str(&vm.heap);
     let Ok(ip) = ip.parse::<IpAddr>().map(|ip| ip.to_canonical()) else {
         let msg = format!("invalid IP address {:?} (expected an address such as 127.0.0.1 or ::1)", super::truncate(ip, 200));
@@ -233,7 +220,7 @@ impl NativeObject for Listener {
     }
 }
 
-fn listener_accept(vm: &mut Vm, l: Val<Listener>) -> Suspended<Val<Conn>> {
+fn listener_accept(vm: &mut Vm, l: Val<Listener>) -> Suspended<Conn> {
     let l = l.get(&vm.heap)?;
     let Some(socket) = l.socket.clone() else { return Err(HostError::new("closed", "listener closed")) };
     let closed = CloseSignal(l.closed.subscribe());
@@ -282,10 +269,9 @@ impl Detached {
         Detached { reader: Arc::new(Mutex::new(reader)), writer: Arc::new(Mutex::new(writer)), peer, slot }
     }
 
-    /// Allocates a `net.Conn` object for the connection.
-    pub fn alloc(self, vm: &mut Vm) -> Result<Val<Conn>, Ctl> {
-        let conn = Conn { halves: Some((self.reader, self.writer)), slot: None, peer: self.peer, closed: watch::Sender::new(false) };
-        alloc_resource(vm, conn, self.slot)
+    /// The `net.Conn` object of the connection.
+    pub fn into_conn(self) -> Conn {
+        Conn { halves: Some((self.reader, self.writer)), slot: Some(self.slot), peer: self.peer, closed: watch::Sender::new(false) }
     }
 
     /// Starts closing the connection without waiting (see [`shutdown_now`]).
@@ -466,12 +452,12 @@ pub(crate) async fn connect_checked(
     Ok(network.connect(&addrs).await?)
 }
 
-fn connect(vm: &mut Vm, host: Val<String>, port: i64, timeout: SignedDuration) -> Suspended<Val<Conn>> {
+fn connect(vm: &mut Vm, host: Val<String>, port: i64, timeout: SignedDuration) -> Suspended<Conn> {
     let (host, port) = check_endpoint(vm, host, port)?;
     vm.require(&Capability::Net { host: host.clone(), port })?;
     // Counted from the start: a connection attempt holds a socket.
     let slot = vm.resource_slot_with(CONN_BUFFER, "a connection")?;
-    let timeout = Duration::try_from(timeout).unwrap_or_default();
+    let timeout = stream::timeout(timeout);
     let (policy, network, clock) = (vm.host.policy.clone(), vm.host.network.clone(), vm.host.clock.clone());
     suspend_resource(slot, async move {
         let open = connect_checked(&policy, &*network, &host, port);
@@ -482,14 +468,14 @@ fn connect(vm: &mut Vm, host: Val<String>, port: i64, timeout: SignedDuration) -
     })
 }
 
-fn connect_tls(vm: &mut Vm, host: Val<String>, port: i64, timeout: SignedDuration) -> Suspended<Val<Conn>> {
+fn connect_tls(vm: &mut Vm, host: Val<String>, port: i64, timeout: SignedDuration) -> Suspended<Conn> {
     if !cfg!(feature = "tls") {
         return Err(HostError::new("invalid", "TLS support is not enabled in this build"));
     }
     let (host, port) = check_endpoint(vm, host, port)?;
     vm.require(&Capability::Net { host: host.clone(), port })?;
     let slot = vm.resource_slot_with(CONN_BUFFER + TLS_BUFFERS, "a connection")?;
-    let timeout = Duration::try_from(timeout).unwrap_or_default();
+    let timeout = stream::timeout(timeout);
     let (policy, network, clock) = (vm.host.policy.clone(), vm.host.network.clone(), vm.host.clock.clone());
     let settings = vm.host.tls.clone();
     // The timeout covers connecting and the handshake, so a peer that
@@ -509,7 +495,7 @@ fn connect_tls(vm: &mut Vm, host: Val<String>, port: i64, timeout: SignedDuratio
     })
 }
 
-fn conn_read(vm: &mut Vm, c: Val<Conn>, max: i64) -> Suspended<Val<Vec<u8>>> {
+fn conn_read(vm: &mut Vm, c: Val<Conn>, max: i64) -> Suspended<Vec<u8>> {
     if max <= 0 {
         return Err(HostError::new("invalid", "read: max must be positive"));
     }
@@ -521,46 +507,35 @@ fn conn_read(vm: &mut Vm, c: Val<Conn>, max: i64) -> Suspended<Val<Vec<u8>>> {
     let res = vm.reserve_io(max)?;
     suspend(
         h.closed.guard(async move {
-            let mut reader = h.reader.lock().await;
-            let available = reader.fill_buf().await?;
-            let data = available[..available.len().min(max)].to_vec();
-            reader.consume(data.len());
+            let data = read_upto(&mut *h.reader.lock().await, max).await?;
             Ok((data, res))
         }),
-        |vm, (data, res)| {
+        |_, (data, res)| {
             drop(res);
-            vm.reserve(data.len())?;
-            vm.charge_bytes(data.len())?;
-            Ok(Val::from_raw(vm.heap.new_bytes(data)))
+            Ok(data)
         },
     )
 }
 
-fn conn_read_line(vm: &mut Vm, c: Val<Conn>) -> Suspended<Option<Val<String>>> {
+fn conn_read_line(vm: &mut Vm, c: Val<Conn>) -> Suspended<Option<String>> {
     let h = conn_handle(vm, c)?;
     // The line may grow until it exhausts the memory limit.
     let mut res = vm.io_reservation();
     suspend(
         h.closed.guard(async move {
-            let mut reader = h.reader.lock().await;
-            let Some(mut line) = read_line_bytes(&mut *reader, usize::MAX, &mut res).await? else { return Ok((None, res)) };
-            strip_eol(&mut line);
-            let line = String::from_utf8(line).map_err(|_| IoFailure::new("invalid", "line is not valid UTF-8"))?;
-            Ok((Some(line), res))
+            let line = read_line(&mut *h.reader.lock().await, &mut res).await?;
+            Ok((line, res))
         }),
         |vm, (line, res)| {
             drop(res);
-            let Some(s) = line else { return Ok(None) };
-            vm.reserve(s.len())?;
-            vm.charge_slow_bytes(s.len())?;
-            Ok(Some(Val::from_raw(vm.new_str(s))))
+            line_read(vm, line, "line is not valid UTF-8")
         },
     )
 }
 
 /// Reads until the peer has finished sending; the data is reserved as it
 /// arrives.
-fn conn_read_all(vm: &mut Vm, c: Val<Conn>) -> Suspended<Val<Vec<u8>>> {
+fn conn_read_all(vm: &mut Vm, c: Val<Conn>) -> Suspended<Vec<u8>> {
     let h = conn_handle(vm, c)?;
     let mut res = vm.io_reservation();
     suspend(
@@ -570,11 +545,9 @@ fn conn_read_all(vm: &mut Vm, c: Val<Conn>) -> Suspended<Val<Vec<u8>>> {
             read_to_end_reserved(&mut *reader, &mut data, &mut res, usize::MAX).await?;
             Ok((data, res))
         }),
-        |vm, (data, res)| {
+        |_, (data, res)| {
             drop(res);
-            vm.reserve(data.len())?;
-            vm.charge_bytes(data.len())?;
-            Ok(Val::from_raw(vm.heap.new_bytes(data)))
+            Ok(data)
         },
     )
 }

@@ -1,11 +1,11 @@
 //! The `test` module (written in Sand, except `fail`).
 
 use crate::check::ModKind;
-use crate::native::{NativeModule, Never, Val};
-use crate::vm::{Ctl, Vm};
+use crate::native::{NativeModule, Never};
+use crate::vm::Ctl;
 
 pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("test", ModKind::Std, include_str!("test.sand"));
-    m.vm_function("fail", |vm: &mut Vm, msg: Val<String>| -> Result<Never, Ctl> { crate::vm::fail("assert", msg.str(&vm.heap)) });
+    m.function("fail", |msg: &str| -> Result<Never, Ctl> { crate::vm::fail("assert", msg) });
     m
 }

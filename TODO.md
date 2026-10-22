@@ -67,28 +67,19 @@ Follow-up work, roughly in priority order.
 - [ ] Rust signatures cannot state the bounds of type parameters (`Eq`, `Ord`,
       `Hash`): the checker does not detect a `native fn` declaration that omits
       a bound its Rust function relies on.
-- [ ] Natives build heap values with untyped constructors and wrap them in
-      `Val::from_raw`. Give `Vm` constructors that return
-      typed handles (`new_str` → `Val<String>`, `new_bytes`, lists, tuples)
-      and accessors for map, set, task and channel handles, so that the
-      Rust types of results are correct by construction. Where a native
-      reserves and charges as `IntoValue` does (`uri.parse_query`,
-      `http_common::header_list`, fs `stat`, `uuid`, `crypto`), return the
-      Rust value instead. Typed map and set accessors also remove the dead
-      `_ => 0` fallbacks in `core.rs`.
 - [ ] The checker accepts `json.decode<T>` for a `T` that contains a type
       it cannot decode (a function, a task); the call then returns an `Err`
       of kind `"invalid"`. Reject such a `T` at the call, as private fields
       are, without restricting other `reflect` natives.
 - [ ] `compile/reflect.rs` recognizes `json.Json` by its module and type
       name. Bind it as the other types of native modules are.
-- [ ] `http.request`, `http.stream` and the web `http.request` repeat the
-      request setup (URL, method, headers, capability, `filter_request`),
-      and `Duration::try_from(timeout).unwrap_or_default()` appears six
-      times in `net` and `http`. Share the setup, and convert timeouts with
-      a `FromValue` for `std::time::Duration`.
 - [ ] `ValueType` sets `MODULE`, `NAME` and `DOC` by hand. Derive them as
       `SandEnum` and `SandObject` do.
+- [ ] The derives name the crate `::sandlang`, so a crate that renames the
+      dependency cannot use them (add `#[sand(crate = ...)]`), and they
+      ignore doc comments written as `#[doc = include_str!(...)]`.
+- [ ] A host module's Sand source is always compiled optimized, also under
+      `Config::optimize(false)`.
 - [ ] Types bound to Rust types have no source position, so `help` lists
       them before the module's other types (`Task`, `Channel` before
       `Option`).
@@ -97,7 +88,6 @@ Follow-up work, roughly in priority order.
 
 - [ ] Fix broken intra-doc links to private items and run `cargo doc` with
       `-D warnings` in CI.
-
 - [ ] Policy lints judge `http` rules only by their exact text (and
       `bypassable-http-deny`); rules with wildcards in hosts or paths could
       be compared as file rules are. A rule made unnecessary only by several
@@ -105,6 +95,10 @@ Follow-up work, roughly in priority order.
 
 ### Diagnostics
 
+- [ ] Parser recovery reports follow-on errors after the first one
+      (`unexpected }` after a missing `,` or `:`, `expected )` after an
+      unterminated string). The spec tests list them; remove them there as
+      recovery improves.
 - [ ] Recover at the next `match` arm after an invalid pattern
       (`1..5 =>`, `Rect(..) =>`) instead of reporting a spurious
       `unexpected }` at the end of the `match`.
@@ -121,7 +115,6 @@ Follow-up work, roughly in priority order.
 - [ ] A typed native call costs about 0.5 ns in `HostFn` dispatch and the
       argument slice (`fannkuch` and `results` in `bench/programs` show
       it). Find where the time goes.
-
 - [ ] Dispatch loop: the cost of individual instructions shifts by up to
       ±15% between builds as LLVM reallocates registers. A threaded design
       (one function per instruction with guaranteed tail calls, Rust's

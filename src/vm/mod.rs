@@ -896,6 +896,27 @@ impl Vm {
         if self.heap.would_exceed(extra) { Err(Ctl::limit(LimitKind::Memory)) } else { Ok(()) }
     }
 
+    /// Runs `f`, which makes the value of a native call after its side
+    /// effects, without memory-limit checks: a failure would make the engine
+    /// call the native again. The caller enforces the limit with
+    /// [`Vm::enforce_limit`] when the value is a root.
+    pub(crate) fn unchecked<R>(&mut self, f: impl FnOnce(&mut Vm) -> R) -> R {
+        self.heap.unchecked = true;
+        let r = f(self);
+        self.heap.unchecked = false;
+        r
+    }
+
+    /// Collects all garbage if the heap is over the memory limit, then fails
+    /// if it still is. All live values must be roots.
+    pub(crate) fn enforce_limit(&mut self, current: Option<&mut Fiber>) -> Result<(), LimitKind> {
+        if !self.heap.over_limit() {
+            return Ok(());
+        }
+        self.collect_all_garbage(current);
+        if self.heap.over_limit() { Err(LimitKind::Memory) } else { Ok(()) }
+    }
+
     /// Starts accounting for the buffers of an I/O operation that are not
     /// yet heap values (see [`iomem`]); the operation grows the reservation
     /// as its buffers grow and drops it before turning them into values.

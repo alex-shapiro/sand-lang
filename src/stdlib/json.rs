@@ -726,6 +726,9 @@ fn is_ident(s: &str) -> bool {
     b.next().is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') && b.all(|c| c.is_ascii_alphanumeric() || c == b'_')
 }
 
+/// The longest prefix of a key (in characters) that an error message quotes.
+const QUOTED_KEY: usize = 64;
+
 impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
     fn path_str(&self) -> String {
         let mut s = String::from("$");
@@ -736,16 +739,46 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                 }
                 Seg::Key(k) if is_ident(k) => {
                     s.push('.');
-                    s.push_str(k);
+                    s.push_str(super::truncate(k, QUOTED_KEY));
                 }
                 Seg::Key(k) => {
                     s.push('[');
-                    write_str(&mut s, k);
+                    write_str(&mut s, super::truncate(k, QUOTED_KEY));
                     s.push(']');
                 }
             }
         }
         s
+    }
+
+    /// The Sand syntax of `t`, for messages.
+    fn type_name(&self, t: &TypeDesc) -> String {
+        let list = |ts: &[std::sync::Arc<TypeDesc>]| ts.iter().map(|t| self.type_name(t)).collect::<Vec<_>>().join(", ");
+        match t {
+            TypeDesc::Int => "int".into(),
+            TypeDesc::Float => "float".into(),
+            TypeDesc::Bool => "bool".into(),
+            TypeDesc::Str => "str".into(),
+            TypeDesc::Bytes => "bytes".into(),
+            TypeDesc::Duration => "duration".into(),
+            TypeDesc::Unit => "()".into(),
+            TypeDesc::List(e) => format!("[{}]", self.type_name(e)),
+            TypeDesc::Map(k, v) => format!("[{}: {}]", self.type_name(k), self.type_name(v)),
+            TypeDesc::Set(e) => format!("Set<{}>", self.type_name(e)),
+            TypeDesc::Tuple(ts) => format!("({})", list(ts)),
+            TypeDesc::Option(e) => format!("{}?", self.type_name(e)),
+            TypeDesc::Json => "Json".into(),
+            TypeDesc::Struct { name, .. } | TypeDesc::Enum { name, .. } | TypeDesc::Value { name, .. } | TypeDesc::Unsupported(name) => {
+                name.clone()
+            }
+            TypeDesc::Recur(id) => {
+                let found = self.stack.iter().rev().find_map(|d| match d {
+                    TypeDesc::Struct { id: i, name, .. } | TypeDesc::Enum { id: i, name, .. } if i == id => Some(name),
+                    _ => None,
+                });
+                found.cloned().unwrap_or_default()
+            }
+        }
     }
 
     fn fail(&self, msg: &str) -> Error {
@@ -968,7 +1001,8 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
     /// Converts an object key to a map key of type `t`, with its text if it
     /// is a string.
     fn map_key(&mut self, t: &TypeDesc, key: Cow<'a, str>) -> PResult<(Value, u64, Option<Cow<'a, str>>)> {
-        let bad = |d: &Self| d.fail(&format!("invalid map key `{key}`"));
+        let quoted = super::truncate(&key, QUOTED_KEY);
+        let bad = |d: &Self| d.fail(&format!("invalid map key `{quoted}`"));
         let k = match t {
             TypeDesc::Str => {
                 let hash = self.b.hash(&key)?;
@@ -988,13 +1022,13 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
             },
             TypeDesc::Value { parse, .. } => {
                 self.b.meter.charge_bytes(key.len())?;
-                let v = parse(&key).map_err(|msg| self.fail(&format!("invalid map key `{key}`: {msg}")))?;
+                let v = parse(&key).map_err(|msg| self.fail(&format!("invalid map key `{quoted}`: {msg}")))?;
                 let Some(x) = v.value() else { return Err(Error::Ctl(Ctl::internal("json.decode: not a value"))) };
                 // Staged object keys are deduplicated by their canonical text.
                 let (hash, text) = (x.value_hash(), x.text());
                 return Ok((self.b.st.alloc(v), hash, Some(Cow::Owned(text))));
             }
-            _ => return Err(self.unsupported("map keys of this type")),
+            _ => return Err(self.unsupported(&format!("map keys of type {}", self.type_name(t)))),
         };
         Ok((k, hash_key(self.b.heap, self.b.meter, k)?, None))
     }
@@ -1004,7 +1038,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
     fn decode_enum(&mut self, name: &str, variants: &'d [VariantDesc]) -> PResult<Value> {
         let find = |d: &Self, tag: &str| match lookup(d.b.meter, variants, |v| v.0 == tag)? {
             Some(i) => Ok(&variants[i]),
-            None => Err(d.fail(&format!("unknown variant `{tag}` of {name}"))),
+            None => Err(d.fail(&format!("unknown variant `{}` of {name}", super::truncate(tag, QUOTED_KEY)))),
         };
         match self.p.peek() {
             Some(b'"') => {

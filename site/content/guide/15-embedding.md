@@ -137,20 +137,21 @@ Running the script above prints `5.0` and `Err(Error { kind: "not_found", messag
 
 Sand infers the Sand function signature from the Rust parameter and return types:
 
-| Rust type                                   | Sand type                    |
-| ------------------------------------------- | ---------------------------- |
-| `i64`, `f64`, `bool`, `()`                  | `int`, `float`, `bool`, `()` |
-| `String`, `&str`                            | `str`                        |
-| `Vec<u8>`, `&[u8]`                          | `bytes`                      |
-| `Vec<T>`                                    | `[T]`                        |
-| `Option<T>`                                 | `T?`                         |
-| `Result<T, E>`                              | `Result<T, Error>`           |
-| `HashMap<String, T>`, `BTreeMap<String, T>` | `[str: T]`                   |
-| `jiff::SignedDuration`                      | `duration`                   |
-| tuples of up to 8 elements                  | tuples                       |
-| Rust enum with `#[derive(SandEnum)]`        | matching Sand `enum`         |
-| `&T` (argument) or `T` (result) with `#[derive(SandObject)]` | opaque type `T` |
-| a registered `ValueType` `T`                | opaque type `T`              |
+| Rust type                                         | Sand type                    |
+| ------------------------------------------------- | ---------------------------- |
+| `i64`, `f64`, `bool`, `()`                        | `int`, `float`, `bool`, `()` |
+| `String`, `&str`                                  | `str`                        |
+| `Vec<u8>`, `&[u8]`                                | `bytes`                      |
+| `Vec<T>`                                          | `[T]`                        |
+| `Option<T>`                                       | `T?`                         |
+| `Result<T, E>`                                    | `Result<T, Error>`           |
+| `HashMap<K, V>`, `BTreeMap<K, V>`                 | `[K: V]`                     |
+| `HashSet<T>`, `BTreeSet<T>`                       | `Set<T>`                     |
+| `jiff::SignedDuration`                            | `duration`                   |
+| tuples of up to 8 elements                        | tuples                       |
+| Rust enum with `#[derive(SandEnum)]`              | matching Sand `enum`         |
+| `&T` (argument) or `T` (result), `#[derive(SandObject)]` | opaque type `T`       |
+| a registered `ValueType` `T`                      | opaque type `T`              |
 
 A function that the module's Sand source does not declare is `pub`, and its parameters are named `arg1`, `arg2`, ... unless `params` names them. A function registered as `"Type.name"` is a method of `Type`, and it takes `self` if its first parameter has type `Type` (as `Counter.add` below). A generic function must have a `native fn` declaration.
 
@@ -200,7 +201,7 @@ stats.function("Counter.add", |c: &Counter, n: i64| c.0.fetch_add(n, Ordering::R
 
 `NativeModule::async_function` registers an async Rust function; while its future is pending, only the calling Sand task suspends.
 
-A function that takes `&mut Vm` (`NativeModule::vm_function`) checks a capability with `Vm::require`, which fails with kind `"permission_denied"` if the policy denies it:
+To check a capability, register the function with `NativeModule::vm_function` and call `Vm::require`, which fails with kind `"permission_denied"` if the policy denies it. The engine calls the function again after a permission prompt, so call `Vm::require` before any side effect:
 
 ```rust
 # #[tokio::main(flavor = "current_thread")]

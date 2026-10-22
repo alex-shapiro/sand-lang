@@ -174,9 +174,10 @@ fn load_registered(
         return true;
     }
     let Some(src) = registry.sources.get(name) else { return false };
-    if path.iter().any(|p| p == name) {
+    if let Some(i) = path.iter().position(|p| p == name) {
         if let Some(at) = at {
-            errors.push(Diag::error(at, format!("import cycle through module `{name}`")));
+            let cycle = path[i..].iter().map(String::as_str).chain([name]).collect::<Vec<_>>().join(" → ");
+            errors.push(Diag::error(at, format!("import cycle: {cycle}")));
         }
         return false;
     }
@@ -189,7 +190,7 @@ fn load_registered(
         match imp {
             ImportRef::Name(dep, span) => {
                 if !registry.sources.contains_key(dep.as_str()) {
-                    errors.push(Diag::error(span, format!("unknown module `{dep}`")));
+                    errors.push(Diag::error(span, unknown_module(&dep)));
                 } else if load_registered(registry, &dep, Some(span), loaded, sm, pending, errors, path) {
                     imports.push((Some(item), dep));
                 }
@@ -199,16 +200,24 @@ fn load_registered(
         }
     }
     let start = Span::new(file, 0, 0);
+    // The checker reports a dependency that is not registered, with the native that uses it.
     for &dep in &src.deps {
-        if !registry.sources.contains_key(dep) {
-            errors.push(Diag::error(start, format!("unknown module `{dep}` in the signature of a native function")));
-        } else if load_registered(registry, dep, Some(start), loaded, sm, pending, errors, path) {
+        if load_registered(registry, dep, Some(start), loaded, sm, pending, errors, path) {
             imports.push((None, dep.to_string()));
         }
     }
     path.pop();
     pending.push(Pending { name: name.to_string(), kind: src.kind, file, ast: res.module, imports });
     true
+}
+
+/// The error for an import of `name`, which no module has.
+pub(crate) fn unknown_module(name: &str) -> String {
+    if crate::stdlib::OS_MODULES.contains(&name) {
+        format!("module `{name}` is not available: this build of Sand has no operating-system access")
+    } else {
+        format!("unknown module `{name}`")
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -313,7 +322,7 @@ pub(crate) fn scan_imports(text: &str, file: FileId) -> Vec<ImportRef> {
 }
 
 /// A module loaded by a compilation (or a REPL session): a script, or a
-/// host module that is not in the snapshot.
+/// standard module that is not in the snapshot.
 pub(crate) struct LoadedModule {
     pub name: String,
     pub file: FileId,

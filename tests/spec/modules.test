@@ -153,6 +153,49 @@ pub fn open() -> Account { Account { owner: "ann", balance: 0 } }
 --- error
 6: field `balance` of `account.Account` is private
 
+=== a pattern without `..` does not name private fields
+import "./account.sand"
+let account.Account { owner } = account.open()
+--- file account.sand
+pub struct Account {
+    pub owner: str
+    balance: int
+}
+pub fn open() -> Account { Account { owner: "ann", balance: 0 } }
+--- error
+2: `Account` has private fields; add `..` to ignore them
+
+=== members omit a built-in method that a private method hides
+import "./money.sand"
+print(members(money.cents(1)).contains("to_str"))
+print(members(money.cents(1)).contains("debug"))
+--- file money.sand
+pub struct Money {
+    pub cents: int
+    fn to_str(self) -> str { "$\(self.cents / 100)" }
+}
+pub fn cents(n: int) -> Money { Money { cents: n } }
+--- stdout
+false
+true
+
+=== help reports a private method that hides a built-in one
+import "./money.sand"
+help(money.cents(1).to_str)
+--- file money.sand
+pub struct Money {
+    pub cents: int
+    fn to_str(self) -> str { "$\(self.cents / 100)" }
+}
+pub fn cents(n: int) -> Money { Money { cents: n } }
+--- error
+2: method `to_str` of `money.Money` is private
+
+=== only natives take type descriptions
+fn id<reflect T>(x: T) -> T { x }
+--- error
+1: only the type parameters of a `native fn` can be `reflect`
+
 === private fields cannot be assigned in other modules
 import "./account.sand"
 let a = account.open()

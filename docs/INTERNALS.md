@@ -63,12 +63,12 @@ the typed Rust function of each native under its key:
   error) before any effect: a prompt re-executes the call.
 - Reserve memory and take resource slots before mutating anything: on a
   memory or resource limit (`CtlKind::Collect`) the native is called again
-  after a collection. After a side effect, allocate what was reserved
-  without a check (`vm.place_object`).
+  after a collection. The conversion of the native's result does not check
+  the limit: the engine collects and checks it after the call.
 - A native whose Sand result is `Result<T>` returns `Result<_, HostError>`:
   `Err(HostError::new(kind, message))` is the script's `Err(Error)`, and a
   `Ctl` converts with `?`. Any other fallible native returns `Result<_, Ctl>`,
-  so the compiler rejects a recoverable error from it. `Err(Ctl::fail(kind,
+  so the Rust compiler rejects a `HostError` from it. `Err(Ctl::fail(kind,
   message))` aborts the run with a runtime error.
 - An async native returns `Later::new(future)`. The future must not hold
   `Value`s; it yields a closure that makes the result on the VM thread

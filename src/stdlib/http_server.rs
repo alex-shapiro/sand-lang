@@ -32,10 +32,7 @@ pub(super) fn natives(m: &mut NativeModule) {
     m.object_type::<Server>();
     m.object_type::<Exchange>();
     m.vm_function("serve", serve);
-    m.vm_function("Server.addr", |vm: &mut Vm, server: Val<Server>| -> Result<_, Ctl> {
-        let addr = server.get(&vm.heap)?.addr;
-        Ok(Val::<net::SocketAddr>::from_raw(vm.new_value(addr)))
-    });
+    m.vm_function("Server.addr", |vm: &mut Vm, server: Val<Server>| -> Result<net::SocketAddr, Ctl> { Ok(server.get(&vm.heap)?.addr) });
     m.vm_function("Server.close", |vm: &mut Vm, server: Val<Server>| -> Result<_, Ctl> {
         server.get_mut(&mut vm.heap)?.close();
         Ok(())
@@ -170,7 +167,7 @@ impl NativeObject for Server {
     }
 }
 
-fn serve(vm: &mut Vm, ip: Val<String>, port: i64) -> Suspended<Val<Server>> {
+fn serve(vm: &mut Vm, ip: Val<String>, port: i64) -> Suspended<Server> {
     let shared = Arc::default();
     vm.host.http_pool.watch(&shared);
     net::listen_with(vm, ip, port, move |socket| Server::new(socket, shared))
@@ -186,7 +183,7 @@ fn evict_beyond(reads: &[Pending], cap: usize) {
 
 /// A request: method, path, query, headers, body, connection, and what its
 /// response needs.
-type Request = Val<(String, String, String, Vec<(String, String)>, Body, net::Conn, Exchange)>;
+type Request = (String, String, String, Vec<(String, String)>, Body, net::Conn, Exchange);
 
 /// Accepts connections and reads request heads until a complete request is available.
 fn next_request(vm: &mut Vm, server: Val<Server>) -> Suspended<Request> {
@@ -258,21 +255,18 @@ fn next_request(vm: &mut Vm, server: Val<Server>) -> Suspended<Request> {
     };
     let max_body = vm.host.limits.max_http_body;
     let clock = vm.host.clock.clone();
-    stream::suspend(closed.guard(serve), move |vm, received: Received| {
+    stream::suspend(closed.guard(serve), move |_, received: Received| {
         let Received { head: (method, path, query, headers), framing, expects_continue, persists, http10, conn, res } = received;
         drop(res);
-        let fields = [method, path, query].map(|s| vm.new_str(s));
-        let headers = header_list(vm, headers)?;
-        let conn = conn.alloc(vm)?;
-        let handle = conn.get(&vm.heap)?.handle().expect("a new connection is open");
+        let conn = conn.into_conn();
         let body = if framing == Framing::Done {
             BodyReader::empty(max_body)
         } else {
+            let handle = conn.handle().expect("a new connection is open");
             BodyReader::new(Box::new(Framed::on_conn(&handle, framing, BODY_TIMEOUT, clock, expects_continue)), max_body, None)
         };
-        let body = alloc_body(vm, body)?;
-        let exchange = vm.new_object(Exchange { persists, http10, server: weak })?;
-        Ok(Request::from_raw(vm.heap.new_tuple(&[fields[0], fields[1], fields[2], headers.raw(), body.raw(), conn.raw(), exchange.raw()])))
+        let exchange = Exchange { persists, http10, server: weak };
+        Ok((method, path, query, headers, Body::new(body), conn, exchange))
     })
 }
 

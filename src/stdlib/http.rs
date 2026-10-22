@@ -7,8 +7,8 @@
 //! leaves its connection in the run's [`Pool`].
 
 use super::http_common::*;
-use super::net::{self, ConnHandle, TlsSettings};
-use super::stream::{IoFailure, Suspended, read_line_bytes, strip_eol, suspend};
+use super::net::{self, ConnHandle, Resource, TlsSettings};
+use super::stream::{self, IoFailure, Suspended, read_line_bytes, strip_eol, suspend};
 use crate::check::ModKind;
 use crate::native::{HostError, Later, NativeModule, NativeObject, Val};
 use crate::network::{Network, Stream};
@@ -16,7 +16,6 @@ use crate::platform::{Clock, Instant};
 use crate::policy::Policy;
 use crate::vm::Vm;
 use crate::vm::iomem::{Reservation, ResourceSlot};
-use crate::vm::value::Value;
 use jiff::SignedDuration;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
@@ -46,9 +45,6 @@ pub(crate) fn module() -> NativeModule {
     m.vm_function("read_response", read_response);
     m
 }
-
-/// A response's status, headers and body.
-type Response = Val<(i64, Vec<(String, String)>, Body)>;
 
 // ----------------------------------------------------------------------
 // Message heads
@@ -604,21 +600,9 @@ fn send(
     body: Val<Vec<u8>>,
     timeout: SignedDuration,
 ) -> Suspended<Response> {
-    let (method, text) = (method.str(&vm.heap), url.str(&vm.heap));
-    vm.charge_slow_bytes(method.len().saturating_add(text.len()))?;
-    let url = match Url::parse(text) {
-        Ok(u) => u,
-        Err(e) => return Err(HostError::new(e.kind, e.message)),
-    };
-    if !is_token(method) {
-        return Err(HostError::new("invalid", format!("invalid HTTP method {:?}", super::truncate(method, 64))));
-    }
-    let (method, text) = (method.to_string(), text.to_string());
-    let mut headers = header_pairs(vm, headers)?;
-    vm.require(&url.capability(&method))?;
-    if let Err(reason) = filter_request(vm, &url, &mut headers) {
-        return Err(HostError::new("permission_denied", reason));
-    }
+    let mut req = prepare_request(vm, method, url, headers)?;
+    req.require(vm)?;
+    let Prepared { method, text, url, headers } = req;
     // The request is held outside the heap while it is sent.
     let mut res = vm.reserve_io(body.bytes(&vm.heap).len())?;
     let pool = vm.host.http_pool.clone();
@@ -640,7 +624,7 @@ fn send(
     if let Err(e) = res.ensure(request.len()) {
         return Err(HostError::new("limit", format!("cannot buffer the request: {e}")));
     }
-    let timeout = Duration::try_from(timeout).unwrap_or_default();
+    let timeout = stream::timeout(timeout);
     let head_only = method.eq_ignore_ascii_case("HEAD");
     let replayable = IDEMPOTENT.iter().any(|m| method.eq_ignore_ascii_case(m));
     let max_body = vm.host.limits.max_http_body;
@@ -669,10 +653,9 @@ fn send(
             drop(res);
             Ok((r, head_res))
         },
-        move |vm, ((conn, head), head_res): ((ClientConn, ResponseHead), Reservation)| {
+        move |_, ((conn, head), head_res): ((ClientConn, ResponseHead), Reservation)| {
             drop(head_res);
             let ResponseHead { status, headers, framing, persists } = head;
-            let headers = header_list(vm, headers)?;
             let reuse = (persists && !close).then(|| Arc::downgrade(&pool));
             let source = Source::Owned { conn: Some(conn), reuse };
             let mut framed = Framed { source, framing, timeout, clock: body_clock, continue_first: false };
@@ -682,8 +665,7 @@ fn send(
             } else {
                 BodyReader::new(Box::new(framed), max_body, None)
             };
-            let body = alloc_body(vm, reader)?;
-            Ok(Val::from_raw(vm.heap.new_tuple(&[Value::Int(status), headers.raw(), body.raw()])))
+            Ok(response(status, headers, reader))
         },
     )
 }
@@ -743,30 +725,16 @@ fn start_upload(
     url: Val<String>,
     headers: Val<Vec<(String, String)>>,
     timeout: SignedDuration,
-) -> Suspended<Val<(net::Conn, Outgoing)>> {
-    let (method, text) = (method.str(&vm.heap).to_string(), url.str(&vm.heap).to_string());
-    vm.charge_slow_bytes(method.len() + text.len())?;
-    let url = match Url::parse(&text) {
-        Ok(u) => u,
-        Err(e) => return Err(HostError::new(e.kind, e.message)),
-    };
-    if !is_token(&method) {
-        return Err(HostError::new("invalid", format!("invalid HTTP method {:?}", super::truncate(&method, 64))));
-    }
-    let mut headers = header_pairs(vm, headers)?;
-    let length = match given_length(&headers) {
-        Ok(n) => n,
-        Err(e) => return Err(HostError::new("invalid", e)),
-    };
-    vm.require(&url.capability(&method))?;
-    if let Err(reason) = filter_request(vm, &url, &mut headers) {
-        return Err(HostError::new("permission_denied", reason));
-    }
+) -> Suspended<(net::Conn, Outgoing)> {
+    let mut req = prepare_request(vm, method, url, headers)?;
+    let length = given_length(&req.headers).map_err(|e| HostError::new("invalid", e))?;
+    req.require(vm)?;
+    let Prepared { method, text, url, headers } = req;
     let buffers = if url.scheme == "https" { net::CONN_BUFFER + net::TLS_BUFFERS } else { net::CONN_BUFFER };
     let slot = vm.resource_slot_with(buffers, "a connection")?;
     let delimit = length.map_or(Delimit::Chunked, Delimit::Length);
     let head = request_head(&method, &url, &headers, delimit, true);
-    let timeout = Duration::try_from(timeout).unwrap_or_default();
+    let timeout = stream::timeout(timeout);
     let (policy, network, tls) = (vm.host.policy.clone(), vm.host.network.clone(), vm.host.tls.clone());
     let clock = vm.host.clock.clone();
     let open = async move {
@@ -784,11 +752,9 @@ fn start_upload(
                 None => Err(IoFailure::new("timeout", format!("connecting to {text} timed out"))),
             }
         },
-        move |vm, (conn, slot)| {
-            let conn = net::alloc_resource(vm, conn, slot)?;
-            let out = Outgoing { head: Some(head.into_bytes()), delimit, left: length, finished: false, after: None };
-            let body = vm.new_object(out)?;
-            Ok(Val::from_raw(vm.heap.new_tuple(&[conn.raw(), body.raw()])))
+        move |_, (mut conn, slot): (net::Conn, ResourceSlot)| {
+            conn.attach(slot);
+            Ok((conn, Outgoing { head: Some(head.into_bytes()), delimit, left: length, finished: false, after: None }))
         },
     )
 }
@@ -847,7 +813,7 @@ fn write_body(vm: &mut Vm, conn: Val<net::Conn>, body: Val<Outgoing>, data: Val<
 /// upload: `(status, headers, body)`, the body read from `conn`.
 fn read_response(vm: &mut Vm, conn: Val<net::Conn>, head_only: bool, timeout: SignedDuration) -> Suspended<Response> {
     let h = net::conn_handle(vm, conn)?;
-    let timeout = Duration::try_from(timeout).unwrap_or_default();
+    let timeout = stream::timeout(timeout);
     let max_body = vm.host.limits.max_http_body;
     let mut res = Reservation::new(&vm.heap.io_memory);
     let reader = h.reader.clone();
@@ -866,15 +832,13 @@ fn read_response(vm: &mut Vm, conn: Val<net::Conn>, head_only: bool, timeout: Si
                 None => Err(IoFailure::new("timeout", "timed out waiting for the response")),
             }
         }),
-        move |vm, head: ResponseHead| {
-            let headers = header_list(vm, head.headers)?;
+        move |_, head: ResponseHead| {
             let reader = if head.framing == Framing::Done {
                 BodyReader::empty(max_body)
             } else {
                 BodyReader::new(Box::new(Framed::on_conn(&h, head.framing, timeout, body_clock, false)), max_body, None)
             };
-            let body = alloc_body(vm, reader)?;
-            Ok(Val::from_raw(vm.heap.new_tuple(&[Value::Int(head.status), headers.raw(), body.raw()])))
+            Ok(response(head.status, head.headers, reader))
         },
     )
 }

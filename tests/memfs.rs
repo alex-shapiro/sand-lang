@@ -80,6 +80,36 @@ print(fs.exists("/out2")?)
 }
 
 #[test]
+fn removing_a_tree_asks_before_it_removes_anything() {
+    for (answer, removed) in [(PromptAnswer::DenyOnce, false), (PromptAnswer::AllowOnce, true)] {
+        let fs = MemFs::new();
+        for name in ["a", "b", "c"] {
+            fs.write(format!("/t/{name}.txt"), name).unwrap();
+        }
+        // The removal walk reaches `c.txt` before `b.txt`, which needs a prompt.
+        let prompted = Capability::FsWrite(PathBuf::from("/t/b.txt"));
+        let policy = {
+            let prompted = prompted.clone();
+            Policy::custom(move |cap: &Capability| if *cap == prompted { Decision::Prompt } else { Decision::Allow })
+        };
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let log = asked.clone();
+        let prompter = move |cap: Capability| {
+            log.lock().unwrap().push(cap);
+            async move { answer }
+        };
+        let config = Config::new().policy(policy).prompter(prompter).memory_fs(fs.clone());
+        let (r, out) = run(config, "import fs\nprint(fs.remove_dir(\"/t\", recursive: true).is_ok())");
+        r.unwrap();
+        assert_eq!(out, format!("{removed}\n"));
+        assert_eq!(*asked.lock().unwrap(), [prompted]);
+        for name in ["a", "b", "c"] {
+            assert_eq!(fs.read(format!("/t/{name}.txt")).is_err(), removed, "{name}.txt");
+        }
+    }
+}
+
+#[test]
 fn imports_and_main_files_come_from_the_memory_file_system() {
     let fs = MemFs::new();
     fs.write("/app/main.sand", "import \"lib/util\"\nprint(util.twice(21))\n").unwrap();

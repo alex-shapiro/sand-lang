@@ -16,7 +16,7 @@ use crate::engine::Registry;
 use crate::syntax::lexer::{is_ident, keyword};
 use crate::types::ValueTypeInfo;
 use crate::vm::heap::Heap;
-use crate::vm::value::{Obj, TypeDesc, Value, ValueType};
+use crate::vm::value::{ChannelObj, MapObj, Obj, SetObj, TaskObj, TypeDesc, Value, ValueType};
 use crate::vm::{Ctl, HostFn, NativeFn, Vm};
 use std::any::{Any, TypeId};
 use std::sync::Arc;
@@ -68,6 +68,18 @@ pub trait EnumType: SandType + Copy + 'static {
 ///
 /// ```compile_fail
 /// #[derive(Clone, Copy, sandlang::SandEnum)]
+/// enum Shape { Circle }
+/// ```
+///
+/// ```compile_fail
+/// #[derive(Clone, Copy, sandlang::SandEnum)]
+/// #[sand(module = "geo")]
+/// enum Shape { #[sand(name = "Round")] Circle }
+/// ```
+///
+/// ```compile_fail
+/// #[derive(Clone, Copy, sandlang::SandEnum)]
+/// #[sand(module = "geo", name = "shape")]
 /// enum Shape { Circle }
 /// ```
 ///
@@ -200,10 +212,65 @@ impl Val<Vec<u8>> {
     }
 }
 
-impl<T> Val<Vec<T>> {
+impl<T: SandType> Val<Vec<T>> {
     /// The elements of the list, which have the type that `T` describes.
     pub fn items(self, heap: &Heap) -> &[Value] {
         heap.list(self.raw())
+    }
+}
+
+impl<K: SandType, V: SandType> Val<std::collections::HashMap<K, V>> {
+    /// The map.
+    pub(crate) fn map(self, heap: &Heap) -> Result<&MapObj, Ctl> {
+        match heap.get(self.raw()) {
+            Obj::Map(m) => Ok(m),
+            _ => Err(mismatch::<std::collections::HashMap<K, V>>()),
+        }
+    }
+}
+
+impl<T: SandType> Val<std::collections::HashSet<T>> {
+    /// The set.
+    pub(crate) fn set(self, heap: &Heap) -> Result<&SetObj, Ctl> {
+        match heap.get(self.raw()) {
+            Obj::Set(s) => Ok(s),
+            _ => Err(mismatch::<std::collections::HashSet<T>>()),
+        }
+    }
+}
+
+impl Val<Range> {
+    /// The `(start, end, inclusive)` bounds of the range.
+    pub(crate) fn bounds(self, heap: &Heap) -> Result<(i64, i64, bool), Ctl> {
+        match *heap.get(self.raw()) {
+            Obj::Range(a, b, inclusive) => Ok((a, b, inclusive)),
+            _ => Err(mismatch::<Range>()),
+        }
+    }
+}
+
+impl<T: SandType> Val<Channel<T>> {
+    /// The channel.
+    pub(crate) fn channel(self, heap: &Heap) -> Result<&ChannelObj, Ctl> {
+        match heap.get(self.raw()) {
+            Obj::Channel(c) => Ok(c),
+            _ => Err(mismatch::<Channel<T>>()),
+        }
+    }
+
+    /// The channel, to take values from it (see [`Heap::channel_mut`]).
+    pub(crate) fn channel_mut(self, heap: &mut Heap) -> Result<&mut ChannelObj, Ctl> {
+        heap.channel_mut(self.raw(), None).ok_or_else(mismatch::<Channel<T>>)
+    }
+}
+
+impl<T: SandType> Val<Task<T>> {
+    /// The task.
+    pub(crate) fn task(self, heap: &Heap) -> Result<&TaskObj, Ctl> {
+        match heap.get(self.raw()) {
+            Obj::Task(t) => Ok(t),
+            _ => Err(mismatch::<Task<T>>()),
+        }
     }
 }
 
@@ -232,14 +299,7 @@ impl Vm {
     /// Moves `x` to the heap, failing if it does not fit in the memory limit.
     pub fn new_object<T: ObjectType>(&mut self, x: T) -> Result<Val<T>, Ctl> {
         self.reserve(NativeObject::size(&x))?;
-        Ok(self.place_object(x))
-    }
-
-    /// Moves `x` to the heap without a check of the memory limit, for a
-    /// native that reserved its size before a side effect (which a rerun
-    /// after a collection would repeat).
-    pub(crate) fn place_object<T: ObjectType>(&mut self, x: T) -> Val<T> {
-        Val::from_raw(self.heap.alloc(Obj::Native(Box::new(x))))
+        Ok(Val::from_raw(self.heap.alloc(Obj::Native(Box::new(x)))))
     }
 }
 

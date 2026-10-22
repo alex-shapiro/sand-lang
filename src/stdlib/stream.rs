@@ -1,10 +1,10 @@
-//! Errors and buffered reads shared by the modules that do I/O off the VM
-//! thread (`io`'s standard input, `net`, `http`).
+//! Errors, results and buffered reads shared by the I/O modules (`fs`,
+//! `io`, `net`, `http`).
 
 use super::io_kind;
 use crate::native::{HostError, IntoValue, Later};
-use crate::vm::Vm;
 use crate::vm::iomem::{MemoryLimit, Reservation};
+use crate::vm::{Ctl, Vm};
 use std::future::Future;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt};
 
@@ -52,6 +52,48 @@ impl From<std::io::Error> for IoFailure {
     fn from(e: std::io::Error) -> IoFailure {
         IoFailure::new(io_kind(&e), e.to_string())
     }
+}
+
+/// `data` as text, charging for the check of its UTF-8; `None` if it is not UTF-8.
+pub(crate) fn utf8(vm: &Vm, data: Vec<u8>) -> Result<Option<String>, Ctl> {
+    vm.charge_slow_bytes(data.len())?;
+    Ok(String::from_utf8(data).ok())
+}
+
+/// The result of a read of bytes, which always has data.
+pub(crate) fn bytes_read(_: &mut Vm, data: Option<Vec<u8>>) -> Result<Vec<u8>, HostError> {
+    Ok(data.unwrap_or_default())
+}
+
+/// The result of a read of a line (`None` at the end), or kind `"invalid"`
+/// with `message` if the line is not UTF-8.
+pub(crate) fn line_read(vm: &Vm, line: Option<Vec<u8>>, message: &str) -> Result<Option<String>, HostError> {
+    let Some(line) = line else { return Ok(None) };
+    utf8(vm, line)?.map(Some).ok_or_else(|| HostError::new("invalid", message))
+}
+
+/// A Sand `duration` timeout as a `Duration` (zero if negative).
+#[cfg(any(feature = "os", web))]
+pub(crate) fn timeout(d: jiff::SignedDuration) -> std::time::Duration {
+    std::time::Duration::try_from(d).unwrap_or_default()
+}
+
+/// Reads a line without its `\n` or `\r\n` (see [`read_line_bytes`]).
+pub(crate) async fn read_line<R: AsyncBufRead + Unpin>(r: &mut R, res: &mut Reservation) -> Result<Option<Vec<u8>>, IoFailure> {
+    let line = read_line_bytes(r, usize::MAX, res).await?;
+    Ok(line.map(|mut line| {
+        strip_eol(&mut line);
+        line
+    }))
+}
+
+/// Reads what `r` has buffered, at most `max` bytes, filling the buffer
+/// first if it is empty; empty at the end of the stream.
+pub(crate) async fn read_upto<R: AsyncBufRead + Unpin>(r: &mut R, max: usize) -> Result<Vec<u8>, IoFailure> {
+    let available = r.fill_buf().await?;
+    let data = available[..available.len().min(max)].to_vec();
+    r.consume(data.len());
+    Ok(data)
 }
 
 /// Reads a line including its `\n` (if any); `None` at end of stream. Fails

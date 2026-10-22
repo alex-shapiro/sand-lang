@@ -100,6 +100,7 @@ fn f(a: int) -> int { a }
 print(f(b: 1))
 --- error
 2: no parameter named `b`
+2: missing argument `a`
 
 === duplicate argument is an error
 fn f(a: int) -> int { a }
@@ -147,6 +148,7 @@ fn f(x: int) -> int {
 fn f(a) -> int { 1 }
 --- error
 1: expected `:`
+1: unexpected `}`
 
 === defaults must follow required parameters
 fn f(a: int = 1, b: int) -> int { a + b }

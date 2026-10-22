@@ -262,23 +262,6 @@ impl<T: SandType> SandType for BTreeSet<T> {
     }
 }
 
-macro_rules! tuple_type {
-    ($($n:ident),+) => {
-        impl<$($n: SandType),+> SandType for ($($n,)+) {
-            fn sand_type() -> Type {
-                Type::Tuple(vec![$($n::sand_type()),+])
-            }
-        }
-    };
-}
-tuple_type!(A, B);
-tuple_type!(A, B, C);
-tuple_type!(A, B, C, D);
-tuple_type!(A, B, C, D, E);
-tuple_type!(A, B, C, D, E, F);
-tuple_type!(A, B, C, D, E, F, G);
-tuple_type!(A, B, C, D, E, F, G, H);
-
 macro_rules! fn_type {
     ($($n:ident),*) => {
         /// A Sand function type, for [`Val`] handles to functions.
@@ -357,6 +340,11 @@ impl<const N: u8> SandType for Reflect<N> {
 /// A native function that needs the VM takes its heap values as `Val`s:
 /// `Val<String>` is a `str`, `Val<Vec<Param<0>>>` a list of the first type
 /// parameter, `Val<fn() -> Option<String>>` a function.
+///
+/// The garbage collector does not see a `Val` that Rust code keeps: an
+/// argument is valid until the call (or its async result) is finished, and
+/// a value that the native makes is valid until it returns. Do not store a
+/// `Val` in an object or between calls.
 pub struct Val<T: ?Sized>(Value, PhantomData<fn() -> T>);
 
 impl<T: ?Sized> Val<T> {

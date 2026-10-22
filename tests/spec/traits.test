@@ -823,7 +823,7 @@ impl lib.Named for lib.Point {
     fn name(self) -> str { "again" }
 }
 --- file lib.sand
-pub struct Point { x: int }
+pub struct Point { pub x: int }
 pub trait Named {
     fn name(self) -> str
 }

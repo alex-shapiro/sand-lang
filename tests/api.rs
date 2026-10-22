@@ -360,7 +360,12 @@ fn value_types_in_signatures_must_be_registered() {
     let mut m = NativeModule::new("bank");
     m.function("zero", || Money(0));
     let errors = engine_errors(Config::new().module(m));
-    assert!(errors[0].contains("native `bank.zero` uses `bank.Money`, which no module declares"), "{errors:?}");
+    assert!(errors[0].contains("native `bank.zero` uses `bank.Money`, which module `bank` does not declare"), "{errors:?}");
+
+    let mut m = NativeModule::new("ledger");
+    m.function("fee", || Money(150));
+    let errors = engine_errors(Config::new().module(m));
+    assert_eq!(errors, ["the Rust function of native `ledger.fee` uses `bank.Money`, and module `bank` is not added to the engine"]);
 }
 
 #[test]
@@ -505,7 +510,13 @@ fn registered_methods_are_declared_from_their_rust_types() {
     let mut m = shapes_module();
     m.function("Ghost.rank", |s: Shape| s as i64);
     let errors = engine_errors(Config::new().module(m));
-    assert_eq!(errors, ["native `shapes.Ghost.rank` is a method of `Ghost`, which is not a type of the module without type parameters"]);
+    assert_eq!(errors, ["native `shapes.Ghost.rank` is a method of `Ghost`, which is not a type of module `shapes`"]);
+
+    let mut m = shapes_module();
+    m.source("pub struct Box<T> {\n    pub item: T\n}");
+    m.function("Box.size", || 1i64);
+    let errors = engine_errors(Config::new().module(m));
+    assert_eq!(errors, ["native `shapes.Box.size` is a method of the generic type `Box`, so the module must declare it with `native fn`"]);
 }
 
 #[test]
@@ -560,11 +571,21 @@ fn natives_declared_with_other_enums_do_not_check() {
 }
 
 #[test]
+fn clones_of_a_config_report_its_errors() {
+    let mut m = NativeModule::new("bank");
+    m.function("zero", || Money(0));
+    let config = Config::new().module(m);
+    let errors = engine_errors(config.clone());
+    assert_eq!(errors.len(), 1);
+    assert_eq!(engine_errors(config), errors);
+}
+
+#[test]
 fn enums_in_signatures_must_be_registered() {
     let mut m = NativeModule::new("shapes");
     m.function("square", || Shape::Square);
     let errors = engine_errors(Config::new().module(m));
-    assert!(errors[0].contains("uses `shapes.Shape`, which no module declares"), "{errors:?}");
+    assert!(errors[0].contains("uses `shapes.Shape`, which module `shapes` does not declare"), "{errors:?}");
 }
 
 #[test]
@@ -813,7 +834,29 @@ fn host_modules_cannot_import_each_other_in_a_cycle() {
     a.source("import ring_b\npub fn one() -> int { 1 }");
     b.source("import ring_a\npub fn two() -> int { 2 }");
     let errors = engine_errors(Config::new().module(a).module(b));
-    assert_eq!(errors, ["import cycle through module `ring_a`"]);
+    assert_eq!(errors, ["import cycle: ring_a → ring_b → ring_a"]);
+}
+
+#[derive(Clone, Copy, sandlang::SandEnum)]
+#[sand(module = "ring_a")]
+enum RingA {
+    One,
+}
+
+#[derive(Clone, Copy, sandlang::SandEnum)]
+#[sand(module = "ring_b")]
+enum RingB {
+    Two,
+}
+
+/// A native imports the modules of the types in its signature.
+#[test]
+fn host_modules_cannot_use_each_others_types_in_a_cycle() {
+    let (mut a, mut b) = (NativeModule::new("ring_a"), NativeModule::new("ring_b"));
+    a.enum_type::<RingA>().function("next", |_: RingB| RingA::One);
+    b.enum_type::<RingB>().function("next", |_: RingA| RingB::Two);
+    let errors = engine_errors(Config::new().module(a).module(b));
+    assert_eq!(errors, ["import cycle: ring_a → ring_b → ring_a"]);
 }
 
 #[test]
@@ -992,6 +1035,32 @@ fn native_module_custom_capability() {
     let (r, out, _) = run_src(Config::new().policy(policy).module(m), src);
     r.unwrap();
     assert_eq!(out, "Ok(\"opened front\")\nErr(Error { kind: \"permission_denied\", message: \"permission denied: door back\" })\n");
+}
+
+/// A prompt suspends the native, which runs again with the answer.
+#[test]
+fn native_module_capability_prompts() {
+    let opened = Arc::new(AtomicUsize::new(0));
+    let o = opened.clone();
+    let mut m = NativeModule::new("door");
+    m.vm_function("open", move |vm: &mut Vm, name: String| -> Result<String, sandlang::HostError> {
+        vm.require(&Capability::Custom { name: "door".into(), detail: name.clone() })?;
+        o.fetch_add(1, Ordering::SeqCst);
+        Ok(format!("opened {name}"))
+    });
+    let prompter = ScriptedPrompter::new(&[PromptAnswer::AllowOnce, PromptAnswer::DenyOnce]);
+    let policy =
+        Policy::custom(|cap: &Capability| if matches!(cap, Capability::Custom { .. }) { Decision::Prompt } else { Decision::Allow });
+    let out = MemorySink::new();
+    let mut engine = Engine::new(prompter.config(policy).module(m).stdout(out.clone())).unwrap();
+    rt().block_on(engine.run_source("main.sand", "import door\nprint(door.open(\"front\"))\nprint(door.open(\"back\"))")).unwrap();
+    assert_eq!(
+        out.contents(),
+        "Ok(\"opened front\")\nErr(Error { kind: \"permission_denied\", message: \"permission denied: door back\" })\n"
+    );
+    let door = |detail: &str| Capability::Custom { name: "door".into(), detail: detail.into() };
+    assert_eq!(prompter.asked(), vec![door("front"), door("back")]);
+    assert_eq!(opened.load(Ordering::SeqCst), 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -1517,6 +1586,39 @@ fn memory_limit() {
     let config = Config::new().limits(Limits { max_memory: Some(8 << 20), ..Limits::default() });
     let (r, _, _) = run_src(config, "let xs = []\nwhile true { xs.push(\"some string data\".repeat(10)) }");
     assert!(matches!(r, Err(Error::Limit(LimitKind::Memory))), "{r:?}");
+}
+
+/// A native's result is made after its side effects, so a memory limit
+/// that a collection resolves does not call it again.
+#[test]
+fn a_native_runs_once_when_its_result_needs_a_collection() {
+    let pops = Arc::new(AtomicUsize::new(0));
+    let p = pops.clone();
+    let mut m = NativeModule::new("queue");
+    m.function("pop", move || {
+        p.fetch_add(1, Ordering::SeqCst);
+        "x".repeat(700_000)
+    });
+    let config = Config::new().module(m).limits(Limits { max_memory: Some(8 << 20), ..Limits::default() });
+    // The first string is garbage, which only a collection frees.
+    let src = "import queue\nvar s = \"y\".repeat(3_900_000)\ns = \"y\".repeat(3_900_000)\nprint(queue.pop().len())";
+    let (r, out, _) = run_src(config, src);
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!(out, "700000\n");
+    assert_eq!(pops.load(Ordering::SeqCst), 1);
+}
+
+/// The finisher of an async native, which cannot run again, collects
+/// garbage instead of failing with the memory limit.
+#[test]
+fn an_async_result_that_needs_a_collection_does_not_end_the_run() {
+    let mut m = NativeModule::new("slow");
+    m.async_function("read", || async { "x".repeat(700_000) });
+    let config = Config::new().module(m).limits(Limits { max_memory: Some(8 << 20), ..Limits::default() });
+    let src = "import slow\nvar s = \"y\".repeat(3_900_000)\ns = \"y\".repeat(3_900_000)\nprint(slow.read().len())";
+    let (r, out, _) = run_src(config, src);
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!(out, "700000\n");
 }
 
 #[test]

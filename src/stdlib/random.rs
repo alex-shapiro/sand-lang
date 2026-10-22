@@ -52,8 +52,8 @@ pub(crate) fn module() -> NativeModule {
         "bool" => | | -> bool = |_: &mut Vm, rng: &mut Rng| Ok(rng.next_u64() >> 63 == 1);
         "choice" => |xs: Val<Vec<Param<0>>>| -> Option<Param<0>> = choice;
         "shuffle" => |xs: Val<Vec<Param<0>>>| -> () = shuffle;
-        "sample" => |xs: Val<Vec<Param<0>>>, k: i64| -> Val<Vec<Param<0>>> = sample;
-        "bytes" => |n: i64| -> Val<Vec<u8>> = bytes;
+        "sample" => |xs: Val<Vec<Param<0>>>, k: i64| -> Vec<Param<0>> = sample;
+        "bytes" => |n: i64| -> Vec<u8> = bytes;
     }
     m
 }
@@ -84,12 +84,11 @@ fn shuffle(vm: &mut Vm, rng: &mut Rng, xs: Val<Vec<Param<0>>>) -> Result<(), Ctl
 
 /// A partial Fisher-Yates shuffle of the positions, recording only those it
 /// has disturbed (the element now at each).
-fn sample(vm: &mut Vm, rng: &mut Rng, xs: Val<Vec<Param<0>>>, k: i64) -> Result<Val<Vec<Param<0>>>, Ctl> {
+fn sample(vm: &mut Vm, rng: &mut Rng, xs: Val<Vec<Param<0>>>, k: i64) -> Result<Vec<Param<0>>, Ctl> {
     let items = xs.items(&vm.heap);
     let n = items.len();
     let k = k.clamp(0, n as i64) as usize;
     vm.reserve(k.saturating_mul(2 * std::mem::size_of::<Value>()))?;
-    vm.charge(k as u64)?;
     let mut moved: FxHashMap<usize, usize> = FxHashMap::default();
     let mut out = Vec::with_capacity(k);
     for i in 0..k {
@@ -97,12 +96,12 @@ fn sample(vm: &mut Vm, rng: &mut Rng, xs: Val<Vec<Param<0>>>, k: i64) -> Result<
         let at_i = moved.get(&i).copied().unwrap_or(i);
         let at_j = moved.get(&j).copied().unwrap_or(j);
         moved.insert(j, at_i);
-        out.push(items[at_j]);
+        out.push(Param::from_raw(items[at_j]));
     }
-    Ok(Val::from_raw(vm.heap.new_list(out)))
+    Ok(out)
 }
 
-fn bytes(vm: &mut Vm, rng: &mut Rng, n: i64) -> Result<Val<Vec<u8>>, Ctl> {
+fn bytes(vm: &mut Vm, rng: &mut Rng, n: i64) -> Result<Vec<u8>, Ctl> {
     if n < 0 {
         return fail("invalid", "random.bytes: negative length");
     }
@@ -114,5 +113,5 @@ fn bytes(vm: &mut Vm, rng: &mut Rng, n: i64) -> Result<Val<Vec<u8>>, Ctl> {
         let word = rng.next_u64().to_le_bytes();
         out.extend_from_slice(&word[..(n - out.len()).min(8)]);
     }
-    Ok(Val::from_raw(vm.heap.new_bytes(out)))
+    Ok(out)
 }

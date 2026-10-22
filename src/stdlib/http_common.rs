@@ -1,9 +1,8 @@
 //! What the `http` clients (over TCP natively, over `fetch` on the web)
-//! share: URLs (built on the `uri` module's parser), redirect resolution
-//! and header syntax.
+//! share: URLs (built on the `uri` module's parser), redirect resolution,
+//! header syntax, request checks and responses.
 
-use super::stream::IoFailure;
-use super::stream::{self, Suspended};
+use super::stream::{self, IoFailure, Suspended, bytes_read, line_read};
 use super::uri;
 use crate::native::{HostError, IntoValue, NativeModule, NativeObject, Val};
 use crate::vm::iomem::Reservation;
@@ -162,19 +161,56 @@ pub(crate) fn header_pairs(vm: &Vm, list: Val<Vec<(String, String)>>) -> Result<
     Ok(pairs)
 }
 
-/// Builds a `[(str, str)]` list from header pairs.
-pub(crate) fn header_list(vm: &mut Vm, headers: Vec<(String, String)>) -> Result<Val<Vec<(String, String)>>, Ctl> {
-    let size = headers.iter().map(|(k, v)| k.len() + v.len() + 160).fold(0usize, usize::saturating_add);
-    vm.reserve(size)?;
-    vm.charge(headers.len() as u64)?;
-    let items = headers
-        .into_iter()
-        .map(|(k, v)| {
-            let (k, v) = (vm.new_str(k), vm.new_str(v));
-            vm.heap.new_tuple(&[k, v])
-        })
-        .collect();
-    Ok(Val::from_raw(vm.heap.new_list(items)))
+// ----------------------------------------------------------------------
+// Requests and responses
+
+/// A client's request, checked by [`prepare_request`].
+pub(crate) struct Prepared {
+    pub method: String,
+    /// The URL as the script gave it.
+    #[cfg_attr(web, allow(dead_code))]
+    pub text: String,
+    pub url: Url,
+    pub headers: Vec<(String, String)>,
+}
+
+/// Checks the method, URL and headers of a client's request (kind
+/// `"parse"` or `"invalid"`).
+pub(crate) fn prepare_request(
+    vm: &Vm,
+    method: Val<String>,
+    url: Val<String>,
+    headers: Val<Vec<(String, String)>>,
+) -> Result<Prepared, HostError> {
+    let (method, text) = (method.str(&vm.heap), url.str(&vm.heap));
+    vm.charge_slow_bytes(method.len().saturating_add(text.len()))?;
+    let url = Url::parse(text)?;
+    if !is_token(method) {
+        return Err(HostError::new("invalid", format!("invalid HTTP method {:?}", super::truncate(method, 64))));
+    }
+    let (method, text) = (method.to_string(), text.to_string());
+    let headers = header_pairs(vm, headers)?;
+    Ok(Prepared { method, text, url, headers })
+}
+
+impl Prepared {
+    /// Requires the capability to send the request, then lets the host's
+    /// request filter change its headers or deny it.
+    pub fn require(&mut self, vm: &mut Vm) -> Result<(), HostError> {
+        vm.require(&self.url.capability(&self.method))?;
+        let Some(filter) = &vm.host.request_filter else { return Ok(()) };
+        let url = &self.url;
+        let target = crate::engine::RequestTarget { scheme: url.scheme.clone(), host: url.host.clone(), port: url.port };
+        filter(&target, &mut self.headers).map_err(|reason| HostError::new("permission_denied", reason))
+    }
+}
+
+/// A response's status, headers and body.
+pub(crate) type Response = (i64, Vec<(String, String)>, Body);
+
+/// The response with `status`, `headers` and the body that `reader` reads.
+pub(crate) fn response(status: i64, headers: Vec<(String, String)>, reader: BodyReader) -> Response {
+    (status, headers, Body::new(reader))
 }
 
 // ----------------------------------------------------------------------
@@ -447,36 +483,17 @@ fn read_body<R: IntoValue + Send + 'static>(
     })
 }
 
-/// The data of a read, as `bytes`.
-fn read_bytes(vm: &mut Vm, data: Option<Vec<u8>>) -> Result<Val<Vec<u8>>, HostError> {
-    let data = data.unwrap_or_default();
-    vm.reserve(data.len())?;
-    vm.charge_bytes(data.len())?;
-    Ok(Val::from_raw(vm.heap.new_bytes(data)))
-}
-
-/// The line of a read, as `str?`.
-fn read_text(vm: &mut Vm, line: Option<Vec<u8>>) -> Result<Option<Val<String>>, HostError> {
-    let Some(line) = line else { return Ok(None) };
-    vm.reserve(line.len())?;
-    vm.charge_slow_bytes(line.len())?;
-    let Ok(text) = String::from_utf8(line) else { return Err(HostError::new("invalid", "line is not valid UTF-8")) };
-    Ok(Some(Val::from_raw(vm.new_str(text))))
-}
-
-pub(crate) fn alloc_body(vm: &mut Vm, reader: BodyReader) -> Result<Val<Body>, Ctl> {
-    vm.new_object(Body::new(reader))
-}
-
 fn body_natives(m: &mut NativeModule) {
     m.vm_function("Body.read", |vm: &mut Vm, body: Val<Body>, max: i64| {
         if max <= 0 {
             return Err(HostError::new("invalid", "read: max must be positive"));
         }
-        read_body(vm, body, BodyRead::Upto(to_usize_saturating(max)), read_bytes)
+        read_body(vm, body, BodyRead::Upto(to_usize_saturating(max)), bytes_read)
     });
-    m.vm_function("Body.read_line", |vm: &mut Vm, body: Val<Body>| read_body(vm, body, BodyRead::Line, read_text));
-    m.vm_function("Body.read_all", |vm: &mut Vm, body: Val<Body>| read_body(vm, body, BodyRead::All, read_bytes));
+    m.vm_function("Body.read_line", |vm: &mut Vm, body: Val<Body>| {
+        read_body(vm, body, BodyRead::Line, |vm, line| line_read(vm, line, "line is not valid UTF-8"))
+    });
+    m.vm_function("Body.read_all", |vm: &mut Vm, body: Val<Body>| read_body(vm, body, BodyRead::All, bytes_read));
     m.vm_function("Body.close", |vm: &mut Vm, body: Val<Body>| -> Result<_, Ctl> {
         let b = body.get_mut(&mut vm.heap)?;
         b.closed.send_replace(true);
@@ -485,10 +502,4 @@ fn body_natives(m: &mut NativeModule) {
         b.reader = None;
         Ok(())
     });
-}
-
-pub(crate) fn filter_request(vm: &Vm, url: &Url, headers: &mut Vec<(String, String)>) -> Result<(), String> {
-    let Some(filter) = &vm.host.request_filter else { return Ok(()) };
-    let target = crate::engine::RequestTarget { scheme: url.scheme.clone(), host: url.host.clone(), port: url.port };
-    filter(&target, headers)
 }

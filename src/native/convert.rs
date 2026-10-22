@@ -5,7 +5,8 @@ use super::ty::{Never, Param, Reflect, SandType, Val};
 use crate::vm::meter::Scratch;
 use crate::vm::value::{Obj, Value, ValueType};
 use crate::vm::{Ctl, Vm};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::hash::Hash;
 
 /// Conversion of an argument from a Sand value.
 ///
@@ -44,7 +45,9 @@ impl Conversion {
 }
 
 /// Conversion into a Sand value: checks the memory limit and charges the
-/// meter for what it builds.
+/// meter for what it builds. The engine converts a native's result after
+/// the native's side effects, so there it checks the limit after the
+/// conversion instead.
 pub trait IntoValue: SandType {
     fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl>;
 }
@@ -254,7 +257,9 @@ impl IntoValue for Vec<u8> {
 }
 impl IntoValue for &[u8] {
     fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl> {
-        self.to_vec().into_value(vm)
+        vm.reserve(self.len())?;
+        vm.charge_bytes(self.len())?;
+        Ok(vm.heap.new_bytes(self))
     }
 }
 
@@ -304,12 +309,11 @@ impl<T: IntoValue, E: IntoHostError> IntoValue for Result<T, E> {
                 let v = x.into_value(vm)?;
                 Ok(vm.ok(v))
             }
-            // The memory limit is not checked here: a native that fails
-            // with it runs again after a collection, which would repeat side
-            // effects that came before the error. The next safe point
-            // collects and checks the limit.
             Err(e) => match *e.into_host_error().0 {
-                Raised::Error { kind, message } => Ok(vm.err_value(&kind, &message)),
+                Raised::Error { kind, message } => {
+                    vm.charge_bytes(kind.len() + message.len())?;
+                    Ok(vm.err_value(&kind, &message))
+                }
                 Raised::Abort(c) => Err(c),
             },
         }
@@ -331,14 +335,23 @@ impl<T: IntoValue> IntoValue for Result<T, Ctl> {
     }
 }
 
-/// The entries of a `[str: T]` map.
-fn read_map<'a, T: FromValue>(vm: &'a Vm, v: Value, conv: &mut Conversion) -> Result<Vec<(String, T::Item<'a>)>, Ctl> {
-    let Obj::Map(m) = vm.heap.get(v) else { return Err(mismatch::<HashMap<String, T>>()) };
-    conv.alloc(vm, m.live.saturating_mul(std::mem::size_of::<(String, T::Item<'a>)>()))?;
-    vm.charge(m.live as u64)?;
-    m.entries.iter().flatten().map(|&(k, x)| Ok((String::from_value(vm, k, conv)?, T::from_value(vm, x, conv)?))).collect()
+/// The fuel for sorting `n` items: about `n log n` comparisons.
+fn sort_cost(n: usize) -> u64 {
+    (n as u64).saturating_mul(u64::from(usize::BITS - n.leading_zeros()))
 }
-fn write_map<T: IntoValue>(vm: &mut Vm, len: usize, items: impl IntoIterator<Item = (String, T)>) -> Result<Value, Ctl> {
+
+fn read_map<'a, K, V, C>(vm: &'a Vm, v: Value, conv: &mut Conversion) -> Result<C, Ctl>
+where
+    K: for<'k> FromValue<Item<'k> = K>,
+    V: FromValue,
+    C: FromIterator<(K, V::Item<'a>)>,
+{
+    let Obj::Map(m) = vm.heap.get(v) else { return Err(mismatch::<HashMap<K, V>>()) };
+    conv.alloc(vm, m.live.saturating_mul(std::mem::size_of::<(K, V::Item<'a>)>()))?;
+    vm.charge(m.live as u64)?;
+    m.entries.iter().flatten().map(|&(k, x)| Ok((K::from_value(vm, k, conv)?, V::from_value(vm, x, conv)?))).collect()
+}
+fn write_map<K: IntoValue, V: IntoValue>(vm: &mut Vm, len: usize, items: impl IntoIterator<Item = (K, V)>) -> Result<Value, Ctl> {
     vm.reserve(len.saturating_mul(4 * std::mem::size_of::<Value>()))?;
     let m = vm.heap.alloc(Obj::Map(Box::default()));
     for (k, v) in items {
@@ -348,34 +361,83 @@ fn write_map<T: IntoValue>(vm: &mut Vm, len: usize, items: impl IntoIterator<Ite
     }
     Ok(m)
 }
-impl<T: FromValue> FromValue for HashMap<String, T> {
-    type Item<'a> = HashMap<String, T::Item<'a>>;
+impl<K: for<'k> FromValue<Item<'k> = K> + Eq + Hash, V: FromValue> FromValue for HashMap<K, V> {
+    type Item<'a> = HashMap<K, V::Item<'a>>;
     fn from_value<'a>(vm: &'a Vm, v: Value, conv: &mut Conversion) -> Result<Self::Item<'a>, Ctl> {
-        Ok(read_map::<T>(vm, v, conv)?.into_iter().collect())
+        read_map::<K, V, _>(vm, v, conv)
     }
 }
-impl<T: IntoValue> IntoValue for HashMap<String, T> {
+/// The entries are inserted in key order, so that the Sand map's order does
+/// not depend on hashing.
+impl<K: IntoValue + Ord, V: IntoValue> IntoValue for HashMap<K, V> {
     fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl> {
-        let mut items: Vec<(String, T)> = self.into_iter().collect();
-        vm.charge(items.len() as u64)?;
-        items.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut items: Vec<(K, V)> = self.into_iter().collect();
+        vm.charge(sort_cost(items.len()))?;
+        items.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         write_map(vm, items.len(), items)
     }
 }
-impl<T: FromValue> FromValue for BTreeMap<String, T> {
-    type Item<'a> = BTreeMap<String, T::Item<'a>>;
+impl<K: for<'k> FromValue<Item<'k> = K> + Ord, V: FromValue> FromValue for BTreeMap<K, V> {
+    type Item<'a> = BTreeMap<K, V::Item<'a>>;
     fn from_value<'a>(vm: &'a Vm, v: Value, conv: &mut Conversion) -> Result<Self::Item<'a>, Ctl> {
-        Ok(read_map::<T>(vm, v, conv)?.into_iter().collect())
+        read_map::<K, V, _>(vm, v, conv)
     }
 }
-impl<T: IntoValue> IntoValue for BTreeMap<String, T> {
+impl<K: IntoValue, V: IntoValue> IntoValue for BTreeMap<K, V> {
     fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl> {
         write_map(vm, self.len(), self)
     }
 }
 
+fn read_set<T: for<'k> FromValue<Item<'k> = T>, C: FromIterator<T>>(vm: &Vm, v: Value, conv: &mut Conversion) -> Result<C, Ctl> {
+    let Obj::Set(s) = vm.heap.get(v) else { return Err(mismatch::<HashSet<T>>()) };
+    conv.alloc(vm, s.live.saturating_mul(std::mem::size_of::<T>()))?;
+    vm.charge(s.live as u64)?;
+    s.entries.iter().flatten().map(|&x| T::from_value(vm, x, conv)).collect()
+}
+fn write_set<T: IntoValue>(vm: &mut Vm, len: usize, items: impl IntoIterator<Item = T>) -> Result<Value, Ctl> {
+    vm.reserve(len.saturating_mul(3 * std::mem::size_of::<Value>()))?;
+    let s = vm.heap.alloc(Obj::Set(Box::default()));
+    for x in items {
+        let x = x.into_value(vm)?;
+        vm.set_add(s, x)?;
+    }
+    Ok(s)
+}
+impl<T: for<'k> FromValue<Item<'k> = T> + Eq + Hash> FromValue for HashSet<T> {
+    type Item<'a> = HashSet<T>;
+    fn from_value(vm: &Vm, v: Value, conv: &mut Conversion) -> Result<Self, Ctl> {
+        read_set(vm, v, conv)
+    }
+}
+/// The elements are inserted in order, as for `HashMap`.
+impl<T: IntoValue + Ord> IntoValue for HashSet<T> {
+    fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl> {
+        let mut items: Vec<T> = self.into_iter().collect();
+        vm.charge(sort_cost(items.len()))?;
+        items.sort_unstable();
+        write_set(vm, items.len(), items)
+    }
+}
+impl<T: for<'k> FromValue<Item<'k> = T> + Ord> FromValue for BTreeSet<T> {
+    type Item<'a> = BTreeSet<T>;
+    fn from_value(vm: &Vm, v: Value, conv: &mut Conversion) -> Result<Self, Ctl> {
+        read_set(vm, v, conv)
+    }
+}
+impl<T: IntoValue> IntoValue for BTreeSet<T> {
+    fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl> {
+        write_set(vm, self.len(), self)
+    }
+}
+
 macro_rules! tuple_impls {
     ($len:literal: $($n:ident $i:tt),+) => {
+        impl<$($n: SandType),+> SandType for ($($n,)+) {
+            fn sand_type() -> crate::native::Type {
+                crate::native::Type::Tuple(vec![$($n::sand_type()),+])
+            }
+        }
         impl<$($n: FromValue),+> FromValue for ($($n,)+) {
             type Item<'a> = ($($n::Item<'a>,)+);
             fn from_value<'a>(vm: &'a Vm, v: Value, conv: &mut Conversion) -> Result<Self::Item<'a>, Ctl> {

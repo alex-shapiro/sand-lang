@@ -26,22 +26,16 @@ pub(crate) fn module() -> NativeModule {
     m.vm_function("encode_component", |vm: &mut Vm, s: Val<String>| encode_native(vm, s, b""));
     m.vm_function("encode_path", |vm: &mut Vm, s: Val<String>| encode_native(vm, s, b"/"));
     m.vm_function("decode_component", |vm: &mut Vm, s: Val<String>| -> Result<String, HostError> {
-        vm.charge_slow_bytes(s.str(&vm.heap).len())?;
-        decode_component(s.str(&vm.heap)).map_err(|msg| HostError::new("parse", msg))
+        let s = s.str(&vm.heap);
+        vm.reserve(s.len())?;
+        vm.charge_slow_bytes(s.len())?;
+        decode_component(s).map_err(|msg| HostError::new("parse", msg))
     });
-    m.vm_function("parse_query", |vm: &mut Vm, q: Val<String>| -> Result<Val<Vec<(String, String)>>, Ctl> {
+    m.vm_function("parse_query", |vm: &mut Vm, q: Val<String>| -> Result<Vec<(String, String)>, Ctl> {
         let q = q.str(&vm.heap);
         vm.reserve(q.len().saturating_mul(4))?;
         vm.charge_slow_bytes(q.len())?;
-        let pairs = parse_query(q);
-        vm.charge(pairs.len() as u64)?;
-        let mut items = Vec::with_capacity(pairs.len());
-        for (k, v) in pairs {
-            let k = vm.new_str(k);
-            let v = vm.new_str(v);
-            items.push(vm.heap.new_tuple(&[k, v]));
-        }
-        Ok(Val::from_raw(vm.heap.new_list(items)))
+        Ok(parse_query(q))
     });
     m
 }
@@ -281,12 +275,11 @@ pub(crate) fn remove_dot_segments(path: &str) -> String {
     out
 }
 
-fn encode_native(vm: &mut Vm, s: Val<String>, keep: &[u8]) -> Result<Val<String>, Ctl> {
+fn encode_native(vm: &mut Vm, s: Val<String>, keep: &[u8]) -> Result<String, Ctl> {
     let s = s.str(&vm.heap);
     vm.reserve(s.len().saturating_mul(3))?;
     vm.charge_slow_bytes(s.len())?;
-    let out = encode(s, keep);
-    Ok(Val::from_raw(vm.new_str(out)))
+    Ok(encode(s, keep))
 }
 
 /// Percent-encodes every byte that is not unreserved or in `keep`.

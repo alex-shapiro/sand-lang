@@ -16,8 +16,8 @@ use crate::native::{HostError, IntoValue, NativeModule, NativeObject, Val};
 use crate::policy::{Capability, Decision, MAX_PATH_BYTES, Policy};
 use crate::vm::iomem::{Reservation, ResourceSlot};
 use crate::vm::meter::{Allowance, Stopped};
-use crate::vm::value::{Value, to_usize_saturating};
-use crate::vm::{Ctl, CtlKind, Vm};
+use crate::vm::value::to_usize_saturating;
+use crate::vm::{Ctl, CtlKind, Permits, Vm};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -32,7 +32,7 @@ pub(crate) fn module() -> NativeModule {
     m.object_type::<FileObj>();
     register_file(&mut m);
 
-    m.vm_function("read_bytes", |vm: &mut Vm, path: Val<String>| -> FsResult<Val<Vec<u8>>> {
+    m.vm_function("read_bytes", |vm: &mut Vm, path: Val<String>| -> FsResult<Vec<u8>> {
         let (shown, mut t) = target(vm, path, Mode::Follow)?;
         check(vm, &mut t, Access::Read, &shown)?;
         let res = vm.io_reservation();
@@ -40,15 +40,13 @@ pub(crate) fn module() -> NativeModule {
             vm,
             shown,
             move |fs| fs.read(t, res),
-            |vm, (data, res)| {
+            |_, (data, res)| {
                 drop(res);
-                vm.reserve(data.len())?;
-                vm.charge_bytes(data.len())?;
-                Ok(Val::from_raw(vm.heap.new_bytes(data)))
+                Ok(data)
             },
         )
     });
-    m.vm_function("read_text", |vm: &mut Vm, path: Val<String>| -> FsResult<Val<String>> {
+    m.vm_function("read_text", |vm: &mut Vm, path: Val<String>| -> FsResult<String> {
         let (shown, mut t) = target(vm, path, Mode::Follow)?;
         check(vm, &mut t, Access::Read, &shown)?;
         let res = vm.io_reservation();
@@ -58,13 +56,7 @@ pub(crate) fn module() -> NativeModule {
             move |fs| fs.read(t, res),
             move |vm, (data, res)| {
                 drop(res);
-                vm.reserve(data.len())?;
-                // UTF-8 validation.
-                vm.charge_slow_bytes(data.len())?;
-                match String::from_utf8(data) {
-                    Ok(text) => Ok(Val::from_raw(vm.new_str(text))),
-                    Err(_) => Err(HostError::new("invalid", format!("{shown}: file is not valid UTF-8"))),
-                }
+                super::stream::utf8(vm, data)?.ok_or_else(|| HostError::new("invalid", format!("{shown}: file is not valid UTF-8")))
             },
         )
     });
@@ -83,7 +75,7 @@ pub(crate) fn module() -> NativeModule {
     m.vm_function("exists", |vm: &mut Vm, path: Val<String>| file_kind(vm, path, |k| k != EntryKind::Symlink));
     m.vm_function("is_file", |vm: &mut Vm, path: Val<String>| file_kind(vm, path, |k| k == EntryKind::File));
     m.vm_function("is_dir", |vm: &mut Vm, path: Val<String>| file_kind(vm, path, |k| k == EntryKind::Dir));
-    m.vm_function("list_dir", |vm: &mut Vm, path: Val<String>| -> FsResult<Val<Vec<String>>> {
+    m.vm_function("list_dir", |vm: &mut Vm, path: Val<String>| -> FsResult<Vec<String>> {
         let (shown, mut t) = target(vm, path, Mode::Follow)?;
         check(vm, &mut t, Access::Read, &shown)?;
         let res = vm.io_reservation();
@@ -93,14 +85,10 @@ pub(crate) fn module() -> NativeModule {
             move |fs| fs.list_dir(t, res),
             |vm, (names, res)| {
                 drop(res);
-                let bytes = names.iter().map(|n| n.len() + 32).sum();
-                vm.reserve(bytes)?;
-                // Reading, converting and sorting the names (done off the VM thread).
+                // Reading and sorting the names (done off the VM thread).
                 let n = names.len() as u64;
-                vm.charge(n * (1 + u64::from(n.max(1).ilog2())))?;
-                vm.charge_bytes(bytes)?;
-                let items = names.into_iter().map(|n| vm.new_str(n)).collect();
-                Ok(Val::from_raw(vm.heap.new_list(items)))
+                vm.charge(n * u64::from(n.max(1).ilog2()))?;
+                Ok(names)
             },
         )
     });
@@ -145,7 +133,7 @@ pub(crate) fn module() -> NativeModule {
         let renamed = vm.offload(move |allowance| -> Result<io::Result<()>, (Halt, bool)> {
             for (t, moved_to, is_to) in [(&from, Some(to.path.as_path()), false), (&to, None, true)] {
                 if fs.stat(t).is_ok_and(|m| m.kind == EntryKind::Dir)
-                    && let Err(e) = scan_tree(&fs, &policy, t, moved_to, &mut res, allowance).map_err(|h| (h, is_to))?
+                    && let Err(e) = scan_tree(&fs, &policy, t, moved_to, None, &mut res, allowance).map_err(|h| (h, is_to))?
                 {
                     return Ok(Err(e));
                 }
@@ -169,50 +157,36 @@ pub(crate) fn module() -> NativeModule {
         }
         run(vm, shown, move |fs| fs.copy(from, to), ok_unit)
     });
-    m.vm_function("stat", |vm: &mut Vm, path: Val<String>| -> FsResult<Val<Stat>> {
+    m.vm_function("stat", |vm: &mut Vm, path: Val<String>| -> FsResult<Stat> {
         let (shown, mut t) = target(vm, path, Mode::Follow)?;
         check(vm, &mut t, Access::Read, &shown)?;
         let stat = match vm.host.fs.stat(&t) {
             Ok(m) if m.kind == EntryKind::Symlink => Err(unchecked_symlink(t.path.file_name().unwrap_or_default())),
             r => r,
         };
-        settle(vm, shown, stat, |vm, m| {
-            let modified = vm.option(m.modified.map(Value::Int));
-            let size = Value::Int(i64::try_from(m.size).unwrap_or(i64::MAX));
-            let (is_file, is_dir) = (Value::Bool(m.kind == EntryKind::File), Value::Bool(m.kind == EntryKind::Dir));
-            Ok(Val::from_raw(vm.heap.new_tuple(&[size, is_file, is_dir, modified])))
+        settle(vm, shown, stat, |_, m| {
+            Ok((i64::try_from(m.size).unwrap_or(i64::MAX), m.kind == EntryKind::File, m.kind == EntryKind::Dir, m.modified))
         })
     });
 
-    // Pure path helpers (charged for scanning and copying their input).
-    m.vm_function("join", |vm: &mut Vm, parts: Val<Vec<String>>| -> Result<Val<String>, Ctl> {
+    // Pure path helpers. The conversion of the result charges for the copy.
+    m.vm_function("join", |vm: &mut Vm, parts: Val<Vec<String>>| -> Result<String, Ctl> {
         let items = parts.items(&vm.heap);
-        let total = items.iter().map(|&p| vm.str(p).len() + 1).fold(0usize, usize::saturating_add);
         vm.charge(items.len() as u64)?;
-        vm.charge_bytes(total)?;
-        vm.reserve(total)?;
         let mut path = PathBuf::new();
-        for &part in parts.items(&vm.heap) {
+        for &part in items {
             path.push(vm.str(part));
         }
-        let s = path.to_string_lossy().into_owned();
-        Ok(Val::from_raw(vm.new_str(s)))
+        Ok(path.to_string_lossy().into_owned())
     });
-    m.vm_function("basename", |vm: &mut Vm, path: Val<String>| -> Result<Val<String>, Ctl> {
-        lexical_cost(vm, path)?;
-        let s = Path::new(path.str(&vm.heap)).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        Ok(Val::from_raw(vm.new_str(s)))
+    m.vm_function("basename", |vm: &mut Vm, path: Val<String>| -> Result<String, Ctl> {
+        Ok(lexical(vm, path)?.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
     });
-    m.vm_function("dirname", |vm: &mut Vm, path: Val<String>| -> Result<Val<String>, Ctl> {
-        lexical_cost(vm, path)?;
-        let s = Path::new(path.str(&vm.heap)).parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
-        Ok(Val::from_raw(vm.new_str(s)))
+    m.vm_function("dirname", |vm: &mut Vm, path: Val<String>| -> Result<String, Ctl> {
+        Ok(lexical(vm, path)?.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default())
     });
-    m.vm_function("extension", |vm: &mut Vm, path: Val<String>| -> Result<Val<Option<String>>, Ctl> {
-        lexical_cost(vm, path)?;
-        let ext = Path::new(path.str(&vm.heap)).extension().map(|e| e.to_string_lossy().into_owned());
-        let v = ext.map(|e| vm.new_str(e));
-        Ok(Val::from_raw(vm.option(v)))
+    m.vm_function("extension", |vm: &mut Vm, path: Val<String>| -> Result<Option<String>, Ctl> {
+        Ok(lexical(vm, path)?.extension().map(|e| e.to_string_lossy().into_owned()))
     });
     m
 }
@@ -325,28 +299,45 @@ fn charge_entry(allowance: &mut Allowance, path: &Path) -> Result<(), Stopped> {
 /// Fails with [`Halt::Protected`] if the policy protects an entry of the
 /// directory tree at `t` (see [`Policy::protects_normalized_in`]). If the
 /// tree is being moved to `to`, the entry's new path is checked as well. A
-/// tree with a protected entry may not be moved or removed as a whole. The
-/// tree is scanned only if a deny rule may match a path in it.
+/// tree with a protected entry may not be moved or removed as a whole. With
+/// `permits`, also fails if writing an entry is not permitted
+/// ([`permit_entry`]). Without `permits`, the tree is scanned only if a deny
+/// rule may match a path in it.
 fn scan_tree(
     fs: &Fs,
     policy: &Policy,
     t: &Target,
     to: Option<&Path>,
+    permits: Option<&Permits>,
     res: &mut Reservation,
     allowance: &mut Allowance,
 ) -> Result<io::Result<()>, Halt> {
     let space = fs.space();
-    if !policy.denies_under_normalized_in(&t.path, space) && to.is_none_or(|to| !policy.denies_under_normalized_in(to, space)) {
+    let denies = policy.denies_under_normalized_in(&t.path, space) || to.is_some_and(|to| policy.denies_under_normalized_in(to, space));
+    if !denies && permits.is_none() {
         return Ok(Ok(()));
     }
     fs.walk_tree(t, res, false, |path| {
         charge_entry(allowance, path)?;
         let moved = to.map(|to| to.join(path.strip_prefix(&t.path).unwrap_or(path)));
-        if policy.protects_normalized_in(path, space) || moved.is_some_and(|m| policy.protects_normalized_in(&m, space)) {
+        if denies && (policy.protects_normalized_in(path, space) || moved.is_some_and(|m| policy.protects_normalized_in(&m, space))) {
             return Err(Halt::Protected);
+        }
+        if let Some(permits) = permits {
+            permit_entry(permits, path)?;
         }
         Ok(Ok(()))
     })
+}
+
+/// Checks writing the entry `path` of a tree.
+fn permit_entry(permits: &Permits, path: &Path) -> Result<(), Halt> {
+    let cap = Capability::FsWrite(path.to_path_buf());
+    match permits.permit_path(&cap, true) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(Halt::Denied(path.to_path_buf())),
+        Err(()) => Err(Halt::Prompt(cap)),
+    }
 }
 
 fn protected(shown: &str) -> HostError {
@@ -380,27 +371,27 @@ fn ok_unit<T>(_: &mut Vm, _: T) -> FsResult<()> {
 
 /// `remove_tree(path)`: removes the directory `path` (not a symlink to
 /// one) and everything below it. If the policy protects an entry of the
-/// tree ([`scan_tree`]), nothing is removed. Each entry is also checked
-/// against the policy just before it is removed.
+/// tree ([`scan_tree`]), nothing is removed. If the user may be asked, every
+/// entry is permitted before anything is removed, so that a prompt cannot
+/// stop the removal partway. Each entry is also checked against the policy
+/// just before it is removed.
 fn remove_tree(vm: &mut Vm, path: Val<String>) -> FsResult<()> {
     let (shown, mut t) = target(vm, path, Mode::Entry)?;
     check(vm, &mut t, Access::Write, &shown)?;
+    // Every entry is checked before any is removed, so that a denial or a
+    // prompt leaves the tree whole.
+    let scan = !matches!(vm.host.policy, Policy::AllowAll);
     let (fs, permits, root) = (vm.host.fs.clone(), vm.permits(), t.path.clone());
     let mut res = vm.io_reservation();
     let removed = vm.offload(move |allowance| -> Result<io::Result<()>, Halt> {
         if fs.stat(&t).is_ok_and(|m| m.kind == EntryKind::Dir)
-            && let Err(e) = scan_tree(&fs, &permits.policy, &t, None, &mut res, allowance)?
+            && let Err(e) = scan_tree(&fs, &permits.policy, &t, None, scan.then_some(&permits), &mut res, allowance)?
         {
             return Ok(Err(e));
         }
         fs.walk_tree(&t, &mut res, true, |path| {
             charge_entry(allowance, path)?;
-            let cap = Capability::FsWrite(path.to_path_buf());
-            match permits.permit_path(&cap, true) {
-                Ok(true) => Ok(Ok(())),
-                Ok(false) => Err(Halt::Denied(path.to_path_buf())),
-                Err(()) => Err(Halt::Prompt(cap)),
-            }
+            permit_entry(&permits, path).map(Ok)
         })
     })?;
     match removed {
@@ -428,12 +419,11 @@ fn write(vm: &mut Vm, path: Val<String>, data: Vec<u8>, res: Reservation) -> FsR
     run(vm, shown, op, ok_unit)
 }
 
-/// Charges for scanning the path `p` and copying (part of) it, and checks
-/// the memory limit for the copy.
-fn lexical_cost(vm: &Vm, p: Val<String>) -> Result<(), Ctl> {
-    let n = p.str(&vm.heap).len();
-    vm.charge_bytes(n.saturating_mul(2))?;
-    vm.reserve(n)
+/// The path `p`, charged for scanning it.
+fn lexical(vm: &Vm, p: Val<String>) -> Result<&Path, Ctl> {
+    let p = p.str(&vm.heap);
+    vm.charge_bytes(p.len())?;
+    Ok(Path::new(p))
 }
 
 /// `exists` / `is_file` / `is_dir`: `false` when nothing (or a symlink that
@@ -677,7 +667,7 @@ fn with_file<R: IntoValue>(
 fn register_file(m: &mut NativeModule) {
     m.enum_type::<OpenMode>();
     m.vm_function("open", open);
-    m.vm_function("File.read", |vm: &mut Vm, file: Val<FileObj>, max: i64| -> FsResult<Val<Vec<u8>>> {
+    m.vm_function("File.read", |vm: &mut Vm, file: Val<FileObj>, max: i64| -> FsResult<Vec<u8>> {
         if max <= 0 {
             return Err(HostError::new("invalid", "read: max must be positive"));
         }
@@ -702,14 +692,10 @@ fn register_file(m: &mut NativeModule) {
                     let r = f.read(&mut data);
                     (data, r)
                 })?;
-                return Ok(match r {
-                    Ok(got) => {
-                        data.truncate(got);
-                        vm.charge_bytes(got)?;
-                        Ok(Val::from_raw(vm.heap.new_bytes(data)))
-                    }
-                    Err(e) => Err(e),
-                });
+                return Ok(r.map(|got| {
+                    data.truncate(got);
+                    data
+                }));
             }
             if st.unread() == 0 {
                 if let Err(e) = st.make_room(vm)? {
@@ -721,13 +707,12 @@ fn register_file(m: &mut NativeModule) {
             }
             let n = st.unread().min(max);
             vm.reserve(n)?;
-            vm.charge_bytes(n)?;
             let data = st.buf[st.at..st.at + n].to_vec();
             st.consume(n);
-            Ok(Ok(Val::from_raw(vm.heap.new_bytes(data))))
+            Ok(Ok(data))
         })
     });
-    m.vm_function("File.read_line", |vm: &mut Vm, file: Val<FileObj>| -> FsResult<Val<Option<String>>> {
+    m.vm_function("File.read_line", |vm: &mut Vm, file: Val<FileObj>| -> FsResult<Option<String>> {
         with_file(vm, file, Needs::Read, |vm, st| {
             vm.charge(1)?;
             // The line stays in the buffer until it is complete, so that
@@ -750,7 +735,7 @@ fn register_file(m: &mut NativeModule) {
                     return Ok(Err(e));
                 }
                 match st.fill(vm)? {
-                    Ok(0) if st.unread() == 0 => return Ok(Ok(Val::from_raw(vm.none()))),
+                    Ok(0) if st.unread() == 0 => return Ok(Ok(None)),
                     Ok(0) => break st.buf.len(),
                     Ok(_) => {}
                     Err(e) => return Ok(Err(e)),
@@ -761,30 +746,20 @@ fn register_file(m: &mut NativeModule) {
                 line = l.strip_suffix(b"\r").unwrap_or(l);
             }
             vm.reserve(line.len())?;
-            vm.charge_slow_bytes(line.len())?;
-            let line = match std::str::from_utf8(line) {
-                Ok(text) => text.to_string(),
-                Err(_) => {
-                    st.consume(end - st.at);
-                    return Ok(Err(io::Error::new(io::ErrorKind::InvalidData, "line is not valid UTF-8")));
-                }
-            };
+            let line = line.to_vec();
             st.consume(end - st.at);
+            let Some(text) = super::stream::utf8(vm, line)? else {
+                return Ok(Err(io::Error::new(io::ErrorKind::InvalidData, "line is not valid UTF-8")));
+            };
             st.shrink();
-            let s = vm.new_str(line);
-            Ok(Ok(Val::from_raw(vm.some(s))))
+            Ok(Ok(Some(text)))
         })
     });
-    m.vm_function("File.read_all", |vm: &mut Vm, file: Val<FileObj>| -> FsResult<Val<Vec<u8>>> {
-        read_rest(vm, file, |vm, data| Ok(Ok(Val::from_raw(vm.heap.new_bytes(data)))))
-    });
-    m.vm_function("File.read_text", |vm: &mut Vm, file: Val<FileObj>| -> FsResult<Val<String>> {
+    m.vm_function("File.read_all", |vm: &mut Vm, file: Val<FileObj>| read_rest(vm, file, |_, data| Ok(Ok(data))));
+    m.vm_function("File.read_text", |vm: &mut Vm, file: Val<FileObj>| {
         read_rest(vm, file, |vm, data| {
             vm.charge_slow_bytes(data.len())?;
-            Ok(match String::from_utf8(data) {
-                Ok(s) => Ok(Val::from_raw(vm.new_str(s))),
-                Err(_) => Err(io::Error::new(io::ErrorKind::InvalidData, "file is not valid UTF-8")),
-            })
+            Ok(String::from_utf8(data).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "file is not valid UTF-8")))
         })
     });
     m.vm_function("File.write", |vm: &mut Vm, file: Val<FileObj>, data: Val<Vec<u8>>| write_file(vm, file, move |vm| data.bytes(&vm.heap)));
@@ -824,15 +799,10 @@ fn register_file(m: &mut NativeModule) {
             Ok(pos.map(|p| i64::try_from(p.saturating_sub(unread)).unwrap_or(i64::MAX)))
         })
     });
-    m.vm_function("file_stat", |vm: &mut Vm, file: Val<FileObj>| -> FsResult<Val<(i64, Option<i64>)>> {
+    m.vm_function("file_stat", |vm: &mut Vm, file: Val<FileObj>| {
         with_file(vm, file, Needs::Nothing, |vm, st| {
             vm.charge(SYSCALL_FUEL)?;
-            let m = match st.io(vm, |f| f.meta())? {
-                Ok(m) => m,
-                Err(e) => return Ok(Err(e)),
-            };
-            let modified = vm.option(m.modified.map(Value::Int));
-            Ok(Ok(Val::from_raw(vm.heap.new_tuple(&[Value::Int(i64::try_from(m.size).unwrap_or(i64::MAX)), modified]))))
+            Ok(st.io(vm, |f| f.meta())?.map(|m| (i64::try_from(m.size).unwrap_or(i64::MAX), m.modified)))
         })
     });
     m.vm_function("File.set_len", |vm: &mut Vm, file: Val<FileObj>, len: i64| {
@@ -854,14 +824,10 @@ fn register_file(m: &mut NativeModule) {
             st.io(vm, |f| f.sync())
         })
     });
-    m.vm_function("File.path", |vm: &mut Vm, file: Val<FileObj>| -> Result<Val<String>, Ctl> {
-        let shown = file.get(&vm.heap)?.shown.clone();
-        vm.charge_bytes(shown.len())?;
-        Ok(Val::from_raw(vm.new_str(shown)))
-    });
+    m.vm_function("File.path", |vm: &mut Vm, file: Val<FileObj>| -> Result<String, Ctl> { Ok(file.get(&vm.heap)?.shown.clone()) });
 }
 
-fn open(vm: &mut Vm, path: Val<String>, mode: OpenMode) -> FsResult<Val<FileObj>> {
+fn open(vm: &mut Vm, path: Val<String>, mode: OpenMode) -> FsResult<FileObj> {
     let (shown, mut t) = target(vm, path, Mode::Follow)?;
     for (needed, access) in [(mode.reads(), Access::Read), (mode.writes(), Access::Write)] {
         if needed {
@@ -870,8 +836,6 @@ fn open(vm: &mut Vm, path: Val<String>, mode: OpenMode) -> FsResult<Val<FileObj>
     }
     let slot = vm.resource_slot()?;
     vm.charge(SYSCALL_FUEL)?;
-    // The object's memory, before opening: a memory limit calls the native again.
-    vm.reserve(FileObj::BASE_SIZE + shown.len())?;
     let fs = vm.host.fs.clone();
     let file = match vm.offload(move |_| fs.open(t, mode))? {
         Ok(f) => f,
@@ -879,8 +843,7 @@ fn open(vm: &mut Vm, path: Val<String>, mode: OpenMode) -> FsResult<Val<FileObj>
         Err(e) if too_many_open_files(&e) && !vm.collected => return Err(Ctl::from(CtlKind::Collect).into()),
         Err(e) => return Err(HostError::new(io_kind(&e), format!("{shown}: {e}"))),
     };
-    let obj = FileObj { open: Some(OpenState { file: Some(file), _slot: slot, buf: Vec::new(), at: 0, counted: 0 }), shown, mode };
-    Ok(vm.place_object(obj))
+    Ok(FileObj { open: Some(OpenState { file: Some(file), _slot: slot, buf: Vec::new(), at: 0, counted: 0 }), shown, mode })
 }
 
 /// `write` and `write_str`: writes the bytes that `data` reads from the heap.
@@ -945,7 +908,6 @@ fn read_rest<R: IntoValue>(
         if vm.heap.would_exceed(data.len()) {
             return Ok(Err(too_large()));
         }
-        vm.charge_bytes(data.len())?;
         finish(vm, data)
     })
 }

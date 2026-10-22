@@ -152,6 +152,8 @@ pub struct Heap {
     young_resources: usize,
     /// Testing aid: collect at every safe point (see `Config::gc_stress`).
     pub stress: bool,
+    /// Set while allocations skip the memory limit (see [`Vm::unchecked`](crate::vm::Vm::unchecked)).
+    pub(crate) unchecked: bool,
     /// Buffers of pending I/O, counted against `limit` with the heap.
     pub io_memory: Arc<IoMemory>,
     worklist: Vec<u32>,
@@ -348,6 +350,7 @@ impl Heap {
             live_objects: 0,
             young_resources: 0,
             stress: false,
+            unchecked: false,
             io_memory: IoMemory::new(limit, max_resources),
             worklist: Vec::new(),
             scan: Vec::new(),
@@ -535,7 +538,7 @@ impl Heap {
                 // Publishing on every check before the heap grows keeps the
                 // size that pending I/O checks against up to date.
                 self.io_memory.publish_heap(used);
-                used.saturating_add(self.io_memory.reserved()).saturating_add(extra) > l
+                !self.unchecked && used.saturating_add(self.io_memory.reserved()).saturating_add(extra) > l
             }
             None => extra > super::iomem::UNLIMITED,
         }

@@ -2797,8 +2797,9 @@ and `Config::prompter` set the active `Policy` and interactive `Prompter`
 A `NativeModule` makes Rust functions and types available to scripts as an
 importable module, registered with `Config::module`. The engine derives the
 Sand type of each function from its Rust types, and converts arguments and
-results within the fuel and memory limits. Module and type names must be
-unique, and a host module cannot take the name of a standard module.
+results within the fuel and memory limits. `NativeModule` and
+`Config::module` panic on a name that is invalid or taken (a host module cannot
+take the name of a standard module).
 
 | Method                       | Registers                                                                            |
 | ---------------------------- | ------------------------------------------------------------------------------------ |
@@ -2826,12 +2827,19 @@ The error type of a function's Rust result sets its Sand result:
 `Vm::require(&capability)` checks a `Capability` (§14) and fails with kind
 `"permission_denied"` if the policy denies it.
 
+The engine calls a function again after a permission prompt, and after a
+garbage collection if the function fails with the memory limit or a resource
+limit. Thus a function must call `Vm::require` and reserve memory before its
+side effects. The conversion of its result does not fail with the memory limit:
+the engine checks the limit after the call.
+
 | Rust type                                                | Sand type                                                    |
 | -------------------------------------------------------- | ------------------------------------------------------------ |
 | `i64`, `f64`, `bool`, `()`, `jiff::SignedDuration`       | `int`, `float`, `bool`, `()`, `duration`                     |
 | `String`, `&str`; `Vec<u8>`, `&[u8]`                     | `str`; `bytes`                                               |
 | `Vec<T>`, `Option<T>`, tuples of 2 to 8 elements         | `[T]`, `T?`, tuples                                          |
-| `HashMap<String, T>`, `BTreeMap<String, T>`              | `[str: T]`                                                   |
+| `HashMap<K, V>`, `BTreeMap<K, V>`                        | `[K: V]`                                                     |
+| `HashSet<T>`, `BTreeSet<T>`                              | `Set<T>`                                                     |
 | `Result<T, E>`                                           | `Result<T>` or `T`, as above                                 |
 | `Never`                                                  | `never`                                                      |
 | a registered `ValueType`, `EnumType` or `ObjectType` `T` | its type (`&T` for an object argument)                       |
@@ -2856,8 +2864,9 @@ of one `Config`. It fails with `Error::Compile` if:
   type of another module;
 - a public function or field uses a private type;
 - a generic function has no `native fn` declaration;
-- a function registered as `"Type.name"` names no type of the module, or a
-  generic type, and has no `native fn` declaration;
+- a function registered as `"Type.name"` names no type of the module, or
+  names a generic type and has no `native fn` declaration;
+- the natives of host modules use each other's types in a cycle;
 - a function that the source declares also has `params` or `doc`.
 
 ### 16.4 Operating-system access and file systems

@@ -3,6 +3,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::quote;
+use syn::ext::IdentExt;
 use syn::{Attribute, Data, DeriveInput, Error, Expr, ExprLit, Fields, Lit, LitStr, Meta, parse_macro_input};
 
 /// Derives `EnumType`, `SandType`, `FromValue`, and `IntoValue` for a unit
@@ -47,7 +48,7 @@ fn attrs(input: &DeriveInput, derive: &str, allow_private: bool) -> syn::Result<
     if !input.generics.params.is_empty() {
         return Err(Error::new_spanned(&input.generics, format!("`{derive}` cannot be derived for a type with type parameters")));
     }
-    let (mut module, mut name, mut private) = (None, LitStr::new(&ty.to_string(), ty.span()), false);
+    let (mut module, mut name, mut private) = (None, LitStr::new(&ty.unraw().to_string(), ty.span()), false);
     for attr in input.attrs.iter().filter(|a| a.path().is_ident("sand")) {
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("module") {
@@ -67,6 +68,16 @@ fn attrs(input: &DeriveInput, derive: &str, allow_private: bool) -> syn::Result<
     let Some(module) = module else {
         return Err(Error::new(Span::call_site(), format!("`{derive}` requires `#[sand(module = \"...\")]`")));
     };
+    let n = name.value();
+    let capitalized = n.starts_with(|c: char| c.is_ascii_uppercase()) && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !capitalized {
+        return Err(Error::new_spanned(&name, format!("the Sand type name `{n}` is not a capitalized identifier")));
+    }
+    for attrs in members(&input.data) {
+        if let Some(a) = attrs.iter().find(|a| a.path().is_ident("sand")) {
+            return Err(Error::new_spanned(a, "`#[sand(...)]` applies only to the type"));
+        }
+    }
     Ok(Attrs { module, name, private })
 }
 
@@ -86,7 +97,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         if !matches!(v.fields, Fields::Unit) {
             return Err(Error::new_spanned(&v.fields, "`SandEnum` variants cannot have fields"));
         }
-        let (ident, vname, vdoc) = (&v.ident, v.ident.to_string(), extract_doc_comment(&v.attrs));
+        let (ident, vname, vdoc) = (&v.ident, v.ident.unraw().to_string(), extract_doc_comment(&v.attrs));
         variants.push(quote! { ::sandlang::native::EnumVariant { name: #vname, doc: #vdoc, value: #ty::#ident } });
         arms.push(quote! { #ty::#ident => #i });
     }
@@ -166,6 +177,18 @@ fn sand_object(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             }
         }
     })
+}
+
+/// The attributes of the variants and fields of a type.
+fn members(data: &Data) -> Vec<&[Attribute]> {
+    fn fields(f: &Fields) -> impl Iterator<Item = &[Attribute]> {
+        f.iter().map(|f| &f.attrs[..])
+    }
+    match data {
+        Data::Struct(s) => fields(&s.fields).collect(),
+        Data::Enum(e) => e.variants.iter().flat_map(|v| std::iter::once(&v.attrs[..]).chain(fields(&v.fields))).collect(),
+        Data::Union(u) => u.fields.named.iter().map(|f| &f.attrs[..]).collect(),
+    }
 }
 
 fn extract_doc_comment(attrs: &[Attribute]) -> String {

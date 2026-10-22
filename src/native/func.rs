@@ -162,7 +162,7 @@ macro_rules! fn_impls {
                         $(let $a = $a::from_value(vm, $a, &mut conv)?;)*
                         call(&self, $($a),*)
                     };
-                    r.into_value(vm)
+                    vm.unchecked(|vm| r.into_value(vm))
                 })
             }
         }
@@ -182,7 +182,8 @@ macro_rules! fn_impls {
                     let &[$($a),*] = own_args(args, $n) else { return Err(missing()) };
                     let mut conv = Conversion::new();
                     $(let $a = $a::from_value(vm, $a, &mut conv)?;)*
-                    self(vm, $($a),*).into_value(vm)
+                    let r = self(vm, $($a),*);
+                    vm.unchecked(|vm| r.into_value(vm))
                 })
             }
         }

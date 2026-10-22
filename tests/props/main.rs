@@ -1,6 +1,7 @@
 //! Property-based tests that compare Sand execution against Rust reference
 //! models on generated inputs.
 
+mod natives;
 mod observers;
 mod programs;
 mod values;

@@ -1673,12 +1673,18 @@ impl Checker {
         let key = format!("{module}.{name}");
         let (owner, fn_name) = match name.split_once('.') {
             Some((ty, method)) => match self.scope_def(mi, ty) {
-                Some(Def::Type(TyRef::Def(d))) if self.types[d as usize].module == mi && self.types[d as usize].generics.is_empty() => {
+                Some(Def::Type(TyRef::Def(d))) if self.types[d as usize].module == mi => {
+                    if !self.types[d as usize].generics.is_empty() {
+                        let msg = format!(
+                            "native `{key}` is a method of the generic type `{ty}`, so the module must declare it with `native fn`"
+                        );
+                        self.error(span, msg);
+                        return;
+                    }
                     (Some(d), method)
                 }
                 _ => {
-                    let msg = format!("native `{key}` is a method of `{ty}`, which is not a type of the module without type parameters");
-                    self.error(span, msg);
+                    self.error(span, format!("native `{key}` is a method of `{ty}`, which is not a type of module `{module}`"));
                     return;
                 }
             },
@@ -1817,15 +1823,19 @@ impl Checker {
             Type::Named(n) => {
                 let module = match n.module {
                     "prelude" => self.prelude,
-                    m => self.mods.iter().position(|info| self.syms.str(info.name) == m).map(|i| i as ModId),
+                    m => self.module_named(m),
                 };
                 let def = match module.and_then(|m| self.scope_def(m, n.name)) {
                     Some(Def::Type(TyRef::Def(d))) if Some(self.types[d as usize].module) == module => d,
                     _ => {
-                        self.error(
-                            span,
-                            format!("the Rust function of native `{key}` uses `{}.{}`, which no module declares", n.module, n.name),
-                        );
+                        let (m, t) = (n.module, n.name);
+                        let msg = match module {
+                            Some(_) => format!("the Rust function of native `{key}` uses `{m}.{t}`, which module `{m}` does not declare"),
+                            None => {
+                                format!("the Rust function of native `{key}` uses `{m}.{t}`, and module `{m}` is not added to the engine")
+                            }
+                        };
+                        self.error(span, msg);
                         return None;
                     }
                 };

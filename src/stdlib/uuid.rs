@@ -1,7 +1,7 @@
 //! The `uuid` module.
 
 use crate::check::ModKind;
-use crate::native::{HostError, NativeModule, Val};
+use crate::native::{HostError, NativeModule};
 use crate::vm::{Ctl, Vm};
 
 pub(crate) fn module() -> NativeModule {
@@ -10,7 +10,7 @@ pub(crate) fn module() -> NativeModule {
         let mut b = random_bytes(vm);
         b[6] = (b[6] & 0x0f) | 0x40;
         b[8] = (b[8] & 0x3f) | 0x80;
-        Ok(new_str(vm, format_uuid(&b)))
+        Ok(format_uuid(&b))
     });
     m.vm_function("unix_millis", |vm: &mut Vm| -> Result<_, Ctl> {
         let ms = vm.host.clock.wall().duration_since(crate::platform::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
@@ -27,17 +27,13 @@ pub(crate) fn module() -> NativeModule {
         b[6] = 0x70 | (counter >> 8) as u8;
         b[7] = counter as u8;
         b[8] = (b[8] & 0x3f) | 0x80;
-        Ok(new_str(vm, format_uuid(&b)))
+        Ok(format_uuid(&b))
     });
-    m.vm_function("parse", |vm: &mut Vm, s: Val<String>| match parse(s.str(&vm.heap)) {
-        Some(b) => Ok(new_str(vm, format_uuid(&b))),
-        None => Err(HostError::new("parse", format!("invalid UUID: {:?}", super::truncate(s.str(&vm.heap), 64)))),
+    m.function("parse", |s: &str| match parse(s) {
+        Some(b) => Ok(format_uuid(&b)),
+        None => Err(HostError::new("parse", format!("invalid UUID: {:?}", super::truncate(s, 64)))),
     });
     m
-}
-
-fn new_str(vm: &mut Vm, s: String) -> Val<String> {
-    Val::from_raw(vm.new_str(s))
 }
 
 fn random_bytes(vm: &mut Vm) -> [u8; 16] {

@@ -3,7 +3,6 @@
 use crate::check::ModKind;
 use crate::native::{NativeModule, Val};
 use crate::vm::display::escape_str_debug;
-use crate::vm::value::{Obj, Value};
 use crate::vm::{Ctl, Vm};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -138,17 +137,14 @@ fn emit_record(vm: &mut Vm, level: LogLevel, msg: Val<String>, fields: Fields) -
     if !enabled {
         return Ok(());
     }
-    let fields: Vec<(Value, Value)> = match vm.heap.get(fields.raw()) {
-        Obj::Map(m) => m.entries.iter().flatten().copied().collect(),
-        _ => Vec::new(),
-    };
-    let len = msg.str(&vm.heap).len() + fields.iter().map(|&(k, v)| vm.str(k).len() + vm.str(v).len()).sum::<usize>();
+    let fields = fields.map(&vm.heap)?.entries.iter().flatten();
+    let len = msg.str(&vm.heap).len() + fields.clone().map(|&(k, v)| vm.str(k).len() + vm.str(v).len()).sum::<usize>();
     vm.reserve(len)?;
     vm.charge_bytes(len)?;
     let record = LogRecord {
         level,
         message: msg.str(&vm.heap).to_string(),
-        fields: fields.iter().map(|&(k, v)| (vm.str(k).to_string(), vm.str(v).to_string())).collect(),
+        fields: fields.map(|&(k, v)| (vm.str(k).to_string(), vm.str(v).to_string())).collect(),
         location: vm.native_caller(),
     };
     match sink {

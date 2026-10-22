@@ -104,6 +104,12 @@ pub enum Error {
     Io(String),
 }
 
+impl Error {
+    fn compiler_bug(message: &str) -> Error {
+        Error::Internal { message: format!("compiler: {message}"), trace: Vec::new() }
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -754,7 +760,7 @@ pub(crate) struct Compiled {
     /// compilation, excluding import prompts.
     pub deadline: Option<Instant>,
     /// The snapshot the program extends, if it only adds to its tables (no
-    /// host module had to be compiled), so that it can be recycled.
+    /// module with natives had to be compiled), so that it can be recycled.
     pub snapshot: Option<Arc<Snapshot>>,
 }
 
@@ -771,8 +777,7 @@ pub(crate) struct CompileOptions {
 /// Runs `f` on a stack deep enough for checking and compiling
 /// (`platform::on_deep_stack`). A panic is an internal compiler error.
 pub(crate) fn on_compile_stack<R: Send + 'static>(f: impl FnOnce() -> Result<R, Error> + Send + 'static) -> Result<R, Error> {
-    crate::platform::on_deep_stack(f)
-        .unwrap_or_else(|p| Err(Error::Io(format!("internal compiler error: {}", crate::unwind::panic_text(&*p)))))
+    crate::platform::on_deep_stack(f).unwrap_or_else(|p| Err(Error::compiler_bug(&crate::unwind::panic_text(&*p))))
 }
 
 impl Engine {
@@ -933,8 +938,8 @@ impl Engine {
         let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
         match crate::unwind::catch(|| compiling.poll(&mut cx)) {
             Ok(std::task::Poll::Ready(r)) => r,
-            Ok(std::task::Poll::Pending) => Err(Error::Io("internal compiler error: compilation waited".into())),
-            Err(msg) => Err(Error::Io(format!("internal compiler error: {msg}"))),
+            Ok(std::task::Poll::Pending) => Err(Error::compiler_bug("compilation waited")),
+            Err(msg) => Err(Error::compiler_bug(&msg)),
         }
     }
 
@@ -1339,15 +1344,8 @@ impl Engine {
                         match library {
                             Some(resolved) => Some((resolved, name, span, false)),
                             None if optional => continue,
-                            None if crate::stdlib::OS_MODULES.contains(&name.as_str()) => {
-                                errors.push(Diag::error(
-                                    span,
-                                    format!("module `{name}` is not available: this build of Sand has no operating-system access"),
-                                ));
-                                continue;
-                            }
                             None => {
-                                errors.push(Diag::error(span, format!("unknown module `{name}`")));
+                                errors.push(Diag::error(span, crate::modules::unknown_module(&name)));
                                 continue;
                             }
                         }
@@ -1565,7 +1563,6 @@ fn compile_program(
     if lint {
         checker.lint.main_imports = checker.main_imports();
     }
-    // Only host modules declare natives.
     let host = g.has_natives(&order);
     let cp = checker.take_checked();
     let lints = match modules.iter().find(|m| m.file == main_file).filter(|_| lint) {
