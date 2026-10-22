@@ -137,23 +137,23 @@ Running the script above prints `5.0` and `Err(Error { kind: "not_found", messag
 
 Sand infers the Sand function signature from the Rust parameter and return types:
 
-| Rust type                                         | Sand type                    |
-| ------------------------------------------------- | ---------------------------- |
-| `i64`, `f64`, `bool`, `()`                        | `int`, `float`, `bool`, `()` |
-| `String`, `&str`                                  | `str`                        |
-| `Vec<u8>`, `&[u8]`                                | `bytes`                      |
-| `Vec<T>`                                          | `[T]`                        |
-| `Option<T>`                                       | `T?`                         |
-| `Box<T>`                                          | `T`                          |
-| `Result<T, E>`                                    | `Result<T, Error>`           |
-| `HashMap<K, V>`, `BTreeMap<K, V>`                 | `[K: V]`                     |
-| `HashSet<T>`, `BTreeSet<T>`                       | `Set<T>`                     |
-| `jiff::SignedDuration`                            | `duration`                   |
-| tuples of up to 8 elements                        | tuples                       |
-| Rust enum with `#[derive(SandEnum)]`                     | matching Sand `enum`         |
-| Rust struct with `#[derive(SandStruct)]`                 | matching Sand `struct`       |
-| `&T` (argument) or `T` (result) with `#[derive(SandObject)]` | opaque type `T`          |
-| `ValueType` `T` with `#[derive(SandValue)]`              | opaque value type `T`        |
+| Rust type                                                    | Sand type                    |
+| ------------------------------------------------------------ | ---------------------------- |
+| `i64`, `f64`, `bool`, `()`                                   | `int`, `float`, `bool`, `()` |
+| `String`, `&str`                                             | `str`                        |
+| `Vec<u8>`, `&[u8]`                                           | `bytes`                      |
+| `Vec<T>`                                                     | `[T]`                        |
+| `Option<T>`                                                  | `T?`                         |
+| `Box<T>`                                                     | `T`                          |
+| `Result<T, E>`                                               | `Result<T, Error>`           |
+| `HashMap<K, V>`, `BTreeMap<K, V>`                            | `[K: V]`                     |
+| `HashSet<T>`, `BTreeSet<T>`                                  | `Set<T>`                     |
+| `jiff::SignedDuration`                                       | `duration`                   |
+| tuples of up to 8 elements                                   | tuples                       |
+| Rust enum with `#[derive(SandEnum)]`                         | matching Sand `enum`         |
+| Rust struct with `#[derive(SandStruct)]`                     | matching Sand `struct`       |
+| `&T` (argument) or `T` (result) with `#[derive(SandObject)]` | opaque type `T`              |
+| `ValueType` `T` with `#[derive(SandValue)]`                  | opaque value type `T`        |
 
 The engine automatically exports registered functions that are not declared in `NativeModule::source` as `pub`, with default parameter names `arg1`, `arg2`, ... unless overridden by `params`. Registering a function as `"Type.name"` defines a method on `Type`; the method takes `self` if its first parameter has type `Type` (such as `Counter.add` below). Generic functions must be declared with `native fn` in `NativeModule::source`.
 

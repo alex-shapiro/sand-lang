@@ -2814,13 +2814,13 @@ and charges fuel and memory when converting arguments and return values.
 is invalid or already registered, or if a host module uses the name of a
 standard library module.
 
-| Method                       | Registered item                                                                      |
-| ---------------------------- | ------------------------------------------------------------------------------------ |
-| `function(name, f)`          | synchronous function that can borrow `&str`, `&[u8]`, and `&T` arguments             |
-| `vm_function(name, f)`       | synchronous function that takes `&mut Vm` and owned arguments                        |
-| `async_function(name, f)`    | asynchronous function that takes owned arguments and suspends only the calling task  |
-| `bind::<T>()`                | Rust type `T` with a derived `NamedType` (see below)                                 |
-| `params(names)`, `doc(text)` | parameter names and documentation for the most recently registered function          |
+| Method                       | Registered item                                                                     |
+| ---------------------------- | ----------------------------------------------------------------------------------- |
+| `function(name, f)`          | synchronous function that can borrow `&str`, `&[u8]`, and `&T` arguments            |
+| `vm_function(name, f)`       | synchronous function that takes `&mut Vm` and owned arguments                       |
+| `async_function(name, f)`    | asynchronous function that takes owned arguments and suspends only the calling task |
+| `bind::<T>()`                | Rust type `T` with a derived `NamedType` (see below)                                |
+| `params(names)`, `doc(text)` | parameter names and documentation for the most recently registered function         |
 
 Four derive macros bind a Rust type to a Sand type of the module that
 `#[sand(module = "...")]` names. The type keeps its Rust name, or takes the
@@ -2829,12 +2829,12 @@ its module. `#[sand(crate = path)]` sets the path of the `sandlang` crate if a
 crate renames the dependency. Doc comments, including
 `#[doc = include_str!("...")]`, become Sand documentation.
 
-| Derive       | Sand type                                                                                 |
-| ------------ | ----------------------------------------------------------------------------------------- |
-| `SandValue`  | opaque value type (§5.4); the type must also implement `ValueType`                        |
-| `SandEnum`   | `enum` with the unit variants of a Rust enum                                              |
-| `SandObject` | opaque reference type; the type must also implement `NativeObject`                        |
-| `SandStruct` | `struct` with the named fields of a Rust struct, copied on each conversion                |
+| Derive       | Sand type                                                                  |
+| ------------ | -------------------------------------------------------------------------- |
+| `SandValue`  | opaque value type (§5.4); the type must also implement `ValueType`         |
+| `SandEnum`   | `enum` with the unit variants of a Rust enum                               |
+| `SandObject` | opaque reference type; the type must also implement `NativeObject`         |
+| `SandStruct` | `struct` with the named fields of a Rust struct, copied on each conversion |
 
 A field of a `SandStruct` is public, unless it has `#[sand(private)]`, and
 immutable, unless it has `#[sand(var)]`. `#[sand(name = "...")]` gives a field
@@ -2854,7 +2854,7 @@ returns a Sand `Result` or aborts the run on failure:
 
 - `Result<T, HostError>` maps to the Sand return type `Result<T, Error>`.
   Returning `Err(HostError::new(kind, message))` yields `Err(Error { kind,
-  message })` in Sand, whereas `?` converts a `Ctl` into a `HostError` that
+message })` in Sand, whereas `?` converts a `Ctl` into a `HostError` that
   halts or suspends the VM and converts a `std::io::Error` into a `HostError`
   with the corresponding standard error kind.
 - `Result<T, std::io::Error>`, `Result<T, String>`, and `Result<T, &str>` also
@@ -2863,7 +2863,7 @@ returns a Sand `Result` or aborts the run on failure:
   aborts the run with a runtime error (`Ctl::fail`), a resource limit error, or
   an exit code.
 - `Result<Later<T, E>, E>` suspends the calling task on a future and maps to
-   the same Sand return type as `Result<T, E>`.
+  the same Sand return type as `Result<T, E>`.
 
 To check a sandbox capability inside a `vm_function`, call
 `Vm::require(&capability)` (§14), which returns an error of kind
@@ -2877,19 +2877,19 @@ or resource check in the body of each `vm_function` call. Return-value
 conversion does not fail on the memory limit; instead, the engine collects
 garbage and checks the memory limit after the call completes.
 
-| Rust type                                                | Sand type                                                      |
-| -------------------------------------------------------- | -------------------------------------------------------------- |
-| `i64`, `f64`, `bool`, `()`, `jiff::SignedDuration`       | `int`, `float`, `bool`, `()`, `duration`                       |
-| `String`, `&str`; `Vec<u8>`, `&[u8]`                     | `str`; `bytes`                                                 |
-| `Vec<T>`, `Option<T>`, tuples of 2 to 8 elements         | `[T]`, `T?`, tuples                                            |
-| `Box<T>`                                                 | `T`                                                            |
-| `HashMap<K, V>`, `BTreeMap<K, V>`                        | `[K: V]`                                                       |
-| `HashSet<T>`, `BTreeSet<T>`                              | `Set<T>`                                                       |
-| `Result<T, E>`                                           | `Result<T, Error>` or `T` (determined by `E`)                  |
-| `Never`                                                  | `never`                                                        |
-| bound type `T` (see above)                               | `T` (or `&T` for a borrowed object parameter)                  |
-| `Val<T>`                                                 | `T` (passed as an uncopied heap handle)                        |
-| `Param<N, B>`, `Reflect<N, C>`                           | `N`-th type parameter and its runtime type description         |
+| Rust type                                          | Sand type                                              |
+| -------------------------------------------------- | ------------------------------------------------------ |
+| `i64`, `f64`, `bool`, `()`, `jiff::SignedDuration` | `int`, `float`, `bool`, `()`, `duration`               |
+| `String`, `&str`; `Vec<u8>`, `&[u8]`               | `str`; `bytes`                                         |
+| `Vec<T>`, `Option<T>`, tuples of 2 to 8 elements   | `[T]`, `T?`, tuples                                    |
+| `Box<T>`                                           | `T`                                                    |
+| `HashMap<K, V>`, `BTreeMap<K, V>`                  | `[K: V]`                                               |
+| `HashSet<T>`, `BTreeSet<T>`                        | `Set<T>`                                               |
+| `Result<T, E>`                                     | `Result<T, Error>` or `T` (determined by `E`)          |
+| `Never`                                            | `never`                                                |
+| bound type `T` (see above)                         | `T` (or `&T` for a borrowed object parameter)          |
+| `Val<T>`                                           | `T` (passed as an uncopied heap handle)                |
+| `Param<N, B>`, `Reflect<N, C>`                     | `N`-th type parameter and its runtime type description |
 
 `Param<N, B>` states the bounds `B` that the Rust function requires of the
 `N`-th type parameter: `bound::Eq`, `bound::Ord`, `bound::Hash`, or a pair of
