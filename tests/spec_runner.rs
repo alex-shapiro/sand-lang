@@ -31,6 +31,9 @@
 //! Every case runs with scripts seeing the host's file system (a temporary
 //! directory; with the `os` feature) and with a memory file system
 //! (`MemFs`), which must behave alike.
+//!
+//! Run one file with `cargo test --test spec_runner <file>`. Set
+//! `SPEC_FILTER=<substring>` to run only the cases whose names contain it.
 
 mod common;
 

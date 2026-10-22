@@ -1,4 +1,9 @@
 //! Compiles checked HIR into register bytecode.
+//!
+//! The garbage collector scans a fiber's registers only up to the innermost
+//! frame's `base + nregs`. A register that a returned call left can hold a
+//! handle to a freed object, so the compiled code must never read a register
+//! before it writes it.
 
 mod init_order;
 mod inline;
@@ -4006,8 +4011,8 @@ fn thread_jumps(code: &mut [Op]) {
     }
 }
 
-/// Whether every branch back is a safe point charging fuel (see "Metering"
-/// in docs/INTERNALS.md) and every `Loop` jumps back.
+/// Whether every branch back is a safe point charging fuel (see
+/// `meter::code_fuel`) and every `Loop` jumps back.
 fn check_back_edges(code: &[Op]) -> bool {
     code.iter().all(|op| match op.branch_off() {
         Some(off) if off < 0 => op.is_back_edge(),

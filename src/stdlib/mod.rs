@@ -69,7 +69,8 @@ pub(crate) const STD_MODULES: &[&str] = &[
     "uuid",
 ];
 
-/// At most the first `max` characters of `s`.
+/// At most the first `max` characters of `s`. Quote script text in messages
+/// through this function.
 pub(crate) fn truncate(s: &str, max: usize) -> &str {
     match s.char_indices().nth(max) {
         Some((i, _)) => &s[..i],

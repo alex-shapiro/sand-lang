@@ -95,7 +95,9 @@ impl NativeError for HostError {
 
 impl<T: IntoValue + Send + 'static, E: NativeError> Later<T, E> {
     /// Suspends the calling task until `fut` resolves, and then runs the
-    /// returned closure on the VM thread to produce the Sand result.
+    /// returned closure on the VM thread to produce the Sand result. `fut`
+    /// must not hold `Value`s, because the garbage collector does not see
+    /// them while the task waits.
     pub fn new<F>(fut: impl Future<Output = F> + Send + 'static) -> Later<T, E>
     where
         F: FnOnce(&mut Vm) -> Result<T, E> + Send + 'static,

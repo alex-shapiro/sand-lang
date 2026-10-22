@@ -1,5 +1,8 @@
 //! The `net` module: TCP listeners and connections, and TLS client connections.
 //!
+//! Connect only through [`connect_checked`], which checks each resolved
+//! address against the policy. Every wait on a peer has a timeout.
+//!
 //! A connection is split into a buffered read half and a write half, each
 //! behind its own async mutex, so one task can read while another writes.
 //! Closing a socket wakes every pending operation on it (they fail with kind

@@ -286,6 +286,8 @@ impl BuildHasher for FxBuild {
     }
 }
 
+/// A hash map with a per-process seed. Use it for tables keyed by script
+/// data, so that scripts cannot cause hash collisions.
 pub type FxHashMap<K, V> = HashMap<K, V, FxBuild>;
 
 /// The hash index of a map or set: the slots of its entries, found by the

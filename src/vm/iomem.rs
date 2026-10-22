@@ -8,7 +8,8 @@
 //! dropped: right before the operation's result is allocated as a value, or
 //! when the operation fails or is cancelled. An operation whose buffers do
 //! not fit fails with an error of kind `"limit"`; nothing beyond the limit
-//! was allocated, so the run continues.
+//! was allocated, so the run continues. Reserve bytes as they arrive, never a
+//! size that a peer announces (`Content-Length`).
 
 use std::fmt;
 use std::sync::Arc;

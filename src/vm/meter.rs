@@ -42,7 +42,10 @@
 //!
 //! Operations that cannot be interrupted internally (a single regex search)
 //! charge their estimated cost *before* running, so they fail fast when the
-//! instruction budget cannot cover them.
+//! instruction budget cannot cover them. Work with no cost estimate is
+//! charged by time (`stdlib/regex.rs`). Values with shared structure can
+//! display, encode or compare much larger than their heap size, so charge
+//! such work by what it produces.
 
 use super::Ctl;
 use super::heap::Heap;

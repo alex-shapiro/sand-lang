@@ -5,7 +5,8 @@
 //! [`Fs::target`] first resolves an operation's path into a [`Target`]: the
 //! normal form the policy checks and, on the host, the directory handles of
 //! the walk, through which the operation then acts (see `unix.rs`). Callers
-//! run host file system calls on worker threads (`Vm::offload`).
+//! run host file system calls on worker threads (`Vm::offload`). Never call
+//! path-based `std::fs` or `tokio::fs` functions on script paths.
 
 #[cfg(feature = "os")]
 mod host;

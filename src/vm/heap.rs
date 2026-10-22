@@ -1,6 +1,10 @@
 //! The garbage-collected heap: an arena of objects addressed by `u32` handles,
 //! collected by a precise, non-moving, generational mark-and-sweep collector.
 //!
+//! Collection runs only at safe points, never during a native call, so
+//! natives can keep `Value`s in Rust locals. Never keep a `&mut Obj` across a
+//! safe point.
+//!
 //! Generations use *sticky mark bits*: an object's mark bit stays set after
 //! the collection it survived, and a set bit means "old". Objects allocated
 //! since the last collection are young and listed in `young`.
