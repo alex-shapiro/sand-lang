@@ -1,10 +1,22 @@
 # Sand implementation internals
 
-This document holds only what no single file can say: a map of the source
-tree and rules that span several files. Put all other information in module
-docs or next to the code.
+Sand executes scripts through a five-stage pipeline under strict CPU, memory,
+and capability limits. Every stage and native module must uphold four
+cross-cutting sandbox invariants:
 
-## Map
+- Do not panic on script input.
+- Charge `Meter` (`src/vm/meter.rs`) at runtime and `CompileBudget`
+  (`src/check/budget.rs`) during compilation for all work proportional to
+  script input.
+- Reserve all memory allocated for script input against `max_memory`,
+  including heap objects (`src/vm/heap.rs`) and off-heap I/O buffers
+  (`src/vm/iomem.rs`).
+- Gate all OS access behind the `os` feature and check `Policy` before every
+  OS operation.
+
+## Pipeline and source layout
+
+The compiler and runtime process source code in five stages:
 
 ```
 source    ─lexer────▶ tokens     src/syntax/lexer.rs
@@ -14,23 +26,12 @@ typed HIR ─compiler─▶ bytecode   src/compile/
 bytecode  ─VM───────▶ effects    src/vm/
 ```
 
-- `src/engine.rs` and `src/modules.rs`: the embedding API and module loading.
-- `src/native/`: the `NativeModule` API. `src/stdlib/`: the standard library.
-- `src/policy/`, `src/files/`, `src/platform.rs`: the sandbox's access to the
-  OS.
-- `cli/`: the `sand` command. `wasm/`: the WebAssembly bindings. `site/`: the
-  website and playground.
+The remaining modules provide the embedding API, native bindings, sandboxed OS
+access, and host targets:
 
-## Rules
-
-- Script input must never cause a panic.
-- All work that grows with script input charges the meter (`src/vm/meter.rs`)
-  or, during compilation, the `CompileBudget` (`src/check/budget.rs`).
-- All memory that script input causes counts against `max_memory`: heap
-  objects (`src/vm/heap.rs`), and buffers outside the heap (`src/vm/iomem.rs`).
-- All OS access goes through the policy and is behind the `os` feature.
-- The engine can run a native more than once (`NativeModule`).
-
-`SAND_GC_STRESS=1` collects garbage at every safe point,
-`SAND_DUMP_BYTECODE=1` prints the compiled code, and `SAND_GC_STATS=1`
-(`sand run`) prints collector statistics.
+- `src/engine.rs`, `src/modules.rs`: `Engine`, `Config`, and module loading.
+- `src/native/`, `src/stdlib/`: the `NativeModule` API and the standard
+  library.
+- `src/policy/`, `src/files/`, `src/platform.rs`: capability policies,
+  sandboxed file systems, and OS platform abstractions.
+- `cli/`, `wasm/`, `site/`: the `sand` CLI, WebAssembly bindings, and website.

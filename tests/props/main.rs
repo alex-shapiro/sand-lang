@@ -1,5 +1,5 @@
 //! Property-based tests that compare Sand execution against Rust reference
-//! models on generated inputs. Set `PROPTEST_CASES=<n>` to run more cases.
+//! models on generated inputs.
 
 mod natives;
 mod observers;

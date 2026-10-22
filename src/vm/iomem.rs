@@ -1,15 +1,15 @@
-//! Accounting of memory held outside the heap by pending I/O.
+//! Off-heap memory and open-resource accounting for pending I/O operations.
 //!
-//! The buffers pending I/O fills (file and socket reads, HTTP messages,
-//! standard input, copies of data being written) are not heap objects until
-//! the operation finishes. They are reserved here as they grow, and the heap
-//! counts the reserved bytes against `max_memory` together with its own
-//! ([`super::heap::Heap::would_exceed`]). A [`Reservation`] is released when
-//! dropped: right before the operation's result is allocated as a value, or
-//! when the operation fails or is cancelled. An operation whose buffers do
-//! not fit fails with an error of kind `"limit"`; nothing beyond the limit
-//! was allocated, so the run continues. Reserve bytes as they arrive, never a
-//! size that a peer announces (`Content-Length`).
+//! Pending I/O tasks (file and socket reads, HTTP transfers, standard input,
+//! and outbound write buffers) must reserve off-heap buffer capacity through a
+//! [`Reservation`] before allocating. [`Heap::would_exceed`](super::heap::Heap::would_exceed)
+//! counts reserved bytes together with heap memory against `max_memory`; if a
+//! reservation exceeds the limit, the I/O operation fails with kind `"limit"`
+//! without allocating, and execution continues. Reserve bytes incrementally as
+//! data is received rather than pre-reserving an untrusted size declared by a
+//! peer (such as an HTTP `Content-Length` header). Drop the [`Reservation`]
+//! immediately before allocating the resulting heap [`Value`](super::value::Value),
+//! or on error or cancellation.
 
 use std::fmt;
 use std::sync::Arc;

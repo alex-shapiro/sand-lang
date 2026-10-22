@@ -1,12 +1,9 @@
-//! The `net` module: TCP listeners and connections, and TLS client connections.
+//! The `net` module: TCP listeners, TCP connections, and TLS client
+//! connections.
 //!
-//! Connect only through [`connect_checked`], which checks each resolved
-//! address against the policy. Every wait on a peer has a timeout.
-//!
-//! A connection is split into a buffered read half and a write half, each
-//! behind its own async mutex, so one task can read while another writes.
-//! Closing a socket wakes every pending operation on it (they fail with kind
-//! `"closed"`) and releases the OS socket once those operations have finished.
+//! Open outbound connections only through [`connect_checked`] so that the
+//! policy checks every resolved IP address, and bound every wait on a peer
+//! with a timeout.
 
 use super::stream::{self, IoFailure, Suspended, line_read, read_line, read_to_end_reserved, read_upto, suspend};
 use crate::check::ModKind;
@@ -289,8 +286,11 @@ pub(crate) struct ConnHandle {
     pub closed: CloseSignal,
 }
 
-/// An open TCP or TLS stream connection. Separate tasks can read and write
-/// concurrently on the same `Conn`.
+/// An open TCP or TLS stream connection.
+///
+/// The read and write halves use separate async mutexes so that a task can read
+/// while another task writes. Closing the connection cancels all pending
+/// operations with kind `"closed"` and drops the OS socket after they finish.
 #[derive(crate::SandObject)]
 #[sand(module = "net")]
 pub(crate) struct Conn {
@@ -440,7 +440,8 @@ pub(crate) async fn resolve_allowed(
     }
 }
 
-/// Connects to a resolved address allowed by policy.
+/// Resolves `host` through `network`, checks each resolved address against
+/// `policy`, and connects to the first allowed address.
 pub(crate) async fn connect_checked(
     policy: &Policy,
     network: &dyn Network,

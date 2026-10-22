@@ -69,8 +69,8 @@ pub(crate) const STD_MODULES: &[&str] = &[
     "uuid",
 ];
 
-/// At most the first `max` characters of `s`. Quote script text in messages
-/// through this function.
+/// Returns a prefix of `s` containing at most `max` characters. Use this
+/// function to bound script text included in diagnostic or error messages.
 pub(crate) fn truncate(s: &str, max: usize) -> &str {
     match s.char_indices().nth(max) {
         Some((i, _)) => &s[..i],

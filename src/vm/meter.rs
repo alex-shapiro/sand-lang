@@ -1,51 +1,42 @@
-//! Fuel metering: one counter for bytecode and for the work done outside the
-//! bytecode loop (natives, and the interpreter's heavy generic operations:
-//! deep comparison, display, concatenation, slicing, ...).
+//! Fuel metering for bytecode execution, native functions, and runtime
+//! operations (deep comparison, display, concatenation, and slicing).
 //!
-//! The scheduler runs each task for a slice of fuel: at most `SLICE_FUEL`
-//! units, and at most what is left of `max_instructions`. The interpreter
-//! spends one unit per call, loop iteration and backward jump; natives
-//! charge the meter ([`Meter::charge`]) for their work. The interpreter
-//! keeps its count in a register, applies what it spent to the meter before
-//! each native call ([`Meter::sync`]) and reloads it afterwards
-//! ([`Meter::resync`]). So:
+//! [`Meter`] enforces `max_instructions`, CPU-time limits, wall-clock limits,
+//! and cancellation through a single fuel counter:
 //!
-//! * charging is a subtraction and a comparison, with no syscalls;
-//! * native work counts against `max_instructions`, and a native that
-//!   exhausts the slice preempts its task when it returns;
-//! * once the slice is exhausted, the meter checks the interrupt flag, the
-//!   instruction budget and the slice's CPU and wall-clock deadlines every
-//!   `CHECK_INTERVAL` units, failing with `Ctl::interrupted()` or
-//!   `Ctl::limit(kind)`. Neither a slice nor a check interval extends past
-//!   the instruction budget, so natives stop exactly at the limit and
-//!   bytecode within one unit of it;
-//! * the interpreter's generic operations charge the meter before it has
-//!   seen the bytecode fuel spent since the last sync, so they may overrun
-//!   the limit by that much (less than a slice).
-//!
-//! The meter uses `Cell`s so that it can be charged through a shared
-//! reference while the heap is borrowed (e.g. inside sort comparators).
+//! * The scheduler grants each task a fuel slice bounded by `SLICE_FUEL` and by
+//!   the remaining `max_instructions` budget.
+//! * The interpreter keeps the active slice fuel in a register, deducts fuel at
+//!   calls and loop back edges, writes spent fuel to [`Meter::sync`] before a
+//!   native call, and reloads the register with [`Meter::resync`] afterward.
+//! * Native functions and runtime operations deduct fuel through shared `&Meter`
+//!   references (`Cell` fields allow charging while [`Heap`] is borrowed).
+//! * After a slice is exhausted, [`Meter`] checks the interrupt flag,
+//!   instruction budget, and CPU and wall-clock deadlines every
+//!   [`CHECK_INTERVAL`] units and returns `Ctl::interrupted()` or
+//!   `Ctl::limit(kind)` if a limit is exceeded.
 //!
 //! # Cost model
 //!
-//! One fuel unit is roughly the work of one simple bytecode loop iteration
-//! (a few nanoseconds to a few tens of nanoseconds). Natives charge:
+//! A fuel unit corresponds to a simple bytecode loop iteration. Native
+//! functions and runtime helpers must charge fuel proportional to their work:
 //!
-//! * [`Meter::charge`]`(n)` — one unit per element visited, compared, hashed,
-//!   copied or produced (list/map/set elements, comparison and display
-//!   nodes, JSON values, regex matches);
-//! * [`Meter::charge_bytes`]`(n)` — one unit per [`BYTES_PER_UNIT`] bytes
-//!   scanned, copied or produced (strings, bytes, output buffers);
-//! * [`Meter::charge_slow_bytes`]`(n)` — one unit per [`SLOW_BYTES_PER_UNIT`]
-//!   bytes for byte-at-a-time algorithms (hash functions, regex search,
-//!   base64, percent-encoding, case mapping).
+//! * [`Meter::charge`]`(n)`: a unit per element visited, compared, hashed,
+//!   copied, or produced (container elements, comparison and display nodes,
+//!   JSON values, and regex matches).
+//! * [`Meter::charge_bytes`]`(n)`: a unit per [`BYTES_PER_UNIT`] bytes
+//!   scanned, copied, or produced (strings, byte slices, and output buffers).
+//! * [`Meter::charge_slow_bytes`]`(n)`: a unit per [`SLOW_BYTES_PER_UNIT`]
+//!   bytes for byte-at-a-time algorithms (cryptographic and hash functions,
+//!   regex searches, base64, percent-encoding, and case mapping).
 //!
-//! Operations that cannot be interrupted internally (a single regex search)
-//! charge their estimated cost *before* running, so they fail fast when the
-//! instruction budget cannot cover them. Work with no cost estimate is
-//! charged by time (`stdlib/regex.rs`). Values with shared structure can
-//! display, encode or compare much larger than their heap size, so charge
-//! such work by what it produces.
+//! Charge the estimated cost of an uninterruptible operation before executing
+//! it so that it fails immediately if the remaining instruction budget is
+//! insufficient. If an operation's cost cannot be estimated in advance, meter
+//! it by elapsed time (see `stdlib/regex.rs`). Because formatting, encoding, or
+//! comparing a value with shared substructure can expand it exponentially,
+//! charge fuel as output or traversal steps are produced rather than by the
+//! input's heap size.
 
 use super::Ctl;
 use super::heap::Heap;

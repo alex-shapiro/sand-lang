@@ -107,11 +107,13 @@ pub struct EnumVariant<T> {
 
 /// Memory and resource accounting for a heap-allocated [`ObjectType`].
 ///
-/// A native object must not hold `Value`s, because the garbage collector does
-/// not trace native objects. Report growth after allocation with
-/// `Heap::account`.
+/// Do not store [`Value`]s inside an implementor; the garbage collector does
+/// not trace native objects.
 pub trait NativeObject: Any + Send {
     /// Approximate heap memory used by `self`, in bytes.
+    ///
+    /// The VM reads this value on allocation and deallocation; call
+    /// [`Heap::account`] if the object's size changes in place.
     fn size(&self) -> usize {
         64
     }
@@ -357,12 +359,12 @@ struct FnDef {
 /// parameter values or generic type parameters. [`Engine::new`](crate::Engine::new)
 /// verifies all declarations against the registered Rust signatures.
 ///
-/// The engine calls a function again after a permission prompt and after a
-/// garbage collection that a memory or resource limit caused. Thus a function
-/// must check permissions ([`Vm::require`](crate::vm::Vm::require)), reserve
-/// memory and take resource slots before its first side effect. A panic in a
-/// function stops the run with [`Error::Internal`](crate::Error::Internal), so
-/// a function must not panic on script input.
+/// Registered functions must check permissions ([`Vm::require`]), reserve
+/// memory, and acquire resource slots before performing any side effect,
+/// because the VM re-invokes the function from the start after a permission
+/// prompt or a garbage collection triggered by a memory or resource limit. Do
+/// not panic on script input; the engine catches panics and aborts the run with
+/// [`Error::Internal`](crate::Error::Internal).
 #[derive(Clone)]
 pub struct NativeModule {
     name: String,
