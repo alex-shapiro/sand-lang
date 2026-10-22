@@ -981,6 +981,12 @@ impl Vm {
         self.permit_by(cap, |p, c| p.check_in(c, space))
     }
 
+    /// Checks a capability as [`Vm::permit`] does, and fails with kind
+    /// `"permission_denied"` if the policy denies it.
+    pub fn require(&mut self, cap: &Capability) -> Result<(), HostError> {
+        if self.permit(cap)? { Ok(()) } else { Err(HostError::new("permission_denied", format!("permission denied: {cap}"))) }
+    }
+
     pub fn permit_normalized(&mut self, cap: &Capability) -> Result<bool, Ctl> {
         self.permit_path(cap, false)
     }
@@ -1153,14 +1159,14 @@ impl Vm {
     /// stderr (2) for `io.stdout` and `io.stderr`: a denial or a failed
     /// write is the `Err(Error)` value it returns (`Ok(Unit)` otherwise);
     /// exceeding the output limit stops the run.
-    pub fn write_stream_value(&mut self, which: u8, v: Value) -> Result<(), crate::native::HostError> {
+    pub fn write_stream_value(&mut self, which: u8, v: Value) -> Result<(), HostError> {
         let len = match self.heap.get(v) {
             Obj::Str(s) => s.len(),
             _ => self.heap.bytes_of(v).len(),
         };
         if !self.output_allowed(which)? {
             let name = if which == 1 { "stdout" } else { "stderr" };
-            return Err(crate::native::HostError::new("permission_denied", format!("permission denied: {name}")));
+            return Err(HostError::new("permission_denied", format!("permission denied: {name}")));
         }
         self.count_output(which, len)?;
         let data = match self.heap.get(v) {
@@ -1169,7 +1175,7 @@ impl Vm {
         };
         match self.stream_sink(which).write(data) {
             Ok(()) => Ok(self.limit_backlog(which)?),
-            Err(e) => Err(crate::native::HostError::new(crate::stdlib::io_kind(&e), e.to_string())),
+            Err(e) => Err(e.into()),
         }
     }
 

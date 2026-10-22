@@ -1264,13 +1264,12 @@ impl<'a> Formatter<'a> {
     }
 
     fn field_decl(&mut self, f: &'a FieldDecl) -> Doc {
-        let var = match (f.is_pub, f.mutable) {
-            (true, true) => "pub var ",
-            (true, false) => "pub ",
-            (false, true) => "var ",
-            (false, false) => "",
+        let head = match (f.is_pub, f.mutable) {
+            (_, true) => self.declared(f.is_pub, f.span.lo, "var ".into()),
+            (true, false) => text("pub "),
+            (false, false) => text(""),
         };
-        let mut parts = vec![text(var), self.name(&f.name), self.punct(f.name.span.hi, &Tok::Colon, ": "), self.ty(&f.ty)];
+        let mut parts = vec![head, self.name(&f.name), self.punct(f.name.span.hi, &Tok::Colon, ": "), self.ty(&f.ty)];
         if let Some(d) = &f.default {
             parts.push(self.punct(f.ty.span.hi, &Tok::Eq, " = "));
             parts.push(self.expr(d));

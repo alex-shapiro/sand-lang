@@ -1609,11 +1609,11 @@ impl Checker {
                 if let Ty::Named(d, _) = ty
                     && seen.insert(d)
                 {
-                    let def = &self.types[d as usize];
-                    if let Some(f) = def.fields().iter().find(|f| !f.is_pub).filter(|_| def.module != self.cur_mod) {
+                    if let Some(f) = self.hidden_field(d) {
                         found = Some((d, f.name));
                         return true;
                     }
+                    let def = &self.types[d as usize];
                     todo.extend(def.fields().iter().map(|f| f.ty).chain(def.variants().iter().flat_map(|v| v.fields.iter().copied())));
                 }
                 false
@@ -1657,20 +1657,41 @@ impl Checker {
         // Standard modules declare all their natives.
         let host = self.mods[self.cur_mod as usize].kind == ModKind::Host;
         for (name, decl) in missing {
-            if host && !name.contains('.') {
-                self.declare_derived_native(name, decl.id, &decl.sig, &decl.names, decl.doc.clone(), span);
+            if host {
+                self.declare_derived_native(name, decl, span);
             } else {
                 self.error(span, format!("native `{module}.{name}` is registered, but the module does not declare it with `native fn`"));
             }
         }
     }
 
-    /// Declares `pub native fn name` with the signature of the Rust function.
-    fn declare_derived_native(&mut self, name: &str, id: u32, sig: &Signature, names: &[String], doc: Option<Arc<str>>, span: Span) {
-        let key = format!("{}.{name}", self.name(self.mods[self.cur_mod as usize].name));
-        if let Some(b) = self.syms.get(name).and_then(|s| self.mods[self.cur_mod as usize].scope.get(&s)) {
-            let msg = format!("`{name}` is also the name of the registered native `{key}`; declare the native with `native fn {name}`");
-            self.error(b.span, msg);
+    /// Declares `pub native fn name` with the signature of the Rust function:
+    /// a method of `Type` for `name` = `Type.method`.
+    fn declare_derived_native(&mut self, name: &str, decl: &NativeDecl, span: Span) {
+        let (mi, sig) = (self.cur_mod, &decl.sig);
+        let module = self.name(self.mods[mi as usize].name).to_string();
+        let key = format!("{module}.{name}");
+        let (owner, fn_name) = match name.split_once('.') {
+            Some((ty, method)) => match self.scope_def(mi, ty) {
+                Some(Def::Type(TyRef::Def(d))) if self.types[d as usize].module == mi && self.types[d as usize].generics.is_empty() => {
+                    (Some(d), method)
+                }
+                _ => {
+                    let msg = format!("native `{key}` is a method of `{ty}`, which is not a type of the module without type parameters");
+                    self.error(span, msg);
+                    return;
+                }
+            },
+            None => (None, name),
+        };
+        let taken = match owner {
+            Some(d) => self.methods_named(Ctor::Def(d), fn_name).and_then(|fs| fs.first().map(|&f| self.fns[f as usize].span)),
+            None => self.syms.get(name).and_then(|s| self.mods[mi as usize].scope.get(&s)).map(|b| b.span),
+        };
+        if let Some(at) = taken {
+            let msg =
+                format!("`{fn_name}` is also the name of the registered native `{key}`; declare the native with `native fn {fn_name}`");
+            self.error(at, msg);
             return;
         }
         let mut generic = false;
@@ -1682,35 +1703,46 @@ impl Checker {
             self.error(span, msg);
             return;
         }
+        let has_self = sig.takes_self(&module, name);
         let mut params = Vec::new();
-        for (t, n) in sig.params.iter().zip(names) {
+        for (i, t) in sig.params.iter().enumerate() {
             let ty = self.host_type(t, &[], &key, span).unwrap_or(TypeId::ERROR);
-            params.push(ParamSig { name: self.sym(n), ty, default: None });
+            let name = match (i, has_self, &decl.names) {
+                (0, true, _) => self.sym("self"),
+                (_, _, Some(names)) => self.sym(&names[i - usize::from(has_self)]),
+                (_, _, None) => self.sym(&format!("arg{}", i + 1 - usize::from(has_self))),
+            };
+            params.push(ParamSig { name, ty, default: None });
         }
         let ret = self.host_type(&sig.ret, &[], &key, span).unwrap_or(TypeId::ERROR);
-        let ident = ast::Ident { name: name.to_string(), span };
-        self.check_public_types("function", &ident, params.iter().map(|p| p.ty).chain([ret]));
-        let name = self.sym(name);
+        let ident = ast::Ident { name: fn_name.to_string(), span };
+        if owner.is_none_or(|d| self.types[d as usize].is_pub) {
+            self.check_public_types("function", &ident, params.iter().map(|p| p.ty).chain([ret]));
+        }
+        let (name, self_ty) = (self.sym(fn_name), owner.map(|d| self.arena.named(d, &[])));
         let f = self.add_fn(FnInfo {
             name,
-            module: self.cur_mod,
+            module: mi,
             generics: vec![],
             outer: 0,
             params,
             ret,
-            has_self: false,
-            kind: FnKind::Native(id),
-            doc,
+            has_self,
+            kind: FnKind::Native(decl.id),
+            doc: decl.doc.clone(),
             span,
             is_pub: true,
-            owner: None,
-            self_ty: None,
+            owner: owner.map(Ctor::Def),
+            self_ty,
             decl: None,
             dicts: vec![],
             impl_of: None,
             trait_of: None,
         });
-        self.define_ident(&ident, Def::Fn(f), true);
+        match owner {
+            Some(d) => self.register_method(Ctor::Def(d), &ident, f),
+            None => self.define_ident(&ident, Def::Fn(f), true),
+        }
     }
 
     /// Reports a public function or field (`what`) of a native module whose
@@ -2170,6 +2202,11 @@ impl Checker {
             match self.natives.fns.get(key.as_str()).cloned() {
                 Some(decl) => {
                     self.check_native_signature(f, &key, &decl.sig, &generics, &params, ret);
+                    if decl.names.is_some() || decl.doc.is_some() {
+                        let msg =
+                            format!("native `{key}` has `params` or `doc`, which apply only to a native that the module does not declare");
+                        self.error(f.name.span, msg);
+                    }
                     FnKind::Native(decl.id)
                 }
                 None => {
@@ -2299,6 +2336,18 @@ impl Checker {
         }
         ids.push(id);
         self.methods.insert(key, ids.into());
+    }
+
+    /// Whether the current module can use a member or item of `module`
+    /// that is `pub` if `is_pub`.
+    pub(crate) fn visible(&self, module: ModId, is_pub: bool) -> bool {
+        is_pub || module == self.cur_mod
+    }
+
+    /// The first field of struct `d` that the current module cannot use.
+    pub(crate) fn hidden_field(&self, d: TypeDefId) -> Option<&FieldDef> {
+        let def = &self.types[d as usize];
+        def.fields().iter().find(|f| !self.visible(def.module, f.is_pub))
     }
 
     /// The methods named `name` of type constructor `c`.

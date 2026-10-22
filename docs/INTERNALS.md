@@ -55,19 +55,20 @@ the typed Rust function of each native under its key:
   the Rust function's types. A native takes the heap values it does not copy
   as `Val<T>` handles and type parameters as `Param<N>`.
 - Arguments arrive in declaration order, defaults filled in, after one
-  `Reflect<N>` per `reflect` type parameter. A native that implements a
-  trait method also receives the impl's dictionary first, and ignores it.
+  `Reflect<N>` per `reflect` type parameter. A call of a trait method passes
+  the impl's dictionary first; the engine drops it.
 - Never panic on script input. A Rust panic is caught per slice and ends the
   run with an internal error, leaving the VM possibly inconsistent.
-- Check permissions (`vm.permit`) before any effect: a prompt re-executes
-  the call.
+- Check permissions (`vm.permit`, or `vm.require` for a `permission_denied`
+  error) before any effect: a prompt re-executes the call.
 - Reserve memory and take resource slots before mutating anything: on a
   memory or resource limit (`CtlKind::Collect`) the native is called again
-  after a collection.
+  after a collection. After a side effect, allocate what was reserved
+  without a check (`vm.place_object`).
 - A native whose Sand result is `Result<T>` returns `Result<_, HostError>`:
   `Err(HostError::new(kind, message))` is the script's `Err(Error)`, and a
-  `Ctl` converts with `?`. Any other native returns `Result<_, Ctl>`, so
-  the compiler rejects a recoverable error from it. `Err(Ctl::fail(kind,
+  `Ctl` converts with `?`. Any other fallible native returns `Result<_, Ctl>`,
+  so the compiler rejects a recoverable error from it. `Err(Ctl::fail(kind,
   message))` aborts the run with a runtime error.
 - An async native returns `Later::new(future)`. The future must not hold
   `Value`s; it yields a closure that makes the result on the VM thread

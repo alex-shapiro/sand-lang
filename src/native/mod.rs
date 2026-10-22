@@ -6,7 +6,7 @@ mod func;
 mod ty;
 
 pub use convert::{Conversion, FromValue, HostError, IntoHostError, IntoValue};
-pub use func::{AsyncHostFunction, GuardedFunction, HostFunction, Later, NativeError, Signature, VmFunction};
+pub use func::{AsyncHostFunction, HostFunction, Later, NativeError, Signature, VmFunction};
 pub use ty::{Channel, Named, Never, Param, Range, Reflect, SandType, Task, Type, Val};
 
 pub(crate) use convert::mismatch;
@@ -232,7 +232,14 @@ impl Vm {
     /// Moves `x` to the heap, failing if it does not fit in the memory limit.
     pub fn new_object<T: ObjectType>(&mut self, x: T) -> Result<Val<T>, Ctl> {
         self.reserve(NativeObject::size(&x))?;
-        Ok(Val::from_raw(self.heap.alloc(Obj::Native(Box::new(x)))))
+        Ok(self.place_object(x))
+    }
+
+    /// Moves `x` to the heap without a check of the memory limit, for a
+    /// native that reserved its size before a side effect (which a rerun
+    /// after a collection would repeat).
+    pub(crate) fn place_object<T: ObjectType>(&mut self, x: T) -> Val<T> {
+        Val::from_raw(self.heap.alloc(Obj::Native(Box::new(x))))
     }
 }
 
@@ -275,9 +282,10 @@ pub(crate) struct NativeDecl {
     /// The native's id in the registry.
     pub id: u32,
     pub sig: Arc<Signature>,
-    /// Parameter names and doc comment for a host function that the module
-    /// source does not declare: the checker declares it from its signature.
-    pub names: Arc<[String]>,
+    /// The parameter names and doc comment of [`NativeModule::params`] and
+    /// [`NativeModule::doc`], for a function that the module source does not
+    /// declare: the checker declares it from its signature.
+    pub names: Option<Arc<[String]>>,
     pub doc: Option<Arc<str>>,
 }
 
@@ -287,18 +295,21 @@ struct FnDef {
     name: String,
     sig: Signature,
     f: HostFn,
-    names: Option<Vec<String>>,
+    names: Option<Arc<[String]>>,
+    doc: Option<Arc<str>>,
 }
 
 /// A module of Rust functions and types, imported by scripts with
 /// `import <name>`.
 ///
 /// Each function's Sand signature is derived from its Rust types. Unless the
-/// module's Sand source declares the function with `native fn` (to name its
-/// parameters, give defaults, or make it a method), the module declares it
-/// as `pub native fn` with the parameter names that
-/// [`NativeModule::params`] sets (`arg1`, `arg2`, ... by default). The engine
-/// checks each declaration against the Rust types when it is created.
+/// module's Sand source declares the function with `native fn` (to give its
+/// parameters defaults, or to name its type parameters), the module declares
+/// it as `pub native fn` with the parameter names that
+/// [`NativeModule::params`] sets (`arg1`, `arg2`, ... by default). A function
+/// registered as `Type.name` is a method of `Type`, which takes `self` if its
+/// first parameter has type `Type`. The engine checks each declaration
+/// against the Rust types when it is created.
 #[derive(Clone)]
 pub struct NativeModule {
     name: String,
@@ -306,7 +317,6 @@ pub struct NativeModule {
     source: String,
     functions: Vec<FnDef>,
     types: Vec<BoundType>,
-    docs: Vec<(String, String)>,
 }
 
 impl NativeModule {
@@ -331,7 +341,7 @@ impl NativeModule {
     }
 
     fn of_kind(name: &str, kind: ModKind) -> NativeModule {
-        NativeModule { name: name.to_string(), kind, source: String::new(), functions: Vec::new(), types: Vec::new(), docs: Vec::new() }
+        NativeModule { name: name.to_string(), kind, source: String::new(), functions: Vec::new(), types: Vec::new() }
     }
 
     /// The name scripts import the module by.
@@ -346,7 +356,7 @@ impl NativeModule {
         assert!(!self.functions.iter().any(|d| d.name == name), "function `{name}` is registered twice in module `{}`", self.name);
         // The standard modules are built once per process.
         let f = if self.kind == ModKind::Host { HostFn::Shared(f.into()) } else { HostFn::Static(Box::leak(f)) };
-        self.functions.push(FnDef { name: name.to_string(), sig, f, names: None });
+        self.functions.push(FnDef { name: name.to_string(), sig, f, names: None, doc: None });
         self
     }
 
@@ -354,8 +364,8 @@ impl NativeModule {
     /// of type `&str`, `&[u8]` and `&T` (for an [`ObjectType`] `T`) borrow
     /// the script's values instead of copying them.
     ///
-    /// `name` is the function's name, or `Type.method` for a method that the
-    /// module source declares in `extend Type` or an `impl` for `Type`.
+    /// `name` is the function's name, or `Type.method` for a method of a
+    /// type of the module.
     ///
     /// # Panics
     ///
@@ -377,26 +387,44 @@ impl NativeModule {
         self.add(name, F::signature(), f.into_host())
     }
 
-    /// Registers a function guarded by a capability that `guard` computes
-    /// from the arguments (given by reference). The Sand return type is
-    /// `Result<R, Error>`; a denial yields a `permission_denied` error.
-    pub fn guarded_function<M, G, F: GuardedFunction<M, G>>(&mut self, name: &str, guard: G, f: F) -> &mut Self {
-        self.add(name, F::signature(), f.into_host(guard))
-    }
-
     /// Names the parameters of the function registered last (shown by
     /// `help`, and usable as named arguments) if the module source does not
-    /// declare it.
+    /// declare it. A method's names follow `self`.
     ///
     /// # Panics
     ///
-    /// If no function is registered, or the number of names differs from
-    /// its number of parameters.
+    /// If no function is registered, if the number of names differs from
+    /// its number of parameters, or if a name is not an identifier or is
+    /// given twice.
     pub fn params(&mut self, names: &[&str]) -> &mut Self {
-        let Some(f) = self.functions.last_mut() else { panic!("`params` names the parameters of the function registered last") };
-        assert_eq!(names.len(), f.sig.params.len(), "function `{}` has {} parameters", f.name, f.sig.params.len());
+        let module = self.name.clone();
+        let f = self.last("params");
+        let n = f.sig.params.len() - usize::from(f.sig.takes_self(&module, &f.name));
+        assert_eq!(names.len(), n, "function `{}` has {n} parameters", f.name);
+        for (i, n) in names.iter().enumerate() {
+            assert!(is_ident(n) && keyword(n).is_none(), "parameter name `{n}` of function `{}` is not an identifier", f.name);
+            assert!(!names[..i].contains(n), "parameter name `{n}` of function `{}` is given twice", f.name);
+        }
         f.names = Some(names.iter().map(|n| n.to_string()).collect());
         self
+    }
+
+    /// Attaches a doc comment (shown by `help`) to the function registered
+    /// last if the module source does not declare it.
+    ///
+    /// # Panics
+    ///
+    /// If no function is registered.
+    pub fn doc(&mut self, text: &str) -> &mut Self {
+        self.last("doc").doc = Some(text.into());
+        self
+    }
+
+    fn last(&mut self, method: &str) -> &mut FnDef {
+        match self.functions.last_mut() {
+            Some(f) => f,
+            None => panic!("`{method}` applies to the function registered last, and no function is registered"),
+        }
     }
 
     /// Registers `T` as a value type of this module (see [`ValueType`]); the
@@ -455,14 +483,6 @@ impl NativeModule {
         self
     }
 
-    /// Attaches a doc comment (shown by `help`) to a registered function
-    /// that the module source does not declare.
-    pub fn doc(&mut self, name: &str, text: &str) -> &mut Self {
-        self.docs.retain(|(n, _)| n != name);
-        self.docs.push((name.to_string(), text.to_string()));
-        self
-    }
-
     /// Adds the module's types to `r`, before any module's functions (whose
     /// signatures may use them).
     pub(crate) fn register_types(&self, r: &mut Registry) {
@@ -474,9 +494,7 @@ impl NativeModule {
     /// Adds the module's functions and source to `r`.
     pub(crate) fn register(&self, r: &mut Registry) {
         for f in &self.functions {
-            let doc = self.docs.iter().find(|(n, _)| *n == f.name).map(|(_, d)| Arc::from(d.as_str()));
-            let names = f.names.clone().unwrap_or_else(|| (1..=f.sig.params.len()).map(|i| format!("arg{i}")).collect());
-            r.add_native(format!("{}.{}", self.name, f.name), f.f.clone(), f.sig.clone(), names.into(), doc);
+            r.add_native(format!("{}.{}", self.name, f.name), f.f.clone(), f.sig.clone(), f.names.clone(), f.doc.clone());
         }
         r.source(self.name.clone(), self.kind, self.source.clone());
     }

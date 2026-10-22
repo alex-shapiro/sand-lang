@@ -7,17 +7,13 @@ use crate::vm::{Ctl, fail};
 pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("math", ModKind::Std, include_str!("math.sand"));
 
-    macro_rules! unary {
+    // A macro, not a loop over `fn` pointers: each native calls its function directly.
+    macro_rules! functions {
         ($($name:literal => $f:expr),* $(,)?) => {
             $(m.function($name, $f);)*
         };
     }
-    macro_rules! binary {
-        ($($name:literal => $f:expr),* $(,)?) => {
-            $(m.function($name, $f);)*
-        };
-    }
-    unary! {
+    functions! {
         "cbrt" => f64::cbrt,
         "exp" => f64::exp,
         "ln" => f64::ln,
@@ -34,8 +30,6 @@ pub(crate) fn module() -> NativeModule {
         "tanh" => f64::tanh,
         "to_radians" => f64::to_radians,
         "to_degrees" => f64::to_degrees,
-    }
-    binary! {
         "log" => f64::log,
         "atan2" => f64::atan2,
         "hypot" => f64::hypot,

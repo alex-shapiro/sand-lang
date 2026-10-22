@@ -839,7 +839,7 @@ import "./lib.sand"
 fn f<T: lib.Secret>(x: T) {}
 print(lib.P { x: 1 }.secret())
 --- file lib.sand
-pub struct P { x: int }
+pub struct P { pub x: int }
 trait Secret {
     fn secret(self) -> int
 }

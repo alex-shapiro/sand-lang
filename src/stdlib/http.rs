@@ -7,7 +7,7 @@
 //! leaves its connection in the run's [`Pool`].
 
 use super::http_common::*;
-use super::net::{self, ConnHandle, TlsSettings, check_permission};
+use super::net::{self, ConnHandle, TlsSettings};
 use super::stream::{IoFailure, Suspended, read_line_bytes, strip_eol, suspend};
 use crate::check::ModKind;
 use crate::native::{HostError, Later, NativeModule, NativeObject, Val};
@@ -615,7 +615,7 @@ fn send(
     }
     let (method, text) = (method.to_string(), text.to_string());
     let mut headers = header_pairs(vm, headers)?;
-    check_permission(vm, url.capability(&method))?;
+    vm.require(&url.capability(&method))?;
     if let Err(reason) = filter_request(vm, &url, &mut headers) {
         return Err(HostError::new("permission_denied", reason));
     }
@@ -758,7 +758,7 @@ fn start_upload(
         Ok(n) => n,
         Err(e) => return Err(HostError::new("invalid", e)),
     };
-    check_permission(vm, url.capability(&method))?;
+    vm.require(&url.capability(&method))?;
     if let Err(reason) = filter_request(vm, &url, &mut headers) {
         return Err(HostError::new("permission_denied", reason));
     }

@@ -311,7 +311,7 @@ impl Checker {
             if let Some(i) = def.variants().iter().position(|v| Some(v.name) == sym) {
                 return Some(Target::Variant(d, i as u32));
             }
-            if let Some(i) = def.fields().iter().position(|f| Some(f.name) == sym && (f.is_pub || def.module == self.cur_mod)) {
+            if let Some(i) = def.fields().iter().position(|f| Some(f.name) == sym && self.visible(def.module, f.is_pub)) {
                 let ty = match inst.map(|t| self.ty(t)) {
                     Some(Ty::Named(_, args)) => {
                         let args = self.elems(args);
@@ -429,8 +429,7 @@ impl Checker {
         if let Ctor::Def(d) = c {
             let def = &self.types[d as usize];
             names.extend(def.variants().iter().map(|v| self.name(v.name).to_string()));
-            let own = def.module == self.cur_mod;
-            names.extend(def.fields().iter().filter(|f| f.is_pub || own).map(|f| self.name(f.name).to_string()));
+            names.extend(def.fields().iter().filter(|f| self.visible(def.module, f.is_pub)).map(|f| self.name(f.name).to_string()));
         }
         names.extend(self.methods_of(c).into_iter().map(|f| self.name(self.fns[f as usize].name).to_string()));
         for i in self.visible_impls(c, arity) {
@@ -451,10 +450,7 @@ impl Checker {
     /// Returns the inherent methods of `c` that the current module can use,
     /// in declaration order.
     pub(super) fn methods_of(&self, c: Ctor) -> Vec<FnId> {
-        let shown = |f: FnId| {
-            let fi = &self.fns[f as usize];
-            fi.is_pub || fi.module == self.cur_mod
-        };
+        let shown = |f: FnId| self.visible(self.fns[f as usize].module, self.fns[f as usize].is_pub);
         let mut fs: Vec<FnId> = self
             .methods
             .entries()
@@ -665,27 +661,41 @@ impl Checker {
             let variants: Vec<(String, Option<Arc<str>>)> =
                 (0..def.variants().len()).map(|i| (self.variant_text(d, i as u32), def.variants()[i].doc.clone())).collect();
             section(out, "Variants", &variants);
-            let own = def.module == self.cur_mod;
             let fields: Vec<(String, Option<Arc<str>>)> = def
                 .fields()
                 .iter()
-                .filter(|f| f.is_pub || own)
+                .filter(|f| self.visible(def.module, f.is_pub))
                 .map(|f| {
                     let var = if f.mutable { "var " } else { "" };
                     let default = f.default.map(|h| format!(" = {}", self.source_text(self.fns[h as usize].span))).unwrap_or_default();
-                    (format!("{var}{}: {}{default}", self.name(f.name), self.show(f.ty)), f.doc.clone())
+                    (
+                        format!("{}{var}{}: {}{default}", self.pub_mark(def.module, f.is_pub), self.name(f.name), self.show(f.ty)),
+                        f.doc.clone(),
+                    )
                 })
                 .collect();
             section(out, "Fields", &fields);
         }
-        let methods: Vec<(String, Option<Arc<str>>)> =
-            self.methods_of(c).into_iter().map(|f| (self.signature(f, false), self.fns[f as usize].doc.clone())).collect();
+        let methods: Vec<(String, Option<Arc<str>>)> = self
+            .methods_of(c)
+            .into_iter()
+            .map(|f| {
+                let fi = &self.fns[f as usize];
+                (format!("{}{}", self.pub_mark(fi.module, fi.is_pub), self.signature(f, false)), fi.doc.clone())
+            })
+            .collect();
         section(out, "Methods", &methods);
         let traits: Vec<String> =
             self.visible_impls(c, arity).into_iter().map(|i| self.show_trait(&self.impls[i as usize].trait_ref)).collect();
         if !traits.is_empty() {
             let _ = writeln!(out, "Implements: {}", traits.join(", "));
         }
+    }
+
+    /// `pub ` for a public member that `help` shows in its own module, where
+    /// private members show too.
+    fn pub_mark(&self, module: ModId, is_pub: bool) -> &'static str {
+        if is_pub && module == self.cur_mod { "pub " } else { "" }
     }
 
     /// The documentation of the type of a value.

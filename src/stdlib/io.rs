@@ -3,7 +3,7 @@
 use super::stream::{self, Suspended};
 use super::stream::{IoFailure, read_line_bytes, read_to_end_reserved, strip_eol};
 use crate::check::ModKind;
-use crate::native::{HostError, IntoValue, Later, NativeModule, NativeObject, Val};
+use crate::native::{HostError, IntoValue, Later, NativeModule, NativeObject, ObjectType, Val};
 use crate::policy::Capability;
 use crate::vm::iomem::Reservation;
 use crate::vm::value::{Obj, Value, to_usize_saturating, u64_to_usize_saturating};
@@ -28,20 +28,8 @@ pub(crate) fn module() -> NativeModule {
     });
     m.vm_function("Stdin.read_line", |vm: &mut Vm, _: Val<Stdin>| read_stdin(vm, Read::Line, input_line));
     m.vm_function("Stdin.read_all", |vm: &mut Vm, _: Val<Stdin>| read_stdin(vm, Read::All, input_bytes));
-    m.vm_function("Stdout.write", |vm: &mut Vm, _: Val<Stdout>, data: Val<Vec<u8>>| -> Result<(), HostError> {
-        write_out(vm, 1, data.raw())
-    });
-    m.vm_function("Stdout.write_str", |vm: &mut Vm, _: Val<Stdout>, text: Val<String>| -> Result<(), HostError> {
-        write_out(vm, 1, text.raw())
-    });
-    m.vm_function("Stdout.flush", |vm: &mut Vm, _: Val<Stdout>| flush_out(vm, 1));
-    m.vm_function("Stderr.write", |vm: &mut Vm, _: Val<Stderr>, data: Val<Vec<u8>>| -> Result<(), HostError> {
-        write_out(vm, 2, data.raw())
-    });
-    m.vm_function("Stderr.write_str", |vm: &mut Vm, _: Val<Stderr>, text: Val<String>| -> Result<(), HostError> {
-        write_out(vm, 2, text.raw())
-    });
-    m.vm_function("Stderr.flush", |vm: &mut Vm, _: Val<Stderr>| flush_out(vm, 2));
+    output::<Stdout>(&mut m);
+    output::<Stderr>(&mut m);
     m
 }
 
@@ -66,6 +54,27 @@ impl NativeObject for Stdin {}
 impl NativeObject for Stdout {}
 impl NativeObject for Stderr {}
 
+/// The type of an output stream.
+trait Output: ObjectType {
+    /// The stream: stdout (1) or stderr (2).
+    const STREAM: u8;
+}
+
+impl Output for Stdout {
+    const STREAM: u8 = 1;
+}
+
+impl Output for Stderr {
+    const STREAM: u8 = 2;
+}
+
+/// Registers the methods of output stream `T`.
+fn output<T: Output>(m: &mut NativeModule) {
+    m.vm_function(&format!("{}.write", T::NAME), |vm: &mut Vm, _: Val<T>, data: Val<Vec<u8>>| write_out(vm, T::STREAM, data.raw()));
+    m.vm_function(&format!("{}.write_str", T::NAME), |vm: &mut Vm, _: Val<T>, text: Val<String>| write_out(vm, T::STREAM, text.raw()));
+    m.vm_function(&format!("{}.flush", T::NAME), |vm: &mut Vm, _: Val<T>| flush_out(vm, T::STREAM));
+}
+
 /// Writes the `str` or `bytes` value `v` to stdout (1) or stderr (2).
 fn write_out(vm: &mut Vm, which: u8, v: Value) -> Result<(), HostError> {
     let len = match vm.heap.get(v) {
@@ -78,10 +87,7 @@ fn write_out(vm: &mut Vm, which: u8, v: Value) -> Result<(), HostError> {
 
 fn flush_out(vm: &mut Vm, which: u8) -> Result<(), HostError> {
     let sink = if which == 1 { &vm.host.stdout } else { &vm.host.stderr };
-    match sink.flush() {
-        Ok(()) => Ok(()),
-        Err(e) => Err(HostError::new(super::io_kind(&e), e.to_string())),
-    }
+    Ok(sink.flush()?)
 }
 
 /// What a read of standard input reads.

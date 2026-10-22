@@ -65,10 +65,7 @@ fn send(
         return Err(HostError::new("invalid", format!("invalid HTTP method {:?}", super::truncate(&method, 64))));
     }
     let mut headers = header_pairs(vm, headers)?;
-    let cap = url.capability(&method);
-    if !vm.permit(&cap)? {
-        return Err(HostError::new("permission_denied", format!("permission denied: {cap}")));
-    }
+    vm.require(&url.capability(&method))?;
     if let Err(reason) = filter_request(vm, &url, &mut headers) {
         return Err(HostError::new("permission_denied", reason));
     }

@@ -2,7 +2,6 @@
 
 use super::convert::{Conversion, FromValue, HostError, IntoValue};
 use super::ty::Type;
-use crate::policy::Capability;
 use crate::vm::value::Value;
 use crate::vm::{BoxFuture, Ctl, Finisher, NResult, NativeFn, Vm};
 use std::future::Future;
@@ -15,6 +14,15 @@ pub struct Signature {
     pub ret: Type,
 }
 
+impl Signature {
+    /// Whether the native `name` of `module` is a method that takes `self`:
+    /// `name` is `Type.method`, and its first parameter has type `Type`.
+    pub(crate) fn takes_self(&self, module: &str, name: &str) -> bool {
+        let Some((ty, _)) = name.split_once('.') else { return false };
+        matches!(self.params.first(), Some(Type::Named(n)) if n.module == module && n.name == ty && n.args.is_empty())
+    }
+}
+
 /// A synchronous Rust function without access to the VM: `Fn(A, B, ...) -> R`
 /// where the arguments implement [`FromValue`] and the result [`IntoValue`].
 /// Arguments of type `&str` and `&[u8]` borrow the script's values. A result
@@ -25,7 +33,7 @@ pub trait HostFunction<Marker>: Send + Sync + 'static {
 }
 
 /// A synchronous Rust function with access to the VM:
-/// `Fn(&mut Vm, A, B, ...) -> Result<R, Ctl>`. Its arguments are owned:
+/// `Fn(&mut Vm, A, B, ...) -> R`. Its arguments are owned:
 /// heap values that it does not copy are [`Val`](super::Val) handles.
 pub trait VmFunction<Marker>: Send + Sync + 'static {
     fn signature() -> Signature;
@@ -37,13 +45,6 @@ pub trait VmFunction<Marker>: Send + Sync + 'static {
 pub trait AsyncHostFunction<Marker>: Send + Sync + 'static {
     fn signature() -> Signature;
     fn into_host(self) -> Box<NativeFn>;
-}
-
-/// A host function whose calls are guarded by a capability that `G`
-/// computes from the arguments (see [`NativeModule::guarded_function`](super::NativeModule::guarded_function)).
-pub trait GuardedFunction<Marker, G>: Send + Sync + 'static {
-    fn signature() -> Signature;
-    fn into_host(self, guard: G) -> Box<NativeFn>;
 }
 
 /// The result of a native function that is ready when a future completes:
@@ -207,41 +208,6 @@ macro_rules! fn_impls {
                         let r = fut.await;
                         Box::new(move |vm: &mut Vm| r.into_value(vm)) as Finisher
                     })))
-                })
-            }
-        }
-
-        #[allow(non_snake_case, unused_variables, unused_mut, clippy::unused_unit, clippy::too_many_arguments)]
-        impl<F, G, R, $($a,)*> GuardedFunction<($($a,)*), G> for F
-        where
-            F: Fn($($a),*) -> R + for<'a> Fn($($a::Item<'a>),*) -> R + Send + Sync + 'static,
-            G: for<'a> Fn($(&$a::Item<'a>),*) -> Capability + Send + Sync + 'static,
-            R: IntoValue,
-            $($a: FromValue + 'static,)*
-        {
-            fn signature() -> Signature {
-                Signature { params: vec![$($a::sand_type()),*], ret: Type::result(R::sand_type(), Type::error()) }
-            }
-            fn into_host(self, guard: G) -> Box<NativeFn> {
-                fn call<R, $($a,)*>(f: &impl Fn($($a),*) -> R, $($a: $a,)*) -> R {
-                    f($($a),*)
-                }
-                Box::new(move |vm: &mut Vm, args: &[Value]| -> NResult {
-                    let cap = {
-                        let &[$($a),*] = own_args(args, $n) else { return Err(missing()) };
-                        let mut conv = Conversion::new();
-                        $(let $a = $a::from_value(vm, $a, &mut conv)?;)*
-                        guard($(&$a),*)
-                    };
-                    let r = if vm.permit(&cap)? {
-                        let &[$($a),*] = own_args(args, $n) else { return Err(missing()) };
-                        let mut conv = Conversion::new();
-                        $(let $a = $a::from_value(vm, $a, &mut conv)?;)*
-                        Ok(call(&self, $($a),*))
-                    } else {
-                        Err(HostError::new("permission_denied", format!("permission denied: {cap}")))
-                    };
-                    r.into_value(vm)
                 })
             }
         }

@@ -67,27 +67,28 @@ Follow-up work, roughly in priority order.
 - [ ] Rust signatures cannot state the bounds of type parameters (`Eq`, `Ord`,
       `Hash`): the checker does not detect a `native fn` declaration that omits
       a bound its Rust function relies on.
-- [ ] Derive methods of registered types from `"Type.name"` registrations
-      (with `self` from the first parameter) so host modules need not declare
-      them in Sand source.
-- [ ] Each `Engine::new` with host modules checks and compiles them again.
-      Share the snapshot between engines whose configurations register the
-      same modules.
 - [ ] Natives build heap values with untyped constructors and wrap them in
-      `Val::from_raw` (about 120 calls). Give `Vm` constructors that return
+      `Val::from_raw`. Give `Vm` constructors that return
       typed handles (`new_str` → `Val<String>`, `new_bytes`, lists, tuples)
       and accessors for map, set, task and channel handles, so that the
-      Rust types of results are correct by construction.
+      Rust types of results are correct by construction. Where a native
+      reserves and charges as `IntoValue` does (`uri.parse_query`,
+      `http_common::header_list`, fs `stat`, `uuid`, `crypto`), return the
+      Rust value instead. Typed map and set accessors also remove the dead
+      `_ => 0` fallbacks in `core.rs`.
 - [ ] The checker accepts `json.decode<T>` for a `T` that contains a type
-      it cannot decode (a function, a task); the call then returns `Err`.
-      Reject such a `T` at the call, as private fields are.
+      it cannot decode (a function, a task); the call then returns an `Err`
+      of kind `"invalid"`. Reject such a `T` at the call, as private fields
+      are, without restricting other `reflect` natives.
+- [ ] `compile/reflect.rs` recognizes `json.Json` by its module and type
+      name. Bind it as the other types of native modules are.
+- [ ] `http.request`, `http.stream` and the web `http.request` repeat the
+      request setup (URL, method, headers, capability, `filter_request`),
+      and `Duration::try_from(timeout).unwrap_or_default()` appears six
+      times in `net` and `http`. Share the setup, and convert timeouts with
+      a `FromValue` for `std::time::Duration`.
 - [ ] `ValueType` sets `MODULE`, `NAME` and `DOC` by hand. Derive them as
       `SandEnum` and `SandObject` do.
-- [ ] `io` registers `write`, `write_str` and `flush` separately for
-      `Stdout` and `Stderr`, with the stream as a number. Register them once
-      for both types.
-- [ ] `help` inside the module that owns a type does not mark which of its
-      fields and methods are `pub`.
 - [ ] Types bound to Rust types have no source position, so `help` lists
       them before the module's other types (`Task`, `Channel` before
       `Option`).
@@ -114,16 +115,12 @@ Follow-up work, roughly in priority order.
 
 ### Performance
 
-- [ ] `task.race` charges fuel and checks memory for its list, and then
-      `BlockOn::Race` does both again.
 - [ ] `HostFn::Static` avoids an `Arc` dereference for standard natives at
       the cost of a `Box::leak` and an enum. Measure whether it pays; if not,
       use one `Arc` variant.
-- [ ] A call of a typed native costs about 0.5 ns more than a call of the
-      former untyped `fn` natives (`fannkuch` and `results` in
-      `bench/programs` are 2–3% slower; the others are unchanged). The
-      closures compile to the same code; the difference is in the call
-      through `HostFn` and the argument slice. Find where the time goes.
+- [ ] A typed native call costs about 0.5 ns in `HostFn` dispatch and the
+      argument slice (`fannkuch` and `results` in `bench/programs` show
+      it). Find where the time goes.
 
 - [ ] Dispatch loop: the cost of individual instructions shifts by up to
       ±15% between builds as LLVM reallocates registers. A threaded design
@@ -148,7 +145,7 @@ Follow-up work, roughly in priority order.
 - [ ] **Construct all types with `T(...)`.** Replace struct literals with
       named-argument calls (`Point(x: 1.0, y: 2.0)`, with defaults and
       `..base`) and struct patterns with `Point(x, ..)`. Allow a type to
-      declare an `init` method (or a native `init` for a native type) that
+      declare an `init` method (or a native `init` for an opaque type) that
       replaces field-by-field construction and can return a `Result`. Inside
       `init`, `Self(...)` performs field-by-field construction. Remove
       module-level constructor functions (`time.date`, `regex.new`,

@@ -1,7 +1,7 @@
 //! Natives for the prelude and the `task` module.
 
 use crate::check::ModKind;
-use crate::native::{self, Channel, HostError, NativeModule, Never, Param, Task, Val};
+use crate::native::{self, Channel, HostError, Later, NativeModule, Never, Param, Task, Val};
 use crate::vm::compare::{
     find_key, hash_key, set_slot, try_sort_by, try_sort_numbers, try_sort_packed, values_cmp_metered, values_eq_metered,
 };
@@ -142,20 +142,15 @@ pub(crate) fn task() -> NativeModule {
     m.vm_function("sleep", |vm: &mut Vm, d: SignedDuration| {
         let d = nanos(d).max(0) as u64;
         let sleep = vm.host.clock.sleep(std::time::Duration::from_nanos(d));
-        Err::<(), _>(Ctl::suspend(Box::pin(async move {
+        Ok::<_, Ctl>(Later::new(async move {
             sleep.await;
-            Box::new(|_: &mut Vm| Ok(Value::Unit)) as crate::vm::Finisher
-        })))
+            |_: &mut Vm| Ok::<_, Ctl>(())
+        }))
     });
     m.vm_function("yield_now", |vm: &mut Vm| Err::<(), _>(vm.yield_now()));
+    // `BlockOn::Race` charges for the tasks and checks the memory limit.
     m.vm_function("race", |vm: &mut Vm, tasks: List<Task<Param<0>>>| {
-        let n = list_len(vm, tasks);
-        vm.charge(n as u64)?;
-        vm.reserve(std::mem::size_of_val(tasks.items(&vm.heap)))?;
         let tasks = tasks.items(&vm.heap).to_vec();
-        if tasks.is_empty() {
-            return fail("invalid", "task.race called with an empty list");
-        }
         vm.block(BlockOn::Race(tasks)).map(Param::<0>::from_raw)
     });
     m.vm_function("channel", |vm: &mut Vm, cap: i64| -> Result<Val<Channel<Param<0>>>, Ctl> {

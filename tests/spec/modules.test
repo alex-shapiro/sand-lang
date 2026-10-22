@@ -78,6 +78,41 @@ pub fn new(text: str) -> Doc { Doc { text } }
 --- error
 4: `text` is a method; call it with `()`
 
+=== a private method hides the built-in to_str in other modules
+import "./money.sand"
+print(money.cents(500).to_str())
+--- file money.sand
+pub struct Money {
+    pub cents: int
+    fn to_str(self) -> str { "$\(self.cents / 100)" }
+}
+pub fn cents(n: int) -> Money { Money { cents: n } }
+--- error
+2: method `to_str` of `money.Money` is private
+
+=== a public field does not hide a private method of the same name
+import "./box.sand"
+print(box.new(2).size())
+--- file box.sand
+pub struct Box {
+    pub size: int
+    fn size(self) -> int { self.size * 2 }
+}
+pub fn new(size: int) -> Box { Box { size } }
+--- error
+2: method `size` of `box.Box` is private
+
+=== a struct with private fields reports only the privacy error
+import "./account.sand"
+let a = account.Account { owner: "ann" }
+--- file account.sand
+pub struct Account {
+    pub owner: str
+    balance: int
+}
+--- error
+2: cannot construct `account.Account` here: its field `balance` is private
+
 === private methods cannot be called from other modules
 import "./account.sand"
 print(account.open("ann").audit())
@@ -143,6 +178,12 @@ pub struct Account {
 pub fn open() -> Account { Account { owner: "ann" } }
 --- error
 4: this call cannot build `account.Account` here: its field `balance` is private
+
+=== natives that take a type description can only be called
+import json
+let decode: fn(str) -> Result<int> = json.decode
+--- error
+2: `decode` takes a type description, so it can only be called
 
 === private items are not visible
 import "./m.sand"

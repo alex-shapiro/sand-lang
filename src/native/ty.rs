@@ -217,8 +217,7 @@ impl<T: SandType> SandType for Option<T> {
     }
 }
 
-/// `Result<T, Error>`: errors of any Rust type become the prelude's `Error`
-/// (see [`IntoHostError`](crate::native::IntoHostError)).
+/// `Result<T, Error>` (see [`IntoHostError`](crate::native::IntoHostError)).
 impl<T: SandType, E: crate::native::IntoHostError> SandType for Result<T, E> {
     fn sand_type() -> Type {
         Type::result(T::sand_type(), Type::error())
@@ -231,8 +230,8 @@ impl<T: SandType, E: crate::native::NativeError> SandType for Result<crate::nati
     }
 }
 
-/// `T`: a native that returns `Err(ctl)` fails the call with `ctl` (a
-/// runtime error, a limit, or a suspension).
+/// `T`: a native that returns `Err(ctl)` aborts the run with `ctl` (a
+/// runtime error, a limit, or an exit) or suspends the calling task.
 impl<T: SandType> SandType for Result<T, crate::vm::Ctl> {
     fn sand_type() -> Type {
         T::sand_type()

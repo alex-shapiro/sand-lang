@@ -6,7 +6,6 @@ use crate::vm::meter::Scratch;
 use crate::vm::value::{Obj, Value, ValueType};
 use crate::vm::{Ctl, Vm};
 use std::collections::{BTreeMap, HashMap};
-use std::fmt::Display;
 
 /// Conversion of an argument from a Sand value.
 ///
@@ -52,8 +51,7 @@ pub trait IntoValue: SandType {
 
 /// The error of a native function whose Sand result is `Result<T>`: an
 /// `Error { kind, message }` that the script receives, or an abort (`Ctl`,
-/// converted with `?`) that ends the call. Any other error type `E: Display`
-/// in a `Result<T, E>` becomes an error of kind `"error"`.
+/// converted with `?`) that ends the run.
 pub struct HostError(Box<Raised>);
 
 enum Raised {
@@ -62,7 +60,7 @@ enum Raised {
 }
 
 impl HostError {
-    /// An error of kind `kind`; the standard kinds are listed in SPEC §13
+    /// An error of kind `kind`; the standard kinds are listed in SPEC §5.4
     /// (`not_found`, `invalid`, `permission_denied`, ...).
     pub fn new(kind: impl Into<String>, message: impl Into<String>) -> HostError {
         HostError(Box::new(Raised::Error { kind: kind.into(), message: message.into() }))
@@ -75,6 +73,14 @@ impl From<Ctl> for HostError {
     }
 }
 
+/// An error of the standard kind for `e` (`not_found`, `permission_denied`,
+/// ...).
+impl From<std::io::Error> for HostError {
+    fn from(e: std::io::Error) -> HostError {
+        HostError::new(crate::stdlib::io_kind(&e), e.to_string())
+    }
+}
+
 impl std::fmt::Debug for HostError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &*self.0 {
@@ -84,7 +90,9 @@ impl std::fmt::Debug for HostError {
     }
 }
 
-/// The error types a host function may return in a `Result`.
+/// The error types of a native function whose Sand result is `Result<T>`:
+/// [`HostError`], `std::io::Error` (an error of its standard kind), and
+/// `String` and `&str` (an error of kind `"error"`).
 pub trait IntoHostError {
     fn into_host_error(self) -> HostError;
 }
@@ -95,9 +103,21 @@ impl IntoHostError for HostError {
     }
 }
 
-impl<E: Display> IntoHostError for E {
+impl IntoHostError for std::io::Error {
     fn into_host_error(self) -> HostError {
-        HostError::new("error", self.to_string())
+        self.into()
+    }
+}
+
+impl IntoHostError for String {
+    fn into_host_error(self) -> HostError {
+        HostError::new("error", self)
+    }
+}
+
+impl IntoHostError for &str {
+    fn into_host_error(self) -> HostError {
+        HostError::new("error", self)
     }
 }
 
@@ -284,11 +304,12 @@ impl<T: IntoValue, E: IntoHostError> IntoValue for Result<T, E> {
                 let v = x.into_value(vm)?;
                 Ok(vm.ok(v))
             }
+            // The memory limit is not checked here: a native that fails
+            // with it runs again after a collection, which would repeat side
+            // effects that came before the error. The next safe point
+            // collects and checks the limit.
             Err(e) => match *e.into_host_error().0 {
-                Raised::Error { kind, message } => {
-                    vm.reserve(kind.len() + message.len())?;
-                    Ok(vm.err_value(&kind, &message))
-                }
+                Raised::Error { kind, message } => Ok(vm.err_value(&kind, &message)),
                 Raised::Abort(c) => Err(c),
             },
         }

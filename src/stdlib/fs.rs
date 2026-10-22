@@ -369,10 +369,7 @@ fn run<T: Send + 'static, R: IntoValue>(
 /// Converts an I/O result into an engine result.
 fn settle<T, R: IntoValue>(vm: &mut Vm, shown: String, r: io::Result<T>, finish: impl FnOnce(&mut Vm, T) -> FsResult<R>) -> FsResult<R> {
     match r {
-        Ok(v) => {
-            let x = finish(vm, v)?;
-            Ok(x)
-        }
+        Ok(v) => finish(vm, v),
         Err(e) => Err(HostError::new(io_kind(&e), format!("{shown}: {e}"))),
     }
 }
@@ -883,7 +880,7 @@ fn open(vm: &mut Vm, path: Val<String>, mode: OpenMode) -> FsResult<Val<FileObj>
         Err(e) => return Err(HostError::new(io_kind(&e), format!("{shown}: {e}"))),
     };
     let obj = FileObj { open: Some(OpenState { file: Some(file), _slot: slot, buf: Vec::new(), at: 0, counted: 0 }), shown, mode };
-    Ok(vm.new_object(obj)?)
+    Ok(vm.place_object(obj))
 }
 
 /// `write` and `write_str`: writes the bytes that `data` reads from the heap.

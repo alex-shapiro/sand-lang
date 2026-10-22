@@ -121,6 +121,8 @@ fn json_ids(vm: &Vm) -> Result<JsonIds, Ctl> {
 enum Error {
     /// Invalid JSON or a mismatch with the target type: becomes `Err(Error { kind: "parse" })`.
     Parse(String),
+    /// A target type that values cannot be decoded into: becomes `Err(Error { kind: "invalid" })`.
+    Invalid(String),
     /// Aborts the native call (memory limit, error).
     Ctl(Ctl),
 }
@@ -137,6 +139,7 @@ fn into_result<T>(r: PResult<Value>) -> Result<Val<T>, HostError> {
     match r {
         Ok(v) => Ok(Val::from_raw(v)),
         Err(Error::Parse(msg)) => Err(HostError::new("parse", msg)),
+        Err(Error::Invalid(msg)) => Err(HostError::new("invalid", msg)),
         Err(Error::Ctl(c)) => Err(c.into()),
     }
 }
@@ -749,6 +752,11 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
         Error::Parse(format!("{}: {msg}", self.path_str()))
     }
 
+    /// The error for a part of the target type that cannot be decoded.
+    fn unsupported(&self, what: &str) -> Error {
+        Error::Invalid(format!("{}: cannot decode {what}", self.path_str()))
+    }
+
     /// The error for a value of the wrong kind: a syntax error if there is no
     /// value at all, otherwise `expected <what>`.
     fn mismatch(&self, what: &str) -> Error {
@@ -932,7 +940,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                     Err(msg) => Err(self.fail(&msg)),
                 }
             }
-            TypeDesc::Unsupported(name) => Err(Error::Parse(format!("cannot decode values of type {name}"))),
+            TypeDesc::Unsupported(name) => Err(self.unsupported(&format!("values of type {name}"))),
         }
     }
 
@@ -986,7 +994,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                 let (hash, text) = (x.value_hash(), x.text());
                 return Ok((self.b.st.alloc(v), hash, Some(Cow::Owned(text))));
             }
-            _ => return Err(Error::Parse("cannot decode map keys of this type".to_string())),
+            _ => return Err(self.unsupported("map keys of this type")),
         };
         Ok((k, hash_key(self.b.heap, self.b.meter, k)?, None))
     }

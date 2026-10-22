@@ -7,6 +7,7 @@ mod common;
 use common::{TempDir, rt, run_with};
 use sandlang::jiff::civil::Date;
 use sandlang::time::TimeZone;
+use sandlang::vm::Vm;
 use sandlang::{
     Capability, Config, Decision, Engine, Error, LimitKind, Limits, LogLevel, LogRecord, LogSink, MemorySink, NativeModule, Policy,
     PromptAnswer, RulePolicy, ValueType,
@@ -172,7 +173,7 @@ fn script_args_and_env_are_virtual() {
 
 fn geo_module() -> NativeModule {
     let mut m = NativeModule::new("geo");
-    m.function("dist", |a: f64, b: f64| -> f64 { (a * a + b * b).sqrt() }).params(&["a", "b"]);
+    m.function("dist", |a: f64, b: f64| -> f64 { (a * a + b * b).sqrt() }).params(&["a", "b"]).doc("Euclidean length of (a, b).");
     m.function("count", |s: &str| -> i64 { s.chars().count() as i64 });
     m.function("split", |s: String| -> Vec<String> { s.split(',').map(String::from).collect() });
     m.function("find", |xs: Vec<i64>, t: i64| -> Option<i64> { xs.iter().position(|&x| x == t).map(|i| i as i64) });
@@ -189,7 +190,6 @@ fn geo_module() -> NativeModule {
     m.function("pair", |a: i64, s: String| -> (i64, String) { (a * 2, s.to_uppercase()) });
     m.function("raw", |b: Vec<u8>| -> Vec<u8> { b.into_iter().rev().collect() });
     m.function("flag", |b: bool| -> bool { !b });
-    m.doc("dist", "Euclidean length of (a, b).");
     m
 }
 
@@ -493,11 +493,19 @@ fn host_function_declarations_must_have_the_rust_types() {
 }
 
 #[test]
-fn registered_methods_must_be_declared() {
+fn registered_methods_are_declared_from_their_rust_types() {
     let mut m = shapes_module();
-    m.function("Shape.ghost", |s: Shape| s as i64);
+    m.function("Shape.rank", |s: Shape, base: i64| base + s as i64).params(&["base"]);
+    m.function("Shape.first", || Shape::Circle);
+    let src = "import shapes\nprint(shapes.Shape.Square.rank(base: 10))\nprint(shapes.Shape.first())";
+    let (r, out, _) = run_src(Config::new().module(m), src);
+    r.unwrap();
+    assert_eq!(out, "11\nCircle\n");
+
+    let mut m = shapes_module();
+    m.function("Ghost.rank", |s: Shape| s as i64);
     let errors = engine_errors(Config::new().module(m));
-    assert!(errors[0].contains("native `shapes.Shape.ghost` is registered, but the module does not declare it"), "{errors:?}");
+    assert_eq!(errors, ["native `shapes.Ghost.rank` is a method of `Ghost`, which is not a type of the module without type parameters"]);
 }
 
 #[test]
@@ -611,11 +619,10 @@ fn native_module_conversions() {
     })
     .params(&["key"]);
     m.function("many", |n: i64| -> Vec<String> { (0..n).map(|i| "x".repeat(1000) + &i.to_string()).collect() });
-    m.guarded_function(
-        "write",
-        |path: &&str, data: &Vec<u8>| Capability::Custom { name: "write".into(), detail: format!("{path} {}", data.len()) },
-        |path: &str, data: Vec<u8>| -> i64 { (path.len() + data.len()) as i64 },
-    );
+    m.vm_function("write", |vm: &mut Vm, path: String, data: Vec<u8>| -> Result<i64, sandlang::HostError> {
+        vm.require(&Capability::Custom { name: "write".into(), detail: format!("{path} {}", data.len()) })?;
+        Ok((path.len() + data.len()) as i64)
+    });
     let src = r#"
 import conv
 print(conv.grid(3))
@@ -663,6 +670,27 @@ fn host_module_names_are_unique() {
 #[should_panic(expected = "registered twice")]
 fn host_function_names_are_unique() {
     NativeModule::new("a").function("f", || -> i64 { 1 }).function("f", || -> i64 { 2 });
+}
+
+#[test]
+#[should_panic(expected = "is given twice")]
+fn parameter_names_are_unique() {
+    NativeModule::new("a").function("f", |a: i64, b: i64| a + b).params(&["x", "x"]);
+}
+
+#[test]
+#[should_panic(expected = "is not an identifier")]
+fn parameter_names_are_identifiers() {
+    NativeModule::new("a").function("f", |a: i64| a).params(&["fn"]);
+}
+
+#[test]
+fn declared_natives_take_names_and_docs_from_the_declaration() {
+    let mut m = NativeModule::new("a");
+    m.source("pub native fn f(x: int) -> int");
+    m.function("f", |a: i64| a).params(&["y"]);
+    let errors = engine_errors(Config::new().module(m));
+    assert_eq!(errors, ["native `a.f` has `params` or `doc`, which apply only to a native that the module does not declare"]);
 }
 
 #[test]
@@ -813,10 +841,11 @@ impl sandlang::native::NativeObject for Scratch {}
 fn stats_module() -> NativeModule {
     let mut m = NativeModule::new("stats");
     m.object_type::<Counter>();
-    m.source("extend Counter {\n    /// Adds `n` and returns the total.\n    pub native fn add(self, n: int) -> int\n}");
     m.function("counter", || Counter(AtomicUsize::new(0)));
     m.function("total", |c: &Counter| c.0.load(Ordering::Relaxed) as i64);
-    m.function("Counter.add", |c: &Counter, n: i64| (c.0.fetch_add(n as usize, Ordering::Relaxed) + n as usize) as i64);
+    m.function("Counter.add", |c: &Counter, n: i64| (c.0.fetch_add(n as usize, Ordering::Relaxed) + n as usize) as i64)
+        .params(&["n"])
+        .doc("Adds `n` and returns the total.");
     m
 }
 
@@ -950,11 +979,10 @@ fn public_fields_of_public_host_types_use_public_types() {
 #[test]
 fn native_module_custom_capability() {
     let mut m = NativeModule::new("door");
-    m.guarded_function(
-        "open",
-        |name: &String| Capability::Custom { name: "door".into(), detail: name.clone() },
-        |name: String| -> String { format!("opened {name}") },
-    );
+    m.vm_function("open", |vm: &mut Vm, name: String| -> Result<String, sandlang::HostError> {
+        vm.require(&Capability::Custom { name: "door".into(), detail: name.clone() })?;
+        Ok(format!("opened {name}"))
+    });
     let src = "import door\nprint(door.open(\"front\"))\nprint(door.open(\"back\"))";
     let policy = Policy::custom(|cap: &Capability| match cap {
         Capability::Custom { detail, .. } if detail == "front" => Decision::Allow,

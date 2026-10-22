@@ -223,6 +223,9 @@ pub struct Config {
     pub(crate) prompter: Option<Arc<dyn Prompter>>,
     pub(crate) limits: Limits,
     pub(crate) modules: Vec<NativeModule>,
+    /// The registry of `modules`, which engines made from clones of this
+    /// configuration share (with the checked and compiled modules).
+    registry: Arc<OnceLock<Arc<Registry>>>,
     pub(crate) stdout: SharedSink,
     pub(crate) stderr: SharedSink,
     log_sink: Option<Arc<dyn crate::LogSink>>,
@@ -274,6 +277,7 @@ impl Config {
             prompter: None,
             limits: Limits::default(),
             modules: Vec::new(),
+            registry: Arc::default(),
             stdout: Arc::new(crate::stdio::StdoutSink::default()),
             stderr: Arc::new(crate::stdio::StderrSink::default()),
             log_sink: None,
@@ -342,6 +346,7 @@ impl Config {
     pub fn module(mut self, m: NativeModule) -> Self {
         assert!(!self.modules.iter().any(|x| x.name() == m.name()), "host module `{}` is added twice", m.name());
         self.modules.push(m);
+        self.registry = Arc::default();
         self
     }
     pub fn stdout(mut self, s: impl OutputSink + 'static) -> Self {
@@ -602,7 +607,7 @@ impl Registry {
     }
 
     /// Registers the native `key` (`module.name` or `module.Type.name`).
-    pub fn add_native(&mut self, key: String, f: HostFn, sig: Signature, names: Arc<[String]>, doc: Option<Arc<str>>) {
+    pub fn add_native(&mut self, key: String, f: HostFn, sig: Signature, names: Option<Arc<[String]>>, doc: Option<Arc<str>>) {
         assert!(!self.decls.fns.contains_key(key.as_str()), "native `{key}` registered twice");
         let id = self.natives.len() as u32;
         Arc::make_mut(&mut self.natives).push(NativeEntry { name: key.clone().into(), f });
@@ -773,9 +778,10 @@ pub(crate) fn on_compile_stack<R: Send + 'static>(f: impl FnOnce() -> Result<R, 
 impl Engine {
     /// An engine for `config`. Fails with [`Error::Compile`] if a host
     /// module has errors, such as a `native fn` whose types differ from its
-    /// Rust function's.
+    /// Rust function's. Engines made from clones of one `Config` check its
+    /// host modules once.
     pub fn new(config: Config) -> Result<Engine, Error> {
-        let registry = Registry::for_config(&config);
+        let registry = config.registry.get_or_init(|| Registry::for_config(&config)).clone();
         if registry.base.is_some() {
             registry.snapshot()?;
         }
@@ -1592,6 +1598,17 @@ mod registry_tests {
         let undeclared: Vec<&str> =
             STD.natives.iter().enumerate().filter(|(id, _)| !declared.contains(&(*id as u32))).map(|(_, e)| &*e.name).collect();
         assert!(undeclared.is_empty(), "registered natives no `native fn` declares: {undeclared:?}");
+    }
+
+    /// Engines made from clones of a configuration check its host modules
+    /// once; adding a module makes a new registry.
+    #[test]
+    fn engines_of_one_config_share_its_registry() {
+        let config = Config::new().module(NativeModule::new("a"));
+        let (one, two) = (Engine::new(config.clone()).unwrap(), Engine::new(config.clone()).unwrap());
+        assert!(Arc::ptr_eq(&one.registry, &two.registry));
+        let three = Engine::new(config.module(NativeModule::new("b"))).unwrap();
+        assert!(!Arc::ptr_eq(&one.registry, &three.registry));
     }
 
     /// `STD_MODULES` (the names host modules cannot take) lists the standard modules.

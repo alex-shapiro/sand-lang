@@ -365,7 +365,7 @@ pub(crate) fn module() -> NativeModule {
         if let Some(re) = cached_regex(vm, pattern.str(&vm.heap), slot) {
             vm.charge(CACHED_COST)?;
             vm.charge_bytes(pattern.str(&vm.heap).len())?;
-            return Ok(Val::from_raw(re.raw()));
+            return Ok(re);
         }
         let mut scan = Scan::new(vm);
         scan.charge(vm, COMPILE_BASE + COMPILE_PER_BYTE * pattern.str(&vm.heap).len() as u64)?;

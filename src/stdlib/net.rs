@@ -11,7 +11,7 @@ use crate::native::{HostError, NativeModule, NativeObject, Val};
 use crate::network::{self, Network, Stream};
 use crate::policy::{Capability, Decision, Policy, format_host_port, is_private_address, is_valid_host, parse_port, split_port};
 use crate::vm::iomem::{Reservation, ResourceSlot};
-use crate::vm::value::ValueType;
+use crate::vm::value::{ValueType, to_usize_saturating};
 use crate::vm::{Ctl, Vm};
 use jiff::SignedDuration;
 use std::fmt;
@@ -63,11 +63,6 @@ pub(crate) fn module() -> NativeModule {
 
 pub(crate) fn closed() -> IoFailure {
     IoFailure::new("closed", "connection closed")
-}
-
-/// Checks `cap` against the policy, or fails with kind `"permission_denied"`.
-pub(crate) fn check_permission(vm: &mut Vm, cap: Capability) -> Result<(), HostError> {
-    if vm.permit(&cap)? { Ok(()) } else { Err(HostError::new("permission_denied", format!("permission denied: {cap}"))) }
 }
 
 /// A native object holding an open resource, counted by its slot (see
@@ -193,7 +188,7 @@ pub(crate) fn listen_with<T: Resource>(
         return Err(HostError::new("invalid", msg));
     };
     let addr = std::net::SocketAddr::new(ip, check_port(port)?);
-    check_permission(vm, Capability::NetListen(addr))?;
+    vm.require(&Capability::NetListen(addr))?;
     let slot = vm.resource_slot()?;
     let network = vm.host.network.clone();
     suspend_resource(slot, async move { Ok(open(network.listen(addr).await?)?) })
@@ -473,7 +468,7 @@ pub(crate) async fn connect_checked(
 
 fn connect(vm: &mut Vm, host: Val<String>, port: i64, timeout: SignedDuration) -> Suspended<Val<Conn>> {
     let (host, port) = check_endpoint(vm, host, port)?;
-    check_permission(vm, Capability::Net { host: host.clone(), port })?;
+    vm.require(&Capability::Net { host: host.clone(), port })?;
     // Counted from the start: a connection attempt holds a socket.
     let slot = vm.resource_slot_with(CONN_BUFFER, "a connection")?;
     let timeout = Duration::try_from(timeout).unwrap_or_default();
@@ -492,7 +487,7 @@ fn connect_tls(vm: &mut Vm, host: Val<String>, port: i64, timeout: SignedDuratio
         return Err(HostError::new("invalid", "TLS support is not enabled in this build"));
     }
     let (host, port) = check_endpoint(vm, host, port)?;
-    check_permission(vm, Capability::Net { host: host.clone(), port })?;
+    vm.require(&Capability::Net { host: host.clone(), port })?;
     let slot = vm.resource_slot_with(CONN_BUFFER + TLS_BUFFERS, "a connection")?;
     let timeout = Duration::try_from(timeout).unwrap_or_default();
     let (policy, network, clock) = (vm.host.policy.clone(), vm.host.network.clone(), vm.host.clock.clone());
@@ -520,7 +515,7 @@ fn conn_read(vm: &mut Vm, c: Val<Conn>, max: i64) -> Suspended<Val<Vec<u8>>> {
     }
     // A read returns what the connection's buffer holds (filling it first if
     // it is empty), at most `CONN_BUFFER` bytes.
-    let max = (max as usize).min(CONN_BUFFER);
+    let max = to_usize_saturating(max).min(CONN_BUFFER);
     let h = conn_handle(vm, c)?;
     // The buffer is counted against the memory limit while the read is pending.
     let res = vm.reserve_io(max)?;

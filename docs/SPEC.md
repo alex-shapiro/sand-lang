@@ -267,13 +267,12 @@ importing a name that is not exported is an error. Qualified names are written
 ### 3.3 Visibility
 
 `pub` may precede `fn`, `struct`, `enum`, `trait`, `type`, `let` and `var` at
-the top level, and the fields and methods of structs, enums and `extend`
-blocks. Other modules cannot use an item, field or method without `pub`: they
-cannot name a private item, read, assign or match a private field, call a
-private method, or build a struct that has a private field (with a literal,
-or with `json.decode`). Printing a value and `json.encode` show all of its
-fields. Enum variants and the methods of a public trait are public; impls have
-no visibility of their own (§4.9). Top-level `var`s are exported read-only:
+the top level, struct fields, and the methods of structs, enums and `extend`
+blocks. Other modules cannot name a private item, read, assign or match a
+private field, call a private method, or build a struct that has a private field
+(with a literal or `json.decode`). Printing a value and `json.encode` show all
+of its fields. Enum variants and the methods of a public trait are public; impls
+have no visibility of their own (§4.9). Top-level `var`s are exported read-only:
 importers may read but not assign them.
 
 ---
@@ -656,9 +655,9 @@ Standard library modules define further nominal types (e.g. `json.Json`,
 types (§16.3), and they have no fields, cannot be constructed with a literal,
 and are manipulated only by functions and methods. The values of a value type
 (e.g. `time.PlainDate`) are immutable, are compared and hashed by value, can
-implement `Ord`, and are formatted as text (`2024-02-29`). Other opaque values
-(objects, e.g. `net.Conn`, and the prelude's `Task<T>` and `Channel<T>`) are
-compared by identity and formatted as `<Type>`.
+implement `Ord`, and are formatted as text (`2024-02-29`). Objects (e.g.
+`net.Conn`) are compared by identity and formatted as `<Type>`; tasks and
+channels as `<task>` and `<channel>`.
 
 ### 5.5 Type equality and subtyping
 
@@ -2151,8 +2150,8 @@ r.replace(text, rep: str) -> str        // first; $1, ${name} expand
 r.replace_all(text, rep: str) -> str
 r.split(text) -> [str]
 r.pattern() -> str
-struct Match { pub text: str, pub start: int, pub end: int }
-struct Captures { pub text: str }
+pub struct Match { pub text: str, pub start: int, pub end: int }
+pub struct Captures { pub text: str }
 Captures: get(i: int) -> Match?, name(n: str) -> Match?, len() -> int, text(i: int) -> str?
 ```
 
@@ -2712,7 +2711,7 @@ let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 
 
 ### 16.1 Execution and errors
 
-`Engine::new` fails with `Error::Compile` if a host module has errors (§16.3).
+`Engine::new` checks host modules (§16.3).
 `Engine::run_source` and `Engine::run_file` compile and execute a script inside
 the returned future on the thread that polls it. `Engine::run_tests` compiles a
 module and executes its `test` blocks (§4.8). For static analysis without
@@ -2801,60 +2800,65 @@ Sand type of each function from its Rust types, and converts arguments and
 results within the fuel and memory limits. Module and type names must be
 unique, and a host module cannot take the name of a standard module.
 
-| Method                                  | Registers                                                                   |
-| --------------------------------------- | --------------------------------------------------------------------------- |
-| `function(name, f)`                     | a synchronous function; it can borrow `&str`, `&[u8]` and `&T` arguments    |
-| `vm_function(name, f)`                  | a synchronous function that also takes `&mut Vm`; its arguments are owned   |
-| `async_function(name, f)`               | a function returning a `Future`; only the calling task waits for it         |
-| `guarded_function(name, guard, f)`      | a function whose calls need the `Capability` that `guard` computes (§14)    |
-| `value_type::<T>()`                     | a `ValueType`: an opaque type with value semantics (§5.4)                   |
-| `enum_type::<T>()`                      | an `EnumType` (`#[derive(SandEnum)]`): a unit `enum`                        |
-| `object_type::<T>()`                    | an `ObjectType` (`#[derive(SandObject)]`): an opaque reference type         |
-| `params(names)`, `doc(name, text)`      | the parameter names and doc comment of a function that the source does not declare |
+| Method                       | Registers                                                                            |
+| ---------------------------- | ------------------------------------------------------------------------------------ |
+| `function(name, f)`          | a synchronous function; it can borrow `&str`, `&[u8]` and `&T` arguments             |
+| `vm_function(name, f)`       | a synchronous function that also takes `&mut Vm`; its arguments are owned            |
+| `async_function(name, f)`    | a function with owned arguments that returns a `Future`; only the calling task waits |
+| `value_type::<T>()`          | a `ValueType`: an opaque type with value semantics (§5.4)                            |
+| `enum_type::<T>()`           | an `EnumType` (`#[derive(SandEnum)]`): a unit `enum`                                 |
+| `object_type::<T>()`         | an `ObjectType` (`#[derive(SandObject)]`): an opaque reference type                  |
+| `params(names)`, `doc(text)` | the parameter names and doc comment of the function registered last                  |
 
 The error type of a function's Rust result sets its Sand result:
 
 - `Result<T, HostError>`: `Result<T>`. `HostError::new(kind, message)` is the
-  `Err(Error { kind, message })` that the script receives. A `Ctl` converts
-  into a `HostError` with `?` and ends the call.
-- `Result<T, E>` for any other `E: Display`: `Result<T>`, with errors of kind
-  `"error"`.
-- `Result<T, Ctl>`: `T`. An `Err` ends the call: a runtime error
+  `Err(Error { kind, message })` that the script receives. `?` converts a
+  `Ctl` into a `HostError` that aborts as with `Result<T, Ctl>`, and a
+  `std::io::Error` into one of its standard kind.
+- `Result<T, E>` for `E` = `std::io::Error`, `String` or `&str`: as
+  `Result<T, HostError>`; a string is an error of kind `"error"`.
+- `Result<T, Ctl>`: `T`. An `Err` aborts the run: a runtime error
   (`Ctl::fail`), a limit, or an exit.
 - `Result<Later<T, E>, E>`: as `Result<T, E>`, after the calling task waits
   for a future.
 
-A denial of a guarded function's capability returns `Err` with kind
-`"permission_denied"`.
+`Vm::require(&capability)` checks a `Capability` (§14) and fails with kind
+`"permission_denied"` if the policy denies it.
 
-| Rust type                                                 | Sand type                               |
-| --------------------------------------------------------- | --------------------------------------- |
-| `i64`, `f64`, `bool`, `()`, `jiff::SignedDuration`        | `int`, `float`, `bool`, `()`, `duration` |
-| `String`, `&str`; `Vec<u8>`, `&[u8]`                      | `str`; `bytes`                          |
-| `Vec<T>`, `Option<T>`, tuples of 2 to 8 elements          | `[T]`, `T?`, tuples                     |
-| `HashMap<String, T>`, `BTreeMap<String, T>`               | `[str: T]`                              |
-| `Result<T, E>`                                            | `Result<T>` or `T`, as above            |
-| `Never`                                                   | `never`                                 |
-| a registered `ValueType`, `EnumType` or `ObjectType` `T`  | its type (`&T` for an object argument)  |
-| `Val<T>`                                                  | the type of `T`, as a handle to a heap value |
-| `Param<N>`, `Reflect<N>`                                  | type parameter `N`, and its runtime description |
+| Rust type                                                | Sand type                                                    |
+| -------------------------------------------------------- | ------------------------------------------------------------ |
+| `i64`, `f64`, `bool`, `()`, `jiff::SignedDuration`       | `int`, `float`, `bool`, `()`, `duration`                     |
+| `String`, `&str`; `Vec<u8>`, `&[u8]`                     | `str`; `bytes`                                               |
+| `Vec<T>`, `Option<T>`, tuples of 2 to 8 elements         | `[T]`, `T?`, tuples                                          |
+| `HashMap<String, T>`, `BTreeMap<String, T>`              | `[str: T]`                                                   |
+| `Result<T, E>`                                           | `Result<T>` or `T`, as above                                 |
+| `Never`                                                  | `never`                                                      |
+| a registered `ValueType`, `EnumType` or `ObjectType` `T` | its type (`&T` for an object argument)                       |
+| `Val<T>`                                                 | the type of `T`, as a handle to a heap value                 |
+| `Param<N>`, `Reflect<N>`                                 | the type parameter at index `N`, and its runtime description |
 
 The engine declares each registered type with its Rust doc comment. It also
 declares each function that the module's Sand source (`NativeModule::source`)
 does not declare, as `pub native fn`. The parameters of such a function are
-named `arg1`, `arg2`, ..., unless `params` names them. The source must declare
-a function with `native fn` to give its parameters defaults, to make it a
-method (registered as `"Type.name"`), or to name its type parameters (a
-generic function).
+named `arg1`, `arg2`, ..., unless `params` names them. A function registered
+as `"Type.name"` is a method of `Type`, which takes `self` if its first
+parameter has type `Type`. The source must declare a function with `native fn`
+to give its parameters defaults or to name its type parameters (a generic
+function).
 
-`Engine::new` checks every host module. It fails with `Error::Compile` if:
+`Engine::new` checks every host module, once for all engines made from clones
+of one `Config`. It fails with `Error::Compile` if:
 
 - the module source has a syntax or type error;
 - the types of a `native fn` declaration differ from those of its Rust function;
 - a function uses a type that no module registers or declares, or a private
   type of another module;
 - a public function or field uses a private type;
-- a registered method or generic function has no `native fn` declaration.
+- a generic function has no `native fn` declaration;
+- a function registered as `"Type.name"` names no type of the module, or a
+  generic type, and has no `native fn` declaration;
+- a function that the source declares also has `params` or `doc`.
 
 ### 16.4 Operating-system access and file systems
 
