@@ -26,16 +26,11 @@ use std::sync::{Arc, Mutex};
 use value::*;
 
 pub type NResult = Result<Value, Ctl>;
-/// The Rust function of a native, which takes the call's arguments.
 pub type NativeFn = dyn Fn(&mut Vm, &[Value]) -> NResult + Send + Sync;
 
-/// The function of a native.
 #[derive(Clone)]
 pub enum HostFn {
-    /// A function of the standard library, which lives as long as the
-    /// process. A call does not go through an `Arc`.
     Static(&'static NativeFn),
-    /// A function of a host module.
     Shared(Arc<NativeFn>),
 }
 
@@ -95,8 +90,7 @@ pub enum CtlKind {
 }
 
 impl Ctl {
-    /// Aborts execution with a runtime error of kind `kind`. A native returns
-    /// a recoverable `Err` to the script as a [`HostError`].
+    /// Aborts execution with an uncatchable runtime error of `kind`. For recoverable `Result` errors, return [`HostError`] instead.
     #[cold]
     pub fn fail(kind: &str, msg: impl std::fmt::Display) -> Ctl {
         Ctl(Box::new(CtlKind::RuntimeError(format!("{kind}: {msg}"))))
@@ -896,10 +890,7 @@ impl Vm {
         if self.heap.would_exceed(extra) { Err(Ctl::limit(LimitKind::Memory)) } else { Ok(()) }
     }
 
-    /// Runs `f`, which makes the value of a native call after its side
-    /// effects, without memory-limit checks: a failure would make the engine
-    /// call the native again. The caller enforces the limit with
-    /// [`Vm::enforce_limit`] when the value is a root.
+    /// Runs `f` with heap memory-limit checks disabled so post-effect result conversion cannot trigger a retry. Call [`Vm::enforce_limit`] after rooting the result.
     pub(crate) fn unchecked<R>(&mut self, f: impl FnOnce(&mut Vm) -> R) -> R {
         self.heap.unchecked = true;
         let r = f(self);
@@ -907,8 +898,7 @@ impl Vm {
         r
     }
 
-    /// Collects all garbage if the heap is over the memory limit, then fails
-    /// if it still is. All live values must be roots.
+    /// Runs a full garbage collection if the heap exceeds the memory limit, and returns `Err(LimitKind::Memory)` if it still exceeds the limit. All live values must be rooted.
     pub(crate) fn enforce_limit(&mut self, current: Option<&mut Fiber>) -> Result<(), LimitKind> {
         if !self.heap.over_limit() {
             return Ok(());
@@ -1002,8 +992,7 @@ impl Vm {
         self.permit_by(cap, |p, c| p.check_in(c, space))
     }
 
-    /// Checks a capability as [`Vm::permit`] does, and fails with kind
-    /// `"permission_denied"` if the policy denies it.
+    /// Checks `cap` with [`Vm::permit`] and returns a `"permission_denied"` [`HostError`] if denied.
     pub fn require(&mut self, cap: &Capability) -> Result<(), HostError> {
         if self.permit(cap)? { Ok(()) } else { Err(HostError::new("permission_denied", format!("permission denied: {cap}"))) }
     }

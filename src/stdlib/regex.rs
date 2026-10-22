@@ -321,9 +321,6 @@ fn replace(vm: &mut Vm, re: Val<RegexObj>, text: Val<String>, rep: Val<String>, 
     })
 }
 
-/// The message for a syntax error in `pattern`, from the error's display
-/// `error`, which repeats the whole pattern and marks the error under it.
-/// For a long pattern, only the error line is kept.
 fn syntax_message(pattern: &str, error: &str) -> String {
     if pattern.len() <= 200 {
         return error.to_string();
@@ -346,7 +343,6 @@ fn builder() -> meta::Builder {
     b
 }
 
-/// The Sand type `regex.Match`, which `find` and `find_all` build by position.
 struct MatchType;
 
 impl SandType for MatchType {
@@ -355,10 +351,8 @@ impl SandType for MatchType {
     }
 }
 
-/// The fields of `regex.Match`, in the order that `find` and `find_all` fill them.
 const MATCH_FIELDS: [&str; 3] = ["text", "start", "end"];
 
-/// The runtime struct id of `regex.Match`, if its fields are [`MATCH_FIELDS`].
 fn match_def(vm: &Vm) -> Option<u32> {
     let def = vm.prog.types.iter().position(|t| t.name == "Match" && t.module == "regex" && t.fields == MATCH_FIELDS)?;
     Some(def as u32)

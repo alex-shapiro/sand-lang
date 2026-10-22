@@ -12,7 +12,6 @@ struct RngObj(Rng);
 
 impl NativeObject for RngObj {}
 
-/// Runs `op` with the engine's generator.
 fn with_engine<R>(vm: &mut Vm, op: impl FnOnce(&mut Vm, &mut Rng) -> Result<R, Ctl>) -> Result<R, Ctl> {
     let mut rng = vm.host.rng.clone();
     let result = op(vm, &mut rng);
@@ -20,7 +19,6 @@ fn with_engine<R>(vm: &mut Vm, op: impl FnOnce(&mut Vm, &mut Rng) -> Result<R, C
     result
 }
 
-/// Runs `op` with the generator of `obj`.
 fn with_object<R>(vm: &mut Vm, obj: Val<RngObj>, op: impl FnOnce(&mut Vm, &mut Rng) -> Result<R, Ctl>) -> Result<R, Ctl> {
     let mut rng = obj.get(&vm.heap)?.0.clone();
     let result = op(vm, &mut rng);
@@ -37,7 +35,6 @@ pub(crate) fn module() -> NativeModule {
     });
     m.vm_function("rng", |vm: &mut Vm, seed: i64| vm.new_object(RngObj(Rng::new(seed as u64))));
 
-    // Each operation is a function of the engine's generator and a method of `Rng`.
     macro_rules! ops {
         ($($name:literal => |$($a:ident: $t:ty),*| -> $r:ty = $op:expr;)*) => {$(
             m.vm_function($name, |vm: &mut Vm, $($a: $t),*| -> Result<$r, Ctl> { with_engine(vm, |vm, rng| $op(vm, rng, $($a),*)) });

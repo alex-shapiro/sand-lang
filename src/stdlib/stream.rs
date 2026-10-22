@@ -1,5 +1,5 @@
-//! Errors, results and buffered reads shared by the I/O modules (`fs`,
-//! `io`, `net`, `http`).
+//! Shared I/O errors, async results, and buffered readers for the `fs`, `io`,
+//! `net`, and `http` modules.
 
 use super::io_kind;
 use crate::native::{HostError, IntoValue, Later};
@@ -27,11 +27,9 @@ impl From<IoFailure> for HostError {
     }
 }
 
-/// The result of a native that suspends the calling task until an I/O
-/// operation completes; its Sand result is `Result<T>`.
 pub(crate) type Suspended<T> = Result<Later<T, HostError>, HostError>;
 
-/// Suspends the calling task on `fut`, finishing with `ok` on success.
+/// Suspends the calling task on `fut` and runs `ok` when `fut` succeeds.
 pub(crate) fn suspend<T: Send + 'static, R: IntoValue + Send + 'static>(
     fut: impl Future<Output = Result<T, IoFailure>> + Send + 'static,
     ok: impl FnOnce(&mut Vm, T) -> Result<R, HostError> + Send + 'static,
@@ -54,31 +52,26 @@ impl From<std::io::Error> for IoFailure {
     }
 }
 
-/// `data` as text, charging for the check of its UTF-8; `None` if it is not UTF-8.
 pub(crate) fn utf8(vm: &Vm, data: Vec<u8>) -> Result<Option<String>, Ctl> {
     vm.charge_slow_bytes(data.len())?;
     Ok(String::from_utf8(data).ok())
 }
 
-/// The result of a read of bytes, which always has data.
 pub(crate) fn bytes_read(_: &mut Vm, data: Option<Vec<u8>>) -> Result<Vec<u8>, HostError> {
     Ok(data.unwrap_or_default())
 }
 
-/// The result of a read of a line (`None` at the end), or kind `"invalid"`
-/// with `message` if the line is not UTF-8.
 pub(crate) fn line_read(vm: &Vm, line: Option<Vec<u8>>, message: &str) -> Result<Option<String>, HostError> {
     let Some(line) = line else { return Ok(None) };
     utf8(vm, line)?.map(Some).ok_or_else(|| HostError::new("invalid", message))
 }
 
-/// A Sand `duration` timeout as a `Duration` (zero if negative).
 #[cfg(any(feature = "os", web))]
 pub(crate) fn timeout(d: jiff::SignedDuration) -> std::time::Duration {
     std::time::Duration::try_from(d).unwrap_or_default()
 }
 
-/// Reads a line without its `\n` or `\r\n` (see [`read_line_bytes`]).
+/// Reads a line and strips any trailing `\n` or `\r\n`.
 pub(crate) async fn read_line<R: AsyncBufRead + Unpin>(r: &mut R, res: &mut Reservation) -> Result<Option<Vec<u8>>, IoFailure> {
     let line = read_line_bytes(r, usize::MAX, res).await?;
     Ok(line.map(|mut line| {
@@ -87,8 +80,7 @@ pub(crate) async fn read_line<R: AsyncBufRead + Unpin>(r: &mut R, res: &mut Rese
     }))
 }
 
-/// Reads what `r` has buffered, at most `max` bytes, filling the buffer
-/// first if it is empty; empty at the end of the stream.
+/// Reads up to `max` buffered bytes from `r`, filling the buffer first if empty.
 pub(crate) async fn read_upto<R: AsyncBufRead + Unpin>(r: &mut R, max: usize) -> Result<Vec<u8>, IoFailure> {
     let available = r.fill_buf().await?;
     let data = available[..available.len().min(max)].to_vec();

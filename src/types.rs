@@ -557,7 +557,6 @@ pub struct FieldDef {
     pub name: Symbol,
     pub ty: TypeId,
     pub mutable: bool,
-    /// Whether other modules can use the field.
     pub is_pub: bool,
     /// Helper function computing the default value.
     pub default: Option<FnId>,
@@ -597,18 +596,15 @@ pub enum TypeDefKind {
     Enum {
         variants: Vec<VariantDef>,
     },
-    /// A type bound to a Rust type, or implemented by the VM.
+    /// An opaque type registered by a native module or implemented by the VM.
     Opaque(Opaque),
 }
 
-/// What implements an opaque type.
 #[derive(Clone, Copy, Debug)]
 pub enum Opaque {
-    /// A [`crate::vm::value::ValueType`].
     Value(ValueTypeInfo),
-    /// A [`crate::native::ObjectType`].
     Object(std::any::TypeId),
-    /// The VM (`Task<T>`, `Channel<T>`).
+    /// Built-in VM type (`Task<T>`, `Channel<T>`).
     Builtin,
 }
 

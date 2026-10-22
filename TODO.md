@@ -64,25 +64,21 @@ Follow-up work, roughly in priority order.
 - [ ] Derive Sand structs from Rust structs (`#[derive(SandStruct)]`) so that
       natives can take and return structs such as `regex.Match` and `uri.Uri`
       without private tuple-returning natives and Sand wrappers.
-- [ ] Rust signatures cannot state the bounds of type parameters (`Eq`, `Ord`,
-      `Hash`): the checker does not detect a `native fn` declaration that omits
-      a bound its Rust function relies on.
-- [ ] The checker accepts `json.decode<T>` for a `T` that contains a type
-      it cannot decode (a function, a task); the call then returns an `Err`
-      of kind `"invalid"`. Reject such a `T` at the call, as private fields
-      are, without restricting other `reflect` natives.
-- [ ] `compile/reflect.rs` recognizes `json.Json` by its module and type
-      name. Bind it as the other types of native modules are.
-- [ ] `ValueType` sets `MODULE`, `NAME` and `DOC` by hand. Derive them as
-      `SandEnum` and `SandObject` do.
-- [ ] The derives name the crate `::sandlang`, so a crate that renames the
-      dependency cannot use them (add `#[sand(crate = ...)]`), and they
-      ignore doc comments written as `#[doc = include_str!(...)]`.
-- [ ] A host module's Sand source is always compiled optimized, also under
-      `Config::optimize(false)`.
-- [ ] Types bound to Rust types have no source position, so `help` lists
-      them before the module's other types (`Task`, `Channel` before
-      `Option`).
+- [ ] Check type parameter bounds (`Eq`, `Ord`, `Hash`) on `native fn`
+      declarations against the Rust function signature.
+- [ ] Reject `json.decode<T>` at compile time if `T` contains a non-decodable
+      type (such as a function or a task), without restricting other `reflect`
+      natives.
+- [ ] Register `json.Json` through `NativeModule` instead of matching its
+      module and type name in `compile/reflect.rs`.
+- [ ] Derive `MODULE`, `NAME`, and `DOC` for `ValueType` as `SandEnum` and
+      `SandObject` do.
+- [ ] Add `#[sand(crate = ...)]` to `SandEnum` and `SandObject` for crates that
+      rename the `sandlang` dependency, and support `#[doc = include_str!(...)]`
+      attributes.
+- [ ] Respect `Config::optimize(false)` when compiling the Sand source of a
+      host module.
+- [ ] Preserve declaration order in `help` output for types bound to Rust types.
 
 ### Tooling
 
@@ -95,10 +91,10 @@ Follow-up work, roughly in priority order.
 
 ### Diagnostics
 
-- [ ] Parser recovery reports follow-on errors after the first one
+- [ ] Suppress follow-on parser errors after an initial syntax error
       (`unexpected }` after a missing `,` or `:`, `expected )` after an
-      unterminated string). The spec tests list them; remove them there as
-      recovery improves.
+      unterminated string) and remove the follow-on expectations from the spec
+      tests.
 - [ ] Recover at the next `match` arm after an invalid pattern
       (`1..5 =>`, `Rect(..) =>`) instead of reporting a spurious
       `unexpected }` at the end of the `match`.
@@ -109,12 +105,12 @@ Follow-up work, roughly in priority order.
 
 ### Performance
 
-- [ ] `HostFn::Static` avoids an `Arc` dereference for standard natives at
-      the cost of a `Box::leak` and an enum. Measure whether it pays; if not,
-      use one `Arc` variant.
-- [ ] A typed native call costs about 0.5 ns in `HostFn` dispatch and the
-      argument slice (`fannkuch` and `results` in `bench/programs` show
-      it). Find where the time goes.
+- [ ] Benchmark `HostFn::Static` against `HostFn::Shared` to determine whether
+      avoiding the `Arc` dereference justifies `Box::leak` and the enum
+      dispatch; if not, keep only `Arc`.
+- [ ] Profile `HostFn` dispatch and argument slice construction (`fannkuch` and
+      `results` in `bench/programs`) to reduce the ~0.5 ns typed native call
+      overhead.
 - [ ] Dispatch loop: the cost of individual instructions shifts by up to
       ±15% between builds as LLVM reallocates registers. A threaded design
       (one function per instruction with guaranteed tail calls, Rust's

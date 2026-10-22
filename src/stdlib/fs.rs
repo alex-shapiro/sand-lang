@@ -21,10 +21,7 @@ use crate::vm::{Ctl, CtlKind, Permits, Vm};
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// The result of a native that returns `Result<R>`.
 type FsResult<R> = Result<R, HostError>;
-
-/// What `stat` returns: size, `is_file`, `is_dir` and modification time.
 type Stat = (i64, bool, bool, Option<i64>);
 
 pub(crate) fn module() -> NativeModule {
@@ -169,7 +166,7 @@ pub(crate) fn module() -> NativeModule {
         })
     });
 
-    // Pure path helpers. The conversion of the result charges for the copy.
+    // Pure path helpers.
     m.vm_function("join", |vm: &mut Vm, parts: Val<Vec<String>>| -> Result<String, Ctl> {
         let items = parts.items(&vm.heap);
         vm.charge(items.len() as u64)?;
@@ -271,15 +268,11 @@ fn check_path(vm: &mut Vm, cap: Capability, shown: &str, entry: bool) -> Result<
     if vm.permit_path(&cap, entry)? { Ok(()) } else { Err(denied(&cap, shown)) }
 }
 
-/// Why a walk of a directory tree on a worker thread stopped early.
+/// Why a directory tree walk on a worker thread stopped early.
 enum Halt {
-    /// A charge to its [`Allowance`] failed.
     Stopped,
-    /// The policy needs to ask the user about this capability.
     Prompt(Capability),
-    /// The policy protects an entry of the tree (see [`scan_tree`]).
     Protected,
-    /// The policy denies writing this entry.
     Denied(PathBuf),
 }
 
@@ -296,13 +289,9 @@ fn charge_entry(allowance: &mut Allowance, path: &Path) -> Result<(), Stopped> {
     allowance.charge_bytes(path.as_os_str().len().saturating_mul(4))
 }
 
-/// Fails with [`Halt::Protected`] if the policy protects an entry of the
-/// directory tree at `t` (see [`Policy::protects_normalized_in`]). If the
-/// tree is being moved to `to`, the entry's new path is checked as well. A
-/// tree with a protected entry may not be moved or removed as a whole. With
-/// `permits`, also fails if writing an entry is not permitted
-/// ([`permit_entry`]). Without `permits`, the tree is scanned only if a deny
-/// rule may match a path in it.
+/// Checks that no entry in the directory tree at `t` (or at `to`, if moved) is
+/// protected by a deny rule. If `permits` is given, also checks that writing
+/// each entry is permitted.
 fn scan_tree(
     fs: &Fs,
     policy: &Policy,
@@ -330,7 +319,6 @@ fn scan_tree(
     })
 }
 
-/// Checks writing the entry `path` of a tree.
 fn permit_entry(permits: &Permits, path: &Path) -> Result<(), Halt> {
     let cap = Capability::FsWrite(path.to_path_buf());
     match permits.permit_path(&cap, true) {
@@ -369,17 +357,12 @@ fn ok_unit<T>(_: &mut Vm, _: T) -> FsResult<()> {
     Ok(())
 }
 
-/// `remove_tree(path)`: removes the directory `path` (not a symlink to
-/// one) and everything below it. If the policy protects an entry of the
-/// tree ([`scan_tree`]), nothing is removed. If the user may be asked, every
-/// entry is permitted before anything is removed, so that a prompt cannot
-/// stop the removal partway. Each entry is also checked against the policy
-/// just before it is removed.
+/// Removes the directory `path` (not a symlink) and all entries below it.
+/// Checks permissions across the whole tree before removing any entry so that
+/// a denial or prompt does not leave a partially removed tree.
 fn remove_tree(vm: &mut Vm, path: Val<String>) -> FsResult<()> {
     let (shown, mut t) = target(vm, path, Mode::Entry)?;
     check(vm, &mut t, Access::Write, &shown)?;
-    // Every entry is checked before any is removed, so that a denial or a
-    // prompt leaves the tree whole.
     let scan = !matches!(vm.host.policy, Policy::AllowAll);
     let (fs, permits, root) = (vm.host.fs.clone(), vm.permits(), t.path.clone());
     let mut res = vm.io_reservation();
@@ -397,7 +380,6 @@ fn remove_tree(vm: &mut Vm, path: Val<String>) -> FsResult<()> {
     match removed {
         Ok(r) => settle(vm, shown, r, ok_unit),
         Err(Halt::Protected) => Err(protected(&shown)),
-        // Named as the script would name it: below the path it gave.
         Err(Halt::Denied(path)) => {
             let below = path.strip_prefix(&root).unwrap_or(&path);
             Err(HostError::new("permission_denied", format!("permission denied: write {}", Path::new(&shown).join(below).display())))
@@ -419,7 +401,6 @@ fn write(vm: &mut Vm, path: Val<String>, data: Vec<u8>, res: Reservation) -> FsR
     run(vm, shown, op, ok_unit)
 }
 
-/// The path `p`, charged for scanning it.
 fn lexical(vm: &Vm, p: Val<String>) -> Result<&Path, Ctl> {
     let p = p.str(&vm.heap);
     vm.charge_bytes(p.len())?;
@@ -466,7 +447,6 @@ struct FileObj {
 }
 
 impl FileObj {
-    /// The memory of a file object without its name and buffer.
     const BASE_SIZE: usize = 64;
 }
 
@@ -619,10 +599,8 @@ enum Needs {
     Nothing,
 }
 
-/// Runs `op` on the open `file`, taken out of its object meanwhile (so
-/// that `op` may read other heap values and the VM). An `io::Error` becomes
-/// an `Err(Error)` value naming the file's path; a closed file, or one not
-/// opened for what `needs`, is an error too.
+/// Runs `op` on the open `file`, temporarily taking `OpenState` out of the
+/// object so `op` can borrow `vm`.
 fn with_file<R: IntoValue>(
     vm: &mut Vm,
     file: Val<FileObj>,
@@ -846,7 +824,6 @@ fn open(vm: &mut Vm, path: Val<String>, mode: OpenMode) -> FsResult<FileObj> {
     Ok(FileObj { open: Some(OpenState { file: Some(file), _slot: slot, buf: Vec::new(), at: 0, counted: 0 }), shown, mode })
 }
 
-/// `write` and `write_str`: writes the bytes that `data` reads from the heap.
 fn write_file(vm: &mut Vm, file: Val<FileObj>, data: impl Fn(&Vm) -> &[u8]) -> FsResult<()> {
     with_file(vm, file, Needs::Write, move |vm, st| {
         let len = data(vm).len();
@@ -868,9 +845,6 @@ fn write_file(vm: &mut Vm, file: Val<FileObj>, data: impl Fn(&Vm) -> &[u8]) -> F
     })
 }
 
-/// `read_all` and `read_text`: what was read ahead, then the rest of the
-/// file, whose size is reserved first (so that a file too large fails
-/// before it is read). `finish` converts the data.
 fn read_rest<R: IntoValue>(
     vm: &mut Vm,
     file: Val<FileObj>,

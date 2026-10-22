@@ -1,6 +1,4 @@
-//! What the `http` clients (over TCP natively, over `fetch` on the web)
-//! share: URLs (built on the `uri` module's parser), redirect resolution,
-//! header syntax, request checks and responses.
+//! Shared HTTP client types and helpers for TCP and web `fetch` clients.
 
 use super::stream::{self, IoFailure, Suspended, bytes_read, line_read};
 use super::uri;
@@ -110,7 +108,6 @@ pub(crate) fn resolve(base: &str, location: &str) -> Result<String, IoFailure> {
     Ok(text)
 }
 
-/// Adds the types and natives that every client shares to `m`.
 pub(crate) fn natives(m: &mut NativeModule) {
     m.object_type::<Body>();
     body_natives(m);
@@ -164,18 +161,14 @@ pub(crate) fn header_pairs(vm: &Vm, list: Val<Vec<(String, String)>>) -> Result<
 // ----------------------------------------------------------------------
 // Requests and responses
 
-/// A client's request, checked by [`prepare_request`].
 pub(crate) struct Prepared {
     pub method: String,
-    /// The URL as the script gave it.
     #[cfg_attr(web, allow(dead_code))]
     pub text: String,
     pub url: Url,
     pub headers: Vec<(String, String)>,
 }
 
-/// Checks the method, URL and headers of a client's request (kind
-/// `"parse"` or `"invalid"`).
 pub(crate) fn prepare_request(
     vm: &Vm,
     method: Val<String>,
@@ -194,8 +187,6 @@ pub(crate) fn prepare_request(
 }
 
 impl Prepared {
-    /// Requires the capability to send the request, then lets the host's
-    /// request filter change its headers or deny it.
     pub fn require(&mut self, vm: &mut Vm) -> Result<(), HostError> {
         vm.require(&self.url.capability(&self.method))?;
         let Some(filter) = &vm.host.request_filter else { return Ok(()) };
@@ -205,10 +196,8 @@ impl Prepared {
     }
 }
 
-/// A response's status, headers and body.
 pub(crate) type Response = (i64, Vec<(String, String)>, Body);
 
-/// The response with `status`, `headers` and the body that `reader` reads.
 pub(crate) fn response(status: i64, headers: Vec<(String, String)>, reader: BodyReader) -> Response {
     (status, headers, Body::new(reader))
 }
@@ -432,8 +421,6 @@ enum BodyRead {
     All,
 }
 
-/// Reads from `body` until the read completes or the body is closed, and
-/// makes the result with `done`.
 fn read_body<R: IntoValue + Send + 'static>(
     vm: &mut Vm,
     body: Val<Body>,

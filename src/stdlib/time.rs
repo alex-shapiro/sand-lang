@@ -414,7 +414,6 @@ fn check_supported_zone(tz: &tz::TimeZone) -> Result<(), String> {
     }
 }
 
-/// A value with a calendar date.
 trait HasDate {
     fn date_part(&self) -> Date;
 }
@@ -445,7 +444,6 @@ impl HasDate for PlainMonthDay {
     }
 }
 
-/// A value with a wall-clock time.
 trait HasTime {
     fn time_part(&self) -> Time;
 }
@@ -466,12 +464,9 @@ impl HasTime for ZonedDateTime {
     }
 }
 
-/// The options of `until` and `since`: largest unit, smallest unit, increment and mode.
 type DifferenceOptions = (Unit, Unit, i64, RoundMode);
 
-/// A value whose `until` and `since` return the `Span` between two values.
 trait Difference: ValueType {
-    /// The span from `self` to `other`, or from `other` to `self` if `since`.
     fn difference(&self, other: &Self, since: bool, options: DifferenceOptions) -> Result<jiff::Span, jiff::Error>;
 }
 
@@ -794,10 +789,8 @@ fn epoch_div(t: Timestamp, unit: i128) -> Result<i64, Ctl> {
         .map_err(|_| Ctl::fail("overflow", "the time is too far from 1970 for nanoseconds in an int"))
 }
 
-/// A method `name` that computes its result from a part `P` of `self`.
 type Part<P, R> = (&'static str, fn(P) -> R);
 
-/// Registers each `(name, f)` of `natives` as the method `name` of `T` that returns `f(part(self))`.
 fn methods<T: ValueType, P: 'static, R: IntoValue + 'static>(m: &mut NativeModule, part: fn(&T) -> P, natives: &[Part<P, R>]) {
     for &(name, f) in natives {
         m.function(&format!("{}.{name}", T::NAME), move |x: T| f(part(&x)));
@@ -935,7 +928,6 @@ fn register_module(m: &mut NativeModule) {
 }
 
 fn register_parts(m: &mut NativeModule) {
-    // Registers the methods of `natives` on each type, with the part `$part` of `self`.
     macro_rules! parts {
         ($has:ident::$part:ident: $($t:ty),+ => $natives:expr) => {$(methods(m, <$t as $has>::$part, $natives);)+};
     }
@@ -953,7 +945,6 @@ fn register_parts(m: &mut NativeModule) {
     }
 }
 
-/// Registers `until` and `since` of `T`.
 fn register_difference<T: Difference>(m: &mut NativeModule) {
     for (name, since) in [("until", false), ("since", true)] {
         m.function(

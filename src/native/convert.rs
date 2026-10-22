@@ -1,4 +1,4 @@
-//! Conversion of values between Sand and Rust.
+//! Value conversion between Sand and Rust.
 
 use super::func::{Later, NativeError};
 use super::ty::{Never, Param, Reflect, SandType, Val};
@@ -8,24 +8,22 @@ use crate::vm::{Ctl, Vm};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::Hash;
 
-/// Conversion of an argument from a Sand value.
+/// Converts a Sand [`Value`] into a Rust argument for a native function.
 ///
-/// The checker guarantees that each argument has the Sand type of its Rust
-/// type, so a conversion fails only if the engine has a bug (with an internal
-/// error). The converted [`FromValue::Item`] may borrow from the heap for the
-/// duration of a call that has no access to the VM (`&str`, `&[u8]`). Owned
-/// types (`String`, `Vec<T>`, ...) copy the value.
+/// For functions registered with [`NativeModule::function`](super::NativeModule::function),
+/// [`FromValue::Item`] can borrow directly from the VM heap (`&str`, `&[u8]`,
+/// `&T`). Owned types (`String`, `Vec<T>`, ...) allocate a copy and account for
+/// it through [`Conversion`].
 pub trait FromValue: SandType {
     type Item<'a>;
 
-    /// Converts `v`, charging the meter for the work and counting the memory
-    /// the conversion allocates in `conv` (which checks it against the
-    /// memory limit as it grows, before allocating).
+    /// Converts `v` into [`Self::Item`], charging fuel to `vm` and recording
+    /// temporary Rust allocations in `conv`.
     fn from_value<'a>(vm: &'a Vm, v: Value, conv: &mut Conversion) -> Result<Self::Item<'a>, Ctl>;
 }
 
-/// The memory allocated converting a call's arguments, checked against the
-/// memory limit as it grows.
+/// Tracks temporary Rust memory allocated while converting arguments for a
+/// native call and enforces the VM memory limit.
 pub struct Conversion {
     bytes: usize,
     scratch: Scratch,
@@ -36,48 +34,46 @@ impl Conversion {
         Conversion { bytes: 0, scratch: Scratch::new() }
     }
 
-    /// Counts `bytes` about to be allocated, failing with the memory limit
-    /// if the conversion's allocations do not fit.
+    /// Reserves `bytes` against the VM memory limit before allocating an
+    /// owned argument value.
     pub fn alloc(&mut self, vm: &Vm, bytes: usize) -> Result<(), Ctl> {
         self.bytes = self.bytes.saturating_add(bytes);
         self.scratch.check(&vm.heap, self.bytes)
     }
 }
 
-/// Conversion into a Sand value: checks the memory limit and charges the
-/// meter for what it builds. The engine converts a native's result after
-/// the native's side effects, so there it checks the limit after the
-/// conversion instead.
+/// Converts a Rust return value into a Sand [`Value`], charging fuel and
+/// reserving heap memory.
 pub trait IntoValue: SandType {
     fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl>;
 }
 
-/// The error of a native function whose Sand result is `Result<T>`: an
-/// `Error { kind, message }` that the script receives, or an abort (`Ctl`,
-/// converted with `?`) that ends the run.
-pub struct HostError(Box<Raised>);
+/// Error returned by a native function whose Sand return type is `Result<T>`.
+///
+/// Construct a recoverable script error with [`HostError::new`], or propagate a
+/// VM control signal ([`Ctl`]) or `std::io::Error` with `?`.
+pub struct HostError(Box<HostErrorKind>);
 
-enum Raised {
+enum HostErrorKind {
     Error { kind: String, message: String },
     Abort(Ctl),
 }
 
 impl HostError {
-    /// An error of kind `kind`; the standard kinds are listed in SPEC §5.4
-    /// (`not_found`, `invalid`, `permission_denied`, ...).
+    /// Creates a recoverable Sand `Error` with the given `kind` (such as
+    /// `"not_found"`, `"invalid"`, or `"permission_denied"`; see SPEC §5.4) and
+    /// `message`.
     pub fn new(kind: impl Into<String>, message: impl Into<String>) -> HostError {
-        HostError(Box::new(Raised::Error { kind: kind.into(), message: message.into() }))
+        HostError(Box::new(HostErrorKind::Error { kind: kind.into(), message: message.into() }))
     }
 }
 
 impl From<Ctl> for HostError {
     fn from(c: Ctl) -> HostError {
-        HostError(Box::new(Raised::Abort(c)))
+        HostError(Box::new(HostErrorKind::Abort(c)))
     }
 }
 
-/// An error of the standard kind for `e` (`not_found`, `permission_denied`,
-/// ...).
 impl From<std::io::Error> for HostError {
     fn from(e: std::io::Error) -> HostError {
         HostError::new(crate::stdlib::io_kind(&e), e.to_string())
@@ -87,15 +83,14 @@ impl From<std::io::Error> for HostError {
 impl std::fmt::Debug for HostError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &*self.0 {
-            Raised::Error { kind, message } => write!(f, "HostError({kind}: {message})"),
-            Raised::Abort(c) => write!(f, "HostError({c:?})"),
+            HostErrorKind::Error { kind, message } => write!(f, "HostError({kind}: {message})"),
+            HostErrorKind::Abort(c) => write!(f, "HostError({c:?})"),
         }
     }
 }
 
-/// The error types of a native function whose Sand result is `Result<T>`:
-/// [`HostError`], `std::io::Error` (an error of its standard kind), and
-/// `String` and `&str` (an error of kind `"error"`).
+/// Converts a Rust error into a [`HostError`] for native functions returning
+/// `Result<T, E>`.
 pub trait IntoHostError {
     fn into_host_error(self) -> HostError;
 }
@@ -124,13 +119,11 @@ impl IntoHostError for &str {
     }
 }
 
-/// The error for a value that does not have the type its declaration gives.
 #[cold]
 pub(crate) fn mismatch<S: SandType + ?Sized>() -> Ctl {
     Ctl::internal(format!("a native function expected a value of type `{}`", S::sand_type()))
 }
 
-/// Scalars convert without allocating.
 macro_rules! scalar {
     ($($t:ty: $p:pat => $e:expr, $v:ident => $into:expr),* $(,)?) => {$(
         impl FromValue for $t {
@@ -179,8 +172,6 @@ impl FromValue for jiff::SignedDuration {
     }
 }
 
-/// Fails with kind `"overflow"` for a duration outside the range of Sand
-/// durations (about ±292 years).
 impl IntoValue for jiff::SignedDuration {
     fn into_value(self, _: &mut Vm) -> Result<Value, Ctl> {
         match i64::try_from(self.as_nanos()) {
@@ -310,11 +301,11 @@ impl<T: IntoValue, E: IntoHostError> IntoValue for Result<T, E> {
                 Ok(vm.ok(v))
             }
             Err(e) => match *e.into_host_error().0 {
-                Raised::Error { kind, message } => {
+                HostErrorKind::Error { kind, message } => {
                     vm.charge_bytes(kind.len() + message.len())?;
                     Ok(vm.err_value(&kind, &message))
                 }
-                Raised::Abort(c) => Err(c),
+                HostErrorKind::Abort(c) => Err(c),
             },
         }
     }
@@ -335,7 +326,6 @@ impl<T: IntoValue> IntoValue for Result<T, Ctl> {
     }
 }
 
-/// The fuel for sorting `n` items: about `n log n` comparisons.
 fn sort_cost(n: usize) -> u64 {
     (n as u64).saturating_mul(u64::from(usize::BITS - n.leading_zeros()))
 }
@@ -367,8 +357,8 @@ impl<K: for<'k> FromValue<Item<'k> = K> + Eq + Hash, V: FromValue> FromValue for
         read_map::<K, V, _>(vm, v, conv)
     }
 }
-/// The entries are inserted in key order, so that the Sand map's order does
-/// not depend on hashing.
+/// Sorts keys before insertion so the Sand map's iteration order is
+/// deterministic.
 impl<K: IntoValue + Ord, V: IntoValue> IntoValue for HashMap<K, V> {
     fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl> {
         let mut items: Vec<(K, V)> = self.into_iter().collect();
@@ -410,7 +400,8 @@ impl<T: for<'k> FromValue<Item<'k> = T> + Eq + Hash> FromValue for HashSet<T> {
         read_set(vm, v, conv)
     }
 }
-/// The elements are inserted in order, as for `HashMap`.
+/// Sorts elements before insertion so the Sand set's iteration order is
+/// deterministic.
 impl<T: IntoValue + Ord> IntoValue for HashSet<T> {
     fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl> {
         let mut items: Vec<T> = self.into_iter().collect();
@@ -490,7 +481,6 @@ impl<T: ValueType> IntoValue for T {
     }
 }
 
-/// Handles pass through unconverted.
 macro_rules! handle {
     ($([$($g:tt)*] $t:ty),* $(,)?) => {$(
         impl<$($g)*> FromValue for $t {

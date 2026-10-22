@@ -1,4 +1,4 @@
-//! Rust functions usable as native functions, with their Sand signatures.
+//! Traits and types for registering Rust functions in a [`NativeModule`](super::NativeModule).
 
 use super::convert::{Conversion, FromValue, HostError, IntoValue};
 use super::ty::Type;
@@ -7,7 +7,7 @@ use crate::vm::{BoxFuture, Ctl, Finisher, NResult, NativeFn, Vm};
 use std::future::Future;
 use std::marker::PhantomData;
 
-/// The Sand signature of a native function, derived from its Rust types.
+/// Sand parameter and return types derived from a Rust function signature.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Signature {
     pub params: Vec<Type>,
@@ -15,43 +15,47 @@ pub struct Signature {
 }
 
 impl Signature {
-    /// Whether the native `name` of `module` is a method that takes `self`:
-    /// `name` is `Type.method`, and its first parameter has type `Type`.
+    /// Returns `true` if `name` is `"Type.method"` and the first parameter has
+    /// type `module.Type`.
     pub(crate) fn takes_self(&self, module: &str, name: &str) -> bool {
         let Some((ty, _)) = name.split_once('.') else { return false };
         matches!(self.params.first(), Some(Type::Named(n)) if n.module == module && n.name == ty && n.args.is_empty())
     }
 }
 
-/// A synchronous Rust function without access to the VM: `Fn(A, B, ...) -> R`
-/// where the arguments implement [`FromValue`] and the result [`IntoValue`].
-/// Arguments of type `&str` and `&[u8]` borrow the script's values. A result
-/// of type `Result<T, Ctl>` gives the Sand type `T`; `Err` fails the call.
+/// Synchronous function registered with [`NativeModule::function`](super::NativeModule::function).
+///
+/// Parameters implement [`FromValue`] (borrowing `&str`, `&[u8]`, and `&T`
+/// directly from the VM heap), and the return type implements [`IntoValue`].
 pub trait HostFunction<Marker>: Send + Sync + 'static {
     fn signature() -> Signature;
     fn into_host(self) -> Box<NativeFn>;
 }
 
-/// A synchronous Rust function with access to the VM:
-/// `Fn(&mut Vm, A, B, ...) -> R`. Its arguments are owned:
-/// heap values that it does not copy are [`Val`](super::Val) handles.
+/// Synchronous function registered with [`NativeModule::vm_function`](super::NativeModule::vm_function).
+///
+/// Receives `&mut Vm` as its first argument; remaining arguments must be owned
+/// [`FromValue`] types or [`Val`](super::Val) handles.
 pub trait VmFunction<Marker>: Send + Sync + 'static {
     fn signature() -> Signature;
     fn into_host(self) -> Box<NativeFn>;
 }
 
-/// A Rust function returning a future, usable as an async native function.
-/// Its arguments must be owned (the future outlives the call).
+/// Asynchronous function registered with [`NativeModule::async_function`](super::NativeModule::async_function).
+///
+/// Arguments must be owned [`FromValue`] types so the returned future can
+/// outlive the initial call.
 pub trait AsyncHostFunction<Marker>: Send + Sync + 'static {
     fn signature() -> Signature;
     fn into_host(self) -> Box<NativeFn>;
 }
 
-/// The result of a native function that is ready when a future completes:
-/// the calling task waits, then the VM finishes the call with the
-/// `Result<T, E>` that the future's closure makes. A native returns it as
-/// `Result<Later<T, E>, E>`: with `E = Ctl` its Sand result is `T`, with
-/// `E = HostError` it is `Result<T>`.
+/// Deferred result returned by a [`VmFunction`] that may suspend the calling
+/// Sand task on a future.
+///
+/// Return `Result<Later<T, E>, E>` from the function: if `E` is [`Ctl`], the
+/// Sand return type is `T`; if `E` is [`HostError`], the Sand return type is
+/// `Result<T, Error>`.
 pub struct Later<T, E>(Wait, PhantomData<fn() -> (T, E)>);
 
 enum Wait {
@@ -59,12 +63,9 @@ enum Wait {
     Future(BoxFuture),
 }
 
-/// The error type of a native function's result: [`Ctl`] (an abort; the
-/// Sand result is `T`) or [`HostError`] (the Sand result is `Result<T>`).
+/// Error type for a [`Later`] result ([`Ctl`] or [`HostError`]).
 pub trait NativeError: Send + Sized + 'static + sealed::Sealed {
-    /// The Sand result type for a success of type `t`.
     fn result_type(t: Type) -> Type;
-    /// Converts `r` into the Sand result.
     fn finish<T: IntoValue>(r: Result<T, Self>, vm: &mut Vm) -> NResult;
 }
 
@@ -93,7 +94,8 @@ impl NativeError for HostError {
 }
 
 impl<T: IntoValue + Send + 'static, E: NativeError> Later<T, E> {
-    /// The result that `fut`'s closure makes.
+    /// Suspends the calling task until `fut` resolves, and then runs the
+    /// returned closure on the VM thread to produce the Sand result.
     pub fn new<F>(fut: impl Future<Output = F> + Send + 'static) -> Later<T, E>
     where
         F: FnOnce(&mut Vm) -> Result<T, E> + Send + 'static,
@@ -105,14 +107,13 @@ impl<T: IntoValue + Send + 'static, E: NativeError> Later<T, E> {
         Later(Wait::Future(Box::pin(fut)), PhantomData)
     }
 
-    /// The result `r`, without waiting.
+    /// Completes immediately with `r` without suspending the calling task.
     pub fn ready(r: Result<T, E>) -> Later<T, E> {
         Later(Wait::Ready(Box::new(move |vm: &mut Vm| E::finish(r, vm))), PhantomData)
     }
 }
 
 impl<T, E> Later<T, E> {
-    /// Finishes the call: now, or by suspending the calling task.
     pub(crate) fn finish(self, vm: &mut Vm) -> NResult {
         match self.0 {
             Wait::Ready(f) => f(vm),
@@ -121,16 +122,15 @@ impl<T, E> Later<T, E> {
     }
 }
 
-/// The arguments of a native that takes `n` of them. A call of a trait
-/// method passes the impl's dictionaries first, which a native does not take.
+/// Drops any leading trait-dictionary arguments passed before the `n` function
+/// arguments.
 #[inline(always)]
-fn own_args(args: &[Value], n: usize) -> &[Value] {
+fn strip_dict_args(args: &[Value], n: usize) -> &[Value] {
     args.get(args.len().wrapping_sub(n)..).unwrap_or_default()
 }
 
-/// The error for too few arguments, possible only if the engine has a bug.
 #[cold]
-fn missing() -> Ctl {
+fn too_few_args() -> Ctl {
     Ctl::internal("native function called with too few arguments")
 }
 
@@ -150,14 +150,12 @@ macro_rules! fn_impls {
                 Signature { params: vec![$($a::sand_type()),*], ret: R::sand_type() }
             }
             fn into_host(self) -> Box<NativeFn> {
-                // Calls through the higher-ranked signature (the arguments
-                // borrow from the heap).
                 fn call<R, $($a,)*>(f: &impl Fn($($a),*) -> R, $($a: $a,)*) -> R {
                     f($($a),*)
                 }
                 Box::new(move |vm: &mut Vm, args: &[Value]| -> NResult {
                     let r = {
-                        let &[$($a),*] = own_args(args, $n) else { return Err(missing()) };
+                        let &[$($a),*] = strip_dict_args(args, $n) else { return Err(too_few_args()) };
                         let mut conv = Conversion::new();
                         $(let $a = $a::from_value(vm, $a, &mut conv)?;)*
                         call(&self, $($a),*)
@@ -179,7 +177,7 @@ macro_rules! fn_impls {
             }
             fn into_host(self) -> Box<NativeFn> {
                 Box::new(move |vm: &mut Vm, args: &[Value]| -> NResult {
-                    let &[$($a),*] = own_args(args, $n) else { return Err(missing()) };
+                    let &[$($a),*] = strip_dict_args(args, $n) else { return Err(too_few_args()) };
                     let mut conv = Conversion::new();
                     $(let $a = $a::from_value(vm, $a, &mut conv)?;)*
                     let r = self(vm, $($a),*);
@@ -201,7 +199,7 @@ macro_rules! fn_impls {
             }
             fn into_host(self) -> Box<NativeFn> {
                 Box::new(move |vm: &mut Vm, args: &[Value]| -> NResult {
-                    let &[$($a),*] = own_args(args, $n) else { return Err(missing()) };
+                    let &[$($a),*] = strip_dict_args(args, $n) else { return Err(too_few_args()) };
                     let mut conv = Conversion::new();
                     $(let $a = $a::from_value(vm, $a, &mut conv)?;)*
                     let fut = self($($a),*);

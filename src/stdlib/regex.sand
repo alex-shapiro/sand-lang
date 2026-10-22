@@ -18,9 +18,7 @@ pub struct Match {
 pub struct Captures {
     /// Input string that was searched.
     pub text: str
-    /// Start and end byte offsets for each group (`-1` if the group did not match).
     spans: [int]
-    /// The regex that matched, for the indexes of named groups.
     regex: Regex
 
     /// Returns capture group `i`, or `None` if group `i` did not participate or

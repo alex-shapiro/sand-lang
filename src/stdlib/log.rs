@@ -104,7 +104,6 @@ impl LogSink for NullLogSink {
     fn log(&self, _: &LogRecord) {}
 }
 
-/// The fields of a record.
 type Fields = Val<HashMap<String, String>>;
 
 pub(crate) fn module() -> NativeModule {

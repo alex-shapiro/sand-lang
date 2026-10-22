@@ -229,8 +229,7 @@ pub struct Config {
     pub(crate) prompter: Option<Arc<dyn Prompter>>,
     pub(crate) limits: Limits,
     pub(crate) modules: Vec<NativeModule>,
-    /// The registry of `modules`, which engines made from clones of this
-    /// configuration share (with the checked and compiled modules).
+    /// Shared module registry for engines created from clones of this `Config`.
     registry: Arc<OnceLock<Arc<Registry>>>,
     pub(crate) stdout: SharedSink,
     pub(crate) stderr: SharedSink,
@@ -522,11 +521,8 @@ impl TestReport {
 /// The natives and module sources that engines compile against: the
 /// standard library's, followed by those of a configuration's host modules.
 pub(crate) struct Registry {
-    /// Natives by id.
     pub natives: Arc<Vec<NativeEntry>>,
-    /// What the checker knows about the natives and the types bound to Rust types.
     pub decls: Arc<NativeDecls>,
-    /// The modules' Sand sources, by module name.
     pub sources: BTreeMap<Cow<'static, str>, Source>,
     /// The standard library's registry, whose snapshot this one's extends.
     base: Option<Arc<Registry>>,
@@ -540,26 +536,24 @@ pub(crate) struct Registry {
     partial: Mutex<HashMap<Vec<String>, Arc<Snapshot>>>,
 }
 
-/// The Sand source of a registered module.
 #[derive(Clone)]
 pub(crate) struct Source {
     pub kind: ModKind,
     pub text: Cow<'static, str>,
-    /// The other modules whose types the signatures of its natives use.
+    /// Other modules referenced by this module's native function signatures.
     pub deps: Vec<&'static str>,
 }
 
-/// What the checker knows about registered natives and types.
+/// Registered native functions and Rust-bound types.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct NativeDecls {
-    /// Natives by key: `module.name`, or `module.Type.name` for a method.
+    /// Native functions keyed by `module.name` or `module.Type.name`.
     pub fns: HashMap<Cow<'static, str>, NativeDecl>,
-    /// Types bound to Rust types, by qualified name (`module.Name`).
+    /// Rust-bound types keyed by `module.Name`.
     pub types: HashMap<Cow<'static, str>, BoundType>,
 }
 
 impl NativeDecls {
-    /// The native with key `key`'s id.
     pub(crate) fn id(&self, key: &str) -> Option<u32> {
         self.fns.get(key).map(|d| d.id)
     }
@@ -612,7 +606,6 @@ impl Registry {
         Arc::new(r)
     }
 
-    /// Registers the native `key` (`module.name` or `module.Type.name`).
     pub fn add_native(&mut self, key: String, f: HostFn, sig: Signature, names: Option<Arc<[String]>>, doc: Option<Arc<str>>) {
         assert!(!self.decls.fns.contains_key(key.as_str()), "native `{key}` registered twice");
         let id = self.natives.len() as u32;
@@ -759,8 +752,7 @@ pub(crate) struct Compiled {
     /// When the run's wall-time limit passes, counted from the start of
     /// compilation, excluding import prompts.
     pub deadline: Option<Instant>,
-    /// The snapshot the program extends, if it only adds to its tables (no
-    /// module with natives had to be compiled), so that it can be recycled.
+    /// Base snapshot when no additional native modules were compiled, allowing `program` to be recycled.
     pub snapshot: Option<Arc<Snapshot>>,
 }
 
@@ -781,10 +773,9 @@ pub(crate) fn on_compile_stack<R: Send + 'static>(f: impl FnOnce() -> Result<R, 
 }
 
 impl Engine {
-    /// An engine for `config`. Fails with [`Error::Compile`] if a host
-    /// module has errors, such as a `native fn` whose types differ from its
-    /// Rust function's. Engines made from clones of one `Config` check its
-    /// host modules once.
+    /// Creates an engine with `config`, checking any registered host modules.
+    ///
+    /// Clones of a `Config` share the compiled host-module registry until [`Config::module`] is called.
     pub fn new(config: Config) -> Result<Engine, Error> {
         let registry = config.registry.get_or_init(|| Registry::for_config(&config)).clone();
         if registry.base.is_some() {
@@ -1585,8 +1576,6 @@ mod registry_tests {
     use super::*;
     use crate::check::FnKind;
 
-    /// Every native the standard library registers is declared by a `native
-    /// fn` (a native registered under a mistyped name would never be called).
     #[test]
     fn every_std_native_is_declared() {
         let snapshot = STD.snapshot().expect("the standard library compiles");
@@ -1597,8 +1586,6 @@ mod registry_tests {
         assert!(undeclared.is_empty(), "registered natives no `native fn` declares: {undeclared:?}");
     }
 
-    /// Engines made from clones of a configuration check its host modules
-    /// once; adding a module makes a new registry.
     #[test]
     fn engines_of_one_config_share_its_registry() {
         let config = Config::new().module(NativeModule::new("a"));

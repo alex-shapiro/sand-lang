@@ -843,7 +843,6 @@ pub trait ValueType: Clone + Eq + Hash + std::fmt::Display + Send + Sync + 'stat
     const MODULE: &'static str;
     /// Name of the Sand type (e.g. `"PlainDate"`).
     const NAME: &'static str;
-    /// Doc comment of the Sand type.
     const DOC: &'static str = "";
     /// Comparison function for types that satisfy `Ord` (typically `Some(Ord::cmp)`).
     const ORDER: Option<fn(&Self, &Self) -> std::cmp::Ordering> = None;

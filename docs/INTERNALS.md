@@ -26,7 +26,7 @@ bytecode  ─VM───────▶ effects    src/vm/
 - `src/vm/`: values, heap, interpreter, scheduler, metering (`meter.rs`),
   memory held by pending I/O (`iomem.rs`).
 - `src/stdlib/`: the standard library; `src/native/`: the `NativeModule`
-  API, which the standard library and hosts use.
+  API for the standard library and host modules.
 - `src/policy/`: capabilities and policies (`rules.rs` decides requests by
   rule indices: a trie of path patterns, hash tables of hosts); policy files
   (`file.rs`) and their formatter and linter; `src/files/`: the file systems
@@ -41,53 +41,59 @@ bytecode  ─VM───────▶ effects    src/vm/
 
 ## Natives
 
-A module `foo` is `src/stdlib/foo.sand` (declarations, docs, Sand helpers,
-`native fn`s) and `src/stdlib/foo.rs`, which builds a `NativeModule` with
-the typed Rust function of each native under its key:
+Each standard module `foo` pairs `src/stdlib/foo.sand` (declarations, docs,
+Sand helpers, and `native fn` items) with `src/stdlib/foo.rs`, which registers
+each native Rust function in a `NativeModule`:
 
-| Declaration                                                    | Key                                              |
-| -------------------------------------------------------------- | ------------------------------------------------ |
-| `native fn bar` in module `foo`                                | `foo.bar`                                        |
-| `native fn bar` in `struct`/`enum`/`extend`/`impl ... for Baz` | `foo.Baz.bar`                                    |
-| in the prelude: `extend str`, `[T]`, `[K: V]`, ...             | `prelude.str.bar`, `prelude.List.bar`, ...       |
+| Declaration                                                    | Registration name                          |
+| -------------------------------------------------------------- | ------------------------------------------ |
+| `native fn bar` in module `foo`                                | `bar` (or `foo.bar` in `core.rs`)          |
+| `native fn bar` in `struct`/`enum`/`extend`/`impl ... for Baz` | `Baz.bar` (or `foo.Baz.bar` in `core.rs`)  |
+| in the prelude: `extend str`, `[T]`, `[K: V]`, ...             | `str.bar`, `List.bar`, ...                 |
 
-- The checker compares each declaration with the `Signature` derived from
-  the Rust function's types. A native takes the heap values it does not copy
-  as `Val<T>` handles and type parameters as `Param<N>`.
-- Arguments arrive in declaration order, defaults filled in, after one
-  `Reflect<N>` per `reflect` type parameter. A call of a trait method passes
-  the impl's dictionary first; the engine drops it.
-- Never panic on script input. A Rust panic is caught per slice and ends the
-  run with an internal error, leaving the VM possibly inconsistent.
+- The checker verifies each `native fn` declaration against the `Signature`
+  derived from the Rust function parameters and return type. Use `Val<T>` to
+  reference a heap value without copying it, and `Param<N>` for the `N`-th type
+  parameter.
+- The VM passes arguments in declaration order with default values filled in,
+  preceded by a `Reflect<N>` argument for each `reflect` type parameter. For
+  trait method calls, the VM strips the leading trait dictionary before calling
+  the native function.
+- Never panic on script input. The engine catches Rust panics at scheduling
+  slice boundaries and aborts the run with `Error::Internal`.
 - Check permissions (`vm.permit`, or `vm.require` for a `permission_denied`
-  error) before any effect: a prompt re-executes the call.
-- Reserve memory and take resource slots before mutating anything: on a
-  memory or resource limit (`CtlKind::Collect`) the native is called again
-  after a collection. The conversion of the native's result does not check
-  the limit: the engine collects and checks it after the call.
-- A native whose Sand result is `Result<T>` returns `Result<_, HostError>`:
-  `Err(HostError::new(kind, message))` is the script's `Err(Error)`, and a
-  `Ctl` converts with `?`. Any other fallible native returns `Result<_, Ctl>`,
-  so the Rust compiler rejects a `HostError` from it. `Err(Ctl::fail(kind,
-  message))` aborts the run with a runtime error.
-- An async native returns `Later::new(future)`. The future must not hold
-  `Value`s; it yields a closure that makes the result on the VM thread
-  (`stdlib::stream::suspend` wraps the pattern for I/O).
-- Register opaque types (`ValueType`, `#[derive(SandObject)]`) and unit
-  enums (`#[derive(SandEnum)]`) with the module: the checker declares them
-  from the Rust types and their docs.
-- Native objects never hold `Value`s: the collector does not trace them and
-  `native_mut` skips the write barrier. An object whose owned memory grows
-  must report it with `vm.heap.account`.
-- If `ValueType::PACKING` is set, values are stored inline in `Obj::Packed`;
-  otherwise they are boxed in `Obj::Value`.
-- Natives return a struct's fields as a tuple and let Sand build the struct.
-  Never build `Obj::Variant` by hand: variants with one payload are stored
-  inline, and equality and hashing rely on the canonical form.
-- Build values derived from other heap values with `vm.heap.staged`, which
-  reads them in place, instead of copying them out.
-- Tables keyed by script data use `value::FxHashMap` (seeded per process),
-  so scripts cannot choose colliding keys.
+  error) before any side effect, because the engine re-runs the native function
+  after a permission prompt.
+- Reserve memory and acquire resource slots before mutating state, because the
+  engine runs garbage collection and re-runs the native function on
+  `CtlKind::Collect`. Return-value conversion skips the memory limit check; the
+  VM runs garbage collection and checks the memory limit after the call
+  completes.
+- Return `Result<T, HostError>` from functions whose Sand return type is
+  `Result<T>`. `Err(HostError::new(kind, message))` produces a Sand `Err(Error)`
+  value, whereas `?` converts a `Ctl` into a `HostError` that halts or suspends
+  the VM. Return `Result<T, Ctl>` from fallible functions whose Sand return
+  type is `T`; `Err(Ctl::fail(kind, message))` aborts the run with a runtime
+  error.
+- Return `Later::new(future)` from async functions. The future must not hold
+  raw `Value`s; it resolves to a closure that constructs the result on the VM
+  thread (`stdlib::stream::suspend` wraps this pattern for I/O).
+- Register opaque types (`ValueType`, `#[derive(SandObject)]`) and unit enums
+  (`#[derive(SandEnum)]`) on `NativeModule` so the checker declares them from
+  their Rust definitions and doc comments.
+- Never store `Value`s inside a `NativeObject`: the garbage collector does not
+  trace native objects, and `native_mut` skips the write barrier. Report
+  dynamic heap growth inside a `NativeObject` with `vm.heap.account`.
+- If `ValueType::PACKING` is `Some`, the VM stores the value inline in
+  `Obj::Packed`; otherwise the VM boxes the value in `Obj::Value`.
+- To construct a Sand struct from a native function, return a tuple of its
+  fields to a Sand wrapper function. Never construct `Obj::Variant` directly,
+  because single-payload variants use an inline representation required for
+  equality and hashing.
+- Use `vm.heap.staged` to construct heap values from existing heap values in
+  place without intermediate copies.
+- Use `value::FxHashMap` (seeded per process) for tables keyed by script data so
+  scripts cannot trigger hash collisions.
 
 ## Metering
 

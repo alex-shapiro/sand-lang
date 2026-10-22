@@ -24,7 +24,6 @@ fn engine_with(config: Config) -> (Engine, MemorySink, MemorySink) {
     (engine, out, err)
 }
 
-/// Runs `src`; an engine that cannot be created is the run's error.
 fn run_src(config: Config, src: &str) -> (Result<sandlang::Outcome, Error>, String, String) {
     let (out, err) = (MemorySink::new(), MemorySink::new());
     let mut engine = match Engine::new(config.stdout(out.clone()).stderr(err.clone())) {
@@ -35,7 +34,6 @@ fn run_src(config: Config, src: &str) -> (Result<sandlang::Outcome, Error>, Stri
     (r, out.contents(), err.contents())
 }
 
-/// The messages of the error that creating an engine for `config` fails with.
 fn engine_errors(config: Config) -> Vec<String> {
     match Engine::new(config) {
         Err(Error::Compile(ds)) => ds.into_iter().map(|d| d.message).collect(),
@@ -849,7 +847,6 @@ enum RingB {
     Two,
 }
 
-/// A native imports the modules of the types in its signature.
 #[test]
 fn host_modules_cannot_use_each_others_types_in_a_cycle() {
     let (mut a, mut b) = (NativeModule::new("ring_a"), NativeModule::new("ring_b"));
@@ -874,7 +871,6 @@ struct Counter(AtomicUsize);
 
 impl sandlang::native::NativeObject for Counter {}
 
-/// Scratch space, hidden from other modules.
 #[derive(sandlang::SandObject)]
 #[sand(module = "stats", private)]
 struct Scratch;
@@ -1037,7 +1033,6 @@ fn native_module_custom_capability() {
     assert_eq!(out, "Ok(\"opened front\")\nErr(Error { kind: \"permission_denied\", message: \"permission denied: door back\" })\n");
 }
 
-/// A prompt suspends the native, which runs again with the answer.
 #[test]
 fn native_module_capability_prompts() {
     let opened = Arc::new(AtomicUsize::new(0));
@@ -1588,8 +1583,6 @@ fn memory_limit() {
     assert!(matches!(r, Err(Error::Limit(LimitKind::Memory))), "{r:?}");
 }
 
-/// A native's result is made after its side effects, so a memory limit
-/// that a collection resolves does not call it again.
 #[test]
 fn a_native_runs_once_when_its_result_needs_a_collection() {
     let pops = Arc::new(AtomicUsize::new(0));
@@ -1600,7 +1593,6 @@ fn a_native_runs_once_when_its_result_needs_a_collection() {
         "x".repeat(700_000)
     });
     let config = Config::new().module(m).limits(Limits { max_memory: Some(8 << 20), ..Limits::default() });
-    // The first string is garbage, which only a collection frees.
     let src = "import queue\nvar s = \"y\".repeat(3_900_000)\ns = \"y\".repeat(3_900_000)\nprint(queue.pop().len())";
     let (r, out, _) = run_src(config, src);
     assert!(r.is_ok(), "{r:?}");
@@ -1608,8 +1600,6 @@ fn a_native_runs_once_when_its_result_needs_a_collection() {
     assert_eq!(pops.load(Ordering::SeqCst), 1);
 }
 
-/// The finisher of an async native, which cannot run again, collects
-/// garbage instead of failing with the memory limit.
 #[test]
 fn an_async_result_that_needs_a_collection_does_not_end_the_run() {
     let mut m = NativeModule::new("slow");

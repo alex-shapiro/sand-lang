@@ -1216,8 +1216,7 @@ impl Checker {
     // ------------------------------------------------------------------
     // Fields
 
-    /// (index, type, mutable) of struct field `name`, if the current module
-    /// can use it.
+    /// Returns `(index, type, mutable)` for visible struct field `name`.
     fn struct_field(&mut self, t: TypeId, name: &str) -> Option<(u32, TypeId, bool)> {
         let Ty::Named(d, args) = self.ty(t) else { return None };
         let s = self.syms.get(name)?;
@@ -1229,13 +1228,11 @@ impl Checker {
         Some((i as u32, self.field_type(d, i, &args), self.types[d as usize].fields()[i].mutable))
     }
 
-    /// Whether the current module can use field `i` of struct `d`.
     pub(crate) fn field_visible(&self, d: TypeDefId, i: usize) -> bool {
         let def = &self.types[d as usize];
         self.visible(def.module, def.fields()[i].is_pub)
     }
 
-    /// Reports field `i` of struct `d` at `span` if the current module cannot use it.
     pub(crate) fn check_field_visible(&mut self, d: TypeDefId, i: usize, span: Span) {
         if !self.field_visible(d, i) {
             let def = &self.types[d as usize];
@@ -1244,19 +1241,16 @@ impl Checker {
         }
     }
 
-    /// The methods named `name` of `c` that the current module can use.
     fn visible_methods(&self, c: Ctor, name: &str) -> impl Iterator<Item = FnId> + '_ {
         let fs = self.methods_named(c, name).unwrap_or_default();
         (0..fs.len()).map(move |i| fs[i]).filter(|&f| self.visible(self.fns[f as usize].module, self.fns[f as usize].is_pub))
     }
 
-    /// The first method named `name` of `c` that the current module can use.
     fn visible_method(&self, c: Ctor, name: &str) -> Option<FnId> {
         self.visible_methods(c, name).next()
     }
 
-    /// The error for a field or method `name` of type `t` that exists but
-    /// that the current module cannot use.
+    /// Returns a diagnostic message if `name` is a private field or method of `t`.
     fn private_member(&self, t: TypeId, name: &str) -> Option<String> {
         let ty = self.ty(t);
         let s = self.syms.get(name)?;
@@ -1754,7 +1748,6 @@ impl Checker {
         }
     }
 
-    /// The method `name` of `recv_ty` with `self` that the current module can use.
     fn lookup_method(&mut self, recv_ty: TypeId, name: &str) -> Option<FnId> {
         let c = ctor_of(self.ty(recv_ty))?;
         self.visible_methods(c, name).find(|&f| self.fns[f as usize].has_self)
@@ -1816,7 +1809,7 @@ impl Checker {
                 return err(span);
             }
         }
-        // A private method hides the built-in `to_str` and `debug` too.
+        // Private methods shadow built-in `to_str` and `debug`.
         if let Some(msg) = self.private_member(rt, &method.name) {
             self.error(method.span, msg);
             self.infer_args(args);
@@ -1866,7 +1859,6 @@ impl Checker {
     // ------------------------------------------------------------------
     // Struct literals
 
-    /// Checks the values of a struct literal that is not built.
     fn infer_field_values(&mut self, fields: &[ast::FieldInit]) {
         for v in fields.iter().filter_map(|f| f.value.as_ref()) {
             self.infer(v, None);

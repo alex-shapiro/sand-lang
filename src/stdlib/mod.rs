@@ -77,7 +77,6 @@ pub(crate) fn truncate(s: &str, max: usize) -> &str {
     }
 }
 
-/// The standard modules (and the prelude) that are built as [`NativeModule`]s.
 pub(crate) fn modules() -> Vec<NativeModule> {
     vec![
         core::prelude(),

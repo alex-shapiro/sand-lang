@@ -28,7 +28,6 @@ const MAX_DEPTH: usize = 512;
 /// header), checked against the memory limit before each.
 const NODE: usize = 64;
 
-/// The Sand type `json.Json`.
 struct JsonType;
 
 impl SandType for JsonType {
@@ -119,11 +118,8 @@ fn json_ids(vm: &Vm) -> Result<JsonIds, Ctl> {
 
 /// Failure while parsing or decoding.
 enum Error {
-    /// Invalid JSON or a mismatch with the target type: becomes `Err(Error { kind: "parse" })`.
     Parse(String),
-    /// A target type that values cannot be decoded into: becomes `Err(Error { kind: "invalid" })`.
     Invalid(String),
-    /// Aborts the native call (memory limit, error).
     Ctl(Ctl),
 }
 
@@ -726,7 +722,6 @@ fn is_ident(s: &str) -> bool {
     b.next().is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') && b.all(|c| c.is_ascii_alphanumeric() || c == b'_')
 }
 
-/// The longest prefix of a key (in characters) that an error message quotes.
 const QUOTED_KEY: usize = 64;
 
 impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
@@ -751,7 +746,6 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
         s
     }
 
-    /// The Sand syntax of `t`, for messages.
     fn type_name(&self, t: &TypeDesc) -> String {
         let list = |ts: &[std::sync::Arc<TypeDesc>]| ts.iter().map(|t| self.type_name(t)).collect::<Vec<_>>().join(", ");
         match t {
@@ -785,7 +779,6 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
         Error::Parse(format!("{}: {msg}", self.path_str()))
     }
 
-    /// The error for a part of the target type that cannot be decoded.
     fn unsupported(&self, what: &str) -> Error {
         Error::Invalid(format!("{}: cannot decode {what}", self.path_str()))
     }

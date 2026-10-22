@@ -18,7 +18,7 @@ Each external operation requests a capability from the policy:
 | `stdin`, `stdout`, `stderr` | standard input, output, and error streams                |
 | `timezone`                  | `time.local_zone()`                                      |
 | `import`                    | script module imports, by file path                      |
-| `custom`                    | functions of [native modules](/guide/embedding/)         |
+| `custom`                    | custom capabilities checked by [native modules](/guide/embedding/) |
 
 Sand has neither a foreign function interface nor process-spawning APIs. Every host interaction passes through these capabilities.
 

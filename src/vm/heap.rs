@@ -152,7 +152,7 @@ pub struct Heap {
     young_resources: usize,
     /// Testing aid: collect at every safe point (see `Config::gc_stress`).
     pub stress: bool,
-    /// Set while allocations skip the memory limit (see [`Vm::unchecked`](crate::vm::Vm::unchecked)).
+    /// Disables memory-limit checks during post-effect result conversion (see [`Vm::unchecked`](crate::vm::Vm::unchecked)).
     pub(crate) unchecked: bool,
     /// Buffers of pending I/O, counted against `limit` with the heap.
     pub io_memory: Arc<IoMemory>,

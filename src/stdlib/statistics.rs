@@ -5,7 +5,6 @@ use crate::native::{NativeModule, Val};
 use crate::vm::value::FxHashMap;
 use crate::vm::{Ctl, Vm};
 
-/// A list of numbers.
 type Floats = Val<Vec<f64>>;
 
 pub(crate) fn module() -> NativeModule {

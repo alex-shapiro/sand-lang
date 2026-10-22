@@ -57,8 +57,7 @@ struct Pending {
     kind: ModKind,
     file: FileId,
     ast: ast::Module,
-    /// The modules it uses: by import item index, or without an import
-    /// for the types of native signatures.
+    /// Imported module names paired with their AST import index (`None` for native signature dependencies).
     imports: Vec<(Option<usize>, String)>,
 }
 
@@ -76,9 +75,7 @@ impl Pending {
 }
 
 impl Snapshot {
-    /// Checks and compiles the modules of `registry` (with `only`, just those
-    /// and their imports) that `base`, the standard library's snapshot, does
-    /// not hold. Every module must check.
+    /// Checks and compiles modules in `registry` that are not already in `base`.
     pub(crate) fn build(registry: &Registry, base: Option<&Snapshot>, only: Option<&[&str]>) -> Result<Snapshot, Error> {
         let (mut sm, mut by_name, mut mods) = match base {
             Some(b) => (b.sm.clone(), b.by_name.clone(), b.mods.clone()),
@@ -97,7 +94,6 @@ impl Snapshot {
         }
         let mut checker = base.map(|b| b.checker.clone()).unwrap_or_default();
         checker.lint_facts = false;
-        // Standard modules import only each other: they come before host modules.
         pending.sort_by_key(|p| p.kind == ModKind::Host);
         for (k, p) in pending.iter().enumerate() {
             by_name.insert(p.name.clone(), (checker.mods.len() + k) as ModId);
@@ -156,9 +152,7 @@ impl Snapshot {
     }
 }
 
-/// Loads the registered module `name` and, first, those it uses (that are
-/// not in `loaded` or `pending` yet). `at` is where another module uses it,
-/// for a diagnostic of an import cycle. Returns whether it was loaded.
+/// Parses registered module `name` and its dependencies into `pending` in topological order.
 #[allow(clippy::too_many_arguments)]
 fn load_registered(
     registry: &Registry,
@@ -200,7 +194,6 @@ fn load_registered(
         }
     }
     let start = Span::new(file, 0, 0);
-    // The checker reports a dependency that is not registered, with the native that uses it.
     for &dep in &src.deps {
         if load_registered(registry, dep, Some(start), loaded, sm, pending, errors, path) {
             imports.push((None, dep.to_string()));
@@ -211,7 +204,6 @@ fn load_registered(
     true
 }
 
-/// The error for an import of `name`, which no module has.
 pub(crate) fn unknown_module(name: &str) -> String {
     if crate::stdlib::OS_MODULES.contains(&name) {
         format!("module `{name}` is not available: this build of Sand has no operating-system access")
@@ -321,8 +313,7 @@ pub(crate) fn scan_imports(text: &str, file: FileId) -> Vec<ImportRef> {
     out
 }
 
-/// A module loaded by a compilation (or a REPL session): a script, or a
-/// standard module that is not in the snapshot.
+/// A script module or uncached standard module loaded into a [`ModuleGraph`].
 pub(crate) struct LoadedModule {
     pub name: String,
     pub file: FileId,

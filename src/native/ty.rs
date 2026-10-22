@@ -1,4 +1,4 @@
-//! Sand types described by Rust types.
+//! Rust representations of Sand types.
 
 use crate::vm::value::{Value, ValueType};
 use std::any::TypeId;
@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::marker::PhantomData;
 
-/// A Sand type, as a Rust type describes it (see [`SandType`]).
+/// A Sand type derived from a Rust type through [`SandType`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Type {
     Int,
@@ -23,33 +23,32 @@ pub enum Type {
     Map(Box<Type>, Box<Type>),
     Tuple(Vec<Type>),
     Fn(Vec<Type>, Box<Type>),
-    /// The type parameter at this index in the native function's type
-    /// parameters: those of its `extend` block or impl, then its own.
+    /// Type parameter at index `0..`, ordered with any enclosing `extend` or
+    /// `impl` type parameters before the function's own type parameters.
     Param(u8),
-    /// The runtime description of the type parameter at this index, which
-    /// the declaration marks `reflect`. Only leading parameters have it.
+    /// Runtime type description for the `reflect` type parameter at index `0..`.
     Reflect(u8),
-    /// A type that a module declares.
+    /// Nominal type declared in a module.
     Named(Named),
 }
 
-/// A type that a module declares, with its type arguments.
+/// A nominal Sand type and its type arguments.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Named {
     pub module: &'static str,
     pub name: &'static str,
     pub args: Vec<Type>,
-    /// The Rust type that the module binds to the Sand type, if any.
     pub rust: Option<TypeId>,
 }
 
 impl Type {
-    /// The type `name` that `module` declares in Sand source.
+    /// Constructs a reference to the Sand type `module.name<args>`.
     pub fn named(module: &'static str, name: &'static str, args: Vec<Type>) -> Type {
         Type::Named(Named { module, name, args, rust: None })
     }
 
-    /// The Sand type of the Rust type `T`, which `module` binds to `name`.
+    /// Constructs a reference to the Sand type `module.name` bound to the Rust
+    /// type `T`.
     pub fn bound<T: 'static>(module: &'static str, name: &'static str) -> Type {
         Type::Named(Named { module, name, args: Vec::new(), rust: Some(TypeId::of::<T>()) })
     }
@@ -62,12 +61,10 @@ impl Type {
         Type::named("prelude", "Result", vec![t, e])
     }
 
-    /// The prelude's `Error`.
     pub fn error() -> Type {
         Type::named("prelude", "Error", Vec::new())
     }
 
-    /// Calls `f` on this type and each type in it.
     pub(crate) fn visit(&self, f: &mut impl FnMut(&Type)) {
         f(self);
         match self {
@@ -86,13 +83,10 @@ impl Type {
         }
     }
 
-    /// The Sand syntax of the type, with names of `module` and the prelude
-    /// unqualified.
     pub(crate) fn render(&self, module: &str) -> String {
         self.render_with(module, &|i| format!("<type parameter {i}>"))
     }
 
-    /// As [`Type::render`], with `param` naming the type parameters.
     pub(crate) fn render_with(&self, module: &str, param: &dyn Fn(u8) -> String) -> String {
         let mut out = String::new();
         self.write(module, param, &mut out);
@@ -176,9 +170,8 @@ impl fmt::Display for Type {
     }
 }
 
-/// A Rust type with a Sand equivalent.
+/// Maps a Rust type to its corresponding Sand [`Type`].
 pub trait SandType {
-    /// The Sand type of `Self`.
     fn sand_type() -> Type;
 }
 
@@ -217,7 +210,6 @@ impl<T: SandType> SandType for Option<T> {
     }
 }
 
-/// `Result<T, Error>` (see [`IntoHostError`](crate::native::IntoHostError)).
 impl<T: SandType, E: crate::native::IntoHostError> SandType for Result<T, E> {
     fn sand_type() -> Type {
         Type::result(T::sand_type(), Type::error())
@@ -230,8 +222,6 @@ impl<T: SandType, E: crate::native::NativeError> SandType for Result<crate::nati
     }
 }
 
-/// `T`: a native that returns `Err(ctl)` aborts the run with `ctl` (a
-/// runtime error, a limit, or an exit) or suspends the calling task.
 impl<T: SandType> SandType for Result<T, crate::vm::Ctl> {
     fn sand_type() -> Type {
         T::sand_type()
@@ -264,7 +254,6 @@ impl<T: SandType> SandType for BTreeSet<T> {
 
 macro_rules! fn_type {
     ($($n:ident),*) => {
-        /// A Sand function type, for [`Val`] handles to functions.
         impl<R: SandType, $($n: SandType),*> SandType for fn($($n),*) -> R {
             fn sand_type() -> Type {
                 Type::Fn(vec![$($n::sand_type()),*], Box::new(R::sand_type()))
@@ -283,26 +272,23 @@ impl<T: ValueType> SandType for T {
     }
 }
 
-/// The type of a native function that does not return, such as one that
-/// always fails. It has no values.
+/// Uninhabited return type for native functions that never return (Sand `never`).
 #[derive(Clone, Copy, Debug)]
 pub enum Never {}
 
-/// A value of the type parameter at index `N` of a generic native function
-/// (see [`Type::Param`]).
+/// Value of the `N`-th generic type parameter of a `native fn` (see [`Type::Param`]).
 ///
-/// For `native fn first<T>(xs: [T]) -> T?`, the Rust function takes a
-/// `Val<Vec<Param<0>>>` and returns an `Option<Param<0>>`.
+/// For `native fn first<T>(xs: [T]) -> T?`, the Rust function accepts
+/// `Val<Vec<Param<0>>>` and returns `Option<Param<0>>`.
 #[derive(Clone, Copy, Debug)]
 pub struct Param<const N: u8>(Value);
 
 impl<const N: u8> Param<N> {
-    /// The value. The caller must keep the value's type unchanged.
     pub fn raw(self) -> Value {
         self.0
     }
 
-    /// `v`, which must be a value of the type parameter.
+    /// Wraps `v`, which must have the type of the `N`-th type parameter.
     pub fn from_raw(v: Value) -> Self {
         Param(v)
     }
@@ -314,8 +300,8 @@ impl<const N: u8> SandType for Param<N> {
     }
 }
 
-/// The runtime description of the type parameter at index `N`, which the
-/// declaration marks `reflect` (see [`Type::Reflect`]).
+/// Runtime type description passed for the `N`-th `reflect` type parameter of
+/// a `native fn` (see [`Type::Reflect`]).
 #[derive(Clone, Copy, Debug)]
 pub struct Reflect<const N: u8>(Value);
 
@@ -335,25 +321,25 @@ impl<const N: u8> SandType for Reflect<N> {
     }
 }
 
-/// A Sand value of the type that `T` describes, passed without conversion.
+/// Uncopied handle to a Sand [`Value`] with the Sand type of `T`.
 ///
-/// A native function that needs the VM takes its heap values as `Val`s:
-/// `Val<String>` is a `str`, `Val<Vec<Param<0>>>` a list of the first type
-/// parameter, `Val<fn() -> Option<String>>` a function.
+/// Functions registered with [`NativeModule::vm_function`](super::NativeModule::vm_function)
+/// can accept and return `Val<T>` to avoid copying heap values (for example,
+/// `Val<String>` for `str`, `Val<Vec<Param<0>>>` for `[T]`, or
+/// `Val<fn() -> Option<String>>` for `fn() -> str?`).
 ///
-/// The garbage collector does not see a `Val` that Rust code keeps: an
-/// argument is valid until the call (or its async result) is finished, and
-/// a value that the native makes is valid until it returns. Do not store a
-/// `Val` in an object or between calls.
+/// Because the garbage collector does not trace `Val` handles stored in Rust
+/// structs, a `Val` is valid only for the duration of the synchronous native
+/// call that received or allocated it. Never store a `Val` inside a
+/// [`NativeObject`](super::NativeObject) or across an async suspension point.
 pub struct Val<T: ?Sized>(Value, PhantomData<fn() -> T>);
 
 impl<T: ?Sized> Val<T> {
-    /// The value. The caller must keep the value's type unchanged.
     pub fn raw(self) -> Value {
         self.0
     }
 
-    /// `v`, which must be a value of the type that `T` describes.
+    /// Wraps `v`, which must have the Sand type of `T`.
     pub fn from_raw(v: Value) -> Self {
         Val(v, PhantomData)
     }
@@ -379,7 +365,7 @@ impl<T: SandType + ?Sized> SandType for Val<T> {
     }
 }
 
-/// The prelude's `Task<T>`, for [`Val`] handles.
+/// Marker type representing the prelude's `Task<T>` in [`Val<Task<T>>`](Val).
 pub struct Task<T>(PhantomData<T>);
 
 impl<T: SandType> SandType for Task<T> {
@@ -388,7 +374,7 @@ impl<T: SandType> SandType for Task<T> {
     }
 }
 
-/// The prelude's `Channel<T>`, for [`Val`] handles.
+/// Marker type representing the prelude's `Channel<T>` in [`Val<Channel<T>>`](Val).
 pub struct Channel<T>(PhantomData<T>);
 
 impl<T: SandType> SandType for Channel<T> {
@@ -397,7 +383,7 @@ impl<T: SandType> SandType for Channel<T> {
     }
 }
 
-/// The prelude's `Range`, for [`Val`] handles.
+/// Marker type representing the prelude's `Range` in [`Val<Range>`](Val).
 pub struct Range;
 
 impl SandType for Range {

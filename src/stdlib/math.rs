@@ -7,7 +7,6 @@ use crate::vm::{Ctl, fail};
 pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("math", ModKind::Std, include_str!("math.sand"));
 
-    // A macro, not a loop over `fn` pointers: each native calls its function directly.
     macro_rules! functions {
         ($($name:literal => $f:expr),* $(,)?) => {
             $(m.function($name, $f);)*

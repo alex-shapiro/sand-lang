@@ -4,8 +4,6 @@ use crate::check::ModKind;
 use crate::native::{HostError, NativeModule, Val};
 use crate::vm::{Ctl, Vm};
 
-/// The components of a `uri.Uri` (built in Sand): `(scheme, userinfo, host,
-/// port, path, query, fragment)`.
 type PartsTuple = (String, Option<String>, Option<String>, Option<i64>, String, Option<String>, Option<String>);
 
 pub(crate) fn module() -> NativeModule {
@@ -97,7 +95,6 @@ impl std::fmt::Display for Parts {
     }
 }
 
-/// `Ok` of the components, or `Err(Error { kind: "parse" })`.
 fn result(parsed: Result<Parts, String>) -> Result<PartsTuple, HostError> {
     let p = parsed.map_err(|msg| HostError::new("parse", msg))?;
     let (userinfo, host, port) = match p.authority {

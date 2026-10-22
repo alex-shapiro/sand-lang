@@ -27,7 +27,6 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a server's body read waits for data.
 const BODY_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Adds the server's types and natives to `m`.
 pub(super) fn natives(m: &mut NativeModule) {
     m.object_type::<Server>();
     m.object_type::<Exchange>();
@@ -181,8 +180,6 @@ fn evict_beyond(reads: &[Pending], cap: usize) {
     }
 }
 
-/// A request: method, path, query, headers, body, connection, and what its
-/// response needs.
 type Request = (String, String, String, Vec<(String, String)>, Body, net::Conn, Exchange);
 
 /// Accepts connections and reads request heads until a complete request is available.
@@ -414,7 +411,6 @@ async fn read_request_head<R: AsyncBufRead + Unpin>(
 // ----------------------------------------------------------------------
 // Responses
 
-/// What the response to a request needs to know about its connection.
 #[derive(crate::SandObject)]
 #[sand(module = "http", private)]
 struct Exchange {
@@ -524,8 +520,6 @@ fn write_response(
     end_response(vm, conn, data, res, after)
 }
 
-/// `reply_body(exchange, request_body, status, headers, include_body)`: the
-/// `Outgoing` of a streamed response.
 fn reply_body(
     vm: &mut Vm,
     exchange: Val<Exchange>,

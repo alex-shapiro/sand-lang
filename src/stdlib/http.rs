@@ -687,8 +687,6 @@ fn request_head(method: &str, url: &Url, headers: &[(String, String)], body: Del
 // ----------------------------------------------------------------------
 // Bodies written as they go
 
-/// A body that a script writes (an upload's or a reply's), and the head
-/// still to send before it.
 #[derive(crate::SandObject)]
 #[sand(module = "http", private)]
 pub(super) struct Outgoing {
@@ -696,10 +694,8 @@ pub(super) struct Outgoing {
     /// `Delimit::None` drops writes (a reply to `HEAD`, or a status without
     /// a body).
     pub delimit: Delimit,
-    /// The bytes left of a body with a `Content-Length`.
     pub left: Option<u64>,
     pub finished: bool,
-    /// For a reply: what becomes of the connection after the body.
     pub after: Option<super::http_server::After>,
 }
 

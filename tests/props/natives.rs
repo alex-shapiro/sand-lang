@@ -1,5 +1,4 @@
-//! Properties of native functions: conversions of maps and sets, and calls
-//! that run exactly once under any memory limit.
+//! Property tests for native function conversions and single-execution guarantees.
 
 use super::str_lit;
 use proptest::prelude::*;
@@ -16,7 +15,6 @@ fn run(config: Config, src: &str) -> (Result<sandlang::Outcome, Error>, String) 
     (r, out.contents())
 }
 
-/// The Sand text of `map` in key order, as `print` shows a map.
 fn map_text(map: &BTreeMap<i64, String>) -> String {
     let entries: Vec<String> = map.iter().map(|(k, v)| format!("{k}: {}", str_lit(v))).collect();
     if entries.is_empty() { "[:]".to_string() } else { format!("[{}]", entries.join(", ")) }
@@ -25,8 +23,6 @@ fn map_text(map: &BTreeMap<i64, String>) -> String {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
 
-    /// Maps and sets cross between Sand and Rust unchanged, and a Rust
-    /// `HashMap` or `HashSet` becomes a Sand map or set in key order.
     #[test]
     fn maps_and_sets_round_trip(map in prop::collection::btree_map(-50i64..50, "[a-z\"\\\\]{0,4}", 0..12)) {
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -39,7 +35,6 @@ proptest! {
         m.function("btree_map", |x: BTreeMap<i64, String>| x);
         m.function("hash_set", |x: HashSet<i64>| x);
         m.function("btree_set", |x: BTreeSet<i64>| x);
-        // Sand keeps insertion order: insert in reverse so that key order is a change.
         let inserts: String = map.iter().rev().map(|(k, v)| format!("m[{k}] = {}\n", str_lit(v))).collect();
         let src = format!(
             "import conv\nlet m: [int: str] = [:]\n{inserts}print(conv.hash_map(m))\nprint(conv.btree_map(m))\n\
@@ -53,9 +48,6 @@ proptest! {
         prop_assert_eq!(seen, vec![map]);
     }
 
-    /// A native with a side effect runs once per call whatever the memory
-    /// limit and the garbage on the heap: its result is made after the side
-    /// effect, so a collection never calls it again.
     #[test]
     fn natives_run_once_per_call(limit_kib in 1024usize..8192, garbage in 0usize..4_000_000, size in 0usize..800_000, calls in 1usize..6) {
         let count = Arc::new(AtomicUsize::new(0));

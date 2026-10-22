@@ -424,7 +424,6 @@ impl<'a> Parser<'a> {
         Ok(Import { source, alias: None, names: Some(names) })
     }
 
-    /// Type parameters; only a `native fn` (`native`) may mark them `reflect`.
     fn generics(&mut self, native: bool) -> PResult<Vec<GenericParam>> {
         let mut out = Vec::new();
         if !self.eat(&Tok::Lt) {
@@ -725,8 +724,6 @@ impl<'a> Parser<'a> {
         Ok(ImplDecl { generics, trait_ref, target, where_clause, methods })
     }
 
-    /// Reports `native type`: a native module declares its types by
-    /// registering Rust types.
     fn native_type<T>(&mut self) -> PResult<T> {
         self.error_here("native types are declared by registering Rust types with `NativeModule`, not in Sand source");
         Err(())

@@ -149,13 +149,13 @@ Sand infers the Sand function signature from the Rust parameter and return types
 | `HashSet<T>`, `BTreeSet<T>`                       | `Set<T>`                     |
 | `jiff::SignedDuration`                            | `duration`                   |
 | tuples of up to 8 elements                        | tuples                       |
-| Rust enum with `#[derive(SandEnum)]`              | matching Sand `enum`         |
-| `&T` (argument) or `T` (result), `#[derive(SandObject)]` | opaque type `T`       |
-| a registered `ValueType` `T`                      | opaque type `T`              |
+| Rust enum with `#[derive(SandEnum)]`                     | matching Sand `enum`         |
+| `&T` (argument) or `T` (result) with `#[derive(SandObject)]` | opaque type `T`          |
+| registered `ValueType` `T`                               | opaque type `T`              |
 
-A function that the module's Sand source does not declare is `pub`, and its parameters are named `arg1`, `arg2`, ... unless `params` names them. A function registered as `"Type.name"` is a method of `Type`, and it takes `self` if its first parameter has type `Type` (as `Counter.add` below). A generic function must have a `native fn` declaration.
+The engine automatically exports registered functions that are not declared in `NativeModule::source` as `pub`, with default parameter names `arg1`, `arg2`, ... unless overridden by `params`. Registering a function as `"Type.name"` defines a method on `Type`; the method takes `self` if its first parameter has type `Type` (such as `Counter.add` below). Generic functions must be declared with `native fn` in `NativeModule::source`.
 
-Returning `Err(HostError::new(kind, message))` preserves `kind` on the Sand `Error`. A `std::io::Error` converts to an `Error` of its standard kind, and a `String` or `&str` error to an `Error` of kind `"error"`. A function that returns `Result<T, sandlang::vm::Ctl>` has the Sand result `T`: its `Err` aborts the run, as a runtime error (`Ctl::fail`), a limit, or an exit.
+Returning `Err(HostError::new(kind, message))` produces a Sand `Err(Error)` with the given `kind` and `message`. The engine also converts `std::io::Error` into an `Error` with its standard kind, and `String` or `&str` errors into an `Error` with kind `"error"`. A function that returns `Result<T, sandlang::vm::Ctl>` has the Sand return type `T`; returning `Err(ctl)` aborts the run with a runtime error (`Ctl::fail`), a resource limit error, or an exit code.
 
 Derive `SandEnum` on a unit-only Rust enum and register it with `NativeModule::enum_type` to pass enum values between Rust and Sand:
 
@@ -180,13 +180,13 @@ geo.function("sides", |s: Shape| match s {
 
 `NativeModule::enum_type` generates the `pub enum Shape` declaration in `geo` from the Rust variants and doc comments, so scripts can call `geo.sides(geo.Shape.Square)`. Do not redeclare a registered enum in `NativeModule::source`. Use `#[sand(name = "Kind")]` to expose the enum under a different Sand name.
 
-Derive `SandObject` on a Rust type and register it with `NativeModule::object_type` to give scripts opaque handles to its values, such as connections. Functions take an object as `&T` and return a new one as `T`; scripts compare objects by identity:
+Derive `SandObject` on a Rust type and register it with `NativeModule::object_type` to expose opaque reference handles to scripts. Registered functions borrow an object parameter as `&T` and return a new object by value as `T`; scripts compare object handles by identity:
 
 ```rust
 use sandlang::{NativeModule, NativeObject, SandObject};
 use std::sync::atomic::{AtomicI64, Ordering};
 
-/// A counter shared by the calls that receive it.
+/// A shared atomic counter.
 #[derive(SandObject)]
 #[sand(module = "stats")]
 struct Counter(AtomicI64);
@@ -201,7 +201,7 @@ stats.function("Counter.add", |c: &Counter, n: i64| c.0.fetch_add(n, Ordering::R
 
 `NativeModule::async_function` registers an async Rust function; while its future is pending, only the calling Sand task suspends.
 
-To check a capability, register the function with `NativeModule::vm_function` and call `Vm::require`, which fails with kind `"permission_denied"` if the policy denies it. The engine calls the function again after a permission prompt, so call `Vm::require` before any side effect:
+To check a sandbox capability inside a native function, register the function with `NativeModule::vm_function` and call `Vm::require`, which returns a `"permission_denied"` error if the policy denies the request. Because the engine re-runs the function after a permission prompt, call `Vm::require` before performing any side effects:
 
 ```rust
 # #[tokio::main(flavor = "current_thread")]
@@ -228,7 +228,7 @@ Ok("opened front")
 Err(Error { kind: "permission_denied", message: "permission denied: door back" })
 ```
 
-`NativeModule::source` adds Sand declarations to the module. A `native fn` declaration of a registered function gives its parameters defaults or names its type parameters. `Engine::new` checks the module and fails with `Error::Compile` if a declaration's types differ from the Rust function's.
+`NativeModule::source` attaches Sand source declarations to a native module. Use `native fn` declarations in the Sand source to specify default parameter values or generic type parameters for registered functions. `Engine::new` type-checks registered modules and returns `Error::Compile` if a `native fn` declaration does not match its Rust function signature.
 
 ## Interactive sessions
 

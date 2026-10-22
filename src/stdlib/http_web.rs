@@ -42,8 +42,6 @@ struct Request {
     max_body: usize,
 }
 
-/// A received response: status, headers and body (reserved in the
-/// reservation).
 type Received = (i64, Vec<(String, String)>, Vec<u8>, Reservation);
 
 fn send(

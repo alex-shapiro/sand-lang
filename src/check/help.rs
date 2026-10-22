@@ -427,8 +427,7 @@ impl Checker {
         }
     }
 
-    /// The error for a field or method `name` of type `c` that the current
-    /// module cannot use.
+    /// Returns a diagnostic message if `name` is a private field or method of `c`.
     fn hidden_member(&self, c: Ctor, name: &str) -> Option<String> {
         let s = self.syms.get(name)?;
         if let Ctor::Def(d) = c
@@ -443,7 +442,7 @@ impl Checker {
     /// The variants, fields and methods of type `c`, in no particular order.
     fn type_members(&self, c: Ctor, arity: u32) -> Vec<String> {
         let mut names = universal_names();
-        // A private method hides the built-in member of its name.
+        // Private methods shadow built-in `to_str` and `debug`.
         names.retain(|n| self.hidden_member(c, n).is_none());
         if let Ctor::Def(d) = c {
             let def = &self.types[d as usize];
@@ -466,8 +465,7 @@ impl Checker {
         names
     }
 
-    /// Returns the inherent methods of `c` that the current module can use,
-    /// in declaration order.
+    /// Returns the visible inherent methods of `c` in declaration order.
     pub(super) fn methods_of(&self, c: Ctor) -> Vec<FnId> {
         let shown = |f: FnId| self.visible(self.fns[f as usize].module, self.fns[f as usize].is_pub);
         let mut fs: Vec<FnId> = self
@@ -711,8 +709,7 @@ impl Checker {
         }
     }
 
-    /// `pub ` for a public member that `help` shows in its own module, where
-    /// private members show too.
+    /// Returns `"pub "` when displaying a public member inside its defining module.
     fn pub_mark(&self, module: ModId, is_pub: bool) -> &'static str {
         if is_pub && module == self.cur_mod { "pub " } else { "" }
     }

@@ -495,7 +495,6 @@ pub(crate) struct FnState {
 pub struct Checker {
     /// The sources of the files checked, for diagnostics and `help`.
     sources: PMap<FileId, Arc<SourceFile>>,
-    /// The natives that the modules being checked can declare.
     natives: Arc<NativeDecls>,
     pub arena: TypeArena,
     pub syms: Symbols,
@@ -1564,7 +1563,6 @@ impl Checker {
         self.types[id as usize].kind = TypeDefKind::Enum { variants };
     }
 
-    /// Declares the types that the current module binds to Rust types.
     fn declare_bound_types(&mut self) {
         let natives = self.natives.clone();
         let module = self.name(self.mods[self.cur_mod as usize].name).to_string();
@@ -1598,8 +1596,7 @@ impl Checker {
         }
     }
 
-    /// A struct in type `t` (or in the types of its fields) with a field that
-    /// the current module cannot use, and the field.
+    /// Finds a struct reachable from `t` that has a field invisible to the current module.
     fn private_field_in(&self, t: TypeId) -> Option<(TypeDefId, Symbol)> {
         let mut seen = HashSet::new();
         let mut todo = vec![t];
@@ -1625,7 +1622,6 @@ impl Checker {
         None
     }
 
-    /// The Rust type bound to type definition `d`, if any.
     fn rust_type(&self, d: TypeDefId) -> Option<std::any::TypeId> {
         match &self.types[d as usize].kind {
             TypeDefKind::Opaque(Opaque::Value(v)) => Some(v.type_id),
@@ -1638,9 +1634,7 @@ impl Checker {
         }
     }
 
-    /// Declares each native of the current module that its source does not
-    /// declare, from the native's signature (or reports that a method must
-    /// be declared).
+    /// Declares registered host functions that do not have a `native fn` declaration in Sand source.
     fn declare_undeclared_natives(&mut self, first_fn: usize) {
         let span = Span::new(self.mods[self.cur_mod as usize].file, 0, 0);
         let declared: HashSet<u32> =
@@ -1654,7 +1648,6 @@ impl Checker {
             .filter(|(_, d)| !declared.contains(&d.id))
             .collect();
         missing.sort_by_key(|(name, _)| *name);
-        // Standard modules declare all their natives.
         let host = self.mods[self.cur_mod as usize].kind == ModKind::Host;
         for (name, decl) in missing {
             if host {
@@ -1665,8 +1658,6 @@ impl Checker {
         }
     }
 
-    /// Declares `pub native fn name` with the signature of the Rust function:
-    /// a method of `Type` for `name` = `Type.method`.
     fn declare_derived_native(&mut self, name: &str, decl: &NativeDecl, span: Span) {
         let (mi, sig) = (self.cur_mod, &decl.sig);
         let module = self.name(self.mods[mi as usize].name).to_string();
@@ -1751,8 +1742,7 @@ impl Checker {
         }
     }
 
-    /// Reports a public function or field (`what`) of a native module whose
-    /// types `tys` include a private type of the module.
+    /// Reports an error if a public item in a native module exposes a private type.
     fn check_public_types(&mut self, what: &str, item: &ast::Ident, tys: impl IntoIterator<Item = TypeId>) {
         let mi = self.cur_mod;
         let mut private = None;
@@ -1771,9 +1761,7 @@ impl Checker {
         }
     }
 
-    /// The checker's type for the Rust signature type `t` of native `key`,
-    /// whose type parameters are `generics`. Reports a type that the
-    /// modules do not declare.
+    /// Resolves a Rust signature type `t` for native function `key` into a [`TypeId`].
     fn host_type(&mut self, t: &Type, generics: &[ParamId], key: &str, span: Span) -> Option<TypeId> {
         Some(match t {
             Type::Int => TypeId::INT,
@@ -1864,8 +1852,7 @@ impl Checker {
         })
     }
 
-    /// Checks a `native fn` declaration (`f`, with type parameters
-    /// `generics`) against the signature of its Rust function.
+    /// Verifies that a `native fn` declaration matches its registered Rust signature.
     fn check_native_signature(
         &mut self,
         f: &ast::FnDecl,
@@ -2348,13 +2335,10 @@ impl Checker {
         self.methods.insert(key, ids.into());
     }
 
-    /// Whether the current module can use a member or item of `module`
-    /// that is `pub` if `is_pub`.
     pub(crate) fn visible(&self, module: ModId, is_pub: bool) -> bool {
         is_pub || module == self.cur_mod
     }
 
-    /// The first field of struct `d` that the current module cannot use.
     pub(crate) fn hidden_field(&self, d: TypeDefId) -> Option<&FieldDef> {
         let def = &self.types[d as usize];
         def.fields().iter().find(|f| !self.visible(def.module, f.is_pub))

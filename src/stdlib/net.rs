@@ -58,11 +58,8 @@ pub(crate) fn closed() -> IoFailure {
     IoFailure::new("closed", "connection closed")
 }
 
-/// A native object holding an open resource, counted by its slot (see
-/// `iomem::ResourceSlot`) until closed or collected.
 pub(crate) trait Resource: crate::native::ObjectType + IntoValue {
-    /// Takes the slot that counted the resource while it was being opened
-    /// (the object keeps the slot until it is closed).
+    /// Attaches the slot that counted the resource while it was being opened.
     fn attach(&mut self, slot: ResourceSlot);
 }
 
@@ -269,7 +266,6 @@ impl Detached {
         Detached { reader: Arc::new(Mutex::new(reader)), writer: Arc::new(Mutex::new(writer)), peer, slot }
     }
 
-    /// The `net.Conn` object of the connection.
     pub fn into_conn(self) -> Conn {
         Conn { halves: Some((self.reader, self.writer)), slot: Some(self.slot), peer: self.peer, closed: watch::Sender::new(false) }
     }
@@ -552,9 +548,8 @@ fn conn_read_all(vm: &mut Vm, c: Val<Conn>) -> Suspended<Vec<u8>> {
     )
 }
 
-/// Writes the bytes that `bytes` reads from the heap (of a `str` or a
-/// `bytes`), from a copy that is reserved until the write is done (the heap
-/// value may change or go meanwhile).
+/// Copies the bytes returned by `bytes` into an I/O reservation before writing,
+/// because the heap value can move or be collected while the write is pending.
 fn conn_write(vm: &mut Vm, c: Val<Conn>, bytes: impl Fn(&Vm) -> &[u8]) -> Suspended<()> {
     let len = bytes(vm).len();
     vm.charge_bytes(len)?;

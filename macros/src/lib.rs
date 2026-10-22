@@ -20,9 +20,9 @@ pub fn derive_sand_enum(input: TokenStream) -> TokenStream {
     sand_enum(&input).unwrap_or_else(Error::into_compile_error).into()
 }
 
-/// Derives `ObjectType`, `SandType`, `FromValue` for `&T`, and `IntoValue`
-/// for a struct or enum so that native functions can take objects of it
-/// by reference and return new ones. The type must also implement
+/// Derives `ObjectType`, `SandType`, `FromValue` (for `&T`), and `IntoValue`
+/// for a struct or enum so that native functions can borrow object handles as
+/// `&T` and return new objects by value. The type must also implement
 /// `NativeObject`.
 ///
 /// Required attribute:
@@ -30,20 +30,20 @@ pub fn derive_sand_enum(input: TokenStream) -> TokenStream {
 ///
 /// Optional attributes:
 /// - `#[sand(name = "<Name>")]` overrides the Sand type name.
-/// - `#[sand(private)]` hides the type from other modules.
+/// - `#[sand(private)]` makes the type private to its module.
 #[proc_macro_derive(SandObject, attributes(sand))]
 pub fn derive_sand_object(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     sand_object(&input).unwrap_or_else(Error::into_compile_error).into()
 }
 
-struct Attrs {
+struct TypeAttrs {
     module: LitStr,
     name: LitStr,
     private: bool,
 }
 
-fn attrs(input: &DeriveInput, derive: &str, allow_private: bool) -> syn::Result<Attrs> {
+fn parse_type_attrs(input: &DeriveInput, derive: &str, allow_private: bool) -> syn::Result<TypeAttrs> {
     let ty = &input.ident;
     if !input.generics.params.is_empty() {
         return Err(Error::new_spanned(&input.generics, format!("`{derive}` cannot be derived for a type with type parameters")));
@@ -68,17 +68,18 @@ fn attrs(input: &DeriveInput, derive: &str, allow_private: bool) -> syn::Result<
     let Some(module) = module else {
         return Err(Error::new(Span::call_site(), format!("`{derive}` requires `#[sand(module = \"...\")]`")));
     };
-    let n = name.value();
-    let capitalized = n.starts_with(|c: char| c.is_ascii_uppercase()) && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    let type_name = name.value();
+    let capitalized =
+        type_name.starts_with(|c: char| c.is_ascii_uppercase()) && type_name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
     if !capitalized {
-        return Err(Error::new_spanned(&name, format!("the Sand type name `{n}` is not a capitalized identifier")));
+        return Err(Error::new_spanned(&name, format!("the Sand type name `{type_name}` is not a capitalized identifier")));
     }
-    for attrs in members(&input.data) {
+    for attrs in member_attrs(&input.data) {
         if let Some(a) = attrs.iter().find(|a| a.path().is_ident("sand")) {
             return Err(Error::new_spanned(a, "`#[sand(...)]` applies only to the type"));
         }
     }
-    Ok(Attrs { module, name, private })
+    Ok(TypeAttrs { module, name, private })
 }
 
 fn sand_enum(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
@@ -86,7 +87,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let Data::Enum(data) = &input.data else {
         return Err(Error::new_spanned(ty, "`SandEnum` can only be derived for enums"));
     };
-    let Attrs { module, name, .. } = attrs(input, "SandEnum", false)?;
+    let TypeAttrs { module, name, .. } = parse_type_attrs(input, "SandEnum", false)?;
     if data.variants.is_empty() {
         return Err(Error::new_spanned(ty, "a Sand enum must have at least one variant"));
     }
@@ -141,7 +142,7 @@ fn sand_object(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     if matches!(input.data, Data::Union(_)) {
         return Err(Error::new_spanned(ty, "`SandObject` cannot be derived for unions"));
     }
-    let Attrs { module, name, private } = attrs(input, "SandObject", true)?;
+    let TypeAttrs { module, name, private } = parse_type_attrs(input, "SandObject", true)?;
     let doc = extract_doc_comment(&input.attrs);
     let public = !private;
     Ok(quote! {
@@ -179,8 +180,7 @@ fn sand_object(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     })
 }
 
-/// The attributes of the variants and fields of a type.
-fn members(data: &Data) -> Vec<&[Attribute]> {
+fn member_attrs(data: &Data) -> Vec<&[Attribute]> {
     fn fields(f: &Fields) -> impl Iterator<Item = &[Attribute]> {
         f.iter().map(|f| &f.attrs[..])
     }

@@ -53,7 +53,6 @@ impl NativeObject for Stdin {}
 impl NativeObject for Stdout {}
 impl NativeObject for Stderr {}
 
-/// The type of an output stream.
 trait Output: ObjectType {
     /// The stream: stdout (1) or stderr (2).
     const STREAM: u8;
@@ -67,7 +66,6 @@ impl Output for Stderr {
     const STREAM: u8 = 2;
 }
 
-/// Registers the methods of output stream `T`.
 fn output<T: Output>(m: &mut NativeModule) {
     m.vm_function(&format!("{}.write", T::NAME), |vm: &mut Vm, _: Val<T>, data: Val<Vec<u8>>| write_out(vm, T::STREAM, data.raw()));
     m.vm_function(&format!("{}.write_str", T::NAME), |vm: &mut Vm, _: Val<T>, text: Val<String>| write_out(vm, T::STREAM, text.raw()));
@@ -100,7 +98,6 @@ enum Read {
     Upto(usize),
 }
 
-/// Reads `what` from standard input and makes the result with `done`.
 fn read_stdin<R: IntoValue + Send + 'static>(
     vm: &mut Vm,
     what: Read,

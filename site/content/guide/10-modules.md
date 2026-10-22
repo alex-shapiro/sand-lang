@@ -77,7 +77,7 @@ print(square(1.0) == Rect { w: 1.0, h: 1.0 })
 
 ## Visibility
 
-Module items are private by default. Mark functions, structs, enums, traits, type aliases, and top-level `let` or `var` bindings with `pub` to export them, and the fields and methods of a type to let other modules use them. Another module cannot build a struct with a private field. Referencing a private item from another module is a compile error:
+Module items are private by default. Mark top-level functions, structs, enums, traits, type aliases, and `let` or `var` bindings with `pub` to export them, and mark struct fields and methods with `pub` to expose them to importing modules. Other modules cannot construct a struct that has a private field. Referencing a private item from another module is a compile error:
 
 ```sand error
 import "./geometry.sand"

@@ -19,15 +19,12 @@ const ITEM: usize = std::mem::size_of::<Obj>() + 2 * std::mem::size_of::<Value>(
 /// Approximate heap cost of a list element.
 const SLOT: usize = std::mem::size_of::<Value>();
 
-/// Handles to the prelude's types. The type parameters are those of their
-/// `extend` blocks: `T` for lists and sets, `K` and `V` for maps.
 type Str = Val<String>;
 type Bytes = Val<Vec<u8>>;
 type List<T = Param<0>> = Val<Vec<T>>;
 type Map = Val<HashMap<Param<0>, Param<1>>>;
 type Set = Val<HashSet<Param<0>>>;
 type Range = Val<native::Range>;
-/// The function that `iter_next` returns: each call yields the next element.
 type IterFn<T> = Val<fn() -> Option<T>>;
 
 /// Charges for copying `n` bytes into a new value and checks the memory limit.
@@ -36,13 +33,10 @@ fn copy_bytes(vm: &Vm, n: usize) -> Result<(), Ctl> {
     vm.charge_bytes(n)
 }
 
-/// Checks the memory limit for a new list of `n` elements. Converting the
-/// result charges for the elements.
 fn reserve_list(vm: &Vm, n: usize) -> Result<(), Ctl> {
     vm.reserve(n.saturating_mul(SLOT))
 }
 
-/// `items`, which are values of type parameter `N`.
 fn params<const N: u8>(items: Vec<Value>) -> Vec<Param<N>> {
     items.into_iter().map(Param::from_raw).collect()
 }
@@ -54,7 +48,6 @@ fn produce(vm: &Vm, n: usize, objs: usize) -> Result<(), Ctl> {
     vm.charge(n.saturating_add(objs) as u64)
 }
 
-/// The nanoseconds of a Sand duration (an `i64`, so the cast is exact).
 fn nanos(d: SignedDuration) -> i64 {
     d.as_nanos() as i64
 }
@@ -848,7 +841,6 @@ fn inclusive(vm: &Vm, r: Range) -> Result<Option<(i64, i64)>, Ctl> {
     Ok(last.filter(|&last| a <= last).map(|last| (a, last)))
 }
 
-/// The number of integers from `first` to `last`.
 fn count(bounds: Option<(i64, i64)>) -> i128 {
     bounds.map_or(0, |(first, last)| last as i128 - first as i128 + 1)
 }
@@ -979,7 +971,6 @@ fn new_set(vm: &mut Vm, set: SetObj) -> Set {
     Val::from_raw(vm.heap.alloc(Obj::Set(Box::new(set))))
 }
 
-/// Allocates `copy`, a copy of a map or set (sharing no state).
 fn alloc_copy(vm: &mut Vm, copy: Obj) -> NResult {
     let size = copy.size();
     vm.reserve(size)?;
@@ -1002,7 +993,6 @@ fn clear_container(vm: &mut Vm, v: Value) -> Result<(), Ctl> {
 }
 
 fn maps(m: &mut NativeModule) {
-    /// The keys (`0`) or values (`1`) of map `m`.
     fn map_column<const N: u8>(vm: &mut Vm, m: Map) -> Result<Vec<Param<N>>, Ctl> {
         let mo = m.map(&vm.heap)?;
         reserve_list(vm, mo.live)?;
