@@ -81,13 +81,6 @@ Follow-up work, roughly in priority order.
       `List.sum_from` depends on the bound of its Sand caller.
 - [ ] Support generic structs (such as the prelude's `Iter<T>`) and field
       defaults in `#[derive(SandStruct)]`.
-- [ ] Reject invalid and duplicate Sand field names (`#[sand(name)]`, Sand
-      keywords) when the derive expands, not when `NativeModule::bind` panics
-      at engine setup. The derive can emit a `const` assertion that calls a
-      `const fn` over the lexer's keyword table.
-- [ ] `http.send` closes an idle pooled connection, instead of putting it
-      back in the pool, if the request then fails to buffer or runs out of
-      fuel.
 
 ### Tooling
 

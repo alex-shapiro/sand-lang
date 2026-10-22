@@ -861,6 +861,28 @@ print(http.get("{base}/")?.text()?)
     assert_eq!(reqs.iter().filter(|r| r.header("connection") == Some("close")).count(), 1);
 }
 
+/// A request that fails before it is sent leaves its idle connection in
+/// the pool for the next request: here, the request and its body do not
+/// fit in the memory limit together, although each fits alone.
+#[test]
+fn http_clients_keep_idle_connections_after_failed_requests() {
+    let server = http_server(|req| HttpResponse::new(200, format!("{} bytes", req.body.len())));
+    let base = format!("http://{}", server.addr);
+    let src = format!(
+        r#"
+import http
+print(http.get("{base}/")?.text()?)
+let big = "x".repeat(300_000)
+let e = http.post("{base}/", big.bytes(), headers: [("X-Big", big)]).unwrap_err()
+print(e.kind)
+print(http.get("{base}/")?.text()?)
+"#
+    );
+    let r = run_with(&src, |c| c.limits(Limits { max_memory: Some(1 << 20), ..Limits::default() }));
+    assert_eq!(r.ok_stdout(), "0 bytes\nlimit\n0 bytes\n");
+    assert_eq!(server.connections.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
 #[test]
 fn http_clients_send_requests_again_on_closed_connections() {
     // Each connection answers its first request, then reads the next one and

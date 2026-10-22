@@ -14,7 +14,7 @@ pub(crate) use convert::mismatch;
 
 use crate::check::ModKind;
 use crate::engine::Registry;
-use crate::syntax::lexer::{is_ident, keyword};
+use crate::syntax::lexer::{is_ident, is_keyword};
 use crate::types::ValueTypeInfo;
 use crate::vm::heap::Heap;
 use crate::vm::value::{ChannelObj, MapObj, Obj, SetObj, TaskObj, TypeDesc, Value, ValueType};
@@ -172,8 +172,27 @@ pub fn struct_into_value<T: StructType>(vm: &mut Vm, write: impl FnOnce(&mut Vm)
     let fields = write(vm);
     vm.nesting -= 1;
     let fields = fields?;
+    if fields.len() != T::FIELDS.len() {
+        return Err(Ctl::internal(format!("struct {}.{} takes {} fields, not {}", T::MODULE, T::NAME, T::FIELDS.len(), fields.len())));
+    }
     vm.check_room(fields.len() * std::mem::size_of::<Value>())?;
     Ok(vm.heap.alloc(Obj::Struct(def, fields)))
+}
+
+/// Returns `true` if `name` can name a Sand type or enum variant: a
+/// capitalized identifier that is not a keyword. The derive macros call this
+/// function in constants, so that an invalid name does not compile.
+#[doc(hidden)]
+pub const fn is_type_name(name: &str) -> bool {
+    is_name(name) && name.as_bytes()[0].is_ascii_uppercase()
+}
+
+/// Returns `true` if `name` can name a Sand module, field, or parameter: an
+/// identifier that is not a keyword. The derive macros call this function in constants, so
+/// that an invalid name does not compile.
+#[doc(hidden)]
+pub const fn is_name(name: &str) -> bool {
+    is_ident(name) && !is_keyword(name)
 }
 
 /// Converts the value `v` of a field of a [`StructType`] for
@@ -248,6 +267,37 @@ pub fn field_value<T: for<'a> FromValue<Item<'a> = T>>(vm: &Vm, v: Value, conv: 
 ///     // A field must have a Sand type.
 ///     id: u32,
 /// }
+/// ```
+///
+/// ```compile_fail
+/// #[derive(sandlang::SandStruct)]
+/// #[sand(module = "db")]
+/// struct Row {
+///     // A field name must not be a Sand keyword.
+///     r#match: i64,
+/// }
+/// ```
+///
+/// ```compile_fail
+/// #[derive(sandlang::SandStruct)]
+/// #[sand(module = "db")]
+/// struct Row {
+///     #[sand(name = "two words")]
+///     id: i64,
+/// }
+/// ```
+///
+/// ```compile_fail
+/// #[derive(Clone, Copy, sandlang::SandEnum)]
+/// #[sand(module = "geo", name = "Self")]
+/// enum Shape { Circle }
+/// ```
+///
+/// ```compile_fail
+/// #[derive(Clone, Copy, sandlang::SandEnum)]
+/// #[sand(module = "geo")]
+/// #[allow(non_camel_case_types)]
+/// enum Shape { circle }
 /// ```
 ///
 /// ```compile_fail
@@ -561,7 +611,7 @@ impl NativeModule {
     /// Panics if `name` is not a valid identifier or conflicts with the prelude
     /// or a standard library module.
     pub fn new(name: &str) -> NativeModule {
-        assert!(is_ident(name) && keyword(name).is_none(), "a host module cannot be named `{name}`: it is not an identifier");
+        assert!(is_name(name), "a host module cannot be named `{name}`: it is not an identifier, or is a keyword");
         assert!(!crate::stdlib::STD_MODULES.contains(&name), "a host module cannot be named `{name}`: it is the name of a standard module");
         NativeModule::of_kind(name, ModKind::Host)
     }
@@ -646,7 +696,7 @@ impl NativeModule {
         let n = f.sig.params.len() - usize::from(f.sig.takes_self(&module, &f.name));
         assert_eq!(names.len(), n, "function `{}` has {n} parameters", f.name);
         for (i, n) in names.iter().enumerate() {
-            assert!(is_ident(n) && keyword(n).is_none(), "parameter name `{n}` of function `{}` is not an identifier", f.name);
+            assert!(is_name(n), "parameter name `{n}` of function `{}` is not an identifier, or is a keyword", f.name);
             assert!(!names[..i].contains(n), "parameter name `{n}` of function `{}` is given twice", f.name);
         }
         f.names = Some(names.iter().map(|n| n.to_string()).collect());
@@ -682,15 +732,14 @@ impl NativeModule {
     pub fn bind<T: NamedType>(&mut self) -> &mut Self {
         let kind = T::binding().0;
         match &kind {
-            BoundKind::Enum(_, variants) => variants.iter().for_each(|(v, _)| crate::vm::value::check_type_name(v)),
+            BoundKind::Enum(_, variants) => {
+                for (v, _) in variants.iter() {
+                    assert!(is_type_name(v), "variant `{v}` of `{}` is not a capitalized identifier, or is a keyword", T::NAME);
+                }
+            }
             BoundKind::Struct(_, fields) => {
                 for (i, f) in fields.iter().enumerate() {
-                    assert!(
-                        is_ident(f.name) && keyword(f.name).is_none(),
-                        "field `{}` of `{}` is not an identifier; rename it with `#[sand(name = \"...\")]`",
-                        f.name,
-                        T::NAME
-                    );
+                    assert!(is_name(f.name), "field `{}` of `{}` is not an identifier, or is a keyword", f.name, T::NAME);
                     assert!(!fields[..i].iter().any(|g| g.name == f.name), "field `{}` of `{}` is declared twice", f.name, T::NAME);
                 }
             }
@@ -706,7 +755,7 @@ impl NativeModule {
 
     fn add_type(&mut self, t: BoundType) -> &mut Self {
         assert_eq!(t.module, self.name, "type `{}` belongs to module `{}`", t.name, t.module);
-        crate::vm::value::check_type_name(t.name);
+        assert!(is_type_name(t.name), "type name `{}` is not a capitalized identifier, or is a keyword", t.name);
         assert!(!self.types.iter().any(|u| u.name == t.name), "type `{}` is registered twice in module `{}`", t.name, self.name);
         self.types.push(t);
         self

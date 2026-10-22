@@ -1026,13 +1026,31 @@ fn struct_fields_must_use_registered_public_types() {
     assert_eq!(errors, ["public field `secret` uses the private type `Secret`; make `Secret` public"]);
 }
 
+/// The derive rejects these names at compile time (see the `compile_fail`
+/// examples of `sandlang::native`), and `bind` rejects them in a struct that
+/// implements `StructType` by hand.
 #[test]
-#[should_panic(expected = "field `fn` of `Keyword` is not an identifier")]
+#[should_panic(expected = "field `fn` of `Keyword` is not an identifier, or is a keyword")]
 fn struct_fields_must_be_sand_identifiers() {
-    #[derive(sandlang::SandStruct)]
-    #[sand(module = "lab")]
-    struct Keyword {
-        r#fn: i64,
+    use sandlang::native::{Binding, Type};
+    struct Keyword;
+    impl sandlang::NamedType for Keyword {
+        const MODULE: &'static str = "lab";
+        const NAME: &'static str = "Keyword";
+        const DOC: &'static str = "";
+        const PUBLIC: bool = true;
+        fn binding() -> Binding<Self> {
+            Binding::of_struct()
+        }
+    }
+    impl sandlang::SandType for Keyword {
+        fn sand_type() -> Type {
+            Type::bound::<Self>("lab", "Keyword")
+        }
+    }
+    impl sandlang::StructType for Keyword {
+        const FIELDS: &'static [sandlang::StructField] =
+            &[sandlang::StructField { name: "fn", doc: "", public: true, var: false, ty: <i64 as sandlang::SandType>::sand_type }];
     }
     NativeModule::new("lab").bind::<Keyword>();
 }

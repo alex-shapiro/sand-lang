@@ -613,23 +613,28 @@ fn send(
             Some(vm.resource_slot_with(buffers, "a connection")?)
         }
     };
-    if let Err(e) = req.filter(vm) {
-        if let Some(conn) = idle {
-            pool.put(conn);
+    let built = (|| {
+        req.filter(vm)?;
+        let body = body.bytes(&vm.heap);
+        vm.charge_bytes(body.len())?;
+        let close = connection_has(&req.headers, "close");
+        let sized = !body.is_empty() || ["POST", "PUT", "PATCH"].iter().any(|m| req.method.eq_ignore_ascii_case(m));
+        let delimit = if sized { Delimit::Length(body.len() as u64) } else { Delimit::None };
+        let mut request = request_head(&req.method, &req.url, &req.headers, delimit, close).into_bytes();
+        request.extend_from_slice(body);
+        res.ensure(request.len()).map_err(|e| HostError::new("limit", format!("cannot buffer the request: {e}")))?;
+        Ok::<_, HostError>((request, close))
+    })();
+    let (request, close) = match built {
+        Ok(built) => built,
+        Err(e) => {
+            if let Some(conn) = idle {
+                pool.put(conn);
+            }
+            return Err(e);
         }
-        return Err(e);
-    }
-    let Prepared { method, text, url, headers } = req;
-    let body = body.bytes(&vm.heap);
-    vm.charge_bytes(body.len())?;
-    let close = connection_has(&headers, "close");
-    let sized = !body.is_empty() || ["POST", "PUT", "PATCH"].iter().any(|m| method.eq_ignore_ascii_case(m));
-    let mut request =
-        request_head(&method, &url, &headers, if sized { Delimit::Length(body.len() as u64) } else { Delimit::None }, close).into_bytes();
-    request.extend_from_slice(body);
-    if let Err(e) = res.ensure(request.len()) {
-        return Err(HostError::new("limit", format!("cannot buffer the request: {e}")));
-    }
+    };
+    let Prepared { method, text, url, .. } = req;
     let timeout = stream::timeout(timeout);
     let head_only = method.eq_ignore_ascii_case("HEAD");
     let replayable = IDEMPOTENT.iter().any(|m| method.eq_ignore_ascii_case(m));

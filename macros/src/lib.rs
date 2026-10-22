@@ -15,7 +15,7 @@
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as Tokens};
-use quote::quote;
+use quote::{quote, quote_spanned};
 use syn::ext::IdentExt;
 use syn::{Attribute, Data, DeriveInput, Error, Expr, ExprLit, Fields, Lit, LitStr, Meta, Path, parse_macro_input, parse_quote};
 
@@ -101,13 +101,14 @@ fn parse_type_attrs(input: &DeriveInput, derive: &str) -> syn::Result<TypeAttrs>
     let Some(module) = module else {
         return Err(Error::new(Span::call_site(), format!("`{derive}` requires `#[sand(module = \"...\")]`")));
     };
-    let type_name = name.value();
-    let capitalized =
-        type_name.starts_with(|c: char| c.is_ascii_uppercase()) && type_name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-    if !capitalized {
-        return Err(Error::new_spanned(&name, format!("the Sand type name `{type_name}` is not a capitalized identifier")));
-    }
     Ok(TypeAttrs { module, name, public, krate, doc: doc_expr(&input.attrs) })
+}
+
+/// A constant that fails to compile, with an error at `span`, if `name` is
+/// not a Sand type or variant name (`kind` is `"type"` or `"variant"`).
+fn type_name_check(krate: &Path, kind: &str, name: &str, span: Span) -> Tokens {
+    let msg = format!("the Sand {kind} name `{name}` is not a capitalized identifier, or is a keyword");
+    quote_spanned! {span=> const _: () = ::std::assert!(#krate::native::is_type_name(#name), #msg); }
 }
 
 /// Rejects `#[sand(...)]` on the variants and fields of a type whose derive
@@ -130,7 +131,9 @@ fn no_member_attrs(data: &Data) -> syn::Result<()> {
 /// The `NamedType` implementation and the `SandType` implementation of a derived type.
 fn named_type(ty: &syn::Ident, a: &TypeAttrs, binding: Tokens) -> Tokens {
     let TypeAttrs { module, name, public, krate, doc } = a;
+    let check = type_name_check(krate, "type", &name.value(), name.span());
     quote! {
+        #check
         impl #krate::native::NamedType for #ty {
             const MODULE: &'static str = #module;
             const NAME: &'static str = #name;
@@ -169,11 +172,13 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
     let krate = &attrs.krate;
     let mut variants = Vec::new();
     let mut arms = Vec::new();
+    let mut checks = Vec::new();
     for (i, v) in data.variants.iter().enumerate() {
         if !matches!(v.fields, Fields::Unit) {
             return Err(Error::new_spanned(&v.fields, "`SandEnum` variants cannot have fields"));
         }
         let (ident, vname, vdoc) = (&v.ident, v.ident.unraw().to_string(), doc_expr(&v.attrs));
+        checks.push(type_name_check(krate, "variant", &vname, ident.span()));
         variants.push(quote! { #krate::native::EnumVariant { name: #vname, doc: #vdoc, value: #ty::#ident } });
         arms.push(quote! { #ty::#ident => #i });
     }
@@ -182,6 +187,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
     Ok(quote! {
         #named
         #sand_type
+        #(#checks)*
         impl #krate::native::EnumType for #ty {
             const VARIANTS: &'static [#krate::native::EnumVariant<Self>] = &[#(#variants),*];
             fn index(self) -> usize {
@@ -260,13 +266,16 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
     let mut infos = Vec::new();
     let mut reads = Vec::new();
     let mut writes = Vec::new();
+    let mut names = Vec::new();
+    let mut checks = Vec::new();
     for (i, f) in fields.iter().enumerate() {
         let ident = f.ident.as_ref().expect("named field");
-        let (mut public, mut var, mut name) = (true, false, ident.unraw().to_string());
+        let (mut public, mut var) = (true, false);
+        let mut name = LitStr::new(&ident.unraw().to_string(), ident.span());
         for attr in f.attrs.iter().filter(|a| a.path().is_ident("sand")) {
             attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("name") {
-                    name = meta.value()?.parse::<LitStr>()?.value();
+                    name = meta.value()?.parse::<LitStr>()?;
                 } else if meta.path.is_ident("private") {
                     public = false;
                 } else if meta.path.is_ident("var") {
@@ -277,6 +286,15 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
                 Ok(())
             })?;
         }
+        if names.contains(&name.value()) {
+            return Err(Error::new_spanned(&name, format!("the Sand field name `{}` is used twice", name.value())));
+        }
+        names.push(name.value());
+        let msg = format!(
+            "the Sand field name `{}` is not an identifier, or is a keyword; rename the field with `#[sand(name = \"...\")]`",
+            name.value()
+        );
+        checks.push(quote_spanned! {name.span()=> const _: () = ::std::assert!(#krate::native::is_name(#name), #msg); });
         let (fty, doc) = (&f.ty, doc_expr(&f.attrs));
         infos.push(quote! {
             #krate::native::StructField {
@@ -295,6 +313,7 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
     Ok(quote! {
         #named
         #sand_type
+        #(#checks)*
         impl #krate::native::StructType for #ty {
             const FIELDS: &'static [#krate::native::StructField] = &[#(#infos),*];
         }
@@ -404,13 +423,28 @@ mod tests {
     }
 
     #[test]
+    fn names_are_checked_by_constants() {
+        let out = expand(sand_enum, "#[sand(module = \"m\", name = \"Self\")] enum E { A, b }");
+        assert!(out.contains(":: sandlang :: native :: is_type_name (\"Self\")"), "{out}");
+        assert!(out.contains(":: sandlang :: native :: is_type_name (\"A\")"), "{out}");
+        assert!(out.contains(":: sandlang :: native :: is_type_name (\"b\")"), "{out}");
+        let out = expand(sand_struct, "#[sand(module = \"m\")] struct S { r#fn: i64, #[sand(name = \"two words\")] y: i64 }");
+        assert!(out.contains(":: sandlang :: native :: is_name (\"fn\")"), "{out}");
+        assert!(out.contains(":: sandlang :: native :: is_name (\"two words\")"), "{out}");
+    }
+
+    #[test]
     fn invalid_derives_are_rejected() {
         let cases: [(Derive, &str, &str); 7] = [
             (sand_struct, "#[sand(module = \"m\")] struct S(i64);", "`SandStruct` requires named fields"),
             (sand_struct, "#[sand(module = \"m\")] enum S { A }", "`SandStruct` can only be derived for structs"),
             (sand_struct, "#[sand(module = \"m\")] struct S<'a> { x: &'a str }", "type or lifetime parameters"),
             (sand_struct, "struct S { x: i64 }", "requires `#[sand(module = \"...\")]`"),
-            (sand_value, "#[sand(module = \"m\", name = \"lower\")] struct V(i64);", "is not a capitalized identifier"),
+            (
+                sand_struct,
+                "#[sand(module = \"m\")] struct S { x: i64, #[sand(name = \"x\")] y: i64 }",
+                "the Sand field name `x` is used twice",
+            ),
             (sand_value, "#[sand(module = \"m\")] struct V { #[sand(private)] x: i64 }", "applies only to the type"),
             (sand_enum, "#[sand(module = \"m\", public)] enum E { A }", "expected `module`, `name`, `private` or `crate`"),
         ];

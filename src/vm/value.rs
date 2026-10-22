@@ -1074,12 +1074,6 @@ pub(crate) fn value_of<T: ValueType>(obj: &Obj) -> Option<T> {
     }
 }
 
-pub(crate) fn check_type_name(name: &str) {
-    let b = name.as_bytes();
-    let ident = b.first().is_some_and(u8::is_ascii_uppercase) && b.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_');
-    assert!(ident, "type name `{name}` is not a capitalized identifier");
-}
-
 pub type ParseValue = fn(&str) -> Result<Obj, String>;
 
 pub(crate) fn parse_value<T: ValueType>(text: &str) -> Result<Obj, String> {

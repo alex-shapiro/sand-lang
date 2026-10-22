@@ -519,7 +519,8 @@ impl Heap {
     /// Whether `extra` more bytes would exceed the memory limit (which also
     /// covers buffers reserved by pending I/O).
     pub fn would_exceed(&self, extra: usize) -> bool {
-        if !self.unchecked && self.fail_next_check.replace(false) {
+        if self.fail_next_check.get() && !self.unchecked {
+            self.fail_next_check.set(false);
             return true;
         }
         match self.limit {

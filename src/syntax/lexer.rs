@@ -86,6 +86,17 @@ macro_rules! tokens {
                 _ => return None,
             })
         }
+
+        /// Returns `true` if `s` is a keyword. The derive macros of `sandlang`
+        /// call this function in constants, to reject keyword names at compile
+        /// time.
+        pub const fn is_keyword(s: &str) -> bool {
+            let s = s.as_bytes();
+            $(if same_bytes(s, $kw_text.as_bytes()) {
+                return true;
+            })*
+            false
+        }
     };
 }
 
@@ -352,15 +363,39 @@ pub fn is_complete(source: &str) -> bool {
 }
 
 /// Returns `true` if `s` has identifier syntax (including keywords).
-pub fn is_ident(s: &str) -> bool {
+pub const fn is_ident(s: &str) -> bool {
     let b = s.as_bytes();
-    b.first().is_some_and(|&c| is_ident_start(c)) && b.iter().all(|&c| is_ident_char(c))
+    if b.is_empty() || !is_ident_start(b[0]) {
+        return false;
+    }
+    let mut i = 1;
+    while i < b.len() {
+        if !is_ident_char(b[i]) {
+            return false;
+        }
+        i += 1;
+    }
+    true
 }
 
-fn is_ident_start(c: u8) -> bool {
+const fn same_bytes(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+const fn is_ident_start(c: u8) -> bool {
     c.is_ascii_alphabetic() || c == b'_'
 }
-fn is_ident_char(c: u8) -> bool {
+const fn is_ident_char(c: u8) -> bool {
     c.is_ascii_alphanumeric() || c == b'_'
 }
 

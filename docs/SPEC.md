@@ -2839,7 +2839,8 @@ crate renames the dependency. Doc comments, including
 A field of a `SandStruct` is public, unless it has `#[sand(private)]`, and
 immutable, unless it has `#[sand(var)]`. `#[sand(name = "...")]` gives a field
 a Sand name other than its Rust name, such as for a Rust name that is a Sand
-keyword. Each field type must convert in both directions (an owned `FromValue`
+keyword. A derive does not compile if a Sand name of the type, a variant, or a
+field is a keyword or is not an identifier. Each field type must convert in both directions (an owned `FromValue`
 type and an `IntoValue` type). A struct can contain itself through a `Vec`,
 map, or `Option<Box<T>>` field. A value that holds one struct in several
 places becomes a separate Rust copy for each place, and each copy costs fuel
@@ -2870,11 +2871,11 @@ To check a sandbox capability inside a `vm_function`, call
 re-runs the native function after a permission prompt or after a garbage
 collection triggered by a memory or resource limit, a native function must
 check capabilities and reserve memory before performing any side effects.
-Only a `vm_function` can make these checks after its body starts, so only its
-body can run twice. `Config::retry_stress` fails the first memory or resource
-check in the body of each `vm_function` call, to test this order. Return-value conversion does
-not fail on the memory limit; instead, the engine collects garbage and checks
-the memory limit after the call completes.
+Only the body of a `vm_function` can make these checks, so only that body can
+run twice. To test this order, `Config::retry_stress` fails the first memory
+or resource check in the body of each `vm_function` call. Return-value
+conversion does not fail on the memory limit; instead, the engine collects
+garbage and checks the memory limit after the call completes.
 
 | Rust type                                                | Sand type                                                      |
 | -------------------------------------------------------- | -------------------------------------------------------------- |

@@ -279,9 +279,9 @@ impl ValueType for PlainMonthDay {
     }
 }
 
-/// A signed calendar and clock duration (such as `P1M2DT3H`). Sub-second units
-/// normalize into seconds (`span(milliseconds: 1500)` stores 1 second and 500
-/// milliseconds). Two spans are equal only if all unit fields match
+/// A signed calendar and clock duration (such as `P1M2DT3H`). `span`
+/// normalizes sub-second units into seconds (`span(milliseconds: 1500)` stores
+/// 1 second and 500 milliseconds). Two spans are equal only if all unit fields match
 /// (`span(hours: 24) != span(days: 1)`).
 #[derive(Clone, Copy, Debug, crate::SandValue)]
 #[sand(module = "time")]
