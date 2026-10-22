@@ -633,7 +633,7 @@ extend<T> [T] {
     pub native fn min(self) -> T? where T: Ord
     /// Returns the maximum element, or `None` if the list is empty.
     pub native fn max(self) -> T? where T: Ord
-    native fn sort_by_keys<K>(self, keys: [K])
+    native fn sort_by_keys<K: Ord>(self, keys: [K])
 
     /// Returns a lazy iterator over the elements of the list.
     pub fn iter(self) -> Iter<T> {

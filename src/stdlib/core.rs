@@ -1,6 +1,7 @@
 //! Natives for the prelude and the `task` module.
 
 use crate::check::ModKind;
+use crate::native::bound::{Eq as EqB, Hash as HashB, Ord as OrdB};
 use crate::native::{self, Channel, HostError, Later, NativeModule, Never, Param, Task, Val};
 use crate::vm::compare::{
     find_key, hash_key, set_slot, try_sort_by, try_sort_numbers, try_sort_packed, values_cmp_metered, values_eq_metered,
@@ -22,8 +23,8 @@ const SLOT: usize = std::mem::size_of::<Value>();
 type Str = Val<String>;
 type Bytes = Val<Vec<u8>>;
 type List<T = Param<0>> = Val<Vec<T>>;
-type Map = Val<HashMap<Param<0>, Param<1>>>;
-type Set = Val<HashSet<Param<0>>>;
+type Map = Val<HashMap<Param<0, HashB>, Param<1>>>;
+type Set = Val<HashSet<Param<0, HashB>>>;
 type Range = Val<native::Range>;
 type IterFn<T> = Val<fn() -> Option<T>>;
 
@@ -70,7 +71,7 @@ pub(crate) fn prelude() -> NativeModule {
     });
     m.function("fail", |message: &str, kind: &str| -> Result<Never, Ctl> { fail(kind, message) });
     m.function("exit", |code: i64| -> Result<Never, Ctl> { Err(Ctl::exit(code.clamp(i32::MIN as i64, i32::MAX as i64) as i32)) });
-    m.vm_function("set", |vm: &mut Vm, items: List| -> Result<_, Ctl> {
+    m.vm_function("set", |vm: &mut Vm, items: List<Param<0, HashB>>| -> Result<_, Ctl> {
         let set = set_of(vm, items.items(&vm.heap))?;
         Ok(new_set(vm, set))
     });
@@ -588,7 +589,7 @@ fn find_bytes(vm: &Vm, hay: &[u8], needle: &[u8]) -> Result<Option<usize>, Ctl> 
 }
 
 /// The index of the first element equal to `x`, charging for the comparisons.
-fn index_of(vm: &Vm, list: List, x: Param<0>) -> Result<Option<usize>, Ctl> {
+fn index_of(vm: &Vm, list: List, x: Param<0, EqB>) -> Result<Option<usize>, Ctl> {
     for (i, y) in list.items(&vm.heap).iter().enumerate() {
         vm.charge(1)?;
         if values_eq_metered(&vm.heap, &vm.meter, *y, x.raw())? {
@@ -670,8 +671,8 @@ fn lists(m: &mut NativeModule) {
     m.vm_function("List.last", |vm: &mut Vm, xs: List| -> Result<Option<Param<0>>, Ctl> {
         Ok(xs.items(&vm.heap).last().copied().map(Param::from_raw))
     });
-    m.vm_function("List.contains", |vm: &mut Vm, xs: List, x: Param<0>| -> Result<bool, Ctl> { Ok(index_of(vm, xs, x)?.is_some()) });
-    m.vm_function("List.index_of", |vm: &mut Vm, xs: List, x: Param<0>| -> Result<Option<i64>, Ctl> {
+    m.vm_function("List.contains", |vm: &mut Vm, xs: List, x: Param<0, EqB>| -> Result<bool, Ctl> { Ok(index_of(vm, xs, x)?.is_some()) });
+    m.vm_function("List.index_of", |vm: &mut Vm, xs: List, x: Param<0, EqB>| -> Result<Option<i64>, Ctl> {
         Ok(index_of(vm, xs, x)?.map(|p| p as i64))
     });
     m.vm_function("List.reverse", |vm: &mut Vm, xs: List| -> Result<_, Ctl> {
@@ -683,19 +684,19 @@ fn lists(m: &mut NativeModule) {
         reserve_list(vm, list_len(vm, xs))?;
         Ok(params(xs.items(&vm.heap).iter().rev().copied().collect()))
     });
-    m.vm_function("List.sort", |vm: &mut Vm, xs: List| {
+    m.vm_function("List.sort", |vm: &mut Vm, xs: List<Param<0, OrdB>>| {
         let mut v = std::mem::take(vm.heap.list_mut(xs.raw()));
         let r = sort_values(vm, &mut v);
         *vm.heap.list_mut(xs.raw()) = v;
         r
     });
-    m.vm_function("List.sorted", |vm: &mut Vm, xs: List| -> Result<Vec<Param<0>>, Ctl> {
+    m.vm_function("List.sorted", |vm: &mut Vm, xs: List<Param<0, OrdB>>| -> Result<Vec<Param<0>>, Ctl> {
         reserve_list(vm, list_len(vm, xs))?;
         let mut v = xs.items(&vm.heap).to_vec();
         sort_values(vm, &mut v)?;
         Ok(params(v))
     });
-    m.vm_function("List.sort_by_keys", |vm: &mut Vm, xs: List, keys: List<Param<1>>| {
+    m.vm_function("List.sort_by_keys", |vm: &mut Vm, xs: List, keys: List<Param<1, OrdB>>| {
         let keys = keys.items(&vm.heap).to_vec();
         let items = std::mem::take(vm.heap.list_mut(xs.raw()));
         if keys.len() != items.len() {
@@ -775,7 +776,7 @@ fn lists(m: &mut NativeModule) {
             st.new_list(pairs)
         })))
     });
-    m.vm_function("List.dedup", |vm: &mut Vm, xs: List| -> Result<Vec<Param<0>>, Ctl> {
+    m.vm_function("List.dedup", |vm: &mut Vm, xs: List<Param<0, EqB>>| -> Result<Vec<Param<0>>, Ctl> {
         let items = xs.items(&vm.heap);
         vm.charge(items.len() as u64)?;
         reserve_list(vm, items.len())?;
@@ -791,12 +792,12 @@ fn lists(m: &mut NativeModule) {
         }
         Ok(params(out))
     });
-    m.vm_function("List.unique", |vm: &mut Vm, xs: List| -> Result<Vec<Param<0>>, Ctl> {
+    m.vm_function("List.unique", |vm: &mut Vm, xs: List<Param<0, HashB>>| -> Result<Vec<Param<0>>, Ctl> {
         let set = set_of(vm, xs.items(&vm.heap))?;
         reserve_list(vm, set.live)?;
         Ok(params(set.entries.into_iter().flatten().collect()))
     });
-    m.vm_function("List.to_set", |vm: &mut Vm, xs: List| -> Result<_, Ctl> {
+    m.vm_function("List.to_set", |vm: &mut Vm, xs: List<Param<0, HashB>>| -> Result<_, Ctl> {
         let set = set_of(vm, xs.items(&vm.heap))?;
         Ok(new_set(vm, set))
     });
@@ -813,7 +814,7 @@ fn lists(m: &mut NativeModule) {
     }
     m.vm_function("List.sum_from", |vm: &mut Vm, xs: List, init: Param<0>| fold_num(vm, xs, init, false));
     m.vm_function("List.product_from", |vm: &mut Vm, xs: List, init: Param<0>| fold_num(vm, xs, init, true));
-    fn extreme(vm: &mut Vm, xs: List, want: Ordering) -> Result<Option<Param<0>>, Ctl> {
+    fn extreme(vm: &mut Vm, xs: List<Param<0, OrdB>>, want: Ordering) -> Result<Option<Param<0>>, Ctl> {
         let items = xs.items(&vm.heap);
         let mut best: Option<Value> = None;
         for &x in items {
@@ -830,8 +831,8 @@ fn lists(m: &mut NativeModule) {
         }
         Ok(best.map(Param::from_raw))
     }
-    m.vm_function("List.min", |vm: &mut Vm, xs: List| extreme(vm, xs, Ordering::Less));
-    m.vm_function("List.max", |vm: &mut Vm, xs: List| extreme(vm, xs, Ordering::Greater));
+    m.vm_function("List.min", |vm: &mut Vm, xs: List<Param<0, OrdB>>| extreme(vm, xs, Ordering::Less));
+    m.vm_function("List.max", |vm: &mut Vm, xs: List<Param<0, OrdB>>| extreme(vm, xs, Ordering::Greater));
 }
 
 /// Returns the inclusive `(first, last)` bounds, or `None` if empty.

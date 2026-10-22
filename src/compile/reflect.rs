@@ -23,9 +23,10 @@
 
 use crate::check::CheckedProgram;
 use crate::check::persist::PMap;
+use crate::native::ReflectCheckFn;
 use crate::types::{Opaque, Ty, TyList, TypeArena, TypeDefKind, TypeId, TypePrinter};
 use crate::vm::value::TypeDesc;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// Maximum work (nodes built, plus type key components examined) for the
@@ -49,6 +50,9 @@ pub(crate) struct DescCache {
     closed: PMap<Key, Arc<TypeDesc>>,
     /// The constant holding the description of each reflected type.
     consts: PMap<Key, u32>,
+    /// The constants (with the addresses of the checks) that a native's
+    /// [`ReflectCheck`](crate::native::ReflectCheck) accepted.
+    accepted: PMap<(u32, usize), ()>,
     /// Work done by the current compilation (reset by [`DescCache::start`]).
     total: usize,
 }
@@ -101,6 +105,35 @@ impl DescCache {
         let (work, failed) = (b.work, b.failed);
         self.total = self.total.saturating_add(work);
         (!failed).then_some(d)
+    }
+}
+
+impl DescCache {
+    /// Checks the description `desc` of constant `k` with `check`, calling it
+    /// once for each distinct node.
+    pub(crate) fn check(&mut self, k: u32, desc: &TypeDesc, check: ReflectCheckFn) -> Result<(), String> {
+        let key = (k, check.0 as usize);
+        if self.accepted.get(&key).is_some() {
+            return Ok(());
+        }
+        let mut seen: HashSet<*const TypeDesc> = HashSet::new();
+        let mut todo = vec![desc];
+        while let Some(d) = todo.pop() {
+            if !seen.insert(d) {
+                continue;
+            }
+            (check.0)(d)?;
+            match d {
+                TypeDesc::List(e) | TypeDesc::Set(e) | TypeDesc::Option(e) => todo.push(e),
+                TypeDesc::Map(k, v) => todo.extend([&**k, &**v]),
+                TypeDesc::Tuple(ts) => todo.extend(ts.iter().map(|t| &**t)),
+                TypeDesc::Struct { fields, .. } => todo.extend(fields.iter().map(|f| &*f.1)),
+                TypeDesc::Enum { variants, .. } => todo.extend(variants.iter().flat_map(|v| v.2.iter().map(|t| &**t))),
+                _ => {}
+            }
+        }
+        self.accepted.insert(key, ());
+        Ok(())
     }
 }
 
@@ -310,7 +343,7 @@ impl Builder<'_, '_> {
                 TypeDesc::Enum { id, name, variants }
             }
             TypeDefKind::Opaque(Opaque::Value(v)) => TypeDesc::Value { name, parse: v.parse },
-            TypeDefKind::Opaque(_) => TypeDesc::Unsupported(name_of(def.name)),
+            TypeDefKind::Opaque(_) => TypeDesc::Unsupported(name),
         };
         // Descriptions made inside this instance are not reused outside it.
         for k in self.open_at.pop().unwrap_or_default() {

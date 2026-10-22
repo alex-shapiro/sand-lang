@@ -4,6 +4,7 @@
 mod natives;
 mod observers;
 mod programs;
+mod reflect;
 mod values;
 
 use proptest::prelude::*;

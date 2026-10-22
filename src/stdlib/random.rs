@@ -28,7 +28,7 @@ fn with_object<R>(vm: &mut Vm, obj: Val<RngObj>, op: impl FnOnce(&mut Vm, &mut R
 
 pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("random", ModKind::Std, include_str!("random.sand"));
-    m.object_type::<RngObj>();
+    m.bind::<RngObj>();
     m.vm_function("seed", |vm: &mut Vm, s: i64| -> Result<_, Ctl> {
         vm.host.rng = Rng::new(s as u64);
         Ok(())

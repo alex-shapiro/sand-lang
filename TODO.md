@@ -61,24 +61,22 @@ Follow-up work, roughly in priority order.
 
 - [ ] Support enum variant payloads in `#[derive(SandEnum)]` so native modules
       such as `json` do not construct variant values by runtime ID.
-- [ ] Derive Sand structs from Rust structs (`#[derive(SandStruct)]`) so that
-      natives can take and return structs such as `regex.Match` and `uri.Uri`
-      without private tuple-returning natives and Sand wrappers.
-- [ ] Check type parameter bounds (`Eq`, `Ord`, `Hash`) on `native fn`
-      declarations against the Rust function signature.
-- [ ] Reject `json.decode<T>` at compile time if `T` contains a non-decodable
-      type (such as a function or a task), without restricting other `reflect`
-      natives.
 - [ ] Register `json.Json` through `NativeModule` instead of matching its
       module and type name in `compile/reflect.rs`.
-- [ ] Derive `MODULE`, `NAME`, and `DOC` for `ValueType` as `SandEnum` and
-      `SandObject` do.
-- [ ] Add `#[sand(crate = ...)]` to `SandEnum` and `SandObject` for crates that
-      rename the `sandlang` dependency, and support `#[doc = include_str!(...)]`
-      attributes.
-- [ ] Respect `Config::optimize(false)` when compiling the Sand source of a
-      host module.
-- [ ] Preserve declaration order in `help` output for types bound to Rust types.
+- [ ] Return `SandStruct`s from the private `http` natives (`send`,
+      `read_response`, `start_upload`, `next_request`) instead of tuples that
+      Sand wrappers turn into `Response`, `Stream`, `Upload`, and `Request`.
+- [ ] Bind the prelude's `Error` with `SandStruct` instead of building it by
+      runtime ID (`RtIds::error_def`, `Vm::err_value`).
+- [ ] Reject `json.encode<T>` and `json.to_json<T>` at compile time if `T`
+      contains a function, task, or channel (they abort at run time). This
+      needs a check like `ReflectCheck` for type parameters that are not
+      `reflect`.
+- [ ] Let natives require `Num` (`Param<N, bound::Num>`). A `Num` bound
+      carries a trait dictionary, and natives cannot take one, so
+      `List.sum_from` depends on the bound of its Sand caller.
+- [ ] Support generic structs (such as the prelude's `Iter<T>`) and field
+      defaults in `#[derive(SandStruct)]`.
 
 ### Tooling
 

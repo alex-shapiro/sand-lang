@@ -49,6 +49,7 @@ pub struct CompileInput<'a> {
 
 struct Compiler<'a> {
     cp: &'a CheckedProgram,
+    natives: &'a NativeDecls,
     optimize: bool,
     /// The program's types, which `reflect` extends with the instances it
     /// describes (a private copy: they are not needed after compiling).
@@ -302,6 +303,7 @@ impl ProgramMark {
         p.types.truncate(self.types);
         p.variants.truncate(self.variants);
         p.enum_types.retain(|_, &mut first| first < self.variants as u32);
+        p.struct_types.retain(|_, &mut def| def < self.types as u32);
         p.templates.truncate(self.templates);
         p.switches.truncate(self.switches);
         p.tests.truncate(self.tests);
@@ -336,6 +338,7 @@ pub(crate) fn compile_more(mut input: CompileInput, prog: &mut Program, inc: &mu
     let order = InitOrder::new(cp, &bodies, inits, prog.global_names.len(), input.initialized.take(), input.budget);
     let mut c = Compiler {
         cp,
+        natives: input.natives,
         optimize: input.optimize,
         arena: cp.arena.clone(),
         budget: input.budget,
@@ -438,6 +441,7 @@ impl<'a> Compiler<'a> {
             json: None,
         };
         self.prog.enum_types.extend(cp.enum_bindings.iter().copied());
+        self.prog.struct_types.extend(cp.struct_bindings.iter().copied());
         let (json, json_mod) = (cp.syms.get("Json"), cp.syms.get("json"));
         if let Some(jd) = cp.types.iter().position(|t| Some(t.name) == json && Some(t.module_name) == json_mod) {
             let jd = jd as u32;
@@ -2170,6 +2174,15 @@ impl<'a> Compiler<'a> {
                         self.errors.push(Diag::error(e.span, "type too large to describe at runtime"));
                         continue;
                     };
+                    let check = self.natives.sigs.get(*native as usize).and_then(|s| match s.params.get(i) {
+                        Some(crate::native::Type::Reflect(_, c)) => Some(*c),
+                        _ => None,
+                    });
+                    if let (Some(check), Const::TypeDesc(desc)) = (check, &self.prog.consts[k as usize])
+                        && let Err(msg) = self.descs.check(k, desc, check)
+                    {
+                        self.errors.push(Diag::error(e.span, msg));
+                    }
                     self.emit(f, Op::LoadConst { dst: base + i as Reg, k });
                 }
                 self.set_line(f, e.span);

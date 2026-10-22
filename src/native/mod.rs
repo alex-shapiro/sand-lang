@@ -6,7 +6,7 @@ mod ty;
 
 pub use convert::{Conversion, FromValue, HostError, IntoHostError, IntoValue};
 pub use func::{AsyncHostFunction, HostFunction, Later, NativeError, Signature, VmFunction};
-pub use ty::{Channel, Named, Never, Param, Range, Reflect, SandType, Task, Type, Val};
+pub use ty::{Bounds, Channel, Named, Never, Param, Range, Reflect, ReflectCheck, ReflectCheckFn, SandType, Task, Type, Val, bound};
 
 pub(crate) use convert::mismatch;
 
@@ -20,10 +20,57 @@ use crate::vm::{Ctl, HostFn, NativeFn, Vm};
 use std::any::{Any, TypeId};
 use std::sync::Arc;
 
+/// A Rust type bound to a nominal Sand type of a native module.
+///
+/// Derive this trait with [`SandEnum`](crate::SandEnum),
+/// [`SandObject`](crate::SandObject), [`SandStruct`](crate::SandStruct), or
+/// [`SandValue`](crate::SandValue), and register the type with
+/// [`NativeModule::bind`].
+pub trait NamedType: Sized + 'static {
+    /// Name of the Sand module that owns the type (`#[sand(module = "...")]`).
+    const MODULE: &'static str;
+    /// Sand type name (the Rust identifier, or `#[sand(name = "...")]`).
+    const NAME: &'static str;
+    /// Doc comment of the type.
+    const DOC: &'static str;
+    /// `false` if the type is private to its module (`#[sand(private)]`).
+    const PUBLIC: bool;
+    /// How the engine represents values of the type. The derive macros
+    /// implement this function.
+    #[doc(hidden)]
+    fn binding() -> Binding;
+}
+
+/// How the engine represents values of a [`NamedType`].
+#[doc(hidden)]
+pub struct Binding(BoundKind);
+
+impl Binding {
+    pub fn of_enum<T: EnumType>() -> Binding {
+        Binding(BoundKind::Enum(TypeId::of::<T>(), T::VARIANTS.iter().map(|v| (v.name, v.doc)).collect()))
+    }
+
+    pub fn of_object<T: ObjectType>() -> Binding {
+        Binding(BoundKind::Object(TypeId::of::<T>()))
+    }
+
+    pub fn of_struct<T: StructType>() -> Binding {
+        Binding(BoundKind::Struct(TypeId::of::<T>(), T::FIELDS))
+    }
+
+    pub fn of_value<T: ValueType>() -> Binding {
+        Binding(BoundKind::Value(ValueTypeInfo {
+            ord: T::ORDER.is_some(),
+            parse: crate::vm::value::parse_value::<T>,
+            type_id: TypeId::of::<T>(),
+        }))
+    }
+}
+
 /// A unit-only Rust enum that maps to a Sand `enum` with matching variants.
 ///
 /// Derive this trait with [`#[derive(SandEnum)]`](crate::SandEnum) and register
-/// the type with [`NativeModule::enum_type`]:
+/// the type with [`NativeModule::bind`]:
 ///
 /// ```
 /// /// A two-dimensional shape.
@@ -34,17 +81,57 @@ use std::sync::Arc;
 ///     Square,
 /// }
 /// ```
-pub trait EnumType: SandType + Copy + 'static {
-    /// Name of the Sand module that owns the enum (`#[sand(module = "...")]`).
-    const MODULE: &'static str;
-    /// Sand enum name (defaults to the Rust identifier, or `#[sand(name = "...")]`).
-    const NAME: &'static str;
-    /// Doc comment attached to the enum declaration.
-    const DOC: &'static str;
+pub trait EnumType: NamedType + SandType + Copy {
     /// Variants in declaration order.
     const VARIANTS: &'static [EnumVariant<Self>];
     /// Returns the zero-based index of `self` in [`Self::VARIANTS`].
     fn index(self) -> usize;
+}
+
+/// A Rust struct that maps to a Sand `struct` with the same fields.
+///
+/// Derive this trait with [`#[derive(SandStruct)]`](crate::SandStruct) and
+/// register the type with [`NativeModule::bind`]. Native functions take and
+/// return the struct by value: the engine copies its fields between Rust and
+/// the Sand heap.
+///
+/// ```
+/// /// A point in the plane.
+/// #[derive(sandlang::SandStruct)]
+/// #[sand(module = "geo")]
+/// pub struct Point {
+///     /// Horizontal coordinate.
+///     pub x: f64,
+///     /// Vertical coordinate.
+///     pub y: f64,
+///     /// Number of times the point moved.
+///     #[sand(private, var)]
+///     moves: i64,
+/// }
+/// ```
+pub trait StructType: NamedType + SandType {
+    /// Fields in declaration order.
+    const FIELDS: &'static [StructField];
+}
+
+/// Metadata for a field of a [`StructType`].
+#[derive(Debug)]
+pub struct StructField {
+    pub name: &'static str,
+    pub doc: &'static str,
+    /// `false` if the field is private to the module (`#[sand(private)]`).
+    pub public: bool,
+    /// `true` if scripts can assign the field (`#[sand(var)]`).
+    pub var: bool,
+    /// Returns the Sand type of the field.
+    pub ty: fn() -> Type,
+}
+
+/// Converts the value `v` of a field of a [`StructType`] for
+/// [`FromValue::from_value`]. The derive macro calls this function.
+#[doc(hidden)]
+pub fn field_value<T: for<'a> FromValue<Item<'a> = T>>(vm: &Vm, v: Value, conv: &mut Conversion) -> Result<T, Ctl> {
+    T::from_value(vm, v, conv)
 }
 
 /// ```compile_fail
@@ -95,6 +182,37 @@ pub trait EnumType: SandType + Copy + 'static {
 /// struct Conn<T>(T);
 /// impl<T: Send + 'static> sandlang::native::NativeObject for Conn<T> {}
 /// ```
+///
+/// ```compile_fail
+/// #[derive(sandlang::SandStruct)]
+/// #[sand(module = "text")]
+/// struct Word {
+///     // A field must convert from an owned value.
+///     text: &'static str,
+/// }
+/// ```
+///
+/// ```compile_fail
+/// #[derive(sandlang::SandStruct)]
+/// #[sand(module = "db")]
+/// struct Row {
+///     // A field must have a Sand type.
+///     id: u32,
+/// }
+/// ```
+///
+/// ```compile_fail
+/// #[derive(Clone, PartialEq, Eq, Hash, sandlang::SandValue)]
+/// #[sand(module = "money")]
+/// struct Cents(i64);
+/// // Missing: `impl sandlang::ValueType for Cents`.
+/// ```
+///
+/// ```compile_fail
+/// #[derive(Clone, Copy, sandlang::SandEnum)]
+/// #[sand(module = "geo", crate = not_sandlang)]
+/// enum Shape { Circle }
+/// ```
 #[cfg(doctest)]
 struct DeriveErrors;
 
@@ -131,7 +249,7 @@ pub trait NativeObject: Any + Send {
 ///
 /// Derive this trait with [`#[derive(SandObject)]`](crate::SandObject),
 /// implement [`NativeObject`], and register the type with
-/// [`NativeModule::object_type`]:
+/// [`NativeModule::bind`]:
 ///
 /// ```
 /// /// A shared atomic counter.
@@ -145,16 +263,7 @@ pub trait NativeObject: Any + Send {
 /// Functions registered with [`NativeModule::function`] borrow an object as
 /// `&T` and return a new object by value as `T`. Functions registered with
 /// [`NativeModule::vm_function`] accept a [`Val<T>`] handle.
-pub trait ObjectType: NativeObject + SandType + Sized {
-    /// Name of the Sand module that owns the type (`#[sand(module = "...")]`).
-    const MODULE: &'static str;
-    /// Sand type name (defaults to the Rust identifier, or `#[sand(name = "...")]`).
-    const NAME: &'static str;
-    /// Doc comment attached to the type declaration.
-    const DOC: &'static str;
-    /// `true` if the type is exported (`pub`), or `false` if marked `#[sand(private)]`.
-    const PUBLIC: bool;
-}
+pub trait ObjectType: NativeObject + NamedType + SandType {}
 
 /// Type-erased heap representation of an [`ObjectType`].
 pub trait DynObject: Any + Send + sealed::Sealed {
@@ -190,7 +299,7 @@ impl<T: ObjectType> Val<T> {
     }
 }
 
-impl<const N: u8> Reflect<N> {
+impl<const N: u8, C: ReflectCheck> Reflect<N, C> {
     pub fn desc(self, heap: &Heap) -> Result<&Arc<TypeDesc>, Ctl> {
         match heap.get(self.raw()) {
             Obj::TypeDesc(d) => Ok(d),
@@ -295,6 +404,33 @@ impl Vm {
         self.reserve(NativeObject::size(&x))?;
         Ok(Val::from_raw(self.heap.alloc(Obj::Native(Box::new(x)))))
     }
+
+    /// Returns the fields of `v`, a value of the Sand struct bound to `T`, in
+    /// declaration order.
+    pub fn struct_fields<T: StructType>(&self, v: Value) -> Result<&[Value], Ctl> {
+        let def = self.prog.struct_types.get(&TypeId::of::<T>());
+        match (def, v) {
+            (Some(&def), Value::Obj(_)) => match self.heap.get(v) {
+                Obj::Struct(d, fields) if *d == def && fields.len() == T::FIELDS.len() => Ok(fields),
+                _ => Err(mismatch::<T>()),
+            },
+            _ => Err(mismatch::<T>()),
+        }
+    }
+
+    /// Allocates a value of the Sand struct bound to `T` with `fields` in
+    /// declaration order. Returns an internal error if the module that owns
+    /// `T` is not loaded in the current program.
+    pub fn new_struct<T: StructType>(&mut self, fields: Box<[Value]>) -> Result<Value, Ctl> {
+        let Some(&def) = self.prog.struct_types.get(&TypeId::of::<T>()) else {
+            return Err(Ctl::internal(format!("struct {}.{} is not loaded", T::MODULE, T::NAME)));
+        };
+        if fields.len() != T::FIELDS.len() {
+            return Err(mismatch::<T>());
+        }
+        self.reserve(fields.len() * std::mem::size_of::<Value>())?;
+        Ok(self.heap.alloc(Obj::Struct(def, fields)))
+    }
 }
 
 /// A Rust-backed type registered on a [`NativeModule`].
@@ -313,6 +449,8 @@ pub(crate) enum BoundKind {
     /// An [`EnumType`] with the `(name, doc)` pair of each variant in declaration order.
     Enum(TypeId, Arc<[(&'static str, &'static str)]>),
     Object(TypeId),
+    /// A [`StructType`] with its fields in declaration order.
+    Struct(TypeId, &'static [StructField]),
     /// A VM-implemented generic type (`Task<T>` or `Channel<T>`), with its type parameter names.
     Builtin(&'static [&'static str]),
 }
@@ -322,7 +460,7 @@ impl BoundKind {
         match self {
             BoundKind::Value(v) => Some(v.type_id),
             BoundKind::Enum(t, _) => Some(*t),
-            BoundKind::Object(t) => Some(*t),
+            BoundKind::Object(t) | BoundKind::Struct(t, _) => Some(*t),
             BoundKind::Builtin(_) => None,
         }
     }
@@ -485,37 +623,26 @@ impl NativeModule {
         }
     }
 
-    /// Registers `T` as a public opaque value type of this module (see
-    /// [`ValueType`]).
+    /// Binds the Rust type `T` to the Sand type `T::NAME` of this module (see
+    /// [`NamedType`]).
     ///
     /// # Panics
     ///
     /// Panics if `T::MODULE` does not match [`NativeModule::name`], if
-    /// `T::NAME` is not a capitalized identifier, or if `T::NAME` is already
-    /// registered in this module.
-    pub fn value_type<T: ValueType>(&mut self) -> &mut Self {
-        let info = ValueTypeInfo { ord: T::ORDER.is_some(), parse: crate::vm::value::parse_value::<T>, type_id: TypeId::of::<T>() };
-        self.add_type(BoundType { module: T::MODULE, name: T::NAME, doc: T::DOC, public: true, kind: BoundKind::Value(info) })
-    }
-
-    /// Registers `T` as a public enum type of this module (see [`EnumType`]).
-    ///
-    /// # Panics
-    ///
-    /// Panics under the same conditions as [`NativeModule::value_type`].
-    pub fn enum_type<T: EnumType>(&mut self) -> &mut Self {
-        let kind = BoundKind::Enum(TypeId::of::<T>(), T::VARIANTS.iter().map(|v| (v.name, v.doc)).collect());
-        self.add_type(BoundType { module: T::MODULE, name: T::NAME, doc: T::DOC, public: true, kind })
-    }
-
-    /// Registers `T` as an opaque object type of this module (see
-    /// [`ObjectType`]).
-    ///
-    /// # Panics
-    ///
-    /// Panics under the same conditions as [`NativeModule::value_type`].
-    pub fn object_type<T: ObjectType>(&mut self) -> &mut Self {
-        let kind = BoundKind::Object(TypeId::of::<T>());
+    /// `T::NAME` (or the name of a variant or field) is not a valid
+    /// identifier, or if `T::NAME` is already registered in this module.
+    pub fn bind<T: NamedType>(&mut self) -> &mut Self {
+        let kind = T::binding().0;
+        match &kind {
+            BoundKind::Enum(_, variants) => variants.iter().for_each(|(v, _)| crate::vm::value::check_type_name(v)),
+            BoundKind::Struct(_, fields) => {
+                for (i, f) in fields.iter().enumerate() {
+                    assert!(is_ident(f.name) && keyword(f.name).is_none(), "field `{}` of `{}` is not an identifier", f.name, T::NAME);
+                    assert!(!fields[..i].iter().any(|g| g.name == f.name), "field `{}` of `{}` is declared twice", f.name, T::NAME);
+                }
+            }
+            _ => {}
+        }
         self.add_type(BoundType { module: T::MODULE, name: T::NAME, doc: T::DOC, public: T::PUBLIC, kind })
     }
 

@@ -13,9 +13,9 @@ use tokio::sync::Mutex;
 
 pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("io", ModKind::Std, include_str!("io.sand"));
-    m.object_type::<Stdin>();
-    m.object_type::<Stdout>();
-    m.object_type::<Stderr>();
+    m.bind::<Stdin>();
+    m.bind::<Stdout>();
+    m.bind::<Stderr>();
     m.vm_function("new_stdin", |vm: &mut Vm| vm.new_object(Stdin));
     m.vm_function("new_stdout", |vm: &mut Vm| vm.new_object(Stdout));
     m.vm_function("new_stderr", |vm: &mut Vm| vm.new_object(Stderr));

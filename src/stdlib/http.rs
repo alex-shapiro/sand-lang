@@ -37,7 +37,7 @@ const POOL_MAX: usize = 16;
 pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("http", ModKind::Std, concat!(include_str!("http_os.sand"), include_str!("http.sand")));
     super::http_common::natives(&mut m);
-    m.object_type::<Outgoing>();
+    m.bind::<Outgoing>();
     super::http_server::natives(&mut m);
     m.vm_function("send", send);
     m.vm_function("start_upload", start_upload);

@@ -109,7 +109,7 @@ pub(crate) fn resolve(base: &str, location: &str) -> Result<String, IoFailure> {
 }
 
 pub(crate) fn natives(m: &mut NativeModule) {
-    m.object_type::<Body>();
+    m.bind::<Body>();
     body_natives(m);
     m.vm_function("resolve", |vm: &mut Vm, base: Val<String>, location: Val<String>| -> Result<String, HostError> {
         let (base, location) = (base.str(&vm.heap), location.str(&vm.heap));

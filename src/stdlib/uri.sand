@@ -1,24 +1,6 @@
 //! URI parsing, resolution, percent-encoding, and query string handling (RFC 3986).
 
-/// A parsed URI (RFC 3986). `host` is `Some` if the URI includes an authority
-/// component (`//...`), and IPv6 host literals are stored without enclosing
-/// brackets.
-pub struct Uri {
-    /// Lowercase URI scheme (such as `"https"`).
-    pub scheme: str
-    /// Optional `userinfo` component before `@`.
-    pub userinfo: str?
-    /// Hostname or IP literal (without brackets for IPv6), if an authority is present.
-    pub host: str?
-    /// Explicit port number, if present.
-    pub port: int?
-    /// URI path component (may be `""`).
-    pub path: str
-    /// Raw query component after `?`, without the leading `?`.
-    pub query: str?
-    /// Fragment component after `#`, without the leading `#`.
-    pub fragment: str?
-
+extend Uri {
     /// Formats the URI as a string according to RFC 3986 §5.3.
     pub fn to_str(self) -> str {
         var s = self.scheme + ":"
@@ -37,10 +19,7 @@ pub struct Uri {
 
     /// Resolves a relative or absolute URI `reference` against `self` as the
     /// base URI (RFC 3986 §5.2).
-    pub fn join(self, reference: str) -> Result<Uri> {
-        let base = (self.scheme, self.userinfo, self.host, self.port, self.path, self.query, self.fragment)
-        Ok(from_parts(resolve_parts(base, reference)?))
-    }
+    pub native fn join(self, reference: str) -> Result<Uri>
 
     /// Decodes `self.query` into `(key, value)` pairs (see `parse_query`).
     pub fn query_pairs(self) -> [(str, str)] {
@@ -78,20 +57,7 @@ pub struct Uri {
 
 /// Parses an absolute URI string (with a scheme) into a `Uri`. Fails with kind
 /// `"parse"` on invalid syntax, characters, or port numbers.
-pub fn parse(text: str) -> Result<Uri> {
-    Ok(from_parts(parse_parts(text)?))
-}
-
-type Parts = (str, str?, str?, int?, str, str?, str?)
-
-fn from_parts(parts: Parts) -> Uri {
-    let (scheme, userinfo, host, port, path, query, fragment) = parts
-    Uri { scheme, userinfo, host, port, path, query, fragment }
-}
-
-native fn parse_parts(text: str) -> Result<Parts>
-
-native fn resolve_parts(base: Parts, reference: str) -> Result<Parts>
+pub native fn parse(text: str) -> Result<Uri>
 
 /// Percent-encodes all bytes in `s` except RFC 3986 unreserved characters
 /// (`A-Z`, `a-z`, `0-9`, `-`, `.`, `_`, `~`).

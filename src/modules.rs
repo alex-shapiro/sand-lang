@@ -94,6 +94,7 @@ impl Snapshot {
         }
         let mut checker = base.map(|b| b.checker.clone()).unwrap_or_default();
         checker.lint_facts = false;
+        checker.optimize = registry.optimize;
         pending.sort_by_key(|p| p.kind == ModKind::Host);
         for (k, p) in pending.iter().enumerate() {
             by_name.insert(p.name.clone(), (checker.mods.len() + k) as ModId);
@@ -132,7 +133,7 @@ impl Snapshot {
             native_info: native_info(&cp, registry),
             budget: &budget,
             initialized: None,
-            optimize: true,
+            optimize: registry.optimize,
         };
         let inits: Vec<FnId> = ["prelude", "task"].iter().filter_map(|n| mods[by_name[*n] as usize].init).collect();
         program.entry = compile_more(input, &mut program, &mut compiler, &inits).map_err(|ds| resolve(&sm, &ds))?;

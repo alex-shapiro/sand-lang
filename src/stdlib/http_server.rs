@@ -28,8 +28,8 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const BODY_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(super) fn natives(m: &mut NativeModule) {
-    m.object_type::<Server>();
-    m.object_type::<Exchange>();
+    m.bind::<Server>();
+    m.bind::<Exchange>();
     m.vm_function("serve", serve);
     m.vm_function("Server.addr", |vm: &mut Vm, server: Val<Server>| -> Result<net::SocketAddr, Ctl> { Ok(server.get(&vm.heap)?.addr) });
     m.vm_function("Server.close", |vm: &mut Vm, server: Val<Server>| -> Result<_, Ctl> {

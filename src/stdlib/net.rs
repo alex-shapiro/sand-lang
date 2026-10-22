@@ -23,9 +23,9 @@ use tokio::sync::{Mutex, watch};
 
 pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("net", ModKind::Std, include_str!("net.sand"));
-    m.value_type::<SocketAddr>();
-    m.object_type::<Listener>();
-    m.object_type::<Conn>();
+    m.bind::<SocketAddr>();
+    m.bind::<Listener>();
+    m.bind::<Conn>();
     m.function("SocketAddr.ip", |addr: SocketAddr| addr.0.ip().to_string());
     m.function("SocketAddr.port", |addr: SocketAddr| i64::from(addr.0.port()));
     m.function("split_host_port", split_host_port);
@@ -106,8 +106,9 @@ impl CloseSignal {
 // ----------------------------------------------------------------------
 // Addresses
 
-/// Backing value for `net.SocketAddr`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// An IP address and port, formatted as `127.0.0.1:8080` or `[::1]:8080`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, crate::SandValue)]
+#[sand(module = "net")]
 pub(crate) struct SocketAddr(std::net::SocketAddr);
 
 impl From<std::net::SocketAddr> for SocketAddr {
@@ -127,9 +128,6 @@ impl fmt::Display for SocketAddr {
 }
 
 impl ValueType for SocketAddr {
-    const MODULE: &'static str = "net";
-    const NAME: &'static str = "SocketAddr";
-    const DOC: &'static str = "An IP address and port, formatted as `127.0.0.1:8080` or `[::1]:8080`.";
     const ORDER: Option<fn(&Self, &Self) -> std::cmp::Ordering> = Some(Ord::cmp);
     fn parse(text: &str) -> Result<Self, String> {
         let addr: std::net::SocketAddr = text.parse().map_err(|_| format!("invalid socket address {:?}", super::truncate(text, 200)))?;

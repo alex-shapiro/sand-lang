@@ -22,11 +22,35 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 type FsResult<R> = Result<R, HostError>;
-type Stat = (i64, bool, bool, Option<i64>);
+
+/// Metadata for a file or directory.
+#[derive(crate::SandStruct)]
+#[sand(module = "fs")]
+struct Metadata {
+    /// Size in bytes.
+    size: i64,
+    /// `true` if the entry is a regular file.
+    is_file: bool,
+    /// `true` if the entry is a directory.
+    is_dir: bool,
+    /// Last modification timestamp, if supported by the platform.
+    modified: Option<jiff::Timestamp>,
+}
+
+impl Metadata {
+    fn new(size: u64, kind: EntryKind, modified: Option<i64>) -> Metadata {
+        Metadata {
+            size: i64::try_from(size).unwrap_or(i64::MAX),
+            is_file: kind == EntryKind::File,
+            is_dir: kind == EntryKind::Dir,
+            modified: modified.and_then(|n| jiff::Timestamp::from_nanosecond(n.into()).ok()),
+        }
+    }
+}
 
 pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("fs", ModKind::Std, include_str!("fs.sand"));
-    m.object_type::<FileObj>();
+    m.bind::<FileObj>().bind::<Metadata>();
     register_file(&mut m);
 
     m.vm_function("read_bytes", |vm: &mut Vm, path: Val<String>| -> FsResult<Vec<u8>> {
@@ -154,16 +178,14 @@ pub(crate) fn module() -> NativeModule {
         }
         run(vm, shown, move |fs| fs.copy(from, to), ok_unit)
     });
-    m.vm_function("stat", |vm: &mut Vm, path: Val<String>| -> FsResult<Stat> {
+    m.vm_function("metadata", |vm: &mut Vm, path: Val<String>| -> FsResult<Metadata> {
         let (shown, mut t) = target(vm, path, Mode::Follow)?;
         check(vm, &mut t, Access::Read, &shown)?;
         let stat = match vm.host.fs.stat(&t) {
             Ok(m) if m.kind == EntryKind::Symlink => Err(unchecked_symlink(t.path.file_name().unwrap_or_default())),
             r => r,
         };
-        settle(vm, shown, stat, |_, m| {
-            Ok((i64::try_from(m.size).unwrap_or(i64::MAX), m.kind == EntryKind::File, m.kind == EntryKind::Dir, m.modified))
-        })
+        settle(vm, shown, stat, |_, m| Ok(Metadata::new(m.size, m.kind, m.modified)))
     });
 
     // Pure path helpers.
@@ -643,7 +665,7 @@ fn with_file<R: IntoValue>(
 }
 
 fn register_file(m: &mut NativeModule) {
-    m.enum_type::<OpenMode>();
+    m.bind::<OpenMode>();
     m.vm_function("open", open);
     m.vm_function("File.read", |vm: &mut Vm, file: Val<FileObj>, max: i64| -> FsResult<Vec<u8>> {
         if max <= 0 {
@@ -777,10 +799,10 @@ fn register_file(m: &mut NativeModule) {
             Ok(pos.map(|p| i64::try_from(p.saturating_sub(unread)).unwrap_or(i64::MAX)))
         })
     });
-    m.vm_function("file_stat", |vm: &mut Vm, file: Val<FileObj>| {
+    m.vm_function("File.metadata", |vm: &mut Vm, file: Val<FileObj>| {
         with_file(vm, file, Needs::Nothing, |vm, st| {
             vm.charge(SYSCALL_FUEL)?;
-            Ok(st.io(vm, |f| f.meta())?.map(|m| (i64::try_from(m.size).unwrap_or(i64::MAX), m.modified)))
+            Ok(st.io(vm, |f| f.meta())?.map(|m| Metadata::new(m.size, EntryKind::File, m.modified)))
         })
     });
     m.vm_function("File.set_len", |vm: &mut Vm, file: Val<FileObj>, len: i64| {

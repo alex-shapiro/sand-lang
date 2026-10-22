@@ -4,19 +4,6 @@
 //! operation is checked against the active sandbox policy.
 
 import io
-import time
-
-/// Metadata for a file or directory.
-pub struct Metadata {
-    /// Size in bytes.
-    pub size: int
-    /// `true` if the entry is a regular file.
-    pub is_file: bool
-    /// `true` if the entry is a directory.
-    pub is_dir: bool
-    /// Last modification timestamp, if supported by the platform.
-    pub modified: time.Instant?
-}
 
 /// Opens the regular file at `path` with `mode`. The sandbox policy is checked
 /// at the time of the `open` call.
@@ -52,10 +39,7 @@ extend File {
     pub native fn position(self) -> Result<int>
 
     /// Returns the size and modification timestamp of the open file.
-    pub fn metadata(self) -> Result<Metadata> {
-        let (size, modified) = file_stat(self)?
-        Ok(to_metadata(size, true, false, modified))
-    }
+    pub native fn metadata(self) -> Result<Metadata>
 
     /// Truncates or zero-extends the file to `len` bytes.
     pub native fn set_len(self, len: int) -> Result<()>
@@ -64,8 +48,6 @@ extend File {
     /// Returns the path string passed to `open`.
     pub native fn path(self) -> str
 }
-
-native fn file_stat(f: File) -> Result<(int, int?)>
 
 /// Reads the entire file at `path` as UTF-8 text, or fails with kind
 /// `"invalid"` if the file contains invalid UTF-8.
@@ -115,16 +97,7 @@ pub native fn rename(src: str, dst: str) -> Result<()>
 pub native fn copy(src: str, dst: str) -> Result<()>
 
 /// Returns metadata for the file or directory at `path`.
-pub fn metadata(path: str) -> Result<Metadata> {
-    let (size, is_file, is_dir, modified) = stat(path)?
-    Ok(to_metadata(size, is_file, is_dir, modified))
-}
-
-fn to_metadata(size: int, is_file: bool, is_dir: bool, modified: int?) -> Metadata {
-    Metadata { size, is_file, is_dir, modified: modified.map(time.Instant.from_epoch_nanos) }
-}
-
-native fn stat(path: str) -> Result<(int, bool, bool, int?)>
+pub native fn metadata(path: str) -> Result<Metadata>
 
 /// Joins path segments using the platform path separator. An absolute segment
 /// replaces all preceding segments.

@@ -497,7 +497,14 @@ impl Checker {
             .map(|(&n, &b)| (n, b))
             .collect();
         self.budget.charge(items.len() as u64);
-        items.sort_by(|(m, a), (n, b)| (a.span.lo, self.name(*m)).cmp(&(b.span.lo, self.name(*n))));
+        // Rust-bound types and derived natives all start at offset 0: list
+        // the types, then the functions, each in registration order.
+        let order = |d: &Def| match *d {
+            Def::Type(TyRef::Def(t)) => (0, t),
+            Def::Fn(f) => (1, f),
+            _ => (2, 0),
+        };
+        items.sort_by(|(m, a), (n, b)| (a.span.lo, order(&a.def), self.name(*m)).cmp(&(b.span.lo, order(&b.def), self.name(*n))));
         items.into_iter().map(|(n, b)| (n, b.def)).collect()
     }
 

@@ -9,7 +9,7 @@
 
 use super::base64;
 use crate::check::ModKind;
-use crate::native::{HostError, NativeModule, Param, Reflect, SandType, Type, Val};
+use crate::native::{HostError, NativeModule, Param, Reflect, ReflectCheck, SandType, Type, Val};
 use crate::types::ConstVal;
 use crate::vm::bytecode::{JsonIds, Program};
 use crate::vm::compare::{hash_key, str_hash};
@@ -33,6 +33,54 @@ struct JsonType;
 impl SandType for JsonType {
     fn sand_type() -> Type {
         Type::named("json", "Json", vec![])
+    }
+}
+
+/// The types that `decode` accepts: those with a runtime description, with
+/// map keys that JSON object keys can represent.
+struct Decodable;
+
+impl ReflectCheck for Decodable {
+    fn check(node: &TypeDesc) -> Result<(), String> {
+        let no_recur = |_| "a recursive type".to_string();
+        match node {
+            TypeDesc::Unsupported(name) => Err(format!("`json.decode` cannot decode values of type `{name}`")),
+            TypeDesc::Map(k, _) if !is_map_key(k) => {
+                Err(format!("`json.decode` cannot decode map keys of type `{}`", desc_name(k, &no_recur)))
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Whether `decode` reads map keys of type `t` from JSON object keys (see
+/// `Decoder::map_key`).
+fn is_map_key(t: &TypeDesc) -> bool {
+    matches!(t, TypeDesc::Str | TypeDesc::Int | TypeDesc::Duration | TypeDesc::Bool | TypeDesc::Enum { .. } | TypeDesc::Value { .. })
+}
+
+/// The Sand name of the type that `t` describes, with `recur` naming the
+/// enclosing type that a `TypeDesc::Recur` refers to.
+fn desc_name(t: &TypeDesc, recur: &dyn Fn(u32) -> String) -> String {
+    let list = |ts: &[std::sync::Arc<TypeDesc>]| ts.iter().map(|t| desc_name(t, recur)).collect::<Vec<_>>().join(", ");
+    match t {
+        TypeDesc::Int => "int".into(),
+        TypeDesc::Float => "float".into(),
+        TypeDesc::Bool => "bool".into(),
+        TypeDesc::Str => "str".into(),
+        TypeDesc::Bytes => "bytes".into(),
+        TypeDesc::Duration => "duration".into(),
+        TypeDesc::Unit => "()".into(),
+        TypeDesc::List(e) => format!("[{}]", desc_name(e, recur)),
+        TypeDesc::Map(k, v) => format!("[{}: {}]", desc_name(k, recur), desc_name(v, recur)),
+        TypeDesc::Set(e) => format!("Set<{}>", desc_name(e, recur)),
+        TypeDesc::Tuple(ts) => format!("({})", list(ts)),
+        TypeDesc::Option(e) => format!("{}?", desc_name(e, recur)),
+        TypeDesc::Json => "Json".into(),
+        TypeDesc::Struct { name, .. } | TypeDesc::Enum { name, .. } | TypeDesc::Value { name, .. } | TypeDesc::Unsupported(name) => {
+            name.clone()
+        }
+        TypeDesc::Recur(id) => recur(*id),
     }
 }
 
@@ -67,7 +115,7 @@ pub(crate) fn module() -> NativeModule {
         let out = e.out;
         Ok(Val::from_raw(vm.new_str(out)))
     });
-    m.vm_function("decode", |vm: &mut Vm, ty: Reflect<0>, text: Val<String>| -> Result<Val<Param<0>>, HostError> {
+    m.vm_function("decode", |vm: &mut Vm, ty: Reflect<0, Decodable>, text: Val<String>| -> Result<Val<Param<0>>, HostError> {
         let desc = ty.desc(&vm.heap)?.clone();
         let ids = vm.prog.ids;
         let meter = &vm.meter;
@@ -747,32 +795,13 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
     }
 
     fn type_name(&self, t: &TypeDesc) -> String {
-        let list = |ts: &[std::sync::Arc<TypeDesc>]| ts.iter().map(|t| self.type_name(t)).collect::<Vec<_>>().join(", ");
-        match t {
-            TypeDesc::Int => "int".into(),
-            TypeDesc::Float => "float".into(),
-            TypeDesc::Bool => "bool".into(),
-            TypeDesc::Str => "str".into(),
-            TypeDesc::Bytes => "bytes".into(),
-            TypeDesc::Duration => "duration".into(),
-            TypeDesc::Unit => "()".into(),
-            TypeDesc::List(e) => format!("[{}]", self.type_name(e)),
-            TypeDesc::Map(k, v) => format!("[{}: {}]", self.type_name(k), self.type_name(v)),
-            TypeDesc::Set(e) => format!("Set<{}>", self.type_name(e)),
-            TypeDesc::Tuple(ts) => format!("({})", list(ts)),
-            TypeDesc::Option(e) => format!("{}?", self.type_name(e)),
-            TypeDesc::Json => "Json".into(),
-            TypeDesc::Struct { name, .. } | TypeDesc::Enum { name, .. } | TypeDesc::Value { name, .. } | TypeDesc::Unsupported(name) => {
-                name.clone()
-            }
-            TypeDesc::Recur(id) => {
-                let found = self.stack.iter().rev().find_map(|d| match d {
-                    TypeDesc::Struct { id: i, name, .. } | TypeDesc::Enum { id: i, name, .. } if i == id => Some(name),
-                    _ => None,
-                });
-                found.cloned().unwrap_or_default()
-            }
-        }
+        desc_name(t, &|id| {
+            let found = self.stack.iter().rev().find_map(|d| match d {
+                TypeDesc::Struct { id: i, name, .. } | TypeDesc::Enum { id: i, name, .. } if *i == id => Some(name),
+                _ => None,
+            });
+            found.cloned().unwrap_or_default()
+        })
     }
 
     fn fail(&self, msg: &str) -> Error {

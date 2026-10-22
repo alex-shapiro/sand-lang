@@ -833,20 +833,41 @@ impl ChannelObj {
     }
 }
 
-/// A Rust type that implements an immutable Sand value type (registered with
-/// [`crate::NativeModule::value_type`]).
+/// A Rust type that implements an immutable Sand value type.
+///
+/// Derive [`NamedType`](crate::native::NamedType) with
+/// [`#[derive(SandValue)]`](crate::SandValue), implement this trait, and
+/// register the type with [`NativeModule::bind`](crate::NativeModule::bind):
+///
+/// ```
+/// use sandlang::ValueType;
+///
+/// /// An amount of money in cents (such as `12.50`).
+/// #[derive(Clone, PartialEq, Eq, Hash, sandlang::SandValue)]
+/// #[sand(module = "bank")]
+/// pub struct Money(u64);
+///
+/// impl std::fmt::Display for Money {
+///     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+///         write!(f, "{}.{:02}", self.0 / 100, self.0 % 100)
+///     }
+/// }
+///
+/// impl ValueType for Money {
+///     fn parse(text: &str) -> Result<Money, String> {
+///         let (whole, cents) = text.split_once('.').ok_or("expected `units.cents`")?;
+///         let n = |s: &str| s.parse::<u64>().map_err(|e| e.to_string());
+///         Ok(Money(n(whole)? * 100 + n(cents)?))
+///     }
+/// }
+/// ```
 ///
 /// Values are compared, hashed, and formatted using `Eq`, `Hash`, and
 /// `Display`, and are encoded and decoded in JSON as strings. Equal values
 /// must produce identical `Display` output, and [`Self::parse`] must parse that
 /// output back into an equal value. Comparison, hashing, and formatting are
 /// not metered, so these operations must execute in constant time.
-pub trait ValueType: Clone + Eq + Hash + std::fmt::Display + Send + Sync + 'static {
-    /// Name of the module that declares this type (e.g. `"time"`).
-    const MODULE: &'static str;
-    /// Name of the Sand type (e.g. `"PlainDate"`).
-    const NAME: &'static str;
-    const DOC: &'static str = "";
+pub trait ValueType: crate::native::NamedType + Clone + Eq + Hash + std::fmt::Display + Send + Sync + 'static {
     /// Comparison function for types that satisfy `Ord` (typically `Some(Ord::cmp)`).
     const ORDER: Option<fn(&Self, &Self) -> std::cmp::Ordering> = None;
     /// Optional 16-byte inline heap representation.

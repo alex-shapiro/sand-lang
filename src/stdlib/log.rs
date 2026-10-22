@@ -112,7 +112,7 @@ pub(crate) fn module() -> NativeModule {
     m.vm_function("info", |vm: &mut Vm, msg: Val<String>, fields: Fields| emit_record(vm, LogLevel::Info, msg, fields));
     m.vm_function("warn", |vm: &mut Vm, msg: Val<String>, fields: Fields| emit_record(vm, LogLevel::Warn, msg, fields));
     m.vm_function("error", |vm: &mut Vm, msg: Val<String>, fields: Fields| emit_record(vm, LogLevel::Error, msg, fields));
-    m.enum_type::<LogLevel>();
+    m.bind::<LogLevel>();
     m.vm_function("set_level", |vm: &mut Vm, level: LogLevel| -> Result<_, Ctl> {
         vm.host.log_level = Some(level);
         Ok(())
