@@ -100,9 +100,17 @@ Follow-up work, roughly in priority order.
       literals (`[1, "a"]`).
 - [ ] Include the `<top level>` stack frame if a failing `assert` is the
       final top-level statement.
+- [ ] `help` shows a type of another module without its module name
+      (`help(http.Request)` shows `conn: Conn`, not `conn: net.Conn`, and
+      `help(fs.Metadata)` shows `modified: Instant?`).
 
 ### Performance
 
+- [ ] A dead string stays rooted after the function that made it returns
+      (`fn junk() -> int { "x".repeat(12_000_000).len() }`, then
+      `junk() + host.call()`): a full collection inside the native call does
+      not free it. Find the root. If the optimizer inlines `junk`, a register
+      of the current frame may still hold the string.
 - [ ] Benchmark `HostFn::Static` against `HostFn::Shared` to determine whether
       avoiding the `Arc` dereference justifies `Box::leak` and the enum
       dispatch; if not, keep only `Arc`.

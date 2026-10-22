@@ -601,19 +601,25 @@ fn send(
     timeout: SignedDuration,
 ) -> Suspended<Response> {
     let mut req = prepare_request(vm, method, url, headers)?;
-    req.require(vm)?;
-    let Prepared { method, text, url, headers } = req;
     // The request is held outside the heap while it is sent.
     let mut res = vm.reserve_io(body.bytes(&vm.heap).len())?;
+    req.allow(vm)?;
     let pool = vm.host.http_pool.clone();
-    let idle = pool.take(&url.origin());
+    let idle = pool.take(&req.url.origin());
     let slot = match idle {
         Some(_) => None,
         None => {
-            let buffers = if url.scheme == "https" { net::CONN_BUFFER + net::TLS_BUFFERS } else { net::CONN_BUFFER };
+            let buffers = if req.url.scheme == "https" { net::CONN_BUFFER + net::TLS_BUFFERS } else { net::CONN_BUFFER };
             Some(vm.resource_slot_with(buffers, "a connection")?)
         }
     };
+    if let Err(e) = req.filter(vm) {
+        if let Some(conn) = idle {
+            pool.put(conn);
+        }
+        return Err(e);
+    }
+    let Prepared { method, text, url, headers } = req;
     let body = body.bytes(&vm.heap);
     vm.charge_bytes(body.len())?;
     let close = connection_has(&headers, "close");
@@ -724,10 +730,11 @@ fn start_upload(
 ) -> Suspended<(net::Conn, Outgoing)> {
     let mut req = prepare_request(vm, method, url, headers)?;
     let length = given_length(&req.headers).map_err(|e| HostError::new("invalid", e))?;
-    req.require(vm)?;
-    let Prepared { method, text, url, headers } = req;
-    let buffers = if url.scheme == "https" { net::CONN_BUFFER + net::TLS_BUFFERS } else { net::CONN_BUFFER };
+    req.allow(vm)?;
+    let buffers = if req.url.scheme == "https" { net::CONN_BUFFER + net::TLS_BUFFERS } else { net::CONN_BUFFER };
     let slot = vm.resource_slot_with(buffers, "a connection")?;
+    req.filter(vm)?;
+    let Prepared { method, text, url, headers } = req;
     let delimit = length.map_or(Delimit::Chunked, Delimit::Length);
     let head = request_head(&method, &url, &headers, delimit, true);
     let timeout = stream::timeout(timeout);

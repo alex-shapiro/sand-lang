@@ -45,9 +45,7 @@ impl ReflectCheck for Decodable {
         let no_recur = |_| "a recursive type".to_string();
         match node {
             TypeDesc::Unsupported(name) => Err(format!("`json.decode` cannot decode values of type `{name}`")),
-            TypeDesc::Map(k, _) if !is_map_key(k) => {
-                Err(format!("`json.decode` cannot decode map keys of type `{}`", desc_name(k, &no_recur)))
-            }
+            TypeDesc::Map(k, _) if !is_map_key(k) => Err(format!("`json.decode` cannot decode map keys of type `{}`", k.name(&no_recur))),
             _ => Ok(()),
         }
     }
@@ -57,31 +55,6 @@ impl ReflectCheck for Decodable {
 /// `Decoder::map_key`).
 fn is_map_key(t: &TypeDesc) -> bool {
     matches!(t, TypeDesc::Str | TypeDesc::Int | TypeDesc::Duration | TypeDesc::Bool | TypeDesc::Enum { .. } | TypeDesc::Value { .. })
-}
-
-/// The Sand name of the type that `t` describes, with `recur` naming the
-/// enclosing type that a `TypeDesc::Recur` refers to.
-fn desc_name(t: &TypeDesc, recur: &dyn Fn(u32) -> String) -> String {
-    let list = |ts: &[std::sync::Arc<TypeDesc>]| ts.iter().map(|t| desc_name(t, recur)).collect::<Vec<_>>().join(", ");
-    match t {
-        TypeDesc::Int => "int".into(),
-        TypeDesc::Float => "float".into(),
-        TypeDesc::Bool => "bool".into(),
-        TypeDesc::Str => "str".into(),
-        TypeDesc::Bytes => "bytes".into(),
-        TypeDesc::Duration => "duration".into(),
-        TypeDesc::Unit => "()".into(),
-        TypeDesc::List(e) => format!("[{}]", desc_name(e, recur)),
-        TypeDesc::Map(k, v) => format!("[{}: {}]", desc_name(k, recur), desc_name(v, recur)),
-        TypeDesc::Set(e) => format!("Set<{}>", desc_name(e, recur)),
-        TypeDesc::Tuple(ts) => format!("({})", list(ts)),
-        TypeDesc::Option(e) => format!("{}?", desc_name(e, recur)),
-        TypeDesc::Json => "Json".into(),
-        TypeDesc::Struct { name, .. } | TypeDesc::Enum { name, .. } | TypeDesc::Value { name, .. } | TypeDesc::Unsupported(name) => {
-            name.clone()
-        }
-        TypeDesc::Recur(id) => recur(*id),
-    }
 }
 
 pub(crate) fn module() -> NativeModule {
@@ -239,7 +212,7 @@ impl<'a, 's, 'h> Build<'a, 's, 'h> {
 
     /// Checks that a value's heap objects fit besides those being assembled.
     fn reserve(&self) -> Result<(), Ctl> {
-        self.st.reserve(NODE + self.pending)
+        self.st.check_room(NODE + self.pending)
     }
 
     /// Appends `v` to a list being assembled, checking its buffer's growth
@@ -249,7 +222,7 @@ impl<'a, 's, 'h> Build<'a, 's, 'h> {
     fn push(&mut self, items: &mut Vec<Value>, v: Value) -> Result<(), Ctl> {
         if items.len() == items.capacity() {
             let more = items.capacity().max(4);
-            self.st.reserve((NODE + self.pending).saturating_add(more.saturating_mul(2 * std::mem::size_of::<Value>())))?;
+            self.st.check_room((NODE + self.pending).saturating_add(more.saturating_mul(2 * std::mem::size_of::<Value>())))?;
             let before = items.capacity();
             items.reserve_exact(more);
             self.pending += (items.capacity() - before) * std::mem::size_of::<Value>();
@@ -795,7 +768,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
     }
 
     fn type_name(&self, t: &TypeDesc) -> String {
-        desc_name(t, &|id| {
+        t.name(&|id| {
             let found = self.stack.iter().rev().find_map(|d| match d {
                 TypeDesc::Struct { id: i, name, .. } | TypeDesc::Enum { id: i, name, .. } if *i == id => Some(name),
                 _ => None,
@@ -1012,7 +985,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
         self.b.meter.charge(1)?;
         if !self.indexes.contains_key(&id) {
             self.b.meter.charge(fields.len() as u64)?;
-            self.b.st.reserve(self.b.pending.saturating_add(fields.len().saturating_mul(32)))?;
+            self.b.st.check_room(self.b.pending.saturating_add(fields.len().saturating_mul(32)))?;
             self.b.pending += fields.len() * 32;
             let index = fields.iter().enumerate().rev().map(|(i, f)| (f.0.as_str(), i)).collect();
             self.indexes.insert(id, index);
@@ -1456,7 +1429,7 @@ impl<'a> Converter<'a, '_, '_> {
                     self.b.st.new_variant(ids.str_, &[s])
                 }
                 Obj::Bytes(b) => {
-                    self.b.st.reserve(self.b.pending.saturating_add(b.len() / 3 * 4 + 4))?;
+                    self.b.st.check_room(self.b.pending.saturating_add(b.len() / 3 * 4 + 4))?;
                     self.b.meter.charge_slow_bytes(b.len())?;
                     let s = self.b.st.new_str(base64::encode(b, false));
                     self.b.st.new_variant(ids.str_, &[s])
@@ -1466,7 +1439,7 @@ impl<'a> Converter<'a, '_, '_> {
                 Obj::Set(s) => self.array(s.entries.iter().flatten().copied(), depth)?,
                 Obj::Range(a, b, inclusive) => {
                     let (n, ints) = range_ints(*a, *b, *inclusive);
-                    self.b.st.reserve(self.b.pending.saturating_add(n.saturating_mul(std::mem::size_of::<Value>())))?;
+                    self.b.st.check_room(self.b.pending.saturating_add(n.saturating_mul(std::mem::size_of::<Value>())))?;
                     self.b.meter.charge(n as u64)?;
                     let items = ints.map(|i| json_number(self.b.st, &ids, Value::Int(i))).collect();
                     let list = self.b.st.new_list(items);

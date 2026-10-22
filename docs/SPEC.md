@@ -2636,7 +2636,9 @@ cannot handle fall back to an engine whose cost per byte grows with the
 pattern. Time is measured as the function runs and charged between matches
 when iterating. Ordinary searches take a few to a hundred nanoseconds per
 unit of their deterministic charge, so only work that charge underestimates
-by an order of magnitude or more is charged by time.
+by an order of magnitude or more is charged by time. The fuel of that work,
+and so the point where `max_instructions` stops it, differs between machines
+and between runs. All other fuel is the same in every run.
 
 Fuel counts against `max_instructions`. Once a scheduling slice's fuel is
 spent, long operations check the instruction budget, the CPU and
@@ -2835,9 +2837,16 @@ crate renames the dependency. Doc comments, including
 | `SandStruct` | `struct` with the named fields of a Rust struct, copied on each conversion                |
 
 A field of a `SandStruct` is public, unless it has `#[sand(private)]`, and
-immutable, unless it has `#[sand(var)]`. Each field type must convert in both
-directions (an owned `FromValue` type and an `IntoValue` type). The module's
-Sand source can add methods to a bound type with `extend`.
+immutable, unless it has `#[sand(var)]`. `#[sand(name = "...")]` gives a field
+a Sand name other than its Rust name, such as for a Rust name that is a Sand
+keyword. Each field type must convert in both directions (an owned `FromValue`
+type and an `IntoValue` type). A struct can contain itself through a `Vec`,
+map, or `Option<Box<T>>` field. A value that holds one struct in several
+places becomes a separate Rust copy for each place, and each copy costs fuel
+and memory. If a native function takes or returns a value whose structs nest
+more than 256 deep (such as a cyclic value), the run aborts with kind
+`"limit"`. The module's Sand source can add methods to a bound type
+with `extend`.
 
 The Rust return type of a registered function determines whether the function
 returns a Sand `Result` or aborts the run on failure:
@@ -2861,14 +2870,18 @@ To check a sandbox capability inside a `vm_function`, call
 re-runs the native function after a permission prompt or after a garbage
 collection triggered by a memory or resource limit, a native function must
 check capabilities and reserve memory before performing any side effects.
-Return-value conversion does not fail on the memory limit; instead, the engine
-collects garbage and checks the memory limit after the call completes.
+Only a `vm_function` can make these checks after its body starts, so only its
+body can run twice. `Config::retry_stress` fails the first memory or resource
+check of each native call, to test this order. Return-value conversion does
+not fail on the memory limit; instead, the engine collects garbage and checks
+the memory limit after the call completes.
 
 | Rust type                                                | Sand type                                                      |
 | -------------------------------------------------------- | -------------------------------------------------------------- |
 | `i64`, `f64`, `bool`, `()`, `jiff::SignedDuration`       | `int`, `float`, `bool`, `()`, `duration`                       |
 | `String`, `&str`; `Vec<u8>`, `&[u8]`                     | `str`; `bytes`                                                 |
 | `Vec<T>`, `Option<T>`, tuples of 2 to 8 elements         | `[T]`, `T?`, tuples                                            |
+| `Box<T>`                                                 | `T`                                                            |
 | `HashMap<K, V>`, `BTreeMap<K, V>`                        | `[K: V]`                                                       |
 | `HashSet<T>`, `BTreeSet<T>`                              | `Set<T>`                                                       |
 | `Result<T, E>`                                           | `Result<T, Error>` or `T` (determined by `E`)                  |
@@ -2895,11 +2908,10 @@ functions that are not declared in `NativeModule::source`. Registered types use
 their Rust doc comments, and undeclared functions are exported as `pub native
 fn` with parameter names `arg1`, `arg2`, ... unless overridden by `params`.
 `help` lists these declarations in registration order, before the items of
-the Sand source. A
-function registered as `"Type.name"` is a method on `Type`, and takes `self` if
-its first parameter has type `Type`. Generic functions and functions with
-default parameter values must be declared explicitly with `native fn` in
-`NativeModule::source`.
+the Sand source. A function registered as `"Type.name"` is a method on `Type`,
+and takes `self` if its first parameter has type `Type`. Generic functions and
+functions with default parameter values must be declared explicitly with
+`native fn` in `NativeModule::source`.
 
 `Engine::new` compiles and validates all registered host modules once per
 `Config` (shared across cloned configurations), and returns `Error::Compile` if:

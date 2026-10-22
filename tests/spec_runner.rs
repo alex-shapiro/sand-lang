@@ -1,6 +1,6 @@
 //! Golden-file acceptance test runner for the language specification
-//! (`tests/spec/*.test`). The runner executes every test case across three
-//! compiler and collector modes (default, [`Config::gc_stress`], and
+//! (`tests/spec/*.test`). The runner executes every test case across four
+//! modes (default, [`Config::gc_stress`], [`Config::retry_stress`], and
 //! `Config::optimize(false)`) and two file system backends ([`MemFs`] and, with
 //! the `os` feature, a temporary host directory). Set `SPEC_FILTER=<substring>`
 //! to run only cases whose names match `<substring>`.
@@ -41,6 +41,7 @@ use std::path::{Path, PathBuf};
 enum Mode {
     Plain,
     GcStress,
+    RetryStress,
     Unoptimized,
 }
 
@@ -49,6 +50,7 @@ impl Mode {
         match self {
             Mode::Plain => "",
             Mode::GcStress => " (under GC stress)",
+            Mode::RetryStress => " (under retry stress)",
             Mode::Unoptimized => " (unoptimized)",
         }
     }
@@ -221,7 +223,8 @@ fn run_case(case: &Case, mode: Mode, backend: Backend) -> Result<(), String> {
     let out = MemorySink::new();
     let err = MemorySink::new();
     let config = Config::new().policy(Policy::allow_all()).stdout(out.clone()).stderr(err.clone()).seed(42);
-    let mut config = dir.configure(config.gc_stress(mode == Mode::GcStress).optimize(mode != Mode::Unoptimized));
+    let mut config =
+        dir.configure(config.gc_stress(mode == Mode::GcStress).retry_stress(mode == Mode::RetryStress).optimize(mode != Mode::Unoptimized));
     if let Some(stdin) = get("stdin") {
         config = config.stdin_bytes(stdin.into_bytes());
     }
@@ -378,6 +381,15 @@ macro_rules! spec_files {
                 #[test]
                 fn $name() {
                     run_file(stringify!($name), Mode::GcStress, $backend);
+                }
+            )*
+        }
+        mod retry_stress {
+            use super::{Backend, Mode, run_file};
+            $(
+                #[test]
+                fn $name() {
+                    run_file(stringify!($name), Mode::RetryStress, $backend);
                 }
             )*
         }

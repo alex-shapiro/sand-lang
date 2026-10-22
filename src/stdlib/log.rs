@@ -138,7 +138,7 @@ fn emit_record(vm: &mut Vm, level: LogLevel, msg: Val<String>, fields: Fields) -
     }
     let fields = fields.map(&vm.heap)?.entries.iter().flatten();
     let len = msg.str(&vm.heap).len() + fields.clone().map(|&(k, v)| vm.str(k).len() + vm.str(v).len()).sum::<usize>();
-    vm.reserve(len)?;
+    vm.check_room(len)?;
     vm.charge_bytes(len)?;
     let record = LogRecord {
         level,
@@ -153,7 +153,7 @@ fn emit_record(vm: &mut Vm, level: LogLevel, msg: Val<String>, fields: Fields) -
         }
         None => {
             let line = format!("{record}\n");
-            vm.reserve(line.len())?;
+            vm.check_room(line.len())?;
             vm.count_output(2, line.len())?;
             vm.write_counted(2, line.as_bytes())?;
         }

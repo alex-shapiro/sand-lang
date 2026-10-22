@@ -41,6 +41,8 @@ pub fn derive_sand_object(input: TokenStream) -> TokenStream {
 /// implement `FromValue` (with an owned `Item`) and `IntoValue`.
 ///
 /// Field attributes:
+/// - `#[sand(name = "<name>")]` overrides the Sand field name (the Rust
+///   identifier by default), for a Rust name that is a Sand keyword.
 /// - `#[sand(private)]` makes the field private to the module.
 /// - `#[sand(var)]` makes the field mutable (`var`) in Sand.
 #[proc_macro_derive(SandStruct, attributes(sand))]
@@ -48,7 +50,8 @@ pub fn derive_sand_struct(input: TokenStream) -> TokenStream {
     expand(input, sand_struct)
 }
 
-/// Derives `NamedType` for a type that implements `ValueType` by hand.
+/// Derives `NamedType`, `SandType`, `FromValue`, and `IntoValue` for a type
+/// that implements `ValueType` by hand.
 #[proc_macro_derive(SandValue, attributes(sand))]
 pub fn derive_sand_value(input: TokenStream) -> TokenStream {
     expand(input, sand_value)
@@ -110,13 +113,15 @@ fn parse_type_attrs(input: &DeriveInput, derive: &str) -> syn::Result<TypeAttrs>
 /// Rejects `#[sand(...)]` on the variants and fields of a type whose derive
 /// takes no member attributes.
 fn no_member_attrs(data: &Data) -> syn::Result<()> {
-    let fields = |f: &Fields| f.iter().map(|f| f.attrs.clone()).collect::<Vec<_>>();
-    let attrs: Vec<Vec<Attribute>> = match data {
-        Data::Struct(s) => fields(&s.fields),
-        Data::Enum(e) => e.variants.iter().flat_map(|v| std::iter::once(v.attrs.clone()).chain(fields(&v.fields))).collect(),
-        Data::Union(u) => u.fields.named.iter().map(|f| f.attrs.clone()).collect(),
+    fn fields(f: &Fields) -> impl Iterator<Item = &Attribute> {
+        f.iter().flat_map(|f| &f.attrs)
+    }
+    let attrs: Vec<&Attribute> = match data {
+        Data::Struct(s) => fields(&s.fields).collect(),
+        Data::Enum(e) => e.variants.iter().flat_map(|v| v.attrs.iter().chain(fields(&v.fields))).collect(),
+        Data::Union(u) => u.fields.named.iter().flat_map(|f| &f.attrs).collect(),
     };
-    match attrs.iter().flatten().find(|a| a.path().is_ident("sand")) {
+    match attrs.into_iter().find(|a| a.path().is_ident("sand")) {
         Some(a) => Err(Error::new_spanned(a, "`#[sand(...)]` applies only to the type")),
         None => Ok(()),
     }
@@ -257,20 +262,22 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
     let mut writes = Vec::new();
     for (i, f) in fields.iter().enumerate() {
         let ident = f.ident.as_ref().expect("named field");
-        let (mut public, mut var) = (true, false);
+        let (mut public, mut var, mut name) = (true, false, ident.unraw().to_string());
         for attr in f.attrs.iter().filter(|a| a.path().is_ident("sand")) {
             attr.parse_nested_meta(|meta| {
-                if meta.path.is_ident("private") {
+                if meta.path.is_ident("name") {
+                    name = meta.value()?.parse::<LitStr>()?.value();
+                } else if meta.path.is_ident("private") {
                     public = false;
                 } else if meta.path.is_ident("var") {
                     var = true;
                 } else {
-                    return Err(meta.error("expected `private` or `var`"));
+                    return Err(meta.error("expected `name`, `private` or `var`"));
                 }
                 Ok(())
             })?;
         }
-        let (fty, name, doc) = (&f.ty, ident.unraw().to_string(), doc_expr(&f.attrs));
+        let (fty, doc) = (&f.ty, doc_expr(&f.attrs));
         infos.push(quote! {
             #krate::native::StructField {
                 name: #name,
@@ -299,14 +306,15 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
                 v: #krate::Value,
                 conv: &mut #krate::native::Conversion,
             ) -> ::std::result::Result<Self, #krate::vm::Ctl> {
-                let fields = vm.struct_fields::<Self>(v)?;
-                ::std::result::Result::Ok(#ty { #(#reads),* })
+                #krate::native::struct_from_value(vm, v, conv, |fields, conv| ::std::result::Result::Ok(#ty { #(#reads),* }))
             }
         }
         impl #krate::native::IntoValue for #ty {
             fn into_value(self, vm: &mut #krate::vm::Vm) -> ::std::result::Result<#krate::Value, #krate::vm::Ctl> {
-                let fields: ::std::boxed::Box<[#krate::Value]> = ::std::boxed::Box::new([#(#writes),*]);
-                vm.new_struct::<Self>(fields)
+                vm.nested(|vm| {
+                    let fields: ::std::boxed::Box<[#krate::Value]> = ::std::boxed::Box::new([#(#writes),*]);
+                    vm.new_struct::<Self>(fields)
+                })
             }
         }
     })
@@ -320,44 +328,36 @@ fn sand_value(input: &DeriveInput) -> syn::Result<Tokens> {
     let attrs = parse_type_attrs(input, "SandValue")?;
     no_member_attrs(&input.data)?;
     let krate = &attrs.krate;
-    Ok(named_type(ty, &attrs, quote! { #krate::native::Binding::of_value::<Self>() }))
+    let named = named_type(ty, &attrs, quote! { #krate::native::Binding::of_value::<Self>() });
+    Ok(quote! {
+        #named
+        #krate::__value_type_impls!(#ty);
+    })
 }
 
 /// A `&'static str` expression for the doc comment in `attrs`: the lines of
 /// `///` comments without their first space, joined by newlines and trimmed.
-/// A `#[doc = ...]` attribute whose value is not a string literal (such as
-/// `include_str!("...")`) is included as it is, through `concat!`.
+/// A `#[doc = ...]` value that is not a string literal (such as
+/// `include_str!("...")`) is included through `concat!`.
 fn doc_expr(attrs: &[Attribute]) -> Tokens {
-    let docs = attrs.iter().filter_map(|a| match &a.meta {
-        Meta::NameValue(nv) if nv.path.is_ident("doc") => Some(&nv.value),
-        _ => None,
-    });
-    let mut lines: Vec<Result<String, &Expr>> = Vec::new();
-    for e in docs {
-        lines.push(match e {
+    let mut parts = Vec::new();
+    for a in attrs {
+        let Meta::NameValue(nv) = &a.meta else { continue };
+        if !nv.path.is_ident("doc") {
+            continue;
+        }
+        if !parts.is_empty() {
+            parts.push(quote! { "\n" });
+        }
+        parts.push(match &nv.value {
             Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) => {
                 let line = s.value();
-                Ok(line.strip_prefix(' ').map(str::to_string).unwrap_or(line))
+                let line = line.strip_prefix(' ').unwrap_or(&line);
+                quote! { #line }
             }
-            e => Err(e),
+            e => quote! { #e },
         });
     }
-    if let Ok(lines) = lines.iter().cloned().collect::<Result<Vec<String>, _>>() {
-        let text = lines.join("\n");
-        let text = text.trim();
-        return quote! { #text };
-    }
-    let parts = lines.iter().enumerate().map(|(i, l)| {
-        let sep = if i > 0 {
-            quote! { "\n", }
-        } else {
-            quote! {}
-        };
-        match l {
-            Ok(text) => quote! { #sep #text },
-            Err(e) => quote! { #sep #e },
-        }
-    });
     quote! { ::std::concat!(#(#parts),*).trim_ascii() }
 }
 
@@ -384,13 +384,9 @@ mod tests {
     }
 
     #[test]
-    fn literal_docs_are_trimmed_at_expansion() {
+    fn docs_are_concatenated_and_trimmed_at_compile_time() {
         let out = expand(sand_enum, "#[sand(module = \"m\")]\n/// One.\n///\n///   Two.\nenum E { A }");
-        assert!(out.contains("\"One.\\n\\n  Two.\""), "{out}");
-    }
-
-    #[test]
-    fn docs_from_macros_are_concatenated_and_trimmed_at_compile_time() {
+        assert!(out.contains(":: std :: concat ! (\"One.\" , \"\\n\" , \"\" , \"\\n\" , \"  Two.\") . trim_ascii ()"), "{out}");
         let out = expand(
             sand_struct,
             "#[sand(module = \"m\")]\n/// Head.\n#[doc = include_str!(\"x.md\")]\nstruct S { #[doc = include_str!(\"f.md\")] x: i64 }",
@@ -402,10 +398,12 @@ mod tests {
     #[test]
     fn struct_fields_take_attributes() {
         let out = expand(sand_struct, "#[sand(module = \"m\")] struct S { #[sand(private, var)] r#type: i64, y: bool }");
-        assert!(out.contains("name : \"type\" , doc : \"\" , public : false , var : true"), "{out}");
-        assert!(out.contains("name : \"y\" , doc : \"\" , public : true , var : false"), "{out}");
+        assert!(out.contains("name : \"type\" , doc : :: std :: concat ! () . trim_ascii () , public : false , var : true"), "{out}");
+        assert!(out.contains("name : \"y\" , doc : :: std :: concat ! () . trim_ascii () , public : true , var : false"), "{out}");
         let out = expand(sand_struct, "#[sand(module = \"m\")] struct S { #[sand(hidden)] x: i64 }");
-        assert_eq!(out, "error: expected `private` or `var`");
+        assert_eq!(out, "error: expected `name`, `private` or `var`");
+        let out = expand(sand_struct, "#[sand(module = \"m\")] struct S { #[sand(name = \"kind\")] r#type: i64 }");
+        assert!(out.contains("name : \"kind\""), "{out}");
     }
 
     #[test]

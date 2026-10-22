@@ -243,6 +243,7 @@ pub struct Config {
     pub(crate) env: Option<Vec<(String, String)>>,
     pub(crate) seed: Option<u64>,
     pub(crate) gc_stress: bool,
+    pub(crate) retry_stress: bool,
     pub(crate) optimize: bool,
     pub(crate) dump_bytecode: bool,
     pub(crate) exit_after_run: bool,
@@ -295,6 +296,7 @@ impl Config {
             env: None,
             seed: None,
             gc_stress: false,
+            retry_stress: false,
             optimize: true,
             dump_bytecode: false,
             exit_after_run: false,
@@ -438,6 +440,16 @@ impl Config {
     #[doc(hidden)]
     pub fn gc_stress(mut self, on: bool) -> Self {
         self.gc_stress = on;
+        self
+    }
+    /// Testing aid: in each native function call, the first memory or
+    /// resource check fails. The engine then collects garbage and calls the
+    /// native again, as it does when garbage fills the memory limit. Use it to
+    /// test that a native function checks memory and resources before it
+    /// changes anything: a change made before the check happens twice. As
+    /// after a real limit, the collection also closes idle HTTP connections.
+    pub fn retry_stress(mut self, on: bool) -> Self {
+        self.retry_stress = on;
         self
     }
     /// Enables or disables loop fusion, loop specialization, inlining, and
@@ -1097,6 +1109,7 @@ impl Engine {
             vm.heap.stress = true;
             vm.heap.next_gc = 0;
         }
+        vm.retry_stress = c.retry_stress;
         vm
     }
 

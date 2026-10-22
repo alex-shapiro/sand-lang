@@ -89,6 +89,102 @@ fn outer_lit(x: &Outer) -> String {
     )
 }
 
+/// A tree, for structs that contain themselves.
+#[derive(Clone, Debug, PartialEq, sandlang::SandStruct)]
+#[sand(module = "tree")]
+struct Tree {
+    n: i64,
+    kids: Vec<Tree>,
+}
+
+fn tree() -> impl Strategy<Value = Tree> {
+    let leaf = int().prop_map(|n| Tree { n, kids: Vec::new() });
+    leaf.prop_recursive(6, 48, 4, |kid| (int(), prop::collection::vec(kid, 0..4)).prop_map(|(n, kids)| Tree { n, kids }))
+}
+
+fn tree_lit(t: &Tree) -> String {
+    let kids: Vec<String> = t.kids.iter().map(tree_lit).collect();
+    format!("tree.Tree {{ n: {}, kids: [{}] }}", int_lit(t.n), kids.join(", "))
+}
+
+fn depth(t: &Tree) -> usize {
+    1 + t.kids.iter().map(depth).max().unwrap_or(0)
+}
+
+/// A linked list, for structs that contain themselves through a `Box`.
+#[derive(Clone, Debug, PartialEq, sandlang::SandStruct)]
+#[sand(module = "chain")]
+struct Link {
+    n: i64,
+    next: Option<Box<Link>>,
+}
+
+fn link_of(ns: &[i64]) -> Option<Box<Link>> {
+    ns.iter().rev().fold(None, |next, &n| Some(Box::new(Link { n, next })))
+}
+
+/// A node that has its children in a list.
+#[derive(sandlang::SandStruct)]
+#[sand(module = "dag")]
+struct Fan {
+    kids: Vec<Fan>,
+}
+
+/// A node that has its children as the values of a hash map.
+#[derive(sandlang::SandStruct)]
+#[sand(module = "dag")]
+struct HashFan {
+    kids: HashMap<i64, HashFan>,
+}
+
+/// A node that has its children as the values of an ordered map.
+#[derive(sandlang::SandStruct)]
+#[sand(module = "dag")]
+struct TreeFan {
+    kids: BTreeMap<String, TreeFan>,
+}
+
+/// A node that has its children in boxes.
+#[derive(sandlang::SandStruct)]
+#[sand(module = "dag")]
+struct Bin {
+    left: Option<Box<Bin>>,
+    right: Option<Box<Bin>>,
+}
+
+/// A node that has its children in a boxed tuple.
+#[derive(sandlang::SandStruct)]
+#[sand(module = "dag")]
+struct Pair {
+    kids: Option<Box<(Pair, Pair)>>,
+}
+
+/// Each way for a struct to hold values of its own type: the leaf, a node
+/// that holds `a` twice, and the native function that takes the value.
+const SHAPES: [(&str, &str, &str); 5] = [
+    ("dag.Fan { kids: [] }", "dag.Fan { kids: [a, a] }", "fan"),
+    ("dag.HashFan { kids: [:] }", "dag.HashFan { kids: [0: a, 1: a] }", "hash_fan"),
+    ("dag.TreeFan { kids: [:] }", "dag.TreeFan { kids: [\"l\": a, \"r\": a] }", "tree_fan"),
+    ("dag.Bin { left: None, right: None }", "dag.Bin { left: Some(a), right: Some(a) }", "bin"),
+    ("dag.Pair { kids: None }", "dag.Pair { kids: Some((a, a)) }", "pair"),
+];
+
+/// A script that makes a value `levels` structs deep in which each struct
+/// holds the struct below it twice (through `SHAPES[shape]`), and passes it
+/// to a native function.
+fn shared_dag(shape: usize, levels: u32, limits: Limits) -> Result<sandlang::Outcome, Error> {
+    let mut m = NativeModule::new("dag");
+    m.bind::<Fan>().bind::<HashFan>().bind::<TreeFan>().bind::<Bin>().bind::<Pair>();
+    m.function("fan", |_: Fan| 0);
+    m.function("hash_fan", |_: HashFan| 0);
+    m.function("tree_fan", |_: TreeFan| 0);
+    m.function("bin", |_: Bin| 0);
+    m.function("pair", |_: Pair| 0);
+    let (leaf, node, call) = SHAPES[shape];
+    let src = format!("import dag\nvar a = {leaf}\nfor _ in 0..{} {{\n    a = {node}\n}}\nprint(dag.{call}(a))", levels - 1);
+    run(Config::new().module(m).limits(limits), &src).0
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
 
@@ -122,6 +218,92 @@ proptest! {
         let bumped = format!("{}\n{}\n", value.count.wrapping_add(1), value.inner.n.wrapping_mul(2));
         prop_assert_eq!(out, format!("true\ntrue\ntrue\n{bumped}0\n"), "{}", src);
         prop_assert_eq!(seen.lock().unwrap().clone(), vec![value]);
+    }
+
+    /// A tree converts to Rust and back without change. A script value
+    /// converts if its structs nest at most 256 deep, and fails with a
+    /// `"limit"` error otherwise, however many other structs it contains.
+    #[test]
+    fn recursive_structs_round_trip(value in tree(), spine in 230usize..270, gc_stress in any::<bool>()) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut m = NativeModule::new("tree");
+        m.bind::<Tree>();
+        let s = seen.clone();
+        m.function("echo", move |x: Tree| {
+            s.lock().unwrap().push(x.clone());
+            x
+        });
+        let src = format!(
+            "import tree\nlet t = {}\nprint(tree.echo(t) == t)\nvar deep = t\nfor _ in 0..{spine} {{\n    deep = tree.Tree {{ n: 0, kids: [t, deep] }}\n}}\n\
+             print(tree.echo(deep) == deep)",
+            tree_lit(&value)
+        );
+        let (r, out) = run(Config::new().module(m).gc_stress(gc_stress), &src);
+        if depth(&value) + spine <= 256 {
+            prop_assert!(r.is_ok(), "{r:?}\n{src}");
+            prop_assert_eq!(out, "true\ntrue\n");
+        } else {
+            let message = match r {
+                Err(Error::Runtime { message, .. }) => message,
+                r => return Err(TestCaseError::fail(format!("expected a runtime error, got {r:?}"))),
+            };
+            prop_assert!(message.contains("value too deeply nested to convert"), "{message}");
+            prop_assert_eq!(out, "true\n");
+        }
+        prop_assert_eq!(&seen.lock().unwrap()[0], &value);
+    }
+
+    /// A boxed list converts in both directions if it is at most 256 links
+    /// long, and fails with a `"limit"` error otherwise, from either side.
+    #[test]
+    fn boxed_lists_round_trip(ns in prop::collection::vec(int(), 1..300), from_rust in any::<bool>(), gc_stress in any::<bool>()) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut m = NativeModule::new("chain");
+        m.bind::<Link>();
+        let s = seen.clone();
+        m.function("echo", move |x: Link| {
+            s.lock().unwrap().push(x.clone());
+            x
+        });
+        let made = link_of(&ns);
+        m.function("make", move || made.clone().map(|l| *l));
+        let backwards: Vec<String> = ns.iter().rev().map(|&n| int_lit(n)).collect();
+        let build = if from_rust {
+            "chain.make()".to_string()
+        } else {
+            format!("var l: chain.Link? = None\nfor n in [{}] {{\n    l = Some(chain.Link {{ n, next: l }})\n}}\nl", backwards.join(", "))
+        };
+        let src = format!("import chain\nlet l = {{\n{build}\n}}?\nprint(chain.echo(l) == l)");
+        let (r, out) = run(Config::new().module(m).gc_stress(gc_stress), &src);
+        if ns.len() <= 256 {
+            prop_assert!(r.is_ok(), "{r:?}\n{src}");
+            prop_assert_eq!(out, "true\n");
+            prop_assert_eq!(seen.lock().unwrap().clone(), vec![*link_of(&ns).unwrap()]);
+        } else {
+            let message = match r {
+                Err(Error::Runtime { message, .. }) => message,
+                r => return Err(TestCaseError::fail(format!("expected a runtime error, got {r:?}"))),
+            };
+            prop_assert!(message.contains("value too deeply nested to convert"), "{message}");
+            prop_assert!(seen.lock().unwrap().is_empty());
+        }
+    }
+
+    /// A native function argument that holds one struct in many places is
+    /// copied once for each place, through every container that can hold the
+    /// struct again (see `FromValue`). Each copy costs fuel and memory, so the
+    /// instruction and memory limits stop the copy.
+    #[test]
+    fn shared_structs_cost_fuel_and_memory_for_each_copy(shape in 0..SHAPES.len(), levels in 14u32..20) {
+        let copies = (1u64 << levels) - 1;
+        let fuel = |n: u64| Limits { max_instructions: Some(n), ..Limits::default() };
+        let r = shared_dag(shape, levels, fuel(copies * 8 + 10_000));
+        prop_assert!(r.is_ok(), "{r:?}");
+        let r = shared_dag(shape, levels, fuel(copies / 2));
+        prop_assert!(matches!(r, Err(Error::Limit(LimitKind::Instructions))), "{r:?}");
+        let memory = Limits { max_memory: Some(16 << 20), ..Limits::default() };
+        let r = shared_dag(shape, 40 + levels, memory);
+        prop_assert!(matches!(r, Err(Error::Limit(LimitKind::Memory))), "{r:?}");
     }
 
     #[test]

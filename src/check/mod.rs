@@ -1906,7 +1906,8 @@ impl Checker {
         let n = reflect.len().min(sig.params.len());
         let (lead, rest) = sig.params.split_at(n);
         let reflect_index = |t: &Type| if let Type::Reflect(i, _) = t { Some(*i) } else { None };
-        let leads_match = lead.iter().map(reflect_index).eq(reflect.iter().map(|&i| Some(i))) && !rest.iter().any(|t| reflect_index(t).is_some());
+        let leads_match =
+            lead.iter().map(reflect_index).eq(reflect.iter().map(|&i| Some(i))) && !rest.iter().any(|t| reflect_index(t).is_some());
         if leads_match {
             let mark = self.diags.len();
             let want: Option<Vec<TypeId>> = rest.iter().map(|t| self.host_type(t, generics, &who, span)).collect();

@@ -1,6 +1,6 @@
 //! Rust representations of Sand types.
 
-use crate::vm::value::{TypeDesc, Value, ValueType};
+use crate::vm::value::{TypeDesc, Value};
 use std::any::TypeId;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
@@ -206,6 +206,12 @@ impl<T: SandType> SandType for Vec<T> {
     }
 }
 
+impl<T: SandType> SandType for Box<T> {
+    fn sand_type() -> Type {
+        T::sand_type()
+    }
+}
+
 impl<T: SandType> SandType for Option<T> {
     fn sand_type() -> Type {
         Type::option(T::sand_type())
@@ -267,12 +273,6 @@ fn_type!();
 fn_type!(A);
 fn_type!(A, B);
 fn_type!(A, B, C);
-
-impl<T: ValueType> SandType for T {
-    fn sand_type() -> Type {
-        Type::bound::<T>(T::MODULE, T::NAME)
-    }
-}
 
 /// Uninhabited return type for native functions that never return (Sand `never`).
 #[derive(Clone, Copy, Debug)]
@@ -398,6 +398,7 @@ pub trait ReflectCheck {
     /// Returns the error message for a call site if the native cannot handle
     /// values of the type that `node` describes. The engine calls this function
     /// once for each distinct node of the description of the type argument.
+    /// [`TypeDesc::name`] gives the Sand name of a type for the message.
     fn check(node: &TypeDesc) -> Result<(), String>;
 }
 

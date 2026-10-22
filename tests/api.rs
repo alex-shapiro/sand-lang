@@ -1038,9 +1038,120 @@ fn struct_fields_must_be_sand_identifiers() {
 }
 
 #[test]
+fn struct_fields_can_take_another_sand_name() {
+    #[derive(sandlang::SandStruct)]
+    #[sand(module = "lab")]
+    struct Sample {
+        #[sand(name = "kind")]
+        r#type: String,
+        #[sand(name = "variance", var)]
+        var: i64,
+    }
+    let mut m = NativeModule::new("lab");
+    m.bind::<Sample>();
+    m.function("grow", |s: Sample| Sample { r#type: format!("{}!", s.r#type), var: s.var * 2 });
+    let src = "import lab\nvar s = lab.grow(lab.Sample { kind: \"a\", variance: 2 })\ns.variance += 1\nprint(s)";
+    let (r, out, _) = run_src(Config::new().module(m), src);
+    r.unwrap();
+    assert_eq!(out, "Sample { kind: \"a!\", variance: 5 }\n");
+}
+
+#[test]
+#[should_panic(expected = "the binding of `Fake` describes another Rust type")]
+fn bindings_describe_their_own_type() {
+    struct Fake;
+    impl sandlang::NamedType for Fake {
+        const MODULE: &'static str = "plane";
+        const NAME: &'static str = "Fake";
+        const DOC: &'static str = "";
+        const PUBLIC: bool = true;
+        fn binding() -> sandlang::native::Binding {
+            sandlang::native::Binding::of_struct::<Point>()
+        }
+    }
+    NativeModule::new("plane").bind::<Fake>();
+}
+
+#[test]
 #[should_panic(expected = "type `Point` is registered twice in module `plane`")]
 fn structs_bind_once() {
     NativeModule::new("plane").bind::<Point>().bind::<Point>();
+}
+
+/// A tree node, for structs that contain themselves.
+#[derive(sandlang::SandStruct)]
+#[sand(module = "tree")]
+struct Node {
+    kids: Vec<Node>,
+}
+
+#[test]
+fn recursive_structs_convert_to_a_bounded_depth() {
+    fn size(n: &Node) -> i64 {
+        1 + n.kids.iter().map(size).sum::<i64>()
+    }
+    let run = |src: &str| {
+        let mut m = NativeModule::new("tree");
+        m.bind::<Node>();
+        m.function("size", |n: Node| size(&n));
+        m.function("echo", |n: Node| n);
+        m.function("chain", |n: i64| (0..n).fold(Node { kids: Vec::new() }, |n, _| Node { kids: vec![n] }));
+        run_src(Config::new().module(m), &format!("import tree\nlet leaf = tree.Node {{ kids: [] }}\n{src}"))
+    };
+    let (r, out, _) = run("print(tree.size(tree.echo(tree.Node { kids: [leaf, tree.Node { kids: [leaf] }] })))");
+    r.unwrap();
+    assert_eq!(out, "4\n");
+    let (r, out, _) =
+        run("var n = leaf\nfor _ in 0..255 {\n    n = tree.Node { kids: [n] }\n}\nprint(tree.size(n))\nprint(tree.size(tree.chain(255)))");
+    r.unwrap();
+    assert_eq!(out, "256\n256\n");
+    for src in [
+        "print(tree.chain(256))",
+        "print(tree.chain(5000))",
+        "var n = leaf\nfor _ in 0..256 {\n    n = tree.Node { kids: [n] }\n}\nprint(tree.size(n))",
+        "var n = leaf\nfor _ in 0..1000000 {\n    n = tree.Node { kids: [n] }\n}\nprint(tree.size(n))",
+        "leaf.kids.push(leaf)\nprint(tree.size(leaf))",
+    ] {
+        let (r, _, _) = run(src);
+        let Err(Error::Runtime { message, .. }) = r else { panic!("{src}: expected a runtime error, got {r:?}") };
+        assert!(message.contains("value too deeply nested to convert"), "{src}: {message}");
+    }
+}
+
+/// A linked list node, for structs that contain themselves through a `Box`.
+#[derive(sandlang::SandStruct)]
+#[sand(module = "chain")]
+struct Link {
+    n: i64,
+    next: Option<Box<Link>>,
+}
+
+#[test]
+fn boxed_structs_convert_to_a_bounded_depth() {
+    fn sum(l: &Link) -> i64 {
+        l.n + l.next.as_deref().map_or(0, sum)
+    }
+    let run = |src: &str| {
+        let mut m = NativeModule::new("chain");
+        m.bind::<Link>();
+        m.function("sum", |l: Link| sum(&l));
+        m.function("range", |n: i64| (0..n).fold(None, |next, i| Some(Box::new(Link { n: i, next }))));
+        run_src(Config::new().module(m), &format!("import chain\n{src}"))
+    };
+    let (r, out, _) = run("print(chain.sum(chain.Link { n: 1, next: Some(chain.Link { n: 2, next: None }) }))\nprint(chain.range(3))");
+    r.unwrap();
+    assert_eq!(out, "3\nSome(Link { n: 2, next: Some(Link { n: 1, next: Some(Link { n: 0, next: None }) }) })\n");
+    let (r, out, _) = run("print(chain.sum(chain.range(256)?))");
+    r.unwrap();
+    assert_eq!(out, "32640\n");
+    for src in [
+        "print(chain.range(257))",
+        "var l = chain.Link { n: 0, next: None }\nfor i in 0..256 {\n    l = chain.Link { n: i, next: Some(l) }\n}\nprint(chain.sum(l))",
+    ] {
+        let (r, _, _) = run(src);
+        let Err(Error::Runtime { message, .. }) = r else { panic!("{src}: expected a runtime error, got {r:?}") };
+        assert!(message.contains("value too deeply nested to convert"), "{src}: {message}");
+    }
 }
 
 #[derive(Clone, Copy, sandlang::SandEnum)]

@@ -144,6 +144,7 @@ Sand infers the Sand function signature from the Rust parameter and return types
 | `Vec<u8>`, `&[u8]`                                | `bytes`                      |
 | `Vec<T>`                                          | `[T]`                        |
 | `Option<T>`                                       | `T?`                         |
+| `Box<T>`                                          | `T`                          |
 | `Result<T, E>`                                    | `Result<T, Error>`           |
 | `HashMap<K, V>`, `BTreeMap<K, V>`                 | `[K: V]`                     |
 | `HashSet<T>`, `BTreeSet<T>`                       | `Set<T>`                     |
@@ -183,7 +184,7 @@ geo.function("sides", |s: Shape| match s {
 
 The engine generates the `pub enum Shape` declaration in `geo` from the Rust variants and doc comments, so scripts can call `geo.sides(geo.Shape.Square)`.
 
-Derive `SandStruct` on a Rust struct with named fields to pass struct values between Rust and Sand. The engine copies the fields on each conversion. A field is public unless it has `#[sand(private)]`, and immutable unless it has `#[sand(var)]`:
+Derive `SandStruct` on a Rust struct with named fields to pass struct values between Rust and Sand. The engine copies the fields on each conversion. A field is public unless it has `#[sand(private)]`, and immutable unless it has `#[sand(var)]`. `#[sand(name = "kind")]` gives a field a different Sand name:
 
 ```rust
 use sandlang::{NativeModule, SandStruct};
@@ -204,7 +205,7 @@ geo.function("mid", |a: Point, b: Point| Point { x: (a.x + b.x) / 2.0, y: (a.y +
 geo.function("Point.norm", |p: Point| (p.x * p.x + p.y * p.y).sqrt());
 ```
 
-Scripts build and read the struct as any other: `geo.mid(geo.Point { x: 0.0, y: 0.0 }, b).norm()`.
+Scripts build and read the struct as any other: `geo.mid(geo.Point { x: 0.0, y: 0.0 }, b).norm()`. A struct can contain itself (`kids: Vec<Node>` or `next: Option<Box<Node>>`). If a native function takes or returns a value whose structs nest more than 256 deep, the run aborts.
 
 Derive `SandObject` on a Rust type to expose opaque reference handles to scripts. Registered functions borrow an object parameter as `&T` and return a new object by value as `T`; scripts compare object handles by identity:
 
@@ -227,7 +228,7 @@ stats.function("Counter.add", |c: &Counter, n: i64| c.0.fetch_add(n, Ordering::R
 
 `NativeModule::async_function` registers an async Rust function; while its future is pending, only the calling Sand task suspends.
 
-To check a sandbox capability inside a native function, register the function with `NativeModule::vm_function` and call `Vm::require`, which returns a `"permission_denied"` error if the policy denies the request. Because the engine re-runs the function after a permission prompt, call `Vm::require` before performing any side effects:
+To check a sandbox capability inside a native function, register the function with `NativeModule::vm_function` and call `Vm::require`, which returns a `"permission_denied"` error if the policy denies the request. The engine calls the function again after a permission prompt, and after it collects garbage when a memory or resource check (`Vm::check_room`, `Vm::reserve_io`, `Vm::resource_slot`) fails. So make these checks before any side effect. `Config::retry_stress(true)` fails the first check of each native call, so that your tests show a side effect that runs twice:
 
 ```rust
 # #[tokio::main(flavor = "current_thread")]

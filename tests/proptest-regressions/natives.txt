@@ -5,3 +5,5 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc ea9234ea3ac89087fa4f5aa0d15f0f65155c5734cd36f79c43b06bb9539201b5 # shrinks to limit_kib = 5026, garbage = 2313342, size = 512569, calls = 1
+cc 59207e472b025e75cf255199b08a9ae65e7279d38643139b5451ba99016746e3 # shrinks to value = Tree { n: 0, kids: [Tree { n: 0, kids: [] }] }, spine = 254, gc_stress = false
+cc b49607cb61e85367584452aa45ca5138bd1ec683198ffbd14a25516ec7291311 # shrinks to boxed = true, levels = 14

@@ -53,10 +53,11 @@ fn send(
     timeout: SignedDuration,
 ) -> Suspended<Response> {
     let mut req = prepare_request(vm, method, url, headers)?;
-    req.require(vm)?;
-    let Prepared { method, url, headers, .. } = req;
     // The request body is held, and the response buffered, outside the heap.
     let res = vm.reserve_io(body.bytes(&vm.heap).len())?;
+    req.allow(vm)?;
+    req.filter(vm)?;
+    let Prepared { method, url, headers, .. } = req;
     let body = body.bytes(&vm.heap).to_vec();
     vm.charge_bytes(body.len())?;
     let request = Request {

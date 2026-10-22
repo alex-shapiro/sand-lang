@@ -556,6 +556,12 @@ pub struct Vm {
     /// interpreter, a native or an I/O finisher: the VM is memory safe but may
     /// be inconsistent, so a REPL session discards it.
     pub(crate) broken: bool,
+    /// Testing aid: the first memory or resource check of each native call
+    /// fails (see `Config::retry_stress`).
+    pub(crate) retry_stress: bool,
+    /// The number of structs that the current conversion to Sand is inside
+    /// of (see [`Vm::nested`]).
+    pub(crate) nesting: usize,
 }
 
 pub const SLICE_FUEL: i64 = 20_000;
@@ -582,9 +588,7 @@ impl Fiber {
         let n = need.max(self.stack.len() * 2).min(MAX_STACK_SLOTS);
         let before = self.stack.capacity();
         let extra = n.saturating_sub(before) * std::mem::size_of::<Value>();
-        if heap.would_exceed(extra) {
-            return Err(Ctl::limit(LimitKind::Memory));
-        }
+        heap.check_room(extra)?;
         self.stack.reserve_exact(n - self.stack.len());
         self.stack.resize(n, Value::Unit);
         heap.fiber_bytes += self.stack.capacity().saturating_sub(before) * std::mem::size_of::<Value>();
@@ -598,9 +602,7 @@ impl Fiber {
     pub fn grow_frames(&mut self, heap: &mut Heap) -> Result<(), Ctl> {
         let before = self.frames.capacity();
         let more = before.max(8);
-        if heap.would_exceed(more * std::mem::size_of::<Frame>()) {
-            return Err(Ctl::limit(LimitKind::Memory));
-        }
+        heap.check_room(more * std::mem::size_of::<Frame>())?;
         self.frames.reserve_exact(more);
         heap.fiber_bytes += self.frames.capacity().saturating_sub(before) * std::mem::size_of::<Frame>();
         Ok(())
@@ -652,6 +654,8 @@ impl Vm {
             last_slot: std::cell::Cell::new((u32::MAX, 0)),
             ascii_strs: Vec::new(),
             broken: false,
+            retry_stress: false,
+            nesting: 0,
         };
         vm.load_program();
         vm
@@ -885,9 +889,10 @@ impl Vm {
         display::to_debug_metered(&self.prog, &self.heap, &self.meter, v)
     }
 
-    /// Fails with a memory limit error if `extra` bytes cannot be allocated.
-    pub fn reserve(&self, extra: usize) -> Result<(), Ctl> {
-        if self.heap.would_exceed(extra) { Err(Ctl::limit(LimitKind::Memory)) } else { Ok(()) }
+    /// Fails with the memory limit if `extra` more heap bytes do not fit (see
+    /// [`Heap::check_room`](heap::Heap::check_room)).
+    pub fn check_room(&self, extra: usize) -> Result<(), Ctl> {
+        self.heap.check_room(extra)
     }
 
     /// Runs `f` with heap memory-limit checks disabled so post-effect result conversion cannot trigger a retry. Call [`Vm::enforce_limit`] after rooting the result.
@@ -926,6 +931,9 @@ impl Vm {
     /// after a retry.
     pub fn try_reserve_io(&mut self, bytes: usize) -> Result<Option<iomem::Reservation>, Ctl> {
         let mut r = self.io_reservation();
+        if !self.collected && self.heap.fail_next_check.replace(false) {
+            return Err(CtlKind::Collect.into());
+        }
         match r.ensure(bytes) {
             Ok(()) => Ok(Some(r)),
             Err(_) if !self.collected => Err(CtlKind::Collect.into()),
@@ -938,6 +946,9 @@ impl Vm {
     /// limit is reached, then fails with kind `"limit"` if the limit is still
     /// reached.
     pub fn resource_slot(&mut self) -> Result<iomem::ResourceSlot, HostError> {
+        if !self.collected && self.heap.fail_next_check.replace(false) {
+            return Err(Ctl::from(CtlKind::Collect).into());
+        }
         match iomem::ResourceSlot::try_new(&self.heap.io_memory) {
             Some(slot) => Ok(slot),
             None if !self.collected => Err(Ctl::from(CtlKind::Collect).into()),

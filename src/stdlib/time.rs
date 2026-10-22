@@ -65,6 +65,7 @@ macro_rules! jiff_names {
                 Binding::of_value::<Self>()
             }
         }
+        crate::__value_type_impls!($rust);
     )*};
 }
 
@@ -734,7 +735,7 @@ fn parse<T: ValueType>(vm: &mut Vm, text: Val<String>) -> Result<T, HostError> {
 fn format(vm: &mut Vm, format: Val<String>, t: impl Into<BrokenDownTime>) -> Result<String, Ctl> {
     let format = format.str(&vm.heap);
     // Bound output size before formatting.
-    vm.reserve(format.len().saturating_mul(64))?;
+    vm.check_room(format.len().saturating_mul(64))?;
     vm.charge_slow_bytes(format.len())?;
     strtime::format(format, t).map_err(|e| Ctl::fail("invalid", e))
 }

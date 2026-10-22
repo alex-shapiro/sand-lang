@@ -4,7 +4,7 @@ mod convert;
 mod func;
 mod ty;
 
-pub use convert::{Conversion, FromValue, HostError, IntoHostError, IntoValue};
+pub use convert::{Conversion, FromValue, HostError, IntoHostError, IntoValue, value_from, value_into};
 pub use func::{AsyncHostFunction, HostFunction, Later, NativeError, Signature, VmFunction};
 pub use ty::{Bounds, Channel, Named, Never, Param, Range, Reflect, ReflectCheck, ReflectCheckFn, SandType, Task, Type, Val, bound};
 
@@ -117,7 +117,9 @@ pub trait StructType: NamedType + SandType {
 /// Metadata for a field of a [`StructType`].
 #[derive(Debug)]
 pub struct StructField {
+    /// Sand field name (the Rust identifier).
     pub name: &'static str,
+    /// Doc comment of the field.
     pub doc: &'static str,
     /// `false` if the field is private to the module (`#[sand(private)]`).
     pub public: bool,
@@ -125,6 +127,23 @@ pub struct StructField {
     pub var: bool,
     /// Returns the Sand type of the field.
     pub ty: fn() -> Type,
+}
+
+/// Converts `v`, a value of the Sand struct bound to `T`, with `read`, which
+/// takes the fields in declaration order. Charges fuel for the struct, so that
+/// a value that shares one struct in many places costs fuel for each copy.
+/// Fails with a `"limit"` error if structs nest too deeply. The derive macro
+/// calls this function.
+#[doc(hidden)]
+pub fn struct_from_value<T: StructType>(
+    vm: &Vm,
+    v: Value,
+    conv: &mut Conversion,
+    read: impl FnOnce(&[Value], &mut Conversion) -> Result<T, Ctl>,
+) -> Result<T, Ctl> {
+    let fields = vm.struct_fields::<T>(v)?;
+    vm.charge(1)?;
+    conv.nested(|conv| read(fields, conv))
 }
 
 /// Converts the value `v` of a field of a [`StructType`] for
@@ -401,8 +420,17 @@ impl Vm {
     /// Allocates `x` on the heap after reserving `x.size()` bytes against the
     /// memory limit.
     pub fn new_object<T: ObjectType>(&mut self, x: T) -> Result<Val<T>, Ctl> {
-        self.reserve(NativeObject::size(&x))?;
+        self.check_room(NativeObject::size(&x))?;
         Ok(Val::from_raw(self.heap.alloc(Obj::Native(Box::new(x)))))
+    }
+
+    /// Converts the fields of a struct to Sand with `f`. Fails with a
+    /// `"limit"` error if structs nest too deeply.
+    pub fn nested<R>(&mut self, f: impl FnOnce(&mut Vm) -> Result<R, Ctl>) -> Result<R, Ctl> {
+        self.nesting = convert::deeper(self.nesting)?;
+        let r = f(self);
+        self.nesting -= 1;
+        r
     }
 
     /// Returns the fields of `v`, a value of the Sand struct bound to `T`, in
@@ -428,7 +456,7 @@ impl Vm {
         if fields.len() != T::FIELDS.len() {
             return Err(mismatch::<T>());
         }
-        self.reserve(fields.len() * std::mem::size_of::<Value>())?;
+        self.check_room(fields.len() * std::mem::size_of::<Value>())?;
         Ok(self.heap.alloc(Obj::Struct(def, fields)))
     }
 }
@@ -567,6 +595,13 @@ impl NativeModule {
     /// first parameter. Heap values that the function does not copy must be
     /// taken as [`Val`] handles.
     ///
+    /// The engine can call `f` again: after a permission prompt
+    /// ([`Vm::require`]), and after it collects garbage when a memory or
+    /// resource check fails ([`Vm::check_room`], [`Vm::reserve_io`],
+    /// [`Vm::resource_slot`]). So `f` must make these checks before it changes
+    /// anything. [`Config::retry_stress`](crate::Config::retry_stress) tests
+    /// this.
+    ///
     /// # Panics
     ///
     /// Panics under the same conditions as [`NativeModule::function`].
@@ -630,14 +665,21 @@ impl NativeModule {
     ///
     /// Panics if `T::MODULE` does not match [`NativeModule::name`], if
     /// `T::NAME` (or the name of a variant or field) is not a valid
-    /// identifier, or if `T::NAME` is already registered in this module.
+    /// identifier, if `T::NAME` is already registered in this module, or if
+    /// [`NamedType::binding`] describes a type other than `T`.
     pub fn bind<T: NamedType>(&mut self) -> &mut Self {
         let kind = T::binding().0;
+        assert!(kind.rust_type() == Some(TypeId::of::<T>()), "the binding of `{}` describes another Rust type", T::NAME);
         match &kind {
             BoundKind::Enum(_, variants) => variants.iter().for_each(|(v, _)| crate::vm::value::check_type_name(v)),
             BoundKind::Struct(_, fields) => {
                 for (i, f) in fields.iter().enumerate() {
-                    assert!(is_ident(f.name) && keyword(f.name).is_none(), "field `{}` of `{}` is not an identifier", f.name, T::NAME);
+                    assert!(
+                        is_ident(f.name) && keyword(f.name).is_none(),
+                        "field `{}` of `{}` is not an identifier; rename it with `#[sand(name = \"...\")]`",
+                        f.name,
+                        T::NAME
+                    );
                     assert!(!fields[..i].iter().any(|g| g.name == f.name), "field `{}` of `{}` is declared twice", f.name, T::NAME);
                 }
             }

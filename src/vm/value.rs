@@ -835,7 +835,7 @@ impl ChannelObj {
 
 /// A Rust type that implements an immutable Sand value type.
 ///
-/// Derive [`NamedType`](crate::native::NamedType) with
+/// Derive [`NamedType`](crate::native::NamedType) and the conversions with
 /// [`#[derive(SandValue)]`](crate::SandValue), implement this trait, and
 /// register the type with [`NativeModule::bind`](crate::NativeModule::bind):
 ///
@@ -855,9 +855,11 @@ impl ChannelObj {
 ///
 /// impl ValueType for Money {
 ///     fn parse(text: &str) -> Result<Money, String> {
-///         let (whole, cents) = text.split_once('.').ok_or("expected `units.cents`")?;
+///         let parts = text.split_once('.').filter(|(_, cents)| cents.len() == 2);
+///         let (units, cents) = parts.ok_or("expected `units.cents`")?;
 ///         let n = |s: &str| s.parse::<u64>().map_err(|e| e.to_string());
-///         Ok(Money(n(whole)? * 100 + n(cents)?))
+///         let total = n(units)?.checked_mul(100).and_then(|u| u.checked_add(n(cents).ok()?));
+///         total.map(Money).ok_or_else(|| format!("invalid amount `{text}`"))
 ///     }
 /// }
 /// ```
@@ -867,7 +869,18 @@ impl ChannelObj {
 /// must produce identical `Display` output, and [`Self::parse`] must parse that
 /// output back into an equal value. Comparison, hashing, and formatting are
 /// not metered, so these operations must execute in constant time.
-pub trait ValueType: crate::native::NamedType + Clone + Eq + Hash + std::fmt::Display + Send + Sync + 'static {
+pub trait ValueType:
+    crate::native::NamedType
+    + crate::native::IntoValue
+    + for<'a> crate::native::FromValue<Item<'a> = Self>
+    + Clone
+    + Eq
+    + Hash
+    + std::fmt::Display
+    + Send
+    + Sync
+    + 'static
+{
     /// Comparison function for types that satisfy `Ord` (typically `Some(Ord::cmp)`).
     const ORDER: Option<fn(&Self, &Self) -> std::cmp::Ordering> = None;
     /// Optional 16-byte inline heap representation.
@@ -1118,6 +1131,33 @@ pub enum TypeDesc {
     /// Recursive reference to the enclosing struct or enum with this `id`.
     Recur(u32),
     Unsupported(String),
+}
+
+impl TypeDesc {
+    /// The Sand name of the type that `self` describes. `recur` names the
+    /// enclosing struct or enum that a [`TypeDesc::Recur`] refers to.
+    pub fn name(&self, recur: &dyn Fn(u32) -> String) -> String {
+        let list = |ts: &[Arc<TypeDesc>]| ts.iter().map(|t| t.name(recur)).collect::<Vec<_>>().join(", ");
+        match self {
+            TypeDesc::Int => "int".into(),
+            TypeDesc::Float => "float".into(),
+            TypeDesc::Bool => "bool".into(),
+            TypeDesc::Str => "str".into(),
+            TypeDesc::Bytes => "bytes".into(),
+            TypeDesc::Duration => "duration".into(),
+            TypeDesc::Unit => "()".into(),
+            TypeDesc::List(e) => format!("[{}]", e.name(recur)),
+            TypeDesc::Map(k, v) => format!("[{}: {}]", k.name(recur), v.name(recur)),
+            TypeDesc::Set(e) => format!("Set<{}>", e.name(recur)),
+            TypeDesc::Tuple(ts) => format!("({})", list(ts)),
+            TypeDesc::Option(e) => format!("{}?", e.name(recur)),
+            TypeDesc::Json => "Json".into(),
+            TypeDesc::Struct { name, .. } | TypeDesc::Enum { name, .. } | TypeDesc::Value { name, .. } | TypeDesc::Unsupported(name) => {
+                name.clone()
+            }
+            TypeDesc::Recur(id) => recur(*id),
+        }
+    }
 }
 
 impl std::fmt::Debug for TypeDesc {
