@@ -228,7 +228,7 @@ stats.function("Counter.add", |c: &Counter, n: i64| c.0.fetch_add(n, Ordering::R
 
 `NativeModule::async_function` registers an async Rust function; while its future is pending, only the calling Sand task suspends.
 
-To check a sandbox capability inside a native function, register the function with `NativeModule::vm_function` and call `Vm::require`, which returns a `"permission_denied"` error if the policy denies the request. The engine calls the function again after a permission prompt, and after it collects garbage when a memory or resource check (`Vm::check_room`, `Vm::reserve_io`, `Vm::resource_slot`) fails. So make these checks before any side effect. `Config::retry_stress(true)` fails the first check of each native call, so that your tests show a side effect that runs twice:
+To check a sandbox capability inside a native function, register the function with `NativeModule::vm_function` and call `Vm::require`, which returns a `"permission_denied"` error if the policy denies the request. The engine calls the function again after a permission prompt, and after it collects garbage when a memory or resource check (`Vm::check_room`, `Vm::reserve_io`, `Vm::resource_slot`) fails. So make these checks before any side effect. `Config::retry_stress(true)` fails the first of these checks in each call, so that your tests show a side effect that runs twice:
 
 ```rust
 # #[tokio::main(flavor = "current_thread")]

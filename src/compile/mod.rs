@@ -2174,7 +2174,7 @@ impl<'a> Compiler<'a> {
                         self.errors.push(Diag::error(e.span, "type too large to describe at runtime"));
                         continue;
                     };
-                    let check = self.natives.sigs.get(*native as usize).and_then(|s| match s.params.get(i) {
+                    let check = self.natives.fns.get(*native as usize).and_then(|d| match d.sig.params.get(i) {
                         Some(crate::native::Type::Reflect(_, c)) => Some(*c),
                         _ => None,
                     });

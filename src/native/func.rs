@@ -8,7 +8,7 @@ use std::future::Future;
 use std::marker::PhantomData;
 
 /// Sand parameter and return types derived from a Rust function signature.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct Signature {
     pub params: Vec<Type>,
     pub ret: Type,
@@ -183,6 +183,7 @@ macro_rules! fn_impls {
                     let &[$($a),*] = strip_dict_args(args, $n) else { return Err(too_few_args()) };
                     let mut conv = Conversion::new();
                     $(let $a = $a::from_value(vm, $a, &mut conv)?;)*
+                    vm.arm_retry_stress();
                     let r = self(vm, $($a),*);
                     vm.unchecked(|vm| r.into_value(vm))
                 })

@@ -17,10 +17,10 @@ use std::hash::Hash;
 ///
 /// A Sand value can hold one value in many places, and a conversion makes a
 /// separate copy for each place. So an implementation for a type that can
-/// hold values of the same type again (a list, a map, a struct, or a `Box`)
-/// must charge fuel for each copy it makes, and must add the bytes it
-/// allocates to the [`Conversion`]. Then the instruction and memory limits
-/// stop a copy that grows without bound.
+/// hold values of the same type again (a list, a map, or a struct) must
+/// charge fuel for each copy it makes, and each implementation must add the
+/// bytes it allocates to the [`Conversion`]. Then the instruction and memory
+/// limits stop a copy that grows without bound.
 pub trait FromValue: SandType {
     type Item<'a>;
 

@@ -39,6 +39,10 @@ Follow-up work, roughly in priority order.
       the ratio between two input sizes in the same run).
 - [ ] The playground page is tested by hand in headless Chrome, not in CI,
       Firefox or Safari.
+- [ ] `Config::retry_stress` fails only the first check in the body of a
+      `vm_function`, so a side effect between two checks of one call is not
+      found. Run the stressed tests once for each check index that a call
+      reaches, and fail that check.
 - [ ] Run the `cargo fuzz` targets on a schedule (or on OSS-Fuzz). Update the
       `run` target to compare optimized and unoptimized executions.
 

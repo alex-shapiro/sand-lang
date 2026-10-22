@@ -1057,22 +1057,6 @@ fn struct_fields_can_take_another_sand_name() {
 }
 
 #[test]
-#[should_panic(expected = "the binding of `Fake` describes another Rust type")]
-fn bindings_describe_their_own_type() {
-    struct Fake;
-    impl sandlang::NamedType for Fake {
-        const MODULE: &'static str = "plane";
-        const NAME: &'static str = "Fake";
-        const DOC: &'static str = "";
-        const PUBLIC: bool = true;
-        fn binding() -> sandlang::native::Binding {
-            sandlang::native::Binding::of_struct::<Point>()
-        }
-    }
-    NativeModule::new("plane").bind::<Fake>();
-}
-
-#[test]
 #[should_panic(expected = "type `Point` is registered twice in module `plane`")]
 fn structs_bind_once() {
     NativeModule::new("plane").bind::<Point>().bind::<Point>();
@@ -2664,4 +2648,22 @@ fn engine_docs_include_prelude_std_and_host_modules() {
     let host = docs.last().unwrap();
     assert_eq!((host.name.as_str(), host.kind), ("geo", ModuleKind::Host));
     assert_eq!(host.items[0].decl, "fn dist(a: float, b: float) -> float");
+}
+
+/// Argument conversion cannot use up the failure of `Config::retry_stress`:
+/// a side effect before the first check in the body runs twice.
+#[test]
+fn retry_stress_fails_a_check_in_the_native_body() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c = calls.clone();
+    let mut m = NativeModule::new("probe");
+    m.vm_function("touch", move |vm: &mut Vm, s: String| -> Result<i64, sandlang::vm::Ctl> {
+        c.fetch_add(1, Ordering::SeqCst);
+        vm.check_room(s.len())?;
+        Ok(s.len() as i64)
+    });
+    let (r, out, _) = run_src(Config::new().retry_stress(true).module(m), "import probe\nprint(probe.touch(\"abc\"))");
+    r.unwrap();
+    assert_eq!(out, "3\n");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
 }

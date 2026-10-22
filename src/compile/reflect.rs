@@ -23,7 +23,6 @@
 
 use crate::check::CheckedProgram;
 use crate::check::persist::PMap;
-use crate::native::ReflectCheckFn;
 use crate::types::{Opaque, Ty, TyList, TypeArena, TypeDefKind, TypeId, TypePrinter};
 use crate::vm::value::TypeDesc;
 use std::collections::{HashMap, HashSet};
@@ -111,8 +110,8 @@ impl DescCache {
 impl DescCache {
     /// Checks the description `desc` of constant `k` with `check`, calling it
     /// once for each distinct node.
-    pub(crate) fn check(&mut self, k: u32, desc: &TypeDesc, check: ReflectCheckFn) -> Result<(), String> {
-        let key = (k, check.0 as usize);
+    pub(crate) fn check(&mut self, k: u32, desc: &TypeDesc, check: fn(&TypeDesc) -> Result<(), String>) -> Result<(), String> {
+        let key = (k, check as usize);
         if self.accepted.get(&key).is_some() {
             return Ok(());
         }
@@ -122,7 +121,7 @@ impl DescCache {
             if !seen.insert(d) {
                 continue;
             }
-            (check.0)(d)?;
+            check(d)?;
             match d {
                 TypeDesc::List(e) | TypeDesc::Set(e) | TypeDesc::Option(e) => todo.push(e),
                 TypeDesc::Map(k, v) => todo.extend([&**k, &**v]),

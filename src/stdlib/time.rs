@@ -61,8 +61,8 @@ macro_rules! jiff_names {
             const NAME: &'static str = $name;
             const DOC: &'static str = $doc;
             const PUBLIC: bool = true;
-            fn binding() -> Binding {
-                Binding::of_value::<Self>()
+            fn binding() -> Binding<Self> {
+                Binding::of_value()
             }
         }
         crate::__value_type_impls!($rust);

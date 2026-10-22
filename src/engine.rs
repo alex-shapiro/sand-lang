@@ -442,12 +442,13 @@ impl Config {
         self.gc_stress = on;
         self
     }
-    /// Testing aid: in each native function call, the first memory or
-    /// resource check fails. The engine then collects garbage and calls the
-    /// native again, as it does when garbage fills the memory limit. Use it to
-    /// test that a native function checks memory and resources before it
-    /// changes anything: a change made before the check happens twice. As
-    /// after a real limit, the collection also closes idle HTTP connections.
+    /// Testing aid: in each call of a `vm_function`, the first memory or
+    /// resource check after argument conversion fails. The engine then
+    /// collects garbage and calls the native again, as it does when garbage
+    /// fills the memory limit. Use it to test that a native function checks
+    /// memory and resources before it changes anything: a change made before
+    /// the check happens twice. As after a real limit, the collection also
+    /// closes idle HTTP connections.
     pub fn retry_stress(mut self, on: bool) -> Self {
         self.retry_stress = on;
         self
@@ -563,17 +564,21 @@ pub(crate) struct Source {
 /// Registered native functions and Rust-bound types.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct NativeDecls {
-    /// Native functions keyed by `module.name` or `module.Type.name`.
-    pub fns: HashMap<Cow<'static, str>, NativeDecl>,
-    /// The signatures of the native functions, by id.
-    pub sigs: Vec<Arc<Signature>>,
+    /// Native functions by id, in registration order.
+    pub fns: Vec<NativeDecl>,
+    /// The id of each native function by its key.
+    pub ids: HashMap<Cow<'static, str>, u32>,
     /// Rust-bound types in registration order.
     pub types: Vec<BoundType>,
 }
 
 impl NativeDecls {
     pub(crate) fn id(&self, key: &str) -> Option<u32> {
-        self.fns.get(key).map(|d| d.id)
+        self.ids.get(key).copied()
+    }
+
+    pub(crate) fn get(&self, key: &str) -> Option<&NativeDecl> {
+        self.id(key).map(|id| &self.fns[id as usize])
     }
 }
 
@@ -632,13 +637,13 @@ impl Registry {
     }
 
     pub fn add_native(&mut self, key: String, f: HostFn, sig: Signature, names: Option<Arc<[String]>>, doc: Option<Arc<str>>) {
-        assert!(!self.decls.fns.contains_key(key.as_str()), "native `{key}` registered twice");
+        assert!(!self.decls.ids.contains_key(key.as_str()), "native `{key}` registered twice");
         let id = self.natives.len() as u32;
         Arc::make_mut(&mut self.natives).push(NativeEntry { name: key.clone().into(), f });
-        let sig = Arc::new(sig);
         let decls = Arc::make_mut(&mut self.decls);
-        decls.sigs.push(sig.clone());
-        decls.fns.insert(key.into(), NativeDecl { id, sig, names, doc });
+        let key: Cow<'static, str> = key.into();
+        decls.ids.insert(key.clone(), id);
+        decls.fns.push(NativeDecl { id, key, sig: Arc::new(sig), names, doc });
     }
 
     pub(crate) fn add_bound_type(&mut self, t: BoundType) {
@@ -657,7 +662,7 @@ impl Registry {
         let module = module.into();
         let prefix = format!("{module}.");
         let mut deps: Vec<&'static str> = Vec::new();
-        let sigs = self.decls.fns.iter().filter(|(k, _)| k.starts_with(&prefix)).flat_map(|(_, d)| d.sig.params.iter().chain([&d.sig.ret]));
+        let sigs = self.decls.fns.iter().filter(|d| d.key.starts_with(&prefix)).flat_map(|d| d.sig.params.iter().chain([&d.sig.ret]));
         let fields = self.decls.types.iter().filter(|t| t.module == module).flat_map(|t| match &t.kind {
             BoundKind::Struct(_, fields) => fields.iter().map(|f| (f.ty)()).collect(),
             _ => Vec::new(),

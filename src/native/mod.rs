@@ -6,7 +6,7 @@ mod ty;
 
 pub use convert::{Conversion, FromValue, HostError, IntoHostError, IntoValue, value_from, value_into};
 pub use func::{AsyncHostFunction, HostFunction, Later, NativeError, Signature, VmFunction};
-pub use ty::{Bounds, Channel, Named, Never, Param, Range, Reflect, ReflectCheck, ReflectCheckFn, SandType, Task, Type, Val, bound};
+pub use ty::{Bounds, Channel, Named, Never, Param, Range, Reflect, ReflectCheck, SandType, Task, Type, Val, bound};
 
 pub(crate) use convert::mismatch;
 
@@ -18,6 +18,8 @@ use crate::vm::heap::Heap;
 use crate::vm::value::{ChannelObj, MapObj, Obj, SetObj, TaskObj, TypeDesc, Value, ValueType};
 use crate::vm::{Ctl, HostFn, NativeFn, Vm};
 use std::any::{Any, TypeId};
+use std::borrow::Cow;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 /// A Rust type bound to a nominal Sand type of a native module.
@@ -38,32 +40,35 @@ pub trait NamedType: Sized + 'static {
     /// How the engine represents values of the type. The derive macros
     /// implement this function.
     #[doc(hidden)]
-    fn binding() -> Binding;
+    fn binding() -> Binding<Self>;
 }
 
-/// How the engine represents values of a [`NamedType`].
+/// How the engine represents values of the [`NamedType`] `T`.
 #[doc(hidden)]
-pub struct Binding(BoundKind);
+pub struct Binding<T>(BoundKind, PhantomData<fn() -> T>);
 
-impl Binding {
-    pub fn of_enum<T: EnumType>() -> Binding {
-        Binding(BoundKind::Enum(TypeId::of::<T>(), T::VARIANTS.iter().map(|v| (v.name, v.doc)).collect()))
+impl<T: EnumType> Binding<T> {
+    pub fn of_enum() -> Binding<T> {
+        Binding(BoundKind::Enum(TypeId::of::<T>(), T::VARIANTS.iter().map(|v| (v.name, v.doc)).collect()), PhantomData)
     }
+}
 
-    pub fn of_object<T: ObjectType>() -> Binding {
-        Binding(BoundKind::Object(TypeId::of::<T>()))
+impl<T: ObjectType> Binding<T> {
+    pub fn of_object() -> Binding<T> {
+        Binding(BoundKind::Object(TypeId::of::<T>()), PhantomData)
     }
+}
 
-    pub fn of_struct<T: StructType>() -> Binding {
-        Binding(BoundKind::Struct(TypeId::of::<T>(), T::FIELDS))
+impl<T: StructType> Binding<T> {
+    pub fn of_struct() -> Binding<T> {
+        Binding(BoundKind::Struct(TypeId::of::<T>(), T::FIELDS), PhantomData)
     }
+}
 
-    pub fn of_value<T: ValueType>() -> Binding {
-        Binding(BoundKind::Value(ValueTypeInfo {
-            ord: T::ORDER.is_some(),
-            parse: crate::vm::value::parse_value::<T>,
-            type_id: TypeId::of::<T>(),
-        }))
+impl<T: ValueType> Binding<T> {
+    pub fn of_value() -> Binding<T> {
+        let info = ValueTypeInfo { ord: T::ORDER.is_some(), parse: crate::vm::value::parse_value::<T>, type_id: TypeId::of::<T>() };
+        Binding(BoundKind::Value(info), PhantomData)
     }
 }
 
@@ -231,6 +236,23 @@ pub fn field_value<T: for<'a> FromValue<Item<'a> = T>>(vm: &Vm, v: Value, conv: 
 /// #[derive(Clone, Copy, sandlang::SandEnum)]
 /// #[sand(module = "geo", crate = not_sandlang)]
 /// enum Shape { Circle }
+/// ```
+///
+/// ```compile_fail
+/// #[derive(sandlang::SandStruct)]
+/// #[sand(module = "geo")]
+/// struct Point { x: f64 }
+/// struct Fake;
+/// impl sandlang::NamedType for Fake {
+///     const MODULE: &'static str = "geo";
+///     const NAME: &'static str = "Fake";
+///     const DOC: &'static str = "";
+///     const PUBLIC: bool = true;
+///     // A binding describes its own type.
+///     fn binding() -> sandlang::native::Binding<Fake> {
+///         sandlang::native::Binding::<Point>::of_struct()
+///     }
+/// }
 /// ```
 #[cfg(doctest)]
 struct DeriveErrors;
@@ -498,6 +520,8 @@ impl BoundKind {
 #[derive(Clone, Debug)]
 pub(crate) struct NativeDecl {
     pub id: u32,
+    /// `module.name` or `module.Type.name`.
+    pub key: Cow<'static, str>,
     pub sig: Arc<Signature>,
     pub names: Option<Arc<[String]>>,
     pub doc: Option<Arc<str>>,
@@ -665,11 +689,9 @@ impl NativeModule {
     ///
     /// Panics if `T::MODULE` does not match [`NativeModule::name`], if
     /// `T::NAME` (or the name of a variant or field) is not a valid
-    /// identifier, if `T::NAME` is already registered in this module, or if
-    /// [`NamedType::binding`] describes a type other than `T`.
+    /// identifier, or if `T::NAME` is already registered in this module.
     pub fn bind<T: NamedType>(&mut self) -> &mut Self {
         let kind = T::binding().0;
-        assert!(kind.rust_type() == Some(TypeId::of::<T>()), "the binding of `{}` describes another Rust type", T::NAME);
         match &kind {
             BoundKind::Enum(_, variants) => variants.iter().for_each(|(v, _)| crate::vm::value::check_type_name(v)),
             BoundKind::Struct(_, fields) => {

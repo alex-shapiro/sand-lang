@@ -1686,7 +1686,6 @@ impl Vm {
         let frame = fiber.frames.last_mut().unwrap();
         frame.ip = ip as u32;
         self.caller_site = (frame.proto, frame.ip);
-        self.heap.fail_next_check.set(self.retry_stress);
         let mut r = Self::invoke_native(self, natives, n, &fiber.stack[start..start + argc]);
         self.heap.fail_next_check.set(false);
         if r.is_memory_limit() || matches!(&r, Err(c) if matches!(c.kind(), CtlKind::Collect)) {

@@ -556,8 +556,8 @@ pub struct Vm {
     /// interpreter, a native or an I/O finisher: the VM is memory safe but may
     /// be inconsistent, so a REPL session discards it.
     pub(crate) broken: bool,
-    /// Testing aid: the first memory or resource check of each native call
-    /// fails (see `Config::retry_stress`).
+    /// Testing aid: the first memory or resource check in the body of each
+    /// `vm_function` call fails (see `Config::retry_stress`).
     pub(crate) retry_stress: bool,
     /// The number of structs that the current conversion to Sand is inside
     /// of (see [`Vm::nested`]).
@@ -889,6 +889,14 @@ impl Vm {
         display::to_debug_metered(&self.prog, &self.heap, &self.meter, v)
     }
 
+    /// Under [`Config::retry_stress`](crate::Config::retry_stress), makes the
+    /// next memory or resource check fail, unless this call is the retry.
+    /// Argument conversion has no side effects, so the wrapper of a
+    /// `vm_function` arms the failure after it converts the arguments.
+    pub(crate) fn arm_retry_stress(&self) {
+        self.heap.fail_next_check.set(self.retry_stress && !self.collected);
+    }
+
     /// Fails with the memory limit if `extra` more heap bytes do not fit (see
     /// [`Heap::check_room`](heap::Heap::check_room)).
     pub fn check_room(&self, extra: usize) -> Result<(), Ctl> {
@@ -931,7 +939,7 @@ impl Vm {
     /// after a retry.
     pub fn try_reserve_io(&mut self, bytes: usize) -> Result<Option<iomem::Reservation>, Ctl> {
         let mut r = self.io_reservation();
-        if !self.collected && self.heap.fail_next_check.replace(false) {
+        if self.heap.fail_next_check.replace(false) {
             return Err(CtlKind::Collect.into());
         }
         match r.ensure(bytes) {
@@ -946,7 +954,7 @@ impl Vm {
     /// limit is reached, then fails with kind `"limit"` if the limit is still
     /// reached.
     pub fn resource_slot(&mut self) -> Result<iomem::ResourceSlot, HostError> {
-        if !self.collected && self.heap.fail_next_check.replace(false) {
+        if self.heap.fail_next_check.replace(false) {
             return Err(Ctl::from(CtlKind::Collect).into());
         }
         match iomem::ResourceSlot::try_new(&self.heap.io_memory) {

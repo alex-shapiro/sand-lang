@@ -136,7 +136,7 @@ fn named_type(ty: &syn::Ident, a: &TypeAttrs, binding: Tokens) -> Tokens {
             const NAME: &'static str = #name;
             const DOC: &'static str = #doc;
             const PUBLIC: bool = #public;
-            fn binding() -> #krate::native::Binding {
+            fn binding() -> #krate::native::Binding<Self> {
                 #binding
             }
         }
@@ -177,7 +177,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
         variants.push(quote! { #krate::native::EnumVariant { name: #vname, doc: #vdoc, value: #ty::#ident } });
         arms.push(quote! { #ty::#ident => #i });
     }
-    let named = named_type(ty, &attrs, quote! { #krate::native::Binding::of_enum::<Self>() });
+    let named = named_type(ty, &attrs, quote! { #krate::native::Binding::of_enum() });
     let sand_type = sand_type(ty, krate);
     Ok(quote! {
         #named
@@ -216,7 +216,7 @@ fn sand_object(input: &DeriveInput) -> syn::Result<Tokens> {
     let attrs = parse_type_attrs(input, "SandObject")?;
     no_member_attrs(&input.data)?;
     let krate = &attrs.krate;
-    let named = named_type(ty, &attrs, quote! { #krate::native::Binding::of_object::<Self>() });
+    let named = named_type(ty, &attrs, quote! { #krate::native::Binding::of_object() });
     let sand_type = sand_type(ty, krate);
     Ok(quote! {
         #named
@@ -290,7 +290,7 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
         reads.push(quote! { #ident: #krate::native::field_value::<#fty>(vm, fields[#i], conv)? });
         writes.push(quote! { #krate::native::IntoValue::into_value(self.#ident, vm)? });
     }
-    let named = named_type(ty, &attrs, quote! { #krate::native::Binding::of_struct::<Self>() });
+    let named = named_type(ty, &attrs, quote! { #krate::native::Binding::of_struct() });
     let sand_type = sand_type(ty, krate);
     Ok(quote! {
         #named
@@ -328,7 +328,7 @@ fn sand_value(input: &DeriveInput) -> syn::Result<Tokens> {
     let attrs = parse_type_attrs(input, "SandValue")?;
     no_member_attrs(&input.data)?;
     let krate = &attrs.krate;
-    let named = named_type(ty, &attrs, quote! { #krate::native::Binding::of_value::<Self>() });
+    let named = named_type(ty, &attrs, quote! { #krate::native::Binding::of_value() });
     Ok(quote! {
         #named
         #krate::__value_type_impls!(#ty);

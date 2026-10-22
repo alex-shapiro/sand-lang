@@ -7,7 +7,7 @@ use std::fmt;
 use std::marker::PhantomData;
 
 /// A Sand type derived from a Rust type through [`SandType`].
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug)]
 pub enum Type {
     Int,
     Float,
@@ -29,13 +29,13 @@ pub enum Type {
     Param(u8, Bounds),
     /// Runtime type description for the `reflect` type parameter at index
     /// `0..`, and the check of the types that the native accepts for it.
-    Reflect(u8, ReflectCheckFn),
+    Reflect(u8, fn(&TypeDesc) -> Result<(), String>),
     /// Nominal type declared in a module.
     Named(Named),
 }
 
 /// A nominal Sand type and its type arguments.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug)]
 pub struct Named {
     pub module: &'static str,
     pub name: &'static str,
@@ -409,30 +409,6 @@ impl ReflectCheck for () {
     }
 }
 
-/// A [`ReflectCheck::check`] function, compared by address.
-#[derive(Clone, Copy)]
-pub struct ReflectCheckFn(pub fn(&TypeDesc) -> Result<(), String>);
-
-impl PartialEq for ReflectCheckFn {
-    fn eq(&self, other: &Self) -> bool {
-        std::ptr::fn_addr_eq(self.0, other.0)
-    }
-}
-
-impl Eq for ReflectCheckFn {}
-
-impl std::hash::Hash for ReflectCheckFn {
-    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
-        (self.0 as usize).hash(h);
-    }
-}
-
-impl fmt::Debug for ReflectCheckFn {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("ReflectCheckFn")
-    }
-}
-
 /// Runtime type description passed for the `N`-th `reflect` type parameter of
 /// a `native fn` (see [`Type::Reflect`]). At each call site, the engine checks
 /// the description with `C` and rejects the program if `C` rejects it.
@@ -464,7 +440,7 @@ impl<const N: u8, C: ReflectCheck> fmt::Debug for Reflect<N, C> {
 
 impl<const N: u8, C: ReflectCheck> SandType for Reflect<N, C> {
     fn sand_type() -> Type {
-        Type::Reflect(N, ReflectCheckFn(C::check))
+        Type::Reflect(N, C::check)
     }
 }
 

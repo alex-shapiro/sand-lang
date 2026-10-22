@@ -1680,13 +1680,12 @@ impl Checker {
             self.fns.iter_from(first_fn).filter_map(|f| if let FnKind::Native(n) = f.kind { Some(n) } else { None }).collect();
         let module = self.name(self.mods[self.cur_mod as usize].name).to_string();
         let natives = self.natives.clone();
-        let mut missing: Vec<(&str, &NativeDecl)> = natives
+        let missing: Vec<(&str, &NativeDecl)> = natives
             .fns
             .iter()
-            .filter_map(|(k, d)| Some((k.strip_prefix(module.as_str())?.strip_prefix('.')?, d)))
+            .filter_map(|d| Some((d.key.strip_prefix(module.as_str())?.strip_prefix('.')?, d)))
             .filter(|(_, d)| !declared.contains(&d.id))
             .collect();
-        missing.sort_by_key(|(_, d)| d.id);
         let host = self.mods[self.cur_mod as usize].kind == ModKind::Host;
         for (name, decl) in missing {
             if host {
@@ -2270,7 +2269,7 @@ impl Checker {
                 Some(t) => format!("{module_name}.{t}.{}", f.name.name),
                 None => format!("{module_name}.{}", f.name.name),
             };
-            match self.natives.fns.get(key.as_str()).cloned() {
+            match self.natives.get(&key).cloned() {
                 Some(decl) => {
                     self.check_native_signature(f, &key, &decl.sig, &generics, &params, ret);
                     if decl.names.is_some() || decl.doc.is_some() {

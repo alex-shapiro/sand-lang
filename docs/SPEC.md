@@ -2872,7 +2872,7 @@ collection triggered by a memory or resource limit, a native function must
 check capabilities and reserve memory before performing any side effects.
 Only a `vm_function` can make these checks after its body starts, so only its
 body can run twice. `Config::retry_stress` fails the first memory or resource
-check of each native call, to test this order. Return-value conversion does
+check in the body of each `vm_function` call, to test this order. Return-value conversion does
 not fail on the memory limit; instead, the engine collects garbage and checks
 the memory limit after the call completes.
 
