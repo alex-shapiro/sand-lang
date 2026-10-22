@@ -1,11 +1,9 @@
-//! The file system scripts see: the `fs` module and the loading of script
-//! modules go through an [`Fs`], the host's (with the `os` feature) or a
-//! [`MemFs`].
+//! Sandboxed file system abstraction over the host OS (`Fs::Host`, behind the
+//! `os` feature) and an in-memory file system ([`MemFs`]).
 //!
-//! [`Fs::target`] first resolves an operation's path into a [`Target`]: the
-//! normal form the policy checks and, on the host, the directory handles of
-//! the walk, through which the operation then acts (see `unix.rs`). Callers
-//! run host file system calls on worker threads (`Vm::offload`).
+//! Perform all script file and module-loading I/O through [`Fs`] on a worker
+//! thread (`Vm::offload`). Do not call path-based `std::fs` or `tokio::fs`
+//! functions on script paths.
 
 #[cfg(feature = "os")]
 mod host;
@@ -126,7 +124,9 @@ pub(crate) struct Work {
     pub scanned_bytes: usize,
 }
 
-/// A path resolved by an [`Fs`] for an operation.
+/// A path resolved by [`Fs::target`] into a normalized path for policy
+/// evaluation and, on the host, pinned directory handles for TOCTOU-safe
+/// access.
 pub(crate) struct Target {
     /// The fully resolved absolute path evaluated by the policy.
     pub path: PathBuf,
@@ -244,7 +244,8 @@ impl Fs {
         }
     }
 
-    /// Resolves a path for an operation.
+    /// Resolves `p` into a [`Target`] containing the normalized path for policy
+    /// evaluation and, on the host, pinned directory handles for the walk.
     pub fn target(&self, p: &Path, mode: Mode) -> Target {
         match self {
             #[cfg(feature = "os")]

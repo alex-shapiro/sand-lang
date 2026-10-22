@@ -2,35 +2,31 @@
 //! RustCrypto crates, charged as they go.
 
 use crate::check::ModKind;
-use crate::engine::Registry;
-use crate::vm::Ctl;
+use crate::native::{NativeModule, Val};
 use crate::vm::meter::{Budget, SLOW_BYTES_PER_UNIT};
-use crate::vm::value::Value;
+use crate::vm::{Ctl, Vm};
 use hmac::{KeyInit, Mac};
 use sha2::Digest;
 
-pub fn register(r: &mut Registry) {
-    r.source("crypto", ModKind::Std, include_str!("crypto.sand"));
-    r.add_builtin("crypto.sha256", |vm, a| {
-        let d = sha256_parts(&[vm.heap.bytes_of(a[0])], &vm.meter)?;
-        Ok(vm.heap.new_bytes(d.to_vec()))
+pub(crate) fn module() -> NativeModule {
+    let mut m = NativeModule::std("crypto", ModKind::Std, include_str!("crypto.sand"));
+    m.vm_function("sha256", |vm: &mut Vm, data: Val<Vec<u8>>| -> Result<_, Ctl> {
+        Ok(sha256_parts(&[data.bytes(&vm.heap)], &vm.meter)?.to_vec())
     });
-    r.add_builtin("crypto.sha1", |vm, a| {
-        let d = digest::<sha1::Sha1>(&[vm.heap.bytes_of(a[0])], &vm.meter)?;
-        Ok(vm.heap.new_bytes(d.to_vec()))
+    m.vm_function("sha1", |vm: &mut Vm, data: Val<Vec<u8>>| -> Result<_, Ctl> {
+        Ok(digest::<sha1::Sha1>(&[data.bytes(&vm.heap)], &vm.meter)?.to_vec())
     });
-    r.add_builtin("crypto.md5", |vm, a| {
-        let d = digest::<md5::Md5>(&[vm.heap.bytes_of(a[0])], &vm.meter)?;
-        Ok(vm.heap.new_bytes(d.to_vec()))
+    m.vm_function("md5", |vm: &mut Vm, data: Val<Vec<u8>>| -> Result<_, Ctl> {
+        Ok(digest::<md5::Md5>(&[data.bytes(&vm.heap)], &vm.meter)?.to_vec())
     });
-    r.add_builtin("crypto.hmac_sha256", |vm, a| {
-        let d = hmac_sha256(vm.heap.bytes_of(a[0]), vm.heap.bytes_of(a[1]), &vm.meter)?;
-        Ok(vm.heap.new_bytes(d.to_vec()))
+    m.vm_function("hmac_sha256", |vm: &mut Vm, key: Val<Vec<u8>>, data: Val<Vec<u8>>| -> Result<_, Ctl> {
+        Ok(hmac_sha256(key.bytes(&vm.heap), data.bytes(&vm.heap), &vm.meter)?.to_vec())
     });
-    r.add_builtin("crypto.constant_time_eq", |vm, a| {
-        vm.charge_bytes(vm.heap.bytes_of(a[0]).len())?;
-        Ok(Value::Bool(constant_time_eq(vm.heap.bytes_of(a[0]), vm.heap.bytes_of(a[1]))))
+    m.vm_function("constant_time_eq", |vm: &mut Vm, a: Val<Vec<u8>>, b: Val<Vec<u8>>| -> Result<_, Ctl> {
+        vm.charge_bytes(a.bytes(&vm.heap).len())?;
+        Ok(constant_time_eq(a.bytes(&vm.heap), b.bytes(&vm.heap)))
     });
+    m
 }
 
 /// Bytes hashed between charges to the budget (4 KiB).

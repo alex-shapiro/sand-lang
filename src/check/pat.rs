@@ -314,6 +314,7 @@ impl Checker {
                         continue;
                     };
                     seen[idx] = true;
+                    self.check_field_visible(d, idx, f.name.span);
                     let fty = self.field_type(d, idx, &targs);
                     let h = match &f.pattern {
                         Some(p) => self.check_pat_inner(p, fty, mutable, binds),
@@ -322,10 +323,19 @@ impl Checker {
                     hs.push((idx as u32, h));
                 }
                 if !rest {
+                    let mut hidden = false;
                     for i in seen.iter().enumerate().filter(|(_, s)| !**s).map(|(i, _)| i) {
+                        if !self.field_visible(d, i) {
+                            hidden = true;
+                            continue;
+                        }
                         let fname = self.name(self.types[d as usize].fields()[i].name);
                         let msg = format!("missing field `{fname}` in pattern; add `..` to ignore the rest");
                         self.error(span, msg);
+                    }
+                    if hidden {
+                        let ty = self.name(self.types[d as usize].name);
+                        self.error(span, format!("`{ty}` has private fields; add `..` to ignore them"));
                     }
                 }
                 self.pat(HPatKind::Struct { fields: hs }, ty, span)

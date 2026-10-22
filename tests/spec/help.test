@@ -303,7 +303,7 @@ Functions:
 
 Types:
     bool, int, float, str, bytes, duration, Range, List<T>, Map<K, V>, Set<T>,
-    Option<T>, Result<T, E>, Error, Task<T>, Channel<T>, Iter<T>
+    Channel<T>, Task<T>, Option<T>, Result<T, E>, Error, Iter<T>
 
 Traits:
     Close, Iterator<T>

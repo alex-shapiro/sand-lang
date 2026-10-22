@@ -1,6 +1,7 @@
 //! Property-based tests that compare Sand execution against Rust reference
 //! models on generated inputs.
 
+mod natives;
 mod observers;
 mod programs;
 mod values;
@@ -81,7 +82,7 @@ fn run_in(src: &str, mode: Mode) -> Run {
         .stderr(MemorySink::new())
         .optimize(!matches!(mode, Mode::Unoptimized))
         .gc_stress(matches!(mode, Mode::GcStress));
-    let mut engine = Engine::new(config);
+    let mut engine = Engine::new(config).unwrap();
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let failure = match rt.block_on(engine.run_source("main.sand", src)) {
         Ok(_) => None,

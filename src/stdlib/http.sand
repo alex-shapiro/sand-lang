@@ -5,13 +5,13 @@ let MAX_DRAINED = 64 * 1024
 /// to lowercase.
 pub struct Response {
     /// HTTP status code (such as `200` or `404`).
-    status: int
+    pub status: int
     /// Response headers in receipt order, with lowercase names.
-    headers: [(str, str)]
+    pub headers: [(str, str)]
     /// Response body bytes.
-    body: bytes
+    pub body: bytes
     /// Final URL after any redirects.
-    url: str
+    pub url: str
 
     /// Decodes the response body as UTF-8 text.
     pub fn text(self) -> Result<str> {
@@ -44,13 +44,13 @@ pub struct Response {
 /// is closed.
 pub struct Stream {
     /// HTTP status code (such as `200` or `404`).
-    status: int
+    pub status: int
     /// Response headers in receipt order, with lowercase names.
-    headers: [(str, str)]
+    pub headers: [(str, str)]
     /// Streaming response body.
-    body: Body
+    pub body: Body
     /// Final URL after any redirects.
-    url: str
+    pub url: str
 
     /// Returns `true` if `status` is in `200..=299`.
     pub fn ok(self) -> bool {
@@ -74,11 +74,6 @@ impl Close for Stream {
         self.body.close()
     }
 }
-
-/// A streaming HTTP request or response body. `read_all` and `read_text` read
-/// at most `max_http_body` bytes (failing with kind `"limit"` if exceeded), and
-/// each read waits at most the request `timeout`.
-pub native type Body
 
 impl io.Reader for Body {
     native fn read(self, max: int) -> Result<bytes>

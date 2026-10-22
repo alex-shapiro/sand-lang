@@ -30,7 +30,7 @@ pub(crate) mod time;
 mod uri;
 mod uuid;
 
-use crate::engine::Registry;
+use crate::native::NativeModule;
 #[cfg(feature = "os")]
 pub(crate) use http::Pool as HttpPool;
 #[cfg(feature = "os")]
@@ -69,7 +69,8 @@ pub(crate) const STD_MODULES: &[&str] = &[
     "uuid",
 ];
 
-/// At most the first `max` characters of `s`.
+/// Returns a prefix of `s` containing at most `max` characters. Use this
+/// function to bound script text included in diagnostic or error messages.
 pub(crate) fn truncate(s: &str, max: usize) -> &str {
     match s.char_indices().nth(max) {
         Some((i, _)) => &s[..i],
@@ -77,28 +78,32 @@ pub(crate) fn truncate(s: &str, max: usize) -> &str {
     }
 }
 
-pub(crate) fn register(r: &mut Registry) {
-    core::register(r);
-    base64::register(r);
-    crypto::register(r);
-    fs::register(r);
-    #[cfg(feature = "os")]
-    http::register(r);
-    #[cfg(all(web, not(feature = "os")))]
-    http_web::register(r);
-    io::register(r);
-    json::register(r);
-    log::register(r);
-    math::register(r);
-    #[cfg(feature = "os")]
-    net::register(r);
-    random::register(r);
-    regex::register(r);
-    statistics::register(r);
-    test::register(r);
-    time::register(r);
-    uri::register(r);
-    uuid::register(r);
+pub(crate) fn modules() -> Vec<NativeModule> {
+    vec![
+        core::prelude(),
+        core::task(),
+        base64::module(),
+        crypto::module(),
+        fs::module(),
+        #[cfg(feature = "os")]
+        http::module(),
+        #[cfg(all(web, not(feature = "os")))]
+        http_web::module(),
+        io::module(),
+        io::env_module(),
+        json::module(),
+        log::module(),
+        math::module(),
+        #[cfg(feature = "os")]
+        net::module(),
+        random::module(),
+        regex::module(),
+        statistics::module(),
+        test::module(),
+        time::module(),
+        uri::module(),
+        uuid::module(),
+    ]
 }
 
 /// The standard error kind for an I/O error.

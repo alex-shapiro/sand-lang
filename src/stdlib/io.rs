@@ -1,68 +1,79 @@
 //! The `io` and `env` modules.
 
-use super::stream::{IoFailure, read_line_bytes, read_to_end_reserved, strip_eol};
+use super::stream::{self, IoFailure, Suspended, bytes_read, line_read, read_line, read_to_end_reserved, read_upto, strip_eol};
 use crate::check::ModKind;
-use crate::engine::Registry;
+use crate::native::{HostError, IntoValue, Later, NativeModule, NativeObject, ObjectType, Val};
 use crate::policy::Capability;
 use crate::vm::iomem::Reservation;
-use crate::vm::value::{NativeObject, Obj, Value, to_usize_saturating, u64_to_usize_saturating};
-use crate::vm::{Ctl, Finisher, NResult, NativeFn, StdinSource, Vm};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt};
+use crate::vm::value::{Obj, Value, to_usize_saturating, u64_to_usize_saturating};
+use crate::vm::{Ctl, StdinSource, Vm};
+use std::collections::BTreeMap;
+use tokio::io::AsyncBufRead;
 use tokio::sync::Mutex;
 
-pub fn register(r: &mut Registry) {
-    r.source("io", ModKind::Std, include_str!("io.sand"));
-    r.source("env", ModKind::Std, include_str!("env.sand"));
-    register_io(r);
-    register_env(r);
-}
-
-fn register_io(r: &mut Registry) {
-    r.add_builtin("io.new_stdin", |vm, _| Ok(vm.heap.alloc(Obj::Native(Box::new(StdStream::Stdin)))));
-    r.add_builtin("io.new_stdout", |vm, _| Ok(vm.heap.alloc(Obj::Native(Box::new(StdStream::Stdout)))));
-    r.add_builtin("io.new_stderr", |vm, _| Ok(vm.heap.alloc(Obj::Native(Box::new(StdStream::Stderr)))));
-    r.add_method("io.Stdin.read", |vm, a| {
-        let max = a[1].as_int();
+pub(crate) fn module() -> NativeModule {
+    let mut m = NativeModule::std("io", ModKind::Std, include_str!("io.sand"));
+    m.object_type::<Stdin>();
+    m.object_type::<Stdout>();
+    m.object_type::<Stderr>();
+    m.vm_function("new_stdin", |vm: &mut Vm| vm.new_object(Stdin));
+    m.vm_function("new_stdout", |vm: &mut Vm| vm.new_object(Stdout));
+    m.vm_function("new_stderr", |vm: &mut Vm| vm.new_object(Stderr));
+    m.vm_function("Stdin.read", |vm: &mut Vm, _: Val<Stdin>, max: i64| {
         if max <= 0 {
-            return Err(Ctl::native_err("invalid", "read: max must be positive"));
+            return Err(HostError::new("invalid", "read: max must be positive"));
         }
-        read_stdin(vm, Read::Upto(to_usize_saturating(max)))
+        read_stdin(vm, Read::Upto(to_usize_saturating(max)), bytes_read)
     });
-    r.add_method("io.Stdin.read_line", |vm, _| read_stdin(vm, Read::Line));
-    r.add_method("io.Stdin.read_all", |vm, _| read_stdin(vm, Read::All));
-    for (key, which) in [("io.Stdout", 1), ("io.Stderr", 2)] {
-        let write: NativeFn = if which == 1 { |vm, a| write_out(vm, 1, a[1]) } else { |vm, a| write_out(vm, 2, a[1]) };
-        r.add_method(format!("{key}.write"), write);
-        r.add_method(format!("{key}.write_str"), write);
-        r.add_method(format!("{key}.flush"), if which == 1 { |vm, _| flush_out(vm, 1) } else { |vm, _| flush_out(vm, 2) });
-    }
+    m.vm_function("Stdin.read_line", |vm: &mut Vm, _: Val<Stdin>| read_stdin(vm, Read::Line, input_line));
+    m.vm_function("Stdin.read_all", |vm: &mut Vm, _: Val<Stdin>| read_stdin(vm, Read::All, bytes_read));
+    output::<Stdout>(&mut m);
+    output::<Stderr>(&mut m);
+    m
 }
 
-/// The standard streams' objects (`io.stdin`, `io.stdout`, `io.stderr`).
-enum StdStream {
-    Stdin,
-    Stdout,
-    Stderr,
+/// The type of `io.stdin`. Reading requires the `Stdin` capability.
+#[derive(crate::SandObject)]
+#[sand(module = "io")]
+struct Stdin;
+
+/// The type of `io.stdout`. Writing requires the `Stdout` capability and counts
+/// toward `max_output_bytes`.
+#[derive(crate::SandObject)]
+#[sand(module = "io")]
+struct Stdout;
+
+/// The type of `io.stderr`. Writing requires the `Stderr` capability and counts
+/// toward `max_output_bytes`.
+#[derive(crate::SandObject)]
+#[sand(module = "io")]
+struct Stderr;
+
+impl NativeObject for Stdin {}
+impl NativeObject for Stdout {}
+impl NativeObject for Stderr {}
+
+trait Output: ObjectType {
+    /// The stream: stdout (1) or stderr (2).
+    const STREAM: u8;
 }
 
-impl NativeObject for StdStream {
-    fn type_name(&self) -> &'static str {
-        match self {
-            StdStream::Stdin => "Stdin",
-            StdStream::Stdout => "Stdout",
-            StdStream::Stderr => "Stderr",
-        }
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
+impl Output for Stdout {
+    const STREAM: u8 = 1;
+}
+
+impl Output for Stderr {
+    const STREAM: u8 = 2;
+}
+
+fn output<T: Output>(m: &mut NativeModule) {
+    m.vm_function(&format!("{}.write", T::NAME), |vm: &mut Vm, _: Val<T>, data: Val<Vec<u8>>| write_out(vm, T::STREAM, data.raw()));
+    m.vm_function(&format!("{}.write_str", T::NAME), |vm: &mut Vm, _: Val<T>, text: Val<String>| write_out(vm, T::STREAM, text.raw()));
+    m.vm_function(&format!("{}.flush", T::NAME), |vm: &mut Vm, _: Val<T>| flush_out(vm, T::STREAM));
 }
 
 /// Writes the `str` or `bytes` value `v` to stdout (1) or stderr (2).
-fn write_out(vm: &mut Vm, which: u8, v: Value) -> NResult {
+fn write_out(vm: &mut Vm, which: u8, v: Value) -> Result<(), HostError> {
     let len = match vm.heap.get(v) {
         Obj::Str(s) => s.len(),
         _ => vm.heap.bytes_of(v).len(),
@@ -71,12 +82,9 @@ fn write_out(vm: &mut Vm, which: u8, v: Value) -> NResult {
     vm.write_stream_value(which, v)
 }
 
-fn flush_out(vm: &mut Vm, which: u8) -> NResult {
+fn flush_out(vm: &mut Vm, which: u8) -> Result<(), HostError> {
     let sink = if which == 1 { &vm.host.stdout } else { &vm.host.stderr };
-    match sink.flush() {
-        Ok(()) => Ok(vm.ok(Value::Unit)),
-        Err(e) => Err(Ctl::native_err(super::io_kind(&e), e.to_string())),
-    }
+    Ok(sink.flush()?)
 }
 
 /// What a read of standard input reads.
@@ -90,22 +98,20 @@ enum Read {
     Upto(usize),
 }
 
-fn read_stdin(vm: &mut Vm, what: Read) -> NResult {
+fn read_stdin<R: IntoValue + Send + 'static>(
+    vm: &mut Vm,
+    what: Read,
+    done: fn(&mut Vm, Option<Vec<u8>>) -> Result<R, HostError>,
+) -> Suspended<R> {
     if !vm.permit(&Capability::Stdin)? {
-        return Err(Ctl::native_err("permission_denied", "permission denied: read standard input"));
+        return Err(HostError::new("permission_denied", "permission denied: read standard input"));
     }
     // A prompt written before reading must be visible (on a terminal).
     vm.flush_before_input()?;
     if what == Read::Line
         && let Some(data) = buffered_line(vm)
     {
-        return match data {
-            Some(data) => line_result(vm, data),
-            None => {
-                let none = vm.none();
-                Ok(vm.ok(none))
-            }
-        };
+        return Ok(Later::ready(done(vm, data)));
     }
     let stdin = vm.host.stdin.clone();
     // The input is buffered outside the heap until it is complete.
@@ -113,38 +119,18 @@ fn read_stdin(vm: &mut Vm, what: Read) -> NResult {
         Read::Upto(max) => vm.reserve_io(max.min(STDIN_CHUNK))?,
         _ => vm.io_reservation(),
     };
-    Err(Ctl::suspend(Box::pin(async move {
-        let result = read_input(&stdin, what, &mut res).await;
-        Box::new(move |vm: &mut Vm| -> NResult {
-            drop(res);
-            let data = match result {
-                Ok(Some(data)) => data,
-                Ok(None) => {
-                    let none = vm.none();
-                    return Ok(vm.ok(none));
-                }
-                Err(e) => return Err(IoFailure::new(e.kind, format!("stdin: {}", e.message)).into()),
-            };
-            vm.reserve(data.len())?;
-            if what != Read::Line {
-                vm.charge_bytes(data.len())?;
-                let b = vm.heap.new_bytes(data);
-                return Ok(vm.ok(b));
-            }
-            line_result(vm, data)
-        }) as Finisher
-    })))
+    let read = async move {
+        let data = read_input(&stdin, what, &mut res).await.map_err(|e| IoFailure::new(e.kind, format!("stdin: {}", e.message)))?;
+        Ok((data, res))
+    };
+    stream::suspend(read, move |vm, (data, res)| {
+        drop(res);
+        done(vm, data)
+    })
 }
 
-/// `Ok(Some(line))`, or kind `"invalid"` if `line` is not UTF-8.
-fn line_result(vm: &mut Vm, line: Vec<u8>) -> NResult {
-    vm.charge_slow_bytes(line.len())?;
-    let Ok(text) = String::from_utf8(line) else {
-        return Err(Ctl::native_err("invalid", "stdin: input is not valid UTF-8"));
-    };
-    let s = vm.new_str(text);
-    let v = vm.some(s);
-    Ok(vm.ok(v))
+fn input_line(vm: &mut Vm, line: Option<Vec<u8>>) -> Result<Option<String>, HostError> {
+    line_read(vm, line, "stdin: input is not valid UTF-8")
 }
 
 /// The most `read` returns at once from standard input.
@@ -210,32 +196,24 @@ async fn read_input(stdin: &Mutex<StdinSource>, what: Read, res: &mut Reservatio
 
 async fn read_from<R: AsyncBufRead + Unpin>(r: &mut R, what: Read, res: &mut Reservation) -> Result<Option<Vec<u8>>, IoFailure> {
     match what {
-        Read::Line => {
-            let Some(mut data) = read_line_bytes(r, usize::MAX, res).await? else { return Ok(None) };
-            strip_eol(&mut data);
-            Ok(Some(data))
-        }
+        Read::Line => read_line(r, res).await,
         Read::All => {
             let mut data = Vec::new();
             read_to_end_reserved(r, &mut data, res, usize::MAX).await?;
             Ok(Some(data))
         }
-        Read::Upto(max) => {
-            let available = r.fill_buf().await?;
-            let data = available[..available.len().min(max).min(STDIN_CHUNK)].to_vec();
-            r.consume(data.len());
-            Ok(Some(data))
-        }
+        Read::Upto(max) => read_upto(r, max.min(STDIN_CHUNK)).await.map(Some),
     }
 }
 
-fn register_env(r: &mut Registry) {
-    r.add_builtin("env.get", |vm, a| {
-        let name = vm.str(a[0]).to_string();
+pub(crate) fn env_module() -> NativeModule {
+    let mut m = NativeModule::std("env", ModKind::Std, include_str!("env.sand"));
+    m.vm_function("get", |vm: &mut Vm, name: Val<String>| -> Result<Option<String>, Ctl> {
+        let name = name.str(&vm.heap).to_string();
         if !vm.permit(&Capability::Env(name.clone()))? {
-            return Ok(vm.none());
+            return Ok(None);
         }
-        let value = match &vm.host.env {
+        Ok(match &vm.host.env {
             Some(vars) => vars.iter().find(|(k, _)| *k == name).map(|(_, v)| v.clone()),
             // `std::env::var` may panic on such names.
             #[cfg(feature = "os")]
@@ -245,36 +223,20 @@ fn register_env(r: &mut Registry) {
             // No process environment without operating-system access.
             #[cfg(not(feature = "os"))]
             None => None,
-        };
-        let v = value.map(|v| vm.new_str(v));
-        Ok(vm.option(v))
+        })
     });
-    r.add_builtin("env.args", |vm, _| {
-        let args = vm.host.args.clone();
-        let items = args.into_iter().map(|a| vm.new_str(a)).collect();
-        Ok(vm.heap.new_list(items))
-    });
-    r.add_builtin("env.vars", |vm, _| {
-        let map = vm.heap.alloc(Obj::Map(Box::default()));
+    m.vm_function("args", |vm: &mut Vm| vm.host.args.clone());
+    m.vm_function("vars", |vm: &mut Vm| -> Result<BTreeMap<String, String>, Ctl> {
         if !vm.permit(&Capability::Env("*".into()))? {
-            return Ok(map);
+            return Ok(BTreeMap::new());
         }
-        let vars = match &vm.host.env {
-            Some(vars) => vars.clone(),
+        Ok(match &vm.host.env {
+            Some(vars) => vars.iter().cloned().collect(),
             #[cfg(not(feature = "os"))]
-            None => Vec::new(),
+            None => BTreeMap::new(),
             #[cfg(feature = "os")]
-            None => {
-                let mut vars: Vec<(String, String)> =
-                    std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))).collect();
-                vars.sort();
-                vars
-            }
-        };
-        for (k, v) in vars {
-            let (k, v) = (vm.new_str(k), vm.new_str(v));
-            vm.map_insert(map, k, v)?;
-        }
-        Ok(map)
+            None => std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))).collect(),
+        })
     });
+    m
 }

@@ -40,10 +40,10 @@ pub use engine::{
 pub use feed::StdinFeed;
 pub use files::MemFs;
 pub use native::{
-    Conversion, EnumType, EnumVariant, FromValue, HostError, IntoHostError, IntoValue, ListElem, NativeModule, SandType, TypeContext,
+    Conversion, EnumType, EnumVariant, FromValue, HostError, IntoHostError, IntoValue, NativeModule, NativeObject, ObjectType, SandType,
 };
 pub use policy::{Capability, CustomPolicy, Decision, Policy, PromptAnswer, Prompter, RulePolicy};
-pub use sandlang_macros::SandEnum;
+pub use sandlang_macros::{SandEnum, SandObject};
 pub use session::Session;
 pub use stdio::flush_stdio;
 pub use stdlib::log::{LogLevel, LogRecord, LogSink};

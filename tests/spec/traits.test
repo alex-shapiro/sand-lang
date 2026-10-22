@@ -786,7 +786,7 @@ pub trait Shape {
     fn area(self) -> float
     fn name(self) -> str { "shape" }
 }
-pub struct Square { side: float }
+pub struct Square { pub side: float }
 impl Shape for Square {
     fn area(self) -> float { self.side * self.side }
 }
@@ -823,7 +823,7 @@ impl lib.Named for lib.Point {
     fn name(self) -> str { "again" }
 }
 --- file lib.sand
-pub struct Point { x: int }
+pub struct Point { pub x: int }
 pub trait Named {
     fn name(self) -> str
 }
@@ -839,7 +839,7 @@ import "./lib.sand"
 fn f<T: lib.Secret>(x: T) {}
 print(lib.P { x: 1 }.secret())
 --- file lib.sand
-pub struct P { x: int }
+pub struct P { pub x: int }
 trait Secret {
     fn secret(self) -> int
 }

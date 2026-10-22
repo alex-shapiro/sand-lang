@@ -1,11 +1,11 @@
 //! The `log` module.
 
 use crate::check::ModKind;
-use crate::engine::Registry;
+use crate::native::{NativeModule, Val};
 use crate::vm::display::escape_str_debug;
-use crate::vm::value::{Obj, Value};
-use crate::vm::{NResult, Vm};
+use crate::vm::{Ctl, Vm};
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fmt;
 
 /// Severity level of a log record, ordered from lowest to highest.
@@ -104,26 +104,29 @@ impl LogSink for NullLogSink {
     fn log(&self, _: &LogRecord) {}
 }
 
-pub fn register(r: &mut Registry) {
-    r.source("log", ModKind::Std, include_str!("log.sand"));
-    r.add_builtin("log.debug", |vm, a| emit_record(vm, LogLevel::Debug, a));
-    r.add_builtin("log.info", |vm, a| emit_record(vm, LogLevel::Info, a));
-    r.add_builtin("log.warn", |vm, a| emit_record(vm, LogLevel::Warn, a));
-    r.add_builtin("log.error", |vm, a| emit_record(vm, LogLevel::Error, a));
-    r.add_enum_type::<LogLevel>();
-    r.add_builtin("log.set_level", |vm, a| {
-        vm.host.log_level = Some(vm.enum_value(a[0])?);
-        Ok(Value::Unit)
+type Fields = Val<HashMap<String, String>>;
+
+pub(crate) fn module() -> NativeModule {
+    let mut m = NativeModule::std("log", ModKind::Std, include_str!("log.sand"));
+    m.vm_function("debug", |vm: &mut Vm, msg: Val<String>, fields: Fields| emit_record(vm, LogLevel::Debug, msg, fields));
+    m.vm_function("info", |vm: &mut Vm, msg: Val<String>, fields: Fields| emit_record(vm, LogLevel::Info, msg, fields));
+    m.vm_function("warn", |vm: &mut Vm, msg: Val<String>, fields: Fields| emit_record(vm, LogLevel::Warn, msg, fields));
+    m.vm_function("error", |vm: &mut Vm, msg: Val<String>, fields: Fields| emit_record(vm, LogLevel::Error, msg, fields));
+    m.enum_type::<LogLevel>();
+    m.vm_function("set_level", |vm: &mut Vm, level: LogLevel| -> Result<_, Ctl> {
+        vm.host.log_level = Some(level);
+        Ok(())
     });
-    r.add_builtin("log.disable", |vm, _| {
+    m.vm_function("disable", |vm: &mut Vm| -> Result<_, Ctl> {
         vm.host.log_level = None;
-        Ok(Value::Unit)
+        Ok(())
     });
+    m
 }
 
-fn emit_record(vm: &mut Vm, level: LogLevel, a: &[Value]) -> NResult {
+fn emit_record(vm: &mut Vm, level: LogLevel, msg: Val<String>, fields: Fields) -> Result<(), Ctl> {
     if vm.host.log_level.is_none_or(|l| level < l) {
-        return Ok(Value::Unit);
+        return Ok(());
     }
     let sink = vm.host.log_sink.clone();
     let enabled = match &sink {
@@ -131,19 +134,16 @@ fn emit_record(vm: &mut Vm, level: LogLevel, a: &[Value]) -> NResult {
         None => vm.output_allowed(2)?,
     };
     if !enabled {
-        return Ok(Value::Unit);
+        return Ok(());
     }
-    let fields: Vec<(Value, Value)> = match vm.heap.get(a[1]) {
-        Obj::Map(m) => m.entries.iter().flatten().copied().collect(),
-        _ => Vec::new(),
-    };
-    let len = vm.str(a[0]).len() + fields.iter().map(|&(k, v)| vm.str(k).len() + vm.str(v).len()).sum::<usize>();
+    let fields = fields.map(&vm.heap)?.entries.iter().flatten();
+    let len = msg.str(&vm.heap).len() + fields.clone().map(|&(k, v)| vm.str(k).len() + vm.str(v).len()).sum::<usize>();
     vm.reserve(len)?;
     vm.charge_bytes(len)?;
     let record = LogRecord {
         level,
-        message: vm.str(a[0]).to_string(),
-        fields: fields.iter().map(|&(k, v)| (vm.str(k).to_string(), vm.str(v).to_string())).collect(),
+        message: msg.str(&vm.heap).to_string(),
+        fields: fields.map(|&(k, v)| (vm.str(k).to_string(), vm.str(v).to_string())).collect(),
         location: vm.native_caller(),
     };
     match sink {
@@ -158,5 +158,5 @@ fn emit_record(vm: &mut Vm, level: LogLevel, a: &[Value]) -> NResult {
             vm.write_counted(2, line.as_bytes())?;
         }
     }
-    Ok(Value::Unit)
+    Ok(())
 }

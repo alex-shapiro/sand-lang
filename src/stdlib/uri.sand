@@ -5,19 +5,19 @@
 /// brackets.
 pub struct Uri {
     /// Lowercase URI scheme (such as `"https"`).
-    scheme: str
+    pub scheme: str
     /// Optional `userinfo` component before `@`.
-    userinfo: str?
+    pub userinfo: str?
     /// Hostname or IP literal (without brackets for IPv6), if an authority is present.
-    host: str?
+    pub host: str?
     /// Explicit port number, if present.
-    port: int?
+    pub port: int?
     /// URI path component (may be `""`).
-    path: str
+    pub path: str
     /// Raw query component after `?`, without the leading `?`.
-    query: str?
+    pub query: str?
     /// Fragment component after `#`, without the leading `#`.
-    fragment: str?
+    pub fragment: str?
 
     /// Formats the URI as a string according to RFC 3986 §5.3.
     pub fn to_str(self) -> str {
@@ -38,7 +38,8 @@ pub struct Uri {
     /// Resolves a relative or absolute URI `reference` against `self` as the
     /// base URI (RFC 3986 §5.2).
     pub fn join(self, reference: str) -> Result<Uri> {
-        Ok(from_parts(resolve_parts(self, reference)?))
+        let base = (self.scheme, self.userinfo, self.host, self.port, self.path, self.query, self.fragment)
+        Ok(from_parts(resolve_parts(base, reference)?))
     }
 
     /// Decodes `self.query` into `(key, value)` pairs (see `parse_query`).
@@ -90,7 +91,7 @@ fn from_parts(parts: Parts) -> Uri {
 
 native fn parse_parts(text: str) -> Result<Parts>
 
-native fn resolve_parts(base: Uri, reference: str) -> Result<Parts>
+native fn resolve_parts(base: Parts, reference: str) -> Result<Parts>
 
 /// Percent-encodes all bytes in `s` except RFC 3986 unreserved characters
 /// (`A-Z`, `a-z`, `0-9`, `-`, `.`, `_`, `~`).

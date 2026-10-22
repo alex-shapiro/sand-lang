@@ -20,41 +20,6 @@
 //! `%Z` zone abbreviation, `%Q` IANA zone name, `%s` Unix seconds, and `%%`
 //! literal `%`.
 
-/// An exact point on the UTC timeline (such as `2024-03-10T07:30:00Z`).
-pub native type Instant
-
-/// An exact instant paired with a `TimeZone` (such as
-/// `2024-03-10T03:30:00-04:00[America/New_York]`), ordered by instant and then
-/// by zone ID.
-pub native type ZonedDateTime
-
-/// A calendar date and wall-clock time without a time zone (such as
-/// `2024-03-10T03:30:00`).
-pub native type PlainDateTime
-
-/// A calendar date without a time zone (such as `2024-03-10`).
-pub native type PlainDate
-
-/// A wall-clock time of day without a date or time zone (such as `03:30:00`).
-pub native type PlainTime
-
-/// A calendar year and month without a day (such as `2024-03`).
-pub native type PlainYearMonth
-
-/// A calendar month and day without a year (such as `03-10`).
-pub native type PlainMonthDay
-
-/// A signed calendar and clock duration (such as `P1M2DT3H`). Sub-second units
-/// normalize into seconds (`span(milliseconds: 1500)` stores 1 second and 500
-/// milliseconds). Two spans are equal only if all unit fields match
-/// (`span(hours: 24) != span(days: 1)`).
-pub native type Span
-
-/// A time zone identifier: an IANA zone (`America/New_York`), `UTC`, or a fixed
-/// minute offset (`+05:30`). Two zones are equal if their canonical IDs match
-/// (`zone("Etc/UTC") != UTC`).
-pub native type TimeZone
-
 /// A value (`Span` or `duration`) that can be converted into a `Span`.
 pub trait ToSpan {
     /// Converts `self` into a `Span`.
@@ -155,9 +120,6 @@ pub native fn span(
     microseconds: int = 0,
     nanoseconds: int = 0,
 ) -> Span
-
-/// A monotonic timer for measuring elapsed time.
-pub native type Stopwatch
 
 extend Stopwatch {
     /// Returns the elapsed `duration` since this `Stopwatch` was started.

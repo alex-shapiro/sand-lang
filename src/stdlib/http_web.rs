@@ -9,13 +9,13 @@
 //! local JavaScript event loop and sends its result back over a channel.
 //! Dropping the receiver aborts the in-flight request.
 
-use super::http_common::{BodyReader, MemoryBody, Url, alloc_body, filter_request, header_list, header_pairs, is_token};
-use super::stream::IoFailure;
+use super::http_common::{BodyReader, MemoryBody, Prepared, Response, prepare_request, response};
+use super::stream::{self, IoFailure, Suspended, suspend};
 use crate::check::ModKind;
-use crate::engine::Registry;
+use crate::native::{NativeModule, Val};
+use crate::vm::Vm;
 use crate::vm::iomem::Reservation;
-use crate::vm::value::Value;
-use crate::vm::{Ctl, Finisher, NResult, Vm};
+use jiff::SignedDuration;
 use js_sys::{Array, Function, Object, Promise, Reflect, Uint8Array};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -25,10 +25,11 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
-pub fn register(r: &mut Registry) {
-    r.source("http", ModKind::Std, concat!(include_str!("http_web.sand"), include_str!("http.sand")));
-    super::http_common::register(r);
-    r.add_builtin("http.send", send);
+pub(crate) fn module() -> NativeModule {
+    let mut m = NativeModule::std("http", ModKind::Std, concat!(include_str!("http_web.sand"), include_str!("http.sand")));
+    super::http_common::natives(&mut m);
+    m.vm_function("send", send);
+    m
 }
 
 /// A request to send.
@@ -41,55 +42,41 @@ struct Request {
     max_body: usize,
 }
 
-/// A response: status, headers and body (reserved in the reservation).
-type Response = (i64, Vec<(String, String)>, Vec<u8>, Reservation);
+type Received = (i64, Vec<(String, String)>, Vec<u8>, Reservation);
 
-fn send(vm: &mut Vm, a: &[Value]) -> NResult {
-    let method = vm.str(a[0]).to_string();
-    let text = vm.str(a[1]).to_string();
-    vm.charge_slow_bytes(method.len() + text.len())?;
-    let url = match Url::parse(&text) {
-        Ok(u) => u,
-        Err(e) => return Err(Ctl::native_err(e.kind, e.message)),
-    };
-    if !is_token(&method) {
-        return Err(Ctl::native_err("invalid", format!("invalid HTTP method {:?}", super::truncate(&method, 64))));
-    }
-    let mut headers = header_pairs(vm, a[2])?;
-    let cap = url.capability(&method);
-    if !vm.permit(&cap)? {
-        return Err(Ctl::native_err("permission_denied", format!("permission denied: {cap}")));
-    }
-    if let Err(reason) = filter_request(vm, &url, &mut headers) {
-        return Err(Ctl::native_err("permission_denied", reason));
-    }
+fn send(
+    vm: &mut Vm,
+    method: Val<String>,
+    url: Val<String>,
+    headers: Val<Vec<(String, String)>>,
+    body: Val<Vec<u8>>,
+    timeout: SignedDuration,
+) -> Suspended<Response> {
+    let mut req = prepare_request(vm, method, url, headers)?;
+    req.require(vm)?;
+    let Prepared { method, url, headers, .. } = req;
     // The request body is held, and the response buffered, outside the heap.
-    let res = vm.reserve_io(vm.heap.bytes_of(a[3]).len())?;
-    let body = vm.heap.bytes_of(a[3]).to_vec();
+    let res = vm.reserve_io(body.bytes(&vm.heap).len())?;
+    let body = body.bytes(&vm.heap).to_vec();
     vm.charge_bytes(body.len())?;
     let request = Request {
         method,
         url: format!("{}{}", url.origin(), url.target),
         headers,
         body,
-        timeout: Duration::from_nanos(a[4].as_int().max(0) as u64),
+        timeout: stream::timeout(timeout),
         max_body: vm.host.limits.max_http_body,
     };
     let max_body = request.max_body;
     let (id, done) = start(request, res);
-    Err(Ctl::suspend(Box::pin(async move {
+    let received = async move {
         let _abort = AbortOnDrop(id);
-        let result = done.await.unwrap_or_else(|_| Err(IoFailure::new("io", "the request was abandoned")));
-        Box::new(move |vm: &mut Vm| -> NResult {
-            let (status, headers, body, res) = result?;
-            let headers = header_list(vm, headers)?;
-            // The browser read the body: it stays reserved while it is read.
-            let reader = BodyReader::new(Box::new(MemoryBody::new(body)), max_body, Some(res));
-            let body = alloc_body(vm, reader);
-            let tuple = vm.heap.new_tuple(&[Value::Int(status), headers, body]);
-            Ok(vm.ok(tuple))
-        }) as Finisher
-    })))
+        done.await.unwrap_or_else(|_| Err(IoFailure::new("io", "the request was abandoned")))
+    };
+    suspend(received, move |_, (status, headers, body, res)| {
+        // The browser read the body: it stays reserved while it is read.
+        Ok(response(status, headers, BodyReader::new(Box::new(MemoryBody::new(body)), max_body, Some(res))))
+    })
 }
 
 thread_local! {
@@ -114,7 +101,7 @@ fn abort(id: u64) {
 }
 
 /// Starts `request` in a local task; the receiver gets its outcome.
-fn start(request: Request, res: Reservation) -> (u64, tokio::sync::oneshot::Receiver<Result<Response, IoFailure>>) {
+fn start(request: Request, res: Reservation) -> (u64, tokio::sync::oneshot::Receiver<Result<Received, IoFailure>>) {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let id = NEXT_ID.with(|n| {
         n.set(n.get() + 1);
@@ -128,7 +115,7 @@ fn start(request: Request, res: Reservation) -> (u64, tokio::sync::oneshot::Rece
     (id, rx)
 }
 
-async fn exchange(id: u64, request: &Request, mut res: Reservation) -> Result<Response, IoFailure> {
+async fn exchange(id: u64, request: &Request, mut res: Reservation) -> Result<Received, IoFailure> {
     let url = &request.url;
     let failed = |e: JsValue| IoFailure::new("io", format!("request to {url} failed: {}", describe(&e)));
     let global = js_sys::global();

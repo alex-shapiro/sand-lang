@@ -17,7 +17,7 @@ fuzz_target!(|data: &[u8]| {
             max_call_depth: 256,
             ..Limits::default()
         });
-    let mut engine = Engine::new(config);
+    let mut engine = Engine::new(config).unwrap();
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let _ = rt.block_on(engine.run_source("fuzz.sand", src));
 });

@@ -295,7 +295,7 @@ impl<'a> Parser<'a> {
             Tok::Pub => {
                 self.bump();
                 match self.tok() {
-                    Tok::Native if matches!(self.peek_tok(1), Tok::Type) => ItemKind::NativeType(self.native_type(true, doc)?),
+                    Tok::Native if matches!(self.peek_tok(1), Tok::Type) => return self.native_type(),
                     Tok::Fn | Tok::Native => ItemKind::Fn(self.fn_decl(true, doc)?),
                     Tok::Struct => ItemKind::Struct(self.struct_decl(true, doc)?),
                     Tok::Enum => ItemKind::Enum(self.enum_decl(true, doc)?),
@@ -317,7 +317,7 @@ impl<'a> Parser<'a> {
                 }
             }
             Tok::Fn if matches!(self.peek_tok(1), Tok::Ident) => ItemKind::Fn(self.fn_decl(false, doc)?),
-            Tok::Native if matches!(self.peek_tok(1), Tok::Type) => ItemKind::NativeType(self.native_type(false, doc)?),
+            Tok::Native if matches!(self.peek_tok(1), Tok::Type) => return self.native_type(),
             Tok::Native => ItemKind::Fn(self.fn_decl(false, doc)?),
             Tok::Struct => ItemKind::Struct(self.struct_decl(false, doc)?),
             Tok::Enum => ItemKind::Enum(self.enum_decl(false, doc)?),
@@ -424,7 +424,7 @@ impl<'a> Parser<'a> {
         Ok(Import { source, alias: None, names: Some(names) })
     }
 
-    fn generics(&mut self) -> PResult<Vec<GenericParam>> {
+    fn generics(&mut self, native: bool) -> PResult<Vec<GenericParam>> {
         let mut out = Vec::new();
         if !self.eat(&Tok::Lt) {
             return Ok(out);
@@ -432,7 +432,10 @@ impl<'a> Parser<'a> {
         loop {
             let mut reflect = false;
             if self.at(&Tok::Ident) && self.cur_text() == "reflect" && matches!(self.peek_tok(1), Tok::Ident) {
-                self.bump();
+                let span = self.bump();
+                if !native {
+                    self.errors.push(Diag::error(span, "only the type parameters of a `native fn` can be `reflect`"));
+                }
                 reflect = true;
             }
             let name = self.ident("type parameter")?;
@@ -525,7 +528,7 @@ impl<'a> Parser<'a> {
         let is_native = self.eat(&Tok::Native);
         self.expect(&Tok::Fn, "`fn`")?;
         let name = self.name_or_keyword("function name")?;
-        let generics = self.generics()?;
+        let generics = self.generics(is_native)?;
         self.expect(&Tok::LParen, "`(`")?;
         let mut params = Vec::new();
         let mut seen_default = false;
@@ -570,7 +573,7 @@ impl<'a> Parser<'a> {
     fn struct_decl(&mut self, is_pub: bool, doc: Option<String>) -> PResult<StructDecl> {
         self.bump();
         let name = self.ident("struct name")?;
-        let generics = self.generics()?;
+        let generics = self.generics(false)?;
         self.expect(&Tok::LBrace, "`{`")?;
         let mut fields = Vec::new();
         let mut methods = Vec::new();
@@ -586,16 +589,13 @@ impl<'a> Parser<'a> {
                 methods.push(self.fn_decl(p, mdoc)?);
                 continue;
             }
-            if self.at(&Tok::Pub) {
-                self.error_here("`pub` is not allowed on struct fields; they are public if the struct is");
-                self.bump();
-            }
+            let is_pub = self.eat(&Tok::Pub);
             let mutable = self.eat(&Tok::Var);
             let fname = self.ident("field name")?;
             self.expect(&Tok::Colon, "`:`")?;
             let ty = self.ty()?;
             let default = if self.eat(&Tok::Eq) { Some(self.expr()?) } else { None };
-            fields.push(FieldDecl { name: fname, ty, default, mutable, doc: mdoc, span: self.span_from(mlo) });
+            fields.push(FieldDecl { name: fname, ty, default, mutable, is_pub, doc: mdoc, span: self.span_from(mlo) });
             // A type ending in `>` is not followed by an automatic terminator.
             if !(self.at(&Tok::Semi) || self.at(&Tok::Comma) || self.at(&Tok::RBrace) || self.toks[self.pos].newline_before) {
                 self.expected("`,`, newline or `}`");
@@ -609,7 +609,7 @@ impl<'a> Parser<'a> {
     fn enum_decl(&mut self, is_pub: bool, doc: Option<String>) -> PResult<EnumDecl> {
         self.bump();
         let name = self.ident("enum name")?;
-        let generics = self.generics()?;
+        let generics = self.generics(false)?;
         self.expect(&Tok::LBrace, "`{`")?;
         let mut variants = Vec::new();
         let mut methods = Vec::new();
@@ -656,7 +656,7 @@ impl<'a> Parser<'a> {
 
     fn extend_decl(&mut self, doc: Option<String>) -> PResult<ExtendDecl> {
         self.bump();
-        let generics = self.generics()?;
+        let generics = self.generics(false)?;
         let target = self.ty()?;
         self.expect(&Tok::LBrace, "`{`")?;
         let mut methods = Vec::new();
@@ -707,7 +707,7 @@ impl<'a> Parser<'a> {
     fn trait_decl(&mut self, is_pub: bool, doc: Option<String>) -> PResult<TraitDecl> {
         self.bump();
         let name = self.ident("trait name")?;
-        let generics = self.generics()?;
+        let generics = self.generics(false)?;
         let supers = if self.eat(&Tok::Colon) { self.bounds()? } else { Vec::new() };
         let methods = self.trait_body(true)?;
         Ok(TraitDecl { name, generics, supers, methods, is_pub, doc })
@@ -715,7 +715,7 @@ impl<'a> Parser<'a> {
 
     fn impl_decl(&mut self) -> PResult<ImplDecl> {
         self.bump();
-        let generics = self.generics()?;
+        let generics = self.generics(false)?;
         let trait_ref = self.bound()?;
         self.expect(&Tok::For, "`for`")?;
         let target = self.ty()?;
@@ -724,18 +724,15 @@ impl<'a> Parser<'a> {
         Ok(ImplDecl { generics, trait_ref, target, where_clause, methods })
     }
 
-    fn native_type(&mut self, is_pub: bool, doc: Option<String>) -> PResult<NativeTypeDecl> {
-        self.bump();
-        self.bump();
-        let name = self.ident("type name")?;
-        let generics = self.generics()?;
-        Ok(NativeTypeDecl { name, generics, is_pub, doc })
+    fn native_type<T>(&mut self) -> PResult<T> {
+        self.error_here("native types are declared by registering Rust types with `NativeModule`, not in Sand source");
+        Err(())
     }
 
     fn type_alias(&mut self, is_pub: bool, doc: Option<String>) -> PResult<TypeAlias> {
         self.bump();
         let name = self.ident("type name")?;
-        let generics = self.generics()?;
+        let generics = self.generics(false)?;
         self.expect(&Tok::Eq, "`=`")?;
         let ty = self.ty()?;
         Ok(TypeAlias { name, generics, ty, is_pub, doc })

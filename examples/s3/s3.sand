@@ -11,19 +11,19 @@ import time
 import uri
 
 pub struct Credentials {
-    access_key: str
-    secret_key: str
-    session_token: str? = None
+    pub access_key: str
+    pub secret_key: str
+    pub session_token: str? = None
 }
 
 pub struct Client {
-    region: str
-    credentials: Credentials
+    pub region: str
+    pub credentials: Credentials
     /// e.g. `https://s3.amazonaws.com` or `http://127.0.0.1:9000`
-    endpoint: str = "https://s3.amazonaws.com"
+    pub endpoint: str = "https://s3.amazonaws.com"
     /// Use `endpoint/bucket/key` instead of `bucket.endpoint/key`.
-    path_style: bool = false
-    timeout: duration = 30s
+    pub path_style: bool = false
+    pub timeout: duration = 30s
 
     pub fn put_object(
         self,
@@ -133,19 +133,19 @@ pub struct Client {
 }
 
 pub struct ObjectInfo {
-    key: str
-    size: int
-    etag: str
-    last_modified: str
+    pub key: str
+    pub size: int
+    pub etag: str
+    pub last_modified: str
 }
 
 pub struct SignedRequest {
-    method: str
-    host: str
-    path: str
-    query: [(str, str)]
-    headers: [str: str]
-    payload: bytes
+    pub method: str
+    pub host: str
+    pub path: str
+    pub query: [(str, str)]
+    pub headers: [str: str]
+    pub payload: bytes
 }
 
 fn check(resp: http.Response) -> Result<http.Response> {

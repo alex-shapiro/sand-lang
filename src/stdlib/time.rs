@@ -1,15 +1,15 @@
 //! Implementation of the `time` standard library module.
 
 use crate::check::ModKind;
-use crate::engine::Registry;
+use crate::native::{HostError, IntoValue, NativeModule, NativeObject, Val};
 use crate::platform::{Instant as Monotonic, UNIX_EPOCH};
 use crate::policy::Capability;
-use crate::vm::value::{NativeObject, Obj, Packing, Value, ValueType};
-use crate::vm::{Ctl, NResult, NativeFn, Vm};
+use crate::vm::value::{Packing, ValueType};
+use crate::vm::{Ctl, Vm};
 use jiff::civil::{Date, DateDifference, DateTime, DateTimeDifference, DateTimeRound, Time, TimeRound};
 use jiff::fmt::strtime::{self, BrokenDownTime};
 use jiff::fmt::temporal::{DateTimeParser, DateTimePrinter};
-use jiff::tz::{self, Disambiguation, TimeZoneDatabase, TimeZoneTransition};
+use jiff::tz::{self, TimeZoneDatabase, TimeZoneTransition};
 use jiff::{
     RoundMode, SignedDuration, SpanArithmetic, SpanRelativeTo, SpanRound, Timestamp, TimestampRound, Unit, Zoned, ZonedDifference,
     ZonedRound,
@@ -56,6 +56,7 @@ fn unpack_time(bits: u64) -> Time {
 impl ValueType for Timestamp {
     const MODULE: &'static str = "time";
     const NAME: &'static str = "Instant";
+    const DOC: &'static str = "An exact point on the UTC timeline (such as `2024-03-10T07:30:00Z`).";
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
     // Flip the sign bit so unsigned comparison matches chronological order.
     const PACKING: Option<Packing<Self>> = Some(Packing {
@@ -77,6 +78,7 @@ impl ValueType for Timestamp {
 impl ValueType for DateTime {
     const MODULE: &'static str = "time";
     const NAME: &'static str = "PlainDateTime";
+    const DOC: &'static str = "A calendar date and wall-clock time without a time zone (such as `2024-03-10T03:30:00`).";
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
     const PACKING: Option<Packing<Self>> = Some(Packing {
         pack: |dt| [pack_date(&dt.date()), pack_time(&dt.time())],
@@ -91,6 +93,7 @@ impl ValueType for DateTime {
 impl ValueType for Date {
     const MODULE: &'static str = "time";
     const NAME: &'static str = "PlainDate";
+    const DOC: &'static str = "A calendar date without a time zone (such as `2024-03-10`).";
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
     const PACKING: Option<Packing<Self>> = Some(Packing { pack: |d| [pack_date(d), 0], unpack: |[d, _]| unpack_date(d), ordered: true });
     fn parse(text: &str) -> Result<Self, String> {
@@ -101,6 +104,7 @@ impl ValueType for Date {
 impl ValueType for Time {
     const MODULE: &'static str = "time";
     const NAME: &'static str = "PlainTime";
+    const DOC: &'static str = "A wall-clock time of day without a date or time zone (such as `03:30:00`).";
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
     const PACKING: Option<Packing<Self>> = Some(Packing { pack: |t| [pack_time(t), 0], unpack: |[t, _]| unpack_time(t), ordered: true });
     fn parse(text: &str) -> Result<Self, String> {
@@ -175,6 +179,7 @@ impl fmt::Display for ZonedDateTime {
 impl ValueType for ZonedDateTime {
     const MODULE: &'static str = "time";
     const NAME: &'static str = "ZonedDateTime";
+    const DOC: &'static str = "An exact instant paired with a `TimeZone` (such as `2024-03-10T03:30:00-04:00[America/New_York]`), ordered by instant and then by zone ID.";
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
     fn parse(text: &str) -> Result<Self, String> {
         let z = PARSER.parse_zoned_with(&DB, text).map_err(|_| parse_error(text, Self::NAME))?;
@@ -210,6 +215,7 @@ impl fmt::Display for PlainYearMonth {
 impl ValueType for PlainYearMonth {
     const MODULE: &'static str = "time";
     const NAME: &'static str = "PlainYearMonth";
+    const DOC: &'static str = "A calendar year and month without a day (such as `2024-03`).";
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
     const PACKING: Option<Packing<Self>> =
         Some(Packing { pack: |ym| [pack_date(&ym.0), 0], unpack: |[d, _]| PlainYearMonth(unpack_date(d)), ordered: true });
@@ -252,6 +258,7 @@ impl fmt::Display for PlainMonthDay {
 impl ValueType for PlainMonthDay {
     const MODULE: &'static str = "time";
     const NAME: &'static str = "PlainMonthDay";
+    const DOC: &'static str = "A calendar month and day without a year (such as `03-10`).";
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
     const PACKING: Option<Packing<Self>> =
         Some(Packing { pack: |md| [pack_date(&md.0), 0], unpack: |[d, _]| PlainMonthDay(unpack_date(d)), ordered: true });
@@ -336,6 +343,7 @@ impl fmt::Display for Span {
 impl ValueType for Span {
     const MODULE: &'static str = "time";
     const NAME: &'static str = "Span";
+    const DOC: &'static str = "A signed calendar and clock duration (such as `P1M2DT3H`). Sub-second units normalize into seconds (`span(milliseconds: 1500)` stores 1 second and 500 milliseconds). Two spans are equal only if all unit fields match (`span(hours: 24) != span(days: 1)`).";
     fn parse(text: &str) -> Result<Self, String> {
         text.parse().and_then(Span::new).map_err(|_| parse_error(text, Self::NAME))
     }
@@ -384,6 +392,7 @@ impl fmt::Display for TimeZone {
 impl ValueType for TimeZone {
     const MODULE: &'static str = "time";
     const NAME: &'static str = "TimeZone";
+    const DOC: &'static str = "A time zone identifier: an IANA zone (`America/New_York`), `UTC`, or a fixed minute offset (`+05:30`). Two zones are equal if their canonical IDs match (`zone(\"Etc/UTC\") != UTC`).";
     fn parse(text: &str) -> Result<Self, String> {
         parse_zone(text).map(TimeZone)
     }
@@ -405,75 +414,94 @@ fn check_supported_zone(tz: &tz::TimeZone) -> Result<(), String> {
     }
 }
 
-fn expected_type_error<T>(what: &str) -> Result<T, Ctl> {
-    Err(Ctl::internal(format!("expected a time.{what}")))
+trait HasDate {
+    fn date_part(&self) -> Date;
 }
 
-fn extract_value<T: ValueType>(vm: &Vm, v: Value) -> Result<T, Ctl> {
-    match vm.heap.value::<T>(v) {
-        Some(x) => Ok(x),
-        None => expected_type_error(T::NAME),
+impl HasDate for Date {
+    fn date_part(&self) -> Date {
+        *self
+    }
+}
+impl HasDate for DateTime {
+    fn date_part(&self) -> Date {
+        self.date()
+    }
+}
+impl HasDate for ZonedDateTime {
+    fn date_part(&self) -> Date {
+        self.0.date()
+    }
+}
+impl HasDate for PlainYearMonth {
+    fn date_part(&self) -> Date {
+        self.0
+    }
+}
+impl HasDate for PlainMonthDay {
+    fn date_part(&self) -> Date {
+        self.0
     }
 }
 
-fn instant(vm: &Vm, v: Value) -> Result<Timestamp, Ctl> {
-    if let Some(t) = vm.heap.value::<Timestamp>(v) {
-        Ok(t)
-    } else if let Some(z) = vm.heap.value::<ZonedDateTime>(v) {
-        Ok(z.0.timestamp())
-    } else {
-        expected_type_error("Instant")
+trait HasTime {
+    fn time_part(&self) -> Time;
+}
+
+impl HasTime for Time {
+    fn time_part(&self) -> Time {
+        *self
+    }
+}
+impl HasTime for DateTime {
+    fn time_part(&self) -> Time {
+        self.time()
+    }
+}
+impl HasTime for ZonedDateTime {
+    fn time_part(&self) -> Time {
+        self.0.time()
     }
 }
 
-fn zoned(vm: &Vm, v: Value) -> Result<Zoned, Ctl> {
-    extract_value::<ZonedDateTime>(vm, v).map(|z| z.0)
+type DifferenceOptions = (Unit, Unit, i64, RoundMode);
+
+trait Difference: ValueType {
+    fn difference(&self, other: &Self, since: bool, options: DifferenceOptions) -> Result<jiff::Span, jiff::Error>;
 }
 
-fn opt_zoned(vm: &Vm, v: Value) -> Result<Option<Zoned>, Ctl> {
-    vm.as_option(v).map(|z| zoned(vm, z)).transpose()
-}
-
-fn date(vm: &Vm, v: Value) -> Result<Date, Ctl> {
-    let heap = &vm.heap;
-    if let Some(d) = heap.value::<Date>(v) {
-        Ok(d)
-    } else if let Some(dt) = heap.value::<DateTime>(v) {
-        Ok(dt.date())
-    } else if let Some(z) = heap.value::<ZonedDateTime>(v) {
-        Ok(z.0.date())
-    } else if let Some(ym) = heap.value::<PlainYearMonth>(v) {
-        Ok(ym.0)
-    } else if let Some(md) = heap.value::<PlainMonthDay>(v) {
-        Ok(md.0)
-    } else {
-        expected_type_error("PlainDate")
+impl Difference for ZonedDateTime {
+    fn difference(
+        &self,
+        other: &Self,
+        since: bool,
+        (largest, smallest, increment, mode): DifferenceOptions,
+    ) -> Result<jiff::Span, jiff::Error> {
+        let options = ZonedDifference::new(&other.0).largest(largest).smallest(smallest).increment(increment).mode(mode);
+        if since { self.0.since(options) } else { self.0.until(options) }
     }
 }
-
-fn time_of(vm: &Vm, v: Value) -> Result<Time, Ctl> {
-    let heap = &vm.heap;
-    if let Some(t) = heap.value::<Time>(v) {
-        Ok(t)
-    } else if let Some(dt) = heap.value::<DateTime>(v) {
-        Ok(dt.time())
-    } else if let Some(z) = heap.value::<ZonedDateTime>(v) {
-        Ok(z.0.time())
-    } else {
-        expected_type_error("PlainTime")
+impl Difference for DateTime {
+    fn difference(
+        &self,
+        other: &Self,
+        since: bool,
+        (largest, smallest, increment, mode): DifferenceOptions,
+    ) -> Result<jiff::Span, jiff::Error> {
+        let options = DateTimeDifference::new(*other).largest(largest).smallest(smallest).increment(increment).mode(mode);
+        if since { self.since(options) } else { self.until(options) }
     }
 }
-
-fn datetime(vm: &Vm, v: Value) -> Result<DateTime, Ctl> {
-    if let Some(dt) = vm.heap.value::<DateTime>(v) { Ok(dt) } else { Ok(zoned(vm, v)?.datetime()) }
-}
-
-fn span(vm: &Vm, v: Value) -> Result<jiff::Span, Ctl> {
-    extract_value::<Span>(vm, v).map(|s| s.0)
-}
-
-fn zone(vm: &Vm, v: Value) -> Result<tz::TimeZone, Ctl> {
-    extract_value::<TimeZone>(vm, v).map(|z| z.0)
+impl Difference for Date {
+    fn difference(
+        &self,
+        other: &Self,
+        since: bool,
+        (largest, smallest, increment, mode): DifferenceOptions,
+    ) -> Result<jiff::Span, jiff::Error> {
+        let options = DateDifference::new(*other).largest(largest).smallest(smallest).increment(increment).mode(mode);
+        if since { self.since(options) } else { self.until(options) }
+    }
 }
 
 pub mod enums {
@@ -601,24 +629,12 @@ pub mod enums {
     }
 }
 
-fn unit(vm: &Vm, v: Value) -> Result<Unit, Ctl> {
-    Ok(vm.enum_value::<enums::Unit>(v)?.into())
+fn rounding_options(smallest: enums::Unit, increment: i64, mode: enums::RoundingMode) -> Result<(Unit, i64, RoundMode), Ctl> {
+    Ok((smallest.into(), parse_increment(increment)?, mode.into()))
 }
 
-fn rounding_mode(vm: &Vm, v: Value) -> Result<RoundMode, Ctl> {
-    Ok(vm.enum_value::<enums::RoundingMode>(v)?.into())
-}
-
-fn disambiguation(vm: &Vm, v: Value) -> Result<Disambiguation, Ctl> {
-    Ok(vm.enum_value::<enums::Disambiguation>(v)?.into())
-}
-
-fn rounding_args(vm: &Vm, a: &[Value], i: usize) -> Result<(Unit, i64, RoundMode), Ctl> {
-    Ok((unit(vm, a[i])?, parse_increment(a[i + 1])?, rounding_mode(vm, a[i + 2])?))
-}
-
-fn parse_increment(v: Value) -> Result<i64, Ctl> {
-    match v.as_int() {
+fn parse_increment(increment: i64) -> Result<i64, Ctl> {
+    match increment {
         i @ 1..=1_000_000_000 => Ok(i),
         i => Err(Ctl::fail("invalid", format!("the rounding increment must be from 1 to 1000000000, not {i}"))),
     }
@@ -631,9 +647,14 @@ fn check_clock_unit(smallest: Unit, what: &str) -> Result<(), Ctl> {
     Ok(())
 }
 
-fn difference_args(vm: &Vm, a: &[Value]) -> Result<(Unit, Unit, i64, RoundMode), Ctl> {
-    let (smallest, increment, mode) = rounding_args(vm, a, 3)?;
-    Ok((unit(vm, a[2])?.max(smallest), smallest, increment, mode))
+fn difference_options(
+    largest: enums::Unit,
+    smallest: enums::Unit,
+    increment: i64,
+    mode: enums::RoundingMode,
+) -> Result<DifferenceOptions, Ctl> {
+    let (smallest, increment, mode) = rounding_options(smallest, increment, mode)?;
+    Ok((Unit::from(largest).max(smallest), smallest, increment, mode))
 }
 
 fn jiff_error(e: jiff::Error) -> Ctl {
@@ -641,34 +662,6 @@ fn jiff_error(e: jiff::Error) -> Ctl {
         Ctl::fail("overflow", "the result is outside the supported range (years -9999 to 9999)")
     } else {
         Ctl::fail("invalid", e)
-    }
-}
-
-fn alloc_or_fail<T: ValueType>(vm: &mut Vm, x: Result<T, jiff::Error>) -> NResult {
-    match x {
-        Ok(x) => Ok(vm.new_value(x)),
-        Err(e) => Err(jiff_error(e)),
-    }
-}
-
-fn into_sand_result<T: ValueType>(vm: &mut Vm, x: Result<T, String>, kind: &'static str) -> NResult {
-    match x {
-        Ok(x) => {
-            let v = vm.new_value(x);
-            Ok(vm.ok(v))
-        }
-        Err(msg) => Err(Ctl::native_err(kind, msg)),
-    }
-}
-
-fn int_val(n: impl Into<i64>) -> Value {
-    Value::Int(n.into())
-}
-
-fn duration_val(d: SignedDuration) -> NResult {
-    match i64::try_from(d.as_nanos()) {
-        Ok(n) => Ok(Value::Dur(n)),
-        Err(_) => Err(Ctl::fail("overflow", "the time is too long for a duration")),
     }
 }
 
@@ -702,43 +695,42 @@ fn constrain_time([h, m, s, ms, us, ns]: [i64; 6]) -> Result<Time, Ctl> {
     exact_time(parts).ok_or_else(|| Ctl::internal("a clamped time is invalid"))
 }
 
-fn int_args<const N: usize>(a: &[Value], from: usize) -> [i64; N] {
-    std::array::from_fn(|i| a[from + i].as_int())
-}
-
-fn span_relative_to(rel: &Option<Zoned>) -> SpanRelativeTo<'_> {
+fn span_relative_to(rel: &Option<ZonedDateTime>) -> SpanRelativeTo<'_> {
     match rel {
-        Some(z) => z.into(),
+        Some(z) => (&z.0).into(),
         None => SpanRelativeTo::days_are_24_hours(),
     }
 }
 
-fn parse_with<T: ValueType>(vm: &mut Vm, a: &[Value], formatted: fn(&BrokenDownTime) -> Result<T, jiff::Error>) -> NResult {
-    let (text, format) = (vm.str(a[0]), vm.str(a[1]));
+fn parse_with<T: ValueType>(
+    vm: &mut Vm,
+    text: Val<String>,
+    format: Val<String>,
+    formatted: fn(&BrokenDownTime) -> Result<T, jiff::Error>,
+) -> Result<T, HostError> {
+    let (text, format) = (text.str(&vm.heap), format.str(&vm.heap));
     vm.charge_bytes(text.len() + format.len())?;
     let x = if format.is_empty() {
         T::parse(text)
     } else {
         strtime::parse(format, text).and_then(|b| formatted(&b)).map_err(|_| format_parse_error(text, T::NAME, format))
     };
-    into_sand_result(vm, x, "parse")
+    x.map_err(|e| HostError::new("parse", e))
 }
 
-fn parse<T: ValueType>(vm: &mut Vm, a: &[Value]) -> NResult {
-    let text = vm.str(a[0]);
+fn parse<T: ValueType>(vm: &mut Vm, text: Val<String>) -> Result<T, HostError> {
+    let text = text.str(&vm.heap);
     vm.charge_bytes(text.len())?;
     let x = T::parse(text);
-    into_sand_result(vm, x, "parse")
+    x.map_err(|e| HostError::new("parse", e))
 }
 
-fn format(vm: &mut Vm, a: &[Value], t: impl Into<BrokenDownTime>) -> NResult {
-    let format = vm.str(a[1]);
+fn format(vm: &mut Vm, format: Val<String>, t: impl Into<BrokenDownTime>) -> Result<String, Ctl> {
+    let format = format.str(&vm.heap);
     // Bound output size before formatting.
     vm.reserve(format.len().saturating_mul(64))?;
     vm.charge_slow_bytes(format.len())?;
-    let s = strtime::format(format, t).map_err(|e| Ctl::fail("invalid", e))?;
-    vm.charge_bytes(s.len())?;
-    Ok(vm.new_str(s))
+    strtime::format(format, t).map_err(|e| Ctl::fail("invalid", e))
 }
 
 /// Returns the first transition that changes the UTC offset (ignoring abbreviation-only transitions).
@@ -769,7 +761,7 @@ fn positive_epoch_round_mode(mode: RoundMode) -> RoundMode {
     }
 }
 
-fn require_relative_to(spans: &[jiff::Span], largest: Option<Unit>, rel: &Option<Zoned>) -> Result<(), Ctl> {
+fn require_relative_to(spans: &[jiff::Span], largest: Option<Unit>, rel: &Option<ZonedDateTime>) -> Result<(), Ctl> {
     let calendar = spans.iter().any(|s| s.get_years() != 0 || s.get_months() != 0) || matches!(largest, Some(Unit::Year | Unit::Month));
     if calendar && rel.is_none() {
         return Err(Ctl::fail("invalid", "a span with years or months needs `relative_to`"));
@@ -777,19 +769,12 @@ fn require_relative_to(spans: &[jiff::Span], largest: Option<Unit>, rel: &Option
     Ok(())
 }
 
+/// A monotonic timer for measuring elapsed time.
+#[derive(crate::SandObject)]
+#[sand(module = "time")]
 struct Stopwatch(Monotonic);
 
-impl NativeObject for Stopwatch {
-    fn type_name(&self) -> &'static str {
-        "Stopwatch"
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-}
+impl NativeObject for Stopwatch {}
 
 fn now(vm: &Vm) -> Result<Timestamp, Ctl> {
     let nanos = match vm.host.clock.wall().duration_since(UNIX_EPOCH) {
@@ -799,231 +784,203 @@ fn now(vm: &Vm) -> Result<Timestamp, Ctl> {
     nanos.ok().and_then(|n| Timestamp::from_nanosecond(n).ok()).ok_or_else(|| Ctl::internal("the system clock is out of range"))
 }
 
-fn epoch_div(t: Timestamp, unit: i128) -> NResult {
-    match i64::try_from(t.as_nanosecond().div_euclid(unit)) {
-        Ok(n) => Ok(Value::Int(n)),
-        Err(_) => Err(Ctl::fail("overflow", "the time is too far from 1970 for nanoseconds in an int")),
+fn epoch_div(t: Timestamp, unit: i128) -> Result<i64, Ctl> {
+    i64::try_from(t.as_nanosecond().div_euclid(unit))
+        .map_err(|_| Ctl::fail("overflow", "the time is too far from 1970 for nanoseconds in an int"))
+}
+
+type Part<P, R> = (&'static str, fn(P) -> R);
+
+fn methods<T: ValueType, P: 'static, R: IntoValue + 'static>(m: &mut NativeModule, part: fn(&T) -> P, natives: &[Part<P, R>]) {
+    for &(name, f) in natives {
+        m.function(&format!("{}.{name}", T::NAME), move |x: T| f(part(&x)));
     }
 }
 
-fn register_methods(r: &mut Registry, types: &[&str], natives: &[(&str, NativeFn)]) {
-    for ty in types {
-        for &(name, f) in natives {
-            r.add_builtin(format!("time.{ty}.{name}"), f);
-        }
-    }
+const YEAR_MONTH: &[Part<Date, i64>] = &[
+    ("year", |d| d.year().into()),
+    ("month", |d| d.month().into()),
+    ("days_in_month", |d| d.days_in_month().into()),
+    ("days_in_year", |d| d.days_in_year().into()),
+];
+const LEAP_YEAR: &[Part<Date, bool>] = &[("in_leap_year", Date::in_leap_year)];
+const MONTH: &[Part<Date, i64>] = &[("month", |d| d.month().into())];
+const DAY: &[Part<Date, i64>] = &[("day", |d| d.day().into())];
+const WEEK: &[Part<Date, i64>] = &[
+    ("day_of_week", |d| d.weekday().to_monday_one_offset().into()),
+    ("day_of_year", |d| d.day_of_year().into()),
+    ("week_of_year", |d| d.iso_week_date().week().into()),
+    ("year_of_week", |d| d.iso_week_date().year().into()),
+];
+const CLOCK: &[Part<Time, i64>] = &[
+    ("hour", |t| t.hour().into()),
+    ("minute", |t| t.minute().into()),
+    ("second", |t| t.second().into()),
+    ("millisecond", |t| t.millisecond().into()),
+    ("microsecond", |t| t.microsecond().into()),
+    ("nanosecond", |t| t.nanosecond().into()),
+];
+const TO_PLAIN_DATE: &[Part<Date, Date>] = &[("to_plain_date", |d| d)];
+const TO_PLAIN_TIME: &[Part<Time, Time>] = &[("to_plain_time", |t| t)];
+const SPAN_UNITS: &[Part<jiff::Span, i64>] = &[
+    ("years", |s| s.get_years().into()),
+    ("months", |s| s.get_months().into()),
+    ("weeks", |s| s.get_weeks().into()),
+    ("days", |s| s.get_days().into()),
+    ("hours", |s| s.get_hours().into()),
+    ("minutes", |s| s.get_minutes()),
+    ("seconds", |s| s.get_seconds()),
+    ("milliseconds", |s| s.get_milliseconds()),
+    ("microseconds", |s| s.get_microseconds()),
+    ("nanoseconds", |s| s.get_nanoseconds()),
+    ("sign", |s| s.signum().into()),
+];
+const SPAN_IS_ZERO: &[Part<jiff::Span, bool>] = &[("is_zero", |s| s.is_zero())];
+
+pub(crate) fn module() -> NativeModule {
+    let mut m = NativeModule::std("time", ModKind::Std, include_str!("time.sand"));
+    m.enum_type::<enums::Unit>();
+    m.enum_type::<enums::RoundingMode>();
+    m.enum_type::<enums::Disambiguation>();
+    m.value_type::<Timestamp>();
+    m.value_type::<ZonedDateTime>();
+    m.value_type::<DateTime>();
+    m.value_type::<Date>();
+    m.value_type::<Time>();
+    m.value_type::<PlainYearMonth>();
+    m.value_type::<PlainMonthDay>();
+    m.value_type::<Span>();
+    m.value_type::<TimeZone>();
+    m.object_type::<Stopwatch>();
+    register_module(&mut m);
+    register_parts(&mut m);
+    register_instant(&mut m);
+    register_zoned(&mut m);
+    register_datetime(&mut m);
+    register_date(&mut m);
+    register_time(&mut m);
+    register_year_month(&mut m);
+    register_span(&mut m);
+    m
 }
 
-const DATE_TYPES: &[&str] = &["PlainDate", "PlainDateTime", "ZonedDateTime"];
-const TIME_TYPES: &[&str] = &["PlainTime", "PlainDateTime", "ZonedDateTime"];
-
-pub fn register(r: &mut Registry) {
-    r.source("time", ModKind::Std, include_str!("time.sand"));
-    r.add_enum_type::<enums::Unit>();
-    r.add_enum_type::<enums::RoundingMode>();
-    r.add_enum_type::<enums::Disambiguation>();
-    r.add_value_type::<Timestamp>();
-    r.add_value_type::<ZonedDateTime>();
-    r.add_value_type::<DateTime>();
-    r.add_value_type::<Date>();
-    r.add_value_type::<Time>();
-    r.add_value_type::<PlainYearMonth>();
-    r.add_value_type::<PlainMonthDay>();
-    r.add_value_type::<Span>();
-    r.add_value_type::<TimeZone>();
-    register_module(r);
-    register_parts(r);
-    register_instant(r);
-    register_zoned(r);
-    register_datetime(r);
-    register_date(r);
-    register_time(r);
-    register_year_month(r);
-    register_span(r);
-}
-
-fn register_module(r: &mut Registry) {
-    r.add_builtin("time.utc", |vm, _| Ok(vm.new_value(TimeZone(tz::TimeZone::UTC))));
-    r.add_builtin("time.zone", |vm, a| {
-        let name = vm.str(a[0]);
+fn register_module(m: &mut NativeModule) {
+    m.function("utc", || TimeZone(tz::TimeZone::UTC));
+    m.vm_function("zone", |vm: &mut Vm, name: Val<String>| {
+        let name = name.str(&vm.heap);
         vm.charge_bytes(name.len())?;
         vm.charge(64)?;
         let tz = parse_zone(name).map(TimeZone);
-        into_sand_result(vm, tz, "not_found")
+        tz.map_err(|e| HostError::new("not_found", e))
     });
-    r.add_builtin("time.local_zone", |vm, _| {
+    m.vm_function("local_zone", |vm: &mut Vm| -> Result<_, Ctl> {
         let tz = match vm.host.time_zone.clone() {
             Some(tz) if vm.permit(&Capability::TimeZone)? => tz,
             _ => tz::TimeZone::UTC,
         };
-        Ok(vm.new_value(TimeZone(tz)))
+        Ok(TimeZone(tz))
     });
-    r.add_builtin("time.now", |vm, _| {
-        let t = now(vm)?;
-        Ok(vm.new_value(t))
-    });
-    r.add_builtin("time.stopwatch", |vm, _| {
+    m.vm_function("now", |vm: &mut Vm| now(vm));
+    m.vm_function("stopwatch", |vm: &mut Vm| {
         let start = vm.host.clock.now();
-        Ok(vm.heap.alloc(Obj::Native(Box::new(Stopwatch(start)))))
+        vm.new_object(Stopwatch(start))
     });
-    r.add_builtin("time.Stopwatch.elapsed", |vm, a| {
-        let start = vm.heap.native::<Stopwatch>(a[0]).ok_or_else(|| Ctl::internal("expected a time.Stopwatch"))?.0;
+    m.vm_function("Stopwatch.elapsed", |vm: &mut Vm, watch: Val<Stopwatch>| -> Result<_, Ctl> {
+        let start = watch.get(&vm.heap)?.0;
         let elapsed = vm.host.clock.now().saturating_duration_since(start);
-        Ok(Value::Dur(i64::try_from(elapsed.as_nanos()).unwrap_or(i64::MAX)))
+        Ok(SignedDuration::from_nanos(i64::try_from(elapsed.as_nanos()).unwrap_or(i64::MAX)))
     });
-    r.add_builtin("time.midnight", |vm, _| Ok(vm.new_value(Time::midnight())));
-    r.add_builtin("time.duration_span", |vm, a| {
-        let s = jiff::Span::try_from(SignedDuration::from_nanos(a[0].as_int())).and_then(Span::new);
-        alloc_or_fail(vm, s)
-    });
+    m.function("midnight", Time::midnight);
+    m.function("duration_span", |d: SignedDuration| jiff::Span::try_from(d).and_then(Span::new).map_err(jiff_error));
 
-    r.add_builtin("time.date", |vm, a| {
-        let [y, m, d] = int_args(a, 0);
+    m.function("date", |y: i64, m: i64, d: i64| {
         let date = exact_date(y, m, d).ok_or_else(|| format!("no such date: {y:04}-{m:02}-{d:02}"));
-        into_sand_result(vm, date, "invalid")
+        date.map_err(|e| HostError::new("invalid", e))
     });
-    r.add_builtin("time.time", |vm, a| {
-        let parts: [i64; 6] = int_args(a, 0);
-        let [h, m, s, ..] = parts;
-        let t = exact_time(parts).ok_or_else(|| format!("no such time: {h:02}:{m:02}:{s:02}"));
-        into_sand_result(vm, t, "invalid")
+    m.function("time", |h: i64, m: i64, s: i64, ms: i64, us: i64, ns: i64| {
+        let t = exact_time([h, m, s, ms, us, ns]).ok_or_else(|| format!("no such time: {h:02}:{m:02}:{s:02}"));
+        t.map_err(|e| HostError::new("invalid", e))
     });
-    r.add_builtin("time.datetime", |vm, a| {
-        let [y, m, d, h, mi, s] = int_args(a, 0);
-        let dt = match (exact_date(y, m, d), exact_time(int_args(a, 3))) {
+    m.function("datetime", |y: i64, m: i64, d: i64, h: i64, mi: i64, s: i64, ms: i64, us: i64, ns: i64| {
+        let dt = match (exact_date(y, m, d), exact_time([h, mi, s, ms, us, ns])) {
             (Some(date), Some(time)) => Ok(date.to_datetime(time)),
             (None, _) => Err(format!("no such date: {y:04}-{m:02}-{d:02}")),
             (_, None) => Err(format!("no such time: {h:02}:{mi:02}:{s:02}")),
         };
-        into_sand_result(vm, dt, "invalid")
+        dt.map_err(|e| HostError::new("invalid", e))
     });
-    r.add_builtin("time.year_month", |vm, a| {
-        let [y, m] = int_args(a, 0);
+    m.function("year_month", |y: i64, m: i64| {
         let ym = exact_date(y, m, 1).map(PlainYearMonth).ok_or_else(|| format!("no such month: {y:04}-{m:02}"));
-        into_sand_result(vm, ym, "invalid")
+        ym.map_err(|e| HostError::new("invalid", e))
     });
-    r.add_builtin("time.month_day", |vm, a| {
-        let [m, d] = int_args(a, 0);
+    m.function("month_day", |m: i64, d: i64| {
         let md = exact_date(MONTH_DAY_YEAR.into(), m, d).map(PlainMonthDay).ok_or_else(|| format!("no such day: {m:02}-{d:02}"));
-        into_sand_result(vm, md, "invalid")
+        md.map_err(|e| HostError::new("invalid", e))
     });
-    r.add_builtin("time.span", |vm, a| {
-        let units: [i64; 10] = int_args(a, 0);
+    m.function("span", |y: i64, mo: i64, w: i64, d: i64, h: i64, mi: i64, s: i64, ms: i64, us: i64, ns: i64| {
+        let units = [y, mo, w, d, h, mi, s, ms, us, ns];
         if units.iter().any(|&u| u > 0) && units.iter().any(|&u| u < 0) {
             return Err(Ctl::fail("invalid", "the units of a span must not have different signs"));
         }
-        alloc_or_fail(vm, build_span(units).and_then(Span::new))
+        build_span(units).and_then(Span::new).map_err(jiff_error)
     });
-    r.add_builtin("time.TimeZone.id", |vm, a| {
-        let id = extract_value::<TimeZone>(vm, a[0])?.to_string();
-        Ok(vm.new_str(id))
-    });
+    m.function("TimeZone.id", |z: TimeZone| z.to_string());
 }
 
-fn register_parts(r: &mut Registry) {
-    register_methods(
-        r,
-        &["PlainDate", "PlainDateTime", "ZonedDateTime", "PlainYearMonth"],
-        &[
-            ("year", |vm, a| Ok(int_val(date(vm, a[0])?.year()))),
-            ("month", |vm, a| Ok(int_val(date(vm, a[0])?.month()))),
-            ("days_in_month", |vm, a| Ok(int_val(date(vm, a[0])?.days_in_month()))),
-            ("days_in_year", |vm, a| Ok(int_val(date(vm, a[0])?.days_in_year()))),
-            ("in_leap_year", |vm, a| Ok(Value::Bool(date(vm, a[0])?.in_leap_year()))),
-        ],
-    );
-    register_methods(
-        r,
-        &["PlainDate", "PlainDateTime", "ZonedDateTime", "PlainMonthDay"],
-        &[("day", |vm, a| Ok(int_val(date(vm, a[0])?.day())))],
-    );
-    register_methods(r, &["PlainMonthDay"], &[("month", |vm, a| Ok(int_val(date(vm, a[0])?.month())))]);
-    register_methods(
-        r,
-        DATE_TYPES,
-        &[
-            ("day_of_week", |vm, a| Ok(int_val(date(vm, a[0])?.weekday().to_monday_one_offset()))),
-            ("day_of_year", |vm, a| Ok(int_val(date(vm, a[0])?.day_of_year()))),
-            ("week_of_year", |vm, a| Ok(int_val(date(vm, a[0])?.iso_week_date().week()))),
-            ("year_of_week", |vm, a| Ok(int_val(date(vm, a[0])?.iso_week_date().year()))),
-        ],
-    );
-    register_methods(
-        r,
-        TIME_TYPES,
-        &[
-            ("hour", |vm, a| Ok(int_val(time_of(vm, a[0])?.hour()))),
-            ("minute", |vm, a| Ok(int_val(time_of(vm, a[0])?.minute()))),
-            ("second", |vm, a| Ok(int_val(time_of(vm, a[0])?.second()))),
-            ("millisecond", |vm, a| Ok(int_val(time_of(vm, a[0])?.millisecond()))),
-            ("microsecond", |vm, a| Ok(int_val(time_of(vm, a[0])?.microsecond()))),
-            ("nanosecond", |vm, a| Ok(int_val(time_of(vm, a[0])?.nanosecond()))),
-        ],
-    );
-    register_methods(
-        r,
-        &["Instant", "ZonedDateTime"],
-        &[
-            ("epoch_seconds", |vm, a| epoch_div(instant(vm, a[0])?, 1_000_000_000)),
-            ("epoch_millis", |vm, a| epoch_div(instant(vm, a[0])?, 1_000_000)),
-            ("epoch_nanos", |vm, a| epoch_div(instant(vm, a[0])?, 1)),
-        ],
-    );
-    register_methods(
-        r,
-        &["ZonedDateTime", "PlainDateTime"],
-        &[
-            ("to_plain_date", |vm, a| {
-                let d = date(vm, a[0])?;
-                Ok(vm.new_value(d))
-            }),
-            ("to_plain_time", |vm, a| {
-                let t = time_of(vm, a[0])?;
-                Ok(vm.new_value(t))
-            }),
-        ],
-    );
+fn register_parts(m: &mut NativeModule) {
+    macro_rules! parts {
+        ($has:ident::$part:ident: $($t:ty),+ => $natives:expr) => {$(methods(m, <$t as $has>::$part, $natives);)+};
+    }
+    parts!(HasDate::date_part: Date, DateTime, ZonedDateTime, PlainYearMonth => YEAR_MONTH);
+    parts!(HasDate::date_part: Date, DateTime, ZonedDateTime, PlainYearMonth => LEAP_YEAR);
+    parts!(HasDate::date_part: Date, DateTime, ZonedDateTime, PlainMonthDay => DAY);
+    parts!(HasDate::date_part: PlainMonthDay => MONTH);
+    parts!(HasDate::date_part: Date, DateTime, ZonedDateTime => WEEK);
+    parts!(HasTime::time_part: Time, DateTime, ZonedDateTime => CLOCK);
+    parts!(HasDate::date_part: ZonedDateTime, DateTime => TO_PLAIN_DATE);
+    parts!(HasTime::time_part: ZonedDateTime, DateTime => TO_PLAIN_TIME);
+    for (name, unit) in [("epoch_seconds", 1_000_000_000), ("epoch_millis", 1_000_000), ("epoch_nanos", 1)] {
+        m.function(&format!("Instant.{name}"), move |t: Timestamp| epoch_div(t, unit));
+        m.function(&format!("ZonedDateTime.{name}"), move |z: ZonedDateTime| epoch_div(z.0.timestamp(), unit));
+    }
 }
 
-fn register_instant(r: &mut Registry) {
-    r.add_builtin("time.Instant.parse", |vm, a| parse_with(vm, a, BrokenDownTime::to_timestamp));
-    r.add_builtin("time.Instant.from_epoch_seconds", |vm, a| {
-        let t = Timestamp::from_second(a[0].as_int());
-        alloc_or_fail(vm, t)
+fn register_difference<T: Difference>(m: &mut NativeModule) {
+    for (name, since) in [("until", false), ("since", true)] {
+        m.function(
+            &format!("{}.{name}", T::NAME),
+            move |x: T, other: T, largest: enums::Unit, smallest: enums::Unit, increment: i64, mode: enums::RoundingMode| {
+                let options = difference_options(largest, smallest, increment, mode)?;
+                x.difference(&other, since, options).and_then(Span::new).map_err(jiff_error)
+            },
+        );
+    }
+}
+
+fn register_instant(m: &mut NativeModule) {
+    m.vm_function("Instant.parse", |vm: &mut Vm, text: Val<String>, format: Val<String>| {
+        parse_with(vm, text, format, BrokenDownTime::to_timestamp)
     });
-    r.add_builtin("time.Instant.from_epoch_millis", |vm, a| {
-        let t = Timestamp::from_millisecond(a[0].as_int());
-        alloc_or_fail(vm, t)
-    });
-    r.add_builtin("time.Instant.from_epoch_nanos", |vm, a| {
-        let t = Timestamp::from_nanosecond(a[0].as_int().into());
-        alloc_or_fail(vm, t)
-    });
-    r.add_builtin("time.Instant.add", |vm, a| {
-        let t = instant(vm, a[0])?.checked_add(SignedDuration::from_nanos(a[1].as_int()));
-        alloc_or_fail(vm, t)
-    });
-    r.add_builtin("time.Instant.since", |vm, a| duration_val(instant(vm, a[0])?.duration_since(instant(vm, a[1])?)));
-    r.add_builtin("time.Instant.round", |vm, a| {
-        let (smallest, increment, mode) = rounding_args(vm, a, 1)?;
+    m.function("Instant.from_epoch_seconds", |s: i64| Timestamp::from_second(s).map_err(jiff_error));
+    m.function("Instant.from_epoch_millis", |ms: i64| Timestamp::from_millisecond(ms).map_err(jiff_error));
+    m.function("Instant.from_epoch_nanos", |ns: i64| Timestamp::from_nanosecond(ns.into()).map_err(jiff_error));
+    m.function("Instant.add", |t: Timestamp, d: SignedDuration| t.checked_add(d).map_err(jiff_error));
+    m.function("Instant.since", |t: Timestamp, other: Timestamp| t.duration_since(other));
+    m.function("Instant.round", |t: Timestamp, smallest: enums::Unit, increment: i64, mode: enums::RoundingMode| {
+        let (smallest, increment, mode) = rounding_options(smallest, increment, mode)?;
         check_clock_unit(smallest, "an Instant")?;
-        let t =
-            instant(vm, a[0])?.round(TimestampRound::new().smallest(smallest).increment(increment).mode(positive_epoch_round_mode(mode)));
-        alloc_or_fail(vm, t)
+        t.round(TimestampRound::new().smallest(smallest).increment(increment).mode(positive_epoch_round_mode(mode))).map_err(jiff_error)
     });
-    r.add_builtin("time.Instant.to_zoned_datetime", |vm, a| {
-        let z = instant(vm, a[0])?.to_zoned(zone(vm, a[1])?);
-        Ok(vm.new_value(ZonedDateTime(z)))
-    });
-    r.add_builtin("time.Instant.format", |vm, a| {
-        let z = instant(vm, a[0])?.to_zoned(tz::TimeZone::UTC);
-        format(vm, a, &z)
+    m.function("Instant.to_zoned_datetime", |t: Timestamp, zone: TimeZone| ZonedDateTime(t.to_zoned(zone.0)));
+    m.vm_function("Instant.format", |vm: &mut Vm, t: Timestamp, pattern: Val<String>| {
+        let z = t.to_zoned(tz::TimeZone::UTC);
+        format(vm, pattern, &z)
     });
 }
 
-fn register_zoned(r: &mut Registry) {
-    r.add_builtin("time.ZonedDateTime.parse", |vm, a| {
-        let (text, format) = (vm.str(a[0]), vm.str(a[1]));
+fn register_zoned(m: &mut NativeModule) {
+    m.vm_function("ZonedDateTime.parse", |vm: &mut Vm, text: Val<String>, format: Val<String>| {
+        let (text, format) = (text.str(&vm.heap), format.str(&vm.heap));
         vm.charge_bytes(text.len() + format.len())?;
         let z = if format.is_empty() {
             ZonedDateTime::parse(text)
@@ -1036,293 +993,183 @@ fn register_zoned(r: &mut Registry) {
                     Ok(ZonedDateTime(z))
                 })
         };
-        into_sand_result(vm, z, "parse")
+        z.map_err(|e| HostError::new("parse", e))
     });
-    r.add_builtin("time.ZonedDateTime.hours_in_day", |vm, a| {
-        let z = zoned(vm, a[0])?;
+    m.function("ZonedDateTime.hours_in_day", |z: ZonedDateTime| -> Result<_, Ctl> {
+        let z = z.0;
         let start = z.start_of_day().map_err(jiff_error)?;
         let end = z.date().tomorrow().and_then(|d| d.to_zoned(z.time_zone().clone())).map_err(jiff_error)?;
-        Ok(Value::Float(end.timestamp().duration_since(start.timestamp()).as_secs_f64() / 3600.0))
+        Ok(end.timestamp().duration_since(start.timestamp()).as_secs_f64() / 3600.0)
     });
-    r.add_builtin("time.ZonedDateTime.offset", |vm, a| Ok(Value::Dur(i64::from(zoned(vm, a[0])?.offset().seconds()) * 1_000_000_000)));
-    r.add_builtin("time.ZonedDateTime.time_zone", |vm, a| {
-        let tz = zoned(vm, a[0])?.time_zone().clone();
-        Ok(vm.new_value(TimeZone(tz)))
+    m.function("ZonedDateTime.offset", |z: ZonedDateTime| SignedDuration::from_secs(z.0.offset().seconds().into()));
+    m.function("ZonedDateTime.time_zone", |z: ZonedDateTime| TimeZone(z.0.time_zone().clone()));
+    m.function(
+        "ZonedDateTime.with",
+        |z: ZonedDateTime, y: i64, m: i64, d: i64, h: i64, mi: i64, s: i64, ms: i64, us: i64, ns: i64, dis: enums::Disambiguation| {
+            let (date, time) = (constrain_date(y, m, d)?, constrain_time([h, mi, s, ms, us, ns])?);
+            let z = z.0.with().date(date).time(time).disambiguation(dis.into()).build();
+            z.map(ZonedDateTime).map_err(jiff_error)
+        },
+    );
+    m.function("ZonedDateTime.with_plain_time", |z: ZonedDateTime, t: Time| {
+        let z = z.0.date().to_datetime(t).to_zoned(z.0.time_zone().clone());
+        z.map(ZonedDateTime).map_err(jiff_error)
     });
-    r.add_builtin("time.ZonedDateTime.with", |vm, a| {
-        let [y, m, d] = int_args(a, 1);
-        let (date, time) = (constrain_date(y, m, d)?, constrain_time(int_args(a, 4))?);
-        let z = zoned(vm, a[0])?.with().date(date).time(time).disambiguation(disambiguation(vm, a[10])?).build();
-        alloc_or_fail(vm, z.map(ZonedDateTime))
+    m.function("ZonedDateTime.with_time_zone", |z: ZonedDateTime, zone: TimeZone| ZonedDateTime(z.0.with_time_zone(zone.0)));
+    m.function("ZonedDateTime.add", |z: ZonedDateTime, s: Span| z.0.checked_add(s.0).map(ZonedDateTime).map_err(jiff_error));
+    register_difference::<ZonedDateTime>(m);
+    m.function("ZonedDateTime.round", |z: ZonedDateTime, smallest: enums::Unit, increment: i64, mode: enums::RoundingMode| {
+        let (smallest, increment, mode) = rounding_options(smallest, increment, mode)?;
+        let z = z.0.round(ZonedRound::new().smallest(smallest).increment(increment).mode(mode));
+        z.map(ZonedDateTime).map_err(jiff_error)
     });
-    r.add_builtin("time.ZonedDateTime.with_plain_time", |vm, a| {
-        let z = zoned(vm, a[0])?;
-        let z = z.date().to_datetime(time_of(vm, a[1])?).to_zoned(z.time_zone().clone());
-        alloc_or_fail(vm, z.map(ZonedDateTime))
-    });
-    r.add_builtin("time.ZonedDateTime.with_time_zone", |vm, a| {
-        let z = zoned(vm, a[0])?.with_time_zone(zone(vm, a[1])?);
-        Ok(vm.new_value(ZonedDateTime(z)))
-    });
-    r.add_builtin("time.ZonedDateTime.add", |vm, a| {
-        let z = zoned(vm, a[0])?.checked_add(span(vm, a[1])?);
-        alloc_or_fail(vm, z.map(ZonedDateTime))
-    });
-    fn diff(vm: &mut Vm, a: &[Value], since: bool) -> NResult {
-        let (largest, smallest, increment, mode) = difference_args(vm, a)?;
-        let (z, other) = (zoned(vm, a[0])?, zoned(vm, a[1])?);
-        let options = ZonedDifference::new(&other).largest(largest).smallest(smallest).increment(increment).mode(mode);
-        let s = if since { z.since(options) } else { z.until(options) };
-        alloc_or_fail(vm, s.and_then(Span::new))
-    }
-    r.add_builtin("time.ZonedDateTime.until", |vm, a| diff(vm, a, false));
-    r.add_builtin("time.ZonedDateTime.since", |vm, a| diff(vm, a, true));
-    r.add_builtin("time.ZonedDateTime.round", |vm, a| {
-        let (smallest, increment, mode) = rounding_args(vm, a, 1)?;
-        let z = zoned(vm, a[0])?.round(ZonedRound::new().smallest(smallest).increment(increment).mode(mode));
-        alloc_or_fail(vm, z.map(ZonedDateTime))
-    });
-    r.add_builtin("time.ZonedDateTime.start_of_day", |vm, a| {
-        let z = zoned(vm, a[0])?.start_of_day();
-        alloc_or_fail(vm, z.map(ZonedDateTime))
-    });
-    fn transition(vm: &mut Vm, a: &[Value], next: bool) -> NResult {
-        let z = zoned(vm, a[0])?;
-        let tz = z.time_zone();
+    m.function("ZonedDateTime.start_of_day", |z: ZonedDateTime| z.0.start_of_day().map(ZonedDateTime).map_err(jiff_error));
+    fn transition(vm: &mut Vm, z: ZonedDateTime, next: bool) -> Result<Option<ZonedDateTime>, Ctl> {
+        let tz = z.0.time_zone();
         let t = if next {
-            find_offset_transition(vm, tz, tz.following(z.timestamp()))?
+            find_offset_transition(vm, tz, tz.following(z.0.timestamp()))?
         } else {
-            find_offset_transition(vm, tz, tz.preceding(z.timestamp()))?
+            find_offset_transition(vm, tz, tz.preceding(z.0.timestamp()))?
         };
-        let t = t.map(|t| vm.new_value(ZonedDateTime(t.to_zoned(tz.clone()))));
-        Ok(vm.option(t))
+        Ok(t.map(|t| ZonedDateTime(t.to_zoned(tz.clone()))))
     }
-    r.add_builtin("time.ZonedDateTime.next_transition", |vm, a| transition(vm, a, true));
-    r.add_builtin("time.ZonedDateTime.previous_transition", |vm, a| transition(vm, a, false));
-    r.add_builtin("time.ZonedDateTime.to_instant", |vm, a| {
-        let t = instant(vm, a[0])?;
-        Ok(vm.new_value(t))
-    });
-    r.add_builtin("time.ZonedDateTime.to_plain_datetime", |vm, a| {
-        let dt = datetime(vm, a[0])?;
-        Ok(vm.new_value(dt))
-    });
-    r.add_builtin("time.ZonedDateTime.format", |vm, a| {
-        let z = zoned(vm, a[0])?;
-        format(vm, a, &z)
-    });
+    m.vm_function("ZonedDateTime.next_transition", |vm: &mut Vm, z: ZonedDateTime| transition(vm, z, true));
+    m.vm_function("ZonedDateTime.previous_transition", |vm: &mut Vm, z: ZonedDateTime| transition(vm, z, false));
+    m.function("ZonedDateTime.to_instant", |z: ZonedDateTime| z.0.timestamp());
+    m.function("ZonedDateTime.to_plain_datetime", |z: ZonedDateTime| z.0.datetime());
+    m.vm_function("ZonedDateTime.format", |vm: &mut Vm, z: ZonedDateTime, pattern: Val<String>| format(vm, pattern, &z.0));
 }
 
-fn register_datetime(r: &mut Registry) {
-    r.add_builtin("time.PlainDateTime.parse", |vm, a| parse_with(vm, a, BrokenDownTime::to_datetime));
-    r.add_builtin("time.PlainDateTime.with", |vm, a| {
-        let [y, m, d] = int_args(a, 1);
-        let dt = constrain_date(y, m, d)?.to_datetime(constrain_time(int_args(a, 4))?);
-        Ok(vm.new_value(dt))
+fn register_datetime(m: &mut NativeModule) {
+    m.vm_function("PlainDateTime.parse", |vm: &mut Vm, text: Val<String>, format: Val<String>| {
+        parse_with(vm, text, format, BrokenDownTime::to_datetime)
     });
-    r.add_builtin("time.PlainDateTime.with_plain_time", |vm, a| {
-        let dt = date(vm, a[0])?.to_datetime(time_of(vm, a[1])?);
-        Ok(vm.new_value(dt))
+    m.function(
+        "PlainDateTime.with",
+        |_: DateTime, y: i64, m: i64, d: i64, h: i64, mi: i64, s: i64, ms: i64, us: i64, ns: i64| -> Result<_, Ctl> {
+            Ok(constrain_date(y, m, d)?.to_datetime(constrain_time([h, mi, s, ms, us, ns])?))
+        },
+    );
+    m.function("PlainDateTime.with_plain_time", |dt: DateTime, t: Time| dt.date().to_datetime(t));
+    m.function("PlainDateTime.add_span", |dt: DateTime, s: Span| dt.checked_add(s.0).map_err(jiff_error));
+    register_difference::<DateTime>(m);
+    m.function("PlainDateTime.round", |dt: DateTime, smallest: enums::Unit, increment: i64, mode: enums::RoundingMode| {
+        let (smallest, increment, mode) = rounding_options(smallest, increment, mode)?;
+        dt.round(DateTimeRound::new().smallest(smallest).increment(increment).mode(mode)).map_err(jiff_error)
     });
-    r.add_builtin("time.PlainDateTime.add_span", |vm, a| {
-        let dt = datetime(vm, a[0])?.checked_add(span(vm, a[1])?);
-        alloc_or_fail(vm, dt)
+    m.function("PlainDateTime.to_zoned_datetime", |dt: DateTime, zone: TimeZone, dis: enums::Disambiguation| {
+        let z = zone.0.to_ambiguous_zoned(dt).disambiguate(dis.into());
+        z.map(ZonedDateTime).map_err(jiff_error)
     });
-    fn diff(vm: &mut Vm, a: &[Value], since: bool) -> NResult {
-        let (largest, smallest, increment, mode) = difference_args(vm, a)?;
-        let (dt, other) = (datetime(vm, a[0])?, datetime(vm, a[1])?);
-        let options = DateTimeDifference::new(other).largest(largest).smallest(smallest).increment(increment).mode(mode);
-        let s = if since { dt.since(options) } else { dt.until(options) };
-        alloc_or_fail(vm, s.and_then(Span::new))
-    }
-    r.add_builtin("time.PlainDateTime.until", |vm, a| diff(vm, a, false));
-    r.add_builtin("time.PlainDateTime.since", |vm, a| diff(vm, a, true));
-    r.add_builtin("time.PlainDateTime.round", |vm, a| {
-        let (smallest, increment, mode) = rounding_args(vm, a, 1)?;
-        let dt = datetime(vm, a[0])?.round(DateTimeRound::new().smallest(smallest).increment(increment).mode(mode));
-        alloc_or_fail(vm, dt)
-    });
-    r.add_builtin("time.PlainDateTime.to_zoned_datetime", |vm, a| {
-        let z = zone(vm, a[1])?.to_ambiguous_zoned(datetime(vm, a[0])?).disambiguate(disambiguation(vm, a[2])?);
-        alloc_or_fail(vm, z.map(ZonedDateTime))
-    });
-    r.add_builtin("time.PlainDateTime.format", |vm, a| {
-        let dt = datetime(vm, a[0])?;
-        format(vm, a, dt)
-    });
+    m.vm_function("PlainDateTime.format", |vm: &mut Vm, dt: DateTime, pattern: Val<String>| format(vm, pattern, dt));
 }
 
-fn register_date(r: &mut Registry) {
-    r.add_builtin("time.PlainDate.parse", |vm, a| parse_with(vm, a, BrokenDownTime::to_date));
-    r.add_builtin("time.PlainDate.with", |vm, a| {
-        let [y, m, d] = int_args(a, 1);
-        let d = constrain_date(y, m, d)?;
-        Ok(vm.new_value(d))
+fn register_date(m: &mut NativeModule) {
+    m.vm_function("PlainDate.parse", |vm: &mut Vm, text: Val<String>, format: Val<String>| {
+        parse_with(vm, text, format, BrokenDownTime::to_date)
     });
-    r.add_builtin("time.PlainDate.add_span", |vm, a| {
-        let d = date(vm, a[0])?.checked_add(span(vm, a[1])?);
-        alloc_or_fail(vm, d)
+    m.function("PlainDate.with", |_: Date, y: i64, m: i64, d: i64| constrain_date(y, m, d));
+    m.function("PlainDate.add_span", |d: Date, s: Span| d.checked_add(s.0).map_err(jiff_error));
+    register_difference::<Date>(m);
+    m.function("PlainDate.to_plain_datetime", |d: Date, t: Time| d.to_datetime(t));
+    m.function("PlainDate.to_zoned_datetime", |d: Date, zone: TimeZone| d.to_zoned(zone.0).map(ZonedDateTime).map_err(jiff_error));
+    m.function("PlainDate.to_plain_year_month", |d: Date| PlainYearMonth(d.first_of_month()));
+    m.function("PlainDate.to_plain_month_day", |d: Date| {
+        PlainMonthDay::new(d.month(), d.day()).ok_or_else(|| Ctl::internal("no month-day"))
     });
-    fn diff(vm: &mut Vm, a: &[Value], since: bool) -> NResult {
-        let (largest, smallest, increment, mode) = difference_args(vm, a)?;
-        let (d, other) = (date(vm, a[0])?, date(vm, a[1])?);
-        let options = DateDifference::new(other).largest(largest).smallest(smallest).increment(increment).mode(mode);
-        let s = if since { d.since(options) } else { d.until(options) };
-        alloc_or_fail(vm, s.and_then(Span::new))
-    }
-    r.add_builtin("time.PlainDate.until", |vm, a| diff(vm, a, false));
-    r.add_builtin("time.PlainDate.since", |vm, a| diff(vm, a, true));
-    r.add_builtin("time.PlainDate.to_plain_datetime", |vm, a| {
-        let dt = date(vm, a[0])?.to_datetime(time_of(vm, a[1])?);
-        Ok(vm.new_value(dt))
-    });
-    r.add_builtin("time.PlainDate.to_zoned_datetime", |vm, a| {
-        let z = date(vm, a[0])?.to_zoned(zone(vm, a[1])?);
-        alloc_or_fail(vm, z.map(ZonedDateTime))
-    });
-    r.add_builtin("time.PlainDate.to_plain_year_month", |vm, a| {
-        let d = date(vm, a[0])?.first_of_month();
-        Ok(vm.new_value(PlainYearMonth(d)))
-    });
-    r.add_builtin("time.PlainDate.to_plain_month_day", |vm, a| {
-        let d = date(vm, a[0])?;
-        let md = PlainMonthDay::new(d.month(), d.day()).ok_or_else(|| Ctl::internal("no month-day"))?;
-        Ok(vm.new_value(md))
-    });
-    r.add_builtin("time.PlainDate.format", |vm, a| {
-        let d = date(vm, a[0])?;
-        format(vm, a, d)
-    });
+    m.vm_function("PlainDate.format", |vm: &mut Vm, d: Date, pattern: Val<String>| format(vm, pattern, d));
 }
 
-fn register_time(r: &mut Registry) {
-    r.add_builtin("time.PlainTime.parse", |vm, a| parse_with(vm, a, BrokenDownTime::to_time));
-    r.add_builtin("time.PlainTime.with", |vm, a| {
-        let t = constrain_time(int_args(a, 1))?;
-        Ok(vm.new_value(t))
+fn register_time(m: &mut NativeModule) {
+    m.vm_function("PlainTime.parse", |vm: &mut Vm, text: Val<String>, format: Val<String>| {
+        parse_with(vm, text, format, BrokenDownTime::to_time)
     });
-    r.add_builtin("time.PlainTime.add_span", |vm, a| {
-        let t = time_of(vm, a[0])?.wrapping_add(span(vm, a[1])?);
-        Ok(vm.new_value(t))
-    });
-    r.add_builtin("time.PlainTime.since", |vm, a| duration_val(time_of(vm, a[0])?.duration_since(time_of(vm, a[1])?)));
-    r.add_builtin("time.PlainTime.round", |vm, a| {
-        let (smallest, increment, mode) = rounding_args(vm, a, 1)?;
+    m.function("PlainTime.with", |_: Time, h: i64, m: i64, s: i64, ms: i64, us: i64, ns: i64| constrain_time([h, m, s, ms, us, ns]));
+    m.function("PlainTime.add_span", |t: Time, s: Span| t.wrapping_add(s.0));
+    m.function("PlainTime.since", |t: Time, other: Time| t.duration_since(other));
+    m.function("PlainTime.round", |t: Time, smallest: enums::Unit, increment: i64, mode: enums::RoundingMode| {
+        let (smallest, increment, mode) = rounding_options(smallest, increment, mode)?;
         check_clock_unit(smallest, "a PlainTime")?;
-        let t = time_of(vm, a[0])?.round(TimeRound::new().smallest(smallest).increment(increment).mode(mode));
-        alloc_or_fail(vm, t)
+        t.round(TimeRound::new().smallest(smallest).increment(increment).mode(mode)).map_err(jiff_error)
     });
-    r.add_builtin("time.PlainTime.format", |vm, a| {
-        let t = time_of(vm, a[0])?;
-        format(vm, a, t)
-    });
+    m.vm_function("PlainTime.format", |vm: &mut Vm, t: Time, pattern: Val<String>| format(vm, pattern, t));
 }
 
-fn register_year_month(r: &mut Registry) {
-    r.add_builtin("time.PlainYearMonth.parse", parse::<PlainYearMonth>);
-    r.add_builtin("time.PlainYearMonth.with", |vm, a| {
-        let [y, m] = int_args(a, 1);
-        let d = constrain_date(y, m, 1)?;
-        Ok(vm.new_value(PlainYearMonth(d)))
+fn register_year_month(m: &mut NativeModule) {
+    m.vm_function("PlainYearMonth.parse", parse::<PlainYearMonth>);
+    m.function("PlainYearMonth.with", |_: PlainYearMonth, y: i64, m: i64| -> Result<_, Ctl> {
+        Ok(PlainYearMonth(constrain_date(y, m, 1)?))
     });
-    r.add_builtin("time.PlainYearMonth.add_span", |vm, a| {
-        let s = span(vm, a[1])?;
+    m.function("PlainYearMonth.add_span", |ym: PlainYearMonth, s: Span| {
+        let s = s.0;
         if span_units(&s)[2..].iter().any(|&u| u != 0) {
             return Err(Ctl::fail("invalid", format!("a PlainYearMonth can only add years and months, not {s}")));
         }
-        let d = date(vm, a[0])?.checked_add(s);
-        alloc_or_fail(vm, d.map(PlainYearMonth))
+        ym.0.checked_add(s).map(PlainYearMonth).map_err(jiff_error)
     });
-    r.add_builtin("time.PlainYearMonth.until", |vm, a| {
-        let largest = unit(vm, a[2])?;
+    m.function("PlainYearMonth.until", |ym: PlainYearMonth, other: PlainYearMonth, largest: enums::Unit| {
+        let largest = Unit::from(largest);
         if !matches!(largest, Unit::Year | Unit::Month) {
             return Err(Ctl::fail("invalid", "the largest unit between months must be years or months"));
         }
-        let s = date(vm, a[0])?.until(DateDifference::new(date(vm, a[1])?).largest(largest).smallest(Unit::Month));
-        alloc_or_fail(vm, s.and_then(Span::new))
+        let s = ym.0.until(DateDifference::new(other.0).largest(largest).smallest(Unit::Month));
+        s.and_then(Span::new).map_err(jiff_error)
     });
-    r.add_builtin("time.PlainYearMonth.to_plain_date", |vm, a| {
-        let d = date(vm, a[0])?;
-        let d = constrain_date(d.year().into(), d.month().into(), a[1].as_int())?;
-        Ok(vm.new_value(d))
-    });
+    m.function("PlainYearMonth.to_plain_date", |ym: PlainYearMonth, day: i64| constrain_date(ym.0.year().into(), ym.0.month().into(), day));
 
-    r.add_builtin("time.PlainMonthDay.parse", parse::<PlainMonthDay>);
-    r.add_builtin("time.PlainMonthDay.with", |vm, a| {
-        let [m, d] = int_args(a, 1);
-        let d = constrain_date(MONTH_DAY_YEAR.into(), m, d)?;
-        Ok(vm.new_value(PlainMonthDay(d)))
+    m.vm_function("PlainMonthDay.parse", parse::<PlainMonthDay>);
+    m.function("PlainMonthDay.with", |_: PlainMonthDay, m: i64, d: i64| -> Result<_, Ctl> {
+        Ok(PlainMonthDay(constrain_date(MONTH_DAY_YEAR.into(), m, d)?))
     });
-    r.add_builtin("time.PlainMonthDay.to_plain_date", |vm, a| {
-        let md = date(vm, a[0])?;
-        let d = constrain_date(a[1].as_int(), md.month().into(), md.day().into())?;
-        Ok(vm.new_value(d))
-    });
+    m.function("PlainMonthDay.to_plain_date", |md: PlainMonthDay, year: i64| constrain_date(year, md.month().into(), md.day().into()));
 }
 
-fn register_span(r: &mut Registry) {
-    r.add_builtin("time.Span.parse", parse::<Span>);
-    register_methods(
-        r,
-        &["Span"],
-        &[
-            ("years", |vm, a| Ok(int_val(span(vm, a[0])?.get_years()))),
-            ("months", |vm, a| Ok(int_val(span(vm, a[0])?.get_months()))),
-            ("weeks", |vm, a| Ok(int_val(span(vm, a[0])?.get_weeks()))),
-            ("days", |vm, a| Ok(int_val(span(vm, a[0])?.get_days()))),
-            ("hours", |vm, a| Ok(int_val(span(vm, a[0])?.get_hours()))),
-            ("minutes", |vm, a| Ok(int_val(span(vm, a[0])?.get_minutes()))),
-            ("seconds", |vm, a| Ok(int_val(span(vm, a[0])?.get_seconds()))),
-            ("milliseconds", |vm, a| Ok(int_val(span(vm, a[0])?.get_milliseconds()))),
-            ("microseconds", |vm, a| Ok(int_val(span(vm, a[0])?.get_microseconds()))),
-            ("nanoseconds", |vm, a| Ok(int_val(span(vm, a[0])?.get_nanoseconds()))),
-            ("sign", |vm, a| Ok(int_val(span(vm, a[0])?.signum()))),
-            ("is_zero", |vm, a| Ok(Value::Bool(span(vm, a[0])?.is_zero()))),
-            ("negated", |vm, a| {
-                let s = span(vm, a[0])?.negate();
-                alloc_or_fail(vm, Span::new(s))
-            }),
-            ("abs", |vm, a| {
-                let s = span(vm, a[0])?.abs();
-                alloc_or_fail(vm, Span::new(s))
-            }),
-        ],
-    );
-    r.add_builtin("time.Span.add_span", |vm, a| {
-        let (s, other, rel) = (span(vm, a[0])?, span(vm, a[1])?, opt_zoned(vm, a[2])?);
+fn register_span(m: &mut NativeModule) {
+    m.vm_function("Span.parse", parse::<Span>);
+    methods(m, Span::span, SPAN_UNITS);
+    methods(m, Span::span, SPAN_IS_ZERO);
+    m.function("Span.negated", |s: Span| Span::new(s.0.negate()).map_err(jiff_error));
+    m.function("Span.abs", |s: Span| Span::new(s.0.abs()).map_err(jiff_error));
+    m.function("Span.add_span", |s: Span, other: Span, rel: Option<ZonedDateTime>| {
+        let (s, other) = (s.0, other.0);
         require_relative_to(&[s, other], None, &rel)?;
         let sum = s.checked_add(SpanArithmetic::from((other, span_relative_to(&rel))));
-        alloc_or_fail(vm, sum.and_then(Span::new))
+        sum.and_then(Span::new).map_err(jiff_error)
     });
-    r.add_builtin("time.Span.round", |vm, a| {
-        let (smallest, increment, mode) = (unit(vm, a[1])?, parse_increment(a[3])?, rounding_mode(vm, a[4])?);
-        let largest = vm.as_option(a[2]).map(|u| unit(vm, u)).transpose()?;
-        let (s, rel) = (span(vm, a[0])?, opt_zoned(vm, a[5])?);
-        require_relative_to(&[s], largest.or(Some(smallest)), &rel)?;
-        let mut options = SpanRound::new().smallest(smallest).increment(increment).mode(mode).relative(span_relative_to(&rel));
-        if let Some(largest) = largest {
-            options = options.largest(largest);
+    m.function(
+        "Span.round",
+        |s: Span,
+         smallest: enums::Unit,
+         largest: Option<enums::Unit>,
+         increment: i64,
+         mode: enums::RoundingMode,
+         rel: Option<ZonedDateTime>| {
+            let (smallest, increment, mode) = rounding_options(smallest, increment, mode)?;
+            let largest = largest.map(Unit::from);
+            require_relative_to(&[s.0], largest.or(Some(smallest)), &rel)?;
+            let mut options = SpanRound::new().smallest(smallest).increment(increment).mode(mode).relative(span_relative_to(&rel));
+            if let Some(largest) = largest {
+                options = options.largest(largest);
+            }
+            s.0.round(options).and_then(Span::new).map_err(jiff_error)
+        },
+    );
+    m.function("Span.total", |s: Span, unit: enums::Unit, rel: Option<ZonedDateTime>| {
+        let unit = Unit::from(unit);
+        require_relative_to(&[s.0], Some(unit), &rel)?;
+        s.0.total((unit, span_relative_to(&rel))).map_err(jiff_error)
+    });
+    m.function("Span.compare", |s: Span, other: Span, rel: Option<ZonedDateTime>| -> Result<_, Ctl> {
+        if span_units(&s.0) == span_units(&other.0) {
+            return Ok(0);
         }
-        alloc_or_fail(vm, s.round(options).and_then(Span::new))
+        require_relative_to(&[s.0, other.0], None, &rel)?;
+        let o = s.0.compare((other.0, span_relative_to(&rel))).map_err(jiff_error)?;
+        Ok(i64::from(o as i8))
     });
-    r.add_builtin("time.Span.total", |vm, a| {
-        let (s, unit, rel) = (span(vm, a[0])?, unit(vm, a[1])?, opt_zoned(vm, a[2])?);
-        require_relative_to(&[s], Some(unit), &rel)?;
-        s.total((unit, span_relative_to(&rel))).map(Value::Float).map_err(jiff_error)
-    });
-    r.add_builtin("time.Span.compare", |vm, a| {
-        let (s, other, rel) = (span(vm, a[0])?, span(vm, a[1])?, opt_zoned(vm, a[2])?);
-        if span_units(&s) == span_units(&other) {
-            return Ok(int_val(0));
-        }
-        require_relative_to(&[s, other], None, &rel)?;
-        let o = s.compare((other, span_relative_to(&rel))).map_err(jiff_error)?;
-        Ok(int_val(o as i8))
-    });
-    r.add_builtin("time.Span.to_duration", |vm, a| {
-        let (s, rel) = (span(vm, a[0])?, opt_zoned(vm, a[1])?);
-        require_relative_to(&[s], None, &rel)?;
-        duration_val(s.to_duration(span_relative_to(&rel)).map_err(jiff_error)?)
+    m.function("Span.to_duration", |s: Span, rel: Option<ZonedDateTime>| {
+        require_relative_to(&[s.0], None, &rel)?;
+        s.0.to_duration(span_relative_to(&rel)).map_err(jiff_error)
     });
 }
 

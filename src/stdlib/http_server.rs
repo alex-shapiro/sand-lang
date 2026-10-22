@@ -4,14 +4,13 @@
 
 use super::http::{Delimit, Framed, Framing, Outgoing, end_head, framing, given_length, persists, push_headers, read_head, values};
 use super::http_common::*;
-use super::net::{self, Detached, finish};
+use super::net::{self, Detached};
 use super::stream::IoFailure;
-use crate::engine::Registry;
+use super::stream::{self, Suspended};
+use crate::native::{HostError, NativeModule, NativeObject, Val};
 use crate::network::{Listener, NetworkFuture, Stream};
 use crate::vm::iomem::{IoMemory, Reservation, ResourceSlot};
-use crate::vm::value::{NativeObject, Obj, Value};
-use crate::vm::{Ctl, NResult, Vm};
-use std::any::Any;
+use crate::vm::{Ctl, Vm};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,19 +27,18 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a server's body read waits for data.
 const BODY_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub(super) fn register(r: &mut Registry) {
-    r.add_builtin("http.serve", serve);
-    r.add_builtin("http.Server.addr", |vm, a| {
-        let addr = server(vm, a[0])?.addr;
-        Ok(vm.new_value(addr))
+pub(super) fn natives(m: &mut NativeModule) {
+    m.object_type::<Server>();
+    m.object_type::<Exchange>();
+    m.vm_function("serve", serve);
+    m.vm_function("Server.addr", |vm: &mut Vm, server: Val<Server>| -> Result<net::SocketAddr, Ctl> { Ok(server.get(&vm.heap)?.addr) });
+    m.vm_function("Server.close", |vm: &mut Vm, server: Val<Server>| -> Result<_, Ctl> {
+        server.get_mut(&mut vm.heap)?.close();
+        Ok(())
     });
-    r.add_method("http.Server.close", |vm, a| {
-        vm.heap.native_mut::<Server>(a[0]).ok_or_else(|| Ctl::internal("not a server"))?.close();
-        Ok(Value::Unit)
-    });
-    r.add_builtin("http.next_request", next_request);
-    r.add_builtin("http.write_response", write_response);
-    r.add_builtin("http.reply_body", reply_body);
+    m.vm_function("next_request", next_request);
+    m.vm_function("write_response", write_response);
+    m.vm_function("reply_body", reply_body);
 }
 
 // ----------------------------------------------------------------------
@@ -127,7 +125,10 @@ impl Shared {
     }
 }
 
-/// The `http.Server` type.
+/// An HTTP/1.1 server listening for incoming requests. Closing the server stops
+/// accepting new connections and closes in-flight request readers.
+#[derive(crate::SandObject)]
+#[sand(module = "http")]
 struct Server {
     listener: Option<Arc<dyn Listener>>,
     slot: Option<ResourceSlot>,
@@ -160,28 +161,15 @@ impl net::Resource for Server {
 }
 
 impl NativeObject for Server {
-    fn type_name(&self) -> &'static str {
-        "Server"
-    }
     fn is_resource(&self) -> bool {
         self.listener.is_some()
     }
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
 }
 
-fn server(vm: &Vm, v: Value) -> Result<&Server, Ctl> {
-    vm.heap.native::<Server>(v).ok_or_else(|| Ctl::internal("not a server"))
-}
-
-fn serve(vm: &mut Vm, a: &[Value]) -> NResult {
+fn serve(vm: &mut Vm, ip: Val<String>, port: i64) -> Suspended<Server> {
     let shared = Arc::default();
     vm.host.http_pool.watch(&shared);
-    net::listen_with(vm, a[0], a[1], move |socket| Server::new(socket, shared))
+    net::listen_with(vm, ip, port, move |socket| Server::new(socket, shared))
 }
 
 /// Tells the oldest readings beyond the newest `cap` to give up.
@@ -192,10 +180,12 @@ fn evict_beyond(reads: &[Pending], cap: usize) {
     }
 }
 
+type Request = (String, String, String, Vec<(String, String)>, Body, net::Conn, Exchange);
+
 /// Accepts connections and reads request heads until a complete request is available.
-fn next_request(vm: &mut Vm, a: &[Value]) -> NResult {
-    let srv = server(vm, a[0])?;
-    let Some(socket) = srv.listener.clone() else { return Err(Ctl::native_err("closed", "server closed")) };
+fn next_request(vm: &mut Vm, server: Val<Server>) -> Suspended<Request> {
+    let srv = server.get(&vm.heap)?;
+    let Some(socket) = srv.listener.clone() else { return Err(HostError::new("closed", "server closed")) };
     let closed = net::CloseSignal::of(&srv.closed);
     let shared = srv.shared.clone();
     let weak = Arc::downgrade(&shared);
@@ -262,24 +252,19 @@ fn next_request(vm: &mut Vm, a: &[Value]) -> NResult {
     };
     let max_body = vm.host.limits.max_http_body;
     let clock = vm.host.clock.clone();
-    Err(Ctl::suspend(Box::pin(async move {
-        finish(closed.guard(serve).await, move |vm, received: Received| {
-            let Received { head: (method, path, query, headers), framing, expects_continue, persists, http10, conn, res } = received;
-            drop(res);
-            let fields = [method, path, query].map(|s| vm.new_str(s));
-            let headers = header_list(vm, headers)?;
-            let conn = conn.alloc(vm);
-            let handle = vm.heap.native::<net::Conn>(conn).and_then(net::Conn::handle).expect("a new connection is open");
-            let body = if framing == Framing::Done {
-                BodyReader::empty(max_body)
-            } else {
-                BodyReader::new(Box::new(Framed::on_conn(&handle, framing, BODY_TIMEOUT, clock, expects_continue)), max_body, None)
-            };
-            let body = alloc_body(vm, body);
-            let exchange = vm.heap.alloc(Obj::Native(Box::new(Exchange { persists, http10, server: weak })));
-            Ok(vm.heap.new_tuple(&[fields[0], fields[1], fields[2], headers, body, conn, exchange]))
-        })
-    })))
+    stream::suspend(closed.guard(serve), move |_, received: Received| {
+        let Received { head: (method, path, query, headers), framing, expects_continue, persists, http10, conn, res } = received;
+        drop(res);
+        let conn = conn.into_conn();
+        let body = if framing == Framing::Done {
+            BodyReader::empty(max_body)
+        } else {
+            let handle = conn.handle().expect("a new connection is open");
+            BodyReader::new(Box::new(Framed::on_conn(&handle, framing, BODY_TIMEOUT, clock, expects_continue)), max_body, None)
+        };
+        let exchange = Exchange { persists, http10, server: weak };
+        Ok((method, path, query, headers, Body::new(body), conn, exchange))
+    })
 }
 
 /// A request's head, read by the server: method, path, query, headers.
@@ -426,8 +411,8 @@ async fn read_request_head<R: AsyncBufRead + Unpin>(
 // ----------------------------------------------------------------------
 // Responses
 
-/// The `http.Exchange` type: what the response to a request needs to know
-/// about its connection.
+#[derive(crate::SandObject)]
+#[sand(module = "http", private)]
 struct Exchange {
     /// True if the client connection can be reused.
     persists: bool,
@@ -436,17 +421,7 @@ struct Exchange {
     server: Weak<Shared>,
 }
 
-impl NativeObject for Exchange {
-    fn type_name(&self) -> &'static str {
-        "Exchange"
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-}
+impl NativeObject for Exchange {}
 
 /// What becomes of a connection once a response has been written to it.
 pub(super) struct After {
@@ -456,9 +431,9 @@ pub(super) struct After {
 }
 
 /// True if the connection is reused for subsequent requests.
-fn after(vm: &Vm, exchange: Value, body: Value, delimit: Delimit) -> Result<(After, Option<&'static str>), Ctl> {
-    let ex = vm.heap.native::<Exchange>(exchange).ok_or_else(|| Ctl::internal("not an exchange"))?;
-    let complete = vm.heap.native::<Body>(body).ok_or_else(|| Ctl::internal("not a body"))?.is_complete();
+fn after(vm: &Vm, exchange: Val<Exchange>, body: Val<Body>, delimit: Delimit) -> Result<(After, Option<&'static str>), Ctl> {
+    let ex = exchange.get(&vm.heap)?;
+    let complete = body.get(&vm.heap)?.is_complete();
     let persists = ex.persists && complete && delimit != Delimit::Close && ex.server.strong_count() > 0;
     let header = match (persists, ex.http10) {
         (false, _) => Some("close"),
@@ -470,10 +445,10 @@ fn after(vm: &Vm, exchange: Value, body: Value, delimit: Delimit) -> Result<(Aft
 
 /// Takes the connection out of `net.Conn` `c`, writes `data` (the end of a
 /// response) to it, then hands it back to the server or closes it.
-pub(super) fn end_response(vm: &mut Vm, c: Value, data: Vec<u8>, res: Reservation, after: After) -> NResult {
+pub(super) fn end_response(vm: &mut Vm, c: Val<net::Conn>, data: Vec<u8>, res: Reservation, after: After) -> Suspended<()> {
     let conn = net::detach(vm, c)?;
     let mem = vm.heap.io_memory.clone();
-    net::suspend(
+    stream::suspend(
         async move {
             let written = async {
                 let mut w = conn.writer.lock().await;
@@ -488,7 +463,7 @@ pub(super) fn end_response(vm: &mut Vm, c: Value, data: Vec<u8>, res: Reservatio
             }
             Ok(r?)
         },
-        |_, ()| Ok(Value::Unit),
+        |_, ()| Ok(()),
     )
 }
 
@@ -498,10 +473,9 @@ struct Parts {
     headers: Vec<(String, String)>,
 }
 
-fn validate_response(vm: &Vm, status: Value, headers: Value) -> Result<Parts, Ctl> {
-    let status = status.as_int();
+fn validate_response(vm: &Vm, status: i64, headers: Val<Vec<(String, String)>>) -> Result<Parts, HostError> {
     if !(100..=999).contains(&status) {
-        return Err(Ctl::native_err("invalid", format!("invalid HTTP status {status}")));
+        return Err(HostError::new("invalid", format!("invalid HTTP status {status}")));
     }
     Ok(Parts { status, headers: header_pairs(vm, headers)? })
 }
@@ -520,44 +494,58 @@ fn has_body(status: i64) -> bool {
 
 /// `write_response(conn, exchange, request_body, status, body, headers,
 /// include_body)`: writes a response with a `content-length` to `conn`.
-fn write_response(vm: &mut Vm, a: &[Value]) -> NResult {
-    let Parts { status, headers } = validate_response(vm, a[3], a[5])?;
+#[allow(clippy::too_many_arguments)]
+fn write_response(
+    vm: &mut Vm,
+    conn: Val<net::Conn>,
+    exchange: Val<Exchange>,
+    request_body: Val<Body>,
+    status: i64,
+    body: Val<Vec<u8>>,
+    headers: Val<Vec<(String, String)>>,
+    include_body: bool,
+) -> Suspended<()> {
+    let Parts { status, headers } = validate_response(vm, status, headers)?;
     let has_body = has_body(status);
-    let delimit = if has_body { Delimit::Length(vm.heap.bytes_of(a[4]).len() as u64) } else { Delimit::None };
-    let (after, connection) = after(vm, a[1], a[2], delimit)?;
+    let delimit = if has_body { Delimit::Length(body.bytes(&vm.heap).len() as u64) } else { Delimit::None };
+    let (after, connection) = after(vm, exchange, request_body, delimit)?;
     let head = end_head(status_head(status, &headers), delimit, connection);
-    let body = if has_body && a[6].as_bool() { vm.heap.bytes_of(a[4]) } else { &[] };
-    let len = head.len().saturating_add(body.len());
+    let sent = if has_body && include_body { body.bytes(&vm.heap) } else { &[] };
+    let len = head.len().saturating_add(sent.len());
     vm.charge_bytes(len)?;
     let res = vm.reserve_io(len)?;
-    let body = if has_body && a[6].as_bool() { vm.heap.bytes_of(a[4]) } else { &[] };
+    let sent = if has_body && include_body { body.bytes(&vm.heap) } else { &[] };
     let mut data = head.into_bytes();
-    data.extend_from_slice(body);
-    end_response(vm, a[0], data, res, after)
+    data.extend_from_slice(sent);
+    end_response(vm, conn, data, res, after)
 }
 
-/// `reply_body(exchange, request_body, status, headers, include_body)`: the
-/// `Outgoing` of a streamed response.
-fn reply_body(vm: &mut Vm, a: &[Value]) -> NResult {
-    let Parts { status, headers } = validate_response(vm, a[2], a[3])?;
+fn reply_body(
+    vm: &mut Vm,
+    exchange: Val<Exchange>,
+    request_body: Val<Body>,
+    status: i64,
+    headers: Val<Vec<(String, String)>>,
+    include_body: bool,
+) -> Result<Outgoing, HostError> {
+    let Parts { status, headers } = validate_response(vm, status, headers)?;
     let length = match given_length(&headers) {
         Ok(n) => n,
-        Err(e) => return Err(Ctl::native_err("invalid", e)),
+        Err(e) => return Err(HostError::new("invalid", e)),
     };
-    let http10 = vm.heap.native::<Exchange>(a[0]).ok_or_else(|| Ctl::internal("not an exchange"))?.http10;
+    let http10 = exchange.get(&vm.heap)?.http10;
     let advertised = match (has_body(status), length) {
         (false, _) => Delimit::None,
         (true, Some(n)) => Delimit::Length(n),
         (true, None) if http10 => Delimit::Close,
         (true, None) => Delimit::Chunked,
     };
-    let (after, connection) = after(vm, a[0], a[1], advertised)?;
+    let (after, connection) = after(vm, exchange, request_body, advertised)?;
     let head = end_head(status_head(status, &headers), advertised, connection);
     vm.charge_bytes(head.len())?;
-    let delimit = if a[4].as_bool() { advertised } else { Delimit::None };
+    let delimit = if include_body { advertised } else { Delimit::None };
     let out = Outgoing { head: Some(head.into_bytes()), delimit, left: length, finished: false, after: Some(after) };
-    let out = vm.heap.alloc(Obj::Native(Box::new(out)));
-    Ok(vm.ok(out))
+    Ok(out)
 }
 
 fn reason_phrase(status: i64) -> &'static str {

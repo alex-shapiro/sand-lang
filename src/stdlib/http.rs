@@ -7,17 +7,16 @@
 //! leaves its connection in the run's [`Pool`].
 
 use super::http_common::*;
-use super::net::{self, ConnHandle, TlsSettings, check_permission, suspend};
-use super::stream::{IoFailure, read_line_bytes, strip_eol};
+use super::net::{self, ConnHandle, Resource, TlsSettings};
+use super::stream::{self, IoFailure, Suspended, read_line_bytes, strip_eol, suspend};
 use crate::check::ModKind;
-use crate::engine::Registry;
+use crate::native::{HostError, Later, NativeModule, NativeObject, Val};
 use crate::network::{Network, Stream};
 use crate::platform::{Clock, Instant};
 use crate::policy::Policy;
+use crate::vm::Vm;
 use crate::vm::iomem::{Reservation, ResourceSlot};
-use crate::vm::value::{NativeObject, Obj, Value};
-use crate::vm::{Ctl, NResult, Vm};
-use std::any::Any;
+use jiff::SignedDuration;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
 use std::task::{Context, Waker};
@@ -35,14 +34,16 @@ const POOL_PER_ORIGIN: usize = 4;
 /// `max_open_resources`).
 const POOL_MAX: usize = 16;
 
-pub fn register(r: &mut Registry) {
-    r.source("http", ModKind::Std, concat!(include_str!("http_os.sand"), include_str!("http.sand")));
-    super::http_common::register(r);
-    super::http_server::register(r);
-    r.add_builtin("http.send", send);
-    r.add_builtin("http.start_upload", start_upload);
-    r.add_builtin("http.write_body", write_body);
-    r.add_builtin("http.read_response", read_response);
+pub(crate) fn module() -> NativeModule {
+    let mut m = NativeModule::std("http", ModKind::Std, concat!(include_str!("http_os.sand"), include_str!("http.sand")));
+    super::http_common::natives(&mut m);
+    m.object_type::<Outgoing>();
+    super::http_server::natives(&mut m);
+    m.vm_function("send", send);
+    m.vm_function("start_upload", start_upload);
+    m.vm_function("write_body", write_body);
+    m.vm_function("read_response", read_response);
+    m
 }
 
 // ----------------------------------------------------------------------
@@ -591,24 +592,19 @@ async fn read_response_head<R: AsyncBufRead + Unpin>(
 /// responding (RFC 9110 §9.2.2).
 const IDEMPOTENT: &[&str] = &["GET", "HEAD", "OPTIONS", "TRACE", "PUT", "DELETE"];
 
-fn send(vm: &mut Vm, a: &[Value]) -> NResult {
-    let (method, text) = (vm.str(a[0]), vm.str(a[1]));
-    vm.charge_slow_bytes(method.len().saturating_add(text.len()))?;
-    let url = match Url::parse(text) {
-        Ok(u) => u,
-        Err(e) => return Err(Ctl::native_err(e.kind, e.message)),
-    };
-    if !is_token(method) {
-        return Err(Ctl::native_err("invalid", format!("invalid HTTP method {:?}", super::truncate(method, 64))));
-    }
-    let (method, text) = (method.to_string(), text.to_string());
-    let mut headers = header_pairs(vm, a[2])?;
-    check_permission(vm, url.capability(&method))?;
-    if let Err(reason) = filter_request(vm, &url, &mut headers) {
-        return Err(Ctl::native_err("permission_denied", reason));
-    }
+fn send(
+    vm: &mut Vm,
+    method: Val<String>,
+    url: Val<String>,
+    headers: Val<Vec<(String, String)>>,
+    body: Val<Vec<u8>>,
+    timeout: SignedDuration,
+) -> Suspended<Response> {
+    let mut req = prepare_request(vm, method, url, headers)?;
+    req.require(vm)?;
+    let Prepared { method, text, url, headers } = req;
     // The request is held outside the heap while it is sent.
-    let mut res = vm.reserve_io(vm.heap.bytes_of(a[3]).len())?;
+    let mut res = vm.reserve_io(body.bytes(&vm.heap).len())?;
     let pool = vm.host.http_pool.clone();
     let idle = pool.take(&url.origin());
     let slot = match idle {
@@ -618,7 +614,7 @@ fn send(vm: &mut Vm, a: &[Value]) -> NResult {
             Some(vm.resource_slot_with(buffers, "a connection")?)
         }
     };
-    let body = vm.heap.bytes_of(a[3]);
+    let body = body.bytes(&vm.heap);
     vm.charge_bytes(body.len())?;
     let close = connection_has(&headers, "close");
     let sized = !body.is_empty() || ["POST", "PUT", "PATCH"].iter().any(|m| method.eq_ignore_ascii_case(m));
@@ -626,9 +622,9 @@ fn send(vm: &mut Vm, a: &[Value]) -> NResult {
         request_head(&method, &url, &headers, if sized { Delimit::Length(body.len() as u64) } else { Delimit::None }, close).into_bytes();
     request.extend_from_slice(body);
     if let Err(e) = res.ensure(request.len()) {
-        return Err(Ctl::native_err("limit", format!("cannot buffer the request: {e}")));
+        return Err(HostError::new("limit", format!("cannot buffer the request: {e}")));
     }
-    let timeout = Duration::from_nanos(a[4].as_int().max(0) as u64);
+    let timeout = stream::timeout(timeout);
     let head_only = method.eq_ignore_ascii_case("HEAD");
     let replayable = IDEMPOTENT.iter().any(|m| method.eq_ignore_ascii_case(m));
     let max_body = vm.host.limits.max_http_body;
@@ -657,10 +653,9 @@ fn send(vm: &mut Vm, a: &[Value]) -> NResult {
             drop(res);
             Ok((r, head_res))
         },
-        move |vm, ((conn, head), head_res): ((ClientConn, ResponseHead), Reservation)| {
+        move |_, ((conn, head), head_res): ((ClientConn, ResponseHead), Reservation)| {
             drop(head_res);
             let ResponseHead { status, headers, framing, persists } = head;
-            let headers = header_list(vm, headers)?;
             let reuse = (persists && !close).then(|| Arc::downgrade(&pool));
             let source = Source::Owned { conn: Some(conn), reuse };
             let mut framed = Framed { source, framing, timeout, clock: body_clock, continue_first: false };
@@ -670,8 +665,7 @@ fn send(vm: &mut Vm, a: &[Value]) -> NResult {
             } else {
                 BodyReader::new(Box::new(framed), max_body, None)
             };
-            let body = alloc_body(vm, reader);
-            Ok(vm.heap.new_tuple(&[Value::Int(status), headers, body]))
+            Ok(response(status, headers, reader))
         },
     )
 }
@@ -693,32 +687,21 @@ fn request_head(method: &str, url: &Url, headers: &[(String, String)], body: Del
 // ----------------------------------------------------------------------
 // Bodies written as they go
 
-/// The `http.Outgoing` type: a body that a script writes (an upload's or a
-/// reply's), and the head still to send before it.
+#[derive(crate::SandObject)]
+#[sand(module = "http", private)]
 pub(super) struct Outgoing {
     pub head: Option<Vec<u8>>,
     /// `Delimit::None` drops writes (a reply to `HEAD`, or a status without
     /// a body).
     pub delimit: Delimit,
-    /// The bytes left of a body with a `Content-Length`.
     pub left: Option<u64>,
     pub finished: bool,
-    /// For a reply: what becomes of the connection after the body.
     pub after: Option<super::http_server::After>,
 }
 
 impl NativeObject for Outgoing {
-    fn type_name(&self) -> &'static str {
-        "Outgoing"
-    }
     fn size(&self) -> usize {
         64 + self.head.as_ref().map_or(0, Vec::capacity)
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
     }
 }
 
@@ -732,30 +715,22 @@ pub(super) fn given_length(headers: &[(String, String)]) -> Result<Option<u64>, 
 
 /// `start_upload(method, url, headers, timeout)`: connects for a streamed
 /// request: `(net.Conn, Outgoing)`. The connection is not reused.
-fn start_upload(vm: &mut Vm, a: &[Value]) -> NResult {
-    let (method, text) = (vm.str(a[0]).to_string(), vm.str(a[1]).to_string());
-    vm.charge_slow_bytes(method.len() + text.len())?;
-    let url = match Url::parse(&text) {
-        Ok(u) => u,
-        Err(e) => return Err(Ctl::native_err(e.kind, e.message)),
-    };
-    if !is_token(&method) {
-        return Err(Ctl::native_err("invalid", format!("invalid HTTP method {:?}", super::truncate(&method, 64))));
-    }
-    let mut headers = header_pairs(vm, a[2])?;
-    let length = match given_length(&headers) {
-        Ok(n) => n,
-        Err(e) => return Err(Ctl::native_err("invalid", e)),
-    };
-    check_permission(vm, url.capability(&method))?;
-    if let Err(reason) = filter_request(vm, &url, &mut headers) {
-        return Err(Ctl::native_err("permission_denied", reason));
-    }
+fn start_upload(
+    vm: &mut Vm,
+    method: Val<String>,
+    url: Val<String>,
+    headers: Val<Vec<(String, String)>>,
+    timeout: SignedDuration,
+) -> Suspended<(net::Conn, Outgoing)> {
+    let mut req = prepare_request(vm, method, url, headers)?;
+    let length = given_length(&req.headers).map_err(|e| HostError::new("invalid", e))?;
+    req.require(vm)?;
+    let Prepared { method, text, url, headers } = req;
     let buffers = if url.scheme == "https" { net::CONN_BUFFER + net::TLS_BUFFERS } else { net::CONN_BUFFER };
     let slot = vm.resource_slot_with(buffers, "a connection")?;
     let delimit = length.map_or(Delimit::Chunked, Delimit::Length);
     let head = request_head(&method, &url, &headers, delimit, true);
-    let timeout = Duration::from_nanos(a[3].as_int().max(0) as u64);
+    let timeout = stream::timeout(timeout);
     let (policy, network, tls) = (vm.host.policy.clone(), vm.host.network.clone(), vm.host.tls.clone());
     let clock = vm.host.clock.clone();
     let open = async move {
@@ -773,72 +748,68 @@ fn start_upload(vm: &mut Vm, a: &[Value]) -> NResult {
                 None => Err(IoFailure::new("timeout", format!("connecting to {text} timed out"))),
             }
         },
-        move |vm, (conn, slot)| {
-            let conn = net::alloc_resource(vm, conn, slot);
-            let out = Outgoing { head: Some(head.into_bytes()), delimit, left: length, finished: false, after: None };
-            let body = vm.heap.alloc(Obj::Native(Box::new(out)));
-            Ok(vm.heap.new_tuple(&[conn, body]))
+        move |_, (mut conn, slot): (net::Conn, ResourceSlot)| {
+            conn.attach(slot);
+            Ok((conn, Outgoing { head: Some(head.into_bytes()), delimit, left: length, finished: false, after: None }))
         },
     )
 }
 
 /// `write_body(conn, body, data, last)`: writes `data` to the body (an
 /// `Outgoing` on `conn`), then, if `last`, ends it.
-fn write_body(vm: &mut Vm, a: &[Value]) -> NResult {
-    let n = vm.heap.bytes_of(a[2]).len();
-    let last = a[3].as_bool();
-    let out = vm.heap.native::<Outgoing>(a[1]).ok_or_else(|| Ctl::internal("not an outgoing body"))?;
+fn write_body(vm: &mut Vm, conn: Val<net::Conn>, body: Val<Outgoing>, data: Val<Vec<u8>>, last: bool) -> Suspended<()> {
+    let n = data.bytes(&vm.heap).len();
+    let out = body.get(&vm.heap)?;
     if out.finished {
-        return Err(Ctl::native_err("closed", "the body has been finished"));
+        return Err(HostError::new("closed", "the body has been finished"));
     }
     let left = out.left.map(|left| left.checked_sub(n as u64));
     let sent = out.delimit != Delimit::None;
     match left {
-        Some(None) => return Err(Ctl::native_err("invalid", "the body is longer than its content-length")),
+        Some(None) => return Err(HostError::new("invalid", "the body is longer than its content-length")),
         Some(Some(more)) if last && more > 0 && sent => {
-            return Err(Ctl::native_err("invalid", format!("the body is {more} bytes shorter than its content-length")));
+            return Err(HostError::new("invalid", format!("the body is {more} bytes shorter than its content-length")));
         }
         _ => {}
     }
     let len = out.head.as_ref().map_or(0, Vec::len) + if sent { n + 32 } else { 0 };
     vm.charge_bytes(len)?;
     let res = vm.reserve_io(len)?;
-    let out = vm.heap.native_mut::<Outgoing>(a[1]).expect("checked above");
+    let out = body.get_mut(&mut vm.heap)?;
     out.left = left.flatten();
     out.finished = last;
     let delimit = out.delimit;
     let after = if last { out.after.take() } else { None };
-    let mut data = out.head.take().unwrap_or_default();
-    let body = vm.heap.bytes_of(a[2]);
+    let mut wire = out.head.take().unwrap_or_default();
+    let body = data.bytes(&vm.heap);
     match delimit {
         Delimit::Chunked => {
             if !body.is_empty() {
-                data.extend_from_slice(format!("{:x}\r\n", body.len()).as_bytes());
-                data.extend_from_slice(body);
-                data.extend_from_slice(b"\r\n");
+                wire.extend_from_slice(format!("{:x}\r\n", body.len()).as_bytes());
+                wire.extend_from_slice(body);
+                wire.extend_from_slice(b"\r\n");
             }
             if last {
-                data.extend_from_slice(b"0\r\n\r\n");
+                wire.extend_from_slice(b"0\r\n\r\n");
             }
         }
-        Delimit::Length(_) | Delimit::Close => data.extend_from_slice(body),
+        Delimit::Length(_) | Delimit::Close => wire.extend_from_slice(body),
         Delimit::None => {}
     }
     if let Some(after) = after {
-        return super::http_server::end_response(vm, a[0], data, res, after);
+        return super::http_server::end_response(vm, conn, wire, res, after);
     }
-    if data.is_empty() {
-        return Ok(vm.ok(Value::Unit));
+    if wire.is_empty() {
+        return Ok(Later::ready(Ok(())));
     }
-    net::write_bytes(vm, a[0], data, res)
+    net::write_bytes(vm, conn, wire, res)
 }
 
 /// `read_response(conn, head_only, timeout)`: reads the response to an
 /// upload: `(status, headers, body)`, the body read from `conn`.
-fn read_response(vm: &mut Vm, a: &[Value]) -> NResult {
-    let h = net::conn_handle(vm, a[0])?;
-    let head_only = a[1].as_bool();
-    let timeout = Duration::from_nanos(a[2].as_int().max(0) as u64);
+fn read_response(vm: &mut Vm, conn: Val<net::Conn>, head_only: bool, timeout: SignedDuration) -> Suspended<Response> {
+    let h = net::conn_handle(vm, conn)?;
+    let timeout = stream::timeout(timeout);
     let max_body = vm.host.limits.max_http_body;
     let mut res = Reservation::new(&vm.heap.io_memory);
     let reader = h.reader.clone();
@@ -857,15 +828,13 @@ fn read_response(vm: &mut Vm, a: &[Value]) -> NResult {
                 None => Err(IoFailure::new("timeout", "timed out waiting for the response")),
             }
         }),
-        move |vm, head: ResponseHead| {
-            let headers = header_list(vm, head.headers)?;
+        move |_, head: ResponseHead| {
             let reader = if head.framing == Framing::Done {
                 BodyReader::empty(max_body)
             } else {
                 BodyReader::new(Box::new(Framed::on_conn(&h, head.framing, timeout, body_clock, false)), max_body, None)
             };
-            let body = alloc_body(vm, reader);
-            Ok(vm.heap.new_tuple(&[Value::Int(head.status), headers, body]))
+            Ok(response(head.status, head.headers, reader))
         },
     )
 }

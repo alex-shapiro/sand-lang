@@ -498,6 +498,8 @@ impl Checker {
                             if ot != TypeId::ERROR {
                                 let msg = if matches!(self.ty(ot), Ty::Var(_)) {
                                     "type annotation needed before field access".to_string()
+                                } else if let Some(msg) = self.private_member(ot, &name.name) {
+                                    msg
                                 } else {
                                     format!("no field `{}` on type {}", name.name, self.show(ot))
                                 };
@@ -1093,6 +1095,11 @@ impl Checker {
     }
 
     fn fn_value(&mut self, f: FnId, span: Span) -> HExpr {
+        if self.fns[f as usize].generics.iter().any(|&p| self.params[p as usize].reflect) {
+            let msg = format!("`{}` takes a type description, so it can only be called", self.name(self.fns[f as usize].name));
+            self.error(span, msg);
+            return err(span);
+        }
         if !self.fns[f as usize].dicts.is_empty() {
             // Partially apply the dictionaries.
             return self.wrapper_value(f, &[], span);
@@ -1209,13 +1216,53 @@ impl Checker {
     // ------------------------------------------------------------------
     // Fields
 
-    /// (index, type, mutable) of a struct field.
+    /// Returns `(index, type, mutable)` for visible struct field `name`.
     fn struct_field(&mut self, t: TypeId, name: &str) -> Option<(u32, TypeId, bool)> {
         let Ty::Named(d, args) = self.ty(t) else { return None };
         let s = self.syms.get(name)?;
         let i = self.types[d as usize].fields().iter().position(|f| f.name == s)?;
+        if !self.field_visible(d, i) {
+            return None;
+        }
         let args = self.elems(args);
         Some((i as u32, self.field_type(d, i, &args), self.types[d as usize].fields()[i].mutable))
+    }
+
+    pub(crate) fn field_visible(&self, d: TypeDefId, i: usize) -> bool {
+        let def = &self.types[d as usize];
+        self.visible(def.module, def.fields()[i].is_pub)
+    }
+
+    pub(crate) fn check_field_visible(&mut self, d: TypeDefId, i: usize, span: Span) {
+        if !self.field_visible(d, i) {
+            let def = &self.types[d as usize];
+            let msg = format!("field `{}` of `{}` is private", self.name(def.fields()[i].name), self.ctor_name(Ctor::Def(d), 0));
+            self.error(span, msg);
+        }
+    }
+
+    fn visible_methods(&self, c: Ctor, name: &str) -> impl Iterator<Item = FnId> + '_ {
+        let fs = self.methods_named(c, name).unwrap_or_default();
+        (0..fs.len()).map(move |i| fs[i]).filter(|&f| self.visible(self.fns[f as usize].module, self.fns[f as usize].is_pub))
+    }
+
+    fn visible_method(&self, c: Ctor, name: &str) -> Option<FnId> {
+        self.visible_methods(c, name).next()
+    }
+
+    /// Returns a diagnostic message if `name` is a private field or method of `t`.
+    fn private_member(&self, t: TypeId, name: &str) -> Option<String> {
+        let ty = self.ty(t);
+        let s = self.syms.get(name)?;
+        if let Ty::Named(d, _) = ty
+            && let Some(i) = self.types[d as usize].fields().iter().position(|f| f.name == s)
+            && !self.field_visible(d, i)
+        {
+            return Some(format!("field `{name}` of `{}` is private", self.ctor_name(Ctor::Def(d), 0)));
+        }
+        let c = ctor_of(ty)?;
+        let hidden = self.methods_named(c, name).is_some() && self.visible_method(c, name).is_none();
+        hidden.then(|| format!("method `{name}` of `{}` is private", self.ctor_name(c, 0)))
     }
 
     pub(crate) fn field_type(&mut self, d: TypeDefId, i: usize, args: &[TypeId]) -> TypeId {
@@ -1242,9 +1289,9 @@ impl Checker {
                     return self.variant_value(d, i, hint, span);
                 }
                 if let Some(c) = ctor_of(self.ty(t))
-                    && let Some(fs) = self.methods_named(c, &name.name)
+                    && let Some(f) = self.visible_method(c, &name.name)
                 {
-                    return self.fn_value(fs[0], span);
+                    return self.fn_value(f, span);
                 }
                 match self.find_trait_method(t, &name.name, name.span) {
                     Ok(Some((tr, slot))) => return self.trait_method_value(tr, slot, t, span),
@@ -1254,7 +1301,9 @@ impl Checker {
                 if t == TypeId::ERROR {
                     return err(span);
                 }
-                let msg = if matches!(self.ty(t), Ty::Named(d, _) if self.types[d as usize].is_enum()) {
+                let msg = if let Some(msg) = self.private_member(t, &name.name) {
+                    msg
+                } else if matches!(self.ty(t), Ty::Named(d, _) if self.types[d as usize].is_enum()) {
                     format!("no variant `{}` on type {}", name.name, self.show(t))
                 } else {
                     format!("no method `{}` on type {}", name.name, self.show(t))
@@ -1287,9 +1336,11 @@ impl Checker {
             }
             other => {
                 let has_method =
-                    ctor_of(other).is_some_and(|c| self.methods_named(c, &name.name).is_some()) || self.has_trait_method(ot, &name.name);
+                    ctor_of(other).is_some_and(|c| self.visible_method(c, &name.name).is_some()) || self.has_trait_method(ot, &name.name);
                 let msg = if has_method {
                     format!("`{}` is a method; call it with `()`", name.name)
+                } else if let Some(msg) = self.private_member(ot, &name.name) {
+                    msg
                 } else {
                     format!("no field `{}` on type {}", name.name, self.show(ot))
                 };
@@ -1657,9 +1708,9 @@ impl Checker {
                     return self.call_variant(d, i, args, span);
                 }
                 if let Some(c) = ctor_of(self.ty(t))
-                    && let Some(fs) = self.methods_named(c, &name.name)
+                    && let Some(f) = self.visible_method(c, &name.name)
                 {
-                    return self.call_fn(fs[0], None, args, span);
+                    return self.call_fn(f, None, args, span);
                 }
                 match self.find_trait_method(t, &name.name, name.span) {
                     Ok(Some((tr, slot))) => return self.call_trait_method(tr, slot, t, None, args, span),
@@ -1672,7 +1723,9 @@ impl Checker {
                 if t == TypeId::ERROR {
                     return err(span);
                 }
-                let msg = if matches!(self.ty(t), Ty::Named(d, _) if self.types[d as usize].is_enum()) {
+                let msg = if let Some(msg) = self.private_member(t, &name.name) {
+                    msg
+                } else if matches!(self.ty(t), Ty::Named(d, _) if self.types[d as usize].is_enum()) {
                     format!("no variant `{}` on type {}", name.name, self.show(t))
                 } else {
                     format!("no method `{}` on type {}", name.name, self.show(t))
@@ -1697,8 +1750,7 @@ impl Checker {
 
     fn lookup_method(&mut self, recv_ty: TypeId, name: &str) -> Option<FnId> {
         let c = ctor_of(self.ty(recv_ty))?;
-        let fs = self.methods_named(c, name)?;
-        fs.iter().copied().find(|&f| self.fns[f as usize].has_self)
+        self.visible_methods(c, name).find(|&f| self.fns[f as usize].has_self)
     }
 
     fn check_method_call(&mut self, receiver: &Expr, method: &ast::Ident, args: &CallArgs, span: Span) -> HExpr {
@@ -1757,6 +1809,12 @@ impl Checker {
                 return err(span);
             }
         }
+        // Private methods shadow built-in `to_str` and `debug`.
+        if let Some(msg) = self.private_member(rt, &method.name) {
+            self.error(method.span, msg);
+            self.infer_args(args);
+            return err(span);
+        }
         match method.name.as_str() {
             "to_str" | "debug" if args.len() == 0 => {
                 let kind = if method.name == "to_str" { HKind::ToStr(Box::new(r)) } else { HKind::Debug(Box::new(r)) };
@@ -1801,21 +1859,30 @@ impl Checker {
     // ------------------------------------------------------------------
     // Struct literals
 
+    fn infer_field_values(&mut self, fields: &[ast::FieldInit]) {
+        for v in fields.iter().filter_map(|f| f.value.as_ref()) {
+            self.infer(v, None);
+        }
+    }
+
     fn check_struct_lit(&mut self, path: &[ast::Ident], fields: &[ast::FieldInit], base: Option<&Expr>, span: Span) -> HExpr {
         let def = match self.resolve_struct_path(path) {
             Some(d) => d,
             None => {
-                for f in fields {
-                    if let Some(v) = &f.value {
-                        self.infer(v, None);
-                    }
-                }
+                self.infer_field_values(fields);
                 return err(span);
             }
         };
         if !self.types[def as usize].is_struct() {
             let msg = format!("`{}` is not a struct", self.name(self.types[def as usize].name));
             self.error(path.last().unwrap().span, msg);
+            return err(span);
+        }
+        if let Some(f) = self.hidden_field(def) {
+            let msg =
+                format!("cannot construct `{}` here: its field `{}` is private", self.ctor_name(Ctor::Def(def), 0), self.name(f.name));
+            self.error(path.last().unwrap().span, msg);
+            self.infer_field_values(fields);
             return err(span);
         }
         let args = self.enum_args(def, None);

@@ -1,9 +1,11 @@
-//! Errors and buffered reads shared by the modules that do I/O off the VM
-//! thread (`io`'s standard input, `net`, `http`).
+//! Shared I/O errors, async results, and buffered readers for the `fs`, `io`,
+//! `net`, and `http` modules.
 
 use super::io_kind;
-use crate::vm::Ctl;
+use crate::native::{HostError, IntoValue, Later};
 use crate::vm::iomem::{MemoryLimit, Reservation};
+use crate::vm::{Ctl, Vm};
+use std::future::Future;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt};
 
 /// An error produced off the VM thread, turned into a Sand `Error` on it.
@@ -19,10 +21,23 @@ impl IoFailure {
     }
 }
 
-impl From<IoFailure> for Ctl {
-    fn from(e: IoFailure) -> Ctl {
-        Ctl::native_err(e.kind, e.message)
+impl From<IoFailure> for HostError {
+    fn from(e: IoFailure) -> HostError {
+        HostError::new(e.kind, e.message)
     }
+}
+
+pub(crate) type Suspended<T> = Result<Later<T, HostError>, HostError>;
+
+/// Suspends the calling task on `fut` and runs `ok` when `fut` succeeds.
+pub(crate) fn suspend<T: Send + 'static, R: IntoValue + Send + 'static>(
+    fut: impl Future<Output = Result<T, IoFailure>> + Send + 'static,
+    ok: impl FnOnce(&mut Vm, T) -> Result<R, HostError> + Send + 'static,
+) -> Suspended<R> {
+    Ok(Later::new(async move {
+        let r = fut.await;
+        move |vm: &mut Vm| ok(vm, r?)
+    }))
 }
 
 impl From<MemoryLimit> for IoFailure {
@@ -35,6 +50,42 @@ impl From<std::io::Error> for IoFailure {
     fn from(e: std::io::Error) -> IoFailure {
         IoFailure::new(io_kind(&e), e.to_string())
     }
+}
+
+pub(crate) fn utf8(vm: &Vm, data: Vec<u8>) -> Result<Option<String>, Ctl> {
+    vm.charge_slow_bytes(data.len())?;
+    Ok(String::from_utf8(data).ok())
+}
+
+pub(crate) fn bytes_read(_: &mut Vm, data: Option<Vec<u8>>) -> Result<Vec<u8>, HostError> {
+    Ok(data.unwrap_or_default())
+}
+
+pub(crate) fn line_read(vm: &Vm, line: Option<Vec<u8>>, message: &str) -> Result<Option<String>, HostError> {
+    let Some(line) = line else { return Ok(None) };
+    utf8(vm, line)?.map(Some).ok_or_else(|| HostError::new("invalid", message))
+}
+
+#[cfg(any(feature = "os", web))]
+pub(crate) fn timeout(d: jiff::SignedDuration) -> std::time::Duration {
+    std::time::Duration::try_from(d).unwrap_or_default()
+}
+
+/// Reads a line and strips any trailing `\n` or `\r\n`.
+pub(crate) async fn read_line<R: AsyncBufRead + Unpin>(r: &mut R, res: &mut Reservation) -> Result<Option<Vec<u8>>, IoFailure> {
+    let line = read_line_bytes(r, usize::MAX, res).await?;
+    Ok(line.map(|mut line| {
+        strip_eol(&mut line);
+        line
+    }))
+}
+
+/// Reads up to `max` buffered bytes from `r`, filling the buffer first if empty.
+pub(crate) async fn read_upto<R: AsyncBufRead + Unpin>(r: &mut R, max: usize) -> Result<Vec<u8>, IoFailure> {
+    let available = r.fill_buf().await?;
+    let data = available[..available.len().min(max)].to_vec();
+    r.consume(data.len());
+    Ok(data)
 }
 
 /// Reads a line including its `\n` (if any); `None` at end of stream. Fails

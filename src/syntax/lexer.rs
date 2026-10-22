@@ -351,6 +351,12 @@ pub fn is_complete(source: &str) -> bool {
     !lexed.open && last.is_none_or(|t| t.tok.ends_statement()) && !ends_with_doc
 }
 
+/// Returns `true` if `s` has identifier syntax (including keywords).
+pub fn is_ident(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.first().is_some_and(|&c| is_ident_start(c)) && b.iter().all(|&c| is_ident_char(c))
+}
+
 fn is_ident_start(c: u8) -> bool {
     c.is_ascii_alphabetic() || c == b'_'
 }

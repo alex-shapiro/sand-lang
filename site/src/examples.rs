@@ -109,7 +109,7 @@ fn engine(files: &[(String, String)]) -> (Engine, MemorySink) {
     let policy = check_policy(POLICY).expect("default policy is valid");
     let config =
         Config::new().memory_fs(fs).policy(policy.policy()).limits(policy.limits).seed(42).stdout(sink.clone()).stderr(sink.clone());
-    (Engine::new(config), sink)
+    (Engine::new(config).unwrap(), sink)
 }
 
 fn diff(a: &str, b: &str) -> String {

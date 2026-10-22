@@ -37,18 +37,12 @@ pub native fn connect_tls(host: str, port: int, timeout: duration = 30s) -> Resu
 /// ```
 pub native fn split_host_port(text: str) -> Result<(str, int)>
 
-/// An IP address and port, formatted as `127.0.0.1:8080` or `[::1]:8080`.
-pub native type SocketAddr
-
 extend SocketAddr {
     /// Returns the IP address string (such as `"127.0.0.1"` or `"::1"`).
     pub native fn ip(self) -> str
     /// Returns the port number.
     pub native fn port(self) -> int
 }
-
-/// A listening TCP socket returned by `listen`.
-pub native type Listener
 
 extend Listener {
     /// Waits for and returns the next incoming TCP connection.
@@ -62,10 +56,6 @@ impl Close for Listener {
     /// kind `"closed"`.
     native fn close(self)
 }
-
-/// An open TCP or TLS stream connection. Separate tasks can read and write
-/// concurrently on the same `Conn`.
-pub native type Conn
 
 impl io.Reader for Conn {
     /// Reads up to `max` bytes as soon as data is available (up to the 8 KiB

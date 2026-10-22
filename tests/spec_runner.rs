@@ -1,6 +1,12 @@
-//! Golden-file acceptance tests for the language specification.
+//! Golden-file acceptance test runner for the language specification
+//! (`tests/spec/*.test`). The runner executes every test case across three
+//! compiler and collector modes (default, [`Config::gc_stress`], and
+//! `Config::optimize(false)`) and two file system backends ([`MemFs`] and, with
+//! the `os` feature, a temporary host directory). Set `SPEC_FILTER=<substring>`
+//! to run only cases whose names match `<substring>`.
 //!
-//! Each `tests/spec/*.test` file contains many cases:
+//! Each `.test` file contains `=== <name>` cases followed by expectation and
+//! input sections:
 //!
 //! ```text
 //! === case name
@@ -11,26 +17,18 @@
 //! 3: substring of a compile error reported on line 3
 //! ```
 //!
-//! Sections:
-//! * `--- stdout` / `--- stderr`: exact expected output (a trailing newline is implied).
-//! * `--- error`: compile errors; each line is `LINE: substring` or `substring`.
-//! * `--- fail`: substring of the message of the error the run fails with.
-//! * `--- exit N`: expected exit code.
-//! * `--- stdin`: data supplied on standard input.
-//! * `--- file PATH`: an extra file written next to `main.sand`.
-//! * `--- lint`: expected lint warnings, one `LINE: code` per line (exact set).
-//! * `--- fmt`: expected output of the formatter applied to the source.
-//! * `--- test`: run with the test runner; expected report.
-//! * `--- args`: whitespace-separated script arguments.
-//! * `--- env`: `NAME=value` lines forming the script's environment.
-//!
-//! Every file is also run with `Config::gc_stress` (to collect garbage at
-//! every safe point) and with `Config::optimize(false)` (to verify that
-//! optimizations preserve program behavior).
-//!
-//! Every case runs with scripts seeing the host's file system (a temporary
-//! directory; with the `os` feature) and with a memory file system
-//! (`MemFs`), which must behave alike.
+//! Supported sections:
+//! * `--- stdout` / `--- stderr`: exact expected output (with an implicit trailing newline).
+//! * `--- error`: expected compile errors (`LINE: substring` or `substring` per line).
+//! * `--- fail`: expected substring of a runtime error message.
+//! * `--- exit N`: expected process exit code.
+//! * `--- stdin`: standard input bytes provided to the script.
+//! * `--- file PATH`: auxiliary file created beside `main.sand`.
+//! * `--- lint`: exact set of expected lint warnings (`LINE: code` per line).
+//! * `--- fmt`: expected formatter output for the source.
+//! * `--- test`: expected report from the test runner.
+//! * `--- args`: whitespace-separated command-line arguments.
+//! * `--- env`: `NAME=value` environment variables exposed to the script.
 
 mod common;
 
@@ -206,7 +204,7 @@ fn run_case(case: &Case, mode: Mode, backend: Backend) -> Result<(), String> {
 
     if let Some(expected) = get("lint") {
         dir.write("main.sand", &case.source);
-        let engine = Engine::new(dir.configure(Config::new().policy(Policy::allow_all())));
+        let engine = Engine::new(dir.configure(Config::new().policy(Policy::allow_all()))).unwrap();
         let warnings = engine.lint_source("main.sand", &case.source).map_err(|e| format!("lint failed: {e}"))?;
         let mut got: Vec<String> = warnings.iter().map(|w| format!("{}: {}", w.line, w.code)).collect();
         got.sort();
@@ -235,7 +233,7 @@ fn run_case(case: &Case, mode: Mode, backend: Backend) -> Result<(), String> {
             env.lines().filter_map(|l| l.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect();
         config = config.env(vars.into_iter().collect());
     }
-    let mut engine = Engine::new(config);
+    let mut engine = Engine::new(config).unwrap();
     let runtime = rt();
 
     if let Some(expected) = get("test") {
@@ -263,16 +261,26 @@ fn run_case(case: &Case, mode: Mode, backend: Backend) -> Result<(), String> {
                 return Err(format!("expected compile error, but program ran. stdout:\n{stdout}"));
             }
         };
-        for want in expected.lines().filter(|l| !l.trim().is_empty()) {
-            let (line, text) = match want.split_once(": ") {
+        let wants: Vec<(Option<usize>, &str)> = expected
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|want| match want.split_once(": ") {
                 Some((l, t)) if l.trim().parse::<usize>().is_ok() => (Some(l.trim().parse::<usize>().unwrap()), t.trim()),
                 _ => (None, want.trim()),
-            };
-            let found = diags.iter().any(|d| d.message.contains(text) && line.is_none_or(|l| d.line == l));
-            if !found {
-                let all: Vec<String> = diags.iter().map(|d| format!("  {}: {}", d.line, d.message)).collect();
-                return Err(format!("missing compile error {want:?}; got:\n{}", all.join("\n")));
-            }
+            })
+            .collect();
+        let matches =
+            |d: &sandlang::Diagnostic, &(line, text): &(Option<usize>, &str)| d.message.contains(text) && line.is_none_or(|l| d.line == l);
+        let all = || diags.iter().map(|d| format!("  {}: {}", d.line, d.message)).collect::<Vec<_>>().join("\n");
+        if let Some((line, text)) = wants.iter().find(|w| !diags.iter().any(|d| matches(d, w))) {
+            return Err(format!(
+                "missing compile error {:?}; got:\n{}",
+                format!("{}{text}", line.map_or(String::new(), |l| format!("{l}: "))),
+                all()
+            ));
+        }
+        if diags.iter().any(|d| !wants.iter().any(|w| matches(d, w))) {
+            return Err(format!("unexpected compile errors; got:\n{}", all()));
         }
         return Ok(());
     }

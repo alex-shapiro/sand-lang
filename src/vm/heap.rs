@@ -1,61 +1,41 @@
-//! The garbage-collected heap: an arena of objects addressed by `u32` handles,
-//! collected by a precise, non-moving, generational mark-and-sweep collector.
+//! The garbage-collected heap: an arena of [`Obj`] slots addressed by `u32`
+//! handles and managed by a precise, non-moving, generational mark-and-sweep
+//! collector.
 //!
-//! Generations use *sticky mark bits*: an object's mark bit stays set after
-//! the collection it survived, and a set bit means "old". Objects allocated
-//! since the last collection are young and listed in `young`.
+//! The VM runs garbage collection only at safe points and never during a native
+//! call, so native functions may hold [`Value`]s in local variables. Do not
+//! hold a `&mut Obj` across a safe point, and mutate [`Value`]-containing
+//! objects only through [`Heap::get_mut`], [`Heap::get_mut_storing`], or the
+//! container methods built on them so that the collector records write
+//! barriers.
 //!
-//! * A **minor** collection marks from the roots and from the *remembered
-//!   set* (old objects mutated since the last collection, which may point to
-//!   young objects), never traversing other old objects, and sweeps only the
-//!   young list. Surviving young objects keep their mark: they are promoted.
-//! * A **major** collection clears all marks, marks everything reachable and
-//!   sweeps the whole arena. It runs when `bytes` exceeds `major_at` (twice
-//!   the live size after the previous major collection, capped near the
-//!   memory limit), and immediately after a minor collection that leaves the
-//!   heap over the limit.
-//! * The write barrier lives in `get_mut` (and therefore `list_mut`,
-//!   `list_push` and the map/set helpers built on it): the first mutation of
-//!   an old object after a collection adds it to the remembered set. Every
-//!   change to a value stored inside a heap object must go through these
-//!   accessors. Hot paths that store known values use the precise variant
-//!   `get_mut_storing`, which only remembers the object if a stored value
-//!   refers to a young object. `NativeObject`s never hold `Value`s, so
-//!   `native_mut` needs no barrier.
-//! * Lists remembered only through `list_push`/`list_mut_storing` (and maps
-//!   and sets only through `entries_mut_storing`) are *partially*
-//!   remembered: the minor collection scans just the stored indices (entries)
-//!   and the pushed tail (`DirtyList`) instead of the whole object. Any other
-//!   mutation, or too many scattered stores, makes the remembered entry a
-//!   full one. A channel remembered through `channel_mut` is partially
-//!   remembered too. Values enter its queue only at the back, so the young
-//!   values are among the last `ChannelObj::pushed` values of the queue.
-//! * Tracing scans big containers `SCAN_CHUNK` children at a time, so that
-//!   its worklist stays small.
+//! The collector divides objects into young and old generations using sticky
+//! mark bits (`marks`). The allocator leaves new objects unmarked and appends
+//! them to `young`; objects that survive a collection keep their mark bit set
+//! and become old:
 //!
-//! Major collections of large heaps are **incremental**: instead of marking
-//! and sweeping the whole heap in one pause, a *cycle* does the work in
-//! steps paced by allocation, while minor collections go on as usual:
+//! * A **minor collection** traces from roots and the remembered set
+//!   (`remembered` and `dirty`), skips unmarked old objects, and sweeps only
+//!   `young`.
+//! * A **major collection** reclaims unreachable old objects across the entire
+//!   arena if `bytes` exceeds `major_at` or if a minor collection leaves the
+//!   heap above `limit`.
 //!
-//! * **Marking** uses separate mark bits (`cmarks`) and a gray worklist
-//!   (objects marked but not yet scanned; big lists, maps and sets are
-//!   scanned in chunks). The cycle starts by shading the roots; each step
-//!   scans a budget of values.
-//! * **Barrier** (incremental update, Dijkstra-style): while marking, the
-//!   accessors that know the value they store (`get_mut_storing`,
-//!   `list_mut_storing`, `list_push`) shade it; `get_mut`, whose stores are
-//!   unknown, puts a marked object back on the worklist (to be rescanned).
-//!   New objects are allocated unmarked, so minor collections can still free
-//!   young garbage (they drop freed objects from the worklist). Fiber stacks
-//!   and globals have no barrier: the final step rescans them.
-//! * **Final step**: shades the roots again and drains the worklist; the
-//!   marked objects are exactly the reachable ones. They all become old
-//!   (`marks` = `cmarks`), so the remembered set and the young list restart
-//!   empty.
-//! * **Sweeping** frees unmarked objects a budget of slots at a time.
-//!   Objects allocated meanwhile get a cycle mark so the sweep keeps them.
-//! * A forced collection (before a memory limit error) abandons the cycle
-//!   and collects everything at once, which is always safe.
+//! For large heaps, the collector executes major collections incrementally in
+//! allocation-paced steps (`Phase::Marking` and `Phase::Sweeping`) while minor
+//! collections continue between steps:
+//!
+//! * **Marking** traces reachable objects into a separate bitmap (`cmarks`)
+//!   using a bounded worklist (`gray`, chunked by `SCAN_CHUNK`). During
+//!   marking, write barriers shade newly stored values or push mutated objects
+//!   back onto `gray` (Dijkstra-style incremental update).
+//! * **Completion** rescans the roots (because the VM does not barrier writes
+//!   to fiber stacks or globals), drains `gray`, promotes all marked objects
+//!   (`marks = cmarks`), and clears `remembered` and `young`.
+//! * **Sweeping** frees unmarked slots in bounded steps while marking any newly
+//!   allocated objects in `cmarks`. If a memory limit forces an immediate
+//!   collection, the collector aborts the incremental cycle and performs a full
+//!   stop-the-world major collection.
 
 use super::iomem::IoMemory;
 use super::value::*;
@@ -152,6 +132,8 @@ pub struct Heap {
     young_resources: usize,
     /// Testing aid: collect at every safe point (see `Config::gc_stress`).
     pub stress: bool,
+    /// Disables memory-limit checks during post-effect result conversion (see [`Vm::unchecked`](crate::vm::Vm::unchecked)).
+    pub(crate) unchecked: bool,
     /// Buffers of pending I/O, counted against `limit` with the heap.
     pub io_memory: Arc<IoMemory>,
     worklist: Vec<u32>,
@@ -282,7 +264,10 @@ impl Staging<'_> {
     }
 }
 
-/// The parts of an old list that may hold young values.
+/// Indices of an old list, map, or set that may hold young values after
+/// [`Heap::list_push`], [`Heap::list_mut_storing`], or
+/// [`Heap::entries_mut_storing`], allowing minor collections to scan only the
+/// modified slots and pushed tail instead of the entire container.
 #[derive(Default)]
 struct DirtyList {
     /// Every index at and above this one (pushes); `NONE` if none.
@@ -348,6 +333,7 @@ impl Heap {
             live_objects: 0,
             young_resources: 0,
             stress: false,
+            unchecked: false,
             io_memory: IoMemory::new(limit, max_resources),
             worklist: Vec::new(),
             scan: Vec::new(),
@@ -535,7 +521,7 @@ impl Heap {
                 // Publishing on every check before the heap grows keeps the
                 // size that pending I/O checks against up to date.
                 self.io_memory.publish_heap(used);
-                used.saturating_add(self.io_memory.reserved()).saturating_add(extra) > l
+                !self.unchecked && used.saturating_add(self.io_memory.reserved()).saturating_add(extra) > l
             }
             None => extra > super::iomem::UNLIMITED,
         }
@@ -564,7 +550,9 @@ impl Heap {
         &self.objs[h as usize]
     }
 
-    /// Mutable access to an object, through the write barrier.
+    /// Returns a mutable reference to the object for `v` and records a write
+    /// barrier. All mutations of [`Value`]s inside a heap object must use this
+    /// method or one of the specialized barriered accessors.
     #[inline]
     pub fn get_mut(&mut self, v: Value) -> &mut Obj {
         match v {
@@ -949,11 +937,10 @@ impl Heap {
         if fits(least) { Ok(least) } else { Err(LimitKind::Memory) }
     }
 
-    /// Mutable access to channel `ch`, for taking values from it and for
-    /// storing `stored`, if any, as a blocked sender's value. Values must
-    /// enter the queue only through [`Heap::channel_push`] and
-    /// `ChannelObj::take`. The write barrier remembers the channel partially
-    /// (see the module documentation).
+    /// Returns a mutable reference to channel `ch` and records a partial write
+    /// barrier if `stored` references a young object. Because values are
+    /// appended only to the back of the queue via [`Heap::channel_push`], minor
+    /// collections scan only the last `ChannelObj::pushed` elements.
     pub fn channel_mut(&mut self, ch: Value, stored: Option<Value>) -> Option<&mut ChannelObj> {
         let Value::Obj(h) = ch else { return None };
         if let Some(v) = stored {
@@ -1085,7 +1072,7 @@ impl Heap {
 
     pub fn native<T: 'static>(&self, v: Value) -> Option<&T> {
         match self.get(v) {
-            Obj::Native(n) => n.as_any().downcast_ref::<T>(),
+            Obj::Native(n) => (&**n as &dyn std::any::Any).downcast_ref::<T>(),
             _ => None,
         }
     }
@@ -1096,9 +1083,9 @@ impl Heap {
 
     pub fn native_mut<T: 'static>(&mut self, v: Value) -> Option<&mut T> {
         // Native objects hold no values: no write barrier needed.
-        let Value::Obj(h) = v else { panic!("internal error: not an object") };
+        let Value::Obj(h) = v else { return None };
         match &mut self.objs[h as usize] {
-            Obj::Native(n) => n.as_any_mut().downcast_mut::<T>(),
+            Obj::Native(n) => (&mut **n as &mut dyn std::any::Any).downcast_mut::<T>(),
             _ => None,
         }
     }

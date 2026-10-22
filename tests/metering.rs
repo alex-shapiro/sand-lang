@@ -8,15 +8,14 @@
 mod common;
 
 use common::{rt, run_with};
-use sandlang::vm::Vm;
-use sandlang::vm::value::Value;
+use sandlang::vm::{Ctl, Vm};
 use sandlang::{Config, Engine, Error, LimitKind, Limits, MemorySink, NativeModule, Outcome};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 fn run(config: Config, src: &str) -> (Result<Outcome, Error>, String) {
     let out = MemorySink::new();
-    let mut engine = Engine::new(config.stdout(out.clone()));
+    let mut engine = Engine::new(config.stdout(out.clone())).unwrap();
     let r = rt().block_on(engine.run_source("main.sand", src));
     (r, out.contents())
 }
@@ -260,7 +259,7 @@ fn signal() -> (NativeModule, mpsc::Receiver<()>) {
 fn interrupt_after_ready(src: &str, delay: Duration) -> (Result<Outcome, Error>, String, Duration) {
     let (m, rx) = signal();
     let out = MemorySink::new();
-    let mut engine = Engine::new(Config::new().module(m).stdout(out.clone()));
+    let mut engine = Engine::new(Config::new().module(m).stdout(out.clone())).unwrap();
     let handle = engine.interrupt_handle();
     let t = std::thread::spawn(move || {
         rx.recv().unwrap();
@@ -308,8 +307,7 @@ fn interrupt_stops_a_big_json_parse() {
 fn host_natives_can_charge_and_be_stopped() {
     // A raw native that works forever, charging the meter as it goes.
     let mut m = NativeModule::new("busy");
-    m.source("pub native fn spin() -> int");
-    m.raw_function("spin", |vm: &mut Vm, _: &[Value]| {
+    m.vm_function("spin", |vm: &mut Vm| -> Result<i64, Ctl> {
         let mut n: i64 = 0;
         loop {
             vm.charge(1)?;
@@ -337,9 +335,8 @@ fn natives_stop_exactly_at_the_instruction_limit() {
     use std::sync::atomic::{AtomicU64, Ordering};
     let granted = Arc::new(AtomicU64::new(0));
     let mut m = NativeModule::new("busy");
-    m.source("pub native fn spin() -> int");
     let g = granted.clone();
-    m.raw_function("spin", move |vm: &mut Vm, _: &[Value]| {
+    m.vm_function("spin", move |vm: &mut Vm| -> Result<i64, Ctl> {
         loop {
             vm.charge(1)?;
             g.fetch_add(1, Ordering::Relaxed);
@@ -513,21 +510,19 @@ fn race_lists_are_charged_and_counted() {
 /// `probe.receivers(ch)` and `probe.waiters(task)`: the lengths of the wait
 /// lists of a channel and of a running task.
 fn probe() -> NativeModule {
+    use sandlang::native::{Channel, Task, Val};
     use sandlang::vm::value::Obj;
     let mut m = NativeModule::new("probe");
-    m.source("pub native fn receivers(ch: Channel<int>) -> int\npub native fn waiters(t: Task<()>) -> int");
-    m.raw_function("receivers", |vm: &mut Vm, a: &[Value]| {
-        Ok(Value::Int(match vm.heap.get(a[0]) {
-            Obj::Channel(c) => c.receivers.len() as i64,
-            _ => -1,
-        }))
+    m.vm_function("receivers", |vm: &mut Vm, ch: Val<Channel<i64>>| match vm.heap.get(ch.raw()) {
+        Obj::Channel(c) => c.receivers.len() as i64,
+        _ => -1,
     });
-    m.raw_function("waiters", |vm: &mut Vm, a: &[Value]| {
-        let fid = match vm.heap.get(a[0]) {
+    m.vm_function("waiters", |vm: &mut Vm, t: Val<Task<()>>| {
+        let fid = match vm.heap.get(t.raw()) {
             Obj::Task(t) => t.fiber as usize,
-            _ => return Ok(Value::Int(-1)),
+            _ => return -1,
         };
-        Ok(Value::Int(vm.fibers.get(fid).and_then(|f| f.as_ref()).map_or(-1, |f| f.waiters.len() as i64)))
+        vm.fibers.get(fid).and_then(|f| f.as_ref()).map_or(-1, |f| f.waiters.len() as i64)
     });
     m
 }

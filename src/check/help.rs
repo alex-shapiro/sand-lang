@@ -311,7 +311,7 @@ impl Checker {
             if let Some(i) = def.variants().iter().position(|v| Some(v.name) == sym) {
                 return Some(Target::Variant(d, i as u32));
             }
-            if let Some(i) = def.fields().iter().position(|f| Some(f.name) == sym) {
+            if let Some(i) = def.fields().iter().position(|f| Some(f.name) == sym && self.visible(def.module, f.is_pub)) {
                 let ty = match inst.map(|t| self.ty(t)) {
                     Some(Ty::Named(_, args)) => {
                         let args = self.elems(args);
@@ -340,6 +340,10 @@ impl Checker {
             .collect();
         if !impl_fns.is_empty() {
             return Some(Target::Fns(impl_fns));
+        }
+        if let Some(msg) = self.hidden_member(c, name) {
+            self.error(span, msg);
+            return None;
         }
         if let Some(u) = universal(name) {
             return Some(Target::Universal(u));
@@ -423,13 +427,27 @@ impl Checker {
         }
     }
 
+    /// Returns a diagnostic message if `name` is a private field or method of `c`.
+    fn hidden_member(&self, c: Ctor, name: &str) -> Option<String> {
+        let s = self.syms.get(name)?;
+        if let Ctor::Def(d) = c
+            && self.types[d as usize].fields().iter().any(|f| f.name == s)
+        {
+            return Some(format!("field `{name}` of `{}` is private", self.ctor_name(c, 0)));
+        }
+        let hidden = self.methods_named(c, name).is_some() && self.methods_of(c).iter().all(|&f| self.fns[f as usize].name != s);
+        hidden.then(|| format!("method `{name}` of `{}` is private", self.ctor_name(c, 0)))
+    }
+
     /// The variants, fields and methods of type `c`, in no particular order.
     fn type_members(&self, c: Ctor, arity: u32) -> Vec<String> {
         let mut names = universal_names();
+        // Private methods shadow built-in `to_str` and `debug`.
+        names.retain(|n| self.hidden_member(c, n).is_none());
         if let Ctor::Def(d) = c {
             let def = &self.types[d as usize];
             names.extend(def.variants().iter().map(|v| self.name(v.name).to_string()));
-            names.extend(def.fields().iter().map(|f| self.name(f.name).to_string()));
+            names.extend(def.fields().iter().filter(|f| self.visible(def.module, f.is_pub)).map(|f| self.name(f.name).to_string()));
         }
         names.extend(self.methods_of(c).into_iter().map(|f| self.name(self.fns[f as usize].name).to_string()));
         for i in self.visible_impls(c, arity) {
@@ -447,13 +465,9 @@ impl Checker {
         names
     }
 
-    /// Returns inherent methods of `c` in declaration order, excluding
-    /// private helpers in non-script modules.
+    /// Returns the visible inherent methods of `c` in declaration order.
     pub(super) fn methods_of(&self, c: Ctor) -> Vec<FnId> {
-        let shown = |f: FnId| {
-            let fi = &self.fns[f as usize];
-            fi.is_pub || fi.module == self.cur_mod || matches!(self.mods[fi.module as usize].kind, ModKind::Script { .. })
-        };
+        let shown = |f: FnId| self.visible(self.fns[f as usize].module, self.fns[f as usize].is_pub);
         let mut fs: Vec<FnId> = self
             .methods
             .entries()
@@ -483,7 +497,7 @@ impl Checker {
             .map(|(&n, &b)| (n, b))
             .collect();
         self.budget.charge(items.len() as u64);
-        items.sort_by_key(|(_, b)| b.span.lo);
+        items.sort_by(|(m, a), (n, b)| (a.span.lo, self.name(*m)).cmp(&(b.span.lo, self.name(*n))));
         items.into_iter().map(|(n, b)| (n, b.def)).collect()
     }
 
@@ -667,22 +681,37 @@ impl Checker {
             let fields: Vec<(String, Option<Arc<str>>)> = def
                 .fields()
                 .iter()
+                .filter(|f| self.visible(def.module, f.is_pub))
                 .map(|f| {
                     let var = if f.mutable { "var " } else { "" };
                     let default = f.default.map(|h| format!(" = {}", self.source_text(self.fns[h as usize].span))).unwrap_or_default();
-                    (format!("{var}{}: {}{default}", self.name(f.name), self.show(f.ty)), f.doc.clone())
+                    (
+                        format!("{}{var}{}: {}{default}", self.pub_mark(def.module, f.is_pub), self.name(f.name), self.show(f.ty)),
+                        f.doc.clone(),
+                    )
                 })
                 .collect();
             section(out, "Fields", &fields);
         }
-        let methods: Vec<(String, Option<Arc<str>>)> =
-            self.methods_of(c).into_iter().map(|f| (self.signature(f, false), self.fns[f as usize].doc.clone())).collect();
+        let methods: Vec<(String, Option<Arc<str>>)> = self
+            .methods_of(c)
+            .into_iter()
+            .map(|f| {
+                let fi = &self.fns[f as usize];
+                (format!("{}{}", self.pub_mark(fi.module, fi.is_pub), self.signature(f, false)), fi.doc.clone())
+            })
+            .collect();
         section(out, "Methods", &methods);
         let traits: Vec<String> =
             self.visible_impls(c, arity).into_iter().map(|i| self.show_trait(&self.impls[i as usize].trait_ref)).collect();
         if !traits.is_empty() {
             let _ = writeln!(out, "Implements: {}", traits.join(", "));
         }
+    }
+
+    /// Returns `"pub "` when displaying a public member inside its defining module.
+    fn pub_mark(&self, module: ModId, is_pub: bool) -> &'static str {
+        if is_pub && module == self.cur_mod { "pub " } else { "" }
     }
 
     /// The documentation of the type of a value.
@@ -863,8 +892,8 @@ impl Checker {
         let (kw, bounds) = match def.kind {
             TypeDefKind::Struct { .. } => ("struct", ""),
             TypeDefKind::Enum { .. } => ("enum", ""),
-            TypeDefKind::Opaque(Some(v)) => ("type", if v.ord { ": Ord + Hash" } else { ": Hash" }),
-            TypeDefKind::Opaque(None) => ("type", ""),
+            TypeDefKind::Opaque(Opaque::Value(v)) => ("type", if v.ord { ": Ord + Hash" } else { ": Hash" }),
+            TypeDefKind::Opaque(_) => ("type", ""),
         };
         let prefix = if qualify { self.module_prefix(def.module) } else { String::new() };
         format!("{kw} {prefix}{}{bounds}", self.type_header_name(d))

@@ -34,7 +34,7 @@ fn run_example(rel: &str, args: &[&str], config: Config) -> Output {
     let out = MemorySink::new();
     let err = MemorySink::new();
     let config = config.stdout(out.clone()).stderr(err.clone()).args(args.iter().map(|s| s.to_string()).collect());
-    let mut engine = Engine::new(config);
+    let mut engine = Engine::new(config).unwrap();
     let result = rt().block_on(engine.run_file(example(rel)));
     Output { result, stdout: out.contents(), stderr: err.contents() }
 }
@@ -64,7 +64,8 @@ fn examples_type_check_lint_and_are_formatted() {
     for rel in ALL_EXAMPLES {
         let path = example(rel);
         let source = std::fs::read_to_string(&path).unwrap();
-        let warnings = Engine::new(Config::new().policy(Policy::deny_all())).lint_file(&path).unwrap_or_else(|e| panic!("{rel}: {e}"));
+        let warnings =
+            Engine::new(Config::new().policy(Policy::deny_all())).unwrap().lint_file(&path).unwrap_or_else(|e| panic!("{rel}: {e}"));
         assert!(warnings.is_empty(), "{rel} has lint warnings: {warnings:?}");
         let formatted = sandlang::fmt::format_source(&source).unwrap();
         assert!(formatted == source, "{rel} is not formatted:\n{}", first_diff(&source, &formatted));
@@ -299,7 +300,7 @@ fn tcp_chat_server() {
     let err = MemorySink::new();
     let policy = RulePolicy::new().allow_listen("127.0.0.1:0");
     let config = Config::new().policy(Policy::rules(policy)).stdout(out.clone()).stderr(err.clone()).args(vec!["0".into()]);
-    let mut engine = Engine::new(config);
+    let mut engine = Engine::new(config).unwrap();
     let interrupt = engine.interrupt_handle();
     let server = std::thread::spawn(move || rt().block_on(engine.run_file(example("chat_server.sand"))));
 
@@ -366,7 +367,7 @@ fn chat_server_cannot_listen_without_permission() {
 
 #[test]
 fn s3_signing_tests_pass() {
-    let mut engine = Engine::new(Config::new());
+    let mut engine = Engine::new(Config::new()).unwrap();
     let report = rt().block_on(engine.run_tests(example("s3/s3.sand"))).unwrap();
     assert_eq!(report.failed(), 0, "{}", report.render());
     assert_eq!(report.passed(), 3);

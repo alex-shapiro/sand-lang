@@ -341,7 +341,6 @@ impl<'a> Linter<'a> {
                     }
                 }
                 ItemKind::TypeAlias(a) => self.name(&a.name, is_upper_camel(&a.name.name), "type", "UpperCamelCase"),
-                ItemKind::NativeType(n) => self.name(&n.name, is_upper_camel(&n.name.name), "type", "UpperCamelCase"),
                 ItemKind::Import(imp) => {
                     if let Some(a) = &imp.alias {
                         self.name(a, is_snake(&a.name), "module alias", "snake_case");
@@ -867,12 +866,13 @@ fn unused_functions(checked: &CheckedProgram) -> Vec<FnId> {
         match f.kind {
             FnKind::Init | FnKind::Test(_) | FnKind::Native(_) | FnKind::TraitMethod(..) | FnKind::Intrinsic(_) => true,
             FnKind::DefaultHelper => false,
-            FnKind::Script => match f.owner {
-                // Methods are public exactly when their type is.
-                Some(Ctor::Def(d)) => checked.types.get(d as usize).is_none_or(|t| t.is_pub),
-                Some(_) => true,
-                None => f.is_pub,
-            },
+            FnKind::Script => {
+                f.is_pub
+                    && match f.owner {
+                        Some(Ctor::Def(d)) => checked.types.get(d as usize).is_none_or(|t| t.is_pub),
+                        _ => true,
+                    }
+            }
         }
     };
     let mut reached = vec![false; n];
@@ -931,6 +931,7 @@ mod tests {
     fn variant_like_bindings_suggest_the_closest_variant() {
         let src = "enum State {\n    Empty\n    Closed\n    Full(int)\n}\nfn f(s: State) -> int {\n    match s {\n        Full(n) => n\n        Closed => 1\n        Emtpy => 0\n    }\n}\nfn g(s: State) -> int {\n    match s {\n        Full(n) => n\n        Rest => 1\n    }\n}\nprint(f(State.Empty) + g(State.Empty))\n";
         let messages: Vec<String> = crate::Engine::new(crate::Config::new())
+            .unwrap()
             .lint_source("main.sand", src)
             .unwrap()
             .into_iter()

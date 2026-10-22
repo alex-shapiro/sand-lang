@@ -81,28 +81,17 @@ pub fn copy<R: Reader, W: Writer>(src: R, dst: W) -> Result<int> {
     }
 }
 
-/// The type of `io.stdin`. Reading requires the `Stdin` capability.
-pub native type Stdin
-
 impl Reader for Stdin {
     native fn read(self, max: int) -> Result<bytes>
     native fn read_line(self) -> Result<str?>
     native fn read_all(self) -> Result<bytes>
 }
 
-/// The type of `io.stdout`. Writing requires the `Stdout` capability and counts
-/// toward `max_output_bytes`.
-pub native type Stdout
-
 impl Writer for Stdout {
     native fn write(self, data: bytes) -> Result<()>
     native fn write_str(self, text: str) -> Result<()>
     native fn flush(self) -> Result<()>
 }
-
-/// The type of `io.stderr`. Writing requires the `Stderr` capability and counts
-/// toward `max_output_bytes`.
-pub native type Stderr
 
 impl Writer for Stderr {
     native fn write(self, data: bytes) -> Result<()>

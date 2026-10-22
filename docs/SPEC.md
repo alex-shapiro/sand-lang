@@ -266,11 +266,15 @@ importing a name that is not exported is an error. Qualified names are written
 
 ### 3.3 Visibility
 
-`pub` may precede `fn`, `struct`, `enum`, `trait`, `type`, `let` and `var` at
-the top level. Fields and methods of a public type are public, as are the
-methods of a public trait. Impls have no visibility of their own (§4.9).
-Top-level `var`s are exported read-only: importers may read but not assign
-them.
+`pub` may precede top-level `fn`, `struct`, `enum`, `trait`, `type`, `let`, and
+`var` declarations, struct fields, and methods in `struct`, `enum`, and
+`extend` blocks. Other modules cannot reference a private item, access or match
+a private field, call a private method, or construct a struct that has a
+private field (through a struct literal or `json.decode`). Value formatting and
+`json.encode` include all struct fields regardless of visibility. Enum variants
+and the methods of a public trait are always public; `impl` blocks do not have
+visibility modifiers (§4.9). Importing modules can read a `pub var`, but only
+the declaring module can assign to it.
 
 ---
 
@@ -311,25 +315,27 @@ fn greet(name: str, greeting: str = "Hello") {
 
 ```sand
 pub struct Point {
-    x: float
-    y: float
+    pub x: float
+    pub y: float
 
     /// Distance from the origin.
-    fn norm(self) -> float {
+    pub fn norm(self) -> float {
         (self.x * self.x + self.y * self.y).sqrt()
     }
 
-    fn origin() -> Point { Point { x: 0.0, y: 0.0 } }
+    pub fn origin() -> Point { Point { x: 0.0, y: 0.0 } }
 }
 
 struct Counter {
     name: str
-    var count: int = 0
+    pub var count: int = 0
 }
 ```
 
 - Fields are separated by newlines or commas and are immutable unless
-  declared `var`. A field's default is used when a struct literal omits it.
+  declared `var`. If a struct literal omits a field, the engine evaluates the
+  field's default expression. Fields and methods are private to the declaring
+  module unless marked `pub` (§3.3).
 - Methods are `fn` declarations inside the body. A method whose first parameter
   is `self` (no annotation) is an instance method, called as `value.method(...)`.
   Other methods are static, called as `Type.method(...)`.
@@ -407,21 +413,23 @@ must be fully inferred from their initializer and module-level uses.
 
 ### 4.7 Native declarations
 
-In the prelude, standard library and host native modules, functions and
-`impl` methods may be declared `native`, without a body; the module's registry
-supplies the Rust implementation. User scripts may not declare `native`
-functions.
+The prelude, standard library, and host native modules can declare `native`
+functions and methods without a body. The module provides the Rust
+implementation, and the engine verifies that the declared Sand signature
+matches the Rust function signature (§16.3). User scripts cannot declare
+`native` functions.
 
 ```sand
 pub native fn parse(text: str) -> Result<Json>
 ```
 
-A native type parameter may be marked
-`reflect` (`native fn decode<reflect T>(text: str) -> Result<T>`); the compiler
-then passes a runtime description of the instantiated type, which must be fully
-known at the call site.
+If a type parameter on a `native fn` is marked `reflect`
+(`native fn decode<reflect T>(text: str) -> Result<T>`), the compiler passes a
+runtime type description of `T` to the function, and `T` must be a concrete
+type at the call site.
 
-`native type Name` declares an opaque type (§5.4).
+Native modules register opaque types (§5.4) directly from Rust rather than
+declaring them in Sand source.
 
 ### 4.8 Test blocks
 
@@ -634,7 +642,7 @@ The prelude defines:
 ```sand
 pub enum Option<T> { Some(T), None }
 pub enum Result<T, E = Error> { Ok(T), Err(E) }
-pub struct Error { kind: str, message: str }
+pub struct Error { pub kind: str, pub message: str }
 ```
 
 `Error.kind` is a short machine-readable tag. Standard kinds are:
@@ -644,13 +652,14 @@ pub struct Error { kind: str, message: str }
 The prelude also defines the lazy iterator struct `Iter<T>` and the trait
 `Iterator<T>` (§12.13).
 
-Standard library modules define further nominal types (e.g. `json.Json`,
-`http.Response`, `net.Conn`). Some are _opaque_: they have no fields, cannot be
-constructed with a literal, and are manipulated only by methods. If a module
-registers an opaque type as a value type (§16, e.g. `time.PlainDate`), its
-values are immutable, are compared and hashed by value, can implement `Ord`,
-and are formatted as text (`2024-02-29`). Other opaque values are compared by
-identity and formatted as `<Type>`.
+Standard library and host modules define additional nominal types (such as
+`json.Json`, `http.Response`, and `net.Conn`). An _opaque_ type is bound to a
+registered Rust type (§16.3); it has no fields, cannot be constructed with a
+struct literal, and can only be used through functions and methods. Opaque
+value types (such as `time.PlainDate`) are immutable, compare and hash by
+value, can implement `Ord`, and format as text (`2024-02-29`). Opaque object
+types (such as `net.Conn`) compare by identity and format as `<Type>`; tasks
+and channels format as `<task>` and `<channel>`.
 
 ### 5.5 Type equality and subtyping
 
@@ -1726,7 +1735,7 @@ directory (set by the host; default: the module root).
 | `open(path, mode: Mode = Mode.Read) -> Result<File>`                             | by mode, below                    |
 | `join(parts: [str]) -> str`, `basename(p)`, `dirname(p)`, `extension(p) -> str?` | none                              |
 
-`struct Metadata { size: int, is_file: bool, is_dir: bool, modified: time.Instant? }`.
+`struct Metadata { pub size: int, pub is_file: bool, pub is_dir: bool, pub modified: time.Instant? }`.
 
 `/` is a separator on every platform (on Windows `\` is too). `join` inserts
 the platform's separator, and a part that is an absolute path replaces the
@@ -1826,7 +1835,7 @@ times (such as `Set-Cookie`) occurs several times. Names of received
 headers are lower-cased.
 
 ```sand
-pub struct Response { status: int, headers: [(str, str)], body: bytes, url: str }
+pub struct Response { pub status: int, pub headers: [(str, str)], pub body: bytes, pub url: str }
 pub fn get(url: str, headers: [(str, str)] = [], timeout: duration = 30s) -> Result<Response>
 pub fn request(method: str, url: str, headers: [(str, str)] = [], body: bytes = b"",
                timeout: duration = 30s, follow_redirects: bool = true) -> Result<Response>
@@ -1838,7 +1847,7 @@ pub fn request_json<T>(method: str, url: str, value: T, headers: [(str, str)] = 
                        follow_redirects: bool = true) -> Result<Response>
 pub fn open(method: str, url: str, headers: [(str, str)] = [], body: bytes = b"",
             timeout: duration = 30s, follow_redirects: bool = true) -> Result<Stream>
-pub struct Stream { status: int, headers: [(str, str)], body: Body, url: str }
+pub struct Stream { pub status: int, pub headers: [(str, str)], pub body: Body, pub url: str }
 pub fn upload(method: str, url: str, headers: [(str, str)] = [], timeout: duration = 30s) -> Result<Upload>
 upload.finish() -> Result<Stream>
 ```
@@ -1887,7 +1896,7 @@ Server:
 pub fn serve(ip: str, port: int) -> Result<Server>      // capability NetListen(ip:port)
 server.accept() -> Result<Request>
 server.addr() -> net.SocketAddr
-pub struct Request { method: str, path: str, query: str, headers: [(str, str)], body: Body, conn: net.Conn }
+pub struct Request { pub method: str, pub path: str, pub query: str, pub headers: [(str, str)], pub body: Body, pub conn: net.Conn }
 request.respond(status: int, body: bytes, headers: [(str, str)] = []) -> Result<()>
 request.respond_stream(status: int, headers: [(str, str)] = []) -> Result<Reply>
 reply.finish() -> Result<()>
@@ -1907,18 +1916,17 @@ read the rest of it, at most `max_http_body` bytes), each wait bounded by
 30 seconds. A client that sent `Expect: 100-continue` is answered `100
 Continue` when the handler starts reading the body.
 
-`conn` is the client connection (fields of public types are public, §3.3).
-The body is read from it; `conn` may be used between reads of the body
-(reading `conn` reads past what the body has read), and closing the
-connection or the request ends the body. `respond` writes a response with
-a `content-length` header (and no body for `HEAD` requests or statuses
-without one) to `conn`, then closes the request. `respond_stream` returns
-a `Reply`, an `io.Writer` for a body framed as an upload's is (to an
-HTTP/1.0 client without a `content-length`, the body ends with the
-connection); the head is sent with the first write or `finish`, and
-closing the reply finishes it. A script may also write to `conn` directly,
-producing the HTTP framing itself, and close it. Constructing a `Request`
-value directly has no special meaning.
+`conn` is the client connection from which `request.body` reads. A handler can
+use `conn` directly between body reads (reading from `conn` consumes bytes
+after the bytes already read by `body`), and closing `conn` or `request` ends
+the body. `respond` writes a response with a `content-length` header (omitting
+the body for `HEAD` requests and bodyless status codes) to `conn`, and then
+closes `request`. `respond_stream` returns a `Reply` (`io.Writer`) that frames
+the response body in the same way as `Upload` (or terminates the body by
+closing the connection for HTTP/1.0 clients without `content-length`); the
+server sends the response head on the first write or `finish`, and closing the
+`Reply` finishes the response. A script can also write raw HTTP framing
+directly to `conn` and close it.
 
 After `respond` or `finish`, the server reads the client's next request
 from the connection (and `conn` is closed) if the client allows it
@@ -2000,7 +2008,7 @@ pending, then waits; the run's limits and interrupts apply while it waits.
 
 `get(name: str) -> str?` (capability `Env(name)`; a denial yields `None`),
 `args() -> [str]` (arguments the host passed to the script; no capability),
-`vars() -> [str: str]` (capability `Env("*")`; a denial yields an empty map).
+`vars() -> [str: str]` (sorted by name; capability `Env("*")`; a denial yields an empty map).
 
 ### 13.7 `json`
 
@@ -2143,13 +2151,14 @@ r.replace(text, rep: str) -> str        // first; $1, ${name} expand
 r.replace_all(text, rep: str) -> str
 r.split(text) -> [str]
 r.pattern() -> str
-struct Match { text: str, start: int, end: int }
-struct Captures { text: str, spans: [int], regex: Regex }
+pub struct Match { pub text: str, pub start: int, pub end: int }
+pub struct Captures { text: str, ... }
 Captures: get(i: int) -> Match?, name(n: str) -> Match?, len() -> int, text(i: int) -> str?
 ```
 
-`Captures` holds the searched text and each group's start and end offsets
-(`-1` for a group that did not participate); its methods slice the text.
+`Captures` stores the searched text and the start and end byte offsets of each
+capture group (`-1` if a group did not match), and its methods slice the
+matched text.
 Syntax is that of the Rust `regex` crate (linear-time, no backreferences);
 patterns with backslashes are best written as raw strings (`r"\d{4}"`),
 since `\d` is an invalid escape in an ordinary string; braces need no care
@@ -2244,8 +2253,8 @@ See §11.3.
 
 ```sand
 pub struct Uri {
-    scheme: str, userinfo: str?, host: str?, port: int?,
-    path: str, query: str?, fragment: str?
+    pub scheme: str, pub userinfo: str?, pub host: str?, pub port: int?,
+    pub path: str, pub query: str?, pub fragment: str?
 }
 pub fn parse(text: str) -> Result<Uri>                 // RFC 3986
 pub native fn encode_component(s: str) -> str          // percent-encodes all but unreserved
@@ -2698,13 +2707,15 @@ let config = Config::new()
     .policy(Policy::deny_all())
     .limits(Limits { max_memory: Some(64 << 20), ..Limits::default() })
     .module(module);
-let mut engine = Engine::new(config);
+let mut engine = Engine::new(config)?;
 let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 4.0))"#).await?;
 ```
 
 ### 16.1 Execution and errors
 
-`Engine::run_source` and `Engine::run_file` compile and execute a script inside
+`Engine::new` validates registered host modules (§16.3) and constructs an
+`Engine`. `Engine::run_source` and `Engine::run_file` compile and execute a
+script inside
 the returned future on the thread that polls it. `Engine::run_tests` compiles a
 module and executes its `test` blocks (§4.8). For static analysis without
 execution, `check_source`, `check_file`, `lint_source`, and `lint_file` (§17.2)
@@ -2786,70 +2797,85 @@ and `Config::prompter` set the active `Policy` and interactive `Prompter`
 
 ### 16.3 Native modules
 
-A `NativeModule` exposes host Rust functions and types to Sand scripts as an
-importable, statically typed module. Registered via `Config::module`, a native
-module integrates into both the compiler and the virtual machine: the compiler
-derives Sand signatures from the registered Rust types for type-checking, and
-the VM converts arguments and return values across the host boundary while
-enforcing fuel and memory limits. Module, function, and type names must be
-unique and cannot shadow a standard library module or prelude type.
+`NativeModule` exposes Rust functions and types to Sand scripts as an
+importable module registered with `Config::module`. The engine infers the Sand
+signature of each registered function from its Rust parameter and return types,
+and charges fuel and memory when converting arguments and return values.
+`NativeModule` and `Config::module` panic if a module, type, or function name
+is invalid or already registered, or if a host module uses the name of a
+standard library module.
 
-Host functions can execute synchronously or asynchronously, optionally behind
-a capability check. `NativeModule::function` registers a synchronous closure.
-`NativeModule::async_function` registers a closure returning a `Future` that
-suspends only the calling Sand task until completion.
-`NativeModule::guarded_function(name, guard, f)` integrates a synchronous
-function with the engine's security policy (§14): before calling `f`, the engine
-passes references to the converted arguments to `guard` and checks the resulting
-`Capability`, returning a `"permission_denied"` error if denied.
+| Method                       | Registered item                                                                      |
+| ---------------------------- | ------------------------------------------------------------------------------------ |
+| `function(name, f)`          | synchronous function that can borrow `&str`, `&[u8]`, and `&T` arguments             |
+| `vm_function(name, f)`       | synchronous function that takes `&mut Vm` and owned arguments                        |
+| `async_function(name, f)`    | asynchronous function that takes owned arguments and suspends only the calling task  |
+| `value_type::<T>()`          | opaque value type implementing `ValueType` (§5.4)                                    |
+| `enum_type::<T>()`           | unit enum deriving `SandEnum` (`EnumType`)                                           |
+| `object_type::<T>()`         | opaque reference type deriving `SandObject` (`ObjectType`)                           |
+| `params(names)`, `doc(text)` | parameter names and documentation for the most recently registered function          |
 
-Values and errors cross the host boundary through the `FromValue`, `IntoValue`,
-and `IntoHostError` traits. A synchronous or guarded host function runs without
-re-entering the VM and can borrow `&str` and `&[u8]` slices directly from the VM
-heap for the duration of the call; asynchronous functions require owned argument
-types. Fallible functions return `Result<T, E>` (`E: IntoHostError`).
-`HostError { kind, message }` preserves the `Error` kind.
+The Rust return type of a registered function determines whether the function
+returns a Sand `Result` or aborts the run on failure:
 
-| Rust type                                   | Sand type                    |
-| ------------------------------------------- | ---------------------------- |
-| `i64`, `f64`, `bool`, `()`                  | `int`, `float`, `bool`, `()` |
-| `String`, `&str`                            | `str`                        |
-| `Vec<u8>`, `&[u8]`                          | `bytes`                      |
-| `Vec<T>` (`T: ListElem`)                    | `[T]`                        |
-| `Option<T>`                                 | `T?`                         |
-| `Result<T, E>` (`E: IntoHostError`)         | `Result<T, Error>`           |
-| `HashMap<String, T>`, `BTreeMap<String, T>` | `[str: T]`                   |
-| 2-, 3-, and 4-element tuples                | tuples                       |
-| `T: ValueType`                              | value type `T::NAME`         |
-| `T: EnumType` (`#[derive(SandEnum)]`)       | enum `T::NAME`               |
+- `Result<T, HostError>` maps to the Sand return type `Result<T, Error>`.
+  Returning `Err(HostError::new(kind, message))` yields `Err(Error { kind,
+  message })` in Sand, whereas `?` converts a `Ctl` into a `HostError` that
+  halts or suspends the VM and converts a `std::io::Error` into a `HostError`
+  with the corresponding standard error kind.
+- `Result<T, std::io::Error>`, `Result<T, String>`, and `Result<T, &str>` also
+  map to `Result<T, Error>`; string errors use the kind `"error"`.
+- `Result<T, Ctl>` maps to the Sand return type `T`. Returning `Err(ctl)`
+  aborts the run with a runtime error (`Ctl::fail`), a resource limit error, or
+  an exit code.
+- `Result<Later<T, E>, E>` suspends the calling task on a future and maps to
+   the same Sand return type as `Result<T, E>`.
 
-A native module's public interface combines automatically derived signatures
-with optional Sand source code. By default, the engine generates a
-`pub native fn` declaration for each typed Rust function using parameter names
-`arg1`, `arg2`, and so on (or custom names set with `NativeModule::params`).
-Adding Sand source via `NativeModule::source` allows a module to define Sand
-structs, enums, and helper functions alongside its Rust functions, or to write
-explicit `native fn` declarations that supply default argument values or
-signatures for untyped `NativeModule::raw_function` callbacks. At compile time,
-the engine verifies that every registered function has a matching declaration
-and that public signatures do not reference private module types.
+To check a sandbox capability inside a `vm_function`, call
+`Vm::require(&capability)` (§14), which returns an error of kind
+`"permission_denied"` if the policy denies the request. Because the engine
+re-runs the native function after a permission prompt or after a garbage
+collection triggered by a memory or resource limit, a native function must
+check capabilities and reserve memory before performing any side effects.
+Return-value conversion does not fail on the memory limit; instead, the engine
+collects garbage and checks the memory limit after the call completes.
 
-`ValueType` (§5.4) exposes an immutable Rust type to Sand as an opaque value
-type with value semantics. Registering `T: ValueType` with
-`NativeModule::value_type::<T>()` declares `pub native type NAME` in the module
-unless the module source already declares it. A value type implements
-`Clone + Eq + Hash + Display` and a `T::parse` constructor so that the compiler
-can validate type-annotated string literals and guarantee round-trip formatting.
-The standard library's time types implement `ValueType` and can be used directly
-in host function signatures.
+| Rust type                                                | Sand type                                                      |
+| -------------------------------------------------------- | -------------------------------------------------------------- |
+| `i64`, `f64`, `bool`, `()`, `jiff::SignedDuration`       | `int`, `float`, `bool`, `()`, `duration`                       |
+| `String`, `&str`; `Vec<u8>`, `&[u8]`                     | `str`; `bytes`                                                 |
+| `Vec<T>`, `Option<T>`, tuples of 2 to 8 elements         | `[T]`, `T?`, tuples                                            |
+| `HashMap<K, V>`, `BTreeMap<K, V>`                        | `[K: V]`                                                       |
+| `HashSet<T>`, `BTreeSet<T>`                              | `Set<T>`                                                       |
+| `Result<T, E>`                                           | `Result<T, Error>` or `T` (determined by `E`)                  |
+| `Never`                                                  | `never`                                                        |
+| registered `ValueType`, `EnumType`, or `ObjectType` `T`  | `T` (or `&T` for a borrowed object parameter)                  |
+| `Val<T>`                                                 | `T` (passed as an uncopied heap handle)                        |
+| `Param<N>`, `Reflect<N>`                                 | `N`-th type parameter and its runtime type description         |
 
-`EnumType` exposes unit enums to Sand as transparent `pub enum` types.
-An enum type is derived with `#[derive(sandlang::SandEnum)]`. An enum
-has a require`#[sand(module = "...")]` attribute and an optional
-`#[sand(name = "...")]` attribute. `NativeModule::enum_type::<T>()` generates
-the Sand `pub enum` declaration directly from the Rust variants and doc comments.
-Module source must not redeclare a natively-declared type. Standard library enums
-implement `EnumType` for use in host functions.
+The engine automatically generates Sand declarations for registered types and
+functions that are not declared in `NativeModule::source`. Registered types use
+their Rust doc comments, and undeclared functions are exported as `pub native
+fn` with parameter names `arg1`, `arg2`, ... unless overridden by `params`. A
+function registered as `"Type.name"` is a method on `Type`, and takes `self` if
+its first parameter has type `Type`. Generic functions and functions with
+default parameter values must be declared explicitly with `native fn` in
+`NativeModule::source`.
+
+`Engine::new` compiles and validates all registered host modules once per
+`Config` (shared across cloned configurations), and returns `Error::Compile` if:
+
+- the module's Sand source contains a syntax or type error;
+- a `native fn` declaration in Sand source does not match the Rust function's
+  signature;
+- a registered function references an unregistered type or another module's
+  private type;
+- a public function or field exposes a private type;
+- a generic Rust function lacks a `native fn` declaration in Sand source;
+- a method registered as `"Type.name"` targets a nonexistent type, or targets a
+  generic type without a `native fn` declaration in Sand source;
+- host modules form a dependency cycle through their registered function types;
+- a function declared in Sand source also configures `params` or `doc` in Rust.
 
 ### 16.4 Operating-system access and file systems
 
@@ -2917,7 +2943,7 @@ the engine's remembered `"always"` prompt decisions (§14.3). `Session`
 implements the evaluation semantics of `sand repl` (§17.6):
 
 ```rust
-let mut session = Engine::new(config).session();
+let mut session = Engine::new(config)?.session();
 session.eval("var hits = 0\nfn hit() -> int { hits += 1\n hits }").await?;   // Ok(None)
 assert_eq!(session.eval("hit() + hit()").await?, Some("3".to_string()));
 ```
@@ -2998,12 +3024,12 @@ these:
 | `resource-field`       | a struct field or enum variant holding a resource, in a type that does not implement `Close`                                                                                                                                            |
 | `resource-escapes`     | a resource bound with `use`, or received as a parameter, that is kept beyond the call: returned (`use` only), stored, captured by a task, or passed to a function that keeps it                                                         |
 
-`unused-function`: public items are `pub` top-level functions and all
-methods of `pub` types. A private function is used only if reachable from
-top-level code, a `test` block or a public item, through calls (including
-method calls), function values, default arguments and the
-arguments of `help` and `members`; a function referenced only by itself or by
-unused functions is reported.
+`unused-function`: a module's public entry points are its `pub` top-level
+functions and the `pub` methods of its `pub` types. The linter reports any
+private function or method that is not reachable from top-level code, a `test`
+block, or a public entry point through calls, method calls, function values,
+default arguments, or `help` and `members` arguments (including functions
+referenced only by themselves or by other unused functions).
 
 `shadowed-variable`: the earlier binding may be a parameter, a `let`/`var`
 (including destructuring), a loop variable, or a `match`/`if let`/`while

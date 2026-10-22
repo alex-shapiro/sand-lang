@@ -1,113 +1,91 @@
 //! The `random` module.
 
 use crate::check::ModKind;
-use crate::engine::Registry;
-use crate::vm::value::{FxHashMap, NativeObject, Obj, Value, to_usize_saturating};
-use crate::vm::{NResult, Rng, Vm, fail, internal};
-use std::any::Any;
+use crate::native::{NativeModule, NativeObject, Param, Val};
+use crate::vm::value::{FxHashMap, Value, to_usize_saturating};
+use crate::vm::{Ctl, Rng, Vm, fail};
 
-/// The opaque `random.Rng` type: an independent generator.
-pub(crate) struct RngObj(pub Rng);
+/// An isolated pseudo-random number generator created with `random.rng(seed)`.
+#[derive(crate::SandObject)]
+#[sand(module = "random", name = "Rng")]
+struct RngObj(Rng);
 
-impl NativeObject for RngObj {
-    fn type_name(&self) -> &'static str {
-        "Rng"
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-}
+impl NativeObject for RngObj {}
 
-/// Allocates a `random.Rng` seeded with `seed`.
-pub(crate) fn new_rng(vm: &mut Vm, seed: u64) -> Value {
-    vm.heap.alloc(Obj::Native(Box::new(RngObj(Rng::new(seed)))))
-}
-
-/// A generator operation; `args` excludes the receiver.
-type Op = fn(&mut Vm, &mut Rng, &[Value]) -> NResult;
-
-/// Runs `op` with the engine's generator.
-fn with_engine(vm: &mut Vm, args: &[Value], op: Op) -> NResult {
+fn with_engine<R>(vm: &mut Vm, op: impl FnOnce(&mut Vm, &mut Rng) -> Result<R, Ctl>) -> Result<R, Ctl> {
     let mut rng = vm.host.rng.clone();
-    let result = op(vm, &mut rng, args);
+    let result = op(vm, &mut rng);
     vm.host.rng = rng;
     result
 }
 
-/// Runs `op` with the `Rng` object in `args[0]`.
-fn with_object(vm: &mut Vm, args: &[Value], op: Op) -> NResult {
-    let Some(RngObj(rng)) = vm.heap.native::<RngObj>(args[0]) else { return internal("not an Rng") };
-    let mut rng = rng.clone();
-    let result = op(vm, &mut rng, &args[1..]);
-    if let Some(obj) = vm.heap.native_mut::<RngObj>(args[0]) {
-        obj.0 = rng;
-    }
+fn with_object<R>(vm: &mut Vm, obj: Val<RngObj>, op: impl FnOnce(&mut Vm, &mut Rng) -> Result<R, Ctl>) -> Result<R, Ctl> {
+    let mut rng = obj.get(&vm.heap)?.0.clone();
+    let result = op(vm, &mut rng);
+    obj.get_mut(&mut vm.heap)?.0 = rng;
     result
 }
 
-pub fn register(r: &mut Registry) {
-    r.source("random", ModKind::Std, include_str!("random.sand"));
-
-    r.add_builtin("random.seed", |vm, a| {
-        vm.host.rng = Rng::new(a[0].as_int() as u64);
-        Ok(Value::Unit)
+pub(crate) fn module() -> NativeModule {
+    let mut m = NativeModule::std("random", ModKind::Std, include_str!("random.sand"));
+    m.object_type::<RngObj>();
+    m.vm_function("seed", |vm: &mut Vm, s: i64| -> Result<_, Ctl> {
+        vm.host.rng = Rng::new(s as u64);
+        Ok(())
     });
-    r.add_builtin("random.rng", |vm, a| Ok(new_rng(vm, a[0].as_int() as u64)));
+    m.vm_function("rng", |vm: &mut Vm, seed: i64| vm.new_object(RngObj(Rng::new(seed as u64))));
 
     macro_rules! ops {
-        ($($name:literal => $op:expr),* $(,)?) => {$(
-            r.add_builtin(concat!("random.", $name), |vm, a| with_engine(vm, a, $op));
-            r.add_builtin(concat!("random.Rng.", $name), |vm, a| with_object(vm, a, $op));
+        ($($name:literal => |$($a:ident: $t:ty),*| -> $r:ty = $op:expr;)*) => {$(
+            m.vm_function($name, |vm: &mut Vm, $($a: $t),*| -> Result<$r, Ctl> { with_engine(vm, |vm, rng| $op(vm, rng, $($a),*)) });
+            m.vm_function(concat!("Rng.", $name), |vm: &mut Vm, obj: Val<RngObj>, $($a: $t),*| -> Result<$r, Ctl> {
+                with_object(vm, obj, |vm, rng| $op(vm, rng, $($a),*))
+            });
         )*};
     }
     ops! {
-        "int" => int,
-        "float" => |_, rng, _| Ok(Value::Float(rng.float())),
-        "bool" => |_, rng, _| Ok(Value::Bool(rng.next_u64() >> 63 == 1)),
-        "choice" => choice,
-        "shuffle" => shuffle,
-        "sample" => sample,
-        "bytes" => bytes,
+        "int" => |lo: i64, hi: i64| -> i64 = int;
+        "float" => | | -> f64 = |_: &mut Vm, rng: &mut Rng| Ok(rng.float());
+        "bool" => | | -> bool = |_: &mut Vm, rng: &mut Rng| Ok(rng.next_u64() >> 63 == 1);
+        "choice" => |xs: Val<Vec<Param<0>>>| -> Option<Param<0>> = choice;
+        "shuffle" => |xs: Val<Vec<Param<0>>>| -> () = shuffle;
+        "sample" => |xs: Val<Vec<Param<0>>>, k: i64| -> Vec<Param<0>> = sample;
+        "bytes" => |n: i64| -> Vec<u8> = bytes;
     }
+    m
 }
 
-fn int(_: &mut Vm, rng: &mut Rng, a: &[Value]) -> NResult {
-    let (lo, hi) = (a[0].as_int(), a[1].as_int());
+fn int(_: &mut Vm, rng: &mut Rng, lo: i64, hi: i64) -> Result<i64, Ctl> {
     if lo >= hi {
         return fail("invalid", format!("random.int: empty range {lo}..{hi}"));
     }
     let span = (hi as i128 - lo as i128) as u64;
-    Ok(Value::Int((lo as i128 + rng.below(span) as i128) as i64))
+    Ok((lo as i128 + rng.below(span) as i128) as i64)
 }
 
-fn choice(vm: &mut Vm, rng: &mut Rng, a: &[Value]) -> NResult {
-    let xs = vm.heap.list(a[0]);
-    let x = (!xs.is_empty()).then(|| xs[rng.below(xs.len() as u64) as usize]);
-    Ok(vm.option(x))
+fn choice(vm: &mut Vm, rng: &mut Rng, xs: Val<Vec<Param<0>>>) -> Result<Option<Param<0>>, Ctl> {
+    let xs = xs.items(&vm.heap);
+    Ok((!xs.is_empty()).then(|| Param::from_raw(xs[rng.below(xs.len() as u64) as usize])))
 }
 
 /// Fisher-Yates.
-fn shuffle(vm: &mut Vm, rng: &mut Rng, a: &[Value]) -> NResult {
-    vm.charge(vm.heap.list(a[0]).len() as u64)?;
-    let xs = vm.heap.list_mut(a[0]);
+fn shuffle(vm: &mut Vm, rng: &mut Rng, xs: Val<Vec<Param<0>>>) -> Result<(), Ctl> {
+    vm.charge(xs.items(&vm.heap).len() as u64)?;
+    let xs = vm.heap.list_mut(xs.raw());
     for i in (1..xs.len()).rev() {
         let j = rng.below(i as u64 + 1) as usize;
         xs.swap(i, j);
     }
-    Ok(Value::Unit)
+    Ok(())
 }
 
 /// A partial Fisher-Yates shuffle of the positions, recording only those it
 /// has disturbed (the element now at each).
-fn sample(vm: &mut Vm, rng: &mut Rng, a: &[Value]) -> NResult {
-    let items = vm.heap.list(a[0]);
+fn sample(vm: &mut Vm, rng: &mut Rng, xs: Val<Vec<Param<0>>>, k: i64) -> Result<Vec<Param<0>>, Ctl> {
+    let items = xs.items(&vm.heap);
     let n = items.len();
-    let k = a[1].as_int().clamp(0, n as i64) as usize;
+    let k = k.clamp(0, n as i64) as usize;
     vm.reserve(k.saturating_mul(2 * std::mem::size_of::<Value>()))?;
-    vm.charge(k as u64)?;
     let mut moved: FxHashMap<usize, usize> = FxHashMap::default();
     let mut out = Vec::with_capacity(k);
     for i in 0..k {
@@ -115,13 +93,12 @@ fn sample(vm: &mut Vm, rng: &mut Rng, a: &[Value]) -> NResult {
         let at_i = moved.get(&i).copied().unwrap_or(i);
         let at_j = moved.get(&j).copied().unwrap_or(j);
         moved.insert(j, at_i);
-        out.push(items[at_j]);
+        out.push(Param::from_raw(items[at_j]));
     }
-    Ok(vm.heap.new_list(out))
+    Ok(out)
 }
 
-fn bytes(vm: &mut Vm, rng: &mut Rng, a: &[Value]) -> NResult {
-    let n = a[0].as_int();
+fn bytes(vm: &mut Vm, rng: &mut Rng, n: i64) -> Result<Vec<u8>, Ctl> {
     if n < 0 {
         return fail("invalid", "random.bytes: negative length");
     }
@@ -133,5 +110,5 @@ fn bytes(vm: &mut Vm, rng: &mut Rng, a: &[Value]) -> NResult {
         let word = rng.next_u64().to_le_bytes();
         out.extend_from_slice(&word[..(n - out.len()).min(8)]);
     }
-    Ok(vm.heap.new_bytes(out))
+    Ok(out)
 }

@@ -161,7 +161,7 @@ const BENCHES: &[Bench] = &[
 
 fn run_once(src: &str) -> (Duration, String, GcStats) {
     let out = MemorySink::new();
-    let mut engine = Engine::new(Config::new().stdout(out.clone()));
+    let mut engine = Engine::new(Config::new().stdout(out.clone())).unwrap();
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let start = Instant::now();
     rt.block_on(engine.run_source("bench.sand", src)).unwrap();

@@ -214,10 +214,9 @@ impl Checker {
         let def = &self.types[d];
         let mut needs = Vec::new();
         let ok = match &def.kind {
-            TypeDefKind::Opaque(value) => match b {
-                Bound::Eq => true,
-                Bound::Hash => value.is_some(),
-                Bound::Ord => value.is_some_and(|v| v.ord),
+            TypeDefKind::Opaque(kind) => match (b, kind) {
+                (Bound::Eq, _) | (Bound::Hash, Opaque::Value(_)) => true,
+                (Bound::Ord, Opaque::Value(v)) => v.ord,
                 _ => false,
             },
             TypeDefKind::Struct { fields } => {

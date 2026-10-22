@@ -557,6 +557,7 @@ pub struct FieldDef {
     pub name: Symbol,
     pub ty: TypeId,
     pub mutable: bool,
+    pub is_pub: bool,
     /// Helper function computing the default value.
     pub default: Option<FnId>,
     /// The default as a constant, when it is one (used by `json.decode`).
@@ -589,9 +590,22 @@ pub struct VariantDef {
 
 #[derive(Clone, Debug)]
 pub enum TypeDefKind {
-    Struct { fields: Vec<FieldDef> },
-    Enum { variants: Vec<VariantDef> },
-    Opaque(Option<ValueTypeInfo>),
+    Struct {
+        fields: Vec<FieldDef>,
+    },
+    Enum {
+        variants: Vec<VariantDef>,
+    },
+    /// An opaque type registered by a native module or implemented by the VM.
+    Opaque(Opaque),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Opaque {
+    Value(ValueTypeInfo),
+    Object(std::any::TypeId),
+    /// Built-in VM type (`Task<T>`, `Channel<T>`).
+    Builtin,
 }
 
 /// Metadata for a registered [`crate::vm::value::ValueType`].
@@ -600,17 +614,6 @@ pub struct ValueTypeInfo {
     pub ord: bool,
     pub parse: crate::vm::value::ParseValue,
     pub type_id: std::any::TypeId,
-    pub rust_name: &'static str,
-}
-
-/// Metadata for a registered [`crate::native::EnumType`].
-#[derive(Clone, Debug)]
-pub struct EnumTypeInfo {
-    pub type_id: std::any::TypeId,
-    pub name: &'static str,
-    pub doc: &'static str,
-    /// `(name, doc)` for each variant in declaration order.
-    pub variants: Arc<[(&'static str, &'static str)]>,
 }
 
 #[derive(Clone, Debug)]

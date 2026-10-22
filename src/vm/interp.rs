@@ -1707,12 +1707,9 @@ impl Vm {
             self.forget_once_answers();
         }
         let r = match r {
-            Err(c) if matches!(c.kind(), CtlKind::NativeErr { .. }) => self.native_err_value(n, c),
-            r => r,
-        };
-        let r = match r {
             Ok(v) => {
                 fiber.stack[slot] = v;
+                self.enforce_limit(Some(fiber)).map_err(Trap::Limit)?;
                 if self.cancel_current {
                     self.cancel_current = false;
                     return Ok(Some(Exit::Cancelled));
@@ -1757,10 +1754,9 @@ impl Vm {
             }
             CtlKind::Async(fut) => {
                 fiber.result_slot = slot;
-                fiber.result_native = n;
                 Ok(Some(Exit::Async(fut)))
             }
-            CtlKind::Yield | CtlKind::Blocked | CtlKind::NativeErr { .. } => unreachable!("handled above"),
+            CtlKind::Yield | CtlKind::Blocked => unreachable!("handled above"),
             CtlKind::Collect => Err(self.internal_trap(fiber, ip, "a native asked for a collection twice".into())),
         }
     }
@@ -1909,11 +1905,7 @@ impl Vm {
     #[inline(always)]
     fn invoke_native(&mut self, natives: &[NativeEntry], n: u32, args: &[Value]) -> NResult {
         let entry = &natives[n as usize];
-        match &entry.imp {
-            NativeImpl::Builtin(f) => f(self, args),
-            NativeImpl::Method(f) => f(self, args.get(1..).unwrap_or_default()),
-            NativeImpl::Host(f) => f(self, args),
-        }
+        entry.f.call(self, args)
     }
 
     /// Waits for `on` (a native's result): its value if it is there

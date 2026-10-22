@@ -159,7 +159,7 @@ print(fs.open("swapped/data.txt").unwrap_err().kind)
     let out = MemorySink::new();
     let config = Config::new().policy(Policy::rules(policy)).cwd(&root).stdout(out.clone());
     let main = dir.write("main.sand", src);
-    let mut engine = Engine::new(config);
+    let mut engine = Engine::new(config).unwrap();
     let handle = std::thread::spawn(move || rt().block_on(engine.run_file(&main)));
     let start = Instant::now();
     while !root.join("sync/ready").exists() {
@@ -295,7 +295,7 @@ for _ in 0..2 {
 }
 "#;
     let limits = Limits { max_wall_time: Some(Duration::from_secs(20)), ..Limits::default() };
-    let mut engine = Engine::new(Config::new().policy(Policy::allow_all()).limits(limits).stdout(out.clone()));
+    let mut engine = Engine::new(Config::new().policy(Policy::allow_all()).limits(limits).stdout(out.clone())).unwrap();
     let handle = std::thread::spawn(move || rt().block_on(engine.run_source("server.sand", src)));
     let start = Instant::now();
     let addr = loop {
@@ -338,7 +338,7 @@ use req = server.accept()?
 req.respond(200, b"served")?
 "#;
     let limits = Limits { max_open_resources: 20, max_wall_time: Some(Duration::from_secs(20)), ..Limits::default() };
-    let mut engine = Engine::new(Config::new().policy(Policy::allow_all()).limits(limits).stdout(out.clone()));
+    let mut engine = Engine::new(Config::new().policy(Policy::allow_all()).limits(limits).stdout(out.clone())).unwrap();
     let handle = std::thread::spawn(move || rt().block_on(engine.run_source("server.sand", src)));
     let start = Instant::now();
     let addr = loop {
@@ -479,7 +479,7 @@ fn server_script(
     limits: Limits,
 ) -> (String, std::thread::JoinHandle<Result<sandlang::Outcome, sandlang::Error>>, MemorySink) {
     let out = MemorySink::new();
-    let mut engine = Engine::new(Config::new().policy(Policy::allow_all()).limits(limits).stdout(out.clone()));
+    let mut engine = Engine::new(Config::new().policy(Policy::allow_all()).limits(limits).stdout(out.clone())).unwrap();
     let handle = std::thread::spawn(move || rt().block_on(engine.run_source("server.sand", src)));
     let start = Instant::now();
     let addr = loop {

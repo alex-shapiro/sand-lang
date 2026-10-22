@@ -70,7 +70,7 @@ pub(crate) fn cmd_repl(args: &[String]) -> Result<u8, String> {
     if let Some(feed) = &feed {
         config = config.stdin_feed(feed);
     }
-    let mut session = Engine::new(config).session();
+    let mut session = Engine::new(config).map_err(|e| e.render())?.session();
     let reader = if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         Reader::Editor(EditorReader::new(screen.clone()))
     } else {

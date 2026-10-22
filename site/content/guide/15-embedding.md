@@ -10,12 +10,15 @@ The `sandlang` crate embeds the Sand compiler and VM as a Rust library. Construc
 `Engine::run_source` compiles and executes a script, returning a future that runs on any Tokio runtime with timers enabled:
 
 ```rust
-use sandlang::{Config, Engine};
+use sandlang::{Config, Engine, Error, Outcome};
+
+async fn run(source: &str) -> Result<Outcome, Error> {
+    Engine::new(Config::new())?.run_source("main.sand", source).await
+}
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let mut engine = Engine::new(Config::new());
-    match engine.run_source("main.sand", r#"print("hello from Sand")"#).await {
+    match run(r#"print("hello from Sand")"#).await {
         Ok(outcome) => println!("exit code {}", outcome.exit_code),
         Err(err) => eprint!("{}", err.render()),
     }
@@ -69,7 +72,7 @@ let config = Config::new()
     .memory_fs(files.clone())
     .stdout(out.clone());
 
-let mut engine = Engine::new(config);
+let mut engine = Engine::new(config)?;
 engine.run_source("main.sand", script).await?;
 println!("{}", out.contents());
 let report = files.read("/out/report.txt")?;
@@ -112,8 +115,8 @@ use sandlang::{Config, HostError, NativeModule};
 
 let mut geo = NativeModule::new("geo");
 geo.function("dist", |x: f64, y: f64| -> f64 { (x * x + y * y).sqrt() })
-    .params(&["x", "y"]);
-geo.doc("dist", "Returns the distance of (x, y) from the origin.");
+    .params(&["x", "y"])
+    .doc("Returns the distance of (x, y) from the origin.");
 geo.function("country", |code: &str| -> Result<String, HostError> {
     match code {
         "NL" => Ok("Netherlands".to_string()),
@@ -134,19 +137,25 @@ Running the script above prints `5.0` and `Err(Error { kind: "not_found", messag
 
 Sand infers the Sand function signature from the Rust parameter and return types:
 
-| Rust type                                   | Sand type                    |
-| ------------------------------------------- | ---------------------------- |
-| `i64`, `f64`, `bool`, `()`                  | `int`, `float`, `bool`, `()` |
-| `String`, `&str`                            | `str`                        |
-| `Vec<u8>`, `&[u8]`                          | `bytes`                      |
-| `Vec<T>`                                    | `[T]`                        |
-| `Option<T>`                                 | `T?`                         |
-| `Result<T, E>`                              | `Result<T, Error>`           |
-| `HashMap<String, T>`, `BTreeMap<String, T>` | `[str: T]`                   |
-| tuples of up to 4 elements                  | tuples                       |
-| Rust enum with `#[derive(SandEnum)]`        | matching Sand `enum`         |
+| Rust type                                         | Sand type                    |
+| ------------------------------------------------- | ---------------------------- |
+| `i64`, `f64`, `bool`, `()`                        | `int`, `float`, `bool`, `()` |
+| `String`, `&str`                                  | `str`                        |
+| `Vec<u8>`, `&[u8]`                                | `bytes`                      |
+| `Vec<T>`                                          | `[T]`                        |
+| `Option<T>`                                       | `T?`                         |
+| `Result<T, E>`                                    | `Result<T, Error>`           |
+| `HashMap<K, V>`, `BTreeMap<K, V>`                 | `[K: V]`                     |
+| `HashSet<T>`, `BTreeSet<T>`                       | `Set<T>`                     |
+| `jiff::SignedDuration`                            | `duration`                   |
+| tuples of up to 8 elements                        | tuples                       |
+| Rust enum with `#[derive(SandEnum)]`                     | matching Sand `enum`         |
+| `&T` (argument) or `T` (result) with `#[derive(SandObject)]` | opaque type `T`          |
+| registered `ValueType` `T`                               | opaque type `T`              |
 
-Returning `Err(HostError::new(kind, message))` preserves `kind` on the Sand `Error`; any other Rust error type converts to an `Error` with kind `"error"` and its `Display` message.
+The engine automatically exports registered functions that are not declared in `NativeModule::source` as `pub`, with default parameter names `arg1`, `arg2`, ... unless overridden by `params`. Registering a function as `"Type.name"` defines a method on `Type`; the method takes `self` if its first parameter has type `Type` (such as `Counter.add` below). Generic functions must be declared with `native fn` in `NativeModule::source`.
+
+Returning `Err(HostError::new(kind, message))` produces a Sand `Err(Error)` with the given `kind` and `message`. The engine also converts `std::io::Error` into an `Error` with its standard kind, and `String` or `&str` errors into an `Error` with kind `"error"`. A function that returns `Result<T, sandlang::vm::Ctl>` has the Sand return type `T`; returning `Err(ctl)` aborts the run with a runtime error (`Ctl::fail`), a resource limit error, or an exit code.
 
 Derive `SandEnum` on a unit-only Rust enum and register it with `NativeModule::enum_type` to pass enum values between Rust and Sand:
 
@@ -171,23 +180,42 @@ geo.function("sides", |s: Shape| match s {
 
 `NativeModule::enum_type` generates the `pub enum Shape` declaration in `geo` from the Rust variants and doc comments, so scripts can call `geo.sides(geo.Shape.Square)`. Do not redeclare a registered enum in `NativeModule::source`. Use `#[sand(name = "Kind")]` to expose the enum under a different Sand name.
 
+Derive `SandObject` on a Rust type and register it with `NativeModule::object_type` to expose opaque reference handles to scripts. Registered functions borrow an object parameter as `&T` and return a new object by value as `T`; scripts compare object handles by identity:
+
+```rust
+use sandlang::{NativeModule, NativeObject, SandObject};
+use std::sync::atomic::{AtomicI64, Ordering};
+
+/// A shared atomic counter.
+#[derive(SandObject)]
+#[sand(module = "stats")]
+struct Counter(AtomicI64);
+
+impl NativeObject for Counter {}
+
+let mut stats = NativeModule::new("stats");
+stats.object_type::<Counter>();
+stats.function("counter", || Counter(AtomicI64::new(0)));
+stats.function("Counter.add", |c: &Counter, n: i64| c.0.fetch_add(n, Ordering::Relaxed) + n).params(&["n"]);
+```
+
 `NativeModule::async_function` registers an async Rust function; while its future is pending, only the calling Sand task suspends.
 
-`NativeModule::guarded_function` checks a capability before invoking the function. The guard closure constructs a `Capability` from the call arguments, and the Sand signature wraps the return type in `Result<T, Error>`, returning an `Err` with kind `"permission_denied"` if the policy denies the request:
+To check a sandbox capability inside a native function, register the function with `NativeModule::vm_function` and call `Vm::require`, which returns a `"permission_denied"` error if the policy denies the request. Because the engine re-runs the function after a permission prompt, call `Vm::require` before performing any side effects:
 
 ```rust
 # #[tokio::main(flavor = "current_thread")]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-use sandlang::{Capability, Config, Engine, NativeModule, Policy, RulePolicy};
+use sandlang::vm::Vm;
+use sandlang::{Capability, Config, Engine, HostError, NativeModule, Policy, RulePolicy};
 
 let mut door = NativeModule::new("door");
-door.guarded_function(
-    "open",
-    |name: &String| Capability::Custom { name: "door".into(), detail: name.clone() },
-    |name: String| -> String { format!("opened {name}") },
-);
+door.vm_function("open", |vm: &mut Vm, name: String| -> Result<String, HostError> {
+    vm.require(&Capability::Custom { name: "door".into(), detail: name.clone() })?;
+    Ok(format!("opened {name}"))
+});
 let policy = Policy::rules(RulePolicy::new().allow_custom("door", Some("front")));
-let mut engine = Engine::new(Config::new().module(door).policy(policy));
+let mut engine = Engine::new(Config::new().module(door).policy(policy))?;
 engine.run_source("main.sand", "import door\nprint(door.open(\"front\"))\nprint(door.open(\"back\"))").await?;
 # Ok(())
 # }
@@ -200,7 +228,7 @@ Ok("opened front")
 Err(Error { kind: "permission_denied", message: "permission denied: door back" })
 ```
 
-`NativeModule::source` adds Sand declarations to the module. A `native fn` declaration in the module source overrides the derived signature for a registered function of the same name, letting you specify parameter names and default values. Parameter and return types must match the derived signature.
+`NativeModule::source` attaches Sand source declarations to a native module. Use `native fn` declarations in the Sand source to specify default parameter values or generic type parameters for registered functions. `Engine::new` type-checks registered modules and returns `Error::Compile` if a `native fn` declaration does not match its Rust function signature.
 
 ## Interactive sessions
 
@@ -211,7 +239,7 @@ Err(Error { kind: "permission_denied", message: "permission denied: door back" }
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 # use sandlang::{Config, Engine};
 # let config = Config::new();
-let mut session = Engine::new(config).session();
+let mut session = Engine::new(config)?.session();
 session.eval("var hits = 0\nfn hit() -> int {\n    hits += 1\n    hits\n}").await?;
 assert_eq!(session.eval("hit() + hit()").await?, Some("3".to_string()));
 # Ok(())
@@ -230,7 +258,7 @@ assert_eq!(session.eval("hit() + hit()").await?, Some("3".to_string()));
 use sandlang::{Config, Engine, Error};
 use std::time::Duration;
 
-let mut engine = Engine::new(Config::new());
+let mut engine = Engine::new(Config::new())?;
 let handle = engine.interrupt_handle();
 std::thread::spawn(move || {
     std::thread::sleep(Duration::from_secs(1));

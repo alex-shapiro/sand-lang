@@ -599,9 +599,3 @@ Int(1)
 --- fail
 parse: unexpected end of input at line 1, column 2
 
-=== reject pub on a struct field
-pub struct Point {
-    pub x: int
-}
---- error
-2: `pub` is not allowed on struct fields; they are public if the struct is

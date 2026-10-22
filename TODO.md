@@ -59,29 +59,31 @@ Follow-up work, roughly in priority order.
 
 ### Embedding
 
-- [ ] Validate all host module declarations in `Engine::new` instead of
-      deferring checks until a script imports the module.
-- [ ] Return a structured type from `SandType::sand_type` instead of Sand
-      source text so `Checker` does not re-parse derived host signatures.
-- [ ] Prefix prelude native functions with `prelude.` so that every native
-      function key starts with its module name and host modules can use prelude
-      type names such as `str`.
 - [ ] Support enum variant payloads in `#[derive(SandEnum)]` so native modules
       such as `json` do not construct variant values by runtime ID.
-- [ ] Check raw native function implementations against their `native fn`
-      declarations at compile time instead of failing with an internal error on
-      argument conversion at runtime.
-- [ ] Bind each opaque `native type` to a Rust `NativeObject` type at
-      registration time so the type checker can verify opaque parameter and
-      return types.
-- [ ] Add struct field visibility and require public fields of public types in
-      native modules to use public types.
+- [ ] Derive Sand structs from Rust structs (`#[derive(SandStruct)]`) so that
+      natives can take and return structs such as `regex.Match` and `uri.Uri`
+      without private tuple-returning natives and Sand wrappers.
+- [ ] Check type parameter bounds (`Eq`, `Ord`, `Hash`) on `native fn`
+      declarations against the Rust function signature.
+- [ ] Reject `json.decode<T>` at compile time if `T` contains a non-decodable
+      type (such as a function or a task), without restricting other `reflect`
+      natives.
+- [ ] Register `json.Json` through `NativeModule` instead of matching its
+      module and type name in `compile/reflect.rs`.
+- [ ] Derive `MODULE`, `NAME`, and `DOC` for `ValueType` as `SandEnum` and
+      `SandObject` do.
+- [ ] Add `#[sand(crate = ...)]` to `SandEnum` and `SandObject` for crates that
+      rename the `sandlang` dependency, and support `#[doc = include_str!(...)]`
+      attributes.
+- [ ] Respect `Config::optimize(false)` when compiling the Sand source of a
+      host module.
+- [ ] Preserve declaration order in `help` output for types bound to Rust types.
 
 ### Tooling
 
 - [ ] Fix broken intra-doc links to private items and run `cargo doc` with
       `-D warnings` in CI.
-
 - [ ] Policy lints judge `http` rules only by their exact text (and
       `bypassable-http-deny`); rules with wildcards in hosts or paths could
       be compared as file rules are. A rule made unnecessary only by several
@@ -89,6 +91,10 @@ Follow-up work, roughly in priority order.
 
 ### Diagnostics
 
+- [ ] Suppress follow-on parser errors after an initial syntax error
+      (`unexpected }` after a missing `,` or `:`, `expected )` after an
+      unterminated string) and remove the follow-on expectations from the spec
+      tests.
 - [ ] Recover at the next `match` arm after an invalid pattern
       (`1..5 =>`, `Rect(..) =>`) instead of reporting a spurious
       `unexpected }` at the end of the `match`.
@@ -99,6 +105,12 @@ Follow-up work, roughly in priority order.
 
 ### Performance
 
+- [ ] Benchmark `HostFn::Static` against `HostFn::Shared` to determine whether
+      avoiding the `Arc` dereference justifies `Box::leak` and the enum
+      dispatch; if not, keep only `Arc`.
+- [ ] Profile `HostFn` dispatch and argument slice construction (`fannkuch` and
+      `results` in `bench/programs`) to reduce the ~0.5 ns typed native call
+      overhead.
 - [ ] Dispatch loop: the cost of individual instructions shifts by up to
       ±15% between builds as LLVM reallocates registers. A threaded design
       (one function per instruction with guaranteed tail calls, Rust's
@@ -122,7 +134,7 @@ Follow-up work, roughly in priority order.
 - [ ] **Construct all types with `T(...)`.** Replace struct literals with
       named-argument calls (`Point(x: 1.0, y: 2.0)`, with defaults and
       `..base`) and struct patterns with `Point(x, ..)`. Allow a type to
-      declare an `init` method (or a native `init` for a native type) that
+      declare an `init` method (or a native `init` for an opaque type) that
       replaces field-by-field construction and can return a `Result`. Inside
       `init`, `Self(...)` performs field-by-field construction. Remove
       module-level constructor functions (`time.date`, `regex.new`,

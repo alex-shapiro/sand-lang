@@ -386,3 +386,19 @@ let v = [1].filter_map(x => if ((x % 8 == 0) or (6 == log.count(y => {
 } else {
     None
 })
+
+=== pub fields and methods keep pub
+pub struct Account {
+  pub   owner:str
+  pub  var balance:int=0
+  var  count:int
+  pub fn describe(self)->str{self.owner}
+}
+--- fmt
+pub struct Account {
+    pub owner: str
+    pub var balance: int = 0
+    var count: int
+
+    pub fn describe(self) -> str { self.owner }
+}

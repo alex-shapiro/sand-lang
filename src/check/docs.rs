@@ -60,7 +60,7 @@ impl Checker {
             .filter(|(_, b)| b.is_pub && b.span.file == info.file && !matches!(b.def, Def::Module(_) | Def::Variant(..)))
             .map(|(&n, &b)| (n, b))
             .collect();
-        items.sort_by_key(|(_, b)| b.span.lo);
+        items.sort_by(|(m, a), (n, b)| (a.span.lo, self.name(*m)).cmp(&(b.span.lo, self.name(*n))));
         items.into_iter().map(|(n, b)| (n, b.def)).collect()
     }
 
@@ -72,7 +72,7 @@ impl Checker {
                 let decl = self.variant_text(d, i as u32);
                 members.push(member_doc(MemberKind::Variant, self.name(v.name), decl, &v.doc));
             }
-            for f in def.fields() {
+            for f in def.fields().iter().filter(|f| f.is_pub) {
                 let var = if f.mutable { "var " } else { "" };
                 let default = f.default.map(|h| format!(" = {}", self.source_text(self.fns[h as usize].span))).unwrap_or_default();
                 let decl = format!("{var}{}: {}{default}", self.name(f.name), self.show(f.ty));

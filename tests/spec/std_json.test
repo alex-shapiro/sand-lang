@@ -381,6 +381,8 @@ let a = json!({1: 2})
 let a = json!({"a": 1 "b": 2})
 --- error
 1: expected `,` or `}`
+1: unexpected `}`
+1: expected expression, found `)`
 
 === json macro calls use parentheses
 let a = json!{"a": 1}

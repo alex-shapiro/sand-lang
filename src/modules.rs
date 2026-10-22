@@ -57,16 +57,16 @@ struct Pending {
     kind: ModKind,
     file: FileId,
     ast: ast::Module,
-    /// Import item index -> module name.
-    imports: Vec<(usize, String)>,
+    /// Imported module names paired with their AST import index (`None` for native signature dependencies).
+    imports: Vec<(Option<usize>, String)>,
 }
 
 impl Pending {
     /// The module for the checker, with its imports resolved by `by_name`
     /// (which has them all), and the ids of the modules it imports.
     fn resolve(self, by_name: &HashMap<String, ModId>, sm: &SourceMap) -> (ParsedModule, Vec<ModId>) {
-        let imports: HashMap<usize, ModId> = self.imports.iter().map(|(item, dep)| (*item, by_name[dep])).collect();
-        let mut deps: Vec<ModId> = imports.values().copied().collect();
+        let imports: HashMap<usize, ModId> = self.imports.iter().filter_map(|(item, dep)| Some(((*item)?, by_name[dep]))).collect();
+        let mut deps: Vec<ModId> = self.imports.iter().map(|(_, dep)| by_name[dep]).collect();
         deps.sort_unstable();
         deps.dedup();
         let source = sm.file(self.file).clone();
@@ -75,11 +75,7 @@ impl Pending {
 }
 
 impl Snapshot {
-    /// Checks and compiles the modules of `registry` (with `only`, just those
-    /// and their imports) that `base`, the standard library's snapshot, does
-    /// not hold. Every standard module must check; a host module that does
-    /// not, or imports one that does not, is left out for the programs that
-    /// import it to compile and report.
+    /// Checks and compiles modules in `registry` that are not already in `base`.
     pub(crate) fn build(registry: &Registry, base: Option<&Snapshot>, only: Option<&[&str]>) -> Result<Snapshot, Error> {
         let (mut sm, mut by_name, mut mods) = match base {
             Some(b) => (b.sm.clone(), b.by_name.clone(), b.mods.clone()),
@@ -90,7 +86,7 @@ impl Snapshot {
         let mut errors = Vec::new();
         let all = registry.sources.keys().map(|k| k.as_ref());
         for name in ["prelude", "task"].into_iter().chain(all).filter(|n| only.is_none_or(|o| o.contains(n))) {
-            load_registered(registry, name, &by_name, &mut sm, &mut pending, &mut errors, &mut Vec::new());
+            load_registered(registry, name, None, &by_name, &mut sm, &mut pending, &mut errors, &mut Vec::new());
         }
         let resolve = |sm: &SourceMap, ds: &[Diag]| Error::Compile(ds.iter().map(|d| sm.resolve(d)).collect());
         if !errors.is_empty() {
@@ -98,48 +94,30 @@ impl Snapshot {
         }
         let mut checker = base.map(|b| b.checker.clone()).unwrap_or_default();
         checker.lint_facts = false;
-        // The standard modules at once (they import only each other).
-        let (std, hosts): (Vec<Pending>, Vec<Pending>) = pending.into_iter().partition(|p| p.kind != ModKind::Host);
-        for (k, p) in std.iter().enumerate() {
+        pending.sort_by_key(|p| p.kind == ModKind::Host);
+        for (k, p) in pending.iter().enumerate() {
             by_name.insert(p.name.clone(), (checker.mods.len() + k) as ModId);
         }
         let mut parsed = Vec::new();
-        for p in std {
+        for p in pending {
             let (m, deps) = p.resolve(&by_name, &sm);
             mods.push(SnapModule { deps, init: None });
             parsed.push(m);
         }
         let budget = Arc::new(CompileBudget::default());
-        checker.check_modules(&parsed, &registry.by_name, &budget).map_err(|ds| resolve(&sm, &ds))?;
-        // Host modules one at a time, each on a copy of the checker.
-        for p in hosts {
-            if p.imports.iter().any(|(_, dep)| !by_name.contains_key(dep)) {
-                // It imports a module that was left out.
-                continue;
-            }
-            let (id, name) = (checker.mods.len() as ModId, p.name.clone());
-            let (m, deps) = p.resolve(&by_name, &sm);
-            let mut attempt = checker.clone();
-            if attempt.check_modules(std::slice::from_ref(&m), &registry.by_name, &budget).is_ok() {
-                checker = attempt;
-                by_name.insert(name, id);
-                mods.push(SnapModule { deps, init: None });
-            }
-        }
+        checker.check_modules(&parsed, &registry.decls, &budget).map_err(|ds| resolve(&sm, &ds))?;
         for (m, info) in mods.iter_mut().zip(checker.mods.iter()) {
             m.init = info.init;
         }
         checker.module_index = registry
             .sources
             .iter()
-            .filter(|(name, (kind, _))| *name != "prelude" && (*kind != ModKind::Host || by_name.contains_key(name.as_ref())))
-            .map(|(name, (_, src))| (name.to_string(), crate::check::help::module_summary(src)))
+            .filter(|(name, _)| *name != "prelude")
+            .map(|(name, src)| (name.to_string(), crate::check::help::module_summary(&src.text)))
             .collect();
         let mut exports = HashMap::new();
-        for (module, src) in
-            registry.sources.iter().filter(|(name, (kind, _))| *name != "prelude" && *kind == ModKind::Std).map(|(n, (_, s))| (n, s))
-        {
-            for name in crate::check::help::public_functions(src) {
+        for (module, src) in registry.sources.iter().filter(|(name, src)| *name != "prelude" && src.kind == ModKind::Std) {
+            for name in crate::check::help::public_functions(&src.text) {
                 exports.entry(name).or_insert_with(|| module.to_string());
             }
         }
@@ -150,7 +128,7 @@ impl Snapshot {
         let input = CompileInput {
             checked: &cp,
             sm: &sm,
-            natives: &registry.by_name,
+            natives: &registry.decls,
             native_info: native_info(&cp, registry),
             budget: &budget,
             initialized: None,
@@ -174,11 +152,12 @@ impl Snapshot {
     }
 }
 
-/// Loads the registered module `name` and, first, those it imports (that
-/// are not in `loaded` or `pending` yet). Returns whether it was loaded.
+/// Parses registered module `name` and its dependencies into `pending` in topological order.
+#[allow(clippy::too_many_arguments)]
 fn load_registered(
     registry: &Registry,
     name: &str,
+    at: Option<Span>,
     loaded: &HashMap<String, ModId>,
     sm: &mut SourceMap,
     pending: &mut Vec<Pending>,
@@ -188,45 +167,49 @@ fn load_registered(
     if loaded.contains_key(name) || pending.iter().any(|p| p.name == name) {
         return true;
     }
-    let Some((kind, src)) = registry.sources.get(name) else { return false };
-    if path.iter().any(|p| p == name) {
-        // An import cycle: the module cannot be checked.
+    let Some(src) = registry.sources.get(name) else { return false };
+    if let Some(i) = path.iter().position(|p| p == name) {
+        if let Some(at) = at {
+            let cycle = path[i..].iter().map(String::as_str).chain([name]).collect::<Vec<_>>().join(" → ");
+            errors.push(Diag::error(at, format!("import cycle: {cycle}")));
+        }
         return false;
     }
-    let file = sm.add(format!("<{name}>"), src.as_ref());
-    let res = crate::syntax::parse_module(src, file);
-    let mut ok = res.errors.is_empty();
-    if !ok && *kind != ModKind::Host {
-        errors.extend(res.errors);
-    }
+    let file = sm.add(format!("<{name}>"), src.text.as_ref());
+    let res = crate::syntax::parse_module(&src.text, file);
+    errors.extend(res.errors);
     let mut imports = Vec::new();
     path.push(name.to_string());
     for (item, imp) in import_refs(&res.module) {
         match imp {
             ImportRef::Name(dep, span) => {
-                if load_registered(registry, &dep, loaded, sm, pending, errors, path) {
-                    imports.push((item, dep));
-                } else {
-                    ok = false;
-                    if *kind != ModKind::Host {
-                        errors.push(Diag::error(span, format!("unknown module `{dep}`")));
-                    }
+                if !registry.sources.contains_key(dep.as_str()) {
+                    errors.push(Diag::error(span, unknown_module(&dep)));
+                } else if load_registered(registry, &dep, Some(span), loaded, sm, pending, errors, path) {
+                    imports.push((Some(item), dep));
                 }
             }
             ImportRef::Implicit(..) => unreachable!("not an import declaration"),
-            ImportRef::Path(_, span) => {
-                ok = false;
-                if *kind != ModKind::Host {
-                    errors.push(Diag::error(span, "native modules cannot import script files"));
-                }
-            }
+            ImportRef::Path(_, span) => errors.push(Diag::error(span, "native modules cannot import script files")),
+        }
+    }
+    let start = Span::new(file, 0, 0);
+    for &dep in &src.deps {
+        if load_registered(registry, dep, Some(start), loaded, sm, pending, errors, path) {
+            imports.push((None, dep.to_string()));
         }
     }
     path.pop();
-    if ok || *kind != ModKind::Host {
-        pending.push(Pending { name: name.to_string(), kind: *kind, file, ast: res.module, imports });
+    pending.push(Pending { name: name.to_string(), kind: src.kind, file, ast: res.module, imports });
+    true
+}
+
+pub(crate) fn unknown_module(name: &str) -> String {
+    if crate::stdlib::OS_MODULES.contains(&name) {
+        format!("module `{name}` is not available: this build of Sand has no operating-system access")
+    } else {
+        format!("unknown module `{name}`")
     }
-    ok || *kind != ModKind::Host
 }
 
 #[derive(Clone, Debug)]
@@ -330,8 +313,7 @@ pub(crate) fn scan_imports(text: &str, file: FileId) -> Vec<ImportRef> {
     out
 }
 
-/// A module loaded by a compilation (or a REPL session): a script, or a
-/// host module that is not in the snapshot.
+/// A script module or uncached standard module loaded into a [`ModuleGraph`].
 pub(crate) struct LoadedModule {
     pub name: String,
     pub file: FileId,
@@ -554,12 +536,11 @@ pub(crate) fn budget_error(stop: Stop, sm: &SourceMap, main_file: u32) -> Error 
 pub(crate) struct NativeInfo {
     pub names: Vec<String>,
     pub argc: Vec<u16>,
-    pub returns_result: Vec<bool>,
 }
 
 pub(crate) fn native_info(checked: &crate::check::CheckedProgram, registry: &Registry) -> NativeInfo {
     let n = registry.natives.len();
-    let mut info = NativeInfo { names: vec![String::new(); n], argc: vec![0; n], returns_result: vec![false; n] };
+    let mut info = NativeInfo { names: vec![String::new(); n], argc: vec![0; n] };
     for f in &checked.fns {
         if let crate::check::FnKind::Native(n) = f.kind
             && (n as usize) < info.names.len()
@@ -569,7 +550,6 @@ pub(crate) fn native_info(checked: &crate::check::CheckedProgram, registry: &Reg
             let reflect = f.generics.iter().filter(|g| checked.params[**g as usize].reflect).count();
             // A native implementing a trait method also receives its impl's dictionary.
             info.argc[n] = (f.dicts.len() + f.params.len() + reflect) as u16;
-            info.returns_result[n] = matches!(checked.arena.get(f.ret), crate::types::Ty::Named(d, _) if d == checked.wk.result);
         }
     }
     info

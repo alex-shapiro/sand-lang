@@ -31,8 +31,6 @@ pub enum ItemKind {
     Trait(TraitDecl),
     Impl(ImplDecl),
     TypeAlias(TypeAlias),
-    /// `native type Name<T>`: an opaque type implemented by a native module.
-    NativeType(NativeTypeDecl),
     Test(TestDecl),
     Stmt(Stmt),
 }
@@ -111,6 +109,7 @@ pub struct FieldDecl {
     pub ty: TypeExpr,
     pub default: Option<Expr>,
     pub mutable: bool,
+    pub is_pub: bool,
     pub doc: Option<String>,
     pub span: Span,
 }
@@ -185,14 +184,6 @@ pub struct TypeAlias {
     pub name: Ident,
     pub generics: Vec<GenericParam>,
     pub ty: TypeExpr,
-    pub is_pub: bool,
-    pub doc: Option<String>,
-}
-
-#[derive(Clone, Debug)]
-pub struct NativeTypeDecl {
-    pub name: Ident,
-    pub generics: Vec<GenericParam>,
     pub is_pub: bool,
     pub doc: Option<String>,
 }

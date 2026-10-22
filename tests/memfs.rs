@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 fn run(config: Config, source: &str) -> (Result<sandlang::Outcome, Error>, String) {
     let out = MemorySink::new();
-    let mut engine = Engine::new(config.stdout(out.clone()));
+    let mut engine = Engine::new(config.stdout(out.clone())).unwrap();
     let r = rt().block_on(engine.run_source("main.sand", source));
     (r, out.contents())
 }
@@ -80,13 +80,43 @@ print(fs.exists("/out2")?)
 }
 
 #[test]
+fn removing_a_tree_asks_before_it_removes_anything() {
+    for (answer, removed) in [(PromptAnswer::DenyOnce, false), (PromptAnswer::AllowOnce, true)] {
+        let fs = MemFs::new();
+        for name in ["a", "b", "c"] {
+            fs.write(format!("/t/{name}.txt"), name).unwrap();
+        }
+        // The removal walk reaches `c.txt` before `b.txt`, which needs a prompt.
+        let prompted = Capability::FsWrite(PathBuf::from("/t/b.txt"));
+        let policy = {
+            let prompted = prompted.clone();
+            Policy::custom(move |cap: &Capability| if *cap == prompted { Decision::Prompt } else { Decision::Allow })
+        };
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let log = asked.clone();
+        let prompter = move |cap: Capability| {
+            log.lock().unwrap().push(cap);
+            async move { answer }
+        };
+        let config = Config::new().policy(policy).prompter(prompter).memory_fs(fs.clone());
+        let (r, out) = run(config, "import fs\nprint(fs.remove_dir(\"/t\", recursive: true).is_ok())");
+        r.unwrap();
+        assert_eq!(out, format!("{removed}\n"));
+        assert_eq!(*asked.lock().unwrap(), [prompted]);
+        for name in ["a", "b", "c"] {
+            assert_eq!(fs.read(format!("/t/{name}.txt")).is_err(), removed, "{name}.txt");
+        }
+    }
+}
+
+#[test]
 fn imports_and_main_files_come_from_the_memory_file_system() {
     let fs = MemFs::new();
     fs.write("/app/main.sand", "import \"lib/util\"\nprint(util.twice(21))\n").unwrap();
     fs.write("/app/lib/util.sand", "import \"helper\"\npub fn twice(x: int) -> int { helper.add(x, x) }\n").unwrap();
     fs.write("/app/lib/helper.sand", "pub fn add(a: int, b: int) -> int { a + b }\n").unwrap();
     let out = MemorySink::new();
-    let mut engine = Engine::new(Config::new().memory_fs(fs.clone()).stdout(out.clone()));
+    let mut engine = Engine::new(Config::new().memory_fs(fs.clone()).stdout(out.clone())).unwrap();
     rt().block_on(engine.run_file("/app/main.sand")).unwrap();
     assert_eq!(out.contents(), "42\n");
     engine.check_file("/app/main.sand").unwrap();
@@ -99,7 +129,7 @@ fn imports_and_main_files_come_from_the_memory_file_system() {
     }
     // `allow import` restricts them further.
     let rules = RulePolicy::new().allow_import("/app/lib");
-    let mut engine = Engine::new(Config::new().policy(Policy::rules(rules)).memory_fs(fs.clone()).stdout(MemorySink::new()));
+    let mut engine = Engine::new(Config::new().policy(Policy::rules(rules)).memory_fs(fs.clone()).stdout(MemorySink::new())).unwrap();
     rt().block_on(engine.run_file("/app/main.sand")).unwrap();
     fs.write("/app/other.sand", "pub fn f() -> int { 1 }\n").unwrap();
     match rt().block_on(engine.run_source("main.sand", "import \"other\"\nprint(other.f())")) {
@@ -163,7 +193,7 @@ fn engines_can_share_a_file_system() {
 fn checks_and_lints_see_the_memory_file_system() {
     let fs = MemFs::new();
     fs.write("/lib.sand", "pub fn f() -> int { 1 }\n").unwrap();
-    let engine = Engine::new(Config::new().memory_fs(fs));
+    let engine = Engine::new(Config::new().memory_fs(fs)).unwrap();
     engine.check_source("main.sand", "import \"lib\"\nprint(lib.f())").unwrap();
     match engine.check_source("main.sand", "import \"missing\"") {
         Err(Error::Compile(d)) => assert!(d[0].message.contains("cannot load module `missing`"), "{d:?}"),

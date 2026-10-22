@@ -1,9 +1,11 @@
 //! The `test` module (written in Sand, except `fail`).
 
 use crate::check::ModKind;
-use crate::engine::Registry;
+use crate::native::{NativeModule, Never};
+use crate::vm::Ctl;
 
-pub fn register(r: &mut Registry) {
-    r.source("test", ModKind::Std, include_str!("test.sand"));
-    r.add_builtin("test.fail", |vm, a| crate::vm::fail("assert", vm.str(a[0])));
+pub(crate) fn module() -> NativeModule {
+    let mut m = NativeModule::std("test", ModKind::Std, include_str!("test.sand"));
+    m.function("fail", |msg: &str| -> Result<Never, Ctl> { crate::vm::fail("assert", msg) });
+    m
 }
