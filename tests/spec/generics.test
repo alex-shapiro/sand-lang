@@ -209,3 +209,14 @@ print(Tree.Leaf("a") < Tree.Leaf("b"))
 --- stdout
 tree
 true
+
+=== a bound error names the part of the type that does not satisfy it
+struct Row { var n: int }
+struct Wrap<T> { items: [T] }
+fn keys<T>(w: Wrap<T>) -> Set<Wrap<T>> {
+    set([w])
+}
+let s = set([Row { n: 1 }])
+--- error
+4: Wrap<T> does not satisfy Hash because the elements of `[T]` have type `T`; add a bound `T: Hash`
+6: Row does not satisfy Hash because field `n` of `Row` is mutable

@@ -491,6 +491,9 @@ pub enum Bound {
     Ord,
     Hash,
     Num,
+    /// Values that `json.encode` can represent: all but functions, tasks,
+    /// channels, and native objects.
+    Encode,
     /// Supports `+`: numbers, durations, strings, bytes and lists. Not
     /// written in source: the checker requires it of the operands of `+`
     /// whose type is not known yet (`(a, b) => a + b`).
@@ -504,6 +507,7 @@ impl Bound {
             "Ord" => Bound::Ord,
             "Hash" => Bound::Hash,
             "Num" => Bound::Num,
+            "Encode" => Bound::Encode,
             _ => return None,
         })
     }
@@ -513,6 +517,7 @@ impl Bound {
             Bound::Ord => "Ord",
             Bound::Hash => "Hash",
             Bound::Num => "Num",
+            Bound::Encode => "Encode",
             Bound::Add => "Add",
         }
     }
@@ -547,7 +552,7 @@ impl ParamInfo {
         self.bounds.iter().any(|&x| {
             x == b
                 || (b == Bound::Eq && matches!(x, Bound::Ord | Bound::Hash | Bound::Num))
-                || (matches!(b, Bound::Ord | Bound::Add) && x == Bound::Num)
+                || (matches!(b, Bound::Ord | Bound::Add | Bound::Encode) && x == Bound::Num)
         })
     }
 }
@@ -577,11 +582,14 @@ pub enum ConstVal {
     EmptyList,
     EmptyMap,
     None,
+    /// A payload-less enum variant, by its runtime variant id.
+    Tag(u32),
 }
 
 impl ConstVal {
-    /// The Sand source text of the value.
-    pub fn sand_text(&self) -> String {
+    /// The Sand source text of the value; `variant` names a variant by its
+    /// runtime id.
+    pub fn sand_text(&self, variant: &dyn Fn(u32) -> String) -> String {
         match self {
             ConstVal::Unit => "()".into(),
             ConstVal::Bool(b) => b.to_string(),
@@ -596,6 +604,7 @@ impl ConstVal {
             ConstVal::EmptyList => "[]".into(),
             ConstVal::EmptyMap => "[:]".into(),
             ConstVal::None => "None".into(),
+            ConstVal::Tag(id) => variant(*id),
         }
     }
 }

@@ -2059,14 +2059,7 @@ impl<'a> Compiler<'a> {
                 }
                 f.next_reg = mark;
             }
-            HKind::CallNative { native, args, reflect, checks } => {
-                for &(t, check) in checks {
-                    match self.descs.validate(self.cp, &mut self.arena, t, check) {
-                        Ok(()) => {}
-                        Err(Some(msg)) => self.errors.push(Diag::error(e.span, msg)),
-                        Err(None) => self.errors.push(Diag::error(e.span, "type too large to check")),
-                    }
-                }
+            HKind::CallNative { native, args, reflect } => {
                 if let (Some(&op @ (Inline::MapGet | Inline::MapHas)), [HArg::Expr(m), HArg::Expr(k)]) =
                     (self.inline.get(native), args.as_slice())
                     && let HKind::Tuple(items) = &k.kind

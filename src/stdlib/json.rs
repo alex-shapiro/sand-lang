@@ -9,7 +9,7 @@
 
 use super::base64;
 use crate::check::ModKind;
-use crate::native::bound::Checked;
+use crate::native::bound::Encode;
 use crate::native::{HostError, NamedType, NativeModule, Param, Reflect, ReflectCheck, TypeNames, Val, variant_index};
 use crate::syntax::lexer::is_ident;
 use crate::types::ConstVal;
@@ -82,27 +82,14 @@ impl JsonIds {
     }
 }
 
+/// The rules of `decode` beyond its `T: Encode` bound.
 struct Decodable;
 
 impl ReflectCheck for Decodable {
     fn check(node: &TypeDesc, names: &TypeNames) -> Result<(), String> {
         match node {
-            TypeDesc::Unsupported(name) => Err(format!("`json.decode` cannot decode values of type `{name}`")),
             TypeDesc::Range => Err("`json.decode` cannot decode values of type `Range`".into()),
             TypeDesc::Map(k, _) if !is_map_key(k) => Err(format!("`json.decode` cannot decode map keys of type `{}`", names.format(k))),
-            _ => Ok(()),
-        }
-    }
-}
-
-/// Accepts the types whose values `encode` and `to_json` convert: all but
-/// functions, tasks, channels, and native objects.
-struct Encodable;
-
-impl ReflectCheck for Encodable {
-    fn check(node: &TypeDesc, _: &TypeNames) -> Result<(), String> {
-        match node {
-            TypeDesc::Unsupported(name) => Err(format!("JSON cannot represent values of type `{name}`")),
             _ => Ok(()),
         }
     }
@@ -131,7 +118,7 @@ pub(crate) fn module() -> NativeModule {
         });
         into_result(r)
     });
-    m.vm_function("encode", |vm: &mut Vm, value: Param<0, Checked<Encodable>>, indent: i64| -> Result<Val<String>, Ctl> {
+    m.vm_function("encode", |vm: &mut Vm, value: Param<0, Encode>, indent: i64| -> Result<Val<String>, Ctl> {
         let ids = JsonIds::of(&vm.prog)?;
         let indent = indent.clamp(0, 1 << 16) as usize;
         let mut e = Encoder {
@@ -178,7 +165,7 @@ pub(crate) fn module() -> NativeModule {
         }
         into_result(r)
     });
-    m.vm_function("to_json", |vm: &mut Vm, value: Param<0, Checked<Encodable>>| -> Result<Val<Json>, Ctl> {
+    m.vm_function("to_json", |vm: &mut Vm, value: Param<0, Encode>| -> Result<Val<Json>, Ctl> {
         let ids = JsonIds::of(&vm.prog)?;
         let (prog, meter) = (&vm.prog, &vm.meter);
         let v = vm.heap.staged(|heap, st| {
@@ -1019,7 +1006,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                 }
             }
             TypeDesc::Range => Err(self.unsupported("values of type Range")),
-            TypeDesc::Unsupported(name) | TypeDesc::Param(name) => Err(self.unsupported(&format!("values of type {name}"))),
+            TypeDesc::Unsupported(name) => Err(self.unsupported(&format!("values of type {name}"))),
         }
     }
 
@@ -1164,6 +1151,7 @@ fn const_value(st: &mut Staging, none: u32, c: &ConstVal) -> Value {
         ConstVal::EmptyList => st.new_list(Vec::new()),
         ConstVal::EmptyMap => st.alloc(Obj::Map(Box::default())),
         ConstVal::None => Value::Tag(none),
+        ConstVal::Tag(id) => Value::Tag(*id),
     }
 }
 

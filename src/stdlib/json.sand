@@ -101,22 +101,18 @@ pub native fn parse(text: str) -> Result<Json>
 
 /// Serializes `value` as JSON text (compact if `indent == 0`, or pretty-printed
 /// with `indent` spaces per level). Finite floats include a decimal point or
-/// exponent (`2.0`), and `NaN` or infinite floats serialize as `null`. The
-/// compiler rejects a `T` that contains a function, task, channel, or native
-/// object. If a type parameter of the caller hides such a value, `encode`
-/// aborts.
-pub native fn encode<T>(value: T, indent: int = 0) -> str
+/// exponent (`2.0`), and `NaN` or infinite floats serialize as `null`.
+pub native fn encode<T: Encode>(value: T, indent: int = 0) -> str
 
 /// Parses `text` and converts it into type `T`. Missing struct fields use their
 /// declared default or `None`; type mismatches fail with kind `"parse"` and a
 /// JSON path diagnostic. The compiler rejects types that contain functions,
 /// tasks, channels, ranges, native objects, or unsupported map keys.
-pub native fn decode<reflect T>(text: str) -> Result<T>
+pub native fn decode<reflect T: Encode>(text: str) -> Result<T>
 
 /// Converts `value` into a `Json` value: primitives map directly, `()` and
 /// `None` map to `Null`, `Some(x)` maps to `x`, lists, sets, and tuples map to
 /// `Arr`, `[str: V]` maps and structs map to `Obj`, unit enum variants map to
 /// `Str`, payload variants map to `{"Variant": payload}`, `bytes` maps to
-/// Base64, and `duration` maps to nanoseconds. Rejects the same types as
-/// `encode`.
-pub native fn to_json<T>(value: T) -> Json
+/// Base64, and `duration` maps to nanoseconds.
+pub native fn to_json<T: Encode>(value: T) -> Json

@@ -1100,9 +1100,8 @@ impl Checker {
             self.error(span, msg);
             return err(span);
         }
-        let checked = matches!(self.fns[f as usize].kind, FnKind::Native(n) if !self.checked_params(n).is_empty());
-        if !self.fns[f as usize].dicts.is_empty() || checked {
-            // Partially apply the dictionaries; a wrapper also checks the type arguments.
+        if !self.fns[f as usize].dicts.is_empty() {
+            // Partially apply the dictionaries.
             return self.wrapper_value(f, &[], span);
         }
         let inst = self.instantiate_fn_with(f, span, &[]);
@@ -1539,34 +1538,10 @@ impl Checker {
                         self.fs.reflect_checks.push((t, span));
                     }
                 }
-                let checks = self.native_checks(n, &fresh);
-                mk(HKind::CallNative { native: n, args: hargs, reflect, checks }, ret, span)
+                mk(HKind::CallNative { native: n, args: hargs, reflect }, ret, span)
             }
             _ => mk(HKind::Call { func: f, args: hargs }, ret, span),
         }
-    }
-
-    /// The type parameters (by index) that native `n` validates with
-    /// `bound::Checked`, with their checks.
-    fn checked_params(&self, n: u32) -> Vec<(u8, crate::native::ReflectCheckFn)> {
-        let mut out: Vec<(u8, crate::native::ReflectCheckFn)> = Vec::new();
-        let Some(decl) = self.natives.fns.get(n as usize) else { return out };
-        for t in decl.sig.params.iter().chain([&decl.sig.ret]) {
-            t.visit(&mut |t| {
-                if let crate::native::Type::Param(i, _, Some(c)) = *t
-                    && !out.iter().any(|&(j, d)| j == i && std::ptr::fn_addr_eq(d, c))
-                {
-                    out.push((i, c));
-                }
-            });
-        }
-        out
-    }
-
-    /// The type arguments (of an instance of native `n` with type arguments
-    /// `targs`) to validate, with their checks.
-    pub(crate) fn native_checks(&self, n: u32, targs: &[TypeId]) -> Vec<(TypeId, crate::native::ReflectCheckFn)> {
-        self.checked_params(n).into_iter().filter_map(|(i, c)| Some((*targs.get(i as usize)?, c))).collect()
     }
 
     /// The expression of constant `c`, of type `ty`.
@@ -1581,6 +1556,7 @@ impl Checker {
             ConstVal::EmptyList => HKind::List(Vec::new()),
             ConstVal::EmptyMap => HKind::Map(Vec::new()),
             ConstVal::None => HKind::Tag(self.none_rt()),
+            ConstVal::Tag(id) => HKind::Tag(*id),
         };
         mk(kind, ty, span)
     }

@@ -29,7 +29,8 @@ use syn::{
 /// payload-less variants, tuple variants to positional payloads, and variants
 /// with named fields to named payloads. Each payload type must implement
 /// `IntoValue` and owned `FromValue`. The type parameters of a generic enum
-/// become Sand type parameters.
+/// become Sand type parameters. A payload-less variant is a `ConstValue`, so
+/// it can be the default of a `SandStruct` field.
 #[proc_macro_derive(SandEnum, attributes(sand))]
 pub fn derive_sand_enum(input: TokenStream) -> TokenStream {
     expand(input, sand_enum)
@@ -378,6 +379,12 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
                 match self {
                     #(#writes),*
                 }
+            }
+        }
+
+        impl #imp #krate::native::ConstValue for #ty #tyg #wh {
+            fn to_const(&self) -> ::std::option::Option<#krate::native::Constant> {
+                #krate::native::variant_const(self)
             }
         }
     })

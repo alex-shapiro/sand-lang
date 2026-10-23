@@ -72,7 +72,8 @@ impl<T: StructType> Binding<T> {
     pub fn of_struct() -> Binding<T> {
         let defaults = T::FIELDS.iter().map(|f| f.default.map(|d| d())).collect::<Vec<_>>();
         for (f, d) in T::FIELDS.iter().zip(&defaults) {
-            assert!(!matches!(d, Some(None)), "the default of field `{}` of `{}` is not a Sand constant", f.name, T::NAME);
+            let constant = !matches!(d, Some(None | Some(Constant::Value(ConstVal::Tag(_)))));
+            assert!(constant, "the default of field `{}` of `{}` is not a Sand constant", f.name, T::NAME);
         }
         let defaults = defaults.into_iter().map(Option::flatten).collect();
         Binding(BoundKind::Struct { rust: T::rust_type(), params: T::PARAMS, fields: T::FIELDS, defaults }, PhantomData)
@@ -192,24 +193,42 @@ pub struct StructField {
     pub ty: fn() -> Type,
     /// Returns the default value of the field (`#[sand(default)]`), or
     /// `None` if the value is not a Sand constant.
-    pub default: Option<fn() -> Option<ConstVal>>,
+    pub default: Option<fn() -> Option<Constant>>,
+}
+
+/// A Sand constant made from a Rust value (see [`ConstValue`]).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Constant {
+    /// A constant that every program represents alike (never a
+    /// [`ConstVal::Tag`]).
+    Value(ConstVal),
+    /// The payload-less variant `index` of the Rust-bound enum whose
+    /// [`NamedType::rust_type`] is `rust`.
+    Variant { rust: TypeId, index: usize },
 }
 
 /// A Rust value that is also a Sand constant, as the default of a struct field
-/// must be: a number, `bool`, `()`, string, duration, empty list or map, or
-/// `None`.
+/// must be: a number, `bool`, `()`, string, duration, empty list or map,
+/// `None`, or a payload-less variant of a [`SandEnum`](crate::SandEnum) (which
+/// derives this trait).
 pub trait ConstValue {
     /// Returns `self` as a Sand constant, or `None` if no Sand constant equals
     /// `self` (such as a non-empty list).
-    fn to_const(&self) -> Option<ConstVal>;
+    fn to_const(&self) -> Option<Constant>;
+}
+
+#[doc(hidden)]
+pub fn variant_const<T: EnumType>(x: &T) -> Option<Constant> {
+    let index = x.index();
+    T::VARIANTS[index].fields.is_empty().then(|| Constant::Variant { rust: T::rust_type(), index })
 }
 
 macro_rules! const_value {
     ($($t:ty: $x:ident => $e:expr),* $(,)?) => {$(
         impl ConstValue for $t {
-            fn to_const(&self) -> Option<ConstVal> {
+            fn to_const(&self) -> Option<Constant> {
                 let $x = self;
-                Some($e)
+                Some(Constant::Value($e))
             }
         }
     )*};
@@ -225,43 +244,43 @@ const_value! {
 }
 
 impl ConstValue for jiff::SignedDuration {
-    fn to_const(&self) -> Option<ConstVal> {
-        i64::try_from(self.as_nanos()).ok().map(ConstVal::Dur)
+    fn to_const(&self) -> Option<Constant> {
+        i64::try_from(self.as_nanos()).ok().map(|d| Constant::Value(ConstVal::Dur(d)))
     }
 }
 
 impl<T> ConstValue for Vec<T> {
-    fn to_const(&self) -> Option<ConstVal> {
-        self.is_empty().then_some(ConstVal::EmptyList)
+    fn to_const(&self) -> Option<Constant> {
+        self.is_empty().then_some(Constant::Value(ConstVal::EmptyList))
     }
 }
 
 impl<K, V> ConstValue for std::collections::HashMap<K, V> {
-    fn to_const(&self) -> Option<ConstVal> {
-        self.is_empty().then_some(ConstVal::EmptyMap)
+    fn to_const(&self) -> Option<Constant> {
+        self.is_empty().then_some(Constant::Value(ConstVal::EmptyMap))
     }
 }
 
 impl<K, V> ConstValue for indexmap::IndexMap<K, V> {
-    fn to_const(&self) -> Option<ConstVal> {
-        self.is_empty().then_some(ConstVal::EmptyMap)
+    fn to_const(&self) -> Option<Constant> {
+        self.is_empty().then_some(Constant::Value(ConstVal::EmptyMap))
     }
 }
 
 impl<K, V> ConstValue for std::collections::BTreeMap<K, V> {
-    fn to_const(&self) -> Option<ConstVal> {
-        self.is_empty().then_some(ConstVal::EmptyMap)
+    fn to_const(&self) -> Option<Constant> {
+        self.is_empty().then_some(Constant::Value(ConstVal::EmptyMap))
     }
 }
 
 impl<T> ConstValue for Option<T> {
-    fn to_const(&self) -> Option<ConstVal> {
-        self.is_none().then_some(ConstVal::None)
+    fn to_const(&self) -> Option<Constant> {
+        self.is_none().then_some(Constant::Value(ConstVal::None))
     }
 }
 
 impl<T: ConstValue> ConstValue for Box<T> {
-    fn to_const(&self) -> Option<ConstVal> {
+    fn to_const(&self) -> Option<Constant> {
         (**self).to_const()
     }
 }
@@ -758,7 +777,7 @@ pub(crate) enum BoundKind {
         params: &'static [&'static str],
         fields: &'static [StructField],
         /// The default of each field.
-        defaults: Arc<[Option<ConstVal>]>,
+        defaults: Arc<[Option<Constant>]>,
     },
     /// A VM-implemented generic type (`Task<T>` or `Channel<T>`), with its type parameter names.
     Builtin(&'static [&'static str]),

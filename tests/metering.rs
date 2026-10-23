@@ -687,7 +687,7 @@ fn host_function_arguments_count_against_the_memory_limit() {
 
 #[test]
 fn json_encode_charges_for_nested_options() {
-    let src = "import json\nfn deep<T>(x: T, n: int) -> int {\n    if n == 0 {\n        let xs = (0..100000).map(_ => x)\n        return json.encode(xs).len()\n    }\n    deep(Some(x), n - 1)\n}\nprint(deep(1, 2000))";
+    let src = "import json\nfn deep<T: Encode>(x: T, n: int) -> int {\n    if n == 0 {\n        let xs = (0..100000).map(_ => x)\n        return json.encode(xs).len()\n    }\n    deep(Some(x), n - 1)\n}\nprint(deep(1, 2000))";
     expect_stop(limits(|l| l.max_instructions = Some(2_000_000)), src, is_limit(LimitKind::Instructions), Duration::from_secs(30));
 }
 

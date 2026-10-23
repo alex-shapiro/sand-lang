@@ -301,7 +301,7 @@ fn greet(name: str, greeting: str = "Hello") {
 - The body is a block whose value is returned. In a function returning `()`,
   the value of the final expression is discarded.
 - Type parameters are listed in `<...>` with optional bounds `T: Ord + Hash`.
-  Bounds are the built-in bounds `Eq`, `Ord`, `Hash` and `Num` (§5.6) and
+  Bounds are the built-in bounds `Eq`, `Ord`, `Hash`, `Num` and `Encode` (§5.6) and
   traits (§4.9), possibly module-qualified or with type arguments:
   `T: Ord + Describe`, `T: geo.Shape`, `T: Into<str>`. Bounds may also be
   given in a trailing `where` clause (`fn sum(self) -> T where T: Num`), which
@@ -430,7 +430,7 @@ type at the call site. The Rust function can also validate `T` at compile time
 (§16.3).
 
 Each type parameter on a `native fn` declaration must declare the built-in
-bounds (`Eq`, `Ord`, `Hash`) required by the Rust function (§16.3).
+bounds required by the Rust function (§16.3).
 
 Native modules register Rust-bound opaque types (§5.4), enums, and structs
 directly from Rust rather than declaring them in Sand source.
@@ -512,8 +512,8 @@ fn show_all<T>(xs: [T]) -> str where T: Describe { xs.describe() }
 - **Supertraits** follow a `:` and may be traits or built-in bounds:
   `trait Shape: Describe + Eq`. A bound `T: Shape` implies `T: Describe` and
   `T: Eq`. A trait may not be its own supertrait, directly or indirectly.
-- Traits share the namespace of types. `Eq`, `Ord`, `Hash` and `Num` cannot
-  be redefined.
+- Traits share the namespace of types. The built-in bounds cannot be
+  redefined.
 
 **Impls.** `impl<P...> Trait<Args> for Type where ... { methods }`
 implements a trait for a type.
@@ -673,14 +673,16 @@ error. Use `x.to_float()` or `f.to_int()`.
 
 ### 5.6 Bounds
 
-| Bound  | Satisfied by                                                                                                                                                                       |
-| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Eq`   | every type except function types (and types containing them)                                                                                                                       |
-| `Ord`  | `int`, `float`, `bool`, `str`, `bytes`, `duration`, `()`, ordered value types (§5.4), and tuples, lists, `Option`, structs and enums all of whose components are `Ord`             |
-| `Hash` | `int`, `bool`, `str`, `bytes`, `duration`, `()`, value types (§5.4), and tuples, `Option`, `Result`, enums and structs **without `var` fields** all of whose components are `Hash` |
-| `Num`  | `int`, `float`                                                                                                                                                                     |
+| Bound    | Satisfied by                                                                                                                                                                       |
+| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Eq`     | every type except function types (and types containing them)                                                                                                                       |
+| `Ord`    | `int`, `float`, `bool`, `str`, `bytes`, `duration`, `()`, ordered value types (§5.4), and tuples, lists, `Option`, structs and enums all of whose components are `Ord`             |
+| `Hash`   | `int`, `bool`, `str`, `bytes`, `duration`, `()`, value types (§5.4), and tuples, `Option`, `Result`, enums and structs **without `var` fields** all of whose components are `Hash` |
+| `Num`    | `int`, `float`                                                                                                                                                                     |
+| `Encode` | every type except function types, `Task`, `Channel`, native objects (§5.4), and types containing them                                                                              |
 
-Map keys and set elements must be `Hash`. Built-in bounds are satisfied
+Map keys and set elements must be `Hash`. `Num` implies `Eq`, `Ord` and
+`Encode`, and `Ord` and `Hash` imply `Eq`. Built-in bounds are satisfied
 structurally and cannot be implemented. Traits (§4.9) are user-defined bounds;
 a trait whose supertraits include a built-in bound implies it.
 
@@ -2019,9 +2021,9 @@ pending, then waits; the run's limits and interrupts apply while it waits.
 ```sand
 pub enum Json { Null, Bool(bool), Int(int), Float(float), Str(str), Arr([Json]), Obj([str: Json]) }
 pub native fn parse(text: str) -> Result<Json>
-pub native fn encode<T>(value: T, indent: int = 0) -> str
-pub native fn decode<reflect T>(text: str) -> Result<T>
-pub native fn to_json<T>(value: T) -> Json
+pub native fn encode<T: Encode>(value: T, indent: int = 0) -> str
+pub native fn decode<reflect T: Encode>(text: str) -> Result<T>
+pub native fn to_json<T: Encode>(value: T) -> Json
 ```
 
 `parse` reads a number written without a fraction or exponent that fits in an
@@ -2049,18 +2051,14 @@ name, `None` → `null`, `Some(x)` → `x`; other enums: a payload-less variant
 payloads); `bytes` → base64 string; `duration` → nanoseconds; value types
 (§5.4) → their text form (`"2024-02-29"`); `Json` → itself.
 
-The compiler rejects a call to `encode` or `to_json` if `T` contains a
-function, task, channel, or native object. If a type parameter of the caller
-hides such a value, the call aborts.
-
 `json!` (§6.13) builds a `Json` from JSON syntax with embedded Sand values.
 
 `decode<T>` is the inverse for types built from those components. The
-compiler rejects a call if `T` contains a type that JSON cannot represent: a
-function, task, channel, range, or native object, or a map whose key type is
+compiler also rejects a `T` that contains a range, or a map whose key type is
 not `str`, `int`, `duration`, `bool`, an enum, or a value type. A struct
 field missing from the object takes its declared default if that is a
-constant expression (a literal, `[]`, `[:]` or `None`), else `None` if
+constant expression (a literal, `[]`, `[:]`, `None`, or a payload-less
+variant), else `None` if
 optional; otherwise decoding fails with kind `"parse"` and a message naming
 the path (e.g. `$.items[2].name: expected str`). Parsing is limited to a
 nesting depth of 512.
@@ -2854,7 +2852,8 @@ field private to the module, `#[sand(var)]` makes it mutable (`var`), and
 `#[sand(name = "<name>")]` overrides its Sand name. `#[sand(default)]` or
 `#[sand(default = <expr>)]` gives a field the default `Default::default()` or
 `<expr>`, which must be a number, `bool`, `()`, string, duration, empty list or
-map, or `None`; `bind` panics otherwise.
+map, `None`, or a payload-less variant of a `SandEnum`; `bind` panics
+otherwise.
 
 Recursive types can reference themselves through `Vec`, map, or `Box` fields.
 Because the engine copies each reachable struct and enum value during
@@ -2907,8 +2906,8 @@ engine collects garbage and checks the memory limit after the call completes.
 | `Num<N>`                                           | `Num` evidence of the `N`-th type parameter            |
 
 `Param<N, B>` specifies requirements `B` on the `N`-th type parameter: a
-built-in bound (`bound::Eq`, `bound::Ord`, `bound::Hash`, `bound::Num`),
-`bound::Checked<C>`, or a tuple of these such as `(bound::Ord, bound::Hash)`,
+built-in bound (`bound::Eq`, `bound::Ord`, `bound::Hash`, `bound::Num`,
+`bound::Encode`) or a tuple of these such as `(bound::Ord, bound::Hash)`,
 defaulting to `()`. The corresponding `native fn` declaration must declare the
 bounds of `B` or stronger bounds on that parameter.
 
@@ -2916,9 +2915,6 @@ bounds of `B` or stronger bounds on that parameter.
 at compile time using `C: ReflectCheck` (defaulting to `()`, which accepts all
 types). At each call site, the compiler calls `C::check` once per distinct node
 in the `TypeDesc` graph and reports a compile error if `C::check` returns `Err`.
-`bound::Checked<C>` validates the type argument in the same way, but passes no
-description at run time. A type parameter of the caller in the type argument
-is a `TypeDesc::Param` node.
 
 If a `native fn` declaration bounds a type parameter by `Num`, the Rust
 function takes its evidence as `Num<N>` (with `zero` and `one`), after its

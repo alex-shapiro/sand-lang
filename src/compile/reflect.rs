@@ -20,10 +20,6 @@
 //! The work is bounded: every node built, cache lookup and key component
 //! costs a unit, at most [`MAX_DESC_NODES`] per description and
 //! [`MAX_TOTAL_DESC_NODES`] per compilation.
-//!
-//! The type arguments that [`bound::Checked`](crate::native::bound::Checked)
-//! validates are described the same way, but not passed at run time; their
-//! descriptions can contain type parameters of the calling function.
 
 use crate::check::CheckedProgram;
 use crate::check::persist::PMap;
@@ -56,8 +52,6 @@ pub(crate) struct DescCache {
     consts: PMap<Key, u32>,
     /// Reflected `(const_id, check_fn)` pairs that passed [`ReflectCheck`](crate::native::ReflectCheck).
     accepted: PMap<(u32, usize), ()>,
-    /// Type keys of the checked type arguments that passed each check.
-    checked: PMap<(Key, usize), ()>,
     /// Work done by the current compilation (reset by [`DescCache::start`]).
     total: usize,
 }
@@ -112,33 +106,7 @@ impl DescCache {
         (!failed).then_some(d)
     }
 
-    /// Runs `check` on the description of the type argument `t` (see
-    /// [`DescCache::check`]); `Err(None)` if the description is too large.
-    pub(crate) fn validate(
-        &mut self,
-        cp: &CheckedProgram,
-        arena: &mut TypeArena,
-        t: TypeId,
-        check: ReflectCheckFn,
-    ) -> Result<(), Option<String>> {
-        let mut key = Vec::new();
-        type_key(arena, t, &mut key);
-        self.total = self.total.saturating_add(key.len());
-        if self.total > MAX_TOTAL_DESC_NODES {
-            return Err(None);
-        }
-        let key = (key, check as usize);
-        if self.checked.get(&key).is_some() {
-            return Ok(());
-        }
-        let desc = self.describe(cp, arena, t).ok_or(None)?;
-        Self::check_nodes(&desc, check).map_err(Some)?;
-        self.checked.insert(key, ());
-        Ok(())
-    }
-
-    /// Runs `check` once per distinct node in `desc`, the description in
-    /// constant `k`.
+    /// Runs `check` once per distinct node in `desc`.
     pub(crate) fn check(&mut self, k: u32, desc: &TypeDesc, check: ReflectCheckFn) -> Result<(), String> {
         let key = (k, check as usize);
         if self.accepted.get(&key).is_some() {
@@ -276,9 +244,6 @@ impl Builder<'_, '_> {
             Ty::Duration => leaf(TypeDesc::Duration),
             Ty::Unit => leaf(TypeDesc::Unit),
             Ty::Range => leaf(TypeDesc::Range),
-            // Only checked type arguments contain these: the checker rejects
-            // them in `reflect` type arguments.
-            Ty::Param(_) | Ty::Var(_) | Ty::Error => leaf(TypeDesc::Param(self.show(t))),
             Ty::List(e) => {
                 let (e, l) = self.desc(e);
                 (Arc::new(TypeDesc::List(e)), l)

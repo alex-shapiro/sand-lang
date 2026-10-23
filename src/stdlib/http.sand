@@ -105,7 +105,7 @@ pub fn post(
 }
 
 /// Sends an HTTP `POST` request with `value` encoded as JSON.
-pub fn post_json<T>(
+pub fn post_json<T: Encode>(
     url: str,
     value: T,
     headers: [(str, str)] = [],
@@ -115,7 +115,7 @@ pub fn post_json<T>(
 }
 
 /// Sends an HTTP `PUT` request with `value` encoded as JSON.
-pub fn put_json<T>(
+pub fn put_json<T: Encode>(
     url: str,
     value: T,
     headers: [(str, str)] = [],
@@ -125,7 +125,7 @@ pub fn put_json<T>(
 }
 
 /// Sends an HTTP `PATCH` request with `value` encoded as JSON.
-pub fn patch_json<T>(
+pub fn patch_json<T: Encode>(
     url: str,
     value: T,
     headers: [(str, str)] = [],
@@ -137,7 +137,7 @@ pub fn patch_json<T>(
 /// Sends an HTTP request with `value` encoded as JSON, setting
 /// `Content-Type: application/json` if `headers` does not specify a
 /// `Content-Type`.
-pub fn request_json<T>(
+pub fn request_json<T: Encode>(
     method: str,
     url: str,
     value: T,

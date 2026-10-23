@@ -1130,9 +1130,6 @@ pub enum TypeDesc {
     },
     /// Recursive reference to the enclosing struct or enum with this `id`.
     Recur(u32),
-    /// A type parameter of the calling function. Only the descriptions that
-    /// [`bound::Checked`](crate::native::bound::Checked) validates contain it.
-    Param(String),
     /// A function, task, channel, or native object type.
     Unsupported(String),
 }
@@ -1155,11 +1152,9 @@ impl TypeDesc {
             TypeDesc::Tuple(ts) => format!("({})", list(ts)),
             TypeDesc::Option(e) => format!("{}?", e.format(recur)),
             TypeDesc::Range => "Range".into(),
-            TypeDesc::Struct { name, .. }
-            | TypeDesc::Enum { name, .. }
-            | TypeDesc::Value { name, .. }
-            | TypeDesc::Param(name)
-            | TypeDesc::Unsupported(name) => name.clone(),
+            TypeDesc::Struct { name, .. } | TypeDesc::Enum { name, .. } | TypeDesc::Value { name, .. } | TypeDesc::Unsupported(name) => {
+                name.clone()
+            }
             TypeDesc::Recur(id) => recur(*id),
         }
     }
@@ -1184,7 +1179,6 @@ impl std::fmt::Debug for TypeDesc {
             TypeDesc::Enum { id, name, .. } => write!(f, "Enum({name} #{id})"),
             TypeDesc::Range => write!(f, "Range"),
             TypeDesc::Value { name, .. } => write!(f, "{name}"),
-            TypeDesc::Param(name) => write!(f, "Param({name})"),
             TypeDesc::Recur(id) => write!(f, "Recur(#{id})"),
             TypeDesc::Unsupported(name) => write!(f, "Unsupported({name})"),
         }

@@ -638,7 +638,7 @@ impl Checker {
         let saved = std::mem::replace(&mut self.fs.evidence, evidence);
         for b in self.builtin_closure(tid) {
             if self.satisfies(target, b) == Some(false) {
-                let msg = format!("{} does not satisfy {}, which trait `{name}` requires", self.show(target), b.name());
+                let msg = self.unsatisfied(target, b, &format!(", which trait `{name}` requires"));
                 self.error(span, msg);
             }
         }
@@ -840,7 +840,7 @@ impl Checker {
         let fi = &self.fns[f as usize];
         let kind = match fi.kind {
             FnKind::TraitMethod(trait_id, slot) => HKind::CallTrait { trait_id, slot, args, impl_id: None },
-            FnKind::Native(native) => HKind::CallNative { native, args, reflect: vec![], checks: self.native_checks(native, &inst.fresh) },
+            FnKind::Native(native) => HKind::CallNative { native, args, reflect: vec![] },
             _ => HKind::Call { func: f, args },
         };
         let name = self.name(fi.name).to_string();
@@ -1069,7 +1069,10 @@ impl Checker {
             };
             for (v, b) in inst.builtin {
                 match self.satisfies(v, b) {
-                    Some(false) => return Err(context(self, format!("{} does not satisfy {}", self.show(v), b.name()))),
+                    Some(false) => {
+                        let msg = self.unsatisfied(v, b, "");
+                        return Err(context(self, msg));
+                    }
                     None => self.fs.obligations.push((v, b, span)),
                     Some(true) => {}
                 }

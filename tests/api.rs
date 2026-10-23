@@ -1372,6 +1372,8 @@ struct Settings {
     parent: Option<Box<Settings>>,
     #[sand(default = -0.5)]
     ratio: f64,
+    #[sand(default = LogLevel::Warn)]
+    log: LogLevel,
 }
 
 #[test]
@@ -1391,9 +1393,9 @@ help(conf.Settings)
 "#;
     let (r, out, _) = run_src(Config::new().module(m), src);
     r.unwrap();
-    let s = "Settings { name: \"a\", port: 8080, verbose: false, level: \"info\", timeout: 30s, tags: [:], parent: None, ratio: -0.5 }";
-    let d = "Settings { name: \"c\", port: 8080, verbose: true, level: \"info\", timeout: 30s, tags: [:], parent: None, ratio: -0.5 }";
-    let help = "struct conf.Settings\n\nSettings with defaults.\n\nFields:\n    name: str\n    port: int = 8080\n    verbose: bool = false\n    level: str = \"info\"\n    timeout: duration = 30s\n    tags: [str: str] = [:]\n    parent: Settings? = None\n    ratio: float = -0.5\n";
+    let s = "Settings { name: \"a\", port: 8080, verbose: false, level: \"info\", timeout: 30s, tags: [:], parent: None, ratio: -0.5, log: Warn }";
+    let d = "Settings { name: \"c\", port: 8080, verbose: true, level: \"info\", timeout: 30s, tags: [:], parent: None, ratio: -0.5, log: Warn }";
+    let help = "struct conf.Settings\n\nSettings with defaults.\n\nFields:\n    name: str\n    port: int = 8080\n    verbose: bool = false\n    level: str = \"info\"\n    timeout: duration = 30s\n    tags: [str: str] = [:]\n    parent: Settings? = None\n    ratio: float = -0.5\n    log: Level = Level.Warn\n";
     assert_eq!(out, format!("{s}\n1\n{d}\n{help}"));
 }
 
@@ -1407,6 +1409,40 @@ fn rust_field_defaults_must_be_sand_constants() {
         xs: Vec<i64>,
     }
     NativeModule::new("lab").bind::<Bad>();
+}
+
+#[test]
+#[should_panic(expected = "the default of field `figure` of `Sketch` is not a Sand constant")]
+fn rust_field_defaults_cannot_be_variants_with_payloads() {
+    #[derive(sandlang::SandStruct)]
+    #[sand(module = "draw")]
+    struct Sketch {
+        #[sand(default = Figure::Circle(1.0))]
+        figure: Figure,
+    }
+    NativeModule::new("draw").bind::<Sketch>();
+}
+
+#[test]
+fn rust_field_defaults_can_be_payload_less_variants() {
+    #[derive(Debug, PartialEq, sandlang::SandStruct)]
+    #[sand(module = "draw")]
+    struct Sketch {
+        #[sand(default = Figure::Empty)]
+        figure: Figure,
+        #[sand(default)]
+        backdrop: Option<Figure>,
+    }
+    let mut m = draw_module();
+    m.bind::<Sketch>();
+    m.function("figure", |s: Sketch| s.figure);
+    let src = "import draw\nimport json\nprint(draw.figure(draw.Sketch {}))\nlet s: draw.Sketch = json.decode(\"{}\")?\nprint(s)\nhelp(draw.Sketch)";
+    let (r, out, _) = run_src(Config::new().module(m), src);
+    r.unwrap();
+    assert_eq!(
+        out,
+        "Empty\nSketch { figure: Empty, backdrop: None }\nstruct draw.Sketch\n\nFields:\n    figure: Figure = Figure.Empty\n    backdrop: Figure? = None\n"
+    );
 }
 
 #[test]
@@ -1482,58 +1518,59 @@ print(none.product())
 }
 
 #[test]
-fn checked_type_parameters_reject_type_arguments_at_compile_time() {
-    use sandlang::native::{Param, ReflectCheck, TypeNames, bound};
-    use sandlang::vm::value::TypeDesc;
-    struct NoFloats;
-    impl ReflectCheck for NoFloats {
-        fn check(node: &TypeDesc, names: &TypeNames) -> Result<(), String> {
-            match node {
-                TypeDesc::Float => Err("no floats".into()),
-                TypeDesc::Struct { .. } => Err(format!("no structs like {}", names.format(node))),
-                _ => Ok(()),
-            }
-        }
-    }
-    let mut m = NativeModule::new("strict");
-    m.function("keep", |x: Param<0, (bound::Eq, bound::Checked<NoFloats>)>| x);
-    m.source("pub native fn keep<T: Eq>(x: T) -> T");
-    let run = |src: &str| run_src(Config::new().module(m.clone()), &format!("import strict\n{src}"));
-    let (r, out, _) = run("print(strict.keep((1, \"a\")))\nfn pass<T: Eq>(x: T) -> T {\n    strict.keep(x)\n}\nprint(pass(\"a\"))");
+fn natives_can_require_encode() {
+    use sandlang::native::{Param, bound};
+    let module = |decl: &str| {
+        let mut m = NativeModule::new("store");
+        m.function("keep", |x: Param<0, bound::Encode>| x);
+        m.source(decl);
+        m
+    };
+    let run =
+        |src: &str| run_src(Config::new().module(module("pub native fn keep<T: Encode>(x: T) -> T")), &format!("import store\n{src}"));
+    let (r, out, _) = run("print(store.keep((1, [\"a\"])))\nfn pass<T: Num>(x: T) -> T {\n    store.keep(x)\n}\nprint(pass(2))");
     r.unwrap();
-    assert_eq!(out, "(1, \"a\")\na\n");
+    assert_eq!(out, "(1, [\"a\"])\n2\n");
     let cases = [
-        ("strict.keep((1, 2.0))", "no floats"),
-        ("struct P { x: int }\nstrict.keep(P { x: 1 })", "no structs like P"),
-        ("let f: fn(float) -> float = strict.keep", "no floats"),
+        ("store.keep(() => 1)", "fn() -> int does not satisfy Encode"),
+        ("fn pass<T>(x: T) -> T {\n    store.keep(x)\n}", "type parameter `T` does not satisfy Encode; add a bound `T: Encode`"),
+        ("let f: fn(fn() -> int) -> fn() -> int = store.keep", "fn() -> int does not satisfy Encode"),
     ];
     for (src, msg) in cases {
         let (r, _, _) = run(src);
         let Err(Error::Compile(ds)) = r else { panic!("{src}: expected a compile error, got {r:?}") };
         assert_eq!(ds[0].message, msg, "{src}");
     }
+    let errors = engine_errors(Config::new().module(module("pub native fn keep<T>(x: T) -> T")));
+    assert_eq!(errors, ["native function `keep` must bound `T` by `Encode`, as its Rust function requires `T: Encode`"]);
 }
 
 #[test]
 fn json_rejects_unrepresentable_types_at_compile_time() {
-    let cases = [
-        ("json.encode((x: int) => x)", "JSON cannot represent values of type `fn(int) -> int`"),
-        ("json.encode([spawn 1])", "JSON cannot represent values of type `Task<int>`"),
-        ("let c: Channel<int> = task.channel()\njson.to_json(c)", "JSON cannot represent values of type `Channel<int>`"),
-        ("let f: fn((int, fn() -> int), int) -> str = json.encode", "JSON cannot represent values of type `fn() -> int`"),
-        ("struct S { f: fn() -> int }\njson.encode(S { f: () => 1 })", "JSON cannot represent values of type `fn() -> int`"),
-        ("json.to_json([(1, Some(() => 2))])", "JSON cannot represent values of type `fn() -> int`"),
+    let cases = vec![
+        ("json.encode((x: int) => x)", "fn(int) -> int does not satisfy Encode"),
+        ("json.encode([spawn 1])", "[Task<int>] does not satisfy Encode because the elements of `[Task<int>]` have type `Task<int>`"),
+        ("let c: Channel<int> = task.channel()\njson.to_json(c)", "Channel<int> does not satisfy Encode"),
+        (
+            "let f: fn((int, fn() -> int), int) -> str = json.encode",
+            "(int, fn() -> int) does not satisfy Encode because element 1 of `(int, fn() -> int)` has type `fn() -> int`",
+        ),
+        (
+            "struct S { f: fn() -> int }\njson.encode(S { f: () => 1 })",
+            "S does not satisfy Encode because field `f` of `S` has type `fn() -> int`",
+        ),
+        ("fn dump<T>(x: T) -> str {\n    json.encode(x)\n}", "type parameter `T` does not satisfy Encode; add a bound `T: Encode`"),
     ];
-    for (src, msg) in cases {
+    let http = ("import http\nlet r = http.post_json(\"http://h/\", (x: int) => x)", "fn(int) -> int does not satisfy Encode");
+    for (src, msg) in cases.into_iter().chain(cfg!(feature = "os").then_some(http)) {
         let (r, _, _) = run_src(Config::new(), &format!("import json\n{src}"));
         let Err(Error::Compile(ds)) = r else { panic!("{src}: expected a compile error, got {r:?}") };
         assert_eq!(ds[0].message, msg, "{src}");
     }
-    let src = "import json\nprint(json.encode(1..4))\nprint(json.to_json([Some(1), None]))\nfn dump<T>(x: T) -> str {\n    json.encode(x)\n}\nprint(dump([1]))\nprint(dump(() => 1))";
+    let src = "import json\nprint(json.encode(1..4))\nprint(json.to_json([Some(1), None]))\nfn dump<T: Encode>(x: T) -> str {\n    json.encode(x)\n}\nprint(dump([1]))";
     let (r, out, _) = run_src(Config::new(), src);
-    let Err(Error::Runtime { message, .. }) = r else { panic!("expected a runtime error, got {r:?}") };
+    r.unwrap();
     assert_eq!(out, "[1,2,3]\nArr([Int(1), Null])\n[1]\n");
-    assert!(message.contains("cannot encode a function as JSON"), "{message}");
 }
 
 #[test]

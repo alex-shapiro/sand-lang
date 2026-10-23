@@ -62,13 +62,6 @@ Follow-up work, roughly in priority order.
 
 ### Embedding
 
-- [ ] `bound::Checked` accepts the type parameters of the caller, so
-      `json.encode(x)` in `fn f<T>(x: T)` aborts at run time if `T` is a
-      function. A built-in bound that callers must declare (as for `Hash`)
-      would move this check to compile time.
-- [ ] Allow payload-less enum variants as struct field defaults that
-      `json.decode` uses (`mode: Mode = Mode.Read`) and as
-      `#[sand(default = ...)]` values; `ConstVal` has no enum variants.
 
 ### Tooling
 

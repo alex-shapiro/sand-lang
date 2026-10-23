@@ -97,6 +97,8 @@ struct Defaults {
     opt: Option<Fig>,
     #[sand(default = sandlang::jiff::SignedDuration::from_millis(1500))]
     d: sandlang::jiff::SignedDuration,
+    #[sand(default = Fig::Empty)]
+    shape: Fig,
 }
 
 impl Default for Defaults {
@@ -109,6 +111,7 @@ impl Default for Defaults {
             xs: Vec::new(),
             opt: None,
             d: sandlang::jiff::SignedDuration::from_millis(1500),
+            shape: Fig::Empty,
         }
     }
 }
@@ -208,8 +211,8 @@ proptest! {
     }
 
     #[test]
-    fn rust_field_defaults_fill_omitted_fields(given in prop::collection::vec(any::<bool>(), 7), n in int(), s in text()) {
-        let full = Defaults { n, x: -1.25, b: false, s: s.clone(), xs: vec![s.clone()], opt: Some(Fig::Num(n)), d: sandlang::jiff::SignedDuration::from_secs(3) };
+    fn rust_field_defaults_fill_omitted_fields(given in prop::collection::vec(any::<bool>(), 8), n in int(), s in text()) {
+        let full = Defaults { n, x: -1.25, b: false, s: s.clone(), xs: vec![s.clone()], opt: Some(Fig::Num(n)), d: sandlang::jiff::SignedDuration::from_secs(3), shape: Fig::Num(n) };
         let lits = [
             ("n", int_lit(n), format!("{n}")),
             ("x", "(-1.25)".to_string(), "-1.25".to_string()),
@@ -218,6 +221,7 @@ proptest! {
             ("xs", format!("[{}]", str_lit(&s)), format!("[{}]", serde_str(&s))),
             ("opt", format!("Some(fig.Fig.Num({}))", int_lit(n)), format!("{{\"Num\": [{n}]}}")),
             ("d", "3s".to_string(), "3000000000".to_string()),
+            ("shape", format!("fig.Fig.Num({})", int_lit(n)), format!("{{\"Num\": [{n}]}}")),
         ];
         let mut expected = Defaults::default();
         let fields: Vec<String> = lits.iter().zip(&given).filter(|(_, g)| **g).map(|((name, lit, _), _)| format!("{name}: {lit}")).collect();
@@ -231,7 +235,8 @@ proptest! {
                     3 => expected.s = full.s.clone(),
                     4 => expected.xs = full.xs.clone(),
                     5 => expected.opt = full.opt.clone(),
-                    _ => expected.d = full.d,
+                    6 => expected.d = full.d,
+                    _ => expected.shape = full.shape.clone(),
                 }
             }
         }

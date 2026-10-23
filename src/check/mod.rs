@@ -14,7 +14,7 @@ mod unify;
 use crate::diag::{Diag, FileId, SourceFile, Span};
 use crate::engine::NativeDecls;
 use crate::hir::*;
-use crate::native::{BoundKind, Bounds, EnumVariant, NativeDecl, Signature, StructField, Type};
+use crate::native::{BoundKind, Bounds, Constant, EnumVariant, NativeDecl, Signature, StructField, Type};
 use crate::syntax::ast::{self, ItemKind, TypeExpr, TypeExprKind};
 use crate::types::*;
 use crate::vm::value::{FxBuild, FxHashMap};
@@ -192,7 +192,7 @@ pub struct FnInfo {
 
 /// The fields or payloads of a Rust-bound struct or enum.
 enum BoundMembers {
-    Struct(&'static [StructField], Arc<[Option<ConstVal>]>),
+    Struct(&'static [StructField], Arc<[Option<Constant>]>),
     Enum(&'static [EnumVariant]),
 }
 
@@ -555,7 +555,7 @@ pub struct Checker {
     pub subst: Vec<Option<TypeId>>,
     /// For each type definition, what it needs to satisfy `Eq`, `Ord` and
     /// `Hash` (see `unify::Derived`).
-    pub(crate) derived: PVec<[unify::Derived; 3]>,
+    pub(crate) derived: PVec<[unify::Derived; 4]>,
     pub diags: Vec<Diag>,
     pub wk: WellKnown,
     pub prelude: Option<ModId>,
@@ -1668,7 +1668,16 @@ impl Checker {
                     }
                     let doc = Some(f.doc).filter(|d| !d.is_empty()).map(Arc::from);
                     let name = self.sym(f.name);
-                    let const_default = default.clone();
+                    // A variant default has the type of its field, so if its enum is
+                    // not registered, resolving the field's type reported that.
+                    let const_default = match default {
+                        Some(Constant::Value(c)) => Some(c.clone()),
+                        Some(Constant::Variant { rust, index }) => {
+                            let first = self.enum_bindings.iter_from(0).find(|(t, _)| t == rust).map(|&(_, first)| first);
+                            first.map(|first| ConstVal::Tag(first + *index as u32))
+                        }
+                        None => None,
+                    };
                     fields.push(FieldDef { name, ty, mutable: f.var, is_pub: f.public, default: None, const_default, doc });
                 }
                 self.types[id as usize].kind = TypeDefKind::Struct { fields };
@@ -1879,7 +1888,7 @@ impl Checker {
                 let r = self.host_type(r, generics, owner, span)?;
                 self.arena.func(&ps, r)
             }
-            Type::Param(i, ..) => match generics.get(*i as usize) {
+            Type::Param(i, _) => match generics.get(*i as usize) {
                 Some(&p) => self.param_ty(p),
                 None => {
                     self.error(span, format!("{owner} uses type parameter {i}, which its declaration does not have"));
@@ -2004,7 +2013,7 @@ impl Checker {
         let mut required = vec![Bounds::NONE; generics.len()];
         for t in sig.params.iter().chain([&sig.ret]) {
             t.visit(&mut |t| {
-                if let Type::Param(i, b, _) = t
+                if let Type::Param(i, b) = t
                     && let Some(r) = required.get_mut(*i as usize)
                 {
                     *r = r.union(*b);
@@ -2018,6 +2027,7 @@ impl Checker {
                 ord: need.ord && !info.has_bound(Bound::Ord),
                 hash: need.hash && !info.has_bound(Bound::Hash),
                 num: need.num && !info.has_bound(Bound::Num),
+                encode: need.encode && !info.has_bound(Bound::Encode),
             };
             if missing != Bounds::NONE {
                 let name = self.name(info.name).to_string();
@@ -2581,7 +2591,14 @@ impl Checker {
             FnDeclRef::FieldDefault { item, field } => {
                 let ItemKind::Struct(s) = &m.items[item as usize].kind else { unreachable!() };
                 let e = s.fields[field as usize].default.as_ref().unwrap();
-                (self.check_expr(e, ret), e.span)
+                let h = self.check_expr(e, ret);
+                // A payload-less variant is a constant that `json.decode` can use.
+                if let (HKind::Tag(id), Some(Ty::Named(d, _))) = (&h.kind, self_ty.map(|t| self.arena.get(t)))
+                    && let TypeDefKind::Struct { fields } = &mut self.types[d as usize].kind
+                {
+                    fields[field as usize].const_default = Some(ConstVal::Tag(*id));
+                }
+                (h, e.span)
             }
             FnDeclRef::Test { item } => {
                 let ItemKind::Test(t) = &m.items[item as usize].kind else { unreachable!() };

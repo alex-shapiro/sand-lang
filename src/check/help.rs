@@ -95,7 +95,7 @@ impl Checker {
             panic!("the prelude is missing `print`")
         };
         let args = vec![HArg::Expr(mk(HKind::Str(text), TypeId::STR, span))];
-        mk(HKind::CallNative { native, args, reflect: vec![], checks: vec![] }, TypeId::UNIT, span)
+        mk(HKind::CallNative { native, args, reflect: vec![] }, TypeId::UNIT, span)
     }
 
     // ------------------------------------------------------------------
@@ -939,6 +939,13 @@ impl Checker {
         }
     }
 
+    /// `Enum.Variant` for the variant with runtime id `id`.
+    fn variant_name(&self, id: u32) -> String {
+        let (d, i) = self.variants[id as usize];
+        let def = &self.types[d as usize];
+        format!("{}.{}", self.name(def.name), self.name(def.variants()[i as usize].name))
+    }
+
     pub(super) fn variant_text(&self, d: TypeDefId, i: u32) -> String {
         let v = &self.types[d as usize].variants()[i as usize];
         let mut s = self.name(v.name).to_string();
@@ -983,7 +990,7 @@ impl Checker {
     pub(super) fn default_text(&self, f: &FieldDef) -> String {
         match (f.default, &f.const_default) {
             (Some(h), _) => format!(" = {}", self.source_text(self.fns[h as usize].span)),
-            (None, Some(c)) => format!(" = {}", c.sand_text()),
+            (None, Some(c)) => format!(" = {}", c.sand_text(&|id| self.variant_name(id))),
             (None, None) => String::new(),
         }
     }

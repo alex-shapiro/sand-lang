@@ -53,6 +53,17 @@ impl Ty {
         }
     }
 
+    /// Whether the type satisfies `Encode`, which `json.decode` requires.
+    fn encodable(&self) -> bool {
+        match self {
+            Ty::Fn | Ty::Task => false,
+            Ty::List(t) | Ty::Set(t) | Ty::Option(t) | Ty::Wrap(t) => t.encodable(),
+            Ty::Map(k, v) => k.encodable() && v.encodable(),
+            Ty::Tuple(ts) => ts.iter().all(Ty::encodable),
+            _ => true,
+        }
+    }
+
     fn decodable(&self) -> bool {
         match self {
             Ty::Fn | Ty::Task | Ty::Range | Ty::Keyed => false,
@@ -117,7 +128,9 @@ proptest! {
             }
             Err(Error::Compile(ds)) => {
                 prop_assert!(!t.decodable(), "rejected: {ds:?}\n{src}");
-                prop_assert!(ds.iter().all(|d| d.message.starts_with("`json.decode` cannot decode")), "{ds:?}\n{src}");
+                // A type that is not `Encode` fails the bound check, which comes first.
+                let want = if t.encodable() { "`json.decode` cannot decode" } else { "does not satisfy Encode" };
+                prop_assert!(ds.iter().all(|d| d.message.contains(want)), "{ds:?}\n{src}");
                 prop_assert!(ds.iter().all(|d| !d.message.contains("``")), "{ds:?}\n{src}");
             }
             Err(e) => prop_assert!(false, "{e}\n{src}"),

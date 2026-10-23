@@ -226,12 +226,18 @@ let x = json.decode("1")
 
 === decode rejects types that JSON cannot represent
 import json
-struct Tree { children: [Tree: int] }
-let a: Result<Tree> = json.decode("{}")
 let b: Result<[fn() -> int]> = json.decode("[]")
 --- error
+2: [fn() -> int] does not satisfy Encode because the elements of `[fn() -> int]` have type `fn() -> int`
+
+=== decode rejects map keys and ranges that it cannot decode
+import json
+struct Tree { children: [Tree: int] }
+let a: Result<Tree> = json.decode("{}")
+let r: Result<Range> = json.decode("[]")
+--- error
 3: `json.decode` cannot decode map keys of type `Tree`
-4: `json.decode` cannot decode values of type `fn() -> int`
+4: `json.decode` cannot decode values of type `Range`
 
 === encode decode roundtrip
 import json
@@ -406,31 +412,49 @@ let a = yaml!({})
 === json macro value without a json form is an error
 let a = json!({"f": (x: int) => x})
 --- error
-1: JSON cannot represent values of type `fn(int) -> int`
+1: fn(int) -> int does not satisfy Encode
 
 === encode rejects functions at compile time
 import json
 struct Job { name: str, run: fn() -> int }
 print(json.encode([Job { name: "a", run: () => 1 }]))
 --- error
-3: JSON cannot represent values of type `fn() -> int`
+3: [Job] does not satisfy Encode because field `run` of `Job` has type `fn() -> int`
 
 === to_json rejects tasks at compile time
 import json
 let t = spawn 1
 print(json.to_json(Some(t)))
 --- error
-3: JSON cannot represent values of type `Task<int>`
+3: Task<int>? does not satisfy Encode because the payload of variant `Some` of `Task<int>?` has type `Task<int>`
 
-=== encode through a type parameter aborts on functions
+=== encode through a type parameter needs the bound
 import json
 fn dump<T>(x: T) -> str {
     json.encode(x)
 }
-print(dump((1, "a")))
-print(dump(() => 1))
---- fail
-cannot encode a function as JSON
+fn bounded<T: Encode>(x: T) -> str {
+    json.encode(x)
+}
+print(bounded(() => 1))
+--- error
+3: type parameter `T` does not satisfy Encode; add a bound `T: Encode`
+8: fn() -> int does not satisfy Encode
+
+=== the Encode bound holds for data and is implied by Num
+import json
+struct P<T> { x: T, tags: Set<str> }
+fn dump<T: Encode>(x: T) -> str {
+    json.encode(x)
+}
+fn num<T: Num>(x: T) -> str {
+    dump(x)
+}
+print(dump(P { x: [1..3], tags: set(["a"]) }))
+print(num(1.5))
+--- stdout
+{"x":[[1,2]],"tags":["a"]}
+1.5
 
 === decode into json.Json parses untyped JSON
 import json
@@ -441,3 +465,12 @@ print(js)
 --- stdout
 Obj(["a": Arr([Int(1), Float(2.5), Null])])
 [Bool(true), Str("x")]
+
+=== decode fills a missing field with its variant default
+import json
+enum Mode { Read, Write }
+struct Opened { path: str, mode: Mode = Mode.Write }
+let o: Opened = json.decode("{\"path\": \"a\"}")?
+print(o)
+--- stdout
+Opened { path: "a", mode: Write }
