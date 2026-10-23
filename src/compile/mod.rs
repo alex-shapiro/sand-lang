@@ -272,6 +272,7 @@ pub(crate) struct ProgramMark {
     types: usize,
     variants: usize,
     templates: usize,
+    desc_templates: usize,
     switches: usize,
     tests: usize,
     nglobals: usize,
@@ -287,6 +288,7 @@ impl ProgramMark {
             types: p.types.len(),
             variants: p.variants.len(),
             templates: p.templates.len(),
+            desc_templates: p.desc_templates.len(),
             switches: p.switches.len(),
             tests: p.tests.len(),
             nglobals: p.nglobals,
@@ -304,6 +306,7 @@ impl ProgramMark {
         p.enum_types.retain(|_, &mut first| first < self.variants as u32);
         p.struct_types.retain(|_, &mut def| def < self.types as u32);
         p.templates.truncate(self.templates);
+        p.desc_templates.truncate(self.desc_templates);
         p.switches.truncate(self.switches);
         p.tests.truncate(self.tests);
         p.nglobals = self.nglobals;
@@ -1686,14 +1689,35 @@ impl<'a> Compiler<'a> {
                 };
                 self.emit(f, Op::LoadConst { dst, k });
             }
-            HKind::TypeDesc(t) => {
+            HKind::TypeDesc { ty, args } => {
                 let mut sink = DescCode { cp: self.cp, prog: &mut *self.prog, fn_protos: &self.fn_protos };
-                match self.descs.const_for(self.cp, &mut self.arena, *t, &mut sink) {
-                    Some(k) => {
-                        self.emit(f, Op::LoadConst { dst, k });
-                    }
-                    None => self.errors.push(Diag::error(e.span, "type too large to describe at runtime")),
+                let params = self.arena.params_of(*ty);
+                if params.len() != args.len() {
+                    self.errors.push(Diag::error(e.span, "internal error: a type description has no argument for a type parameter"));
+                    return;
                 }
+                if params.is_empty() {
+                    match self.descs.const_for(self.cp, &mut self.arena, *ty, &mut sink) {
+                        Some(k) => {
+                            self.emit(f, Op::LoadConst { dst, k });
+                        }
+                        None => self.errors.push(Diag::error(e.span, "type too large to describe at runtime")),
+                    }
+                    return;
+                }
+                let Some(tmpl) = self.descs.template_for(self.cp, &mut self.arena, *ty, params, &mut sink) else {
+                    self.errors.push(Diag::error(e.span, "type too large to describe at runtime"));
+                    return;
+                };
+                let mark = f.next_reg;
+                let base = self.alloc_n(f, args.len());
+                for (i, a) in args.iter().enumerate() {
+                    self.expr_to(f, a, base + i as Reg);
+                }
+                self.set_line(f, e.span);
+                self.emit(f, Op::Describe { base, tmpl });
+                self.mv(f, dst, base);
+                f.next_reg = mark;
             }
             HKind::VariantFn { rt_id, arity } => {
                 let p = self.variant_wrapper(*rt_id, *arity, f.file);
@@ -4209,7 +4233,7 @@ fn walk_pruned<'e>(e: &'e HExpr, f: &mut impl FnMut(&'e HExpr) -> bool) {
                 }
             }
         }
-        HKind::Dict { args, .. } => args.iter().for_each(|x| walk_pruned(x, f)),
+        HKind::Dict { args, .. } | HKind::TypeDesc { args, .. } => args.iter().for_each(|x| walk_pruned(x, f)),
         HKind::CallValue { callee, args } => {
             walk_pruned(callee, f);
             args.iter().for_each(|x| walk_pruned(x, f));
@@ -4298,6 +4322,11 @@ impl reflect::DescSink for DescCode<'_> {
     fn constant(&mut self, desc: std::sync::Arc<crate::vm::value::TypeDesc>) -> u32 {
         self.prog.consts.push(Const::TypeDesc(desc));
         (self.prog.consts.len() - 1) as u32
+    }
+
+    fn template(&mut self, t: crate::vm::value::DescTemplate) -> u32 {
+        self.prog.desc_templates.push(t);
+        (self.prog.desc_templates.len() - 1) as u32
     }
 
     fn field_fill(&mut self, def: TypeDefId, index: u32, helper: FnId) -> Option<u32> {

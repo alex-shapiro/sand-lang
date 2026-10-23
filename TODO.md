@@ -73,8 +73,7 @@ Follow-up work, roughly in priority order.
       payloads. A limit of 512 overflows a 512 KiB thread stack (the iOS
       default), so convert `Json` without recursion.
 - [ ] Sand has no set literal, so no set is a constant: `#[sand(default)]`
-      on a `HashSet` or `BTreeSet` field panics in `bind`, and `json.decode`
-      cannot fill a missing field whose default is `set([...])`.
+      on a `HashSet` or `BTreeSet` field panics in `bind`.
 - [ ] The derives describe the field types of a generic `SandEnum` or
       `SandStruct` at `Param<0>`, `Param<1>`, ..., so a field cannot use
       `Self` or another generic type whose type parameters have bounds
@@ -168,5 +167,11 @@ Follow-up work, roughly in priority order.
       impls, supertraits, evidence and errors share one implementation.
       Decide whether derivation is automatic (as today) or requested
       (`derive` in Rust, `deriving` in Haskell).
+- [ ] The checker requires `Hash` of set elements and map keys only where
+      a method needs it, not where a type is written. So
+      `let s: Set<Set<int>> = json.decode("[[1], [1]]")?` compiles, and
+      `json.decode` builds a set whose elements it cannot compare, with
+      equal elements twice. Require `Hash` of the element and key types of
+      `Set` and map types wherever a type is written.
 - [ ] Trait bounds on struct/enum type parameters.
 - [ ] Non-constant trait method defaults.

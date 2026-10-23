@@ -308,12 +308,14 @@ fn greet(name: str, greeting: str = "Hello") {
   may also constrain the type parameters of an enclosing generic `extend`
   block, struct or enum for that one method.
 - A type parameter marked `reflect` (`fn load<reflect T: Encode>(text: str)
-  -> Result<T>`) receives a runtime description of its type argument, which
-  the function can pass on to another `reflect` type parameter, such as that
-  of `json.decode`. At each call, the type argument must be a concrete type
-  or a `reflect` type parameter of the calling function. A function with a
-  `reflect` type parameter cannot be a function value, and trait and impl
-  methods cannot have one.
+  -> Result<[T]>`) receives a runtime description of its type argument. The
+  function can pass the description on to another `reflect` type parameter,
+  such as that of `json.decode`, alone or in a type that contains it (`[T]`).
+  Each type parameter in such a type argument must be a `reflect` type
+  parameter of the calling function. A recursive function that nests a
+  description more than 256 levels deep (`T` as `[T]`) aborts with kind
+  `"limit"`. A function with a `reflect` type parameter cannot be a function
+  value, and trait and impl methods cannot have one.
 - Functions may be declared inside blocks; such local functions may capture
   enclosing variables and may call themselves recursively. Local functions
   declared consecutively in the same block may call each other.

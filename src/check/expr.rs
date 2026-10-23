@@ -1522,7 +1522,7 @@ impl Checker {
         for (k, &t) in fresh.iter().enumerate() {
             if self.params[self.fns[f as usize].generics[k] as usize].reflect {
                 self.fs.reflect_checks.push((t, span));
-                hidden.push(HArg::Expr(mk(HKind::TypeDesc(t), TypeId::UNIT, span)));
+                hidden.push(HArg::Expr(mk(HKind::TypeDesc { ty: t, args: Vec::new() }, TypeId::UNIT, span)));
             }
         }
         hidden.extend(dicts.into_iter().map(|(t, tr)| HArg::Expr(self.evidence_hole(t, tr, false, span))));

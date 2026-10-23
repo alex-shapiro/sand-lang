@@ -3,7 +3,7 @@
 //! Every instruction is 8 bytes. Registers are frame-relative `u16` slots.
 //! Jump offsets are relative to the instruction *after* the jump.
 
-use super::value::{FxHashMap, TypeDesc};
+use super::value::{DescTemplate, FxHashMap, TypeDesc};
 use crate::hir::FormatSpec;
 use std::sync::Arc;
 
@@ -901,6 +901,12 @@ pub enum Op {
         dst: Reg,
         tmpl: u32,
     },
+    /// The type description `Program::desc_templates[tmpl]` instantiated
+    /// with the descriptions in `base..`, written to `base`.
+    Describe {
+        base: Reg,
+        tmpl: u32,
+    },
     /// `local += "..."` (an interpolation) for a string builder local (see
     /// `AppendStr`): formats the template and appends it in place.
     AppendInterp {
@@ -1272,6 +1278,8 @@ pub struct Program {
     pub native_argc: Arc<[u16]>,
     /// The templates of string interpolations (`Op::Interp`).
     pub templates: Vec<Template>,
+    /// The templates of type descriptions (`Op::Describe`).
+    pub desc_templates: Vec<DescTemplate>,
     /// The jump tables of `SwitchVariant`, `SwitchInt` and `SwitchChar`.
     pub switches: Vec<Switch>,
 }

@@ -641,13 +641,72 @@ P { x: 1, y: 7 }
 (P { x: 3, y: 7 }, P { x: 2, y: 7 })
 Ok((2, 1))
 
-=== reflect type arguments must be concrete or reflect type parameters
+=== the type parameters of reflect type arguments must be reflect
 import json
 fn plain<T: Encode>(text: str) -> Result<T> { json.decode(text) }
-fn nested<reflect T: Encode>(text: str) -> Result<[T]> { json.decode(text) }
+fn mixed<reflect T: Encode, U: Encode>(text: str) -> Result<(T, [U])> { json.decode(text) }
 --- error
-2: this call needs a description of `T` at run time, so the type must be concrete or a `reflect` type parameter
-3: this call needs a description of `[T]` at run time, so the type must be concrete or a `reflect` type parameter
+2: this call needs a description of `T` at run time, so `T` must be a `reflect` type parameter of this function
+3: this call needs a description of `(T, [U])` at run time, so `U` must be a `reflect` type parameter of this function
+
+=== reflect type arguments build on reflect type parameters
+import json
+struct P { x: int, tag: str = "t\(1 + 1)" }
+struct Page<T> { items: [T], next: str? = None }
+enum Shape<T> { Dot, Named(label: str, value: T) }
+struct Tree<T> { value: T, kids: [Tree<T>] = [] }
+fn all<reflect T: Encode>(text: str) -> Result<[T]> { json.decode(text) }
+fn page<reflect T: Encode>(text: str) -> Result<Page<T>> { json.decode(text) }
+fn pair<reflect A: Encode, reflect B: Encode>(text: str) -> Result<(A, [str: B], Set<A>)> { json.decode(text) }
+fn shape<reflect T: Encode>(text: str) -> Result<Shape<T>> { json.decode(text) }
+fn tree<reflect T: Encode>(text: str) -> Result<Tree<T>> { json.decode(text) }
+fn later<reflect T: Encode>(text: str) -> fn() -> Result<T?> { () => json.decode(text) }
+fn pages<reflect T: Encode>(text: str) -> Result<Page<Page<T>>> { page(text) }
+let a: [P] = all("[{\"x\": 1}, {\"x\": 2}]")?
+print(a)
+let p: Result<Page<P>> = page("{\"items\": [{\"y\": 3}]}")
+print(p)
+let t: (int, [str: P], Set<int>) = pair("[1, {\"k\": {\"x\": 5}}, [2, 2]]")?
+print(t)
+let s: Shape<P> = shape("{\"Named\": {\"label\": \"n\", \"value\": {\"x\": 9}}}")?
+print(s)
+let bad: Result<Shape<[P]>> = shape("{\"Other\": 1}")
+print(bad)
+let tr: Tree<str> = tree("{\"value\": \"a\", \"kids\": [{\"value\": \"b\", \"kids\": [{\"value\": \"c\"}]}]}")?
+print(tr)
+let f: fn() -> Result<P?> = later("{\"x\": 7}")
+print(f())
+let n: Result<Page<Page<P>>> = pages("{\"items\": [{\"items\": [{\"x\": \"no\"}]}]}")
+print(n)
+--- stdout
+[P { x: 1, tag: "t2" }, P { x: 2, tag: "t2" }]
+Err(Error { kind: "parse", message: "$.items[0]: missing field `x`" })
+(1, ["k": P { x: 5, tag: "t2" }], Set([2]))
+Named("n", P { x: 9, tag: "t2" })
+Err(Error { kind: "parse", message: "$: unknown variant `Other` of Shape<[P]>" })
+Tree { value: "a", kids: [Tree { value: "b", kids: [Tree { value: "c", kids: [] }] }] }
+Ok(Some(P { x: 7, tag: "t2" }))
+Err(Error { kind: "parse", message: "$.items[0].items[0].x: expected int" })
+
+=== recursion that nests reflect type arguments without end aborts
+import json
+fn deep<reflect T: Encode>(n: int, witness: [T]) -> int {
+    if n == 0 {
+        let r: Result<T> = json.decode("[[1]]")
+        print(r.is_ok())
+        return 0
+    }
+    let w: [[T]] = []
+    deep(n - 1, w) + 1
+}
+let w: [int] = []
+print(deep(2, w))
+print(deep(1000, w))
+--- stdout
+true
+2
+--- fail
+limit: the description of a type argument is nested too deeply
 
 === trait methods cannot be reflect
 trait Load { fn load<reflect T>() -> int }

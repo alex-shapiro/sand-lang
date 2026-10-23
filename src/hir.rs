@@ -242,9 +242,13 @@ pub enum HKind {
         native: u32,
         args: Vec<HArg>,
     },
-    /// The runtime description of a `reflect` type argument, passed before
-    /// the other arguments of a call.
-    TypeDesc(TypeId),
+    /// The runtime description of a `reflect` type argument `ty`, passed
+    /// before the other arguments of a call. If `ty` has type parameters,
+    /// `args` are the descriptions of these (`TypeArena::params_of`).
+    TypeDesc {
+        ty: TypeId,
+        args: Vec<HExpr>,
+    },
     CallValue {
         callee: Box<HExpr>,
         args: Vec<HExpr>,
@@ -478,7 +482,10 @@ impl HExpr {
                 }
             }
             HKind::Call { args, .. } | HKind::CallTrait { args, .. } | HKind::CallNative { args, .. } => args_parts(args, f),
-            HKind::TypeDesc(t) => f(Part::Type(t)),
+            HKind::TypeDesc { ty, args } => {
+                args.iter_mut().for_each(e);
+                f(Part::Type(ty));
+            }
             HKind::CallValue { callee, args } => {
                 e(callee);
                 args.iter_mut().for_each(e);

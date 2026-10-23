@@ -891,6 +891,12 @@ impl Checker {
     /// `reflect` type parameter of the function being checked.
     pub(crate) fn reflect_local(&self, t: TypeId) -> Option<LocalId> {
         let Ty::Param(p) = self.rty(t) else { return None };
+        self.reflect_param_local(p)
+    }
+
+    /// The hidden parameter holding the description of `p`, if `p` is a
+    /// `reflect` type parameter of the function being checked.
+    pub(crate) fn reflect_param_local(&self, p: ParamId) -> Option<LocalId> {
         self.fs.reflect_locals.iter().find(|&&(q, _)| q == p).map(|&(_, l)| l)
     }
 

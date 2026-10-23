@@ -2858,10 +2858,11 @@ impl Checker {
             }
             if self.arena.has_vars(z) {
                 self.infer_error(sp, "cannot infer type for this call; add a type annotation");
-            } else if self.arena.has_params(z) {
+            } else if let Some(p) = self.arena.params_of(z).into_iter().find(|&p| self.reflect_param_local(p).is_none()) {
                 let msg = format!(
-                    "this call needs a description of `{}` at run time, so the type must be concrete or a `reflect` type parameter",
-                    self.show(z)
+                    "this call needs a description of `{}` at run time, so `{}` must be a `reflect` type parameter of this function",
+                    self.show(z),
+                    self.name(self.params[p as usize].name)
                 );
                 self.error(sp, msg);
             } else if let Some((d, f)) = self.private_field_in(z) {

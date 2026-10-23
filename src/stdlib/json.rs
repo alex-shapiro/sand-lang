@@ -1063,6 +1063,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
             }
             TypeDesc::Range => self.decode_range(),
             TypeDesc::Unsupported(name) => Err(self.unsupported(&format!("values of type {name}"))),
+            TypeDesc::Param(_) => Err(Error::Ctl(Ctl::internal("json.decode: a type parameter without a description"))),
         }
     }
 

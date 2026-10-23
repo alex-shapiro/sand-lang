@@ -180,6 +180,25 @@ fn types_methods_and_extend_across_inputs() {
 }
 
 #[test]
+fn reflect_descriptions_from_type_parameters_across_inputs() {
+    let mut r = Repl::new();
+    r.ok(r#"import json
+struct P { x: int }
+fn all<reflect T: Encode>(s: str) -> Result<[T]> { json.decode(s) }"#);
+    // The templates of a failed input are removed with it.
+    r.compile_error(
+        r#"fn opt<reflect T: Encode>(s: str) -> Result<T?> { json.decode(s) }
+let o: P? = opt("null")?
+let bad: int = "no""#,
+    );
+    r.ok(r#"let a: [P] = all("[{\"x\": 1}]")?"#);
+    assert_eq!(r.value("a"), "[P { x: 1 }]");
+    r.ok(r#"fn opt<reflect T: Encode>(s: str) -> Result<[T?]> { json.decode(s) }
+let b: [[P]?] = opt("[null, [{\"x\": 2}]]")?"#);
+    assert_eq!(r.value("b"), "[None, Some([P { x: 2 }])]");
+}
+
+#[test]
 fn traits_and_impls_across_inputs() {
     let mut r = Repl::new();
     r.ok("trait Describe {\n    fn describe(self) -> str\n    fn shout(self) -> str { self.describe().to_upper() }\n}");

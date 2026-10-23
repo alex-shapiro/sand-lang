@@ -1,7 +1,8 @@
 //! Property tests for the type arguments of `json.decode`: rejected at
-//! compile time unless `Encode`, and decoded with run-time errors only for
-//! map keys that JSON object keys cannot hold; and the constant field defaults
-//! that fill missing fields.
+//! compile time unless `Encode`, decoded with run-time errors only for map
+//! keys that JSON object keys cannot hold, and decoded the same through a
+//! function that builds them from its `reflect` type parameter; and the
+//! constant field defaults that fill missing fields.
 
 use super::{check, int, int_lit, str_lit};
 use proptest::prelude::*;
@@ -29,6 +30,9 @@ enum Ty {
     Option(Box<Ty>),
     Tuple(Vec<Ty>),
     Wrap(Box<Ty>),
+    Tree(Box<Ty>),
+    /// The type parameter `T` of a function.
+    Param,
 }
 
 impl Ty {
@@ -54,6 +58,34 @@ impl Ty {
             Ty::Option(t) => format!("{}?", t.sand()),
             Ty::Tuple(ts) => format!("({})", ts.iter().map(Ty::sand).collect::<Vec<_>>().join(", ")),
             Ty::Wrap(t) => format!("Wrap<{}>", t.sand()),
+            Ty::Tree(t) => format!("Tree<{}>", t.sand()),
+            Ty::Param => "T".into(),
+        }
+    }
+
+    /// `self` with `arg` for `Ty::Param`.
+    fn subst(&self, arg: &Ty) -> Ty {
+        let b = |t: &Ty| Box::new(t.subst(arg));
+        match self {
+            Ty::Param => arg.clone(),
+            Ty::List(t) => Ty::List(b(t)),
+            Ty::Set(t) => Ty::Set(b(t)),
+            Ty::Map(k, v) => Ty::Map(b(k), b(v)),
+            Ty::Option(t) => Ty::Option(b(t)),
+            Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| t.subst(arg)).collect()),
+            Ty::Wrap(t) => Ty::Wrap(b(t)),
+            Ty::Tree(t) => Ty::Tree(b(t)),
+            t => t.clone(),
+        }
+    }
+
+    fn has_param(&self) -> bool {
+        match self {
+            Ty::Param => true,
+            Ty::List(t) | Ty::Set(t) | Ty::Option(t) | Ty::Wrap(t) | Ty::Tree(t) => t.has_param(),
+            Ty::Map(k, v) => k.has_param() || v.has_param(),
+            Ty::Tuple(ts) => ts.iter().any(Ty::has_param),
+            _ => false,
         }
     }
 
@@ -61,7 +93,7 @@ impl Ty {
     fn encodable(&self) -> bool {
         match self {
             Ty::Fn | Ty::Task => false,
-            Ty::List(t) | Ty::Set(t) | Ty::Option(t) | Ty::Wrap(t) => t.encodable(),
+            Ty::List(t) | Ty::Set(t) | Ty::Option(t) | Ty::Wrap(t) | Ty::Tree(t) => t.encodable(),
             Ty::Map(k, v) => k.encodable() && v.encodable(),
             Ty::Tuple(ts) => ts.iter().all(Ty::encodable),
             _ => true,
@@ -73,7 +105,7 @@ impl Ty {
     fn keys_decodable(&self) -> bool {
         match self {
             Ty::Keyed => false,
-            Ty::List(t) | Ty::Set(t) | Ty::Option(t) | Ty::Wrap(t) => t.keys_decodable(),
+            Ty::List(t) | Ty::Set(t) | Ty::Option(t) | Ty::Wrap(t) | Ty::Tree(t) => t.keys_decodable(),
             Ty::Map(k, v) => matches!(**k, Ty::Int | Ty::Bool | Ty::Str | Ty::Duration | Ty::UnitEnum) && v.keys_decodable(),
             Ty::Tuple(ts) => ts.iter().all(Ty::keys_decodable),
             _ => true,
@@ -90,10 +122,18 @@ fn hashable() -> impl Strategy<Value = Ty> {
 }
 
 fn ty() -> impl Strategy<Value = Ty> {
+    ty_with(0, 1)
+}
+
+/// Types in which `Ty::Param` and the types that are not `Encode` have the
+/// weights `param` and `bad` among the leaves.
+fn ty_with(param: u32, bad: u32) -> impl Strategy<Value = Ty> {
     let leaf = prop_oneof![
-        3 => prop_oneof![Just(Ty::Int), Just(Ty::Float), Just(Ty::Bool), Just(Ty::Str), Just(Ty::Bytes), Just(Ty::Unit), Just(Ty::Duration)],
-        2 => prop_oneof![Just(Ty::Json), Just(Ty::UnitEnum), Just(Ty::Rec)],
-        1 => prop_oneof![Just(Ty::Fn), Just(Ty::Task), Just(Ty::Range), Just(Ty::Keyed)],
+        6 => prop_oneof![Just(Ty::Int), Just(Ty::Float), Just(Ty::Bool), Just(Ty::Str), Just(Ty::Bytes), Just(Ty::Unit), Just(Ty::Duration)],
+        4 => prop_oneof![Just(Ty::Json), Just(Ty::UnitEnum), Just(Ty::Rec)],
+        1 => prop_oneof![Just(Ty::Range), Just(Ty::Keyed)],
+        bad => prop_oneof![Just(Ty::Fn), Just(Ty::Task)],
+        param => Just(Ty::Param),
     ];
     leaf.prop_recursive(3, 12, 3, |inner| {
         prop_oneof![
@@ -102,10 +142,15 @@ fn ty() -> impl Strategy<Value = Ty> {
             (hashable(), inner.clone()).prop_map(|(k, v)| Ty::Map(Box::new(k), Box::new(v))),
             inner.clone().prop_map(|t| Ty::Option(Box::new(t))),
             prop::collection::vec(inner.clone(), 2..4).prop_map(Ty::Tuple),
-            inner.prop_map(|t| Ty::Wrap(Box::new(t))),
+            inner.clone().prop_map(|t| Ty::Wrap(Box::new(t))),
+            inner.prop_map(|t| Ty::Tree(Box::new(t))),
         ]
     })
 }
+
+/// The declarations that the types of `ty` refer to.
+const TYPES: &str = "enum Unit { A, B }\nstruct Rec { a: int, b: str? }\nstruct Keyed { m: [Keyed: int]? }\nstruct Wrap<T> { v: T }\n\
+                     struct Tree<T> { v: T, kids: [Tree<T>] = [] }";
 
 const INPUTS: [&str; 14] = [
     "null",
@@ -131,7 +176,7 @@ proptest! {
     fn json_decode_accepts_exactly_the_encodable_types(t in ty()) {
         let inputs: Vec<String> = INPUTS.iter().map(|s| format!("{s:?}")).collect();
         let src = format!(
-            "import json\nenum Unit {{ A, B }}\nstruct Rec {{ a: int, b: str? }}\nstruct Keyed {{ m: [Keyed: int]? }}\nstruct Wrap<T> {{ v: T }}\n\
+            "import json\n{TYPES}\n\
              fn read(s: str) -> Result<{}> {{ json.decode(s) }}\n\
              for s in [{}] {{\n    match read(s) {{\n        Ok(_) => print(\"ok\")\n        Err(e) => print(e.kind)\n    }}\n}}",
             t.sand(),
@@ -153,6 +198,106 @@ proptest! {
                 prop_assert!(ds.iter().all(|d| !d.message.contains("``")), "{ds:?}\n{src}");
             }
             Err(e) => prop_assert!(false, "{e}\n{src}"),
+        }
+    }
+}
+
+/// Types that contain `Ty::Param`.
+fn context() -> impl Strategy<Value = Ty> {
+    ty_with(10, 0).prop_map(|t| if t.has_param() { t } else { Ty::Tuple(vec![t, Ty::Param]) })
+}
+
+/// Deterministic choices for [`json_text`].
+struct Rng(u64);
+
+impl Rng {
+    fn below(&mut self, n: u64) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0 % n
+    }
+}
+
+/// A JSON text for a value of type `t`, except that one in `1 / wrong` of
+/// the values in it is of another type.
+fn json_text(t: &Ty, rng: &mut Rng, depth: u32, wrong: u64) -> String {
+    if rng.below(wrong) == 0 {
+        return ["7", "\"zzz\"", "null", "[]", "{}"][rng.below(5) as usize].into();
+    }
+    let many = |t: &Ty, rng: &mut Rng| {
+        let n = if depth > 3 { 0 } else { rng.below(3) };
+        (0..n).map(|_| json_text(t, rng, depth + 1, wrong)).collect::<Vec<_>>()
+    };
+    match t {
+        Ty::Int | Ty::Duration => (rng.below(5) as i64 - 2).to_string(),
+        Ty::Float => ["1.5", "-2", "0.25"][rng.below(3) as usize].into(),
+        Ty::Bool => ["true", "false"][rng.below(2) as usize].into(),
+        Ty::Str => ["\"a\"", "\"b\"", "\"\""][rng.below(3) as usize].into(),
+        Ty::Bytes => ["\"AQI=\"", "\"\""][rng.below(2) as usize].into(),
+        Ty::Unit => "null".into(),
+        Ty::Json => ["{\"a\": [1, null]}", "2", "\"s\""][rng.below(3) as usize].into(),
+        Ty::UnitEnum => ["\"A\"", "\"B\""][rng.below(2) as usize].into(),
+        Ty::Rec => ["{\"a\": 1, \"b\": \"x\"}", "{\"a\": 2}"][rng.below(2) as usize].into(),
+        Ty::Keyed => ["{}", "{\"m\": null}"][rng.below(2) as usize].into(),
+        Ty::Range => ["{\"start\": 1, \"end\": 3}", "{\"start\": 0, \"end\": 0, \"inclusive\": true}"][rng.below(2) as usize].into(),
+        Ty::Fn | Ty::Task | Ty::Param => "null".into(),
+        Ty::List(e) | Ty::Set(e) => format!("[{}]", many(e, rng).join(", ")),
+        Ty::Map(k, v) => {
+            let key = match **k {
+                Ty::Int | Ty::Duration => "\"1\"",
+                Ty::Bool => "\"true\"",
+                Ty::UnitEnum => "\"A\"",
+                _ => "\"k\"",
+            };
+            let entries = many(v, rng).into_iter().map(|v| format!("{key}: {v}")).collect::<Vec<_>>();
+            format!("{{{}}}", entries.join(", "))
+        }
+        Ty::Option(e) => {
+            if rng.below(3) == 0 {
+                "null".into()
+            } else {
+                json_text(e, rng, depth + 1, wrong)
+            }
+        }
+        Ty::Tuple(ts) => format!("[{}]", ts.iter().map(|t| json_text(t, rng, depth + 1, wrong)).collect::<Vec<_>>().join(", ")),
+        Ty::Wrap(e) => format!("{{\"v\": {}}}", json_text(e, rng, depth + 1, wrong)),
+        Ty::Tree(e) => {
+            let kids = many(t, rng);
+            let v = json_text(e, rng, depth + 1, wrong);
+            if kids.is_empty() && rng.below(2) == 0 {
+                format!("{{\"v\": {v}}}")
+            } else {
+                format!("{{\"v\": {v}, \"kids\": [{}]}}", kids.join(", "))
+            }
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    #[test]
+    fn reflect_type_parameters_build_descriptions_of_types_that_contain_them(ctx in context(), arg in ty_with(0, 0), seed in 1..u64::MAX) {
+        let full = ctx.subst(&arg);
+        let mut rng = Rng(seed);
+        let texts: Vec<String> = (0..8).map(|i| format!("{:?}", json_text(&full, &mut rng, 0, [1000, 12][i % 2]))).collect();
+        let src = format!(
+            "import json\n{TYPES}\n\
+             fn direct(s: str) -> Result<{}> {{ json.decode(s) }}\n\
+             fn via<reflect T: Encode>(s: str) -> Result<{}> {{ json.decode(s) }}\n\
+             fn read(s: str) -> Result<{}> {{ via(s) }}\n\
+             for s in [{}] {{\n    print(direct(s))\n    print(read(s))\n}}",
+            full.sand(),
+            ctx.sand(),
+            full.sand(),
+            texts.join(", ")
+        );
+        let r = super::run(&src)?;
+        prop_assert!(r.failure.is_none(), "{:?}\n{}", r.failure, src);
+        let lines: Vec<&str> = r.stdout.lines().collect();
+        for pair in lines.chunks(2) {
+            prop_assert_eq!(pair[0], pair[1], "{}", src);
         }
     }
 }

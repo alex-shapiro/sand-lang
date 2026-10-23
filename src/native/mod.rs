@@ -590,7 +590,7 @@ impl<T: ObjectType> Val<T> {
 impl<const N: u8> Reflect<N> {
     pub fn desc(self, heap: &Heap) -> Result<&Arc<TypeDesc>, Ctl> {
         match heap.get(self.raw()) {
-            Obj::TypeDesc(d) => Ok(d),
+            Obj::TypeDesc(d) => Ok(&d.desc),
             _ => Err(Ctl::internal("a native function expected a type description")),
         }
     }

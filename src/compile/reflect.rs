@@ -24,7 +24,7 @@
 use crate::check::CheckedProgram;
 use crate::check::persist::PMap;
 use crate::types::{FnId, Opaque, Ty, TyList, TypeArena, TypeDefId, TypeDefKind, TypeId, TypePrinter};
-use crate::vm::value::{FieldDefault, TypeDesc};
+use crate::vm::value::{DescTemplate, FieldDefault, MAX_BUILT_DEPTH, TypeDesc};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -49,6 +49,8 @@ pub(crate) struct DescCache {
     closed: PMap<Key, Arc<TypeDesc>>,
     /// The constant holding the description of each reflected type.
     consts: PMap<Key, u32>,
+    /// The template of each reflected type with type parameters.
+    templates: PMap<Key, u32>,
     /// The function that fills each field (struct definition, field index)
     /// with its computed default (see [`DescSink::field_fill`]).
     field_fills: PMap<(TypeDefId, u32), u32>,
@@ -62,6 +64,8 @@ pub(crate) struct DescCache {
 pub(crate) trait DescSink {
     /// Adds the constant holding `desc` and returns its index.
     fn constant(&mut self, desc: Arc<TypeDesc>) -> u32;
+    /// Adds template `t` and returns its index.
+    fn template(&mut self, t: DescTemplate) -> u32;
     /// Adds the function (with the struct as its one capture) that sets field
     /// `index` of struct `def` to the value of the field's default `helper`,
     /// and returns its proto, or `None` if `helper` has no code.
@@ -92,6 +96,36 @@ impl DescCache {
         let desc = self.describe(cp, arena, t, sink)?;
         let k = sink.constant(desc);
         self.consts.insert(key, k);
+        Some(k)
+    }
+
+    /// The index of the template describing `t`, whose type parameters are
+    /// `params`, adding it to `sink` if needed; `None` if the description is
+    /// too large.
+    pub(crate) fn template_for(
+        &mut self,
+        cp: &CheckedProgram,
+        arena: &mut TypeArena,
+        t: TypeId,
+        params: Vec<u32>,
+        sink: &mut dyn DescSink,
+    ) -> Option<u32> {
+        let mut key = Vec::new();
+        type_key(arena, t, &mut key);
+        self.total = self.total.saturating_add(key.len());
+        if self.total > MAX_TOTAL_DESC_NODES {
+            return None;
+        }
+        if let Some(&k) = self.templates.get(&key) {
+            return Some(k);
+        }
+        let template = DescTemplate::new(self.describe(cp, arena, t, sink)?, params);
+        self.total = self.total.saturating_add(template.size());
+        if template.depth() > MAX_BUILT_DEPTH || self.total > MAX_TOTAL_DESC_NODES {
+            return None;
+        }
+        let k = sink.template(template);
+        self.templates.insert(key, k);
         Some(k)
     }
 
@@ -251,6 +285,7 @@ impl Builder<'_, '_> {
                 }
                 self.named(t, d, args)
             }
+            Ty::Param(p) => leaf(TypeDesc::Param(p)),
             _ => leaf(TypeDesc::Unsupported(self.show(t))),
         }
     }
@@ -268,6 +303,13 @@ impl Builder<'_, '_> {
 
     fn show(&self, t: TypeId) -> String {
         TypePrinter::new(self.arena, &self.cp.types, &self.cp.params, &self.cp.syms, self.cp.wk).show(t)
+    }
+
+    /// The name of instance `t`, in which instantiation replaces the type
+    /// parameters (see [`DescTemplate`]).
+    fn instance_name(&self, t: TypeId) -> String {
+        TypePrinter { mark_params: true, ..TypePrinter::new(self.arena, &self.cp.types, &self.cp.params, &self.cp.syms, self.cp.wk) }
+            .show(t)
     }
 
     /// The description of the struct or enum instance `t` = `d<args>`.
@@ -289,7 +331,12 @@ impl Builder<'_, '_> {
             return (desc.clone(), Some(*x));
         }
         let def = &self.cp.types[d as usize];
-        let name = self.show(t);
+        // Instantiation replaces the type parameters in the names of structs
+        // and enums only.
+        let name = match def.kind {
+            TypeDefKind::Opaque(_) => self.show(t),
+            _ => self.instance_name(t),
+        };
         if !self.charge(name.len() / 8) {
             return (Arc::new(TypeDesc::Unit), None);
         }

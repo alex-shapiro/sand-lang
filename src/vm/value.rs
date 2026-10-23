@@ -1145,6 +1145,9 @@ pub enum TypeDesc {
     Recur(u32),
     /// A function, task, channel, or native object type.
     Unsupported(String),
+    /// A type parameter in a [`DescTemplate`]. A native never receives a
+    /// description that contains one.
+    Param(u32),
 }
 
 impl TypeDesc {
@@ -1169,7 +1172,188 @@ impl TypeDesc {
                 name.clone()
             }
             TypeDesc::Recur(id) => recur(*id),
+            TypeDesc::Param(_) => "_".into(),
         }
+    }
+}
+
+/// A type description on the heap.
+#[derive(Clone)]
+pub struct DescObj {
+    pub desc: Arc<TypeDesc>,
+    /// Bytes of the nodes that instantiations of templates built (0 for a
+    /// constant).
+    pub built: u32,
+    /// The length of the longest path of such nodes.
+    pub depth: u16,
+}
+
+/// The longest path of nodes that instantiations of templates build into
+/// one description. Deeper descriptions (made by a recursive function that
+/// passes `[T]` on as `T`) abort with kind `"limit"`.
+pub const MAX_BUILT_DEPTH: usize = 256;
+
+/// A type description with type parameters ([`TypeDesc::Param`]), which
+/// `Op::Describe` instantiates with the descriptions of its arguments.
+#[derive(Clone, Debug)]
+pub struct DescTemplate {
+    desc: Arc<TypeDesc>,
+    /// The type parameters, in the order of the arguments.
+    params: Vec<u32>,
+    /// The nodes of `desc` that contain a type parameter, by address.
+    spine: std::collections::HashSet<usize, FxBuild>,
+    /// The length of the longest path of nodes in `spine`.
+    depth: usize,
+}
+
+fn addr(d: &Arc<TypeDesc>) -> usize {
+    Arc::as_ptr(d) as usize
+}
+
+impl DescTemplate {
+    /// The template of `desc` with arguments for `params`.
+    pub fn new(desc: Arc<TypeDesc>, params: Vec<u32>) -> DescTemplate {
+        // The depth of the parameters in each node (0: none), by address.
+        fn depth(d: &Arc<TypeDesc>, seen: &mut FxHashMap<usize, usize>) -> usize {
+            if let Some(&n) = seen.get(&addr(d)) {
+                return n;
+            }
+            let mut deepest = |ds: &mut dyn Iterator<Item = &Arc<TypeDesc>>| ds.map(|x| depth(x, seen)).max().unwrap_or(0);
+            let below = match &**d {
+                TypeDesc::Param(_) => 0,
+                TypeDesc::List(e) | TypeDesc::Set(e, _) | TypeDesc::Option(e) => deepest(&mut std::iter::once(e)),
+                TypeDesc::Map(k, v) => deepest(&mut [k, v].into_iter()),
+                TypeDesc::Tuple(ts) => deepest(&mut ts.iter()),
+                TypeDesc::Struct { fields, .. } => deepest(&mut fields.iter().map(|f| &f.1)),
+                TypeDesc::Enum { variants, .. } => deepest(&mut variants.iter().flat_map(|v| &v.2)),
+                _ => {
+                    seen.insert(addr(d), 0);
+                    return 0;
+                }
+            };
+            let n = if below > 0 || matches!(**d, TypeDesc::Param(_)) { below + 1 } else { 0 };
+            seen.insert(addr(d), n);
+            n
+        }
+        let mut seen = FxHashMap::default();
+        let depth = depth(&desc, &mut seen);
+        let spine = seen.into_iter().filter(|&(_, n)| n > 0).map(|(a, _)| a).collect();
+        DescTemplate { desc, params, spine, depth }
+    }
+
+    /// The number of type parameters, which is the number of arguments.
+    pub fn arity(&self) -> usize {
+        self.params.len()
+    }
+
+    /// The length of the longest path of nodes that instantiation builds.
+    pub fn depth(&self) -> usize {
+        self.depth
+    }
+
+    /// The number of nodes that instantiation builds.
+    pub fn size(&self) -> usize {
+        self.spine.len()
+    }
+
+    /// The description with `args[i]` for parameter `self.params[i]`.
+    /// Fails with kind `"limit"` if it is deeper than [`MAX_BUILT_DEPTH`].
+    pub(crate) fn instantiate(&self, args: &[&DescObj]) -> Result<DescObj, crate::vm::Ctl> {
+        let depth = self.depth + args.iter().map(|a| a.depth as usize).max().unwrap_or(0);
+        if depth > MAX_BUILT_DEPTH {
+            return Err(crate::vm::Ctl::fail("limit", "the description of a type argument is nested too deeply"));
+        }
+        if args.len() != self.params.len() {
+            return Err(crate::vm::Ctl::internal("a type description template has the wrong number of arguments"));
+        }
+        let mut b = Instance { t: self, args, memo: FxHashMap::default(), built: 0, missing: false };
+        let desc = b.node(&self.desc);
+        if b.missing {
+            return Err(crate::vm::Ctl::internal("a type description template has no argument for a type parameter"));
+        }
+        let built = args.iter().map(|a| a.built as usize).sum::<usize>().saturating_add(b.built);
+        Ok(DescObj { desc, built: u32::try_from(built).unwrap_or(u32::MAX), depth: depth as u16 })
+    }
+}
+
+/// One instantiation of a [`DescTemplate`].
+struct Instance<'a> {
+    t: &'a DescTemplate,
+    args: &'a [&'a DescObj],
+    /// The nodes built, by the address of their template node.
+    memo: FxHashMap<usize, Arc<TypeDesc>>,
+    /// Bytes of the nodes built.
+    built: usize,
+    /// Whether a parameter has no argument.
+    missing: bool,
+}
+
+impl Instance<'_> {
+    fn arg(&mut self, p: u32) -> Arc<TypeDesc> {
+        match self.t.params.iter().position(|&q| q == p) {
+            Some(i) => self.args[i].desc.clone(),
+            None => {
+                self.missing = true;
+                Arc::new(TypeDesc::Param(p))
+            }
+        }
+    }
+
+    /// `name` with each [`crate::types::param_mark`] replaced by the name of
+    /// its argument.
+    fn name(&mut self, name: &str) -> String {
+        let mut out = String::new();
+        let mut parts = name.split(crate::types::PARAM_MARK);
+        out.push_str(parts.next().unwrap_or_default());
+        while let (Some(p), Some(text)) = (parts.next(), parts.next()) {
+            if let Ok(p) = p.parse() {
+                out.push_str(&self.arg(p).format(&|_| String::new()));
+            }
+            out.push_str(text);
+        }
+        self.built += out.len();
+        out
+    }
+
+    fn node(&mut self, d: &Arc<TypeDesc>) -> Arc<TypeDesc> {
+        if !self.t.spine.contains(&addr(d)) {
+            return d.clone();
+        }
+        if let Some(x) = self.memo.get(&addr(d)) {
+            return x.clone();
+        }
+        let new = match &**d {
+            TypeDesc::Param(p) => return self.arg(*p),
+            TypeDesc::List(e) => TypeDesc::List(self.node(e)),
+            TypeDesc::Set(e, fill) => TypeDesc::Set(self.node(e), *fill),
+            TypeDesc::Option(e) => TypeDesc::Option(self.node(e)),
+            TypeDesc::Map(k, v) => TypeDesc::Map(self.node(k), self.node(v)),
+            TypeDesc::Tuple(ts) => TypeDesc::Tuple(ts.iter().map(|t| self.node(t)).collect()),
+            TypeDesc::Struct { id, def, name, fields, rust } => {
+                let fields: Vec<FieldDesc> = fields.iter().map(|(n, t, d)| (n.clone(), self.node(t), d.clone())).collect();
+                self.built += fields.iter().map(|f| f.0.len() + std::mem::size_of::<FieldDesc>()).sum::<usize>();
+                TypeDesc::Struct { id: *id, def: *def, name: self.name(name), fields, rust: *rust }
+            }
+            TypeDesc::Enum { id, name, variants, rust } => {
+                let variants: Vec<VariantDesc> = variants
+                    .iter()
+                    .map(|(n, rt, ts, names)| (n.clone(), *rt, ts.iter().map(|t| self.node(t)).collect(), names.clone()))
+                    .collect();
+                self.built += variants
+                    .iter()
+                    .map(|v| {
+                        let names = v.3.iter().flatten().map(|n| n.len() + std::mem::size_of::<String>()).sum::<usize>();
+                        v.0.len() + v.2.len() * std::mem::size_of::<Arc<TypeDesc>>() + names + std::mem::size_of::<VariantDesc>()
+                    })
+                    .sum::<usize>();
+                TypeDesc::Enum { id: *id, name: self.name(name), variants, rust: *rust }
+            }
+            other => other.clone(),
+        };
+        self.built += std::mem::size_of::<TypeDesc>() + 2 * std::mem::size_of::<usize>();
+        let new = Arc::new(new);
+        self.memo.insert(addr(d), new.clone());
+        new
     }
 }
 
@@ -1194,6 +1378,7 @@ impl std::fmt::Debug for TypeDesc {
             TypeDesc::Value { name, .. } => write!(f, "{name}"),
             TypeDesc::Recur(id) => write!(f, "Recur(#{id})"),
             TypeDesc::Unsupported(name) => write!(f, "Unsupported({name})"),
+            TypeDesc::Param(p) => write!(f, "Param({p})"),
         }
     }
 }
@@ -1247,7 +1432,7 @@ pub enum Obj {
     Native(Box<dyn crate::native::DynObject>),
     Value(Box<dyn ValueObj>),
     Packed(&'static PackedType, [u64; 2]),
-    TypeDesc(Arc<TypeDesc>),
+    TypeDesc(DescObj),
 }
 
 impl std::fmt::Debug for Obj {
@@ -1273,7 +1458,7 @@ impl std::fmt::Debug for Obj {
             Obj::Native(n) => write!(f, "Native({})", n.type_name()),
             Obj::Value(v) => write!(f, "Value({})", v.type_name()),
             Obj::Packed(t, _) => write!(f, "Packed({})", t.name),
-            Obj::TypeDesc(t) => write!(f, "TypeDesc({t:?})"),
+            Obj::TypeDesc(t) => write!(f, "TypeDesc({:?})", t.desc),
         }
     }
 }
@@ -1311,7 +1496,7 @@ impl Obj {
             }
             Obj::Native(n) => n.size(),
             Obj::Value(v) => v.size(),
-            Obj::TypeDesc(_) => 64,
+            Obj::TypeDesc(t) => 64 + t.built as usize,
         }
     }
 

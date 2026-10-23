@@ -413,6 +413,22 @@ impl TypeArena {
     pub fn mentions(&self, t: TypeId, p: ParamId) -> bool {
         self.has_params(t) && self.any(t, &mut |x| x == Ty::Param(p))
     }
+
+    /// The type parameters in `t`, in the order in which they first occur.
+    pub fn params_of(&self, t: TypeId) -> Vec<ParamId> {
+        let mut out = Vec::new();
+        if self.has_params(t) {
+            self.any(t, &mut |x| {
+                if let Ty::Param(p) = x
+                    && !out.contains(&p)
+                {
+                    out.push(p);
+                }
+                false
+            });
+        }
+        out
+    }
 }
 
 /// An interned name.
@@ -716,11 +732,24 @@ pub struct TypePrinter<'a> {
     pub subst: &'a [Option<TypeId>],
     /// Names for inference variables shown as type parameters (others are `_`).
     pub var_names: &'a [(VarId, String)],
+    /// Shows each type parameter as a mark that
+    /// [`TypeDesc::Param`](crate::vm::value::TypeDesc::Param) instantiation
+    /// replaces (see [`param_mark`]).
+    pub mark_params: bool,
 }
+
+/// The text that stands for type parameter `p` in the names of
+/// [`TypeDesc`](crate::vm::value::TypeDesc) templates.
+pub fn param_mark(p: ParamId) -> String {
+    format!("{PARAM_MARK}{p}{PARAM_MARK}")
+}
+
+/// Delimits a [`param_mark`]. Type names cannot contain it.
+pub const PARAM_MARK: char = '\u{E000}';
 
 impl<'a> TypePrinter<'a> {
     pub fn new(arena: &'a TypeArena, defs: &'a PVec<TypeDef>, params: &'a PVec<ParamInfo>, syms: &'a Symbols, wk: WellKnown) -> Self {
-        TypePrinter { arena, defs, params, syms, wk, subst: &[], var_names: &[] }
+        TypePrinter { arena, defs, params, syms, wk, subst: &[], var_names: &[], mark_params: false }
     }
 
     pub fn show(&self, t: TypeId) -> String {
@@ -786,7 +815,7 @@ impl Tagged<'_, '_> {
     }
 
     fn write(&self, s: &mut String, t: TypeId) {
-        let TypePrinter { arena, defs, params, syms, wk, var_names, .. } = self.p;
+        let TypePrinter { arena, defs, params, syms, wk, var_names, mark_params, .. } = self.p;
         let t = self.p.resolve(t);
         match arena.get(t) {
             Ty::Int => s.push_str("int"),
@@ -803,6 +832,7 @@ impl Tagged<'_, '_> {
                 Some((_, n)) => s.push_str(n),
                 None => s.push('_'),
             },
+            Ty::Param(p) if *mark_params => s.push_str(&param_mark(p)),
             Ty::Param(p) => s.push_str(params.get(p as usize).map(|p| syms.str(p.name)).unwrap_or("?")),
             Ty::List(t) => {
                 s.push('[');
