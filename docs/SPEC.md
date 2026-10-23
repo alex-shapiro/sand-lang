@@ -307,6 +307,13 @@ fn greet(name: str, greeting: str = "Hello") {
   given in a trailing `where` clause (`fn sum(self) -> T where T: Num`), which
   may also constrain the type parameters of an enclosing generic `extend`
   block, struct or enum for that one method.
+- A type parameter marked `reflect` (`fn load<reflect T: Encode>(text: str)
+  -> Result<T>`) receives a runtime description of its type argument, which
+  the function can pass on to another `reflect` type parameter, such as that
+  of `json.decode`. At each call, the type argument must be a concrete type
+  or a `reflect` type parameter of the calling function. A function with a
+  `reflect` type parameter cannot be a function value, and trait and impl
+  methods cannot have one.
 - Functions may be declared inside blocks; such local functions may capture
   enclosing variables and may call themselves recursively. Local functions
   declared consecutively in the same block may call each other.
@@ -423,10 +430,8 @@ matches the Rust function signature (§16.3). User scripts cannot declare
 pub native fn parse(text: str) -> Result<Json>
 ```
 
-If a type parameter on a `native fn` is marked `reflect`
-(`native fn decode<reflect T>(text: str) -> Result<T>`), the compiler passes a
-runtime type description of `T` to the function, and `T` must be a concrete
-type at the call site.
+A native function receives the runtime description of each `reflect` type
+parameter (§4.1) as a `Reflect<N>` argument (§16.3).
 
 Each type parameter on a `native fn` declaration must declare the built-in
 bounds required by the Rust function (§16.3).
@@ -2021,7 +2026,7 @@ pending, then waits; the run's limits and interrupts apply while it waits.
 pub enum Json { Null, Bool(bool), Int(int), Float(float), Str(str), Arr([Json]), Obj([str: Json]) }
 pub native fn parse(text: str) -> Result<Json>
 pub native fn encode<T: Encode>(value: T, indent: int = 0) -> str
-pub native fn decode<reflect T: Encode>(text: str) -> Result<T>
+pub fn decode<reflect T: Encode>(text: str) -> Result<T>
 pub native fn to_json<T: Encode>(value: T) -> Json
 ```
 
@@ -2060,14 +2065,17 @@ and a value type as its text form. Encoding any other key aborts with kind
 
 `decode<T>` is the inverse for types built from those components. Decoding a
 map whose key type is not one of those fails with kind `"invalid"`. If the
-object does not contain a struct field, the field takes its declared default
-if the default is a constant: an expression built only from literals, ranges
-of ints, tuples, lists, maps, variants, and struct literals (`(80, 24)`,
-`[Shape.Dot]`, `Server { port: 81 }`). An optional field without a default
-takes `None`. In all other cases decoding fails with kind `"parse"` and a
-message naming the path (e.g. `$.items[2].name: expected str`), because
-`decode` cannot compute a default that is not a constant (`Some(f())`).
-Parsing is limited to a nesting depth of 512.
+object does not contain a struct field, the field takes its declared default,
+as in a struct literal. An optional field without a default takes `None`. Any
+other missing field or type mismatch fails with kind `"parse"` and a message
+naming the path (e.g. `$.items[2].name: expected str`). Parsing is limited to
+a nesting depth of 512.
+
+`decode` builds a constant default (built only from literals, ranges of
+ints, tuples, lists, maps, variants, and struct literals) directly. It runs
+the other defaults (`id: str = uuid.v4()`) only after the whole text decodes
+without error: the defaults of an object run in declaration order, after
+those of the objects inside it.
 
 ### 13.8 `log`
 

@@ -191,10 +191,10 @@ pub fn cents(n: int) -> Money { Money { cents: n } }
 --- error
 2: method `to_str` of `money.Money` is private
 
-=== only natives take type descriptions
-fn id<reflect T>(x: T) -> T { x }
+=== only functions take type descriptions
+struct Box<reflect T> { x: T }
 --- error
-1: only the type parameters of a `native fn` can be `reflect`
+1: only the type parameters of a function can be `reflect`
 
 === private fields cannot be assigned in other modules
 import "./account.sand"

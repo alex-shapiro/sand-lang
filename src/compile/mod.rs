@@ -1686,6 +1686,15 @@ impl<'a> Compiler<'a> {
                 };
                 self.emit(f, Op::LoadConst { dst, k });
             }
+            HKind::TypeDesc(t) => {
+                let mut sink = DescCode { cp: self.cp, prog: &mut *self.prog, fn_protos: &self.fn_protos };
+                match self.descs.const_for(self.cp, &mut self.arena, *t, &mut sink) {
+                    Some(k) => {
+                        self.emit(f, Op::LoadConst { dst, k });
+                    }
+                    None => self.errors.push(Diag::error(e.span, "type too large to describe at runtime")),
+                }
+            }
             HKind::VariantFn { rt_id, arity } => {
                 let p = self.variant_wrapper(*rt_id, *arity, f.file);
                 let k = self.const_idx(Const::Fn(p));
@@ -2057,7 +2066,7 @@ impl<'a> Compiler<'a> {
                 }
                 f.next_reg = mark;
             }
-            HKind::CallNative { native, args, reflect } => {
+            HKind::CallNative { native, args } => {
                 if let (Some(&op @ (Inline::MapGet | Inline::MapHas)), [HArg::Expr(m), HArg::Expr(k)]) =
                     (self.inline.get(native), args.as_slice())
                     && let HKind::Tuple(items) = &k.kind
@@ -2134,26 +2143,14 @@ impl<'a> Compiler<'a> {
                     return;
                 }
                 let mark = f.next_reg;
-                if let ([HArg::Expr(x)], true) = (args.as_slice(), reflect.is_empty()) {
+                if let [HArg::Expr(x)] = args.as_slice() {
                     let r = self.expr_reg(f, x);
                     self.set_line(f, e.span);
                     self.call_native(f, r, *native, dst);
                     f.next_reg = mark;
                     return;
                 }
-                let base = self.call_args(f, args, reflect.len());
-                for (i, t) in reflect.iter().enumerate() {
-                    let prog = &mut *self.prog;
-                    let add = |desc| {
-                        prog.consts.push(Const::TypeDesc(desc));
-                        (prog.consts.len() - 1) as u32
-                    };
-                    let Some(k) = self.descs.const_for(self.cp, &mut self.arena, *t, add) else {
-                        self.errors.push(Diag::error(e.span, "type too large to describe at runtime"));
-                        continue;
-                    };
-                    self.emit(f, Op::LoadConst { dst: base + i as Reg, k });
-                }
+                let base = self.call_args(f, args, 0);
                 self.set_line(f, e.span);
                 self.call_native(f, base, *native, dst);
                 f.next_reg = mark;
@@ -4267,6 +4264,63 @@ fn walk_pruned<'e>(e: &'e HExpr, f: &mut impl FnMut(&'e HExpr) -> bool) {
             }
         }
         _ => {}
+    }
+}
+
+/// Adds the constants and functions of type descriptions to a program.
+struct DescCode<'p> {
+    cp: &'p CheckedProgram,
+    prog: &'p mut Program,
+    fn_protos: &'p PVec<Option<u32>>,
+}
+
+impl DescCode<'_> {
+    /// Adds a function without parameters whose `captures` captured values
+    /// are in its first registers.
+    fn add(&mut self, file: u32, captures: usize, nregs: u16, code: Vec<Op>) -> u32 {
+        self.prog.protos.push(Proto {
+            name: FILL_PROTO.into(),
+            file,
+            nparams: 0,
+            nregs,
+            lines: vec![0; code.len()],
+            code,
+            captures: vec![NO_REG; captures],
+            cleanups: Vec::new(),
+            sites: Vec::new(),
+            inlined: Vec::new(),
+        });
+        (self.prog.protos.len() - 1) as u32
+    }
+}
+
+impl reflect::DescSink for DescCode<'_> {
+    fn constant(&mut self, desc: std::sync::Arc<crate::vm::value::TypeDesc>) -> u32 {
+        self.prog.consts.push(Const::TypeDesc(desc));
+        (self.prog.consts.len() - 1) as u32
+    }
+
+    fn field_fill(&mut self, def: TypeDefId, index: u32, helper: FnId) -> Option<u32> {
+        let proto = (*self.fn_protos.get(helper as usize)?)?;
+        let idx = u16::try_from(index).ok()?;
+        let file = self.cp.types[def as usize].span.file;
+        // r0: the struct; r1: the default.
+        let code = vec![Op::CallDirect { base: 1, proto }, Op::SetField { obj: 0, idx, src: 1 }, Op::RetUnit];
+        Some(self.add(file, 1, 2, code))
+    }
+
+    fn set_fill(&mut self) -> u32 {
+        // r0: the set; r1, r2, r3: the list, the index and the length (the
+        // state of `ForList`); r4: an element; r5: the result of `SetAdd`.
+        let code = vec![
+            Op::LoadInt { dst: 2, v: 0 },
+            Op::Len { dst: 3, src: 1 },
+            Op::ForList { elem: 4, base: 1, off: 2 },
+            Op::SetAdd { dst: 5, set: 0, key: 4 },
+            Op::Loop { off: -3 },
+            Op::RetUnit,
+        ];
+        self.add(0, 2, 6, code)
     }
 }
 

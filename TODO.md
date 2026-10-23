@@ -62,13 +62,12 @@ Follow-up work, roughly in priority order.
 
 ### Embedding
 
-- [ ] Let natives call Sand function values. Natives cannot run bytecode, so
-      `native::Num` reads `T.zero()` and `T.one()` by calling the native
-      methods in fixed slots of the `Num` dictionary, and the checker requires
-      the prelude's `Num` impls to be native. Callbacks such as `sort_by` also
-      need Sand wrappers (`sort_by_keys(self.map(key))`), and `json.decode`
-      fails on a missing field whose default is not a constant
-      (`x: int? = Some(f())`) instead of calling its default.
+- [ ] `native::Num` reads `T.zero()` and `T.one()` by calling the native
+      methods in fixed slots of the `Num` dictionary, so the checker requires
+      the prelude's `Num` impls to be native. Natives do not run bytecode:
+      a Sand caller runs the code that a native needs, as `json.decode` runs
+      the defaults that `decode_raw` returns. Pass `Num` evidence to natives
+      as the values `zero` and `one` instead.
 - [ ] `json.parse` accepts 512 levels of nesting, but conversion of a `Json`
       value to Rust aborts with kind `"limit"` beyond 256 levels of enum
       payloads. A limit of 512 overflows a 512 KiB thread stack (the iOS

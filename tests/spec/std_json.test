@@ -550,19 +550,9 @@ struct All {
 let a: All = json.decode("{}")?
 print(a)
 print(a == All {})
-struct Computed { n: int = 1 + 1, o: int? = Some(1 + 1), p: int? }
-let c: Result<Computed> = json.decode("{}")
-print(c)
-let o: Result<Computed> = json.decode("{\"n\": 5}")
-print(o)
-let p: Computed = json.decode("{\"n\": 5, \"o\": 6}")?
-print(p)
 --- stdout
 All { u: (), b: true, n: -3, x: -1.5, d: -2s, s: "q\"", xs: [], m: [:], o: None, some: Some(Write), mode: Read, neg: 4, r: -1..3, ri: 0..=2 }
 true
-Err(Error { kind: "parse", message: "$: missing field `n`, whose default is not a constant" })
-Err(Error { kind: "parse", message: "$: missing field `o`, whose default is not a constant" })
-Computed { n: 5, o: Some(6), p: None }
 
 === decode fills missing fields with defaults built from constructors
 import json
@@ -579,10 +569,93 @@ struct Late { n: int, m: (str, bool)? = Some(("x", true)) }
 let c: Config = json.decode("{\"size\": [1, 2]}")?
 print(c)
 print(c == Config { size: (1, 2) })
-struct Loop { next: [Loop] = [Loop {}] }
-let l: Result<Loop> = json.decode("{}")
-print(l)
 --- stdout
 Config { server: Server { host: "localhost", port: 80, routes: ["a": [1, 2]] }, backup: Server { host: "localhost", port: 81, routes: ["a": [1, 2]] }, shapes: [Rect(1.0, 2.0), Dot], size: (1, 2), late: Late { n: 3, m: Some(("x", true)) } }
 true
-Err(Error { kind: "parse", message: "$: missing field `next`, whose default is not a constant" })
+
+=== decode runs the defaults that are not constants, as a struct literal does
+import json
+var calls: [str] = []
+fn note(what: str, n: int) -> int {
+    calls.push(what)
+    n
+}
+struct Item { id: int = note("item.id", calls.len()), name: str }
+struct Inner { a: int = note("inner.a", 1), b: str = "b" }
+struct Outer {
+    x: int = note("outer.x", 2)
+    inner: Inner
+    y: int? = Some(note("outer.y", 3))
+    items: Set<Item> = set()
+    label: str = "a" + "b"
+}
+let o: Outer = json.decode(r#"{"inner": {}, "items": [{"name": "p"}, {"name": "q", "id": 9}, {"name": "p"}]}"#)?
+print(o)
+print(calls)
+let bad: Result<Outer> = json.decode(r#"{"inner": {}, "items": 5}"#)
+print(bad)
+print(calls.len())
+--- stdout
+Outer { x: 2, inner: Inner { a: 1, b: "b" }, y: Some(3), items: Set([Item { id: 1, name: "p" }, Item { id: 9, name: "q" }, Item { id: 2, name: "p" }]), label: "ab" }
+["inner.a", "item.id", "item.id", "outer.x", "outer.y"]
+Err(Error { kind: "parse", message: "$.items: expected array" })
+5
+
+=== a default that never ends fails decode as it fails a struct literal
+import json
+struct Loop { next: [Loop] = [Loop {}] }
+let l: Result<Loop> = json.decode("{}")
+print(l)
+--- fail
+stack overflow
+
+=== decode defaults can suspend their task
+import json
+import task
+fn later(n: int) -> int {
+    task.sleep(1ms)
+    n
+}
+struct S { a: int = later(4), b: [int] = [later(5)] }
+let s: [S] = json.decode("[{}, {\"a\": 1}]")?
+print(s)
+--- stdout
+[S { a: 4, b: [5] }, S { a: 1, b: [5] }]
+
+=== functions pass reflect type parameters on to json.decode
+import json
+struct P { x: int, y: int = 7 }
+fn load<reflect T: Encode>(text: str) -> Result<T> { json.decode(text) }
+fn both<reflect T: Encode>(a: str, b: str = "{\"x\": 3}", first: Result<T> = load(b)) -> Result<(T, T)> {
+    let later: fn() -> Result<T> = () => load(a)
+    Ok((first?, later()?))
+}
+let p: P = load("{\"x\": 1}")?
+print(p)
+let t: (P, P) = both("{\"x\": 2}")?
+print(t)
+let n: Result<(int, int)> = both("1", "2")
+print(n)
+--- stdout
+P { x: 1, y: 7 }
+(P { x: 3, y: 7 }, P { x: 2, y: 7 })
+Ok((2, 1))
+
+=== reflect type arguments must be concrete or reflect type parameters
+import json
+fn plain<T: Encode>(text: str) -> Result<T> { json.decode(text) }
+fn nested<reflect T: Encode>(text: str) -> Result<[T]> { json.decode(text) }
+--- error
+2: this call needs a description of `T` at run time, so the type must be concrete or a `reflect` type parameter
+3: this call needs a description of `[T]` at run time, so the type must be concrete or a `reflect` type parameter
+
+=== trait methods cannot be reflect
+trait Load { fn load<reflect T>() -> int }
+--- error
+1: the type parameters of trait and impl methods cannot be `reflect`
+
+=== functions with reflect type parameters cannot be values
+fn size<reflect T>(x: int) -> int { x }
+let f = size
+--- error
+2: `size` takes a type description, so it can only be called

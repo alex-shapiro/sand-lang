@@ -1615,7 +1615,7 @@ impl Vm {
     /// from innermost inlined call to outermost.
     fn trace_frame(&self, proto: u32, at: u32, out: &mut Vec<TraceEntry>) {
         let proto = &self.prog.protos[proto as usize];
-        if proto.name == "<entry>" {
+        if proto.name == "<entry>" || proto.name == FILL_PROTO {
             return;
         }
         let idx = (at as usize).saturating_sub(1).min(proto.lines.len().saturating_sub(1));

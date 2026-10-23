@@ -548,6 +548,7 @@ impl Ctx<'_> {
             | HKind::Bytes(_)
             | HKind::Global(_)
             | HKind::FnValue(_)
+            | HKind::TypeDesc(_)
             | HKind::VariantFn { .. }
             | HKind::Tag(_)
             | HKind::Continue { .. }

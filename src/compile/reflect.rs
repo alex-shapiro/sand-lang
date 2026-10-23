@@ -23,7 +23,7 @@
 
 use crate::check::CheckedProgram;
 use crate::check::persist::PMap;
-use crate::types::{Opaque, Ty, TyList, TypeArena, TypeDefKind, TypeId, TypePrinter};
+use crate::types::{FnId, Opaque, Ty, TyList, TypeArena, TypeDefId, TypeDefKind, TypeId, TypePrinter};
 use crate::vm::value::{FieldDefault, TypeDesc};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -49,8 +49,26 @@ pub(crate) struct DescCache {
     closed: PMap<Key, Arc<TypeDesc>>,
     /// The constant holding the description of each reflected type.
     consts: PMap<Key, u32>,
+    /// The function that fills each field (struct definition, field index)
+    /// with its computed default (see [`DescSink::field_fill`]).
+    field_fills: PMap<(TypeDefId, u32), u32>,
+    /// The function that adds elements to a set (see [`DescSink::set_fill`]).
+    set_fill: Option<u32>,
     /// Work done by the current compilation (reset by [`DescCache::start`]).
     total: usize,
+}
+
+/// Adds to the program what descriptions refer to.
+pub(crate) trait DescSink {
+    /// Adds the constant holding `desc` and returns its index.
+    fn constant(&mut self, desc: Arc<TypeDesc>) -> u32;
+    /// Adds the function (with the struct as its one capture) that sets field
+    /// `index` of struct `def` to the value of the field's default `helper`,
+    /// and returns its proto, or `None` if `helper` has no code.
+    fn field_fill(&mut self, def: TypeDefId, index: u32, helper: FnId) -> Option<u32>;
+    /// Adds the function (with a set and a list as its captures) that adds
+    /// the elements of the list to the set, and returns its proto.
+    fn set_fill(&mut self) -> u32;
 }
 
 impl DescCache {
@@ -59,15 +77,9 @@ impl DescCache {
         self.total = 0;
     }
 
-    /// The index of the constant describing `t`, creating it with `add` if
+    /// The index of the constant describing `t`, adding it to `sink` if
     /// needed; `None` if the description is too large.
-    pub(crate) fn const_for(
-        &mut self,
-        cp: &CheckedProgram,
-        arena: &mut TypeArena,
-        t: TypeId,
-        add: impl FnOnce(Arc<TypeDesc>) -> u32,
-    ) -> Option<u32> {
+    pub(crate) fn const_for(&mut self, cp: &CheckedProgram, arena: &mut TypeArena, t: TypeId, sink: &mut dyn DescSink) -> Option<u32> {
         let mut key = Vec::new();
         type_key(arena, t, &mut key);
         self.total = self.total.saturating_add(key.len());
@@ -77,19 +89,20 @@ impl DescCache {
         if let Some(&k) = self.consts.get(&key) {
             return Some(k);
         }
-        let desc = self.describe(cp, arena, t)?;
-        let k = add(desc);
+        let desc = self.describe(cp, arena, t, sink)?;
+        let k = sink.constant(desc);
         self.consts.insert(key, k);
         Some(k)
     }
 
     /// The description of `t`, or `None` if it is too large.
-    fn describe(&mut self, cp: &CheckedProgram, arena: &mut TypeArena, t: TypeId) -> Option<Arc<TypeDesc>> {
+    fn describe(&mut self, cp: &CheckedProgram, arena: &mut TypeArena, t: TypeId, sink: &mut dyn DescSink) -> Option<Arc<TypeDesc>> {
         let budget = MAX_DESC_NODES.min(MAX_TOTAL_DESC_NODES.saturating_sub(self.total));
         let mut b = Builder {
             cp,
             arena,
             cache: self,
+            sink,
             stack: HashMap::new(),
             open: HashMap::new(),
             open_at: Vec::new(),
@@ -157,6 +170,7 @@ struct Builder<'a, 'c> {
     cp: &'a CheckedProgram,
     arena: &'c mut TypeArena,
     cache: &'c mut DescCache,
+    sink: &'c mut dyn DescSink,
     /// The struct and enum instances being described, by their depth.
     stack: HashMap<Key, usize>,
     /// Descriptions that refer to instances on the stack, with the lowest
@@ -210,7 +224,8 @@ impl Builder<'_, '_> {
             }
             Ty::Set(e) => {
                 let (e, l) = self.desc(e);
-                (Arc::new(TypeDesc::Set(e)), l)
+                let fill = *self.cache.set_fill.get_or_insert_with(|| self.sink.set_fill());
+                (Arc::new(TypeDesc::Set(e, fill)), l)
             }
             Ty::Map(k, v) => {
                 let ((k, lk), (v, lv)) = (self.desc(k), self.desc(v));
@@ -238,6 +253,17 @@ impl Builder<'_, '_> {
             }
             _ => leaf(TypeDesc::Unsupported(self.show(t))),
         }
+    }
+
+    /// The function that fills field `index` of struct `d` with its computed
+    /// default `helper`.
+    fn field_fill(&mut self, d: TypeDefId, index: u32, helper: FnId) -> Option<u32> {
+        if let Some(&p) = self.cache.field_fills.get(&(d, index)) {
+            return Some(p);
+        }
+        let p = self.sink.field_fill(d, index, helper)?;
+        self.cache.field_fills.insert((d, index), p);
+        Some(p)
     }
 
     fn show(&self, t: TypeId) -> String {
@@ -278,13 +304,17 @@ impl Builder<'_, '_> {
             TypeDefKind::Struct { fields } => {
                 let fields = fields
                     .iter()
-                    .map(|f| {
+                    .enumerate()
+                    .map(|(i, f)| {
                         let ft = self.arena.instantiate(f.ty, &def.generics, &args);
                         let (fd, lf) = self.desc(ft);
                         l = low(l, lf);
                         let default = match (&f.const_default, f.default) {
                             (Some(c), _) => FieldDefault::Const(c.clone()),
-                            (None, Some(_)) => FieldDefault::Computed,
+                            (None, Some(helper)) => match self.field_fill(d, i as u32, helper) {
+                                Some(fill) => FieldDefault::Computed(fill),
+                                None => FieldDefault::None,
+                            },
                             (None, None) => FieldDefault::None,
                         };
                         (name_of(f.name), fd, default)

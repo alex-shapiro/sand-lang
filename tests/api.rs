@@ -132,6 +132,19 @@ fn deferred_code_copies_are_bounded() {
 }
 
 #[test]
+fn json_decode_defaults_appear_in_stack_traces() {
+    let src =
+        "import json\nfn boom() -> int { fail(\"boom\") }\nstruct S {\n    a: int = boom()\n}\nlet s: Result<S> = json.decode(\"{}\")\n";
+    let (r, _, _) = run_src(Config::new(), src);
+    let Err(Error::Runtime { trace, .. }) = r else { panic!("expected a runtime error, got {r:?}") };
+    let frames: Vec<(&str, usize)> = trace.iter().map(|f| (f.function.as_str(), f.line)).collect();
+    assert_eq!(frames[..2], [("boom", 2), ("S.a", 4)], "{trace:?}");
+    assert_eq!(frames[2].0, "decode", "{trace:?}");
+    assert_eq!(frames[3], ("<top level>", 6), "{trace:?}");
+    assert_eq!(frames.len(), 4, "{trace:?}");
+}
+
+#[test]
 fn runtime_errors_have_stack_traces() {
     // Non-tail calls, so every frame appears in the trace.
     let src = "fn a() -> int { fail(\"boom\") }\nfn b() -> int { a() + 1 }\nprint(b())\n";

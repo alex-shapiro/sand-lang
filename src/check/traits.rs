@@ -382,6 +382,7 @@ impl Checker {
         let rules = DeclRules { skip_where: &outer, defaults: DefaultRule::Const };
         let mut methods: Vec<TraitMethod> = Vec::new();
         for (j, m) in d.methods.iter().enumerate() {
+            self.deny_reflect_method(m);
             if methods.iter().any(|x| self.name(x.name) == m.name.name) {
                 let msg = format!("method `{}` is already defined in trait `{}`", m.name.name, self.name(self.traits[id as usize].name));
                 self.error(m.name.span, msg);
@@ -530,6 +531,7 @@ impl Checker {
             for p in m.params.iter().filter(|p| p.default.is_some()) {
                 self.error(p.name.span, "default values are declared by the trait, not the impl");
             }
+            self.deny_reflect_method(m);
             let at = DeclPath { item, method: j as u32 };
             let f = self.declare_fn(m, at, rules, Some(ctor), &scope, Some(target));
             // Natives read `Num` evidence by calling its methods (`native::Num`).
@@ -847,7 +849,7 @@ impl Checker {
         let fi = &self.fns[f as usize];
         let kind = match fi.kind {
             FnKind::TraitMethod(trait_id, slot) => HKind::CallTrait { trait_id, slot, args, impl_id: None },
-            FnKind::Native(native) => HKind::CallNative { native, args, reflect: vec![] },
+            FnKind::Native(native) => HKind::CallNative { native, args },
             _ => HKind::Call { func: f, args },
         };
         let name = self.name(fi.name).to_string();
@@ -859,6 +861,38 @@ impl Checker {
 
     // ------------------------------------------------------------------
     // Evidence
+
+    /// Reports the `reflect` type parameters of trait or impl method `m`: a
+    /// call through a trait passes no type descriptions.
+    fn deny_reflect_method(&mut self, m: &ast::FnDecl) {
+        for g in m.generics.iter().filter(|g| g.reflect) {
+            self.error(g.name.span, "the type parameters of trait and impl methods cannot be `reflect`");
+        }
+    }
+
+    /// Declares the hidden parameters of the function being checked that
+    /// hold the descriptions of its `reflect` type parameters.
+    pub(crate) fn declare_reflect_params(&mut self, f: FnId) -> Vec<LocalId> {
+        let span = self.fns[f as usize].span;
+        let mut out = Vec::new();
+        for k in 0..self.fns[f as usize].generics.len() {
+            let p = self.fns[f as usize].generics[k];
+            if self.params[p as usize].reflect {
+                let l = self.declare_local_sym(Symbol::DESC, TypeId::UNIT, false, span, true);
+                self.fs.data[l as usize].used = true;
+                self.fs.reflect_locals.push((p, l));
+                out.push(l);
+            }
+        }
+        out
+    }
+
+    /// The hidden parameter holding the description of `t`, if `t` is a
+    /// `reflect` type parameter of the function being checked.
+    pub(crate) fn reflect_local(&self, t: TypeId) -> Option<LocalId> {
+        let Ty::Param(p) = self.rty(t) else { return None };
+        self.fs.reflect_locals.iter().find(|&&(q, _)| q == p).map(|&(_, l)| l)
+    }
 
     /// Declares the hidden dictionary parameters of the function being
     /// checked and records the evidence they (and impl dictionaries) provide.

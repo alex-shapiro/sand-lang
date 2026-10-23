@@ -218,21 +218,25 @@ proptest! {
     }
 
     #[test]
-    fn json_decode_fails_on_missing_fields_with_computed_defaults(fields in prop::collection::vec((constant_default(), any::<bool>()), 1..6)) {
-        // A call makes a default computed, even if the value it gives is constant.
+    fn json_decode_runs_computed_defaults_as_a_struct_literal_does(fields in prop::collection::vec((constant_default(), any::<bool>()), 1..6)) {
+        // A call makes a default computed, even if the value it gives is
+        // constant; `note` records the order of the calls. Encodings are
+        // compared, as `Some(())` and `None` both encode as `null`.
         let decls: Vec<String> = fields
             .iter()
             .enumerate()
-            .map(|(i, ((ty, e), computed))| if *computed { format!("    f{i}: {ty}? = Some(id({e}))") } else { format!("    f{i}: {ty} = {e}") })
+            .map(|(i, ((ty, e), computed))| match computed {
+                true => format!("    f{i}: {ty}? = Some(note({i}, {e}))"),
+                false => format!("    f{i}: {ty} = {e}"),
+            })
             .collect();
         let src = format!(
-            "import json\n{CONSTANT_TYPES}\nstruct S {{\n{}\n}}\nlet s: Result<S> = json.decode(\"{{}}\")\nmatch s {{\n    Ok(s) => print(s == S {{}})\n    Err(e) => print(e.message)\n}}",
+            "import json\n{CONSTANT_TYPES}\nvar calls: [int] = []\nfn note<T>(i: int, x: T) -> T {{\n    calls.push(i)\n    x\n}}\n\
+             struct S {{\n{}\n}}\nlet s: S = json.decode(\"{{}}\")?\nlet decoded = calls\ncalls = []\nlet literal = S {{}}\n\
+             print(s == literal)\nprint(decoded == calls)\ncalls = []\nlet full: S = json.decode(json.encode(literal))?\nprint(json.encode(full) == json.encode(literal))\nprint(calls)\nprint(decoded)",
             decls.join("\n")
         );
-        let out = match fields.iter().position(|(_, computed)| *computed) {
-            Some(i) => format!("$: missing field `f{i}`, whose default is not a constant\n"),
-            None => "true\n".to_string(),
-        };
-        check(&src, &out, None)?;
+        let order: Vec<String> = fields.iter().enumerate().filter(|(_, (_, computed))| *computed).map(|(i, _)| i.to_string()).collect();
+        check(&src, &format!("true\ntrue\ntrue\n[]\n[{}]\n", order.join(", ")), None)?;
     }
 }

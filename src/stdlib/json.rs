@@ -120,7 +120,8 @@ pub(crate) fn module() -> NativeModule {
         let out = e.out;
         Ok(Val::from_raw(vm.new_str(out)))
     });
-    m.vm_function("decode", |vm: &mut Vm, ty: Reflect<0>, text: Val<String>| -> Result<Val<Param<0>>, HostError> {
+    m.bind::<Decoded<()>>();
+    m.vm_function("decode_raw", |vm: &mut Vm, ty: Reflect<0>, text: Val<String>| -> Result<Decoded<Param<0>>, Ctl> {
         let desc = ty.desc(&vm.heap)?.clone();
         let (ids, json) = (vm.prog.ids, JsonIds::of(&vm.prog)?);
         let meter = &vm.meter;
@@ -135,10 +136,15 @@ pub(crate) fn module() -> NativeModule {
                 slots: Vec::new(),
                 indexes: FxHashMap::default(),
                 fills: Vec::new(),
+                thunks: Vec::new(),
             };
             let r = d.decode(&desc).and_then(|v| d.p.finish().map(|()| v));
             let charged = d.p.charge(meter);
-            (charged.map_err(Error::Ctl).and(r), d.fills)
+            let r = charged.map_err(Error::Ctl).and(r).map(|v| match d.thunks.is_empty() {
+                true => Decoded::Done(Param::from_raw(v)),
+                false => Decoded::Pending(Param::from_raw(v), Val::from_raw(d.b.list(std::mem::take(&mut d.thunks)))),
+            });
+            (r, d.fills)
         });
         if r.is_ok() {
             for fill in fills {
@@ -156,7 +162,13 @@ pub(crate) fn module() -> NativeModule {
                 }
             }
         }
-        into_result(r)
+        let fail = |kind: &str, message| Ok(Decoded::Failed(super::Error { kind: kind.into(), message }));
+        match r {
+            Ok(d) => Ok(d),
+            Err(Error::Parse(msg)) => fail("parse", msg),
+            Err(Error::Invalid(msg)) => fail("invalid", msg),
+            Err(Error::Ctl(c)) => Err(c),
+        }
     });
     m.vm_function("to_json", |vm: &mut Vm, value: Param<0, Encode>| -> Result<Val<Json>, Ctl> {
         let ids = JsonIds::of(&vm.prog)?;
@@ -169,6 +181,20 @@ pub(crate) fn module() -> NativeModule {
         Ok(Val::from_raw(v))
     });
     m
+}
+
+/// The result of `decode_raw`, which the Sand function `decode` completes.
+#[derive(crate::SandEnum)]
+#[sand(module = "json", private)]
+enum Decoded<T> {
+    /// The decoded value.
+    Done(T),
+    /// The decoded value, which is complete once each of the functions has
+    /// run: they compute the defaults of missing fields that are not
+    /// constants, and add elements that contain such fields to their sets.
+    Pending(T, Val<Vec<fn()>>),
+    /// `text` is not JSON, or does not describe a value of the type.
+    Failed(super::Error),
 }
 
 /// Failure while parsing or decoding.
@@ -753,6 +779,9 @@ struct Decoder<'a, 'd, 's, 'h> {
     indexes: FxHashMap<u32, FxHashMap<&'d str, usize>>,
     /// Staged sets and maps, filled once their elements are on the heap.
     fills: Vec<Fill>,
+    /// The functions that complete the decoded value (see [`Decoded::Pending`]),
+    /// in the order to run them.
+    thunks: Vec<Value>,
 }
 
 /// A staged set or map with the elements or entries to add to it once these
@@ -909,16 +938,23 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                 })?;
                 Ok(self.b.list(items))
             }
-            TypeDesc::Set(elem) => {
+            TypeDesc::Set(elem, fill) => {
                 self.expect_open(b'[', "array")?;
                 let mut items = Vec::new();
+                let thunks = self.thunks.len();
                 self.array(|d, i| {
                     let v = d.with_seg(Seg::Index(i), |d| d.decode(elem))?;
                     Ok(d.b.push(&mut items, v)?)
                 })?;
-                // The elements' buffer stays pending until the set is filled.
                 let set = self.b.st.alloc(Obj::Set(Box::default()));
-                self.fills.push(Fill::Set(set, items));
+                if self.thunks.len() == thunks {
+                    // The elements' buffer stays pending until the set is filled.
+                    self.fills.push(Fill::Set(set, items));
+                } else {
+                    // Elements are hashed once their computed defaults are set.
+                    let items = self.b.list(items);
+                    self.thunk(*fill, Box::new([set, items]))?;
+                }
                 Ok(set)
             }
             TypeDesc::Tuple(elems) => {
@@ -966,6 +1002,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                     return Err(e);
                 }
                 let mut values = Vec::with_capacity(fields.len());
+                let mut computed = Vec::new();
                 for (i, (field, ty, default)) in fields.iter().enumerate() {
                     values.push(match (self.slots[base + i], default, &**ty) {
                         (Some(v), _, _) => v,
@@ -976,16 +1013,24 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                                 return Err(e);
                             }
                         },
+                        (None, FieldDefault::Computed(fill), _) => {
+                            computed.push(*fill);
+                            Value::Unit
+                        }
                         (None, FieldDefault::None, TypeDesc::Option(_)) => Value::Tag(self.ids.none),
-                        (None, default, _) => {
+                        (None, FieldDefault::None, _) => {
                             self.slots.truncate(base);
-                            let why = if matches!(default, FieldDefault::Computed) { ", whose default is not a constant" } else { "" };
-                            return Err(self.fail(&format!("missing field `{field}`{why}")));
+                            return Err(self.fail(&format!("missing field `{field}`")));
                         }
                     });
                 }
                 self.slots.truncate(base);
-                Ok(self.b.st.alloc(Obj::Struct(*def, values.into_boxed_slice())))
+                let s = self.b.st.alloc(Obj::Struct(*def, values.into_boxed_slice()));
+                // As in a struct literal, the defaults run in declaration order.
+                for fill in computed {
+                    self.thunk(fill, Box::new([s]))?;
+                }
+                Ok(s)
             }
             TypeDesc::Enum { .. } if is_json(t) => {
                 let ids = self.json;
@@ -1019,6 +1064,14 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
             TypeDesc::Range => self.decode_range(),
             TypeDesc::Unsupported(name) => Err(self.unsupported(&format!("values of type {name}"))),
         }
+    }
+
+    /// Adds a closure of `proto` with `captures` to the functions that
+    /// complete the decoded value.
+    fn thunk(&mut self, proto: u32, captures: Box<[Value]>) -> PResult<()> {
+        self.b.reserve()?;
+        let c = self.b.st.alloc(Obj::Closure(proto, captures));
+        Ok(self.b.push(&mut self.thunks, c)?)
     }
 
     /// The value of constant `c`, charged as decoded values are.

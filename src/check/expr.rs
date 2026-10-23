@@ -1516,30 +1516,29 @@ impl Checker {
         let Some(mut hargs) = self.bind_args(Callee::Fn(f), &ptys, recv, args, span) else {
             return mk(HKind::Error, ret, span);
         };
-        if !dicts.is_empty() {
-            // Dictionaries are passed first; default helpers receive them too.
-            let k = dicts.len();
+        // The descriptions of the `reflect` type arguments, then the
+        // dictionaries, are passed first; default helpers receive them too.
+        let mut hidden: Vec<HArg> = Vec::new();
+        for (k, &t) in fresh.iter().enumerate() {
+            if self.params[self.fns[f as usize].generics[k] as usize].reflect {
+                self.fs.reflect_checks.push((t, span));
+                hidden.push(HArg::Expr(mk(HKind::TypeDesc(t), TypeId::UNIT, span)));
+            }
+        }
+        hidden.extend(dicts.into_iter().map(|(t, tr)| HArg::Expr(self.evidence_hole(t, tr, false, span))));
+        if !hidden.is_empty() {
+            let k = hidden.len();
             for a in &mut hargs {
                 if let HArg::Default { inputs, .. } = a {
                     *inputs = (0..k).chain(inputs.iter().map(|i| i + k)).collect();
                 }
             }
-            let mut all: Vec<HArg> = dicts.into_iter().map(|(t, tr)| HArg::Expr(self.evidence_hole(t, tr, false, span))).collect();
-            all.extend(hargs);
-            hargs = all;
+            hidden.extend(hargs);
+            hargs = hidden;
         }
         match self.fns[f as usize].kind {
             FnKind::TraitMethod(trait_id, slot) => mk(HKind::CallTrait { trait_id, slot, args: hargs, impl_id: None }, ret, span),
-            FnKind::Native(n) => {
-                let mut reflect = Vec::new();
-                for (k, &t) in fresh.iter().enumerate() {
-                    if self.params[self.fns[f as usize].generics[k] as usize].reflect {
-                        reflect.push(t);
-                        self.fs.reflect_checks.push((t, span));
-                    }
-                }
-                mk(HKind::CallNative { native: n, args: hargs, reflect }, ret, span)
-            }
+            FnKind::Native(n) => mk(HKind::CallNative { native: n, args: hargs }, ret, span),
             _ => mk(HKind::Call { func: f, args: hargs }, ret, span),
         }
     }

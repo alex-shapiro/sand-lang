@@ -1089,8 +1089,9 @@ pub type FieldDesc = (String, Arc<TypeDesc>, FieldDefault);
 pub enum FieldDefault {
     None,
     Const(crate::types::ConstVal),
-    /// A default that is not a constant, which `json.decode` cannot compute.
-    Computed,
+    /// A default that is not a constant: the proto of the function that
+    /// computes it and stores it in the struct, its one capture.
+    Computed(u32),
 }
 
 /// An enum variant: name, runtime id, payload types and payload field names.
@@ -1111,7 +1112,9 @@ pub enum TypeDesc {
     Unit,
     List(Arc<TypeDesc>),
     Map(Arc<TypeDesc>, Arc<TypeDesc>),
-    Set(Arc<TypeDesc>),
+    /// The element type, and the proto of the function that adds a list of
+    /// elements to a set (its two captures) once the elements are complete.
+    Set(Arc<TypeDesc>, u32),
     Tuple(Vec<Arc<TypeDesc>>),
     Option(Arc<TypeDesc>),
     Range,
@@ -1158,7 +1161,7 @@ impl TypeDesc {
             TypeDesc::Unit => "()".into(),
             TypeDesc::List(e) => format!("[{}]", e.format(recur)),
             TypeDesc::Map(k, v) => format!("[{}: {}]", k.format(recur), v.format(recur)),
-            TypeDesc::Set(e) => format!("Set<{}>", e.format(recur)),
+            TypeDesc::Set(e, _) => format!("Set<{}>", e.format(recur)),
             TypeDesc::Tuple(ts) => format!("({})", list(ts)),
             TypeDesc::Option(e) => format!("{}?", e.format(recur)),
             TypeDesc::Range => "Range".into(),
@@ -1182,7 +1185,7 @@ impl std::fmt::Debug for TypeDesc {
             TypeDesc::Unit => write!(f, "Unit"),
             TypeDesc::List(e) => write!(f, "List({e:?})"),
             TypeDesc::Map(k, v) => write!(f, "Map({k:?}, {v:?})"),
-            TypeDesc::Set(e) => write!(f, "Set({e:?})"),
+            TypeDesc::Set(e, _) => write!(f, "Set({e:?})"),
             TypeDesc::Tuple(ts) => f.debug_tuple("Tuple").field(ts).finish(),
             TypeDesc::Option(e) => write!(f, "Option({e:?})"),
             TypeDesc::Struct { id, name, .. } => write!(f, "Struct({name} #{id})"),

@@ -107,12 +107,27 @@ pub native fn parse(text: str) -> Result<Json>
 pub native fn encode<T: Encode>(value: T, indent: int = 0) -> str
 
 /// Parses `text` and converts it into type `T`. A missing struct field takes
-/// its declared default if the default is a constant (built only from literals
-/// and constructors), or `None` if the field is optional and has no default.
-/// Other missing fields and type mismatches fail with kind `"parse"` and a
-/// JSON path diagnostic. Fails with kind `"invalid"` on a map key whose type
-/// `encode` cannot write.
-pub native fn decode<reflect T: Encode>(text: str) -> Result<T>
+/// its declared default, as in a struct literal, or `None` if the field is
+/// optional and has no default. Other missing fields and type mismatches fail
+/// with kind `"parse"` and a JSON path diagnostic. Fails with kind `"invalid"`
+/// on a map key whose type `encode` cannot write. The defaults that are not
+/// constants run only if the whole text decodes, in the order in which the
+/// objects that omit them end.
+pub fn decode<reflect T: Encode>(text: str) -> Result<T> {
+    let decoded: Decoded<T> = decode_raw(text)
+    match decoded {
+        Done(value) => Ok(value)
+        Pending(value, fills) => {
+            for fill in fills {
+                fill()
+            }
+            Ok(value)
+        }
+        Failed(e) => Err(e)
+    }
+}
+
+native fn decode_raw<reflect T: Encode>(text: str) -> Decoded<T>
 
 /// Converts `value` into the `Json` value that `encode` writes: for example,
 /// `()` and `None` map to `Null`, `Some(x)` maps to `x`, lists map to `Arr`,

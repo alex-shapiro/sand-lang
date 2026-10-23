@@ -389,6 +389,14 @@ impl Checker {
                 }
                 return;
             }
+            // A `reflect` type parameter of this function passes on its own
+            // description.
+            HKind::TypeDesc(t) => {
+                if let Some(l) = self.reflect_local(*t) {
+                    e.kind = HKind::Local(l);
+                    return;
+                }
+            }
             HKind::CallTrait { args, impl_id, .. } => {
                 if let Some(HArg::Expr(HExpr { kind: HKind::Evidence(i), .. })) = args.first()
                     && let HKind::Dict { impl_id: id, .. } = fin.dicts[*i as usize].kind

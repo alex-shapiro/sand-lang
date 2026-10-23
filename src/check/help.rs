@@ -95,7 +95,7 @@ impl Checker {
             panic!("the prelude is missing `print`")
         };
         let args = vec![HArg::Expr(mk(HKind::Str(text), TypeId::STR, span))];
-        mk(HKind::CallNative { native, args, reflect: vec![] }, TypeId::UNIT, span)
+        mk(HKind::CallNative { native, args }, TypeId::UNIT, span)
     }
 
     // ------------------------------------------------------------------
@@ -957,11 +957,12 @@ impl Checker {
         s
     }
 
-    /// `T: Ord + Describe`
+    /// `T: Ord + Describe`, or `reflect T: ...` for a `reflect` type parameter.
     fn param_text(&self, p: ParamId) -> String {
-        let name = self.name(self.params[p as usize].name);
+        let info = &self.params[p as usize];
+        let name = format!("{}{}", if info.reflect { "reflect " } else { "" }, self.name(info.name));
         let bounds = self.bounds_text(p, false);
-        if bounds.is_empty() { name.to_string() } else { format!("{name}: {bounds}") }
+        if bounds.is_empty() { name } else { format!("{name}: {bounds}") }
     }
 
     /// `Ord + Describe` (without `Hash` if `keyed`).

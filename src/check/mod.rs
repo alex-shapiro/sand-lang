@@ -501,6 +501,9 @@ pub(crate) struct FnState {
     pub lambda_first_local: Vec<LocalId>,
     pub obligations: Vec<(TypeId, Bound, Span)>,
     pub reflect_checks: Vec<(TypeId, Span)>,
+    /// The hidden parameters holding the descriptions of the function's
+    /// `reflect` type parameters.
+    pub reflect_locals: Vec<(ParamId, LocalId)>,
     pub infer_checks: Vec<(TypeId, Span)>,
     /// Inside a top-level statement of a module (lets become globals).
     pub top_level: bool,
@@ -2671,7 +2674,8 @@ impl Checker {
         let synthetic =
             fi.impl_of.is_some() || fi.trait_of.is_some() || matches!(decl, FnDeclRef::ParamDefault(..) | FnDeclRef::FieldDefault { .. });
         self.begin_fn(generics, self_ty);
-        let mut param_locals = self.declare_dict_params(id);
+        let mut param_locals = self.declare_reflect_params(id);
+        param_locals.extend(self.declare_dict_params(id));
         let f = match decl {
             FnDeclRef::Fn(at) => Some(at.get(m)),
             _ => None,
@@ -2849,8 +2853,17 @@ impl Checker {
         let reflect = std::mem::take(&mut self.fs.reflect_checks);
         for (t, sp) in reflect {
             let z = self.zonk(t);
-            if self.arena.has_vars(z) || self.arena.has_params(z) {
+            if self.reflect_local(z).is_some() {
+                continue;
+            }
+            if self.arena.has_vars(z) {
                 self.infer_error(sp, "cannot infer type for this call; add a type annotation");
+            } else if self.arena.has_params(z) {
+                let msg = format!(
+                    "this call needs a description of `{}` at run time, so the type must be concrete or a `reflect` type parameter",
+                    self.show(z)
+                );
+                self.error(sp, msg);
             } else if let Some((d, f)) = self.private_field_in(z) {
                 let (ty, field) = (self.ctor_name(Ctor::Def(d), 0), self.name(f));
                 self.error(sp, format!("this call cannot build `{ty}` here: its field `{field}` is private"));

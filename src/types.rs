@@ -420,7 +420,7 @@ impl TypeArena {
 pub struct Symbol(u32);
 
 /// Names every symbol table has, with fixed symbols.
-const KNOWN: [&str; 9] = ["", "Self", "self", "_", "<tmp>", "<dict>", "<arg>", "next", "close"];
+const KNOWN: [&str; 10] = ["", "Self", "self", "_", "<tmp>", "<dict>", "<arg>", "next", "close", "<desc>"];
 
 impl Symbol {
     pub const EMPTY: Symbol = Symbol(0);
@@ -435,6 +435,8 @@ impl Symbol {
     pub const ARG: Symbol = Symbol(6);
     pub const NEXT: Symbol = Symbol(7);
     pub const CLOSE: Symbol = Symbol(8);
+    /// Hidden parameters holding the descriptions of `reflect` type arguments.
+    pub const DESC: Symbol = Symbol(9);
 }
 
 /// Interned names (persistent, like the [`TypeArena`]).

@@ -1114,6 +1114,10 @@ impl Op {
     }
 }
 
+/// The name of the functions that `json.decode` runs to fill computed field
+/// defaults and sets; stack traces leave them out.
+pub const FILL_PROTO: &str = "<fill>";
+
 #[derive(Clone, Debug)]
 pub struct Proto {
     pub name: String,

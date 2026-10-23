@@ -3,14 +3,17 @@
 /// Works for any int.
 fn double(x: int) -> int { x * 2 }
 fn pick<T: Ord>(a: T, b: T, label: str = "max") -> T { a }
+fn size<reflect T: Encode>(x: int) -> int { x }
 help(double)
 help(pick)
+help(size)
 --- stdout
 fn double(x: int) -> int
 
 Doubles a number.
 Works for any int.
 fn pick<T: Ord>(a: T, b: T, label: str = "max") -> T
+fn size<reflect T: Encode>(x: int) -> int
 
 === functions of modules are qualified, imported or not
 help(base64.encode)
