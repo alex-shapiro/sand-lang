@@ -76,6 +76,10 @@ Follow-up work, roughly in priority order.
 - [ ] Sand has no set literal, so no set is a constant: `#[sand(default)]`
       on a `HashSet` or `BTreeSet` field panics in `bind`, and `json.decode`
       cannot fill a missing field whose default is `set([...])`.
+- [ ] The derives describe the field types of a generic `SandEnum` or
+      `SandStruct` at `Param<0>`, `Param<1>`, ..., so a field cannot use
+      `Self` or another generic type whose type parameters have bounds
+      (`struct Sorted<T: Ord>`): `Param<N>` does not implement `Ord`.
 - [ ] Map Rust ranges (`std::ops::Range<i64>`, `RangeInclusive<i64>`) to the
       Sand `Range`. Today a host struct field holds a range only as
       `Val<Range>`, so it cannot have a `#[sand(default)]`.

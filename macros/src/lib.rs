@@ -241,7 +241,16 @@ fn named_type(input: &DeriveInput, a: &TypeAttrs, generic: &Generic, binding: To
     let (imp, tyg, wh) = generic.split(input, |_| quote!(#krate::native::SandType));
     let params: Vec<String> = generic.params.iter().map(|p| p.unraw().to_string()).collect();
     let checks = generic.params.iter().zip(&params).map(|(p, n)| assert_type_name(krate, "type parameter", n, p.span()));
-    let canonical = &generic.canonical_self;
+    // A type nested in a function of a generic impl is not generic, so its
+    // `TypeId` is the same for every instance.
+    let rust_type = (!generic.params.is_empty()).then(|| {
+        quote! {
+            fn rust_type() -> ::std::any::TypeId {
+                enum Instance {}
+                ::std::any::TypeId::of::<Instance>()
+            }
+        }
+    });
     quote! {
         #check
         #(#checks)*
@@ -251,9 +260,7 @@ fn named_type(input: &DeriveInput, a: &TypeAttrs, generic: &Generic, binding: To
             const DOC: &'static str = #doc;
             const PUBLIC: bool = #public;
             const PARAMS: &'static [&'static str] = &[#(#params),*];
-            fn rust_type() -> ::std::any::TypeId {
-                ::std::any::TypeId::of::<#canonical>()
-            }
+            #rust_type
             fn binding() -> #krate::native::Binding<Self> {
                 #binding
             }
@@ -676,7 +683,7 @@ mod tests {
     fn type_parameters_become_sand_type_parameters() {
         let out = expand(sand_struct, "#[sand(module = \"m\")] struct Pair<A, B> { a: A, b: Vec<B>, c: Option<(A, B)> }");
         assert!(out.contains("const PARAMS : & 'static [& 'static str] = & [\"A\" , \"B\"]"), "{out}");
-        assert!(out.contains(":: std :: any :: TypeId :: of :: < Pair < :: sandlang :: native :: Param < 0u8 > , :: sandlang :: native :: Param < 1u8 > > > ()"), "{out}");
+        assert!(out.contains("enum Instance { } :: std :: any :: TypeId :: of :: < Instance > ()"), "{out}");
         assert!(out.contains("ty : < :: sandlang :: native :: Param < 0u8 > as :: sandlang :: native :: SandType > :: sand_type"), "{out}");
         assert!(out.contains("ty : < Vec < :: sandlang :: native :: Param < 1u8 > > as"), "{out}");
         assert!(out.contains("Option < (:: sandlang :: native :: Param < 0u8 > , :: sandlang :: native :: Param < 1u8 >) >"), "{out}");

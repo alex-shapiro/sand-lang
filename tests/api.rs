@@ -1345,6 +1345,27 @@ help(cons.Chain)
 }
 
 #[test]
+fn generic_host_types_can_bound_their_type_parameters() {
+    #[derive(Clone, Debug, PartialEq, sandlang::SandStruct)]
+    #[sand(module = "sorted")]
+    struct Sorted<T: Ord> {
+        #[sand(default)]
+        items: Vec<T>,
+    }
+    let mut m = NativeModule::new("sorted");
+    m.bind::<Sorted<i64>>();
+    m.function("sort", |mut s: Sorted<i64>| {
+        s.items.sort();
+        s
+    });
+    let src =
+        "import sorted\nprint(sorted.sort(sorted.Sorted { items: [3, 1, 2] }))\nlet e: sorted.Sorted<str> = sorted.Sorted {}\nprint(e)";
+    let (r, out, _) = run_src(Config::new().module(m), src);
+    r.unwrap();
+    assert_eq!(out, "Sorted { items: [1, 2, 3] }\nSorted { items: [] }\n");
+}
+
+#[test]
 fn generic_host_types_bind_type_parameters() {
     let src = r#"
 import boxes

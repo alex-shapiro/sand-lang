@@ -42,7 +42,7 @@ pub trait NamedType: Sized + 'static {
     /// generic enum or struct).
     const PARAMS: &'static [&'static str] = &[];
     /// Identifies the Sand type: the `TypeId` of `Self`, or for a generic type,
-    /// of its instance with `Param<0>`, `Param<1>`, ... as type arguments.
+    /// one `TypeId` for all its instances.
     #[doc(hidden)]
     fn rust_type() -> TypeId {
         TypeId::of::<Self>()
@@ -596,6 +596,10 @@ impl<const N: u8> Reflect<N> {
     }
 }
 
+/// The methods of the prelude's `Num` trait in the order of their slots in its
+/// dictionary. The checker requires the trait to declare them in this order.
+pub(crate) const NUM_METHODS: [&str; 2] = ["zero", "one"];
+
 impl<const N: u8> Num<N> {
     /// Returns `T.zero()`.
     pub fn zero(self, vm: &mut Vm) -> Result<Param<N>, Ctl> {
@@ -607,8 +611,8 @@ impl<const N: u8> Num<N> {
         self.evidence(vm, 1)
     }
 
-    /// Calls method `slot` of the prelude's `Num` trait. The prelude implements
-    /// `Num` only for `int` and `float`, with native methods.
+    /// Calls method `slot` of the prelude's `Num` trait (see [`NUM_METHODS`]).
+    /// The checker requires the methods of each `Num` impl to be native.
     fn evidence(self, vm: &mut Vm, slot: usize) -> Result<Param<N>, Ctl> {
         let f = match vm.heap.get(self.raw()) {
             Obj::Tuple(slots) => slots.get(slot).map(|&f| vm.heap.get(f)),

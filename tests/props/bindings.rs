@@ -69,10 +69,11 @@ fn fig_lit(f: &Fig) -> String {
     }
 }
 
-/// A generic struct whose fields use its parameters in every position.
+/// A generic struct whose fields use its parameters in every position, with a
+/// bound on one parameter.
 #[derive(Clone, Debug, PartialEq, sandlang::SandStruct)]
 #[sand(module = "fig")]
-struct Holder<A, B> {
+struct Holder<A, B: Ord> {
     a: A,
     bs: Vec<B>,
     pair: Option<(A, B)>,

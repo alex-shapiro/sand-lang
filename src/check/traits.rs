@@ -415,6 +415,13 @@ impl Checker {
             let name = self.sym(&m.name.name);
             methods.push(TraitMethod { name, sig, default });
         }
+        if Some(id) == self.num_trait && !methods.iter().map(|m| self.name(m.name)).eq(crate::native::NUM_METHODS) {
+            let names = crate::native::NUM_METHODS.map(|n| format!("`{n}`")).join(", ");
+            self.error(
+                d.name.span,
+                format!("the `Num` trait must declare the methods {names} in this order, because `native::Num` reads them by position"),
+            );
+        }
         self.traits[id as usize].methods = methods;
     }
 
