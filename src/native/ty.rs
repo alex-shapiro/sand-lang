@@ -1,6 +1,6 @@
 //! Rust representations of Sand types.
 
-use crate::vm::value::{TypeDesc, Value};
+use crate::vm::value::Value;
 use std::any::TypeId;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
@@ -27,9 +27,8 @@ pub enum Type {
     /// type parameters before the function's own type parameters) and its
     /// required [`Bounds`].
     Param(u8, Bounds),
-    /// Runtime type description for the `reflect` type parameter at index `0..`
-    /// and its compile-time [`ReflectCheckFn`].
-    Reflect(u8, ReflectCheckFn),
+    /// Runtime type description for the `reflect` type parameter at index `0..`.
+    Reflect(u8),
     /// Evidence that the type parameter at index `0..` is `Num` (see [`Num`]).
     Num(u8),
     /// Nominal type declared in a module.
@@ -145,7 +144,7 @@ impl Type {
                 r.write(module, param, out);
             }
             Type::Param(i, _) => out.push_str(&param(*i)),
-            Type::Reflect(i, _) => out.push_str(&format!("<description of {}>", param(*i))),
+            Type::Reflect(i) => out.push_str(&format!("<description of {}>", param(*i))),
             Type::Num(i) => out.push_str(&format!("<Num evidence of {}>", param(*i))),
             Type::Named(n) if n.module == "prelude" && n.name == "Option" && n.args.len() == 1 => {
                 let fn_type = matches!(n.args[0], Type::Fn(..));
@@ -457,69 +456,30 @@ impl<const N: u8> SandType for Num<N> {
     }
 }
 
-/// Compile-time validation function for a reflected type node (see [`ReflectCheck`]).
-pub type ReflectCheckFn = fn(&TypeDesc, &TypeNames) -> Result<(), String>;
-
-/// Compile-time validator for a `reflect` type parameter (see [`Reflect`]).
-pub trait ReflectCheck {
-    /// Validates a single `node` in a reflected [`TypeDesc`] graph.
-    ///
-    /// At each call site, the compiler invokes `check` once per distinct node in
-    /// the type argument's [`TypeDesc`] and reports a compile error if `check`
-    /// returns `Err`. Use [`TypeNames::format`] to format `node` or its child
-    /// types in the error message.
-    fn check(node: &TypeDesc, names: &TypeNames) -> Result<(), String>;
-}
-
-impl ReflectCheck for () {
-    fn check(_: &TypeDesc, _: &TypeNames) -> Result<(), String> {
-        Ok(())
-    }
-}
-
-/// Names of the enclosing structs and enums of a [`TypeDesc`] node during
-/// [`ReflectCheck::check`].
-#[derive(Debug, Default)]
-pub struct TypeNames(pub(crate) HashMap<u32, String>);
-
-impl TypeNames {
-    /// Formats the Sand type name described by `t`.
-    pub fn format(&self, t: &TypeDesc) -> String {
-        t.format(&|id| self.0.get(&id).cloned().unwrap_or_default())
-    }
-}
-
 /// Runtime type description for the `N`-th `reflect` type parameter of a
-/// `native fn` (see [`Type::Reflect`]), validated at compile time by `C`.
-pub struct Reflect<const N: u8, C: ReflectCheck = ()>(Value, PhantomData<fn() -> C>);
+/// `native fn` (see [`Type::Reflect`]).
+#[derive(Clone, Copy)]
+pub struct Reflect<const N: u8>(Value);
 
-impl<const N: u8, C: ReflectCheck> Reflect<N, C> {
+impl<const N: u8> Reflect<N> {
     pub fn raw(self) -> Value {
         self.0
     }
 
     pub(crate) fn from_raw(v: Value) -> Self {
-        Reflect(v, PhantomData)
+        Reflect(v)
     }
 }
 
-impl<const N: u8, C: ReflectCheck> Clone for Reflect<N, C> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<const N: u8, C: ReflectCheck> Copy for Reflect<N, C> {}
-
-impl<const N: u8, C: ReflectCheck> fmt::Debug for Reflect<N, C> {
+impl<const N: u8> fmt::Debug for Reflect<N> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Reflect({:?})", self.0)
     }
 }
 
-impl<const N: u8, C: ReflectCheck> SandType for Reflect<N, C> {
+impl<const N: u8> SandType for Reflect<N> {
     fn sand_type() -> Type {
-        Type::Reflect(N, C::check)
+        Type::Reflect(N)
     }
 }
 

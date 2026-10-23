@@ -6,9 +6,7 @@ mod ty;
 
 pub use convert::{Conversion, FromValue, HostError, IntoHostError, IntoValue, value_from, value_into};
 pub use func::{AsyncHostFunction, HostFunction, Later, NativeError, Signature, VmFunction};
-pub use ty::{
-    Bounds, Channel, Named, Never, Num, Param, Range, Reflect, ReflectCheck, ReflectCheckFn, SandType, Task, Type, TypeNames, Val, bound,
-};
+pub use ty::{Bounds, Channel, Named, Never, Num, Param, Range, Reflect, SandType, Task, Type, Val, bound};
 
 #[doc(hidden)]
 pub use convert::mismatch;
@@ -643,7 +641,7 @@ impl<T: ObjectType> Val<T> {
     }
 }
 
-impl<const N: u8, C: ReflectCheck> Reflect<N, C> {
+impl<const N: u8> Reflect<N> {
     pub fn desc(self, heap: &Heap) -> Result<&Arc<TypeDesc>, Ctl> {
         match heap.get(self.raw()) {
             Obj::TypeDesc(d) => Ok(d),

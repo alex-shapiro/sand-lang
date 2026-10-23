@@ -138,5 +138,13 @@ Follow-up work, roughly in priority order.
       specified in §3.1.
 - [ ] Trait objects (`dyn Trait`), associated types and constants, and
       blanket impls (`impl<T> X for T`).
+- [ ] **Unify built-in bounds and traits.** `Eq`, `Ord`, `Hash`, `Num` and
+      `Encode` are checked by structural inference, while traits are checked
+      by impls and dictionaries. Rust, Haskell and Swift use one mechanism:
+      make the built-in bounds traits whose impls the compiler derives from
+      a type's fields and payloads (as Rust infers `Send`), so that bounds,
+      impls, supertraits, evidence and errors share one implementation.
+      Decide whether derivation is automatic (as today) or requested
+      (`derive` in Rust, `deriving` in Haskell).
 - [ ] Trait bounds on struct/enum type parameters.
 - [ ] Non-constant trait method defaults.

@@ -1,4 +1,6 @@
-//! Property tests for compile-time validation of `json.decode` type arguments.
+//! Property tests for the type arguments of `json.decode`: rejected at
+//! compile time unless `Encode`, and decoded with run-time errors only for
+//! map keys that JSON object keys cannot hold.
 
 use proptest::prelude::*;
 use sandlang::{Config, Engine, Error, MemorySink, Policy};
@@ -64,12 +66,14 @@ impl Ty {
         }
     }
 
-    fn decodable(&self) -> bool {
+    /// Whether every map key type in the type is one that JSON object keys
+    /// hold (`Keyed` has a map with `Keyed` keys).
+    fn keys_decodable(&self) -> bool {
         match self {
-            Ty::Fn | Ty::Task | Ty::Range | Ty::Keyed => false,
-            Ty::List(t) | Ty::Set(t) | Ty::Option(t) | Ty::Wrap(t) => t.decodable(),
-            Ty::Map(k, v) => matches!(**k, Ty::Int | Ty::Bool | Ty::Str | Ty::Duration | Ty::UnitEnum) && v.decodable(),
-            Ty::Tuple(ts) => ts.iter().all(Ty::decodable),
+            Ty::Keyed => false,
+            Ty::List(t) | Ty::Set(t) | Ty::Option(t) | Ty::Wrap(t) => t.keys_decodable(),
+            Ty::Map(k, v) => matches!(**k, Ty::Int | Ty::Bool | Ty::Str | Ty::Duration | Ty::UnitEnum) && v.keys_decodable(),
+            Ty::Tuple(ts) => ts.iter().all(Ty::keys_decodable),
             _ => true,
         }
     }
@@ -101,14 +105,28 @@ fn ty() -> impl Strategy<Value = Ty> {
     })
 }
 
-const INPUTS: [&str; 12] =
-    ["null", "1", "1.5", "true", "\"A\"", "\"x\"", "[]", "[1, 2]", "[[1]]", "{}", "{\"a\": 1, \"b\": null}", "{\"v\": [], \"A\": 1}"];
+const INPUTS: [&str; 14] = [
+    "null",
+    "1",
+    "1.5",
+    "true",
+    "\"A\"",
+    "\"x\"",
+    "[]",
+    "[1, 2]",
+    "[[1]]",
+    "{}",
+    "{\"a\": 1, \"b\": null}",
+    "{\"v\": [], \"A\": 1}",
+    "{\"start\": 1, \"end\": 2}",
+    "{\"m\": {\"k\": 1}}",
+];
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
     #[test]
-    fn json_decode_accepts_exactly_the_decodable_types(t in ty()) {
+    fn json_decode_accepts_exactly_the_encodable_types(t in ty()) {
         let inputs: Vec<String> = INPUTS.iter().map(|s| format!("{s:?}")).collect();
         let src = format!(
             "import json\nenum Unit {{ A, B }}\nstruct Rec {{ a: int, b: str? }}\nstruct Keyed {{ m: [Keyed: int]? }}\nstruct Wrap<T> {{ v: T }}\n\
@@ -122,15 +140,14 @@ proptest! {
         let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
         match rt.block_on(engine.run_source("main.sand", &src)) {
             Ok(_) => {
-                prop_assert!(t.decodable(), "accepted:\n{src}");
+                prop_assert!(t.encodable(), "accepted:\n{src}");
                 let kinds = out.contents();
-                prop_assert!(kinds.lines().all(|k| k == "ok" || k == "parse"), "{kinds}\n{src}");
+                let bad_key = !t.keys_decodable();
+                prop_assert!(kinds.lines().all(|k| k == "ok" || k == "parse" || (bad_key && k == "invalid")), "{kinds}\n{src}");
             }
             Err(Error::Compile(ds)) => {
-                prop_assert!(!t.decodable(), "rejected: {ds:?}\n{src}");
-                // A type that is not `Encode` fails the bound check, which comes first.
-                let want = if t.encodable() { "`json.decode` cannot decode" } else { "does not satisfy Encode" };
-                prop_assert!(ds.iter().all(|d| d.message.contains(want)), "{ds:?}\n{src}");
+                prop_assert!(!t.encodable(), "rejected: {ds:?}\n{src}");
+                prop_assert!(ds.iter().all(|d| d.message.contains("does not satisfy Encode")), "{ds:?}\n{src}");
                 prop_assert!(ds.iter().all(|d| !d.message.contains("``")), "{ds:?}\n{src}");
             }
             Err(e) => prop_assert!(false, "{e}\n{src}"),

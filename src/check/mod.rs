@@ -1960,18 +1960,14 @@ impl Checker {
         // The Rust function takes the runtime arguments that precede the
         // declared ones: type descriptions, then `Num` evidence.
         let num = self.num_trait;
-        let mut leads: Vec<Type> = generics
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| self.params[**p as usize].reflect)
-            .map(|(i, _)| Type::Reflect(i as u8, |_, _| Ok(())))
-            .collect();
+        let mut leads: Vec<Type> =
+            generics.iter().enumerate().filter(|(_, p)| self.params[**p as usize].reflect).map(|(i, _)| Type::Reflect(i as u8)).collect();
         for (i, &p) in generics.iter().enumerate() {
             let n = self.params[p as usize].traits.iter().filter(|tr| Some(tr.trait_id) == num).count();
             leads.extend(std::iter::repeat_n(Type::Num(i as u8), n));
         }
         let lead_of = |t: &Type| match t {
-            Type::Reflect(i, _) => Some((false, *i)),
+            Type::Reflect(i) => Some((false, *i)),
             Type::Num(i) => Some((true, *i)),
             _ => None,
         };

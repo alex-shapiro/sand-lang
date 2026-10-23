@@ -230,14 +230,63 @@ let b: Result<[fn() -> int]> = json.decode("[]")
 --- error
 2: [fn() -> int] does not satisfy Encode because the elements of `[fn() -> int]` have type `fn() -> int`
 
-=== decode rejects map keys and ranges that it cannot decode
+=== ranges encode as objects with their bounds
 import json
-struct Tree { children: [Tree: int] }
-let a: Result<Tree> = json.decode("{}")
-let r: Result<Range> = json.decode("[]")
---- error
-3: `json.decode` cannot decode map keys of type `Tree`
-4: `json.decode` cannot decode values of type `Range`
+print(json.encode(1..4))
+print(json.encode(-2..=5, indent: 2))
+let r: Range = json.decode("{\"end\": 3, \"start\": 1, \"step\": 9}")?
+print(r)
+let i: Range = json.decode(json.encode(0..=0))?
+print(i)
+print(json.to_json(0..2))
+let bad: Result<Range> = json.decode("{\"start\": 1}")
+print(bad)
+--- stdout
+{"start":1,"end":4}
+{
+  "start": -2,
+  "end": 5,
+  "inclusive": true
+}
+1..3
+0..=0
+Obj(["start": Int(0), "end": Int(2)])
+Err(Error { kind: "parse", message: "$: missing field `end`" })
+
+=== map keys are strings, numbers, bools, variant names, or value types
+import json
+import time
+enum Mode { Read, Write }
+print(json.encode([1: "a", -2: "b"]))
+print(json.encode([true: 1]))
+print(json.encode([Mode.Read: 1, Mode.Write: 2]))
+print(json.encode([2s: 1]))
+print(json.encode([time.date(2024, 2, 29)?: 1]))
+let m: [Mode: int] = json.decode("{\"Write\": 2}")?
+print(m)
+let d: [time.PlainDate: int] = json.decode("{\"2024-02-29\": 1}")?
+print(d)
+--- stdout
+{"1":"a","-2":"b"}
+{"true":1}
+{"Read":1,"Write":2}
+{"2000000000":1}
+{"2024-02-29":1}
+[Write: 2]
+[2024-02-29: 1]
+
+=== other map keys fail when encoded or decoded
+import json
+let empty: [(int, int): str] = json.decode("{}")?
+print(empty)
+let keyed: Result<[(int, int): str]> = json.decode("{\"a\": \"b\"}")
+print(keyed)
+print(json.encode([(1, 2): "a"]))
+--- stdout
+[:]
+Err(Error { kind: "invalid", message: "$: cannot decode map keys of type (int, int)" })
+--- fail
+a JSON object key must be a string, int, duration, bool, payload-less variant, or value type
 
 === encode decode roundtrip
 import json
@@ -453,7 +502,7 @@ fn num<T: Num>(x: T) -> str {
 print(dump(P { x: [1..3], tags: set(["a"]) }))
 print(num(1.5))
 --- stdout
-{"x":[[1,2]],"tags":["a"]}
+{"x":[{"start":1,"end":3}],"tags":["a"]}
 1.5
 
 === decode into json.Json parses untyped JSON

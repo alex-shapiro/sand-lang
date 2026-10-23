@@ -10,7 +10,7 @@
 use super::base64;
 use crate::check::ModKind;
 use crate::native::bound::Encode;
-use crate::native::{HostError, NamedType, NativeModule, Param, Reflect, ReflectCheck, TypeNames, Val, variant_index};
+use crate::native::{HostError, NamedType, NativeModule, Param, Reflect, Val, variant_index};
 use crate::syntax::lexer::is_ident;
 use crate::types::ConstVal;
 use crate::vm::bytecode::Program;
@@ -82,25 +82,8 @@ impl JsonIds {
     }
 }
 
-/// The rules of `decode` beyond its `T: Encode` bound.
-struct Decodable;
-
-impl ReflectCheck for Decodable {
-    fn check(node: &TypeDesc, names: &TypeNames) -> Result<(), String> {
-        match node {
-            TypeDesc::Range => Err("`json.decode` cannot decode values of type `Range`".into()),
-            TypeDesc::Map(k, _) if !is_map_key(k) => Err(format!("`json.decode` cannot decode map keys of type `{}`", names.format(k))),
-            _ => Ok(()),
-        }
-    }
-}
-
 fn is_json(t: &TypeDesc) -> bool {
     matches!(t, TypeDesc::Enum { rust: Some(r), .. } if *r == Json::rust_type())
-}
-
-fn is_map_key(t: &TypeDesc) -> bool {
-    matches!(t, TypeDesc::Str | TypeDesc::Int | TypeDesc::Duration | TypeDesc::Bool | TypeDesc::Enum { .. } | TypeDesc::Value { .. })
 }
 
 pub(crate) fn module() -> NativeModule {
@@ -135,7 +118,7 @@ pub(crate) fn module() -> NativeModule {
         let out = e.out;
         Ok(Val::from_raw(vm.new_str(out)))
     });
-    m.vm_function("decode", |vm: &mut Vm, ty: Reflect<0, Decodable>, text: Val<String>| -> Result<Val<Param<0>>, HostError> {
+    m.vm_function("decode", |vm: &mut Vm, ty: Reflect<0>, text: Val<String>| -> Result<Val<Param<0>>, HostError> {
         let desc = ty.desc(&vm.heap)?.clone();
         let (ids, json) = (vm.prog.ids, JsonIds::of(&vm.prog)?);
         let meter = &vm.meter;
@@ -846,6 +829,14 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
         })
     }
 
+    fn bool(&mut self) -> PResult<bool> {
+        match self.p.peek() {
+            Some(b't') => self.p.literal(b"true").map(|()| true),
+            Some(b'f') => self.p.literal(b"false").map(|()| false),
+            _ => Err(self.mismatch("bool")),
+        }
+    }
+
     fn string(&mut self, what: &str) -> PResult<Cow<'a, str>> {
         if self.p.peek() == Some(b'"') { self.p.string(true) } else { Err(self.mismatch(what)) }
     }
@@ -869,11 +860,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
             TypeDesc::Int => Ok(Value::Int(self.int()?)),
             TypeDesc::Duration => Ok(Value::Dur(self.int()?)),
             TypeDesc::Float => Ok(Value::Float(self.number("float")?.float())),
-            TypeDesc::Bool => match self.p.peek() {
-                Some(b't') => self.p.literal(b"true").map(|()| Value::Bool(true)),
-                Some(b'f') => self.p.literal(b"false").map(|()| Value::Bool(false)),
-                _ => Err(self.mismatch("bool")),
-            },
+            TypeDesc::Bool => Ok(Value::Bool(self.bool()?)),
             TypeDesc::Unit => match self.p.peek() {
                 Some(b'n') => self.p.literal(b"null").map(|()| Value::Unit),
                 _ => Err(self.mismatch("null")),
@@ -1005,9 +992,29 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                     Err(msg) => Err(self.fail(&msg)),
                 }
             }
-            TypeDesc::Range => Err(self.unsupported("values of type Range")),
+            TypeDesc::Range => self.decode_range(),
             TypeDesc::Unsupported(name) => Err(self.unsupported(&format!("values of type {name}"))),
         }
+    }
+
+    /// A range: `{"start": a, "end": b}`, with `"inclusive": true` for `a..=b`.
+    fn decode_range(&mut self) -> PResult<Value> {
+        self.expect_open(b'{', "object")?;
+        let (mut start, mut end, mut inclusive) = (None, None, false);
+        self.object(true, |d, key| {
+            d.p.ws();
+            match &*key {
+                "start" => start = Some(d.with_seg(Seg::Key(key), |d| d.int())?),
+                "end" => end = Some(d.with_seg(Seg::Key(key), |d| d.int())?),
+                "inclusive" => inclusive = d.with_seg(Seg::Key(key), |d| d.bool())?,
+                _ => d.p.skip()?,
+            }
+            Ok(())
+        })?;
+        let (Some(start), Some(end)) = (start, end) else {
+            return Err(self.fail(&format!("missing field `{}`", if start.is_none() { "start" } else { "end" })));
+        };
+        Ok(self.b.st.alloc(Obj::Range(start, end, inclusive)))
     }
 
     /// The field of struct `id` named `key`: `guess` (the field after the
@@ -1287,17 +1294,15 @@ impl Encoder<'_> {
                 Obj::Tuple(items) => self.array(items.len(), items.iter().copied(), level)?,
                 Obj::Set(s) => self.array(s.live, s.entries.iter().flatten().copied(), level)?,
                 Obj::Range(a, b, inclusive) => {
-                    let (n, ints) = range_ints(*a, *b, *inclusive);
-                    self.array(n, ints.map(Value::Int), level)?
+                    let fields = [("start", Value::Int(*a)), ("end", Value::Int(*b)), ("inclusive", Value::Bool(true))];
+                    let n = if *inclusive { 3 } else { 2 };
+                    self.object(n, fields[..n].iter(), level, |e, &(k, v)| {
+                        e.string(k)?;
+                        Ok(v)
+                    })?
                 }
                 Obj::Map(m) => self.object(m.live, m.entries.iter().flatten(), level, |e, &(k, v)| {
-                    match heap.get(k) {
-                        Obj::Str(s) => e.string(s)?,
-                        _ => {
-                            let key = crate::vm::display::to_display_metered(prog, heap, e.meter, k)?;
-                            e.string(&key)?
-                        }
-                    }
+                    e.string(&key_text(prog, heap, k)?)?;
                     Ok(v)
                 })?,
                 Obj::Struct(def, fields) => {
@@ -1367,12 +1372,22 @@ fn json_number(st: &mut Staging, ids: &JsonIds, n: Value) -> Value {
     st.new_variant(id, &[n])
 }
 
-/// The number and the integers of the range `a..b` (`a..=b` if `inclusive`).
-fn range_ints(a: i64, b: i64, inclusive: bool) -> (usize, impl Iterator<Item = i64>) {
-    let last = if inclusive { Some(b) } else { b.checked_sub(1) };
-    let ints = last.filter(|&last| a <= last).map(|last| a..=last).into_iter().flatten();
-    let n = last.map_or(0, |last| (last as i128 - a as i128 + 1).max(0));
-    (usize::try_from(n).unwrap_or(usize::MAX), ints)
+/// The JSON object key of map key `k`, written as serde_json writes keys:
+/// a string as itself; an int, duration (nanoseconds), or bool as its text;
+/// a payload-less variant as its name; a value type as its text.
+fn key_text<'v>(prog: &'v Program, heap: &'v Heap, k: Value) -> Result<Cow<'v, str>, Ctl> {
+    let bad = || fail("invalid", "a JSON object key must be a string, int, duration, bool, payload-less variant, or value type");
+    Ok(match k {
+        Value::Int(i) | Value::Dur(i) => Cow::Owned(i.to_string()),
+        Value::Bool(b) => Cow::Borrowed(if b { "true" } else { "false" }),
+        Value::Tag(id) if id != prog.ids.none => Cow::Borrowed(prog.variants[id as usize].name.as_str()),
+        Value::Obj(_) => match heap.get(k) {
+            Obj::Str(s) => Cow::Borrowed(&**s),
+            o @ (Obj::Value(_) | Obj::Packed(..)) => Cow::Owned(o.value().map(ValueRef::text).unwrap_or_default()),
+            _ => return bad(),
+        },
+        _ => return bad(),
+    })
 }
 
 /// The length of `s` as written by [`write_str`].
@@ -1477,12 +1492,21 @@ impl<'a> Converter<'a, '_, '_> {
                 Obj::Tuple(items) => self.array(items.iter().copied(), depth)?,
                 Obj::Set(s) => self.array(s.entries.iter().flatten().copied(), depth)?,
                 Obj::Range(a, b, inclusive) => {
-                    let (n, ints) = range_ints(*a, *b, *inclusive);
-                    self.b.st.check_memory(self.b.pending.saturating_add(n.saturating_mul(std::mem::size_of::<Value>())))?;
-                    self.b.meter.charge(n as u64)?;
-                    let items = ints.map(|i| json_number(self.b.st, &ids, Value::Int(i))).collect();
-                    let list = self.b.st.new_list(items);
-                    self.b.st.new_variant(ids.arr, &[list])
+                    self.check_depth(depth)?;
+                    let mut fields = vec![
+                        ("start", json_number(self.b.st, &ids, Value::Int(*a))),
+                        ("end", json_number(self.b.st, &ids, Value::Int(*b))),
+                    ];
+                    if *inclusive {
+                        fields.push(("inclusive", self.b.st.new_variant(ids.bool_, &[Value::Bool(true)])));
+                    }
+                    let mut out = self.b.start_map();
+                    for (name, x) in fields {
+                        let k = self.b.st.new_str(name);
+                        self.put(&mut out, k, Cow::Borrowed(name), x)?;
+                    }
+                    let map = self.b.map(out);
+                    self.b.st.new_variant(ids.obj, &[map])
                 }
                 Obj::Map(m) => {
                     self.check_depth(depth)?;
@@ -1492,8 +1516,8 @@ impl<'a> Converter<'a, '_, '_> {
                         let (k, text) = match heap.get(k) {
                             Obj::Str(s) => (k, Cow::Borrowed(&**s)),
                             _ => {
-                                let key = crate::vm::display::to_display_metered(prog, heap, self.b.meter, k)?;
-                                (self.b.st.new_str(key.as_str()), Cow::Owned(key))
+                                let key = key_text(prog, heap, k)?;
+                                (self.b.st.new_str(&*key), key)
                             }
                         };
                         self.put(&mut out, k, text, x)?;

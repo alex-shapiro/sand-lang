@@ -426,8 +426,7 @@ pub native fn parse(text: str) -> Result<Json>
 If a type parameter on a `native fn` is marked `reflect`
 (`native fn decode<reflect T>(text: str) -> Result<T>`), the compiler passes a
 runtime type description of `T` to the function, and `T` must be a concrete
-type at the call site. The Rust function can also validate `T` at compile time
-(§16.3).
+type at the call site.
 
 Each type parameter on a `native fn` declaration must declare the built-in
 bounds required by the Rust function (§16.3).
@@ -2044,18 +2043,23 @@ parse back as floats; non-finite floats encode as `null`.
 
 `encode`/`to_json` map values structurally: `int` → number (`Int`), `float`
 → number (`Float`), `str` →
-string, `bool`, `()` → `null`, lists/sets/tuples → arrays, maps → objects
-(non-`str` keys converted with `to_str`), structs → objects keyed by field
-name, `None` → `null`, `Some(x)` → `x`; other enums: a payload-less variant
-→ `"Variant"`, otherwise `{"Variant": [payload...]}` (an object for named
-payloads); `bytes` → base64 string; `duration` → nanoseconds; value types
-(§5.4) → their text form (`"2024-02-29"`); `Json` → itself.
+string, `bool`, `()` → `null`, lists/sets/tuples → arrays, maps → objects,
+structs → objects keyed by field name, `None` → `null`, `Some(x)` → `x`;
+other enums: a payload-less variant → `"Variant"`, otherwise
+`{"Variant": [payload...]}` (an object for named payloads); `bytes` → base64
+string; `duration` → nanoseconds; `a..b` → `{"start": a, "end": b}` and
+`a..=b` → `{"start": a, "end": b, "inclusive": true}`; value types (§5.4) →
+their text form (`"2024-02-29"`); `Json` → itself.
+
+As in Rust's serde_json, a map key encodes as a string: a `str` as itself, an
+`int`, `duration`, or `bool` as its text, a payload-less variant as its name,
+and a value type as its text form. Encoding any other key aborts with kind
+`"invalid"`.
 
 `json!` (§6.13) builds a `Json` from JSON syntax with embedded Sand values.
 
-`decode<T>` is the inverse for types built from those components. The
-compiler also rejects a `T` that contains a range, or a map whose key type is
-not `str`, `int`, `duration`, `bool`, an enum, or a value type. A struct
+`decode<T>` is the inverse for types built from those components. Decoding a
+map whose key type is not one of those fails with kind `"invalid"`. A struct
 field missing from the object takes its declared default if that is a
 constant expression (a literal, `[]`, `[:]`, `None`, or a payload-less
 variant), else `None` if
@@ -2902,7 +2906,7 @@ engine collects garbage and checks the memory limit after the call completes.
 | `Never`                                            | `never`                                                |
 | bound type `T` (see above)                         | `T` (or `&T` for a borrowed object parameter)          |
 | `Val<T>`                                           | `T` (passed as an uncopied heap handle)                |
-| `Param<N, B>`, `Reflect<N, C>`                     | `N`-th type parameter and its runtime type description |
+| `Param<N, B>`, `Reflect<N>`                        | `N`-th type parameter and its runtime type description |
 | `Num<N>`                                           | `Num` evidence of the `N`-th type parameter            |
 
 `Param<N, B>` specifies requirements `B` on the `N`-th type parameter: a
@@ -2910,11 +2914,6 @@ built-in bound (`bound::Eq`, `bound::Ord`, `bound::Hash`, `bound::Num`,
 `bound::Encode`) or a tuple of these such as `(bound::Ord, bound::Hash)`,
 defaulting to `()`. The corresponding `native fn` declaration must declare the
 bounds of `B` or stronger bounds on that parameter.
-
-`Reflect<N, C>` validates the reflected `TypeDesc` of the `N`-th type parameter
-at compile time using `C: ReflectCheck` (defaulting to `()`, which accepts all
-types). At each call site, the compiler calls `C::check` once per distinct node
-in the `TypeDesc` graph and reports a compile error if `C::check` returns `Err`.
 
 If a `native fn` declaration bounds a type parameter by `Num`, the Rust
 function takes its evidence as `Num<N>` (with `zero` and `one`), after its

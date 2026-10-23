@@ -49,7 +49,6 @@ pub struct CompileInput<'a> {
 
 struct Compiler<'a> {
     cp: &'a CheckedProgram,
-    natives: &'a NativeDecls,
     optimize: bool,
     /// The program's types, which `reflect` extends with the instances it
     /// describes (a private copy: they are not needed after compiling).
@@ -338,7 +337,6 @@ pub(crate) fn compile_more(mut input: CompileInput, prog: &mut Program, inc: &mu
     let order = InitOrder::new(cp, &bodies, inits, prog.global_names.len(), input.initialized.take(), input.budget);
     let mut c = Compiler {
         cp,
-        natives: input.natives,
         optimize: input.optimize,
         arena: cp.arena.clone(),
         budget: input.budget,
@@ -2154,15 +2152,6 @@ impl<'a> Compiler<'a> {
                         self.errors.push(Diag::error(e.span, "type too large to describe at runtime"));
                         continue;
                     };
-                    let check = self.natives.fns.get(*native as usize).and_then(|d| match d.sig.params.get(i) {
-                        Some(crate::native::Type::Reflect(_, c)) => Some(*c),
-                        _ => None,
-                    });
-                    if let (Some(check), Const::TypeDesc(desc)) = (check, &self.prog.consts[k as usize])
-                        && let Err(msg) = self.descs.check(k, desc, check)
-                    {
-                        self.errors.push(Diag::error(e.span, msg));
-                    }
                     self.emit(f, Op::LoadConst { dst: base + i as Reg, k });
                 }
                 self.set_line(f, e.span);

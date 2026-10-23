@@ -1,7 +1,7 @@
 //! Value conversion between Sand and Rust.
 
 use super::func::{Later, NativeError};
-use super::ty::{Never, Num, Param, Reflect, ReflectCheck, SandType, Val, bound::ParamBounds};
+use super::ty::{Never, Num, Param, Reflect, SandType, Val, bound::ParamBounds};
 use crate::vm::meter::Scratch;
 use crate::vm::value::{Obj, Value, ValueType};
 use crate::vm::{Ctl, Vm};
@@ -581,7 +581,7 @@ impl<const N: u8> FromValue for Num<N> {
     }
 }
 
-impl<const N: u8, C: ReflectCheck> FromValue for Reflect<N, C> {
+impl<const N: u8> FromValue for Reflect<N> {
     type Item<'a> = Self;
     fn from_value(vm: &Vm, v: Value, _: &mut Conversion) -> Result<Self, Ctl> {
         let r = Reflect::from_raw(v);

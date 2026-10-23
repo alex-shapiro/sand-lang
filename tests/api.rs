@@ -1570,7 +1570,7 @@ fn json_rejects_unrepresentable_types_at_compile_time() {
     let src = "import json\nprint(json.encode(1..4))\nprint(json.to_json([Some(1), None]))\nfn dump<T: Encode>(x: T) -> str {\n    json.encode(x)\n}\nprint(dump([1]))";
     let (r, out, _) = run_src(Config::new(), src);
     r.unwrap();
-    assert_eq!(out, "[1,2,3]\nArr([Int(1), Null])\n[1]\n");
+    assert_eq!(out, "{\"start\":1,\"end\":4}\nArr([Int(1), Null])\n[1]\n");
 }
 
 #[test]
@@ -2373,7 +2373,6 @@ fn counts_past_u32_max_are_not_truncated() {
         "print((0..BIG).reversed().len())",
         "print((0..BIG * 2).step_by(2).len())",
         "print([0; BIG].len())",
-        "import json\nprint(json.encode(0..BIG).len())",
     ] {
         let src = src.replace("BIG", BIG);
         let (r, out, _) = run_src(Config::new().limits(memory.clone()), &src);
