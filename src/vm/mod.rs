@@ -556,6 +556,10 @@ pub struct Vm {
     /// interpreter, a native or an I/O finisher: the VM is memory safe but may
     /// be inconsistent, so a REPL session discards it.
     pub(crate) broken: bool,
+    /// Testing aid: causes the first memory or resource check in each `vm_function` call to fail (see `Config::retry_stress`).
+    pub(crate) retry_stress: bool,
+    /// Struct nesting depth during conversion to Sand (see [`struct_into_value`](crate::native::struct_into_value)).
+    pub(crate) struct_depth: usize,
 }
 
 pub const SLICE_FUEL: i64 = 20_000;
@@ -582,9 +586,7 @@ impl Fiber {
         let n = need.max(self.stack.len() * 2).min(MAX_STACK_SLOTS);
         let before = self.stack.capacity();
         let extra = n.saturating_sub(before) * std::mem::size_of::<Value>();
-        if heap.would_exceed(extra) {
-            return Err(Ctl::limit(LimitKind::Memory));
-        }
+        heap.check_memory(extra)?;
         self.stack.reserve_exact(n - self.stack.len());
         self.stack.resize(n, Value::Unit);
         heap.fiber_bytes += self.stack.capacity().saturating_sub(before) * std::mem::size_of::<Value>();
@@ -598,9 +600,7 @@ impl Fiber {
     pub fn grow_frames(&mut self, heap: &mut Heap) -> Result<(), Ctl> {
         let before = self.frames.capacity();
         let more = before.max(8);
-        if heap.would_exceed(more * std::mem::size_of::<Frame>()) {
-            return Err(Ctl::limit(LimitKind::Memory));
-        }
+        heap.check_memory(more * std::mem::size_of::<Frame>())?;
         self.frames.reserve_exact(more);
         heap.fiber_bytes += self.frames.capacity().saturating_sub(before) * std::mem::size_of::<Frame>();
         Ok(())
@@ -652,6 +652,8 @@ impl Vm {
             last_slot: std::cell::Cell::new((u32::MAX, 0)),
             ascii_strs: Vec::new(),
             broken: false,
+            retry_stress: false,
+            struct_depth: 0,
         };
         vm.load_program();
         vm
@@ -885,9 +887,16 @@ impl Vm {
         display::to_debug_metered(&self.prog, &self.heap, &self.meter, v)
     }
 
-    /// Fails with a memory limit error if `extra` bytes cannot be allocated.
-    pub fn reserve(&self, extra: usize) -> Result<(), Ctl> {
-        if self.heap.would_exceed(extra) { Err(Ctl::limit(LimitKind::Memory)) } else { Ok(()) }
+    /// If [`Config::retry_stress`](crate::Config::retry_stress) is enabled and
+    /// this call is not a retry, forces the next memory or resource check to fail.
+    pub(crate) fn arm_retry_stress(&self) {
+        self.heap.fail_next_check.set(self.retry_stress && !self.collected);
+    }
+
+    /// Returns a memory-limit error if `extra` additional heap bytes exceed the
+    /// limit (see [`Heap::check_memory`](heap::Heap::check_memory)).
+    pub fn check_memory(&self, extra: usize) -> Result<(), Ctl> {
+        self.heap.check_memory(extra)
     }
 
     /// Runs `f` with heap memory-limit checks disabled so post-effect result conversion cannot trigger a retry. Call [`Vm::enforce_limit`] after rooting the result.
@@ -922,10 +931,13 @@ impl Vm {
         self.try_reserve_io(bytes)?.ok_or_else(|| HostError::new("limit", format!("cannot buffer {bytes} bytes: {}", iomem::MemoryLimit)))
     }
 
-    /// Like [`Vm::reserve_io`], but returns `Ok(None)` if `bytes` do not fit
-    /// after a retry.
+    /// Reserves `bytes` of off-heap I/O memory, or returns `Ok(None)` if `bytes`
+    /// do not fit after garbage collection.
     pub fn try_reserve_io(&mut self, bytes: usize) -> Result<Option<iomem::Reservation>, Ctl> {
         let mut r = self.io_reservation();
+        if self.heap.fail_next_check.replace(false) {
+            return Err(CtlKind::Collect.into());
+        }
         match r.ensure(bytes) {
             Ok(()) => Ok(Some(r)),
             Err(_) if !self.collected => Err(CtlKind::Collect.into()),
@@ -938,6 +950,9 @@ impl Vm {
     /// limit is reached, then fails with kind `"limit"` if the limit is still
     /// reached.
     pub fn resource_slot(&mut self) -> Result<iomem::ResourceSlot, HostError> {
+        if self.heap.fail_next_check.replace(false) {
+            return Err(Ctl::from(CtlKind::Collect).into());
+        }
         match iomem::ResourceSlot::try_new(&self.heap.io_memory) {
             Some(slot) => Ok(slot),
             None if !self.collected => Err(Ctl::from(CtlKind::Collect).into()),
@@ -945,8 +960,8 @@ impl Vm {
         }
     }
 
-    /// Like [`Vm::resource_slot`], also reserving `buffers` bytes for the
-    /// fixed buffers of `what` (such as `"a connection"`).
+    /// Acquires an open-resource slot and reserves `buffers` bytes for `what`
+    /// (such as `"a connection"`).
     pub fn resource_slot_with(&mut self, buffers: usize, what: &str) -> Result<iomem::ResourceSlot, HostError> {
         let mut slot = self.resource_slot()?;
         self.heap.io_memory.publish_heap(self.heap.used());

@@ -1,7 +1,7 @@
 //! Value conversion between Sand and Rust.
 
 use super::func::{Later, NativeError};
-use super::ty::{Never, Param, Reflect, SandType, Val};
+use super::ty::{Never, Param, Reflect, ReflectCheck, SandType, Val, bound::ParamBounds};
 use crate::vm::meter::Scratch;
 use crate::vm::value::{Obj, Value, ValueType};
 use crate::vm::{Ctl, Vm};
@@ -12,8 +12,13 @@ use std::hash::Hash;
 ///
 /// For functions registered with [`NativeModule::function`](super::NativeModule::function),
 /// [`FromValue::Item`] can borrow directly from the VM heap (`&str`, `&[u8]`,
-/// `&T`). Owned types (`String`, `Vec<T>`, ...) allocate a copy and account for
-/// it through [`Conversion`].
+/// `&T`). Owned types (`String`, `Vec<T>`, ...) allocate a Rust copy.
+///
+/// Because a Sand value can contain shared references to the same heap object,
+/// converting a value into owned Rust types copies each reachable reference.
+/// Implementations must charge fuel to `vm` and record allocated bytes in
+/// [`Conversion`] so that instruction and memory limits bound exponential
+/// expansion of shared values.
 pub trait FromValue: SandType {
     type Item<'a>;
 
@@ -27,15 +32,28 @@ pub trait FromValue: SandType {
 pub struct Conversion {
     bytes: usize,
     scratch: Scratch,
+    depth: usize,
+}
+
+const MAX_STRUCT_DEPTH: usize = 256;
+
+pub(crate) fn enter_struct(depth: usize) -> Result<usize, Ctl> {
+    if depth < MAX_STRUCT_DEPTH { Ok(depth + 1) } else { Err(Ctl::fail("limit", "value too deeply nested to convert")) }
 }
 
 impl Conversion {
     pub(crate) fn new() -> Conversion {
-        Conversion { bytes: 0, scratch: Scratch::new() }
+        Conversion { bytes: 0, scratch: Scratch::new(), depth: 0 }
     }
 
-    /// Reserves `bytes` against the VM memory limit before allocating an
-    /// owned argument value.
+    pub(crate) fn enter_struct<R>(&mut self, f: impl FnOnce(&mut Conversion) -> Result<R, Ctl>) -> Result<R, Ctl> {
+        self.depth = enter_struct(self.depth)?;
+        let r = f(self);
+        self.depth -= 1;
+        r
+    }
+
+    /// Records `bytes` of temporary Rust allocation and checks the VM memory limit.
     pub fn alloc(&mut self, vm: &Vm, bytes: usize) -> Result<(), Ctl> {
         self.bytes = self.bytes.saturating_add(bytes);
         self.scratch.check(&vm.heap, self.bytes)
@@ -208,14 +226,14 @@ impl FromValue for String {
 }
 impl IntoValue for String {
     fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl> {
-        vm.reserve(self.len())?;
+        vm.check_memory(self.len())?;
         vm.charge_bytes(self.len())?;
         Ok(vm.heap.new_str(self))
     }
 }
 impl IntoValue for &str {
     fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl> {
-        vm.reserve(self.len())?;
+        vm.check_memory(self.len())?;
         vm.charge_bytes(self.len())?;
         Ok(vm.heap.new_str(self))
     }
@@ -241,14 +259,14 @@ impl FromValue for Vec<u8> {
 }
 impl IntoValue for Vec<u8> {
     fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl> {
-        vm.reserve(self.len())?;
+        vm.check_memory(self.len())?;
         vm.charge_bytes(self.len())?;
         Ok(vm.heap.new_bytes(self))
     }
 }
 impl IntoValue for &[u8] {
     fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl> {
-        vm.reserve(self.len())?;
+        vm.check_memory(self.len())?;
         vm.charge_bytes(self.len())?;
         Ok(vm.heap.new_bytes(self))
     }
@@ -265,13 +283,26 @@ impl<T: FromValue> FromValue for Vec<T> {
 }
 impl<T: IntoValue> IntoValue for Vec<T> {
     fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl> {
-        vm.reserve(self.len().saturating_mul(std::mem::size_of::<Value>()))?;
+        vm.check_memory(self.len().saturating_mul(std::mem::size_of::<Value>()))?;
         vm.charge(self.len() as u64)?;
         let mut items = Vec::with_capacity(self.len());
         for x in self {
             items.push(x.into_value(vm)?);
         }
         Ok(vm.heap.new_list(items))
+    }
+}
+
+impl<T: for<'a> FromValue<Item<'a> = T>> FromValue for Box<T> {
+    type Item<'a> = Box<T>;
+    fn from_value(vm: &Vm, v: Value, conv: &mut Conversion) -> Result<Box<T>, Ctl> {
+        conv.alloc(vm, std::mem::size_of::<T>())?;
+        T::from_value(vm, v, conv).map(Box::new)
+    }
+}
+impl<T: IntoValue> IntoValue for Box<T> {
+    fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl> {
+        (*self).into_value(vm)
     }
 }
 
@@ -342,7 +373,7 @@ where
     m.entries.iter().flatten().map(|&(k, x)| Ok((K::from_value(vm, k, conv)?, V::from_value(vm, x, conv)?))).collect()
 }
 fn write_map<K: IntoValue, V: IntoValue>(vm: &mut Vm, len: usize, items: impl IntoIterator<Item = (K, V)>) -> Result<Value, Ctl> {
-    vm.reserve(len.saturating_mul(4 * std::mem::size_of::<Value>()))?;
+    vm.check_memory(len.saturating_mul(4 * std::mem::size_of::<Value>()))?;
     let m = vm.heap.alloc(Obj::Map(Box::default()));
     for (k, v) in items {
         let k = k.into_value(vm)?;
@@ -386,7 +417,7 @@ fn read_set<T: for<'k> FromValue<Item<'k> = T>, C: FromIterator<T>>(vm: &Vm, v: 
     s.entries.iter().flatten().map(|&x| T::from_value(vm, x, conv)).collect()
 }
 fn write_set<T: IntoValue>(vm: &mut Vm, len: usize, items: impl IntoIterator<Item = T>) -> Result<Value, Ctl> {
-    vm.reserve(len.saturating_mul(3 * std::mem::size_of::<Value>()))?;
+    vm.check_memory(len.saturating_mul(3 * std::mem::size_of::<Value>()))?;
     let s = vm.heap.alloc(Obj::Set(Box::default()));
     for x in items {
         let x = x.into_value(vm)?;
@@ -452,7 +483,7 @@ macro_rules! tuple_impls {
         impl<$($n: IntoValue),+> IntoValue for ($($n,)+) {
             fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl> {
                 let items = [$(self.$i.into_value(vm)?),+];
-                vm.reserve(items.len() * std::mem::size_of::<Value>())?;
+                vm.check_memory(items.len() * std::mem::size_of::<Value>())?;
                 Ok(vm.heap.new_tuple(&items))
             }
         }
@@ -466,19 +497,44 @@ tuple_impls!(6: A 0, B 1, C 2, D 3, E 4, F 5);
 tuple_impls!(7: A 0, B 1, C 2, D 3, E 4, F 5, G 6);
 tuple_impls!(8: A 0, B 1, C 2, D 3, E 4, F 5, G 6, H 7);
 
-impl<T: ValueType> FromValue for T {
-    type Item<'a> = T;
-    fn from_value(vm: &Vm, v: Value, _: &mut Conversion) -> Result<T, Ctl> {
-        vm.heap.value::<T>(v).ok_or_else(mismatch::<T>)
-    }
-}
-impl<T: ValueType> IntoValue for T {
-    fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl> {
-        if T::PACKING.is_none() {
-            vm.reserve(ValueType::size(&self))?;
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __value_type_impls {
+    ($t:ty) => {
+        impl $crate::native::SandType for $t {
+            fn sand_type() -> $crate::native::Type {
+                $crate::native::Type::bound::<Self>(<Self as $crate::native::NamedType>::MODULE, <Self as $crate::native::NamedType>::NAME)
+            }
         }
-        Ok(vm.new_value(self))
+        impl $crate::native::FromValue for $t {
+            type Item<'a> = Self;
+            fn from_value(
+                vm: &$crate::vm::Vm,
+                v: $crate::Value,
+                _: &mut $crate::native::Conversion,
+            ) -> ::std::result::Result<Self, $crate::vm::Ctl> {
+                $crate::native::value_from(vm, v)
+            }
+        }
+        impl $crate::native::IntoValue for $t {
+            fn into_value(self, vm: &mut $crate::vm::Vm) -> ::std::result::Result<$crate::Value, $crate::vm::Ctl> {
+                $crate::native::value_into(self, vm)
+            }
+        }
+    };
+}
+
+#[doc(hidden)]
+pub fn value_from<T: ValueType>(vm: &Vm, v: Value) -> Result<T, Ctl> {
+    vm.heap.value::<T>(v).ok_or_else(mismatch::<T>)
+}
+
+#[doc(hidden)]
+pub fn value_into<T: ValueType>(x: T, vm: &mut Vm) -> Result<Value, Ctl> {
+    if T::PACKING.is_none() {
+        vm.check_memory(ValueType::size(&x))?;
     }
+    Ok(vm.new_value(x))
 }
 
 macro_rules! handle {
@@ -498,10 +554,10 @@ macro_rules! handle {
 }
 handle! {
     [T: SandType + ?Sized] Val<T>,
-    [const N: u8] Param<N>,
+    [const N: u8, B: ParamBounds] Param<N, B>,
 }
 
-impl<const N: u8> FromValue for Reflect<N> {
+impl<const N: u8, C: ReflectCheck> FromValue for Reflect<N, C> {
     type Item<'a> = Self;
     fn from_value(vm: &Vm, v: Value, _: &mut Conversion) -> Result<Self, Ctl> {
         let r = Reflect::from_raw(v);

@@ -1,6 +1,7 @@
 //! Natives for the prelude and the `task` module.
 
 use crate::check::ModKind;
+use crate::native::bound::{Eq as EqB, Hash as HashB, Ord as OrdB};
 use crate::native::{self, Channel, HostError, Later, NativeModule, Never, Param, Task, Val};
 use crate::vm::compare::{
     find_key, hash_key, set_slot, try_sort_by, try_sort_numbers, try_sort_packed, values_cmp_metered, values_eq_metered,
@@ -22,19 +23,19 @@ const SLOT: usize = std::mem::size_of::<Value>();
 type Str = Val<String>;
 type Bytes = Val<Vec<u8>>;
 type List<T = Param<0>> = Val<Vec<T>>;
-type Map = Val<HashMap<Param<0>, Param<1>>>;
-type Set = Val<HashSet<Param<0>>>;
+type Map = Val<HashMap<Param<0, HashB>, Param<1>>>;
+type Set = Val<HashSet<Param<0, HashB>>>;
 type Range = Val<native::Range>;
 type IterFn<T> = Val<fn() -> Option<T>>;
 
 /// Charges for copying `n` bytes into a new value and checks the memory limit.
 fn copy_bytes(vm: &Vm, n: usize) -> Result<(), Ctl> {
-    vm.reserve(n)?;
+    vm.check_memory(n)?;
     vm.charge_bytes(n)
 }
 
 fn reserve_list(vm: &Vm, n: usize) -> Result<(), Ctl> {
-    vm.reserve(n.saturating_mul(SLOT))
+    vm.check_memory(n.saturating_mul(SLOT))
 }
 
 fn params<const N: u8>(items: Vec<Value>) -> Vec<Param<N>> {
@@ -44,7 +45,7 @@ fn params<const N: u8>(items: Vec<Value>) -> Vec<Param<N>> {
 /// Charges for producing `n` new list elements (plus `objs` new objects) and
 /// checks the memory limit.
 fn produce(vm: &Vm, n: usize, objs: usize) -> Result<(), Ctl> {
-    vm.reserve(n.saturating_mul(SLOT).saturating_add(objs.saturating_mul(ITEM)))?;
+    vm.check_memory(n.saturating_mul(SLOT).saturating_add(objs.saturating_mul(ITEM)))?;
     vm.charge(n.saturating_add(objs) as u64)
 }
 
@@ -70,7 +71,7 @@ pub(crate) fn prelude() -> NativeModule {
     });
     m.function("fail", |message: &str, kind: &str| -> Result<Never, Ctl> { fail(kind, message) });
     m.function("exit", |code: i64| -> Result<Never, Ctl> { Err(Ctl::exit(code.clamp(i32::MIN as i64, i32::MAX as i64) as i32)) });
-    m.vm_function("set", |vm: &mut Vm, items: List| -> Result<_, Ctl> {
+    m.vm_function("set", |vm: &mut Vm, items: List<Param<0, HashB>>| -> Result<_, Ctl> {
         let set = set_of(vm, items.items(&vm.heap))?;
         Ok(new_set(vm, set))
     });
@@ -138,7 +139,7 @@ pub(crate) fn task() -> NativeModule {
     // `BlockOn::Race` charges for the tasks and checks the memory limit.
     m.vm_function("race", |vm: &mut Vm, tasks: List<Task<Param<0>>>| {
         let tasks = tasks.items(&vm.heap);
-        vm.reserve(tasks.len().saturating_mul(SLOT))?;
+        vm.check_memory(tasks.len().saturating_mul(SLOT))?;
         let tasks = tasks.to_vec();
         vm.block(BlockOn::Race(tasks)).map(Param::<0>::from_raw)
     });
@@ -227,7 +228,7 @@ fn split_list(vm: &mut Vm, text: Str, split: impl for<'h> Fn(&'h Heap, &mut dyn 
     let mut count = 0usize;
     split(&vm.heap, &mut |_| count += 1);
     produce(vm, count, count)?;
-    vm.reserve(text.str(&vm.heap).len().saturating_add(count.saturating_mul(ITEM)))?;
+    vm.check_memory(text.str(&vm.heap).len().saturating_add(count.saturating_mul(ITEM)))?;
     Ok(Val::from_raw(vm.staged_strs(|heap, st, ascii| {
         st.expect(count + 1);
         let mut items = Vec::with_capacity(count);
@@ -282,7 +283,7 @@ fn strings(m: &mut NativeModule) {
     });
     m.vm_function("str.bytes", |vm: &mut Vm, s: Str| -> Result<Vec<u8>, Ctl> {
         let t = s.str(&vm.heap);
-        vm.reserve(t.len())?;
+        vm.check_memory(t.len())?;
         Ok(t.as_bytes().to_vec())
     });
     // Searches charge for the needle too: preparing the search scans it,
@@ -315,13 +316,13 @@ fn strings(m: &mut NativeModule) {
     m.vm_function("str.replace", |vm: &mut Vm, s: Str, pattern: Str, replacement: Str| -> Result<String, Ctl> {
         let (t, from, to) = (s.str(&vm.heap), pattern.str(&vm.heap), replacement.str(&vm.heap));
         if from.is_empty() {
-            vm.reserve(t.len())?;
+            vm.check_memory(t.len())?;
             return Ok(t.to_string());
         }
         // Count the matches first so the output size is known exactly.
         vm.charge_bytes(t.len().saturating_add(from.len()))?;
         let n = t.matches(from).count();
-        vm.reserve(t.len() - n * from.len() + n.saturating_mul(to.len()))?;
+        vm.check_memory(t.len() - n * from.len() + n.saturating_mul(to.len()))?;
         Ok(t.replace(from, to))
     });
     m.vm_function("str.split", |vm: &mut Vm, s: Str, sep: Str| {
@@ -375,13 +376,13 @@ fn strings(m: &mut NativeModule) {
     m.vm_function("str.strip_suffix", |vm: &mut Vm, s: Str, suffix: Str| strip(vm, s, suffix, |t, p| t.ends_with(p).then_some(0)));
     m.vm_function("str.to_upper", |vm: &mut Vm, s: Str| -> Result<String, Ctl> {
         let t = s.str(&vm.heap);
-        vm.reserve(case_mapped_bound(t))?;
+        vm.check_memory(case_mapped_bound(t))?;
         vm.charge_slow_bytes(t.len())?;
         Ok(t.to_uppercase())
     });
     m.vm_function("str.to_lower", |vm: &mut Vm, s: Str| -> Result<String, Ctl> {
         let t = s.str(&vm.heap);
-        vm.reserve(case_mapped_bound(t))?;
+        vm.check_memory(case_mapped_bound(t))?;
         vm.charge_slow_bytes(t.len())?;
         Ok(t.to_lowercase())
     });
@@ -391,7 +392,7 @@ fn strings(m: &mut NativeModule) {
         }
         let t = s.str(&vm.heap);
         let n = to_usize_saturating(n);
-        vm.reserve(t.len().checked_mul(n).ok_or(Ctl::limit(crate::LimitKind::Memory))?)?;
+        vm.check_memory(t.len().checked_mul(n).ok_or(Ctl::limit(crate::LimitKind::Memory))?)?;
         Ok(t.repeat(n))
     });
     fn pad(vm: &mut Vm, s: Str, width: i64, fill: Str, start: bool) -> Result<Str, Ctl> {
@@ -451,7 +452,7 @@ fn strings(m: &mut NativeModule) {
     });
     m.vm_function("str.reversed", |vm: &mut Vm, s: Str| -> Result<String, Ctl> {
         let t = s.str(&vm.heap);
-        vm.reserve(t.len())?;
+        vm.check_memory(t.len())?;
         Ok(t.chars().rev().collect())
     });
     m.vm_function("List.join", join);
@@ -462,7 +463,7 @@ fn join(vm: &mut Vm, list: List<String>, sep: Str) -> Result<String, Ctl> {
     let items = list.items(&vm.heap);
     vm.charge(items.len() as u64)?;
     let total = items.iter().fold(sep_s.len().saturating_mul(items.len()), |n, x| n.saturating_add(vm.heap.str(*x).len()));
-    vm.reserve(total)?;
+    vm.check_memory(total)?;
     let mut out = String::with_capacity(total);
     for (i, x) in items.iter().enumerate() {
         if i > 0 {
@@ -486,7 +487,7 @@ fn bytes(m: &mut NativeModule) {
     });
     m.vm_function("bytes.to_str", |vm: &mut Vm, b: Bytes| -> Result<String, HostError> {
         let b = b.bytes(&vm.heap);
-        vm.reserve(b.len())?;
+        vm.check_memory(b.len())?;
         match std::str::from_utf8(b) {
             Ok(s) => Ok(s.to_string()),
             Err(e) => {
@@ -497,13 +498,13 @@ fn bytes(m: &mut NativeModule) {
     });
     m.vm_function("bytes.to_str_lossy", |vm: &mut Vm, b: Bytes| -> Result<String, Ctl> {
         let b = b.bytes(&vm.heap);
-        vm.reserve(b.len())?;
+        vm.check_memory(b.len())?;
         Ok(String::from_utf8_lossy(b).into_owned())
     });
     m.vm_function("bytes.to_hex", |vm: &mut Vm, b: Bytes| -> Result<String, Ctl> {
         const HEX: &[u8; 16] = b"0123456789abcdef";
         let b = b.bytes(&vm.heap);
-        vm.reserve(b.len().saturating_mul(2))?;
+        vm.check_memory(b.len().saturating_mul(2))?;
         vm.charge_slow_bytes(b.len())?;
         let mut s = String::with_capacity(b.len() * 2);
         for x in b {
@@ -522,7 +523,7 @@ fn bytes(m: &mut NativeModule) {
     });
     m.vm_function("bytes.from_list", |vm: &mut Vm, items: List<i64>| -> Result<Vec<u8>, Ctl> {
         let n = list_len(vm, items);
-        vm.reserve(n)?;
+        vm.check_memory(n)?;
         vm.charge(n as u64)?;
         let mut out = Vec::with_capacity(n);
         for x in items.items(&vm.heap) {
@@ -536,7 +537,7 @@ fn bytes(m: &mut NativeModule) {
     });
     m.vm_function("bytes.from_hex", |vm: &mut Vm, text: Str| -> Result<Option<Vec<u8>>, Ctl> {
         let t = text.str(&vm.heap);
-        vm.reserve(t.len() / 2)?;
+        vm.check_memory(t.len() / 2)?;
         vm.charge_slow_bytes(t.len())?;
         let ok = t.len().is_multiple_of(2) && t.bytes().all(|b| b.is_ascii_hexdigit());
         if !ok {
@@ -559,7 +560,7 @@ fn find_bytes(vm: &Vm, hay: &[u8], needle: &[u8]) -> Result<Option<usize>, Ctl> 
     if needle.len() > hay.len() {
         return Ok(None);
     }
-    vm.reserve(needle.len().saturating_mul(std::mem::size_of::<usize>()))?;
+    vm.check_memory(needle.len().saturating_mul(std::mem::size_of::<usize>()))?;
     vm.charge_slow_bytes(hay.len() + needle.len())?;
     let mut fail = vec![0usize; needle.len()];
     let mut k = 0;
@@ -588,7 +589,7 @@ fn find_bytes(vm: &Vm, hay: &[u8], needle: &[u8]) -> Result<Option<usize>, Ctl> 
 }
 
 /// The index of the first element equal to `x`, charging for the comparisons.
-fn index_of(vm: &Vm, list: List, x: Param<0>) -> Result<Option<usize>, Ctl> {
+fn index_of(vm: &Vm, list: List, x: Param<0, EqB>) -> Result<Option<usize>, Ctl> {
     for (i, y) in list.items(&vm.heap).iter().enumerate() {
         vm.charge(1)?;
         if values_eq_metered(&vm.heap, &vm.meter, *y, x.raw())? {
@@ -670,8 +671,8 @@ fn lists(m: &mut NativeModule) {
     m.vm_function("List.last", |vm: &mut Vm, xs: List| -> Result<Option<Param<0>>, Ctl> {
         Ok(xs.items(&vm.heap).last().copied().map(Param::from_raw))
     });
-    m.vm_function("List.contains", |vm: &mut Vm, xs: List, x: Param<0>| -> Result<bool, Ctl> { Ok(index_of(vm, xs, x)?.is_some()) });
-    m.vm_function("List.index_of", |vm: &mut Vm, xs: List, x: Param<0>| -> Result<Option<i64>, Ctl> {
+    m.vm_function("List.contains", |vm: &mut Vm, xs: List, x: Param<0, EqB>| -> Result<bool, Ctl> { Ok(index_of(vm, xs, x)?.is_some()) });
+    m.vm_function("List.index_of", |vm: &mut Vm, xs: List, x: Param<0, EqB>| -> Result<Option<i64>, Ctl> {
         Ok(index_of(vm, xs, x)?.map(|p| p as i64))
     });
     m.vm_function("List.reverse", |vm: &mut Vm, xs: List| -> Result<_, Ctl> {
@@ -683,19 +684,19 @@ fn lists(m: &mut NativeModule) {
         reserve_list(vm, list_len(vm, xs))?;
         Ok(params(xs.items(&vm.heap).iter().rev().copied().collect()))
     });
-    m.vm_function("List.sort", |vm: &mut Vm, xs: List| {
+    m.vm_function("List.sort", |vm: &mut Vm, xs: List<Param<0, OrdB>>| {
         let mut v = std::mem::take(vm.heap.list_mut(xs.raw()));
         let r = sort_values(vm, &mut v);
         *vm.heap.list_mut(xs.raw()) = v;
         r
     });
-    m.vm_function("List.sorted", |vm: &mut Vm, xs: List| -> Result<Vec<Param<0>>, Ctl> {
+    m.vm_function("List.sorted", |vm: &mut Vm, xs: List<Param<0, OrdB>>| -> Result<Vec<Param<0>>, Ctl> {
         reserve_list(vm, list_len(vm, xs))?;
         let mut v = xs.items(&vm.heap).to_vec();
         sort_values(vm, &mut v)?;
         Ok(params(v))
     });
-    m.vm_function("List.sort_by_keys", |vm: &mut Vm, xs: List, keys: List<Param<1>>| {
+    m.vm_function("List.sort_by_keys", |vm: &mut Vm, xs: List, keys: List<Param<1, OrdB>>| {
         let keys = keys.items(&vm.heap).to_vec();
         let items = std::mem::take(vm.heap.list_mut(xs.raw()));
         if keys.len() != items.len() {
@@ -775,7 +776,7 @@ fn lists(m: &mut NativeModule) {
             st.new_list(pairs)
         })))
     });
-    m.vm_function("List.dedup", |vm: &mut Vm, xs: List| -> Result<Vec<Param<0>>, Ctl> {
+    m.vm_function("List.dedup", |vm: &mut Vm, xs: List<Param<0, EqB>>| -> Result<Vec<Param<0>>, Ctl> {
         let items = xs.items(&vm.heap);
         vm.charge(items.len() as u64)?;
         reserve_list(vm, items.len())?;
@@ -791,12 +792,12 @@ fn lists(m: &mut NativeModule) {
         }
         Ok(params(out))
     });
-    m.vm_function("List.unique", |vm: &mut Vm, xs: List| -> Result<Vec<Param<0>>, Ctl> {
+    m.vm_function("List.unique", |vm: &mut Vm, xs: List<Param<0, HashB>>| -> Result<Vec<Param<0>>, Ctl> {
         let set = set_of(vm, xs.items(&vm.heap))?;
         reserve_list(vm, set.live)?;
         Ok(params(set.entries.into_iter().flatten().collect()))
     });
-    m.vm_function("List.to_set", |vm: &mut Vm, xs: List| -> Result<_, Ctl> {
+    m.vm_function("List.to_set", |vm: &mut Vm, xs: List<Param<0, HashB>>| -> Result<_, Ctl> {
         let set = set_of(vm, xs.items(&vm.heap))?;
         Ok(new_set(vm, set))
     });
@@ -813,7 +814,7 @@ fn lists(m: &mut NativeModule) {
     }
     m.vm_function("List.sum_from", |vm: &mut Vm, xs: List, init: Param<0>| fold_num(vm, xs, init, false));
     m.vm_function("List.product_from", |vm: &mut Vm, xs: List, init: Param<0>| fold_num(vm, xs, init, true));
-    fn extreme(vm: &mut Vm, xs: List, want: Ordering) -> Result<Option<Param<0>>, Ctl> {
+    fn extreme(vm: &mut Vm, xs: List<Param<0, OrdB>>, want: Ordering) -> Result<Option<Param<0>>, Ctl> {
         let items = xs.items(&vm.heap);
         let mut best: Option<Value> = None;
         for &x in items {
@@ -830,8 +831,8 @@ fn lists(m: &mut NativeModule) {
         }
         Ok(best.map(Param::from_raw))
     }
-    m.vm_function("List.min", |vm: &mut Vm, xs: List| extreme(vm, xs, Ordering::Less));
-    m.vm_function("List.max", |vm: &mut Vm, xs: List| extreme(vm, xs, Ordering::Greater));
+    m.vm_function("List.min", |vm: &mut Vm, xs: List<Param<0, OrdB>>| extreme(vm, xs, Ordering::Less));
+    m.vm_function("List.max", |vm: &mut Vm, xs: List<Param<0, OrdB>>| extreme(vm, xs, Ordering::Greater));
 }
 
 /// Returns the inclusive `(first, last)` bounds, or `None` if empty.
@@ -973,7 +974,7 @@ fn new_set(vm: &mut Vm, set: SetObj) -> Set {
 
 fn alloc_copy(vm: &mut Vm, copy: Obj) -> NResult {
     let size = copy.size();
-    vm.reserve(size)?;
+    vm.check_memory(size)?;
     vm.charge_bytes(size)?;
     Ok(vm.heap.alloc(copy))
 }

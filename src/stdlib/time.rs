@@ -1,7 +1,7 @@
 //! Implementation of the `time` standard library module.
 
 use crate::check::ModKind;
-use crate::native::{HostError, IntoValue, NativeModule, NativeObject, Val};
+use crate::native::{Binding, HostError, IntoValue, NamedType, NativeModule, NativeObject, Val};
 use crate::platform::{Instant as Monotonic, UNIX_EPOCH};
 use crate::policy::Capability;
 use crate::vm::value::{Packing, ValueType};
@@ -53,10 +53,29 @@ fn unpack_time(bits: u64) -> Time {
         .expect("packed by pack_time")
 }
 
+macro_rules! bind_jiff_types {
+    ($($rust:ty => $name:literal: $doc:literal),* $(,)?) => {$(
+        impl NamedType for $rust {
+            const MODULE: &'static str = "time";
+            const NAME: &'static str = $name;
+            const DOC: &'static str = $doc;
+            const PUBLIC: bool = true;
+            fn binding() -> Binding<Self> {
+                Binding::of_value()
+            }
+        }
+        crate::__value_type_impls!($rust);
+    )*};
+}
+
+bind_jiff_types! {
+    Timestamp => "Instant": "An exact point on the UTC timeline (such as `2024-03-10T07:30:00Z`).",
+    DateTime => "PlainDateTime": "A calendar date and wall-clock time without a time zone (such as `2024-03-10T03:30:00`).",
+    Date => "PlainDate": "A calendar date without a time zone (such as `2024-03-10`).",
+    Time => "PlainTime": "A wall-clock time of day without a date or time zone (such as `03:30:00`).",
+}
+
 impl ValueType for Timestamp {
-    const MODULE: &'static str = "time";
-    const NAME: &'static str = "Instant";
-    const DOC: &'static str = "An exact point on the UTC timeline (such as `2024-03-10T07:30:00Z`).";
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
     // Flip the sign bit so unsigned comparison matches chronological order.
     const PACKING: Option<Packing<Self>> = Some(Packing {
@@ -76,9 +95,6 @@ impl ValueType for Timestamp {
 }
 
 impl ValueType for DateTime {
-    const MODULE: &'static str = "time";
-    const NAME: &'static str = "PlainDateTime";
-    const DOC: &'static str = "A calendar date and wall-clock time without a time zone (such as `2024-03-10T03:30:00`).";
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
     const PACKING: Option<Packing<Self>> = Some(Packing {
         pack: |dt| [pack_date(&dt.date()), pack_time(&dt.time())],
@@ -91,9 +107,6 @@ impl ValueType for DateTime {
 }
 
 impl ValueType for Date {
-    const MODULE: &'static str = "time";
-    const NAME: &'static str = "PlainDate";
-    const DOC: &'static str = "A calendar date without a time zone (such as `2024-03-10`).";
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
     const PACKING: Option<Packing<Self>> = Some(Packing { pack: |d| [pack_date(d), 0], unpack: |[d, _]| unpack_date(d), ordered: true });
     fn parse(text: &str) -> Result<Self, String> {
@@ -102,9 +115,6 @@ impl ValueType for Date {
 }
 
 impl ValueType for Time {
-    const MODULE: &'static str = "time";
-    const NAME: &'static str = "PlainTime";
-    const DOC: &'static str = "A wall-clock time of day without a date or time zone (such as `03:30:00`).";
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
     const PACKING: Option<Packing<Self>> = Some(Packing { pack: |t| [pack_time(t), 0], unpack: |[t, _]| unpack_time(t), ordered: true });
     fn parse(text: &str) -> Result<Self, String> {
@@ -125,9 +135,11 @@ fn zone_key(tz: &tz::TimeZone) -> ZoneKey<'_> {
     }
 }
 
-/// An instant in a supported [`TimeZone`] (`time.ZonedDateTime`).
-/// Two values are equal only if both their instants and their zone IDs match.
-#[derive(Clone, Debug)]
+/// An exact instant paired with a `TimeZone` (such as
+/// `2024-03-10T03:30:00-04:00[America/New_York]`), ordered by instant and then
+/// by zone ID.
+#[derive(Clone, Debug, crate::SandValue)]
+#[sand(module = "time")]
 pub struct ZonedDateTime(Zoned);
 
 impl ZonedDateTime {
@@ -177,9 +189,6 @@ impl fmt::Display for ZonedDateTime {
     }
 }
 impl ValueType for ZonedDateTime {
-    const MODULE: &'static str = "time";
-    const NAME: &'static str = "ZonedDateTime";
-    const DOC: &'static str = "An exact instant paired with a `TimeZone` (such as `2024-03-10T03:30:00-04:00[America/New_York]`), ordered by instant and then by zone ID.";
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
     fn parse(text: &str) -> Result<Self, String> {
         let z = PARSER.parse_zoned_with(&DB, text).map_err(|_| parse_error(text, Self::NAME))?;
@@ -192,8 +201,9 @@ fn write_year(f: &mut fmt::Formatter<'_>, year: i16) -> fmt::Result {
     if (0..=9999).contains(&year) { write!(f, "{year:04}") } else { write!(f, "{year:+07}") }
 }
 
-/// A year and month (`time.PlainYearMonth`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// A calendar year and month without a day (such as `2024-03`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, crate::SandValue)]
+#[sand(module = "time")]
 pub struct PlainYearMonth(Date);
 
 impl PlainYearMonth {
@@ -213,9 +223,6 @@ impl fmt::Display for PlainYearMonth {
     }
 }
 impl ValueType for PlainYearMonth {
-    const MODULE: &'static str = "time";
-    const NAME: &'static str = "PlainYearMonth";
-    const DOC: &'static str = "A calendar year and month without a day (such as `2024-03`).";
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
     const PACKING: Option<Packing<Self>> =
         Some(Packing { pack: |ym| [pack_date(&ym.0), 0], unpack: |[d, _]| PlainYearMonth(unpack_date(d)), ordered: true });
@@ -231,8 +238,9 @@ impl ValueType for PlainYearMonth {
 /// Reference leap year used to store `PlainMonthDay` as a `Date`.
 const MONTH_DAY_YEAR: i16 = 1972;
 
-/// A month and day without a year (`time.PlainMonthDay`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// A calendar month and day without a year (such as `03-10`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, crate::SandValue)]
+#[sand(module = "time")]
 pub struct PlainMonthDay(Date);
 
 impl PlainMonthDay {
@@ -256,9 +264,6 @@ impl fmt::Display for PlainMonthDay {
     }
 }
 impl ValueType for PlainMonthDay {
-    const MODULE: &'static str = "time";
-    const NAME: &'static str = "PlainMonthDay";
-    const DOC: &'static str = "A calendar month and day without a year (such as `03-10`).";
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
     const PACKING: Option<Packing<Self>> =
         Some(Packing { pack: |md| [pack_date(&md.0), 0], unpack: |[d, _]| PlainMonthDay(unpack_date(d)), ordered: true });
@@ -273,8 +278,12 @@ impl ValueType for PlainMonthDay {
     }
 }
 
-/// A calendar and clock duration (`time.Span`) with sub-second units normalized into seconds.
-#[derive(Clone, Copy, Debug)]
+/// A signed calendar and clock duration (such as `P1M2DT3H`). `span`
+/// normalizes sub-second units into seconds (`span(milliseconds: 1500)` stores
+/// 1 second and 500 milliseconds). Two spans are equal only if all unit fields match
+/// (`span(hours: 24) != span(days: 1)`).
+#[derive(Clone, Copy, Debug, crate::SandValue)]
+#[sand(module = "time")]
 pub struct Span(jiff::Span);
 
 impl Span {
@@ -341,16 +350,16 @@ impl fmt::Display for Span {
     }
 }
 impl ValueType for Span {
-    const MODULE: &'static str = "time";
-    const NAME: &'static str = "Span";
-    const DOC: &'static str = "A signed calendar and clock duration (such as `P1M2DT3H`). Sub-second units normalize into seconds (`span(milliseconds: 1500)` stores 1 second and 500 milliseconds). Two spans are equal only if all unit fields match (`span(hours: 24) != span(days: 1)`).";
     fn parse(text: &str) -> Result<Self, String> {
         text.parse().and_then(Span::new).map_err(|_| parse_error(text, Self::NAME))
     }
 }
 
-/// An IANA time zone, `UTC`, or a fixed whole-minute offset (`time.TimeZone`).
-#[derive(Clone, Debug)]
+/// A time zone identifier: an IANA zone (`America/New_York`), `UTC`, or a fixed
+/// minute offset (`+05:30`). Two zones are equal if their canonical IDs match
+/// (`zone("Etc/UTC") != UTC`).
+#[derive(Clone, Debug, crate::SandValue)]
+#[sand(module = "time")]
 pub struct TimeZone(tz::TimeZone);
 
 impl TimeZone {
@@ -390,9 +399,6 @@ impl fmt::Display for TimeZone {
     }
 }
 impl ValueType for TimeZone {
-    const MODULE: &'static str = "time";
-    const NAME: &'static str = "TimeZone";
-    const DOC: &'static str = "A time zone identifier: an IANA zone (`America/New_York`), `UTC`, or a fixed minute offset (`+05:30`). Two zones are equal if their canonical IDs match (`zone(\"Etc/UTC\") != UTC`).";
     fn parse(text: &str) -> Result<Self, String> {
         parse_zone(text).map(TimeZone)
     }
@@ -728,7 +734,7 @@ fn parse<T: ValueType>(vm: &mut Vm, text: Val<String>) -> Result<T, HostError> {
 fn format(vm: &mut Vm, format: Val<String>, t: impl Into<BrokenDownTime>) -> Result<String, Ctl> {
     let format = format.str(&vm.heap);
     // Bound output size before formatting.
-    vm.reserve(format.len().saturating_mul(64))?;
+    vm.check_memory(format.len().saturating_mul(64))?;
     vm.charge_slow_bytes(format.len())?;
     strtime::format(format, t).map_err(|e| Ctl::fail("invalid", e))
 }
@@ -839,19 +845,19 @@ const SPAN_IS_ZERO: &[Part<jiff::Span, bool>] = &[("is_zero", |s| s.is_zero())];
 
 pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("time", ModKind::Std, include_str!("time.sand"));
-    m.enum_type::<enums::Unit>();
-    m.enum_type::<enums::RoundingMode>();
-    m.enum_type::<enums::Disambiguation>();
-    m.value_type::<Timestamp>();
-    m.value_type::<ZonedDateTime>();
-    m.value_type::<DateTime>();
-    m.value_type::<Date>();
-    m.value_type::<Time>();
-    m.value_type::<PlainYearMonth>();
-    m.value_type::<PlainMonthDay>();
-    m.value_type::<Span>();
-    m.value_type::<TimeZone>();
-    m.object_type::<Stopwatch>();
+    m.bind::<enums::Unit>();
+    m.bind::<enums::RoundingMode>();
+    m.bind::<enums::Disambiguation>();
+    m.bind::<Timestamp>();
+    m.bind::<ZonedDateTime>();
+    m.bind::<DateTime>();
+    m.bind::<Date>();
+    m.bind::<Time>();
+    m.bind::<PlainYearMonth>();
+    m.bind::<PlainMonthDay>();
+    m.bind::<Span>();
+    m.bind::<TimeZone>();
+    m.bind::<Stopwatch>();
     register_module(&mut m);
     register_parts(&mut m);
     register_instant(&mut m);

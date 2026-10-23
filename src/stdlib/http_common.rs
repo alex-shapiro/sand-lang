@@ -109,7 +109,7 @@ pub(crate) fn resolve(base: &str, location: &str) -> Result<String, IoFailure> {
 }
 
 pub(crate) fn natives(m: &mut NativeModule) {
-    m.object_type::<Body>();
+    m.bind::<Body>();
     body_natives(m);
     m.vm_function("resolve", |vm: &mut Vm, base: Val<String>, location: Val<String>| -> Result<String, HostError> {
         let (base, location) = (base.str(&vm.heap), location.str(&vm.heap));
@@ -149,7 +149,7 @@ pub(crate) fn header_pairs(vm: &Vm, list: Val<Vec<(String, String)>>) -> Result<
         let (k, v) = (vm.str(*k), vm.str(*v));
         size = size.saturating_add(k.len() + v.len() + 64);
         vm.charge_bytes(k.len() + v.len())?;
-        vm.reserve(size)?;
+        vm.check_memory(size)?;
         if !valid_header(k, v) {
             return Err(HostError::new("invalid", format!("invalid header {:?}: {:?}", super::truncate(k, 64), super::truncate(v, 64))));
         }
@@ -187,8 +187,17 @@ pub(crate) fn prepare_request(
 }
 
 impl Prepared {
-    pub fn require(&mut self, vm: &mut Vm) -> Result<(), HostError> {
+    /// Checks the policy for this request. Call this before mutating state
+    /// because a permission prompt retries the native call.
+    pub fn check_policy(&self, vm: &mut Vm) -> Result<(), HostError> {
         vm.require(&self.url.capability(&self.method))?;
+        Ok(())
+    }
+
+    /// Runs the host request filter, which can rewrite headers or reject the
+    /// request. Call this after all checks that can retry the native call so
+    /// the host observes the filter once per request.
+    pub fn apply_filter(&mut self, vm: &Vm) -> Result<(), HostError> {
         let Some(filter) = &vm.host.request_filter else { return Ok(()) };
         let url = &self.url;
         let target = crate::engine::RequestTarget { scheme: url.scheme.clone(), host: url.host.clone(), port: url.port };

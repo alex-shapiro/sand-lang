@@ -1,66 +1,94 @@
-//! Derive macros for `sandlang`, re-exported at the root of the `sandlang` crate.
+//! Derive macros that bind Rust types to Sand types in a `NativeModule`.
+//!
+//! Every derive macro requires `#[sand(module = "<module>")]` on the type and
+//! accepts these optional type attributes:
+//! - `#[sand(name = "<Name>")]`: overrides the Sand type name (defaults to the
+//!   Rust identifier).
+//! - `#[sand(private)]`: makes the type private to its module.
+//! - `#[sand(crate = <path>)]`: sets the path to the `sandlang` crate (defaults
+//!   to `::sandlang`).
+//!
+//! Rust doc comments (including `#[doc = include_str!("...")]`) become Sand
+//! documentation.
 
 use proc_macro::TokenStream;
-use proc_macro2::Span;
-use quote::quote;
+use proc_macro2::{Span, TokenStream as Tokens};
+use quote::{quote, quote_spanned};
 use syn::ext::IdentExt;
-use syn::{Attribute, Data, DeriveInput, Error, Expr, ExprLit, Fields, Lit, LitStr, Meta, parse_macro_input};
+use syn::{Attribute, Data, DeriveInput, Error, Expr, ExprLit, Fields, Lit, LitStr, Meta, Path, parse_macro_input, parse_quote};
 
-/// Derives `EnumType`, `SandType`, `FromValue`, and `IntoValue` for a unit
-/// enum so that native functions can accept and return it.
-///
-/// Required attribute:
-/// - `#[sand(module = "<module>")]` sets the Sand module that owns the enum.
-///
-/// Optional attribute:
-/// - `#[sand(name = "<Name>")]` overrides the Sand enum name.
+/// Derives `NamedType`, `EnumType`, `SandType`, `FromValue`, and `IntoValue`
+/// for a unit enum.
 #[proc_macro_derive(SandEnum, attributes(sand))]
 pub fn derive_sand_enum(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
-    sand_enum(&input).unwrap_or_else(Error::into_compile_error).into()
+    expand(input, sand_enum)
 }
 
-/// Derives `ObjectType`, `SandType`, `FromValue` (for `&T`), and `IntoValue`
-/// for a struct or enum so that native functions can borrow object handles as
-/// `&T` and return new objects by value. The type must also implement
-/// `NativeObject`.
-///
-/// Required attribute:
-/// - `#[sand(module = "<module>")]` sets the Sand module that owns the type.
-///
-/// Optional attributes:
-/// - `#[sand(name = "<Name>")]` overrides the Sand type name.
-/// - `#[sand(private)]` makes the type private to its module.
+/// Derives `NamedType`, `ObjectType`, `SandType`, `FromValue` (for `&T`), and
+/// `IntoValue` for an opaque host object type that implements `NativeObject`.
 #[proc_macro_derive(SandObject, attributes(sand))]
 pub fn derive_sand_object(input: TokenStream) -> TokenStream {
+    expand(input, sand_object)
+}
+
+/// Derives `NamedType`, `StructType`, `SandType`, `FromValue`, and `IntoValue`
+/// for a struct with named fields.
+///
+/// Each field type must implement `IntoValue` and owned `FromValue`. Optional
+/// field attributes:
+/// - `#[sand(name = "<name>")]`: overrides the Sand field name (defaults to the
+///   Rust identifier).
+/// - `#[sand(private)]`: makes the field private to its module.
+/// - `#[sand(var)]`: makes the field mutable (`var`) in Sand.
+#[proc_macro_derive(SandStruct, attributes(sand))]
+pub fn derive_sand_struct(input: TokenStream) -> TokenStream {
+    expand(input, sand_struct)
+}
+
+/// Derives `NamedType`, `SandType`, `FromValue`, and `IntoValue` for a type
+/// that implements `ValueType`.
+#[proc_macro_derive(SandValue, attributes(sand))]
+pub fn derive_sand_value(input: TokenStream) -> TokenStream {
+    expand(input, sand_value)
+}
+
+fn expand(input: TokenStream, derive: fn(&DeriveInput) -> syn::Result<Tokens>) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    sand_object(&input).unwrap_or_else(Error::into_compile_error).into()
+    derive(&input).unwrap_or_else(Error::into_compile_error).into()
 }
 
 struct TypeAttrs {
     module: LitStr,
     name: LitStr,
-    private: bool,
+    public: bool,
+    krate: Path,
+    doc: Tokens,
 }
 
-fn parse_type_attrs(input: &DeriveInput, derive: &str, allow_private: bool) -> syn::Result<TypeAttrs> {
+fn parse_type_attrs(input: &DeriveInput, derive: &str) -> syn::Result<TypeAttrs> {
     let ty = &input.ident;
     if !input.generics.params.is_empty() {
-        return Err(Error::new_spanned(&input.generics, format!("`{derive}` cannot be derived for a type with type parameters")));
+        return Err(Error::new_spanned(
+            &input.generics,
+            format!("`{derive}` cannot be derived for a type with type or lifetime parameters"),
+        ));
     }
-    let (mut module, mut name, mut private) = (None, LitStr::new(&ty.unraw().to_string(), ty.span()), false);
+    let mut module = None;
+    let mut name = LitStr::new(&ty.unraw().to_string(), ty.span());
+    let mut public = true;
+    let mut krate: Path = parse_quote!(::sandlang);
     for attr in input.attrs.iter().filter(|a| a.path().is_ident("sand")) {
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("module") {
                 module = Some(meta.value()?.parse::<LitStr>()?);
             } else if meta.path.is_ident("name") {
                 name = meta.value()?.parse()?;
-            } else if meta.path.is_ident("private") && allow_private {
-                private = true;
-            } else if allow_private {
-                return Err(meta.error("expected `module`, `name` or `private`"));
+            } else if meta.path.is_ident("private") {
+                public = false;
+            } else if meta.path.is_ident("crate") {
+                krate = meta.value()?.parse()?;
             } else {
-                return Err(meta.error("expected `module` or `name`"));
+                return Err(meta.error("expected `module`, `name`, `private` or `crate`"));
             }
             Ok(())
         })?;
@@ -68,137 +96,349 @@ fn parse_type_attrs(input: &DeriveInput, derive: &str, allow_private: bool) -> s
     let Some(module) = module else {
         return Err(Error::new(Span::call_site(), format!("`{derive}` requires `#[sand(module = \"...\")]`")));
     };
-    let type_name = name.value();
-    let capitalized =
-        type_name.starts_with(|c: char| c.is_ascii_uppercase()) && type_name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-    if !capitalized {
-        return Err(Error::new_spanned(&name, format!("the Sand type name `{type_name}` is not a capitalized identifier")));
-    }
-    for attrs in member_attrs(&input.data) {
-        if let Some(a) = attrs.iter().find(|a| a.path().is_ident("sand")) {
-            return Err(Error::new_spanned(a, "`#[sand(...)]` applies only to the type"));
-        }
-    }
-    Ok(TypeAttrs { module, name, private })
+    Ok(TypeAttrs { module, name, public, krate, doc: doc_expr(&input.attrs) })
 }
 
-fn sand_enum(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+fn assert_type_name(krate: &Path, kind: &str, name: &str, span: Span) -> Tokens {
+    let msg = format!("the Sand {kind} name `{name}` is not a capitalized identifier, or is a keyword");
+    quote_spanned! {span=> const _: () = ::std::assert!(#krate::native::is_type_name(#name), #msg); }
+}
+
+fn reject_member_attrs(data: &Data) -> syn::Result<()> {
+    fn fields(f: &Fields) -> impl Iterator<Item = &Attribute> {
+        f.iter().flat_map(|f| &f.attrs)
+    }
+    let attrs: Vec<&Attribute> = match data {
+        Data::Struct(s) => fields(&s.fields).collect(),
+        Data::Enum(e) => e.variants.iter().flat_map(|v| v.attrs.iter().chain(fields(&v.fields))).collect(),
+        Data::Union(u) => u.fields.named.iter().flat_map(|f| &f.attrs).collect(),
+    };
+    match attrs.into_iter().find(|a| a.path().is_ident("sand")) {
+        Some(a) => Err(Error::new_spanned(a, "`#[sand(...)]` applies only to the type")),
+        None => Ok(()),
+    }
+}
+
+fn named_type(ty: &syn::Ident, a: &TypeAttrs, binding: Tokens) -> Tokens {
+    let TypeAttrs { module, name, public, krate, doc } = a;
+    let check = assert_type_name(krate, "type", &name.value(), name.span());
+    quote! {
+        #check
+        impl #krate::native::NamedType for #ty {
+            const MODULE: &'static str = #module;
+            const NAME: &'static str = #name;
+            const DOC: &'static str = #doc;
+            const PUBLIC: bool = #public;
+            fn binding() -> #krate::native::Binding<Self> {
+                #binding
+            }
+        }
+    }
+}
+
+fn sand_type(ty: &syn::Ident, krate: &Path) -> Tokens {
+    quote! {
+        impl #krate::native::SandType for #ty {
+            fn sand_type() -> #krate::native::Type {
+                #krate::native::Type::bound::<Self>(
+                    <Self as #krate::native::NamedType>::MODULE,
+                    <Self as #krate::native::NamedType>::NAME,
+                )
+            }
+        }
+    }
+}
+
+fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
     let ty = &input.ident;
     let Data::Enum(data) = &input.data else {
         return Err(Error::new_spanned(ty, "`SandEnum` can only be derived for enums"));
     };
-    let TypeAttrs { module, name, .. } = parse_type_attrs(input, "SandEnum", false)?;
+    let attrs = parse_type_attrs(input, "SandEnum")?;
+    reject_member_attrs(&input.data)?;
     if data.variants.is_empty() {
         return Err(Error::new_spanned(ty, "a Sand enum must have at least one variant"));
     }
-    let enum_doc = extract_doc_comment(&input.attrs);
+    let krate = &attrs.krate;
     let mut variants = Vec::new();
     let mut arms = Vec::new();
+    let mut checks = Vec::new();
     for (i, v) in data.variants.iter().enumerate() {
         if !matches!(v.fields, Fields::Unit) {
             return Err(Error::new_spanned(&v.fields, "`SandEnum` variants cannot have fields"));
         }
-        let (ident, vname, vdoc) = (&v.ident, v.ident.unraw().to_string(), extract_doc_comment(&v.attrs));
-        variants.push(quote! { ::sandlang::native::EnumVariant { name: #vname, doc: #vdoc, value: #ty::#ident } });
+        let (ident, vname, vdoc) = (&v.ident, v.ident.unraw().to_string(), doc_expr(&v.attrs));
+        checks.push(assert_type_name(krate, "variant", &vname, ident.span()));
+        variants.push(quote! { #krate::native::EnumVariant { name: #vname, doc: #vdoc, value: #ty::#ident } });
         arms.push(quote! { #ty::#ident => #i });
     }
+    let named = named_type(ty, &attrs, quote! { #krate::native::Binding::of_enum() });
+    let sand_type = sand_type(ty, krate);
     Ok(quote! {
-        impl ::sandlang::native::EnumType for #ty {
-            const MODULE: &'static str = #module;
-            const NAME: &'static str = #name;
-            const DOC: &'static str = #enum_doc;
-            const VARIANTS: &'static [::sandlang::native::EnumVariant<Self>] = &[#(#variants),*];
+        #named
+        #sand_type
+        #(#checks)*
+        impl #krate::native::EnumType for #ty {
+            const VARIANTS: &'static [#krate::native::EnumVariant<Self>] = &[#(#variants),*];
             fn index(self) -> usize {
                 match self {
                     #(#arms),*
                 }
             }
         }
-        impl ::sandlang::native::SandType for #ty {
-            fn sand_type() -> ::sandlang::native::Type {
-                ::sandlang::native::Type::bound::<Self>(#module, #name)
-            }
-        }
-        impl ::sandlang::native::FromValue for #ty {
+        impl #krate::native::FromValue for #ty {
             type Item<'a> = Self;
             fn from_value(
-                vm: &::sandlang::vm::Vm,
-                v: ::sandlang::Value,
-                _: &mut ::sandlang::native::Conversion,
-            ) -> ::std::result::Result<Self, ::sandlang::vm::Ctl> {
+                vm: &#krate::vm::Vm,
+                v: #krate::Value,
+                _: &mut #krate::native::Conversion,
+            ) -> ::std::result::Result<Self, #krate::vm::Ctl> {
                 vm.enum_value(v)
             }
         }
-        impl ::sandlang::native::IntoValue for #ty {
-            fn into_value(self, vm: &mut ::sandlang::vm::Vm) -> ::std::result::Result<::sandlang::Value, ::sandlang::vm::Ctl> {
+        impl #krate::native::IntoValue for #ty {
+            fn into_value(self, vm: &mut #krate::vm::Vm) -> ::std::result::Result<#krate::Value, #krate::vm::Ctl> {
                 vm.new_enum(self)
             }
         }
     })
 }
 
-fn sand_object(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+fn sand_object(input: &DeriveInput) -> syn::Result<Tokens> {
     let ty = &input.ident;
     if matches!(input.data, Data::Union(_)) {
         return Err(Error::new_spanned(ty, "`SandObject` cannot be derived for unions"));
     }
-    let TypeAttrs { module, name, private } = parse_type_attrs(input, "SandObject", true)?;
-    let doc = extract_doc_comment(&input.attrs);
-    let public = !private;
+    let attrs = parse_type_attrs(input, "SandObject")?;
+    reject_member_attrs(&input.data)?;
+    let krate = &attrs.krate;
+    let named = named_type(ty, &attrs, quote! { #krate::native::Binding::of_object() });
+    let sand_type = sand_type(ty, krate);
     Ok(quote! {
-        impl ::sandlang::native::ObjectType for #ty {
-            const MODULE: &'static str = #module;
-            const NAME: &'static str = #name;
-            const DOC: &'static str = #doc;
-            const PUBLIC: bool = #public;
-        }
-        impl ::sandlang::native::SandType for #ty {
-            fn sand_type() -> ::sandlang::native::Type {
-                ::sandlang::native::Type::bound::<Self>(#module, #name)
+        #named
+        #sand_type
+        impl #krate::native::ObjectType for #ty {}
+        impl #krate::native::SandType for &#ty {
+            fn sand_type() -> #krate::native::Type {
+                <#ty as #krate::native::SandType>::sand_type()
             }
         }
-        impl ::sandlang::native::SandType for &#ty {
-            fn sand_type() -> ::sandlang::native::Type {
-                <#ty as ::sandlang::native::SandType>::sand_type()
-            }
-        }
-        impl<'r> ::sandlang::native::FromValue for &'r #ty {
+        impl<'r> #krate::native::FromValue for &'r #ty {
             type Item<'a> = &'a #ty;
             fn from_value<'a>(
-                vm: &'a ::sandlang::vm::Vm,
-                v: ::sandlang::Value,
-                _: &mut ::sandlang::native::Conversion,
-            ) -> ::std::result::Result<&'a #ty, ::sandlang::vm::Ctl> {
-                ::sandlang::native::Val::<#ty>::from_raw(v).get(&vm.heap)
+                vm: &'a #krate::vm::Vm,
+                v: #krate::Value,
+                _: &mut #krate::native::Conversion,
+            ) -> ::std::result::Result<&'a #ty, #krate::vm::Ctl> {
+                #krate::native::Val::<#ty>::from_raw(v).get(&vm.heap)
             }
         }
-        impl ::sandlang::native::IntoValue for #ty {
-            fn into_value(self, vm: &mut ::sandlang::vm::Vm) -> ::std::result::Result<::sandlang::Value, ::sandlang::vm::Ctl> {
-                vm.new_object(self).map(::sandlang::native::Val::raw)
+        impl #krate::native::IntoValue for #ty {
+            fn into_value(self, vm: &mut #krate::vm::Vm) -> ::std::result::Result<#krate::Value, #krate::vm::Ctl> {
+                vm.new_object(self).map(#krate::native::Val::raw)
             }
         }
     })
 }
 
-fn member_attrs(data: &Data) -> Vec<&[Attribute]> {
-    fn fields(f: &Fields) -> impl Iterator<Item = &[Attribute]> {
-        f.iter().map(|f| &f.attrs[..])
+fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
+    let ty = &input.ident;
+    let Data::Struct(data) = &input.data else {
+        return Err(Error::new_spanned(ty, "`SandStruct` can only be derived for structs"));
+    };
+    let attrs = parse_type_attrs(input, "SandStruct")?;
+    let krate = &attrs.krate;
+    let fields = match &data.fields {
+        Fields::Named(f) => f.named.iter().collect::<Vec<_>>(),
+        Fields::Unit => Vec::new(),
+        Fields::Unnamed(f) => return Err(Error::new_spanned(f, "`SandStruct` requires named fields")),
+    };
+    let mut infos = Vec::new();
+    let mut reads = Vec::new();
+    let mut writes = Vec::new();
+    let mut names = Vec::new();
+    let mut checks = Vec::new();
+    for (i, f) in fields.iter().enumerate() {
+        let ident = f.ident.as_ref().expect("named field");
+        let (mut public, mut var) = (true, false);
+        let mut name = LitStr::new(&ident.unraw().to_string(), ident.span());
+        for attr in f.attrs.iter().filter(|a| a.path().is_ident("sand")) {
+            attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("name") {
+                    name = meta.value()?.parse::<LitStr>()?;
+                } else if meta.path.is_ident("private") {
+                    public = false;
+                } else if meta.path.is_ident("var") {
+                    var = true;
+                } else {
+                    return Err(meta.error("expected `name`, `private` or `var`"));
+                }
+                Ok(())
+            })?;
+        }
+        if names.contains(&name.value()) {
+            return Err(Error::new_spanned(&name, format!("the Sand field name `{}` is used twice", name.value())));
+        }
+        names.push(name.value());
+        let msg = format!(
+            "the Sand field name `{}` is not an identifier, or is a keyword; rename the field with `#[sand(name = \"...\")]`",
+            name.value()
+        );
+        checks.push(quote_spanned! {name.span()=> const _: () = ::std::assert!(#krate::native::is_name(#name), #msg); });
+        let (fty, doc) = (&f.ty, doc_expr(&f.attrs));
+        infos.push(quote! {
+            #krate::native::StructField {
+                name: #name,
+                doc: #doc,
+                public: #public,
+                var: #var,
+                ty: <#fty as #krate::native::SandType>::sand_type,
+            }
+        });
+        reads.push(quote! { #ident: #krate::native::field_from_value::<#fty>(vm, fields[#i], conv)? });
+        writes.push(quote! { #krate::native::IntoValue::into_value(self.#ident, vm)? });
     }
-    match data {
-        Data::Struct(s) => fields(&s.fields).collect(),
-        Data::Enum(e) => e.variants.iter().flat_map(|v| std::iter::once(&v.attrs[..]).chain(fields(&v.fields))).collect(),
-        Data::Union(u) => u.fields.named.iter().map(|f| &f.attrs[..]).collect(),
-    }
+    let named = named_type(ty, &attrs, quote! { #krate::native::Binding::of_struct() });
+    let sand_type = sand_type(ty, krate);
+    Ok(quote! {
+        #named
+        #sand_type
+        #(#checks)*
+        impl #krate::native::StructType for #ty {
+            const FIELDS: &'static [#krate::native::StructField] = &[#(#infos),*];
+        }
+        impl #krate::native::FromValue for #ty {
+            type Item<'a> = Self;
+            #[allow(unused_variables)]
+            fn from_value(
+                vm: &#krate::vm::Vm,
+                v: #krate::Value,
+                conv: &mut #krate::native::Conversion,
+            ) -> ::std::result::Result<Self, #krate::vm::Ctl> {
+                #krate::native::struct_from_value(vm, v, conv, |fields, conv| ::std::result::Result::Ok(#ty { #(#reads),* }))
+            }
+        }
+        impl #krate::native::IntoValue for #ty {
+            fn into_value(self, vm: &mut #krate::vm::Vm) -> ::std::result::Result<#krate::Value, #krate::vm::Ctl> {
+                #krate::native::struct_into_value::<Self>(vm, move |vm| ::std::result::Result::Ok(::std::boxed::Box::new([#(#writes),*])))
+            }
+        }
+    })
 }
 
-fn extract_doc_comment(attrs: &[Attribute]) -> String {
-    let lines = attrs.iter().filter_map(|a| match &a.meta {
-        Meta::NameValue(nv) if nv.path.is_ident("doc") => match &nv.value {
-            Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) => Some(s.value()),
-            _ => None,
-        },
-        _ => None,
-    });
-    let lines: Vec<String> = lines.map(|l| l.strip_prefix(' ').map(str::to_string).unwrap_or(l)).collect();
-    lines.join("\n").trim().to_string()
+fn sand_value(input: &DeriveInput) -> syn::Result<Tokens> {
+    let ty = &input.ident;
+    if matches!(input.data, Data::Union(_)) {
+        return Err(Error::new_spanned(ty, "`SandValue` cannot be derived for unions"));
+    }
+    let attrs = parse_type_attrs(input, "SandValue")?;
+    reject_member_attrs(&input.data)?;
+    let krate = &attrs.krate;
+    let named = named_type(ty, &attrs, quote! { #krate::native::Binding::of_value() });
+    Ok(quote! {
+        #named
+        #krate::__value_type_impls!(#ty);
+    })
+}
+
+/// Builds a compile-time `&'static str` expression from `#[doc = ...]`
+/// attributes, preserving non-literal expressions such as `include_str!(...)`.
+fn doc_expr(attrs: &[Attribute]) -> Tokens {
+    let mut parts = Vec::new();
+    for a in attrs {
+        let Meta::NameValue(nv) = &a.meta else { continue };
+        if !nv.path.is_ident("doc") {
+            continue;
+        }
+        if !parts.is_empty() {
+            parts.push(quote! { "\n" });
+        }
+        parts.push(match &nv.value {
+            Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) => {
+                let line = s.value();
+                let line = line.strip_prefix(' ').unwrap_or(&line);
+                quote! { #line }
+            }
+            e => quote! { #e },
+        });
+    }
+    quote! { ::std::concat!(#(#parts),*).trim_ascii() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type Derive = fn(&DeriveInput) -> syn::Result<Tokens>;
+
+    fn expand(f: Derive, src: &str) -> String {
+        let input: DeriveInput = syn::parse_str(src).unwrap();
+        f(&input).map(|t| t.to_string()).unwrap_or_else(|e| format!("error: {e}"))
+    }
+
+    #[test]
+    fn the_crate_attribute_sets_the_path_of_every_item() {
+        let derives: [(Derive, &str); 4] =
+            [(sand_enum, "enum E { A }"), (sand_object, "struct O;"), (sand_struct, "struct S { x: i64 }"), (sand_value, "struct V(i64);")];
+        for (f, item) in derives {
+            let out = expand(f, &format!("#[sand(module = \"m\", crate = ::renamed)] {item}"));
+            assert!(out.contains(":: renamed :: native"), "{out}");
+            assert!(!out.contains("sandlang"), "{out}");
+        }
+    }
+
+    #[test]
+    fn docs_are_concatenated_and_trimmed_at_compile_time() {
+        let out = expand(sand_enum, "#[sand(module = \"m\")]\n/// One.\n///\n///   Two.\nenum E { A }");
+        assert!(out.contains(":: std :: concat ! (\"One.\" , \"\\n\" , \"\" , \"\\n\" , \"  Two.\") . trim_ascii ()"), "{out}");
+        let out = expand(
+            sand_struct,
+            "#[sand(module = \"m\")]\n/// Head.\n#[doc = include_str!(\"x.md\")]\nstruct S { #[doc = include_str!(\"f.md\")] x: i64 }",
+        );
+        assert!(out.contains(":: std :: concat ! (\"Head.\" , \"\\n\" , include_str ! (\"x.md\")) . trim_ascii ()"), "{out}");
+        assert!(out.contains(":: std :: concat ! (include_str ! (\"f.md\")) . trim_ascii ()"), "{out}");
+    }
+
+    #[test]
+    fn struct_fields_take_attributes() {
+        let out = expand(sand_struct, "#[sand(module = \"m\")] struct S { #[sand(private, var)] r#type: i64, y: bool }");
+        assert!(out.contains("name : \"type\" , doc : :: std :: concat ! () . trim_ascii () , public : false , var : true"), "{out}");
+        assert!(out.contains("name : \"y\" , doc : :: std :: concat ! () . trim_ascii () , public : true , var : false"), "{out}");
+        let out = expand(sand_struct, "#[sand(module = \"m\")] struct S { #[sand(hidden)] x: i64 }");
+        assert_eq!(out, "error: expected `name`, `private` or `var`");
+        let out = expand(sand_struct, "#[sand(module = \"m\")] struct S { #[sand(name = \"kind\")] r#type: i64 }");
+        assert!(out.contains("name : \"kind\""), "{out}");
+    }
+
+    #[test]
+    fn names_are_checked_by_constants() {
+        let out = expand(sand_enum, "#[sand(module = \"m\", name = \"Self\")] enum E { A, b }");
+        assert!(out.contains(":: sandlang :: native :: is_type_name (\"Self\")"), "{out}");
+        assert!(out.contains(":: sandlang :: native :: is_type_name (\"A\")"), "{out}");
+        assert!(out.contains(":: sandlang :: native :: is_type_name (\"b\")"), "{out}");
+        let out = expand(sand_struct, "#[sand(module = \"m\")] struct S { r#fn: i64, #[sand(name = \"two words\")] y: i64 }");
+        assert!(out.contains(":: sandlang :: native :: is_name (\"fn\")"), "{out}");
+        assert!(out.contains(":: sandlang :: native :: is_name (\"two words\")"), "{out}");
+    }
+
+    #[test]
+    fn invalid_derives_are_rejected() {
+        let cases: [(Derive, &str, &str); 7] = [
+            (sand_struct, "#[sand(module = \"m\")] struct S(i64);", "`SandStruct` requires named fields"),
+            (sand_struct, "#[sand(module = \"m\")] enum S { A }", "`SandStruct` can only be derived for structs"),
+            (sand_struct, "#[sand(module = \"m\")] struct S<'a> { x: &'a str }", "type or lifetime parameters"),
+            (sand_struct, "struct S { x: i64 }", "requires `#[sand(module = \"...\")]`"),
+            (
+                sand_struct,
+                "#[sand(module = \"m\")] struct S { x: i64, #[sand(name = \"x\")] y: i64 }",
+                "the Sand field name `x` is used twice",
+            ),
+            (sand_value, "#[sand(module = \"m\")] struct V { #[sand(private)] x: i64 }", "applies only to the type"),
+            (sand_enum, "#[sand(module = \"m\", public)] enum E { A }", "expected `module`, `name`, `private` or `crate`"),
+        ];
+        for (f, src, msg) in cases {
+            let out = expand(f, src);
+            assert!(out.starts_with("error: ") && out.contains(msg), "{src}: {out}");
+        }
+    }
 }

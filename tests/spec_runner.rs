@@ -1,6 +1,6 @@
 //! Golden-file acceptance test runner for the language specification
-//! (`tests/spec/*.test`). The runner executes every test case across three
-//! compiler and collector modes (default, [`Config::gc_stress`], and
+//! (`tests/spec/*.test`). The runner executes every test case across four
+//! modes (default, [`Config::gc_stress`], [`Config::retry_stress`], and
 //! `Config::optimize(false)`) and two file system backends ([`MemFs`] and, with
 //! the `os` feature, a temporary host directory). Set `SPEC_FILTER=<substring>`
 //! to run only cases whose names match `<substring>`.
@@ -29,6 +29,7 @@
 //! * `--- test`: expected report from the test runner.
 //! * `--- args`: whitespace-separated command-line arguments.
 //! * `--- env`: `NAME=value` environment variables exposed to the script.
+//! * `--- requires FEATURE...`: crate features (`os`, `tls`) required to run the case.
 
 mod common;
 
@@ -41,6 +42,7 @@ use std::path::{Path, PathBuf};
 enum Mode {
     Plain,
     GcStress,
+    RetryStress,
     Unoptimized,
 }
 
@@ -49,6 +51,7 @@ impl Mode {
         match self {
             Mode::Plain => "",
             Mode::GcStress => " (under GC stress)",
+            Mode::RetryStress => " (under retry stress)",
             Mode::Unoptimized => " (unoptimized)",
         }
     }
@@ -181,6 +184,15 @@ fn parse_cases(text: &str) -> Vec<Case> {
 
 fn run_case(case: &Case, mode: Mode, backend: Backend) -> Result<(), String> {
     let get = |name: &str| case.sections.iter().find(|(h, _)| h == name).map(|(_, b)| b.clone());
+    let enabled = |feature: &str| match feature {
+        "os" => cfg!(feature = "os"),
+        "tls" => cfg!(feature = "tls"),
+        _ => panic!("unknown feature `{feature}` in case {:?}", case.name),
+    };
+    let mut required = case.sections.iter().filter_map(|(h, _)| h.strip_prefix("requires ")).flat_map(str::split_whitespace);
+    if !required.all(enabled) {
+        return Ok(());
+    }
     let dir = CaseDir::new(backend, &case.name);
     for (h, body) in &case.sections {
         if let Some(path) = h.strip_prefix("file ") {
@@ -221,7 +233,8 @@ fn run_case(case: &Case, mode: Mode, backend: Backend) -> Result<(), String> {
     let out = MemorySink::new();
     let err = MemorySink::new();
     let config = Config::new().policy(Policy::allow_all()).stdout(out.clone()).stderr(err.clone()).seed(42);
-    let mut config = dir.configure(config.gc_stress(mode == Mode::GcStress).optimize(mode != Mode::Unoptimized));
+    let mut config =
+        dir.configure(config.gc_stress(mode == Mode::GcStress).retry_stress(mode == Mode::RetryStress).optimize(mode != Mode::Unoptimized));
     if let Some(stdin) = get("stdin") {
         config = config.stdin_bytes(stdin.into_bytes());
     }
@@ -378,6 +391,15 @@ macro_rules! spec_files {
                 #[test]
                 fn $name() {
                     run_file(stringify!($name), Mode::GcStress, $backend);
+                }
+            )*
+        }
+        mod retry_stress {
+            use super::{Backend, Mode, run_file};
+            $(
+                #[test]
+                fn $name() {
+                    run_file(stringify!($name), Mode::RetryStress, $backend);
                 }
             )*
         }

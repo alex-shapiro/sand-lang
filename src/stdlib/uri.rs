@@ -4,34 +4,72 @@ use crate::check::ModKind;
 use crate::native::{HostError, NativeModule, Val};
 use crate::vm::{Ctl, Vm};
 
-type PartsTuple = (String, Option<String>, Option<String>, Option<i64>, String, Option<String>, Option<String>);
+/// A parsed URI (RFC 3986). `host` is `Some` if the URI includes an authority
+/// component (`//...`). IPv6 host literals omit the enclosing brackets.
+#[derive(crate::SandStruct)]
+#[sand(module = "uri")]
+struct Uri {
+    /// Lowercase URI scheme (such as `"https"`).
+    scheme: String,
+    /// Optional `userinfo` component before `@`.
+    userinfo: Option<String>,
+    /// Hostname or IP literal (without brackets for IPv6), if an authority is present.
+    host: Option<String>,
+    /// Explicit port number, if present.
+    port: Option<i64>,
+    /// URI path component (may be `""`).
+    path: String,
+    /// Raw query component after `?`, without the leading `?`.
+    query: Option<String>,
+    /// Fragment component after `#`, without the leading `#`.
+    fragment: Option<String>,
+}
+
+impl From<Parts> for Uri {
+    fn from(p: Parts) -> Uri {
+        let (userinfo, host, port) = match p.authority {
+            Some(a) => (a.userinfo, Some(a.host), a.port),
+            None => (None, None, None),
+        };
+        Uri { scheme: p.scheme.unwrap_or_default(), userinfo, host, port, path: p.path, query: p.query, fragment: p.fragment }
+    }
+}
+
+impl From<Uri> for Parts {
+    fn from(u: Uri) -> Parts {
+        let authority = u.host.map(|host| Authority { userinfo: u.userinfo, host, port: u.port });
+        Parts { scheme: Some(u.scheme), authority, path: u.path, query: u.query, fragment: u.fragment }
+    }
+}
 
 pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("uri", ModKind::Std, include_str!("uri.sand"));
-    m.vm_function("parse_parts", |vm: &mut Vm, text: Val<String>| -> Result<_, HostError> {
+    m.bind::<Uri>();
+    m.vm_function("parse", |vm: &mut Vm, text: Val<String>| -> Result<Uri, HostError> {
         let n = text.str(&vm.heap).len();
-        vm.reserve(n.saturating_mul(2))?;
+        vm.check_memory(n.saturating_mul(2))?;
         vm.charge_slow_bytes(n)?;
-        result(parse(text.str(&vm.heap), true))
+        Ok(parse(text.str(&vm.heap), true).map_err(|msg| HostError::new("parse", msg))?.into())
     });
-    m.vm_function("resolve_parts", |vm: &mut Vm, base: PartsTuple, reference: Val<String>| -> Result<_, HostError> {
-        let base = from_tuple(base);
+    m.vm_function("Uri.join", |vm: &mut Vm, base: Uri, reference: Val<String>| -> Result<Uri, HostError> {
+        let base = Parts::from(base);
         let n = base.len().saturating_add(reference.str(&vm.heap).len());
-        vm.reserve(n.saturating_mul(3))?;
+        vm.check_memory(n.saturating_mul(3))?;
         vm.charge_slow_bytes(n)?;
-        result(parse(reference.str(&vm.heap), false).map(|r| resolve(&base, r)))
+        let r = parse(reference.str(&vm.heap), false).map_err(|msg| HostError::new("parse", msg))?;
+        Ok(resolve(&base, r).into())
     });
     m.vm_function("encode_component", |vm: &mut Vm, s: Val<String>| encode_native(vm, s, b""));
     m.vm_function("encode_path", |vm: &mut Vm, s: Val<String>| encode_native(vm, s, b"/"));
     m.vm_function("decode_component", |vm: &mut Vm, s: Val<String>| -> Result<String, HostError> {
         let s = s.str(&vm.heap);
-        vm.reserve(s.len())?;
+        vm.check_memory(s.len())?;
         vm.charge_slow_bytes(s.len())?;
         decode_component(s).map_err(|msg| HostError::new("parse", msg))
     });
     m.vm_function("parse_query", |vm: &mut Vm, q: Val<String>| -> Result<Vec<(String, String)>, Ctl> {
         let q = q.str(&vm.heap);
-        vm.reserve(q.len().saturating_mul(4))?;
+        vm.check_memory(q.len().saturating_mul(4))?;
         vm.charge_slow_bytes(q.len())?;
         Ok(parse_query(q))
     });
@@ -93,20 +131,6 @@ impl std::fmt::Display for Parts {
         }
         Ok(())
     }
-}
-
-fn result(parsed: Result<Parts, String>) -> Result<PartsTuple, HostError> {
-    let p = parsed.map_err(|msg| HostError::new("parse", msg))?;
-    let (userinfo, host, port) = match p.authority {
-        Some(a) => (a.userinfo, Some(a.host), a.port),
-        None => (None, None, None),
-    };
-    Ok((p.scheme.unwrap_or_default(), userinfo, host, port, p.path, p.query, p.fragment))
-}
-
-fn from_tuple((scheme, userinfo, host, port, path, query, fragment): PartsTuple) -> Parts {
-    let authority = host.map(|host| Authority { userinfo, host, port });
-    Parts { scheme: Some(scheme), authority, path, query, fragment }
 }
 
 /// Characters that may never appear literally in a URI.
@@ -274,7 +298,7 @@ pub(crate) fn remove_dot_segments(path: &str) -> String {
 
 fn encode_native(vm: &mut Vm, s: Val<String>, keep: &[u8]) -> Result<String, Ctl> {
     let s = s.str(&vm.heap);
-    vm.reserve(s.len().saturating_mul(3))?;
+    vm.check_memory(s.len().saturating_mul(3))?;
     vm.charge_slow_bytes(s.len())?;
     Ok(encode(s, keep))
 }

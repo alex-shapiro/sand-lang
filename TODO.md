@@ -39,6 +39,9 @@ Follow-up work, roughly in priority order.
       the ratio between two input sizes in the same run).
 - [ ] The playground page is tested by hand in headless Chrome, not in CI,
       Firefox or Safari.
+- [ ] `Config::retry_stress` fails only the first check in a `vm_function`
+      body, so it does not detect a side effect between the first and second
+      checks. Run stressed tests for each check index reached during a call.
 - [ ] Run the `cargo fuzz` targets on a schedule (or on OSS-Fuzz). Update the
       `run` target to compare optimized and unoptimized executions.
 
@@ -61,24 +64,19 @@ Follow-up work, roughly in priority order.
 
 - [ ] Support enum variant payloads in `#[derive(SandEnum)]` so native modules
       such as `json` do not construct variant values by runtime ID.
-- [ ] Derive Sand structs from Rust structs (`#[derive(SandStruct)]`) so that
-      natives can take and return structs such as `regex.Match` and `uri.Uri`
-      without private tuple-returning natives and Sand wrappers.
-- [ ] Check type parameter bounds (`Eq`, `Ord`, `Hash`) on `native fn`
-      declarations against the Rust function signature.
-- [ ] Reject `json.decode<T>` at compile time if `T` contains a non-decodable
-      type (such as a function or a task), without restricting other `reflect`
-      natives.
 - [ ] Register `json.Json` through `NativeModule` instead of matching its
       module and type name in `compile/reflect.rs`.
-- [ ] Derive `MODULE`, `NAME`, and `DOC` for `ValueType` as `SandEnum` and
-      `SandObject` do.
-- [ ] Add `#[sand(crate = ...)]` to `SandEnum` and `SandObject` for crates that
-      rename the `sandlang` dependency, and support `#[doc = include_str!(...)]`
-      attributes.
-- [ ] Respect `Config::optimize(false)` when compiling the Sand source of a
-      host module.
-- [ ] Preserve declaration order in `help` output for types bound to Rust types.
+- [ ] Return `SandStruct` types from the private `http` natives (`send`,
+      `read_response`, `start_upload`, `next_request`) instead of converting
+      tuples in Sand wrappers.
+- [ ] Bind the prelude `Error` type with `SandStruct` instead of constructing
+      it by runtime ID (`RtIds::error_def`, `Vm::err_value`).
+- [ ] Reject `json.encode<T>` and `json.to_json<T>` at compile time if `T`
+      contains a function, task, or channel.
+- [ ] Support `Param<N, bound::Num>` in native functions by passing the `Num`
+      trait dictionary to the native call.
+- [ ] Support generic structs (such as `Iter<T>`) and default field values in
+      `#[derive(SandStruct)]`.
 
 ### Tooling
 
@@ -102,9 +100,16 @@ Follow-up work, roughly in priority order.
       literals (`[1, "a"]`).
 - [ ] Include the `<top level>` stack frame if a failing `assert` is the
       final top-level statement.
+- [ ] Qualify types from other modules in `help` output (for example,
+      `conn: net.Conn` in `help(http.Request)` and `modified: time.Instant?` in
+      `help(fs.Metadata)`).
 
 ### Performance
 
+- [ ] Clear dead temporaries before native calls so that inlined allocations
+      (such as `fn junk() -> int { "x".repeat(12_000_000).len() }` in
+      `junk() + host.call()`) do not remain rooted in caller frame registers
+      during garbage collection.
 - [ ] Benchmark `HostFn::Static` against `HostFn::Shared` to determine whether
       avoiding the `Arc` dereference justifies `Box::leak` and the enum
       dispatch; if not, keep only `Arc`.

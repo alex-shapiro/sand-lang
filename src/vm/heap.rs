@@ -132,6 +132,8 @@ pub struct Heap {
     young_resources: usize,
     /// Testing aid: collect at every safe point (see `Config::gc_stress`).
     pub stress: bool,
+    /// Testing aid: causes the next limit check to fail (see `Config::retry_stress`).
+    pub(crate) fail_next_check: std::cell::Cell<bool>,
     /// Disables memory-limit checks during post-effect result conversion (see [`Vm::unchecked`](crate::vm::Vm::unchecked)).
     pub(crate) unchecked: bool,
     /// Buffers of pending I/O, counted against `limit` with the heap.
@@ -244,8 +246,8 @@ impl Staging<'_> {
         self.heap.would_exceed(self.bytes.saturating_add(extra))
     }
 
-    /// Fails with the memory limit if `extra` more bytes do not fit.
-    pub fn reserve(&self, extra: usize) -> Result<(), crate::vm::Ctl> {
+    /// Returns a memory-limit error if `extra` additional bytes exceed the heap limit.
+    pub fn check_memory(&self, extra: usize) -> Result<(), crate::vm::Ctl> {
         if self.would_exceed(extra) { Err(crate::vm::Ctl::limit(LimitKind::Memory)) } else { Ok(()) }
     }
 
@@ -333,6 +335,7 @@ impl Heap {
             live_objects: 0,
             young_resources: 0,
             stress: false,
+            fail_next_check: std::cell::Cell::new(false),
             unchecked: false,
             io_memory: IoMemory::new(limit, max_resources),
             worklist: Vec::new(),
@@ -515,6 +518,10 @@ impl Heap {
     /// Whether `extra` more bytes would exceed the memory limit (which also
     /// covers buffers reserved by pending I/O).
     pub fn would_exceed(&self, extra: usize) -> bool {
+        if self.fail_next_check.get() && !self.unchecked {
+            self.fail_next_check.set(false);
+            return true;
+        }
         match self.limit {
             Some(l) => {
                 let used = self.used();
@@ -525,6 +532,12 @@ impl Heap {
             }
             None => extra > super::iomem::UNLIMITED,
         }
+    }
+
+    /// Returns a memory-limit error if `extra` additional bytes exceed the heap limit.
+    /// Allocate the bytes immediately after this check, or use [`Scratch`](super::meter::Scratch) to track a growing buffer.
+    pub fn check_memory(&self, extra: usize) -> Result<(), crate::vm::Ctl> {
+        if self.would_exceed(extra) { Err(crate::vm::Ctl::limit(LimitKind::Memory)) } else { Ok(()) }
     }
 
     pub fn over_limit(&self) -> bool {

@@ -3,24 +3,7 @@
 //! Match offsets are UTF-8 byte indices into the input string. Use raw string
 //! literals (`r"\d{4}"`) for patterns with backslash escapes.
 
-/// A substring match and its UTF-8 byte range `start..end`.
-pub struct Match {
-    /// Matched substring.
-    pub text: str
-    /// Inclusive start byte offset.
-    pub start: int
-    /// Exclusive end byte offset.
-    pub end: int
-}
-
-/// Capture groups from a regular expression match. Group `0` corresponds to the
-/// full match.
-pub struct Captures {
-    /// Input string that was searched.
-    pub text: str
-    spans: [int]
-    regex: Regex
-
+extend Captures {
     /// Returns capture group `i`, or `None` if group `i` did not participate or
     /// is out of bounds.
     pub fn get(self, i: int) -> Match? {
@@ -71,14 +54,9 @@ extend Regex {
     pub native fn find_all(self, text: str) -> [Match]
 
     /// Returns the capture groups for the leftmost-first match in `text`.
-    pub fn captures(self, text: str) -> Captures? {
-        Some(Captures { text, spans: self.capture_spans(text)?, regex: self })
-    }
-
+    pub native fn captures(self, text: str) -> Captures?
     /// Returns the capture groups for all non-overlapping matches in `text`.
-    pub fn captures_all(self, text: str) -> [Captures] {
-        self.capture_spans_all(text).map(spans => Captures { text, spans, regex: self })
-    }
+    pub native fn captures_all(self, text: str) -> [Captures]
 
     /// Replaces the leftmost-first match in `text` with `rep`, expanding `$1`
     /// or `${1}` to numbered groups, `${name}` to named groups, and `$$` to a
@@ -92,7 +70,5 @@ extend Regex {
     /// Returns the source pattern string used to compile `self`.
     pub native fn pattern(self) -> str
 
-    native fn capture_spans(self, text: str) -> [int]?
-    native fn capture_spans_all(self, text: str) -> [[int]]
     native fn group_index(self, name: str) -> int?
 }

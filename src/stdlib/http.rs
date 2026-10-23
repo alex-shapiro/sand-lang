@@ -37,7 +37,7 @@ const POOL_MAX: usize = 16;
 pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("http", ModKind::Std, concat!(include_str!("http_os.sand"), include_str!("http.sand")));
     super::http_common::natives(&mut m);
-    m.object_type::<Outgoing>();
+    m.bind::<Outgoing>();
     super::http_server::natives(&mut m);
     m.vm_function("send", send);
     m.vm_function("start_upload", start_upload);
@@ -601,29 +601,40 @@ fn send(
     timeout: SignedDuration,
 ) -> Suspended<Response> {
     let mut req = prepare_request(vm, method, url, headers)?;
-    req.require(vm)?;
-    let Prepared { method, text, url, headers } = req;
     // The request is held outside the heap while it is sent.
     let mut res = vm.reserve_io(body.bytes(&vm.heap).len())?;
+    req.check_policy(vm)?;
     let pool = vm.host.http_pool.clone();
-    let idle = pool.take(&url.origin());
+    let idle = pool.take(&req.url.origin());
     let slot = match idle {
         Some(_) => None,
         None => {
-            let buffers = if url.scheme == "https" { net::CONN_BUFFER + net::TLS_BUFFERS } else { net::CONN_BUFFER };
+            let buffers = if req.url.scheme == "https" { net::CONN_BUFFER + net::TLS_BUFFERS } else { net::CONN_BUFFER };
             Some(vm.resource_slot_with(buffers, "a connection")?)
         }
     };
-    let body = body.bytes(&vm.heap);
-    vm.charge_bytes(body.len())?;
-    let close = connection_has(&headers, "close");
-    let sized = !body.is_empty() || ["POST", "PUT", "PATCH"].iter().any(|m| method.eq_ignore_ascii_case(m));
-    let mut request =
-        request_head(&method, &url, &headers, if sized { Delimit::Length(body.len() as u64) } else { Delimit::None }, close).into_bytes();
-    request.extend_from_slice(body);
-    if let Err(e) = res.ensure(request.len()) {
-        return Err(HostError::new("limit", format!("cannot buffer the request: {e}")));
-    }
+    let built = (|| {
+        req.apply_filter(vm)?;
+        let body = body.bytes(&vm.heap);
+        vm.charge_bytes(body.len())?;
+        let close = connection_has(&req.headers, "close");
+        let sized = !body.is_empty() || ["POST", "PUT", "PATCH"].iter().any(|m| req.method.eq_ignore_ascii_case(m));
+        let delimit = if sized { Delimit::Length(body.len() as u64) } else { Delimit::None };
+        let mut request = request_head(&req.method, &req.url, &req.headers, delimit, close).into_bytes();
+        request.extend_from_slice(body);
+        res.ensure(request.len()).map_err(|e| HostError::new("limit", format!("cannot buffer the request: {e}")))?;
+        Ok::<_, HostError>((request, close))
+    })();
+    let (request, close) = match built {
+        Ok(built) => built,
+        Err(e) => {
+            if let Some(conn) = idle {
+                pool.put(conn);
+            }
+            return Err(e);
+        }
+    };
+    let Prepared { method, text, url, .. } = req;
     let timeout = stream::timeout(timeout);
     let head_only = method.eq_ignore_ascii_case("HEAD");
     let replayable = IDEMPOTENT.iter().any(|m| method.eq_ignore_ascii_case(m));
@@ -724,10 +735,11 @@ fn start_upload(
 ) -> Suspended<(net::Conn, Outgoing)> {
     let mut req = prepare_request(vm, method, url, headers)?;
     let length = given_length(&req.headers).map_err(|e| HostError::new("invalid", e))?;
-    req.require(vm)?;
-    let Prepared { method, text, url, headers } = req;
-    let buffers = if url.scheme == "https" { net::CONN_BUFFER + net::TLS_BUFFERS } else { net::CONN_BUFFER };
+    req.check_policy(vm)?;
+    let buffers = if req.url.scheme == "https" { net::CONN_BUFFER + net::TLS_BUFFERS } else { net::CONN_BUFFER };
     let slot = vm.resource_slot_with(buffers, "a connection")?;
+    req.apply_filter(vm)?;
+    let Prepared { method, text, url, headers } = req;
     let delimit = length.map_or(Delimit::Chunked, Delimit::Length);
     let head = request_head(&method, &url, &headers, delimit, true);
     let timeout = stream::timeout(timeout);

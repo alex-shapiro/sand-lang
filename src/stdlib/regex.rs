@@ -6,17 +6,17 @@
 //! object is re-measured after every search.
 
 use crate::check::ModKind;
-use crate::native::{HostError, NativeModule, NativeObject, SandType, Type, Val};
+use crate::native::{HostError, NativeModule, NativeObject, Val};
 use crate::platform::Instant;
 use crate::vm::meter::{SLOW_BYTES_PER_UNIT, Scratch};
-use crate::vm::value::{Obj, Value};
+use crate::vm::value::Value;
 use crate::vm::{Ctl, Vm};
 use regex_automata::meta::{self, Cache};
-use regex_automata::util::captures::Captures;
+use regex_automata::util::captures::Captures as Groups;
 use regex_automata::util::interpolate;
 use regex_automata::util::iter::Searcher;
 use regex_automata::util::syntax;
-use regex_automata::{Input, Match, MatchKind, PatternID};
+use regex_automata::{Input, MatchKind, PatternID};
 use std::cell::{Cell, RefCell};
 
 /// Limit on each compiled NFA (forward and reverse) of a regex.
@@ -119,16 +119,14 @@ struct RegexObj {
     /// during searches, up to a bound set by the size limits.
     cache: RefCell<Cache>,
     pattern: Box<str>,
-    /// Runtime struct id of `regex.Match`.
-    match_def: u32,
     /// The size last accounted for this object (see [`RegexObj::refresh_size`]).
     size: Cell<usize>,
 }
 
 impl RegexObj {
-    fn new(re: meta::Regex, pattern: &str, match_def: u32) -> RegexObj {
+    fn new(re: meta::Regex, pattern: &str) -> RegexObj {
         let cache = RefCell::new(re.create_cache());
-        let obj = RegexObj { re, cache, pattern: pattern.into(), match_def, size: Cell::new(0) };
+        let obj = RegexObj { re, cache, pattern: pattern.into(), size: Cell::new(0) };
         obj.size.set(obj.measure());
         obj
     }
@@ -204,7 +202,7 @@ fn each_match(
     cache: &mut Cache,
     text: &str,
     scan: &mut Scan,
-    mut found: impl FnMut(Match) -> usize,
+    mut found: impl FnMut(regex_automata::Match) -> usize,
 ) -> Result<(), Ctl> {
     let mut it = Searcher::new(Input::new(text));
     let mut collected = 0;
@@ -223,7 +221,7 @@ fn each_captures(
     cache: &mut Cache,
     text: &str,
     scan: &mut Scan,
-    mut found: impl FnMut(&Captures) -> Result<usize, Ctl>,
+    mut found: impl FnMut(&Groups) -> Result<usize, Ctl>,
 ) -> Result<(), Ctl> {
     let mut it = Searcher::new(Input::new(text));
     let mut caps = obj.re.create_captures();
@@ -238,18 +236,46 @@ fn each_captures(
     scan.step(vm, text.len(), collected)
 }
 
-/// A `Match { text, start, end }` of the bytes `start..end` of string `text`.
-fn new_match(vm: &mut Vm, def: u32, text: Value, start: usize, end: usize) -> Value {
-    let t = super::core::new_substr(vm, text, start..end);
-    vm.heap.alloc(Obj::Struct(def, Box::new([t, Value::Int(start as i64), Value::Int(end as i64)])))
+/// A substring match and its UTF-8 byte range `start..end`.
+#[derive(crate::SandStruct)]
+#[sand(module = "regex")]
+struct Match {
+    /// Matched substring.
+    text: Val<String>,
+    /// Inclusive start byte offset.
+    start: i64,
+    /// Exclusive end byte offset.
+    end: i64,
+}
+
+impl Match {
+    fn new(vm: &mut Vm, text: Val<String>, span: std::ops::Range<usize>) -> Match {
+        let (start, end) = (span.start as i64, span.end as i64);
+        Match { text: Val::from_raw(super::core::new_substr(vm, text.raw(), span)), start, end }
+    }
+}
+
+/// Capture groups from a regular expression match. Group `0` corresponds to
+/// the full match.
+#[derive(crate::SandStruct)]
+#[sand(module = "regex")]
+struct Captures {
+    /// Input string that was searched.
+    text: Val<String>,
+    /// Start and end byte offsets per group (`-1, -1` if unmatched).
+    #[sand(private)]
+    spans: Vec<i64>,
+    #[sand(private)]
+    regex: Val<RegexObj>,
 }
 
 /// Bytes counted per group of a match's spans (two list elements).
 const SPAN_COST: usize = 2 * std::mem::size_of::<Value>();
 
-/// The spans of the groups of a match, `start, end` per group (`-1, -1` for
-/// a group that did not participate), as `regex.Captures` holds them.
-fn spans(caps: &Captures) -> Vec<i64> {
+/// Approximate heap cost of a `Captures` value excluding `spans`.
+const CAPTURES_COST: usize = 64;
+
+fn spans(caps: &Groups) -> Vec<i64> {
     let mut out = Vec::with_capacity(2 * caps.group_len());
     for i in 0..caps.group_len() {
         let (s, e) = caps.get_group(i).map_or((-1, -1), |s| (s.start as i64, s.end as i64));
@@ -261,7 +287,7 @@ fn spans(caps: &Captures) -> Vec<i64> {
 /// The length of `rep` with the groups of `caps` interpolated (as
 /// `Captures::interpolate_string_into` writes it), measured without copying
 /// the groups. `literal` is scratch space for the replacement's own text.
-fn expansion_len(caps: &Captures, rep: &str, literal: &mut String) -> usize {
+fn expansion_len(caps: &Groups, rep: &str, literal: &mut String) -> usize {
     literal.clear();
     let mut groups = 0usize;
     interpolate::string(
@@ -302,7 +328,7 @@ fn replace(vm: &mut Vm, re: Val<RegexObj>, text: Val<String>, rep: Val<String>, 
             } else {
                 rep.len()
             };
-            vm.reserve(out.len().saturating_add(m.start() - last).saturating_add(added))?;
+            vm.check_memory(out.len().saturating_add(m.start() - last).saturating_add(added))?;
             out.push_str(&text[last..m.start()]);
             if expand {
                 caps.interpolate_string_into(text, rep, &mut out);
@@ -343,24 +369,9 @@ fn builder() -> meta::Builder {
     b
 }
 
-struct MatchType;
-
-impl SandType for MatchType {
-    fn sand_type() -> Type {
-        Type::named("regex", "Match", vec![])
-    }
-}
-
-const MATCH_FIELDS: [&str; 3] = ["text", "start", "end"];
-
-fn match_def(vm: &Vm) -> Option<u32> {
-    let def = vm.prog.types.iter().position(|t| t.name == "Match" && t.module == "regex" && t.fields == MATCH_FIELDS)?;
-    Some(def as u32)
-}
-
 pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("regex", ModKind::Std, include_str!("regex.sand"));
-    m.object_type::<RegexObj>();
+    m.bind::<RegexObj>().bind::<Match>().bind::<Captures>();
 
     m.vm_function("new", |vm: &mut Vm, pattern: Val<String>| -> Result<Val<RegexObj>, HostError> {
         let slot = cache_slot(pattern.str(&vm.heap));
@@ -386,8 +397,7 @@ pub(crate) fn module() -> NativeModule {
                 });
             }
         };
-        let Some(match_def) = match_def(vm) else { return Err(Ctl::internal("regex.Match { text, start, end } is not defined").into()) };
-        let obj = vm.new_object(RegexObj::new(re, pattern.str(&vm.heap), match_def))?;
+        let obj = vm.new_object(RegexObj::new(re, pattern.str(&vm.heap)))?;
         if let Some(h) = obj.raw().handle() {
             let cache = &mut vm.host.regex_cache;
             if cache.is_empty() {
@@ -407,64 +417,54 @@ pub(crate) fn module() -> NativeModule {
             Ok(found)
         })
     });
-    m.vm_function("Regex.find", |vm: &mut Vm, re: Val<RegexObj>, text: Val<String>| -> Result<Option<Val<MatchType>>, Ctl> {
+    m.vm_function("Regex.find", |vm: &mut Vm, re: Val<RegexObj>, text: Val<String>| -> Result<Option<Match>, Ctl> {
         let found = with_regex(vm, re, |vm, obj, cache| {
             let t = text.str(&vm.heap);
             let mut scan = Scan::new(vm);
             scan.search(vm, t)?;
             let m = obj.re.search_with(cache, &Input::new(t));
             scan.finish(vm)?;
-            vm.reserve(m.map_or(0, |m| m.len() + MATCH_COST))?;
-            Ok(m.map(|m| (m.start(), m.end(), obj.match_def)))
+            vm.check_memory(m.map_or(0, |m| m.len() + MATCH_COST))?;
+            Ok(m.map(|m| m.range()))
         })?;
-        Ok(found.map(|(s, e, def)| Val::from_raw(new_match(vm, def, text.raw(), s, e))))
+        Ok(found.map(|span| Match::new(vm, text, span)))
     });
-    m.vm_function("Regex.find_all", |vm: &mut Vm, re: Val<RegexObj>, text: Val<String>| -> Result<Val<Vec<MatchType>>, Ctl> {
-        let (def, spans, cost) = with_regex(vm, re, |vm, obj, cache| {
+    m.vm_function("Regex.find_all", |vm: &mut Vm, re: Val<RegexObj>, text: Val<String>| -> Result<Vec<Match>, Ctl> {
+        let spans = with_regex(vm, re, |vm, obj, cache| {
             let t = text.str(&vm.heap);
             let (mut spans, mut cost, mut scan) = (Vec::new(), 0, Scan::new(vm));
             each_match(vm, obj, cache, t, &mut scan, |m| {
-                spans.push((m.start(), m.end()));
+                spans.push(m.range());
                 cost += MATCH_COST + m.len();
                 cost
             })?;
-            Ok((obj.match_def, spans, cost))
+            vm.check_memory(cost)?;
+            Ok(spans)
         })?;
-        vm.reserve(cost)?;
-        Ok(Val::from_raw(vm.heap.staged(|heap, st| {
-            let t = text.str(heap);
-            let matches = spans
-                .into_iter()
-                .map(|(s, e)| {
-                    let t = st.new_str(&t[s..e]);
-                    st.alloc(Obj::Struct(def, Box::new([t, Value::Int(s as i64), Value::Int(e as i64)])))
-                })
-                .collect();
-            st.new_list(matches)
-        })))
+        Ok(spans.into_iter().map(|span| Match::new(vm, text, span)).collect())
     });
-    m.vm_function("Regex.capture_spans", |vm: &mut Vm, re: Val<RegexObj>, text: Val<String>| -> Result<Option<Vec<i64>>, Ctl> {
+    m.vm_function("Regex.captures", |vm: &mut Vm, re: Val<RegexObj>, text: Val<String>| -> Result<Option<Captures>, Ctl> {
         with_regex(vm, re, |vm, obj, cache| {
-            let text = text.str(&vm.heap);
+            let t = text.str(&vm.heap);
             let mut scan = Scan::new(vm);
-            scan.search(vm, text)?;
+            scan.search(vm, t)?;
             let mut caps = obj.re.create_captures();
-            obj.re.search_captures_with(cache, &Input::new(text), &mut caps);
+            obj.re.search_captures_with(cache, &Input::new(t), &mut caps);
             scan.finish(vm)?;
-            vm.reserve(SPAN_COST * caps.group_len())?;
-            Ok(caps.is_match().then(|| spans(&caps)))
+            vm.check_memory(CAPTURES_COST + SPAN_COST * caps.group_len())?;
+            Ok(caps.is_match().then(|| Captures { text, spans: spans(&caps), regex: re }))
         })
     });
-    m.vm_function("Regex.capture_spans_all", |vm: &mut Vm, re: Val<RegexObj>, text: Val<String>| -> Result<Vec<Vec<i64>>, Ctl> {
+    m.vm_function("Regex.captures_all", |vm: &mut Vm, re: Val<RegexObj>, text: Val<String>| -> Result<Vec<Captures>, Ctl> {
         with_regex(vm, re, |vm, obj, cache| {
-            let text = text.str(&vm.heap);
+            let t = text.str(&vm.heap);
             let (mut all, mut cost, mut scan) = (Vec::new(), 0, Scan::new(vm));
-            each_captures(vm, obj, cache, text, &mut scan, |caps| {
-                cost += 64 + SPAN_COST * caps.group_len();
-                all.push(spans(caps));
+            each_captures(vm, obj, cache, t, &mut scan, |caps| {
+                cost += CAPTURES_COST + SPAN_COST * caps.group_len();
+                all.push(Captures { text, spans: spans(caps), regex: re });
                 Ok(cost)
             })?;
-            vm.reserve(cost)?;
+            vm.check_memory(cost)?;
             Ok(all)
         })
     });
@@ -490,7 +490,7 @@ pub(crate) fn module() -> NativeModule {
             spans.push((last, text.len()));
             Ok((spans, cost))
         })?;
-        vm.reserve(cost)?;
+        vm.check_memory(cost)?;
         Ok(Val::from_raw(vm.heap.staged(|heap, st| {
             let text = text.str(heap);
             let items = spans.into_iter().map(|(s, e)| st.new_str(&text[s..e])).collect();

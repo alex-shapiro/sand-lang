@@ -352,17 +352,15 @@ impl Scratch {
     /// exceed the limit (checked only when `len` has grown enough).
     #[inline]
     pub fn check(&mut self, heap: &Heap, len: usize) -> Result<(), Ctl> {
-        if len < self.next {
+        if len < self.next && !heap.fail_next_check.get() {
             return Ok(());
         }
         self.next = len.saturating_add(SCRATCH_STEP);
-        if heap.would_exceed(len) { Err(Ctl::limit(LimitKind::Memory)) } else { Ok(()) }
+        heap.check_memory(len)
     }
 }
 
-/// Results that may report the memory limit. Memory checks use the heap's
-/// byte count, which includes garbage not yet collected, so callers that can
-/// run the collector retry once.
+/// Reports whether a result failed with [`LimitKind::Memory`].
 pub(crate) trait MemoryLimit {
     fn is_memory_limit(&self) -> bool;
 }

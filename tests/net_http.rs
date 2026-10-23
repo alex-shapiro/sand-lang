@@ -862,6 +862,25 @@ print(http.get("{base}/")?.text()?)
 }
 
 #[test]
+fn http_clients_keep_idle_connections_after_failed_requests() {
+    let server = http_server(|req| HttpResponse::new(200, format!("{} bytes", req.body.len())));
+    let base = format!("http://{}", server.addr);
+    let src = format!(
+        r#"
+import http
+print(http.get("{base}/")?.text()?)
+let big = "x".repeat(300_000)
+let e = http.post("{base}/", big.bytes(), headers: [("X-Big", big)]).unwrap_err()
+print(e.kind)
+print(http.get("{base}/")?.text()?)
+"#
+    );
+    let r = run_with(&src, |c| c.limits(Limits { max_memory: Some(1 << 20), ..Limits::default() }));
+    assert_eq!(r.ok_stdout(), "0 bytes\nlimit\n0 bytes\n");
+    assert_eq!(server.connections.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[test]
 fn http_clients_send_requests_again_on_closed_connections() {
     // Each connection answers its first request, then reads the next one and
     // closes without answering, as a server whose idle timeout passed as the
@@ -1092,23 +1111,25 @@ print(http.get("{base}/b")?.text()?)
 print(http.get("{base}/c", headers: [("X-Refuse", "yes")]).unwrap_err().kind)
 "#
     );
-    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let log = seen.clone();
-    let r = run_with(&src, move |c| {
-        c.request_filter(move |target, headers| {
-            log.lock().unwrap().push(target.clone());
-            if headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("x-refuse")) {
-                return Err("refused by the host".into());
-            }
-            for (_, value) in headers.iter_mut() {
-                *value = value.replace("secret-marker", "real-token");
-            }
-            Ok(())
-        })
-    });
-    assert_eq!(r.ok_stdout(), "Bearer real-token\n-\npermission_denied\n");
-    let seen = seen.lock().unwrap();
-    assert_eq!(seen.len(), 3);
-    assert_eq!(seen[0].scheme, "http");
-    assert_eq!(seen[0].host, "127.0.0.1");
+    for stress in [false, true] {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        let r = run_with(&src, move |c| {
+            c.retry_stress(stress).request_filter(move |target, headers| {
+                log.lock().unwrap().push(target.clone());
+                if headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("x-refuse")) {
+                    return Err("refused by the host".into());
+                }
+                for (_, value) in headers.iter_mut() {
+                    *value = value.replace("secret-marker", "real-token");
+                }
+                Ok(())
+            })
+        });
+        assert_eq!(r.ok_stdout(), "Bearer real-token\n-\npermission_denied\n");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 3, "retry stress: {stress}");
+        assert_eq!(seen[0].scheme, "http");
+        assert_eq!(seen[0].host, "127.0.0.1");
+    }
 }

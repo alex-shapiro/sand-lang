@@ -833,20 +833,54 @@ impl ChannelObj {
     }
 }
 
-/// A Rust type that implements an immutable Sand value type (registered with
-/// [`crate::NativeModule::value_type`]).
+/// A Rust type that implements an immutable Sand value type.
 ///
-/// Values are compared, hashed, and formatted using `Eq`, `Hash`, and
-/// `Display`, and are encoded and decoded in JSON as strings. Equal values
+/// Derive [`NamedType`](crate::native::NamedType) and the conversions with
+/// [`#[derive(SandValue)]`](crate::SandValue), implement this trait, and
+/// register the type with [`NativeModule::bind`](crate::NativeModule::bind):
+///
+/// ```
+/// use sandlang::ValueType;
+///
+/// /// An amount of money in cents (such as `12.50`).
+/// #[derive(Clone, PartialEq, Eq, Hash, sandlang::SandValue)]
+/// #[sand(module = "bank")]
+/// pub struct Money(u64);
+///
+/// impl std::fmt::Display for Money {
+///     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+///         write!(f, "{}.{:02}", self.0 / 100, self.0 % 100)
+///     }
+/// }
+///
+/// impl ValueType for Money {
+///     fn parse(text: &str) -> Result<Money, String> {
+///         let parts = text.split_once('.').filter(|(_, cents)| cents.len() == 2);
+///         let (units, cents) = parts.ok_or("expected `units.cents`")?;
+///         let n = |s: &str| s.parse::<u64>().map_err(|e| e.to_string());
+///         let total = n(units)?.checked_mul(100).and_then(|u| u.checked_add(n(cents).ok()?));
+///         total.map(Money).ok_or_else(|| format!("invalid amount `{text}`"))
+///     }
+/// }
+/// ```
+///
+/// The runtime compares, hashes, and formats values with `Eq`, `Hash`, and
+/// `Display`, and encodes and decodes them in JSON as strings. Equal values
 /// must produce identical `Display` output, and [`Self::parse`] must parse that
-/// output back into an equal value. Comparison, hashing, and formatting are
-/// not metered, so these operations must execute in constant time.
-pub trait ValueType: Clone + Eq + Hash + std::fmt::Display + Send + Sync + 'static {
-    /// Name of the module that declares this type (e.g. `"time"`).
-    const MODULE: &'static str;
-    /// Name of the Sand type (e.g. `"PlainDate"`).
-    const NAME: &'static str;
-    const DOC: &'static str = "";
+/// output into an equal value. The runtime does not meter comparison, hashing,
+/// or formatting, so these operations must execute in constant time.
+pub trait ValueType:
+    crate::native::NamedType
+    + crate::native::IntoValue
+    + for<'a> crate::native::FromValue<Item<'a> = Self>
+    + Clone
+    + Eq
+    + Hash
+    + std::fmt::Display
+    + Send
+    + Sync
+    + 'static
+{
     /// Comparison function for types that satisfy `Ord` (typically `Some(Ord::cmp)`).
     const ORDER: Option<fn(&Self, &Self) -> std::cmp::Ordering> = None;
     /// Optional 16-byte inline heap representation.
@@ -1040,12 +1074,6 @@ pub(crate) fn value_of<T: ValueType>(obj: &Obj) -> Option<T> {
     }
 }
 
-pub(crate) fn check_type_name(name: &str) {
-    let b = name.as_bytes();
-    let ident = b.first().is_some_and(u8::is_ascii_uppercase) && b.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_');
-    assert!(ident, "type name `{name}` is not a capitalized identifier");
-}
-
 pub type ParseValue = fn(&str) -> Result<Obj, String>;
 
 pub(crate) fn parse_value<T: ValueType>(text: &str) -> Result<Obj, String> {
@@ -1097,6 +1125,32 @@ pub enum TypeDesc {
     /// Recursive reference to the enclosing struct or enum with this `id`.
     Recur(u32),
     Unsupported(String),
+}
+
+impl TypeDesc {
+    /// Formats the Sand type name for `self`, using `recur` to resolve [`TypeDesc::Recur`] IDs.
+    pub fn format(&self, recur: &dyn Fn(u32) -> String) -> String {
+        let list = |ts: &[Arc<TypeDesc>]| ts.iter().map(|t| t.format(recur)).collect::<Vec<_>>().join(", ");
+        match self {
+            TypeDesc::Int => "int".into(),
+            TypeDesc::Float => "float".into(),
+            TypeDesc::Bool => "bool".into(),
+            TypeDesc::Str => "str".into(),
+            TypeDesc::Bytes => "bytes".into(),
+            TypeDesc::Duration => "duration".into(),
+            TypeDesc::Unit => "()".into(),
+            TypeDesc::List(e) => format!("[{}]", e.format(recur)),
+            TypeDesc::Map(k, v) => format!("[{}: {}]", k.format(recur), v.format(recur)),
+            TypeDesc::Set(e) => format!("Set<{}>", e.format(recur)),
+            TypeDesc::Tuple(ts) => format!("({})", list(ts)),
+            TypeDesc::Option(e) => format!("{}?", e.format(recur)),
+            TypeDesc::Json => "Json".into(),
+            TypeDesc::Struct { name, .. } | TypeDesc::Enum { name, .. } | TypeDesc::Value { name, .. } | TypeDesc::Unsupported(name) => {
+                name.clone()
+            }
+            TypeDesc::Recur(id) => recur(*id),
+        }
+    }
 }
 
 impl std::fmt::Debug for TypeDesc {

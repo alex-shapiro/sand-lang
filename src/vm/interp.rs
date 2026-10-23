@@ -392,9 +392,7 @@ impl Vm {
                 let (oa, ob) = (self.heap.get(a), self.heap.get(b));
                 match (oa, ob) {
                     (super::value::Obj::Str(x), super::value::Obj::Str(y)) => {
-                        if self.heap.would_exceed(x.len() + y.len()) {
-                            return Err(Ctl::limit(LimitKind::Memory));
-                        }
+                        self.heap.check_memory(x.len() + y.len())?;
                         self.meter.charge_bytes(x.len() + y.len())?;
                         let mut s = String::with_capacity(x.len() + y.len());
                         s.push_str(x);
@@ -402,18 +400,14 @@ impl Vm {
                         self.heap.new_str(s)
                     }
                     (super::value::Obj::Bytes(x), super::value::Obj::Bytes(y)) => {
-                        if self.heap.would_exceed(x.len() + y.len()) {
-                            return Err(Ctl::limit(LimitKind::Memory));
-                        }
+                        self.heap.check_memory(x.len() + y.len())?;
                         self.meter.charge_bytes(x.len() + y.len())?;
                         let mut v = x.to_vec();
                         v.extend_from_slice(y);
                         self.heap.new_bytes(v)
                     }
                     (super::value::Obj::List(x), super::value::Obj::List(y)) => {
-                        if self.heap.would_exceed((x.len() + y.len()) * 16) {
-                            return Err(Ctl::limit(LimitKind::Memory));
-                        }
+                        self.heap.check_memory((x.len() + y.len()) * std::mem::size_of::<Value>())?;
                         self.meter.charge((x.len() + y.len()) as u64)?;
                         let mut v = Vec::with_capacity(x.len() + y.len());
                         v.extend_from_slice(x);
@@ -1348,7 +1342,7 @@ impl Vm {
                         if n < 0 {
                             fail!(format!("invalid: negative repeat count: {n}"));
                         }
-                        if self.heap.would_exceed(to_usize_saturating(n).saturating_mul(16)) {
+                        if self.heap.would_exceed(to_usize_saturating(n).saturating_mul(std::mem::size_of::<Value>())) {
                             save!();
                             return Err(Trap::Limit(LimitKind::Memory));
                         }
@@ -1693,11 +1687,11 @@ impl Vm {
         frame.ip = ip as u32;
         self.caller_site = (frame.proto, frame.ip);
         let mut r = Self::invoke_native(self, natives, n, &fiber.stack[start..start + argc]);
+        self.heap.fail_next_check.set(false);
         if r.is_memory_limit() || matches!(&r, Err(c) if matches!(c.kind(), CtlKind::Collect)) {
-            // Natives check memory (and open resources) against counts that
-            // include garbage they cannot collect (their locals are not
-            // roots). Collect and retry once; natives reserve memory and
-            // resources before they mutate anything.
+            // Native functions check memory and open-resource limits against
+            // counts that include uncollected garbage. Run a full collection
+            // and retry once.
             self.collect_all_garbage(Some(fiber));
             self.collected = true;
             r = Self::invoke_native(self, natives, n, &fiber.stack[start..start + argc]);
@@ -1872,9 +1866,7 @@ impl Vm {
             }
             scratch.check(&self.heap, out.len())?;
         }
-        if self.heap.would_exceed(out.len()) {
-            return Err(Ctl::limit(LimitKind::Memory));
-        }
+        self.heap.check_memory(out.len())?;
         Ok(out)
     }
 
@@ -1948,9 +1940,7 @@ impl Vm {
                 }
                 // One waiter per task, and the list of tasks to cancel.
                 self.meter.charge(tasks.len() as u64)?;
-                if self.heap.would_exceed(tasks.len() * (std::mem::size_of::<Value>() + std::mem::size_of::<(u32, u64)>())) {
-                    return Err(Ctl::limit(LimitKind::Memory));
-                }
+                self.heap.check_memory(tasks.len() * (std::mem::size_of::<Value>() + std::mem::size_of::<(u32, u64)>()))?;
                 for &t in &tasks {
                     if let Obj::Task(to) = self.heap.get(t)
                         && to.state == TaskState::Done
@@ -2280,7 +2270,7 @@ impl Vm {
     #[inline(never)]
     fn entries_capacity_slow(&self, len: usize, cap: usize, elem: usize, index: usize) -> Result<usize, Ctl> {
         if len < cap {
-            self.reserve(index)?;
+            self.check_memory(index)?;
             return Ok(cap);
         }
         self.heap.grown_capacity(cap, len + 1, elem, index).map_err(Ctl::limit)
@@ -2384,7 +2374,7 @@ impl Vm {
         let l = self.heap.list(list);
         let end = l.len().saturating_sub(after).max(before);
         let n = end.saturating_sub(before);
-        self.reserve(n * std::mem::size_of::<Value>())?;
+        self.check_memory(n * std::mem::size_of::<Value>())?;
         self.meter.charge(n as u64)?;
         let items = self.heap.list(list).get(before..end).map(<[Value]>::to_vec).unwrap_or_default();
         Ok(self.heap.new_list(items))
@@ -2409,9 +2399,7 @@ impl Vm {
         let (a, b) = (a as usize, b as usize);
         let list = matches!(self.heap.get(o), Obj::List(_));
         let cost = if list { (b - a) as u64 } else { ((b - a) / super::meter::BYTES_PER_UNIT) as u64 };
-        if self.heap.would_exceed(if list { (b - a) * std::mem::size_of::<Value>() } else { b - a }) {
-            return Err(Ctl::limit(LimitKind::Memory));
-        }
+        self.heap.check_memory(if list { (b - a) * std::mem::size_of::<Value>() } else { b - a })?;
         self.meter.charge(cost)?;
         Ok(match self.heap.get(o) {
             Obj::List(l) => {

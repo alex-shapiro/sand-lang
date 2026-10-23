@@ -212,10 +212,8 @@ fn persisted_inverted_index() {
     assert!(o.failure().contains("permission_denied"), "{}", o.failure());
 }
 
-/// Runs the CPU-bound examples with a garbage collection at every safe point
-/// and checks that the output is unchanged.
 #[test]
-fn examples_are_unchanged_under_gc_stress() {
+fn examples_are_unchanged_under_stress() {
     let dir = TempDir::new("gcstress");
     dir.write("docs/a.txt", "The quick brown fox jumps over the lazy dog");
     dir.write("docs/b.txt", "A quick brown dog outpaces a quick red fox");
@@ -238,13 +236,17 @@ fn examples_are_unchanged_under_gc_stress() {
         ("search_index.sand", vec!["index", "idx.json", "docs"], Box::new(files)),
         ("search_index.sand", vec!["search", "idx.json", "quick", "fox"], Box::new(files)),
     ];
+    type Stress = (&'static str, fn(Config) -> Config);
+    let stresses: [Stress; 2] = [("GC stress", |c| c.gc_stress(true)), ("retry stress", |c| c.retry_stress(true))];
     for (rel, args, config) in &runs {
         let normal = run_example(rel, args, config());
-        let stressed = run_example(rel, args, config().gc_stress(true));
         ok(&normal);
-        assert_eq!(normal.stdout, stressed.stdout, "{rel} {args:?}: stdout differs under GC stress");
-        assert_eq!(normal.stderr, stressed.stderr, "{rel} {args:?}: stderr differs under GC stress");
-        assert_eq!(format!("{:?}", normal.result), format!("{:?}", stressed.result), "{rel} {args:?}");
+        for (name, stress) in stresses {
+            let stressed = run_example(rel, args, stress(config()));
+            assert_eq!(normal.stdout, stressed.stdout, "{rel} {args:?}: stdout differs under {name}");
+            assert_eq!(normal.stderr, stressed.stderr, "{rel} {args:?}: stderr differs under {name}");
+            assert_eq!(format!("{:?}", normal.result), format!("{:?}", stressed.result), "{rel} {args:?}: {name}");
+        }
     }
 }
 

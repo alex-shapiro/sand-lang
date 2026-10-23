@@ -6,7 +6,7 @@ use crate::compile::{CompileInput, compile_more};
 use crate::diag::{Diag, Diagnostic, FileId, Span};
 use crate::files::{Fs, MemFs};
 use crate::modules::{ImportRef, ModuleGraph, Snapshot, Target, budget_error, native_info};
-use crate::native::{BoundType, NativeDecl, NativeModule, Signature, Type};
+use crate::native::{BoundKind, BoundType, NativeDecl, NativeModule, Signature, Type};
 use crate::platform::{Clock, Instant, SystemClock};
 use crate::policy::{Capability, Decision, Policy, PromptAnswer, Prompter};
 use crate::session::Session;
@@ -243,6 +243,7 @@ pub struct Config {
     pub(crate) env: Option<Vec<(String, String)>>,
     pub(crate) seed: Option<u64>,
     pub(crate) gc_stress: bool,
+    pub(crate) retry_stress: bool,
     pub(crate) optimize: bool,
     pub(crate) dump_bytecode: bool,
     pub(crate) exit_after_run: bool,
@@ -295,6 +296,7 @@ impl Config {
             env: None,
             seed: None,
             gc_stress: false,
+            retry_stress: false,
             optimize: true,
             dump_bytecode: false,
             exit_after_run: false,
@@ -440,11 +442,20 @@ impl Config {
         self.gc_stress = on;
         self
     }
+    /// Testing aid: forces the first memory or resource check in each
+    /// `vm_function` call to fail, triggering garbage collection and re-running
+    /// the function. Use this option to verify that native functions check
+    /// memory and resource limits before performing side effects.
+    pub fn retry_stress(mut self, on: bool) -> Self {
+        self.retry_stress = on;
+        self
+    }
     /// Enables or disables loop fusion, loop specialization, inlining, and
     /// loop-invariant hoisting.
     #[doc(hidden)]
     pub fn optimize(mut self, on: bool) -> Self {
         self.optimize = on;
+        self.registry = Arc::default();
         self
     }
     /// Debugging aid: print the bytecode of the program's own functions to
@@ -524,6 +535,7 @@ pub(crate) struct Registry {
     pub natives: Arc<Vec<NativeEntry>>,
     pub decls: Arc<NativeDecls>,
     pub sources: BTreeMap<Cow<'static, str>, Source>,
+    pub optimize: bool,
     /// The standard library's registry, whose snapshot this one's extends.
     base: Option<Arc<Registry>>,
     /// The modules checked and compiled, made on first use.
@@ -547,15 +559,18 @@ pub(crate) struct Source {
 /// Registered native functions and Rust-bound types.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct NativeDecls {
-    /// Native functions keyed by `module.name` or `module.Type.name`.
-    pub fns: HashMap<Cow<'static, str>, NativeDecl>,
-    /// Rust-bound types keyed by `module.Name`.
-    pub types: HashMap<Cow<'static, str>, BoundType>,
+    pub fns: Vec<NativeDecl>,
+    pub ids: HashMap<Cow<'static, str>, u32>,
+    pub types: Vec<BoundType>,
 }
 
 impl NativeDecls {
     pub(crate) fn id(&self, key: &str) -> Option<u32> {
-        self.fns.get(key).map(|d| d.id)
+        self.ids.get(key).copied()
+    }
+
+    pub(crate) fn get(&self, key: &str) -> Option<&NativeDecl> {
+        self.id(key).map(|id| &self.fns[id as usize])
     }
 }
 
@@ -583,6 +598,7 @@ impl Registry {
             natives: Arc::default(),
             decls: Arc::default(),
             sources: BTreeMap::new(),
+            optimize: true,
             base: None,
             snapshot: OnceLock::new(),
             core: OnceLock::new(),
@@ -595,7 +611,13 @@ impl Registry {
         if config.modules.is_empty() {
             return std;
         }
-        let mut r = Registry { natives: std.natives.clone(), decls: std.decls.clone(), sources: std.sources.clone(), ..Registry::empty() };
+        let mut r = Registry {
+            natives: std.natives.clone(),
+            decls: std.decls.clone(),
+            sources: std.sources.clone(),
+            optimize: config.optimize,
+            ..Registry::empty()
+        };
         for m in &config.modules {
             m.register_types(&mut r);
         }
@@ -607,40 +629,46 @@ impl Registry {
     }
 
     pub fn add_native(&mut self, key: String, f: HostFn, sig: Signature, names: Option<Arc<[String]>>, doc: Option<Arc<str>>) {
-        assert!(!self.decls.fns.contains_key(key.as_str()), "native `{key}` registered twice");
+        assert!(!self.decls.ids.contains_key(key.as_str()), "native `{key}` registered twice");
         let id = self.natives.len() as u32;
         Arc::make_mut(&mut self.natives).push(NativeEntry { name: key.clone().into(), f });
-        let decl = NativeDecl { id, sig: Arc::new(sig), names, doc };
-        Arc::make_mut(&mut self.decls).fns.insert(key.into(), decl);
+        let decls = Arc::make_mut(&mut self.decls);
+        let key: Cow<'static, str> = key.into();
+        decls.ids.insert(key.clone(), id);
+        decls.fns.push(NativeDecl { id, key, sig: Arc::new(sig), names, doc });
     }
 
     pub(crate) fn add_bound_type(&mut self, t: BoundType) {
         let qual = format!("{}.{}", t.module, t.name);
         let decls = Arc::make_mut(&mut self.decls);
-        if let Some(rust) = t.kind.rust_type() {
-            let other = decls.types.iter().find(|(_, b)| b.kind.rust_type() == Some(rust));
-            assert!(other.is_none(), "Rust type of `{qual}` is bound to `{}` already", other.map_or("", |(q, _)| q.as_ref()));
+        if let Some(rust) = t.kind.rust_type()
+            && let Some(other) = decls.types.iter().find(|b| b.kind.rust_type() == Some(rust))
+        {
+            panic!("Rust type of `{qual}` is bound to `{}.{}` already", other.module, other.name);
         }
-        assert!(!decls.types.contains_key(qual.as_str()), "type `{qual}` registered twice");
-        decls.types.insert(qual.into(), t);
+        assert!(!decls.types.iter().any(|b| b.module == t.module && b.name == t.name), "type `{qual}` registered twice");
+        decls.types.push(t);
     }
 
     pub fn source(&mut self, module: impl Into<Cow<'static, str>>, kind: ModKind, src: impl Into<Cow<'static, str>>) {
         let module = module.into();
         let prefix = format!("{module}.");
         let mut deps: Vec<&'static str> = Vec::new();
-        for d in self.decls.fns.iter().filter(|(k, _)| k.starts_with(&prefix)).map(|(_, d)| &*d.sig) {
-            for t in d.params.iter().chain([&d.ret]) {
-                t.visit(&mut |t| {
-                    if let Type::Named(n) = t
-                        && n.module != module
-                        && n.module != "prelude"
-                        && !deps.contains(&n.module)
-                    {
-                        deps.push(n.module);
-                    }
-                });
-            }
+        let sigs = self.decls.fns.iter().filter(|d| d.key.starts_with(&prefix)).flat_map(|d| d.sig.params.iter().chain([&d.sig.ret]));
+        let fields = self.decls.types.iter().filter(|t| t.module == module).flat_map(|t| match &t.kind {
+            BoundKind::Struct(_, fields) => fields.iter().map(|f| (f.ty)()).collect(),
+            _ => Vec::new(),
+        });
+        for t in sigs.cloned().chain(fields) {
+            t.visit(&mut |t| {
+                if let Type::Named(n) = t
+                    && n.module != module
+                    && n.module != "prelude"
+                    && !deps.contains(&n.module)
+                {
+                    deps.push(n.module);
+                }
+            });
         }
         deps.sort_unstable();
         self.sources.insert(module, Source { kind, text: src.into(), deps });
@@ -1078,6 +1106,7 @@ impl Engine {
             vm.heap.stress = true;
             vm.heap.next_gc = 0;
         }
+        vm.retry_stress = c.retry_stress;
         vm
     }
 
@@ -1439,7 +1468,7 @@ impl Engine {
 
     fn resolve_library_module(&self, d: &Discovery<'_>, prompted: Duration, name: &str) -> Result<Option<crate::files::Target>, Error> {
         let Some(library) = &self.config.library else { return Ok(None) };
-        if !crate::check::help::is_ident(name) {
+        if !crate::syntax::lexer::is_ident(name) {
             return Ok(None);
         }
         let resolve = self.resolve_script_target(&self.config.fs.absolute(library).join(format!("{name}.sand")));
@@ -1584,6 +1613,29 @@ mod registry_tests {
         let undeclared: Vec<&str> =
             STD.natives.iter().enumerate().filter(|(id, _)| !declared.contains(&(*id as u32))).map(|(_, e)| &*e.name).collect();
         assert!(undeclared.is_empty(), "registered natives no `native fn` declares: {undeclared:?}");
+    }
+
+    #[test]
+    fn host_module_source_follows_the_optimize_setting() {
+        let src = "fn double(x: int) -> int { x * 2 }\npub fn doubled_total(xs: [int]) -> int { xs.map(double).filter(x => x > 2).sum() }";
+        let code = |optimize: bool| {
+            let mut m = NativeModule::new("host");
+            m.source(src);
+            let engine = Engine::new(Config::new().optimize(optimize).module(m)).unwrap();
+            let snap = engine.registry.snapshot().unwrap();
+            let proto = snap.program.protos.iter().find(|p| p.name == "doubled_total").expect("doubled_total is compiled");
+            proto.code.clone()
+        };
+        let script = |optimize: bool| {
+            let engine = Engine::new(Config::new().optimize(optimize)).unwrap();
+            let c = engine.compile_now("main.sand", src, Path::new("."), None, false).unwrap();
+            let proto = c.program.protos.iter().find(|p| p.name == "doubled_total").expect("doubled_total is compiled");
+            proto.code.clone()
+        };
+        let (fast, slow) = (code(true), code(false));
+        assert_ne!(fast, slow);
+        assert_eq!(fast.len(), script(true).len());
+        assert_eq!(slow.len(), script(false).len());
     }
 
     #[test]

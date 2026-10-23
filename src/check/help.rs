@@ -10,6 +10,7 @@ use super::expr::{CallArgs, Ns, mk};
 use super::traits::impl_key;
 use super::*;
 use crate::syntax::ast::{Expr, ExprKind, StrSeg};
+use crate::syntax::lexer::is_ident;
 use std::fmt::Write;
 
 /// What the argument of `help` or `members` refers to.
@@ -497,7 +498,14 @@ impl Checker {
             .map(|(&n, &b)| (n, b))
             .collect();
         self.budget.charge(items.len() as u64);
-        items.sort_by(|(m, a), (n, b)| (a.span.lo, self.name(*m)).cmp(&(b.span.lo, self.name(*n))));
+        // Synthetic declarations for Rust-bound types and native functions have
+        // `span.lo == 0`; order them by definition ID to preserve registration order.
+        let order = |d: &Def| match *d {
+            Def::Type(TyRef::Def(t)) => (0, t),
+            Def::Fn(f) => (1, f),
+            _ => (2, 0),
+        };
+        items.sort_by(|(m, a), (n, b)| (a.span.lo, order(&a.def), self.name(*m)).cmp(&(b.span.lo, order(&b.def), self.name(*n))));
         items.into_iter().map(|(n, b)| (n, b.def)).collect()
     }
 
@@ -1102,10 +1110,6 @@ pub(crate) fn module_summary(src: &str) -> String {
         .filter_map(|l| l.strip_prefix("//!"))
         .collect();
     summary(&doc.join("\n"))
-}
-
-pub(crate) fn is_ident(s: &str) -> bool {
-    s.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Where the first segment of a dotted name ends (at a `.` outside `<...>`).

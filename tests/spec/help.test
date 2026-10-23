@@ -276,6 +276,7 @@ true
 
 === the overview lists functions, types and modules
 help()
+--- requires os
 --- stdout
 help(x) shows the documentation of x: a module, type, trait, function,
 method, field, variant or variable, or the type of any other expression
@@ -303,7 +304,7 @@ Functions:
 
 Types:
     bool, int, float, str, bytes, duration, Range, List<T>, Map<K, V>, Set<T>,
-    Channel<T>, Task<T>, Option<T>, Result<T, E>, Error, Iter<T>
+    Task<T>, Channel<T>, Option<T>, Result<T, E>, Error, Iter<T>
 
 Traits:
     Close, Iterator<T>

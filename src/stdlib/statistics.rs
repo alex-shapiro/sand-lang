@@ -33,7 +33,7 @@ pub(crate) fn module() -> NativeModule {
     m.vm_function("mode", |vm: &mut Vm, xs: Floats| -> Result<_, Ctl> {
         let items = xs.items(&vm.heap);
         vm.charge(items.len() as u64)?;
-        vm.reserve(items.len().saturating_mul(32))?;
+        vm.check_memory(items.len().saturating_mul(32))?;
         // Count by bit pattern (with -0.0 folded into 0.0); remember the
         // first index of each value so ties go to the earliest.
         let mut counts: FxHashMap<u64, (usize, usize)> = FxHashMap::default();
@@ -90,7 +90,7 @@ fn floats(vm: &Vm, list: Floats) -> Result<impl ExactSizeIterator<Item = f64> + 
 /// A copy of the numbers of a list, to reorder.
 fn copied(vm: &Vm, list: Floats) -> Result<Vec<f64>, Ctl> {
     let xs = floats(vm, list)?;
-    vm.reserve(xs.len() * std::mem::size_of::<f64>())?;
+    vm.check_memory(xs.len() * std::mem::size_of::<f64>())?;
     Ok(xs.collect())
 }
 

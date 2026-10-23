@@ -137,27 +137,31 @@ Running the script above prints `5.0` and `Err(Error { kind: "not_found", messag
 
 Sand infers the Sand function signature from the Rust parameter and return types:
 
-| Rust type                                         | Sand type                    |
-| ------------------------------------------------- | ---------------------------- |
-| `i64`, `f64`, `bool`, `()`                        | `int`, `float`, `bool`, `()` |
-| `String`, `&str`                                  | `str`                        |
-| `Vec<u8>`, `&[u8]`                                | `bytes`                      |
-| `Vec<T>`                                          | `[T]`                        |
-| `Option<T>`                                       | `T?`                         |
-| `Result<T, E>`                                    | `Result<T, Error>`           |
-| `HashMap<K, V>`, `BTreeMap<K, V>`                 | `[K: V]`                     |
-| `HashSet<T>`, `BTreeSet<T>`                       | `Set<T>`                     |
-| `jiff::SignedDuration`                            | `duration`                   |
-| tuples of up to 8 elements                        | tuples                       |
-| Rust enum with `#[derive(SandEnum)]`                     | matching Sand `enum`         |
-| `&T` (argument) or `T` (result) with `#[derive(SandObject)]` | opaque type `T`          |
-| registered `ValueType` `T`                               | opaque type `T`              |
+| Rust type                                                    | Sand type                    |
+| ------------------------------------------------------------ | ---------------------------- |
+| `i64`, `f64`, `bool`, `()`                                   | `int`, `float`, `bool`, `()` |
+| `String`, `&str`                                             | `str`                        |
+| `Vec<u8>`, `&[u8]`                                           | `bytes`                      |
+| `Vec<T>`                                                     | `[T]`                        |
+| `Option<T>`                                                  | `T?`                         |
+| `Box<T>`                                                     | `T`                          |
+| `Result<T, E>`                                               | `Result<T, Error>`           |
+| `HashMap<K, V>`, `BTreeMap<K, V>`                            | `[K: V]`                     |
+| `HashSet<T>`, `BTreeSet<T>`                                  | `Set<T>`                     |
+| `jiff::SignedDuration`                                       | `duration`                   |
+| tuples of up to 8 elements                                   | tuples                       |
+| Rust enum with `#[derive(SandEnum)]`                         | matching Sand `enum`         |
+| Rust struct with `#[derive(SandStruct)]`                     | matching Sand `struct`       |
+| `&T` (argument) or `T` (result) with `#[derive(SandObject)]` | opaque type `T`              |
+| `ValueType` `T` with `#[derive(SandValue)]`                  | opaque value type `T`        |
 
 The engine automatically exports registered functions that are not declared in `NativeModule::source` as `pub`, with default parameter names `arg1`, `arg2`, ... unless overridden by `params`. Registering a function as `"Type.name"` defines a method on `Type`; the method takes `self` if its first parameter has type `Type` (such as `Counter.add` below). Generic functions must be declared with `native fn` in `NativeModule::source`.
 
 Returning `Err(HostError::new(kind, message))` produces a Sand `Err(Error)` with the given `kind` and `message`. The engine also converts `std::io::Error` into an `Error` with its standard kind, and `String` or `&str` errors into an `Error` with kind `"error"`. A function that returns `Result<T, sandlang::vm::Ctl>` has the Sand return type `T`; returning `Err(ctl)` aborts the run with a runtime error (`Ctl::fail`), a resource limit error, or an exit code.
 
-Derive `SandEnum` on a unit-only Rust enum and register it with `NativeModule::enum_type` to pass enum values between Rust and Sand:
+Each derive macro (`SandEnum`, `SandStruct`, `SandObject`, `SandValue`) binds a Rust type to a Sand type in the module specified by `#[sand(module = "...")]`. Register each bound type with `NativeModule::bind`. Do not redeclare a bound type in `NativeModule::source`; use `extend` to add Sand methods to it. Optional type attributes override the Sand name (`#[sand(name = "Kind")]`), make the type private to its module (`#[sand(private)]`), or specify a renamed `sandlang` dependency (`#[sand(crate = my_sandlang)]`).
+
+Derive `SandEnum` on a unit-only Rust enum to pass enum values between Rust and Sand:
 
 ```rust
 use sandlang::{NativeModule, SandEnum};
@@ -171,16 +175,39 @@ enum Shape {
 }
 
 let mut geo = NativeModule::new("geo");
-geo.enum_type::<Shape>();
+geo.bind::<Shape>();
 geo.function("sides", |s: Shape| match s {
     Shape::Circle => 0,
     Shape::Square => 4,
 });
 ```
 
-`NativeModule::enum_type` generates the `pub enum Shape` declaration in `geo` from the Rust variants and doc comments, so scripts can call `geo.sides(geo.Shape.Square)`. Do not redeclare a registered enum in `NativeModule::source`. Use `#[sand(name = "Kind")]` to expose the enum under a different Sand name.
+The engine generates the `pub enum Shape` declaration in `geo` from the Rust variants and doc comments, so scripts can call `geo.sides(geo.Shape.Square)`.
 
-Derive `SandObject` on a Rust type and register it with `NativeModule::object_type` to expose opaque reference handles to scripts. Registered functions borrow an object parameter as `&T` and return a new object by value as `T`; scripts compare object handles by identity:
+Derive `SandStruct` on a Rust struct with named fields to copy struct values between Rust and Sand. Fields are `pub` and immutable by default; annotate a field with `#[sand(private)]` to make it private, `#[sand(var)]` to make it mutable, or `#[sand(name = "kind")]` to override its Sand name:
+
+```rust
+use sandlang::{NativeModule, SandStruct};
+
+/// A point in the plane.
+#[derive(SandStruct)]
+#[sand(module = "geo")]
+struct Point {
+    /// Horizontal coordinate.
+    x: f64,
+    /// Vertical coordinate.
+    y: f64,
+}
+
+let mut geo = NativeModule::new("geo");
+geo.bind::<Point>();
+geo.function("mid", |a: Point, b: Point| Point { x: (a.x + b.x) / 2.0, y: (a.y + b.y) / 2.0 });
+geo.function("Point.norm", |p: Point| (p.x * p.x + p.y * p.y).sqrt());
+```
+
+Scripts construct and access `Point` like any Sand struct (`geo.mid(geo.Point { x: 0.0, y: 0.0 }, b).norm()`). Recursive structs can reference themselves through `Vec<T>`, maps, or `Option<Box<T>>`; conversion aborts with a `"limit"` error if struct nesting exceeds 256 levels.
+
+Derive `SandObject` on a Rust type to expose opaque reference handles to scripts. Registered functions borrow an object parameter as `&T` and return a new object by value as `T`; scripts compare object handles by identity:
 
 ```rust
 use sandlang::{NativeModule, NativeObject, SandObject};
@@ -194,14 +221,14 @@ struct Counter(AtomicI64);
 impl NativeObject for Counter {}
 
 let mut stats = NativeModule::new("stats");
-stats.object_type::<Counter>();
+stats.bind::<Counter>();
 stats.function("counter", || Counter(AtomicI64::new(0)));
 stats.function("Counter.add", |c: &Counter, n: i64| c.0.fetch_add(n, Ordering::Relaxed) + n).params(&["n"]);
 ```
 
 `NativeModule::async_function` registers an async Rust function; while its future is pending, only the calling Sand task suspends.
 
-To check a sandbox capability inside a native function, register the function with `NativeModule::vm_function` and call `Vm::require`, which returns a `"permission_denied"` error if the policy denies the request. Because the engine re-runs the function after a permission prompt, call `Vm::require` before performing any side effects:
+To check a sandbox capability inside a native function, register the function with `NativeModule::vm_function` and call `Vm::require`, which returns a `"permission_denied"` error if the policy denies the request. Because the engine re-runs a `vm_function` after a permission prompt or after a garbage collection triggered by a memory or resource check (`Vm::check_memory`, `Vm::reserve_io`, `Vm::resource_slot`), check permissions and limits before performing any side effects. Enable `Config::retry_stress(true)` in tests to force the first memory or resource check in each `vm_function` call to trigger a collection and retry:
 
 ```rust
 # #[tokio::main(flavor = "current_thread")]
@@ -229,6 +256,8 @@ Err(Error { kind: "permission_denied", message: "permission denied: door back" }
 ```
 
 `NativeModule::source` attaches Sand source declarations to a native module. Use `native fn` declarations in the Sand source to specify default parameter values or generic type parameters for registered functions. `Engine::new` type-checks registered modules and returns `Error::Compile` if a `native fn` declaration does not match its Rust function signature.
+
+A generic Rust function accepts values of its `N`-th type parameter as `Param<N, B>`, where `B` declares any built-in bounds (`bound::Eq`, `bound::Ord`, `bound::Hash`, or a tuple such as `(bound::Ord, bound::Hash)`) required by the Rust implementation. The corresponding `native fn` declaration in `NativeModule::source` must declare those bounds (`native fn max<T: Ord>(xs: [T]) -> T?`).
 
 ## Interactive sessions
 

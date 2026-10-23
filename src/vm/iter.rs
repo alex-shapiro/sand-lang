@@ -108,7 +108,7 @@ impl Vm {
         let live: Vec<u32> = pins.its.iter().copied().filter(|&p| reads_in_place(&self.heap, p, h)).collect();
         if !live.is_empty() {
             self.meter.charge((slots + pinned) as u64)?;
-            self.reserve(bytes.saturating_add(std::mem::size_of::<Obj>()))?;
+            self.check_memory(bytes.saturating_add(std::mem::size_of::<Obj>()))?;
             let copy = match self.heap.get(c) {
                 Obj::Map(m) => Obj::Map(Box::new(MapObj { entries: m.entries.clone(), live: m.live, ..MapObj::default() })),
                 Obj::Set(s) => Obj::Set(Box::new(SetObj { entries: s.entries.clone(), live: s.live, ..SetObj::default() })),

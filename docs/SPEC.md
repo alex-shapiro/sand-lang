@@ -426,10 +426,14 @@ pub native fn parse(text: str) -> Result<Json>
 If a type parameter on a `native fn` is marked `reflect`
 (`native fn decode<reflect T>(text: str) -> Result<T>`), the compiler passes a
 runtime type description of `T` to the function, and `T` must be a concrete
-type at the call site.
+type at the call site. The Rust function can also validate `T` at compile time
+(§16.3).
 
-Native modules register opaque types (§5.4) directly from Rust rather than
-declaring them in Sand source.
+Each type parameter on a `native fn` declaration must declare the built-in
+bounds (`Eq`, `Ord`, `Hash`) required by the Rust function (§16.3).
+
+Native modules register Rust-bound opaque types (§5.4), enums, and structs
+directly from Rust rather than declaring them in Sand source.
 
 ### 4.8 Test blocks
 
@@ -2047,7 +2051,10 @@ payloads); `bytes` → base64 string; `duration` → nanoseconds; value types
 
 `json!` (§6.13) builds a `Json` from JSON syntax with embedded Sand values.
 
-`decode<T>` is the inverse for types built from those components. A struct
+`decode<T>` is the inverse for types built from those components. The
+compiler rejects a call if `T` contains a type that JSON cannot represent: a
+function, task, channel, range, or native object, or a map whose key type is
+not `str`, `int`, `duration`, `bool`, an enum, or a value type. A struct
 field missing from the object takes its declared default if that is a
 constant expression (a literal, `[]`, `[:]` or `None`), else `None` if
 optional; otherwise decoding fails with kind `"parse"` and a message naming
@@ -2256,12 +2263,12 @@ pub struct Uri {
     pub scheme: str, pub userinfo: str?, pub host: str?, pub port: int?,
     pub path: str, pub query: str?, pub fragment: str?
 }
-pub fn parse(text: str) -> Result<Uri>                 // RFC 3986
+pub native fn parse(text: str) -> Result<Uri>          // RFC 3986
 pub native fn encode_component(s: str) -> str          // percent-encodes all but unreserved
 pub native fn encode_path(s: str) -> str               // also keeps "/"
 pub native fn decode_component(s: str) -> Result<str>
 pub native fn parse_query(q: str) -> [(str, str)]      // '+' decodes to space
-pub native fn build_query(pairs: [(str, str)]) -> str
+pub fn build_query(pairs: [(str, str)]) -> str
 ```
 
 `Uri` methods: `to_str()` (recomposition), `join(reference: str) ->
@@ -2629,7 +2636,9 @@ cannot handle fall back to an engine whose cost per byte grows with the
 pattern. Time is measured as the function runs and charged between matches
 when iterating. Ordinary searches take a few to a hundred nanoseconds per
 unit of their deterministic charge, so only work that charge underestimates
-by an order of magnitude or more is charged by time.
+by an order of magnitude or more is charged by time. All other fuel charges
+are deterministic across runs; time-based regex charges depend on execution
+speed.
 
 Fuel counts against `max_instructions`. Once a scheduling slice's fuel is
 spent, long operations check the instruction budget, the CPU and
@@ -2805,22 +2814,47 @@ and charges fuel and memory when converting arguments and return values.
 is invalid or already registered, or if a host module uses the name of a
 standard library module.
 
-| Method                       | Registered item                                                                      |
-| ---------------------------- | ------------------------------------------------------------------------------------ |
-| `function(name, f)`          | synchronous function that can borrow `&str`, `&[u8]`, and `&T` arguments             |
-| `vm_function(name, f)`       | synchronous function that takes `&mut Vm` and owned arguments                        |
-| `async_function(name, f)`    | asynchronous function that takes owned arguments and suspends only the calling task  |
-| `value_type::<T>()`          | opaque value type implementing `ValueType` (§5.4)                                    |
-| `enum_type::<T>()`           | unit enum deriving `SandEnum` (`EnumType`)                                           |
-| `object_type::<T>()`         | opaque reference type deriving `SandObject` (`ObjectType`)                           |
-| `params(names)`, `doc(text)` | parameter names and documentation for the most recently registered function          |
+| Method                       | Registered item                                                                     |
+| ---------------------------- | ----------------------------------------------------------------------------------- |
+| `function(name, f)`          | synchronous function that can borrow `&str`, `&[u8]`, and `&T` arguments            |
+| `vm_function(name, f)`       | synchronous function that takes `&mut Vm` and owned arguments                       |
+| `async_function(name, f)`    | asynchronous function that takes owned arguments and suspends only the calling task |
+| `bind::<T>()`                | Rust type `T` with a derived `NamedType` (see below)                                |
+| `params(names)`, `doc(text)` | parameter names and documentation for the most recently registered function         |
+
+Four derive macros bind a Rust type to a Sand type in a native module and
+implement `NamedType`, `SandType`, `FromValue`, and `IntoValue`. Every derived
+type requires `#[sand(module = "<module>")]` and accepts `#[sand(name = "<Name>")]`
+to override its Sand name, `#[sand(private)]` to keep the type private to its
+module, and `#[sand(crate = <path>)]` to specify a renamed `sandlang`
+dependency. Rust doc comments (including `#[doc = include_str!("...")]`) become
+Sand documentation. Compilation fails if a type, variant, or field name is a
+Sand keyword or is not a valid Sand identifier.
+
+| Derive       | Sand type                                                                  |
+| ------------ | -------------------------------------------------------------------------- |
+| `SandValue`  | opaque value type (§5.4); the type must also implement `ValueType`         |
+| `SandEnum`   | `enum` with the unit variants of a Rust enum                               |
+| `SandObject` | opaque reference type; the type must also implement `NativeObject`         |
+| `SandStruct` | `struct` with the named fields of a Rust struct, copied on each conversion |
+
+Each field of a `SandStruct` must implement `IntoValue` and owned `FromValue`.
+By default, fields are `pub` and immutable; `#[sand(private)]` makes a field
+private to the module, `#[sand(var)]` makes it mutable (`var`), and
+`#[sand(name = "<name>")]` overrides its Sand name. Recursive structs can
+reference themselves through `Vec`, map, or `Option<Box<T>>` fields. Because the
+engine copies each reachable struct value during conversion and charges fuel and
+memory for each copy, shared references in a Sand value produce independent Rust
+copies. Conversion aborts with kind `"limit"` if struct nesting exceeds 256
+levels (for example, in a cyclic value). Module Sand source can define methods
+on any bound type with `extend`.
 
 The Rust return type of a registered function determines whether the function
 returns a Sand `Result` or aborts the run on failure:
 
 - `Result<T, HostError>` maps to the Sand return type `Result<T, Error>`.
   Returning `Err(HostError::new(kind, message))` yields `Err(Error { kind,
-  message })` in Sand, whereas `?` converts a `Ctl` into a `HostError` that
+message })` in Sand, whereas `?` converts a `Ctl` into a `HostError` that
   halts or suspends the VM and converts a `std::io::Error` into a `HostError`
   with the corresponding standard error kind.
 - `Result<T, std::io::Error>`, `Result<T, String>`, and `Result<T, &str>` also
@@ -2829,38 +2863,52 @@ returns a Sand `Result` or aborts the run on failure:
   aborts the run with a runtime error (`Ctl::fail`), a resource limit error, or
   an exit code.
 - `Result<Later<T, E>, E>` suspends the calling task on a future and maps to
-   the same Sand return type as `Result<T, E>`.
+  the same Sand return type as `Result<T, E>`.
 
 To check a sandbox capability inside a `vm_function`, call
 `Vm::require(&capability)` (§14), which returns an error of kind
 `"permission_denied"` if the policy denies the request. Because the engine
-re-runs the native function after a permission prompt or after a garbage
-collection triggered by a memory or resource limit, a native function must
-check capabilities and reserve memory before performing any side effects.
-Return-value conversion does not fail on the memory limit; instead, the engine
-collects garbage and checks the memory limit after the call completes.
+re-runs a `vm_function` from the start after a permission prompt or after a
+garbage collection triggered by a memory or resource check (`Vm::check_memory`,
+`Vm::reserve_io`, `Vm::resource_slot`), the function must check capabilities and
+limits before performing any side effects. `Config::retry_stress` tests this
+requirement by failing the first memory or resource check in each `vm_function`
+call. Return-value conversion does not fail on the memory limit; instead, the
+engine collects garbage and checks the memory limit after the call completes.
 
-| Rust type                                                | Sand type                                                      |
-| -------------------------------------------------------- | -------------------------------------------------------------- |
-| `i64`, `f64`, `bool`, `()`, `jiff::SignedDuration`       | `int`, `float`, `bool`, `()`, `duration`                       |
-| `String`, `&str`; `Vec<u8>`, `&[u8]`                     | `str`; `bytes`                                                 |
-| `Vec<T>`, `Option<T>`, tuples of 2 to 8 elements         | `[T]`, `T?`, tuples                                            |
-| `HashMap<K, V>`, `BTreeMap<K, V>`                        | `[K: V]`                                                       |
-| `HashSet<T>`, `BTreeSet<T>`                              | `Set<T>`                                                       |
-| `Result<T, E>`                                           | `Result<T, Error>` or `T` (determined by `E`)                  |
-| `Never`                                                  | `never`                                                        |
-| registered `ValueType`, `EnumType`, or `ObjectType` `T`  | `T` (or `&T` for a borrowed object parameter)                  |
-| `Val<T>`                                                 | `T` (passed as an uncopied heap handle)                        |
-| `Param<N>`, `Reflect<N>`                                 | `N`-th type parameter and its runtime type description         |
+| Rust type                                          | Sand type                                              |
+| -------------------------------------------------- | ------------------------------------------------------ |
+| `i64`, `f64`, `bool`, `()`, `jiff::SignedDuration` | `int`, `float`, `bool`, `()`, `duration`               |
+| `String`, `&str`; `Vec<u8>`, `&[u8]`               | `str`; `bytes`                                         |
+| `Vec<T>`, `Option<T>`, tuples of 2 to 8 elements   | `[T]`, `T?`, tuples                                    |
+| `Box<T>`                                           | `T`                                                    |
+| `HashMap<K, V>`, `BTreeMap<K, V>`                  | `[K: V]`                                               |
+| `HashSet<T>`, `BTreeSet<T>`                        | `Set<T>`                                               |
+| `Result<T, E>`                                     | `Result<T, Error>` or `T` (determined by `E`)          |
+| `Never`                                            | `never`                                                |
+| bound type `T` (see above)                         | `T` (or `&T` for a borrowed object parameter)          |
+| `Val<T>`                                           | `T` (passed as an uncopied heap handle)                |
+| `Param<N, B>`, `Reflect<N, C>`                     | `N`-th type parameter and its runtime type description |
+
+`Param<N, B>` specifies the built-in bounds `B` (`bound::Eq`, `bound::Ord`,
+`bound::Hash`, or a tuple of bounds such as `(bound::Ord, bound::Hash)`,
+defaulting to `()`) required on the `N`-th type parameter. The corresponding
+`native fn` declaration must declare `B` or stronger bounds on that parameter.
+
+`Reflect<N, C>` validates the reflected `TypeDesc` of the `N`-th type parameter
+at compile time using `C: ReflectCheck` (defaulting to `()`, which accepts all
+types). At each call site, the compiler calls `C::check` once per distinct node
+in the `TypeDesc` graph and reports a compile error if `C::check` returns `Err`.
 
 The engine automatically generates Sand declarations for registered types and
 functions that are not declared in `NativeModule::source`. Registered types use
 their Rust doc comments, and undeclared functions are exported as `pub native
-fn` with parameter names `arg1`, `arg2`, ... unless overridden by `params`. A
-function registered as `"Type.name"` is a method on `Type`, and takes `self` if
-its first parameter has type `Type`. Generic functions and functions with
-default parameter values must be declared explicitly with `native fn` in
-`NativeModule::source`.
+fn` with parameter names `arg1`, `arg2`, ... unless overridden by `params`.
+`help` lists registered types and functions in registration order before items
+declared in `NativeModule::source`. A function registered as `"Type.name"` is a
+method on `Type`, and takes `self` if its first parameter has type `Type`.
+Generic functions and functions with default parameter values must be declared
+explicitly with `native fn` in `NativeModule::source`.
 
 `Engine::new` compiles and validates all registered host modules once per
 `Config` (shared across cloned configurations), and returns `Error::Compile` if:
@@ -2871,6 +2919,7 @@ default parameter values must be declared explicitly with `native fn` in
 - a registered function references an unregistered type or another module's
   private type;
 - a public function or field exposes a private type;
+- a `native fn` declaration lacks a bound that its Rust function requires;
 - a generic Rust function lacks a `native fn` declaration in Sand source;
 - a method registered as `"Type.name"` targets a nonexistent type, or targets a
   generic type without a `native fn` declaration in Sand source;

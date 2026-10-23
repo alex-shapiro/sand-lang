@@ -217,7 +217,8 @@ help(geo.dist)
     );
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, sandlang::SandValue)]
+#[sand(module = "bank")]
 struct Money(i64);
 
 impl std::fmt::Display for Money {
@@ -227,8 +228,6 @@ impl std::fmt::Display for Money {
 }
 
 impl ValueType for Money {
-    const MODULE: &'static str = "bank";
-    const NAME: &'static str = "Money";
     const ORDER: Option<fn(&Self, &Self) -> std::cmp::Ordering> = Some(Ord::cmp);
     fn parse(text: &str) -> Result<Self, String> {
         let (whole, cents) = text.split_once('.').ok_or("expected 0.00")?;
@@ -236,7 +235,8 @@ impl ValueType for Money {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, sandlang::SandValue)]
+#[sand(module = "bank")]
 struct Cell(i64, i64);
 
 impl std::fmt::Display for Cell {
@@ -246,8 +246,6 @@ impl std::fmt::Display for Cell {
 }
 
 impl ValueType for Cell {
-    const MODULE: &'static str = "bank";
-    const NAME: &'static str = "Cell";
     fn parse(text: &str) -> Result<Self, String> {
         let (a, b) = text.split_once(':').ok_or("expected a:b")?;
         Ok(Cell(a.parse().map_err(|_| "bad row")?, b.parse().map_err(|_| "bad column")?))
@@ -256,7 +254,7 @@ impl ValueType for Cell {
 
 fn bank_module() -> NativeModule {
     let mut m = NativeModule::new("bank");
-    m.value_type::<Money>().value_type::<Cell>();
+    m.bind::<Money>().bind::<Cell>();
     m.function("cents", Money);
     m.function("sum", |xs: Vec<Money>| Money(xs.iter().map(|m| m.0).sum()));
     m.function("cell", |a: i64, b: i64| Cell(a, b));
@@ -323,7 +321,7 @@ fn host_functions_take_value_types_of_modules_added_later() {
 #[test]
 #[should_panic(expected = "belongs to module `bank`")]
 fn value_types_belong_to_their_module() {
-    NativeModule::new("other").value_type::<Money>();
+    NativeModule::new("other").bind::<Money>();
 }
 
 #[test]
@@ -336,7 +334,8 @@ fn host_sources_with_crlf_lines_import_referenced_modules() {
     assert!(out.starts_with("2024-01-01\nmodule geo\n\nGeometry.\né\n"), "{out}");
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, sandlang::SandValue)]
+#[sand(module = "bank", name = "Money")]
 struct Impostor;
 
 impl std::fmt::Display for Impostor {
@@ -346,8 +345,6 @@ impl std::fmt::Display for Impostor {
 }
 
 impl ValueType for Impostor {
-    const MODULE: &'static str = "bank";
-    const NAME: &'static str = "Money";
     fn parse(_: &str) -> Result<Self, String> {
         Ok(Impostor)
     }
@@ -387,7 +384,7 @@ enum Shape {
 
 fn shapes_module() -> NativeModule {
     let mut m = NativeModule::new("shapes");
-    m.enum_type::<Shape>();
+    m.bind::<Shape>();
     m.function("sides", |s: Shape| match s {
         Shape::Circle => 0,
         Shape::Square => 4,
@@ -850,8 +847,8 @@ enum RingB {
 #[test]
 fn host_modules_cannot_use_each_others_types_in_a_cycle() {
     let (mut a, mut b) = (NativeModule::new("ring_a"), NativeModule::new("ring_b"));
-    a.enum_type::<RingA>().function("next", |_: RingB| RingA::One);
-    b.enum_type::<RingB>().function("next", |_: RingA| RingB::Two);
+    a.bind::<RingA>().function("next", |_: RingB| RingA::One);
+    b.bind::<RingB>().function("next", |_: RingA| RingB::Two);
     let errors = engine_errors(Config::new().module(a).module(b));
     assert_eq!(errors, ["import cycle: ring_a → ring_b → ring_a"]);
 }
@@ -879,7 +876,7 @@ impl sandlang::native::NativeObject for Scratch {}
 
 fn stats_module() -> NativeModule {
     let mut m = NativeModule::new("stats");
-    m.object_type::<Counter>();
+    m.bind::<Counter>();
     m.function("counter", || Counter(AtomicUsize::new(0)));
     m.function("total", |c: &Counter| c.0.load(Ordering::Relaxed) as i64);
     m.function("Counter.add", |c: &Counter, n: i64| (c.0.fetch_add(n as usize, Ordering::Relaxed) + n as usize) as i64)
@@ -910,7 +907,7 @@ help(stats.Counter)
 #[test]
 fn natives_must_be_declared_with_their_object_types() {
     let mut m = stats_module();
-    m.object_type::<Scratch>();
+    m.bind::<Scratch>();
     m.function("scratch", || Scratch);
     let errors = engine_errors(Config::new().module(m));
     assert!(errors[0].contains("public function `scratch` uses the private type `Scratch`"), "{errors:?}");
@@ -925,11 +922,301 @@ fn natives_must_be_declared_with_their_object_types() {
 #[test]
 fn natives_cannot_use_private_types_of_other_modules() {
     let mut stats = stats_module();
-    stats.object_type::<Scratch>();
+    stats.bind::<Scratch>();
     let mut m = NativeModule::new("peek");
     m.function("scratch", |_: &Scratch| 0i64);
     let errors = engine_errors(Config::new().module(stats).module(m));
     assert!(errors[0].contains("native `peek.scratch` uses `stats.Scratch`, which is private"), "{errors:?}");
+}
+
+/// A point in the plane.
+#[derive(Clone, Copy, Debug, PartialEq, sandlang::SandStruct)]
+#[sand(module = "plane")]
+struct Point {
+    /// Horizontal coordinate.
+    x: f64,
+    /// Vertical coordinate.
+    y: f64,
+}
+
+#[derive(Debug, PartialEq, sandlang::SandStruct)]
+#[sand(module = "plane")]
+struct Route {
+    label: Option<String>,
+    points: Vec<Point>,
+    lengths: HashMap<String, i64>,
+    end: Shape,
+    #[sand(private, var)]
+    visits: i64,
+}
+
+fn plane_module() -> NativeModule {
+    let mut m = NativeModule::new("plane");
+    m.bind::<Point>().bind::<Route>();
+    m.function("mid", |a: Point, b: Point| Point { x: (a.x + b.x) / 2.0, y: (a.y + b.y) / 2.0 });
+    m.function("Point.norm", |p: Point| (p.x * p.x + p.y * p.y).sqrt());
+    m.function("route", |label: Option<String>, points: Vec<Point>| {
+        let lengths = HashMap::from([("points".to_string(), points.len() as i64)]);
+        Route { label, points, lengths, end: Shape::Triangle, visits: 0 }
+    })
+    .params(&["label", "points"]);
+    m.function("Route.visit_count", |r: Route| r.visits);
+    m.source("extend Route {\n    /// Counts a visit.\n    pub fn visit(self) {\n        self.visits += 1\n    }\n}");
+    m
+}
+
+#[test]
+fn host_functions_take_and_return_structs() {
+    let src = r#"
+import plane
+import shapes
+let a = plane.Point { x: 1.0, y: 2.0 }
+print(plane.mid(a, plane.Point { x: 3.0, y: 4.0 }))
+print(plane.Point { x: 3.0, y: 4.0 }.norm())
+let r = plane.route(label: Some("home"), points: [a, a])
+print(r)
+r.visit()
+r.visit()
+print(r.visit_count())
+print(r.end == shapes.Shape.Triangle)
+help(plane.Point)
+"#;
+    let (r, out, _) = run_src(Config::new().module(shapes_module()).module(plane_module()), src);
+    r.unwrap();
+    let route = "Route { label: Some(\"home\"), points: [Point { x: 1.0, y: 2.0 }, Point { x: 1.0, y: 2.0 }], lengths: [\"points\": 2], end: Triangle, visits: 0 }";
+    let help = "struct plane.Point\n\nA point in the plane.\n\nFields:\n    x: float\n        Horizontal coordinate.\n    y: float\n        Vertical coordinate.\n\nMethods:\n    fn norm(self) -> float\n";
+    assert_eq!(out, format!("Point {{ x: 2.0, y: 3.0 }}\n5.0\n{route}\n2\ntrue\n{help}"));
+}
+
+#[test]
+fn private_struct_fields_stay_in_their_module() {
+    let config = || Config::new().module(shapes_module()).module(plane_module());
+    let cases = [
+        "let r = plane.route(label: None, points: [])\nprint(r.visits)",
+        "let r = plane.route(label: None, points: [])\nr.visits = 3",
+        "print(plane.Route { label: None, points: [], lengths: [:], end: shapes.Shape.Circle, visits: 0 })",
+    ];
+    for src in cases {
+        let (r, _, _) = run_src(config(), &format!("import plane\nimport shapes\n{src}"));
+        let Err(Error::Compile(ds)) = r else { panic!("{src}: expected a compile error, got {r:?}") };
+        assert!(ds[0].message.contains("private"), "{src}: {ds:?}");
+    }
+}
+
+#[test]
+fn struct_fields_must_use_registered_public_types() {
+    let errors = engine_errors(Config::new().module(plane_module()));
+    let msg = "the Rust field `end` of `plane.Route` uses `shapes.Shape`, and module `shapes` is not added to the engine";
+    assert!(errors.iter().any(|e| e == msg), "{errors:?}");
+
+    #[derive(Clone, Copy, sandlang::SandEnum)]
+    #[sand(module = "lab", private)]
+    enum Secret {
+        Code,
+    }
+    #[derive(sandlang::SandStruct)]
+    #[sand(module = "lab")]
+    struct Report {
+        secret: Secret,
+    }
+    let mut m = NativeModule::new("lab");
+    m.bind::<Secret>().bind::<Report>();
+    let errors = engine_errors(Config::new().module(m));
+    assert_eq!(errors, ["public field `secret` uses the private type `Secret`; make `Secret` public"]);
+}
+
+#[test]
+#[should_panic(expected = "field `fn` of `Keyword` is not an identifier, or is a keyword")]
+fn struct_fields_must_be_sand_identifiers() {
+    use sandlang::native::{Binding, Type};
+    struct Keyword;
+    impl sandlang::NamedType for Keyword {
+        const MODULE: &'static str = "lab";
+        const NAME: &'static str = "Keyword";
+        const DOC: &'static str = "";
+        const PUBLIC: bool = true;
+        fn binding() -> Binding<Self> {
+            Binding::of_struct()
+        }
+    }
+    impl sandlang::SandType for Keyword {
+        fn sand_type() -> Type {
+            Type::bound::<Self>("lab", "Keyword")
+        }
+    }
+    impl sandlang::StructType for Keyword {
+        const FIELDS: &'static [sandlang::StructField] =
+            &[sandlang::StructField { name: "fn", doc: "", public: true, var: false, ty: <i64 as sandlang::SandType>::sand_type }];
+    }
+    NativeModule::new("lab").bind::<Keyword>();
+}
+
+#[test]
+fn struct_fields_can_take_another_sand_name() {
+    #[derive(sandlang::SandStruct)]
+    #[sand(module = "lab")]
+    struct Sample {
+        #[sand(name = "kind")]
+        r#type: String,
+        #[sand(name = "variance", var)]
+        var: i64,
+    }
+    let mut m = NativeModule::new("lab");
+    m.bind::<Sample>();
+    m.function("grow", |s: Sample| Sample { r#type: format!("{}!", s.r#type), var: s.var * 2 });
+    let src = "import lab\nvar s = lab.grow(lab.Sample { kind: \"a\", variance: 2 })\ns.variance += 1\nprint(s)";
+    let (r, out, _) = run_src(Config::new().module(m), src);
+    r.unwrap();
+    assert_eq!(out, "Sample { kind: \"a!\", variance: 5 }\n");
+}
+
+#[test]
+#[should_panic(expected = "type `Point` is registered twice in module `plane`")]
+fn structs_bind_once() {
+    NativeModule::new("plane").bind::<Point>().bind::<Point>();
+}
+
+#[derive(sandlang::SandStruct)]
+#[sand(module = "tree")]
+struct Node {
+    children: Vec<Node>,
+}
+
+#[test]
+fn recursive_structs_convert_to_a_bounded_depth() {
+    fn size(n: &Node) -> i64 {
+        1 + n.children.iter().map(size).sum::<i64>()
+    }
+    let run = |src: &str| {
+        let mut m = NativeModule::new("tree");
+        m.bind::<Node>();
+        m.function("size", |n: Node| size(&n));
+        m.function("echo", |n: Node| n);
+        m.function("chain", |n: i64| (0..n).fold(Node { children: Vec::new() }, |n, _| Node { children: vec![n] }));
+        run_src(Config::new().module(m), &format!("import tree\nlet leaf = tree.Node {{ children: [] }}\n{src}"))
+    };
+    let (r, out, _) = run("print(tree.size(tree.echo(tree.Node { children: [leaf, tree.Node { children: [leaf] }] })))");
+    r.unwrap();
+    assert_eq!(out, "4\n");
+    let (r, out, _) = run(
+        "var n = leaf\nfor _ in 0..255 {\n    n = tree.Node { children: [n] }\n}\nprint(tree.size(n))\nprint(tree.size(tree.chain(255)))",
+    );
+    r.unwrap();
+    assert_eq!(out, "256\n256\n");
+    for src in [
+        "print(tree.chain(256))",
+        "print(tree.chain(5000))",
+        "var n = leaf\nfor _ in 0..256 {\n    n = tree.Node { children: [n] }\n}\nprint(tree.size(n))",
+        "var n = leaf\nfor _ in 0..1000000 {\n    n = tree.Node { children: [n] }\n}\nprint(tree.size(n))",
+        "leaf.children.push(leaf)\nprint(tree.size(leaf))",
+    ] {
+        let (r, _, _) = run(src);
+        let Err(Error::Runtime { message, .. }) = r else { panic!("{src}: expected a runtime error, got {r:?}") };
+        assert!(message.contains("value too deeply nested to convert"), "{src}: {message}");
+    }
+}
+
+#[derive(sandlang::SandStruct)]
+#[sand(module = "chain")]
+struct Link {
+    n: i64,
+    next: Option<Box<Link>>,
+}
+
+#[test]
+fn boxed_structs_convert_to_a_bounded_depth() {
+    fn sum(l: &Link) -> i64 {
+        l.n + l.next.as_deref().map_or(0, sum)
+    }
+    let run = |src: &str| {
+        let mut m = NativeModule::new("chain");
+        m.bind::<Link>();
+        m.function("sum", |l: Link| sum(&l));
+        m.function("range", |n: i64| (0..n).fold(None, |next, i| Some(Box::new(Link { n: i, next }))));
+        run_src(Config::new().module(m), &format!("import chain\n{src}"))
+    };
+    let (r, out, _) = run("print(chain.sum(chain.Link { n: 1, next: Some(chain.Link { n: 2, next: None }) }))\nprint(chain.range(3))");
+    r.unwrap();
+    assert_eq!(out, "3\nSome(Link { n: 2, next: Some(Link { n: 1, next: Some(Link { n: 0, next: None }) }) })\n");
+    let (r, out, _) = run("print(chain.sum(chain.range(256)?))");
+    r.unwrap();
+    assert_eq!(out, "32640\n");
+    for src in [
+        "print(chain.range(257))",
+        "var l = chain.Link { n: 0, next: None }\nfor i in 0..256 {\n    l = chain.Link { n: i, next: Some(l) }\n}\nprint(chain.sum(l))",
+    ] {
+        let (r, _, _) = run(src);
+        let Err(Error::Runtime { message, .. }) = r else { panic!("{src}: expected a runtime error, got {r:?}") };
+        assert!(message.contains("value too deeply nested to convert"), "{src}: {message}");
+    }
+}
+
+#[derive(Clone, Copy, sandlang::SandEnum)]
+#[sand(module = "zoo")]
+enum Zebra {
+    Stripe,
+}
+
+#[doc = include_str!("include/apple.md")]
+#[derive(sandlang::SandStruct)]
+#[sand(module = "zoo")]
+struct Apple {
+    #[doc = include_str!("include/apple.md")]
+    grams: i64,
+}
+
+#[test]
+fn help_lists_rust_bound_items_in_registration_order() {
+    let mut m = NativeModule::new("zoo");
+    m.bind::<Zebra>().bind::<Apple>();
+    m.function("zz", || 1i64).doc("Last letter.");
+    m.function("aa", || Apple { grams: 1 }).doc("First letter.");
+    m.source("/// From source.\npub fn mm() {}");
+    let (r, out, _) = run_src(Config::new().module(m), "import zoo\nhelp(zoo)\nhelp(zoo.Apple)");
+    r.unwrap();
+    let order: Vec<usize> =
+        ["enum Zebra", "struct Apple", "fn zz()", "fn aa()", "fn mm()"].iter().map(|s| out.find(s).unwrap_or(usize::MAX)).collect();
+    assert!(order.windows(2).all(|w| w[0] < w[1]), "{out}");
+    assert!(out.ends_with("struct zoo.Apple\n\nA fruit, documented in a file.\n\nIt has one field.\n\nFields:\n    grams: int\n        A fruit, documented in a file.\n"), "{out}");
+}
+
+#[test]
+fn native_declarations_must_have_the_bounds_of_their_rust_functions() {
+    use sandlang::native::{Param, bound};
+    let module = |decl: &str| {
+        let mut m = NativeModule::new("dedupe");
+        m.function("uniq", |xs: Vec<Param<0, bound::Hash>>| xs);
+        m.function("top", |xs: Vec<Param<0, bound::Ord>>, _key: Param<1, (bound::Ord, bound::Hash)>| xs);
+        m.source(decl);
+        m
+    };
+    let decls = "pub native fn uniq<T: Hash>(xs: [T]) -> [T]\npub native fn top<T, K: Hash>(xs: [T], key: K) -> [T] where T: Ord, K: Ord";
+    let (r, out, _) = run_src(Config::new().module(module(decls)), "import dedupe\nprint(dedupe.uniq([1, 2]))\nprint(dedupe.top([3], 1))");
+    r.unwrap();
+    assert_eq!(out, "[1, 2]\n[3]\n");
+
+    let cases = [
+        (
+            "pub native fn uniq<T>(xs: [T]) -> [T]",
+            "native function `uniq` must bound `T` by `Hash`, as its Rust function requires `T: Hash`",
+        ),
+        (
+            "pub native fn uniq<T: Eq>(xs: [T]) -> [T]",
+            "native function `uniq` must bound `T` by `Hash`, as its Rust function requires `T: Hash`",
+        ),
+        (
+            "pub native fn top<T, K: Hash>(xs: [T], key: K) -> [T]",
+            "native function `top` must bound `T` by `Ord`, as its Rust function requires `T: Ord`",
+        ),
+        (
+            "pub native fn top<T: Ord, K>(xs: [T], key: K) -> [T]",
+            "native function `top` must bound `K` by `Ord + Hash`, as its Rust function requires `K: Ord + Hash`",
+        ),
+    ];
+    for (decl, msg) in cases {
+        let errors = engine_errors(Config::new().module(module(decl)));
+        assert!(errors.iter().any(|e| e == msg), "{decl}: {errors:?}");
+    }
 }
 
 #[test]
@@ -2300,7 +2587,7 @@ fn host_modules_can_define_resources() {
 
     let closed = Arc::new(AtomicUsize::new(0));
     let mut m = NativeModule::new("pool");
-    m.object_type::<Conn>();
+    m.bind::<Conn>();
     m.source("impl Close for Conn {\n    native fn close(self)\n}");
     let c = closed.clone();
     m.vm_function("connect", move |vm: &mut Vm| -> Result<Conn, sandlang::HostError> {
@@ -2374,4 +2661,20 @@ fn engine_docs_include_prelude_std_and_host_modules() {
     let host = docs.last().unwrap();
     assert_eq!((host.name.as_str(), host.kind), ("geo", ModuleKind::Host));
     assert_eq!(host.items[0].decl, "fn dist(a: float, b: float) -> float");
+}
+
+#[test]
+fn retry_stress_fails_a_check_in_the_native_body() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c = calls.clone();
+    let mut m = NativeModule::new("probe");
+    m.vm_function("touch", move |vm: &mut Vm, s: String| -> Result<i64, sandlang::vm::Ctl> {
+        c.fetch_add(1, Ordering::SeqCst);
+        vm.check_memory(s.len())?;
+        Ok(s.len() as i64)
+    });
+    let (r, out, _) = run_src(Config::new().retry_stress(true).module(m), "import probe\nprint(probe.touch(\"abc\"))");
+    r.unwrap();
+    assert_eq!(out, "3\n");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
