@@ -2049,6 +2049,10 @@ name, `None` → `null`, `Some(x)` → `x`; other enums: a payload-less variant
 payloads); `bytes` → base64 string; `duration` → nanoseconds; value types
 (§5.4) → their text form (`"2024-02-29"`); `Json` → itself.
 
+The compiler rejects a call to `encode` or `to_json` if `T` contains a
+function, task, channel, or native object. If a type parameter of the caller
+hides such a value, the call aborts.
+
 `json!` (§6.13) builds a `Json` from JSON syntax with embedded Sand values.
 
 `decode<T>` is the inverse for types built from those components. The
@@ -2834,20 +2838,31 @@ Sand keyword or is not a valid Sand identifier.
 | Derive       | Sand type                                                                  |
 | ------------ | -------------------------------------------------------------------------- |
 | `SandValue`  | opaque value type (§5.4); the type must also implement `ValueType`         |
-| `SandEnum`   | `enum` with the unit variants of a Rust enum                               |
+| `SandEnum`   | `enum` with the variants and payloads of a Rust enum                       |
 | `SandObject` | opaque reference type; the type must also implement `NativeObject`         |
 | `SandStruct` | `struct` with the named fields of a Rust struct, copied on each conversion |
 
-Each field of a `SandStruct` must implement `IntoValue` and owned `FromValue`.
-By default, fields are `pub` and immutable; `#[sand(private)]` makes a field
-private to the module, `#[sand(var)]` makes it mutable (`var`), and
-`#[sand(name = "<name>")]` overrides its Sand name. Recursive structs can
-reference themselves through `Vec`, map, or `Option<Box<T>>` fields. Because the
-engine copies each reachable struct value during conversion and charges fuel and
-memory for each copy, shared references in a Sand value produce independent Rust
-copies. Conversion aborts with kind `"limit"` if struct nesting exceeds 256
-levels (for example, in a cyclic value). Module Sand source can define methods
-on any bound type with `extend`.
+Each field of a `SandStruct` and each payload of a `SandEnum` variant must
+implement `IntoValue` and owned `FromValue`. A tuple variant becomes a variant
+with positional payloads (`Circle(float)`), and a variant with named fields one
+with named payloads (`Rect(w: float, h: float)`). The type parameters of a
+generic enum or struct become Sand type parameters; `bind` registers the type
+from any of its instances (`bind::<Pair<(), ()>>()`).
+
+By default, struct fields are `pub` and immutable; `#[sand(private)]` makes a
+field private to the module, `#[sand(var)]` makes it mutable (`var`), and
+`#[sand(name = "<name>")]` overrides its Sand name. `#[sand(default)]` or
+`#[sand(default = <expr>)]` gives a field the default `Default::default()` or
+`<expr>`, which must be a number, `bool`, `()`, string, duration, empty list or
+map, or `None`; `bind` panics otherwise.
+
+Recursive types can reference themselves through `Vec`, map, or `Box` fields.
+Because the engine copies each reachable struct and enum value during
+conversion and charges fuel and memory for each copy, shared references in a
+Sand value produce independent Rust copies. Conversion aborts with kind
+`"limit"` if the nesting of structs and enum payloads exceeds 256 levels (for
+example, in a cyclic value). Module Sand source can define methods on any bound
+type with `extend`.
 
 The Rust return type of a registered function determines whether the function
 returns a Sand `Result` or aborts the run on failure:
@@ -2882,23 +2897,32 @@ engine collects garbage and checks the memory limit after the call completes.
 | `String`, `&str`; `Vec<u8>`, `&[u8]`               | `str`; `bytes`                                         |
 | `Vec<T>`, `Option<T>`, tuples of 2 to 8 elements   | `[T]`, `T?`, tuples                                    |
 | `Box<T>`                                           | `T`                                                    |
-| `HashMap<K, V>`, `BTreeMap<K, V>`                  | `[K: V]`                                               |
+| `HashMap<K, V>`, `BTreeMap<K, V>`, `IndexMap<K, V>` | `[K: V]`                                              |
 | `HashSet<T>`, `BTreeSet<T>`                        | `Set<T>`                                               |
 | `Result<T, E>`                                     | `Result<T, Error>` or `T` (determined by `E`)          |
 | `Never`                                            | `never`                                                |
 | bound type `T` (see above)                         | `T` (or `&T` for a borrowed object parameter)          |
 | `Val<T>`                                           | `T` (passed as an uncopied heap handle)                |
 | `Param<N, B>`, `Reflect<N, C>`                     | `N`-th type parameter and its runtime type description |
+| `Num<N>`                                           | `Num` evidence of the `N`-th type parameter            |
 
-`Param<N, B>` specifies the built-in bounds `B` (`bound::Eq`, `bound::Ord`,
-`bound::Hash`, or a tuple of bounds such as `(bound::Ord, bound::Hash)`,
-defaulting to `()`) required on the `N`-th type parameter. The corresponding
-`native fn` declaration must declare `B` or stronger bounds on that parameter.
+`Param<N, B>` specifies requirements `B` on the `N`-th type parameter: a
+built-in bound (`bound::Eq`, `bound::Ord`, `bound::Hash`, `bound::Num`),
+`bound::Checked<C>`, or a tuple of these such as `(bound::Ord, bound::Hash)`,
+defaulting to `()`. The corresponding `native fn` declaration must declare the
+bounds of `B` or stronger bounds on that parameter.
 
 `Reflect<N, C>` validates the reflected `TypeDesc` of the `N`-th type parameter
 at compile time using `C: ReflectCheck` (defaulting to `()`, which accepts all
 types). At each call site, the compiler calls `C::check` once per distinct node
 in the `TypeDesc` graph and reports a compile error if `C::check` returns `Err`.
+`bound::Checked<C>` validates the type argument in the same way, but passes no
+description at run time. A type parameter of the caller in the type argument
+is a `TypeDesc::Param` node.
+
+If a `native fn` declaration bounds a type parameter by `Num`, the Rust
+function takes its evidence as `Num<N>` (with `zero` and `one`), after its
+`Reflect` parameters.
 
 The engine automatically generates Sand declarations for registered types and
 functions that are not declared in `NativeModule::source`. Registered types use

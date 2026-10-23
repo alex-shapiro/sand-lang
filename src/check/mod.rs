@@ -14,7 +14,7 @@ mod unify;
 use crate::diag::{Diag, FileId, SourceFile, Span};
 use crate::engine::NativeDecls;
 use crate::hir::*;
-use crate::native::{BoundKind, Bounds, NativeDecl, Signature, StructField, Type};
+use crate::native::{BoundKind, Bounds, EnumVariant, NativeDecl, Signature, StructField, Type};
 use crate::syntax::ast::{self, ItemKind, TypeExpr, TypeExprKind};
 use crate::types::*;
 use crate::vm::value::{FxBuild, FxHashMap};
@@ -190,6 +190,12 @@ pub struct FnInfo {
     pub trait_of: Option<TraitId>,
 }
 
+/// The fields or payloads of a Rust-bound struct or enum.
+enum BoundMembers {
+    Struct(&'static [StructField], Arc<[Option<ConstVal>]>),
+    Enum(&'static [EnumVariant]),
+}
+
 /// Where the syntax of a function body is in the items of its module.
 /// AST is borrowed while the module is checked.
 #[derive(Clone, Copy, Debug)]
@@ -362,6 +368,30 @@ impl CheckedProgram {
 
     pub fn name(&self, s: Symbol) -> &str {
         self.syms.str(s)
+    }
+
+    /// The Rust type bound to type definition `d`, if any.
+    pub fn rust_type(&self, d: TypeDefId) -> Option<std::any::TypeId> {
+        rust_type(&self.types[d as usize], &self.enum_bindings, &self.struct_bindings, d)
+    }
+}
+
+/// The Rust type bound to type definition `d` (`def`), if any.
+fn rust_type(
+    def: &TypeDef,
+    enum_bindings: &PVec<(std::any::TypeId, u32)>,
+    struct_bindings: &PVec<(std::any::TypeId, TypeDefId)>,
+    d: TypeDefId,
+) -> Option<std::any::TypeId> {
+    match &def.kind {
+        TypeDefKind::Opaque(Opaque::Value(v)) => Some(v.type_id),
+        TypeDefKind::Opaque(Opaque::Object(t)) => Some(*t),
+        TypeDefKind::Struct { .. } => struct_bindings.iter_from(0).find(|(_, def)| *def == d).map(|(t, _)| *t),
+        TypeDefKind::Enum { variants } => {
+            let first = variants.first()?.rt_id;
+            enum_bindings.iter_from(0).find(|(_, v)| *v == first).map(|(t, _)| *t)
+        }
+        _ => None,
     }
 }
 
@@ -1156,7 +1186,7 @@ impl Checker {
                 trait_ids.push(id);
             }
         }
-        let bound_structs = if self.allows_native() { self.declare_bound_types() } else { Vec::new() };
+        let bound_members = if self.allows_native() { self.declare_bound_types() } else { Vec::new() };
         let mut struct_ids = Vec::new();
         for item in items {
             match &item.kind {
@@ -1210,8 +1240,8 @@ impl Checker {
             .collect();
         self.resolve_supertraits(&trait_ids, &trait_decls);
         // 3. Fields and variants, and the built-in bounds they satisfy.
-        for (id, fields) in bound_structs {
-            self.resolve_bound_struct(id, fields);
+        for (id, members) in bound_members {
+            self.resolve_bound_members(id, members);
         }
         let mut k = 0;
         for (idx, item) in items.iter().enumerate() {
@@ -1570,64 +1600,93 @@ impl Checker {
         self.types[id as usize].kind = TypeDefKind::Enum { variants };
     }
 
-    fn declare_bound_types(&mut self) -> Vec<(TypeDefId, &'static [StructField])> {
+    fn declare_bound_types(&mut self) -> Vec<(TypeDefId, BoundMembers)> {
         let natives = self.natives.clone();
         let module = self.name(self.mods[self.cur_mod as usize].name).to_string();
         let span = Span::new(self.mods[self.cur_mod as usize].file, 0, 0);
-        let mut structs = Vec::new();
+        let mut members = Vec::new();
         for t in natives.types.iter().filter(|t| t.module == module) {
             let ident = ast::Ident { name: t.name.to_string(), span };
             let doc = Some(t.doc).filter(|d| !d.is_empty());
-            let (generics, kind) = match &t.kind {
-                BoundKind::Value(v) => (vec![], TypeDefKind::Opaque(Opaque::Value(*v))),
-                BoundKind::Object(id) => (vec![], TypeDefKind::Opaque(Opaque::Object(*id))),
-                BoundKind::Builtin(params) => {
-                    let ps = params.iter().map(|p| self.sym(p)).collect::<Vec<_>>();
-                    (ps.into_iter().map(|p| self.new_param(p, vec![], false)).collect(), TypeDefKind::Opaque(Opaque::Builtin))
-                }
-                BoundKind::Enum(..) => (vec![], TypeDefKind::Enum { variants: vec![] }),
-                BoundKind::Struct(..) => (vec![], TypeDefKind::Struct { fields: vec![] }),
+            let params: &[&str] = match &t.kind {
+                BoundKind::Builtin(params) | BoundKind::Enum { params, .. } | BoundKind::Struct { params, .. } => params,
+                BoundKind::Value(_) | BoundKind::Object(_) => &[],
+            };
+            let ps = params.iter().map(|p| self.sym(p)).collect::<Vec<_>>();
+            let generics = ps.into_iter().map(|p| self.new_param(p, vec![], false)).collect();
+            let kind = match &t.kind {
+                BoundKind::Value(v) => TypeDefKind::Opaque(Opaque::Value(*v)),
+                BoundKind::Object(id) => TypeDefKind::Opaque(Opaque::Object(*id)),
+                BoundKind::Builtin(_) => TypeDefKind::Opaque(Opaque::Builtin),
+                BoundKind::Enum { .. } => TypeDefKind::Enum { variants: vec![] },
+                BoundKind::Struct { .. } => TypeDefKind::Struct { fields: vec![] },
             };
             let id = self.new_typedef(&ident, generics, kind, t.public, doc);
             self.define_ident(&ident, Def::Type(TyRef::Def(id)), t.public);
             match &t.kind {
-                BoundKind::Enum(_, vs) if vs.is_empty() => {}
-                BoundKind::Enum(type_id, vs) => {
-                    let mut variants = Vec::new();
-                    for (i, &(vname, vdoc)) in vs.iter().enumerate() {
+                BoundKind::Enum { rust, variants, .. } => {
+                    let mut defs = Vec::new();
+                    for (i, v) in variants.iter().enumerate() {
                         self.variants.push((id, i as u32));
                         let rt_id = (self.variants.len() - 1) as u32;
-                        let doc = Some(vdoc).filter(|d| !d.is_empty()).map(Arc::from);
-                        variants.push(VariantDef { name: self.sym(vname), fields: vec![], field_names: None, rt_id, doc });
+                        let doc = Some(v.doc).filter(|d| !d.is_empty()).map(Arc::from);
+                        let names: Option<Vec<Symbol>> = v.fields.iter().map(|f| f.name.map(|n| self.sym(n))).collect();
+                        let field_names = names.filter(|ns| !ns.is_empty());
+                        defs.push(VariantDef { name: self.sym(v.name), fields: vec![], field_names, rt_id, doc });
                     }
-                    self.enum_bindings.push((*type_id, variants[0].rt_id));
-                    self.types[id as usize].kind = TypeDefKind::Enum { variants };
+                    if let Some(first) = defs.first() {
+                        self.enum_bindings.push((*rust, first.rt_id));
+                    }
+                    self.types[id as usize].kind = TypeDefKind::Enum { variants: defs };
+                    members.push((id, BoundMembers::Enum(variants)));
                 }
-                BoundKind::Struct(type_id, fields) => {
-                    self.struct_bindings.push((*type_id, id));
-                    structs.push((id, *fields));
+                BoundKind::Struct { rust, fields, defaults, .. } => {
+                    self.struct_bindings.push((*rust, id));
+                    members.push((id, BoundMembers::Struct(fields, defaults.clone())));
                 }
                 _ => {}
             }
         }
-        structs
+        members
     }
 
-    fn resolve_bound_struct(&mut self, id: TypeDefId, rust: &[StructField]) {
+    /// Resolves the field or payload types of a bound type declared by
+    /// `declare_bound_types`, once all types of the module are declared.
+    fn resolve_bound_members(&mut self, id: TypeDefId, members: BoundMembers) {
         let span = self.types[id as usize].span;
         let qual = format!("{}.{}", self.name(self.types[id as usize].module_name), self.name(self.types[id as usize].name));
-        let mut fields = Vec::new();
-        for f in rust {
-            let owner = format!("the Rust field `{}` of `{qual}`", f.name);
-            let ty = self.host_type(&(f.ty)(), &[], &owner, span).unwrap_or(TypeId::ERROR);
-            if self.types[id as usize].is_pub && f.public {
-                self.check_public_types("field", &ast::Ident { name: f.name.to_string(), span }, [ty]);
+        let generics = self.types[id as usize].generics.clone();
+        let public = self.types[id as usize].is_pub;
+        match members {
+            BoundMembers::Struct(rust, defaults) => {
+                let mut fields = Vec::new();
+                for (f, default) in rust.iter().zip(defaults.iter()) {
+                    let owner = format!("the Rust field `{}` of `{qual}`", f.name);
+                    let ty = self.host_type(&(f.ty)(), &generics, &owner, span).unwrap_or(TypeId::ERROR);
+                    if public && f.public {
+                        self.check_public_types("field", &ast::Ident { name: f.name.to_string(), span }, [ty]);
+                    }
+                    let doc = Some(f.doc).filter(|d| !d.is_empty()).map(Arc::from);
+                    let name = self.sym(f.name);
+                    let const_default = default.clone();
+                    fields.push(FieldDef { name, ty, mutable: f.var, is_pub: f.public, default: None, const_default, doc });
+                }
+                self.types[id as usize].kind = TypeDefKind::Struct { fields };
             }
-            let doc = Some(f.doc).filter(|d| !d.is_empty()).map(Arc::from);
-            let name = self.sym(f.name);
-            fields.push(FieldDef { name, ty, mutable: f.var, is_pub: f.public, default: None, const_default: None, doc });
+            BoundMembers::Enum(rust) => {
+                for (i, v) in rust.iter().enumerate() {
+                    let owner = format!("the Rust payload of variant `{}` of `{qual}`", v.name);
+                    let tys: Vec<TypeId> =
+                        v.fields.iter().map(|f| self.host_type(&(f.ty)(), &generics, &owner, span).unwrap_or(TypeId::ERROR)).collect();
+                    if public {
+                        self.check_public_types("variant", &ast::Ident { name: v.name.to_string(), span }, tys.iter().copied());
+                    }
+                    if let TypeDefKind::Enum { variants } = &mut self.types[id as usize].kind {
+                        variants[i].fields = tys;
+                    }
+                }
+            }
         }
-        self.types[id as usize].kind = TypeDefKind::Struct { fields };
     }
 
     /// Finds a struct reachable from `t` that has a field invisible to the current module.
@@ -1657,16 +1716,7 @@ impl Checker {
     }
 
     fn rust_type(&self, d: TypeDefId) -> Option<std::any::TypeId> {
-        match &self.types[d as usize].kind {
-            TypeDefKind::Opaque(Opaque::Value(v)) => Some(v.type_id),
-            TypeDefKind::Opaque(Opaque::Object(t)) => Some(*t),
-            TypeDefKind::Struct { .. } => self.struct_bindings.iter_from(0).find(|(_, def)| *def == d).map(|(t, _)| *t),
-            TypeDefKind::Enum { variants } => {
-                let first = variants.first()?.rt_id;
-                self.enum_bindings.iter_from(0).find(|(_, v)| *v == first).map(|(t, _)| *t)
-            }
-            _ => None,
-        }
+        rust_type(&self.types[d as usize], &self.enum_bindings, &self.struct_bindings, d)
     }
 
     /// Declares registered host functions that do not have a `native fn` declaration in Sand source.
@@ -1727,7 +1777,7 @@ impl Checker {
         }
         let mut generic = false;
         for t in sig.params.iter().chain([&sig.ret]) {
-            t.visit(&mut |t| generic |= matches!(t, Type::Param(..) | Type::Reflect(..)));
+            t.visit(&mut |t| generic |= matches!(t, Type::Param(..) | Type::Reflect(..) | Type::Num(_)));
         }
         if generic {
             let msg = format!("native `{key}` is generic, so the module must declare it with `native fn`");
@@ -1829,7 +1879,7 @@ impl Checker {
                 let r = self.host_type(r, generics, owner, span)?;
                 self.arena.func(&ps, r)
             }
-            Type::Param(i, _) => match generics.get(*i as usize) {
+            Type::Param(i, ..) => match generics.get(*i as usize) {
                 Some(&p) => self.param_ty(p),
                 None => {
                     self.error(span, format!("{owner} uses type parameter {i}, which its declaration does not have"));
@@ -1837,7 +1887,11 @@ impl Checker {
                 }
             },
             Type::Reflect(..) => {
-                self.error(span, format!("{owner} takes a type description that is not its first parameter"));
+                self.error(span, format!("{owner} takes a type description that is not one of its first parameters"));
+                return None;
+            }
+            Type::Num(_) => {
+                self.error(span, format!("{owner} takes `Num` evidence that is not one of its first parameters"));
                 return None;
             }
             Type::Named(n) => {
@@ -1894,13 +1948,27 @@ impl Checker {
     ) {
         let span = f.name.span;
         let owner = format!("the Rust function of native `{key}`");
-        let reflect: Vec<u8> =
-            generics.iter().enumerate().filter(|(_, p)| self.params[**p as usize].reflect).map(|(i, _)| i as u8).collect();
-        let n = reflect.len().min(sig.params.len());
+        // The Rust function takes the runtime arguments that precede the
+        // declared ones: type descriptions, then `Num` evidence.
+        let num = self.num_trait;
+        let mut leads: Vec<Type> = generics
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| self.params[**p as usize].reflect)
+            .map(|(i, _)| Type::Reflect(i as u8, |_, _| Ok(())))
+            .collect();
+        for (i, &p) in generics.iter().enumerate() {
+            let n = self.params[p as usize].traits.iter().filter(|tr| Some(tr.trait_id) == num).count();
+            leads.extend(std::iter::repeat_n(Type::Num(i as u8), n));
+        }
+        let lead_of = |t: &Type| match t {
+            Type::Reflect(i, _) => Some((false, *i)),
+            Type::Num(i) => Some((true, *i)),
+            _ => None,
+        };
+        let n = leads.len().min(sig.params.len());
         let (lead, rest) = sig.params.split_at(n);
-        let reflect_index = |t: &Type| if let Type::Reflect(i, _) = t { Some(*i) } else { None };
-        let leads_match =
-            lead.iter().map(reflect_index).eq(reflect.iter().map(|&i| Some(i))) && !rest.iter().any(|t| reflect_index(t).is_some());
+        let leads_match = lead.iter().map(lead_of).eq(leads.iter().map(lead_of)) && !rest.iter().any(|t| lead_of(t).is_some());
         if leads_match {
             let mark = self.diags.len();
             let want: Option<Vec<TypeId>> = rest.iter().map(|t| self.host_type(t, generics, &owner, span)).collect();
@@ -1918,11 +1986,7 @@ impl Checker {
         let names: Vec<String> = generics.iter().map(|&p| self.name(self.params[p as usize].name).to_string()).collect();
         let show_rust =
             |t: &Type| t.render_with(&module, &|i| names.get(i as usize).cloned().unwrap_or_else(|| format!("<type parameter {i}>")));
-        let mut declared: Vec<String> = generics
-            .iter()
-            .filter(|&&p| self.params[p as usize].reflect)
-            .map(|&p| format!("<description of {}>", self.name(self.params[p as usize].name)))
-            .collect();
+        let mut declared: Vec<String> = leads.iter().map(show_rust).collect();
         declared.extend(params.iter().map(|p| self.show(p.ty)));
         let rust: Vec<String> = sig.params.iter().map(show_rust).collect();
         let msg = format!(
@@ -1940,7 +2004,7 @@ impl Checker {
         let mut required = vec![Bounds::NONE; generics.len()];
         for t in sig.params.iter().chain([&sig.ret]) {
             t.visit(&mut |t| {
-                if let Type::Param(i, b) = t
+                if let Type::Param(i, b, _) = t
                     && let Some(r) = required.get_mut(*i as usize)
                 {
                     *r = r.union(*b);
@@ -1953,6 +2017,7 @@ impl Checker {
                 eq: need.eq && !info.has_bound(Bound::Eq),
                 ord: need.ord && !info.has_bound(Bound::Ord),
                 hash: need.hash && !info.has_bound(Bound::Hash),
+                num: need.num && !info.has_bound(Bound::Num),
             };
             if missing != Bounds::NONE {
                 let name = self.name(info.name).to_string();
@@ -2285,8 +2350,8 @@ impl Checker {
             let pt = self.param_ty(p);
             dicts.extend(self.params[p as usize].traits.iter().map(|&tr| (pt, tr)));
         }
-        if f.is_native && !dicts.is_empty() {
-            self.error(f.name.span, "native functions cannot have trait bounds");
+        if f.is_native && dicts.iter().any(|(_, tr)| Some(tr.trait_id) != self.num_trait) {
+            self.error(f.name.span, "native functions cannot have trait bounds other than built-in bounds");
         }
         let name = self.sym(&f.name.name);
         let id = self.add_fn(FnInfo {

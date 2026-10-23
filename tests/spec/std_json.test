@@ -403,7 +403,41 @@ let a = yaml!({})
 --- error
 1: unknown macro `yaml!`; the only macro is `json!`
 
-=== json macro value without a json form fails
+=== json macro value without a json form is an error
 let a = json!({"f": (x: int) => x})
+--- error
+1: JSON cannot represent values of type `fn(int) -> int`
+
+=== encode rejects functions at compile time
+import json
+struct Job { name: str, run: fn() -> int }
+print(json.encode([Job { name: "a", run: () => 1 }]))
+--- error
+3: JSON cannot represent values of type `fn() -> int`
+
+=== to_json rejects tasks at compile time
+import json
+let t = spawn 1
+print(json.to_json(Some(t)))
+--- error
+3: JSON cannot represent values of type `Task<int>`
+
+=== encode through a type parameter aborts on functions
+import json
+fn dump<T>(x: T) -> str {
+    json.encode(x)
+}
+print(dump((1, "a")))
+print(dump(() => 1))
 --- fail
 cannot encode a function as JSON
+
+=== decode into json.Json parses untyped JSON
+import json
+let j: json.Json = json.decode("{\"a\": [1, 2.5, null]}")?
+print(j)
+let js: [json.Json] = json.decode("[true, \"x\"]")?
+print(js)
+--- stdout
+Obj(["a": Arr([Int(1), Float(2.5), Null])])
+[Bool(true), Str("x")]

@@ -1,7 +1,7 @@
 //! Value conversion between Sand and Rust.
 
 use super::func::{Later, NativeError};
-use super::ty::{Never, Param, Reflect, ReflectCheck, SandType, Val, bound::ParamBounds};
+use super::ty::{Never, Num, Param, Reflect, ReflectCheck, SandType, Val, bound::ParamBounds};
 use crate::vm::meter::Scratch;
 use crate::vm::value::{Obj, Value, ValueType};
 use crate::vm::{Ctl, Vm};
@@ -138,7 +138,8 @@ impl IntoHostError for &str {
 }
 
 #[cold]
-pub(crate) fn mismatch<S: SandType + ?Sized>() -> Ctl {
+#[doc(hidden)]
+pub fn mismatch<S: SandType + ?Sized>() -> Ctl {
     Ctl::internal(format!("a native function expected a value of type `{}`", S::sand_type()))
 }
 
@@ -333,8 +334,8 @@ impl<T: IntoValue, E: IntoHostError> IntoValue for Result<T, E> {
             }
             Err(e) => match *e.into_host_error().0 {
                 HostErrorKind::Error { kind, message } => {
-                    vm.charge_bytes(kind.len() + message.len())?;
-                    Ok(vm.err_value(&kind, &message))
+                    let e = crate::stdlib::Error { kind, message }.into_value(vm)?;
+                    Ok(vm.err(e))
                 }
                 HostErrorKind::Abort(c) => Err(c),
             },
@@ -405,6 +406,19 @@ impl<K: for<'k> FromValue<Item<'k> = K> + Ord, V: FromValue> FromValue for BTree
     }
 }
 impl<K: IntoValue, V: IntoValue> IntoValue for BTreeMap<K, V> {
+    fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl> {
+        write_map(vm, self.len(), self)
+    }
+}
+
+impl<K: for<'k> FromValue<Item<'k> = K> + Eq + Hash, V: FromValue> FromValue for indexmap::IndexMap<K, V> {
+    type Item<'a> = indexmap::IndexMap<K, V::Item<'a>>;
+    fn from_value<'a>(vm: &'a Vm, v: Value, conv: &mut Conversion) -> Result<Self::Item<'a>, Ctl> {
+        read_map::<K, V, _>(vm, v, conv)
+    }
+}
+/// Keeps the insertion order of the entries.
+impl<K: IntoValue, V: IntoValue> IntoValue for indexmap::IndexMap<K, V> {
     fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl> {
         write_map(vm, self.len(), self)
     }
@@ -503,7 +517,7 @@ macro_rules! __value_type_impls {
     ($t:ty) => {
         impl $crate::native::SandType for $t {
             fn sand_type() -> $crate::native::Type {
-                $crate::native::Type::bound::<Self>(<Self as $crate::native::NamedType>::MODULE, <Self as $crate::native::NamedType>::NAME)
+                $crate::native::Type::bound::<Self>(::std::vec::Vec::new())
             }
         }
         impl $crate::native::FromValue for $t {
@@ -555,6 +569,16 @@ macro_rules! handle {
 handle! {
     [T: SandType + ?Sized] Val<T>,
     [const N: u8, B: ParamBounds] Param<N, B>,
+}
+
+impl<const N: u8> FromValue for Num<N> {
+    type Item<'a> = Self;
+    fn from_value(vm: &Vm, v: Value, _: &mut Conversion) -> Result<Self, Ctl> {
+        match vm.heap.get(v) {
+            Obj::Tuple(_) => Ok(Num::from_raw(v)),
+            _ => Err(mismatch::<Self>()),
+        }
+    }
 }
 
 impl<const N: u8, C: ReflectCheck> FromValue for Reflect<N, C> {

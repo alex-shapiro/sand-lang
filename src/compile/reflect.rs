@@ -20,6 +20,10 @@
 //! The work is bounded: every node built, cache lookup and key component
 //! costs a unit, at most [`MAX_DESC_NODES`] per description and
 //! [`MAX_TOTAL_DESC_NODES`] per compilation.
+//!
+//! The type arguments that [`bound::Checked`](crate::native::bound::Checked)
+//! validates are described the same way, but not passed at run time; their
+//! descriptions can contain type parameters of the calling function.
 
 use crate::check::CheckedProgram;
 use crate::check::persist::PMap;
@@ -52,6 +56,8 @@ pub(crate) struct DescCache {
     consts: PMap<Key, u32>,
     /// Reflected `(const_id, check_fn)` pairs that passed [`ReflectCheck`](crate::native::ReflectCheck).
     accepted: PMap<(u32, usize), ()>,
+    /// Type keys of the checked type arguments that passed each check.
+    checked: PMap<(Key, usize), ()>,
     /// Work done by the current compilation (reset by [`DescCache::start`]).
     total: usize,
 }
@@ -106,12 +112,44 @@ impl DescCache {
         (!failed).then_some(d)
     }
 
-    /// Runs `check` once per distinct node in `desc`.
+    /// Runs `check` on the description of the type argument `t` (see
+    /// [`DescCache::check`]); `Err(None)` if the description is too large.
+    pub(crate) fn validate(
+        &mut self,
+        cp: &CheckedProgram,
+        arena: &mut TypeArena,
+        t: TypeId,
+        check: ReflectCheckFn,
+    ) -> Result<(), Option<String>> {
+        let mut key = Vec::new();
+        type_key(arena, t, &mut key);
+        self.total = self.total.saturating_add(key.len());
+        if self.total > MAX_TOTAL_DESC_NODES {
+            return Err(None);
+        }
+        let key = (key, check as usize);
+        if self.checked.get(&key).is_some() {
+            return Ok(());
+        }
+        let desc = self.describe(cp, arena, t).ok_or(None)?;
+        Self::check_nodes(&desc, check).map_err(Some)?;
+        self.checked.insert(key, ());
+        Ok(())
+    }
+
+    /// Runs `check` once per distinct node in `desc`, the description in
+    /// constant `k`.
     pub(crate) fn check(&mut self, k: u32, desc: &TypeDesc, check: ReflectCheckFn) -> Result<(), String> {
         let key = (k, check as usize);
         if self.accepted.get(&key).is_some() {
             return Ok(());
         }
+        Self::check_nodes(desc, check)?;
+        self.accepted.insert(key, ());
+        Ok(())
+    }
+
+    fn check_nodes(desc: &TypeDesc, check: ReflectCheckFn) -> Result<(), String> {
         let mut seen: HashSet<*const TypeDesc> = HashSet::new();
         // The loop visits parents before children, so it records each enclosing
         // struct or enum in `names` before any `TypeDesc::Recur` that references it.
@@ -134,7 +172,6 @@ impl DescCache {
                 _ => {}
             }
         }
-        self.accepted.insert(key, ());
         Ok(())
     }
 }
@@ -238,6 +275,10 @@ impl Builder<'_, '_> {
             Ty::Bytes => leaf(TypeDesc::Bytes),
             Ty::Duration => leaf(TypeDesc::Duration),
             Ty::Unit => leaf(TypeDesc::Unit),
+            Ty::Range => leaf(TypeDesc::Range),
+            // Only checked type arguments contain these: the checker rejects
+            // them in `reflect` type arguments.
+            Ty::Param(_) | Ty::Var(_) | Ty::Error => leaf(TypeDesc::Param(self.show(t))),
             Ty::List(e) => {
                 let (e, l) = self.desc(e);
                 (Arc::new(TypeDesc::List(e)), l)
@@ -267,10 +308,6 @@ impl Builder<'_, '_> {
                 if d == self.cp.wk.option {
                     let (inner, l) = self.desc(self.arena.elem(args, 0));
                     return (Arc::new(TypeDesc::Option(inner)), l);
-                }
-                let def = &self.cp.types[d as usize];
-                if self.cp.name(def.name) == "Json" && self.cp.name(def.module_name) == "json" {
-                    return leaf(TypeDesc::Json);
                 }
                 self.named(t, d, args)
             }
@@ -323,7 +360,7 @@ impl Builder<'_, '_> {
                         (name_of(f.name), fd, f.const_default.clone())
                     })
                     .collect();
-                TypeDesc::Struct { id, def: d, name, fields }
+                TypeDesc::Struct { id, def: d, name, fields, rust: self.cp.rust_type(d) }
             }
             TypeDefKind::Enum { variants } => {
                 let variants = variants
@@ -342,7 +379,7 @@ impl Builder<'_, '_> {
                         (name_of(v.name), v.rt_id, payload, v.field_names.as_ref().map(|ns| ns.iter().map(|&n| name_of(n)).collect()))
                     })
                     .collect();
-                TypeDesc::Enum { id, name, variants }
+                TypeDesc::Enum { id, name, variants, rust: self.cp.rust_type(d) }
             }
             TypeDefKind::Opaque(Opaque::Value(v)) => TypeDesc::Value { name, parse: v.parse },
             TypeDefKind::Opaque(_) => TypeDesc::Unsupported(name),

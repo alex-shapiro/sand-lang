@@ -62,21 +62,13 @@ Follow-up work, roughly in priority order.
 
 ### Embedding
 
-- [ ] Support enum variant payloads in `#[derive(SandEnum)]` so native modules
-      such as `json` do not construct variant values by runtime ID.
-- [ ] Register `json.Json` through `NativeModule` instead of matching its
-      module and type name in `compile/reflect.rs`.
-- [ ] Return `SandStruct` types from the private `http` natives (`send`,
-      `read_response`, `start_upload`, `next_request`) instead of converting
-      tuples in Sand wrappers.
-- [ ] Bind the prelude `Error` type with `SandStruct` instead of constructing
-      it by runtime ID (`RtIds::error_def`, `Vm::err_value`).
-- [ ] Reject `json.encode<T>` and `json.to_json<T>` at compile time if `T`
-      contains a function, task, or channel.
-- [ ] Support `Param<N, bound::Num>` in native functions by passing the `Num`
-      trait dictionary to the native call.
-- [ ] Support generic structs (such as `Iter<T>`) and default field values in
-      `#[derive(SandStruct)]`.
+- [ ] `bound::Checked` accepts the type parameters of the caller, so
+      `json.encode(x)` in `fn f<T>(x: T)` aborts at run time if `T` is a
+      function. A built-in bound that callers must declare (as for `Hash`)
+      would move this check to compile time.
+- [ ] Allow payload-less enum variants as struct field defaults that
+      `json.decode` uses (`mode: Mode = Mode.Read`) and as
+      `#[sand(default = ...)]` values; `ConstVal` has no enum variants.
 
 ### Tooling
 

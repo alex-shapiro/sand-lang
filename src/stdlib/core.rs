@@ -1,8 +1,8 @@
 //! Natives for the prelude and the `task` module.
 
 use crate::check::ModKind;
-use crate::native::bound::{Eq as EqB, Hash as HashB, Ord as OrdB};
-use crate::native::{self, Channel, HostError, Later, NativeModule, Never, Param, Task, Val};
+use crate::native::bound::{Eq as EqB, Hash as HashB, Num as NumB, Ord as OrdB};
+use crate::native::{self, Channel, HostError, Later, NativeModule, Never, Num, Param, Task, Val};
 use crate::vm::compare::{
     find_key, hash_key, set_slot, try_sort_by, try_sort_numbers, try_sort_packed, values_cmp_metered, values_eq_metered,
 };
@@ -53,10 +53,22 @@ fn nanos(d: SignedDuration) -> i64 {
     d.as_nanos() as i64
 }
 
+/// Standard error record with a machine-readable `kind` tag and human-readable
+/// `message`.
+#[derive(Clone, Debug, PartialEq, crate::SandStruct)]
+#[sand(module = "prelude")]
+pub(crate) struct Error {
+    /// Machine-readable category tag (such as `"not_found"` or `"permission_denied"`).
+    pub kind: String,
+    /// Human-readable error description.
+    pub message: String,
+}
+
 pub(crate) fn prelude() -> NativeModule {
     let mut m = NativeModule::std("prelude", ModKind::Prelude, include_str!("prelude.sand"));
     m.builtin_type("Task", "Handle to a concurrent task started with `spawn`.", &["T"]);
     m.builtin_type("Channel", "FIFO message queue for communicating between tasks (created with `task.channel`).", &["T"]);
+    m.bind::<Error>();
 
     // Globals.
     m.vm_function("print", |vm: &mut Vm, x: Param<0>| {
@@ -153,6 +165,11 @@ pub(crate) fn task() -> NativeModule {
 }
 
 fn numbers(m: &mut NativeModule) {
+    // The `Num` evidence, which natives read through `Num<N>`.
+    m.function("int.zero", || 0i64);
+    m.function("int.one", || 1i64);
+    m.function("float.zero", || 0.0f64);
+    m.function("float.one", || 1.0f64);
     m.function("int.to_float", |i: i64| i as f64);
     m.function("int.to_str_radix", |v: i64, radix: i64| -> Result<String, Ctl> {
         if !(2..=36).contains(&radix) {
@@ -801,19 +818,19 @@ fn lists(m: &mut NativeModule) {
         let set = set_of(vm, xs.items(&vm.heap))?;
         Ok(new_set(vm, set))
     });
-    // Values are erased, so the identity (`T.zero()` / `T.one()`, from the
-    // `Num` evidence of the caller) is passed in: an empty `[float]` sums to 0.0.
-    fn fold_num(vm: &mut Vm, xs: List, init: Param<0>, product: bool) -> Result<Param<0>, Ctl> {
+    // Values are erased, so the identity (`T.zero()` or `T.one()`) comes from
+    // the `Num` evidence: an empty `[float]` sums to 0.0.
+    fn fold_num(vm: &mut Vm, num: Num<0>, xs: List<Param<0, NumB>>, product: bool) -> Result<Param<0>, Ctl> {
         produce(vm, list_len(vm, xs), 0)?;
+        let mut acc = if product { num.one(vm)? } else { num.zero(vm)? }.raw();
         let items = xs.items(&vm.heap).to_vec();
-        let mut acc = init.raw();
         for x in items {
             acc = vm.arith(if product { 2 } else { 0 }, acc, x)?;
         }
         Ok(Param::from_raw(acc))
     }
-    m.vm_function("List.sum_from", |vm: &mut Vm, xs: List, init: Param<0>| fold_num(vm, xs, init, false));
-    m.vm_function("List.product_from", |vm: &mut Vm, xs: List, init: Param<0>| fold_num(vm, xs, init, true));
+    m.vm_function("List.sum", |vm: &mut Vm, num: Num<0>, xs: List<Param<0, NumB>>| fold_num(vm, num, xs, false));
+    m.vm_function("List.product", |vm: &mut Vm, num: Num<0>, xs: List<Param<0, NumB>>| fold_num(vm, num, xs, true));
     fn extreme(vm: &mut Vm, xs: List<Param<0, OrdB>>, want: Ordering) -> Result<Option<Param<0>>, Ctl> {
         let items = xs.items(&vm.heap);
         let mut best: Option<Value> = None;

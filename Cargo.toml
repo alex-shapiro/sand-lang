@@ -34,6 +34,7 @@ md-5 = { version = "0.11", default-features = false }
 hmac = { version = "0.13", default-features = false }
 getrandom = "0.4"
 hashbrown = { version = "0.16", default-features = false, features = ["inline-more"] }
+indexmap = { version = "2", default-features = false, features = ["std"] }
 compact_str = { version = "0.9", default-features = false }
 jiff = { version = "0.2.38", default-features = false, features = ["std", "tzdb-bundle-always", "perf-inline"] }
 

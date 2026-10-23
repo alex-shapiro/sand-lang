@@ -16,7 +16,7 @@ mod http_server;
 #[cfg(all(web, not(feature = "os")))]
 mod http_web;
 mod io;
-mod json;
+pub(crate) mod json;
 pub(crate) mod log;
 mod math;
 #[cfg(feature = "os")]
@@ -30,6 +30,7 @@ pub(crate) mod time;
 mod uri;
 mod uuid;
 
+pub(crate) use self::core::Error;
 use crate::native::NativeModule;
 #[cfg(feature = "os")]
 pub(crate) use http::Pool as HttpPool;

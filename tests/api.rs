@@ -1041,12 +1041,18 @@ fn struct_fields_must_be_sand_identifiers() {
     }
     impl sandlang::SandType for Keyword {
         fn sand_type() -> Type {
-            Type::bound::<Self>("lab", "Keyword")
+            Type::bound::<Self>(Vec::new())
         }
     }
     impl sandlang::StructType for Keyword {
-        const FIELDS: &'static [sandlang::StructField] =
-            &[sandlang::StructField { name: "fn", doc: "", public: true, var: false, ty: <i64 as sandlang::SandType>::sand_type }];
+        const FIELDS: &'static [sandlang::StructField] = &[sandlang::StructField {
+            name: "fn",
+            doc: "",
+            public: true,
+            var: false,
+            ty: <i64 as sandlang::SandType>::sand_type,
+            default: None,
+        }];
     }
     NativeModule::new("lab").bind::<Keyword>();
 }
@@ -1149,6 +1155,415 @@ fn boxed_structs_convert_to_a_bounded_depth() {
         let Err(Error::Runtime { message, .. }) = r else { panic!("{src}: expected a runtime error, got {r:?}") };
         assert!(message.contains("value too deeply nested to convert"), "{src}: {message}");
     }
+}
+
+/// A figure in the plane.
+#[derive(Clone, Debug, PartialEq, sandlang::SandEnum)]
+#[sand(module = "draw")]
+enum Figure {
+    /// Nothing at all.
+    Empty,
+    /// A circle with its radius.
+    Circle(f64),
+    /// A rectangle.
+    Rect { w: f64, h: f64 },
+    /// A figure with a label.
+    Labeled(String, Box<Figure>),
+    /// Several figures.
+    Group(Vec<Figure>),
+}
+
+fn draw_module() -> NativeModule {
+    let mut m = NativeModule::new("draw");
+    m.bind::<Figure>();
+    fn area(f: &Figure) -> f64 {
+        match f {
+            Figure::Empty => 0.0,
+            Figure::Circle(r) => 3.0 * r * r,
+            Figure::Rect { w, h } => w * h,
+            Figure::Labeled(_, f) => area(f),
+            Figure::Group(fs) => fs.iter().map(area).sum(),
+        }
+    }
+    m.function("area", |f: Figure| area(&f));
+    m.function("echo", |f: Figure| f);
+    m.function("square", |side: f64| Figure::Labeled("square".into(), Box::new(Figure::Rect { w: side, h: side })));
+    m.function("nest", |n: i64| (0..n).fold(Figure::Empty, |f, _| Figure::Group(vec![f])));
+    m
+}
+
+#[test]
+fn host_functions_take_and_return_enums_with_payloads() {
+    let src = r#"
+import draw
+let g = draw.Figure.Group([draw.Figure.Circle(1.0), draw.Figure.Rect(w: 2.0, h: 3.0), draw.Figure.Empty])
+print(draw.area(g))
+print(draw.echo(g) == g)
+let s = draw.square(2.0)
+print(s)
+match s {
+    Labeled(name, Rect(w, h)) => print("\(name): \(w) by \(h)")
+    _ => print("other")
+}
+print(draw.area(draw.Figure.Labeled("x", draw.Figure.Circle(2.0))))
+help(draw.Figure)
+"#;
+    let (r, out, _) = run_src(Config::new().module(draw_module()), src);
+    r.unwrap();
+    let help = "enum draw.Figure\n\nA figure in the plane.\n\nVariants:\n    Empty\n        Nothing at all.\n    Circle(float)\n        A circle with its radius.\n    Rect(w: float, h: float)\n        A rectangle.\n    Labeled(str, Figure)\n        A figure with a label.\n    Group([Figure])\n        Several figures.\n";
+    assert_eq!(out, format!("9.0\ntrue\nLabeled(\"square\", Rect(2.0, 2.0))\nsquare: 2.0 by 2.0\n12.0\n{help}"));
+}
+
+#[test]
+fn enums_with_payloads_convert_to_a_bounded_depth() {
+    let run = |src: &str| run_src(Config::new().module(draw_module()), &format!("import draw\n{src}"));
+    let (r, out, _) = run("print(draw.area(draw.nest(256)))");
+    r.unwrap();
+    assert_eq!(out, "0.0\n");
+    for src in
+        ["print(draw.nest(257))", "var f = draw.Figure.Empty\nfor _ in 0..257 {\n    f = draw.Figure.Group([f])\n}\nprint(draw.area(f))"]
+    {
+        let (r, _, _) = run(src);
+        let Err(Error::Runtime { message, .. }) = r else { panic!("{src}: expected a runtime error, got {r:?}") };
+        assert!(message.contains("value too deeply nested to convert"), "{src}: {message}");
+    }
+}
+
+#[test]
+#[should_panic(expected = "field `type` of `Shape.Named` is not an identifier, or is a keyword")]
+fn enum_payload_fields_must_be_sand_identifiers() {
+    use sandlang::native::{Binding, EnumVariant, Type, VariantField};
+    struct Shape;
+    impl sandlang::NamedType for Shape {
+        const MODULE: &'static str = "lab";
+        const NAME: &'static str = "Shape";
+        const DOC: &'static str = "";
+        const PUBLIC: bool = true;
+        fn binding() -> Binding<Self> {
+            Binding::of_enum()
+        }
+    }
+    impl sandlang::SandType for Shape {
+        fn sand_type() -> Type {
+            Type::bound::<Self>(Vec::new())
+        }
+    }
+    impl sandlang::EnumType for Shape {
+        const VARIANTS: &'static [EnumVariant] = &[EnumVariant {
+            name: "Named",
+            doc: "",
+            fields: &[VariantField { name: Some("type"), ty: <i64 as sandlang::SandType>::sand_type }],
+        }];
+        fn index(&self) -> usize {
+            0
+        }
+    }
+    NativeModule::new("lab").bind::<Shape>();
+}
+
+/// A value with a label.
+#[derive(Clone, Debug, PartialEq, sandlang::SandStruct)]
+#[sand(module = "boxes")]
+struct Labeled<T> {
+    label: String,
+    /// The labeled value.
+    value: T,
+    /// Earlier values.
+    #[sand(default)]
+    history: Vec<T>,
+}
+
+/// One of two values.
+#[derive(Clone, Debug, PartialEq, sandlang::SandEnum)]
+#[sand(module = "boxes")]
+enum Either<L, R> {
+    Left(L),
+    Right(R),
+}
+
+fn boxes_module() -> NativeModule {
+    use sandlang::native::{Param, Val};
+    let mut m = NativeModule::new("boxes");
+    m.bind::<Labeled<()>>().bind::<Either<(), ()>>();
+    m.function("count", |n: i64| Labeled { label: "count".into(), value: n, history: (0..n).collect() });
+    m.function("names", || Labeled { label: "names".into(), value: vec!["a".to_string()], history: Vec::new() });
+    m.function("split", |x: i64| if x < 0 { Either::Left(x.to_string()) } else { Either::Right(x as f64) });
+    m.function("total", |l: Labeled<i64>| l.value + l.history.iter().sum::<i64>());
+    m.vm_function(
+        "relabel",
+        |_: &mut sandlang::vm::Vm, l: Labeled<Param<0>>, label: String| -> Result<Labeled<Param<0>>, sandlang::vm::Ctl> {
+            Ok(Labeled { label, ..l })
+        },
+    );
+    m.vm_function("unwrap", |vm: &mut sandlang::vm::Vm, e: Val<Either<Param<0>, Param<0>>>| -> Result<Param<0>, sandlang::vm::Ctl> {
+        Ok(Param::from_raw(vm.heap.field(e.raw(), 0).unwrap()))
+    });
+    m.source("pub native fn relabel<T>(l: Labeled<T>, label: str) -> Labeled<T>\npub native fn unwrap<T>(e: Either<T, T>) -> T");
+    m
+}
+
+#[test]
+fn generic_host_types_bind_type_parameters() {
+    let src = r#"
+import boxes
+let c = boxes.count(3)
+print(c)
+print(boxes.total(c))
+print(boxes.names().value)
+print(boxes.split(-4))
+print(boxes.split(4))
+let l = boxes.Labeled { label: "x", value: (1, "a") }
+print(boxes.relabel(l, "y"))
+let s: str = boxes.unwrap(boxes.Either.Left("left"))
+print(s)
+let e: boxes.Either<int, str> = boxes.Either.Right("r")
+match e {
+    Left(n) => print(n + 1)
+    Right(t) => print(t.len())
+}
+help(boxes.Labeled)
+help(boxes.Either)
+"#;
+    let (r, out, _) = run_src(Config::new().module(boxes_module()), src);
+    r.unwrap();
+    let help = "struct boxes.Labeled<T>\n\nA value with a label.\n\nFields:\n    label: str\n    value: T\n        The labeled value.\n    history: [T] = []\n        Earlier values.\n\
+                enum boxes.Either<L, R>\n\nOne of two values.\n\nVariants:\n    Left(L)\n    Right(R)\n";
+    let expected = [
+        "Labeled { label: \"count\", value: 3, history: [0, 1, 2] }",
+        "6",
+        "[\"a\"]",
+        "Left(\"-4\")",
+        "Right(4.0)",
+        "Labeled { label: \"y\", value: (1, \"a\"), history: [] }",
+        "left",
+        "1",
+    ];
+    assert_eq!(out, format!("{}\n{help}", expected.join("\n")));
+    let (r, _, _) = run_src(Config::new().module(boxes_module()), "import boxes\nlet l: boxes.Labeled<str> = boxes.count(1)");
+    let Err(Error::Compile(ds)) = r else { panic!("expected a type error, got {r:?}") };
+    assert!(ds[0].message.contains("expected Labeled<str>, found Labeled<int>"), "{ds:?}");
+}
+
+#[test]
+fn generic_host_types_bind_once_for_every_instance() {
+    let errors =
+        std::panic::catch_unwind(|| NativeModule::new("boxes").bind::<Labeled<i64>>().bind::<Labeled<String>>().name().to_string());
+    let msg = errors.unwrap_err();
+    let msg = msg.downcast_ref::<String>().unwrap();
+    assert!(msg.contains("type `Labeled` is registered twice in module `boxes`"), "{msg}");
+}
+
+/// Settings with defaults.
+#[derive(Clone, Debug, PartialEq, sandlang::SandStruct)]
+#[sand(module = "conf")]
+struct Settings {
+    name: String,
+    #[sand(default = 8080)]
+    port: i64,
+    #[sand(default)]
+    verbose: bool,
+    #[sand(default = "info")]
+    level: String,
+    #[sand(default = sandlang::jiff::SignedDuration::from_secs(30))]
+    timeout: sandlang::jiff::SignedDuration,
+    #[sand(default)]
+    tags: HashMap<String, String>,
+    #[sand(default)]
+    parent: Option<Box<Settings>>,
+    #[sand(default = -0.5)]
+    ratio: f64,
+}
+
+#[test]
+fn rust_field_defaults_fill_struct_literals_and_decoded_json() {
+    let mut m = NativeModule::new("conf");
+    m.bind::<Settings>();
+    m.function("port", |s: Settings| s.port);
+    let src = r#"
+import conf
+import json
+let s = conf.Settings { name: "a" }
+print(s)
+print(conf.port(conf.Settings { name: "b", port: 1 }))
+let d: conf.Settings = json.decode("{\"name\": \"c\", \"verbose\": true}")?
+print(d)
+help(conf.Settings)
+"#;
+    let (r, out, _) = run_src(Config::new().module(m), src);
+    r.unwrap();
+    let s = "Settings { name: \"a\", port: 8080, verbose: false, level: \"info\", timeout: 30s, tags: [:], parent: None, ratio: -0.5 }";
+    let d = "Settings { name: \"c\", port: 8080, verbose: true, level: \"info\", timeout: 30s, tags: [:], parent: None, ratio: -0.5 }";
+    let help = "struct conf.Settings\n\nSettings with defaults.\n\nFields:\n    name: str\n    port: int = 8080\n    verbose: bool = false\n    level: str = \"info\"\n    timeout: duration = 30s\n    tags: [str: str] = [:]\n    parent: Settings? = None\n    ratio: float = -0.5\n";
+    assert_eq!(out, format!("{s}\n1\n{d}\n{help}"));
+}
+
+#[test]
+#[should_panic(expected = "the default of field `xs` of `Bad` is not a Sand constant")]
+fn rust_field_defaults_must_be_sand_constants() {
+    #[derive(sandlang::SandStruct)]
+    #[sand(module = "lab")]
+    struct Bad {
+        #[sand(default = vec![1])]
+        xs: Vec<i64>,
+    }
+    NativeModule::new("lab").bind::<Bad>();
+}
+
+#[test]
+fn natives_take_num_evidence() {
+    use sandlang::native::{Num, Param, Val, bound};
+    use sandlang::vm::{Ctl, Vm};
+    let module = |decl: &str| {
+        let mut m = NativeModule::new("nums");
+        m.vm_function("total", |vm: &mut Vm, num: Num<0>, xs: Val<Vec<Param<0, bound::Num>>>| -> Result<Param<0>, Ctl> {
+            let mut acc = num.zero(vm)?.raw();
+            for &x in xs.items(&vm.heap) {
+                acc = match (acc, x) {
+                    (sandlang::Value::Int(a), sandlang::Value::Int(b)) => sandlang::Value::Int(a + b),
+                    (sandlang::Value::Float(a), sandlang::Value::Float(b)) => sandlang::Value::Float(a + b),
+                    _ => return Err(Ctl::internal("not a number")),
+                };
+            }
+            Ok(Param::from_raw(acc))
+        });
+        m.vm_function("unit", |vm: &mut Vm, num: Num<1>, _: Param<0>, _: Param<1>| num.one(vm));
+        m.source(decl);
+        m
+    };
+    let decls = "pub native fn total<T: Num>(xs: [T]) -> T\npub native fn unit<A, B: Num>(a: A, b: B) -> B";
+    let src = r#"
+import nums
+print(nums.total([1, 2, 3]))
+print(nums.total([0.5, 0.25]))
+let empty: [float] = []
+print(nums.total(empty))
+fn twice<T: Num>(xs: [T]) -> T {
+    nums.total(xs) + nums.total(xs)
+}
+print(twice([2, 3]))
+print(twice([1.5]))
+print(nums.unit("a", 7.0))
+print(nums.unit(true, 7))
+let f: fn([int]) -> int = nums.total
+print(f([4, 5]))
+print([1.5, 2.5].sum())
+print([1, 2, 3].product())
+let none: [float] = []
+print(none.product())
+"#;
+    let (r, out, _) = run_src(Config::new().module(module(decls)), src);
+    r.unwrap();
+    assert_eq!(out, "6\n0.75\n0.0\n10\n3.0\n1.0\n1\n9\n4.0\n6\n1.0\n");
+
+    let cases = [
+        (
+            "pub native fn total<T>(xs: [T]) -> T\npub native fn unit<A, B: Num>(a: A, b: B) -> B",
+            "native function `total` is declared `fn([T]) -> T`, but its Rust function is `fn(<Num evidence of T>, [T]) -> T`",
+        ),
+        (
+            "pub native fn total<T: Num>(xs: [T]) -> T\npub native fn unit<A: Num, B: Num>(a: A, b: B) -> B",
+            "native function `unit` is declared `fn(<Num evidence of A>, <Num evidence of B>, A, B) -> B`, but its Rust function is `fn(<Num evidence of B>, A, B) -> B`",
+        ),
+        (
+            "pub native fn total<T: Num>(xs: [T]) -> T\npub native fn unit<A, B: Ord>(a: A, b: B) -> B",
+            "native function `unit` is declared `fn(A, B) -> B`, but its Rust function is `fn(<Num evidence of B>, A, B) -> B`",
+        ),
+    ];
+    for (decl, msg) in cases {
+        let errors = engine_errors(Config::new().module(module(decl)));
+        assert!(errors.iter().any(|e| e == msg), "{decl}: {errors:?}");
+    }
+
+    let mut m = NativeModule::new("nums");
+    m.function("first", |xs: Vec<Param<0, bound::Num>>| xs[0]);
+    m.source("pub native fn first<T: Ord>(xs: [T]) -> T");
+    let errors = engine_errors(Config::new().module(m));
+    assert_eq!(errors, ["native function `first` must bound `T` by `Num`, as its Rust function requires `T: Num`"]);
+}
+
+#[test]
+fn checked_type_parameters_reject_type_arguments_at_compile_time() {
+    use sandlang::native::{Param, ReflectCheck, TypeNames, bound};
+    use sandlang::vm::value::TypeDesc;
+    struct NoFloats;
+    impl ReflectCheck for NoFloats {
+        fn check(node: &TypeDesc, names: &TypeNames) -> Result<(), String> {
+            match node {
+                TypeDesc::Float => Err("no floats".into()),
+                TypeDesc::Struct { .. } => Err(format!("no structs like {}", names.format(node))),
+                _ => Ok(()),
+            }
+        }
+    }
+    let mut m = NativeModule::new("strict");
+    m.function("keep", |x: Param<0, (bound::Eq, bound::Checked<NoFloats>)>| x);
+    m.source("pub native fn keep<T: Eq>(x: T) -> T");
+    let run = |src: &str| run_src(Config::new().module(m.clone()), &format!("import strict\n{src}"));
+    let (r, out, _) = run("print(strict.keep((1, \"a\")))\nfn pass<T: Eq>(x: T) -> T {\n    strict.keep(x)\n}\nprint(pass(\"a\"))");
+    r.unwrap();
+    assert_eq!(out, "(1, \"a\")\na\n");
+    let cases = [
+        ("strict.keep((1, 2.0))", "no floats"),
+        ("struct P { x: int }\nstrict.keep(P { x: 1 })", "no structs like P"),
+        ("let f: fn(float) -> float = strict.keep", "no floats"),
+    ];
+    for (src, msg) in cases {
+        let (r, _, _) = run(src);
+        let Err(Error::Compile(ds)) = r else { panic!("{src}: expected a compile error, got {r:?}") };
+        assert_eq!(ds[0].message, msg, "{src}");
+    }
+}
+
+#[test]
+fn json_rejects_unrepresentable_types_at_compile_time() {
+    let cases = [
+        ("json.encode((x: int) => x)", "JSON cannot represent values of type `fn(int) -> int`"),
+        ("json.encode([spawn 1])", "JSON cannot represent values of type `Task<int>`"),
+        ("let c: Channel<int> = task.channel()\njson.to_json(c)", "JSON cannot represent values of type `Channel<int>`"),
+        ("let f: fn((int, fn() -> int), int) -> str = json.encode", "JSON cannot represent values of type `fn() -> int`"),
+        ("struct S { f: fn() -> int }\njson.encode(S { f: () => 1 })", "JSON cannot represent values of type `fn() -> int`"),
+        ("json.to_json([(1, Some(() => 2))])", "JSON cannot represent values of type `fn() -> int`"),
+    ];
+    for (src, msg) in cases {
+        let (r, _, _) = run_src(Config::new(), &format!("import json\n{src}"));
+        let Err(Error::Compile(ds)) = r else { panic!("{src}: expected a compile error, got {r:?}") };
+        assert_eq!(ds[0].message, msg, "{src}");
+    }
+    let src = "import json\nprint(json.encode(1..4))\nprint(json.to_json([Some(1), None]))\nfn dump<T>(x: T) -> str {\n    json.encode(x)\n}\nprint(dump([1]))\nprint(dump(() => 1))";
+    let (r, out, _) = run_src(Config::new(), src);
+    let Err(Error::Runtime { message, .. }) = r else { panic!("expected a runtime error, got {r:?}") };
+    assert_eq!(out, "[1,2,3]\nArr([Int(1), Null])\n[1]\n");
+    assert!(message.contains("cannot encode a function as JSON"), "{message}");
+}
+
+#[test]
+fn host_functions_take_and_return_json_values() {
+    use sandlang::json::Json;
+    let mut m = NativeModule::new("doc");
+    m.function("keys", |j: Json| match j {
+        Json::Obj(fields) => fields.keys().cloned().collect(),
+        _ => Vec::new(),
+    });
+    m.function("make", || {
+        let mut fields = sandlang::indexmap::IndexMap::new();
+        fields.insert("z".to_string(), Json::Int(1));
+        fields.insert("a".to_string(), Json::Arr(vec![Json::Null, Json::Bool(true), Json::Float(1.5), Json::Str("s".into())]));
+        Json::Obj(fields)
+    });
+    m.function("same", |a: Json, b: Json| a == b);
+    let src = r#"
+import doc
+import json
+print(doc.keys(json.parse("{\"b\": 1, \"a\": [2], \"c\": null}")?))
+let made = doc.make()
+print(json.encode(made))
+print(doc.same(made, json.parse(json.encode(made))?))
+print(made.get("a")?.at(2)?.as_float())
+print(doc.keys(json.Json.Null))
+"#;
+    let (r, out, _) = run_src(Config::new().module(m), src);
+    r.unwrap();
+    assert_eq!(out, "[\"b\", \"a\", \"c\"]\n{\"z\":1,\"a\":[null,true,1.5,\"s\"]}\ntrue\nSome(1.5)\n[]\n");
 }
 
 #[derive(Clone, Copy, sandlang::SandEnum)]

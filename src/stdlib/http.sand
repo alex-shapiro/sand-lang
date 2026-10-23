@@ -39,19 +39,7 @@ pub struct Response {
     }
 }
 
-/// An HTTP response with a streaming `Body`, returned by `open`. The underlying
-/// connection remains open until the body is read to completion or the `Stream`
-/// is closed.
-pub struct Stream {
-    /// HTTP status code (such as `200` or `404`).
-    pub status: int
-    /// Response headers in receipt order, with lowercase names.
-    pub headers: [(str, str)]
-    /// Streaming response body.
-    pub body: Body
-    /// Final URL after any redirects.
-    pub url: str
-
+extend Stream {
     /// Returns `true` if `status` is in `200..=299`.
     pub fn ok(self) -> bool {
         self.status >= 200 and self.status <= 299
@@ -220,14 +208,8 @@ pub fn open(
     var current_body = body
     var redirects = 0
     loop {
-        let (status, resp_headers, resp_body) = send(
-            current_method,
-            current_url,
-            current_headers,
-            current_body,
-            timeout,
-        )?
-        let response = Stream { status, headers: resp_headers, body: resp_body, url: current_url }
+        let response = send(current_method, current_url, current_headers, current_body, timeout)?
+        let status = response.status
         if not follow_redirects or not [301, 302, 303, 307, 308].contains(status) {
             return Ok(response)
         }
@@ -266,7 +248,7 @@ native fn send(
     headers: [(str, str)],
     body: bytes,
     timeout: duration,
-) -> Result<(int, [(str, str)], Body)>
+) -> Result<Stream>
 
 native fn resolve(base: str, location: str) -> Result<str>
 

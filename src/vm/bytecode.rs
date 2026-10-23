@@ -1239,20 +1239,6 @@ pub struct RtIds {
     pub none: u32,
     pub ok: u32,
     pub err: u32,
-    pub error_def: u32,
-    pub json: Option<JsonIds>,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct JsonIds {
-    pub def: u32,
-    pub null: u32,
-    pub bool_: u32,
-    pub int: u32,
-    pub float: u32,
-    pub str_: u32,
-    pub arr: u32,
-    pub obj: u32,
 }
 
 /// A compiled program, shared by `Arc`. It is immutable once built, except
@@ -1265,11 +1251,13 @@ pub struct Program {
     pub global_names: Vec<String>,
     pub types: Vec<StructRt>,
     pub variants: Vec<VariantRt>,
-    /// Maps each registered [`EnumType`](crate::EnumType) `TypeId` to the
-    /// runtime ID of its first variant. Subsequent variants have consecutive IDs.
+    /// Maps the [`NamedType::rust_type`](crate::NamedType::rust_type) of each
+    /// registered [`EnumType`](crate::EnumType) to the runtime ID of its first
+    /// variant. Subsequent variants have consecutive IDs.
     pub enum_types: FxHashMap<std::any::TypeId, u32>,
-    /// Maps each registered [`StructType`](crate::native::StructType) `TypeId`
-    /// to its runtime struct ID.
+    /// Maps the [`NamedType::rust_type`](crate::NamedType::rust_type) of each
+    /// registered [`StructType`](crate::native::StructType) to its runtime
+    /// struct ID.
     pub struct_types: FxHashMap<std::any::TypeId, u32>,
     pub ids: RtIds,
     pub entry: u32,

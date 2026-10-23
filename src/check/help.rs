@@ -95,7 +95,7 @@ impl Checker {
             panic!("the prelude is missing `print`")
         };
         let args = vec![HArg::Expr(mk(HKind::Str(text), TypeId::STR, span))];
-        mk(HKind::CallNative { native, args, reflect: vec![] }, TypeId::UNIT, span)
+        mk(HKind::CallNative { native, args, reflect: vec![], checks: vec![] }, TypeId::UNIT, span)
     }
 
     // ------------------------------------------------------------------
@@ -692,7 +692,7 @@ impl Checker {
                 .filter(|f| self.visible(def.module, f.is_pub))
                 .map(|f| {
                     let var = if f.mutable { "var " } else { "" };
-                    let default = f.default.map(|h| format!(" = {}", self.source_text(self.fns[h as usize].span))).unwrap_or_default();
+                    let default = self.default_text(f);
                     (
                         format!("{}{var}{}: {}{default}", self.pub_mark(def.module, f.is_pub), self.name(f.name), self.show(f.ty)),
                         f.doc.clone(),
@@ -977,6 +977,15 @@ impl Checker {
         };
         bounds.extend(info.traits.iter().filter(visible).map(|tr| self.show_trait(tr)));
         bounds.join(" + ")
+    }
+
+    /// ` = <default>` for a field with a default, or `""`.
+    pub(super) fn default_text(&self, f: &FieldDef) -> String {
+        match (f.default, &f.const_default) {
+            (Some(h), _) => format!(" = {}", self.source_text(self.fns[h as usize].span)),
+            (None, Some(c)) => format!(" = {}", c.sand_text()),
+            (None, None) => String::new(),
+        }
     }
 
     pub(super) fn source_text(&self, span: Span) -> String {

@@ -241,7 +241,10 @@ pub enum HKind {
     CallNative {
         native: u32,
         args: Vec<HArg>,
+        /// The `reflect` type arguments, whose descriptions precede `args`.
         reflect: Vec<TypeId>,
+        /// The type arguments validated at compile time (`bound::Checked`).
+        checks: Vec<(TypeId, crate::native::ReflectCheckFn)>,
     },
     CallValue {
         callee: Box<HExpr>,
@@ -476,9 +479,10 @@ impl HExpr {
                 }
             }
             HKind::Call { args, .. } | HKind::CallTrait { args, .. } => args_parts(args, f),
-            HKind::CallNative { args, reflect, .. } => {
+            HKind::CallNative { args, reflect, checks, .. } => {
                 args_parts(args, f);
                 reflect.iter_mut().for_each(|t| f(Part::Type(t)));
+                checks.iter_mut().for_each(|(t, _)| f(Part::Type(t)));
             }
             HKind::CallValue { callee, args } => {
                 e(callee);

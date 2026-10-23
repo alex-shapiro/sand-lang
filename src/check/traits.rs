@@ -525,6 +525,10 @@ impl Checker {
             }
             let at = DeclPath { item, method: j as u32 };
             let f = self.declare_fn(m, at, rules, Some(ctor), &scope, Some(target));
+            // Natives read `Num` evidence by calling its methods (`native::Num`).
+            if Some(tid) == self.num_trait && !m.is_native {
+                self.error(m.name.span, "the methods of a `Num` impl must be native");
+            }
             self.fns[f as usize].impl_of = Some(id);
             self.check_impl_method(id, slot as u32, f, m);
             slots[slot] = Some(f);
@@ -836,6 +840,7 @@ impl Checker {
         let fi = &self.fns[f as usize];
         let kind = match fi.kind {
             FnKind::TraitMethod(trait_id, slot) => HKind::CallTrait { trait_id, slot, args, impl_id: None },
+            FnKind::Native(native) => HKind::CallNative { native, args, reflect: vec![], checks: self.native_checks(native, &inst.fresh) },
             _ => HKind::Call { func: f, args },
         };
         let name = self.name(fi.name).to_string();

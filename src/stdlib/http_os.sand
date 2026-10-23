@@ -19,10 +19,7 @@ extend Server {
     /// are read concurrently across connections, and the request body is
     /// streamed on demand. Connections that do not send a complete request
     /// header within 30 seconds receive `408 Request Timeout`.
-    pub fn accept(self) -> Result<Request> {
-        let (method, path, query, headers, body, conn, exchange) = next_request(self)?
-        Ok(Request { method, path, query, headers, body, conn, exchange })
-    }
+    pub native fn accept(self) -> Result<Request>
 
     /// Returns the bound local address.
     pub native fn addr(self) -> net.SocketAddr
@@ -32,23 +29,7 @@ impl Close for Server {
     native fn close(self)
 }
 
-/// An incoming HTTP request received by a `Server`. Header names are normalized
-/// to lowercase.
-pub struct Request {
-    /// HTTP request method (such as `"GET"` or `"POST"`).
-    pub method: str
-    /// Request path before `?`.
-    pub path: str
-    /// Raw query string after `?` (or `""` if absent).
-    pub query: str
-    /// Request headers in receipt order, with lowercase names.
-    pub headers: [(str, str)]
-    /// Streaming request body (`read_all`, `bytes`, `text`, and `json` enforce `max_http_body`).
-    pub body: Body
-    /// Underlying client connection.
-    pub conn: net.Conn
-    exchange: Exchange
-
+extend Request {
     /// Sends a complete HTTP response with `status`, `body`, and `headers`, and
     /// closes the request.
     pub fn respond(self, status: int, body: bytes, headers: [(str, str)] = []) -> Result<()> {
@@ -144,31 +125,20 @@ impl Close for Reply {
 /// io.copy(src, up)?
 /// use resp = up.finish()?
 /// ```
-pub fn upload(
+pub native fn upload(
     method: str,
     url: str,
     headers: [(str, str)] = [],
     timeout: duration = 30s,
-) -> Result<Upload> {
-    let (conn, body) = start_upload(method, url, headers, timeout)?
-    Ok(Upload { url, conn, body, head_only: method.to_upper() == "HEAD", timeout })
-}
+) -> Result<Upload>
 
-/// An in-progress streaming HTTP request returned by `upload`.
-pub struct Upload {
-    url: str
-    conn: net.Conn
-    body: Outgoing
-    head_only: bool
-    timeout: duration
-
+extend Upload {
     /// Finishes the request body and waits for the response header, returning a
     /// `Stream` for reading the response body. Fails if fewer bytes were
     /// written than declared by `Content-Length`.
     pub fn finish(self) -> Result<Stream> {
         write_body(self.conn, self.body, b"", true)?
-        let (status, headers, body) = read_response(self.conn, self.head_only, self.timeout)?
-        Ok(Stream { status, headers, body, url: self.url })
+        read_response(self)
     }
 }
 
@@ -184,13 +154,6 @@ impl Close for Upload {
     }
 }
 
-native fn start_upload(
-    method: str,
-    url: str,
-    headers: [(str, str)],
-    timeout: duration,
-) -> Result<(net.Conn, Outgoing)>
-
 native fn reply_body(
     exchange: Exchange,
     request_body: Body,
@@ -201,15 +164,7 @@ native fn reply_body(
 
 native fn write_body(conn: net.Conn, body: Outgoing, data: bytes, last: bool) -> Result<()>
 
-native fn read_response(
-    conn: net.Conn,
-    head_only: bool,
-    timeout: duration,
-) -> Result<(int, [(str, str)], Body)>
-
-native fn next_request(
-    server: Server,
-) -> Result<(str, str, str, [(str, str)], Body, net.Conn, Exchange)>
+native fn read_response(upload: Upload) -> Result<Stream>
 
 native fn write_response(
     conn: net.Conn,

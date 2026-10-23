@@ -186,15 +186,6 @@ pub enum Result<T, E> {
     }
 }
 
-/// Standard error record with a machine-readable `kind` tag and human-readable
-/// `message`.
-pub struct Error {
-    /// Machine-readable category tag (such as `"not_found"` or `"permission_denied"`).
-    pub kind: str
-    /// Human-readable error description.
-    pub message: str
-}
-
 /// Constructs an `Error` with `message` and `kind`.
 pub fn error(message: str, kind: str = "error") -> Error {
     Error { kind, message }
@@ -306,15 +297,13 @@ trait Num {
 }
 
 impl Num for int {
-    fn zero() -> int { 0 }
-
-    fn one() -> int { 1 }
+    native fn zero() -> int
+    native fn one() -> int
 }
 
 impl Num for float {
-    fn zero() -> float { 0.0 }
-
-    fn one() -> float { 1.0 }
+    native fn zero() -> float
+    native fn one() -> float
 }
 
 /// Boolean truth values (`true` and `false`).
@@ -627,8 +616,6 @@ extend<T> [T] {
     pub native fn unique(self) -> [T] where T: Hash
     /// Collects the distinct elements into a `Set<T>` in order of first appearance.
     pub native fn to_set(self) -> Set<T> where T: Hash
-    native fn sum_from(self, init: T) -> T
-    native fn product_from(self, init: T) -> T
     /// Returns the minimum element, or `None` if the list is empty.
     pub native fn min(self) -> T? where T: Ord
     /// Returns the maximum element, or `None` if the list is empty.
@@ -643,14 +630,10 @@ extend<T> [T] {
     native fn iter_next(self) -> fn() -> T?
 
     /// Returns the sum of all elements (`T.zero()` if empty).
-    pub fn sum(self) -> T where T: Num {
-        self.sum_from(T.zero())
-    }
+    pub native fn sum(self) -> T where T: Num
 
     /// Returns the product of all elements (`T.one()` if empty).
-    pub fn product(self) -> T where T: Num {
-        self.product_from(T.one())
-    }
+    pub native fn product(self) -> T where T: Num
 
     /// Applies `f` to each element and returns the results in a new list.
     pub fn map<U>(self, f: fn(T) -> U) -> [U] {

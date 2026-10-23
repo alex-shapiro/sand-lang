@@ -1,24 +1,6 @@
 //! JSON (RFC 8259) parsing, serialization, and typed conversion.
 
-/// A dynamic JSON value. Plain integers that fit in a 64-bit signed `int` parse
-/// as `Int`; all other numbers parse as `Float`. Object entries preserve
-/// insertion order.
-pub enum Json {
-    /// JSON `null`.
-    Null
-    /// JSON boolean (`true` or `false`).
-    Bool(bool)
-    /// Exact 64-bit signed integer.
-    Int(int)
-    /// IEEE-754 floating-point number.
-    Float(float)
-    /// UTF-8 string.
-    Str(str)
-    /// JSON array.
-    Arr([Json])
-    /// Insertion-ordered JSON object.
-    Obj([str: Json])
-
+extend Json {
     /// Returns the field `key` if `self` is an `Obj`, or `None` otherwise.
     pub fn get(self, key: str) -> Json? {
         match self {
@@ -119,8 +101,10 @@ pub native fn parse(text: str) -> Result<Json>
 
 /// Serializes `value` as JSON text (compact if `indent == 0`, or pretty-printed
 /// with `indent` spaces per level). Finite floats include a decimal point or
-/// exponent (`2.0`), and `NaN` or infinite floats serialize as `null`. Aborts
-/// if `value` contains a function, task, channel, or native resource.
+/// exponent (`2.0`), and `NaN` or infinite floats serialize as `null`. The
+/// compiler rejects a `T` that contains a function, task, channel, or native
+/// object. If a type parameter of the caller hides such a value, `encode`
+/// aborts.
 pub native fn encode<T>(value: T, indent: int = 0) -> str
 
 /// Parses `text` and converts it into type `T`. Missing struct fields use their
@@ -133,5 +117,6 @@ pub native fn decode<reflect T>(text: str) -> Result<T>
 /// `None` map to `Null`, `Some(x)` maps to `x`, lists, sets, and tuples map to
 /// `Arr`, `[str: V]` maps and structs map to `Obj`, unit enum variants map to
 /// `Str`, payload variants map to `{"Variant": payload}`, `bytes` maps to
-/// Base64, and `duration` maps to nanoseconds.
+/// Base64, and `duration` maps to nanoseconds. Rejects the same types as
+/// `encode`.
 pub native fn to_json<T>(value: T) -> Json

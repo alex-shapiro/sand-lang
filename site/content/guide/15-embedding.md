@@ -146,7 +146,7 @@ Sand infers the Sand function signature from the Rust parameter and return types
 | `Option<T>`                                                  | `T?`                         |
 | `Box<T>`                                                     | `T`                          |
 | `Result<T, E>`                                               | `Result<T, Error>`           |
-| `HashMap<K, V>`, `BTreeMap<K, V>`                            | `[K: V]`                     |
+| `HashMap<K, V>`, `BTreeMap<K, V>`, `IndexMap<K, V>`          | `[K: V]`                     |
 | `HashSet<T>`, `BTreeSet<T>`                                  | `Set<T>`                     |
 | `jiff::SignedDuration`                                       | `duration`                   |
 | tuples of up to 8 elements                                   | tuples                       |
@@ -161,30 +161,32 @@ Returning `Err(HostError::new(kind, message))` produces a Sand `Err(Error)` with
 
 Each derive macro (`SandEnum`, `SandStruct`, `SandObject`, `SandValue`) binds a Rust type to a Sand type in the module specified by `#[sand(module = "...")]`. Register each bound type with `NativeModule::bind`. Do not redeclare a bound type in `NativeModule::source`; use `extend` to add Sand methods to it. Optional type attributes override the Sand name (`#[sand(name = "Kind")]`), make the type private to its module (`#[sand(private)]`), or specify a renamed `sandlang` dependency (`#[sand(crate = my_sandlang)]`).
 
-Derive `SandEnum` on a unit-only Rust enum to pass enum values between Rust and Sand:
+Derive `SandEnum` on a Rust enum to pass enum values between Rust and Sand:
 
 ```rust
 use sandlang::{NativeModule, SandEnum};
 
 /// A two-dimensional shape.
-#[derive(Clone, Copy, SandEnum)]
+#[derive(SandEnum)]
 #[sand(module = "geo")]
 enum Shape {
-    Circle,
-    Square,
+    Circle(f64),
+    Rect { w: f64, h: f64 },
+    Empty,
 }
 
 let mut geo = NativeModule::new("geo");
 geo.bind::<Shape>();
-geo.function("sides", |s: Shape| match s {
-    Shape::Circle => 0,
-    Shape::Square => 4,
+geo.function("area", |s: Shape| match s {
+    Shape::Circle(r) => std::f64::consts::PI * r * r,
+    Shape::Rect { w, h } => w * h,
+    Shape::Empty => 0.0,
 });
 ```
 
-The engine generates the `pub enum Shape` declaration in `geo` from the Rust variants and doc comments, so scripts can call `geo.sides(geo.Shape.Square)`.
+The engine generates the `pub enum Shape` declaration in `geo` from the Rust variants and doc comments, so scripts can call `geo.area(geo.Shape.Rect(w: 2.0, h: 3.0))`.
 
-Derive `SandStruct` on a Rust struct with named fields to copy struct values between Rust and Sand. Fields are `pub` and immutable by default; annotate a field with `#[sand(private)]` to make it private, `#[sand(var)]` to make it mutable, or `#[sand(name = "kind")]` to override its Sand name:
+Derive `SandStruct` on a Rust struct with named fields to copy struct values between Rust and Sand. Fields are `pub` and immutable by default; annotate a field with `#[sand(private)]` to make it private, `#[sand(var)]` to make it mutable, `#[sand(name = "kind")]` to override its Sand name, or `#[sand(default)]` (`#[sand(default = 1.0)]`) to give it a default value:
 
 ```rust
 use sandlang::{NativeModule, SandStruct};
@@ -196,6 +198,7 @@ struct Point {
     /// Horizontal coordinate.
     x: f64,
     /// Vertical coordinate.
+    #[sand(default)]
     y: f64,
 }
 
@@ -205,7 +208,7 @@ geo.function("mid", |a: Point, b: Point| Point { x: (a.x + b.x) / 2.0, y: (a.y +
 geo.function("Point.norm", |p: Point| (p.x * p.x + p.y * p.y).sqrt());
 ```
 
-Scripts construct and access `Point` like any Sand struct (`geo.mid(geo.Point { x: 0.0, y: 0.0 }, b).norm()`). Recursive structs can reference themselves through `Vec<T>`, maps, or `Option<Box<T>>`; conversion aborts with a `"limit"` error if struct nesting exceeds 256 levels.
+Scripts construct and access `Point` like any Sand struct (`geo.mid(geo.Point { x: 0.0 }, b).norm()`). The type parameters of a generic enum or struct become Sand type parameters; register the type with any instance (`bind::<Pair<(), ()>>()`). Recursive types can reference themselves through `Vec<T>`, maps, or `Box<T>`; conversion aborts with a `"limit"` error if nesting exceeds 256 levels.
 
 Derive `SandObject` on a Rust type to expose opaque reference handles to scripts. Registered functions borrow an object parameter as `&T` and return a new object by value as `T`; scripts compare object handles by identity:
 
@@ -257,7 +260,7 @@ Err(Error { kind: "permission_denied", message: "permission denied: door back" }
 
 `NativeModule::source` attaches Sand source declarations to a native module. Use `native fn` declarations in the Sand source to specify default parameter values or generic type parameters for registered functions. `Engine::new` type-checks registered modules and returns `Error::Compile` if a `native fn` declaration does not match its Rust function signature.
 
-A generic Rust function accepts values of its `N`-th type parameter as `Param<N, B>`, where `B` declares any built-in bounds (`bound::Eq`, `bound::Ord`, `bound::Hash`, or a tuple such as `(bound::Ord, bound::Hash)`) required by the Rust implementation. The corresponding `native fn` declaration in `NativeModule::source` must declare those bounds (`native fn max<T: Ord>(xs: [T]) -> T?`).
+A generic Rust function accepts values of its `N`-th type parameter as `Param<N, B>`, where `B` declares any built-in bounds (`bound::Eq`, `bound::Ord`, `bound::Hash`, `bound::Num`, or a tuple such as `(bound::Ord, bound::Hash)`) required by the Rust implementation. The corresponding `native fn` declaration in `NativeModule::source` must declare those bounds (`native fn max<T: Ord>(xs: [T]) -> T?`). For each type parameter that the declaration bounds by `Num`, the Rust function takes the evidence `Num<N>` (with `zero` and `one`) before its other parameters. `bound::Checked<C>` rejects type arguments at compile time with a `ReflectCheck` `C`, as `json.encode` rejects functions.
 
 ## Interactive sessions
 

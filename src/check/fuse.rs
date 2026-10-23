@@ -527,7 +527,7 @@ impl Checker {
         self.types[self.wk.option as usize].variants()[0].rt_id
     }
 
-    fn none_rt(&self) -> u32 {
+    pub(crate) fn none_rt(&self) -> u32 {
         self.types[self.wk.option as usize].variants()[1].rt_id
     }
 

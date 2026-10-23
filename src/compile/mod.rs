@@ -432,30 +432,10 @@ impl<'a> Compiler<'a> {
             let s = cp.syms.get(n);
             cp.types[d as usize].variants().iter().find(|v| Some(v.name) == s).map(|v| v.rt_id).unwrap_or(0)
         };
-        self.prog.ids = RtIds {
-            some: vid(wk.option, "Some"),
-            none: vid(wk.option, "None"),
-            ok: vid(wk.result, "Ok"),
-            err: vid(wk.result, "Err"),
-            error_def: wk.error,
-            json: None,
-        };
+        self.prog.ids =
+            RtIds { some: vid(wk.option, "Some"), none: vid(wk.option, "None"), ok: vid(wk.result, "Ok"), err: vid(wk.result, "Err") };
         self.prog.enum_types.extend(cp.enum_bindings.iter().copied());
         self.prog.struct_types.extend(cp.struct_bindings.iter().copied());
-        let (json, json_mod) = (cp.syms.get("Json"), cp.syms.get("json"));
-        if let Some(jd) = cp.types.iter().position(|t| Some(t.name) == json && Some(t.module_name) == json_mod) {
-            let jd = jd as u32;
-            self.prog.ids.json = Some(JsonIds {
-                def: jd,
-                null: vid(jd, "Null"),
-                bool_: vid(jd, "Bool"),
-                int: vid(jd, "Int"),
-                float: vid(jd, "Float"),
-                str_: vid(jd, "Str"),
-                arr: vid(jd, "Arr"),
-                obj: vid(jd, "Obj"),
-            });
-        }
         // Reserve protos for every new script function so calls can refer to them.
         let first = self.fn_protos.len();
         while self.fn_protos.len() < cp.fns.len() {
@@ -2079,7 +2059,14 @@ impl<'a> Compiler<'a> {
                 }
                 f.next_reg = mark;
             }
-            HKind::CallNative { native, args, reflect } => {
+            HKind::CallNative { native, args, reflect, checks } => {
+                for &(t, check) in checks {
+                    match self.descs.validate(self.cp, &mut self.arena, t, check) {
+                        Ok(()) => {}
+                        Err(Some(msg)) => self.errors.push(Diag::error(e.span, msg)),
+                        Err(None) => self.errors.push(Diag::error(e.span, "type too large to check")),
+                    }
+                }
                 if let (Some(&op @ (Inline::MapGet | Inline::MapHas)), [HArg::Expr(m), HArg::Expr(k)]) =
                     (self.inline.get(native), args.as_slice())
                     && let HKind::Tuple(items) = &k.kind

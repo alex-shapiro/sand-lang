@@ -1104,6 +1104,7 @@ pub enum TypeDesc {
     Set(Arc<TypeDesc>),
     Tuple(Vec<Arc<TypeDesc>>),
     Option(Arc<TypeDesc>),
+    Range,
     Struct {
         /// Identifies the struct instance (definition and type arguments)
         /// for `Recur`.
@@ -1111,19 +1112,28 @@ pub enum TypeDesc {
         def: u32,
         name: String,
         fields: Vec<FieldDesc>,
+        /// The [`NamedType::rust_type`](crate::NamedType::rust_type) of a
+        /// Rust-bound struct.
+        rust: Option<std::any::TypeId>,
     },
     Enum {
         id: u32,
         name: String,
         variants: Vec<VariantDesc>,
+        /// The [`NamedType::rust_type`](crate::NamedType::rust_type) of a
+        /// Rust-bound enum.
+        rust: Option<std::any::TypeId>,
     },
-    Json,
     Value {
         name: String,
         parse: ParseValue,
     },
     /// Recursive reference to the enclosing struct or enum with this `id`.
     Recur(u32),
+    /// A type parameter of the calling function. Only the descriptions that
+    /// [`bound::Checked`](crate::native::bound::Checked) validates contain it.
+    Param(String),
+    /// A function, task, channel, or native object type.
     Unsupported(String),
 }
 
@@ -1144,10 +1154,12 @@ impl TypeDesc {
             TypeDesc::Set(e) => format!("Set<{}>", e.format(recur)),
             TypeDesc::Tuple(ts) => format!("({})", list(ts)),
             TypeDesc::Option(e) => format!("{}?", e.format(recur)),
-            TypeDesc::Json => "Json".into(),
-            TypeDesc::Struct { name, .. } | TypeDesc::Enum { name, .. } | TypeDesc::Value { name, .. } | TypeDesc::Unsupported(name) => {
-                name.clone()
-            }
+            TypeDesc::Range => "Range".into(),
+            TypeDesc::Struct { name, .. }
+            | TypeDesc::Enum { name, .. }
+            | TypeDesc::Value { name, .. }
+            | TypeDesc::Param(name)
+            | TypeDesc::Unsupported(name) => name.clone(),
             TypeDesc::Recur(id) => recur(*id),
         }
     }
@@ -1170,8 +1182,9 @@ impl std::fmt::Debug for TypeDesc {
             TypeDesc::Option(e) => write!(f, "Option({e:?})"),
             TypeDesc::Struct { id, name, .. } => write!(f, "Struct({name} #{id})"),
             TypeDesc::Enum { id, name, .. } => write!(f, "Enum({name} #{id})"),
-            TypeDesc::Json => write!(f, "Json"),
+            TypeDesc::Range => write!(f, "Range"),
             TypeDesc::Value { name, .. } => write!(f, "{name}"),
+            TypeDesc::Param(name) => write!(f, "Param({name})"),
             TypeDesc::Recur(id) => write!(f, "Recur(#{id})"),
             TypeDesc::Unsupported(name) => write!(f, "Unsupported({name})"),
         }

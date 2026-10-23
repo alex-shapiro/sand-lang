@@ -9,7 +9,7 @@
 //! local JavaScript event loop and sends its result back over a channel.
 //! Dropping the receiver aborts the in-flight request.
 
-use super::http_common::{BodyReader, MemoryBody, Prepared, Response, prepare_request, response};
+use super::http_common::{BodyReader, MemoryBody, Prepared, ResponseStream, prepare_request, response};
 use super::stream::{self, IoFailure, Suspended, suspend};
 use crate::check::ModKind;
 use crate::native::{NativeModule, Val};
@@ -51,13 +51,13 @@ fn send(
     headers: Val<Vec<(String, String)>>,
     body: Val<Vec<u8>>,
     timeout: SignedDuration,
-) -> Suspended<Response> {
+) -> Suspended<ResponseStream> {
     let mut req = prepare_request(vm, method, url, headers)?;
     // The request body is held, and the response buffered, outside the heap.
     let res = vm.reserve_io(body.bytes(&vm.heap).len())?;
     req.check_policy(vm)?;
     req.apply_filter(vm)?;
-    let Prepared { method, url, headers, .. } = req;
+    let Prepared { method, text, url, headers } = req;
     let body = body.bytes(&vm.heap).to_vec();
     vm.charge_bytes(body.len())?;
     let request = Request {
@@ -74,9 +74,9 @@ fn send(
         let _abort = AbortOnDrop(id);
         done.await.unwrap_or_else(|_| Err(IoFailure::new("io", "the request was abandoned")))
     };
-    suspend(received, move |_, (status, headers, body, res)| {
+    suspend(received, move |vm, (status, headers, body, res)| {
         // The browser read the body: it stays reserved while it is read.
-        Ok(response(status, headers, BodyReader::new(Box::new(MemoryBody::new(body)), max_body, Some(res))))
+        Ok(response(vm, text, status, headers, BodyReader::new(Box::new(MemoryBody::new(body)), max_body, Some(res)))?)
     })
 }
 

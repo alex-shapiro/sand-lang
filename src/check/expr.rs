@@ -1100,8 +1100,9 @@ impl Checker {
             self.error(span, msg);
             return err(span);
         }
-        if !self.fns[f as usize].dicts.is_empty() {
-            // Partially apply the dictionaries.
+        let checked = matches!(self.fns[f as usize].kind, FnKind::Native(n) if !self.checked_params(n).is_empty());
+        if !self.fns[f as usize].dicts.is_empty() || checked {
+            // Partially apply the dictionaries; a wrapper also checks the type arguments.
             return self.wrapper_value(f, &[], span);
         }
         let inst = self.instantiate_fn_with(f, span, &[]);
@@ -1538,10 +1539,50 @@ impl Checker {
                         self.fs.reflect_checks.push((t, span));
                     }
                 }
-                mk(HKind::CallNative { native: n, args: hargs, reflect }, ret, span)
+                let checks = self.native_checks(n, &fresh);
+                mk(HKind::CallNative { native: n, args: hargs, reflect, checks }, ret, span)
             }
             _ => mk(HKind::Call { func: f, args: hargs }, ret, span),
         }
+    }
+
+    /// The type parameters (by index) that native `n` validates with
+    /// `bound::Checked`, with their checks.
+    fn checked_params(&self, n: u32) -> Vec<(u8, crate::native::ReflectCheckFn)> {
+        let mut out: Vec<(u8, crate::native::ReflectCheckFn)> = Vec::new();
+        let Some(decl) = self.natives.fns.get(n as usize) else { return out };
+        for t in decl.sig.params.iter().chain([&decl.sig.ret]) {
+            t.visit(&mut |t| {
+                if let crate::native::Type::Param(i, _, Some(c)) = *t
+                    && !out.iter().any(|&(j, d)| j == i && std::ptr::fn_addr_eq(d, c))
+                {
+                    out.push((i, c));
+                }
+            });
+        }
+        out
+    }
+
+    /// The type arguments (of an instance of native `n` with type arguments
+    /// `targs`) to validate, with their checks.
+    pub(crate) fn native_checks(&self, n: u32, targs: &[TypeId]) -> Vec<(TypeId, crate::native::ReflectCheckFn)> {
+        self.checked_params(n).into_iter().filter_map(|(i, c)| Some((*targs.get(i as usize)?, c))).collect()
+    }
+
+    /// The expression of constant `c`, of type `ty`.
+    fn const_expr(&mut self, c: &ConstVal, ty: TypeId, span: Span) -> HExpr {
+        let kind = match c {
+            ConstVal::Unit => HKind::Unit,
+            ConstVal::Bool(b) => HKind::Bool(*b),
+            ConstVal::Int(i) => HKind::Int(*i),
+            ConstVal::Float(f) => HKind::Float(*f),
+            ConstVal::Str(s) => HKind::Str(s.clone()),
+            ConstVal::Dur(d) => HKind::Dur(*d),
+            ConstVal::EmptyList => HKind::List(Vec::new()),
+            ConstVal::EmptyMap => HKind::Map(Vec::new()),
+            ConstVal::None => HKind::Tag(self.none_rt()),
+        };
+        mk(kind, ty, span)
     }
 
     fn call_variant(&mut self, d: TypeDefId, i: u32, args: &CallArgs, span: Span) -> HExpr {
@@ -1934,14 +1975,17 @@ impl Checker {
         let mut values = Vec::new();
         for (i, &given) in given.iter().enumerate() {
             let fty = self.field_type(def, i, &args);
-            let v = match (given, base_local, self.types[def as usize].fields()[i].default) {
-                (Some(l), _, _) => mk(HKind::Local(l), fty, span),
-                (None, Some(b), _) => mk(HKind::Field { obj: Box::new(mk(HKind::Local(b), sty, span)), index: i as u32 }, fty, span),
-                (None, None, Some(helper)) => {
+            let field = &self.types[def as usize].fields()[i];
+            let v = match (given, base_local, field.default, field.const_default.clone()) {
+                (Some(l), _, _, _) => mk(HKind::Local(l), fty, span),
+                (None, Some(b), _, _) => mk(HKind::Field { obj: Box::new(mk(HKind::Local(b), sty, span)), index: i as u32 }, fty, span),
+                (None, None, Some(helper), _) => {
                     // Instantiate the helper with this literal's type arguments.
                     mk(HKind::Call { func: helper, args: vec![] }, fty, span)
                 }
-                (None, None, None) => {
+                // The default of a field of a Rust-bound struct.
+                (None, None, None, Some(c)) => self.const_expr(&c, fty, span),
+                (None, None, None, None) => {
                     let def = &self.types[def as usize];
                     let msg = format!("missing field `{}` in `{}` literal", self.name(def.fields()[i].name), self.name(def.name));
                     self.error(span, msg);

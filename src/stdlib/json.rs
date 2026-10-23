@@ -9,10 +9,11 @@
 
 use super::base64;
 use crate::check::ModKind;
-use crate::native::{HostError, NativeModule, Param, Reflect, ReflectCheck, SandType, Type, TypeNames, Val};
+use crate::native::bound::Checked;
+use crate::native::{HostError, NamedType, NativeModule, Param, Reflect, ReflectCheck, TypeNames, Val, variant_index};
 use crate::syntax::lexer::is_ident;
 use crate::types::ConstVal;
-use crate::vm::bytecode::{JsonIds, Program};
+use crate::vm::bytecode::Program;
 use crate::vm::compare::{hash_key, str_hash};
 use crate::vm::heap::{Heap, Staging};
 use crate::vm::meter::{BYTES_PER_UNIT, Meter, SLOW_BYTES_PER_UNIT, Scratch};
@@ -29,11 +30,55 @@ const MAX_DEPTH: usize = 512;
 /// header), checked against the memory limit before each.
 const NODE: usize = 64;
 
-struct JsonType;
+/// A dynamic JSON value. Plain integers that fit in a 64-bit signed `int` parse
+/// as `Int`; all other numbers parse as `Float`. Object entries preserve
+/// insertion order.
+#[derive(Clone, Debug, PartialEq, crate::SandEnum)]
+#[sand(module = "json")]
+pub enum Json {
+    /// JSON `null`.
+    Null,
+    /// JSON boolean (`true` or `false`).
+    Bool(bool),
+    /// Exact 64-bit signed integer.
+    Int(i64),
+    /// IEEE-754 floating-point number.
+    Float(f64),
+    /// UTF-8 string.
+    Str(String),
+    /// JSON array.
+    Arr(Vec<Json>),
+    /// Insertion-ordered JSON object.
+    Obj(indexmap::IndexMap<String, Json>),
+}
 
-impl SandType for JsonType {
-    fn sand_type() -> Type {
-        Type::named("json", "Json", vec![])
+/// The runtime ids of `Json` and of its variants in a program.
+#[derive(Clone, Copy)]
+struct JsonIds {
+    def: u32,
+    null: u32,
+    bool_: u32,
+    int: u32,
+    float: u32,
+    str_: u32,
+    arr: u32,
+    obj: u32,
+}
+
+impl JsonIds {
+    fn of(prog: &Program) -> Result<JsonIds, Ctl> {
+        const INDEXES: [usize; 7] = [
+            variant_index::<Json>("Null"),
+            variant_index::<Json>("Bool"),
+            variant_index::<Json>("Int"),
+            variant_index::<Json>("Float"),
+            variant_index::<Json>("Str"),
+            variant_index::<Json>("Arr"),
+            variant_index::<Json>("Obj"),
+        ];
+        let Some(&first) = prog.enum_types.get(&Json::rust_type()) else { return internal("the json module is not loaded") };
+        let [null, bool_, int, float, str_, arr, obj] = INDEXES.map(|i| first + i as u32);
+        Ok(JsonIds { def: prog.variants[first as usize].def, null, bool_, int, float, str_, arr, obj })
     }
 }
 
@@ -43,10 +88,28 @@ impl ReflectCheck for Decodable {
     fn check(node: &TypeDesc, names: &TypeNames) -> Result<(), String> {
         match node {
             TypeDesc::Unsupported(name) => Err(format!("`json.decode` cannot decode values of type `{name}`")),
+            TypeDesc::Range => Err("`json.decode` cannot decode values of type `Range`".into()),
             TypeDesc::Map(k, _) if !is_map_key(k) => Err(format!("`json.decode` cannot decode map keys of type `{}`", names.format(k))),
             _ => Ok(()),
         }
     }
+}
+
+/// Accepts the types whose values `encode` and `to_json` convert: all but
+/// functions, tasks, channels, and native objects.
+struct Encodable;
+
+impl ReflectCheck for Encodable {
+    fn check(node: &TypeDesc, _: &TypeNames) -> Result<(), String> {
+        match node {
+            TypeDesc::Unsupported(name) => Err(format!("JSON cannot represent values of type `{name}`")),
+            _ => Ok(()),
+        }
+    }
+}
+
+fn is_json(t: &TypeDesc) -> bool {
+    matches!(t, TypeDesc::Enum { rust: Some(r), .. } if *r == Json::rust_type())
 }
 
 fn is_map_key(t: &TypeDesc) -> bool {
@@ -55,8 +118,9 @@ fn is_map_key(t: &TypeDesc) -> bool {
 
 pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("json", ModKind::Std, include_str!("json.sand"));
-    m.vm_function("parse", |vm: &mut Vm, text: Val<String>| -> Result<Val<JsonType>, HostError> {
-        let ids = json_ids(vm)?;
+    m.bind::<Json>();
+    m.vm_function("parse", |vm: &mut Vm, text: Val<String>| -> Result<Val<Json>, HostError> {
+        let ids = JsonIds::of(&vm.prog)?;
         let meter = &vm.meter;
         let r = vm.heap.staged(|heap, st| {
             let mut b = Build::new(heap, st, meter);
@@ -67,8 +131,8 @@ pub(crate) fn module() -> NativeModule {
         });
         into_result(r)
     });
-    m.vm_function("encode", |vm: &mut Vm, value: Param<0>, indent: i64| -> Result<Val<String>, Ctl> {
-        let ids = json_ids(vm)?;
+    m.vm_function("encode", |vm: &mut Vm, value: Param<0, Checked<Encodable>>, indent: i64| -> Result<Val<String>, Ctl> {
+        let ids = JsonIds::of(&vm.prog)?;
         let indent = indent.clamp(0, 1 << 16) as usize;
         let mut e = Encoder {
             prog: &vm.prog,
@@ -86,13 +150,14 @@ pub(crate) fn module() -> NativeModule {
     });
     m.vm_function("decode", |vm: &mut Vm, ty: Reflect<0, Decodable>, text: Val<String>| -> Result<Val<Param<0>>, HostError> {
         let desc = ty.desc(&vm.heap)?.clone();
-        let ids = vm.prog.ids;
+        let (ids, json) = (vm.prog.ids, JsonIds::of(&vm.prog)?);
         let meter = &vm.meter;
         let (r, sets) = vm.heap.staged(|heap, st| {
             let mut d = Decoder {
                 p: Parser::new(text.str(heap)),
                 b: Build::new(heap, st, meter),
                 ids,
+                json,
                 path: Vec::new(),
                 stack: Vec::new(),
                 slots: Vec::new(),
@@ -113,8 +178,8 @@ pub(crate) fn module() -> NativeModule {
         }
         into_result(r)
     });
-    m.vm_function("to_json", |vm: &mut Vm, value: Param<0>| -> Result<Val<JsonType>, Ctl> {
-        let ids = json_ids(vm)?;
+    m.vm_function("to_json", |vm: &mut Vm, value: Param<0, Checked<Encodable>>| -> Result<Val<Json>, Ctl> {
+        let ids = JsonIds::of(&vm.prog)?;
         let (prog, meter) = (&vm.prog, &vm.meter);
         let v = vm.heap.staged(|heap, st| {
             let mut c =
@@ -124,13 +189,6 @@ pub(crate) fn module() -> NativeModule {
         Ok(Val::from_raw(v))
     });
     m
-}
-
-fn json_ids(vm: &Vm) -> Result<JsonIds, Ctl> {
-    match vm.prog.ids.json {
-        Some(ids) => Ok(ids),
-        None => internal("the json module is not loaded"),
-    }
 }
 
 /// Failure while parsing or decoding.
@@ -704,6 +762,7 @@ struct Decoder<'a, 'd, 's, 'h> {
     p: Parser<'a>,
     b: Build<'a, 's, 'h>,
     ids: crate::vm::bytecode::RtIds,
+    json: JsonIds,
     /// Location of the value being decoded, for error messages.
     path: Vec<Seg<'a>>,
     /// Enclosing struct and enum types, to resolve recursive references.
@@ -930,15 +989,15 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                 self.slots.truncate(base);
                 Ok(self.b.st.alloc(Obj::Struct(*def, values.into_boxed_slice())))
             }
+            TypeDesc::Enum { .. } if is_json(t) => {
+                let ids = self.json;
+                self.p.parse_json(&mut self.b, &ids)
+            }
             TypeDesc::Enum { name, variants, .. } => {
                 self.stack.push(t);
                 let r = self.decode_enum(name, variants);
                 self.stack.pop();
                 r
-            }
-            TypeDesc::Json => {
-                let Some(ids) = self.ids.json else { return Err(Error::Ctl(Ctl::internal("the json module is not loaded"))) };
-                self.p.parse_json(&mut self.b, &ids)
             }
             TypeDesc::Recur(id) => {
                 self.b.meter.charge(1 + (self.stack.len() / LOOKUPS_PER_UNIT) as u64)?;
@@ -959,7 +1018,8 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                     Err(msg) => Err(self.fail(&msg)),
                 }
             }
-            TypeDesc::Unsupported(name) => Err(self.unsupported(&format!("values of type {name}"))),
+            TypeDesc::Range => Err(self.unsupported("values of type Range")),
+            TypeDesc::Unsupported(name) | TypeDesc::Param(name) => Err(self.unsupported(&format!("values of type {name}"))),
         }
     }
 

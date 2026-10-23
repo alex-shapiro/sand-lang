@@ -6,7 +6,7 @@ use crate::compile::{CompileInput, compile_more};
 use crate::diag::{Diag, Diagnostic, FileId, Span};
 use crate::files::{Fs, MemFs};
 use crate::modules::{ImportRef, ModuleGraph, Snapshot, Target, budget_error, native_info};
-use crate::native::{BoundKind, BoundType, NativeDecl, NativeModule, Signature, Type};
+use crate::native::{BoundType, NativeDecl, NativeModule, Signature, Type};
 use crate::platform::{Clock, Instant, SystemClock};
 use crate::policy::{Capability, Decision, Policy, PromptAnswer, Prompter};
 use crate::session::Session;
@@ -655,10 +655,7 @@ impl Registry {
         let prefix = format!("{module}.");
         let mut deps: Vec<&'static str> = Vec::new();
         let sigs = self.decls.fns.iter().filter(|d| d.key.starts_with(&prefix)).flat_map(|d| d.sig.params.iter().chain([&d.sig.ret]));
-        let fields = self.decls.types.iter().filter(|t| t.module == module).flat_map(|t| match &t.kind {
-            BoundKind::Struct(_, fields) => fields.iter().map(|f| (f.ty)()).collect(),
-            _ => Vec::new(),
-        });
+        let fields = self.decls.types.iter().filter(|t| t.module == module).flat_map(|t| t.kind.member_types());
         for t in sigs.cloned().chain(fields) {
             t.visit(&mut |t| {
                 if let Type::Named(n) = t

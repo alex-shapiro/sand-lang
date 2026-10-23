@@ -846,20 +846,6 @@ impl Vm {
         }
     }
 
-    /// Builds an `Error { kind, message }` value.
-    pub fn error_value(&mut self, kind: &str, message: &str) -> Value {
-        let k = self.heap.new_str(kind);
-        let m = self.heap.new_str(message);
-        let def = self.prog.ids.error_def;
-        self.heap.alloc(Obj::Struct(def, Box::new([k, m])))
-    }
-
-    /// `Err(Error { kind, message })`.
-    pub fn err_value(&mut self, kind: &str, message: &str) -> Value {
-        let e = self.error_value(kind, message);
-        self.err(e)
-    }
-
     /// Unpacks an Option: `Some(x)` → `Some(x)`.
     pub fn as_option(&self, v: Value) -> Option<Value> {
         if self.heap.variant_id(v) == self.prog.ids.some { self.heap.field(v, 0) } else { None }

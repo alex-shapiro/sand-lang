@@ -565,6 +565,7 @@ pub struct FieldDef {
     pub doc: Option<Arc<str>>,
 }
 
+/// A constant value: a struct field default that `json.decode` can use.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ConstVal {
     Unit,
@@ -576,6 +577,27 @@ pub enum ConstVal {
     EmptyList,
     EmptyMap,
     None,
+}
+
+impl ConstVal {
+    /// The Sand source text of the value.
+    pub fn sand_text(&self) -> String {
+        match self {
+            ConstVal::Unit => "()".into(),
+            ConstVal::Bool(b) => b.to_string(),
+            ConstVal::Int(i) => i.to_string(),
+            ConstVal::Float(f) => crate::vm::display::fmt_float(*f),
+            ConstVal::Str(s) => {
+                let mut out = String::new();
+                crate::vm::display::escape_str_debug(s, &mut out);
+                out
+            }
+            ConstVal::Dur(d) => crate::vm::display::fmt_duration(*d),
+            ConstVal::EmptyList => "[]".into(),
+            ConstVal::EmptyMap => "[:]".into(),
+            ConstVal::None => "None".into(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -657,7 +679,6 @@ pub struct WellKnown {
     pub error: TypeDefId,
     pub task: TypeDefId,
     pub channel: TypeDefId,
-    pub json: Option<TypeDefId>,
 }
 
 /// Formats types for diagnostics, signatures and help.
