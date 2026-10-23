@@ -53,8 +53,7 @@ fn unpack_time(bits: u64) -> Time {
         .expect("packed by pack_time")
 }
 
-/// Binds the `jiff` types that represent `time` values to their Sand names.
-macro_rules! jiff_names {
+macro_rules! bind_jiff_types {
     ($($rust:ty => $name:literal: $doc:literal),* $(,)?) => {$(
         impl NamedType for $rust {
             const MODULE: &'static str = "time";
@@ -69,7 +68,7 @@ macro_rules! jiff_names {
     )*};
 }
 
-jiff_names! {
+bind_jiff_types! {
     Timestamp => "Instant": "An exact point on the UTC timeline (such as `2024-03-10T07:30:00Z`).",
     DateTime => "PlainDateTime": "A calendar date and wall-clock time without a time zone (such as `2024-03-10T03:30:00`).",
     Date => "PlainDate": "A calendar date without a time zone (such as `2024-03-10`).",
@@ -735,7 +734,7 @@ fn parse<T: ValueType>(vm: &mut Vm, text: Val<String>) -> Result<T, HostError> {
 fn format(vm: &mut Vm, format: Val<String>, t: impl Into<BrokenDownTime>) -> Result<String, Ctl> {
     let format = format.str(&vm.heap);
     // Bound output size before formatting.
-    vm.check_room(format.len().saturating_mul(64))?;
+    vm.check_memory(format.len().saturating_mul(64))?;
     vm.charge_slow_bytes(format.len())?;
     strtime::format(format, t).map_err(|e| Ctl::fail("invalid", e))
 }

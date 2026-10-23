@@ -85,7 +85,7 @@ fn sample(vm: &mut Vm, rng: &mut Rng, xs: Val<Vec<Param<0>>>, k: i64) -> Result<
     let items = xs.items(&vm.heap);
     let n = items.len();
     let k = k.clamp(0, n as i64) as usize;
-    vm.check_room(k.saturating_mul(2 * std::mem::size_of::<Value>()))?;
+    vm.check_memory(k.saturating_mul(2 * std::mem::size_of::<Value>()))?;
     let mut moved: FxHashMap<usize, usize> = FxHashMap::default();
     let mut out = Vec::with_capacity(k);
     for i in 0..k {
@@ -103,7 +103,7 @@ fn bytes(vm: &mut Vm, rng: &mut Rng, n: i64) -> Result<Vec<u8>, Ctl> {
         return fail("invalid", "random.bytes: negative length");
     }
     let n = to_usize_saturating(n);
-    vm.check_room(n)?;
+    vm.check_memory(n)?;
     vm.charge_slow_bytes(n)?;
     let mut out = Vec::with_capacity(n);
     while out.len() < n {

@@ -159,7 +159,7 @@ The engine automatically exports registered functions that are not declared in `
 
 Returning `Err(HostError::new(kind, message))` produces a Sand `Err(Error)` with the given `kind` and `message`. The engine also converts `std::io::Error` into an `Error` with its standard kind, and `String` or `&str` errors into an `Error` with kind `"error"`. A function that returns `Result<T, sandlang::vm::Ctl>` has the Sand return type `T`; returning `Err(ctl)` aborts the run with a runtime error (`Ctl::fail`), a resource limit error, or an exit code.
 
-Each derive binds a Rust type to a Sand type of a module. Register the type with `NativeModule::bind`. Do not redeclare a registered type in `NativeModule::source`; add methods to it with `extend` instead. Use `#[sand(name = "Kind")]` to give the type a different Sand name, `#[sand(private)]` to make it private to its module, and `#[sand(crate = my_sandlang)]` if your crate renames the `sandlang` dependency.
+Each derive macro (`SandEnum`, `SandStruct`, `SandObject`, `SandValue`) binds a Rust type to a Sand type in the module specified by `#[sand(module = "...")]`. Register each bound type with `NativeModule::bind`. Do not redeclare a bound type in `NativeModule::source`; use `extend` to add Sand methods to it. Optional type attributes override the Sand name (`#[sand(name = "Kind")]`), make the type private to its module (`#[sand(private)]`), or specify a renamed `sandlang` dependency (`#[sand(crate = my_sandlang)]`).
 
 Derive `SandEnum` on a unit-only Rust enum to pass enum values between Rust and Sand:
 
@@ -184,7 +184,7 @@ geo.function("sides", |s: Shape| match s {
 
 The engine generates the `pub enum Shape` declaration in `geo` from the Rust variants and doc comments, so scripts can call `geo.sides(geo.Shape.Square)`.
 
-Derive `SandStruct` on a Rust struct with named fields to pass struct values between Rust and Sand. The engine copies the fields on each conversion. A field is public unless it has `#[sand(private)]`, and immutable unless it has `#[sand(var)]`. `#[sand(name = "kind")]` gives a field a different Sand name:
+Derive `SandStruct` on a Rust struct with named fields to copy struct values between Rust and Sand. Fields are `pub` and immutable by default; annotate a field with `#[sand(private)]` to make it private, `#[sand(var)]` to make it mutable, or `#[sand(name = "kind")]` to override its Sand name:
 
 ```rust
 use sandlang::{NativeModule, SandStruct};
@@ -205,7 +205,7 @@ geo.function("mid", |a: Point, b: Point| Point { x: (a.x + b.x) / 2.0, y: (a.y +
 geo.function("Point.norm", |p: Point| (p.x * p.x + p.y * p.y).sqrt());
 ```
 
-Scripts build and read the struct as any other: `geo.mid(geo.Point { x: 0.0, y: 0.0 }, b).norm()`. A struct can contain itself (`kids: Vec<Node>` or `next: Option<Box<Node>>`). If a native function takes or returns a value whose structs nest more than 256 deep, the run aborts.
+Scripts construct and access `Point` like any Sand struct (`geo.mid(geo.Point { x: 0.0, y: 0.0 }, b).norm()`). Recursive structs can reference themselves through `Vec<T>`, maps, or `Option<Box<T>>`; conversion aborts with a `"limit"` error if struct nesting exceeds 256 levels.
 
 Derive `SandObject` on a Rust type to expose opaque reference handles to scripts. Registered functions borrow an object parameter as `&T` and return a new object by value as `T`; scripts compare object handles by identity:
 
@@ -228,7 +228,7 @@ stats.function("Counter.add", |c: &Counter, n: i64| c.0.fetch_add(n, Ordering::R
 
 `NativeModule::async_function` registers an async Rust function; while its future is pending, only the calling Sand task suspends.
 
-To check a sandbox capability inside a native function, register the function with `NativeModule::vm_function` and call `Vm::require`, which returns a `"permission_denied"` error if the policy denies the request. The engine calls the function again after a permission prompt, and after it collects garbage when a memory or resource check (`Vm::check_room`, `Vm::reserve_io`, `Vm::resource_slot`) fails. So make these checks before any side effect. `Config::retry_stress(true)` fails the first of these checks in each call, so that your tests show a side effect that runs twice:
+To check a sandbox capability inside a native function, register the function with `NativeModule::vm_function` and call `Vm::require`, which returns a `"permission_denied"` error if the policy denies the request. Because the engine re-runs a `vm_function` after a permission prompt or after a garbage collection triggered by a memory or resource check (`Vm::check_memory`, `Vm::reserve_io`, `Vm::resource_slot`), check permissions and limits before performing any side effects. Enable `Config::retry_stress(true)` in tests to force the first memory or resource check in each `vm_function` call to trigger a collection and retry:
 
 ```rust
 # #[tokio::main(flavor = "current_thread")]
@@ -257,7 +257,7 @@ Err(Error { kind: "permission_denied", message: "permission denied: door back" }
 
 `NativeModule::source` attaches Sand source declarations to a native module. Use `native fn` declarations in the Sand source to specify default parameter values or generic type parameters for registered functions. `Engine::new` type-checks registered modules and returns `Error::Compile` if a `native fn` declaration does not match its Rust function signature.
 
-A generic Rust function takes the values of a type parameter as `Param<N>`. If the function compares or hashes these values, it states the bounds it needs as `Param<N, bound::Ord>` (or `bound::Eq`, `bound::Hash`, or a pair such as `(bound::Ord, bound::Hash)`), and its `native fn` declaration must give the type parameter these bounds (`native fn max<T: Ord>(xs: [T]) -> T?`).
+A generic Rust function accepts values of its `N`-th type parameter as `Param<N, B>`, where `B` declares any built-in bounds (`bound::Eq`, `bound::Ord`, `bound::Hash`, or a tuple such as `(bound::Ord, bound::Hash)`) required by the Rust implementation. The corresponding `native fn` declaration in `NativeModule::source` must declare those bounds (`native fn max<T: Ord>(xs: [T]) -> T?`).
 
 ## Interactive sessions
 

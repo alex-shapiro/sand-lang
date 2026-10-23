@@ -1,17 +1,15 @@
-//! Derive macros for `sandlang`, re-exported at the root of the `sandlang` crate.
+//! Derive macros that bind Rust types to Sand types in a `NativeModule`.
 //!
-//! Each derive binds a Rust type to a Sand type of a native module, and takes
-//! these attributes on the type:
-//! - `#[sand(module = "<module>")]` (required) sets the Sand module that owns
-//!   the type.
-//! - `#[sand(name = "<Name>")]` overrides the Sand type name (the Rust
-//!   identifier by default).
-//! - `#[sand(private)]` makes the type private to its module.
-//! - `#[sand(crate = <path>)]` sets the path of the `sandlang` crate, for a
-//!   crate that renames the dependency (`::sandlang` by default).
+//! Every derive macro requires `#[sand(module = "<module>")]` on the type and
+//! accepts these optional type attributes:
+//! - `#[sand(name = "<Name>")]`: overrides the Sand type name (defaults to the
+//!   Rust identifier).
+//! - `#[sand(private)]`: makes the type private to its module.
+//! - `#[sand(crate = <path>)]`: sets the path to the `sandlang` crate (defaults
+//!   to `::sandlang`).
 //!
-//! Doc comments become Sand documentation. `#[doc = include_str!("...")]`
-//! attributes are supported.
+//! Rust doc comments (including `#[doc = include_str!("...")]`) become Sand
+//! documentation.
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as Tokens};
@@ -20,38 +18,35 @@ use syn::ext::IdentExt;
 use syn::{Attribute, Data, DeriveInput, Error, Expr, ExprLit, Fields, Lit, LitStr, Meta, Path, parse_macro_input, parse_quote};
 
 /// Derives `NamedType`, `EnumType`, `SandType`, `FromValue`, and `IntoValue`
-/// for a unit enum, so that native functions can accept and return it.
+/// for a unit enum.
 #[proc_macro_derive(SandEnum, attributes(sand))]
 pub fn derive_sand_enum(input: TokenStream) -> TokenStream {
     expand(input, sand_enum)
 }
 
 /// Derives `NamedType`, `ObjectType`, `SandType`, `FromValue` (for `&T`), and
-/// `IntoValue` for a struct or enum, so that native functions can borrow object
-/// handles as `&T` and return new objects by value. The type must also
-/// implement `NativeObject`.
+/// `IntoValue` for an opaque host object type that implements `NativeObject`.
 #[proc_macro_derive(SandObject, attributes(sand))]
 pub fn derive_sand_object(input: TokenStream) -> TokenStream {
     expand(input, sand_object)
 }
 
 /// Derives `NamedType`, `StructType`, `SandType`, `FromValue`, and `IntoValue`
-/// for a struct with named fields, so that native functions can accept and
-/// return it as a Sand struct with the same fields. Each field type must
-/// implement `FromValue` (with an owned `Item`) and `IntoValue`.
+/// for a struct with named fields.
 ///
-/// Field attributes:
-/// - `#[sand(name = "<name>")]` overrides the Sand field name (the Rust
-///   identifier by default), for a Rust name that is a Sand keyword.
-/// - `#[sand(private)]` makes the field private to the module.
-/// - `#[sand(var)]` makes the field mutable (`var`) in Sand.
+/// Each field type must implement `IntoValue` and owned `FromValue`. Optional
+/// field attributes:
+/// - `#[sand(name = "<name>")]`: overrides the Sand field name (defaults to the
+///   Rust identifier).
+/// - `#[sand(private)]`: makes the field private to its module.
+/// - `#[sand(var)]`: makes the field mutable (`var`) in Sand.
 #[proc_macro_derive(SandStruct, attributes(sand))]
 pub fn derive_sand_struct(input: TokenStream) -> TokenStream {
     expand(input, sand_struct)
 }
 
 /// Derives `NamedType`, `SandType`, `FromValue`, and `IntoValue` for a type
-/// that implements `ValueType` by hand.
+/// that implements `ValueType`.
 #[proc_macro_derive(SandValue, attributes(sand))]
 pub fn derive_sand_value(input: TokenStream) -> TokenStream {
     expand(input, sand_value)
@@ -104,16 +99,12 @@ fn parse_type_attrs(input: &DeriveInput, derive: &str) -> syn::Result<TypeAttrs>
     Ok(TypeAttrs { module, name, public, krate, doc: doc_expr(&input.attrs) })
 }
 
-/// A constant that fails to compile, with an error at `span`, if `name` is
-/// not a Sand type or variant name (`kind` is `"type"` or `"variant"`).
-fn type_name_check(krate: &Path, kind: &str, name: &str, span: Span) -> Tokens {
+fn assert_type_name(krate: &Path, kind: &str, name: &str, span: Span) -> Tokens {
     let msg = format!("the Sand {kind} name `{name}` is not a capitalized identifier, or is a keyword");
     quote_spanned! {span=> const _: () = ::std::assert!(#krate::native::is_type_name(#name), #msg); }
 }
 
-/// Rejects `#[sand(...)]` on the variants and fields of a type whose derive
-/// takes no member attributes.
-fn no_member_attrs(data: &Data) -> syn::Result<()> {
+fn reject_member_attrs(data: &Data) -> syn::Result<()> {
     fn fields(f: &Fields) -> impl Iterator<Item = &Attribute> {
         f.iter().flat_map(|f| &f.attrs)
     }
@@ -128,10 +119,9 @@ fn no_member_attrs(data: &Data) -> syn::Result<()> {
     }
 }
 
-/// The `NamedType` implementation and the `SandType` implementation of a derived type.
 fn named_type(ty: &syn::Ident, a: &TypeAttrs, binding: Tokens) -> Tokens {
     let TypeAttrs { module, name, public, krate, doc } = a;
-    let check = type_name_check(krate, "type", &name.value(), name.span());
+    let check = assert_type_name(krate, "type", &name.value(), name.span());
     quote! {
         #check
         impl #krate::native::NamedType for #ty {
@@ -165,7 +155,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
         return Err(Error::new_spanned(ty, "`SandEnum` can only be derived for enums"));
     };
     let attrs = parse_type_attrs(input, "SandEnum")?;
-    no_member_attrs(&input.data)?;
+    reject_member_attrs(&input.data)?;
     if data.variants.is_empty() {
         return Err(Error::new_spanned(ty, "a Sand enum must have at least one variant"));
     }
@@ -178,7 +168,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
             return Err(Error::new_spanned(&v.fields, "`SandEnum` variants cannot have fields"));
         }
         let (ident, vname, vdoc) = (&v.ident, v.ident.unraw().to_string(), doc_expr(&v.attrs));
-        checks.push(type_name_check(krate, "variant", &vname, ident.span()));
+        checks.push(assert_type_name(krate, "variant", &vname, ident.span()));
         variants.push(quote! { #krate::native::EnumVariant { name: #vname, doc: #vdoc, value: #ty::#ident } });
         arms.push(quote! { #ty::#ident => #i });
     }
@@ -220,7 +210,7 @@ fn sand_object(input: &DeriveInput) -> syn::Result<Tokens> {
         return Err(Error::new_spanned(ty, "`SandObject` cannot be derived for unions"));
     }
     let attrs = parse_type_attrs(input, "SandObject")?;
-    no_member_attrs(&input.data)?;
+    reject_member_attrs(&input.data)?;
     let krate = &attrs.krate;
     let named = named_type(ty, &attrs, quote! { #krate::native::Binding::of_object() });
     let sand_type = sand_type(ty, krate);
@@ -305,7 +295,7 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
                 ty: <#fty as #krate::native::SandType>::sand_type,
             }
         });
-        reads.push(quote! { #ident: #krate::native::field_value::<#fty>(vm, fields[#i], conv)? });
+        reads.push(quote! { #ident: #krate::native::field_from_value::<#fty>(vm, fields[#i], conv)? });
         writes.push(quote! { #krate::native::IntoValue::into_value(self.#ident, vm)? });
     }
     let named = named_type(ty, &attrs, quote! { #krate::native::Binding::of_struct() });
@@ -342,7 +332,7 @@ fn sand_value(input: &DeriveInput) -> syn::Result<Tokens> {
         return Err(Error::new_spanned(ty, "`SandValue` cannot be derived for unions"));
     }
     let attrs = parse_type_attrs(input, "SandValue")?;
-    no_member_attrs(&input.data)?;
+    reject_member_attrs(&input.data)?;
     let krate = &attrs.krate;
     let named = named_type(ty, &attrs, quote! { #krate::native::Binding::of_value() });
     Ok(quote! {
@@ -351,10 +341,8 @@ fn sand_value(input: &DeriveInput) -> syn::Result<Tokens> {
     })
 }
 
-/// A `&'static str` expression for the doc comment in `attrs`: the lines of
-/// `///` comments without their first space, joined by newlines and trimmed.
-/// A `#[doc = ...]` value that is not a string literal (such as
-/// `include_str!("...")`) is included through `concat!`.
+/// Builds a compile-time `&'static str` expression from `#[doc = ...]`
+/// attributes, preserving non-literal expressions such as `include_str!(...)`.
 fn doc_expr(attrs: &[Attribute]) -> Tokens {
     let mut parts = Vec::new();
     for a in attrs {

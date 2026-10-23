@@ -864,11 +864,11 @@ impl ChannelObj {
 /// }
 /// ```
 ///
-/// Values are compared, hashed, and formatted using `Eq`, `Hash`, and
-/// `Display`, and are encoded and decoded in JSON as strings. Equal values
+/// The runtime compares, hashes, and formats values with `Eq`, `Hash`, and
+/// `Display`, and encodes and decodes them in JSON as strings. Equal values
 /// must produce identical `Display` output, and [`Self::parse`] must parse that
-/// output back into an equal value. Comparison, hashing, and formatting are
-/// not metered, so these operations must execute in constant time.
+/// output into an equal value. The runtime does not meter comparison, hashing,
+/// or formatting, so these operations must execute in constant time.
 pub trait ValueType:
     crate::native::NamedType
     + crate::native::IntoValue
@@ -1128,10 +1128,9 @@ pub enum TypeDesc {
 }
 
 impl TypeDesc {
-    /// The Sand name of the type that `self` describes. `recur` names the
-    /// enclosing struct or enum that a [`TypeDesc::Recur`] refers to.
-    pub fn name(&self, recur: &dyn Fn(u32) -> String) -> String {
-        let list = |ts: &[Arc<TypeDesc>]| ts.iter().map(|t| t.name(recur)).collect::<Vec<_>>().join(", ");
+    /// Formats the Sand type name for `self`, using `recur` to resolve [`TypeDesc::Recur`] IDs.
+    pub fn format(&self, recur: &dyn Fn(u32) -> String) -> String {
+        let list = |ts: &[Arc<TypeDesc>]| ts.iter().map(|t| t.format(recur)).collect::<Vec<_>>().join(", ");
         match self {
             TypeDesc::Int => "int".into(),
             TypeDesc::Float => "float".into(),
@@ -1140,11 +1139,11 @@ impl TypeDesc {
             TypeDesc::Bytes => "bytes".into(),
             TypeDesc::Duration => "duration".into(),
             TypeDesc::Unit => "()".into(),
-            TypeDesc::List(e) => format!("[{}]", e.name(recur)),
-            TypeDesc::Map(k, v) => format!("[{}: {}]", k.name(recur), v.name(recur)),
-            TypeDesc::Set(e) => format!("Set<{}>", e.name(recur)),
+            TypeDesc::List(e) => format!("[{}]", e.format(recur)),
+            TypeDesc::Map(k, v) => format!("[{}: {}]", k.format(recur), v.format(recur)),
+            TypeDesc::Set(e) => format!("Set<{}>", e.format(recur)),
             TypeDesc::Tuple(ts) => format!("({})", list(ts)),
-            TypeDesc::Option(e) => format!("{}?", e.name(recur)),
+            TypeDesc::Option(e) => format!("{}?", e.format(recur)),
             TypeDesc::Json => "Json".into(),
             TypeDesc::Struct { name, .. } | TypeDesc::Enum { name, .. } | TypeDesc::Value { name, .. } | TypeDesc::Unsupported(name) => {
                 name.clone()

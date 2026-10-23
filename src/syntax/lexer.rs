@@ -87,12 +87,10 @@ macro_rules! tokens {
             })
         }
 
-        /// Returns `true` if `s` is a keyword. The derive macros of `sandlang`
-        /// call this function in constants, to reject keyword names at compile
-        /// time.
+        /// Returns `true` if `s` is a Sand keyword.
         pub const fn is_keyword(s: &str) -> bool {
             let s = s.as_bytes();
-            $(if same_bytes(s, $kw_text.as_bytes()) {
+            $(if bytes_eq(s, $kw_text.as_bytes()) {
                 return true;
             })*
             false
@@ -378,7 +376,7 @@ pub const fn is_ident(s: &str) -> bool {
     true
 }
 
-const fn same_bytes(a: &[u8], b: &[u8]) -> bool {
+const fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }

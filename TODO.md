@@ -39,10 +39,9 @@ Follow-up work, roughly in priority order.
       the ratio between two input sizes in the same run).
 - [ ] The playground page is tested by hand in headless Chrome, not in CI,
       Firefox or Safari.
-- [ ] `Config::retry_stress` fails only the first check in the body of a
-      `vm_function`, so a side effect between two checks of one call is not
-      found. Run the stressed tests once for each check index that a call
-      reaches, and fail that check.
+- [ ] `Config::retry_stress` fails only the first check in a `vm_function`
+      body, so it does not detect a side effect between the first and second
+      checks. Run stressed tests for each check index reached during a call.
 - [ ] Run the `cargo fuzz` targets on a schedule (or on OSS-Fuzz). Update the
       `run` target to compare optimized and unoptimized executions.
 
@@ -67,20 +66,17 @@ Follow-up work, roughly in priority order.
       such as `json` do not construct variant values by runtime ID.
 - [ ] Register `json.Json` through `NativeModule` instead of matching its
       module and type name in `compile/reflect.rs`.
-- [ ] Return `SandStruct`s from the private `http` natives (`send`,
-      `read_response`, `start_upload`, `next_request`) instead of tuples that
-      Sand wrappers turn into `Response`, `Stream`, `Upload`, and `Request`.
-- [ ] Bind the prelude's `Error` with `SandStruct` instead of building it by
-      runtime ID (`RtIds::error_def`, `Vm::err_value`).
+- [ ] Return `SandStruct` types from the private `http` natives (`send`,
+      `read_response`, `start_upload`, `next_request`) instead of converting
+      tuples in Sand wrappers.
+- [ ] Bind the prelude `Error` type with `SandStruct` instead of constructing
+      it by runtime ID (`RtIds::error_def`, `Vm::err_value`).
 - [ ] Reject `json.encode<T>` and `json.to_json<T>` at compile time if `T`
-      contains a function, task, or channel (they abort at run time). This
-      needs a check like `ReflectCheck` for type parameters that are not
-      `reflect`.
-- [ ] Let natives require `Num` (`Param<N, bound::Num>`). A `Num` bound
-      carries a trait dictionary, and natives cannot take one, so
-      `List.sum_from` depends on the bound of its Sand caller.
-- [ ] Support generic structs (such as the prelude's `Iter<T>`) and field
-      defaults in `#[derive(SandStruct)]`.
+      contains a function, task, or channel.
+- [ ] Support `Param<N, bound::Num>` in native functions by passing the `Num`
+      trait dictionary to the native call.
+- [ ] Support generic structs (such as `Iter<T>`) and default field values in
+      `#[derive(SandStruct)]`.
 
 ### Tooling
 
@@ -104,17 +100,16 @@ Follow-up work, roughly in priority order.
       literals (`[1, "a"]`).
 - [ ] Include the `<top level>` stack frame if a failing `assert` is the
       final top-level statement.
-- [ ] `help` shows a type of another module without its module name
-      (`help(http.Request)` shows `conn: Conn`, not `conn: net.Conn`, and
-      `help(fs.Metadata)` shows `modified: Instant?`).
+- [ ] Qualify types from other modules in `help` output (for example,
+      `conn: net.Conn` in `help(http.Request)` and `modified: time.Instant?` in
+      `help(fs.Metadata)`).
 
 ### Performance
 
-- [ ] A dead string stays rooted after the function that made it returns
-      (`fn junk() -> int { "x".repeat(12_000_000).len() }`, then
-      `junk() + host.call()`): a full collection inside the native call does
-      not free it. Find the root. If the optimizer inlines `junk`, a register
-      of the current frame may still hold the string.
+- [ ] Clear dead temporaries before native calls so that inlined allocations
+      (such as `fn junk() -> int { "x".repeat(12_000_000).len() }` in
+      `junk() + host.call()`) do not remain rooted in caller frame registers
+      during garbage collection.
 - [ ] Benchmark `HostFn::Static` against `HostFn::Shared` to determine whether
       avoiding the `Arc` dereference justifies `Box::leak` and the enum
       dispatch; if not, keep only `Arc`.

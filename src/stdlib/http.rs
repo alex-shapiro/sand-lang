@@ -603,7 +603,7 @@ fn send(
     let mut req = prepare_request(vm, method, url, headers)?;
     // The request is held outside the heap while it is sent.
     let mut res = vm.reserve_io(body.bytes(&vm.heap).len())?;
-    req.allow(vm)?;
+    req.check_policy(vm)?;
     let pool = vm.host.http_pool.clone();
     let idle = pool.take(&req.url.origin());
     let slot = match idle {
@@ -614,7 +614,7 @@ fn send(
         }
     };
     let built = (|| {
-        req.filter(vm)?;
+        req.apply_filter(vm)?;
         let body = body.bytes(&vm.heap);
         vm.charge_bytes(body.len())?;
         let close = connection_has(&req.headers, "close");
@@ -735,10 +735,10 @@ fn start_upload(
 ) -> Suspended<(net::Conn, Outgoing)> {
     let mut req = prepare_request(vm, method, url, headers)?;
     let length = given_length(&req.headers).map_err(|e| HostError::new("invalid", e))?;
-    req.allow(vm)?;
+    req.check_policy(vm)?;
     let buffers = if req.url.scheme == "https" { net::CONN_BUFFER + net::TLS_BUFFERS } else { net::CONN_BUFFER };
     let slot = vm.resource_slot_with(buffers, "a connection")?;
-    req.filter(vm)?;
+    req.apply_filter(vm)?;
     let Prepared { method, text, url, headers } = req;
     let delimit = length.map_or(Delimit::Chunked, Delimit::Length);
     let head = request_head(&method, &url, &headers, delimit, true);

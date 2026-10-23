@@ -249,7 +249,6 @@ struct Match {
 }
 
 impl Match {
-    /// The match of the bytes `span` of the string `text`.
     fn new(vm: &mut Vm, text: Val<String>, span: std::ops::Range<usize>) -> Match {
         let (start, end) = (span.start as i64, span.end as i64);
         Match { text: Val::from_raw(super::core::new_substr(vm, text.raw(), span)), start, end }
@@ -263,7 +262,7 @@ impl Match {
 struct Captures {
     /// Input string that was searched.
     text: Val<String>,
-    /// `start, end` per group (`-1, -1` for a group that did not participate).
+    /// Start and end byte offsets per group (`-1, -1` if unmatched).
     #[sand(private)]
     spans: Vec<i64>,
     #[sand(private)]
@@ -273,11 +272,9 @@ struct Captures {
 /// Bytes counted per group of a match's spans (two list elements).
 const SPAN_COST: usize = 2 * std::mem::size_of::<Value>();
 
-/// Approximate heap cost of one `Captures` value without its spans (struct
-/// plus list header).
+/// Approximate heap cost of a `Captures` value excluding `spans`.
 const CAPTURES_COST: usize = 64;
 
-/// The spans of the groups of a match, as `Captures.spans` holds them.
 fn spans(caps: &Groups) -> Vec<i64> {
     let mut out = Vec::with_capacity(2 * caps.group_len());
     for i in 0..caps.group_len() {
@@ -331,7 +328,7 @@ fn replace(vm: &mut Vm, re: Val<RegexObj>, text: Val<String>, rep: Val<String>, 
             } else {
                 rep.len()
             };
-            vm.check_room(out.len().saturating_add(m.start() - last).saturating_add(added))?;
+            vm.check_memory(out.len().saturating_add(m.start() - last).saturating_add(added))?;
             out.push_str(&text[last..m.start()]);
             if expand {
                 caps.interpolate_string_into(text, rep, &mut out);
@@ -427,7 +424,7 @@ pub(crate) fn module() -> NativeModule {
             scan.search(vm, t)?;
             let m = obj.re.search_with(cache, &Input::new(t));
             scan.finish(vm)?;
-            vm.check_room(m.map_or(0, |m| m.len() + MATCH_COST))?;
+            vm.check_memory(m.map_or(0, |m| m.len() + MATCH_COST))?;
             Ok(m.map(|m| m.range()))
         })?;
         Ok(found.map(|span| Match::new(vm, text, span)))
@@ -441,7 +438,7 @@ pub(crate) fn module() -> NativeModule {
                 cost += MATCH_COST + m.len();
                 cost
             })?;
-            vm.check_room(cost)?;
+            vm.check_memory(cost)?;
             Ok(spans)
         })?;
         Ok(spans.into_iter().map(|span| Match::new(vm, text, span)).collect())
@@ -454,7 +451,7 @@ pub(crate) fn module() -> NativeModule {
             let mut caps = obj.re.create_captures();
             obj.re.search_captures_with(cache, &Input::new(t), &mut caps);
             scan.finish(vm)?;
-            vm.check_room(CAPTURES_COST + SPAN_COST * caps.group_len())?;
+            vm.check_memory(CAPTURES_COST + SPAN_COST * caps.group_len())?;
             Ok(caps.is_match().then(|| Captures { text, spans: spans(&caps), regex: re }))
         })
     });
@@ -467,7 +464,7 @@ pub(crate) fn module() -> NativeModule {
                 all.push(Captures { text, spans: spans(caps), regex: re });
                 Ok(cost)
             })?;
-            vm.check_room(cost)?;
+            vm.check_memory(cost)?;
             Ok(all)
         })
     });
@@ -493,7 +490,7 @@ pub(crate) fn module() -> NativeModule {
             spans.push((last, text.len()));
             Ok((spans, cost))
         })?;
-        vm.check_room(cost)?;
+        vm.check_memory(cost)?;
         Ok(Val::from_raw(vm.heap.staged(|heap, st| {
             let text = text.str(heap);
             let items = spans.into_iter().map(|(s, e)| st.new_str(&text[s..e])).collect();

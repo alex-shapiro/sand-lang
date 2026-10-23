@@ -226,7 +226,7 @@ let x = json.decode("1")
 
 === decode rejects types that JSON cannot represent
 import json
-struct Tree { kids: [Tree: int] }
+struct Tree { children: [Tree: int] }
 let a: Result<Tree> = json.decode("{}")
 let b: Result<[fn() -> int]> = json.decode("[]")
 --- error

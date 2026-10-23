@@ -212,9 +212,6 @@ fn persisted_inverted_index() {
     assert!(o.failure().contains("permission_denied"), "{}", o.failure());
 }
 
-/// Runs the CPU-bound examples with a garbage collection at every safe point,
-/// and with a failed first memory check in every native call, and checks that
-/// the output is unchanged.
 #[test]
 fn examples_are_unchanged_under_stress() {
     let dir = TempDir::new("gcstress");

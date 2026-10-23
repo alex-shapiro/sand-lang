@@ -50,8 +50,7 @@ pub(crate) struct DescCache {
     closed: PMap<Key, Arc<TypeDesc>>,
     /// The constant holding the description of each reflected type.
     consts: PMap<Key, u32>,
-    /// The constants (with the addresses of the checks) that a native's
-    /// [`ReflectCheck`](crate::native::ReflectCheck) accepted.
+    /// Reflected `(const_id, check_fn)` pairs that passed [`ReflectCheck`](crate::native::ReflectCheck).
     accepted: PMap<(u32, usize), ()>,
     /// Work done by the current compilation (reset by [`DescCache::start`]).
     total: usize,
@@ -106,19 +105,16 @@ impl DescCache {
         self.total = self.total.saturating_add(work);
         (!failed).then_some(d)
     }
-}
 
-impl DescCache {
-    /// Checks the description `desc` of constant `k` with `check`, calling it
-    /// once for each distinct node.
+    /// Runs `check` once per distinct node in `desc`.
     pub(crate) fn check(&mut self, k: u32, desc: &TypeDesc, check: ReflectCheckFn) -> Result<(), String> {
         let key = (k, check as usize);
         if self.accepted.get(&key).is_some() {
             return Ok(());
         }
         let mut seen: HashSet<*const TypeDesc> = HashSet::new();
-        // A node is visited before its children, so the struct or enum that a
-        // `TypeDesc::Recur` refers to is named before the `Recur` is checked.
+        // The loop visits parents before children, so it records each enclosing
+        // struct or enum in `names` before any `TypeDesc::Recur` that references it.
         let mut names = TypeNames::default();
         let mut todo = vec![desc];
         while let Some(d) = todo.pop() {

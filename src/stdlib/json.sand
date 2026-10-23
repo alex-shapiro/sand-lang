@@ -125,9 +125,8 @@ pub native fn encode<T>(value: T, indent: int = 0) -> str
 
 /// Parses `text` and converts it into type `T`. Missing struct fields use their
 /// declared default or `None`; type mismatches fail with kind `"parse"` and a
-/// JSON path diagnostic. The compiler rejects a `T` that JSON cannot represent
-/// (with functions, tasks, channels, ranges, native objects, or unsupported
-/// map keys).
+/// JSON path diagnostic. The compiler rejects types that contain functions,
+/// tasks, channels, ranges, native objects, or unsupported map keys.
 pub native fn decode<reflect T>(text: str) -> Result<T>
 
 /// Converts `value` into a `Json` value: primitives map directly, `()` and

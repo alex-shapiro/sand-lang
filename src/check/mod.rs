@@ -1211,7 +1211,7 @@ impl Checker {
         self.resolve_supertraits(&trait_ids, &trait_decls);
         // 3. Fields and variants, and the built-in bounds they satisfy.
         for (id, fields) in bound_structs {
-            self.fill_bound_struct(id, fields);
+            self.resolve_bound_struct(id, fields);
         }
         let mut k = 0;
         for (idx, item) in items.iter().enumerate() {
@@ -1570,9 +1570,6 @@ impl Checker {
         self.types[id as usize].kind = TypeDefKind::Enum { variants };
     }
 
-    /// Declares the Rust-bound types of the current module, in registration
-    /// order. Returns the structs, whose fields [`Checker::fill_bound_struct`]
-    /// resolves once all the module's types are declared.
     fn declare_bound_types(&mut self) -> Vec<(TypeDefId, &'static [StructField])> {
         let natives = self.natives.clone();
         let module = self.name(self.mods[self.cur_mod as usize].name).to_string();
@@ -1616,14 +1613,13 @@ impl Checker {
         structs
     }
 
-    /// Resolves the fields of the Rust-bound struct `id`.
-    fn fill_bound_struct(&mut self, id: TypeDefId, rust: &[StructField]) {
+    fn resolve_bound_struct(&mut self, id: TypeDefId, rust: &[StructField]) {
         let span = self.types[id as usize].span;
         let qual = format!("{}.{}", self.name(self.types[id as usize].module_name), self.name(self.types[id as usize].name));
         let mut fields = Vec::new();
         for f in rust {
-            let who = format!("the Rust field `{}` of `{qual}`", f.name);
-            let ty = self.host_type(&(f.ty)(), &[], &who, span).unwrap_or(TypeId::ERROR);
+            let owner = format!("the Rust field `{}` of `{qual}`", f.name);
+            let ty = self.host_type(&(f.ty)(), &[], &owner, span).unwrap_or(TypeId::ERROR);
             if self.types[id as usize].is_pub && f.public {
                 self.check_public_types("field", &ast::Ident { name: f.name.to_string(), span }, [ty]);
             }
@@ -1739,10 +1735,10 @@ impl Checker {
             return;
         }
         let has_self = sig.takes_self(&module, name);
-        let who = format!("the Rust function of native `{key}`");
+        let host_owner = format!("the Rust function of native `{key}`");
         let mut params = Vec::new();
         for (i, t) in sig.params.iter().enumerate() {
-            let ty = self.host_type(t, &[], &who, span).unwrap_or(TypeId::ERROR);
+            let ty = self.host_type(t, &[], &host_owner, span).unwrap_or(TypeId::ERROR);
             let name = match (i, has_self, &decl.names) {
                 (0, true, _) => self.sym("self"),
                 (_, _, Some(names)) => self.sym(&names[i - usize::from(has_self)]),
@@ -1750,7 +1746,7 @@ impl Checker {
             };
             params.push(ParamSig { name, ty, default: None });
         }
-        let ret = self.host_type(&sig.ret, &[], &who, span).unwrap_or(TypeId::ERROR);
+        let ret = self.host_type(&sig.ret, &[], &host_owner, span).unwrap_or(TypeId::ERROR);
         let ident = ast::Ident { name: fn_name.to_string(), span };
         if owner.is_none_or(|d| self.types[d as usize].is_pub) {
             self.check_public_types("function", &ident, params.iter().map(|p| p.ty).chain([ret]));
@@ -1800,9 +1796,8 @@ impl Checker {
         }
     }
 
-    /// Resolves the Rust type `t` of `who` (a native function or a struct
-    /// field, for error messages) into a [`TypeId`].
-    fn host_type(&mut self, t: &Type, generics: &[ParamId], who: &str, span: Span) -> Option<TypeId> {
+    /// Resolves a host [`Type`] from `owner` into a [`TypeId`].
+    fn host_type(&mut self, t: &Type, generics: &[ParamId], owner: &str, span: Span) -> Option<TypeId> {
         Some(match t {
             Type::Int => TypeId::INT,
             Type::Float => TypeId::FLOAT,
@@ -1814,35 +1809,35 @@ impl Checker {
             Type::Never => TypeId::NEVER,
             Type::Range => TypeId::RANGE,
             Type::List(e) => {
-                let e = self.host_type(e, generics, who, span)?;
+                let e = self.host_type(e, generics, owner, span)?;
                 self.arena.list_of(e)
             }
             Type::Set(e) => {
-                let e = self.host_type(e, generics, who, span)?;
+                let e = self.host_type(e, generics, owner, span)?;
                 self.arena.set_of(e)
             }
             Type::Map(k, v) => {
-                let (k, v) = (self.host_type(k, generics, who, span)?, self.host_type(v, generics, who, span)?);
+                let (k, v) = (self.host_type(k, generics, owner, span)?, self.host_type(v, generics, owner, span)?);
                 self.arena.map_of(k, v)
             }
             Type::Tuple(ts) => {
-                let ts = ts.iter().map(|t| self.host_type(t, generics, who, span)).collect::<Option<Vec<_>>>()?;
+                let ts = ts.iter().map(|t| self.host_type(t, generics, owner, span)).collect::<Option<Vec<_>>>()?;
                 self.arena.tuple(&ts)
             }
             Type::Fn(ps, r) => {
-                let ps = ps.iter().map(|t| self.host_type(t, generics, who, span)).collect::<Option<Vec<_>>>()?;
-                let r = self.host_type(r, generics, who, span)?;
+                let ps = ps.iter().map(|t| self.host_type(t, generics, owner, span)).collect::<Option<Vec<_>>>()?;
+                let r = self.host_type(r, generics, owner, span)?;
                 self.arena.func(&ps, r)
             }
             Type::Param(i, _) => match generics.get(*i as usize) {
                 Some(&p) => self.param_ty(p),
                 None => {
-                    self.error(span, format!("{who} uses type parameter {i}, which its declaration does not have"));
+                    self.error(span, format!("{owner} uses type parameter {i}, which its declaration does not have"));
                     return None;
                 }
             },
             Type::Reflect(..) => {
-                self.error(span, format!("{who} takes a type description that is not its first parameter"));
+                self.error(span, format!("{owner} takes a type description that is not its first parameter"));
                 return None;
             }
             Type::Named(n) => {
@@ -1855,9 +1850,9 @@ impl Checker {
                     _ => {
                         let (m, t) = (n.module, n.name);
                         let msg = match module {
-                            Some(_) => format!("{who} uses `{m}.{t}`, which module `{m}` does not declare"),
+                            Some(_) => format!("{owner} uses `{m}.{t}`, which module `{m}` does not declare"),
                             None => {
-                                format!("{who} uses `{m}.{t}`, and module `{m}` is not added to the engine")
+                                format!("{owner} uses `{m}.{t}`, and module `{m}` is not added to the engine")
                             }
                         };
                         self.error(span, msg);
@@ -1865,20 +1860,20 @@ impl Checker {
                     }
                 };
                 if module != Some(self.cur_mod) && !self.types[def as usize].is_pub {
-                    self.error(span, format!("{who} uses `{}.{}`, which is private", n.module, n.name));
+                    self.error(span, format!("{owner} uses `{}.{}`, which is private", n.module, n.name));
                     return None;
                 }
                 if n.rust.is_some() && n.rust != self.rust_type(def) {
                     let msg = format!(
-                        "{who} uses a Rust type that is not the one bound to `{}.{}`; register it with its module",
+                        "{owner} uses a Rust type that is not the one bound to `{}.{}`; register it with its module",
                         n.module, n.name
                     );
                     self.error(span, msg);
                     return None;
                 }
-                let args = n.args.iter().map(|t| self.host_type(t, generics, who, span)).collect::<Option<Vec<_>>>()?;
+                let args = n.args.iter().map(|t| self.host_type(t, generics, owner, span)).collect::<Option<Vec<_>>>()?;
                 if args.len() != self.types[def as usize].generics.len() {
-                    self.error(span, format!("{who} gives `{}.{}` the wrong number of type arguments", n.module, n.name));
+                    self.error(span, format!("{owner} gives `{}.{}` the wrong number of type arguments", n.module, n.name));
                     return None;
                 }
                 self.arena.named(def, &args)
@@ -1887,8 +1882,7 @@ impl Checker {
     }
 
     /// Verifies that a `native fn` declaration matches its registered Rust
-    /// signature, and gives each type parameter the bounds that the Rust
-    /// function requires of it.
+    /// signature and declares all required type parameter bounds.
     fn check_native_signature(
         &mut self,
         f: &ast::FnDecl,
@@ -1899,7 +1893,7 @@ impl Checker {
         ret: TypeId,
     ) {
         let span = f.name.span;
-        let who = format!("the Rust function of native `{key}`");
+        let owner = format!("the Rust function of native `{key}`");
         let reflect: Vec<u8> =
             generics.iter().enumerate().filter(|(_, p)| self.params[**p as usize].reflect).map(|(i, _)| i as u8).collect();
         let n = reflect.len().min(sig.params.len());
@@ -1909,8 +1903,8 @@ impl Checker {
             lead.iter().map(reflect_index).eq(reflect.iter().map(|&i| Some(i))) && !rest.iter().any(|t| reflect_index(t).is_some());
         if leads_match {
             let mark = self.diags.len();
-            let want: Option<Vec<TypeId>> = rest.iter().map(|t| self.host_type(t, generics, &who, span)).collect();
-            let want_ret = self.host_type(&sig.ret, generics, &who, span);
+            let want: Option<Vec<TypeId>> = rest.iter().map(|t| self.host_type(t, generics, &owner, span)).collect();
+            let want_ret = self.host_type(&sig.ret, generics, &owner, span);
             if self.diags.len() > mark {
                 return;
             }
@@ -1942,8 +1936,6 @@ impl Checker {
         self.error(span, msg);
     }
 
-    /// Reports each type parameter of a `native fn` declaration that lacks a
-    /// bound its Rust function requires (`Param<N, B>`).
     fn check_native_bounds(&mut self, f: &ast::FnDecl, sig: &Signature, generics: &[ParamId]) {
         let mut required = vec![Bounds::NONE; generics.len()];
         for t in sig.params.iter().chain([&sig.ret]) {

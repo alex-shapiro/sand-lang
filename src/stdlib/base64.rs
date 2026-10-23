@@ -18,14 +18,14 @@ pub(crate) fn module() -> NativeModule {
 
 fn encode_native(vm: &mut Vm, data: Val<Vec<u8>>, url: bool) -> Result<String, Ctl> {
     let data = data.bytes(&vm.heap);
-    vm.check_room(data.len() / 3 * 4 + 4)?;
+    vm.check_memory(data.len() / 3 * 4 + 4)?;
     vm.charge_slow_bytes(data.len())?;
     Ok(encode(data, url))
 }
 
 fn decode_native(vm: &mut Vm, text: Val<String>, url: bool) -> Result<Vec<u8>, HostError> {
     let text = text.str(&vm.heap);
-    vm.check_room(text.len() / 4 * 3 + 3)?;
+    vm.check_memory(text.len() / 4 * 3 + 3)?;
     vm.charge_slow_bytes(text.len())?;
     decode(text, url).map_err(|msg| HostError::new("parse", msg))
 }

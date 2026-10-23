@@ -37,22 +37,18 @@ impl SandType for JsonType {
     }
 }
 
-/// The types that `decode` accepts: those with a runtime description, with
-/// map keys that JSON object keys can represent.
 struct Decodable;
 
 impl ReflectCheck for Decodable {
     fn check(node: &TypeDesc, names: &TypeNames) -> Result<(), String> {
         match node {
             TypeDesc::Unsupported(name) => Err(format!("`json.decode` cannot decode values of type `{name}`")),
-            TypeDesc::Map(k, _) if !is_map_key(k) => Err(format!("`json.decode` cannot decode map keys of type `{}`", names.of(k))),
+            TypeDesc::Map(k, _) if !is_map_key(k) => Err(format!("`json.decode` cannot decode map keys of type `{}`", names.format(k))),
             _ => Ok(()),
         }
     }
 }
 
-/// Whether `decode` reads map keys of type `t` from JSON object keys (see
-/// `Decoder::map_key`).
 fn is_map_key(t: &TypeDesc) -> bool {
     matches!(t, TypeDesc::Str | TypeDesc::Int | TypeDesc::Duration | TypeDesc::Bool | TypeDesc::Enum { .. } | TypeDesc::Value { .. })
 }
@@ -212,7 +208,7 @@ impl<'a, 's, 'h> Build<'a, 's, 'h> {
 
     /// Checks that a value's heap objects fit besides those being assembled.
     fn reserve(&self) -> Result<(), Ctl> {
-        self.st.check_room(NODE + self.pending)
+        self.st.check_memory(NODE + self.pending)
     }
 
     /// Appends `v` to a list being assembled, checking its buffer's growth
@@ -222,7 +218,7 @@ impl<'a, 's, 'h> Build<'a, 's, 'h> {
     fn push(&mut self, items: &mut Vec<Value>, v: Value) -> Result<(), Ctl> {
         if items.len() == items.capacity() {
             let more = items.capacity().max(4);
-            self.st.check_room((NODE + self.pending).saturating_add(more.saturating_mul(2 * std::mem::size_of::<Value>())))?;
+            self.st.check_memory((NODE + self.pending).saturating_add(more.saturating_mul(2 * std::mem::size_of::<Value>())))?;
             let before = items.capacity();
             items.reserve_exact(more);
             self.pending += (items.capacity() - before) * std::mem::size_of::<Value>();
@@ -763,7 +759,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
     }
 
     fn type_name(&self, t: &TypeDesc) -> String {
-        t.name(&|id| {
+        t.format(&|id| {
             let found = self.stack.iter().rev().find_map(|d| match d {
                 TypeDesc::Struct { id: i, name, .. } | TypeDesc::Enum { id: i, name, .. } if *i == id => Some(name),
                 _ => None,
@@ -980,7 +976,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
         self.b.meter.charge(1)?;
         if !self.indexes.contains_key(&id) {
             self.b.meter.charge(fields.len() as u64)?;
-            self.b.st.check_room(self.b.pending.saturating_add(fields.len().saturating_mul(32)))?;
+            self.b.st.check_memory(self.b.pending.saturating_add(fields.len().saturating_mul(32)))?;
             self.b.pending += fields.len() * 32;
             let index = fields.iter().enumerate().rev().map(|(i, f)| (f.0.as_str(), i)).collect();
             self.indexes.insert(id, index);
@@ -1424,7 +1420,7 @@ impl<'a> Converter<'a, '_, '_> {
                     self.b.st.new_variant(ids.str_, &[s])
                 }
                 Obj::Bytes(b) => {
-                    self.b.st.check_room(self.b.pending.saturating_add(b.len() / 3 * 4 + 4))?;
+                    self.b.st.check_memory(self.b.pending.saturating_add(b.len() / 3 * 4 + 4))?;
                     self.b.meter.charge_slow_bytes(b.len())?;
                     let s = self.b.st.new_str(base64::encode(b, false));
                     self.b.st.new_variant(ids.str_, &[s])
@@ -1434,7 +1430,7 @@ impl<'a> Converter<'a, '_, '_> {
                 Obj::Set(s) => self.array(s.entries.iter().flatten().copied(), depth)?,
                 Obj::Range(a, b, inclusive) => {
                     let (n, ints) = range_ints(*a, *b, *inclusive);
-                    self.b.st.check_room(self.b.pending.saturating_add(n.saturating_mul(std::mem::size_of::<Value>())))?;
+                    self.b.st.check_memory(self.b.pending.saturating_add(n.saturating_mul(std::mem::size_of::<Value>())))?;
                     self.b.meter.charge(n as u64)?;
                     let items = ints.map(|i| json_number(self.b.st, &ids, Value::Int(i))).collect();
                     let list = self.b.st.new_list(items);

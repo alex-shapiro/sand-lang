@@ -442,13 +442,10 @@ impl Config {
         self.gc_stress = on;
         self
     }
-    /// Testing aid: in each call of a `vm_function`, the first memory or
-    /// resource check after argument conversion fails. The engine then
-    /// collects garbage and calls the native again, as it does when garbage
-    /// fills the memory limit. Use it to test that a native function checks
-    /// memory and resources before it changes anything: a change made before
-    /// the check happens twice. As after a real limit, the collection also
-    /// closes idle HTTP connections.
+    /// Testing aid: forces the first memory or resource check in each
+    /// `vm_function` call to fail, triggering garbage collection and re-running
+    /// the function. Use this option to verify that native functions check
+    /// memory and resource limits before performing side effects.
     pub fn retry_stress(mut self, on: bool) -> Self {
         self.retry_stress = on;
         self
@@ -538,8 +535,6 @@ pub(crate) struct Registry {
     pub natives: Arc<Vec<NativeEntry>>,
     pub decls: Arc<NativeDecls>,
     pub sources: BTreeMap<Cow<'static, str>, Source>,
-    /// Whether the Sand source of the modules is optimized
-    /// ([`Config::optimize`]; always for the standard library).
     pub optimize: bool,
     /// The standard library's registry, whose snapshot this one's extends.
     base: Option<Arc<Registry>>,
@@ -564,11 +559,8 @@ pub(crate) struct Source {
 /// Registered native functions and Rust-bound types.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct NativeDecls {
-    /// Native functions by id, in registration order.
     pub fns: Vec<NativeDecl>,
-    /// The id of each native function by its key.
     pub ids: HashMap<Cow<'static, str>, u32>,
-    /// Rust-bound types in registration order.
     pub types: Vec<BoundType>,
 }
 
@@ -1623,9 +1615,6 @@ mod registry_tests {
         assert!(undeclared.is_empty(), "registered natives no `native fn` declares: {undeclared:?}");
     }
 
-    /// `Config::optimize` applies to the Sand source of host modules: the
-    /// bytecode of a host function that inlining and loop fusion change is
-    /// the bytecode of the same function in a script compiled the same way.
     #[test]
     fn host_module_source_follows_the_optimize_setting() {
         let src = "fn double(x: int) -> int { x * 2 }\npub fn doubled_total(xs: [int]) -> int { xs.map(double).filter(x => x > 2).sum() }";

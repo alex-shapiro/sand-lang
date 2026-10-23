@@ -706,7 +706,7 @@ fn register_file(m: &mut NativeModule) {
                 }
             }
             let n = st.unread().min(max);
-            vm.check_room(n)?;
+            vm.check_memory(n)?;
             let data = st.buf[st.at..st.at + n].to_vec();
             st.consume(n);
             Ok(Ok(data))
@@ -745,7 +745,7 @@ fn register_file(m: &mut NativeModule) {
             if let Some(l) = line.strip_suffix(b"\n") {
                 line = l.strip_suffix(b"\r").unwrap_or(l);
             }
-            vm.check_room(line.len())?;
+            vm.check_memory(line.len())?;
             let line = line.to_vec();
             st.consume(end - st.at);
             let Some(text) = super::stream::utf8(vm, line)? else {

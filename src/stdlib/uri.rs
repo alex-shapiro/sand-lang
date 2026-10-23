@@ -5,8 +5,7 @@ use crate::native::{HostError, NativeModule, Val};
 use crate::vm::{Ctl, Vm};
 
 /// A parsed URI (RFC 3986). `host` is `Some` if the URI includes an authority
-/// component (`//...`), and IPv6 host literals are stored without enclosing
-/// brackets.
+/// component (`//...`). IPv6 host literals omit the enclosing brackets.
 #[derive(crate::SandStruct)]
 #[sand(module = "uri")]
 struct Uri {
@@ -48,14 +47,14 @@ pub(crate) fn module() -> NativeModule {
     m.bind::<Uri>();
     m.vm_function("parse", |vm: &mut Vm, text: Val<String>| -> Result<Uri, HostError> {
         let n = text.str(&vm.heap).len();
-        vm.check_room(n.saturating_mul(2))?;
+        vm.check_memory(n.saturating_mul(2))?;
         vm.charge_slow_bytes(n)?;
         Ok(parse(text.str(&vm.heap), true).map_err(|msg| HostError::new("parse", msg))?.into())
     });
     m.vm_function("Uri.join", |vm: &mut Vm, base: Uri, reference: Val<String>| -> Result<Uri, HostError> {
         let base = Parts::from(base);
         let n = base.len().saturating_add(reference.str(&vm.heap).len());
-        vm.check_room(n.saturating_mul(3))?;
+        vm.check_memory(n.saturating_mul(3))?;
         vm.charge_slow_bytes(n)?;
         let r = parse(reference.str(&vm.heap), false).map_err(|msg| HostError::new("parse", msg))?;
         Ok(resolve(&base, r).into())
@@ -64,13 +63,13 @@ pub(crate) fn module() -> NativeModule {
     m.vm_function("encode_path", |vm: &mut Vm, s: Val<String>| encode_native(vm, s, b"/"));
     m.vm_function("decode_component", |vm: &mut Vm, s: Val<String>| -> Result<String, HostError> {
         let s = s.str(&vm.heap);
-        vm.check_room(s.len())?;
+        vm.check_memory(s.len())?;
         vm.charge_slow_bytes(s.len())?;
         decode_component(s).map_err(|msg| HostError::new("parse", msg))
     });
     m.vm_function("parse_query", |vm: &mut Vm, q: Val<String>| -> Result<Vec<(String, String)>, Ctl> {
         let q = q.str(&vm.heap);
-        vm.check_room(q.len().saturating_mul(4))?;
+        vm.check_memory(q.len().saturating_mul(4))?;
         vm.charge_slow_bytes(q.len())?;
         Ok(parse_query(q))
     });
@@ -299,7 +298,7 @@ pub(crate) fn remove_dot_segments(path: &str) -> String {
 
 fn encode_native(vm: &mut Vm, s: Val<String>, keep: &[u8]) -> Result<String, Ctl> {
     let s = s.str(&vm.heap);
-    vm.check_room(s.len().saturating_mul(3))?;
+    vm.check_memory(s.len().saturating_mul(3))?;
     vm.charge_slow_bytes(s.len())?;
     Ok(encode(s, keep))
 }

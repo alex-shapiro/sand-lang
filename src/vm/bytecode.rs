@@ -1268,8 +1268,8 @@ pub struct Program {
     /// Maps each registered [`EnumType`](crate::EnumType) `TypeId` to the
     /// runtime ID of its first variant. Subsequent variants have consecutive IDs.
     pub enum_types: FxHashMap<std::any::TypeId, u32>,
-    /// Maps each registered [`StructType`](crate::native::StructType)
-    /// `TypeId` to the runtime ID of its struct.
+    /// Maps each registered [`StructType`](crate::native::StructType) `TypeId`
+    /// to its runtime struct ID.
     pub struct_types: FxHashMap<std::any::TypeId, u32>,
     pub ids: RtIds,
     pub entry: u32,

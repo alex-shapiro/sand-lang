@@ -12,15 +12,13 @@ use std::hash::Hash;
 ///
 /// For functions registered with [`NativeModule::function`](super::NativeModule::function),
 /// [`FromValue::Item`] can borrow directly from the VM heap (`&str`, `&[u8]`,
-/// `&T`). Owned types (`String`, `Vec<T>`, ...) allocate a copy and account for
-/// it through [`Conversion`].
+/// `&T`). Owned types (`String`, `Vec<T>`, ...) allocate a Rust copy.
 ///
-/// A Sand value can hold one value in many places, and a conversion makes a
-/// separate copy for each place. So an implementation for a type that can
-/// hold values of the same type again (a list, a map, or a struct) must
-/// charge fuel for each copy it makes, and each implementation must add the
-/// bytes it allocates to the [`Conversion`]. Then the instruction and memory
-/// limits stop a copy that grows without bound.
+/// Because a Sand value can contain shared references to the same heap object,
+/// converting a value into owned Rust types copies each reachable reference.
+/// Implementations must charge fuel to `vm` and record allocated bytes in
+/// [`Conversion`] so that instruction and memory limits bound exponential
+/// expansion of shared values.
 pub trait FromValue: SandType {
     type Item<'a>;
 
@@ -37,15 +35,10 @@ pub struct Conversion {
     depth: usize,
 }
 
-/// Maximum nesting of the structs in a value that crosses between Sand and
-/// Rust. Rust types can only nest without bound through a struct, so this
-/// limit bounds the stack that a conversion uses.
-const MAX_NESTING: usize = 256;
+const MAX_STRUCT_DEPTH: usize = 256;
 
-/// The nesting depth inside one more struct, or a `"limit"` error if it
-/// exceeds [`MAX_NESTING`].
-pub(crate) fn deeper(depth: usize) -> Result<usize, Ctl> {
-    if depth < MAX_NESTING { Ok(depth + 1) } else { Err(Ctl::fail("limit", "value too deeply nested to convert")) }
+pub(crate) fn enter_struct(depth: usize) -> Result<usize, Ctl> {
+    if depth < MAX_STRUCT_DEPTH { Ok(depth + 1) } else { Err(Ctl::fail("limit", "value too deeply nested to convert")) }
 }
 
 impl Conversion {
@@ -53,18 +46,14 @@ impl Conversion {
         Conversion { bytes: 0, scratch: Scratch::new(), depth: 0 }
     }
 
-    /// Converts the fields of a struct with `f`. Fails with a `"limit"`
-    /// error if structs nest too deeply, as they do in a cyclic value.
-    pub(crate) fn nested<R>(&mut self, f: impl FnOnce(&mut Conversion) -> Result<R, Ctl>) -> Result<R, Ctl> {
-        self.depth = deeper(self.depth)?;
+    pub(crate) fn enter_struct<R>(&mut self, f: impl FnOnce(&mut Conversion) -> Result<R, Ctl>) -> Result<R, Ctl> {
+        self.depth = enter_struct(self.depth)?;
         let r = f(self);
         self.depth -= 1;
         r
     }
 
-    /// Adds `bytes` of owned Rust copies to the total of this conversion, and
-    /// checks the total against the memory limit as it grows (see
-    /// [`Scratch`]).
+    /// Records `bytes` of temporary Rust allocation and checks the VM memory limit.
     pub fn alloc(&mut self, vm: &Vm, bytes: usize) -> Result<(), Ctl> {
         self.bytes = self.bytes.saturating_add(bytes);
         self.scratch.check(&vm.heap, self.bytes)
@@ -237,14 +226,14 @@ impl FromValue for String {
 }
 impl IntoValue for String {
     fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl> {
-        vm.check_room(self.len())?;
+        vm.check_memory(self.len())?;
         vm.charge_bytes(self.len())?;
         Ok(vm.heap.new_str(self))
     }
 }
 impl IntoValue for &str {
     fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl> {
-        vm.check_room(self.len())?;
+        vm.check_memory(self.len())?;
         vm.charge_bytes(self.len())?;
         Ok(vm.heap.new_str(self))
     }
@@ -270,14 +259,14 @@ impl FromValue for Vec<u8> {
 }
 impl IntoValue for Vec<u8> {
     fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl> {
-        vm.check_room(self.len())?;
+        vm.check_memory(self.len())?;
         vm.charge_bytes(self.len())?;
         Ok(vm.heap.new_bytes(self))
     }
 }
 impl IntoValue for &[u8] {
     fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl> {
-        vm.check_room(self.len())?;
+        vm.check_memory(self.len())?;
         vm.charge_bytes(self.len())?;
         Ok(vm.heap.new_bytes(self))
     }
@@ -294,7 +283,7 @@ impl<T: FromValue> FromValue for Vec<T> {
 }
 impl<T: IntoValue> IntoValue for Vec<T> {
     fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl> {
-        vm.check_room(self.len().saturating_mul(std::mem::size_of::<Value>()))?;
+        vm.check_memory(self.len().saturating_mul(std::mem::size_of::<Value>()))?;
         vm.charge(self.len() as u64)?;
         let mut items = Vec::with_capacity(self.len());
         for x in self {
@@ -384,7 +373,7 @@ where
     m.entries.iter().flatten().map(|&(k, x)| Ok((K::from_value(vm, k, conv)?, V::from_value(vm, x, conv)?))).collect()
 }
 fn write_map<K: IntoValue, V: IntoValue>(vm: &mut Vm, len: usize, items: impl IntoIterator<Item = (K, V)>) -> Result<Value, Ctl> {
-    vm.check_room(len.saturating_mul(4 * std::mem::size_of::<Value>()))?;
+    vm.check_memory(len.saturating_mul(4 * std::mem::size_of::<Value>()))?;
     let m = vm.heap.alloc(Obj::Map(Box::default()));
     for (k, v) in items {
         let k = k.into_value(vm)?;
@@ -428,7 +417,7 @@ fn read_set<T: for<'k> FromValue<Item<'k> = T>, C: FromIterator<T>>(vm: &Vm, v: 
     s.entries.iter().flatten().map(|&x| T::from_value(vm, x, conv)).collect()
 }
 fn write_set<T: IntoValue>(vm: &mut Vm, len: usize, items: impl IntoIterator<Item = T>) -> Result<Value, Ctl> {
-    vm.check_room(len.saturating_mul(3 * std::mem::size_of::<Value>()))?;
+    vm.check_memory(len.saturating_mul(3 * std::mem::size_of::<Value>()))?;
     let s = vm.heap.alloc(Obj::Set(Box::default()));
     for x in items {
         let x = x.into_value(vm)?;
@@ -494,7 +483,7 @@ macro_rules! tuple_impls {
         impl<$($n: IntoValue),+> IntoValue for ($($n,)+) {
             fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl> {
                 let items = [$(self.$i.into_value(vm)?),+];
-                vm.check_room(items.len() * std::mem::size_of::<Value>())?;
+                vm.check_memory(items.len() * std::mem::size_of::<Value>())?;
                 Ok(vm.heap.new_tuple(&items))
             }
         }
@@ -508,9 +497,6 @@ tuple_impls!(6: A 0, B 1, C 2, D 3, E 4, F 5);
 tuple_impls!(7: A 0, B 1, C 2, D 3, E 4, F 5, G 6);
 tuple_impls!(8: A 0, B 1, C 2, D 3, E 4, F 5, G 6, H 7);
 
-/// Implements `SandType`, `FromValue`, and `IntoValue` for a type that
-/// implements `NamedType` and `ValueType`. `#[derive(SandValue)]` uses this
-/// macro.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __value_type_impls {
@@ -538,19 +524,15 @@ macro_rules! __value_type_impls {
     };
 }
 
-/// Converts `v` to the value type `T`. [`__value_type_impls`] calls this
-/// function.
 #[doc(hidden)]
 pub fn value_from<T: ValueType>(vm: &Vm, v: Value) -> Result<T, Ctl> {
     vm.heap.value::<T>(v).ok_or_else(mismatch::<T>)
 }
 
-/// Allocates `x`, a value of the value type `T`. [`__value_type_impls`]
-/// calls this function.
 #[doc(hidden)]
 pub fn value_into<T: ValueType>(x: T, vm: &mut Vm) -> Result<Value, Ctl> {
     if T::PACKING.is_none() {
-        vm.check_room(ValueType::size(&x))?;
+        vm.check_memory(ValueType::size(&x))?;
     }
     Ok(vm.new_value(x))
 }

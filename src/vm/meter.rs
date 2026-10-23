@@ -356,13 +356,11 @@ impl Scratch {
             return Ok(());
         }
         self.next = len.saturating_add(SCRATCH_STEP);
-        heap.check_room(len)
+        heap.check_memory(len)
     }
 }
 
-/// Results that may report the memory limit. Memory checks use the heap's
-/// byte count, which includes garbage not yet collected, so callers that can
-/// run the collector retry once.
+/// Reports whether a result failed with [`LimitKind::Memory`].
 pub(crate) trait MemoryLimit {
     fn is_memory_limit(&self) -> bool;
 }

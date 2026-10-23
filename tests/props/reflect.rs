@@ -1,9 +1,8 @@
-//! Property tests for the compile-time check of `json.decode` type arguments.
+//! Property tests for compile-time validation of `json.decode` type arguments.
 
 use proptest::prelude::*;
 use sandlang::{Config, Engine, Error, MemorySink, Policy};
 
-/// A Sand type, for `json.decode<T>`.
 #[derive(Clone, Debug)]
 enum Ty {
     Int,
@@ -14,13 +13,9 @@ enum Ty {
     Unit,
     Duration,
     Json,
-    /// `enum Unit { A, B }`
     UnitEnum,
-    /// `struct Rec { a: int, b: str? }`
     Rec,
-    /// `struct Keyed { m: [Keyed: int]? }`, a struct that is its own map key
     Keyed,
-    /// `fn() -> int`
     Fn,
     Task,
     Range,
@@ -29,7 +24,6 @@ enum Ty {
     Map(Box<Ty>, Box<Ty>),
     Option(Box<Ty>),
     Tuple(Vec<Ty>),
-    /// `struct Wrap<T> { v: T }`
     Wrap(Box<Ty>),
 }
 
@@ -59,7 +53,6 @@ impl Ty {
         }
     }
 
-    /// The reference model: whether `json.decode` can decode values of the type.
     fn decodable(&self) -> bool {
         match self {
             Ty::Fn | Ty::Task | Ty::Range | Ty::Keyed => false,
@@ -71,7 +64,6 @@ impl Ty {
     }
 }
 
-/// Types that satisfy `Hash`, for map keys and set elements.
 fn hashable() -> impl Strategy<Value = Ty> {
     let leaf =
         prop_oneof![Just(Ty::Int), Just(Ty::Bool), Just(Ty::Str), Just(Ty::Bytes), Just(Ty::Unit), Just(Ty::Duration), Just(Ty::UnitEnum)];
@@ -104,8 +96,6 @@ const INPUTS: [&str; 12] =
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
-    /// The compiler accepts `json.decode<T>` exactly when `T` is decodable,
-    /// and a call it accepts never fails at run time for an unsupported type.
     #[test]
     fn json_decode_accepts_exactly_the_decodable_types(t in ty()) {
         let inputs: Vec<String> = INPUTS.iter().map(|s| format!("{s:?}")).collect();
@@ -128,7 +118,6 @@ proptest! {
             Err(Error::Compile(ds)) => {
                 prop_assert!(!t.decodable(), "rejected: {ds:?}\n{src}");
                 prop_assert!(ds.iter().all(|d| d.message.starts_with("`json.decode` cannot decode")), "{ds:?}\n{src}");
-                // Each message names the type it rejects.
                 prop_assert!(ds.iter().all(|d| !d.message.contains("``")), "{ds:?}\n{src}");
             }
             Err(e) => prop_assert!(false, "{e}\n{src}"),

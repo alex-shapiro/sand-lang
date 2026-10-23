@@ -24,7 +24,7 @@ use std::borrow::Cow;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-/// A Rust type bound to a nominal Sand type of a native module.
+/// A Rust type bound to a nominal Sand type in a [`NativeModule`].
 ///
 /// Derive this trait with [`SandEnum`](crate::SandEnum),
 /// [`SandObject`](crate::SandObject), [`SandStruct`](crate::SandStruct), or
@@ -33,19 +33,16 @@ use std::sync::Arc;
 pub trait NamedType: Sized + 'static {
     /// Name of the Sand module that owns the type (`#[sand(module = "...")]`).
     const MODULE: &'static str;
-    /// Sand type name (the Rust identifier, or `#[sand(name = "...")]`).
+    /// Sand type name (defaults to the Rust identifier, or `#[sand(name = "...")]`).
     const NAME: &'static str;
-    /// Doc comment of the type.
+    /// Documentation comment attached to the Sand type declaration.
     const DOC: &'static str;
-    /// `false` if the type is private to its module (`#[sand(private)]`).
+    /// `true` if the type is exported (`pub`), or `false` if marked `#[sand(private)]`.
     const PUBLIC: bool;
-    /// How the engine represents values of the type. The derive macros
-    /// implement this function.
     #[doc(hidden)]
     fn binding() -> Binding<Self>;
 }
 
-/// How the engine represents values of the [`NamedType`] `T`.
 #[doc(hidden)]
 pub struct Binding<T>(BoundKind, PhantomData<fn() -> T>);
 
@@ -95,12 +92,11 @@ pub trait EnumType: NamedType + SandType + Copy {
     fn index(self) -> usize;
 }
 
-/// A Rust struct that maps to a Sand `struct` with the same fields.
+/// A Rust struct that maps to a Sand `struct` with matching fields.
 ///
 /// Derive this trait with [`#[derive(SandStruct)]`](crate::SandStruct) and
-/// register the type with [`NativeModule::bind`]. Native functions take and
-/// return the struct by value: the engine copies its fields between Rust and
-/// the Sand heap.
+/// register the type with [`NativeModule::bind`]. Native functions pass and
+/// return the struct by value, copying its fields between Rust and the VM heap.
 ///
 /// ```
 /// /// A point in the plane.
@@ -111,7 +107,7 @@ pub trait EnumType: NamedType + SandType + Copy {
 ///     pub x: f64,
 ///     /// Vertical coordinate.
 ///     pub y: f64,
-///     /// Number of times the point moved.
+///     /// Number of moves applied to the point.
 ///     #[sand(private, var)]
 ///     moves: i64,
 /// }
@@ -124,23 +120,18 @@ pub trait StructType: NamedType + SandType {
 /// Metadata for a field of a [`StructType`].
 #[derive(Debug)]
 pub struct StructField {
-    /// Sand field name (the Rust identifier).
+    /// Sand field name (defaults to the Rust identifier, or `#[sand(name = "...")]`).
     pub name: &'static str,
-    /// Doc comment of the field.
+    /// Documentation comment attached to the field.
     pub doc: &'static str,
-    /// `false` if the field is private to the module (`#[sand(private)]`).
+    /// `true` if the field is exported (`pub`), or `false` if marked `#[sand(private)]`.
     pub public: bool,
-    /// `true` if scripts can assign the field (`#[sand(var)]`).
+    /// `true` if the field is mutable (`var` via `#[sand(var)]`).
     pub var: bool,
-    /// Returns the Sand type of the field.
+    /// Returns the Sand [`Type`] of the field.
     pub ty: fn() -> Type,
 }
 
-/// Converts `v`, a value of the Sand struct bound to `T`, with `read`, which
-/// takes the fields in declaration order. Charges fuel for the struct, so that
-/// a value that shares one struct in many places costs fuel for each copy.
-/// Fails with a `"limit"` error if structs nest too deeply. The derive macro
-/// calls this function.
 #[doc(hidden)]
 pub fn struct_from_value<T: StructType>(
     vm: &Vm,
@@ -157,48 +148,37 @@ pub fn struct_from_value<T: StructType>(
         _ => return Err(mismatch::<T>()),
     };
     vm.charge(1)?;
-    conv.nested(|conv| read(fields, conv))
+    conv.enter_struct(|conv| read(fields, conv))
 }
 
-/// Allocates a value of the Sand struct bound to `T`, with the fields that
-/// `write` converts in declaration order. Fails with a `"limit"` error if
-/// structs nest too deeply. The derive macro calls this function.
 #[doc(hidden)]
 pub fn struct_into_value<T: StructType>(vm: &mut Vm, write: impl FnOnce(&mut Vm) -> Result<Box<[Value]>, Ctl>) -> Result<Value, Ctl> {
     let Some(&def) = vm.prog.struct_types.get(&TypeId::of::<T>()) else {
         return Err(Ctl::internal(format!("struct {}.{} is not loaded", T::MODULE, T::NAME)));
     };
-    vm.nesting = convert::deeper(vm.nesting)?;
+    vm.struct_depth = convert::enter_struct(vm.struct_depth)?;
     let fields = write(vm);
-    vm.nesting -= 1;
+    vm.struct_depth -= 1;
     let fields = fields?;
     if fields.len() != T::FIELDS.len() {
         return Err(Ctl::internal(format!("struct {}.{} takes {} fields, not {}", T::MODULE, T::NAME, T::FIELDS.len(), fields.len())));
     }
-    vm.check_room(fields.len() * std::mem::size_of::<Value>())?;
+    vm.check_memory(fields.len() * std::mem::size_of::<Value>())?;
     Ok(vm.heap.alloc(Obj::Struct(def, fields)))
 }
 
-/// Returns `true` if `name` can name a Sand type or enum variant: a
-/// capitalized identifier that is not a keyword. The derive macros call this
-/// function in constants, so that an invalid name does not compile.
 #[doc(hidden)]
 pub const fn is_type_name(name: &str) -> bool {
     is_name(name) && name.as_bytes()[0].is_ascii_uppercase()
 }
 
-/// Returns `true` if `name` can name a Sand module, field, or parameter: an
-/// identifier that is not a keyword. The derive macros call this function in constants, so
-/// that an invalid name does not compile.
 #[doc(hidden)]
 pub const fn is_name(name: &str) -> bool {
     is_ident(name) && !is_keyword(name)
 }
 
-/// Converts the value `v` of a field of a [`StructType`] for
-/// [`FromValue::from_value`]. The derive macro calls this function.
 #[doc(hidden)]
-pub fn field_value<T: for<'a> FromValue<Item<'a> = T>>(vm: &Vm, v: Value, conv: &mut Conversion) -> Result<T, Ctl> {
+pub fn field_from_value<T: for<'a> FromValue<Item<'a> = T>>(vm: &Vm, v: Value, conv: &mut Conversion) -> Result<T, Ctl> {
     T::from_value(vm, v, conv)
 }
 
@@ -255,7 +235,6 @@ pub fn field_value<T: for<'a> FromValue<Item<'a> = T>>(vm: &Vm, v: Value, conv: 
 /// #[derive(sandlang::SandStruct)]
 /// #[sand(module = "text")]
 /// struct Word {
-///     // A field must convert from an owned value.
 ///     text: &'static str,
 /// }
 /// ```
@@ -264,7 +243,6 @@ pub fn field_value<T: for<'a> FromValue<Item<'a> = T>>(vm: &Vm, v: Value, conv: 
 /// #[derive(sandlang::SandStruct)]
 /// #[sand(module = "db")]
 /// struct Row {
-///     // A field must have a Sand type.
 ///     id: u32,
 /// }
 /// ```
@@ -273,7 +251,6 @@ pub fn field_value<T: for<'a> FromValue<Item<'a> = T>>(vm: &Vm, v: Value, conv: 
 /// #[derive(sandlang::SandStruct)]
 /// #[sand(module = "db")]
 /// struct Row {
-///     // A field name must not be a Sand keyword.
 ///     r#match: i64,
 /// }
 /// ```
@@ -304,7 +281,6 @@ pub fn field_value<T: for<'a> FromValue<Item<'a> = T>>(vm: &Vm, v: Value, conv: 
 /// #[derive(Clone, PartialEq, Eq, Hash, sandlang::SandValue)]
 /// #[sand(module = "money")]
 /// struct Cents(i64);
-/// // Missing: `impl sandlang::ValueType for Cents`.
 /// ```
 ///
 /// ```compile_fail
@@ -323,7 +299,6 @@ pub fn field_value<T: for<'a> FromValue<Item<'a> = T>>(vm: &Vm, v: Value, conv: 
 ///     const NAME: &'static str = "Fake";
 ///     const DOC: &'static str = "";
 ///     const PUBLIC: bool = true;
-///     // A binding describes its own type.
 ///     fn binding() -> sandlang::native::Binding<Fake> {
 ///         sandlang::native::Binding::<Point>::of_struct()
 ///     }
@@ -514,10 +489,10 @@ impl Vm {
         }
     }
 
-    /// Allocates `x` on the heap after reserving `x.size()` bytes against the
+    /// Allocates `x` on the heap after checking `x.size()` bytes against the
     /// memory limit.
     pub fn new_object<T: ObjectType>(&mut self, x: T) -> Result<Val<T>, Ctl> {
-        self.check_room(NativeObject::size(&x))?;
+        self.check_memory(NativeObject::size(&x))?;
         Ok(Val::from_raw(self.heap.alloc(Obj::Native(Box::new(x)))))
     }
 }
@@ -538,7 +513,6 @@ pub(crate) enum BoundKind {
     /// An [`EnumType`] with the `(name, doc)` pair of each variant in declaration order.
     Enum(TypeId, Arc<[(&'static str, &'static str)]>),
     Object(TypeId),
-    /// A [`StructType`] with its fields in declaration order.
     Struct(TypeId, &'static [StructField]),
     /// A VM-implemented generic type (`Task<T>` or `Channel<T>`), with its type parameter names.
     Builtin(&'static [&'static str]),
@@ -658,12 +632,11 @@ impl NativeModule {
     /// first parameter. Heap values that the function does not copy must be
     /// taken as [`Val`] handles.
     ///
-    /// The engine can call `f` again: after a permission prompt
-    /// ([`Vm::require`]), and after it collects garbage when a memory or
-    /// resource check fails ([`Vm::check_room`], [`Vm::reserve_io`],
-    /// [`Vm::resource_slot`]). So `f` must make these checks before it changes
-    /// anything. [`Config::retry_stress`](crate::Config::retry_stress) tests
-    /// this.
+    /// Because the VM re-runs `f` from the start after a permission prompt
+    /// ([`Vm::require`]) or after a garbage collection triggered by a memory or
+    /// resource check ([`Vm::check_memory`], [`Vm::reserve_io`],
+    /// [`Vm::resource_slot`]), `f` must perform all capability and limit checks
+    /// before any side effects.
     ///
     /// # Panics
     ///
@@ -721,14 +694,13 @@ impl NativeModule {
         }
     }
 
-    /// Binds the Rust type `T` to the Sand type `T::NAME` of this module (see
-    /// [`NamedType`]).
+    /// Registers the Rust-bound type `T` in this module (see [`NamedType`]).
     ///
     /// # Panics
     ///
-    /// Panics if `T::MODULE` does not match [`NativeModule::name`], if
-    /// `T::NAME` (or the name of a variant or field) is not a valid
-    /// identifier, or if `T::NAME` is already registered in this module.
+    /// Panics if `T::MODULE` does not match [`NativeModule::name`], if the
+    /// type, variant, or field names of `T` are invalid or duplicated, or if
+    /// `T::NAME` is already registered in this module.
     pub fn bind<T: NamedType>(&mut self) -> &mut Self {
         let kind = T::binding().0;
         match &kind {

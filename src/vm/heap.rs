@@ -132,7 +132,7 @@ pub struct Heap {
     young_resources: usize,
     /// Testing aid: collect at every safe point (see `Config::gc_stress`).
     pub stress: bool,
-    /// Testing aid: the next limit check fails (see `Config::retry_stress`).
+    /// Testing aid: causes the next limit check to fail (see `Config::retry_stress`).
     pub(crate) fail_next_check: std::cell::Cell<bool>,
     /// Disables memory-limit checks during post-effect result conversion (see [`Vm::unchecked`](crate::vm::Vm::unchecked)).
     pub(crate) unchecked: bool,
@@ -246,9 +246,8 @@ impl Staging<'_> {
         self.heap.would_exceed(self.bytes.saturating_add(extra))
     }
 
-    /// Fails with the memory limit if `extra` more bytes, besides those
-    /// staged, do not fit.
-    pub fn check_room(&self, extra: usize) -> Result<(), crate::vm::Ctl> {
+    /// Returns a memory-limit error if `extra` additional bytes exceed the heap limit.
+    pub fn check_memory(&self, extra: usize) -> Result<(), crate::vm::Ctl> {
         if self.would_exceed(extra) { Err(crate::vm::Ctl::limit(LimitKind::Memory)) } else { Ok(()) }
     }
 
@@ -535,10 +534,9 @@ impl Heap {
         }
     }
 
-    /// Fails with the memory limit if `extra` more bytes do not fit. Records
-    /// nothing, so allocate the bytes right after the check. Track Rust
-    /// buffers that grow with [`Scratch`](super::meter::Scratch) instead.
-    pub fn check_room(&self, extra: usize) -> Result<(), crate::vm::Ctl> {
+    /// Returns a memory-limit error if `extra` additional bytes exceed the heap limit.
+    /// Allocate the bytes immediately after this check, or use [`Scratch`](super::meter::Scratch) to track a growing buffer.
+    pub fn check_memory(&self, extra: usize) -> Result<(), crate::vm::Ctl> {
         if self.would_exceed(extra) { Err(crate::vm::Ctl::limit(LimitKind::Memory)) } else { Ok(()) }
     }
 

@@ -498,8 +498,8 @@ impl Checker {
             .map(|(&n, &b)| (n, b))
             .collect();
         self.budget.charge(items.len() as u64);
-        // Rust-bound types and derived natives all start at offset 0: list
-        // the types, then the functions, each in registration order.
+        // Synthetic declarations for Rust-bound types and native functions have
+        // `span.lo == 0`; order them by definition ID to preserve registration order.
         let order = |d: &Def| match *d {
             Def::Type(TyRef::Def(t)) => (0, t),
             Def::Fn(f) => (1, f),

@@ -426,14 +426,14 @@ pub native fn parse(text: str) -> Result<Json>
 If a type parameter on a `native fn` is marked `reflect`
 (`native fn decode<reflect T>(text: str) -> Result<T>`), the compiler passes a
 runtime type description of `T` to the function, and `T` must be a concrete
-type at the call site. The Rust function can reject some types at compile
-time (§16.3).
+type at the call site. The Rust function can also validate `T` at compile time
+(§16.3).
 
-A `native fn` declaration must give each type parameter the built-in bounds
-(`Eq`, `Ord`, `Hash`) that the Rust function requires of it (§16.3).
+Each type parameter on a `native fn` declaration must declare the built-in
+bounds (`Eq`, `Ord`, `Hash`) required by the Rust function (§16.3).
 
-Native modules register their opaque types (§5.4), enums, and structs from
-Rust. They do not declare them in Sand source.
+Native modules register Rust-bound opaque types (§5.4), enums, and structs
+directly from Rust rather than declaring them in Sand source.
 
 ### 4.8 Test blocks
 
@@ -2636,9 +2636,9 @@ cannot handle fall back to an engine whose cost per byte grows with the
 pattern. Time is measured as the function runs and charged between matches
 when iterating. Ordinary searches take a few to a hundred nanoseconds per
 unit of their deterministic charge, so only work that charge underestimates
-by an order of magnitude or more is charged by time. The fuel of that work,
-and so the point where `max_instructions` stops it, differs between machines
-and between runs. All other fuel is the same in every run.
+by an order of magnitude or more is charged by time. All other fuel charges
+are deterministic across runs; time-based regex charges depend on execution
+speed.
 
 Fuel counts against `max_instructions`. Once a scheduling slice's fuel is
 spent, long operations check the instruction budget, the CPU and
@@ -2822,12 +2822,14 @@ standard library module.
 | `bind::<T>()`                | Rust type `T` with a derived `NamedType` (see below)                                |
 | `params(names)`, `doc(text)` | parameter names and documentation for the most recently registered function         |
 
-Four derive macros bind a Rust type to a Sand type of the module that
-`#[sand(module = "...")]` names. The type keeps its Rust name, or takes the
-name in `#[sand(name = "...")]`. `#[sand(private)]` makes the type private to
-its module. `#[sand(crate = path)]` sets the path of the `sandlang` crate if a
-crate renames the dependency. Doc comments, including
-`#[doc = include_str!("...")]`, become Sand documentation.
+Four derive macros bind a Rust type to a Sand type in a native module and
+implement `NamedType`, `SandType`, `FromValue`, and `IntoValue`. Every derived
+type requires `#[sand(module = "<module>")]` and accepts `#[sand(name = "<Name>")]`
+to override its Sand name, `#[sand(private)]` to keep the type private to its
+module, and `#[sand(crate = <path>)]` to specify a renamed `sandlang`
+dependency. Rust doc comments (including `#[doc = include_str!("...")]`) become
+Sand documentation. Compilation fails if a type, variant, or field name is a
+Sand keyword or is not a valid Sand identifier.
 
 | Derive       | Sand type                                                                  |
 | ------------ | -------------------------------------------------------------------------- |
@@ -2836,18 +2838,16 @@ crate renames the dependency. Doc comments, including
 | `SandObject` | opaque reference type; the type must also implement `NativeObject`         |
 | `SandStruct` | `struct` with the named fields of a Rust struct, copied on each conversion |
 
-A field of a `SandStruct` is public, unless it has `#[sand(private)]`, and
-immutable, unless it has `#[sand(var)]`. `#[sand(name = "...")]` gives a field
-a Sand name other than its Rust name, such as for a Rust name that is a Sand
-keyword. A derive does not compile if a Sand name of the type, a variant, or a
-field is a keyword or is not an identifier. Each field type must convert in both directions (an owned `FromValue`
-type and an `IntoValue` type). A struct can contain itself through a `Vec`,
-map, or `Option<Box<T>>` field. A value that holds one struct in several
-places becomes a separate Rust copy for each place, and each copy costs fuel
-and memory. If a native function takes or returns a value whose structs nest
-more than 256 deep (such as a cyclic value), the run aborts with kind
-`"limit"`. The module's Sand source can add methods to a bound type
-with `extend`.
+Each field of a `SandStruct` must implement `IntoValue` and owned `FromValue`.
+By default, fields are `pub` and immutable; `#[sand(private)]` makes a field
+private to the module, `#[sand(var)]` makes it mutable (`var`), and
+`#[sand(name = "<name>")]` overrides its Sand name. Recursive structs can
+reference themselves through `Vec`, map, or `Option<Box<T>>` fields. Because the
+engine copies each reachable struct value during conversion and charges fuel and
+memory for each copy, shared references in a Sand value produce independent Rust
+copies. Conversion aborts with kind `"limit"` if struct nesting exceeds 256
+levels (for example, in a cyclic value). Module Sand source can define methods
+on any bound type with `extend`.
 
 The Rust return type of a registered function determines whether the function
 returns a Sand `Result` or aborts the run on failure:
@@ -2868,14 +2868,13 @@ message })` in Sand, whereas `?` converts a `Ctl` into a `HostError` that
 To check a sandbox capability inside a `vm_function`, call
 `Vm::require(&capability)` (§14), which returns an error of kind
 `"permission_denied"` if the policy denies the request. Because the engine
-re-runs the native function after a permission prompt or after a garbage
-collection triggered by a memory or resource limit, a native function must
-check capabilities and reserve memory before performing any side effects.
-Only the body of a `vm_function` can make these checks, so only that body can
-run twice. To test this order, `Config::retry_stress` fails the first memory
-or resource check in the body of each `vm_function` call. Return-value
-conversion does not fail on the memory limit; instead, the engine collects
-garbage and checks the memory limit after the call completes.
+re-runs a `vm_function` from the start after a permission prompt or after a
+garbage collection triggered by a memory or resource check (`Vm::check_memory`,
+`Vm::reserve_io`, `Vm::resource_slot`), the function must check capabilities and
+limits before performing any side effects. `Config::retry_stress` tests this
+requirement by failing the first memory or resource check in each `vm_function`
+call. Return-value conversion does not fail on the memory limit; instead, the
+engine collects garbage and checks the memory limit after the call completes.
 
 | Rust type                                          | Sand type                                              |
 | -------------------------------------------------- | ------------------------------------------------------ |
@@ -2891,28 +2890,25 @@ garbage and checks the memory limit after the call completes.
 | `Val<T>`                                           | `T` (passed as an uncopied heap handle)                |
 | `Param<N, B>`, `Reflect<N, C>`                     | `N`-th type parameter and its runtime type description |
 
-`Param<N, B>` states the bounds `B` that the Rust function requires of the
-`N`-th type parameter: `bound::Eq`, `bound::Ord`, `bound::Hash`, or a pair of
-them (`Param<0, (bound::Ord, bound::Hash)>`). `B` is `()` by default. The
-`native fn` declaration must give the type parameter these bounds, or bounds
-that imply them.
+`Param<N, B>` specifies the built-in bounds `B` (`bound::Eq`, `bound::Ord`,
+`bound::Hash`, or a tuple of bounds such as `(bound::Ord, bound::Hash)`,
+defaulting to `()`) required on the `N`-th type parameter. The corresponding
+`native fn` declaration must declare `B` or stronger bounds on that parameter.
 
-`Reflect<N, C>` checks the description of the type argument at each call
-site with `C: ReflectCheck` before the program runs. The engine calls
-`C::check` once for each distinct node of the description, and rejects the
-call with the message that `check` returns. `C` is `()` by default, which
-accepts every type. `json.decode` uses this check to reject types that JSON
-cannot represent.
+`Reflect<N, C>` validates the reflected `TypeDesc` of the `N`-th type parameter
+at compile time using `C: ReflectCheck` (defaulting to `()`, which accepts all
+types). At each call site, the compiler calls `C::check` once per distinct node
+in the `TypeDesc` graph and reports a compile error if `C::check` returns `Err`.
 
 The engine automatically generates Sand declarations for registered types and
 functions that are not declared in `NativeModule::source`. Registered types use
 their Rust doc comments, and undeclared functions are exported as `pub native
 fn` with parameter names `arg1`, `arg2`, ... unless overridden by `params`.
-`help` lists these declarations in registration order, before the items of
-the Sand source. A function registered as `"Type.name"` is a method on `Type`,
-and takes `self` if its first parameter has type `Type`. Generic functions and
-functions with default parameter values must be declared explicitly with
-`native fn` in `NativeModule::source`.
+`help` lists registered types and functions in registration order before items
+declared in `NativeModule::source`. A function registered as `"Type.name"` is a
+method on `Type`, and takes `self` if its first parameter has type `Type`.
+Generic functions and functions with default parameter values must be declared
+explicitly with `native fn` in `NativeModule::source`.
 
 `Engine::new` compiles and validates all registered host modules once per
 `Config` (shared across cloned configurations), and returns `Error::Compile` if:

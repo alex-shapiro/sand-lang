@@ -861,9 +861,6 @@ print(http.get("{base}/")?.text()?)
     assert_eq!(reqs.iter().filter(|r| r.header("connection") == Some("close")).count(), 1);
 }
 
-/// A request that fails before it is sent leaves its idle connection in
-/// the pool for the next request: here, the request and its body do not
-/// fit in the memory limit together, although each fits alone.
 #[test]
 fn http_clients_keep_idle_connections_after_failed_requests() {
     let server = http_server(|req| HttpResponse::new(200, format!("{} bytes", req.body.len())));
@@ -1102,8 +1099,6 @@ serving.cancel()
     assert_eq!(out.contents(), format!("ready {addr}\nopened\n"));
 }
 
-/// The filter sees each request once, also if the engine calls the native
-/// again after a collection (`Config::retry_stress`).
 #[test]
 fn request_filters_rewrite_and_refuse_requests() {
     let server = http_server(|req| HttpResponse::new(200, req.header("authorization").unwrap_or("-").to_string()));

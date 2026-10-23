@@ -29,8 +29,7 @@
 //! * `--- test`: expected report from the test runner.
 //! * `--- args`: whitespace-separated command-line arguments.
 //! * `--- env`: `NAME=value` environment variables exposed to the script.
-//! * `--- requires FEATURE...`: the crate features (`os`, `tls`) the case
-//!   needs. Without them, the runner skips the case.
+//! * `--- requires FEATURE...`: crate features (`os`, `tls`) required to run the case.
 
 mod common;
 

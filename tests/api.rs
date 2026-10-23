@@ -939,7 +939,6 @@ struct Point {
     y: f64,
 }
 
-/// A path through points, with a shape at its end.
 #[derive(Debug, PartialEq, sandlang::SandStruct)]
 #[sand(module = "plane")]
 struct Route {
@@ -1026,9 +1025,6 @@ fn struct_fields_must_use_registered_public_types() {
     assert_eq!(errors, ["public field `secret` uses the private type `Secret`; make `Secret` public"]);
 }
 
-/// The derive rejects these names at compile time (see the `compile_fail`
-/// examples of `sandlang::native`), and `bind` rejects them in a struct that
-/// implements `StructType` by hand.
 #[test]
 #[should_panic(expected = "field `fn` of `Keyword` is not an identifier, or is a keyword")]
 fn struct_fields_must_be_sand_identifiers() {
@@ -1080,39 +1076,39 @@ fn structs_bind_once() {
     NativeModule::new("plane").bind::<Point>().bind::<Point>();
 }
 
-/// A tree node, for structs that contain themselves.
 #[derive(sandlang::SandStruct)]
 #[sand(module = "tree")]
 struct Node {
-    kids: Vec<Node>,
+    children: Vec<Node>,
 }
 
 #[test]
 fn recursive_structs_convert_to_a_bounded_depth() {
     fn size(n: &Node) -> i64 {
-        1 + n.kids.iter().map(size).sum::<i64>()
+        1 + n.children.iter().map(size).sum::<i64>()
     }
     let run = |src: &str| {
         let mut m = NativeModule::new("tree");
         m.bind::<Node>();
         m.function("size", |n: Node| size(&n));
         m.function("echo", |n: Node| n);
-        m.function("chain", |n: i64| (0..n).fold(Node { kids: Vec::new() }, |n, _| Node { kids: vec![n] }));
-        run_src(Config::new().module(m), &format!("import tree\nlet leaf = tree.Node {{ kids: [] }}\n{src}"))
+        m.function("chain", |n: i64| (0..n).fold(Node { children: Vec::new() }, |n, _| Node { children: vec![n] }));
+        run_src(Config::new().module(m), &format!("import tree\nlet leaf = tree.Node {{ children: [] }}\n{src}"))
     };
-    let (r, out, _) = run("print(tree.size(tree.echo(tree.Node { kids: [leaf, tree.Node { kids: [leaf] }] })))");
+    let (r, out, _) = run("print(tree.size(tree.echo(tree.Node { children: [leaf, tree.Node { children: [leaf] }] })))");
     r.unwrap();
     assert_eq!(out, "4\n");
-    let (r, out, _) =
-        run("var n = leaf\nfor _ in 0..255 {\n    n = tree.Node { kids: [n] }\n}\nprint(tree.size(n))\nprint(tree.size(tree.chain(255)))");
+    let (r, out, _) = run(
+        "var n = leaf\nfor _ in 0..255 {\n    n = tree.Node { children: [n] }\n}\nprint(tree.size(n))\nprint(tree.size(tree.chain(255)))",
+    );
     r.unwrap();
     assert_eq!(out, "256\n256\n");
     for src in [
         "print(tree.chain(256))",
         "print(tree.chain(5000))",
-        "var n = leaf\nfor _ in 0..256 {\n    n = tree.Node { kids: [n] }\n}\nprint(tree.size(n))",
-        "var n = leaf\nfor _ in 0..1000000 {\n    n = tree.Node { kids: [n] }\n}\nprint(tree.size(n))",
-        "leaf.kids.push(leaf)\nprint(tree.size(leaf))",
+        "var n = leaf\nfor _ in 0..256 {\n    n = tree.Node { children: [n] }\n}\nprint(tree.size(n))",
+        "var n = leaf\nfor _ in 0..1000000 {\n    n = tree.Node { children: [n] }\n}\nprint(tree.size(n))",
+        "leaf.children.push(leaf)\nprint(tree.size(leaf))",
     ] {
         let (r, _, _) = run(src);
         let Err(Error::Runtime { message, .. }) = r else { panic!("{src}: expected a runtime error, got {r:?}") };
@@ -1120,7 +1116,6 @@ fn recursive_structs_convert_to_a_bounded_depth() {
     }
 }
 
-/// A linked list node, for structs that contain themselves through a `Box`.
 #[derive(sandlang::SandStruct)]
 #[sand(module = "chain")]
 struct Link {
@@ -2668,8 +2663,6 @@ fn engine_docs_include_prelude_std_and_host_modules() {
     assert_eq!(host.items[0].decl, "fn dist(a: float, b: float) -> float");
 }
 
-/// Argument conversion cannot use up the failure of `Config::retry_stress`:
-/// a side effect before the first check in the body runs twice.
 #[test]
 fn retry_stress_fails_a_check_in_the_native_body() {
     let calls = Arc::new(AtomicUsize::new(0));
@@ -2677,7 +2670,7 @@ fn retry_stress_fails_a_check_in_the_native_body() {
     let mut m = NativeModule::new("probe");
     m.vm_function("touch", move |vm: &mut Vm, s: String| -> Result<i64, sandlang::vm::Ctl> {
         c.fetch_add(1, Ordering::SeqCst);
-        vm.check_room(s.len())?;
+        vm.check_memory(s.len())?;
         Ok(s.len() as i64)
     });
     let (r, out, _) = run_src(Config::new().retry_stress(true).module(m), "import probe\nprint(probe.touch(\"abc\"))");

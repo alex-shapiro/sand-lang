@@ -89,29 +89,27 @@ fn outer_lit(x: &Outer) -> String {
     )
 }
 
-/// A tree, for structs that contain themselves.
 #[derive(Clone, Debug, PartialEq, sandlang::SandStruct)]
 #[sand(module = "tree")]
 struct Tree {
     n: i64,
-    kids: Vec<Tree>,
+    children: Vec<Tree>,
 }
 
 fn tree() -> impl Strategy<Value = Tree> {
-    let leaf = int().prop_map(|n| Tree { n, kids: Vec::new() });
-    leaf.prop_recursive(6, 48, 4, |kid| (int(), prop::collection::vec(kid, 0..4)).prop_map(|(n, kids)| Tree { n, kids }))
+    let leaf = int().prop_map(|n| Tree { n, children: Vec::new() });
+    leaf.prop_recursive(6, 48, 4, |child| (int(), prop::collection::vec(child, 0..4)).prop_map(|(n, children)| Tree { n, children }))
 }
 
 fn tree_lit(t: &Tree) -> String {
-    let kids: Vec<String> = t.kids.iter().map(tree_lit).collect();
-    format!("tree.Tree {{ n: {}, kids: [{}] }}", int_lit(t.n), kids.join(", "))
+    let children: Vec<String> = t.children.iter().map(tree_lit).collect();
+    format!("tree.Tree {{ n: {}, children: [{}] }}", int_lit(t.n), children.join(", "))
 }
 
 fn depth(t: &Tree) -> usize {
-    1 + t.kids.iter().map(depth).max().unwrap_or(0)
+    1 + t.children.iter().map(depth).max().unwrap_or(0)
 }
 
-/// A linked list, for structs that contain themselves through a `Box`.
 #[derive(Clone, Debug, PartialEq, sandlang::SandStruct)]
 #[sand(module = "chain")]
 struct Link {
@@ -123,28 +121,24 @@ fn link_of(ns: &[i64]) -> Option<Box<Link>> {
     ns.iter().rev().fold(None, |next, &n| Some(Box::new(Link { n, next })))
 }
 
-/// A node that has its children in a list.
 #[derive(sandlang::SandStruct)]
 #[sand(module = "dag")]
 struct Fan {
-    kids: Vec<Fan>,
+    children: Vec<Fan>,
 }
 
-/// A node that has its children as the values of a hash map.
 #[derive(sandlang::SandStruct)]
 #[sand(module = "dag")]
 struct HashFan {
-    kids: HashMap<i64, HashFan>,
+    children: HashMap<i64, HashFan>,
 }
 
-/// A node that has its children as the values of an ordered map.
 #[derive(sandlang::SandStruct)]
 #[sand(module = "dag")]
 struct TreeFan {
-    kids: BTreeMap<String, TreeFan>,
+    children: BTreeMap<String, TreeFan>,
 }
 
-/// A node that has its children in boxes.
 #[derive(sandlang::SandStruct)]
 #[sand(module = "dag")]
 struct Bin {
@@ -152,26 +146,20 @@ struct Bin {
     right: Option<Box<Bin>>,
 }
 
-/// A node that has its children in a boxed tuple.
 #[derive(sandlang::SandStruct)]
 #[sand(module = "dag")]
 struct Pair {
-    kids: Option<Box<(Pair, Pair)>>,
+    children: Option<Box<(Pair, Pair)>>,
 }
 
-/// Each way for a struct to hold values of its own type: the leaf, a node
-/// that holds `a` twice, and the native function that takes the value.
 const SHAPES: [(&str, &str, &str); 5] = [
-    ("dag.Fan { kids: [] }", "dag.Fan { kids: [a, a] }", "fan"),
-    ("dag.HashFan { kids: [:] }", "dag.HashFan { kids: [0: a, 1: a] }", "hash_fan"),
-    ("dag.TreeFan { kids: [:] }", "dag.TreeFan { kids: [\"l\": a, \"r\": a] }", "tree_fan"),
+    ("dag.Fan { children: [] }", "dag.Fan { children: [a, a] }", "fan"),
+    ("dag.HashFan { children: [:] }", "dag.HashFan { children: [0: a, 1: a] }", "hash_fan"),
+    ("dag.TreeFan { children: [:] }", "dag.TreeFan { children: [\"l\": a, \"r\": a] }", "tree_fan"),
     ("dag.Bin { left: None, right: None }", "dag.Bin { left: Some(a), right: Some(a) }", "bin"),
-    ("dag.Pair { kids: None }", "dag.Pair { kids: Some((a, a)) }", "pair"),
+    ("dag.Pair { children: None }", "dag.Pair { children: Some((a, a)) }", "pair"),
 ];
 
-/// A script that makes a value `levels` structs deep in which each struct
-/// holds the struct below it twice (through `SHAPES[shape]`), and passes it
-/// to a native function.
 fn shared_dag(shape: usize, levels: u32, limits: Limits) -> Result<sandlang::Outcome, Error> {
     let mut m = NativeModule::new("dag");
     m.bind::<Fan>().bind::<HashFan>().bind::<TreeFan>().bind::<Bin>().bind::<Pair>();
@@ -188,9 +176,6 @@ fn shared_dag(shape: usize, levels: u32, limits: Limits) -> Result<sandlang::Out
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
 
-    /// A struct converts to Rust and back without change: Rust receives the
-    /// value the script built, and the script sees the value Rust built as
-    /// equal to its own, in every execution mode.
     #[test]
     fn structs_round_trip(value in outer(), gc_stress in any::<bool>()) {
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -220,9 +205,6 @@ proptest! {
         prop_assert_eq!(seen.lock().unwrap().clone(), vec![value]);
     }
 
-    /// A tree converts to Rust and back without change. A script value
-    /// converts if its structs nest at most 256 deep, and fails with a
-    /// `"limit"` error otherwise, however many other structs it contains.
     #[test]
     fn recursive_structs_round_trip(value in tree(), spine in 230usize..270, gc_stress in any::<bool>()) {
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -234,7 +216,7 @@ proptest! {
             x
         });
         let src = format!(
-            "import tree\nlet t = {}\nprint(tree.echo(t) == t)\nvar deep = t\nfor _ in 0..{spine} {{\n    deep = tree.Tree {{ n: 0, kids: [t, deep] }}\n}}\n\
+            "import tree\nlet t = {}\nprint(tree.echo(t) == t)\nvar deep = t\nfor _ in 0..{spine} {{\n    deep = tree.Tree {{ n: 0, children: [t, deep] }}\n}}\n\
              print(tree.echo(deep) == deep)",
             tree_lit(&value)
         );
@@ -253,8 +235,6 @@ proptest! {
         prop_assert_eq!(&seen.lock().unwrap()[0], &value);
     }
 
-    /// A boxed list converts in both directions if it is at most 256 links
-    /// long, and fails with a `"limit"` error otherwise, from either side.
     #[test]
     fn boxed_lists_round_trip(ns in prop::collection::vec(int(), 1..300), from_rust in any::<bool>(), gc_stress in any::<bool>()) {
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -289,10 +269,6 @@ proptest! {
         }
     }
 
-    /// A native function argument that holds one struct in many places is
-    /// copied once for each place, through every container that can hold the
-    /// struct again (see `FromValue`). Each copy costs fuel and memory, so the
-    /// instruction and memory limits stop the copy.
     #[test]
     fn shared_structs_cost_fuel_and_memory_for_each_copy(shape in 0..SHAPES.len(), levels in 14u32..20) {
         let copies = (1u64 << levels) - 1;
@@ -360,13 +336,9 @@ proptest! {
     }
 }
 
-/// Sand keywords and near misses, for the name checks of the derives.
 const NAMES: [&str; 12] = ["match", "fn", "Self", "self", "inf", "nan", "use", "type", "Match", "matches", "_", "_1"];
 
 proptest! {
-    /// `native::is_name` and `native::is_type_name`, which the derives call
-    /// in constants, accept exactly the names that the lexer reads as one
-    /// identifier (a capitalized one for `is_type_name`).
     #[test]
     fn derive_name_checks_agree_with_the_lexer(s in prop_oneof!["[a-zA-Z_0-9 .]{0,6}", prop::sample::select(NAMES.as_slice()).prop_map(String::from)]) {
         use sandlang::syntax::lexer::{Tok, lex};
