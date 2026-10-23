@@ -18,8 +18,10 @@ use crate::types::{ConstVal, ValueTypeInfo};
 use crate::vm::heap::Heap;
 use crate::vm::value::{ChannelObj, MapObj, Obj, SetObj, TaskObj, TypeDesc, Value, ValueType};
 use crate::vm::{Ctl, HostFn, NativeFn, Vm};
+use indexmap::IndexMap;
 use std::any::{Any, TypeId};
 use std::borrow::Cow;
+use std::collections::{BTreeMap, HashMap};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -68,12 +70,12 @@ impl<T: ObjectType> Binding<T> {
 
 impl<T: StructType> Binding<T> {
     pub fn of_struct() -> Binding<T> {
-        let defaults = T::FIELDS.iter().map(|f| f.default.map(|d| d())).collect::<Vec<_>>();
-        for (f, d) in T::FIELDS.iter().zip(&defaults) {
-            let constant = !matches!(d, Some(None | Some(Constant::Value(ConstVal::Tag(_)))));
-            assert!(constant, "the default of field `{}` of `{}` is not a Sand constant", f.name, T::NAME);
-        }
-        let defaults = defaults.into_iter().map(Option::flatten).collect();
+        let default = |f: &StructField| {
+            let d = f.default?();
+            assert!(d.is_some(), "the default of field `{}` of `{}` is not a Sand constant", f.name, T::NAME);
+            d
+        };
+        let defaults = T::FIELDS.iter().map(default).collect();
         Binding(BoundKind::Struct { rust: T::rust_type(), params: T::PARAMS, fields: T::FIELDS, defaults }, PhantomData)
     }
 }
@@ -196,7 +198,10 @@ pub struct StructField {
 
 /// A Sand constant made from a Rust value (see [`ConstValue`]).
 #[derive(Clone, Debug, PartialEq)]
-pub enum Constant {
+pub struct Constant(pub(crate) ConstRepr);
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ConstRepr {
     /// A constant that every program represents alike (never a
     /// [`ConstVal::Tag`]).
     Value(ConstVal),
@@ -208,7 +213,8 @@ pub enum Constant {
 /// A Rust value that is also a Sand constant, as the default of a struct field
 /// must be: a number, `bool`, `()`, string, duration, empty list or map,
 /// `None`, or a payload-less variant of a [`SandEnum`](crate::SandEnum) (which
-/// derives this trait).
+/// derives this trait). Implement it for another type by delegating to one of
+/// these.
 pub trait ConstValue {
     /// Returns `self` as a Sand constant, or `None` if no Sand constant equals
     /// `self` (such as a non-empty list).
@@ -218,7 +224,11 @@ pub trait ConstValue {
 #[doc(hidden)]
 pub fn variant_const<T: EnumType>(x: &T) -> Option<Constant> {
     let index = x.index();
-    T::VARIANTS[index].fields.is_empty().then(|| Constant::Variant { rust: T::rust_type(), index })
+    T::VARIANTS[index].fields.is_empty().then(|| Constant(ConstRepr::Variant { rust: T::rust_type(), index }))
+}
+
+fn constant(c: ConstVal) -> Constant {
+    Constant(ConstRepr::Value(c))
 }
 
 macro_rules! const_value {
@@ -226,54 +236,41 @@ macro_rules! const_value {
         impl ConstValue for $t {
             fn to_const(&self) -> Option<Constant> {
                 let $x = self;
-                Some(Constant::Value($e))
+                $e
             }
         }
     )*};
 }
 
 const_value! {
-    i64: x => ConstVal::Int(*x),
-    f64: x => ConstVal::Float(*x),
-    bool: x => ConstVal::Bool(*x),
-    (): _x => ConstVal::Unit,
-    String: x => ConstVal::Str(x.clone()),
-    &str: x => ConstVal::Str(x.to_string()),
+    i64: x => Some(constant(ConstVal::Int(*x))),
+    f64: x => Some(constant(ConstVal::Float(*x))),
+    bool: x => Some(constant(ConstVal::Bool(*x))),
+    (): _x => Some(constant(ConstVal::Unit)),
+    String: x => Some(constant(ConstVal::Str(x.clone()))),
+    jiff::SignedDuration: x => i64::try_from(x.as_nanos()).ok().map(|d| constant(ConstVal::Dur(d))),
 }
 
-impl ConstValue for jiff::SignedDuration {
-    fn to_const(&self) -> Option<Constant> {
-        i64::try_from(self.as_nanos()).ok().map(|d| Constant::Value(ConstVal::Dur(d)))
-    }
+macro_rules! empty_const {
+    ($($t:ident<$($p:ident),*> => $c:ident),* $(,)?) => {$(
+        impl<$($p),*> ConstValue for $t<$($p),*> {
+            fn to_const(&self) -> Option<Constant> {
+                self.is_empty().then(|| constant(ConstVal::$c))
+            }
+        }
+    )*};
 }
 
-impl<T> ConstValue for Vec<T> {
-    fn to_const(&self) -> Option<Constant> {
-        self.is_empty().then_some(Constant::Value(ConstVal::EmptyList))
-    }
-}
-
-impl<K, V> ConstValue for std::collections::HashMap<K, V> {
-    fn to_const(&self) -> Option<Constant> {
-        self.is_empty().then_some(Constant::Value(ConstVal::EmptyMap))
-    }
-}
-
-impl<K, V> ConstValue for indexmap::IndexMap<K, V> {
-    fn to_const(&self) -> Option<Constant> {
-        self.is_empty().then_some(Constant::Value(ConstVal::EmptyMap))
-    }
-}
-
-impl<K, V> ConstValue for std::collections::BTreeMap<K, V> {
-    fn to_const(&self) -> Option<Constant> {
-        self.is_empty().then_some(Constant::Value(ConstVal::EmptyMap))
-    }
+empty_const! {
+    Vec<T> => EmptyList,
+    HashMap<K, V> => EmptyMap,
+    BTreeMap<K, V> => EmptyMap,
+    IndexMap<K, V> => EmptyMap,
 }
 
 impl<T> ConstValue for Option<T> {
     fn to_const(&self) -> Option<Constant> {
-        self.is_none().then_some(Constant::Value(ConstVal::None))
+        self.is_none().then(|| constant(ConstVal::None))
     }
 }
 
@@ -362,8 +359,8 @@ pub fn enum_from_value<T: EnumType>(
 
 /// Field `i` of the payload of the enum value `v`.
 #[doc(hidden)]
-pub fn variant_field(vm: &Vm, v: Value, i: usize) -> Value {
-    vm.heap.field(v, i).unwrap_or(Value::Unit)
+pub fn variant_field(vm: &Vm, v: Value, i: usize) -> Result<Value, Ctl> {
+    vm.heap.field(v, i).ok_or_else(|| Ctl::internal("a native function read a missing variant payload"))
 }
 
 /// Builds the variant `index` of `T` with the payload that `write` converts.

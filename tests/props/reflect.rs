@@ -1,7 +1,9 @@
 //! Property tests for the type arguments of `json.decode`: rejected at
 //! compile time unless `Encode`, and decoded with run-time errors only for
-//! map keys that JSON object keys cannot hold.
+//! map keys that JSON object keys cannot hold; and the constant field defaults
+//! that fill missing fields.
 
+use super::{check, int, int_lit, str_lit};
 use proptest::prelude::*;
 use sandlang::{Config, Engine, Error, MemorySink, Policy};
 
@@ -152,5 +154,41 @@ proptest! {
             }
             Err(e) => prop_assert!(false, "{e}\n{src}"),
         }
+    }
+}
+
+/// A field type and a constant default expression of that type.
+fn constant_default() -> impl Strategy<Value = (&'static str, String)> {
+    let finite = any::<f64>().prop_filter("finite", |f| f.is_finite());
+    let leaf = prop_oneof![
+        int().prop_filter("a literal", |&i| i != i64::MIN).prop_map(|i| ("int", int_lit(i))),
+        finite.prop_map(|f| ("float", if f.is_sign_negative() { format!("(-{:?})", -f) } else { format!("{f:?}") })),
+        (-1000i64..1000).prop_map(|n| ("duration", if n < 0 { format!("-{}ms", -n) } else { format!("{n}ms") })),
+        "[a-z\"\\\n é]{0,4}".prop_map(|t| ("str", str_lit(&t))),
+        any::<bool>().prop_map(|b| ("bool", b.to_string())),
+        Just(("()", "()".to_string())),
+        Just(("[int]", "[]".to_string())),
+        Just(("[str: int]", "[:]".to_string())),
+        Just(("int?", "None".to_string())),
+        prop::sample::select(vec!["Mode.Read", "Mode.Write"]).prop_map(|v| ("Mode", v.to_string())),
+    ];
+    // Negating twice keeps a number constant.
+    (leaf, any::<bool>()).prop_map(|((ty, e), twice)| match ty {
+        "int" | "float" | "duration" if twice => (ty, format!("-(-{e})")),
+        _ => (ty, e),
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(128))]
+
+    #[test]
+    fn json_decode_fills_missing_fields_with_constant_defaults(fields in prop::collection::vec(constant_default(), 1..6)) {
+        let decls: Vec<String> = fields.iter().enumerate().map(|(i, (ty, e))| format!("    f{i}: {ty} = {e}")).collect();
+        let src = format!(
+            "import json\nenum Mode {{ Read, Write }}\nstruct S {{\n{}\n}}\nlet s: S = json.decode(\"{{}}\")?\nprint(s == S {{}})\nprint(json.encode(s) == json.encode(S {{}}))",
+            decls.join("\n")
+        );
+        check(&src, "true\ntrue\n", None)?;
     }
 }

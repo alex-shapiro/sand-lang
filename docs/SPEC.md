@@ -2847,7 +2847,8 @@ Sand keyword or is not a valid Sand identifier.
 Each field of a `SandStruct` and each payload of a `SandEnum` variant must
 implement `IntoValue` and owned `FromValue`. A tuple variant becomes a variant
 with positional payloads (`Circle(float)`), and a variant with named fields one
-with named payloads (`Rect(w: float, h: float)`). The type parameters of a
+with named payloads (`Rect(w: float, h: float)`); `#[sand(name = "<name>")]`
+overrides the Sand name of a named payload. The type parameters of a
 generic enum or struct become Sand type parameters; `bind` registers the type
 from any of its instances (`bind::<Pair<(), ()>>()`).
 
@@ -2904,6 +2905,7 @@ engine collects garbage and checks the memory limit after the call completes.
 | `HashSet<T>`, `BTreeSet<T>`                        | `Set<T>`                                               |
 | `Result<T, E>`                                     | `Result<T, Error>` or `T` (determined by `E`)          |
 | `Never`                                            | `never`                                                |
+| `sandlang::json::Json`                             | `json.Json`                                            |
 | bound type `T` (see above)                         | `T` (or `&T` for a borrowed object parameter)          |
 | `Val<T>`                                           | `T` (passed as an uncopied heap handle)                |
 | `Param<N, B>`, `Reflect<N>`                        | `N`-th type parameter and its runtime type description |

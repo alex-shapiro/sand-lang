@@ -27,7 +27,8 @@ use syn::{
 ///
 /// Variants map to Sand variants with the same name: unit variants to
 /// payload-less variants, tuple variants to positional payloads, and variants
-/// with named fields to named payloads. Each payload type must implement
+/// with named fields to named payloads (`#[sand(name = "<name>")]` overrides
+/// the Sand name of a named payload). Each payload type must implement
 /// `IntoValue` and owned `FromValue`. The type parameters of a generic enum
 /// become Sand type parameters. A payload-less variant is a `ConstValue`, so
 /// it can be the default of a `SandStruct` field.
@@ -196,13 +197,19 @@ fn reject_member_attrs(data: &Data) -> syn::Result<()> {
     fn fields(f: &Fields) -> impl Iterator<Item = &Attribute> {
         f.iter().flat_map(|f| &f.attrs)
     }
-    let attrs: Vec<&Attribute> = match data {
-        Data::Struct(s) => fields(&s.fields).collect(),
-        Data::Enum(e) => e.variants.iter().flat_map(|v| v.attrs.iter().chain(fields(&v.fields))).collect(),
-        Data::Union(u) => u.fields.named.iter().flat_map(|f| &f.attrs).collect(),
+    let (attrs, msg): (Vec<&Attribute>, _) = match data {
+        Data::Struct(s) => (fields(&s.fields).collect(), "`#[sand(...)]` applies only to the type"),
+        Data::Enum(e) => (
+            e.variants
+                .iter()
+                .flat_map(|v| v.attrs.iter().chain(fields(&v.fields).filter(|_| !matches!(v.fields, Fields::Named(_)))))
+                .collect(),
+            "`#[sand(...)]` applies only to the type and to named payload fields",
+        ),
+        Data::Union(u) => (u.fields.named.iter().flat_map(|f| &f.attrs).collect(), "`#[sand(...)]` applies only to the type"),
     };
     match attrs.into_iter().find(|a| a.path().is_ident("sand")) {
-        Some(a) => Err(Error::new_spanned(a, "`#[sand(...)]` applies only to the type")),
+        Some(a) => Err(Error::new_spanned(a, msg)),
         None => Ok(()),
     }
 }
@@ -265,6 +272,22 @@ fn conversion_bounds(input: &DeriveInput, krate: &Path, generic: &Generic) -> (T
     (imp, tyg, wh, from, into)
 }
 
+/// The Sand name of the named payload field `f` (`ident` in Rust), which
+/// `#[sand(name = "...")]` overrides.
+fn variant_field_name(f: &Field, ident: &Ident) -> syn::Result<LitStr> {
+    let mut name = LitStr::new(&ident.unraw().to_string(), ident.span());
+    for attr in f.attrs.iter().filter(|a| a.path().is_ident("sand")) {
+        attr.parse_nested_meta(|meta| {
+            if !meta.path.is_ident("name") {
+                return Err(meta.error("expected `name`"));
+            }
+            name = meta.value()?.parse()?;
+            Ok(())
+        })?;
+    }
+    Ok(name)
+}
+
 /// The name, field name and type of each field of a variant or struct.
 fn field_parts(fields: &Fields) -> impl Iterator<Item = (Option<&Ident>, &Field)> {
     fields.iter().map(|f| (f.ident.as_ref(), f))
@@ -300,15 +323,15 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
             let canon = generic.canonical(krate, fty);
             let sname = match fname {
                 Some(n) => {
-                    let lit = LitStr::new(&n.unraw().to_string(), n.span());
-                    checks.push(assert_field_name(krate, &lit, false));
+                    let lit = variant_field_name(f, n)?;
+                    checks.push(assert_field_name(krate, &lit, true));
                     quote!(::std::option::Option::Some(#lit))
                 }
                 None => quote!(::std::option::Option::None),
             };
             infos.push(quote! { #krate::native::VariantField { name: #sname, ty: <#canon as #krate::native::SandType>::sand_type } });
             let bind = format_ident!("f{k}");
-            let get = quote! { #krate::native::field_from_value::<#fty>(vm, #krate::native::variant_field(vm, v, #k), conv)? };
+            let get = quote! { #krate::native::field_from_value::<#fty>(vm, #krate::native::variant_field(vm, v, #k)?, conv)? };
             match fname {
                 Some(n) => {
                     gets.push(quote!(#n: #get));
@@ -653,6 +676,9 @@ mod tests {
         assert!(out.contains("VariantField { name : :: std :: option :: Option :: Some (\"w\") , ty : < f64 as"), "{out}");
         assert!(out.contains("E :: B (..) => 1usize"), "{out}");
         assert!(out.contains("E :: C { w : f0 } => :: sandlang :: native :: variant_into_value :: < Self , _ > (vm , 2usize"), "{out}");
+        let out = expand(sand_enum, "#[sand(module = \"m\")] enum E { A { #[sand(name = \"kind\")] r#type: i64 } }");
+        assert!(out.contains("VariantField { name : :: std :: option :: Option :: Some (\"kind\")"), "{out}");
+        assert!(out.contains("E :: A { r#type : f0 }"), "{out}");
     }
 
     #[test]
@@ -670,7 +696,7 @@ mod tests {
 
     #[test]
     fn invalid_derives_are_rejected() {
-        let cases: [(Derive, &str, &str); 10] = [
+        let cases: [(Derive, &str, &str); 12] = [
             (sand_struct, "#[sand(module = \"m\")] struct S(i64);", "`SandStruct` requires named fields"),
             (sand_struct, "#[sand(module = \"m\")] enum S { A }", "`SandStruct` can only be derived for structs"),
             (sand_struct, "#[sand(module = \"m\")] struct S<'a> { x: &'a str }", "lifetime or const parameters"),
@@ -684,6 +710,8 @@ mod tests {
             ),
             (sand_value, "#[sand(module = \"m\")] struct V { #[sand(private)] x: i64 }", "applies only to the type"),
             (sand_enum, "#[sand(module = \"m\")] enum E { #[sand(name = \"B\")] A }", "applies only to the type"),
+            (sand_enum, "#[sand(module = \"m\")] enum E { A(#[sand(name = \"x\")] i64) }", "and to named payload fields"),
+            (sand_enum, "#[sand(module = \"m\")] enum E { A { #[sand(var)] x: i64 } }", "expected `name`"),
             (sand_enum, "#[sand(module = \"m\", public)] enum E { A }", "expected `module`, `name`, `private` or `crate`"),
         ];
         for (f, src, msg) in cases {

@@ -62,6 +62,11 @@ Follow-up work, roughly in priority order.
 
 ### Embedding
 
+- [ ] Let natives call Sand function values. Natives cannot run bytecode, so
+      `native::Num` reads `T.zero()` and `T.one()` by calling the native
+      methods in fixed slots of the `Num` dictionary, and the checker requires
+      the prelude's `Num` impls to be native. Callbacks such as `sort_by` also
+      need Sand wrappers (`sort_by_keys(self.map(key))`).
 
 ### Tooling
 

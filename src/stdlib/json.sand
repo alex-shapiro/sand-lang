@@ -101,18 +101,18 @@ pub native fn parse(text: str) -> Result<Json>
 
 /// Serializes `value` as JSON text (compact if `indent == 0`, or pretty-printed
 /// with `indent` spaces per level). Finite floats include a decimal point or
-/// exponent (`2.0`), and `NaN` or infinite floats serialize as `null`.
+/// exponent (`2.0`), and `NaN` or infinite floats serialize as `null`. Aborts
+/// with kind `"invalid"` if a map key is not a string, `int`, `duration`,
+/// `bool`, payload-less variant, or value type.
 pub native fn encode<T: Encode>(value: T, indent: int = 0) -> str
 
 /// Parses `text` and converts it into type `T`. Missing struct fields use their
 /// declared default or `None`; type mismatches fail with kind `"parse"` and a
-/// JSON path diagnostic. The compiler rejects types that contain functions,
-/// tasks, channels, ranges, native objects, or unsupported map keys.
+/// JSON path diagnostic. Fails with kind `"invalid"` on a map key whose type
+/// `encode` cannot write.
 pub native fn decode<reflect T: Encode>(text: str) -> Result<T>
 
-/// Converts `value` into a `Json` value: primitives map directly, `()` and
-/// `None` map to `Null`, `Some(x)` maps to `x`, lists, sets, and tuples map to
-/// `Arr`, `[str: V]` maps and structs map to `Obj`, unit enum variants map to
-/// `Str`, payload variants map to `{"Variant": payload}`, `bytes` maps to
-/// Base64, and `duration` maps to nanoseconds.
+/// Converts `value` into the `Json` value that `encode` writes: for example,
+/// `()` and `None` map to `Null`, `Some(x)` maps to `x`, lists map to `Arr`,
+/// and maps and structs map to `Obj`. Aborts as `encode` does.
 pub native fn to_json<T: Encode>(value: T) -> Json

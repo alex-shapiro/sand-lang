@@ -14,7 +14,7 @@ mod unify;
 use crate::diag::{Diag, FileId, SourceFile, Span};
 use crate::engine::NativeDecls;
 use crate::hir::*;
-use crate::native::{BoundKind, Bounds, Constant, EnumVariant, NativeDecl, Signature, StructField, Type};
+use crate::native::{BoundKind, Bounds, ConstRepr, Constant, EnumVariant, NativeDecl, Signature, StructField, Type};
 use crate::syntax::ast::{self, ItemKind, TypeExpr, TypeExprKind};
 use crate::types::*;
 use crate::vm::value::{FxBuild, FxHashMap};
@@ -1547,7 +1547,6 @@ impl Checker {
                 if i >= fields.len() {
                     break;
                 }
-                let const_default = const_of(d);
                 let name = self.sym(&format!("{}.{}", s.name.name, f.name.name));
                 let helper = self.add_fn(FnInfo {
                     name,
@@ -1569,7 +1568,6 @@ impl Checker {
                     trait_of: None,
                 });
                 fields[i].default = Some(helper);
-                fields[i].const_default = const_default;
             }
         }
         self.types[id as usize].kind = TypeDefKind::Struct { fields };
@@ -1671,8 +1669,8 @@ impl Checker {
                     // A variant default has the type of its field, so if its enum is
                     // not registered, resolving the field's type reported that.
                     let const_default = match default {
-                        Some(Constant::Value(c)) => Some(c.clone()),
-                        Some(Constant::Variant { rust, index }) => {
+                        Some(Constant(ConstRepr::Value(c))) => Some(c.clone()),
+                        Some(Constant(ConstRepr::Variant { rust, index })) => {
                             let first = self.enum_bindings.iter_from(0).find(|(t, _)| t == rust).map(|&(_, first)| first);
                             first.map(|first| ConstVal::Tag(first + *index as u32))
                         }
@@ -1722,6 +1720,30 @@ impl Checker {
             }
         }
         None
+    }
+
+    /// The value of `h` if it is a constant that `json.decode` can use as a
+    /// field default: a literal, `[]`, `[:]`, or a payload-less variant.
+    fn const_of(&self, h: &HExpr) -> Option<ConstVal> {
+        Some(match &h.kind {
+            HKind::Unit => ConstVal::Unit,
+            HKind::Bool(b) => ConstVal::Bool(*b),
+            HKind::Int(i) => ConstVal::Int(*i),
+            HKind::Float(f) => ConstVal::Float(*f),
+            HKind::Dur(d) => ConstVal::Dur(*d),
+            HKind::Str(s) => ConstVal::Str(s.clone()),
+            HKind::List(xs) if xs.is_empty() => ConstVal::EmptyList,
+            HKind::Map(xs) if xs.is_empty() => ConstVal::EmptyMap,
+            HKind::Tag(id) if *id == self.none_rt() => ConstVal::None,
+            HKind::Tag(id) => ConstVal::Tag(*id),
+            HKind::Unary { op: HUnOp::Neg, e } => match self.const_of(e)? {
+                ConstVal::Int(i) => ConstVal::Int(i.checked_neg()?),
+                ConstVal::Float(f) => ConstVal::Float(-f),
+                ConstVal::Dur(d) => ConstVal::Dur(d.checked_neg()?),
+                _ => return None,
+            },
+            _ => return None,
+        })
     }
 
     fn rust_type(&self, d: TypeDefId) -> Option<std::any::TypeId> {
@@ -2588,11 +2610,11 @@ impl Checker {
                 let ItemKind::Struct(s) = &m.items[item as usize].kind else { unreachable!() };
                 let e = s.fields[field as usize].default.as_ref().unwrap();
                 let h = self.check_expr(e, ret);
-                // A payload-less variant is a constant that `json.decode` can use.
-                if let (HKind::Tag(id), Some(Ty::Named(d, _))) = (&h.kind, self_ty.map(|t| self.arena.get(t)))
+                let c = self.const_of(&h);
+                if let Some(Ty::Named(d, _)) = self_ty.map(|t| self.arena.get(t))
                     && let TypeDefKind::Struct { fields } = &mut self.types[d as usize].kind
                 {
-                    fields[field as usize].const_default = Some(ConstVal::Tag(*id));
+                    fields[field as usize].const_default = c;
                 }
                 (h, e.span)
             }
@@ -2903,37 +2925,6 @@ fn is_closed_const(e: &ast::Expr) -> bool {
         }
         _ => false,
     }
-}
-
-fn const_of(e: &ast::Expr) -> Option<ConstVal> {
-    use ast::ExprKind as K;
-    Some(match &e.kind {
-        K::Unit => ConstVal::Unit,
-        K::Bool(b) => ConstVal::Bool(*b),
-        K::Int(i) => ConstVal::Int(*i),
-        K::Float(f) => ConstVal::Float(*f),
-        K::Duration(d) => ConstVal::Dur(*d),
-        K::Str(segs) => {
-            let mut s = String::new();
-            for seg in segs {
-                match seg {
-                    ast::StrSeg::Text(t) => s.push_str(t),
-                    _ => return None,
-                }
-            }
-            ConstVal::Str(s)
-        }
-        K::List(xs) if xs.is_empty() => ConstVal::EmptyList,
-        K::Map(xs) if xs.is_empty() => ConstVal::EmptyMap,
-        K::Ident(id) if id.name == "None" => ConstVal::None,
-        K::Unary(ast::UnOp::Neg, inner) => match inner.kind {
-            K::Int(i) => ConstVal::Int(-i),
-            K::Float(f) => ConstVal::Float(-f),
-            K::Duration(d) => ConstVal::Dur(-d),
-            _ => return None,
-        },
-        _ => return None,
-    })
 }
 
 /// Names referenced (as identifiers or struct-literal shorthands) inside

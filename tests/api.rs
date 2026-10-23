@@ -1302,6 +1302,48 @@ fn boxes_module() -> NativeModule {
     m
 }
 
+/// A generic recursive enum whose named payload has a renamed field.
+#[derive(Clone, Debug, PartialEq, sandlang::SandEnum)]
+#[sand(module = "cons")]
+enum Chain<T> {
+    End,
+    Link {
+        #[sand(name = "item")]
+        r#type: T,
+        next: Box<Chain<T>>,
+    },
+}
+
+#[test]
+fn generic_recursive_enums_bind_with_renamed_payloads() {
+    let mut m = NativeModule::new("cons");
+    m.bind::<Chain<()>>();
+    m.function("words", |n: i64| (0..n).fold(Chain::End, |next, i| Chain::Link { r#type: format!("w{i}"), next: Box::new(next) }));
+    m.function("sum", |c: Chain<i64>| {
+        let (mut total, mut c) = (0, c);
+        while let Chain::Link { r#type, next } = c {
+            total += r#type;
+            c = *next;
+        }
+        total
+    });
+    let src = r#"
+import cons
+let w = cons.words(2)
+print(w)
+match w {
+    Link(first, _) => print(first)
+    End => print("end")
+}
+print(cons.sum(cons.Chain.Link(item: 4, next: cons.Chain.Link(item: 5, next: cons.Chain.End))))
+help(cons.Chain)
+"#;
+    let (r, out, _) = run_src(Config::new().module(m), src);
+    r.unwrap();
+    let help = "enum cons.Chain<T>\n\nA generic recursive enum whose named payload has a renamed field.\n\nVariants:\n    End\n    Link(item: T, next: Chain<T>)\n";
+    assert_eq!(out, format!("Link(\"w1\", Link(\"w0\", End))\nw1\n9\n{help}"));
+}
+
 #[test]
 fn generic_host_types_bind_type_parameters() {
     let src = r#"

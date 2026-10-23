@@ -149,6 +149,7 @@ Sand infers the Sand function signature from the Rust parameter and return types
 | `HashMap<K, V>`, `BTreeMap<K, V>`, `IndexMap<K, V>`          | `[K: V]`                     |
 | `HashSet<T>`, `BTreeSet<T>`                                  | `Set<T>`                     |
 | `jiff::SignedDuration`                                       | `duration`                   |
+| `sandlang::json::Json`                                       | `json.Json`                  |
 | tuples of up to 8 elements                                   | tuples                       |
 | Rust enum with `#[derive(SandEnum)]`                         | matching Sand `enum`         |
 | Rust struct with `#[derive(SandStruct)]`                     | matching Sand `struct`       |
@@ -260,7 +261,7 @@ Err(Error { kind: "permission_denied", message: "permission denied: door back" }
 
 `NativeModule::source` attaches Sand source declarations to a native module. Use `native fn` declarations in the Sand source to specify default parameter values or generic type parameters for registered functions. `Engine::new` type-checks registered modules and returns `Error::Compile` if a `native fn` declaration does not match its Rust function signature.
 
-A generic Rust function accepts values of its `N`-th type parameter as `Param<N, B>`, where `B` declares any built-in bounds (`bound::Eq`, `bound::Ord`, `bound::Hash`, `bound::Num`, `bound::Encode`, or a tuple such as `(bound::Ord, bound::Hash)`) required by the Rust implementation. The corresponding `native fn` declaration in `NativeModule::source` must declare those bounds (`native fn max<T: Ord>(xs: [T]) -> T?`). For each type parameter that the declaration bounds by `Num`, the Rust function takes the evidence `Num<N>` (with `zero` and `one`) before its other parameters.
+A generic Rust function accepts values of its `N`-th type parameter as `Param<N, B>`, where `B` declares any built-in bounds (`bound::Eq`, `bound::Ord`, `bound::Hash`, `bound::Num`, `bound::Encode`, or a tuple such as `(bound::Ord, bound::Hash)`) required by the Rust implementation. The corresponding `native fn` declaration in `NativeModule::source` must declare those bounds (`native fn max<T: Ord>(xs: [T]) -> T?`). For each type parameter that the declaration bounds by `Num`, the Rust function takes the evidence `Num<N>` (with `zero` and `one`) before the declared parameters.
 
 ## Interactive sessions
 

@@ -523,3 +523,33 @@ let o: Opened = json.decode("{\"path\": \"a\"}")?
 print(o)
 --- stdout
 Opened { path: "a", mode: Write }
+
+=== decode fills missing fields with their constant defaults
+import json
+enum Mode { Read, Write }
+struct All {
+    u: () = ()
+    b: bool = true
+    n: int = -3
+    x: float = -1.5
+    d: duration = -2s
+    s: str = "q\""
+    xs: [int] = []
+    m: [str: int] = [:]
+    o: int? = None
+    mode: Mode = Mode.Read
+    neg: int = --4
+}
+let a: All = json.decode("{}")?
+print(a)
+print(a == All {})
+struct Computed { n: int = 1 + 1, o: int? = Some(1) }
+let c: Result<Computed> = json.decode("{}")
+print(c)
+let o: Computed = json.decode("{\"n\": 5}")?
+print(o)
+--- stdout
+All { u: (), b: true, n: -3, x: -1.5, d: -2s, s: "q\"", xs: [], m: [:], o: None, mode: Read, neg: 4 }
+true
+Err(Error { kind: "parse", message: "$: missing field `n`" })
+Computed { n: 5, o: None }
