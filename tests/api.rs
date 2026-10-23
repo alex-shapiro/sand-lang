@@ -1520,6 +1520,18 @@ fn rust_field_defaults_must_be_sand_constants() {
 }
 
 #[test]
+#[should_panic(expected = "the default of field `table` of `Big` is not a Sand constant, or has more than 65536 parts or 64 levels")]
+fn rust_field_defaults_are_bounded() {
+    #[derive(sandlang::SandStruct)]
+    #[sand(module = "lab")]
+    struct Big {
+        #[sand(default = vec![0; 1 << 16])]
+        table: Vec<i64>,
+    }
+    NativeModule::new("lab").bind::<Big>();
+}
+
+#[test]
 fn rust_field_defaults_can_be_any_constant() {
     #[derive(Debug, PartialEq, sandlang::SandStruct)]
     #[sand(module = "draw")]

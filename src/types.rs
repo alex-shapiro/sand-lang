@@ -593,7 +593,7 @@ pub struct FieldDef {
     /// Helper function computing the default value.
     pub default: Option<FnId>,
     /// The default if it is a constant, which `json.decode` uses.
-    pub const_default: Option<ConstVal>,
+    pub const_default: Option<Arc<ConstVal>>,
     pub doc: Option<Arc<str>>,
 }
 
@@ -625,7 +625,34 @@ pub enum ConstVal<V = u32, S = TypeDefId> {
     Struct(S, Vec<ConstVal<V, S>>),
 }
 
+/// The most parts (values at any level) of a constant field default.
+pub const MAX_CONST_PARTS: usize = 1 << 16;
+
+/// The deepest nesting of a constant field default (a scalar has depth 1).
+pub const MAX_CONST_DEPTH: usize = 64;
+
 impl<V, S> ConstVal<V, S> {
+    /// The number of parts of `self`, or `None` if it has more than
+    /// [`MAX_CONST_PARTS`] or nests deeper than [`MAX_CONST_DEPTH`]. Stops
+    /// at the first part beyond these limits.
+    pub fn measure(&self) -> Option<usize> {
+        fn walk<V, S>(c: &ConstVal<V, S>, left: &mut usize, depth: usize) -> bool {
+            if depth == 0 || *left == 0 {
+                return false;
+            }
+            *left -= 1;
+            match c {
+                ConstVal::Tuple(xs) | ConstVal::List(xs) | ConstVal::Set(xs) | ConstVal::Variant(_, xs) | ConstVal::Struct(_, xs) => {
+                    xs.iter().all(|x| walk(x, left, depth - 1))
+                }
+                ConstVal::Map(kvs) => kvs.iter().all(|(k, v)| walk(k, left, depth - 1) && walk(v, left, depth - 1)),
+                _ => true,
+            }
+        }
+        let mut left = MAX_CONST_PARTS;
+        walk(self, &mut left, MAX_CONST_DEPTH).then_some(MAX_CONST_PARTS - left)
+    }
+
     /// `self` with each variant identified by `variant` and each struct by
     /// `def`, or `None` if one of them returns `None`.
     pub fn resolve<V2, S2>(&self, variant: &impl Fn(&V) -> Option<V2>, def: &impl Fn(&S) -> Option<S2>) -> Option<ConstVal<V2, S2>> {

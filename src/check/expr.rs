@@ -615,6 +615,10 @@ impl Checker {
                     self.error(g.name.span, "local functions cannot have trait bounds; declare the function at the top level");
                     self.params[p as usize].traits.clear();
                 }
+                // A local function is a closure, which takes no hidden arguments.
+                if g.reflect {
+                    self.error(g.name.span, "local functions cannot have `reflect` type parameters; declare the function at the top level");
+                }
             }
             let mut ptys = Vec::new();
             self.check_param_names(f.params.iter().map(|p| &p.name));

@@ -314,7 +314,8 @@ fn greet(name: str, greeting: str = "Hello") {
   Each type parameter in such a type argument must be a `reflect` type
   parameter of the calling function. A recursive function that nests a
   description more than 256 levels deep (`T` as `[T]`) aborts with kind
-  `"limit"`. Trait and impl methods cannot have a `reflect` type parameter.
+  `"limit"`. Local functions and trait and impl methods cannot have `reflect`
+  type parameters.
 - Functions may be declared inside blocks; such local functions may capture
   enclosing variables and may call themselves recursively. Local functions
   declared consecutively in the same block may call each other.
@@ -2074,8 +2075,8 @@ than 256 bytes in a message is cut and ends in `…`. Parsing is limited to a
 nesting depth of 512.
 
 `decode` builds a constant default (built only from literals, ranges of
-ints, tuples, lists, maps, `set([...])`, variants, and struct literals)
-directly. It runs the other defaults (`id: str = uuid.v4()`) only after the
+ints, tuples, lists, maps, `set([...])`, variants, and struct literals, with
+at most 65536 parts nested at most 64 levels deep) directly. It runs the other defaults (`id: str = uuid.v4()`) only after the
 whole text decodes without error: the defaults of an object run in
 declaration order, after those of the objects inside it.
 
@@ -2870,8 +2871,8 @@ field private to the module, `#[sand(var)]` makes it mutable (`var`), and
 `#[sand(default = <expr>)]` gives a field the default `Default::default()` or
 `<expr>`. The default must be a constant: a number, `bool`, `()`, string,
 `bytes`, duration, or a tuple, `Vec`, map, set, `Option`, `SandEnum`, or
-`SandStruct` of constants. `bind` panics otherwise (for example, on a
-`jiff::Timestamp`).
+`SandStruct` of constants, with at most 65536 parts nested at most 64 levels
+deep. `bind` panics otherwise (for example, on a `jiff::Timestamp`).
 
 Recursive types can reference themselves through `Vec`, map, or `Box` fields.
 Because the engine copies each reachable struct and enum value during

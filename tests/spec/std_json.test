@@ -729,6 +729,17 @@ trait Load { fn load<reflect T>() -> int }
 --- error
 1: the type parameters of trait and impl methods cannot be `reflect`
 
+=== local functions cannot be reflect
+import json
+fn outer<reflect T: Encode>(text: str) -> Result<[T]> {
+    fn inner<reflect U: Encode>(t: str) -> Result<[U]> { json.decode(t) }
+    fn same(t: str) -> Result<[T]> { json.decode(t) }
+    let _ = same(text)
+    inner(text)
+}
+--- error
+3: local functions cannot have `reflect` type parameters; declare the function at the top level
+
 === functions with reflect type parameters are values
 import json
 fn load<reflect T: Encode>(text: str) -> Result<[T]> { json.decode(text) }

@@ -190,6 +190,19 @@ pub struct FnInfo {
     pub trait_of: Option<TraitId>,
 }
 
+/// The constant defaults that `Checker::helper_const` has found.
+#[derive(Default)]
+struct ConstMemo {
+    /// The constant (or `None`) that each default helper of the module being
+    /// checked returns.
+    done: FxHashMap<FnId, Option<ConstVal>>,
+    /// The number of helpers being folded, each inside the one before.
+    nesting: usize,
+    /// Whether a helper was not folded because `nesting` reached
+    /// [`MAX_CONST_DEPTH`].
+    cut: bool,
+}
+
 /// The fields or payloads of a Rust-bound struct or enum.
 enum BoundMembers {
     Struct(&'static [StructField], Arc<[Option<Constant>]>),
@@ -1672,7 +1685,7 @@ impl Checker {
                     }
                     let doc = Some(f.doc).filter(|d| !d.is_empty()).map(Arc::from);
                     let name = self.sym(f.name);
-                    let const_default = default.as_ref().and_then(|c| self.bound_const(c));
+                    let const_default = default.as_ref().and_then(|c| self.bound_const(c)).map(Arc::new);
                     fields.push(FieldDef { name, ty, mutable: f.var, is_pub: f.public, default: None, const_default, doc });
                 }
                 self.types[id as usize].kind = TypeDefKind::Struct { fields };
@@ -1739,12 +1752,12 @@ impl Checker {
     /// module being checked declares, once the bodies of their default
     /// helpers (from `first_fn` on) are checked.
     fn find_const_defaults(&mut self, first_fn: usize) {
-        let mut memo = FxHashMap::default();
+        let mut memo = ConstMemo::default();
         for f in first_fn..self.fns.len() {
             if let Some(FnDeclRef::FieldDefault { field, .. }) = self.fns[f].decl
                 && let Some(Ty::Named(d, _)) = self.fns[f].self_ty.map(|t| self.arena.get(t))
             {
-                let c = self.helper_const(f as FnId, &mut memo);
+                let c = self.helper_const(f as FnId, &mut memo).map(Arc::new);
                 if let TypeDefKind::Struct { fields } = &mut self.types[d as usize].kind {
                     fields[field as usize].const_default = c;
                 }
@@ -1752,29 +1765,51 @@ impl Checker {
         }
     }
 
-    /// The constant that the field default helper `f` returns, if any. `memo`
-    /// holds the results for the helpers of the module being checked.
-    fn helper_const(&self, f: FnId, memo: &mut FxHashMap<FnId, Option<ConstVal>>) -> Option<ConstVal> {
+    /// The constant that the field default helper `f` returns, if any.
+    fn helper_const(&self, f: FnId, memo: &mut ConstMemo) -> Option<ConstVal> {
         let fi = &self.fns[f as usize];
         let Some(FnDeclRef::FieldDefault { field, .. }) = fi.decl else { return None };
         if fi.module != self.cur_mod {
             let Ty::Named(d, _) = self.arena.get(fi.self_ty?) else { return None };
-            return self.types[d as usize].fields()[field as usize].const_default.clone();
+            let c = self.types[d as usize].fields()[field as usize].const_default.as_deref()?;
+            return self.charge_copy(c).then(|| c.clone());
         }
-        if let Some(c) = memo.get(&f) {
-            return c.clone();
+        if let Some(c) = memo.done.get(&f) {
+            return c.as_ref().filter(|c| self.charge_copy(c)).cloned();
+        }
+        // A struct literal nests the defaults that it omits one level deeper,
+        // so helpers nest about as deep as the constants they build.
+        if memo.nesting == MAX_CONST_DEPTH {
+            memo.cut = true;
+            return None;
         }
         // A default that contains itself is not a constant.
-        memo.insert(f, None);
-        let c = self.bodies.get(f).and_then(|b| self.const_of(&b.body, &mut Vec::new(), memo));
-        memo.insert(f, c.clone());
+        memo.done.insert(f, None);
+        let outer_cut = std::mem::replace(&mut memo.cut, false);
+        memo.nesting += 1;
+        let c = self.bodies.get(f).and_then(|b| self.const_of(&b.body, &mut Vec::new(), memo)).filter(|c| self.charge_copy(c));
+        memo.nesting -= 1;
+        // A cut depends on the helpers outside `f`, so a result that was cut
+        // is not kept: alone, `f` can still be a constant.
+        match memo.cut {
+            true => memo.done.remove(&f),
+            false => memo.done.insert(f, c.clone()),
+        };
+        memo.cut |= outer_cut;
         c
+    }
+
+    /// Charges the compile budget for a copy of `c`. Returns `false` if the
+    /// budget is spent or `c` is too large to be a constant
+    /// ([`ConstVal::measure`]).
+    fn charge_copy(&self, c: &ConstVal) -> bool {
+        c.measure().is_some_and(|parts| self.budget.charge(parts as u64))
     }
 
     /// The value of `h` if it is a constant: built only from literals, ranges
     /// of ints, constructors, and the defaults of struct fields. `env` holds
     /// the constants of the locals of the enclosing blocks.
-    fn const_of(&self, h: &HExpr, env: &mut Vec<(LocalId, ConstVal)>, memo: &mut FxHashMap<FnId, Option<ConstVal>>) -> Option<ConstVal> {
+    fn const_of(&self, h: &HExpr, env: &mut Vec<(LocalId, ConstVal)>, memo: &mut ConstMemo) -> Option<ConstVal> {
         if !self.budget.charge(1) {
             return None;
         }
@@ -1812,7 +1847,13 @@ impl Checker {
                 ConstVal::Dur(d) => ConstVal::Dur(d.checked_neg()?),
                 _ => return None,
             },
-            HKind::Local(l) => env.iter().rev().find(|(x, _)| x == l)?.1.clone(),
+            HKind::Local(l) => {
+                let c = &env.iter().rev().find(|(x, _)| x == l)?.1;
+                if !self.charge_copy(c) {
+                    return None;
+                }
+                c.clone()
+            }
             HKind::Field { obj, index } => match self.const_of(obj, env, memo)? {
                 ConstVal::Struct(_, mut fields) if (*index as usize) < fields.len() => fields.swap_remove(*index as usize),
                 _ => return None,
@@ -2871,7 +2912,13 @@ impl Checker {
             }
             if self.arena.has_vars(z) {
                 self.infer_error(sp, format!("cannot infer type for this {what}; add a type annotation"));
-            } else if let Some(p) = self.arena.params_of(z).into_iter().find(|&p| self.reflect_param_local(p).is_none()) {
+            } else if let Some(p) = self
+                .arena
+                .params_of(z)
+                .into_iter()
+                // The `reflect` type parameters of local functions are reported where they are declared.
+                .find(|&p| !self.params[p as usize].reflect && self.reflect_param_local(p).is_none())
+            {
                 let msg = format!(
                     "this {what} needs a description of `{}` at run time, so `{}` must be a `reflect` type parameter of this function",
                     self.show(z),

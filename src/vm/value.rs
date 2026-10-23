@@ -1088,7 +1088,8 @@ pub type FieldDesc = (String, Arc<TypeDesc>, FieldDefault);
 #[derive(Clone, Debug)]
 pub enum FieldDefault {
     None,
-    Const(crate::types::ConstVal),
+    /// A constant, which the instances of a [`DescTemplate`] share.
+    Const(Arc<crate::types::ConstVal>),
     /// A default that is not a constant: the proto of the function that
     /// computes it and stores it in the struct, its one capture.
     Computed(u32),
@@ -1384,7 +1385,10 @@ impl Instance<'_> {
             TypeDesc::Set(e, fill) => TypeDesc::Set(self.node(e), *fill),
             TypeDesc::Option(e) => TypeDesc::Option(self.node(e)),
             TypeDesc::Map(k, v) => TypeDesc::Map(self.node(k), self.node(v)),
-            TypeDesc::Tuple(ts) => TypeDesc::Tuple(ts.iter().map(|t| self.node(t)).collect()),
+            TypeDesc::Tuple(ts) => {
+                self.built += ts.len() * std::mem::size_of::<Arc<TypeDesc>>();
+                TypeDesc::Tuple(ts.iter().map(|t| self.node(t)).collect())
+            }
             TypeDesc::Struct { id, def, name, fields, rust } => {
                 let fields: Vec<FieldDesc> = fields.iter().map(|(n, t, d)| (n.clone(), self.node(t), d.clone())).collect();
                 self.built += fields.iter().map(|f| f.0.len() + std::mem::size_of::<FieldDesc>()).sum::<usize>();
@@ -1410,6 +1414,41 @@ impl Instance<'_> {
         let new = Arc::new(new);
         self.memo.insert(addr(d), new.clone());
         new
+    }
+}
+
+impl Drop for TypeDesc {
+    /// Drops the nodes that only `self` holds without recursion: a
+    /// description can nest deeper than the stack of the thread that drops
+    /// it allows.
+    fn drop(&mut self) {
+        /// Moves the children of `d` that only `d` holds to `out`.
+        fn take(d: &mut TypeDesc, out: &mut Vec<Arc<TypeDesc>>) {
+            static HOLE: std::sync::LazyLock<Arc<TypeDesc>> = std::sync::LazyLock::new(|| Arc::new(TypeDesc::Unit));
+            let mut one = |e: &mut Arc<TypeDesc>| {
+                if Arc::strong_count(e) == 1 {
+                    out.push(std::mem::replace(e, HOLE.clone()));
+                }
+            };
+            match d {
+                TypeDesc::List(e) | TypeDesc::Set(e, _) | TypeDesc::Option(e) => one(e),
+                TypeDesc::Map(k, v) => {
+                    one(k);
+                    one(v);
+                }
+                TypeDesc::Tuple(ts) => ts.iter_mut().for_each(one),
+                TypeDesc::Struct { fields, .. } => fields.iter_mut().for_each(|f| one(&mut f.1)),
+                TypeDesc::Enum { variants, .. } => variants.iter_mut().flat_map(|v| &mut v.2).for_each(one),
+                _ => {}
+            }
+        }
+        let mut todo = Vec::new();
+        take(self, &mut todo);
+        while let Some(d) = todo.pop() {
+            if let Some(mut d) = Arc::into_inner(d) {
+                take(&mut d, &mut todo);
+            }
+        }
     }
 }
 
@@ -1589,6 +1628,41 @@ impl Obj {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deep_descriptions_drop_on_a_small_stack() {
+        let shared = Arc::new(TypeDesc::Int);
+        let mut d = Arc::new(TypeDesc::Unit);
+        for i in 0..200_000 {
+            d = Arc::new(match i % 4 {
+                0 => TypeDesc::List(d),
+                1 => TypeDesc::Map(shared.clone(), d),
+                2 => TypeDesc::Tuple(vec![shared.clone(), d]),
+                _ => TypeDesc::Struct { id: 0, def: 0, name: "S".into(), fields: vec![("f".into(), d, FieldDefault::None)], rust: None },
+            });
+        }
+        std::thread::Builder::new().stack_size(64 << 10).spawn(move || drop(d)).unwrap().join().unwrap();
+        assert_eq!(Arc::strong_count(&shared), 1);
+    }
+
+    #[test]
+    fn instances_of_a_description_template_share_its_constant_defaults() {
+        // An instance that copied the constant would hold memory that its
+        // `built` bytes do not count.
+        let table = Arc::new(crate::types::ConstVal::List(vec![crate::types::ConstVal::Int(0); 1000]));
+        let fields = vec![
+            ("v".to_string(), Arc::new(TypeDesc::Param(0)), FieldDefault::None),
+            ("table".to_string(), Arc::new(TypeDesc::List(Arc::new(TypeDesc::Int))), FieldDefault::Const(table.clone())),
+        ];
+        let desc = Arc::new(TypeDesc::Struct { id: 0, def: 0, name: "Big".into(), fields, rust: None });
+        let template = DescTemplate::new(desc, vec![0]);
+        let arg = DescObj { desc: Arc::new(TypeDesc::Str), built: 0, depth: 0 };
+        let instance = template.instantiate(&[&arg]).unwrap();
+        let TypeDesc::Struct { fields, .. } = &*instance.desc else { panic!("{:?}", instance.desc) };
+        assert!(matches!(&*fields[0].1, TypeDesc::Str));
+        assert!(matches!(&fields[1].2, FieldDefault::Const(c) if Arc::ptr_eq(c, &table)));
+        assert!((instance.built as usize) < 1000, "{}", instance.built);
+    }
 
     #[test]
     fn saturating_conversions_never_wrap() {

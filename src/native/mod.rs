@@ -14,7 +14,7 @@ pub use convert::mismatch;
 use crate::check::ModKind;
 use crate::engine::Registry;
 use crate::syntax::lexer::{is_ident, is_keyword};
-use crate::types::{ConstVal, ValueTypeInfo};
+use crate::types::{ConstVal, MAX_CONST_DEPTH, MAX_CONST_PARTS, ValueTypeInfo};
 use crate::vm::heap::Heap;
 use crate::vm::value::{ChannelObj, MapObj, Obj, SetObj, TaskObj, TypeDesc, Value, ValueType};
 use crate::vm::{Ctl, HostFn, NativeFn, Vm};
@@ -70,7 +70,12 @@ impl<T: StructType> Binding<T> {
     pub fn of_struct() -> Binding<T> {
         let default = |f: &StructField| {
             let d = f.default?();
-            assert!(d.is_some(), "the default of field `{}` of `{}` is not a Sand constant", f.name, T::NAME);
+            assert!(
+                d.as_ref().is_some_and(|c| c.0.measure().is_some()),
+                "the default of field `{}` of `{}` is not a Sand constant, or has more than {MAX_CONST_PARTS} parts or {MAX_CONST_DEPTH} levels",
+                f.name,
+                T::NAME
+            );
             d
         };
         let defaults = T::FIELDS.iter().map(default).collect();

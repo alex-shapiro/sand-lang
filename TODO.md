@@ -125,6 +125,10 @@ Follow-up work, roughly in priority order.
       50 ns for the native `json.decode` on `main`, and profiling does not
       show where the 18 ns go. (The Sand `decode` wrapper adds 25 ns more; it
       stays, so that natives run no Sand code.)
+- [ ] `Op::Describe` builds a new description on each call: a function
+      that passes `[T]` to `json.decode` takes about 90 ns more per call
+      than one that passes `[P]`. Keep the instances of each template by
+      the descriptions of their arguments.
 - [ ] Dispatch loop: the cost of individual instructions shifts by up to
       ±15% between builds as LLVM reallocates registers. A threaded design
       (one function per instruction with guaranteed tail calls, Rust's
@@ -177,4 +181,9 @@ Follow-up work, roughly in priority order.
       equal elements twice. Require `Hash` of the element and key types of
       `Set` and map types wherever a type is written.
 - [ ] Trait bounds on struct/enum type parameters.
+- [ ] Allow trait bounds and `reflect` type parameters on local functions.
+      A local function is a closure, so a call passes no dictionaries or
+      descriptions: pass them as calls of top-level functions do
+      (`hidden_args`), and wrap a local function used as a value as
+      `wrapper_value` does.
 - [ ] Non-constant trait method defaults.

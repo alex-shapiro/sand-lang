@@ -459,3 +459,28 @@ fn many_inlined_lambdas_compile_in_linear_time() {
         format!("fn main() {{\n    var xs = [1, 2, 3]\n{}    print(xs)\n}}\nmain()\n", "    xs = xs.map(x => x + 1)\n".repeat(n))
     });
 }
+
+#[test]
+fn constant_field_defaults_are_bounded() {
+    // Locals that repeat a list make a default of 10^8 parts: it is not a
+    // constant, so checking does not build it.
+    let mut lets = vec!["let a0 = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]".to_string()];
+    let mut ty = "[int]".to_string();
+    for i in 1..8 {
+        lets.push(format!("let a{i} = [{}]", vec![format!("a{}", i - 1); 10].join(", ")));
+        ty = format!("[{ty}]");
+    }
+    let wide = format!("struct S {{\n    x: {ty} = {{\n        {}\n        a7\n    }}\n}}", lets.join("\n        "));
+    check(Config::new(), &wide).0.unwrap();
+    // A chain of struct literals nests deeper than a constant can: the
+    // defaults of the outer structs run as computed defaults.
+    let mut deep = String::from("import json\n");
+    for i in 0..300 {
+        deep += &format!("struct S{i} {{ next: S{} = S{} {{}} }}\n", i + 1, i + 1);
+    }
+    deep += "struct S300 { v: int = 1 }\nlet s: S0 = json.decode(\"{}\")?\nprint(s == S0 {})\n";
+    let out = MemorySink::new();
+    let mut engine = Engine::new(Config::new().stdout(out.clone())).unwrap();
+    rt().block_on(engine.run_source("main.sand", &deep)).unwrap();
+    assert_eq!(out.contents(), "true\n");
+}

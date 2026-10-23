@@ -439,7 +439,22 @@ fn hostile_compile_inputs_are_contained() {
     for i in 1..n {
         doubling += &format!("let a{i} = (a{}, a{})\n", i - 1, i - 1);
     }
+    // A field default of 2^40 parts, built by locals that repeat a list.
+    let mut repeated = String::from("let a0 = [0, 0]\n");
+    let mut ty = String::from("[int]");
+    for i in 1..n {
+        repeated += &format!("let a{i} = [a{}, a{}]\n", i - 1, i - 1);
+        ty = format!("[{ty}]");
+    }
+    // Field defaults that nest one struct per level, 20000 levels deep.
+    let mut chain = String::from("import json\n");
+    for i in 0..20_000 {
+        chain += &format!("struct S{i} {{ next: S{} = S{} {{}} }}\n", i + 1, i + 1);
+    }
+    chain += "struct S20000 { v: int = 1 }\nlet s: Result<S0> = json.decode(\"{}\")\nprint(s.is_ok())\n";
     let programs = [
+        format!("import json\nstruct S {{\n    x: {ty} = {{\n{repeated}a{}\n    }}\n}}\nlet s: Result<S> = json.decode(\"{{}}\")\n", n - 1),
+        chain,
         doubling,
         format!(
             "enum E {{ A, B, C }}\nfn f(t: ({})) -> int {{\n    match t {{\n        ({}) => 0\n        ({}) => 1\n    }}\n}}\n",

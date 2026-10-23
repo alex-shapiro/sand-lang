@@ -389,3 +389,44 @@ proptest! {
         check(&src, &format!("true\ntrue\ntrue\n[]\n[{}]\n", order.join(", ")), None)?;
     }
 }
+
+/// The width and depth of a list default whose parts stay below 2^18, so
+/// that some exceed the limits of constants and some do not.
+fn list_shape() -> impl Strategy<Value = (usize, usize)> {
+    (1usize..4).prop_flat_map(|width| {
+        let max_depth = match width {
+            1 => 80usize,
+            2 => 18,
+            _ => 11,
+        };
+        (Just(width), 1..=max_depth)
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    #[test]
+    fn json_decode_fills_defaults_beyond_the_limits_of_constants((width, depth) in list_shape(), chain in 1usize..80) {
+        // Locals repeat a list `width` times at each of `depth` levels, and
+        // each struct of the chain nests the default of the next one level
+        // deeper: defaults within the limits of constants are built
+        // directly, the others run, with the same value.
+        let mut lets = vec![format!("let a0 = [{}]", vec!["0"; width].join(", "))];
+        let mut ty = "[int]".to_string();
+        for i in 1..depth {
+            lets.push(format!("let a{i} = [{}]", vec![format!("a{}", i - 1); width].join(", ")));
+            ty = format!("[{ty}]");
+        }
+        let mut src = format!(
+            "import json\nstruct S0 {{\n    list: {ty} = {{\n        {}\n        a{}\n    }}\n    next: S1 = S1 {{}}\n}}\n",
+            lets.join("\n        "),
+            depth - 1
+        );
+        for i in 1..chain {
+            src += &format!("struct S{i} {{ next: S{} = S{} {{}} }}\n", i + 1, i + 1);
+        }
+        src += &format!("struct S{chain} {{ v: int = 1 }}\nlet s: S0 = json.decode(\"{{}}\")?\nprint(s == S0 {{}})\nprint(json.encode(s) == json.encode(S0 {{}}))\n");
+        check(&src, "true\ntrue\n", None)?;
+    }
+}
