@@ -1666,16 +1666,7 @@ impl Checker {
                     }
                     let doc = Some(f.doc).filter(|d| !d.is_empty()).map(Arc::from);
                     let name = self.sym(f.name);
-                    // A variant default has the type of its field, so if its enum is
-                    // not registered, resolving the field's type reported that.
-                    let const_default = match default {
-                        Some(Constant(ConstRepr::Value(c))) => Some(c.clone()),
-                        Some(Constant(ConstRepr::Variant { rust, index })) => {
-                            let first = self.enum_bindings.iter_from(0).find(|(t, _)| t == rust).map(|&(_, first)| first);
-                            first.map(|first| ConstVal::Tag(first + *index as u32))
-                        }
-                        None => None,
-                    };
+                    let const_default = default.as_ref().and_then(|c| self.bound_const(&c.0));
                     fields.push(FieldDef { name, ty, mutable: f.var, is_pub: f.public, default: None, const_default, doc });
                 }
                 self.types[id as usize].kind = TypeDefKind::Struct { fields };
@@ -1722,9 +1713,23 @@ impl Checker {
         None
     }
 
+    /// The value of the Rust field default `c`. A variant default has the type
+    /// of its field, so if its enum is not registered, resolving the field's
+    /// type reported that.
+    fn bound_const(&self, c: &ConstRepr) -> Option<ConstVal> {
+        Some(match c {
+            ConstRepr::Value(c) => c.clone(),
+            ConstRepr::Variant { rust, index } => {
+                let first = self.enum_bindings.iter_from(0).find(|(t, _)| t == rust).map(|&(_, first)| first)?;
+                ConstVal::Tag(first + *index as u32)
+            }
+            ConstRepr::Some(c) => ConstVal::Some(Box::new(self.bound_const(c)?)),
+        })
+    }
+
     /// The value of `h` if it is a constant that `json.decode` can use as a
-    /// field default: a literal, `[]`, `[:]`, a payload-less variant, or
-    /// `Some` of one of these.
+    /// field default: a literal, `[]`, `[:]`, a range of int literals, a
+    /// payload-less variant, or `Some` of one of these.
     fn const_of(&self, h: &HExpr) -> Option<ConstVal> {
         Some(match &h.kind {
             HKind::Unit => ConstVal::Unit,
@@ -1741,6 +1746,10 @@ impl Checker {
                 ConstVal::Some(Box::new(self.const_of(&args[0])?))
             }
             HKind::Tag(id) => ConstVal::Tag(*id),
+            HKind::Range { start, end, inclusive } => match (self.const_of(start)?, self.const_of(end)?) {
+                (ConstVal::Int(a), ConstVal::Int(b)) => ConstVal::Range(a, b, *inclusive),
+                _ => return None,
+            },
             HKind::Unary { op: HUnOp::Neg, e } => match self.const_of(e)? {
                 ConstVal::Int(i) => ConstVal::Int(i.checked_neg()?),
                 ConstVal::Float(f) => ConstVal::Float(-f),

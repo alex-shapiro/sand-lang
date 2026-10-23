@@ -1163,6 +1163,7 @@ fn const_value(st: &mut Staging, ids: &crate::vm::bytecode::RtIds, c: &ConstVal)
             let v = const_value(st, ids, c);
             st.new_variant(ids.some, &[v])
         }
+        ConstVal::Range(a, b, inclusive) => st.alloc(Obj::Range(*a, *b, *inclusive)),
         ConstVal::Tag(id) => Value::Tag(*id),
     }
 }

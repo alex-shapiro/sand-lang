@@ -18,10 +18,8 @@ use crate::types::{ConstVal, ValueTypeInfo};
 use crate::vm::heap::Heap;
 use crate::vm::value::{ChannelObj, MapObj, Obj, SetObj, TaskObj, TypeDesc, Value, ValueType};
 use crate::vm::{Ctl, HostFn, NativeFn, Vm};
-use indexmap::IndexMap;
 use std::any::{Any, TypeId};
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -196,7 +194,7 @@ pub struct StructField {
     pub default: Option<fn() -> Option<Constant>>,
 }
 
-/// A Sand constant made from a Rust value (see [`ConstValue`]).
+/// A Sand constant made from a Rust value (see [`IntoValue::to_const`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Constant(pub(crate) ConstRepr);
 
@@ -208,78 +206,27 @@ pub(crate) enum ConstRepr {
     /// The payload-less variant `index` of the Rust-bound enum whose
     /// [`NamedType::rust_type`] is `rust`.
     Variant { rust: TypeId, index: usize },
+    /// `Some` of a constant that contains a variant.
+    Some(Box<ConstRepr>),
 }
 
-/// A Rust value that is also a Sand constant, as the default of a struct field
-/// must be: a number, `bool`, `()`, string, `bytes`, duration, empty list or
-/// map, `None`, or a payload-less variant of a [`SandEnum`](crate::SandEnum)
-/// (which derives this trait). Implement it for another type by delegating to one of
-/// these.
-pub trait ConstValue {
-    /// Returns `self` as a Sand constant, or `None` if no Sand constant equals
-    /// `self` (such as a non-empty list).
-    fn to_const(&self) -> Option<Constant>;
+impl Constant {
+    pub(crate) fn value(c: ConstVal) -> Constant {
+        Constant(ConstRepr::Value(c))
+    }
+
+    pub(crate) fn some(self) -> Constant {
+        Constant(match self.0 {
+            ConstRepr::Value(c) => ConstRepr::Value(ConstVal::Some(Box::new(c))),
+            c => ConstRepr::Some(Box::new(c)),
+        })
+    }
 }
 
 #[doc(hidden)]
 pub fn variant_const<T: EnumType>(x: &T) -> Option<Constant> {
     let index = x.index();
     T::VARIANTS[index].fields.is_empty().then(|| Constant(ConstRepr::Variant { rust: T::rust_type(), index }))
-}
-
-fn constant(c: ConstVal) -> Constant {
-    Constant(ConstRepr::Value(c))
-}
-
-macro_rules! const_value {
-    ($($t:ty: $x:ident => $e:expr),* $(,)?) => {$(
-        impl ConstValue for $t {
-            fn to_const(&self) -> Option<Constant> {
-                let $x = self;
-                $e
-            }
-        }
-    )*};
-}
-
-const_value! {
-    i64: x => Some(constant(ConstVal::Int(*x))),
-    f64: x => Some(constant(ConstVal::Float(*x))),
-    bool: x => Some(constant(ConstVal::Bool(*x))),
-    (): _x => Some(constant(ConstVal::Unit)),
-    String: x => Some(constant(ConstVal::Str(x.clone()))),
-    Vec<u8>: x => Some(constant(ConstVal::Bytes(x.clone()))),
-    jiff::SignedDuration: x => i64::try_from(x.as_nanos()).ok().map(|d| constant(ConstVal::Dur(d))),
-}
-
-macro_rules! empty_const {
-    ($($t:ident<$($p:ident $(: $b:path)?),*> => $c:ident),* $(,)?) => {$(
-        impl<$($p $(: $b)?),*> ConstValue for $t<$($p),*> {
-            fn to_const(&self) -> Option<Constant> {
-                self.is_empty().then(|| constant(ConstVal::$c))
-            }
-        }
-    )*};
-}
-
-// `Vec<u8>` is `bytes`, and `u8` is not a `SandType`.
-empty_const! {
-    Vec<T: SandType> => EmptyList,
-    HashMap<K, V> => EmptyMap,
-    BTreeMap<K, V> => EmptyMap,
-    IndexMap<K, V> => EmptyMap,
-}
-
-impl<T> ConstValue for Option<T> {
-    fn to_const(&self) -> Option<Constant> {
-        self.is_none().then(|| constant(ConstVal::None))
-    }
-}
-
-impl<T: ConstValue> ConstValue for Box<T> {
-    fn to_const(&self) -> Option<Constant> {
-        (**self).to_const()
-    }
 }
 
 #[doc(hidden)]

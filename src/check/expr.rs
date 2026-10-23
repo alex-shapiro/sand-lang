@@ -1564,6 +1564,11 @@ impl Checker {
                 };
                 HKind::MakeVariant { rt_id: self.some_rt(), args: vec![self.const_expr(c, inner, span)] }
             }
+            ConstVal::Range(a, b, inclusive) => HKind::Range {
+                start: Box::new(mk(HKind::Int(*a), TypeId::INT, span)),
+                end: Box::new(mk(HKind::Int(*b), TypeId::INT, span)),
+                inclusive: *inclusive,
+            },
             ConstVal::Tag(id) => HKind::Tag(*id),
         };
         mk(kind, ty, span)

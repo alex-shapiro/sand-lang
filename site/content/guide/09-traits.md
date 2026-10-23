@@ -24,13 +24,13 @@ Structs and enums can also be generic (see [Structs and enums](/guide/structs-an
 
 An unconstrained type parameter `T` supports only storage, passing, and formatting. Add a bound (`T: Bound`) to compare, hash, or perform arithmetic on values of type `T`. Combine multiple bounds with `+`, as in `T: Ord + Hash`.
 
-| Bound    | Operations                        | Supporting types                         |
-| -------- | --------------------------------- | ---------------------------------------- |
-| `Eq`     | `==`, `!=`                        | all types except functions               |
-| `Ord`    | `<`, `>`, `sorted()`, `max()`     | numbers, `str`, lists, tuples            |
-| `Hash`   | map keys and set elements         | `int`, `bool`, `str`, tuples             |
-| `Num`    | `+`, `-`, `*`, `/`, `T.zero()`    | `int`, `float`                           |
-| `Encode` | `json.encode()`, `json.to_json()` | all types except functions and resources |
+| Bound    | Operations                        | Supporting types                                                |
+| -------- | --------------------------------- | --------------------------------------------------------------- |
+| `Eq`     | `==`, `!=`                        | all types except functions                                      |
+| `Ord`    | `<`, `>`, `sorted()`, `max()`     | numbers, `str`, lists, tuples                                   |
+| `Hash`   | map keys and set elements         | `int`, `bool`, `str`, tuples                                    |
+| `Num`    | `+`, `-`, `*`, `/`, `T.zero()`    | `int`, `float`                                                  |
+| `Encode` | `json.encode()`, `json.to_json()` | all types except functions, tasks, channels, and native objects |
 
 ```sand
 fn largest<T: Ord>(xs: [T]) -> T? {

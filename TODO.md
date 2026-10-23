@@ -71,10 +71,16 @@ Follow-up work, roughly in priority order.
       `x: int? = Some(f())` as `None`) instead of calling its default.
 - [ ] `json.parse` accepts 512 levels of nesting, but conversion of a `Json`
       value to Rust aborts with kind `"limit"` beyond 256 levels of enum
-      payloads. Use one limit, or convert `Json` without recursion.
+      payloads. A limit of 512 overflows a 512 KiB thread stack (the iOS
+      default), so convert `Json` without recursion.
+- [ ] Map Rust ranges (`std::ops::Range<i64>`, `RangeInclusive<i64>`) to the
+      Sand `Range`. Today a host struct field holds a range only as
+      `Val<Range>`, so it cannot have a `#[sand(default)]`.
 
 ### Tooling
 
+- [ ] `help` does not describe the built-in bounds (`help(Encode)` reports an
+      undefined name).
 - [ ] Fix broken intra-doc links to private items and run `cargo doc` with
       `-D warnings` in CI.
 - [ ] Policy lints judge `http` rules only by their exact text (and

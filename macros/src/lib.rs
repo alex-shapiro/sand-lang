@@ -30,8 +30,8 @@ use syn::{
 /// with named fields to named payloads (`#[sand(name = "<name>")]` overrides
 /// the Sand name of a named payload). Each payload type must implement
 /// `IntoValue` and owned `FromValue`. The type parameters of a generic enum
-/// become Sand type parameters. A payload-less variant is a `ConstValue`, so
-/// it can be the default of a `SandStruct` field.
+/// become Sand type parameters. A payload-less variant can be the default of
+/// a `SandStruct` field.
 #[proc_macro_derive(SandEnum, attributes(sand))]
 pub fn derive_sand_enum(input: TokenStream) -> TokenStream {
     expand(input, sand_enum)
@@ -56,7 +56,7 @@ pub fn derive_sand_object(input: TokenStream) -> TokenStream {
 /// - `#[sand(var)]`: makes the field mutable (`var`) in Sand.
 /// - `#[sand(default)]` or `#[sand(default = <expr>)]`: gives the field a Sand
 ///   default value, `Default::default()` or `<expr>` (converted with `Into`),
-///   which must be a `ConstValue`.
+///   which must be a constant (`IntoValue::to_const`).
 #[proc_macro_derive(SandStruct, attributes(sand))]
 pub fn derive_sand_struct(input: TokenStream) -> TokenStream {
     expand(input, sand_struct)
@@ -403,9 +403,6 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
                     #(#writes),*
                 }
             }
-        }
-
-        impl #imp #krate::native::ConstValue for #ty #tyg #wh {
             fn to_const(&self) -> ::std::option::Option<#krate::native::Constant> {
                 #krate::native::variant_const(self)
             }
@@ -505,7 +502,7 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
                 quote_spanned! {fty.span()=>
                     ::std::option::Option::Some(|| {
                         let value: #canon = ::std::convert::Into::into(#value);
-                        #krate::native::ConstValue::to_const(&value)
+                        #krate::native::IntoValue::to_const(&value)
                     })
                 }
             }
@@ -650,7 +647,7 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("let value : i64 = :: std :: convert :: Into :: into (2) ;"), "{out}");
-        assert!(out.contains(":: sandlang :: native :: ConstValue :: to_const (& value)"), "{out}");
+        assert!(out.contains(":: sandlang :: native :: IntoValue :: to_const (& value)"), "{out}");
         assert_eq!(out.matches("default : :: std :: option :: Option :: None").count(), 1, "{out}");
     }
 

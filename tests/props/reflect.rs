@@ -172,6 +172,8 @@ fn constant_default() -> impl Strategy<Value = (String, String)> {
         Just(("[int]", "[]".to_string())),
         Just(("[str: int]", "[:]".to_string())),
         Just(("int?", "None".to_string())),
+        (-3i64..3, -3i64..3, any::<bool>())
+            .prop_map(|(a, b, inclusive)| ("Range", format!("{}..{}{}", int_lit(a), if inclusive { "=" } else { "" }, int_lit(b)))),
         prop::sample::select(vec!["Mode.Read", "Mode.Write"]).prop_map(|v| ("Mode", v.to_string())),
     ];
     // Negating twice keeps a number constant, as does wrapping it in `Some`.

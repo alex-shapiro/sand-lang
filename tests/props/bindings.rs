@@ -101,6 +101,10 @@ struct Defaults {
     shape: Fig,
     #[sand(default = b"\x00z".to_vec())]
     raw: Vec<u8>,
+    #[sand(default = Some(4))]
+    some: Option<i64>,
+    #[sand(default = Some(Fig::Empty))]
+    some_fig: Option<Fig>,
 }
 
 impl Default for Defaults {
@@ -115,6 +119,8 @@ impl Default for Defaults {
             d: sandlang::jiff::SignedDuration::from_millis(1500),
             shape: Fig::Empty,
             raw: b"\x00z".to_vec(),
+            some: Some(4),
+            some_fig: Some(Fig::Empty),
         }
     }
 }
@@ -214,8 +220,8 @@ proptest! {
     }
 
     #[test]
-    fn rust_field_defaults_fill_omitted_fields(given in prop::collection::vec(any::<bool>(), 9), n in int(), s in text()) {
-        let full = Defaults { n, x: -1.25, b: false, s: s.clone(), xs: vec![s.clone()], opt: Some(Fig::Num(n)), d: sandlang::jiff::SignedDuration::from_secs(3), shape: Fig::Num(n), raw: vec![1, 2, 255] };
+    fn rust_field_defaults_fill_omitted_fields(given in prop::collection::vec(any::<bool>(), 11), n in int(), s in text()) {
+        let full = Defaults { n, x: -1.25, b: false, s: s.clone(), xs: vec![s.clone()], opt: Some(Fig::Num(n)), d: sandlang::jiff::SignedDuration::from_secs(3), shape: Fig::Num(n), raw: vec![1, 2, 255], some: None, some_fig: Some(Fig::Num(n)) };
         let lits = [
             ("n", int_lit(n), format!("{n}")),
             ("x", "(-1.25)".to_string(), "-1.25".to_string()),
@@ -226,6 +232,8 @@ proptest! {
             ("d", "3s".to_string(), "3000000000".to_string()),
             ("shape", format!("fig.Fig.Num({})", int_lit(n)), format!("{{\"Num\": [{n}]}}")),
             ("raw", "b\"\\x01\\x02\\xff\"".to_string(), "\"AQL/\"".to_string()),
+            ("some", "None".to_string(), "null".to_string()),
+            ("some_fig", format!("Some(fig.Fig.Num({}))", int_lit(n)), format!("{{\"Num\": [{n}]}}")),
         ];
         let mut expected = Defaults::default();
         let fields: Vec<String> = lits.iter().zip(&given).filter(|(_, g)| **g).map(|((name, lit, _), _)| format!("{name}: {lit}")).collect();
@@ -241,7 +249,9 @@ proptest! {
                     5 => expected.opt = full.opt.clone(),
                     6 => expected.d = full.d,
                     7 => expected.shape = full.shape.clone(),
-                    _ => expected.raw = full.raw.clone(),
+                    8 => expected.raw = full.raw.clone(),
+                    9 => expected.some = full.some,
+                    _ => expected.some_fig = full.some_fig.clone(),
                 }
             }
         }

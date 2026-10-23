@@ -1478,6 +1478,10 @@ fn rust_field_defaults_can_be_payload_less_variants() {
         figure: Figure,
         #[sand(default)]
         backdrop: Option<Figure>,
+        #[sand(default = Some(Figure::Empty))]
+        frame: Option<Figure>,
+        #[sand(default = Some(2))]
+        layers: Option<i64>,
     }
     let mut m = draw_module();
     m.bind::<Sketch>();
@@ -1487,7 +1491,7 @@ fn rust_field_defaults_can_be_payload_less_variants() {
     r.unwrap();
     assert_eq!(
         out,
-        "Empty\nSketch { figure: Empty, backdrop: None }\nstruct draw.Sketch\n\nFields:\n    figure: Figure = Figure.Empty\n    backdrop: Figure? = None\n"
+        "Empty\nSketch { figure: Empty, backdrop: None, frame: Some(Empty), layers: Some(2) }\nstruct draw.Sketch\n\nFields:\n    figure: Figure = Figure.Empty\n    backdrop: Figure? = None\n    frame: Figure? = Some(Figure.Empty)\n    layers: int? = Some(2)\n"
     );
 }
 
