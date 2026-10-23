@@ -99,6 +99,8 @@ struct Defaults {
     d: sandlang::jiff::SignedDuration,
     #[sand(default = Fig::Empty)]
     shape: Fig,
+    #[sand(default = b"\x00z".to_vec())]
+    raw: Vec<u8>,
 }
 
 impl Default for Defaults {
@@ -112,6 +114,7 @@ impl Default for Defaults {
             opt: None,
             d: sandlang::jiff::SignedDuration::from_millis(1500),
             shape: Fig::Empty,
+            raw: b"\x00z".to_vec(),
         }
     }
 }
@@ -211,8 +214,8 @@ proptest! {
     }
 
     #[test]
-    fn rust_field_defaults_fill_omitted_fields(given in prop::collection::vec(any::<bool>(), 8), n in int(), s in text()) {
-        let full = Defaults { n, x: -1.25, b: false, s: s.clone(), xs: vec![s.clone()], opt: Some(Fig::Num(n)), d: sandlang::jiff::SignedDuration::from_secs(3), shape: Fig::Num(n) };
+    fn rust_field_defaults_fill_omitted_fields(given in prop::collection::vec(any::<bool>(), 9), n in int(), s in text()) {
+        let full = Defaults { n, x: -1.25, b: false, s: s.clone(), xs: vec![s.clone()], opt: Some(Fig::Num(n)), d: sandlang::jiff::SignedDuration::from_secs(3), shape: Fig::Num(n), raw: vec![1, 2, 255] };
         let lits = [
             ("n", int_lit(n), format!("{n}")),
             ("x", "(-1.25)".to_string(), "-1.25".to_string()),
@@ -222,6 +225,7 @@ proptest! {
             ("opt", format!("Some(fig.Fig.Num({}))", int_lit(n)), format!("{{\"Num\": [{n}]}}")),
             ("d", "3s".to_string(), "3000000000".to_string()),
             ("shape", format!("fig.Fig.Num({})", int_lit(n)), format!("{{\"Num\": [{n}]}}")),
+            ("raw", "b\"\\x01\\x02\\xff\"".to_string(), "\"AQL/\"".to_string()),
         ];
         let mut expected = Defaults::default();
         let fields: Vec<String> = lits.iter().zip(&given).filter(|(_, g)| **g).map(|((name, lit, _), _)| format!("{name}: {lit}")).collect();
@@ -236,7 +240,8 @@ proptest! {
                     4 => expected.xs = full.xs.clone(),
                     5 => expected.opt = full.opt.clone(),
                     6 => expected.d = full.d,
-                    _ => expected.shape = full.shape.clone(),
+                    7 => expected.shape = full.shape.clone(),
+                    _ => expected.raw = full.raw.clone(),
                 }
             }
         }

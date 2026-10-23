@@ -2856,9 +2856,9 @@ By default, struct fields are `pub` and immutable; `#[sand(private)]` makes a
 field private to the module, `#[sand(var)]` makes it mutable (`var`), and
 `#[sand(name = "<name>")]` overrides its Sand name. `#[sand(default)]` or
 `#[sand(default = <expr>)]` gives a field the default `Default::default()` or
-`<expr>`, which must be a number, `bool`, `()`, string, duration, empty list or
-map, `None`, or a payload-less variant of a `SandEnum`; `bind` panics
-otherwise.
+`<expr>`, which must be a number, `bool`, `()`, string, `bytes`, duration,
+empty list or map, `None`, or a payload-less variant of a `SandEnum`; `bind`
+panics otherwise.
 
 Recursive types can reference themselves through `Vec`, map, or `Box` fields.
 Because the engine copies each reachable struct and enum value during

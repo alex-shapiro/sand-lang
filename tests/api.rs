@@ -1416,6 +1416,8 @@ struct Settings {
     ratio: f64,
     #[sand(default = LogLevel::Warn)]
     log: LogLevel,
+    #[sand(default)]
+    key: Vec<u8>,
 }
 
 #[test]
@@ -1423,22 +1425,24 @@ fn rust_field_defaults_fill_struct_literals_and_decoded_json() {
     let mut m = NativeModule::new("conf");
     m.bind::<Settings>();
     m.function("port", |s: Settings| s.port);
+    m.function("key", |s: Settings| s.key);
     let src = r#"
 import conf
 import json
 let s = conf.Settings { name: "a" }
 print(s)
 print(conf.port(conf.Settings { name: "b", port: 1 }))
+print(conf.key(s))
 let d: conf.Settings = json.decode("{\"name\": \"c\", \"verbose\": true}")?
 print(d)
 help(conf.Settings)
 "#;
     let (r, out, _) = run_src(Config::new().module(m), src);
     r.unwrap();
-    let s = "Settings { name: \"a\", port: 8080, verbose: false, level: \"info\", timeout: 30s, tags: [:], parent: None, ratio: -0.5, log: Warn }";
-    let d = "Settings { name: \"c\", port: 8080, verbose: true, level: \"info\", timeout: 30s, tags: [:], parent: None, ratio: -0.5, log: Warn }";
-    let help = "struct conf.Settings\n\nSettings with defaults.\n\nFields:\n    name: str\n    port: int = 8080\n    verbose: bool = false\n    level: str = \"info\"\n    timeout: duration = 30s\n    tags: [str: str] = [:]\n    parent: Settings? = None\n    ratio: float = -0.5\n    log: Level = Level.Warn\n";
-    assert_eq!(out, format!("{s}\n1\n{d}\n{help}"));
+    let s = "Settings { name: \"a\", port: 8080, verbose: false, level: \"info\", timeout: 30s, tags: [:], parent: None, ratio: -0.5, log: Warn, key: b\"\" }";
+    let d = "Settings { name: \"c\", port: 8080, verbose: true, level: \"info\", timeout: 30s, tags: [:], parent: None, ratio: -0.5, log: Warn, key: b\"\" }";
+    let help = "struct conf.Settings\n\nSettings with defaults.\n\nFields:\n    name: str\n    port: int = 8080\n    verbose: bool = false\n    level: str = \"info\"\n    timeout: duration = 30s\n    tags: [str: str] = [:]\n    parent: Settings? = None\n    ratio: float = -0.5\n    log: Level = Level.Warn\n    key: bytes = b\"\"\n";
+    assert_eq!(out, format!("{s}\n1\nb\"\"\n{d}\n{help}"));
 }
 
 #[test]

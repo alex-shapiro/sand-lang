@@ -1552,6 +1552,7 @@ impl Checker {
             ConstVal::Int(i) => HKind::Int(*i),
             ConstVal::Float(f) => HKind::Float(*f),
             ConstVal::Str(s) => HKind::Str(s.clone()),
+            ConstVal::Bytes(b) => HKind::Bytes(b.clone()),
             ConstVal::Dur(d) => HKind::Dur(*d),
             ConstVal::EmptyList => HKind::List(Vec::new()),
             ConstVal::EmptyMap => HKind::Map(Vec::new()),

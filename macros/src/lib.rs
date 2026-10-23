@@ -288,11 +288,6 @@ fn variant_field_name(f: &Field, ident: &Ident) -> syn::Result<LitStr> {
     Ok(name)
 }
 
-/// The name, field name and type of each field of a variant or struct.
-fn field_parts(fields: &Fields) -> impl Iterator<Item = (Option<&Ident>, &Field)> {
-    fields.iter().map(|f| (f.ident.as_ref(), f))
-}
-
 fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
     let ty = &input.ident;
     let Data::Enum(data) = &input.data else {
@@ -318,12 +313,17 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
         let mut gets = Vec::new();
         let mut puts = Vec::new();
         let mut binds = Vec::new();
-        for (k, (fname, f)) in field_parts(&v.fields).enumerate() {
-            let fty = &f.ty;
+        let mut snames = Vec::new();
+        for (k, f) in v.fields.iter().enumerate() {
+            let (fname, fty) = (f.ident.as_ref(), &f.ty);
             let canon = generic.canonical(krate, fty);
             let sname = match fname {
                 Some(n) => {
                     let lit = variant_field_name(f, n)?;
+                    if snames.contains(&lit.value()) {
+                        return Err(Error::new_spanned(&lit, format!("the Sand payload name `{}` is used twice", lit.value())));
+                    }
+                    snames.push(lit.value());
                     checks.push(assert_field_name(krate, &lit, true));
                     quote!(::std::option::Option::Some(#lit))
                 }
@@ -696,7 +696,7 @@ mod tests {
 
     #[test]
     fn invalid_derives_are_rejected() {
-        let cases: [(Derive, &str, &str); 12] = [
+        let cases: [(Derive, &str, &str); 13] = [
             (sand_struct, "#[sand(module = \"m\")] struct S(i64);", "`SandStruct` requires named fields"),
             (sand_struct, "#[sand(module = \"m\")] enum S { A }", "`SandStruct` can only be derived for structs"),
             (sand_struct, "#[sand(module = \"m\")] struct S<'a> { x: &'a str }", "lifetime or const parameters"),
@@ -712,6 +712,11 @@ mod tests {
             (sand_enum, "#[sand(module = \"m\")] enum E { #[sand(name = \"B\")] A }", "applies only to the type"),
             (sand_enum, "#[sand(module = \"m\")] enum E { A(#[sand(name = \"x\")] i64) }", "and to named payload fields"),
             (sand_enum, "#[sand(module = \"m\")] enum E { A { #[sand(var)] x: i64 } }", "expected `name`"),
+            (
+                sand_enum,
+                "#[sand(module = \"m\")] enum E { A { #[sand(name = \"y\")] x: i64, y: i64 } }",
+                "the Sand payload name `y` is used twice",
+            ),
             (sand_enum, "#[sand(module = \"m\", public)] enum E { A }", "expected `module`, `name`, `private` or `crate`"),
         ];
         for (f, src, msg) in cases {

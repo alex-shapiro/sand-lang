@@ -1732,6 +1732,7 @@ impl Checker {
             HKind::Float(f) => ConstVal::Float(*f),
             HKind::Dur(d) => ConstVal::Dur(*d),
             HKind::Str(s) => ConstVal::Str(s.clone()),
+            HKind::Bytes(b) => ConstVal::Bytes(b.clone()),
             HKind::List(xs) if xs.is_empty() => ConstVal::EmptyList,
             HKind::Map(xs) if xs.is_empty() => ConstVal::EmptyMap,
             HKind::Tag(id) if *id == self.none_rt() => ConstVal::None,

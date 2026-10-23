@@ -67,6 +67,13 @@ Follow-up work, roughly in priority order.
       methods in fixed slots of the `Num` dictionary, and the checker requires
       the prelude's `Num` impls to be native. Callbacks such as `sort_by` also
       need Sand wrappers (`sort_by_keys(self.map(key))`).
+- [ ] A Rust function whose `native fn` declaration bounds a type parameter
+      by `Num` must take `Num<N>`, even if it does not use the evidence.
+      Let the checker accept a signature without it and drop the evidence
+      argument at the call.
+- [ ] `json.parse` accepts 512 levels of nesting, but conversion of a `Json`
+      value to Rust aborts with kind `"limit"` beyond 256 levels of enum
+      payloads. Use one limit, or convert `Json` without recursion.
 
 ### Tooling
 

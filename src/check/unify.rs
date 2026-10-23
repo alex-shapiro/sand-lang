@@ -165,10 +165,9 @@ impl Checker {
         let ty = self.rty(t);
         match ty {
             Ty::Var(_) => None,
-            Ty::List(x) if matches!(b, Bound::Eq | Bound::Ord | Bound::Encode) => self.satisfies(x, b),
-            Ty::Set(x) if matches!(b, Bound::Eq | Bound::Encode) => self.satisfies(x, b),
-            Ty::Map(k, v) if matches!(b, Bound::Eq | Bound::Encode) => all(&mut [k, v].into_iter()),
-            Ty::Tuple(l) if !matches!(b, Bound::Num | Bound::Add) => all(&mut self.arena.list(l).iter().copied()),
+            Ty::List(x) | Ty::Set(x) if structural(ty, b) => self.satisfies(x, b),
+            Ty::Map(k, v) if structural(ty, b) => all(&mut [k, v].into_iter()),
+            Ty::Tuple(l) if structural(ty, b) => all(&mut self.arena.list(l).iter().copied()),
             Ty::Param(p) => Some(self.params[p as usize].has_bound(b)),
             Ty::Named(d, l) => match derived_index(b).and_then(|k| self.derived.get(d as usize).map(|x| &x[k])) {
                 Some(Derived::Never) => Some(false),
@@ -248,10 +247,9 @@ impl Checker {
                 }
                 None => self.params[p as usize].has_bound(b),
             },
-            Ty::List(x) => matches!(b, Bound::Eq | Bound::Ord | Bound::Encode) && go(x),
-            Ty::Set(x) => matches!(b, Bound::Eq | Bound::Encode) && go(x),
-            Ty::Map(k, v) => matches!(b, Bound::Eq | Bound::Encode) && go(k) && go(v),
-            Ty::Tuple(l) => !matches!(b, Bound::Num | Bound::Add) && self.arena.list(l).iter().all(|&x| go(x)),
+            Ty::List(x) | Ty::Set(x) => structural(ty, b) && go(x),
+            Ty::Map(k, v) => structural(ty, b) && go(k) && go(v),
+            Ty::Tuple(l) => structural(ty, b) && self.arena.list(l).iter().all(|&x| go(x)),
             Ty::Named(e, l) => match derived_index(b).map(|k| &self.derived[e as usize][k]) {
                 Some(Derived::Needs(ps)) => ps.iter().all(|&i| go(self.arena.elem(l, i as usize))),
                 _ => false,
@@ -318,13 +316,16 @@ impl Checker {
         let mut parts: Vec<(TypeId, String)> = Vec::new();
         let mut mutable = None;
         let owner = self.show(t);
+        // A list, set, map or tuple that never satisfies `b` is the part to name.
         match self.rty(t) {
-            Ty::List(x) | Ty::Set(x) => parts.push((x, format!("the elements of `{owner}` have type `{}`", self.show(x)))),
-            Ty::Map(k, v) => {
+            ty @ (Ty::List(x) | Ty::Set(x)) if structural(ty, b) => {
+                parts.push((x, format!("the elements of `{owner}` have type `{}`", self.show(x))))
+            }
+            ty @ Ty::Map(k, v) if structural(ty, b) => {
                 parts.push((k, format!("the keys of `{owner}` have type `{}`", self.show(k))));
                 parts.push((v, format!("the values of `{owner}` have type `{}`", self.show(v))));
             }
-            Ty::Tuple(l) => {
+            ty @ Ty::Tuple(l) if structural(ty, b) => {
                 let items = self.arena.list(l).to_vec();
                 parts.extend(
                     items.into_iter().enumerate().map(|(i, x)| (x, format!("element {i} of `{owner}` has type `{}`", self.show(x)))),
@@ -466,6 +467,17 @@ const DERIVED: [Bound; 4] = [Bound::Eq, Bound::Ord, Bound::Hash, Bound::Encode];
 
 fn derived_index(b: Bound) -> Option<usize> {
     DERIVED.iter().position(|&x| x == b)
+}
+
+/// Whether the list, set, map or tuple type `t` satisfies `b` if its
+/// components do. If not, it never does.
+fn structural(t: Ty, b: Bound) -> bool {
+    match t {
+        Ty::List(_) => matches!(b, Bound::Eq | Bound::Ord | Bound::Encode),
+        Ty::Set(_) | Ty::Map(..) => matches!(b, Bound::Eq | Bound::Encode),
+        Ty::Tuple(_) => !matches!(b, Bound::Num | Bound::Add),
+        _ => false,
+    }
 }
 
 /// Whether a type without components that may vary satisfies `b`.

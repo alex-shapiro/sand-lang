@@ -578,6 +578,7 @@ pub enum ConstVal {
     Int(i64),
     Float(f64),
     Str(String),
+    Bytes(Vec<u8>),
     Dur(i64),
     EmptyList,
     EmptyMap,
@@ -598,6 +599,11 @@ impl ConstVal {
             ConstVal::Str(s) => {
                 let mut out = String::new();
                 crate::vm::display::escape_str_debug(s, &mut out);
+                out
+            }
+            ConstVal::Bytes(b) => {
+                let mut out = String::new();
+                crate::vm::display::escape_bytes(b, &mut out);
                 out
             }
             ConstVal::Dur(d) => crate::vm::display::fmt_duration(*d),

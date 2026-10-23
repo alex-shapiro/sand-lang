@@ -1154,6 +1154,7 @@ fn const_value(st: &mut Staging, none: u32, c: &ConstVal) -> Value {
         ConstVal::Int(i) => Value::Int(*i),
         ConstVal::Float(f) => Value::Float(*f),
         ConstVal::Str(s) => st.new_str(s.as_str()),
+        ConstVal::Bytes(b) => st.new_bytes(b.as_slice()),
         ConstVal::Dur(d) => Value::Dur(*d),
         ConstVal::EmptyList => st.new_list(Vec::new()),
         ConstVal::EmptyMap => st.alloc(Obj::Map(Box::default())),

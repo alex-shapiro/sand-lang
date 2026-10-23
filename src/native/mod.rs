@@ -211,9 +211,9 @@ pub(crate) enum ConstRepr {
 }
 
 /// A Rust value that is also a Sand constant, as the default of a struct field
-/// must be: a number, `bool`, `()`, string, duration, empty list or map,
-/// `None`, or a payload-less variant of a [`SandEnum`](crate::SandEnum) (which
-/// derives this trait). Implement it for another type by delegating to one of
+/// must be: a number, `bool`, `()`, string, `bytes`, duration, empty list or
+/// map, `None`, or a payload-less variant of a [`SandEnum`](crate::SandEnum)
+/// (which derives this trait). Implement it for another type by delegating to one of
 /// these.
 pub trait ConstValue {
     /// Returns `self` as a Sand constant, or `None` if no Sand constant equals
@@ -248,12 +248,13 @@ const_value! {
     bool: x => Some(constant(ConstVal::Bool(*x))),
     (): _x => Some(constant(ConstVal::Unit)),
     String: x => Some(constant(ConstVal::Str(x.clone()))),
+    Vec<u8>: x => Some(constant(ConstVal::Bytes(x.clone()))),
     jiff::SignedDuration: x => i64::try_from(x.as_nanos()).ok().map(|d| constant(ConstVal::Dur(d))),
 }
 
 macro_rules! empty_const {
-    ($($t:ident<$($p:ident),*> => $c:ident),* $(,)?) => {$(
-        impl<$($p),*> ConstValue for $t<$($p),*> {
+    ($($t:ident<$($p:ident $(: $b:path)?),*> => $c:ident),* $(,)?) => {$(
+        impl<$($p $(: $b)?),*> ConstValue for $t<$($p),*> {
             fn to_const(&self) -> Option<Constant> {
                 self.is_empty().then(|| constant(ConstVal::$c))
             }
@@ -261,8 +262,9 @@ macro_rules! empty_const {
     )*};
 }
 
+// `Vec<u8>` is `bytes`, and `u8` is not a `SandType`.
 empty_const! {
-    Vec<T> => EmptyList,
+    Vec<T: SandType> => EmptyList,
     HashMap<K, V> => EmptyMap,
     BTreeMap<K, V> => EmptyMap,
     IndexMap<K, V> => EmptyMap,
@@ -967,13 +969,17 @@ impl NativeModule {
     /// # Panics
     ///
     /// Panics if `T::MODULE` does not match [`NativeModule::name`], if the
-    /// type, variant, or field names of `T` are invalid or duplicated, or if
-    /// `T::NAME` is already registered in this module.
+    /// variant, field, or type parameter names of `T` are invalid or
+    /// duplicated, or if `T::NAME` is already registered in this module.
     pub fn bind<T: NamedType>(&mut self) -> &mut Self {
         let kind = T::binding().0;
-        let names = |what: &str, owner: &str, names: &[&str]| {
+        // Fields are identifiers; variants and type parameters are type names.
+        let names = |what: &str, owner: &str, names: &[&str], type_names: bool| {
             for (i, n) in names.iter().enumerate() {
-                assert!(is_name(n), "{what} `{n}` of `{owner}` is not an identifier, or is a keyword");
+                match type_names {
+                    true => assert!(is_type_name(n), "{what} `{n}` of `{owner}` is not a capitalized identifier, or is a keyword"),
+                    false => assert!(is_name(n), "{what} `{n}` of `{owner}` is not an identifier, or is a keyword"),
+                }
                 assert!(!names[..i].contains(n), "{what} `{n}` of `{owner}` is declared twice");
             }
         };
@@ -981,7 +987,6 @@ impl NativeModule {
             BoundKind::Enum { params, variants, .. } => {
                 assert!(!variants.is_empty(), "enum `{}` has no variants", T::NAME);
                 for v in variants.iter() {
-                    assert!(is_type_name(v.name), "variant `{}` of `{}` is not a capitalized identifier, or is a keyword", v.name, T::NAME);
                     let fields: Vec<&str> = v.fields.iter().filter_map(|f| f.name).collect();
                     assert!(
                         fields.is_empty() || fields.len() == v.fields.len(),
@@ -989,16 +994,16 @@ impl NativeModule {
                         v.name,
                         T::NAME
                     );
-                    names("field", &format!("{}.{}", T::NAME, v.name), &fields);
+                    names("field", &format!("{}.{}", T::NAME, v.name), &fields, false);
                 }
                 let vs: Vec<&str> = variants.iter().map(|v| v.name).collect();
-                names("variant", T::NAME, &vs);
-                names("type parameter", T::NAME, params);
+                names("variant", T::NAME, &vs, true);
+                names("type parameter", T::NAME, params, true);
             }
             BoundKind::Struct { params, fields, .. } => {
                 let fs: Vec<&str> = fields.iter().map(|f| f.name).collect();
-                names("field", T::NAME, &fs);
-                names("type parameter", T::NAME, params);
+                names("field", T::NAME, &fs, false);
+                names("type parameter", T::NAME, params, true);
             }
             _ => {}
         }

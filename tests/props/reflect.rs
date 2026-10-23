@@ -165,6 +165,8 @@ fn constant_default() -> impl Strategy<Value = (&'static str, String)> {
         finite.prop_map(|f| ("float", if f.is_sign_negative() { format!("(-{:?})", -f) } else { format!("{f:?}") })),
         (-1000i64..1000).prop_map(|n| ("duration", if n < 0 { format!("-{}ms", -n) } else { format!("{n}ms") })),
         "[a-z\"\\\n é]{0,4}".prop_map(|t| ("str", str_lit(&t))),
+        prop::collection::vec(any::<u8>(), 0..4)
+            .prop_map(|b| ("bytes", format!("b\"{}\"", b.iter().map(|x| format!("\\x{x:02x}")).collect::<String>()))),
         any::<bool>().prop_map(|b| ("bool", b.to_string())),
         Just(("()", "()".to_string())),
         Just(("[int]", "[]".to_string())),
