@@ -1238,11 +1238,42 @@ pub(crate) fn cut_name(name: &mut String) {
 #[derive(Clone)]
 pub struct DescObj {
     pub desc: Arc<TypeDesc>,
-    /// Bytes of the nodes that instantiations of templates built (0 for a
-    /// constant).
-    pub built: u32,
-    /// The length of the longest path of such nodes.
-    pub depth: u16,
+    /// What the instantiation of a template built, or `None` for a constant.
+    pub built: Option<Box<Built>>,
+}
+
+/// The part of a [`DescObj`] that the instantiation of a template built.
+#[derive(Clone)]
+pub struct Built {
+    /// Bytes of the nodes built.
+    bytes: u32,
+    /// The length of the longest path of nodes that instantiations built, in
+    /// this description and in its arguments.
+    depth: u16,
+    /// The descriptions whose nodes this one shares: the arguments of the
+    /// template. Holding them keeps their bytes counted while it lives.
+    args: Box<[Value]>,
+}
+
+impl DescObj {
+    /// The description that a program constant holds.
+    pub fn constant(desc: Arc<TypeDesc>) -> DescObj {
+        DescObj { desc, built: None }
+    }
+
+    fn depth(&self) -> usize {
+        self.built.as_ref().map_or(0, |b| b.depth as usize)
+    }
+
+    /// The bytes that `self` holds besides its constant nodes.
+    fn size(&self) -> usize {
+        self.built.as_ref().map_or(0, |b| std::mem::size_of::<Built>() + b.bytes as usize + b.args.len() * VALUE_SIZE)
+    }
+
+    /// The heap objects of the descriptions whose nodes `self` shares.
+    fn args(&self) -> &[Value] {
+        self.built.as_ref().map_or(&[], |b| &b.args)
+    }
 }
 
 /// The longest path of nodes that instantiations of templates build into
@@ -1311,10 +1342,11 @@ impl DescTemplate {
         self.spine.len()
     }
 
-    /// The description with `args[i]` for parameter `self.params[i]`.
-    /// Fails with kind `"limit"` if it is deeper than [`MAX_BUILT_DEPTH`].
-    pub(crate) fn instantiate(&self, args: &[&DescObj]) -> Result<DescObj, crate::vm::Ctl> {
-        let depth = self.depth + args.iter().map(|a| a.depth as usize).max().unwrap_or(0);
+    /// The description with `args[i]` for parameter `self.params[i]`, which
+    /// holds `handles`, the heap objects of `args`. Fails with kind
+    /// `"limit"` if it is deeper than [`MAX_BUILT_DEPTH`].
+    pub(crate) fn instantiate(&self, args: &[&DescObj], handles: Box<[Value]>) -> Result<DescObj, crate::vm::Ctl> {
+        let depth = self.depth + args.iter().map(|a| a.depth()).max().unwrap_or(0);
         if depth > MAX_BUILT_DEPTH {
             return Err(crate::vm::Ctl::fail("limit", "the description of a type argument is nested too deeply"));
         }
@@ -1326,8 +1358,8 @@ impl DescTemplate {
         if b.missing {
             return Err(crate::vm::Ctl::internal("a type description template has no argument for a type parameter"));
         }
-        let built = args.iter().map(|a| a.built as usize).sum::<usize>().saturating_add(b.built);
-        Ok(DescObj { desc, built: u32::try_from(built).unwrap_or(u32::MAX), depth: depth as u16 })
+        let built = Built { bytes: u32::try_from(b.built).unwrap_or(u32::MAX), depth: depth as u16, args: handles };
+        Ok(DescObj { desc, built: Some(Box::new(built)) })
     }
 }
 
@@ -1361,14 +1393,17 @@ impl Instance<'_> {
         let mut out = String::new();
         let mut parts = name.split(crate::types::PARAM_MARK);
         out.push_str(parts.next().unwrap_or_default());
-        while let (Some(p), Some(text)) = (parts.next(), parts.next()) {
+        while let (Some(p), Some(text)) = (parts.next(), parts.next())
+            && out.len() <= MAX_NAME
+        {
             if let Ok(p) = p.parse() {
-                out.push_str(&self.arg(p).format(&|_| String::new()));
+                self.arg(p).write_name(&|_| String::new(), &mut out);
             }
             out.push_str(text);
         }
         cut_name(&mut out);
-        self.built += out.len();
+        out.shrink_to_fit();
+        self.built += out.capacity();
         out
     }
 
@@ -1391,7 +1426,7 @@ impl Instance<'_> {
             }
             TypeDesc::Struct { id, def, name, fields, rust } => {
                 let fields: Vec<FieldDesc> = fields.iter().map(|(n, t, d)| (n.clone(), self.node(t), d.clone())).collect();
-                self.built += fields.iter().map(|f| f.0.len() + std::mem::size_of::<FieldDesc>()).sum::<usize>();
+                self.built += fields.iter().map(|f| f.0.capacity() + std::mem::size_of::<FieldDesc>()).sum::<usize>();
                 TypeDesc::Struct { id: *id, def: *def, name: self.name(name), fields, rust: *rust }
             }
             TypeDesc::Enum { id, name, variants, rust } => {
@@ -1591,7 +1626,7 @@ impl Obj {
             }
             Obj::Native(n) => n.size(),
             Obj::Value(v) => v.size(),
-            Obj::TypeDesc(t) => 64 + t.built as usize,
+            Obj::TypeDesc(t) => 64 + t.size(),
         }
     }
 
@@ -1616,6 +1651,7 @@ impl Obj {
                 IterSrc::Range { .. } | IterSrc::Done => {}
             },
             Obj::Task(t) => f(t.result),
+            Obj::TypeDesc(d) => d.args().iter().for_each(|v| f(*v)),
             Obj::Channel(c) => {
                 c.queue.iter().for_each(|v| f(*v));
                 c.senders.iter().for_each(|(_, _, v)| f(*v));
@@ -1656,12 +1692,12 @@ mod tests {
         ];
         let desc = Arc::new(TypeDesc::Struct { id: 0, def: 0, name: "Big".into(), fields, rust: None });
         let template = DescTemplate::new(desc, vec![0]);
-        let arg = DescObj { desc: Arc::new(TypeDesc::Str), built: 0, depth: 0 };
-        let instance = template.instantiate(&[&arg]).unwrap();
+        let arg = DescObj::constant(Arc::new(TypeDesc::Str));
+        let instance = template.instantiate(&[&arg], Box::default()).unwrap();
         let TypeDesc::Struct { fields, .. } = &*instance.desc else { panic!("{:?}", instance.desc) };
         assert!(matches!(&*fields[0].1, TypeDesc::Str));
         assert!(matches!(&fields[1].2, FieldDefault::Const(c) if Arc::ptr_eq(c, &table)));
-        assert!((instance.built as usize) < 1000, "{}", instance.built);
+        assert!(instance.size() < 1000, "{}", instance.size());
     }
 
     #[test]

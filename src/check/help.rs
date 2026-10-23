@@ -590,7 +590,7 @@ impl Checker {
                 self.render_type_of(*ty, &mut out);
             }
         }
-        self.budget.charge(out.len() as u64 / 16);
+        self.budget.charge(out.len() as u64 / super::budget::TEXT_BYTES_PER_UNIT);
         out.truncate(out.trim_end().len());
         out
     }
@@ -686,7 +686,7 @@ impl Checker {
                 .filter(|f| self.visible(def.module, f.is_pub))
                 .map(|f| {
                     let var = if f.mutable { "var " } else { "" };
-                    let default = self.default_text(f);
+                    let default = self.default_text(d, f);
                     (
                         format!("{}{var}{}: {}{default}", self.pub_mark(def.module, f.is_pub), self.name(f.name), self.show(f.ty)),
                         f.doc.clone(),
@@ -974,12 +974,14 @@ impl Checker {
         bounds.join(" + ")
     }
 
-    /// ` = <default>` for a field with a default, or `""`.
-    pub(super) fn default_text(&self, f: &FieldDef) -> String {
+    /// ` = <default>` for field `f` of struct `d` if it has a default, or
+    /// `""`: the source text of a Sand default, or the text of the constant
+    /// default of a Rust-bound field.
+    pub(super) fn default_text(&self, d: TypeDefId, f: &FieldDef) -> String {
         match (f.default, &f.const_default) {
+            (Some(_), Some(c)) if self.rust_type(d).is_some() => format!(" = {}", self.const_text(c)),
             (Some(h), _) => format!(" = {}", self.source_text(self.fns[h as usize].span)),
-            (None, Some(c)) => format!(" = {}", self.const_text(c)),
-            (None, None) => String::new(),
+            (None, _) => String::new(),
         }
     }
 

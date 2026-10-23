@@ -632,25 +632,34 @@ pub const MAX_CONST_PARTS: usize = 1 << 16;
 pub const MAX_CONST_DEPTH: usize = 64;
 
 impl<V, S> ConstVal<V, S> {
-    /// The number of parts of `self`, or `None` if it has more than
-    /// [`MAX_CONST_PARTS`] or nests deeper than [`MAX_CONST_DEPTH`]. Stops
-    /// at the first part beyond these limits.
-    pub fn measure(&self) -> Option<usize> {
-        fn walk<V, S>(c: &ConstVal<V, S>, left: &mut usize, depth: usize) -> bool {
+    /// The number of parts of `self` and the bytes of its strings and
+    /// `bytes`, or `None` if it has more than [`MAX_CONST_PARTS`] parts or
+    /// nests deeper than [`MAX_CONST_DEPTH`]. Stops at the first part beyond
+    /// these limits.
+    pub fn measure(&self) -> Option<(usize, usize)> {
+        fn walk<V, S>(c: &ConstVal<V, S>, left: &mut usize, bytes: &mut usize, depth: usize) -> bool {
             if depth == 0 || *left == 0 {
                 return false;
             }
             *left -= 1;
             match c {
                 ConstVal::Tuple(xs) | ConstVal::List(xs) | ConstVal::Set(xs) | ConstVal::Variant(_, xs) | ConstVal::Struct(_, xs) => {
-                    xs.iter().all(|x| walk(x, left, depth - 1))
+                    xs.iter().all(|x| walk(x, left, bytes, depth - 1))
                 }
-                ConstVal::Map(kvs) => kvs.iter().all(|(k, v)| walk(k, left, depth - 1) && walk(v, left, depth - 1)),
+                ConstVal::Map(kvs) => kvs.iter().all(|(k, v)| walk(k, left, bytes, depth - 1) && walk(v, left, bytes, depth - 1)),
+                ConstVal::Str(s) => {
+                    *bytes = bytes.saturating_add(s.len());
+                    true
+                }
+                ConstVal::Bytes(b) => {
+                    *bytes = bytes.saturating_add(b.len());
+                    true
+                }
                 _ => true,
             }
         }
-        let mut left = MAX_CONST_PARTS;
-        walk(self, &mut left, MAX_CONST_DEPTH).then_some(MAX_CONST_PARTS - left)
+        let (mut left, mut bytes) = (MAX_CONST_PARTS, 0);
+        walk(self, &mut left, &mut bytes, MAX_CONST_DEPTH).then_some((MAX_CONST_PARTS - left, bytes))
     }
 
     /// `self` with each variant identified by `variant` and each struct by

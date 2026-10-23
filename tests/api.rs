@@ -1570,7 +1570,10 @@ fn rust_field_defaults_can_be_any_constant() {
     m.function("figure", |s: Sketch| s.figure);
     m.function("keep", |s: Sketch| s);
     let src = "import draw\nimport json\nprint(draw.figure(draw.Sketch {}))\nlet s: draw.Sketch = json.decode(\"{}\")?\nprint(s)\n\
-               print(s == draw.Sketch {})\nprint(draw.keep(s) == s)\nprint(draw.Frame {})\nhelp(draw.Sketch)";
+               print(s == draw.Sketch {})\nprint(draw.keep(s) == s)\nprint(draw.Frame {})\n\
+               struct Scene { sketch: draw.Sketch = draw.Sketch { pair: (4, \"y\") } }\nlet scene: Scene = json.decode(\"{}\")?\n\
+               print(scene == Scene {} and scene.sketch.pair == (4, \"y\") and scene.sketch.border == draw.Frame { width: 2.0, labels: [\"l\"] })\n\
+               help(draw.Sketch)";
     let (r, out, _) = run_src(Config::new().module(m), src);
     r.unwrap();
     assert_eq!(
@@ -1578,7 +1581,7 @@ fn rust_field_defaults_can_be_any_constant() {
         "Empty\nSketch { figure: Empty, backdrop: None, frame: Some(Labeled(\"a\\\"b\", Rect(1.0, -2.0))), layers: Some(2), \
          parts: [Circle(1.0), Group([])], pair: (3, \"x\"), flags: [2: [true]], border: Frame { width: 2.0, labels: [\"l\"] }, \
          seen: Set([\"a\", \"b\"]), none: Set([]) }\n\
-         true\ntrue\nFrame { width: 1.5, labels: [] }\nstruct draw.Sketch\n\nFields:\n    figure: Figure = Figure.Empty\n    \
+         true\ntrue\nFrame { width: 1.5, labels: [] }\ntrue\nstruct draw.Sketch\n\nFields:\n    figure: Figure = Figure.Empty\n    \
          backdrop: Figure? = None\n    frame: Figure? = Some(Figure.Labeled(\"a\\\"b\", Figure.Rect(w: 1.0, h: -2.0)))\n    \
          layers: int? = Some(2)\n    parts: [Figure] = [Figure.Circle(1.0), Figure.Group([])]\n    pair: (int, str) = (3, \"x\")\n    \
          flags: [int: [bool]] = [2: [true]]\n    border: Frame = Frame { width: 2.0, labels: [\"l\"] }\n    \

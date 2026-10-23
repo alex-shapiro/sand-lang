@@ -798,3 +798,16 @@ fn names_of_type_descriptions_built_at_run_time_stay_short() {
     );
     assert!(lines[0].contains('…') && lines[1].contains("expected array of length 2"), "{out}");
 }
+
+#[test]
+fn type_descriptions_count_the_nodes_they_share_once() {
+    // At each call, `A` and `B` are two descriptions that share the nodes
+    // of all the calls before. Counting those nodes for each description
+    // that holds them would double the count on each call.
+    let src = "import json\nstruct P<A, B> { a: A, b: B }\nfn deep<reflect A: Encode, reflect B: Encode>(n: int, x: [A], y: [B]) -> int {\n    \
+               if n == 0 {\n        let r: Result<[(A, B)]> = json.decode(\"[]\")\n        return if r.is_ok() { 0 } else { -1 }\n    }\n    \
+               let w: [P<A, B>] = []\n    deep(n - 1, w, w) + 1\n}\nlet w: [int] = []\nprint(deep(200, w, w))";
+    let (r, out) = run(limits(|l| l.max_memory = Some(16 << 20)), src);
+    r.unwrap();
+    assert_eq!(out, "200\n");
+}

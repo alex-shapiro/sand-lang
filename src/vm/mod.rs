@@ -679,7 +679,7 @@ impl Vm {
                 Const::Bytes(b) => heap.new_bytes(b.clone()),
                 Const::Fn(p) => heap.alloc(Obj::Closure(*p, Box::new([]))),
                 Const::Native(n) => heap.alloc(Obj::NativeFn(*n)),
-                Const::TypeDesc(t) => heap.alloc(Obj::TypeDesc(DescObj { desc: t.clone(), built: 0, depth: 0 })),
+                Const::TypeDesc(t) => heap.alloc(Obj::TypeDesc(DescObj::constant(t.clone()))),
                 Const::Tuple(items) => heap.new_tuple(&items.iter().map(|&i| self.consts[i as usize]).collect::<Vec<_>>()),
             };
             self.consts.push(v);

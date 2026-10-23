@@ -210,12 +210,14 @@ enum BoundMembers {
 }
 
 /// Where the syntax of a function body is in the items of its module.
-/// AST is borrowed while the module is checked.
+/// AST is borrowed while the module is checked. `BoundDefault(i)` has no
+/// syntax: it is the constant default of field `i` of a Rust-bound struct.
 #[derive(Clone, Copy, Debug)]
 pub enum FnDeclRef {
     Fn(DeclPath),
     ParamDefault(DeclPath, u32),
     FieldDefault { item: u32, field: u32 },
+    BoundDefault(u32),
     Init,
     Test { item: u32 },
 }
@@ -1676,8 +1678,9 @@ impl Checker {
         let public = self.types[id as usize].is_pub;
         match members {
             BoundMembers::Struct(rust, defaults) => {
+                let self_ty = self.def_self_ty(id, &generics);
                 let mut fields = Vec::new();
-                for (f, default) in rust.iter().zip(defaults.iter()) {
+                for (i, (f, default)) in rust.iter().zip(defaults.iter()).enumerate() {
                     let owner = format!("the Rust field `{}` of `{qual}`", f.name);
                     let ty = self.host_type(&(f.ty)(), &generics, &owner, span).unwrap_or(TypeId::ERROR);
                     if public && f.public {
@@ -1686,7 +1689,30 @@ impl Checker {
                     let doc = Some(f.doc).filter(|d| !d.is_empty()).map(Arc::from);
                     let name = self.sym(f.name);
                     let const_default = default.as_ref().and_then(|c| self.bound_const(c)).map(Arc::new);
-                    fields.push(FieldDef { name, ty, mutable: f.var, is_pub: f.public, default: None, const_default, doc });
+                    // As for a Sand default, struct literals call a helper that builds the default.
+                    let helper = const_default.is_some().then(|| {
+                        let helper_name = self.sym(&format!("{}.{}", self.name(self.types[id as usize].name), f.name));
+                        self.add_fn(FnInfo {
+                            name: helper_name,
+                            module: self.cur_mod,
+                            generics: generics.clone(),
+                            outer: generics.len(),
+                            params: vec![],
+                            ret: ty,
+                            has_self: false,
+                            kind: FnKind::DefaultHelper,
+                            doc: None,
+                            span,
+                            is_pub: false,
+                            owner: None,
+                            self_ty: Some(self_ty),
+                            decl: Some(FnDeclRef::BoundDefault(i as u32)),
+                            dicts: vec![],
+                            impl_of: None,
+                            trait_of: None,
+                        })
+                    });
+                    fields.push(FieldDef { name, ty, mutable: f.var, is_pub: f.public, default: helper, const_default, doc });
                 }
                 self.types[id as usize].kind = TypeDefKind::Struct { fields };
             }
@@ -1768,11 +1794,18 @@ impl Checker {
     /// The constant that the field default helper `f` returns, if any.
     fn helper_const(&self, f: FnId, memo: &mut ConstMemo) -> Option<ConstVal> {
         let fi = &self.fns[f as usize];
-        let Some(FnDeclRef::FieldDefault { field, .. }) = fi.decl else { return None };
-        if fi.module != self.cur_mod {
-            let Ty::Named(d, _) = self.arena.get(fi.self_ty?) else { return None };
-            let c = self.types[d as usize].fields()[field as usize].const_default.as_deref()?;
+        if !matches!(fi.kind, FnKind::DefaultHelper) {
+            return None;
+        }
+        let Ty::Named(d, _) = self.arena.get(fi.self_ty?) else { return None };
+        let field = self.types[d as usize].fields().iter().find(|x| x.default == Some(f))?;
+        // The constant defaults of Rust-bound structs, of the structs of
+        // earlier modules, and of the fields found before are known.
+        if let Some(c) = field.const_default.as_deref() {
             return self.charge_copy(c).then(|| c.clone());
+        }
+        if fi.module != self.cur_mod {
+            return None;
         }
         if let Some(c) = memo.done.get(&f) {
             return c.as_ref().filter(|c| self.charge_copy(c)).cloned();
@@ -1799,11 +1832,12 @@ impl Checker {
         c
     }
 
-    /// Charges the compile budget for a copy of `c`. Returns `false` if the
-    /// budget is spent or `c` is too large to be a constant
-    /// ([`ConstVal::measure`]).
+    /// Charges the compile budget for a copy of `c`: a unit per part, and
+    /// per [`TEXT_BYTES_PER_UNIT`](budget::TEXT_BYTES_PER_UNIT) bytes of its
+    /// strings. Returns `false` if the budget is spent or `c` is too large to
+    /// be a constant ([`ConstVal::measure`]).
     fn charge_copy(&self, c: &ConstVal) -> bool {
-        c.measure().is_some_and(|parts| self.budget.charge(parts as u64))
+        c.measure().is_some_and(|(parts, bytes)| self.budget.charge(parts as u64 + bytes as u64 / budget::TEXT_BYTES_PER_UNIT))
     }
 
     /// The value of `h` if it is a constant: built only from literals, ranges
@@ -2725,8 +2759,9 @@ impl Checker {
         let (self_ty, ret, name) = (fi.self_ty, fi.ret, self.name(fi.name).to_string());
         // Parameters of trait and impl methods are dictated by the trait;
         // those of default helpers are synthetic.
-        let synthetic =
-            fi.impl_of.is_some() || fi.trait_of.is_some() || matches!(decl, FnDeclRef::ParamDefault(..) | FnDeclRef::FieldDefault { .. });
+        let synthetic = fi.impl_of.is_some()
+            || fi.trait_of.is_some()
+            || matches!(decl, FnDeclRef::ParamDefault(..) | FnDeclRef::FieldDefault { .. } | FnDeclRef::BoundDefault(_));
         self.begin_fn(generics, self_ty);
         let mut param_locals = self.declare_reflect_params(id);
         param_locals.extend(self.declare_dict_params(id));
@@ -2768,6 +2803,18 @@ impl Checker {
                 let ItemKind::Struct(s) = &m.items[item as usize].kind else { unreachable!() };
                 let e = s.fields[field as usize].default.as_ref().unwrap();
                 (self.check_expr(e, ret), e.span)
+            }
+            FnDeclRef::BoundDefault(field) => {
+                let span = self.fns[id as usize].span;
+                let c = self_ty.and_then(|t| match self.arena.get(t) {
+                    Ty::Named(d, _) => self.types[d as usize].fields()[field as usize].const_default.clone(),
+                    _ => None,
+                });
+                let body = match c {
+                    Some(c) => self.const_expr(&c, ret, span),
+                    None => expr::err(span),
+                };
+                (body, span)
             }
             FnDeclRef::Test { item } => {
                 let ItemKind::Test(t) = &m.items[item as usize].kind else { unreachable!() };

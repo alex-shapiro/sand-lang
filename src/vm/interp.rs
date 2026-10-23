@@ -1880,16 +1880,17 @@ impl Vm {
     fn op_describe(&mut self, prog: &Program, tmpl: u32, args: &[Value]) -> Result<Value, Ctl> {
         let t = &prog.desc_templates[tmpl as usize];
         self.meter.charge(t.size() as u64)?;
-        let mut descs = Vec::with_capacity(t.arity());
-        for &a in &args[..t.arity()] {
+        let args = &args[..t.arity()];
+        let mut descs = Vec::with_capacity(args.len());
+        for &a in args {
             match self.heap.get(a) {
                 Obj::TypeDesc(d) => descs.push(d),
                 _ => return Err(internal("`Op::Describe` expected type descriptions")),
             }
         }
-        let d = t.instantiate(&descs)?;
-        self.check_memory(d.built as usize)?;
-        Ok(self.heap.alloc(Obj::TypeDesc(d)))
+        let d = Obj::TypeDesc(t.instantiate(&descs, args.into())?);
+        self.check_memory(d.size())?;
+        Ok(self.heap.alloc(d))
     }
 
     /// `Op::Interp`: string interpolation into one buffer.

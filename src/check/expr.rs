@@ -77,7 +77,7 @@ fn unit(span: Span) -> HExpr {
     mk(HKind::Unit, TypeId::UNIT, span)
 }
 
-fn err(span: Span) -> HExpr {
+pub(super) fn err(span: Span) -> HExpr {
     mk(HKind::Error, TypeId::ERROR, span)
 }
 
@@ -1536,7 +1536,7 @@ impl Checker {
     }
 
     /// The expression of constant `c`, of type `ty`.
-    fn const_expr(&mut self, c: &ConstVal, ty: TypeId, span: Span) -> HExpr {
+    pub(super) fn const_expr(&mut self, c: &ConstVal, ty: TypeId, span: Span) -> HExpr {
         let all = |s: &mut Self, xs: &[ConstVal], tys: &[TypeId]| -> Vec<HExpr> {
             xs.iter().enumerate().map(|(i, x)| s.const_expr(x, tys.get(i).copied().unwrap_or(TypeId::ERROR), span)).collect()
         };
@@ -2000,17 +2000,14 @@ impl Checker {
         let mut values = Vec::new();
         for (i, &given) in given.iter().enumerate() {
             let fty = self.field_type(def, i, &args);
-            let field = &self.types[def as usize].fields()[i];
-            let v = match (given, base_local, field.default, field.const_default.clone()) {
-                (Some(l), _, _, _) => mk(HKind::Local(l), fty, span),
-                (None, Some(b), _, _) => mk(HKind::Field { obj: Box::new(mk(HKind::Local(b), sty, span)), index: i as u32 }, fty, span),
-                (None, None, Some(helper), _) => {
+            let v = match (given, base_local, self.types[def as usize].fields()[i].default) {
+                (Some(l), _, _) => mk(HKind::Local(l), fty, span),
+                (None, Some(b), _) => mk(HKind::Field { obj: Box::new(mk(HKind::Local(b), sty, span)), index: i as u32 }, fty, span),
+                (None, None, Some(helper)) => {
                     // Instantiate the helper with this literal's type arguments.
                     mk(HKind::Call { func: helper, args: vec![] }, fty, span)
                 }
-                // The default of a field of a Rust-bound struct.
-                (None, None, None, Some(c)) => self.const_expr(&c, fty, span),
-                (None, None, None, None) => {
+                (None, None, None) => {
                     let def = &self.types[def as usize];
                     let msg = format!("missing field `{}` in `{}` literal", self.name(def.fields()[i].name), self.name(def.name));
                     self.error(span, msg);

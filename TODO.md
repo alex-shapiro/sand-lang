@@ -85,6 +85,9 @@ Follow-up work, roughly in priority order.
 
 - [ ] `help` does not describe the built-in bounds (`help(Encode)` reports an
       undefined name).
+- [ ] `help` writes the whole constant default of a Rust-bound field, which
+      can have 65536 parts (`#[sand(default = vec![0; 60000])]`). Cut long
+      defaults as long type names are cut.
 - [ ] Fix broken intra-doc links to private items and run `cargo doc` with
       `-D warnings` in CI.
 - [ ] Policy lints judge `http` rules only by their exact text (and

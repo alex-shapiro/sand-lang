@@ -484,3 +484,33 @@ fn constant_field_defaults_are_bounded() {
     rt().block_on(engine.run_source("main.sand", &deep)).unwrap();
     assert_eq!(out.contents(), "true\n");
 }
+
+#[test]
+fn rust_field_defaults_are_built_once() {
+    #[derive(sandlang::SandStruct)]
+    #[sand(module = "lab")]
+    struct Big {
+        #[sand(default = vec![0; (1 << 16) - 1])]
+        table: Vec<i64>,
+    }
+    let mut m = sandlang::NativeModule::new("lab");
+    m.bind::<Big>();
+    // Each literal calls the helper that builds the default: a copy in each
+    // literal would take 2 * 10^8 units.
+    let src = format!("import lab\nlet xs = [{}]\nprint(xs.len())\n", vec!["lab.Big {}"; 3000].join(", "));
+    let (r, took) = check(limits(|l| l.max_compile_fuel = Some(2_000_000)).module(m), &src);
+    r.unwrap();
+    assert!(took < FAST, "took {took:?}");
+}
+
+#[test]
+fn copies_of_constant_strings_are_charged_by_their_size() {
+    // `D {}` holds 4096 copies of a 64 KiB string (256 MiB), in only 16
+    // parts per copy of `C {}`.
+    let text = "x".repeat(1 << 16);
+    let fields = |ty: &str, n: usize| (0..n).map(|i| format!("f{i}: {ty} = {ty} {{}}")).collect::<Vec<_>>().join(", ");
+    let mut src = format!("struct A {{ s: str = \"{text}\" }}\nstruct B {{ {} }}\nstruct C {{ {} }}\n", fields("A", 16), fields("B", 16));
+    check(Config::new(), &src).0.unwrap();
+    src += &format!("struct D {{ {} }}\n", fields("C", 16));
+    rejects(&src, "program too complex to compile");
+}
