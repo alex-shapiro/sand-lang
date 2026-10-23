@@ -1204,9 +1204,17 @@ impl TypeDesc {
                 }
                 out.push(')');
             }
-            TypeDesc::Option(e) => {
-                e.write_name(recur, out);
-                out.push('?');
+            TypeDesc::Option(_) => {
+                // A loop, not recursion: the inner name comes first, so the
+                // length of `out` does not bound the layers of `T??`.
+                let (mut inner, mut layers) = (self, 0);
+                while let TypeDesc::Option(e) = inner {
+                    (inner, layers) = (&**e, layers + 1);
+                }
+                inner.write_name(recur, out);
+                for _ in 0..layers.min(MAX_NAME + 1) {
+                    out.push('?');
+                }
             }
             TypeDesc::Range => out.push_str("Range"),
             TypeDesc::Struct { name, .. } | TypeDesc::Enum { name, .. } | TypeDesc::Value { name, .. } | TypeDesc::Unsupported(name) => {

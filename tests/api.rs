@@ -145,6 +145,25 @@ fn json_decode_defaults_appear_in_stack_traces() {
 }
 
 #[test]
+fn json_decode_of_deep_options_runs_on_a_small_stack() {
+    // 512 KiB is the default stack of a secondary thread on iOS. Layers of
+    // `T??` read no JSON nesting, and the name of a map key type that
+    // `decode` cannot read comes first in the error text.
+    let deep = format!("int{}", "?".repeat(9000));
+    let src = format!(
+        "import json\nlet a: {deep} = json.decode(\"1\").unwrap()\nprint(json.encode(a))\nlet b: Result<[{deep}]> = json.decode(\"[{{}}]\")\n\
+         print(b.unwrap_err().message)\nlet c: Result<[{deep}: str]> = json.decode(\"{{\\\"1\\\": \\\"a\\\"}}\")\nprint(c.unwrap_err().message)\n"
+    );
+    let run = move || run_src(Config::new(), &src);
+    let (r, out, err) = std::thread::Builder::new().stack_size(512 << 10).spawn(run).unwrap().join().unwrap();
+    assert!(r.is_ok(), "{r:?} {err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines[..2], ["1", "$[0]: expected int"]);
+    assert!(lines[2].starts_with("$: cannot decode map keys of type int??") && lines[2].ends_with("?…"), "{}", lines[2]);
+    assert!(lines[2].len() < 300, "{}", lines[2].len());
+}
+
+#[test]
 fn runtime_errors_have_stack_traces() {
     // Non-tail calls, so every frame appears in the trace.
     let src = "fn a() -> int { fail(\"boom\") }\nfn b() -> int { a() + 1 }\nprint(b())\n";

@@ -169,6 +169,12 @@ pub struct Heap {
     /// dropped by major collections.
     spare: [Vec<Box<[Value]>>; SPARE_LENS],
     spare_bytes: usize,
+    /// The empty buffer of [`Staging`], kept for the next [`Heap::staged`]:
+    /// a new buffer for each call grows by doubling, and the allocator keeps
+    /// the freed buffers resident. A major collection drops it if no call
+    /// used it since the major collection before.
+    staged: Vec<(u32, Obj)>,
+    staged_used: bool,
 }
 
 const SPARE_LENS: usize = 4;
@@ -243,7 +249,16 @@ impl Staging<'_> {
     /// Whether `extra` more bytes, besides those staged, would exceed the
     /// memory limit of the heap.
     pub fn would_exceed(&self, extra: usize) -> bool {
-        self.heap.would_exceed(self.bytes.saturating_add(extra))
+        self.heap.would_exceed(self.bytes.saturating_add(self.buffer_bytes()).saturating_add(extra))
+    }
+
+    /// The bytes of the buffer that holds the staged objects until they move
+    /// to the heap, once it holds one more object.
+    fn buffer_bytes(&self) -> usize {
+        let (len, cap) = (self.objs.len(), self.objs.capacity());
+        // `Vec` doubles its capacity when it is full.
+        let cap = if len < cap { cap } else { cap.saturating_mul(2).max(4) };
+        cap.saturating_mul(std::mem::size_of::<(u32, Obj)>())
     }
 
     /// Returns a memory-limit error if `extra` additional bytes exceed the heap limit.
@@ -353,6 +368,8 @@ impl Heap {
             incremental: true,
             spare: Default::default(),
             spare_bytes: 0,
+            staged: Vec::new(),
+            staged_used: false,
         }
     }
 
@@ -414,14 +431,17 @@ impl Heap {
     /// the heap. The values `Staging::alloc` returns are valid once `f` has
     /// returned (they may be stored in other staged objects meanwhile).
     pub fn staged<R>(&mut self, f: impl FnOnce(&Heap, &mut Staging<'_>) -> R) -> R {
-        let mut st = Staging { heap: self, free: self.free_head, end: self.objs.len(), objs: Vec::new(), bytes: 0 };
+        let objs = std::mem::take(&mut self.staged);
+        self.staged_used = true;
+        let mut st = Staging { heap: self, free: self.free_head, end: self.objs.len(), objs, bytes: 0 };
         let r = f(self, &mut st);
-        let (free, objs) = (st.free, st.objs);
-        for (h, obj) in objs {
+        let (free, mut objs) = (st.free, st.objs);
+        for (h, obj) in objs.drain(..) {
             let v = self.alloc(obj);
             debug_assert_eq!(v, Value::Obj(h), "staged handles follow the free list, then the arena's end");
         }
         debug_assert_eq!(self.free_head, free);
+        self.staged = objs;
         r
     }
 
@@ -546,7 +566,8 @@ impl Heap {
 
     /// Memory used by heap objects and fibers (not counting pending I/O).
     pub fn used(&self) -> usize {
-        self.bytes.saturating_add(self.fiber_bytes).saturating_add(self.spare_bytes)
+        let staged = self.staged.capacity() * std::mem::size_of::<(u32, Obj)>();
+        self.bytes.saturating_add(self.fiber_bytes).saturating_add(self.spare_bytes).saturating_add(staged)
     }
 
     #[inline]
@@ -1170,6 +1191,9 @@ impl Heap {
     fn drop_spares(&mut self) {
         self.spare = Default::default();
         self.spare_bytes = 0;
+        if !std::mem::take(&mut self.staged_used) {
+            self.staged = Vec::new();
+        }
     }
 
     /// Frees object `h`, returning its accounted size.
@@ -1562,6 +1586,23 @@ mod tests {
         assert_eq!(s, a, "the free slot is reused");
         let c = heap.new_str("c");
         assert_eq!(c.handle(), l.handle().map(|h| h + 1));
+    }
+
+    #[test]
+    fn the_staging_buffer_counts_until_a_major_collection_finds_it_unused() {
+        let mut heap = Heap::new(None, usize::MAX);
+        let stage = |heap: &mut Heap| heap.staged(|_, st| (0..1000).map(|i| st.new_list(vec![Value::Int(i)])).last());
+        let used = heap.used();
+        stage(&mut heap);
+        heap.collect([], true);
+        let kept = heap.used() - used;
+        assert!(kept >= 1000 * std::mem::size_of::<(u32, Obj)>(), "{kept}");
+        // Reused, the buffer does not grow.
+        stage(&mut heap);
+        heap.collect([], true);
+        assert_eq!(heap.used() - used, kept);
+        heap.collect([], true);
+        assert_eq!(heap.used(), used);
     }
 
     #[test]

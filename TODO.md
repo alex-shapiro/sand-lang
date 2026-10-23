@@ -183,7 +183,9 @@ Follow-up work, roughly in priority order.
       `json.decode` builds a set whose elements it cannot compare, with
       equal elements twice. Require `Hash` of the element and key types of
       `Set` and map types wherever a type is written.
-- [ ] Trait bounds on struct/enum type parameters.
+- [ ] Trait bounds on struct/enum type parameters. The checker accepts
+      built-in bounds there but does not check them: with
+      `struct Bag<T: Hash> { s: [T] }`, `Bag<[int]>` compiles.
 - [ ] Allow trait bounds and `reflect` type parameters on local functions.
       A local function is a closure, so a call passes no dictionaries or
       descriptions: pass them as calls of top-level functions do

@@ -2076,9 +2076,10 @@ nesting depth of 512.
 
 `decode` builds a constant default (built only from literals, ranges of
 ints, tuples, lists, maps, `set([...])`, variants, and struct literals, with
-at most 65536 parts nested at most 64 levels deep) directly. It runs the other defaults (`id: str = uuid.v4()`) only after the
-whole text decodes without error: the defaults of an object run in
-declaration order, after those of the objects inside it.
+at most 65536 parts nested at most 64 levels deep) directly. It runs the
+other defaults (`id: str = uuid.v4()`) only after the whole text decodes
+without error: the defaults of an object run in declaration order, after
+those of the objects inside it.
 
 ### 13.8 `log`
 

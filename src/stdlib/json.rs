@@ -931,14 +931,24 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                 let b = base64::decode(&s, false).map_err(|_| self.fail("invalid base64"))?;
                 Ok(self.b.st.new_bytes(b))
             }
-            TypeDesc::Option(inner) => {
+            TypeDesc::Option(_) => {
+                // A loop, not recursion: the layers of `T??` read no JSON
+                // nesting, so the nesting limit does not bound them.
+                let (mut inner, mut layers) = (t, 0);
+                while let TypeDesc::Option(e) = inner {
+                    (inner, layers) = (e, layers + 1);
+                }
+                self.b.meter.charge(layers)?;
                 if self.p.peek() == Some(b'n') {
                     self.p.literal(b"null")?;
-                    Ok(Value::Tag(self.ids.none))
-                } else {
-                    let v = self.decode(inner)?;
-                    Ok(self.b.st.new_variant(self.ids.some, &[v]))
+                    return Ok(Value::Tag(self.ids.none));
                 }
+                let mut v = self.decode(inner)?;
+                for _ in 0..layers {
+                    self.b.reserve()?;
+                    v = self.b.st.new_variant(self.ids.some, &[v]);
+                }
+                Ok(v)
             }
             TypeDesc::List(elem) => {
                 self.expect_open(b'[', "array")?;
