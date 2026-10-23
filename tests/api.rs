@@ -1508,13 +1508,13 @@ help(conf.Settings)
 }
 
 #[test]
-#[should_panic(expected = "the default of field `tags` of `Bad` is not a Sand constant")]
+#[should_panic(expected = "the default of field `at` of `Bad` is not a Sand constant")]
 fn rust_field_defaults_must_be_sand_constants() {
     #[derive(sandlang::SandStruct)]
     #[sand(module = "lab")]
     struct Bad {
-        #[sand(default)]
-        tags: std::collections::BTreeSet<String>,
+        #[sand(default = sandlang::jiff::Timestamp::UNIX_EPOCH)]
+        at: sandlang::jiff::Timestamp,
     }
     NativeModule::new("lab").bind::<Bad>();
 }
@@ -1548,6 +1548,10 @@ fn rust_field_defaults_can_be_any_constant() {
         flags: std::collections::BTreeMap<i64, Vec<bool>>,
         #[sand(default = Frame { width: 2.0, labels: vec!["l".into()] })]
         border: Frame,
+        #[sand(default = std::collections::BTreeSet::from(["b".to_string(), "a".to_string()]))]
+        seen: std::collections::BTreeSet<String>,
+        #[sand(default)]
+        none: std::collections::HashSet<i64>,
     }
     let mut m = draw_module();
     m.bind::<Frame>().bind::<Sketch>();
@@ -1560,11 +1564,13 @@ fn rust_field_defaults_can_be_any_constant() {
     assert_eq!(
         out,
         "Empty\nSketch { figure: Empty, backdrop: None, frame: Some(Labeled(\"a\\\"b\", Rect(1.0, -2.0))), layers: Some(2), \
-         parts: [Circle(1.0), Group([])], pair: (3, \"x\"), flags: [2: [true]], border: Frame { width: 2.0, labels: [\"l\"] } }\n\
+         parts: [Circle(1.0), Group([])], pair: (3, \"x\"), flags: [2: [true]], border: Frame { width: 2.0, labels: [\"l\"] }, \
+         seen: Set([\"a\", \"b\"]), none: Set([]) }\n\
          true\ntrue\nFrame { width: 1.5, labels: [] }\nstruct draw.Sketch\n\nFields:\n    figure: Figure = Figure.Empty\n    \
          backdrop: Figure? = None\n    frame: Figure? = Some(Figure.Labeled(\"a\\\"b\", Figure.Rect(w: 1.0, h: -2.0)))\n    \
          layers: int? = Some(2)\n    parts: [Figure] = [Figure.Circle(1.0), Figure.Group([])]\n    pair: (int, str) = (3, \"x\")\n    \
-         flags: [int: [bool]] = [2: [true]]\n    border: Frame = Frame { width: 2.0, labels: [\"l\"] }\n"
+         flags: [int: [bool]] = [2: [true]]\n    border: Frame = Frame { width: 2.0, labels: [\"l\"] }\n    \
+         seen: Set<str> = set([\"a\", \"b\"])\n    none: Set<int> = set()\n"
     );
 }
 
@@ -1643,6 +1649,13 @@ print(none.product())
     m.source("pub native fn first<T: Ord>(xs: [T]) -> T");
     let errors = engine_errors(Config::new().module(m));
     assert_eq!(errors, ["native function `first` must bound `T` by `Num`, as its Rust function requires `T: Num`"]);
+
+    // A call through an impl passes the impl's dictionary, not `Num` values.
+    let mut m = NativeModule::new("nums");
+    m.vm_function("List.go", |vm: &mut Vm, num: Num<0>, _: Val<Vec<Param<0, bound::Num>>>| num.one(vm));
+    m.source("pub trait Go { fn go(self) -> int }\nimpl<T: Num> Go for [T] { native fn go(self) -> T }");
+    let errors = engine_errors(Config::new().module(m));
+    assert!(errors.iter().any(|e| e == "the Rust function of a native impl method cannot take `Num` evidence"), "{errors:?}");
 }
 
 #[test]

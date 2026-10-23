@@ -222,12 +222,6 @@ pub fn open() -> Account { Account { owner: "ann" } }
 --- error
 4: this call cannot build `account.Account` here: its field `balance` is private
 
-=== natives that take a type description can only be called
-import json
-let decode: fn(str) -> Result<int> = json.decode
---- error
-2: `decode` takes a type description, so it can only be called
-
 === private items are not visible
 import "./m.sand"
 print(m.secret())

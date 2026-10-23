@@ -317,6 +317,10 @@ fn constant_default() -> impl Strategy<Value = (String, String)> {
         Just(("()".to_string(), "()".to_string())),
         Just(("[int]".to_string(), "[]".to_string())),
         Just(("[str: int]".to_string(), "[:]".to_string())),
+        prop::collection::vec(-3i64..3, 0..3).prop_map(|xs| {
+            let items: Vec<String> = xs.iter().map(|&x| int_lit(x)).collect();
+            ("Set<int>".to_string(), if items.is_empty() { "set()".to_string() } else { format!("set([{}])", items.join(", ")) })
+        }),
         Just(("int?".to_string(), "None".to_string())),
         Just(("Tree<int>".to_string(), "Tree.Empty".to_string())),
         (-3i64..3, -3i64..3, any::<bool>()).prop_map(|(a, b, inclusive)| {

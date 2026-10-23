@@ -1103,6 +1103,12 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                 let items = all(self, xs)?;
                 self.b.st.new_list(items)
             }
+            ConstVal::Set(xs) => {
+                let items = all(self, xs)?;
+                let set = self.b.st.alloc(Obj::Set(Box::default()));
+                self.fills.push(Fill::Set(set, items));
+                set
+            }
             ConstVal::Map(kvs) => {
                 let mut entries = Vec::with_capacity(kvs.len());
                 for (k, v) in kvs {

@@ -538,6 +538,11 @@ impl Checker {
             if Some(tid) == self.num_trait && !m.is_native {
                 self.error(m.name.span, "the methods of a `Num` impl must be native");
             }
+            // A call through an impl passes the impl's dictionary first, which
+            // a native would read as its `Num` evidence.
+            if m.is_native && !self.fns[f as usize].dicts.is_empty() {
+                self.error(m.name.span, "the Rust function of a native impl method cannot take `Num` evidence");
+            }
             self.fns[f as usize].impl_of = Some(id);
             self.check_impl_method(id, slot as u32, f, m);
             slots[slot] = Some(f);
@@ -833,11 +838,9 @@ impl Checker {
     pub(crate) fn wrapper_value(&mut self, f: FnId, pre: &[(ParamId, TypeId)], span: Span) -> HExpr {
         let inst = self.instantiate_fn_with(f, span, pre);
         let id = self.new_lambda();
-        let mut args: Vec<HArg> = Vec::new();
-        for &(t, tr) in &inst.dicts {
-            let lenient = matches!(self.rty(t), Ty::Var(_)) && inst.params.iter().any(|&p| self.occurs_in(t, p));
-            args.push(HArg::Expr(self.evidence_hole(t, tr, lenient, span)));
-        }
+        let params_ty = inst.params.clone();
+        let lenient = move |c: &Self, t: TypeId| matches!(c.rty(t), Ty::Var(_)) && params_ty.iter().any(|&p| c.occurs_in(t, p));
+        let mut args = self.hidden_args(f, &inst.fresh, &inst.dicts, "function value", &lenient, span);
         let mut params = Vec::new();
         for &t in &inst.params {
             self.fs.locals.push(LocalInfo { name: Symbol::ARG, mutable: false, owner: id, cell: false, span });
@@ -861,6 +864,34 @@ impl Checker {
 
     // ------------------------------------------------------------------
     // Evidence
+
+    /// The hidden arguments of a call of `f` with the type arguments `fresh`
+    /// and the evidence `dicts`: the descriptions of its `reflect` type
+    /// arguments, then its evidence. `what` names the call in errors, and
+    /// `lenient` tells which evidence can stay unknown (see
+    /// [`EvidenceReq::lenient`]).
+    pub(crate) fn hidden_args(
+        &mut self,
+        f: FnId,
+        fresh: &[TypeId],
+        dicts: &[(TypeId, TraitRef)],
+        what: &'static str,
+        lenient: &dyn Fn(&Self, TypeId) -> bool,
+        span: Span,
+    ) -> Vec<HArg> {
+        let mut out = Vec::new();
+        for (k, &t) in fresh.iter().enumerate() {
+            if self.params[self.fns[f as usize].generics[k] as usize].reflect {
+                self.fs.reflect_checks.push((t, span, what));
+                out.push(HArg::Expr(mk(HKind::TypeDesc { ty: t, args: Vec::new() }, TypeId::UNIT, span)));
+            }
+        }
+        for &(t, tr) in dicts {
+            let lenient = lenient(self, t);
+            out.push(HArg::Expr(self.evidence_hole(t, tr, lenient, span)));
+        }
+        out
+    }
 
     /// Reports the `reflect` type parameters of trait or impl method `m`: a
     /// call through a trait passes no type descriptions.

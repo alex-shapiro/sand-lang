@@ -589,11 +589,11 @@ pub struct FieldDef {
 }
 
 /// A value built only from literals, ranges, and constructors, such as
-/// `(1, "a")`, `["k": [2]]`, `Shape.Circle(1.0)`, or `Point { x: 0 }`. A
-/// struct field default that is a constant fills a missing field in
-/// `json.decode`. A program identifies a variant by its runtime id and a
-/// struct by its definition (`V` and `S`); a native module identifies them by
-/// Rust type.
+/// `(1, "a")`, `["k": [2]]`, `set([3])`, `Shape.Circle(1.0)`, or
+/// `Point { x: 0 }`. A struct field default that is a constant fills a
+/// missing field in `json.decode`. A program identifies a variant by its
+/// runtime id and a struct by its definition (`V` and `S`); a native module
+/// identifies them by Rust type.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ConstVal<V = u32, S = TypeDefId> {
     Unit,
@@ -608,6 +608,8 @@ pub enum ConstVal<V = u32, S = TypeDefId> {
     Tuple(Vec<ConstVal<V, S>>),
     List(Vec<ConstVal<V, S>>),
     Map(Vec<(ConstVal<V, S>, ConstVal<V, S>)>),
+    /// `set([...])`, with the elements in insertion order.
+    Set(Vec<ConstVal<V, S>>),
     /// A variant and its payload.
     Variant(V, Vec<ConstVal<V, S>>),
     /// A struct and its fields in declaration order.
@@ -630,6 +632,7 @@ impl<V, S> ConstVal<V, S> {
             ConstVal::Range(a, b, inclusive) => ConstVal::Range(*a, *b, *inclusive),
             ConstVal::Tuple(xs) => ConstVal::Tuple(all(xs)?),
             ConstVal::List(xs) => ConstVal::List(all(xs)?),
+            ConstVal::Set(xs) => ConstVal::Set(all(xs)?),
             ConstVal::Map(kvs) => {
                 ConstVal::Map(kvs.iter().map(|(k, v)| Some((k.resolve(variant, def)?, v.resolve(variant, def)?))).collect::<Option<_>>()?)
             }

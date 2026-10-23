@@ -314,8 +314,7 @@ fn greet(name: str, greeting: str = "Hello") {
   Each type parameter in such a type argument must be a `reflect` type
   parameter of the calling function. A recursive function that nests a
   description more than 256 levels deep (`T` as `[T]`) aborts with kind
-  `"limit"`. A function with a `reflect` type parameter cannot be a function
-  value, and trait and impl methods cannot have one.
+  `"limit"`. Trait and impl methods cannot have a `reflect` type parameter.
 - Functions may be declared inside blocks; such local functions may capture
   enclosing variables and may call themselves recursively. Local functions
   declared consecutively in the same block may call each other.
@@ -2074,10 +2073,10 @@ naming the path (e.g. `$.items[2].name: expected str`). Parsing is limited to
 a nesting depth of 512.
 
 `decode` builds a constant default (built only from literals, ranges of
-ints, tuples, lists, maps, variants, and struct literals) directly. It runs
-the other defaults (`id: str = uuid.v4()`) only after the whole text decodes
-without error: the defaults of an object run in declaration order, after
-those of the objects inside it.
+ints, tuples, lists, maps, `set([...])`, variants, and struct literals)
+directly. It runs the other defaults (`id: str = uuid.v4()`) only after the
+whole text decodes without error: the defaults of an object run in
+declaration order, after those of the objects inside it.
 
 ### 13.8 `log`
 
@@ -2869,8 +2868,9 @@ field private to the module, `#[sand(var)]` makes it mutable (`var`), and
 `#[sand(name = "<name>")]` overrides its Sand name. `#[sand(default)]` or
 `#[sand(default = <expr>)]` gives a field the default `Default::default()` or
 `<expr>`. The default must be a constant: a number, `bool`, `()`, string,
-`bytes`, duration, or a tuple, `Vec`, map, `Option`, `SandEnum`, or
-`SandStruct` of constants. `bind` panics otherwise (for example, on a set).
+`bytes`, duration, or a tuple, `Vec`, map, set, `Option`, `SandEnum`, or
+`SandStruct` of constants. `bind` panics otherwise (for example, on a
+`jiff::Timestamp`).
 
 Recursive types can reference themselves through `Vec`, map, or `Box` fields.
 Because the engine copies each reachable struct and enum value during
@@ -2931,7 +2931,8 @@ bounds of `B` or stronger bounds on that parameter.
 
 If a `native fn` declaration bounds a type parameter by `Num`, the Rust
 function can take its evidence as `Num<N>` (with `zero` and `one`), after its
-`Reflect` parameters, in the order of the type parameters.
+`Reflect` parameters, in the order of the type parameters. A native impl
+method cannot take `Num<N>`.
 
 The engine automatically generates Sand declarations for registered types and
 functions that are not declared in `NativeModule::source`. Registered types use

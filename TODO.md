@@ -62,22 +62,21 @@ Follow-up work, roughly in priority order.
 
 ### Embedding
 
-- [ ] `native::Num` reads `T.zero()` and `T.one()` by calling the native
-      methods in fixed slots of the `Num` dictionary, so the checker requires
-      the prelude's `Num` impls to be native. Natives do not run bytecode:
-      a Sand caller runs the code that a native needs, as `json.decode` runs
-      the defaults that `decode_raw` returns. Pass `Num` evidence to natives
-      as the values `zero` and `one` instead.
 - [ ] `json.parse` accepts 512 levels of nesting, but conversion of a `Json`
       value to Rust aborts with kind `"limit"` beyond 256 levels of enum
       payloads. A limit of 512 overflows a 512 KiB thread stack (the iOS
       default), so convert `Json` without recursion.
-- [ ] Sand has no set literal, so no set is a constant: `#[sand(default)]`
-      on a `HashSet` or `BTreeSet` field panics in `bind`.
 - [ ] The derives describe the field types of a generic `SandEnum` or
       `SandStruct` at `Param<0>`, `Param<1>`, ..., so a field cannot use
       `Self` or another generic type whose type parameters have bounds
       (`struct Sorted<T: Ord>`): `Param<N>` does not implement `Ord`.
+- [ ] Value types (`time.Instant`, `uuid.Uuid`, ...) have no Sand constant,
+      so `#[sand(default)]` on a value-type field panics in `bind`, and
+      `json.decode` runs a Sand default of a value type as a computed one.
+      Add a constant that holds the text of a value and parses it.
+- [ ] A native impl method cannot take `Num<N>`: a call through an impl
+      passes the impl's dictionary first. Let the impl slot call the native
+      with the `Num` dictionary of the impl's evidence instead.
 - [ ] Map Rust ranges (`std::ops::Range<i64>`, `RangeInclusive<i64>`) to the
       Sand `Range`. Today a host struct field holds a range only as
       `Val<Range>`, so it cannot have a `#[sand(default)]`.

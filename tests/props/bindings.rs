@@ -7,7 +7,7 @@ use sandlang::json::Json;
 use sandlang::native::{Num, Param, Val, bound};
 use sandlang::vm::{Ctl, Vm};
 use sandlang::{Config, Engine, Error, MemorySink, NativeModule, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::{Arc, Mutex};
 
 fn run(config: Config, src: &str) -> (Result<sandlang::Outcome, Error>, String) {
@@ -115,6 +115,10 @@ struct Defaults {
     holder: Holder<i64, String>,
     #[sand(default = BTreeMap::from([("k".to_string(), Fig::Named { tag: None, parts: vec![Fig::Empty] })]))]
     map: BTreeMap<String, Fig>,
+    #[sand(default = BTreeSet::from(["b".to_string(), "a".to_string()]))]
+    tags: BTreeSet<String>,
+    #[sand(default = HashSet::from([3, -1]))]
+    ids: HashSet<i64>,
 }
 
 impl Default for Defaults {
@@ -135,6 +139,8 @@ impl Default for Defaults {
             pair: (1, "t".into()),
             holder: Holder { a: 2, bs: vec!["b".into()], pair: Some((2, "c".into())), extra: vec![5] },
             map: BTreeMap::from([("k".to_string(), Fig::Named { tag: None, parts: vec![Fig::Empty] })]),
+            tags: BTreeSet::from(["b".to_string(), "a".to_string()]),
+            ids: HashSet::from([3, -1]),
         }
     }
 }
@@ -234,8 +240,8 @@ proptest! {
     }
 
     #[test]
-    fn rust_field_defaults_fill_omitted_fields(given in prop::collection::vec(any::<bool>(), 15), n in int(), s in text()) {
-        let full = Defaults { n, x: -1.25, b: false, s: s.clone(), xs: vec![s.clone()], opt: Some(Fig::Num(n)), d: sandlang::jiff::SignedDuration::from_secs(3), shape: Fig::Num(n), raw: vec![1, 2, 255], some: None, some_fig: Some(Fig::Num(n)), figs: vec![Fig::Num(n)], pair: (n, s.clone()), holder: Holder { a: n, bs: Vec::new(), pair: None, extra: Vec::new() }, map: BTreeMap::from([(s.clone(), Fig::Num(n))]) };
+    fn rust_field_defaults_fill_omitted_fields(given in prop::collection::vec(any::<bool>(), 17), n in int(), s in text()) {
+        let full = Defaults { n, x: -1.25, b: false, s: s.clone(), xs: vec![s.clone()], opt: Some(Fig::Num(n)), d: sandlang::jiff::SignedDuration::from_secs(3), shape: Fig::Num(n), raw: vec![1, 2, 255], some: None, some_fig: Some(Fig::Num(n)), figs: vec![Fig::Num(n)], pair: (n, s.clone()), holder: Holder { a: n, bs: Vec::new(), pair: None, extra: Vec::new() }, map: BTreeMap::from([(s.clone(), Fig::Num(n))]), tags: BTreeSet::from([s.clone()]), ids: HashSet::from([n]) };
         let lits = [
             ("n", int_lit(n), format!("{n}")),
             ("x", "(-1.25)".to_string(), "-1.25".to_string()),
@@ -252,6 +258,8 @@ proptest! {
             ("pair", format!("({}, {})", int_lit(n), str_lit(&s)), format!("[{n}, {}]", serde_str(&s))),
             ("holder", format!("fig.Holder {{ a: {}, bs: [], pair: None }}", int_lit(n)), format!("{{\"a\": {n}, \"bs\": [], \"pair\": null}}")),
             ("map", format!("[{}: fig.Fig.Num({})]", str_lit(&s), int_lit(n)), format!("{{{}: {{\"Num\": [{n}]}}}}", serde_str(&s))),
+            ("tags", format!("set([{}])", str_lit(&s)), format!("[{}]", serde_str(&s))),
+            ("ids", format!("set([{}])", int_lit(n)), format!("[{n}]")),
         ];
         let mut expected = Defaults::default();
         let fields: Vec<String> = lits.iter().zip(&given).filter(|(_, g)| **g).map(|((name, lit, _), _)| format!("{name}: {lit}")).collect();
@@ -273,7 +281,9 @@ proptest! {
                     11 => expected.figs = full.figs.clone(),
                     12 => expected.pair = full.pair.clone(),
                     13 => expected.holder = full.holder.clone(),
-                    _ => expected.map = full.map.clone(),
+                    14 => expected.map = full.map.clone(),
+                    15 => expected.tags = full.tags.clone(),
+                    _ => expected.ids = full.ids.clone(),
                 }
             }
         }

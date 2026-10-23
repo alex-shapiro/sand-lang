@@ -87,13 +87,7 @@ impl Checker {
 
     /// A call of the prelude's `print` with `text`.
     fn print_call(&mut self, text: String, span: Span) -> HExpr {
-        let print = self.prelude.and_then(|p| match self.mods[p as usize].scope.get(&self.syms.get("print")?)?.def {
-            Def::Fn(f) => Some(f),
-            _ => None,
-        });
-        let Some(FnKind::Native(native)) = print.map(|f| self.fns[f as usize].kind.clone()) else {
-            panic!("the prelude is missing `print`")
-        };
+        let native = self.prelude_native("print").expect("the prelude declares `print`");
         let args = vec![HArg::Expr(mk(HKind::Str(text), TypeId::STR, span))];
         mk(HKind::CallNative { native, args }, TypeId::UNIT, span)
     }
@@ -1011,6 +1005,8 @@ impl Checker {
             ConstVal::Range(a, b, inclusive) => format!("{a}..{}{b}", if *inclusive { "=" } else { "" }),
             ConstVal::Tuple(xs) => format!("({})", list(xs)),
             ConstVal::List(xs) => format!("[{}]", list(xs)),
+            ConstVal::Set(xs) if xs.is_empty() => "set()".into(),
+            ConstVal::Set(xs) => format!("set([{}])", list(xs)),
             ConstVal::Map(kvs) if kvs.is_empty() => "[:]".into(),
             ConstVal::Map(kvs) => {
                 let entries: Vec<String> = kvs.iter().map(|(k, v)| format!("{}: {}", self.const_text(k), self.const_text(v))).collect();

@@ -563,6 +563,7 @@ struct Config {
     shapes: [Shape] = [Shape.Rect(w: 1.0, h: 2.0), Shape.Dot]
     size: (int, int) = (80, 24)
     late: Late = Late { n: 3 }
+    tags: Set<str> = set(["b", "a"])
 }
 struct Server { host: str = "localhost", port: int = 80, routes: [str: [int]] = ["a": [1, 2]] }
 struct Late { n: int, m: (str, bool)? = Some(("x", true)) }
@@ -570,7 +571,7 @@ let c: Config = json.decode("{\"size\": [1, 2]}")?
 print(c)
 print(c == Config { size: (1, 2) })
 --- stdout
-Config { server: Server { host: "localhost", port: 80, routes: ["a": [1, 2]] }, backup: Server { host: "localhost", port: 81, routes: ["a": [1, 2]] }, shapes: [Rect(1.0, 2.0), Dot], size: (1, 2), late: Late { n: 3, m: Some(("x", true)) } }
+Config { server: Server { host: "localhost", port: 80, routes: ["a": [1, 2]] }, backup: Server { host: "localhost", port: 81, routes: ["a": [1, 2]] }, shapes: [Rect(1.0, 2.0), Dot], size: (1, 2), late: Late { n: 3, m: Some(("x", true)) }, tags: Set(["b", "a"]) }
 true
 
 === decode runs the defaults that are not constants, as a struct literal does
@@ -713,8 +714,23 @@ trait Load { fn load<reflect T>() -> int }
 --- error
 1: the type parameters of trait and impl methods cannot be `reflect`
 
-=== functions with reflect type parameters cannot be values
+=== functions with reflect type parameters are values
+import json
+fn load<reflect T: Encode>(text: str) -> Result<[T]> { json.decode(text) }
+fn loader<reflect T: Encode>(x: T?) -> fn(str) -> Result<[T]> { load }
+let f: fn(str) -> Result<[int]> = load
+let g: fn(str) -> Result<str> = json.decode
+let none: bool? = None
+print(f("[1, 2]"))
+print(g("\"a\""))
+print(loader(none)("[true]"))
+--- stdout
+Ok([1, 2])
+Ok("a")
+Ok([true])
+
+=== a function value needs the reflect type argument
 fn size<reflect T>(x: int) -> int { x }
 let f = size
 --- error
-2: `size` takes a type description, so it can only be called
+2: cannot infer type for this function value; add a type annotation

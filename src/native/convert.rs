@@ -69,7 +69,7 @@ pub trait IntoValue: SandType {
 
     /// Returns `self` as a Sand constant, or `None` if no Sand constant
     /// equals `self`. Numbers, `bool`, `()`, strings, `bytes`, durations, and
-    /// the tuples, `Vec`s, maps, `Option`s, [`SandEnum`](crate::SandEnum)s,
+    /// the tuples, `Vec`s, maps, sets, `Option`s, [`SandEnum`](crate::SandEnum)s,
     /// and [`SandStruct`](crate::SandStruct)s of constants are constants. A
     /// field default (`#[sand(default)]`) must be a constant.
     fn to_const(&self) -> Option<Constant> {
@@ -508,6 +508,11 @@ impl<T: IntoValue + Ord> IntoValue for HashSet<T> {
         items.sort_unstable();
         write_set(vm, items.len(), items)
     }
+    fn to_const(&self) -> Option<Constant> {
+        let mut items: Vec<&T> = self.iter().collect();
+        items.sort_unstable();
+        Some(Constant(ConstVal::Set(super::parts(items.into_iter().map(T::to_const))?)))
+    }
 }
 impl<T: for<'k> FromValue<Item<'k> = T> + Ord> FromValue for BTreeSet<T> {
     type Item<'a> = BTreeSet<T>;
@@ -518,6 +523,9 @@ impl<T: for<'k> FromValue<Item<'k> = T> + Ord> FromValue for BTreeSet<T> {
 impl<T: IntoValue> IntoValue for BTreeSet<T> {
     fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl> {
         write_set(vm, self.len(), self)
+    }
+    fn to_const(&self) -> Option<Constant> {
+        Some(Constant(ConstVal::Set(super::parts(self.iter().map(T::to_const))?)))
     }
 }
 

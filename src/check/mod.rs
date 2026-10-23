@@ -500,7 +500,9 @@ pub(crate) struct FnState {
     /// (see `fuse.rs`, which re-owns the locals of inlined lambdas).
     pub lambda_first_local: Vec<LocalId>,
     pub obligations: Vec<(TypeId, Bound, Span)>,
-    pub reflect_checks: Vec<(TypeId, Span)>,
+    /// The `reflect` type arguments of calls and function values (`what`),
+    /// checked once the function's types are inferred.
+    pub reflect_checks: Vec<(TypeId, Span, &'static str)>,
     /// The hidden parameters holding the descriptions of the function's
     /// `reflect` type parameters.
     pub reflect_locals: Vec<(ParamId, LocalId)>,
@@ -1793,6 +1795,13 @@ impl Checker {
             HKind::Map(kvs) => ConstVal::Map(
                 kvs.iter().map(|(k, v)| Some((self.const_of(k, env, memo)?, self.const_of(v, env, memo)?))).collect::<Option<_>>()?,
             ),
+            HKind::CallNative { native, args } if Some(*native) == self.prelude_native("set") => match args.as_slice() {
+                [HArg::Expr(xs)] => match self.const_of(xs, env, memo)? {
+                    ConstVal::List(xs) => ConstVal::Set(xs),
+                    _ => return None,
+                },
+                _ => return None,
+            },
             HKind::Range { start, end, inclusive } => match (self.const_of(start, env, memo)?, self.const_of(end, env, memo)?) {
                 (ConstVal::Int(a), ConstVal::Int(b)) => ConstVal::Range(a, b, *inclusive),
                 _ => return None,
@@ -1835,6 +1844,16 @@ impl Checker {
 
     fn rust_type(&self, d: TypeDefId) -> Option<std::any::TypeId> {
         rust_type(&self.types[d as usize], &self.enum_bindings, &self.struct_bindings, d)
+    }
+
+    /// The id of the prelude's native function `name`.
+    pub(crate) fn prelude_native(&self, name: &str) -> Option<u32> {
+        let p = self.prelude?;
+        let Def::Fn(f) = self.mods[p as usize].scope.get(&self.syms.get(name)?)?.def else { return None };
+        match self.fns[f as usize].kind {
+            FnKind::Native(n) => Some(n),
+            _ => None,
+        }
     }
 
     /// Declares registered host functions that do not have a `native fn` declaration in Sand source.
@@ -2851,23 +2870,23 @@ impl Checker {
             }
         }
         let reflect = std::mem::take(&mut self.fs.reflect_checks);
-        for (t, sp) in reflect {
+        for (t, sp, what) in reflect {
             let z = self.zonk(t);
             if self.reflect_local(z).is_some() {
                 continue;
             }
             if self.arena.has_vars(z) {
-                self.infer_error(sp, "cannot infer type for this call; add a type annotation");
+                self.infer_error(sp, format!("cannot infer type for this {what}; add a type annotation"));
             } else if let Some(p) = self.arena.params_of(z).into_iter().find(|&p| self.reflect_param_local(p).is_none()) {
                 let msg = format!(
-                    "this call needs a description of `{}` at run time, so `{}` must be a `reflect` type parameter of this function",
+                    "this {what} needs a description of `{}` at run time, so `{}` must be a `reflect` type parameter of this function",
                     self.show(z),
                     self.name(self.params[p as usize].name)
                 );
                 self.error(sp, msg);
             } else if let Some((d, f)) = self.private_field_in(z) {
                 let (ty, field) = (self.ctor_name(Ctor::Def(d), 0), self.name(f));
-                self.error(sp, format!("this call cannot build `{ty}` here: its field `{field}` is private"));
+                self.error(sp, format!("this {what} cannot build `{ty}` here: its field `{field}` is private"));
             }
         }
         // Cells are decided by the final walk.

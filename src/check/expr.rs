@@ -1095,13 +1095,9 @@ impl Checker {
     }
 
     fn fn_value(&mut self, f: FnId, span: Span) -> HExpr {
-        if self.fns[f as usize].generics.iter().any(|&p| self.params[p as usize].reflect) {
-            let msg = format!("`{}` takes a type description, so it can only be called", self.name(self.fns[f as usize].name));
-            self.error(span, msg);
-            return err(span);
-        }
-        if !self.fns[f as usize].dicts.is_empty() {
-            // Partially apply the dictionaries.
+        let fi = &self.fns[f as usize];
+        if !fi.dicts.is_empty() || fi.generics.iter().any(|&p| self.params[p as usize].reflect) {
+            // Partially apply the hidden arguments.
             return self.wrapper_value(f, &[], span);
         }
         let inst = self.instantiate_fn_with(f, span, &[]);
@@ -1516,16 +1512,8 @@ impl Checker {
         let Some(mut hargs) = self.bind_args(Callee::Fn(f), &ptys, recv, args, span) else {
             return mk(HKind::Error, ret, span);
         };
-        // The descriptions of the `reflect` type arguments, then the
-        // dictionaries, are passed first; default helpers receive them too.
-        let mut hidden: Vec<HArg> = Vec::new();
-        for (k, &t) in fresh.iter().enumerate() {
-            if self.params[self.fns[f as usize].generics[k] as usize].reflect {
-                self.fs.reflect_checks.push((t, span));
-                hidden.push(HArg::Expr(mk(HKind::TypeDesc { ty: t, args: Vec::new() }, TypeId::UNIT, span)));
-            }
-        }
-        hidden.extend(dicts.into_iter().map(|(t, tr)| HArg::Expr(self.evidence_hole(t, tr, false, span))));
+        // Hidden arguments are passed first; default helpers receive them too.
+        let mut hidden = self.hidden_args(f, &fresh, &dicts, "call", &|_, _| false, span);
         if !hidden.is_empty() {
             let k = hidden.len();
             for a in &mut hargs {
@@ -1574,6 +1562,18 @@ impl Checker {
                     _ => TypeId::ERROR,
                 };
                 HKind::List(all(self, xs, &vec![elem; xs.len()]))
+            }
+            ConstVal::Set(xs) => {
+                let elem = match self.rty(ty) {
+                    Ty::Set(e) => e,
+                    _ => TypeId::ERROR,
+                };
+                let list = self.list_ty(elem);
+                let items = mk(HKind::List(all(self, xs, &vec![elem; xs.len()])), list, span);
+                match self.prelude_native("set") {
+                    Some(native) => HKind::CallNative { native, args: vec![HArg::Expr(items)] },
+                    None => HKind::Error,
+                }
             }
             ConstVal::Map(kvs) => {
                 let (kt, vt) = match self.rty(ty) {
