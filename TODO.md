@@ -74,6 +74,21 @@ Follow-up work, roughly in priority order.
       so `#[sand(default)]` on a value-type field panics in `bind`, and
       `json.decode` runs a Sand default of a value type as a computed one.
       Add a constant that holds the text of a value and parses it.
+- [ ] **Let natives run Sand code.** Natives do not run bytecode, so a Sand
+      caller runs the code that a native needs:
+      - `json.decode` is a Sand function that runs the computed defaults
+        that the native `decode_raw` returns. Against the native `decode`
+        that ran no computed defaults, the wrapper makes decoding `"1"` take
+        90 ns instead of 50 ns and a two-field object 250 ns instead of
+        220 ns; a 2000-object array takes about the same time.
+      - `sort_by` maps the keys into a list for the native `sort_by_keys`.
+      - `native::Num` calls the native methods in fixed slots of the `Num`
+        dictionary, so the checker requires the `Num` impls to be native.
+
+      A native that gives the VM Sand functions to run after it returns
+      removes the `decode` wrapper; a native that calls a Sand function and
+      reads its result removes all three. Do this only if these costs matter
+      more than a change to the interpreter loop.
 - [ ] A native impl method cannot take `Num<N>`: a call through an impl
       passes the impl's dictionary first. Let the impl slot call the native
       with the `Num` dictionary of the impl's evidence instead.
@@ -121,11 +136,6 @@ Follow-up work, roughly in priority order.
 - [ ] Profile `HostFn` dispatch and argument slice construction (`fannkuch` and
       `results` in `bench/programs`) to reduce the ~0.5 ns typed native call
       overhead.
-- [ ] `json.decode` is a Sand function that calls the native `decode_raw`,
-      because only Sand code can run the computed defaults of missing fields.
-      Decoding `"1"` takes 90 ns, against 50 ns when `decode` was native.
-      Let a native give the VM Sand functions to run after it returns, and
-      make `decode` native again.
 - [ ] Dispatch loop: the cost of individual instructions shifts by up to
       ±15% between builds as LLVM reallocates registers. A threaded design
       (one function per instruction with guaranteed tail calls, Rust's
