@@ -1151,29 +1151,85 @@ pub enum TypeDesc {
 }
 
 impl TypeDesc {
-    /// Formats the Sand type name for `self`, using `recur` to resolve [`TypeDesc::Recur`] IDs.
+    /// Formats the Sand type name for `self`, using `recur` to resolve
+    /// [`TypeDesc::Recur`] IDs. A name longer than 256 bytes is cut and ends
+    /// in `…`.
     pub fn format(&self, recur: &dyn Fn(u32) -> String) -> String {
-        let list = |ts: &[Arc<TypeDesc>]| ts.iter().map(|t| t.format(recur)).collect::<Vec<_>>().join(", ");
-        match self {
-            TypeDesc::Int => "int".into(),
-            TypeDesc::Float => "float".into(),
-            TypeDesc::Bool => "bool".into(),
-            TypeDesc::Str => "str".into(),
-            TypeDesc::Bytes => "bytes".into(),
-            TypeDesc::Duration => "duration".into(),
-            TypeDesc::Unit => "()".into(),
-            TypeDesc::List(e) => format!("[{}]", e.format(recur)),
-            TypeDesc::Map(k, v) => format!("[{}: {}]", k.format(recur), v.format(recur)),
-            TypeDesc::Set(e, _) => format!("Set<{}>", e.format(recur)),
-            TypeDesc::Tuple(ts) => format!("({})", list(ts)),
-            TypeDesc::Option(e) => format!("{}?", e.format(recur)),
-            TypeDesc::Range => "Range".into(),
-            TypeDesc::Struct { name, .. } | TypeDesc::Enum { name, .. } | TypeDesc::Value { name, .. } | TypeDesc::Unsupported(name) => {
-                name.clone()
-            }
-            TypeDesc::Recur(id) => recur(*id),
-            TypeDesc::Param(_) => "_".into(),
+        let mut out = String::new();
+        self.write_name(recur, &mut out);
+        cut_name(&mut out);
+        out
+    }
+
+    /// Appends the name of `self` to `out` until `out` is longer than
+    /// [`MAX_NAME`], which bounds the work on a description whose nodes are
+    /// shared ([`DescTemplate`]).
+    fn write_name(&self, recur: &dyn Fn(u32) -> String, out: &mut String) {
+        if out.len() > MAX_NAME {
+            return;
         }
+        match self {
+            TypeDesc::Int => out.push_str("int"),
+            TypeDesc::Float => out.push_str("float"),
+            TypeDesc::Bool => out.push_str("bool"),
+            TypeDesc::Str => out.push_str("str"),
+            TypeDesc::Bytes => out.push_str("bytes"),
+            TypeDesc::Duration => out.push_str("duration"),
+            TypeDesc::Unit => out.push_str("()"),
+            TypeDesc::List(e) => {
+                out.push('[');
+                e.write_name(recur, out);
+                out.push(']');
+            }
+            TypeDesc::Map(k, v) => {
+                out.push('[');
+                k.write_name(recur, out);
+                out.push_str(": ");
+                v.write_name(recur, out);
+                out.push(']');
+            }
+            TypeDesc::Set(e, _) => {
+                out.push_str("Set<");
+                e.write_name(recur, out);
+                out.push('>');
+            }
+            TypeDesc::Tuple(ts) => {
+                out.push('(');
+                for (i, t) in ts.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    t.write_name(recur, out);
+                }
+                out.push(')');
+            }
+            TypeDesc::Option(e) => {
+                e.write_name(recur, out);
+                out.push('?');
+            }
+            TypeDesc::Range => out.push_str("Range"),
+            TypeDesc::Struct { name, .. } | TypeDesc::Enum { name, .. } | TypeDesc::Value { name, .. } | TypeDesc::Unsupported(name) => {
+                out.push_str(name)
+            }
+            TypeDesc::Recur(id) => out.push_str(&recur(*id)),
+            TypeDesc::Param(_) => out.push('_'),
+        }
+    }
+}
+
+/// The longest type name, in bytes, in a description or from
+/// [`TypeDesc::format`].
+const MAX_NAME: usize = 256;
+
+/// Cuts `name` to [`MAX_NAME`] bytes, ending it in `…` if it was longer.
+pub(crate) fn cut_name(name: &mut String) {
+    if name.len() > MAX_NAME {
+        let mut end = MAX_NAME;
+        while !name.is_char_boundary(end) {
+            end -= 1;
+        }
+        name.truncate(end);
+        name.push('…');
     }
 }
 
@@ -1200,9 +1256,9 @@ pub struct DescTemplate {
     desc: Arc<TypeDesc>,
     /// The type parameters, in the order of the arguments.
     params: Vec<u32>,
-    /// The nodes of `desc` that contain a type parameter, by address.
+    /// The nodes of `desc` that are or contain a type parameter, by address.
     spine: std::collections::HashSet<usize, FxBuild>,
-    /// The length of the longest path of nodes in `spine`.
+    /// The length of the longest path of nodes that instantiation builds.
     depth: usize,
 }
 
@@ -1213,31 +1269,29 @@ fn addr(d: &Arc<TypeDesc>) -> usize {
 impl DescTemplate {
     /// The template of `desc` with arguments for `params`.
     pub fn new(desc: Arc<TypeDesc>, params: Vec<u32>) -> DescTemplate {
-        // The depth of the parameters in each node (0: none), by address.
-        fn depth(d: &Arc<TypeDesc>, seen: &mut FxHashMap<usize, usize>) -> usize {
+        // For each node, by address: the longest path of nodes that
+        // instantiation builds below and at it (a parameter is replaced, not
+        // built), or `None` if it contains no parameter.
+        fn depth(d: &Arc<TypeDesc>, seen: &mut FxHashMap<usize, Option<usize>>) -> Option<usize> {
             if let Some(&n) = seen.get(&addr(d)) {
                 return n;
             }
-            let mut deepest = |ds: &mut dyn Iterator<Item = &Arc<TypeDesc>>| ds.map(|x| depth(x, seen)).max().unwrap_or(0);
-            let below = match &**d {
-                TypeDesc::Param(_) => 0,
+            let mut deepest = |ds: &mut dyn Iterator<Item = &Arc<TypeDesc>>| ds.filter_map(|x| depth(x, seen)).max().map(|n| n + 1);
+            let n = match &**d {
+                TypeDesc::Param(_) => Some(0),
                 TypeDesc::List(e) | TypeDesc::Set(e, _) | TypeDesc::Option(e) => deepest(&mut std::iter::once(e)),
                 TypeDesc::Map(k, v) => deepest(&mut [k, v].into_iter()),
                 TypeDesc::Tuple(ts) => deepest(&mut ts.iter()),
                 TypeDesc::Struct { fields, .. } => deepest(&mut fields.iter().map(|f| &f.1)),
                 TypeDesc::Enum { variants, .. } => deepest(&mut variants.iter().flat_map(|v| &v.2)),
-                _ => {
-                    seen.insert(addr(d), 0);
-                    return 0;
-                }
+                _ => None,
             };
-            let n = if below > 0 || matches!(**d, TypeDesc::Param(_)) { below + 1 } else { 0 };
             seen.insert(addr(d), n);
             n
         }
         let mut seen = FxHashMap::default();
-        let depth = depth(&desc, &mut seen);
-        let spine = seen.into_iter().filter(|&(_, n)| n > 0).map(|(a, _)| a).collect();
+        let depth = depth(&desc, &mut seen).unwrap_or(0);
+        let spine = seen.into_iter().filter(|(_, n)| n.is_some()).map(|(a, _)| a).collect();
         DescTemplate { desc, params, spine, depth }
     }
 
@@ -1300,7 +1354,8 @@ impl Instance<'_> {
     }
 
     /// `name` with each [`crate::types::param_mark`] replaced by the name of
-    /// its argument.
+    /// its argument, cut to [`MAX_NAME`] bytes, so that a recursive function
+    /// that passes `P<T, T>` on as `T` does not double the name on each call.
     fn name(&mut self, name: &str) -> String {
         let mut out = String::new();
         let mut parts = name.split(crate::types::PARAM_MARK);
@@ -1311,6 +1366,7 @@ impl Instance<'_> {
             }
             out.push_str(text);
         }
+        cut_name(&mut out);
         self.built += out.len();
         out
     }

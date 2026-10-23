@@ -539,6 +539,19 @@ impl Bound {
             Bound::Add => "Add",
         }
     }
+
+    /// Whether a type parameter bounded by `self` satisfies `other`.
+    pub fn implies(self, other: Bound) -> bool {
+        self == other
+            || (other == Bound::Eq && matches!(self, Bound::Ord | Bound::Hash | Bound::Num))
+            || (matches!(other, Bound::Ord | Bound::Add | Bound::Encode) && self == Bound::Num)
+    }
+
+    /// The names of `bounds`, without the bounds that the others imply.
+    pub fn names(bounds: &[Bound]) -> Vec<&'static str> {
+        let implied = |b: Bound| bounds.iter().any(|&x| x != b && x.implies(b));
+        bounds.iter().filter(|&&b| !implied(b)).map(|b| b.name()).collect()
+    }
 }
 
 /// A user-defined trait applied to type arguments (`Into<str>`); the
@@ -567,11 +580,7 @@ pub struct ParamInfo {
 
 impl ParamInfo {
     pub fn has_bound(&self, b: Bound) -> bool {
-        self.bounds.iter().any(|&x| {
-            x == b
-                || (b == Bound::Eq && matches!(x, Bound::Ord | Bound::Hash | Bound::Num))
-                || (matches!(b, Bound::Ord | Bound::Add | Bound::Encode) && x == Bound::Num)
-        })
+        self.bounds.iter().any(|&x| x.implies(b))
     }
 }
 

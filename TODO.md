@@ -121,6 +121,11 @@ Follow-up work, roughly in priority order.
 - [ ] Profile `HostFn` dispatch and argument slice construction (`fannkuch` and
       `results` in `bench/programs`) to reduce the ~0.5 ns typed native call
       overhead.
+- [ ] `json.decode` is a Sand function that calls the native `decode_raw`,
+      because only Sand code can run the computed defaults of missing fields.
+      Decoding `"1"` takes 90 ns, against 50 ns when `decode` was native.
+      Let a native give the VM Sand functions to run after it returns, and
+      make `decode` native again.
 - [ ] Dispatch loop: the cost of individual instructions shifts by up to
       ±15% between builds as LLVM reallocates registers. A threaded design
       (one function per instruction with guaranteed tail calls, Rust's

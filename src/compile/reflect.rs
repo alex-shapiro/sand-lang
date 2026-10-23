@@ -23,8 +23,8 @@
 
 use crate::check::CheckedProgram;
 use crate::check::persist::PMap;
-use crate::types::{FnId, Opaque, Ty, TyList, TypeArena, TypeDefId, TypeDefKind, TypeId, TypePrinter};
-use crate::vm::value::{DescTemplate, FieldDefault, MAX_BUILT_DEPTH, TypeDesc};
+use crate::types::{FnId, Opaque, PARAM_MARK, Ty, TyList, TypeArena, TypeDefId, TypeDefKind, TypeId, TypePrinter};
+use crate::vm::value::{DescTemplate, FieldDefault, MAX_BUILT_DEPTH, TypeDesc, cut_name};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -333,12 +333,16 @@ impl Builder<'_, '_> {
         let def = &self.cp.types[d as usize];
         // Instantiation replaces the type parameters in the names of structs
         // and enums only.
-        let name = match def.kind {
+        let mut name = match def.kind {
             TypeDefKind::Opaque(_) => self.show(t),
             _ => self.instance_name(t),
         };
         if !self.charge(name.len() / 8) {
             return (Arc::new(TypeDesc::Unit), None);
+        }
+        // Instantiation cuts the names that have type parameters.
+        if !name.contains(PARAM_MARK) {
+            cut_name(&mut name);
         }
         let cp = self.cp;
         let args = self.arena.list(args).to_vec();

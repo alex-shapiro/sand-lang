@@ -10,7 +10,7 @@
 use super::base64;
 use crate::check::ModKind;
 use crate::native::bound::Encode;
-use crate::native::{HostError, NamedType, NativeModule, Param, Reflect, Val, variant_index};
+use crate::native::{EnumType, HostError, NamedType, NativeModule, Param, Reflect, Val, variant_index};
 use crate::syntax::lexer::is_ident;
 use crate::types::ConstVal;
 use crate::vm::bytecode::Program;
@@ -54,10 +54,10 @@ pub enum Json {
     Obj(indexmap::IndexMap<String, Json>),
 }
 
-/// The runtime ids of `Json` and of its variants in a program.
+/// The runtime ids of the variants of `Json` in a program.
 #[derive(Clone, Copy)]
 struct JsonIds {
-    def: u32,
+    first: u32,
     null: u32,
     bool_: u32,
     int: u32,
@@ -69,6 +69,15 @@ struct JsonIds {
 
 impl JsonIds {
     fn of(prog: &Program) -> Result<JsonIds, Ctl> {
+        match prog.enum_types.get(&Json::rust_type()) {
+            Some(&first) => Ok(JsonIds::at(first)),
+            None => internal("the json module is not loaded"),
+        }
+    }
+
+    /// The ids if the first variant has id `first`: the variants of an enum
+    /// have consecutive ids.
+    fn at(first: u32) -> JsonIds {
         const INDEXES: [usize; 7] = [
             variant_index::<Json>("Null"),
             variant_index::<Json>("Bool"),
@@ -78,9 +87,13 @@ impl JsonIds {
             variant_index::<Json>("Arr"),
             variant_index::<Json>("Obj"),
         ];
-        let Some(&first) = prog.enum_types.get(&Json::rust_type()) else { return internal("the json module is not loaded") };
         let [null, bool_, int, float, str_, arr, obj] = INDEXES.map(|i| first + i as u32);
-        Ok(JsonIds { def: prog.variants[first as usize].def, null, bool_, int, float, str_, arr, obj })
+        JsonIds { first, null, bool_, int, float, str_, arr, obj }
+    }
+
+    /// Whether `id` is the id of a variant of `Json`.
+    fn has(&self, id: u32) -> bool {
+        id.wrapping_sub(self.first) < Json::VARIANTS.len() as u32
     }
 }
 
@@ -123,14 +136,13 @@ pub(crate) fn module() -> NativeModule {
     m.bind::<Decoded<()>>();
     m.vm_function("decode_raw", |vm: &mut Vm, ty: Reflect<0>, text: Val<String>| -> Result<Decoded<Param<0>>, Ctl> {
         let desc = ty.desc(&vm.heap)?.clone();
-        let (ids, json) = (vm.prog.ids, JsonIds::of(&vm.prog)?);
+        let ids = vm.prog.ids;
         let meter = &vm.meter;
         let (r, fills) = vm.heap.staged(|heap, st| {
             let mut d = Decoder {
                 p: Parser::new(text.str(heap)),
                 b: Build::new(heap, st, meter),
                 ids,
-                json,
                 path: Vec::new(),
                 stack: Vec::new(),
                 slots: Vec::new(),
@@ -768,7 +780,6 @@ struct Decoder<'a, 'd, 's, 'h> {
     p: Parser<'a>,
     b: Build<'a, 's, 'h>,
     ids: crate::vm::bytecode::RtIds,
-    json: JsonIds,
     /// Location of the value being decoded, for error messages.
     path: Vec<Seg<'a>>,
     /// Enclosing struct and enum types, to resolve recursive references.
@@ -982,58 +993,9 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                 })?;
                 Ok(self.b.map(m))
             }
-            TypeDesc::Struct { id, def, fields, .. } => {
-                self.expect_open(b'{', "object")?;
-                self.stack.push(t);
-                let base = self.slots.len();
-                self.slots.resize(base + fields.len(), None);
-                let mut next = 0;
-                let r = self.object(true, |d, key| match d.field_index(*id, fields, &key, next)? {
-                    Some(i) => {
-                        next = i + 1;
-                        d.slots[base + i] = Some(d.with_seg(Seg::Key(key), |d| d.decode(&fields[i].1))?);
-                        Ok(())
-                    }
-                    None => d.p.skip(),
-                });
-                self.stack.pop();
-                if let Err(e) = r {
-                    self.slots.truncate(base);
-                    return Err(e);
-                }
-                let mut values = Vec::with_capacity(fields.len());
-                let mut computed = Vec::new();
-                for (i, (field, ty, default)) in fields.iter().enumerate() {
-                    values.push(match (self.slots[base + i], default, &**ty) {
-                        (Some(v), _, _) => v,
-                        (None, FieldDefault::Const(c), _) => match self.constant(c) {
-                            Ok(v) => v,
-                            Err(e) => {
-                                self.slots.truncate(base);
-                                return Err(e);
-                            }
-                        },
-                        (None, FieldDefault::Computed(fill), _) => {
-                            computed.push(*fill);
-                            Value::Unit
-                        }
-                        (None, FieldDefault::None, TypeDesc::Option(_)) => Value::Tag(self.ids.none),
-                        (None, FieldDefault::None, _) => {
-                            self.slots.truncate(base);
-                            return Err(self.fail(&format!("missing field `{field}`")));
-                        }
-                    });
-                }
-                self.slots.truncate(base);
-                let s = self.b.st.alloc(Obj::Struct(*def, values.into_boxed_slice()));
-                // As in a struct literal, the defaults run in declaration order.
-                for fill in computed {
-                    self.thunk(fill, Box::new([s]))?;
-                }
-                Ok(s)
-            }
-            TypeDesc::Enum { .. } if is_json(t) => {
-                let ids = self.json;
+            TypeDesc::Struct { id, def, fields, .. } => self.decode_struct(t, *id, *def, fields),
+            TypeDesc::Enum { variants, .. } if is_json(t) => {
+                let ids = JsonIds::at(variants.first().map_or(0, |v| v.1));
                 self.p.parse_json(&mut self.b, &ids)
             }
             TypeDesc::Enum { name, variants, .. } => {
@@ -1065,6 +1027,59 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
             TypeDesc::Unsupported(name) => Err(self.unsupported(&format!("values of type {name}"))),
             TypeDesc::Param(_) => Err(Error::Ctl(Ctl::internal("json.decode: a type parameter without a description"))),
         }
+    }
+
+    /// A struct: an object with its fields, in which a missing field takes
+    /// its default.
+    fn decode_struct(&mut self, t: &'d TypeDesc, id: u32, def: u32, fields: &'d [FieldDesc]) -> PResult<Value> {
+        self.expect_open(b'{', "object")?;
+        self.stack.push(t);
+        let base = self.slots.len();
+        self.slots.resize(base + fields.len(), None);
+        let mut next = 0;
+        let r = self.object(true, |d, key| match d.field_index(id, fields, &key, next)? {
+            Some(i) => {
+                next = i + 1;
+                d.slots[base + i] = Some(d.with_seg(Seg::Key(key), |d| d.decode(&fields[i].1))?);
+                Ok(())
+            }
+            None => d.p.skip(),
+        });
+        self.stack.pop();
+        if let Err(e) = r {
+            self.slots.truncate(base);
+            return Err(e);
+        }
+        let mut values = Vec::with_capacity(fields.len());
+        let mut computed = Vec::new();
+        for (i, (field, ty, default)) in fields.iter().enumerate() {
+            values.push(match (self.slots[base + i], default, &**ty) {
+                (Some(v), _, _) => v,
+                (None, FieldDefault::Const(c), _) => match self.constant(c) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        self.slots.truncate(base);
+                        return Err(e);
+                    }
+                },
+                (None, FieldDefault::Computed(fill), _) => {
+                    computed.push(*fill);
+                    Value::Unit
+                }
+                (None, FieldDefault::None, TypeDesc::Option(_)) => Value::Tag(self.ids.none),
+                (None, FieldDefault::None, _) => {
+                    self.slots.truncate(base);
+                    return Err(self.fail(&format!("missing field `{field}`")));
+                }
+            });
+        }
+        self.slots.truncate(base);
+        let s = self.b.st.alloc(Obj::Struct(def, values.into_boxed_slice()));
+        // As in a struct literal, the defaults run in declaration order.
+        for fill in computed {
+            self.thunk(fill, Box::new([s]))?;
+        }
+        Ok(s)
     }
 
     /// Adds a closure of `proto` with `captures` to the functions that
@@ -1449,7 +1464,7 @@ impl Encoder<'_> {
     /// JSON, other variants as `{"Name": payload}`.
     fn variant(&mut self, id: u32, fields: &[Value], level: usize) -> Result<(), Ctl> {
         let Some(rt) = self.prog.variants.get(id as usize) else { return fail("invalid", "cannot encode this value as JSON") };
-        if rt.def == self.ids.def {
+        if self.ids.has(id) {
             return self.value(fields.first().copied().unwrap_or(Value::Unit), level);
         }
         if level >= MAX_DEPTH {
@@ -1570,16 +1585,17 @@ impl<'a> Converter<'a, '_, '_> {
         self.b.reserve()?;
         self.b.meter.charge(1)?;
         loop {
-            match prog.variants.get(heap.variant_id(v) as usize) {
-                // `Json` values are shared.
-                Some(rt) if rt.def == ids.def => return Ok(v),
-                // `Some(x)` converts as `x`.
-                _ if heap.variant_id(v) == prog.ids.some => {
-                    self.b.meter.charge(1)?;
-                    v = heap.field(v, 0).unwrap_or(Value::Unit);
-                }
-                _ => break,
+            let id = heap.variant_id(v);
+            // `Json` values are shared.
+            if ids.has(id) {
+                return Ok(v);
             }
+            // `Some(x)` converts as `x`.
+            if id != prog.ids.some {
+                break;
+            }
+            self.b.meter.charge(1)?;
+            v = heap.field(v, 0).unwrap_or(Value::Unit);
         }
         Ok(match v {
             Value::Unit | Value::Uninit => Value::Tag(ids.null),

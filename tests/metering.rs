@@ -772,3 +772,29 @@ fn iterating_maps_and_sets_copies_nothing() {
     let (r, _) = run(limits(|l| l.max_memory = Some(20 << 20)), src);
     assert!(matches!(r, Err(Error::Limit(LimitKind::Memory))), "{r:?}");
 }
+
+#[test]
+fn names_of_type_descriptions_built_at_run_time_stay_short() {
+    // Each call doubles the name `P<A, B>`, which the memory limit does not
+    // bound.
+    let doubling = "struct P<A, B> { a: A, b: B }\nfn grow<reflect A, reflect B>(n: int, a: A?, b: B?) -> int {\n    \
+                    let x: P<A, B>? = None\n    grow(n + 1, x, x)\n}\nprint(grow(0, Some(1), Some(2)))";
+    let deep = |e: &Error| matches!(e, Error::Runtime { message, .. } if message.contains("nested too deeply"));
+    expect_stop(limits(|l| l.max_memory = None), doubling, deep, Duration::from_secs(10));
+    // `(A, A)` shares its halves, so the type `A` written out doubles on each
+    // call.
+    let shared = "import json\nstruct P<T> { v: T }\nfn grow<reflect A: Encode>(n: int, a: A?) -> int {\n    if n == 0 {\n        \
+                  let m: Result<[A: int]> = json.decode(\"{\\\"k\\\": 1}\")\n        let p: Result<P<A>> = json.decode(\"{\\\"v\\\": 1}\")\n        \
+                  print(m)\n        print(p)\n        return 0\n    }\n    let x: (A, A)? = None\n    grow(n - 1, x)\n}\nlet a: int? = None\nprint(grow(200, a))";
+    let start = Instant::now();
+    let (r, out) = run(Config::new(), shared);
+    r.unwrap();
+    assert!(start.elapsed() < Duration::from_secs(10), "took {:?}", start.elapsed());
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 3, "{out}");
+    assert!(
+        lines[0].starts_with("Err(Error { kind: \"invalid\", message: \"$: cannot decode map keys of type ((((") && lines[0].len() < 400,
+        "{out}"
+    );
+    assert!(lines[0].contains('…') && lines[1].contains("expected array of length 2"), "{out}");
+}

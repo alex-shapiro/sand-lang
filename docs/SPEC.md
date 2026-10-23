@@ -2069,8 +2069,9 @@ map whose key type is not one of those fails with kind `"invalid"`. If the
 object does not contain a struct field, the field takes its declared default,
 as in a struct literal. An optional field without a default takes `None`. Any
 other missing field or type mismatch fails with kind `"parse"` and a message
-naming the path (e.g. `$.items[2].name: expected str`). Parsing is limited to
-a nesting depth of 512.
+naming the path (e.g. `$.items[2].name: expected str`); a type name longer
+than 256 bytes in a message is cut and ends in `…`. Parsing is limited to a
+nesting depth of 512.
 
 `decode` builds a constant default (built only from literals, ranges of
 ints, tuples, lists, maps, `set([...])`, variants, and struct literals)

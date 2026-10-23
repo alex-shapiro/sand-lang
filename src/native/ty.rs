@@ -315,23 +315,15 @@ impl Bounds {
     /// Returns the bound names required by `self`, omitting the bounds that
     /// the others imply.
     pub fn names(self) -> Vec<&'static str> {
-        let mut out = Vec::new();
-        if self.eq && !self.ord && !self.hash && !self.num {
-            out.push("Eq");
-        }
-        if self.ord && !self.num {
-            out.push("Ord");
-        }
-        if self.hash {
-            out.push("Hash");
-        }
-        if self.num {
-            out.push("Num");
-        }
-        if self.encode && !self.num {
-            out.push("Encode");
-        }
-        out
+        crate::types::Bound::names(&self.list())
+    }
+
+    /// The bounds in `self`.
+    pub(crate) fn list(self) -> Vec<crate::types::Bound> {
+        use crate::types::Bound;
+        let all =
+            [(self.eq, Bound::Eq), (self.ord, Bound::Ord), (self.hash, Bound::Hash), (self.num, Bound::Num), (self.encode, Bound::Encode)];
+        all.into_iter().filter(|&(on, _)| on).map(|(_, b)| b).collect()
     }
 }
 

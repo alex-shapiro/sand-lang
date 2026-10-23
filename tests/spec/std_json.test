@@ -702,12 +702,27 @@ fn deep<reflect T: Encode>(n: int, witness: [T]) -> int {
 }
 let w: [int] = []
 print(deep(2, w))
+print(deep(256, w))
 print(deep(1000, w))
 --- stdout
 true
 2
+false
+256
 --- fail
 limit: the description of a type argument is nested too deeply
+
+=== long type names in messages are cut
+import json
+enum Wrapped<T> { Of(T) }
+fn wrap<reflect T: Encode>(text: str) -> Result<Wrapped<T>> { json.decode(text) }
+let direct: Result<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<int>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> = json.decode("1")
+let built: Result<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<int>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> = wrap("1")
+print(direct)
+print(direct == built)
+--- stdout
+Err(Error { kind: "parse", message: "$: expected Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<int>>>>>>>>>>>>>…" })
+true
 
 === trait methods cannot be reflect
 trait Load { fn load<reflect T>() -> int }

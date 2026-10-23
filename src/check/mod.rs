@@ -2154,19 +2154,13 @@ impl Checker {
         }
         for (&p, need) in generics.iter().zip(required) {
             let info = &self.params[p as usize];
-            let missing = Bounds {
-                eq: need.eq && !info.has_bound(Bound::Eq),
-                ord: need.ord && !info.has_bound(Bound::Ord),
-                hash: need.hash && !info.has_bound(Bound::Hash),
-                num: need.num && !info.has_bound(Bound::Num),
-                encode: need.encode && !info.has_bound(Bound::Encode),
-            };
-            if missing != Bounds::NONE {
+            let missing: Vec<Bound> = need.list().into_iter().filter(|&b| !info.has_bound(b)).collect();
+            if !missing.is_empty() {
                 let name = self.name(info.name).to_string();
                 let msg = format!(
                     "native function `{}` must bound `{name}` by `{}`, as its Rust function requires `{name}: {}`",
                     f.name.name,
-                    missing.names().join(" + "),
+                    Bound::names(&missing).join(" + "),
                     need.names().join(" + ")
                 );
                 self.error(f.name.span, msg);
