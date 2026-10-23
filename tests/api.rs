@@ -1395,6 +1395,34 @@ fn generic_host_types_bind_once_for_every_instance() {
     assert!(msg.contains("type `Labeled` is registered twice in module `boxes`"), "{msg}");
 }
 
+#[test]
+fn generic_host_types_refer_to_their_own_type_as_self() {
+    use sandlang::native::Param;
+    #[derive(Clone, Debug, PartialEq, sandlang::SandEnum)]
+    #[sand(module = "trees")]
+    enum Tree<T> {
+        Leaf(T),
+        Node(Vec<Self>),
+    }
+    #[derive(Clone, Debug, PartialEq, sandlang::SandStruct)]
+    #[sand(module = "trees")]
+    struct Chain<T> {
+        value: T,
+        next: Option<Box<Self>>,
+    }
+    let mut m = NativeModule::new("trees");
+    m.bind::<Tree<()>>().bind::<Chain<()>>();
+    m.function("tree", |t: Tree<Param<0>>| t);
+    m.function("chain", |c: Chain<Param<0>>| c);
+    m.source("pub native fn tree<T>(t: Tree<T>) -> Tree<T>\npub native fn chain<T>(c: Chain<T>) -> Chain<T>");
+    let src = "import trees\nlet t = trees.Tree.Node([trees.Tree.Leaf(\"a\")])\nprint(trees.tree(t) == t)\n\
+               let c = trees.Chain { value: 1, next: Some(trees.Chain { value: 2, next: None }) }\nprint(trees.chain(c) == c)\n\
+               help(trees.Tree)";
+    let (r, out, _) = run_src(Config::new().module(m), src);
+    r.unwrap();
+    assert_eq!(out, "true\ntrue\nenum trees.Tree<T>\n\nVariants:\n    Leaf(T)\n    Node([Tree<T>])\n");
+}
+
 /// Settings with defaults.
 #[derive(Clone, Debug, PartialEq, sandlang::SandStruct)]
 #[sand(module = "conf")]
@@ -1446,31 +1474,27 @@ help(conf.Settings)
 }
 
 #[test]
-#[should_panic(expected = "the default of field `xs` of `Bad` is not a Sand constant")]
+#[should_panic(expected = "the default of field `tags` of `Bad` is not a Sand constant")]
 fn rust_field_defaults_must_be_sand_constants() {
     #[derive(sandlang::SandStruct)]
     #[sand(module = "lab")]
     struct Bad {
-        #[sand(default = vec![1])]
-        xs: Vec<i64>,
+        #[sand(default)]
+        tags: std::collections::BTreeSet<String>,
     }
     NativeModule::new("lab").bind::<Bad>();
 }
 
 #[test]
-#[should_panic(expected = "the default of field `figure` of `Sketch` is not a Sand constant")]
-fn rust_field_defaults_cannot_be_variants_with_payloads() {
-    #[derive(sandlang::SandStruct)]
+fn rust_field_defaults_can_be_any_constant() {
+    #[derive(Debug, PartialEq, sandlang::SandStruct)]
     #[sand(module = "draw")]
-    struct Sketch {
-        #[sand(default = Figure::Circle(1.0))]
-        figure: Figure,
+    struct Frame {
+        #[sand(default = 1.5)]
+        width: f64,
+        #[sand(default)]
+        labels: Vec<String>,
     }
-    NativeModule::new("draw").bind::<Sketch>();
-}
-
-#[test]
-fn rust_field_defaults_can_be_payload_less_variants() {
     #[derive(Debug, PartialEq, sandlang::SandStruct)]
     #[sand(module = "draw")]
     struct Sketch {
@@ -1478,20 +1502,35 @@ fn rust_field_defaults_can_be_payload_less_variants() {
         figure: Figure,
         #[sand(default)]
         backdrop: Option<Figure>,
-        #[sand(default = Some(Figure::Empty))]
+        #[sand(default = Some(Figure::Labeled("a\"b".into(), Box::new(Figure::Rect { w: 1.0, h: -2.0 }))))]
         frame: Option<Figure>,
         #[sand(default = Some(2))]
         layers: Option<i64>,
+        #[sand(default = vec![Figure::Circle(1.0), Figure::Group(Vec::new())])]
+        parts: Vec<Figure>,
+        #[sand(default = (3, "x".to_string()))]
+        pair: (i64, String),
+        #[sand(default = std::collections::BTreeMap::from([(2, vec![true])]))]
+        flags: std::collections::BTreeMap<i64, Vec<bool>>,
+        #[sand(default = Frame { width: 2.0, labels: vec!["l".into()] })]
+        border: Frame,
     }
     let mut m = draw_module();
-    m.bind::<Sketch>();
+    m.bind::<Frame>().bind::<Sketch>();
     m.function("figure", |s: Sketch| s.figure);
-    let src = "import draw\nimport json\nprint(draw.figure(draw.Sketch {}))\nlet s: draw.Sketch = json.decode(\"{}\")?\nprint(s)\nhelp(draw.Sketch)";
+    m.function("keep", |s: Sketch| s);
+    let src = "import draw\nimport json\nprint(draw.figure(draw.Sketch {}))\nlet s: draw.Sketch = json.decode(\"{}\")?\nprint(s)\n\
+               print(s == draw.Sketch {})\nprint(draw.keep(s) == s)\nprint(draw.Frame {})\nhelp(draw.Sketch)";
     let (r, out, _) = run_src(Config::new().module(m), src);
     r.unwrap();
     assert_eq!(
         out,
-        "Empty\nSketch { figure: Empty, backdrop: None, frame: Some(Empty), layers: Some(2) }\nstruct draw.Sketch\n\nFields:\n    figure: Figure = Figure.Empty\n    backdrop: Figure? = None\n    frame: Figure? = Some(Figure.Empty)\n    layers: int? = Some(2)\n"
+        "Empty\nSketch { figure: Empty, backdrop: None, frame: Some(Labeled(\"a\\\"b\", Rect(1.0, -2.0))), layers: Some(2), \
+         parts: [Circle(1.0), Group([])], pair: (3, \"x\"), flags: [2: [true]], border: Frame { width: 2.0, labels: [\"l\"] } }\n\
+         true\ntrue\nFrame { width: 1.5, labels: [] }\nstruct draw.Sketch\n\nFields:\n    figure: Figure = Figure.Empty\n    \
+         backdrop: Figure? = None\n    frame: Figure? = Some(Figure.Labeled(\"a\\\"b\", Figure.Rect(w: 1.0, h: -2.0)))\n    \
+         layers: int? = Some(2)\n    parts: [Figure] = [Figure.Circle(1.0), Figure.Group([])]\n    pair: (int, str) = (3, \"x\")\n    \
+         flags: [int: [bool]] = [2: [true]]\n    border: Frame = Frame { width: 2.0, labels: [\"l\"] }\n"
     );
 }
 

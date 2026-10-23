@@ -565,14 +565,19 @@ pub struct FieldDef {
     pub is_pub: bool,
     /// Helper function computing the default value.
     pub default: Option<FnId>,
-    /// The default as a constant, when it is one (used by `json.decode`).
+    /// The default if it is a constant, which `json.decode` uses.
     pub const_default: Option<ConstVal>,
     pub doc: Option<Arc<str>>,
 }
 
-/// A constant value: a struct field default that `json.decode` can use.
+/// A value built only from literals, ranges, and constructors, such as
+/// `(1, "a")`, `["k": [2]]`, `Shape.Circle(1.0)`, or `Point { x: 0 }`. A
+/// struct field default that is a constant fills a missing field in
+/// `json.decode`. A program identifies a variant by its runtime id and a
+/// struct by its definition (`V` and `S`); a native module identifies them by
+/// Rust type.
 #[derive(Clone, Debug, PartialEq)]
-pub enum ConstVal {
+pub enum ConstVal<V = u32, S = TypeDefId> {
     Unit,
     Bool(bool),
     Int(i64),
@@ -580,43 +585,39 @@ pub enum ConstVal {
     Str(String),
     Bytes(Vec<u8>),
     Dur(i64),
-    EmptyList,
-    EmptyMap,
-    None,
-    Some(Box<ConstVal>),
     /// `a..b`, or `a..=b` if inclusive.
     Range(i64, i64, bool),
-    /// A payload-less enum variant, by its runtime variant id.
-    Tag(u32),
+    Tuple(Vec<ConstVal<V, S>>),
+    List(Vec<ConstVal<V, S>>),
+    Map(Vec<(ConstVal<V, S>, ConstVal<V, S>)>),
+    /// A variant and its payload.
+    Variant(V, Vec<ConstVal<V, S>>),
+    /// A struct and its fields in declaration order.
+    Struct(S, Vec<ConstVal<V, S>>),
 }
 
-impl ConstVal {
-    /// The Sand source text of the value; `variant` names a variant by its
-    /// runtime id.
-    pub fn sand_text(&self, variant: &dyn Fn(u32) -> String) -> String {
-        match self {
-            ConstVal::Unit => "()".into(),
-            ConstVal::Bool(b) => b.to_string(),
-            ConstVal::Int(i) => i.to_string(),
-            ConstVal::Float(f) => crate::vm::display::fmt_float(*f),
-            ConstVal::Str(s) => {
-                let mut out = String::new();
-                crate::vm::display::escape_str_debug(s, &mut out);
-                out
+impl<V, S> ConstVal<V, S> {
+    /// `self` with each variant identified by `variant` and each struct by
+    /// `def`, or `None` if one of them returns `None`.
+    pub fn resolve<V2, S2>(&self, variant: &impl Fn(&V) -> Option<V2>, def: &impl Fn(&S) -> Option<S2>) -> Option<ConstVal<V2, S2>> {
+        let all = |xs: &[ConstVal<V, S>]| xs.iter().map(|x| x.resolve(variant, def)).collect::<Option<Vec<_>>>();
+        Some(match self {
+            ConstVal::Unit => ConstVal::Unit,
+            ConstVal::Bool(b) => ConstVal::Bool(*b),
+            ConstVal::Int(i) => ConstVal::Int(*i),
+            ConstVal::Float(f) => ConstVal::Float(*f),
+            ConstVal::Str(s) => ConstVal::Str(s.clone()),
+            ConstVal::Bytes(b) => ConstVal::Bytes(b.clone()),
+            ConstVal::Dur(d) => ConstVal::Dur(*d),
+            ConstVal::Range(a, b, inclusive) => ConstVal::Range(*a, *b, *inclusive),
+            ConstVal::Tuple(xs) => ConstVal::Tuple(all(xs)?),
+            ConstVal::List(xs) => ConstVal::List(all(xs)?),
+            ConstVal::Map(kvs) => {
+                ConstVal::Map(kvs.iter().map(|(k, v)| Some((k.resolve(variant, def)?, v.resolve(variant, def)?))).collect::<Option<_>>()?)
             }
-            ConstVal::Bytes(b) => {
-                let mut out = String::new();
-                crate::vm::display::escape_bytes(b, &mut out);
-                out
-            }
-            ConstVal::Dur(d) => crate::vm::display::fmt_duration(*d),
-            ConstVal::EmptyList => "[]".into(),
-            ConstVal::EmptyMap => "[:]".into(),
-            ConstVal::None => "None".into(),
-            ConstVal::Some(c) => format!("Some({})", c.sand_text(variant)),
-            ConstVal::Range(a, b, inclusive) => format!("{a}..{}{b}", if *inclusive { "=" } else { "" }),
-            ConstVal::Tag(id) => variant(*id),
-        }
+            ConstVal::Variant(v, xs) => ConstVal::Variant(variant(v)?, all(xs)?),
+            ConstVal::Struct(s, xs) => ConstVal::Struct(def(s)?, all(xs)?),
+        })
     }
 }
 

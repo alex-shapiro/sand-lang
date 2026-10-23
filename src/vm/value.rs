@@ -1080,8 +1080,18 @@ pub(crate) fn parse_value<T: ValueType>(text: &str) -> Result<Obj, String> {
     Ok(value_obj(T::parse(text)?))
 }
 
-/// A struct field: name, type and constant default.
-pub type FieldDesc = (String, Arc<TypeDesc>, Option<crate::types::ConstVal>);
+/// A struct field: name, type and default.
+pub type FieldDesc = (String, Arc<TypeDesc>, FieldDefault);
+
+/// The default of a struct field, which fills the field if `json.decode` does
+/// not find it.
+#[derive(Clone, Debug)]
+pub enum FieldDefault {
+    None,
+    Const(crate::types::ConstVal),
+    /// A default that is not a constant, which `json.decode` cannot compute.
+    Computed,
+}
 
 /// An enum variant: name, runtime id, payload types and payload field names.
 pub type VariantDesc = (String, u32, Vec<Arc<TypeDesc>>, Option<Vec<String>>);

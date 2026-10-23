@@ -2059,13 +2059,15 @@ and a value type as its text form. Encoding any other key aborts with kind
 `json!` (§6.13) builds a `Json` from JSON syntax with embedded Sand values.
 
 `decode<T>` is the inverse for types built from those components. Decoding a
-map whose key type is not one of those fails with kind `"invalid"`. A struct
-field missing from the object takes its declared default if that is a
-constant expression (a literal, `[]`, `[:]`, `None`, a range of int literals,
-a payload-less variant, or `Some` of one of these), else `None` if optional;
-otherwise decoding fails with kind `"parse"` and a message naming the path
-(e.g. `$.items[2].name: expected str`). Parsing is limited to a nesting depth
-of 512.
+map whose key type is not one of those fails with kind `"invalid"`. If the
+object does not contain a struct field, the field takes its declared default
+if the default is a constant: an expression built only from literals, ranges
+of ints, tuples, lists, maps, variants, and struct literals (`(80, 24)`,
+`[Shape.Dot]`, `Server { port: 81 }`). An optional field without a default
+takes `None`. In all other cases decoding fails with kind `"parse"` and a
+message naming the path (e.g. `$.items[2].name: expected str`), because
+`decode` cannot compute a default that is not a constant (`Some(f())`).
+Parsing is limited to a nesting depth of 512.
 
 ### 13.8 `log`
 
@@ -2856,9 +2858,9 @@ By default, struct fields are `pub` and immutable; `#[sand(private)]` makes a
 field private to the module, `#[sand(var)]` makes it mutable (`var`), and
 `#[sand(name = "<name>")]` overrides its Sand name. `#[sand(default)]` or
 `#[sand(default = <expr>)]` gives a field the default `Default::default()` or
-`<expr>`, which must be a number, `bool`, `()`, string, `bytes`, duration,
-empty list or map, `None`, a payload-less variant of a `SandEnum`, or `Some`
-of one of these; `bind` panics otherwise.
+`<expr>`. The default must be a constant: a number, `bool`, `()`, string,
+`bytes`, duration, or a tuple, `Vec`, map, `Option`, `SandEnum`, or
+`SandStruct` of constants. `bind` panics otherwise (for example, on a set).
 
 Recursive types can reference themselves through `Vec`, map, or `Box` fields.
 Because the engine copies each reachable struct and enum value during

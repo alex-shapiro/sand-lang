@@ -17,7 +17,9 @@ use crate::vm::bytecode::Program;
 use crate::vm::compare::{hash_key, str_hash};
 use crate::vm::heap::{Heap, Staging};
 use crate::vm::meter::{BYTES_PER_UNIT, Meter, SLOW_BYTES_PER_UNIT, Scratch};
-use crate::vm::value::{FieldDesc, FxHashMap, KeyTable, MAP_ENTRY_SIZE, MapObj, Obj, TypeDesc, Value, ValueRef, VariantDesc, slot_fits};
+use crate::vm::value::{
+    FieldDefault, FieldDesc, FxHashMap, KeyTable, MAP_ENTRY_SIZE, MapObj, Obj, TypeDesc, Value, ValueRef, VariantDesc, slot_fits,
+};
 use crate::vm::{Ctl, NResult, Vm, fail, internal};
 use hashbrown::HashTable;
 use std::borrow::Cow;
@@ -122,7 +124,7 @@ pub(crate) fn module() -> NativeModule {
         let desc = ty.desc(&vm.heap)?.clone();
         let (ids, json) = (vm.prog.ids, JsonIds::of(&vm.prog)?);
         let meter = &vm.meter;
-        let (r, sets) = vm.heap.staged(|heap, st| {
+        let (r, fills) = vm.heap.staged(|heap, st| {
             let mut d = Decoder {
                 p: Parser::new(text.str(heap)),
                 b: Build::new(heap, st, meter),
@@ -132,17 +134,25 @@ pub(crate) fn module() -> NativeModule {
                 stack: Vec::new(),
                 slots: Vec::new(),
                 indexes: FxHashMap::default(),
-                sets: Vec::new(),
+                fills: Vec::new(),
             };
             let r = d.decode(&desc).and_then(|v| d.p.finish().map(|()| v));
             let charged = d.p.charge(meter);
-            (charged.map_err(Error::Ctl).and(r), d.sets)
+            (charged.map_err(Error::Ctl).and(r), d.fills)
         });
-        // Sets are filled once their elements are on the heap (to hash them).
         if r.is_ok() {
-            for (set, items) in sets {
-                for x in items {
-                    vm.set_add(set, x)?;
+            for fill in fills {
+                match fill {
+                    Fill::Set(set, items) => {
+                        for x in items {
+                            vm.set_add(set, x)?;
+                        }
+                    }
+                    Fill::Map(map, entries) => {
+                        for (k, v) in entries {
+                            vm.map_insert(map, k, v)?;
+                        }
+                    }
                 }
             }
         }
@@ -741,8 +751,15 @@ struct Decoder<'a, 'd, 's, 'h> {
     slots: Vec<Option<Value>>,
     /// Field indexes of large structs, by struct instance id.
     indexes: FxHashMap<u32, FxHashMap<&'d str, usize>>,
-    /// Staged sets and their elements, added once these are on the heap.
-    sets: Vec<(Value, Vec<Value>)>,
+    /// Staged sets and maps, filled once their elements are on the heap.
+    fills: Vec<Fill>,
+}
+
+/// A staged set or map with the elements or entries to add to it once these
+/// are on the heap, which hashing them requires.
+enum Fill {
+    Set(Value, Vec<Value>),
+    Map(Value, Vec<(Value, Value)>),
 }
 
 impl<'a> Source<'a> for Decoder<'a, '_, '_, '_> {
@@ -901,7 +918,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                 })?;
                 // The elements' buffer stays pending until the set is filled.
                 let set = self.b.st.alloc(Obj::Set(Box::default()));
-                self.sets.push((set, items));
+                self.fills.push(Fill::Set(set, items));
                 Ok(set)
             }
             TypeDesc::Tuple(elems) => {
@@ -952,11 +969,18 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                 for (i, (field, ty, default)) in fields.iter().enumerate() {
                     values.push(match (self.slots[base + i], default, &**ty) {
                         (Some(v), _, _) => v,
-                        (None, Some(c), _) => const_value(self.b.st, &self.ids, c),
-                        (None, None, TypeDesc::Option(_)) => Value::Tag(self.ids.none),
-                        _ => {
+                        (None, FieldDefault::Const(c), _) => match self.constant(c) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                self.slots.truncate(base);
+                                return Err(e);
+                            }
+                        },
+                        (None, FieldDefault::None, TypeDesc::Option(_)) => Value::Tag(self.ids.none),
+                        (None, default, _) => {
                             self.slots.truncate(base);
-                            return Err(self.fail(&format!("missing field `{field}`")));
+                            let why = if matches!(default, FieldDefault::Computed) { ", whose default is not a constant" } else { "" };
+                            return Err(self.fail(&format!("missing field `{field}`{why}")));
                         }
                     });
                 }
@@ -995,6 +1019,54 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
             TypeDesc::Range => self.decode_range(),
             TypeDesc::Unsupported(name) => Err(self.unsupported(&format!("values of type {name}"))),
         }
+    }
+
+    /// The value of constant `c`, charged as decoded values are.
+    fn constant(&mut self, c: &ConstVal) -> PResult<Value> {
+        self.b.meter.charge(1)?;
+        self.b.reserve()?;
+        let all = |d: &mut Self, xs: &[ConstVal]| xs.iter().map(|x| d.constant(x)).collect::<PResult<Vec<_>>>();
+        Ok(match c {
+            ConstVal::Unit => Value::Unit,
+            ConstVal::Bool(b) => Value::Bool(*b),
+            ConstVal::Int(i) => Value::Int(*i),
+            ConstVal::Float(f) => Value::Float(*f),
+            ConstVal::Dur(d) => Value::Dur(*d),
+            ConstVal::Str(s) => {
+                self.b.meter.charge_bytes(s.len())?;
+                self.b.st.new_str(s.as_str())
+            }
+            ConstVal::Bytes(b) => {
+                self.b.meter.charge_bytes(b.len())?;
+                self.b.st.new_bytes(b.as_slice())
+            }
+            ConstVal::Range(a, b, inclusive) => self.b.st.alloc(Obj::Range(*a, *b, *inclusive)),
+            ConstVal::Tuple(xs) => {
+                let items = all(self, xs)?;
+                self.b.st.new_tuple(items)
+            }
+            ConstVal::List(xs) => {
+                let items = all(self, xs)?;
+                self.b.st.new_list(items)
+            }
+            ConstVal::Map(kvs) => {
+                let mut entries = Vec::with_capacity(kvs.len());
+                for (k, v) in kvs {
+                    entries.push((self.constant(k)?, self.constant(v)?));
+                }
+                let map = self.b.st.alloc(Obj::Map(Box::default()));
+                self.fills.push(Fill::Map(map, entries));
+                map
+            }
+            ConstVal::Variant(id, payload) => {
+                let payload = all(self, payload)?;
+                self.b.st.new_variant(*id, &payload)
+            }
+            ConstVal::Struct(def, fields) => {
+                let fields = all(self, fields)?;
+                self.b.st.alloc(Obj::Struct(*def, fields.into_boxed_slice()))
+            }
+        })
     }
 
     /// A range: `{"start": a, "end": b}`, with `"inclusive": true` for `a..=b`.
@@ -1144,27 +1216,6 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
         }
         let fields: Vec<Value> = slots.into_iter().map(|s| s.unwrap_or(Value::Unit)).collect();
         Ok(self.b.st.new_variant(*id, &fields))
-    }
-}
-
-fn const_value(st: &mut Staging, ids: &crate::vm::bytecode::RtIds, c: &ConstVal) -> Value {
-    match c {
-        ConstVal::Unit => Value::Unit,
-        ConstVal::Bool(b) => Value::Bool(*b),
-        ConstVal::Int(i) => Value::Int(*i),
-        ConstVal::Float(f) => Value::Float(*f),
-        ConstVal::Str(s) => st.new_str(s.as_str()),
-        ConstVal::Bytes(b) => st.new_bytes(b.as_slice()),
-        ConstVal::Dur(d) => Value::Dur(*d),
-        ConstVal::EmptyList => st.new_list(Vec::new()),
-        ConstVal::EmptyMap => st.alloc(Obj::Map(Box::default())),
-        ConstVal::None => Value::Tag(ids.none),
-        ConstVal::Some(c) => {
-            let v = const_value(st, ids, c);
-            st.new_variant(ids.some, &[v])
-        }
-        ConstVal::Range(a, b, inclusive) => st.alloc(Obj::Range(*a, *b, *inclusive)),
-        ConstVal::Tag(id) => Value::Tag(*id),
     }
 }
 

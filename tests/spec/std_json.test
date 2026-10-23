@@ -550,13 +550,39 @@ struct All {
 let a: All = json.decode("{}")?
 print(a)
 print(a == All {})
-struct Computed { n: int = 1 + 1, o: int? = Some(1 + 1) }
+struct Computed { n: int = 1 + 1, o: int? = Some(1 + 1), p: int? }
 let c: Result<Computed> = json.decode("{}")
 print(c)
-let o: Computed = json.decode("{\"n\": 5}")?
+let o: Result<Computed> = json.decode("{\"n\": 5}")
 print(o)
+let p: Computed = json.decode("{\"n\": 5, \"o\": 6}")?
+print(p)
 --- stdout
 All { u: (), b: true, n: -3, x: -1.5, d: -2s, s: "q\"", xs: [], m: [:], o: None, some: Some(Write), mode: Read, neg: 4, r: -1..3, ri: 0..=2 }
 true
-Err(Error { kind: "parse", message: "$: missing field `n`" })
-Computed { n: 5, o: None }
+Err(Error { kind: "parse", message: "$: missing field `n`, whose default is not a constant" })
+Err(Error { kind: "parse", message: "$: missing field `o`, whose default is not a constant" })
+Computed { n: 5, o: Some(6), p: None }
+
+=== decode fills missing fields with defaults built from constructors
+import json
+enum Shape { Circle(float), Rect(w: float, h: float), Dot }
+struct Config {
+    server: Server = Server {}
+    backup: Server = Server { port: 81, ..Server {} }
+    shapes: [Shape] = [Shape.Rect(w: 1.0, h: 2.0), Shape.Dot]
+    size: (int, int) = (80, 24)
+    late: Late = Late { n: 3 }
+}
+struct Server { host: str = "localhost", port: int = 80, routes: [str: [int]] = ["a": [1, 2]] }
+struct Late { n: int, m: (str, bool)? = Some(("x", true)) }
+let c: Config = json.decode("{\"size\": [1, 2]}")?
+print(c)
+print(c == Config { size: (1, 2) })
+struct Loop { next: [Loop] = [Loop {}] }
+let l: Result<Loop> = json.decode("{}")
+print(l)
+--- stdout
+Config { server: Server { host: "localhost", port: 80, routes: ["a": [1, 2]] }, backup: Server { host: "localhost", port: 81, routes: ["a": [1, 2]] }, shapes: [Rect(1.0, 2.0), Dot], size: (1, 2), late: Late { n: 3, m: Some(("x", true)) } }
+true
+Err(Error { kind: "parse", message: "$: missing field `next`, whose default is not a constant" })

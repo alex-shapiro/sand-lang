@@ -67,12 +67,15 @@ Follow-up work, roughly in priority order.
       methods in fixed slots of the `Num` dictionary, and the checker requires
       the prelude's `Num` impls to be native. Callbacks such as `sort_by` also
       need Sand wrappers (`sort_by_keys(self.map(key))`), and `json.decode`
-      fills a missing field only from a constant default (it decodes
-      `x: int? = Some(f())` as `None`) instead of calling its default.
+      fails on a missing field whose default is not a constant
+      (`x: int? = Some(f())`) instead of calling its default.
 - [ ] `json.parse` accepts 512 levels of nesting, but conversion of a `Json`
       value to Rust aborts with kind `"limit"` beyond 256 levels of enum
       payloads. A limit of 512 overflows a 512 KiB thread stack (the iOS
       default), so convert `Json` without recursion.
+- [ ] Sand has no set literal, so no set is a constant: `#[sand(default)]`
+      on a `HashSet` or `BTreeSet` field panics in `bind`, and `json.decode`
+      cannot fill a missing field whose default is `set([...])`.
 - [ ] Map Rust ranges (`std::ops::Range<i64>`, `RangeInclusive<i64>`) to the
       Sand `Range`. Today a host struct field holds a range only as
       `Val<Range>`, so it cannot have a `#[sand(default)]`.

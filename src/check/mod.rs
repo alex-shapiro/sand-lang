@@ -14,7 +14,7 @@ mod unify;
 use crate::diag::{Diag, FileId, SourceFile, Span};
 use crate::engine::NativeDecls;
 use crate::hir::*;
-use crate::native::{BoundKind, Bounds, ConstRepr, Constant, EnumVariant, NativeDecl, Signature, StructField, Type};
+use crate::native::{BoundKind, Bounds, Constant, EnumVariant, NativeDecl, RustVariant, Signature, StructField, Type};
 use crate::syntax::ast::{self, ItemKind, TypeExpr, TypeExprKind};
 use crate::types::*;
 use crate::vm::value::{FxBuild, FxHashMap};
@@ -1344,6 +1344,7 @@ impl Checker {
             }
             i += 1;
         }
+        self.find_const_defaults(first_fn);
         // 7. Tests (those of imported modules are type checked, not run).
         for (idx, item) in items.iter().enumerate() {
             if let ItemKind::Test(t) = &item.kind {
@@ -1666,7 +1667,7 @@ impl Checker {
                     }
                     let doc = Some(f.doc).filter(|d| !d.is_empty()).map(Arc::from);
                     let name = self.sym(f.name);
-                    let const_default = default.as_ref().and_then(|c| self.bound_const(&c.0));
+                    let const_default = default.as_ref().and_then(|c| self.bound_const(c));
                     fields.push(FieldDef { name, ty, mutable: f.var, is_pub: f.public, default: None, const_default, doc });
                 }
                 self.types[id as usize].kind = TypeDefKind::Struct { fields };
@@ -1713,24 +1714,66 @@ impl Checker {
         None
     }
 
-    /// The value of the Rust field default `c`. A variant default has the type
-    /// of its field, so if its enum is not registered, resolving the field's
-    /// type reported that.
-    fn bound_const(&self, c: &ConstRepr) -> Option<ConstVal> {
-        Some(match c {
-            ConstRepr::Value(c) => c.clone(),
-            ConstRepr::Variant { rust, index } => {
+    /// The value of the Rust field default `c`. A variant or struct in `c`
+    /// has a type in the field's type, so if it is not registered, resolving
+    /// the field's type reported that.
+    fn bound_const(&self, c: &Constant) -> Option<ConstVal> {
+        let variant = |v: &RustVariant| match v {
+            RustVariant::None => Some(self.none_rt()),
+            RustVariant::Some => Some(self.some_rt()),
+            RustVariant::Bound { rust, index } => {
                 let first = self.enum_bindings.iter_from(0).find(|(t, _)| t == rust).map(|&(_, first)| first)?;
-                ConstVal::Tag(first + *index as u32)
+                Some(first + *index as u32)
             }
-            ConstRepr::Some(c) => ConstVal::Some(Box::new(self.bound_const(c)?)),
-        })
+        };
+        let def = |rust: &std::any::TypeId| self.struct_bindings.iter_from(0).find(|(t, _)| t == rust).map(|&(_, d)| d);
+        c.0.resolve(&variant, &def)
     }
 
-    /// The value of `h` if it is a constant that `json.decode` can use as a
-    /// field default: a literal, `[]`, `[:]`, a range of int literals, a
-    /// payload-less variant, or `Some` of one of these.
-    fn const_of(&self, h: &HExpr) -> Option<ConstVal> {
+    /// Finds the constant defaults of the fields of the structs that the
+    /// module being checked declares, once the bodies of their default
+    /// helpers (from `first_fn` on) are checked.
+    fn find_const_defaults(&mut self, first_fn: usize) {
+        let mut memo = FxHashMap::default();
+        for f in first_fn..self.fns.len() {
+            if let Some(FnDeclRef::FieldDefault { field, .. }) = self.fns[f].decl
+                && let Some(Ty::Named(d, _)) = self.fns[f].self_ty.map(|t| self.arena.get(t))
+            {
+                let c = self.helper_const(f as FnId, &mut memo);
+                if let TypeDefKind::Struct { fields } = &mut self.types[d as usize].kind {
+                    fields[field as usize].const_default = c;
+                }
+            }
+        }
+    }
+
+    /// The constant that the field default helper `f` returns, if any. `memo`
+    /// holds the results for the helpers of the module being checked.
+    fn helper_const(&self, f: FnId, memo: &mut FxHashMap<FnId, Option<ConstVal>>) -> Option<ConstVal> {
+        let fi = &self.fns[f as usize];
+        let Some(FnDeclRef::FieldDefault { field, .. }) = fi.decl else { return None };
+        if fi.module != self.cur_mod {
+            let Ty::Named(d, _) = self.arena.get(fi.self_ty?) else { return None };
+            return self.types[d as usize].fields()[field as usize].const_default.clone();
+        }
+        if let Some(c) = memo.get(&f) {
+            return c.clone();
+        }
+        // A default that contains itself is not a constant.
+        memo.insert(f, None);
+        let c = self.bodies.get(f).and_then(|b| self.const_of(&b.body, &mut Vec::new(), memo));
+        memo.insert(f, c.clone());
+        c
+    }
+
+    /// The value of `h` if it is a constant: built only from literals, ranges
+    /// of ints, constructors, and the defaults of struct fields. `env` holds
+    /// the constants of the locals of the enclosing blocks.
+    fn const_of(&self, h: &HExpr, env: &mut Vec<(LocalId, ConstVal)>, memo: &mut FxHashMap<FnId, Option<ConstVal>>) -> Option<ConstVal> {
+        if !self.budget.charge(1) {
+            return None;
+        }
+        let mut all = |xs: &[HExpr]| xs.iter().map(|x| self.const_of(x, env, memo)).collect::<Option<Vec<_>>>();
         Some(match &h.kind {
             HKind::Unit => ConstVal::Unit,
             HKind::Bool(b) => ConstVal::Bool(*b),
@@ -1739,23 +1782,50 @@ impl Checker {
             HKind::Dur(d) => ConstVal::Dur(*d),
             HKind::Str(s) => ConstVal::Str(s.clone()),
             HKind::Bytes(b) => ConstVal::Bytes(b.clone()),
-            HKind::List(xs) if xs.is_empty() => ConstVal::EmptyList,
-            HKind::Map(xs) if xs.is_empty() => ConstVal::EmptyMap,
-            HKind::Tag(id) if *id == self.none_rt() => ConstVal::None,
-            HKind::MakeVariant { rt_id, args } if *rt_id == self.some_rt() && args.len() == 1 => {
-                ConstVal::Some(Box::new(self.const_of(&args[0])?))
-            }
-            HKind::Tag(id) => ConstVal::Tag(*id),
-            HKind::Range { start, end, inclusive } => match (self.const_of(start)?, self.const_of(end)?) {
+            HKind::Tuple(xs) => ConstVal::Tuple(all(xs)?),
+            HKind::List(xs) => ConstVal::List(all(xs)?),
+            HKind::Tag(id) => ConstVal::Variant(*id, Vec::new()),
+            HKind::MakeVariant { rt_id, args } => ConstVal::Variant(*rt_id, all(args)?),
+            HKind::MakeStruct { def, fields } => ConstVal::Struct(*def, all(fields)?),
+            HKind::Map(kvs) => ConstVal::Map(
+                kvs.iter().map(|(k, v)| Some((self.const_of(k, env, memo)?, self.const_of(v, env, memo)?))).collect::<Option<_>>()?,
+            ),
+            HKind::Range { start, end, inclusive } => match (self.const_of(start, env, memo)?, self.const_of(end, env, memo)?) {
                 (ConstVal::Int(a), ConstVal::Int(b)) => ConstVal::Range(a, b, *inclusive),
                 _ => return None,
             },
-            HKind::Unary { op: HUnOp::Neg, e } => match self.const_of(e)? {
+            HKind::Unary { op: HUnOp::Neg, e } => match self.const_of(e, env, memo)? {
                 ConstVal::Int(i) => ConstVal::Int(i.checked_neg()?),
                 ConstVal::Float(f) => ConstVal::Float(-f),
                 ConstVal::Dur(d) => ConstVal::Dur(d.checked_neg()?),
                 _ => return None,
             },
+            HKind::Local(l) => env.iter().rev().find(|(x, _)| x == l)?.1.clone(),
+            HKind::Field { obj, index } => match self.const_of(obj, env, memo)? {
+                ConstVal::Struct(_, mut fields) if (*index as usize) < fields.len() => fields.swap_remove(*index as usize),
+                _ => return None,
+            },
+            // The default of a field that a struct literal omits.
+            HKind::Call { func, args } if args.is_empty() => self.helper_const(*func, memo)?,
+            // A struct literal binds the values of its fields to locals first.
+            HKind::Block(stmts) => {
+                let (last, lets) = stmts.split_last()?;
+                let mark = env.len();
+                for s in lets {
+                    let HKind::Let { pat: HPat { kind: HPatKind::Bind(l), .. }, init, else_: None } = &s.kind else {
+                        env.truncate(mark);
+                        return None;
+                    };
+                    let Some(c) = self.const_of(init, env, memo) else {
+                        env.truncate(mark);
+                        return None;
+                    };
+                    env.push((*l, c));
+                }
+                let c = self.const_of(last, env, memo);
+                env.truncate(mark);
+                c?
+            }
             _ => return None,
         })
     }
@@ -2639,14 +2709,7 @@ impl Checker {
             FnDeclRef::FieldDefault { item, field } => {
                 let ItemKind::Struct(s) = &m.items[item as usize].kind else { unreachable!() };
                 let e = s.fields[field as usize].default.as_ref().unwrap();
-                let h = self.check_expr(e, ret);
-                let c = self.const_of(&h);
-                if let Some(Ty::Named(d, _)) = self_ty.map(|t| self.arena.get(t))
-                    && let TypeDefKind::Struct { fields } = &mut self.types[d as usize].kind
-                {
-                    fields[field as usize].const_default = c;
-                }
-                (h, e.span)
+                (self.check_expr(e, ret), e.span)
             }
             FnDeclRef::Test { item } => {
                 let ItemKind::Test(t) = &m.items[item as usize].kind else { unreachable!() };

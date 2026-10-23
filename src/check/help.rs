@@ -939,13 +939,6 @@ impl Checker {
         }
     }
 
-    /// `Enum.Variant` for the variant with runtime id `id`.
-    fn variant_name(&self, id: u32) -> String {
-        let (d, i) = self.variants[id as usize];
-        let def = &self.types[d as usize];
-        format!("{}.{}", self.name(def.name), self.name(def.variants()[i as usize].name))
-    }
-
     pub(super) fn variant_text(&self, d: TypeDefId, i: u32) -> String {
         let v = &self.types[d as usize].variants()[i as usize];
         let mut s = self.name(v.name).to_string();
@@ -990,8 +983,66 @@ impl Checker {
     pub(super) fn default_text(&self, f: &FieldDef) -> String {
         match (f.default, &f.const_default) {
             (Some(h), _) => format!(" = {}", self.source_text(self.fns[h as usize].span)),
-            (None, Some(c)) => format!(" = {}", c.sand_text(&|id| self.variant_name(id))),
+            (None, Some(c)) => format!(" = {}", self.const_text(c)),
             (None, None) => String::new(),
+        }
+    }
+
+    /// The Sand source text of constant `c`.
+    fn const_text(&self, c: &ConstVal) -> String {
+        let list = |xs: &[ConstVal]| xs.iter().map(|x| self.const_text(x)).collect::<Vec<_>>().join(", ");
+        match c {
+            ConstVal::Unit => "()".into(),
+            ConstVal::Bool(b) => b.to_string(),
+            ConstVal::Int(i) => i.to_string(),
+            ConstVal::Float(f) => crate::vm::display::fmt_float(*f),
+            ConstVal::Str(s) => {
+                let mut out = String::new();
+                crate::vm::display::escape_str_debug(s, &mut out);
+                out
+            }
+            ConstVal::Bytes(b) => {
+                let mut out = String::new();
+                crate::vm::display::escape_bytes(b, &mut out);
+                out
+            }
+            ConstVal::Dur(d) => crate::vm::display::fmt_duration(*d),
+            ConstVal::Range(a, b, inclusive) => format!("{a}..{}{b}", if *inclusive { "=" } else { "" }),
+            ConstVal::Tuple(xs) => format!("({})", list(xs)),
+            ConstVal::List(xs) => format!("[{}]", list(xs)),
+            ConstVal::Map(kvs) if kvs.is_empty() => "[:]".into(),
+            ConstVal::Map(kvs) => {
+                let entries: Vec<String> = kvs.iter().map(|(k, v)| format!("{}: {}", self.const_text(k), self.const_text(v))).collect();
+                format!("[{}]", entries.join(", "))
+            }
+            ConstVal::Variant(id, payload) => {
+                let (d, i) = self.variants[*id as usize];
+                let def = &self.types[d as usize];
+                let v = &def.variants()[i as usize];
+                let mut out = self.name(v.name).to_string();
+                if d != self.wk.option {
+                    out = format!("{}.{out}", self.name(def.name));
+                }
+                if !payload.is_empty() {
+                    let parts: Vec<String> = match &v.field_names {
+                        Some(names) => {
+                            names.iter().zip(payload).map(|(&n, x)| format!("{}: {}", self.name(n), self.const_text(x))).collect()
+                        }
+                        None => payload.iter().map(|x| self.const_text(x)).collect(),
+                    };
+                    out.push_str(&format!("({})", parts.join(", ")));
+                }
+                out
+            }
+            ConstVal::Struct(d, fields) => {
+                let def = &self.types[*d as usize];
+                let parts: Vec<String> =
+                    def.fields().iter().zip(fields).map(|(f, x)| format!("{}: {}", self.name(f.name), self.const_text(x))).collect();
+                match parts.is_empty() {
+                    true => format!("{} {{}}", self.name(def.name)),
+                    false => format!("{} {{ {} }}", self.name(def.name), parts.join(", ")),
+                }
+            }
         }
     }
 

@@ -24,7 +24,7 @@
 use crate::check::CheckedProgram;
 use crate::check::persist::PMap;
 use crate::types::{Opaque, Ty, TyList, TypeArena, TypeDefKind, TypeId, TypePrinter};
-use crate::vm::value::TypeDesc;
+use crate::vm::value::{FieldDefault, TypeDesc};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -282,7 +282,12 @@ impl Builder<'_, '_> {
                         let ft = self.arena.instantiate(f.ty, &def.generics, &args);
                         let (fd, lf) = self.desc(ft);
                         l = low(l, lf);
-                        (name_of(f.name), fd, f.const_default.clone())
+                        let default = match (&f.const_default, f.default) {
+                            (Some(c), _) => FieldDefault::Const(c.clone()),
+                            (None, Some(_)) => FieldDefault::Computed,
+                            (None, None) => FieldDefault::None,
+                        };
+                        (name_of(f.name), fd, default)
                     })
                     .collect();
                 TypeDesc::Struct { id, def: d, name, fields, rust: self.cp.rust_type(d) }

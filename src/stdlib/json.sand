@@ -106,8 +106,10 @@ pub native fn parse(text: str) -> Result<Json>
 /// `bool`, payload-less variant, or value type.
 pub native fn encode<T: Encode>(value: T, indent: int = 0) -> str
 
-/// Parses `text` and converts it into type `T`. Missing struct fields use their
-/// declared default or `None`; type mismatches fail with kind `"parse"` and a
+/// Parses `text` and converts it into type `T`. A missing struct field takes
+/// its declared default if the default is a constant (built only from literals
+/// and constructors), or `None` if the field is optional and has no default.
+/// Other missing fields and type mismatches fail with kind `"parse"` and a
 /// JSON path diagnostic. Fails with kind `"invalid"` on a map key whose type
 /// `encode` cannot write.
 pub native fn decode<reflect T: Encode>(text: str) -> Result<T>

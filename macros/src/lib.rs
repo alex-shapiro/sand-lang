@@ -110,9 +110,13 @@ fn parse_type_attrs(input: &DeriveInput, derive: &str) -> syn::Result<TypeAttrs>
     Ok(TypeAttrs { module, name, public, krate, doc: doc_expr(&input.attrs) })
 }
 
-fn reject_generics(input: &DeriveInput, derive: &str) -> syn::Result<()> {
+/// The `Generic` of a type that must not have type or lifetime parameters.
+fn non_generic(input: &DeriveInput, derive: &str) -> syn::Result<Generic> {
     match input.generics.params.is_empty() {
-        true => Ok(()),
+        true => {
+            let ty = &input.ident;
+            Ok(Generic { params: Vec::new(), canonical_self: parse_quote!(#ty) })
+        }
         false => {
             Err(Error::new_spanned(&input.generics, format!("`{derive}` cannot be derived for a type with type or lifetime parameters")))
         }
@@ -123,10 +127,12 @@ fn reject_generics(input: &DeriveInput, derive: &str) -> syn::Result<()> {
 /// parameters.
 struct Generic {
     params: Vec<Ident>,
+    /// `Self` with `Param<0>`, `Param<1>`, ... as its type arguments.
+    canonical_self: Type,
 }
 
 impl Generic {
-    fn of(input: &DeriveInput, derive: &str) -> syn::Result<Generic> {
+    fn of(input: &DeriveInput, derive: &str, krate: &Path) -> syn::Result<Generic> {
         let mut params = Vec::new();
         for p in &input.generics.params {
             match p {
@@ -142,29 +148,42 @@ impl Generic {
         if params.len() > 255 {
             return Err(Error::new_spanned(&input.generics, "a Sand type has at most 255 type parameters"));
         }
-        Ok(Generic { params })
+        let ty = &input.ident;
+        let canonical_self = match params.len() {
+            0 => parse_quote!(#ty),
+            n => {
+                let i = (0..n).map(|i| i as u8);
+                parse_quote!(#ty<#(#krate::native::Param<#i>),*>)
+            }
+        };
+        Ok(Generic { params, canonical_self })
     }
 
-    /// `ty` with each type parameter replaced by its `Param<N>`, so that the
-    /// type describes the field of every instance.
+    /// `ty` with `Self` and each type parameter replaced by their canonical
+    /// forms, so that the type describes the field of every instance.
     fn canonical(&self, krate: &Path, ty: &Type) -> Type {
-        struct Subst<'a>(&'a [Ident], &'a Path);
+        struct Subst<'a>(&'a Generic, &'a Path);
         impl VisitMut for Subst<'_> {
             fn visit_type_mut(&mut self, t: &mut Type) {
                 if let Type::Path(p) = t
                     && p.qself.is_none()
                     && let Some(id) = p.path.get_ident()
-                    && let Some(i) = self.0.iter().position(|x| x == id)
                 {
-                    let (i, krate) = (i as u8, self.1);
-                    *t = parse_quote!(#krate::native::Param<#i>);
-                    return;
+                    if id == "Self" {
+                        *t = self.0.canonical_self.clone();
+                        return;
+                    }
+                    if let Some(i) = self.0.params.iter().position(|x| x == id) {
+                        let (i, krate) = (i as u8, self.1);
+                        *t = parse_quote!(#krate::native::Param<#i>);
+                        return;
+                    }
                 }
                 syn::visit_mut::visit_type_mut(self, t);
             }
         }
         let mut t = ty.clone();
-        Subst(&self.params, krate).visit_type_mut(&mut t);
+        Subst(self, krate).visit_type_mut(&mut t);
         t
     }
 
@@ -222,13 +241,7 @@ fn named_type(input: &DeriveInput, a: &TypeAttrs, generic: &Generic, binding: To
     let (imp, tyg, wh) = generic.split(input, |_| quote!(#krate::native::SandType));
     let params: Vec<String> = generic.params.iter().map(|p| p.unraw().to_string()).collect();
     let checks = generic.params.iter().zip(&params).map(|(p, n)| assert_type_name(krate, "type parameter", n, p.span()));
-    let canonical = match generic.params.len() {
-        0 => quote!(#ty),
-        n => {
-            let i = (0..n).map(|i| i as u8);
-            quote!(#ty<#(#krate::native::Param<#i>),*>)
-        }
-    };
+    let canonical = &generic.canonical_self;
     quote! {
         #check
         #(#checks)*
@@ -294,7 +307,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
         return Err(Error::new_spanned(ty, "`SandEnum` can only be derived for enums"));
     };
     let attrs = parse_type_attrs(input, "SandEnum")?;
-    let generic = Generic::of(input, "SandEnum")?;
+    let generic = Generic::of(input, "SandEnum", &attrs.krate)?;
     reject_member_attrs(&input.data)?;
     if data.variants.is_empty() {
         return Err(Error::new_spanned(ty, "a Sand enum must have at least one variant"));
@@ -304,6 +317,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
     let mut indexes = Vec::new();
     let mut reads = Vec::new();
     let mut writes = Vec::new();
+    let mut consts = Vec::new();
     let mut checks = Vec::new();
     for (i, v) in data.variants.iter().enumerate() {
         let (ident, vname, vdoc) = (&v.ident, v.ident.unraw().to_string(), doc_expr(&v.attrs));
@@ -365,6 +379,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
             false => quote!(move |vm| ::std::result::Result::Ok([#(#puts),*])),
         };
         writes.push(quote! { #pattern => #krate::native::variant_into_value::<Self, _>(vm, #i, #write) });
+        consts.push(quote! { #pattern => #krate::native::variant_const::<Self>(#i, [#(#krate::native::IntoValue::to_const(#names)),*]) });
     }
     let named = named_type(input, &attrs, &generic, quote! { #krate::native::Binding::of_enum() });
     let sand_type = sand_type(input, krate, &generic);
@@ -404,7 +419,9 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
                 }
             }
             fn to_const(&self) -> ::std::option::Option<#krate::native::Constant> {
-                #krate::native::variant_const(self)
+                match self {
+                    #(#consts),*
+                }
             }
         }
     })
@@ -416,10 +433,9 @@ fn sand_object(input: &DeriveInput) -> syn::Result<Tokens> {
         return Err(Error::new_spanned(ty, "`SandObject` cannot be derived for unions"));
     }
     let attrs = parse_type_attrs(input, "SandObject")?;
-    reject_generics(input, "SandObject")?;
+    let none = non_generic(input, "SandObject")?;
     reject_member_attrs(&input.data)?;
     let krate = &attrs.krate;
-    let none = Generic { params: Vec::new() };
     let named = named_type(input, &attrs, &none, quote! { #krate::native::Binding::of_object() });
     let sand_type = sand_type(input, krate, &none);
     Ok(quote! {
@@ -455,7 +471,7 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
         return Err(Error::new_spanned(ty, "`SandStruct` can only be derived for structs"));
     };
     let attrs = parse_type_attrs(input, "SandStruct")?;
-    let generic = Generic::of(input, "SandStruct")?;
+    let generic = Generic::of(input, "SandStruct", &attrs.krate)?;
     let krate = &attrs.krate;
     let fields = match &data.fields {
         Fields::Named(f) => f.named.iter().collect::<Vec<_>>(),
@@ -466,6 +482,7 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
     let mut reads = Vec::new();
     let mut writes = Vec::new();
     let mut names = Vec::new();
+    let mut consts = Vec::new();
     let mut checks = Vec::new();
     for (i, f) in fields.iter().enumerate() {
         let ident = f.ident.as_ref().expect("named field");
@@ -519,6 +536,7 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
         });
         reads.push(quote! { #ident: #krate::native::field_from_value::<#fty>(vm, fields[#i], conv)? });
         writes.push(quote! { #krate::native::IntoValue::into_value(self.#ident, vm)? });
+        consts.push(quote! { #krate::native::IntoValue::to_const(&self.#ident) });
     }
     let named = named_type(input, &attrs, &generic, quote! { #krate::native::Binding::of_struct() });
     let sand_type = sand_type(input, krate, &generic);
@@ -545,6 +563,9 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
             fn into_value(self, vm: &mut #krate::vm::Vm) -> ::std::result::Result<#krate::Value, #krate::vm::Ctl> {
                 #krate::native::struct_into_value::<Self>(vm, move |vm| ::std::result::Result::Ok(::std::boxed::Box::new([#(#writes),*])))
             }
+            fn to_const(&self) -> ::std::option::Option<#krate::native::Constant> {
+                #krate::native::struct_const::<Self>([#(#consts),*])
+            }
         }
     })
 }
@@ -555,10 +576,10 @@ fn sand_value(input: &DeriveInput) -> syn::Result<Tokens> {
         return Err(Error::new_spanned(ty, "`SandValue` cannot be derived for unions"));
     }
     let attrs = parse_type_attrs(input, "SandValue")?;
-    reject_generics(input, "SandValue")?;
+    let none = non_generic(input, "SandValue")?;
     reject_member_attrs(&input.data)?;
     let krate = &attrs.krate;
-    let named = named_type(input, &attrs, &Generic { params: Vec::new() }, quote! { #krate::native::Binding::of_value() });
+    let named = named_type(input, &attrs, &none, quote! { #krate::native::Binding::of_value() });
     Ok(quote! {
         #named
         #krate::__value_type_impls!(#ty);

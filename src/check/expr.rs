@@ -1546,6 +1546,9 @@ impl Checker {
 
     /// The expression of constant `c`, of type `ty`.
     fn const_expr(&mut self, c: &ConstVal, ty: TypeId, span: Span) -> HExpr {
+        let all = |s: &mut Self, xs: &[ConstVal], tys: &[TypeId]| -> Vec<HExpr> {
+            xs.iter().enumerate().map(|(i, x)| s.const_expr(x, tys.get(i).copied().unwrap_or(TypeId::ERROR), span)).collect()
+        };
         let kind = match c {
             ConstVal::Unit => HKind::Unit,
             ConstVal::Bool(b) => HKind::Bool(*b),
@@ -1554,22 +1557,52 @@ impl Checker {
             ConstVal::Str(s) => HKind::Str(s.clone()),
             ConstVal::Bytes(b) => HKind::Bytes(b.clone()),
             ConstVal::Dur(d) => HKind::Dur(*d),
-            ConstVal::EmptyList => HKind::List(Vec::new()),
-            ConstVal::EmptyMap => HKind::Map(Vec::new()),
-            ConstVal::None => HKind::Tag(self.none_rt()),
-            ConstVal::Some(c) => {
-                let inner = match self.rty(ty) {
-                    Ty::Named(_, args) => self.arena.elem(args, 0),
-                    _ => TypeId::ERROR,
-                };
-                HKind::MakeVariant { rt_id: self.some_rt(), args: vec![self.const_expr(c, inner, span)] }
-            }
             ConstVal::Range(a, b, inclusive) => HKind::Range {
                 start: Box::new(mk(HKind::Int(*a), TypeId::INT, span)),
                 end: Box::new(mk(HKind::Int(*b), TypeId::INT, span)),
                 inclusive: *inclusive,
             },
-            ConstVal::Tag(id) => HKind::Tag(*id),
+            ConstVal::Tuple(xs) => {
+                let tys = match self.rty(ty) {
+                    Ty::Tuple(l) => self.arena.list(l).to_vec(),
+                    _ => Vec::new(),
+                };
+                HKind::Tuple(all(self, xs, &tys))
+            }
+            ConstVal::List(xs) => {
+                let elem = match self.rty(ty) {
+                    Ty::List(e) => e,
+                    _ => TypeId::ERROR,
+                };
+                HKind::List(all(self, xs, &vec![elem; xs.len()]))
+            }
+            ConstVal::Map(kvs) => {
+                let (kt, vt) = match self.rty(ty) {
+                    Ty::Map(k, v) => (k, v),
+                    _ => (TypeId::ERROR, TypeId::ERROR),
+                };
+                HKind::Map(kvs.iter().map(|(k, v)| (self.const_expr(k, kt, span), self.const_expr(v, vt, span))).collect())
+            }
+            ConstVal::Variant(id, payload) if payload.is_empty() => HKind::Tag(*id),
+            ConstVal::Variant(id, payload) => {
+                let (d, i) = self.variants[*id as usize];
+                let args = match self.rty(ty) {
+                    Ty::Named(_, args) => self.elems(args),
+                    _ => Vec::new(),
+                };
+                let def = &self.types[d as usize];
+                let (fields, generics) = (def.variants()[i as usize].fields.clone(), def.generics.clone());
+                let tys: Vec<TypeId> = fields.iter().map(|&t| self.arena.instantiate(t, &generics, &args)).collect();
+                HKind::MakeVariant { rt_id: *id, args: all(self, payload, &tys) }
+            }
+            ConstVal::Struct(def, fields) => {
+                let args = match self.rty(ty) {
+                    Ty::Named(_, args) => self.elems(args),
+                    _ => Vec::new(),
+                };
+                let tys: Vec<TypeId> = (0..fields.len()).map(|i| self.field_type(*def, i, &args)).collect();
+                HKind::MakeStruct { def: *def, fields: all(self, fields, &tys) }
+            }
         };
         mk(kind, ty, span)
     }

@@ -157,34 +157,52 @@ proptest! {
     }
 }
 
-/// A field type and a constant default expression of that type.
+/// A field type and a constant default expression of that type, built from
+/// literals and constructors.
 fn constant_default() -> impl Strategy<Value = (String, String)> {
     let finite = any::<f64>().prop_filter("finite", |f| f.is_finite());
     let leaf = prop_oneof![
-        int().prop_filter("a literal", |&i| i != i64::MIN).prop_map(|i| ("int", int_lit(i))),
-        finite.prop_map(|f| ("float", if f.is_sign_negative() { format!("(-{:?})", -f) } else { format!("{f:?}") })),
-        (-1000i64..1000).prop_map(|n| ("duration", if n < 0 { format!("-{}ms", -n) } else { format!("{n}ms") })),
-        "[a-z\"\\\n é]{0,4}".prop_map(|t| ("str", str_lit(&t))),
+        int().prop_filter("a literal", |&i| i != i64::MIN).prop_map(|i| ("int".to_string(), int_lit(i))),
+        finite.prop_map(|f| ("float".to_string(), if f.is_sign_negative() { format!("(-{:?})", -f) } else { format!("{f:?}") })),
+        (-1000i64..1000).prop_map(|n| ("duration".to_string(), if n < 0 { format!("-{}ms", -n) } else { format!("{n}ms") })),
+        "[a-z\"\\\n é]{0,4}".prop_map(|t| ("str".to_string(), str_lit(&t))),
         prop::collection::vec(any::<u8>(), 0..4)
-            .prop_map(|b| ("bytes", format!("b\"{}\"", b.iter().map(|x| format!("\\x{x:02x}")).collect::<String>()))),
-        any::<bool>().prop_map(|b| ("bool", b.to_string())),
-        Just(("()", "()".to_string())),
-        Just(("[int]", "[]".to_string())),
-        Just(("[str: int]", "[:]".to_string())),
-        Just(("int?", "None".to_string())),
-        (-3i64..3, -3i64..3, any::<bool>())
-            .prop_map(|(a, b, inclusive)| ("Range", format!("{}..{}{}", int_lit(a), if inclusive { "=" } else { "" }, int_lit(b)))),
-        prop::sample::select(vec!["Mode.Read", "Mode.Write"]).prop_map(|v| ("Mode", v.to_string())),
+            .prop_map(|b| ("bytes".to_string(), format!("b\"{}\"", b.iter().map(|x| format!("\\x{x:02x}")).collect::<String>()))),
+        any::<bool>().prop_map(|b| ("bool".to_string(), b.to_string())),
+        Just(("()".to_string(), "()".to_string())),
+        Just(("[int]".to_string(), "[]".to_string())),
+        Just(("[str: int]".to_string(), "[:]".to_string())),
+        Just(("int?".to_string(), "None".to_string())),
+        Just(("Tree<int>".to_string(), "Tree.Empty".to_string())),
+        (-3i64..3, -3i64..3, any::<bool>()).prop_map(|(a, b, inclusive)| {
+            ("Range".to_string(), format!("{}..{}{}", int_lit(a), if inclusive { "=" } else { "" }, int_lit(b)))
+        }),
+        prop::sample::select(vec!["Mode.Read", "Mode.Write"]).prop_map(|v| ("Mode".to_string(), v.to_string())),
     ];
-    // Negating twice keeps a number constant, as does wrapping it in `Some`.
-    (leaf, any::<bool>(), 0..3usize).prop_map(|((ty, e), twice, somes)| {
-        let e = match ty {
-            "int" | "float" | "duration" if twice => format!("-(-{e})"),
-            _ => e,
-        };
-        (0..somes).fold((ty.to_string(), e), |(ty, e), _| (format!("{ty}?"), format!("Some({e})")))
+    // Negating twice keeps a number constant.
+    let leaf = (leaf, any::<bool>()).prop_map(|((ty, e), twice)| match ty.as_str() {
+        "int" | "float" | "duration" if twice => (ty, format!("-(-{e})")),
+        _ => (ty, e),
+    });
+    leaf.prop_recursive(3, 24, 3, |inner| {
+        prop_oneof![
+            inner.clone().prop_map(|(ty, e)| (format!("{ty}?"), format!("Some({e})"))),
+            (inner.clone(), inner.clone()).prop_map(|((t1, e1), (t2, e2))| (format!("({t1}, {t2})"), format!("({e1}, {e2})"))),
+            (inner.clone(), 1..3usize).prop_map(|((ty, e), n)| (format!("[{ty}]"), format!("[{}]", vec![e; n].join(", ")))),
+            inner.clone().prop_map(|(ty, e)| (format!("[str: {ty}]"), format!("[\"a\": {e}, \"b\": {e}]"))),
+            inner.clone().prop_map(|(ty, e)| (format!("Tree<{ty}>"), format!("Tree.Leaf({e})"))),
+            inner.clone().prop_map(|(ty, e)| (format!("Tree<{ty}>"), format!("Tree.Pair(a: {e}, b: {e})"))),
+            (inner, any::<bool>()).prop_map(|((ty, e), w)| {
+                let w = if w { ", w: -1" } else { "" };
+                (format!("Holder<{ty}>"), format!("Holder {{ v: {e}{w} }}"))
+            }),
+        ]
     })
 }
+
+/// The declarations that the types of `constant_default` refer to.
+const CONSTANT_TYPES: &str = "enum Mode { Read, Write }\nenum Tree<T> { Leaf(T), Pair(a: T, b: T), Empty }\n\
+                              struct Holder<T> { v: T, w: int = 7, tags: [str] = [\"t\"] }\nfn id<T>(x: T) -> T { x }";
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(128))]
@@ -193,9 +211,28 @@ proptest! {
     fn json_decode_fills_missing_fields_with_constant_defaults(fields in prop::collection::vec(constant_default(), 1..6)) {
         let decls: Vec<String> = fields.iter().enumerate().map(|(i, (ty, e))| format!("    f{i}: {ty} = {e}")).collect();
         let src = format!(
-            "import json\nenum Mode {{ Read, Write }}\nstruct S {{\n{}\n}}\nlet s: S = json.decode(\"{{}}\")?\nprint(s == S {{}})\nprint(json.encode(s) == json.encode(S {{}}))",
+            "import json\n{CONSTANT_TYPES}\nstruct S {{\n{}\n}}\nlet s: S = json.decode(\"{{}}\")?\nprint(s == S {{}})\nprint(json.encode(s) == json.encode(S {{}}))",
             decls.join("\n")
         );
         check(&src, "true\ntrue\n", None)?;
+    }
+
+    #[test]
+    fn json_decode_fails_on_missing_fields_with_computed_defaults(fields in prop::collection::vec((constant_default(), any::<bool>()), 1..6)) {
+        // A call makes a default computed, even if the value it gives is constant.
+        let decls: Vec<String> = fields
+            .iter()
+            .enumerate()
+            .map(|(i, ((ty, e), computed))| if *computed { format!("    f{i}: {ty}? = Some(id({e}))") } else { format!("    f{i}: {ty} = {e}") })
+            .collect();
+        let src = format!(
+            "import json\n{CONSTANT_TYPES}\nstruct S {{\n{}\n}}\nlet s: Result<S> = json.decode(\"{{}}\")\nmatch s {{\n    Ok(s) => print(s == S {{}})\n    Err(e) => print(e.message)\n}}",
+            decls.join("\n")
+        );
+        let out = match fields.iter().position(|(_, computed)| *computed) {
+            Some(i) => format!("$: missing field `f{i}`, whose default is not a constant\n"),
+            None => "true\n".to_string(),
+        };
+        check(&src, &out, None)?;
     }
 }

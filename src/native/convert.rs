@@ -1,8 +1,8 @@
 //! Value conversion between Sand and Rust.
 
-use super::Constant;
 use super::func::{Later, NativeError};
 use super::ty::{Never, Num, Param, Reflect, SandType, Val, bound::ParamBounds};
+use super::{Constant, RustVariant};
 use crate::types::ConstVal;
 use crate::vm::meter::Scratch;
 use crate::vm::value::{Obj, Value, ValueType};
@@ -68,10 +68,10 @@ pub trait IntoValue: SandType {
     fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl>;
 
     /// Returns `self` as a Sand constant, or `None` if no Sand constant
-    /// equals `self`. Numbers, `bool`, `()`, strings, `bytes`, durations,
-    /// empty lists and maps, `None`, `Some` of a constant, and payload-less
-    /// variants of a [`SandEnum`](crate::SandEnum) are constants. A field
-    /// default (`#[sand(default)]`) must be a constant.
+    /// equals `self`. Numbers, `bool`, `()`, strings, `bytes`, durations, and
+    /// the tuples, `Vec`s, maps, `Option`s, [`SandEnum`](crate::SandEnum)s,
+    /// and [`SandStruct`](crate::SandStruct)s of constants are constants. A
+    /// field default (`#[sand(default)]`) must be a constant.
     fn to_const(&self) -> Option<Constant> {
         None
     }
@@ -171,7 +171,7 @@ macro_rules! scalar {
                 Ok($into)
             }
             fn to_const(&self) -> Option<Constant> {
-                Some(Constant::value($c(*self)))
+                Some(Constant($c(*self)))
             }
         }
     )*};
@@ -194,7 +194,7 @@ impl IntoValue for () {
         Ok(Value::Unit)
     }
     fn to_const(&self) -> Option<Constant> {
-        Some(Constant::value(ConstVal::Unit))
+        Some(Constant(ConstVal::Unit))
     }
 }
 
@@ -216,7 +216,7 @@ impl IntoValue for jiff::SignedDuration {
         }
     }
     fn to_const(&self) -> Option<Constant> {
-        i64::try_from(self.as_nanos()).ok().map(|d| Constant::value(ConstVal::Dur(d)))
+        i64::try_from(self.as_nanos()).ok().map(|d| Constant(ConstVal::Dur(d)))
     }
 }
 
@@ -252,7 +252,7 @@ impl IntoValue for String {
         Ok(vm.heap.new_str(self))
     }
     fn to_const(&self) -> Option<Constant> {
-        Some(Constant::value(ConstVal::Str(self.clone())))
+        Some(Constant(ConstVal::Str(self.clone())))
     }
 }
 impl IntoValue for &str {
@@ -288,7 +288,7 @@ impl IntoValue for Vec<u8> {
         Ok(vm.heap.new_bytes(self))
     }
     fn to_const(&self) -> Option<Constant> {
-        Some(Constant::value(ConstVal::Bytes(self.clone())))
+        Some(Constant(ConstVal::Bytes(self.clone())))
     }
 }
 impl IntoValue for &[u8] {
@@ -319,7 +319,7 @@ impl<T: IntoValue> IntoValue for Vec<T> {
         Ok(vm.heap.new_list(items))
     }
     fn to_const(&self) -> Option<Constant> {
-        self.is_empty().then(|| Constant::value(ConstVal::EmptyList))
+        Some(Constant(ConstVal::List(super::parts(self.iter().map(T::to_const))?)))
     }
 }
 
@@ -356,10 +356,10 @@ impl<T: IntoValue> IntoValue for Option<T> {
         })
     }
     fn to_const(&self) -> Option<Constant> {
-        match self {
-            Some(x) => x.to_const().map(Constant::some),
-            None => Some(Constant::value(ConstVal::None)),
-        }
+        Some(Constant(match self {
+            Some(x) => ConstVal::Variant(RustVariant::Some, vec![x.to_const()?.0]),
+            None => ConstVal::Variant(RustVariant::None, Vec::new()),
+        }))
     }
 }
 
@@ -437,7 +437,9 @@ impl<K: IntoValue + Ord, V: IntoValue> IntoValue for HashMap<K, V> {
         write_map(vm, items.len(), items)
     }
     fn to_const(&self) -> Option<Constant> {
-        self.is_empty().then(|| Constant::value(ConstVal::EmptyMap))
+        let mut items: Vec<(&K, &V)> = self.iter().collect();
+        items.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        map_const(items)
     }
 }
 impl<K: for<'k> FromValue<Item<'k> = K> + Ord, V: FromValue> FromValue for BTreeMap<K, V> {
@@ -451,7 +453,7 @@ impl<K: IntoValue, V: IntoValue> IntoValue for BTreeMap<K, V> {
         write_map(vm, self.len(), self)
     }
     fn to_const(&self) -> Option<Constant> {
-        self.is_empty().then(|| Constant::value(ConstVal::EmptyMap))
+        map_const(self)
     }
 }
 
@@ -467,8 +469,13 @@ impl<K: IntoValue, V: IntoValue> IntoValue for indexmap::IndexMap<K, V> {
         write_map(vm, self.len(), self)
     }
     fn to_const(&self) -> Option<Constant> {
-        self.is_empty().then(|| Constant::value(ConstVal::EmptyMap))
+        map_const(self)
     }
+}
+
+fn map_const<'a, K: IntoValue + 'a, V: IntoValue + 'a>(entries: impl IntoIterator<Item = (&'a K, &'a V)>) -> Option<Constant> {
+    let entries = entries.into_iter().map(|(k, v)| Some((k.to_const()?.0, v.to_const()?.0))).collect::<Option<_>>()?;
+    Some(Constant(ConstVal::Map(entries)))
 }
 
 fn read_set<T: for<'k> FromValue<Item<'k> = T>, C: FromIterator<T>>(vm: &Vm, v: Value, conv: &mut Conversion) -> Result<C, Ctl> {
@@ -546,6 +553,9 @@ macro_rules! tuple_impls {
                 let items = [$(self.$i.into_value(vm)?),+];
                 vm.check_memory(items.len() * std::mem::size_of::<Value>())?;
                 Ok(vm.heap.new_tuple(&items))
+            }
+            fn to_const(&self) -> Option<Constant> {
+                Some(Constant(ConstVal::Tuple(vec![$(self.$i.to_const()?.0),+])))
             }
         }
     };

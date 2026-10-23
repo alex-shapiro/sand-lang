@@ -196,37 +196,37 @@ pub struct StructField {
 
 /// A Sand constant made from a Rust value (see [`IntoValue::to_const`]).
 #[derive(Clone, Debug, PartialEq)]
-pub struct Constant(pub(crate) ConstRepr);
+pub struct Constant(pub(crate) ConstVal<RustVariant, TypeId>);
 
+/// A variant in a [`Constant`].
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum ConstRepr {
-    /// A constant that every program represents alike (never a
-    /// [`ConstVal::Tag`]).
-    Value(ConstVal),
-    /// The payload-less variant `index` of the Rust-bound enum whose
+pub(crate) enum RustVariant {
+    None,
+    Some,
+    /// The variant `index` of the Rust-bound enum whose
     /// [`NamedType::rust_type`] is `rust`.
-    Variant { rust: TypeId, index: usize },
-    /// `Some` of a constant that contains a variant.
-    Some(Box<ConstRepr>),
+    Bound {
+        rust: TypeId,
+        index: usize,
+    },
 }
 
-impl Constant {
-    pub(crate) fn value(c: ConstVal) -> Constant {
-        Constant(ConstRepr::Value(c))
-    }
-
-    pub(crate) fn some(self) -> Constant {
-        Constant(match self.0 {
-            ConstRepr::Value(c) => ConstRepr::Value(ConstVal::Some(Box::new(c))),
-            c => ConstRepr::Some(Box::new(c)),
-        })
-    }
+/// The values of `cs`, or `None` if one of them is not a constant.
+fn parts(cs: impl IntoIterator<Item = Option<Constant>>) -> Option<Vec<ConstVal<RustVariant, TypeId>>> {
+    cs.into_iter().map(|c| c.map(|c| c.0)).collect()
 }
 
+/// The variant `index` of `T` with `payload`, or `None` if a part of the
+/// payload is not a constant.
 #[doc(hidden)]
-pub fn variant_const<T: EnumType>(x: &T) -> Option<Constant> {
-    let index = x.index();
-    T::VARIANTS[index].fields.is_empty().then(|| Constant(ConstRepr::Variant { rust: T::rust_type(), index }))
+pub fn variant_const<T: EnumType>(index: usize, payload: impl IntoIterator<Item = Option<Constant>>) -> Option<Constant> {
+    Some(Constant(ConstVal::Variant(RustVariant::Bound { rust: T::rust_type(), index }, parts(payload)?)))
+}
+
+/// The struct `T` with `fields`, or `None` if a field is not a constant.
+#[doc(hidden)]
+pub fn struct_const<T: StructType>(fields: impl IntoIterator<Item = Option<Constant>>) -> Option<Constant> {
+    Some(Constant(ConstVal::Struct(T::rust_type(), parts(fields)?)))
 }
 
 #[doc(hidden)]
