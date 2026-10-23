@@ -66,11 +66,9 @@ Follow-up work, roughly in priority order.
       `native::Num` reads `T.zero()` and `T.one()` by calling the native
       methods in fixed slots of the `Num` dictionary, and the checker requires
       the prelude's `Num` impls to be native. Callbacks such as `sort_by` also
-      need Sand wrappers (`sort_by_keys(self.map(key))`).
-- [ ] A Rust function whose `native fn` declaration bounds a type parameter
-      by `Num` must take `Num<N>`, even if it does not use the evidence.
-      Let the checker accept a signature without it and drop the evidence
-      argument at the call.
+      need Sand wrappers (`sort_by_keys(self.map(key))`), and `json.decode`
+      fills a missing field only from a constant default (it decodes
+      `x: int? = Some(f())` as `None`) instead of calling its default.
 - [ ] `json.parse` accepts 512 levels of nesting, but conversion of a `Json`
       value to Rust aborts with kind `"limit"` beyond 256 levels of enum
       payloads. Use one limit, or convert `Json` without recursion.

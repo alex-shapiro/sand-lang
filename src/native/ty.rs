@@ -421,9 +421,10 @@ impl<const N: u8, B: bound::ParamBounds> SandType for Param<N, B> {
 /// Evidence that the `N`-th generic type parameter of a `native fn` is `Num`
 /// (`int` or `float`), declared as `T: Num`.
 ///
-/// A Rust function takes one `Num<N>` for each type parameter that its
-/// `native fn` declaration bounds by `Num`, after its [`Reflect`] parameters
-/// and before the other parameters.
+/// A Rust function can take `Num<N>` for each type parameter that its
+/// `native fn` declaration bounds by `Num`, in the order of the type
+/// parameters, after its [`Reflect`] parameters and before the other
+/// parameters.
 pub struct Num<const N: u8>(Value);
 
 impl<const N: u8> Num<N> {

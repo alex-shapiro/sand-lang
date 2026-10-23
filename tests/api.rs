@@ -1543,10 +1543,6 @@ print(none.product())
             "native function `total` is declared `fn([T]) -> T`, but its Rust function is `fn(<Num evidence of T>, [T]) -> T`",
         ),
         (
-            "pub native fn total<T: Num>(xs: [T]) -> T\npub native fn unit<A: Num, B: Num>(a: A, b: B) -> B",
-            "native function `unit` is declared `fn(<Num evidence of A>, <Num evidence of B>, A, B) -> B`, but its Rust function is `fn(<Num evidence of B>, A, B) -> B`",
-        ),
-        (
             "pub native fn total<T: Num>(xs: [T]) -> T\npub native fn unit<A, B: Ord>(a: A, b: B) -> B",
             "native function `unit` is declared `fn(A, B) -> B`, but its Rust function is `fn(<Num evidence of B>, A, B) -> B`",
         ),
@@ -1555,6 +1551,15 @@ print(none.product())
         let errors = engine_errors(Config::new().module(module(decl)));
         assert!(errors.iter().any(|e| e == msg), "{decl}: {errors:?}");
     }
+
+    // A Rust function takes the `Num` evidence of only the parameters it uses.
+    let mut m = module("pub native fn total<T: Num>(xs: [T]) -> T\npub native fn unit<A: Num, B: Num>(a: A, b: B) -> B");
+    m.function("first", |xs: Vec<Param<0, bound::Num>>| xs[0]);
+    m.source("pub native fn first<T: Num>(xs: [T]) -> T");
+    let src = "import nums\nprint(nums.first([2.5]))\nprint(nums.unit(1, 2))\nlet f: fn([int]) -> int = nums.first\nprint(f([7]))";
+    let (r, out, _) = run_src(Config::new().module(m), src);
+    r.unwrap();
+    assert_eq!(out, "2.5\n1\n7\n");
 
     let mut m = NativeModule::new("nums");
     m.function("first", |xs: Vec<Param<0, bound::Num>>| xs[0]);

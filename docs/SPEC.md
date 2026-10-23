@@ -2061,9 +2061,8 @@ and a value type as its text form. Encoding any other key aborts with kind
 `decode<T>` is the inverse for types built from those components. Decoding a
 map whose key type is not one of those fails with kind `"invalid"`. A struct
 field missing from the object takes its declared default if that is a
-constant expression (a literal, `[]`, `[:]`, `None`, or a payload-less
-variant), else `None` if
-optional; otherwise decoding fails with kind `"parse"` and a message naming
+constant expression (a literal, `[]`, `[:]`, `None`, a payload-less variant,
+or `Some` of one of these), else `None` if optional; otherwise decoding fails with kind `"parse"` and a message naming
 the path (e.g. `$.items[2].name: expected str`). Parsing is limited to a
 nesting depth of 512.
 
@@ -2918,8 +2917,8 @@ defaulting to `()`. The corresponding `native fn` declaration must declare the
 bounds of `B` or stronger bounds on that parameter.
 
 If a `native fn` declaration bounds a type parameter by `Num`, the Rust
-function takes its evidence as `Num<N>` (with `zero` and `one`), after its
-`Reflect` parameters.
+function can take its evidence as `Num<N>` (with `zero` and `one`), after its
+`Reflect` parameters, in the order of the type parameters.
 
 The engine automatically generates Sand declarations for registered types and
 functions that are not declared in `NativeModule::source`. Registered types use

@@ -523,7 +523,7 @@ impl Checker {
         mk(HKind::CallValue { callee: Box::new(local(f, fty, span)), args }, ret, span)
     }
 
-    fn some_rt(&self) -> u32 {
+    pub(crate) fn some_rt(&self) -> u32 {
         self.types[self.wk.option as usize].variants()[0].rt_id
     }
 

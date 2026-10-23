@@ -227,8 +227,12 @@ let x = json.decode("1")
 === decode rejects types that JSON cannot represent
 import json
 let b: Result<[fn() -> int]> = json.decode("[]")
+struct Hooks { on: [str: fn() -> int] }
+struct App { hooks: Hooks? }
+let a: Result<App> = json.decode("{}")
 --- error
 2: [fn() -> int] does not satisfy Encode because the elements of `[fn() -> int]` have type `fn() -> int`
+5: App does not satisfy Encode because field `on` of `Hooks` has type `[str: fn() -> int]`
 
 === ranges encode as objects with their bounds
 import json
@@ -537,19 +541,20 @@ struct All {
     xs: [int] = []
     m: [str: int] = [:]
     o: int? = None
+    some: Mode? = Some(Mode.Write)
     mode: Mode = Mode.Read
     neg: int = --4
 }
 let a: All = json.decode("{}")?
 print(a)
 print(a == All {})
-struct Computed { n: int = 1 + 1, o: int? = Some(1) }
+struct Computed { n: int = 1 + 1, o: int? = Some(1 + 1) }
 let c: Result<Computed> = json.decode("{}")
 print(c)
 let o: Computed = json.decode("{\"n\": 5}")?
 print(o)
 --- stdout
-All { u: (), b: true, n: -3, x: -1.5, d: -2s, s: "q\"", xs: [], m: [:], o: None, mode: Read, neg: 4 }
+All { u: (), b: true, n: -3, x: -1.5, d: -2s, s: "q\"", xs: [], m: [:], o: None, some: Some(Write), mode: Read, neg: 4 }
 true
 Err(Error { kind: "parse", message: "$: missing field `n`" })
 Computed { n: 5, o: None }

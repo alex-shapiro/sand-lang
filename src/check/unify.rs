@@ -288,7 +288,7 @@ impl Checker {
     /// not if that is not `t` itself.
     pub(crate) fn unsatisfied(&mut self, t: TypeId, b: Bound, context: &str) -> String {
         let mut msg = format!("{} does not satisfy {}{context}", self.show(t), b.name());
-        if let Ok(Some((why, leaf))) = self.why_unsatisfied(t, b, &mut std::collections::HashSet::new()) {
+        if let Ok(Some(Why { text: why, leaf, .. })) = self.why_unsatisfied(t, b, &mut std::collections::HashSet::new()) {
             msg.push_str(if context.is_empty() { " because " } else { ", because " });
             msg.push_str(&why);
             if let Ty::Param(p) = self.rty(leaf) {
@@ -299,21 +299,17 @@ impl Checker {
         msg
     }
 
-    /// The innermost field, payload or element of `t` (which does not satisfy
-    /// `b`) that does not satisfy `b`, described, with its type: `Ok(None)` if
-    /// that is `t` itself, and `Err(())` if each such part leads back to a type
-    /// in `seen`.
-    fn why_unsatisfied(
-        &mut self,
-        t: TypeId,
-        b: Bound,
-        seen: &mut std::collections::HashSet<TypeId>,
-    ) -> Result<Option<(String, TypeId)>, ()> {
+    /// Why `t` (which does not satisfy `b`) does not: the innermost field or
+    /// payload that does not satisfy `b` (or, if there is none, element of a
+    /// list, set, map or tuple). `Ok(None)` if no part of `t` is to blame, and
+    /// `Err(())` if each such part leads back to a type in `seen`.
+    fn why_unsatisfied(&mut self, t: TypeId, b: Bound, seen: &mut std::collections::HashSet<TypeId>) -> Result<Option<Why>, ()> {
         if !seen.insert(t) || !self.budget.charge(1) {
             return Err(());
         }
         // The parts of `t` with their descriptions.
         let mut parts: Vec<(TypeId, String)> = Vec::new();
+        let member = matches!(self.rty(t), Ty::Named(..));
         let mut mutable = None;
         let owner = self.show(t);
         // A list, set, map or tuple that never satisfies `b` is the part to name.
@@ -354,16 +350,19 @@ impl Checker {
             }
             _ => {}
         }
-        if let Some(m) = mutable {
-            return Ok(Some((m, t)));
+        if let Some(text) = mutable {
+            return Ok(Some(Why { text, leaf: t, member: true }));
         }
         let mut cyclic = false;
-        for (x, what) in parts {
+        for (x, text) in parts {
             if self.satisfies(x, b) != Some(false) {
                 continue;
             }
             match self.why_unsatisfied(x, b, seen) {
-                Ok(inner) => return Ok(Some(inner.unwrap_or((what, x)))),
+                Ok(Some(inner)) if inner.member || !member => return Ok(Some(inner)),
+                // A field's type shows the element to blame.
+                Ok(Some(inner)) => return Ok(Some(Why { text, leaf: inner.leaf, member })),
+                Ok(None) => return Ok(Some(Why { text, leaf: x, member })),
                 Err(()) => cyclic = true,
             }
         }
@@ -460,6 +459,15 @@ pub(crate) enum Derived {
     Never,
     /// The arguments of these type parameters (indices) must satisfy it.
     Needs(Vec<u32>),
+}
+
+/// A description of the part of a type that does not satisfy a bound.
+struct Why {
+    text: String,
+    /// The innermost type that does not satisfy the bound.
+    leaf: TypeId,
+    /// Whether `text` describes a field or payload.
+    member: bool,
 }
 
 /// The bounds that type definitions may satisfy, in the order of `Checker::derived`.

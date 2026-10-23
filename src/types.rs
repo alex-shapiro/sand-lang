@@ -583,6 +583,7 @@ pub enum ConstVal {
     EmptyList,
     EmptyMap,
     None,
+    Some(Box<ConstVal>),
     /// A payload-less enum variant, by its runtime variant id.
     Tag(u32),
 }
@@ -610,6 +611,7 @@ impl ConstVal {
             ConstVal::EmptyList => "[]".into(),
             ConstVal::EmptyMap => "[:]".into(),
             ConstVal::None => "None".into(),
+            ConstVal::Some(c) => format!("Some({})", c.sand_text(variant)),
             ConstVal::Tag(id) => variant(*id),
         }
     }

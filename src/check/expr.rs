@@ -1557,6 +1557,13 @@ impl Checker {
             ConstVal::EmptyList => HKind::List(Vec::new()),
             ConstVal::EmptyMap => HKind::Map(Vec::new()),
             ConstVal::None => HKind::Tag(self.none_rt()),
+            ConstVal::Some(c) => {
+                let inner = match self.rty(ty) {
+                    Ty::Named(_, args) => self.arena.elem(args, 0),
+                    _ => TypeId::ERROR,
+                };
+                HKind::MakeVariant { rt_id: self.some_rt(), args: vec![self.const_expr(c, inner, span)] }
+            }
             ConstVal::Tag(id) => HKind::Tag(*id),
         };
         mk(kind, ty, span)

@@ -158,7 +158,7 @@ proptest! {
 }
 
 /// A field type and a constant default expression of that type.
-fn constant_default() -> impl Strategy<Value = (&'static str, String)> {
+fn constant_default() -> impl Strategy<Value = (String, String)> {
     let finite = any::<f64>().prop_filter("finite", |f| f.is_finite());
     let leaf = prop_oneof![
         int().prop_filter("a literal", |&i| i != i64::MIN).prop_map(|i| ("int", int_lit(i))),
@@ -174,10 +174,13 @@ fn constant_default() -> impl Strategy<Value = (&'static str, String)> {
         Just(("int?", "None".to_string())),
         prop::sample::select(vec!["Mode.Read", "Mode.Write"]).prop_map(|v| ("Mode", v.to_string())),
     ];
-    // Negating twice keeps a number constant.
-    (leaf, any::<bool>()).prop_map(|((ty, e), twice)| match ty {
-        "int" | "float" | "duration" if twice => (ty, format!("-(-{e})")),
-        _ => (ty, e),
+    // Negating twice keeps a number constant, as does wrapping it in `Some`.
+    (leaf, any::<bool>(), 0..3usize).prop_map(|((ty, e), twice, somes)| {
+        let e = match ty {
+            "int" | "float" | "duration" if twice => format!("-(-{e})"),
+            _ => e,
+        };
+        (0..somes).fold((ty.to_string(), e), |(ty, e), _| (format!("{ty}?"), format!("Some({e})")))
     })
 }
 

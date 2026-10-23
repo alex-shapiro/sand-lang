@@ -1723,7 +1723,8 @@ impl Checker {
     }
 
     /// The value of `h` if it is a constant that `json.decode` can use as a
-    /// field default: a literal, `[]`, `[:]`, or a payload-less variant.
+    /// field default: a literal, `[]`, `[:]`, a payload-less variant, or
+    /// `Some` of one of these.
     fn const_of(&self, h: &HExpr) -> Option<ConstVal> {
         Some(match &h.kind {
             HKind::Unit => ConstVal::Unit,
@@ -1736,6 +1737,9 @@ impl Checker {
             HKind::List(xs) if xs.is_empty() => ConstVal::EmptyList,
             HKind::Map(xs) if xs.is_empty() => ConstVal::EmptyMap,
             HKind::Tag(id) if *id == self.none_rt() => ConstVal::None,
+            HKind::MakeVariant { rt_id, args } if *rt_id == self.some_rt() && args.len() == 1 => {
+                ConstVal::Some(Box::new(self.const_of(&args[0])?))
+            }
             HKind::Tag(id) => ConstVal::Tag(*id),
             HKind::Unary { op: HUnOp::Neg, e } => match self.const_of(e)? {
                 ConstVal::Int(i) => ConstVal::Int(i.checked_neg()?),
@@ -1968,7 +1972,8 @@ impl Checker {
     }
 
     /// Verifies that a `native fn` declaration matches its registered Rust
-    /// signature and declares all required type parameter bounds.
+    /// signature and declares all required type parameter bounds. Returns
+    /// the type parameters whose `Num` evidence the Rust function takes.
     fn check_native_signature(
         &mut self,
         f: &ast::FnDecl,
@@ -1977,39 +1982,45 @@ impl Checker {
         generics: &[ParamId],
         params: &[ParamSig],
         ret: TypeId,
-    ) {
+    ) -> Vec<u8> {
         let span = f.name.span;
         let owner = format!("the Rust function of native `{key}`");
         // The Rust function takes the runtime arguments that precede the
-        // declared ones: type descriptions, then `Num` evidence.
-        let num = self.num_trait;
-        let mut leads: Vec<Type> =
+        // declared ones: type descriptions, then the `Num` evidence of some
+        // of the type parameters bounded by `Num`, in order.
+        let reflect: Vec<Type> =
             generics.iter().enumerate().filter(|(_, p)| self.params[**p as usize].reflect).map(|(i, _)| Type::Reflect(i as u8)).collect();
-        for (i, &p) in generics.iter().enumerate() {
-            let n = self.params[p as usize].traits.iter().filter(|tr| Some(tr.trait_id) == num).count();
-            leads.extend(std::iter::repeat_n(Type::Num(i as u8), n));
-        }
+        let num: Vec<u8> = (0..generics.len() as u8)
+            .filter(|&i| self.num_trait.is_some() && self.params[generics[i as usize] as usize].has_bound(Bound::Num))
+            .collect();
         let lead_of = |t: &Type| match t {
             Type::Reflect(i) => Some((false, *i)),
             Type::Num(i) => Some((true, *i)),
             _ => None,
         };
-        let n = leads.len().min(sig.params.len());
+        let n = reflect.len().min(sig.params.len());
         let (lead, rest) = sig.params.split_at(n);
-        let leads_match = lead.iter().map(lead_of).eq(leads.iter().map(lead_of)) && !rest.iter().any(|t| lead_of(t).is_some());
+        let k = rest.iter().take_while(|t| matches!(t, Type::Num(_))).count();
+        let (evidence, rest) = rest.split_at(k);
+        let taken: Vec<u8> = evidence.iter().filter_map(|t| if let Type::Num(i) = t { Some(*i) } else { None }).collect();
+        let mut wanted = num.iter();
+        let leads_match = lead.iter().map(lead_of).eq(reflect.iter().map(lead_of))
+            && taken.iter().all(|i| wanted.any(|j| j == i))
+            && !rest.iter().any(|t| lead_of(t).is_some());
         if leads_match {
             let mark = self.diags.len();
             let want: Option<Vec<TypeId>> = rest.iter().map(|t| self.host_type(t, generics, &owner, span)).collect();
             let want_ret = self.host_type(&sig.ret, generics, &owner, span);
             if self.diags.len() > mark {
-                return;
+                return taken;
             }
             let have: Vec<TypeId> = params.iter().map(|p| p.ty).collect();
             if want.as_ref() == Some(&have) && want_ret == Some(ret) {
                 self.check_native_bounds(f, sig, generics);
-                return;
+                return taken;
             }
         }
+        let leads: Vec<Type> = reflect.into_iter().chain(num.iter().map(|&i| Type::Num(i))).collect();
         let module = self.name(self.mods[self.cur_mod as usize].name).to_string();
         let names: Vec<String> = generics.iter().map(|&p| self.name(self.params[p as usize].name).to_string()).collect();
         let show_rust =
@@ -2026,6 +2037,7 @@ impl Checker {
             show_rust(&sig.ret)
         );
         self.error(span, msg);
+        Vec::new()
     }
 
     fn check_native_bounds(&mut self, f: &ast::FnDecl, sig: &Signature, generics: &[ParamId]) {
@@ -2347,6 +2359,8 @@ impl Checker {
             "members" => Some(Intrinsic::Members),
             _ => None,
         };
+        // The type parameters whose `Num` evidence a native takes.
+        let mut num_evidence = Vec::new();
         let kind = if let Some(i) = intrinsic.filter(|_| f.is_native && owner.is_none() && Some(self.cur_mod) == self.prelude) {
             FnKind::Intrinsic(i)
         } else if f.is_native {
@@ -2357,7 +2371,7 @@ impl Checker {
             };
             match self.natives.get(&key).cloned() {
                 Some(decl) => {
-                    self.check_native_signature(f, &key, &decl.sig, &generics, &params, ret);
+                    num_evidence = self.check_native_signature(f, &key, &decl.sig, &generics, &params, ret);
                     if decl.names.is_some() || decl.doc.is_some() {
                         let msg =
                             format!("native `{key}` has `params` or `doc`, which apply only to a native that the module does not declare");
@@ -2379,8 +2393,14 @@ impl Checker {
             let pt = self.param_ty(p);
             dicts.extend(self.params[p as usize].traits.iter().map(|&tr| (pt, tr)));
         }
-        if f.is_native && dicts.iter().any(|(_, tr)| Some(tr.trait_id) != self.num_trait) {
-            self.error(f.name.span, "native functions cannot have trait bounds other than built-in bounds");
+        if f.is_native {
+            if dicts.iter().any(|(_, tr)| Some(tr.trait_id) != self.num_trait) {
+                self.error(f.name.span, "native functions cannot have trait bounds other than built-in bounds");
+            }
+            if let Some(trait_id) = self.num_trait {
+                let num = TraitRef { trait_id, args: TyList::EMPTY };
+                dicts = num_evidence.iter().map(|&i| (self.param_ty(generics[i as usize]), num)).collect();
+            }
         }
         let name = self.sym(&f.name.name);
         let id = self.add_fn(FnInfo {

@@ -952,7 +952,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                 for (i, (field, ty, default)) in fields.iter().enumerate() {
                     values.push(match (self.slots[base + i], default, &**ty) {
                         (Some(v), _, _) => v,
-                        (None, Some(c), _) => const_value(self.b.st, self.ids.none, c),
+                        (None, Some(c), _) => const_value(self.b.st, &self.ids, c),
                         (None, None, TypeDesc::Option(_)) => Value::Tag(self.ids.none),
                         _ => {
                             self.slots.truncate(base);
@@ -1147,7 +1147,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
     }
 }
 
-fn const_value(st: &mut Staging, none: u32, c: &ConstVal) -> Value {
+fn const_value(st: &mut Staging, ids: &crate::vm::bytecode::RtIds, c: &ConstVal) -> Value {
     match c {
         ConstVal::Unit => Value::Unit,
         ConstVal::Bool(b) => Value::Bool(*b),
@@ -1158,7 +1158,11 @@ fn const_value(st: &mut Staging, none: u32, c: &ConstVal) -> Value {
         ConstVal::Dur(d) => Value::Dur(*d),
         ConstVal::EmptyList => st.new_list(Vec::new()),
         ConstVal::EmptyMap => st.alloc(Obj::Map(Box::default())),
-        ConstVal::None => Value::Tag(none),
+        ConstVal::None => Value::Tag(ids.none),
+        ConstVal::Some(c) => {
+            let v = const_value(st, ids, c);
+            st.new_variant(ids.some, &[v])
+        }
         ConstVal::Tag(id) => Value::Tag(*id),
     }
 }
