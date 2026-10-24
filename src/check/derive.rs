@@ -111,6 +111,12 @@ impl Checker {
         }
     }
 
+    /// The field types of struct `d` or the payload types of enum `d`, in
+    /// terms of its type parameters.
+    pub(crate) fn member_types(&self, d: usize) -> Vec<TypeId> {
+        self.members(d).into_iter().map(Step::child).collect()
+    }
+
     /// A `var` field of `d`, which keeps `d` from implementing `Hash`.
     fn mutable_field(&self, d: usize) -> Option<Symbol> {
         self.types[d].fields().iter().find(|f| f.mutable).map(|f| f.name)
@@ -120,10 +126,24 @@ impl Checker {
     /// using greatest fixed-point iteration so that mutually recursive types
     /// implement a trait unless a component type refutes it.
     pub(crate) fn derive_impls(&mut self, first: usize) {
-        let n = self.types.len();
-        while self.derived.len() < n {
+        while self.derived.len() < self.types.len() {
             self.derived.push(std::array::from_fn(|_| Derived::Needs(Vec::new())));
         }
+        let users = self.member_users(first);
+        for b in Builtin::ALL.iter().copied().filter(|b| b.is_derived()) {
+            self.until_stable(first, &users, &mut |c, d| {
+                let new = c.derive(d, b);
+                let changed = new != c.derived[d][b as usize];
+                c.derived[d][b as usize] = new;
+                changed
+            });
+        }
+    }
+
+    /// For each type definition from `first` onward (indexed from `first`),
+    /// the type definitions from `first` onward whose members mention it.
+    pub(crate) fn member_users(&self, first: usize) -> Vec<Vec<usize>> {
+        let n = self.types.len();
         let mut users: Vec<Vec<usize>> = vec![Vec::new(); n - first];
         for d in first..n {
             for m in self.members(d) {
@@ -138,23 +158,26 @@ impl Checker {
                 });
             }
         }
-        for b in Builtin::ALL.iter().copied().filter(|b| b.is_derived()) {
-            let mut todo: Vec<usize> = (first..n).collect();
-            let mut queued = vec![true; n - first];
-            while let Some(d) = todo.pop() {
-                queued[d - first] = false;
-                let new = self.derive(d, b);
-                if new != self.derived[d][b as usize] {
-                    self.derived[d][b as usize] = new;
-                    for &u in &users[d - first] {
-                        if !std::mem::replace(&mut queued[u - first], true) {
-                            todo.push(u);
-                        }
+        users
+    }
+
+    /// Calls `update` for each type definition from `first` onward, and again
+    /// for the users (see [`Checker::member_users`]) of each definition for
+    /// which it returns `true` (changed), until no call changes anything.
+    pub(crate) fn until_stable(&mut self, first: usize, users: &[Vec<usize>], update: &mut dyn FnMut(&mut Checker, usize) -> bool) {
+        let mut todo: Vec<usize> = (first..first + users.len()).collect();
+        let mut queued = vec![true; users.len()];
+        while let Some(d) = todo.pop() {
+            queued[d - first] = false;
+            if update(self, d) {
+                for &u in &users[d - first] {
+                    if !std::mem::replace(&mut queued[u - first], true) {
+                        todo.push(u);
                     }
                 }
-                if !self.budget.check() {
-                    return;
-                }
+            }
+            if !self.budget.check() {
+                return;
             }
         }
     }

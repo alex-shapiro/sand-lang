@@ -514,3 +514,23 @@ fn copies_of_constant_strings_are_charged_by_their_size() {
     src += &format!("struct D {{ {} }}\n", fields("C", 16));
     rejects(&src, "program too complex to compile");
 }
+
+#[test]
+fn requirements_spread_through_chains_of_types_in_linear_work() {
+    // `S0<T>` needs `T: Hash` through `n` other types, declared in either
+    // order. The compile fuel grows linearly with `n`.
+    let chain = |n: usize, reverse: bool| {
+        let mut items: Vec<String> = (0..n).map(|i| format!("struct S{i}<T> {{ x: S{}<T>? }}\n", i + 1)).collect();
+        items.push(format!("struct S{n}<T: Hash> {{ x: T }}\n"));
+        if reverse {
+            items.reverse();
+        }
+        items.concat()
+    };
+    for reverse in [false, true] {
+        for n in [500, 4000] {
+            let (r, _) = check(limits(|l| l.max_compile_fuel = Some(200 * n as u64)), &chain(n, reverse));
+            assert!(r.is_ok(), "reverse {reverse}, n {n}: {r:?}");
+        }
+    }
+}

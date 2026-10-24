@@ -779,7 +779,7 @@ fn names_of_type_descriptions_built_at_run_time_stay_short() {
                     let x: P<A, B>? = None\n    grow(n + 1, x, x)\n}\nprint(grow(0, Some(1), Some(2)))";
     let deep = |e: &Error| matches!(e, Error::Runtime { message, .. } if message.contains("nested too deeply"));
     expect_stop(limits(|l| l.max_memory = None), doubling, deep, Duration::from_secs(10));
-    let shared = "import json\nstruct P<T> { v: T }\nfn grow<reflect A: Encode>(n: int, a: A?) -> int {\n    if n == 0 {\n        \
+    let shared = "import json\nstruct P<T> { v: T }\nfn grow<reflect A: Encode + Hash>(n: int, a: A?) -> int {\n    if n == 0 {\n        \
                   let m: Result<[A: int]> = json.decode(\"{\\\"k\\\": 1}\")\n        let p: Result<P<A>> = json.decode(\"{\\\"v\\\": 1}\")\n        \
                   print(m)\n        print(p)\n        return 0\n    }\n    let x: (A, A)? = None\n    grow(n - 1, x)\n}\nlet a: int? = None\nprint(grow(200, a))";
     let start = Instant::now();

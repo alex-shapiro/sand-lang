@@ -3344,3 +3344,18 @@ fn derived_impls_of_deep_field_types_are_checked_on_a_small_stack() {
     assert_eq!(ds.len(), 1, "{ds:?}");
     assert!(ds[0].message.starts_with("F does not implement `Hash`"), "{}", ds[0].message);
 }
+
+#[test]
+fn deep_set_elements_and_map_keys_of_fields_are_checked_on_a_small_stack() {
+    let (ok, bad) = (format!("int{}", "?".repeat(9000)), format!("float{}", "?".repeat(9000)));
+    let src = format!(
+        "import json\nstruct K {{ m: [{ok}: int], s: Set<{ok}> }}\nstruct G {{ m: [{bad}: int] }}\n\
+         let k: Result<K> = json.decode(\"{{}}\")\nprint(k.is_ok())\n"
+    );
+    let run = move || run_src(Config::new(), &src);
+    let (r, _, _) = std::thread::Builder::new().stack_size(512 << 10).spawn(run).unwrap().join().unwrap();
+    let Err(Error::Compile(ds)) = r else { panic!("{r:?}") };
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    assert_eq!(ds[0].line, 3, "{ds:?}");
+    assert!(ds[0].message.starts_with(&format!("{bad} does not implement `Hash`")), "{}", ds[0].message);
+}

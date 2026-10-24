@@ -72,6 +72,13 @@ pub struct ImplDef {
     pub evidence: Vec<(TypeId, TraitRef)>,
 }
 
+/// A trait that a type constructor (`owner`) requires of a type argument.
+struct Requirement {
+    owner: TypeId,
+    arg: TypeId,
+    tr: TraitRef,
+}
+
 /// An impl instantiated with fresh type variables.
 struct ImplInst {
     target: TypeId,
@@ -173,17 +180,17 @@ impl Checker {
     }
 
     // ------------------------------------------------------------------
-    // Bounds
+    // Required traits
 
     /// Resolves the traits that source names after `:` (`T: Ord + geo.Shape`).
-    pub(crate) fn resolve_traits(&mut self, bs: &[TypeExpr], scope: &[(Symbol, ParamId)], self_ty: Option<TypeId>) -> Vec<TraitRef> {
+    pub(crate) fn resolve_traits(&mut self, ts: &[TypeExpr], scope: &[(Symbol, ParamId)], self_ty: Option<TypeId>) -> Vec<TraitRef> {
         let mut traits = Vec::new();
-        for b in bs {
-            let TypeExprKind::Named { path, args } = &b.kind else {
-                self.error(b.span, "expected a trait");
+        for t in ts {
+            let TypeExprKind::Named { path, args } = &t.kind else {
+                self.error(t.span, "expected a trait");
                 continue;
             };
-            let Some(tid) = self.resolve_trait_path(path, b.span) else {
+            let Some(tid) = self.resolve_trait_path(path, t.span) else {
                 continue;
             };
             let args: Vec<TypeId> = args.iter().map(|t| self.resolve_type_in(t, scope, self_ty)).collect();
@@ -195,7 +202,7 @@ impl Checker {
                     1 => format!("expected 1 type argument for trait `{name}`, found {}", args.len()),
                     _ => format!("expected {n} type arguments for trait `{name}`, found {}", args.len()),
                 };
-                self.error(b.span, msg);
+                self.error(t.span, msg);
                 continue;
             }
             let args = self.arena.intern_list(&args);
@@ -208,7 +215,7 @@ impl Checker {
     fn resolve_trait_path(&mut self, path: &[ast::Ident], span: Span) -> Option<TraitId> {
         let name = || path.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(".");
         let def = match path {
-            // Only traits can be bounds, so a type of the module (`struct Hash`) does not hide a trait of the prelude.
+            // Only traits can follow `:`, so a type of the module (`struct Hash`) does not hide a trait of the prelude.
             [one] => match (self.lookup_global(&one.name), self.prelude) {
                 (Some(Def::Type(_)), Some(p)) if p != self.cur_mod => match self.scope_def(p, &one.name) {
                     Some(Def::Trait(t)) if self.traits[t as usize].is_pub => Some(Def::Trait(t)),
@@ -295,8 +302,8 @@ impl Checker {
         self.trait_and_supers(t).contains(&target)
     }
 
-    /// Whether type parameter `p` is bounded by trait `t` or by a trait with
-    /// it as a supertrait, whatever the trait's arguments.
+    /// Whether type parameter `p` requires trait `t` or a trait with it as a
+    /// supertrait, whatever the trait's arguments.
     pub(crate) fn param_has_trait(&self, p: ParamId, t: TraitId) -> bool {
         self.params[p as usize].traits.iter().any(|tr| self.trait_reaches(tr.trait_id, t))
     }
@@ -1159,8 +1166,10 @@ impl Checker {
         }
         match self.ty(ty) {
             Ty::Error => return Ok(dict_expr(HKind::Error, span)),
-            // A value of type `never` is never produced, so its methods never run.
-            Ty::Never => return Ok(dict_expr(HKind::Unit, span)),
+            // A dictionary can be loaded where no value of type `never` exists
+            // (on entry, or for a method without `self`), so only traits
+            // without dictionaries are implemented.
+            Ty::Never if !self.has_dict(&tr) => return Ok(dict_expr(HKind::Unit, span)),
             Ty::Var(_) => {
                 let mut m = Unmet::new(format!("cannot infer the type that must implement `{}`", self.show_trait(&tr)));
                 m.unknown = true;
@@ -1195,6 +1204,113 @@ impl Checker {
             Err(m) if m.unknown => None,
             Err(_) => Some(false),
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Requirements of written types
+
+    /// The traits that the type constructors in `t` require of their type
+    /// arguments: set elements and map keys need `Hash`, and `Bag<X>` needs
+    /// what `struct Bag<T: ...>` requires of `T`.
+    fn written_requirements(&mut self, t: TypeId) -> Vec<Requirement> {
+        let hash = self.builtin_trait(Builtin::Hash);
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+        let mut todo = vec![t];
+        while let Some(t) = todo.pop() {
+            if !self.budget.charge(1) {
+                break;
+            }
+            if !seen.insert(t) {
+                continue;
+            }
+            match self.ty(t) {
+                Ty::List(x) => todo.push(x),
+                Ty::Set(x) => {
+                    todo.push(x);
+                    out.extend(hash.map(|tr| Requirement { owner: t, arg: x, tr }));
+                }
+                Ty::Map(k, v) => {
+                    todo.extend([k, v]);
+                    out.extend(hash.map(|tr| Requirement { owner: t, arg: k, tr }));
+                }
+                Ty::Tuple(l) => todo.extend(self.elems(l)),
+                Ty::Fn(ps, r) => {
+                    todo.extend(self.elems(ps));
+                    todo.push(r);
+                }
+                Ty::Named(d, args) => {
+                    let (gens, args) = (self.types[d as usize].generics.clone(), self.elems(args));
+                    let map = |p: ParamId| gens.iter().position(|&g| g == p).map(|i| args[i]);
+                    for (&g, &arg) in gens.iter().zip(&args) {
+                        for tr in self.params[g as usize].traits.clone() {
+                            let tr = tr.subst_params(&mut self.arena, &map);
+                            out.push(Requirement { owner: t, arg, tr });
+                        }
+                    }
+                    todo.extend(args);
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// The first requirement of a type constructor in `ty` (zonked) that its
+    /// type argument does not meet (see [`Checker::written_requirements`]).
+    pub(crate) fn unmet_in_type(&mut self, ty: TypeId) -> Option<Box<Unmet>> {
+        for r in self.written_requirements(ty) {
+            if let Err(mut m) = self.resolve_evidence(r.arg, r.tr, 0) {
+                let owner = match self.ty(r.owner) {
+                    Ty::Set(_) => format!("the elements of {}", self.show(r.owner)),
+                    Ty::Map(..) => format!("the keys of {}", self.show(r.owner)),
+                    _ => self.show(r.owner),
+                };
+                m.required.get_or_insert(owner);
+                return Some(m);
+            }
+        }
+        None
+    }
+
+    /// Gives the type parameters of the type definitions from `first` onward
+    /// the requirements of their field and payload types: with
+    /// `struct Bag<T: Hash>`, `struct Outer<U> { b: Bag<U> }` gets `U: Hash`.
+    pub(crate) fn infer_member_requirements(&mut self, first: usize) {
+        let users = self.member_users(first);
+        self.until_stable(first, &users, &mut |c, d| {
+            let gens = c.types[d].generics.clone();
+            let mut changed = false;
+            for m in c.member_types(d) {
+                for r in c.written_requirements(m) {
+                    if let Ty::Param(p) = c.ty(r.arg)
+                        && gens.contains(&p)
+                        && !c.param_traits(p).contains(&r.tr)
+                    {
+                        c.add_traits(p, vec![r.tr]);
+                        changed = true;
+                    }
+                }
+            }
+            changed
+        });
+    }
+
+    /// Checks that the field or payload type `ty` of type definition `d`
+    /// meets the requirements of its type constructors, given the traits of
+    /// the type parameters of `d`.
+    pub(crate) fn check_member_type(&mut self, d: TypeDefId, ty: TypeId, span: Span) {
+        let mut evidence = Vec::new();
+        for &p in &self.types[d as usize].generics {
+            let pt = self.arena.param(p);
+            evidence.extend(self.params[p as usize].traits.iter().map(|&tr| (pt, tr, dict_expr(HKind::Unit, span))));
+        }
+        let saved = std::mem::replace(&mut self.fs.evidence, evidence);
+        if let Some(m) = self.unmet_in_type(ty) {
+            let msg = self.unmet_message(m, "");
+            self.error(span, msg);
+        }
+        self.fs.evidence = saved;
     }
 
     fn zonk_trait(&mut self, tr: TraitRef) -> TraitRef {

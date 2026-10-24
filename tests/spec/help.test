@@ -506,5 +506,5 @@ Methods:
     fn total(self) -> T where T: Num
 
 Implements:
-    Eq where T: Eq
+    Eq
     Encode where T: Encode

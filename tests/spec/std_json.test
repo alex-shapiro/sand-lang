@@ -481,7 +481,7 @@ print(json.to_json(Some(t)))
 --- error
 3: Task<int>? does not implement `Encode` because the payload of variant `Some` of `Task<int>?` has type `Task<int>`
 
-=== encode through a type parameter needs the bound
+=== encode through a type parameter needs Encode
 import json
 fn dump<T>(x: T) -> str {
     json.encode(x)
@@ -494,7 +494,7 @@ print(bounded(() => 1))
 3: type parameter `T` does not implement `Encode`; add `T: Encode`
 8: fn() -> int does not implement `Encode`
 
-=== the Encode bound holds for data and is implied by Num
+=== data implements Encode, and Num implies it
 import json
 struct P<T> { x: T, tags: Set<str> }
 fn dump<T: Encode>(x: T) -> str {
@@ -658,7 +658,7 @@ enum Shape<T> { Dot, Named(label: str, value: T) }
 struct Tree<T> { value: T, kids: [Tree<T>] = [] }
 fn all<reflect T: Encode>(text: str) -> Result<[T]> { json.decode(text) }
 fn page<reflect T: Encode>(text: str) -> Result<Page<T>> { json.decode(text) }
-fn pair<reflect A: Encode, reflect B: Encode>(text: str) -> Result<(A, [str: B], Set<A>)> { json.decode(text) }
+fn pair<reflect A: Encode + Hash, reflect B: Encode>(text: str) -> Result<(A, [str: B], Set<A>)> { json.decode(text) }
 fn shape<reflect T: Encode>(text: str) -> Result<Shape<T>> { json.decode(text) }
 fn tree<reflect T: Encode>(text: str) -> Result<Tree<T>> { json.decode(text) }
 fn later<reflect T: Encode>(text: str) -> fn() -> Result<T?> { () => json.decode(text) }
@@ -760,3 +760,33 @@ fn size<reflect T>(x: int) -> int { x }
 let f = size
 --- error
 2: cannot infer type for this function value; add a type annotation
+
+=== decode cannot build sets, maps or types whose type arguments lack required traits
+import json
+struct Bag<T: Hash> { items: Set<T> }
+struct Outer<U> { b: Bag<U> }
+struct Rows { seen: Set<[int]> }
+fn load<reflect T: Encode>(s: str) -> Result<Set<T>> { json.decode(s) }
+fn load_hashed<reflect T: Encode + Hash>(s: str) -> Result<Set<T>> { json.decode(s) }
+fn any<reflect T: Encode>(s: str) -> Result<T> { json.decode(s) }
+let a: Result<Set<[int]>> = json.decode("[[1], [1]]")
+let b: Result<[float: int]> = json.decode("{}")
+let c: Result<Outer<[int]>> = json.decode("{\"b\": {\"items\": [[1], [1]]}}")
+let d: Result<Rows> = json.decode("{\"seen\": []}")
+let e: Result<Set<[int]>> = any("[]")
+let f: Result<Set<int>> = load_hashed("[1]")
+--- error
+4: [int] does not implement `Hash` (required for the elements of Set<[int]>)
+5: type parameter `T` does not implement `Hash` (required for the elements of Set<T>); add `T: Hash`
+8: this call cannot build Set<[int]>: [int] does not implement `Hash` (required for the elements of Set<[int]>)
+9: [float: int]: float does not implement `Hash` (required for the keys of [float: int])
+10: Outer<[int]>: [int] does not implement `Hash` (required for Outer<[int]>)
+12: Set<[int]>: [int] does not implement `Hash`
+
+=== decode builds a set of hashable elements once
+import json
+fn load_hashed<reflect T: Encode + Hash>(s: str) -> Result<Set<T>> { json.decode(s) }
+let f: Result<Set<int>> = load_hashed("[1, 1, 2]")
+print(f)
+--- stdout
+Ok(Set([1, 2]))

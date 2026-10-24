@@ -131,7 +131,7 @@ impl Num for str {
 3: cannot infer the type that must implement `Num`; add a type annotation
 4: `Num` is a built-in trait and cannot be implemented
 
-=== arithmetic on unbounded type parameter is an error
+=== arithmetic on a type parameter without Num is an error
 fn add<T>(a: T, b: T) -> T { a + b }
 --- error
 1: Num

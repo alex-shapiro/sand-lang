@@ -573,8 +573,14 @@ example, `str does not implement `Describe` (required for [str] to implement
 `Describe`)`. Functions, methods, `where` clauses, impls, and the type
 parameters of structs and enums can require traits. The methods of a struct
 or enum, including those of its `extend` blocks, may use the traits that its
-type parameters require. Struct literals, variants and each call of such a
-method check them; type annotations do not.
+type parameters require. A struct or enum also requires what the types of its
+fields and variant payloads require of its type parameters: with
+`struct Bag<T: Hash>`, `struct Outer<U> { b: Bag<U> }` requires `U: Hash`,
+and `help(Outer)` shows `struct Outer<U: Hash>`. Set elements and map keys
+require `Hash`, so the field type `Set<[int]>` is an error. Struct literals,
+variants, each call of such a method, and the type arguments of `reflect`
+type parameters (from which `json.decode` builds values) check the required
+traits. Other type annotations do not.
 
 A trait without methods, in it or in its supertraits (`trait Marker {}`, and
 all built-in traits except `Num`), adds no hidden argument to the functions
@@ -637,7 +643,9 @@ enum.
 `break`, `continue`, `fail(...)`) may appear where any type is expected.
 Inside other types it is ordinary: `[never]` and `fn() -> never` are distinct
 types, so `let xs: [never] = [1]` and passing `() => 5` where a
-`fn() -> never` is expected are type errors.
+`fn() -> never` is expected are type errors. `never` implements only the
+traits without methods (§4.9), such as `Eq` and `Hash`: generic code can call
+a method of a trait (`T.zero()`) when no value of type `T` exists.
 
 ### 5.2 Composite types
 

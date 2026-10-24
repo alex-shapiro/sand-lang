@@ -1516,3 +1516,73 @@ type Keys<T: Hash> = [T]
 fn f(x: Keys<float>) -> int { x.len() }
 --- error
 1: the type parameters of a type alias cannot require traits; require them on the functions that use the alias
+
+=== never implements only the traits without methods
+trait D { fn d(self) -> int }
+trait Make { fn make() -> Self }
+impl D for int { fn d(self) -> int { self } }
+fn total<T: D>(xs: [T]) -> int {
+    var s = 0
+    for x in xs { s += x.d() }
+    s
+}
+fn make<T: Make>() -> T { T.make() }
+fn largest<T: Ord + Hash + Encode>(xs: [T]) -> T? { xs.max() }
+let e: [never] = []
+print(largest(e))
+print(total(e))
+print(e.sum())
+let x: never = make()
+--- error
+13: never does not implement `D`
+14: never does not implement `Num`
+15: never does not implement `Make`
+
+=== structs and enums get the requirements of their field and payload types
+struct Bag<T: Hash> { items: Set<T> }
+struct Outer<U> { b: Bag<U> }
+extend<U> Outer<U> {
+    fn has(self, x: U) -> bool { self.b.items.contains(x) }
+}
+enum A<T> { One(B<T>?), Zero }
+enum B<T> { Two(A<T>, [T: int]) }
+let o = Outer { b: Bag { items: set(["x"]) } }
+print(o.has("x"))
+help(Outer)
+help(A)
+--- stdout
+true
+struct Outer<U: Hash>
+
+Fields:
+    b: Bag<U>
+
+Methods:
+    fn has(self, x: U) -> bool
+
+Implements:
+    Eq
+    Encode where U: Encode
+enum A<T: Hash>
+
+Variants:
+    One(B<T>?)
+    Zero
+
+Implements:
+    Eq
+    Encode where T: Encode
+
+=== field and payload types meet the requirements of their type constructors
+trait Describe { fn describe(self) -> str }
+impl Describe for int { fn describe(self) -> str { "i" } }
+struct Wrap<T: Describe> { x: T }
+struct Rows { seen: Set<[int]> }
+struct Pairs<T> { s: Set<(T, int)> }
+struct Uses { w: Wrap<int>, v: Wrap<str> }
+enum E { Keyed([float: int]) }
+--- error
+4: [int] does not implement `Hash` (required for the elements of Set<[int]>)
+5: (T, int) does not implement `Hash` because element 0 of `(T, int)` has type `T` (required for the elements of Set<(T, int)>); add `T: Hash`
+6: str does not implement `Describe` (required for Wrap<str>)
+7: float does not implement `Hash` (required for the keys of [float: int])

@@ -722,10 +722,14 @@ impl Checker {
 
     /// What the derived impl of `b` for constructor `c` (with type
     /// parameters `names`) requires of them (`T: Eq`), or `None` if there is
-    /// no such impl.
+    /// no such impl. Omits what the declaration of `c` already requires.
     fn derived_wheres(&self, c: Ctor, names: &[String], b: Builtin) -> Option<Vec<String>> {
         let needs = self.derived_needs(c, names.len(), b)?;
-        Some(needs.iter().map(|&i| format!("{}: {}", names[i as usize], b.name())).collect())
+        let declared = |i: u32| match (c, self.builtins[b as usize]) {
+            (Ctor::Def(d), Some(t)) => self.param_has_trait(self.types[d as usize].generics[i as usize], t),
+            _ => false,
+        };
+        Some(needs.into_iter().filter(|&i| !declared(i)).map(|i| format!("{}: {}", names[i as usize], b.name())).collect())
     }
 
     /// The names of the type parameters of constructor `c` (`K`, `V` for maps).
@@ -996,8 +1000,8 @@ impl Checker {
         if traits.is_empty() { name } else { format!("{name}: {traits}") }
     }
 
-    /// The traits that bound type parameter `p` (`Ord + Describe`), without
-    /// those that a trait in `omit` implies.
+    /// The traits that type parameter `p` requires (`Ord + Describe`),
+    /// without those that a trait in `omit` implies.
     fn traits_text(&self, p: ParamId, omit: &[TraitId]) -> String {
         let visible = |tr: &&TraitRef| {
             let t = &self.traits[tr.trait_id as usize];
@@ -1129,12 +1133,12 @@ fn suggestion(name: &str, names: Vec<String>) -> String {
     best.map(|(_, n)| format!("; did you mean `{n}`?")).unwrap_or_default()
 }
 
-/// A titled list of entries, each with the first sentence of its doc.
 /// `shown`, followed by ` where ` and `wheres` if there are any.
 fn with_wheres(shown: String, wheres: Vec<String>) -> String {
     if wheres.is_empty() { shown } else { format!("{shown} where {}", wheres.join(", ")) }
 }
 
+/// A titled list of entries, each with the first sentence of its doc.
 fn section(out: &mut String, title: &str, entries: &[(String, Option<Arc<str>>)]) {
     if entries.is_empty() {
         return;

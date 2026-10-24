@@ -1266,9 +1266,13 @@ impl Checker {
             .filter_map(|(i, x)| if let ItemKind::Trait(t) = &x.kind { Some((i as u32, t)) } else { None })
             .collect();
         self.resolve_supertraits(&trait_ids, &trait_decls);
-        // 3. Fields and variants, and the built-in traits derived from them.
+        // 3. Fields and variants, and the requirements and built-in traits
+        // derived from them. Their types are checked once impls are declared.
+        let mut member_types: Vec<(TypeDefId, TypeId, Span)> = Vec::new();
         for (id, members) in bound_members {
             self.resolve_bound_members(id, members);
+            let span = self.types[id as usize].span;
+            member_types.extend(self.member_types(id as usize).into_iter().map(|t| (id, t, span)));
         }
         let mut k = 0;
         for (idx, item) in items.iter().enumerate() {
@@ -1276,16 +1280,17 @@ impl Checker {
                 ItemKind::Struct(s) => {
                     let id = struct_ids[k];
                     k += 1;
-                    self.fill_struct(id, s, idx as u32);
+                    self.fill_struct(id, s, idx as u32, &mut member_types);
                 }
                 ItemKind::Enum(e) => {
                     let id = struct_ids[k];
                     k += 1;
-                    self.fill_enum(id, e);
+                    self.fill_enum(id, e, &mut member_types);
                 }
                 _ => {}
             }
         }
+        self.infer_member_requirements(first_type);
         self.derive_impls(first_type);
         if pm.kind == ModKind::Prelude {
             for name in ["Option", "Result"] {
@@ -1332,6 +1337,9 @@ impl Checker {
         }
         for id in impl_ids {
             self.check_impl_supertraits(id);
+        }
+        for (d, t, span) in member_types {
+            self.check_member_type(d, t, span);
         }
         if self.allows_native() {
             self.declare_undeclared_natives(first_fn);
@@ -1531,7 +1539,8 @@ impl Checker {
         ps.iter().map(|&p| (self.params[p as usize].name, p)).collect()
     }
 
-    fn fill_struct(&mut self, id: TypeDefId, s: &ast::StructDecl, item: u32) {
+    /// Resolves the fields of struct `id` and appends their types to `written`.
+    fn fill_struct(&mut self, id: TypeDefId, s: &ast::StructDecl, item: u32, written: &mut Vec<(TypeDefId, TypeId, Span)>) {
         let gens = self.types[id as usize].generics.clone();
         let scope = self.generic_scope(&gens);
         let self_ty = self.def_self_ty(id, &gens);
@@ -1542,6 +1551,7 @@ impl Checker {
                 continue;
             }
             let ty = self.resolve_type_in(&f.ty, &scope, Some(self_ty));
+            written.push((id, ty, f.ty.span));
             if s.is_pub && f.is_pub && self.allows_native() {
                 self.check_public_types("field", &f.name, [ty]);
             }
@@ -1588,7 +1598,8 @@ impl Checker {
         self.types[id as usize].kind = TypeDefKind::Struct { fields };
     }
 
-    fn fill_enum(&mut self, id: TypeDefId, e: &ast::EnumDecl) {
+    /// Resolves the variants of enum `id` and appends their payload types to `written`.
+    fn fill_enum(&mut self, id: TypeDefId, e: &ast::EnumDecl, written: &mut Vec<(TypeDefId, TypeId, Span)>) {
         let gens = self.types[id as usize].generics.clone();
         let scope = self.generic_scope(&gens);
         let self_ty = self.def_self_ty(id, &gens);
@@ -1599,6 +1610,7 @@ impl Checker {
                 continue;
             }
             let fields: Vec<TypeId> = v.fields.iter().map(|f| self.resolve_type_in(&f.ty, &scope, Some(self_ty))).collect();
+            written.extend(fields.iter().zip(&v.fields).map(|(&t, f)| (id, t, f.ty.span)));
             let names: Vec<Option<Symbol>> = v.fields.iter().map(|f| f.name.as_ref().map(|n| self.syms.intern(&n.name))).collect();
             let field_names = if !names.is_empty() && names.iter().all(|n| n.is_some()) { names.into_iter().collect() } else { None };
             self.variants.push((id, i as u32));
@@ -2982,6 +2994,9 @@ impl Checker {
             } else if let Some((d, f)) = self.private_field_in(z) {
                 let (ty, field) = (self.ctor_name(Ctor::Def(d), 0), self.name(f));
                 self.error(sp, format!("this {what} cannot build `{ty}` here: its field `{field}` is private"));
+            } else if let Some(m) = self.unmet_in_type(z) {
+                let msg = format!("this {what} cannot build {}: {}", self.show(z), self.unmet_message(m, ""));
+                self.error(sp, msg);
             }
         }
         // Cells are decided by the final walk.

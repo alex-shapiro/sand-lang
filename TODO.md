@@ -169,35 +169,31 @@ Follow-up work, roughly in priority order.
       specified in §3.1.
 - [ ] Trait objects (`dyn Trait`), associated types and constants, and
       blanket impls (`impl<T> X for T`).
-- [ ] **Check that written types are well formed.** The checker does not
-      check type annotations and `reflect` type arguments against the traits
-      that their constructors require: set elements and map keys must
-      implement `Hash`, and `struct Bag<T: Hash>` requires `T: Hash`.
-      `let s: Set<[int]> = json.decode("[[1], [1]]")?` gives a set that holds
-      `[1]` twice (also on `main`), and `fn size(b: Bag<[int]>)` is accepted.
-      Calls, struct literals and variants check the traits, so no method runs
-      without its dictionary. Design (decided): infer requirements, as Swift
-      does.
+- [ ] **Check that written types are well formed.** The checker checks
+      field and payload types and the type arguments of `reflect` type
+      parameters against the traits that their constructors require (set
+      elements and map keys need `Hash`, and `struct Bag<T: Hash>` needs
+      `T: Hash`), and structs and enums get the requirements of their field
+      and payload types. Other type annotations are not checked:
+      `fn size(b: Bag<[int]>)` and `let s: Set<[int]> = ...` are accepted.
+      Calls, literals, field types and `reflect` type arguments check the
+      requirements, so no value of such a type exists. The rest of the design
+      (decided: infer requirements, as Swift does):
       - A function or a method of a type gets the requirements of the types
         in its parameter and return types for each type argument that is a
         type parameter: `fn size<T>(b: Bag<T>)` gets `T: Hash`.
       - An impl gets the requirements of the types in its trait arguments and
         target, as if they were written on the impl:
-        `impl<T> From<Shelf<T>> for str` gets `T: Describe`.
-      - A struct or enum gets the requirements of the types of its fields and
-        variant payloads: `struct Outer<U> { b: Bag<U> }` gets `U: Hash`, and
-        so does every function that takes an `Outer<U>`. The checker computes
-        these requirements once per declaration and repeats the computation
-        for mutually recursive types until nothing changes.
+        `impl<T> From<Shelf<T>> for str` gets `T: Describe`. Now an impl gets
+        none, and `extend<T> Bag<T>` gets those of `Bag`.
       - The types inside a requirement's trait arguments do not cause
         inference, so that inference ends (`struct S<T: Tr<S<[T]>>>`). Native
         functions get no inferred requirements.
-      - The checker checks every other written type: concrete types
-        (`Set<[int]>`, `Bag<float>`) and type arguments that are not type
-        parameters (`Bag<[T]>`).
-      - `help` and hover show inferred requirements, and an unmet inferred
-        requirement names its source ("required because `size` takes a
-        `Bag<T>`").
+      - The checker checks every other written type, including `native fn`
+        signatures: concrete types (`Set<[int]>`, `Bag<float>`) and type
+        arguments that are not type parameters (`Bag<[T]>`).
+      - An unmet inferred requirement names its source ("required because
+        `size` takes a `Bag<T>`").
 - [ ] Let local functions require traits with methods (such as `Num`) and
       have `reflect` type parameters, by passing hidden dictionary and
       type-description arguments to closures.
