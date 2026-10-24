@@ -176,9 +176,23 @@ Follow-up work, roughly in priority order.
       `let s: Set<[int]> = json.decode("[[1], [1]]")?` gives a set that holds
       `[1]` twice (also on `main`), and `fn size(b: Bag<[int]>)` is accepted.
       Calls, struct literals and variants check the traits, so no method runs
-      without its dictionary. Decide whether generic signatures
-      (`fn f<T>(b: Bag<T>)`) must declare `T: Hash` or imply it, then check
-      every written type.
+      without its dictionary. Design (decided): infer requirements, as Swift
+      does.
+      - A function or a method of a type gets the requirements of the types
+        in its parameter and return types for each type argument that is a
+        type parameter: `fn size<T>(b: Bag<T>)` gets `T: Hash`.
+      - An impl gets the requirements of the types in its trait arguments and
+        target, as if they were written on the impl:
+        `impl<T> From<Shelf<T>> for str` gets `T: Describe`.
+      - Inferred requirements do not cause further inference. Native
+        functions get no inferred requirements.
+      - The checker checks every other written type: concrete types
+        (`Set<[int]>`, `Bag<float>`), type arguments that are not type
+        parameters (`Bag<[T]>`), and struct fields (`struct Outer<U> { b:
+        Bag<U> }` must declare `U: Hash`).
+      - `help` and hover show inferred requirements, and an unmet inferred
+        requirement names its source ("required because `size` takes a
+        `Bag<T>`").
 - [ ] Let local functions require traits with methods (such as `Num`) and
       have `reflect` type parameters, by passing hidden dictionary and
       type-description arguments to closures.
