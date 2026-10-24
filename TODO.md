@@ -184,12 +184,17 @@ Follow-up work, roughly in priority order.
       - An impl gets the requirements of the types in its trait arguments and
         target, as if they were written on the impl:
         `impl<T> From<Shelf<T>> for str` gets `T: Describe`.
-      - Inferred requirements do not cause further inference. Native
+      - A struct or enum gets the requirements of the types of its fields and
+        variant payloads: `struct Outer<U> { b: Bag<U> }` gets `U: Hash`, and
+        so does every function that takes an `Outer<U>`. The checker computes
+        these requirements once per declaration and repeats the computation
+        for mutually recursive types until nothing changes.
+      - The types inside a requirement's trait arguments do not cause
+        inference, so that inference ends (`struct S<T: Tr<S<[T]>>>`). Native
         functions get no inferred requirements.
       - The checker checks every other written type: concrete types
-        (`Set<[int]>`, `Bag<float>`), type arguments that are not type
-        parameters (`Bag<[T]>`), and struct fields (`struct Outer<U> { b:
-        Bag<U> }` must declare `U: Hash`).
+        (`Set<[int]>`, `Bag<float>`) and type arguments that are not type
+        parameters (`Bag<[T]>`).
       - `help` and hover show inferred requirements, and an unmet inferred
         requirement names its source ("required because `size` takes a
         `Bag<T>`").
