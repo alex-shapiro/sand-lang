@@ -103,7 +103,7 @@ Follow-up work, roughly in priority order.
       final top-level statement.
 - [ ] Report an unsatisfied bound once per expression: with `x: float?`,
       `set([need(x), x])` (where `need<T: Hash>`) reports
-      `float? does not implement Hash` three times, at overlapping spans.
+      `float? does not implement Hash` twice, at overlapping spans.
 - [ ] Show the type of impls for some instances of a constructor in the
       `Implements` section of `help` (`impl Describe for [int]` is listed as
       `Describe` in `help(List)`).
@@ -168,9 +168,12 @@ Follow-up work, roughly in priority order.
 - [ ] Enforce `Hash` on `Set<T>` element types and `[K: V]` key types at every
       type annotation, not only at method calls, so that `json.decode` cannot
       construct a `Set` or map with unhashable keys.
-- [ ] Check the bounds of struct and enum type parameters at struct literals,
-      variant constructors, and type annotations (currently `struct Bag<T: Hash>`
-      accepts `Bag<[int]>`; only the methods of `Bag` check `T: Hash`).
+- [ ] Check the bounds of struct and enum type parameters in type
+      annotations. With `struct Bag<T: Hash>`, `fn size(b: Bag<[int]>)` and
+      `json.decode` into `Bag<[int]>` are accepted; only struct literals,
+      variants and the methods of `Bag` check `T: Hash`. Decide whether
+      generic signatures (`fn f<T>(b: Bag<T>)`) must repeat the bounds or
+      imply them.
 - [ ] Support bounds on traits with methods (such as `Num`) and `reflect` type
       parameters on local functions by passing hidden dictionary and
       type-description arguments to closures.

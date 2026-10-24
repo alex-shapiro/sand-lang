@@ -611,12 +611,15 @@ impl Checker {
             let own = self.declare_params(&f.generics, &scope, self_ty);
             for (g, &p) in f.generics.iter().zip(&own) {
                 scope.push((self.params[p as usize].name, p));
-                if self.params[p as usize].traits.iter().any(|tr| self.has_dict(tr)) {
+                let with_dicts: Vec<TraitRef> = self.params[p as usize].traits.iter().copied().filter(|tr| self.has_dict(tr)).collect();
+                if !with_dicts.is_empty() {
                     self.error(
                         g.name.span,
                         "local functions cannot have bounds on traits with methods; declare the function at the top level",
                     );
-                    self.params[p as usize].traits.clear();
+                    // Error evidence lets the body use the bounds without further errors.
+                    let pt = self.param_ty(p);
+                    self.fs.evidence.extend(with_dicts.into_iter().map(|tr| (pt, tr, mk(HKind::Error, TypeId::UNIT, g.name.span))));
                 }
                 if g.reflect {
                     self.error(g.name.span, "local functions cannot have `reflect` type parameters; declare the function at the top level");
@@ -1122,15 +1125,19 @@ impl Checker {
         mk(HKind::FnValue(f), t, span)
     }
 
-    fn enum_args(&mut self, d: TypeDefId, hint: Option<TypeId>) -> Vec<TypeId> {
-        if let Some(h) = hint
-            && let Ty::Named(hd, args) = self.rty(h)
-            && hd == d
-        {
-            return self.elems(args);
+    /// The type arguments of a value that a struct literal or variant of `d`
+    /// makes: those of `hint` if it is an instance of `d`, else fresh
+    /// variables. Requires the bounds of the type parameters of `d`.
+    fn construct_args(&mut self, d: TypeDefId, hint: Option<TypeId>, span: Span) -> Vec<TypeId> {
+        let args = match hint.map(|h| self.rty(h)) {
+            Some(Ty::Named(hd, args)) if hd == d => self.elems(args),
+            _ => (0..self.types[d as usize].generics.len()).map(|_| self.fresh()).collect(),
+        };
+        if self.types[d as usize].generics.iter().any(|&p| !self.params[p as usize].traits.is_empty()) {
+            let gens = self.types[d as usize].generics.clone();
+            self.require_bounds(&gens, &args, &[], span);
         }
-        let n = self.types[d as usize].generics.len();
-        (0..n).map(|_| self.fresh()).collect()
+        args
     }
 
     pub(crate) fn variant_field_types(&mut self, d: TypeDefId, i: u32, args: &[TypeId]) -> Vec<TypeId> {
@@ -1140,7 +1147,7 @@ impl Checker {
     }
 
     fn variant_value(&mut self, d: TypeDefId, i: u32, hint: Option<TypeId>, span: Span) -> HExpr {
-        let args = self.enum_args(d, hint);
+        let args = self.construct_args(d, hint, span);
         let rt_id = self.types[d as usize].variants()[i as usize].rt_id;
         let fields = self.variant_field_types(d, i, &args);
         let enum_ty = self.named_ty(d, &args);
@@ -1625,7 +1632,7 @@ impl Checker {
     fn call_variant(&mut self, d: TypeDefId, i: u32, args: &CallArgs, span: Span) -> HExpr {
         // Hints are not pushed into payloads so that mismatches are reported
         // on the whole value (`expected str?, found int?`).
-        let targs = self.enum_args(d, None);
+        let targs = self.construct_args(d, None, span);
         let rt_id = self.types[d as usize].variants()[i as usize].rt_id;
         let enum_ty = self.named_ty(d, &targs);
         let ptys = self.variant_field_types(d, i, &targs);
@@ -1963,7 +1970,7 @@ impl Checker {
             self.infer_field_values(fields);
             return err(span);
         }
-        let args = self.enum_args(def, None);
+        let args = self.construct_args(def, None, span);
         let sty = self.named_ty(def, &args);
         let n = self.types[def as usize].fields().len();
         let mut given: Vec<Option<LocalId>> = vec![None; n];

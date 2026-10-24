@@ -207,7 +207,14 @@ impl Checker {
     fn resolve_trait_path(&mut self, path: &[ast::Ident], span: Span) -> Option<TraitId> {
         let name = || path.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(".");
         let def = match path {
-            [one] => self.lookup_global(&one.name),
+            // Only traits can be bounds, so a type of the module (`struct Hash`) does not hide a trait of the prelude.
+            [one] => match (self.lookup_global(&one.name), self.prelude) {
+                (Some(Def::Type(_)), Some(p)) if p != self.cur_mod => match self.scope_def(p, &one.name) {
+                    Some(Def::Trait(t)) if self.traits[t as usize].is_pub => Some(Def::Trait(t)),
+                    _ => self.lookup_global(&one.name),
+                },
+                (def, _) => def,
+            },
             [m, item] => match self.lookup_global(&m.name) {
                 Some(Def::Module(m)) => {
                     // Reports private or missing members itself.
@@ -490,8 +497,9 @@ impl Checker {
             return None;
         };
         let tid = self.resolve_trait_path(path, span)?;
+        // Only the prelude implements `Num`, and nothing implements the derived traits.
         if let Some(b) = self.traits[tid as usize].builtin
-            && Some(self.cur_mod) != self.prelude
+            && (b.derived_index().is_some() || Some(self.cur_mod) != self.prelude)
         {
             let msg = match b.derived_index() {
                 Some(_) => format!("`{}` is a built-in trait; the compiler derives its impls, so it cannot be implemented", b.name()),
@@ -755,6 +763,10 @@ impl Checker {
                         let tr = self.fresh_trait_ref(t);
                         found.push((tr, slot));
                     }
+                }
+                // Like the names of the prelude, its trait methods yield to those of other modules.
+                if found.iter().any(|(tr, _)| Some(self.traits[tr.trait_id as usize].module) != self.prelude) {
+                    found.retain(|(tr, _)| Some(self.traits[tr.trait_id as usize].module) != self.prelude);
                 }
                 // The method (and its impls) may be all that an import is used for.
                 if let [(tr, _)] = found.as_slice() {
@@ -1200,12 +1212,10 @@ impl Checker {
         let span = Span::default();
         let not_impl = |c: &Checker| Unmet::new(format!("{} does not implement `{}`", c.show(ty), c.show_trait(&tr)));
         let Some(key) = impl_key(&self.arena, ty) else { return Err(not_impl(self)) };
-        let ids = self.impls_by.get(&(tr.trait_id, key.0, key.1)).map(|v| v.to_vec()).unwrap_or_default();
-        if ids.is_empty()
-            && let Some(k) = self.traits[tr.trait_id as usize].builtin.and_then(Builtin::derived_index)
-        {
+        if let Some(k) = self.traits[tr.trait_id as usize].builtin.and_then(Builtin::derived_index) {
             return self.resolve_derived(ty, tr, k, depth).map(|()| dict_expr(HKind::Unit, span));
         }
+        let ids = self.impls_by.get(&(tr.trait_id, key.0, key.1)).map(|v| v.to_vec()).unwrap_or_default();
         let targs = self.elems(tr.args);
         let mut matching = Vec::new();
         for id in ids {
@@ -1246,8 +1256,6 @@ impl Checker {
                         args.push(dict_expr(HKind::Error, span));
                     }
                 }
-                // A type left unknown here is checked when the function is finished.
-                Err(m) if m.unknown && !self.has_dict(&s) => self.fs.obligations.push((e.unwrap_or(ty), s, span)),
                 Err(m) => return Err(context(self, m)),
             }
         }

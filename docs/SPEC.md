@@ -519,8 +519,10 @@ fn show_all<T>(xs: [T]) -> str where T: Describe { xs.describe() }
 - **Supertraits** follow a `:`: `trait Shape: Describe + Eq`. A bound
   `T: Shape` implies `T: Describe` and `T: Eq`. A trait may not be its own
   supertrait, directly or indirectly.
-- Traits share the namespace of types. Programs cannot redefine or implement
-  the built-in traits (§5.6).
+- Traits share the namespace of types. In a bound, a type of the module does
+  not hide a trait of the prelude with the same name (`struct Hash` and
+  `T: Hash`). Programs cannot redefine or implement the built-in traits
+  (§5.6).
 
 **Impls.** `impl<P...> Trait<Args> for Type where ... { methods }`
 implements a trait for a type.
@@ -567,9 +569,8 @@ instantiation checks the bounds; an unsatisfied bound is reported as, for
 example, `str does not implement `Describe` (required for [str] to implement
 `Describe`)`. Bounds may appear on functions, methods, `where` clauses,
 impls, and the type parameters of structs and enums. The methods of a struct
-or enum may rely on the bounds of its type parameters, and each call of such
-a method checks them. Struct literals and variant constructors do not check
-them.
+or enum may rely on the bounds of its type parameters. Struct literals,
+variants and each call of such a method check them; type annotations do not.
 
 A trait without methods, in it or in its supertraits (`trait Marker {}`, and
 all built-in traits except `Num`), adds no hidden argument to the functions
@@ -584,8 +585,10 @@ that it bounds.
   module and have an impl for the type's constructor. The trait does not
   need to be imported.
 
-If several traits provide `m`, the call is ambiguous and an error. Every
-trait method can also be called in qualified form:
+If several traits provide `m`, the call is ambiguous and an error. On a
+type that is not a type parameter, the traits of other modules hide those of
+the prelude: with `impl Monoid for int`, `int.zero()` calls `Monoid.zero`, not
+`Num.zero`. Every trait method can also be called in qualified form:
 
 ```sand
 Describe.describe(p)          // Self is inferred from the arguments

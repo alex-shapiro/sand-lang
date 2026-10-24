@@ -517,6 +517,8 @@ pub enum Builtin {
 
 impl Builtin {
     pub const ALL: [Builtin; 5] = [Builtin::Eq, Builtin::Ord, Builtin::Hash, Builtin::Encode, Builtin::Num];
+    /// The traits whose impls the checker derives from the components of types.
+    pub const DERIVED: [Builtin; 4] = [Builtin::Eq, Builtin::Ord, Builtin::Hash, Builtin::Encode];
 
     pub fn parse(s: &str) -> Option<Builtin> {
         Builtin::ALL.into_iter().find(|b| b.name() == s)
@@ -532,10 +534,9 @@ impl Builtin {
         }
     }
 
-    /// The index of a trait whose impls the checker derives from the
-    /// components of types, or `None` for `Num`.
+    /// The position of `self` in [`Builtin::DERIVED`], or `None` for `Num`.
     pub fn derived_index(self) -> Option<usize> {
-        (self != Builtin::Num).then_some(self as usize)
+        Builtin::DERIVED.iter().position(|&b| b == self)
     }
 }
 

@@ -3333,3 +3333,17 @@ fn retry_stress_fails_a_check_in_the_native_body() {
     assert_eq!(out, "3\n");
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
+
+#[test]
+fn derived_impls_of_deep_field_types_are_checked_on_a_small_stack() {
+    let (ok, bad) = (format!("int{}", "?".repeat(9000)), format!("float{}", "?".repeat(9000)));
+    let src = format!(
+        "struct S {{ f: {ok} }}\nstruct F {{ f: {bad} }}\nstruct B<T: Hash> {{ v: T }}\nprint(set([S {{ f: None }}]).len())\n\
+         let b = B {{ v: S {{ f: None }} }}\nlet c = B {{ v: F {{ f: None }} }}\n"
+    );
+    let run = move || run_src(Config::new(), &src);
+    let (r, _, _) = std::thread::Builder::new().stack_size(512 << 10).spawn(run).unwrap().join().unwrap();
+    let Err(Error::Compile(ds)) = r else { panic!("{r:?}") };
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    assert!(ds[0].message.starts_with("F does not implement `Hash`"), "{}", ds[0].message);
+}

@@ -1342,7 +1342,7 @@ print(t.insert(3).insert(1).insert(2).items())
 ["#1", "#2"]
 [1, 2, 3]
 
-=== methods check the bounds of their type's parameters
+=== struct literals, variants and methods check the bounds of their type's parameters
 trait Describe {
     fn describe(self) -> str
 }
@@ -1351,10 +1351,21 @@ struct Labeled<T: Describe> {
 
     fn labels(self) -> [str] { self.items.map(x => x.describe()) }
 }
+enum Tree<T: Describe> {
+    Leaf
+    Node(Tree<T>, T)
+}
 let l = Labeled { items: ["a"] }
 print(l.labels())
+let t: Tree<str> = Tree.Leaf
+let n = Tree.Node(Tree.Leaf, 1.5)
+fn wrap<T>(x: T) -> Labeled<T> { Labeled { items: [x] } }
 --- error
-10: str does not implement `Describe`
+13: str does not implement `Describe`
+14: str does not implement `Describe`
+15: str does not implement `Describe`
+16: float does not implement `Describe`
+17: type parameter `T` does not implement `Describe`; add a bound `T: Describe`
 
 === local functions check their bounds where they are used
 fn outer() {
@@ -1377,6 +1388,90 @@ trait Ord {}
 2: `Hash` is a built-in trait; the compiler derives its impls, so it cannot be implemented
 3: `Num` is a built-in trait and cannot be implemented
 7: `Ord` is a built-in trait and cannot be redefined
+
+=== trait methods of other modules hide those of the prelude on concrete types
+trait Monoid {
+    fn zero() -> Self
+    fn combine(self, other: Self) -> Self
+}
+impl Monoid for int {
+    fn zero() -> int { 100 }
+    fn combine(self, other: int) -> int { self + other }
+}
+print(int.zero())
+print(float.zero())
+print(Num.zero() + 1)
+fn total<T: Num>(xs: [T]) -> T {
+    var s = T.zero()
+    for x in xs { s = s + x }
+    s
+}
+print(total([1, 2]))
+--- stdout
+100
+0.0
+1
+3
+
+=== a type named like a built-in trait does not hide the trait in bounds
+struct Hash { hex: str }
+trait Keyed: Hash {
+    fn key(self) -> str
+}
+impl Keyed for Hash {
+    fn key(self) -> str { self.hex }
+}
+fn count<K: Hash>(xs: [K]) -> int { set(xs).len() }
+print(count([Hash { hex: "a" }, Hash { hex: "a" }]))
+print(Hash { hex: "b" }.key())
+--- stdout
+1
+b
+
+=== an unmet bound of an impl found late is reported at the use
+trait Marker {}
+impl<T: Hash> Marker for [T] {}
+trait Tagged {
+    fn tag(self) -> str
+}
+impl<T: Marker> Tagged for T? {
+    fn tag(self) -> str { "t" }
+}
+trait Two {
+    fn two(self) -> str
+}
+impl Two for [float] {
+    fn two(self) -> str { "2" }
+}
+fn tag_it<T: Tagged>(x: T) -> str { x.tag() }
+fn two_it<T: Two>(x: T) -> str { x.two() }
+fn main() {
+    let xs = []
+    var ys = None
+    print(tag_it(Some(xs)))
+    if false { print(two_it(ys.unwrap())) }
+    ys = Some(xs)
+}
+--- error
+20: float does not implement `Hash` (required for [float] to implement `Marker`)
+
+=== a local function with a bound on a trait with methods is reported once
+trait Describe {
+    fn describe(self) -> str
+}
+impl Describe for int {
+    fn describe(self) -> str { "i" }
+}
+fn outer() {
+    fn twice<T: Num>(x: T) -> T { x + x }
+    fn show<T: Describe>(x: T) -> str { x.describe() }
+    print(show(1))
+    print(show("s"))
+}
+--- error
+8: local functions cannot have bounds on traits with methods
+9: local functions cannot have bounds on traits with methods
+11: str does not implement `Describe`
 
 === bounds on the type parameters of a type may name types declared later
 trait Into<T> {

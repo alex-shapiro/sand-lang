@@ -9,7 +9,7 @@
 //! struct with `var` fields: `Hash`).
 
 use super::Checker;
-use super::traits::{Unmet, impl_key};
+use super::traits::Unmet;
 use crate::types::*;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -19,15 +19,12 @@ pub(crate) enum Derived {
     Needs(Vec<u32>),
 }
 
-/// The derived built-in traits, by [`Builtin::derived_index`].
-pub(crate) const DERIVED: [Builtin; 4] = [Builtin::Eq, Builtin::Ord, Builtin::Hash, Builtin::Encode];
-
 impl Checker {
     /// The components of `ty` that must implement derived trait `k` for `ty`
     /// to implement it, or `None` if `ty` cannot implement it.
     pub(crate) fn derived_parts(&self, ty: Ty, k: usize) -> Option<Vec<TypeId>> {
         use Builtin::*;
-        let b = DERIVED[k];
+        let b = Builtin::DERIVED[k];
         match ty {
             Ty::Int | Ty::Bool | Ty::Str | Ty::Bytes | Ty::Duration | Ty::Unit | Ty::Never | Ty::Error => Some(Vec::new()),
             Ty::Float => (b != Hash).then(Vec::new),
@@ -55,16 +52,13 @@ impl Checker {
         };
         let mut unknown = None;
         let mut todo = vec![ty];
-        let mut first = true;
         while let Some(t) = todo.pop() {
             if !self.budget.charge(1) {
                 return Ok(());
             }
             let t = self.resolve(t);
             let node = self.ty(t);
-            let explicit = !first && impl_key(&self.arena, t).is_some_and(|(c, n)| self.impls_by.contains_key(&(tr.trait_id, c, n)));
-            first = false;
-            if explicit || matches!(node, Ty::Param(_) | Ty::Var(_)) {
+            if matches!(node, Ty::Param(_) | Ty::Var(_)) {
                 match self.resolve_evidence(t, tr, depth + 1) {
                     Ok(_) => {}
                     Err(m) if m.unknown => unknown = Some(m),
@@ -107,7 +101,7 @@ impl Checker {
                 });
             }
         }
-        for k in 0..DERIVED.len() {
+        for k in 0..Builtin::DERIVED.len() {
             let mut todo: Vec<usize> = (first..n).collect();
             let mut queued = vec![true; n - first];
             while let Some(d) = todo.pop() {
@@ -132,7 +126,7 @@ impl Checker {
     /// current state of `self.derived`.
     fn derive(&self, d: usize, k: usize) -> Derived {
         let def = &self.types[d];
-        let b = DERIVED[k];
+        let b = Builtin::DERIVED[k];
         let mut needs = Vec::new();
         let ok = match &def.kind {
             TypeDefKind::Opaque(kind) => match (b, kind) {
@@ -164,7 +158,7 @@ impl Checker {
                     needs.push(i as u32);
                     true
                 }
-                None => self.builtins[DERIVED[k] as usize].is_some_and(|tid| self.param_has_trait(p, tid)),
+                None => self.builtins[Builtin::DERIVED[k] as usize].is_some_and(|tid| self.param_has_trait(p, tid)),
             },
             Ty::Var(_) => true,
             ty => self.derived_parts(ty, k).is_some_and(|parts| parts.into_iter().all(|x| self.needs(x, k, generics, needs))),
@@ -263,7 +257,7 @@ impl Checker {
                 let (generics, args) = (self.types[d as usize].generics.clone(), self.arena.list(args).to_vec());
                 let members: Vec<(Step, TypeId)> = match &self.types[d as usize].kind {
                     TypeDefKind::Struct { fields } => {
-                        if DERIVED[k] == Builtin::Hash
+                        if Builtin::DERIVED[k] == Builtin::Hash
                             && let Some(f) = fields.iter().find(|f| f.mutable)
                         {
                             return vec![Step::Mutable(f.name)];

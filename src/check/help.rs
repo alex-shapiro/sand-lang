@@ -741,7 +741,7 @@ impl Checker {
             Ctor::Range => Some(Ty::Range),
         };
         let mut out = Vec::new();
-        for (k, b) in super::derive::DERIVED.into_iter().enumerate() {
+        for (k, b) in Builtin::DERIVED.into_iter().enumerate() {
             let needs: Option<Vec<u32>> = match (c, probe) {
                 (Ctor::Def(d), _) => match self.derived.get(d as usize).map(|x| &x[k]) {
                     Some(super::derive::Derived::Needs(ps)) => Some(ps.clone()),
