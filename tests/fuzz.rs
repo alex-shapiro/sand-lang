@@ -340,6 +340,7 @@ fn hostile_runtime_programs_are_contained() {
         "print(\"\\(1:999999999)\".len())",
         // Sleeping forever.
         "task.sleep(1000h)",
+        "struct P<A, B> { a: A, b: B }\nfn grow<reflect A, reflect B>(n: int, a: A?, b: B?) -> int {\n    let x: P<A, B>? = None\n    grow(n + 1, x, x)\n}\nprint(grow(0, Some(1), Some(2)))",
     ];
     for src in programs {
         let start = std::time::Instant::now();
@@ -360,7 +361,7 @@ fn random_json_and_uri_inputs() {
     }
     let lits: Vec<String> = cases.iter().map(|s| format!("{s:?}")).collect();
     let src = format!(
-        "import json\nimport uri\nimport base64\nimport regex\nimport time\nimport uuid\nvar n = 0\nfor s in [{}] {{\n    if json.parse(s).is_ok() {{ n += 1 }}\n    if uri.parse(s).is_ok() {{ n += 1 }}\n    if base64.decode(s).is_ok() {{ n += 1 }}\n    if regex.new(s).is_ok() {{ n += 1 }}\n    if time.Instant.parse(s).is_ok() {{ n += 1 }}\n    if time.ZonedDateTime.parse(s).is_ok() {{ n += 1 }}\n    if time.PlainDate.parse(s).is_ok() {{ n += 1 }}\n    if time.Span.parse(s).is_ok() {{ n += 1 }}\n    if time.zone(s).is_ok() {{ n += 1 }}\n    if uuid.parse(s).is_ok() {{ n += 1 }}\n    let _ = uri.decode_component(s)\n    let _ = s.parse_float()\n}}\nprint(n >= 0)\n",
+        "import json\nimport uri\nimport base64\nimport regex\nimport time\nimport uuid\nvar n = 0\nfor s in [{}] {{\n    if json.parse(s).is_ok() {{ n += 1 }}\n    let typed: Result<json.Json> = json.decode(s)\n    if json.parse(s).ok() != typed.ok() {{ n -= 1000000 }}\n    if uri.parse(s).is_ok() {{ n += 1 }}\n    if base64.decode(s).is_ok() {{ n += 1 }}\n    if regex.new(s).is_ok() {{ n += 1 }}\n    if time.Instant.parse(s).is_ok() {{ n += 1 }}\n    if time.ZonedDateTime.parse(s).is_ok() {{ n += 1 }}\n    if time.PlainDate.parse(s).is_ok() {{ n += 1 }}\n    if time.Span.parse(s).is_ok() {{ n += 1 }}\n    if time.zone(s).is_ok() {{ n += 1 }}\n    if uuid.parse(s).is_ok() {{ n += 1 }}\n    let _ = uri.decode_component(s)\n    let _ = s.parse_float()\n}}\nprint(n >= 0)\n",
         lits.join(", ")
     );
     let out = MemorySink::new();
@@ -437,7 +438,20 @@ fn hostile_compile_inputs_are_contained() {
     for i in 1..n {
         doubling += &format!("let a{i} = (a{}, a{})\n", i - 1, i - 1);
     }
+    let mut repeated = String::from("let a0 = [0, 0]\n");
+    let mut ty = String::from("[int]");
+    for i in 1..n {
+        repeated += &format!("let a{i} = [a{}, a{}]\n", i - 1, i - 1);
+        ty = format!("[{ty}]");
+    }
+    let mut chain = String::from("import json\n");
+    for i in 0..20_000 {
+        chain += &format!("struct S{i} {{ next: S{} = S{} {{}} }}\n", i + 1, i + 1);
+    }
+    chain += "struct S20000 { v: int = 1 }\nlet s: Result<S0> = json.decode(\"{}\")\nprint(s.is_ok())\n";
     let programs = [
+        format!("import json\nstruct S {{\n    x: {ty} = {{\n{repeated}a{}\n    }}\n}}\nlet s: Result<S> = json.decode(\"{{}}\")\n", n - 1),
+        chain,
         doubling,
         format!(
             "enum E {{ A, B, C }}\nfn f(t: ({})) -> int {{\n    match t {{\n        ({}) => 0\n        ({}) => 1\n    }}\n}}\n",

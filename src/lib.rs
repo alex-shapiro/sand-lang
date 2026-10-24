@@ -52,7 +52,13 @@ pub use vm::OutputSink;
 pub use vm::heap::GcStats;
 pub use vm::value::{Packing, Value, ValueType};
 
+pub use indexmap;
 pub use jiff;
+
+/// Rust representation of `json.Json` values.
+pub mod json {
+    pub use crate::stdlib::json::Json;
+}
 
 /// Rust types for `time` module values. `Instant`, `PlainDateTime`,
 /// `PlainDate`, and `PlainTime` are [`jiff::Timestamp`],

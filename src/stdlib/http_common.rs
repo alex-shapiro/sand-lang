@@ -110,6 +110,7 @@ pub(crate) fn resolve(base: &str, location: &str) -> Result<String, IoFailure> {
 
 pub(crate) fn natives(m: &mut NativeModule) {
     m.bind::<Body>();
+    m.bind::<ResponseStream>();
     body_natives(m);
     m.vm_function("resolve", |vm: &mut Vm, base: Val<String>, location: Val<String>| -> Result<String, HostError> {
         let (base, location) = (base.str(&vm.heap), location.str(&vm.heap));
@@ -163,7 +164,6 @@ pub(crate) fn header_pairs(vm: &Vm, list: Val<Vec<(String, String)>>) -> Result<
 
 pub(crate) struct Prepared {
     pub method: String,
-    #[cfg_attr(web, allow(dead_code))]
     pub text: String,
     pub url: Url,
     pub headers: Vec<(String, String)>,
@@ -205,10 +205,32 @@ impl Prepared {
     }
 }
 
-pub(crate) type Response = (i64, Vec<(String, String)>, Body);
+/// An HTTP response with a streaming `Body`, returned by `open`. The underlying
+/// connection remains open until the body is read to completion or the `Stream`
+/// is closed.
+#[derive(crate::SandStruct)]
+#[sand(module = "http", name = "Stream")]
+pub(crate) struct ResponseStream {
+    /// HTTP status code (such as `200` or `404`).
+    pub status: i64,
+    /// Response headers in receipt order, with lowercase names.
+    pub headers: Vec<(String, String)>,
+    /// Streaming response body.
+    pub body: Val<Body>,
+    /// Final URL after any redirects.
+    pub url: String,
+}
 
-pub(crate) fn response(status: i64, headers: Vec<(String, String)>, reader: BodyReader) -> Response {
-    (status, headers, Body::new(reader))
+/// The response from `url` with `status`, `headers`, and a body read by `reader`.
+pub(crate) fn response(
+    vm: &mut Vm,
+    url: String,
+    status: i64,
+    headers: Vec<(String, String)>,
+    reader: BodyReader,
+) -> Result<ResponseStream, Ctl> {
+    let body = vm.new_object(Body::new(reader))?;
+    Ok(ResponseStream { status, headers, body, url })
 }
 
 // ----------------------------------------------------------------------

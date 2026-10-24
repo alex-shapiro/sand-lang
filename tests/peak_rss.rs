@@ -27,6 +27,22 @@ const PROGRAMS: &[(&str, &str)] = &[
     ("set growth", "let s: Set<str> = set()\nvar i = 0\nwhile true {\n    s.add(\"k\\(i)\")\n    i += 1\n}"),
     ("string building", "var s = \"\"\nwhile true { s += \"abcdefgh\" }"),
     ("list doubling", "let xs = []\nwhile true { xs.push(1) }"),
+    (
+        "type descriptions",
+        "import json\nstruct P<A, B> { a: A, b: B }\nfn make<reflect A: Encode, reflect B: Encode>(n: int, x: [A], y: [B]) -> fn() -> bool {\n    \
+         if n == 0 {\n        return () => {\n            let r: Result<[(A, B)]> = json.decode(\"[]\")\n            r.is_ok()\n        }\n    }\n    \
+         let w: [P<A, B>] = []\n    make(n - 1, w, w)\n}\nlet keep = []\nlet w: [int] = []\nwhile true { keep.push(make(100, w, w)) }",
+    ),
+    (
+        "decoded computed defaults",
+        "import json\nfn one() -> int { 1 }\nstruct P { a: int = one(), b: int = one() }\nlet text = \"[\" + \"{},\".repeat(100000) + \"{}]\"\n\
+         let keep = []\nwhile true {\n    let r: Result<[P]> = json.decode(text)\n    keep.push(r)\n}",
+    ),
+    (
+        "decoded constant defaults",
+        "import json\nstruct P { a: int = 1, b: int = 2 }\nlet text = \"[\" + \"{},\".repeat(100000) + \"{}]\"\n\
+         let keep = []\nwhile true {\n    let r: Result<[P]> = json.decode(text)\n    keep.push(r)\n}",
+    ),
 ];
 
 const CASE: &str = "SAND_PEAK_RSS_CASE";

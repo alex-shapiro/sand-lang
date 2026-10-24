@@ -413,6 +413,22 @@ impl TypeArena {
     pub fn mentions(&self, t: TypeId, p: ParamId) -> bool {
         self.has_params(t) && self.any(t, &mut |x| x == Ty::Param(p))
     }
+
+    /// Returns the type parameters in `t` in order of first appearance.
+    pub fn params_of(&self, t: TypeId) -> Vec<ParamId> {
+        let mut out = Vec::new();
+        if self.has_params(t) {
+            self.any(t, &mut |x| {
+                if let Ty::Param(p) = x
+                    && !out.contains(&p)
+                {
+                    out.push(p);
+                }
+                false
+            });
+        }
+        out
+    }
 }
 
 /// An interned name.
@@ -420,7 +436,7 @@ impl TypeArena {
 pub struct Symbol(u32);
 
 /// Names every symbol table has, with fixed symbols.
-const KNOWN: [&str; 9] = ["", "Self", "self", "_", "<tmp>", "<dict>", "<arg>", "next", "close"];
+const KNOWN: [&str; 10] = ["", "Self", "self", "_", "<tmp>", "<dict>", "<arg>", "next", "close", "<desc>"];
 
 impl Symbol {
     pub const EMPTY: Symbol = Symbol(0);
@@ -435,6 +451,8 @@ impl Symbol {
     pub const ARG: Symbol = Symbol(6);
     pub const NEXT: Symbol = Symbol(7);
     pub const CLOSE: Symbol = Symbol(8);
+    /// Hidden parameters that hold runtime descriptions for `reflect` type arguments.
+    pub const DESC: Symbol = Symbol(9);
 }
 
 /// Interned names (persistent, like the [`TypeArena`]).
@@ -491,6 +509,9 @@ pub enum Bound {
     Ord,
     Hash,
     Num,
+    /// Types that support JSON encoding (all types except functions, tasks,
+    /// channels, and native objects).
+    Encode,
     /// Supports `+`: numbers, durations, strings, bytes and lists. Not
     /// written in source: the checker requires it of the operands of `+`
     /// whose type is not known yet (`(a, b) => a + b`).
@@ -504,6 +525,7 @@ impl Bound {
             "Ord" => Bound::Ord,
             "Hash" => Bound::Hash,
             "Num" => Bound::Num,
+            "Encode" => Bound::Encode,
             _ => return None,
         })
     }
@@ -513,8 +535,22 @@ impl Bound {
             Bound::Ord => "Ord",
             Bound::Hash => "Hash",
             Bound::Num => "Num",
+            Bound::Encode => "Encode",
             Bound::Add => "Add",
         }
+    }
+
+    /// Returns `true` if `self` implies `other`.
+    pub fn implies(self, other: Bound) -> bool {
+        self == other
+            || (other == Bound::Eq && matches!(self, Bound::Ord | Bound::Hash | Bound::Num))
+            || (matches!(other, Bound::Ord | Bound::Add | Bound::Encode) && self == Bound::Num)
+    }
+
+    /// Returns the names of `bounds`, excluding bounds implied by other bounds in the slice.
+    pub fn names(bounds: &[Bound]) -> Vec<&'static str> {
+        let implied = |b: Bound| bounds.iter().any(|&x| x != b && x.implies(b));
+        bounds.iter().filter(|&&b| !implied(b)).map(|b| b.name()).collect()
     }
 }
 
@@ -544,11 +580,7 @@ pub struct ParamInfo {
 
 impl ParamInfo {
     pub fn has_bound(&self, b: Bound) -> bool {
-        self.bounds.iter().any(|&x| {
-            x == b
-                || (b == Bound::Eq && matches!(x, Bound::Ord | Bound::Hash | Bound::Num))
-                || (matches!(b, Bound::Ord | Bound::Add) && x == Bound::Num)
-        })
+        self.bounds.iter().any(|&x| x.implies(b))
     }
 }
 
@@ -560,22 +592,97 @@ pub struct FieldDef {
     pub is_pub: bool,
     /// Helper function computing the default value.
     pub default: Option<FnId>,
-    /// The default as a constant, when it is one (used by `json.decode`).
-    pub const_default: Option<ConstVal>,
+    /// Constant default value, if the field default is a constant expression.
+    pub const_default: Option<Arc<ConstVal>>,
     pub doc: Option<Arc<str>>,
 }
 
+/// A compile-time constant value constructed from literals, ranges, and data
+/// constructors.
+///
+/// Compiled programs identify variants by runtime ID (`V = u32`) and structs by
+/// definition ID (`S = TypeDefId`). Native modules identify both by Rust
+/// `TypeId`.
 #[derive(Clone, Debug, PartialEq)]
-pub enum ConstVal {
+pub enum ConstVal<V = u32, S = TypeDefId> {
     Unit,
     Bool(bool),
     Int(i64),
     Float(f64),
     Str(String),
+    Bytes(Vec<u8>),
     Dur(i64),
-    EmptyList,
-    EmptyMap,
-    None,
+    /// `a..b`, or `a..=b` if inclusive.
+    Range(i64, i64, bool),
+    Tuple(Vec<ConstVal<V, S>>),
+    List(Vec<ConstVal<V, S>>),
+    Map(Vec<(ConstVal<V, S>, ConstVal<V, S>)>),
+    /// `set([...])`, with the elements in insertion order.
+    Set(Vec<ConstVal<V, S>>),
+    /// A variant and its payload.
+    Variant(V, Vec<ConstVal<V, S>>),
+    /// A struct and its fields in declaration order.
+    Struct(S, Vec<ConstVal<V, S>>),
+}
+
+/// Maximum number of nodes in a constant field default.
+pub const MAX_CONST_PARTS: usize = 1 << 16;
+
+/// Maximum nesting depth of a constant field default (a scalar has depth 1).
+pub const MAX_CONST_DEPTH: usize = 64;
+
+impl<V, S> ConstVal<V, S> {
+    /// Returns the node count and total string and byte length of `self`, or
+    /// `None` if `self` exceeds [`MAX_CONST_PARTS`] or [`MAX_CONST_DEPTH`].
+    pub fn measure(&self) -> Option<(usize, usize)> {
+        fn walk<V, S>(c: &ConstVal<V, S>, left: &mut usize, bytes: &mut usize, depth: usize) -> bool {
+            if depth == 0 || *left == 0 {
+                return false;
+            }
+            *left -= 1;
+            match c {
+                ConstVal::Tuple(xs) | ConstVal::List(xs) | ConstVal::Set(xs) | ConstVal::Variant(_, xs) | ConstVal::Struct(_, xs) => {
+                    xs.iter().all(|x| walk(x, left, bytes, depth - 1))
+                }
+                ConstVal::Map(kvs) => kvs.iter().all(|(k, v)| walk(k, left, bytes, depth - 1) && walk(v, left, bytes, depth - 1)),
+                ConstVal::Str(s) => {
+                    *bytes = bytes.saturating_add(s.len());
+                    true
+                }
+                ConstVal::Bytes(b) => {
+                    *bytes = bytes.saturating_add(b.len());
+                    true
+                }
+                _ => true,
+            }
+        }
+        let (mut left, mut bytes) = (MAX_CONST_PARTS, 0);
+        walk(self, &mut left, &mut bytes, MAX_CONST_DEPTH).then_some((MAX_CONST_PARTS - left, bytes))
+    }
+
+    /// Maps each variant ID with `variant` and each struct ID with `def`, or
+    /// returns `None` if any mapping returns `None`.
+    pub fn resolve<V2, S2>(&self, variant: &impl Fn(&V) -> Option<V2>, def: &impl Fn(&S) -> Option<S2>) -> Option<ConstVal<V2, S2>> {
+        let all = |xs: &[ConstVal<V, S>]| xs.iter().map(|x| x.resolve(variant, def)).collect::<Option<Vec<_>>>();
+        Some(match self {
+            ConstVal::Unit => ConstVal::Unit,
+            ConstVal::Bool(b) => ConstVal::Bool(*b),
+            ConstVal::Int(i) => ConstVal::Int(*i),
+            ConstVal::Float(f) => ConstVal::Float(*f),
+            ConstVal::Str(s) => ConstVal::Str(s.clone()),
+            ConstVal::Bytes(b) => ConstVal::Bytes(b.clone()),
+            ConstVal::Dur(d) => ConstVal::Dur(*d),
+            ConstVal::Range(a, b, inclusive) => ConstVal::Range(*a, *b, *inclusive),
+            ConstVal::Tuple(xs) => ConstVal::Tuple(all(xs)?),
+            ConstVal::List(xs) => ConstVal::List(all(xs)?),
+            ConstVal::Set(xs) => ConstVal::Set(all(xs)?),
+            ConstVal::Map(kvs) => {
+                ConstVal::Map(kvs.iter().map(|(k, v)| Some((k.resolve(variant, def)?, v.resolve(variant, def)?))).collect::<Option<_>>()?)
+            }
+            ConstVal::Variant(v, xs) => ConstVal::Variant(variant(v)?, all(xs)?),
+            ConstVal::Struct(s, xs) => ConstVal::Struct(def(s)?, all(xs)?),
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -657,7 +764,6 @@ pub struct WellKnown {
     pub error: TypeDefId,
     pub task: TypeDefId,
     pub channel: TypeDefId,
-    pub json: Option<TypeDefId>,
 }
 
 /// Formats types for diagnostics, signatures and help.
@@ -672,11 +778,24 @@ pub struct TypePrinter<'a> {
     pub subst: &'a [Option<TypeId>],
     /// Names for inference variables shown as type parameters (others are `_`).
     pub var_names: &'a [(VarId, String)],
+    /// Formats each type parameter as a placeholder for
+    /// [`TypeDesc::Param`](crate::vm::value::TypeDesc::Param) instantiation
+    /// (see [`param_placeholder`]).
+    pub placeholder_params: bool,
 }
+
+/// Returns the placeholder string for type parameter `p` in
+/// [`TypeDesc`](crate::vm::value::TypeDesc) template names.
+pub fn param_placeholder(p: ParamId) -> String {
+    format!("{PARAM_PLACEHOLDER}{p}{PARAM_PLACEHOLDER}")
+}
+
+/// Delimiter character for [`param_placeholder`]. Type names cannot contain this character.
+pub const PARAM_PLACEHOLDER: char = '\u{E000}';
 
 impl<'a> TypePrinter<'a> {
     pub fn new(arena: &'a TypeArena, defs: &'a PVec<TypeDef>, params: &'a PVec<ParamInfo>, syms: &'a Symbols, wk: WellKnown) -> Self {
-        TypePrinter { arena, defs, params, syms, wk, subst: &[], var_names: &[] }
+        TypePrinter { arena, defs, params, syms, wk, subst: &[], var_names: &[], placeholder_params: false }
     }
 
     pub fn show(&self, t: TypeId) -> String {
@@ -742,7 +861,7 @@ impl Tagged<'_, '_> {
     }
 
     fn write(&self, s: &mut String, t: TypeId) {
-        let TypePrinter { arena, defs, params, syms, wk, var_names, .. } = self.p;
+        let TypePrinter { arena, defs, params, syms, wk, var_names, placeholder_params, .. } = self.p;
         let t = self.p.resolve(t);
         match arena.get(t) {
             Ty::Int => s.push_str("int"),
@@ -759,6 +878,7 @@ impl Tagged<'_, '_> {
                 Some((_, n)) => s.push_str(n),
                 None => s.push('_'),
             },
+            Ty::Param(p) if *placeholder_params => s.push_str(&param_placeholder(p)),
             Ty::Param(p) => s.push_str(params.get(p as usize).map(|p| syms.str(p.name)).unwrap_or("?")),
             Ty::List(t) => {
                 s.push('[');

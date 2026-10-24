@@ -1080,16 +1080,24 @@ pub(crate) fn parse_value<T: ValueType>(text: &str) -> Result<Obj, String> {
     Ok(value_obj(T::parse(text)?))
 }
 
-/// A struct field: name, type and constant default.
-pub type FieldDesc = (String, Arc<TypeDesc>, Option<crate::types::ConstVal>);
+/// Struct field descriptor: `(name, type, default)`.
+pub type FieldDesc = (String, Arc<TypeDesc>, FieldDefault);
 
-/// An enum variant: name, runtime id, payload types and payload field names.
+/// Default value for a struct field used when a field is omitted during `json.decode`.
+#[derive(Clone, Debug)]
+pub enum FieldDefault {
+    None,
+    /// Compile-time constant shared across [`DescTemplate`] instantiations.
+    Const(Arc<crate::types::ConstVal>),
+    /// Prototype index of the helper function that evaluates a non-constant default and writes it to the captured struct.
+    Computed(u32),
+}
+
+/// Enum variant descriptor: `(name, runtime_id, payload_types, payload_field_names)`.
 pub type VariantDesc = (String, u32, Vec<Arc<TypeDesc>>, Option<Vec<String>>);
 
-/// A runtime description of a type, for `reflect` type parameters (built by
-/// `compile::reflect`). Descriptions are DAGs: the description of a struct
-/// or enum instance is shared by every place that uses it, so walking one as
-/// a tree can take exponential time. `Debug` shows structs and enums by name.
+/// Runtime type descriptor for `reflect` type parameters, constructed as a
+/// directed acyclic graph (DAG) by `compile::reflect`.
 #[derive(Clone)]
 pub enum TypeDesc {
     Int,
@@ -1101,54 +1109,347 @@ pub enum TypeDesc {
     Unit,
     List(Arc<TypeDesc>),
     Map(Arc<TypeDesc>, Arc<TypeDesc>),
-    Set(Arc<TypeDesc>),
+    /// Set element descriptor and the helper function prototype that populates a set from a list.
+    Set(Arc<TypeDesc>, u32),
     Tuple(Vec<Arc<TypeDesc>>),
     Option(Arc<TypeDesc>),
+    Range,
     Struct {
-        /// Identifies the struct instance (definition and type arguments)
-        /// for `Recur`.
+        /// Instance ID used to resolve [`TypeDesc::Recur`] references.
         id: u32,
         def: u32,
         name: String,
         fields: Vec<FieldDesc>,
+        /// [`NamedType::rust_type`](crate::NamedType::rust_type) for a Rust-bound struct.
+        rust: Option<std::any::TypeId>,
     },
     Enum {
         id: u32,
         name: String,
         variants: Vec<VariantDesc>,
+        /// [`NamedType::rust_type`](crate::NamedType::rust_type) for a Rust-bound enum.
+        rust: Option<std::any::TypeId>,
     },
-    Json,
     Value {
         name: String,
         parse: ParseValue,
     },
-    /// Recursive reference to the enclosing struct or enum with this `id`.
+    /// Recursive reference to an enclosing struct or enum with matching `id`.
     Recur(u32),
+    /// Non-encodable type (function, task, channel, or native object).
     Unsupported(String),
+    /// Uninstantiated type parameter inside a [`DescTemplate`].
+    Param(u32),
 }
 
 impl TypeDesc {
-    /// Formats the Sand type name for `self`, using `recur` to resolve [`TypeDesc::Recur`] IDs.
+    /// Formats the Sand type name for `self`, using `recur` to resolve
+    /// [`TypeDesc::Recur`] IDs. Names longer than [`MAX_TYPE_NAME_LEN`] bytes
+    /// are truncated with `…`.
     pub fn format(&self, recur: &dyn Fn(u32) -> String) -> String {
-        let list = |ts: &[Arc<TypeDesc>]| ts.iter().map(|t| t.format(recur)).collect::<Vec<_>>().join(", ");
+        let mut out = String::new();
+        self.write_name(recur, &mut out);
+        truncate_type_name(&mut out);
+        out
+    }
+
+    fn write_name(&self, recur: &dyn Fn(u32) -> String, out: &mut String) {
+        if out.len() > MAX_TYPE_NAME_LEN {
+            return;
+        }
         match self {
-            TypeDesc::Int => "int".into(),
-            TypeDesc::Float => "float".into(),
-            TypeDesc::Bool => "bool".into(),
-            TypeDesc::Str => "str".into(),
-            TypeDesc::Bytes => "bytes".into(),
-            TypeDesc::Duration => "duration".into(),
-            TypeDesc::Unit => "()".into(),
-            TypeDesc::List(e) => format!("[{}]", e.format(recur)),
-            TypeDesc::Map(k, v) => format!("[{}: {}]", k.format(recur), v.format(recur)),
-            TypeDesc::Set(e) => format!("Set<{}>", e.format(recur)),
-            TypeDesc::Tuple(ts) => format!("({})", list(ts)),
-            TypeDesc::Option(e) => format!("{}?", e.format(recur)),
-            TypeDesc::Json => "Json".into(),
-            TypeDesc::Struct { name, .. } | TypeDesc::Enum { name, .. } | TypeDesc::Value { name, .. } | TypeDesc::Unsupported(name) => {
-                name.clone()
+            TypeDesc::Int => out.push_str("int"),
+            TypeDesc::Float => out.push_str("float"),
+            TypeDesc::Bool => out.push_str("bool"),
+            TypeDesc::Str => out.push_str("str"),
+            TypeDesc::Bytes => out.push_str("bytes"),
+            TypeDesc::Duration => out.push_str("duration"),
+            TypeDesc::Unit => out.push_str("()"),
+            TypeDesc::List(e) => {
+                out.push('[');
+                e.write_name(recur, out);
+                out.push(']');
             }
-            TypeDesc::Recur(id) => recur(*id),
+            TypeDesc::Map(k, v) => {
+                out.push('[');
+                k.write_name(recur, out);
+                out.push_str(": ");
+                v.write_name(recur, out);
+                out.push(']');
+            }
+            TypeDesc::Set(e, _) => {
+                out.push_str("Set<");
+                e.write_name(recur, out);
+                out.push('>');
+            }
+            TypeDesc::Tuple(ts) => {
+                out.push('(');
+                for (i, t) in ts.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    t.write_name(recur, out);
+                }
+                out.push(')');
+            }
+            TypeDesc::Option(_) => {
+                let (mut inner, mut layers) = (self, 0);
+                while let TypeDesc::Option(e) = inner {
+                    (inner, layers) = (&**e, layers + 1);
+                }
+                inner.write_name(recur, out);
+                for _ in 0..layers.min(MAX_TYPE_NAME_LEN + 1) {
+                    out.push('?');
+                }
+            }
+            TypeDesc::Range => out.push_str("Range"),
+            TypeDesc::Struct { name, .. } | TypeDesc::Enum { name, .. } | TypeDesc::Value { name, .. } | TypeDesc::Unsupported(name) => {
+                out.push_str(name)
+            }
+            TypeDesc::Recur(id) => out.push_str(&recur(*id)),
+            TypeDesc::Param(_) => out.push('_'),
+        }
+    }
+}
+
+/// Maximum byte length of a formatted type name in a [`TypeDesc`].
+const MAX_TYPE_NAME_LEN: usize = 256;
+
+/// Truncates `name` to [`MAX_TYPE_NAME_LEN`] bytes on a UTF-8 character boundary and appends `…`.
+pub(crate) fn truncate_type_name(name: &mut String) {
+    if name.len() > MAX_TYPE_NAME_LEN {
+        let mut end = MAX_TYPE_NAME_LEN;
+        while !name.is_char_boundary(end) {
+            end -= 1;
+        }
+        name.truncate(end);
+        name.push('…');
+    }
+}
+
+/// Heap-allocated runtime type descriptor.
+#[derive(Clone)]
+pub struct TypeDescObj {
+    pub desc: Arc<TypeDesc>,
+    /// Metadata for a template-instantiated descriptor, or `None` for a constant descriptor.
+    pub instantiated: Option<Box<InstantiatedDesc>>,
+}
+
+/// Memory accounting and GC references for a [`TypeDescObj`] produced by [`DescTemplate::instantiate`].
+#[derive(Clone)]
+pub struct InstantiatedDesc {
+    /// Heap bytes allocated for newly constructed [`TypeDesc`] nodes.
+    bytes: u32,
+    /// Maximum nesting depth of instantiated template nodes.
+    depth: u16,
+    /// Argument descriptor handles retained so the GC accounts for their shared subgraphs.
+    args: Box<[Value]>,
+}
+
+impl TypeDescObj {
+    pub fn constant(desc: Arc<TypeDesc>) -> TypeDescObj {
+        TypeDescObj { desc, instantiated: None }
+    }
+
+    fn depth(&self) -> usize {
+        self.instantiated.as_ref().map_or(0, |b| b.depth as usize)
+    }
+
+    fn size(&self) -> usize {
+        self.instantiated.as_ref().map_or(0, |b| std::mem::size_of::<InstantiatedDesc>() + b.bytes as usize + b.args.len() * VALUE_SIZE)
+    }
+
+    fn args(&self) -> &[Value] {
+        self.instantiated.as_ref().map_or(&[], |b| &b.args)
+    }
+}
+
+/// Maximum nesting depth of template-instantiated [`TypeDesc`] nodes.
+pub const MAX_DESC_DEPTH: usize = 256;
+
+/// Parameterized [`TypeDesc`] template instantiated at runtime by `Op::Describe`.
+#[derive(Clone, Debug)]
+pub struct DescTemplate {
+    desc: Arc<TypeDesc>,
+    params: Vec<u32>,
+    /// Addresses of [`TypeDesc`] nodes in `desc` that contain a [`TypeDesc::Param`].
+    spine: std::collections::HashSet<usize, FxBuild>,
+    /// Maximum path length of nodes cloned during instantiation.
+    depth: usize,
+}
+
+fn addr(d: &Arc<TypeDesc>) -> usize {
+    Arc::as_ptr(d) as usize
+}
+
+impl DescTemplate {
+    pub fn new(desc: Arc<TypeDesc>, params: Vec<u32>) -> DescTemplate {
+        fn depth(d: &Arc<TypeDesc>, seen: &mut FxHashMap<usize, Option<usize>>) -> Option<usize> {
+            if let Some(&n) = seen.get(&addr(d)) {
+                return n;
+            }
+            let mut deepest = |ds: &mut dyn Iterator<Item = &Arc<TypeDesc>>| ds.filter_map(|x| depth(x, seen)).max().map(|n| n + 1);
+            let n = match &**d {
+                TypeDesc::Param(_) => Some(0),
+                TypeDesc::List(e) | TypeDesc::Set(e, _) | TypeDesc::Option(e) => deepest(&mut std::iter::once(e)),
+                TypeDesc::Map(k, v) => deepest(&mut [k, v].into_iter()),
+                TypeDesc::Tuple(ts) => deepest(&mut ts.iter()),
+                TypeDesc::Struct { fields, .. } => deepest(&mut fields.iter().map(|f| &f.1)),
+                TypeDesc::Enum { variants, .. } => deepest(&mut variants.iter().flat_map(|v| &v.2)),
+                _ => None,
+            };
+            seen.insert(addr(d), n);
+            n
+        }
+        let mut seen = FxHashMap::default();
+        let depth = depth(&desc, &mut seen).unwrap_or(0);
+        let spine = seen.into_iter().filter(|(_, n)| n.is_some()).map(|(a, _)| a).collect();
+        DescTemplate { desc, params, spine, depth }
+    }
+
+    pub fn arity(&self) -> usize {
+        self.params.len()
+    }
+
+    pub fn depth(&self) -> usize {
+        self.depth
+    }
+
+    pub fn size(&self) -> usize {
+        self.spine.len()
+    }
+
+    /// Substitutes `args` for `self.params`, retaining `handles` for GC tracing.
+    pub(crate) fn instantiate(&self, args: &[&TypeDescObj], handles: Box<[Value]>) -> Result<TypeDescObj, crate::vm::Ctl> {
+        let depth = self.depth + args.iter().map(|a| a.depth()).max().unwrap_or(0);
+        if depth > MAX_DESC_DEPTH {
+            return Err(crate::vm::Ctl::fail("limit", "the description of a type argument is nested too deeply"));
+        }
+        if args.len() != self.params.len() {
+            return Err(crate::vm::Ctl::internal("a type description template has the wrong number of arguments"));
+        }
+        let mut b = TemplateInstantiator { t: self, args, memo: FxHashMap::default(), allocated_bytes: 0, missing: false };
+        let desc = b.node(&self.desc);
+        if b.missing {
+            return Err(crate::vm::Ctl::internal("a type description template has no argument for a type parameter"));
+        }
+        let instantiated =
+            InstantiatedDesc { bytes: u32::try_from(b.allocated_bytes).unwrap_or(u32::MAX), depth: depth as u16, args: handles };
+        Ok(TypeDescObj { desc, instantiated: Some(Box::new(instantiated)) })
+    }
+}
+
+struct TemplateInstantiator<'a> {
+    t: &'a DescTemplate,
+    args: &'a [&'a TypeDescObj],
+    memo: FxHashMap<usize, Arc<TypeDesc>>,
+    allocated_bytes: usize,
+    missing: bool,
+}
+
+impl TemplateInstantiator<'_> {
+    fn arg(&mut self, p: u32) -> Arc<TypeDesc> {
+        match self.t.params.iter().position(|&q| q == p) {
+            Some(i) => self.args[i].desc.clone(),
+            None => {
+                self.missing = true;
+                Arc::new(TypeDesc::Param(p))
+            }
+        }
+    }
+
+    /// Substitutes argument type names for [`crate::types::PARAM_PLACEHOLDER`] markers and truncates the result to [`MAX_TYPE_NAME_LEN`] bytes.
+    fn name(&mut self, name: &str) -> String {
+        let mut out = String::new();
+        let mut parts = name.split(crate::types::PARAM_PLACEHOLDER);
+        out.push_str(parts.next().unwrap_or_default());
+        while let (Some(p), Some(text)) = (parts.next(), parts.next())
+            && out.len() <= MAX_TYPE_NAME_LEN
+        {
+            if let Ok(p) = p.parse() {
+                self.arg(p).write_name(&|_| String::new(), &mut out);
+            }
+            out.push_str(text);
+        }
+        truncate_type_name(&mut out);
+        out.shrink_to_fit();
+        self.allocated_bytes += out.capacity();
+        out
+    }
+
+    fn node(&mut self, d: &Arc<TypeDesc>) -> Arc<TypeDesc> {
+        if !self.t.spine.contains(&addr(d)) {
+            return d.clone();
+        }
+        if let Some(x) = self.memo.get(&addr(d)) {
+            return x.clone();
+        }
+        let new = match &**d {
+            TypeDesc::Param(p) => return self.arg(*p),
+            TypeDesc::List(e) => TypeDesc::List(self.node(e)),
+            TypeDesc::Set(e, fill) => TypeDesc::Set(self.node(e), *fill),
+            TypeDesc::Option(e) => TypeDesc::Option(self.node(e)),
+            TypeDesc::Map(k, v) => TypeDesc::Map(self.node(k), self.node(v)),
+            TypeDesc::Tuple(ts) => {
+                self.allocated_bytes += ts.len() * std::mem::size_of::<Arc<TypeDesc>>();
+                TypeDesc::Tuple(ts.iter().map(|t| self.node(t)).collect())
+            }
+            TypeDesc::Struct { id, def, name, fields, rust } => {
+                let fields: Vec<FieldDesc> = fields.iter().map(|(n, t, d)| (n.clone(), self.node(t), d.clone())).collect();
+                self.allocated_bytes += fields.iter().map(|f| f.0.capacity() + std::mem::size_of::<FieldDesc>()).sum::<usize>();
+                TypeDesc::Struct { id: *id, def: *def, name: self.name(name), fields, rust: *rust }
+            }
+            TypeDesc::Enum { id, name, variants, rust } => {
+                let variants: Vec<VariantDesc> = variants
+                    .iter()
+                    .map(|(n, rt, ts, names)| (n.clone(), *rt, ts.iter().map(|t| self.node(t)).collect(), names.clone()))
+                    .collect();
+                self.allocated_bytes += variants
+                    .iter()
+                    .map(|v| {
+                        let names = v.3.iter().flatten().map(|n| n.len() + std::mem::size_of::<String>()).sum::<usize>();
+                        v.0.len() + v.2.len() * std::mem::size_of::<Arc<TypeDesc>>() + names + std::mem::size_of::<VariantDesc>()
+                    })
+                    .sum::<usize>();
+                TypeDesc::Enum { id: *id, name: self.name(name), variants, rust: *rust }
+            }
+            other => other.clone(),
+        };
+        self.allocated_bytes += std::mem::size_of::<TypeDesc>() + 2 * std::mem::size_of::<usize>();
+        let new = Arc::new(new);
+        self.memo.insert(addr(d), new.clone());
+        new
+    }
+}
+
+impl Drop for TypeDesc {
+    /// Iteratively drops uniquely owned child nodes so deeply nested descriptors do not overflow the call stack.
+    fn drop(&mut self) {
+        fn take(d: &mut TypeDesc, out: &mut Vec<Arc<TypeDesc>>) {
+            static HOLE: std::sync::LazyLock<Arc<TypeDesc>> = std::sync::LazyLock::new(|| Arc::new(TypeDesc::Unit));
+            let mut one = |e: &mut Arc<TypeDesc>| {
+                if Arc::strong_count(e) == 1 {
+                    out.push(std::mem::replace(e, HOLE.clone()));
+                }
+            };
+            match d {
+                TypeDesc::List(e) | TypeDesc::Set(e, _) | TypeDesc::Option(e) => one(e),
+                TypeDesc::Map(k, v) => {
+                    one(k);
+                    one(v);
+                }
+                TypeDesc::Tuple(ts) => ts.iter_mut().for_each(one),
+                TypeDesc::Struct { fields, .. } => fields.iter_mut().for_each(|f| one(&mut f.1)),
+                TypeDesc::Enum { variants, .. } => variants.iter_mut().flat_map(|v| &mut v.2).for_each(one),
+                _ => {}
+            }
+        }
+        let mut todo = Vec::new();
+        take(self, &mut todo);
+        while let Some(d) = todo.pop() {
+            if let Some(mut d) = Arc::into_inner(d) {
+                take(&mut d, &mut todo);
+            }
         }
     }
 }
@@ -1165,15 +1466,16 @@ impl std::fmt::Debug for TypeDesc {
             TypeDesc::Unit => write!(f, "Unit"),
             TypeDesc::List(e) => write!(f, "List({e:?})"),
             TypeDesc::Map(k, v) => write!(f, "Map({k:?}, {v:?})"),
-            TypeDesc::Set(e) => write!(f, "Set({e:?})"),
+            TypeDesc::Set(e, _) => write!(f, "Set({e:?})"),
             TypeDesc::Tuple(ts) => f.debug_tuple("Tuple").field(ts).finish(),
             TypeDesc::Option(e) => write!(f, "Option({e:?})"),
             TypeDesc::Struct { id, name, .. } => write!(f, "Struct({name} #{id})"),
             TypeDesc::Enum { id, name, .. } => write!(f, "Enum({name} #{id})"),
-            TypeDesc::Json => write!(f, "Json"),
+            TypeDesc::Range => write!(f, "Range"),
             TypeDesc::Value { name, .. } => write!(f, "{name}"),
             TypeDesc::Recur(id) => write!(f, "Recur(#{id})"),
             TypeDesc::Unsupported(name) => write!(f, "Unsupported({name})"),
+            TypeDesc::Param(p) => write!(f, "Param({p})"),
         }
     }
 }
@@ -1227,7 +1529,7 @@ pub enum Obj {
     Native(Box<dyn crate::native::DynObject>),
     Value(Box<dyn ValueObj>),
     Packed(&'static PackedType, [u64; 2]),
-    TypeDesc(Arc<TypeDesc>),
+    TypeDesc(TypeDescObj),
 }
 
 impl std::fmt::Debug for Obj {
@@ -1253,7 +1555,7 @@ impl std::fmt::Debug for Obj {
             Obj::Native(n) => write!(f, "Native({})", n.type_name()),
             Obj::Value(v) => write!(f, "Value({})", v.type_name()),
             Obj::Packed(t, _) => write!(f, "Packed({})", t.name),
-            Obj::TypeDesc(t) => write!(f, "TypeDesc({t:?})"),
+            Obj::TypeDesc(t) => write!(f, "TypeDesc({:?})", t.desc),
         }
     }
 }
@@ -1291,7 +1593,7 @@ impl Obj {
             }
             Obj::Native(n) => n.size(),
             Obj::Value(v) => v.size(),
-            Obj::TypeDesc(_) => 64,
+            Obj::TypeDesc(t) => 64 + t.size(),
         }
     }
 
@@ -1316,6 +1618,7 @@ impl Obj {
                 IterSrc::Range { .. } | IterSrc::Done => {}
             },
             Obj::Task(t) => f(t.result),
+            Obj::TypeDesc(d) => d.args().iter().for_each(|v| f(*v)),
             Obj::Channel(c) => {
                 c.queue.iter().for_each(|v| f(*v));
                 c.senders.iter().for_each(|(_, _, v)| f(*v));
@@ -1328,6 +1631,39 @@ impl Obj {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deep_descriptions_drop_on_a_small_stack() {
+        let shared = Arc::new(TypeDesc::Int);
+        let mut d = Arc::new(TypeDesc::Unit);
+        for i in 0..200_000 {
+            d = Arc::new(match i % 4 {
+                0 => TypeDesc::List(d),
+                1 => TypeDesc::Map(shared.clone(), d),
+                2 => TypeDesc::Tuple(vec![shared.clone(), d]),
+                _ => TypeDesc::Struct { id: 0, def: 0, name: "S".into(), fields: vec![("f".into(), d, FieldDefault::None)], rust: None },
+            });
+        }
+        std::thread::Builder::new().stack_size(64 << 10).spawn(move || drop(d)).unwrap().join().unwrap();
+        assert_eq!(Arc::strong_count(&shared), 1);
+    }
+
+    #[test]
+    fn instances_of_a_description_template_share_its_constant_defaults() {
+        let table = Arc::new(crate::types::ConstVal::List(vec![crate::types::ConstVal::Int(0); 1000]));
+        let fields = vec![
+            ("v".to_string(), Arc::new(TypeDesc::Param(0)), FieldDefault::None),
+            ("table".to_string(), Arc::new(TypeDesc::List(Arc::new(TypeDesc::Int))), FieldDefault::Const(table.clone())),
+        ];
+        let desc = Arc::new(TypeDesc::Struct { id: 0, def: 0, name: "Big".into(), fields, rust: None });
+        let template = DescTemplate::new(desc, vec![0]);
+        let arg = TypeDescObj::constant(Arc::new(TypeDesc::Str));
+        let instance = template.instantiate(&[&arg], Box::default()).unwrap();
+        let TypeDesc::Struct { fields, .. } = &*instance.desc else { panic!("{:?}", instance.desc) };
+        assert!(matches!(&*fields[0].1, TypeDesc::Str));
+        assert!(matches!(&fields[1].2, FieldDefault::Const(c) if Arc::ptr_eq(c, &table)));
+        assert!(instance.size() < 1000, "{}", instance.size());
+    }
 
     #[test]
     fn saturating_conversions_never_wrap() {

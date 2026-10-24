@@ -187,10 +187,8 @@ impl Checker {
         }
     }
 
-    /// Adds bounds to a type parameter, with the built-in bounds its traits
-    /// imply. A `Num` bound also adds the trait that carries its evidence.
+    /// Adds bounds and implied supertrait bounds to type parameter `p`.
     pub(crate) fn add_bounds(&mut self, p: ParamId, mut bounds: Vec<Bound>, mut traits: Vec<TraitRef>) {
-        // A trait with `Num` as a supertrait carries its evidence itself.
         if let Some(n) = self.num_trait.filter(|_| bounds.contains(&Bound::Num)) {
             traits.push(TraitRef { trait_id: n, args: TyList::EMPTY });
         }
@@ -288,7 +286,6 @@ impl Checker {
     // Trait declarations
 
     pub(crate) fn declare_trait(&mut self, t: &ast::TraitDecl) -> TraitId {
-        // The prelude declares the (private) trait carrying the evidence of `Num`.
         let num_evidence = Some(self.cur_mod) == self.prelude && t.name.name == "Num";
         if Bound::parse(&t.name.name).is_some() && !num_evidence {
             self.error(t.name.span, format!("`{}` is a built-in bound and cannot be redefined", t.name.name));
@@ -332,7 +329,6 @@ impl Checker {
             let scope = self.trait_scope(id);
             let self_ty = self.param_ty(self.traits[id as usize].self_param);
             let (bounds, mut supers) = self.resolve_bounds(&d.supers, &scope, Some(self_ty));
-            // `Num` carries evidence (`zero`, `one`), so its trait is a real supertrait.
             if let Some(n) = self.num_trait.filter(|_| bounds.contains(&Bound::Num)) {
                 supers.push(TraitRef { trait_id: n, args: TyList::EMPTY });
             }
@@ -382,6 +378,7 @@ impl Checker {
         let rules = DeclRules { skip_where: &outer, defaults: DefaultRule::Const };
         let mut methods: Vec<TraitMethod> = Vec::new();
         for (j, m) in d.methods.iter().enumerate() {
+            self.reject_reflect_params(m);
             if methods.iter().any(|x| self.name(x.name) == m.name.name) {
                 let msg = format!("method `{}` is already defined in trait `{}`", m.name.name, self.name(self.traits[id as usize].name));
                 self.error(m.name.span, msg);
@@ -414,6 +411,13 @@ impl Checker {
             };
             let name = self.sym(&m.name.name);
             methods.push(TraitMethod { name, sig, default });
+        }
+        if Some(id) == self.num_trait && !methods.iter().map(|m| self.name(m.name)).eq(crate::native::NUM_METHODS) {
+            let names = crate::native::NUM_METHODS.map(|n| format!("`{n}`")).join(", ");
+            self.error(
+                d.name.span,
+                format!("the `Num` trait must declare the methods {names} in this order, because `native::Num` reads them by position"),
+            );
         }
         self.traits[id as usize].methods = methods;
     }
@@ -523,8 +527,17 @@ impl Checker {
             for p in m.params.iter().filter(|p| p.default.is_some()) {
                 self.error(p.name.span, "default values are declared by the trait, not the impl");
             }
+            self.reject_reflect_params(m);
             let at = DeclPath { item, method: j as u32 };
             let f = self.declare_fn(m, at, rules, Some(ctor), &scope, Some(target));
+            if Some(tid) == self.num_trait && !m.is_native {
+                self.error(m.name.span, "the methods of a `Num` impl must be native");
+            }
+            // Trait dispatch passes the impl dictionary as the first hidden
+            // argument, which conflicts with the `Num` evidence slot in native functions.
+            if m.is_native && !self.fns[f as usize].dicts.is_empty() {
+                self.error(m.name.span, "the Rust function of a native impl method cannot take `Num` evidence");
+            }
             self.fns[f as usize].impl_of = Some(id);
             self.check_impl_method(id, slot as u32, f, m);
             slots[slot] = Some(f);
@@ -634,12 +647,11 @@ impl Checker {
         let saved = std::mem::replace(&mut self.fs.evidence, evidence);
         for b in self.builtin_closure(tid) {
             if self.satisfies(target, b) == Some(false) {
-                let msg = format!("{} does not satisfy {}, which trait `{name}` requires", self.show(target), b.name());
+                let msg = self.format_unsatisfied_bound(target, b, &format!(", which trait `{name}` requires"));
                 self.error(span, msg);
             }
         }
         for s in self.supers_of(target, trait_ref) {
-            // A missing `Num` was reported as a built-in bound above.
             if Some(s.trait_id) == self.num_trait {
                 continue;
             }
@@ -820,11 +832,9 @@ impl Checker {
     pub(crate) fn wrapper_value(&mut self, f: FnId, pre: &[(ParamId, TypeId)], span: Span) -> HExpr {
         let inst = self.instantiate_fn_with(f, span, pre);
         let id = self.new_lambda();
-        let mut args: Vec<HArg> = Vec::new();
-        for &(t, tr) in &inst.dicts {
-            let lenient = matches!(self.rty(t), Ty::Var(_)) && inst.params.iter().any(|&p| self.occurs_in(t, p));
-            args.push(HArg::Expr(self.evidence_hole(t, tr, lenient, span)));
-        }
+        let params_ty = inst.params.clone();
+        let lenient = move |c: &Self, t: TypeId| matches!(c.rty(t), Ty::Var(_)) && params_ty.iter().any(|&p| c.occurs_in(t, p));
+        let mut args = self.hidden_args(f, &inst.fresh, &inst.dicts, "function value", &lenient, span);
         let mut params = Vec::new();
         for &t in &inst.params {
             self.fs.locals.push(LocalInfo { name: Symbol::ARG, mutable: false, owner: id, cell: false, span });
@@ -836,6 +846,7 @@ impl Checker {
         let fi = &self.fns[f as usize];
         let kind = match fi.kind {
             FnKind::TraitMethod(trait_id, slot) => HKind::CallTrait { trait_id, slot, args, impl_id: None },
+            FnKind::Native(native) => HKind::CallNative { native, args },
             _ => HKind::Call { func: f, args },
         };
         let name = self.name(fi.name).to_string();
@@ -847,6 +858,67 @@ impl Checker {
 
     // ------------------------------------------------------------------
     // Evidence
+
+    /// Builds hidden arguments for a call to `f` (`reflect` type descriptions
+    /// followed by trait dictionaries).
+    pub(crate) fn hidden_args(
+        &mut self,
+        f: FnId,
+        fresh: &[TypeId],
+        dicts: &[(TypeId, TraitRef)],
+        what: &'static str,
+        lenient: &dyn Fn(&Self, TypeId) -> bool,
+        span: Span,
+    ) -> Vec<HArg> {
+        let mut out = Vec::new();
+        for (k, &t) in fresh.iter().enumerate() {
+            if self.params[self.fns[f as usize].generics[k] as usize].reflect {
+                self.fs.reflect_checks.push((t, span, what));
+                out.push(HArg::Expr(mk(HKind::TypeDesc { ty: t, args: Vec::new() }, TypeId::UNIT, span)));
+            }
+        }
+        for &(t, tr) in dicts {
+            let lenient = lenient(self, t);
+            out.push(HArg::Expr(self.evidence_hole(t, tr, lenient, span)));
+        }
+        out
+    }
+
+    /// Reports an error if trait or impl method `m` declares `reflect` type parameters.
+    fn reject_reflect_params(&mut self, m: &ast::FnDecl) {
+        for g in m.generics.iter().filter(|g| g.reflect) {
+            self.error(g.name.span, "the type parameters of trait and impl methods cannot be `reflect`");
+        }
+    }
+
+    /// Declares hidden parameters for the `reflect` type parameters of `f`.
+    pub(crate) fn declare_reflect_params(&mut self, f: FnId) -> Vec<LocalId> {
+        let span = self.fns[f as usize].span;
+        let mut out = Vec::new();
+        for k in 0..self.fns[f as usize].generics.len() {
+            let p = self.fns[f as usize].generics[k];
+            if self.params[p as usize].reflect {
+                let l = self.declare_local_sym(Symbol::DESC, TypeId::UNIT, false, span, true);
+                self.fs.data[l as usize].used = true;
+                self.fs.reflect_locals.push((p, l));
+                out.push(l);
+            }
+        }
+        out
+    }
+
+    /// Returns the hidden local holding the description of `t` if `t` is a
+    /// `reflect` type parameter of the current function.
+    pub(crate) fn reflect_local(&self, t: TypeId) -> Option<LocalId> {
+        let Ty::Param(p) = self.rty(t) else { return None };
+        self.reflect_param_local(p)
+    }
+
+    /// Returns the hidden local holding the description of `p` if `p` is a
+    /// `reflect` type parameter of the current function.
+    pub(crate) fn reflect_param_local(&self, p: ParamId) -> Option<LocalId> {
+        self.fs.reflect_locals.iter().find(|&&(q, _)| q == p).map(|&(_, l)| l)
+    }
 
     /// Declares the hidden dictionary parameters of the function being
     /// checked and records the evidence they (and impl dictionaries) provide.
@@ -1064,7 +1136,10 @@ impl Checker {
             };
             for (v, b) in inst.builtin {
                 match self.satisfies(v, b) {
-                    Some(false) => return Err(context(self, format!("{} does not satisfy {}", self.show(v), b.name()))),
+                    Some(false) => {
+                        let msg = self.format_unsatisfied_bound(v, b, "");
+                        return Err(context(self, msg));
+                    }
                     None => self.fs.obligations.push((v, b, span)),
                     Some(true) => {}
                 }

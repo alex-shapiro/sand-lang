@@ -111,6 +111,7 @@ pub fn render_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Valu
     let mut work = vec![Work::Val(v, 0, debug)];
     let mut scratch = Scratch::new();
     let mut charged = out.len();
+    let error_def = prog.struct_types.get(&<crate::stdlib::Error as crate::NamedType>::rust_type()).copied();
     while let Some(w) = work.pop() {
         if out.len() - charged >= BYTES_PER_UNIT {
             budget.charge_bytes(out.len() - charged)?;
@@ -224,7 +225,7 @@ pub fn render_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Valu
                             }
                             Obj::Struct(def, fields) => {
                                 let rt = &prog.types[*def as usize];
-                                if *def == prog.ids.error_def && !debug {
+                                if Some(*def) == error_def && !debug {
                                     let kind = heap.str(fields[0]);
                                     let msg = heap.str(fields[1]);
                                     scratch.check(heap, out.len() + kind.len() + msg.len())?;

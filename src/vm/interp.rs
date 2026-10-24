@@ -1621,6 +1621,10 @@ impl Vm {
                         Ok(v) => r!(local) = v,
                         Err(c) => fail_ctl!(c),
                     },
+                    Op::Describe { base, tmpl } => match self.op_describe(&prog, tmpl, &regs[base as usize..]) {
+                        Ok(v) => r!(base) = v,
+                        Err(c) => fail_ctl!(c),
+                    },
 
                     // ---------------- misc
                     Op::Spawn { dst, closure } => {
@@ -1868,6 +1872,25 @@ impl Vm {
         }
         self.heap.check_memory(out.len())?;
         Ok(out)
+    }
+
+    /// `Op::Describe`: instantiates a type descriptor template with the
+    /// argument descriptors at the start of `args`.
+    #[inline(never)]
+    fn op_describe(&mut self, prog: &Program, tmpl: u32, args: &[Value]) -> Result<Value, Ctl> {
+        let t = &prog.desc_templates[tmpl as usize];
+        self.meter.charge(t.size() as u64)?;
+        let args = &args[..t.arity()];
+        let mut descs = Vec::with_capacity(args.len());
+        for &a in args {
+            match self.heap.get(a) {
+                Obj::TypeDesc(d) => descs.push(d),
+                _ => return Err(internal("`Op::Describe` expected type descriptions")),
+            }
+        }
+        let d = Obj::TypeDesc(t.instantiate(&descs, args.into())?);
+        self.check_memory(d.size())?;
+        Ok(self.heap.alloc(d))
     }
 
     /// `Op::Interp`: string interpolation into one buffer.

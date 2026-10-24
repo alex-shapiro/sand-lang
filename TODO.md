@@ -62,24 +62,27 @@ Follow-up work, roughly in priority order.
 
 ### Embedding
 
-- [ ] Support enum variant payloads in `#[derive(SandEnum)]` so native modules
-      such as `json` do not construct variant values by runtime ID.
-- [ ] Register `json.Json` through `NativeModule` instead of matching its
-      module and type name in `compile/reflect.rs`.
-- [ ] Return `SandStruct` types from the private `http` natives (`send`,
-      `read_response`, `start_upload`, `next_request`) instead of converting
-      tuples in Sand wrappers.
-- [ ] Bind the prelude `Error` type with `SandStruct` instead of constructing
-      it by runtime ID (`RtIds::error_def`, `Vm::err_value`).
-- [ ] Reject `json.encode<T>` and `json.to_json<T>` at compile time if `T`
-      contains a function, task, or channel.
-- [ ] Support `Param<N, bound::Num>` in native functions by passing the `Num`
-      trait dictionary to the native call.
-- [ ] Support generic structs (such as `Iter<T>`) and default field values in
-      `#[derive(SandStruct)]`.
+- [ ] Convert `Json` values to and from Rust without recursion so that
+      conversion accepts the full 512 nesting levels of `json.parse` without
+      overflowing a 512 KiB thread stack (the iOS default).
+- [ ] Support bounded type parameters on `Self` and nested generic types in
+      `#[derive(SandEnum)]` and `#[derive(SandStruct)]` fields. The derive
+      macros substitute `Param<N>` for each type parameter when describing
+      field types, and `Param<N>` does not satisfy Rust trait bounds such as
+      `Ord`.
+- [ ] Represent `ValueType` constants in `ConstVal` by their text form so that
+      `#[sand(default)]` supports value-type fields and `json.decode` evaluates
+      constant value-type defaults directly.
+- [ ] Pass `Num<N>` evidence to native `impl` methods by extracting the `Num`
+      dictionary from the `impl` dictionary.
+- [ ] Implement `SandType`, `FromValue`, and `IntoValue` for
+      `std::ops::Range<i64>` and `RangeInclusive<i64>` so that `SandStruct`
+      fields can use Rust range types and `#[sand(default)]`.
 
 ### Tooling
 
+- [ ] Describe built-in bounds (`Eq`, `Ord`, `Hash`, `Num`, `Encode`) in
+      `help`.
 - [ ] Fix broken intra-doc links to private items and run `cargo doc` with
       `-D warnings` in CI.
 - [ ] Policy lints judge `http` rules only by their exact text (and
@@ -116,6 +119,11 @@ Follow-up work, roughly in priority order.
 - [ ] Profile `HostFn` dispatch and argument slice construction (`fannkuch` and
       `results` in `bench/programs`) to reduce the ~0.5 ns typed native call
       overhead.
+- [ ] Reduce `json.decode` dispatch overhead (~76 ns per call to decode `"1"`,
+      of which 15 ns is the Sand wrapper around `decode_raw`).
+- [ ] Cache instantiated `TypeDesc` objects in `Op::Describe` by their
+      template and argument descriptions to avoid ~90 ns of allocation per
+      generic `reflect` call.
 - [ ] Dispatch loop: the cost of individual instructions shifts by up to
       ±15% between builds as LLVM reallocates registers. A threaded design
       (one function per instruction with guaranteed tail calls, Rust's
@@ -153,5 +161,17 @@ Follow-up work, roughly in priority order.
       specified in §3.1.
 - [ ] Trait objects (`dyn Trait`), associated types and constants, and
       blanket impls (`impl<T> X for T`).
-- [ ] Trait bounds on struct/enum type parameters.
+- [ ] **Unify built-in bounds and traits.** Represent `Eq`, `Ord`, `Hash`,
+      `Num`, and `Encode` as traits whose implementations the compiler derives
+      from struct fields and enum payloads, so that built-in bounds and
+      user-defined traits share one implementation for supertraits, evidence,
+      and diagnostics.
+- [ ] Enforce `Hash` on `Set<T>` element types and `[K: V]` key types at every
+      type annotation, not only at method calls, so that `json.decode` cannot
+      construct a `Set` or map with unhashable keys.
+- [ ] Support trait bounds on struct and enum type parameters, and check
+      built-in bounds at type construction sites (currently `struct Bag<T: Hash>`
+      accepts `Bag<[int]>`).
+- [ ] Support trait bounds and `reflect` type parameters on local functions by
+      passing hidden dictionary and type-description arguments to closures.
 - [ ] Non-constant trait method defaults.

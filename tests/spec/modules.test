@@ -191,10 +191,10 @@ pub fn cents(n: int) -> Money { Money { cents: n } }
 --- error
 2: method `to_str` of `money.Money` is private
 
-=== only natives take type descriptions
-fn id<reflect T>(x: T) -> T { x }
+=== only functions take type descriptions
+struct Box<reflect T> { x: T }
 --- error
-1: only the type parameters of a `native fn` can be `reflect`
+1: only the type parameters of a function can be `reflect`
 
 === private fields cannot be assigned in other modules
 import "./account.sand"
@@ -221,12 +221,6 @@ pub struct Account {
 pub fn open() -> Account { Account { owner: "ann" } }
 --- error
 4: this call cannot build `account.Account` here: its field `balance` is private
-
-=== natives that take a type description can only be called
-import json
-let decode: fn(str) -> Result<int> = json.decode
---- error
-2: `decode` takes a type description, so it can only be called
 
 === private items are not visible
 import "./m.sand"

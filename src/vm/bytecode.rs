@@ -3,7 +3,7 @@
 //! Every instruction is 8 bytes. Registers are frame-relative `u16` slots.
 //! Jump offsets are relative to the instruction *after* the jump.
 
-use super::value::{FxHashMap, TypeDesc};
+use super::value::{DescTemplate, FxHashMap, TypeDesc};
 use crate::hir::FormatSpec;
 use std::sync::Arc;
 
@@ -901,6 +901,12 @@ pub enum Op {
         dst: Reg,
         tmpl: u32,
     },
+    /// Instantiates `Program::desc_templates[tmpl]` with the type descriptors
+    /// in `base..` and writes the result to `base`.
+    Describe {
+        base: Reg,
+        tmpl: u32,
+    },
     /// `local += "..."` (an interpolation) for a string builder local (see
     /// `AppendStr`): formats the template and appends it in place.
     AppendInterp {
@@ -1114,6 +1120,9 @@ impl Op {
     }
 }
 
+/// Prototype name for helper functions that evaluate field defaults and populate sets during `json.decode` (omitted from stack traces).
+pub const FILL_PROTO: &str = "<fill>";
+
 #[derive(Clone, Debug)]
 pub struct Proto {
     pub name: String,
@@ -1239,20 +1248,6 @@ pub struct RtIds {
     pub none: u32,
     pub ok: u32,
     pub err: u32,
-    pub error_def: u32,
-    pub json: Option<JsonIds>,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct JsonIds {
-    pub def: u32,
-    pub null: u32,
-    pub bool_: u32,
-    pub int: u32,
-    pub float: u32,
-    pub str_: u32,
-    pub arr: u32,
-    pub obj: u32,
 }
 
 /// A compiled program, shared by `Arc`. It is immutable once built, except
@@ -1265,11 +1260,13 @@ pub struct Program {
     pub global_names: Vec<String>,
     pub types: Vec<StructRt>,
     pub variants: Vec<VariantRt>,
-    /// Maps each registered [`EnumType`](crate::EnumType) `TypeId` to the
-    /// runtime ID of its first variant. Subsequent variants have consecutive IDs.
+    /// Maps the [`NamedType::rust_type`](crate::NamedType::rust_type) of each
+    /// registered [`EnumType`](crate::EnumType) to the runtime ID of its first
+    /// variant. Subsequent variants have consecutive IDs.
     pub enum_types: FxHashMap<std::any::TypeId, u32>,
-    /// Maps each registered [`StructType`](crate::native::StructType) `TypeId`
-    /// to its runtime struct ID.
+    /// Maps the [`NamedType::rust_type`](crate::NamedType::rust_type) of each
+    /// registered [`StructType`](crate::native::StructType) to its runtime
+    /// struct ID.
     pub struct_types: FxHashMap<std::any::TypeId, u32>,
     pub ids: RtIds,
     pub entry: u32,
@@ -1278,8 +1275,10 @@ pub struct Program {
     /// The names of the natives, by id.
     pub native_names: Arc<[String]>,
     pub native_argc: Arc<[u16]>,
-    /// The templates of string interpolations (`Op::Interp`).
+    /// Templates for string interpolations (`Op::Interp`).
     pub templates: Vec<Template>,
+    /// Templates for parameterized type descriptors (`Op::Describe`).
+    pub desc_templates: Vec<DescTemplate>,
     /// The jump tables of `SwitchVariant`, `SwitchInt` and `SwitchChar`.
     pub switches: Vec<Switch>,
 }

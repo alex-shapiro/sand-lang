@@ -160,6 +160,14 @@ fn bound_checks_on_structs_sharing_field_types() {
 }
 
 #[test]
+fn bounds_of_long_chains_of_structs_are_derived_in_linear_time() {
+    let n = 20_000;
+    let mut src: String = (0..n).map(|i| format!("struct S{i} {{ s: S{}? }}\n", i + 1)).collect();
+    src += &format!("struct S{n} {{ f: fn() -> int }}\nfn same(x: S0) -> bool {{ x == x }}\n");
+    rejects(&src, "S0 does not satisfy Eq");
+}
+
+#[test]
 fn deeply_nested_string_interpolation() {
     // The lexer keeps its own stack; the parser limits the nesting.
     let n = 100_000;
@@ -458,4 +466,51 @@ fn many_inlined_lambdas_compile_in_linear_time() {
     compiles_in_linear_time("inlined lambdas", 25_000, |n| {
         format!("fn main() {{\n    var xs = [1, 2, 3]\n{}    print(xs)\n}}\nmain()\n", "    xs = xs.map(x => x + 1)\n".repeat(n))
     });
+}
+
+#[test]
+fn constant_field_defaults_are_bounded() {
+    let mut lets = vec!["let a0 = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]".to_string()];
+    let mut ty = "[int]".to_string();
+    for i in 1..8 {
+        lets.push(format!("let a{i} = [{}]", vec![format!("a{}", i - 1); 10].join(", ")));
+        ty = format!("[{ty}]");
+    }
+    let wide = format!("struct S {{\n    x: {ty} = {{\n        {}\n        a7\n    }}\n}}", lets.join("\n        "));
+    check(Config::new(), &wide).0.unwrap();
+    let mut deep = String::from("import json\n");
+    for i in 0..300 {
+        deep += &format!("struct S{i} {{ next: S{} = S{} {{}} }}\n", i + 1, i + 1);
+    }
+    deep += "struct S300 { v: int = 1 }\nlet s: S0 = json.decode(\"{}\")?\nprint(s == S0 {})\n";
+    let out = MemorySink::new();
+    let mut engine = Engine::new(Config::new().stdout(out.clone())).unwrap();
+    rt().block_on(engine.run_source("main.sand", &deep)).unwrap();
+    assert_eq!(out.contents(), "true\n");
+}
+
+#[test]
+fn rust_field_defaults_are_built_once() {
+    #[derive(sandlang::SandStruct)]
+    #[sand(module = "lab")]
+    struct Big {
+        #[sand(default = vec![0; (1 << 16) - 1])]
+        table: Vec<i64>,
+    }
+    let mut m = sandlang::NativeModule::new("lab");
+    m.bind::<Big>();
+    let src = format!("import lab\nlet xs = [{}]\nprint(xs.len())\n", vec!["lab.Big {}"; 3000].join(", "));
+    let (r, took) = check(limits(|l| l.max_compile_fuel = Some(2_000_000)).module(m), &src);
+    r.unwrap();
+    assert!(took < FAST, "took {took:?}");
+}
+
+#[test]
+fn copies_of_constant_strings_are_charged_by_their_size() {
+    let text = "x".repeat(1 << 16);
+    let fields = |ty: &str, n: usize| (0..n).map(|i| format!("f{i}: {ty} = {ty} {{}}")).collect::<Vec<_>>().join(", ");
+    let mut src = format!("struct A {{ s: str = \"{text}\" }}\nstruct B {{ {} }}\nstruct C {{ {} }}\n", fields("A", 16), fields("B", 16));
+    check(Config::new(), &src).0.unwrap();
+    src += &format!("struct D {{ {} }}\n", fields("C", 16));
+    rejects(&src, "program too complex to compile");
 }

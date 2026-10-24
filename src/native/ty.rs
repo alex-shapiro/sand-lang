@@ -1,6 +1,6 @@
 //! Rust representations of Sand types.
 
-use crate::vm::value::{TypeDesc, Value};
+use crate::vm::value::Value;
 use std::any::TypeId;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
@@ -27,9 +27,10 @@ pub enum Type {
     /// type parameters before the function's own type parameters) and its
     /// required [`Bounds`].
     Param(u8, Bounds),
-    /// Runtime type description for the `reflect` type parameter at index `0..`
-    /// and its compile-time [`ReflectCheckFn`].
-    Reflect(u8, ReflectCheckFn),
+    /// Runtime type descriptor for the `reflect` type parameter at index `0..`.
+    Reflect(u8),
+    /// `Num` trait dictionary for the type parameter at index `0..` (see [`Num`]).
+    Num(u8),
     /// Nominal type declared in a module.
     Named(Named),
 }
@@ -49,10 +50,9 @@ impl Type {
         Type::Named(Named { module, name, args, rust: None })
     }
 
-    /// Constructs a reference to the Sand type `module.name` bound to the Rust
-    /// type `T`.
-    pub fn bound<T: 'static>(module: &'static str, name: &'static str) -> Type {
-        Type::Named(Named { module, name, args: Vec::new(), rust: Some(TypeId::of::<T>()) })
+    /// Constructs a reference to the Sand type bound to `T` with type arguments `args`.
+    pub fn bound<T: super::NamedType>(args: Vec<Type>) -> Type {
+        Type::Named(Named { module: T::MODULE, name: T::NAME, args, rust: Some(T::rust_type()) })
     }
 
     pub fn option(t: Type) -> Type {
@@ -64,7 +64,7 @@ impl Type {
     }
 
     pub fn error() -> Type {
-        Type::named("prelude", "Error", Vec::new())
+        <crate::stdlib::Error as SandType>::sand_type()
     }
 
     pub(crate) fn visit(&self, f: &mut impl FnMut(&Type)) {
@@ -143,7 +143,8 @@ impl Type {
                 r.write(module, param, out);
             }
             Type::Param(i, _) => out.push_str(&param(*i)),
-            Type::Reflect(i, _) => out.push_str(&format!("<description of {}>", param(*i))),
+            Type::Reflect(i) => out.push_str(&format!("<description of {}>", param(*i))),
+            Type::Num(i) => out.push_str(&format!("<Num evidence of {}>", param(*i))),
             Type::Named(n) if n.module == "prelude" && n.name == "Option" && n.args.len() == 1 => {
                 let fn_type = matches!(n.args[0], Type::Fn(..));
                 out.push_str(if fn_type { "(" } else { "" });
@@ -248,6 +249,12 @@ impl<K: SandType, V: SandType> SandType for BTreeMap<K, V> {
     }
 }
 
+impl<K: SandType, V: SandType> SandType for indexmap::IndexMap<K, V> {
+    fn sand_type() -> Type {
+        Type::Map(Box::new(K::sand_type()), Box::new(V::sand_type()))
+    }
+}
+
 impl<T: SandType> SandType for HashSet<T> {
     fn sand_type() -> Type {
         Type::Set(Box::new(T::sand_type()))
@@ -278,37 +285,43 @@ fn_type!(A, B, C);
 #[derive(Clone, Copy, Debug)]
 pub enum Never {}
 
-/// Built-in trait bounds (`Eq`, `Ord`, `Hash`) required on a generic type
-/// parameter of a native function. `Ord` and `Hash` imply `Eq`.
+/// Built-in trait bounds (`Eq`, `Ord`, `Hash`, `Num`, `Encode`) required on a
+/// generic type parameter of a native function.
+///
+/// `Ord`, `Hash`, and `Num` imply `Eq`, and `Num` implies `Ord` and `Encode`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Bounds {
     pub eq: bool,
     pub ord: bool,
     pub hash: bool,
+    pub num: bool,
+    pub encode: bool,
 }
 
 impl Bounds {
-    pub const NONE: Bounds = Bounds { eq: false, ord: false, hash: false };
+    pub const NONE: Bounds = Bounds { eq: false, ord: false, hash: false, num: false, encode: false };
 
     #[must_use]
     pub const fn union(self, other: Bounds) -> Bounds {
-        Bounds { eq: self.eq || other.eq, ord: self.ord || other.ord, hash: self.hash || other.hash }
+        Bounds {
+            eq: self.eq || other.eq,
+            ord: self.ord || other.ord,
+            hash: self.hash || other.hash,
+            num: self.num || other.num,
+            encode: self.encode || other.encode,
+        }
     }
 
-    /// Returns the bound names required by `self`, omitting `Eq` if implied by
-    /// `Ord` or `Hash`.
+    /// Returns the required bound names, omitting bounds that are implied by other bounds in `self`.
     pub fn names(self) -> Vec<&'static str> {
-        let mut out = Vec::new();
-        if self.eq && !self.ord && !self.hash {
-            out.push("Eq");
-        }
-        if self.ord {
-            out.push("Ord");
-        }
-        if self.hash {
-            out.push("Hash");
-        }
-        out
+        crate::types::Bound::names(&self.list())
+    }
+
+    pub(crate) fn list(self) -> Vec<crate::types::Bound> {
+        use crate::types::Bound;
+        let all =
+            [(self.eq, Bound::Eq), (self.ord, Bound::Ord), (self.hash, Bound::Hash), (self.num, Bound::Num), (self.encode, Bound::Encode)];
+        all.into_iter().filter(|&(on, _)| on).map(|(_, b)| b).collect()
     }
 }
 
@@ -343,6 +356,10 @@ pub mod bound {
         Ord: ord,
         /// Requires `Hash` (map keys and set elements).
         Hash: hash,
+        /// Requires `Num` (`int` or `float`). Pass [`Num`](super::super::Num) as a parameter to access the `Num` dictionary at runtime.
+        Num: num,
+        /// Requires `Encode` (excludes functions, tasks, channels, and native objects).
+        Encode: encode,
     }
 
     impl<A: ParamBounds, B: ParamBounds> ParamBounds for (A, B) {
@@ -390,69 +407,68 @@ impl<const N: u8, B: bound::ParamBounds> SandType for Param<N, B> {
     }
 }
 
-/// Compile-time validation function for a reflected type node (see [`ReflectCheck`]).
-pub type ReflectCheckFn = fn(&TypeDesc, &TypeNames) -> Result<(), String>;
+/// Runtime dictionary for the `N`-th generic type parameter bounded by `Num`
+/// (`int` or `float`).
+///
+/// A Rust function can accept `Num<N>` for any type parameter declared with a
+/// `T: Num` bound. Place `Num<N>` parameters in ascending order of `N`, after
+/// any [`Reflect`] parameters and before regular value parameters.
+pub struct Num<const N: u8>(Value);
 
-/// Compile-time validator for a `reflect` type parameter (see [`Reflect`]).
-pub trait ReflectCheck {
-    /// Validates a single `node` in a reflected [`TypeDesc`] graph.
-    ///
-    /// At each call site, the compiler invokes `check` once per distinct node in
-    /// the type argument's [`TypeDesc`] and reports a compile error if `check`
-    /// returns `Err`. Use [`TypeNames::format`] to format `node` or its child
-    /// types in the error message.
-    fn check(node: &TypeDesc, names: &TypeNames) -> Result<(), String>;
-}
-
-impl ReflectCheck for () {
-    fn check(_: &TypeDesc, _: &TypeNames) -> Result<(), String> {
-        Ok(())
-    }
-}
-
-/// Names of the enclosing structs and enums of a [`TypeDesc`] node during
-/// [`ReflectCheck::check`].
-#[derive(Debug, Default)]
-pub struct TypeNames(pub(crate) HashMap<u32, String>);
-
-impl TypeNames {
-    /// Formats the Sand type name described by `t`.
-    pub fn format(&self, t: &TypeDesc) -> String {
-        t.format(&|id| self.0.get(&id).cloned().unwrap_or_default())
-    }
-}
-
-/// Runtime type description for the `N`-th `reflect` type parameter of a
-/// `native fn` (see [`Type::Reflect`]), validated at compile time by `C`.
-pub struct Reflect<const N: u8, C: ReflectCheck = ()>(Value, PhantomData<fn() -> C>);
-
-impl<const N: u8, C: ReflectCheck> Reflect<N, C> {
+impl<const N: u8> Num<N> {
     pub fn raw(self) -> Value {
         self.0
     }
 
     pub(crate) fn from_raw(v: Value) -> Self {
-        Reflect(v, PhantomData)
+        Num(v)
     }
 }
 
-impl<const N: u8, C: ReflectCheck> Clone for Reflect<N, C> {
+impl<const N: u8> Clone for Num<N> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<const N: u8, C: ReflectCheck> Copy for Reflect<N, C> {}
+impl<const N: u8> Copy for Num<N> {}
 
-impl<const N: u8, C: ReflectCheck> fmt::Debug for Reflect<N, C> {
+impl<const N: u8> fmt::Debug for Num<N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Num({:?})", self.0)
+    }
+}
+
+impl<const N: u8> SandType for Num<N> {
+    fn sand_type() -> Type {
+        Type::Num(N)
+    }
+}
+
+/// Runtime type descriptor for the `N`-th `reflect` type parameter of a
+/// `native fn` (see [`Type::Reflect`]).
+#[derive(Clone, Copy)]
+pub struct Reflect<const N: u8>(Value);
+
+impl<const N: u8> Reflect<N> {
+    pub fn raw(self) -> Value {
+        self.0
+    }
+
+    pub(crate) fn from_raw(v: Value) -> Self {
+        Reflect(v)
+    }
+}
+
+impl<const N: u8> fmt::Debug for Reflect<N> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Reflect({:?})", self.0)
     }
 }
 
-impl<const N: u8, C: ReflectCheck> SandType for Reflect<N, C> {
+impl<const N: u8> SandType for Reflect<N> {
     fn sand_type() -> Type {
-        Type::Reflect(N, C::check)
+        Type::Reflect(N)
     }
 }
 

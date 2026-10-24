@@ -687,7 +687,7 @@ fn host_function_arguments_count_against_the_memory_limit() {
 
 #[test]
 fn json_encode_charges_for_nested_options() {
-    let src = "import json\nfn deep<T>(x: T, n: int) -> int {\n    if n == 0 {\n        let xs = (0..100000).map(_ => x)\n        return json.encode(xs).len()\n    }\n    deep(Some(x), n - 1)\n}\nprint(deep(1, 2000))";
+    let src = "import json\nfn deep<T: Encode>(x: T, n: int) -> int {\n    if n == 0 {\n        let xs = (0..100000).map(_ => x)\n        return json.encode(xs).len()\n    }\n    deep(Some(x), n - 1)\n}\nprint(deep(1, 2000))";
     expect_stop(limits(|l| l.max_instructions = Some(2_000_000)), src, is_limit(LimitKind::Instructions), Duration::from_secs(30));
 }
 
@@ -771,4 +771,56 @@ fn iterating_maps_and_sets_copies_nothing() {
                let it = m.iter()\nm[0] = 1\nprint(it.count())";
     let (r, _) = run(limits(|l| l.max_memory = Some(20 << 20)), src);
     assert!(matches!(r, Err(Error::Limit(LimitKind::Memory))), "{r:?}");
+}
+
+#[test]
+fn names_of_type_descriptions_built_at_run_time_stay_short() {
+    let doubling = "struct P<A, B> { a: A, b: B }\nfn grow<reflect A, reflect B>(n: int, a: A?, b: B?) -> int {\n    \
+                    let x: P<A, B>? = None\n    grow(n + 1, x, x)\n}\nprint(grow(0, Some(1), Some(2)))";
+    let deep = |e: &Error| matches!(e, Error::Runtime { message, .. } if message.contains("nested too deeply"));
+    expect_stop(limits(|l| l.max_memory = None), doubling, deep, Duration::from_secs(10));
+    let shared = "import json\nstruct P<T> { v: T }\nfn grow<reflect A: Encode>(n: int, a: A?) -> int {\n    if n == 0 {\n        \
+                  let m: Result<[A: int]> = json.decode(\"{\\\"k\\\": 1}\")\n        let p: Result<P<A>> = json.decode(\"{\\\"v\\\": 1}\")\n        \
+                  print(m)\n        print(p)\n        return 0\n    }\n    let x: (A, A)? = None\n    grow(n - 1, x)\n}\nlet a: int? = None\nprint(grow(200, a))";
+    let start = Instant::now();
+    let (r, out) = run(Config::new(), shared);
+    r.unwrap();
+    assert!(start.elapsed() < Duration::from_secs(10), "took {:?}", start.elapsed());
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 3, "{out}");
+    assert!(
+        lines[0].starts_with("Err(Error { kind: \"invalid\", message: \"$: cannot decode map keys of type ((((") && lines[0].len() < 400,
+        "{out}"
+    );
+    assert!(lines[0].contains('…') && lines[1].contains("expected array of length 2"), "{out}");
+}
+
+#[test]
+fn type_descriptions_count_the_nodes_they_share_once() {
+    let src = "import json\nstruct P<A, B> { a: A, b: B }\nfn deep<reflect A: Encode, reflect B: Encode>(n: int, x: [A], y: [B]) -> int {\n    \
+               if n == 0 {\n        let r: Result<[(A, B)]> = json.decode(\"[]\")\n        return if r.is_ok() { 0 } else { -1 }\n    }\n    \
+               let w: [P<A, B>] = []\n    deep(n - 1, w, w) + 1\n}\nlet w: [int] = []\nprint(deep(200, w, w))";
+    let (r, out) = run(limits(|l| l.max_memory = Some(16 << 20)), src);
+    r.unwrap();
+    assert_eq!(out, "200\n");
+}
+
+#[test]
+fn the_collection_at_the_memory_limit_releases_the_staging_buffer() {
+    let src = |churn: bool, mib: usize| {
+        let churn = if churn { "for i in 0..400 {\n    let s = \"y\".repeat(1 << 20)\n}\n" } else { "" };
+        format!(
+            "import json\nlet text = \"[\" + \"[1],\".repeat(199999) + \"[1]]\"\nlet a = json.parse(text)?\n{churn}let b = \"x\".repeat({})\n\
+             print(a.as_list().unwrap().len() + b.len())",
+            mib << 20
+        )
+    };
+    let fits = |churn: bool, mib: usize| run(limits(|l| l.max_memory = Some(64 << 20)), &src(churn, mib)).0.is_ok();
+    let (mut lo, mut hi) = (0, 64);
+    while hi - lo > 1 {
+        let mid = (lo + hi) / 2;
+        if fits(true, mid) { lo = mid } else { hi = mid }
+    }
+    assert!(lo >= 16, "{lo} MiB");
+    assert!(fits(false, lo - 2), "{lo} MiB fit after churn, but {} MiB do not fit right after the parse", lo - 2);
 }

@@ -49,7 +49,6 @@ pub struct CompileInput<'a> {
 
 struct Compiler<'a> {
     cp: &'a CheckedProgram,
-    natives: &'a NativeDecls,
     optimize: bool,
     /// The program's types, which `reflect` extends with the instances it
     /// describes (a private copy: they are not needed after compiling).
@@ -273,6 +272,7 @@ pub(crate) struct ProgramMark {
     types: usize,
     variants: usize,
     templates: usize,
+    desc_templates: usize,
     switches: usize,
     tests: usize,
     nglobals: usize,
@@ -288,6 +288,7 @@ impl ProgramMark {
             types: p.types.len(),
             variants: p.variants.len(),
             templates: p.templates.len(),
+            desc_templates: p.desc_templates.len(),
             switches: p.switches.len(),
             tests: p.tests.len(),
             nglobals: p.nglobals,
@@ -305,6 +306,7 @@ impl ProgramMark {
         p.enum_types.retain(|_, &mut first| first < self.variants as u32);
         p.struct_types.retain(|_, &mut def| def < self.types as u32);
         p.templates.truncate(self.templates);
+        p.desc_templates.truncate(self.desc_templates);
         p.switches.truncate(self.switches);
         p.tests.truncate(self.tests);
         p.nglobals = self.nglobals;
@@ -338,7 +340,6 @@ pub(crate) fn compile_more(mut input: CompileInput, prog: &mut Program, inc: &mu
     let order = InitOrder::new(cp, &bodies, inits, prog.global_names.len(), input.initialized.take(), input.budget);
     let mut c = Compiler {
         cp,
-        natives: input.natives,
         optimize: input.optimize,
         arena: cp.arena.clone(),
         budget: input.budget,
@@ -432,30 +433,10 @@ impl<'a> Compiler<'a> {
             let s = cp.syms.get(n);
             cp.types[d as usize].variants().iter().find(|v| Some(v.name) == s).map(|v| v.rt_id).unwrap_or(0)
         };
-        self.prog.ids = RtIds {
-            some: vid(wk.option, "Some"),
-            none: vid(wk.option, "None"),
-            ok: vid(wk.result, "Ok"),
-            err: vid(wk.result, "Err"),
-            error_def: wk.error,
-            json: None,
-        };
+        self.prog.ids =
+            RtIds { some: vid(wk.option, "Some"), none: vid(wk.option, "None"), ok: vid(wk.result, "Ok"), err: vid(wk.result, "Err") };
         self.prog.enum_types.extend(cp.enum_bindings.iter().copied());
         self.prog.struct_types.extend(cp.struct_bindings.iter().copied());
-        let (json, json_mod) = (cp.syms.get("Json"), cp.syms.get("json"));
-        if let Some(jd) = cp.types.iter().position(|t| Some(t.name) == json && Some(t.module_name) == json_mod) {
-            let jd = jd as u32;
-            self.prog.ids.json = Some(JsonIds {
-                def: jd,
-                null: vid(jd, "Null"),
-                bool_: vid(jd, "Bool"),
-                int: vid(jd, "Int"),
-                float: vid(jd, "Float"),
-                str_: vid(jd, "Str"),
-                arr: vid(jd, "Arr"),
-                obj: vid(jd, "Obj"),
-            });
-        }
         // Reserve protos for every new script function so calls can refer to them.
         let first = self.fn_protos.len();
         while self.fn_protos.len() < cp.fns.len() {
@@ -1708,6 +1689,36 @@ impl<'a> Compiler<'a> {
                 };
                 self.emit(f, Op::LoadConst { dst, k });
             }
+            HKind::TypeDesc { ty, args } => {
+                let mut sink = DescCode { cp: self.cp, prog: &mut *self.prog, fn_protos: &self.fn_protos };
+                let params = self.arena.params_of(*ty);
+                if params.len() != args.len() {
+                    self.errors.push(Diag::error(e.span, "internal error: a type description has no argument for a type parameter"));
+                    return;
+                }
+                if params.is_empty() {
+                    match self.descs.const_for(self.cp, &mut self.arena, *ty, &mut sink) {
+                        Some(k) => {
+                            self.emit(f, Op::LoadConst { dst, k });
+                        }
+                        None => self.errors.push(Diag::error(e.span, "type too large to describe at runtime")),
+                    }
+                    return;
+                }
+                let Some(tmpl) = self.descs.template_for(self.cp, &mut self.arena, *ty, params, &mut sink) else {
+                    self.errors.push(Diag::error(e.span, "type too large to describe at runtime"));
+                    return;
+                };
+                let mark = f.next_reg;
+                let base = self.alloc_n(f, args.len());
+                for (i, a) in args.iter().enumerate() {
+                    self.expr_to(f, a, base + i as Reg);
+                }
+                self.set_line(f, e.span);
+                self.emit(f, Op::Describe { base, tmpl });
+                self.mv(f, dst, base);
+                f.next_reg = mark;
+            }
             HKind::VariantFn { rt_id, arity } => {
                 let p = self.variant_wrapper(*rt_id, *arity, f.file);
                 let k = self.const_idx(Const::Fn(p));
@@ -2079,7 +2090,7 @@ impl<'a> Compiler<'a> {
                 }
                 f.next_reg = mark;
             }
-            HKind::CallNative { native, args, reflect } => {
+            HKind::CallNative { native, args } => {
                 if let (Some(&op @ (Inline::MapGet | Inline::MapHas)), [HArg::Expr(m), HArg::Expr(k)]) =
                     (self.inline.get(native), args.as_slice())
                     && let HKind::Tuple(items) = &k.kind
@@ -2156,35 +2167,14 @@ impl<'a> Compiler<'a> {
                     return;
                 }
                 let mark = f.next_reg;
-                if let ([HArg::Expr(x)], true) = (args.as_slice(), reflect.is_empty()) {
+                if let [HArg::Expr(x)] = args.as_slice() {
                     let r = self.expr_reg(f, x);
                     self.set_line(f, e.span);
                     self.call_native(f, r, *native, dst);
                     f.next_reg = mark;
                     return;
                 }
-                let base = self.call_args(f, args, reflect.len());
-                for (i, t) in reflect.iter().enumerate() {
-                    let prog = &mut *self.prog;
-                    let add = |desc| {
-                        prog.consts.push(Const::TypeDesc(desc));
-                        (prog.consts.len() - 1) as u32
-                    };
-                    let Some(k) = self.descs.const_for(self.cp, &mut self.arena, *t, add) else {
-                        self.errors.push(Diag::error(e.span, "type too large to describe at runtime"));
-                        continue;
-                    };
-                    let check = self.natives.fns.get(*native as usize).and_then(|d| match d.sig.params.get(i) {
-                        Some(crate::native::Type::Reflect(_, c)) => Some(*c),
-                        _ => None,
-                    });
-                    if let (Some(check), Const::TypeDesc(desc)) = (check, &self.prog.consts[k as usize])
-                        && let Err(msg) = self.descs.check(k, desc, check)
-                    {
-                        self.errors.push(Diag::error(e.span, msg));
-                    }
-                    self.emit(f, Op::LoadConst { dst: base + i as Reg, k });
-                }
+                let base = self.call_args(f, args, 0);
                 self.set_line(f, e.span);
                 self.call_native(f, base, *native, dst);
                 f.next_reg = mark;
@@ -4243,7 +4233,7 @@ fn walk_pruned<'e>(e: &'e HExpr, f: &mut impl FnMut(&'e HExpr) -> bool) {
                 }
             }
         }
-        HKind::Dict { args, .. } => args.iter().for_each(|x| walk_pruned(x, f)),
+        HKind::Dict { args, .. } | HKind::TypeDesc { args, .. } => args.iter().for_each(|x| walk_pruned(x, f)),
         HKind::CallValue { callee, args } => {
             walk_pruned(callee, f);
             args.iter().for_each(|x| walk_pruned(x, f));
@@ -4298,6 +4288,66 @@ fn walk_pruned<'e>(e: &'e HExpr, f: &mut impl FnMut(&'e HExpr) -> bool) {
             }
         }
         _ => {}
+    }
+}
+
+/// Emits constants and helper functions for runtime type descriptors.
+struct DescCode<'p> {
+    cp: &'p CheckedProgram,
+    prog: &'p mut Program,
+    fn_protos: &'p PVec<Option<u32>>,
+}
+
+impl DescCode<'_> {
+    /// Emits a zero-parameter function prototype with `captures` captured values in its initial registers.
+    fn add(&mut self, file: u32, captures: usize, nregs: u16, code: Vec<Op>) -> u32 {
+        self.prog.protos.push(Proto {
+            name: FILL_PROTO.into(),
+            file,
+            nparams: 0,
+            nregs,
+            lines: vec![0; code.len()],
+            code,
+            captures: vec![NO_REG; captures],
+            cleanups: Vec::new(),
+            sites: Vec::new(),
+            inlined: Vec::new(),
+        });
+        (self.prog.protos.len() - 1) as u32
+    }
+}
+
+impl reflect::DescSink for DescCode<'_> {
+    fn constant(&mut self, desc: std::sync::Arc<crate::vm::value::TypeDesc>) -> u32 {
+        self.prog.consts.push(Const::TypeDesc(desc));
+        (self.prog.consts.len() - 1) as u32
+    }
+
+    fn template(&mut self, t: crate::vm::value::DescTemplate) -> u32 {
+        self.prog.desc_templates.push(t);
+        (self.prog.desc_templates.len() - 1) as u32
+    }
+
+    fn field_fill(&mut self, def: TypeDefId, index: u32, helper: FnId) -> Option<u32> {
+        let proto = (*self.fn_protos.get(helper as usize)?)?;
+        let idx = u16::try_from(index).ok()?;
+        let file = self.cp.types[def as usize].span.file;
+        // r0 holds the struct; r1 holds the evaluated default value.
+        let code = vec![Op::CallDirect { base: 1, proto }, Op::SetField { obj: 0, idx, src: 1 }, Op::RetUnit];
+        Some(self.add(file, 1, 2, code))
+    }
+
+    fn set_fill(&mut self) -> u32 {
+        // r0 holds the set; r1..=r3 hold the list, index, and length for ForList; r4 holds the element; r5 holds the SetAdd result.
+        let code = vec![
+            Op::LoadInt { dst: 2, v: 0 },
+            Op::Len { dst: 3, src: 1 },
+            Op::ForList { elem: 4, base: 1, off: 2 },
+            Op::SetAdd { dst: 5, set: 0, key: 4 },
+            Op::Loop { off: -3 },
+            Op::RetUnit,
+        ];
+        self.add(0, 2, 6, code)
     }
 }
 

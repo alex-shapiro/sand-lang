@@ -679,7 +679,7 @@ impl Vm {
                 Const::Bytes(b) => heap.new_bytes(b.clone()),
                 Const::Fn(p) => heap.alloc(Obj::Closure(*p, Box::new([]))),
                 Const::Native(n) => heap.alloc(Obj::NativeFn(*n)),
-                Const::TypeDesc(t) => heap.alloc(Obj::TypeDesc(t.clone())),
+                Const::TypeDesc(t) => heap.alloc(Obj::TypeDesc(TypeDescObj::constant(t.clone()))),
                 Const::Tuple(items) => heap.new_tuple(&items.iter().map(|&i| self.consts[i as usize]).collect::<Vec<_>>()),
             };
             self.consts.push(v);
@@ -844,20 +844,6 @@ impl Vm {
             Some(v) => self.some(v),
             None => self.none(),
         }
-    }
-
-    /// Builds an `Error { kind, message }` value.
-    pub fn error_value(&mut self, kind: &str, message: &str) -> Value {
-        let k = self.heap.new_str(kind);
-        let m = self.heap.new_str(message);
-        let def = self.prog.ids.error_def;
-        self.heap.alloc(Obj::Struct(def, Box::new([k, m])))
-    }
-
-    /// `Err(Error { kind, message })`.
-    pub fn err_value(&mut self, kind: &str, message: &str) -> Value {
-        let e = self.error_value(kind, message);
-        self.err(e)
     }
 
     /// Unpacks an Option: `Some(x)` → `Some(x)`.
@@ -1629,7 +1615,7 @@ impl Vm {
     /// from innermost inlined call to outermost.
     fn trace_frame(&self, proto: u32, at: u32, out: &mut Vec<TraceEntry>) {
         let proto = &self.prog.protos[proto as usize];
-        if proto.name == "<entry>" {
+        if proto.name == "<entry>" || proto.name == FILL_PROTO {
             return;
         }
         let idx = (at as usize).saturating_sub(1).min(proto.lines.len().saturating_sub(1));

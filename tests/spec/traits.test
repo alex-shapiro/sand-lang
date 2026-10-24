@@ -1029,7 +1029,7 @@ impl<T> Shape for W<T> {
 }
 --- error
 11: the trait `Describe` is not implemented for S, which trait `Shape` requires
-15: M does not satisfy Hash, which trait `Keyed` requires
+15: M does not satisfy Hash, which trait `Keyed` requires, because field `n` of `M` is mutable
 22: type parameter `T` does not implement `Describe`
 
 === cyclic supertraits

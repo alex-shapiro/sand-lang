@@ -424,7 +424,7 @@ impl<'a> Parser<'a> {
         Ok(Import { source, alias: None, names: Some(names) })
     }
 
-    fn generics(&mut self, native: bool) -> PResult<Vec<GenericParam>> {
+    fn generics(&mut self, function: bool) -> PResult<Vec<GenericParam>> {
         let mut out = Vec::new();
         if !self.eat(&Tok::Lt) {
             return Ok(out);
@@ -433,8 +433,8 @@ impl<'a> Parser<'a> {
             let mut reflect = false;
             if self.at(&Tok::Ident) && self.cur_text() == "reflect" && matches!(self.peek_tok(1), Tok::Ident) {
                 let span = self.bump();
-                if !native {
-                    self.errors.push(Diag::error(span, "only the type parameters of a `native fn` can be `reflect`"));
+                if !function {
+                    self.errors.push(Diag::error(span, "only the type parameters of a function can be `reflect`"));
                 }
                 reflect = true;
             }
@@ -528,7 +528,7 @@ impl<'a> Parser<'a> {
         let is_native = self.eat(&Tok::Native);
         self.expect(&Tok::Fn, "`fn`")?;
         let name = self.name_or_keyword("function name")?;
-        let generics = self.generics(is_native)?;
+        let generics = self.generics(true)?;
         self.expect(&Tok::LParen, "`(`")?;
         let mut params = Vec::new();
         let mut seen_default = false;

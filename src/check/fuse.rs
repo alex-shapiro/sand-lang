@@ -141,6 +141,7 @@ fn is_inert(e: &HExpr) -> bool {
             | HKind::Local(_)
             | HKind::Global(_)
             | HKind::FnValue(_)
+            | HKind::TypeDesc { .. }
             | HKind::VariantFn { .. }
             | HKind::Int(_)
             | HKind::Float(_)
@@ -523,11 +524,11 @@ impl Checker {
         mk(HKind::CallValue { callee: Box::new(local(f, fty, span)), args }, ret, span)
     }
 
-    fn some_rt(&self) -> u32 {
+    pub(crate) fn some_rt(&self) -> u32 {
         self.types[self.wk.option as usize].variants()[0].rt_id
     }
 
-    fn none_rt(&self) -> u32 {
+    pub(crate) fn none_rt(&self) -> u32 {
         self.types[self.wk.option as usize].variants()[1].rt_id
     }
 

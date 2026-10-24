@@ -77,7 +77,7 @@ fn unit(span: Span) -> HExpr {
     mk(HKind::Unit, TypeId::UNIT, span)
 }
 
-fn err(span: Span) -> HExpr {
+pub(super) fn err(span: Span) -> HExpr {
     mk(HKind::Error, TypeId::ERROR, span)
 }
 
@@ -615,6 +615,9 @@ impl Checker {
                     self.error(g.name.span, "local functions cannot have trait bounds; declare the function at the top level");
                     self.params[p as usize].traits.clear();
                 }
+                if g.reflect {
+                    self.error(g.name.span, "local functions cannot have `reflect` type parameters; declare the function at the top level");
+                }
             }
             let mut ptys = Vec::new();
             self.check_param_names(f.params.iter().map(|p| &p.name));
@@ -1095,13 +1098,8 @@ impl Checker {
     }
 
     fn fn_value(&mut self, f: FnId, span: Span) -> HExpr {
-        if self.fns[f as usize].generics.iter().any(|&p| self.params[p as usize].reflect) {
-            let msg = format!("`{}` takes a type description, so it can only be called", self.name(self.fns[f as usize].name));
-            self.error(span, msg);
-            return err(span);
-        }
-        if !self.fns[f as usize].dicts.is_empty() {
-            // Partially apply the dictionaries.
+        let fi = &self.fns[f as usize];
+        if !fi.dicts.is_empty() || fi.generics.iter().any(|&p| self.params[p as usize].reflect) {
             return self.wrapper_value(f, &[], span);
         }
         let inst = self.instantiate_fn_with(f, span, &[]);
@@ -1516,32 +1514,97 @@ impl Checker {
         let Some(mut hargs) = self.bind_args(Callee::Fn(f), &ptys, recv, args, span) else {
             return mk(HKind::Error, ret, span);
         };
-        if !dicts.is_empty() {
-            // Dictionaries are passed first; default helpers receive them too.
-            let k = dicts.len();
+        let mut hidden = self.hidden_args(f, &fresh, &dicts, "call", &|_, _| false, span);
+        if !hidden.is_empty() {
+            let k = hidden.len();
             for a in &mut hargs {
                 if let HArg::Default { inputs, .. } = a {
                     *inputs = (0..k).chain(inputs.iter().map(|i| i + k)).collect();
                 }
             }
-            let mut all: Vec<HArg> = dicts.into_iter().map(|(t, tr)| HArg::Expr(self.evidence_hole(t, tr, false, span))).collect();
-            all.extend(hargs);
-            hargs = all;
+            hidden.extend(hargs);
+            hargs = hidden;
         }
         match self.fns[f as usize].kind {
             FnKind::TraitMethod(trait_id, slot) => mk(HKind::CallTrait { trait_id, slot, args: hargs, impl_id: None }, ret, span),
-            FnKind::Native(n) => {
-                let mut reflect = Vec::new();
-                for (k, &t) in fresh.iter().enumerate() {
-                    if self.params[self.fns[f as usize].generics[k] as usize].reflect {
-                        reflect.push(t);
-                        self.fs.reflect_checks.push((t, span));
-                    }
-                }
-                mk(HKind::CallNative { native: n, args: hargs, reflect }, ret, span)
-            }
+            FnKind::Native(n) => mk(HKind::CallNative { native: n, args: hargs }, ret, span),
             _ => mk(HKind::Call { func: f, args: hargs }, ret, span),
         }
+    }
+
+    /// Builds an HIR expression for constant `c` with type `ty`.
+    pub(super) fn const_expr(&mut self, c: &ConstVal, ty: TypeId, span: Span) -> HExpr {
+        let all = |s: &mut Self, xs: &[ConstVal], tys: &[TypeId]| -> Vec<HExpr> {
+            xs.iter().enumerate().map(|(i, x)| s.const_expr(x, tys.get(i).copied().unwrap_or(TypeId::ERROR), span)).collect()
+        };
+        let kind = match c {
+            ConstVal::Unit => HKind::Unit,
+            ConstVal::Bool(b) => HKind::Bool(*b),
+            ConstVal::Int(i) => HKind::Int(*i),
+            ConstVal::Float(f) => HKind::Float(*f),
+            ConstVal::Str(s) => HKind::Str(s.clone()),
+            ConstVal::Bytes(b) => HKind::Bytes(b.clone()),
+            ConstVal::Dur(d) => HKind::Dur(*d),
+            ConstVal::Range(a, b, inclusive) => HKind::Range {
+                start: Box::new(mk(HKind::Int(*a), TypeId::INT, span)),
+                end: Box::new(mk(HKind::Int(*b), TypeId::INT, span)),
+                inclusive: *inclusive,
+            },
+            ConstVal::Tuple(xs) => {
+                let tys = match self.rty(ty) {
+                    Ty::Tuple(l) => self.arena.list(l).to_vec(),
+                    _ => Vec::new(),
+                };
+                HKind::Tuple(all(self, xs, &tys))
+            }
+            ConstVal::List(xs) => {
+                let elem = match self.rty(ty) {
+                    Ty::List(e) => e,
+                    _ => TypeId::ERROR,
+                };
+                HKind::List(all(self, xs, &vec![elem; xs.len()]))
+            }
+            ConstVal::Set(xs) => {
+                let elem = match self.rty(ty) {
+                    Ty::Set(e) => e,
+                    _ => TypeId::ERROR,
+                };
+                let list = self.list_ty(elem);
+                let items = mk(HKind::List(all(self, xs, &vec![elem; xs.len()])), list, span);
+                match self.prelude_native("set") {
+                    Some(native) => HKind::CallNative { native, args: vec![HArg::Expr(items)] },
+                    None => HKind::Error,
+                }
+            }
+            ConstVal::Map(kvs) => {
+                let (kt, vt) = match self.rty(ty) {
+                    Ty::Map(k, v) => (k, v),
+                    _ => (TypeId::ERROR, TypeId::ERROR),
+                };
+                HKind::Map(kvs.iter().map(|(k, v)| (self.const_expr(k, kt, span), self.const_expr(v, vt, span))).collect())
+            }
+            ConstVal::Variant(id, payload) if payload.is_empty() => HKind::Tag(*id),
+            ConstVal::Variant(id, payload) => {
+                let (d, i) = self.variants[*id as usize];
+                let args = match self.rty(ty) {
+                    Ty::Named(_, args) => self.elems(args),
+                    _ => Vec::new(),
+                };
+                let def = &self.types[d as usize];
+                let (fields, generics) = (def.variants()[i as usize].fields.clone(), def.generics.clone());
+                let tys: Vec<TypeId> = fields.iter().map(|&t| self.arena.instantiate(t, &generics, &args)).collect();
+                HKind::MakeVariant { rt_id: *id, args: all(self, payload, &tys) }
+            }
+            ConstVal::Struct(def, fields) => {
+                let args = match self.rty(ty) {
+                    Ty::Named(_, args) => self.elems(args),
+                    _ => Vec::new(),
+                };
+                let tys: Vec<TypeId> = (0..fields.len()).map(|i| self.field_type(*def, i, &args)).collect();
+                HKind::MakeStruct { def: *def, fields: all(self, fields, &tys) }
+            }
+        };
+        mk(kind, ty, span)
     }
 
     fn call_variant(&mut self, d: TypeDefId, i: u32, args: &CallArgs, span: Span) -> HExpr {

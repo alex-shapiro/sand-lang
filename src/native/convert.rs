@@ -1,7 +1,9 @@
 //! Value conversion between Sand and Rust.
 
 use super::func::{Later, NativeError};
-use super::ty::{Never, Param, Reflect, ReflectCheck, SandType, Val, bound::ParamBounds};
+use super::ty::{Never, Num, Param, Reflect, SandType, Val, bound::ParamBounds};
+use super::{Constant, RustVariant};
+use crate::types::ConstVal;
 use crate::vm::meter::Scratch;
 use crate::vm::value::{Obj, Value, ValueType};
 use crate::vm::{Ctl, Vm};
@@ -64,6 +66,18 @@ impl Conversion {
 /// reserving heap memory.
 pub trait IntoValue: SandType {
     fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl>;
+
+    /// Converts `self` into a compile-time Sand [`Constant`], or returns `None`
+    /// if `self` cannot be represented as a constant.
+    ///
+    /// Scalars (`i64`, `f64`, `bool`, `()`, `String`, `Vec<u8>`,
+    /// [`jiff::SignedDuration`]) and collections, options,
+    /// [`SandEnum`](crate::SandEnum)s, and [`SandStruct`](crate::SandStruct)s
+    /// composed of constants can be converted. Field defaults declared with
+    /// `#[sand(default)]` require a constant value.
+    fn to_const(&self) -> Option<Constant> {
+        None
+    }
 }
 
 /// Error returned by a native function whose Sand return type is `Result<T>`.
@@ -138,12 +152,13 @@ impl IntoHostError for &str {
 }
 
 #[cold]
-pub(crate) fn mismatch<S: SandType + ?Sized>() -> Ctl {
+#[doc(hidden)]
+pub fn mismatch<S: SandType + ?Sized>() -> Ctl {
     Ctl::internal(format!("a native function expected a value of type `{}`", S::sand_type()))
 }
 
 macro_rules! scalar {
-    ($($t:ty: $p:pat => $e:expr, $v:ident => $into:expr),* $(,)?) => {$(
+    ($($t:ty: $p:pat => $e:expr, $v:ident => $into:expr, $c:path),* $(,)?) => {$(
         impl FromValue for $t {
             type Item<'a> = $t;
             fn from_value(_: &Vm, v: Value, _: &mut Conversion) -> Result<$t, Ctl> {
@@ -158,14 +173,17 @@ macro_rules! scalar {
                 let $v = self;
                 Ok($into)
             }
+            fn to_const(&self) -> Option<Constant> {
+                Some(Constant($c(*self)))
+            }
         }
     )*};
 }
 
 scalar! {
-    i64: Value::Int(i) => i, x => Value::Int(x),
-    f64: Value::Float(f) => f, x => Value::Float(x),
-    bool: Value::Bool(b) => b, x => Value::Bool(x),
+    i64: Value::Int(i) => i, x => Value::Int(x), ConstVal::Int,
+    f64: Value::Float(f) => f, x => Value::Float(x), ConstVal::Float,
+    bool: Value::Bool(b) => b, x => Value::Bool(x), ConstVal::Bool,
 }
 
 impl FromValue for () {
@@ -177,6 +195,9 @@ impl FromValue for () {
 impl IntoValue for () {
     fn into_value(self, _: &mut Vm) -> Result<Value, Ctl> {
         Ok(Value::Unit)
+    }
+    fn to_const(&self) -> Option<Constant> {
+        Some(Constant(ConstVal::Unit))
     }
 }
 
@@ -196,6 +217,9 @@ impl IntoValue for jiff::SignedDuration {
             Ok(n) => Ok(Value::Dur(n)),
             Err(_) => Err(Ctl::fail("overflow", "the duration is out of range")),
         }
+    }
+    fn to_const(&self) -> Option<Constant> {
+        i64::try_from(self.as_nanos()).ok().map(|d| Constant(ConstVal::Dur(d)))
     }
 }
 
@@ -230,6 +254,9 @@ impl IntoValue for String {
         vm.charge_bytes(self.len())?;
         Ok(vm.heap.new_str(self))
     }
+    fn to_const(&self) -> Option<Constant> {
+        Some(Constant(ConstVal::Str(self.clone())))
+    }
 }
 impl IntoValue for &str {
     fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl> {
@@ -263,6 +290,9 @@ impl IntoValue for Vec<u8> {
         vm.charge_bytes(self.len())?;
         Ok(vm.heap.new_bytes(self))
     }
+    fn to_const(&self) -> Option<Constant> {
+        Some(Constant(ConstVal::Bytes(self.clone())))
+    }
 }
 impl IntoValue for &[u8] {
     fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl> {
@@ -291,6 +321,9 @@ impl<T: IntoValue> IntoValue for Vec<T> {
         }
         Ok(vm.heap.new_list(items))
     }
+    fn to_const(&self) -> Option<Constant> {
+        Some(Constant(ConstVal::List(super::collect_consts(self.iter().map(T::to_const))?)))
+    }
 }
 
 impl<T: for<'a> FromValue<Item<'a> = T>> FromValue for Box<T> {
@@ -303,6 +336,9 @@ impl<T: for<'a> FromValue<Item<'a> = T>> FromValue for Box<T> {
 impl<T: IntoValue> IntoValue for Box<T> {
     fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl> {
         (*self).into_value(vm)
+    }
+    fn to_const(&self) -> Option<Constant> {
+        (**self).to_const()
     }
 }
 
@@ -322,6 +358,12 @@ impl<T: IntoValue> IntoValue for Option<T> {
             None => vm.none(),
         })
     }
+    fn to_const(&self) -> Option<Constant> {
+        Some(Constant(match self {
+            Some(x) => ConstVal::Variant(RustVariant::Some, vec![x.to_const()?.0]),
+            None => ConstVal::Variant(RustVariant::None, Vec::new()),
+        }))
+    }
 }
 
 impl<T: IntoValue, E: IntoHostError> IntoValue for Result<T, E> {
@@ -333,8 +375,8 @@ impl<T: IntoValue, E: IntoHostError> IntoValue for Result<T, E> {
             }
             Err(e) => match *e.into_host_error().0 {
                 HostErrorKind::Error { kind, message } => {
-                    vm.charge_bytes(kind.len() + message.len())?;
-                    Ok(vm.err_value(&kind, &message))
+                    let e = crate::stdlib::Error { kind, message }.into_value(vm)?;
+                    Ok(vm.err(e))
                 }
                 HostErrorKind::Abort(c) => Err(c),
             },
@@ -397,6 +439,11 @@ impl<K: IntoValue + Ord, V: IntoValue> IntoValue for HashMap<K, V> {
         items.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         write_map(vm, items.len(), items)
     }
+    fn to_const(&self) -> Option<Constant> {
+        let mut items: Vec<(&K, &V)> = self.iter().collect();
+        items.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        map_const(items)
+    }
 }
 impl<K: for<'k> FromValue<Item<'k> = K> + Ord, V: FromValue> FromValue for BTreeMap<K, V> {
     type Item<'a> = BTreeMap<K, V::Item<'a>>;
@@ -408,6 +455,29 @@ impl<K: IntoValue, V: IntoValue> IntoValue for BTreeMap<K, V> {
     fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl> {
         write_map(vm, self.len(), self)
     }
+    fn to_const(&self) -> Option<Constant> {
+        map_const(self)
+    }
+}
+
+impl<K: for<'k> FromValue<Item<'k> = K> + Eq + Hash, V: FromValue> FromValue for indexmap::IndexMap<K, V> {
+    type Item<'a> = indexmap::IndexMap<K, V::Item<'a>>;
+    fn from_value<'a>(vm: &'a Vm, v: Value, conv: &mut Conversion) -> Result<Self::Item<'a>, Ctl> {
+        read_map::<K, V, _>(vm, v, conv)
+    }
+}
+impl<K: IntoValue, V: IntoValue> IntoValue for indexmap::IndexMap<K, V> {
+    fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl> {
+        write_map(vm, self.len(), self)
+    }
+    fn to_const(&self) -> Option<Constant> {
+        map_const(self)
+    }
+}
+
+fn map_const<'a, K: IntoValue + 'a, V: IntoValue + 'a>(entries: impl IntoIterator<Item = (&'a K, &'a V)>) -> Option<Constant> {
+    let entries = entries.into_iter().map(|(k, v)| Some((k.to_const()?.0, v.to_const()?.0))).collect::<Option<_>>()?;
+    Some(Constant(ConstVal::Map(entries)))
 }
 
 fn read_set<T: for<'k> FromValue<Item<'k> = T>, C: FromIterator<T>>(vm: &Vm, v: Value, conv: &mut Conversion) -> Result<C, Ctl> {
@@ -440,6 +510,11 @@ impl<T: IntoValue + Ord> IntoValue for HashSet<T> {
         items.sort_unstable();
         write_set(vm, items.len(), items)
     }
+    fn to_const(&self) -> Option<Constant> {
+        let mut items: Vec<&T> = self.iter().collect();
+        items.sort_unstable();
+        Some(Constant(ConstVal::Set(super::collect_consts(items.into_iter().map(T::to_const))?)))
+    }
 }
 impl<T: for<'k> FromValue<Item<'k> = T> + Ord> FromValue for BTreeSet<T> {
     type Item<'a> = BTreeSet<T>;
@@ -450,6 +525,9 @@ impl<T: for<'k> FromValue<Item<'k> = T> + Ord> FromValue for BTreeSet<T> {
 impl<T: IntoValue> IntoValue for BTreeSet<T> {
     fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl> {
         write_set(vm, self.len(), self)
+    }
+    fn to_const(&self) -> Option<Constant> {
+        Some(Constant(ConstVal::Set(super::collect_consts(self.iter().map(T::to_const))?)))
     }
 }
 
@@ -486,6 +564,9 @@ macro_rules! tuple_impls {
                 vm.check_memory(items.len() * std::mem::size_of::<Value>())?;
                 Ok(vm.heap.new_tuple(&items))
             }
+            fn to_const(&self) -> Option<Constant> {
+                Some(Constant(ConstVal::Tuple(vec![$(self.$i.to_const()?.0),+])))
+            }
         }
     };
 }
@@ -503,7 +584,7 @@ macro_rules! __value_type_impls {
     ($t:ty) => {
         impl $crate::native::SandType for $t {
             fn sand_type() -> $crate::native::Type {
-                $crate::native::Type::bound::<Self>(<Self as $crate::native::NamedType>::MODULE, <Self as $crate::native::NamedType>::NAME)
+                $crate::native::Type::bound::<Self>(::std::vec::Vec::new())
             }
         }
         impl $crate::native::FromValue for $t {
@@ -557,7 +638,17 @@ handle! {
     [const N: u8, B: ParamBounds] Param<N, B>,
 }
 
-impl<const N: u8, C: ReflectCheck> FromValue for Reflect<N, C> {
+impl<const N: u8> FromValue for Num<N> {
+    type Item<'a> = Self;
+    fn from_value(vm: &Vm, v: Value, _: &mut Conversion) -> Result<Self, Ctl> {
+        match vm.heap.get(v) {
+            Obj::Tuple(_) => Ok(Num::from_raw(v)),
+            _ => Err(mismatch::<Self>()),
+        }
+    }
+}
+
+impl<const N: u8> FromValue for Reflect<N> {
     type Item<'a> = Self;
     fn from_value(vm: &Vm, v: Value, _: &mut Conversion) -> Result<Self, Ctl> {
         let r = Reflect::from_raw(v);

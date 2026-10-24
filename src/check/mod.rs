@@ -14,7 +14,7 @@ mod unify;
 use crate::diag::{Diag, FileId, SourceFile, Span};
 use crate::engine::NativeDecls;
 use crate::hir::*;
-use crate::native::{BoundKind, Bounds, NativeDecl, Signature, StructField, Type};
+use crate::native::{BoundKind, Bounds, Constant, EnumVariant, NativeDecl, RustVariant, Signature, StructField, Type};
 use crate::syntax::ast::{self, ItemKind, TypeExpr, TypeExprKind};
 use crate::types::*;
 use crate::vm::value::{FxBuild, FxHashMap};
@@ -190,13 +190,25 @@ pub struct FnInfo {
     pub trait_of: Option<TraitId>,
 }
 
-/// Where the syntax of a function body is in the items of its module.
-/// AST is borrowed while the module is checked.
+#[derive(Default)]
+struct ConstFoldState {
+    cache: FxHashMap<FnId, Option<ConstVal>>,
+    depth: usize,
+    depth_exceeded: bool,
+}
+
+enum BoundMembers {
+    Struct(&'static [StructField], Arc<[Option<Constant>]>),
+    Enum(&'static [EnumVariant]),
+}
+
+/// Location of a function body in the module AST, or a synthetic body kind.
 #[derive(Clone, Copy, Debug)]
 pub enum FnDeclRef {
     Fn(DeclPath),
     ParamDefault(DeclPath, u32),
     FieldDefault { item: u32, field: u32 },
+    BoundDefault(u32),
     Init,
     Test { item: u32 },
 }
@@ -363,6 +375,29 @@ impl CheckedProgram {
     pub fn name(&self, s: Symbol) -> &str {
         self.syms.str(s)
     }
+
+    /// Returns the Rust `TypeId` bound to type definition `d`, if any.
+    pub fn rust_type(&self, d: TypeDefId) -> Option<std::any::TypeId> {
+        rust_type(&self.types[d as usize], &self.enum_bindings, &self.struct_bindings, d)
+    }
+}
+
+fn rust_type(
+    def: &TypeDef,
+    enum_bindings: &PVec<(std::any::TypeId, u32)>,
+    struct_bindings: &PVec<(std::any::TypeId, TypeDefId)>,
+    d: TypeDefId,
+) -> Option<std::any::TypeId> {
+    match &def.kind {
+        TypeDefKind::Opaque(Opaque::Value(v)) => Some(v.type_id),
+        TypeDefKind::Opaque(Opaque::Object(t)) => Some(*t),
+        TypeDefKind::Struct { .. } => struct_bindings.iter_from(0).find(|(_, def)| *def == d).map(|(t, _)| *t),
+        TypeDefKind::Enum { variants } => {
+            let first = variants.first()?.rt_id;
+            enum_bindings.iter_from(0).find(|(_, v)| *v == first).map(|(t, _)| *t)
+        }
+        _ => None,
+    }
 }
 
 #[derive(Clone)]
@@ -470,7 +505,12 @@ pub(crate) struct FnState {
     /// (see `fuse.rs`, which re-owns the locals of inlined lambdas).
     pub lambda_first_local: Vec<LocalId>,
     pub obligations: Vec<(TypeId, Bound, Span)>,
-    pub reflect_checks: Vec<(TypeId, Span)>,
+    /// `(type, span, call_kind)` triples for `reflect` type arguments, checked
+    /// after type inference completes.
+    pub reflect_checks: Vec<(TypeId, Span, &'static str)>,
+    /// Maps each `reflect` type parameter of the current function to the hidden
+    /// local that holds its runtime description.
+    pub reflect_locals: Vec<(ParamId, LocalId)>,
     pub infer_checks: Vec<(TypeId, Span)>,
     /// Inside a top-level statement of a module (lets become globals).
     pub top_level: bool,
@@ -525,7 +565,7 @@ pub struct Checker {
     pub subst: Vec<Option<TypeId>>,
     /// For each type definition, what it needs to satisfy `Eq`, `Ord` and
     /// `Hash` (see `unify::Derived`).
-    pub(crate) derived: PVec<[unify::Derived; 3]>,
+    pub(crate) derived: PVec<[unify::Derived; 4]>,
     pub diags: Vec<Diag>,
     pub wk: WellKnown,
     pub prelude: Option<ModId>,
@@ -1156,7 +1196,7 @@ impl Checker {
                 trait_ids.push(id);
             }
         }
-        let bound_structs = if self.allows_native() { self.declare_bound_types() } else { Vec::new() };
+        let bound_members = if self.allows_native() { self.declare_bound_types() } else { Vec::new() };
         let mut struct_ids = Vec::new();
         for item in items {
             match &item.kind {
@@ -1210,8 +1250,8 @@ impl Checker {
             .collect();
         self.resolve_supertraits(&trait_ids, &trait_decls);
         // 3. Fields and variants, and the built-in bounds they satisfy.
-        for (id, fields) in bound_structs {
-            self.resolve_bound_struct(id, fields);
+        for (id, members) in bound_members {
+            self.resolve_bound_members(id, members);
         }
         let mut k = 0;
         for (idx, item) in items.iter().enumerate() {
@@ -1314,6 +1354,7 @@ impl Checker {
             }
             i += 1;
         }
+        self.fold_field_defaults(first_fn);
         // 7. Tests (those of imported modules are type checked, not run).
         for (idx, item) in items.iter().enumerate() {
             if let ItemKind::Test(t) = &item.kind {
@@ -1424,7 +1465,6 @@ impl Checker {
     fn declare_generics(&mut self, gs: &[ast::GenericParam]) -> Vec<ParamId> {
         let out = self.declare_params(gs, &[], None);
         for (g, &p) in gs.iter().zip(&out) {
-            // `Num` evidence is passed to the type's methods, not stored.
             let num = self.num_trait;
             self.params[p as usize].traits.retain(|t| Some(t.trait_id) != num);
             if !self.params[p as usize].traits.is_empty() {
@@ -1517,7 +1557,6 @@ impl Checker {
                 if i >= fields.len() {
                     break;
                 }
-                let const_default = const_of(d);
                 let name = self.sym(&format!("{}.{}", s.name.name, f.name.name));
                 let helper = self.add_fn(FnInfo {
                     name,
@@ -1539,7 +1578,6 @@ impl Checker {
                     trait_of: None,
                 });
                 fields[i].default = Some(helper);
-                fields[i].const_default = const_default;
             }
         }
         self.types[id as usize].kind = TypeDefKind::Struct { fields };
@@ -1570,64 +1608,116 @@ impl Checker {
         self.types[id as usize].kind = TypeDefKind::Enum { variants };
     }
 
-    fn declare_bound_types(&mut self) -> Vec<(TypeDefId, &'static [StructField])> {
+    fn declare_bound_types(&mut self) -> Vec<(TypeDefId, BoundMembers)> {
         let natives = self.natives.clone();
         let module = self.name(self.mods[self.cur_mod as usize].name).to_string();
         let span = Span::new(self.mods[self.cur_mod as usize].file, 0, 0);
-        let mut structs = Vec::new();
+        let mut members = Vec::new();
         for t in natives.types.iter().filter(|t| t.module == module) {
             let ident = ast::Ident { name: t.name.to_string(), span };
             let doc = Some(t.doc).filter(|d| !d.is_empty());
-            let (generics, kind) = match &t.kind {
-                BoundKind::Value(v) => (vec![], TypeDefKind::Opaque(Opaque::Value(*v))),
-                BoundKind::Object(id) => (vec![], TypeDefKind::Opaque(Opaque::Object(*id))),
-                BoundKind::Builtin(params) => {
-                    let ps = params.iter().map(|p| self.sym(p)).collect::<Vec<_>>();
-                    (ps.into_iter().map(|p| self.new_param(p, vec![], false)).collect(), TypeDefKind::Opaque(Opaque::Builtin))
-                }
-                BoundKind::Enum(..) => (vec![], TypeDefKind::Enum { variants: vec![] }),
-                BoundKind::Struct(..) => (vec![], TypeDefKind::Struct { fields: vec![] }),
+            let params: &[&str] = match &t.kind {
+                BoundKind::Builtin(params) | BoundKind::Enum { params, .. } | BoundKind::Struct { params, .. } => params,
+                BoundKind::Value(_) | BoundKind::Object(_) => &[],
+            };
+            let ps = params.iter().map(|p| self.sym(p)).collect::<Vec<_>>();
+            let generics = ps.into_iter().map(|p| self.new_param(p, vec![], false)).collect();
+            let kind = match &t.kind {
+                BoundKind::Value(v) => TypeDefKind::Opaque(Opaque::Value(*v)),
+                BoundKind::Object(id) => TypeDefKind::Opaque(Opaque::Object(*id)),
+                BoundKind::Builtin(_) => TypeDefKind::Opaque(Opaque::Builtin),
+                BoundKind::Enum { .. } => TypeDefKind::Enum { variants: vec![] },
+                BoundKind::Struct { .. } => TypeDefKind::Struct { fields: vec![] },
             };
             let id = self.new_typedef(&ident, generics, kind, t.public, doc);
             self.define_ident(&ident, Def::Type(TyRef::Def(id)), t.public);
             match &t.kind {
-                BoundKind::Enum(_, vs) if vs.is_empty() => {}
-                BoundKind::Enum(type_id, vs) => {
-                    let mut variants = Vec::new();
-                    for (i, &(vname, vdoc)) in vs.iter().enumerate() {
+                BoundKind::Enum { rust, variants, .. } => {
+                    let mut defs = Vec::new();
+                    for (i, v) in variants.iter().enumerate() {
                         self.variants.push((id, i as u32));
                         let rt_id = (self.variants.len() - 1) as u32;
-                        let doc = Some(vdoc).filter(|d| !d.is_empty()).map(Arc::from);
-                        variants.push(VariantDef { name: self.sym(vname), fields: vec![], field_names: None, rt_id, doc });
+                        let doc = Some(v.doc).filter(|d| !d.is_empty()).map(Arc::from);
+                        let names: Option<Vec<Symbol>> = v.fields.iter().map(|f| f.name.map(|n| self.sym(n))).collect();
+                        let field_names = names.filter(|ns| !ns.is_empty());
+                        defs.push(VariantDef { name: self.sym(v.name), fields: vec![], field_names, rt_id, doc });
                     }
-                    self.enum_bindings.push((*type_id, variants[0].rt_id));
-                    self.types[id as usize].kind = TypeDefKind::Enum { variants };
+                    if let Some(first) = defs.first() {
+                        self.enum_bindings.push((*rust, first.rt_id));
+                    }
+                    self.types[id as usize].kind = TypeDefKind::Enum { variants: defs };
+                    members.push((id, BoundMembers::Enum(variants)));
                 }
-                BoundKind::Struct(type_id, fields) => {
-                    self.struct_bindings.push((*type_id, id));
-                    structs.push((id, *fields));
+                BoundKind::Struct { rust, fields, defaults, .. } => {
+                    self.struct_bindings.push((*rust, id));
+                    members.push((id, BoundMembers::Struct(fields, defaults.clone())));
                 }
                 _ => {}
             }
         }
-        structs
+        members
     }
 
-    fn resolve_bound_struct(&mut self, id: TypeDefId, rust: &[StructField]) {
+    /// Resolves field or payload types for a Rust-bound type after all types in
+    /// the module are declared.
+    fn resolve_bound_members(&mut self, id: TypeDefId, members: BoundMembers) {
         let span = self.types[id as usize].span;
         let qual = format!("{}.{}", self.name(self.types[id as usize].module_name), self.name(self.types[id as usize].name));
-        let mut fields = Vec::new();
-        for f in rust {
-            let owner = format!("the Rust field `{}` of `{qual}`", f.name);
-            let ty = self.host_type(&(f.ty)(), &[], &owner, span).unwrap_or(TypeId::ERROR);
-            if self.types[id as usize].is_pub && f.public {
-                self.check_public_types("field", &ast::Ident { name: f.name.to_string(), span }, [ty]);
+        let generics = self.types[id as usize].generics.clone();
+        let public = self.types[id as usize].is_pub;
+        match members {
+            BoundMembers::Struct(rust, defaults) => {
+                let self_ty = self.def_self_ty(id, &generics);
+                let mut fields = Vec::new();
+                for (i, (f, default)) in rust.iter().zip(defaults.iter()).enumerate() {
+                    let owner = format!("the Rust field `{}` of `{qual}`", f.name);
+                    let ty = self.host_type(&(f.ty)(), &generics, &owner, span).unwrap_or(TypeId::ERROR);
+                    if public && f.public {
+                        self.check_public_types("field", &ast::Ident { name: f.name.to_string(), span }, [ty]);
+                    }
+                    let doc = Some(f.doc).filter(|d| !d.is_empty()).map(Arc::from);
+                    let name = self.sym(f.name);
+                    let const_default = default.as_ref().and_then(|c| self.resolve_bound_const(c)).map(Arc::new);
+                    let helper = const_default.is_some().then(|| {
+                        let helper_name = self.sym(&format!("{}.{}", self.name(self.types[id as usize].name), f.name));
+                        self.add_fn(FnInfo {
+                            name: helper_name,
+                            module: self.cur_mod,
+                            generics: generics.clone(),
+                            outer: generics.len(),
+                            params: vec![],
+                            ret: ty,
+                            has_self: false,
+                            kind: FnKind::DefaultHelper,
+                            doc: None,
+                            span,
+                            is_pub: false,
+                            owner: None,
+                            self_ty: Some(self_ty),
+                            decl: Some(FnDeclRef::BoundDefault(i as u32)),
+                            dicts: vec![],
+                            impl_of: None,
+                            trait_of: None,
+                        })
+                    });
+                    fields.push(FieldDef { name, ty, mutable: f.var, is_pub: f.public, default: helper, const_default, doc });
+                }
+                self.types[id as usize].kind = TypeDefKind::Struct { fields };
             }
-            let doc = Some(f.doc).filter(|d| !d.is_empty()).map(Arc::from);
-            let name = self.sym(f.name);
-            fields.push(FieldDef { name, ty, mutable: f.var, is_pub: f.public, default: None, const_default: None, doc });
+            BoundMembers::Enum(rust) => {
+                for (i, v) in rust.iter().enumerate() {
+                    let owner = format!("the Rust payload of variant `{}` of `{qual}`", v.name);
+                    let tys: Vec<TypeId> =
+                        v.fields.iter().map(|f| self.host_type(&(f.ty)(), &generics, &owner, span).unwrap_or(TypeId::ERROR)).collect();
+                    if public {
+                        self.check_public_types("variant", &ast::Ident { name: v.name.to_string(), span }, tys.iter().copied());
+                    }
+                    if let TypeDefKind::Enum { variants } = &mut self.types[id as usize].kind {
+                        variants[i].fields = tys;
+                    }
+                }
+            }
         }
-        self.types[id as usize].kind = TypeDefKind::Struct { fields };
     }
 
     /// Finds a struct reachable from `t` that has a field invisible to the current module.
@@ -1656,15 +1746,165 @@ impl Checker {
         None
     }
 
-    fn rust_type(&self, d: TypeDefId) -> Option<std::any::TypeId> {
-        match &self.types[d as usize].kind {
-            TypeDefKind::Opaque(Opaque::Value(v)) => Some(v.type_id),
-            TypeDefKind::Opaque(Opaque::Object(t)) => Some(*t),
-            TypeDefKind::Struct { .. } => self.struct_bindings.iter_from(0).find(|(_, def)| *def == d).map(|(t, _)| *t),
-            TypeDefKind::Enum { variants } => {
-                let first = variants.first()?.rt_id;
-                self.enum_bindings.iter_from(0).find(|(_, v)| *v == first).map(|(t, _)| *t)
+    /// Resolves a Rust field default `c` into a [`ConstVal`].
+    fn resolve_bound_const(&self, c: &Constant) -> Option<ConstVal> {
+        let variant = |v: &RustVariant| match v {
+            RustVariant::None => Some(self.none_rt()),
+            RustVariant::Some => Some(self.some_rt()),
+            RustVariant::Bound { rust, index } => {
+                let first = self.enum_bindings.iter_from(0).find(|(t, _)| t == rust).map(|&(_, first)| first)?;
+                Some(first + *index as u32)
             }
+        };
+        let def = |rust: &std::any::TypeId| self.struct_bindings.iter_from(0).find(|(t, _)| t == rust).map(|&(_, d)| d);
+        c.0.resolve(&variant, &def)
+    }
+
+    /// Evaluates constant field defaults for structs declared in the current module.
+    fn fold_field_defaults(&mut self, first_fn: usize) {
+        let mut state = ConstFoldState::default();
+        for f in first_fn..self.fns.len() {
+            if let Some(FnDeclRef::FieldDefault { field, .. }) = self.fns[f].decl
+                && let Some(Ty::Named(d, _)) = self.fns[f].self_ty.map(|t| self.arena.get(t))
+            {
+                let c = self.fold_default_helper(f as FnId, &mut state).map(Arc::new);
+                if let TypeDefKind::Struct { fields } = &mut self.types[d as usize].kind {
+                    fields[field as usize].const_default = c;
+                }
+            }
+        }
+    }
+
+    /// Evaluates the field default helper `f` as a constant, if possible.
+    fn fold_default_helper(&self, f: FnId, state: &mut ConstFoldState) -> Option<ConstVal> {
+        let fi = &self.fns[f as usize];
+        if !matches!(fi.kind, FnKind::DefaultHelper) {
+            return None;
+        }
+        let Ty::Named(d, _) = self.arena.get(fi.self_ty?) else { return None };
+        let field = self.types[d as usize].fields().iter().find(|x| x.default == Some(f))?;
+        if let Some(c) = field.const_default.as_deref() {
+            return self.charge_const(c).then(|| c.clone());
+        }
+        if fi.module != self.cur_mod {
+            return None;
+        }
+        if let Some(c) = state.cache.get(&f) {
+            return c.as_ref().filter(|c| self.charge_const(c)).cloned();
+        }
+        if state.depth == MAX_CONST_DEPTH {
+            state.depth_exceeded = true;
+            return None;
+        }
+        // Insert `None` before recursing to reject cyclic field defaults.
+        state.cache.insert(f, None);
+        let outer_exceeded = std::mem::replace(&mut state.depth_exceeded, false);
+        state.depth += 1;
+        let c = self.bodies.get(f).and_then(|b| self.fold_const_expr(&b.body, &mut Vec::new(), state)).filter(|c| self.charge_const(c));
+        state.depth -= 1;
+        // Do not cache `None` if a nested helper hit `MAX_CONST_DEPTH`, because
+        // `f` may still fold within the depth limit when evaluated directly.
+        match state.depth_exceeded {
+            true => state.cache.remove(&f),
+            false => state.cache.insert(f, c.clone()),
+        };
+        state.depth_exceeded |= outer_exceeded;
+        c
+    }
+
+    /// Charges the compile budget for `c` and returns `false` if the budget is
+    /// exhausted or `c` exceeds [`ConstVal::measure`] limits.
+    fn charge_const(&self, c: &ConstVal) -> bool {
+        c.measure().is_some_and(|(parts, bytes)| self.budget.charge(parts as u64 + bytes as u64 / budget::TEXT_BYTES_PER_UNIT))
+    }
+
+    /// Evaluates `h` as a compile-time constant, if possible.
+    fn fold_const_expr(&self, h: &HExpr, env: &mut Vec<(LocalId, ConstVal)>, state: &mut ConstFoldState) -> Option<ConstVal> {
+        if !self.budget.charge(1) {
+            return None;
+        }
+        let mut all = |xs: &[HExpr]| xs.iter().map(|x| self.fold_const_expr(x, env, state)).collect::<Option<Vec<_>>>();
+        Some(match &h.kind {
+            HKind::Unit => ConstVal::Unit,
+            HKind::Bool(b) => ConstVal::Bool(*b),
+            HKind::Int(i) => ConstVal::Int(*i),
+            HKind::Float(f) => ConstVal::Float(*f),
+            HKind::Dur(d) => ConstVal::Dur(*d),
+            HKind::Str(s) => ConstVal::Str(s.clone()),
+            HKind::Bytes(b) => ConstVal::Bytes(b.clone()),
+            HKind::Tuple(xs) => ConstVal::Tuple(all(xs)?),
+            HKind::List(xs) => ConstVal::List(all(xs)?),
+            HKind::Tag(id) => ConstVal::Variant(*id, Vec::new()),
+            HKind::MakeVariant { rt_id, args } => ConstVal::Variant(*rt_id, all(args)?),
+            HKind::MakeStruct { def, fields } => ConstVal::Struct(*def, all(fields)?),
+            HKind::Map(kvs) => ConstVal::Map(
+                kvs.iter()
+                    .map(|(k, v)| Some((self.fold_const_expr(k, env, state)?, self.fold_const_expr(v, env, state)?)))
+                    .collect::<Option<_>>()?,
+            ),
+            HKind::CallNative { native, args } if Some(*native) == self.prelude_native("set") => match args.as_slice() {
+                [HArg::Expr(xs)] => match self.fold_const_expr(xs, env, state)? {
+                    ConstVal::List(xs) => ConstVal::Set(xs),
+                    _ => return None,
+                },
+                _ => return None,
+            },
+            HKind::Range { start, end, inclusive } => {
+                match (self.fold_const_expr(start, env, state)?, self.fold_const_expr(end, env, state)?) {
+                    (ConstVal::Int(a), ConstVal::Int(b)) => ConstVal::Range(a, b, *inclusive),
+                    _ => return None,
+                }
+            }
+            HKind::Unary { op: HUnOp::Neg, e } => match self.fold_const_expr(e, env, state)? {
+                ConstVal::Int(i) => ConstVal::Int(i.checked_neg()?),
+                ConstVal::Float(f) => ConstVal::Float(-f),
+                ConstVal::Dur(d) => ConstVal::Dur(d.checked_neg()?),
+                _ => return None,
+            },
+            HKind::Local(l) => {
+                let c = &env.iter().rev().find(|(x, _)| x == l)?.1;
+                if !self.charge_const(c) {
+                    return None;
+                }
+                c.clone()
+            }
+            HKind::Field { obj, index } => match self.fold_const_expr(obj, env, state)? {
+                ConstVal::Struct(_, mut fields) if (*index as usize) < fields.len() => fields.swap_remove(*index as usize),
+                _ => return None,
+            },
+            HKind::Call { func, args } if args.is_empty() => self.fold_default_helper(*func, state)?,
+            HKind::Block(stmts) => {
+                let (last, lets) = stmts.split_last()?;
+                let mark = env.len();
+                for s in lets {
+                    let HKind::Let { pat: HPat { kind: HPatKind::Bind(l), .. }, init, else_: None } = &s.kind else {
+                        env.truncate(mark);
+                        return None;
+                    };
+                    let Some(c) = self.fold_const_expr(init, env, state) else {
+                        env.truncate(mark);
+                        return None;
+                    };
+                    env.push((*l, c));
+                }
+                let c = self.fold_const_expr(last, env, state);
+                env.truncate(mark);
+                c?
+            }
+            _ => return None,
+        })
+    }
+
+    fn rust_type(&self, d: TypeDefId) -> Option<std::any::TypeId> {
+        rust_type(&self.types[d as usize], &self.enum_bindings, &self.struct_bindings, d)
+    }
+
+    /// The id of the prelude's native function `name`.
+    pub(crate) fn prelude_native(&self, name: &str) -> Option<u32> {
+        let p = self.prelude?;
+        let Def::Fn(f) = self.mods[p as usize].scope.get(&self.syms.get(name)?)?.def else { return None };
+        match self.fns[f as usize].kind {
+            FnKind::Native(n) => Some(n),
             _ => None,
         }
     }
@@ -1727,7 +1967,7 @@ impl Checker {
         }
         let mut generic = false;
         for t in sig.params.iter().chain([&sig.ret]) {
-            t.visit(&mut |t| generic |= matches!(t, Type::Param(..) | Type::Reflect(..)));
+            t.visit(&mut |t| generic |= matches!(t, Type::Param(..) | Type::Reflect(..) | Type::Num(_)));
         }
         if generic {
             let msg = format!("native `{key}` is generic, so the module must declare it with `native fn`");
@@ -1837,7 +2077,11 @@ impl Checker {
                 }
             },
             Type::Reflect(..) => {
-                self.error(span, format!("{owner} takes a type description that is not its first parameter"));
+                self.error(span, format!("{owner} takes a type description that is not one of its first parameters"));
+                return None;
+            }
+            Type::Num(_) => {
+                self.error(span, format!("{owner} takes `Num` evidence that is not one of its first parameters"));
                 return None;
             }
             Type::Named(n) => {
@@ -1882,7 +2126,9 @@ impl Checker {
     }
 
     /// Verifies that a `native fn` declaration matches its registered Rust
-    /// signature and declares all required type parameter bounds.
+    /// signature and declares all required type parameter bounds. Returns
+    /// the type parameter indices for which the Rust function accepts `Num`
+    /// evidence.
     fn check_native_signature(
         &mut self,
         f: &ast::FnDecl,
@@ -1891,38 +2137,47 @@ impl Checker {
         generics: &[ParamId],
         params: &[ParamSig],
         ret: TypeId,
-    ) {
+    ) -> Vec<u8> {
         let span = f.name.span;
         let owner = format!("the Rust function of native `{key}`");
-        let reflect: Vec<u8> =
-            generics.iter().enumerate().filter(|(_, p)| self.params[**p as usize].reflect).map(|(i, _)| i as u8).collect();
+        let reflect: Vec<Type> =
+            generics.iter().enumerate().filter(|(_, p)| self.params[**p as usize].reflect).map(|(i, _)| Type::Reflect(i as u8)).collect();
+        let num: Vec<u8> = (0..generics.len() as u8)
+            .filter(|&i| self.num_trait.is_some() && self.params[generics[i as usize] as usize].has_bound(Bound::Num))
+            .collect();
+        let lead_of = |t: &Type| match t {
+            Type::Reflect(i) => Some((false, *i)),
+            Type::Num(i) => Some((true, *i)),
+            _ => None,
+        };
         let n = reflect.len().min(sig.params.len());
         let (lead, rest) = sig.params.split_at(n);
-        let reflect_index = |t: &Type| if let Type::Reflect(i, _) = t { Some(*i) } else { None };
-        let leads_match =
-            lead.iter().map(reflect_index).eq(reflect.iter().map(|&i| Some(i))) && !rest.iter().any(|t| reflect_index(t).is_some());
+        let k = rest.iter().take_while(|t| matches!(t, Type::Num(_))).count();
+        let (evidence, rest) = rest.split_at(k);
+        let taken: Vec<u8> = evidence.iter().filter_map(|t| if let Type::Num(i) = t { Some(*i) } else { None }).collect();
+        let mut wanted = num.iter();
+        let leads_match = lead.iter().map(lead_of).eq(reflect.iter().map(lead_of))
+            && taken.iter().all(|i| wanted.any(|j| j == i))
+            && !rest.iter().any(|t| lead_of(t).is_some());
         if leads_match {
             let mark = self.diags.len();
             let want: Option<Vec<TypeId>> = rest.iter().map(|t| self.host_type(t, generics, &owner, span)).collect();
             let want_ret = self.host_type(&sig.ret, generics, &owner, span);
             if self.diags.len() > mark {
-                return;
+                return taken;
             }
             let have: Vec<TypeId> = params.iter().map(|p| p.ty).collect();
             if want.as_ref() == Some(&have) && want_ret == Some(ret) {
                 self.check_native_bounds(f, sig, generics);
-                return;
+                return taken;
             }
         }
+        let leads: Vec<Type> = reflect.into_iter().chain(num.iter().map(|&i| Type::Num(i))).collect();
         let module = self.name(self.mods[self.cur_mod as usize].name).to_string();
         let names: Vec<String> = generics.iter().map(|&p| self.name(self.params[p as usize].name).to_string()).collect();
         let show_rust =
             |t: &Type| t.render_with(&module, &|i| names.get(i as usize).cloned().unwrap_or_else(|| format!("<type parameter {i}>")));
-        let mut declared: Vec<String> = generics
-            .iter()
-            .filter(|&&p| self.params[p as usize].reflect)
-            .map(|&p| format!("<description of {}>", self.name(self.params[p as usize].name)))
-            .collect();
+        let mut declared: Vec<String> = leads.iter().map(show_rust).collect();
         declared.extend(params.iter().map(|p| self.show(p.ty)));
         let rust: Vec<String> = sig.params.iter().map(show_rust).collect();
         let msg = format!(
@@ -1934,6 +2189,7 @@ impl Checker {
             show_rust(&sig.ret)
         );
         self.error(span, msg);
+        Vec::new()
     }
 
     fn check_native_bounds(&mut self, f: &ast::FnDecl, sig: &Signature, generics: &[ParamId]) {
@@ -1949,17 +2205,13 @@ impl Checker {
         }
         for (&p, need) in generics.iter().zip(required) {
             let info = &self.params[p as usize];
-            let missing = Bounds {
-                eq: need.eq && !info.has_bound(Bound::Eq),
-                ord: need.ord && !info.has_bound(Bound::Ord),
-                hash: need.hash && !info.has_bound(Bound::Hash),
-            };
-            if missing != Bounds::NONE {
+            let missing: Vec<Bound> = need.list().into_iter().filter(|&b| !info.has_bound(b)).collect();
+            if !missing.is_empty() {
                 let name = self.name(info.name).to_string();
                 let msg = format!(
                     "native function `{}` must bound `{name}` by `{}`, as its Rust function requires `{name}: {}`",
                     f.name.name,
-                    missing.names().join(" + "),
+                    Bound::names(&missing).join(" + "),
                     need.names().join(" + ")
                 );
                 self.error(f.name.span, msg);
@@ -2253,6 +2505,7 @@ impl Checker {
             "members" => Some(Intrinsic::Members),
             _ => None,
         };
+        let mut num_evidence = Vec::new();
         let kind = if let Some(i) = intrinsic.filter(|_| f.is_native && owner.is_none() && Some(self.cur_mod) == self.prelude) {
             FnKind::Intrinsic(i)
         } else if f.is_native {
@@ -2263,7 +2516,7 @@ impl Checker {
             };
             match self.natives.get(&key).cloned() {
                 Some(decl) => {
-                    self.check_native_signature(f, &key, &decl.sig, &generics, &params, ret);
+                    num_evidence = self.check_native_signature(f, &key, &decl.sig, &generics, &params, ret);
                     if decl.names.is_some() || decl.doc.is_some() {
                         let msg =
                             format!("native `{key}` has `params` or `doc`, which apply only to a native that the module does not declare");
@@ -2285,8 +2538,14 @@ impl Checker {
             let pt = self.param_ty(p);
             dicts.extend(self.params[p as usize].traits.iter().map(|&tr| (pt, tr)));
         }
-        if f.is_native && !dicts.is_empty() {
-            self.error(f.name.span, "native functions cannot have trait bounds");
+        if f.is_native {
+            if dicts.iter().any(|(_, tr)| Some(tr.trait_id) != self.num_trait) {
+                self.error(f.name.span, "native functions cannot have trait bounds other than built-in bounds");
+            }
+            if let Some(trait_id) = self.num_trait {
+                let num = TraitRef { trait_id, args: TyList::EMPTY };
+                dicts = num_evidence.iter().map(|&i| (self.param_ty(generics[i as usize]), num)).collect();
+            }
         }
         let name = self.sym(&f.name.name);
         let id = self.add_fn(FnInfo {
@@ -2475,10 +2734,12 @@ impl Checker {
         let (self_ty, ret, name) = (fi.self_ty, fi.ret, self.name(fi.name).to_string());
         // Parameters of trait and impl methods are dictated by the trait;
         // those of default helpers are synthetic.
-        let synthetic =
-            fi.impl_of.is_some() || fi.trait_of.is_some() || matches!(decl, FnDeclRef::ParamDefault(..) | FnDeclRef::FieldDefault { .. });
+        let synthetic = fi.impl_of.is_some()
+            || fi.trait_of.is_some()
+            || matches!(decl, FnDeclRef::ParamDefault(..) | FnDeclRef::FieldDefault { .. } | FnDeclRef::BoundDefault(_));
         self.begin_fn(generics, self_ty);
-        let mut param_locals = self.declare_dict_params(id);
+        let mut param_locals = self.declare_reflect_params(id);
+        param_locals.extend(self.declare_dict_params(id));
         let f = match decl {
             FnDeclRef::Fn(at) => Some(at.get(m)),
             _ => None,
@@ -2517,6 +2778,18 @@ impl Checker {
                 let ItemKind::Struct(s) = &m.items[item as usize].kind else { unreachable!() };
                 let e = s.fields[field as usize].default.as_ref().unwrap();
                 (self.check_expr(e, ret), e.span)
+            }
+            FnDeclRef::BoundDefault(field) => {
+                let span = self.fns[id as usize].span;
+                let c = self_ty.and_then(|t| match self.arena.get(t) {
+                    Ty::Named(d, _) => self.types[d as usize].fields()[field as usize].const_default.clone(),
+                    _ => None,
+                });
+                let body = match c {
+                    Some(c) => self.const_expr(&c, ret, span),
+                    None => expr::err(span),
+                };
+                (body, span)
             }
             FnDeclRef::Test { item } => {
                 let ItemKind::Test(t) = &m.items[item as usize].kind else { unreachable!() };
@@ -2654,13 +2927,25 @@ impl Checker {
             }
         }
         let reflect = std::mem::take(&mut self.fs.reflect_checks);
-        for (t, sp) in reflect {
+        for (t, sp, what) in reflect {
             let z = self.zonk(t);
-            if self.arena.has_vars(z) || self.arena.has_params(z) {
-                self.infer_error(sp, "cannot infer type for this call; add a type annotation");
+            if self.reflect_local(z).is_some() {
+                continue;
+            }
+            if self.arena.has_vars(z) {
+                self.infer_error(sp, format!("cannot infer type for this {what}; add a type annotation"));
+            } else if let Some(p) =
+                self.arena.params_of(z).into_iter().find(|&p| !self.params[p as usize].reflect && self.reflect_param_local(p).is_none())
+            {
+                let msg = format!(
+                    "this {what} needs a description of `{}` at run time, so `{}` must be a `reflect` type parameter of this function",
+                    self.show(z),
+                    self.name(self.params[p as usize].name)
+                );
+                self.error(sp, msg);
             } else if let Some((d, f)) = self.private_field_in(z) {
                 let (ty, field) = (self.ctor_name(Ctor::Def(d), 0), self.name(f));
-                self.error(sp, format!("this call cannot build `{ty}` here: its field `{field}` is private"));
+                self.error(sp, format!("this {what} cannot build `{ty}` here: its field `{field}` is private"));
             }
         }
         // Cells are decided by the final walk.
@@ -2825,37 +3110,6 @@ fn is_closed_const(e: &ast::Expr) -> bool {
         }
         _ => false,
     }
-}
-
-fn const_of(e: &ast::Expr) -> Option<ConstVal> {
-    use ast::ExprKind as K;
-    Some(match &e.kind {
-        K::Unit => ConstVal::Unit,
-        K::Bool(b) => ConstVal::Bool(*b),
-        K::Int(i) => ConstVal::Int(*i),
-        K::Float(f) => ConstVal::Float(*f),
-        K::Duration(d) => ConstVal::Dur(*d),
-        K::Str(segs) => {
-            let mut s = String::new();
-            for seg in segs {
-                match seg {
-                    ast::StrSeg::Text(t) => s.push_str(t),
-                    _ => return None,
-                }
-            }
-            ConstVal::Str(s)
-        }
-        K::List(xs) if xs.is_empty() => ConstVal::EmptyList,
-        K::Map(xs) if xs.is_empty() => ConstVal::EmptyMap,
-        K::Ident(id) if id.name == "None" => ConstVal::None,
-        K::Unary(ast::UnOp::Neg, inner) => match inner.kind {
-            K::Int(i) => ConstVal::Int(-i),
-            K::Float(f) => ConstVal::Float(-f),
-            K::Duration(d) => ConstVal::Dur(-d),
-            _ => return None,
-        },
-        _ => return None,
-    })
 }
 
 /// Names referenced (as identifiers or struct-literal shorthands) inside

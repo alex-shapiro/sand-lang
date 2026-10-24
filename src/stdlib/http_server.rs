@@ -1,4 +1,4 @@
-//! The `http` module's server. [`next_request`] reads request heads from
+//! The `http` module's server. [`accept_request`] reads request heads from
 //! many connections at once: newly accepted ones, and kept-alive ones handed
 //! back after a response ([`end_response`]).
 
@@ -30,13 +30,14 @@ const BODY_TIMEOUT: Duration = Duration::from_secs(30);
 pub(super) fn natives(m: &mut NativeModule) {
     m.bind::<Server>();
     m.bind::<Exchange>();
+    m.bind::<Request>();
     m.vm_function("serve", serve);
     m.vm_function("Server.addr", |vm: &mut Vm, server: Val<Server>| -> Result<net::SocketAddr, Ctl> { Ok(server.get(&vm.heap)?.addr) });
     m.vm_function("Server.close", |vm: &mut Vm, server: Val<Server>| -> Result<_, Ctl> {
         server.get_mut(&mut vm.heap)?.close();
         Ok(())
     });
-    m.vm_function("next_request", next_request);
+    m.vm_function("Server.accept", accept_request);
     m.vm_function("write_response", write_response);
     m.vm_function("reply_body", reply_body);
 }
@@ -77,7 +78,7 @@ impl ReadState {
 /// The connections a server reads requests from.
 #[derive(Default)]
 pub(super) struct Shared {
-    /// Locked by the `next_request` call that drives the readings; oldest first.
+    /// Locked by the `Server.accept` call that drives the readings; oldest first.
     reads: tokio::sync::Mutex<Vec<Pending>>,
     /// Readings handed back but not yet in `reads`, and the driving call's waker.
     returned: std::sync::Mutex<(Vec<Pending>, Option<Waker>)>,
@@ -145,7 +146,7 @@ impl Server {
     }
 
     /// Stops listening and closes the connections being read (or, if a
-    /// `next_request` is pending, when it ends).
+    /// `Server.accept` is pending, when it ends).
     fn close(&mut self) {
         self.closed.send_replace(true);
         self.listener = None;
@@ -180,10 +181,30 @@ fn evict_beyond(reads: &[Pending], cap: usize) {
     }
 }
 
-type Request = (String, String, String, Vec<(String, String)>, Body, net::Conn, Exchange);
+/// An incoming HTTP request received by a `Server`. Header names are normalized
+/// to lowercase.
+#[derive(crate::SandStruct)]
+#[sand(module = "http")]
+struct Request {
+    /// HTTP request method (such as `"GET"` or `"POST"`).
+    method: String,
+    /// Request path before `?`.
+    path: String,
+    /// Raw query string after `?` (or `""` if absent).
+    query: String,
+    /// Request headers in receipt order, with lowercase names.
+    headers: Vec<(String, String)>,
+    /// Streaming request body (`read_all`, `bytes`, `text`, and `json` enforce `max_http_body`).
+    body: Val<Body>,
+    /// Underlying client connection.
+    conn: Val<net::Conn>,
+    #[sand(private)]
+    exchange: Val<Exchange>,
+}
 
-/// Accepts connections and reads request heads until a complete request is available.
-fn next_request(vm: &mut Vm, server: Val<Server>) -> Suspended<Request> {
+/// `Server.accept(server)`: accepts connections and reads request heads until
+/// a complete request is available.
+fn accept_request(vm: &mut Vm, server: Val<Server>) -> Suspended<Request> {
     let srv = server.get(&vm.heap)?;
     let Some(socket) = srv.listener.clone() else { return Err(HostError::new("closed", "server closed")) };
     let closed = net::CloseSignal::of(&srv.closed);
@@ -252,7 +273,7 @@ fn next_request(vm: &mut Vm, server: Val<Server>) -> Suspended<Request> {
     };
     let max_body = vm.host.limits.max_http_body;
     let clock = vm.host.clock.clone();
-    stream::suspend(closed.guard(serve), move |_, received: Received| {
+    stream::suspend(closed.guard(serve), move |vm, received: Received| {
         let Received { head: (method, path, query, headers), framing, expects_continue, persists, http10, conn, res } = received;
         drop(res);
         let conn = conn.into_conn();
@@ -262,8 +283,9 @@ fn next_request(vm: &mut Vm, server: Val<Server>) -> Suspended<Request> {
             let handle = conn.handle().expect("a new connection is open");
             BodyReader::new(Box::new(Framed::on_conn(&handle, framing, BODY_TIMEOUT, clock, expects_continue)), max_body, None)
         };
-        let exchange = Exchange { persists, http10, server: weak };
-        Ok((method, path, query, headers, Body::new(body), conn, exchange))
+        let exchange = vm.new_object(Exchange { persists, http10, server: weak })?;
+        let (body, conn) = (vm.new_object(Body::new(body))?, vm.new_object(conn)?);
+        Ok(Request { method, path, query, headers, body, conn, exchange })
     })
 }
 

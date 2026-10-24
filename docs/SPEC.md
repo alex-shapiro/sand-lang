@@ -301,12 +301,21 @@ fn greet(name: str, greeting: str = "Hello") {
 - The body is a block whose value is returned. In a function returning `()`,
   the value of the final expression is discarded.
 - Type parameters are listed in `<...>` with optional bounds `T: Ord + Hash`.
-  Bounds are the built-in bounds `Eq`, `Ord`, `Hash` and `Num` (§5.6) and
+  Bounds are the built-in bounds `Eq`, `Ord`, `Hash`, `Num` and `Encode` (§5.6) and
   traits (§4.9), possibly module-qualified or with type arguments:
   `T: Ord + Describe`, `T: geo.Shape`, `T: Into<str>`. Bounds may also be
   given in a trailing `where` clause (`fn sum(self) -> T where T: Num`), which
   may also constrain the type parameters of an enclosing generic `extend`
   block, struct or enum for that one method.
+- A type parameter marked `reflect` (`fn load<reflect T: Encode>(text: str)
+  -> Result<[T]>`) receives a runtime type description of its type argument. A
+  function can forward `T` (or a composite type containing `T`, such as `[T]`)
+  to another `reflect` type parameter, such as `json.decode<T>`. Every type
+  parameter that appears in a `reflect` type argument must itself be declared
+  `reflect` on the enclosing function. If recursive calls nest constructed type
+  descriptions more than 256 levels deep, execution aborts with kind `"limit"`.
+  Local functions, trait methods, and `impl` methods cannot declare `reflect`
+  type parameters.
 - Functions may be declared inside blocks; such local functions may capture
   enclosing variables and may call themselves recursively. Local functions
   declared consecutively in the same block may call each other.
@@ -423,14 +432,11 @@ matches the Rust function signature (§16.3). User scripts cannot declare
 pub native fn parse(text: str) -> Result<Json>
 ```
 
-If a type parameter on a `native fn` is marked `reflect`
-(`native fn decode<reflect T>(text: str) -> Result<T>`), the compiler passes a
-runtime type description of `T` to the function, and `T` must be a concrete
-type at the call site. The Rust function can also validate `T` at compile time
-(§16.3).
+A native function receives the runtime description of each `reflect` type
+parameter (§4.1) as a `Reflect<N>` argument (§16.3).
 
 Each type parameter on a `native fn` declaration must declare the built-in
-bounds (`Eq`, `Ord`, `Hash`) required by the Rust function (§16.3).
+bounds required by the Rust function (§16.3).
 
 Native modules register Rust-bound opaque types (§5.4), enums, and structs
 directly from Rust rather than declaring them in Sand source.
@@ -512,8 +518,8 @@ fn show_all<T>(xs: [T]) -> str where T: Describe { xs.describe() }
 - **Supertraits** follow a `:` and may be traits or built-in bounds:
   `trait Shape: Describe + Eq`. A bound `T: Shape` implies `T: Describe` and
   `T: Eq`. A trait may not be its own supertrait, directly or indirectly.
-- Traits share the namespace of types. `Eq`, `Ord`, `Hash` and `Num` cannot
-  be redefined.
+- Traits share the namespace of types. The built-in bounds cannot be
+  redefined.
 
 **Impls.** `impl<P...> Trait<Args> for Type where ... { methods }`
 implements a trait for a type.
@@ -673,14 +679,16 @@ error. Use `x.to_float()` or `f.to_int()`.
 
 ### 5.6 Bounds
 
-| Bound  | Satisfied by                                                                                                                                                                       |
-| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Eq`   | every type except function types (and types containing them)                                                                                                                       |
-| `Ord`  | `int`, `float`, `bool`, `str`, `bytes`, `duration`, `()`, ordered value types (§5.4), and tuples, lists, `Option`, structs and enums all of whose components are `Ord`             |
-| `Hash` | `int`, `bool`, `str`, `bytes`, `duration`, `()`, value types (§5.4), and tuples, `Option`, `Result`, enums and structs **without `var` fields** all of whose components are `Hash` |
-| `Num`  | `int`, `float`                                                                                                                                                                     |
+| Bound    | Satisfied by                                                                                                                                                                       |
+| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Eq`     | every type except function types (and types containing them)                                                                                                                       |
+| `Ord`    | `int`, `float`, `bool`, `str`, `bytes`, `duration`, `()`, ordered value types (§5.4), and tuples, lists, `Option`, structs and enums all of whose components are `Ord`             |
+| `Hash`   | `int`, `bool`, `str`, `bytes`, `duration`, `()`, value types (§5.4), and tuples, `Option`, `Result`, enums and structs **without `var` fields** all of whose components are `Hash` |
+| `Num`    | `int`, `float`                                                                                                                                                                     |
+| `Encode` | every type except function types, `Task`, `Channel`, native objects (§5.4), and types containing them                                                                              |
 
-Map keys and set elements must be `Hash`. Built-in bounds are satisfied
+Map keys and set elements must be `Hash`. `Num` implies `Eq`, `Ord` and
+`Encode`, and `Ord` and `Hash` imply `Eq`. Built-in bounds are satisfied
 structurally and cannot be implemented. Traits (§4.9) are user-defined bounds;
 a trait whose supertraits include a built-in bound implies it.
 
@@ -2019,9 +2027,9 @@ pending, then waits; the run's limits and interrupts apply while it waits.
 ```sand
 pub enum Json { Null, Bool(bool), Int(int), Float(float), Str(str), Arr([Json]), Obj([str: Json]) }
 pub native fn parse(text: str) -> Result<Json>
-pub native fn encode<T>(value: T, indent: int = 0) -> str
-pub native fn decode<reflect T>(text: str) -> Result<T>
-pub native fn to_json<T>(value: T) -> Json
+pub native fn encode<T: Encode>(value: T, indent: int = 0) -> str
+pub fn decode<reflect T: Encode>(text: str) -> Result<T>
+pub native fn to_json<T: Encode>(value: T) -> Json
 ```
 
 `parse` reads a number written without a fraction or exponent that fits in an
@@ -2040,26 +2048,33 @@ not equal.
 Floats encode with a fraction or an exponent (`2.0`, `1e20`), so that they
 parse back as floats; non-finite floats encode as `null`.
 
-`encode`/`to_json` map values structurally: `int` → number (`Int`), `float`
-→ number (`Float`), `str` →
-string, `bool`, `()` → `null`, lists/sets/tuples → arrays, maps → objects
-(non-`str` keys converted with `to_str`), structs → objects keyed by field
-name, `None` → `null`, `Some(x)` → `x`; other enums: a payload-less variant
-→ `"Variant"`, otherwise `{"Variant": [payload...]}` (an object for named
-payloads); `bytes` → base64 string; `duration` → nanoseconds; value types
-(§5.4) → their text form (`"2024-02-29"`); `Json` → itself.
+`encode` and `to_json` convert values structurally: `int` → number (`Int`),
+`float` → number (`Float`), `str` → string, `bool`, `()` → `null`,
+lists/sets/tuples → arrays, maps → objects, structs → objects keyed by field
+name, `None` → `null`, `Some(x)` → `x`; other enums: a unit variant →
+`"Variant"`, otherwise `{"Variant": [payload...]}` (or an object for named
+payloads); `bytes` → base64 string; `duration` → nanoseconds; `a..b` →
+`{"start": a, "end": b}` and `a..=b` → `{"start": a, "end": b, "inclusive":
+true}`; value types (§5.4) → their text form (`"2024-02-29"`); `Json` → itself.
+Map keys are formatted as JSON object keys: `str` as itself, `int`, `duration`,
+and `bool` as their text representation, a unit enum variant as its variant
+name, and a value type as its text form. Any other map key type aborts with
+kind `"invalid"`.
 
 `json!` (§6.13) builds a `Json` from JSON syntax with embedded Sand values.
 
-`decode<T>` is the inverse for types built from those components. The
-compiler rejects a call if `T` contains a type that JSON cannot represent: a
-function, task, channel, range, or native object, or a map whose key type is
-not `str`, `int`, `duration`, `bool`, an enum, or a value type. A struct
-field missing from the object takes its declared default if that is a
-constant expression (a literal, `[]`, `[:]` or `None`), else `None` if
-optional; otherwise decoding fails with kind `"parse"` and a message naming
-the path (e.g. `$.items[2].name: expected str`). Parsing is limited to a
-nesting depth of 512.
+`decode<T>` is the inverse of `encode<T>`. Decoding a non-empty map with an
+unsupported key type fails with kind `"invalid"`. If a JSON object omits a
+struct field, `decode` uses the field's declared default, or `None` if the
+field is an `Option` without a default. Constant defaults (constructed from
+literals, `int` ranges, tuples, lists, maps, `set([...])`, enum variants, and
+struct literals, up to 65,536 nodes and 64 nesting levels) are constructed
+during decoding; non-constant defaults (such as `id: str = uuid.v4()`) are
+evaluated after the entire input is parsed, inner structs before outer structs
+and fields in declaration order. Any other missing field or type mismatch fails
+with kind `"parse"` and the JSON path of the error (such as `$.items[2].name:
+expected str`, with type names truncated at 256 bytes with `…`). Parsing is
+limited to a nesting depth of 512.
 
 ### 13.8 `log`
 
@@ -2834,20 +2849,35 @@ Sand keyword or is not a valid Sand identifier.
 | Derive       | Sand type                                                                  |
 | ------------ | -------------------------------------------------------------------------- |
 | `SandValue`  | opaque value type (§5.4); the type must also implement `ValueType`         |
-| `SandEnum`   | `enum` with the unit variants of a Rust enum                               |
+| `SandEnum`   | `enum` with the variants and payloads of a Rust enum                       |
 | `SandObject` | opaque reference type; the type must also implement `NativeObject`         |
 | `SandStruct` | `struct` with the named fields of a Rust struct, copied on each conversion |
 
-Each field of a `SandStruct` must implement `IntoValue` and owned `FromValue`.
-By default, fields are `pub` and immutable; `#[sand(private)]` makes a field
-private to the module, `#[sand(var)]` makes it mutable (`var`), and
-`#[sand(name = "<name>")]` overrides its Sand name. Recursive structs can
-reference themselves through `Vec`, map, or `Option<Box<T>>` fields. Because the
-engine copies each reachable struct value during conversion and charges fuel and
-memory for each copy, shared references in a Sand value produce independent Rust
-copies. Conversion aborts with kind `"limit"` if struct nesting exceeds 256
-levels (for example, in a cyclic value). Module Sand source can define methods
-on any bound type with `extend`.
+Each field of a `SandStruct` and each payload of a `SandEnum` variant must
+implement `IntoValue` and owned `FromValue`. Unit variants map to unit
+variants, tuple variants map to variants with positional payloads
+(`Circle(float)`), and struct variants map to variants with named payloads
+(`Rect(w: float, h: float)`), where `#[sand(name = "<name>")]` overrides a
+payload field name. Generic type parameters on a `SandEnum` or `SandStruct` map
+to Sand type parameters; pass any concrete instantiation to `bind` (such as
+`bind::<Pair<(), ()>>()`).
+
+By default, struct fields are `pub` and immutable; `#[sand(private)]` makes a
+field private to the module, `#[sand(var)]` makes it mutable (`var`), and
+`#[sand(name = "<name>")]` overrides its Sand name. `#[sand(default)]` uses
+`Default::default()` as the Sand field default, and `#[sand(default = <expr>)]`
+uses `<expr>`. `bind` panics if a field default is not a constant (built from
+numbers, `bool`, `()`, strings, `bytes`, durations, tuples, `Vec`, maps, sets,
+`Option`, `SandEnum`, and `SandStruct` values, with at most 65,536 nodes and 64
+nesting levels).
+
+Recursive types can reference themselves through `Vec`, map, or `Box` fields.
+Because the engine copies each reachable struct and enum value during
+conversion and charges fuel and memory for each copy, shared references in a
+Sand value produce independent Rust copies. Conversion aborts with kind
+`"limit"` if the nesting of structs and enum payloads exceeds 256 levels (for
+example, in a cyclic value). Module Sand source can define methods on any bound
+type with `extend`.
 
 The Rust return type of a registered function determines whether the function
 returns a Sand `Result` or aborts the run on failure:
@@ -2882,23 +2912,26 @@ engine collects garbage and checks the memory limit after the call completes.
 | `String`, `&str`; `Vec<u8>`, `&[u8]`               | `str`; `bytes`                                         |
 | `Vec<T>`, `Option<T>`, tuples of 2 to 8 elements   | `[T]`, `T?`, tuples                                    |
 | `Box<T>`                                           | `T`                                                    |
-| `HashMap<K, V>`, `BTreeMap<K, V>`                  | `[K: V]`                                               |
+| `HashMap<K, V>`, `BTreeMap<K, V>`, `IndexMap<K, V>` | `[K: V]`                                              |
 | `HashSet<T>`, `BTreeSet<T>`                        | `Set<T>`                                               |
 | `Result<T, E>`                                     | `Result<T, Error>` or `T` (determined by `E`)          |
 | `Never`                                            | `never`                                                |
+| `sandlang::json::Json`                             | `json.Json`                                            |
 | bound type `T` (see above)                         | `T` (or `&T` for a borrowed object parameter)          |
 | `Val<T>`                                           | `T` (passed as an uncopied heap handle)                |
-| `Param<N, B>`, `Reflect<N, C>`                     | `N`-th type parameter and its runtime type description |
+| `Param<N, B>`, `Reflect<N>`                        | `N`-th type parameter and its runtime type description |
+| `Num<N>`                                           | `Num` evidence of the `N`-th type parameter            |
 
 `Param<N, B>` specifies the built-in bounds `B` (`bound::Eq`, `bound::Ord`,
-`bound::Hash`, or a tuple of bounds such as `(bound::Ord, bound::Hash)`,
-defaulting to `()`) required on the `N`-th type parameter. The corresponding
-`native fn` declaration must declare `B` or stronger bounds on that parameter.
+`bound::Hash`, `bound::Num`, `bound::Encode`, or a tuple of bounds such as
+`(bound::Ord, bound::Hash)`, defaulting to `()`) required on the `N`-th type
+parameter. The corresponding `native fn` declaration must declare `B` or
+stronger bounds on that parameter.
 
-`Reflect<N, C>` validates the reflected `TypeDesc` of the `N`-th type parameter
-at compile time using `C: ReflectCheck` (defaulting to `()`, which accepts all
-types). At each call site, the compiler calls `C::check` once per distinct node
-in the `TypeDesc` graph and reports a compile error if `C::check` returns `Err`.
+If a `native fn` declaration bounds its `N`-th type parameter by `Num`, the
+Rust function can accept a `Num<N>` argument (providing `Num::zero` and
+`Num::one`) after any `Reflect` arguments and in type-parameter order. Native
+`impl` methods cannot take `Num<N>`.
 
 The engine automatically generates Sand declarations for registered types and
 functions that are not declared in `NativeModule::source`. Registered types use

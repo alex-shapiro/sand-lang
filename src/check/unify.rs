@@ -5,6 +5,7 @@
 //! types are equal ids and most comparisons are integer comparisons.
 
 use super::Checker;
+use super::expr::mk;
 use super::traits::is_const_dict;
 use crate::diag::Span;
 use crate::hir::*;
@@ -165,57 +166,75 @@ impl Checker {
         let ty = self.rty(t);
         match ty {
             Ty::Var(_) => None,
-            Ty::List(x) if matches!(b, Bound::Eq | Bound::Ord) => self.satisfies(x, b),
-            Ty::Set(x) if b == Bound::Eq => self.satisfies(x, b),
-            Ty::Map(k, v) if b == Bound::Eq => all(&mut [k, v].into_iter()),
-            Ty::Tuple(l) if !matches!(b, Bound::Num | Bound::Add) => all(&mut self.arena.list(l).iter().copied()),
+            Ty::List(x) | Ty::Set(x) if has_structural_bound(ty, b) => self.satisfies(x, b),
+            Ty::Map(k, v) if has_structural_bound(ty, b) => all(&mut [k, v].into_iter()),
+            Ty::Tuple(l) if has_structural_bound(ty, b) => all(&mut self.arena.list(l).iter().copied()),
             Ty::Param(p) => Some(self.params[p as usize].has_bound(b)),
             Ty::Named(d, l) => match derived_index(b).and_then(|k| self.derived.get(d as usize).map(|x| &x[k])) {
                 Some(Derived::Never) => Some(false),
                 Some(Derived::Needs(ps)) => all(&mut ps.iter().map(|&i| self.arena.elem(l, i as usize))),
-                // `Num` and `Add`; the bounds of a type still being declared are not known.
                 None => Some(!matches!(b, Bound::Num | Bound::Add)),
             },
             _ => Some(prim_satisfies(ty, b)),
         }
     }
 
-    /// Works out which built-in bounds the type definitions from `first` on
-    /// (those of the module being checked) satisfy, once their fields and
-    /// variants are known: see [`Derived`].
+    /// Computes which built-in bounds each type definition from `first` onward
+    /// satisfies, using greatest fixed-point iteration so mutually recursive
+    /// types satisfy a bound unless a component type refutes it.
     pub(crate) fn derive_bounds(&mut self, first: usize) {
         let n = self.types.len();
-        // From the optimistic start (every bound holds, requiring nothing),
-        // refine until nothing changes: the greatest fixed point, so that a
-        // recursive type satisfies a bound unless something in it does not.
         while self.derived.len() < n {
             self.derived.push(std::array::from_fn(|_| Derived::Needs(Vec::new())));
         }
-        loop {
-            let mut changed = false;
-            for d in first..n {
-                for (k, b) in DERIVED.into_iter().enumerate() {
-                    let new = self.derive(d, b);
-                    if new != self.derived[d][k] {
-                        self.derived[d][k] = new;
-                        changed = true;
+        let mut users: Vec<Vec<usize>> = vec![Vec::new(); n - first];
+        for d in first..n {
+            let members: Vec<TypeId> = match &self.types[d].kind {
+                TypeDefKind::Struct { fields } => fields.iter().map(|f| f.ty).collect(),
+                TypeDefKind::Enum { variants } => variants.iter().flat_map(|v| v.fields.iter().copied()).collect(),
+                TypeDefKind::Opaque(_) => Vec::new(),
+            };
+            for t in members {
+                self.arena.any(t, &mut |x| {
+                    if let Ty::Named(e, _) = x
+                        && let Some(u) = (e as usize).checked_sub(first).and_then(|i| users.get_mut(i))
+                        && u.last() != Some(&d)
+                    {
+                        u.push(d);
+                    }
+                    false
+                });
+            }
+        }
+        for (k, b) in DERIVED.into_iter().enumerate() {
+            let mut todo: Vec<usize> = (first..n).collect();
+            let mut queued = vec![true; n - first];
+            while let Some(d) = todo.pop() {
+                queued[d - first] = false;
+                let new = self.derive(d, b);
+                if new != self.derived[d][k] {
+                    self.derived[d][k] = new;
+                    for &u in &users[d - first] {
+                        if !std::mem::replace(&mut queued[u - first], true) {
+                            todo.push(u);
+                        }
                     }
                 }
-            }
-            if !changed || !self.budget.check() {
-                break;
+                if !self.budget.check() {
+                    return;
+                }
             }
         }
     }
 
-    /// What type definition `d` needs to satisfy `b`, from its fields and
-    /// variants and what the other definitions need (so far).
+    /// Computes the requirements for type definition `d` to satisfy `b` based on
+    /// its fields or variants and the current `self.derived` state.
     fn derive(&self, d: usize, b: Bound) -> Derived {
         let def = &self.types[d];
         let mut needs = Vec::new();
         let ok = match &def.kind {
             TypeDefKind::Opaque(kind) => match (b, kind) {
-                (Bound::Eq, _) | (Bound::Hash, Opaque::Value(_)) => true,
+                (Bound::Eq, _) | (Bound::Hash | Bound::Encode, Opaque::Value(_)) => true,
                 (Bound::Ord, Opaque::Value(v)) => v.ord,
                 _ => false,
             },
@@ -233,9 +252,8 @@ impl Checker {
         Derived::Needs(needs)
     }
 
-    /// Whether field type `t` of a definition with type parameters
-    /// `generics` can satisfy `b`, adding to `needs` the parameters (as
-    /// indices into `generics`) whose arguments must satisfy it too.
+    /// Returns `true` if member type `t` can satisfy `b`, and appends required
+    /// type parameter indices from `generics` to `needs`.
     fn needs(&self, t: TypeId, b: Bound, generics: &[ParamId], needs: &mut Vec<u32>) -> bool {
         self.budget.charge(1);
         let mut go = |t: TypeId| self.needs(t, b, generics, needs);
@@ -248,10 +266,9 @@ impl Checker {
                 }
                 None => self.params[p as usize].has_bound(b),
             },
-            Ty::List(x) => matches!(b, Bound::Eq | Bound::Ord) && go(x),
-            Ty::Set(x) => b == Bound::Eq && go(x),
-            Ty::Map(k, v) => b == Bound::Eq && go(k) && go(v),
-            Ty::Tuple(l) => !matches!(b, Bound::Num | Bound::Add) && self.arena.list(l).iter().all(|&x| go(x)),
+            Ty::List(x) | Ty::Set(x) => has_structural_bound(ty, b) && go(x),
+            Ty::Map(k, v) => has_structural_bound(ty, b) && go(k) && go(v),
+            Ty::Tuple(l) => has_structural_bound(ty, b) && self.arena.list(l).iter().all(|&x| go(x)),
             Ty::Named(e, l) => match derived_index(b).map(|k| &self.derived[e as usize][k]) {
                 Some(Derived::Needs(ps)) => ps.iter().all(|&i| go(self.arena.elem(l, i as usize))),
                 _ => false,
@@ -281,9 +298,95 @@ impl Checker {
                 let n = self.name(self.params[p as usize].name);
                 format!("type parameter `{n}` does not satisfy {}; add a bound `{n}: {}`", b.name(), b.name())
             }
-            _ => format!("{} does not satisfy {}", self.show(t), b.name()),
+            _ => self.format_unsatisfied_bound(t, b, ""),
         };
         self.error(span, msg);
+    }
+
+    /// Formats a diagnostic message explaining why `t` does not satisfy `b`.
+    pub(crate) fn format_unsatisfied_bound(&mut self, t: TypeId, b: Bound, context: &str) -> String {
+        let mut msg = format!("{} does not satisfy {}{context}", self.show(t), b.name());
+        if let Ok(Some(UnsatisfiedReason { text: why, leaf, .. })) = self.find_unsatisfied_part(t, b, &mut std::collections::HashSet::new())
+        {
+            msg.push_str(if context.is_empty() { " because " } else { ", because " });
+            msg.push_str(&why);
+            if let Ty::Param(p) = self.rty(leaf) {
+                let n = self.name(self.params[p as usize].name);
+                msg.push_str(&format!("; add a bound `{n}: {}`", b.name()));
+            }
+        }
+        msg
+    }
+
+    /// Finds the innermost field, variant payload, or collection element of `t`
+    /// that fails to satisfy `b`. Returns `Ok(None)` if `t` fails directly, or
+    /// `Err(())` if all failing paths cycle through `seen`.
+    fn find_unsatisfied_part(
+        &mut self,
+        t: TypeId,
+        b: Bound,
+        seen: &mut std::collections::HashSet<TypeId>,
+    ) -> Result<Option<UnsatisfiedReason>, ()> {
+        if !seen.insert(t) || !self.budget.charge(1) {
+            return Err(());
+        }
+        let mut parts: Vec<(TypeId, String)> = Vec::new();
+        let is_member = matches!(self.rty(t), Ty::Named(..));
+        let mut mutable = None;
+        let owner = self.show(t);
+        match self.rty(t) {
+            ty @ (Ty::List(x) | Ty::Set(x)) if has_structural_bound(ty, b) => {
+                parts.push((x, format!("the elements of `{owner}` have type `{}`", self.show(x))))
+            }
+            ty @ Ty::Map(k, v) if has_structural_bound(ty, b) => {
+                parts.push((k, format!("the keys of `{owner}` have type `{}`", self.show(k))));
+                parts.push((v, format!("the values of `{owner}` have type `{}`", self.show(v))));
+            }
+            ty @ Ty::Tuple(l) if has_structural_bound(ty, b) => {
+                let items = self.arena.list(l).to_vec();
+                parts.extend(
+                    items.into_iter().enumerate().map(|(i, x)| (x, format!("element {i} of `{owner}` has type `{}`", self.show(x)))),
+                );
+            }
+            Ty::Named(d, args) => {
+                let (generics, args) = (self.types[d as usize].generics.clone(), self.arena.list(args).to_vec());
+                let mut members: Vec<(String, TypeId, bool)> = Vec::new();
+                match &self.types[d as usize].kind {
+                    TypeDefKind::Struct { fields } => {
+                        members.extend(fields.iter().map(|f| (format!("field `{}` of `{owner}`", self.name(f.name)), f.ty, f.mutable)))
+                    }
+                    TypeDefKind::Enum { variants } => members.extend(variants.iter().flat_map(|v| {
+                        v.fields.iter().map(|&ft| (format!("the payload of variant `{}` of `{owner}`", self.name(v.name)), ft, false))
+                    })),
+                    TypeDefKind::Opaque(_) => {}
+                }
+                for (what, ft, is_var) in members {
+                    if b == Bound::Hash && is_var && mutable.is_none() {
+                        mutable = Some(format!("{what} is mutable"));
+                    }
+                    let ft = self.arena.instantiate(ft, &generics, &args);
+                    let text = format!("{what} has type `{}`", self.show(ft));
+                    parts.push((ft, text));
+                }
+            }
+            _ => {}
+        }
+        if let Some(text) = mutable {
+            return Ok(Some(UnsatisfiedReason { text, leaf: t, is_member: true }));
+        }
+        let mut cyclic = false;
+        for (x, text) in parts {
+            if self.satisfies(x, b) != Some(false) {
+                continue;
+            }
+            match self.find_unsatisfied_part(x, b, seen) {
+                Ok(Some(inner)) if inner.is_member || !is_member => return Ok(Some(inner)),
+                Ok(Some(inner)) => return Ok(Some(UnsatisfiedReason { text, leaf: inner.leaf, is_member })),
+                Ok(None) => return Ok(Some(UnsatisfiedReason { text, leaf: x, is_member })),
+                Err(()) => cyclic = true,
+            }
+        }
+        if cyclic { Err(()) } else { Ok(None) }
     }
 
     // ------------------------------------------------------------------
@@ -305,6 +408,15 @@ impl Checker {
                     self.hoist_dict(e, &mut fin.hoisted);
                 }
                 return;
+            }
+            HKind::TypeDesc { ty, args } => {
+                *ty = self.zonk(*ty);
+                if let Some(l) = self.reflect_local(*ty) {
+                    e.kind = HKind::Local(l);
+                    return;
+                }
+                let locals: Option<Vec<LocalId>> = self.arena.params_of(*ty).into_iter().map(|p| self.reflect_param_local(p)).collect();
+                *args = locals.unwrap_or_default().into_iter().map(|l| mk(HKind::Local(l), TypeId::UNIT, e.span)).collect();
             }
             HKind::CallTrait { args, impl_id, .. } => {
                 if let Some(HArg::Expr(HExpr { kind: HKind::Evidence(i), .. })) = args.first()
@@ -369,30 +481,43 @@ pub(crate) struct Finish {
     pub hoisted: Vec<(LocalId, HExpr)>,
 }
 
-/// What a type definition needs to satisfy a built-in bound.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Derived {
-    /// A field type never satisfies the bound.
     Never,
-    /// The arguments of these type parameters (indices) must satisfy it.
+    /// Indices of type parameters whose arguments must also satisfy the bound.
     Needs(Vec<u32>),
 }
 
-/// The bounds that type definitions may satisfy, in the order of `Checker::derived`.
-const DERIVED: [Bound; 3] = [Bound::Eq, Bound::Ord, Bound::Hash];
+struct UnsatisfiedReason {
+    text: String,
+    leaf: TypeId,
+    is_member: bool,
+}
+
+const DERIVED: [Bound; 4] = [Bound::Eq, Bound::Ord, Bound::Hash, Bound::Encode];
 
 fn derived_index(b: Bound) -> Option<usize> {
     DERIVED.iter().position(|&x| x == b)
 }
 
-/// Whether a type without components that may vary satisfies `b`.
+/// Returns `true` if collection or tuple type `t` satisfies `b` whenever its
+/// element types satisfy `b`.
+fn has_structural_bound(t: Ty, b: Bound) -> bool {
+    match t {
+        Ty::List(_) => matches!(b, Bound::Eq | Bound::Ord | Bound::Encode),
+        Ty::Set(_) | Ty::Map(..) => matches!(b, Bound::Eq | Bound::Encode),
+        Ty::Tuple(_) => !matches!(b, Bound::Num | Bound::Add),
+        _ => false,
+    }
+}
+
 fn prim_satisfies(t: Ty, b: Bound) -> bool {
     match t {
         Ty::Error | Ty::Never | Ty::Int => true,
         Ty::Float => b != Bound::Hash,
         Ty::Str | Ty::Bytes | Ty::Duration => b != Bound::Num,
         Ty::Bool | Ty::Unit => !matches!(b, Bound::Num | Bound::Add),
-        Ty::Range => matches!(b, Bound::Eq | Bound::Hash),
+        Ty::Range => matches!(b, Bound::Eq | Bound::Hash | Bound::Encode),
         Ty::List(_) => b == Bound::Add,
         _ => false,
     }

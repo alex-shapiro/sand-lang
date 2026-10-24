@@ -168,10 +168,16 @@ pub struct Heap {
     /// objects are made and dropped all the time. Counted as used memory;
     /// dropped by major collections.
     spare: [Vec<Box<[Value]>>; SPARE_LENS],
+    /// Reusable chunks of [`STAGE_CHUNK`] objects for [`Staging`], counted in
+    /// `spare_bytes` and dropped on major collections.
+    spare_chunks: Vec<Vec<(u32, Obj)>>,
     spare_bytes: usize,
 }
 
 const SPARE_LENS: usize = 4;
+/// Maximum number of objects per chunk in [`Staging`].
+const STAGE_CHUNK: usize = 4096;
+const CHUNK_BYTES: usize = STAGE_CHUNK * std::mem::size_of::<(u32, Obj)>();
 /// The most boxes kept of each length: about what a minor collection frees.
 const SPARE_MAX: usize = 1 << 14;
 
@@ -185,7 +191,14 @@ pub struct Staging<'h> {
     free: u32,
     /// The next slot past the end of the arena.
     end: usize,
-    objs: Vec<(u32, Obj)>,
+    /// Staged objects and their handles, stored in chunks that double up to
+    /// [`STAGE_CHUNK`] objects so reallocations do not leave large freed
+    /// buffers resident in the allocator.
+    chunks: Vec<Vec<(u32, Obj)>>,
+    /// Total object capacity across `chunks`.
+    capacity: usize,
+    /// Reusable empty chunks of [`STAGE_CHUNK`] objects.
+    spares: Vec<Vec<(u32, Obj)>>,
     /// Accounted size of the staged objects.
     bytes: usize,
 }
@@ -205,8 +218,21 @@ impl Staging<'_> {
             self.end += 1;
             (self.end - 1) as u32
         };
-        self.objs.push((h, obj));
+        match self.chunks.last_mut() {
+            Some(c) if c.len() < c.capacity() => c.push((h, obj)),
+            _ => {
+                let n = self.next_chunk_capacity();
+                let mut c = if n == STAGE_CHUNK { self.spares.pop() } else { None }.unwrap_or_else(|| Vec::with_capacity(n));
+                self.capacity += c.capacity();
+                c.push((h, obj));
+                self.chunks.push(c);
+            }
+        }
         Value::Obj(h)
+    }
+
+    fn next_chunk_capacity(&self) -> usize {
+        self.chunks.last().map_or(4, |c| (c.capacity() * 2).min(STAGE_CHUNK))
     }
 
     pub fn new_str(&mut self, s: impl Into<CompactString>) -> Value {
@@ -243,26 +269,20 @@ impl Staging<'_> {
     /// Whether `extra` more bytes, besides those staged, would exceed the
     /// memory limit of the heap.
     pub fn would_exceed(&self, extra: usize) -> bool {
-        self.heap.would_exceed(self.bytes.saturating_add(extra))
+        self.heap.would_exceed(self.bytes.saturating_add(self.buffer_bytes()).saturating_add(extra))
+    }
+
+    fn buffer_bytes(&self) -> usize {
+        let full = self.chunks.last().is_none_or(|c| c.len() == c.capacity());
+        let next = if full { self.next_chunk_capacity() } else { 0 };
+        let objs = self.capacity + next + self.spares.len() * STAGE_CHUNK;
+        let chunks = self.chunks.capacity().max(self.chunks.len() + 1);
+        objs * std::mem::size_of::<(u32, Obj)>() + chunks * std::mem::size_of::<Vec<(u32, Obj)>>()
     }
 
     /// Returns a memory-limit error if `extra` additional bytes exceed the heap limit.
     pub fn check_memory(&self, extra: usize) -> Result<(), crate::vm::Ctl> {
         if self.would_exceed(extra) { Err(crate::vm::Ctl::limit(LimitKind::Memory)) } else { Ok(()) }
-    }
-
-    /// Makes room for `n` more staged objects.
-    pub fn expect(&mut self, n: usize) {
-        self.objs.reserve(n);
-    }
-
-    /// The number of objects staged.
-    pub fn len(&self) -> usize {
-        self.objs.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.objs.is_empty()
     }
 }
 
@@ -352,6 +372,7 @@ impl Heap {
             stress_tick: 0,
             incremental: true,
             spare: Default::default(),
+            spare_chunks: Vec::new(),
             spare_bytes: 0,
         }
     }
@@ -414,14 +435,23 @@ impl Heap {
     /// the heap. The values `Staging::alloc` returns are valid once `f` has
     /// returned (they may be stored in other staged objects meanwhile).
     pub fn staged<R>(&mut self, f: impl FnOnce(&Heap, &mut Staging<'_>) -> R) -> R {
-        let mut st = Staging { heap: self, free: self.free_head, end: self.objs.len(), objs: Vec::new(), bytes: 0 };
+        let spares = std::mem::take(&mut self.spare_chunks);
+        self.spare_bytes -= spares.len() * CHUNK_BYTES;
+        let mut st = Staging { heap: self, free: self.free_head, end: self.objs.len(), chunks: Vec::new(), capacity: 0, spares, bytes: 0 };
         let r = f(self, &mut st);
-        let (free, objs) = (st.free, st.objs);
-        for (h, obj) in objs {
-            let v = self.alloc(obj);
-            debug_assert_eq!(v, Value::Obj(h), "staged handles follow the free list, then the arena's end");
+        let (free, chunks, mut spares) = (st.free, st.chunks, st.spares);
+        for mut c in chunks {
+            for (h, obj) in c.drain(..) {
+                let v = self.alloc(obj);
+                debug_assert_eq!(v, Value::Obj(h), "staged handles follow the free list, then the arena's end");
+            }
+            if c.capacity() == STAGE_CHUNK {
+                spares.push(c);
+            }
         }
         debug_assert_eq!(self.free_head, free);
+        self.spare_bytes += spares.len() * CHUNK_BYTES;
+        self.spare_chunks = spares;
         r
     }
 
@@ -1169,6 +1199,7 @@ impl Heap {
 
     fn drop_spares(&mut self) {
         self.spare = Default::default();
+        self.spare_chunks = Vec::new();
         self.spare_bytes = 0;
     }
 
@@ -1562,6 +1593,27 @@ mod tests {
         assert_eq!(s, a, "the free slot is reused");
         let c = heap.new_str("c");
         assert_eq!(c.handle(), l.handle().map(|h| h + 1));
+    }
+
+    #[test]
+    fn the_staging_buffer_counts_while_it_holds_objects_and_until_a_major_collection() {
+        let n = (STAGE_CHUNK - 4) + 3 * STAGE_CHUNK;
+        let size = std::mem::size_of::<(u32, Obj)>();
+        let mut heap = Heap::new(None, usize::MAX);
+        let used = heap.used();
+        let buffer = heap.staged(|_, st| {
+            for i in 0..n {
+                st.new_list(vec![Value::Int(i as i64)]);
+            }
+            assert_eq!(st.chunks.iter().map(Vec::len).sum::<usize>(), n);
+            st.buffer_bytes()
+        });
+        let objs = (n + STAGE_CHUNK) * size;
+        assert!(buffer >= objs && buffer < objs + 1024, "{buffer}");
+        let lists = n * Obj::List(vec![Value::Int(0)]).size();
+        assert_eq!(heap.used() - used, lists + 3 * CHUNK_BYTES);
+        heap.collect((0..n).map(|i| Value::Obj(i as u32)), true);
+        assert_eq!(heap.used() - used, lists);
     }
 
     #[test]

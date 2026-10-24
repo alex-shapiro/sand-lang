@@ -87,15 +87,9 @@ impl Checker {
 
     /// A call of the prelude's `print` with `text`.
     fn print_call(&mut self, text: String, span: Span) -> HExpr {
-        let print = self.prelude.and_then(|p| match self.mods[p as usize].scope.get(&self.syms.get("print")?)?.def {
-            Def::Fn(f) => Some(f),
-            _ => None,
-        });
-        let Some(FnKind::Native(native)) = print.map(|f| self.fns[f as usize].kind.clone()) else {
-            panic!("the prelude is missing `print`")
-        };
+        let native = self.prelude_native("print").expect("the prelude declares `print`");
         let args = vec![HArg::Expr(mk(HKind::Str(text), TypeId::STR, span))];
-        mk(HKind::CallNative { native, args, reflect: vec![] }, TypeId::UNIT, span)
+        mk(HKind::CallNative { native, args }, TypeId::UNIT, span)
     }
 
     // ------------------------------------------------------------------
@@ -596,7 +590,7 @@ impl Checker {
                 self.render_type_of(*ty, &mut out);
             }
         }
-        self.budget.charge(out.len() as u64 / 16);
+        self.budget.charge(out.len() as u64 / super::budget::TEXT_BYTES_PER_UNIT);
         out.truncate(out.trim_end().len());
         out
     }
@@ -692,7 +686,7 @@ impl Checker {
                 .filter(|f| self.visible(def.module, f.is_pub))
                 .map(|f| {
                     let var = if f.mutable { "var " } else { "" };
-                    let default = f.default.map(|h| format!(" = {}", self.source_text(self.fns[h as usize].span))).unwrap_or_default();
+                    let default = self.format_field_default(d, f);
                     (
                         format!("{}{var}{}: {}{default}", self.pub_mark(def.module, f.is_pub), self.name(f.name), self.show(f.ty)),
                         f.doc.clone(),
@@ -957,11 +951,11 @@ impl Checker {
         s
     }
 
-    /// `T: Ord + Describe`
     fn param_text(&self, p: ParamId) -> String {
-        let name = self.name(self.params[p as usize].name);
+        let info = &self.params[p as usize];
+        let name = format!("{}{}", if info.reflect { "reflect " } else { "" }, self.name(info.name));
         let bounds = self.bounds_text(p, false);
-        if bounds.is_empty() { name.to_string() } else { format!("{name}: {bounds}") }
+        if bounds.is_empty() { name } else { format!("{name}: {bounds}") }
     }
 
     /// `Ord + Describe` (without `Hash` if `keyed`).
@@ -979,13 +973,89 @@ impl Checker {
         bounds.join(" + ")
     }
 
+    /// Formats the ` = <default>` suffix for field `f` of struct `d`, or returns
+    /// an empty string if `f` has no default.
+    pub(super) fn format_field_default(&self, d: TypeDefId, f: &FieldDef) -> String {
+        match (f.default, &f.const_default) {
+            (Some(_), Some(c)) if self.rust_type(d).is_some() => format!(" = {}", truncate_expr(self.format_const(c))),
+            (Some(h), _) => format!(" = {}", self.source_text(self.fns[h as usize].span)),
+            (None, _) => String::new(),
+        }
+    }
+
+    /// Formats constant `c` as Sand source syntax.
+    fn format_const(&self, c: &ConstVal) -> String {
+        let list = |xs: &[ConstVal]| xs.iter().map(|x| self.format_const(x)).collect::<Vec<_>>().join(", ");
+        match c {
+            ConstVal::Unit => "()".into(),
+            ConstVal::Bool(b) => b.to_string(),
+            ConstVal::Int(i) => i.to_string(),
+            ConstVal::Float(f) => crate::vm::display::fmt_float(*f),
+            ConstVal::Str(s) => {
+                let mut out = String::new();
+                crate::vm::display::escape_str_debug(s, &mut out);
+                out
+            }
+            ConstVal::Bytes(b) => {
+                let mut out = String::new();
+                crate::vm::display::escape_bytes(b, &mut out);
+                out
+            }
+            ConstVal::Dur(d) => crate::vm::display::fmt_duration(*d),
+            ConstVal::Range(a, b, inclusive) => format!("{a}..{}{b}", if *inclusive { "=" } else { "" }),
+            ConstVal::Tuple(xs) => format!("({})", list(xs)),
+            ConstVal::List(xs) => format!("[{}]", list(xs)),
+            ConstVal::Set(xs) if xs.is_empty() => "set()".into(),
+            ConstVal::Set(xs) => format!("set([{}])", list(xs)),
+            ConstVal::Map(kvs) if kvs.is_empty() => "[:]".into(),
+            ConstVal::Map(kvs) => {
+                let entries: Vec<String> = kvs.iter().map(|(k, v)| format!("{}: {}", self.format_const(k), self.format_const(v))).collect();
+                format!("[{}]", entries.join(", "))
+            }
+            ConstVal::Variant(id, payload) => {
+                let (d, i) = self.variants[*id as usize];
+                let def = &self.types[d as usize];
+                let v = &def.variants()[i as usize];
+                let mut out = self.name(v.name).to_string();
+                if d != self.wk.option {
+                    out = format!("{}.{out}", self.name(def.name));
+                }
+                if !payload.is_empty() {
+                    let parts: Vec<String> = match &v.field_names {
+                        Some(names) => {
+                            names.iter().zip(payload).map(|(&n, x)| format!("{}: {}", self.name(n), self.format_const(x))).collect()
+                        }
+                        None => payload.iter().map(|x| self.format_const(x)).collect(),
+                    };
+                    out.push_str(&format!("({})", parts.join(", ")));
+                }
+                out
+            }
+            ConstVal::Struct(d, fields) => {
+                let def = &self.types[*d as usize];
+                let parts: Vec<String> =
+                    def.fields().iter().zip(fields).map(|(f, x)| format!("{}: {}", self.name(f.name), self.format_const(x))).collect();
+                match parts.is_empty() {
+                    true => format!("{} {{}}", self.name(def.name)),
+                    false => format!("{} {{ {} }}", self.name(def.name), parts.join(", ")),
+                }
+            }
+        }
+    }
+
     pub(super) fn source_text(&self, span: Span) -> String {
         let file = self.sources.get(&span.file);
         let text = file.and_then(|f| f.text.get(span.lo as usize..span.hi as usize)).unwrap_or("...");
-        let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        let short = crate::stdlib::truncate(&line, 60);
-        if short.len() < line.len() { format!("{short}...") } else { line }
+        truncate_expr(text.split_whitespace().collect::<Vec<_>>().join(" "))
     }
+}
+
+const MAX_EXPR_CHARS: usize = 60;
+
+/// Truncates `text` to [`MAX_EXPR_CHARS`] characters and appends `...` if truncated.
+fn truncate_expr(text: String) -> String {
+    let short = crate::stdlib::truncate(&text, MAX_EXPR_CHARS);
+    if short.len() < text.len() { format!("{short}...") } else { text }
 }
 
 impl Scopes {
