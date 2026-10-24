@@ -337,6 +337,11 @@ pub(crate) fn compile_more(mut input: CompileInput, prog: &mut Program, inc: &mu
         .map(|(_, b)| if input.optimize { inline::inline_calls(b, &inc.inline, input.budget) } else { None })
         .collect();
     let bodies: HashMap<FnId, &HFn> = cp.bodies.from(first as FnId).zip(&inlined).map(|((f, b), i)| (f, i.as_ref().unwrap_or(b))).collect();
+    if cfg!(debug_assertions)
+        && let Err(m) = crate::check::verify(cp, cp.bodies.from(first as FnId).map(|(f, _)| (f, bodies[&f])))
+    {
+        panic!("the checked program fails verification: {m}");
+    }
     let order = InitOrder::new(cp, &bodies, inits, prog.global_names.len(), input.initialized.take(), input.budget);
     let mut c = Compiler {
         cp,
@@ -1261,7 +1266,7 @@ impl<'a> Compiler<'a> {
         let tail = !defers_pending(f);
         match &e.kind {
             HKind::Block(items) if !items.is_empty() && self.struct_literal(f, items).is_none() => self.ret_block(f, items, None),
-            HKind::Call { func, args } if tail && self.fn_protos[*func as usize].is_some() => {
+            HKind::Call { func, args, .. } if tail && self.fn_protos[*func as usize].is_some() => {
                 let proto = self.fn_protos[*func as usize].unwrap();
                 let base = self.call_args(f, args, 0);
                 self.set_line(f, e.span);
@@ -1681,7 +1686,7 @@ impl<'a> Compiler<'a> {
                     self.emit(f, Op::LoadGlobal { dst, g: *g });
                 }
             },
-            HKind::FnValue(fid) => {
+            HKind::FnValue { func: fid, .. } => {
                 let k = match (&self.cp.fns[*fid as usize].kind, self.fn_protos[*fid as usize]) {
                     (FnKind::Native(n), _) => self.const_idx(Const::Native(*n)),
                     (_, Some(p)) => self.const_idx(Const::Fn(p)),
@@ -2080,7 +2085,7 @@ impl<'a> Compiler<'a> {
                     self.emit(f, Op::RetUnit);
                 }
             },
-            HKind::Call { func, args } => {
+            HKind::Call { func, args, .. } => {
                 let mark = f.next_reg;
                 let base = self.call_args(f, args, 0);
                 self.set_line(f, e.span);
@@ -2090,7 +2095,7 @@ impl<'a> Compiler<'a> {
                 }
                 f.next_reg = mark;
             }
-            HKind::CallNative { native, args } => {
+            HKind::CallNative { native, args, .. } => {
                 if let (Some(&op @ (Inline::MapGet | Inline::MapHas)), [HArg::Expr(m), HArg::Expr(k)]) =
                     (self.inline.get(native), args.as_slice())
                     && let HKind::Tuple(items) = &k.kind

@@ -11,6 +11,7 @@ pub mod persist;
 mod resources;
 mod traits;
 mod unify;
+mod verify;
 
 use crate::diag::{Diag, FileId, SourceFile, Span};
 use crate::engine::NativeDecls;
@@ -27,6 +28,7 @@ use std::sync::Arc;
 
 pub use pat::Witness;
 pub use traits::{ImplDef, TraitDef, TraitMethod};
+pub(crate) use verify::verify;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModKind {
@@ -1864,7 +1866,7 @@ impl Checker {
                     .map(|(k, v)| Some((self.fold_const_expr(k, env, state)?, self.fold_const_expr(v, env, state)?)))
                     .collect::<Option<_>>()?,
             ),
-            HKind::CallNative { native, args } if Some(*native) == self.prelude_native("set") => match args.as_slice() {
+            HKind::CallNative { native, args, .. } if Some(*native) == self.prelude_native("set") => match args.as_slice() {
                 [HArg::Expr(xs)] => match self.fold_const_expr(xs, env, state)? {
                     ConstVal::List(xs) => ConstVal::Set(xs),
                     _ => return None,
@@ -1894,7 +1896,7 @@ impl Checker {
                 ConstVal::Struct(_, mut fields) if (*index as usize) < fields.len() => fields.swap_remove(*index as usize),
                 _ => return None,
             },
-            HKind::Call { func, args } if args.is_empty() => self.fold_default_helper(*func, state)?,
+            HKind::Call { func, args, .. } if args.is_empty() => self.fold_default_helper(*func, state)?,
             HKind::Block(stmts) => {
                 let (last, lets) = stmts.split_last()?;
                 let mark = env.len();

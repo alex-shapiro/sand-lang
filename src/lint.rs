@@ -887,8 +887,8 @@ fn unused_functions(checked: &CheckedProgram) -> Vec<FnId> {
         let Some(body) = checked.bodies.get(id) else { continue };
         let mut refs: Vec<FnId> = body.doc_refs.clone();
         crate::compile::walk(&body.body, &mut |e| match &e.kind {
-            HKind::FnValue(f) => refs.push(*f),
-            HKind::Call { func, args } => {
+            HKind::FnValue { func: f, .. } => refs.push(*f),
+            HKind::Call { func, args, .. } => {
                 refs.push(*func);
                 refs.extend(args.iter().filter_map(|a| if let HArg::Default { helper, .. } = a { Some(*helper) } else { None }));
             }

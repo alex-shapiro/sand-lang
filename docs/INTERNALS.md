@@ -26,6 +26,10 @@ typed HIR ─compiler─▶ bytecode   src/compile/
 bytecode  ─VM───────▶ effects    src/vm/
 ```
 
+Debug builds verify the trait evidence of the typed HIR before compiling it
+(`src/check/verify.rs`), so a checker bug fails there instead of running with
+a wrong dictionary.
+
 The remaining modules provide the embedding API, native bindings, sandboxed OS
 access, and host targets:
 

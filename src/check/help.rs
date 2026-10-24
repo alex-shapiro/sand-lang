@@ -87,7 +87,7 @@ impl Checker {
     fn print_call(&mut self, text: String, span: Span) -> HExpr {
         let native = self.prelude_native("print").expect("the prelude declares `print`");
         let args = vec![HArg::Expr(mk(HKind::Str(text), TypeId::STR, span))];
-        mk(HKind::CallNative { native, args }, TypeId::UNIT, span)
+        mk(HKind::CallNative { native, targs: vec![TypeId::STR], args }, TypeId::UNIT, span)
     }
 
     // ------------------------------------------------------------------

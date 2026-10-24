@@ -441,12 +441,12 @@ impl Ctx<'_> {
                 }
                 0
             }
-            HKind::Call { func, args } => self.call(f, Some(*func), args, e),
+            HKind::Call { func, args, .. } => self.call(f, Some(*func), args, e),
             HKind::CallNative { native, args, .. } => {
                 let func = self.natives.get(native).copied();
                 self.call(f, func, args, e)
             }
-            HKind::CallTrait { trait_id, slot, args, impl_id } => {
+            HKind::CallTrait { trait_id, slot, args, impl_id, .. } => {
                 let func = match impl_id {
                     Some(i) => self.ck.impls[*i as usize].slots.get(*slot as usize).copied(),
                     None => self.ck.traits[*trait_id as usize].methods.get(*slot as usize).map(|m| m.sig),
@@ -547,7 +547,7 @@ impl Ctx<'_> {
             | HKind::Str(_)
             | HKind::Bytes(_)
             | HKind::Global(_)
-            | HKind::FnValue(_)
+            | HKind::FnValue { .. }
             | HKind::TypeDesc { .. }
             | HKind::VariantFn { .. }
             | HKind::Tag(_)

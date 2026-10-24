@@ -928,9 +928,9 @@ impl Checker {
         }
         let fi = &self.fns[f as usize];
         let kind = match fi.kind {
-            FnKind::TraitMethod(trait_id, slot) => HKind::CallTrait { trait_id, slot, args, impl_id: None },
-            FnKind::Native(native) => HKind::CallNative { native, args },
-            _ => HKind::Call { func: f, args },
+            FnKind::TraitMethod(trait_id, slot) => HKind::CallTrait { trait_id, slot, targs: inst.fresh, args, impl_id: None },
+            FnKind::Native(native) => HKind::CallNative { native, targs: inst.fresh, args },
+            _ => HKind::Call { func: f, targs: inst.fresh, args },
         };
         let name = self.name(fi.name).to_string();
         let body = mk(kind, inst.ret, span);
@@ -1153,18 +1153,6 @@ impl Checker {
     /// The dictionary expression proving `ty: tr` in the current function
     /// (`()` for a trait without a dictionary).
     pub(crate) fn resolve_evidence(&mut self, ty: TypeId, tr: TraitRef, depth: u32) -> Result<HExpr, Box<Unmet>> {
-        let r = self.find_evidence(ty, tr, depth);
-        debug_assert!(
-            !(self.has_dict(&tr) && r.as_ref().is_ok_and(|e| matches!(e.kind, HKind::Unit))),
-            "`()` as the dictionary of `{}` for {}",
-            self.show_trait(&tr),
-            self.show(ty)
-        );
-        r
-    }
-
-    /// [`Checker::resolve_evidence`] without the check of its result.
-    fn find_evidence(&mut self, ty: TypeId, tr: TraitRef, depth: u32) -> Result<HExpr, Box<Unmet>> {
         let ty = self.zonk(ty);
         let tr = self.zonk_trait(tr);
         let span = Span::default();

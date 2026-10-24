@@ -160,8 +160,12 @@ pub enum HKind {
     Bytes(Vec<u8>),
     Local(LocalId),
     Global(GlobalId),
-    /// A script function used as a value.
-    FnValue(FnId),
+    /// A script function used as a value, with the type arguments of its
+    /// type parameters ([`FnInfo::generics`](crate::check::FnInfo)).
+    FnValue {
+        func: FnId,
+        targs: Vec<TypeId>,
+    },
     /// A variant constructor used as a function value.
     VariantFn {
         rt_id: u32,
@@ -234,12 +238,16 @@ pub enum HKind {
         depth: u32,
     },
     Return(Option<Box<HExpr>>),
+    /// Calls `func`. `targs` are the type arguments of its type parameters
+    /// ([`FnInfo::generics`](crate::check::FnInfo)), as for the other calls.
     Call {
         func: FnId,
+        targs: Vec<TypeId>,
         args: Vec<HArg>,
     },
     CallNative {
         native: u32,
+        targs: Vec<TypeId>,
         args: Vec<HArg>,
     },
     /// Runtime description for a `reflect` type argument `ty`. If `ty`
@@ -258,6 +266,8 @@ pub enum HKind {
     CallTrait {
         trait_id: TraitId,
         slot: u32,
+        /// The type arguments of the method signature's type parameters.
+        targs: Vec<TypeId>,
         args: Vec<HArg>,
         /// The impl the dictionary comes from, when known statically (the
         /// compiler then calls its method directly).
@@ -482,7 +492,11 @@ impl HExpr {
                     e(x);
                 }
             }
-            HKind::Call { args, .. } | HKind::CallTrait { args, .. } | HKind::CallNative { args, .. } => args_parts(args, f),
+            HKind::Call { targs, args, .. } | HKind::CallTrait { targs, args, .. } | HKind::CallNative { targs, args, .. } => {
+                targs.iter_mut().for_each(|t| f(Part::Type(t)));
+                args_parts(args, f)
+            }
+            HKind::FnValue { targs, .. } => targs.iter_mut().for_each(|t| f(Part::Type(t))),
             HKind::TypeDesc { ty, args } => {
                 args.iter_mut().for_each(e);
                 f(Part::Type(ty));
@@ -544,7 +558,6 @@ impl HExpr {
             | HKind::Bytes(_)
             | HKind::Local(_)
             | HKind::Global(_)
-            | HKind::FnValue(_)
             | HKind::VariantFn { .. }
             | HKind::Tag(_)
             | HKind::Continue { .. }

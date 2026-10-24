@@ -1119,7 +1119,7 @@ impl Checker {
         }
         let inst = self.instantiate_fn_with(f, span, &[]);
         let t = self.fn_ty(&inst.params, inst.ret);
-        mk(HKind::FnValue(f), t, span)
+        mk(HKind::FnValue { func: f, targs: inst.fresh }, t, span)
     }
 
     /// The type arguments of a value that a struct literal or variant of `d`
@@ -1545,9 +1545,11 @@ impl Checker {
             hargs = hidden;
         }
         match self.fns[f as usize].kind {
-            FnKind::TraitMethod(trait_id, slot) => mk(HKind::CallTrait { trait_id, slot, args: hargs, impl_id: None }, ret, span),
-            FnKind::Native(n) => mk(HKind::CallNative { native: n, args: hargs }, ret, span),
-            _ => mk(HKind::Call { func: f, args: hargs }, ret, span),
+            FnKind::TraitMethod(trait_id, slot) => {
+                mk(HKind::CallTrait { trait_id, slot, targs: fresh, args: hargs, impl_id: None }, ret, span)
+            }
+            FnKind::Native(n) => mk(HKind::CallNative { native: n, targs: fresh, args: hargs }, ret, span),
+            _ => mk(HKind::Call { func: f, targs: fresh, args: hargs }, ret, span),
         }
     }
 
@@ -1591,7 +1593,7 @@ impl Checker {
                 let list = self.list_ty(elem);
                 let items = mk(HKind::List(all(self, xs, &vec![elem; xs.len()])), list, span);
                 match self.prelude_native("set") {
-                    Some(native) => HKind::CallNative { native, args: vec![HArg::Expr(items)] },
+                    Some(native) => HKind::CallNative { native, targs: vec![elem], args: vec![HArg::Expr(items)] },
                     None => HKind::Error,
                 }
             }
@@ -2019,10 +2021,7 @@ impl Checker {
             let v = match (given, base_local, self.types[def as usize].fields()[i].default) {
                 (Some(l), _, _) => mk(HKind::Local(l), fty, span),
                 (None, Some(b), _) => mk(HKind::Field { obj: Box::new(mk(HKind::Local(b), sty, span)), index: i as u32 }, fty, span),
-                (None, None, Some(helper)) => {
-                    // Instantiate the helper with this literal's type arguments.
-                    mk(HKind::Call { func: helper, args: vec![] }, fty, span)
-                }
+                (None, None, Some(helper)) => mk(HKind::Call { func: helper, targs: args.clone(), args: vec![] }, fty, span),
                 (None, None, None) => {
                     let def = &self.types[def as usize];
                     let msg = format!("missing field `{}` in `{}` literal", self.name(def.fields()[i].name), self.name(def.name));
