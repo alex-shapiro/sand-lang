@@ -160,6 +160,18 @@ fn bound_checks_on_structs_sharing_field_types() {
 }
 
 #[test]
+fn bounds_of_long_chains_of_structs_are_derived_in_linear_time() {
+    // Each struct names the next, and the last has a function field, so
+    // that no struct satisfies `Eq`. Each definition is derived again only
+    // when one that it names changes, instead of all of them until nothing
+    // changes (one pass per struct in the chain).
+    let n = 20_000;
+    let mut src: String = (0..n).map(|i| format!("struct S{i} {{ s: S{}? }}\n", i + 1)).collect();
+    src += &format!("struct S{n} {{ f: fn() -> int }}\nfn same(x: S0) -> bool {{ x == x }}\n");
+    rejects(&src, "S0 does not satisfy Eq");
+}
+
+#[test]
 fn deeply_nested_string_interpolation() {
     // The lexer keeps its own stack; the parser limits the nesting.
     let n = 100_000;

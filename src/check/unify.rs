@@ -191,19 +191,44 @@ impl Checker {
         while self.derived.len() < n {
             self.derived.push(std::array::from_fn(|_| Derived::Needs(Vec::new())));
         }
-        loop {
-            let mut changed = false;
-            for d in first..n {
-                for (k, b) in DERIVED.into_iter().enumerate() {
-                    let new = self.derive(d, b);
-                    if new != self.derived[d][k] {
-                        self.derived[d][k] = new;
-                        changed = true;
+        // What a definition needs follows from what the definitions that its
+        // fields and variants name need, so a change to one requeues these.
+        let mut users: Vec<Vec<usize>> = vec![Vec::new(); n - first];
+        for d in first..n {
+            let members: Vec<TypeId> = match &self.types[d].kind {
+                TypeDefKind::Struct { fields } => fields.iter().map(|f| f.ty).collect(),
+                TypeDefKind::Enum { variants } => variants.iter().flat_map(|v| v.fields.iter().copied()).collect(),
+                TypeDefKind::Opaque(_) => Vec::new(),
+            };
+            for t in members {
+                self.arena.any(t, &mut |x| {
+                    if let Ty::Named(e, _) = x
+                        && let Some(u) = (e as usize).checked_sub(first).and_then(|i| users.get_mut(i))
+                        && u.last() != Some(&d)
+                    {
+                        u.push(d);
+                    }
+                    false
+                });
+            }
+        }
+        for (k, b) in DERIVED.into_iter().enumerate() {
+            let mut todo: Vec<usize> = (first..n).collect();
+            let mut queued = vec![true; n - first];
+            while let Some(d) = todo.pop() {
+                queued[d - first] = false;
+                let new = self.derive(d, b);
+                if new != self.derived[d][k] {
+                    self.derived[d][k] = new;
+                    for &u in &users[d - first] {
+                        if !std::mem::replace(&mut queued[u - first], true) {
+                            todo.push(u);
+                        }
                     }
                 }
-            }
-            if !changed || !self.budget.check() {
-                break;
+                if !self.budget.check() {
+                    return;
+                }
             }
         }
     }
