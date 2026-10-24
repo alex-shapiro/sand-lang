@@ -491,7 +491,7 @@ fn bounded<T: Encode>(x: T) -> str {
 }
 print(bounded(() => 1))
 --- error
-3: type parameter `T` does not implement `Encode`; add a bound `T: Encode`
+3: type parameter `T` does not implement `Encode`; add `T: Encode`
 8: fn() -> int does not implement `Encode`
 
 === the Encode bound holds for data and is implied by Num

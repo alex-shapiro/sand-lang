@@ -168,4 +168,4 @@ Non-tail recursion is bounded by the engine's call depth limit. The default limi
 
 ## Generic functions
 
-Functions can declare type parameters and trait bounds in `<...>`. See [Traits and generics](/guide/traits/) for more.
+Functions can declare type parameters and the traits that they require in `<...>`. See [Traits and generics](/guide/traits/) for more.

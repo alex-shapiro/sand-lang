@@ -45,8 +45,6 @@ enum Target {
 const ITEM: &str = "    ";
 const ITEM_DOC: &str = "        ";
 
-const BUILTIN_TYPES: &[&str] = &["bool", "int", "float", "str", "bytes", "duration", "Range", "List<T>", "Map<K, V>", "Set<T>"];
-
 impl Checker {
     pub(crate) fn check_intrinsic(&mut self, which: Intrinsic, args: &CallArgs, span: Span) -> HExpr {
         let name = match which {
@@ -164,7 +162,7 @@ impl Checker {
             if let Some(p) = self.prelude {
                 names.extend(self.scope_names(p, true));
             }
-            names.extend(BUILTIN_TYPES.iter().map(|t| t.to_string()));
+            names.extend(Ctor::BUILTIN.iter().map(|&c| self.ctor_name(c, 0)));
             format!("undefined name `{name}`{}", suggestion(name, names))
         };
         self.error(span, msg);
@@ -354,7 +352,7 @@ impl Checker {
 
     fn param_member(&mut self, p: ParamId, name: &str, span: Span) -> Option<Target> {
         let sym = self.syms.get(name);
-        for tr in self.bound_traits(p) {
+        for tr in self.param_traits(p) {
             if let Some(slot) = sym.and_then(|s| self.traits[tr.trait_id as usize].slot(s)) {
                 return Some(Target::TraitMethod(tr.trait_id, slot));
             }
@@ -454,7 +452,7 @@ impl Checker {
 
     fn param_members(&mut self, p: ParamId) -> Vec<String> {
         let mut names = universal_names();
-        for tr in self.bound_traits(p) {
+        for tr in self.param_traits(p) {
             names.extend(self.traits[tr.trait_id as usize].methods.iter().map(|m| self.name(m.name).to_string()));
         }
         names
@@ -614,7 +612,7 @@ impl Checker {
             .collect();
         out.push_str("Functions:\n");
         table(out, &fns);
-        let mut types: Vec<String> = BUILTIN_TYPES.iter().map(|t| t.to_string()).collect();
+        let mut types: Vec<String> = Ctor::BUILTIN.iter().map(|&c| self.ctor_name(c, 0)).collect();
         let mut traits = Vec::new();
         for &(_, d) in &items {
             match d {
@@ -707,54 +705,38 @@ impl Checker {
         let mut traits = self.derived_traits(c, arity);
         for i in self.visible_impls(c, arity) {
             let imp = &self.impls[i as usize];
-            let wheres: Vec<String> = imp.evidence.iter().map(|(t, tr)| format!("{}: {}", self.show(*t), self.show_trait(tr))).collect();
-            let shown = self.show_trait(&imp.trait_ref);
-            traits.push(if wheres.is_empty() { shown } else { format!("{shown} where {}", wheres.join(", ")) });
+            let wheres = imp.evidence.iter().map(|(t, tr)| format!("{}: {}", self.show(*t), self.show_trait(tr))).collect();
+            traits.push(with_wheres(self.show_trait(&imp.trait_ref), wheres));
         }
         let traits: Vec<(String, Option<Arc<str>>)> = traits.into_iter().map(|t| (t, None)).collect();
         section(out, "Implements", &traits);
     }
 
-    /// The derived built-in traits of constructor `c`, with the bounds they
-    /// need on its type parameters (`Eq where T: Eq`).
-    fn derived_traits(&mut self, c: Ctor, arity: u32) -> Vec<String> {
-        let names: Vec<String> = match c {
+    /// The derived built-in traits of constructor `c`, with the traits they
+    /// require of its type parameters (`Eq where T: Eq`).
+    fn derived_traits(&self, c: Ctor, arity: u32) -> Vec<String> {
+        let names = self.ctor_params(c, arity);
+        let derived = Builtin::ALL.iter().copied().filter(|b| b.is_derived());
+        derived.filter_map(|b| Some(with_wheres(b.name().into(), self.derived_wheres(c, &names, b)?))).collect()
+    }
+
+    /// What the derived impl of `b` for constructor `c` (with type
+    /// parameters `names`) requires of them (`T: Eq`), or `None` if there is
+    /// no such impl.
+    fn derived_wheres(&self, c: Ctor, names: &[String], b: Builtin) -> Option<Vec<String>> {
+        let needs = self.derived_needs(c, names.len(), b)?;
+        Some(needs.iter().map(|&i| format!("{}: {}", names[i as usize], b.name())).collect())
+    }
+
+    /// The names of the type parameters of constructor `c` (`K`, `V` for maps).
+    fn ctor_params(&self, c: Ctor, arity: u32) -> Vec<String> {
+        match c {
             Ctor::Def(d) => self.types[d as usize].generics.iter().map(|&p| self.name(self.params[p as usize].name).to_string()).collect(),
             Ctor::List | Ctor::Set => vec!["T".into()],
             Ctor::Map => vec!["K".into(), "V".into()],
             Ctor::Tuple => (0..arity).map(|i| ((b'A' + (i % 26) as u8) as char).to_string()).collect(),
             _ => Vec::new(),
-        };
-        let probe = match c {
-            Ctor::Def(_) | Ctor::Fn => None,
-            Ctor::Tuple => Some(Ty::Tuple(TyList::EMPTY)),
-            Ctor::List => Some(Ty::List(TypeId::INT)),
-            Ctor::Set => Some(Ty::Set(TypeId::INT)),
-            Ctor::Map => Some(Ty::Map(TypeId::INT, TypeId::INT)),
-            Ctor::Int => Some(Ty::Int),
-            Ctor::Float => Some(Ty::Float),
-            Ctor::Bool => Some(Ty::Bool),
-            Ctor::Str => Some(Ty::Str),
-            Ctor::Bytes => Some(Ty::Bytes),
-            Ctor::Duration => Some(Ty::Duration),
-            Ctor::Unit => Some(Ty::Unit),
-            Ctor::Range => Some(Ty::Range),
-        };
-        let mut out = Vec::new();
-        for (k, b) in Builtin::DERIVED.into_iter().enumerate() {
-            let needs: Option<Vec<u32>> = match (c, probe) {
-                (Ctor::Def(d), _) => match self.derived.get(d as usize).map(|x| &x[k]) {
-                    Some(super::derive::Derived::Needs(ps)) => Some(ps.clone()),
-                    _ => None,
-                },
-                (_, Some(ty)) => self.derived_parts(ty, k).map(|_| (0..names.len() as u32).collect()),
-                _ => None,
-            };
-            let Some(needs) = needs else { continue };
-            let wheres: Vec<String> = needs.iter().map(|&i| format!("{}: {}", names[i as usize], b.name())).collect();
-            out.push(if wheres.is_empty() { b.name().to_string() } else { format!("{} where {}", b.name(), wheres.join(", ")) });
         }
-        out
     }
 
     /// Returns `"pub "` when displaying a public member inside its defining module.
@@ -774,7 +756,7 @@ impl Checker {
     fn render_param(&mut self, p: ParamId, out: &mut String) {
         let _ = writeln!(out, "type parameter {}\n", self.param_text(p));
         let mut methods = Vec::new();
-        for tr in self.bound_traits(p) {
+        for tr in self.param_traits(p) {
             for m in &self.traits[tr.trait_id as usize].methods {
                 methods.push((self.signature(m.sig, true), self.fns[m.sig as usize].doc.clone()));
             }
@@ -796,17 +778,23 @@ impl Checker {
             td.methods.iter().map(|m| (self.signature(m.sig, false), self.fns[m.sig as usize].doc.clone())).collect();
         section(out, "Methods", &methods);
         let mut impls: Vec<String> = Vec::new();
+        if let Some(b) = td.builtin.filter(|b| b.is_derived()) {
+            for &c in Ctor::BUILTIN.iter().chain(&[Ctor::Unit]) {
+                if let Some(wheres) = self.derived_wheres(c, &self.ctor_params(c, 0), b) {
+                    impls.push(with_wheres(self.ctor_name(c, 0), wheres));
+                }
+            }
+        }
         for imp in self.impls.iter().filter(|i| i.trait_ref.trait_id == t) {
-            let shown = self.show(imp.target);
+            let wheres = imp.evidence.iter().map(|(t, tr)| format!("{}: {}", self.show(*t), self.show_trait(tr))).collect();
+            let shown = with_wheres(self.show(imp.target), wheres);
             if !impls.contains(&shown) {
                 impls.push(shown);
             }
         }
         self.budget.charge(self.impls.len() as u64);
-        if !impls.is_empty() {
-            out.push_str("Implemented for:\n");
-            wrap(out, &impls);
-        }
+        let impls: Vec<(String, Option<Arc<str>>)> = impls.into_iter().map(|t| (t, None)).collect();
+        section(out, "Implemented for", &impls);
     }
 
     /// Formats the signature of `f`, prefixed with its owner or module if
@@ -850,15 +838,19 @@ impl Checker {
         if self.resolve(fi.ret) != TypeId::UNIT {
             let _ = write!(s, " -> {}", self.show(fi.ret));
         }
-        // Bounds a method puts on its type's parameters (`fn sum(self) -> T
-        // where T: Num`), except `Hash`, which every map key and set element has.
+        // Traits that a method requires of its type's parameters (`fn sum(self)
+        // -> T where T: Num`). Those of the type's declaration and the `Hash`
+        // of map keys and set elements apply to every method.
         if fi.trait_of.is_none() {
-            let keyed = matches!(fi.owner, Some(Ctor::Map | Ctor::Set));
+            let hash: Vec<TraitId> = self.builtins[Builtin::Hash as usize].into_iter().collect();
+            let keyed = if matches!(fi.owner, Some(Ctor::Map | Ctor::Set)) { &hash[..] } else { &[] };
             let wheres: Vec<String> = fi.generics[..fi.outer.min(fi.generics.len())]
                 .iter()
                 .filter_map(|&p| {
-                    let bounds = self.bounds_text(p, keyed);
-                    (!bounds.is_empty()).then(|| format!("{}: {bounds}", self.name(self.params[p as usize].name)))
+                    let mut declared = self.declared_traits(fi.self_ty, p);
+                    declared.extend_from_slice(keyed);
+                    let traits = self.traits_text(p, &declared);
+                    (!traits.is_empty()).then(|| format!("{}: {traits}", self.name(self.params[p as usize].name)))
                 })
                 .collect();
             if !wheres.is_empty() {
@@ -942,7 +934,12 @@ impl Checker {
             TypeDefKind::Opaque(_) => "type",
         };
         let prefix = if qualify { self.module_prefix(def.module) } else { String::new() };
-        format!("{kw} {prefix}{}", self.type_header_name(d))
+        let mut s = format!("{kw} {prefix}{}", self.name(def.name));
+        if !def.generics.is_empty() {
+            let ps: Vec<String> = def.generics.iter().map(|&p| self.param_text(p)).collect();
+            let _ = write!(s, "<{}>", ps.join(", "));
+        }
+        s
     }
 
     pub(super) fn trait_header_name(&self, t: TraitId) -> String {
@@ -965,13 +962,10 @@ impl Checker {
             Ctor::Duration => "duration".into(),
             Ctor::Unit => "()".into(),
             Ctor::Range => "Range".into(),
-            Ctor::List => "List<T>".into(),
-            Ctor::Map => "Map<K, V>".into(),
-            Ctor::Set => "Set<T>".into(),
-            Ctor::Tuple => {
-                let names: Vec<String> = (0..arity).map(|i| ((b'A' + (i % 26) as u8) as char).to_string()).collect();
-                format!("({})", names.join(", "))
-            }
+            Ctor::List => format!("List<{}>", self.ctor_params(c, 0).join(", ")),
+            Ctor::Map => format!("Map<{}>", self.ctor_params(c, 0).join(", ")),
+            Ctor::Set => format!("Set<{}>", self.ctor_params(c, 0).join(", ")),
+            Ctor::Tuple => format!("({})", self.ctor_params(c, arity).join(", ")),
             Ctor::Fn => "fn(...)".into(),
             Ctor::Def(d) => format!("{}{}", self.module_prefix(self.types[d as usize].module), self.type_header_name(d)),
         }
@@ -998,19 +992,29 @@ impl Checker {
     fn param_text(&self, p: ParamId) -> String {
         let info = &self.params[p as usize];
         let name = format!("{}{}", if info.reflect { "reflect " } else { "" }, self.name(info.name));
-        let bounds = self.bounds_text(p, false);
-        if bounds.is_empty() { name } else { format!("{name}: {bounds}") }
+        let traits = self.traits_text(p, &[]);
+        if traits.is_empty() { name } else { format!("{name}: {traits}") }
     }
 
-    /// `Ord + Describe` (without `Hash` if `keyed`).
-    fn bounds_text(&self, p: ParamId, keyed: bool) -> String {
-        let hash = self.builtins[Builtin::Hash as usize];
+    /// The traits that bound type parameter `p` (`Ord + Describe`), without
+    /// those that a trait in `omit` implies.
+    fn traits_text(&self, p: ParamId, omit: &[TraitId]) -> String {
         let visible = |tr: &&TraitRef| {
             let t = &self.traits[tr.trait_id as usize];
-            (t.is_pub || t.module == self.cur_mod) && !(keyed && Some(tr.trait_id) == hash)
+            t.is_pub || t.module == self.cur_mod
         };
         let traits: Vec<TraitRef> = self.params[p as usize].traits.iter().filter(visible).copied().collect();
-        self.minimal_traits(&traits).iter().map(|tr| self.show_trait(tr)).collect::<Vec<_>>().join(" + ")
+        let shown = self.minimal_traits(&traits).into_iter().filter(|tr| !omit.iter().any(|&o| self.trait_reaches(o, tr.trait_id)));
+        shown.map(|tr| self.show_trait(&tr)).collect::<Vec<_>>().join(" + ")
+    }
+
+    /// The traits that the declaration of type `self_ty` puts on type
+    /// parameter `p`, if `self_ty` takes `p` as a type argument.
+    fn declared_traits(&self, self_ty: Option<TypeId>, p: ParamId) -> Vec<TraitId> {
+        let Some(Ty::Named(d, args)) = self_ty.map(|t| self.ty(t)) else { return Vec::new() };
+        let gens = &self.types[d as usize].generics;
+        let at = self.arena.list(args).iter().position(|&a| self.ty(a) == Ty::Param(p));
+        at.map(|i| self.params[gens[i] as usize].traits.iter().map(|tr| tr.trait_id).collect()).unwrap_or_default()
     }
 
     /// Formats the ` = <default>` suffix for field `f` of struct `d`, or returns
@@ -1126,6 +1130,11 @@ fn suggestion(name: &str, names: Vec<String>) -> String {
 }
 
 /// A titled list of entries, each with the first sentence of its doc.
+/// `shown`, followed by ` where ` and `wheres` if there are any.
+fn with_wheres(shown: String, wheres: Vec<String>) -> String {
+    if wheres.is_empty() { shown } else { format!("{shown} where {}", wheres.join(", ")) }
+}
+
 fn section(out: &mut String, title: &str, entries: &[(String, Option<Arc<str>>)]) {
     if entries.is_empty() {
         return;

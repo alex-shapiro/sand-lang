@@ -291,25 +291,21 @@ pub native fn help<T>(x: T)
 /// if called as `members()`.
 pub native fn members<T>(x: T) -> [str]
 
-/// Types whose values `==` and `!=` compare: every type except function
-/// types. The compiler derives `Eq` for structs, enums, tuples, and
-/// collections whose components implement it.
+/// Types whose values `==` and `!=` compare. The compiler derives `Eq` for
+/// tuples, structs, and enums whose components implement it.
 pub trait Eq {}
 
-/// Totally ordered types, which `<`, `<=`, `>`, `>=`, and `sort` compare:
-/// `int`, `float`, `bool`, `str`, `bytes`, `duration`, `()`, ordered value
-/// types, and tuples, lists, structs, and enums whose components implement
-/// `Ord`.
+/// Types whose values `<`, `<=`, `>`, `>=`, and `sort` compare. The compiler
+/// derives `Ord` for tuples, structs, and enums whose components implement it.
 pub trait Ord: Eq {}
 
-/// Types of map keys and set elements: `int`, `bool`, `str`, `bytes`,
-/// `duration`, `()`, `Range`, value types, and tuples, structs, and enums
-/// whose components implement `Hash`. Lists, maps, sets, `float`, and
-/// structs with `var` fields do not implement `Hash`.
+/// Types of map keys and set elements. The compiler derives `Hash` for
+/// tuples, structs, and enums whose components implement it, except for
+/// structs with `var` fields.
 pub trait Hash: Eq {}
 
-/// Types that `json.encode` can encode: every type except function types,
-/// `Task`, `Channel`, native objects, and types that contain them.
+/// Types that `json.encode` can encode. The compiler derives `Encode` for
+/// tuples, structs, and enums whose components implement it.
 pub trait Encode {}
 
 /// Numbers (`int` and `float`), which support arithmetic.

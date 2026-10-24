@@ -337,7 +337,7 @@ fn f<T>(x: T) -> T {
     g(x, x)
 }
 --- error
-2: operator `+` is not defined for type parameter `T`; add a bound `T: Num`
+2: operator `+` is not defined for type parameter `T`; add `T: Num`
 
 === a method receiver of the wrong instance is reported once
 struct Box<T> { v: T }

@@ -417,12 +417,20 @@ help(Option)
 --- stdout
 trait Hash
 
-Types of map keys and set elements: `int`, `bool`, `str`, `bytes`,
-`duration`, `()`, `Range`, value types, and tuples, structs, and enums
-whose components implement `Hash`. Lists, maps, sets, `float`, and
-structs with `var` fields do not implement `Hash`.
+Types of map keys and set elements. The compiler derives `Hash` for
+tuples, structs, and enums whose components implement it, except for
+structs with `var` fields.
 
 Supertraits: Eq
+
+Implemented for:
+    bool
+    int
+    str
+    bytes
+    duration
+    Range
+    ()
 trait Num
 
 Numbers (`int` and `float`), which support arithmetic.
@@ -436,7 +444,8 @@ Methods:
         Returns the multiplicative identity (`1` or `1.0`).
 
 Implemented for:
-    int, float
+    int
+    float
 enum Option<T>
 
 An optional value (`Some(value)` or `None`), also written `T?`.
@@ -477,3 +486,25 @@ Implements:
     Hash where T: Hash
     Encode where T: Encode
     Close where T: Close
+
+=== types show the traits of their type parameters once
+struct Bag<T: Hash> {
+    items: Set<T>
+
+    fn has(self, x: T) -> bool { self.items.contains(x) }
+    fn total(self) -> T where T: Num { self.items.to_list().sum() }
+}
+help(Bag)
+--- stdout
+struct Bag<T: Hash>
+
+Fields:
+    items: Set<T>
+
+Methods:
+    fn has(self, x: T) -> bool
+    fn total(self) -> T where T: Num
+
+Implements:
+    Eq where T: Eq
+    Encode where T: Encode

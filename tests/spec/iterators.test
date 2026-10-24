@@ -232,7 +232,7 @@ Some(5)
 [4, 3]
 2
 
-=== iterators through bounds
+=== iterators through the traits of type parameters
 struct Countdown {
     var n: int
 }

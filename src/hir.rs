@@ -269,7 +269,8 @@ pub enum HKind {
     /// [`HKind::Dict`]) when the function has been checked.
     Evidence(u32),
     /// The dictionary of an impl: the trait's methods, followed by `args`
-    /// (supertrait dictionaries, then the dictionaries for the impl's bounds).
+    /// (supertrait dictionaries, then the dictionaries of the traits that the
+    /// impl requires of its type parameters).
     Dict {
         impl_id: ImplId,
         args: Vec<HExpr>,

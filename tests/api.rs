@@ -161,7 +161,7 @@ fn json_decode_of_deep_options_runs_on_a_small_stack() {
 }
 
 #[test]
-fn bounds_on_deep_types_are_checked_on_a_small_stack() {
+fn required_traits_of_deep_types_are_checked_on_a_small_stack() {
     let deep = format!("(fn() -> int){}", "?".repeat(9000));
     let src = format!(
         "let a: {deep} = None\nprint(a == a)\nfn same<T: Hash>(x: T) -> T {{ x }}\nlet b: int{} = None\nprint(same(b) == b)\n",
@@ -1388,7 +1388,7 @@ help(cons.Chain)
 }
 
 #[test]
-fn generic_host_types_can_bound_their_type_parameters() {
+fn generic_host_types_can_require_traits_of_their_type_parameters() {
     #[derive(Clone, Debug, PartialEq, sandlang::SandStruct)]
     #[sand(module = "sorted")]
     struct Sorted<T: Ord> {
@@ -1641,11 +1641,11 @@ fn rust_field_defaults_can_be_any_constant() {
 
 #[test]
 fn natives_take_num_evidence() {
-    use sandlang::native::{Num, Param, Val, bound};
+    use sandlang::native::{Num, Param, Val, traits};
     use sandlang::vm::{Ctl, Vm};
     let module = |decl: &str| {
         let mut m = NativeModule::new("nums");
-        m.vm_function("total", |vm: &mut Vm, num: Num<0>, xs: Val<Vec<Param<0, bound::Num>>>| -> Result<Param<0>, Ctl> {
+        m.vm_function("total", |vm: &mut Vm, num: Num<0>, xs: Val<Vec<Param<0, traits::Num>>>| -> Result<Param<0>, Ctl> {
             let mut acc = num.zero(vm)?.raw();
             for &x in xs.items(&vm.heap) {
                 acc = match (acc, x) {
@@ -1701,7 +1701,7 @@ print(none.product())
     }
 
     let mut m = module("pub native fn total<T: Num>(xs: [T]) -> T\npub native fn unit<A: Num, B: Num>(a: A, b: B) -> B");
-    m.function("first", |xs: Vec<Param<0, bound::Num>>| xs[0]);
+    m.function("first", |xs: Vec<Param<0, traits::Num>>| xs[0]);
     m.source("pub native fn first<T: Num>(xs: [T]) -> T");
     let src = "import nums\nprint(nums.first([2.5]))\nprint(nums.unit(1, 2))\nlet f: fn([int]) -> int = nums.first\nprint(f([7]))";
     let (r, out, _) = run_src(Config::new().module(m), src);
@@ -1709,13 +1709,13 @@ print(none.product())
     assert_eq!(out, "2.5\n1\n7\n");
 
     let mut m = NativeModule::new("nums");
-    m.function("first", |xs: Vec<Param<0, bound::Num>>| xs[0]);
+    m.function("first", |xs: Vec<Param<0, traits::Num>>| xs[0]);
     m.source("pub native fn first<T: Ord>(xs: [T]) -> T");
     let errors = engine_errors(Config::new().module(m));
-    assert_eq!(errors, ["native function `first` must bound `T` by `Num`, as its Rust function requires `T: Num`"]);
+    assert_eq!(errors, ["native function `first` must declare `T: Num`, as its Rust function requires `T: Num`"]);
 
     let mut m = NativeModule::new("nums");
-    m.vm_function("List.go", |vm: &mut Vm, num: Num<0>, _: Val<Vec<Param<0, bound::Num>>>| num.one(vm));
+    m.vm_function("List.go", |vm: &mut Vm, num: Num<0>, _: Val<Vec<Param<0, traits::Num>>>| num.one(vm));
     m.source("pub trait Go { fn go(self) -> int }\nimpl<T: Num> Go for [T] { native fn go(self) -> T }");
     let errors = engine_errors(Config::new().module(m));
     assert!(errors.iter().any(|e| e == "the Rust function of a native impl method cannot take `Num` evidence"), "{errors:?}");
@@ -1723,10 +1723,10 @@ print(none.product())
 
 #[test]
 fn natives_can_require_encode() {
-    use sandlang::native::{Param, bound};
+    use sandlang::native::{Param, traits};
     let module = |decl: &str| {
         let mut m = NativeModule::new("store");
-        m.function("keep", |x: Param<0, bound::Encode>| x);
+        m.function("keep", |x: Param<0, traits::Encode>| x);
         m.source(decl);
         m
     };
@@ -1737,7 +1737,7 @@ fn natives_can_require_encode() {
     assert_eq!(out, "(1, [\"a\"])\n2\n");
     let cases = [
         ("store.keep(() => 1)", "fn() -> int does not implement `Encode`"),
-        ("fn pass<T>(x: T) -> T {\n    store.keep(x)\n}", "type parameter `T` does not implement `Encode`; add a bound `T: Encode`"),
+        ("fn pass<T>(x: T) -> T {\n    store.keep(x)\n}", "type parameter `T` does not implement `Encode`; add `T: Encode`"),
         ("let f: fn(fn() -> int) -> fn() -> int = store.keep", "fn() -> int does not implement `Encode`"),
     ];
     for (src, msg) in cases {
@@ -1746,7 +1746,7 @@ fn natives_can_require_encode() {
         assert_eq!(ds[0].message, msg, "{src}");
     }
     let errors = engine_errors(Config::new().module(module("pub native fn keep<T>(x: T) -> T")));
-    assert_eq!(errors, ["native function `keep` must bound `T` by `Encode`, as its Rust function requires `T: Encode`"]);
+    assert_eq!(errors, ["native function `keep` must declare `T: Encode`, as its Rust function requires `T: Encode`"]);
 }
 
 #[test]
@@ -1763,7 +1763,7 @@ fn json_rejects_unrepresentable_types_at_compile_time() {
             "struct S { f: fn() -> int }\njson.encode(S { f: () => 1 })",
             "S does not implement `Encode` because field `f` of `S` has type `fn() -> int`",
         ),
-        ("fn dump<T>(x: T) -> str {\n    json.encode(x)\n}", "type parameter `T` does not implement `Encode`; add a bound `T: Encode`"),
+        ("fn dump<T>(x: T) -> str {\n    json.encode(x)\n}", "type parameter `T` does not implement `Encode`; add `T: Encode`"),
     ];
     let http = ("import http\nlet r = http.post_json(\"http://h/\", (x: int) => x)", "fn(int) -> int does not implement `Encode`");
     for (src, msg) in cases.into_iter().chain(cfg!(feature = "os").then_some(http)) {
@@ -1837,12 +1837,12 @@ fn help_lists_rust_bound_items_in_registration_order() {
 }
 
 #[test]
-fn native_declarations_must_have_the_bounds_of_their_rust_functions() {
-    use sandlang::native::{Param, bound};
+fn native_declarations_must_require_the_traits_of_their_rust_functions() {
+    use sandlang::native::{Param, traits};
     let module = |decl: &str| {
         let mut m = NativeModule::new("dedupe");
-        m.function("uniq", |xs: Vec<Param<0, bound::Hash>>| xs);
-        m.function("top", |xs: Vec<Param<0, bound::Ord>>, _key: Param<1, (bound::Ord, bound::Hash)>| xs);
+        m.function("uniq", |xs: Vec<Param<0, traits::Hash>>| xs);
+        m.function("top", |xs: Vec<Param<0, traits::Ord>>, _key: Param<1, (traits::Ord, traits::Hash)>| xs);
         m.source(decl);
         m
     };
@@ -1852,21 +1852,18 @@ fn native_declarations_must_have_the_bounds_of_their_rust_functions() {
     assert_eq!(out, "[1, 2]\n[3]\n");
 
     let cases = [
-        (
-            "pub native fn uniq<T>(xs: [T]) -> [T]",
-            "native function `uniq` must bound `T` by `Hash`, as its Rust function requires `T: Hash`",
-        ),
+        ("pub native fn uniq<T>(xs: [T]) -> [T]", "native function `uniq` must declare `T: Hash`, as its Rust function requires `T: Hash`"),
         (
             "pub native fn uniq<T: Eq>(xs: [T]) -> [T]",
-            "native function `uniq` must bound `T` by `Hash`, as its Rust function requires `T: Hash`",
+            "native function `uniq` must declare `T: Hash`, as its Rust function requires `T: Hash`",
         ),
         (
             "pub native fn top<T, K: Hash>(xs: [T], key: K) -> [T]",
-            "native function `top` must bound `T` by `Ord`, as its Rust function requires `T: Ord`",
+            "native function `top` must declare `T: Ord`, as its Rust function requires `T: Ord`",
         ),
         (
             "pub native fn top<T: Ord, K>(xs: [T], key: K) -> [T]",
-            "native function `top` must bound `K` by `Ord + Hash`, as its Rust function requires `K: Ord + Hash`",
+            "native function `top` must declare `K: Ord + Hash`, as its Rust function requires `K: Ord + Hash`",
         ),
     ];
     for (decl, msg) in cases {

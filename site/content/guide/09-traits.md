@@ -1,9 +1,9 @@
 +++
 title = "Traits and generics"
-description = "Generic functions, bounds, and traits."
+description = "Generic functions and traits."
 +++
 
-A generic function operates on values of any type that implements the traits of its bounds. A trait specifies the operations that a type must support. The prelude declares built-in traits, and you can define your own.
+A generic function operates on values of any type that implements the traits that its type parameters require. A trait specifies the operations that a type must support. The prelude declares built-in traits, and you can define your own.
 
 ## Generic functions
 
@@ -22,7 +22,7 @@ Structs and enums can also be generic (see [Structs and enums](/guide/structs-an
 
 ## Built-in traits
 
-An unconstrained type parameter `T` supports only storage, passing, and formatting. Add a bound (`T: Trait`) to compare, hash, or perform arithmetic on values of type `T`. Combine multiple bounds with `+`, as in `T: Ord + Hash`.
+An unconstrained type parameter `T` supports only storage, passing, and formatting. Require a trait (`T: Trait`) to compare, hash, or perform arithmetic on values of type `T`. Combine several traits with `+`, as in `T: Ord + Hash`.
 
 | Trait    | Operations                       | Supporting types                                                |
 | -------- | -------------------------------- | --------------------------------------------------------------- |
@@ -62,7 +62,7 @@ print(counts(["a", "b", "a"]))
 
 The compiler derives `Eq`, `Ord`, `Hash`, and `Encode` for each struct, enum, and tuple whose fields implement them. A struct with a `var` field does not implement `Hash`. `help(Type)` lists the traits that a type implements. For complete rules, see [§5.6 of the specification](/spec/#56-built-in-traits).
 
-If a function uses an operation that its bounds do not permit, the compiler reports the missing bound:
+If a function uses an operation of a trait that its type parameter does not require, the compiler reports the missing trait:
 
 ```sand error
 fn bigger<T>(a: T, b: T) -> T {
@@ -178,7 +178,7 @@ print(Dog { nick: "rex" }.greet())
 
 ## Impls for built-in types
 
-You can implement custom traits for built-in types such as `bool`, `str`, and `[T]`. A generic `impl` can declare bounds on its type parameters so that the implementation applies only if the element types implement those traits:
+You can implement custom traits for built-in types such as `bool`, `str`, and `[T]`. A generic `impl` can require traits of its type parameters so that the implementation applies only if the element types implement those traits:
 
 ```sand
 trait Describe {
@@ -278,7 +278,7 @@ Trait implementations are always global once their defining module is loaded.
 
 ## Heterogeneous collections
 
-A trait is a type bound, not a value type. To store values of different concrete types in a single collection, wrap the types in an enum:
+A trait is not a type. To store values of different concrete types in a single collection, wrap the types in an enum:
 
 ```sand
 import math

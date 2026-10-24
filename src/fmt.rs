@@ -1168,9 +1168,9 @@ impl<'a> Formatter<'a> {
             }
             parts.push(self.name(&g.name));
             end = g.name.span.hi;
-            if let Some(last) = g.bounds.last() {
+            if let Some(last) = g.traits.last() {
                 parts.push(self.punct(g.name.span.hi, &Tok::Colon, ": "));
-                parts.push(self.bounds(&g.bounds));
+                parts.push(self.traits(&g.traits));
                 end = last.span.hi;
             }
         }
@@ -1179,18 +1179,18 @@ impl<'a> Formatter<'a> {
     }
 
     /// `A + B<T> + m.C`
-    fn bounds(&mut self, bs: &'a [TypeExpr]) -> Doc {
+    fn traits(&mut self, ts: &'a [TypeExpr]) -> Doc {
         let mut parts = Vec::new();
-        for (i, b) in bs.iter().enumerate() {
+        for (i, t) in ts.iter().enumerate() {
             if i > 0 {
-                parts.push(self.punct(bs[i - 1].span.hi, &Tok::Plus, " + "));
+                parts.push(self.punct(ts[i - 1].span.hi, &Tok::Plus, " + "));
             }
-            parts.push(self.ty(b));
+            parts.push(self.ty(t));
         }
         cat(parts)
     }
 
-    /// ` where T: B, ...` after what ends at `after`.
+    /// ` where T: A, ...` after what ends at `after`.
     fn where_clause(&mut self, after: u32, preds: &'a [WherePredicate]) -> Doc {
         // `where` is an identifier.
         let mut parts = vec![self.punct(after, &Tok::Ident, " where ")];
@@ -1200,7 +1200,7 @@ impl<'a> Formatter<'a> {
             }
             parts.push(self.name(&w.name));
             parts.push(self.punct(w.name.span.hi, &Tok::Colon, ": "));
-            parts.push(self.bounds(&w.bounds));
+            parts.push(self.traits(&w.traits));
         }
         cat(parts)
     }
@@ -1311,7 +1311,7 @@ impl<'a> Formatter<'a> {
         let mut head = vec![self.declared(t.is_pub, span.lo, "trait ".into()), self.name(&t.name), self.generics(&t.generics)];
         if !t.supers.is_empty() {
             head.push(self.punct(t.generics.last().map_or(t.name.span.hi, |g| g.name.span.hi), &Tok::Colon, ": "));
-            head.push(self.bounds(&t.supers));
+            head.push(self.traits(&t.supers));
         }
         head.push(text(" "));
         let members: Vec<Member> = t.methods.iter().map(|f| Member::Method(f, self.fn_lo(f))).collect();

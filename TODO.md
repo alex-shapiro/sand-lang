@@ -65,16 +65,20 @@ Follow-up work, roughly in priority order.
 - [ ] Convert `Json` values to and from Rust without recursion so that
       conversion accepts the full 512 nesting levels of `json.parse` without
       overflowing a 512 KiB thread stack (the iOS default).
-- [ ] Support bounded type parameters on `Self` and nested generic types in
-      `#[derive(SandEnum)]` and `#[derive(SandStruct)]` fields. The derive
-      macros substitute `Param<N>` for each type parameter when describing
-      field types, and `Param<N>` does not satisfy Rust trait bounds such as
-      `Ord`.
+- [ ] In `#[derive(SandEnum)]` and `#[derive(SandStruct)]`, support fields
+      of type `Self` and of nested generic types whose type parameters require
+      traits (`struct Sorted<T: Ord>`). The derive macros substitute
+      `Param<N>` for each type parameter when describing field types, and
+      `Param<N>` does not satisfy Rust trait bounds such as `Ord`.
 - [ ] Represent `ValueType` constants in `ConstVal` by their text form so that
       `#[sand(default)]` supports value-type fields and `json.decode` evaluates
       constant value-type defaults directly.
 - [ ] Pass `Num<N>` evidence to native `impl` methods by extracting the `Num`
       dictionary from the `impl` dictionary.
+- [ ] The native API uses "bound" for a Rust type that `NativeModule::bind`
+      attaches to a Sand type (`BoundKind`, `BoundType`, `Type::bound`,
+      `declare_bound_types`), next to `Binding<T>`. Use one name for this
+      concept.
 - [ ] Implement `SandType`, `FromValue`, and `IntoValue` for
       `std::ops::Range<i64>` and `RangeInclusive<i64>` so that `SandStruct`
       fields can use Rust range types and `#[sand(default)]`.
@@ -101,7 +105,7 @@ Follow-up work, roughly in priority order.
       literals (`[1, "a"]`).
 - [ ] Include the `<top level>` stack frame if a failing `assert` is the
       final top-level statement.
-- [ ] Report an unsatisfied bound once per expression: with `x: float?`,
+- [ ] Report a missing trait once per expression: with `x: float?`,
       `set([need(x), x])` (where `need<T: Hash>`) reports
       `float? does not implement Hash` twice, at overlapping spans.
 - [ ] Show the type of impls for some instances of a constructor in the
@@ -168,13 +172,18 @@ Follow-up work, roughly in priority order.
 - [ ] Enforce `Hash` on `Set<T>` element types and `[K: V]` key types at every
       type annotation, not only at method calls, so that `json.decode` cannot
       construct a `Set` or map with unhashable keys.
-- [ ] Check the bounds of struct and enum type parameters in type
-      annotations. With `struct Bag<T: Hash>`, `fn size(b: Bag<[int]>)` and
-      `json.decode` into `Bag<[int]>` are accepted; only struct literals,
+- [ ] Check in type annotations the traits that struct and enum type
+      parameters require. With `struct Bag<T: Hash>`, `fn size(b: Bag<[int]>)`
+      and `json.decode` into `Bag<[int]>` are accepted; only struct literals,
       variants and the methods of `Bag` check `T: Hash`. Decide whether
-      generic signatures (`fn f<T>(b: Bag<T>)`) must repeat the bounds or
-      imply them.
-- [ ] Support bounds on traits with methods (such as `Num`) and `reflect` type
-      parameters on local functions by passing hidden dictionary and
+      generic signatures (`fn f<T>(b: Bag<T>)`) must repeat the required
+      traits or imply them.
+- [ ] Let local functions require traits with methods (such as `Num`) and
+      have `reflect` type parameters, by passing hidden dictionary and
       type-description arguments to closures.
+- [ ] `+` is not a trait. `require_plus` (`src/check/unify.rs`) checks the
+      operands of `+` against a fixed list of types, and a type parameter
+      supports `+` only through `Num`, so generic code cannot concatenate
+      `str`, `bytes` or lists. Declare an `Add` trait in the prelude and
+      derive or implement it like the other built-in traits.
 - [ ] Non-constant trait method defaults.

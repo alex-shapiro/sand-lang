@@ -1,7 +1,7 @@
 use super::{int, int_lit, str_lit};
 use proptest::prelude::*;
 use sandlang::json::Json;
-use sandlang::native::{Num, Param, Val, bound};
+use sandlang::native::{Num, Param, Val, traits};
 use sandlang::vm::{Ctl, Vm};
 use sandlang::{Config, Engine, Error, MemorySink, NativeModule, Value};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -166,7 +166,7 @@ fn json() -> impl Strategy<Value = Json> {
 
 fn sum_module() -> NativeModule {
     let mut m = NativeModule::new("nums");
-    m.vm_function("total", |vm: &mut Vm, num: Num<0>, xs: Val<Vec<Param<0, bound::Num>>>| -> Result<Param<0>, Ctl> {
+    m.vm_function("total", |vm: &mut Vm, num: Num<0>, xs: Val<Vec<Param<0, traits::Num>>>| -> Result<Param<0>, Ctl> {
         let mut acc = num.zero(vm)?.raw();
         for &x in xs.items(&vm.heap) {
             acc = match (acc, x) {

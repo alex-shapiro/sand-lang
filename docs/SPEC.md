@@ -300,13 +300,13 @@ fn greet(name: str, greeting: str = "Hello") {
 - The return type follows `->`; if omitted it is `()` (unit).
 - The body is a block whose value is returned. In a function returning `()`,
   the value of the final expression is discarded.
-- Type parameters are listed in `<...>` with optional bounds `T: Ord + Hash`.
-  Bounds are traits (§4.9), including the built-in traits (§5.6), possibly
-  module-qualified or with type arguments: `T: Ord + Describe`,
-  `T: geo.Shape`, `T: Into<str>`. Bounds may also be
-  given in a trailing `where` clause (`fn sum(self) -> T where T: Num`), which
-  may also constrain the type parameters of an enclosing generic `extend`
-  block, struct or enum for that one method.
+- Type parameters are listed in `<...>`. After a `:`, a type parameter names
+  the traits (§4.9) that its type arguments must implement, including the
+  built-in traits (§5.6), possibly module-qualified or with type arguments:
+  `T: Ord + Describe`, `T: geo.Shape`, `T: Into<str>`. A trailing `where`
+  clause (`fn sum(self) -> T where T: Num`) can also require traits, and can
+  require them of the type parameters of an enclosing generic `extend` block,
+  struct or enum for that one method.
 - A type parameter marked `reflect` (`fn load<reflect T: Encode>(text: str)
   -> Result<[T]>`) receives a runtime type description of its type argument. A
   function can forward `T` (or a composite type containing `T`, such as `[T]`)
@@ -318,8 +318,8 @@ fn greet(name: str, greeting: str = "Hello") {
   type parameters.
 - Functions may be declared inside blocks; such local functions may capture
   enclosing variables and may call themselves recursively. Local functions
-  declared consecutively in the same block may call each other. Their bounds
-  may only be traits without methods (such as `Eq` or `Hash`).
+  declared consecutively in the same block may call each other. Their type
+  parameters may only require traits without methods (such as `Eq` or `Hash`).
 
 ### 4.2 Structs
 
@@ -408,7 +408,7 @@ type Pair<T> = (T, T)
 ```
 
 Aliases are transparent: `Grid` and `[[bool]]` are the same type. Aliases may
-not be recursive.
+not be recursive, and their type parameters cannot require traits.
 
 ### 4.6 Top-level variables
 
@@ -437,7 +437,7 @@ A native function receives the runtime description of each `reflect` type
 parameter (§4.1) as a `Reflect<N>` argument (§16.3).
 
 Each type parameter on a `native fn` declaration must declare the built-in
-bounds required by the Rust function (§16.3).
+traits that the Rust function requires (§16.3).
 
 Native modules register Rust-bound opaque types (§5.4), enums, and structs
 directly from Rust rather than declaring them in Sand source.
@@ -459,7 +459,7 @@ and `Err` as test failures (§6.8).
 ### 4.9 Traits and impls
 
 A **trait** defines a set of methods that types can implement. Generic code
-bounded by a trait can call its methods.
+can call the methods of the traits that its type parameters require.
 
 ```sand
 /// Things with a textual description.
@@ -508,18 +508,18 @@ fn show_all<T>(xs: [T]) -> str where T: Describe { xs.describe() }
   methods. Trait methods are not marked `pub` (they are public if the trait
   is) and cannot be `native`.
 - Inside the trait, `Self` is a type parameter standing for the implementing
-  type. It is bounded by the trait itself, so default methods may call any
+  type. It implements the trait itself, so default methods may call any
   method of the trait (`self.describe()`, `Self.empty()`) and of its
   supertraits.
-- A trait may have type parameters (`trait Into<T>`); they may not have
-  bounds. Trait methods may have type parameters of their own, with bounds;
-  `where` clauses in trait methods may only constrain those.
+- A trait may have type parameters (`trait Into<T>`); they cannot require
+  traits. Trait methods may have type parameters of their own, which can
+  require traits; `where` clauses in trait methods may only constrain those.
 - Default values of trait method parameters must be constants (literals,
   `[]`, `[:]`, `None`).
-- **Supertraits** follow a `:`: `trait Shape: Describe + Eq`. A bound
-  `T: Shape` implies `T: Describe` and `T: Eq`. A trait may not be its own
-  supertrait, directly or indirectly.
-- Traits share the namespace of types. In a bound, a type of the module does
+- **Supertraits** follow a `:`: `trait Shape: Describe + Eq`. A type
+  parameter `T: Shape` also implements `Describe` and `Eq`. A trait may not
+  be its own supertrait, directly or indirectly.
+- Traits share the namespace of types. After a `:`, a type of the module does
   not hide a trait of the prelude with the same name (`struct Hash` and
   `T: Hash`). Programs cannot redefine or implement the built-in traits
   (§5.6).
@@ -535,19 +535,20 @@ implements a trait for a type.
   parameters (`impl<T> Trait for T`) are not allowed. The type's arguments may
   be fixed (`impl Describe for [int]`).
 - Each type parameter of the impl must occur in the type or in the trait
-  arguments. The impl's bounds (in `<...>` or in a `where` clause after the
-  type) are required wherever the impl is used: `impl<T: Describe>
-Describe for [T]` makes `[T]` implement `Describe` exactly when `T` does.
+  arguments. The traits that the impl requires of them (in `<...>` or in a
+  `where` clause after the type) are required wherever the impl is used:
+  `impl<T: Describe> Describe for [T]` makes `[T]` implement `Describe`
+  exactly when `T` does.
 - The impl defines each required method of the trait, may override default
   methods, and may not define other methods. Each method's signature must
   equal the trait's after replacing `Self` by the impl's type and the trait's
   type parameters by the impl's trait arguments (method type parameters may
-  be renamed but must have the same bounds). Impl methods take no `pub`, no
-  default values (those of the trait apply) and may not add bounds to the
+  be renamed but must require the same traits). Impl methods take no `pub`, no
+  default values (those of the trait apply) and cannot require traits of the
   impl's type parameters. Within the impl, `Self` is the impl's type.
 - **Supertraits:** the impl's type must implement every supertrait of the
-  trait (possibly through conditional impls, under the impl's bounds) and
-  satisfy its built-in supertraits.
+  trait, possibly through conditional impls under the traits that the impl
+  requires.
 - **Coherence:** a trait has at most one impl per type constructor and trait
   arguments. Two impls of a trait for the same constructor conflict when
   their trait arguments can be unified: `impl Into<str> for int` and
@@ -560,25 +561,28 @@ Describe for [T]` makes `[T]` implement `Describe` exactly when `T` does.
 - Impls have no names and no visibility: once their module is loaded they
   apply throughout the program.
 
-**Bounds.** A bound `T: Trait<Args>` is satisfied by a type with a
-matching impl (written or derived, §5.6) whose own bounds are satisfied
-(recursively: `[[Point]]: Describe` needs `[Point]: Describe`, which needs
-`Point: Describe`), by a type parameter bounded by the trait or by a trait
-that has it as a supertrait, and by `Self` inside the trait. Every
-instantiation checks the bounds; an unsatisfied bound is reported as, for
+**Required traits.** A type argument for `T: Trait<Args>` must implement
+the trait. A type implements it through a matching impl (written or derived,
+§5.6) whose type parameters get type arguments that implement the traits
+the impl requires (recursively: `[[Point]]: Describe` needs
+`[Point]: Describe`, which needs `Point: Describe`). A type parameter
+implements the traits that it requires and their supertraits, and `Self`
+implements the trait inside the trait. Every instantiation checks the
+required traits, and reports a type that does not implement one as, for
 example, `str does not implement `Describe` (required for [str] to implement
-`Describe`)`. Bounds may appear on functions, methods, `where` clauses,
-impls, and the type parameters of structs and enums. The methods of a struct
-or enum may rely on the bounds of its type parameters. Struct literals,
-variants and each call of such a method check them; type annotations do not.
+`Describe`)`. Functions, methods, `where` clauses, impls, and the type
+parameters of structs and enums can require traits. The methods of a struct
+or enum, including those of its `extend` blocks, may use the traits that its
+type parameters require. Struct literals, variants and each call of such a
+method check them; type annotations do not.
 
 A trait without methods, in it or in its supertraits (`trait Marker {}`, and
 all built-in traits except `Num`), adds no hidden argument to the functions
-that it bounds.
+that require it.
 
 **Method calls.** `e.m(args)` where the type of `e` is
 
-- a type parameter: finds `m` among the traits of its bounds and their
+- a type parameter: finds `m` among the traits that it requires and their
   supertraits;
 - any other type: after function-typed fields and inherent methods (§9),
   finds `m` among the traits that are public or declared in the current
@@ -594,19 +598,19 @@ the prelude: with `impl Monoid for int`, `int.zero()` calls `Monoid.zero`, not
 Describe.describe(p)          // Self is inferred from the arguments
 geo.Shape.area(c)             // a module-qualified trait
 Point.describe(p)             // through the type
-T.empty()                     // a static method through a bounded type parameter
+T.empty()                     // a static method through a type parameter
 Self.empty()                  // in traits and impls
 let m: [str] = Monoid.empty() // Self is inferred from the expected type
 ```
 
 Static methods cannot be called on a value. A call's trait arguments are
-inferred from the bound, from the impl when the trait has a single impl for
-the type's constructor, or from the expected type; when several impls remain
-possible the call needs a type annotation.
+inferred from the traits of the type parameter, from the impl when the trait
+has a single impl for the type's constructor, or from the expected type; when
+several impls remain possible the call needs a type annotation.
 
 Trait methods (`Point.describe`, `Describe.describe`, `T.empty`) and
-generic functions with trait bounds can be used as function values; the
-bounds are resolved where the value is created.
+generic functions that require traits can be used as function values; the
+required traits are resolved where the value is created.
 
 A trait is not a type: there are no trait objects (`dyn Trait`), so a list
 holding values of different types that implement the same trait needs an
@@ -709,9 +713,9 @@ needs the trait of the type arguments that its components use. For example,
 do, and `help(Pair)` shows `Hash where A: Hash, B: Hash`. Only the prelude
 implements `Num`.
 
-The built-in traits are otherwise ordinary traits (§4.9): they can be bounds,
-supertraits (`trait Keyed: Hash { ... }`) and impl bounds. `Num` has the
-static methods `zero()` and `one()`, the additive and multiplicative
+The built-in traits are otherwise ordinary traits (§4.9): type parameters,
+supertraits (`trait Keyed: Hash { ... }`) and impls can require them. `Num`
+has the static methods `zero()` and `one()`, the additive and multiplicative
 identities (`0`/`1` for `int`, `0.0`/`1.0` for `float`), so generic code can
 sum even an empty list:
 
@@ -802,7 +806,7 @@ same `Num` type, with these additions:
   list) once inferred: `add(true, false)` is a compile error.
 - `duration + duration`, `duration - duration`, `-duration`,
   `duration * k`, `k * duration` and `duration / k` produce `duration`,
-  where `k` is any `Num` (a type parameter `k: T` needs the bound `T: Num`);
+  where `k` is any `Num` (a type parameter `k: T` needs `T: Num`);
   a `float` factor gives the exact product truncated toward zero to whole
   nanoseconds, and fails (kind `overflow`) if it is not finite or
   the product is out of range;
@@ -1173,7 +1177,7 @@ needed`).
 - Method resolution: for `e.m(...)`, the type constructor of `e` determines the
   candidates, in order: a function-typed struct field `m` (whose value is
   called), an inherent method (declared in the type or an `extend` block), a
-  trait method (§4.9; for a type parameter, from its bounds), and the
+  trait method (§4.9; for a type parameter, from its traits), and the
   universal methods `to_str() -> str` (display form) and `debug() -> str`
   (debug form).
 - Integer and float literals have types `int` and `float` respectively; there
@@ -1181,7 +1185,7 @@ needed`).
 - At the end of checking a function, every type variable must be resolved,
   except those bound to the function's own type parameters. Unresolved
   variables are errors (`cannot infer type`).
-- Bounds on type parameters are checked at instantiation, or once the
+- The traits of type parameters are checked at instantiation, or once the
   function's types are inferred if a type argument is not known yet.
 - A type, with inference variables resolved, has at most 10,000 components
   (type constructors and leaves); larger types, which only arise by repeated
@@ -2940,14 +2944,14 @@ engine collects garbage and checks the memory limit after the call completes.
 | `Param<N, B>`, `Reflect<N>`                        | `N`-th type parameter and its runtime type description |
 | `Num<N>`                                           | `Num` evidence of the `N`-th type parameter            |
 
-`Param<N, B>` specifies the built-in traits `B` (`bound::Eq`, `bound::Ord`,
-`bound::Hash`, `bound::Num`, `bound::Encode`, or a tuple such as
-`(bound::Ord, bound::Hash)`, defaulting to `()`) required on the `N`-th type
-parameter. The corresponding `native fn` declaration must bound that
-parameter by `B` or by traits that have `B` as supertraits. Native functions
-may only have bounds on built-in traits.
+`Param<N, B>` specifies the built-in traits `B` (`traits::Eq`, `traits::Ord`,
+`traits::Hash`, `traits::Num`, `traits::Encode`, or a tuple such as
+`(traits::Ord, traits::Hash)`, defaulting to `()`) required on the `N`-th type
+parameter. The `native fn` declaration must declare these traits for that
+type parameter, directly or through traits that have them as supertraits.
+Native functions can only require built-in traits.
 
-If a `native fn` declaration bounds its `N`-th type parameter by `Num`, the
+If a `native fn` declaration requires `Num` of its `N`-th type parameter, the
 Rust function can accept a `Num<N>` argument (providing `Num::zero` and
 `Num::one`) after any `Reflect` arguments and in type-parameter order. Native
 `impl` methods cannot take `Num<N>`.
@@ -2971,7 +2975,8 @@ explicitly with `native fn` in `NativeModule::source`.
 - a registered function references an unregistered type or another module's
   private type;
 - a public function or field exposes a private type;
-- a `native fn` declaration lacks a bound that its Rust function requires;
+- a `native fn` declaration does not declare a trait that its Rust function
+  requires;
 - a generic Rust function lacks a `native fn` declaration in Sand source;
 - a method registered as `"Type.name"` targets a nonexistent type, or targets a
   generic type without a `native fn` declaration in Sand source;

@@ -9,7 +9,7 @@
 
 use super::base64;
 use crate::check::ModKind;
-use crate::native::bound::Encode;
+use crate::native::traits;
 use crate::native::{EnumType, HostError, NamedType, NativeModule, Param, Reflect, Val, variant_index};
 use crate::syntax::lexer::is_ident;
 use crate::types::ConstVal;
@@ -113,7 +113,7 @@ pub(crate) fn module() -> NativeModule {
         });
         into_result(r)
     });
-    m.vm_function("encode", |vm: &mut Vm, value: Param<0, Encode>, indent: i64| -> Result<Val<String>, Ctl> {
+    m.vm_function("encode", |vm: &mut Vm, value: Param<0, traits::Encode>, indent: i64| -> Result<Val<String>, Ctl> {
         let ids = JsonIds::of(&vm.prog)?;
         let indent = indent.clamp(0, 1 << 16) as usize;
         let mut e = Encoder {
@@ -179,7 +179,7 @@ pub(crate) fn module() -> NativeModule {
             Err(Error::Ctl(c)) => Err(c),
         }
     });
-    m.vm_function("to_json", |vm: &mut Vm, value: Param<0, Encode>| -> Result<Val<Json>, Ctl> {
+    m.vm_function("to_json", |vm: &mut Vm, value: Param<0, traits::Encode>| -> Result<Val<Json>, Ctl> {
         let ids = JsonIds::of(&vm.prog)?;
         let (prog, meter) = (&vm.prog, &vm.meter);
         let v = vm.heap.staged(|heap, st| {

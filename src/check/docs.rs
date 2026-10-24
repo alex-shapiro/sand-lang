@@ -3,16 +3,13 @@
 use super::*;
 use crate::docs::{ItemDoc, ItemKind, MemberDoc, MemberKind, ModuleDoc, ModuleKind};
 
-const BUILTIN_CTORS: &[Ctor] =
-    &[Ctor::Bool, Ctor::Int, Ctor::Float, Ctor::Str, Ctor::Bytes, Ctor::Duration, Ctor::Range, Ctor::List, Ctor::Map, Ctor::Set];
-
 impl Checker {
     pub(crate) fn module_doc(&mut self, m: ModId, kind: ModuleKind) -> ModuleDoc {
         // Omit the current module prefix in item signatures.
         self.cur_mod = m;
         let mut items = Vec::new();
         if kind == ModuleKind::Prelude {
-            for &c in BUILTIN_CTORS {
+            for &c in Ctor::BUILTIN {
                 let doc = self.ctor_docs.get(&c).map(|d| d.to_string());
                 let name = self.ctor_name(c, 0);
                 items.push(self.type_item(ItemKind::Builtin, c, name.clone(), format!("type {name}"), doc));

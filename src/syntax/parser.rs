@@ -439,8 +439,8 @@ impl<'a> Parser<'a> {
                 reflect = true;
             }
             let name = self.ident("type parameter")?;
-            let bounds = if self.eat(&Tok::Colon) { self.bounds()? } else { Vec::new() };
-            out.push(GenericParam { name, bounds, reflect });
+            let traits = if self.eat(&Tok::Colon) { self.traits()? } else { Vec::new() };
+            out.push(GenericParam { name, traits, reflect });
             if self.eat(&Tok::Comma) {
                 continue;
             }
@@ -450,21 +450,21 @@ impl<'a> Parser<'a> {
         Ok(out)
     }
 
-    /// `B1 + B2 + ...` where each bound is `Name`, `module.Name` or `Name<Args>`.
-    fn bounds(&mut self) -> PResult<Vec<TypeExpr>> {
-        let mut out = vec![self.bound()?];
+    /// `A + B + ...` where each trait is `Name`, `module.Name` or `Name<Args>`.
+    fn traits(&mut self) -> PResult<Vec<TypeExpr>> {
+        let mut out = vec![self.trait_name()?];
         while self.eat(&Tok::Plus) {
-            out.push(self.bound()?);
+            out.push(self.trait_name()?);
         }
         Ok(out)
     }
 
-    fn bound(&mut self) -> PResult<TypeExpr> {
+    fn trait_name(&mut self) -> PResult<TypeExpr> {
         let lo = self.lo();
-        let mut path = vec![self.ident("bound")?];
+        let mut path = vec![self.ident("trait")?];
         while self.at(&Tok::Dot) && matches!(self.peek_tok(1), Tok::Ident) {
             self.bump();
-            path.push(self.ident("bound")?);
+            path.push(self.ident("trait")?);
         }
         let mut args = Vec::new();
         if self.eat(&Tok::Lt) {
@@ -479,7 +479,7 @@ impl<'a> Parser<'a> {
         Ok(TypeExpr { kind: TypeExprKind::Named { path, args }, span: self.span_from(lo) })
     }
 
-    /// An optional `where T: B, U: C` clause.
+    /// An optional `where T: A, U: B + C` clause.
     fn where_clause(&mut self) -> PResult<Vec<WherePredicate>> {
         let mut out = Vec::new();
         if self.at(&Tok::Ident) && self.cur_text() == "where" {
@@ -487,8 +487,8 @@ impl<'a> Parser<'a> {
             loop {
                 let name = self.ident("type parameter")?;
                 self.expect(&Tok::Colon, "`:`")?;
-                let bounds = self.bounds()?;
-                out.push(WherePredicate { name, bounds });
+                let traits = self.traits()?;
+                out.push(WherePredicate { name, traits });
                 if !self.eat(&Tok::Comma) {
                     break;
                 }
@@ -708,7 +708,7 @@ impl<'a> Parser<'a> {
         self.bump();
         let name = self.ident("trait name")?;
         let generics = self.generics(false)?;
-        let supers = if self.eat(&Tok::Colon) { self.bounds()? } else { Vec::new() };
+        let supers = if self.eat(&Tok::Colon) { self.traits()? } else { Vec::new() };
         let methods = self.trait_body(true)?;
         Ok(TraitDecl { name, generics, supers, methods, is_pub, doc })
     }
@@ -716,7 +716,7 @@ impl<'a> Parser<'a> {
     fn impl_decl(&mut self) -> PResult<ImplDecl> {
         self.bump();
         let generics = self.generics(false)?;
-        let trait_ref = self.bound()?;
+        let trait_ref = self.trait_name()?;
         self.expect(&Tok::For, "`for`")?;
         let target = self.ty()?;
         let where_clause = self.where_clause()?;

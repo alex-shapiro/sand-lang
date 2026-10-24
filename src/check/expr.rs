@@ -613,11 +613,8 @@ impl Checker {
                 scope.push((self.params[p as usize].name, p));
                 let with_dicts: Vec<TraitRef> = self.params[p as usize].traits.iter().copied().filter(|tr| self.has_dict(tr)).collect();
                 if !with_dicts.is_empty() {
-                    self.error(
-                        g.name.span,
-                        "local functions cannot have bounds on traits with methods; declare the function at the top level",
-                    );
-                    // Error evidence lets the body use the bounds without further errors.
+                    self.error(g.name.span, "local functions cannot require traits with methods; declare the function at the top level");
+                    // Error evidence lets the body use the traits without further errors.
                     let pt = self.param_ty(p);
                     self.fs.evidence.extend(with_dicts.into_iter().map(|tr| (pt, tr, mk(HKind::Error, TypeId::UNIT, g.name.span))));
                 }
@@ -1010,7 +1007,7 @@ impl Checker {
         }
         let scheme = self.fs.data[l as usize].scheme.clone();
         let fresh: Vec<TypeId> = scheme.iter().map(|_| self.fresh()).collect();
-        self.require_bounds(&scheme, &fresh, &[], span);
+        self.require_traits(&scheme, &fresh, &[], span);
         self.arena.instantiate(t, &scheme, &fresh)
     }
 
@@ -1074,7 +1071,7 @@ impl Checker {
 
     /// Instantiates `f` with fresh type variables, first unifying those of
     /// the parameters in `pre` with the given types. The trait evidence the
-    /// call passes is returned in `dicts`; the other bounds are required here.
+    /// call passes is returned in `dicts`; the other traits are required here.
     pub(crate) fn instantiate_fn_with(&mut self, f: FnId, span: Span, pre: &[(ParamId, TypeId)]) -> Instance {
         let n = self.fns[f as usize].generics.len();
         let first = self.subst.len() as VarId;
@@ -1096,13 +1093,13 @@ impl Checker {
         }
         let gens = self.fns[f as usize].generics.clone();
         let passed = self.fns[f as usize].dicts.clone();
-        self.require_bounds(&gens, &fresh, &passed, span);
+        self.require_traits(&gens, &fresh, &passed, span);
         Instance { fresh, params, ret, dicts }
     }
 
-    /// Requires the bounds of type parameters `gens`, instantiated as
+    /// Requires the traits of type parameters `gens`, instantiated as
     /// `fresh`, except the evidence passed in `passed`.
-    fn require_bounds(&mut self, gens: &[ParamId], fresh: &[TypeId], passed: &[(TypeId, TraitRef)], span: Span) {
+    fn require_traits(&mut self, gens: &[ParamId], fresh: &[TypeId], passed: &[(TypeId, TraitRef)], span: Span) {
         let map = |p: ParamId| gens.iter().position(|&g| g == p).map(|i| fresh[i]);
         for (&g, &v) in gens.iter().zip(fresh) {
             let pt = self.param_ty(g);
@@ -1127,7 +1124,7 @@ impl Checker {
 
     /// The type arguments of a value that a struct literal or variant of `d`
     /// makes: those of `hint` if it is an instance of `d`, else fresh
-    /// variables. Requires the bounds of the type parameters of `d`.
+    /// variables. Requires the traits of the type parameters of `d`.
     fn construct_args(&mut self, d: TypeDefId, hint: Option<TypeId>, span: Span) -> Vec<TypeId> {
         let args = match hint.map(|h| self.rty(h)) {
             Some(Ty::Named(hd, args)) if hd == d => self.elems(args),
@@ -1135,7 +1132,7 @@ impl Checker {
         };
         if self.types[d as usize].generics.iter().any(|&p| !self.params[p as usize].traits.is_empty()) {
             let gens = self.types[d as usize].generics.clone();
-            self.require_bounds(&gens, &args, &[], span);
+            self.require_traits(&gens, &args, &[], span);
         }
         args
     }
@@ -1876,7 +1873,7 @@ impl Checker {
             let call = self.call_instance(f, inst, Some(r), args, span);
             return self.fuse_consumer(call);
         }
-        // Trait methods: through the bounds of a type parameter, or the impls of a type.
+        // Trait methods: through the traits of a type parameter, or the impls of a type.
         match self.find_trait_method(rt, &method.name, method.span) {
             Ok(Some((tr, slot))) => {
                 let sig = self.traits[tr.trait_id as usize].methods[slot as usize].sig;
@@ -1909,7 +1906,7 @@ impl Checker {
                 let mut msg = format!("no method `{}` on type {}", method.name, self.show(rt));
                 if let Some(t) = self.trait_with_method(&method.name) {
                     if let Ty::Param(_) = self.ty(rt) {
-                        msg.push_str(&format!("; add a bound `{}: {t}`", self.show(rt)));
+                        msg.push_str(&format!("; add `{}: {t}`", self.show(rt)));
                     } else {
                         msg.push_str(&format!(" (the trait `{t}` has it but is not implemented for {})", self.show(rt)));
                     }
@@ -2247,8 +2244,8 @@ impl Checker {
                     let msg = format!("type mismatch: cannot compare {} with {}", self.show(lh.ty), self.show(rh.ty));
                     self.error(span, msg);
                 }
-                let bound = if matches!(op, BinOp::Eq | BinOp::Ne) { Builtin::Eq } else { Builtin::Ord };
-                self.require_builtin(lh.ty, bound, span);
+                let b = if matches!(op, BinOp::Eq | BinOp::Ne) { Builtin::Eq } else { Builtin::Ord };
+                self.require_builtin(lh.ty, b, span);
                 let cop = match op {
                     BinOp::Eq => CmpOp::Eq,
                     BinOp::Ne => CmpOp::Ne,

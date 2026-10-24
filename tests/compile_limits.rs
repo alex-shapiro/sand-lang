@@ -136,7 +136,7 @@ fn retried_trait_evidence_is_charged() {
 }
 
 #[test]
-fn bound_checks_on_structs_sharing_field_types() {
+fn trait_checks_on_structs_sharing_field_types() {
     let mut src = String::from("struct S0 { x: int }\n");
     for i in 1..60 {
         src += &format!("struct S{i} {{ a: S{}, b: S{} }}\n", i - 1, i - 1);
@@ -160,7 +160,7 @@ fn bound_checks_on_structs_sharing_field_types() {
 }
 
 #[test]
-fn bounds_of_long_chains_of_structs_are_derived_in_linear_time() {
+fn derived_traits_of_long_chains_of_structs_are_computed_in_linear_time() {
     let n = 20_000;
     let mut src: String = (0..n).map(|i| format!("struct S{i} {{ s: S{}? }}\n", i + 1)).collect();
     src += &format!("struct S{n} {{ f: fn() -> int }}\nfn same(x: S0) -> bool {{ x == x }}\n");

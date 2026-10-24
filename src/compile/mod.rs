@@ -199,7 +199,7 @@ enum HoistKey<'h> {
     /// assigned (`it.next`, the function of an `Iter`).
     Field(LocalId, u32),
     /// A method of a trait dictionary in a local that is never assigned
-    /// (a call through a bound).
+    /// (a call through the trait of a type parameter).
     Method(LocalId, u32),
 }
 
@@ -4388,7 +4388,7 @@ mod tests {
     }
 
     #[test]
-    fn bounds_on_traits_without_methods_take_no_dictionary() {
+    fn traits_without_methods_take_no_dictionary() {
         let src = "trait Marker {}\ntrait Describe: Ord { fn describe(self) -> str }\nimpl Marker for int {}\nimpl Describe for int { fn describe(self) -> str { \"i\" } }\nfn plain<T: Eq + Ord + Hash + Encode + Marker>(x: T) -> bool { x == x }\nfn described<T: Describe>(x: T) -> bool { x < x }\nfn num<T: Num>(x: T) -> T { x + x }\nprint(plain(1))\nprint(described(1))\nprint(num(1))\n";
         let prog = compile(src);
         let nparams = |name: &str| prog.protos.iter().find(|p| p.name == name).unwrap().nparams;

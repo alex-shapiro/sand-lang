@@ -1,4 +1,4 @@
-//! Types, type definitions, bounds and interned names.
+//! Types, type definitions, traits and interned names.
 //!
 //! Types are hash-consed: a [`TypeId`] indexes a node of a [`TypeArena`],
 //! and structurally equal types have the same id, so types are `Copy` and
@@ -503,40 +503,90 @@ impl Symbols {
     }
 }
 
-/// A trait that the prelude declares and whose operations the engine
-/// implements (`==`, `<`, hashing, JSON encoding, arithmetic). Only the
-/// prelude implements `Num`; the checker derives the impls of the others.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Builtin {
-    Eq,
-    Ord,
-    Hash,
-    Encode,
-    Num,
+macro_rules! builtins {
+    ($($name:ident),*) => {
+        /// A trait that the prelude declares and whose operations the engine
+        /// implements (`==`, `<`, hashing, JSON encoding, arithmetic). Only the
+        /// prelude implements `Num`; the checker derives the impls of the others.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        pub enum Builtin {
+            $($name),*
+        }
+
+        impl Builtin {
+            pub const ALL: &[Builtin] = &[$(Builtin::$name),*];
+
+            pub fn name(self) -> &'static str {
+                match self {
+                    $(Builtin::$name => stringify!($name)),*
+                }
+            }
+        }
+
+        /// The built-in traits as Rust types, which name the traits that a
+        /// native function requires of a type parameter: `Param<0, traits::Hash>`
+        /// or `Param<0, (traits::Ord, traits::Hash)>`.
+        pub mod traits {
+            use super::{Builtin, Builtins};
+
+            /// The built-in traits that a [`Param`](crate::native::Param)
+            /// requires: one trait, `()` for none, or a pair of sets.
+            pub trait Set {
+                const TRAITS: Builtins;
+            }
+
+            impl Set for () {
+                const TRAITS: Builtins = Builtins::NONE;
+            }
+
+            impl<A: Set, B: Set> Set for (A, B) {
+                const TRAITS: Builtins = A::TRAITS.union(B::TRAITS);
+            }
+
+            $(
+                #[doc = concat!("The built-in trait `", stringify!($name), "`.")]
+                pub struct $name;
+
+                impl Set for $name {
+                    const TRAITS: Builtins = Builtins::of(Builtin::$name);
+                }
+            )*
+        }
+    };
 }
 
+builtins!(Eq, Ord, Hash, Encode, Num);
+
 impl Builtin {
-    pub const ALL: [Builtin; 5] = [Builtin::Eq, Builtin::Ord, Builtin::Hash, Builtin::Encode, Builtin::Num];
-    /// The traits whose impls the checker derives from the components of types.
-    pub const DERIVED: [Builtin; 4] = [Builtin::Eq, Builtin::Ord, Builtin::Hash, Builtin::Encode];
-
     pub fn parse(s: &str) -> Option<Builtin> {
-        Builtin::ALL.into_iter().find(|b| b.name() == s)
+        Builtin::ALL.iter().copied().find(|b| b.name() == s)
     }
 
-    pub fn name(self) -> &'static str {
-        match self {
-            Builtin::Eq => "Eq",
-            Builtin::Ord => "Ord",
-            Builtin::Hash => "Hash",
-            Builtin::Encode => "Encode",
-            Builtin::Num => "Num",
-        }
+    /// Whether the checker derives the impls of `self` from the components
+    /// of types (all built-in traits except `Num`).
+    pub fn is_derived(self) -> bool {
+        self != Builtin::Num
+    }
+}
+
+/// A set of built-in traits.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Builtins(u8);
+
+impl Builtins {
+    pub const NONE: Builtins = Builtins(0);
+
+    pub const fn of(b: Builtin) -> Builtins {
+        Builtins(1 << b as u8)
     }
 
-    /// The position of `self` in [`Builtin::DERIVED`], or `None` for `Num`.
-    pub fn derived_index(self) -> Option<usize> {
-        Builtin::DERIVED.iter().position(|&b| b == self)
+    #[must_use]
+    pub const fn union(self, other: Builtins) -> Builtins {
+        Builtins(self.0 | other.0)
+    }
+
+    pub fn iter(self) -> impl Iterator<Item = Builtin> {
+        Builtin::ALL.iter().copied().filter(move |&b| self.0 & Builtins::of(b).0 != 0)
     }
 }
 
@@ -557,7 +607,7 @@ impl TraitRef {
 #[derive(Clone, Debug)]
 pub struct ParamInfo {
     pub name: Symbol,
-    /// The declared trait bounds, without their supertraits.
+    /// The traits that the type parameter declares, without their supertraits.
     pub traits: Vec<TraitRef>,
     pub reflect: bool,
 }

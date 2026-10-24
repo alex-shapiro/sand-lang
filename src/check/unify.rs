@@ -1,4 +1,4 @@
-//! Unification, bounds and zonking.
+//! Unification, trait requirements and zonking.
 //!
 //! Inference variables are nodes of the type arena (`Ty::Var`) whose
 //! bindings are kept in `Checker::subst`; types are hash-consed, so equal
@@ -176,7 +176,7 @@ impl Checker {
             Ty::Param(p) if self.builtins[Builtin::Num as usize].is_some_and(|n| self.param_has_trait(p, n)) => {}
             Ty::Param(p) => {
                 let n = self.name(self.params[p as usize].name);
-                let msg = format!("operator `+` is not defined for type parameter `{n}`; add a bound `{n}: Num`");
+                let msg = format!("operator `+` is not defined for type parameter `{n}`; add `{n}: Num`");
                 self.error(span, msg);
             }
             _ => {

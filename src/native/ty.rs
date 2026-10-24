@@ -1,5 +1,6 @@
 //! Rust representations of Sand types.
 
+use crate::types::{Builtins, traits};
 use crate::vm::value::Value;
 use std::any::TypeId;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -24,9 +25,9 @@ pub enum Type {
     Tuple(Vec<Type>),
     Fn(Vec<Type>, Box<Type>),
     /// Type parameter at index `0..` (ordered with enclosing `extend` or `impl`
-    /// type parameters before the function's own type parameters) and its
-    /// required [`Bounds`].
-    Param(u8, Bounds),
+    /// type parameters before the function's own type parameters) and the
+    /// built-in traits that the Rust function requires of it.
+    Param(u8, Builtins),
     /// Runtime type descriptor for the `reflect` type parameter at index `0..`.
     Reflect(u8),
     /// `Num` trait dictionary for the type parameter at index `0..` (see [`Num`]).
@@ -285,97 +286,17 @@ fn_type!(A, B, C);
 #[derive(Clone, Copy, Debug)]
 pub enum Never {}
 
-/// Built-in traits (`Eq`, `Ord`, `Hash`, `Num`, `Encode`) that a native
-/// function requires of a type parameter. The Sand declaration must bound
-/// the parameter by them or by traits that have them as supertraits.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct Bounds {
-    pub eq: bool,
-    pub ord: bool,
-    pub hash: bool,
-    pub num: bool,
-    pub encode: bool,
-}
-
-impl Bounds {
-    pub const NONE: Bounds = Bounds { eq: false, ord: false, hash: false, num: false, encode: false };
-
-    #[must_use]
-    pub const fn union(self, other: Bounds) -> Bounds {
-        Bounds {
-            eq: self.eq || other.eq,
-            ord: self.ord || other.ord,
-            hash: self.hash || other.hash,
-            num: self.num || other.num,
-            encode: self.encode || other.encode,
-        }
-    }
-
-    pub(crate) fn builtins(self) -> impl Iterator<Item = crate::types::Builtin> {
-        use crate::types::Builtin;
-        let all = [
-            (self.eq, Builtin::Eq),
-            (self.ord, Builtin::Ord),
-            (self.hash, Builtin::Hash),
-            (self.num, Builtin::Num),
-            (self.encode, Builtin::Encode),
-        ];
-        all.into_iter().filter(|&(on, _)| on).map(|(_, b)| b)
-    }
-}
-
-/// Marker types that specify required type parameter bounds on [`Param`] (for
-/// example, `Param<0, bound::Hash>` or `Param<0, (bound::Ord, bound::Hash)>`).
-pub mod bound {
-    use super::Bounds;
-
-    /// Built-in trait bounds required on a [`Param`](super::Param).
-    pub trait ParamBounds {
-        const BOUNDS: Bounds;
-    }
-
-    impl ParamBounds for () {
-        const BOUNDS: Bounds = Bounds::NONE;
-    }
-
-    macro_rules! markers {
-        ($($(#[$doc:meta])* $name:ident: $field:ident),* $(,)?) => {$(
-            $(#[$doc])*
-            pub struct $name;
-            impl ParamBounds for $name {
-                const BOUNDS: Bounds = Bounds { $field: true, ..Bounds::NONE };
-            }
-        )*};
-    }
-
-    markers! {
-        /// Requires `Eq` (`==` and `!=`).
-        Eq: eq,
-        /// Requires `Ord` (`<`, `<=`, `>`, `>=`).
-        Ord: ord,
-        /// Requires `Hash` (map keys and set elements).
-        Hash: hash,
-        /// Requires `Num` (`int` or `float`). Pass [`Num`](super::super::Num) as a parameter to access the `Num` dictionary at runtime.
-        Num: num,
-        /// Requires `Encode` (excludes functions, tasks, channels, and native objects).
-        Encode: encode,
-    }
-
-    impl<A: ParamBounds, B: ParamBounds> ParamBounds for (A, B) {
-        const BOUNDS: Bounds = A::BOUNDS.union(B::BOUNDS);
-    }
-}
-
 /// Value of the `N`-th generic type parameter of a `native fn` (see
-/// [`Type::Param`]), with required trait bounds `B` (see [`bound`]).
+/// [`Type::Param`]), with the built-in traits `B` that the Rust function
+/// requires of it (see [`traits`]).
 ///
 /// For `native fn first<T>(xs: [T]) -> T?`, the Rust function takes
 /// `Val<Vec<Param<0>>>` and returns `Option<Param<0>>`. If the Rust function
-/// requires a trait bound on `T` (such as `Param<0, bound::Hash>`), the
-/// `native fn` declaration must declare that bound on `T`.
-pub struct Param<const N: u8, B: bound::ParamBounds = ()>(Value, PhantomData<fn() -> B>);
+/// requires a built-in trait of `T` (such as `Param<0, traits::Hash>`), the
+/// `native fn` declaration must declare `T: Hash`.
+pub struct Param<const N: u8, B: traits::Set = ()>(Value, PhantomData<fn() -> B>);
 
-impl<const N: u8, B: bound::ParamBounds> Param<N, B> {
+impl<const N: u8, B: traits::Set> Param<N, B> {
     pub fn raw(self) -> Value {
         self.0
     }
@@ -386,31 +307,31 @@ impl<const N: u8, B: bound::ParamBounds> Param<N, B> {
     }
 }
 
-impl<const N: u8, B: bound::ParamBounds> Clone for Param<N, B> {
+impl<const N: u8, B: traits::Set> Clone for Param<N, B> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<const N: u8, B: bound::ParamBounds> Copy for Param<N, B> {}
+impl<const N: u8, B: traits::Set> Copy for Param<N, B> {}
 
-impl<const N: u8, B: bound::ParamBounds> fmt::Debug for Param<N, B> {
+impl<const N: u8, B: traits::Set> fmt::Debug for Param<N, B> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Param({:?})", self.0)
     }
 }
 
-impl<const N: u8, B: bound::ParamBounds> SandType for Param<N, B> {
+impl<const N: u8, B: traits::Set> SandType for Param<N, B> {
     fn sand_type() -> Type {
-        Type::Param(N, B::BOUNDS)
+        Type::Param(N, B::TRAITS)
     }
 }
 
-/// Runtime dictionary for the `N`-th generic type parameter bounded by `Num`
-/// (`int` or `float`).
+/// Runtime dictionary of `Num` for the `N`-th generic type parameter (`int`
+/// or `float`).
 ///
-/// A Rust function can accept `Num<N>` for any type parameter declared with a
-/// `T: Num` bound. Place `Num<N>` parameters in ascending order of `N`, after
+/// A Rust function can accept `Num<N>` for any type parameter that the
+/// `native fn` declaration declares as `T: Num`. Place `Num<N>` parameters in ascending order of `N`, after
 /// any [`Reflect`] parameters and before regular value parameters.
 pub struct Num<const N: u8>(Value);
 

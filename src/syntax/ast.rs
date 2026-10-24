@@ -54,8 +54,9 @@ pub struct Import {
 #[derive(Clone, Debug)]
 pub struct GenericParam {
     pub name: Ident,
-    /// Traits (`Ord`, `Describe`, `geo.Shape`, `Into<str>`), written like named types.
-    pub bounds: Vec<TypeExpr>,
+    /// The traits that the type must implement (`Ord`, `Describe`,
+    /// `geo.Shape`, `Into<str>`), written like named types.
+    pub traits: Vec<TypeExpr>,
     pub reflect: bool,
 }
 
@@ -71,7 +72,7 @@ pub struct Param {
 #[derive(Clone, Debug)]
 pub struct WherePredicate {
     pub name: Ident,
-    pub bounds: Vec<TypeExpr>,
+    pub traits: Vec<TypeExpr>,
 }
 
 #[derive(Clone, Debug)]

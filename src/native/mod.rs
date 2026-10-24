@@ -4,9 +4,10 @@ mod convert;
 mod func;
 mod ty;
 
+pub use crate::types::traits;
 pub use convert::{Conversion, FromValue, HostError, IntoHostError, IntoValue, value_from, value_into};
 pub use func::{AsyncHostFunction, HostFunction, Later, NativeError, Signature, VmFunction};
-pub use ty::{Bounds, Channel, Named, Never, Num, Param, Range, Reflect, SandType, Task, Type, Val, bound};
+pub use ty::{Channel, Named, Never, Num, Param, Range, Reflect, SandType, Task, Type, Val};
 
 #[doc(hidden)]
 pub use convert::mismatch;

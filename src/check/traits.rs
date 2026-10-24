@@ -1,23 +1,24 @@
 //! Traits: declarations, impls, method lookup and evidence.
 //!
 //! Values are erased at runtime, so generic code receives *dictionaries*:
-//! a function with trait bounds takes one hidden parameter per (type
-//! parameter, trait) bound, before its declared parameters. A dictionary is a
-//! tuple holding the trait's methods (impl methods or defaults), then the
-//! dictionaries of the trait's supertraits for the same type, then those of
-//! the impl's own bounds. Trait methods (signatures, default and impl
-//! methods) take the dictionary of `Self` as their first hidden parameter.
-//! A trait without methods in it or its supertraits has no dictionary, so
-//! its bounds cost nothing at run time (see [`TraitDef::has_dict`]).
+//! a function takes one hidden parameter for each trait that one of its type
+//! parameters requires (`T: Describe`), before its declared parameters. A
+//! dictionary is a tuple holding the trait's methods (impl methods or
+//! defaults), then the dictionaries of the trait's supertraits for the same
+//! type, then those of the traits that the impl requires of its type
+//! parameters. Trait methods (signatures, default and impl methods) take the
+//! dictionary of `Self` as their first hidden parameter. A trait without
+//! methods in it or its supertraits has no dictionary, so requiring it costs
+//! nothing at run time (see [`TraitDef::has_dict`]).
 //!
-//! A type implements a trait through a bound of a type parameter, an impl,
+//! A type implements a trait through the traits of a type parameter, an impl,
 //! or, for the built-in traits other than `Num`, an impl that the checker
 //! derives from the type's components (see `derive`).
 //!
 //! Calls record the evidence they need as [`HKind::Evidence`] placeholders;
 //! when the enclosing function has been checked (and its types inferred),
 //! each is resolved to a hidden parameter of the function, a projection of
-//! one (supertraits, impl bounds) or an impl's [`HKind::Dict`].
+//! one (supertraits, traits that the impl requires) or an impl's [`HKind::Dict`].
 
 use super::expr::mk;
 use super::*;
@@ -65,7 +66,7 @@ pub struct ImplDef {
     pub span: Span,
     /// The function for each method of the trait (impl method or default).
     pub slots: Vec<FnId>,
-    /// Trait bounds of the impl's type parameters. The dictionaries of those
+    /// The traits that the impl requires of its type parameters. The dictionaries of those
     /// with dictionaries follow the supertrait dictionaries in the impl's
     /// dictionary.
     pub evidence: Vec<(TypeId, TraitRef)>,
@@ -93,7 +94,7 @@ pub(crate) struct Unmet {
     pub hint: Option<String>,
     /// A derived impl that does not exist, whose failing component
     /// [`Checker::explain`] finds (only for diagnostics that are reported).
-    pub explain: Option<(TypeId, TraitRef, usize)>,
+    pub explain: Option<(TypeId, TraitRef, Builtin)>,
 }
 
 impl Unmet {
@@ -174,12 +175,12 @@ impl Checker {
     // ------------------------------------------------------------------
     // Bounds
 
-    /// Resolves the traits of bounds written in source.
-    pub(crate) fn resolve_bounds(&mut self, bs: &[TypeExpr], scope: &[(Symbol, ParamId)], self_ty: Option<TypeId>) -> Vec<TraitRef> {
+    /// Resolves the traits that source names after `:` (`T: Ord + geo.Shape`).
+    pub(crate) fn resolve_traits(&mut self, bs: &[TypeExpr], scope: &[(Symbol, ParamId)], self_ty: Option<TypeId>) -> Vec<TraitRef> {
         let mut traits = Vec::new();
         for b in bs {
             let TypeExprKind::Named { path, args } = &b.kind else {
-                self.error(b.span, "expected a bound");
+                self.error(b.span, "expected a trait");
                 continue;
             };
             let Some(tid) = self.resolve_trait_path(path, b.span) else {
@@ -231,14 +232,14 @@ impl Checker {
                 None
             }
             _ => {
-                self.error(span, format!("unknown bound `{}`", name()));
+                self.error(span, format!("unknown trait `{}`", name()));
                 None
             }
         }
     }
 
-    /// Adds trait bounds to type parameter `p`.
-    pub(crate) fn add_bounds(&mut self, p: ParamId, traits: Vec<TraitRef>) {
+    /// Adds `traits` to the traits that type parameter `p` requires.
+    pub(crate) fn add_traits(&mut self, p: ParamId, traits: Vec<TraitRef>) {
         let info = &mut self.params[p as usize];
         for tr in traits {
             if !info.traits.contains(&tr) {
@@ -255,17 +256,17 @@ impl Checker {
         self_ty: Option<TypeId>,
     ) {
         for w in preds {
-            let traits = self.resolve_bounds(&w.bounds, scope, self_ty);
+            let traits = self.resolve_traits(&w.traits, scope, self_ty);
             let sym = self.syms.get(&w.name.name);
             match scope.iter().rev().find(|(n, _)| Some(*n) == sym) {
-                Some((_, p)) => self.add_bounds(*p, traits),
+                Some((_, p)) => self.add_traits(*p, traits),
                 None => self.error(w.name.span, format!("unknown type parameter `{}`", w.name.name)),
             }
         }
     }
 
     pub(crate) fn trait_as_type_error(&mut self, id: &ast::Ident) {
-        self.error(id.span, format!("`{}` is a trait, not a type; use a type parameter bounded by it (`<T: {}>`)", id.name, id.name));
+        self.error(id.span, format!("`{}` is a trait, not a type; use a type parameter that implements it (`<T: {}>`)", id.name, id.name));
     }
 
     /// The id of built-in trait `b`, once the prelude has declared it.
@@ -313,7 +314,7 @@ impl Checker {
     }
 
     /// The traits a type parameter is known to implement (with supertraits).
-    pub(crate) fn bound_traits(&mut self, p: ParamId) -> Vec<TraitRef> {
+    pub(crate) fn param_traits(&mut self, p: ParamId) -> Vec<TraitRef> {
         let traits = self.params[p as usize].traits.clone();
         let pt = self.param_ty(p);
         self.with_supers(pt, traits)
@@ -344,8 +345,8 @@ impl Checker {
         }
         let mut generics = Vec::new();
         for g in &t.generics {
-            if !g.bounds.is_empty() {
-                self.error(g.name.span, "bounds on trait type parameters are not supported; put them on the methods or impls");
+            if !g.traits.is_empty() {
+                self.error(g.name.span, "the type parameters of a trait cannot require traits; require them on the methods or impls");
             }
             let name = self.sym(&g.name.name);
             generics.push(self.new_param(name, false));
@@ -381,7 +382,7 @@ impl Checker {
         for (&id, (_, d)) in ids.iter().zip(decls) {
             let scope = self.trait_scope(id);
             let self_ty = self.param_ty(self.traits[id as usize].self_param);
-            let supers = self.resolve_bounds(&d.supers, &scope, Some(self_ty));
+            let supers = self.resolve_traits(&d.supers, &scope, Some(self_ty));
             self.traits[id as usize].supers = supers;
         }
         for (&id, (_, d)) in ids.iter().zip(decls) {
@@ -499,11 +500,12 @@ impl Checker {
         let tid = self.resolve_trait_path(path, span)?;
         // Only the prelude implements `Num`, and nothing implements the derived traits.
         if let Some(b) = self.traits[tid as usize].builtin
-            && (b.derived_index().is_some() || Some(self.cur_mod) != self.prelude)
+            && (b.is_derived() || Some(self.cur_mod) != self.prelude)
         {
-            let msg = match b.derived_index() {
-                Some(_) => format!("`{}` is a built-in trait; the compiler derives its impls, so it cannot be implemented", b.name()),
-                None => format!("`{}` is a built-in trait and cannot be implemented", b.name()),
+            let msg = if b.is_derived() {
+                format!("`{}` is a built-in trait; the compiler derives its impls, so it cannot be implemented", b.name())
+            } else {
+                format!("`{}` is a built-in trait and cannot be implemented", b.name())
             };
             self.error(span, msg);
             return None;
@@ -586,7 +588,7 @@ impl Checker {
             }
             for w in &m.where_clause {
                 if scope.iter().any(|(n, _)| self.name(*n) == w.name.name) {
-                    self.error(w.name.span, "impl methods cannot add bounds to the impl's type parameters; add them to the impl");
+                    self.error(w.name.span, "impl methods cannot require traits of the impl's type parameters; require them on the impl");
                 }
             }
             for p in m.params.iter().filter(|p| p.default.is_some()) {
@@ -677,11 +679,11 @@ impl Checker {
                 let ta: Vec<TraitRef> = ta.iter().map(|t| t.subst_params(&mut self.arena, &map)).collect();
                 let pb = self.param_ty(b);
                 let ta = self.with_supers(pb, ta);
-                let tb = self.bound_traits(b);
+                let tb = self.param_traits(b);
                 ok &= ta.iter().all(|x| tb.contains(x)) && tb.iter().all(|x| ta.contains(x));
             }
         }
-        // The impl's dictionary, then the method's own bounds in the trait's order.
+        // The impl's dictionary, then the traits of the method's own type parameters in the trait's order.
         let mut dicts = vec![(imp.target, imp.trait_ref)];
         if ok {
             for &(t, tr) in &sig.dicts[1..] {
@@ -694,7 +696,7 @@ impl Checker {
             let found = self.fn_signature(f);
             let tname = self.name(tname);
             let msg = if want == found {
-                format!("the type parameters of method `{}` have different bounds than in trait `{tname}`", m.name.name)
+                format!("the type parameters of method `{}` require different traits than in trait `{tname}`", m.name.name)
             } else {
                 format!("method `{}` does not match its declaration in trait `{tname}`: expected `{want}`, found `{found}`", m.name.name)
             };
@@ -734,7 +736,7 @@ impl Checker {
     // Method lookup
 
     /// Finds the trait providing method `name` for values of type `ty`: through
-    /// the bounds of a type parameter, or the impls of a concrete type.
+    /// the traits of a type parameter, or the impls of a concrete type.
     /// Reports ambiguity (and returns `Err`).
     pub(crate) fn find_trait_method(&mut self, ty: TypeId, name: &str, span: Span) -> Result<Option<(TraitRef, u32)>, ()> {
         let ty = self.resolve(ty);
@@ -742,7 +744,7 @@ impl Checker {
         let mut found: Vec<(TraitRef, u32)> = Vec::new();
         match self.ty(ty) {
             Ty::Param(p) => {
-                for tr in self.bound_traits(p) {
+                for tr in self.param_traits(p) {
                     if let Some(slot) = self.traits[tr.trait_id as usize].slot(sym) {
                         found.push((tr, slot));
                     }
@@ -802,19 +804,19 @@ impl Checker {
         let Some(sym) = self.syms.get(name) else { return false };
         let t = self.resolve(ty);
         match self.ty(t) {
-            Ty::Param(p) => self.bound_traits(p).iter().any(|tr| self.traits[tr.trait_id as usize].slot(sym).is_some()),
+            Ty::Param(p) => self.param_traits(p).iter().any(|tr| self.traits[tr.trait_id as usize].slot(sym).is_some()),
             _ => impl_key(&self.arena, t).and_then(|k| self.impls_by_ctor.get(&k)).is_some_and(|ids| {
                 ids.iter().any(|&i| self.traits[self.impls[i as usize].trait_ref.trait_id as usize].slot(sym).is_some())
             }),
         }
     }
 
-    /// Whether `ty` implements trait `t` (through a bound of a type parameter
+    /// Whether `ty` implements trait `t` (through the traits of a type parameter
     /// or an impl for its constructor), whatever the trait's arguments.
     pub(crate) fn implements_trait(&mut self, ty: TypeId, t: TraitId) -> bool {
         let ty = self.resolve(ty);
         match self.ty(ty) {
-            Ty::Param(p) => self.bound_traits(p).iter().any(|tr| tr.trait_id == t),
+            Ty::Param(p) => self.param_traits(p).iter().any(|tr| tr.trait_id == t),
             _ => impl_key(&self.arena, ty).and_then(|(c, n)| self.impls_by.get(&(t, c, n))).is_some_and(|ids| !ids.is_empty()),
         }
     }
@@ -1023,7 +1025,7 @@ impl Checker {
         dict_expr(HKind::Evidence((self.fs.holes.len() - 1) as u32), span)
     }
 
-    /// If only one impl or bound can provide the evidence, uses it to infer
+    /// If only one impl or trait of a type parameter can provide the evidence, uses it to infer
     /// the trait arguments (and type arguments) early.
     fn improve_evidence(&mut self, ty: TypeId, tr: TraitRef) {
         let t = self.resolve(ty);
@@ -1054,19 +1056,6 @@ impl Checker {
                 }
             }
         }
-    }
-
-    /// Whether the bounds of type parameter `ty`, or the evidence of the
-    /// current function, provide `ty: tr`.
-    fn fact_implies(&mut self, ty: TypeId, tr: TraitRef) -> bool {
-        let mut direct: Vec<TraitRef> = self.fs.evidence.iter().filter(|(t, _, _)| *t == ty).map(|(_, tr, _)| *tr).collect();
-        if let Ty::Param(p) = self.ty(ty) {
-            if !self.param_has_trait(p, tr.trait_id) && direct.is_empty() {
-                return false;
-            }
-            direct.extend(self.params[p as usize].traits.iter().copied());
-        }
-        self.with_supers(ty, direct).contains(&tr)
     }
 
     /// Traits that the evidence of the current function provides for `ty`.
@@ -1159,9 +1148,6 @@ impl Checker {
         if !ground && let Some(e) = self.find_fact(ty, tr) {
             return Ok(e);
         }
-        if !ground && !self.has_dict(&tr) && self.fact_implies(ty, tr) {
-            return Ok(dict_expr(HKind::Unit, span));
-        }
         match self.ty(ty) {
             Ty::Error => return Ok(dict_expr(HKind::Error, span)),
             // A value of type `never` is never produced, so its methods never run.
@@ -1176,7 +1162,7 @@ impl Checker {
                 let n = self.name(self.params[p as usize].name).to_string();
                 let t = self.show_trait(&tr);
                 let mut m = Unmet::new(format!("type parameter `{n}` does not implement `{t}`"));
-                m.hint = Some(format!("add a bound `{n}: {t}`"));
+                m.hint = Some(format!("add `{n}: {t}`"));
                 return Err(m);
             }
             _ => {}
@@ -1212,8 +1198,8 @@ impl Checker {
         let span = Span::default();
         let not_impl = |c: &Checker| Unmet::new(format!("{} does not implement `{}`", c.show(ty), c.show_trait(&tr)));
         let Some(key) = impl_key(&self.arena, ty) else { return Err(not_impl(self)) };
-        if let Some(k) = self.traits[tr.trait_id as usize].builtin.and_then(Builtin::derived_index) {
-            return self.resolve_derived(ty, tr, k, depth).map(|()| dict_expr(HKind::Unit, span));
+        if let Some(b) = self.traits[tr.trait_id as usize].builtin.filter(|b| b.is_derived()) {
+            return self.resolve_derived(ty, tr, b, depth).map(|()| dict_expr(HKind::Unit, span));
         }
         let ids = self.impls_by.get(&(tr.trait_id, key.0, key.1)).map(|v| v.to_vec()).unwrap_or_default();
         let targs = self.elems(tr.args);
@@ -1262,17 +1248,33 @@ impl Checker {
         Ok(dict_expr(HKind::Dict { impl_id: id, args }, span))
     }
 
-    /// Evidence from the function's dictionaries (and their supertraits).
+    /// Evidence from the function's dictionaries, the traits of type
+    /// parameter `ty`, and their supertraits.
     fn find_fact(&mut self, ty: TypeId, tr: TraitRef) -> Option<HExpr> {
-        // Breadth first over the facts about `ty` and their supertraits,
-        // visiting each trait once. A node is (trait, parent node, field of
-        // the parent's dictionary holding it), or (trait, None, fact index).
-        let mut nodes: Vec<(TraitRef, Option<usize>, usize)> = Vec::new();
-        for (k, (t, f, _)) in self.fs.evidence.iter().enumerate() {
-            if *t == ty && !nodes.iter().any(|(x, _, _)| x == f) {
-                nodes.push((*f, None, k));
+        enum Link {
+            /// The dictionary of `roots[i]`.
+            Root(usize),
+            /// The field of the parent node's dictionary that holds this one.
+            Super(usize, u32),
+        }
+        let mut roots: Vec<HExpr> = Vec::new();
+        let mut nodes: Vec<(TraitRef, Link)> = Vec::new();
+        for (t, f, e) in &self.fs.evidence {
+            if *t == ty && !nodes.iter().any(|(x, _)| x == f) {
+                nodes.push((*f, Link::Root(roots.len())));
+                roots.push(e.clone());
             }
         }
+        // Bounds on traits without dictionaries are not in the evidence.
+        if let Ty::Param(p) = self.ty(ty) {
+            for f in self.params[p as usize].traits.clone() {
+                if !self.has_dict(&f) && !nodes.iter().any(|(x, _)| *x == f) {
+                    nodes.push((f, Link::Root(roots.len())));
+                    roots.push(dict_expr(HKind::Unit, Span::default()));
+                }
+            }
+        }
+        // Breadth first, visiting each trait once.
         let mut next = 0;
         while next < nodes.len() {
             if !self.budget.charge(1) {
@@ -1281,25 +1283,35 @@ impl Checker {
             let i = next;
             next += 1;
             if nodes[i].0 == tr {
-                // The fact's dictionary, then the supertrait fields down to `tr`.
+                if !self.has_dict(&tr) {
+                    return Some(dict_expr(HKind::Unit, Span::default()));
+                }
                 let mut fields = Vec::new();
                 let mut at = i;
-                while let (_, Some(parent), field) = &nodes[at] {
-                    fields.push(*field as u32);
-                    at = *parent;
-                }
-                let mut e = self.fs.evidence[nodes[at].2].2.clone();
+                let root = loop {
+                    match nodes[at].1 {
+                        Link::Root(r) => break r,
+                        Link::Super(parent, field) => {
+                            fields.push(field);
+                            at = parent;
+                        }
+                    }
+                };
+                let mut e = roots[root].clone();
                 for index in fields.into_iter().rev() {
                     let span = e.span;
                     e = dict_expr(HKind::Field { obj: Box::new(e), index }, span);
                 }
                 return Some(e);
             }
-            let n = self.traits[nodes[i].0.trait_id as usize].methods.len();
-            let supers: Vec<TraitRef> = self.supers_of(ty, nodes[i].0).into_iter().filter(|s| self.has_dict(s)).collect();
-            for (j, s) in supers.into_iter().enumerate() {
-                if !nodes.iter().any(|(x, _, _)| *x == s) {
-                    nodes.push((s, Some(i), n + j));
+            let mut field = self.traits[nodes[i].0.trait_id as usize].methods.len() as u32;
+            for s in self.supers_of(ty, nodes[i].0) {
+                let link = Link::Super(i, field);
+                if self.has_dict(&s) {
+                    field += 1;
+                }
+                if !nodes.iter().any(|(x, _)| *x == s) {
+                    nodes.push((s, link));
                 }
             }
         }

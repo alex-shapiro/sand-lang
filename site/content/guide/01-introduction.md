@@ -96,7 +96,7 @@ See [Tools](/guide/tools/) for details.
 6. [Structs and enums](/guide/structs-and-enums/): user-defined types and methods.
 7. [Pattern matching](/guide/patterns/): destructuring and exhaustiveness checking.
 8. [Errors](/guide/errors/): `Option`, `Result`, and the `?` operator.
-9. [Traits and generics](/guide/traits/): traits, implementations, and generic bounds.
+9. [Traits and generics](/guide/traits/): traits, implementations, and generic functions.
 10. [Modules](/guide/modules/): imports and visibility.
 11. [Concurrency](/guide/concurrency/): tasks, channels, and asynchronous I/O.
 12. [Resources](/guide/resources/): resource cleanup with `use` and `defer`.

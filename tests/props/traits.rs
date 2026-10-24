@@ -1,40 +1,8 @@
 //! The built-in traits against a reference model: which types implement
-//! `Eq`, `Ord`, `Hash` and `Encode`, and which bounds imply which traits.
+//! `Eq`, `Ord`, `Hash` and `Encode`, and which required traits imply which others.
 
 use proptest::prelude::*;
 use sandlang::{Config, Engine, Error, MemorySink, Policy};
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Tr {
-    Eq,
-    Ord,
-    Hash,
-    Encode,
-}
-
-impl Tr {
-    const ALL: [Tr; 4] = [Tr::Eq, Tr::Ord, Tr::Hash, Tr::Encode];
-
-    fn name(self) -> &'static str {
-        match self {
-            Tr::Eq => "Eq",
-            Tr::Ord => "Ord",
-            Tr::Hash => "Hash",
-            Tr::Encode => "Encode",
-        }
-    }
-
-    /// An expression that uses `x` through a function bounded by the trait
-    /// and through the operation that needs it, and what it prints.
-    fn probe(self) -> (&'static str, &'static str) {
-        match self {
-            Tr::Eq => ("need(x) == x", "true"),
-            Tr::Ord => ("need(x) <= x", "true"),
-            Tr::Hash => ("set([need(x), x]).len()", "1"),
-            Tr::Encode => ("json.encode(need(x)).len() > 0", "true"),
-        }
-    }
-}
 
 #[derive(Clone, Debug)]
 enum Ty {
@@ -123,8 +91,8 @@ impl Ty {
     }
 
     /// The reference model of the derived impls.
-    fn implements(&self, tr: Tr) -> bool {
-        use Tr::*;
+    fn implements(&self, tr: Trait) -> bool {
+        use Trait::*;
         match self {
             Ty::Int | Ty::Bool | Ty::Str | Ty::Bytes | Ty::Unit | Ty::Duration | Ty::Plain => true,
             Ty::Float => tr != Hash,
@@ -196,27 +164,27 @@ fn outcome(src: &str) -> Result<String, Vec<String>> {
     }
 }
 
-/// The traits that bounds `bs` imply, by the prelude's supertraits.
-fn closure(bs: &[Bound]) -> Vec<&'static str> {
+/// The traits that requiring `ts` implies, by the prelude's supertraits.
+fn closure(ts: &[Trait]) -> Vec<&'static str> {
     let mut out = Vec::new();
-    for b in bs {
-        let implied: &[&str] = match b {
-            Bound::Eq => &["Eq"],
-            Bound::Ord => &["Ord", "Eq"],
-            Bound::Hash => &["Hash", "Eq"],
-            Bound::Encode => &["Encode"],
-            Bound::Num => &["Num", "Ord", "Eq", "Encode"],
-            Bound::Keyed => &["Keyed", "Hash", "Eq"],
-            Bound::Scale => &["Scale", "Num", "Ord", "Eq", "Encode"],
-            Bound::Marker => &["Marker"],
+    for t in ts {
+        let implied: &[&str] = match t {
+            Trait::Eq => &["Eq"],
+            Trait::Ord => &["Ord", "Eq"],
+            Trait::Hash => &["Hash", "Eq"],
+            Trait::Encode => &["Encode"],
+            Trait::Num => &["Num", "Ord", "Eq", "Encode"],
+            Trait::Keyed => &["Keyed", "Hash", "Eq"],
+            Trait::Scale => &["Scale", "Num", "Ord", "Eq", "Encode"],
+            Trait::Marker => &["Marker"],
         };
         out.extend(implied);
     }
     out
 }
 
-#[derive(Clone, Copy, Debug)]
-enum Bound {
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Trait {
     Eq,
     Ord,
     Hash,
@@ -227,23 +195,39 @@ enum Bound {
     Marker,
 }
 
-impl Bound {
+impl Trait {
+    /// The traits whose impls the compiler derives.
+    const DERIVED: [Trait; 4] = [Trait::Eq, Trait::Ord, Trait::Hash, Trait::Encode];
+
+    /// An expression that uses `x` through a function that requires the
+    /// derived trait and through the operation that needs it, and what it
+    /// prints.
+    fn probe(self) -> (&'static str, &'static str) {
+        match self {
+            Trait::Eq => ("need(x) == x", "true"),
+            Trait::Ord => ("need(x) <= x", "true"),
+            Trait::Hash => ("set([need(x), x]).len()", "1"),
+            Trait::Encode => ("json.encode(need(x)).len() > 0", "true"),
+            _ => unreachable!("{self:?} is not derived"),
+        }
+    }
+
     fn name(self) -> &'static str {
         match self {
-            Bound::Eq => "Eq",
-            Bound::Ord => "Ord",
-            Bound::Hash => "Hash",
-            Bound::Encode => "Encode",
-            Bound::Num => "Num",
-            Bound::Keyed => "Keyed",
-            Bound::Scale => "Scale",
-            Bound::Marker => "Marker",
+            Trait::Eq => "Eq",
+            Trait::Ord => "Ord",
+            Trait::Hash => "Hash",
+            Trait::Encode => "Encode",
+            Trait::Num => "Num",
+            Trait::Keyed => "Keyed",
+            Trait::Scale => "Scale",
+            Trait::Marker => "Marker",
         }
     }
 }
 
-fn bound() -> impl Strategy<Value = Bound> {
-    prop::sample::select(vec![Bound::Eq, Bound::Ord, Bound::Hash, Bound::Encode, Bound::Num, Bound::Keyed, Bound::Scale, Bound::Marker])
+fn a_trait() -> impl Strategy<Value = Trait> {
+    prop::sample::select(vec![Trait::Eq, Trait::Ord, Trait::Hash, Trait::Encode, Trait::Num, Trait::Keyed, Trait::Scale, Trait::Marker])
 }
 
 const TRAITS: &str = "trait Keyed: Hash {}\ntrait Scale: Num {\n    fn twice(self) -> Self { self + self }\n}\ntrait Marker {}\n\
@@ -254,7 +238,7 @@ proptest! {
 
     #[test]
     fn types_implement_the_built_in_traits_that_their_components_implement(t in ty()) {
-        for tr in Tr::ALL {
+        for tr in Trait::DERIVED {
             let (probe, printed) = tr.probe();
             let src = format!(
                 "import json\n{TYPES}\nfn need<T: {}>(x: T) -> T {{ x }}\nlet x: {} = {}\nprint({probe})",
@@ -265,7 +249,7 @@ proptest! {
             match outcome(&src) {
                 Ok(out) => {
                     prop_assert!(t.implements(tr), "accepted:\n{src}");
-                    if tr == Tr::Encode && !t.json_keys() {
+                    if tr == Trait::Encode && !t.json_keys() {
                         prop_assert!(out.contains("a JSON object key must be"), "{out}\n{src}");
                     } else {
                         prop_assert_eq!(out.trim(), printed, "{}", src);
@@ -281,7 +265,7 @@ proptest! {
     }
 
     #[test]
-    fn traits_with_built_in_supertraits_need_them_of_their_impls(t in ty(), tr in prop::sample::select(Tr::ALL.to_vec())) {
+    fn traits_with_built_in_supertraits_need_them_of_their_impls(t in ty(), tr in prop::sample::select(Trait::DERIVED.to_vec())) {
         prop_assume!(!matches!(t, Ty::Fn));
         let src = format!(
             "{TYPES}\ntrait Via: {} {{\n    fn via(self) -> int {{ 7 }}\n}}\nimpl Via for {} {{}}\nlet x: {} = {}\nprint(x.via())",
@@ -304,14 +288,14 @@ proptest! {
     }
 
     #[test]
-    fn bounds_imply_their_supertraits(bs in prop::collection::vec(bound(), 1..4), need in bound()) {
-        let names: Vec<&str> = bs.iter().map(|b| b.name()).collect();
+    fn required_traits_imply_their_supertraits(ts in prop::collection::vec(a_trait(), 1..4), need in a_trait()) {
+        let names: Vec<&str> = ts.iter().map(|t| t.name()).collect();
         let src = format!(
             "{TRAITS}\nfn need<T: {}>(x: T) -> T {{ x }}\nfn probe<T: {}>(x: T) -> T {{ need(x) }}\nprint(probe(3))",
             need.name(),
             names.join(" + ")
         );
-        let implied = closure(&bs).contains(&need.name());
+        let implied = closure(&ts).contains(&need.name());
         match outcome(&src) {
             Ok(out) => {
                 prop_assert!(implied, "accepted:\n{src}");
@@ -319,7 +303,7 @@ proptest! {
             }
             Err(msgs) => {
                 prop_assert!(!implied, "rejected: {msgs:?}\n{src}");
-                let want = format!("type parameter `T` does not implement `{0}`; add a bound `T: {0}`", need.name());
+                let want = format!("type parameter `T` does not implement `{0}`; add `T: {0}`", need.name());
                 prop_assert_eq!(msgs, vec![want], "{}", src);
             }
         }

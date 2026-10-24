@@ -1,9 +1,10 @@
 //! Value conversion between Sand and Rust.
 
 use super::func::{Later, NativeError};
-use super::ty::{Never, Num, Param, Reflect, SandType, Val, bound::ParamBounds};
+use super::ty::{Never, Num, Param, Reflect, SandType, Val};
 use super::{Constant, RustVariant};
 use crate::types::ConstVal;
+use crate::types::traits;
 use crate::vm::meter::Scratch;
 use crate::vm::value::{Obj, Value, ValueType};
 use crate::vm::{Ctl, Vm};
@@ -635,7 +636,7 @@ macro_rules! handle {
 }
 handle! {
     [T: SandType + ?Sized] Val<T>,
-    [const N: u8, B: ParamBounds] Param<N, B>,
+    [const N: u8, B: traits::Set] Param<N, B>,
 }
 
 impl<const N: u8> FromValue for Num<N> {
