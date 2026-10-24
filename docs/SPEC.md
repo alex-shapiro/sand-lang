@@ -344,8 +344,10 @@ struct Counter {
 
 - Fields are separated by newlines or commas and are immutable unless
   declared `var`. If a struct literal omits a field, the engine evaluates the
-  field's default expression. Fields and methods are private to the declaring
-  module unless marked `pub` (§3.3).
+  field's default expression. A default can use the traits without methods
+  that the struct's type parameters require (`s: Set<T> = set([])` with
+  `T: Hash`), but not traits with methods (§4.9). Fields and methods are
+  private to the declaring module unless marked `pub` (§3.3).
 - Methods are `fn` declarations inside the body. A method whose first parameter
   is `self` (no annotation) is an instance method, called as `value.method(...)`.
   Other methods are static, called as `Type.method(...)`.

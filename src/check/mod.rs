@@ -513,6 +513,8 @@ pub(crate) struct FnState {
     pub obligations: Vec<(TypeId, TraitRef, Span)>,
     /// Operands of `+` whose types were not inferred when they were checked.
     pub plus_checks: Vec<(TypeId, Span)>,
+    /// Set while checking a field default, which receives no dictionaries.
+    pub field_default: bool,
     /// `(type, span, call_kind)` triples for `reflect` type arguments, checked
     /// after type inference completes.
     pub reflect_checks: Vec<(TypeId, Span, &'static str)>,
@@ -2778,6 +2780,7 @@ impl Checker {
             || fi.trait_of.is_some()
             || matches!(decl, FnDeclRef::ParamDefault(..) | FnDeclRef::FieldDefault { .. } | FnDeclRef::BoundDefault(_));
         self.begin_fn(generics, self_ty);
+        self.fs.field_default = matches!(decl, FnDeclRef::FieldDefault { .. });
         let mut param_locals = self.declare_reflect_params(id);
         param_locals.extend(self.declare_dict_params(id));
         let f = match decl {

@@ -194,6 +194,11 @@ Follow-up work, roughly in priority order.
         arguments that are not type parameters (`Bag<[T]>`).
       - An unmet inferred requirement names its source ("required because
         `size` takes a `Bag<T>`").
+- [ ] Let field defaults use the traits with methods that the type's
+      parameters require (`struct Bag<T: Make> { x: T = T.make() }`). Struct
+      literals call the default helper without dictionaries, and
+      `json.decode` fills a missing field with one closure per field
+      (`field_fill` in `src/compile/reflect.rs`), not one per instance.
 - [ ] Let local functions require traits with methods (such as `Num`) and
       have `reflect` type parameters, by passing hidden dictionary and
       type-description arguments to closures.

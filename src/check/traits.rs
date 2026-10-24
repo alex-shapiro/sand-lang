@@ -1179,6 +1179,12 @@ impl Checker {
             Ty::Param(p) => {
                 let n = self.name(self.params[p as usize].name).to_string();
                 let t = self.show_trait(&tr);
+                if self.fs.field_default && self.param_has_trait(p, tr.trait_id) {
+                    let msg = format!(
+                        "field defaults cannot use `{t}`, which type parameter `{n}` requires, because defaults receive no trait dictionaries"
+                    );
+                    return Err(Unmet::new(msg));
+                }
                 let mut m = Unmet::new(format!("type parameter `{n}` does not implement `{t}`"));
                 m.hint = Some(format!("add `{n}: {t}`"));
                 return Err(m);

@@ -1586,3 +1586,11 @@ enum E { Keyed([float: int]) }
 5: (T, int) does not implement `Hash` because element 0 of `(T, int)` has type `T` (required for the elements of Set<(T, int)>); add `T: Hash`
 6: str does not implement `Describe` (required for Wrap<str>)
 7: float does not implement `Hash` (required for the keys of [float: int])
+
+=== field defaults cannot use traits with methods of the type's parameters
+trait Make { fn make() -> Self }
+impl Make for int { fn make() -> int { 7 } }
+struct Bag<T: Make + Ord> { x: T = T.make(), big: bool = false }
+struct Keys<T: Hash> { s: Set<T> = set([]) }
+--- error
+3: field defaults cannot use `Make`, which type parameter `T` requires, because defaults receive no trait dictionaries
