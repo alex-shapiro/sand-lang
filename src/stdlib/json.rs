@@ -20,7 +20,7 @@ use crate::vm::meter::{BYTES_PER_UNIT, Meter, SLOW_BYTES_PER_UNIT, Scratch};
 use crate::vm::value::{
     FieldDefault, FieldDesc, FxHashMap, KeyTable, MAP_ENTRY_SIZE, MapObj, Obj, TypeDesc, Value, ValueRef, VariantDesc, slot_fits,
 };
-use crate::vm::{Ctl, NResult, Vm, fail, internal};
+use crate::vm::{Ctl, NResult, Vm, fail, internal, without_trait};
 use hashbrown::HashTable;
 use std::borrow::Cow;
 use std::fmt::Write;
@@ -1441,12 +1441,13 @@ impl Encoder<'_> {
                     })?
                 }
                 Obj::Variant(id, fields) => self.variant(*id, fields, level)?,
-                Obj::Closure(..) | Obj::NativeFn(_) | Obj::IterFn(_) => return fail("invalid", "cannot encode a function as JSON"),
-                Obj::Task(_) => return fail("invalid", "cannot encode a task as JSON"),
-                Obj::Channel(_) => return fail("invalid", "cannot encode a channel as JSON"),
-                Obj::Native(n) => return fail("invalid", format!("cannot encode a {} as JSON", n.type_name())),
+                o @ (Obj::Closure(..) | Obj::NativeFn(_) | Obj::IterFn(_) | Obj::Task(_) | Obj::Channel(_) | Obj::Native(_)) => {
+                    return Err(without_trait(o.kind_name(), "encoded as JSON", "Encode"));
+                }
                 o @ (Obj::Value(_) | Obj::Packed(..)) => self.string(&o.value().map(ValueRef::text).unwrap_or_default())?,
-                Obj::TypeDesc(_) | Obj::Cell(_) | Obj::Free(_) => return fail("invalid", "cannot encode this value as JSON"),
+                o @ (Obj::TypeDesc(_) | Obj::Cell(_) | Obj::Free(_)) => {
+                    return Err(without_trait(o.kind_name(), "encoded as JSON", "Encode"));
+                }
             },
             _ => {
                 let (id, payload) = v.as_inline_variant().unwrap_or((u32::MAX, Value::Unit));
@@ -1457,7 +1458,7 @@ impl Encoder<'_> {
     }
 
     fn variant(&mut self, id: u32, fields: &[Value], level: usize) -> Result<(), Ctl> {
-        let Some(rt) = self.prog.variants.get(id as usize) else { return fail("invalid", "cannot encode this value as JSON") };
+        let Some(rt) = self.prog.variants.get(id as usize) else { return internal("json.encode: a variant id without a variant") };
         if self.ids.has(id) {
             return self.value(fields.first().copied().unwrap_or(Value::Unit), level);
         }
@@ -1665,17 +1666,18 @@ impl<'a> Converter<'a, '_, '_> {
                     self.b.st.new_variant(ids.obj, &[map])
                 }
                 Obj::Variant(id, fields) => self.variant(*id, fields, depth)?,
-                Obj::Closure(..) | Obj::NativeFn(_) | Obj::IterFn(_) => return fail("invalid", "cannot encode a function as JSON"),
-                Obj::Task(_) => return fail("invalid", "cannot encode a task as JSON"),
-                Obj::Channel(_) => return fail("invalid", "cannot encode a channel as JSON"),
-                Obj::Native(n) => return fail("invalid", format!("cannot encode a {} as JSON", n.type_name())),
+                o @ (Obj::Closure(..) | Obj::NativeFn(_) | Obj::IterFn(_) | Obj::Task(_) | Obj::Channel(_) | Obj::Native(_)) => {
+                    return Err(without_trait(o.kind_name(), "encoded as JSON", "Encode"));
+                }
                 o @ (Obj::Value(_) | Obj::Packed(..)) => {
                     let s = o.value().map(ValueRef::text).unwrap_or_default();
                     self.b.meter.charge_bytes(s.len())?;
                     let s = self.b.st.new_str(s);
                     self.b.st.new_variant(ids.str_, &[s])
                 }
-                Obj::TypeDesc(_) | Obj::Cell(_) | Obj::Free(_) => return fail("invalid", "cannot encode this value as JSON"),
+                o @ (Obj::TypeDesc(_) | Obj::Cell(_) | Obj::Free(_)) => {
+                    return Err(without_trait(o.kind_name(), "encoded as JSON", "Encode"));
+                }
             },
             _ => {
                 let (id, payload) = v.as_inline_variant().unwrap_or((u32::MAX, Value::Unit));
@@ -1714,7 +1716,7 @@ impl<'a> Converter<'a, '_, '_> {
     /// A variant with a payload: `{"Name": payload}`.
     fn variant(&mut self, id: u32, fields: &[Value], depth: usize) -> NResult {
         let (prog, ids) = (self.prog, self.ids);
-        let Some(rt) = prog.variants.get(id as usize) else { return fail("invalid", "cannot encode this value as JSON") };
+        let Some(rt) = prog.variants.get(id as usize) else { return internal("json.encode: a variant id without a variant") };
         self.check_depth(depth)?;
         let payload = match &rt.field_names {
             Some(names) => {

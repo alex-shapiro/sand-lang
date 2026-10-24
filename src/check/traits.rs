@@ -725,7 +725,8 @@ impl Checker {
     /// Checks that the type of an impl implements the trait's supertraits.
     pub(crate) fn check_impl_supertraits(&mut self, id: ImplId) {
         let imp = &self.impls[id as usize];
-        let evidence = imp.evidence.iter().map(|&(t, tr)| (t, tr, dict_expr(HKind::Unit, imp.span))).collect();
+        // Only checked: the dictionaries are never built.
+        let evidence = imp.evidence.iter().map(|&(t, tr)| (t, tr, dict_expr(HKind::Error, imp.span))).collect();
         let (target, trait_ref, span) = (imp.target, imp.trait_ref, imp.span);
         let name = self.name(self.traits[trait_ref.trait_id as usize].name).to_string();
         let saved = std::mem::replace(&mut self.fs.evidence, evidence);
@@ -1152,6 +1153,18 @@ impl Checker {
     /// The dictionary expression proving `ty: tr` in the current function
     /// (`()` for a trait without a dictionary).
     pub(crate) fn resolve_evidence(&mut self, ty: TypeId, tr: TraitRef, depth: u32) -> Result<HExpr, Box<Unmet>> {
+        let r = self.find_evidence(ty, tr, depth);
+        debug_assert!(
+            !(self.has_dict(&tr) && r.as_ref().is_ok_and(|e| matches!(e.kind, HKind::Unit))),
+            "`()` as the dictionary of `{}` for {}",
+            self.show_trait(&tr),
+            self.show(ty)
+        );
+        r
+    }
+
+    /// [`Checker::resolve_evidence`] without the check of its result.
+    fn find_evidence(&mut self, ty: TypeId, tr: TraitRef, depth: u32) -> Result<HExpr, Box<Unmet>> {
         let ty = self.zonk(ty);
         let tr = self.zonk_trait(tr);
         let span = Span::default();
@@ -1323,7 +1336,7 @@ impl Checker {
         let mut evidence = Vec::new();
         for &p in &self.types[d as usize].generics {
             let pt = self.arena.param(p);
-            evidence.extend(self.params[p as usize].traits.iter().map(|&tr| (pt, tr, dict_expr(HKind::Unit, span))));
+            evidence.extend(self.params[p as usize].traits.iter().map(|&tr| (pt, tr, dict_expr(HKind::Error, span))));
         }
         let saved = std::mem::replace(&mut self.fs.evidence, evidence);
         if let Some(m) = self.unmet_in_type(ty) {

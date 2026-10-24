@@ -1,7 +1,8 @@
-//! Programs that compile must run to completion or a contained error under tight limits.
+//! Programs that compile must run to completion or a contained error under
+//! tight limits, never to an internal error.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use sandlang::{Config, Engine, Limits, MemorySink, Policy};
+use sandlang::{Config, Engine, Error, Limits, MemorySink, Policy};
 use std::time::Duration;
 
 fuzz_target!(|data: &[u8]| {
@@ -19,5 +20,7 @@ fuzz_target!(|data: &[u8]| {
         });
     let mut engine = Engine::new(config).unwrap();
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    let _ = rt.block_on(engine.run_source("fuzz.sand", src));
+    if let Err(e @ Error::Internal { .. }) = rt.block_on(engine.run_source("fuzz.sand", src)) {
+        panic!("{e}");
+    }
 });
