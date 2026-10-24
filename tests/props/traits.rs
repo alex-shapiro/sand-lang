@@ -308,4 +308,157 @@ proptest! {
             }
         }
     }
+
+    #[test]
+    fn calls_through_supertraits_reach_the_right_method(g in graph()) {
+        let out = outcome(&g.sand()).unwrap_or_else(|e| panic!("{e:?}\n{}", g.sand()));
+        prop_assert_eq!(out, g.expected(), "{}", g.sand());
+    }
+}
+
+/// A random acyclic graph of traits (`T0` to `Tn-1`) that `int` and lists
+/// implement. A trait without methods has no dictionary, so calls through it
+/// reach its supertraits' dictionaries along different fields.
+#[derive(Clone, Debug)]
+struct Graph {
+    traits: Vec<Node>,
+}
+
+#[derive(Clone, Debug)]
+struct Node {
+    has_method: bool,
+    /// Direct supertraits, all with a larger index.
+    supers: Vec<usize>,
+    builtin: Option<&'static str>,
+    /// A trait that `impl<A> Ti for [A]` also requires of `A`. It is reachable
+    /// from `Ti`, so the impls of the supertraits of `Ti` find it.
+    extra: Option<usize>,
+}
+
+fn graph() -> impl Strategy<Value = Graph> {
+    (2..7usize).prop_flat_map(|n| {
+        let node = (
+            any::<bool>(),
+            prop::collection::vec(any::<bool>(), n),
+            prop::option::of(prop::sample::select(vec!["Eq", "Ord", "Encode"])),
+            any::<prop::sample::Index>(),
+            any::<bool>(),
+        );
+        prop::collection::vec(node, n).prop_map(move |raw| {
+            let mut traits: Vec<Node> = raw
+                .iter()
+                .enumerate()
+                .map(|(i, (has_method, sup, builtin, _, _))| Node {
+                    has_method: *has_method,
+                    supers: (i + 1..n).filter(|&j| sup[j]).collect(),
+                    builtin: *builtin,
+                    extra: None,
+                })
+                .collect();
+            for (i, (_, _, _, pick, use_extra)) in raw.iter().enumerate() {
+                let reach: Vec<usize> = Graph::reach(&traits, i).into_iter().filter(|&j| j != i).collect();
+                if *use_extra && !reach.is_empty() {
+                    traits[i].extra = Some(reach[pick.index(reach.len())]);
+                }
+            }
+            Graph { traits }
+        })
+    })
+}
+
+impl Graph {
+    /// Trait `i` and its supertraits, in increasing order.
+    fn reach(traits: &[Node], i: usize) -> Vec<usize> {
+        let mut out = vec![i];
+        let mut k = 0;
+        while k < out.len() {
+            for &j in &traits[out[k]].supers {
+                if !out.contains(&j) {
+                    out.push(j);
+                }
+            }
+            k += 1;
+        }
+        out.sort_unstable();
+        out
+    }
+
+    /// The supertrait of `i` with a method that the default method `di` calls.
+    fn delegate(&self, i: usize) -> Option<usize> {
+        Graph::reach(&self.traits, i).into_iter().find(|&j| j != i && self.traits[j].has_method)
+    }
+
+    fn sand(&self) -> String {
+        let mut s = String::new();
+        for (i, t) in self.traits.iter().enumerate() {
+            let mut supers: Vec<String> = t.supers.iter().map(|j| format!("T{j}")).collect();
+            supers.extend(t.builtin.map(String::from));
+            let colon = if supers.is_empty() { String::new() } else { format!(": {}", supers.join(" + ")) };
+            s += &format!("trait T{i}{colon} {{\n");
+            if t.has_method {
+                let body = match self.delegate(i) {
+                    Some(j) => format!("\"d\" + self.m{j}()"),
+                    None => format!("\"d{i}\""),
+                };
+                s += &format!("    fn m{i}(self) -> str\n    fn d{i}(self) -> str {{ {body} }}\n");
+            }
+            s += "}\n";
+            let requires = match t.extra {
+                Some(k) => format!("T{i} + T{k}"),
+                None => format!("T{i}"),
+            };
+            if t.has_method {
+                let extra = match t.extra {
+                    Some(k) if self.traits[k].has_method => format!(" + self[0].m{k}()"),
+                    _ => String::new(),
+                };
+                s += &format!("impl T{i} for int {{\n    fn m{i}(self) -> str {{ \"i{i}\" }}\n}}\n");
+                s += &format!("impl<A: {requires}> T{i} for [A] {{\n    fn m{i}(self) -> str {{ \"L\" + self[0].m{i}(){extra} }}\n}}\n");
+            } else {
+                s += &format!("impl T{i} for int {{}}\nimpl<A: {requires}> T{i} for [A] {{}}\n");
+            }
+        }
+        for r in 0..self.traits.len() {
+            let calls: Vec<String> = self.called(r).iter().flat_map(|j| [format!("x.m{j}()"), format!("x.d{j}()")]).collect();
+            let body = if calls.is_empty() { "\"-\"".to_string() } else { format!("[{}].join(\",\")", calls.join(", ")) };
+            s += &format!("fn via{r}<T: T{r}>(x: T) -> str {{ {body} }}\nprint(via{r}(1))\nprint(via{r}([2]))\nprint(via{r}([[3]]))\n");
+        }
+        s
+    }
+
+    /// The traits with methods that `via{r}` calls through `T{r}`.
+    fn called(&self, r: usize) -> Vec<usize> {
+        Graph::reach(&self.traits, r).into_iter().filter(|&j| self.traits[j].has_method).collect()
+    }
+
+    /// What `m{i}` returns for an `int` nested in `depth` lists.
+    fn m(&self, i: usize, depth: usize) -> String {
+        if depth == 0 {
+            return format!("i{i}");
+        }
+        let extra = match self.traits[i].extra {
+            Some(k) if self.traits[k].has_method => self.m(k, depth - 1),
+            _ => String::new(),
+        };
+        format!("L{}{extra}", self.m(i, depth - 1))
+    }
+
+    fn d(&self, i: usize, depth: usize) -> String {
+        match self.delegate(i) {
+            Some(j) => format!("d{}", self.m(j, depth)),
+            None => format!("d{i}"),
+        }
+    }
+
+    fn expected(&self) -> String {
+        let mut out = String::new();
+        for r in 0..self.traits.len() {
+            for depth in 0..3 {
+                let calls: Vec<String> = self.called(r).iter().flat_map(|&j| [self.m(j, depth), self.d(j, depth)]).collect();
+                out += &if calls.is_empty() { "-".to_string() } else { calls.join(",") };
+                out.push('\n');
+            }
+        }
+        out
+    }
 }

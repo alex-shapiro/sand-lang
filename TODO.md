@@ -169,15 +169,16 @@ Follow-up work, roughly in priority order.
       specified in §3.1.
 - [ ] Trait objects (`dyn Trait`), associated types and constants, and
       blanket impls (`impl<T> X for T`).
-- [ ] Enforce `Hash` on `Set<T>` element types and `[K: V]` key types at every
-      type annotation, not only at method calls, so that `json.decode` cannot
-      construct a `Set` or map with unhashable keys.
-- [ ] Check in type annotations the traits that struct and enum type
-      parameters require. With `struct Bag<T: Hash>`, `fn size(b: Bag<[int]>)`
-      and `json.decode` into `Bag<[int]>` are accepted; only struct literals,
-      variants and the methods of `Bag` check `T: Hash`. Decide whether
-      generic signatures (`fn f<T>(b: Bag<T>)`) must repeat the required
-      traits or imply them.
+- [ ] **Check that written types are well formed.** The checker does not
+      check type annotations and `reflect` type arguments against the traits
+      that their constructors require: set elements and map keys must
+      implement `Hash`, and `struct Bag<T: Hash>` requires `T: Hash`.
+      `let s: Set<[int]> = json.decode("[[1], [1]]")?` gives a set that holds
+      `[1]` twice (also on `main`), and `fn size(b: Bag<[int]>)` is accepted.
+      Calls, struct literals and variants check the traits, so no method runs
+      without its dictionary. Decide whether generic signatures
+      (`fn f<T>(b: Bag<T>)`) must declare `T: Hash` or imply it, then check
+      every written type.
 - [ ] Let local functions require traits with methods (such as `Num`) and
       have `reflect` type parameters, by passing hidden dictionary and
       type-description arguments to closures.

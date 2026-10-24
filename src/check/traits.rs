@@ -274,10 +274,25 @@ impl Checker {
         self.builtins[b as usize].map(|trait_id| TraitRef { trait_id, args: TyList::EMPTY })
     }
 
+    /// Trait `t` and all its supertraits, ignoring trait arguments.
+    fn trait_and_supers(&self, t: TraitId) -> Vec<TraitId> {
+        let mut out = vec![t];
+        let mut i = 0;
+        while i < out.len() {
+            for s in &self.traits[out[i] as usize].supers {
+                if !out.contains(&s.trait_id) {
+                    out.push(s.trait_id);
+                }
+            }
+            i += 1;
+        }
+        out
+    }
+
     /// Whether trait `t` is `target` or has it as a supertrait, ignoring
     /// trait arguments.
     pub(crate) fn trait_reaches(&self, t: TraitId, target: TraitId) -> bool {
-        t == target || self.super_reaches(t, target)
+        self.trait_and_supers(t).contains(&target)
     }
 
     /// Whether type parameter `p` is bounded by trait `t` or by a trait with
@@ -293,7 +308,7 @@ impl Checker {
             let implied = traits
                 .iter()
                 .enumerate()
-                .any(|(j, x)| (x.trait_id != tr.trait_id && self.super_reaches(x.trait_id, tr.trait_id)) || (x == tr && j < i));
+                .any(|(j, x)| (x.trait_id != tr.trait_id && self.trait_reaches(x.trait_id, tr.trait_id)) || (x == tr && j < i));
             if !implied {
                 out.push(*tr);
             }
@@ -322,14 +337,33 @@ impl Checker {
 
     /// `traits` of `ty` and all their supertraits, in breadth-first order.
     fn with_supers(&mut self, ty: TypeId, traits: Vec<TraitRef>) -> Vec<TraitRef> {
-        let mut out: Vec<TraitRef> = Vec::new();
-        let mut queue = std::collections::VecDeque::from(traits);
-        while let Some(tr) = queue.pop_front() {
-            if out.contains(&tr) {
-                continue;
+        self.super_closure(ty, traits).into_iter().map(|(tr, _)| tr).collect()
+    }
+
+    /// `roots` of `ty` and all their supertraits, breadth first and each
+    /// once. Each entry that is not one of `roots` links to the entry whose
+    /// supertrait it is, and to the field of that entry's dictionary that
+    /// holds its dictionary.
+    fn super_closure(&mut self, ty: TypeId, roots: Vec<TraitRef>) -> Vec<(TraitRef, Option<(usize, u32)>)> {
+        let mut out: Vec<(TraitRef, Option<(usize, u32)>)> = Vec::new();
+        for r in roots {
+            if !out.iter().any(|(x, _)| *x == r) {
+                out.push((r, None));
             }
-            queue.extend(self.supers_of(ty, tr));
-            out.push(tr);
+        }
+        let mut i = 0;
+        while i < out.len() && self.budget.charge(1) {
+            let mut field = self.traits[out[i].0.trait_id as usize].methods.len() as u32;
+            for s in self.supers_of(ty, out[i].0) {
+                let link = Some((i, field));
+                if self.has_dict(&s) {
+                    field += 1;
+                }
+                if !out.iter().any(|(x, _)| *x == s) {
+                    out.push((s, link));
+                }
+            }
+            i += 1;
         }
         out
     }
@@ -386,24 +420,14 @@ impl Checker {
             self.traits[id as usize].supers = supers;
         }
         for (&id, (_, d)) in ids.iter().zip(decls) {
-            if self.super_reaches(id, id) {
+            if self.traits[id as usize].supers.iter().any(|s| self.trait_reaches(s.trait_id, id)) {
                 self.error(d.name.span, format!("trait `{}` is its own supertrait", d.name.name));
                 self.traits[id as usize].supers.clear();
             }
         }
-        // Supertraits may be declared later in the module.
-        loop {
-            let mut changed = false;
-            for &id in ids {
-                let td = &self.traits[id as usize];
-                if !td.has_dict && td.supers.iter().any(|s| self.traits[s.trait_id as usize].has_dict) {
-                    self.traits[id as usize].has_dict = true;
-                    changed = true;
-                }
-            }
-            if !changed {
-                break;
-            }
+        // Until here, `has_dict` says whether a trait declares methods itself.
+        for &id in ids {
+            self.traits[id as usize].has_dict = self.trait_and_supers(id).iter().any(|&t| self.traits[t as usize].has_dict);
         }
         // Inside the trait, `Self` implements it.
         for &id in ids {
@@ -412,20 +436,6 @@ impl Checker {
             let tr = TraitRef { trait_id: id, args: self.arena.intern_list(&args) };
             self.params[sp as usize].traits = vec![tr];
         }
-    }
-
-    fn super_reaches(&self, from: TraitId, target: TraitId) -> bool {
-        let mut seen = HashSet::new();
-        let mut stack: Vec<TraitId> = self.traits[from as usize].supers.iter().map(|s| s.trait_id).collect();
-        while let Some(t) = stack.pop() {
-            if t == target {
-                return true;
-            }
-            if seen.insert(t) {
-                stack.extend(self.traits[t as usize].supers.iter().map(|s| s.trait_id));
-            }
-        }
-        false
     }
 
     /// Declares the method signatures and default methods of trait `id`,
@@ -811,12 +821,16 @@ impl Checker {
         }
     }
 
-    /// Whether `ty` implements trait `t` (through the traits of a type parameter
-    /// or an impl for its constructor), whatever the trait's arguments.
+    /// Whether `ty` implements trait `t`, which is not a derived built-in
+    /// trait, through the traits of a type parameter or an impl for its
+    /// constructor, whatever the trait's arguments. Unlike
+    /// [`Checker::implements`], it does not check the traits that the impl
+    /// requires, and it infers nothing.
     pub(crate) fn implements_trait(&mut self, ty: TypeId, t: TraitId) -> bool {
+        debug_assert!(!self.traits[t as usize].builtin.is_some_and(Builtin::is_derived));
         let ty = self.resolve(ty);
         match self.ty(ty) {
-            Ty::Param(p) => self.param_traits(p).iter().any(|tr| tr.trait_id == t),
+            Ty::Param(p) => self.param_has_trait(p, t),
             _ => impl_key(&self.arena, ty).and_then(|(c, n)| self.impls_by.get(&(t, c, n))).is_some_and(|ids| !ids.is_empty()),
         }
     }
@@ -1036,7 +1050,8 @@ impl Checker {
                     return;
                 }
                 let mut cands: Vec<TraitRef> = Vec::new();
-                for f in self.fact_traits(t) {
+                let direct = self.fs.evidence.iter().filter(|(x, _, _)| *x == t).map(|(_, tr, _)| *tr).collect();
+                for f in self.with_supers(t, direct) {
                     if f.trait_id == tr.trait_id && !cands.contains(&f) {
                         cands.push(f);
                     }
@@ -1056,12 +1071,6 @@ impl Checker {
                 }
             }
         }
-    }
-
-    /// Traits that the evidence of the current function provides for `ty`.
-    fn fact_traits(&mut self, ty: TypeId) -> Vec<TraitRef> {
-        let direct = self.fs.evidence.iter().filter(|(t, _, _)| *t == ty).map(|(_, tr, _)| *tr).collect();
-        self.with_supers(ty, direct)
     }
 
     /// Resolves the evidence placeholders of the function being checked,
@@ -1251,71 +1260,39 @@ impl Checker {
     /// Evidence from the function's dictionaries, the traits of type
     /// parameter `ty`, and their supertraits.
     fn find_fact(&mut self, ty: TypeId, tr: TraitRef) -> Option<HExpr> {
-        enum Link {
-            /// The dictionary of `roots[i]`.
-            Root(usize),
-            /// The field of the parent node's dictionary that holds this one.
-            Super(usize, u32),
-        }
-        let mut roots: Vec<HExpr> = Vec::new();
-        let mut nodes: Vec<(TraitRef, Link)> = Vec::new();
+        let mut roots: Vec<TraitRef> = Vec::new();
+        let mut dicts: Vec<HExpr> = Vec::new();
         for (t, f, e) in &self.fs.evidence {
-            if *t == ty && !nodes.iter().any(|(x, _)| x == f) {
-                nodes.push((*f, Link::Root(roots.len())));
-                roots.push(e.clone());
+            if *t == ty && !roots.contains(f) {
+                roots.push(*f);
+                dicts.push(e.clone());
             }
         }
-        // Bounds on traits without dictionaries are not in the evidence.
+        // Traits without dictionaries are not in the evidence.
         if let Ty::Param(p) = self.ty(ty) {
             for f in self.params[p as usize].traits.clone() {
-                if !self.has_dict(&f) && !nodes.iter().any(|(x, _)| *x == f) {
-                    nodes.push((f, Link::Root(roots.len())));
-                    roots.push(dict_expr(HKind::Unit, Span::default()));
+                if !self.has_dict(&f) && !roots.contains(&f) {
+                    roots.push(f);
+                    dicts.push(dict_expr(HKind::Unit, Span::default()));
                 }
             }
         }
-        // Breadth first, visiting each trait once.
-        let mut next = 0;
-        while next < nodes.len() {
-            if !self.budget.charge(1) {
-                return None;
-            }
-            let i = next;
-            next += 1;
-            if nodes[i].0 == tr {
-                if !self.has_dict(&tr) {
-                    return Some(dict_expr(HKind::Unit, Span::default()));
-                }
-                let mut fields = Vec::new();
-                let mut at = i;
-                let root = loop {
-                    match nodes[at].1 {
-                        Link::Root(r) => break r,
-                        Link::Super(parent, field) => {
-                            fields.push(field);
-                            at = parent;
-                        }
-                    }
-                };
-                let mut e = roots[root].clone();
-                for index in fields.into_iter().rev() {
-                    let span = e.span;
-                    e = dict_expr(HKind::Field { obj: Box::new(e), index }, span);
-                }
-                return Some(e);
-            }
-            let mut field = self.traits[nodes[i].0.trait_id as usize].methods.len() as u32;
-            for s in self.supers_of(ty, nodes[i].0) {
-                let link = Link::Super(i, field);
-                if self.has_dict(&s) {
-                    field += 1;
-                }
-                if !nodes.iter().any(|(x, _)| *x == s) {
-                    nodes.push((s, link));
-                }
-            }
+        let nodes = self.super_closure(ty, roots);
+        let mut at = nodes.iter().position(|(x, _)| *x == tr)?;
+        if !self.has_dict(&tr) {
+            return Some(dict_expr(HKind::Unit, Span::default()));
         }
-        None
+        let mut fields = Vec::new();
+        while let Some((parent, field)) = nodes[at].1 {
+            fields.push(field);
+            at = parent;
+        }
+        let mut e = dicts[at].clone();
+        for index in fields.into_iter().rev() {
+            let span = e.span;
+            e = dict_expr(HKind::Field { obj: Box::new(e), index }, span);
+        }
+        Some(e)
     }
 
     // ------------------------------------------------------------------

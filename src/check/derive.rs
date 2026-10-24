@@ -46,12 +46,17 @@ impl Checker {
     pub(crate) fn derived_parts(&self, ty: Ty, b: Builtin) -> Option<Vec<TypeId>> {
         match ty {
             Ty::Never | Ty::Error => Some(Vec::new()),
-            _ => {
-                let args = self.type_args(ty);
-                let needs = self.derived_needs(ctor_of(ty)?, args.len(), b)?;
-                Some(needs.into_iter().map(|i| args[i as usize]).collect())
-            }
+            _ => Some(self.arg_steps(ty, b)?.into_iter().map(Step::child).collect()),
         }
+    }
+
+    /// The type arguments of `ty` that derived trait `b` needs, or `None` if
+    /// `ty` cannot implement `b`.
+    fn arg_steps(&self, ty: Ty, b: Builtin) -> Option<Vec<Step>> {
+        let c = ctor_of(ty)?;
+        let args = self.type_args(ty);
+        let needs = self.derived_needs(c, args.len(), b)?;
+        Some(needs.into_iter().map(|i| Step::Arg(c, i, args[i as usize])).collect())
     }
 
     fn type_args(&self, ty: Ty) -> Vec<TypeId> {
@@ -290,12 +295,7 @@ impl Checker {
                 let members = self.members(d);
                 members.into_iter().map(|m| m.with_child(self.arena.instantiate(m.child(), &generics, &args))).collect()
             }
-            _ => {
-                let Some(c) = ctor_of(ty) else { return Vec::new() };
-                let args = self.type_args(ty);
-                let needs = self.derived_needs(c, args.len(), b).unwrap_or_default();
-                needs.into_iter().map(|i| Step::Arg(c, i, args[i as usize])).collect()
-            }
+            _ => self.arg_steps(ty, b).unwrap_or_default(),
         }
     }
 }
@@ -303,7 +303,7 @@ impl Checker {
 /// A step from a type to one of its components.
 #[derive(Clone, Copy)]
 enum Step {
-    /// The type argument at an index of a constructor other than a struct or enum.
+    /// The type argument at an index of a constructor.
     Arg(Ctor, u32, TypeId),
     Field(Symbol, TypeId),
     Payload(Symbol, TypeId),
