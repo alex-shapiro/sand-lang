@@ -301,9 +301,9 @@ fn greet(name: str, greeting: str = "Hello") {
 - The body is a block whose value is returned. In a function returning `()`,
   the value of the final expression is discarded.
 - Type parameters are listed in `<...>` with optional bounds `T: Ord + Hash`.
-  Bounds are the built-in bounds `Eq`, `Ord`, `Hash`, `Num` and `Encode` (§5.6) and
-  traits (§4.9), possibly module-qualified or with type arguments:
-  `T: Ord + Describe`, `T: geo.Shape`, `T: Into<str>`. Bounds may also be
+  Bounds are traits (§4.9), including the built-in traits (§5.6), possibly
+  module-qualified or with type arguments: `T: Ord + Describe`,
+  `T: geo.Shape`, `T: Into<str>`. Bounds may also be
   given in a trailing `where` clause (`fn sum(self) -> T where T: Num`), which
   may also constrain the type parameters of an enclosing generic `extend`
   block, struct or enum for that one method.
@@ -318,7 +318,8 @@ fn greet(name: str, greeting: str = "Hello") {
   type parameters.
 - Functions may be declared inside blocks; such local functions may capture
   enclosing variables and may call themselves recursively. Local functions
-  declared consecutively in the same block may call each other.
+  declared consecutively in the same block may call each other. Their bounds
+  may only be traits without methods (such as `Eq` or `Hash`).
 
 ### 4.2 Structs
 
@@ -515,11 +516,11 @@ fn show_all<T>(xs: [T]) -> str where T: Describe { xs.describe() }
   `where` clauses in trait methods may only constrain those.
 - Default values of trait method parameters must be constants (literals,
   `[]`, `[:]`, `None`).
-- **Supertraits** follow a `:` and may be traits or built-in bounds:
-  `trait Shape: Describe + Eq`. A bound `T: Shape` implies `T: Describe` and
-  `T: Eq`. A trait may not be its own supertrait, directly or indirectly.
-- Traits share the namespace of types. The built-in bounds cannot be
-  redefined.
+- **Supertraits** follow a `:`: `trait Shape: Describe + Eq`. A bound
+  `T: Shape` implies `T: Describe` and `T: Eq`. A trait may not be its own
+  supertrait, directly or indirectly.
+- Traits share the namespace of types. Programs cannot redefine or implement
+  the built-in traits (§5.6).
 
 **Impls.** `impl<P...> Trait<Args> for Type where ... { methods }`
 implements a trait for a type.
@@ -557,16 +558,22 @@ Describe for [T]` makes `[T]` implement `Describe` exactly when `T` does.
 - Impls have no names and no visibility: once their module is loaded they
   apply throughout the program.
 
-**Bounds.** A trait bound `T: Trait<Args>` is satisfied by a type with a
-matching impl whose own bounds are satisfied (recursively: `[[Point]]:
-Describe` needs `[Point]: Describe`, which needs `Point: Describe`), by a
-type parameter bounded by the trait or by a trait that has it as a
-supertrait, and by `Self` inside the trait. Bounds are checked at every
-instantiation; an unsatisfied bound is reported as, for example, `the trait
-Describe is not implemented for str (required for [str] to implement
-Describe)`. Trait bounds may appear on functions, methods, `where` clauses
-and impls, but not on the type parameters of structs, enums, type aliases,
-traits, local functions or native functions.
+**Bounds.** A bound `T: Trait<Args>` is satisfied by a type with a
+matching impl (written or derived, §5.6) whose own bounds are satisfied
+(recursively: `[[Point]]: Describe` needs `[Point]: Describe`, which needs
+`Point: Describe`), by a type parameter bounded by the trait or by a trait
+that has it as a supertrait, and by `Self` inside the trait. Every
+instantiation checks the bounds; an unsatisfied bound is reported as, for
+example, `str does not implement `Describe` (required for [str] to implement
+`Describe`)`. Bounds may appear on functions, methods, `where` clauses,
+impls, and the type parameters of structs and enums. The methods of a struct
+or enum may rely on the bounds of its type parameters, and each call of such
+a method checks them. Struct literals and variant constructors do not check
+them.
+
+A trait without methods, in it or in its supertraits (`trait Marker {}`, and
+all built-in traits except `Num`), adds no hidden argument to the functions
+that it bounds.
 
 **Method calls.** `e.m(args)` where the type of `e` is
 
@@ -677,25 +684,33 @@ Apart from `never`, there is no subtyping and there are no implicit conversions.
 In particular `int` and `float` never convert implicitly: `1 + 2.0` is a type
 error. Use `x.to_float()` or `f.to_int()`.
 
-### 5.6 Bounds
+### 5.6 Built-in traits
 
-| Bound    | Satisfied by                                                                                                                                                                       |
-| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Eq`     | every type except function types (and types containing them)                                                                                                                       |
-| `Ord`    | `int`, `float`, `bool`, `str`, `bytes`, `duration`, `()`, ordered value types (§5.4), and tuples, lists, `Option`, structs and enums all of whose components are `Ord`             |
-| `Hash`   | `int`, `bool`, `str`, `bytes`, `duration`, `()`, value types (§5.4), and tuples, `Option`, `Result`, enums and structs **without `var` fields** all of whose components are `Hash` |
-| `Num`    | `int`, `float`                                                                                                                                                                     |
-| `Encode` | every type except function types, `Task`, `Channel`, native objects (§5.4), and types containing them                                                                              |
+The prelude declares five traits whose operations the engine implements:
 
-Map keys and set elements must be `Hash`. `Num` implies `Eq`, `Ord` and
-`Encode`, and `Ord` and `Hash` imply `Eq`. Built-in bounds are satisfied
-structurally and cannot be implemented. Traits (§4.9) are user-defined bounds;
-a trait whose supertraits include a built-in bound implies it.
+| Trait    | Supertraits    | Implemented by                                                                                                                                                                              |
+| -------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Eq`     |                | every type except function types (and types containing them)                                                                                                                                |
+| `Ord`    | `Eq`           | `int`, `float`, `bool`, `str`, `bytes`, `duration`, `()`, ordered value types (§5.4), and tuples, lists, `Option`, structs and enums all of whose components are `Ord`                      |
+| `Hash`   | `Eq`           | `int`, `bool`, `str`, `bytes`, `duration`, `()`, `Range`, value types (§5.4), and tuples, `Option`, `Result`, enums and structs **without `var` fields** all of whose components are `Hash` |
+| `Encode` |                | every type except function types, `Task`, `Channel`, native objects (§5.4), and types containing them                                                                                       |
+| `Num`    | `Ord + Encode` | `int`, `float`                                                                                                                                                                              |
 
-A type parameter bounded by `Num` (directly, in a `where` clause, or through a
-trait with `Num` as a supertrait) also has the static methods `T.zero()` and
-`T.one()`, the additive and multiplicative identities (`0`/`1` for `int`,
-`0.0`/`1.0` for `float`), so generic code can sum even an empty list:
+`==` and `!=` need `Eq`, the ordering operators need `Ord`, map keys and set
+elements need `Hash`, `json.encode` needs `Encode`, and arithmetic on a type
+parameter needs `Num`. The compiler derives the impls of `Eq`, `Ord`, `Hash`
+and `Encode` from the components of each type: a struct or enum implements
+one of them if all of its fields and variant payloads do, and a generic type
+needs the trait of the type arguments that its components use. For example,
+`struct Pair<A, B> { a: A, b: B }` implements `Hash` exactly when `A` and `B`
+do, and `help(Pair)` shows `Hash where A: Hash, B: Hash`. Only the prelude
+implements `Num`.
+
+The built-in traits are otherwise ordinary traits (§4.9): they can be bounds,
+supertraits (`trait Keyed: Hash { ... }`) and impl bounds. `Num` has the
+static methods `zero()` and `one()`, the additive and multiplicative
+identities (`0`/`1` for `int`, `0.0`/`1.0` for `float`), so generic code can
+sum even an empty list:
 
 ```sand
 fn total<T: Num>(xs: [T]) -> T {
@@ -1163,8 +1178,8 @@ needed`).
 - At the end of checking a function, every type variable must be resolved,
   except those bound to the function's own type parameters. Unresolved
   variables are errors (`cannot infer type`).
-- Bounds on type parameters are checked at instantiation; trait bounds
-  (§4.9) once the function's types are inferred.
+- Bounds on type parameters are checked at instantiation, or once the
+  function's types are inferred if a type argument is not known yet.
 - A type, with inference variables resolved, has at most 10,000 components
   (type constructors and leaves); larger types, which only arise by repeated
   doubling (`let b = (a, a)`, or similar aliases or generic calls), are
@@ -2922,11 +2937,12 @@ engine collects garbage and checks the memory limit after the call completes.
 | `Param<N, B>`, `Reflect<N>`                        | `N`-th type parameter and its runtime type description |
 | `Num<N>`                                           | `Num` evidence of the `N`-th type parameter            |
 
-`Param<N, B>` specifies the built-in bounds `B` (`bound::Eq`, `bound::Ord`,
-`bound::Hash`, `bound::Num`, `bound::Encode`, or a tuple of bounds such as
+`Param<N, B>` specifies the built-in traits `B` (`bound::Eq`, `bound::Ord`,
+`bound::Hash`, `bound::Num`, `bound::Encode`, or a tuple such as
 `(bound::Ord, bound::Hash)`, defaulting to `()`) required on the `N`-th type
-parameter. The corresponding `native fn` declaration must declare `B` or
-stronger bounds on that parameter.
+parameter. The corresponding `native fn` declaration must bound that
+parameter by `B` or by traits that have `B` as supertraits. Native functions
+may only have bounds on built-in traits.
 
 If a `native fn` declaration bounds its `N`-th type parameter by `Num`, the
 Rust function can accept a `Num<N>` argument (providing `Num::zero` and

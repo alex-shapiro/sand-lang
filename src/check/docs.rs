@@ -98,8 +98,7 @@ impl Checker {
     fn trait_item(&mut self, t: TraitId, name: String) -> ItemDoc {
         let td = &self.traits[t as usize];
         let mut decl = format!("trait {}", self.trait_header_name(t));
-        let mut supers: Vec<String> = td.supers.iter().map(|s| self.show_trait(s)).collect();
-        supers.extend(td.builtin_supers.iter().map(|b| b.name().to_string()));
+        let supers: Vec<String> = td.supers.iter().map(|s| self.show_trait(s)).collect();
         if !supers.is_empty() {
             decl = format!("{decl}: {}", supers.join(" + "));
         }

@@ -147,246 +147,43 @@ impl Checker {
         ra
     }
 
-    /// Whether `t` satisfies `b`; `None` if unknown (unresolved variable).
-    pub fn satisfies(&self, t: TypeId, b: Bound) -> Option<bool> {
-        if !self.budget.charge(1) {
-            return Some(true);
-        }
-        let all = |ts: &mut dyn Iterator<Item = TypeId>| {
-            let mut unknown = false;
-            for x in ts {
-                match self.satisfies(x, b) {
-                    Some(false) => return Some(false),
-                    None => unknown = true,
-                    Some(true) => {}
-                }
-            }
-            if unknown { None } else { Some(true) }
-        };
-        let ty = self.rty(t);
-        match ty {
-            Ty::Var(_) => None,
-            Ty::List(x) | Ty::Set(x) if has_structural_bound(ty, b) => self.satisfies(x, b),
-            Ty::Map(k, v) if has_structural_bound(ty, b) => all(&mut [k, v].into_iter()),
-            Ty::Tuple(l) if has_structural_bound(ty, b) => all(&mut self.arena.list(l).iter().copied()),
-            Ty::Param(p) => Some(self.params[p as usize].has_bound(b)),
-            Ty::Named(d, l) => match derived_index(b).and_then(|k| self.derived.get(d as usize).map(|x| &x[k])) {
-                Some(Derived::Never) => Some(false),
-                Some(Derived::Needs(ps)) => all(&mut ps.iter().map(|&i| self.arena.elem(l, i as usize))),
-                None => Some(!matches!(b, Bound::Num | Bound::Add)),
-            },
-            _ => Some(prim_satisfies(ty, b)),
-        }
-    }
-
-    /// Computes which built-in bounds each type definition from `first` onward
-    /// satisfies, using greatest fixed-point iteration so mutually recursive
-    /// types satisfy a bound unless a component type refutes it.
-    pub(crate) fn derive_bounds(&mut self, first: usize) {
-        let n = self.types.len();
-        while self.derived.len() < n {
-            self.derived.push(std::array::from_fn(|_| Derived::Needs(Vec::new())));
-        }
-        let mut users: Vec<Vec<usize>> = vec![Vec::new(); n - first];
-        for d in first..n {
-            let members: Vec<TypeId> = match &self.types[d].kind {
-                TypeDefKind::Struct { fields } => fields.iter().map(|f| f.ty).collect(),
-                TypeDefKind::Enum { variants } => variants.iter().flat_map(|v| v.fields.iter().copied()).collect(),
-                TypeDefKind::Opaque(_) => Vec::new(),
-            };
-            for t in members {
-                self.arena.any(t, &mut |x| {
-                    if let Ty::Named(e, _) = x
-                        && let Some(u) = (e as usize).checked_sub(first).and_then(|i| users.get_mut(i))
-                        && u.last() != Some(&d)
-                    {
-                        u.push(d);
-                    }
-                    false
-                });
-            }
-        }
-        for (k, b) in DERIVED.into_iter().enumerate() {
-            let mut todo: Vec<usize> = (first..n).collect();
-            let mut queued = vec![true; n - first];
-            while let Some(d) = todo.pop() {
-                queued[d - first] = false;
-                let new = self.derive(d, b);
-                if new != self.derived[d][k] {
-                    self.derived[d][k] = new;
-                    for &u in &users[d - first] {
-                        if !std::mem::replace(&mut queued[u - first], true) {
-                            todo.push(u);
-                        }
-                    }
-                }
-                if !self.budget.check() {
-                    return;
-                }
+    /// Checks that `t` implements `tr` now, or when the function is
+    /// finished if `t` is not inferred yet.
+    pub fn require(&mut self, t: TypeId, tr: TraitRef, span: Span) {
+        match self.resolve_evidence(t, tr, 0) {
+            Ok(_) => {}
+            Err(m) if m.unknown => self.fs.obligations.push((t, tr, span)),
+            Err(m) => {
+                let msg = self.unmet_message(m, "");
+                self.error(span, msg);
             }
         }
     }
 
-    /// Computes the requirements for type definition `d` to satisfy `b` based on
-    /// its fields or variants and the current `self.derived` state.
-    fn derive(&self, d: usize, b: Bound) -> Derived {
-        let def = &self.types[d];
-        let mut needs = Vec::new();
-        let ok = match &def.kind {
-            TypeDefKind::Opaque(kind) => match (b, kind) {
-                (Bound::Eq, _) | (Bound::Hash | Bound::Encode, Opaque::Value(_)) => true,
-                (Bound::Ord, Opaque::Value(v)) => v.ord,
-                _ => false,
-            },
-            TypeDefKind::Struct { fields } => {
-                !(b == Bound::Hash && fields.iter().any(|f| f.mutable))
-                    && fields.iter().all(|f| self.needs(f.ty, b, &def.generics, &mut needs))
-            }
-            TypeDefKind::Enum { variants } => variants.iter().flat_map(|v| &v.fields).all(|&t| self.needs(t, b, &def.generics, &mut needs)),
-        };
-        if !ok {
-            return Derived::Never;
-        }
-        needs.sort_unstable();
-        needs.dedup();
-        Derived::Needs(needs)
-    }
-
-    /// Returns `true` if member type `t` can satisfy `b`, and appends required
-    /// type parameter indices from `generics` to `needs`.
-    fn needs(&self, t: TypeId, b: Bound, generics: &[ParamId], needs: &mut Vec<u32>) -> bool {
-        self.budget.charge(1);
-        let mut go = |t: TypeId| self.needs(t, b, generics, needs);
-        let ty = self.ty(t);
-        match ty {
-            Ty::Param(p) => match generics.iter().position(|&g| g == p) {
-                Some(i) => {
-                    needs.push(i as u32);
-                    true
-                }
-                None => self.params[p as usize].has_bound(b),
-            },
-            Ty::List(x) | Ty::Set(x) => has_structural_bound(ty, b) && go(x),
-            Ty::Map(k, v) => has_structural_bound(ty, b) && go(k) && go(v),
-            Ty::Tuple(l) => has_structural_bound(ty, b) && self.arena.list(l).iter().all(|&x| go(x)),
-            Ty::Named(e, l) => match derived_index(b).map(|k| &self.derived[e as usize][k]) {
-                Some(Derived::Needs(ps)) => ps.iter().all(|&i| go(self.arena.elem(l, i as usize))),
-                _ => false,
-            },
-            Ty::Var(_) => true,
-            _ => prim_satisfies(ty, b),
+    /// [`Checker::require`] for built-in trait `b`.
+    pub fn require_builtin(&mut self, t: TypeId, b: Builtin, span: Span) {
+        if let Some(tr) = self.builtin_trait(b) {
+            self.require(t, tr, span);
         }
     }
 
-    /// Checks a bound now, or defers it if the type is not yet known.
-    pub fn require_bound(&mut self, t: TypeId, b: Bound, span: Span) {
-        match self.satisfies(t, b) {
-            Some(true) => {}
-            Some(false) => self.report_bound(t, b, span),
-            None => self.fs.obligations.push((t, b, span)),
-        }
-    }
-
-    pub(crate) fn report_bound(&mut self, t: TypeId, b: Bound, span: Span) {
-        let msg = match self.rty(t) {
-            Ty::Param(p) if b == Bound::Add => {
-                let n = self.name(self.params[p as usize].name);
-                format!("operator `+` is not defined for type parameter `{n}`; add a bound `{n}: Num`")
-            }
-            _ if b == Bound::Add => format!("operator `+` is not defined for {}", self.show(t)),
+    /// Checks that `+` is defined for `t` now, or when the function is
+    /// finished if `t` is not inferred yet.
+    pub fn require_plus(&mut self, t: TypeId, span: Span) {
+        match self.rty(t) {
+            Ty::Var(_) => self.fs.plus_checks.push((t, span)),
+            Ty::Int | Ty::Float | Ty::Duration | Ty::Str | Ty::Bytes | Ty::List(_) | Ty::Error | Ty::Never => {}
+            Ty::Param(p) if self.builtins[Builtin::Num as usize].is_some_and(|n| self.param_has_trait(p, n)) => {}
             Ty::Param(p) => {
                 let n = self.name(self.params[p as usize].name);
-                format!("type parameter `{n}` does not satisfy {}; add a bound `{n}: {}`", b.name(), b.name())
+                let msg = format!("operator `+` is not defined for type parameter `{n}`; add a bound `{n}: Num`");
+                self.error(span, msg);
             }
-            _ => self.format_unsatisfied_bound(t, b, ""),
-        };
-        self.error(span, msg);
-    }
-
-    /// Formats a diagnostic message explaining why `t` does not satisfy `b`.
-    pub(crate) fn format_unsatisfied_bound(&mut self, t: TypeId, b: Bound, context: &str) -> String {
-        let mut msg = format!("{} does not satisfy {}{context}", self.show(t), b.name());
-        if let Ok(Some(UnsatisfiedReason { text: why, leaf, .. })) = self.find_unsatisfied_part(t, b, &mut std::collections::HashSet::new())
-        {
-            msg.push_str(if context.is_empty() { " because " } else { ", because " });
-            msg.push_str(&why);
-            if let Ty::Param(p) = self.rty(leaf) {
-                let n = self.name(self.params[p as usize].name);
-                msg.push_str(&format!("; add a bound `{n}: {}`", b.name()));
+            _ => {
+                let msg = format!("operator `+` is not defined for {}", self.show(t));
+                self.error(span, msg);
             }
         }
-        msg
-    }
-
-    /// Finds the innermost field, variant payload, or collection element of `t`
-    /// that fails to satisfy `b`. Returns `Ok(None)` if `t` fails directly, or
-    /// `Err(())` if all failing paths cycle through `seen`.
-    fn find_unsatisfied_part(
-        &mut self,
-        t: TypeId,
-        b: Bound,
-        seen: &mut std::collections::HashSet<TypeId>,
-    ) -> Result<Option<UnsatisfiedReason>, ()> {
-        if !seen.insert(t) || !self.budget.charge(1) {
-            return Err(());
-        }
-        let mut parts: Vec<(TypeId, String)> = Vec::new();
-        let is_member = matches!(self.rty(t), Ty::Named(..));
-        let mut mutable = None;
-        let owner = self.show(t);
-        match self.rty(t) {
-            ty @ (Ty::List(x) | Ty::Set(x)) if has_structural_bound(ty, b) => {
-                parts.push((x, format!("the elements of `{owner}` have type `{}`", self.show(x))))
-            }
-            ty @ Ty::Map(k, v) if has_structural_bound(ty, b) => {
-                parts.push((k, format!("the keys of `{owner}` have type `{}`", self.show(k))));
-                parts.push((v, format!("the values of `{owner}` have type `{}`", self.show(v))));
-            }
-            ty @ Ty::Tuple(l) if has_structural_bound(ty, b) => {
-                let items = self.arena.list(l).to_vec();
-                parts.extend(
-                    items.into_iter().enumerate().map(|(i, x)| (x, format!("element {i} of `{owner}` has type `{}`", self.show(x)))),
-                );
-            }
-            Ty::Named(d, args) => {
-                let (generics, args) = (self.types[d as usize].generics.clone(), self.arena.list(args).to_vec());
-                let mut members: Vec<(String, TypeId, bool)> = Vec::new();
-                match &self.types[d as usize].kind {
-                    TypeDefKind::Struct { fields } => {
-                        members.extend(fields.iter().map(|f| (format!("field `{}` of `{owner}`", self.name(f.name)), f.ty, f.mutable)))
-                    }
-                    TypeDefKind::Enum { variants } => members.extend(variants.iter().flat_map(|v| {
-                        v.fields.iter().map(|&ft| (format!("the payload of variant `{}` of `{owner}`", self.name(v.name)), ft, false))
-                    })),
-                    TypeDefKind::Opaque(_) => {}
-                }
-                for (what, ft, is_var) in members {
-                    if b == Bound::Hash && is_var && mutable.is_none() {
-                        mutable = Some(format!("{what} is mutable"));
-                    }
-                    let ft = self.arena.instantiate(ft, &generics, &args);
-                    let text = format!("{what} has type `{}`", self.show(ft));
-                    parts.push((ft, text));
-                }
-            }
-            _ => {}
-        }
-        if let Some(text) = mutable {
-            return Ok(Some(UnsatisfiedReason { text, leaf: t, is_member: true }));
-        }
-        let mut cyclic = false;
-        for (x, text) in parts {
-            if self.satisfies(x, b) != Some(false) {
-                continue;
-            }
-            match self.find_unsatisfied_part(x, b, seen) {
-                Ok(Some(inner)) if inner.is_member || !is_member => return Ok(Some(inner)),
-                Ok(Some(inner)) => return Ok(Some(UnsatisfiedReason { text, leaf: inner.leaf, is_member })),
-                Ok(None) => return Ok(Some(UnsatisfiedReason { text, leaf: x, is_member })),
-                Err(()) => cyclic = true,
-            }
-        }
-        if cyclic { Err(()) } else { Ok(None) }
     }
 
     // ------------------------------------------------------------------
@@ -479,46 +276,4 @@ pub(crate) struct Finish {
     pub hoist: bool,
     /// Dictionaries built on entry, in hidden locals.
     pub hoisted: Vec<(LocalId, HExpr)>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum Derived {
-    Never,
-    /// Indices of type parameters whose arguments must also satisfy the bound.
-    Needs(Vec<u32>),
-}
-
-struct UnsatisfiedReason {
-    text: String,
-    leaf: TypeId,
-    is_member: bool,
-}
-
-const DERIVED: [Bound; 4] = [Bound::Eq, Bound::Ord, Bound::Hash, Bound::Encode];
-
-fn derived_index(b: Bound) -> Option<usize> {
-    DERIVED.iter().position(|&x| x == b)
-}
-
-/// Returns `true` if collection or tuple type `t` satisfies `b` whenever its
-/// element types satisfy `b`.
-fn has_structural_bound(t: Ty, b: Bound) -> bool {
-    match t {
-        Ty::List(_) => matches!(b, Bound::Eq | Bound::Ord | Bound::Encode),
-        Ty::Set(_) | Ty::Map(..) => matches!(b, Bound::Eq | Bound::Encode),
-        Ty::Tuple(_) => !matches!(b, Bound::Num | Bound::Add),
-        _ => false,
-    }
-}
-
-fn prim_satisfies(t: Ty, b: Bound) -> bool {
-    match t {
-        Ty::Error | Ty::Never | Ty::Int => true,
-        Ty::Float => b != Bound::Hash,
-        Ty::Str | Ty::Bytes | Ty::Duration => b != Bound::Num,
-        Ty::Bool | Ty::Unit => !matches!(b, Bound::Num | Bound::Add),
-        Ty::Range => matches!(b, Bound::Eq | Bound::Hash | Bound::Encode),
-        Ty::List(_) => b == Bound::Add,
-        _ => false,
-    }
 }

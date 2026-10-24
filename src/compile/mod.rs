@@ -4388,6 +4388,16 @@ mod tests {
     }
 
     #[test]
+    fn bounds_on_traits_without_methods_take_no_dictionary() {
+        let src = "trait Marker {}\ntrait Describe: Ord { fn describe(self) -> str }\nimpl Marker for int {}\nimpl Describe for int { fn describe(self) -> str { \"i\" } }\nfn plain<T: Eq + Ord + Hash + Encode + Marker>(x: T) -> bool { x == x }\nfn described<T: Describe>(x: T) -> bool { x < x }\nfn num<T: Num>(x: T) -> T { x + x }\nprint(plain(1))\nprint(described(1))\nprint(num(1))\n";
+        let prog = compile(src);
+        let nparams = |name: &str| prog.protos.iter().find(|p| p.name == name).unwrap().nparams;
+        assert_eq!(nparams("plain"), 1);
+        assert_eq!(nparams("described"), 2);
+        assert_eq!(nparams("num"), 2);
+    }
+
+    #[test]
     fn branches_beyond_the_offset_range_go_through_islands() {
         // Bodies of about 40000 instructions: the loop exits, the `if` and
         // the match test jump farther than an `i16` offset reaches.

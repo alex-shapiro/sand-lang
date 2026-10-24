@@ -231,8 +231,8 @@ struct Hooks { on: [str: fn() -> int] }
 struct App { hooks: Hooks? }
 let a: Result<App> = json.decode("{}")
 --- error
-2: [fn() -> int] does not satisfy Encode because the elements of `[fn() -> int]` have type `fn() -> int`
-5: App does not satisfy Encode because field `on` of `Hooks` has type `[str: fn() -> int]`
+2: [fn() -> int] does not implement `Encode` because the elements of `[fn() -> int]` have type `fn() -> int`
+5: App does not implement `Encode` because field `on` of `Hooks` has type `[str: fn() -> int]`
 
 === ranges encode as objects with their bounds
 import json
@@ -465,21 +465,21 @@ let a = yaml!({})
 === json macro value without a json form is an error
 let a = json!({"f": (x: int) => x})
 --- error
-1: fn(int) -> int does not satisfy Encode
+1: fn(int) -> int does not implement `Encode`
 
 === encode rejects functions at compile time
 import json
 struct Job { name: str, run: fn() -> int }
 print(json.encode([Job { name: "a", run: () => 1 }]))
 --- error
-3: [Job] does not satisfy Encode because field `run` of `Job` has type `fn() -> int`
+3: [Job] does not implement `Encode` because field `run` of `Job` has type `fn() -> int`
 
 === to_json rejects tasks at compile time
 import json
 let t = spawn 1
 print(json.to_json(Some(t)))
 --- error
-3: Task<int>? does not satisfy Encode because the payload of variant `Some` of `Task<int>?` has type `Task<int>`
+3: Task<int>? does not implement `Encode` because the payload of variant `Some` of `Task<int>?` has type `Task<int>`
 
 === encode through a type parameter needs the bound
 import json
@@ -491,8 +491,8 @@ fn bounded<T: Encode>(x: T) -> str {
 }
 print(bounded(() => 1))
 --- error
-3: type parameter `T` does not satisfy Encode; add a bound `T: Encode`
-8: fn() -> int does not satisfy Encode
+3: type parameter `T` does not implement `Encode`; add a bound `T: Encode`
+8: fn() -> int does not implement `Encode`
 
 === the Encode bound holds for data and is implied by Num
 import json

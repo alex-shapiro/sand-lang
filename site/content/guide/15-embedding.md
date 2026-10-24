@@ -261,7 +261,7 @@ Err(Error { kind: "permission_denied", message: "permission denied: door back" }
 
 `NativeModule::source` attaches Sand source declarations to a native module. Use `native fn` declarations in the Sand source to specify default parameter values or generic type parameters for registered functions. `Engine::new` type-checks registered modules and returns `Error::Compile` if a `native fn` declaration does not match its Rust function signature.
 
-A generic Rust function accepts values of its `N`-th type parameter as `Param<N, B>`, where `B` declares any built-in bounds (`bound::Eq`, `bound::Ord`, `bound::Hash`, `bound::Num`, `bound::Encode`, or a tuple such as `(bound::Ord, bound::Hash)`) required by the Rust implementation. The corresponding `native fn` declaration in `NativeModule::source` must declare those bounds (`native fn max<T: Ord>(xs: [T]) -> T?`). If a `native fn` declaration bounds its `N`-th type parameter by `Num`, the Rust function can accept `Num<N>` (providing `zero` and `one`) before the value parameters.
+A generic Rust function accepts values of its `N`-th type parameter as `Param<N, B>`, where `B` declares any built-in traits (`bound::Eq`, `bound::Ord`, `bound::Hash`, `bound::Num`, `bound::Encode`, or a tuple such as `(bound::Ord, bound::Hash)`) required by the Rust implementation. The corresponding `native fn` declaration in `NativeModule::source` must declare those bounds (`native fn max<T: Ord>(xs: [T]) -> T?`), directly or through traits that have them as supertraits. If a `native fn` declaration bounds its `N`-th type parameter by `Num`, the Rust function can accept `Num<N>` (providing `zero` and `one`) before the value parameters.
 
 ## Interactive sessions
 

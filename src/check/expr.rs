@@ -611,8 +611,11 @@ impl Checker {
             let own = self.declare_params(&f.generics, &scope, self_ty);
             for (g, &p) in f.generics.iter().zip(&own) {
                 scope.push((self.params[p as usize].name, p));
-                if !self.params[p as usize].traits.is_empty() {
-                    self.error(g.name.span, "local functions cannot have trait bounds; declare the function at the top level");
+                if self.params[p as usize].traits.iter().any(|tr| self.has_dict(tr)) {
+                    self.error(
+                        g.name.span,
+                        "local functions cannot have bounds on traits with methods; declare the function at the top level",
+                    );
                     self.params[p as usize].traits.clear();
                 }
                 if g.reflect {
@@ -762,9 +765,9 @@ impl Checker {
                     hs.push((kk, vv));
                 }
                 if let Some((k, _)) = pairs.first() {
-                    self.require_bound(kh, Bound::Hash, k.span);
-                } else {
-                    self.fs.obligations.push((kh, Bound::Hash, span));
+                    self.require_builtin(kh, Builtin::Hash, k.span);
+                } else if let Some(hash) = self.builtin_trait(Builtin::Hash) {
+                    self.fs.obligations.push((kh, hash, span));
                 }
                 let t = self.map_ty(kh, vh);
                 mk(HKind::Map(hs), t, span)
@@ -997,13 +1000,14 @@ impl Checker {
     // ------------------------------------------------------------------
     // Names
 
-    fn instantiate_local(&mut self, l: LocalId) -> TypeId {
+    fn instantiate_local(&mut self, l: LocalId, span: Span) -> TypeId {
         let t = self.fs.data[l as usize].ty;
         if self.fs.data[l as usize].scheme.is_empty() {
             return t;
         }
         let scheme = self.fs.data[l as usize].scheme.clone();
         let fresh: Vec<TypeId> = scheme.iter().map(|_| self.fresh()).collect();
+        self.require_bounds(&scheme, &fresh, &[], span);
         self.arena.instantiate(t, &scheme, &fresh)
     }
 
@@ -1015,7 +1019,7 @@ impl Checker {
         }
         if let Some(l) = self.find_local(&id.name) {
             self.use_local(l);
-            let t = self.instantiate_local(l);
+            let t = self.instantiate_local(l, span);
             return mk(HKind::Local(l), t, span);
         }
         match self.lookup_global(&id.name) {
@@ -1066,8 +1070,8 @@ impl Checker {
     }
 
     /// Instantiates `f` with fresh type variables, first unifying those of
-    /// the parameters in `pre` with the given types. Built-in bounds become
-    /// obligations; the trait evidence the call needs is returned in `dicts`.
+    /// the parameters in `pre` with the given types. The trait evidence the
+    /// call passes is returned in `dicts`; the other bounds are required here.
     pub(crate) fn instantiate_fn_with(&mut self, f: FnId, span: Span, pre: &[(ParamId, TypeId)]) -> Instance {
         let n = self.fns[f as usize].generics.len();
         let first = self.subst.len() as VarId;
@@ -1087,14 +1091,25 @@ impl Checker {
                 self.unify(fresh[i], t);
             }
         }
-        for (k, &v) in fresh.iter().enumerate() {
-            let g = self.fns[f as usize].generics[k] as usize;
-            for j in 0..self.params[g].bounds.len() {
-                let b = self.params[g].bounds[j];
-                self.require_bound(v, b, span);
+        let gens = self.fns[f as usize].generics.clone();
+        let passed = self.fns[f as usize].dicts.clone();
+        self.require_bounds(&gens, &fresh, &passed, span);
+        Instance { fresh, params, ret, dicts }
+    }
+
+    /// Requires the bounds of type parameters `gens`, instantiated as
+    /// `fresh`, except the evidence passed in `passed`.
+    fn require_bounds(&mut self, gens: &[ParamId], fresh: &[TypeId], passed: &[(TypeId, TraitRef)], span: Span) {
+        let map = |p: ParamId| gens.iter().position(|&g| g == p).map(|i| fresh[i]);
+        for (&g, &v) in gens.iter().zip(fresh) {
+            let pt = self.param_ty(g);
+            for tr in self.params[g as usize].traits.clone() {
+                if !passed.contains(&(pt, tr)) {
+                    let tr = tr.subst_params(&mut self.arena, &map);
+                    self.require(v, tr, span);
+                }
             }
         }
-        Instance { fresh, params, ret, dicts }
     }
 
     fn fn_value(&mut self, f: FnId, span: Span) -> HExpr {
@@ -2092,7 +2107,7 @@ impl Checker {
                 let t = self.resolve(h.ty);
                 match self.ty(t) {
                     Ty::Int | Ty::Float | Ty::Duration | Ty::Error => {}
-                    Ty::Var(_) | Ty::Param(_) => self.require_bound(t, Bound::Num, span),
+                    Ty::Var(_) | Ty::Param(_) => self.require_builtin(t, Builtin::Num, span),
                     _ => {
                         let msg = format!("cannot negate a value of type {}", self.show(t));
                         self.error(span, msg);
@@ -2109,7 +2124,7 @@ impl Checker {
         match self.rty(t) {
             Ty::Int | Ty::Float => true,
             Ty::Param(_) => {
-                self.require_bound(t, Bound::Num, span);
+                self.require_builtin(t, Builtin::Num, span);
                 true
             }
             _ => false,
@@ -2185,11 +2200,11 @@ impl Checker {
             (Ty::Str | Ty::Bytes | Ty::List(_), Add) => t,
             (Ty::Var(_), Add) => {
                 // Decided later: numbers, durations and concatenation all work.
-                self.require_bound(t, Bound::Add, span);
+                self.require_plus(t, span);
                 t
             }
             (Ty::Var(_) | Ty::Param(_), _) => {
-                self.require_bound(t, Bound::Num, span);
+                self.require_builtin(t, Builtin::Num, span);
                 t
             }
             _ => self.no_operator(op, t, span),
@@ -2225,8 +2240,8 @@ impl Checker {
                     let msg = format!("type mismatch: cannot compare {} with {}", self.show(lh.ty), self.show(rh.ty));
                     self.error(span, msg);
                 }
-                let bound = if matches!(op, BinOp::Eq | BinOp::Ne) { Bound::Eq } else { Bound::Ord };
-                self.require_bound(lh.ty, bound, span);
+                let bound = if matches!(op, BinOp::Eq | BinOp::Ne) { Builtin::Eq } else { Builtin::Ord };
+                self.require_builtin(lh.ty, bound, span);
                 let cop = match op {
                     BinOp::Eq => CmpOp::Eq,
                     BinOp::Ne => CmpOp::Ne,
@@ -2685,7 +2700,7 @@ impl Checker {
         let inner = self.comp_clauses(clauses, a.unwrap(), b, acc, elem_hint, val_hint, span);
         self.pop_scope();
         if is_map {
-            self.require_bound(elem_hint, Bound::Hash, span);
+            self.require_builtin(elem_hint, Builtin::Hash, span);
         }
         let init = if is_map { mk(HKind::Map(vec![]), acc_ty, span) } else { mk(HKind::List(vec![]), acc_ty, span) };
         let stmts = vec![

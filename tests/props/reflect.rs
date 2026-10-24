@@ -180,7 +180,7 @@ proptest! {
             }
             Err(Error::Compile(ds)) => {
                 prop_assert!(!t.encodable(), "rejected: {ds:?}\n{src}");
-                prop_assert!(ds.iter().all(|d| d.message.contains("does not satisfy Encode")), "{ds:?}\n{src}");
+                prop_assert!(ds.iter().all(|d| d.message.contains("does not implement `Encode`")), "{ds:?}\n{src}");
                 prop_assert!(ds.iter().all(|d| !d.message.contains("``")), "{ds:?}\n{src}");
             }
             Err(e) => prop_assert!(false, "{e}\n{src}"),

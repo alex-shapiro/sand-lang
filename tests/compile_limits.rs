@@ -142,7 +142,7 @@ fn bound_checks_on_structs_sharing_field_types() {
         src += &format!("struct S{i} {{ a: S{}, b: S{} }}\n", i - 1, i - 1);
     }
     src += "fn same<T: Eq>(a: T, b: T) -> bool { a == b }\nfn f(x: S59) -> bool { same(x, x) }\n";
-    // Bound checks use what each definition needs (`derive_bounds`) instead
+    // Bound checks use what each definition needs (`derive_impls`) instead
     // of visiting the 2^60 paths through the fields.
     let (r, took) = check(Config::new(), &src);
     r.unwrap();
@@ -164,7 +164,7 @@ fn bounds_of_long_chains_of_structs_are_derived_in_linear_time() {
     let n = 20_000;
     let mut src: String = (0..n).map(|i| format!("struct S{i} {{ s: S{}? }}\n", i + 1)).collect();
     src += &format!("struct S{n} {{ f: fn() -> int }}\nfn same(x: S0) -> bool {{ x == x }}\n");
-    rejects(&src, "S0 does not satisfy Eq");
+    rejects(&src, "S0 does not implement `Eq`");
 }
 
 #[test]

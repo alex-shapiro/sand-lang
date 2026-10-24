@@ -81,8 +81,6 @@ Follow-up work, roughly in priority order.
 
 ### Tooling
 
-- [ ] Describe built-in bounds (`Eq`, `Ord`, `Hash`, `Num`, `Encode`) in
-      `help`.
 - [ ] Fix broken intra-doc links to private items and run `cargo doc` with
       `-D warnings` in CI.
 - [ ] Policy lints judge `http` rules only by their exact text (and
@@ -103,6 +101,12 @@ Follow-up work, roughly in priority order.
       literals (`[1, "a"]`).
 - [ ] Include the `<top level>` stack frame if a failing `assert` is the
       final top-level statement.
+- [ ] Report an unsatisfied bound once per expression: with `x: float?`,
+      `set([need(x), x])` (where `need<T: Hash>`) reports
+      `float? does not implement Hash` three times, at overlapping spans.
+- [ ] Show the type of impls for some instances of a constructor in the
+      `Implements` section of `help` (`impl Describe for [int]` is listed as
+      `Describe` in `help(List)`).
 - [ ] Qualify types from other modules in `help` output (for example,
       `conn: net.Conn` in `help(http.Request)` and `modified: time.Instant?` in
       `help(fs.Metadata)`).
@@ -161,17 +165,13 @@ Follow-up work, roughly in priority order.
       specified in §3.1.
 - [ ] Trait objects (`dyn Trait`), associated types and constants, and
       blanket impls (`impl<T> X for T`).
-- [ ] **Unify built-in bounds and traits.** Represent `Eq`, `Ord`, `Hash`,
-      `Num`, and `Encode` as traits whose implementations the compiler derives
-      from struct fields and enum payloads, so that built-in bounds and
-      user-defined traits share one implementation for supertraits, evidence,
-      and diagnostics.
 - [ ] Enforce `Hash` on `Set<T>` element types and `[K: V]` key types at every
       type annotation, not only at method calls, so that `json.decode` cannot
       construct a `Set` or map with unhashable keys.
-- [ ] Support trait bounds on struct and enum type parameters, and check
-      built-in bounds at type construction sites (currently `struct Bag<T: Hash>`
-      accepts `Bag<[int]>`).
-- [ ] Support trait bounds and `reflect` type parameters on local functions by
-      passing hidden dictionary and type-description arguments to closures.
+- [ ] Check the bounds of struct and enum type parameters at struct literals,
+      variant constructors, and type annotations (currently `struct Bag<T: Hash>`
+      accepts `Bag<[int]>`; only the methods of `Bag` check `T: Hash`).
+- [ ] Support bounds on traits with methods (such as `Num`) and `reflect` type
+      parameters on local functions by passing hidden dictionary and
+      type-description arguments to closures.
 - [ ] Non-constant trait method defaults.

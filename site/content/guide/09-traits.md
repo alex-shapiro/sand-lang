@@ -3,7 +3,7 @@ title = "Traits and generics"
 description = "Generic functions, bounds, and traits."
 +++
 
-A generic function operates on values of any type that satisfies its bounds. A bound specifies the operations that a type must support. Sand provides built-in bounds, and you can define custom traits.
+A generic function operates on values of any type that implements the traits of its bounds. A trait specifies the operations that a type must support. The prelude declares built-in traits, and you can define your own.
 
 ## Generic functions
 
@@ -20,11 +20,11 @@ print(first_or([], "none"))
 
 Structs and enums can also be generic (see [Structs and enums](/guide/structs-and-enums/#generic-types)).
 
-## Built-in bounds
+## Built-in traits
 
-An unconstrained type parameter `T` supports only storage, passing, and formatting. Add a bound (`T: Bound`) to compare, hash, or perform arithmetic on values of type `T`. Combine multiple bounds with `+`, as in `T: Ord + Hash`.
+An unconstrained type parameter `T` supports only storage, passing, and formatting. Add a bound (`T: Trait`) to compare, hash, or perform arithmetic on values of type `T`. Combine multiple bounds with `+`, as in `T: Ord + Hash`.
 
-| Bound    | Operations                       | Supporting types                                                |
+| Trait    | Operations                       | Supporting types                                                |
 | -------- | -------------------------------- | --------------------------------------------------------------- |
 | `Eq`     | `==`, `!=`                       | all types except functions                                      |
 | `Ord`    | `<`, `>`, `sorted()`, `max()`    | numbers, `str`, lists, tuples                                   |
@@ -60,7 +60,7 @@ print(total([1.5, 2.5]))
 print(counts(["a", "b", "a"]))
 ```
 
-A struct, enum, or tuple satisfies a bound if all of its fields satisfy that bound. A struct with a `var` field does not satisfy `Hash`. For complete rules, see [§5.6 of the specification](/spec/#56-bounds).
+The compiler derives `Eq`, `Ord`, `Hash`, and `Encode` for each struct, enum, and tuple whose fields implement them. A struct with a `var` field does not implement `Hash`. `help(Type)` lists the traits that a type implements. For complete rules, see [§5.6 of the specification](/spec/#56-built-in-traits).
 
 If a function uses an operation that its bounds do not permit, the compiler reports the missing bound:
 
@@ -148,7 +148,7 @@ print(empty_str.len())
 
 ### Supertraits
 
-A trait can require other traits or built-in bounds with `trait Name: Super`. A type must satisfy all supertraits before it can implement the subtrait. Default methods in the subtrait can call methods from the supertraits.
+A trait can require other traits, including built-in traits, with `trait Name: Super`. A type must implement all supertraits before it can implement the subtrait. Default methods in the subtrait can call methods from the supertraits.
 
 ```sand
 trait Named {
@@ -178,7 +178,7 @@ print(Dog { nick: "rex" }.greet())
 
 ## Impls for built-in types
 
-You can implement custom traits for built-in types such as `bool`, `str`, and `[T]`. A generic `impl` can declare bounds on its type parameters so that the implementation applies only if the element types satisfy those bounds:
+You can implement custom traits for built-in types such as `bool`, `str`, and `[T]`. A generic `impl` can declare bounds on its type parameters so that the implementation applies only if the element types implement those traits:
 
 ```sand
 trait Describe {

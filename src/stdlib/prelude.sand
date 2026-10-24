@@ -291,8 +291,32 @@ pub native fn help<T>(x: T)
 /// if called as `members()`.
 pub native fn members<T>(x: T) -> [str]
 
-trait Num {
+/// Types whose values `==` and `!=` compare: every type except function
+/// types. The compiler derives `Eq` for structs, enums, tuples, and
+/// collections whose components implement it.
+pub trait Eq {}
+
+/// Totally ordered types, which `<`, `<=`, `>`, `>=`, and `sort` compare:
+/// `int`, `float`, `bool`, `str`, `bytes`, `duration`, `()`, ordered value
+/// types, and tuples, lists, structs, and enums whose components implement
+/// `Ord`.
+pub trait Ord: Eq {}
+
+/// Types of map keys and set elements: `int`, `bool`, `str`, `bytes`,
+/// `duration`, `()`, `Range`, value types, and tuples, structs, and enums
+/// whose components implement `Hash`. Lists, maps, sets, `float`, and
+/// structs with `var` fields do not implement `Hash`.
+pub trait Hash: Eq {}
+
+/// Types that `json.encode` can encode: every type except function types,
+/// `Task`, `Channel`, native objects, and types that contain them.
+pub trait Encode {}
+
+/// Numbers (`int` and `float`), which support arithmetic.
+pub trait Num: Ord + Encode {
+    /// Returns the additive identity (`0` or `0.0`).
     fn zero() -> Self
+    /// Returns the multiplicative identity (`1` or `1.0`).
     fn one() -> Self
 }
 

@@ -285,10 +285,9 @@ fn_type!(A, B, C);
 #[derive(Clone, Copy, Debug)]
 pub enum Never {}
 
-/// Built-in trait bounds (`Eq`, `Ord`, `Hash`, `Num`, `Encode`) required on a
-/// generic type parameter of a native function.
-///
-/// `Ord`, `Hash`, and `Num` imply `Eq`, and `Num` implies `Ord` and `Encode`.
+/// Built-in traits (`Eq`, `Ord`, `Hash`, `Num`, `Encode`) that a native
+/// function requires of a type parameter. The Sand declaration must bound
+/// the parameter by them or by traits that have them as supertraits.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Bounds {
     pub eq: bool,
@@ -312,16 +311,16 @@ impl Bounds {
         }
     }
 
-    /// Returns the required bound names, omitting bounds that are implied by other bounds in `self`.
-    pub fn names(self) -> Vec<&'static str> {
-        crate::types::Bound::names(&self.list())
-    }
-
-    pub(crate) fn list(self) -> Vec<crate::types::Bound> {
-        use crate::types::Bound;
-        let all =
-            [(self.eq, Bound::Eq), (self.ord, Bound::Ord), (self.hash, Bound::Hash), (self.num, Bound::Num), (self.encode, Bound::Encode)];
-        all.into_iter().filter(|&(on, _)| on).map(|(_, b)| b).collect()
+    pub(crate) fn builtins(self) -> impl Iterator<Item = crate::types::Builtin> {
+        use crate::types::Builtin;
+        let all = [
+            (self.eq, Builtin::Eq),
+            (self.ord, Builtin::Ord),
+            (self.hash, Builtin::Hash),
+            (self.num, Builtin::Num),
+            (self.encode, Builtin::Encode),
+        ];
+        all.into_iter().filter(|&(on, _)| on).map(|(_, b)| b)
     }
 }
 

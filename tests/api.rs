@@ -161,6 +161,20 @@ fn json_decode_of_deep_options_runs_on_a_small_stack() {
 }
 
 #[test]
+fn bounds_on_deep_types_are_checked_on_a_small_stack() {
+    let deep = format!("(fn() -> int){}", "?".repeat(9000));
+    let src = format!(
+        "let a: {deep} = None\nprint(a == a)\nfn same<T: Hash>(x: T) -> T {{ x }}\nlet b: int{} = None\nprint(same(b) == b)\n",
+        "?".repeat(9000)
+    );
+    let run = move || run_src(Config::new(), &src);
+    let (r, _, _) = std::thread::Builder::new().stack_size(512 << 10).spawn(run).unwrap().join().unwrap();
+    let Err(Error::Compile(ds)) = r else { panic!("{r:?}") };
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    assert!(ds[0].message.contains("does not implement `Eq`"), "{}", ds[0].message);
+}
+
+#[test]
 fn runtime_errors_have_stack_traces() {
     // Non-tail calls, so every frame appears in the trace.
     let src = "fn a() -> int { fail(\"boom\") }\nfn b() -> int { a() + 1 }\nprint(b())\n";
@@ -318,7 +332,7 @@ help(bank.Cell)
     r.unwrap();
     assert_eq!(
         out,
-        "[0.05, 2.50, 19.99]\n22.54\ntrue\nfive\n[\"2.50\",\"19.99\",\"0.05\"]\n[1.50]\n$[0]: expected 0.00\n1\ntype bank.Money: Ord + Hash\ntype bank.Cell: Hash\n"
+        "[0.05, 2.50, 19.99]\n22.54\ntrue\nfive\n[\"2.50\",\"19.99\",\"0.05\"]\n[1.50]\n$[0]: expected 0.00\n1\ntype bank.Money\n\nImplements:\n    Eq\n    Ord\n    Hash\n    Encode\ntype bank.Cell\n\nImplements:\n    Eq\n    Hash\n    Encode\n"
     );
 }
 
@@ -454,7 +468,7 @@ fn host_enums_take_their_docs_from_rust() {
     r.unwrap();
     assert_eq!(
         out,
-        "enum shapes.Shape\n\nA plane figure.\n\nVariants:\n    Circle\n        Round.\n    Square\n    Triangle\n        Three-sided.\n"
+        "enum shapes.Shape\n\nA plane figure.\n\nVariants:\n    Circle\n        Round.\n    Square\n    Triangle\n        Three-sided.\n\nImplements:\n    Eq\n    Ord\n    Hash\n    Encode\n"
     );
 }
 
@@ -845,7 +859,7 @@ fn help_describes_host_modules_that_are_not_imported() {
     r.unwrap();
     assert_eq!(
         out,
-        "module shapes\n\nShapes.\n\nTypes:\n    struct Square\n        A square.\n\nFunctions:\n    fn area(s: Square) -> float\n        Area of a square.\n[\"Square\", \"area\"]\nstruct shapes.Square\n\nA square.\n\nFields:\n    side: float\n"
+        "module shapes\n\nShapes.\n\nTypes:\n    struct Square\n        A square.\n\nFunctions:\n    fn area(s: Square) -> float\n        Area of a square.\n[\"Square\", \"area\"]\nstruct shapes.Square\n\nA square.\n\nFields:\n    side: float\n\nImplements:\n    Eq\n    Ord\n    Encode\n"
     );
     let (r, out, _) = run_src(config(), "help()");
     r.unwrap();
@@ -929,7 +943,7 @@ help(stats.Counter)
     r.unwrap();
     assert_eq!(
         out,
-        "7\n5 0\ntrue false <Counter>\ntype stats.Counter\n\nA tally that functions of `stats` update.\n\nMethods:\n    fn add(self, n: int) -> int\n        Adds `n` and returns the total.\n"
+        "7\n5 0\ntrue false <Counter>\ntype stats.Counter\n\nA tally that functions of `stats` update.\n\nMethods:\n    fn add(self, n: int) -> int\n        Adds `n` and returns the total.\n\nImplements:\n    Eq\n"
     );
 }
 
@@ -1013,7 +1027,7 @@ help(plane.Point)
     let (r, out, _) = run_src(Config::new().module(shapes_module()).module(plane_module()), src);
     r.unwrap();
     let route = "Route { label: Some(\"home\"), points: [Point { x: 1.0, y: 2.0 }, Point { x: 1.0, y: 2.0 }], lengths: [\"points\": 2], end: Triangle, visits: 0 }";
-    let help = "struct plane.Point\n\nA point in the plane.\n\nFields:\n    x: float\n        Horizontal coordinate.\n    y: float\n        Vertical coordinate.\n\nMethods:\n    fn norm(self) -> float\n";
+    let help = "struct plane.Point\n\nA point in the plane.\n\nFields:\n    x: float\n        Horizontal coordinate.\n    y: float\n        Vertical coordinate.\n\nMethods:\n    fn norm(self) -> float\n\nImplements:\n    Eq\n    Ord\n    Encode\n";
     assert_eq!(out, format!("Point {{ x: 2.0, y: 3.0 }}\n5.0\n{route}\n2\ntrue\n{help}"));
 }
 
@@ -1239,7 +1253,7 @@ help(draw.Figure)
 "#;
     let (r, out, _) = run_src(Config::new().module(draw_module()), src);
     r.unwrap();
-    let help = "enum draw.Figure\n\nA figure in the plane.\n\nVariants:\n    Empty\n        Nothing at all.\n    Circle(float)\n        A circle with its radius.\n    Rect(w: float, h: float)\n        A rectangle.\n    Labeled(str, Figure)\n        A figure with a label.\n    Group([Figure])\n        Several figures.\n";
+    let help = "enum draw.Figure\n\nA figure in the plane.\n\nVariants:\n    Empty\n        Nothing at all.\n    Circle(float)\n        A circle with its radius.\n    Rect(w: float, h: float)\n        A rectangle.\n    Labeled(str, Figure)\n        A figure with a label.\n    Group([Figure])\n        Several figures.\n\nImplements:\n    Eq\n    Ord\n    Encode\n";
     assert_eq!(out, format!("9.0\ntrue\nLabeled(\"square\", Rect(2.0, 2.0))\nsquare: 2.0 by 2.0\n12.0\n{help}"));
 }
 
@@ -1369,7 +1383,7 @@ help(cons.Chain)
 "#;
     let (r, out, _) = run_src(Config::new().module(m), src);
     r.unwrap();
-    let help = "enum cons.Chain<T>\n\nA generic recursive enum whose named payload has a renamed field.\n\nVariants:\n    End\n    Link(item: T, next: Chain<T>)\n";
+    let help = "enum cons.Chain<T>\n\nA generic recursive enum whose named payload has a renamed field.\n\nVariants:\n    End\n    Link(item: T, next: Chain<T>)\n\nImplements:\n    Eq where T: Eq\n    Ord where T: Ord\n    Hash where T: Hash\n    Encode where T: Encode\n";
     assert_eq!(out, format!("Link(\"w1\", Link(\"w0\", End))\nw1\n9\n{help}"));
 }
 
@@ -1418,8 +1432,8 @@ help(boxes.Either)
 "#;
     let (r, out, _) = run_src(Config::new().module(boxes_module()), src);
     r.unwrap();
-    let help = "struct boxes.Labeled<T>\n\nA value with a label.\n\nFields:\n    label: str\n    value: T\n        The labeled value.\n    history: [T] = []\n        Earlier values.\n\
-                enum boxes.Either<L, R>\n\nA left or right value.\n\nVariants:\n    Left(L)\n    Right(R)\n";
+    let help = "struct boxes.Labeled<T>\n\nA value with a label.\n\nFields:\n    label: str\n    value: T\n        The labeled value.\n    history: [T] = []\n        Earlier values.\n\nImplements:\n    Eq where T: Eq\n    Ord where T: Ord\n    Encode where T: Encode\n\
+                enum boxes.Either<L, R>\n\nA left or right value.\n\nVariants:\n    Left(L)\n    Right(R)\n\nImplements:\n    Eq where L: Eq, R: Eq\n    Ord where L: Ord, R: Ord\n    Hash where L: Hash, R: Hash\n    Encode where L: Encode, R: Encode\n";
     let expected = [
         "Labeled { label: \"count\", value: 3, history: [0, 1, 2] }",
         "6",
@@ -1470,7 +1484,10 @@ fn generic_host_types_refer_to_their_own_type_as_self() {
                help(trees.Tree)";
     let (r, out, _) = run_src(Config::new().module(m), src);
     r.unwrap();
-    assert_eq!(out, "true\ntrue\nenum trees.Tree<T>\n\nVariants:\n    Leaf(T)\n    Node([Tree<T>])\n");
+    assert_eq!(
+        out,
+        "true\ntrue\nenum trees.Tree<T>\n\nVariants:\n    Leaf(T)\n    Node([Tree<T>])\n\nImplements:\n    Eq where T: Eq\n    Ord where T: Ord\n    Encode where T: Encode\n"
+    );
 }
 
 /// Settings with defaults.
@@ -1519,7 +1536,7 @@ help(conf.Settings)
     r.unwrap();
     let s = "Settings { name: \"a\", port: 8080, verbose: false, level: \"info\", timeout: 30s, tags: [:], parent: None, ratio: -0.5, log: Warn, key: b\"\" }";
     let d = "Settings { name: \"c\", port: 8080, verbose: true, level: \"info\", timeout: 30s, tags: [:], parent: None, ratio: -0.5, log: Warn, key: b\"\" }";
-    let help = "struct conf.Settings\n\nSettings with defaults.\n\nFields:\n    name: str\n    port: int = 8080\n    verbose: bool = false\n    level: str = \"info\"\n    timeout: duration = 30s\n    tags: [str: str] = [:]\n    parent: Settings? = None\n    ratio: float = -0.5\n    log: Level = Level.Warn\n    key: bytes = b\"\"\n";
+    let help = "struct conf.Settings\n\nSettings with defaults.\n\nFields:\n    name: str\n    port: int = 8080\n    verbose: bool = false\n    level: str = \"info\"\n    timeout: duration = 30s\n    tags: [str: str] = [:]\n    parent: Settings? = None\n    ratio: float = -0.5\n    log: Level = Level.Warn\n    key: bytes = b\"\"\n\nImplements:\n    Eq\n    Encode\n";
     assert_eq!(out, format!("{s}\n1\nb\"\"\n{d}\n{help}"));
 }
 
@@ -1618,7 +1635,7 @@ fn rust_field_defaults_can_be_any_constant() {
          backdrop: Figure? = None\n    frame: Figure? = Some(Figure.Labeled(\"a\\\"b\", Figure.Rect(w: 1.0, h: -2.0)))\n    \
          layers: int? = Some(2)\n    parts: [Figure] = [Figure.Circle(1.0), Figure.Group([])]\n    pair: (int, str) = (3, \"x\")\n    \
          flags: [int: [bool]] = [2: [true]]\n    border: Frame = Frame { width: 2.0, labels: [\"l\"] }\n    \
-         seen: Set<str> = set([\"a\", \"b\"])\n    none: Set<int> = set()\n"
+         seen: Set<str> = set([\"a\", \"b\"])\n    none: Set<int> = set()\n\nImplements:\n    Eq\n    Encode\n"
     );
 }
 
@@ -1719,9 +1736,9 @@ fn natives_can_require_encode() {
     r.unwrap();
     assert_eq!(out, "(1, [\"a\"])\n2\n");
     let cases = [
-        ("store.keep(() => 1)", "fn() -> int does not satisfy Encode"),
-        ("fn pass<T>(x: T) -> T {\n    store.keep(x)\n}", "type parameter `T` does not satisfy Encode; add a bound `T: Encode`"),
-        ("let f: fn(fn() -> int) -> fn() -> int = store.keep", "fn() -> int does not satisfy Encode"),
+        ("store.keep(() => 1)", "fn() -> int does not implement `Encode`"),
+        ("fn pass<T>(x: T) -> T {\n    store.keep(x)\n}", "type parameter `T` does not implement `Encode`; add a bound `T: Encode`"),
+        ("let f: fn(fn() -> int) -> fn() -> int = store.keep", "fn() -> int does not implement `Encode`"),
     ];
     for (src, msg) in cases {
         let (r, _, _) = run(src);
@@ -1735,20 +1752,20 @@ fn natives_can_require_encode() {
 #[test]
 fn json_rejects_unrepresentable_types_at_compile_time() {
     let cases = vec![
-        ("json.encode((x: int) => x)", "fn(int) -> int does not satisfy Encode"),
-        ("json.encode([spawn 1])", "[Task<int>] does not satisfy Encode because the elements of `[Task<int>]` have type `Task<int>`"),
-        ("let c: Channel<int> = task.channel()\njson.to_json(c)", "Channel<int> does not satisfy Encode"),
+        ("json.encode((x: int) => x)", "fn(int) -> int does not implement `Encode`"),
+        ("json.encode([spawn 1])", "[Task<int>] does not implement `Encode` because the elements of `[Task<int>]` have type `Task<int>`"),
+        ("let c: Channel<int> = task.channel()\njson.to_json(c)", "Channel<int> does not implement `Encode`"),
         (
             "let f: fn((int, fn() -> int), int) -> str = json.encode",
-            "(int, fn() -> int) does not satisfy Encode because element 1 of `(int, fn() -> int)` has type `fn() -> int`",
+            "(int, fn() -> int) does not implement `Encode` because element 1 of `(int, fn() -> int)` has type `fn() -> int`",
         ),
         (
             "struct S { f: fn() -> int }\njson.encode(S { f: () => 1 })",
-            "S does not satisfy Encode because field `f` of `S` has type `fn() -> int`",
+            "S does not implement `Encode` because field `f` of `S` has type `fn() -> int`",
         ),
-        ("fn dump<T>(x: T) -> str {\n    json.encode(x)\n}", "type parameter `T` does not satisfy Encode; add a bound `T: Encode`"),
+        ("fn dump<T>(x: T) -> str {\n    json.encode(x)\n}", "type parameter `T` does not implement `Encode`; add a bound `T: Encode`"),
     ];
-    let http = ("import http\nlet r = http.post_json(\"http://h/\", (x: int) => x)", "fn(int) -> int does not satisfy Encode");
+    let http = ("import http\nlet r = http.post_json(\"http://h/\", (x: int) => x)", "fn(int) -> int does not implement `Encode`");
     for (src, msg) in cases.into_iter().chain(cfg!(feature = "os").then_some(http)) {
         let (r, _, _) = run_src(Config::new(), &format!("import json\n{src}"));
         let Err(Error::Compile(ds)) = r else { panic!("{src}: expected a compile error, got {r:?}") };
@@ -1816,7 +1833,7 @@ fn help_lists_rust_bound_items_in_registration_order() {
     let order: Vec<usize> =
         ["enum Zebra", "struct Apple", "fn zz()", "fn aa()", "fn mm()"].iter().map(|s| out.find(s).unwrap_or(usize::MAX)).collect();
     assert!(order.windows(2).all(|w| w[0] < w[1]), "{out}");
-    assert!(out.ends_with("struct zoo.Apple\n\nA fruit, documented in a file.\n\nIt has one field.\n\nFields:\n    grams: int\n        A fruit, documented in a file.\n"), "{out}");
+    assert!(out.ends_with("struct zoo.Apple\n\nA fruit, documented in a file.\n\nIt has one field.\n\nFields:\n    grams: int\n        A fruit, documented in a file.\n\nImplements:\n    Eq\n    Ord\n    Hash\n    Encode\n"), "{out}");
 }
 
 #[test]
@@ -3244,7 +3261,7 @@ fn host_modules_can_define_resources() {
     let (r, out, err) = run_src(config, src);
     assert!(r.is_ok(), "{r:?} {err}");
     assert!(out.contains("too many open resources"), "{out}");
-    assert!(out.ends_with("type pool.Conn\n\nA pooled connection.\n\nImplements: Close\n"), "{out}");
+    assert!(out.ends_with("type pool.Conn\n\nA pooled connection.\n\nImplements:\n    Eq\n    Close\n"), "{out}");
     assert_eq!(closed.load(Ordering::Relaxed), 5);
 }
 

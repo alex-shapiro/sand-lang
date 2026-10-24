@@ -503,59 +503,44 @@ impl Symbols {
     }
 }
 
+/// A trait that the prelude declares and whose operations the engine
+/// implements (`==`, `<`, hashing, JSON encoding, arithmetic). Only the
+/// prelude implements `Num`; the checker derives the impls of the others.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Bound {
+pub enum Builtin {
     Eq,
     Ord,
     Hash,
-    Num,
-    /// Types that support JSON encoding (all types except functions, tasks,
-    /// channels, and native objects).
     Encode,
-    /// Supports `+`: numbers, durations, strings, bytes and lists. Not
-    /// written in source: the checker requires it of the operands of `+`
-    /// whose type is not known yet (`(a, b) => a + b`).
-    Add,
+    Num,
 }
 
-impl Bound {
-    pub fn parse(s: &str) -> Option<Bound> {
-        Some(match s {
-            "Eq" => Bound::Eq,
-            "Ord" => Bound::Ord,
-            "Hash" => Bound::Hash,
-            "Num" => Bound::Num,
-            "Encode" => Bound::Encode,
-            _ => return None,
-        })
+impl Builtin {
+    pub const ALL: [Builtin; 5] = [Builtin::Eq, Builtin::Ord, Builtin::Hash, Builtin::Encode, Builtin::Num];
+
+    pub fn parse(s: &str) -> Option<Builtin> {
+        Builtin::ALL.into_iter().find(|b| b.name() == s)
     }
+
     pub fn name(self) -> &'static str {
         match self {
-            Bound::Eq => "Eq",
-            Bound::Ord => "Ord",
-            Bound::Hash => "Hash",
-            Bound::Num => "Num",
-            Bound::Encode => "Encode",
-            Bound::Add => "Add",
+            Builtin::Eq => "Eq",
+            Builtin::Ord => "Ord",
+            Builtin::Hash => "Hash",
+            Builtin::Encode => "Encode",
+            Builtin::Num => "Num",
         }
     }
 
-    /// Returns `true` if `self` implies `other`.
-    pub fn implies(self, other: Bound) -> bool {
-        self == other
-            || (other == Bound::Eq && matches!(self, Bound::Ord | Bound::Hash | Bound::Num))
-            || (matches!(other, Bound::Ord | Bound::Add | Bound::Encode) && self == Bound::Num)
-    }
-
-    /// Returns the names of `bounds`, excluding bounds implied by other bounds in the slice.
-    pub fn names(bounds: &[Bound]) -> Vec<&'static str> {
-        let implied = |b: Bound| bounds.iter().any(|&x| x != b && x.implies(b));
-        bounds.iter().filter(|&&b| !implied(b)).map(|b| b.name()).collect()
+    /// The index of a trait whose impls the checker derives from the
+    /// components of types, or `None` for `Num`.
+    pub fn derived_index(self) -> Option<usize> {
+        (self != Builtin::Num).then_some(self as usize)
     }
 }
 
-/// A user-defined trait applied to type arguments (`Into<str>`); the
-/// implementing type is given separately.
+/// A trait applied to type arguments (`Into<str>`); the implementing type
+/// is given separately.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TraitRef {
     pub trait_id: TraitId,
@@ -571,17 +556,9 @@ impl TraitRef {
 #[derive(Clone, Debug)]
 pub struct ParamInfo {
     pub name: Symbol,
-    /// Built-in bounds, including those implied by the supertraits of `traits`.
-    pub bounds: Vec<Bound>,
-    /// User-defined trait bounds.
+    /// The declared trait bounds, without their supertraits.
     pub traits: Vec<TraitRef>,
     pub reflect: bool,
-}
-
-impl ParamInfo {
-    pub fn has_bound(&self, b: Bound) -> bool {
-        self.bounds.iter().any(|&x| x.implies(b))
-    }
 }
 
 #[derive(Clone, Debug)]

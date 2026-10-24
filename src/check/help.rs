@@ -704,11 +704,57 @@ impl Checker {
             })
             .collect();
         section(out, "Methods", &methods);
-        let traits: Vec<String> =
-            self.visible_impls(c, arity).into_iter().map(|i| self.show_trait(&self.impls[i as usize].trait_ref)).collect();
-        if !traits.is_empty() {
-            let _ = writeln!(out, "Implements: {}", traits.join(", "));
+        let mut traits = self.derived_traits(c, arity);
+        for i in self.visible_impls(c, arity) {
+            let imp = &self.impls[i as usize];
+            let wheres: Vec<String> = imp.evidence.iter().map(|(t, tr)| format!("{}: {}", self.show(*t), self.show_trait(tr))).collect();
+            let shown = self.show_trait(&imp.trait_ref);
+            traits.push(if wheres.is_empty() { shown } else { format!("{shown} where {}", wheres.join(", ")) });
         }
+        let traits: Vec<(String, Option<Arc<str>>)> = traits.into_iter().map(|t| (t, None)).collect();
+        section(out, "Implements", &traits);
+    }
+
+    /// The derived built-in traits of constructor `c`, with the bounds they
+    /// need on its type parameters (`Eq where T: Eq`).
+    fn derived_traits(&mut self, c: Ctor, arity: u32) -> Vec<String> {
+        let names: Vec<String> = match c {
+            Ctor::Def(d) => self.types[d as usize].generics.iter().map(|&p| self.name(self.params[p as usize].name).to_string()).collect(),
+            Ctor::List | Ctor::Set => vec!["T".into()],
+            Ctor::Map => vec!["K".into(), "V".into()],
+            Ctor::Tuple => (0..arity).map(|i| ((b'A' + (i % 26) as u8) as char).to_string()).collect(),
+            _ => Vec::new(),
+        };
+        let probe = match c {
+            Ctor::Def(_) | Ctor::Fn => None,
+            Ctor::Tuple => Some(Ty::Tuple(TyList::EMPTY)),
+            Ctor::List => Some(Ty::List(TypeId::INT)),
+            Ctor::Set => Some(Ty::Set(TypeId::INT)),
+            Ctor::Map => Some(Ty::Map(TypeId::INT, TypeId::INT)),
+            Ctor::Int => Some(Ty::Int),
+            Ctor::Float => Some(Ty::Float),
+            Ctor::Bool => Some(Ty::Bool),
+            Ctor::Str => Some(Ty::Str),
+            Ctor::Bytes => Some(Ty::Bytes),
+            Ctor::Duration => Some(Ty::Duration),
+            Ctor::Unit => Some(Ty::Unit),
+            Ctor::Range => Some(Ty::Range),
+        };
+        let mut out = Vec::new();
+        for (k, b) in super::derive::DERIVED.into_iter().enumerate() {
+            let needs: Option<Vec<u32>> = match (c, probe) {
+                (Ctor::Def(d), _) => match self.derived.get(d as usize).map(|x| &x[k]) {
+                    Some(super::derive::Derived::Needs(ps)) => Some(ps.clone()),
+                    _ => None,
+                },
+                (_, Some(ty)) => self.derived_parts(ty, k).map(|_| (0..names.len() as u32).collect()),
+                _ => None,
+            };
+            let Some(needs) = needs else { continue };
+            let wheres: Vec<String> = needs.iter().map(|&i| format!("{}: {}", names[i as usize], b.name())).collect();
+            out.push(if wheres.is_empty() { b.name().to_string() } else { format!("{} where {}", b.name(), wheres.join(", ")) });
+        }
+        out
     }
 
     /// Returns `"pub "` when displaying a public member inside its defining module.
@@ -742,8 +788,7 @@ impl Checker {
         if let Some(doc) = &td.doc {
             let _ = writeln!(out, "{doc}\n");
         }
-        let mut supers: Vec<String> = td.supers.iter().map(|s| self.show_trait(s)).collect();
-        supers.extend(td.builtin_supers.iter().map(|b| b.name().to_string()));
+        let supers: Vec<String> = td.supers.iter().map(|s| self.show_trait(s)).collect();
         if !supers.is_empty() {
             let _ = writeln!(out, "Supertraits: {}\n", supers.join(" + "));
         }
@@ -891,14 +936,13 @@ impl Checker {
 
     pub(super) fn type_header(&self, d: TypeDefId, qualify: bool) -> String {
         let def = &self.types[d as usize];
-        let (kw, bounds) = match def.kind {
-            TypeDefKind::Struct { .. } => ("struct", ""),
-            TypeDefKind::Enum { .. } => ("enum", ""),
-            TypeDefKind::Opaque(Opaque::Value(v)) => ("type", if v.ord { ": Ord + Hash" } else { ": Hash" }),
-            TypeDefKind::Opaque(_) => ("type", ""),
+        let kw = match def.kind {
+            TypeDefKind::Struct { .. } => "struct",
+            TypeDefKind::Enum { .. } => "enum",
+            TypeDefKind::Opaque(_) => "type",
         };
         let prefix = if qualify { self.module_prefix(def.module) } else { String::new() };
-        format!("{kw} {prefix}{}{bounds}", self.type_header_name(d))
+        format!("{kw} {prefix}{}", self.type_header_name(d))
     }
 
     pub(super) fn trait_header_name(&self, t: TraitId) -> String {
@@ -960,17 +1004,13 @@ impl Checker {
 
     /// `Ord + Describe` (without `Hash` if `keyed`).
     fn bounds_text(&self, p: ParamId, keyed: bool) -> String {
-        let info = &self.params[p as usize];
-        // (`Add` cannot be written: `+` is allowed on any type.)
-        let mut bounds: Vec<String> =
-            info.bounds.iter().filter(|&&b| b != Bound::Add && !(keyed && b == Bound::Hash)).map(|b| b.name().to_string()).collect();
-        bounds.dedup();
+        let hash = self.builtins[Builtin::Hash as usize];
         let visible = |tr: &&TraitRef| {
             let t = &self.traits[tr.trait_id as usize];
-            t.is_pub || t.module == self.cur_mod
+            (t.is_pub || t.module == self.cur_mod) && !(keyed && Some(tr.trait_id) == hash)
         };
-        bounds.extend(info.traits.iter().filter(visible).map(|tr| self.show_trait(tr)));
-        bounds.join(" + ")
+        let traits: Vec<TraitRef> = self.params[p as usize].traits.iter().filter(visible).copied().collect();
+        self.minimal_traits(&traits).iter().map(|tr| self.show_trait(tr)).collect::<Vec<_>>().join(" + ")
     }
 
     /// Formats the ` = <default>` suffix for field `f` of struct `d`, or returns

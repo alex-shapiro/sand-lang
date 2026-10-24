@@ -582,7 +582,7 @@ struct Box<T> {
 }
 print(Box { item: 1 }.show())
 --- error
-8: the trait `Describe` is not implemented for int
+8: int does not implement `Describe`
 
 === reflect natives alongside dictionaries
 import json
@@ -969,8 +969,8 @@ print(show([[Point { x: 1 }]]))
 print(show([["s"]]))
 print("s".describe())
 --- error
-13: the trait `Describe` is not implemented for int
-15: the trait `Describe` is not implemented for str (required for [str] to implement `Describe`)
+13: int does not implement `Describe`
+15: str does not implement `Describe` (required for [str] to implement `Describe`)
 16: no method `describe` on type str (the trait `Describe` has it but is not implemented for str)
 
 === type parameters need bounds
@@ -984,7 +984,7 @@ fn b<T>(x: T) -> str { show(x) }
 5: no method `describe` on type T; add a bound `T: Describe`
 6: type parameter `T` does not implement `Describe`; add a bound `T: Describe`
 
-=== conditional impl bounds include built-in bounds
+=== conditional impl bounds include built-in traits
 trait Describe {
     fn describe(self) -> str
 }
@@ -1000,7 +1000,7 @@ impl<T: Describe + Hash> Describe for [T] {
 print([1].describe())
 print([1.5].describe())
 --- error
-14: float does not satisfy Hash (required for [float] to implement `Describe`)
+14: float does not implement `Hash` (required for [float] to implement `Describe`)
 
 === supertraits must be implemented
 trait Describe {
@@ -1028,8 +1028,8 @@ impl<T> Shape for W<T> {
     fn area(self) -> float { 0.0 }
 }
 --- error
-11: the trait `Describe` is not implemented for S, which trait `Shape` requires
-15: M does not satisfy Hash, which trait `Keyed` requires, because field `n` of `M` is mutable
+11: S does not implement `Describe`, which trait `Shape` requires
+15: M does not implement `Hash`, which trait `Keyed` requires, because field `n` of `M` is mutable
 22: type parameter `T` does not implement `Describe`
 
 === cyclic supertraits
@@ -1089,13 +1089,12 @@ extend<T: Bogus> Wrap<T> {}
 5: unknown bound `Nope`
 6: `S` is a type, not a trait
 7: `Describe` is a trait, not a type
-8: `Eq` is a built-in bound
+8: `Eq` is a built-in trait; the compiler derives its impls, so it cannot be implemented
 9: cannot implement traits for fn(int)
 12: cannot implement traits for T
 15: type parameter `T` is not used by the impl's type or trait arguments
-18: trait bounds are not allowed on the type parameters of a type
 19: bounds on trait type parameters are not supported
-20: `Eq` is a built-in bound and cannot be redefined
+20: `Eq` is a built-in trait and cannot be redefined
 
 === restrictions on trait and impl methods
 trait Describe<X> {
@@ -1116,7 +1115,7 @@ fn outer() {
 3: `where` clauses in trait methods may only constrain the method's own type parameters
 8: default values are declared by the trait, not the impl
 9: impl methods cannot add bounds to the impl's type parameters
-12: local functions cannot have trait bounds
+12: local functions cannot have bounds on traits with methods
 
 === pub is not allowed on trait and impl methods
 trait Describe {
@@ -1259,3 +1258,139 @@ pub trait Named {
     fn name(self) -> str
 }
 --- lint
+
+=== built-in traits are supertraits like any other
+trait Keyed: Hash {
+    fn key(self) -> str
+    fn same(self, other: Self) -> bool { self == other }
+}
+struct Id { n: int }
+impl Keyed for Id {
+    fn key(self) -> str { "id\(self.n)" }
+}
+fn keys<T: Keyed>(xs: [T]) -> [str] {
+    set(xs).to_list().map(x => x.key())
+}
+trait Scale: Num {
+    fn double(self) -> Self { self + self }
+}
+impl Scale for int {}
+impl Scale for float {}
+fn bump<T: Scale>(x: T) -> T { x.double() + T.one() }
+print(keys([Id { n: 1 }, Id { n: 1 }, Id { n: 2 }]))
+print(Id { n: 1 }.same(Id { n: 1 }))
+print(bump(2))
+print(bump(0.5))
+--- stdout
+["id1", "id2"]
+true
+5
+2.0
+
+=== traits without methods take no dictionary but are checked
+trait Safe {}
+impl Safe for int {}
+impl<T: Safe> Safe for [T] {}
+fn check<T: Safe>(x: T) -> str { "ok" }
+print(check([[1]]))
+--- stdout
+ok
+
+=== a trait without methods is checked through conditional impls
+trait Safe {}
+impl Safe for int {}
+impl<T: Safe> Safe for [T] {}
+fn check<T: Safe>(x: T) -> str { "ok" }
+check(["a"])
+--- error
+5: str does not implement `Safe` (required for [str] to implement `Safe`)
+
+=== bounds on the type parameters of a type apply to its methods
+trait Describe {
+    fn describe(self) -> str
+}
+impl Describe for int {
+    fn describe(self) -> str { "#\(self)" }
+}
+struct Labeled<T: Describe> {
+    items: [T]
+
+    fn labels(self) -> [str] { self.items.map(x => x.describe()) }
+}
+enum Tree<T: Ord> {
+    Leaf
+    Node(Tree<T>, T, Tree<T>)
+
+    fn insert(self, x: T) -> Tree<T> {
+        match self {
+            Leaf => Tree.Node(Tree.Leaf, x, Tree.Leaf)
+            Node(l, v, r) => if x < v { Tree.Node(l.insert(x), v, r) } else { Tree.Node(l, v, r.insert(x)) }
+        }
+    }
+
+    fn items(self) -> [T] {
+        match self {
+            Leaf => []
+            Node(l, v, r) => l.items() + [v] + r.items()
+        }
+    }
+}
+print(Labeled { items: [1, 2] }.labels())
+let t: Tree<int> = Tree.Leaf
+print(t.insert(3).insert(1).insert(2).items())
+--- stdout
+["#1", "#2"]
+[1, 2, 3]
+
+=== methods check the bounds of their type's parameters
+trait Describe {
+    fn describe(self) -> str
+}
+struct Labeled<T: Describe> {
+    items: [T]
+
+    fn labels(self) -> [str] { self.items.map(x => x.describe()) }
+}
+let l = Labeled { items: ["a"] }
+print(l.labels())
+--- error
+10: str does not implement `Describe`
+
+=== local functions check their bounds where they are used
+fn outer() {
+    fn same<T: Eq>(a: T, b: T) -> bool { a == b }
+    print(same([1], [1]))
+    print(same((x: int) => x, (x: int) => x))
+}
+--- error
+4: fn(int) -> int does not implement `Eq`
+
+=== built-in traits cannot be implemented or redefined
+struct S { x: int }
+impl Hash for S {}
+impl Num for S {
+    fn zero() -> S { S { x: 0 } }
+    fn one() -> S { S { x: 1 } }
+}
+trait Ord {}
+--- error
+2: `Hash` is a built-in trait; the compiler derives its impls, so it cannot be implemented
+3: `Num` is a built-in trait and cannot be implemented
+7: `Ord` is a built-in trait and cannot be redefined
+
+=== bounds on the type parameters of a type may name types declared later
+trait Into<T> {
+    fn into(self) -> T
+}
+struct Box<T: Into<Later>> {
+    v: T
+
+    fn get(self) -> Later { self.v.into() }
+}
+struct Later { n: int }
+impl Into<Later> for int {
+    fn into(self) -> Later { Later { n: self } }
+}
+print(Box { v: 3 }.get())
+--- stdout
+Later { n: 3 }
