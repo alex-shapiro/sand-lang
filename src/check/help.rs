@@ -976,10 +976,10 @@ impl Checker {
 
     /// ` = <default>` for field `f` of struct `d` if it has a default, or
     /// `""`: the source text of a Sand default, or the text of the constant
-    /// default of a Rust-bound field.
+    /// default of a Rust-bound field, cut after [`SHOWN_CHARS`] characters.
     pub(super) fn default_text(&self, d: TypeDefId, f: &FieldDef) -> String {
         match (f.default, &f.const_default) {
-            (Some(_), Some(c)) if self.rust_type(d).is_some() => format!(" = {}", self.const_text(c)),
+            (Some(_), Some(c)) if self.rust_type(d).is_some() => format!(" = {}", shorten(self.const_text(c))),
             (Some(h), _) => format!(" = {}", self.source_text(self.fns[h as usize].span)),
             (None, _) => String::new(),
         }
@@ -1048,10 +1048,17 @@ impl Checker {
     pub(super) fn source_text(&self, span: Span) -> String {
         let file = self.sources.get(&span.file);
         let text = file.and_then(|f| f.text.get(span.lo as usize..span.hi as usize)).unwrap_or("...");
-        let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        let short = crate::stdlib::truncate(&line, 60);
-        if short.len() < line.len() { format!("{short}...") } else { line }
+        shorten(text.split_whitespace().collect::<Vec<_>>().join(" "))
     }
+}
+
+/// The most characters of a default or an expression that `help` shows.
+const SHOWN_CHARS: usize = 60;
+
+/// `text` cut after [`SHOWN_CHARS`] characters, ending in `...` if cut.
+fn shorten(text: String) -> String {
+    let short = crate::stdlib::truncate(&text, SHOWN_CHARS);
+    if short.len() < text.len() { format!("{short}...") } else { text }
 }
 
 impl Scopes {

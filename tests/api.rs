@@ -1551,6 +1551,23 @@ fn rust_field_defaults_are_bounded() {
 }
 
 #[test]
+fn help_cuts_long_rust_field_defaults_as_it_cuts_sand_ones() {
+    #[derive(sandlang::SandStruct)]
+    #[sand(module = "lab")]
+    struct Big {
+        #[sand(default = vec![7; 60000])]
+        table: Vec<i64>,
+    }
+    let mut m = NativeModule::new("lab");
+    m.bind::<Big>();
+    let src = format!("import lab\nstruct Mine {{ table: [int] = [{}] }}\nhelp(lab.Big)\nhelp(Mine)", vec!["7"; 100].join(", "));
+    let (r, out, _) = run_src(Config::new().module(m), &src);
+    r.unwrap();
+    let line = format!("    table: [int] = [{}7,...", "7, ".repeat(19));
+    assert_eq!(out.lines().filter(|l| l.starts_with("    table")).collect::<Vec<_>>(), [&line, &line], "{}", &out[..out.len().min(500)]);
+}
+
+#[test]
 fn rust_field_defaults_can_be_any_constant() {
     #[derive(Debug, PartialEq, sandlang::SandStruct)]
     #[sand(module = "draw")]
