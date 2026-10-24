@@ -83,8 +83,8 @@ Follow-up work, roughly in priority order.
 
 ### Tooling
 
-- [ ] `help` does not describe the built-in bounds (`help(Encode)` reports an
-      undefined name).
+- [ ] `help` does not describe the built-in bounds (`help(Eq)` and
+      `help(Encode)` report an undefined name).
 - [ ] `help` writes the whole constant default of a Rust-bound field, which
       can have 65536 parts (`#[sand(default = vec![0; 60000])]`). Cut long
       defaults as long type names are cut.
@@ -124,10 +124,10 @@ Follow-up work, roughly in priority order.
 - [ ] Profile `HostFn` dispatch and argument slice construction (`fannkuch` and
       `results` in `bench/programs`) to reduce the ~0.5 ns typed native call
       overhead.
-- [ ] The native `json.decode_raw` takes about 68 ns to decode `"1"`, against
-      50 ns for the native `json.decode` on `main`, and profiling does not
-      show where the 18 ns go. (The Sand `decode` wrapper adds 25 ns more; it
-      stays, so that natives run no Sand code.)
+- [ ] A loop that decodes `"1"` with `json.decode` takes 76 ns per
+      iteration, against 51 ns with the native `json.decode` on `main`. The
+      Sand `decode` wrapper adds 15 ns of these (it stays, so that natives run
+      no Sand code); `decode_raw` and the match on its result add the rest.
 - [ ] `Op::Describe` builds a new description on each call: a function
       that passes `[T]` to `json.decode` takes about 90 ns more per call
       than one that passes `[P]`. Keep the instances of each template by
