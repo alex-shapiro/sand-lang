@@ -1302,10 +1302,24 @@ impl Checker {
         });
     }
 
+    /// [`Checker::check_member_type`] for each field and payload type of the
+    /// Rust-bound type `d`, naming the member in the message.
+    pub(crate) fn check_bound_member_types(&mut self, d: TypeDefId) {
+        let (span, owner) = (self.types[d as usize].span, self.ctor_name(Ctor::Def(d), 0));
+        let def = &self.types[d as usize];
+        let mut members: Vec<(TypeId, String)> = def.fields().iter().map(|f| (f.ty, format!("field `{}`", self.name(f.name)))).collect();
+        for v in def.variants() {
+            members.extend(v.fields.iter().map(|&t| (t, format!("the payload of variant `{}`", self.name(v.name)))));
+        }
+        for (t, what) in members {
+            self.check_member_type(d, t, span, &format!("{what} of `{owner}`: "));
+        }
+    }
+
     /// Checks that the field or payload type `ty` of type definition `d`
     /// meets the requirements of its type constructors, given the traits of
-    /// the type parameters of `d`.
-    pub(crate) fn check_member_type(&mut self, d: TypeDefId, ty: TypeId, span: Span) {
+    /// the type parameters of `d`. Reports a failure as `prefix` and the reason.
+    pub(crate) fn check_member_type(&mut self, d: TypeDefId, ty: TypeId, span: Span, prefix: &str) {
         let mut evidence = Vec::new();
         for &p in &self.types[d as usize].generics {
             let pt = self.arena.param(p);
@@ -1313,7 +1327,7 @@ impl Checker {
         }
         let saved = std::mem::replace(&mut self.fs.evidence, evidence);
         if let Some(m) = self.unmet_in_type(ty) {
-            let msg = self.unmet_message(m, "");
+            let msg = format!("{prefix}{}", self.unmet_message(m, ""));
             self.error(span, msg);
         }
         self.fs.evidence = saved;

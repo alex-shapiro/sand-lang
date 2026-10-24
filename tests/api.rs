@@ -3359,3 +3359,16 @@ fn deep_set_elements_and_map_keys_of_fields_are_checked_on_a_small_stack() {
     assert_eq!(ds[0].line, 3, "{ds:?}");
     assert!(ds[0].message.starts_with(&format!("{bad} does not implement `Hash`")), "{}", ds[0].message);
 }
+
+#[test]
+fn rust_bound_field_types_meet_the_requirements_of_their_constructors() {
+    #[derive(sandlang::SandStruct)]
+    #[sand(module = "lab")]
+    struct Seen {
+        rows: std::collections::HashSet<Vec<i64>>,
+    }
+    let mut m = NativeModule::new("lab");
+    m.bind::<Seen>();
+    let errors = engine_errors(Config::new().module(m));
+    assert_eq!(errors, ["field `rows` of `Seen`: [int] does not implement `Hash` (required for the elements of Set<[int]>)"]);
+}

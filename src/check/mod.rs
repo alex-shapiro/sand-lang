@@ -1271,10 +1271,10 @@ impl Checker {
         // 3. Fields and variants, and the requirements and built-in traits
         // derived from them. Their types are checked once impls are declared.
         let mut member_types: Vec<(TypeDefId, TypeId, Span)> = Vec::new();
+        let mut bound_ids = Vec::new();
         for (id, members) in bound_members {
             self.resolve_bound_members(id, members);
-            let span = self.types[id as usize].span;
-            member_types.extend(self.member_types(id as usize).into_iter().map(|t| (id, t, span)));
+            bound_ids.push(id);
         }
         let mut k = 0;
         for (idx, item) in items.iter().enumerate() {
@@ -1341,7 +1341,10 @@ impl Checker {
             self.check_impl_supertraits(id);
         }
         for (d, t, span) in member_types {
-            self.check_member_type(d, t, span);
+            self.check_member_type(d, t, span, "");
+        }
+        for d in bound_ids {
+            self.check_bound_member_types(d);
         }
         if self.allows_native() {
             self.declare_undeclared_natives(first_fn);
