@@ -1594,3 +1594,18 @@ struct Bag<T: Make + Ord> { x: T = T.make(), big: bool = false }
 struct Keys<T: Hash> { s: Set<T> = set([]) }
 --- error
 3: field defaults cannot use `Make`, which type parameter `T` requires, because defaults receive no trait dictionaries
+
+=== required traits take the type arguments that the trait declares
+trait Into<T> {
+    fn into(self) -> T
+}
+trait Both<A, B> {}
+fn a<T: Eq<int>>(x: T) {}
+fn b<T: Into>(x: T) {}
+fn c<T: Into<int, str>>(x: T) {}
+fn d<T: Both<int>>(x: T) {}
+--- error
+5: `Eq` does not take type arguments
+6: expected 1 type argument for trait `Into`, found 0
+7: expected 1 type argument for trait `Into`, found 2
+8: expected 2 type arguments for trait `Both`, found 1

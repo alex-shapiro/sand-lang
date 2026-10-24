@@ -4404,12 +4404,16 @@ mod tests {
 
     #[test]
     fn dictionaries_built_from_parameters_are_built_once_on_entry() {
-        let src = "trait Show { fn show(self) -> str }\nimpl Show for int { fn show(self) -> str { \"i\" } }\nimpl<A: Show> Show for [A] { fn show(self) -> str { self[0].show() } }\nfn shows<T: Show>(x: T, n: int) -> int {\n    var k = 0\n    for _ in 0..n {\n        k += [x].show().len() + [1].show().len()\n    }\n    k\n}\nprint(shows(1, 2))\n";
-        assert_eq!(run(src), "4\n");
+        // `subs` and `pairs` build the dictionaries of `[T]: Show` from the
+        // `Show` field of the dictionary of `T: Sub`.
+        let src = "trait Show { fn show(self) -> str }\ntrait Sub: Show { fn sub(self) -> str }\nimpl Show for int { fn show(self) -> str { \"i\" } }\nimpl Sub for int { fn sub(self) -> str { \"s\" } }\nimpl<A: Show> Show for [A] { fn show(self) -> str { self[0].show() } }\nfn shows<T: Show>(x: T, n: int) -> int {\n    var k = 0\n    for _ in 0..n {\n        k += [x].show().len() + [x].show().len() + [1].show().len()\n    }\n    k\n}\nfn subs<T: Sub>(x: T, n: int) -> int {\n    var k = 0\n    for _ in 0..n {\n        k += [x].show().len() + [x].show().len()\n    }\n    k\n}\nfn pairs<T: Sub, U: Sub>(x: T, y: U, n: int) -> int {\n    var k = 0\n    for _ in 0..n {\n        k += [x].show().len() + [y].show().len()\n    }\n    k\n}\nprint(shows(1, 2))\nprint(subs(1, 2))\nprint(pairs(1, 2, 2))\n";
+        assert_eq!(run(src), "6\n4\n4\n");
         let prog = compile(src);
-        let (body, entry) = first_loop(&prog, "shows");
         let tuples = |ops: &[Op]| ops.iter().filter(|op| matches!(op, Op::NewTuple { .. })).count();
-        assert_eq!((tuples(entry), tuples(body)), (1, 0));
+        for (f, n) in [("shows", 1), ("subs", 1), ("pairs", 2)] {
+            let (body, entry) = first_loop(&prog, f);
+            assert_eq!((tuples(entry), tuples(body)), (n, 0), "{f}");
+        }
     }
 
     #[test]

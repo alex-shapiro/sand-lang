@@ -158,7 +158,6 @@ fn same_dict(a: &HExpr, b: &HExpr) -> bool {
         }
         (HKind::Local(l), HKind::Local(m)) => l == m,
         (HKind::Field { obj: a, index: i }, HKind::Field { obj: b, index: j }) => i == j && same_dict(a, b),
-        (HKind::Unit, HKind::Unit) => true,
         _ => false,
     }
 }
