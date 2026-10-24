@@ -811,3 +811,28 @@ fn type_descriptions_count_the_nodes_they_share_once() {
     r.unwrap();
     assert_eq!(out, "200\n");
 }
+
+#[test]
+fn the_collection_at_the_memory_limit_releases_the_staging_buffer() {
+    // `json.parse` stages its objects in a buffer (about 40 bytes per object)
+    // that the heap keeps and counts for the next call. Right after the
+    // parse, only the collection that the memory limit starts can free it
+    // before `repeat` fails.
+    let src = |churn: bool, mib: usize| {
+        let churn = if churn { "for i in 0..400 {\n    let s = \"y\".repeat(1 << 20)\n}\n" } else { "" };
+        format!(
+            "import json\nlet text = \"[\" + \"[1],\".repeat(199999) + \"[1]]\"\nlet a = json.parse(text)?\n{churn}let b = \"x\".repeat({})\n\
+             print(a.as_list().unwrap().len() + b.len())",
+            mib << 20
+        )
+    };
+    let fits = |churn: bool, mib: usize| run(limits(|l| l.max_memory = Some(64 << 20)), &src(churn, mib)).0.is_ok();
+    // The most MiB that fit once garbage churn has run major collections.
+    let (mut lo, mut hi) = (0, 64);
+    while hi - lo > 1 {
+        let mid = (lo + hi) / 2;
+        if fits(true, mid) { lo = mid } else { hi = mid }
+    }
+    assert!(lo >= 16, "{lo} MiB");
+    assert!(fits(false, lo - 2), "{lo} MiB fit after churn, but {} MiB do not fit right after the parse", lo - 2);
+}

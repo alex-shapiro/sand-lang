@@ -247,7 +247,6 @@ fn split_list(vm: &mut Vm, text: Str, split: impl for<'h> Fn(&'h Heap, &mut dyn 
     produce(vm, count, count)?;
     vm.check_memory(text.str(&vm.heap).len().saturating_add(count.saturating_mul(ITEM)))?;
     Ok(Val::from_raw(vm.staged_strs(|heap, st, ascii| {
-        st.expect(count + 1);
         let mut items = Vec::with_capacity(count);
         split(heap, &mut |p| {
             items.push(match p.as_bytes() {
