@@ -242,9 +242,9 @@ pub enum HKind {
         native: u32,
         args: Vec<HArg>,
     },
-    /// The runtime description of a `reflect` type argument `ty`, passed
-    /// before the other arguments of a call. If `ty` has type parameters,
-    /// `args` are the descriptions of these (`TypeArena::params_of`).
+    /// Runtime description for a `reflect` type argument `ty`. If `ty`
+    /// contains type parameters, `args` provides their descriptions in the
+    /// order returned by `TypeArena::params_of`.
     TypeDesc {
         ty: TypeId,
         args: Vec<HExpr>,

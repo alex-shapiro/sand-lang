@@ -54,7 +54,7 @@ pub enum Json {
     Obj(indexmap::IndexMap<String, Json>),
 }
 
-/// The runtime ids of the variants of `Json` in a program.
+/// Runtime variant IDs for `Json` in a compiled program.
 #[derive(Clone, Copy)]
 struct JsonIds {
     first: u32,
@@ -75,8 +75,6 @@ impl JsonIds {
         }
     }
 
-    /// The ids if the first variant has id `first`: the variants of an enum
-    /// have consecutive ids.
     fn at(first: u32) -> JsonIds {
         const INDEXES: [usize; 7] = [
             variant_index::<Json>("Null"),
@@ -91,7 +89,6 @@ impl JsonIds {
         JsonIds { first, null, bool_, int, float, str_, arr, obj }
     }
 
-    /// Whether `id` is the id of a variant of `Json`.
     fn has(&self, id: u32) -> bool {
         id.wrapping_sub(self.first) < Json::VARIANTS.len() as u32
     }
@@ -195,17 +192,16 @@ pub(crate) fn module() -> NativeModule {
     m
 }
 
-/// The result of `decode_raw`, which the Sand function `decode` completes.
+/// Intermediate result returned by `decode_raw` and finalized by `decode`.
 #[derive(crate::SandEnum)]
 #[sand(module = "json", private)]
 enum Decoded<T> {
-    /// The decoded value.
+    /// Fully decoded value.
     Done(T),
-    /// The decoded value, which is complete once each of the functions has
-    /// run: they compute the defaults of missing fields that are not
-    /// constants, and add elements that contain such fields to their sets.
+    /// Decoded value accompanied by deferred thunks that evaluate non-constant
+    /// field defaults and populate sets containing those structs.
     Pending(T, Val<Vec<fn()>>),
-    /// `text` is not JSON, or does not describe a value of the type.
+    /// Parse or type error encountered during decoding.
     Failed(super::Error),
 }
 
@@ -775,28 +771,26 @@ enum Seg<'a> {
 /// Structs with more fields than this find them through a hash index.
 const INDEXED_FIELDS: usize = 8;
 
-/// Decodes JSON text directly into values of a described type.
+/// Decodes JSON text into values described by a [`TypeDesc`].
 struct Decoder<'a, 'd, 's, 'h> {
     p: Parser<'a>,
     b: Build<'a, 's, 'h>,
     ids: crate::vm::bytecode::RtIds,
-    /// Location of the value being decoded, for error messages.
+    /// Current JSON path for diagnostic messages.
     path: Vec<Seg<'a>>,
-    /// Enclosing struct and enum types, to resolve recursive references.
+    /// Active enclosing struct and enum descriptors used to resolve recursive references.
     stack: Vec<&'d TypeDesc>,
-    /// The fields of the structs being decoded.
+    /// Decoded field values for in-progress structs.
     slots: Vec<Option<Value>>,
-    /// Field indexes of large structs, by struct instance id.
+    /// Field name lookup tables for large structs, keyed by struct instance ID.
     indexes: FxHashMap<u32, FxHashMap<&'d str, usize>>,
-    /// Staged sets and maps, filled once their elements are on the heap.
+    /// Staged sets and maps to populate after their elements are committed to the heap.
     fills: Vec<Fill>,
-    /// The functions that complete the decoded value (see [`Decoded::Pending`]),
-    /// in the order to run them.
+    /// Deferred thunks that evaluate computed field defaults and populate sets (see [`Decoded::Pending`]).
     thunks: Vec<Value>,
 }
 
-/// A staged set or map with the elements or entries to add to it once these
-/// are on the heap, which hashing them requires.
+/// Deferred elements or entries to insert into a staged set or map after heap allocation.
 enum Fill {
     Set(Value, Vec<Value>),
     Map(Value, Vec<(Value, Value)>),
@@ -969,10 +963,9 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                 })?;
                 let set = self.b.st.alloc(Obj::Set(Box::default()));
                 if self.thunks.len() == thunks {
-                    // The elements' buffer stays pending until the set is filled.
                     self.fills.push(Fill::Set(set, items));
                 } else {
-                    // Elements are hashed once their computed defaults are set.
+                    // Defer set insertion until element field defaults have been evaluated.
                     let items = self.b.list(items);
                     self.thunk(*fill, Box::new([set, items]))?;
                 }
@@ -1039,8 +1032,6 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
         }
     }
 
-    /// A struct: an object with its fields, in which a missing field takes
-    /// its default.
     fn decode_struct(&mut self, t: &'d TypeDesc, id: u32, def: u32, fields: &'d [FieldDesc]) -> PResult<Value> {
         self.expect_open(b'{', "object")?;
         self.stack.push(t);
@@ -1085,22 +1076,18 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
         }
         self.slots.truncate(base);
         let s = self.b.st.alloc(Obj::Struct(def, values.into_boxed_slice()));
-        // As in a struct literal, the defaults run in declaration order.
         for fill in computed {
             self.thunk(fill, Box::new([s]))?;
         }
         Ok(s)
     }
 
-    /// Adds a closure of `proto` with `captures` to the functions that
-    /// complete the decoded value.
     fn thunk(&mut self, proto: u32, captures: Box<[Value]>) -> PResult<()> {
         self.b.reserve()?;
         let c = self.b.st.alloc(Obj::Closure(proto, captures));
         Ok(self.b.push(&mut self.thunks, c)?)
     }
 
-    /// The value of constant `c`, charged as decoded values are.
     fn constant(&mut self, c: &ConstVal) -> PResult<Value> {
         self.b.meter.charge(1)?;
         self.b.reserve()?;
@@ -1154,7 +1141,6 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
         })
     }
 
-    /// A range: `{"start": a, "end": b}`, with `"inclusive": true` for `a..=b`.
     fn decode_range(&mut self) -> PResult<Value> {
         self.expect_open(b'{', "object")?;
         let (mut start, mut end, mut inclusive) = (None, None, false);
@@ -1444,7 +1430,7 @@ impl Encoder<'_> {
                     })?
                 }
                 Obj::Map(m) => self.object(m.live, m.entries.iter().flatten(), level, |e, &(k, v)| {
-                    e.string(&key_text(prog, heap, k)?)?;
+                    e.string(&format_map_key(prog, heap, k)?)?;
                     Ok(v)
                 })?,
                 Obj::Struct(def, fields) => {
@@ -1470,8 +1456,6 @@ impl Encoder<'_> {
         Ok(())
     }
 
-    /// An enum variant with a payload: `Json` values as their payload's
-    /// JSON, other variants as `{"Name": payload}`.
     fn variant(&mut self, id: u32, fields: &[Value], level: usize) -> Result<(), Ctl> {
         let Some(rt) = self.prog.variants.get(id as usize) else { return fail("invalid", "cannot encode this value as JSON") };
         if self.ids.has(id) {
@@ -1498,8 +1482,7 @@ impl Encoder<'_> {
     }
 }
 
-/// Floats print with a fraction or an exponent (`2.0`, `1e20`), so that they
-/// parse back as floats; non-finite numbers print as `null`.
+/// Formats finite floats with a fraction or exponent (`2.0`, `1e20`) and non-finite floats as `null`.
 fn write_float(out: &mut String, f: f64) {
     if f.is_finite() {
         let _ = write!(out, "{f:?}");
@@ -1508,16 +1491,13 @@ fn write_float(out: &mut String, f: f64) {
     }
 }
 
-/// `Json.Int(n)` or `Json.Float(n)` for a number `n`.
 fn json_number(st: &mut Staging, ids: &JsonIds, n: Value) -> Value {
     let id = if matches!(n, Value::Int(_)) { ids.int } else { ids.float };
     st.new_variant(id, &[n])
 }
 
-/// The JSON object key of map key `k`, written as serde_json writes keys:
-/// a string as itself; an int, duration (nanoseconds), or bool as its text;
-/// a payload-less variant as its name; a value type as its text.
-fn key_text<'v>(prog: &'v Program, heap: &'v Heap, k: Value) -> Result<Cow<'v, str>, Ctl> {
+/// Formats a map key `k` as a JSON object key string, or fails with kind `"invalid"` if `k` cannot be represented as a JSON key.
+fn format_map_key<'v>(prog: &'v Program, heap: &'v Heap, k: Value) -> Result<Cow<'v, str>, Ctl> {
     let bad = || fail("invalid", "a JSON object key must be a string, int, duration, bool, payload-less variant, or value type");
     Ok(match k {
         Value::Int(i) | Value::Dur(i) => Cow::Owned(i.to_string()),
@@ -1659,7 +1639,7 @@ impl<'a> Converter<'a, '_, '_> {
                         let (k, text) = match heap.get(k) {
                             Obj::Str(s) => (k, Cow::Borrowed(&**s)),
                             _ => {
-                                let key = key_text(prog, heap, k)?;
+                                let key = format_map_key(prog, heap, k)?;
                                 (self.b.st.new_str(&*key), key)
                             }
                         };

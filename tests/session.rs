@@ -185,7 +185,6 @@ fn reflect_descriptions_from_type_parameters_across_inputs() {
     r.ok(r#"import json
 struct P { x: int }
 fn all<reflect T: Encode>(s: str) -> Result<[T]> { json.decode(s) }"#);
-    // The templates of a failed input are removed with it.
     r.compile_error(
         r#"fn opt<reflect T: Encode>(s: str) -> Result<T?> { json.decode(s) }
 let o: P? = opt("null")?

@@ -111,7 +111,6 @@ pub fn render_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Valu
     let mut work = vec![Work::Val(v, 0, debug)];
     let mut scratch = Scratch::new();
     let mut charged = out.len();
-    // An `Error` displays as `kind: message`.
     let error_def = prog.struct_types.get(&<crate::stdlib::Error as crate::NamedType>::rust_type()).copied();
     while let Some(w) = work.pop() {
         if out.len() - charged >= BYTES_PER_UNIT {

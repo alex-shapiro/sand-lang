@@ -686,7 +686,7 @@ impl Checker {
                 .filter(|f| self.visible(def.module, f.is_pub))
                 .map(|f| {
                     let var = if f.mutable { "var " } else { "" };
-                    let default = self.default_text(d, f);
+                    let default = self.format_field_default(d, f);
                     (
                         format!("{}{var}{}: {}{default}", self.pub_mark(def.module, f.is_pub), self.name(f.name), self.show(f.ty)),
                         f.doc.clone(),
@@ -951,7 +951,6 @@ impl Checker {
         s
     }
 
-    /// `T: Ord + Describe`, or `reflect T: ...` for a `reflect` type parameter.
     fn param_text(&self, p: ParamId) -> String {
         let info = &self.params[p as usize];
         let name = format!("{}{}", if info.reflect { "reflect " } else { "" }, self.name(info.name));
@@ -974,20 +973,19 @@ impl Checker {
         bounds.join(" + ")
     }
 
-    /// ` = <default>` for field `f` of struct `d` if it has a default, or
-    /// `""`: the source text of a Sand default, or the text of the constant
-    /// default of a Rust-bound field, cut after [`SHOWN_CHARS`] characters.
-    pub(super) fn default_text(&self, d: TypeDefId, f: &FieldDef) -> String {
+    /// Formats the ` = <default>` suffix for field `f` of struct `d`, or returns
+    /// an empty string if `f` has no default.
+    pub(super) fn format_field_default(&self, d: TypeDefId, f: &FieldDef) -> String {
         match (f.default, &f.const_default) {
-            (Some(_), Some(c)) if self.rust_type(d).is_some() => format!(" = {}", shorten(self.const_text(c))),
+            (Some(_), Some(c)) if self.rust_type(d).is_some() => format!(" = {}", truncate_expr(self.format_const(c))),
             (Some(h), _) => format!(" = {}", self.source_text(self.fns[h as usize].span)),
             (None, _) => String::new(),
         }
     }
 
-    /// The Sand source text of constant `c`.
-    fn const_text(&self, c: &ConstVal) -> String {
-        let list = |xs: &[ConstVal]| xs.iter().map(|x| self.const_text(x)).collect::<Vec<_>>().join(", ");
+    /// Formats constant `c` as Sand source syntax.
+    fn format_const(&self, c: &ConstVal) -> String {
+        let list = |xs: &[ConstVal]| xs.iter().map(|x| self.format_const(x)).collect::<Vec<_>>().join(", ");
         match c {
             ConstVal::Unit => "()".into(),
             ConstVal::Bool(b) => b.to_string(),
@@ -1011,7 +1009,7 @@ impl Checker {
             ConstVal::Set(xs) => format!("set([{}])", list(xs)),
             ConstVal::Map(kvs) if kvs.is_empty() => "[:]".into(),
             ConstVal::Map(kvs) => {
-                let entries: Vec<String> = kvs.iter().map(|(k, v)| format!("{}: {}", self.const_text(k), self.const_text(v))).collect();
+                let entries: Vec<String> = kvs.iter().map(|(k, v)| format!("{}: {}", self.format_const(k), self.format_const(v))).collect();
                 format!("[{}]", entries.join(", "))
             }
             ConstVal::Variant(id, payload) => {
@@ -1025,9 +1023,9 @@ impl Checker {
                 if !payload.is_empty() {
                     let parts: Vec<String> = match &v.field_names {
                         Some(names) => {
-                            names.iter().zip(payload).map(|(&n, x)| format!("{}: {}", self.name(n), self.const_text(x))).collect()
+                            names.iter().zip(payload).map(|(&n, x)| format!("{}: {}", self.name(n), self.format_const(x))).collect()
                         }
-                        None => payload.iter().map(|x| self.const_text(x)).collect(),
+                        None => payload.iter().map(|x| self.format_const(x)).collect(),
                     };
                     out.push_str(&format!("({})", parts.join(", ")));
                 }
@@ -1036,7 +1034,7 @@ impl Checker {
             ConstVal::Struct(d, fields) => {
                 let def = &self.types[*d as usize];
                 let parts: Vec<String> =
-                    def.fields().iter().zip(fields).map(|(f, x)| format!("{}: {}", self.name(f.name), self.const_text(x))).collect();
+                    def.fields().iter().zip(fields).map(|(f, x)| format!("{}: {}", self.name(f.name), self.format_const(x))).collect();
                 match parts.is_empty() {
                     true => format!("{} {{}}", self.name(def.name)),
                     false => format!("{} {{ {} }}", self.name(def.name), parts.join(", ")),
@@ -1048,16 +1046,15 @@ impl Checker {
     pub(super) fn source_text(&self, span: Span) -> String {
         let file = self.sources.get(&span.file);
         let text = file.and_then(|f| f.text.get(span.lo as usize..span.hi as usize)).unwrap_or("...");
-        shorten(text.split_whitespace().collect::<Vec<_>>().join(" "))
+        truncate_expr(text.split_whitespace().collect::<Vec<_>>().join(" "))
     }
 }
 
-/// The most characters of a default or an expression that `help` shows.
-const SHOWN_CHARS: usize = 60;
+const MAX_EXPR_CHARS: usize = 60;
 
-/// `text` cut after [`SHOWN_CHARS`] characters, ending in `...` if cut.
-fn shorten(text: String) -> String {
-    let short = crate::stdlib::truncate(&text, SHOWN_CHARS);
+/// Truncates `text` to [`MAX_EXPR_CHARS`] characters and appends `...` if truncated.
+fn truncate_expr(text: String) -> String {
+    let short = crate::stdlib::truncate(&text, MAX_EXPR_CHARS);
     if short.len() < text.len() { format!("{short}...") } else { text }
 }
 

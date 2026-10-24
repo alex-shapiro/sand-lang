@@ -1,9 +1,3 @@
-//! Property tests for the type arguments of `json.decode`: rejected at
-//! compile time unless `Encode`, decoded with run-time errors only for map
-//! keys that JSON object keys cannot hold, and decoded the same through a
-//! function that builds them from its `reflect` type parameter; and the
-//! constant field defaults that fill missing fields.
-
 use super::{check, int, int_lit, str_lit};
 use proptest::prelude::*;
 use sandlang::{Config, Engine, Error, MemorySink, Policy};
@@ -31,7 +25,6 @@ enum Ty {
     Tuple(Vec<Ty>),
     Wrap(Box<Ty>),
     Tree(Box<Ty>),
-    /// The type parameter `T` of a function.
     Param,
 }
 
@@ -63,7 +56,6 @@ impl Ty {
         }
     }
 
-    /// `self` with `arg` for `Ty::Param`.
     fn subst(&self, arg: &Ty) -> Ty {
         let b = |t: &Ty| Box::new(t.subst(arg));
         match self {
@@ -89,7 +81,6 @@ impl Ty {
         }
     }
 
-    /// Whether the type satisfies `Encode`, which `json.decode` requires.
     fn encodable(&self) -> bool {
         match self {
             Ty::Fn | Ty::Task => false,
@@ -100,8 +91,6 @@ impl Ty {
         }
     }
 
-    /// Whether every map key type in the type is one that JSON object keys
-    /// hold (`Keyed` has a map with `Keyed` keys).
     fn keys_decodable(&self) -> bool {
         match self {
             Ty::Keyed => false,
@@ -125,8 +114,6 @@ fn ty() -> impl Strategy<Value = Ty> {
     ty_with(0, 1)
 }
 
-/// Types in which `Ty::Param` and the types that are not `Encode` have the
-/// weights `param` and `bad` among the leaves.
 fn ty_with(param: u32, bad: u32) -> impl Strategy<Value = Ty> {
     let leaf = prop_oneof![
         6 => prop_oneof![Just(Ty::Int), Just(Ty::Float), Just(Ty::Bool), Just(Ty::Str), Just(Ty::Bytes), Just(Ty::Unit), Just(Ty::Duration)],
@@ -148,7 +135,6 @@ fn ty_with(param: u32, bad: u32) -> impl Strategy<Value = Ty> {
     })
 }
 
-/// The declarations that the types of `ty` refer to.
 const TYPES: &str = "enum Unit { A, B }\nstruct Rec { a: int, b: str? }\nstruct Keyed { m: [Keyed: int]? }\nstruct Wrap<T> { v: T }\n\
                      struct Tree<T> { v: T, kids: [Tree<T>] = [] }";
 
@@ -202,12 +188,10 @@ proptest! {
     }
 }
 
-/// Types that contain `Ty::Param`.
 fn context() -> impl Strategy<Value = Ty> {
     ty_with(10, 0).prop_map(|t| if t.has_param() { t } else { Ty::Tuple(vec![t, Ty::Param]) })
 }
 
-/// Deterministic choices for [`json_text`].
 struct Rng(u64);
 
 impl Rng {
@@ -219,8 +203,6 @@ impl Rng {
     }
 }
 
-/// A JSON text for a value of type `t`, except that one in `1 / wrong` of
-/// the values in it is of another type.
 fn json_text(t: &Ty, rng: &mut Rng, depth: u32, wrong: u64) -> String {
     if rng.below(wrong) == 0 {
         return ["7", "\"zzz\"", "null", "[]", "{}"][rng.below(5) as usize].into();
@@ -302,8 +284,6 @@ proptest! {
     }
 }
 
-/// A field type and a constant default expression of that type, built from
-/// literals and constructors.
 fn constant_default() -> impl Strategy<Value = (String, String)> {
     let finite = any::<f64>().prop_filter("finite", |f| f.is_finite());
     let leaf = prop_oneof![
@@ -328,7 +308,6 @@ fn constant_default() -> impl Strategy<Value = (String, String)> {
         }),
         prop::sample::select(vec!["Mode.Read", "Mode.Write"]).prop_map(|v| ("Mode".to_string(), v.to_string())),
     ];
-    // Negating twice keeps a number constant.
     let leaf = (leaf, any::<bool>()).prop_map(|((ty, e), twice)| match ty.as_str() {
         "int" | "float" | "duration" if twice => (ty, format!("-(-{e})")),
         _ => (ty, e),
@@ -349,7 +328,6 @@ fn constant_default() -> impl Strategy<Value = (String, String)> {
     })
 }
 
-/// The declarations that the types of `constant_default` refer to.
 const CONSTANT_TYPES: &str = "enum Mode { Read, Write }\nenum Tree<T> { Leaf(T), Pair(a: T, b: T), Empty }\n\
                               struct Holder<T> { v: T, w: int = 7, tags: [str] = [\"t\"] }\nfn id<T>(x: T) -> T { x }";
 
@@ -368,9 +346,6 @@ proptest! {
 
     #[test]
     fn json_decode_runs_computed_defaults_as_a_struct_literal_does(fields in prop::collection::vec((constant_default(), any::<bool>()), 1..6)) {
-        // A call makes a default computed, even if the value it gives is
-        // constant; `note` records the order of the calls. Encodings are
-        // compared, as `Some(())` and `None` both encode as `null`.
         let decls: Vec<String> = fields
             .iter()
             .enumerate()
@@ -390,8 +365,6 @@ proptest! {
     }
 }
 
-/// The width and depth of a list default whose parts stay below 2^18, so
-/// that some exceed the limits of constants and some do not.
 fn list_shape() -> impl Strategy<Value = (usize, usize)> {
     (1usize..4).prop_flat_map(|width| {
         let max_depth = match width {
@@ -408,10 +381,6 @@ proptest! {
 
     #[test]
     fn json_decode_fills_defaults_beyond_the_limits_of_constants((width, depth) in list_shape(), chain in 1usize..80) {
-        // Locals repeat a list `width` times at each of `depth` levels, and
-        // each struct of the chain nests the default of the next one level
-        // deeper: defaults within the limits of constants are built
-        // directly, the others run, with the same value.
         let mut lets = vec![format!("let a0 = [{}]", vec!["0"; width].join(", "))];
         let mut ty = "[int]".to_string();
         for i in 1..depth {

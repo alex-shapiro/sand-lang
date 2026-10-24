@@ -27,9 +27,9 @@ pub enum Type {
     /// type parameters before the function's own type parameters) and its
     /// required [`Bounds`].
     Param(u8, Bounds),
-    /// Runtime type description for the `reflect` type parameter at index `0..`.
+    /// Runtime type descriptor for the `reflect` type parameter at index `0..`.
     Reflect(u8),
-    /// Evidence that the type parameter at index `0..` is `Num` (see [`Num`]).
+    /// `Num` trait dictionary for the type parameter at index `0..` (see [`Num`]).
     Num(u8),
     /// Nominal type declared in a module.
     Named(Named),
@@ -50,8 +50,7 @@ impl Type {
         Type::Named(Named { module, name, args, rust: None })
     }
 
-    /// Constructs a reference to the Sand type bound to the Rust type `T`,
-    /// with the type arguments `args`.
+    /// Constructs a reference to the Sand type bound to `T` with type arguments `args`.
     pub fn bound<T: super::NamedType>(args: Vec<Type>) -> Type {
         Type::Named(Named { module: T::MODULE, name: T::NAME, args, rust: Some(T::rust_type()) })
     }
@@ -287,8 +286,9 @@ fn_type!(A, B, C);
 pub enum Never {}
 
 /// Built-in trait bounds (`Eq`, `Ord`, `Hash`, `Num`, `Encode`) required on a
-/// generic type parameter of a native function. `Ord`, `Hash`, and `Num` imply
-/// `Eq`, and `Num` implies `Ord` and `Encode`.
+/// generic type parameter of a native function.
+///
+/// `Ord`, `Hash`, and `Num` imply `Eq`, and `Num` implies `Ord` and `Encode`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Bounds {
     pub eq: bool,
@@ -312,13 +312,11 @@ impl Bounds {
         }
     }
 
-    /// Returns the bound names required by `self`, omitting the bounds that
-    /// the others imply.
+    /// Returns the required bound names, omitting bounds that are implied by other bounds in `self`.
     pub fn names(self) -> Vec<&'static str> {
         crate::types::Bound::names(&self.list())
     }
 
-    /// The bounds in `self`.
     pub(crate) fn list(self) -> Vec<crate::types::Bound> {
         use crate::types::Bound;
         let all =
@@ -358,10 +356,9 @@ pub mod bound {
         Ord: ord,
         /// Requires `Hash` (map keys and set elements).
         Hash: hash,
-        /// Requires `Num` (`int` or `float`). A native function that needs the
-        /// `Num` evidence takes it as [`Num`](super::super::Num).
+        /// Requires `Num` (`int` or `float`). Pass [`Num`](super::super::Num) as a parameter to access the `Num` dictionary at runtime.
         Num: num,
-        /// Requires `Encode` (no functions, tasks, channels, or native objects).
+        /// Requires `Encode` (excludes functions, tasks, channels, and native objects).
         Encode: encode,
     }
 
@@ -410,13 +407,12 @@ impl<const N: u8, B: bound::ParamBounds> SandType for Param<N, B> {
     }
 }
 
-/// Evidence that the `N`-th generic type parameter of a `native fn` is `Num`
-/// (`int` or `float`), declared as `T: Num`.
+/// Runtime dictionary for the `N`-th generic type parameter bounded by `Num`
+/// (`int` or `float`).
 ///
-/// A Rust function can take `Num<N>` for each type parameter that its
-/// `native fn` declaration bounds by `Num`, in the order of the type
-/// parameters, after its [`Reflect`] parameters and before the other
-/// parameters.
+/// A Rust function can accept `Num<N>` for any type parameter declared with a
+/// `T: Num` bound. Place `Num<N>` parameters in ascending order of `N`, after
+/// any [`Reflect`] parameters and before regular value parameters.
 pub struct Num<const N: u8>(Value);
 
 impl<const N: u8> Num<N> {
@@ -449,7 +445,7 @@ impl<const N: u8> SandType for Num<N> {
     }
 }
 
-/// Runtime type description for the `N`-th `reflect` type parameter of a
+/// Runtime type descriptor for the `N`-th `reflect` type parameter of a
 /// `native fn` (see [`Type::Reflect`]).
 #[derive(Clone, Copy)]
 pub struct Reflect<const N: u8>(Value);

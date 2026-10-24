@@ -84,8 +84,7 @@ pub const POLL_INTERVAL: u64 = 1 << 16;
 /// compiler's memory to roughly a gigabyte.
 pub const DEFAULT_COMPILE_FUEL: u64 = 10_000_000;
 
-/// Bytes of text (`help` output, copies of constant strings) that the
-/// compiler builds per fuel unit.
+/// Number of generated text bytes charged per fuel unit.
 pub const TEXT_BYTES_PER_UNIT: u64 = 16;
 
 /// Fuel per byte of source in the default budget of the formatter and the

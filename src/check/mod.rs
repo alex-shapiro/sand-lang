@@ -190,28 +190,19 @@ pub struct FnInfo {
     pub trait_of: Option<TraitId>,
 }
 
-/// The constant defaults that `Checker::helper_const` has found.
 #[derive(Default)]
-struct ConstMemo {
-    /// The constant (or `None`) that each default helper of the module being
-    /// checked returns.
-    done: FxHashMap<FnId, Option<ConstVal>>,
-    /// The number of helpers being folded, each inside the one before.
-    nesting: usize,
-    /// Whether a helper was not folded because `nesting` reached
-    /// [`MAX_CONST_DEPTH`].
-    cut: bool,
+struct ConstFoldState {
+    cache: FxHashMap<FnId, Option<ConstVal>>,
+    depth: usize,
+    depth_exceeded: bool,
 }
 
-/// The fields or payloads of a Rust-bound struct or enum.
 enum BoundMembers {
     Struct(&'static [StructField], Arc<[Option<Constant>]>),
     Enum(&'static [EnumVariant]),
 }
 
-/// Where the syntax of a function body is in the items of its module.
-/// AST is borrowed while the module is checked. `BoundDefault(i)` has no
-/// syntax: it is the constant default of field `i` of a Rust-bound struct.
+/// Location of a function body in the module AST, or a synthetic body kind.
 #[derive(Clone, Copy, Debug)]
 pub enum FnDeclRef {
     Fn(DeclPath),
@@ -385,13 +376,12 @@ impl CheckedProgram {
         self.syms.str(s)
     }
 
-    /// The Rust type bound to type definition `d`, if any.
+    /// Returns the Rust `TypeId` bound to type definition `d`, if any.
     pub fn rust_type(&self, d: TypeDefId) -> Option<std::any::TypeId> {
         rust_type(&self.types[d as usize], &self.enum_bindings, &self.struct_bindings, d)
     }
 }
 
-/// The Rust type bound to type definition `d` (`def`), if any.
 fn rust_type(
     def: &TypeDef,
     enum_bindings: &PVec<(std::any::TypeId, u32)>,
@@ -515,11 +505,11 @@ pub(crate) struct FnState {
     /// (see `fuse.rs`, which re-owns the locals of inlined lambdas).
     pub lambda_first_local: Vec<LocalId>,
     pub obligations: Vec<(TypeId, Bound, Span)>,
-    /// The `reflect` type arguments of calls and function values (`what`),
-    /// checked once the function's types are inferred.
+    /// `(type, span, call_kind)` triples for `reflect` type arguments, checked
+    /// after type inference completes.
     pub reflect_checks: Vec<(TypeId, Span, &'static str)>,
-    /// The hidden parameters holding the descriptions of the function's
-    /// `reflect` type parameters.
+    /// Maps each `reflect` type parameter of the current function to the hidden
+    /// local that holds its runtime description.
     pub reflect_locals: Vec<(ParamId, LocalId)>,
     pub infer_checks: Vec<(TypeId, Span)>,
     /// Inside a top-level statement of a module (lets become globals).
@@ -1364,7 +1354,7 @@ impl Checker {
             }
             i += 1;
         }
-        self.find_const_defaults(first_fn);
+        self.fold_field_defaults(first_fn);
         // 7. Tests (those of imported modules are type checked, not run).
         for (idx, item) in items.iter().enumerate() {
             if let ItemKind::Test(t) = &item.kind {
@@ -1475,7 +1465,6 @@ impl Checker {
     fn declare_generics(&mut self, gs: &[ast::GenericParam]) -> Vec<ParamId> {
         let out = self.declare_params(gs, &[], None);
         for (g, &p) in gs.iter().zip(&out) {
-            // `Num` evidence is passed to the type's methods, not stored.
             let num = self.num_trait;
             self.params[p as usize].traits.retain(|t| Some(t.trait_id) != num);
             if !self.params[p as usize].traits.is_empty() {
@@ -1669,8 +1658,8 @@ impl Checker {
         members
     }
 
-    /// Resolves the field or payload types of a bound type declared by
-    /// `declare_bound_types`, once all types of the module are declared.
+    /// Resolves field or payload types for a Rust-bound type after all types in
+    /// the module are declared.
     fn resolve_bound_members(&mut self, id: TypeDefId, members: BoundMembers) {
         let span = self.types[id as usize].span;
         let qual = format!("{}.{}", self.name(self.types[id as usize].module_name), self.name(self.types[id as usize].name));
@@ -1688,8 +1677,7 @@ impl Checker {
                     }
                     let doc = Some(f.doc).filter(|d| !d.is_empty()).map(Arc::from);
                     let name = self.sym(f.name);
-                    let const_default = default.as_ref().and_then(|c| self.bound_const(c)).map(Arc::new);
-                    // As for a Sand default, struct literals call a helper that builds the default.
+                    let const_default = default.as_ref().and_then(|c| self.resolve_bound_const(c)).map(Arc::new);
                     let helper = const_default.is_some().then(|| {
                         let helper_name = self.sym(&format!("{}.{}", self.name(self.types[id as usize].name), f.name));
                         self.add_fn(FnInfo {
@@ -1758,10 +1746,8 @@ impl Checker {
         None
     }
 
-    /// The value of the Rust field default `c`. A variant or struct in `c`
-    /// has a type in the field's type, so if it is not registered, resolving
-    /// the field's type reported that.
-    fn bound_const(&self, c: &Constant) -> Option<ConstVal> {
+    /// Resolves a Rust field default `c` into a [`ConstVal`].
+    fn resolve_bound_const(&self, c: &Constant) -> Option<ConstVal> {
         let variant = |v: &RustVariant| match v {
             RustVariant::None => Some(self.none_rt()),
             RustVariant::Some => Some(self.some_rt()),
@@ -1774,16 +1760,14 @@ impl Checker {
         c.0.resolve(&variant, &def)
     }
 
-    /// Finds the constant defaults of the fields of the structs that the
-    /// module being checked declares, once the bodies of their default
-    /// helpers (from `first_fn` on) are checked.
-    fn find_const_defaults(&mut self, first_fn: usize) {
-        let mut memo = ConstMemo::default();
+    /// Evaluates constant field defaults for structs declared in the current module.
+    fn fold_field_defaults(&mut self, first_fn: usize) {
+        let mut state = ConstFoldState::default();
         for f in first_fn..self.fns.len() {
             if let Some(FnDeclRef::FieldDefault { field, .. }) = self.fns[f].decl
                 && let Some(Ty::Named(d, _)) = self.fns[f].self_ty.map(|t| self.arena.get(t))
             {
-                let c = self.helper_const(f as FnId, &mut memo).map(Arc::new);
+                let c = self.fold_default_helper(f as FnId, &mut state).map(Arc::new);
                 if let TypeDefKind::Struct { fields } = &mut self.types[d as usize].kind {
                     fields[field as usize].const_default = c;
                 }
@@ -1791,63 +1775,55 @@ impl Checker {
         }
     }
 
-    /// The constant that the field default helper `f` returns, if any.
-    fn helper_const(&self, f: FnId, memo: &mut ConstMemo) -> Option<ConstVal> {
+    /// Evaluates the field default helper `f` as a constant, if possible.
+    fn fold_default_helper(&self, f: FnId, state: &mut ConstFoldState) -> Option<ConstVal> {
         let fi = &self.fns[f as usize];
         if !matches!(fi.kind, FnKind::DefaultHelper) {
             return None;
         }
         let Ty::Named(d, _) = self.arena.get(fi.self_ty?) else { return None };
         let field = self.types[d as usize].fields().iter().find(|x| x.default == Some(f))?;
-        // The constant defaults of Rust-bound structs, of the structs of
-        // earlier modules, and of the fields found before are known.
         if let Some(c) = field.const_default.as_deref() {
-            return self.charge_copy(c).then(|| c.clone());
+            return self.charge_const(c).then(|| c.clone());
         }
         if fi.module != self.cur_mod {
             return None;
         }
-        if let Some(c) = memo.done.get(&f) {
-            return c.as_ref().filter(|c| self.charge_copy(c)).cloned();
+        if let Some(c) = state.cache.get(&f) {
+            return c.as_ref().filter(|c| self.charge_const(c)).cloned();
         }
-        // A struct literal nests the defaults that it omits one level deeper,
-        // so helpers nest about as deep as the constants they build.
-        if memo.nesting == MAX_CONST_DEPTH {
-            memo.cut = true;
+        if state.depth == MAX_CONST_DEPTH {
+            state.depth_exceeded = true;
             return None;
         }
-        // A default that contains itself is not a constant.
-        memo.done.insert(f, None);
-        let outer_cut = std::mem::replace(&mut memo.cut, false);
-        memo.nesting += 1;
-        let c = self.bodies.get(f).and_then(|b| self.const_of(&b.body, &mut Vec::new(), memo)).filter(|c| self.charge_copy(c));
-        memo.nesting -= 1;
-        // A cut depends on the helpers outside `f`, so a result that was cut
-        // is not kept: alone, `f` can still be a constant.
-        match memo.cut {
-            true => memo.done.remove(&f),
-            false => memo.done.insert(f, c.clone()),
+        // Insert `None` before recursing to reject cyclic field defaults.
+        state.cache.insert(f, None);
+        let outer_exceeded = std::mem::replace(&mut state.depth_exceeded, false);
+        state.depth += 1;
+        let c = self.bodies.get(f).and_then(|b| self.fold_const_expr(&b.body, &mut Vec::new(), state)).filter(|c| self.charge_const(c));
+        state.depth -= 1;
+        // Do not cache `None` if a nested helper hit `MAX_CONST_DEPTH`, because
+        // `f` may still fold within the depth limit when evaluated directly.
+        match state.depth_exceeded {
+            true => state.cache.remove(&f),
+            false => state.cache.insert(f, c.clone()),
         };
-        memo.cut |= outer_cut;
+        state.depth_exceeded |= outer_exceeded;
         c
     }
 
-    /// Charges the compile budget for a copy of `c`: a unit per part, and
-    /// per [`TEXT_BYTES_PER_UNIT`](budget::TEXT_BYTES_PER_UNIT) bytes of its
-    /// strings. Returns `false` if the budget is spent or `c` is too large to
-    /// be a constant ([`ConstVal::measure`]).
-    fn charge_copy(&self, c: &ConstVal) -> bool {
+    /// Charges the compile budget for `c` and returns `false` if the budget is
+    /// exhausted or `c` exceeds [`ConstVal::measure`] limits.
+    fn charge_const(&self, c: &ConstVal) -> bool {
         c.measure().is_some_and(|(parts, bytes)| self.budget.charge(parts as u64 + bytes as u64 / budget::TEXT_BYTES_PER_UNIT))
     }
 
-    /// The value of `h` if it is a constant: built only from literals, ranges
-    /// of ints, constructors, and the defaults of struct fields. `env` holds
-    /// the constants of the locals of the enclosing blocks.
-    fn const_of(&self, h: &HExpr, env: &mut Vec<(LocalId, ConstVal)>, memo: &mut ConstMemo) -> Option<ConstVal> {
+    /// Evaluates `h` as a compile-time constant, if possible.
+    fn fold_const_expr(&self, h: &HExpr, env: &mut Vec<(LocalId, ConstVal)>, state: &mut ConstFoldState) -> Option<ConstVal> {
         if !self.budget.charge(1) {
             return None;
         }
-        let mut all = |xs: &[HExpr]| xs.iter().map(|x| self.const_of(x, env, memo)).collect::<Option<Vec<_>>>();
+        let mut all = |xs: &[HExpr]| xs.iter().map(|x| self.fold_const_expr(x, env, state)).collect::<Option<Vec<_>>>();
         Some(match &h.kind {
             HKind::Unit => ConstVal::Unit,
             HKind::Bool(b) => ConstVal::Bool(*b),
@@ -1862,20 +1838,24 @@ impl Checker {
             HKind::MakeVariant { rt_id, args } => ConstVal::Variant(*rt_id, all(args)?),
             HKind::MakeStruct { def, fields } => ConstVal::Struct(*def, all(fields)?),
             HKind::Map(kvs) => ConstVal::Map(
-                kvs.iter().map(|(k, v)| Some((self.const_of(k, env, memo)?, self.const_of(v, env, memo)?))).collect::<Option<_>>()?,
+                kvs.iter()
+                    .map(|(k, v)| Some((self.fold_const_expr(k, env, state)?, self.fold_const_expr(v, env, state)?)))
+                    .collect::<Option<_>>()?,
             ),
             HKind::CallNative { native, args } if Some(*native) == self.prelude_native("set") => match args.as_slice() {
-                [HArg::Expr(xs)] => match self.const_of(xs, env, memo)? {
+                [HArg::Expr(xs)] => match self.fold_const_expr(xs, env, state)? {
                     ConstVal::List(xs) => ConstVal::Set(xs),
                     _ => return None,
                 },
                 _ => return None,
             },
-            HKind::Range { start, end, inclusive } => match (self.const_of(start, env, memo)?, self.const_of(end, env, memo)?) {
-                (ConstVal::Int(a), ConstVal::Int(b)) => ConstVal::Range(a, b, *inclusive),
-                _ => return None,
-            },
-            HKind::Unary { op: HUnOp::Neg, e } => match self.const_of(e, env, memo)? {
+            HKind::Range { start, end, inclusive } => {
+                match (self.fold_const_expr(start, env, state)?, self.fold_const_expr(end, env, state)?) {
+                    (ConstVal::Int(a), ConstVal::Int(b)) => ConstVal::Range(a, b, *inclusive),
+                    _ => return None,
+                }
+            }
+            HKind::Unary { op: HUnOp::Neg, e } => match self.fold_const_expr(e, env, state)? {
                 ConstVal::Int(i) => ConstVal::Int(i.checked_neg()?),
                 ConstVal::Float(f) => ConstVal::Float(-f),
                 ConstVal::Dur(d) => ConstVal::Dur(d.checked_neg()?),
@@ -1883,18 +1863,16 @@ impl Checker {
             },
             HKind::Local(l) => {
                 let c = &env.iter().rev().find(|(x, _)| x == l)?.1;
-                if !self.charge_copy(c) {
+                if !self.charge_const(c) {
                     return None;
                 }
                 c.clone()
             }
-            HKind::Field { obj, index } => match self.const_of(obj, env, memo)? {
+            HKind::Field { obj, index } => match self.fold_const_expr(obj, env, state)? {
                 ConstVal::Struct(_, mut fields) if (*index as usize) < fields.len() => fields.swap_remove(*index as usize),
                 _ => return None,
             },
-            // The default of a field that a struct literal omits.
-            HKind::Call { func, args } if args.is_empty() => self.helper_const(*func, memo)?,
-            // A struct literal binds the values of its fields to locals first.
+            HKind::Call { func, args } if args.is_empty() => self.fold_default_helper(*func, state)?,
             HKind::Block(stmts) => {
                 let (last, lets) = stmts.split_last()?;
                 let mark = env.len();
@@ -1903,13 +1881,13 @@ impl Checker {
                         env.truncate(mark);
                         return None;
                     };
-                    let Some(c) = self.const_of(init, env, memo) else {
+                    let Some(c) = self.fold_const_expr(init, env, state) else {
                         env.truncate(mark);
                         return None;
                     };
                     env.push((*l, c));
                 }
-                let c = self.const_of(last, env, memo);
+                let c = self.fold_const_expr(last, env, state);
                 env.truncate(mark);
                 c?
             }
@@ -2149,7 +2127,8 @@ impl Checker {
 
     /// Verifies that a `native fn` declaration matches its registered Rust
     /// signature and declares all required type parameter bounds. Returns
-    /// the type parameters whose `Num` evidence the Rust function takes.
+    /// the type parameter indices for which the Rust function accepts `Num`
+    /// evidence.
     fn check_native_signature(
         &mut self,
         f: &ast::FnDecl,
@@ -2161,9 +2140,6 @@ impl Checker {
     ) -> Vec<u8> {
         let span = f.name.span;
         let owner = format!("the Rust function of native `{key}`");
-        // The Rust function takes the runtime arguments that precede the
-        // declared ones: type descriptions, then the `Num` evidence of some
-        // of the type parameters bounded by `Num`, in order.
         let reflect: Vec<Type> =
             generics.iter().enumerate().filter(|(_, p)| self.params[**p as usize].reflect).map(|(i, _)| Type::Reflect(i as u8)).collect();
         let num: Vec<u8> = (0..generics.len() as u8)
@@ -2529,7 +2505,6 @@ impl Checker {
             "members" => Some(Intrinsic::Members),
             _ => None,
         };
-        // The type parameters whose `Num` evidence a native takes.
         let mut num_evidence = Vec::new();
         let kind = if let Some(i) = intrinsic.filter(|_| f.is_native && owner.is_none() && Some(self.cur_mod) == self.prelude) {
             FnKind::Intrinsic(i)
@@ -2959,12 +2934,8 @@ impl Checker {
             }
             if self.arena.has_vars(z) {
                 self.infer_error(sp, format!("cannot infer type for this {what}; add a type annotation"));
-            } else if let Some(p) = self
-                .arena
-                .params_of(z)
-                .into_iter()
-                // The `reflect` type parameters of local functions are reported where they are declared.
-                .find(|&p| !self.params[p as usize].reflect && self.reflect_param_local(p).is_none())
+            } else if let Some(p) =
+                self.arena.params_of(z).into_iter().find(|&p| !self.params[p as usize].reflect && self.reflect_param_local(p).is_none())
             {
                 let msg = format!(
                     "this {what} needs a description of `{}` at run time, so `{}` must be a `reflect` type parameter of this function",

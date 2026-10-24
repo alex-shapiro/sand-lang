@@ -615,7 +615,6 @@ impl Checker {
                     self.error(g.name.span, "local functions cannot have trait bounds; declare the function at the top level");
                     self.params[p as usize].traits.clear();
                 }
-                // A local function is a closure, which takes no hidden arguments.
                 if g.reflect {
                     self.error(g.name.span, "local functions cannot have `reflect` type parameters; declare the function at the top level");
                 }
@@ -1101,7 +1100,6 @@ impl Checker {
     fn fn_value(&mut self, f: FnId, span: Span) -> HExpr {
         let fi = &self.fns[f as usize];
         if !fi.dicts.is_empty() || fi.generics.iter().any(|&p| self.params[p as usize].reflect) {
-            // Partially apply the hidden arguments.
             return self.wrapper_value(f, &[], span);
         }
         let inst = self.instantiate_fn_with(f, span, &[]);
@@ -1516,7 +1514,6 @@ impl Checker {
         let Some(mut hargs) = self.bind_args(Callee::Fn(f), &ptys, recv, args, span) else {
             return mk(HKind::Error, ret, span);
         };
-        // Hidden arguments are passed first; default helpers receive them too.
         let mut hidden = self.hidden_args(f, &fresh, &dicts, "call", &|_, _| false, span);
         if !hidden.is_empty() {
             let k = hidden.len();
@@ -1535,7 +1532,7 @@ impl Checker {
         }
     }
 
-    /// The expression of constant `c`, of type `ty`.
+    /// Builds an HIR expression for constant `c` with type `ty`.
     pub(super) fn const_expr(&mut self, c: &ConstVal, ty: TypeId, span: Span) -> HExpr {
         let all = |s: &mut Self, xs: &[ConstVal], tys: &[TypeId]| -> Vec<HExpr> {
             xs.iter().enumerate().map(|(i, x)| s.const_expr(x, tys.get(i).copied().unwrap_or(TypeId::ERROR), span)).collect()

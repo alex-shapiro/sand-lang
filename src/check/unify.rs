@@ -166,33 +166,27 @@ impl Checker {
         let ty = self.rty(t);
         match ty {
             Ty::Var(_) => None,
-            Ty::List(x) | Ty::Set(x) if structural(ty, b) => self.satisfies(x, b),
-            Ty::Map(k, v) if structural(ty, b) => all(&mut [k, v].into_iter()),
-            Ty::Tuple(l) if structural(ty, b) => all(&mut self.arena.list(l).iter().copied()),
+            Ty::List(x) | Ty::Set(x) if has_structural_bound(ty, b) => self.satisfies(x, b),
+            Ty::Map(k, v) if has_structural_bound(ty, b) => all(&mut [k, v].into_iter()),
+            Ty::Tuple(l) if has_structural_bound(ty, b) => all(&mut self.arena.list(l).iter().copied()),
             Ty::Param(p) => Some(self.params[p as usize].has_bound(b)),
             Ty::Named(d, l) => match derived_index(b).and_then(|k| self.derived.get(d as usize).map(|x| &x[k])) {
                 Some(Derived::Never) => Some(false),
                 Some(Derived::Needs(ps)) => all(&mut ps.iter().map(|&i| self.arena.elem(l, i as usize))),
-                // `Num` and `Add`; the bounds of a type still being declared are not known.
                 None => Some(!matches!(b, Bound::Num | Bound::Add)),
             },
             _ => Some(prim_satisfies(ty, b)),
         }
     }
 
-    /// Works out which built-in bounds the type definitions from `first` on
-    /// (those of the module being checked) satisfy, once their fields and
-    /// variants are known: see [`Derived`].
+    /// Computes which built-in bounds each type definition from `first` onward
+    /// satisfies, using greatest fixed-point iteration so mutually recursive
+    /// types satisfy a bound unless a component type refutes it.
     pub(crate) fn derive_bounds(&mut self, first: usize) {
         let n = self.types.len();
-        // From the optimistic start (every bound holds, requiring nothing),
-        // refine until nothing changes: the greatest fixed point, so that a
-        // recursive type satisfies a bound unless something in it does not.
         while self.derived.len() < n {
             self.derived.push(std::array::from_fn(|_| Derived::Needs(Vec::new())));
         }
-        // What a definition needs follows from what the definitions that its
-        // fields and variants name need, so a change to one requeues these.
         let mut users: Vec<Vec<usize>> = vec![Vec::new(); n - first];
         for d in first..n {
             let members: Vec<TypeId> = match &self.types[d].kind {
@@ -233,8 +227,8 @@ impl Checker {
         }
     }
 
-    /// What type definition `d` needs to satisfy `b`, from its fields and
-    /// variants and what the other definitions need (so far).
+    /// Computes the requirements for type definition `d` to satisfy `b` based on
+    /// its fields or variants and the current `self.derived` state.
     fn derive(&self, d: usize, b: Bound) -> Derived {
         let def = &self.types[d];
         let mut needs = Vec::new();
@@ -258,9 +252,8 @@ impl Checker {
         Derived::Needs(needs)
     }
 
-    /// Whether field type `t` of a definition with type parameters
-    /// `generics` can satisfy `b`, adding to `needs` the parameters (as
-    /// indices into `generics`) whose arguments must satisfy it too.
+    /// Returns `true` if member type `t` can satisfy `b`, and appends required
+    /// type parameter indices from `generics` to `needs`.
     fn needs(&self, t: TypeId, b: Bound, generics: &[ParamId], needs: &mut Vec<u32>) -> bool {
         self.budget.charge(1);
         let mut go = |t: TypeId| self.needs(t, b, generics, needs);
@@ -273,9 +266,9 @@ impl Checker {
                 }
                 None => self.params[p as usize].has_bound(b),
             },
-            Ty::List(x) | Ty::Set(x) => structural(ty, b) && go(x),
-            Ty::Map(k, v) => structural(ty, b) && go(k) && go(v),
-            Ty::Tuple(l) => structural(ty, b) && self.arena.list(l).iter().all(|&x| go(x)),
+            Ty::List(x) | Ty::Set(x) => has_structural_bound(ty, b) && go(x),
+            Ty::Map(k, v) => has_structural_bound(ty, b) && go(k) && go(v),
+            Ty::Tuple(l) => has_structural_bound(ty, b) && self.arena.list(l).iter().all(|&x| go(x)),
             Ty::Named(e, l) => match derived_index(b).map(|k| &self.derived[e as usize][k]) {
                 Some(Derived::Needs(ps)) => ps.iter().all(|&i| go(self.arena.elem(l, i as usize))),
                 _ => false,
@@ -305,16 +298,16 @@ impl Checker {
                 let n = self.name(self.params[p as usize].name);
                 format!("type parameter `{n}` does not satisfy {}; add a bound `{n}: {}`", b.name(), b.name())
             }
-            _ => self.unsatisfied(t, b, ""),
+            _ => self.format_unsatisfied_bound(t, b, ""),
         };
         self.error(span, msg);
     }
 
-    /// `<t> does not satisfy <b><context>`, naming the part of `t` that does
-    /// not if that is not `t` itself.
-    pub(crate) fn unsatisfied(&mut self, t: TypeId, b: Bound, context: &str) -> String {
+    /// Formats a diagnostic message explaining why `t` does not satisfy `b`.
+    pub(crate) fn format_unsatisfied_bound(&mut self, t: TypeId, b: Bound, context: &str) -> String {
         let mut msg = format!("{} does not satisfy {}{context}", self.show(t), b.name());
-        if let Ok(Some(Why { text: why, leaf, .. })) = self.why_unsatisfied(t, b, &mut std::collections::HashSet::new()) {
+        if let Ok(Some(UnsatisfiedReason { text: why, leaf, .. })) = self.find_unsatisfied_part(t, b, &mut std::collections::HashSet::new())
+        {
             msg.push_str(if context.is_empty() { " because " } else { ", because " });
             msg.push_str(&why);
             if let Ty::Param(p) = self.rty(leaf) {
@@ -325,29 +318,31 @@ impl Checker {
         msg
     }
 
-    /// Why `t` (which does not satisfy `b`) does not: the innermost field or
-    /// payload that does not satisfy `b` (or, if there is none, element of a
-    /// list, set, map or tuple). `Ok(None)` if no part of `t` is to blame, and
-    /// `Err(())` if each such part leads back to a type in `seen`.
-    fn why_unsatisfied(&mut self, t: TypeId, b: Bound, seen: &mut std::collections::HashSet<TypeId>) -> Result<Option<Why>, ()> {
+    /// Finds the innermost field, variant payload, or collection element of `t`
+    /// that fails to satisfy `b`. Returns `Ok(None)` if `t` fails directly, or
+    /// `Err(())` if all failing paths cycle through `seen`.
+    fn find_unsatisfied_part(
+        &mut self,
+        t: TypeId,
+        b: Bound,
+        seen: &mut std::collections::HashSet<TypeId>,
+    ) -> Result<Option<UnsatisfiedReason>, ()> {
         if !seen.insert(t) || !self.budget.charge(1) {
             return Err(());
         }
-        // The parts of `t` with their descriptions.
         let mut parts: Vec<(TypeId, String)> = Vec::new();
-        let member = matches!(self.rty(t), Ty::Named(..));
+        let is_member = matches!(self.rty(t), Ty::Named(..));
         let mut mutable = None;
         let owner = self.show(t);
-        // A list, set, map or tuple that never satisfies `b` is the part to name.
         match self.rty(t) {
-            ty @ (Ty::List(x) | Ty::Set(x)) if structural(ty, b) => {
+            ty @ (Ty::List(x) | Ty::Set(x)) if has_structural_bound(ty, b) => {
                 parts.push((x, format!("the elements of `{owner}` have type `{}`", self.show(x))))
             }
-            ty @ Ty::Map(k, v) if structural(ty, b) => {
+            ty @ Ty::Map(k, v) if has_structural_bound(ty, b) => {
                 parts.push((k, format!("the keys of `{owner}` have type `{}`", self.show(k))));
                 parts.push((v, format!("the values of `{owner}` have type `{}`", self.show(v))));
             }
-            ty @ Ty::Tuple(l) if structural(ty, b) => {
+            ty @ Ty::Tuple(l) if has_structural_bound(ty, b) => {
                 let items = self.arena.list(l).to_vec();
                 parts.extend(
                     items.into_iter().enumerate().map(|(i, x)| (x, format!("element {i} of `{owner}` has type `{}`", self.show(x)))),
@@ -377,18 +372,17 @@ impl Checker {
             _ => {}
         }
         if let Some(text) = mutable {
-            return Ok(Some(Why { text, leaf: t, member: true }));
+            return Ok(Some(UnsatisfiedReason { text, leaf: t, is_member: true }));
         }
         let mut cyclic = false;
         for (x, text) in parts {
             if self.satisfies(x, b) != Some(false) {
                 continue;
             }
-            match self.why_unsatisfied(x, b, seen) {
-                Ok(Some(inner)) if inner.member || !member => return Ok(Some(inner)),
-                // A field's type shows the element to blame.
-                Ok(Some(inner)) => return Ok(Some(Why { text, leaf: inner.leaf, member })),
-                Ok(None) => return Ok(Some(Why { text, leaf: x, member })),
+            match self.find_unsatisfied_part(x, b, seen) {
+                Ok(Some(inner)) if inner.is_member || !is_member => return Ok(Some(inner)),
+                Ok(Some(inner)) => return Ok(Some(UnsatisfiedReason { text, leaf: inner.leaf, is_member })),
+                Ok(None) => return Ok(Some(UnsatisfiedReason { text, leaf: x, is_member })),
                 Err(()) => cyclic = true,
             }
         }
@@ -415,9 +409,6 @@ impl Checker {
                 }
                 return;
             }
-            // A `reflect` type parameter of this function passes on its own
-            // description, and a type with such parameters a description
-            // built from theirs.
             HKind::TypeDesc { ty, args } => {
                 *ty = self.zonk(*ty);
                 if let Some(l) = self.reflect_local(*ty) {
@@ -490,34 +481,28 @@ pub(crate) struct Finish {
     pub hoisted: Vec<(LocalId, HExpr)>,
 }
 
-/// What a type definition needs to satisfy a built-in bound.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Derived {
-    /// A field type never satisfies the bound.
     Never,
-    /// The arguments of these type parameters (indices) must satisfy it.
+    /// Indices of type parameters whose arguments must also satisfy the bound.
     Needs(Vec<u32>),
 }
 
-/// A description of the part of a type that does not satisfy a bound.
-struct Why {
+struct UnsatisfiedReason {
     text: String,
-    /// The innermost type that does not satisfy the bound.
     leaf: TypeId,
-    /// Whether `text` describes a field or payload.
-    member: bool,
+    is_member: bool,
 }
 
-/// The bounds that type definitions may satisfy, in the order of `Checker::derived`.
 const DERIVED: [Bound; 4] = [Bound::Eq, Bound::Ord, Bound::Hash, Bound::Encode];
 
 fn derived_index(b: Bound) -> Option<usize> {
     DERIVED.iter().position(|&x| x == b)
 }
 
-/// Whether the list, set, map or tuple type `t` satisfies `b` if its
-/// components do. If not, it never does.
-fn structural(t: Ty, b: Bound) -> bool {
+/// Returns `true` if collection or tuple type `t` satisfies `b` whenever its
+/// element types satisfy `b`.
+fn has_structural_bound(t: Ty, b: Bound) -> bool {
     match t {
         Ty::List(_) => matches!(b, Bound::Eq | Bound::Ord | Bound::Encode),
         Ty::Set(_) | Ty::Map(..) => matches!(b, Bound::Eq | Bound::Encode),
@@ -526,7 +511,6 @@ fn structural(t: Ty, b: Bound) -> bool {
     }
 }
 
-/// Whether a type without components that may vary satisfies `b`.
 fn prim_satisfies(t: Ty, b: Bound) -> bool {
     match t {
         Ty::Error | Ty::Never | Ty::Int => true,

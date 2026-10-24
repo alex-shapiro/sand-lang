@@ -161,10 +161,6 @@ fn bound_checks_on_structs_sharing_field_types() {
 
 #[test]
 fn bounds_of_long_chains_of_structs_are_derived_in_linear_time() {
-    // Each struct names the next, and the last has a function field, so
-    // that no struct satisfies `Eq`. Each definition is derived again only
-    // when one that it names changes, instead of all of them until nothing
-    // changes (one pass per struct in the chain).
     let n = 20_000;
     let mut src: String = (0..n).map(|i| format!("struct S{i} {{ s: S{}? }}\n", i + 1)).collect();
     src += &format!("struct S{n} {{ f: fn() -> int }}\nfn same(x: S0) -> bool {{ x == x }}\n");
@@ -474,8 +470,6 @@ fn many_inlined_lambdas_compile_in_linear_time() {
 
 #[test]
 fn constant_field_defaults_are_bounded() {
-    // Locals that repeat a list make a default of 10^8 parts: it is not a
-    // constant, so checking does not build it.
     let mut lets = vec!["let a0 = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]".to_string()];
     let mut ty = "[int]".to_string();
     for i in 1..8 {
@@ -484,8 +478,6 @@ fn constant_field_defaults_are_bounded() {
     }
     let wide = format!("struct S {{\n    x: {ty} = {{\n        {}\n        a7\n    }}\n}}", lets.join("\n        "));
     check(Config::new(), &wide).0.unwrap();
-    // A chain of struct literals nests deeper than a constant can: the
-    // defaults of the outer structs run as computed defaults.
     let mut deep = String::from("import json\n");
     for i in 0..300 {
         deep += &format!("struct S{i} {{ next: S{} = S{} {{}} }}\n", i + 1, i + 1);
@@ -507,8 +499,6 @@ fn rust_field_defaults_are_built_once() {
     }
     let mut m = sandlang::NativeModule::new("lab");
     m.bind::<Big>();
-    // Each literal calls the helper that builds the default: a copy in each
-    // literal would take 2 * 10^8 units.
     let src = format!("import lab\nlet xs = [{}]\nprint(xs.len())\n", vec!["lab.Big {}"; 3000].join(", "));
     let (r, took) = check(limits(|l| l.max_compile_fuel = Some(2_000_000)).module(m), &src);
     r.unwrap();
@@ -517,8 +507,6 @@ fn rust_field_defaults_are_built_once() {
 
 #[test]
 fn copies_of_constant_strings_are_charged_by_their_size() {
-    // `D {}` holds 4096 copies of a 64 KiB string (256 MiB), in only 16
-    // parts per copy of `C {}`.
     let text = "x".repeat(1 << 16);
     let fields = |ty: &str, n: usize| (0..n).map(|i| format!("f{i}: {ty} = {ty} {{}}")).collect::<Vec<_>>().join(", ");
     let mut src = format!("struct A {{ s: str = \"{text}\" }}\nstruct B {{ {} }}\nstruct C {{ {} }}\n", fields("A", 16), fields("B", 16));

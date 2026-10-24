@@ -414,7 +414,7 @@ impl TypeArena {
         self.has_params(t) && self.any(t, &mut |x| x == Ty::Param(p))
     }
 
-    /// The type parameters in `t`, in the order in which they first occur.
+    /// Returns the type parameters in `t` in order of first appearance.
     pub fn params_of(&self, t: TypeId) -> Vec<ParamId> {
         let mut out = Vec::new();
         if self.has_params(t) {
@@ -451,7 +451,7 @@ impl Symbol {
     pub const ARG: Symbol = Symbol(6);
     pub const NEXT: Symbol = Symbol(7);
     pub const CLOSE: Symbol = Symbol(8);
-    /// Hidden parameters holding the descriptions of `reflect` type arguments.
+    /// Hidden parameters that hold runtime descriptions for `reflect` type arguments.
     pub const DESC: Symbol = Symbol(9);
 }
 
@@ -509,8 +509,8 @@ pub enum Bound {
     Ord,
     Hash,
     Num,
-    /// Values that `json.encode` can represent: all but functions, tasks,
-    /// channels, and native objects.
+    /// Types that support JSON encoding (all types except functions, tasks,
+    /// channels, and native objects).
     Encode,
     /// Supports `+`: numbers, durations, strings, bytes and lists. Not
     /// written in source: the checker requires it of the operands of `+`
@@ -540,14 +540,14 @@ impl Bound {
         }
     }
 
-    /// Whether a type parameter bounded by `self` satisfies `other`.
+    /// Returns `true` if `self` implies `other`.
     pub fn implies(self, other: Bound) -> bool {
         self == other
             || (other == Bound::Eq && matches!(self, Bound::Ord | Bound::Hash | Bound::Num))
             || (matches!(other, Bound::Ord | Bound::Add | Bound::Encode) && self == Bound::Num)
     }
 
-    /// The names of `bounds`, without the bounds that the others imply.
+    /// Returns the names of `bounds`, excluding bounds implied by other bounds in the slice.
     pub fn names(bounds: &[Bound]) -> Vec<&'static str> {
         let implied = |b: Bound| bounds.iter().any(|&x| x != b && x.implies(b));
         bounds.iter().filter(|&&b| !implied(b)).map(|b| b.name()).collect()
@@ -592,17 +592,17 @@ pub struct FieldDef {
     pub is_pub: bool,
     /// Helper function computing the default value.
     pub default: Option<FnId>,
-    /// The default if it is a constant, which `json.decode` uses.
+    /// Constant default value, if the field default is a constant expression.
     pub const_default: Option<Arc<ConstVal>>,
     pub doc: Option<Arc<str>>,
 }
 
-/// A value built only from literals, ranges, and constructors, such as
-/// `(1, "a")`, `["k": [2]]`, `set([3])`, `Shape.Circle(1.0)`, or
-/// `Point { x: 0 }`. A struct field default that is a constant fills a
-/// missing field in `json.decode`. A program identifies a variant by its
-/// runtime id and a struct by its definition (`V` and `S`); a native module
-/// identifies them by Rust type.
+/// A compile-time constant value constructed from literals, ranges, and data
+/// constructors.
+///
+/// Compiled programs identify variants by runtime ID (`V = u32`) and structs by
+/// definition ID (`S = TypeDefId`). Native modules identify both by Rust
+/// `TypeId`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ConstVal<V = u32, S = TypeDefId> {
     Unit,
@@ -625,17 +625,15 @@ pub enum ConstVal<V = u32, S = TypeDefId> {
     Struct(S, Vec<ConstVal<V, S>>),
 }
 
-/// The most parts (values at any level) of a constant field default.
+/// Maximum number of nodes in a constant field default.
 pub const MAX_CONST_PARTS: usize = 1 << 16;
 
-/// The deepest nesting of a constant field default (a scalar has depth 1).
+/// Maximum nesting depth of a constant field default (a scalar has depth 1).
 pub const MAX_CONST_DEPTH: usize = 64;
 
 impl<V, S> ConstVal<V, S> {
-    /// The number of parts of `self` and the bytes of its strings and
-    /// `bytes`, or `None` if it has more than [`MAX_CONST_PARTS`] parts or
-    /// nests deeper than [`MAX_CONST_DEPTH`]. Stops at the first part beyond
-    /// these limits.
+    /// Returns the node count and total string and byte length of `self`, or
+    /// `None` if `self` exceeds [`MAX_CONST_PARTS`] or [`MAX_CONST_DEPTH`].
     pub fn measure(&self) -> Option<(usize, usize)> {
         fn walk<V, S>(c: &ConstVal<V, S>, left: &mut usize, bytes: &mut usize, depth: usize) -> bool {
             if depth == 0 || *left == 0 {
@@ -662,8 +660,8 @@ impl<V, S> ConstVal<V, S> {
         walk(self, &mut left, &mut bytes, MAX_CONST_DEPTH).then_some((MAX_CONST_PARTS - left, bytes))
     }
 
-    /// `self` with each variant identified by `variant` and each struct by
-    /// `def`, or `None` if one of them returns `None`.
+    /// Maps each variant ID with `variant` and each struct ID with `def`, or
+    /// returns `None` if any mapping returns `None`.
     pub fn resolve<V2, S2>(&self, variant: &impl Fn(&V) -> Option<V2>, def: &impl Fn(&S) -> Option<S2>) -> Option<ConstVal<V2, S2>> {
         let all = |xs: &[ConstVal<V, S>]| xs.iter().map(|x| x.resolve(variant, def)).collect::<Option<Vec<_>>>();
         Some(match self {
@@ -780,24 +778,24 @@ pub struct TypePrinter<'a> {
     pub subst: &'a [Option<TypeId>],
     /// Names for inference variables shown as type parameters (others are `_`).
     pub var_names: &'a [(VarId, String)],
-    /// Shows each type parameter as a mark that
+    /// Formats each type parameter as a placeholder for
     /// [`TypeDesc::Param`](crate::vm::value::TypeDesc::Param) instantiation
-    /// replaces (see [`param_mark`]).
-    pub mark_params: bool,
+    /// (see [`param_placeholder`]).
+    pub placeholder_params: bool,
 }
 
-/// The text that stands for type parameter `p` in the names of
-/// [`TypeDesc`](crate::vm::value::TypeDesc) templates.
-pub fn param_mark(p: ParamId) -> String {
-    format!("{PARAM_MARK}{p}{PARAM_MARK}")
+/// Returns the placeholder string for type parameter `p` in
+/// [`TypeDesc`](crate::vm::value::TypeDesc) template names.
+pub fn param_placeholder(p: ParamId) -> String {
+    format!("{PARAM_PLACEHOLDER}{p}{PARAM_PLACEHOLDER}")
 }
 
-/// Delimits a [`param_mark`]. Type names cannot contain it.
-pub const PARAM_MARK: char = '\u{E000}';
+/// Delimiter character for [`param_placeholder`]. Type names cannot contain this character.
+pub const PARAM_PLACEHOLDER: char = '\u{E000}';
 
 impl<'a> TypePrinter<'a> {
     pub fn new(arena: &'a TypeArena, defs: &'a PVec<TypeDef>, params: &'a PVec<ParamInfo>, syms: &'a Symbols, wk: WellKnown) -> Self {
-        TypePrinter { arena, defs, params, syms, wk, subst: &[], var_names: &[], mark_params: false }
+        TypePrinter { arena, defs, params, syms, wk, subst: &[], var_names: &[], placeholder_params: false }
     }
 
     pub fn show(&self, t: TypeId) -> String {
@@ -863,7 +861,7 @@ impl Tagged<'_, '_> {
     }
 
     fn write(&self, s: &mut String, t: TypeId) {
-        let TypePrinter { arena, defs, params, syms, wk, var_names, mark_params, .. } = self.p;
+        let TypePrinter { arena, defs, params, syms, wk, var_names, placeholder_params, .. } = self.p;
         let t = self.p.resolve(t);
         match arena.get(t) {
             Ty::Int => s.push_str("int"),
@@ -880,7 +878,7 @@ impl Tagged<'_, '_> {
                 Some((_, n)) => s.push_str(n),
                 None => s.push('_'),
             },
-            Ty::Param(p) if *mark_params => s.push_str(&param_mark(p)),
+            Ty::Param(p) if *placeholder_params => s.push_str(&param_placeholder(p)),
             Ty::Param(p) => s.push_str(params.get(p as usize).map(|p| syms.str(p.name)).unwrap_or("?")),
             Ty::List(t) => {
                 s.push('[');

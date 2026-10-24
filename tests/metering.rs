@@ -775,14 +775,10 @@ fn iterating_maps_and_sets_copies_nothing() {
 
 #[test]
 fn names_of_type_descriptions_built_at_run_time_stay_short() {
-    // Each call doubles the name `P<A, B>`, which the memory limit does not
-    // bound.
     let doubling = "struct P<A, B> { a: A, b: B }\nfn grow<reflect A, reflect B>(n: int, a: A?, b: B?) -> int {\n    \
                     let x: P<A, B>? = None\n    grow(n + 1, x, x)\n}\nprint(grow(0, Some(1), Some(2)))";
     let deep = |e: &Error| matches!(e, Error::Runtime { message, .. } if message.contains("nested too deeply"));
     expect_stop(limits(|l| l.max_memory = None), doubling, deep, Duration::from_secs(10));
-    // `(A, A)` shares its halves, so the type `A` written out doubles on each
-    // call.
     let shared = "import json\nstruct P<T> { v: T }\nfn grow<reflect A: Encode>(n: int, a: A?) -> int {\n    if n == 0 {\n        \
                   let m: Result<[A: int]> = json.decode(\"{\\\"k\\\": 1}\")\n        let p: Result<P<A>> = json.decode(\"{\\\"v\\\": 1}\")\n        \
                   print(m)\n        print(p)\n        return 0\n    }\n    let x: (A, A)? = None\n    grow(n - 1, x)\n}\nlet a: int? = None\nprint(grow(200, a))";
@@ -801,9 +797,6 @@ fn names_of_type_descriptions_built_at_run_time_stay_short() {
 
 #[test]
 fn type_descriptions_count_the_nodes_they_share_once() {
-    // At each call, `A` and `B` are two descriptions that share the nodes
-    // of all the calls before. Counting those nodes for each description
-    // that holds them would double the count on each call.
     let src = "import json\nstruct P<A, B> { a: A, b: B }\nfn deep<reflect A: Encode, reflect B: Encode>(n: int, x: [A], y: [B]) -> int {\n    \
                if n == 0 {\n        let r: Result<[(A, B)]> = json.decode(\"[]\")\n        return if r.is_ok() { 0 } else { -1 }\n    }\n    \
                let w: [P<A, B>] = []\n    deep(n - 1, w, w) + 1\n}\nlet w: [int] = []\nprint(deep(200, w, w))";
@@ -814,10 +807,6 @@ fn type_descriptions_count_the_nodes_they_share_once() {
 
 #[test]
 fn the_collection_at_the_memory_limit_releases_the_staging_buffer() {
-    // `json.parse` stages its objects in a buffer (about 40 bytes per object)
-    // that the heap keeps and counts for the next call. Right after the
-    // parse, only the collection that the memory limit starts can free it
-    // before `repeat` fails.
     let src = |churn: bool, mib: usize| {
         let churn = if churn { "for i in 0..400 {\n    let s = \"y\".repeat(1 << 20)\n}\n" } else { "" };
         format!(
@@ -827,7 +816,6 @@ fn the_collection_at_the_memory_limit_releases_the_staging_buffer() {
         )
     };
     let fits = |churn: bool, mib: usize| run(limits(|l| l.max_memory = Some(64 << 20)), &src(churn, mib)).0.is_ok();
-    // The most MiB that fit once garbage churn has run major collections.
     let (mut lo, mut hi) = (0, 64);
     while hi - lo > 1 {
         let mid = (lo + hi) / 2;

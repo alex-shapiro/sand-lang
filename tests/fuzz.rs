@@ -340,7 +340,6 @@ fn hostile_runtime_programs_are_contained() {
         "print(\"\\(1:999999999)\".len())",
         // Sleeping forever.
         "task.sleep(1000h)",
-        // Type descriptions whose names double on each call.
         "struct P<A, B> { a: A, b: B }\nfn grow<reflect A, reflect B>(n: int, a: A?, b: B?) -> int {\n    let x: P<A, B>? = None\n    grow(n + 1, x, x)\n}\nprint(grow(0, Some(1), Some(2)))",
     ];
     for src in programs {
@@ -439,14 +438,12 @@ fn hostile_compile_inputs_are_contained() {
     for i in 1..n {
         doubling += &format!("let a{i} = (a{}, a{})\n", i - 1, i - 1);
     }
-    // A field default of 2^40 parts, built by locals that repeat a list.
     let mut repeated = String::from("let a0 = [0, 0]\n");
     let mut ty = String::from("[int]");
     for i in 1..n {
         repeated += &format!("let a{i} = [a{}, a{}]\n", i - 1, i - 1);
         ty = format!("[{ty}]");
     }
-    // Field defaults that nest one struct per level, 20000 levels deep.
     let mut chain = String::from("import json\n");
     for i in 0..20_000 {
         chain += &format!("struct S{i} {{ next: S{} = S{} {{}} }}\n", i + 1, i + 1);

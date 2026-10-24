@@ -101,18 +101,19 @@ pub native fn parse(text: str) -> Result<Json>
 
 /// Serializes `value` as JSON text (compact if `indent == 0`, or pretty-printed
 /// with `indent` spaces per level). Finite floats include a decimal point or
-/// exponent (`2.0`), and `NaN` or infinite floats serialize as `null`. Aborts
-/// with kind `"invalid"` if a map key is not a string, `int`, `duration`,
+/// exponent (`2.0`), and `NaN` or infinite floats are serialized as `null`.
+/// Aborts with kind `"invalid"` if a map key is not a `str`, `int`, `duration`,
 /// `bool`, payload-less variant, or value type.
 pub native fn encode<T: Encode>(value: T, indent: int = 0) -> str
 
-/// Parses `text` and converts it into type `T`. A missing struct field takes
-/// its declared default, as in a struct literal, or `None` if the field is
-/// optional and has no default. Other missing fields and type mismatches fail
-/// with kind `"parse"` and a JSON path diagnostic. Fails with kind `"invalid"`
-/// on a map key whose type `encode` cannot write. The defaults that are not
-/// constants run only if the whole text decodes, in the order in which the
-/// objects that omit them end.
+/// Parses `text` and decodes it into a value of type `T`.
+///
+/// If a struct field is omitted from a JSON object, `decode` uses the field's
+/// declared default, or `None` if the field is an `Option` without a default.
+/// Non-constant field defaults are evaluated in post-order after `text` is
+/// parsed. Fails with kind `"parse"` on invalid JSON syntax, missing required
+/// fields, or type mismatches, and fails with kind `"invalid"` if a map key
+/// type is not supported by `encode`.
 pub fn decode<reflect T: Encode>(text: str) -> Result<T> {
     let decoded: Decoded<T> = decode_raw(text)
     match decoded {
@@ -129,7 +130,7 @@ pub fn decode<reflect T: Encode>(text: str) -> Result<T> {
 
 native fn decode_raw<reflect T: Encode>(text: str) -> Decoded<T>
 
-/// Converts `value` into the `Json` value that `encode` writes: for example,
-/// `()` and `None` map to `Null`, `Some(x)` maps to `x`, lists map to `Arr`,
-/// and maps and structs map to `Obj`. Aborts as `encode` does.
+/// Converts `value` into a `Json` value using the same representation as
+/// `encode`. Aborts with kind `"invalid"` if `value` contains a map key type
+/// that `encode` does not support.
 pub native fn to_json<T: Encode>(value: T) -> Json

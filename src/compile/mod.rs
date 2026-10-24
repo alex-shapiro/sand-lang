@@ -4291,7 +4291,7 @@ fn walk_pruned<'e>(e: &'e HExpr, f: &mut impl FnMut(&'e HExpr) -> bool) {
     }
 }
 
-/// Adds the constants and functions of type descriptions to a program.
+/// Emits constants and helper functions for runtime type descriptors.
 struct DescCode<'p> {
     cp: &'p CheckedProgram,
     prog: &'p mut Program,
@@ -4299,8 +4299,7 @@ struct DescCode<'p> {
 }
 
 impl DescCode<'_> {
-    /// Adds a function without parameters whose `captures` captured values
-    /// are in its first registers.
+    /// Emits a zero-parameter function prototype with `captures` captured values in its initial registers.
     fn add(&mut self, file: u32, captures: usize, nregs: u16, code: Vec<Op>) -> u32 {
         self.prog.protos.push(Proto {
             name: FILL_PROTO.into(),
@@ -4333,14 +4332,13 @@ impl reflect::DescSink for DescCode<'_> {
         let proto = (*self.fn_protos.get(helper as usize)?)?;
         let idx = u16::try_from(index).ok()?;
         let file = self.cp.types[def as usize].span.file;
-        // r0: the struct; r1: the default.
+        // r0 holds the struct; r1 holds the evaluated default value.
         let code = vec![Op::CallDirect { base: 1, proto }, Op::SetField { obj: 0, idx, src: 1 }, Op::RetUnit];
         Some(self.add(file, 1, 2, code))
     }
 
     fn set_fill(&mut self) -> u32 {
-        // r0: the set; r1, r2, r3: the list, the index and the length (the
-        // state of `ForList`); r4: an element; r5: the result of `SetAdd`.
+        // r0 holds the set; r1..=r3 hold the list, index, and length for ForList; r4 holds the element; r5 holds the SetAdd result.
         let code = vec![
             Op::LoadInt { dst: 2, v: 0 },
             Op::Len { dst: 3, src: 1 },

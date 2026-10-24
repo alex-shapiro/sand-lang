@@ -1,6 +1,3 @@
-//! Property tests for Rust-bound enums with payloads, generic types, field
-//! defaults, `json.Json` values, and `Num` evidence.
-
 use super::{int, int_lit, str_lit};
 use proptest::prelude::*;
 use sandlang::json::Json;
@@ -30,8 +27,6 @@ fn float_lit(f: f64) -> String {
     format!("({f:?})")
 }
 
-/// Has a variant of each runtime representation: a tag, inline payloads
-/// (`Num`, and `Wrap` of a tag), and heap payloads.
 #[derive(Clone, Debug, PartialEq, sandlang::SandEnum)]
 #[sand(module = "fig")]
 enum Fig {
@@ -69,8 +64,6 @@ fn fig_lit(f: &Fig) -> String {
     }
 }
 
-/// A generic struct whose fields use its parameters in every position, with a
-/// bound on one parameter.
 #[derive(Clone, Debug, PartialEq, sandlang::SandStruct)]
 #[sand(module = "fig")]
 struct Holder<A, B: Ord> {
@@ -81,7 +74,6 @@ struct Holder<A, B: Ord> {
     extra: Vec<A>,
 }
 
-/// Field defaults of each kind of constant.
 #[derive(Clone, Debug, PartialEq, sandlang::SandStruct)]
 #[sand(module = "fig")]
 struct Defaults {
@@ -338,7 +330,6 @@ proptest! {
     }
 }
 
-/// `s` as a JSON string.
 fn serde_str(s: &str) -> String {
     let mut out = String::from("\"");
     for c in s.chars() {

@@ -168,15 +168,14 @@ pub struct Heap {
     /// objects are made and dropped all the time. Counted as used memory;
     /// dropped by major collections.
     spare: [Vec<Box<[Value]>>; SPARE_LENS],
-    /// Empty chunks of [`STAGE_CHUNK`] objects for [`Staging`], kept for the
-    /// next [`Heap::staged`]. Counted as used memory; dropped by major
-    /// collections, so that the collection at the memory limit frees them.
+    /// Reusable chunks of [`STAGE_CHUNK`] objects for [`Staging`], counted in
+    /// `spare_bytes` and dropped on major collections.
     spare_chunks: Vec<Vec<(u32, Obj)>>,
     spare_bytes: usize,
 }
 
 const SPARE_LENS: usize = 4;
-/// The most objects in a chunk of the buffer of [`Staging`].
+/// Maximum number of objects per chunk in [`Staging`].
 const STAGE_CHUNK: usize = 4096;
 const CHUNK_BYTES: usize = STAGE_CHUNK * std::mem::size_of::<(u32, Obj)>();
 /// The most boxes kept of each length: about what a minor collection frees.
@@ -192,14 +191,13 @@ pub struct Staging<'h> {
     free: u32,
     /// The next slot past the end of the arena.
     end: usize,
-    /// The staged objects and their handles, in chunks that double in size
-    /// up to [`STAGE_CHUNK`] objects. One buffer that doubled would leave
-    /// each smaller buffer that it replaced freed but resident in the
-    /// allocator, so that a process could use about twice its memory limit.
+    /// Staged objects and their handles, stored in chunks that double up to
+    /// [`STAGE_CHUNK`] objects so reallocations do not leave large freed
+    /// buffers resident in the allocator.
     chunks: Vec<Vec<(u32, Obj)>>,
-    /// The objects that the chunks can hold.
+    /// Total object capacity across `chunks`.
     capacity: usize,
-    /// Empty chunks of [`STAGE_CHUNK`] objects to use first.
+    /// Reusable empty chunks of [`STAGE_CHUNK`] objects.
     spares: Vec<Vec<(u32, Obj)>>,
     /// Accounted size of the staged objects.
     bytes: usize,
@@ -223,7 +221,7 @@ impl Staging<'_> {
         match self.chunks.last_mut() {
             Some(c) if c.len() < c.capacity() => c.push((h, obj)),
             _ => {
-                let n = self.next_chunk();
+                let n = self.next_chunk_capacity();
                 let mut c = if n == STAGE_CHUNK { self.spares.pop() } else { None }.unwrap_or_else(|| Vec::with_capacity(n));
                 self.capacity += c.capacity();
                 c.push((h, obj));
@@ -233,8 +231,7 @@ impl Staging<'_> {
         Value::Obj(h)
     }
 
-    /// The capacity of the next chunk.
-    fn next_chunk(&self) -> usize {
+    fn next_chunk_capacity(&self) -> usize {
         self.chunks.last().map_or(4, |c| (c.capacity() * 2).min(STAGE_CHUNK))
     }
 
@@ -275,11 +272,9 @@ impl Staging<'_> {
         self.heap.would_exceed(self.bytes.saturating_add(self.buffer_bytes()).saturating_add(extra))
     }
 
-    /// The bytes of the buffer that holds the staged objects until they move
-    /// to the heap, once it holds one more object.
     fn buffer_bytes(&self) -> usize {
         let full = self.chunks.last().is_none_or(|c| c.len() == c.capacity());
-        let next = if full { self.next_chunk() } else { 0 };
+        let next = if full { self.next_chunk_capacity() } else { 0 };
         let objs = self.capacity + next + self.spares.len() * STAGE_CHUNK;
         let chunks = self.chunks.capacity().max(self.chunks.len() + 1);
         objs * std::mem::size_of::<(u32, Obj)>() + chunks * std::mem::size_of::<Vec<(u32, Obj)>>()
@@ -1602,7 +1597,6 @@ mod tests {
 
     #[test]
     fn the_staging_buffer_counts_while_it_holds_objects_and_until_a_major_collection() {
-        // Chunks of 4, 8, ..., `STAGE_CHUNK / 2` objects hold `STAGE_CHUNK - 4`.
         let n = (STAGE_CHUNK - 4) + 3 * STAGE_CHUNK;
         let size = std::mem::size_of::<(u32, Obj)>();
         let mut heap = Heap::new(None, usize::MAX);
@@ -1614,10 +1608,8 @@ mod tests {
             assert_eq!(st.chunks.iter().map(Vec::len).sum::<usize>(), n);
             st.buffer_bytes()
         });
-        // With the next chunk, and the headers of the chunks.
         let objs = (n + STAGE_CHUNK) * size;
         assert!(buffer >= objs && buffer < objs + 1024, "{buffer}");
-        // The full chunks stay for the next call until a major collection.
         let lists = n * Obj::List(vec![Value::Int(0)]).size();
         assert_eq!(heap.used() - used, lists + 3 * CHUNK_BYTES);
         heap.collect((0..n).map(|i| Value::Obj(i as u32)), true);

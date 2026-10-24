@@ -209,7 +209,7 @@ geo.function("mid", |a: Point, b: Point| Point { x: (a.x + b.x) / 2.0, y: (a.y +
 geo.function("Point.norm", |p: Point| (p.x * p.x + p.y * p.y).sqrt());
 ```
 
-Scripts construct and access `Point` like any Sand struct (`geo.mid(geo.Point { x: 0.0 }, b).norm()`). The type parameters of a generic enum or struct become Sand type parameters; register the type with any instance (`bind::<Pair<(), ()>>()`). Recursive types can reference themselves through `Vec<T>`, maps, or `Box<T>`; conversion aborts with a `"limit"` error if nesting exceeds 256 levels.
+Scripts construct and access `Point` like any Sand struct (`geo.mid(geo.Point { x: 0.0 }, b).norm()`). Generic type parameters on a `SandEnum` or `SandStruct` map to Sand type parameters; register a generic type using any concrete instantiation (such as `bind::<Pair<(), ()>>()`). Recursive types can reference themselves through `Vec<T>`, maps, or `Box<T>`; conversion aborts with a `"limit"` error if nesting exceeds 256 levels.
 
 Derive `SandObject` on a Rust type to expose opaque reference handles to scripts. Registered functions borrow an object parameter as `&T` and return a new object by value as `T`; scripts compare object handles by identity:
 
@@ -261,7 +261,7 @@ Err(Error { kind: "permission_denied", message: "permission denied: door back" }
 
 `NativeModule::source` attaches Sand source declarations to a native module. Use `native fn` declarations in the Sand source to specify default parameter values or generic type parameters for registered functions. `Engine::new` type-checks registered modules and returns `Error::Compile` if a `native fn` declaration does not match its Rust function signature.
 
-A generic Rust function accepts values of its `N`-th type parameter as `Param<N, B>`, where `B` declares any built-in bounds (`bound::Eq`, `bound::Ord`, `bound::Hash`, `bound::Num`, `bound::Encode`, or a tuple such as `(bound::Ord, bound::Hash)`) required by the Rust implementation. The corresponding `native fn` declaration in `NativeModule::source` must declare those bounds (`native fn max<T: Ord>(xs: [T]) -> T?`). For a type parameter that the declaration bounds by `Num`, the Rust function can take the evidence `Num<N>` (with `zero` and `one`) before the declared parameters.
+A generic Rust function accepts values of its `N`-th type parameter as `Param<N, B>`, where `B` declares any built-in bounds (`bound::Eq`, `bound::Ord`, `bound::Hash`, `bound::Num`, `bound::Encode`, or a tuple such as `(bound::Ord, bound::Hash)`) required by the Rust implementation. The corresponding `native fn` declaration in `NativeModule::source` must declare those bounds (`native fn max<T: Ord>(xs: [T]) -> T?`). If a `native fn` declaration bounds its `N`-th type parameter by `Num`, the Rust function can accept `Num<N>` (providing `zero` and `one`) before the value parameters.
 
 ## Interactive sessions
 

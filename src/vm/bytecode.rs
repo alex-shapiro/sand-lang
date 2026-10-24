@@ -901,8 +901,8 @@ pub enum Op {
         dst: Reg,
         tmpl: u32,
     },
-    /// The type description `Program::desc_templates[tmpl]` instantiated
-    /// with the descriptions in `base..`, written to `base`.
+    /// Instantiates `Program::desc_templates[tmpl]` with the type descriptors
+    /// in `base..` and writes the result to `base`.
     Describe {
         base: Reg,
         tmpl: u32,
@@ -1120,8 +1120,7 @@ impl Op {
     }
 }
 
-/// The name of the functions that `json.decode` runs to fill computed field
-/// defaults and sets; stack traces leave them out.
+/// Prototype name for helper functions that evaluate field defaults and populate sets during `json.decode` (omitted from stack traces).
 pub const FILL_PROTO: &str = "<fill>";
 
 #[derive(Clone, Debug)]
@@ -1276,9 +1275,9 @@ pub struct Program {
     /// The names of the natives, by id.
     pub native_names: Arc<[String]>,
     pub native_argc: Arc<[u16]>,
-    /// The templates of string interpolations (`Op::Interp`).
+    /// Templates for string interpolations (`Op::Interp`).
     pub templates: Vec<Template>,
-    /// The templates of type descriptions (`Op::Describe`).
+    /// Templates for parameterized type descriptors (`Op::Describe`).
     pub desc_templates: Vec<DescTemplate>,
     /// The jump tables of `SwitchVariant`, `SwitchInt` and `SwitchChar`.
     pub switches: Vec<Switch>,

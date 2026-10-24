@@ -187,10 +187,8 @@ impl Checker {
         }
     }
 
-    /// Adds bounds to a type parameter, with the built-in bounds its traits
-    /// imply. A `Num` bound also adds the trait that carries its evidence.
+    /// Adds bounds and implied supertrait bounds to type parameter `p`.
     pub(crate) fn add_bounds(&mut self, p: ParamId, mut bounds: Vec<Bound>, mut traits: Vec<TraitRef>) {
-        // A trait with `Num` as a supertrait carries its evidence itself.
         if let Some(n) = self.num_trait.filter(|_| bounds.contains(&Bound::Num)) {
             traits.push(TraitRef { trait_id: n, args: TyList::EMPTY });
         }
@@ -288,7 +286,6 @@ impl Checker {
     // Trait declarations
 
     pub(crate) fn declare_trait(&mut self, t: &ast::TraitDecl) -> TraitId {
-        // The prelude declares the (private) trait carrying the evidence of `Num`.
         let num_evidence = Some(self.cur_mod) == self.prelude && t.name.name == "Num";
         if Bound::parse(&t.name.name).is_some() && !num_evidence {
             self.error(t.name.span, format!("`{}` is a built-in bound and cannot be redefined", t.name.name));
@@ -332,7 +329,6 @@ impl Checker {
             let scope = self.trait_scope(id);
             let self_ty = self.param_ty(self.traits[id as usize].self_param);
             let (bounds, mut supers) = self.resolve_bounds(&d.supers, &scope, Some(self_ty));
-            // `Num` carries evidence (`zero`, `one`), so its trait is a real supertrait.
             if let Some(n) = self.num_trait.filter(|_| bounds.contains(&Bound::Num)) {
                 supers.push(TraitRef { trait_id: n, args: TyList::EMPTY });
             }
@@ -382,7 +378,7 @@ impl Checker {
         let rules = DeclRules { skip_where: &outer, defaults: DefaultRule::Const };
         let mut methods: Vec<TraitMethod> = Vec::new();
         for (j, m) in d.methods.iter().enumerate() {
-            self.deny_reflect_method(m);
+            self.reject_reflect_params(m);
             if methods.iter().any(|x| self.name(x.name) == m.name.name) {
                 let msg = format!("method `{}` is already defined in trait `{}`", m.name.name, self.name(self.traits[id as usize].name));
                 self.error(m.name.span, msg);
@@ -531,15 +527,14 @@ impl Checker {
             for p in m.params.iter().filter(|p| p.default.is_some()) {
                 self.error(p.name.span, "default values are declared by the trait, not the impl");
             }
-            self.deny_reflect_method(m);
+            self.reject_reflect_params(m);
             let at = DeclPath { item, method: j as u32 };
             let f = self.declare_fn(m, at, rules, Some(ctor), &scope, Some(target));
-            // Natives read `Num` evidence by calling its methods (`native::Num`).
             if Some(tid) == self.num_trait && !m.is_native {
                 self.error(m.name.span, "the methods of a `Num` impl must be native");
             }
-            // A call through an impl passes the impl's dictionary first, which
-            // a native would read as its `Num` evidence.
+            // Trait dispatch passes the impl dictionary as the first hidden
+            // argument, which conflicts with the `Num` evidence slot in native functions.
             if m.is_native && !self.fns[f as usize].dicts.is_empty() {
                 self.error(m.name.span, "the Rust function of a native impl method cannot take `Num` evidence");
             }
@@ -652,12 +647,11 @@ impl Checker {
         let saved = std::mem::replace(&mut self.fs.evidence, evidence);
         for b in self.builtin_closure(tid) {
             if self.satisfies(target, b) == Some(false) {
-                let msg = self.unsatisfied(target, b, &format!(", which trait `{name}` requires"));
+                let msg = self.format_unsatisfied_bound(target, b, &format!(", which trait `{name}` requires"));
                 self.error(span, msg);
             }
         }
         for s in self.supers_of(target, trait_ref) {
-            // A missing `Num` was reported as a built-in bound above.
             if Some(s.trait_id) == self.num_trait {
                 continue;
             }
@@ -865,11 +859,8 @@ impl Checker {
     // ------------------------------------------------------------------
     // Evidence
 
-    /// The hidden arguments of a call of `f` with the type arguments `fresh`
-    /// and the evidence `dicts`: the descriptions of its `reflect` type
-    /// arguments, then its evidence. `what` names the call in errors, and
-    /// `lenient` tells which evidence can stay unknown (see
-    /// [`EvidenceReq::lenient`]).
+    /// Builds hidden arguments for a call to `f` (`reflect` type descriptions
+    /// followed by trait dictionaries).
     pub(crate) fn hidden_args(
         &mut self,
         f: FnId,
@@ -893,16 +884,14 @@ impl Checker {
         out
     }
 
-    /// Reports the `reflect` type parameters of trait or impl method `m`: a
-    /// call through a trait passes no type descriptions.
-    fn deny_reflect_method(&mut self, m: &ast::FnDecl) {
+    /// Reports an error if trait or impl method `m` declares `reflect` type parameters.
+    fn reject_reflect_params(&mut self, m: &ast::FnDecl) {
         for g in m.generics.iter().filter(|g| g.reflect) {
             self.error(g.name.span, "the type parameters of trait and impl methods cannot be `reflect`");
         }
     }
 
-    /// Declares the hidden parameters of the function being checked that
-    /// hold the descriptions of its `reflect` type parameters.
+    /// Declares hidden parameters for the `reflect` type parameters of `f`.
     pub(crate) fn declare_reflect_params(&mut self, f: FnId) -> Vec<LocalId> {
         let span = self.fns[f as usize].span;
         let mut out = Vec::new();
@@ -918,15 +907,15 @@ impl Checker {
         out
     }
 
-    /// The hidden parameter holding the description of `t`, if `t` is a
-    /// `reflect` type parameter of the function being checked.
+    /// Returns the hidden local holding the description of `t` if `t` is a
+    /// `reflect` type parameter of the current function.
     pub(crate) fn reflect_local(&self, t: TypeId) -> Option<LocalId> {
         let Ty::Param(p) = self.rty(t) else { return None };
         self.reflect_param_local(p)
     }
 
-    /// The hidden parameter holding the description of `p`, if `p` is a
-    /// `reflect` type parameter of the function being checked.
+    /// Returns the hidden local holding the description of `p` if `p` is a
+    /// `reflect` type parameter of the current function.
     pub(crate) fn reflect_param_local(&self, p: ParamId) -> Option<LocalId> {
         self.fs.reflect_locals.iter().find(|&&(q, _)| q == p).map(|&(_, l)| l)
     }
@@ -1148,7 +1137,7 @@ impl Checker {
             for (v, b) in inst.builtin {
                 match self.satisfies(v, b) {
                     Some(false) => {
-                        let msg = self.unsatisfied(v, b, "");
+                        let msg = self.format_unsatisfied_bound(v, b, "");
                         return Err(context(self, msg));
                     }
                     None => self.fs.obligations.push((v, b, span)),

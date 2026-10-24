@@ -55,7 +55,7 @@ pub use vm::value::{Packing, Value, ValueType};
 pub use indexmap;
 pub use jiff;
 
-/// The Rust type of `json.Json` values.
+/// Rust representation of `json.Json` values.
 pub mod json {
     pub use crate::stdlib::json::Json;
 }

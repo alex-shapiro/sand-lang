@@ -74,7 +74,7 @@ impl Checker {
             }
             for f in def.fields().iter().filter(|f| f.is_pub) {
                 let var = if f.mutable { "var " } else { "" };
-                let default = self.default_text(d, f);
+                let default = self.format_field_default(d, f);
                 let decl = format!("{var}{}: {}{default}", self.name(f.name), self.show(f.ty));
                 members.push(member_doc(MemberKind::Field, self.name(f.name), decl, &f.doc));
             }

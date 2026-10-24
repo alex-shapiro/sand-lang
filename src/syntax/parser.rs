@@ -424,7 +424,6 @@ impl<'a> Parser<'a> {
         Ok(Import { source, alias: None, names: Some(names) })
     }
 
-    /// Type parameters, which may be `reflect` if `function`.
     fn generics(&mut self, function: bool) -> PResult<Vec<GenericParam>> {
         let mut out = Vec::new();
         if !self.eat(&Tok::Lt) {

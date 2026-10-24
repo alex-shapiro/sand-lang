@@ -165,7 +165,6 @@ pub(crate) fn task() -> NativeModule {
 }
 
 fn numbers(m: &mut NativeModule) {
-    // The `Num` evidence, which natives read through `Num<N>`.
     m.function("int.zero", || 0i64);
     m.function("int.one", || 1i64);
     m.function("float.zero", || 0.0f64);
@@ -817,8 +816,6 @@ fn lists(m: &mut NativeModule) {
         let set = set_of(vm, xs.items(&vm.heap))?;
         Ok(new_set(vm, set))
     });
-    // Values are erased, so the identity (`T.zero()` or `T.one()`) comes from
-    // the `Num` evidence: an empty `[float]` sums to 0.0.
     fn fold_num(vm: &mut Vm, num: Num<0>, xs: List<Param<0, NumB>>, product: bool) -> Result<Param<0>, Ctl> {
         produce(vm, list_len(vm, xs), 0)?;
         let mut acc = if product { num.one(vm)? } else { num.zero(vm)? }.raw();

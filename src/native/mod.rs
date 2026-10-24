@@ -38,11 +38,9 @@ pub trait NamedType: Sized + 'static {
     const DOC: &'static str;
     /// `true` if the type is exported (`pub`), or `false` if marked `#[sand(private)]`.
     const PUBLIC: bool;
-    /// Names of the Sand type parameters (the Rust type parameters of a
-    /// generic enum or struct).
+    /// Type parameter names for a generic enum or struct.
     const PARAMS: &'static [&'static str] = &[];
-    /// Identifies the Sand type: the `TypeId` of `Self`, or for a generic type,
-    /// one `TypeId` for all its instances.
+    /// Returns a [`TypeId`] that uniquely identifies the Sand type across all generic instantiations.
     #[doc(hidden)]
     fn rust_type() -> TypeId {
         TypeId::of::<Self>()
@@ -115,12 +113,12 @@ pub trait EnumType: NamedType + SandType {
     fn index(&self) -> usize;
 }
 
-/// The index of the variant named `name` in `T::VARIANTS`, for use in
-/// constants: `const INT: usize = variant_index::<Json>("Int");`.
+/// Returns the index of the variant named `name` in `T::VARIANTS` for use in
+/// `const` contexts.
 ///
 /// # Panics
 ///
-/// Panics (at compile time, in a constant) if `T` has no variant `name`.
+/// Panics if `name` is not a variant in `T::VARIANTS`.
 pub const fn variant_index<T: EnumType>(name: &str) -> usize {
     let mut i = 0;
     while i < T::VARIANTS.len() {
@@ -160,7 +158,7 @@ const fn same_bytes(a: &str, b: &str) -> bool {
 /// pub struct Point {
 ///     /// Horizontal coordinate.
 ///     pub x: f64,
-///     /// Vertical coordinate (`0.0` if a struct literal omits it).
+///     /// Vertical coordinate (`0.0` if omitted in a struct literal).
 ///     #[sand(default)]
 ///     pub y: f64,
 ///     /// Number of moves applied to the point.
@@ -194,44 +192,38 @@ pub struct StructField {
     pub var: bool,
     /// Returns the Sand [`Type`] of the field.
     pub ty: fn() -> Type,
-    /// Returns the default value of the field (`#[sand(default)]`), or
-    /// `None` if the value is not a Sand constant.
+    /// Evaluates the default value of the field (`#[sand(default)]`) as a compile-time [`Constant`].
     pub default: Option<fn() -> Option<Constant>>,
 }
 
-/// A Sand constant made from a Rust value (see [`IntoValue::to_const`]).
+/// Compile-time Sand constant produced by [`IntoValue::to_const`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct Constant(pub(crate) ConstVal<RustVariant, TypeId>);
 
-/// A variant in a [`Constant`].
+/// Enum variant identifier inside a [`Constant`].
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum RustVariant {
     None,
     Some,
-    /// The variant `index` of the Rust-bound enum whose
-    /// [`NamedType::rust_type`] is `rust`.
+    /// Variant `index` of the Rust-bound enum identified by `rust` ([`NamedType::rust_type`]).
     Bound {
         rust: TypeId,
         index: usize,
     },
 }
 
-/// The values of `cs`, or `None` if one of them is not a constant.
-fn parts(cs: impl IntoIterator<Item = Option<Constant>>) -> Option<Vec<ConstVal<RustVariant, TypeId>>> {
+pub(crate) fn collect_consts(cs: impl IntoIterator<Item = Option<Constant>>) -> Option<Vec<ConstVal<RustVariant, TypeId>>> {
     cs.into_iter().map(|c| c.map(|c| c.0)).collect()
 }
 
-/// The variant `index` of `T` with `payload`, or `None` if a part of the
-/// payload is not a constant.
 #[doc(hidden)]
 pub fn variant_const<T: EnumType>(index: usize, payload: impl IntoIterator<Item = Option<Constant>>) -> Option<Constant> {
-    Some(Constant(ConstVal::Variant(RustVariant::Bound { rust: T::rust_type(), index }, parts(payload)?)))
+    Some(Constant(ConstVal::Variant(RustVariant::Bound { rust: T::rust_type(), index }, collect_consts(payload)?)))
 }
 
-/// The struct `T` with `fields`, or `None` if a field is not a constant.
 #[doc(hidden)]
 pub fn struct_const<T: StructType>(fields: impl IntoIterator<Item = Option<Constant>>) -> Option<Constant> {
-    Some(Constant(ConstVal::Struct(T::rust_type(), parts(fields)?)))
+    Some(Constant(ConstVal::Struct(T::rust_type(), collect_consts(fields)?)))
 }
 
 #[doc(hidden)]
@@ -284,8 +276,6 @@ pub fn field_from_value<T: for<'a> FromValue<Item<'a> = T>>(vm: &Vm, v: Value, c
     T::from_value(vm, v, conv)
 }
 
-/// Reads the enum value `v` as `T`: calls `read` with the index of its variant
-/// in `T::VARIANTS`.
 #[doc(hidden)]
 pub fn enum_from_value<T: EnumType>(
     vm: &Vm,
@@ -311,13 +301,11 @@ pub fn enum_from_value<T: EnumType>(
     conv.enter_struct(|conv| read(index, conv))
 }
 
-/// Field `i` of the payload of the enum value `v`.
 #[doc(hidden)]
 pub fn variant_field(vm: &Vm, v: Value, i: usize) -> Result<Value, Ctl> {
     vm.heap.field(v, i).ok_or_else(|| Ctl::internal("a native function read a missing variant payload"))
 }
 
-/// Builds the variant `index` of `T` with the payload that `write` converts.
 #[doc(hidden)]
 pub fn variant_into_value<T: EnumType, const N: usize>(
     vm: &mut Vm,
@@ -601,24 +589,21 @@ impl<const N: u8> Reflect<N> {
     }
 }
 
-/// The methods of the prelude's `Num` trait in the order of their slots in its
-/// dictionary. The checker requires the trait to declare them in this order.
+/// Method names of the prelude `Num` trait in dictionary slot order.
 pub(crate) const NUM_METHODS: [&str; 2] = ["zero", "one"];
 
 impl<const N: u8> Num<N> {
-    /// Returns `T.zero()`.
+    /// Returns the additive identity (`0` or `0.0`) for type parameter `N`.
     pub fn zero(self, vm: &mut Vm) -> Result<Param<N>, Ctl> {
-        self.evidence(vm, 0)
+        self.call_method(vm, 0)
     }
 
-    /// Returns `T.one()`.
+    /// Returns the multiplicative identity (`1` or `1.0`) for type parameter `N`.
     pub fn one(self, vm: &mut Vm) -> Result<Param<N>, Ctl> {
-        self.evidence(vm, 1)
+        self.call_method(vm, 1)
     }
 
-    /// Calls method `slot` of the prelude's `Num` trait (see [`NUM_METHODS`]).
-    /// The checker requires the methods of each `Num` impl to be native.
-    fn evidence(self, vm: &mut Vm, slot: usize) -> Result<Param<N>, Ctl> {
+    fn call_method(self, vm: &mut Vm, slot: usize) -> Result<Param<N>, Ctl> {
         let f = match vm.heap.get(self.raw()) {
             Obj::Tuple(slots) => slots.get(slot).map(|&f| vm.heap.get(f)),
             _ => None,
@@ -729,10 +714,9 @@ pub(crate) enum BoundKind {
         rust: TypeId,
         params: &'static [&'static str],
         fields: &'static [StructField],
-        /// The default of each field.
         defaults: Arc<[Option<Constant>]>,
     },
-    /// A VM-implemented generic type (`Task<T>` or `Channel<T>`), with its type parameter names.
+    /// Built-in generic type (`Task<T>` or `Channel<T>`) and its type parameter names.
     Builtin(&'static [&'static str]),
 }
 
@@ -745,7 +729,6 @@ impl BoundKind {
         }
     }
 
-    /// The Sand types of the fields and payloads of the type.
     pub(crate) fn member_types(&self) -> Vec<Type> {
         match self {
             BoundKind::Struct { fields, .. } => fields.iter().map(|f| (f.ty)()).collect(),
@@ -929,7 +912,6 @@ impl NativeModule {
     /// duplicated, or if `T::NAME` is already registered in this module.
     pub fn bind<T: NamedType>(&mut self) -> &mut Self {
         let kind = T::binding().0;
-        // Fields are identifiers; variants and type parameters are type names.
         let names = |what: &str, owner: &str, names: &[&str], type_names: bool| {
             for (i, n) in names.iter().enumerate() {
                 match type_names {

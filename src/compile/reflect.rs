@@ -1,88 +1,73 @@
-//! Runtime type descriptions for `reflect` type parameters (e.g. `json.decode`).
+//! Runtime type descriptors for `reflect` type parameters.
 //!
-//! A description expands struct and enum definitions, so written out as a
-//! tree it can be exponentially larger than the type (`struct B { x: A, y:
-//! A }`, `struct C { x: B, y: B }`, ...). Descriptions are therefore built as
-//! DAGs: the description of each struct or enum *instance* (a definition
-//! with its type arguments) is built once and shared (`Arc`) by every place
-//! that refers to it, within one description and, through [`DescCache`],
-//! across all the `reflect` call sites of a program. Each reflected type
-//! becomes one shared constant.
+//! The compiler builds type descriptors as directed acyclic graphs (DAGs) so
+//! that nested struct and enum definitions do not cause exponential size blowup.
+//! Each struct or enum instantiation is built once and shared via [`Arc`] within
+//! a descriptor and across the program through [`DescCache`].
 //!
-//! A recursive reference to an enclosing struct or enum is a
-//! `TypeDesc::Recur(id)`, resolved by the decoder against the instances it
-//! is inside. A shared subtree must therefore never contain a `Recur` to an
-//! instance outside itself unless it is only reused below that instance:
-//! descriptions whose recursive references all point inside them are
-//! *closed* and cached for the whole program; the others are reused only
-//! while the instance they refer to is still being described.
+//! Recursive references to an enclosing struct or enum are represented as
+//! [`TypeDesc::Recur`]. Descriptors whose recursive references all resolve to
+//! nodes within the subtree are closed and cached across the entire program.
+//! Descriptors that reference an outer enclosing type remain open and are reused
+//! only while that enclosing type is being built.
 //!
-//! The work is bounded: every node built, cache lookup and key component
-//! costs a unit, at most [`MAX_DESC_NODES`] per description and
+//! Descriptor construction is bounded by [`MAX_DESC_NODES`] per descriptor and
 //! [`MAX_TOTAL_DESC_NODES`] per compilation.
 
 use crate::check::CheckedProgram;
 use crate::check::persist::PMap;
-use crate::types::{FnId, Opaque, PARAM_MARK, Ty, TyList, TypeArena, TypeDefId, TypeDefKind, TypeId, TypePrinter};
-use crate::vm::value::{DescTemplate, FieldDefault, MAX_BUILT_DEPTH, TypeDesc, cut_name};
+use crate::types::{FnId, Opaque, PARAM_PLACEHOLDER, Ty, TyList, TypeArena, TypeDefId, TypeDefKind, TypeId, TypePrinter};
+use crate::vm::value::{DescTemplate, FieldDefault, MAX_DESC_DEPTH, TypeDesc, truncate_type_name};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Maximum work (nodes built, plus type key components examined) for the
-/// description of one reflected type.
+/// Maximum work units allowed for a single type descriptor.
 pub const MAX_DESC_NODES: usize = 100_000;
 
-/// Maximum work for all the descriptions built by one compilation.
+/// Maximum work units allowed across all type descriptors in a single compilation.
 pub const MAX_TOTAL_DESC_NODES: usize = 1_000_000;
 
-/// A structural key identifying a type (independent of the ids of the
-/// arena, which differ between the compilations that share the cache).
+/// Arena-independent structural key that identifies a type across REPL compilations.
 type Key = Vec<u32>;
 
-/// Type descriptions shared between the `reflect` call sites of a program
-/// (kept between the compilations of a REPL session).
+/// Cache of shared runtime type descriptors across a program or REPL session.
 #[derive(Clone, Default)]
 pub(crate) struct DescCache {
-    /// Ids of struct and enum instances (`TypeDesc::Struct::id`).
+    /// Struct and enum instance IDs (`TypeDesc::Struct::id`).
     ids: PMap<Key, u32>,
-    /// Closed descriptions of struct and enum instances.
+    /// Closed descriptors for struct and enum instances.
     closed: PMap<Key, Arc<TypeDesc>>,
-    /// The constant holding the description of each reflected type.
+    /// Constant pool indices for reflected types.
     consts: PMap<Key, u32>,
-    /// The template of each reflected type with type parameters.
+    /// Template indices for parameterized reflected types.
     templates: PMap<Key, u32>,
-    /// The function that fills each field (struct definition, field index)
-    /// with its computed default (see [`DescSink::field_fill`]).
+    /// Helper function prototypes for computed field defaults, keyed by `(def, field_index)`.
     field_fills: PMap<(TypeDefId, u32), u32>,
-    /// The function that adds elements to a set (see [`DescSink::set_fill`]).
+    /// Helper function prototype that populates a set from a list.
     set_fill: Option<u32>,
-    /// Work done by the current compilation (reset by [`DescCache::start`]).
+    /// Work units consumed during the current compilation.
     total: usize,
 }
 
-/// Adds to the program what descriptions refer to.
+/// Emits constants, templates, and helper functions referenced by type descriptors.
 pub(crate) trait DescSink {
-    /// Adds the constant holding `desc` and returns its index.
+    /// Adds `desc` to the constant pool and returns its constant index.
     fn constant(&mut self, desc: Arc<TypeDesc>) -> u32;
-    /// Adds template `t` and returns its index.
+    /// Adds `t` to the program templates and returns its template index.
     fn template(&mut self, t: DescTemplate) -> u32;
-    /// Adds the function (with the struct as its one capture) that sets field
-    /// `index` of struct `def` to the value of the field's default `helper`,
-    /// and returns its proto, or `None` if `helper` has no code.
+    /// Emits a helper function that evaluates `helper` and assigns the result to field `index` of struct `def`.
     fn field_fill(&mut self, def: TypeDefId, index: u32, helper: FnId) -> Option<u32>;
-    /// Adds the function (with a set and a list as its captures) that adds
-    /// the elements of the list to the set, and returns its proto.
+    /// Emits a helper function that inserts elements from a captured list into a captured set.
     fn set_fill(&mut self) -> u32;
 }
 
 impl DescCache {
-    /// Starts a compilation (which may do another `MAX_TOTAL_DESC_NODES`).
+    /// Resets the per-compilation work counter.
     pub(crate) fn start(&mut self) {
         self.total = 0;
     }
 
-    /// The index of the constant describing `t`, adding it to `sink` if
-    /// needed; `None` if the description is too large.
+    /// Returns the constant pool index for the descriptor of `t`, or `None` if the descriptor exceeds the size budget.
     pub(crate) fn const_for(&mut self, cp: &CheckedProgram, arena: &mut TypeArena, t: TypeId, sink: &mut dyn DescSink) -> Option<u32> {
         let mut key = Vec::new();
         type_key(arena, t, &mut key);
@@ -99,9 +84,7 @@ impl DescCache {
         Some(k)
     }
 
-    /// The index of the template describing `t`, whose type parameters are
-    /// `params`, adding it to `sink` if needed; `None` if the description is
-    /// too large.
+    /// Returns the template index for the parameterized descriptor of `t`, or `None` if the descriptor exceeds the size budget.
     pub(crate) fn template_for(
         &mut self,
         cp: &CheckedProgram,
@@ -121,7 +104,7 @@ impl DescCache {
         }
         let template = DescTemplate::new(self.describe(cp, arena, t, sink)?, params);
         self.total = self.total.saturating_add(template.size());
-        if template.depth() > MAX_BUILT_DEPTH || self.total > MAX_TOTAL_DESC_NODES {
+        if template.depth() > MAX_DESC_DEPTH || self.total > MAX_TOTAL_DESC_NODES {
             return None;
         }
         let k = sink.template(template);
@@ -129,7 +112,6 @@ impl DescCache {
         Some(k)
     }
 
-    /// The description of `t`, or `None` if it is too large.
     fn describe(&mut self, cp: &CheckedProgram, arena: &mut TypeArena, t: TypeId, sink: &mut dyn DescSink) -> Option<Arc<TypeDesc>> {
         let budget = MAX_DESC_NODES.min(MAX_TOTAL_DESC_NODES.saturating_sub(self.total));
         let mut b = Builder {
@@ -199,28 +181,23 @@ fn type_key(arena: &TypeArena, t: TypeId, out: &mut Key) {
     }
 }
 
-/// Builds one description.
 struct Builder<'a, 'c> {
     cp: &'a CheckedProgram,
     arena: &'c mut TypeArena,
     cache: &'c mut DescCache,
     sink: &'c mut dyn DescSink,
-    /// The struct and enum instances being described, by their depth.
+    /// Active struct and enum instances on the recursion stack, mapped to their stack depth.
     stack: HashMap<Key, usize>,
-    /// Descriptions that refer to instances on the stack, with the lowest
-    /// stack depth they refer to. Each is reused only while the instance
-    /// that contains it is being described (the stack below is unchanged).
+    /// Open descriptors that reference active instances on `stack`, paired with the minimum referenced stack depth.
     open: HashMap<Key, (Arc<TypeDesc>, usize)>,
-    /// The keys in `open` by the depth of the instance containing them, to
-    /// drop them when that instance is done.
+    /// Keys in `open` grouped by the depth of the enclosing instance that owns them.
     open_at: Vec<Vec<Key>>,
     work: usize,
     budget: usize,
     failed: bool,
 }
 
-/// The lower of two "lowest stack depth referred to" (`None`: no reference).
-fn low(a: Option<usize>, b: Option<usize>) -> Option<usize> {
+fn min_depth(a: Option<usize>, b: Option<usize>) -> Option<usize> {
     match (a, b) {
         (Some(a), Some(b)) => Some(a.min(b)),
         (a, b) => a.or(b),
@@ -228,7 +205,6 @@ fn low(a: Option<usize>, b: Option<usize>) -> Option<usize> {
 }
 
 impl Builder<'_, '_> {
-    /// Charges `units` of work; false once over budget.
     fn charge(&mut self, units: usize) -> bool {
         self.work = self.work.saturating_add(units);
         if self.work > self.budget {
@@ -237,7 +213,7 @@ impl Builder<'_, '_> {
         !self.failed
     }
 
-    /// The description of `t` and the lowest depth of `stack` it refers to.
+    /// Returns the descriptor for `t` and the minimum `stack` depth that it references.
     fn desc(&mut self, t: TypeId) -> (Arc<TypeDesc>, Option<usize>) {
         if !self.charge(1) {
             return (Arc::new(TypeDesc::Unit), None);
@@ -263,7 +239,7 @@ impl Builder<'_, '_> {
             }
             Ty::Map(k, v) => {
                 let ((k, lk), (v, lv)) = (self.desc(k), self.desc(v));
-                (Arc::new(TypeDesc::Map(k, v)), low(lk, lv))
+                (Arc::new(TypeDesc::Map(k, v)), min_depth(lk, lv))
             }
             Ty::Tuple(ts) => {
                 let mut l = None;
@@ -272,7 +248,7 @@ impl Builder<'_, '_> {
                     .into_iter()
                     .map(|x| {
                         let (d, lx) = self.desc(x);
-                        l = low(l, lx);
+                        l = min_depth(l, lx);
                         d
                     })
                     .collect();
@@ -290,8 +266,6 @@ impl Builder<'_, '_> {
         }
     }
 
-    /// The function that fills field `index` of struct `d` with its computed
-    /// default `helper`.
     fn field_fill(&mut self, d: TypeDefId, index: u32, helper: FnId) -> Option<u32> {
         if let Some(&p) = self.cache.field_fills.get(&(d, index)) {
             return Some(p);
@@ -305,14 +279,12 @@ impl Builder<'_, '_> {
         TypePrinter::new(self.arena, &self.cp.types, &self.cp.params, &self.cp.syms, self.cp.wk).show(t)
     }
 
-    /// The name of instance `t`, in which instantiation replaces the type
-    /// parameters (see [`DescTemplate`]).
+    /// Formats the name of `t` with placeholder markers for type parameters so [`DescTemplate`] can substitute concrete names at runtime.
     fn instance_name(&self, t: TypeId) -> String {
-        TypePrinter { mark_params: true, ..TypePrinter::new(self.arena, &self.cp.types, &self.cp.params, &self.cp.syms, self.cp.wk) }
+        TypePrinter { placeholder_params: true, ..TypePrinter::new(self.arena, &self.cp.types, &self.cp.params, &self.cp.syms, self.cp.wk) }
             .show(t)
     }
 
-    /// The description of the struct or enum instance `t` = `d<args>`.
     fn named(&mut self, t: TypeId, d: u32, args: TyList) -> (Arc<TypeDesc>, Option<usize>) {
         let mut key = Vec::new();
         type_key(self.arena, t, &mut key);
@@ -331,8 +303,6 @@ impl Builder<'_, '_> {
             return (desc.clone(), Some(*x));
         }
         let def = &self.cp.types[d as usize];
-        // Instantiation replaces the type parameters in the names of structs
-        // and enums only.
         let mut name = match def.kind {
             TypeDefKind::Opaque(_) => self.show(t),
             _ => self.instance_name(t),
@@ -340,9 +310,9 @@ impl Builder<'_, '_> {
         if !self.charge(name.len() / 8) {
             return (Arc::new(TypeDesc::Unit), None);
         }
-        // Instantiation cuts the names that have type parameters.
-        if !name.contains(PARAM_MARK) {
-            cut_name(&mut name);
+        // Parameterized names are truncated after template instantiation.
+        if !name.contains(PARAM_PLACEHOLDER) {
+            truncate_type_name(&mut name);
         }
         let cp = self.cp;
         let args = self.arena.list(args).to_vec();
@@ -359,7 +329,7 @@ impl Builder<'_, '_> {
                     .map(|(i, f)| {
                         let ft = self.arena.instantiate(f.ty, &def.generics, &args);
                         let (fd, lf) = self.desc(ft);
-                        l = low(l, lf);
+                        l = min_depth(l, lf);
                         let default = match (&f.const_default, f.default) {
                             (Some(c), _) => FieldDefault::Const(c.clone()),
                             (None, Some(helper)) => match self.field_fill(d, i as u32, helper) {
@@ -383,7 +353,7 @@ impl Builder<'_, '_> {
                             .map(|&x| {
                                 let ft = self.arena.instantiate(x, &def.generics, &args);
                                 let (fd, lf) = self.desc(ft);
-                                l = low(l, lf);
+                                l = min_depth(l, lf);
                                 fd
                             })
                             .collect();
@@ -395,13 +365,11 @@ impl Builder<'_, '_> {
             TypeDefKind::Opaque(Opaque::Value(v)) => TypeDesc::Value { name, parse: v.parse },
             TypeDefKind::Opaque(_) => TypeDesc::Unsupported(name),
         };
-        // Descriptions made inside this instance are not reused outside it.
         for k in self.open_at.pop().unwrap_or_default() {
             self.open.remove(&k);
         }
         self.stack.remove(&key);
         let desc = Arc::new(desc);
-        // References to this instance itself are resolved inside it.
         let l = l.filter(|&x| x < depth);
         if !self.failed {
             match l {
@@ -409,8 +377,6 @@ impl Builder<'_, '_> {
                     self.cache.closed.insert(key, desc.clone());
                 }
                 Some(x) => {
-                    // Reusable while the enclosing instance (`x < depth`,
-                    // so there is one) is being described.
                     self.open.insert(key.clone(), (desc.clone(), x));
                     self.open_at[depth - 1].push(key);
                 }

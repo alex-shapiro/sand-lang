@@ -1874,8 +1874,8 @@ impl Vm {
         Ok(out)
     }
 
-    /// `Op::Describe`: instantiates a type description template with the
-    /// descriptions at the start of `args`.
+    /// `Op::Describe`: instantiates a type descriptor template with the
+    /// argument descriptors at the start of `args`.
     #[inline(never)]
     fn op_describe(&mut self, prog: &Program, tmpl: u32, args: &[Value]) -> Result<Value, Ctl> {
         let t = &prog.desc_templates[tmpl as usize];

@@ -146,9 +146,6 @@ fn json_decode_defaults_appear_in_stack_traces() {
 
 #[test]
 fn json_decode_of_deep_options_runs_on_a_small_stack() {
-    // 512 KiB is the default stack of a secondary thread on iOS. Layers of
-    // `T??` read no JSON nesting, and the name of a map key type that
-    // `decode` cannot read comes first in the error text.
     let deep = format!("int{}", "?".repeat(9000));
     let src = format!(
         "import json\nlet a: {deep} = json.decode(\"1\").unwrap()\nprint(json.encode(a))\nlet b: Result<[{deep}]> = json.decode(\"[{{}}]\")\n\
@@ -1305,7 +1302,7 @@ struct Labeled<T> {
     history: Vec<T>,
 }
 
-/// One of two values.
+/// A left or right value.
 #[derive(Clone, Debug, PartialEq, sandlang::SandEnum)]
 #[sand(module = "boxes")]
 enum Either<L, R> {
@@ -1422,7 +1419,7 @@ help(boxes.Either)
     let (r, out, _) = run_src(Config::new().module(boxes_module()), src);
     r.unwrap();
     let help = "struct boxes.Labeled<T>\n\nA value with a label.\n\nFields:\n    label: str\n    value: T\n        The labeled value.\n    history: [T] = []\n        Earlier values.\n\
-                enum boxes.Either<L, R>\n\nOne of two values.\n\nVariants:\n    Left(L)\n    Right(R)\n";
+                enum boxes.Either<L, R>\n\nA left or right value.\n\nVariants:\n    Left(L)\n    Right(R)\n";
     let expected = [
         "Labeled { label: \"count\", value: 3, history: [0, 1, 2] }",
         "6",
@@ -1686,7 +1683,6 @@ print(none.product())
         assert!(errors.iter().any(|e| e == msg), "{decl}: {errors:?}");
     }
 
-    // A Rust function takes the `Num` evidence of only the parameters it uses.
     let mut m = module("pub native fn total<T: Num>(xs: [T]) -> T\npub native fn unit<A: Num, B: Num>(a: A, b: B) -> B");
     m.function("first", |xs: Vec<Param<0, bound::Num>>| xs[0]);
     m.source("pub native fn first<T: Num>(xs: [T]) -> T");
@@ -1701,7 +1697,6 @@ print(none.product())
     let errors = engine_errors(Config::new().module(m));
     assert_eq!(errors, ["native function `first` must bound `T` by `Num`, as its Rust function requires `T: Num`"]);
 
-    // A call through an impl passes the impl's dictionary, not `Num` values.
     let mut m = NativeModule::new("nums");
     m.vm_function("List.go", |vm: &mut Vm, num: Num<0>, _: Val<Vec<Param<0, bound::Num>>>| num.one(vm));
     m.source("pub trait Go { fn go(self) -> int }\nimpl<T: Num> Go for [T] { native fn go(self) -> T }");
