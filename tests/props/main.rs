@@ -2,6 +2,7 @@
 //! models on generated inputs.
 
 mod bindings;
+mod generics;
 mod natives;
 mod observers;
 mod programs;

@@ -326,6 +326,11 @@ impl ProgramMark {
 pub(crate) fn compile_more(mut input: CompileInput, prog: &mut Program, inc: &mut Incremental, inits: &[FnId]) -> Result<u32, Vec<Diag>> {
     let cp = input.checked;
     let first = inc.fn_protos.len();
+    if cfg!(debug_assertions)
+        && let Err(m) = crate::check::verify(cp, cp.bodies.from(first as FnId))
+    {
+        panic!("the checked program fails verification: {m}");
+    }
     for (f, body) in cp.bodies.from(first as FnId).filter(|_| input.optimize) {
         if let Some(b) = inline::inlinable(cp, f, body) {
             inc.inline.insert(f, b);
@@ -337,11 +342,6 @@ pub(crate) fn compile_more(mut input: CompileInput, prog: &mut Program, inc: &mu
         .map(|(_, b)| if input.optimize { inline::inline_calls(b, &inc.inline, input.budget) } else { None })
         .collect();
     let bodies: HashMap<FnId, &HFn> = cp.bodies.from(first as FnId).zip(&inlined).map(|((f, b), i)| (f, i.as_ref().unwrap_or(b))).collect();
-    if cfg!(debug_assertions)
-        && let Err(m) = crate::check::verify(cp, cp.bodies.from(first as FnId).map(|(f, _)| (f, bodies[&f])))
-    {
-        panic!("the checked program fails verification: {m}");
-    }
     let order = InitOrder::new(cp, &bodies, inits, prog.global_names.len(), input.initialized.take(), input.budget);
     let mut c = Compiler {
         cp,
@@ -4400,6 +4400,16 @@ mod tests {
         assert_eq!(nparams("plain"), 1);
         assert_eq!(nparams("described"), 2);
         assert_eq!(nparams("num"), 2);
+    }
+
+    #[test]
+    fn dictionaries_built_from_parameters_are_built_once_on_entry() {
+        let src = "trait Show { fn show(self) -> str }\nimpl Show for int { fn show(self) -> str { \"i\" } }\nimpl<A: Show> Show for [A] { fn show(self) -> str { self[0].show() } }\nfn shows<T: Show>(x: T, n: int) -> int {\n    var k = 0\n    for _ in 0..n {\n        k += [x].show().len() + [1].show().len()\n    }\n    k\n}\nprint(shows(1, 2))\n";
+        assert_eq!(run(src), "4\n");
+        let prog = compile(src);
+        let (body, entry) = first_loop(&prog, "shows");
+        let tuples = |ops: &[Op]| ops.iter().filter(|op| matches!(op, Op::NewTuple { .. })).count();
+        assert_eq!((tuples(entry), tuples(body)), (1, 0));
     }
 
     #[test]

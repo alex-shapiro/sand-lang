@@ -21,7 +21,7 @@ const DERIVED: [Builtin; 4] = [Builtin::Eq, Builtin::Ord, Builtin::Hash, Builtin
 
 /// Verifies all type definitions and impls of `cp`, and `bodies`. Returns
 /// the first violation found.
-pub(crate) fn verify<'a>(cp: &CheckedProgram, bodies: impl Iterator<Item = (FnId, &'a HFn)>) -> Result<(), String> {
+pub(crate) fn verify<'a>(cp: &'a CheckedProgram, bodies: impl Iterator<Item = (FnId, &'a HFn)>) -> Result<(), String> {
     let mut v = Verifier::new(cp);
     for d in 0..cp.types.len() {
         v.type_def(d as TypeDefId)?;
@@ -231,7 +231,7 @@ impl<'a> Verifier<'a> {
             _ => match self.cp.traits[tr.trait_id as usize].builtin {
                 Some(b) if b.is_derived() => self.derived_holds(cx, ty, b),
                 _ => {
-                    let (i, sigma) = self.impl_for(ty, tr).ok_or_else(|| fail(self))?;
+                    let (i, sigma) = self.impl_for(ty, tr).map_err(|why| format!("{}: {why}", fail(self)))?;
                     let imp = &self.cp.impls[i as usize];
                     let gens = imp.generics.clone();
                     for (t, s) in imp.evidence.clone() {
@@ -281,11 +281,19 @@ impl<'a> Verifier<'a> {
         Ok(())
     }
 
-    /// The impl of `tr` that matches `ty`, and the type arguments of its
-    /// type parameters. An impl of a later session input replaces an earlier
-    /// one, so the last match applies.
-    fn impl_for(&self, ty: TypeId, tr: TraitRef) -> Option<(ImplId, Vec<TypeId>)> {
-        (0..self.cp.impls.len() as ImplId).rev().find_map(|i| Some((i, self.match_impl(i, ty, tr)?)))
+    /// The one impl of `tr` that matches `ty`, and the type arguments of
+    /// its type parameters.
+    fn impl_for(&self, ty: TypeId, tr: TraitRef) -> Result<(ImplId, Vec<TypeId>), &'static str> {
+        let mut found = None;
+        for i in (0..self.cp.impls.len() as ImplId).filter(|&i| !self.cp.impls[i as usize].replaced) {
+            if let Some(sigma) = self.match_impl(i, ty, tr) {
+                if found.is_some() {
+                    return Err("several impls match");
+                }
+                found = Some((i, sigma));
+            }
+        }
+        found.ok_or("no impl matches")
     }
 
     fn match_impl(&self, i: ImplId, ty: TypeId, tr: TraitRef) -> Option<Vec<TypeId>> {
@@ -441,8 +449,11 @@ impl<'a> Verifier<'a> {
 
     /// Checks that the dictionary of impl `i` with fields `args` proves `ty: tr`.
     fn impl_dict(&mut self, cx: &Cx, i: ImplId, args: &[HExpr], ty: TypeId, tr: TraitRef) -> Res {
-        let sigma = self.match_impl(i, ty, tr).ok_or("its impl does not match")?;
         let imp = &self.cp.impls[i as usize];
+        if imp.replaced {
+            return Err("its impl is replaced by a later one".into());
+        }
+        let sigma = self.match_impl(i, ty, tr).ok_or("its impl does not match")?;
         let (gens, evidence) = (imp.generics.clone(), imp.evidence.clone());
         let mut needed: Vec<(TypeId, TraitRef)> = self.supers_of(ty, tr).into_iter().map(|s| (ty, s)).collect();
         for (t, s) in evidence {
@@ -525,7 +536,7 @@ impl<'a> Verifier<'a> {
                     let gens = &self.cp.fns[sig as usize].generics;
                     let self_ty = gens.iter().position(|&g| g == td.self_param).map(|k| targs[k]).ok_or("a trait method has no `Self`")?;
                     let tr = TraitRef { trait_id: *trait_id, args: self.arena.intern_list(&targs[..td.generics.len()]) };
-                    if !self.arena.has_vars(self_ty) && self.match_impl(*i, self_ty, tr).is_none() {
+                    if self.cp.impls[*i as usize].replaced || !self.arena.has_vars(self_ty) && self.match_impl(*i, self_ty, tr).is_none() {
                         return Err(format!("a direct call of `{}` for {} goes to another impl", self.show_trait(tr), self.show(self_ty)));
                     }
                 }

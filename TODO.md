@@ -44,6 +44,18 @@ Follow-up work, roughly in priority order.
       checks. Run stressed tests for each check index reached during a call.
 - [ ] Run the `cargo fuzz` targets on a schedule (or on OSS-Fuzz). Update the
       `run` target to compare optimized and unoptimized executions.
+- [ ] `src/check/verify.rs` checks trait evidence and the requirements of
+      written types, not the other typing rules (an `int` passed where a
+      `str` is expected). A full check of the HIR, as GHC's Core Lint does,
+      needs the type of each local, which `LocalInfo` does not record.
+- [ ] `tests/props/generics.rs` generates no enums with payloads, traits
+      with type parameters (`Into<T>`), method type parameters or `where`
+      clauses, `extend` blocks, generic function values, local generic
+      functions or Rust-bound types.
+- [ ] The mutations of `tests/fuzz.rs` change characters: of 3000 mutants,
+      2854 fail to type check and 123 of the other 146 behave like their
+      original. Mutate typed programs instead (replace a type, an
+      expression of the same type, or a call).
 
 ### Spec
 

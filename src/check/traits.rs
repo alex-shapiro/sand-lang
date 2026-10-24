@@ -70,6 +70,9 @@ pub struct ImplDef {
     /// with dictionaries follow the supertrait dictionaries in the impl's
     /// dictionary.
     pub evidence: Vec<(TypeId, TraitRef)>,
+    /// Replaced by an impl of a later session input: code checked before
+    /// keeps using it, later code does not.
+    pub replaced: bool,
 }
 
 /// A trait that a type constructor (`owner`) requires of a type argument.
@@ -571,6 +574,7 @@ impl Checker {
                     // already checked keeps using it).
                     remove_impl(&mut self.impls_by, &key, other);
                     remove_impl(&mut self.impls_by_ctor, &(ctor, arity), other);
+                    self.impls[other as usize].replaced = true;
                     continue;
                 }
                 let other_span = self.impls[other as usize].span;
@@ -586,7 +590,16 @@ impl Checker {
             let pt = self.param_ty(p);
             evidence.extend(self.params[p as usize].traits.iter().map(|&tr| (pt, tr)));
         }
-        self.impls.push(ImplDef { trait_ref, target, generics: generics.clone(), module: self.cur_mod, span, slots: Vec::new(), evidence });
+        self.impls.push(ImplDef {
+            trait_ref,
+            target,
+            generics: generics.clone(),
+            module: self.cur_mod,
+            span,
+            slots: Vec::new(),
+            evidence,
+            replaced: false,
+        });
         add_impl(&mut self.impls_by, key, id);
         add_impl(&mut self.impls_by_ctor, (ctor, arity), id);
 
