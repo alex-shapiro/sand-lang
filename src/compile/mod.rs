@@ -198,8 +198,7 @@ enum HoistKey<'h> {
     /// An immutable field of a struct or tuple in a local that is never
     /// assigned (`it.next`, the function of an `Iter`).
     Field(LocalId, u32),
-    /// A method of a trait dictionary in a local that is never assigned
-    /// (a call through the trait of a type parameter).
+    /// Method slot of a trait dictionary stored in an immutable local.
     Method(LocalId, u32),
 }
 
@@ -4404,8 +4403,6 @@ mod tests {
 
     #[test]
     fn dictionaries_built_from_parameters_are_built_once_on_entry() {
-        // `subs` and `pairs` build the dictionaries of `[T]: Show` from the
-        // `Show` field of the dictionary of `T: Sub`.
         let src = "trait Show { fn show(self) -> str }\ntrait Sub: Show { fn sub(self) -> str }\nimpl Show for int { fn show(self) -> str { \"i\" } }\nimpl Sub for int { fn sub(self) -> str { \"s\" } }\nimpl<A: Show> Show for [A] { fn show(self) -> str { self[0].show() } }\nfn shows<T: Show>(x: T, n: int) -> int {\n    var k = 0\n    for _ in 0..n {\n        k += [x].show().len() + [x].show().len() + [1].show().len()\n    }\n    k\n}\nfn subs<T: Sub>(x: T, n: int) -> int {\n    var k = 0\n    for _ in 0..n {\n        k += [x].show().len() + [x].show().len()\n    }\n    k\n}\nfn pairs<T: Sub, U: Sub>(x: T, y: U, n: int) -> int {\n    var k = 0\n    for _ in 0..n {\n        k += [x].show().len() + [y].show().len()\n    }\n    k\n}\nprint(shows(1, 2))\nprint(subs(1, 2))\nprint(pairs(1, 2, 2))\n";
         assert_eq!(run(src), "6\n4\n4\n");
         let prog = compile(src);

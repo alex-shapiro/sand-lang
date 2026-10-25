@@ -542,16 +542,13 @@ pub fn keys_eq(heap: &Heap, budget: &impl Budget, a: Value, b: Value) -> Result<
     }
 }
 
-/// The hash of a map key or set element, consistent with [`values_eq`] for
-/// the `Hash` types: a variant hashes the same inline or boxed. Keys are
-/// hashed in place (`Hash` types are deeply immutable). Fails with an
-/// internal error for a value whose type cannot implement `Hash` (a float, a
-/// list, a function, ...), which only a bug in the checker lets through.
+/// Computes the hash of map key or set element `v`, consistent with
+/// [`values_eq`] for all types that implement `Hash`.
 ///
-/// Charges one unit per node visited plus the bytes hashed. Once a key turns
-/// out to be large, the hashes of its containers are memoized by handle, so
-/// a key with shared substructure hashes in time linear in its heap size,
-/// not in its (possibly exponentially larger) tree size.
+/// Charges one unit per visited node plus the number of hashed bytes. For large
+/// keys, container hashes are memoized by handle so that keys with shared
+/// substructure are hashed in time linear in their heap size. Returns an
+/// internal error if `v` has a type that does not implement `Hash`.
 #[inline]
 pub fn hash_key(heap: &Heap, budget: &impl Budget, v: Value) -> Result<u64, Ctl> {
     // Fast paths, inlined: the common scalar and string keys.
@@ -654,12 +651,11 @@ pub fn str_hash(s: &str) -> u64 {
     bytes_hash(s.as_bytes())
 }
 
-// Scalar and string hashes carry no type tag: the keys of a map, and the
-// values at any one position of a key (a field, an element, a variant's
-// payload), all have one static type, so values of different types are
-// never compared. Ints hash with one multiply.
+// Scalar and string hashes omit type tags because all keys in a map or at a
+// given structural position share a single static type.
 
-/// Hashes the length so that trailing NULs (the zero padding) are not lost.
+/// Hashes the byte length before the bytes so that trailing NUL bytes affect
+/// the hash.
 #[inline]
 fn bytes_hash(b: &[u8]) -> u64 {
     let mut h = FxHasher::default();
@@ -668,8 +664,8 @@ fn bytes_hash(b: &[u8]) -> u64 {
     h.finish()
 }
 
-/// The hash of `v` if it is not a container (a tuple, struct or variant
-/// with a payload). See [`hash_key`] for the values it rejects.
+/// Computes the hash of `v` if `v` is a scalar or leaf object, or returns
+/// `Ok(None)` if `v` is a composite container (tuple, struct, or payload variant).
 #[inline]
 fn leaf_hash(heap: &Heap, budget: &impl Budget, v: Value) -> Result<Option<u64>, Ctl> {
     let mut h = FxHasher::default();

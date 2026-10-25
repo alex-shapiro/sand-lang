@@ -1,9 +1,9 @@
-//! Randomised robustness ("fuzz") tests. Every input, however malformed, must
-//! produce a diagnostic or a runtime error — never a host panic, crash, hang or
-//! internal error (a bug in the checker, compiler or VM).
+//! Randomized robustness ("fuzz") tests.
 //!
-//! Deterministic seeds keep failures reproducible; set `FUZZ_ITERS` to run longer.
-//! Coverage-guided fuzz targets for `cargo fuzz` live in `fuzz/`.
+//! Every input must produce a compile diagnostic, a runtime error, or a normal
+//! result, without panicking, hanging, or returning an internal error. Set
+//! `FUZZ_ITERS` to increase the iteration count. Coverage-guided fuzz targets
+//! for `cargo fuzz` are in `fuzz/`.
 
 mod common;
 
@@ -45,8 +45,8 @@ fn limited_config() -> Config {
     })
 }
 
-/// Compiles and (if it compiles) runs `src`, asserting that the host never
-/// panics and that the engine reports no internal error.
+/// Compiles and runs `src`, asserting that the host does not panic and that the
+/// engine does not return an internal error.
 fn exercise(src: &str) {
     let result = catch_unwind(AssertUnwindSafe(|| {
         let mut engine = Engine::new(limited_config()).unwrap();

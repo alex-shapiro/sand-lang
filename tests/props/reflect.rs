@@ -95,7 +95,7 @@ impl Ty {
         }
     }
 
-    /// Whether values of the type implement `Hash`.
+    /// Returns `true` if the type implements `Hash`.
     fn hashable(&self) -> bool {
         match self {
             Ty::Int | Ty::Bool | Ty::Str | Ty::Bytes | Ty::Unit | Ty::Duration | Ty::UnitEnum | Ty::Rec | Ty::Range => true,
@@ -105,8 +105,7 @@ impl Ty {
         }
     }
 
-    /// Whether the elements of the sets and the keys of the maps in the type
-    /// implement `Hash`.
+    /// Returns `true` if all set elements and map keys in the type implement `Hash`.
     fn well_formed(&self) -> bool {
         match self {
             Ty::Set(t) | Ty::Bag(t) => t.hashable() && t.well_formed(),
@@ -140,8 +139,8 @@ fn ty() -> impl Strategy<Value = Ty> {
     ty_with(0, 1)
 }
 
-/// Types with `T` at weight `param`, and with functions, tasks, and set
-/// elements and map keys that are not `Hash` at weight `bad`.
+/// Generates types with type parameter `T` weighted by `param`, and non-`Hash`
+/// or non-`Encode` types weighted by `bad`.
 fn ty_with(param: u32, bad: u32) -> impl Strategy<Value = Ty> {
     let leaf = prop_oneof![
         6 => prop_oneof![Just(Ty::Int), Just(Ty::Float), Just(Ty::Bool), Just(Ty::Str), Just(Ty::Bytes), Just(Ty::Unit), Just(Ty::Duration)],

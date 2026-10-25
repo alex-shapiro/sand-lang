@@ -1,10 +1,9 @@
-//! `help` and `members`, prelude functions that the checker evaluates.
+//! Compile-time evaluation of `help` and `members`.
 //!
-//! The argument names a module (imported or not), type, trait, function,
-//! method, field, variant or variable, as a path in code or in a string
-//! literal; any other expression stands for its type and is not evaluated.
-//! A call compiles to a constant: `help` prints the text rendered here, and
-//! `members` returns the names that may follow `x.`.
+//! `help` prints documentation for a target, and `members` returns a list of
+//! member names for `x.`. A target argument identifies a module, type, trait,
+//! function, method, field, variant, or variable by path or string literal; any
+//! other expression is inspected by its static type without being evaluated.
 
 use super::expr::{CallArgs, Ns, mk};
 use super::traits::impl_key;
@@ -712,19 +711,18 @@ impl Checker {
         section(out, "Implements", &traits);
     }
 
-    /// The derived built-in traits of constructor `c`, with the traits they
-    /// require of its type parameters (`Eq where T: Eq`).
+    /// Formats the derived built-in traits of constructor `c` and their `where`
+    /// clauses (`Eq where T: Eq`).
     fn derived_traits(&self, c: Ctor, arity: u32) -> Vec<String> {
         let names = self.ctor_params(c, arity);
         let derived = Builtin::ALL.iter().copied().filter(|b| b.is_derived());
         derived.filter_map(|b| Some(with_wheres(b.name().into(), self.derived_wheres(c, &names, b)?))).collect()
     }
 
-    /// What the derived impl of `b` for constructor `c` (with type
-    /// parameters `names`) requires of them (`T: Eq`), or `None` if there is
-    /// no such impl. Omits what the declaration of `c` already requires.
+    /// Formats the type parameter bounds required by the derived implementation
+    /// of `b` for constructor `c`, or returns `None` if `c` does not derive `b`.
     fn derived_wheres(&self, c: Ctor, names: &[String], b: Builtin) -> Option<Vec<String>> {
-        let needs = self.derived_needs(c, names.len(), b)?;
+        let needs = self.derived_required_params(c, names.len(), b)?;
         let declared = |i: u32| match (c, self.builtins[b as usize]) {
             (Ctor::Def(d), Some(t)) => self.param_has_trait(self.types[d as usize].generics[i as usize], t),
             _ => false,
@@ -732,7 +730,7 @@ impl Checker {
         Some(needs.into_iter().filter(|&i| !declared(i)).map(|i| format!("{}: {}", names[i as usize], b.name())).collect())
     }
 
-    /// The names of the type parameters of constructor `c` (`K`, `V` for maps).
+    /// Returns the display names of the type parameters for constructor `c`.
     fn ctor_params(&self, c: Ctor, arity: u32) -> Vec<String> {
         match c {
             Ctor::Def(d) => self.types[d as usize].generics.iter().map(|&p| self.name(self.params[p as usize].name).to_string()).collect(),
@@ -842,9 +840,8 @@ impl Checker {
         if self.resolve(fi.ret) != TypeId::UNIT {
             let _ = write!(s, " -> {}", self.show(fi.ret));
         }
-        // Traits that a method requires of its type's parameters (`fn sum(self)
-        // -> T where T: Num`). Those of the type's declaration and the `Hash`
-        // of map keys and set elements apply to every method.
+        // Format method-specific bounds on receiver type parameters (`fn sum(self) -> T where T: Num`),
+        // omitting bounds already declared on the type or implied by `Map`/`Set` keys.
         if fi.trait_of.is_none() {
             let hash: Vec<TraitId> = self.builtins[Builtin::Hash as usize].into_iter().collect();
             let keyed = if matches!(fi.owner, Some(Ctor::Map | Ctor::Set)) { &hash[..] } else { &[] };
@@ -1000,8 +997,8 @@ impl Checker {
         if traits.is_empty() { name } else { format!("{name}: {traits}") }
     }
 
-    /// The traits that type parameter `p` requires (`Ord + Describe`),
-    /// without those that a trait in `omit` implies.
+    /// Formats the traits required by type parameter `p` (`Ord + Describe`),
+    /// omitting any trait implied by `omit`.
     fn traits_text(&self, p: ParamId, omit: &[TraitId]) -> String {
         let visible = |tr: &&TraitRef| {
             let t = &self.traits[tr.trait_id as usize];
@@ -1012,8 +1009,8 @@ impl Checker {
         shown.map(|tr| self.show_trait(&tr)).collect::<Vec<_>>().join(" + ")
     }
 
-    /// The traits that the declaration of type `self_ty` puts on type
-    /// parameter `p`, if `self_ty` takes `p` as a type argument.
+    /// Returns the traits declared on the type definition of `self_ty` for type
+    /// parameter `p`.
     fn declared_traits(&self, self_ty: Option<TypeId>, p: ParamId) -> Vec<TraitId> {
         let Some(Ty::Named(d, args)) = self_ty.map(|t| self.ty(t)) else { return Vec::new() };
         let gens = &self.types[d as usize].generics;
@@ -1133,7 +1130,7 @@ fn suggestion(name: &str, names: Vec<String>) -> String {
     best.map(|(_, n)| format!("; did you mean `{n}`?")).unwrap_or_default()
 }
 
-/// `shown`, followed by ` where ` and `wheres` if there are any.
+/// Appends a ` where ...` clause to `shown` if `wheres` is non-empty.
 fn with_wheres(shown: String, wheres: Vec<String>) -> String {
     if wheres.is_empty() { shown } else { format!("{shown} where {}", wheres.join(", ")) }
 }

@@ -505,9 +505,11 @@ impl Symbols {
 
 macro_rules! builtins {
     ($($name:ident),*) => {
-        /// A trait that the prelude declares and whose operations the engine
-        /// implements (`==`, `<`, hashing, JSON encoding, arithmetic). Only the
-        /// prelude implements `Num`; the checker derives the impls of the others.
+        /// A prelude trait implemented by the VM (`Eq`, `Ord`, `Hash`, `Encode`,
+        /// or `Num`).
+        ///
+        /// The prelude implements `Num` for `int` and `float`; the checker
+        /// automatically derives the remaining built-in traits from type structure.
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
         pub enum Builtin {
             $($name),*
@@ -523,14 +525,14 @@ macro_rules! builtins {
             }
         }
 
-        /// The built-in traits as Rust types, which name the traits that a
-        /// native function requires of a type parameter: `Param<0, traits::Hash>`
-        /// or `Param<0, (traits::Ord, traits::Hash)>`.
+        /// Type-level markers for built-in trait bounds on native [`Param`](crate::native::Param)
+        /// arguments (for example, `Param<0, traits::Hash>` or
+        /// `Param<0, (traits::Ord, traits::Hash)>`).
         pub mod traits {
             use super::{Builtin, Builtins};
 
-            /// The built-in traits that a [`Param`](crate::native::Param)
-            /// requires: one trait, `()` for none, or a pair of sets.
+            /// A set of built-in traits required by a [`Param`](crate::native::Param):
+            /// a single trait, `()` for an empty set, or a tuple `(A, B)` for a union.
             pub trait Set {
                 const TRAITS: Builtins;
             }
@@ -544,7 +546,7 @@ macro_rules! builtins {
             }
 
             $(
-                #[doc = concat!("The built-in trait `", stringify!($name), "`.")]
+                #[doc = concat!("Built-in trait marker for `", stringify!($name), "`.")]
                 pub struct $name;
 
                 impl Set for $name {
@@ -562,14 +564,14 @@ impl Builtin {
         Builtin::ALL.iter().copied().find(|b| b.name() == s)
     }
 
-    /// Whether the checker derives the impls of `self` from the components
-    /// of types (all built-in traits except `Num`).
+    /// Returns `true` if the checker derives `self` from the structure of a type
+    /// (all built-in traits except `Num`).
     pub fn is_derived(self) -> bool {
         self != Builtin::Num
     }
 }
 
-/// A set of built-in traits.
+/// Bitset of [`Builtin`] traits.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Builtins(u8);
 
@@ -590,8 +592,7 @@ impl Builtins {
     }
 }
 
-/// A trait applied to type arguments (`Into<str>`); the implementing type
-/// is given separately.
+/// A trait and its type arguments (`Into<str>`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TraitRef {
     pub trait_id: TraitId,
@@ -607,7 +608,7 @@ impl TraitRef {
 #[derive(Clone, Debug)]
 pub struct ParamInfo {
     pub name: Symbol,
-    /// The traits that the type parameter declares, without their supertraits.
+    /// Direct trait bounds declared on the type parameter, excluding supertraits.
     pub traits: Vec<TraitRef>,
     pub reflect: bool,
 }

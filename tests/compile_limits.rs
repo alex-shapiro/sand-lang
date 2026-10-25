@@ -142,8 +142,8 @@ fn trait_checks_on_structs_sharing_field_types() {
         src += &format!("struct S{i} {{ a: S{}, b: S{} }}\n", i - 1, i - 1);
     }
     src += "fn same<T: Eq>(a: T, b: T) -> bool { a == b }\nfn f(x: S59) -> bool { same(x, x) }\n";
-    // Bound checks use what each definition needs (`derive_impls`) instead
-    // of visiting the 2^60 paths through the fields.
+    // Trait checks use precomputed parameter requirements (`derive_impls`)
+    // instead of traversing all 2^60 field paths.
     let (r, took) = check(Config::new(), &src);
     r.unwrap();
     assert!(took < FAST, "took {took:?}");
@@ -517,8 +517,8 @@ fn copies_of_constant_strings_are_charged_by_their_size() {
 
 #[test]
 fn requirements_spread_through_chains_of_types_in_linear_work() {
-    // `S0<T>` needs `T: Hash` through `n` other types, declared in either
-    // order. The compile fuel grows linearly with `n`.
+    // `S0<T>` requires `T: Hash` transitively through `n` structs in either
+    // declaration order, using compile fuel proportional to `n`.
     let chain = |n: usize, reverse: bool| {
         let mut items: Vec<String> = (0..n).map(|i| format!("struct S{i}<T> {{ x: S{}<T>? }}\n", i + 1)).collect();
         items.push(format!("struct S{n}<T: Hash> {{ x: T }}\n"));

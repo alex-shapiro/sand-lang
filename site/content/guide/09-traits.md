@@ -75,7 +75,7 @@ fn bigger<T>(a: T, b: T) -> T {
 A `trait` block declares a set of methods. A method without a body is required: each implementing type must define it. A method with a body is a default method: implementing types inherit it automatically and can override it.
 
 ```sand
-/// Values with a short text description.
+/// Converts a value to a short text description.
 trait Describe {
     fn describe(self) -> str
 
@@ -232,7 +232,7 @@ Enclose a struct literal in parentheses if it appears directly in a `for` loop h
 
 ## Qualified calls
 
-You can call a trait method through the trait (`Trait.method(value)`) or through the type (`Type.method(value)`). If two traits define a method with the same name on the same type, calling `value.method()` is ambiguous. Qualify the call with the trait name to select the method:
+Qualify a trait method call with the trait name (`Trait.method(value)`) or the target type (`Type.method(value)`) to disambiguate conflicting method names. If two traits define a method with the same name on the same type, an unqualified `value.method()` call is rejected as ambiguous:
 
 ```sand
 trait English {
@@ -278,7 +278,7 @@ Trait implementations are always global once their defining module is loaded.
 
 ## Heterogeneous collections
 
-A trait is not a type. To store values of different concrete types in a single collection, wrap the types in an enum:
+Wrap values of different concrete types in an enum to store them in a single collection, because traits are not types:
 
 ```sand
 import math

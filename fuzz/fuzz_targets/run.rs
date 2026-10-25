@@ -1,5 +1,5 @@
-//! Programs that compile must run to completion or a contained error under
-//! tight limits, never to an internal error.
+//! Fuzz target that compiles and runs arbitrary UTF-8 input under resource
+//! limits, asserting that the engine never returns an internal error.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use sandlang::{Config, Engine, Error, Limits, MemorySink, Policy};

@@ -1,12 +1,10 @@
-//! Derived impls of the built-in traits `Eq`, `Ord`, `Hash` and `Encode`.
+//! Automatic derivation of the built-in traits `Eq`, `Ord`, `Hash`, and `Encode`.
 //!
-//! The checker derives these impls instead of reading them from source. An
-//! instance of a type constructor implements the trait if some of its type
-//! arguments do, as if `struct Pair<A, B>` declared
-//! `impl<A: Eq, B: Eq> Eq for Pair<A, B>`. [`Checker::derived_needs`] gives
-//! these type arguments for each constructor: all of them for tuples and
-//! collections, and for structs and enums those that their fields and
-//! payloads need.
+//! A constructed type implements a derived trait if its required type arguments
+//! implement that trait. [`Checker::derived_required_params`] returns the
+//! required type parameter indices for each type constructor: all type
+//! parameters for tuples and collections, and the type parameters used by
+//! fields or variant payloads for structs and enums.
 
 use super::traits::Unmet;
 use super::{Checker, Ctor, ctor_of};
@@ -15,15 +13,15 @@ use crate::types::*;
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Derived {
     Never,
-    /// Indices of the type parameters whose arguments must also implement the trait.
+    /// Indices of the type parameters whose arguments must implement the trait.
     Needs(Vec<u32>),
 }
 
 impl Checker {
-    /// The indices of the type arguments of constructor `c` (with `n` type
-    /// arguments) that must implement derived trait `b` for an instance of
-    /// `c` to implement it, or `None` if no instance implements it.
-    pub(crate) fn derived_needs(&self, c: Ctor, n: usize, b: Builtin) -> Option<Vec<u32>> {
+    /// Returns the type argument indices of constructor `c` (with `n` type
+    /// arguments) that must implement derived trait `b`, or `None` if `c`
+    /// never implements `b`.
+    pub(crate) fn derived_required_params(&self, c: Ctor, n: usize, b: Builtin) -> Option<Vec<u32>> {
         use Builtin::*;
         let ok = match c {
             Ctor::Def(d) => {
@@ -41,22 +39,20 @@ impl Checker {
         ok.then(|| (0..n as u32).collect())
     }
 
-    /// The components of `ty` that must implement derived trait `b` for `ty`
-    /// to implement it, or `None` if `ty` cannot implement it.
+    /// Returns the component types of `ty` that must implement derived trait
+    /// `b`, or `None` if `ty` cannot implement `b`.
     pub(crate) fn derived_parts(&self, ty: Ty, b: Builtin) -> Option<Vec<TypeId>> {
         match ty {
             Ty::Never | Ty::Error => Some(Vec::new()),
-            _ => Some(self.arg_steps(ty, b)?.into_iter().map(Step::child).collect()),
+            _ => Some(self.type_arg_steps(ty, b)?.into_iter().map(Step::child).collect()),
         }
     }
 
-    /// The type arguments of `ty` that derived trait `b` needs, or `None` if
-    /// `ty` cannot implement `b`.
-    fn arg_steps(&self, ty: Ty, b: Builtin) -> Option<Vec<Step>> {
+    fn type_arg_steps(&self, ty: Ty, b: Builtin) -> Option<Vec<Step>> {
         let c = ctor_of(ty)?;
         let args = self.type_args(ty);
-        let needs = self.derived_needs(c, args.len(), b)?;
-        Some(needs.into_iter().map(|i| Step::Arg(c, i, args[i as usize])).collect())
+        let required = self.derived_required_params(c, args.len(), b)?;
+        Some(required.into_iter().map(|i| Step::Arg(c, i, args[i as usize])).collect())
     }
 
     fn type_args(&self, ty: Ty) -> Vec<TypeId> {
@@ -68,11 +64,11 @@ impl Checker {
         }
     }
 
-    /// Proves `ty: tr` (zonked) for derived trait `b` through the components
-    /// of `ty`. The components are visited with a work list rather than by
-    /// recursion, because types nest deeply (`int???...`).
+    /// Verifies that `ty` implements derived trait `b` (`tr`) by checking its
+    /// component types iteratively with an explicit worklist to avoid stack
+    /// overflow on deeply nested types.
     pub(crate) fn resolve_derived(&mut self, ty: TypeId, tr: TraitRef, b: Builtin, depth: u32) -> Result<(), Box<Unmet>> {
-        let underived = |c: &Checker| {
+        let unmet_err = |c: &Checker| {
             let mut m = Unmet::new(format!("{} does not implement `{}`", c.show(ty), c.show_trait(&tr)));
             m.explain = Some((ty, tr, b));
             m
@@ -89,20 +85,18 @@ impl Checker {
                 match self.resolve_evidence(t, tr, depth + 1) {
                     Ok(_) => {}
                     Err(m) if m.unknown => unknown = Some(m),
-                    Err(_) => return Err(underived(self)),
+                    Err(_) => return Err(unmet_err(self)),
                 }
                 continue;
             }
             match self.derived_parts(node, b) {
                 Some(parts) => todo.extend(parts),
-                None => return Err(underived(self)),
+                None => return Err(unmet_err(self)),
             }
         }
         unknown.map_or(Ok(()), Err)
     }
 
-    /// The fields of struct `d` or the payloads of enum `d`, in terms of its
-    /// type parameters.
     fn members(&self, d: usize) -> Vec<Step> {
         match &self.types[d].kind {
             TypeDefKind::Struct { fields } => fields.iter().map(|f| Step::Field(f.name, f.ty)).collect(),
@@ -111,27 +105,26 @@ impl Checker {
         }
     }
 
-    /// The field types of struct `d` or the payload types of enum `d`, in
-    /// terms of its type parameters.
+    /// Returns the uninstantiated field or variant payload types of type
+    /// definition `d`.
     pub(crate) fn member_types(&self, d: usize) -> Vec<TypeId> {
         self.members(d).into_iter().map(Step::child).collect()
     }
 
-    /// A `var` field of `d`, which keeps `d` from implementing `Hash`.
     fn mutable_field(&self, d: usize) -> Option<Symbol> {
         self.types[d].fields().iter().find(|f| f.mutable).map(|f| f.name)
     }
 
-    /// Computes the derived impls of the type definitions from `first` onward,
-    /// using greatest fixed-point iteration so that mutually recursive types
-    /// implement a trait unless a component type refutes it.
+    /// Computes derived trait implementations for type definitions starting at
+    /// `first` using greatest fixed-point iteration so that mutually recursive
+    /// types implement a trait unless a component type refutes it.
     pub(crate) fn derive_impls(&mut self, first: usize) {
         while self.derived.len() < self.types.len() {
             self.derived.push(std::array::from_fn(|_| Derived::Needs(Vec::new())));
         }
-        let users = self.member_users(first);
+        let dependents = self.dependent_types(first);
         for b in Builtin::ALL.iter().copied().filter(|b| b.is_derived()) {
-            self.until_stable(first, &users, &mut |c, d| {
+            self.propagate_to_fixed_point(first, &dependents, &mut |c, d| {
                 let new = c.derive(d, b);
                 let changed = new != c.derived[d][b as usize];
                 c.derived[d][b as usize] = new;
@@ -140,16 +133,17 @@ impl Checker {
         }
     }
 
-    /// For each type definition from `first` onward (indexed from `first`),
-    /// the type definitions from `first` onward whose members mention it.
-    pub(crate) fn member_users(&self, first: usize) -> Vec<Vec<usize>> {
+    /// Returns, for each type definition at or after `first` (indexed relative
+    /// to `first`), the type definitions at or after `first` whose fields or
+    /// variant payloads reference it.
+    pub(crate) fn dependent_types(&self, first: usize) -> Vec<Vec<usize>> {
         let n = self.types.len();
-        let mut users: Vec<Vec<usize>> = vec![Vec::new(); n - first];
+        let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); n - first];
         for d in first..n {
             for m in self.members(d) {
                 self.arena.any(m.child(), &mut |x| {
                     if let Ty::Named(e, _) = x
-                        && let Some(u) = (e as usize).checked_sub(first).and_then(|i| users.get_mut(i))
+                        && let Some(u) = (e as usize).checked_sub(first).and_then(|i| dependents.get_mut(i))
                         && u.last() != Some(&d)
                     {
                         u.push(d);
@@ -158,19 +152,24 @@ impl Checker {
                 });
             }
         }
-        users
+        dependents
     }
 
-    /// Calls `update` for each type definition from `first` onward, and again
-    /// for the users (see [`Checker::member_users`]) of each definition for
-    /// which it returns `true` (changed), until no call changes anything.
-    pub(crate) fn until_stable(&mut self, first: usize, users: &[Vec<usize>], update: &mut dyn FnMut(&mut Checker, usize) -> bool) {
-        let mut todo: Vec<usize> = (first..first + users.len()).collect();
-        let mut queued = vec![true; users.len()];
+    /// Runs `update` on each type definition starting at `first` and re-queues
+    /// dependent definitions whenever `update` returns `true` until reaching a
+    /// fixed point.
+    pub(crate) fn propagate_to_fixed_point(
+        &mut self,
+        first: usize,
+        dependents: &[Vec<usize>],
+        update: &mut dyn FnMut(&mut Checker, usize) -> bool,
+    ) {
+        let mut todo: Vec<usize> = (first..first + dependents.len()).collect();
+        let mut queued = vec![true; dependents.len()];
         while let Some(d) = todo.pop() {
             queued[d - first] = false;
             if update(self, d) {
-                for &u in &users[d - first] {
+                for &u in &dependents[d - first] {
                     if !std::mem::replace(&mut queued[u - first], true) {
                         todo.push(u);
                     }
@@ -182,11 +181,9 @@ impl Checker {
         }
     }
 
-    /// The derived impl of trait `b` for type definition `d`, given the
-    /// current state of `self.derived`.
     fn derive(&self, d: usize, b: Builtin) -> Derived {
         let def = &self.types[d];
-        let mut needs = Vec::new();
+        let mut required = Vec::new();
         let ok = match &def.kind {
             TypeDefKind::Opaque(kind) => match (b, kind) {
                 (Builtin::Eq, _) | (Builtin::Hash | Builtin::Encode, Opaque::Value(_)) => true,
@@ -195,38 +192,39 @@ impl Checker {
             },
             _ => {
                 !(b == Builtin::Hash && self.mutable_field(d).is_some())
-                    && self.members(d).iter().all(|m| self.needs(m.child(), b, &def.generics, &mut needs))
+                    && self.members(d).iter().all(|m| self.collect_required_params(m.child(), b, &def.generics, &mut required))
             }
         };
         if !ok {
             return Derived::Never;
         }
-        needs.sort_unstable();
-        needs.dedup();
-        Derived::Needs(needs)
+        required.sort_unstable();
+        required.dedup();
+        Derived::Needs(required)
     }
 
-    /// Returns `true` if member type `t` can implement derived trait `b`, and
-    /// appends the indices in `generics` of the type parameters it needs to `needs`.
-    fn needs(&self, t: TypeId, b: Builtin, generics: &[ParamId], needs: &mut Vec<u32>) -> bool {
+    fn collect_required_params(&self, t: TypeId, b: Builtin, generics: &[ParamId], required: &mut Vec<u32>) -> bool {
         self.budget.charge(1);
         match self.ty(t) {
             Ty::Param(p) => match generics.iter().position(|&g| g == p) {
                 Some(i) => {
-                    needs.push(i as u32);
+                    required.push(i as u32);
                     true
                 }
                 None => self.builtins[b as usize].is_some_and(|tid| self.param_has_trait(p, tid)),
             },
             Ty::Var(_) => true,
-            ty => self.derived_parts(ty, b).is_some_and(|parts| parts.into_iter().all(|x| self.needs(x, b, generics, needs))),
+            ty => self
+                .derived_parts(ty, b)
+                .is_some_and(|parts| parts.into_iter().all(|x| self.collect_required_params(x, b, generics, required))),
         }
     }
 
-    /// Fills in why `ty` does not implement derived trait `b`, if `m` asks for it.
+    /// Populates the diagnostic reason and hint on `m` if `m` records a failed
+    /// derived trait check.
     pub(crate) fn explain(&mut self, m: &mut Unmet) {
         let Some((ty, tr, b)) = m.explain.take() else { return };
-        let Some((parent, step, leaf)) = self.failing_part(ty, tr, b) else { return };
+        let Some((parent, step, leaf)) = self.find_failing_step(ty, tr, b) else { return };
         if let Ty::Param(p) = self.rty(leaf) {
             let n = self.name(self.params[p as usize].name);
             m.hint = Some(format!("add `{n}: {}`", self.show_trait(&tr)));
@@ -244,16 +242,13 @@ impl Checker {
         });
     }
 
-    /// Finds a component of `ty` that does not implement derived trait `b`,
-    /// along a path of failing components that ends at a type that fails by
-    /// itself. Returns the innermost field or payload step of the path (or its
-    /// innermost step if it has none), the type that the step belongs to, and
-    /// the type at the end of the path. Returns `None` if `ty` fails by itself
-    /// or every path is a cycle.
-    fn failing_part(&mut self, ty: TypeId, tr: TraitRef, b: Builtin) -> Option<(TypeId, Step, TypeId)> {
+    /// Finds a non-cyclic component path in `ty` that fails to implement
+    /// derived trait `b`. Returns the parent type, the failing step (preferring
+    /// the innermost struct field or enum payload step), and the leaf failing
+    /// type.
+    fn find_failing_step(&mut self, ty: TypeId, tr: TraitRef, b: Builtin) -> Option<(TypeId, Step, TypeId)> {
         struct Frame {
             ty: TypeId,
-            /// The step from the previous frame's type.
             via: Option<Step>,
             parts: Vec<Step>,
             next: usize,
@@ -273,7 +268,6 @@ impl Checker {
             }
             if top.next == top.parts.len() {
                 if top.failed {
-                    // Every failing component led to a cycle.
                     stack.pop();
                     continue;
                 }
@@ -281,7 +275,7 @@ impl Checker {
             }
             let (i, step) = (top.next, top.parts[top.next]);
             top.next += 1;
-            // A failing type with a single component left unchecked fails through it.
+            // If all earlier components succeeded, the remaining component must be the failing one.
             let deduced = !top.failed && i + 1 == top.parts.len();
             let x = self.resolve(step.child());
             if !deduced && self.implements(x, tr) != Some(false) {
@@ -302,8 +296,6 @@ impl Checker {
         Some((stack[at - 1].ty, stack[at].via?, leaf))
     }
 
-    /// The components of `t` that derived trait `b` needs, or a single
-    /// [`Step::Mutable`] if `t` is a struct that cannot implement `Hash`.
     fn steps(&mut self, t: TypeId, b: Builtin) -> Vec<Step> {
         let ty = self.rty(t);
         match ty {
@@ -318,19 +310,16 @@ impl Checker {
                 let members = self.members(d);
                 members.into_iter().map(|m| m.with_child(self.arena.instantiate(m.child(), &generics, &args))).collect()
             }
-            _ => self.arg_steps(ty, b).unwrap_or_default(),
+            _ => self.type_arg_steps(ty, b).unwrap_or_default(),
         }
     }
 }
 
-/// A step from a type to one of its components.
 #[derive(Clone, Copy)]
 enum Step {
-    /// The type argument at an index of a constructor.
     Arg(Ctor, u32, TypeId),
     Field(Symbol, TypeId),
     Payload(Symbol, TypeId),
-    /// The struct has a mutable field, so it cannot implement `Hash`.
     Mutable(Symbol),
 }
 

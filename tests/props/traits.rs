@@ -1,5 +1,5 @@
-//! The built-in traits against a reference model: which types implement
-//! `Eq`, `Ord`, `Hash` and `Encode`, and which required traits imply which others.
+//! Property tests for derived built-in traits (`Eq`, `Ord`, `Hash`, `Encode`),
+//! supertrait implication, and supertrait method dispatch.
 
 use proptest::prelude::*;
 use sandlang::{Config, Engine, Error, MemorySink, Policy};
@@ -62,7 +62,7 @@ impl Ty {
         }
     }
 
-    /// An expression of this type.
+    /// Returns a Sand literal expression of this type.
     fn value(&self) -> String {
         match self {
             Ty::Int => "1".into(),
@@ -90,7 +90,7 @@ impl Ty {
         }
     }
 
-    /// The reference model of the derived impls.
+    /// Returns `true` if `self` implements derived trait `tr` in the reference model.
     fn implements(&self, tr: Trait) -> bool {
         use Trait::*;
         match self {
@@ -110,8 +110,7 @@ impl Ty {
         }
     }
 
-    /// Whether `json.encode` accepts the map keys in a value of this type at
-    /// run time.
+    /// Returns `true` if all map keys in `self` are valid JSON object keys at runtime.
     fn json_keys(&self) -> bool {
         match self {
             Ty::Map(k, v) => matches!(**k, Ty::Int | Ty::Bool | Ty::Str | Ty::Duration) && v.json_keys(),
@@ -150,8 +149,8 @@ fn ty() -> impl Strategy<Value = Ty> {
     })
 }
 
-/// Runs `src`: its standard output (or run-time error), or the messages of
-/// its compile errors.
+/// Runs `src` and returns either stdout (or runtime error message) or compile
+/// error messages.
 fn outcome(src: &str) -> Result<String, Vec<String>> {
     let out = MemorySink::new();
     let mut engine = Engine::new(Config::new().policy(Policy::deny_all()).stdout(out.clone())).unwrap();
@@ -164,7 +163,7 @@ fn outcome(src: &str) -> Result<String, Vec<String>> {
     }
 }
 
-/// The traits that requiring `ts` implies, by the prelude's supertraits.
+/// Returns the transitive supertrait closure of `ts`.
 fn closure(ts: &[Trait]) -> Vec<&'static str> {
     let mut out = Vec::new();
     for t in ts {
@@ -196,12 +195,11 @@ enum Trait {
 }
 
 impl Trait {
-    /// The traits whose impls the compiler derives.
+    /// Built-in traits derived by the compiler.
     const DERIVED: [Trait; 4] = [Trait::Eq, Trait::Ord, Trait::Hash, Trait::Encode];
 
-    /// An expression that uses `x` through a function that requires the
-    /// derived trait and through the operation that needs it, and what it
-    /// prints.
+    /// Returns a probe expression that exercises `self` on `x` and its expected
+    /// output.
     fn probe(self) -> (&'static str, &'static str) {
         match self {
             Trait::Eq => ("need(x) == x", "true"),
@@ -226,7 +224,7 @@ impl Trait {
     }
 }
 
-fn a_trait() -> impl Strategy<Value = Trait> {
+fn trait_strategy() -> impl Strategy<Value = Trait> {
     prop::sample::select(vec![Trait::Eq, Trait::Ord, Trait::Hash, Trait::Encode, Trait::Num, Trait::Keyed, Trait::Scale, Trait::Marker])
 }
 
@@ -288,7 +286,7 @@ proptest! {
     }
 
     #[test]
-    fn required_traits_imply_their_supertraits(ts in prop::collection::vec(a_trait(), 1..4), need in a_trait()) {
+    fn required_traits_imply_their_supertraits(ts in prop::collection::vec(trait_strategy(), 1..4), need in trait_strategy()) {
         let names: Vec<&str> = ts.iter().map(|t| t.name()).collect();
         let src = format!(
             "{TRAITS}\nfn need<T: {}>(x: T) -> T {{ x }}\nfn probe<T: {}>(x: T) -> T {{ need(x) }}\nprint(probe(3))",
@@ -316,9 +314,9 @@ proptest! {
     }
 }
 
-/// A random acyclic graph of traits (`T0` to `Tn-1`) that `int` and lists
-/// implement. A trait without methods has no dictionary, so calls through it
-/// reach its supertraits' dictionaries along different fields.
+/// Random directed acyclic graph of traits (`T0`..`Tn-1`) implemented for `int`
+/// and `[A]`, mixing methodless traits (without runtime dictionaries) and traits
+/// with methods.
 #[derive(Clone, Debug)]
 struct Graph {
     traits: Vec<Node>,
@@ -330,8 +328,7 @@ struct Node {
     /// Direct supertraits, all with a larger index.
     supers: Vec<usize>,
     builtin: Option<&'static str>,
-    /// A trait that `impl<A> Ti for [A]` also requires of `A`. It is reachable
-    /// from `Ti`, so the impls of the supertraits of `Ti` find it.
+    /// Additional reachable supertrait bound on `A` in `impl<A> Ti for [A]`.
     extra: Option<usize>,
 }
 
@@ -367,7 +364,7 @@ fn graph() -> impl Strategy<Value = Graph> {
 }
 
 impl Graph {
-    /// Trait `i` and its supertraits, in increasing order.
+    /// Returns trait `i` and all of its transitive supertraits in ascending order.
     fn reach(traits: &[Node], i: usize) -> Vec<usize> {
         let mut out = vec![i];
         let mut k = 0;
@@ -383,7 +380,7 @@ impl Graph {
         out
     }
 
-    /// The supertrait of `i` with a method that the default method `di` calls.
+    /// Returns the first supertrait of `i` with a method, for `di` to delegate to.
     fn delegate(&self, i: usize) -> Option<usize> {
         Graph::reach(&self.traits, i).into_iter().find(|&j| j != i && self.traits[j].has_method)
     }
@@ -426,12 +423,12 @@ impl Graph {
         s
     }
 
-    /// The traits with methods that `via{r}` calls through `T{r}`.
+    /// Returns the reachable traits from `r` that declare methods.
     fn called(&self, r: usize) -> Vec<usize> {
         Graph::reach(&self.traits, r).into_iter().filter(|&j| self.traits[j].has_method).collect()
     }
 
-    /// What `m{i}` returns for an `int` nested in `depth` lists.
+    /// Returns the expected result of `m{i}` for an `int` nested in `depth` lists.
     fn m(&self, i: usize, depth: usize) -> String {
         if depth == 0 {
             return format!("i{i}");

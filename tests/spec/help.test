@@ -417,9 +417,9 @@ help(Option)
 --- stdout
 trait Hash
 
-Types of map keys and set elements. The compiler derives `Hash` for
-tuples, structs, and enums whose components implement it, except for
-structs with `var` fields.
+Hashes values for use as map keys and set elements. The compiler derives
+`Hash` for tuples, structs without `var` fields, and enums whose components
+implement `Hash`.
 
 Supertraits: Eq
 
@@ -433,7 +433,7 @@ Implemented for:
     ()
 trait Num
 
-Numbers (`int` and `float`), which support arithmetic.
+Performs arithmetic on numeric types (`int` and `float`).
 
 Supertraits: Ord + Encode
 

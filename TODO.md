@@ -10,25 +10,23 @@ Follow-up work, roughly in priority order.
 
 ### Sandbox
 
-- [ ] **Windows rename.** No safe API renames by handle (`fs_at`, `winx`
-      and `cap-std` all rename by path). `rename` keeps every directory on
-      both paths open, so that none of them can be renamed or replaced. A
-      parent that is emptied and turned into a junction during the call is
-      still possible; it is detected after the rename, not prevented.
+- [ ] **Windows rename.** Windows does not provide a safe API to rename files
+      by handle (`fs_at`, `winx`, and `cap-std` all rename by path). `rename`
+      keeps every directory on both paths open so that the directories cannot
+      be renamed or replaced. However, a caller can still empty a parent
+      directory and convert it into a junction during the call; `rename`
+      detects this change after the operation instead of preventing it.
 
 ### Test coverage
 
-- [ ] Run the CI workflow on Windows and Linux, where nothing has run
-      yet (Windows is only cross-checked with
-      `--no-default-features --features os`), including the ConPTY variant of
-      `cli/tests/prompt_tty.rs` and the REPL's line editor.
-- [ ] The Windows resolver and file operations (`files/windows.rs`,
-      through `fs_at` and `winx`) have only been cross-compiled.
-- [ ] The one-walk resolver's Linux path (`openat2` with
-      `RESOLVE_NO_SYMLINKS`, its fallback when `openat2` is missing or
-      filtered by seccomp, and `/proc/self/fd` paths) has only been
-      compiled, and the non-UTF-8 file name tests in `tests/sandbox_io.rs`
-      skip on APFS.
+- [ ] Run the CI workflow on Windows and Linux (including the ConPTY variant of
+      `cli/tests/prompt_tty.rs` and the REPL line editor).
+- [ ] Run the Windows path resolver and file operations (`files/windows.rs`,
+      via `fs_at` and `winx`) on Windows; CI currently only cross-compiles them.
+- [ ] Run the Linux path resolver (`openat2` with `RESOLVE_NO_SYMLINKS`, the
+      fallback if `openat2` is unavailable or blocked by seccomp, and
+      `/proc/self/fd` paths) and the non-UTF-8 file name tests in
+      `tests/sandbox_io.rs` on Linux.
 - [ ] **Wall-clock bounds make tests flaky under load:**
       `hostile_runtime_programs_are_contained` (`tests/fuzz.rs`, 10s bound),
       `code_generation_is_covered_by_the_compile_budget`,
@@ -37,25 +35,22 @@ Follow-up work, roughly in priority order.
       (`tests/metering.rs`), `many_locals_resolve_in_linear_time`
       (`tests/compile_limits.rs`). Bound the work instead (fuel, instructions,
       the ratio between two input sizes in the same run).
-- [ ] The playground page is tested by hand in headless Chrome, not in CI,
-      Firefox or Safari.
+- [ ] Run the playground page tests in CI across Chrome, Firefox, and Safari.
 - [ ] `Config::retry_stress` fails only the first check in a `vm_function`
       body, so it does not detect a side effect between the first and second
       checks. Run stressed tests for each check index reached during a call.
 - [ ] Run the `cargo fuzz` targets on a schedule (or on OSS-Fuzz). Update the
       `run` target to compare optimized and unoptimized executions.
-- [ ] `src/check/verify.rs` checks trait evidence and the requirements of
-      written types, not the other typing rules (an `int` passed where a
-      `str` is expected). A full check of the HIR, as GHC's Core Lint does,
-      needs the type of each local, which `LocalInfo` does not record.
-- [ ] `tests/props/generics.rs` generates no enums with payloads, traits
-      with type parameters (`Into<T>`), method type parameters or `where`
-      clauses, `extend` blocks, generic function values, local generic
-      functions or Rust-bound types.
-- [ ] The mutations of `tests/fuzz.rs` change characters: of 3000 mutants,
-      2854 fail to type check and 123 of the other 146 behave like their
-      original. Mutate typed programs instead (replace a type, an
-      expression of the same type, or a call).
+- [ ] Extend `src/check/verify.rs` to verify full HIR expression typing in
+      addition to trait evidence and written type bounds. Recording the type of
+      each local in `LocalInfo` is required to verify local variable uses.
+- [ ] Extend `tests/props/generics.rs` to generate enums with payloads, generic
+      traits (`Into<T>`), method type parameters, `where` clauses, `extend`
+      blocks, generic function values, local generic functions, and Rust-bound
+      types.
+- [ ] Mutate typed ASTs in `tests/fuzz.rs` (for example, by replacing a type,
+      an expression of the same type, or a call) instead of mutating raw source
+      characters, which mostly produces syntax or type errors.
 
 ### Spec
 
@@ -77,20 +72,19 @@ Follow-up work, roughly in priority order.
 - [ ] Convert `Json` values to and from Rust without recursion so that
       conversion accepts the full 512 nesting levels of `json.parse` without
       overflowing a 512 KiB thread stack (the iOS default).
-- [ ] In `#[derive(SandEnum)]` and `#[derive(SandStruct)]`, support fields
-      of type `Self` and of nested generic types whose type parameters require
-      traits (`struct Sorted<T: Ord>`). The derive macros substitute
-      `Param<N>` for each type parameter when describing field types, and
-      `Param<N>` does not satisfy Rust trait bounds such as `Ord`.
+- [ ] Support fields of type `Self` and nested generic types with trait bounds
+      (`struct Sorted<T: Ord>`) in `#[derive(SandEnum)]` and
+      `#[derive(SandStruct)]`. These derive macros substitute `Param<N>` for
+      each type parameter to describe field types, and `Param<N>` does not
+      implement Rust traits such as `Ord`.
 - [ ] Represent `ValueType` constants in `ConstVal` by their text form so that
       `#[sand(default)]` supports value-type fields and `json.decode` evaluates
       constant value-type defaults directly.
 - [ ] Pass `Num<N>` evidence to native `impl` methods by extracting the `Num`
       dictionary from the `impl` dictionary.
-- [ ] The native API uses "bound" for a Rust type that `NativeModule::bind`
-      attaches to a Sand type (`BoundKind`, `BoundType`, `Type::bound`,
-      `declare_bound_types`), next to `Binding<T>`. Use one name for this
-      concept.
+- [ ] Unify the terminology for Rust types attached via `NativeModule::bind`
+      (`BoundKind`, `BoundType`, `Type::bound`, `declare_bound_types`, and
+      `Binding<T>`).
 - [ ] Implement `SandType`, `FromValue`, and `IntoValue` for
       `std::ops::Range<i64>` and `RangeInclusive<i64>` so that `SandStruct`
       fields can use Rust range types and `#[sand(default)]`.
@@ -99,10 +93,9 @@ Follow-up work, roughly in priority order.
 
 - [ ] Fix broken intra-doc links to private items and run `cargo doc` with
       `-D warnings` in CI.
-- [ ] Policy lints judge `http` rules only by their exact text (and
-      `bypassable-http-deny`); rules with wildcards in hosts or paths could
-      be compared as file rules are. A rule made unnecessary only by several
-      other rules together is not reported.
+- [ ] Compare `http` policy rules with wildcards in hosts or paths using the
+      same subsumption check as file rules, instead of comparing only exact rule
+      text.
 
 ### Diagnostics
 
@@ -117,12 +110,12 @@ Follow-up work, roughly in priority order.
       literals (`[1, "a"]`).
 - [ ] Include the `<top level>` stack frame if a failing `assert` is the
       final top-level statement.
-- [ ] Report a missing trait once per expression: with `x: float?`,
-      `set([need(x), x])` (where `need<T: Hash>`) reports
-      `float? does not implement Hash` twice, at overlapping spans.
-- [ ] Show the type of impls for some instances of a constructor in the
-      `Implements` section of `help` (`impl Describe for [int]` is listed as
-      `Describe` in `help(List)`).
+- [ ] Deduplicate missing trait diagnostics within a single expression (for
+      example, `set([need(x), x])` with `x: float?` and `need<T: Hash>` reports
+      `float? does not implement Hash` twice at overlapping spans).
+- [ ] Display the target type arguments for specialized `impl` blocks in the
+      `Implements` section of `help` (for example, `help(List)` currently lists
+      `impl Describe for [int]` as `Describe`).
 - [ ] Qualify types from other modules in `help` output (for example,
       `conn: net.Conn` in `help(http.Request)` and `modified: time.Instant?` in
       `help(fs.Metadata)`).
@@ -144,11 +137,10 @@ Follow-up work, roughly in priority order.
 - [ ] Cache instantiated `TypeDesc` objects in `Op::Describe` by their
       template and argument descriptions to avoid ~90 ns of allocation per
       generic `reflect` call.
-- [ ] Dispatch loop: the cost of individual instructions shifts by up to
-      ±15% between builds as LLVM reallocates registers. A threaded design
-      (one function per instruction with guaranteed tail calls, Rust's
-      `become`) would remove the shared register allocation once `become`
-      is stable.
+- [ ] Replace the VM dispatch loop with a threaded dispatch table (a separate
+      function per instruction using guaranteed tail calls via Rust's `become`
+      keyword once stabilized) to eliminate register-allocation variance across
+      builds.
 
 ### Language
 
@@ -179,44 +171,37 @@ Follow-up work, roughly in priority order.
       the `T(...)` item above.
 - [ ] Reject `import` statements after non-import items or statements, as
       specified in §3.1.
-- [ ] Trait objects (`dyn Trait`), associated types and constants, and
-      blanket impls (`impl<T> X for T`).
-- [ ] **Check that written types are well formed.** The checker checks
-      field and payload types and the type arguments of `reflect` type
-      parameters against the traits that their constructors require (set
-      elements and map keys need `Hash`, and `struct Bag<T: Hash>` needs
-      `T: Hash`), and structs and enums get the requirements of their field
-      and payload types. Other type annotations are not checked:
-      `fn size(b: Bag<[int]>)` and `let s: Set<[int]> = ...` are accepted.
-      Calls, literals, field types and `reflect` type arguments check the
-      requirements, so no value of such a type exists. The rest of the design
-      (decided: infer requirements, as Swift does):
-      - A function or a method of a type gets the requirements of the types
-        in its parameter and return types for each type argument that is a
-        type parameter: `fn size<T>(b: Bag<T>)` gets `T: Hash`.
-      - An impl gets the requirements of the types in its trait arguments and
-        target, as if they were written on the impl:
-        `impl<T> From<Shelf<T>> for str` gets `T: Describe`. Now an impl gets
-        none, and `extend<T> Bag<T>` gets those of `Bag`.
-      - The types inside a requirement's trait arguments do not cause
-        inference, so that inference ends (`struct S<T: Tr<S<[T]>>>`). Native
-        functions get no inferred requirements.
-      - The checker checks every other written type, including `native fn`
-        signatures: concrete types (`Set<[int]>`, `Bag<float>`) and type
-        arguments that are not type parameters (`Bag<[T]>`).
-      - An unmet inferred requirement names its source ("required because
-        `size` takes a `Bag<T>`").
-- [ ] Let field defaults use the traits with methods that the type's
-      parameters require (`struct Bag<T: Make> { x: T = T.make() }`). Struct
-      literals call the default helper without dictionaries, and
-      `json.decode` fills a missing field with one closure per field
-      (`field_fill` in `src/compile/reflect.rs`), not one per instance.
-- [ ] Let local functions require traits with methods (such as `Num`) and
-      have `reflect` type parameters, by passing hidden dictionary and
+- [ ] Support trait objects (`dyn Trait`), associated types and constants, and
+      blanket implementations (`impl<T> X for T`).
+- [ ] **Check that all written types satisfy constructor trait bounds.** The
+      type checker currently verifies constructor trait bounds on struct fields,
+      enum variant payloads, and `reflect` type arguments, and infers implied
+      bounds for structs, enums, and `extend` blocks. Extend well-formedness
+      checking and implied bound inference to all remaining declarations and
+      type annotations:
+      - Infer implied trait bounds on functions, methods, and `impl` blocks from
+        type parameters that appear as direct arguments to constrained type
+        constructors in parameter types, return types, trait arguments, or
+        `impl` target types (for example, `fn size<T>(b: Bag<T>)` infers
+        `T: Hash`).
+      - Do not infer bounds from types nested inside trait arguments (to ensure
+        termination on recursive bounds such as `struct S<T: Tr<S<[T]>>>`) or
+        on `native fn` declarations.
+      - Verify constructor trait bounds on all remaining type annotations,
+        including `native fn` signatures, concrete type arguments
+        (`Set<[int]>`, `Bag<float>`), and non-parameter type arguments
+        (`Bag<[T]>`).
+      - Include the origin of an inferred bound in diagnostic messages if a
+        caller does not satisfy it (for example, "required because `size` takes
+        a `Bag<T>`").
+- [ ] Allow struct field defaults to call methods from traits required by the
+      struct's type parameters (`struct Bag<T: Make> { x: T = T.make() }`) by
+      passing trait dictionaries to default-value helpers and `json.decode`
+      field initializers.
+- [ ] Allow local functions to require traits with methods (such as `Num`) and
+      to declare `reflect` type parameters by passing hidden dictionary and
       type-description arguments to closures.
-- [ ] `+` is not a trait. `require_plus` (`src/check/unify.rs`) checks the
-      operands of `+` against a fixed list of types, and a type parameter
-      supports `+` only through `Num`, so generic code cannot concatenate
-      `str`, `bytes` or lists. Declare an `Add` trait in the prelude and
-      derive or implement it like the other built-in traits.
-- [ ] Non-constant trait method defaults.
+- [ ] Replace the hardcoded `+` operand check (`require_plus` in
+      `src/check/unify.rs`) with a prelude `Add` trait so that generic functions
+      can concatenate `str`, `bytes`, and lists in addition to adding numbers.
+- [ ] Support non-constant default expressions on trait method parameters.

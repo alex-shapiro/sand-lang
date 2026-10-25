@@ -614,7 +614,7 @@ impl Checker {
                 let with_dicts: Vec<TraitRef> = self.params[p as usize].traits.iter().copied().filter(|tr| self.has_dict(tr)).collect();
                 if !with_dicts.is_empty() {
                     self.error(g.name.span, "local functions cannot require traits with methods; declare the function at the top level");
-                    // Error evidence lets the body use the traits without further errors.
+                    // Insert error evidence so the body can use the traits without cascading errors.
                     let pt = self.param_ty(p);
                     self.fs.evidence.extend(with_dicts.into_iter().map(|tr| (pt, tr, mk(HKind::Error, TypeId::UNIT, g.name.span))));
                 }
@@ -1069,9 +1069,9 @@ impl Checker {
         }
     }
 
-    /// Instantiates `f` with fresh type variables, first unifying those of
-    /// the parameters in `pre` with the given types. The trait evidence the
-    /// call passes is returned in `dicts`; the other traits are required here.
+    /// Instantiates `f` with fresh type variables, unifying the parameters in
+    /// `pre` with their given types. Trait bounds with runtime dictionaries are
+    /// returned in `dicts`; all other trait bounds are checked as obligations.
     pub(crate) fn instantiate_fn_with(&mut self, f: FnId, span: Span, pre: &[(ParamId, TypeId)]) -> Instance {
         let n = self.fns[f as usize].generics.len();
         let first = self.subst.len() as VarId;
@@ -1097,8 +1097,8 @@ impl Checker {
         Instance { fresh, params, ret, dicts }
     }
 
-    /// Requires the traits of type parameters `gens`, instantiated as
-    /// `fresh`, except the evidence passed in `passed`.
+    /// Requires that `fresh` satisfy all trait bounds on `gens` except those
+    /// passed as runtime dictionaries in `passed`.
     fn require_traits(&mut self, gens: &[ParamId], fresh: &[TypeId], passed: &[(TypeId, TraitRef)], span: Span) {
         let map = |p: ParamId| gens.iter().position(|&g| g == p).map(|i| fresh[i]);
         for (&g, &v) in gens.iter().zip(fresh) {
@@ -1122,9 +1122,9 @@ impl Checker {
         mk(HKind::FnValue { func: f, targs: inst.fresh }, t, span)
     }
 
-    /// The type arguments of a value that a struct literal or variant of `d`
-    /// makes: those of `hint` if it is an instance of `d`, else fresh
-    /// variables. Requires the traits of the type parameters of `d`.
+    /// Returns the type arguments for constructing `d`, reusing `hint` if it is
+    /// an instance of `d` or allocating fresh type variables otherwise, and
+    /// checks the trait bounds declared on `d`.
     fn construct_args(&mut self, d: TypeDefId, hint: Option<TypeId>, span: Span) -> Vec<TypeId> {
         let args = match hint.map(|h| self.rty(h)) {
             Some(Ty::Named(hd, args)) if hd == d => self.elems(args),
@@ -1875,7 +1875,6 @@ impl Checker {
             let call = self.call_instance(f, inst, Some(r), args, span);
             return self.fuse_consumer(call);
         }
-        // Trait methods: through the traits of a type parameter, or the impls of a type.
         match self.find_trait_method(rt, &method.name, method.span) {
             Ok(Some((tr, slot))) => {
                 let sig = self.traits[tr.trait_id as usize].methods[slot as usize].sig;

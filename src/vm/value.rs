@@ -1050,7 +1050,7 @@ impl ValueRef<'_> {
 }
 
 impl Obj {
-    /// The kind of the object, for internal errors.
+    /// Returns the object kind name for internal error messages.
     pub fn kind_name(&self) -> &'static str {
         match self {
             Obj::Str(_) => "str",

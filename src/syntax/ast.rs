@@ -54,8 +54,8 @@ pub struct Import {
 #[derive(Clone, Debug)]
 pub struct GenericParam {
     pub name: Ident,
-    /// The traits that the type must implement (`Ord`, `Describe`,
-    /// `geo.Shape`, `Into<str>`), written like named types.
+    /// Trait bounds (`Ord`, `Describe`, `geo.Shape`, `Into<str>`), represented
+    /// as named type expressions.
     pub traits: Vec<TypeExpr>,
     pub reflect: bool,
 }

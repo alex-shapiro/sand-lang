@@ -1,24 +1,24 @@
-//! Traits: declarations, impls, method lookup and evidence.
+//! Trait declarations, implementations, method resolution, and dictionary passing.
 //!
-//! Values are erased at runtime, so generic code receives *dictionaries*:
-//! a function takes one hidden parameter for each trait that one of its type
-//! parameters requires (`T: Describe`), before its declared parameters. A
-//! dictionary is a tuple holding the trait's methods (impl methods or
-//! defaults), then the dictionaries of the trait's supertraits for the same
-//! type, then those of the traits that the impl requires of its type
-//! parameters. Trait methods (signatures, default and impl methods) take the
-//! dictionary of `Self` as their first hidden parameter. A trait without
-//! methods in it or its supertraits has no dictionary, so requiring it costs
-//! nothing at run time (see [`TraitDef::has_dict`]).
+//! Because generic values are type-erased at runtime, the compiler passes a
+//! hidden *dictionary* parameter for each trait bound that declares methods
+//! (`T: Describe`) before a function's explicit parameters. Each dictionary is
+//! a tuple containing the trait's method closures (from the `impl` or trait
+//! defaults), followed by the supertrait dictionaries for the same target type,
+//! followed by the dictionaries required by the `impl` block's own type
+//! parameter bounds. Trait method signatures, default methods, and `impl`
+//! methods accept the `Self` dictionary as their first hidden parameter. A
+//! trait without methods in itself or its supertraits does not have a runtime
+//! dictionary ([`TraitDef::has_dict`]).
 //!
-//! A type implements a trait through the traits of a type parameter, an impl,
-//! or, for the built-in traits other than `Num`, an impl that the checker
-//! derives from the type's components (see `derive`).
+//! A type satisfies a trait bound through a type parameter bound, an `impl`
+//! block, or an implementation of `Eq`, `Ord`, `Hash`, or `Encode` derived from
+//! the type's components (`derive.rs`).
 //!
-//! Calls record the evidence they need as [`HKind::Evidence`] placeholders;
-//! when the enclosing function has been checked (and its types inferred),
-//! each is resolved to a hidden parameter of the function, a projection of
-//! one (supertraits, traits that the impl requires) or an impl's [`HKind::Dict`].
+//! Generic calls emit [`HKind::Evidence`] placeholders during expression
+//! checking. After type inference completes for the enclosing function, the
+//! checker resolves each placeholder to a hidden dictionary parameter, a field
+//! projection from a parameter dictionary, or an [`HKind::Dict`] constructor.
 
 use super::expr::mk;
 use super::*;
@@ -26,7 +26,6 @@ use super::*;
 #[derive(Clone, Debug)]
 pub struct TraitMethod {
     pub name: Symbol,
-    /// The signature ([`FnKind::TraitMethod`]).
     pub sig: FnId,
     pub default: Option<FnId>,
 }
@@ -38,16 +37,13 @@ pub struct TraitDef {
     pub is_pub: bool,
     pub doc: Option<Arc<str>>,
     pub span: Span,
-    /// The trait's own type parameters.
     pub generics: Vec<ParamId>,
-    /// The type parameter standing for the implementing type (`Self`).
     pub self_param: ParamId,
-    /// Direct supertraits, in terms of `generics` and `self_param`.
+    /// Direct supertraits parameterized by `generics` and `self_param`.
     pub supers: Vec<TraitRef>,
     pub methods: Vec<TraitMethod>,
     pub builtin: Option<Builtin>,
-    /// Whether the trait or one of its supertraits has methods. Evidence for
-    /// a trait without a dictionary is checked but never passed.
+    /// Indicates whether this trait or any of its supertraits declares methods.
     pub has_dict: bool,
 }
 
@@ -64,46 +60,38 @@ pub struct ImplDef {
     pub generics: Vec<ParamId>,
     pub module: ModId,
     pub span: Span,
-    /// The function for each method of the trait (impl method or default).
+    /// Functions implementing each method slot of the trait.
     pub slots: Vec<FnId>,
-    /// The traits that the impl requires of its type parameters. The dictionaries of those
-    /// with dictionaries follow the supertrait dictionaries in the impl's
-    /// dictionary.
+    /// Trait bounds required on the `impl` block's type parameters. Bounds that
+    /// have runtime dictionaries are stored after supertrait dictionaries in
+    /// the `impl` dictionary.
     pub evidence: Vec<(TypeId, TraitRef)>,
-    /// Replaced by an impl of a later session input: code checked before
-    /// keeps using it, later code does not.
+    /// Indicates whether a later REPL input replaced this `impl`.
     pub replaced: bool,
 }
 
-/// A trait that a type constructor (`owner`) requires of a type argument.
 struct Requirement {
     owner: TypeId,
     arg: TypeId,
     tr: TraitRef,
 }
 
-/// An impl instantiated with fresh type variables.
 struct ImplInst {
     target: TypeId,
     args: TyList,
     evidence: Vec<(TypeId, TraitRef)>,
 }
 
-/// Why a type does not implement a trait (or why the checker cannot tell).
+/// Diagnostic details for an unsatisfied trait bound.
 #[derive(Clone, Debug)]
 pub(crate) struct Unmet {
-    /// The type is not inferred yet.
     pub unknown: bool,
-    /// `float does not implement `Hash``.
     pub head: String,
-    /// The component of a derived impl that fails.
     pub because: Option<String>,
-    /// The innermost impl that needs the failing evidence.
     pub required: Option<String>,
-    /// How to fix it.
     pub hint: Option<String>,
-    /// A derived impl that does not exist, whose failing component
-    /// [`Checker::explain`] finds (only for diagnostics that are reported).
+    /// Records a failed derived trait check so [`Checker::explain`] can locate
+    /// the failing component type if the diagnostic is emitted.
     pub explain: Option<(TypeId, TraitRef, Builtin)>,
 }
 
@@ -112,8 +100,8 @@ impl Unmet {
         Box::new(Unmet { unknown: false, head, because: None, required: None, hint: None, explain: None })
     }
 
-    /// The diagnostic, with `context` (`, which trait `Shape` requires`)
-    /// about the outermost type. Call [`Checker::explain`] first.
+    /// Formats the diagnostic message with `context` appended to the outermost
+    /// requirement. Call [`Checker::explain`] before formatting.
     fn message(&self, context: &str) -> String {
         let because = self.because.as_ref().map(|b| format!(" because {b}")).unwrap_or_default();
         let mut m = match &self.required {
@@ -128,8 +116,8 @@ impl Unmet {
     }
 }
 
-/// The key under which impls are registered: type constructor and, for
-/// tuples, the arity (tuples of different sizes are different constructors).
+/// Returns the lookup key `(constructor, tuple_arity)` used to index `impl`
+/// blocks for `t`, or `None` if `t` cannot implement traits.
 pub(crate) fn impl_key(arena: &TypeArena, t: TypeId) -> Option<(Ctor, u32)> {
     match arena.get(t) {
         Ty::Fn(..) => None,
@@ -142,7 +130,8 @@ fn dict_expr(kind: HKind, span: Span) -> HExpr {
     mk(kind, TypeId::UNIT, span)
 }
 
-/// Whether a dictionary expression is built from impls only (a constant).
+/// Returns `true` if `e` is a constant dictionary constructed solely from
+/// static `impl` dictionaries.
 pub(crate) fn is_const_dict(e: &HExpr) -> bool {
     match &e.kind {
         HKind::Dict { args, .. } => args.iter().all(is_const_dict),
@@ -150,7 +139,6 @@ pub(crate) fn is_const_dict(e: &HExpr) -> bool {
     }
 }
 
-/// Whether two dictionary expressions build the same dictionary.
 fn same_dict(a: &HExpr, b: &HExpr) -> bool {
     match (&a.kind, &b.kind) {
         (HKind::Dict { impl_id: i, args: xs }, HKind::Dict { impl_id: j, args: ys }) => {
@@ -163,7 +151,6 @@ fn same_dict(a: &HExpr, b: &HExpr) -> bool {
 }
 
 impl Checker {
-    /// The diagnostic for `m` (see [`Unmet::message`]).
     pub(crate) fn unmet_message(&mut self, mut m: Box<Unmet>, context: &str) -> String {
         self.explain(&mut m);
         m.message(context)
@@ -181,10 +168,7 @@ impl Checker {
         s
     }
 
-    // ------------------------------------------------------------------
-    // Required traits
-
-    /// Resolves the traits that source names after `:` (`T: Ord + geo.Shape`).
+    /// Resolves trait bounds written after `:` (`T: Ord + geo.Shape`).
     pub(crate) fn resolve_traits(&mut self, ts: &[TypeExpr], scope: &[(Symbol, ParamId)], self_ty: Option<TypeId>) -> Vec<TraitRef> {
         let mut traits = Vec::new();
         for t in ts {
@@ -213,11 +197,11 @@ impl Checker {
         traits
     }
 
-    /// Resolves `Trait` or `module.Trait`.
     fn resolve_trait_path(&mut self, path: &[ast::Ident], span: Span) -> Option<TraitId> {
         let name = || path.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(".");
         let def = match path {
-            // Only traits can follow `:`, so a type of the module (`struct Hash`) does not hide a trait of the prelude.
+            // Only traits can appear after `:`, so a module-local type (`struct Hash`)
+            // does not shadow a prelude trait of the same name.
             [one] => match (self.lookup_global(&one.name), self.prelude) {
                 (Some(Def::Type(_)), Some(p)) if p != self.cur_mod => match self.scope_def(p, &one.name) {
                     Some(Def::Trait(t)) if self.traits[t as usize].is_pub => Some(Def::Trait(t)),
@@ -226,10 +210,7 @@ impl Checker {
                 (def, _) => def,
             },
             [m, item] => match self.lookup_global(&m.name) {
-                Some(Def::Module(m)) => {
-                    // Reports private or missing members itself.
-                    Some(self.module_member(m, &item.name, item.span)?)
-                }
+                Some(Def::Module(m)) => Some(self.module_member(m, &item.name, item.span)?),
                 _ => None,
             },
             _ => None,
@@ -247,7 +228,6 @@ impl Checker {
         }
     }
 
-    /// Adds `traits` to the traits that type parameter `p` requires.
     pub(crate) fn add_traits(&mut self, p: ParamId, traits: Vec<TraitRef>) {
         let info = &mut self.params[p as usize];
         for tr in traits {
@@ -257,7 +237,6 @@ impl Checker {
         }
     }
 
-    /// Applies a `where` clause to the type parameters in `scope`.
     pub(crate) fn apply_where<'w>(
         &mut self,
         preds: impl IntoIterator<Item = &'w ast::WherePredicate>,
@@ -278,12 +257,10 @@ impl Checker {
         self.error(id.span, format!("`{}` is a trait, not a type; use a type parameter that implements it (`<T: {}>`)", id.name, id.name));
     }
 
-    /// The id of built-in trait `b`, once the prelude has declared it.
     pub(crate) fn builtin_trait(&self, b: Builtin) -> Option<TraitRef> {
         self.builtins[b as usize].map(|trait_id| TraitRef { trait_id, args: TyList::EMPTY })
     }
 
-    /// Trait `t` and all its supertraits, ignoring trait arguments.
     fn trait_and_supers(&self, t: TraitId) -> Vec<TraitId> {
         let mut out = vec![t];
         let mut i = 0;
@@ -298,19 +275,20 @@ impl Checker {
         out
     }
 
-    /// Whether trait `t` is `target` or has it as a supertrait, ignoring
-    /// trait arguments.
+    /// Returns `true` if trait `t` equals `target` or has `target` as a
+    /// supertrait.
     pub(crate) fn trait_reaches(&self, t: TraitId, target: TraitId) -> bool {
         self.trait_and_supers(t).contains(&target)
     }
 
-    /// Whether type parameter `p` requires trait `t` or a trait with it as a
-    /// supertrait, whatever the trait's arguments.
+    /// Returns `true` if type parameter `p` requires trait `t` directly or
+    /// through a supertrait.
     pub(crate) fn param_has_trait(&self, p: ParamId, t: TraitId) -> bool {
         self.params[p as usize].traits.iter().any(|tr| self.trait_reaches(tr.trait_id, t))
     }
 
-    /// `traits` without those that another one of them implies.
+    /// Filters `traits` by removing duplicates and traits implied by other
+    /// traits in the slice.
     pub(crate) fn minimal_traits(&self, traits: &[TraitRef]) -> Vec<TraitRef> {
         let mut out: Vec<TraitRef> = Vec::new();
         for (i, tr) in traits.iter().enumerate() {
@@ -325,7 +303,6 @@ impl Checker {
         out
     }
 
-    /// The direct supertraits of `ty: tr`.
     fn supers_of(&mut self, ty: TypeId, tr: TraitRef) -> Vec<TraitRef> {
         let t = &self.traits[tr.trait_id as usize];
         if t.supers.is_empty() {
@@ -337,23 +314,21 @@ impl Checker {
         t.supers.iter().map(|s| s.subst_params(arena, &map)).collect()
     }
 
-    /// The traits a type parameter is known to implement (with supertraits).
     pub(crate) fn param_traits(&mut self, p: ParamId) -> Vec<TraitRef> {
         let traits = self.params[p as usize].traits.clone();
         let pt = self.param_ty(p);
         self.with_supers(pt, traits)
     }
 
-    /// `traits` of `ty` and all their supertraits, in breadth-first order.
     fn with_supers(&mut self, ty: TypeId, traits: Vec<TraitRef>) -> Vec<TraitRef> {
-        self.super_closure(ty, traits).into_iter().map(|(tr, _)| tr).collect()
+        self.supertrait_closure(ty, traits).into_iter().map(|(tr, _)| tr).collect()
     }
 
-    /// `roots` of `ty` and all their supertraits, breadth first and each
-    /// once. Each entry that is not one of `roots` links to the entry whose
-    /// supertrait it is, and to the field of that entry's dictionary that
-    /// holds its dictionary.
-    fn super_closure(&mut self, ty: TypeId, roots: Vec<TraitRef>) -> Vec<(TraitRef, Option<(usize, u32)>)> {
+    /// Returns `roots` and all of their transitive supertraits for `ty` in
+    /// breadth-first order without duplicates. Each non-root entry stores the
+    /// index of its parent entry and the dictionary field index that holds its
+    /// supertrait dictionary.
+    fn supertrait_closure(&mut self, ty: TypeId, roots: Vec<TraitRef>) -> Vec<(TraitRef, Option<(usize, u32)>)> {
         let mut out: Vec<(TraitRef, Option<(usize, u32)>)> = Vec::new();
         for r in roots {
             if !out.iter().any(|(x, _)| *x == r) {
@@ -376,9 +351,6 @@ impl Checker {
         }
         out
     }
-
-    // ------------------------------------------------------------------
-    // Trait declarations
 
     pub(crate) fn declare_trait(&mut self, t: &ast::TraitDecl) -> TraitId {
         let builtin = Builtin::parse(&t.name.name);
@@ -420,7 +392,6 @@ impl Checker {
         self.generic_scope(&self.traits[t as usize].generics)
     }
 
-    /// Resolves the supertraits of the traits declared by the current module.
     pub(crate) fn resolve_supertraits(&mut self, ids: &[TraitId], decls: &[(u32, &ast::TraitDecl)]) {
         for (&id, (_, d)) in ids.iter().zip(decls) {
             let scope = self.trait_scope(id);
@@ -434,11 +405,10 @@ impl Checker {
                 self.traits[id as usize].supers.clear();
             }
         }
-        // Until here, `has_dict` says whether a trait declares methods itself.
+        // Propagate `has_dict` from supertraits to subtraits.
         for &id in ids {
             self.traits[id as usize].has_dict = self.trait_and_supers(id).iter().any(|&t| self.traits[t as usize].has_dict);
         }
-        // Inside the trait, `Self` implements it.
         for &id in ids {
             let (generics, sp) = (self.traits[id as usize].generics.clone(), self.traits[id as usize].self_param);
             let args: Vec<TypeId> = generics.iter().map(|&p| self.param_ty(p)).collect();
@@ -447,8 +417,6 @@ impl Checker {
         }
     }
 
-    /// Declares the method signatures and default methods of trait `id`,
-    /// declared by item `item`.
     pub(crate) fn declare_trait_methods(&mut self, id: TraitId, d: &ast::TraitDecl, item: u32) {
         let self_param = self.traits[id as usize].self_param;
         let mut outer = self.trait_scope(id);
@@ -506,7 +474,6 @@ impl Checker {
     // ------------------------------------------------------------------
     // Impls
 
-    /// Declares an impl and its methods (item `item`), checking them against the trait.
     pub(crate) fn declare_impl(&mut self, d: &ast::ImplDecl, item: u32) -> Option<ImplId> {
         let span = d.trait_ref.span;
         let generics = self.declare_params(&d.generics, &[], None);
@@ -517,7 +484,6 @@ impl Checker {
             return None;
         };
         let tid = self.resolve_trait_path(path, span)?;
-        // Only the prelude implements `Num`, and nothing implements the derived traits.
         if let Some(b) = self.traits[tid as usize].builtin
             && (b.is_derived() || Some(self.cur_mod) != self.prelude)
         {
@@ -554,7 +520,7 @@ impl Checker {
                 self.error(g.name.span, format!("type parameter `{}` is not used by the impl's type or trait arguments", g.name.name));
             }
         }
-        // Orphan rule: built-in types count as declared by the prelude.
+        // Built-in types belong to the prelude for the orphan rule check.
         let type_mod = match ctor {
             Ctor::Def(dd) => self.types[dd as usize].module,
             _ => self.prelude.unwrap_or(u32::MAX),
@@ -564,13 +530,11 @@ impl Checker {
             self.error(span, msg);
             return None;
         }
-        // Coherence: at most one impl per trait (and trait arguments) per type constructor.
         let key = (tid, ctor, arity);
         for other in self.impls_by.get(&key).map(|v| v.to_vec()).unwrap_or_default() {
             if self.impls_overlap(trait_ref, &generics, other) {
                 if self.impls[other as usize].module == self.cur_mod && self.defined_by_earlier_input(self.impls[other as usize].span) {
-                    // An impl of an earlier session input is replaced (code
-                    // already checked keeps using it).
+                    // Replace an overlapping `impl` from an earlier REPL input.
                     remove_impl(&mut self.impls_by, &key, other);
                     remove_impl(&mut self.impls_by_ctor, &(ctor, arity), other);
                     self.impls[other as usize].replaced = true;
@@ -661,8 +625,8 @@ impl Checker {
         Some(id)
     }
 
-    /// Whether a new impl (with type parameters `generics`) has trait
-    /// arguments that unify with those of impl `other`.
+    /// Returns `true` if a new `impl` (with type parameters `generics`) has
+    /// trait arguments that unify with `other`.
     fn impls_overlap(&mut self, tr: TraitRef, generics: &[ParamId], other: ImplId) -> bool {
         let fresh: Vec<TypeId> = generics.iter().map(|_| self.fresh()).collect();
         let mine = self.elems(tr.args);
@@ -673,7 +637,8 @@ impl Checker {
         self.unify_probe(&pairs)
     }
 
-    /// Checks an impl method's signature against the trait's and sets its dictionaries.
+    /// Verifies that an `impl` method signature matches the trait declaration
+    /// and populates the method's hidden dictionary list.
     fn check_impl_method(&mut self, id: ImplId, slot: u32, f: FnId, m: &ast::FnDecl) {
         let imp = self.impls[id as usize].clone();
         let td = &self.traits[imp.trait_ref.trait_id as usize];
@@ -712,7 +677,6 @@ impl Checker {
                 ok &= ta.iter().all(|x| tb.contains(x)) && tb.iter().all(|x| ta.contains(x));
             }
         }
-        // The impl's dictionary, then the traits of the method's own type parameters in the trait's order.
         let mut dicts = vec![(imp.target, imp.trait_ref)];
         if ok {
             for &(t, tr) in &sig.dicts[1..] {
@@ -734,10 +698,10 @@ impl Checker {
         self.fns[f as usize].dicts = dicts;
     }
 
-    /// Checks that the type of an impl implements the trait's supertraits.
+    /// Verifies that the target type of `impl` `id` satisfies all supertraits
+    /// of the implemented trait.
     pub(crate) fn check_impl_supertraits(&mut self, id: ImplId) {
         let imp = &self.impls[id as usize];
-        // Only checked: the dictionaries are never built.
         let evidence = imp.evidence.iter().map(|&(t, tr)| (t, tr, dict_expr(HKind::Error, imp.span))).collect();
         let (target, trait_ref, span) = (imp.target, imp.trait_ref, imp.span);
         let name = self.name(self.traits[trait_ref.trait_id as usize].name).to_string();
@@ -762,12 +726,9 @@ impl Checker {
         ImplInst { target, args, evidence }
     }
 
-    // ------------------------------------------------------------------
-    // Method lookup
-
-    /// Finds the trait providing method `name` for values of type `ty`: through
-    /// the traits of a type parameter, or the impls of a concrete type.
-    /// Reports ambiguity (and returns `Err`).
+    /// Resolves trait method `name` on receiver type `ty` through type
+    /// parameter bounds or visible `impl` blocks. Emits an error and returns
+    /// `Err(())` if multiple traits match.
     pub(crate) fn find_trait_method(&mut self, ty: TypeId, name: &str, span: Span) -> Result<Option<(TraitRef, u32)>, ()> {
         let ty = self.resolve(ty);
         let Some(sym) = self.syms.get(name) else { return Ok(None) };
@@ -796,11 +757,10 @@ impl Checker {
                         found.push((tr, slot));
                     }
                 }
-                // Like the names of the prelude, its trait methods yield to those of other modules.
+                // Trait methods from non-prelude modules take precedence over prelude trait methods.
                 if found.iter().any(|(tr, _)| Some(self.traits[tr.trait_id as usize].module) != self.prelude) {
                     found.retain(|(tr, _)| Some(self.traits[tr.trait_id as usize].module) != self.prelude);
                 }
-                // The method (and its impls) may be all that an import is used for.
                 if let [(tr, _)] = found.as_slice() {
                     let mut ms = vec![self.traits[tr.trait_id as usize].module];
                     if let Some(ids) = self.impls_by.get(&(tr.trait_id, key.0, key.1)) {
@@ -829,7 +789,6 @@ impl Checker {
         }
     }
 
-    /// Whether `ty` has trait method `name` (without reporting anything).
     pub(crate) fn has_trait_method(&mut self, ty: TypeId, name: &str) -> bool {
         let Some(sym) = self.syms.get(name) else { return false };
         let t = self.resolve(ty);
@@ -841,11 +800,9 @@ impl Checker {
         }
     }
 
-    /// Whether `ty` implements trait `t`, which is not a derived built-in
-    /// trait, through the traits of a type parameter or an impl for its
-    /// constructor, whatever the trait's arguments. Unlike
-    /// [`Checker::implements`], it does not check the traits that the impl
-    /// requires, and it infers nothing.
+    /// Returns `true` if `ty` has a candidate implementation of non-derived
+    /// trait `t` (through a type parameter bound or a constructor `impl`),
+    /// without checking `impl` bounds or unifying trait arguments.
     pub(crate) fn implements_trait(&mut self, ty: TypeId, t: TraitId) -> bool {
         debug_assert!(!self.traits[t as usize].builtin.is_some_and(Builtin::is_derived));
         let ty = self.resolve(ty);
@@ -855,13 +812,12 @@ impl Checker {
         }
     }
 
-    /// A visible trait declaring method `name` (for suggestions).
+    /// Returns the name of a visible trait that declares method `name`.
     pub(crate) fn trait_with_method(&self, name: &str) -> Option<String> {
         let sym = self.syms.get(name)?;
         self.traits.iter().find(|t| (t.is_pub || t.module == self.cur_mod) && t.slot(sym).is_some()).map(|t| self.name(t.name).to_string())
     }
 
-    /// Marks the imports of the current module that bind module `m` as used.
     fn mark_import_used(&mut self, m: ModId) {
         if !self.linting() {
             return;
@@ -874,7 +830,6 @@ impl Checker {
         }
     }
 
-    /// The slot of method `name` in trait `t`, reporting an error if absent.
     pub(crate) fn trait_method_slot(&mut self, t: TraitId, name: &str, span: Span) -> Option<u32> {
         let td = &self.traits[t as usize];
         match self.syms.get(name).and_then(|s| td.slot(s)) {
@@ -893,14 +848,13 @@ impl Checker {
         TraitRef { trait_id: t, args: self.arena.intern_list(&args) }
     }
 
-    fn trait_pre(&self, tr: TraitRef, self_ty: TypeId) -> Vec<(ParamId, TypeId)> {
+    fn trait_type_bindings(&self, tr: TraitRef, self_ty: TypeId) -> Vec<(ParamId, TypeId)> {
         let td = &self.traits[tr.trait_id as usize];
-        let mut pre = vec![(td.self_param, self_ty)];
-        pre.extend(td.generics.iter().copied().zip(self.arena.list(tr.args).iter().copied()));
-        pre
+        let mut bindings = vec![(td.self_param, self_ty)];
+        bindings.extend(td.generics.iter().copied().zip(self.arena.list(tr.args).iter().copied()));
+        bindings
     }
 
-    /// Calls trait method `slot` with `Self = self_ty`.
     pub(crate) fn call_trait_method(
         &mut self,
         tr: TraitRef,
@@ -911,19 +865,19 @@ impl Checker {
         span: Span,
     ) -> HExpr {
         let sig = self.traits[tr.trait_id as usize].methods[slot as usize].sig;
-        let pre = self.trait_pre(tr, self_ty);
-        self.call_fn_with(sig, recv, args, span, &pre)
+        let bindings = self.trait_type_bindings(tr, self_ty);
+        self.call_fn_with(sig, recv, args, span, &bindings)
     }
 
-    /// A trait method used as a function value (`Point.describe`, `Describe.describe`).
     pub(crate) fn trait_method_value(&mut self, tr: TraitRef, slot: u32, self_ty: TypeId, span: Span) -> HExpr {
         let sig = self.traits[tr.trait_id as usize].methods[slot as usize].sig;
-        let pre = self.trait_pre(tr, self_ty);
-        self.wrapper_value(sig, &pre, span)
+        let bindings = self.trait_type_bindings(tr, self_ty);
+        self.wrapper_value(sig, &bindings, span)
     }
 
-    /// A function value for `f` that supplies its dictionaries: a closure
-    /// taking the declared parameters and calling `f`.
+    /// Builds a closure that supplies hidden `reflect` and dictionary arguments
+    /// if generic function or trait method `f` is used as a first-class
+    /// function value.
     pub(crate) fn wrapper_value(&mut self, f: FnId, pre: &[(ParamId, TypeId)], span: Span) -> HExpr {
         let inst = self.instantiate_fn_with(f, span, pre);
         let id = self.new_lambda();
@@ -951,11 +905,8 @@ impl Checker {
         mk(HKind::Lambda(Box::new(lam)), fty, span)
     }
 
-    // ------------------------------------------------------------------
-    // Evidence
-
-    /// Builds hidden arguments for a call to `f` (`reflect` type descriptions
-    /// followed by trait dictionaries).
+    /// Builds hidden call arguments for `f` (`reflect` type descriptions
+    /// followed by trait evidence placeholders).
     pub(crate) fn hidden_args(
         &mut self,
         f: FnId,
@@ -979,14 +930,12 @@ impl Checker {
         out
     }
 
-    /// Reports an error if trait or impl method `m` declares `reflect` type parameters.
     fn reject_reflect_params(&mut self, m: &ast::FnDecl) {
         for g in m.generics.iter().filter(|g| g.reflect) {
             self.error(g.name.span, "the type parameters of trait and impl methods cannot be `reflect`");
         }
     }
 
-    /// Declares hidden parameters for the `reflect` type parameters of `f`.
     pub(crate) fn declare_reflect_params(&mut self, f: FnId) -> Vec<LocalId> {
         let span = self.fns[f as usize].span;
         let mut out = Vec::new();
@@ -1002,21 +951,18 @@ impl Checker {
         out
     }
 
-    /// Returns the hidden local holding the description of `t` if `t` is a
-    /// `reflect` type parameter of the current function.
     pub(crate) fn reflect_local(&self, t: TypeId) -> Option<LocalId> {
         let Ty::Param(p) = self.rty(t) else { return None };
         self.reflect_param_local(p)
     }
 
-    /// Returns the hidden local holding the description of `p` if `p` is a
-    /// `reflect` type parameter of the current function.
     pub(crate) fn reflect_param_local(&self, p: ParamId) -> Option<LocalId> {
         self.fs.reflect_locals.iter().find(|&&(q, _)| q == p).map(|&(_, l)| l)
     }
 
-    /// Declares the hidden dictionary parameters of the function being
-    /// checked and records the evidence they (and impl dictionaries) provide.
+    /// Declares hidden dictionary parameters for `f` and records the trait
+    /// evidence that those parameters (and any `impl` dictionary fields)
+    /// provide.
     pub(crate) fn declare_dict_params(&mut self, f: FnId) -> Vec<LocalId> {
         let (span, impl_of) = (self.fns[f as usize].span, self.fns[f as usize].impl_of);
         let mut out = Vec::new();
@@ -1029,7 +975,8 @@ impl Checker {
         }
         if let (Some(impl_id), Some(&d0)) = (impl_of, out.first()) {
             let imp = &self.impls[impl_id as usize];
-            let base = self.dict_supers(imp.trait_ref.trait_id).count() + self.traits[imp.trait_ref.trait_id as usize].methods.len();
+            let base =
+                self.supertraits_with_dicts(imp.trait_ref.trait_id).count() + self.traits[imp.trait_ref.trait_id as usize].methods.len();
             let evidence: Vec<(TypeId, TraitRef)> = imp.evidence.iter().copied().filter(|(_, tr)| self.has_dict(tr)).collect();
             for (j, (ty, tr)) in evidence.into_iter().enumerate() {
                 let obj = Box::new(dict_expr(HKind::Local(d0), span));
@@ -1044,23 +991,19 @@ impl Checker {
         self.traits[tr.trait_id as usize].has_dict
     }
 
-    /// The positions in `traits[t].supers` of the supertraits whose
-    /// dictionaries the dictionary of `t` holds.
-    fn dict_supers(&self, t: TraitId) -> impl Iterator<Item = usize> + '_ {
+    fn supertraits_with_dicts(&self, t: TraitId) -> impl Iterator<Item = usize> + '_ {
         let supers = &self.traits[t as usize].supers;
         (0..supers.len()).filter(move |&i| self.has_dict(&supers[i]))
     }
 
-    /// A placeholder for the evidence that `ty` implements `tr` (see
-    /// [`EvidenceReq::lenient`]).
     pub(crate) fn evidence_hole(&mut self, ty: TypeId, tr: TraitRef, lenient: bool, span: Span) -> HExpr {
         self.improve_evidence(ty, tr);
         self.fs.holes.push(EvidenceReq { ty, tr, lenient, span });
         dict_expr(HKind::Evidence((self.fs.holes.len() - 1) as u32), span)
     }
 
-    /// If only one impl or trait of a type parameter can provide the evidence, uses it to infer
-    /// the trait arguments (and type arguments) early.
+    /// Unifies trait and target type arguments eagerly if `ty` has a unique
+    /// matching bound or `impl` for `tr.trait_id`.
     fn improve_evidence(&mut self, ty: TypeId, tr: TraitRef) {
         let t = self.resolve(ty);
         match self.ty(t) {
@@ -1093,14 +1036,13 @@ impl Checker {
         }
     }
 
-    /// Resolves the evidence placeholders of the function being checked,
-    /// reporting failures: the dictionary expression for each (in the order
-    /// of `FnState::holes`), which the final walk of the body puts in place.
+    /// Resolves all [`HKind::Evidence`] placeholders in `self.fs.holes` and
+    /// returns their resolved dictionary expressions.
     pub(crate) fn resolve_holes(&mut self) -> Vec<HExpr> {
         let reqs = std::mem::take(&mut self.fs.holes);
         let mut found: Vec<Option<HExpr>> = vec![None; reqs.len()];
-        // Resolving a placeholder can determine the type of another one (that
-        // may come earlier), so retry until nothing changes before reporting.
+        // Resolving a placeholder can unify type variables used by earlier
+        // placeholders, so iterate until reaching a fixed point.
         'retry: loop {
             let (mut progress, mut pending) = (false, false);
             for (r, slot) in reqs.iter().zip(&mut found).filter(|(_, s)| s.is_none()) {
@@ -1138,8 +1080,8 @@ impl Checker {
         out
     }
 
-    /// Moves a dictionary (and the non-constant dictionaries in it) to hidden
-    /// locals initialized on entry, sharing identical ones.
+    /// Hoists non-constant dictionary expressions into entry-block local
+    /// bindings, deduplicating identical dictionaries.
     pub(crate) fn hoist_dict(&mut self, e: &mut HExpr, hoisted: &mut Vec<(LocalId, HExpr)>) {
         if let HKind::Dict { args, .. } = &mut e.kind {
             for a in args.iter_mut() {
@@ -1162,8 +1104,8 @@ impl Checker {
         *e = dict_expr(HKind::Local(l), e.span);
     }
 
-    /// The dictionary expression proving `ty: tr` in the current function
-    /// (`()` for a trait without a dictionary).
+    /// Resolves a dictionary expression proving `ty: tr` in the current
+    /// function (`()` for traits without methods).
     pub(crate) fn resolve_evidence(&mut self, ty: TypeId, tr: TraitRef, depth: u32) -> Result<HExpr, Box<Unmet>> {
         let ty = self.zonk(ty);
         let tr = self.zonk_trait(tr);
@@ -1171,17 +1113,14 @@ impl Checker {
         if depth > 32 {
             return Err(Unmet::new(format!("overflow while checking that {} implements `{}`", self.show(ty), self.show_trait(&tr))));
         }
-        // A type without type parameters is served by its impl, whose
-        // dictionary is constant (so calls on it are direct).
+        // Prefer static `impl` dictionaries for concrete types so that trait
+        // calls can be devirtualized.
         let ground = !self.arena.has_params(ty);
-        if !ground && let Some(e) = self.find_fact(ty, tr) {
+        if !ground && let Some(e) = self.find_evidence_in_scope(ty, tr) {
             return Ok(e);
         }
         match self.ty(ty) {
             Ty::Error => return Ok(dict_expr(HKind::Error, span)),
-            // A dictionary can be loaded where no value of type `never` exists
-            // (on entry, or for a method without `self`), so only traits
-            // without dictionaries are implemented.
             Ty::Never if !self.has_dict(&tr) => return Ok(dict_expr(HKind::Unit, span)),
             Ty::Var(_) => {
                 let mut m = Unmet::new(format!("cannot infer the type that must implement `{}`", self.show_trait(&tr)));
@@ -1208,7 +1147,7 @@ impl Checker {
             Err(m)
                 if !m.unknown
                     && ground
-                    && let Some(e) = self.find_fact(ty, tr) =>
+                    && let Some(e) = self.find_evidence_in_scope(ty, tr) =>
             {
                 Ok(e)
             }
@@ -1216,7 +1155,8 @@ impl Checker {
         }
     }
 
-    /// Whether `ty` implements `tr`; `None` if that depends on a type not inferred yet.
+    /// Returns `Some(true)` if `ty` implements `tr`, `Some(false)` if it does
+    /// not, or `None` if `ty` contains unresolved inference variables.
     pub(crate) fn implements(&mut self, ty: TypeId, tr: TraitRef) -> Option<bool> {
         match self.resolve_evidence(ty, tr, 0) {
             Ok(_) => Some(true),
@@ -1225,12 +1165,9 @@ impl Checker {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Requirements of written types
-
-    /// The traits that the type constructors in `t` require of their type
-    /// arguments: set elements and map keys need `Hash`, and `Bag<X>` needs
-    /// what `struct Bag<T: ...>` requires of `T`.
+    /// Collects all trait bounds required by type constructors in `t` (`Hash`
+    /// on `Set` elements and `Map` keys, and declared type parameter bounds on
+    /// named types).
     fn written_requirements(&mut self, t: TypeId) -> Vec<Requirement> {
         let hash = self.builtin_trait(Builtin::Hash);
         let mut out = Vec::new();
@@ -1275,9 +1212,8 @@ impl Checker {
         out
     }
 
-    /// The first requirement of a type constructor in `ty` (zonked) that its
-    /// type argument does not meet (see [`Checker::written_requirements`]).
-    pub(crate) fn unmet_in_type(&mut self, ty: TypeId) -> Option<Box<Unmet>> {
+    /// Returns the first unsatisfied type-constructor trait bound in `ty`.
+    pub(crate) fn first_unmet_requirement(&mut self, ty: TypeId) -> Option<Box<Unmet>> {
         for r in self.written_requirements(ty) {
             if let Err(mut m) = self.resolve_evidence(r.arg, r.tr, 0) {
                 let owner = match self.ty(r.owner) {
@@ -1292,12 +1228,11 @@ impl Checker {
         None
     }
 
-    /// Gives the type parameters of the type definitions from `first` onward
-    /// the requirements of their field and payload types: with
-    /// `struct Bag<T: Hash>`, `struct Outer<U> { b: Bag<U> }` gets `U: Hash`.
+    /// Propagates trait bounds required by field and variant payload types onto
+    /// the type parameters of type definitions starting at `first`.
     pub(crate) fn infer_member_requirements(&mut self, first: usize) {
-        let users = self.member_users(first);
-        self.until_stable(first, &users, &mut |c, d| {
+        let dependents = self.dependent_types(first);
+        self.propagate_to_fixed_point(first, &dependents, &mut |c, d| {
             let gens = c.types[d].generics.clone();
             let mut changed = false;
             for m in c.member_types(d) {
@@ -1315,8 +1250,6 @@ impl Checker {
         });
     }
 
-    /// [`Checker::check_member_type`] for each field and payload type of the
-    /// Rust-bound type `d`, naming the member in the message.
     pub(crate) fn check_bound_member_types(&mut self, d: TypeDefId) {
         let (span, owner) = (self.types[d as usize].span, self.ctor_name(Ctor::Def(d), 0));
         let def = &self.types[d as usize];
@@ -1329,9 +1262,9 @@ impl Checker {
         }
     }
 
-    /// Checks that the field or payload type `ty` of type definition `d`
-    /// meets the requirements of its type constructors, given the traits of
-    /// the type parameters of `d`. Reports a failure as `prefix` and the reason.
+    /// Verifies that field or variant payload type `ty` of type definition `d`
+    /// satisfies all type-constructor trait bounds under `d`'s type parameter
+    /// bounds.
     pub(crate) fn check_member_type(&mut self, d: TypeDefId, ty: TypeId, span: Span, prefix: &str) {
         let mut evidence = Vec::new();
         for &p in &self.types[d as usize].generics {
@@ -1339,7 +1272,7 @@ impl Checker {
             evidence.extend(self.params[p as usize].traits.iter().map(|&tr| (pt, tr, dict_expr(HKind::Error, span))));
         }
         let saved = std::mem::replace(&mut self.fs.evidence, evidence);
-        if let Some(m) = self.unmet_in_type(ty) {
+        if let Some(m) = self.first_unmet_requirement(ty) {
             let msg = format!("{prefix}{}", self.unmet_message(m, ""));
             self.error(span, msg);
         }
@@ -1351,7 +1284,6 @@ impl Checker {
         TraitRef { trait_id: tr.trait_id, args: arena.map_list(tr.args, &mut |a, t| super::unify::zonk_in(a, subst, budget, t)) }
     }
 
-    /// Evidence for `ty: tr` (zonked) from the impl for the type's constructor.
     fn resolve_by_impl(&mut self, ty: TypeId, tr: TraitRef, depth: u32) -> Result<HExpr, Box<Unmet>> {
         let span = Span::default();
         let not_impl = |c: &Checker| Unmet::new(format!("{} does not implement `{}`", c.show(ty), c.show_trait(&tr)));
@@ -1394,7 +1326,7 @@ impl Checker {
             match self.resolve_evidence(e.unwrap_or(ty), s, depth + 1) {
                 Ok(d) if self.has_dict(&s) => args.push(d),
                 Ok(_) => {}
-                // `check_impl_supertraits` reports a missing supertrait at the impl.
+                // `check_impl_supertraits` reports missing supertraits on the `impl` itself.
                 Err(m) if e.is_none() && !m.unknown => {
                     if self.has_dict(&s) {
                         args.push(dict_expr(HKind::Error, span));
@@ -1406,9 +1338,9 @@ impl Checker {
         Ok(dict_expr(HKind::Dict { impl_id: id, args }, span))
     }
 
-    /// Evidence from the function's dictionaries, the traits of type
-    /// parameter `ty`, and their supertraits.
-    fn find_fact(&mut self, ty: TypeId, tr: TraitRef) -> Option<HExpr> {
+    /// Searches in-scope dictionary parameters, type parameter bounds, and
+    /// their supertraits for evidence that `ty` implements `tr`.
+    fn find_evidence_in_scope(&mut self, ty: TypeId, tr: TraitRef) -> Option<HExpr> {
         let mut roots: Vec<TraitRef> = Vec::new();
         let mut dicts: Vec<HExpr> = Vec::new();
         for (t, f, e) in &self.fs.evidence {
@@ -1417,7 +1349,6 @@ impl Checker {
                 dicts.push(e.clone());
             }
         }
-        // Traits without dictionaries are not in the evidence.
         if let Ty::Param(p) = self.ty(ty) {
             for f in self.params[p as usize].traits.clone() {
                 if !self.has_dict(&f) && !roots.contains(&f) {
@@ -1426,7 +1357,7 @@ impl Checker {
                 }
             }
         }
-        let nodes = self.super_closure(ty, roots);
+        let nodes = self.supertrait_closure(ty, roots);
         let mut at = nodes.iter().position(|(x, _)| *x == tr)?;
         if !self.has_dict(&tr) {
             return Some(dict_expr(HKind::Unit, Span::default()));
@@ -1444,10 +1375,8 @@ impl Checker {
         Some(e)
     }
 
-    // ------------------------------------------------------------------
-    // Tentative unification
-
-    /// Unifies all pairs, or none (undoing partial bindings on failure).
+    /// Unifies all pairs in `pairs`, rolling back all bindings if any pair
+    /// fails to unify.
     pub(crate) fn try_unify_all(&mut self, pairs: &[(TypeId, TypeId)]) -> bool {
         let outer = self.unify_log.replace(Vec::new());
         let ok = pairs.iter().all(|&(a, b)| self.unify(a, b));
@@ -1464,7 +1393,8 @@ impl Checker {
         ok
     }
 
-    /// Whether all pairs unify, without keeping any bindings.
+    /// Tests whether all pairs in `pairs` unify, rolling back all bindings
+    /// afterward.
     fn unify_probe(&mut self, pairs: &[(TypeId, TypeId)]) -> bool {
         let outer = self.unify_log.replace(Vec::new());
         let ok = pairs.iter().all(|&(a, b)| self.unify(a, b));

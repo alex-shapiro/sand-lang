@@ -1,8 +1,7 @@
-//! Unification, trait requirements and zonking.
+//! Type unification, trait obligation checking, and variable resolution.
 //!
-//! Inference variables are nodes of the type arena (`Ty::Var`) whose
-//! bindings are kept in `Checker::subst`; types are hash-consed, so equal
-//! types are equal ids and most comparisons are integer comparisons.
+//! Inference variables are arena nodes (`Ty::Var`) bound in `Checker::subst`.
+//! Because types are hash-consed, equal types share a `TypeId`.
 
 use super::Checker;
 use super::expr::mk;
@@ -147,8 +146,8 @@ impl Checker {
         ra
     }
 
-    /// Checks that `t` implements `tr` now, or when the function is
-    /// finished if `t` is not inferred yet.
+    /// Checks that `t` implements `tr`, or defers the check until the end of
+    /// the function if `t` is not inferred yet.
     pub fn require(&mut self, t: TypeId, tr: TraitRef, span: Span) {
         match self.resolve_evidence(t, tr, 0) {
             Ok(_) => {}
@@ -160,15 +159,15 @@ impl Checker {
         }
     }
 
-    /// [`Checker::require`] for built-in trait `b`.
+    /// Checks that `t` implements built-in trait `b`.
     pub fn require_builtin(&mut self, t: TypeId, b: Builtin, span: Span) {
         if let Some(tr) = self.builtin_trait(b) {
             self.require(t, tr, span);
         }
     }
 
-    /// Checks that `+` is defined for `t` now, or when the function is
-    /// finished if `t` is not inferred yet.
+    /// Checks that `+` is defined for `t`, or defers the check until the end of
+    /// the function if `t` is not inferred yet.
     pub fn require_plus(&mut self, t: TypeId, span: Span) {
         match self.rty(t) {
             Ty::Var(_) => self.fs.plus_checks.push((t, span)),
@@ -189,12 +188,9 @@ impl Checker {
     // ------------------------------------------------------------------
     // The final walk
 
-    /// The final walk over a checked function body: resolves inference
-    /// variables, puts the dictionaries in place of the evidence placeholders
-    /// (noting the statically known impls of trait calls, and building the
-    /// non-constant dictionaries used in loops or lambdas once, on entry),
-    /// and marks the mutable locals that lambdas capture as cells. `lambda` is the lambda being walked
-    /// (0: the function itself); `nested` tells whether it is in a loop or lambda.
+    /// Resolves inference variables, replaces evidence placeholders with
+    /// dictionaries, hoists non-constant dictionaries out of loops and lambdas,
+    /// and marks captured mutable locals as cells.
     pub(crate) fn finish_expr(&mut self, e: &mut HExpr, fin: &mut Finish, lambda: u32, nested: bool) {
         e.ty = self.zonk(e.ty);
         match &mut e.kind {
@@ -268,12 +264,12 @@ pub(crate) fn zonk_in(arena: &mut TypeArena, subst: &[Option<TypeId>], budget: &
     }
 }
 
-/// The state of the final walk of a function body ([`Checker::finish_expr`]).
+/// State for the final pass over a function body ([`Checker::finish_expr`]).
 pub(crate) struct Finish {
-    /// The dictionary of each evidence placeholder.
+    /// Resolved dictionary for each evidence placeholder.
     pub dicts: Vec<HExpr>,
-    /// Whether non-constant dictionaries may occur (the function has dictionaries).
+    /// True if the function has dictionary parameters that may be non-constant.
     pub hoist: bool,
-    /// Dictionaries built on entry, in hidden locals.
+    /// Non-constant dictionaries hoisted into hidden locals at function entry.
     pub hoisted: Vec<(LocalId, HExpr)>,
 }

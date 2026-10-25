@@ -1,66 +1,63 @@
-//! An independent check of the trait evidence in checked HIR, which debug
-//! builds run before compiling, as GHC runs Core Lint. From the declarations
-//! alone it proves again that:
+//! Independent verification of trait bounds and dictionaries in the typed HIR.
 //!
-//! - each type argument of a call, function value, struct literal and variant
-//!   implements the traits that its type parameter requires;
-//! - each dictionary passed to a call is evidence for the trait and type that
-//!   the callee's hidden parameter needs;
-//! - the field and payload types of type definitions, and `reflect` type
-//!   arguments, meet the requirements of their type constructors;
-//! - the type of each impl implements the trait's supertraits.
+//! Debug builds run [`verify`] before code generation to check four invariants
+//! directly from item declarations:
 //!
-//! It shares no code with the checker's evidence search (`traits.rs`,
-//! `derive.rs`), so a bug there makes verification fail instead of giving a
-//! program a wrong dictionary or a set of values that cannot be hashed.
+//! - Every type argument at a call site, function value, struct literal, or
+//!   enum variant satisfies the trait bounds of its type parameter.
+//! - Every dictionary expression passed to a call matches the trait and target
+//!   type expected by the callee's hidden dictionary parameter.
+//! - Every struct field type, enum variant payload type, and `reflect` type
+//!   argument satisfies the trait bounds of its type constructors.
+//! - Every `impl` target type satisfies all supertraits of the implemented
+//!   trait.
+//!
+//! This pass is independent of the type checker's solver (`traits.rs` and
+//! `derive.rs`) so that solver bugs fail verification at compile time.
 
 use super::*;
 
-/// The traits whose impls the compiler derives.
 const DERIVED: [Builtin; 4] = [Builtin::Eq, Builtin::Ord, Builtin::Hash, Builtin::Encode];
 
-/// Verifies all type definitions and impls of `cp`, and `bodies`. Returns
-/// the first violation found.
+/// Verifies all type definitions, `impl` blocks, and function `bodies` in `cp`.
+/// Returns an error describing the first violation found.
 pub(crate) fn verify<'a>(cp: &'a CheckedProgram, bodies: impl Iterator<Item = (FnId, &'a HFn)>) -> Result<(), String> {
     let mut v = Verifier::new(cp);
     for d in 0..cp.types.len() {
-        v.type_def(d as TypeDefId)?;
+        v.check_type_def(d as TypeDefId)?;
     }
     for i in 0..cp.impls.len() {
-        v.impl_supertraits(i as ImplId)?;
+        v.check_impl_supertraits(i as ImplId)?;
     }
     for (f, body) in bodies {
-        v.body(f, body).map_err(|m| format!("in `{}`: {m}", cp.name(cp.fns[f as usize].name)))?;
+        v.check_body(f, body).map_err(|m| format!("in `{}`: {m}", cp.name(cp.fns[f as usize].name)))?;
     }
     Ok(())
 }
 
 struct Verifier<'a> {
     cp: &'a CheckedProgram,
-    /// A copy of the program's types, to which substitutions add.
     arena: TypeArena,
     natives: HashMap<u32, FnId>,
     builtins: HashMap<Builtin, TraitRef>,
-    /// For each type definition and derived trait (in the order of
-    /// [`DERIVED`]): the indices of the type parameters that must implement
-    /// the trait for an instance to implement it, or `None` if none does.
+    /// Required type parameter indices for each type definition and derived
+    /// trait in [`DERIVED`], or `None` if the type never implements the trait.
     derived: Vec<[Option<Vec<u32>>; 4]>,
 }
 
-/// What the code being verified knows.
 #[derive(Default)]
-struct Cx {
-    /// The function whose body is verified.
+struct VerifyCtx {
     f: Option<FnId>,
-    /// The dictionary parameters of the function and what each proves.
+    /// Maps each dictionary parameter local to the `(type, trait)` pair that it
+    /// provides.
     dicts: HashMap<LocalId, (TypeId, TraitRef)>,
-    /// The dictionary of `Self` of an impl method.
+    /// Records the `Self` dictionary local and `ImplId` for an `impl` method.
     impl_dict: Option<(LocalId, ImplId)>,
-    /// The dictionaries that the function builds on entry.
+    /// Maps hoisted dictionary locals to their initializer expressions.
     hoisted: HashMap<LocalId, HExpr>,
 }
 
-type Res = Result<(), String>;
+type VerifyResult = Result<(), String>;
 
 impl<'a> Verifier<'a> {
     fn new(cp: &'a CheckedProgram) -> Self {
@@ -100,7 +97,6 @@ impl<'a> Verifier<'a> {
         TraitRef { trait_id: tr.trait_id, args: self.arena.map_list(tr.args, &mut |a, t| a.instantiate(t, from, to)) }
     }
 
-    /// The direct supertraits of `ty: tr`.
     fn supers_of(&mut self, ty: TypeId, tr: TraitRef) -> Vec<TraitRef> {
         let td = &self.cp.traits[tr.trait_id as usize];
         let mut from = td.generics.clone();
@@ -110,10 +106,10 @@ impl<'a> Verifier<'a> {
         td.supers.clone().into_iter().map(|s| self.subst_trait(s, &from, &to)).collect()
     }
 
-    /// The traits that type parameter `p` (of type `ty`) implements: those
-    /// it requires, those of the function's dictionaries for it, and their
-    /// supertraits.
-    fn param_traits(&mut self, cx: &Cx, p: ParamId, ty: TypeId) -> Vec<TraitRef> {
+    /// Returns all traits satisfied by type parameter `p` (of type `ty`),
+    /// including declared bounds, function dictionary bounds, and their
+    /// transitive supertraits.
+    fn param_traits(&mut self, cx: &VerifyCtx, p: ParamId, ty: TypeId) -> Vec<TraitRef> {
         let mut out = self.cp.params[p as usize].traits.clone();
         if let Some(f) = cx.f {
             out.extend(self.cp.fns[f as usize].dicts.iter().filter(|(t, _)| *t == ty).map(|&(_, tr)| tr));
@@ -130,22 +126,20 @@ impl<'a> Verifier<'a> {
         out
     }
 
-    // ------------------------------------------------------------------
-    // Derived impls
-
-    /// Computes [`Verifier::derived`] as a greatest fixed point: a type
-    /// definition implements a derived trait unless a member type refutes it.
+    /// Computes [`Verifier::derived`] using greatest fixed-point iteration so
+    /// that mutually recursive types implement a derived trait unless a
+    /// component type refutes it.
     fn derive_all(&mut self) {
         let n = self.cp.types.len();
         self.derived = vec![std::array::from_fn(|_| Some(Vec::new())); n];
-        let mut users: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); n];
         for d in 0..n {
             for m in self.members(d) {
                 self.arena.any(m, &mut |t| {
                     if let Ty::Named(e, _) = t
-                        && users[e as usize].last() != Some(&d)
+                        && dependents[e as usize].last() != Some(&d)
                     {
-                        users[e as usize].push(d);
+                        dependents[e as usize].push(d);
                     }
                     false
                 });
@@ -157,7 +151,7 @@ impl<'a> Verifier<'a> {
                 let new = self.derive_def(d, b);
                 if new != self.derived[d][b] {
                     self.derived[d][b] = new;
-                    todo.extend(&users[d]);
+                    todo.extend(&dependents[d]);
                 }
             }
         }
@@ -183,16 +177,16 @@ impl<'a> Verifier<'a> {
             return None;
         }
         let generics = def.generics.clone();
-        let mut needs = Vec::new();
+        let mut required = Vec::new();
         let mut todo = self.members(d);
         while let Some(t) = todo.pop() {
             match self.arena.get(t) {
                 Ty::Param(p) => match generics.iter().position(|&g| g == p) {
-                    Some(i) => needs.push(i as u32),
+                    Some(i) => required.push(i as u32),
                     None => {
                         let pt = self.arena.param(p);
                         let need = self.builtins[&trait_];
-                        if !self.param_traits(&Cx::default(), p, pt).contains(&need) {
+                        if !self.param_traits(&VerifyCtx::default(), p, pt).contains(&need) {
                             return None;
                         }
                     }
@@ -204,19 +198,15 @@ impl<'a> Verifier<'a> {
                 ty => todo.extend(builtin_parts(&self.arena, ty, trait_)?),
             }
         }
-        needs.sort_unstable();
-        needs.dedup();
-        Some(needs)
+        required.sort_unstable();
+        required.dedup();
+        Some(required)
     }
 
-    // ------------------------------------------------------------------
-    // Implemented traits
-
-    /// Proves `ty: tr`.
-    fn holds(&mut self, cx: &Cx, ty: TypeId, tr: TraitRef, depth: u32) -> Res {
+    /// Verifies that `ty` implements `tr`.
+    fn check_trait(&mut self, cx: &VerifyCtx, ty: TypeId, tr: TraitRef, depth: u32) -> VerifyResult {
         let fail = |v: &Self| format!("{} does not implement `{}`", v.show(ty), v.show_trait(tr));
         if self.arena.has_vars(ty) {
-            // Left unknown by inference: no value of the type exists.
             return Ok(());
         }
         if depth > 64 {
@@ -229,14 +219,14 @@ impl<'a> Verifier<'a> {
             Ty::Param(p) if self.param_traits(cx, p, ty).contains(&tr) => Ok(()),
             Ty::Param(_) => Err(fail(self)),
             _ => match self.cp.traits[tr.trait_id as usize].builtin {
-                Some(b) if b.is_derived() => self.derived_holds(cx, ty, b),
+                Some(b) if b.is_derived() => self.check_derived_trait(cx, ty, b),
                 _ => {
-                    let (i, sigma) = self.impl_for(ty, tr).map_err(|why| format!("{}: {why}", fail(self)))?;
+                    let (i, sigma) = self.find_matching_impl(ty, tr).map_err(|why| format!("{}: {why}", fail(self)))?;
                     let imp = &self.cp.impls[i as usize];
                     let gens = imp.generics.clone();
                     for (t, s) in imp.evidence.clone() {
                         let (t, s) = (self.subst(t, &gens, &sigma), self.subst_trait(s, &gens, &sigma));
-                        self.holds(cx, t, s, depth + 1)?;
+                        self.check_trait(cx, t, s, depth + 1)?;
                     }
                     Ok(())
                 }
@@ -244,8 +234,7 @@ impl<'a> Verifier<'a> {
         }
     }
 
-    /// Proves `ty: b` for a derived trait `b` from the components of `ty`.
-    fn derived_holds(&mut self, cx: &Cx, ty: TypeId, b: Builtin) -> Res {
+    fn check_derived_trait(&mut self, cx: &VerifyCtx, ty: TypeId, b: Builtin) -> VerifyResult {
         let bi = DERIVED.iter().position(|&x| x == b).expect("a derived trait");
         let need = self.builtins[&b];
         let fail = |v: &Self, t: TypeId| {
@@ -268,7 +257,7 @@ impl<'a> Verifier<'a> {
                 Ty::Named(d, args) => {
                     let args = self.arena.list(args).to_vec();
                     match &self.derived[d as usize][bi] {
-                        Some(needs) => todo.extend(needs.iter().map(|&i| args[i as usize])),
+                        Some(required) => todo.extend(required.iter().map(|&i| args[i as usize])),
                         None => return fail(self, t),
                     }
                 }
@@ -281,9 +270,9 @@ impl<'a> Verifier<'a> {
         Ok(())
     }
 
-    /// The one impl of `tr` that matches `ty`, and the type arguments of
-    /// its type parameters.
-    fn impl_for(&self, ty: TypeId, tr: TraitRef) -> Result<(ImplId, Vec<TypeId>), &'static str> {
+    /// Finds the unique `impl` of `tr` matching `ty` and returns its `ImplId`
+    /// and type argument substitutions.
+    fn find_matching_impl(&self, ty: TypeId, tr: TraitRef) -> Result<(ImplId, Vec<TypeId>), &'static str> {
         let mut found = None;
         for i in (0..self.cp.impls.len() as ImplId).filter(|&i| !self.cp.impls[i as usize].replaced) {
             if let Some(sigma) = self.match_impl(i, ty, tr) {
@@ -312,8 +301,8 @@ impl<'a> Verifier<'a> {
         sigma.into_iter().collect()
     }
 
-    /// Whether `t` is an instance of `pat`, binding the type parameters
-    /// `gens` of `pat` in `sigma`.
+    /// Returns `true` if `t` matches pattern `pat`, recording substitutions for
+    /// `gens` in `sigma`.
     fn matches(&self, pat: TypeId, t: TypeId, gens: &[ParamId], sigma: &mut [Option<TypeId>]) -> bool {
         if let Ty::Param(p) = self.arena.get(pat)
             && let Some(i) = gens.iter().position(|&g| g == p)
@@ -337,10 +326,10 @@ impl<'a> Verifier<'a> {
         }
     }
 
-    /// Checks that the type arguments in `ty` meet the requirements of their
-    /// type constructors: set elements and map keys implement `Hash`, and
-    /// `Bag<X>` gives `X` the traits that `Bag`'s parameter requires.
-    fn well_formed(&mut self, cx: &Cx, ty: TypeId) -> Res {
+    /// Verifies that all type constructors in `ty` satisfy their trait bounds
+    /// (`Set` elements and `Map` keys implement `Hash`, and named types satisfy
+    /// their parameter bounds).
+    fn check_well_formed(&mut self, cx: &VerifyCtx, ty: TypeId) -> VerifyResult {
         let hash = self.builtins[&Builtin::Hash];
         let mut seen = HashSet::new();
         let mut todo = vec![ty];
@@ -351,11 +340,11 @@ impl<'a> Verifier<'a> {
             match self.arena.get(t) {
                 Ty::List(x) => todo.push(x),
                 Ty::Set(x) => {
-                    self.holds(cx, x, hash, 0).map_err(|m| format!("{m} (required for the elements of {})", self.show(t)))?;
+                    self.check_trait(cx, x, hash, 0).map_err(|m| format!("{m} (required for the elements of {})", self.show(t)))?;
                     todo.push(x);
                 }
                 Ty::Map(k, x) => {
-                    self.holds(cx, k, hash, 0).map_err(|m| format!("{m} (required for the keys of {})", self.show(t)))?;
+                    self.check_trait(cx, k, hash, 0).map_err(|m| format!("{m} (required for the keys of {})", self.show(t)))?;
                     todo.extend([k, x]);
                 }
                 Ty::Tuple(l) => todo.extend(self.arena.list(l)),
@@ -364,7 +353,7 @@ impl<'a> Verifier<'a> {
                     todo.push(r);
                 }
                 Ty::Named(..) => {
-                    self.constructed(cx, t)?;
+                    self.check_type_args(cx, t)?;
                     let Ty::Named(_, args) = self.arena.get(t) else { unreachable!() };
                     todo.extend(self.arena.list(args));
                 }
@@ -374,66 +363,63 @@ impl<'a> Verifier<'a> {
         Ok(())
     }
 
-    /// Checks that the type arguments of `Named` type `ty` implement the
-    /// traits that the definition's type parameters require.
-    fn constructed(&mut self, cx: &Cx, ty: TypeId) -> Res {
+    fn check_type_args(&mut self, cx: &VerifyCtx, ty: TypeId) -> VerifyResult {
         let Ty::Named(d, args) = self.arena.get(ty) else { return Ok(()) };
         let gens = self.cp.types[d as usize].generics.clone();
         let args = self.arena.list(args).to_vec();
         for (&g, &arg) in gens.iter().zip(&args) {
             for tr in self.cp.params[g as usize].traits.clone() {
                 let tr = self.subst_trait(tr, &gens, &args);
-                self.holds(cx, arg, tr, 0).map_err(|m| format!("{m} (required for {})", self.show(ty)))?;
+                self.check_trait(cx, arg, tr, 0).map_err(|m| format!("{m} (required for {})", self.show(ty)))?;
             }
         }
         Ok(())
     }
 
-    // ------------------------------------------------------------------
-    // Dictionaries
-
-    /// Checks that `e` is a dictionary for `ty: tr`.
-    fn dict(&mut self, cx: &Cx, e: &HExpr, ty: TypeId, tr: TraitRef) -> Res {
+    /// Verifies that expression `e` evaluates to a dictionary for `ty: tr`.
+    fn check_dict(&mut self, cx: &VerifyCtx, e: &HExpr, ty: TypeId, tr: TraitRef) -> VerifyResult {
         if self.arena.has_vars(ty) || self.arena.list(tr.args).iter().any(|&a| self.arena.has_vars(a)) {
-            // The type is unknown, so the dictionary is never used.
             return Ok(());
         }
-        let want = |v: &Self| format!("the dictionary for {} implementing `{}`", v.show(ty), v.show_trait(tr));
+        let expected_desc = |v: &Self| format!("the dictionary for {} implementing `{}`", v.show(ty), v.show_trait(tr));
         if !self.has_dict(tr) {
-            return Err(format!("{} is passed, but the trait has no methods", want(self)));
+            return Err(format!("{} is passed, but the trait has no methods", expected_desc(self)));
         }
         match &e.kind {
             HKind::Local(l) if !cx.dicts.contains_key(l) => match cx.hoisted.get(l) {
-                Some(init) => self.dict(cx, &init.clone(), ty, tr),
-                None => Err(format!("{} is local {l}, which holds no dictionary", want(self))),
+                Some(init) => self.check_dict(cx, &init.clone(), ty, tr),
+                None => Err(format!("{} is local {l}, which holds no dictionary", expected_desc(self))),
             },
             HKind::Local(_) | HKind::Field { .. } => {
-                let (t, have) = self.proof(cx, e)?;
+                let (t, have) = self.resolve_dict_param(cx, e)?;
                 if (t, have) == (ty, tr) {
                     Ok(())
                 } else {
-                    Err(format!("{} is the dictionary for {} implementing `{}`", want(self), self.show(t), self.show_trait(have)))
+                    Err(format!("{} is the dictionary for {} implementing `{}`", expected_desc(self), self.show(t), self.show_trait(have)))
                 }
             }
-            HKind::Dict { impl_id, args } => self.impl_dict(cx, *impl_id, args, ty, tr).map_err(|m| format!("{}: {m}", want(self))),
-            _ => Err(format!("{} is not a dictionary expression", want(self))),
+            HKind::Dict { impl_id, args } => {
+                self.check_impl_dict(cx, *impl_id, args, ty, tr).map_err(|m| format!("{}: {m}", expected_desc(self)))
+            }
+            _ => Err(format!("{} is not a dictionary expression", expected_desc(self))),
         }
     }
 
-    /// What a dictionary parameter, or a projection of one, proves.
-    fn proof(&mut self, cx: &Cx, e: &HExpr) -> Result<(TypeId, TraitRef), String> {
+    /// Resolves the `(type, trait)` pair provided by a dictionary parameter or
+    /// supertrait/evidence field projection.
+    fn resolve_dict_param(&mut self, cx: &VerifyCtx, e: &HExpr) -> Result<(TypeId, TraitRef), String> {
         match &e.kind {
             HKind::Local(l) => cx.dicts.get(l).copied().ok_or_else(|| format!("local {l} is not a dictionary parameter")),
             HKind::Field { obj, index } => {
-                let (ty, tr) = self.proof(cx, obj)?;
+                let (ty, tr) = self.resolve_dict_param(cx, obj)?;
                 let methods = self.cp.traits[tr.trait_id as usize].methods.len();
                 let field = (*index as usize).checked_sub(methods).ok_or("a method is used as a dictionary")?;
                 let supers: Vec<TraitRef> = self.supers_of(ty, tr).into_iter().filter(|&s| self.has_dict(s)).collect();
                 if let Some(&s) = supers.get(field) {
                     return Ok((ty, s));
                 }
-                // The impl dictionary of an impl method holds the dictionaries
-                // of what the impl requires of its type parameters.
+                // After supertrait dictionaries, an impl method's `Self` dictionary
+                // stores dictionaries for the impl's own trait bounds.
                 match (&obj.kind, cx.impl_dict) {
                     (HKind::Local(l), Some((d0, i))) if *l == d0 => {
                         let imp = &self.cp.impls[i as usize];
@@ -447,8 +433,7 @@ impl<'a> Verifier<'a> {
         }
     }
 
-    /// Checks that the dictionary of impl `i` with fields `args` proves `ty: tr`.
-    fn impl_dict(&mut self, cx: &Cx, i: ImplId, args: &[HExpr], ty: TypeId, tr: TraitRef) -> Res {
+    fn check_impl_dict(&mut self, cx: &VerifyCtx, i: ImplId, args: &[HExpr], ty: TypeId, tr: TraitRef) -> VerifyResult {
         let imp = &self.cp.impls[i as usize];
         if imp.replaced {
             return Err("its impl is replaced by a later one".into());
@@ -463,9 +448,9 @@ impl<'a> Verifier<'a> {
         for (t, s) in needed {
             if self.has_dict(s) {
                 let e = fields.next().ok_or("it has too few fields")?;
-                self.dict(cx, e, t, s)?;
+                self.check_dict(cx, e, t, s)?;
             } else {
-                self.holds(cx, t, s, 0)?;
+                self.check_trait(cx, t, s, 0)?;
             }
         }
         if fields.next().is_some() {
@@ -474,31 +459,28 @@ impl<'a> Verifier<'a> {
         Ok(())
     }
 
-    // ------------------------------------------------------------------
-    // Declarations and bodies
-
-    fn type_def(&mut self, d: TypeDefId) -> Res {
-        let cx = Cx::default();
+    fn check_type_def(&mut self, d: TypeDefId) -> VerifyResult {
+        let cx = VerifyCtx::default();
         for t in self.members(d as usize) {
-            self.well_formed(&cx, t).map_err(|m| format!("a member of `{}`: {m}", self.cp.name(self.cp.types[d as usize].name)))?;
+            self.check_well_formed(&cx, t).map_err(|m| format!("a member of `{}`: {m}", self.cp.name(self.cp.types[d as usize].name)))?;
         }
         Ok(())
     }
 
-    fn impl_supertraits(&mut self, i: ImplId) -> Res {
+    fn check_impl_supertraits(&mut self, i: ImplId) -> VerifyResult {
         let imp = &self.cp.impls[i as usize];
         let (target, tr) = (imp.target, imp.trait_ref);
         for s in self.supers_of(target, tr) {
-            self.holds(&Cx::default(), target, s, 0)
+            self.check_trait(&VerifyCtx::default(), target, s, 0)
                 .map_err(|m| format!("the impl of `{}` for {}: {m}", self.show_trait(tr), self.show(target)))?;
         }
         Ok(())
     }
 
-    fn body(&mut self, f: FnId, b: &HFn) -> Res {
+    fn check_body(&mut self, f: FnId, b: &HFn) -> VerifyResult {
         let fi = &self.cp.fns[f as usize];
         let reflect = fi.generics.iter().filter(|&&g| self.cp.params[g as usize].reflect).count();
-        let mut cx = Cx { f: Some(f), ..Cx::default() };
+        let mut cx = VerifyCtx { f: Some(f), ..VerifyCtx::default() };
         for (k, &d) in fi.dicts.iter().enumerate() {
             let l = *b.params.get(reflect + k).ok_or("a dictionary parameter is missing")?;
             cx.dicts.insert(l, d);
@@ -510,28 +492,28 @@ impl<'a> Verifier<'a> {
         let mut result = Ok(());
         body.visit_mut(&mut |e| {
             if result.is_ok() {
-                result = self.expr(&mut cx, &b.locals, e);
+                result = self.check_expr(&mut cx, &b.locals, e);
             }
         });
         result
     }
 
-    fn expr(&mut self, cx: &mut Cx, locals: &[LocalInfo], e: &HExpr) -> Res {
+    fn check_expr(&mut self, cx: &mut VerifyCtx, locals: &[LocalInfo], e: &HExpr) -> VerifyResult {
         match &e.kind {
             HKind::Error | HKind::Evidence(_) => Err("a placeholder remains".into()),
             HKind::Let { pat: HPat { kind: HPatKind::Bind(l), .. }, init, .. } if locals[*l as usize].name == Symbol::DICT => {
                 cx.hoisted.insert(*l, (**init).clone());
                 Ok(())
             }
-            HKind::Call { func, targs, args } => self.instance(cx, *func, targs, Some(args)),
+            HKind::Call { func, targs, args } => self.check_fn_instance(cx, *func, targs, Some(args)),
             HKind::CallNative { native, targs, args } => match self.natives.get(native) {
-                Some(&f) => self.instance(cx, f, targs, Some(args)),
+                Some(&f) => self.check_fn_instance(cx, f, targs, Some(args)),
                 None => Err(format!("native {native} has no declaration")),
             },
             HKind::CallTrait { trait_id, slot, targs, args, impl_id } => {
                 let td = &self.cp.traits[*trait_id as usize];
                 let sig = td.methods.get(*slot as usize).ok_or("a trait method slot does not exist")?.sig;
-                self.instance(cx, sig, targs, Some(args))?;
+                self.check_fn_instance(cx, sig, targs, Some(args))?;
                 if let Some(i) = impl_id {
                     let gens = &self.cp.fns[sig as usize].generics;
                     let self_ty = gens.iter().position(|&g| g == td.self_param).map(|k| targs[k]).ok_or("a trait method has no `Self`")?;
@@ -542,20 +524,20 @@ impl<'a> Verifier<'a> {
                 }
                 Ok(())
             }
-            HKind::FnValue { func, targs } => self.instance(cx, *func, targs, None),
-            HKind::MakeStruct { .. } | HKind::MakeVariant { .. } | HKind::Tag(_) => self.constructed(cx, e.ty),
+            HKind::FnValue { func, targs } => self.check_fn_instance(cx, *func, targs, None),
+            HKind::MakeStruct { .. } | HKind::MakeVariant { .. } | HKind::Tag(_) => self.check_type_args(cx, e.ty),
             HKind::VariantFn { .. } => match self.arena.get(e.ty) {
-                Ty::Fn(_, ret) => self.constructed(cx, ret),
+                Ty::Fn(_, ret) => self.check_type_args(cx, ret),
                 _ => Ok(()),
             },
-            HKind::TypeDesc { ty, .. } => self.well_formed(cx, *ty),
+            HKind::TypeDesc { ty, .. } => self.check_well_formed(cx, *ty),
             _ => Ok(()),
         }
     }
 
-    /// Checks a use of function `f` with type arguments `targs`: a call with
-    /// arguments `args` (hidden ones first) or, without them, a function value.
-    fn instance(&mut self, cx: &Cx, f: FnId, targs: &[TypeId], args: Option<&[HArg]>) -> Res {
+    /// Verifies an instantiation of function `f` with `targs`, checking hidden
+    /// `reflect` and dictionary arguments if `args` is `Some`.
+    fn check_fn_instance(&mut self, cx: &VerifyCtx, f: FnId, targs: &[TypeId], args: Option<&[HArg]>) -> VerifyResult {
         let cp = self.cp;
         let fi = &cp.fns[f as usize];
         let name = cp.name(fi.name);
@@ -566,7 +548,7 @@ impl<'a> Verifier<'a> {
         for (&g, &t) in gens.iter().zip(targs) {
             for tr in cp.params[g as usize].traits.iter().copied() {
                 let tr = self.subst_trait(tr, gens, targs);
-                self.holds(cx, t, tr, 0).map_err(|m| format!("a use of `{name}`: {m}"))?;
+                self.check_trait(cx, t, tr, 0).map_err(|m| format!("a use of `{name}`: {m}"))?;
             }
         }
         let Some(args) = args else { return Ok(()) };
@@ -584,7 +566,7 @@ impl<'a> Verifier<'a> {
         for &(t, tr) in &fi.dicts {
             let (t, tr) = (self.subst(t, gens, targs), self.subst_trait(tr, gens, targs));
             match args.get(hidden) {
-                Some(HArg::Expr(e)) => self.dict(cx, e, t, tr).map_err(|m| format!("a call of `{name}`: {m}"))?,
+                Some(HArg::Expr(e)) => self.check_dict(cx, e, t, tr).map_err(|m| format!("a call of `{name}`: {m}"))?,
                 _ => return Err(format!("a call of `{name}` lacks a dictionary")),
             }
             hidden += 1;
@@ -601,8 +583,8 @@ impl<'a> Verifier<'a> {
     }
 }
 
-/// The components of built-in type `ty` that must implement derived trait
-/// `b` for `ty` to implement it, or `None` if `ty` cannot implement it.
+/// Returns the component types of built-in type `ty` that must implement
+/// derived trait `b`, or `None` if `ty` cannot implement `b`.
 fn builtin_parts(arena: &TypeArena, ty: Ty, b: Builtin) -> Option<Vec<TypeId>> {
     use Builtin::*;
     Some(match ty {

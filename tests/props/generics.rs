@@ -1,16 +1,16 @@
-//! Generated generic programs against a Rust model of the trait rules, in the
-//! manner of Hephaestus (Chaliasos et al., PLDI 2022). Each case declares
-//! random traits (static, instance and default methods, supertraits, built-in
-//! supertraits), impls for built-in and generic struct types that require the
-//! trait of their type parameters, and generic functions that call through
-//! dictionaries built in a loop and through supertraits. The model, not the
-//! checker, decides which types implement which traits:
+//! Property tests that compare generated generic programs against a reference
+//! model of trait resolution, following the approach of Hephaestus (Chaliasos
+//! et al., PLDI 2022).
 //!
-//! - a program that the model types must compile, and print what the model
-//!   predicts with and without optimizations; `let` annotations are left out
-//!   where the value alone determines the type;
-//! - the same program with one more use of a type that the model says lacks a
-//!   required trait must give a compile error.
+//! Each test case generates traits (with static, instance, and default methods,
+//! user supertraits, and built-in supertraits), implementations for built-in
+//! and generic struct types, and generic functions that dispatch through
+//! loop-constructed and supertrait dictionaries.
+//!
+//! - Programs accepted by the reference model must compile and produce the
+//!   expected output with and without optimizations.
+//! - Adding a call with a type that does not satisfy a required trait bound in
+//!   the reference model must produce a compile error.
 
 use super::{Mode, int_lit, run_modes, str_lit};
 use proptest::prelude::*;
@@ -39,25 +39,25 @@ impl Rng {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum B {
+enum BuiltinTrait {
     Eq,
     Ord,
     Hash,
     Encode,
 }
 
-impl B {
+impl BuiltinTrait {
     fn name(self) -> &'static str {
         match self {
-            B::Eq => "Eq",
-            B::Ord => "Ord",
-            B::Hash => "Hash",
-            B::Encode => "Encode",
+            BuiltinTrait::Eq => "Eq",
+            BuiltinTrait::Ord => "Ord",
+            BuiltinTrait::Hash => "Hash",
+            BuiltinTrait::Encode => "Encode",
         }
     }
 }
 
-/// The type constructors that user traits have impls for.
+/// Type constructors that can implement generated user traits.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Ctor {
     Int,
@@ -71,8 +71,8 @@ enum Ctor {
 
 const CTORS: [Ctor; 7] = [Ctor::Int, Ctor::Str, Ctor::List, Ctor::Opt, Ctor::Pair, Ctor::Wrap, Ctor::Keyed];
 
-/// `Keyed<A>` requires `A: Hash` through its field, `Outer<A>` through
-/// `Keyed<A>`, and `Tagged<A>` in its declaration.
+/// Standard struct declarations for generated test programs (`Keyed<A>`,
+/// `Outer<A>`, and `Tagged<A>` require `A: Hash`).
 const TYPES: &str = "struct Wrap<A> { v: A }\nstruct Keyed<A> { s: Set<A> }\nstruct Outer<A> { k: Keyed<A> }\n\
                      struct Tagged<A: Hash> { v: A }\nstruct Cell<A> { var v: A }\n";
 
@@ -147,41 +147,40 @@ impl Ty {
         }
     }
 
-    /// The model of the derived impls (SPEC §5.6).
-    fn implements(&self, b: B) -> bool {
+    /// Returns `true` if `self` implements derived trait `b` (SPEC §5.6).
+    fn implements(&self, b: BuiltinTrait) -> bool {
         let own = match self {
             Ty::Int | Ty::Str | Ty::Bool | Ty::Opt(_) | Ty::Pair(..) | Ty::Wrap(_) | Ty::Tagged(_) => true,
-            Ty::Float | Ty::List(_) | Ty::Cell(_) => b != B::Hash,
-            Ty::Set(_) | Ty::Map(..) | Ty::Keyed(_) | Ty::Outer(_) => matches!(b, B::Eq | B::Encode),
+            Ty::Float | Ty::List(_) | Ty::Cell(_) => b != BuiltinTrait::Hash,
+            Ty::Set(_) | Ty::Map(..) | Ty::Keyed(_) | Ty::Outer(_) => matches!(b, BuiltinTrait::Eq | BuiltinTrait::Encode),
             Ty::Fn => false,
         };
         own && self.parts().iter().all(|t| t.implements(b))
     }
 
-    /// Whether the type meets the requirements of its type constructors:
-    /// set elements, map keys and the arguments of `Keyed`, `Outer` and
-    /// `Tagged` implement `Hash`.
+    /// Returns `true` if all set elements, map keys, and type arguments to
+    /// `Keyed`, `Outer`, and `Tagged` in `self` implement `Hash`.
     fn well_formed(&self) -> bool {
         let own = match self {
-            Ty::Set(t) | Ty::Keyed(t) | Ty::Outer(t) | Ty::Tagged(t) | Ty::Map(t, _) => t.implements(B::Hash),
+            Ty::Set(t) | Ty::Keyed(t) | Ty::Outer(t) | Ty::Tagged(t) | Ty::Map(t, _) => t.implements(BuiltinTrait::Hash),
             _ => true,
         };
         own && self.parts().iter().all(|t| t.well_formed())
     }
 
-    /// Whether `json.decode` of `json.encode(x)` gives back `x`: `Some(None)`
-    /// encodes as `null`, and only string map keys are kept as they are.
+    /// Returns `true` if `json.decode(json.encode(x))` preserves `x` (excluding
+    /// nested `Option`s and non-string map keys).
     fn round_trips(&self) -> bool {
         let own = match self {
             Ty::Opt(t) => !matches!(**t, Ty::Opt(_)),
             Ty::Map(k, _) => **k == Ty::Str,
             _ => true,
         };
-        own && self.implements(B::Eq) && self.implements(B::Encode) && self.parts().iter().all(|t| t.round_trips())
+        own && self.implements(BuiltinTrait::Eq) && self.implements(BuiltinTrait::Encode) && self.parts().iter().all(|t| t.round_trips())
     }
 
-    /// Whether every value of the type is written without an annotation
-    /// that the checker needs (no empty collections or `None`).
+    /// Returns `true` if `v` can be inferred without an explicit type annotation
+    /// (does not contain empty collections or `None`).
     fn self_typed(&self, v: &Val) -> bool {
         match (self, v) {
             (Ty::List(t), Val::List(xs)) | (Ty::Set(t), Val::Set(xs)) | (Ty::Keyed(t), Val::Set(xs)) | (Ty::Outer(t), Val::Set(xs)) => {
@@ -205,11 +204,11 @@ enum Val {
     Fn,
     List(Vec<Val>),
     Opt(Option<Box<Val>>),
-    /// A set, also the field of `Keyed` and `Outer`, without duplicates.
+    /// Deduplicated set elements (also used for `Keyed` and `Outer`).
     Set(Vec<Val>),
     Map(Vec<(Val, Val)>),
     Pair(Box<Val>, Box<Val>),
-    /// The field of `Wrap`, `Tagged` or `Cell`.
+    /// Wrapped inner value for `Wrap`, `Tagged`, or `Cell`.
     Wrap(Box<Val>),
 }
 
@@ -261,8 +260,7 @@ impl Val {
         }
     }
 
-    /// The order of values of a type that implements `Ord`. Variants order by
-    /// declaration, so `Some(_) < None`.
+    /// Compares two values according to Sand's `Ord` rules (`Some(_) < None`).
     fn cmp(&self, other: &Val) -> Ordering {
         match (self, other) {
             (Val::Int(a), Val::Int(b)) => a.cmp(b),
@@ -290,8 +288,8 @@ struct Trait {
     methods: bool,
     /// Direct supertraits, all with a larger index.
     supers: Vec<usize>,
-    builtin: Option<B>,
-    /// The constructors with an impl.
+    builtin: Option<BuiltinTrait>,
+    /// Type constructors that implement this trait.
     ctors: Vec<Ctor>,
 }
 
@@ -307,20 +305,22 @@ impl World {
         for i in (0..n).rev() {
             w.traits[i].methods = !rng.chance(4);
             w.traits[i].supers = (i + 1..n).filter(|_| rng.chance(3)).collect();
-            w.traits[i].builtin = [None, None, Some(B::Eq), Some(B::Ord), Some(B::Hash), Some(B::Encode)][rng.below(6)];
-            // The type of each impl must implement the supertraits.
+            w.traits[i].builtin =
+                [None, None, Some(BuiltinTrait::Eq), Some(BuiltinTrait::Ord), Some(BuiltinTrait::Hash), Some(BuiltinTrait::Encode)]
+                    [rng.below(6)];
+            // Each implementing type must also implement all supertraits.
             let builtins = w.builtins(i);
             let allowed: Vec<Ctor> = CTORS
                 .into_iter()
                 .filter(|c| w.traits[i].supers.iter().all(|&j| w.traits[j].ctors.contains(c)))
-                .filter(|&c| builtins.iter().all(|&b| ctor_can(c, b)))
+                .filter(|&c| builtins.iter().all(|&b| ctor_supports_builtin(c, b)))
                 .collect();
             w.traits[i].ctors = allowed.into_iter().filter(|_| !rng.chance(4)).collect();
         }
         w
     }
 
-    /// Trait `i` and its supertraits, in increasing order.
+    /// Returns trait `i` and all of its transitive supertraits in ascending order.
     fn closure(&self, i: usize) -> Vec<usize> {
         let mut out = vec![i];
         let mut k = 0;
@@ -336,12 +336,12 @@ impl World {
         out
     }
 
-    /// The built-in traits that trait `i` implies.
-    fn builtins(&self, i: usize) -> Vec<B> {
+    /// Returns the built-in traits implied by trait `i`.
+    fn builtins(&self, i: usize) -> Vec<BuiltinTrait> {
         let mut out = Vec::new();
         for j in self.closure(i) {
             match self.traits[j].builtin {
-                Some(b @ (B::Ord | B::Hash)) => out.extend([b, B::Eq]),
+                Some(b @ (BuiltinTrait::Ord | BuiltinTrait::Hash)) => out.extend([b, BuiltinTrait::Eq]),
                 Some(b) => out.push(b),
                 None => {}
             }
@@ -353,13 +353,12 @@ impl World {
         self.closure(i).iter().any(|&j| self.traits[j].methods)
     }
 
-    /// The supertraits of `i` (direct or not) with methods.
+    /// Returns the transitive supertraits of `i` that declare methods.
     fn method_supers(&self, i: usize) -> Vec<usize> {
         self.closure(i).into_iter().filter(|&j| j != i && self.traits[j].methods).collect()
     }
 
-    /// The model of trait `i`'s impls: one for each of its constructors,
-    /// which requires the trait of each type argument.
+    /// Returns `true` if `t` implements trait `i` in the reference model.
     fn implements(&self, t: &Ty, i: usize) -> bool {
         t.ctor().is_some_and(|c| self.traits[i].ctors.contains(&c)) && t.parts().iter().all(|p| self.implements(p, i))
     }
@@ -399,9 +398,9 @@ impl World {
         s
     }
 
-    /// The constructors that `use{i}` applies to its argument in its loop.
+    /// Returns the wrapper constructors that `use{i}` applies inside its loop.
     fn wraps(&self, i: usize) -> Vec<Ctor> {
-        let hash = self.builtins(i).contains(&B::Hash);
+        let hash = self.builtins(i).contains(&BuiltinTrait::Hash);
         self.traits[i].ctors.iter().copied().filter(|&c| !matches!(c, Ctor::Int | Ctor::Str) && (c != Ctor::Keyed || hash)).collect()
     }
 
@@ -432,7 +431,7 @@ impl World {
         }
     }
 
-    /// What `use{i}(v)` prints.
+    /// Returns the expected output of `use{i}(v)`.
     fn use_output(&self, t: &Ty, v: &Val, i: usize) -> String {
         let mut out = if self.traits[i].methods {
             let extra = self.method_supers(i).first().map(|&j| format!("/{}", self.show(t, v, j))).unwrap_or_default();
@@ -451,7 +450,7 @@ impl World {
         out
     }
 
-    /// A type with an impl of trait `i`, if its constructors make one.
+    /// Generates a random type that implements trait `i`, if any exists.
     fn impl_ty(&self, rng: &mut Rng, i: usize, depth: u32) -> Option<Ty> {
         for _ in 0..20 {
             let ctors = &self.traits[i].ctors;
@@ -463,7 +462,7 @@ impl World {
                 Ctor::List => part(rng).map(|t| Ty::List(Box::new(t))),
                 Ctor::Opt => part(rng).map(|t| Ty::Opt(Box::new(t))),
                 Ctor::Wrap => part(rng).map(|t| Ty::Wrap(Box::new(t))),
-                Ctor::Keyed => part(rng).filter(|t| t.implements(B::Hash)).map(|t| Ty::Keyed(Box::new(t))),
+                Ctor::Keyed => part(rng).filter(|t| t.implements(BuiltinTrait::Hash)).map(|t| Ty::Keyed(Box::new(t))),
                 Ctor::Pair => part(rng).zip(part(rng)).map(|(a, b)| Ty::Pair(Box::new(a), Box::new(b))),
             };
             if t.is_some() {
@@ -474,12 +473,12 @@ impl World {
     }
 }
 
-/// Whether a type with constructor `c` implements built-in trait `b` when
-/// its type arguments do.
-fn ctor_can(c: Ctor, b: B) -> bool {
+/// Returns `true` if constructor `c` derives built-in trait `b` if its type
+/// arguments implement `b`.
+fn ctor_supports_builtin(c: Ctor, b: BuiltinTrait) -> bool {
     match c {
-        Ctor::List => b != B::Hash,
-        Ctor::Keyed => matches!(b, B::Eq | B::Encode),
+        Ctor::List => b != BuiltinTrait::Hash,
+        Ctor::Keyed => matches!(b, BuiltinTrait::Eq | BuiltinTrait::Encode),
         _ => true,
     }
 }
@@ -542,11 +541,11 @@ fn wrap(c: Ctor, t: &Ty, v: &Val) -> (Ty, Val) {
     }
 }
 
-/// A random well-formed type.
-fn any_ty(rng: &mut Rng, depth: u32) -> Ty {
+/// Generates a random well-formed type.
+fn random_type(rng: &mut Rng, depth: u32) -> Ty {
     loop {
         let leaf = depth == 0 || rng.chance(3);
-        let part = |rng: &mut Rng| Box::new(any_ty(rng, depth.saturating_sub(1)));
+        let part = |rng: &mut Rng| Box::new(random_type(rng, depth.saturating_sub(1)));
         let t = if leaf {
             [Ty::Int, Ty::Str, Ty::Bool, Ty::Float, Ty::Fn][rng.below(5)].clone()
         } else {
@@ -569,9 +568,9 @@ fn any_ty(rng: &mut Rng, depth: u32) -> Ty {
     }
 }
 
-/// A random type for which `want` holds.
-fn ty_where(rng: &mut Rng, want: impl Fn(&Ty) -> bool) -> Option<Ty> {
-    (0..200).map(|_| any_ty(rng, 2)).find(|t| want(t))
+/// Samples random types and returns the first type that satisfies `want`.
+fn find_type(rng: &mut Rng, want: impl Fn(&Ty) -> bool) -> Option<Ty> {
+    (0..200).map(|_| random_type(rng, 2)).find(|t| want(t))
 }
 
 fn value(rng: &mut Rng, t: &Ty) -> Val {
@@ -610,7 +609,7 @@ fn value(rng: &mut Rng, t: &Ty) -> Val {
     }
 }
 
-/// A generated program: declarations, statements, and what they print.
+/// Generated test program with declarations, body statements, and expected stdout.
 struct Case {
     decls: String,
     body: String,
@@ -619,8 +618,8 @@ struct Case {
 }
 
 impl Case {
-    /// Binds a new variable to `v` of type `t`, without the annotation when
-    /// the value determines the type and `erase` is set.
+    /// Appends a `let` binding for `v` of type `t`, omitting the type annotation
+    /// if `erase` is `true` and `v` is self-typed.
     fn bind(&mut self, t: &Ty, v: &Val, erase: bool) -> String {
         let name = format!("v{}", self.next);
         self.next += 1;
@@ -637,8 +636,8 @@ impl Case {
     }
 }
 
-/// A well-typed program, and the ill-typed additions to it: each one more
-/// use of a type that lacks a required trait, with what it is.
+/// Generates a well-typed program and a list of ill-typed snippets that each
+/// violate a trait bound.
 fn generate(seed: u64) -> (Case, Vec<(String, String)>) {
     let mut rng = Rng(seed);
     let w = World::new(&mut rng);
@@ -655,9 +654,11 @@ fn generate(seed: u64) -> (Case, Vec<(String, String)>) {
         }
     }
     for _ in 0..3 {
-        let (probe, b) = [("eqp", B::Eq), ("hashp", B::Hash), ("ordp", B::Ord), ("rtp", B::Encode)][rng.below(4)];
+        let (probe, b) =
+            [("eqp", BuiltinTrait::Eq), ("hashp", BuiltinTrait::Hash), ("ordp", BuiltinTrait::Ord), ("rtp", BuiltinTrait::Encode)]
+                [rng.below(4)];
         let want = |t: &Ty| if probe == "rtp" { t.round_trips() } else { t.implements(b) };
-        let Some(t) = ty_where(&mut rng, want) else { continue };
+        let Some(t) = find_type(&mut rng, want) else { continue };
         let x = value(&mut rng, &t);
         let y = if rng.chance(3) { x.clone() } else { value(&mut rng, &t) };
         let (a, c) = (case.bind(&t, &x, erase), case.bind(&t, &y, erase));
@@ -680,20 +681,21 @@ fn generate(seed: u64) -> (Case, Vec<(String, String)>) {
     let mut bad = Vec::new();
     let lit = |rng: &mut Rng, t: &Ty| format!("let bad: {} = {}\n", t.sand(), value(rng, t).sand(t));
     for i in 0..w.traits.len() {
-        if let Some(t) = ty_where(&mut rng, |t| !w.implements(t, i)) {
+        if let Some(t) = find_type(&mut rng, |t| !w.implements(t, i)) {
             bad.push((format!("{}print(use{i}(bad))\n", lit(&mut rng, &t)), format!("{} lacks T{i}", t.sand())));
         }
         if w.has_dict(i) {
             bad.push((format!("print(count{i}(none))\n"), format!("never lacks T{i}, which has methods")));
         }
     }
-    for (probe, b) in [("eqp", B::Eq), ("hashp", B::Hash), ("ordp", B::Ord), ("rtp", B::Encode)] {
-        if let Some(t) = ty_where(&mut rng, |t| !t.implements(b)) {
+    for (probe, b) in [("eqp", BuiltinTrait::Eq), ("hashp", BuiltinTrait::Hash), ("ordp", BuiltinTrait::Ord), ("rtp", BuiltinTrait::Encode)]
+    {
+        if let Some(t) = find_type(&mut rng, |t| !t.implements(b)) {
             let call = if probe == "rtp" { "rtp(bad)".to_string() } else { format!("{probe}(bad, bad)") };
             bad.push((format!("{}print({call})\n", lit(&mut rng, &t)), format!("{} lacks {}", t.sand(), b.name())));
         }
     }
-    if let Some(t) = ty_where(&mut rng, |t| !t.implements(B::Hash)) {
+    if let Some(t) = find_type(&mut rng, |t| !t.implements(BuiltinTrait::Hash)) {
         let s = t.sand();
         bad.push((format!("let bad: Keyed<{s}> = Keyed {{ s: set([]) }}\n"), format!("Keyed<{s}>")));
         bad.push((format!("let bad: Outer<{s}> = Outer {{ k: Keyed {{ s: set([]) }} }}\n"), format!("Outer<{s}>")));
@@ -705,7 +707,7 @@ fn generate(seed: u64) -> (Case, Vec<(String, String)>) {
     (case, bad)
 }
 
-/// The messages of the compile errors of `src`, or `None` if it compiles.
+/// Returns the compile error messages for `src`, or `None` if `src` compiles.
 fn compile_errors(src: &str) -> Option<Vec<String>> {
     let engine = Engine::new(Config::new().policy(Policy::deny_all())).unwrap();
     match engine.check_source("main.sand", src) {
