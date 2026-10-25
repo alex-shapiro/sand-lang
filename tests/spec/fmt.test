@@ -79,6 +79,22 @@ fn f() {}
 /// Second line.
 fn f() {}
 
+=== a doc comment that documents nothing becomes a line comment
+let l = /// stray
+3
+fn f() {
+    /// on a local
+    let x = 1
+}
+--- fmt
+// stray
+let l = 3
+
+fn f() {
+    // on a local
+    let x = 1
+}
+
 === short inline blocks stay inline
 fn add(a: int, b: int) -> int { a + b }
 let v = if a { 1 } else { 2 }

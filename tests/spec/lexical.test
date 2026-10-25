@@ -407,6 +407,26 @@ let café = 1
 --- stdout
 bom ok
 
+=== module doc comments come before the first item
+//! The module.
+let x = 1 //! not the module
+print(x)
+--- error
+2: a `//!` module documentation comment must come before the first item
+
+=== a `///` after code on its line documents nothing
+let x = 1 /// about nothing
+/// Doubles.
+fn double(n: int) -> int { n * 2 }
+fn plain() {}
+help(double)
+help(plain)
+--- stdout
+fn double(n: int) -> int
+
+Doubles.
+fn plain()
+
 === unterminated block comment
 /* never closed
 print(1)

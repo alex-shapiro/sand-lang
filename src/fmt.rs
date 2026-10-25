@@ -62,7 +62,7 @@ fn format_on_this_thread(src: &str, budget: &CompileBudget) -> Result<String, St
         let (line, col) = SourceFile::new("", src).line_col(err.span.lo);
         return Err(format!("{line}:{col}: {}", err.message));
     }
-    let mut f = Formatter::new(src, &parsed.comments, parsed.tokens, budget);
+    let mut f = Formatter::new(src, &parsed.comments, &parsed.docs, parsed.tokens, budget);
     let doc = f.module(&parsed.module);
     Ok(render(&doc, budget))
 }
@@ -621,6 +621,8 @@ fn is_line_comment(c: &Comment) -> bool {
 struct Formatter<'a> {
     src: &'a str,
     comments: &'a [Comment],
+    /// See [`crate::syntax::parser::ParseResult::docs`].
+    docs: &'a [u32],
     /// Source tokens, without inserted statement terminators.
     tokens: Vec<Token>,
     /// Positions of the line breaks of the source.
@@ -633,10 +635,10 @@ struct Formatter<'a> {
 }
 
 impl<'a> Formatter<'a> {
-    fn new(src: &'a str, comments: &'a [Comment], mut tokens: Vec<Token>, budget: &'a CompileBudget) -> Formatter<'a> {
+    fn new(src: &'a str, comments: &'a [Comment], docs: &'a [u32], mut tokens: Vec<Token>, budget: &'a CompileBudget) -> Formatter<'a> {
         tokens.retain(|t| !(t.tok == Tok::Semi && t.lo == t.hi) && t.tok != Tok::Eof);
         let newlines = src.bytes().enumerate().filter(|&(_, b)| b == b'\n').map(|(i, _)| i as u32).collect();
-        Formatter { src, comments, tokens, newlines, next: 0, deferred: Vec::new(), budget }
+        Formatter { src, comments, docs, tokens, newlines, next: 0, deferred: Vec::new(), budget }
     }
 
     // ------------------------------------------------------------------
@@ -743,8 +745,19 @@ impl<'a> Formatter<'a> {
     // ------------------------------------------------------------------
     // Comments
 
-    fn comment_text(&self, i: usize) -> &'a str {
-        self.comments[i].text(self.src).trim_end()
+    /// The text of comment `i`. A `///` comment that documents nothing is
+    /// printed as `//`, so that moving it next to an item does not document it.
+    fn comment_text(&self, i: usize) -> String {
+        let c = &self.comments[i];
+        let text = c.text(self.src).trim_end();
+        match c.kind {
+            CommentKind::Doc if self.docs.binary_search(&c.lo).is_err() => {
+                // `///!` must not become the module doc comment `//!`.
+                let rest = &text[3..];
+                if rest.starts_with(['!', '/']) { format!("// {rest}") } else { format!("//{rest}") }
+            }
+            _ => text.to_string(),
+        }
     }
 
     fn has_comment_before(&self, pos: u32) -> bool {
@@ -1734,7 +1747,12 @@ impl<'a> Formatter<'a> {
                 cat(vec![name, self.call_args(args, method.span.hi, op.span.hi - 1)])
             }
             ExprKind::Field(x, name) => self.dot(x.span.hi, |f| f.name(name)),
-            ExprKind::TupleField(x, i, span) => self.dot(x.span.hi, |f| prepend(f.inline_comments(span.lo), text(i.to_string()))),
+            ExprKind::TupleField(x, i, span) => {
+                let field = self.dot(x.span.hi, |f| prepend(f.inline_comments(span.lo), text(i.to_string())));
+                // `1.0` would lex as a float.
+                let number = matches!(x.kind, ExprKind::Int(_) | ExprKind::IntOverflow(_) | ExprKind::Float(_));
+                if number { cat(vec![text(" "), field]) } else { field }
+            }
             ExprKind::Index(x, idx) => {
                 let open = self.punct(x.span.hi, &Tok::LBracket, "[");
                 cat(vec![open, self.expr(idx), self.text_at(op.span.hi - 1, "]")])

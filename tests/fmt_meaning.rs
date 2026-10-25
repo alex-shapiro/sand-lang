@@ -116,6 +116,41 @@ fn block_comments_stay_in_place() {
     assert!(failures.is_empty(), "{} failures:\n\n{}", failures.len(), failures.iter().take(20).cloned().collect::<Vec<_>>().join("\n\n"));
 }
 
+/// Found by the `fmt` fuzz target: the formatter strips trailing spaces and
+/// may move an item away from a `///` that follows code on its line, so doc
+/// comments keep neither. A `//!` after code is an error, since the formatter
+/// may move it to the module documentation.
+#[test]
+fn trailing_spaces_in_doc_comments_do_not_change_the_meaning() {
+    for src in [
+        "//!( ",
+        "//! a \n//!\t\nfn f() {}\n",
+        "/// b  \nfn f() {}\n",
+        "\"\"///\nfn f(){}",
+        "let x = 1 /// c\nfn f() {}\n",
+        "let l=///\n3",
+        "///!",
+        "let x = 1\n////\n",
+        "///\n//!",
+        "/* a */\n//! b\nlet x = 1\n",
+    ] {
+        let formatted = format_source(src).unwrap();
+        assert_eq!(meaning(src), meaning(&formatted), "{src:?} formatted as {formatted:?}");
+    }
+    assert!(meaning("//!\0\ni//! \n/ t").is_err());
+}
+
+/// Found by the `fmt` fuzz target: a tuple index on a number literal keeps
+/// its space, since `1.0` is a float.
+#[test]
+fn tuple_indices_on_number_literals_stay_indices() {
+    for src in ["(1 .0)\n", "print(2.5 .1)\n", "print(2 .0 .1)\n"] {
+        let formatted = format_source(src).unwrap();
+        assert_eq!(meaning(src), meaning(&formatted), "{src:?} formatted as {formatted:?}");
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
+    }
+}
+
 /// Found by the `fmt` fuzz target: `..base` stays when it is the only argument.
 #[test]
 fn a_lone_base_argument_keeps_its_dots() {
@@ -123,5 +158,16 @@ fn a_lone_base_argument_keeps_its_dots() {
         let formatted = format_source(src).unwrap();
         assert_eq!(meaning(src), meaning(&formatted), "{src:?} formatted as {formatted:?}");
         assert_eq!(format_source(&formatted).unwrap(), formatted);
+    }
+}
+
+/// Found by the `fmt` fuzz target: a keyword used as a member name ends its
+/// line as any other name does.
+#[test]
+fn a_member_named_by_a_keyword_ends_a_statement() {
+    for src in ["l.or;()\n", "l.and\n(1, 2)\n", "x.if\n[1]\n"] {
+        let formatted = format_source(src).unwrap();
+        assert_eq!(meaning(src), meaning(&formatted), "{src:?} formatted as {formatted:?}");
+        assert_eq!(format_source(&formatted).unwrap(), formatted, "{src:?}");
     }
 }

@@ -17,6 +17,9 @@ pub struct ParseResult {
     /// contents of string and bytes literals are moved into the syntax tree).
     pub tokens: Vec<Token>,
     pub errors: Vec<Diag>,
+    /// The start of each `///` comment that documents an item; other `///`
+    /// comments document nothing.
+    pub docs: Vec<u32>,
 }
 
 pub fn parse_module(src: &str, file: FileId) -> ParseResult {
@@ -24,10 +27,12 @@ pub fn parse_module(src: &str, file: FileId) -> ParseResult {
     let mut p = Parser::new(src, file, tokens, &comments);
     p.errors = errors;
     let module = p.module();
-    let (tokens, mut errors) = (p.toks, p.errors);
+    let (tokens, mut errors, mut docs) = (p.toks, p.errors, p.docs.into_inner());
     errors.sort_by_key(|d| d.span.lo);
     errors.truncate(MAX_ERRORS);
-    ParseResult { module, comments, tokens, errors }
+    docs.sort_unstable();
+    docs.dedup();
+    ParseResult { module, comments, tokens, errors, docs }
 }
 
 struct Parser<'a> {
@@ -43,6 +48,8 @@ struct Parser<'a> {
     fatal: bool,
     /// Inside a `trait` body: methods may omit their body.
     in_trait: bool,
+    /// See [`ParseResult::docs`].
+    docs: std::cell::RefCell<Vec<u32>>,
 }
 
 type PResult<T> = Result<T, ()>;
@@ -60,6 +67,7 @@ impl<'a> Parser<'a> {
             depth: 0,
             fatal: false,
             in_trait: false,
+            docs: Default::default(),
         }
     }
 
@@ -182,10 +190,20 @@ impl<'a> Parser<'a> {
     fn leave(&mut self) {
         self.depth -= 1;
     }
-    /// Doc comment (`///`) immediately preceding byte offset `lo`.
+    /// Doc comment (`///`) immediately preceding byte offset `lo`, which
+    /// documents the item there.
     fn doc_before(&self, lo: u32) -> Option<String> {
+        let (doc, starts) = self.doc_comments_before(lo);
+        self.docs.borrow_mut().extend(starts);
+        doc
+    }
+
+    /// The doc comment immediately preceding byte offset `lo`, and the start
+    /// of each of its lines.
+    fn doc_comments_before(&self, lo: u32) -> (Option<String>, Vec<u32>) {
         let idx = self.comments.partition_point(|c| c.hi <= lo);
         let mut lines = Vec::new();
+        let mut starts = Vec::new();
         let mut boundary = lo;
         let mut i = idx;
         while i > 0 {
@@ -194,19 +212,22 @@ impl<'a> Parser<'a> {
                 break;
             }
             let between = &self.src[c.hi as usize..boundary as usize];
-            if !between.trim().is_empty() || between.matches('\n').count() > 1 {
+            let line_start = self.src[..c.lo as usize].rfind('\n').map_or(0, |i| i + 1);
+            let after_code = !self.src[line_start..c.lo as usize].trim().is_empty();
+            if !between.trim().is_empty() || between.matches('\n').count() > 1 || after_code {
                 break;
             }
             let t = c.text(self.src).trim_start_matches("///");
-            lines.push(t.strip_prefix(' ').unwrap_or(t).to_string());
+            lines.push(t.strip_prefix(' ').unwrap_or(t).trim_end().to_string());
+            starts.push(c.lo);
             boundary = c.lo;
             i -= 1;
         }
         if lines.is_empty() {
-            return None;
+            return (None, starts);
         }
         lines.reverse();
-        Some(lines.join("\n"))
+        (Some(lines.join("\n")), starts)
     }
 
     /// Skips to the next statement boundary after an error.
@@ -238,14 +259,19 @@ impl<'a> Parser<'a> {
 
     fn module(&mut self) -> Module {
         let mut items = Vec::new();
+        let code = self.toks.iter().find(|t| t.tok != Tok::Semi).map_or(u32::MAX, |t| t.lo);
+        for c in self.comments.iter().filter(|c| c.kind == CommentKind::ModuleDoc && c.lo > code) {
+            let msg = "a `//!` module documentation comment must come before the first item; use `//` here";
+            self.errors.push(Diag::error(Span::new(self.file, c.lo, c.hi), msg));
+        }
         let doc: Vec<String> = self
             .comments
             .iter()
-            .take_while(|c| c.kind == CommentKind::ModuleDoc || c.kind == CommentKind::Line)
+            .take_while(|c| c.lo < code)
             .filter(|c| c.kind == CommentKind::ModuleDoc)
             .map(|c| {
                 let t = c.text(self.src).trim_start_matches("//!");
-                t.strip_prefix(' ').unwrap_or(t).to_string()
+                t.strip_prefix(' ').unwrap_or(t).trim_end().to_string()
             })
             .collect();
         loop {
@@ -286,7 +312,7 @@ impl<'a> Parser<'a> {
 
     fn item(&mut self) -> PResult<Item> {
         let lo = self.lo();
-        let doc = self.doc_before(lo);
+        let (doc, starts) = self.doc_comments_before(lo);
         let kind = match self.tok() {
             Tok::Import => ItemKind::Import(self.import()?),
             Tok::Ident if self.is_at_selective_import() => ItemKind::Import(self.selective_import()?),
@@ -348,6 +374,14 @@ impl<'a> Parser<'a> {
         };
         if !matches!(kind, ItemKind::Stmt(_) | ItemKind::Import(_)) {
             self.end_of_item()?;
+        }
+        let documented = match &kind {
+            ItemKind::Import(_) | ItemKind::Impl(_) | ItemKind::Test(_) => false,
+            ItemKind::Stmt(s) => matches!(s.kind, StmtKind::Let { .. } | StmtKind::Fn(_)),
+            _ => true,
+        };
+        if documented {
+            self.docs.borrow_mut().extend(starts);
         }
         Ok(Item { kind, span: self.span_from(lo) })
     }

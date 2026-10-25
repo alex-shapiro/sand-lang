@@ -91,6 +91,11 @@ Follow-up work, roughly in priority order.
 
 ### Tooling
 
+- [ ] Make formatting idempotent for line comments inside an expression that
+      spans lines: `sand fmt` moves the comments of
+      `//r /\nf.7\t.// \n7/e\nf.//as\nf` on each run (found by the `fmt`
+      fuzz target).
+
 - [ ] Fix broken intra-doc links to private items and run `cargo doc` with
       `-D warnings` in CI.
 - [ ] Compare `http` policy rules with wildcards in hosts or paths using the

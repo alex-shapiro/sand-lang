@@ -73,14 +73,16 @@ literals.
 ```
 
 `help` shows doc comments (§12.15). A doc comment on an `extend` block
-documents a built-in type.
+documents a built-in type. A `///` comment documents an item only if it starts
+its line, and trailing spaces are not part of the documentation. A `//!`
+comment after the first item is an error.
 
 ### 2.3 Line termination
 
 Newlines are significant. The lexer converts a newline into a statement
 terminator (`;`) when the last token on the line is one of:
 
-- an identifier, keyword `self`, `Self`, `true`, `false`, `break`, `continue`, `return`
+- an identifier, a keyword after `.` (`x.or`), or the keyword `self`, `Self`, `true`, `false`, `break`, `continue` or `return`
 - a literal (number, duration, string, bytes)
 - a closing `)`, `]` or `}`
 - the postfix operator `?`
@@ -3236,7 +3238,8 @@ one blank line in a row, one blank line around functions with a body,
 types, `extend`, traits, impls and tests, line width 100 (calls, lists,
 maps and parameter lists that do not fit are broken one element per line,
 and method chains that do not fit are broken before each method call),
-comments preserved. Trait and impl bodies are laid out like struct bodies,
+comments preserved (a `///` comment that documents nothing becomes `//`).
+Trait and impl bodies are laid out like struct bodies,
 one method per line, with a blank line around methods with a body. String
 literals, including their interpolations, are copied verbatim. Formatting
 is idempotent and never changes the parse tree (modulo spans). `sand fmt -`
