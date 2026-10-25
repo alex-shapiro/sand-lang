@@ -21,7 +21,7 @@ point 1,2
 POINT 1,2!
 ~hi~
 
-=== generic function with a trait bound
+=== generic function that requires a trait
 trait Describe {
     fn describe(self) -> str
 }
@@ -42,7 +42,7 @@ P3 P3
 int 7 int 7
 ["int 1", "int 2"]
 
-=== multiple bounds including built-in ones
+=== several required traits including built-in ones
 trait Describe {
     fn describe(self) -> str
 }
@@ -70,7 +70,7 @@ print(keys([1, 2]))
 'b'
 [1: "#1", 2: "#2"]
 
-=== static methods through types and bounded type parameters
+=== static methods through types and type parameters
 trait Monoid {
     fn empty() -> Self
     fn combine(self, other: Self) -> Self
@@ -148,7 +148,7 @@ impl Shape for Fig {
     }
 }
 fn report<T: Shape>(xs: [T]) -> [str] {
-    // Supertrait methods and built-in supertraits are available through the bound.
+    // Supertrait methods and built-in supertraits are available through `T: Shape`.
     let first = xs[0]
     xs.map(x => "\(x.summary()) \(x.describe()) \(x == first)")
 }
@@ -414,9 +414,9 @@ struct Nums { xs: [int] }
 impl Mapper for Nums {
     fn map_all<V: Describe>(self, f: fn(int) -> V) -> [str] { self.xs.map(x => f(x).describe()) }
 }
-fn through_bound<M: Mapper>(m: M) -> str { m.first(x => x * 100) }
+fn through_trait<M: Mapper>(m: M) -> str { m.first(x => x * 100) }
 print(Nums { xs: [1, 2] }.map_all(x => x + 1))
-print(through_bound(Nums { xs: [3] }))
+print(through_trait(Nums { xs: [3] }))
 --- stdout
 ["i2", "i3"]
 i300
@@ -445,7 +445,7 @@ print(collect(Counter { i: 0, n: 4 }))
 --- stdout
 [1, 2, 3, 4]
 
-=== function values of bounded generic functions and trait methods
+=== function values of generic functions that require traits, and of trait methods
 trait Describe {
     /// Describes the value.
     fn describe(self) -> str
@@ -528,7 +528,7 @@ print(count_down(4, 2))
 [[1 1] [1 1]]
 ["4", "4"]
 
-=== default arguments may use bounds
+=== default arguments may use required traits
 trait Monoid {
     fn empty() -> Self
     fn combine(self, other: Self) -> Self
@@ -572,7 +572,7 @@ Box(i3)Box(i3)
 plain
 ["Box(i3)"]
 
-=== where clause methods check the bound at the call
+=== `where` clause methods check the trait at the call
 trait Describe {
     fn describe(self) -> str
 }
@@ -582,7 +582,7 @@ struct Box<T> {
 }
 print(Box { item: 1 }.show())
 --- error
-8: the trait `Describe` is not implemented for int
+8: int does not implement `Describe`
 
 === reflect natives alongside dictionaries
 import json
@@ -644,7 +644,7 @@ print([1].combine([2]))
 []
 [1, 2]
 
-=== trait bounds on extend blocks
+=== extend blocks that require traits
 trait Describe {
     fn describe(self) -> str
 }
@@ -703,7 +703,7 @@ print(p.describe())
 --- error
 17: method `describe` is ambiguous: it is provided by traits `Describe` and `Label`
 
-=== ambiguity through bounds
+=== ambiguity through the traits of a type parameter
 trait A {
     fn name(self) -> str
 }
@@ -896,7 +896,7 @@ impl T for S {
 11: method `b` does not match its declaration in trait `T`: expected `fn b(self, x: int) -> int`
 12: method `c` does not match
 13: method `d` does not match
-14: the type parameters of method `e` have different bounds than in trait `T`
+14: the type parameters of method `e` require different traits than in trait `T`
 
 === Self in a trait is the implementing type
 trait Clone {
@@ -951,7 +951,7 @@ impl Into<str?> for int {
 --- error
 16: conflicting impls of `Into<str?>` for int
 
-=== unsatisfied bounds
+=== types that do not implement required traits
 trait Describe {
     fn describe(self) -> str
 }
@@ -969,11 +969,11 @@ print(show([[Point { x: 1 }]]))
 print(show([["s"]]))
 print("s".describe())
 --- error
-13: the trait `Describe` is not implemented for int
-15: the trait `Describe` is not implemented for str (required for [str] to implement `Describe`)
+13: int does not implement `Describe`
+15: str does not implement `Describe` (required for [str] to implement `Describe`)
 16: no method `describe` on type str (the trait `Describe` has it but is not implemented for str)
 
-=== type parameters need bounds
+=== type parameters must declare the traits they use
 trait Describe {
     fn describe(self) -> str
 }
@@ -981,10 +981,10 @@ fn show<T: Describe>(x: T) -> str { x.describe() }
 fn a<T>(x: T) -> str { x.describe() }
 fn b<T>(x: T) -> str { show(x) }
 --- error
-5: no method `describe` on type T; add a bound `T: Describe`
-6: type parameter `T` does not implement `Describe`; add a bound `T: Describe`
+5: no method `describe` on type T; add `T: Describe`
+6: type parameter `T` does not implement `Describe`; add `T: Describe`
 
-=== conditional impl bounds include built-in bounds
+=== conditional impls may require built-in traits
 trait Describe {
     fn describe(self) -> str
 }
@@ -1000,7 +1000,7 @@ impl<T: Describe + Hash> Describe for [T] {
 print([1].describe())
 print([1.5].describe())
 --- error
-14: float does not satisfy Hash (required for [float] to implement `Describe`)
+14: float does not implement `Hash` (required for [float] to implement `Describe`)
 
 === supertraits must be implemented
 trait Describe {
@@ -1028,8 +1028,8 @@ impl<T> Shape for W<T> {
     fn area(self) -> float { 0.0 }
 }
 --- error
-11: the trait `Describe` is not implemented for S, which trait `Shape` requires
-15: M does not satisfy Hash, which trait `Keyed` requires, because field `n` of `M` is mutable
+11: S does not implement `Describe`, which trait `Shape` requires
+15: M does not implement `Hash`, which trait `Keyed` requires, because field `n` of `M` is mutable
 22: type parameter `T` does not implement `Describe`
 
 === cyclic supertraits
@@ -1062,7 +1062,7 @@ fn f() {
 --- error
 8: cannot infer the type that must implement `Monoid`
 
-=== invalid bounds and impls
+=== invalid trait requirements and impls
 trait Describe {
     fn describe(self) -> str
 }
@@ -1085,17 +1085,16 @@ trait Bad<T: Ord> {}
 trait Eq {}
 extend<T: Bogus> Wrap<T> {}
 --- error
-21: unknown bound `Bogus`
-5: unknown bound `Nope`
+21: unknown trait `Bogus`
+5: unknown trait `Nope`
 6: `S` is a type, not a trait
 7: `Describe` is a trait, not a type
-8: `Eq` is a built-in bound
+8: `Eq` is a built-in trait; the compiler derives its impls, so it cannot be implemented
 9: cannot implement traits for fn(int)
 12: cannot implement traits for T
 15: type parameter `T` is not used by the impl's type or trait arguments
-18: trait bounds are not allowed on the type parameters of a type
-19: bounds on trait type parameters are not supported
-20: `Eq` is a built-in bound and cannot be redefined
+19: the type parameters of a trait cannot require traits
+20: `Eq` is a built-in trait and cannot be redefined
 
 === restrictions on trait and impl methods
 trait Describe<X> {
@@ -1115,8 +1114,8 @@ fn outer() {
 2: default values of trait method parameters must be constants
 3: `where` clauses in trait methods may only constrain the method's own type parameters
 8: default values are declared by the trait, not the impl
-9: impl methods cannot add bounds to the impl's type parameters
-12: local functions cannot have trait bounds
+9: impl methods cannot require traits of the impl's type parameters
+12: local functions cannot require traits with methods
 
 === pub is not allowed on trait and impl methods
 trait Describe {
@@ -1259,3 +1258,354 @@ pub trait Named {
     fn name(self) -> str
 }
 --- lint
+
+=== built-in traits are supertraits like any other
+trait Keyed: Hash {
+    fn key(self) -> str
+    fn same(self, other: Self) -> bool { self == other }
+}
+struct Id { n: int }
+impl Keyed for Id {
+    fn key(self) -> str { "id\(self.n)" }
+}
+fn keys<T: Keyed>(xs: [T]) -> [str] {
+    set(xs).to_list().map(x => x.key())
+}
+trait Scale: Num {
+    fn double(self) -> Self { self + self }
+}
+impl Scale for int {}
+impl Scale for float {}
+fn bump<T: Scale>(x: T) -> T { x.double() + T.one() }
+print(keys([Id { n: 1 }, Id { n: 1 }, Id { n: 2 }]))
+print(Id { n: 1 }.same(Id { n: 1 }))
+print(bump(2))
+print(bump(0.5))
+--- stdout
+["id1", "id2"]
+true
+5
+2.0
+
+=== traits without methods take no dictionary but are checked
+trait Safe {}
+impl Safe for int {}
+impl<T: Safe> Safe for [T] {}
+fn check<T: Safe>(x: T) -> str { "ok" }
+print(check([[1]]))
+--- stdout
+ok
+
+=== a trait without methods is checked through conditional impls
+trait Safe {}
+impl Safe for int {}
+impl<T: Safe> Safe for [T] {}
+fn check<T: Safe>(x: T) -> str { "ok" }
+check(["a"])
+--- error
+5: str does not implement `Safe` (required for [str] to implement `Safe`)
+
+=== the traits of a type's parameters apply to its methods
+trait Describe {
+    fn describe(self) -> str
+}
+impl Describe for int {
+    fn describe(self) -> str { "#\(self)" }
+}
+struct Labeled<T: Describe> {
+    items: [T]
+
+    fn labels(self) -> [str] { self.items.map(x => x.describe()) }
+}
+enum Tree<T: Ord> {
+    Leaf
+    Node(Tree<T>, T, Tree<T>)
+
+    fn insert(self, x: T) -> Tree<T> {
+        match self {
+            Leaf => Tree.Node(Tree.Leaf, x, Tree.Leaf)
+            Node(l, v, r) => if x < v { Tree.Node(l.insert(x), v, r) } else { Tree.Node(l, v, r.insert(x)) }
+        }
+    }
+
+    fn items(self) -> [T] {
+        match self {
+            Leaf => []
+            Node(l, v, r) => l.items() + [v] + r.items()
+        }
+    }
+}
+print(Labeled { items: [1, 2] }.labels())
+let t: Tree<int> = Tree.Leaf
+print(t.insert(3).insert(1).insert(2).items())
+--- stdout
+["#1", "#2"]
+[1, 2, 3]
+
+=== struct literals, variants and methods check the traits of their type's parameters
+trait Describe {
+    fn describe(self) -> str
+}
+struct Labeled<T: Describe> {
+    items: [T]
+
+    fn labels(self) -> [str] { self.items.map(x => x.describe()) }
+}
+enum Tree<T: Describe> {
+    Leaf
+    Node(Tree<T>, T)
+}
+let l = Labeled { items: ["a"] }
+print(l.labels())
+let t: Tree<str> = Tree.Leaf
+let n = Tree.Node(Tree.Leaf, 1.5)
+fn wrap<T>(x: T) -> Labeled<T> { Labeled { items: [x] } }
+--- error
+13: str does not implement `Describe`
+14: str does not implement `Describe`
+15: str does not implement `Describe`
+16: float does not implement `Describe`
+17: type parameter `T` does not implement `Describe`; add `T: Describe`
+
+=== local functions check their traits where they are used
+fn outer() {
+    fn same<T: Eq>(a: T, b: T) -> bool { a == b }
+    print(same([1], [1]))
+    print(same((x: int) => x, (x: int) => x))
+}
+--- error
+4: fn(int) -> int does not implement `Eq`
+
+=== built-in traits cannot be implemented or redefined
+struct S { x: int }
+impl Hash for S {}
+impl Num for S {
+    fn zero() -> S { S { x: 0 } }
+    fn one() -> S { S { x: 1 } }
+}
+trait Ord {}
+--- error
+2: `Hash` is a built-in trait; the compiler derives its impls, so it cannot be implemented
+3: `Num` is a built-in trait and cannot be implemented
+7: `Ord` is a built-in trait and cannot be redefined
+
+=== trait methods of other modules hide those of the prelude on concrete types
+trait Monoid {
+    fn zero() -> Self
+    fn combine(self, other: Self) -> Self
+}
+impl Monoid for int {
+    fn zero() -> int { 100 }
+    fn combine(self, other: int) -> int { self + other }
+}
+print(int.zero())
+print(float.zero())
+print(Num.zero() + 1)
+fn total<T: Num>(xs: [T]) -> T {
+    var s = T.zero()
+    for x in xs { s = s + x }
+    s
+}
+print(total([1, 2]))
+--- stdout
+100
+0.0
+1
+3
+
+=== a type named like a built-in trait does not hide the trait after `:`
+struct Hash { hex: str }
+trait Keyed: Hash {
+    fn key(self) -> str
+}
+impl Keyed for Hash {
+    fn key(self) -> str { self.hex }
+}
+fn count<K: Hash>(xs: [K]) -> int { set(xs).len() }
+print(count([Hash { hex: "a" }, Hash { hex: "a" }]))
+print(Hash { hex: "b" }.key())
+--- stdout
+1
+b
+
+=== a trait that an impl found late requires is reported at the use
+trait Marker {}
+impl<T: Hash> Marker for [T] {}
+trait Tagged {
+    fn tag(self) -> str
+}
+impl<T: Marker> Tagged for T? {
+    fn tag(self) -> str { "t" }
+}
+trait Two {
+    fn two(self) -> str
+}
+impl Two for [float] {
+    fn two(self) -> str { "2" }
+}
+fn tag_it<T: Tagged>(x: T) -> str { x.tag() }
+fn two_it<T: Two>(x: T) -> str { x.two() }
+fn main() {
+    let xs = []
+    var ys = None
+    print(tag_it(Some(xs)))
+    if false { print(two_it(ys.unwrap())) }
+    ys = Some(xs)
+}
+--- error
+20: float does not implement `Hash` (required for [float] to implement `Marker`)
+
+=== a local function that requires a trait with methods is reported once
+trait Describe {
+    fn describe(self) -> str
+}
+impl Describe for int {
+    fn describe(self) -> str { "i" }
+}
+fn outer() {
+    fn twice<T: Num>(x: T) -> T { x + x }
+    fn show<T: Describe>(x: T) -> str { x.describe() }
+    print(show(1))
+    print(show("s"))
+}
+--- error
+8: local functions cannot require traits with methods
+9: local functions cannot require traits with methods
+11: str does not implement `Describe`
+
+=== the traits of a type's parameters may take types declared later
+trait Into<T> {
+    fn into(self) -> T
+}
+struct Box<T: Into<Later>> {
+    v: T
+
+    fn get(self) -> Later { self.v.into() }
+}
+struct Later { n: int }
+impl Into<Later> for int {
+    fn into(self) -> Later { Later { n: self } }
+}
+print(Box { v: 3 }.get())
+--- stdout
+Later { n: 3 }
+
+=== extend blocks use the traits of their type's parameters
+trait Describe {
+    fn describe(self) -> str
+}
+impl Describe for int {
+    fn describe(self) -> str { "#\(self)" }
+}
+struct Bag<T: Hash + Describe> {
+    items: [T]
+}
+extend<U> Bag<U> {
+    fn unique(self) -> int { set(self.items).len() }
+    fn labels(self) -> [str] { self.items.map(x => x.describe()) }
+}
+let b = Bag { items: [1, 1, 2] }
+print(b.unique())
+print(b.labels())
+--- stdout
+2
+["#1", "#1", "#2"]
+
+=== type aliases cannot require traits
+type Keys<T: Hash> = [T]
+fn f(x: Keys<float>) -> int { x.len() }
+--- error
+1: the type parameters of a type alias cannot require traits; require them on the functions that use the alias
+
+=== never implements only the traits without methods
+trait D { fn d(self) -> int }
+trait Make { fn make() -> Self }
+impl D for int { fn d(self) -> int { self } }
+fn total<T: D>(xs: [T]) -> int {
+    var s = 0
+    for x in xs { s += x.d() }
+    s
+}
+fn make<T: Make>() -> T { T.make() }
+fn largest<T: Ord + Hash + Encode>(xs: [T]) -> T? { xs.max() }
+let e: [never] = []
+print(largest(e))
+print(total(e))
+print(e.sum())
+let x: never = make()
+--- error
+13: never does not implement `D`
+14: never does not implement `Num`
+15: never does not implement `Make`
+
+=== structs and enums get the requirements of their field and payload types
+struct Bag<T: Hash> { items: Set<T> }
+struct Outer<U> { b: Bag<U> }
+extend<U> Outer<U> {
+    fn has(self, x: U) -> bool { self.b.items.contains(x) }
+}
+enum A<T> { One(B<T>?), Zero }
+enum B<T> { Two(A<T>, [T: int]) }
+let o = Outer { b: Bag { items: set(["x"]) } }
+print(o.has("x"))
+help(Outer)
+help(A)
+--- stdout
+true
+struct Outer<U: Hash>
+
+Fields:
+    b: Bag<U>
+
+Methods:
+    fn has(self, x: U) -> bool
+
+Implements:
+    Eq
+    Encode where U: Encode
+enum A<T: Hash>
+
+Variants:
+    One(B<T>?)
+    Zero
+
+Implements:
+    Eq
+    Encode where T: Encode
+
+=== field and payload types meet the requirements of their type constructors
+trait Describe { fn describe(self) -> str }
+impl Describe for int { fn describe(self) -> str { "i" } }
+struct Wrap<T: Describe> { x: T }
+struct Rows { seen: Set<[int]> }
+struct Pairs<T> { s: Set<(T, int)> }
+struct Uses { w: Wrap<int>, v: Wrap<str> }
+enum E { Keyed([float: int]) }
+--- error
+4: [int] does not implement `Hash` (required for the elements of Set<[int]>)
+5: (T, int) does not implement `Hash` because element 0 of `(T, int)` has type `T` (required for the elements of Set<(T, int)>); add `T: Hash`
+6: str does not implement `Describe` (required for Wrap<str>)
+7: float does not implement `Hash` (required for the keys of [float: int])
+
+=== field defaults cannot use traits with methods of the type's parameters
+trait Make { fn make() -> Self }
+impl Make for int { fn make() -> int { 7 } }
+struct Bag<T: Make + Ord> { x: T = T.make(), big: bool = false }
+struct Keys<T: Hash> { s: Set<T> = set([]) }
+--- error
+3: field defaults cannot use `Make`, which type parameter `T` requires, because defaults receive no trait dictionaries
+
+=== required traits take the type arguments that the trait declares
+trait Into<T> {
+    fn into(self) -> T
+}
+trait Both<A, B> {}
+fn a<T: Eq<int>>(x: T) {}
+fn b<T: Into>(x: T) {}
+fn c<T: Into<int, str>>(x: T) {}
+fn d<T: Both<int>>(x: T) {}
+--- error
+5: `Eq` does not take type arguments
+6: expected 1 type argument for trait `Into`, found 0
+7: expected 1 type argument for trait `Into`, found 2
+8: expected 2 type arguments for trait `Both`, found 1

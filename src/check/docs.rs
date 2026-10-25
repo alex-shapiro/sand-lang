@@ -3,16 +3,13 @@
 use super::*;
 use crate::docs::{ItemDoc, ItemKind, MemberDoc, MemberKind, ModuleDoc, ModuleKind};
 
-const BUILTIN_CTORS: &[Ctor] =
-    &[Ctor::Bool, Ctor::Int, Ctor::Float, Ctor::Str, Ctor::Bytes, Ctor::Duration, Ctor::Range, Ctor::List, Ctor::Map, Ctor::Set];
-
 impl Checker {
     pub(crate) fn module_doc(&mut self, m: ModId, kind: ModuleKind) -> ModuleDoc {
         // Omit the current module prefix in item signatures.
         self.cur_mod = m;
         let mut items = Vec::new();
         if kind == ModuleKind::Prelude {
-            for &c in BUILTIN_CTORS {
+            for &c in Ctor::BUILTIN {
                 let doc = self.ctor_docs.get(&c).map(|d| d.to_string());
                 let name = self.ctor_name(c, 0);
                 items.push(self.type_item(ItemKind::Builtin, c, name.clone(), format!("type {name}"), doc));
@@ -98,8 +95,7 @@ impl Checker {
     fn trait_item(&mut self, t: TraitId, name: String) -> ItemDoc {
         let td = &self.traits[t as usize];
         let mut decl = format!("trait {}", self.trait_header_name(t));
-        let mut supers: Vec<String> = td.supers.iter().map(|s| self.show_trait(s)).collect();
-        supers.extend(td.builtin_supers.iter().map(|b| b.name().to_string()));
+        let supers: Vec<String> = td.supers.iter().map(|s| self.show_trait(s)).collect();
         if !supers.is_empty() {
             decl = format!("{decl}: {}", supers.join(" + "));
         }

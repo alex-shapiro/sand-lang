@@ -291,8 +291,29 @@ pub native fn help<T>(x: T)
 /// if called as `members()`.
 pub native fn members<T>(x: T) -> [str]
 
-trait Num {
+/// Compares values for equality with `==` and `!=`. The compiler derives `Eq`
+/// for tuples, structs, and enums whose components implement `Eq`.
+pub trait Eq {}
+
+/// Compares values for ordering with `<`, `<=`, `>`, `>=`, and `sort`. The
+/// compiler derives `Ord` for tuples, structs, and enums whose components
+/// implement `Ord`.
+pub trait Ord: Eq {}
+
+/// Hashes values for use as map keys and set elements. The compiler derives
+/// `Hash` for tuples, structs without `var` fields, and enums whose components
+/// implement `Hash`.
+pub trait Hash: Eq {}
+
+/// Encodes values as JSON with `json.encode`. The compiler derives `Encode`
+/// for tuples, structs, and enums whose components implement `Encode`.
+pub trait Encode {}
+
+/// Performs arithmetic on numeric types (`int` and `float`).
+pub trait Num: Ord + Encode {
+    /// Returns the additive identity (`0` or `0.0`).
     fn zero() -> Self
+    /// Returns the multiplicative identity (`1` or `1.0`).
     fn one() -> Self
 }
 

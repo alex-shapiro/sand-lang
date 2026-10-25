@@ -160,8 +160,12 @@ pub enum HKind {
     Bytes(Vec<u8>),
     Local(LocalId),
     Global(GlobalId),
-    /// A script function used as a value.
-    FnValue(FnId),
+    /// A script function used as a value, with the type arguments for its
+    /// generic parameters ([`FnInfo::generics`](crate::check::FnInfo)).
+    FnValue {
+        func: FnId,
+        targs: Vec<TypeId>,
+    },
     /// A variant constructor used as a function value.
     VariantFn {
         rt_id: u32,
@@ -234,12 +238,16 @@ pub enum HKind {
         depth: u32,
     },
     Return(Option<Box<HExpr>>),
+    /// Calls `func` with type arguments `targs` for its generic parameters
+    /// ([`FnInfo::generics`](crate::check::FnInfo)).
     Call {
         func: FnId,
+        targs: Vec<TypeId>,
         args: Vec<HArg>,
     },
     CallNative {
         native: u32,
+        targs: Vec<TypeId>,
         args: Vec<HArg>,
     },
     /// Runtime description for a `reflect` type argument `ty`. If `ty`
@@ -258,18 +266,19 @@ pub enum HKind {
     CallTrait {
         trait_id: TraitId,
         slot: u32,
+        /// Type arguments for the method signature's generic parameters.
+        targs: Vec<TypeId>,
         args: Vec<HArg>,
-        /// The impl the dictionary comes from, when known statically (the
-        /// compiler then calls its method directly).
+        /// Statically known implementation ID, if resolved (allowing direct dispatch).
         impl_id: Option<ImplId>,
     },
-    /// Evidence that a type implements a trait, needed by a call: the index
-    /// of an [`EvidenceReq`] of the function being checked. Replaced by a
-    /// dictionary expression (a hidden parameter, a projection of one, or a
-    /// [`HKind::Dict`]) when the function has been checked.
+    /// Placeholder for trait evidence at index `0..` in the function's
+    /// [`EvidenceReq`] list, replaced with a dictionary expression after
+    /// type inference finishes.
     Evidence(u32),
-    /// The dictionary of an impl: the trait's methods, followed by `args`
-    /// (supertrait dictionaries, then the dictionaries for the impl's bounds).
+    /// Runtime trait dictionary for `impl_id`, containing the trait's methods
+    /// followed by `args` (supertrait dictionaries and dictionaries required
+    /// by the implementation's type parameters).
     Dict {
         impl_id: ImplId,
         args: Vec<HExpr>,
@@ -481,7 +490,11 @@ impl HExpr {
                     e(x);
                 }
             }
-            HKind::Call { args, .. } | HKind::CallTrait { args, .. } | HKind::CallNative { args, .. } => args_parts(args, f),
+            HKind::Call { targs, args, .. } | HKind::CallTrait { targs, args, .. } | HKind::CallNative { targs, args, .. } => {
+                targs.iter_mut().for_each(|t| f(Part::Type(t)));
+                args_parts(args, f)
+            }
+            HKind::FnValue { targs, .. } => targs.iter_mut().for_each(|t| f(Part::Type(t))),
             HKind::TypeDesc { ty, args } => {
                 args.iter_mut().for_each(e);
                 f(Part::Type(ty));
@@ -543,7 +556,6 @@ impl HExpr {
             | HKind::Bytes(_)
             | HKind::Local(_)
             | HKind::Global(_)
-            | HKind::FnValue(_)
             | HKind::VariantFn { .. }
             | HKind::Tag(_)
             | HKind::Continue { .. }
@@ -605,7 +617,7 @@ pub struct HFn {
     pub body: HExpr,
     pub locals: Vec<LocalInfo>,
     pub span: Span,
-    /// The functions that `help` and `members` calls in the body name, which
-    /// the `unused-function` lint counts as used.
+    /// Functions referenced by `help` and `members` calls in the body, which
+    /// the `unused-function` lint treats as used.
     pub doc_refs: Vec<FnId>,
 }

@@ -101,7 +101,7 @@ impl Cx<'_> {
                 }
             }),
         }
-        let HKind::Call { func, args } = &e.kind else { return };
+        let HKind::Call { func, args, .. } = &e.kind else { return };
         if depth >= MAX_DEPTH || args.iter().any(|a| !matches!(a, HArg::Expr(_))) {
             return;
         }

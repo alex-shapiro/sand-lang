@@ -173,7 +173,7 @@ fn callees(cp: &CheckedProgram, x: &HExpr, out: &mut Vec<FnId>) {
         out.extend(args.iter().filter_map(|a| if let HArg::Default { helper, .. } = a { Some(*helper) } else { None }))
     };
     match &x.kind {
-        HKind::Call { func, args } => {
+        HKind::Call { func, args, .. } => {
             out.push(*func);
             defaults(args, out);
         }
@@ -184,7 +184,7 @@ fn callees(cp: &CheckedProgram, x: &HExpr, out: &mut Vec<FnId>) {
                 out.extend(&cp.impls[*i as usize].slots);
             }
         }
-        HKind::FnValue(f) | HKind::Inlined { func: f, .. } => out.push(*f),
+        HKind::FnValue { func: f, .. } | HKind::Inlined { func: f, .. } => out.push(*f),
         HKind::Dict { impl_id, .. } => out.extend(&cp.impls[*impl_id as usize].slots),
         _ => {}
     }

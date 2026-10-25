@@ -104,13 +104,22 @@ Methods:
     fn area(self) -> float
         The area.
 
-Implements: Describe
+Implements:
+    Eq
+    Ord
+    Encode
+    Describe
 struct Counter
 
 Fields:
     name: str
         What is counted.
     var count: int = 0
+
+Implements:
+    Eq
+    Ord
+    Encode
 
 === built-in types, traits and type parameters
 help(Set)
@@ -153,6 +162,10 @@ Methods:
     fn iter(self) -> Iter<T>
         Returns a lazy iterator over a snapshot of the elements in insertion
         order.
+
+Implements:
+    Eq where T: Eq
+    Encode where T: Encode
 trait Iterator<T>
 
 Sequential element source supporting `for` loops and lazy `Iter<T>` pipelines.
@@ -192,6 +205,11 @@ struct Point
 Fields:
     x: float
         Horizontal.
+
+Implements:
+    Eq
+    Ord
+    Encode
 evaluated
 field Point.x: float
 
@@ -310,7 +328,7 @@ Types:
     Task<T>, Channel<T>, Error, Option<T>, Result<T, E>, Iter<T>
 
 Traits:
-    Close, Iterator<T>
+    Close, Eq, Ord, Hash, Encode, Num, Iterator<T>
 
 Modules (help(name) describes one):
     base64      Base64 encoding and decoding (RFC 4648) with standard and
@@ -391,3 +409,102 @@ let h = help
 help("json parse")
 --- error
 1: take a name, such as "json" or "json.Json"
+
+=== built-in traits are documented
+help(Hash)
+help(Num)
+help(Option)
+--- stdout
+trait Hash
+
+Hashes values for use as map keys and set elements. The compiler derives
+`Hash` for tuples, structs without `var` fields, and enums whose components
+implement `Hash`.
+
+Supertraits: Eq
+
+Implemented for:
+    bool
+    int
+    str
+    bytes
+    duration
+    Range
+    ()
+trait Num
+
+Performs arithmetic on numeric types (`int` and `float`).
+
+Supertraits: Ord + Encode
+
+Methods:
+    fn zero() -> Self
+        Returns the additive identity (`0` or `0.0`).
+    fn one() -> Self
+        Returns the multiplicative identity (`1` or `1.0`).
+
+Implemented for:
+    int
+    float
+enum Option<T>
+
+An optional value (`Some(value)` or `None`), also written `T?`.
+
+Variants:
+    Some(T)
+        Present value of type `T`.
+    None
+        Absence of a value.
+
+Methods:
+    fn is_some(self) -> bool
+        Returns `true` if `self` is `Some`.
+    fn is_none(self) -> bool
+        Returns `true` if `self` is `None`.
+    fn unwrap(self) -> T
+        Returns the inner value of `Some`, or aborts if `self` is `None`.
+    fn expect(self, msg: str) -> T
+        Returns the inner value of `Some`, or aborts with `msg` if `self` is
+        `None`.
+    fn unwrap_or(self, default: T) -> T
+        Returns the inner value of `Some`, or `default` if `self` is `None`.
+    fn map<U>(self, f: fn(T) -> U) -> U?
+        Applies `f` to the inner value if `self` is `Some`.
+    fn and_then<U>(self, f: fn(T) -> U?) -> U?
+        Returns `f(x)` if `self` is `Some(x)`, or `None` if `self` is `None`.
+    fn or_else(self, f: fn() -> T?) -> T?
+        Returns `self` if it is `Some`, or calls `f()` if `self` is `None`.
+    fn ok_or<E>(self, err: E) -> Result<T, E>
+        Converts `Some(x)` to `Ok(x)` and `None` to `Err(err)`.
+    fn filter(self, f: fn(T) -> bool) -> T?
+        Returns `Some(x)` if `self` is `Some(x)` and `f(x)` is `true`, or `None`
+        otherwise.
+
+Implements:
+    Eq where T: Eq
+    Ord where T: Ord
+    Hash where T: Hash
+    Encode where T: Encode
+    Close where T: Close
+
+=== types show the traits of their type parameters once
+struct Bag<T: Hash> {
+    items: Set<T>
+
+    fn has(self, x: T) -> bool { self.items.contains(x) }
+    fn total(self) -> T where T: Num { self.items.to_list().sum() }
+}
+help(Bag)
+--- stdout
+struct Bag<T: Hash>
+
+Fields:
+    items: Set<T>
+
+Methods:
+    fn has(self, x: T) -> bool
+    fn total(self) -> T where T: Num
+
+Implements:
+    Eq
+    Encode where T: Encode

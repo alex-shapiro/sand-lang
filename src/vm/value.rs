@@ -1050,6 +1050,28 @@ impl ValueRef<'_> {
 }
 
 impl Obj {
+    /// Returns the object kind name for internal error messages.
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Obj::Str(_) => "str",
+            Obj::StrBuf(_) => "string buffer",
+            Obj::Bytes(_) => "bytes",
+            Obj::List(_) => "list",
+            Obj::Map(_) => "map",
+            Obj::Set(_) => "set",
+            Obj::Tuple(_) => "tuple",
+            Obj::Struct(..) => "struct",
+            Obj::Variant(..) => "variant",
+            Obj::Closure(..) | Obj::NativeFn(_) | Obj::IterFn(_) => "function",
+            Obj::Range(..) => "range",
+            Obj::Task(_) => "task",
+            Obj::Channel(_) => "channel",
+            Obj::Native(_) => "native object",
+            Obj::Value(_) | Obj::Packed(..) => "value type",
+            _ => "internal object",
+        }
+    }
+
     pub fn value(&self) -> Option<ValueRef<'_>> {
         match self {
             Obj::Value(x) => Some(ValueRef::Boxed(&**x)),

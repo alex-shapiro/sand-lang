@@ -51,20 +51,12 @@ pub struct Import {
     pub names: Option<Vec<Ident>>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Bound {
-    Eq,
-    Ord,
-    Hash,
-    Num,
-}
-
 #[derive(Clone, Debug)]
 pub struct GenericParam {
     pub name: Ident,
-    /// Built-in bounds (`Ord`) and traits (`Describe`, `geo.Shape`, `Into<str>`),
-    /// written like named types.
-    pub bounds: Vec<TypeExpr>,
+    /// Trait bounds (`Ord`, `Describe`, `geo.Shape`, `Into<str>`), represented
+    /// as named type expressions.
+    pub traits: Vec<TypeExpr>,
     pub reflect: bool,
 }
 
@@ -80,7 +72,7 @@ pub struct Param {
 #[derive(Clone, Debug)]
 pub struct WherePredicate {
     pub name: Ident,
-    pub bounds: Vec<TypeExpr>,
+    pub traits: Vec<TypeExpr>,
 }
 
 #[derive(Clone, Debug)]

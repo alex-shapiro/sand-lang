@@ -25,6 +25,8 @@ enum Ty {
     Tuple(Vec<Ty>),
     Wrap(Box<Ty>),
     Tree(Box<Ty>),
+    /// `struct Bag<T> { s: Set<T> }`, which requires `T: Hash`.
+    Bag(Box<Ty>),
     Param,
 }
 
@@ -52,6 +54,7 @@ impl Ty {
             Ty::Tuple(ts) => format!("({})", ts.iter().map(Ty::sand).collect::<Vec<_>>().join(", ")),
             Ty::Wrap(t) => format!("Wrap<{}>", t.sand()),
             Ty::Tree(t) => format!("Tree<{}>", t.sand()),
+            Ty::Bag(t) => format!("Bag<{}>", t.sand()),
             Ty::Param => "T".into(),
         }
     }
@@ -67,6 +70,7 @@ impl Ty {
             Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| t.subst(arg)).collect()),
             Ty::Wrap(t) => Ty::Wrap(b(t)),
             Ty::Tree(t) => Ty::Tree(b(t)),
+            Ty::Bag(t) => Ty::Bag(b(t)),
             t => t.clone(),
         }
     }
@@ -74,7 +78,7 @@ impl Ty {
     fn has_param(&self) -> bool {
         match self {
             Ty::Param => true,
-            Ty::List(t) | Ty::Set(t) | Ty::Option(t) | Ty::Wrap(t) | Ty::Tree(t) => t.has_param(),
+            Ty::List(t) | Ty::Set(t) | Ty::Option(t) | Ty::Wrap(t) | Ty::Tree(t) | Ty::Bag(t) => t.has_param(),
             Ty::Map(k, v) => k.has_param() || v.has_param(),
             Ty::Tuple(ts) => ts.iter().any(Ty::has_param),
             _ => false,
@@ -84,9 +88,30 @@ impl Ty {
     fn encodable(&self) -> bool {
         match self {
             Ty::Fn | Ty::Task => false,
-            Ty::List(t) | Ty::Set(t) | Ty::Option(t) | Ty::Wrap(t) | Ty::Tree(t) => t.encodable(),
+            Ty::List(t) | Ty::Set(t) | Ty::Option(t) | Ty::Wrap(t) | Ty::Tree(t) | Ty::Bag(t) => t.encodable(),
             Ty::Map(k, v) => k.encodable() && v.encodable(),
             Ty::Tuple(ts) => ts.iter().all(Ty::encodable),
+            _ => true,
+        }
+    }
+
+    /// Returns `true` if the type implements `Hash`.
+    fn hashable(&self) -> bool {
+        match self {
+            Ty::Int | Ty::Bool | Ty::Str | Ty::Bytes | Ty::Unit | Ty::Duration | Ty::UnitEnum | Ty::Rec | Ty::Range => true,
+            Ty::Option(t) | Ty::Wrap(t) => t.hashable(),
+            Ty::Tuple(ts) => ts.iter().all(Ty::hashable),
+            _ => false,
+        }
+    }
+
+    /// Returns `true` if all set elements and map keys in the type implement `Hash`.
+    fn well_formed(&self) -> bool {
+        match self {
+            Ty::Set(t) | Ty::Bag(t) => t.hashable() && t.well_formed(),
+            Ty::Map(k, v) => k.hashable() && k.well_formed() && v.well_formed(),
+            Ty::List(t) | Ty::Option(t) | Ty::Wrap(t) | Ty::Tree(t) => t.well_formed(),
+            Ty::Tuple(ts) => ts.iter().all(Ty::well_formed),
             _ => true,
         }
     }
@@ -94,7 +119,7 @@ impl Ty {
     fn keys_decodable(&self) -> bool {
         match self {
             Ty::Keyed => false,
-            Ty::List(t) | Ty::Set(t) | Ty::Option(t) | Ty::Wrap(t) | Ty::Tree(t) => t.keys_decodable(),
+            Ty::List(t) | Ty::Set(t) | Ty::Option(t) | Ty::Wrap(t) | Ty::Tree(t) | Ty::Bag(t) => t.keys_decodable(),
             Ty::Map(k, v) => matches!(**k, Ty::Int | Ty::Bool | Ty::Str | Ty::Duration | Ty::UnitEnum) && v.keys_decodable(),
             Ty::Tuple(ts) => ts.iter().all(Ty::keys_decodable),
             _ => true,
@@ -114,6 +139,8 @@ fn ty() -> impl Strategy<Value = Ty> {
     ty_with(0, 1)
 }
 
+/// Generates types with type parameter `T` weighted by `param`, and non-`Hash`
+/// or non-`Encode` types weighted by `bad`.
 fn ty_with(param: u32, bad: u32) -> impl Strategy<Value = Ty> {
     let leaf = prop_oneof![
         6 => prop_oneof![Just(Ty::Int), Just(Ty::Float), Just(Ty::Bool), Just(Ty::Str), Just(Ty::Bytes), Just(Ty::Unit), Just(Ty::Duration)],
@@ -122,21 +149,23 @@ fn ty_with(param: u32, bad: u32) -> impl Strategy<Value = Ty> {
         bad => prop_oneof![Just(Ty::Fn), Just(Ty::Task)],
         param => Just(Ty::Param),
     ];
-    leaf.prop_recursive(3, 12, 3, |inner| {
+    leaf.prop_recursive(3, 12, 3, move |inner| {
+        let key = || prop_oneof![4 => hashable(), bad => inner.clone()];
         prop_oneof![
-            inner.clone().prop_map(|t| Ty::List(Box::new(t))),
-            hashable().prop_map(|t| Ty::Set(Box::new(t))),
-            (hashable(), inner.clone()).prop_map(|(k, v)| Ty::Map(Box::new(k), Box::new(v))),
-            inner.clone().prop_map(|t| Ty::Option(Box::new(t))),
-            prop::collection::vec(inner.clone(), 2..4).prop_map(Ty::Tuple),
-            inner.clone().prop_map(|t| Ty::Wrap(Box::new(t))),
-            inner.prop_map(|t| Ty::Tree(Box::new(t))),
+            2 => inner.clone().prop_map(|t| Ty::List(Box::new(t))),
+            2 => key().prop_map(|t| Ty::Set(Box::new(t))),
+            2 => (key(), inner.clone()).prop_map(|(k, v)| Ty::Map(Box::new(k), Box::new(v))),
+            2 => inner.clone().prop_map(|t| Ty::Option(Box::new(t))),
+            2 => prop::collection::vec(inner.clone(), 2..4).prop_map(Ty::Tuple),
+            2 => inner.clone().prop_map(|t| Ty::Wrap(Box::new(t))),
+            2 => inner.clone().prop_map(|t| Ty::Tree(Box::new(t))),
+            2 * bad => inner.prop_map(|t| Ty::Bag(Box::new(t))),
         ]
     })
 }
 
-const TYPES: &str = "enum Unit { A, B }\nstruct Rec { a: int, b: str? }\nstruct Keyed { m: [Keyed: int]? }\nstruct Wrap<T> { v: T }\n\
-                     struct Tree<T> { v: T, kids: [Tree<T>] = [] }";
+const TYPES: &str = "enum Unit { A, B }\nstruct Rec { a: int, b: str? }\nstruct Key { a: int }\nstruct Keyed { m: [Key: int]? }\nstruct Wrap<T> { v: T }\n\
+                     struct Tree<T> { v: T, kids: [Tree<T>] = [] }\nstruct Bag<T> { s: Set<T> }";
 
 const INPUTS: [&str; 14] = [
     "null",
@@ -173,14 +202,21 @@ proptest! {
         let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
         match rt.block_on(engine.run_source("main.sand", &src)) {
             Ok(_) => {
-                prop_assert!(t.encodable(), "accepted:\n{src}");
+                prop_assert!(t.encodable() && t.well_formed(), "accepted:\n{src}");
                 let kinds = out.contents();
                 let bad_key = !t.keys_decodable();
                 prop_assert!(kinds.lines().all(|k| k == "ok" || k == "parse" || (bad_key && k == "invalid")), "{kinds}\n{src}");
             }
             Err(Error::Compile(ds)) => {
-                prop_assert!(!t.encodable(), "rejected: {ds:?}\n{src}");
-                prop_assert!(ds.iter().all(|d| d.message.contains("does not satisfy Encode")), "{ds:?}\n{src}");
+                prop_assert!(!(t.encodable() && t.well_formed()), "rejected: {ds:?}\n{src}");
+                let trait_of = |d: &sandlang::Diagnostic| {
+                    if d.message.contains("does not implement `Encode`") { Some(true) }
+                    else if d.message.contains("does not implement `Hash`") { Some(false) }
+                    else { None }
+                };
+                prop_assert!(ds.iter().all(|d| trait_of(d).is_some()), "{ds:?}\n{src}");
+                prop_assert_eq!(ds.iter().any(|d| trait_of(d) == Some(true)), !t.encodable(), "{:?}\n{}", ds, src);
+                prop_assert_eq!(ds.iter().any(|d| trait_of(d) == Some(false)), !t.well_formed(), "{:?}\n{}", ds, src);
                 prop_assert!(ds.iter().all(|d| !d.message.contains("``")), "{ds:?}\n{src}");
             }
             Err(e) => prop_assert!(false, "{e}\n{src}"),
@@ -244,6 +280,7 @@ fn json_text(t: &Ty, rng: &mut Rng, depth: u32, wrong: u64) -> String {
         }
         Ty::Tuple(ts) => format!("[{}]", ts.iter().map(|t| json_text(t, rng, depth + 1, wrong)).collect::<Vec<_>>().join(", ")),
         Ty::Wrap(e) => format!("{{\"v\": {}}}", json_text(e, rng, depth + 1, wrong)),
+        Ty::Bag(e) => format!("{{\"s\": [{}]}}", many(e, rng).join(", ")),
         Ty::Tree(e) => {
             let kids = many(t, rng);
             let v = json_text(e, rng, depth + 1, wrong);

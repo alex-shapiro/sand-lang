@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 992f81a81066c5bdb6ac17e8dab18ca067ef507de73d1fc330e8c24d7837c792 # shrinks to t = List(Range), tr = Ord
+cc 31a2d6537c361523ceb338631d62972c1688a453a39334f2b9bc90c9a4159a62 # shrinks to t = Map(Range, Int)

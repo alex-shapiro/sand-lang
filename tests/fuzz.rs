@@ -1,13 +1,14 @@
-//! Randomised robustness ("fuzz") tests. Every input, however malformed, must
-//! produce a diagnostic or a runtime error — never a host panic, crash or hang.
+//! Randomized robustness ("fuzz") tests.
 //!
-//! Deterministic seeds keep failures reproducible; set `FUZZ_ITERS` to run longer.
-//! Coverage-guided fuzz targets for `cargo fuzz` live in `fuzz/`.
+//! Every input must produce a compile diagnostic, a runtime error, or a normal
+//! result, without panicking, hanging, or returning an internal error. Set
+//! `FUZZ_ITERS` to increase the iteration count. Coverage-guided fuzz targets
+//! for `cargo fuzz` are in `fuzz/`.
 
 mod common;
 
 use common::rt;
-use sandlang::{Config, Engine, Limits, MemorySink, Policy};
+use sandlang::{Config, Engine, Error, Limits, MemorySink, Policy};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::Duration;
 
@@ -44,14 +45,17 @@ fn limited_config() -> Config {
     })
 }
 
-/// Compiles and (if it compiles) runs `src`, asserting the host never panics.
+/// Compiles and runs `src`, asserting that the host does not panic and that the
+/// engine does not return an internal error.
 fn exercise(src: &str) {
     let result = catch_unwind(AssertUnwindSafe(|| {
         let mut engine = Engine::new(limited_config()).unwrap();
-        let _ = rt().block_on(engine.run_source("fuzz.sand", src));
+        rt().block_on(engine.run_source("fuzz.sand", src))
     }));
-    if result.is_err() {
-        panic!("host panic on input:\n-----\n{src}\n-----");
+    match result {
+        Err(_) => panic!("host panic on input:\n-----\n{src}\n-----"),
+        Ok(Err(e @ Error::Internal { .. })) => panic!("{e}\non input:\n-----\n{src}\n-----"),
+        Ok(_) => {}
     }
 }
 

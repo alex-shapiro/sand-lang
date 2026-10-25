@@ -147,7 +147,7 @@ let a = 1s * "x"
 let b = 1s * 2s
 let c = 1s / "x"
 --- error
-2: type parameter `T` does not satisfy Num
+2: type parameter `T` does not implement `Num`
 4: expected Num, found str
 5: expected Num, found duration
 6: expected Num, found str
@@ -337,7 +337,7 @@ fn f<T>(x: T) -> T {
     g(x, x)
 }
 --- error
-2: operator `+` is not defined for type parameter `T`; add a bound `T: Num`
+2: operator `+` is not defined for type parameter `T`; add `T: Num`
 
 === a method receiver of the wrong instance is reported once
 struct Box<T> { v: T }

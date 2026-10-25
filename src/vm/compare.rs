@@ -3,11 +3,11 @@
 //! proportional to nesting depth, and charge a [`Budget`] one unit per node
 //! plus the bytes compared, so comparing huge values can be interrupted.
 
-use super::Ctl;
 use super::bytecode::Program;
 use super::heap::Heap;
 use super::meter::{Budget, Unmetered};
 use super::value::*;
+use super::{Ctl, without_trait};
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::hash::Hasher;
@@ -542,15 +542,13 @@ pub fn keys_eq(heap: &Heap, budget: &impl Budget, a: Value, b: Value) -> Result<
     }
 }
 
-/// The hash of a map key or set element, consistent with [`values_eq`] for
-/// the `Hash` types: a variant hashes the same inline or boxed, `0.0` and
-/// `-0.0` hash alike, and so do all NaNs. Keys are hashed in place (`Hash`
-/// types are deeply immutable).
+/// Computes the hash of map key or set element `v`, consistent with
+/// [`values_eq`] for all types that implement `Hash`.
 ///
-/// Charges one unit per node visited plus the bytes hashed. Once a key turns
-/// out to be large, the hashes of its containers are memoized by handle, so
-/// a key with shared substructure hashes in time linear in its heap size,
-/// not in its (possibly exponentially larger) tree size.
+/// Charges one unit per visited node plus the number of hashed bytes. For large
+/// keys, container hashes are memoized by handle so that keys with shared
+/// substructure are hashed in time linear in their heap size. Returns an
+/// internal error if `v` has a type that does not implement `Hash`.
 #[inline]
 pub fn hash_key(heap: &Heap, budget: &impl Budget, v: Value) -> Result<u64, Ctl> {
     // Fast paths, inlined: the common scalar and string keys.
@@ -653,12 +651,11 @@ pub fn str_hash(s: &str) -> u64 {
     bytes_hash(s.as_bytes())
 }
 
-// Scalar and string hashes carry no type tag: the keys of a map, and the
-// values at any one position of a key (a field, an element, a variant's
-// payload), all have one static type, so values of different types are
-// never compared. Ints hash with one multiply.
+// Scalar and string hashes omit type tags because all keys in a map or at a
+// given structural position share a single static type.
 
-/// Hashes the length so that trailing NULs (the zero padding) are not lost.
+/// Hashes the byte length before the bytes so that trailing NUL bytes affect
+/// the hash.
 #[inline]
 fn bytes_hash(b: &[u8]) -> u64 {
     let mut h = FxHasher::default();
@@ -667,8 +664,8 @@ fn bytes_hash(b: &[u8]) -> u64 {
     h.finish()
 }
 
-/// The hash of `v` if it is not a container (a tuple, struct or variant
-/// with a payload).
+/// Computes the hash of `v` if `v` is a scalar or leaf object, or returns
+/// `Ok(None)` if `v` is a composite container (tuple, struct, or payload variant).
 #[inline]
 fn leaf_hash(heap: &Heap, budget: &impl Budget, v: Value) -> Result<Option<u64>, Ctl> {
     let mut h = FxHasher::default();
@@ -681,23 +678,14 @@ fn leaf_hash(heap: &Heap, budget: &impl Budget, v: Value) -> Result<Option<u64>,
         Value::Int(i) => return Ok(Some(int_hash(i))),
         Value::Dur(d) => return Ok(Some(int_hash(d))),
         Value::Pair(a, b) => return Ok(Some(pair_hash(a as i64, b))),
-        Value::Float(f) => {
-            h.write_u8(4);
-            h.write_u64(if f == 0.0 {
-                0
-            } else if f.is_nan() {
-                f64::NAN.to_bits()
-            } else {
-                f.to_bits()
-            });
-        }
+        Value::Float(_) => return Err(without_trait("float", "a map key or set element", "Hash")),
         // A payload-less variant (canonical: never a heap object).
         Value::Tag(id) => {
             h.write_u8(5);
             h.write_u32(id);
             h.write_usize(0);
         }
-        Value::Obj(handle) => match heap.get(v) {
+        Value::Obj(_) => match heap.get(v) {
             Obj::Str(s) => {
                 budget.charge_bytes(s.len())?;
                 return Ok(Some(bytes_hash(s.as_bytes())));
@@ -714,11 +702,7 @@ fn leaf_hash(heap: &Heap, budget: &impl Budget, v: Value) -> Result<Option<u64>,
                 h.write_u8(*incl as u8);
             }
             o if let Some(x) = o.value() => return Ok(Some(x.value_hash())),
-            // Identity types (tasks, channels, ...).
-            _ => {
-                h.write_u8(11);
-                h.write_u32(handle);
-            }
+            o => return Err(without_trait(o.kind_name(), "a map key or set element", "Hash")),
         },
         // Inline single-payload variants are containers.
         _ => return Ok(None),
@@ -961,15 +945,18 @@ pub fn values_cmp_metered(prog: &Program, heap: &Heap, budget: &impl Budget, a: 
                                     Some(o) => o,
                                     None => return Err(Ctl::internal(format!("{} values are not ordered", p.type_name()))),
                                 },
-                                _ => x.cmp(&y),
+                                (x, y) if std::mem::discriminant(x) == std::mem::discriminant(y) => {
+                                    return Err(without_trait(x.kind_name(), "compared with `<`", "Ord"));
+                                }
+                                _ => return Err(Ctl::internal("values of different types are compared with `<`")),
                             }
                         }
                     }
                 } else {
-                    Ordering::Equal
+                    return Err(Ctl::internal("values of different types are compared with `<`"));
                 }
             }
-            _ => Ordering::Equal,
+            _ => return Err(Ctl::internal("values of different types are compared with `<`")),
         };
         if ord != Ordering::Equal {
             return Ok(ord);
@@ -1256,5 +1243,37 @@ mod tests {
         assert!(floats.last().unwrap().as_float().is_nan());
         // Mixed lists use the generic sort.
         assert!(try_sort_numbers(&mut [Value::Int(1), Value::Float(1.0)], &Unmetered).is_none());
+    }
+
+    #[test]
+    fn keys_of_types_without_hash_are_internal_errors() {
+        let mut heap = Heap::new(None, usize::MAX);
+        let one = heap.new_str("1");
+        let list = heap.alloc(Obj::List(vec![Value::Int(1)]));
+        let tuple = heap.alloc(Obj::Tuple(vec![Value::Int(1), list].into()));
+        let nested = heap.alloc(Obj::Tuple(vec![Value::Int(1), tuple].into()));
+        for (v, what) in [(Value::Float(1.5), "a float"), (list, "a list"), (tuple, "a list"), (nested, "a list")] {
+            let e = hash_key(&heap, &Unmetered, v).unwrap_err();
+            assert!(matches!(e.kind(), CtlKind::Internal(m) if m.starts_with(what)), "{:?}", e.kind());
+        }
+        let ok = heap.alloc(Obj::Tuple(vec![one, Value::Bool(true), Value::Unit].into()));
+        assert!(hash_key(&heap, &Unmetered, ok).is_ok());
+    }
+
+    #[test]
+    fn values_of_types_without_ord_are_internal_errors() {
+        let mut heap = Heap::new(None, usize::MAX);
+        let prog = Program::default();
+        let (m1, m2) = (heap.alloc(Obj::Map(Box::default())), heap.alloc(Obj::Map(Box::default())));
+        let s = heap.new_str("a");
+        let in_tuple = |heap: &mut Heap, v: Value| heap.alloc(Obj::Tuple(vec![Value::Int(1), v].into()));
+        let (t1, t2) = (in_tuple(&mut heap, m1), in_tuple(&mut heap, m2));
+        for (a, b, what) in [(m1, m2, "a map is compared"), (t1, t2, "a map is compared"), (m1, s, "values of different types")] {
+            let e = values_cmp_metered(&prog, &heap, &Unmetered, a, b).unwrap_err();
+            assert!(matches!(e.kind(), CtlKind::Internal(m) if m.starts_with(what)), "{:?}", e.kind());
+        }
+        let (x, y) = (in_tuple(&mut heap, s), in_tuple(&mut heap, Value::Bool(true)));
+        assert!(values_cmp_metered(&prog, &heap, &Unmetered, x, x).is_ok());
+        assert!(values_cmp_metered(&prog, &heap, &Unmetered, y, y).is_ok());
     }
 }

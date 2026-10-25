@@ -192,6 +192,13 @@ pub fn internal<T>(msg: impl Into<String>) -> Result<T, Ctl> {
     Err(Ctl::internal(msg))
 }
 
+/// Returns an internal error if a value of kind `what` (see [`Obj::kind_name`])
+/// is used as `role` without implementing `trait_name`.
+#[cold]
+pub(crate) fn without_trait(what: &str, role: &str, trait_name: &str) -> Ctl {
+    Ctl::internal(format!("a {what} is {role}, but its type does not implement `{trait_name}`"))
+}
+
 /// What [`Vm::block`] waits for.
 pub enum BlockOn {
     Join(Value),

@@ -136,14 +136,14 @@ fn retried_trait_evidence_is_charged() {
 }
 
 #[test]
-fn bound_checks_on_structs_sharing_field_types() {
+fn trait_checks_on_structs_sharing_field_types() {
     let mut src = String::from("struct S0 { x: int }\n");
     for i in 1..60 {
         src += &format!("struct S{i} {{ a: S{}, b: S{} }}\n", i - 1, i - 1);
     }
     src += "fn same<T: Eq>(a: T, b: T) -> bool { a == b }\nfn f(x: S59) -> bool { same(x, x) }\n";
-    // Bound checks use what each definition needs (`derive_bounds`) instead
-    // of visiting the 2^60 paths through the fields.
+    // Trait checks use precomputed parameter requirements (`derive_impls`)
+    // instead of traversing all 2^60 field paths.
     let (r, took) = check(Config::new(), &src);
     r.unwrap();
     assert!(took < FAST, "took {took:?}");
@@ -160,11 +160,11 @@ fn bound_checks_on_structs_sharing_field_types() {
 }
 
 #[test]
-fn bounds_of_long_chains_of_structs_are_derived_in_linear_time() {
+fn derived_traits_of_long_chains_of_structs_are_computed_in_linear_time() {
     let n = 20_000;
     let mut src: String = (0..n).map(|i| format!("struct S{i} {{ s: S{}? }}\n", i + 1)).collect();
     src += &format!("struct S{n} {{ f: fn() -> int }}\nfn same(x: S0) -> bool {{ x == x }}\n");
-    rejects(&src, "S0 does not satisfy Eq");
+    rejects(&src, "S0 does not implement `Eq`");
 }
 
 #[test]
@@ -513,4 +513,24 @@ fn copies_of_constant_strings_are_charged_by_their_size() {
     check(Config::new(), &src).0.unwrap();
     src += &format!("struct D {{ {} }}\n", fields("C", 16));
     rejects(&src, "program too complex to compile");
+}
+
+#[test]
+fn requirements_spread_through_chains_of_types_in_linear_work() {
+    // `S0<T>` requires `T: Hash` transitively through `n` structs in either
+    // declaration order, using compile fuel proportional to `n`.
+    let chain = |n: usize, reverse: bool| {
+        let mut items: Vec<String> = (0..n).map(|i| format!("struct S{i}<T> {{ x: S{}<T>? }}\n", i + 1)).collect();
+        items.push(format!("struct S{n}<T: Hash> {{ x: T }}\n"));
+        if reverse {
+            items.reverse();
+        }
+        items.concat()
+    };
+    for reverse in [false, true] {
+        for n in [500, 4000] {
+            let (r, _) = check(limits(|l| l.max_compile_fuel = Some(200 * n as u64)), &chain(n, reverse));
+            assert!(r.is_ok(), "reverse {reverse}, n {n}: {r:?}");
+        }
+    }
 }

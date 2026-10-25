@@ -198,8 +198,7 @@ enum HoistKey<'h> {
     /// An immutable field of a struct or tuple in a local that is never
     /// assigned (`it.next`, the function of an `Iter`).
     Field(LocalId, u32),
-    /// A method of a trait dictionary in a local that is never assigned
-    /// (a call through a bound).
+    /// Method slot of a trait dictionary stored in an immutable local.
     Method(LocalId, u32),
 }
 
@@ -326,6 +325,11 @@ impl ProgramMark {
 pub(crate) fn compile_more(mut input: CompileInput, prog: &mut Program, inc: &mut Incremental, inits: &[FnId]) -> Result<u32, Vec<Diag>> {
     let cp = input.checked;
     let first = inc.fn_protos.len();
+    if cfg!(debug_assertions)
+        && let Err(m) = crate::check::verify(cp, cp.bodies.from(first as FnId))
+    {
+        panic!("the checked program fails verification: {m}");
+    }
     for (f, body) in cp.bodies.from(first as FnId).filter(|_| input.optimize) {
         if let Some(b) = inline::inlinable(cp, f, body) {
             inc.inline.insert(f, b);
@@ -1261,7 +1265,7 @@ impl<'a> Compiler<'a> {
         let tail = !defers_pending(f);
         match &e.kind {
             HKind::Block(items) if !items.is_empty() && self.struct_literal(f, items).is_none() => self.ret_block(f, items, None),
-            HKind::Call { func, args } if tail && self.fn_protos[*func as usize].is_some() => {
+            HKind::Call { func, args, .. } if tail && self.fn_protos[*func as usize].is_some() => {
                 let proto = self.fn_protos[*func as usize].unwrap();
                 let base = self.call_args(f, args, 0);
                 self.set_line(f, e.span);
@@ -1681,7 +1685,7 @@ impl<'a> Compiler<'a> {
                     self.emit(f, Op::LoadGlobal { dst, g: *g });
                 }
             },
-            HKind::FnValue(fid) => {
+            HKind::FnValue { func: fid, .. } => {
                 let k = match (&self.cp.fns[*fid as usize].kind, self.fn_protos[*fid as usize]) {
                     (FnKind::Native(n), _) => self.const_idx(Const::Native(*n)),
                     (_, Some(p)) => self.const_idx(Const::Fn(p)),
@@ -2080,7 +2084,7 @@ impl<'a> Compiler<'a> {
                     self.emit(f, Op::RetUnit);
                 }
             },
-            HKind::Call { func, args } => {
+            HKind::Call { func, args, .. } => {
                 let mark = f.next_reg;
                 let base = self.call_args(f, args, 0);
                 self.set_line(f, e.span);
@@ -2090,7 +2094,7 @@ impl<'a> Compiler<'a> {
                 }
                 f.next_reg = mark;
             }
-            HKind::CallNative { native, args } => {
+            HKind::CallNative { native, args, .. } => {
                 if let (Some(&op @ (Inline::MapGet | Inline::MapHas)), [HArg::Expr(m), HArg::Expr(k)]) =
                     (self.inline.get(native), args.as_slice())
                     && let HKind::Tuple(items) = &k.kind
@@ -4385,6 +4389,28 @@ mod tests {
             panic!("{e}");
         }
         out.contents()
+    }
+
+    #[test]
+    fn traits_without_methods_take_no_dictionary() {
+        let src = "trait Marker {}\ntrait Describe: Ord { fn describe(self) -> str }\nimpl Marker for int {}\nimpl Describe for int { fn describe(self) -> str { \"i\" } }\nfn plain<T: Eq + Ord + Hash + Encode + Marker>(x: T) -> bool { x == x }\nfn described<T: Describe>(x: T) -> bool { x < x }\nfn num<T: Num>(x: T) -> T { x + x }\nprint(plain(1))\nprint(described(1))\nprint(num(1))\n";
+        let prog = compile(src);
+        let nparams = |name: &str| prog.protos.iter().find(|p| p.name == name).unwrap().nparams;
+        assert_eq!(nparams("plain"), 1);
+        assert_eq!(nparams("described"), 2);
+        assert_eq!(nparams("num"), 2);
+    }
+
+    #[test]
+    fn dictionaries_built_from_parameters_are_built_once_on_entry() {
+        let src = "trait Show { fn show(self) -> str }\ntrait Sub: Show { fn sub(self) -> str }\nimpl Show for int { fn show(self) -> str { \"i\" } }\nimpl Sub for int { fn sub(self) -> str { \"s\" } }\nimpl<A: Show> Show for [A] { fn show(self) -> str { self[0].show() } }\nfn shows<T: Show>(x: T, n: int) -> int {\n    var k = 0\n    for _ in 0..n {\n        k += [x].show().len() + [x].show().len() + [1].show().len()\n    }\n    k\n}\nfn subs<T: Sub>(x: T, n: int) -> int {\n    var k = 0\n    for _ in 0..n {\n        k += [x].show().len() + [x].show().len()\n    }\n    k\n}\nfn pairs<T: Sub, U: Sub>(x: T, y: U, n: int) -> int {\n    var k = 0\n    for _ in 0..n {\n        k += [x].show().len() + [y].show().len()\n    }\n    k\n}\nprint(shows(1, 2))\nprint(subs(1, 2))\nprint(pairs(1, 2, 2))\n";
+        assert_eq!(run(src), "6\n4\n4\n");
+        let prog = compile(src);
+        let tuples = |ops: &[Op]| ops.iter().filter(|op| matches!(op, Op::NewTuple { .. })).count();
+        for (f, n) in [("shows", 1), ("subs", 1), ("pairs", 2)] {
+            let (body, entry) = first_loop(&prog, f);
+            assert_eq!((tuples(entry), tuples(body)), (n, 0), "{f}");
+        }
     }
 
     #[test]

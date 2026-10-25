@@ -1,4 +1,4 @@
-//! Types, type definitions, bounds and interned names.
+//! Types, type definitions, traits and interned names.
 //!
 //! Types are hash-consed: a [`TypeId`] indexes a node of a [`TypeArena`],
 //! and structurally equal types have the same id, so types are `Copy` and
@@ -503,59 +503,96 @@ impl Symbols {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Bound {
-    Eq,
-    Ord,
-    Hash,
-    Num,
-    /// Types that support JSON encoding (all types except functions, tasks,
-    /// channels, and native objects).
-    Encode,
-    /// Supports `+`: numbers, durations, strings, bytes and lists. Not
-    /// written in source: the checker requires it of the operands of `+`
-    /// whose type is not known yet (`(a, b) => a + b`).
-    Add,
-}
-
-impl Bound {
-    pub fn parse(s: &str) -> Option<Bound> {
-        Some(match s {
-            "Eq" => Bound::Eq,
-            "Ord" => Bound::Ord,
-            "Hash" => Bound::Hash,
-            "Num" => Bound::Num,
-            "Encode" => Bound::Encode,
-            _ => return None,
-        })
-    }
-    pub fn name(self) -> &'static str {
-        match self {
-            Bound::Eq => "Eq",
-            Bound::Ord => "Ord",
-            Bound::Hash => "Hash",
-            Bound::Num => "Num",
-            Bound::Encode => "Encode",
-            Bound::Add => "Add",
+macro_rules! builtins {
+    ($($name:ident),*) => {
+        /// A prelude trait implemented by the VM (`Eq`, `Ord`, `Hash`, `Encode`,
+        /// or `Num`).
+        ///
+        /// The prelude implements `Num` for `int` and `float`; the checker
+        /// automatically derives the remaining built-in traits from type structure.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        pub enum Builtin {
+            $($name),*
         }
+
+        impl Builtin {
+            pub const ALL: &[Builtin] = &[$(Builtin::$name),*];
+
+            pub fn name(self) -> &'static str {
+                match self {
+                    $(Builtin::$name => stringify!($name)),*
+                }
+            }
+        }
+
+        /// Type-level markers for built-in trait bounds on native [`Param`](crate::native::Param)
+        /// arguments (for example, `Param<0, traits::Hash>` or
+        /// `Param<0, (traits::Ord, traits::Hash)>`).
+        pub mod traits {
+            use super::{Builtin, Builtins};
+
+            /// A set of built-in traits required by a [`Param`](crate::native::Param):
+            /// a single trait, `()` for an empty set, or a tuple `(A, B)` for a union.
+            pub trait Set {
+                const TRAITS: Builtins;
+            }
+
+            impl Set for () {
+                const TRAITS: Builtins = Builtins::NONE;
+            }
+
+            impl<A: Set, B: Set> Set for (A, B) {
+                const TRAITS: Builtins = A::TRAITS.union(B::TRAITS);
+            }
+
+            $(
+                #[doc = concat!("Built-in trait marker for `", stringify!($name), "`.")]
+                pub struct $name;
+
+                impl Set for $name {
+                    const TRAITS: Builtins = Builtins::of(Builtin::$name);
+                }
+            )*
+        }
+    };
+}
+
+builtins!(Eq, Ord, Hash, Encode, Num);
+
+impl Builtin {
+    pub fn parse(s: &str) -> Option<Builtin> {
+        Builtin::ALL.iter().copied().find(|b| b.name() == s)
     }
 
-    /// Returns `true` if `self` implies `other`.
-    pub fn implies(self, other: Bound) -> bool {
-        self == other
-            || (other == Bound::Eq && matches!(self, Bound::Ord | Bound::Hash | Bound::Num))
-            || (matches!(other, Bound::Ord | Bound::Add | Bound::Encode) && self == Bound::Num)
-    }
-
-    /// Returns the names of `bounds`, excluding bounds implied by other bounds in the slice.
-    pub fn names(bounds: &[Bound]) -> Vec<&'static str> {
-        let implied = |b: Bound| bounds.iter().any(|&x| x != b && x.implies(b));
-        bounds.iter().filter(|&&b| !implied(b)).map(|b| b.name()).collect()
+    /// Returns `true` if the checker derives `self` from the structure of a type
+    /// (all built-in traits except `Num`).
+    pub fn is_derived(self) -> bool {
+        self != Builtin::Num
     }
 }
 
-/// A user-defined trait applied to type arguments (`Into<str>`); the
-/// implementing type is given separately.
+/// Bitset of [`Builtin`] traits.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Builtins(u8);
+
+impl Builtins {
+    pub const NONE: Builtins = Builtins(0);
+
+    pub const fn of(b: Builtin) -> Builtins {
+        Builtins(1 << b as u8)
+    }
+
+    #[must_use]
+    pub const fn union(self, other: Builtins) -> Builtins {
+        Builtins(self.0 | other.0)
+    }
+
+    pub fn iter(self) -> impl Iterator<Item = Builtin> {
+        Builtin::ALL.iter().copied().filter(move |&b| self.0 & Builtins::of(b).0 != 0)
+    }
+}
+
+/// A trait and its type arguments (`Into<str>`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TraitRef {
     pub trait_id: TraitId,
@@ -571,17 +608,9 @@ impl TraitRef {
 #[derive(Clone, Debug)]
 pub struct ParamInfo {
     pub name: Symbol,
-    /// Built-in bounds, including those implied by the supertraits of `traits`.
-    pub bounds: Vec<Bound>,
-    /// User-defined trait bounds.
+    /// Direct trait bounds declared on the type parameter, excluding supertraits.
     pub traits: Vec<TraitRef>,
     pub reflect: bool,
-}
-
-impl ParamInfo {
-    pub fn has_bound(&self, b: Bound) -> bool {
-        self.bounds.iter().any(|&x| x.implies(b))
-    }
 }
 
 #[derive(Clone, Debug)]

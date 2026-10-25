@@ -195,7 +195,7 @@ fn f() -> Result<()> {
 }
 --- error
 2: `use` needs a value whose type implements `Close`, found int
-3: the trait `Close` is not implemented for int
+3: int does not implement `Close`
 5: add `?` to bind the value of `Ok`
 
 === use binds a name or _, not a pattern

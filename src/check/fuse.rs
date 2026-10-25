@@ -112,8 +112,8 @@ struct Chain {
 enum Func {
     Tmp(LocalId),
     Inline(Box<HLambda>),
-    /// A script function, called directly.
-    Fn(FnId),
+    /// A script function and its type arguments, called directly.
+    Fn(FnId, Vec<TypeId>),
 }
 
 enum LoopSrc {
@@ -140,7 +140,7 @@ fn is_inert(e: &HExpr) -> bool {
         HKind::Lambda(_)
             | HKind::Local(_)
             | HKind::Global(_)
-            | HKind::FnValue(_)
+            | HKind::FnValue { .. }
             | HKind::TypeDesc { .. }
             | HKind::VariantFn { .. }
             | HKind::Int(_)
@@ -243,7 +243,7 @@ impl Checker {
     }
 
     fn adapter_of(&mut self, e: &HExpr) -> Option<Adapter> {
-        let HKind::Call { func, args } = &e.kind else { return None };
+        let HKind::Call { func, args, .. } = &e.kind else { return None };
         let Some(Role::Adapter(kind)) = self.fuse_role(*func) else { return None };
         let fits = args.len() == arity(kind) && args.iter().all(|a| matches!(a, HArg::Expr(_)));
         (fits && self.iter_elem(e.ty).is_some()).then_some(kind)
@@ -252,7 +252,7 @@ impl Checker {
     /// The source kind of a pipeline whose adapters were peeled off,
     /// leaving `e`; `inert` tells whether the adapters' arguments are inert.
     fn source_of(&mut self, e: &HExpr, inert: bool) -> Option<SourceKind> {
-        if let HKind::Call { func, args } = &e.kind
+        if let HKind::Call { func, args, .. } = &e.kind
             && let [HArg::Expr(_)] = args.as_slice()
         {
             match self.fuse_role(*func) {
@@ -321,10 +321,10 @@ impl Checker {
     /// of the fused loop. A lambda literal that cannot `return` (or use `?`)
     /// is inlined there: its locals become locals of the enclosing function.
     fn func(&mut self, e: HExpr, out: &mut Vec<HExpr>) -> Func {
-        if let HKind::FnValue(f) = e.kind
-            && self.fns[f as usize].dicts.is_empty()
+        if let HKind::FnValue { func, targs } = &e.kind
+            && self.fns[*func as usize].dicts.is_empty()
         {
-            return Func::Fn(f);
+            return Func::Fn(*func, targs.clone());
         }
         if let HKind::Lambda(lam) = &e.kind
             && lam.self_local.is_none()
@@ -360,7 +360,7 @@ impl Checker {
     fn apply(&mut self, f: Func, args: Vec<HExpr>, ret: TypeId, span: Span) -> HExpr {
         match f {
             Func::Tmp(l) => self.call_local(l, args, ret, span),
-            Func::Fn(f) => mk(HKind::Call { func: f, args: args.into_iter().map(HArg::Expr).collect() }, ret, span),
+            Func::Fn(func, targs) => mk(HKind::Call { func, targs, args: args.into_iter().map(HArg::Expr).collect() }, ret, span),
             Func::Inline(lam) => {
                 let lam = *lam;
                 let mut stmts: Vec<HExpr> = lam.params.iter().zip(args).map(|(&p, a)| let_(p, a.ty, a, span)).collect();
@@ -616,7 +616,7 @@ impl Checker {
     /// A call of an `Iter` consumer (`to_list`, `fold`, ...) on a fusible
     /// pipeline, as a fused loop; any other call is returned unchanged.
     pub(crate) fn fuse_consumer(&mut self, call: HExpr) -> HExpr {
-        let HKind::Call { func, args } = &call.kind else { return call };
+        let HKind::Call { func, args, .. } = &call.kind else { return call };
         if !self.optimize {
             return call;
         }

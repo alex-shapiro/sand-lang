@@ -1,6 +1,7 @@
 //! Name resolution and type checking: AST to typed HIR.
 
 pub mod budget;
+mod derive;
 mod docs;
 mod expr;
 mod fuse;
@@ -10,11 +11,12 @@ pub mod persist;
 mod resources;
 mod traits;
 mod unify;
+mod verify;
 
 use crate::diag::{Diag, FileId, SourceFile, Span};
 use crate::engine::NativeDecls;
 use crate::hir::*;
-use crate::native::{BoundKind, Bounds, Constant, EnumVariant, NativeDecl, RustVariant, Signature, StructField, Type};
+use crate::native::{BoundKind, Constant, EnumVariant, NativeDecl, RustVariant, Signature, StructField, Type};
 use crate::syntax::ast::{self, ItemKind, TypeExpr, TypeExprKind};
 use crate::types::*;
 use crate::vm::value::{FxBuild, FxHashMap};
@@ -26,6 +28,7 @@ use std::sync::Arc;
 
 pub use pat::Witness;
 pub use traits::{ImplDef, TraitDef, TraitMethod};
+pub(crate) use verify::verify;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModKind {
@@ -94,6 +97,10 @@ pub enum Ctor {
 }
 
 impl Ctor {
+    /// The built-in type constructors that `help` and the documentation describe.
+    pub const BUILTIN: &[Ctor] =
+        &[Ctor::Bool, Ctor::Int, Ctor::Float, Ctor::Str, Ctor::Bytes, Ctor::Duration, Ctor::Range, Ctor::List, Ctor::Map, Ctor::Set];
+
     pub fn native_prefix(self, defs: &PVec<TypeDef>, syms: &Symbols) -> String {
         match self {
             Ctor::Int => "int".into(),
@@ -164,8 +171,8 @@ pub struct FnInfo {
     pub name: Symbol,
     pub module: ModId,
     pub generics: Vec<ParamId>,
-    /// How many of `generics` come first from the enclosing type, `extend`
-    /// block, trait or impl.
+    /// Number of leading entries in `generics` inherited from an enclosing
+    /// type, `extend` block, trait, or `impl`.
     pub outer: usize,
     pub params: Vec<ParamSig>,
     pub ret: TypeId,
@@ -175,18 +182,13 @@ pub struct FnInfo {
     pub span: Span,
     pub is_pub: bool,
     pub owner: Option<Ctor>,
-    /// Type parameter for `Self`, if the function is a method.
     pub self_ty: Option<TypeId>,
-    /// Where the syntax of the body is (script functions and helpers).
     pub decl: Option<FnDeclRef>,
-    /// Hidden dictionary parameters, passed before the declared parameters:
-    /// evidence that each type implements each trait. For trait methods
-    /// (signatures, default methods and impl methods) the first is the
-    /// dictionary of the implementing type.
+    /// Hidden dictionary parameters `(type, trait)` passed before declared
+    /// parameters. For trait methods, default methods, and `impl` methods, the
+    /// first entry is the dictionary for `Self`.
     pub dicts: Vec<(TypeId, TraitRef)>,
-    /// The impl this method belongs to.
     pub impl_of: Option<ImplId>,
-    /// The trait whose signature or default method this is.
     pub trait_of: Option<TraitId>,
 }
 
@@ -504,7 +506,15 @@ pub(crate) struct FnState {
     /// started, so that its own locals are found without a scan of all
     /// (see `fuse.rs`, which re-owns the locals of inlined lambdas).
     pub lambda_first_local: Vec<LocalId>,
-    pub obligations: Vec<(TypeId, Bound, Span)>,
+    /// Deferred trait bounds on types that contained unresolved inference
+    /// variables.
+    pub obligations: Vec<(TypeId, TraitRef, Span)>,
+    /// Deferred `+` operand checks on types that contained unresolved inference
+    /// variables.
+    pub plus_checks: Vec<(TypeId, Span)>,
+    /// Indicates that the checker is checking a struct field default, which
+    /// does not receive trait dictionaries.
+    pub field_default: bool,
     /// `(type, span, call_kind)` triples for `reflect` type arguments, checked
     /// after type inference completes.
     pub reflect_checks: Vec<(TypeId, Span, &'static str)>,
@@ -516,9 +526,10 @@ pub(crate) struct FnState {
     pub top_level: bool,
     pub generics: Vec<(Symbol, ParamId)>,
     pub self_ty: Option<TypeId>,
-    /// Trait evidence available in the function: (type, trait, dictionary expression).
+    /// In-scope trait dictionaries `(type, trait, dict_expr)` available in the
+    /// current function.
     pub evidence: Vec<(TypeId, TraitRef, HExpr)>,
-    /// The evidence needed by the [`HKind::Evidence`] placeholders of the body.
+    /// Pending [`HKind::Evidence`] placeholders in the current function body.
     pub holes: Vec<EvidenceReq>,
     /// The inference variables made before the function, and those of them
     /// bound while checking it (see `release_vars`).
@@ -563,9 +574,9 @@ pub struct Checker {
     /// The bindings of the inference variables of the module being checked
     /// (cleared when it is done: its types are all resolved by then).
     pub subst: Vec<Option<TypeId>>,
-    /// For each type definition, what it needs to satisfy `Eq`, `Ord` and
-    /// `Hash` (see `unify::Derived`).
-    pub(crate) derived: PVec<[unify::Derived; 4]>,
+    /// Derived implementations of `Eq`, `Ord`, `Hash`, and `Encode` for each
+    /// type definition (`derive.rs`).
+    pub(crate) derived: PVec<[derive::Derived; Builtin::ALL.len()]>,
     pub diags: Vec<Diag>,
     pub wk: WellKnown,
     pub prelude: Option<ModId>,
@@ -585,9 +596,7 @@ pub struct Checker {
     pub(crate) fn_names: HashSet<String, FxBuild>,
     pub traits: PVec<TraitDef>,
     pub impls: PVec<ImplDef>,
-    /// Impls by (trait, type constructor, tuple arity).
     pub(crate) impls_by: PMap<(TraitId, Ctor, u32), Arc<[ImplId]>>,
-    /// Impls by (type constructor, tuple arity).
     pub(crate) impls_by_ctor: PMap<(Ctor, u32), Arc<[ImplId]>>,
     /// Records variable bindings made by `unify` so they can be undone.
     pub(crate) unify_log: Option<Vec<VarId>>,
@@ -604,9 +613,7 @@ pub struct Checker {
     pub(crate) cell_returns: bool,
     /// Set while checking an expression for `Session::type_of`.
     pub(crate) type_query: Option<TypeQuery>,
-    /// The prelude's private trait `Num` (static `zero` and `one`): the
-    /// evidence that a type satisfies the built-in bound `Num`.
-    pub(crate) num_trait: Option<TraitId>,
+    pub(crate) builtins: [Option<TraitId>; Builtin::ALL.len()],
     /// The prelude's `Iterator` trait and `Iter` struct, which `for` loops use.
     pub(crate) iter_trait: Option<TraitId>,
     /// The prelude's `Close` trait, which `use` bindings call.
@@ -669,7 +676,7 @@ impl Default for Checker {
             cell_returns: false,
             type_query: None,
             budget: Arc::new(CompileBudget::default()),
-            num_trait: None,
+            builtins: [None; Builtin::ALL.len()],
             iter_trait: None,
             close_trait: None,
             flows: PMap::new(),
@@ -926,26 +933,19 @@ impl Checker {
         let mut generics = Vec::new();
         for (&v, name) in vars.iter().zip(names) {
             let name = name.unwrap_or_default();
-            let mut bounds: Vec<String> = Vec::new();
             let declared = origin(v).map(|p| &self.params[p as usize]);
-            let required = self.type_query.iter().flat_map(|q| &q.bounds).filter(|(t, _)| self.rty(*t) == Ty::Var(v)).map(|(_, b)| *b);
-            // (`Add` cannot be written: `+` is shown as allowed on any type.)
-            let builtin = required.chain(declared.into_iter().flat_map(|p| p.bounds.clone())).filter(|&b| b != Bound::Add);
-            for b in builtin {
-                if !bounds.iter().any(|x| x == b.name()) {
-                    bounds.push(b.name().to_string());
-                }
-            }
-            bounds.extend(declared.into_iter().flat_map(|p| p.traits.iter().map(|tr| self.show_trait(tr))));
-            generics.push(if bounds.is_empty() { name.clone() } else { format!("{name}: {}", bounds.join(" + ")) });
+            let required = self.type_query.iter().flat_map(|q| &q.traits).filter(|(t, _)| self.rty(*t) == Ty::Var(v)).map(|(_, tr)| *tr);
+            let traits: Vec<TraitRef> = declared.into_iter().flat_map(|p| p.traits.iter().copied()).chain(required).collect();
+            let shown: Vec<String> = self.minimal_traits(&traits).iter().map(|tr| self.show_trait(tr)).collect();
+            generics.push(if shown.is_empty() { name.clone() } else { format!("{name}: {}", shown.join(" + ")) });
             var_names.push((v, name));
         }
         let shown = TypePrinter { var_names: &var_names, ..self.printer() }.show(t);
         format!("fn<{}>{}", generics.join(", "), shown.strip_prefix("fn").unwrap_or(&shown))
     }
 
-    pub fn new_param(&mut self, name: Symbol, bounds: Vec<Bound>, reflect: bool) -> ParamId {
-        self.params.push(ParamInfo { name, bounds, traits: Vec::new(), reflect });
+    pub fn new_param(&mut self, name: Symbol, reflect: bool) -> ParamId {
+        self.params.push(ParamInfo { name, traits: Vec::new(), reflect });
         (self.params.len() - 1) as ParamId
     }
 
@@ -1192,30 +1192,43 @@ impl Checker {
         for item in items {
             if let ItemKind::Trait(t) = &item.kind {
                 let id = self.declare_trait(t);
-                self.define_ident(&t.name, Def::Trait(id), t.is_pub);
+                // Keep the prelude built-in trait in scope if a user module redefines its name.
+                if Builtin::parse(&t.name.name).is_none() || pm.kind == ModKind::Prelude {
+                    self.define_ident(&t.name, Def::Trait(id), t.is_pub);
+                }
                 trait_ids.push(id);
             }
         }
         let bound_members = if self.allows_native() { self.declare_bound_types() } else { Vec::new() };
         let mut struct_ids = Vec::new();
+        // The traits of type parameters may take types declared later as arguments.
+        let mut type_params: Vec<(&[ast::GenericParam], Vec<ParamId>)> = Vec::new();
         for item in items {
             match &item.kind {
                 ItemKind::Struct(s) => {
-                    let generics = self.declare_generics(&s.generics);
+                    let generics = self.declare_param_names(&s.generics);
+                    type_params.push((&s.generics, generics.clone()));
                     let kind = TypeDefKind::Struct { fields: vec![] };
                     let id = self.new_typedef(&s.name, generics, kind, s.is_pub, s.doc.as_deref());
                     self.define_ident(&s.name, Def::Type(TyRef::Def(id)), s.is_pub);
                     struct_ids.push(id);
                 }
                 ItemKind::Enum(e) => {
-                    let generics = self.declare_generics(&e.generics);
+                    let generics = self.declare_param_names(&e.generics);
+                    type_params.push((&e.generics, generics.clone()));
                     let kind = TypeDefKind::Enum { variants: vec![] };
                     let id = self.new_typedef(&e.name, generics, kind, e.is_pub, e.doc.as_deref());
                     self.define_ident(&e.name, Def::Type(TyRef::Def(id)), e.is_pub);
                     struct_ids.push(id);
                 }
                 ItemKind::TypeAlias(a) => {
-                    let generics = self.declare_generics(&a.generics);
+                    for g in a.generics.iter().filter(|g| !g.traits.is_empty()) {
+                        self.error(
+                            g.name.span,
+                            "the type parameters of a type alias cannot require traits; require them on the functions that use the alias",
+                        );
+                    }
+                    let generics = self.declare_param_names(&a.generics);
                     let name = self.sym(&a.name.name);
                     self.aliases.push(Alias { name, generics, ty: None, decl: Some((mi, Arc::new(a.ty.clone()))), resolving: false });
                     let id = self.aliases.len() - 1;
@@ -1223,6 +1236,10 @@ impl Checker {
                 }
                 _ => {}
             }
+        }
+        for (gs, ps) in type_params {
+            let scope = self.generic_scope(&ps);
+            self.resolve_param_traits(gs, &ps, &scope, None);
         }
         if pm.kind == ModKind::Prelude {
             self.find_well_known();
@@ -1249,9 +1266,14 @@ impl Checker {
             .filter_map(|(i, x)| if let ItemKind::Trait(t) = &x.kind { Some((i as u32, t)) } else { None })
             .collect();
         self.resolve_supertraits(&trait_ids, &trait_decls);
-        // 3. Fields and variants, and the built-in bounds they satisfy.
+        // 3. Resolve struct fields and enum variants, infer implied member
+        // bounds, and derive built-in traits. Well-formedness checks on member
+        // types run after `impl` declarations are registered.
+        let mut member_types: Vec<(TypeDefId, TypeId, Span)> = Vec::new();
+        let mut bound_ids = Vec::new();
         for (id, members) in bound_members {
             self.resolve_bound_members(id, members);
+            bound_ids.push(id);
         }
         let mut k = 0;
         for (idx, item) in items.iter().enumerate() {
@@ -1259,17 +1281,18 @@ impl Checker {
                 ItemKind::Struct(s) => {
                     let id = struct_ids[k];
                     k += 1;
-                    self.fill_struct(id, s, idx as u32);
+                    self.fill_struct(id, s, idx as u32, &mut member_types);
                 }
                 ItemKind::Enum(e) => {
                     let id = struct_ids[k];
                     k += 1;
-                    self.fill_enum(id, e);
+                    self.fill_enum(id, e, &mut member_types);
                 }
                 _ => {}
             }
         }
-        self.derive_bounds(first_type);
+        self.infer_member_requirements(first_type);
+        self.derive_impls(first_type);
         if pm.kind == ModKind::Prelude {
             for name in ["Option", "Result"] {
                 if let Some(Def::Type(TyRef::Def(d))) = self.scope_def(mi, name) {
@@ -1315,6 +1338,12 @@ impl Checker {
         }
         for id in impl_ids {
             self.check_impl_supertraits(id);
+        }
+        for (d, t, span) in member_types {
+            self.check_member_type(d, t, span, "");
+        }
+        for d in bound_ids {
+            self.check_bound_member_types(d);
         }
         if self.allows_native() {
             self.declare_undeclared_natives(first_fn);
@@ -1461,42 +1490,30 @@ impl Checker {
         }
     }
 
-    /// Type parameters of a type declaration (only built-in bounds are allowed).
-    fn declare_generics(&mut self, gs: &[ast::GenericParam]) -> Vec<ParamId> {
-        let out = self.declare_params(gs, &[], None);
-        for (g, &p) in gs.iter().zip(&out) {
-            let num = self.num_trait;
-            self.params[p as usize].traits.retain(|t| Some(t.trait_id) != num);
-            if !self.params[p as usize].traits.is_empty() {
-                self.error(
-                    g.name.span,
-                    format!(
-                        "trait bounds are not allowed on the type parameters of a type; add them to the functions or impls that need them (`where {}: ...`)",
-                        g.name.name
-                    ),
-                );
-                self.params[p as usize].traits.clear();
-            }
-        }
+    /// Declares type parameters `gs` and resolves their trait bounds against
+    /// `outer` and the newly declared parameters.
+    fn declare_params(&mut self, gs: &[ast::GenericParam], outer: &[(Symbol, ParamId)], self_ty: Option<TypeId>) -> Vec<ParamId> {
+        let out = self.declare_param_names(gs);
+        let mut scope = outer.to_vec();
+        scope.extend(self.generic_scope(&out));
+        self.resolve_param_traits(gs, &out, &scope, self_ty);
         out
     }
 
-    /// Declares type parameters with their bounds; bounds may refer to any of
-    /// the parameters and to `outer`.
-    fn declare_params(&mut self, gs: &[ast::GenericParam], outer: &[(Symbol, ParamId)], self_ty: Option<TypeId>) -> Vec<ParamId> {
-        let mut scope = outer.to_vec();
-        let mut out = Vec::new();
-        for g in gs {
-            let name = self.sym(&g.name.name);
-            let p = self.new_param(name, vec![], g.reflect);
-            scope.push((name, p));
-            out.push(p);
+    fn declare_param_names(&mut self, gs: &[ast::GenericParam]) -> Vec<ParamId> {
+        gs.iter()
+            .map(|g| {
+                let name = self.sym(&g.name.name);
+                self.new_param(name, g.reflect)
+            })
+            .collect()
+    }
+
+    fn resolve_param_traits(&mut self, gs: &[ast::GenericParam], ps: &[ParamId], scope: &[(Symbol, ParamId)], self_ty: Option<TypeId>) {
+        for (g, &p) in gs.iter().zip(ps) {
+            let traits = self.resolve_traits(&g.traits, scope, self_ty);
+            self.add_traits(p, traits);
         }
-        for (g, &p) in gs.iter().zip(&out) {
-            let (bounds, traits) = self.resolve_bounds(&g.bounds, &scope, self_ty);
-            self.add_bounds(p, bounds, traits);
-        }
-        out
     }
 
     fn new_typedef(&mut self, name: &ast::Ident, generics: Vec<ParamId>, kind: TypeDefKind, is_pub: bool, doc: Option<&str>) -> TypeDefId {
@@ -1521,12 +1538,11 @@ impl Checker {
         (self.fns.len() - 1) as FnId
     }
 
-    /// The names of type parameters `ps` (a scope for resolving types).
     fn generic_scope(&self, ps: &[ParamId]) -> Vec<(Symbol, ParamId)> {
         ps.iter().map(|&p| (self.params[p as usize].name, p)).collect()
     }
 
-    fn fill_struct(&mut self, id: TypeDefId, s: &ast::StructDecl, item: u32) {
+    fn fill_struct(&mut self, id: TypeDefId, s: &ast::StructDecl, item: u32, written: &mut Vec<(TypeDefId, TypeId, Span)>) {
         let gens = self.types[id as usize].generics.clone();
         let scope = self.generic_scope(&gens);
         let self_ty = self.def_self_ty(id, &gens);
@@ -1537,6 +1553,7 @@ impl Checker {
                 continue;
             }
             let ty = self.resolve_type_in(&f.ty, &scope, Some(self_ty));
+            written.push((id, ty, f.ty.span));
             if s.is_pub && f.is_pub && self.allows_native() {
                 self.check_public_types("field", &f.name, [ty]);
             }
@@ -1583,7 +1600,8 @@ impl Checker {
         self.types[id as usize].kind = TypeDefKind::Struct { fields };
     }
 
-    fn fill_enum(&mut self, id: TypeDefId, e: &ast::EnumDecl) {
+    /// Resolves the variants of enum `id` and appends their payload types to `written`.
+    fn fill_enum(&mut self, id: TypeDefId, e: &ast::EnumDecl, written: &mut Vec<(TypeDefId, TypeId, Span)>) {
         let gens = self.types[id as usize].generics.clone();
         let scope = self.generic_scope(&gens);
         let self_ty = self.def_self_ty(id, &gens);
@@ -1594,6 +1612,7 @@ impl Checker {
                 continue;
             }
             let fields: Vec<TypeId> = v.fields.iter().map(|f| self.resolve_type_in(&f.ty, &scope, Some(self_ty))).collect();
+            written.extend(fields.iter().zip(&v.fields).map(|(&t, f)| (id, t, f.ty.span)));
             let names: Vec<Option<Symbol>> = v.fields.iter().map(|f| f.name.as_ref().map(|n| self.syms.intern(&n.name))).collect();
             let field_names = if !names.is_empty() && names.iter().all(|n| n.is_some()) { names.into_iter().collect() } else { None };
             self.variants.push((id, i as u32));
@@ -1621,7 +1640,7 @@ impl Checker {
                 BoundKind::Value(_) | BoundKind::Object(_) => &[],
             };
             let ps = params.iter().map(|p| self.sym(p)).collect::<Vec<_>>();
-            let generics = ps.into_iter().map(|p| self.new_param(p, vec![], false)).collect();
+            let generics = ps.into_iter().map(|p| self.new_param(p, false)).collect();
             let kind = match &t.kind {
                 BoundKind::Value(v) => TypeDefKind::Opaque(Opaque::Value(*v)),
                 BoundKind::Object(id) => TypeDefKind::Opaque(Opaque::Object(*id)),
@@ -1842,7 +1861,7 @@ impl Checker {
                     .map(|(k, v)| Some((self.fold_const_expr(k, env, state)?, self.fold_const_expr(v, env, state)?)))
                     .collect::<Option<_>>()?,
             ),
-            HKind::CallNative { native, args } if Some(*native) == self.prelude_native("set") => match args.as_slice() {
+            HKind::CallNative { native, args, .. } if Some(*native) == self.prelude_native("set") => match args.as_slice() {
                 [HArg::Expr(xs)] => match self.fold_const_expr(xs, env, state)? {
                     ConstVal::List(xs) => ConstVal::Set(xs),
                     _ => return None,
@@ -1872,7 +1891,7 @@ impl Checker {
                 ConstVal::Struct(_, mut fields) if (*index as usize) < fields.len() => fields.swap_remove(*index as usize),
                 _ => return None,
             },
-            HKind::Call { func, args } if args.is_empty() => self.fold_default_helper(*func, state)?,
+            HKind::Call { func, args, .. } if args.is_empty() => self.fold_default_helper(*func, state)?,
             HKind::Block(stmts) => {
                 let (last, lets) = stmts.split_last()?;
                 let mark = env.len();
@@ -2126,7 +2145,8 @@ impl Checker {
     }
 
     /// Verifies that a `native fn` declaration matches its registered Rust
-    /// signature and declares all required type parameter bounds. Returns
+    /// signature and declares each built-in trait that the Rust function
+    /// requires. Returns
     /// the type parameter indices for which the Rust function accepts `Num`
     /// evidence.
     fn check_native_signature(
@@ -2142,9 +2162,9 @@ impl Checker {
         let owner = format!("the Rust function of native `{key}`");
         let reflect: Vec<Type> =
             generics.iter().enumerate().filter(|(_, p)| self.params[**p as usize].reflect).map(|(i, _)| Type::Reflect(i as u8)).collect();
-        let num: Vec<u8> = (0..generics.len() as u8)
-            .filter(|&i| self.num_trait.is_some() && self.params[generics[i as usize] as usize].has_bound(Bound::Num))
-            .collect();
+        let num_trait = self.builtins[Builtin::Num as usize];
+        let num: Vec<u8> =
+            (0..generics.len() as u8).filter(|&i| num_trait.is_some_and(|n| self.param_has_trait(generics[i as usize], n))).collect();
         let lead_of = |t: &Type| match t {
             Type::Reflect(i) => Some((false, *i)),
             Type::Num(i) => Some((true, *i)),
@@ -2168,7 +2188,7 @@ impl Checker {
             }
             let have: Vec<TypeId> = params.iter().map(|p| p.ty).collect();
             if want.as_ref() == Some(&have) && want_ret == Some(ret) {
-                self.check_native_bounds(f, sig, generics);
+                self.check_native_traits(f, sig, generics);
                 return taken;
             }
         }
@@ -2192,8 +2212,8 @@ impl Checker {
         Vec::new()
     }
 
-    fn check_native_bounds(&mut self, f: &ast::FnDecl, sig: &Signature, generics: &[ParamId]) {
-        let mut required = vec![Bounds::NONE; generics.len()];
+    fn check_native_traits(&mut self, f: &ast::FnDecl, sig: &Signature, generics: &[ParamId]) {
+        let mut required = vec![Builtins::NONE; generics.len()];
         for t in sig.params.iter().chain([&sig.ret]) {
             t.visit(&mut |t| {
                 if let Type::Param(i, b) = t
@@ -2204,15 +2224,17 @@ impl Checker {
             });
         }
         for (&p, need) in generics.iter().zip(required) {
-            let info = &self.params[p as usize];
-            let missing: Vec<Bound> = need.list().into_iter().filter(|&b| !info.has_bound(b)).collect();
+            let need: Vec<TraitRef> = need.iter().filter_map(|b| self.builtin_trait(b)).collect();
+            let missing: Vec<TraitRef> = need.iter().copied().filter(|tr| !self.param_has_trait(p, tr.trait_id)).collect();
             if !missing.is_empty() {
-                let name = self.name(info.name).to_string();
+                let show =
+                    |c: &Checker, trs: &[TraitRef]| c.minimal_traits(trs).iter().map(|tr| c.show_trait(tr)).collect::<Vec<_>>().join(" + ");
+                let name = self.name(self.params[p as usize].name).to_string();
                 let msg = format!(
-                    "native function `{}` must bound `{name}` by `{}`, as its Rust function requires `{name}: {}`",
+                    "native function `{}` must declare `{name}: {}`, as its Rust function requires `{name}: {}`",
                     f.name.name,
-                    Bound::names(&missing).join(" + "),
-                    need.names().join(" + ")
+                    show(self, &missing),
+                    show(self, &need)
                 );
                 self.error(f.name.span, msg);
             }
@@ -2532,18 +2554,18 @@ impl Checker {
         } else {
             FnKind::Script
         };
-        // One hidden dictionary per (type parameter, trait bound).
         let mut dicts: Vec<(TypeId, TraitRef)> = Vec::new();
         for &p in &generics {
             let pt = self.param_ty(p);
-            dicts.extend(self.params[p as usize].traits.iter().map(|&tr| (pt, tr)));
+            dicts.extend(self.params[p as usize].traits.iter().filter(|tr| self.has_dict(tr)).map(|&tr| (pt, tr)));
         }
         if f.is_native {
-            if dicts.iter().any(|(_, tr)| Some(tr.trait_id) != self.num_trait) {
-                self.error(f.name.span, "native functions cannot have trait bounds other than built-in bounds");
+            if generics.iter().any(|&p| self.params[p as usize].traits.iter().any(|tr| self.traits[tr.trait_id as usize].builtin.is_none()))
+            {
+                self.error(f.name.span, "native functions can only require built-in traits");
             }
-            if let Some(trait_id) = self.num_trait {
-                let num = TraitRef { trait_id, args: TyList::EMPTY };
+            dicts.clear();
+            if let Some(num) = self.builtin_trait(Builtin::Num) {
                 dicts = num_evidence.iter().map(|&i| (self.param_ty(generics[i as usize]), num)).collect();
             }
         }
@@ -2609,21 +2631,37 @@ impl Checker {
     }
 
     fn declare_method(&mut self, m: &ast::FnDecl, at: DeclPath, ctor: Ctor, def: TypeDefId) -> FnId {
-        // Each method gets its own copy of the type's parameters so that
-        // `where` clauses only affect that method.
+        // Clone the type's parameters per method so that method `where` clauses
+        // do not mutate the type's parameter bounds.
         let orig = self.types[def as usize].generics.clone();
         let mut outer = Vec::new();
         for p in &orig {
-            let info = self.params[*p as usize].clone();
-            let np = self.new_param(info.name, vec![], false);
-            self.add_bounds(np, info.bounds, vec![]);
-            outer.push((info.name, np));
+            let name = self.params[*p as usize].name;
+            outer.push((name, self.new_param(name, false)));
         }
         let ps: Vec<ParamId> = outer.iter().map(|(_, p)| *p).collect();
         let self_ty = self.def_self_ty(def, &ps);
+        self.add_type_traits(self_ty, &ps);
         let id = self.declare_fn(m, at, DeclRules::PLAIN, Some(ctor), &outer, Some(self_ty));
         self.register_method(ctor, &m.name, id);
         id
+    }
+
+    /// Copies the trait bounds declared on `ty`'s type definition onto the
+    /// corresponding type parameter arguments in `ps`.
+    fn add_type_traits(&mut self, ty: TypeId, ps: &[ParamId]) {
+        let Ty::Named(d, args) = self.ty(ty) else { return };
+        let (gens, args) = (self.types[d as usize].generics.clone(), self.elems(args));
+        let map = |q: ParamId| gens.iter().position(|&g| g == q).map(|i| args[i]);
+        for (&g, &a) in gens.iter().zip(&args) {
+            if let Ty::Param(p) = self.ty(a)
+                && ps.contains(&p)
+            {
+                let traits = self.params[g as usize].traits.clone();
+                let traits = traits.into_iter().map(|tr| tr.subst_params(&mut self.arena, &map)).collect();
+                self.add_traits(p, traits);
+            }
+        }
     }
 
     fn register_method(&mut self, ctor: Ctor, name: &ast::Ident, id: FnId) {
@@ -2675,8 +2713,7 @@ impl Checker {
     }
 
     fn declare_extend(&mut self, x: &ast::ExtendDecl, item: u32) {
-        // Resolve the target once to find its constructor.
-        // (This also reports invalid bounds once, even if there are no methods.)
+        // Resolve the target and bounds once so that unknown traits are reported even if the block is empty.
         let probe = self.declare_params(&x.generics, &[], None);
         let probe_scope = self.generic_scope(&probe);
         let target = self.resolve_type_in(&x.target, &probe_scope, None);
@@ -2709,6 +2746,7 @@ impl Checker {
             let params = self.declare_params(&x.generics, &[], None);
             let scope = self.generic_scope(&params);
             let self_ty = self.resolve_type_in(&x.target, &scope, None);
+            self.add_type_traits(self_ty, &params);
             let at = DeclPath { item, method: j as u32 };
             let id = self.declare_fn(m, at, DeclRules::PLAIN, Some(ctor), &scope, Some(self_ty));
             self.register_method(ctor, &m.name, id);
@@ -2738,6 +2776,7 @@ impl Checker {
             || fi.trait_of.is_some()
             || matches!(decl, FnDeclRef::ParamDefault(..) | FnDeclRef::FieldDefault { .. } | FnDeclRef::BoundDefault(_));
         self.begin_fn(generics, self_ty);
+        self.fs.field_default = matches!(decl, FnDeclRef::FieldDefault { .. });
         let mut param_locals = self.declare_reflect_params(id);
         param_locals.extend(self.declare_dict_params(id));
         let f = match decl {
@@ -2905,18 +2944,26 @@ impl Checker {
         }
     }
 
-    /// Final checks for a function: bounds, inference completeness; the
+    /// Final checks for a function: required traits, inference completeness; the
     /// final walk of the body.
     fn finish_fn(&mut self, name: String, params: Vec<LocalId>, mut body: HExpr, span: Span) -> HFn {
         // Trait evidence first: resolving it may determine types.
         let dicts = self.resolve_holes();
         let obligations = std::mem::take(&mut self.fs.obligations);
         if let Some(q) = &mut self.type_query {
-            q.bounds.extend(obligations.iter().map(|(t, b, _)| (*t, *b)));
+            q.traits.extend(obligations.iter().map(|(t, tr, _)| (*t, *tr)));
         }
-        for (t, b, sp) in obligations {
-            if self.satisfies(t, b) == Some(false) {
-                self.report_bound(t, b, sp);
+        for (t, tr, sp) in obligations {
+            if let Err(m) = self.resolve_evidence(t, tr, 0)
+                && !m.unknown
+            {
+                let msg = self.unmet_message(m, "");
+                self.error(sp, msg);
+            }
+        }
+        for (t, sp) in std::mem::take(&mut self.fs.plus_checks) {
+            if !matches!(self.rty(t), Ty::Var(_)) {
+                self.require_plus(t, sp);
             }
         }
         let checks = std::mem::take(&mut self.fs.infer_checks);
@@ -2946,9 +2993,11 @@ impl Checker {
             } else if let Some((d, f)) = self.private_field_in(z) {
                 let (ty, field) = (self.ctor_name(Ctor::Def(d), 0), self.name(f));
                 self.error(sp, format!("this {what} cannot build `{ty}` here: its field `{field}` is private"));
+            } else if let Some(m) = self.first_unmet_requirement(z) {
+                let msg = format!("this {what} cannot build {}: {}", self.show(z), self.unmet_message(m, ""));
+                self.error(sp, msg);
             }
         }
-        // Cells are decided by the final walk.
         for info in self.fs.locals.iter_mut().filter(|l| l.mutable) {
             info.cell = false;
         }
@@ -3279,6 +3328,6 @@ pub(crate) fn names_used_in_functions(m: &ast::Module) -> HashSet<String, FxBuil
 pub(crate) struct TypeQuery {
     /// The variables made for the type parameters of instantiated functions.
     pub origins: Vec<(VarId, ParamId)>,
-    /// The built-in bounds required of types.
-    pub bounds: Vec<(TypeId, Bound)>,
+    /// The traits required of types not inferred yet.
+    pub traits: Vec<(TypeId, TraitRef)>,
 }

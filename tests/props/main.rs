@@ -2,10 +2,12 @@
 //! models on generated inputs.
 
 mod bindings;
+mod generics;
 mod natives;
 mod observers;
 mod programs;
 mod reflect;
+mod traits;
 mod values;
 
 use proptest::prelude::*;
