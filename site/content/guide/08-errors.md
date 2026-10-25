@@ -32,10 +32,10 @@ Unwrap an `Option<T>` with pattern matching (`match`, `if let`, `let ... else`),
 ```sand
 fn parse_age(text: str) -> Result<int> {
     let Some(n) = text.parse_int() else {
-        return Err(error("not a number: \(text)", kind: "parse"))
+        return Err(Error("not a number: \(text)", kind: "parse"))
     }
     if n < 0 {
-        return Err(error("negative age: \(n)", kind: "invalid"))
+        return Err(Error("negative age: \(n)", kind: "invalid"))
     }
     Ok(n)
 }
@@ -51,10 +51,10 @@ See the [`Result` reference](/std/prelude/Result/) for transformation methods su
 
 ### The `Error` struct
 
-The `Error` struct has two `str` fields: `kind` (a machine-readable category tag) and `message` (a human-readable description). Construct an `Error` with `error(message, kind: "error")`:
+The `Error` struct has two `str` fields: `message` (a human-readable description) and `kind` (a machine-readable category tag, `"error"` by default). Construct one with `Error(message, kind: "io")`:
 
 ```sand
-let e = error("disk is full", kind: "io")
+let e = Error("disk is full", kind: "io")
 print(e)
 print(e.kind)
 ```
@@ -71,7 +71,7 @@ fn total_age(a: str, b: str) -> Result<int> {
 }
 
 fn parse_age(text: str) -> Result<int> {
-    text.parse_int().ok_or(error("not a number: \(text)", kind: "parse"))
+    text.parse_int().ok_or(Error("not a number: \(text)", kind: "parse"))
 }
 
 print(total_age("30", "12"))
@@ -117,7 +117,7 @@ At the top level of the entry module (or inside a `test` block), applying `?` to
 
 ```sand fails
 fn parse_age(text: str) -> Result<int> {
-    text.parse_int().ok_or(error("not a number: \(text)", kind: "parse"))
+    text.parse_int().ok_or(Error("not a number: \(text)", kind: "parse"))
 }
 
 let age = parse_age("31")?

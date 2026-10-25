@@ -50,10 +50,12 @@ extend Request {
     /// a `Reply` writer. Close the `Reply` or call `finish` to complete the
     /// response body.
     pub fn respond_stream(self, status: int, headers: [(str, str)] = []) -> Result<Reply> {
-        Ok(Reply {
-            conn: self.conn,
-            body: reply_body(self.exchange, self.body, status, headers, self.method != "HEAD")?,
-        })
+        Ok(
+            Reply(
+                conn: self.conn,
+                body: reply_body(self.exchange, self.body, status, headers, self.method != "HEAD")?,
+            ),
+        )
     }
 
     /// Reads and returns the remaining request body as bytes.

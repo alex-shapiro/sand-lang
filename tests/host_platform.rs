@@ -70,7 +70,7 @@ fn scripts_read_host_clock() {
 #[test]
 fn sleeps_wait_on_host_timers() {
     let clock = ManualClock::new();
-    let src = "import task\nimport time\nlet start = time.stopwatch()\ntask.sleep(5s)\nprint(start.elapsed() >= 5s)";
+    let src = "import task\nimport time\nlet start = time.Stopwatch()\ntask.sleep(5s)\nprint(start.elapsed() >= 5s)";
     let r = run_with(src, |c| c.clock(clock.clone()));
     assert_eq!(r.ok_stdout(), "true\n");
     assert!(clock.sleeps.lock().unwrap().contains(&Duration::from_secs(5)));

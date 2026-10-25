@@ -67,7 +67,7 @@ None
 Some("nope")
 
 === unwrap on err fails with the error
-let r: Result<int> = Err(error("disk full"))
+let r: Result<int> = Err(Error("disk full"))
 print(r.unwrap())
 --- fail
 unwrap on Err: error: disk full
@@ -119,7 +119,7 @@ fn f() -> int {
 2: `?`
 
 === question mark at top level aborts on err
-fn fails() -> Result<int> { Err(error("bad input", kind: "parse")) }
+fn fails() -> Result<int> { Err(Error("bad input", kind: "parse")) }
 print("start")
 let v = fails()?
 print("unreachable")
@@ -129,7 +129,7 @@ start
 parse: bad input
 
 === top level question mark fails with the error
-let v: int = Err(error("bad input", kind: "parse"))?
+let v: int = Err(Error("bad input", kind: "parse"))?
 --- fail
 parse: bad input
 
@@ -171,7 +171,7 @@ Some(None)
 true
 
 === error construction and fields
-let e = error("missing file", kind: "not_found")
+let e = Error("missing file", kind: "not_found")
 print(e.kind)
 print(e.message)
 print(e)
@@ -239,7 +239,7 @@ enum K {
     C(K)
     F
 }
-let s = set([K.A(1), K.A(1), K.C(K.F), K.C(K.F), K.C(K.A(1)), K.C(K.A(1)), K.F])
+let s = Set([K.A(1), K.A(1), K.C(K.F), K.C(K.F), K.C(K.A(1)), K.C(K.A(1)), K.F])
 print(s.len())
 print(s.contains(K.C(K.A(1))))
 print(s.contains(K.C(K.A(2))))
@@ -254,7 +254,7 @@ print(f())
 struct Box {
     v: str?
 }
-let b = Box { v: Some("in struct") }
+let b = Box(v: Some("in struct"))
 print(b.v ?? "none")
 fn first_even(xs: [int]) -> int? {
     for x in xs {

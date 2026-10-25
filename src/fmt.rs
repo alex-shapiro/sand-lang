@@ -480,8 +480,7 @@ enum CElem<'a> {
     Expr(&'a Expr),
     Arg(&'a Arg),
     Entry(&'a Expr, &'a Expr),
-    Field(&'a FieldInit),
-    /// `..base` in a struct literal, with the position of `..`.
+    /// `..base` in a construction, with the position of `..`.
     Base(&'a Expr, u32),
     Param(&'a Param),
     Data(&'a Data),
@@ -494,7 +493,6 @@ impl CElem<'_> {
             CElem::Expr(e) => e.span.lo,
             CElem::Arg(a) => a.name.as_ref().map_or(a.value.span.lo, |n| n.span.lo),
             CElem::Entry(k, _) => k.span.lo,
-            CElem::Field(f) => f.name.span.lo,
             CElem::Base(_, lo) => *lo,
             CElem::Param(p) => p.span.lo,
             CElem::Data(d) => d.span().lo,
@@ -507,7 +505,6 @@ impl CElem<'_> {
             CElem::Expr(e) | CElem::Base(e, _) => e.span.hi,
             CElem::Arg(a) => a.value.span.hi,
             CElem::Entry(_, v) => v.span.hi,
-            CElem::Field(f) => f.value.as_ref().map_or(f.name.span.hi, |v| v.span.hi),
             CElem::Param(p) => p.span.hi,
             CElem::Data(d) | CElem::DataEntry(_, d) => d.span().hi,
         }
@@ -591,7 +588,7 @@ fn is_huggable(e: &Expr) -> bool {
         ExprKind::List(xs) => !xs.is_empty(),
         ExprKind::Map(xs) => !xs.is_empty(),
         ExprKind::Match { arms, .. } => !arms.is_empty(),
-        ExprKind::StructLit { .. } | ExprKind::If { .. } | ExprKind::Block(_) => true,
+        ExprKind::If { .. } | ExprKind::Block(_) => true,
         ExprKind::Lambda { body, .. } => is_block_like(body) || is_huggable(body),
         ExprKind::Paren(x) => is_huggable(x),
         _ => false,
@@ -1063,10 +1060,6 @@ impl<'a> Formatter<'a> {
                 None => self.expr(&a.value),
             },
             CElem::Entry(k, v) => cat(vec![self.expr(k), self.punct(k.span.hi, &Tok::Colon, ": "), self.expr(v)]),
-            CElem::Field(f) => match &f.value {
-                Some(v) => cat(vec![self.name(&f.name), self.punct(f.name.span.hi, &Tok::Colon, ": "), self.expr(v)]),
-                None => self.name(&f.name),
-            },
             CElem::Base(e, _) => cat(vec![text(".."), self.expr(e)]),
             CElem::Param(p) => self.param(p),
             CElem::Data(d) => self.data(d),
@@ -1458,15 +1451,6 @@ impl<'a> Formatter<'a> {
                 self.comma_list(("(", ")"), e.span.lo, e.span.hi - 1, &elems, LIST)
             }
             ExprKind::Paren(x) => cat(vec![text("("), self.expr(x), self.text_at(e.span.hi - 1, ")")]),
-            ExprKind::StructLit { path, fields, base } => {
-                let open = self.find_tok(path.last().map_or(e.span.lo, |p| p.span.hi), &Tok::LBrace);
-                let mut elems: Vec<CElem> = fields.iter().map(CElem::Field).collect();
-                if let Some(b) = base {
-                    elems.push(CElem::Base(b, self.prev_tok(b.span.lo)));
-                }
-                let opts = ListOpts { force: self.newline_after(open), pad: true, ..LIST };
-                cat(vec![self.path(path), text(" "), self.comma_list(("{", "}"), open, e.span.hi - 1, &elems, opts)])
-            }
             ExprKind::Unary(op, x) => cat(vec![text(unop_text(*op)), self.expr(x)]),
             ExprKind::Binary(..) | ExprKind::Coalesce(..) => self.binary(e),
             ExprKind::Range { start, end, inclusive } => {
@@ -1767,11 +1751,12 @@ impl<'a> Formatter<'a> {
         let pre = self.inline_comments(open);
         if let [arg] = args {
             // A lone literal or name gains nothing from a line of its own.
-            if arg.name.is_none() && is_atom(&arg.value) && !self.has_comment_before(close) {
+            if arg.name.is_none() && !arg.spread && is_atom(&arg.value) && !self.has_comment_before(close) {
                 return prepend(pre, cat(vec![text("("), self.expr(&arg.value), text(")")]));
             }
         }
-        let elems: Vec<CElem> = args.iter().map(CElem::Arg).collect();
+        let elems: Vec<CElem> =
+            args.iter().map(|a| if a.spread { CElem::Base(&a.value, self.prev_tok(a.value.span.lo)) } else { CElem::Arg(a) }).collect();
         let hug = args.last().is_some_and(|a| is_huggable(&a.value));
         prepend(pre, self.comma_list(("(", ")"), open, close, &elems, ListOpts { hug_last: hug, ..LIST }))
     }
@@ -1862,32 +1847,28 @@ impl<'a> Formatter<'a> {
                 let items = self.join(ps, Self::pat);
                 cat(vec![text("("), items, self.text_at(p.span.hi - 1, ")")])
             }
-            PatternKind::Variant { path, args } => {
+            PatternKind::Ctor { path, args } => {
                 let mut parts = vec![self.path(path)];
                 if let Some(args) = args {
                     parts.push(self.punct(path[path.len() - 1].span.hi, &Tok::LParen, "("));
-                    parts.push(self.join(args, Self::pat));
-                    parts.push(self.text_at(p.span.hi - 1, ")"));
-                }
-                cat(parts)
-            }
-            PatternKind::Struct { path, fields, rest } => {
-                let mut parts = vec![self.path(path)];
-                let open = self.find_tok(path[path.len() - 1].span.hi, &Tok::LBrace);
-                if fields.is_empty() && !rest {
-                    parts.push(self.text_at(open, " {"));
-                    parts.push(self.text_at(p.span.hi - 1, "}"));
-                } else {
-                    parts.push(self.text_at(open, " { "));
-                    parts.push(self.join(fields, |f, field| match &field.pattern {
-                        Some(x) => cat(vec![f.name(&field.name), f.punct(field.name.span.hi, &Tok::Colon, ": "), f.pat(x)]),
-                        None => f.name(&field.name),
-                    }));
-                    if *rest {
-                        parts.push(text(if fields.is_empty() { "" } else { ", " }));
-                        parts.push(self.punct(open, &Tok::DotDot, ".."));
+                    let mut items = Vec::new();
+                    for x in &args.positional {
+                        items.push(self.pat(x));
                     }
-                    parts.push(self.text_at(p.span.hi - 1, " }"));
+                    for (name, x) in &args.named {
+                        items.push(cat(vec![self.name(name), self.punct(name.span.hi, &Tok::Colon, ": "), self.pat(x)]));
+                    }
+                    if args.rest {
+                        let after = args.patterns().map(|x| x.span.hi).max().unwrap_or(path[path.len() - 1].span.hi);
+                        items.push(self.punct(after, &Tok::DotDot, ".."));
+                    }
+                    for (i, item) in items.into_iter().enumerate() {
+                        if i > 0 {
+                            parts.push(text(", "));
+                        }
+                        parts.push(item);
+                    }
+                    parts.push(self.text_at(p.span.hi - 1, ")"));
                 }
                 cat(parts)
             }

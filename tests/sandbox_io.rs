@@ -1051,7 +1051,7 @@ fn pending_http_bodies_count_against_the_memory_limit() {
         let src = format!(
             r#"
 import http
-let results: Channel<str> = task.channel()
+let results: Channel<str> = Channel()
 for _ in 0..10 {{
     let _ = spawn {{
         let r = http.get("http://{addr}/", timeout: 20s)

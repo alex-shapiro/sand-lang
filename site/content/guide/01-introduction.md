@@ -19,8 +19,8 @@ struct Item {
 }
 
 let cart = [
-    Item { name: "pen", price: 1.25, quantity: 4 },
-    Item { name: "notebook", price: 3.5, quantity: 2 },
+    Item(name: "pen", price: 1.25, quantity: 4),
+    Item(name: "notebook", price: 3.5, quantity: 2),
 ]
 
 let total = cart.map(i => i.price * i.quantity.to_float()).sum()

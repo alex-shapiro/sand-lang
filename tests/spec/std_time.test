@@ -59,32 +59,32 @@ overflow
 
 === plain dates
 import time
-let d = time.date(2024, 2, 29)?
+let d = time.PlainDate(2024, 2, 29)?
 print(d)
 print((d.year(), d.month(), d.day()))
 print((d.day_of_week(), d.day_of_year(), d.week_of_year(), d.year_of_week()))
 print((d.days_in_month(), d.days_in_year(), d.in_leap_year()))
-let jan1 = time.date(2021, 1, 1)?
+let jan1 = time.PlainDate(2021, 1, 1)?
 print((jan1.week_of_year(), jan1.year_of_week()))
-print(time.date(2023, 2, 29))
-print(time.date(2024, 13, 1).is_err())
+print(time.PlainDate(2023, 2, 29))
+print(time.PlainDate(2024, 13, 1).is_err())
 --- stdout
 2024-02-29
 (2024, 2, 29)
 (4, 60, 9, 2024)
 (29, 366, true)
 (53, 2020)
-Err(Error { kind: "invalid", message: "no such date: 2023-02-29" })
+Err(Error(message: "no such date: 2023-02-29", kind: "invalid"))
 true
 
 === date arithmetic and end-of-month clamping
 import time
-from time import span
-let d = time.date(2024, 1, 31)?
-print(d.add(span(months: 1)))
-print(d.add(span(months: 1)).add(span(months: 1)))
-print(d.add(span(years: 1, days: 1)))
-print(d.subtract(span(weeks: 5)))
+from time import Span
+let d = time.PlainDate(2024, 1, 31)?
+print(d.add(Span(months: 1)))
+print(d.add(Span(months: 1)).add(Span(months: 1)))
+print(d.add(Span(years: 1, days: 1)))
+print(d.subtract(Span(weeks: 5)))
 print(d.add(3d))
 print(d.add(47h))
 print(d.with(month: 4))
@@ -104,8 +104,8 @@ print(d.with(year: 2025, day: 1))
 === differences between dates
 import time
 from time import Unit, RoundingMode
-let a = time.date(2024, 1, 31)?
-let b = time.date(2025, 3, 1)?
+let a = time.PlainDate(2024, 1, 31)?
+let b = time.PlainDate(2025, 3, 1)?
 print(a.until(b))
 print(a.until(b, largest: Unit.Year))
 print(a.until(b, largest: Unit.Month))
@@ -128,7 +128,7 @@ P13M
 
 === date differences with time units
 import time
-let a = time.date(2024, 1, 1)?
+let a = time.PlainDate(2024, 1, 1)?
 print(a.until(a, smallest: time.Unit.Hour))
 --- fail
 invalid
@@ -136,19 +136,19 @@ invalid
 === plain times
 import time
 from time import Unit
-let t = time.time(9, 30, second: 15, millisecond: 250)?
+let t = time.PlainTime(9, 30, second: 15, millisecond: 250)?
 print(t)
 print((t.hour(), t.minute(), t.second(), t.millisecond(), t.microsecond(), t.nanosecond()))
 print(t.add(90m))
-print(time.time(23, 0)?.add(2h))
-print(time.time(1, 0)?.subtract(time.span(hours: 2, days: 3)))
-print(time.time(17, 0)?.since(time.time(9, 30)?))
-print(time.time(9, 30)?.until(time.time(8, 0)?))
+print(time.PlainTime(23, 0)?.add(2h))
+print(time.PlainTime(1, 0)?.subtract(time.Span(hours: 2, days: 3)))
+print(time.PlainTime(17, 0)?.since(time.PlainTime(9, 30)?))
+print(time.PlainTime(9, 30)?.until(time.PlainTime(8, 0)?))
 print(t.round(Unit.Minute))
-print(time.time(23, 59, second: 45)?.round(Unit.Minute))
+print(time.PlainTime(23, 59, second: 45)?.round(Unit.Minute))
 print(t.with(hour: 25, minute: -3))
-print(time.time(24, 0))
-print(time.time(1, 2, 3, nanosecond: 4)?)
+print(time.PlainTime(24, 0))
+print(time.PlainTime(1, 2, 3, nanosecond: 4)?)
 --- stdout
 09:30:15.25
 (9, 30, 15, 250, 0, 0)
@@ -160,24 +160,24 @@ print(time.time(1, 2, 3, nanosecond: 4)?)
 09:30:00
 00:00:00
 23:00:15.25
-Err(Error { kind: "invalid", message: "no such time: 24:00:00" })
+Err(Error(message: "no such time: 24:00:00", kind: "invalid"))
 01:02:03.000000004
 
 === plain date-times
 import time
-from time import Unit, span
-let dt = time.datetime(2024, 3, 10, hour: 2, minute: 30)?
+from time import Unit, Span
+let dt = time.PlainDateTime(2024, 3, 10, hour: 2, minute: 30)?
 print(dt)
 print((dt.to_plain_date(), dt.to_plain_time()))
-print(dt.add(span(months: 1, hours: 23)))
-print(dt.until(time.datetime(2024, 4, 1)?))
-print(dt.until(time.datetime(2024, 4, 1)?, largest: Unit.Month))
-print(dt.until(time.datetime(2024, 4, 1)?, smallest: Unit.Hour))
+print(dt.add(Span(months: 1, hours: 23)))
+print(dt.until(time.PlainDateTime(2024, 4, 1)?))
+print(dt.until(time.PlainDateTime(2024, 4, 1)?, largest: Unit.Month))
+print(dt.until(time.PlainDateTime(2024, 4, 1)?, smallest: Unit.Hour))
 print(dt.round(Unit.Day))
 print(dt.with(day: 31, hour: 23))
-print(dt.with_plain_time(time.time(8, 15)?))
-print(time.date(2024, 3, 10)?.to_plain_datetime())
-print(time.date(2024, 3, 10)?.to_plain_datetime(time.time(12, 0)?))
+print(dt.with_plain_time(time.PlainTime(8, 15)?))
+print(time.PlainDate(2024, 3, 10)?.to_plain_datetime())
+print(time.PlainDate(2024, 3, 10)?.to_plain_datetime(time.PlainTime(12, 0)?))
 --- stdout
 2024-03-10T02:30:00
 (2024-03-10, 02:30:00)
@@ -193,18 +193,18 @@ P21DT21H
 
 === zoned date-times follow daylight saving time
 import time
-from time import span, Unit
-let ny = time.zone("America/New_York")?
-let z = time.datetime(2024, 3, 9, hour: 12)?.to_zoned_datetime(ny)
+from time import Span, Unit
+let ny = time.TimeZone("America/New_York")?
+let z = time.PlainDateTime(2024, 3, 9, hour: 12)?.to_zoned_datetime(ny)
 print(z)
-print(z.add(span(days: 1)))
-print(z.add(span(hours: 24)))
-print((z.hours_in_day(), z.add(span(days: 1)).hours_in_day()))
-print((z.offset(), z.add(span(days: 1)).offset()))
-print(z.until(z.add(span(days: 1))))
-print(z.until(z.add(span(days: 1)), largest: Unit.Day))
-print(z.until(z.add(span(months: 1, hours: 3)), largest: Unit.Month))
-print(z.add(span(days: 1)).start_of_day())
+print(z.add(Span(days: 1)))
+print(z.add(Span(hours: 24)))
+print((z.hours_in_day(), z.add(Span(days: 1)).hours_in_day()))
+print((z.offset(), z.add(Span(days: 1)).offset()))
+print(z.until(z.add(Span(days: 1))))
+print(z.until(z.add(Span(days: 1)), largest: Unit.Day))
+print(z.until(z.add(Span(months: 1, hours: 3)), largest: Unit.Month))
+print(z.add(Span(days: 1)).start_of_day())
 print(z.next_transition())
 print(z.previous_transition())
 print(z.time_zone())
@@ -236,11 +236,11 @@ print(z.add(1d))
 === wall-clock times in gaps and folds
 import time
 from time import Disambiguation
-let ny = time.zone("America/New_York")?
-let gap = time.datetime(2024, 3, 10, hour: 2, minute: 30)?
+let ny = time.TimeZone("America/New_York")?
+let gap = time.PlainDateTime(2024, 3, 10, hour: 2, minute: 30)?
 print(gap.to_zoned_datetime(ny))
 print(gap.to_zoned_datetime(ny, disambiguation: Disambiguation.Earlier))
-let fold = time.datetime(2024, 11, 3, hour: 1, minute: 30)?
+let fold = time.PlainDateTime(2024, 11, 3, hour: 1, minute: 30)?
 print(fold.to_zoned_datetime(ny))
 print(fold.to_zoned_datetime(ny, disambiguation: Disambiguation.Later))
 let later = fold.to_zoned_datetime(ny, disambiguation: Disambiguation.Later)
@@ -257,21 +257,21 @@ print(later.with(day: 4))
 === zones
 import time
 print(time.UTC)
-print(time.zone("europe/paris")?.id())
-print(time.zone("+05:30")?)
-print(time.zone("Mars/Olympus_Mons"))
+print(time.TimeZone("europe/paris")?.id())
+print(time.TimeZone("+05:30")?)
+print(time.TimeZone("Mars/Olympus_Mons"))
 print(time.local_zone())
 let t = time.Instant.parse("2024-07-01T12:00:00Z")?
-let paris = t.to_zoned_datetime(time.zone("Europe/Paris")?)
+let paris = t.to_zoned_datetime(time.TimeZone("Europe/Paris")?)
 print(paris)
-print(paris.with_time_zone(time.zone("Asia/Kolkata")?))
+print(paris.with_time_zone(time.TimeZone("Asia/Kolkata")?))
 print(paris == t.to_zoned_datetime(time.UTC))
 print(paris.to_instant() == t)
 --- stdout
 UTC
 Europe/Paris
 +05:30
-Err(Error { kind: "not_found", message: "unknown time zone \"Mars/Olympus_Mons\"" })
+Err(Error(message: "unknown time zone \"Mars/Olympus_Mons\"", kind: "not_found"))
 UTC
 2024-07-01T14:00:00+02:00[Europe/Paris]
 2024-07-01T17:30:00+05:30[Asia/Kolkata]
@@ -280,23 +280,23 @@ true
 
 === year-months and month-days
 import time
-from time import span, Unit
-let ym = time.year_month(2024, 1)?
+from time import Span, Unit
+let ym = time.PlainYearMonth(2024, 1)?
 print(ym)
-print((ym.days_in_month(), ym.add(span(months: 1)).days_in_month(), ym.in_leap_year()))
-print(ym.add(span(years: 1, months: 13)))
-print(ym.until(time.year_month(2025, 7)?))
-print(ym.until(time.year_month(2025, 7)?, largest: Unit.Month))
-print(ym.since(time.year_month(2025, 7)?))
+print((ym.days_in_month(), ym.add(Span(months: 1)).days_in_month(), ym.in_leap_year()))
+print(ym.add(Span(years: 1, months: 13)))
+print(ym.until(time.PlainYearMonth(2025, 7)?))
+print(ym.until(time.PlainYearMonth(2025, 7)?, largest: Unit.Month))
+print(ym.since(time.PlainYearMonth(2025, 7)?))
 print(ym.to_plain_date(31))
 print(ym.with(month: 2).to_plain_date(31))
 print(time.PlainYearMonth.parse("2024-02")?)
-let md = time.month_day(2, 29)?
+let md = time.PlainMonthDay(2, 29)?
 print(md)
 print((md.to_plain_date(2023), md.to_plain_date(2024)))
 print(time.PlainMonthDay.parse("--12-25")?.with(day: 40))
-print(time.date(2024, 7, 4)?.to_plain_month_day() == time.month_day(7, 4)?)
-print(time.month_day(2, 30))
+print(time.PlainDate(2024, 7, 4)?.to_plain_month_day() == time.PlainMonthDay(7, 4)?)
+print(time.PlainMonthDay(2, 30))
 --- stdout
 2024-01
 (31, 29, true)
@@ -311,32 +311,32 @@ P18M
 (2023-02-28, 2024-02-29)
 12-31
 true
-Err(Error { kind: "invalid", message: "no such day: 02-30" })
+Err(Error(message: "no such day: 02-30", kind: "invalid"))
 
 === adding sub-month units to PlainYearMonth
 import time
-print(time.year_month(2024, 1)?.add(time.span(days: 1)))
+print(time.PlainYearMonth(2024, 1)?.add(time.Span(days: 1)))
 --- fail
 invalid: a PlainYearMonth can only add years and months
 
 === spans
 import time
-from time import span, Unit
-let s = span(years: 1, months: 2, days: 3, hours: 4, minutes: 5, seconds: 6, milliseconds: 500)
+from time import Span, Unit
+let s = Span(years: 1, months: 2, days: 3, hours: 4, minutes: 5, seconds: 6, milliseconds: 500)
 print(s)
 print((s.years(), s.months(), s.weeks(), s.days(), s.hours(), s.minutes(), s.seconds(), s.milliseconds()))
-print((s.sign(), s.negated().sign(), span().sign(), span().is_zero()))
+print((s.sign(), s.negated().sign(), Span().sign(), Span().is_zero()))
 print(s.negated())
 print(s.negated().abs() == s)
-print(span(hours: 24) == span(days: 1))
+print(Span(hours: 24) == Span(days: 1))
 print(s.with(years: 0, months: 0))
-print(span(hours: 25).round(largest: Some(Unit.Day)))
-print(span(minutes: 100).round(smallest: Unit.Hour))
-print(span(hours: 36).total(Unit.Day))
-print(span(days: 1, hours: 12).to_duration())
-print(span(hours: 1).add(30m))
-print(span(hours: 1).subtract(span(minutes: 90)))
-print(span(days: 1).compare(span(hours: 25)))
+print(Span(hours: 25).round(largest: Some(Unit.Day)))
+print(Span(minutes: 100).round(smallest: Unit.Hour))
+print(Span(hours: 36).total(Unit.Day))
+print(Span(days: 1, hours: 12).to_duration())
+print(Span(hours: 1).add(30m))
+print(Span(hours: 1).subtract(Span(minutes: 90)))
+print(Span(days: 1).compare(Span(hours: 25)))
 print(time.Span.parse("P1Y2M3DT4H5M6.5S")?)
 print(time.Span.parse("4h 30m")?)
 print(time.Span.parse("1 day ago")?)
@@ -363,15 +363,15 @@ true
 
 === spans relative to a start
 import time
-from time import span, Unit
-let ny = time.zone("America/New_York")?
-let start = time.datetime(2024, 3, 9)?.to_zoned_datetime(ny)
-print(span(days: 2).total(Unit.Hour, relative_to: Some(start)))
-print(span(months: 1).total(Unit.Day, relative_to: Some(start)))
-print(span(hours: 47).round(largest: Some(Unit.Day), relative_to: Some(start)))
-print(span(months: 1).add(span(days: 30), relative_to: Some(start)))
-print(span(days: 1).to_duration(relative_to: Some(start)))
-print(span(days: 1).to_duration(relative_to: Some(start.add(span(days: 1)))))
+from time import Span, Unit
+let ny = time.TimeZone("America/New_York")?
+let start = time.PlainDateTime(2024, 3, 9)?.to_zoned_datetime(ny)
+print(Span(days: 2).total(Unit.Hour, relative_to: Some(start)))
+print(Span(months: 1).total(Unit.Day, relative_to: Some(start)))
+print(Span(hours: 47).round(largest: Some(Unit.Day), relative_to: Some(start)))
+print(Span(months: 1).add(Span(days: 30), relative_to: Some(start)))
+print(Span(days: 1).to_duration(relative_to: Some(start)))
+print(Span(days: 1).to_duration(relative_to: Some(start.add(Span(days: 1)))))
 --- stdout
 47.0
 31.0
@@ -382,28 +382,28 @@ P2M
 
 === spans with months require relative_to
 import time
-print(time.span(months: 1).total(time.Unit.Day))
+print(time.Span(months: 1).total(time.Unit.Day))
 --- fail
 invalid
 
 === span units cannot have mixed signs
 import time
-print(time.span(hours: 1, minutes: -30))
+print(time.Span(hours: 1, minutes: -30))
 --- fail
 invalid: the units of a span must not have different signs
 
 === comparing, sorting, and hashing value types
 import time
-let dates = [time.date(2024, 5, 1)?, time.date(2024, 1, 31)?, time.date(2023, 12, 25)?]
+let dates = [time.PlainDate(2024, 5, 1)?, time.PlainDate(2024, 1, 31)?, time.PlainDate(2023, 12, 25)?]
 print(dates.sorted())
 print(dates.max())
-let counts = [time.date(2024, 1, 31)?: 1]
-print(counts[time.date(2024, 1, 31)?])
-print(set([time.time(9, 0)?, time.time(9, 0)?]).len())
-print(time.date(2024, 1, 1)? < time.date(2024, 1, 2)?)
-print(time.span(days: 1) == time.span(days: 1))
-print([time.zone("UTC")?: "utc"].contains(time.UTC))
-print(time.month_day(12, 31)? > time.month_day(1, 1)?)
+let counts = [time.PlainDate(2024, 1, 31)?: 1]
+print(counts[time.PlainDate(2024, 1, 31)?])
+print(Set([time.PlainTime(9, 0)?, time.PlainTime(9, 0)?]).len())
+print(time.PlainDate(2024, 1, 1)? < time.PlainDate(2024, 1, 2)?)
+print(time.Span(days: 1) == time.Span(days: 1))
+print([time.TimeZone("UTC")?: "utc"].contains(time.UTC))
+print(time.PlainMonthDay(12, 31)? > time.PlainMonthDay(1, 1)?)
 --- stdout
 [2023-12-25, 2024-01-31, 2024-05-01]
 Some(2024-05-01)
@@ -417,8 +417,8 @@ true
 === interpolation, format specifications and json
 import time
 import json
-let d = time.date(2024, 2, 29)?
-print("due \(d), at \(time.time(9, 30)?)")
+let d = time.PlainDate(2024, 2, 29)?
+print("due \(d), at \(time.PlainTime(9, 30)?)")
 print("[\(d:>12)]")
 print(d.debug())
 print(json.encode([d]))
@@ -427,7 +427,7 @@ struct Event {
     at: time.ZonedDateTime
     every: time.Span
 }
-let e = Event { name: "standup", at: time.ZonedDateTime.parse("2024-03-11T09:00[America/New_York]")?, every: time.span(weeks: 1) }
+let e = Event(name: "standup", at: time.ZonedDateTime.parse("2024-03-11T09:00[America/New_York]")?, every: time.Span(weeks: 1))
 let text = json.encode(e)
 print(text)
 let back: Event = json.decode(text)?
@@ -464,7 +464,7 @@ EST -0500 -05:00 America/New_York %
 
 === formatting a date with time directives fails
 import time
-print(time.date(2024, 1, 1)?.format("%H"))
+print(time.PlainDate(2024, 1, 1)?.format("%H"))
 --- fail
 invalid
 
@@ -506,7 +506,7 @@ let b = time.now()
 print(b >= a)
 print(a.to_zoned_datetime(time.UTC).year() >= 2024)
 print(time.today(time.UTC).year() >= 2024)
-let sw = time.stopwatch()
+let sw = time.Stopwatch()
 task.sleep(5ms)
 print(sw.elapsed() >= 5ms)
 --- stdout
@@ -518,13 +518,13 @@ true
 === span text round-trip
 import time
 import json
-from time import span, Span
-for s in [span(milliseconds: 1500), span(nanoseconds: 1000), span(microseconds: 2000000), span(hours: 1, milliseconds: 1000)] {
+from time import Span
+for s in [Span(milliseconds: 1500), Span(nanoseconds: 1000), Span(microseconds: 2000000), Span(hours: 1, milliseconds: 1000)] {
     let back: Span = json.decode(json.encode(s))?
     print((s, Span.parse(s.to_str())? == s, back == s))
 }
-let counts = [span(milliseconds: 1500): 1]
-print(counts[span(seconds: 1, milliseconds: 500)])
+let counts = [Span(milliseconds: 1500): 1]
+print(counts[Span(seconds: 1, milliseconds: 500)])
 --- stdout
 (PT1.5S, true, true)
 (PT0.000001S, true, true)
@@ -535,7 +535,7 @@ print(counts[span(seconds: 1, milliseconds: 500)])
 === decoding maps with value-type keys
 import time
 import json
-let m = [time.date(2024, 2, 29)?: 1, time.date(2023, 1, 1)?: 2]
+let m = [time.PlainDate(2024, 2, 29)?: 1, time.PlainDate(2023, 1, 1)?: 2]
 let back: [time.PlainDate: int] = json.decode(json.encode(m))?
 print(back == m)
 let dup: [time.TimeZone: int] = json.decode("{\"america/new_york\": 1, \"America/New_York\": 2}")?
@@ -549,10 +549,10 @@ true
 
 === unsupported time zone formats are rejected
 import time
-print(time.zone("+05:30:15").is_err())
-print(time.zone("EST5EDT,M3.2.0,M11.1.0").is_err())
+print(time.TimeZone("+05:30:15").is_err())
+print(time.TimeZone("EST5EDT,M3.2.0,M11.1.0").is_err())
 print(time.ZonedDateTime.parse("2024-01-01T00:00:00+05:30:15[+05:30:15]").is_err())
-print(time.zone("-08:00")?)
+print(time.TimeZone("-08:00")?)
 --- stdout
 true
 true
@@ -561,13 +561,13 @@ true
 
 === transitions only include offset changes
 import time
-let london = time.zone("Europe/London")?
-let z = time.datetime(1968, 1, 1)?.to_zoned_datetime(london)
+let london = time.TimeZone("Europe/London")?
+let z = time.PlainDateTime(1968, 1, 1)?.to_zoned_datetime(london)
 let first = z.next_transition().unwrap()
 print(first)
 print(first.next_transition().unwrap().offset() != first.offset())
-print(time.datetime(2024, 1, 1)?.to_zoned_datetime(time.zone("+05:30")?).next_transition())
-let fall = time.datetime(2024, 11, 3)?.to_zoned_datetime(time.zone("America/New_York")?)
+print(time.PlainDateTime(2024, 1, 1)?.to_zoned_datetime(time.TimeZone("+05:30")?).next_transition())
+let fall = time.PlainDateTime(2024, 11, 3)?.to_zoned_datetime(time.TimeZone("America/New_York")?)
 print(fall.hours_in_day())
 --- stdout
 1968-02-18T03:00:00+01:00[Europe/London]
@@ -587,10 +587,10 @@ print(t.round(Unit.Second))
 
 === spans without relative_to
 import time
-from time import span, Unit
-print(span(weeks: 1).total(Unit.Day))
-print(span(years: 1).compare(span(years: 1)))
-print(span(years: 1).total(Unit.Day))
+from time import Span, Unit
+print(Span(weeks: 1).total(Unit.Day))
+print(Span(years: 1).compare(Span(years: 1)))
+print(Span(years: 1).total(Unit.Day))
 --- stdout
 7.0
 0
@@ -599,25 +599,25 @@ invalid: a span with years or months needs `relative_to`
 
 === overflow beyond the supported range
 import time
-print(time.datetime(9999, 12, 31, hour: 23)?.round(time.Unit.Day))
+print(time.PlainDateTime(9999, 12, 31, hour: 23)?.round(time.Unit.Day))
 --- fail
 overflow
 
 === sub-second span normalization
 import time
 import json
-from time import span, Span
-let a = span(milliseconds: 1500)
+from time import Span
+let a = Span(milliseconds: 1500)
 let b: Span = json.decode(json.encode(a))?
 print((a == b, a.seconds(), a.milliseconds(), b.seconds(), b.milliseconds()))
-print(span(nanoseconds: -1500).to_str())
+print(Span(nanoseconds: -1500).to_str())
 --- stdout
 (true, 1, 500, 1, 500)
 -PT0.0000015S
 
 === invalid rounding increment
 import time
-print(time.span(hours: 1).round(smallest: time.Unit.Minute, increment: 0))
+print(time.Span(hours: 1).round(smallest: time.Unit.Minute, increment: 0))
 --- fail
 invalid: the rounding increment must be from 1 to 1000000000, not 0
 
@@ -629,9 +629,9 @@ invalid: an Instant can only be rounded to hours or smaller units
 
 === fixed-offset bounds and error formatting
 import time
-print((time.zone("+23:59").is_ok(), time.zone("+24:00").is_err(), time.zone("+00:00")?))
+print((time.TimeZone("+23:59").is_ok(), time.TimeZone("+24:00").is_err(), time.TimeZone("+00:00")?))
 print(time.PlainDate.parse("2024-02-30").unwrap_err().message)
-print(time.stopwatch())
+print(time.Stopwatch())
 --- stdout
 (true, true, UTC)
 cannot read "2024-02-30" as a PlainDate

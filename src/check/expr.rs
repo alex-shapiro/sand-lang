@@ -12,31 +12,34 @@ pub(crate) enum Ns {
 }
 
 /// The arguments of a call, split into positional and named ones.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct CallArgs<'e> {
     pub(crate) positional: Vec<&'e Expr>,
     pub(crate) named: Vec<(&'e ast::Ident, &'e Expr)>,
+    /// `..base`, which only a construction field by field accepts.
+    pub(crate) base: Option<&'e Expr>,
 }
 
 impl<'e> CallArgs<'e> {
     pub(crate) fn new(args: &'e [Arg]) -> CallArgs<'e> {
-        let mut positional = Vec::new();
-        let mut named = Vec::new();
+        let mut out = CallArgs::default();
         for a in args {
             match &a.name {
-                Some(n) => named.push((n, &a.value)),
-                None => positional.push(&a.value),
+                _ if a.spread => out.base = Some(&a.value),
+                Some(n) => out.named.push((n, &a.value)),
+                None => out.positional.push(&a.value),
             }
         }
-        CallArgs { positional, named }
+        out
     }
 
+    /// The number of arguments other than `..base`.
     fn len(&self) -> usize {
         self.positional.len() + self.named.len()
     }
 
     fn exprs(&self) -> impl Iterator<Item = &'e Expr> + '_ {
-        self.positional.iter().copied().chain(self.named.iter().map(|&(_, e)| e))
+        self.positional.iter().copied().chain(self.named.iter().map(|&(_, e)| e)).chain(self.base)
     }
 }
 
@@ -788,7 +791,6 @@ impl Checker {
                 let t = self.tuple_ty(&tys);
                 mk(HKind::Tuple(hs), t, span)
             }
-            ExprKind::StructLit { path, fields, base } => self.check_struct_lit(path, fields, base.as_deref(), span),
             ExprKind::Unary(op, inner) => self.check_unary(*op, inner, span),
             ExprKind::Binary(op, l, r) => self.check_binary(*op, l, r, span),
             ExprKind::Coalesce(l, r) => {
@@ -1205,7 +1207,7 @@ impl Checker {
     }
 
     /// A type reference with fresh type arguments.
-    fn tyref_open(&mut self, r: TyRef, span: Span, name: &str) -> TypeId {
+    pub(crate) fn tyref_open(&mut self, r: TyRef, span: Span, name: &str) -> TypeId {
         match r {
             TyRef::Prim(t) => t,
             TyRef::Coll(c) => {
@@ -1248,14 +1250,6 @@ impl Checker {
     pub(crate) fn field_visible(&self, d: TypeDefId, i: usize) -> bool {
         let def = &self.types[d as usize];
         self.visible(def.module, def.fields()[i].is_pub)
-    }
-
-    pub(crate) fn check_field_visible(&mut self, d: TypeDefId, i: usize, span: Span) {
-        if !self.field_visible(d, i) {
-            let def = &self.types[d as usize];
-            let msg = format!("field `{}` of `{}` is private", self.name(def.fields()[i].name), self.ctor_name(Ctor::Def(d), 0));
-            self.error(span, msg);
-        }
     }
 
     fn visible_methods(&self, c: Ctor, name: &str) -> impl Iterator<Item = FnId> + '_ {
@@ -1304,6 +1298,10 @@ impl Checker {
                     && let Some(i) = self.find_variant(d, &name.name)
                 {
                     return self.variant_value(d, i, hint, span);
+                }
+                if name.name == "init" {
+                    self.init_not_member(t, name.span);
+                    return err(span);
                 }
                 if let Some(c) = ctor_of(self.ty(t))
                     && let Some(f) = self.visible_method(c, &name.name)
@@ -1390,6 +1388,10 @@ impl Checker {
     /// Binds call arguments to the parameters of `callee` (of types `ptys`),
     /// checks them and fills defaults.
     fn bind_args(&mut self, callee: Callee, ptys: &[TypeId], first: Option<HExpr>, args: &CallArgs, span: Span) -> Option<Vec<HArg>> {
+        if let Some(b) = args.base {
+            self.error(b.span, "`..base` is only allowed when a struct is constructed field by field");
+            self.infer(b, None);
+        }
         let n = ptys.len();
         let offset = usize::from(first.is_some());
         let mut slots: Vec<Option<HArg>> = (0..n).map(|_| None).collect();
@@ -1419,6 +1421,16 @@ impl Checker {
         // Order of evaluation: positional, then named in source order.
         let mut out_of_order = false;
         let mut last_idx = 0usize;
+        if self.linting() && !matches!(callee, Callee::Value) {
+            let names: Vec<String> = (offset..n).filter_map(|i| self.param_name(callee, i).map(str::to_string)).collect();
+            let names: Vec<&str> = names.iter().map(String::as_str).collect();
+            let what = self.callee_what(callee);
+            for (i, a) in args.positional.iter().enumerate() {
+                if let ExprKind::Ident(id) = &a.kind {
+                    self.note_argument_order(&what, &names, i, &id.name, a.span);
+                }
+            }
+        }
         for (i, a) in args.positional.iter().enumerate() {
             let pi = i + offset;
             let h = self.check_expr(a, ptys[pi]);
@@ -1592,7 +1604,7 @@ impl Checker {
                 };
                 let list = self.list_ty(elem);
                 let items = mk(HKind::List(all(self, xs, &vec![elem; xs.len()])), list, span);
-                match self.prelude_native("set") {
+                match self.set_init() {
                     Some(native) => HKind::CallNative { native, targs: vec![elem], args: vec![HArg::Expr(items)] },
                     None => HKind::Error,
                 }
@@ -1738,12 +1750,20 @@ impl Checker {
                     return self.call_fn(f, None, args, span);
                 }
                 Some(Def::Variant(d, i)) => return self.call_variant(d, i, args, span),
-                Some(Def::Type(_)) => {
-                    self.error(callee.span, format!("`{}` is a type; use `{} {{ ... }}` to construct it", id.name, id.name));
-                    return err(span);
+                Some(Def::Type(r)) => {
+                    let t = self.tyref_open(r, id.span, &id.name);
+                    return self.construct(t, &id.name, args, callee.span, span);
                 }
+                _ if let Some(Ns::Type(t)) = self.resolve_ns(callee) => return self.construct(t, &id.name, args, callee.span, span),
                 _ => {}
             },
+            ExprKind::SelfType => {
+                if let Some(Ns::Type(t)) = self.resolve_ns(callee) {
+                    return self.construct(t, "Self", args, callee.span, span);
+                }
+                self.infer_args(args);
+                return err(span);
+            }
             ExprKind::Field(obj, name) => {
                 if let Some(ns) = self.resolve_ns(obj) {
                     return self.ns_call(ns, obj, name, args, span);
@@ -1766,9 +1786,9 @@ impl Checker {
                         let gv = self.def_value(Def::Global(g), &name.name, None, name.span);
                         self.call_value(gv, args, span)
                     }
-                    Some(Def::Type(_)) => {
-                        self.error(name.span, format!("`{}` is a type, not a function", name.name));
-                        err(span)
+                    Some(Def::Type(r)) => {
+                        let t = self.tyref_open(r, name.span, &name.name);
+                        self.construct(t, &name.name, args, name.span, span)
                     }
                     Some(Def::Module(_)) => {
                         self.error(name.span, format!("`{}` is a module, not a function", name.name));
@@ -1790,6 +1810,11 @@ impl Checker {
                     && let Some(i) = self.find_variant(d, &name.name)
                 {
                     return self.call_variant(d, i, args, span);
+                }
+                if name.name == "init" {
+                    self.init_not_member(t, name.span);
+                    self.infer_args(args);
+                    return err(span);
                 }
                 if let Some(c) = ctor_of(self.ty(t))
                     && let Some(f) = self.visible_method(c, &name.name)
@@ -1940,155 +1965,179 @@ impl Checker {
     }
 
     // ------------------------------------------------------------------
-    // Struct literals
+    // Construction
 
-    fn infer_field_values(&mut self, fields: &[ast::FieldInit]) {
-        for v in fields.iter().filter_map(|f| f.value.as_ref()) {
-            self.infer(v, None);
+    /// The `init` of type constructor `c`, if it declares one.
+    pub(crate) fn init_method(&self, c: Ctor) -> Option<FnId> {
+        self.methods_named(c, "init")?.iter().copied().find(|&f| !self.fns[f as usize].has_self)
+    }
+
+    fn init_not_member(&mut self, t: TypeId, span: Span) {
+        let ty = self.show(t);
+        self.error(span, format!("`init` is not a member; construct a value with `{ty}(...)`"));
+    }
+
+    /// Checks `T(args)`, which constructs a value of type `t` (written `name`):
+    /// a call of `T`'s `init` if it declares one, or else a struct built field
+    /// by field. Inside `init`, `T(args)` builds the struct field by field.
+    fn construct(&mut self, t: TypeId, name: &str, args: &CallArgs, name_span: Span, span: Span) -> HExpr {
+        let t = self.resolve(t);
+        let ty = self.ty(t);
+        let c = match ty {
+            Ty::Error => {
+                self.infer_args(args);
+                return err(span);
+            }
+            Ty::Param(_) => None,
+            _ => ctor_of(ty),
+        };
+        let Some(c) = c else {
+            self.error(name_span, format!("cannot construct a value of type `{name}`"));
+            self.infer_args(args);
+            return err(span);
+        };
+        if self.fs.init_of != Some(c)
+            && let Some(f) = self.init_method(c)
+        {
+            if !self.visible(self.fns[f as usize].module, self.fns[f as usize].is_pub) {
+                self.error(name_span, format!("the `init` of `{name}` is private"));
+                self.infer_args(args);
+                return err(span);
+            }
+            if let Some(b) = args.base {
+                self.error(b.span, format!("`..base` cannot copy the fields of `{name}`, which declares `init`"));
+                self.infer(b, None);
+            }
+            let inst = self.instantiate_fn_with(f, span, &[]);
+            let fi = &self.fns[f as usize];
+            let (self_ty, generics) = (fi.self_ty.unwrap_or(TypeId::ERROR), fi.generics.clone());
+            let self_ty = self.arena.instantiate(self_ty, &generics, &inst.fresh);
+            if !self.try_unify_all(&[(self_ty, t)]) {
+                let msg = format!("the `init` of `{}` does not construct {}", self.show(self_ty), self.show(t));
+                self.error(name_span, msg);
+                self.infer_args(args);
+                return err(span);
+            }
+            let without_base = CallArgs { base: None, ..args.clone() };
+            return self.call_instance(f, inst, None, &without_base, span);
+        }
+        match c {
+            Ctor::Def(d) if self.types[d as usize].is_struct() => self.construct_fields(d, t, name, args, name_span, span),
+            Ctor::Def(d) if self.types[d as usize].is_enum() => {
+                let def = &self.types[d as usize];
+                let example = match def.variants().first() {
+                    Some(v) => format!(", such as `{name}.{}`", self.name(v.name)),
+                    None => String::new(),
+                };
+                self.error(name_span, format!("`{name}` is an enum; construct one of its variants{example}"));
+                self.infer_args(args);
+                err(span)
+            }
+            _ => {
+                self.error(name_span, format!("`{name}` does not declare `init`, so `{name}(...)` cannot construct it"));
+                self.infer_args(args);
+                err(span)
+            }
         }
     }
 
-    fn check_struct_lit(&mut self, path: &[ast::Ident], fields: &[ast::FieldInit], base: Option<&Expr>, span: Span) -> HExpr {
-        let def = match self.resolve_struct_path(path) {
-            Some(d) => d,
-            None => {
-                self.infer_field_values(fields);
-                return err(span);
+    /// Builds struct `d` of type `t` from the fields given as arguments, the
+    /// fields of `..base`, and field defaults. Arguments are evaluated in
+    /// source order, then `..base`, then the defaults in declaration order.
+    fn construct_fields(&mut self, d: TypeDefId, t: TypeId, name: &str, args: &CallArgs, name_span: Span, span: Span) -> HExpr {
+        if let Some(f) = self.hidden_field(d) {
+            let msg = format!("cannot construct `{}` here: its field `{}` is private", self.ctor_name(Ctor::Def(d), 0), self.name(f.name));
+            self.error(name_span, msg);
+            self.infer_args(args);
+            return err(span);
+        }
+        let Ty::Named(_, targs) = self.ty(t) else { unreachable!() };
+        let targs = self.elems(targs);
+        if self.types[d as usize].generics.iter().any(|&p| !self.params[p as usize].traits.is_empty()) {
+            let gens = self.types[d as usize].generics.clone();
+            self.require_traits(&gens, &targs, &[], span);
+        }
+        let n = self.types[d as usize].fields().len();
+        if args.positional.len() > n {
+            let plural = if n == 1 { "" } else { "s" };
+            self.error(span, format!("`{name}` has {n} field{plural}, but {} arguments are given", args.positional.len()));
+            self.infer_args(args);
+            return err(span);
+        }
+        let mut given: Vec<Option<HExpr>> = (0..n).map(|_| None).collect();
+        let mut order = Vec::new();
+        if self.linting() {
+            let names: Vec<String> = self.types[d as usize].fields().iter().map(|f| self.name(f.name).to_string()).collect();
+            let names: Vec<&str> = names.iter().map(String::as_str).collect();
+            for (i, a) in args.positional.iter().enumerate() {
+                if let ExprKind::Ident(id) = &a.kind {
+                    self.note_argument_order(&format!("`{name}`"), &names, i, &id.name, a.span);
+                }
             }
-        };
-        if !self.types[def as usize].is_struct() {
-            let msg = format!("`{}` is not a struct", self.name(self.types[def as usize].name));
-            self.error(path.last().unwrap().span, msg);
-            return err(span);
         }
-        if let Some(f) = self.hidden_field(def) {
-            let msg =
-                format!("cannot construct `{}` here: its field `{}` is private", self.ctor_name(Ctor::Def(def), 0), self.name(f.name));
-            self.error(path.last().unwrap().span, msg);
-            self.infer_field_values(fields);
-            return err(span);
+        for (i, a) in args.positional.iter().enumerate() {
+            let fty = self.field_type(d, i, &targs);
+            given[i] = Some(self.check_expr(a, fty));
+            order.push(i);
         }
-        let args = self.construct_args(def, None, span);
-        let sty = self.named_ty(def, &args);
-        let n = self.types[def as usize].fields().len();
-        let mut given: Vec<Option<LocalId>> = vec![None; n];
+        for &(field, a) in &args.named {
+            let sym = self.syms.get(&field.name);
+            let Some(i) = self.types[d as usize].fields().iter().position(|f| Some(f.name) == sym) else {
+                self.error(field.span, format!("no field `{}` on type {name}", field.name));
+                self.infer(a, None);
+                continue;
+            };
+            if given[i].is_some() {
+                self.error(field.span, format!("field `{}` is given more than once", field.name));
+                self.infer(a, None);
+                continue;
+            }
+            let fty = self.field_type(d, i, &targs);
+            given[i] = Some(self.check_expr(a, fty));
+            order.push(i);
+        }
+        let base = args.base.map(|b| self.check_expr(b, t));
+        let defaults_last = order.iter().max().is_none_or(|&last| given[..last].iter().all(Option::is_some));
+        let in_order = base.is_none() && defaults_last && order.is_sorted();
         let mut stmts = Vec::new();
-        for f in fields {
-            let sym = self.syms.get(&f.name.name);
-            let Some(idx) = self.types[def as usize].fields().iter().position(|d| Some(d.name) == sym) else {
-                let msg = format!("no field `{}` on type {}", f.name.name, self.name(self.types[def as usize].name));
-                self.error(f.name.span, msg);
-                if let Some(v) = &f.value {
-                    self.infer(v, None);
-                }
-                continue;
-            };
-            if given[idx].is_some() {
-                self.error(f.name.span, format!("field `{}` is given more than once", f.name.name));
-                continue;
+        let mut hoist = |c: &mut Self, h: HExpr| {
+            let (ty, span) = (h.ty, h.span);
+            let l = c.hidden_local(ty, span);
+            stmts.push(mk(
+                HKind::Let { pat: HPat { kind: HPatKind::Bind(l), ty, span }, init: Box::new(h), else_: None },
+                TypeId::UNIT,
+                span,
+            ));
+            mk(HKind::Local(l), ty, span)
+        };
+        if !in_order {
+            for &i in &order {
+                let h = given[i].take().unwrap();
+                given[i] = Some(hoist(self, h));
             }
-            let fty = self.field_type(def, idx, &args);
-            let h = match &f.value {
-                Some(v) => self.check_expr(v, fty),
-                None => {
-                    let h = self.check_ident(&f.name, Some(fty));
-                    self.expect_type(fty, h.ty, f.name.span);
-                    h
-                }
-            };
-            let l = self.hidden_local(fty, f.name.span);
-            stmts.push(mk(
-                HKind::Let { pat: HPat { kind: HPatKind::Bind(l), ty: fty, span: f.name.span }, init: Box::new(h), else_: None },
-                TypeId::UNIT,
-                f.name.span,
-            ));
-            given[idx] = Some(l);
         }
-        let base_local = base.map(|b| {
-            let h = self.check_expr(b, sty);
-            let l = self.hidden_local(sty, b.span);
-            stmts.push(mk(
-                HKind::Let { pat: HPat { kind: HPatKind::Bind(l), ty: sty, span: b.span }, init: Box::new(h), else_: None },
-                TypeId::UNIT,
-                b.span,
-            ));
-            l
-        });
+        let base = base.map(|b| hoist(self, b));
         let mut values = Vec::new();
-        for (i, &given) in given.iter().enumerate() {
-            let fty = self.field_type(def, i, &args);
-            let v = match (given, base_local, self.types[def as usize].fields()[i].default) {
-                (Some(l), _, _) => mk(HKind::Local(l), fty, span),
-                (None, Some(b), _) => mk(HKind::Field { obj: Box::new(mk(HKind::Local(b), sty, span)), index: i as u32 }, fty, span),
-                (None, None, Some(helper)) => mk(HKind::Call { func: helper, targs: args.clone(), args: vec![] }, fty, span),
+        for (i, given) in given.into_iter().enumerate() {
+            let fty = self.field_type(d, i, &targs);
+            let v = match (given, &base, self.types[d as usize].fields()[i].default) {
+                (Some(h), _, _) => h,
+                (None, Some(b), _) => mk(HKind::Field { obj: Box::new(b.clone()), index: i as u32 }, fty, span),
+                (None, None, Some(helper)) => mk(HKind::Call { func: helper, targs: targs.clone(), args: vec![] }, fty, span),
                 (None, None, None) => {
-                    let def = &self.types[def as usize];
-                    let msg = format!("missing field `{}` in `{}` literal", self.name(def.fields()[i].name), self.name(def.name));
-                    self.error(span, msg);
+                    let field = self.name(self.types[d as usize].fields()[i].name);
+                    self.error(span, format!("missing field `{field}` in `{name}(...)`"));
                     err(span)
                 }
             };
             values.push(v);
         }
-        let make = mk(HKind::MakeStruct { def, fields: values }, sty, span);
+        let make = mk(HKind::MakeStruct { def: d, fields: values }, t, span);
         if stmts.is_empty() {
             return make;
         }
         stmts.push(make);
-        mk(HKind::Block(stmts), sty, span)
-    }
-
-    fn resolve_struct_path(&mut self, path: &[ast::Ident]) -> Option<TypeDefId> {
-        let name = || path.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(".");
-        let r = if path.len() == 1 {
-            if path[0].name == "Self" {
-                return match self.fs.self_ty.map(|t| self.ty(t)) {
-                    Some(Ty::Named(d, _)) => Some(d),
-                    _ => {
-                        self.error(path[0].span, "`Self` is only valid inside a type's methods");
-                        None
-                    }
-                };
-            }
-            match self.lookup_global(&path[0].name) {
-                Some(Def::Type(r)) => Some(r),
-                _ => None,
-            }
-        } else if path.len() == 2 {
-            match self.lookup_global(&path[0].name) {
-                Some(Def::Module(m)) => {
-                    self.note_name_used(&path[0].name);
-                    match self.module_member(m, &path[1].name, path[1].span) {
-                        Some(Def::Type(r)) => Some(r),
-                        _ => return None,
-                    }
-                }
-                _ => None,
-            }
-        } else {
-            None
-        };
-        match r {
-            Some(TyRef::Def(d)) => Some(d),
-            Some(TyRef::Alias(i)) => {
-                let t = self.resolve_alias(i, path[0].span);
-                match self.ty(t) {
-                    Ty::Named(d, _) => Some(d),
-                    _ => {
-                        self.error(path[0].span, format!("`{}` is not a struct", name()));
-                        None
-                    }
-                }
-            }
-            Some(_) => {
-                self.error(path[0].span, format!("`{}` is not a struct", name()));
-                None
-            }
-            None => {
-                self.error(path.last().unwrap().span, format!("unknown type `{}`", name()));
-                None
-            }
-        }
+        mk(HKind::Block(stmts), t, span)
     }
 
     // ------------------------------------------------------------------
@@ -2471,9 +2520,13 @@ impl Checker {
         let mut harms = Vec::new();
         let mut ty: Option<TypeId> = None;
         let mut all_never = true;
+        let mut ok_patterns = true;
         for arm in arms {
             self.push_scope();
+            let mark = self.diags.len();
             let pat = self.check_pattern(&arm.pattern, st, false);
+            // A pattern with errors would make other arms seem unreachable.
+            ok_patterns &= self.diags.len() == mark;
             let guard = arm.guard.as_ref().map(|g| self.check_expr(g, TypeId::BOOL));
             let body = self.infer_inner(&arm.body, if want { hint.or(ty) } else { None }, want);
             self.pop_scope();
@@ -2488,7 +2541,9 @@ impl Checker {
             }
             harms.push(HArm { pat, guard, body });
         }
-        self.check_exhaustive(st, &harms, span);
+        if ok_patterns {
+            self.check_exhaustive(st, &harms, span);
+        }
         let ty = if want {
             ty.unwrap_or(TypeId::NEVER)
         } else if all_never && !arms.is_empty() {

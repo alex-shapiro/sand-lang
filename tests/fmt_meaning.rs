@@ -115,3 +115,13 @@ fn block_comments_stay_in_place() {
     }
     assert!(failures.is_empty(), "{} failures:\n\n{}", failures.len(), failures.iter().take(20).cloned().collect::<Vec<_>>().join("\n\n"));
 }
+
+/// Found by the `fmt` fuzz target: `..base` stays when it is the only argument.
+#[test]
+fn a_lone_base_argument_keeps_its_dots() {
+    for src in ["t(..3)\n", "let q = P(..p)\n", "let q = P(\n    ..p,\n)\n", "let q = P(x: 1, /* c */ ..p)\n"] {
+        let formatted = format_source(src).unwrap();
+        assert_eq!(meaning(src), meaning(&formatted), "{src:?} formatted as {formatted:?}");
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
+    }
+}

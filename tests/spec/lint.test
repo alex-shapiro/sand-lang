@@ -46,7 +46,7 @@ fn unused() { help(only_in_unused) }
 help(documented)
 help(Point.norm)
 print(members(listed))
-print(Point { x: 1 }.x)
+print(Point(x: 1).x)
 --- lint
 7: unused-function
 8: unused-function
@@ -95,7 +95,7 @@ let BadVar = 1
 let badVar = 2
 print(BadVar + badVar)
 BadFn()
-print(bad_name { x: 1 })
+print(bad_name(x: 1))
 print(Good.lower_variant)
 --- lint
 1: naming
@@ -330,8 +330,8 @@ struct Hidden {
 
     fn used(self) -> int { self.v }
     fn unused(self) -> int { self.v }
-    fn make() -> Hidden { Hidden { v: 1 } }
-    fn unused_static() -> Hidden { Hidden { v: 2 } }
+    fn make() -> Hidden { Hidden(v: 1) }
+    fn unused_static() -> Hidden { Hidden(v: 2) }
 }
 extend Hidden {
     fn ext_unused(self) -> int { 0 }
@@ -354,7 +354,7 @@ extend Shown {
 let h = Hidden.make()
 print(h.used() + h.ext_used())
 print(Kind.A)
-print(Shown { v: 1 }.v)
+print(Shown(v: 1).v)
 --- lint
 5: unused-function
 7: unused-function
@@ -369,7 +369,7 @@ struct Hidden {
     // lint: allow(unused-function)
     fn unused(self) -> int { self.v }
 }
-print(Hidden { v: 1 }.v)
+print(Hidden(v: 1).v)
 --- lint
 
 === trait and impl methods are not unused functions
@@ -381,10 +381,10 @@ trait Greet {
 struct P { v: int }
 impl Greet for P {
     fn hello(self) -> str { "hi" }
-    fn make() -> P { P { v: 0 } }
+    fn make() -> P { P(v: 0) }
 }
 fn helper() -> int { 1 }
-print(P { v: 2 }.v)
+print(P(v: 2).v)
 --- lint
 11: unused-function
 
@@ -622,11 +622,11 @@ enum Source {
     Text(str)
 }
 fn make() -> Result<Owned> {
-    Ok(Owned { file: fs.open("o.txt", fs.Mode.Write)? })
+    Ok(Owned(file: fs.open("o.txt", fs.Mode.Write)?))
 }
 use o = make()?
 print(o.file.path())
-let l = Log { file: fs.open("o.txt")? }
+let l = Log(file: fs.open("o.txt")?)
 print(Source.Text("x"))
 print(l.file.path())
 --- lint
@@ -642,7 +642,30 @@ struct Info {
 }
 fn info(path: str) -> Result<Info> {
     use f = fs.open(path, fs.Mode.Write)?
-    Ok(Info { path: f.path(), size: f.metadata()?.size })
+    Ok(Info(path: f.path(), size: f.metadata()?.size))
 }
 print(info("i.txt")?)
 --- lint
+
+=== arguments named like another parameter or field
+struct Rect { w: int, h: int }
+fn area(w: int, h: int) -> int { w * h }
+let w = 2
+let h = 3
+print(area(h, w))
+print(Rect(h, w))
+print(Rect(w, h))
+print(area(w, h: h))
+let Rect(h2, w2) = Rect(w: 1, h: 2)
+match Rect(w: 1, h: 2) {
+    Rect(h, ..) => print(h)
+}
+print(h2 + w2)
+// lint: allow(argument-order)
+print(area(h, w))
+--- lint
+5: argument-order
+5: argument-order
+6: argument-order
+6: argument-order
+11: argument-order

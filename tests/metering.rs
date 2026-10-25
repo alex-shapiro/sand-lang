@@ -168,7 +168,7 @@ fn appending_to_a_string_is_charged_for_its_copies() {
 fn sending_to_a_channel_with_many_receivers_is_cheap() {
     let time = |receivers: u32| {
         let src = format!(
-            "let ch: Channel<int> = task.channel()\nvar ts = []\nfor i in 0..{receivers} {{ ts.push(spawn {{ while true {{ let _ = ch.recv() }} }}) }}\n\
+            "let ch: Channel<int> = Channel()\nvar ts = []\nfor i in 0..{receivers} {{ ts.push(spawn {{ while true {{ let _ = ch.recv() }} }}) }}\n\
              task.yield_now()\nfor i in 0..300000 {{\n    ch.send(i)\n    task.yield_now()\n}}\nprint(\"done\")"
         );
         let start = Instant::now();
@@ -224,7 +224,7 @@ fn keys_chosen_to_collide_do_not_slow_down_maps() {
     let time = |key: &str, ty: &str| {
         let (add, find) = (key.replace('X', "j"), key.replace('X', "(i + 100000)"));
         let src = format!(
-            "var m: [{ty}: int] = [:]\nvar s: Set<{ty}> = set([])\nfor j in 0..100000 {{\n    m[{add}] = j\n    s.add({add})\n}}\n\
+            "var m: [{ty}: int] = [:]\nvar s: Set<{ty}> = Set([])\nfor j in 0..100000 {{\n    m[{add}] = j\n    s.add({add})\n}}\n\
              var n = 0\nfor i in 0..200000 {{ if m.contains({find}) or s.contains({find}) {{ n += 1 }} }}\nprint(m.len() + n)"
         );
         let start = Instant::now();
@@ -381,7 +381,7 @@ fn scratch_buffers_count_against_the_memory_limit() {
 #[test]
 fn keys_with_shared_structure_hash_in_linear_time() {
     // `a`'s tree has 2^60 nodes, its heap 60 objects.
-    let (r, out) = run(limits(|l| l.max_instructions = Some(1_000_000)), &format!("{DAG}let s = set([a])\nprint(s.contains(a))"));
+    let (r, out) = run(limits(|l| l.max_instructions = Some(1_000_000)), &format!("{DAG}let s = Set([a])\nprint(s.contains(a))"));
     r.unwrap();
     assert_eq!(out, "true\n");
 }
@@ -445,9 +445,9 @@ fn fiber_stacks_count_against_the_memory_limit() {
 
 #[test]
 fn comparing_shared_structures_counts_the_pairs_it_remembers() {
-    let src = "import random\nstruct N { kids: [N] }\nfn build(levels: int, k: int) -> N {\n    var next: [N] = (0..k).map(_ => N { kids: [] })\n    \
-               for d in 0..levels {\n        var cur: [N] = []\n        for i in 0..k { cur.push(N { kids: [next[random.int(0, k - 1)], next[random.int(0, k - 1)]] }) }\n        \
-               next = cur\n    }\n    N { kids: next }\n}\nlet a = build(60, 2000)\nlet b = build(60, 2000)\n";
+    let src = "import random\nstruct N { kids: [N] }\nfn build(levels: int, k: int) -> N {\n    var next: [N] = (0..k).map(_ => N(kids: []))\n    \
+               for d in 0..levels {\n        var cur: [N] = []\n        for i in 0..k { cur.push(N(kids: [next[random.int(0, k - 1)], next[random.int(0, k - 1)]])) }\n        \
+               next = cur\n    }\n    N(kids: next)\n}\nlet a = build(60, 2000)\nlet b = build(60, 2000)\n";
     for cmp in ["a == b", "a < b"] {
         let src = format!("{src}print({cmp})");
         expect_stop(mem_limit(64), &src, is_limit(LimitKind::Memory), Duration::from_secs(60));
@@ -480,7 +480,7 @@ fn map_and_set_keys_are_not_copied() {
     let (r, out) = run(mem_limit(16), src);
     r.unwrap();
     assert_eq!(out, "2000\n");
-    let src = "let s = \"x\".repeat(1 << 20)\nvar m: Set<(int, str, str)> = set([])\nfor i in 0..2000 { m.add((i, s, s)) }\nprint(m.len())";
+    let src = "let s = \"x\".repeat(1 << 20)\nvar m: Set<(int, str, str)> = Set([])\nfor i in 0..2000 { m.add((i, s, s)) }\nprint(m.len())";
     let (r, out) = run(mem_limit(16), src);
     r.unwrap();
     assert_eq!(out, "2000\n");
@@ -529,13 +529,13 @@ fn probe() -> NativeModule {
 
 #[test]
 fn cancelled_waits_do_not_accumulate() {
-    let src = "import probe\nlet ch: Channel<int> = task.channel()\nlet long = spawn { task.sleep(60s) }\n\
+    let src = "import probe\nlet ch: Channel<int> = Channel()\nlet long = spawn { task.sleep(60s) }\n\
                for i in 0..100000 {\n    let a = spawn { ch.recv() }\n    let b = spawn { long.wait() }\n    task.yield_now()\n    a.cancel()\n    b.cancel()\n}\n\
                print((probe.receivers(ch) < 100, probe.waiters(long) < 100))\nlong.cancel()";
     let (r, out) = run(mem_limit(16).module(probe()), src);
     r.unwrap();
     assert_eq!(out, "(true, true)\n");
-    let src = "let ch: Channel<int> = task.channel()\nvar ts = []\nfor i in 0..100 {\n    let c = spawn { ch.recv() }\n    task.yield_now()\n    c.cancel()\n    ts.push(spawn { ch.recv() })\n}\nfor i in 0..100 { ch.send(i) }\nvar n = 0\nfor t in ts { n += t.wait().unwrap() }\nprint(n)";
+    let src = "let ch: Channel<int> = Channel()\nvar ts = []\nfor i in 0..100 {\n    let c = spawn { ch.recv() }\n    task.yield_now()\n    c.cancel()\n    ts.push(spawn { ch.recv() })\n}\nfor i in 0..100 { ch.send(i) }\nvar n = 0\nfor t in ts { n += t.wait().unwrap() }\nprint(n)";
     let (r, out) = run(Config::new(), src);
     r.unwrap();
     assert_eq!(out, "4950\n");
@@ -543,7 +543,7 @@ fn cancelled_waits_do_not_accumulate() {
 
 #[test]
 fn channel_buffers_are_counted_before_they_grow() {
-    let src = "let ch: Channel<int> = task.channel()\nvar i = 0\nwhile true {\n    ch.send(i)\n    i += 1\n}";
+    let src = "let ch: Channel<int> = Channel()\nvar i = 0\nwhile true {\n    ch.send(i)\n    i += 1\n}";
     expect_stop(mem_limit(32), src, is_limit(LimitKind::Memory), Duration::from_secs(20));
 }
 
@@ -563,11 +563,11 @@ print(("a,b,,c".split(","), "x y  z".split_whitespace(), "héllo".chars()))
 print(("aaa".replace("a", "bc"), "abcabc".replace("bc", "")))
 print((b"hello world".find(b"o w"), b"aaab".contains(b"aab"), b"abc".find(b"abd")))
 print(json.encode(json.parse(r#"{"k": [1, 2, {"x": null}]}"#)?))
-print(regex.new(r"\d+")?.find_all("a1 b22 c333").map(m => m.text))
-print(regex.new(r"\s*,\s*")?.split("a , b,c"))
+print(regex.Regex(r"\d+")?.find_all("a1 b22 c333").map(m => m.text))
+print(regex.Regex(r"\s*,\s*")?.split("a , b,c"))
 print(crypto.sha256("abc".bytes()).to_hex())
 let m = [(1, "a"): 1, (2, "b"): 2]
-print((m[(2, "b")], set([(1, 2), (1, 2), (2, 3)]).len()))
+print((m[(2, "b")], Set([(1, 2), (1, 2), (2, 3)]).len()))
 print("\(3.14159:.2) \(42:>5) \("ab":*^6)")
 "##;
     let (r, out) = run(Config::new(), src);
@@ -583,12 +583,12 @@ print("\(3.14159:.2) \(42:>5) \("ab":*^6)")
 
 #[test]
 fn quadratic_regex_iteration_is_charged_for_its_work() {
-    let src = "import regex\nlet s = \"a\".repeat(200000)\nlet r = regex.new(r\"[a-z]*X|[a-z]\")?\nprint(r.find_all(s).len())";
+    let src = "import regex\nlet s = \"a\".repeat(200000)\nlet r = regex.Regex(r\"[a-z]*X|[a-z]\")?\nprint(r.find_all(s).len())";
     for call in [".find_all(s).len()", ".split(s).len()", ".replace_all(s, \"b\").len()", ".captures_all(s).len()"] {
         let src = src.replace(".find_all(s).len()", call);
         expect_stop(limits(|l| l.max_instructions = Some(200_000)), &src, is_limit(LimitKind::Instructions), Duration::from_secs(2));
     }
-    let src = "import regex\nlet s = \"ab cd \".repeat(100000)\nlet r = regex.new(r\"[a-z]+\")?\n\
+    let src = "import regex\nlet s = \"ab cd \".repeat(100000)\nlet r = regex.Regex(r\"[a-z]+\")?\n\
                print((r.find_all(s).len(), r.split(s).len(), r.replace_all(s, \"$0!\").len(), r.captures_all(s).len()))";
     let (r, out) = run(limits(|l| l.max_instructions = Some(5_000_000)), src);
     r.unwrap();
@@ -601,21 +601,21 @@ fn compiled_regexes_count_against_the_memory_limit() {
 import regex
 var rs = []
 for i in 0..300 {
-    let r = regex.new(r"\w{60}" + "\(i)")?
+    let r = regex.Regex(r"\w{60}" + "\(i)")?
     rs.push(r)
     let _ = r.find_all("é".repeat(100000))
 }
 print(rs.len())
 "#;
     expect_stop(limits(|l| l.max_memory = Some(32 << 20)), src, is_limit(LimitKind::Memory), Duration::from_secs(10));
-    let (r, out) = run(Config::new(), "import regex\nprint(regex.new(r\"\\w{150}\").unwrap_err().kind)");
+    let (r, out) = run(Config::new(), "import regex\nprint(regex.Regex(r\"\\w{150}\").unwrap_err().kind)");
     r.unwrap();
     assert_eq!(out, "limit\n");
 }
 
 #[test]
 fn compiling_a_regex_is_charged_for_the_program_it_builds() {
-    let src = "import regex\nfor i in 0..1000 { let _ = regex.new(r\"\\w{60}\" + \"\\(i)\") }";
+    let src = "import regex\nfor i in 0..1000 { let _ = regex.Regex(r\"\\w{60}\" + \"\\(i)\") }";
     expect_stop(limits(|l| l.max_instructions = Some(2_000_000)), src, is_limit(LimitKind::Instructions), Duration::from_secs(5));
 }
 
@@ -729,7 +729,7 @@ fn regex_captures_do_not_copy_their_groups() {
     // 100 nested groups each matching all of a 2 MB text: captures hold the
     // text once and the groups' offsets (copying each group's text would be
     // 200 MB).
-    let src = "import regex\nlet r = regex.new(\"(\".repeat(100) + \"a*\" + \")\".repeat(100))?\nlet s = \"a\".repeat(2000000)\nprint(r.captures(s).unwrap().len())";
+    let src = "import regex\nlet r = regex.Regex(\"(\".repeat(100) + \"a*\" + \")\".repeat(100))?\nlet s = \"a\".repeat(2000000)\nprint(r.captures(s).unwrap().len())";
     let (r, out) = run(limits(|l| l.max_memory = Some(32 << 20)), src);
     r.unwrap();
     assert_eq!(out, "101\n");
@@ -737,7 +737,7 @@ fn regex_captures_do_not_copy_their_groups() {
     let (r, out) = run(limits(|l| l.max_memory = Some(32 << 20)), &src);
     r.unwrap();
     assert_eq!(out, "1\n");
-    let src = "import regex\nlet r = regex.new(r\"(\\w+)@(\\w+)\")?\nlet c = r.captures(\"mail: joe@example now\").unwrap()\nprint((c.text(1), c.text(2), r.captures_all(\"a@b c@d\").len()))";
+    let src = "import regex\nlet r = regex.Regex(r\"(\\w+)@(\\w+)\")?\nlet c = r.captures(\"mail: joe@example now\").unwrap()\nprint((c.text(1), c.text(2), r.captures_all(\"a@b c@d\").len()))";
     let (r, out) = run(limits(|l| l.max_memory = Some(32 << 20)), src);
     r.unwrap();
     assert_eq!(out, "(Some(\"joe\"), Some(\"example\"), 2)\n");
@@ -745,11 +745,11 @@ fn regex_captures_do_not_copy_their_groups() {
 
 #[test]
 fn regex_replacements_are_reserved_before_they_are_expanded() {
-    let src = "import regex\nlet r = regex.new(\"a*\")?\nlet s = \"a\".repeat(200000)\nprint(r.replace(s, \"$0\".repeat(1000)).len())";
+    let src = "import regex\nlet r = regex.Regex(\"a*\")?\nlet s = \"a\".repeat(200000)\nprint(r.replace(s, \"$0\".repeat(1000)).len())";
     expect_stop(limits(|l| l.max_memory = Some(32 << 20)), src, is_limit(LimitKind::Memory), Duration::from_secs(30));
     let src = src.replace("r.replace(", "r.replace_all(");
     expect_stop(limits(|l| l.max_memory = Some(32 << 20)), &src, is_limit(LimitKind::Memory), Duration::from_secs(30));
-    let src = "import regex\nlet r = regex.new(r\"(?<w>\\w+)\")?\nprint((r.replace_all(\"ab cd\", \"<$w$1>\"), r.replace(\"ab cd\", \"[$0]\"), r.replace_all(\"ab\", \"x\")))";
+    let src = "import regex\nlet r = regex.Regex(r\"(?<w>\\w+)\")?\nprint((r.replace_all(\"ab cd\", \"<$w$1>\"), r.replace(\"ab cd\", \"[$0]\"), r.replace_all(\"ab\", \"x\")))";
     let (r, out) = run(Config::new(), src);
     r.unwrap();
     assert_eq!(out, "(\"<abab> <cdcd>\", \"[ab] cd\", \"x\")\n");
@@ -760,14 +760,14 @@ fn iterating_maps_and_sets_copies_nothing() {
     // The map and the set take about 17 MB; a copy of their entries (or a
     // list of (key, value) tuples) would not fit. Loops left early leave
     // pinned iterators behind, which must not accumulate either.
-    let src = "let m: [int: int] = [:]\nfor i in 0..200000 { m[i] = i }\nlet s: Set<int> = set()\nfor i in 0..200000 { s.add(i) }\n\
+    let src = "let m: [int: int] = [:]\nfor i in 0..200000 { m[i] = i }\nlet s: Set<int> = Set()\nfor i in 0..200000 { s.add(i) }\n\
                var t = 0\nfor (k, v) in m { t += v }\nfor e in m.iter() { t += e.1 }\nfor x in s { t += x }\nt += s.iter().sum()\n\
                for _ in 0..200000 {\n    for (k, v) in m { break }\n    for x in s.iter() { break }\n}\nprint(t)";
     let (r, out) = run(limits(|l| l.max_memory = Some(20 << 20)), src);
     r.unwrap();
     assert_eq!(out, "79999600000\n");
     // Changing the map while an iterator reads it costs the copy.
-    let src = "let m: [int: int] = [:]\nfor i in 0..200000 { m[i] = i }\nlet s: Set<int> = set()\nfor i in 0..200000 { s.add(i) }\n\
+    let src = "let m: [int: int] = [:]\nfor i in 0..200000 { m[i] = i }\nlet s: Set<int> = Set()\nfor i in 0..200000 { s.add(i) }\n\
                let it = m.iter()\nm[0] = 1\nprint(it.count())";
     let (r, _) = run(limits(|l| l.max_memory = Some(20 << 20)), src);
     assert!(matches!(r, Err(Error::Limit(LimitKind::Memory))), "{r:?}");
@@ -779,7 +779,7 @@ fn names_of_type_descriptions_built_at_run_time_stay_short() {
                     let x: P<A, B>? = None\n    grow(n + 1, x, x)\n}\nprint(grow(0, Some(1), Some(2)))";
     let deep = |e: &Error| matches!(e, Error::Runtime { message, .. } if message.contains("nested too deeply"));
     expect_stop(limits(|l| l.max_memory = None), doubling, deep, Duration::from_secs(10));
-    let shared = "import json\nstruct P<T> { v: T }\nfn grow<reflect A: Encode + Hash>(n: int, a: A?) -> int {\n    if n == 0 {\n        \
+    let shared = "import json\nstruct P<T> { v: T }\nfn grow<reflect A: Decode + Hash>(n: int, a: A?) -> int {\n    if n == 0 {\n        \
                   let m: Result<[A: int]> = json.decode(\"{\\\"k\\\": 1}\")\n        let p: Result<P<A>> = json.decode(\"{\\\"v\\\": 1}\")\n        \
                   print(m)\n        print(p)\n        return 0\n    }\n    let x: (A, A)? = None\n    grow(n - 1, x)\n}\nlet a: int? = None\nprint(grow(200, a))";
     let start = Instant::now();
@@ -789,7 +789,9 @@ fn names_of_type_descriptions_built_at_run_time_stay_short() {
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines.len(), 3, "{out}");
     assert!(
-        lines[0].starts_with("Err(Error { kind: \"invalid\", message: \"$: cannot decode map keys of type ((((") && lines[0].len() < 400,
+        lines[0].starts_with("Err(Error(message: \"$: cannot decode map keys of type ((((")
+            && lines[0].ends_with("kind: \"invalid\"))")
+            && lines[0].len() < 400,
         "{out}"
     );
     assert!(lines[0].contains('…') && lines[1].contains("expected array of length 2"), "{out}");
@@ -797,7 +799,7 @@ fn names_of_type_descriptions_built_at_run_time_stay_short() {
 
 #[test]
 fn type_descriptions_count_the_nodes_they_share_once() {
-    let src = "import json\nstruct P<A, B> { a: A, b: B }\nfn deep<reflect A: Encode, reflect B: Encode>(n: int, x: [A], y: [B]) -> int {\n    \
+    let src = "import json\nstruct P<A, B> { a: A, b: B }\nfn deep<reflect A: Decode, reflect B: Decode>(n: int, x: [A], y: [B]) -> int {\n    \
                if n == 0 {\n        let r: Result<[(A, B)]> = json.decode(\"[]\")\n        return if r.is_ok() { 0 } else { -1 }\n    }\n    \
                let w: [P<A, B>] = []\n    deep(n - 1, w, w) + 1\n}\nlet w: [int] = []\nprint(deep(200, w, w))";
     let (r, out) = run(limits(|l| l.max_memory = Some(16 << 20)), src);

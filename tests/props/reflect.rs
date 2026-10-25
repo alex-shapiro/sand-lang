@@ -15,6 +15,8 @@ enum Ty {
     UnitEnum,
     Rec,
     Keyed,
+    /// `struct Valid { a: int }` with an `init`, which refutes `Decode`.
+    Valid,
     Fn,
     Task,
     Range,
@@ -44,6 +46,7 @@ impl Ty {
             Ty::UnitEnum => "Unit".into(),
             Ty::Rec => "Rec".into(),
             Ty::Keyed => "Keyed".into(),
+            Ty::Valid => "Valid".into(),
             Ty::Fn => "(fn() -> int)".into(),
             Ty::Task => "Task<int>".into(),
             Ty::Range => "Range".into(),
@@ -85,12 +88,12 @@ impl Ty {
         }
     }
 
-    fn encodable(&self) -> bool {
+    fn decodable(&self) -> bool {
         match self {
-            Ty::Fn | Ty::Task => false,
-            Ty::List(t) | Ty::Set(t) | Ty::Option(t) | Ty::Wrap(t) | Ty::Tree(t) | Ty::Bag(t) => t.encodable(),
-            Ty::Map(k, v) => k.encodable() && v.encodable(),
-            Ty::Tuple(ts) => ts.iter().all(Ty::encodable),
+            Ty::Fn | Ty::Task | Ty::Valid => false,
+            Ty::List(t) | Ty::Set(t) | Ty::Option(t) | Ty::Wrap(t) | Ty::Tree(t) | Ty::Bag(t) => t.decodable(),
+            Ty::Map(k, v) => k.decodable() && v.decodable(),
+            Ty::Tuple(ts) => ts.iter().all(Ty::decodable),
             _ => true,
         }
     }
@@ -98,7 +101,7 @@ impl Ty {
     /// Returns `true` if the type implements `Hash`.
     fn hashable(&self) -> bool {
         match self {
-            Ty::Int | Ty::Bool | Ty::Str | Ty::Bytes | Ty::Unit | Ty::Duration | Ty::UnitEnum | Ty::Rec | Ty::Range => true,
+            Ty::Int | Ty::Bool | Ty::Str | Ty::Bytes | Ty::Unit | Ty::Duration | Ty::UnitEnum | Ty::Rec | Ty::Valid | Ty::Range => true,
             Ty::Option(t) | Ty::Wrap(t) => t.hashable(),
             Ty::Tuple(ts) => ts.iter().all(Ty::hashable),
             _ => false,
@@ -140,13 +143,13 @@ fn ty() -> impl Strategy<Value = Ty> {
 }
 
 /// Generates types with type parameter `T` weighted by `param`, and non-`Hash`
-/// or non-`Encode` types weighted by `bad`.
+/// or non-`Decode` types weighted by `bad`.
 fn ty_with(param: u32, bad: u32) -> impl Strategy<Value = Ty> {
     let leaf = prop_oneof![
         6 => prop_oneof![Just(Ty::Int), Just(Ty::Float), Just(Ty::Bool), Just(Ty::Str), Just(Ty::Bytes), Just(Ty::Unit), Just(Ty::Duration)],
         4 => prop_oneof![Just(Ty::Json), Just(Ty::UnitEnum), Just(Ty::Rec)],
         1 => prop_oneof![Just(Ty::Range), Just(Ty::Keyed)],
-        bad => prop_oneof![Just(Ty::Fn), Just(Ty::Task)],
+        bad => prop_oneof![Just(Ty::Fn), Just(Ty::Task), Just(Ty::Valid)],
         param => Just(Ty::Param),
     ];
     leaf.prop_recursive(3, 12, 3, move |inner| {
@@ -165,7 +168,8 @@ fn ty_with(param: u32, bad: u32) -> impl Strategy<Value = Ty> {
 }
 
 const TYPES: &str = "enum Unit { A, B }\nstruct Rec { a: int, b: str? }\nstruct Key { a: int }\nstruct Keyed { m: [Key: int]? }\nstruct Wrap<T> { v: T }\n\
-                     struct Tree<T> { v: T, kids: [Tree<T>] = [] }\nstruct Bag<T> { s: Set<T> }";
+                     struct Tree<T> { v: T, kids: [Tree<T>] = [] }\nstruct Bag<T> { s: Set<T> }\n\
+                     struct Valid {\n    a: int\n    fn init(a: int) -> Valid { Self(a) }\n}";
 
 const INPUTS: [&str; 14] = [
     "null",
@@ -188,7 +192,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
     #[test]
-    fn json_decode_accepts_exactly_the_encodable_types(t in ty()) {
+    fn json_decode_accepts_exactly_the_decodable_types(t in ty()) {
         let inputs: Vec<String> = INPUTS.iter().map(|s| format!("{s:?}")).collect();
         let src = format!(
             "import json\n{TYPES}\n\
@@ -202,20 +206,20 @@ proptest! {
         let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
         match rt.block_on(engine.run_source("main.sand", &src)) {
             Ok(_) => {
-                prop_assert!(t.encodable() && t.well_formed(), "accepted:\n{src}");
+                prop_assert!(t.decodable() && t.well_formed(), "accepted:\n{src}");
                 let kinds = out.contents();
                 let bad_key = !t.keys_decodable();
                 prop_assert!(kinds.lines().all(|k| k == "ok" || k == "parse" || (bad_key && k == "invalid")), "{kinds}\n{src}");
             }
             Err(Error::Compile(ds)) => {
-                prop_assert!(!(t.encodable() && t.well_formed()), "rejected: {ds:?}\n{src}");
+                prop_assert!(!(t.decodable() && t.well_formed()), "rejected: {ds:?}\n{src}");
                 let trait_of = |d: &sandlang::Diagnostic| {
-                    if d.message.contains("does not implement `Encode`") { Some(true) }
+                    if d.message.contains("does not implement `Decode`") { Some(true) }
                     else if d.message.contains("does not implement `Hash`") { Some(false) }
                     else { None }
                 };
                 prop_assert!(ds.iter().all(|d| trait_of(d).is_some()), "{ds:?}\n{src}");
-                prop_assert_eq!(ds.iter().any(|d| trait_of(d) == Some(true)), !t.encodable(), "{:?}\n{}", ds, src);
+                prop_assert_eq!(ds.iter().any(|d| trait_of(d) == Some(true)), !t.decodable(), "{:?}\n{}", ds, src);
                 prop_assert_eq!(ds.iter().any(|d| trait_of(d) == Some(false)), !t.well_formed(), "{:?}\n{}", ds, src);
                 prop_assert!(ds.iter().all(|d| !d.message.contains("``")), "{ds:?}\n{src}");
             }
@@ -258,6 +262,7 @@ fn json_text(t: &Ty, rng: &mut Rng, depth: u32, wrong: u64) -> String {
         Ty::UnitEnum => ["\"A\"", "\"B\""][rng.below(2) as usize].into(),
         Ty::Rec => ["{\"a\": 1, \"b\": \"x\"}", "{\"a\": 2}"][rng.below(2) as usize].into(),
         Ty::Keyed => ["{}", "{\"m\": null}"][rng.below(2) as usize].into(),
+        Ty::Valid => "{\"a\": 1}".into(),
         Ty::Range => ["{\"start\": 1, \"end\": 3}", "{\"start\": 0, \"end\": 0, \"inclusive\": true}"][rng.below(2) as usize].into(),
         Ty::Fn | Ty::Task | Ty::Param => "null".into(),
         Ty::List(e) | Ty::Set(e) => format!("[{}]", many(e, rng).join(", ")),
@@ -304,7 +309,7 @@ proptest! {
         let src = format!(
             "import json\n{TYPES}\n\
              fn direct(s: str) -> Result<{}> {{ json.decode(s) }}\n\
-             fn via<reflect T: Encode>(s: str) -> Result<{}> {{ json.decode(s) }}\n\
+             fn via<reflect T: Decode>(s: str) -> Result<{}> {{ json.decode(s) }}\n\
              fn read(s: str) -> Result<{}> {{ via(s) }}\n\
              for s in [{}] {{\n    print(direct(s))\n    print(read(s))\n}}",
             full.sand(),
@@ -336,7 +341,7 @@ fn constant_default() -> impl Strategy<Value = (String, String)> {
         Just(("[str: int]".to_string(), "[:]".to_string())),
         prop::collection::vec(-3i64..3, 0..3).prop_map(|xs| {
             let items: Vec<String> = xs.iter().map(|&x| int_lit(x)).collect();
-            ("Set<int>".to_string(), if items.is_empty() { "set()".to_string() } else { format!("set([{}])", items.join(", ")) })
+            ("Set<int>".to_string(), if items.is_empty() { "Set()".to_string() } else { format!("Set([{}])", items.join(", ")) })
         }),
         Just(("int?".to_string(), "None".to_string())),
         Just(("Tree<int>".to_string(), "Tree.Empty".to_string())),
@@ -359,7 +364,7 @@ fn constant_default() -> impl Strategy<Value = (String, String)> {
             inner.clone().prop_map(|(ty, e)| (format!("Tree<{ty}>"), format!("Tree.Pair(a: {e}, b: {e})"))),
             (inner, any::<bool>()).prop_map(|((ty, e), w)| {
                 let w = if w { ", w: -1" } else { "" };
-                (format!("Holder<{ty}>"), format!("Holder {{ v: {e}{w} }}"))
+                (format!("Holder<{ty}>"), format!("Holder(v: {e}{w})"))
             }),
         ]
     })
@@ -375,14 +380,14 @@ proptest! {
     fn json_decode_fills_missing_fields_with_constant_defaults(fields in prop::collection::vec(constant_default(), 1..6)) {
         let decls: Vec<String> = fields.iter().enumerate().map(|(i, (ty, e))| format!("    f{i}: {ty} = {e}")).collect();
         let src = format!(
-            "import json\n{CONSTANT_TYPES}\nstruct S {{\n{}\n}}\nlet s: S = json.decode(\"{{}}\")?\nprint(s == S {{}})\nprint(json.encode(s) == json.encode(S {{}}))",
+            "import json\n{CONSTANT_TYPES}\nstruct S {{\n{}\n}}\nlet s: S = json.decode(\"{{}}\")?\nprint(s == S())\nprint(json.encode(s) == json.encode(S()))",
             decls.join("\n")
         );
         check(&src, "true\ntrue\n", None)?;
     }
 
     #[test]
-    fn json_decode_runs_computed_defaults_as_a_struct_literal_does(fields in prop::collection::vec((constant_default(), any::<bool>()), 1..6)) {
+    fn json_decode_runs_computed_defaults_as_a_construction_does(fields in prop::collection::vec((constant_default(), any::<bool>()), 1..6)) {
         let decls: Vec<String> = fields
             .iter()
             .enumerate()
@@ -393,7 +398,7 @@ proptest! {
             .collect();
         let src = format!(
             "import json\n{CONSTANT_TYPES}\nvar calls: [int] = []\nfn note<T>(i: int, x: T) -> T {{\n    calls.push(i)\n    x\n}}\n\
-             struct S {{\n{}\n}}\nlet s: S = json.decode(\"{{}}\")?\nlet decoded = calls\ncalls = []\nlet literal = S {{}}\n\
+             struct S {{\n{}\n}}\nlet s: S = json.decode(\"{{}}\")?\nlet decoded = calls\ncalls = []\nlet literal = S()\n\
              print(s == literal)\nprint(decoded == calls)\ncalls = []\nlet full: S = json.decode(json.encode(literal))?\nprint(json.encode(full) == json.encode(literal))\nprint(calls)\nprint(decoded)",
             decls.join("\n")
         );
@@ -425,14 +430,14 @@ proptest! {
             ty = format!("[{ty}]");
         }
         let mut src = format!(
-            "import json\nstruct S0 {{\n    list: {ty} = {{\n        {}\n        a{}\n    }}\n    next: S1 = S1 {{}}\n}}\n",
+            "import json\nstruct S0 {{\n    list: {ty} = {{\n        {}\n        a{}\n    }}\n    next: S1 = S1()\n}}\n",
             lets.join("\n        "),
             depth - 1
         );
         for i in 1..chain {
-            src += &format!("struct S{i} {{ next: S{} = S{} {{}} }}\n", i + 1, i + 1);
+            src += &format!("struct S{i} {{ next: S{} = S{}() }}\n", i + 1, i + 1);
         }
-        src += &format!("struct S{chain} {{ v: int = 1 }}\nlet s: S0 = json.decode(\"{{}}\")?\nprint(s == S0 {{}})\nprint(json.encode(s) == json.encode(S0 {{}}))\n");
+        src += &format!("struct S{chain} {{ v: int = 1 }}\nlet s: S0 = json.decode(\"{{}}\")?\nprint(s == S0())\nprint(json.encode(s) == json.encode(S0()))\n");
         check(&src, "true\ntrue\n", None)?;
     }
 }

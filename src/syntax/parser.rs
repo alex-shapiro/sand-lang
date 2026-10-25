@@ -37,7 +37,6 @@ struct Parser<'a> {
     pos: usize,
     comments: &'a [Comment],
     errors: Vec<Diag>,
-    no_struct: bool,
     /// In a match guard: `x => ...` ends the guard rather than starting a lambda.
     in_guard: bool,
     depth: usize,
@@ -57,7 +56,6 @@ impl<'a> Parser<'a> {
             pos: 0,
             comments,
             errors: Vec::new(),
-            no_struct: false,
             in_guard: false,
             depth: 0,
             fatal: false,
@@ -862,7 +860,6 @@ impl<'a> Parser<'a> {
     fn block_inner(&mut self) -> PResult<Block> {
         let lo = self.lo();
         self.expect(&Tok::LBrace, "`{`")?;
-        let saved = std::mem::replace(&mut self.no_struct, false);
         let mut stmts = Vec::new();
         loop {
             self.skip_semis();
@@ -889,7 +886,6 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        self.no_struct = saved;
         self.expect(&Tok::RBrace, "`}`")?;
         Ok(Block { stmts, span: self.span_from(lo) })
     }
@@ -987,13 +983,6 @@ impl<'a> Parser<'a> {
         self.enter()?;
         let r = self.expr_bp(0);
         self.leave();
-        r
-    }
-
-    fn expr_no_struct(&mut self) -> PResult<Expr> {
-        let saved = std::mem::replace(&mut self.no_struct, true);
-        let r = self.expr();
-        self.no_struct = saved;
         r
     }
 
@@ -1166,11 +1155,27 @@ impl<'a> Parser<'a> {
 
     fn args(&mut self) -> PResult<Vec<Arg>> {
         // Assumes `(` was consumed.
-        let saved = std::mem::replace(&mut self.no_struct, false);
         let saved_guard = std::mem::replace(&mut self.in_guard, false);
+        let r = self.args_inner();
+        self.in_guard = saved_guard;
+        r
+    }
+
+    fn args_inner(&mut self) -> PResult<Vec<Arg>> {
         let mut args = Vec::new();
         let mut seen_named = false;
         while !self.at(&Tok::RParen) {
+            if args.last().is_some_and(|a: &Arg| a.spread) {
+                self.error_here("`..base` must be the last argument");
+            }
+            if self.eat(&Tok::DotDot) {
+                let value = self.expr()?;
+                args.push(Arg { name: None, value, spread: true });
+                if !self.eat(&Tok::Comma) {
+                    break;
+                }
+                continue;
+            }
             let name = if self.at(&Tok::Ident) && matches!(self.peek_tok(1), Tok::Colon) {
                 let n = self.ident("argument name")?;
                 self.bump();
@@ -1183,13 +1188,11 @@ impl<'a> Parser<'a> {
                 None
             };
             let value = self.expr()?;
-            args.push(Arg { name, value });
+            args.push(Arg { name, value, spread: false });
             if !self.eat(&Tok::Comma) {
                 break;
             }
         }
-        self.no_struct = saved;
-        self.in_guard = saved_guard;
         self.expect(&Tok::RParen, "`)`")?;
         Ok(args)
     }
@@ -1215,10 +1218,7 @@ impl<'a> Parser<'a> {
                 }
                 Tok::LBracket => {
                     self.bump();
-                    let saved = std::mem::replace(&mut self.no_struct, false);
-                    let idx = self.expr();
-                    self.no_struct = saved;
-                    let idx = idx?;
+                    let idx = self.expr()?;
                     self.expect(&Tok::RBracket, "`]`")?;
                     e = self.mk(ExprKind::Index(Box::new(e), Box::new(idx)), self.span_from(lo));
                 }
@@ -1262,13 +1262,30 @@ impl<'a> Parser<'a> {
                         }
                     }
                 }
-                Tok::LBrace if !self.no_struct && self.is_struct_lit_start(&e) => {
-                    e = self.struct_lit(e, lo)?;
+                Tok::LBrace if self.is_struct_literal(&e) => {
+                    self.error_here("a struct is constructed with `Name(field: value)`");
+                    return Err(());
                 }
                 _ => break,
             }
         }
         Ok(e)
+    }
+
+    /// Whether `e {` starts a struct literal of an earlier version of Sand,
+    /// which cannot start a block.
+    fn is_struct_literal(&self, e: &Expr) -> bool {
+        let name = match &e.kind {
+            ExprKind::Ident(id) | ExprKind::Field(_, id) => &id.name,
+            ExprKind::SelfType => "Self",
+            _ => return false,
+        };
+        name.starts_with(|c: char| c.is_ascii_uppercase())
+            && match self.peek_tok(1) {
+                Tok::DotDot => true,
+                Tok::Ident => matches!(self.peek_tok(2), Tok::Colon | Tok::Comma),
+                _ => false,
+            }
     }
 
     /// `.name` or `.name(args)` after `e` (the `.` was consumed).
@@ -1281,72 +1298,6 @@ impl<'a> Parser<'a> {
         } else {
             Ok(self.mk(ExprKind::Field(receiver, name), self.span_from(lo)))
         }
-    }
-
-    fn path_of(e: &Expr) -> Option<Vec<Ident>> {
-        match &e.kind {
-            ExprKind::Ident(id) => Some(vec![id.clone()]),
-            ExprKind::SelfType => Some(vec![Ident { name: "Self".into(), span: e.span }]),
-            ExprKind::Field(base, name) => {
-                let mut p = Self::path_of(base)?;
-                p.push(name.clone());
-                Some(p)
-            }
-            _ => None,
-        }
-    }
-
-    fn is_struct_lit_start(&self, e: &Expr) -> bool {
-        if Self::path_of(e).is_none() {
-            return false;
-        }
-        match self.peek_tok(1) {
-            Tok::RBrace | Tok::DotDot => true,
-            Tok::Ident => matches!(self.peek_tok(2), Tok::Colon | Tok::Comma | Tok::RBrace | Tok::Semi),
-            Tok::Semi => {
-                // `Name {` followed by a newline: look at what follows.
-                let mut i = 1;
-                while matches!(self.peek_tok(i), Tok::Semi) {
-                    i += 1;
-                }
-                match self.peek_tok(i) {
-                    Tok::RBrace | Tok::DotDot => true,
-                    Tok::Ident => matches!(self.peek_tok(i + 1), Tok::Colon | Tok::Comma | Tok::RBrace | Tok::Semi),
-                    _ => false,
-                }
-            }
-            _ => false,
-        }
-    }
-
-    fn struct_lit(&mut self, path_expr: Expr, lo: u32) -> PResult<Expr> {
-        let path = Self::path_of(&path_expr).unwrap();
-        self.expect(&Tok::LBrace, "`{`")?;
-        let saved = std::mem::replace(&mut self.no_struct, false);
-        let mut fields = Vec::new();
-        let mut base = None;
-        loop {
-            while self.eat(&Tok::Semi) || self.eat(&Tok::Comma) {}
-            if self.at(&Tok::RBrace) || self.at(&Tok::Eof) {
-                break;
-            }
-            if self.eat(&Tok::DotDot) {
-                base = Some(Box::new(self.expr()?));
-                while self.eat(&Tok::Semi) || self.eat(&Tok::Comma) {}
-                break;
-            }
-            let name = self.ident("field name")?;
-            let value = if self.eat(&Tok::Colon) { Some(self.expr()?) } else { None };
-            fields.push(FieldInit { name, value });
-            if !(self.at(&Tok::Comma) || self.at(&Tok::Semi) || self.at(&Tok::RBrace)) {
-                self.expected("`,` or `}`");
-                self.no_struct = saved;
-                return Err(());
-            }
-        }
-        self.no_struct = saved;
-        self.expect(&Tok::RBrace, "`}`")?;
-        Ok(self.mk(ExprKind::StructLit { path, fields, base }, self.span_from(lo)))
     }
 
     fn lambda(&mut self, lo: u32) -> PResult<Expr> {
@@ -1373,10 +1324,7 @@ impl<'a> Parser<'a> {
             params.push(LambdaParam { name, ty: None });
         }
         self.expect(&Tok::FatArrow, "`=>`")?;
-        let saved = std::mem::replace(&mut self.no_struct, false);
-        let body = self.expr();
-        self.no_struct = saved;
-        let body = body?;
+        let body = self.expr()?;
         Ok(self.mk(ExprKind::Lambda { params, body: Box::new(body), parens }, self.span_from(lo)))
     }
 
@@ -1384,10 +1332,10 @@ impl<'a> Parser<'a> {
         if self.eat(&Tok::Let) {
             let p = self.pattern()?;
             self.expect(&Tok::Eq, "`=`")?;
-            let e = self.expr_no_struct()?;
+            let e = self.expr()?;
             Ok(Cond::Let(Box::new(p), Box::new(e)))
         } else {
-            Ok(Cond::Expr(Box::new(self.expr_no_struct()?)))
+            Ok(Cond::Expr(Box::new(self.expr()?)))
         }
     }
 
@@ -1462,22 +1410,12 @@ impl<'a> Parser<'a> {
                 if self.eat(&Tok::RParen) {
                     return Ok(self.mk(ExprKind::Unit, self.span_from(lo)));
                 }
-                let saved = std::mem::replace(&mut self.no_struct, false);
-                let first = self.expr();
-                let first = match first {
-                    Ok(f) => f,
-                    Err(()) => {
-                        self.no_struct = saved;
-                        return Err(());
-                    }
-                };
+                let first = self.expr()?;
                 if self.eat(&Tok::RParen) {
-                    self.no_struct = saved;
                     return Ok(self.mk(ExprKind::Paren(Box::new(first)), self.span_from(lo)));
                 }
-                let items = self.tuple_rest(first, lo, Self::expr);
-                self.no_struct = saved;
-                Ok(self.mk(ExprKind::Tuple(items?), self.span_from(lo)))
+                let items = self.tuple_rest(first, lo, Self::expr)?;
+                Ok(self.mk(ExprKind::Tuple(items), self.span_from(lo)))
             }
             Tok::LBracket => self.bracket(lo),
             Tok::LBrace => {
@@ -1487,9 +1425,8 @@ impl<'a> Parser<'a> {
             Tok::If => self.if_expr(),
             Tok::Match => {
                 self.bump();
-                let scrutinee = self.expr_no_struct()?;
+                let scrutinee = self.expr()?;
                 self.expect(&Tok::LBrace, "`{`")?;
-                let saved = std::mem::replace(&mut self.no_struct, false);
                 let mut arms = Vec::new();
                 loop {
                     while self.eat(&Tok::Semi) || self.eat(&Tok::Comma) {}
@@ -1511,11 +1448,9 @@ impl<'a> Parser<'a> {
                     arms.push(MatchArm { pattern, guard, body, span: self.span_from(alo) });
                     if !(self.at(&Tok::Semi) || self.at(&Tok::Comma) || self.at(&Tok::RBrace)) {
                         self.expected("`,`, newline or `}`");
-                        self.no_struct = saved;
                         return Err(());
                     }
                 }
-                self.no_struct = saved;
                 self.expect(&Tok::RBrace, "`}`")?;
                 Ok(self.mk(ExprKind::Match { scrutinee: Box::new(scrutinee), arms }, self.span_from(lo)))
             }
@@ -1575,7 +1510,7 @@ impl<'a> Parser<'a> {
             _ => {
                 let pattern = Box::new(self.pattern()?);
                 self.expect(&Tok::In, "`in`")?;
-                let iter = self.expr_no_struct()?;
+                let iter = self.expr()?;
                 ExprKind::For { label, pattern, iter: Box::new(iter), body: self.block()? }
             }
         };
@@ -1641,10 +1576,7 @@ impl<'a> Parser<'a> {
             return Err(());
         }
         self.bump();
-        let saved = std::mem::replace(&mut self.no_struct, false);
-        let arg = self.data();
-        self.no_struct = saved;
-        let arg = arg?;
+        let arg = self.data()?;
         self.expect(&Tok::RParen, "`)`")?;
         let expansion = expand_data(mac, &arg);
         Ok(self.mk(ExprKind::Macro(Box::new(MacroCall { name, arg, expansion })), self.span_from(lo)))
@@ -1726,10 +1658,7 @@ impl<'a> Parser<'a> {
 
     fn bracket(&mut self, lo: u32) -> PResult<Expr> {
         self.bump();
-        let saved = std::mem::replace(&mut self.no_struct, false);
-        let r = self.bracket_inner(lo);
-        self.no_struct = saved;
-        r
+        self.bracket_inner(lo)
     }
 
     fn bracket_inner(&mut self, lo: u32) -> PResult<Expr> {
@@ -1799,9 +1728,9 @@ impl<'a> Parser<'a> {
                         return Err(());
                     }
                     // An interpolation is parsed on its own, like a parenthesized expression.
-                    let saved = (std::mem::replace(&mut self.no_struct, false), std::mem::replace(&mut self.in_guard, false));
+                    let saved = std::mem::replace(&mut self.in_guard, false);
                     let e = self.expr();
-                    (self.no_struct, self.in_guard) = saved;
+                    self.in_guard = saved;
                     let e = e?;
                     let Tok::InterpEnd { spec } = *self.tok() else {
                         self.expected("`)` to end the interpolation");
@@ -1866,6 +1795,38 @@ impl<'a> Parser<'a> {
                 Err(())
             }
         }
+    }
+
+    /// `p, name: q, ..)` after the `(` of a constructor pattern.
+    fn pattern_args(&mut self) -> PResult<PatArgs> {
+        let mut args = PatArgs::default();
+        while !self.at(&Tok::RParen) {
+            if args.rest {
+                self.error_here("`..` must be last in a pattern");
+            }
+            if self.eat(&Tok::DotDot) {
+                args.rest = true;
+                if !self.eat(&Tok::Comma) {
+                    break;
+                }
+                continue;
+            }
+            if self.at(&Tok::Ident) && matches!(self.peek_tok(1), Tok::Colon) {
+                let name = self.ident("field name")?;
+                self.bump();
+                args.named.push((name, self.pattern()?));
+            } else {
+                if !args.named.is_empty() {
+                    self.error_here("positional pattern after named pattern");
+                }
+                args.positional.push(self.pattern()?);
+            }
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        self.expect(&Tok::RParen, "`)`")?;
+        Ok(args)
     }
 
     fn pattern_atom(&mut self) -> PResult<Pattern> {
@@ -1939,45 +1900,15 @@ impl<'a> Parser<'a> {
                     self.bump();
                     path.push(self.ident("name")?);
                 }
-                if self.at(&Tok::LParen) {
-                    self.bump();
-                    let mut args = Vec::new();
-                    while !self.at(&Tok::RParen) {
-                        args.push(self.pattern()?);
-                        if !self.eat(&Tok::Comma) {
-                            break;
-                        }
-                    }
-                    self.expect(&Tok::RParen, "`)`")?;
-                    PatternKind::Variant { path, args: Some(args) }
+                if self.eat(&Tok::LParen) {
+                    PatternKind::Ctor { path, args: Some(self.pattern_args()?) }
                 } else if self.at(&Tok::LBrace) {
-                    self.bump();
-                    let mut fields = Vec::new();
-                    let mut rest = false;
-                    loop {
-                        while self.eat(&Tok::Semi) || self.eat(&Tok::Comma) {}
-                        if self.at(&Tok::RBrace) {
-                            break;
-                        }
-                        if self.eat(&Tok::DotDot) {
-                            rest = true;
-                            while self.eat(&Tok::Semi) || self.eat(&Tok::Comma) {}
-                            break;
-                        }
-                        let name = self.ident("field name")?;
-                        let pattern = if self.eat(&Tok::Colon) { Some(self.pattern()?) } else { None };
-                        fields.push(FieldPat { name, pattern });
-                        if !(self.at(&Tok::Comma) || self.at(&Tok::Semi) || self.at(&Tok::RBrace)) {
-                            self.expected("`,` or `}`");
-                            return Err(());
-                        }
-                    }
-                    self.expect(&Tok::RBrace, "`}`")?;
-                    PatternKind::Struct { path, fields, rest }
+                    self.error_here("a struct pattern is written `Name(field, ..)` or `Name(field: pattern)`");
+                    return Err(());
                 } else if path.len() == 1 {
                     if path[0].name == "_" { PatternKind::Wildcard } else { PatternKind::Binding(path.pop().unwrap()) }
                 } else {
-                    PatternKind::Variant { path, args: None }
+                    PatternKind::Ctor { path, args: None }
                 }
             }
             _ => {
@@ -1998,8 +1929,10 @@ fn expand_data(mac: &DataMacro, d: &Data) -> Expr {
             span,
         })
     };
-    let call =
-        |callee: Expr, value: Expr| Expr { kind: ExprKind::Call { callee: Box::new(callee), args: vec![Arg { name: None, value }] }, span };
+    let call = |callee: Expr, value: Expr| Expr {
+        kind: ExprKind::Call { callee: Box::new(callee), args: vec![Arg { name: None, value, spread: false }] },
+        span,
+    };
     match d {
         Data::Null(_) => path(mac.null),
         Data::Value(e) => call(path(mac.value), e.clone()),

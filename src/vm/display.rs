@@ -226,18 +226,18 @@ pub fn render_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Valu
                             Obj::Struct(def, fields) => {
                                 let rt = &prog.types[*def as usize];
                                 if Some(*def) == error_def && !debug {
-                                    let kind = heap.str(fields[0]);
-                                    let msg = heap.str(fields[1]);
+                                    let msg = heap.str(fields[0]);
+                                    let kind = heap.str(fields[1]);
                                     scratch.check(heap, out.len() + kind.len() + msg.len())?;
                                     let _ = write!(out, "{kind}: {msg}");
                                     continue;
                                 }
                                 if fields.is_empty() {
-                                    let _ = write!(out, "{} {{}}", rt.name);
+                                    let _ = write!(out, "{}()", rt.name);
                                     continue;
                                 }
-                                let _ = write!(out, "{} {{ ", rt.name);
-                                work.push(Work::Seq { obj: v, i: 0, depth: d, names: Some(*def), close: " }" });
+                                let _ = write!(out, "{}(", rt.name);
+                                work.push(Work::Seq { obj: v, i: 0, depth: d, names: Some(*def), close: ")" });
                             }
                             Obj::Variant(id, _) => {
                                 let name = prog.variants.get(*id as usize).map(|v| v.name.as_str()).unwrap_or_default();

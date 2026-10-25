@@ -7,7 +7,7 @@ Sand provides two constructs for defining custom data types: `struct` groups nam
 
 ## Structs
 
-A `struct` declaration lists its fields and their types. It can be initialized with a literal:
+A `struct` declaration lists its fields and their types. `Point(...)` constructs a value, with each field given by name or in declaration order:
 
 ```sand
 struct Point {
@@ -15,7 +15,7 @@ struct Point {
     y: float
 }
 
-let p = Point { x: 3.0, y: 4.0 }
+let p = Point(x: 3.0, y: 4.0)
 print(p.x)
 print(p)
 ```
@@ -30,7 +30,7 @@ struct Counter {
     var count: int = 0
 }
 
-let clicks = Counter { name: "clicks" }
+let clicks = Counter(name: "clicks")
 clicks.count += 1
 clicks.count += 1
 print(clicks)
@@ -44,13 +44,13 @@ struct Point {
     y: float
 }
 
-let p = Point { x: 3.0, y: 4.0 }
+let p = Point(x: 3.0, y: 4.0)
 p.x = 0.0
 ```
 
-### Shorthand and copies
+### Positional fields and copies
 
-In a struct literal, writing `x` is shorthand for `x: x`, and `..base` copies any unmentioned fields from `base`:
+Positional arguments give fields in declaration order, and a last argument `..base` copies the fields not given from `base`:
 
 ```sand
 struct Point {
@@ -59,8 +59,8 @@ struct Point {
 }
 
 let x = 1.0
-let p = Point { x, y: 2.0 }
-let q = Point { y: 9.0, ..p }
+let p = Point(x, y: 2.0)
+let q = Point(y: 9.0, ..p)
 print(q)
 ```
 
@@ -78,18 +78,40 @@ struct Vec2 {
     }
 
     fn plus(self, other: Self) -> Self {
-        Vec2 { x: self.x + other.x, y: self.y + other.y }
+        Vec2(x: self.x + other.x, y: self.y + other.y)
     }
 
     fn zero() -> Self {
-        Vec2 { x: 0.0, y: 0.0 }
+        Vec2(x: 0.0, y: 0.0)
     }
 }
 
-let v = Vec2 { x: 3.0, y: 4.0 }
+let v = Vec2(x: 3.0, y: 4.0)
 print(v.len())
 print(Vec2.zero().plus(v))
 ```
+
+### Validating construction with `init`
+
+A static method named `init` replaces field-by-field construction: `T(...)` calls `init` with its arguments. Inside `init`, `Self(...)` constructs the struct field by field. An `init` that returns a `Result` makes every construction of the type checkable:
+
+```sand
+struct Port {
+    n: int
+
+    fn init(n: int) -> Result<Port> {
+        if n < 1 or n > 65535 {
+            return Err(Error("no such port: \(n)", kind: "invalid"))
+        }
+        Ok(Self(n: n))
+    }
+}
+
+print(Port(8080))
+print(Port(0))
+```
+
+Standard library types construct the same way: `Set([1, 2])`, `Channel(capacity: 8)`, `regex.Regex(r"\d+")?`, and `time.PlainDate(2024, 2, 29)?`.
 
 ### Adding methods with `extend`
 
@@ -103,18 +125,18 @@ struct Vec2 {
 
 extend Vec2 {
     fn scale(self, k: float) -> Vec2 {
-        Vec2 { x: self.x * k, y: self.y * k }
+        Vec2(x: self.x * k, y: self.y * k)
     }
 }
 
-print(Vec2 { x: 1.0, y: 2.0 }.scale(3.0))
+print(Vec2(x: 1.0, y: 2.0).scale(3.0))
 ```
 
 Built-in types cannot be extended with `extend`; define and implement a trait instead (see [Traits and generics](/guide/traits/)).
 
 ## Structs are references
 
-Structs use reference semantics: assigning a struct or passing it to a function shares the same instance. Use `Struct { ..existing }` to allocate a shallow copy, and `==` to compare two structs field by field:
+Structs use reference semantics: assigning a struct or passing it to a function shares the same instance. Use `Struct(..existing)` to allocate a shallow copy, and `==` to compare two structs field by field:
 
 ```sand
 struct Account {
@@ -126,12 +148,12 @@ fn deposit(a: Account, amount: int) {
     a.balance += amount
 }
 
-let a = Account { owner: "ann", balance: 10 }
+let a = Account(owner: "ann", balance: 10)
 let b = a
 deposit(b, 5)
 print(a.balance)
 
-let copy = Account { ..a }
+let copy = Account(..a)
 copy.balance = 0
 print(a.balance)
 ```
@@ -188,7 +210,7 @@ struct Pair<A, B> {
     second: B
 
     fn swap(self) -> Pair<B, A> {
-        Pair { first: self.second, second: self.first }
+        Pair(first: self.second, second: self.first)
     }
 }
 
@@ -204,7 +226,7 @@ enum Tree<T> {
     }
 }
 
-print(Pair { first: 1, second: "one" }.swap())
+print(Pair(first: 1, second: "one").swap())
 
 let t = Tree.Node(Tree.Leaf, 5, Tree.Node(Tree.Leaf, 7, Tree.Leaf))
 print(t.size())

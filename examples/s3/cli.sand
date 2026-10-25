@@ -18,18 +18,23 @@ import "./s3.sand"
 
 fn client() -> Result<s3.Client> {
     let access_key = env.get("AWS_ACCESS_KEY_ID")
-        .ok_or(error("AWS_ACCESS_KEY_ID is not set", kind: "invalid"))?
+        .ok_or(Error("AWS_ACCESS_KEY_ID is not set", kind: "invalid"))?
     let secret_key = env.get("AWS_SECRET_ACCESS_KEY")
-        .ok_or(error("AWS_SECRET_ACCESS_KEY is not set", kind: "invalid"))?
-    let credentials = s3.Credentials {
-        access_key,
-        secret_key,
+        .ok_or(Error("AWS_SECRET_ACCESS_KEY is not set", kind: "invalid"))?
+    let credentials = s3.Credentials(
+        access_key: access_key,
+        secret_key: secret_key,
         session_token: env.get("AWS_SESSION_TOKEN"),
-    }
+    )
     let region = env.get("AWS_REGION") ?? "us-east-1"
     Ok(match env.get("S3_ENDPOINT") {
-        Some(endpoint) => s3.Client { region, credentials, endpoint, path_style: true }
-        None => s3.Client { region, credentials }
+        Some(endpoint) => s3.Client(
+            region: region,
+            credentials: credentials,
+            endpoint: endpoint,
+            path_style: true,
+        )
+        None => s3.Client(region: region, credentials: credentials)
     })
 }
 

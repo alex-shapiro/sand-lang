@@ -88,7 +88,7 @@ fn knapsack(items: [Item], capacity: int) -> int {
     best(0, capacity)
 }
 
-let rng = Rng { state: 42 }
+let rng = Rng(state: 42)
 
 for g in 0..GRIDS {
     print("grid \(g): \(count_paths(make_grid(rng, GRID_SIZE))) paths")
@@ -107,6 +107,6 @@ for p in 0..PAIRS {
 print("total distance: \(total_distance)")
 
 for k in 0..KNAPSACKS {
-    let items = [Item { weight: 1 + rng.next(100), value: 1 + rng.next(500) } for _ in 0..ITEMS]
+    let items = [Item(weight: 1 + rng.next(100), value: 1 + rng.next(500)) for _ in 0..ITEMS]
     print("knapsack \(k): \(knapsack(items, CAPACITY))")
 }

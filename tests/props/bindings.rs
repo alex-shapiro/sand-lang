@@ -221,8 +221,8 @@ proptest! {
         let extra_lit: Vec<String> = extra.iter().map(|&x| int_lit(x)).collect();
         let extra_field = if extra.is_empty() { String::new() } else { format!(", extra: [{}]", extra_lit.join(", ")) };
         let src = format!(
-            "import fig\nlet h = fig.Holder {{ a: {}, bs: [{}], pair: {pair_lit}{extra_field} }}\nprint(fig.echo_text(h) == h)\n\
-             let g: fig.Holder<fig.Fig, int> = fig.make_fig()\nprint(g == fig.Holder {{ a: {}, bs: [{}], pair: None }})",
+            "import fig\nlet h = fig.Holder(a: {}, bs: [{}], pair: {pair_lit}{extra_field})\nprint(fig.echo_text(h) == h)\n\
+             let g: fig.Holder<fig.Fig, int> = fig.make_fig()\nprint(g == fig.Holder(a: {}, bs: [{}], pair: None))",
             int_lit(a), bs_lit.join(", "), fig_lit(&f), int_lit(a)
         );
         let (r, out) = run(Config::new().module(m), &src);
@@ -248,10 +248,10 @@ proptest! {
             ("some_fig", format!("Some(fig.Fig.Num({}))", int_lit(n)), format!("{{\"Num\": [{n}]}}")),
             ("figs", format!("[fig.Fig.Num({})]", int_lit(n)), format!("[{{\"Num\": [{n}]}}]")),
             ("pair", format!("({}, {})", int_lit(n), str_lit(&s)), format!("[{n}, {}]", serde_str(&s))),
-            ("holder", format!("fig.Holder {{ a: {}, bs: [], pair: None }}", int_lit(n)), format!("{{\"a\": {n}, \"bs\": [], \"pair\": null}}")),
+            ("holder", format!("fig.Holder(a: {}, bs: [], pair: None)", int_lit(n)), format!("{{\"a\": {n}, \"bs\": [], \"pair\": null}}")),
             ("map", format!("[{}: fig.Fig.Num({})]", str_lit(&s), int_lit(n)), format!("{{{}: {{\"Num\": [{n}]}}}}", serde_str(&s))),
-            ("tags", format!("set([{}])", str_lit(&s)), format!("[{}]", serde_str(&s))),
-            ("ids", format!("set([{}])", int_lit(n)), format!("[{n}]")),
+            ("tags", format!("Set([{}])", str_lit(&s)), format!("[{}]", serde_str(&s))),
+            ("ids", format!("Set([{}])", int_lit(n)), format!("[{n}]")),
         ];
         let mut expected = Defaults::default();
         let fields: Vec<String> = lits.iter().zip(&given).filter(|(_, g)| **g).map(|((name, lit, _), _)| format!("{name}: {lit}")).collect();
@@ -284,7 +284,7 @@ proptest! {
         let sn = seen.clone();
         m.function("keep", move |d: Defaults| sn.lock().unwrap().push(d));
         let src = format!(
-            "import fig\nimport json\nfig.keep(fig.Defaults {{ {} }})\nlet d: fig.Defaults = json.decode({})?\nfig.keep(d)",
+            "import fig\nimport json\nfig.keep(fig.Defaults({}))\nlet d: fig.Defaults = json.decode({})?\nfig.keep(d)",
             fields.join(", "),
             str_lit(&format!("{{{}}}", keys.join(", ")))
         );

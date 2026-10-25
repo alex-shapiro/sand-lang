@@ -182,7 +182,7 @@ pub fn request(
         follow_redirects: follow_redirects,
     )?
     let data = s.body.read_all()?
-    Ok(Response { status: s.status, headers: s.headers, body: data, url: s.url })
+    Ok(Response(status: s.status, headers: s.headers, body: data, url: s.url))
 }
 
 /// Sends an HTTP request and returns a `Stream` as soon as the response headers
@@ -221,7 +221,7 @@ pub fn open(
         }
         response.close()
         if redirects == MAX_REDIRECTS {
-            return Err(error("too many redirects", kind: "http"))
+            return Err(Error("too many redirects", kind: "http"))
         }
         redirects += 1
         let next = resolve(current_url, location)?

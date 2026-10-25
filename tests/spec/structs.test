@@ -3,40 +3,40 @@ struct Point {
     x: float
     y: float
 }
-let p = Point { x: 1.0, y: 2.0 }
+let p = Point(x: 1.0, y: 2.0)
 print(p.x)
 print(p)
 --- stdout
 1.0
-Point { x: 1.0, y: 2.0 }
+Point(x: 1.0, y: 2.0)
 
 === fields separated by commas
 struct Pair { a: int, b: str }
-print(Pair { a: 1, b: "x" })
+print(Pair(a: 1, b: "x"))
 --- stdout
-Pair { a: 1, b: "x" }
+Pair(a: 1, b: "x")
 
 === field shorthand and update syntax
 struct P { x: int, y: int, z: int }
 let x = 1
 let y = 2
-let a = P { x, y, z: 3 }
-let b = P { z: 30, ..a }
+let a = P(x, y, z: 3)
+let b = P(z: 30, ..a)
 print(a)
 print(b)
 --- stdout
-P { x: 1, y: 2, z: 3 }
-P { x: 1, y: 2, z: 30 }
+P(x: 1, y: 2, z: 3)
+P(x: 1, y: 2, z: 30)
 
 === missing field is an error
 struct P { x: int, y: int }
-let p = P { x: 1 }
+let p = P(x: 1)
 --- error
 2: missing field `y`
 
 === unknown field is an error
 struct P { x: int }
-let p = P { x: 1, q: 2 }
+let p = P(x: 1, q: 2)
 --- error
 2: no field `q`
 
@@ -46,11 +46,11 @@ struct Config {
     port: int = 8080
     debug: bool = false
 }
-print(Config {})
-print(Config { port: 9000 })
+print(Config())
+print(Config(port: 9000))
 --- stdout
-Config { host: "localhost", port: 8080, debug: false }
-Config { host: "localhost", port: 9000, debug: false }
+Config(host: "localhost", port: 8080, debug: false)
+Config(host: "localhost", port: 9000, debug: false)
 
 === methods
 struct Rect {
@@ -58,10 +58,10 @@ struct Rect {
     h: float
 
     fn area(self) -> float { self.w * self.h }
-    fn scale(self, k: float) -> Rect { Rect { w: self.w * k, h: self.h * k } }
-    fn square(side: float) -> Rect { Rect { w: side, h: side } }
+    fn scale(self, k: float) -> Rect { Rect(w: self.w * k, h: self.h * k) }
+    fn square(side: float) -> Rect { Rect(w: side, h: side) }
 }
-let r = Rect { w: 2.0, h: 3.0 }
+let r = Rect(w: 2.0, h: 3.0)
 print(r.area())
 print(r.scale(2.0).area())
 print(Rect.square(4.0).area())
@@ -73,11 +73,11 @@ print(Rect.square(4.0).area())
 === Self type inside struct body
 struct V {
     x: int
-    fn add(self, o: Self) -> Self { V { x: self.x + o.x } }
+    fn add(self, o: Self) -> Self { V(x: self.x + o.x) }
 }
-print(V { x: 1 }.add(V { x: 2 }))
+print(V(x: 1).add(V(x: 2)))
 --- stdout
-V { x: 3 }
+V(x: 3)
 
 === var fields can be mutated
 struct Counter {
@@ -86,7 +86,7 @@ struct Counter {
 
     fn bump(self) { self.count += 1 }
 }
-let c = Counter { name: "c" }
+let c = Counter(name: "c")
 c.bump()
 c.bump()
 c.count += 10
@@ -96,14 +96,14 @@ print(c.count)
 
 === immutable fields cannot be assigned
 struct P { x: int }
-let p = P { x: 1 }
+let p = P(x: 1)
 p.x = 2
 --- error
 3: cannot assign to immutable field `x`
 
 === structs have reference semantics
 struct Box { var v: int }
-let a = Box { v: 1 }
+let a = Box(v: 1)
 let b = a
 b.v = 2
 print(a.v)
@@ -112,29 +112,29 @@ print(a.v)
 
 === struct equality is structural
 struct P { x: int, y: int }
-print(P { x: 1, y: 2 } == P { x: 1, y: 2 })
-print(P { x: 1, y: 2 } == P { x: 2, y: 1 })
+print(P(x: 1, y: 2) == P(x: 1, y: 2))
+print(P(x: 1, y: 2) == P(x: 2, y: 1))
 --- stdout
 true
 false
 
 === struct ordering
 struct V { major: int, minor: int }
-let vs = [V { major: 1, minor: 5 }, V { major: 0, minor: 9 }, V { major: 1, minor: 2 }]
+let vs = [V(major: 1, minor: 5), V(major: 0, minor: 9), V(major: 1, minor: 2)]
 print(vs.sorted().map(v => "\(v.major).\(v.minor)"))
 --- stdout
 ["0.9", "1.2", "1.5"]
 
 === structs as map keys
 struct K { a: int, b: str }
-let m = [K { a: 1, b: "x" }: "first"]
-print(m[K { a: 1, b: "x" }])
+let m = [K(a: 1, b: "x"): "first"]
+print(m[K(a: 1, b: "x")])
 --- stdout
 first
 
 === structs with var fields cannot be map keys
 struct K { var a: int }
-let m = [K { a: 1 }: 1]
+let m = [K(a: 1): 1]
 --- error
 2: Hash
 
@@ -142,22 +142,22 @@ let m = [K { a: 1 }: 1]
 struct Pair<A, B> {
     first: A
     second: B
-    fn swap(self) -> Pair<B, A> { Pair { first: self.second, second: self.first } }
+    fn swap(self) -> Pair<B, A> { Pair(first: self.second, second: self.first) }
 }
-let p = Pair { first: 1, second: "one" }
+let p = Pair(first: 1, second: "one")
 print(p.swap())
-let q: Pair<str, [int]> = Pair { first: "xs", second: [] }
+let q: Pair<str, [int]> = Pair(first: "xs", second: [])
 print(q)
 --- stdout
-Pair { first: "one", second: 1 }
-Pair { first: "xs", second: [] }
+Pair(first: "one", second: 1)
+Pair(first: "xs", second: [])
 
 === extend adds methods
 struct P { x: int }
 extend P {
     fn twice(self) -> int { self.x * 2 }
 }
-print(P { x: 4 }.twice())
+print(P(x: 4).twice())
 --- stdout
 8
 
@@ -170,13 +170,13 @@ extend str {
 
 === unknown method
 struct P { x: int }
-P { x: 1 }.nope()
+P(x: 1).nope()
 --- error
 2: no method `nope` on type P
 
 === unknown field access
 struct P { x: int }
-print(P { x: 1 }.y)
+print(P(x: 1).y)
 --- error
 2: no field `y` on type P
 
@@ -185,7 +185,7 @@ struct Handler {
     name: str
     run: fn(int) -> int
 }
-let h = Handler { name: "dbl", run: x => x * 2 }
+let h = Handler(name: "dbl", run: x => x * 2)
 print(h.run(21))
 --- stdout
 42
@@ -196,7 +196,7 @@ struct Node {
     children: [Node]
 }
 fn total(n: Node) -> int { n.value + n.children.map(total).sum() }
-let tree = Node { value: 1, children: [Node { value: 2, children: [] }, Node { value: 3, children: [Node { value: 4, children: [] }] }] }
+let tree = Node(value: 1, children: [Node(value: 2, children: []), Node(value: 3, children: [Node(value: 4, children: [])])])
 print(total(tree))
 --- stdout
 10
@@ -224,7 +224,7 @@ print(p)
 struct Stack<T> {
     items: [T]
 
-    fn new() -> Stack<T> { Stack { items: [] } }
+    fn new() -> Stack<T> { Stack(items: []) }
     fn push(self, x: T) { self.items.push(x) }
     fn pop(self) -> T? { self.items.pop() }
     fn peek(self) -> T? { self.items.last() }
@@ -240,3 +240,176 @@ print(s.size())
 Some("b")
 Some("b")
 1
+
+=== positional fields follow declaration order
+struct P { x: int, y: int = 2, z: int = 3 }
+print(P(1))
+print(P(1, 5))
+print(P(1, z: 9))
+print(P(z: 9, x: 1, y: 4))
+print(P(7, ..P(1, 2, 3)))
+--- stdout
+P(x: 1, y: 2, z: 3)
+P(x: 1, y: 5, z: 3)
+P(x: 1, y: 2, z: 9)
+P(x: 1, y: 4, z: 9)
+P(x: 7, y: 2, z: 3)
+
+=== construction argument errors
+struct P { x: int, y: int }
+let a = P(1, 2, 3)
+let b = P(1, x: 2)
+let c = P(1, q: 2)
+let d = P(1, ..5)
+--- error
+2: `P` has 2 fields, but 3 arguments are given
+3: field `x` is given more than once
+3: missing field `y`
+4: no field `q` on type P
+4: missing field `y`
+5: type mismatch
+
+=== init replaces construction field by field
+struct Port {
+    n: int
+
+    pub fn init(n: int) -> Result<Port> {
+        if n < 1 or n > 65535 { return Err(Error("no such port: \(n)", kind: "invalid")) }
+        Ok(Self(n: n))
+    }
+
+    fn next(self) -> Result<Port> { Port(self.n + 1) }
+}
+print(Port(80))
+print(Port(n: 0))
+print(Port(65535)?.next())
+let ports = [80, 443].map(n => Port(n))
+print(ports)
+--- stdout
+Ok(Port(n: 80))
+Err(Error(message: "no such port: 0", kind: "invalid"))
+Err(Error(message: "no such port: 65536", kind: "invalid"))
+[Ok(Port(n: 80)), Ok(Port(n: 443))]
+
+=== inside init a construction of the type is field by field
+struct Celsius {
+    degrees: float
+
+    fn init(fahrenheit: float) -> Celsius {
+        let f = () => Celsius((fahrenheit - 32.0) / 1.8)
+        f()
+    }
+}
+print(Celsius(fahrenheit: 212.0))
+--- stdout
+Celsius(degrees: 100.0)
+
+=== init of a generic struct and through an alias
+struct Pair<T> {
+    a: T
+    b: T
+
+    fn init(both: T) -> Self { Self(a: both, b: both) }
+}
+type Ints = Pair<int>
+print(Pair("x"))
+print(Ints(3))
+let p: Pair<[int]> = Pair([])
+print(p)
+--- stdout
+Pair(a: "x", b: "x")
+Pair(a: 3, b: 3)
+Pair(a: [], b: [])
+
+=== init in an extend block
+struct Name { text: str }
+extend Name {
+    fn init(text: str) -> Name { Self(text.to_upper()) }
+}
+print(Name("ann"))
+--- stdout
+Name(text: "ANN")
+
+=== a struct with init is matched by its fields
+struct Port {
+    n: int
+    fn init(n: int) -> Result<Port> { Ok(Self(n)) }
+}
+let Port(n) = Port(8080)?
+print(n)
+--- stdout
+8080
+
+=== init declarations must construct their type
+struct A {
+    x: int
+    fn init(self) -> A { self }
+}
+struct B {
+    x: int
+    fn init(x: int) -> int { x }
+}
+struct C {
+    x: int
+    fn init(x: int) -> Result<int> { Ok(x) }
+}
+enum E {
+    X
+    fn init() -> E { E.X }
+}
+trait T {
+    fn init() -> Self
+}
+--- error
+3: `init` cannot take `self`
+7: `init` must return `B` or `Result<B, E>`
+11: `init` must return `C` or `Result<C, E>`
+15: an enum cannot declare `init`
+18: a trait cannot declare `init`
+
+=== init is not a member
+struct A {
+    x: int
+    fn init(x: int) -> A { Self(x) }
+}
+let a = A.init(1)
+let f = A.init
+let b = A(x: 1, ..A(2))
+--- error
+5: `init` is not a member; construct a value with `A(...)`
+6: `init` is not a member; construct a value with `A(...)`
+7: `..base` cannot copy the fields of `A`, which declares `init`
+
+=== only structs and types with init can be constructed
+enum Shape { Circle(float), Empty }
+fn make<T>() -> T { T() }
+let s = Shape(1.0)
+let i = int(3)
+let l = List()
+--- error
+2: cannot construct a value of type `T`
+3: `Shape` is an enum; construct one of its variants, such as `Shape.Circle`
+4: `int` does not declare `init`
+5: `List` does not declare `init`
+
+=== a struct that declares init does not implement Decode
+import json
+struct Port {
+    n: int
+    fn init(n: int) -> Result<Port> { Ok(Self(n)) }
+}
+struct Config { port: Port }
+print(json.encode(Port(80)?))
+let c: Result<Config> = json.decode("{}")
+--- error
+8: Config does not implement `Decode`
+8: `Port` declares `init`, which decoding does not call
+
+=== `..base` and `..` must come last
+struct P { x: int, y: int }
+let p = P(1, 2)
+let q = P(..p, x: 3)
+let P(.., y) = p
+--- error
+3: `..base` must be the last argument
+4: `..` must be last in a pattern

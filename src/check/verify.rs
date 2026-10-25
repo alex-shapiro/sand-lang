@@ -3,7 +3,7 @@
 //! Debug builds run [`verify`] before code generation to check four invariants
 //! directly from item declarations:
 //!
-//! - Every type argument at a call site, function value, struct literal, or
+//! - Every type argument at a call site, function value, construction, or
 //!   enum variant satisfies the trait bounds of its type parameter.
 //! - Every dictionary expression passed to a call matches the trait and target
 //!   type expected by the callee's hidden dictionary parameter.
@@ -17,7 +17,7 @@
 
 use super::*;
 
-const DERIVED: [Builtin; 4] = [Builtin::Eq, Builtin::Ord, Builtin::Hash, Builtin::Encode];
+const DERIVED: [Builtin; 5] = [Builtin::Eq, Builtin::Ord, Builtin::Hash, Builtin::Encode, Builtin::Decode];
 
 /// Verifies all type definitions, `impl` blocks, and function `bodies` in `cp`.
 /// Returns an error describing the first violation found.
@@ -42,7 +42,9 @@ struct Verifier<'a> {
     builtins: HashMap<Builtin, TraitRef>,
     /// Required type parameter indices for each type definition and derived
     /// trait in [`DERIVED`], or `None` if the type never implements the trait.
-    derived: Vec<[Option<Vec<u32>>; 4]>,
+    derived: Vec<[Option<Vec<u32>>; DERIVED.len()]>,
+    /// The type definitions that declare `init`, which refutes `Decode`.
+    inits: HashSet<TypeDefId>,
 }
 
 #[derive(Default)]
@@ -62,15 +64,22 @@ type VerifyResult = Result<(), String>;
 impl<'a> Verifier<'a> {
     fn new(cp: &'a CheckedProgram) -> Self {
         let mut natives = HashMap::new();
+        let mut inits = HashSet::new();
         for (f, fi) in cp.fns.iter().enumerate() {
             if let FnKind::Native(n) = fi.kind {
                 natives.entry(n).or_insert(f as FnId);
+            }
+            if let Some(Ctor::Def(d)) = fi.owner
+                && !fi.has_self
+                && cp.name(fi.name) == "init"
+            {
+                inits.insert(d);
             }
         }
         let builtins = (0..cp.traits.len())
             .filter_map(|t| Some((cp.traits[t].builtin?, TraitRef { trait_id: t as TraitId, args: TyList::EMPTY })))
             .collect();
-        let mut v = Verifier { cp, arena: cp.arena.clone(), natives, builtins, derived: Vec::new() };
+        let mut v = Verifier { cp, arena: cp.arena.clone(), natives, builtins, derived: Vec::new(), inits };
         v.derive_all();
         v
     }
@@ -167,13 +176,16 @@ impl<'a> Verifier<'a> {
         let trait_ = DERIVED[b];
         if let TypeDefKind::Opaque(o) = def.kind {
             let ok = match (trait_, o) {
-                (Builtin::Eq, _) | (Builtin::Hash | Builtin::Encode, Opaque::Value(_)) => true,
+                (Builtin::Eq, _) | (Builtin::Hash | Builtin::Encode | Builtin::Decode, Opaque::Value(_)) => true,
                 (Builtin::Ord, Opaque::Value(v)) => v.ord,
                 _ => false,
             };
             return ok.then(Vec::new);
         }
         if trait_ == Builtin::Hash && def.fields().iter().any(|f| f.mutable) {
+            return None;
+        }
+        if trait_ == Builtin::Decode && self.inits.contains(&(d as TypeDefId)) {
             return None;
         }
         let generics = def.generics.clone();
@@ -592,8 +604,8 @@ fn builtin_parts(arena: &TypeArena, ty: Ty, b: Builtin) -> Option<Vec<TypeId>> {
         Ty::Float if b != Hash => Vec::new(),
         Ty::Range if b != Ord => Vec::new(),
         Ty::List(x) if b != Hash => vec![x],
-        Ty::Set(x) if matches!(b, Eq | Encode) => vec![x],
-        Ty::Map(k, v) if matches!(b, Eq | Encode) => vec![k, v],
+        Ty::Set(x) if matches!(b, Eq | Encode | Decode) => vec![x],
+        Ty::Map(k, v) if matches!(b, Eq | Encode | Decode) => vec![k, v],
         Ty::Tuple(l) => arena.list(l).to_vec(),
         _ => return None,
     })

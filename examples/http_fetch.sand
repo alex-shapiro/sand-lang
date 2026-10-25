@@ -25,16 +25,16 @@ fn unescape(s: str) -> str {
 }
 
 fn strip_tags(s: str) -> Result<str> {
-    let tags = regex.new("<[^>]*>")?
-    let spaces = regex.new(r"\s+")?
+    let tags = regex.Regex("<[^>]*>")?
+    let spaces = regex.Regex(r"\s+")?
     Ok(unescape(spaces.replace_all(tags.replace_all(s, ""), " ").trim()))
 }
 
 fn parse_page(url: str, status: int, html: str) -> Result<Page> {
     let base = uri.parse(url)?
-    let title_re = regex.new(r"(?is)<title[^>]*>(.*?)</title>")?
-    let heading_re = regex.new(r"(?is)<h([1-3])[^>]*>(.*?)</h[1-3]>")?
-    let link_re = regex.new(r#"(?i)<a\s[^>]*href\s*=\s*["']([^"']+)["']"#)?
+    let title_re = regex.Regex(r"(?is)<title[^>]*>(.*?)</title>")?
+    let heading_re = regex.Regex(r"(?is)<h([1-3])[^>]*>(.*?)</h[1-3]>")?
+    let link_re = regex.Regex(r#"(?i)<a\s[^>]*href\s*=\s*["']([^"']+)["']"#)?
 
     let title = match title_re.captures(html) {
         Some(c) => Some(strip_tags(c.text(1) ?? "")?)
@@ -46,7 +46,7 @@ fn parse_page(url: str, status: int, html: str) -> Result<Page> {
         headings.push("  ".repeat(level - 1) + strip_tags(c.text(2) ?? "")?)
     }
     let links = []
-    let seen = set()
+    let seen = Set()
     for c in link_re.captures_all(html) {
         let href = unescape(c.text(1) ?? "")
         if href.starts_with("#") or href.starts_with("javascript:") or href.starts_with("mailto:") {
@@ -57,17 +57,17 @@ fn parse_page(url: str, status: int, html: str) -> Result<Page> {
             links.push(resolved)
         }
     }
-    Ok(Page { url, status, title, headings, links })
+    Ok(Page(url, status, title, headings, links))
 }
 
 fn fetch(url: str) -> Result<Page> {
     let resp = http.get(url, headers: [("user-agent", "sand-fetch/0.1")], timeout: 10s)?
     if not resp.ok() {
-        return Err(error("\(url) returned status \(resp.status)", kind: "http"))
+        return Err(Error("\(url) returned status \(resp.status)", kind: "http"))
     }
     let content_type = resp.header("content-type") ?? "text/html"
     if not content_type.contains("html") {
-        return Err(error("\(url) is not HTML (\(content_type))", kind: "invalid"))
+        return Err(Error("\(url) is not HTML (\(content_type))", kind: "invalid"))
     }
     parse_page(resp.url, resp.status, resp.text()?)
 }

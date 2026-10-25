@@ -324,7 +324,7 @@ let back: [bank.Money] = json.decode("[\"1.50\"]")?
 print(back)
 let bad: Result<[bank.Money]> = json.decode("[\"x\"]")
 print(bad.unwrap_err().message)
-print(set([bank.cell(1, 2), bank.cell(1, 2)]).len())
+print(Set([bank.cell(1, 2), bank.cell(1, 2)]).len())
 help(bank.Money)
 help(bank.Cell)
 "#;
@@ -332,7 +332,7 @@ help(bank.Cell)
     r.unwrap();
     assert_eq!(
         out,
-        "[0.05, 2.50, 19.99]\n22.54\ntrue\nfive\n[\"2.50\",\"19.99\",\"0.05\"]\n[1.50]\n$[0]: expected 0.00\n1\ntype bank.Money\n\nImplements:\n    Eq\n    Ord\n    Hash\n    Encode\ntype bank.Cell\n\nImplements:\n    Eq\n    Hash\n    Encode\n"
+        "[0.05, 2.50, 19.99]\n22.54\ntrue\nfive\n[\"2.50\",\"19.99\",\"0.05\"]\n[1.50]\n$[0]: expected 0.00\n1\ntype bank.Money\n\nImplements:\n    Eq\n    Ord\n    Hash\n    Encode\n    Decode\ntype bank.Cell\n\nImplements:\n    Eq\n    Hash\n    Encode\n    Decode\n"
     );
 }
 
@@ -342,9 +342,9 @@ fn host_functions_take_and_return_values_of_other_modules() {
     let src = r#"
 import bank
 import time
-print(bank.due(time.date(2024, 2, 28)?, 2))
+print(bank.due(time.PlainDate(2024, 2, 28)?, 2))
 print(bank.opened())
-print(bank.zone_of(time.now_zoned(time.zone("Asia/Tokyo")?)))
+print(bank.zone_of(time.now_zoned(time.TimeZone("Asia/Tokyo")?)))
 help(bank.due)
 "#;
     let (r, out, _) = run_src(config, src);
@@ -468,7 +468,7 @@ fn host_enums_take_their_docs_from_rust() {
     r.unwrap();
     assert_eq!(
         out,
-        "enum shapes.Shape\n\nA plane figure.\n\nVariants:\n    Circle\n        Round.\n    Square\n    Triangle\n        Three-sided.\n\nImplements:\n    Eq\n    Ord\n    Hash\n    Encode\n"
+        "enum shapes.Shape\n\nA plane figure.\n\nVariants:\n    Circle\n        Round.\n    Square\n    Triangle\n        Three-sided.\n\nImplements:\n    Eq\n    Ord\n    Hash\n    Encode\n    Decode\n"
     );
 }
 
@@ -705,7 +705,7 @@ print(conv.write("g", b""))
     r.unwrap();
     assert_eq!(
         out,
-        "[[], [0], [0, 1]]\n[(1, \"a\"), (2, \"b\")]\n6\n[\"a\", \"b\", \"c\"]\nSome(120)\nOk(12)\nErr(Error { kind: \"not_found\", message: \"no key x\" })\nfn conv.lookup(key: str) -> Result<int, Error>\nfn conv.grid(arg1: int) -> [[int]]\nOk(4)\nErr(Error { kind: \"permission_denied\", message: \"permission denied: write g 0\" })\n"
+        "[[], [0], [0, 1]]\n[(1, \"a\"), (2, \"b\")]\n6\n[\"a\", \"b\", \"c\"]\nSome(120)\nOk(12)\nErr(Error(message: \"no key x\", kind: \"not_found\"))\nfn conv.lookup(key: str) -> Result<int, Error>\nfn conv.grid(arg1: int) -> [[int]]\nOk(4)\nErr(Error(message: \"permission denied: write g 0\", kind: \"permission_denied\"))\n"
     );
     // Results are built within the memory limit.
     let limits = Limits { max_memory: Some(16 << 20), ..Limits::default() };
@@ -799,7 +799,7 @@ pub native fn scale(x: float, k: float) -> float
 "#,
     );
     m.function("scale", |x: f64, k: f64| -> f64 { x * k });
-    let src = "import shapes\nlet s = shapes.Square { side: shapes.scale(2.0, 1.5) }\nprint(shapes.area(s))";
+    let src = "import shapes\nlet s = shapes.Square(side: shapes.scale(2.0, 1.5))\nprint(shapes.area(s))";
     let (r, out, _) = run_src(Config::new().module(m), src);
     r.unwrap();
     assert_eq!(out, "9.0\n");
@@ -837,7 +837,7 @@ impl units.Unit for Metres {
 }
 print(1500ms.show())
 print(units.total([1s, 2s]))
-print(units.total([Metres { m: 2.0 }, Metres { m: 0.5 }]))
+print(units.total([Metres(m: 2.0), Metres(m: 0.5)]))
 help(units)
 "#;
     let (r, out, _) = run_src(Config::new().module(m), src);
@@ -859,7 +859,7 @@ fn help_describes_host_modules_that_are_not_imported() {
     r.unwrap();
     assert_eq!(
         out,
-        "module shapes\n\nShapes.\n\nTypes:\n    struct Square\n        A square.\n\nFunctions:\n    fn area(s: Square) -> float\n        Area of a square.\n[\"Square\", \"area\"]\nstruct shapes.Square\n\nA square.\n\nFields:\n    side: float\n\nImplements:\n    Eq\n    Ord\n    Encode\n"
+        "module shapes\n\nShapes.\n\nTypes:\n    struct Square\n        A square.\n\nFunctions:\n    fn area(s: Square) -> float\n        Area of a square.\n[\"Square\", \"area\"]\nstruct shapes.Square\n\nA square.\n\nFields:\n    side: float\n\nImplements:\n    Eq\n    Ord\n    Encode\n    Decode\n"
     );
     let (r, out, _) = run_src(config(), "help()");
     r.unwrap();
@@ -1013,9 +1013,9 @@ fn host_functions_take_and_return_structs() {
     let src = r#"
 import plane
 import shapes
-let a = plane.Point { x: 1.0, y: 2.0 }
-print(plane.mid(a, plane.Point { x: 3.0, y: 4.0 }))
-print(plane.Point { x: 3.0, y: 4.0 }.norm())
+let a = plane.Point(x: 1.0, y: 2.0)
+print(plane.mid(a, plane.Point(x: 3.0, y: 4.0)))
+print(plane.Point(x: 3.0, y: 4.0).norm())
 let r = plane.route(label: Some("home"), points: [a, a])
 print(r)
 r.visit()
@@ -1026,9 +1026,9 @@ help(plane.Point)
 "#;
     let (r, out, _) = run_src(Config::new().module(shapes_module()).module(plane_module()), src);
     r.unwrap();
-    let route = "Route { label: Some(\"home\"), points: [Point { x: 1.0, y: 2.0 }, Point { x: 1.0, y: 2.0 }], lengths: [\"points\": 2], end: Triangle, visits: 0 }";
-    let help = "struct plane.Point\n\nA point in the plane.\n\nFields:\n    x: float\n        Horizontal coordinate.\n    y: float\n        Vertical coordinate.\n\nMethods:\n    fn norm(self) -> float\n\nImplements:\n    Eq\n    Ord\n    Encode\n";
-    assert_eq!(out, format!("Point {{ x: 2.0, y: 3.0 }}\n5.0\n{route}\n2\ntrue\n{help}"));
+    let route = "Route(label: Some(\"home\"), points: [Point(x: 1.0, y: 2.0), Point(x: 1.0, y: 2.0)], lengths: [\"points\": 2], end: Triangle, visits: 0)";
+    let help = "struct plane.Point\n\nA point in the plane.\n\nFields:\n    x: float\n        Horizontal coordinate.\n    y: float\n        Vertical coordinate.\n\nMethods:\n    fn norm(self) -> float\n\nImplements:\n    Eq\n    Ord\n    Encode\n    Decode\n";
+    assert_eq!(out, format!("Point(x: 2.0, y: 3.0)\n5.0\n{route}\n2\ntrue\n{help}"));
 }
 
 #[test]
@@ -1037,7 +1037,7 @@ fn private_struct_fields_stay_in_their_module() {
     let cases = [
         "let r = plane.route(label: None, points: [])\nprint(r.visits)",
         "let r = plane.route(label: None, points: [])\nr.visits = 3",
-        "print(plane.Route { label: None, points: [], lengths: [:], end: shapes.Shape.Circle, visits: 0 })",
+        "print(plane.Route(label: None, points: [], lengths: [:], end: shapes.Shape.Circle, visits: 0))",
     ];
     for src in cases {
         let (r, _, _) = run_src(config(), &format!("import plane\nimport shapes\n{src}"));
@@ -1113,10 +1113,10 @@ fn struct_fields_can_take_another_sand_name() {
     let mut m = NativeModule::new("lab");
     m.bind::<Sample>();
     m.function("grow", |s: Sample| Sample { r#type: format!("{}!", s.r#type), var: s.var * 2 });
-    let src = "import lab\nvar s = lab.grow(lab.Sample { kind: \"a\", variance: 2 })\ns.variance += 1\nprint(s)";
+    let src = "import lab\nvar s = lab.grow(lab.Sample(kind: \"a\", variance: 2))\ns.variance += 1\nprint(s)";
     let (r, out, _) = run_src(Config::new().module(m), src);
     r.unwrap();
-    assert_eq!(out, "Sample { kind: \"a!\", variance: 5 }\n");
+    assert_eq!(out, "Sample(kind: \"a!\", variance: 5)\n");
 }
 
 #[test]
@@ -1142,21 +1142,20 @@ fn recursive_structs_convert_to_a_bounded_depth() {
         m.function("size", |n: Node| size(&n));
         m.function("echo", |n: Node| n);
         m.function("chain", |n: i64| (0..n).fold(Node { children: Vec::new() }, |n, _| Node { children: vec![n] }));
-        run_src(Config::new().module(m), &format!("import tree\nlet leaf = tree.Node {{ children: [] }}\n{src}"))
+        run_src(Config::new().module(m), &format!("import tree\nlet leaf = tree.Node(children: [])\n{src}"))
     };
-    let (r, out, _) = run("print(tree.size(tree.echo(tree.Node { children: [leaf, tree.Node { children: [leaf] }] })))");
+    let (r, out, _) = run("print(tree.size(tree.echo(tree.Node(children: [leaf, tree.Node(children: [leaf])]))))");
     r.unwrap();
     assert_eq!(out, "4\n");
-    let (r, out, _) = run(
-        "var n = leaf\nfor _ in 0..255 {\n    n = tree.Node { children: [n] }\n}\nprint(tree.size(n))\nprint(tree.size(tree.chain(255)))",
-    );
+    let (r, out, _) =
+        run("var n = leaf\nfor _ in 0..255 {\n    n = tree.Node(children: [n])\n}\nprint(tree.size(n))\nprint(tree.size(tree.chain(255)))");
     r.unwrap();
     assert_eq!(out, "256\n256\n");
     for src in [
         "print(tree.chain(256))",
         "print(tree.chain(5000))",
-        "var n = leaf\nfor _ in 0..256 {\n    n = tree.Node { children: [n] }\n}\nprint(tree.size(n))",
-        "var n = leaf\nfor _ in 0..1000000 {\n    n = tree.Node { children: [n] }\n}\nprint(tree.size(n))",
+        "var n = leaf\nfor _ in 0..256 {\n    n = tree.Node(children: [n])\n}\nprint(tree.size(n))",
+        "var n = leaf\nfor _ in 0..1000000 {\n    n = tree.Node(children: [n])\n}\nprint(tree.size(n))",
         "leaf.children.push(leaf)\nprint(tree.size(leaf))",
     ] {
         let (r, _, _) = run(src);
@@ -1184,15 +1183,15 @@ fn boxed_structs_convert_to_a_bounded_depth() {
         m.function("range", |n: i64| (0..n).fold(None, |next, i| Some(Box::new(Link { n: i, next }))));
         run_src(Config::new().module(m), &format!("import chain\n{src}"))
     };
-    let (r, out, _) = run("print(chain.sum(chain.Link { n: 1, next: Some(chain.Link { n: 2, next: None }) }))\nprint(chain.range(3))");
+    let (r, out, _) = run("print(chain.sum(chain.Link(n: 1, next: Some(chain.Link(n: 2, next: None)))))\nprint(chain.range(3))");
     r.unwrap();
-    assert_eq!(out, "3\nSome(Link { n: 2, next: Some(Link { n: 1, next: Some(Link { n: 0, next: None }) }) })\n");
+    assert_eq!(out, "3\nSome(Link(n: 2, next: Some(Link(n: 1, next: Some(Link(n: 0, next: None))))))\n");
     let (r, out, _) = run("print(chain.sum(chain.range(256)?))");
     r.unwrap();
     assert_eq!(out, "32640\n");
     for src in [
         "print(chain.range(257))",
-        "var l = chain.Link { n: 0, next: None }\nfor i in 0..256 {\n    l = chain.Link { n: i, next: Some(l) }\n}\nprint(chain.sum(l))",
+        "var l = chain.Link(n: 0, next: None)\nfor i in 0..256 {\n    l = chain.Link(n: i, next: Some(l))\n}\nprint(chain.sum(l))",
     ] {
         let (r, _, _) = run(src);
         let Err(Error::Runtime { message, .. }) = r else { panic!("{src}: expected a runtime error, got {r:?}") };
@@ -1253,7 +1252,7 @@ help(draw.Figure)
 "#;
     let (r, out, _) = run_src(Config::new().module(draw_module()), src);
     r.unwrap();
-    let help = "enum draw.Figure\n\nA figure in the plane.\n\nVariants:\n    Empty\n        Nothing at all.\n    Circle(float)\n        A circle with its radius.\n    Rect(w: float, h: float)\n        A rectangle.\n    Labeled(str, Figure)\n        A figure with a label.\n    Group([Figure])\n        Several figures.\n\nImplements:\n    Eq\n    Ord\n    Encode\n";
+    let help = "enum draw.Figure\n\nA figure in the plane.\n\nVariants:\n    Empty\n        Nothing at all.\n    Circle(float)\n        A circle with its radius.\n    Rect(w: float, h: float)\n        A rectangle.\n    Labeled(str, Figure)\n        A figure with a label.\n    Group([Figure])\n        Several figures.\n\nImplements:\n    Eq\n    Ord\n    Encode\n    Decode\n";
     assert_eq!(out, format!("9.0\ntrue\nLabeled(\"square\", Rect(2.0, 2.0))\nsquare: 2.0 by 2.0\n12.0\n{help}"));
 }
 
@@ -1383,7 +1382,7 @@ help(cons.Chain)
 "#;
     let (r, out, _) = run_src(Config::new().module(m), src);
     r.unwrap();
-    let help = "enum cons.Chain<T>\n\nA generic recursive enum whose named payload has a renamed field.\n\nVariants:\n    End\n    Link(item: T, next: Chain<T>)\n\nImplements:\n    Eq where T: Eq\n    Ord where T: Ord\n    Hash where T: Hash\n    Encode where T: Encode\n";
+    let help = "enum cons.Chain<T>\n\nA generic recursive enum whose named payload has a renamed field.\n\nVariants:\n    End\n    Link(item: T, next: Chain<T>)\n\nImplements:\n    Eq where T: Eq\n    Ord where T: Ord\n    Hash where T: Hash\n    Encode where T: Encode\n    Decode where T: Decode\n";
     assert_eq!(out, format!("Link(\"w1\", Link(\"w0\", End))\nw1\n9\n{help}"));
 }
 
@@ -1401,11 +1400,10 @@ fn generic_host_types_can_require_traits_of_their_type_parameters() {
         s.items.sort();
         s
     });
-    let src =
-        "import sorted\nprint(sorted.sort(sorted.Sorted { items: [3, 1, 2] }))\nlet e: sorted.Sorted<str> = sorted.Sorted {}\nprint(e)";
+    let src = "import sorted\nprint(sorted.sort(sorted.Sorted(items: [3, 1, 2])))\nlet e: sorted.Sorted<str> = sorted.Sorted()\nprint(e)";
     let (r, out, _) = run_src(Config::new().module(m), src);
     r.unwrap();
-    assert_eq!(out, "Sorted { items: [1, 2, 3] }\nSorted { items: [] }\n");
+    assert_eq!(out, "Sorted(items: [1, 2, 3])\nSorted(items: [])\n");
 }
 
 #[test]
@@ -1418,7 +1416,7 @@ print(boxes.total(c))
 print(boxes.names().value)
 print(boxes.split(-4))
 print(boxes.split(4))
-let l = boxes.Labeled { label: "x", value: (1, "a") }
+let l = boxes.Labeled(label: "x", value: (1, "a"))
 print(boxes.relabel(l, "y"))
 let s: str = boxes.unwrap(boxes.Either.Left("left"))
 print(s)
@@ -1432,15 +1430,15 @@ help(boxes.Either)
 "#;
     let (r, out, _) = run_src(Config::new().module(boxes_module()), src);
     r.unwrap();
-    let help = "struct boxes.Labeled<T>\n\nA value with a label.\n\nFields:\n    label: str\n    value: T\n        The labeled value.\n    history: [T] = []\n        Earlier values.\n\nImplements:\n    Eq where T: Eq\n    Ord where T: Ord\n    Encode where T: Encode\n\
-                enum boxes.Either<L, R>\n\nA left or right value.\n\nVariants:\n    Left(L)\n    Right(R)\n\nImplements:\n    Eq where L: Eq, R: Eq\n    Ord where L: Ord, R: Ord\n    Hash where L: Hash, R: Hash\n    Encode where L: Encode, R: Encode\n";
+    let help = "struct boxes.Labeled<T>\n\nA value with a label.\n\nFields:\n    label: str\n    value: T\n        The labeled value.\n    history: [T] = []\n        Earlier values.\n\nImplements:\n    Eq where T: Eq\n    Ord where T: Ord\n    Encode where T: Encode\n    Decode where T: Decode\n\
+                enum boxes.Either<L, R>\n\nA left or right value.\n\nVariants:\n    Left(L)\n    Right(R)\n\nImplements:\n    Eq where L: Eq, R: Eq\n    Ord where L: Ord, R: Ord\n    Hash where L: Hash, R: Hash\n    Encode where L: Encode, R: Encode\n    Decode where L: Decode, R: Decode\n";
     let expected = [
-        "Labeled { label: \"count\", value: 3, history: [0, 1, 2] }",
+        "Labeled(label: \"count\", value: 3, history: [0, 1, 2])",
         "6",
         "[\"a\"]",
         "Left(\"-4\")",
         "Right(4.0)",
-        "Labeled { label: \"y\", value: (1, \"a\"), history: [] }",
+        "Labeled(label: \"y\", value: (1, \"a\"), history: [])",
         "left",
         "1",
     ];
@@ -1480,13 +1478,13 @@ fn generic_host_types_refer_to_their_own_type_as_self() {
     m.function("chain", |c: Chain<Param<0>>| c);
     m.source("pub native fn tree<T>(t: Tree<T>) -> Tree<T>\npub native fn chain<T>(c: Chain<T>) -> Chain<T>");
     let src = "import trees\nlet t = trees.Tree.Node([trees.Tree.Leaf(\"a\")])\nprint(trees.tree(t) == t)\n\
-               let c = trees.Chain { value: 1, next: Some(trees.Chain { value: 2, next: None }) }\nprint(trees.chain(c) == c)\n\
+               let c = trees.Chain(value: 1, next: Some(trees.Chain(value: 2, next: None)))\nprint(trees.chain(c) == c)\n\
                help(trees.Tree)";
     let (r, out, _) = run_src(Config::new().module(m), src);
     r.unwrap();
     assert_eq!(
         out,
-        "true\ntrue\nenum trees.Tree<T>\n\nVariants:\n    Leaf(T)\n    Node([Tree<T>])\n\nImplements:\n    Eq where T: Eq\n    Ord where T: Ord\n    Encode where T: Encode\n"
+        "true\ntrue\nenum trees.Tree<T>\n\nVariants:\n    Leaf(T)\n    Node([Tree<T>])\n\nImplements:\n    Eq where T: Eq\n    Ord where T: Ord\n    Encode where T: Encode\n    Decode where T: Decode\n"
     );
 }
 
@@ -1516,7 +1514,7 @@ struct Settings {
 }
 
 #[test]
-fn rust_field_defaults_fill_struct_literals_and_decoded_json() {
+fn rust_field_defaults_fill_constructions_and_decoded_json() {
     let mut m = NativeModule::new("conf");
     m.bind::<Settings>();
     m.function("port", |s: Settings| s.port);
@@ -1524,9 +1522,9 @@ fn rust_field_defaults_fill_struct_literals_and_decoded_json() {
     let src = r#"
 import conf
 import json
-let s = conf.Settings { name: "a" }
+let s = conf.Settings(name: "a")
 print(s)
-print(conf.port(conf.Settings { name: "b", port: 1 }))
+print(conf.port(conf.Settings(name: "b", port: 1)))
 print(conf.key(s))
 let d: conf.Settings = json.decode("{\"name\": \"c\", \"verbose\": true}")?
 print(d)
@@ -1534,9 +1532,9 @@ help(conf.Settings)
 "#;
     let (r, out, _) = run_src(Config::new().module(m), src);
     r.unwrap();
-    let s = "Settings { name: \"a\", port: 8080, verbose: false, level: \"info\", timeout: 30s, tags: [:], parent: None, ratio: -0.5, log: Warn, key: b\"\" }";
-    let d = "Settings { name: \"c\", port: 8080, verbose: true, level: \"info\", timeout: 30s, tags: [:], parent: None, ratio: -0.5, log: Warn, key: b\"\" }";
-    let help = "struct conf.Settings\n\nSettings with defaults.\n\nFields:\n    name: str\n    port: int = 8080\n    verbose: bool = false\n    level: str = \"info\"\n    timeout: duration = 30s\n    tags: [str: str] = [:]\n    parent: Settings? = None\n    ratio: float = -0.5\n    log: Level = Level.Warn\n    key: bytes = b\"\"\n\nImplements:\n    Eq\n    Encode\n";
+    let s = "Settings(name: \"a\", port: 8080, verbose: false, level: \"info\", timeout: 30s, tags: [:], parent: None, ratio: -0.5, log: Warn, key: b\"\")";
+    let d = "Settings(name: \"c\", port: 8080, verbose: true, level: \"info\", timeout: 30s, tags: [:], parent: None, ratio: -0.5, log: Warn, key: b\"\")";
+    let help = "struct conf.Settings\n\nSettings with defaults.\n\nFields:\n    name: str\n    port: int = 8080\n    verbose: bool = false\n    level: str = \"info\"\n    timeout: duration = 30s\n    tags: [str: str] = [:]\n    parent: Settings? = None\n    ratio: float = -0.5\n    log: Level = Level.Warn\n    key: bytes = b\"\"\n\nImplements:\n    Eq\n    Encode\n    Decode\n";
     assert_eq!(out, format!("{s}\n1\nb\"\"\n{d}\n{help}"));
 }
 
@@ -1619,23 +1617,23 @@ fn rust_field_defaults_can_be_any_constant() {
     m.bind::<Frame>().bind::<Sketch>();
     m.function("figure", |s: Sketch| s.figure);
     m.function("keep", |s: Sketch| s);
-    let src = "import draw\nimport json\nprint(draw.figure(draw.Sketch {}))\nlet s: draw.Sketch = json.decode(\"{}\")?\nprint(s)\n\
-               print(s == draw.Sketch {})\nprint(draw.keep(s) == s)\nprint(draw.Frame {})\n\
-               struct Scene { sketch: draw.Sketch = draw.Sketch { pair: (4, \"y\") } }\nlet scene: Scene = json.decode(\"{}\")?\n\
-               print(scene == Scene {} and scene.sketch.pair == (4, \"y\") and scene.sketch.border == draw.Frame { width: 2.0, labels: [\"l\"] })\n\
+    let src = "import draw\nimport json\nprint(draw.figure(draw.Sketch()))\nlet s: draw.Sketch = json.decode(\"{}\")?\nprint(s)\n\
+               print(s == draw.Sketch())\nprint(draw.keep(s) == s)\nprint(draw.Frame())\n\
+               struct Scene { sketch: draw.Sketch = draw.Sketch(pair: (4, \"y\")) }\nlet scene: Scene = json.decode(\"{}\")?\n\
+               print(scene == Scene() and scene.sketch.pair == (4, \"y\") and scene.sketch.border == draw.Frame(width: 2.0, labels: [\"l\"]))\n\
                help(draw.Sketch)";
     let (r, out, _) = run_src(Config::new().module(m), src);
     r.unwrap();
     assert_eq!(
         out,
-        "Empty\nSketch { figure: Empty, backdrop: None, frame: Some(Labeled(\"a\\\"b\", Rect(1.0, -2.0))), layers: Some(2), \
-         parts: [Circle(1.0), Group([])], pair: (3, \"x\"), flags: [2: [true]], border: Frame { width: 2.0, labels: [\"l\"] }, \
-         seen: Set([\"a\", \"b\"]), none: Set([]) }\n\
-         true\ntrue\nFrame { width: 1.5, labels: [] }\ntrue\nstruct draw.Sketch\n\nFields:\n    figure: Figure = Figure.Empty\n    \
+        "Empty\nSketch(figure: Empty, backdrop: None, frame: Some(Labeled(\"a\\\"b\", Rect(1.0, -2.0))), layers: Some(2), \
+         parts: [Circle(1.0), Group([])], pair: (3, \"x\"), flags: [2: [true]], border: Frame(width: 2.0, labels: [\"l\"]), \
+         seen: Set([\"a\", \"b\"]), none: Set([]))\n\
+         true\ntrue\nFrame(width: 1.5, labels: [])\ntrue\nstruct draw.Sketch\n\nFields:\n    figure: Figure = Figure.Empty\n    \
          backdrop: Figure? = None\n    frame: Figure? = Some(Figure.Labeled(\"a\\\"b\", Figure.Rect(w: 1.0, h: -2.0)))\n    \
          layers: int? = Some(2)\n    parts: [Figure] = [Figure.Circle(1.0), Figure.Group([])]\n    pair: (int, str) = (3, \"x\")\n    \
          flags: [int: [bool]] = [2: [true]]\n    border: Frame = Frame { width: 2.0, labels: [\"l\"] }\n    \
-         seen: Set<str> = set([\"a\", \"b\"])\n    none: Set<int> = set()\n\nImplements:\n    Eq\n    Encode\n"
+         seen: Set<str> = Set([\"a\", \"b\"])\n    none: Set<int> = Set()\n\nImplements:\n    Eq\n    Encode\n    Decode\n"
     );
 }
 
@@ -1754,13 +1752,13 @@ fn json_rejects_unrepresentable_types_at_compile_time() {
     let cases = vec![
         ("json.encode((x: int) => x)", "fn(int) -> int does not implement `Encode`"),
         ("json.encode([spawn 1])", "[Task<int>] does not implement `Encode` because the elements of `[Task<int>]` have type `Task<int>`"),
-        ("let c: Channel<int> = task.channel()\njson.to_json(c)", "Channel<int> does not implement `Encode`"),
+        ("let c: Channel<int> = Channel()\njson.to_json(c)", "Channel<int> does not implement `Encode`"),
         (
             "let f: fn((int, fn() -> int), int) -> str = json.encode",
             "(int, fn() -> int) does not implement `Encode` because element 1 of `(int, fn() -> int)` has type `fn() -> int`",
         ),
         (
-            "struct S { f: fn() -> int }\njson.encode(S { f: () => 1 })",
+            "struct S { f: fn() -> int }\njson.encode(S(f: () => 1))",
             "S does not implement `Encode` because field `f` of `S` has type `fn() -> int`",
         ),
         ("fn dump<T>(x: T) -> str {\n    json.encode(x)\n}", "type parameter `T` does not implement `Encode`; add `T: Encode`"),
@@ -1833,7 +1831,7 @@ fn help_lists_rust_bound_items_in_registration_order() {
     let order: Vec<usize> =
         ["enum Zebra", "struct Apple", "fn zz()", "fn aa()", "fn mm()"].iter().map(|s| out.find(s).unwrap_or(usize::MAX)).collect();
     assert!(order.windows(2).all(|w| w[0] < w[1]), "{out}");
-    assert!(out.ends_with("struct zoo.Apple\n\nA fruit, documented in a file.\n\nIt has one field.\n\nFields:\n    grams: int\n        A fruit, documented in a file.\n\nImplements:\n    Eq\n    Ord\n    Hash\n    Encode\n"), "{out}");
+    assert!(out.ends_with("struct zoo.Apple\n\nA fruit, documented in a file.\n\nIt has one field.\n\nFields:\n    grams: int\n        A fruit, documented in a file.\n\nImplements:\n    Eq\n    Ord\n    Hash\n    Encode\n    Decode\n"), "{out}");
 }
 
 #[test]
@@ -1970,7 +1968,7 @@ fn native_module_custom_capability() {
     });
     let (r, out, _) = run_src(Config::new().policy(policy).module(m), src);
     r.unwrap();
-    assert_eq!(out, "Ok(\"opened front\")\nErr(Error { kind: \"permission_denied\", message: \"permission denied: door back\" })\n");
+    assert_eq!(out, "Ok(\"opened front\")\nErr(Error(message: \"permission denied: door back\", kind: \"permission_denied\"))\n");
 }
 
 #[test]
@@ -1991,7 +1989,7 @@ fn native_module_capability_prompts() {
     rt().block_on(engine.run_source("main.sand", "import door\nprint(door.open(\"front\"))\nprint(door.open(\"back\"))")).unwrap();
     assert_eq!(
         out.contents(),
-        "Ok(\"opened front\")\nErr(Error { kind: \"permission_denied\", message: \"permission denied: door back\" })\n"
+        "Ok(\"opened front\")\nErr(Error(message: \"permission denied: door back\", kind: \"permission_denied\"))\n"
     );
     let door = |detail: &str| Capability::Custom { name: "door".into(), detail: detail.into() };
     assert_eq!(prompter.asked(), vec![door("front"), door("back")]);
@@ -2590,7 +2588,7 @@ fn counts_past_u32_max_are_not_truncated() {
          print(xs.windows({BIG}))\n\
          print((0..10000000000).step_by(5000000000))\n\
          print((5000000000..5000000003).to_list())\n\
-         let ch = task.channel(capacity: {BIG})\n\
+         let ch = Channel(capacity: {BIG})\n\
          ch.send(1)\n\
          print(ch.len())"
     );
@@ -2685,10 +2683,10 @@ struct Holder {
 let in_list = [Some("list \(i)") for i in 0..1000]
 let in_map: [int: Result<str, int>] = [:]
 for i in 0..1000 { in_map[i] = Ok("map \(i)") }
-let in_struct = Holder { v: Some("struct field") }
+let in_struct = Holder(v: Some("struct field"))
 let captured = Some(["captured", "list"])
 let closure = () => captured.unwrap().len()
-let ch = task.channel(capacity: 10)
+let ch = Channel(capacity: 10)
 ch.send(Some("queued"))
 let t = spawn { Some("task result") }
 t.wait()
@@ -2722,10 +2720,10 @@ struct Node {
 let xs: [str] = []
 let ys = ["", "", ""]
 let m: [str: [int]] = [:]
-let s: Set<str> = set()
+let s: Set<str> = Set()
 var head: Node? = None
-let node = Node { name: "root", next: None }
-let ch = task.channel(capacity: 100)
+let node = Node(name: "root", next: None)
+let ch = Channel(capacity: 100)
 var captured = "c0"
 let bump = (i: int) => {
     captured = "c\(i)"
@@ -2735,8 +2733,8 @@ for i in 0..60 {
     ys[i % 3] = "y\(i)"
     m["k\(i % 7)"] = [i, i * 2]
     s.add("s\(i % 11)")
-    head = Some(Node { name: "n\(i)", next: head })
-    node.next = Some(Node { name: "child\(i)", next: None })
+    head = Some(Node(name: "n\(i)", next: head))
+    node.next = Some(Node(name: "child\(i)", next: None))
     ch.send("msg\(i)")
     bump(i)
     xs.insert(0, "front\(i)")
@@ -3092,7 +3090,7 @@ fn error_messages_cannot_impersonate_limits_or_interrupts() {
     }
     // A failed top-level `?` in a session fails with the error's text.
     let mut session = Engine::new(Config::new()).unwrap().session();
-    let r = rt().block_on(session.eval("let r: Result<int> = Err(error(\"\\u{0}memory\"))\nr?"));
+    let r = rt().block_on(session.eval("let r: Result<int> = Err(Error(\"\\u{0}memory\"))\nr?"));
     assert!(matches!(r, Err(Error::Runtime { .. })), "{r:?}");
 }
 
@@ -3276,7 +3274,7 @@ fn host_errors_are_err_values_and_aborts_end_the_run() {
     let run = |src: &str| run_src(Config::new().module(m.clone()), &format!("import errs\n{src}"));
     let (r, out, _) = run("print(errs.now())\nprint(errs.later())");
     r.unwrap();
-    assert_eq!(out, "Err(Error { kind: \"invalid\", message: \"bad input\" })\nErr(Error { kind: \"io\", message: \"broken pipe\" })\n");
+    assert_eq!(out, "Err(Error(message: \"bad input\", kind: \"invalid\"))\nErr(Error(message: \"broken pipe\", kind: \"io\"))\n");
     let (r, _, _) = run("print(errs.abort())");
     assert!(matches!(&r, Err(Error::Runtime { message, .. }) if message.contains("no result")), "{r:?}");
 }
@@ -3335,8 +3333,8 @@ fn retry_stress_fails_a_check_in_the_native_body() {
 fn derived_impls_of_deep_field_types_are_checked_on_a_small_stack() {
     let (ok, bad) = (format!("int{}", "?".repeat(9000)), format!("float{}", "?".repeat(9000)));
     let src = format!(
-        "struct S {{ f: {ok} }}\nstruct F {{ f: {bad} }}\nstruct B<T: Hash> {{ v: T }}\nprint(set([S {{ f: None }}]).len())\n\
-         let b = B {{ v: S {{ f: None }} }}\nlet c = B {{ v: F {{ f: None }} }}\n"
+        "struct S {{ f: {ok} }}\nstruct F {{ f: {bad} }}\nstruct B<T: Hash> {{ v: T }}\nprint(Set([S(f: None)]).len())\n\
+         let b = B(v: S(f: None))\nlet c = B(v: F(f: None))\n"
     );
     let run = move || run_src(Config::new(), &src);
     let (r, _, _) = std::thread::Builder::new().stack_size(512 << 10).spawn(run).unwrap().join().unwrap();

@@ -10,9 +10,9 @@ struct Node {
 
     fn bottom_up(depth: int) -> Node {
         if depth == 0 {
-            Node { left: None, right: None }
+            Node(left: None, right: None)
         } else {
-            Node { left: Some(Node.bottom_up(depth - 1)), right: Some(Node.bottom_up(depth - 1)) }
+            Node(left: Some(Node.bottom_up(depth - 1)), right: Some(Node.bottom_up(depth - 1)))
         }
     }
 

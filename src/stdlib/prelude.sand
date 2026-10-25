@@ -186,11 +186,6 @@ pub enum Result<T, E> {
     }
 }
 
-/// Constructs an `Error` with `message` and `kind`.
-pub fn error(message: str, kind: str = "error") -> Error {
-    Error { kind, message }
-}
-
 extend<T> Task<T> {
     /// Suspends the calling task until `self` completes and returns its result.
     pub native fn wait(self) -> T
@@ -201,6 +196,11 @@ extend<T> Task<T> {
 }
 
 extend<T> Channel<T> {
+    /// Creates a channel that holds at most `capacity` queued values, or any
+    /// number if `capacity` is `0`. Aborts with kind `"invalid"` if
+    /// `capacity` is negative.
+    pub native fn init(capacity: int = 0) -> Channel<T>
+
     /// Sends `value` into the channel, suspending while a bounded channel is
     /// full. Returns `false` if the channel is closed.
     pub native fn send(self, value: T) -> bool
@@ -221,7 +221,7 @@ extend<T> Channel<T> {
     /// Returns a lazy iterator that receives values from the channel until it
     /// is closed and drained.
     pub fn iter(self) -> Iter<T> {
-        Iter { next: () => self.recv() }
+        Iter(next: () => self.recv())
     }
 }
 
@@ -280,9 +280,6 @@ pub fn todo() -> never {
 /// Terminates the program immediately with exit status `code`.
 pub native fn exit(code: int) -> never
 
-/// Constructs a `Set<T>` containing the unique elements of `items` in insertion order.
-pub native fn set<T: Hash>(items: [T] = []) -> Set<T>
-
 /// Prints documentation for `x` (a module, type, trait, function, method, or
 /// string path).
 pub native fn help<T>(x: T)
@@ -308,6 +305,11 @@ pub trait Hash: Eq {}
 /// Encodes values as JSON with `json.encode`. The compiler derives `Encode`
 /// for tuples, structs, and enums whose components implement `Encode`.
 pub trait Encode {}
+
+/// Decodes values from JSON with `json.decode`. The compiler derives `Decode`
+/// for tuples, enums, and structs whose components implement `Decode`, except
+/// for a struct that declares `init`, which only `init` constructs.
+pub trait Decode: Encode {}
 
 /// Performs arithmetic on numeric types (`int` and `float`).
 pub trait Num: Ord + Encode {
@@ -518,7 +520,7 @@ extend str {
     /// Returns a lazy iterator over the Unicode scalar values of `self` as
     /// single-character strings.
     pub fn chars_iter(self) -> Iter<str> {
-        Iter { next: self.chars_iter_next() }
+        Iter(next: self.chars_iter_next())
     }
 
     native fn chars_iter_next(self) -> fn() -> str?
@@ -645,7 +647,7 @@ extend<T> [T] {
 
     /// Returns a lazy iterator over the elements of the list.
     pub fn iter(self) -> Iter<T> {
-        Iter { next: self.iter_next() }
+        Iter(next: self.iter_next())
     }
 
     native fn iter_next(self) -> fn() -> T?
@@ -933,7 +935,7 @@ extend<K: Hash, V> [K: V] {
     /// Returns a lazy iterator over a snapshot of the `(key, value)` entries in
     /// insertion order.
     pub fn iter(self) -> Iter<(K, V)> {
-        Iter { next: self.iter_next() }
+        Iter(next: self.iter_next())
     }
 
     native fn iter_next(self) -> fn() -> (K, V)?
@@ -960,9 +962,13 @@ extend<K: Hash, V> [K: V] {
     }
 }
 
-/// Insertion-ordered hash set constructed with `set([...])`. Sets are mutable
+/// Insertion-ordered hash set constructed with `Set([...])`. Sets are mutable
 /// reference types, and elements must implement `Hash`.
 extend<T: Hash> Set<T> {
+    /// Creates a set of the distinct elements of `items`, in the order of
+    /// their first occurrence.
+    pub native fn init(items: [T] = []) -> Set<T>
+
     /// Returns the number of elements in the set.
     pub native fn len(self) -> int
     /// Returns `true` if the set contains zero elements.
@@ -990,7 +996,7 @@ extend<T: Hash> Set<T> {
 
     /// Returns a lazy iterator over a snapshot of the elements in insertion order.
     pub fn iter(self) -> Iter<T> {
-        Iter { next: self.iter_next() }
+        Iter(next: self.iter_next())
     }
 
     native fn iter_next(self) -> fn() -> T?
@@ -1029,7 +1035,7 @@ extend Range {
 
     /// Returns a lazy iterator over the integers in the range.
     pub fn iter(self) -> Iter<int> {
-        Iter { next: self.iter_next() }
+        Iter(next: self.iter_next())
     }
 
     native fn iter_next(self) -> fn() -> int?
@@ -1259,7 +1265,7 @@ pub trait Iterator<T> {
 
     /// Wraps `self` in a lazy `Iter<T>` that provides adapter and consumer methods.
     fn iter(self) -> Iter<T> {
-        Iter { next: () => self.next() }
+        Iter(next: () => self.next())
     }
 }
 
@@ -1274,12 +1280,12 @@ pub struct Iter<T> {
     /// Constructs an iterator that calls `f()` to produce each element until
     /// `f()` returns `None`.
     pub fn from_fn(f: fn() -> T?) -> Iter<T> {
-        Iter { next: f }
+        Iter(next: f)
     }
 
     /// Constructs an empty iterator that immediately yields `None`.
     pub fn empty() -> Iter<T> {
-        Iter { next: () => None }
+        Iter(next: () => None)
     }
 
     /// Constructs an iterator that yields `x` once and then `None`.
@@ -1292,12 +1298,12 @@ pub struct Iter<T> {
             done = true
             Some(x)
         }
-        Iter { next }
+        Iter(next)
     }
 
     /// Constructs an infinite iterator that yields `x` on every step.
     pub fn repeat(x: T) -> Iter<T> {
-        Iter { next: () => Some(x) }
+        Iter(next: () => Some(x))
     }
 
     /// Constructs an iterator starting from `first` where each subsequent
@@ -1311,7 +1317,7 @@ pub struct Iter<T> {
             }
             r
         }
-        Iter { next }
+        Iter(next)
     }
 
     /// Applies `f` lazily to each element.
@@ -1323,7 +1329,7 @@ pub struct Iter<T> {
                 None => None
             }
         }
-        Iter { next: step }
+        Iter(next: step)
     }
 
     /// Yields only the elements for which `f` returns `true`.
@@ -1340,7 +1346,7 @@ pub struct Iter<T> {
                 }
             }
         }
-        Iter { next: step }
+        Iter(next: step)
     }
 
     /// Applies `f` to each element and yields the `Some` results.
@@ -1355,7 +1361,7 @@ pub struct Iter<T> {
             }
             None
         }
-        Iter { next: step }
+        Iter(next: step)
     }
 
     /// Applies `f` to each element and flattens the resulting iterators in order.
@@ -1372,7 +1378,7 @@ pub struct Iter<T> {
                 inner = f(x).next
             }
         }
-        Iter { next: step }
+        Iter(next: step)
     }
 
     /// Yields `(index, element)` pairs starting from index `0`.
@@ -1384,7 +1390,7 @@ pub struct Iter<T> {
             i += 1
             Some((i, x))
         }
-        Iter { next: step }
+        Iter(next: step)
     }
 
     /// Yields pairs of elements from `self` and `other` until either iterator is exhausted.
@@ -1396,7 +1402,7 @@ pub struct Iter<T> {
             let y = b()?
             Some((x, y))
         }
-        Iter { next: step }
+        Iter(next: step)
     }
 
     /// Yields all elements of `self` followed by all elements of `other`.
@@ -1414,7 +1420,7 @@ pub struct Iter<T> {
             }
             b()
         }
-        Iter { next: step }
+        Iter(next: step)
     }
 
     /// Yields at most the first `n` elements.
@@ -1428,7 +1434,7 @@ pub struct Iter<T> {
             left -= 1
             next()
         }
-        Iter { next: step }
+        Iter(next: step)
     }
 
     /// Skips the first `n` elements and yields the rest.
@@ -1442,7 +1448,7 @@ pub struct Iter<T> {
             }
             next()
         }
-        Iter { next: step }
+        Iter(next: step)
     }
 
     /// Yields elements while `f` returns `true`, stopping at the first `false`.
@@ -1462,7 +1468,7 @@ pub struct Iter<T> {
                 }
             }
         }
-        Iter { next: step }
+        Iter(next: step)
     }
 
     /// Drops elements while `f` returns `true` and then yields all remaining elements.
@@ -1482,7 +1488,7 @@ pub struct Iter<T> {
             }
             next()
         }
-        Iter { next: step }
+        Iter(next: step)
     }
 
     /// Yields the first element and every `step`-th element thereafter (`step > 0`).
@@ -1502,7 +1508,7 @@ pub struct Iter<T> {
             }
             next()
         }
-        Iter { next: advance }
+        Iter(next: advance)
     }
 
     /// Calls `f` on each element before yielding it.
@@ -1515,7 +1521,7 @@ pub struct Iter<T> {
             }
             r
         }
-        Iter { next: step }
+        Iter(next: step)
     }
 
     /// Collects all remaining elements into a list.
@@ -1529,7 +1535,7 @@ pub struct Iter<T> {
 
     /// Collects all remaining elements into a `Set<T>`.
     pub fn to_set(self) -> Set<T> where T: Hash {
-        let out: Set<T> = set()
+        let out: Set<T> = Set()
         for x in self {
             out.add(x)
         }
@@ -1731,7 +1737,7 @@ extend Iter<int> {
             started = true
             Some(i)
         }
-        Iter { next }
+        Iter(next)
     }
 }
 

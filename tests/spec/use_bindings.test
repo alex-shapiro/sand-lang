@@ -8,8 +8,8 @@ impl Close for Res {
     }
 }
 fn work() {
-    use a = Res { name: "a" }
-    use b = Res { name: "b" }
+    use a = Res(name: "a")
+    use b = Res(name: "b")
     print("work with \(a.name) and \(b.name)")
 }
 work()
@@ -30,7 +30,7 @@ impl Close for Res {
     }
 }
 fn open(name: str, ok: bool) -> Result<Res> {
-    if ok { Ok(Res { name }) } else { Err(error("cannot open \(name)")) }
+    if ok { Ok(Res(name)) } else { Err(Error("cannot open \(name)")) }
 }
 fn early(n: int) -> Result<int> {
     use a = open("a", true)?
@@ -44,7 +44,7 @@ print(early(0))
 print(early(1))
 print(early(2))
 for i in 0..3 {
-    use r = Res { name: "loop \(i)" }
+    use r = Res(name: "loop \(i)")
     if i == 0 {
         continue
     }
@@ -58,7 +58,7 @@ close b
 close a
 Ok(0)
 close a
-Err(Error { kind: "error", message: "cannot open b" })
+Err(Error(message: "cannot open b", kind: "error"))
 close b
 close a
 Ok(2)
@@ -78,7 +78,7 @@ impl Close for Res {
 }
 fn f() -> str {
     defer print("deferred first")
-    use r = Res { name: "r" }
+    use r = Res(name: "r")
     defer print("deferred last")
     r.name
 }
@@ -100,7 +100,7 @@ impl Close for Guard {
 }
 fn lock(name: str) -> Guard {
     print("acquired \(name)")
-    Guard { name }
+    Guard(name)
 }
 {
     use _ = lock("mutex")
@@ -121,12 +121,12 @@ impl Close for Res {
     }
 }
 fn open_some(want: bool) -> Res? {
-    if want { Some(Res { name: "maybe" }) } else { None }
+    if want { Some(Res(name: "maybe")) } else { None }
 }
 {
     use a = open_some(true)
     use b = open_some(false)
-    use all = [Res { name: "first" }, Res { name: "second" }]
+    use all = [Res(name: "first"), Res(name: "second")]
 }
 --- stdout
 close second
@@ -146,7 +146,7 @@ fn consume<T: Close>(x: T) {
     use owned = x
     print("using it")
 }
-consume(Res { name: "generic" })
+consume(Res(name: "generic"))
 --- stdout
 using it
 close generic
@@ -160,7 +160,7 @@ impl Close for Res {
         print("close \(self.name)")
     }
 }
-use r = Res { name: "top" }
+use r = Res(name: "top")
 print("running")
 --- stdout
 running
@@ -180,7 +180,7 @@ impl Close for Res {
     }
 }
 {
-    use r = Res { name: "x" }
+    use r = Res(name: "x")
 }
 --- stdout
 trait
@@ -213,8 +213,8 @@ impl Close for Res {
     fn close(self) {}
 }
 fn f() {
-    use r = Res { name: "a" }
-    r = Res { name: "b" }
+    use r = Res(name: "a")
+    r = Res(name: "b")
 }
 --- error
 9: cannot assign to immutable binding `r`
@@ -227,8 +227,8 @@ impl Close for Res {
     fn close(self) {}
 }
 fn f()   {
-    use   r:Res=Res { name: "a" }   // the resource
-    use _ = Res { name: "b" }
+    use   r:Res=Res(name: "a")   // the resource
+    use _ = Res(name: "b")
 }
 --- fmt
 struct Res {
@@ -240,6 +240,6 @@ impl Close for Res {
 }
 
 fn f() {
-    use r: Res = Res { name: "a" } // the resource
-    use _ = Res { name: "b" }
+    use r: Res = Res(name: "a") // the resource
+    use _ = Res(name: "b")
 }

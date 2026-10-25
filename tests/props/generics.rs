@@ -77,9 +77,9 @@ const TYPES: &str = "struct Wrap<A> { v: A }\nstruct Keyed<A> { s: Set<A> }\nstr
                      struct Tagged<A: Hash> { v: A }\nstruct Cell<A> { var v: A }\n";
 
 const PROBES: &str = "fn eqp<X: Eq>(x: X, y: X) -> str { \"\\(x == y)\" }
-fn hashp<X: Hash>(x: X, y: X) -> str { \"\\(set([x, y, x]).len())\" }
+fn hashp<X: Hash>(x: X, y: X) -> str { \"\\(Set([x, y, x]).len())\" }
 fn ordp<X: Ord>(x: X, y: X) -> str { \"\\(x < y) \\(x <= y)\" }
-fn rtp<reflect X: Encode + Eq>(x: X) -> str {
+fn rtp<reflect X: Decode + Eq>(x: X) -> str {
     let r: Result<X> = json.decode(json.encode(x))
     \"\\(r == Ok(x))\"
 }
@@ -224,17 +224,17 @@ impl Val {
             (Ty::List(t), Val::List(xs)) => format!("[{}]", list(xs, t)),
             (Ty::Opt(t), Val::Opt(Some(x))) => format!("Some({})", x.sand(t)),
             (Ty::Opt(_), Val::Opt(None)) => "None".into(),
-            (Ty::Set(t), Val::Set(xs)) => format!("set([{}])", list(xs, t)),
-            (Ty::Keyed(t), Val::Set(xs)) => format!("Keyed {{ s: set([{}]) }}", list(xs, t)),
-            (Ty::Outer(t), Val::Set(xs)) => format!("Outer {{ k: Keyed {{ s: set([{}]) }} }}", list(xs, t)),
+            (Ty::Set(t), Val::Set(xs)) => format!("Set([{}])", list(xs, t)),
+            (Ty::Keyed(t), Val::Set(xs)) => format!("Keyed(s: Set([{}]))", list(xs, t)),
+            (Ty::Outer(t), Val::Set(xs)) => format!("Outer(k: Keyed(s: Set([{}])))", list(xs, t)),
             (Ty::Map(..), Val::Map(kvs)) if kvs.is_empty() => "[:]".into(),
             (Ty::Map(k, t), Val::Map(kvs)) => {
                 format!("[{}]", kvs.iter().map(|(a, b)| format!("{}: {}", a.sand(k), b.sand(t))).collect::<Vec<_>>().join(", "))
             }
             (Ty::Pair(a, b), Val::Pair(x, y)) => format!("({}, {})", x.sand(a), y.sand(b)),
-            (Ty::Wrap(t), Val::Wrap(x)) => format!("Wrap {{ v: {} }}", x.sand(t)),
-            (Ty::Tagged(t), Val::Wrap(x)) => format!("Tagged {{ v: {} }}", x.sand(t)),
-            (Ty::Cell(t), Val::Wrap(x)) => format!("Cell {{ v: {} }}", x.sand(t)),
+            (Ty::Wrap(t), Val::Wrap(x)) => format!("Wrap(v: {})", x.sand(t)),
+            (Ty::Tagged(t), Val::Wrap(x)) => format!("Tagged(v: {})", x.sand(t)),
+            (Ty::Cell(t), Val::Wrap(x)) => format!("Cell(v: {})", x.sand(t)),
             (t, v) => unreachable!("{v:?} is not a value of {t:?}"),
         }
     }
@@ -523,8 +523,8 @@ fn wrap_source(c: Ctor) -> &'static str {
         Ctor::List => "[x]",
         Ctor::Opt => "Some(x)",
         Ctor::Pair => "(x, x)",
-        Ctor::Wrap => "(Wrap { v: x })",
-        Ctor::Keyed => "(Keyed { s: set([x]) })",
+        Ctor::Wrap => "(Wrap(v: x))",
+        Ctor::Keyed => "(Keyed(s: Set([x])))",
         Ctor::Int | Ctor::Str => unreachable!("not a wrapper"),
     }
 }
@@ -697,10 +697,10 @@ fn generate(seed: u64) -> (Case, Vec<(String, String)>) {
     }
     if let Some(t) = find_type(&mut rng, |t| !t.implements(BuiltinTrait::Hash)) {
         let s = t.sand();
-        bad.push((format!("let bad: Keyed<{s}> = Keyed {{ s: set([]) }}\n"), format!("Keyed<{s}>")));
-        bad.push((format!("let bad: Outer<{s}> = Outer {{ k: Keyed {{ s: set([]) }} }}\n"), format!("Outer<{s}>")));
+        bad.push((format!("let bad: Keyed<{s}> = Keyed(s: Set([]))\n"), format!("Keyed<{s}>")));
+        bad.push((format!("let bad: Outer<{s}> = Outer(k: Keyed(s: Set([])))\n"), format!("Outer<{s}>")));
         let v = value(&mut rng, &t).sand(&t);
-        bad.push((format!("let bad: Tagged<{s}> = Tagged {{ v: {v} }}\n"), format!("Tagged<{s}>")));
+        bad.push((format!("let bad: Tagged<{s}> = Tagged(v: {v})\n"), format!("Tagged<{s}>")));
         bad.push((format!("struct Bad {{ s: Set<{s}> }}\n"), format!("a field of type Set<{s}>")));
         bad.push((format!("let bad: Result<Set<{s}>> = json.decode(\"[]\")\n"), format!("decoding Set<{s}>")));
     }

@@ -25,7 +25,7 @@ fn parse_all(items: [str]) -> Result<int> {
     defer print("done")
     var sum = 0
     for item in items {
-        sum += item.parse_int().ok_or(error("not a number: \(item)"))?
+        sum += item.parse_int().ok_or(Error("not a number: \(item)"))?
     }
     Ok(sum)
 }
@@ -110,7 +110,7 @@ impl Close for Lock {
 
 fn acquire(name: str) -> Lock {
     print("acquire \(name)")
-    Lock { name }
+    Lock(name)
 }
 
 fn work() {
@@ -153,7 +153,7 @@ fn size(path: str) -> Result<int> {
 
 fs.write_text("app.log", "started\n")?
 print(size("app.log")?)
-let log = Log { file: open_log("app.log")? }
+let log = Log(file: open_log("app.log")?)
 print(log.file.write_str("more\n"))
 ```
 
@@ -193,7 +193,7 @@ fn size(path: str) -> Result<int> {
 
 fs.write_text("app.log", "started\n")?
 print(size("app.log")?)
-use log = Log { file: open_log("app.log")? }
+use log = Log(file: open_log("app.log")?)
 print(log.file.write_str("more\n"))
 ```
 

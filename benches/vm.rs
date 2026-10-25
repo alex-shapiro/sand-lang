@@ -51,7 +51,7 @@ const BENCHES: &[Bench] = &[
     },
     Bench {
         name: "map/set iteration 1M",
-        source: "let m: [int: int] = [:]\nfor i in 0..1000000 { m[i] = i }\nvar t = 0\nfor r in 0..3 { for (k, v) in m { t += v } }\nfor e in m.iter() { t += e.1 }\nlet s = set(m.keys())\nfor x in s { t += x }\nprint(t)",
+        source: "let m: [int: int] = [:]\nfor i in 0..1000000 { m[i] = i }\nvar t = 0\nfor r in 0..3 { for (k, v) in m { t += v } }\nfor e in m.iter() { t += e.1 }\nlet s = Set(m.keys())\nfor x in s { t += x }\nprint(t)",
         expected: "2499997500000\n",
         ops: 0,
     },
@@ -75,7 +75,7 @@ const BENCHES: &[Bench] = &[
     },
     Bench {
         name: "struct method dispatch 2M",
-        source: "struct V {\n    x: float\n    y: float\n    fn dot(self, o: V) -> float { self.x * o.x + self.y * o.y }\n}\nlet a = V { x: 1.0, y: 2.0 }\nlet b = V { x: 3.0, y: 4.0 }\nvar t = 0.0\nfor i in 0..2000000 { t += a.dot(b) }\nprint(t)",
+        source: "struct V {\n    x: float\n    y: float\n    fn dot(self, o: V) -> float { self.x * o.x + self.y * o.y }\n}\nlet a = V(x: 1.0, y: 2.0)\nlet b = V(x: 3.0, y: 4.0)\nvar t = 0.0\nfor i in 0..2000000 { t += a.dot(b) }\nprint(t)",
         expected: "22000000.0\n",
         ops: 0,
     },
@@ -141,19 +141,19 @@ const BENCHES: &[Bench] = &[
     },
     Bench {
         name: "gc: 1M live + 10M churn",
-        source: "struct P {\n    x: int\n    y: int\n}\nlet live = [P { x: i, y: i } for i in 0..1000000]\nvar t = 0\nfor i in 0..10000000 {\n    let p = P { x: i, y: 1 }\n    t += p.y\n}\nprint(t + live.len())",
+        source: "struct P {\n    x: int\n    y: int\n}\nlet live = [P(x: i, y: i) for i in 0..1000000]\nvar t = 0\nfor i in 0..10000000 {\n    let p = P(x: i, y: 1)\n    t += p.y\n}\nprint(t + live.len())",
         expected: "11000000\n",
         ops: 10_000_000,
     },
     Bench {
         name: "gc: 4M live (200MB), mutated + 10M churn",
-        source: "struct P {\n    x: int\n    y: int\n}\nlet live = [P { x: i, y: i } for i in 0..3000000]\nlet m: [int: str] = [:]\nfor i in 0..1000000 { m[i] = \"v\\(i)\" }\nvar t = 0\nfor i in 0..10000000 {\n    let p = P { x: i, y: 1 }\n    if i % 100 == 0 { live[i % 3000000] = p }\n    if i % 1000 == 0 { m[i % 1000000] = \"w\\(i)\" }\n    t += p.y\n}\nprint(t + live.len() + m.len())",
+        source: "struct P {\n    x: int\n    y: int\n}\nlet live = [P(x: i, y: i) for i in 0..3000000]\nlet m: [int: str] = [:]\nfor i in 0..1000000 { m[i] = \"v\\(i)\" }\nvar t = 0\nfor i in 0..10000000 {\n    let p = P(x: i, y: 1)\n    if i % 100 == 0 { live[i % 3000000] = p }\n    if i % 1000 == 0 { m[i % 1000000] = \"w\\(i)\" }\n    t += p.y\n}\nprint(t + live.len() + m.len())",
         expected: "14000000\n",
         ops: 10_000_000,
     },
     Bench {
         name: "gc: 1M live, mutated + 5M churn",
-        source: "struct P {\n    x: int\n    y: int\n}\nlet live = [P { x: i, y: i } for i in 0..1000000]\nvar t = 0\nfor i in 0..5000000 {\n    let p = P { x: i, y: 1 }\n    if i % 100 == 0 { live[i % 1000000] = p }\n    t += p.y\n}\nprint(t + live.len())",
+        source: "struct P {\n    x: int\n    y: int\n}\nlet live = [P(x: i, y: i) for i in 0..1000000]\nvar t = 0\nfor i in 0..5000000 {\n    let p = P(x: i, y: 1)\n    if i % 100 == 0 { live[i % 1000000] = p }\n    t += p.y\n}\nprint(t + live.len())",
         expected: "6000000\n",
         ops: 5_000_000,
     },

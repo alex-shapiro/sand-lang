@@ -93,21 +93,21 @@ struct P { x: int, name: str }
 enum E { A, B(int, str) }
 print(())
 print(true)
-print(P { x: 1, name: "n" })
+print(P(x: 1, name: "n"))
 print(E.A)
 print(E.B(2, "s"))
-print(set([1, 2]))
+print(Set([1, 2]))
 print([:])
 print(0..3)
 print(0..=3)
-print(error("boom"))
-print(error("gone", kind: "not_found").debug())
+print(Error("boom"))
+print(Error("gone", kind: "not_found").debug())
 fn f() {}
 print(f)
 --- stdout
 ()
 true
-P { x: 1, name: "n" }
+P(x: 1, name: "n")
 A
 B(2, "s")
 Set([1, 2])
@@ -115,5 +115,5 @@ Set([1, 2])
 0..3
 0..=3
 error: boom
-Error { kind: "not_found", message: "gone" }
+Error(message: "gone", kind: "not_found")
 <fn f>

@@ -33,9 +33,9 @@ pub fn area(s: Shape) -> float {
 
 === qualified types from modules
 import "./model.sand"
-let u = model.User { name: "ann", age: 30 }
+let u = model.User(name: "ann", age: 30)
 print(u.greeting())
-fn older(u: model.User) -> model.User { model.User { age: u.age + 1, ..u } }
+fn older(u: model.User) -> model.User { model.User(age: u.age + 1, ..u) }
 print(older(u).age)
 --- file model.sand
 pub struct User {
@@ -60,7 +60,7 @@ pub struct Account {
     pub fn describe(self) -> str { "\(self.owner): \(self.audit())" }
     fn audit(self) -> int { self.balance }
 }
-pub fn open(owner: str) -> Account { Account { owner, balance: 10 } }
+pub fn open(owner: str) -> Account { Account(owner, balance: 10) }
 --- error
 5: field `balance` of `account.Account` is private
 
@@ -74,7 +74,7 @@ pub struct Doc {
     text: str
     pub fn text(self) -> str { self.text }
 }
-pub fn new(text: str) -> Doc { Doc { text } }
+pub fn new(text: str) -> Doc { Doc(text) }
 --- error
 4: `text` is a method; call it with `()`
 
@@ -86,7 +86,7 @@ pub struct Money {
     pub cents: int
     fn to_str(self) -> str { "$\(self.cents / 100)" }
 }
-pub fn cents(n: int) -> Money { Money { cents: n } }
+pub fn cents(n: int) -> Money { Money(cents: n) }
 --- error
 2: method `to_str` of `money.Money` is private
 
@@ -98,13 +98,13 @@ pub struct Box {
     pub size: int
     fn size(self) -> int { self.size * 2 }
 }
-pub fn new(size: int) -> Box { Box { size } }
+pub fn new(size: int) -> Box { Box(size) }
 --- error
 2: method `size` of `box.Box` is private
 
 === a struct with private fields reports only the privacy error
 import "./account.sand"
-let a = account.Account { owner: "ann" }
+let a = account.Account(owner: "ann")
 --- file account.sand
 pub struct Account {
     pub owner: str
@@ -121,13 +121,13 @@ pub struct Account {
     pub owner: str
     fn audit(self) -> int { 1 }
 }
-pub fn open(owner: str) -> Account { Account { owner } }
+pub fn open(owner: str) -> Account { Account(owner) }
 --- error
 2: method `audit` of `account.Account` is private
 
 === structs with private fields cannot be built in other modules
 import "./account.sand"
-let a = account.Account { owner: "ann", balance: 1 }
+let a = account.Account(owner: "ann", balance: 1)
 --- file account.sand
 pub struct Account {
     pub owner: str
@@ -139,31 +139,31 @@ pub struct Account {
 === private fields cannot be matched in other modules
 import "./account.sand"
 let a = account.open()
-let account.Account { owner, .. } = a
+let account.Account(owner: owner, ..) = a
 print(owner)
 match a {
-    account.Account { balance, .. } => print(balance)
+    account.Account(balance: balance, ..) => print(balance)
 }
 --- file account.sand
 pub struct Account {
     pub owner: str
     balance: int
 }
-pub fn open() -> Account { Account { owner: "ann", balance: 0 } }
+pub fn open() -> Account { Account(owner: "ann", balance: 0) }
 --- error
 6: field `balance` of `account.Account` is private
 
 === a pattern without `..` does not name private fields
 import "./account.sand"
-let account.Account { owner } = account.open()
+let account.Account(owner: owner) = account.open()
 --- file account.sand
 pub struct Account {
     pub owner: str
     balance: int
 }
-pub fn open() -> Account { Account { owner: "ann", balance: 0 } }
+pub fn open() -> Account { Account(owner: "ann", balance: 0) }
 --- error
-2: `Account` has private fields; add `..` to ignore them
+2: `account.Account` has private fields; add `..` to ignore them
 
 === members omit a built-in method that a private method hides
 import "./money.sand"
@@ -174,7 +174,7 @@ pub struct Money {
     pub cents: int
     fn to_str(self) -> str { "$\(self.cents / 100)" }
 }
-pub fn cents(n: int) -> Money { Money { cents: n } }
+pub fn cents(n: int) -> Money { Money(cents: n) }
 --- stdout
 false
 true
@@ -187,7 +187,7 @@ pub struct Money {
     pub cents: int
     fn to_str(self) -> str { "$\(self.cents / 100)" }
 }
-pub fn cents(n: int) -> Money { Money { cents: n } }
+pub fn cents(n: int) -> Money { Money(cents: n) }
 --- error
 2: method `to_str` of `money.Money` is private
 
@@ -204,7 +204,7 @@ a.count = 2
 pub struct Account {
     var count: int
 }
-pub fn open() -> Account { Account { count: 0 } }
+pub fn open() -> Account { Account(count: 0) }
 --- error
 3: field `count` of `account.Account` is private
 
@@ -218,7 +218,7 @@ pub struct Account {
     pub owner: str
     balance: int = 0
 }
-pub fn open() -> Account { Account { owner: "ann" } }
+pub fn open() -> Account { Account(owner: "ann") }
 --- error
 4: this call cannot build `account.Account` here: its field `balance` is private
 
@@ -363,3 +363,28 @@ let from = "x"
 print(convert(pi.round(), from, "y"))
 --- stdout
 3.0 x -> y
+
+=== a private init cannot be called from other modules
+import "./port.sand"
+print(port.Port(80))
+print(port.open(80))
+--- file port.sand
+pub struct Port {
+    pub n: int
+    fn init(n: int) -> Port { Self(n) }
+}
+pub fn open(n: int) -> Port { Port(n) }
+--- error
+2: the `init` of `Port` is private
+
+=== a public init constructs a type with private fields in other modules
+import "./port.sand"
+print(port.Port(80))
+let port.Port(..) = port.Port(81)
+--- file port.sand
+pub struct Port {
+    n: int
+    pub fn init(n: int) -> Port { Self(n) }
+}
+--- stdout
+Port(n: 80)

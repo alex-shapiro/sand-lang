@@ -62,7 +62,7 @@ The ports reproduce Sand's output where semantics differ (float formatting
   Sand spawns one task per URL); `chat_server` uses asyncio streams; `s3` uses
   `http.client`, `hashlib` and `hmac`.
 - Python's `re` module caches compiled patterns, so the ports' per-call
-  `re.sub(pattern, ...)` mirror the Sand code's per-call `regex.new(...)` but
+  `re.sub(pattern, ...)` mirror the Sand code's per-call `regex.Regex(...)` but
   do not recompile. Lua has no regex: `template.lua` scans with `string.find`.
 - Lua ports that print many lines write with `io.write` (`print` flushes
   every line).

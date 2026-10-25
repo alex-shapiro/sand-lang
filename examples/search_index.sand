@@ -30,7 +30,7 @@ struct Index {
     docs: [Doc]
     postings: [str: [Posting]]
 
-    fn empty() -> Index { Index { docs: [], postings: [:] } }
+    fn empty() -> Index { Index(docs: [], postings: [:]) }
 
     fn load(path: str) -> Result<Index> {
         if not fs.exists(path)? {
@@ -53,13 +53,13 @@ struct Index {
         }
         let id = self.docs.len()
         let tokens = tokenize(text)
-        self.docs.push(Doc { path, length: tokens.len() })
+        self.docs.push(Doc(path, length: tokens.len()))
         let positions: [str: [int]] = [:]
         for (i, t) in tokens.enumerate() {
             positions.get_or_insert(t, []).push(i)
         }
         for (term, ps) in positions {
-            self.postings.get_or_insert(term, []).push(Posting { doc: id, positions: ps })
+            self.postings.get_or_insert(term, []).push(Posting(doc: id, positions: ps))
         }
     }
 
@@ -73,7 +73,7 @@ struct Index {
             }
         }
         // Keep ids stable by blanking the slot.
-        self.docs[id] = Doc { path: "", length: 0 }
+        self.docs[id] = Doc(path: "", length: 0)
     }
 
     fn live_docs(self) -> int { self.docs.count(d => d.path != "") }
@@ -97,7 +97,7 @@ struct Index {
     }
 }
 
-let STOP_WORDS = set(["a", "an", "and", "the", "of", "to", "in", "is", "it", "on", "for"])
+let STOP_WORDS = Set(["a", "an", "and", "the", "of", "to", "in", "is", "it", "on", "for"])
 
 /// The lower-cased words of `text`, produced lazily: each call of `next`
 /// resumes reading the characters where the previous one stopped.
@@ -114,7 +114,7 @@ fn words(text: str) -> Iter<str> {
         }
         if current.is_empty() { None } else { Some(current) }
     }
-    Iter { next }
+    Iter(next)
 }
 
 pub fn tokenize(text: str) -> [str] {

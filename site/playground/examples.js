@@ -31,11 +31,11 @@ fn size(p: Planet) -> Size {
 }
 
 let planets = [
-    Planet { name: "Mercury", moons: 0 },
-    Planet { name: "Earth", moons: 1 },
-    Planet { name: "Mars", moons: 2 },
-    Planet { name: "Jupiter", moons: 95 },
-    Planet { name: "Saturn", moons: 146 },
+    Planet(name: "Mercury", moons: 0),
+    Planet(name: "Earth", moons: 1),
+    Planet(name: "Mars", moons: 2),
+    Planet(name: "Jupiter", moons: 95),
+    Planet(name: "Saturn", moons: 146),
 ]
 
 for p in planets {
@@ -207,11 +207,11 @@ struct Sale {
 fn parse(line: str) -> Result<Sale> {
     let cols = line.split(",")
     if cols.len() != 4 {
-        return Err(error("expected 4 columns: \\(line)", kind: "parse"))
+        return Err(Error("expected 4 columns: \\(line)", kind: "parse"))
     }
-    let units = cols[2].parse_int().ok_or(error("bad units: \\(cols[2])"))?
-    let price = cols[3].parse_float().ok_or(error("bad price: \\(cols[3])"))?
-    Ok(Sale { region: cols[0], units, price })
+    let units = cols[2].parse_int().ok_or(Error("bad units: \\(cols[2])"))?
+    let price = cols[3].parse_float().ok_or(Error("bad price: \\(cols[3])"))?
+    Ok(Sale(region: cols[0], units: units, price: price))
 }
 
 let totals: [str: float] = [:]
@@ -267,9 +267,9 @@ limit time 5s
 
 import time
 
-let jobs: Channel<int> = task.channel()
-let results: Channel<str> = task.channel()
-let start = time.stopwatch()
+let jobs: Channel<int> = Channel()
+let results: Channel<str> = Channel()
+let start = time.Stopwatch()
 
 fn worker(name: str, jobs: Channel<int>, results: Channel<str>) {
     for n in jobs.iter() {
@@ -379,7 +379,7 @@ for order in orders {
     }
 }
 
-let digits = regex.new(r"\\d+")?
+let digits = regex.Regex(r"\\d+")?
 let text = "3 apples, 12 pears and 7 plums"
 let numbers = digits.find_all(text).map(m => m.text.parse_int().unwrap())
 print("\\(text) -> \\(numbers) (sum \\(numbers.sum()))")
@@ -431,8 +431,8 @@ fn largest<T: Shape>(shapes: [T]) -> T? {
     shapes.max_by(s => s.area())
 }
 
-let circles = [Circle { r: 1.0 }, Circle { r: 2.5 }, Circle { r: 0.5 }]
-let rects = [Rect { w: 2.0, h: 3.0 }, Rect { w: 4.0, h: 4.0 }]
+let circles = [Circle(r: 1.0), Circle(r: 2.5), Circle(r: 0.5)]
+let rects = [Rect(w: 2.0, h: 3.0), Rect(w: 4.0, h: 4.0)]
 for c in circles { print(c.describe()) }
 for r in rects { print(r.describe()) }
 print("largest circle: \\(largest(circles).unwrap().describe())")

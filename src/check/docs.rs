@@ -63,6 +63,11 @@ impl Checker {
 
     fn type_item(&mut self, kind: ItemKind, c: Ctor, name: String, decl: String, doc: Option<String>) -> ItemDoc {
         let mut members = Vec::new();
+        if let Some(f) = self.init_method(c).filter(|&f| self.fns[f as usize].is_pub) {
+            let (ty, sig) = (c.native_prefix(&self.types, &self.syms), self.signature(f, false));
+            let decl = format!("{ty}{}", sig.strip_prefix("fn init").unwrap_or(&sig));
+            members.push(member_doc(MemberKind::Construct, &ty, decl, &self.fn_doc(f)));
+        }
         if let Ctor::Def(d) = c {
             let def = &self.types[d as usize];
             for (i, v) in def.variants().iter().enumerate() {

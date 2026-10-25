@@ -75,18 +75,18 @@ impl Ty {
             Ty::Range => "0..2".into(),
             Ty::Fn => "() => 1".into(),
             Ty::Task => "spawn 1".into(),
-            Ty::Plain => "Plain { a: 1, b: \"x\" }".into(),
-            Ty::Mut => "Mut { n: 1 }".into(),
-            Ty::Fns => "Fns { f: () => 1 }".into(),
+            Ty::Plain => "Plain(a: 1, b: \"x\")".into(),
+            Ty::Mut => "Mut(n: 1)".into(),
+            Ty::Fns => "Fns(f: () => 1)".into(),
             Ty::List(t) => format!("[{}]", t.value()),
-            Ty::Set(t) => format!("set([{}])", t.value()),
+            Ty::Set(t) => format!("Set([{}])", t.value()),
             Ty::Map(k, v) => format!("[{}: {}]", k.value(), v.value()),
             Ty::Option(t) => format!("Some({})", t.value()),
             Ty::Tuple(ts) => format!("({})", ts.iter().map(Ty::value).collect::<Vec<_>>().join(", ")),
-            Ty::Wrap(t) => format!("Wrap {{ v: {} }}", t.value()),
+            Ty::Wrap(t) => format!("Wrap(v: {})", t.value()),
             Ty::Opt(t) => format!("Opt.Has({})", t.value()),
-            Ty::Tree(t) => format!("Tree {{ v: {} }}", t.value()),
-            Ty::Phantom(_) => "Phantom { n: 1 }".into(),
+            Ty::Tree(t) => format!("Tree(v: {})", t.value()),
+            Ty::Phantom(_) => "Phantom(n: 1)".into(),
         }
     }
 
@@ -204,7 +204,7 @@ impl Trait {
         match self {
             Trait::Eq => ("need(x) == x", "true"),
             Trait::Ord => ("need(x) <= x", "true"),
-            Trait::Hash => ("set([need(x), x]).len()", "1"),
+            Trait::Hash => ("Set([need(x), x]).len()", "1"),
             Trait::Encode => ("json.encode(need(x)).len() > 0", "true"),
             _ => unreachable!("{self:?} is not derived"),
         }

@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc 57a3ccb0cece9f66b1d3eff70ab7e29c4234f44a56d29bab9d6f075f8f736b25 # shrinks to fields = [(("()?", "Some(())"), false)]
 cc 5fd686b19c4222d85dfc47596725481cf3934687263a858b98032c0129eb730e # shrinks to t = Tuple([Map(Keyed, Int), Int])
+cc e19c01c943119fa061a07beb32131a7c394d412174383fd05e4e003503ff88bc # shrinks to t = Map(Int, Fn)

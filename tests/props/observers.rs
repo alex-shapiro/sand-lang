@@ -302,7 +302,7 @@ fn map_observations(entries: &[(i64, i64)]) -> (String, Vec<(String, Expect)>) {
         }
     }
     let keys: Vec<i64> = model.iter().map(|e| e.0).collect();
-    setup.push_str(&format!("let s: Set<int> = set({})", list_str(&keys)));
+    setup.push_str(&format!("let s: Set<int> = Set({})", list_str(&keys)));
     let pairs = ok(format!("[{}]", model.iter().map(|(k, v)| format!("({k}, {v})")).collect::<Vec<_>>().join(", ")));
     let ks = ok(list_str(&keys));
     let mut prints = vec![

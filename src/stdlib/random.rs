@@ -33,7 +33,7 @@ pub(crate) fn module() -> NativeModule {
         vm.host.rng = Rng::new(s as u64);
         Ok(())
     });
-    m.vm_function("rng", |vm: &mut Vm, seed: i64| vm.new_object(RngObj(Rng::new(seed as u64))));
+    m.vm_function("Rng.init", |vm: &mut Vm, seed: i64| vm.new_object(RngObj(Rng::new(seed as u64))));
 
     macro_rules! ops {
         ($($name:literal => |$($a:ident: $t:ty),*| -> $r:ty = $op:expr;)*) => {$(

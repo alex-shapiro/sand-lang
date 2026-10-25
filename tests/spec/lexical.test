@@ -191,7 +191,7 @@ bye
 import regex
 import json
 print("[0-9]{4} {x} }{ {{}}")
-print(regex.new("^[0-9]{4}$").unwrap().is_match("2024"))
+print(regex.Regex("^[0-9]{4}$").unwrap().is_match("2024"))
 let doc = json.parse("{\"a\": {\"b\": [1, 2]}}").unwrap()
 print(doc.path("a.b.1"))
 --- stdout

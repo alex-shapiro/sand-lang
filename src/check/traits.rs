@@ -426,6 +426,9 @@ impl Checker {
         let mut methods: Vec<TraitMethod> = Vec::new();
         for (j, m) in d.methods.iter().enumerate() {
             self.reject_reflect_params(m);
+            if m.name.name == "init" {
+                self.error(m.name.span, "a trait cannot declare `init`; only a type declares its `init`");
+            }
             if methods.iter().any(|x| self.name(x.name) == m.name.name) {
                 let msg = format!("method `{}` is already defined in trait `{}`", m.name.name, self.name(self.traits[id as usize].name));
                 self.error(m.name.span, msg);

@@ -292,6 +292,8 @@ pub struct LintFacts {
     /// Import names of the main module and their spans.
     pub main_imports: Vec<(String, Span)>,
     pub unused_results: Vec<Span>,
+    /// `argument-order`: a positional argument or sub-pattern, and its message.
+    pub argument_order: Vec<(Span, String)>,
     /// The resource lints (`unclosed-resource`, `resource-field`,
     /// `resource-escapes`; see `resources`): span, code and message.
     pub resources: Vec<(Span, &'static str, String)>,
@@ -515,6 +517,9 @@ pub(crate) struct FnState {
     /// Indicates that the checker is checking a struct field default, which
     /// does not receive trait dictionaries.
     pub field_default: bool,
+    /// Inside the `init` of this type constructor, where `T(...)` builds a
+    /// struct field by field.
+    pub init_of: Option<Ctor>,
     /// `(type, span, call_kind)` triples for `reflect` type arguments, checked
     /// after type inference completes.
     pub reflect_checks: Vec<(TypeId, Span, &'static str)>,
@@ -1292,7 +1297,10 @@ impl Checker {
             }
         }
         self.infer_member_requirements(first_type);
-        self.derive_impls(first_type);
+        // `Decode` depends on which structs declare `init`, so it is derived
+        // after the methods are declared.
+        let early: Vec<Builtin> = Builtin::ALL.iter().copied().filter(|&b| b.is_derived() && b != Builtin::Decode).collect();
+        self.derive_impls(first_type, &early);
         if pm.kind == ModKind::Prelude {
             for name in ["Option", "Result"] {
                 if let Some(Def::Type(TyRef::Def(d))) = self.scope_def(mi, name) {
@@ -1327,6 +1335,7 @@ impl Checker {
                 _ => {}
             }
         }
+        self.derive_impls(first_type, &[Builtin::Decode]);
         // Impls, then the supertrait requirements of each.
         let mut impl_ids = Vec::new();
         for (idx, item) in items.iter().enumerate() {
@@ -1347,6 +1356,8 @@ impl Checker {
         }
         if self.allows_native() {
             self.declare_undeclared_natives(first_fn);
+            // A native module can register an `init` without declaring it.
+            self.derive_impls(first_type, &[Builtin::Decode]);
         }
         // 5. Top-level code.
         let mod_name = self.name(self.mods[mi as usize].name).to_string();
@@ -1861,7 +1872,7 @@ impl Checker {
                     .map(|(k, v)| Some((self.fold_const_expr(k, env, state)?, self.fold_const_expr(v, env, state)?)))
                     .collect::<Option<_>>()?,
             ),
-            HKind::CallNative { native, args, .. } if Some(*native) == self.prelude_native("set") => match args.as_slice() {
+            HKind::CallNative { native, args, .. } if Some(*native) == self.set_init() => match args.as_slice() {
                 [HArg::Expr(xs)] => match self.fold_const_expr(xs, env, state)? {
                     ConstVal::List(xs) => ConstVal::Set(xs),
                     _ => return None,
@@ -1923,6 +1934,14 @@ impl Checker {
         let p = self.prelude?;
         let Def::Fn(f) = self.mods[p as usize].scope.get(&self.syms.get(name)?)?.def else { return None };
         match self.fns[f as usize].kind {
+            FnKind::Native(n) => Some(n),
+            _ => None,
+        }
+    }
+
+    /// The native `init` of `Set`, which builds a set from a list.
+    pub(crate) fn set_init(&self) -> Option<u32> {
+        match self.fns[self.init_method(Ctor::Set)? as usize].kind {
             FnKind::Native(n) => Some(n),
             _ => None,
         }
@@ -2665,6 +2684,9 @@ impl Checker {
     }
 
     fn register_method(&mut self, ctor: Ctor, name: &ast::Ident, id: FnId) {
+        if name.name == "init" {
+            self.check_init_decl(ctor, name, id);
+        }
         let has_self = self.fns[id as usize].has_self;
         let module = self.fns[id as usize].module;
         let key = (ctor, self.syms.intern(&name.name));
@@ -2695,6 +2717,42 @@ impl Checker {
         }
         ids.push(id);
         self.methods.insert(key, ids.into());
+    }
+
+    /// Checks that `init` method `id` of `ctor` constructs it: it is static and
+    /// returns `Self` or `Result<Self, E>`.
+    fn check_init_decl(&mut self, ctor: Ctor, name: &ast::Ident, id: FnId) {
+        let f = &self.fns[id as usize];
+        let (self_ty, ret) = (f.self_ty.unwrap_or(TypeId::ERROR), f.ret);
+        if let Ctor::Def(d) = ctor
+            && self.types[d as usize].is_enum()
+        {
+            self.error(name.span, "an enum cannot declare `init`; its variants construct it");
+        } else if f.has_self {
+            self.error(name.span, "`init` cannot take `self`; it constructs a new value");
+        } else {
+            let fits = ret == self_ty
+                || ret == TypeId::ERROR
+                || matches!(self.arena.get(ret), Ty::Named(r, args) if r == self.wk.result && self.arena.elem(args, 0) == self_ty);
+            if !fits {
+                let ty = self.show(self_ty);
+                self.error(name.span, format!("`init` must return `{ty}` or `Result<{ty}, E>`"));
+            }
+        }
+    }
+
+    /// Records an `argument-order` lint if positional argument or
+    /// sub-pattern `name` (at `span`) is given for parameter or field `names[i]`
+    /// of `what` but is named like a different one of `names`.
+    pub(crate) fn note_argument_order(&mut self, what: &str, names: &[&str], i: usize, name: &str, span: Span) {
+        if !self.linting() || names.get(i) == Some(&name) || !names.contains(&name) {
+            return;
+        }
+        let msg = format!(
+            "`{name}` is given for `{}` of {what}, which also has `{name}`; write `{}: {name}` if this is intended",
+            names[i], names[i]
+        );
+        self.lint.argument_order.push((span, msg));
     }
 
     pub(crate) fn visible(&self, module: ModId, is_pub: bool) -> bool {
@@ -2777,6 +2835,8 @@ impl Checker {
             || matches!(decl, FnDeclRef::ParamDefault(..) | FnDeclRef::FieldDefault { .. } | FnDeclRef::BoundDefault(_));
         self.begin_fn(generics, self_ty);
         self.fs.field_default = matches!(decl, FnDeclRef::FieldDefault { .. });
+        let fi = &self.fns[id as usize];
+        self.fs.init_of = fi.owner.filter(|_| !fi.has_self && self.syms.str(fi.name) == "init");
         let mut param_locals = self.declare_reflect_params(id);
         param_locals.extend(self.declare_dict_params(id));
         let f = match decl {
@@ -3236,19 +3296,6 @@ pub(crate) fn names_used_in_functions(m: &ast::Module) -> HashSet<String, FxBuil
                 expr(k, out);
                 expr(v, out);
                 clauses(cs, out);
-            }
-            K::StructLit { fields, base, .. } => {
-                for f in fields {
-                    match &f.value {
-                        Some(v) => expr(v, out),
-                        None => {
-                            out.insert(f.name.name.clone());
-                        }
-                    }
-                }
-                if let Some(b) = base {
-                    expr(b, out);
-                }
             }
             K::Unary(_, x) | K::Paren(x) | K::Try(x) | K::Spawn(x) | K::Field(x, _) | K::TupleField(x, _, _) => expr(x, out),
             K::Range { start, end, .. } => {

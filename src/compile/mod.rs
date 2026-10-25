@@ -814,7 +814,7 @@ impl<'a> Compiler<'a> {
             f.set_reg(p, r);
         }
         match (self.order.init_pos(fid), &body.body.kind) {
-            (Some(pos), HKind::Block(items)) if !items.is_empty() && self.struct_literal(&f, items).is_none() => {
+            (Some(pos), HKind::Block(items)) if !items.is_empty() && self.field_construction(&f, items).is_none() => {
                 self.ret_block(&mut f, items, Some(pos))
             }
             _ => self.ret_expr(&mut f, &body.body),
@@ -1264,7 +1264,7 @@ impl<'a> Compiler<'a> {
         // calls cannot be tail calls.
         let tail = !defers_pending(f);
         match &e.kind {
-            HKind::Block(items) if !items.is_empty() && self.struct_literal(f, items).is_none() => self.ret_block(f, items, None),
+            HKind::Block(items) if !items.is_empty() && self.field_construction(f, items).is_none() => self.ret_block(f, items, None),
             HKind::Call { func, args, .. } if tail && self.fn_protos[*func as usize].is_some() => {
                 let proto = self.fn_protos[*func as usize].unwrap();
                 let base = self.call_args(f, args, 0);
@@ -1755,8 +1755,8 @@ impl<'a> Compiler<'a> {
                 self.compile_assign(f, place, *op, *op_ty, value);
                 self.unit_to(f, dst);
             }
-            HKind::Block(items) if self.struct_literal(f, items).is_some() => {
-                let (n, def, fields) = self.struct_literal(f, items).unwrap();
+            HKind::Block(items) if self.field_construction(f, items).is_some() => {
+                let (n, def, fields) = self.field_construction(f, items).unwrap();
                 let mark = f.next_reg;
                 let start = self.alloc_n(f, fields.len());
                 // The fields given, in source order, straight into their
@@ -2613,11 +2613,11 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    /// A struct literal as the checker lowers it: hidden locals bound to the
-    /// fields given, in source order, then `MakeStruct` (see
-    /// `check_struct_lit`). Returns the number of `let`s, the struct and
+    /// A construction field by field as the checker lowers it: hidden locals
+    /// bound to the fields given, in source order, then `MakeStruct` (see
+    /// `construct_fields`). Returns the number of `let`s, the struct and
     /// its field values.
-    fn struct_literal<'e>(&self, f: &FnState, items: &'e [HExpr]) -> Option<(usize, TypeDefId, &'e [HExpr])> {
+    fn field_construction<'e>(&self, f: &FnState, items: &'e [HExpr]) -> Option<(usize, TypeDefId, &'e [HExpr])> {
         let (HKind::MakeStruct { def, fields }, lets) = (&items.last()?.kind, &items[..items.len() - 1]) else { return None };
         let hidden = |it: &HExpr| {
             matches!(&it.kind, HKind::Let { pat: HPat { kind: HPatKind::Bind(l), .. }, else_: None, .. }

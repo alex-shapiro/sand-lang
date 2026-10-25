@@ -1,6 +1,6 @@
 === match and find
 import regex
-let r = regex.new("[0-9]+")?
+let r = regex.Regex("[0-9]+")?
 print(r.is_match("abc 123"))
 print(r.is_match("abc"))
 let m = r.find("ab 42 cd 7").unwrap()
@@ -22,7 +22,7 @@ None
 
 === captures
 import regex
-let r = regex.new("(?P<key>\\w+)=(?P<value>\\w*)")?
+let r = regex.Regex("(?P<key>\\w+)=(?P<value>\\w*)")?
 let c = r.captures("a=1 b=").unwrap()
 print(c.len())
 print(c.text(0))
@@ -41,11 +41,11 @@ None
 
 === replace and split
 import regex
-let r = regex.new("\\s+")?
+let r = regex.Regex("\\s+")?
 print(r.split("a  b \t c"))
 print(r.replace("a  b  c", "_"))
 print(r.replace_all("a  b  c", "_"))
-let swap = regex.new("(\\w+)@(\\w+)")?
+let swap = regex.Regex("(\\w+)@(\\w+)")?
 print(swap.replace_all("x@y and p@q", "$2@$1"))
 --- stdout
 ["a", "b", "c"]
@@ -55,7 +55,7 @@ y@x and q@p
 
 === invalid pattern is an error
 import regex
-let r = regex.new("(unclosed")
+let r = regex.Regex("(unclosed")
 print(r.is_err())
 print(r.unwrap_err().kind)
 --- stdout
@@ -70,7 +70,7 @@ Ok(true)
 
 === unicode aware
 import regex
-let r = regex.new(r"\p{L}+")?
+let r = regex.Regex(r"\p{L}+")?
 print(r.find_all("héllo wörld 123").map(m => m.text))
 --- stdout
 ["héllo", "wörld"]

@@ -15,7 +15,7 @@ extend Captures {
             return None
         }
         let end = self.spans[2 * i + 1]
-        Some(Match { text: self.text[start..end], start, end })
+        Some(Match(text: self.text[start..end], start: start, end: end))
     }
 
     /// Returns the capture group named `n`, or `None` if it did not participate
@@ -36,16 +36,16 @@ extend Captures {
     }
 }
 
-/// Compiles `pattern` into a `Regex`. Fails with kind `"parse"` on invalid
-/// syntax or `"limit"` if the compiled automaton exceeds the size limit.
-pub native fn new(pattern: str) -> Result<Regex>
-
 /// Compiles `pattern` and returns `true` if it matches anywhere in `text`.
 pub fn is_match(pattern: str, text: str) -> Result<bool> {
-    Ok(new(pattern)?.is_match(text))
+    Ok(Regex(pattern)?.is_match(text))
 }
 
 extend Regex {
+    /// Compiles `pattern`. Fails with kind `"parse"` on invalid syntax or
+    /// `"limit"` if the compiled automaton exceeds the size limit.
+    pub native fn init(pattern: str) -> Result<Regex>
+
     /// Returns `true` if the pattern matches anywhere in `text`.
     pub native fn is_match(self, text: str) -> bool
     /// Returns the leftmost-first match in `text`, or `None` if absent.

@@ -97,7 +97,7 @@ fn top(counts: [str: int], n: int) -> [(str, int)] {
     counts.entries().sorted_by(e => (-e.1, e.0)).take(n)
 }
 
-let rng = Rng { state: 42 }
+let rng = Rng(state: 42)
 let vocabulary = [make_word(rng) for _ in 0..VOCAB_SIZE]
 let text = make_text(rng, vocabulary)
 

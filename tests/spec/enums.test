@@ -124,7 +124,7 @@ print([1, 2].map(Some))
 let a: int? = Some(1)
 let b: Option<int> = None
 let c: Result<int, str> = Ok(2)
-let d: Result<int> = Err(error("bad"))
+let d: Result<int> = Err(Error("bad"))
 print(a)
 print(b)
 print(c)
@@ -133,7 +133,7 @@ print(d)
 Some(1)
 None
 Ok(2)
-Err(Error { kind: "error", message: "bad" })
+Err(Error(message: "bad", kind: "error"))
 
 === enum values are immutable
 enum E { A(int) }
@@ -141,3 +141,52 @@ let e = E.A(1)
 match e { A(x) => { x = 2 } }
 --- error
 3: cannot assign
+
+=== variant patterns match named fields and ignore the rest
+enum Shape {
+    Rect(w: int, h: int)
+    Circle(int)
+    Empty
+}
+fn describe(s: Shape) -> str {
+    match s {
+        Rect(w: 0, ..) | Rect(h: 0, ..) => "flat"
+        Rect(h: tall, w: wide) if tall > wide => "tall \(tall)"
+        Rect(..) => "rect"
+        Circle(..) => "circle"
+        Empty => "empty"
+    }
+}
+for s in [Shape.Rect(w: 0, h: 3), Shape.Rect(w: 2, h: 3), Shape.Rect(w: 3, h: 2), Shape.Circle(1), Shape.Empty] {
+    print(describe(s))
+}
+--- stdout
+flat
+tall 3
+rect
+circle
+empty
+
+=== variant pattern errors
+enum S { R(w: int, h: int), P(int, int), E }
+fn f(s: S) {
+    match s {
+        R(q: 1, ..) => {}
+        R(w: 1, w: 2) => {}
+        R(1) => {}
+        P(x: 1, ..) => {}
+        P(1) => {}
+        E(..) => {}
+        S.R => {}
+        _ => {}
+    }
+}
+--- error
+4: no field `q` on variant `R`
+5: field `w` is matched more than once
+5: missing field `h` in pattern
+6: missing field `h` in pattern; add `..` to ignore the rest
+7: variant `P` has no named fields
+8: variant `P` has 2 fields, but the pattern has 1; add `..` to ignore the rest
+9: variant `E` has no payload; match it with `E`
+10: variant `R` has 2 fields; match them with `R(..)`

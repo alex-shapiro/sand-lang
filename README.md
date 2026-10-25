@@ -16,8 +16,8 @@ struct Page {
 
 fn fetch(url: str) -> Result<Page> {
     let resp = http.get(url, timeout: 10s)?
-    let title = regex.new(r"<title>(.*?)</title>")?.captures(resp.text()?).and_then(c => c.text(1))
-    Ok(Page { url, title })
+    let title = regex.Regex(r"<title>(.*?)</title>")?.captures(resp.text()?).and_then(c => c.text(1))
+    Ok(Page(url, title))
 }
 
 let pages = ["https://example.com", "https://example.org"].map(u => spawn fetch(u))

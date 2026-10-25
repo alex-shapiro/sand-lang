@@ -140,16 +140,13 @@ fn fibonacci_windows() {
 
 fn prime_streams() {
     let squares = Iter.count_from(1).map(n => n * n)
-    let merged = merge(Primes {}.iter(), squares).take_while(x => x < PRIME_LIMIT)
+    let merged = merge(Primes().iter(), squares).take_while(x => x < PRIME_LIMIT)
     let groups = chunks(merged, CHUNK)
     let group_sums = groups.map(g => g.sum())
     let checksum = group_sums.fold(0, digest)
-    let pairs = Primes {}.iter().zip(Primes {}.iter().skip(1)).take_while(p => p.1 < PRIME_LIMIT)
+    let pairs = Primes().iter().zip(Primes().iter().skip(1)).take_while(p => p.1 < PRIME_LIMIT)
     let twins = pairs.filter(p => p.1 - p.0 == 2).count()
-    let gaps = Primes {}.iter()
-        .take_while(p => p < PRIME_LIMIT)
-        .step_by(100)
-        .map(p => p % 1000)
+    let gaps = Primes().iter().take_while(p => p < PRIME_LIMIT).step_by(100).map(p => p % 1000)
     print("primes: merged checksum \(checksum), twins \(twins)")
     print("primes: sampled \(gaps.take(12).to_list())")
 }
@@ -158,10 +155,7 @@ fn collatz_streams() {
     let lengths = Iter.count_from(1).take(COLLATZ_SEEDS).map(seed => (collatz(seed).count(), seed))
     let (steps, seed) = lengths.max().unwrap()
     let all_values = Iter.count_from(1).take(COLLATZ_SEEDS).flat_map(collatz)
-    let checksum = all_values.enumerate()
-        .filter(p => p.0 % 7 == 0)
-        .map(p => p.1)
-        .fold(0, digest)
+    let checksum = all_values.enumerate().filter(p => p.0 % 7 == 0).map(p => p.1).fold(0, digest)
     let peak = Iter.count_from(1, step: 3).take(COLLATZ_SEEDS / 3).flat_map(collatz).max().unwrap()
     print("collatz: longest \(steps) from \(seed), peak \(peak), checksum \(checksum)")
 }

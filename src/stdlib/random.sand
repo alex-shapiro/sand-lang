@@ -1,8 +1,8 @@
 //! Pseudo-random number generation (`xoshiro256**`, non-cryptographic).
 //!
 //! Module-level functions use the engine generator, which is seeded from host
-//! entropy unless overridden by `Config::seed` or `seed`. Call `rng(seed)` to
-//! create an isolated generator instance.
+//! entropy unless overridden by `Config::seed` or `seed`. Call `Rng(seed)` to
+//! create an isolated generator.
 
 /// Reseeds the engine generator with `s` for deterministic output.
 pub native fn seed(s: int)
@@ -29,10 +29,11 @@ pub native fn sample<T>(xs: [T], k: int) -> [T]
 /// Returns `n` pseudo-random bytes.
 pub native fn bytes(n: int) -> bytes
 
-/// Creates an independent `Rng` seeded with `seed`.
-pub native fn rng(seed: int) -> Rng
-
 extend Rng {
+    /// Creates a generator seeded with `seed`, independent of the engine
+    /// generator.
+    pub native fn init(seed: int) -> Rng
+
     /// Returns a uniformly distributed integer in `lo..hi`, or aborts if `lo >= hi`.
     pub native fn int(self, lo: int, hi: int) -> int
     /// Returns a uniformly distributed float in `[0.0, 1.0)`.

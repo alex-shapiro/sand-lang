@@ -12,7 +12,7 @@ struct Board {
     /// Parses a board where `#` is alive and anything else is dead.
     fn parse(text: str) -> Board {
         let rows = text.trim().lines().map(line => line.trim().chars().map(c => c == "#"))
-        Board { width: rows[0].len(), height: rows.len(), cells: rows }
+        Board(width: rows[0].len(), height: rows.len(), cells: rows)
     }
 
     fn alive(self, r: int, c: int) -> bool {

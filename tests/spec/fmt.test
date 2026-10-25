@@ -189,13 +189,13 @@ let f: fn(int, str) -> bool = g
 
 === patterns are formatted
 match p {
-    Point{x:0,..}=>1
+    Point(x:0,..)=>1
     [a,..rest]|[a]=>2
     (a,b)if a>b=>3
 }
 --- fmt
 match p {
-    Point { x: 0, .. } => 1
+    Point(x: 0, ..) => 1
     [a, ..rest] | [a] => 2
     (a, b) if a > b => 3
 }
@@ -259,13 +259,13 @@ pub struct C {
     name: str
 }
 
-=== struct literals and comprehensions
-let p=Point{x:1,..q}
+=== constructions and comprehensions
+let p=Point(x:1,..q)
 let ys=[x*2 for x in xs if x>0]
 let m=[k:v for (k,v) in pairs]
 let e=[:]
 --- fmt
-let p = Point { x: 1, ..q }
+let p = Point(x: 1, ..q)
 let ys = [x * 2 for x in xs if x > 0]
 let m = [k: v for (k, v) in pairs]
 let e = [:]

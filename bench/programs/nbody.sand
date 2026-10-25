@@ -16,7 +16,7 @@ struct Body {
     mass: float
 
     fn new(x: float, y: float, z: float, vx: float, vy: float, vz: float, mass: float) -> Body {
-        Body {
+        Body(
             x,
             y,
             z,
@@ -24,7 +24,7 @@ struct Body {
             vy: vy * DAYS_PER_YEAR,
             vz: vz * DAYS_PER_YEAR,
             mass: mass * SOLAR_MASS,
-        }
+        )
     }
 }
 

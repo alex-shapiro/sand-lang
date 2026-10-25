@@ -373,7 +373,7 @@ pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("regex", ModKind::Std, include_str!("regex.sand"));
     m.bind::<RegexObj>().bind::<Match>().bind::<Captures>();
 
-    m.vm_function("new", |vm: &mut Vm, pattern: Val<String>| -> Result<Val<RegexObj>, HostError> {
+    m.vm_function("Regex.init", |vm: &mut Vm, pattern: Val<String>| -> Result<Val<RegexObj>, HostError> {
         let slot = cache_slot(pattern.str(&vm.heap));
         if let Some(re) = cached_regex(vm, pattern.str(&vm.heap), slot) {
             vm.charge(CACHED_COST)?;

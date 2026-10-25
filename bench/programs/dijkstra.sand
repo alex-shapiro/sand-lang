@@ -65,7 +65,7 @@ fn random_graph(rng: Rng) -> [[(int, int)]] { [random_edges(rng) for _ in 0..NOD
 fn shortest_paths(graph: [[(int, int)]], source: int) -> [int] {
     let dist = [INF; graph.len()]
     dist[source] = 0
-    let heap = Heap { items: [] }
+    let heap = Heap(items: [])
     heap.push((0, source))
     while let Some((d, u)) = heap.pop() {
         if d > dist[u] { continue }
@@ -80,7 +80,7 @@ fn shortest_paths(graph: [[(int, int)]], source: int) -> [int] {
     dist
 }
 
-let rng = Rng { state: 42 }
+let rng = Rng(state: 42)
 let graph = random_graph(rng)
 for _ in 0..SOURCES {
     let source = rng.next(NODES)

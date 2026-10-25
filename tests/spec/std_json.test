@@ -146,13 +146,13 @@ Obj(["id": Int(9007199254740993), "ms": Int(1500000000)])
 import json
 struct User { name: str, age: int, tags: [str], email: str? }
 enum Status { Active, Banned(reason: str), Pair(int, int) }
-let u = User { name: "ann", age: 30, tags: ["x"], email: None }
+let u = User(name: "ann", age: 30, tags: ["x"], email: None)
 print(json.encode(u))
 print(json.encode([Status.Active, Status.Banned("spam"), Status.Pair(1, 2)]))
 print(json.encode(["k": 1.5]))
 print(json.encode((1, "a", true, ())))
 print(json.encode(b"hi"))
-print(json.encode(set([1])))
+print(json.encode(Set([1])))
 print(json.encode([1: "a"]))
 print(json.encode(Some(3)))
 print(json.encode(u, indent: 2))
@@ -189,7 +189,7 @@ let nums: [int] = json.decode("[1, 2, 3]")?
 print(nums.sum())
 --- stdout
 7
-Item { name: "ink", price: 4.0, qty: 3 }
+Item(name: "ink", price: 4.0, qty: 3)
 1
 None
 ["a": 1]
@@ -231,8 +231,8 @@ struct Hooks { on: [str: fn() -> int] }
 struct App { hooks: Hooks? }
 let a: Result<App> = json.decode("{}")
 --- error
-2: [fn() -> int] does not implement `Encode` because the elements of `[fn() -> int]` have type `fn() -> int`
-5: App does not implement `Encode` because field `on` of `Hooks` has type `[str: fn() -> int]`
+2: [fn() -> int] does not implement `Decode` because the elements of `[fn() -> int]` have type `fn() -> int`
+5: App does not implement `Decode` because field `on` of `Hooks` has type `[str: fn() -> int]`
 
 === ranges encode as objects with their bounds
 import json
@@ -255,7 +255,7 @@ print(bad)
 1..3
 0..=0
 Obj(["start": Int(0), "end": Int(2)])
-Err(Error { kind: "parse", message: "$: missing field `end`" })
+Err(Error(message: "$: missing field `end`", kind: "parse"))
 
 === map keys are strings, numbers, bools, variant names, or value types
 import json
@@ -265,7 +265,7 @@ print(json.encode([1: "a", -2: "b"]))
 print(json.encode([true: 1]))
 print(json.encode([Mode.Read: 1, Mode.Write: 2]))
 print(json.encode([2s: 1]))
-print(json.encode([time.date(2024, 2, 29)?: 1]))
+print(json.encode([time.PlainDate(2024, 2, 29)?: 1]))
 let m: [Mode: int] = json.decode("{\"Write\": 2}")?
 print(m)
 let d: [time.PlainDate: int] = json.decode("{\"2024-02-29\": 1}")?
@@ -288,14 +288,14 @@ print(keyed)
 print(json.encode([(1, 2): "a"]))
 --- stdout
 [:]
-Err(Error { kind: "invalid", message: "$: cannot decode map keys of type (int, int)" })
+Err(Error(message: "$: cannot decode map keys of type (int, int)", kind: "invalid"))
 --- fail
 a JSON object key must be a string, int, duration, bool, payload-less variant, or value type
 
 === encode decode roundtrip
 import json
 struct P { x: int, y: [float], name: str, ok: bool }
-let p = P { x: -5, y: [1.5, 2.0], name: "q\"", ok: true }
+let p = P(x: -5, y: [1.5, 2.0], name: "q\"", ok: true)
 let back: P = json.decode(json.encode(p))?
 print(back == p)
 --- stdout
@@ -334,7 +334,7 @@ struct Doc {
     flags: [bool?]
 }
 
-let d = Doc { name: "d", tag: Some("t"), shape: Shape.Nested(Shape.Circle(1.5)), shapes: [Shape.Label("x"), Shape.Pair(1, 2), Shape.Empty, Shape.Nested(Shape.Empty)], count: None, flags: [Some(true), None] }
+let d = Doc(name: "d", tag: Some("t"), shape: Shape.Nested(Shape.Circle(1.5)), shapes: [Shape.Label("x"), Shape.Pair(1, 2), Shape.Empty, Shape.Nested(Shape.Empty)], count: None, flags: [Some(true), None])
 let text = json.encode(d)
 print(text)
 let back: Result<Doc> = json.decode(text)
@@ -373,7 +373,7 @@ print(sh)
 print(json.to_json(Some([1, 2])))
 --- stdout
 {"name":"d","tag":"t","shape":{"Nested":[{"Circle":[1.5]}]},"shapes":[{"Label":["x"]},{"Pair":[1,2]},"Empty",{"Nested":["Empty"]}],"count":null,"flags":[true,null]}
-Ok(Doc { name: "d", tag: Some("t"), shape: Nested(Circle(1.5)), shapes: [Label("x"), Pair(1, 2), Empty, Nested(Empty)], count: None, flags: [Some(true), None] })
+Ok(Doc(name: "d", tag: Some("t"), shape: Nested(Circle(1.5)), shapes: [Label("x"), Pair(1, 2), Empty, Nested(Empty)], count: None, flags: [Some(true), None]))
 true
 3
 [{"Circle":[1.0]},{"Label":["q"]}]
@@ -470,7 +470,7 @@ let a = json!({"f": (x: int) => x})
 === encode rejects functions at compile time
 import json
 struct Job { name: str, run: fn() -> int }
-print(json.encode([Job { name: "a", run: () => 1 }]))
+print(json.encode([Job(name: "a", run: () => 1)]))
 --- error
 3: [Job] does not implement `Encode` because field `run` of `Job` has type `fn() -> int`
 
@@ -503,7 +503,7 @@ fn dump<T: Encode>(x: T) -> str {
 fn num<T: Num>(x: T) -> str {
     dump(x)
 }
-print(dump(P { x: [1..3], tags: set(["a"]) }))
+print(dump(P(x: [1..3], tags: Set(["a"]))))
 print(num(1.5))
 --- stdout
 {"x":[{"start":1,"end":3}],"tags":["a"]}
@@ -526,7 +526,7 @@ struct Opened { path: str, mode: Mode = Mode.Write }
 let o: Opened = json.decode("{\"path\": \"a\"}")?
 print(o)
 --- stdout
-Opened { path: "a", mode: Write }
+Opened(path: "a", mode: Write)
 
 === decode fills missing fields with their constant defaults
 import json
@@ -549,32 +549,32 @@ struct All {
 }
 let a: All = json.decode("{}")?
 print(a)
-print(a == All {})
+print(a == All())
 --- stdout
-All { u: (), b: true, n: -3, x: -1.5, d: -2s, s: "q\"", xs: [], m: [:], o: None, some: Some(Write), mode: Read, neg: 4, r: -1..3, ri: 0..=2 }
+All(u: (), b: true, n: -3, x: -1.5, d: -2s, s: "q\"", xs: [], m: [:], o: None, some: Some(Write), mode: Read, neg: 4, r: -1..3, ri: 0..=2)
 true
 
 === decode fills missing fields with defaults built from constructors
 import json
 enum Shape { Circle(float), Rect(w: float, h: float), Dot }
 struct Config {
-    server: Server = Server {}
-    backup: Server = Server { port: 81, ..Server {} }
+    server: Server = Server()
+    backup: Server = Server(port: 81, ..Server())
     shapes: [Shape] = [Shape.Rect(w: 1.0, h: 2.0), Shape.Dot]
     size: (int, int) = (80, 24)
-    late: Late = Late { n: 3 }
-    tags: Set<str> = set(["b", "a"])
+    late: Late = Late(n: 3)
+    tags: Set<str> = Set(["b", "a"])
 }
 struct Server { host: str = "localhost", port: int = 80, routes: [str: [int]] = ["a": [1, 2]] }
 struct Late { n: int, m: (str, bool)? = Some(("x", true)) }
 let c: Config = json.decode("{\"size\": [1, 2]}")?
 print(c)
-print(c == Config { size: (1, 2) })
+print(c == Config(size: (1, 2)))
 --- stdout
-Config { server: Server { host: "localhost", port: 80, routes: ["a": [1, 2]] }, backup: Server { host: "localhost", port: 81, routes: ["a": [1, 2]] }, shapes: [Rect(1.0, 2.0), Dot], size: (1, 2), late: Late { n: 3, m: Some(("x", true)) }, tags: Set(["b", "a"]) }
+Config(server: Server(host: "localhost", port: 80, routes: ["a": [1, 2]]), backup: Server(host: "localhost", port: 81, routes: ["a": [1, 2]]), shapes: [Rect(1.0, 2.0), Dot], size: (1, 2), late: Late(n: 3, m: Some(("x", true))), tags: Set(["b", "a"]))
 true
 
-=== decode runs the defaults that are not constants, as a struct literal does
+=== decode runs the defaults that are not constants, as a construction does
 import json
 var calls: [str] = []
 fn note(what: str, n: int) -> int {
@@ -587,7 +587,7 @@ struct Outer {
     x: int = note("outer.x", 2)
     inner: Inner
     y: int? = Some(note("outer.y", 3))
-    items: Set<Item> = set()
+    items: Set<Item> = Set()
     label: str = "a" + "b"
 }
 let o: Outer = json.decode(r#"{"inner": {}, "items": [{"name": "p"}, {"name": "q", "id": 9}, {"name": "p"}]}"#)?
@@ -597,14 +597,14 @@ let bad: Result<Outer> = json.decode(r#"{"inner": {}, "items": 5}"#)
 print(bad)
 print(calls.len())
 --- stdout
-Outer { x: 2, inner: Inner { a: 1, b: "b" }, y: Some(3), items: Set([Item { id: 1, name: "p" }, Item { id: 9, name: "q" }, Item { id: 2, name: "p" }]), label: "ab" }
+Outer(x: 2, inner: Inner(a: 1, b: "b"), y: Some(3), items: Set([Item(id: 1, name: "p"), Item(id: 9, name: "q"), Item(id: 2, name: "p")]), label: "ab")
 ["inner.a", "item.id", "item.id", "outer.x", "outer.y"]
-Err(Error { kind: "parse", message: "$.items: expected array" })
+Err(Error(message: "$.items: expected array", kind: "parse"))
 5
 
-=== a default that never ends fails decode as it fails a struct literal
+=== a default that never ends fails decode as it fails a construction
 import json
-struct Loop { next: [Loop] = [Loop {}] }
+struct Loop { next: [Loop] = [Loop()] }
 let l: Result<Loop> = json.decode("{}")
 print(l)
 --- fail
@@ -621,13 +621,13 @@ struct S { a: int = later(4), b: [int] = [later(5)] }
 let s: [S] = json.decode("[{}, {\"a\": 1}]")?
 print(s)
 --- stdout
-[S { a: 4, b: [5] }, S { a: 1, b: [5] }]
+[S(a: 4, b: [5]), S(a: 1, b: [5])]
 
 === functions pass reflect type parameters on to json.decode
 import json
 struct P { x: int, y: int = 7 }
-fn load<reflect T: Encode>(text: str) -> Result<T> { json.decode(text) }
-fn both<reflect T: Encode>(a: str, b: str = "{\"x\": 3}", first: Result<T> = load(b)) -> Result<(T, T)> {
+fn load<reflect T: Decode>(text: str) -> Result<T> { json.decode(text) }
+fn both<reflect T: Decode>(a: str, b: str = "{\"x\": 3}", first: Result<T> = load(b)) -> Result<(T, T)> {
     let later: fn() -> Result<T> = () => load(a)
     Ok((first?, later()?))
 }
@@ -638,14 +638,14 @@ print(t)
 let n: Result<(int, int)> = both("1", "2")
 print(n)
 --- stdout
-P { x: 1, y: 7 }
-(P { x: 3, y: 7 }, P { x: 2, y: 7 })
+P(x: 1, y: 7)
+(P(x: 3, y: 7), P(x: 2, y: 7))
 Ok((2, 1))
 
 === the type parameters of reflect type arguments must be reflect
 import json
-fn plain<T: Encode>(text: str) -> Result<T> { json.decode(text) }
-fn mixed<reflect T: Encode, U: Encode>(text: str) -> Result<(T, [U])> { json.decode(text) }
+fn plain<T: Decode>(text: str) -> Result<T> { json.decode(text) }
+fn mixed<reflect T: Decode, U: Decode>(text: str) -> Result<(T, [U])> { json.decode(text) }
 --- error
 2: this call needs a description of `T` at run time, so `T` must be a `reflect` type parameter of this function
 3: this call needs a description of `(T, [U])` at run time, so `U` must be a `reflect` type parameter of this function
@@ -656,13 +656,13 @@ struct P { x: int, tag: str = "t\(1 + 1)" }
 struct Page<T> { items: [T], next: str? = None }
 enum Shape<T> { Dot, Named(label: str, value: T) }
 struct Tree<T> { value: T, kids: [Tree<T>] = [] }
-fn all<reflect T: Encode>(text: str) -> Result<[T]> { json.decode(text) }
-fn page<reflect T: Encode>(text: str) -> Result<Page<T>> { json.decode(text) }
-fn pair<reflect A: Encode + Hash, reflect B: Encode>(text: str) -> Result<(A, [str: B], Set<A>)> { json.decode(text) }
-fn shape<reflect T: Encode>(text: str) -> Result<Shape<T>> { json.decode(text) }
-fn tree<reflect T: Encode>(text: str) -> Result<Tree<T>> { json.decode(text) }
-fn later<reflect T: Encode>(text: str) -> fn() -> Result<T?> { () => json.decode(text) }
-fn pages<reflect T: Encode>(text: str) -> Result<Page<Page<T>>> { page(text) }
+fn all<reflect T: Decode>(text: str) -> Result<[T]> { json.decode(text) }
+fn page<reflect T: Decode>(text: str) -> Result<Page<T>> { json.decode(text) }
+fn pair<reflect A: Decode + Hash, reflect B: Decode>(text: str) -> Result<(A, [str: B], Set<A>)> { json.decode(text) }
+fn shape<reflect T: Decode>(text: str) -> Result<Shape<T>> { json.decode(text) }
+fn tree<reflect T: Decode>(text: str) -> Result<Tree<T>> { json.decode(text) }
+fn later<reflect T: Decode>(text: str) -> fn() -> Result<T?> { () => json.decode(text) }
+fn pages<reflect T: Decode>(text: str) -> Result<Page<Page<T>>> { page(text) }
 let a: [P] = all("[{\"x\": 1}, {\"x\": 2}]")?
 print(a)
 let p: Result<Page<P>> = page("{\"items\": [{\"y\": 3}]}")
@@ -680,18 +680,18 @@ print(f())
 let n: Result<Page<Page<P>>> = pages("{\"items\": [{\"items\": [{\"x\": \"no\"}]}]}")
 print(n)
 --- stdout
-[P { x: 1, tag: "t2" }, P { x: 2, tag: "t2" }]
-Err(Error { kind: "parse", message: "$.items[0]: missing field `x`" })
-(1, ["k": P { x: 5, tag: "t2" }], Set([2]))
-Named("n", P { x: 9, tag: "t2" })
-Err(Error { kind: "parse", message: "$: unknown variant `Other` of Shape<[P]>" })
-Tree { value: "a", kids: [Tree { value: "b", kids: [Tree { value: "c", kids: [] }] }] }
-Ok(Some(P { x: 7, tag: "t2" }))
-Err(Error { kind: "parse", message: "$.items[0].items[0].x: expected int" })
+[P(x: 1, tag: "t2"), P(x: 2, tag: "t2")]
+Err(Error(message: "$.items[0]: missing field `x`", kind: "parse"))
+(1, ["k": P(x: 5, tag: "t2")], Set([2]))
+Named("n", P(x: 9, tag: "t2"))
+Err(Error(message: "$: unknown variant `Other` of Shape<[P]>", kind: "parse"))
+Tree(value: "a", kids: [Tree(value: "b", kids: [Tree(value: "c", kids: [])])])
+Ok(Some(P(x: 7, tag: "t2")))
+Err(Error(message: "$.items[0].items[0].x: expected int", kind: "parse"))
 
 === recursion that nests reflect type arguments without end aborts
 import json
-fn deep<reflect T: Encode>(n: int, witness: [T]) -> int {
+fn deep<reflect T: Decode>(n: int, witness: [T]) -> int {
     if n == 0 {
         let r: Result<T> = json.decode("[[1]]")
         print(r.is_ok())
@@ -715,13 +715,13 @@ limit: the description of a type argument is nested too deeply
 === long type names in messages are cut
 import json
 enum Wrapped<T> { Of(T) }
-fn wrap<reflect T: Encode>(text: str) -> Result<Wrapped<T>> { json.decode(text) }
+fn wrap<reflect T: Decode>(text: str) -> Result<Wrapped<T>> { json.decode(text) }
 let direct: Result<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<int>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> = json.decode("1")
 let built: Result<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<int>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> = wrap("1")
 print(direct)
 print(direct == built)
 --- stdout
-Err(Error { kind: "parse", message: "$: expected Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<int>>>>>>>>>>>>>…" })
+Err(Error(message: "$: expected Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<int>>>>>>>>>>>>>…", kind: "parse"))
 true
 
 === trait methods cannot be reflect
@@ -731,8 +731,8 @@ trait Load { fn load<reflect T>() -> int }
 
 === local functions cannot be reflect
 import json
-fn outer<reflect T: Encode>(text: str) -> Result<[T]> {
-    fn inner<reflect U: Encode>(t: str) -> Result<[U]> { json.decode(t) }
+fn outer<reflect T: Decode>(text: str) -> Result<[T]> {
+    fn inner<reflect U: Decode>(t: str) -> Result<[U]> { json.decode(t) }
     fn same(t: str) -> Result<[T]> { json.decode(t) }
     let _ = same(text)
     inner(text)
@@ -742,8 +742,8 @@ fn outer<reflect T: Encode>(text: str) -> Result<[T]> {
 
 === functions with reflect type parameters are values
 import json
-fn load<reflect T: Encode>(text: str) -> Result<[T]> { json.decode(text) }
-fn loader<reflect T: Encode>(x: T?) -> fn(str) -> Result<[T]> { load }
+fn load<reflect T: Decode>(text: str) -> Result<[T]> { json.decode(text) }
+fn loader<reflect T: Decode>(x: T?) -> fn(str) -> Result<[T]> { load }
 let f: fn(str) -> Result<[int]> = load
 let g: fn(str) -> Result<str> = json.decode
 let none: bool? = None
@@ -766,9 +766,9 @@ import json
 struct Bag<T: Hash> { items: Set<T> }
 struct Outer<U> { b: Bag<U> }
 struct Rows { seen: Set<[int]> }
-fn load<reflect T: Encode>(s: str) -> Result<Set<T>> { json.decode(s) }
-fn load_hashed<reflect T: Encode + Hash>(s: str) -> Result<Set<T>> { json.decode(s) }
-fn any<reflect T: Encode>(s: str) -> Result<T> { json.decode(s) }
+fn load<reflect T: Decode>(s: str) -> Result<Set<T>> { json.decode(s) }
+fn load_hashed<reflect T: Decode + Hash>(s: str) -> Result<Set<T>> { json.decode(s) }
+fn any<reflect T: Decode>(s: str) -> Result<T> { json.decode(s) }
 let a: Result<Set<[int]>> = json.decode("[[1], [1]]")
 let b: Result<[float: int]> = json.decode("{}")
 let c: Result<Outer<[int]>> = json.decode("{\"b\": {\"items\": [[1], [1]]}}")
@@ -785,7 +785,7 @@ let f: Result<Set<int>> = load_hashed("[1]")
 
 === decode builds a set of hashable elements once
 import json
-fn load_hashed<reflect T: Encode + Hash>(s: str) -> Result<Set<T>> { json.decode(s) }
+fn load_hashed<reflect T: Decode + Hash>(s: str) -> Result<Set<T>> { json.decode(s) }
 let f: Result<Set<int>> = load_hashed("[1, 1, 2]")
 print(f)
 --- stdout

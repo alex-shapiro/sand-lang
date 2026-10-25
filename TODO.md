@@ -104,14 +104,14 @@ Follow-up work, roughly in priority order.
       unterminated string) and remove the follow-on expectations from the spec
       tests.
 - [ ] Recover at the next `match` arm after an invalid pattern
-      (`1..5 =>`, `Rect(..) =>`) instead of reporting a spurious
+      (`1..5 =>`, `Point { x } =>`) instead of reporting a spurious
       `unexpected }` at the end of the `match`.
 - [ ] Suggest an enum in addition to a struct or tuple for mixed-type list
       literals (`[1, "a"]`).
 - [ ] Include the `<top level>` stack frame if a failing `assert` is the
       final top-level statement.
 - [ ] Deduplicate missing trait diagnostics within a single expression (for
-      example, `set([need(x), x])` with `x: float?` and `need<T: Hash>` reports
+      example, `Set([need(x), x])` with `x: float?` and `need<T: Hash>` reports
       `float? does not implement Hash` twice at overlapping spans).
 - [ ] Display the target type arguments for specialized `impl` blocks in the
       `Implements` section of `help` (for example, `help(List)` currently lists
@@ -156,19 +156,14 @@ Follow-up work, roughly in priority order.
 - [ ] Evaluate replacing string error kinds (`"not_found"`, `"invalid"`) with
       an enum.
 
-- [ ] **Construct all types with `T(...)`.** Replace struct literals with
-      named-argument calls (`Point(x: 1.0, y: 2.0)`, with defaults and
-      `..base`) and struct patterns with `Point(x, ..)`. Allow a type to
-      declare an `init` method (or a native `init` for an opaque type) that
-      replaces field-by-field construction and can return a `Result`. Inside
-      `init`, `Self(...)` performs field-by-field construction. Remove
-      module-level constructor functions (`time.date`, `regex.new`,
-      `random.rng`, `task.channel`, `set`, `error`) and the parser restriction
-      on struct literals in `if`, `while`, `match`, and `for` headers. Keep
-      static factory methods (`T.parse`, `T.from_x`).
-- [ ] Support `Rect(..)` and `Rect(w: w, h: h)` in enum variant patterns to
-      match variant construction (`Shape.Rect(w: 2.0, h: 3.0)`), as part of
-      the `T(...)` item above.
+- [ ] Decode a struct that declares `init` by calling `init` with the
+      members of the JSON object as named arguments (as kotlinx.serialization
+      and cattrs call constructors), so that such structs implement `Decode`.
+      The decoder hashes set elements and map keys before it runs deferred
+      Sand calls, so `init` must run before a decoded value enters a set or map.
+- [ ] Allow a type name as a constructor function value (`names.map(Error)`),
+      as variants already are (`[1, 2].map(Token.Num)`). Function values take
+      positional arguments only, so the value cannot use field defaults.
 - [ ] Reject `import` statements after non-import items or statements, as
       specified in §3.1.
 - [ ] Support trait objects (`dyn Trait`), associated types and constants, and

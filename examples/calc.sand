@@ -222,8 +222,8 @@ struct Interpreter {
     }
 
     fn run(self, line: str) -> Result<str, str> {
-        let tokens = Lexer { src: line.chars() }.tokens()?
-        let parser = Parser { tokens }
+        let tokens = Lexer(src: line.chars()).tokens()?
+        let parser = Parser(tokens)
         match parser.statement()? {
             Let(name, e) => {
                 let v = self.eval(e)?
@@ -250,7 +250,7 @@ fn fmt_num(v: float) -> str {
     if v == v.round() and v.abs() < 1e15 { v.to_int().to_str() } else { v.to_str() }
 }
 
-let interp = Interpreter {}
+let interp = Interpreter()
 while let Some(line) = io.stdin.read_line()? {
     if line.trim().is_empty() { continue }
     match interp.run(line) {
