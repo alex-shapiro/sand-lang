@@ -3,10 +3,10 @@
 # builtins with key functions. Stresses closure calls and generators.
 
 from collections import defaultdict
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from functools import reduce
 from itertools import accumulate, islice, pairwise, takewhile
-from typing import Callable, Iterator
 
 EVENTS = 300_000
 KINDS = 8
