@@ -164,8 +164,14 @@ Follow-up work, roughly in priority order.
 - [ ] Decode a struct that declares `init` by calling `init` with the
       members of the JSON object as named arguments (as kotlinx.serialization
       and cattrs call constructors), so that such structs implement `Decode`.
-      The decoder hashes set elements and map keys before it runs deferred
-      Sand calls, so `init` must run before a decoded value enters a set or map.
+      The decoder runs Sand code only as deferred `fn()` thunks
+      (`Decoded::Pending` in `src/stdlib/json.rs`), which has three
+      consequences. A thunk cannot fail the decode, so an `init` that returns
+      `Err` needs thunks that return an error. Thunks get no trait
+      dictionaries, so a generic `init` that calls methods of its bounds
+      (`Sorted<T: Ord>` that sorts) cannot run. `init` must run before its
+      value enters a set, as computed field defaults do now. `json.decode` must
+      also check that `init` is visible at the call, as it does for fields.
 - [ ] Let function types carry parameter defaults, so that a function value
       of `fn error(message: str, kind: str = "error")` or of a type
       (`names.map(Error)`) can omit them. Function values now take all
