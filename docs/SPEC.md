@@ -3243,7 +3243,8 @@ the same line, trailing commas in multi-line lists/arguments/fields, at most
 one blank line in a row, one blank line around functions with a body,
 types, `extend`, traits, impls and tests, line width 100 (calls, lists,
 maps and parameter lists that do not fit are broken one element per line,
-and method chains that do not fit are broken before each method call),
+patterns too if the text after them then fits, and method chains that do
+not fit are broken before each method call),
 comments preserved (a `///` comment that documents nothing becomes `//`).
 Trait and impl bodies are laid out like struct bodies,
 one method per line, with a blank line around methods with a body. String
