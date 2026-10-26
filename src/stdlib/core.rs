@@ -68,7 +68,7 @@ pub(crate) struct Error {
 pub(crate) fn prelude() -> NativeModule {
     let mut m = NativeModule::std("prelude", ModKind::Prelude, include_str!("prelude.sand"));
     m.builtin_type("Task", "Handle to a concurrent task started with `spawn`.", &["T"]);
-    m.builtin_type("Channel", "FIFO message queue for communicating between tasks (created with `Channel(capacity)`).", &["T"]);
+    m.builtin_type("Channel", "FIFO message queue for communicating between tasks.", &["T"]);
     m.bind::<Error>();
 
     // Globals.

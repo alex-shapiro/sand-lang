@@ -5,7 +5,7 @@ use crate::native::{NativeModule, NativeObject, Param, Val};
 use crate::vm::value::{FxHashMap, Value, to_usize_saturating};
 use crate::vm::{Ctl, Rng, Vm, fail};
 
-/// An isolated pseudo-random number generator created with `random.rng(seed)`.
+/// An isolated pseudo-random number generator.
 #[derive(crate::SandObject)]
 #[sand(module = "random", name = "Rng")]
 struct RngObj(Rng);

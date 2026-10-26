@@ -131,8 +131,8 @@ f(1)
 --- stdout
 type Set<T>
 
-Insertion-ordered hash set constructed with `Set([...])`. Sets are mutable
-reference types, and elements must implement `Hash`.
+Insertion-ordered hash set. Sets are mutable reference types, and elements
+must implement `Hash`.
 
 Construct:
     Set(items: [T] = []) -> Set<T>

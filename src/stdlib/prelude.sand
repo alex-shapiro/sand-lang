@@ -962,8 +962,8 @@ extend<K: Hash, V> [K: V] {
     }
 }
 
-/// Insertion-ordered hash set constructed with `Set([...])`. Sets are mutable
-/// reference types, and elements must implement `Hash`.
+/// Insertion-ordered hash set. Sets are mutable reference types, and elements
+/// must implement `Hash`.
 extend<T: Hash> Set<T> {
     /// Creates a set of the distinct elements of `items`, in the order of
     /// their first occurrence.

@@ -110,7 +110,7 @@ impl Scan {
     }
 }
 
-/// A compiled regular expression created with `regex.new`.
+/// A compiled regular expression.
 #[derive(crate::SandObject)]
 #[sand(module = "regex", name = "Regex")]
 struct RegexObj {
@@ -154,7 +154,7 @@ impl NativeObject for RegexObj {
 /// pattern's hash).
 const REGEX_CACHE_SLOTS: usize = 64;
 
-/// Fuel for a `regex.new` served from the cache (plus the pattern's bytes).
+/// Fuel for a `regex.Regex(pattern)` served from the cache (plus the pattern's bytes).
 const CACHED_COST: u64 = 4;
 
 /// The pattern's hash and its slot in the regex cache.
