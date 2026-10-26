@@ -7,7 +7,7 @@ Sand provides two constructs for defining custom data types: `struct` groups nam
 
 ## Structs
 
-A `struct` declaration lists its fields and their types. `Point(...)` constructs a value, with each field given by name or in declaration order:
+A `struct` declaration lists its fields and their types. `Point(...)` constructs a value. Give each field by name or in declaration order:
 
 ```sand
 struct Point {
@@ -50,7 +50,7 @@ p.x = 0.0
 
 ### Positional fields and copies
 
-Positional arguments give fields in declaration order, and a last argument `..base` copies the fields not given from `base`:
+Positional arguments give the fields in declaration order. A last argument `..base` copies the remaining fields from `base`:
 
 ```sand
 struct Point {
@@ -103,7 +103,7 @@ print(Vec2.zero().plus(v))
 
 ### Validating construction with `init`
 
-A static method named `init` replaces field-by-field construction: `T(...)` calls `init` with its arguments. Inside `init`, `Self(...)` constructs the struct field by field. An `init` that returns a `Result` makes every construction of the type checkable:
+A static method `init` replaces construction field by field: `T(...)` calls `init` with its arguments. Inside `init`, `Self(...)` constructs the struct field by field. If `init` returns a `Result`, each construction can fail, and the caller must handle the error:
 
 ```sand
 struct Port {
@@ -121,7 +121,7 @@ print(Port(8080))
 print(Port(0))
 ```
 
-Standard library types construct the same way: `Set([1, 2])`, `Channel(capacity: 8)`, `regex.Regex(r"\d+")?`, and `time.PlainDate(2024, 2, 29)?`.
+Construct standard library types in the same way: `Set([1, 2])`, `Channel(capacity: 8)`, `regex.Regex(r"\d+")?`, and `time.PlainDate(2024, 2, 29)?`.
 
 ### Adding methods with `extend`
 

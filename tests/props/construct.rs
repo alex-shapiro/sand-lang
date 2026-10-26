@@ -1,8 +1,8 @@
-//! `T(...)` constructions and patterns against a model of field binding:
-//! positional arguments fill fields in declaration order, named arguments
-//! fill the rest in any order, `..base` and defaults fill what remains, and
-//! side effects happen in source order, then `..base`, then defaults in
-//! declaration order.
+//! Tests `T(...)` constructions and patterns against a model of field binding.
+//! Positional arguments give the first fields in declaration order. Named
+//! arguments give other fields in any order. `..base` and the defaults give
+//! the remaining fields. A construction evaluates the arguments in source
+//! order, then `..base`, then the defaults in declaration order.
 
 use super::int;
 use proptest::prelude::*;
@@ -20,18 +20,19 @@ fn lit(v: i64) -> String {
     super::int_lit(v)
 }
 
-/// A struct of `int` fields, and one construction of it.
+/// A struct of `int` fields, and a construction of it.
 #[derive(Clone, Debug)]
 struct Construction {
-    /// The default of each field, if it has one.
+    /// The default of each field, or `None`.
     defaults: Vec<Option<i64>>,
-    /// The value given for each field, if the construction gives it.
+    /// The value of each field. The construction uses only the values of the
+    /// fields that it gives.
     given: Vec<i64>,
     /// The number of fields given positionally (a prefix of the fields).
     positional: usize,
     /// The fields given by name, in source order.
     named: Vec<usize>,
-    /// The fields of `..base`, if the construction has one.
+    /// The fields of `..base`, if the construction has `..base`.
     base: Option<Vec<i64>>,
 }
 
@@ -87,7 +88,8 @@ impl Construction {
         )
     }
 
-    /// The expected output, or the field that the construction misses.
+    /// The expected output, or the first field that the construction does
+    /// not give and that does not have a default.
     fn expected(&self) -> Result<String, usize> {
         let n = self.n();
         let mut values = Vec::new();
@@ -190,7 +192,8 @@ impl Match {
         )
     }
 
-    /// The expected output, or `None` if the pattern misses a field without `..`.
+    /// The expected output, or `None` if the pattern does not mention all
+    /// fields and does not end with `..`.
     fn expected(&self) -> Option<String> {
         let mentioned = self.mentioned();
         if !self.rest && mentioned.len() < self.n() {

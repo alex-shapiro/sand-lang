@@ -198,8 +198,8 @@ impl FnInfo {
         self.owner.is_some() && !self.has_self && syms.str(self.name) == "init"
     }
 
-    /// The name of this function in function values and stack traces: the
-    /// name of its type if it is an `init`, which `T(...)` calls.
+    /// The name of this function in function values and stack traces. The
+    /// name of an `init` is the name of its type, because `T(...)` calls it.
     pub(crate) fn runtime_name(&self, types: &PVec<TypeDef>, syms: &Symbols) -> String {
         match self.owner {
             Some(c) if self.is_init(syms) => c.native_prefix(types, syms),
@@ -308,7 +308,8 @@ pub struct LintFacts {
     /// Import names of the main module and their spans.
     pub main_imports: Vec<(String, Span)>,
     pub unused_results: Vec<Span>,
-    /// `argument-order`: a positional argument or sub-pattern, and its message.
+    /// `argument-order` lints: the span of a positional argument or
+    /// sub-pattern, and the message.
     pub argument_order: Vec<(Span, String)>,
     /// The resource lints (`unclosed-resource`, `resource-field`,
     /// `resource-escapes`; see `resources`): span, code and message.
@@ -533,8 +534,8 @@ pub(crate) struct FnState {
     /// Indicates that the checker is checking a struct field default, which
     /// does not receive trait dictionaries.
     pub field_default: bool,
-    /// Inside the `init` of this type constructor, where `T(...)` builds a
-    /// struct field by field.
+    /// The type constructor whose `init` the checker is checking. In this
+    /// `init`, `T(...)` constructs the struct field by field.
     pub init_of: Option<Ctor>,
     /// `(type, span, call_kind)` triples for `reflect` type arguments, checked
     /// after type inference completes.
@@ -1376,7 +1377,8 @@ impl Checker {
         }
         if self.allows_native() {
             self.declare_undeclared_natives(first_fn);
-            // A native module can register an `init` without declaring it.
+            // A native module can register an `init` without a `native fn`
+            // declaration, so `Decode` is derived again.
             self.derive_impls(first_type, &[Builtin::Decode]);
         }
         // 5. Top-level code.
@@ -2743,9 +2745,9 @@ impl Checker {
         self.methods.insert(key, ids.into());
     }
 
-    /// Checks that `init` method `id` of `ctor` constructs it: it is static,
-    /// returns `Self` or `Result<Self, E>`, constructs every instance of the
-    /// type, and comes with the type, not with a later session input.
+    /// Checks the declaration of `init` method `id` of `ctor`. The `init` must
+    /// be static and return `Self` or `Result<Self, E>`. It must construct all
+    /// instances of the type, and be in the same session input as the type.
     fn check_init_decl(&mut self, ctor: Ctor, name: &ast::Ident, id: FnId) {
         let f = &self.fns[id as usize];
         let (self_ty, ret) = (f.self_ty.unwrap_or(TypeId::ERROR), f.ret);
@@ -2756,7 +2758,8 @@ impl Checker {
         } else if let Ctor::Def(d) = ctor
             && (d as usize) < self.first_type
         {
-            // Code checked earlier constructs and decodes the type field by field.
+            // Earlier inputs construct and decode the type field by field, so a
+            // later `init` would not apply to all values.
             let ty = self.name(self.types[d as usize].name).to_string();
             self.error(name.span, format!("`init` must be declared in the same input as `{ty}`"));
         } else if f.has_self {
@@ -2799,9 +2802,10 @@ impl Checker {
         true
     }
 
-    /// Records an `argument-order` lint if positional argument or
-    /// sub-pattern `name` (at `span`) is given for parameter or field `names[i]`
-    /// of `what` but is named like a different one of `names`.
+    /// Records an `argument-order` lint if the positional argument or
+    /// sub-pattern `name` (at `span`) is in the position of `names[i]`, but
+    /// has the name of a different entry in `names`. `what` identifies the
+    /// callee or pattern in the message.
     pub(crate) fn note_argument_order(&mut self, what: &str, names: &[&str], i: usize, name: &str, span: Span) {
         if !self.linting() || names.get(i) == Some(&name) || !names.contains(&name) {
             return;

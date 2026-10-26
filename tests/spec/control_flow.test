@@ -320,7 +320,7 @@ match
 5
 6
 
-=== an old struct literal reports the construction syntax
+=== a struct literal is an error that shows the construction syntax
 struct P { x: int }
 let p = P { x: 1 }
 --- error

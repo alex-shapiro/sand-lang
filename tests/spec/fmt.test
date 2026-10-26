@@ -79,7 +79,7 @@ fn f() {}
 /// Second line.
 fn f() {}
 
-=== a doc comment that documents nothing becomes a line comment
+=== a doc comment that does not document an item becomes a line comment
 let l = /// stray
 3
 fn f() {

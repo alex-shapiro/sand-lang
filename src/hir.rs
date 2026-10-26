@@ -151,7 +151,7 @@ pub struct HLambda {
 
 /// What a constructor function value ([`HKind::CtorFn`]) builds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Made {
+pub enum CtorTarget {
     /// The variant with this runtime id.
     Variant(u32),
     Struct(TypeDefId),
@@ -174,10 +174,10 @@ pub enum HKind {
         func: FnId,
         targs: Vec<TypeId>,
     },
-    /// A variant, or a struct built field by field, used as a function value
-    /// that takes its `arity` fields.
+    /// A variant, or a struct constructed field by field, used as a function
+    /// value. The function takes `arity` arguments, one for each field.
     CtorFn {
-        made: Made,
+        target: CtorTarget,
         arity: usize,
     },
     /// A payload-less variant.

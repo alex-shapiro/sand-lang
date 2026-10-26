@@ -548,7 +548,7 @@ pub enum PatternKind {
     Range(i64, i64),
     Tuple(Vec<Pattern>),
     /// A variant or struct: `Name(args)`, `Enum.Name(args)`, `module.Type(args)`,
-    /// or a qualified payload-less variant `Enum.Name` (`args` is `None`).
+    /// or a qualified variant without a payload, `Enum.Name` (`args` is `None`).
     Ctor {
         path: Vec<Ident>,
         args: Option<PatArgs>,

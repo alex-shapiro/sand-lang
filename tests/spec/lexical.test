@@ -414,7 +414,7 @@ print(x)
 --- error
 2: a `//!` module documentation comment must come before the first item
 
-=== a `///` after code on its line documents nothing
+=== a `///` after code on its line does not document an item
 let x = 1 /// about nothing
 /// Doubles.
 fn double(n: int) -> int { n * 2 }

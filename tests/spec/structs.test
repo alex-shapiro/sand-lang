@@ -493,7 +493,7 @@ print(Box("a"))
 Sorted(items: [1, 2, 3])
 Box(t: "a")
 
-=== a constructor function value is named after its type
+=== a constructor function value has the name of its type
 import regex
 struct Pos {
     x: int
@@ -528,7 +528,7 @@ let e = Pos(1).init(2)
 9: no field `init` on type Pos
 10: no method `init` on type Pos
 
-=== only a construction field by field takes ..base
+=== only a construction field by field accepts `..base`
 struct P { x: int }
 let p = P(1)
 let n = members(..p)

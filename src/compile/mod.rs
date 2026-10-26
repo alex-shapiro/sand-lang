@@ -59,7 +59,7 @@ struct Compiler<'a> {
     fn_protos: PVec<Option<u32>>,
     /// The constants made so far, to share them.
     consts: ConstTable,
-    ctor_wrappers: PMap<Made, u32>,
+    ctor_wrappers: PMap<CtorTarget, u32>,
     /// Constant trait dictionaries by their elements.
     dict_consts: PMap<Vec<u32>, u32>,
     /// Shared type descriptions of `reflect` type arguments.
@@ -255,7 +255,7 @@ pub(crate) struct Incremental {
     fn_protos: PVec<Option<u32>>,
     /// The constants made so far, to share them.
     consts: ConstTable,
-    ctor_wrappers: PMap<Made, u32>,
+    ctor_wrappers: PMap<CtorTarget, u32>,
     dict_consts: PMap<Vec<u32>, u32>,
     descs: reflect::DescCache,
     /// Number of tests compiled.
@@ -1723,8 +1723,8 @@ impl<'a> Compiler<'a> {
                 self.mv(f, dst, base);
                 f.next_reg = mark;
             }
-            HKind::CtorFn { made, arity } => {
-                let p = self.ctor_wrapper(*made, *arity, f.file);
+            HKind::CtorFn { target, arity } => {
+                let p = self.ctor_wrapper(*target, *arity, f.file);
                 let k = self.const_idx(Const::Fn(p));
                 self.emit(f, Op::LoadConst { dst, k });
             }
@@ -2613,10 +2613,10 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    /// A construction field by field as the checker lowers it: hidden locals
-    /// bound to the fields given, in source order, then `MakeStruct` (see
-    /// `construct_fields`). Returns the number of `let`s, the struct and
-    /// its field values.
+    /// Matches a construction field by field in the form that
+    /// `Checker::construct_fields` makes: `let`s that bind hidden locals to
+    /// the given fields in source order, then `MakeStruct`. Returns the number
+    /// of `let`s, the struct, and its field values.
     fn field_construction<'e>(&self, f: &FnState, items: &'e [HExpr]) -> Option<(usize, TypeDefId, &'e [HExpr])> {
         let (HKind::MakeStruct { def, fields }, lets) = (&items.last()?.kind, &items[..items.len() - 1]) else { return None };
         let hidden = |it: &HExpr| {
@@ -2832,23 +2832,23 @@ impl<'a> Compiler<'a> {
         vec![self.emit(f, Op::JNotVariant { src, variant, off: 0 })]
     }
 
-    fn ctor_wrapper(&mut self, made: Made, arity: usize, file: u32) -> u32 {
-        if let Some(&p) = self.ctor_wrappers.get(&made) {
+    fn ctor_wrapper(&mut self, target: CtorTarget, arity: usize, file: u32) -> u32 {
+        if let Some(&p) = self.ctor_wrappers.get(&target) {
             return p;
         }
-        let (id, name) = match made {
-            Made::Variant(rt) => (rt, self.prog.variants.get(rt as usize).map(|v| v.name.clone())),
-            Made::Struct(d) => (d, self.prog.types.get(d as usize).map(|t| t.name.clone())),
+        let (id, name) = match target {
+            CtorTarget::Variant(rt) => (rt, self.prog.variants.get(rt as usize).map(|v| v.name.clone())),
+            CtorTarget::Struct(d) => (d, self.prog.types.get(d as usize).map(|t| t.name.clone())),
         };
         if id > u16::MAX as u32 || arity >= MAX_REGS as usize {
             self.errors.push(Diag::error(Span::new(file, 0, 0), "too many types, enum variants or fields in program"));
             return 0;
         }
         let (dst, id) = (arity as Reg, id as u16);
-        let code = match made {
-            Made::Variant(_) if arity == 1 => vec![Op::RetVariant { src: 0, variant: id }],
-            Made::Variant(_) => vec![Op::NewVariant { dst, start: 0, variant: id }, Op::Ret { src: dst }],
-            Made::Struct(_) => vec![Op::NewStruct { dst, start: 0, def: id }, Op::Ret { src: dst }],
+        let code = match target {
+            CtorTarget::Variant(_) if arity == 1 => vec![Op::RetVariant { src: 0, variant: id }],
+            CtorTarget::Variant(_) => vec![Op::NewVariant { dst, start: 0, variant: id }, Op::Ret { src: dst }],
+            CtorTarget::Struct(_) => vec![Op::NewStruct { dst, start: 0, def: id }, Op::Ret { src: dst }],
         };
         let p = self.prog.protos.len() as u32;
         self.prog.protos.push(Proto {
@@ -2863,7 +2863,7 @@ impl<'a> Compiler<'a> {
             sites: Vec::new(),
             inlined: Vec::new(),
         });
-        self.ctor_wrappers.insert(made, p);
+        self.ctor_wrappers.insert(target, p);
         p
     }
 

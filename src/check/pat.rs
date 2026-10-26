@@ -3,7 +3,7 @@
 use super::*;
 use crate::syntax::ast::{PatArgs, PatLit, Pattern, PatternKind};
 
-/// What a constructor pattern matches: a variant, or a struct, with type arguments.
+/// The variant or struct that a constructor pattern matches, with its type arguments.
 enum PatTarget {
     Variant(TypeDefId, u32, Vec<TypeId>),
     Struct(TypeDefId, Vec<TypeId>),
@@ -120,9 +120,9 @@ impl Checker {
         (0..n).map(|_| self.fresh()).collect()
     }
 
-    /// Resolves the path of a constructor pattern against the scrutinee type
-    /// `ty`: a variant (`Circle`, `Shape.Circle`, `Some`) or a struct type
-    /// (`Point`, `geo.Point`, `Self`).
+    /// Finds the variant or struct for the path of a constructor pattern with
+    /// scrutinee type `ty`. A variant path is `Circle`, `Shape.Circle`, or
+    /// `Some`. A struct path is `Point`, `geo.Point`, or `Self`.
     fn pattern_ctor(&mut self, path: &[ast::Ident], ty: TypeId) -> Option<PatTarget> {
         let rt = self.resolve(ty);
         let last = path.last().unwrap();
@@ -195,8 +195,8 @@ impl Checker {
         }
     }
 
-    /// The type named by `path` (`Point`, `geo.Point`, `Self`, or an alias),
-    /// with fresh type arguments.
+    /// Returns the type that `path` refers to (`Point`, `geo.Point`, `Self`,
+    /// or an alias), with fresh type arguments.
     fn pattern_type(&mut self, path: &[ast::Ident]) -> Option<TypeId> {
         let r = match path {
             [one] if one.name == "Self" => return self.fs.self_ty,
@@ -229,15 +229,17 @@ impl Checker {
     }
 
     /// Checks the sub-patterns of a constructor pattern against fields of
-    /// types `ftys` (named `names`, if they have names), and returns each
-    /// field's index and pattern. `what` names the variant or struct.
+    /// types `ftys`, and returns the index and pattern of each field. `names`
+    /// contains the field names if the fields have names. `is_private` tells
+    /// which fields the current module cannot access. `what` identifies the
+    /// variant or struct in messages.
     #[allow(clippy::too_many_arguments)]
     fn check_ctor_args(
         &mut self,
         args: &PatArgs,
         ftys: &[TypeId],
         names: Option<&[Symbol]>,
-        hidden: &dyn Fn(&Self, usize) -> bool,
+        is_private: &dyn Fn(&Self, usize) -> bool,
         what: &str,
         span: Span,
         mutable: bool,
@@ -265,7 +267,7 @@ impl Checker {
             }
         }
         for (i, p) in args.positional.iter().enumerate() {
-            if hidden(self, i) {
+            if is_private(self, i) {
                 let msg = format!("field `{}` of {what} is private", field_name(self, i));
                 self.error(p.span, msg);
             }
@@ -287,7 +289,7 @@ impl Checker {
                 unknown = true;
                 continue;
             };
-            if hidden(self, i) {
+            if is_private(self, i) {
                 self.error(name.span, format!("field `{}` of {what} is private", name.name));
             }
             if std::mem::replace(&mut seen[i], true) {
@@ -298,7 +300,7 @@ impl Checker {
         }
         if !args.rest && !unknown {
             let missing: Vec<usize> = (0..n).filter(|&i| !seen[i]).collect();
-            if missing.iter().any(|&i| hidden(self, i)) {
+            if missing.iter().any(|&i| is_private(self, i)) {
                 self.error(span, format!("{what} has private fields; add `..` to ignore them"));
             } else if names.is_some() {
                 for i in missing {
@@ -422,8 +424,8 @@ impl Checker {
                             self.error(span, format!("match the fields of {what} with `{}(..)`", self.name(self.types[d as usize].name)));
                             return self.pat(HPatKind::Struct { fields: vec![] }, ty, span);
                         };
-                        let hidden = move |c: &Self, i: usize| !c.field_visible(d, i);
-                        let fields = self.check_ctor_args(args, &ftys, Some(&names), &hidden, &what, span, mutable, binds);
+                        let is_private = move |c: &Self, i: usize| !c.field_visible(d, i);
+                        let fields = self.check_ctor_args(args, &ftys, Some(&names), &is_private, &what, span, mutable, binds);
                         self.pat(HPatKind::Struct { fields }, ty, span)
                     }
                 }

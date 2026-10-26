@@ -13,9 +13,9 @@ pub(crate) enum Ns {
 
 /// How `T(...)` constructs a value (see [`Checker::construct_target`]).
 enum Construct {
-    /// By calling this `init`.
+    /// `T(...)` calls this `init`.
     Init(FnId),
-    /// Field by field, as this struct.
+    /// `T(...)` constructs this struct field by field.
     Fields(TypeDefId),
 }
 
@@ -24,8 +24,8 @@ enum Construct {
 pub(crate) struct CallArgs<'e> {
     pub(crate) positional: Vec<&'e Expr>,
     pub(crate) named: Vec<(&'e ast::Ident, &'e Expr)>,
-    /// `..base`, until a construction field by field takes it (see
-    /// [`Checker::check_args_call`]).
+    /// `..base`, until a check takes it. [`Checker::check_args_call`] reports
+    /// an error if `..base` is not taken.
     base: std::cell::Cell<Option<&'e Expr>>,
 }
 
@@ -42,7 +42,7 @@ impl<'e> CallArgs<'e> {
         out
     }
 
-    /// The number of arguments other than `..base`.
+    /// The number of arguments, not including `..base`.
     fn len(&self) -> usize {
         self.positional.len() + self.named.len()
     }
@@ -1163,7 +1163,7 @@ impl Checker {
         } else {
             let arity = fields.len();
             let t = self.fn_ty(&fields, enum_ty);
-            mk(HKind::CtorFn { made: Made::Variant(rt_id), arity }, t, span)
+            mk(HKind::CtorFn { target: CtorTarget::Variant(rt_id), arity }, t, span)
         }
     }
 
@@ -1260,8 +1260,8 @@ impl Checker {
         self.visible(def.module, def.fields()[i].is_pub)
     }
 
-    /// The methods named `name` of `c` that the module being checked can
-    /// call: not private to another module, and not `init`.
+    /// Returns the methods `name` of `c` that the current module can call.
+    /// The result does not include `init` or private methods of other modules.
     fn visible_methods(&self, c: Ctor, name: &str) -> impl Iterator<Item = FnId> + '_ {
         let fs = self.methods_named(c, name).unwrap_or_default();
         (0..fs.len())
@@ -1576,9 +1576,9 @@ impl Checker {
         mk(self.call_kind(f, fresh, hargs), ret, span)
     }
 
-    /// A call of `f` with type arguments `targs` and all arguments `args`
-    /// (hidden ones first): through a trait dictionary, to a native, or to a
-    /// script function.
+    /// Returns the call of `f` with type arguments `targs` and arguments
+    /// `args`, hidden arguments first. The call kind is different for a trait
+    /// method, a native function, and a script function.
     pub(crate) fn call_kind(&self, f: FnId, targs: Vec<TypeId>, args: Vec<HArg>) -> HKind {
         match self.fns[f as usize].kind {
             FnKind::TraitMethod(trait_id, slot) => HKind::CallTrait { trait_id, slot, targs, args, impl_id: None },
@@ -1707,8 +1707,8 @@ impl Checker {
         }
     }
 
-    /// Infers the types of the arguments of a call that failed, including
-    /// `..base`, which it takes.
+    /// Infers the types of the arguments of a call that has an error. Also
+    /// takes and infers `..base`.
     fn infer_args(&mut self, args: &CallArgs) {
         let all = args.positional.iter().copied().chain(args.named.iter().map(|&(_, e)| e)).chain(args.take_base());
         for a in all {
@@ -1765,8 +1765,8 @@ impl Checker {
         mk(HKind::CallValue { callee: Box::new(callee), args: hs }, ret, span)
     }
 
-    /// Checks a call with arguments `args` by `check`, and denies a `..base`
-    /// that no construction field by field took.
+    /// Checks a call with `check`. Then reports an error if `check` did not
+    /// take the `..base` of `args`.
     fn check_args_call(&mut self, args: &[Arg], check: impl FnOnce(&mut Self, &CallArgs) -> HExpr) -> HExpr {
         let args = CallArgs::new(args);
         let h = check(self, &args);
@@ -2004,17 +2004,17 @@ impl Checker {
     // ------------------------------------------------------------------
     // Construction
 
-    /// The `init` of type constructor `c`, if it declares one.
+    /// The `init` of type constructor `c`, if `c` declares `init`.
     pub(crate) fn init_method(&self, c: Ctor) -> Option<FnId> {
         self.methods_named(c, "init")?.iter().copied().find(|&f| !self.fns[f as usize].has_self)
     }
 
-    /// Whether `f` is the `init` of a type, which only `T(...)` calls.
+    /// Whether `f` is the `init` of a type. Only `T(...)` can call an `init`.
     fn is_init(&self, f: FnId) -> bool {
         self.fns[f as usize].is_init(&self.syms)
     }
 
-    /// Reports `ty.init`, where `ty` names type `t`.
+    /// Reports an error for `ty.init`, where `ty` refers to type `t`.
     fn init_not_member(&mut self, t: TypeId, ty: &Expr, span: Span) {
         let constructible = ctor_of(self.ty(t))
             .is_some_and(|c| self.init_method(c).is_some() || matches!(c, Ctor::Def(d) if self.types[d as usize].is_struct()));
@@ -2025,10 +2025,11 @@ impl Checker {
         self.error(span, msg);
     }
 
-    /// How a value of type `t` (written `name`) is constructed: by the `init`
-    /// of `T`, or field by field if `T` is a struct without `init` or the
-    /// checker is inside its `init`. Reports an error if no value of `t` can
-    /// be constructed here.
+    /// Returns how `T(...)` constructs a value of type `t`, which the source
+    /// writes as `name`. `T(...)` calls the `init` of `T`. It constructs a
+    /// struct field by field if the struct does not declare `init`, or if the
+    /// checker is inside that `init`. Reports an error and returns `None` if
+    /// the code at this location cannot construct a value of `t`.
     fn construct_target(&mut self, t: TypeId, name: &str, name_span: Span) -> Option<Construct> {
         let ty = self.rty(t);
         let c = match ty {
@@ -2074,24 +2075,25 @@ impl Checker {
         }
     }
 
-    /// Unifies `t` with the type that `init` `f` constructs, given the
-    /// instance `ret` of its return type (`Self` or `Result<Self, E>`).
+    /// Unifies `t` with the type that `init` `f` constructs. `ret` is the
+    /// instantiated return type of `f`: `Self` or `Result<Self, E>`. Reports
+    /// an error and returns `false` if the types do not unify.
     fn unify_init_result(&mut self, f: FnId, ret: TypeId, t: TypeId, name_span: Span) -> bool {
         let fi = &self.fns[f as usize];
-        let made = match self.rty(ret) {
+        let constructed = match self.rty(ret) {
             Ty::Named(r, args) if fi.ret != fi.self_ty.unwrap_or(TypeId::ERROR) && r == self.wk.result => self.arena.elem(args, 0),
             _ => ret,
         };
-        if self.try_unify_all(&[(made, t)]) {
+        if self.try_unify_all(&[(constructed, t)]) {
             return true;
         }
-        let msg = format!("the `init` of `{}` does not construct {}", self.show(made), self.show(t));
+        let msg = format!("the `init` of `{}` does not construct {}", self.show(constructed), self.show(t));
         self.error(name_span, msg);
         false
     }
 
-    /// Checks `T(args)`, which constructs a value of type `t` (written `name`)
-    /// (see [`Self::construct_target`]).
+    /// Checks `T(args)`, a construction of type `t` that the source writes as
+    /// `name`.
     fn construct(&mut self, t: TypeId, name: &str, args: &CallArgs, name_span: Span, span: Span) -> HExpr {
         match self.construct_target(t, name, name_span) {
             Some(Construct::Init(f)) => {
@@ -2114,9 +2116,8 @@ impl Checker {
         }
     }
 
-    /// `T` used as a value: a function that constructs a value of type `t`
-    /// (written `name`) as `T(...)` does, and takes all parameters of `init`
-    /// or all fields.
+    /// Checks type `t` used as a value. The value is a function that does the
+    /// same as `T(...)`, and takes all parameters of `init` or all fields.
     fn construct_value(&mut self, t: TypeId, name: &str, span: Span) -> HExpr {
         match self.construct_target(t, name, span) {
             Some(Construct::Init(f)) => {
@@ -2134,14 +2135,14 @@ impl Checker {
                 self.require_struct_traits(d, &targs, span);
                 let ftys: Vec<TypeId> = (0..self.types[d as usize].fields().len()).map(|i| self.field_type(d, i, &targs)).collect();
                 let fty = self.fn_ty(&ftys, t);
-                mk(HKind::CtorFn { made: Made::Struct(d), arity: ftys.len() }, fty, span)
+                mk(HKind::CtorFn { target: CtorTarget::Struct(d), arity: ftys.len() }, fty, span)
             }
             None => err(span),
         }
     }
 
-    /// Checks the traits that the type parameters of struct `d` require of
-    /// `targs`.
+    /// Checks that `targs` implement the traits that the type parameters of
+    /// struct `d` require.
     fn require_struct_traits(&mut self, d: TypeDefId, targs: &[TypeId], span: Span) {
         if self.types[d as usize].generics.iter().any(|&p| !self.params[p as usize].traits.is_empty()) {
             let gens = self.types[d as usize].generics.clone();
@@ -2149,8 +2150,8 @@ impl Checker {
         }
     }
 
-    /// Builds struct `d` of type `t` from the fields given as arguments, the
-    /// fields of `..base`, and field defaults. Arguments are evaluated in
+    /// Builds struct `d` of type `t` from the arguments, the fields of
+    /// `..base`, and the field defaults. The result evaluates the arguments in
     /// source order, then `..base`, then the defaults in declaration order.
     fn construct_fields(&mut self, d: TypeDefId, t: TypeId, name: &str, args: &CallArgs, span: Span) -> HExpr {
         let Ty::Named(_, targs) = self.ty(t) else { unreachable!() };
@@ -2624,7 +2625,8 @@ impl Checker {
             self.push_scope();
             let mark = self.diags.len();
             let pat = self.check_pattern(&arm.pattern, st, false);
-            // A pattern with errors would make other arms seem unreachable.
+            // An invalid pattern can make other arms seem unreachable, so the
+            // exhaustiveness check is skipped.
             ok_patterns &= self.diags.len() == mark;
             let guard = arm.guard.as_ref().map(|g| self.check_expr(g, TypeId::BOOL));
             let body = self.infer_inner(&arm.body, if want { hint.or(ty) } else { None }, want);

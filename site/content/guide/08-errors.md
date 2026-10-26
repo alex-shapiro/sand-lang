@@ -51,7 +51,7 @@ See the [`Result` reference](/std/prelude/Result/) for transformation methods su
 
 ### The `Error` struct
 
-The `Error` struct has two `str` fields: `message` (a human-readable description) and `kind` (a machine-readable category tag, `"error"` by default). Construct one with `Error(message, kind: "io")`:
+The `Error` struct has two `str` fields: `message` (a human-readable description) and `kind` (a machine-readable category tag, `"error"` by default). Construct an `Error` with `Error(message, kind: "io")`:
 
 ```sand
 let e = Error("disk is full", kind: "io")

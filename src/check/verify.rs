@@ -3,7 +3,7 @@
 //! Debug builds run [`verify`] before code generation to check four invariants
 //! directly from item declarations:
 //!
-//! - Every type argument at a call site, function value, construction, or
+//! - Each type argument at a call site, function value, construction, or
 //!   enum variant satisfies the trait bounds of its type parameter.
 //! - Every dictionary expression passed to a call matches the trait and target
 //!   type expected by the callee's hidden dictionary parameter.
@@ -43,7 +43,8 @@ struct Verifier<'a> {
     /// Required type parameter indices for each type definition and derived
     /// trait in [`DERIVED`], or `None` if the type never implements the trait.
     derived: Vec<[Option<Vec<u32>>; DERIVED.len()]>,
-    /// The type definitions that declare `init`, which refutes `Decode`.
+    /// The type definitions that declare `init`. These types do not implement
+    /// `Decode`.
     inits: HashSet<TypeDefId>,
 }
 

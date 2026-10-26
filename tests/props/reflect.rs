@@ -15,7 +15,8 @@ enum Ty {
     UnitEnum,
     Rec,
     Keyed,
-    /// `struct Valid { a: int }` with an `init`, which refutes `Decode`.
+    /// `struct Valid { a: int }` with an `init`, so it does not implement
+    /// `Decode`.
     Valid,
     Fn,
     Task,

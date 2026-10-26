@@ -196,7 +196,7 @@ enum E { C(int, s: int), D(x: int, y: int), F(int, int) }
 --- error
 1: the fields of variant `C` must be all named or all positional
 
-=== a named pattern on a positional variant reports one error
+=== a named pattern on a positional variant is one error
 match Some(1) {
     Some(x: 1) => print(1)
     _ => print(2)

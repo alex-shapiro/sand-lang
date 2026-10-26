@@ -172,14 +172,14 @@ enum Doc {
     /// current line. When printed flat, nested non-forced groups (including
     /// `hug` groups) are also printed flat.
     ///
-    /// An `if_helps` group, which ends with a one-character bracket, breaks
-    /// only if the text after it then fits after the bracket.
+    /// A `break_if_rest_fits` group must end with a one-character bracket. It
+    /// breaks only if the text after the group then fits after the bracket.
     Group {
         doc: Box<Doc>,
         force: bool,
         hug: bool,
         strict: bool,
-        if_helps: bool,
+        break_if_rest_fits: bool,
     },
     Concat(Vec<Doc>),
 }
@@ -198,13 +198,13 @@ fn indent(doc: Doc) -> Doc {
 
 fn group(b: &CompileBudget, force: bool, doc: Doc) -> Doc {
     let force = force || needs_break(b, &doc);
-    Doc::Group { doc: Box::new(doc), force, hug: false, strict: false, if_helps: false }
+    Doc::Group { doc: Box::new(doc), force, hug: false, strict: false, break_if_rest_fits: false }
 }
 
 /// A group that is flat only if it fits entirely (see [`Doc::Group`]).
 fn strict_group(b: &CompileBudget, force: bool, doc: Doc) -> Doc {
     let force = force || contains_hard(b, &doc);
-    Doc::Group { doc: Box::new(doc), force, hug: false, strict: true, if_helps: false }
+    Doc::Group { doc: Box::new(doc), force, hug: false, strict: true, break_if_rest_fits: false }
 }
 
 /// True if `doc` contains a forced break outside of nested groups and hug groups.
@@ -325,13 +325,16 @@ fn render(doc: &Doc, b: &CompileBudget) -> String {
             Doc::Line | Doc::SoftLine | Doc::HardLine => p.newline(ind),
             Doc::IfBreak(broken, flat) => p.text(if mode == Mode::Break { broken } else { flat }),
             Doc::Indent(d) => stack.push((if mode == Mode::Break { ind + INDENT } else { ind }, mode, d)),
-            Doc::Group { doc: d, force, hug, strict, if_helps } => {
+            Doc::Group { doc: d, force, hug, strict, break_if_rest_fits } => {
                 let flat = |d: &Doc, col: usize| fits(d, &stack, WIDTH as isize - col as isize, *strict, b);
                 let m = if *force {
                     Mode::Break
                 } else if mode == Mode::Strict {
                     Mode::Strict
-                } else if (mode == Mode::Flat && !hug) || flat(d, p.col) || (*if_helps && !flat(&Doc::Concat(Vec::new()), ind + 1)) {
+                } else if (mode == Mode::Flat && !hug)
+                    || flat(d, p.col)
+                    || (*break_if_rest_fits && !flat(&Doc::Concat(Vec::new()), ind + 1))
+                {
                     if *strict { Mode::Strict } else { Mode::Flat }
                 } else {
                     Mode::Break
@@ -536,12 +539,12 @@ struct ListOpts {
     /// The last element may break on its own (see [`Doc::Group`]).
     hug_last: bool,
     /// Break only if the text after the list then fits (see [`Doc::Group`]).
-    if_helps: bool,
+    break_if_rest_fits: bool,
 }
 
-const LIST: ListOpts = ListOpts { force: false, trailing_comma: true, hug_last: false, if_helps: false };
-/// The sub-patterns of a pattern.
-const PATTERN: ListOpts = ListOpts { if_helps: true, ..LIST };
+const LIST: ListOpts = ListOpts { force: false, trailing_comma: true, hug_last: false, break_if_rest_fits: false };
+/// Options for the sub-patterns of a pattern.
+const PATTERN: ListOpts = ListOpts { break_if_rest_fits: true, ..LIST };
 
 /// The operator and operands of a binary operation.
 fn binary_parts(e: &Expr) -> Option<(&'static str, &Expr, &Expr)> {
@@ -763,8 +766,9 @@ impl<'a> Formatter<'a> {
     // ------------------------------------------------------------------
     // Comments
 
-    /// The text of comment `i`. A `///` comment that documents nothing is
-    /// printed as `//`, so that moving it next to an item does not document it.
+    /// The text of comment `i`. A `///` comment that does not document an
+    /// item becomes `//`, so that the formatter cannot make it document an
+    /// item if it moves the comment.
     fn comment_text(&self, i: usize) -> String {
         let c = &self.comments[i];
         let text = c.text(self.src).trim_end();
@@ -1080,8 +1084,8 @@ impl<'a> Formatter<'a> {
             hard = true;
         }
         let mut doc = group(self.budget, hard, cat(vec![text(open), indent(cat(parts)), Doc::SoftLine, text(close)]));
-        if let Doc::Group { if_helps, .. } = &mut doc {
-            *if_helps = opts.if_helps;
+        if let Doc::Group { break_if_rest_fits, .. } = &mut doc {
+            *break_if_rest_fits = opts.break_if_rest_fits;
         }
         prepend(pre, doc)
     }
@@ -1776,7 +1780,7 @@ impl<'a> Formatter<'a> {
             ExprKind::Field(x, name) => self.dot(x.span.hi, |f| f.name(name)),
             ExprKind::TupleField(x, i, span) => {
                 let field = self.dot(x.span.hi, |f| prepend(f.inline_comments(span.lo), text(i.to_string())));
-                // `1.0` would lex as a float.
+                // Without the space, `1.0` is a float literal.
                 let number = matches!(x.kind, ExprKind::Int(_) | ExprKind::IntOverflow(_) | ExprKind::Float(_));
                 if number { cat(vec![text(" "), field]) } else { field }
             }
@@ -1790,8 +1794,8 @@ impl<'a> Formatter<'a> {
         }
     }
 
-    /// Call arguments; the `(` is the first one after `after`.
-    /// The sub-patterns of a pattern, as [`Self::call_args`] lays out arguments.
+    /// Lays out the sub-patterns of a pattern between `brackets`, as
+    /// [`Self::call_args`] lays out arguments.
     fn pattern_list(&mut self, brackets: (&'static str, &'static str), open: u32, close: u32, elems: &[CElem<'a>]) -> Doc {
         let atom = |el: &CElem| match el {
             CElem::Pat(p) => {
@@ -1810,6 +1814,7 @@ impl<'a> Formatter<'a> {
         self.comma_list(brackets, open, close, elems, PATTERN)
     }
 
+    /// Call arguments; the `(` is the first one after `after`.
     fn call_args(&mut self, args: &'a [Arg], after: u32, close: u32) -> Doc {
         let open = self.find_tok(after, &Tok::LParen);
         let pre = self.inline_comments(open);

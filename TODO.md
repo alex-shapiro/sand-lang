@@ -91,10 +91,9 @@ Follow-up work, roughly in priority order.
 
 ### Tooling
 
-- [ ] Make formatting idempotent for line comments inside an expression that
-      spans lines: `sand fmt` moves the comments of
-      `//r /\nf.7\t.// \n7/e\nf.//as\nf` on each run (found by the `fmt`
-      fuzz target).
+- [ ] Make formatting idempotent for line comments in a multi-line
+      expression. Each run of `sand fmt` moves the comments of
+      `//r /\nf.7\t.// \n7/e\nf.//as\nf` (found by the `fmt` fuzz target).
 
 - [ ] Fix broken intra-doc links to private items and run `cargo doc` with
       `-D warnings` in CI.
@@ -161,21 +160,23 @@ Follow-up work, roughly in priority order.
 - [ ] Evaluate replacing string error kinds (`"not_found"`, `"invalid"`) with
       an enum.
 
-- [ ] Decode a struct that declares `init` by calling `init` with the
-      members of the JSON object as named arguments (as kotlinx.serialization
-      and cattrs call constructors), so that such structs implement `Decode`.
-      The decoder runs Sand code only as deferred `fn()` thunks
-      (`Decoded::Pending` in `src/stdlib/json.rs`), which has three
-      consequences. A thunk cannot fail the decode, so an `init` that returns
-      `Err` needs thunks that return an error. Thunks get no trait
-      dictionaries, so a generic `init` that calls methods of its bounds
-      (`Sorted<T: Ord>` that sorts) cannot run. `init` must run before its
-      value enters a set, as computed field defaults do now. `json.decode` must
-      also check that `init` is visible at the call, as it does for fields.
-- [ ] Let function types carry parameter defaults, so that a function value
-      of `fn error(message: str, kind: str = "error")` or of a type
-      (`names.map(Error)`) can omit them. Function values now take all
-      parameters, and `["a"].map(Error)` is a type error.
+- [ ] Let `json.decode` decode a struct that declares `init`: call `init`
+      with the members of the JSON object as named arguments, as
+      kotlinx.serialization and cattrs call constructors. Then these structs
+      can implement `Decode`. The decoder runs Sand code only in deferred
+      `fn()` thunks (`Decoded::Pending` in `src/stdlib/json.rs`). This needs
+      these changes:
+      - Let a thunk return an error, so that an `init` that returns `Err`
+        makes the decode fail.
+      - Give thunks trait dictionaries, so that a generic `init` can call
+        methods of its bounds (`Sorted<T: Ord>` that sorts).
+      - Run `init` before its value goes into a set, as computed field
+        defaults do now.
+      - Check that `init` is visible at the call of `json.decode`, as for
+        fields.
+- [ ] Let function types include parameter defaults, so that a call through
+      a function value can omit them. Now a function value takes all
+      parameters, so `["a"].map(Error)` is a type error.
 - [ ] Reject `import` statements after non-import items or statements, as
       specified in §3.1.
 - [ ] Support trait objects (`dyn Trait`), associated types and constants, and

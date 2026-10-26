@@ -647,7 +647,7 @@ fn info(path: str) -> Result<Info> {
 print(info("i.txt")?)
 --- lint
 
-=== construction arguments named like another field
+=== construction arguments with the name of another field
 struct Rect { w: int, h: int }
 struct Size {
     w: int
