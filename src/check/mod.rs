@@ -192,6 +192,22 @@ pub struct FnInfo {
     pub trait_of: Option<TraitId>,
 }
 
+impl FnInfo {
+    /// Whether this function is the `init` of its type.
+    pub(crate) fn is_init(&self, syms: &Symbols) -> bool {
+        self.owner.is_some() && !self.has_self && syms.str(self.name) == "init"
+    }
+
+    /// The name of this function in function values and stack traces: the
+    /// name of its type if it is an `init`, which `T(...)` calls.
+    pub(crate) fn runtime_name(&self, types: &PVec<TypeDef>, syms: &Symbols) -> String {
+        match self.owner {
+            Some(c) if self.is_init(syms) => c.native_prefix(types, syms),
+            _ => syms.str(self.name).to_string(),
+        }
+    }
+}
+
 #[derive(Default)]
 struct ConstFoldState {
     cache: FxHashMap<FnId, Option<ConstVal>>,
@@ -1629,6 +1645,10 @@ impl Checker {
             let fields: Vec<TypeId> = v.fields.iter().map(|f| self.resolve_type_in(&f.ty, &scope, Some(self_ty))).collect();
             written.extend(fields.iter().zip(&v.fields).map(|(&t, f)| (id, t, f.ty.span)));
             let names: Vec<Option<Symbol>> = v.fields.iter().map(|f| f.name.as_ref().map(|n| self.syms.intern(&n.name))).collect();
+            if names.iter().any(Option::is_some) && names.iter().any(Option::is_none) {
+                let msg = format!("the fields of variant `{}` must be all named or all positional", v.name.name);
+                self.error(v.name.span, msg);
+            }
             let field_names = if !names.is_empty() && names.iter().all(|n| n.is_some()) { names.into_iter().collect() } else { None };
             self.variants.push((id, i as u32));
             let rt_id = (self.variants.len() - 1) as u32;
@@ -2724,8 +2744,8 @@ impl Checker {
     }
 
     /// Checks that `init` method `id` of `ctor` constructs it: it is static,
-    /// returns `Self` or `Result<Self, E>`, and comes with the type, not with
-    /// a later session input.
+    /// returns `Self` or `Result<Self, E>`, constructs every instance of the
+    /// type, and comes with the type, not with a later session input.
     fn check_init_decl(&mut self, ctor: Ctor, name: &ast::Ident, id: FnId) {
         let f = &self.fns[id as usize];
         let (self_ty, ret) = (f.self_ty.unwrap_or(TypeId::ERROR), f.ret);
@@ -2741,6 +2761,11 @@ impl Checker {
             self.error(name.span, format!("`init` must be declared in the same input as `{ty}`"));
         } else if f.has_self {
             self.error(name.span, "`init` cannot take `self`; it constructs a new value");
+        } else if let Ctor::Def(d) = ctor
+            && !self.is_generic_instance(d, self_ty)
+        {
+            let ty = self.ctor_name(ctor, 0);
+            self.error(name.span, format!("`init` must construct every `{ty}`, so its type arguments cannot be fixed or bounded further"));
         } else {
             let fits = ret == self_ty
                 || ret == TypeId::ERROR
@@ -2750,6 +2775,28 @@ impl Checker {
                 self.error(name.span, format!("`init` must return `{ty}` or `Result<{ty}, E>`"));
             }
         }
+    }
+
+    /// Whether `t` is type definition `d` applied to distinct type parameters
+    /// that have only the bounds that `d` declares for them.
+    fn is_generic_instance(&mut self, d: TypeDefId, t: TypeId) -> bool {
+        let Ty::Named(_, args) = self.ty(t) else { return false };
+        let (gens, args) = (self.types[d as usize].generics.clone(), self.elems(args));
+        let mut seen = Vec::new();
+        for (&g, &a) in gens.iter().zip(&args) {
+            let Ty::Param(p) = self.ty(a) else { return false };
+            if seen.contains(&p) {
+                return false;
+            }
+            seen.push(p);
+            let map = |q: ParamId| gens.iter().position(|&x| x == q).map(|i| args[i]);
+            let declared: Vec<TraitRef> =
+                self.params[g as usize].traits.clone().into_iter().map(|tr| tr.subst_params(&mut self.arena, &map)).collect();
+            if self.params[p as usize].traits.iter().any(|tr| !declared.contains(tr)) {
+                return false;
+            }
+        }
+        true
     }
 
     /// Records an `argument-order` lint if positional argument or
@@ -2847,7 +2894,7 @@ impl Checker {
         self.begin_fn(generics, self_ty);
         self.fs.field_default = matches!(decl, FnDeclRef::FieldDefault { .. });
         let fi = &self.fns[id as usize];
-        self.fs.init_of = fi.owner.filter(|_| !fi.has_self && self.syms.str(fi.name) == "init");
+        self.fs.init_of = fi.owner.filter(|_| fi.is_init(&self.syms));
         let mut param_locals = self.declare_reflect_params(id);
         param_locals.extend(self.declare_dict_params(id));
         let f = match decl {

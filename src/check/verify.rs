@@ -70,8 +70,7 @@ impl<'a> Verifier<'a> {
                 natives.entry(n).or_insert(f as FnId);
             }
             if let Some(Ctor::Def(d)) = fi.owner
-                && !fi.has_self
-                && cp.name(fi.name) == "init"
+                && fi.is_init(&cp.syms)
             {
                 inits.insert(d);
             }

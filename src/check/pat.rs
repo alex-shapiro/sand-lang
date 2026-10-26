@@ -273,6 +273,7 @@ impl Checker {
             let h = self.check_pat_inner(p, ftys[i], mutable, binds);
             out.push((i as u32, h));
         }
+        let mut unknown = false;
         for (name, p) in &args.named {
             let sym = self.syms.get(&name.name);
             let found = names.and_then(|ns| ns.iter().position(|&x| Some(x) == sym));
@@ -283,6 +284,7 @@ impl Checker {
                 };
                 self.error(name.span, msg);
                 self.check_pat_inner(p, TypeId::ERROR, mutable, binds);
+                unknown = true;
                 continue;
             };
             if hidden(self, i) {
@@ -294,7 +296,7 @@ impl Checker {
             let h = self.check_pat_inner(p, ftys[i], mutable, binds);
             out.push((i as u32, h));
         }
-        if !args.rest {
+        if !args.rest && !unknown {
             let missing: Vec<usize> = (0..n).filter(|&i| !seen[i]).collect();
             if missing.iter().any(|&i| hidden(self, i)) {
                 self.error(span, format!("{what} has private fields; add `..` to ignore them"));
@@ -634,7 +636,21 @@ impl Checker {
                         if a.is_empty() { name.to_string() } else { format!("{name}({})", a.join(", ")) }
                     }
                     SCtor::Tuple(_) => format!("({})", a.join(", ")),
-                    SCtor::Struct(_, d) => format!("{} {{ .. }}", d.map_or("_", |d| self.name(self.types[d as usize].name))),
+                    SCtor::Struct(_, None) => "_".into(),
+                    SCtor::Struct(_, Some(d)) => {
+                        let def = &self.types[*d as usize];
+                        let mut parts: Vec<String> = def
+                            .fields()
+                            .iter()
+                            .zip(&a)
+                            .filter(|(_, x)| *x != "_")
+                            .map(|(f, x)| format!("{}: {x}", self.name(f.name)))
+                            .collect();
+                        if parts.len() < a.len() {
+                            parts.push("..".into());
+                        }
+                        format!("{}({})", self.name(def.name), parts.join(", "))
+                    }
                     SCtor::ListExact(_) => format!("[{}]", a.join(", ")),
                     SCtor::ListAtLeast(..) => {
                         let mut parts = a.clone();

@@ -465,3 +465,93 @@ let P(.., y) = p
 --- error
 3: `..base` must be the last argument
 4: `..` must be last in a pattern
+
+=== init constructs every instance of its type
+struct Box<T> { t: T }
+extend Box<int> { fn init(t: int) -> Box<int> { Self(t: t) } }
+struct Wrap<T> {
+    t: T
+    fn init(t: T) -> Self where T: Hash { Self(t: t) }
+}
+struct Pair<A, B> { a: A, b: B }
+extend<T> Pair<T, T> { fn init(a: T, b: T) -> Pair<T, T> { Self(a: a, b: b) } }
+--- error
+2: `init` must construct every `Box<T>`
+5: `init` must construct every `Wrap<T>`
+8: `init` must construct every `Pair<A, B>`
+
+=== init may repeat the bounds of its type
+struct Sorted<T: Ord> {
+    items: [T]
+    fn init(items: [T]) -> Self where T: Ord { Self(items: items.sorted()) }
+}
+struct Box<T> { t: T }
+extend<U> Box<U> { fn init(t: U) -> Box<U> { Self(t: t) } }
+print(Sorted([3, 1, 2]))
+print(Box("a"))
+--- stdout
+Sorted(items: [1, 2, 3])
+Box(t: "a")
+
+=== a constructor function value is named after its type
+import regex
+struct Pos {
+    x: int
+    fn init(x: int) -> Pos { Pos(x: x) }
+}
+struct Plain { x: int }
+print(Pos)
+print(Plain)
+print(Set)
+print(regex.Regex)
+--- stdout
+<fn Pos>
+<fn Plain>
+<fn Set>
+<fn Regex>
+
+=== init is not a member of a type or a value
+import regex
+struct Pos {
+    x: int
+    fn init(x: int) -> Pos { Pos(x: x) }
+}
+let a = Set.init([1])
+let b = regex.Regex.init("a")
+let c = int.init(1)
+let d = Pos(1).init
+let e = Pos(1).init(2)
+--- error
+6: `init` is not a member; construct a value with `Set(...)`
+7: `init` is not a member; construct a value with `regex.Regex(...)`
+8: `init` is not a member
+9: no field `init` on type Pos
+10: no method `init` on type Pos
+
+=== only a construction field by field takes ..base
+struct P { x: int }
+let p = P(1)
+let n = members(..p)
+help(..p)
+let s = "a".len(..p)
+--- error
+3: `..base` is only allowed when a struct is constructed field by field
+4: `..base` is only allowed when a struct is constructed field by field
+5: `..base` is only allowed when a struct is constructed field by field
+
+=== a missing struct case is shown as a construction
+struct B { a: bool, b: bool }
+fn h(v: B) -> int {
+    match v {
+        B(b: true, ..) => 1
+        B(a: true, ..) => 2
+    }
+}
+fn g(v: (B, int)) -> int {
+    match v {
+        (B(a: true, b: true), _) => 1
+    }
+}
+--- error
+3: non-exhaustive match: missing `B(a: false, b: false)`
+9: non-exhaustive match: missing `(B(a: false, b: true), _)`

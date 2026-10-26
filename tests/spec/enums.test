@@ -190,3 +190,16 @@ fn f(s: S) {
 8: variant `P` has 2 fields, but the pattern has 1; add `..` to ignore the rest
 9: variant `E` has no payload; match it with `E`
 10: variant `R` has 2 fields; match them with `R(..)`
+
+=== variant fields are all named or all positional
+enum E { C(int, s: int), D(x: int, y: int), F(int, int) }
+--- error
+1: the fields of variant `C` must be all named or all positional
+
+=== a named pattern on a positional variant reports one error
+match Some(1) {
+    Some(x: 1) => print(1)
+    _ => print(2)
+}
+--- error
+2: variant `Some` has no named fields

@@ -822,7 +822,7 @@ impl<'a> Compiler<'a> {
         let nregs = f.max_reg.max(1) as u16;
         let Finished { code, lines, cleanups, sites, inlined } = self.finish(f);
         self.prog.protos[proto_idx as usize] = Proto {
-            name: self.cp.name(fi.name).to_string(),
+            name: fi.runtime_name(&self.cp.types, &self.cp.syms),
             file: body.span.file,
             nparams: body.params.len() as u16,
             nregs,
@@ -932,7 +932,7 @@ impl<'a> Compiler<'a> {
         if f.sites.len() >= MAX_SITES {
             return k(self, f);
         }
-        let name = self.cp.name(self.cp.fns[func as usize].name).to_string();
+        let name = self.cp.fns[func as usize].runtime_name(&self.cp.types, &self.cp.syms);
         f.sites.push(InlineSite { name, file: body.span.file, line: f.line, parent: f.site });
         let saved = (f.site, f.file, f.line);
         f.site = f.sites.len() as u16;

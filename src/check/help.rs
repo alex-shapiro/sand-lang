@@ -1092,10 +1092,7 @@ impl Checker {
                 let def = &self.types[*d as usize];
                 let parts: Vec<String> =
                     def.fields().iter().zip(fields).map(|(f, x)| format!("{}: {}", self.name(f.name), self.format_const(x))).collect();
-                match parts.is_empty() {
-                    true => format!("{} {{}}", self.name(def.name)),
-                    false => format!("{} {{ {} }}", self.name(def.name), parts.join(", ")),
-                }
+                format!("{}({})", self.name(def.name), parts.join(", "))
             }
         }
     }

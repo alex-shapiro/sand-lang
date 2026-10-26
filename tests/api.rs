@@ -192,6 +192,21 @@ fn runtime_errors_have_stack_traces() {
 }
 
 #[test]
+fn init_frames_are_named_after_their_type() {
+    let src = "struct Pos {\n    x: int\n    fn init(x: int) -> Pos {\n        if x < 0 { fail(\"negative\") }\n        Pos(x: x)\n    }\n}\nfn make(x: int) -> Pos {\n    let p = Pos(x)\n    p\n}\nprint(make(1))\nprint(make(-1))\n";
+    for optimize in [true, false] {
+        let (r, _, _) = run_src(Config::new().optimize(optimize), src);
+        match r {
+            Err(Error::Runtime { trace, .. }) => {
+                let names: Vec<&str> = trace.iter().map(|f| f.function.as_str()).collect();
+                assert_eq!(names, ["Pos", "make", "<top level>"], "{trace:?}");
+            }
+            other => panic!("expected runtime error, got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn engine_can_run_multiple_sources_independently() {
     let (mut engine, out, _) = engine_with(Config::new());
     let rt = rt();
@@ -1632,7 +1647,7 @@ fn rust_field_defaults_can_be_any_constant() {
          true\ntrue\nFrame(width: 1.5, labels: [])\ntrue\nstruct draw.Sketch\n\nFields:\n    figure: Figure = Figure.Empty\n    \
          backdrop: Figure? = None\n    frame: Figure? = Some(Figure.Labeled(\"a\\\"b\", Figure.Rect(w: 1.0, h: -2.0)))\n    \
          layers: int? = Some(2)\n    parts: [Figure] = [Figure.Circle(1.0), Figure.Group([])]\n    pair: (int, str) = (3, \"x\")\n    \
-         flags: [int: [bool]] = [2: [true]]\n    border: Frame = Frame { width: 2.0, labels: [\"l\"] }\n    \
+         flags: [int: [bool]] = [2: [true]]\n    border: Frame = Frame(width: 2.0, labels: [\"l\"])\n    \
          seen: Set<str> = Set([\"a\", \"b\"])\n    none: Set<int> = Set()\n\nImplements:\n    Eq\n    Encode\n    Decode\n"
     );
 }

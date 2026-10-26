@@ -20,12 +20,13 @@ enum Construct {
 }
 
 /// The arguments of a call, split into positional and named ones.
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub(crate) struct CallArgs<'e> {
     pub(crate) positional: Vec<&'e Expr>,
     pub(crate) named: Vec<(&'e ast::Ident, &'e Expr)>,
-    /// `..base`, which only a construction field by field accepts.
-    pub(crate) base: Option<&'e Expr>,
+    /// `..base`, until a construction field by field takes it (see
+    /// [`Checker::check_args_call`]).
+    base: std::cell::Cell<Option<&'e Expr>>,
 }
 
 impl<'e> CallArgs<'e> {
@@ -33,7 +34,7 @@ impl<'e> CallArgs<'e> {
         let mut out = CallArgs::default();
         for a in args {
             match &a.name {
-                _ if a.spread => out.base = Some(&a.value),
+                _ if a.spread => out.base.set(Some(&a.value)),
                 Some(n) => out.named.push((n, &a.value)),
                 None => out.positional.push(&a.value),
             }
@@ -46,8 +47,8 @@ impl<'e> CallArgs<'e> {
         self.positional.len() + self.named.len()
     }
 
-    fn exprs(&self) -> impl Iterator<Item = &'e Expr> + '_ {
-        self.positional.iter().copied().chain(self.named.iter().map(|&(_, e)| e)).chain(self.base)
+    fn take_base(&self) -> Option<&'e Expr> {
+        self.base.take()
     }
 }
 
@@ -832,8 +833,10 @@ impl Checker {
                 let eh = self.check_expr(en, TypeId::INT);
                 mk(HKind::Range { start: Box::new(sh), end: Box::new(eh), inclusive: *inclusive }, TypeId::RANGE, span)
             }
-            ExprKind::Call { callee, args } => self.check_call(callee, &CallArgs::new(args), span),
-            ExprKind::MethodCall { receiver, method, args } => self.check_method_call(receiver, method, &CallArgs::new(args), span),
+            ExprKind::Call { callee, args } => self.check_args_call(args, |c, args| c.check_call(callee, args, span)),
+            ExprKind::MethodCall { receiver, method, args } => {
+                self.check_args_call(args, |c, args| c.check_method_call(receiver, method, args, span))
+            }
             ExprKind::Field(obj, name) => self.check_field(obj, name, hint, span),
             ExprKind::TupleField(obj, idx, ispan) => {
                 let o = self.infer(obj, None);
@@ -1257,9 +1260,13 @@ impl Checker {
         self.visible(def.module, def.fields()[i].is_pub)
     }
 
+    /// The methods named `name` of `c` that the module being checked can
+    /// call: not private to another module, and not `init`.
     fn visible_methods(&self, c: Ctor, name: &str) -> impl Iterator<Item = FnId> + '_ {
         let fs = self.methods_named(c, name).unwrap_or_default();
-        (0..fs.len()).map(move |i| fs[i]).filter(|&f| self.visible(self.fns[f as usize].module, self.fns[f as usize].is_pub))
+        (0..fs.len())
+            .map(move |i| fs[i])
+            .filter(|&f| self.visible(self.fns[f as usize].module, self.fns[f as usize].is_pub) && !self.is_init(f))
     }
 
     fn visible_method(&self, c: Ctor, name: &str) -> Option<FnId> {
@@ -1277,7 +1284,8 @@ impl Checker {
             return Some(format!("field `{name}` of `{}` is private", self.ctor_name(Ctor::Def(d), 0)));
         }
         let c = ctor_of(ty)?;
-        let hidden = self.methods_named(c, name).is_some() && self.visible_method(c, name).is_none();
+        let declared = self.methods_named(c, name).is_some_and(|fs| fs.iter().any(|&f| !self.is_init(f)));
+        let hidden = declared && self.visible_method(c, name).is_none();
         hidden.then(|| format!("method `{name}` of `{}` is private", self.ctor_name(c, 0)))
     }
 
@@ -1305,7 +1313,7 @@ impl Checker {
                     return self.variant_value(d, i, hint, span);
                 }
                 if name.name == "init" {
-                    self.init_not_member(t, name.span);
+                    self.init_not_member(t, obj, name.span);
                     return err(span);
                 }
                 if let Some(c) = ctor_of(self.ty(t))
@@ -1396,10 +1404,6 @@ impl Checker {
     /// Binds call arguments to the parameters of `callee` (of types `ptys`),
     /// checks them and fills defaults.
     fn bind_args(&mut self, callee: Callee, ptys: &[TypeId], first: Option<HExpr>, args: &CallArgs, span: Span) -> Option<Vec<HArg>> {
-        if let Some(b) = args.base {
-            self.error(b.span, "`..base` is only allowed when a struct is constructed field by field");
-            self.infer(b, None);
-        }
         let n = ptys.len();
         let offset = usize::from(first.is_some());
         let mut slots: Vec<Option<HArg>> = (0..n).map(|_| None).collect();
@@ -1703,8 +1707,11 @@ impl Checker {
         }
     }
 
+    /// Infers the types of the arguments of a call that failed, including
+    /// `..base`, which it takes.
     fn infer_args(&mut self, args: &CallArgs) {
-        for a in args.exprs() {
+        let all = args.positional.iter().copied().chain(args.named.iter().map(|&(_, e)| e)).chain(args.take_base());
+        for a in all {
             let hint = match &a.kind {
                 ExprKind::Lambda { params, .. } => Some(self.fn_ty(&vec![TypeId::ERROR; params.len()], TypeId::ERROR)),
                 _ => None,
@@ -1756,6 +1763,18 @@ impl Checker {
             })
             .collect();
         mk(HKind::CallValue { callee: Box::new(callee), args: hs }, ret, span)
+    }
+
+    /// Checks a call with arguments `args` by `check`, and denies a `..base`
+    /// that no construction field by field took.
+    fn check_args_call(&mut self, args: &[Arg], check: impl FnOnce(&mut Self, &CallArgs) -> HExpr) -> HExpr {
+        let args = CallArgs::new(args);
+        let h = check(self, &args);
+        if let Some(b) = args.take_base() {
+            self.error(b.span, "`..base` is only allowed when a struct is constructed field by field");
+            self.infer(b, None);
+        }
+        h
     }
 
     fn check_call(&mut self, callee: &Expr, args: &CallArgs, span: Span) -> HExpr {
@@ -1830,7 +1849,7 @@ impl Checker {
                     return self.call_variant(d, i, args, span);
                 }
                 if name.name == "init" {
-                    self.init_not_member(t, name.span);
+                    self.init_not_member(t, obj, name.span);
                     self.infer_args(args);
                     return err(span);
                 }
@@ -1992,12 +2011,18 @@ impl Checker {
 
     /// Whether `f` is the `init` of a type, which only `T(...)` calls.
     fn is_init(&self, f: FnId) -> bool {
-        self.fns[f as usize].owner.is_some_and(|c| self.init_method(c) == Some(f))
+        self.fns[f as usize].is_init(&self.syms)
     }
 
-    fn init_not_member(&mut self, t: TypeId, span: Span) {
-        let ty = self.show(t);
-        self.error(span, format!("`init` is not a member; construct a value with `{ty}(...)`"));
+    /// Reports `ty.init`, where `ty` names type `t`.
+    fn init_not_member(&mut self, t: TypeId, ty: &Expr, span: Span) {
+        let constructible = ctor_of(self.ty(t))
+            .is_some_and(|c| self.init_method(c).is_some() || matches!(c, Ctor::Def(d) if self.types[d as usize].is_struct()));
+        let msg = match constructible {
+            true => format!("`init` is not a member; construct a value with `{}(...)`", self.source_text(ty.span)),
+            false => "`init` is not a member".to_string(),
+        };
+        self.error(span, msg);
     }
 
     /// How a value of type `t` (written `name`) is constructed: by the `init`
@@ -2070,7 +2095,7 @@ impl Checker {
     fn construct(&mut self, t: TypeId, name: &str, args: &CallArgs, name_span: Span, span: Span) -> HExpr {
         match self.construct_target(t, name, name_span) {
             Some(Construct::Init(f)) => {
-                if let Some(b) = args.base {
+                if let Some(b) = args.take_base() {
                     self.error(b.span, format!("`..base` cannot copy the fields of `{name}`, which declares `init`"));
                     self.infer(b, None);
                 }
@@ -2079,8 +2104,7 @@ impl Checker {
                     self.infer_args(args);
                     return err(span);
                 }
-                let without_base = CallArgs { base: None, ..args.clone() };
-                self.call_instance(f, inst, None, &without_base, span)
+                self.call_instance(f, inst, None, args, span)
             }
             Some(Construct::Fields(d)) => self.construct_fields(d, self.resolve(t), name, args, span),
             None => {
@@ -2171,7 +2195,7 @@ impl Checker {
             given[i] = Some(self.check_expr(a, fty));
             order.push(i);
         }
-        let base = args.base.map(|b| self.check_expr(b, t));
+        let base = args.take_base().map(|b| self.check_expr(b, t));
         let defaults_last = order.iter().max().is_none_or(|&last| given[..last].iter().all(Option::is_some));
         let in_order = base.is_none() && defaults_last && order.is_sorted();
         let mut stmts = Vec::new();

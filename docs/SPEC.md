@@ -367,7 +367,9 @@ pub struct Port {
   `Result<Port>`). Inside `init`, `T(args)` and `Self(args)` construct the
   struct field by field. Native modules declare a `native fn init` for
   built-in and opaque types (`Set([1, 2])`, `regex.Regex(pattern)`). Enums and
-  traits cannot declare `init`, and `T.init` is not a member.
+  traits cannot declare `init`, and `T.init` is not a member. An `init` must
+  construct every instance of its type, so an `extend` block or `where` clause
+  cannot fix or bound its type arguments beyond the bounds of the type.
 - Methods are `fn` declarations inside the body. A method whose first parameter
   is `self` (no annotation) is an instance method, called as `value.method(...)`.
   Other methods are static, called as `Type.method(...)`.
@@ -399,7 +401,7 @@ enum Tree<T> {
 ```
 
 - Variants are separated by newlines or commas. A variant has zero or more
-  payload fields; payload fields may be named (`radius: float`) or positional
+  payload fields, which are all named (`radius: float`) or all positional
   (`float`).
 - Variants are referred to as `Enum.Variant` in expressions, e.g.
   `Shape.Circle(1.0)` or `Shape.Circle(radius: 1.0)`. In patterns the enum
@@ -838,7 +840,8 @@ construction field by field accepts `..base`.
 
 A type used as a value is a function that constructs a value as `T(args)`
 does. It takes all parameters of `init`, or else all fields in declaration
-order; defaults do not apply. A variant with a payload is a function value in
+order; defaults do not apply. It displays as `<fn T>`, and stack traces show
+calls of `init` as `T`. A variant with a payload is a function value in
 the same way: `names.map(Name)`, `lists.map(Set)`, `xs.map(Some)`.
 
 ### 6.5 Operators
@@ -1348,10 +1351,10 @@ system's open-file limit is reached.
 | `None`                              | `None`                              | same                                                                            |
 | `Point(x: 1.0)`                     | `Point(x: 1.0)`                     | same                                                                            |
 | `Circle(2.0)`                       | `Circle(2.0)`                       | same                                                                            |
+| `Shape.Rect(w: 1.0, h: 2.0)`        | `Rect(w: 1.0, h: 2.0)`              | same                                                                            |
 | `Error`                             | `<kind>: <message>`                 | `Error(message: "...", kind: "...")`                                            |
 | function                            | `<fn name>`                         | same                                                                            |
 | task / channel                      | `<task>` / `<channel>`              | same                                                                            |
-| `Shape.Rect(w: 1.0, h: 2.0)`        | `Rect(w: 1.0, h: 2.0)`              | same                                                                            |
 | `0..3`                              | `0..3`                              | same                                                                            |
 | `time.PlainDate(2024, 2, 29)?`      | `2024-02-29`                        | same                                                                            |
 | other opaque value                  | `<Regex>`                           | same                                                                            |
