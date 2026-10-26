@@ -91,9 +91,9 @@ Follow-up work, roughly in priority order.
 
 ### Tooling
 
-- [ ] Make formatting idempotent for line comments in a multi-line
-      expression. Each run of `sand fmt` moves the comments of
-      `//r /\nf.7\t.// \n7/e\nf.//as\nf` (found by the `fmt` fuzz target).
+- [ ] Make `sand fmt` idempotent when a multi-line expression contains line
+      comments (for example, `//r /\nf.7\t.// \n7/e\nf.//as\nf` shifts comments
+      on each formatting pass).
 
 - [ ] Fix broken intra-doc links to private items and run `cargo doc` with
       `-D warnings` in CI.
@@ -160,23 +160,18 @@ Follow-up work, roughly in priority order.
 - [ ] Evaluate replacing string error kinds (`"not_found"`, `"invalid"`) with
       an enum.
 
-- [ ] Let `json.decode` decode a struct that declares `init`: call `init`
-      with the members of the JSON object as named arguments, as
-      kotlinx.serialization and cattrs call constructors. Then these structs
-      can implement `Decode`. The decoder runs Sand code only in deferred
-      `fn()` thunks (`Decoded::Pending` in `src/stdlib/json.rs`). This needs
-      these changes:
-      - Let a thunk return an error, so that an `init` that returns `Err`
-        makes the decode fail.
-      - Give thunks trait dictionaries, so that a generic `init` can call
-        methods of its bounds (`Sorted<T: Ord>` that sorts).
-      - Run `init` before its value goes into a set, as computed field
-        defaults do now.
-      - Check that `init` is visible at the call of `json.decode`, as for
-        fields.
-- [ ] Let function types include parameter defaults, so that a call through
-      a function value can omit them. Now a function value takes all
-      parameters, so `["a"].map(Error)` is a type error.
+- [ ] Support `Decode` for structs that declare `init` by calling `init` with
+      the JSON object's members as named arguments:
+      - Propagate `Err` results from deferred `Decoded::Pending` thunks in
+        `src/stdlib/json.rs` so that a fallible `init` fails `json.decode`.
+      - Pass trait dictionaries to `Decoded::Pending` thunks so that a generic
+        `init` can call trait methods on its type parameters.
+      - Execute `init` before inserting decoded structs into a `Set`, as
+        `json.decode` already does for computed field defaults.
+      - Verify that `init` is visible at the `json.decode` call site.
+- [ ] Preserve default parameter values in function types so that calls through
+      function values can omit defaulted arguments (for example,
+      `["a"].map(Error)`).
 - [ ] Reject `import` statements after non-import items or statements, as
       specified in §3.1.
 - [ ] Support trait objects (`dyn Trait`), associated types and constants, and

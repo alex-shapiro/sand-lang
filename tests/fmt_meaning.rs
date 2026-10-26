@@ -116,11 +116,6 @@ fn block_comments_stay_in_place() {
     assert!(failures.is_empty(), "{} failures:\n\n{}", failures.len(), failures.iter().take(20).cloned().collect::<Vec<_>>().join("\n\n"));
 }
 
-/// Found by the `fmt` fuzz target. The formatter removes trailing spaces, and
-/// it can move an item away from a `///` that follows code on the same line.
-/// Thus documentation does not include trailing spaces, and a `///` after code
-/// does not document an item. A `//!` after code is an error, because the
-/// formatter can move it into the module documentation.
 #[test]
 fn trailing_spaces_in_doc_comments_do_not_change_the_meaning() {
     for src in [
@@ -141,8 +136,6 @@ fn trailing_spaces_in_doc_comments_do_not_change_the_meaning() {
     assert!(meaning("//!\0\ni//! \n/ t").is_err());
 }
 
-/// Found by the `fmt` fuzz target. The formatter keeps the space in a tuple
-/// index on a number literal (`1 .0`), because `1.0` is a float literal.
 #[test]
 fn tuple_indices_on_number_literals_stay_indices() {
     for src in ["(1 .0)\n", "print(2.5 .1)\n", "print(2 .0 .1)\n"] {
@@ -152,8 +145,6 @@ fn tuple_indices_on_number_literals_stay_indices() {
     }
 }
 
-/// Found by the `fmt` fuzz target. The formatter keeps `..base` if it is the
-/// only argument.
 #[test]
 fn a_lone_base_argument_keeps_its_dots() {
     for src in ["t(..3)\n", "let q = P(..p)\n", "let q = P(\n    ..p,\n)\n", "let q = P(x: 1, /* c */ ..p)\n"] {
@@ -163,8 +154,6 @@ fn a_lone_base_argument_keeps_its_dots() {
     }
 }
 
-/// Found by the `fmt` fuzz target. A keyword used as a member name (`x.or`)
-/// at the end of a line ends the statement, as any other name does.
 #[test]
 fn a_member_named_by_a_keyword_ends_a_statement() {
     for src in ["l.or;()\n", "l.and\n(1, 2)\n", "x.if\n[1]\n"] {

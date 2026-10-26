@@ -154,8 +154,8 @@ impl NativeObject for RegexObj {
 /// pattern's hash).
 const REGEX_CACHE_SLOTS: usize = 64;
 
-/// Fuel for a `regex.Regex(pattern)` call that the cache serves. The call also
-/// charges for the bytes of `pattern`.
+/// Base fuel cost for a cache hit in `regex.Regex` (in addition to the byte
+/// length of `pattern`).
 const CACHED_COST: u64 = 4;
 
 /// The pattern's hash and its slot in the regex cache.

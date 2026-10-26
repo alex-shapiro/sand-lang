@@ -72,15 +72,16 @@ literals.
 //! documentation comment for the enclosing module (only before the first item)
 ```
 
-`help` shows doc comments (§12.15). A doc comment on an `extend` block
-documents a built-in type. A `///` comment documents an item only if its line
-does not have code before it. Documentation does not include trailing spaces.
-A `//!` comment after the first item is an error.
+`help` displays doc comments (§12.15). A doc comment on an `extend` block
+documents a built-in type. A `///` comment must appear on its own line before
+the item it documents; a `///` comment after code on the same line is a regular
+line comment. The lexer strips trailing whitespace from doc comment lines. A
+`//!` comment after the first item is a syntax error.
 
 ### 2.3 Line termination
 
 Newlines are significant. The lexer converts a newline into a statement
-terminator (`;`) when the last token on the line is one of:
+terminator (`;`) if the last token on the line is:
 
 - an identifier, a keyword after `.` (`x.or`), or the keyword `self`, `Self`, `true`, `false`, `break`, `continue` or `return`
 - a literal (number, duration, string, bytes)
@@ -89,9 +90,9 @@ terminator (`;`) when the last token on the line is one of:
 - `..` or `..=`, which may end an open range (`let rest = 1..`)
 
 and the newline is **not** inside a `(...)` or `[...]` group. Inside `{...}`
-newlines are significant again, even when nested inside parentheses.
+newlines are significant again, even inside parentheses.
 
-No terminator is inserted if the next non-blank line starts with `.`,
+The lexer does not insert a terminator if the next non-blank line starts with `.`,
 `else`, `and`, `or`, `=>`, a binary operator, or a `-` followed by whitespace
 (see below). This permits chains such as:
 
@@ -362,14 +363,15 @@ pub struct Port {
   `T: Hash`), but cannot use traits that declare methods (§4.9). Fields and
   methods are private to the declaring module unless marked `pub` (§3.3).
 - A struct can declare a static method `init` that returns `Self` or
-  `Result<Self, E>`. If `init` exists, `T(args)` calls it and evaluates to its
-  result: `Port(80)` is a `Result<Port>`. Inside `init`, `T(args)` and
-  `Self(args)` construct the struct field by field. A native module declares
-  `native fn init` for a built-in or opaque type (`Set([1, 2])`,
-  `regex.Regex(pattern)`). Enums and traits cannot declare `init`, and code
-  cannot refer to `T.init`. An `init` must construct all instances of its
-  type. Thus, an `extend` block that declares `init` cannot specialize the
-  type, and a `where` clause on `init` cannot add bounds.
+  `Result<Self, E>`. If a struct declares `init`, `T(args)` calls `init` and
+  returns its result (for example, `Port(80)` has type `Result<Port>`). Inside
+  `init`, `T(args)` and `Self(args)` construct the struct field by field. Native
+  modules can also declare `native fn init` on built-in or opaque types (such as
+  `Set([1, 2])` and `regex.Regex(pattern)`). Enums and traits cannot declare
+  `init`, and expressions cannot reference `T.init` as a member. `init` must
+  apply to all instances of the type: an `extend` block that declares `init`
+  cannot specialize the target's type parameters, and `init` cannot add trait
+  bounds beyond those declared on the type.
 - Methods are `fn` declarations inside the body. A method whose first parameter
   is `self` (no annotation) is an instance method, called as `value.method(...)`.
   Other methods are static, called as `Type.method(...)`.
@@ -714,9 +716,9 @@ The prelude also defines the lazy iterator struct `Iter<T>` and the trait
 `Iterator<T>` (§12.13).
 
 Standard library and host modules define additional nominal types (such as
-`json.Json`, `http.Response`, and `net.Conn`). An _opaque_ type is bound to a
-registered Rust type (§16.3). It does not have fields. Only its `init` (§4.2)
-and the functions and methods of its module create values of the type. Opaque
+`json.Json`, `http.Response`, and `net.Conn`). An _opaque_ type binds a
+registered Rust type (§16.3); it does not have fields, and only its `init`
+(§4.2) or functions and methods in its module can construct its values. Opaque
 value types (such as `time.PlainDate`) are immutable, compare and hash by
 value, can implement `Ord`, and format as text (`2024-02-29`). Opaque object
 types (such as `net.Conn`) compare by identity and format as `<Type>`; tasks
@@ -834,17 +836,17 @@ Set([1, 2])                   // a type that declares `init` (§4.2)
 ```
 
 `T(args)` constructs a value of type `T`. If `T` declares `init` (§4.2),
-`T(args)` calls it. Otherwise, the arguments give the fields as the arguments
-of a call (§6.6) give the parameters: first positional arguments in
-declaration order, then named arguments. The construction must give each
-field that does not have a default. A last argument `..base` gives the
-remaining fields. `..base` is not permitted if `T(args)` calls `init`.
+`T(args)` calls `init`. Otherwise, positional arguments populate fields in
+declaration order, followed by named arguments (§6.6). A field-by-field
+construction must provide every field that does not have a default, either as
+an argument or via a trailing `..base` argument. `T(args)` cannot use `..base`
+if `T` declares `init`.
 
-A type name used as a value is a function that does the same as `T(args)`, for
-example `lists.map(Set)`. The function takes all parameters of `init`, or all
-fields in declaration order. It does not use defaults. It displays as
-`<fn T>`, and stack traces show calls of `init` as `T`. The name of a variant
-with a payload is also a function value (`xs.map(Some)`).
+Used as a value, a type name is a constructor function (for example,
+`lists.map(Set)`) that takes all `init` parameters or all struct fields in
+declaration order, ignoring defaults. `str` formats it as `<fn T>`, and stack
+traces display `init` frames as `T`. A variant with a payload can also be used
+as a function value (`xs.map(Some)`).
 
 ### 6.5 Operators
 
@@ -1193,12 +1195,11 @@ p1 | p2               alternatives (must bind the same names with the same types
 A binding pattern `name` that coincides with a payload-less variant of the
 scrutinee's enum type refers to that variant (`Empty` for a `Shape`, §4.3). A
 capitalized name that is not such a variant is a binding, which the linter
-reports as a likely mistyped variant (`variant-like-binding`, §17.2). The
-sub-patterns of a struct or variant pattern have the same order as the
-arguments of a construction: first positional sub-patterns in field order,
-then named sub-patterns. The pattern must mention each field or end with `..`.
-A struct pattern matches the fields of a struct also if the struct declares
-`init`. A pattern binds a name at most once.
+reports as a likely mistyped variant (`variant-like-binding`, §17.2). In a
+struct or variant pattern, positional sub-patterns match fields in declaration
+order, followed by named sub-patterns. The pattern must either match every
+field or end with `..`. Struct patterns match fields directly even if the
+struct declares `init`. A pattern binds each name at most once.
 
 ### 8.2 Guards
 
@@ -3181,7 +3182,7 @@ these:
 | `naming`               | violates naming conventions (§2.4)                                                                                                                                                                                                      |
 | `bool-comparison`      | comparing with `true`/`false` literal                                                                                                                                                                                                   |
 | `self-assignment`      | `x = x`                                                                                                                                                                                                                                 |
-| `argument-order`       | a positional argument of a construction, or a positional sub-pattern, that has the name of a different field or `init` parameter (`Rect(h, w)` for `struct Rect { w: float, h: float }`)                                                |
+| `argument-order`       | positional construction argument or sub-pattern whose identifier matches a different field or `init` parameter (`Rect(h, w)` for `struct Rect { w: float, h: float }`)                                                                  |
 | `len-zero`             | `x.len() == 0` (use `is_empty()`)                                                                                                                                                                                                       |
 | `nan-comparison`       | a comparison with `nan`, which is always false (`!=` is always true); use `is_nan()`                                                                                                                                                    |
 | `empty-block`          | empty `if`/`else`/loop body                                                                                                                                                                                                             |
@@ -3247,11 +3248,12 @@ Rewrites files in canonical style: 4-space indentation, one statement per
 line, spaces around binary operators, no space before `(` in calls, `{` on
 the same line, trailing commas in multi-line lists/arguments/fields, at most
 one blank line in a row, one blank line around functions with a body,
-types, `extend`, traits, impls and tests, line width 100 (calls, lists,
-maps and parameter lists that do not fit are broken one element per line,
-patterns are broken in the same way if the text after them then fits, and
-method chains that do not fit are broken before each method call), comments
-preserved (a `///` comment that does not document an item becomes `//`).
+types, `extend`, traits, impls and tests, line width 100 (the formatter breaks
+calls, lists, maps, and parameter lists that exceed the line width across
+lines with each element on its own line, breaks patterns across lines if doing
+so allows the rest of the line to fit, and breaks method chains that exceed the
+line width before each method call), and comments preserved (the formatter
+converts any `///` comment that does not document an item to `//`).
 Trait and impl bodies are laid out like struct bodies,
 one method per line, with a blank line around methods with a body. String
 literals, including their interpolations, are copied verbatim. Formatting
@@ -3329,7 +3331,7 @@ between inputs.
   Code checked earlier keeps referring to what it referred to then. Methods
   (`extend`) and impls (§4.9) of a later input likewise replace those of
   earlier inputs with the same name or for the same type. A later input cannot
-  add an `init` (§4.2) to a type of an earlier input.
+  add `init` (§4.2) to a type declared in an earlier input.
 - A top-level variable's type must be inferred within the input that declares
   it.
 - An input that fails to compile has no effect. An input that fails with an

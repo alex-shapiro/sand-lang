@@ -193,13 +193,12 @@ pub struct FnInfo {
 }
 
 impl FnInfo {
-    /// Whether this function is the `init` of its type.
     pub(crate) fn is_init(&self, syms: &Symbols) -> bool {
         self.owner.is_some() && !self.has_self && syms.str(self.name) == "init"
     }
 
-    /// The name of this function in function values and stack traces. The
-    /// name of an `init` is the name of its type, because `T(...)` calls it.
+    /// Returns the display name of this function for function values and stack
+    /// traces (using the enclosing type's name for `init` methods).
     pub(crate) fn runtime_name(&self, types: &PVec<TypeDef>, syms: &Symbols) -> String {
         match self.owner {
             Some(c) if self.is_init(syms) => c.native_prefix(types, syms),
@@ -308,8 +307,6 @@ pub struct LintFacts {
     /// Import names of the main module and their spans.
     pub main_imports: Vec<(String, Span)>,
     pub unused_results: Vec<Span>,
-    /// `argument-order` lints: the span of a positional argument or
-    /// sub-pattern, and the message.
     pub argument_order: Vec<(Span, String)>,
     /// The resource lints (`unclosed-resource`, `resource-field`,
     /// `resource-escapes`; see `resources`): span, code and message.
@@ -534,8 +531,8 @@ pub(crate) struct FnState {
     /// Indicates that the checker is checking a struct field default, which
     /// does not receive trait dictionaries.
     pub field_default: bool,
-    /// The type constructor whose `init` the checker is checking. In this
-    /// `init`, `T(...)` constructs the struct field by field.
+    /// Enclosing type constructor if currently checking its `init` method
+    /// (where `T(...)` constructs the struct field by field).
     pub init_of: Option<Ctor>,
     /// `(type, span, call_kind)` triples for `reflect` type arguments, checked
     /// after type inference completes.
@@ -604,7 +601,7 @@ pub struct Checker {
     pub prelude: Option<ModId>,
     pub task_mod: Option<ModId>,
     pub cur_mod: ModId,
-    /// The first type definition of the module or session input being checked.
+    /// Index of the first type definition in the current module or session input.
     pub(crate) first_type: usize,
     pub(crate) fs: FnState,
     pub lint: LintFacts,
@@ -1318,8 +1315,7 @@ impl Checker {
             }
         }
         self.infer_member_requirements(first_type);
-        // `Decode` depends on which structs declare `init`, so it is derived
-        // after the methods are declared.
+        // Derive `Decode` after method declarations because structs with `init` do not implement `Decode`.
         let early: Vec<Builtin> = Builtin::ALL.iter().copied().filter(|&b| b.is_derived() && b != Builtin::Decode).collect();
         self.derive_impls(first_type, &early);
         if pm.kind == ModKind::Prelude {
@@ -1377,8 +1373,7 @@ impl Checker {
         }
         if self.allows_native() {
             self.declare_undeclared_natives(first_fn);
-            // A native module can register an `init` without a `native fn`
-            // declaration, so `Decode` is derived again.
+            // Re-derive `Decode` after registering undeclared native `init` functions.
             self.derive_impls(first_type, &[Builtin::Decode]);
         }
         // 5. Top-level code.
@@ -1965,7 +1960,6 @@ impl Checker {
         }
     }
 
-    /// The native `init` of `Set`, which builds a set from a list.
     pub(crate) fn set_init(&self) -> Option<u32> {
         match self.fns[self.init_method(Ctor::Set)? as usize].kind {
             FnKind::Native(n) => Some(n),
@@ -2745,9 +2739,6 @@ impl Checker {
         self.methods.insert(key, ids.into());
     }
 
-    /// Checks the declaration of `init` method `id` of `ctor`. The `init` must
-    /// be static and return `Self` or `Result<Self, E>`. It must construct all
-    /// instances of the type, and be in the same session input as the type.
     fn check_init_decl(&mut self, ctor: Ctor, name: &ast::Ident, id: FnId) {
         let f = &self.fns[id as usize];
         let (self_ty, ret) = (f.self_ty.unwrap_or(TypeId::ERROR), f.ret);
@@ -2758,8 +2749,7 @@ impl Checker {
         } else if let Ctor::Def(d) = ctor
             && (d as usize) < self.first_type
         {
-            // Earlier inputs construct and decode the type field by field, so a
-            // later `init` would not apply to all values.
+            // Earlier session inputs already construct and decode the struct field by field.
             let ty = self.name(self.types[d as usize].name).to_string();
             self.error(name.span, format!("`init` must be declared in the same input as `{ty}`"));
         } else if f.has_self {
@@ -2780,8 +2770,8 @@ impl Checker {
         }
     }
 
-    /// Whether `t` is type definition `d` applied to distinct type parameters
-    /// that have only the bounds that `d` declares for them.
+    /// Returns `true` if `t` applies type definition `d` to distinct type
+    /// parameters without adding trait bounds beyond those declared on `d`.
     fn is_generic_instance(&mut self, d: TypeDefId, t: TypeId) -> bool {
         let Ty::Named(_, args) = self.ty(t) else { return false };
         let (gens, args) = (self.types[d as usize].generics.clone(), self.elems(args));
@@ -2802,16 +2792,14 @@ impl Checker {
         true
     }
 
-    /// Records an `argument-order` lint if the positional argument or
-    /// sub-pattern `name` (at `span`) is in the position of `names[i]`, but
-    /// has the name of a different entry in `names`. `what` identifies the
-    /// callee or pattern in the message.
-    pub(crate) fn note_argument_order(&mut self, what: &str, names: &[&str], i: usize, name: &str, span: Span) {
+    /// Emits an `argument-order` lint if positional argument or sub-pattern
+    /// `name` at index `i` matches a different field or parameter in `names`.
+    pub(crate) fn note_argument_order(&mut self, target_name: &str, names: &[&str], i: usize, name: &str, span: Span) {
         if !self.linting() || names.get(i) == Some(&name) || !names.contains(&name) {
             return;
         }
         let msg = format!(
-            "`{name}` is given for `{}` of {what}, which also has `{name}`; write `{}: {name}` if this is intended",
+            "`{name}` is given for `{}` of {target_name}, which also has `{name}`; write `{}: {name}` if this is intended",
             names[i], names[i]
         );
         self.lint.argument_order.push((span, msg));

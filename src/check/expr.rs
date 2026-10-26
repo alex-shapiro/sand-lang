@@ -11,11 +11,8 @@ pub(crate) enum Ns {
     Trait(TraitId),
 }
 
-/// How `T(...)` constructs a value (see [`Checker::construct_target`]).
 enum Construct {
-    /// `T(...)` calls this `init`.
     Init(FnId),
-    /// `T(...)` constructs this struct field by field.
     Fields(TypeDefId),
 }
 
@@ -24,8 +21,8 @@ enum Construct {
 pub(crate) struct CallArgs<'e> {
     pub(crate) positional: Vec<&'e Expr>,
     pub(crate) named: Vec<(&'e ast::Ident, &'e Expr)>,
-    /// `..base`, until a check takes it. [`Checker::check_args_call`] reports
-    /// an error if `..base` is not taken.
+    /// Trailing `..base` spread expression, consumed during field-by-field
+    /// struct construction.
     base: std::cell::Cell<Option<&'e Expr>>,
 }
 
@@ -42,7 +39,7 @@ impl<'e> CallArgs<'e> {
         out
     }
 
-    /// The number of arguments, not including `..base`.
+    /// Number of positional and named arguments (excluding `..base`).
     fn len(&self) -> usize {
         self.positional.len() + self.named.len()
     }
@@ -833,9 +830,9 @@ impl Checker {
                 let eh = self.check_expr(en, TypeId::INT);
                 mk(HKind::Range { start: Box::new(sh), end: Box::new(eh), inclusive: *inclusive }, TypeId::RANGE, span)
             }
-            ExprKind::Call { callee, args } => self.check_args_call(args, |c, args| c.check_call(callee, args, span)),
+            ExprKind::Call { callee, args } => self.with_call_args(args, |c, args| c.check_call(callee, args, span)),
             ExprKind::MethodCall { receiver, method, args } => {
-                self.check_args_call(args, |c, args| c.check_method_call(receiver, method, args, span))
+                self.with_call_args(args, |c, args| c.check_method_call(receiver, method, args, span))
             }
             ExprKind::Field(obj, name) => self.check_field(obj, name, hint, span),
             ExprKind::TupleField(obj, idx, ispan) => {
@@ -1068,7 +1065,7 @@ impl Checker {
             }
             Def::Variant(d, i) => self.variant_value(d, i, hint, span),
             Def::Type(r) => {
-                let t = self.tyref_open(r, span, name);
+                let t = self.fresh_tyref(r, span, name);
                 self.construct_value(t, name, span)
             }
             Def::Module(_) => {
@@ -1143,7 +1140,7 @@ impl Checker {
             Some(Ty::Named(hd, args)) if hd == d => self.elems(args),
             _ => (0..self.types[d as usize].generics.len()).map(|_| self.fresh()).collect(),
         };
-        self.require_struct_traits(d, &args, span);
+        self.require_type_def_bounds(d, &args, span);
         args
     }
 
@@ -1180,7 +1177,7 @@ impl Checker {
                 }
                 match self.lookup_global(&id.name)? {
                     Def::Module(m) => Some(Ns::Module(m)),
-                    Def::Type(r) => Some(Ns::Type(self.tyref_open(r, id.span, &id.name))),
+                    Def::Type(r) => Some(Ns::Type(self.fresh_tyref(r, id.span, &id.name))),
                     Def::Trait(t) => Some(Ns::Trait(t)),
                     _ => None,
                 }
@@ -1203,7 +1200,7 @@ impl Checker {
                 Ns::Module(m) => {
                     let found = self.syms.get(&name.name).and_then(|s| self.mods[m as usize].scope.get(&s).copied());
                     match found {
-                        Some(Binding { def: Def::Type(r), is_pub: true, .. }) => Some(Ns::Type(self.tyref_open(r, name.span, &name.name))),
+                        Some(Binding { def: Def::Type(r), is_pub: true, .. }) => Some(Ns::Type(self.fresh_tyref(r, name.span, &name.name))),
                         Some(Binding { def: Def::Trait(t), is_pub: true, .. }) => Some(Ns::Trait(t)),
                         _ => None,
                     }
@@ -1214,8 +1211,7 @@ impl Checker {
         }
     }
 
-    /// A type reference with fresh type arguments.
-    pub(crate) fn tyref_open(&mut self, r: TyRef, span: Span, name: &str) -> TypeId {
+    pub(crate) fn fresh_tyref(&mut self, r: TyRef, span: Span, name: &str) -> TypeId {
         match r {
             TyRef::Prim(t) => t,
             TyRef::Coll(c) => {
@@ -1260,8 +1256,8 @@ impl Checker {
         self.visible(def.module, def.fields()[i].is_pub)
     }
 
-    /// Returns the methods `name` of `c` that the current module can call.
-    /// The result does not include `init` or private methods of other modules.
+    /// Returns the callable inherent methods named `name` on `c` (excluding
+    /// `init` and private methods from other modules).
     fn visible_methods(&self, c: Ctor, name: &str) -> impl Iterator<Item = FnId> + '_ {
         let fs = self.methods_named(c, name).unwrap_or_default();
         (0..fs.len())
@@ -1313,7 +1309,7 @@ impl Checker {
                     return self.variant_value(d, i, hint, span);
                 }
                 if name.name == "init" {
-                    self.init_not_member(t, obj, name.span);
+                    self.reject_init_member(t, obj, name.span);
                     return err(span);
                 }
                 if let Some(c) = ctor_of(self.ty(t))
@@ -1381,8 +1377,7 @@ impl Checker {
     // ------------------------------------------------------------------
     // Calls
 
-    /// How a callee is named in diagnostics.
-    fn callee_what(&self, c: Callee) -> String {
+    fn callee_name(&self, c: Callee) -> String {
         match c {
             Callee::Fn(f) if let Some(owner) = self.fns[f as usize].owner.filter(|_| self.is_init(f)) => {
                 format!("`{}`", self.ctor_name(owner, 0))
@@ -1409,7 +1404,7 @@ impl Checker {
         let mut slots: Vec<Option<HArg>> = (0..n).map(|_| None).collect();
         if let Some(f) = first {
             if n == 0 {
-                self.error(span, format!("{} takes no arguments", self.callee_what(callee)));
+                self.error(span, format!("{} takes no arguments", self.callee_name(callee)));
                 return None;
             }
             self.expect_type(ptys[0], f.ty, f.span);
@@ -1422,8 +1417,8 @@ impl Checker {
         let user_params = n - offset;
         if args.positional.len() > user_params {
             let plural = if user_params == 1 { "" } else { "s" };
-            let what = self.callee_what(callee);
-            self.error(span, format!("{what} expected {user_params} argument{plural}, found {}", args.len()));
+            let target = self.callee_name(callee);
+            self.error(span, format!("{target} expected {user_params} argument{plural}, found {}", args.len()));
             // Still check the arguments for errors.
             for a in &args.positional {
                 self.infer(a, None);
@@ -1441,10 +1436,10 @@ impl Checker {
         if self.linting() && construction {
             let names: Vec<String> = (offset..n).filter_map(|i| self.param_name(callee, i).map(str::to_string)).collect();
             let names: Vec<&str> = names.iter().map(String::as_str).collect();
-            let what = self.callee_what(callee);
+            let target = self.callee_name(callee);
             for (i, a) in args.positional.iter().enumerate() {
                 if let ExprKind::Ident(id) = &a.kind {
-                    self.note_argument_order(&what, &names, i, &id.name, a.span);
+                    self.note_argument_order(&target, &names, i, &id.name, a.span);
                 }
             }
         }
@@ -1472,7 +1467,7 @@ impl Checker {
                     slots[pi] = Some(HArg::Expr(h));
                 }
                 _ => {
-                    self.error(name.span, format!("{} has no parameter named `{}`", self.callee_what(callee), name.name));
+                    self.error(name.span, format!("{} has no parameter named `{}`", self.callee_name(callee), name.name));
                     self.infer(a, None);
                 }
             }
@@ -1576,9 +1571,6 @@ impl Checker {
         mk(self.call_kind(f, fresh, hargs), ret, span)
     }
 
-    /// Returns the call of `f` with type arguments `targs` and arguments
-    /// `args`, hidden arguments first. The call kind is different for a trait
-    /// method, a native function, and a script function.
     pub(crate) fn call_kind(&self, f: FnId, targs: Vec<TypeId>, args: Vec<HArg>) -> HKind {
         match self.fns[f as usize].kind {
             FnKind::TraitMethod(trait_id, slot) => HKind::CallTrait { trait_id, slot, targs, args, impl_id: None },
@@ -1677,8 +1669,8 @@ impl Checker {
         }
         if args.named.is_empty() && args.len() != ptys.len() {
             let plural = if ptys.len() == 1 { "" } else { "s" };
-            let what = self.callee_what(Callee::Variant(d, i));
-            self.error(span, format!("{what} expected {} argument{plural}, found {}", ptys.len(), args.len()));
+            let target = self.callee_name(Callee::Variant(d, i));
+            self.error(span, format!("{target} expected {} argument{plural}, found {}", ptys.len(), args.len()));
             self.infer_args(args);
             return mk(HKind::Error, enum_ty, span);
         }
@@ -1695,7 +1687,6 @@ impl Checker {
         mk(HKind::MakeVariant { rt_id, args: hs }, enum_ty, span)
     }
 
-    /// Infers the arguments of a failed call. Lambdas get error-typed parameters, so they report no extra errors.
     /// Coerces an element of a collection literal, with a hint for mixed values.
     fn expect_elem(&mut self, expected: TypeId, found: TypeId, span: Span, what: &str) {
         if !self.coerce(expected, found) {
@@ -1707,8 +1698,8 @@ impl Checker {
         }
     }
 
-    /// Infers the types of the arguments of a call that has an error. Also
-    /// takes and infers `..base`.
+    /// Infers argument types after a failed call, assigning error types to
+    /// lambda parameters to suppress cascading errors.
     fn infer_args(&mut self, args: &CallArgs) {
         let all = args.positional.iter().copied().chain(args.named.iter().map(|&(_, e)| e)).chain(args.take_base());
         for a in all {
@@ -1765,9 +1756,7 @@ impl Checker {
         mk(HKind::CallValue { callee: Box::new(callee), args: hs }, ret, span)
     }
 
-    /// Checks a call with `check`. Then reports an error if `check` did not
-    /// take the `..base` of `args`.
-    fn check_args_call(&mut self, args: &[Arg], check: impl FnOnce(&mut Self, &CallArgs) -> HExpr) -> HExpr {
+    fn with_call_args(&mut self, args: &[Arg], check: impl FnOnce(&mut Self, &CallArgs) -> HExpr) -> HExpr {
         let args = CallArgs::new(args);
         let h = check(self, &args);
         if let Some(b) = args.take_base() {
@@ -1788,7 +1777,7 @@ impl Checker {
                 }
                 Some(Def::Variant(d, i)) => return self.call_variant(d, i, args, span),
                 Some(Def::Type(r)) => {
-                    let t = self.tyref_open(r, id.span, &id.name);
+                    let t = self.fresh_tyref(r, id.span, &id.name);
                     return self.construct(t, &id.name, args, callee.span, span);
                 }
                 _ if let Some(Ns::Type(t)) = self.resolve_ns(callee) => return self.construct(t, &id.name, args, callee.span, span),
@@ -1824,7 +1813,7 @@ impl Checker {
                         self.call_value(gv, args, span)
                     }
                     Some(Def::Type(r)) => {
-                        let t = self.tyref_open(r, name.span, &name.name);
+                        let t = self.fresh_tyref(r, name.span, &name.name);
                         self.construct(t, &name.name, args, name.span, span)
                     }
                     Some(Def::Module(_)) => {
@@ -1849,7 +1838,7 @@ impl Checker {
                     return self.call_variant(d, i, args, span);
                 }
                 if name.name == "init" {
-                    self.init_not_member(t, obj, name.span);
+                    self.reject_init_member(t, obj, name.span);
                     self.infer_args(args);
                     return err(span);
                 }
@@ -2004,18 +1993,15 @@ impl Checker {
     // ------------------------------------------------------------------
     // Construction
 
-    /// The `init` of type constructor `c`, if `c` declares `init`.
     pub(crate) fn init_method(&self, c: Ctor) -> Option<FnId> {
         self.methods_named(c, "init")?.iter().copied().find(|&f| !self.fns[f as usize].has_self)
     }
 
-    /// Whether `f` is the `init` of a type. Only `T(...)` can call an `init`.
     fn is_init(&self, f: FnId) -> bool {
         self.fns[f as usize].is_init(&self.syms)
     }
 
-    /// Reports an error for `ty.init`, where `ty` refers to type `t`.
-    fn init_not_member(&mut self, t: TypeId, ty: &Expr, span: Span) {
+    fn reject_init_member(&mut self, t: TypeId, ty: &Expr, span: Span) {
         let constructible = ctor_of(self.ty(t))
             .is_some_and(|c| self.init_method(c).is_some() || matches!(c, Ctor::Def(d) if self.types[d as usize].is_struct()));
         let msg = match constructible {
@@ -2025,11 +2011,9 @@ impl Checker {
         self.error(span, msg);
     }
 
-    /// Returns how `T(...)` constructs a value of type `t`, which the source
-    /// writes as `name`. `T(...)` calls the `init` of `T`. It constructs a
-    /// struct field by field if the struct does not declare `init`, or if the
-    /// checker is inside that `init`. Reports an error and returns `None` if
-    /// the code at this location cannot construct a value of `t`.
+    /// Resolves how `T(...)` constructs type `t` (written as `name`), returning
+    /// [`Construct::Fields`] inside `T`'s own `init` or if `T` is a struct
+    /// without `init`, and [`Construct::Init`] otherwise.
     fn construct_target(&mut self, t: TypeId, name: &str, name_span: Span) -> Option<Construct> {
         let ty = self.rty(t);
         let c = match ty {
@@ -2075,9 +2059,8 @@ impl Checker {
         }
     }
 
-    /// Unifies `t` with the type that `init` `f` constructs. `ret` is the
-    /// instantiated return type of `f`: `Self` or `Result<Self, E>`. Reports
-    /// an error and returns `false` if the types do not unify.
+    /// Unifies `t` with the type constructed by `init` function `f` (whose
+    /// instantiated return type `ret` is `Self` or `Result<Self, E>`).
     fn unify_init_result(&mut self, f: FnId, ret: TypeId, t: TypeId, name_span: Span) -> bool {
         let fi = &self.fns[f as usize];
         let constructed = match self.rty(ret) {
@@ -2092,8 +2075,6 @@ impl Checker {
         false
     }
 
-    /// Checks `T(args)`, a construction of type `t` that the source writes as
-    /// `name`.
     fn construct(&mut self, t: TypeId, name: &str, args: &CallArgs, name_span: Span, span: Span) -> HExpr {
         match self.construct_target(t, name, name_span) {
             Some(Construct::Init(f)) => {
@@ -2116,8 +2097,7 @@ impl Checker {
         }
     }
 
-    /// Checks type `t` used as a value. The value is a function that does the
-    /// same as `T(...)`, and takes all parameters of `init` or all fields.
+    /// Type-checks type `t` used as a constructor function value.
     fn construct_value(&mut self, t: TypeId, name: &str, span: Span) -> HExpr {
         match self.construct_target(t, name, span) {
             Some(Construct::Init(f)) => {
@@ -2132,7 +2112,7 @@ impl Checker {
                 let t = self.resolve(t);
                 let Ty::Named(_, targs) = self.ty(t) else { unreachable!() };
                 let targs = self.elems(targs);
-                self.require_struct_traits(d, &targs, span);
+                self.require_type_def_bounds(d, &targs, span);
                 let ftys: Vec<TypeId> = (0..self.types[d as usize].fields().len()).map(|i| self.field_type(d, i, &targs)).collect();
                 let fty = self.fn_ty(&ftys, t);
                 mk(HKind::CtorFn { target: CtorTarget::Struct(d), arity: ftys.len() }, fty, span)
@@ -2141,22 +2121,20 @@ impl Checker {
         }
     }
 
-    /// Checks that `targs` implement the traits that the type parameters of
-    /// struct `d` require.
-    fn require_struct_traits(&mut self, d: TypeDefId, targs: &[TypeId], span: Span) {
+    fn require_type_def_bounds(&mut self, d: TypeDefId, targs: &[TypeId], span: Span) {
         if self.types[d as usize].generics.iter().any(|&p| !self.params[p as usize].traits.is_empty()) {
             let gens = self.types[d as usize].generics.clone();
             self.require_traits(&gens, targs, &[], span);
         }
     }
 
-    /// Builds struct `d` of type `t` from the arguments, the fields of
-    /// `..base`, and the field defaults. The result evaluates the arguments in
-    /// source order, then `..base`, then the defaults in declaration order.
+    /// Type-checks field-by-field construction of struct `d`, evaluating
+    /// explicit arguments in source order, followed by `..base`, followed by
+    /// defaulted fields in declaration order.
     fn construct_fields(&mut self, d: TypeDefId, t: TypeId, name: &str, args: &CallArgs, span: Span) -> HExpr {
         let Ty::Named(_, targs) = self.ty(t) else { unreachable!() };
         let targs = self.elems(targs);
-        self.require_struct_traits(d, &targs, span);
+        self.require_type_def_bounds(d, &targs, span);
         let n = self.types[d as usize].fields().len();
         if args.positional.len() > n {
             let plural = if n == 1 { "" } else { "s" };
@@ -2620,14 +2598,13 @@ impl Checker {
         let mut harms = Vec::new();
         let mut ty: Option<TypeId> = None;
         let mut all_never = true;
-        let mut ok_patterns = true;
+        let mut patterns_valid = true;
         for arm in arms {
             self.push_scope();
             let mark = self.diags.len();
             let pat = self.check_pattern(&arm.pattern, st, false);
-            // An invalid pattern can make other arms seem unreachable, so the
-            // exhaustiveness check is skipped.
-            ok_patterns &= self.diags.len() == mark;
+            // Skip exhaustiveness and reachability checking if any arm pattern is invalid.
+            patterns_valid &= self.diags.len() == mark;
             let guard = arm.guard.as_ref().map(|g| self.check_expr(g, TypeId::BOOL));
             let body = self.infer_inner(&arm.body, if want { hint.or(ty) } else { None }, want);
             self.pop_scope();
@@ -2642,7 +2619,7 @@ impl Checker {
             }
             harms.push(HArm { pat, guard, body });
         }
-        if ok_patterns {
+        if patterns_valid {
             self.check_exhaustive(st, &harms, span);
         }
         let ty = if want {

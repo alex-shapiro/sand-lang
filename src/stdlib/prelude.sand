@@ -307,9 +307,8 @@ pub trait Hash: Eq {}
 pub trait Encode {}
 
 /// Decodes values from JSON with `json.decode`. The compiler derives `Decode`
-/// for tuples, enums, and structs whose components implement `Decode`. A
-/// struct that declares `init` does not implement `Decode`, because
-/// `json.decode` does not call `init`.
+/// for tuples, structs without `init`, and enums whose components implement
+/// `Decode`.
 pub trait Decode: Encode {}
 
 /// Performs arithmetic on numeric types (`int` and `float`).

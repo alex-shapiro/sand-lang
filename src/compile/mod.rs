@@ -1759,8 +1759,8 @@ impl<'a> Compiler<'a> {
                 let (n, def, fields) = self.field_construction(f, items).unwrap();
                 let mark = f.next_reg;
                 let start = self.alloc_n(f, fields.len());
-                // The fields given, in source order, straight into their
-                // registers; then the others (from `..base` or defaults).
+                // Evaluate explicit arguments in source order directly into their
+                // field registers, followed by `..base` and default fields.
                 let mut done = vec![false; fields.len()];
                 for it in &items[..n] {
                     let HKind::Let { pat, init, else_ } = &it.kind else { unreachable!() };
@@ -2613,10 +2613,9 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    /// Matches a construction field by field in the form that
-    /// `Checker::construct_fields` makes: `let`s that bind hidden locals to
-    /// the given fields in source order, then `MakeStruct`. Returns the number
-    /// of `let`s, the struct, and its field values.
+    /// Matches a field-by-field struct construction block lowered by
+    /// `Checker::construct_fields` (`let` bindings for hoisted arguments in
+    /// source order followed by `MakeStruct`), returning `(num_lets, def, fields)`.
     fn field_construction<'e>(&self, f: &FnState, items: &'e [HExpr]) -> Option<(usize, TypeDefId, &'e [HExpr])> {
         let (HKind::MakeStruct { def, fields }, lets) = (&items.last()?.kind, &items[..items.len() - 1]) else { return None };
         let hidden = |it: &HExpr| {

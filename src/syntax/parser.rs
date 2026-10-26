@@ -17,7 +17,7 @@ pub struct ParseResult {
     /// contents of string and bytes literals are moved into the syntax tree).
     pub tokens: Vec<Token>,
     pub errors: Vec<Diag>,
-    /// The start of each `///` comment that documents an item.
+    /// Sorted start byte offsets of `///` comments attached to items.
     pub docs: Vec<u32>,
 }
 
@@ -47,7 +47,6 @@ struct Parser<'a> {
     fatal: bool,
     /// Inside a `trait` body: methods may omit their body.
     in_trait: bool,
-    /// See [`ParseResult::docs`].
     docs: std::cell::RefCell<Vec<u32>>,
 }
 
@@ -189,17 +188,13 @@ impl<'a> Parser<'a> {
     fn leave(&mut self) {
         self.depth -= 1;
     }
-    /// Returns the doc comment (`///`) immediately before byte offset `lo`,
-    /// and records it in [`ParseResult::docs`] as the doc comment of the item
-    /// at `lo`.
+
     fn doc_before(&self, lo: u32) -> Option<String> {
         let (doc, starts) = self.doc_comments_before(lo);
         self.docs.borrow_mut().extend(starts);
         doc
     }
 
-    /// The doc comment immediately before byte offset `lo`, and the start of
-    /// each of its lines.
     fn doc_comments_before(&self, lo: u32) -> (Option<String>, Vec<u32>) {
         let idx = self.comments.partition_point(|c| c.hi <= lo);
         let mut lines = Vec::new();
@@ -1306,8 +1301,8 @@ impl<'a> Parser<'a> {
         Ok(e)
     }
 
-    /// Whether `e {` starts a struct literal (`Name { x: 1 }`), which Sand
-    /// does not support. A valid block cannot start in this way.
+    /// Returns `true` if `e {` has the form of a brace-style struct literal
+    /// (`Name { x: 1 }`) so the parser can report a targeted diagnostic.
     fn is_struct_literal(&self, e: &Expr) -> bool {
         let name = match &e.kind {
             ExprKind::Ident(id) | ExprKind::Field(_, id) => &id.name,
@@ -1831,7 +1826,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// `p, name: q, ..)` after the `(` of a constructor pattern.
     fn pattern_args(&mut self) -> PResult<PatArgs> {
         let mut args = PatArgs::default();
         while !self.at(&Tok::RParen) {

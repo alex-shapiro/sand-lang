@@ -30,8 +30,8 @@ pub struct ItemDoc {
     /// Formatted Sand declaration (`enum Json`, `fn parse(text: str) -> Result<Json, Error>`).
     pub decl: String,
     pub doc: Option<String>,
-    /// The `init`, variants, fields, and methods of a type, or the methods of
-    /// a trait.
+    /// Constructor (`init`), variants, fields, and methods of a type, or
+    /// methods of a trait.
     pub members: Vec<MemberDoc>,
     /// Implemented traits (if this item is a type) or implementing types (if
     /// this item is a trait).
@@ -63,7 +63,7 @@ pub struct MemberDoc {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MemberKind {
-    /// The type's `init`, shown as `T(params) -> T`.
+    /// Type constructor (`init`), formatted as `T(params) -> T`.
     Construct,
     Variant,
     Field,

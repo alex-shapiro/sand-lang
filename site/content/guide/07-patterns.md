@@ -80,7 +80,7 @@ print(name(Shape.Empty))
 
 ### Structs
 
-A struct pattern has the same form as a construction. Sub-patterns match fields in declaration order or by name (`field: pattern`), and `..` ignores the remaining fields:
+A struct pattern matches fields in declaration order or by name (`field: pattern`), and `..` ignores any remaining fields:
 
 ```sand
 struct User {

@@ -7,7 +7,7 @@ Sand provides two constructs for defining custom data types: `struct` groups nam
 
 ## Structs
 
-A `struct` declaration lists its fields and their types. `Point(...)` constructs a value. Give each field by name or in declaration order:
+A `struct` declaration lists its fields and their types. Construct an instance with `Type(...)`, passing fields by name or in declaration order:
 
 ```sand
 struct Point {
@@ -50,7 +50,7 @@ p.x = 0.0
 
 ### Positional fields and copies
 
-Positional arguments give the fields in declaration order. A last argument `..base` copies the remaining fields from `base`:
+Positional arguments populate fields in declaration order, and a trailing `..base` argument copies any remaining fields from `base`:
 
 ```sand
 struct Point {
@@ -64,7 +64,7 @@ let q = Point(y: 9.0, ..p)
 print(q)
 ```
 
-A type name used as a value is a function that takes all fields in order:
+Used as a value, a struct name is a constructor function that takes all fields in declaration order:
 
 ```sand
 struct Tag {
@@ -103,7 +103,7 @@ print(Vec2.zero().plus(v))
 
 ### Validating construction with `init`
 
-A static method `init` replaces construction field by field: `T(...)` calls `init` with its arguments. Inside `init`, `Self(...)` constructs the struct field by field. If `init` returns a `Result`, each construction can fail, and the caller must handle the error:
+A static `init` method replaces field-by-field construction so that `T(...)` calls `init`. Inside `init`, `Self(...)` constructs the struct field by field. If `init` returns a `Result`, the caller must handle the error:
 
 ```sand
 struct Port {
@@ -121,7 +121,7 @@ print(Port(8080))
 print(Port(0))
 ```
 
-Construct standard library types in the same way: `Set([1, 2])`, `Channel(capacity: 8)`, `regex.Regex(r"\d+")?`, and `time.PlainDate(2024, 2, 29)?`.
+Standard library types use the same construction syntax: `Set([1, 2])`, `Channel(capacity: 8)`, `regex.Regex(r"\d+")?`, and `time.PlainDate(2024, 2, 29)?`.
 
 ### Adding methods with `extend`
 

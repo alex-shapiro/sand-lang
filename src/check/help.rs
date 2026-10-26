@@ -462,7 +462,7 @@ impl Checker {
         names
     }
 
-    /// Returns the visible inherent methods of `c` other than its `init`, in
+    /// Returns the visible inherent methods of `c` (excluding `init`) in
     /// declaration order.
     pub(super) fn methods_of(&self, c: Ctor) -> Vec<FnId> {
         let init = self.init_method(c);

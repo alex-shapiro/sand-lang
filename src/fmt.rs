@@ -171,14 +171,13 @@ enum Doc {
     /// A `strict` group is printed flat only if the entire group fits on the
     /// current line. When printed flat, nested non-forced groups (including
     /// `hug` groups) are also printed flat.
-    ///
-    /// A `break_if_rest_fits` group must end with a one-character bracket. It
-    /// breaks only if the text after the group then fits after the bracket.
     Group {
         doc: Box<Doc>,
         force: bool,
         hug: bool,
         strict: bool,
+        /// Break only if the text after the closing 1-byte bracket fits on the
+        /// line (`ind + 1`).
         break_if_rest_fits: bool,
     },
     Concat(Vec<Doc>),
@@ -538,12 +537,11 @@ struct ListOpts {
     trailing_comma: bool,
     /// The last element may break on its own (see [`Doc::Group`]).
     hug_last: bool,
-    /// Break only if the text after the list then fits (see [`Doc::Group`]).
+    /// Break only if doing so allows the remainder of the line to fit (see [`Doc::Group`]).
     break_if_rest_fits: bool,
 }
 
 const LIST: ListOpts = ListOpts { force: false, trailing_comma: true, hug_last: false, break_if_rest_fits: false };
-/// Options for the sub-patterns of a pattern.
 const PATTERN: ListOpts = ListOpts { break_if_rest_fits: true, ..LIST };
 
 /// The operator and operands of a binary operation.
@@ -642,7 +640,6 @@ fn is_line_comment(c: &Comment) -> bool {
 struct Formatter<'a> {
     src: &'a str,
     comments: &'a [Comment],
-    /// See [`crate::syntax::parser::ParseResult::docs`].
     docs: &'a [u32],
     /// Source tokens, without inserted statement terminators.
     tokens: Vec<Token>,
@@ -766,9 +763,8 @@ impl<'a> Formatter<'a> {
     // ------------------------------------------------------------------
     // Comments
 
-    /// The text of comment `i`. A `///` comment that does not document an
-    /// item becomes `//`, so that the formatter cannot make it document an
-    /// item if it moves the comment.
+    /// Returns the formatted text of comment `i`, rewriting unattached `///`
+    /// comments to `//` so that moving them cannot attach them to an item.
     fn comment_text(&self, i: usize) -> String {
         let c = &self.comments[i];
         let text = c.text(self.src).trim_end();
@@ -1780,7 +1776,7 @@ impl<'a> Formatter<'a> {
             ExprKind::Field(x, name) => self.dot(x.span.hi, |f| f.name(name)),
             ExprKind::TupleField(x, i, span) => {
                 let field = self.dot(x.span.hi, |f| prepend(f.inline_comments(span.lo), text(i.to_string())));
-                // Without the space, `1.0` is a float literal.
+                // Preserve a space before `.0` on numeric literals so that `1 .0` does not format as float literal `1.0`.
                 let number = matches!(x.kind, ExprKind::Int(_) | ExprKind::IntOverflow(_) | ExprKind::Float(_));
                 if number { cat(vec![text(" "), field]) } else { field }
             }
@@ -1794,8 +1790,6 @@ impl<'a> Formatter<'a> {
         }
     }
 
-    /// Lays out the sub-patterns of a pattern between `brackets`, as
-    /// [`Self::call_args`] lays out arguments.
     fn pattern_list(&mut self, brackets: (&'static str, &'static str), open: u32, close: u32, elems: &[CElem<'a>]) -> Doc {
         let atom = |el: &CElem| match el {
             CElem::Pat(p) => {

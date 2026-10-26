@@ -43,8 +43,7 @@ struct Verifier<'a> {
     /// Required type parameter indices for each type definition and derived
     /// trait in [`DERIVED`], or `None` if the type never implements the trait.
     derived: Vec<[Option<Vec<u32>>; DERIVED.len()]>,
-    /// The type definitions that declare `init`. These types do not implement
-    /// `Decode`.
+    /// Type definitions that declare `init` (which do not implement `Decode`).
     inits: HashSet<TypeDefId>,
 }
 

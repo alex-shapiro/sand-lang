@@ -120,10 +120,9 @@ impl Checker {
         self.types[d].fields().iter().find(|f| f.mutable).map(|f| f.name)
     }
 
-    /// Computes the derived implementations of `traits` for the type
-    /// definitions from `first` onward, and replaces earlier results for
-    /// `traits`. The computation finds the greatest fixed point, so mutually
-    /// recursive types implement a trait unless a component type does not.
+    /// Computes derived implementations of `traits` for type definitions
+    /// starting at `first` using greatest fixed-point iteration so that mutually
+    /// recursive types implement a trait unless a component type refutes it.
     pub(crate) fn derive_impls(&mut self, first: usize, traits: &[Builtin]) {
         while self.derived.len() < self.types.len() {
             self.derived.push(std::array::from_fn(|_| Derived::Needs(Vec::new())));
@@ -335,7 +334,6 @@ enum Step {
     Field(Symbol, TypeId),
     Payload(Symbol, TypeId),
     Mutable(Symbol),
-    /// The struct declares `init`, so it does not implement `Decode`.
     Init,
 }
 

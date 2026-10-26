@@ -149,10 +149,10 @@ pub struct HLambda {
     pub self_local: Option<LocalId>,
 }
 
-/// What a constructor function value ([`HKind::CtorFn`]) builds.
+/// Target of a constructor function value ([`HKind::CtorFn`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CtorTarget {
-    /// The variant with this runtime id.
+    /// Variant runtime ID.
     Variant(u32),
     Struct(TypeDefId),
 }
@@ -174,8 +174,8 @@ pub enum HKind {
         func: FnId,
         targs: Vec<TypeId>,
     },
-    /// A variant, or a struct constructed field by field, used as a function
-    /// value. The function takes `arity` arguments, one for each field.
+    /// Variant or field-by-field struct constructor used as a function value of
+    /// `arity` parameters.
     CtorFn {
         target: CtorTarget,
         arity: usize,

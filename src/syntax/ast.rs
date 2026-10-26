@@ -342,8 +342,8 @@ pub struct FormatSpecAst {
 pub struct Arg {
     pub name: Option<Ident>,
     pub value: Expr,
-    /// `..value`: the last argument of a construction, which copies the
-    /// remaining fields from `value`.
+    /// Indicates a trailing `..value` argument that copies remaining struct
+    /// fields from `value`.
     pub spread: bool,
 }
 
@@ -524,12 +524,11 @@ pub enum PatLit {
     Unit,
 }
 
-/// The arguments of a constructor pattern: `(p, name: q, ..)`.
 #[derive(Clone, Debug, Default)]
 pub struct PatArgs {
     pub positional: Vec<Pattern>,
     pub named: Vec<(Ident, Pattern)>,
-    /// A trailing `..` ignores the fields that are not mentioned.
+    /// Indicates a trailing `..` that ignores unmentioned fields.
     pub rest: bool,
 }
 
@@ -547,8 +546,8 @@ pub enum PatternKind {
     Literal(PatLit),
     Range(i64, i64),
     Tuple(Vec<Pattern>),
-    /// A variant or struct: `Name(args)`, `Enum.Name(args)`, `module.Type(args)`,
-    /// or a qualified variant without a payload, `Enum.Name` (`args` is `None`).
+    /// Struct or enum variant pattern (`Name(args)`, `Enum.Name(args)`,
+    /// `module.Type(args)`, or unit variant `Enum.Name` with `args: None`).
     Ctor {
         path: Vec<Ident>,
         args: Option<PatArgs>,

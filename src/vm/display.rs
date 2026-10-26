@@ -83,9 +83,8 @@ pub fn escape_bytes(b: &[u8], out: &mut String) {
 enum Work<'p> {
     Val(Value, usize, bool),
     Text(&'static str),
-    /// Elements `i..` of a list, or the fields of a tuple, struct, or variant,
-    /// then `close`. The fields of a struct, or of a variant with named
-    /// fields, include their names.
+    /// Remaining elements `i..` of a list, tuple, struct, or variant (prefixing
+    /// each element with `names[i]` if present), followed by `close`.
     Seq {
         obj: Value,
         i: usize,

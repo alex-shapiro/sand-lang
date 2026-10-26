@@ -3,7 +3,6 @@
 use super::*;
 use crate::syntax::ast::{PatArgs, PatLit, Pattern, PatternKind};
 
-/// The variant or struct that a constructor pattern matches, with its type arguments.
 enum PatTarget {
     Variant(TypeDefId, u32, Vec<TypeId>),
     Struct(TypeDefId, Vec<TypeId>),
@@ -120,10 +119,9 @@ impl Checker {
         (0..n).map(|_| self.fresh()).collect()
     }
 
-    /// Finds the variant or struct for the path of a constructor pattern with
-    /// scrutinee type `ty`. A variant path is `Circle`, `Shape.Circle`, or
-    /// `Some`. A struct path is `Point`, `geo.Point`, or `Self`.
-    fn pattern_ctor(&mut self, path: &[ast::Ident], ty: TypeId) -> Option<PatTarget> {
+    /// Resolves the variant or struct referenced by constructor pattern `path`
+    /// against scrutinee type `ty`.
+    fn resolve_pattern_ctor(&mut self, path: &[ast::Ident], ty: TypeId) -> Option<PatTarget> {
         let rt = self.resolve(ty);
         let last = path.last().unwrap();
         let found = if path.len() == 1 {
@@ -132,7 +130,7 @@ impl Checker {
             {
                 return Some(PatTarget::Variant(d, i, self.elems(args)));
             }
-            match self.pattern_type(path) {
+            match self.resolve_pattern_type(path) {
                 Some(t) => Some(t),
                 None => match self.lookup_global(&last.name) {
                     Some(Def::Variant(d, i)) => {
@@ -144,12 +142,12 @@ impl Checker {
                 },
             }
         } else {
-            match self.pattern_type(path) {
+            match self.resolve_pattern_type(path) {
                 Some(t) => Some(t),
                 None => {
                     // `Enum.Variant` or `module.Enum.Variant`.
                     let type_path = &path[..path.len() - 1];
-                    let Some(t) = self.pattern_type(type_path) else {
+                    let Some(t) = self.resolve_pattern_type(type_path) else {
                         let name = type_path.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(".");
                         self.error(type_path[0].span, format!("unknown type `{name}`"));
                         return None;
@@ -195,12 +193,12 @@ impl Checker {
         }
     }
 
-    /// Returns the type that `path` refers to (`Point`, `geo.Point`, `Self`,
-    /// or an alias), with fresh type arguments.
-    fn pattern_type(&mut self, path: &[ast::Ident]) -> Option<TypeId> {
+    /// Resolves type path `path` (`Point`, `geo.Point`, `Self`, or a type
+    /// alias) and instantiates it with fresh type variables.
+    fn resolve_pattern_type(&mut self, path: &[ast::Ident]) -> Option<TypeId> {
         let r = match path {
-            [one] if one.name == "Self" => return self.fs.self_ty,
-            [one] => match self.lookup_global(&one.name)? {
+            [ident] if ident.name == "Self" => return self.fs.self_ty,
+            [ident] => match self.lookup_global(&ident.name)? {
                 Def::Type(r) => r,
                 _ => return None,
             },
@@ -220,7 +218,7 @@ impl Checker {
             _ => return None,
         };
         let last = path.last().unwrap();
-        Some(self.tyref_open(r, last.span, &last.name))
+        Some(self.fresh_tyref(r, last.span, &last.name))
     }
 
     fn find_variant_named(&self, d: TypeDefId, name: &str) -> Option<u32> {
@@ -228,11 +226,8 @@ impl Checker {
         self.types[d as usize].variants().iter().position(|v| v.name == s).map(|i| i as u32)
     }
 
-    /// Checks the sub-patterns of a constructor pattern against fields of
-    /// types `ftys`, and returns the index and pattern of each field. `names`
-    /// contains the field names if the fields have names. `is_private` tells
-    /// which fields the current module cannot access. `what` identifies the
-    /// variant or struct in messages.
+    /// Type-checks the positional and named sub-patterns of a struct or variant
+    /// pattern, returning `(field_index, pattern)` pairs.
     #[allow(clippy::too_many_arguments)]
     fn check_ctor_args(
         &mut self,
@@ -240,7 +235,7 @@ impl Checker {
         ftys: &[TypeId],
         names: Option<&[Symbol]>,
         is_private: &dyn Fn(&Self, usize) -> bool,
-        what: &str,
+        target_name: &str,
         span: Span,
         mutable: bool,
         binds: &mut Binds,
@@ -250,7 +245,7 @@ impl Checker {
         let mut seen = vec![false; n];
         if args.positional.len() > n {
             let plural = if n == 1 { "" } else { "s" };
-            self.error(span, format!("{what} has {n} field{plural}, but the pattern has {}", args.positional.len()));
+            self.error(span, format!("{target_name} has {n} field{plural}, but the pattern has {}", args.positional.len()));
             for p in args.patterns() {
                 self.check_pat_inner(p, TypeId::ERROR, mutable, binds);
             }
@@ -262,13 +257,13 @@ impl Checker {
             let ns: Vec<&str> = ns.iter().map(String::as_str).collect();
             for (i, p) in args.positional.iter().enumerate() {
                 if let PatternKind::Binding(id) = &p.kind {
-                    self.note_argument_order(what, &ns, i, &id.name, p.span);
+                    self.note_argument_order(target_name, &ns, i, &id.name, p.span);
                 }
             }
         }
         for (i, p) in args.positional.iter().enumerate() {
             if is_private(self, i) {
-                let msg = format!("field `{}` of {what} is private", field_name(self, i));
+                let msg = format!("field `{}` of {target_name} is private", field_name(self, i));
                 self.error(p.span, msg);
             }
             seen[i] = true;
@@ -281,8 +276,8 @@ impl Checker {
             let found = names.and_then(|ns| ns.iter().position(|&x| Some(x) == sym));
             let Some(i) = found else {
                 let msg = match names {
-                    Some(_) => format!("no field `{}` on {what}", name.name),
-                    None => format!("{what} has no named fields"),
+                    Some(_) => format!("no field `{}` on {target_name}", name.name),
+                    None => format!("{target_name} has no named fields"),
                 };
                 self.error(name.span, msg);
                 self.check_pat_inner(p, TypeId::ERROR, mutable, binds);
@@ -290,7 +285,7 @@ impl Checker {
                 continue;
             };
             if is_private(self, i) {
-                self.error(name.span, format!("field `{}` of {what} is private", name.name));
+                self.error(name.span, format!("field `{}` of {target_name} is private", name.name));
             }
             if std::mem::replace(&mut seen[i], true) {
                 self.error(name.span, format!("field `{}` is matched more than once", name.name));
@@ -301,7 +296,7 @@ impl Checker {
         if !args.rest && !unknown {
             let missing: Vec<usize> = (0..n).filter(|&i| !seen[i]).collect();
             if missing.iter().any(|&i| is_private(self, i)) {
-                self.error(span, format!("{what} has private fields; add `..` to ignore them"));
+                self.error(span, format!("{target_name} has private fields; add `..` to ignore them"));
             } else if names.is_some() {
                 for i in missing {
                     let msg = format!("missing field `{}` in pattern; add `..` to ignore the rest", field_name(self, i));
@@ -310,7 +305,7 @@ impl Checker {
             } else if !missing.is_empty() {
                 let found = n - missing.len();
                 let plural = if n == 1 { "" } else { "s" };
-                self.error(span, format!("{what} has {n} field{plural}, but the pattern has {found}; add `..` to ignore the rest"));
+                self.error(span, format!("{target_name} has {n} field{plural}, but the pattern has {found}; add `..` to ignore the rest"));
             }
         }
         out
@@ -380,7 +375,7 @@ impl Checker {
                 self.pat(HPatKind::Tuple(hs), ty, span)
             }
             PatternKind::Ctor { path, args } => {
-                let Some(target) = self.pattern_ctor(path, ty) else {
+                let Some(target) = self.resolve_pattern_ctor(path, ty) else {
                     for p in args.iter().flat_map(|a| a.patterns()) {
                         self.check_pat_inner(p, TypeId::ERROR, mutable, binds);
                     }
@@ -407,8 +402,8 @@ impl Checker {
                             }
                             return self.pat(HPatKind::Variant { rt_id, args: vec![] }, ty, span);
                         }
-                        let what = format!("variant `{vname}`");
-                        let given = self.check_ctor_args(args, &ftys, names.as_deref(), &|_, _| false, &what, span, mutable, binds);
+                        let target_name = format!("variant `{vname}`");
+                        let given = self.check_ctor_args(args, &ftys, names.as_deref(), &|_, _| false, &target_name, span, mutable, binds);
                         let mut hs: Vec<HPat> = ftys.iter().map(|&t| self.pat(HPatKind::Wildcard, t, span)).collect();
                         for (i, h) in given {
                             hs[i as usize] = h;
@@ -418,14 +413,17 @@ impl Checker {
                     PatTarget::Struct(d, targs) => {
                         let def = &self.types[d as usize];
                         let names: Vec<Symbol> = def.fields().iter().map(|f| f.name).collect();
-                        let what = format!("`{}`", self.ctor_name(Ctor::Def(d), 0));
+                        let target_name = format!("`{}`", self.ctor_name(Ctor::Def(d), 0));
                         let ftys: Vec<TypeId> = (0..names.len()).map(|i| self.field_type(d, i, &targs)).collect();
                         let Some(args) = args else {
-                            self.error(span, format!("match the fields of {what} with `{}(..)`", self.name(self.types[d as usize].name)));
+                            self.error(
+                                span,
+                                format!("match the fields of {target_name} with `{}(..)`", self.name(self.types[d as usize].name)),
+                            );
                             return self.pat(HPatKind::Struct { fields: vec![] }, ty, span);
                         };
                         let is_private = move |c: &Self, i: usize| !c.field_visible(d, i);
-                        let fields = self.check_ctor_args(args, &ftys, Some(&names), &is_private, &what, span, mutable, binds);
+                        let fields = self.check_ctor_args(args, &ftys, Some(&names), &is_private, &target_name, span, mutable, binds);
                         self.pat(HPatKind::Struct { fields }, ty, span)
                     }
                 }

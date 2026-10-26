@@ -1,8 +1,4 @@
-//! Tests `T(...)` constructions and patterns against a model of field binding.
-//! Positional arguments give the first fields in declaration order. Named
-//! arguments give other fields in any order. `..base` and the defaults give
-//! the remaining fields. A construction evaluates the arguments in source
-//! order, then `..base`, then the defaults in declaration order.
+//! Property tests for `T(...)` struct construction and constructor patterns.
 
 use super::int;
 use proptest::prelude::*;
@@ -20,19 +16,13 @@ fn lit(v: i64) -> String {
     super::int_lit(v)
 }
 
-/// A struct of `int` fields, and a construction of it.
 #[derive(Clone, Debug)]
 struct Construction {
-    /// The default of each field, or `None`.
     defaults: Vec<Option<i64>>,
-    /// The value of each field. The construction uses only the values of the
-    /// fields that it gives.
     given: Vec<i64>,
-    /// The number of fields given positionally (a prefix of the fields).
     positional: usize,
-    /// The fields given by name, in source order.
+    /// Indices of fields passed by name, in source order.
     named: Vec<usize>,
-    /// The fields of `..base`, if the construction has `..base`.
     base: Option<Vec<i64>>,
 }
 
@@ -54,7 +44,7 @@ fn construction() -> impl Strategy<Value = Construction> {
 }
 
 impl Construction {
-    fn n(&self) -> usize {
+    fn arity(&self) -> usize {
         self.defaults.len()
     }
 
@@ -63,7 +53,7 @@ impl Construction {
     }
 
     fn source(&self) -> String {
-        let n = self.n();
+        let n = self.arity();
         let fields: Vec<String> = (0..n)
             .map(|i| match self.defaults[i] {
                 Some(d) => format!("f{i}: int = note({}, {})", 100 + i, lit(d)),
@@ -88,10 +78,9 @@ impl Construction {
         )
     }
 
-    /// The expected output, or the first field that the construction does
-    /// not give and that does not have a default.
+    /// Returns the expected stdout, or the index of the first missing required field.
     fn expected(&self) -> Result<String, usize> {
-        let n = self.n();
+        let n = self.arity();
         let mut values = Vec::new();
         let mut log: Vec<usize> = (0..self.positional).chain(self.named.iter().copied()).collect();
         if self.base.is_some() {
@@ -115,15 +104,12 @@ impl Construction {
     }
 }
 
-/// A sub-pattern of a constructor pattern.
 #[derive(Clone, Debug)]
 enum Sub {
     Bind,
-    /// A literal that matches if the field equals it.
     Lit(i64),
 }
 
-/// A value of a struct or a variant with `int` fields, and a pattern for it.
 #[derive(Clone, Debug)]
 struct Match {
     values: Vec<i64>,
@@ -154,7 +140,7 @@ fn matching() -> impl Strategy<Value = Match> {
 }
 
 impl Match {
-    fn n(&self) -> usize {
+    fn arity(&self) -> usize {
         self.values.len()
     }
 
@@ -170,7 +156,7 @@ impl Match {
     }
 
     fn source(&self) -> String {
-        let n = self.n();
+        let n = self.arity();
         let fields: Vec<String> = (0..n).map(|i| format!("f{i}: int")).collect();
         let values: Vec<String> = self.values.iter().map(|&v| lit(v)).collect();
         let mut subs: Vec<String> = (0..self.positional).map(|i| self.sub(i)).collect();
@@ -192,11 +178,10 @@ impl Match {
         )
     }
 
-    /// The expected output, or `None` if the pattern does not mention all
-    /// fields and does not end with `..`.
+    /// Returns the expected stdout, or `None` if the pattern omits fields without `..`.
     fn expected(&self) -> Option<String> {
         let mentioned = self.mentioned();
-        if !self.rest && mentioned.len() < self.n() {
+        if !self.rest && mentioned.len() < self.arity() {
             return None;
         }
         let matched = mentioned.iter().all(|&i| match self.subs[i] {

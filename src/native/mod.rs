@@ -159,7 +159,7 @@ const fn same_bytes(a: &str, b: &str) -> bool {
 /// pub struct Point {
 ///     /// Horizontal coordinate.
 ///     pub x: f64,
-///     /// Vertical coordinate (`0.0` if a construction omits it).
+///     /// Vertical coordinate (`0.0` if omitted in a construction).
 ///     #[sand(default)]
 ///     pub y: f64,
 ///     /// Number of moves applied to the point.
