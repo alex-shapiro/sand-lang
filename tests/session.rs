@@ -179,6 +179,21 @@ fn types_methods_and_extend_across_inputs() {
     assert_eq!(r.value("swap((1, 2))"), "(2, 1)");
 }
 
+/// Earlier inputs construct and decode a struct field by field, so a later
+/// `init` would not hold for all of its values.
+#[test]
+fn a_later_input_cannot_add_init() {
+    let mut r = Repl::new();
+    r.ok("import json\nstruct P { x: int }\nextend P {\n    fn get(self) -> int { self.x }\n}");
+    let msg = r.compile_error("extend P {\n    fn init(x: int) -> Result<P> { if x < 0 { Err(Error(\"neg\")) } else { Ok(P(x: x)) } }\n}");
+    assert!(msg.contains("`init` must be declared in the same input as `P`"), "{msg}");
+    r.ok(r#"let p: Result<P> = json.decode("{\"x\": -5}")"#);
+    assert_eq!(r.value("p"), "Ok(P(x: -5))");
+    // A type and its `init` in one input.
+    r.ok("struct Q { x: int }\nextend Q {\n    fn init(x: int) -> Q { Q(x: x + 1) }\n}");
+    assert_eq!(r.value("Q(1)"), "Q(x: 2)");
+}
+
 #[test]
 fn reflect_descriptions_from_type_parameters_across_inputs() {
     let mut r = Repl::new();

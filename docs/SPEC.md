@@ -3315,7 +3315,8 @@ between inputs.
   later inputs.
   Code checked earlier keeps referring to what it referred to then. Methods
   (`extend`) and impls (§4.9) of a later input likewise replace those of
-  earlier inputs with the same name or for the same type.
+  earlier inputs with the same name or for the same type. A later input cannot
+  add an `init` (§4.2) to a type of an earlier input.
 - A top-level variable's type must be inferred within the input that declares
   it.
 - An input that fails to compile has no effect. An input that fails with an

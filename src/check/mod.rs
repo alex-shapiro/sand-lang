@@ -579,14 +579,16 @@ pub struct Checker {
     /// The bindings of the inference variables of the module being checked
     /// (cleared when it is done: its types are all resolved by then).
     pub subst: Vec<Option<TypeId>>,
-    /// Derived implementations of `Eq`, `Ord`, `Hash`, and `Encode` for each
-    /// type definition (`derive.rs`).
+    /// Derived implementations of the built-in traits for each type
+    /// definition (`derive.rs`).
     pub(crate) derived: PVec<[derive::Derived; Builtin::ALL.len()]>,
     pub diags: Vec<Diag>,
     pub wk: WellKnown,
     pub prelude: Option<ModId>,
     pub task_mod: Option<ModId>,
     pub cur_mod: ModId,
+    /// The first type definition of the module or session input being checked.
+    pub(crate) first_type: usize,
     pub(crate) fs: FnState,
     pub lint: LintFacts,
     pub tests: Vec<(String, FnId)>,
@@ -661,6 +663,7 @@ impl Default for Checker {
             prelude: None,
             task_mod: None,
             cur_mod: 0,
+            first_type: 0,
             fs: FnState::default(),
             lint: LintFacts::default(),
             tests: Vec::new(),
@@ -1182,6 +1185,7 @@ impl Checker {
         let error_mark = self.diags.len();
         let first_fn = self.fns.len();
         let first_type = self.types.len();
+        self.first_type = first_type;
         let items = &pm.ast.items;
         // 1. Imports.
         for (idx, item) in items.iter().enumerate() {
@@ -2719,8 +2723,9 @@ impl Checker {
         self.methods.insert(key, ids.into());
     }
 
-    /// Checks that `init` method `id` of `ctor` constructs it: it is static and
-    /// returns `Self` or `Result<Self, E>`.
+    /// Checks that `init` method `id` of `ctor` constructs it: it is static,
+    /// returns `Self` or `Result<Self, E>`, and comes with the type, not with
+    /// a later session input.
     fn check_init_decl(&mut self, ctor: Ctor, name: &ast::Ident, id: FnId) {
         let f = &self.fns[id as usize];
         let (self_ty, ret) = (f.self_ty.unwrap_or(TypeId::ERROR), f.ret);
@@ -2728,6 +2733,12 @@ impl Checker {
             && self.types[d as usize].is_enum()
         {
             self.error(name.span, "an enum cannot declare `init`; its variants construct it");
+        } else if let Ctor::Def(d) = ctor
+            && (d as usize) < self.first_type
+        {
+            // Code checked earlier constructs and decodes the type field by field.
+            let ty = self.name(self.types[d as usize].name).to_string();
+            self.error(name.span, format!("`init` must be declared in the same input as `{ty}`"));
         } else if f.has_self {
             self.error(name.span, "`init` cannot take `self`; it constructs a new value");
         } else {
