@@ -64,6 +64,16 @@ let q = Point(y: 9.0, ..p)
 print(q)
 ```
 
+A type name used as a value is a function that takes all fields in order:
+
+```sand
+struct Tag {
+    name: str
+}
+
+print(["new", "sale"].map(Tag))
+```
+
 ## Methods
 
 Methods can be declared directly inside a `struct` or `enum` body. Functions taking `self` as their first parameter are instance methods (`v.len()`), and functions without `self` are static functions (`Vec2.zero()`):

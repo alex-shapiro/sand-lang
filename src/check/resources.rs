@@ -549,7 +549,7 @@ impl Ctx<'_> {
             | HKind::Global(_)
             | HKind::FnValue { .. }
             | HKind::TypeDesc { .. }
-            | HKind::VariantFn { .. }
+            | HKind::CtorFn { .. }
             | HKind::Tag(_)
             | HKind::Continue { .. }
             | HKind::Evidence(_)

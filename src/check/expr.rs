@@ -11,6 +11,14 @@ pub(crate) enum Ns {
     Trait(TraitId),
 }
 
+/// How `T(...)` constructs a value (see [`Checker::construct_target`]).
+enum Construct {
+    /// By calling this `init`.
+    Init(FnId),
+    /// Field by field, as this struct.
+    Fields(TypeDefId),
+}
+
 /// The arguments of a call, split into positional and named ones.
 #[derive(Clone, Default)]
 pub(crate) struct CallArgs<'e> {
@@ -717,10 +725,10 @@ impl Checker {
                     err(span)
                 }
             },
-            ExprKind::SelfType => {
-                self.error(span, "`Self` is a type, not a value");
-                err(span)
-            }
+            ExprKind::SelfType => match self.resolve_ns(e) {
+                Some(Ns::Type(t)) => self.construct_value(t, "Self", span),
+                _ => err(span),
+            },
             ExprKind::Paren(inner) => self.infer_inner(inner, hint, want),
             ExprKind::Macro(m) => self.infer_inner(&m.expansion, hint, want),
             ExprKind::ModuleRef(name) => {
@@ -1056,9 +1064,9 @@ impl Checker {
                 mk(HKind::Global(g), t, span)
             }
             Def::Variant(d, i) => self.variant_value(d, i, hint, span),
-            Def::Type(_) => {
-                self.error(span, format!("`{name}` is a type, not a value"));
-                err(span)
+            Def::Type(r) => {
+                let t = self.tyref_open(r, span, name);
+                self.construct_value(t, name, span)
             }
             Def::Module(_) => {
                 self.error(span, format!("`{name}` is a module, not a value"));
@@ -1132,10 +1140,7 @@ impl Checker {
             Some(Ty::Named(hd, args)) if hd == d => self.elems(args),
             _ => (0..self.types[d as usize].generics.len()).map(|_| self.fresh()).collect(),
         };
-        if self.types[d as usize].generics.iter().any(|&p| !self.params[p as usize].traits.is_empty()) {
-            let gens = self.types[d as usize].generics.clone();
-            self.require_traits(&gens, &args, &[], span);
-        }
+        self.require_struct_traits(d, &args, span);
         args
     }
 
@@ -1155,7 +1160,7 @@ impl Checker {
         } else {
             let arity = fields.len();
             let t = self.fn_ty(&fields, enum_ty);
-            mk(HKind::VariantFn { rt_id, arity }, t, span)
+            mk(HKind::CtorFn { made: Made::Variant(rt_id), arity }, t, span)
         }
     }
 
@@ -1982,52 +1987,39 @@ impl Checker {
         self.error(span, format!("`init` is not a member; construct a value with `{ty}(...)`"));
     }
 
-    /// Checks `T(args)`, which constructs a value of type `t` (written `name`):
-    /// a call of `T`'s `init` if it declares one, or else a struct built field
-    /// by field. Inside `init`, `T(args)` builds the struct field by field.
-    fn construct(&mut self, t: TypeId, name: &str, args: &CallArgs, name_span: Span, span: Span) -> HExpr {
-        let t = self.resolve(t);
-        let ty = self.ty(t);
+    /// How a value of type `t` (written `name`) is constructed: by the `init`
+    /// of `T`, or field by field if `T` is a struct without `init` or the
+    /// checker is inside its `init`. Reports an error if no value of `t` can
+    /// be constructed here.
+    fn construct_target(&mut self, t: TypeId, name: &str, name_span: Span) -> Option<Construct> {
+        let ty = self.rty(t);
         let c = match ty {
-            Ty::Error => {
-                self.infer_args(args);
-                return err(span);
-            }
+            Ty::Error => return None,
             Ty::Param(_) => None,
             _ => ctor_of(ty),
         };
         let Some(c) = c else {
             self.error(name_span, format!("cannot construct a value of type `{name}`"));
-            self.infer_args(args);
-            return err(span);
+            return None;
         };
         if self.fs.init_of != Some(c)
             && let Some(f) = self.init_method(c)
         {
             if !self.visible(self.fns[f as usize].module, self.fns[f as usize].is_pub) {
                 self.error(name_span, format!("the `init` of `{name}` is private"));
-                self.infer_args(args);
-                return err(span);
+                return None;
             }
-            if let Some(b) = args.base {
-                self.error(b.span, format!("`..base` cannot copy the fields of `{name}`, which declares `init`"));
-                self.infer(b, None);
-            }
-            let inst = self.instantiate_fn_with(f, span, &[]);
-            let fi = &self.fns[f as usize];
-            let (self_ty, generics) = (fi.self_ty.unwrap_or(TypeId::ERROR), fi.generics.clone());
-            let self_ty = self.arena.instantiate(self_ty, &generics, &inst.fresh);
-            if !self.try_unify_all(&[(self_ty, t)]) {
-                let msg = format!("the `init` of `{}` does not construct {}", self.show(self_ty), self.show(t));
-                self.error(name_span, msg);
-                self.infer_args(args);
-                return err(span);
-            }
-            let without_base = CallArgs { base: None, ..args.clone() };
-            return self.call_instance(f, inst, None, &without_base, span);
+            return Some(Construct::Init(f));
         }
         match c {
-            Ctor::Def(d) if self.types[d as usize].is_struct() => self.construct_fields(d, t, name, args, name_span, span),
+            Ctor::Def(d) if self.types[d as usize].is_struct() => {
+                if let Some(f) = self.hidden_field(d) {
+                    let msg = format!("cannot construct `{}` here: its field `{}` is private", self.ctor_name(c, 0), self.name(f.name));
+                    self.error(name_span, msg);
+                    return None;
+                }
+                Some(Construct::Fields(d))
+            }
             Ctor::Def(d) if self.types[d as usize].is_enum() => {
                 let def = &self.types[d as usize];
                 let example = match def.variants().first() {
@@ -2035,33 +2027,98 @@ impl Checker {
                     None => String::new(),
                 };
                 self.error(name_span, format!("`{name}` is an enum; construct one of its variants{example}"));
-                self.infer_args(args);
-                err(span)
+                None
             }
             _ => {
                 self.error(name_span, format!("`{name}` does not declare `init`, so `{name}(...)` cannot construct it"));
+                None
+            }
+        }
+    }
+
+    /// Unifies `t` with the type that `init` `f` constructs, given the
+    /// instance `ret` of its return type (`Self` or `Result<Self, E>`).
+    fn unify_init_result(&mut self, f: FnId, ret: TypeId, t: TypeId, name_span: Span) -> bool {
+        let fi = &self.fns[f as usize];
+        let made = match self.rty(ret) {
+            Ty::Named(r, args) if fi.ret != fi.self_ty.unwrap_or(TypeId::ERROR) && r == self.wk.result => self.arena.elem(args, 0),
+            _ => ret,
+        };
+        if self.try_unify_all(&[(made, t)]) {
+            return true;
+        }
+        let msg = format!("the `init` of `{}` does not construct {}", self.show(made), self.show(t));
+        self.error(name_span, msg);
+        false
+    }
+
+    /// Checks `T(args)`, which constructs a value of type `t` (written `name`)
+    /// (see [`Self::construct_target`]).
+    fn construct(&mut self, t: TypeId, name: &str, args: &CallArgs, name_span: Span, span: Span) -> HExpr {
+        match self.construct_target(t, name, name_span) {
+            Some(Construct::Init(f)) => {
+                if let Some(b) = args.base {
+                    self.error(b.span, format!("`..base` cannot copy the fields of `{name}`, which declares `init`"));
+                    self.infer(b, None);
+                }
+                let inst = self.instantiate_fn_with(f, span, &[]);
+                if !self.unify_init_result(f, inst.ret, t, name_span) {
+                    self.infer_args(args);
+                    return err(span);
+                }
+                let without_base = CallArgs { base: None, ..args.clone() };
+                self.call_instance(f, inst, None, &without_base, span)
+            }
+            Some(Construct::Fields(d)) => self.construct_fields(d, self.resolve(t), name, args, span),
+            None => {
                 self.infer_args(args);
                 err(span)
             }
         }
     }
 
+    /// `T` used as a value: a function that constructs a value of type `t`
+    /// (written `name`) as `T(...)` does, and takes all parameters of `init`
+    /// or all fields.
+    fn construct_value(&mut self, t: TypeId, name: &str, span: Span) -> HExpr {
+        match self.construct_target(t, name, span) {
+            Some(Construct::Init(f)) => {
+                let v = self.fn_value(f, span);
+                let Ty::Fn(_, ret) = self.ty(v.ty) else { return err(span) };
+                if !self.unify_init_result(f, ret, t, span) {
+                    return err(span);
+                }
+                v
+            }
+            Some(Construct::Fields(d)) => {
+                let t = self.resolve(t);
+                let Ty::Named(_, targs) = self.ty(t) else { unreachable!() };
+                let targs = self.elems(targs);
+                self.require_struct_traits(d, &targs, span);
+                let ftys: Vec<TypeId> = (0..self.types[d as usize].fields().len()).map(|i| self.field_type(d, i, &targs)).collect();
+                let fty = self.fn_ty(&ftys, t);
+                mk(HKind::CtorFn { made: Made::Struct(d), arity: ftys.len() }, fty, span)
+            }
+            None => err(span),
+        }
+    }
+
+    /// Checks the traits that the type parameters of struct `d` require of
+    /// `targs`.
+    fn require_struct_traits(&mut self, d: TypeDefId, targs: &[TypeId], span: Span) {
+        if self.types[d as usize].generics.iter().any(|&p| !self.params[p as usize].traits.is_empty()) {
+            let gens = self.types[d as usize].generics.clone();
+            self.require_traits(&gens, targs, &[], span);
+        }
+    }
+
     /// Builds struct `d` of type `t` from the fields given as arguments, the
     /// fields of `..base`, and field defaults. Arguments are evaluated in
     /// source order, then `..base`, then the defaults in declaration order.
-    fn construct_fields(&mut self, d: TypeDefId, t: TypeId, name: &str, args: &CallArgs, name_span: Span, span: Span) -> HExpr {
-        if let Some(f) = self.hidden_field(d) {
-            let msg = format!("cannot construct `{}` here: its field `{}` is private", self.ctor_name(Ctor::Def(d), 0), self.name(f.name));
-            self.error(name_span, msg);
-            self.infer_args(args);
-            return err(span);
-        }
+    fn construct_fields(&mut self, d: TypeDefId, t: TypeId, name: &str, args: &CallArgs, span: Span) -> HExpr {
         let Ty::Named(_, targs) = self.ty(t) else { unreachable!() };
         let targs = self.elems(targs);
-        if self.types[d as usize].generics.iter().any(|&p| !self.params[p as usize].traits.is_empty()) {
-            let gens = self.types[d as usize].generics.clone();
-            self.require_traits(&gens, &targs, &[], span);
-        }
+        self.require_struct_traits(d, &targs, span);
         let n = self.types[d as usize].fields().len();
         if args.positional.len() > n {
             let plural = if n == 1 { "" } else { "s" };

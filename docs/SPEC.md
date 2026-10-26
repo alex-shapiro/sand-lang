@@ -836,6 +836,11 @@ declaration order, then named arguments. Every field without a default must be
 given, unless a last argument `..base` gives the remaining fields. Only a
 construction field by field accepts `..base`.
 
+A type used as a value is a function that constructs a value as `T(args)`
+does. It takes all parameters of `init`, or else all fields in declaration
+order; defaults do not apply. A variant with a payload is a function value in
+the same way: `names.map(Name)`, `lists.map(Set)`, `xs.map(Some)`.
+
 ### 6.5 Operators
 
 **Arithmetic** `+ - * / % **` and unary `-` require both operands to have the

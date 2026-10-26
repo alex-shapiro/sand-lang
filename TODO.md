@@ -96,6 +96,11 @@ Follow-up work, roughly in priority order.
       `//r /\nf.7\t.// \n7/e\nf.//as\nf` on each run (found by the `fmt`
       fuzz target).
 
+- [ ] Break long patterns over lines as calls are (`sand fmt` keeps
+      `Alpha(first_long_field_name: aaaa, second_long_field_name: bbbb, ...)`
+      on one line beyond the line width). `Formatter::pat` joins sub-patterns
+      with `, ` instead of using `comma_list`.
+
 - [ ] Fix broken intra-doc links to private items and run `cargo doc` with
       `-D warnings` in CI.
 - [ ] Compare `http` policy rules with wildcards in hosts or paths using the
@@ -166,9 +171,10 @@ Follow-up work, roughly in priority order.
       and cattrs call constructors), so that such structs implement `Decode`.
       The decoder hashes set elements and map keys before it runs deferred
       Sand calls, so `init` must run before a decoded value enters a set or map.
-- [ ] Allow a type name as a constructor function value (`names.map(Error)`),
-      as variants already are (`[1, 2].map(Token.Num)`). Function values take
-      positional arguments only, so the value cannot use field defaults.
+- [ ] Let function types carry parameter defaults, so that a function value
+      of `fn error(message: str, kind: str = "error")` or of a type
+      (`names.map(Error)`) can omit them. Function values now take all
+      parameters, and `["a"].map(Error)` is a type error.
 - [ ] Reject `import` statements after non-import items or statements, as
       specified in §3.1.
 - [ ] Support trait objects (`dyn Trait`), associated types and constants, and

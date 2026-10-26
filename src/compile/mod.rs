@@ -59,7 +59,7 @@ struct Compiler<'a> {
     fn_protos: PVec<Option<u32>>,
     /// The constants made so far, to share them.
     consts: ConstTable,
-    variant_wrappers: PMap<u32, u32>,
+    ctor_wrappers: PMap<Made, u32>,
     /// Constant trait dictionaries by their elements.
     dict_consts: PMap<Vec<u32>, u32>,
     /// Shared type descriptions of `reflect` type arguments.
@@ -255,7 +255,7 @@ pub(crate) struct Incremental {
     fn_protos: PVec<Option<u32>>,
     /// The constants made so far, to share them.
     consts: ConstTable,
-    variant_wrappers: PMap<u32, u32>,
+    ctor_wrappers: PMap<Made, u32>,
     dict_consts: PMap<Vec<u32>, u32>,
     descs: reflect::DescCache,
     /// Number of tests compiled.
@@ -351,7 +351,7 @@ pub(crate) fn compile_more(mut input: CompileInput, prog: &mut Program, inc: &mu
         prog,
         fn_protos: std::mem::take(&mut inc.fn_protos),
         consts: std::mem::take(&mut inc.consts),
-        variant_wrappers: std::mem::take(&mut inc.variant_wrappers),
+        ctor_wrappers: std::mem::take(&mut inc.ctor_wrappers),
         dict_consts: std::mem::take(&mut inc.dict_consts),
         descs: std::mem::take(&mut inc.descs),
         errors: Vec::new(),
@@ -364,7 +364,7 @@ pub(crate) fn compile_more(mut input: CompileInput, prog: &mut Program, inc: &mu
     let entry = c.compile_new(input, inits, &mut inc.tests);
     inc.fn_protos = c.fn_protos;
     inc.consts = c.consts;
-    inc.variant_wrappers = c.variant_wrappers;
+    inc.ctor_wrappers = c.ctor_wrappers;
     inc.dict_consts = c.dict_consts;
     inc.descs = c.descs;
     if c.errors.is_empty() { Ok(entry) } else { Err(c.errors) }
@@ -1723,8 +1723,8 @@ impl<'a> Compiler<'a> {
                 self.mv(f, dst, base);
                 f.next_reg = mark;
             }
-            HKind::VariantFn { rt_id, arity } => {
-                let p = self.variant_wrapper(*rt_id, *arity, f.file);
+            HKind::CtorFn { made, arity } => {
+                let p = self.ctor_wrapper(*made, *arity, f.file);
                 let k = self.const_idx(Const::Fn(p));
                 self.emit(f, Op::LoadConst { dst, k });
             }
@@ -2832,22 +2832,27 @@ impl<'a> Compiler<'a> {
         vec![self.emit(f, Op::JNotVariant { src, variant, off: 0 })]
     }
 
-    fn variant_wrapper(&mut self, rt: u32, arity: usize, file: u32) -> u32 {
-        if let Some(&p) = self.variant_wrappers.get(&rt) {
+    fn ctor_wrapper(&mut self, made: Made, arity: usize, file: u32) -> u32 {
+        if let Some(&p) = self.ctor_wrappers.get(&made) {
             return p;
         }
-        if rt > u16::MAX as u32 || arity >= MAX_REGS as usize {
-            self.errors.push(Diag::error(Span::new(file, 0, 0), "too many enum variants or fields in program"));
+        let (id, name) = match made {
+            Made::Variant(rt) => (rt, self.prog.variants.get(rt as usize).map(|v| v.name.clone())),
+            Made::Struct(d) => (d, self.prog.types.get(d as usize).map(|t| t.name.clone())),
+        };
+        if id > u16::MAX as u32 || arity >= MAX_REGS as usize {
+            self.errors.push(Diag::error(Span::new(file, 0, 0), "too many types, enum variants or fields in program"));
             return 0;
         }
-        let name = self.prog.variants.get(rt as usize).map(|v| v.name.clone()).unwrap_or_default();
-        let code = match arity {
-            1 => vec![Op::RetVariant { src: 0, variant: rt as u16 }],
-            _ => vec![Op::NewVariant { dst: arity as Reg, start: 0, variant: rt as u16 }, Op::Ret { src: arity as Reg }],
+        let (dst, id) = (arity as Reg, id as u16);
+        let code = match made {
+            Made::Variant(_) if arity == 1 => vec![Op::RetVariant { src: 0, variant: id }],
+            Made::Variant(_) => vec![Op::NewVariant { dst, start: 0, variant: id }, Op::Ret { src: dst }],
+            Made::Struct(_) => vec![Op::NewStruct { dst, start: 0, def: id }, Op::Ret { src: dst }],
         };
         let p = self.prog.protos.len() as u32;
         self.prog.protos.push(Proto {
-            name: name.clone(),
+            name: name.unwrap_or_default(),
             file,
             nparams: arity as u16,
             nregs: arity as u16 + 1,
@@ -2858,7 +2863,7 @@ impl<'a> Compiler<'a> {
             sites: Vec::new(),
             inlined: Vec::new(),
         });
-        self.variant_wrappers.insert(rt, p);
+        self.ctor_wrappers.insert(made, p);
         p
     }
 

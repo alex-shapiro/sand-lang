@@ -128,6 +128,7 @@ pub fn open(owner: str) -> Account { Account(owner) }
 === structs with private fields cannot be built in other modules
 import "./account.sand"
 let a = account.Account(owner: "ann", balance: 1)
+let f = account.Account
 --- file account.sand
 pub struct Account {
     pub owner: str
@@ -135,6 +136,7 @@ pub struct Account {
 }
 --- error
 2: cannot construct `account.Account` here: its field `balance` is private
+3: cannot construct `account.Account` here: its field `balance` is private
 
 === private fields cannot be matched in other modules
 import "./account.sand"
@@ -368,6 +370,7 @@ print(convert(pi.round(), from, "y"))
 import "./port.sand"
 print(port.Port(80))
 print(port.open(80))
+let f = port.Port
 --- file port.sand
 pub struct Port {
     pub n: int
@@ -376,11 +379,13 @@ pub struct Port {
 pub fn open(n: int) -> Port { Port(n) }
 --- error
 2: the `init` of `Port` is private
+4: the `init` of `Port` is private
 
 === a public init constructs a type with private fields in other modules
 import "./port.sand"
 print(port.Port(80))
 let port.Port(..) = port.Port(81)
+print([82].map(port.Port))
 --- file port.sand
 pub struct Port {
     n: int
@@ -388,3 +393,4 @@ pub struct Port {
 }
 --- stdout
 Port(n: 80)
+[Port(n: 82)]

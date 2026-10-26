@@ -380,6 +380,58 @@ let b = A(x: 1, ..A(2))
 6: `init` is not a member; construct a value with `A(...)`
 7: `..base` cannot copy the fields of `A`, which declares `init`
 
+=== a type used as a value is its constructor
+import regex
+struct W {
+    v: int
+    fn all(vs: [int]) -> [W] { vs.map(Self) }
+}
+struct P { x: int, y: int = 0 }
+struct Port {
+    n: int
+    fn init(n: int) -> Result<Port> {
+        if n < 1 { return Err(Error("bad")) }
+        let make: fn(int) -> Port = Port
+        Ok(make(n))
+    }
+}
+struct Pair<T> {
+    a: T
+    b: T
+    fn init(both: T) -> Self { Self(a: both, b: both) }
+}
+type Ints = Pair<int>
+print([1, 2].map(W))
+print(W.all([3]))
+let p: fn(int, int) -> P = P
+print(p(1, 2))
+print([0, 80].map(Port))
+print([[1, 1, 2]].map(Set))
+print(["a+", "("].map(regex.Regex).map(r => r.is_ok()))
+print(["x"].map(Pair))
+let f: fn(int) -> Pair<int> = Ints
+print(f(3))
+--- stdout
+[W(v: 1), W(v: 2)]
+[W(v: 3)]
+P(x: 1, y: 2)
+[Err(Error(message: "bad", kind: "error")), Ok(Port(n: 80))]
+[Set([1, 2])]
+[true, false]
+[Pair(a: "x", b: "x")]
+Pair(a: 3, b: 3)
+
+=== a type that cannot be constructed is not a value
+enum Shape { Circle(float), Empty }
+let s = Shape
+let i = int
+let x: fn(int) -> Pair<str> = Pair
+struct Pair<T> { a: T, b: T }
+--- error
+2: `Shape` is an enum; construct one of its variants, such as `Shape.Circle`
+3: `int` does not declare `init`
+4: type mismatch
+
 === only structs and types with init can be constructed
 enum Shape { Circle(float), Empty }
 fn make<T>() -> T { T() }

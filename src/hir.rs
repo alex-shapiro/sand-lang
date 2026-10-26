@@ -149,6 +149,14 @@ pub struct HLambda {
     pub self_local: Option<LocalId>,
 }
 
+/// What a constructor function value ([`HKind::CtorFn`]) builds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Made {
+    /// The variant with this runtime id.
+    Variant(u32),
+    Struct(TypeDefId),
+}
+
 #[derive(Clone, Debug)]
 pub enum HKind {
     Unit,
@@ -166,9 +174,10 @@ pub enum HKind {
         func: FnId,
         targs: Vec<TypeId>,
     },
-    /// A variant constructor used as a function value.
-    VariantFn {
-        rt_id: u32,
+    /// A variant, or a struct built field by field, used as a function value
+    /// that takes its `arity` fields.
+    CtorFn {
+        made: Made,
         arity: usize,
     },
     /// A payload-less variant.
@@ -556,7 +565,7 @@ impl HExpr {
             | HKind::Bytes(_)
             | HKind::Local(_)
             | HKind::Global(_)
-            | HKind::VariantFn { .. }
+            | HKind::CtorFn { .. }
             | HKind::Tag(_)
             | HKind::Continue { .. }
             | HKind::Evidence(_)

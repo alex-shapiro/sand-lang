@@ -538,7 +538,7 @@ impl<'a> Verifier<'a> {
             }
             HKind::FnValue { func, targs } => self.check_fn_instance(cx, *func, targs, None),
             HKind::MakeStruct { .. } | HKind::MakeVariant { .. } | HKind::Tag(_) => self.check_type_args(cx, e.ty),
-            HKind::VariantFn { .. } => match self.arena.get(e.ty) {
+            HKind::CtorFn { .. } => match self.arena.get(e.ty) {
                 Ty::Fn(_, ret) => self.check_type_args(cx, ret),
                 _ => Ok(()),
             },
