@@ -895,14 +895,8 @@ impl Checker {
             params.push(l);
             args.push(HArg::Expr(mk(HKind::Local(l), t, span)));
         }
-        let fi = &self.fns[f as usize];
-        let kind = match fi.kind {
-            FnKind::TraitMethod(trait_id, slot) => HKind::CallTrait { trait_id, slot, targs: inst.fresh, args, impl_id: None },
-            FnKind::Native(native) => HKind::CallNative { native, targs: inst.fresh, args },
-            _ => HKind::Call { func: f, targs: inst.fresh, args },
-        };
-        let name = self.name(fi.name).to_string();
-        let body = mk(kind, inst.ret, span);
+        let name = self.name(self.fns[f as usize].name).to_string();
+        let body = mk(self.call_kind(f, inst.fresh, args), inst.ret, span);
         let lam = HLambda { id, name, params, body, self_local: None };
         let fty = self.fn_ty(&inst.params, inst.ret);
         mk(HKind::Lambda(Box::new(lam)), fty, span)

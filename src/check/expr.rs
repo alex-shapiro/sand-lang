@@ -1556,12 +1556,17 @@ impl Checker {
             hidden.extend(hargs);
             hargs = hidden;
         }
+        mk(self.call_kind(f, fresh, hargs), ret, span)
+    }
+
+    /// A call of `f` with type arguments `targs` and all arguments `args`
+    /// (hidden ones first): through a trait dictionary, to a native, or to a
+    /// script function.
+    pub(crate) fn call_kind(&self, f: FnId, targs: Vec<TypeId>, args: Vec<HArg>) -> HKind {
         match self.fns[f as usize].kind {
-            FnKind::TraitMethod(trait_id, slot) => {
-                mk(HKind::CallTrait { trait_id, slot, targs: fresh, args: hargs, impl_id: None }, ret, span)
-            }
-            FnKind::Native(n) => mk(HKind::CallNative { native: n, targs: fresh, args: hargs }, ret, span),
-            _ => mk(HKind::Call { func: f, targs: fresh, args: hargs }, ret, span),
+            FnKind::TraitMethod(trait_id, slot) => HKind::CallTrait { trait_id, slot, targs, args, impl_id: None },
+            FnKind::Native(native) => HKind::CallNative { native, targs, args },
+            _ => HKind::Call { func: f, targs, args },
         }
     }
 

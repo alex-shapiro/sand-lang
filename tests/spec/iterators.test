@@ -428,6 +428,19 @@ print((t, (0..4).map(i => i * i), (0..10).filter(i => i % 4 == 0)))
 [3, 1, 0, 1, 0]
 (10, [0, 1, 4, 9], [0, 4, 8])
 
+=== native functions passed to fused pipelines
+import base64
+let xs = ["aGk=", "!"]
+print(xs.map(base64.decode))
+print(xs.iter().map(base64.decode).filter(r => r.is_ok()).count())
+print(["a", "b"].map(str.to_upper))
+print((-1..1).map(int.abs))
+--- stdout
+[Ok(b"hi"), Err(Error(message: "invalid base64: incorrect length or padding", kind: "parse"))]
+1
+["A", "B"]
+[1, 0]
+
 === skip and step_by stop if source is exhausted
 let skipped = [1, 2].iter().skip(4611686018427387904)
 let stepped = [1, 2, 3].iter().step_by(4611686018427387904)

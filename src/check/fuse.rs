@@ -360,7 +360,7 @@ impl Checker {
     fn apply(&mut self, f: Func, args: Vec<HExpr>, ret: TypeId, span: Span) -> HExpr {
         match f {
             Func::Tmp(l) => self.call_local(l, args, ret, span),
-            Func::Fn(func, targs) => mk(HKind::Call { func, targs, args: args.into_iter().map(HArg::Expr).collect() }, ret, span),
+            Func::Fn(func, targs) => mk(self.call_kind(func, targs, args.into_iter().map(HArg::Expr).collect()), ret, span),
             Func::Inline(lam) => {
                 let lam = *lam;
                 let mut stmts: Vec<HExpr> = lam.params.iter().zip(args).map(|(&p, a)| let_(p, a.ty, a, span)).collect();
