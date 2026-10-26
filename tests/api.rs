@@ -1253,7 +1253,7 @@ help(draw.Figure)
     let (r, out, _) = run_src(Config::new().module(draw_module()), src);
     r.unwrap();
     let help = "enum draw.Figure\n\nA figure in the plane.\n\nVariants:\n    Empty\n        Nothing at all.\n    Circle(float)\n        A circle with its radius.\n    Rect(w: float, h: float)\n        A rectangle.\n    Labeled(str, Figure)\n        A figure with a label.\n    Group([Figure])\n        Several figures.\n\nImplements:\n    Eq\n    Ord\n    Encode\n    Decode\n";
-    assert_eq!(out, format!("9.0\ntrue\nLabeled(\"square\", Rect(2.0, 2.0))\nsquare: 2.0 by 2.0\n12.0\n{help}"));
+    assert_eq!(out, format!("9.0\ntrue\nLabeled(\"square\", Rect(w: 2.0, h: 2.0))\nsquare: 2.0 by 2.0\n12.0\n{help}"));
 }
 
 #[test]
@@ -1383,7 +1383,7 @@ help(cons.Chain)
     let (r, out, _) = run_src(Config::new().module(m), src);
     r.unwrap();
     let help = "enum cons.Chain<T>\n\nA generic recursive enum whose named payload has a renamed field.\n\nVariants:\n    End\n    Link(item: T, next: Chain<T>)\n\nImplements:\n    Eq where T: Eq\n    Ord where T: Ord\n    Hash where T: Hash\n    Encode where T: Encode\n    Decode where T: Decode\n";
-    assert_eq!(out, format!("Link(\"w1\", Link(\"w0\", End))\nw1\n9\n{help}"));
+    assert_eq!(out, format!("Link(item: \"w1\", next: Link(item: \"w0\", next: End))\nw1\n9\n{help}"));
 }
 
 #[test]
@@ -1626,7 +1626,7 @@ fn rust_field_defaults_can_be_any_constant() {
     r.unwrap();
     assert_eq!(
         out,
-        "Empty\nSketch(figure: Empty, backdrop: None, frame: Some(Labeled(\"a\\\"b\", Rect(1.0, -2.0))), layers: Some(2), \
+        "Empty\nSketch(figure: Empty, backdrop: None, frame: Some(Labeled(\"a\\\"b\", Rect(w: 1.0, h: -2.0))), layers: Some(2), \
          parts: [Circle(1.0), Group([])], pair: (3, \"x\"), flags: [2: [true]], border: Frame(width: 2.0, labels: [\"l\"]), \
          seen: Set([\"a\", \"b\"]), none: Set([]))\n\
          true\ntrue\nFrame(width: 1.5, labels: [])\ntrue\nstruct draw.Sketch\n\nFields:\n    figure: Figure = Figure.Empty\n    \

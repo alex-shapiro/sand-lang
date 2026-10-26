@@ -216,7 +216,7 @@ enum Shape { Dot, Circle(radius: float), Line(int, int) }
 let shapes: [Shape] = json.decode(r#"["Dot", {"Circle": {"radius": 2}}, {"Line": [1, 2]}]"#)?
 print(shapes)
 --- stdout
-[Dot, Circle(2.0), Line(1, 2)]
+[Dot, Circle(radius: 2.0), Line(1, 2)]
 
 === decode requires a known type
 import json
@@ -571,7 +571,7 @@ let c: Config = json.decode("{\"size\": [1, 2]}")?
 print(c)
 print(c == Config(size: (1, 2)))
 --- stdout
-Config(server: Server(host: "localhost", port: 80, routes: ["a": [1, 2]]), backup: Server(host: "localhost", port: 81, routes: ["a": [1, 2]]), shapes: [Rect(1.0, 2.0), Dot], size: (1, 2), late: Late(n: 3, m: Some(("x", true))), tags: Set(["b", "a"]))
+Config(server: Server(host: "localhost", port: 80, routes: ["a": [1, 2]]), backup: Server(host: "localhost", port: 81, routes: ["a": [1, 2]]), shapes: [Rect(w: 1.0, h: 2.0), Dot], size: (1, 2), late: Late(n: 3, m: Some(("x", true))), tags: Set(["b", "a"]))
 true
 
 === decode runs the defaults that are not constants, as a construction does
@@ -683,7 +683,7 @@ print(n)
 [P(x: 1, tag: "t2"), P(x: 2, tag: "t2")]
 Err(Error(message: "$.items[0]: missing field `x`", kind: "parse"))
 (1, ["k": P(x: 5, tag: "t2")], Set([2]))
-Named("n", P(x: 9, tag: "t2"))
+Named(label: "n", value: P(x: 9, tag: "t2"))
 Err(Error(message: "$: unknown variant `Other` of Shape<[P]>", kind: "parse"))
 Tree(value: "a", kids: [Tree(value: "b", kids: [Tree(value: "c", kids: [])])])
 Ok(Some(P(x: 7, tag: "t2")))

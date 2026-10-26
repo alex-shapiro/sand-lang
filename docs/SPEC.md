@@ -1351,6 +1351,7 @@ system's open-file limit is reached.
 | `Error`                             | `<kind>: <message>`                 | `Error(message: "...", kind: "...")`                                            |
 | function                            | `<fn name>`                         | same                                                                            |
 | task / channel                      | `<task>` / `<channel>`              | same                                                                            |
+| `Shape.Rect(w: 1.0, h: 2.0)`        | `Rect(w: 1.0, h: 2.0)`              | same                                                                            |
 | `0..3`                              | `0..3`                              | same                                                                            |
 | `time.PlainDate(2024, 2, 29)?`      | `2024-02-29`                        | same                                                                            |
 | other opaque value                  | `<Regex>`                           | same                                                                            |

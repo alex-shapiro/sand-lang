@@ -19,7 +19,7 @@ print(Shape.Rect(w: 1.0, h: 2.0))
 3.0
 6.0
 0.0
-Rect(1.0, 2.0)
+Rect(w: 1.0, h: 2.0)
 
 === enum methods
 enum Dir {
