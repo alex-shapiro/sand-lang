@@ -1376,6 +1376,9 @@ impl Checker {
     /// How a callee is named in diagnostics.
     fn callee_what(&self, c: Callee) -> String {
         match c {
+            Callee::Fn(f) if let Some(owner) = self.fns[f as usize].owner.filter(|_| self.is_init(f)) => {
+                format!("`{}`", self.ctor_name(owner, 0))
+            }
             Callee::Fn(f) => format!("`{}`", self.name(self.fns[f as usize].name)),
             Callee::Variant(d, i) => format!("`{}`", self.name(self.types[d as usize].variants()[i as usize].name)),
             Callee::Value => "function".into(),
@@ -1426,7 +1429,12 @@ impl Checker {
         // Order of evaluation: positional, then named in source order.
         let mut out_of_order = false;
         let mut last_idx = 0usize;
-        if self.linting() && !matches!(callee, Callee::Value) {
+        let construction = match callee {
+            Callee::Fn(f) => self.is_init(f),
+            Callee::Variant(..) => true,
+            Callee::Value => false,
+        };
+        if self.linting() && construction {
             let names: Vec<String> = (offset..n).filter_map(|i| self.param_name(callee, i).map(str::to_string)).collect();
             let names: Vec<&str> = names.iter().map(String::as_str).collect();
             let what = self.callee_what(callee);
@@ -1980,6 +1988,11 @@ impl Checker {
     /// The `init` of type constructor `c`, if it declares one.
     pub(crate) fn init_method(&self, c: Ctor) -> Option<FnId> {
         self.methods_named(c, "init")?.iter().copied().find(|&f| !self.fns[f as usize].has_self)
+    }
+
+    /// Whether `f` is the `init` of a type, which only `T(...)` calls.
+    fn is_init(&self, f: FnId) -> bool {
+        self.fns[f as usize].owner.is_some_and(|c| self.init_method(c) == Some(f))
     }
 
     fn init_not_member(&mut self, t: TypeId, span: Span) {

@@ -647,25 +647,34 @@ fn info(path: str) -> Result<Info> {
 print(info("i.txt")?)
 --- lint
 
-=== arguments named like another parameter or field
+=== construction arguments named like another field
 struct Rect { w: int, h: int }
+struct Size {
+    w: int
+    h: int
+    fn init(w: int, h: int) -> Size { Self(w: w, h: h) }
+}
+enum Shape { Box(w: int, h: int) }
 fn area(w: int, h: int) -> int { w * h }
 let w = 2
 let h = 3
 print(area(h, w))
 print(Rect(h, w))
 print(Rect(w, h))
-print(area(w, h: h))
+print(Size(h, w))
+print(Shape.Box(h, w))
 let Rect(h2, w2) = Rect(w: 1, h: 2)
 match Rect(w: 1, h: 2) {
     Rect(h, ..) => print(h)
 }
 print(h2 + w2)
 // lint: allow(argument-order)
-print(area(h, w))
+print(Rect(h, w))
 --- lint
-5: argument-order
-5: argument-order
-6: argument-order
-6: argument-order
-11: argument-order
+12: argument-order
+12: argument-order
+14: argument-order
+14: argument-order
+15: argument-order
+15: argument-order
+18: argument-order
