@@ -113,11 +113,11 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
             // First the destinations that only rules for all of the rule's
             // hosts match, then those that net rules that allow name.
             let found = bypass(url.host.clone()).or_else(|| {
-                let reach = paths.opposed(r, copies).filter_map(|k| match k.scope {
+                let mut reach = paths.opposed(r, copies).filter_map(|k| match k.scope {
                     Scope::Http { host, net: true, .. } => url.host.intersection(host),
                     _ => None,
                 });
-                reach.into_iter().find_map(&mut bypass)
+                reach.find_map(&mut bypass)
             });
             if let Some((j, reach)) = found {
                 warn(i, "bypassable-http-deny", format!("{} lets scripts connect to {reach} and send any request", describe(j)));
