@@ -111,8 +111,6 @@ Follow-up work, roughly in priority order.
       `allow read /r/hN`, 5,000 `deny /r/*/aN` and `allow read /r`, `sand
       lint` takes 5 s, because it compares each narrow rule with each deny
       rule.
-- [ ] Stop `sand lint` (and other commands that print) from panicking when
-      stdout closes early (`sand lint a.policy | head`).
 
 ### Diagnostics
 

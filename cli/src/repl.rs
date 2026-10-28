@@ -77,7 +77,7 @@ pub(crate) fn cmd_repl(args: &[String]) -> Result<u8, String> {
         Reader::Plain(LineReader::new())
     };
     let mut io = Io { reader, feed, ended: false };
-    println!("sand {} — help() for documentation, :help for the REPL's commands, :quit to exit", env!("CARGO_PKG_VERSION"));
+    outln!("sand {} — help() for documentation, :help for the REPL's commands, :quit to exit", env!("CARGO_PKG_VERSION"));
     Ok(rt.block_on(repl(&mut session, &screen, &mut io)))
 }
 
@@ -124,7 +124,7 @@ async fn repl(session: &mut Session, screen: &Screen, io: &mut Io) -> u8 {
             Got::Line(line) => line,
             Got::Interrupt { discarded } => {
                 if io.reader.echoes_interrupt() {
-                    println!();
+                    outln!();
                 }
                 if input.is_empty() && !discarded {
                     match session.cancel_tasks() {
@@ -139,7 +139,7 @@ async fn repl(session: &mut Session, screen: &Screen, io: &mut Io) -> u8 {
             Got::End => {
                 // End of input: run what was entered.
                 if !input.trim().is_empty() {
-                    println!();
+                    outln!();
                     io.ended = true;
                     eval(session, io, &input).await;
                 }
@@ -155,14 +155,14 @@ async fn repl(session: &mut Session, screen: &Screen, io: &mut Io) -> u8 {
                 let (name, arg) = command.split_once(char::is_whitespace).unwrap_or((command, ""));
                 match name {
                     "quit" | "q" => break,
-                    "help" | "h" => print!("{REPL_HELP}"),
+                    "help" | "h" => out!("{REPL_HELP}"),
                     "reset" => session.reset(),
                     "type" | "t" => match session.type_of(arg.trim()) {
-                        Ok(t) => println!("{t}"),
+                        Ok(t) => outln!("{t}"),
                         Err(e) => eprint!("{}", e.render()),
                     },
                     "test" => match foreground(session.interrupt_handle(), io, session.run_tests()).await {
-                        Ok(report) => print!("{}", report.render()),
+                        Ok(report) => out!("{}", report.render()),
                         Err(e) => eprint!("{}", e.render()),
                     },
                     _ => eprintln!("unknown command `:{name}` (:help lists the commands)"),
@@ -186,7 +186,7 @@ async fn repl(session: &mut Session, screen: &Screen, io: &mut Io) -> u8 {
 async fn eval(session: &mut Session, io: &mut Io, input: &str) {
     let handle = session.interrupt_handle();
     match foreground(handle, io, session.eval(input)).await {
-        Ok(Some(value)) => println!("{value}"),
+        Ok(Some(value)) => outln!("{value}"),
         Ok(None) => {}
         Err(e) => eprint!("{}", e.render()),
     }

@@ -432,6 +432,58 @@ fn lint_command() {
     assert!(o.stderr.contains("unknown option `--allow-warning`"), "{o:?}");
 }
 
+/// A reader that stops early (`sand lint x.policy | head -1`) ends the
+/// output without a panic.
+#[test]
+fn output_stops_quietly_when_stdout_closes() {
+    let dir = TempDir::new("lint-pipe");
+    let rules: String = (0..20_000).map(|i| format!("allow net h{i}.example.com\n")).collect();
+    dir.write("big.policy", &format!("allow net *\n{rules}"));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sand"))
+        .args(["lint", "big.policy"])
+        .current_dir(dir.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut first = [0u8; 16];
+    child.stdout.take().unwrap().read_exact(&mut first).unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!((out.status.code(), stderr.as_ref()), (Some(1), ""));
+    // The REPL, reading from a pipe.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sand"))
+        .arg("repl")
+        .current_dir(dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let line = format!("\"{}\"\n", "x".repeat(200));
+    let mut stdin = child.stdin.take().unwrap();
+    let writer = std::thread::spawn(move || {
+        let _ = stdin.write_all(line.repeat(3000).as_bytes());
+    });
+    child.stdout.take().unwrap().read_exact(&mut first).unwrap();
+    let out = child.wait_with_output().unwrap();
+    writer.join().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!((out.status.code(), stderr.as_ref()), (Some(0), ""));
+}
+
+/// An error other than a closed pipe is reported, and the status is 2.
+/// (Rust ignores `EBADF` on standard output, and macOS has no `/dev/full`.)
+#[cfg(target_os = "linux")]
+#[test]
+fn output_errors_are_reported() {
+    let full = std::fs::OpenOptions::new().write(true).open("/dev/full").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_sand")).arg("--version").stdout(full).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(stderr.starts_with("sand: cannot write to standard output: "), "{stderr}");
+}
+
 #[test]
 fn fmt_command() {
     let dir = TempDir::new("fmt");
