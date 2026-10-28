@@ -173,7 +173,8 @@ impl NetPattern {
         if let IpAddr::V4(net) = net {
             v4.push((net, len));
         }
-        if [IpAddr::V4(Ipv4Addr::LOCALHOST), IpAddr::V6(Ipv6Addr::LOCALHOST)].into_iter().any(|ip| self.kind.matches_ip(ip)) {
+        let local = [Ipv4Addr::UNSPECIFIED.into(), Ipv6Addr::UNSPECIFIED.into(), Ipv4Addr::LOCALHOST.into(), Ipv6Addr::LOCALHOST.into()];
+        if local.into_iter().any(|ip| self.kind.matches_ip(ip)) {
             ranges.extend([range(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 32), range(v6(0), 128)]);
             v4.push((Ipv4Addr::UNSPECIFIED, 32));
         }
@@ -455,12 +456,14 @@ impl<T> HostIndex<T> {
 
 /// Other addresses that reach what `ip` reaches, which deny patterns must
 /// also catch: the unspecified address (`0.0.0.0`, `::`) connects to the
-/// local host (`127.0.0.1`, `::1`), and IPv6 addresses embedding an IPv4
-/// address (IPv4-compatible, IPv4-translated, NAT64 `64:ff9b::/96`, 6to4
-/// `2002::/16`) reach that address.
+/// local host (`127.0.0.1`, `::1`) and is the same in both families, and
+/// IPv6 addresses embedding an IPv4 address (IPv4-compatible,
+/// IPv4-translated, NAT64 `64:ff9b::/96`, 6to4 `2002::/16`) reach that
+/// address.
 fn ip_spellings(ip: IpAddr) -> Vec<IpAddr> {
     if ip.is_unspecified() {
-        return vec![IpAddr::V4(Ipv4Addr::LOCALHOST), IpAddr::V6(Ipv6Addr::LOCALHOST)];
+        let other = if ip.is_ipv4() { IpAddr::V6(Ipv6Addr::UNSPECIFIED) } else { IpAddr::V4(Ipv4Addr::UNSPECIFIED) };
+        return vec![other, IpAddr::V4(Ipv4Addr::LOCALHOST), IpAddr::V6(Ipv6Addr::LOCALHOST)];
     }
     match ip {
         IpAddr::V6(v6) => match embedded_ipv4(v6) {

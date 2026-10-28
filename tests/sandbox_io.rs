@@ -75,6 +75,14 @@ fn deny_ranges_catch_other_spellings_of_their_addresses() {
     for host in ["8.8.8.8", "2001:4860::8888", "64:ff9b::808:808", "2002:808:808::"] {
         assert_eq!(p.check(&net(host, 8080)), Decision::Allow, "{host}");
     }
+    // `0.0.0.0` and `::` are the same to deny rules.
+    for (deny, hosts) in [("0.0.0.0", ["::", "[::]", "64:ff9b::"]), ("[::]", ["0.0.0.0", "::ffff:0.0.0.0", "64:ff9b::"])] {
+        let p = RulePolicy::new().allow_net("*").deny_net(deny).deny_private_networks();
+        let p = p.allow_net("0.0.0.0").allow_net("[::]").allow_net("[64:ff9b::]");
+        for host in hosts {
+            assert_eq!(p.check(&net(host, 80)), Decision::Deny, "deny {deny}: {host}");
+        }
+    }
     // Only deny rules are widened.
     let p = RulePolicy::new().allow_net("127.0.0.1");
     assert_eq!(p.check(&net("0.0.0.0", 80)), Decision::Deny);
