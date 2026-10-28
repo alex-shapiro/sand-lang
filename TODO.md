@@ -92,6 +92,14 @@ Follow-up work, roughly in priority order.
       `std::ops::Range<i64>` and `RangeInclusive<i64>` so that `SandStruct`
       fields can use Rust range types and `#[sand(default)]`.
 
+### Policy
+
+- [ ] Apply the address patterns of http rules to the addresses that host
+      names resolve to. With `allow http *`, `allow private-net` and `deny
+      http 10.0.0.0/8/admin`, `GET http://intranet/admin` is allowed if
+      `intranet` resolves to `10.0.0.5`. `Capability::NetAddr` has no
+      method or path, so only net rules decide resolved addresses.
+
 ### Tooling
 
 - [ ] Fix broken intra-doc links to private items and run `cargo doc` with
