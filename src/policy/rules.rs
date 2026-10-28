@@ -558,7 +558,7 @@ impl RulePolicy {
         }
     }
 
-    /// Offers the net rules matching `dest`. Unless `allow private-net`,
+    /// Offers the net rules that match `dest`. Unless `allow private-net`,
     /// internal destinations named directly need an explicit allow rule.
     fn net_verdict(&self, dest: &Dest, best: &mut Best<'_>) {
         let internal = self.deny_private && is_internal(dest);
@@ -569,7 +569,7 @@ impl RulePolicy {
         });
     }
 
-    /// Offers the http and net rules matching a request (see
+    /// Offers the http and net rules that match a request (see
     /// [`RuleKind::http_match`]).
     fn http_verdict(&self, dest: &Dest, method: &str, scheme: &str, names: &[String], best: &mut Best<'_>) {
         let index = self.others();

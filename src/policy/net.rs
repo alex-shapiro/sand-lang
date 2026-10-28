@@ -55,8 +55,8 @@ fn canonical_hostname(name: &str) -> Option<String> {
 }
 
 impl NetPattern {
-    /// Parses a host pattern of a `net` or `http` rule. A range must name
-    /// its first address (`10.0.0.0/8`, not `10.0.0.1/8`).
+    /// Parses a host pattern of a `net` or `http` rule. A range must start
+    /// at its first address (`10.0.0.0/8`, not `10.0.0.1/8`).
     pub(crate) fn parse(pattern: &str) -> Result<NetPattern, String> {
         let invalid =
             || format!("invalid host pattern `{pattern}` (expected a host, host:port, *.domain, *, an IP address or a CIDR range)");
@@ -277,9 +277,9 @@ impl Unnamed {
     }
 
     /// An address for which `ok` is true in a range that no narrower range
-    /// of `ranges` contains, preferring ones without other spellings that
-    /// patterns could match (see [`ip_spellings`]), then public ones: the
-    /// address and how well it meets these preferences.
+    /// of `ranges` contains: the address, and how well it agrees with two
+    /// preferences. First, an address without other spellings that patterns
+    /// can match (see [`ip_spellings`]). Second, a public address.
     fn address(net: IpAddr, len: u8, ranges: &[(IpAddr, u8)], ok: &dyn Fn(IpAddr) -> bool) -> Option<(u8, IpAddr)> {
         let inside: Vec<(IpAddr, u8)> =
             ranges.iter().copied().filter(|&(ip, l)| l > len && ip.is_ipv4() == net.is_ipv4() && mask(ip, len) == net).collect();
@@ -411,7 +411,7 @@ impl<T> HostIndex<T> {
         }
     }
 
-    /// Calls `f(explicit, spelled, t)` for each pattern matching `dest`:
+    /// Calls `f(explicit, spelled, t)` for each pattern that matches `dest`:
     /// `explicit` patterns name hosts or addresses without wildcards. A
     /// name matches name patterns, an IP literal address patterns, also by
     /// another spelling of its address (see [`ip_spellings`]) where
@@ -468,7 +468,7 @@ impl<T> HostIndex<T> {
 /// Other addresses that reach what `ip` reaches, which deny patterns must
 /// also catch: the unspecified address (`0.0.0.0`, `::`) connects to the
 /// local host (`127.0.0.1`, `::1`) and is the same in both families, and
-/// IPv6 addresses embedding an IPv4 address (IPv4-compatible,
+/// IPv6 addresses that embed an IPv4 address (IPv4-compatible,
 /// IPv4-translated, NAT64 `64:ff9b::/96`, 6to4 `2002::/16`) reach that
 /// address.
 fn ip_spellings(ip: IpAddr) -> Vec<IpAddr> {
@@ -678,8 +678,9 @@ impl UrlPattern {
         // A `/` in brackets belongs to an IPv6 range (`[fc00::/7]`).
         let mut end =
             slash_from(if rest.first().is_some_and(|t| t.0 == '[') { rest.iter().position(|t| t.0 == ']').unwrap_or(0) } else { 0 });
-        // A prefix length after an address reads as in a net rule
-        // (`10.0.0.0/8`), so that a range is an error, not a path.
+        // Parse a prefix length after an address as a net rule does
+        // (`10.0.0.0/8`). Thus a range gives an error, and does not become
+        // a path.
         let head = text(&rest[..end]);
         let mut address = None;
         if let Ok(NetPattern { kind: HostKind::Ip(ip, len), port: None }) = NetPattern::parse(&head)
@@ -805,9 +806,9 @@ mod tests {
             prop_assert!(reached, "{} in none of {:?}", ip, ranges);
         }
 
-        /// An http rule reads its host as a net rule does, and the path
-        /// after it as after any host. A prefix length after an address
-        /// reads as in a net rule, and a range is an error.
+        /// The parser reads the host of an http rule as the host of a net
+        /// rule, and the path after it as the path after any host. A range
+        /// gives an error.
         #[test]
         fn url_hosts_are_single_address_net_patterns(
             host in prop::sample::select(vec![

@@ -95,52 +95,55 @@ Follow-up work, roughly in priority order.
 ### Policy
 
 - [ ] **Make the built-in policy a set of standard rules.** Code outside the
-      rules decides some requests, so users, prompts and the linter cannot
-      see every rule that decides:
+      rules decides some requests. Thus users, prompts and the linter cannot
+      see all of the rules that decide:
       - `check_normalized_in` (`src/policy/rules.rs`) allows standard output
-        and standard error, and allows imports if no `allow import` rule
+        and standard error. It also allows imports if no `allow import` rule
         exists.
-      - `deny_private_networks()` keeps wildcard allow rules from internal
-        destinations (`is_internal`, `allow_applies`), denies internal
-        destinations that only `default allow` allows, and lets `localhost`
-        reach loopback addresses (`check_addr`).
+      - `deny_private_networks()` prevents wildcard allow rules from
+        allowing internal destinations (`is_internal`, `allow_applies`). It
+        denies internal destinations that only `default allow` allows. It
+        lets `localhost` connect to loopback addresses (`check_addr`).
 
-      At startup, turn these into standard rules that the standard check
-      evaluates, with no other path. Remove the host settings that make
-      such rules in code (`deny_private_networks()`, the private-network
-      flag of `PolicyFile`, the CLI's `--allow-private-net`), and make sure
-      that the host API can add the equivalent standard rules. Then the
-      linter compares only rules, and its `reaches_internal` and `internal`
-      flags go away. Two design points:
-      - At equal specificity, a user rule must take precedence over a
-        built-in rule: `allow net localhost` must beat a built-in `deny net
-        localhost`, but a deny wins at a tie between user rules.
-      - An explicit hostname rule must also decide the addresses that the
-        name resolves to where that is safe: `allow net localhost` must
-        reach `127.0.0.1` without an address rule.
+      At startup, change these into standard rules that the standard check
+      evaluates. Do not decide requests in a different way. Remove the host
+      settings that make such rules in code (`deny_private_networks()`, the
+      private-network flag of `PolicyFile`, the CLI option
+      `--allow-private-net`). Make sure that the host API can add the
+      equivalent standard rules. The linter then compares only rules, and
+      you can remove its `reaches_internal` and `internal` flags. Two design
+      points:
+      - At equal specificity, a user rule must have precedence over a
+        built-in rule: `allow net localhost` must have precedence over a
+        built-in `deny net localhost`. Between user rules of equal
+        specificity, a deny rule has precedence.
+      - Where it is safe, an explicit hostname rule must also decide the
+        addresses of that name: `allow net localhost` must allow
+        `127.0.0.1` without an address rule.
 
-      Treat names under `localhost` as `localhost` (RFC 6761): macOS and
-      systemd-resolved resolve them to loopback addresses. `is_localhost`
-      (`src/policy/net.rs`) matches only `localhost`. So `allow net *`
-      allows `Net(x.localhost)` and then denies its loopback addresses, and
-      an explicit `allow net app.localhost` cannot reach a local server
-      without `allow private-net`. Decide whether `allow net *.localhost`
-      counts as an explicit rule.
+      Make names under `localhost` equivalent to `localhost` (RFC 6761).
+      macOS and systemd-resolved resolve these names to loopback addresses,
+      but `is_localhost` (`src/policy/net.rs`) matches only `localhost`.
+      Thus `allow net *` allows `Net(x.localhost)`, and then the policy
+      denies its loopback addresses. Also, an explicit `allow net
+      app.localhost` cannot connect to a local server without `allow
+      private-net`. Decide if `allow net *.localhost` is an explicit rule.
 - [ ] Do not resolve IP literals. For an IP literal, `check_addr` ignores
-      every rule and allows only the literal's own address, which carries
-      the decision of the hostname check (a prompt answer included) to the
-      address check. Instead, make `resolve_allowed` (`src/stdlib/net.rs`)
-      connect to the literal with no resolver call and no `NetAddr` check,
-      and remove the shortcut from `check_addr`.
+      all rules and allows only the address of the literal. Thus the
+      decision of the hostname check (also a prompt answer) applies to the
+      address check. Change `resolve_allowed` (`src/stdlib/net.rs`) to
+      connect to the literal without a resolver call or a `NetAddr` check.
+      Then remove the shortcut from `check_addr`.
 - [ ] Apply the address patterns of http rules to the addresses that host
       names resolve to. With `allow http *`, `allow private-net` and `deny
       http 10.0.0.5/admin`, `GET http://intranet/admin` is allowed if
       `intranet` resolves to `10.0.0.5`. `Capability::NetAddr` has no
       method or path, so only net rules decide resolved addresses.
-- [ ] Give prompts a rule for http requests whose path has an encoded
-      separator (`%2F`, `%5C`). The policy checks both readings of such a
-      path, but `rule_for` (`src/policy/file.rs`) returns `None`, so a
-      prompt cannot offer "allow always" and asks again each time.
+- [ ] Give prompts a rule for http requests with an encoded separator
+      (`%2F`, `%5C`) in the path. The policy checks the two possible paths
+      of such a request. But `rule_for` (`src/policy/file.rs`) returns
+      `None`. Thus a prompt cannot offer "allow always", and it asks again
+      for each request.
 - [ ] Document in §14.5 that a deny rule for an IPv4 address also matches
       the IPv6 forms that embed it (`::a00:1`, `::ffff:0:a00:1`,
       `64:ff9b::a00:1`, `2002:a00:1::`), and that a deny rule for
@@ -152,11 +155,11 @@ Follow-up work, roughly in priority order.
       `-D warnings` in CI.
 - [ ] Report `env` and `listen` policy rules that broader rules already
       decide. The linter reports only exact repeats of these rules.
-- [ ] Make the policy linter near-linear when many rules of the other verb
-      rank above the narrow rules that a broad rule covers: with 20,000
-      `allow read /r/hN`, 5,000 `deny /r/*/aN` and `allow read /r`, `sand
-      lint` takes 5 s, because it compares each narrow rule with each deny
-      rule.
+- [ ] Make the time of the policy linter almost linear when many opposite
+      rules have precedence over the narrow rules that a broad rule covers.
+      With 20,000 `allow read /r/hN`, 5,000 `deny /r/*/aN` and `allow read
+      /r`, `sand lint` takes 5 s, because it compares each narrow rule with
+      each deny rule.
 
 ### Diagnostics
 

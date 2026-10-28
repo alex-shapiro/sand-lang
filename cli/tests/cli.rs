@@ -451,7 +451,7 @@ fn output_stops_quietly_when_stdout_closes() {
     let out = child.wait_with_output().unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!((out.status.code(), stderr.as_ref()), (Some(1), ""));
-    // The REPL, reading from a pipe.
+    // The REPL, with input from a pipe.
     let mut child = Command::new(env!("CARGO_BIN_EXE_sand"))
         .arg("repl")
         .current_dir(dir.path())

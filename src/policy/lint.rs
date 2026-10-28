@@ -31,8 +31,8 @@ use std::path::Path;
 /// for any method and path. The linter reports a rule only when, for each
 /// kind of request that the rule decides, one other rule shows that the
 /// rule is not needed. It reports a word that uses sets only if no rule of
-/// the word is needed. Removing every reported rule together does not
-/// change a decision.
+/// the word is needed. If you remove all reported rules together, no
+/// decision changes.
 pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<LintWarning>, Vec<PolicyError>> {
     let parsed = parse(text, base, home)?;
     let deny_private = !parsed.file.private_net;
@@ -77,9 +77,9 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
         same.entry((r.allow, &r.kind)).or_default().push(i);
     }
     // The rules of each word of the file: a word that uses sets gives a rule
-    // for each value. Removing every reported word must change no decision,
-    // so a report relies only on rules that stay. Of two words that each
-    // make the other not needed, the later one is reported.
+    // for each value. If a user removes all reported words, no decision may
+    // change. Thus a report uses only the rules that stay. Of two words that
+    // make each other not needed, the linter reports the later word.
     let mut words: Vec<std::ops::Range<usize>> = Vec::new();
     for (i, r) in rules.iter().enumerate() {
         let Some(o) = &r.origin else { continue };
@@ -152,7 +152,8 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
         })
     };
     for word in &words {
-        // A repeat has the warnings of the first rule; a word, those of its first rule that has any.
+        // The first of equal rules gets the warnings of all of them. A word
+        // gets the warning of its first rule that has one.
         let mut firsts = word.clone().filter(|&i| same[&(rules[i].allow, &rules[i].kind)][0] == i);
         if let Some((by, reach)) = firsts.find_map(&mut bypass_of) {
             warn(word.start, "bypassable-http-deny", format!("{by} lets scripts connect to {reach} and send any request"));
@@ -641,8 +642,8 @@ mod tests {
         );
     }
 
-    /// Removing every reported rule together changes no decision: a rule
-    /// reported as not needed does not show that another rule is not needed.
+    /// If you remove all reported rules together, no decision changes: a
+    /// reported rule does not show that another rule is not needed.
     #[test]
     fn reported_rules_do_not_justify_others() {
         assert_eq!(lint("allow /r\ndeny /r/a\ndeny read /r/a"), ["3:11: warning[redundant-rule]: line 2 (`/r/a`) already denies this"]);
@@ -913,8 +914,8 @@ mod tests {
         paths.visits.get()
     }
 
-    /// Finding which net rules are not needed takes work in proportion to
-    /// the number of rules, where http denies rank between a broad and a
+    /// The work to find the net rules that are not needed is in proportion
+    /// to the number of rules, also where http denies rank between a broad and a
     /// narrow net rule (`*`, `*.example.com/aN`, `hN.example.com`), or below
     /// both (`*.com/aN` under `*.example.com`).
     #[test]
@@ -1112,7 +1113,7 @@ mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(512))]
 
-        /// Removing a rule the linter reports does not change any decision.
+        /// If you remove a rule that the linter reports, no decision changes.
         #[test]
         fn reported_rules_are_not_needed(
             lines in prop::collection::vec(rule_line(), 1..9),

@@ -652,7 +652,7 @@ mod tests {
         (answer, String::from_utf8(out).unwrap())
     }
 
-    /// A writer that fails with `kind`, counting the writes.
+    /// A writer that fails with `kind` and counts its writes.
     struct Failing(std::io::ErrorKind, usize);
 
     impl Write for Failing {
