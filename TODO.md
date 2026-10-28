@@ -98,10 +98,6 @@ Follow-up work, roughly in priority order.
       `-D warnings` in CI.
 - [ ] Report `env` and `listen` policy rules that broader rules already
       decide. The linter reports only exact repeats of these rules.
-- [ ] Report a `deny http` rule as bypassable when a `net` rule allows
-      another spelling of an address that it denies (`allow net 0.0.0.0` and
-      `deny http 127.0.0.1/x`). The linter intersects host patterns as
-      written.
 - [ ] Make the policy linter near-linear when many rules of the other verb lie
       below a broad rule: with 20,000 `allow read /r/hN`, 5,000 `deny
       /r/*/aN` and `allow read /r`, `sand lint` takes 5 s, because it compares

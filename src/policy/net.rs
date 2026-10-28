@@ -159,6 +159,43 @@ impl NetPattern {
         hosts && (self.port.is_none() || other.port.is_none() || self.port == other.port)
     }
 
+    /// The address ranges, with this pattern's port, whose addresses reach
+    /// an address that this pattern matches as written (see
+    /// [`ip_spellings`]). Deny rules for this pattern also match them. The
+    /// IPv4-compatible ranges also contain `::` and `::1`, which do not
+    /// embed an address (see [`NetPattern::denies_ip`]).
+    pub(crate) fn reaching_ranges(&self) -> Vec<NetPattern> {
+        let HostKind::Ip(net, len) = self.kind else { return Vec::new() };
+        let range = |ip: IpAddr, len: u8| NetPattern { kind: HostKind::Ip(ip, len), port: self.port };
+        let v6 = |bits: u128| IpAddr::V6(Ipv6Addr::from(bits));
+        let mut ranges = Vec::new();
+        let mut v4 = Vec::new();
+        if let IpAddr::V4(net) = net {
+            v4.push((net, len));
+        }
+        if [IpAddr::V4(Ipv4Addr::LOCALHOST), IpAddr::V6(Ipv6Addr::LOCALHOST)].into_iter().any(|ip| self.kind.matches_ip(ip)) {
+            ranges.extend([range(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 32), range(v6(0), 128)]);
+            v4.push((Ipv4Addr::UNSPECIFIED, 32));
+        }
+        for (net, len) in v4 {
+            let bits = u32::from(net) as u128;
+            ranges.extend([
+                range(v6(0x64_ff9b << 96 | bits), 96 + len),
+                range(v6(0x2002 << 112 | bits << 80), 16 + len),
+                range(v6(0xffff << 48 | bits), 96 + len),
+                range(v6(bits), 96 + len),
+            ]);
+        }
+        ranges
+    }
+
+    /// Whether a deny rule for this pattern matches the address `ip`, as
+    /// written or by another spelling (see [`ip_spellings`]).
+    pub(crate) fn denies_ip(&self, ip: IpAddr) -> bool {
+        let ip = ip.to_canonical();
+        std::iter::once(ip).chain(ip_spellings(ip)).any(|ip| self.kind.matches_ip(ip))
+    }
+
     /// Whether an explicit pattern may name an internal destination (see
     /// [`is_internal`]).
     pub(crate) fn may_name_internal(&self) -> bool {
@@ -181,6 +218,11 @@ impl HostKind {
             (HostKind::Ip(net, len), HostKind::Ip(ip, l)) => len <= l && mask(*ip, *len) == *net,
             _ => false,
         }
+    }
+
+    /// Whether the pattern matches the address `ip` as written.
+    fn matches_ip(&self, ip: IpAddr) -> bool {
+        self.covers(&HostKind::Ip(ip, full_len(ip)))
     }
 }
 
@@ -209,24 +251,24 @@ impl Unnamed {
         Unnamed { label, port, ranges }
     }
 
-    /// A destination that `pattern` matches, and that only the patterns
-    /// that match all of `pattern` match. `None` if narrower patterns
-    /// cover all of `pattern`.
-    pub(crate) fn dest(&self, pattern: &NetPattern) -> Option<(String, u16)> {
+    /// A destination that `pattern` matches, that a deny rule for `denied`
+    /// matches, and that only the patterns that match all of `pattern`
+    /// match. `None` if narrower patterns cover all of `pattern`.
+    pub(crate) fn dest(&self, pattern: &NetPattern, denied: &NetPattern) -> Option<(String, u16)> {
         let name = match &pattern.kind {
             HostKind::Any => self.label.clone(),
             HostKind::Suffix(domain) => format!("{}.{domain}", self.label),
             HostKind::Host(name) => name.clone(),
-            HostKind::Ip(ip, len) => Unnamed::address(*ip, *len, &self.ranges)?.1.to_string(),
+            HostKind::Ip(ip, len) => Unnamed::address(*ip, *len, &self.ranges, &|ip| denied.denies_ip(ip))?.1.to_string(),
         };
         Some((name, pattern.port.or(self.port)?))
     }
 
-    /// An address in a range that no narrower range of `ranges` contains,
-    /// preferring ones without other spellings that patterns could match
-    /// (see [`ip_spellings`]), then public ones: the address and how well
-    /// it meets these preferences.
-    fn address(net: IpAddr, len: u8, ranges: &[(IpAddr, u8)]) -> Option<(u8, IpAddr)> {
+    /// An address for which `ok` is true in a range that no narrower range
+    /// of `ranges` contains, preferring ones without other spellings that
+    /// patterns could match (see [`ip_spellings`]), then public ones: the
+    /// address and how well it meets these preferences.
+    fn address(net: IpAddr, len: u8, ranges: &[(IpAddr, u8)], ok: &dyn Fn(IpAddr) -> bool) -> Option<(u8, IpAddr)> {
         let inside: Vec<(IpAddr, u8)> =
             ranges.iter().copied().filter(|&(ip, l)| l > len && ip.is_ipv4() == net.is_ipv4() && mask(ip, len) == net).collect();
         let at = |offset: u128| match net {
@@ -237,12 +279,12 @@ impl Unnamed {
         if inside.is_empty() {
             let last = u128::MAX.checked_shr(128 - host_bits).unwrap_or(0);
             let quality = |ip: IpAddr| 2 * ip_spellings(ip).is_empty() as u8 + !is_private_address(ip) as u8;
-            let candidates = [0, 1, last / 2 + 1, last].into_iter().filter(|&o| o <= last).map(at);
+            let candidates = [0, 1, 2, last / 2 + 1, last].into_iter().filter(|&o| o <= last).map(at).filter(|&ip| ok(ip));
             return candidates.map(|ip| (quality(ip), ip)).max_by_key(|c| c.0);
         }
         let halves = [net, at(1 << (host_bits - 1))];
         let found = halves.into_iter().filter(|half| !inside.contains(&(*half, len + 1)));
-        found.filter_map(|half| Unnamed::address(half, len + 1, &inside)).max_by_key(|c| c.0)
+        found.filter_map(|half| Unnamed::address(half, len + 1, &inside, ok)).max_by_key(|c| c.0)
     }
 }
 
