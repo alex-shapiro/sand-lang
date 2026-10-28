@@ -35,6 +35,9 @@ Follow-up work, roughly in priority order.
       (`tests/metering.rs`), `many_locals_resolve_in_linear_time`
       (`tests/compile_limits.rs`). Bound the work instead (fuel, instructions,
       the ratio between two input sizes in the same run).
+- [ ] `peak_rss_stays_near_the_memory_limit` (`tests/peak_rss.rs`) fails on
+      macOS: "decoded computed defaults" peaks at 1.32 times the limit, above
+      the 1.25 bound.
 - [ ] Run the playground page tests in CI across Chrome, Firefox, and Safari.
 - [ ] `Config::retry_stress` fails only the first check in a `vm_function`
       body, so it does not detect a side effect between the first and second
@@ -97,6 +100,10 @@ Follow-up work, roughly in priority order.
       `net` rule decides both connections and http requests), and `env` and
       `listen` rules that broader rules already decide. The linter now reports
       only exact repeats of these rules.
+- [ ] Report a `deny http` rule as bypassable when a `net` rule allows
+      another spelling of an address that it denies (`allow net 0.0.0.0` and
+      `deny http 127.0.0.1/x`). The linter intersects host patterns as
+      written.
 - [ ] Make the policy linter near-linear when many rules of the other verb lie
       below a broad rule: with 20,000 `allow read /r/hN`, 5,000 `deny
       /r/*/aN` and `allow read /r`, `sand lint` takes 12 s, because it compares

@@ -4,6 +4,7 @@
 use super::path::{Seg, Tok};
 use crate::vm::value::FxHashMap;
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 /// A host pattern: `host`, `*.domain`, `*`, an IP address or a CIDR range,
@@ -124,15 +125,24 @@ impl NetPattern {
     /// Whether the pattern matches every destination `other` matches.
     /// False when unsure.
     pub(crate) fn covers(&self, other: &NetPattern) -> bool {
-        let hosts = match (&self.kind, &other.kind) {
-            (HostKind::Any, _) => true,
-            (HostKind::Suffix(s), HostKind::Suffix(t)) => s == t || is_under(t, s),
-            (HostKind::Suffix(s), HostKind::Host(h)) => is_under(h, s),
-            (HostKind::Host(h), HostKind::Host(g)) => h == g,
-            (HostKind::Ip(net, len), HostKind::Ip(ip, l)) => len <= l && mask(*ip, *len) == *net,
-            _ => false,
+        self.kind.covers(&other.kind) && self.port.is_none_or(|p| other.port == Some(p))
+    }
+
+    /// The destinations both patterns match as written (without other
+    /// spellings of addresses), if any.
+    pub(crate) fn intersection(&self, other: &NetPattern) -> Option<NetPattern> {
+        let port = match (self.port, other.port) {
+            (Some(a), Some(b)) if a != b => return None,
+            (a, b) => a.or(b),
         };
-        hosts && self.port.is_none_or(|p| other.port == Some(p))
+        let kind = if self.kind.covers(&other.kind) {
+            &other.kind
+        } else if other.kind.covers(&self.kind) {
+            &self.kind
+        } else {
+            return None;
+        };
+        Some(NetPattern { kind: kind.clone(), port })
     }
 
     /// Whether some destination may match both patterns. Deny rules also
@@ -157,6 +167,82 @@ impl NetPattern {
             HostKind::Ip(ip, len) => *len < full_len(*ip) || is_private_address(*ip),
             HostKind::Any | HostKind::Suffix(_) => false,
         }
+    }
+}
+
+impl HostKind {
+    /// Whether the pattern matches every host `other` matches.
+    fn covers(&self, other: &HostKind) -> bool {
+        match (self, other) {
+            (HostKind::Any, _) => true,
+            (HostKind::Suffix(s), HostKind::Suffix(t)) => s == t || is_under(t, s),
+            (HostKind::Suffix(s), HostKind::Host(h)) => is_under(h, s),
+            (HostKind::Host(h), HostKind::Host(g)) => h == g,
+            (HostKind::Ip(net, len), HostKind::Ip(ip, l)) => len <= l && mask(*ip, *len) == *net,
+            _ => false,
+        }
+    }
+}
+
+/// Labels, ports and address ranges that a set of patterns does not name,
+/// to find destinations that the patterns match only by wildcards.
+pub(crate) struct Unnamed {
+    label: String,
+    /// `None` if the patterns name every port.
+    port: Option<u16>,
+    ranges: Vec<(IpAddr, u8)>,
+}
+
+impl Unnamed {
+    pub(crate) fn new<'a>(patterns: impl Iterator<Item = &'a NetPattern>) -> Unnamed {
+        let (mut labels, mut ports, mut ranges) = (HashSet::new(), HashSet::new(), Vec::new());
+        for p in patterns {
+            match &p.kind {
+                HostKind::Host(name) | HostKind::Suffix(name) => labels.extend(name.split('.')),
+                HostKind::Ip(ip, len) => ranges.push((*ip, *len)),
+                HostKind::Any => {}
+            }
+            ports.extend(p.port);
+        }
+        let label = (0..).map(|n| format!("x{n}")).find(|l| !labels.contains(l.as_str())).expect("an unused label");
+        let port = [443, 80, 8443, 8080].into_iter().chain(0..=u16::MAX).find(|p| !ports.contains(p));
+        Unnamed { label, port, ranges }
+    }
+
+    /// A destination that `pattern` matches, and that only the patterns
+    /// that match all of `pattern` match. `None` if narrower patterns
+    /// cover all of `pattern`.
+    pub(crate) fn dest(&self, pattern: &NetPattern) -> Option<(String, u16)> {
+        let name = match &pattern.kind {
+            HostKind::Any => self.label.clone(),
+            HostKind::Suffix(domain) => format!("{}.{domain}", self.label),
+            HostKind::Host(name) => name.clone(),
+            HostKind::Ip(ip, len) => Unnamed::address(*ip, *len, &self.ranges)?.1.to_string(),
+        };
+        Some((name, pattern.port.or(self.port)?))
+    }
+
+    /// An address in a range that no narrower range of `ranges` contains,
+    /// preferring ones without other spellings that patterns could match
+    /// (see [`ip_spellings`]), then public ones: the address and how well
+    /// it meets these preferences.
+    fn address(net: IpAddr, len: u8, ranges: &[(IpAddr, u8)]) -> Option<(u8, IpAddr)> {
+        let inside: Vec<(IpAddr, u8)> =
+            ranges.iter().copied().filter(|&(ip, l)| l > len && ip.is_ipv4() == net.is_ipv4() && mask(ip, len) == net).collect();
+        let at = |offset: u128| match net {
+            IpAddr::V4(v4) => IpAddr::V4(Ipv4Addr::from(u32::from(v4) + offset as u32)),
+            IpAddr::V6(v6) => IpAddr::V6(Ipv6Addr::from(u128::from(v6) + offset)),
+        };
+        let host_bits = (full_len(net) - len) as u32;
+        if inside.is_empty() {
+            let last = u128::MAX.checked_shr(128 - host_bits).unwrap_or(0);
+            let quality = |ip: IpAddr| 2 * ip_spellings(ip).is_empty() as u8 + !is_private_address(ip) as u8;
+            let candidates = [0, 1, last / 2 + 1, last].into_iter().filter(|&o| o <= last).map(at);
+            return candidates.map(|ip| (quality(ip), ip)).max_by_key(|c| c.0);
+        }
+        let halves = [net, at(1 << (host_bits - 1))];
+        let found = halves.into_iter().filter(|half| !inside.contains(&(*half, len + 1)));
+        found.filter_map(|half| Unnamed::address(half, len + 1, &inside)).max_by_key(|c| c.0)
     }
 }
 

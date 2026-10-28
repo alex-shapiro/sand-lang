@@ -1,7 +1,7 @@
 //! The policy file linter.
 
 use super::file::parse;
-use super::net::{HostKind, NetPattern, domains_above, format_host_port};
+use super::net::{HostKind, NetPattern, Unnamed, domains_above};
 use super::path::{self, Pattern, Seg, name_counts};
 use super::rules::{IMPORT, READ, Rank, Rule, RuleKind, WRITE, file_segments, fold_segments, method_matches, precedence, scheme_matches};
 use super::{Capability, PathSpace, PolicyError};
@@ -16,15 +16,17 @@ use std::path::Path;
 ///   decide everything it covers the same way;
 /// - `overridden-rule`: rules that take precedence (more specific, or a
 ///   deny as specific) decide everything it covers the other way;
-/// - `bypassable-http-deny`: a `deny http` rule for a host that `net` rules
-///   let scripts connect to (and send it anything);
+/// - `bypassable-http-deny`: a `deny http` rule names a destination that
+///   a `net` rule lets scripts connect to (and send anything);
 /// - `unused-set`: a `let` set that is never referenced in a rule.
 ///
 /// The linter compares file and http rules by what their patterns match,
 /// wildcards included, and compares paths as written, without resolving
 /// symlinks. A `net` rule counts as an http rule for any method and path.
 /// The linter reports a rule only when, for each file access or http method
-/// the rule names, one other rule shows that the rule is not needed.
+/// the rule names, one other rule shows that the rule is not needed. It
+/// compares the hosts and ports of `deny http` and `net` rules by what
+/// their patterns match.
 pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<LintWarning>, Vec<PolicyError>> {
     let parsed = parse(text, base, home)?;
     let deny_private = !parsed.file.private_net;
@@ -46,6 +48,22 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
         [init @ .., last] => format!("{} and {}", init.iter().map(|&i| describe(i)).collect::<Vec<_>>().join(", "), describe(*last)),
     };
     let paths = PathRules::new(rules, deny_private);
+    let unnamed = Unnamed::new(rules.iter().filter_map(|r| match &r.kind {
+        RuleKind::Net(p) => Some(p),
+        RuleKind::Http(_, url) => Some(&url.host),
+        _ => None,
+    }));
+    // For each host pattern: a net rule that lets scripts connect to a
+    // destination it matches, and the pattern of such destinations.
+    let mut bypasses: FxHashMap<NetPattern, Option<(usize, NetPattern)>> = FxHashMap::default();
+    let mut bypass = |reach: NetPattern| {
+        let found = bypasses.entry(reach).or_insert_with_key(|reach| {
+            let (host, port) = unnamed.dest(reach)?;
+            let Some((true, j)) = policy.verdict(&Capability::Net { host, port }, PathSpace::Memory, &[]) else { return None };
+            Some((j, NetPattern { port: Some(port), ..reach.clone() }))
+        });
+        found.clone()
+    };
     let mut same: FxHashMap<(bool, &RuleKind), Vec<usize>> = FxHashMap::default();
     for (i, r) in rules.iter().enumerate() {
         same.entry((r.allow, &r.kind)).or_default().push(i);
@@ -57,7 +75,8 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
             warn(i, "redundant-rule", format!("the same as {}", describe(copies[0])));
             continue;
         }
-        if let Some(r) = paths.get(i).filter(|_| !matches!(rule.kind, RuleKind::Net(_))) {
+        let Some(r) = paths.get(i) else { continue };
+        if !matches!(rule.kind, RuleKind::Net(_)) {
             let (mut agree, mut oppose, mut needed) = (Vec::new(), Vec::new(), false);
             let broader = paths.broader(r, copies);
             for op in r.ops() {
@@ -86,18 +105,17 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
         if let RuleKind::Http(_, url) = &rule.kind
             && !rule.allow
         {
-            let host = match &url.host.kind {
-                HostKind::Host(h) => h.clone(),
-                HostKind::Ip(ip, _) if url.host.is_explicit() => ip.to_string(),
-                _ => continue,
-            };
-            let port = url.host.port.unwrap_or(443);
-            if let Some((true, j)) = policy.verdict(&Capability::Net { host: host.clone(), port }, PathSpace::Memory, &[]) {
-                warn(
-                    i,
-                    "bypassable-http-deny",
-                    format!("{} lets scripts connect to {} and send any request", describe(j), format_host_port(&host, port)),
-                );
+            // First the destinations that only rules for all of the rule's
+            // hosts match, then those that net rules that allow name.
+            let found = bypass(url.host.clone()).or_else(|| {
+                let reach = paths.opposed(r, copies).filter_map(|k| match (&rules[k.index].kind, &k.scope) {
+                    (RuleKind::Net(_), Scope::Http { host, .. }) => url.host.intersection(host),
+                    _ => None,
+                });
+                reach.into_iter().find_map(&mut bypass)
+            });
+            if let Some((j, reach)) = found {
+                warn(i, "bypassable-http-deny", format!("{} lets scripts connect to {reach} and send any request", describe(j)));
             }
         }
     }
@@ -545,6 +563,42 @@ mod tests {
             lint("allow private-net\nallow net *\ndeny http localhost/x"),
             ["3:11: warning[bypassable-http-deny]: line 2 (`*`) lets scripts connect to localhost:443 and send any request"]
         );
+        // Wildcard denies, and net rules for some of the hosts or ports they name.
+        assert_eq!(
+            lint("allow net *.example.com\ndeny http *.example.com/admin\nallow net *\ndeny http POST *"),
+            [
+                "2:11: warning[bypassable-http-deny]: line 1 (`*.example.com`) lets scripts connect to *.example.com:443 and send any request",
+                "4:16: warning[bypassable-http-deny]: line 3 (`*`) lets scripts connect to *:443 and send any request",
+            ]
+        );
+        assert_eq!(
+            lint("deny net *\nallow net api.example.com\ndeny http *.example.com/admin"),
+            [
+                "3:11: warning[redundant-rule]: line 1 (`*`) already denies this",
+                "3:11: warning[bypassable-http-deny]: line 2 (`api.example.com`) lets scripts connect to api.example.com:443 and send any request",
+            ]
+        );
+        assert_eq!(
+            lint("allow net api.example.com:8080\ndeny http api.example.com/x"),
+            [
+                "2:11: warning[bypassable-http-deny]: line 1 (`api.example.com:8080`) lets scripts connect to api.example.com:8080 and send any request"
+            ]
+        );
+        assert_eq!(
+            lint("allow net *\ndeny net *:443\ndeny http api.example.com/x"),
+            ["3:11: warning[bypassable-http-deny]: line 1 (`*`) lets scripts connect to api.example.com:80 and send any request"]
+        );
+        // Narrower ranges deny some or all of a range that a net rule allows.
+        assert_eq!(
+            lint("allow net 10.0.0.0/8\ndeny net 10.0.0.1\ndeny net 10.0.0.0/9\ndeny http *"),
+            ["4:11: warning[bypassable-http-deny]: line 1 (`10.0.0.0/8`) lets scripts connect to 10.0.0.0/8:443 and send any request"]
+        );
+        assert_eq!(lint("allow net 10.0.0.0/8\ndeny net 10.0.0.0/9\ndeny net 10.128.0.0/9\ndeny http *"), Vec::<String>::new());
+        // A more specific net rule denies the hosts the wildcard names.
+        assert_eq!(
+            lint("allow net *\ndeny net *.example.com\ndeny http *.example.com/a"),
+            ["3:11: warning[redundant-rule]: line 2 (`*.example.com`) already denies this"]
+        );
     }
 
     #[test]
@@ -624,79 +678,92 @@ mod tests {
         );
     }
 
-    /// A policy line from `RULES`.
+    /// A policy line for paths under `/r` or for hosts that [`probes`] name.
     fn rule_line() -> impl Strategy<Value = String> {
-        let names = || prop::sample::select(vec!["a", "A", "*", "**", "x.*", "k*"]);
-        let path = prop::collection::vec(names(), 0..3).prop_map(|n| n.iter().map(|n| format!("/{n}")).collect::<String>());
+        let names = || prop::sample::select(vec!["a", "A", "b", "é", "*", "**", "x.*", "k*", "*.txt"]);
+        let path = prop::collection::vec(names(), 0..4).prop_map(|n| n.iter().map(|n| format!("/{n}")).collect::<String>());
         let hosts = || {
             prop::sample::select(vec![
                 "*",
-                "*.example.com",
                 "*.com",
-                "api.example.com",
+                "*.example.com",
+                "*.api.example.com",
                 "example.com",
+                "api.example.com",
+                "b.api.example.com",
                 "localhost",
+                "*.localhost",
+                "0.0.0.0",
                 "127.0.0.1",
                 "10.0.0.1",
                 "8.8.8.8",
+                "[::1]",
+                "[64:ff9b::808:808]",
+                "10.0.0.0/8",
+                "8.0.0.0/8",
+                "0.0.0.0/0",
+                "[::]/0",
             ])
         };
-        let port = prop::sample::select(vec!["", ":443", ":8080"]);
-        let scheme = prop::sample::select(vec!["", "https://", "http://"]);
-        let methods = prop::sample::select(vec!["", "GET ", "POST ", "GET POST "]);
+        let port = || prop::sample::select(vec!["", "", ":443", ":80", ":8080"]);
+        let scheme = prop::sample::select(vec!["", "", "https://", "http://"]);
+        let methods = prop::sample::select(vec!["", "", "GET ", "POST ", "GET POST ", "PUT GET "]);
         let access = prop::sample::select(vec!["", "read ", "write ", "import "]);
         let verb = prop::sample::select(vec!["allow", "deny"]);
-        let net = prop::sample::select(vec!["*.example.com", "api.example.com", "10.0.0.0/8", "127.0.0.1", "*"]);
+        // In an http rule, `/len` after an address begins the path.
         prop_oneof![
             (verb.clone(), access, path.clone()).prop_map(|(v, a, p)| format!("{v} {a}/r{p}")),
-            (verb.clone(), methods, scheme, hosts(), port, path).prop_map(|(v, m, s, h, port, p)| {
-                // Schemes and ports go with names only.
-                let (s, port) = if h.contains('*') || h.parse::<std::net::IpAddr>().is_err() { (s, port) } else { ("", "") };
-                format!("{v} http {m}{s}{h}{port}{p}")
-            }),
-            (verb, net).prop_map(|(v, h)| format!("{v} net {h}")),
+            (verb.clone(), methods, scheme, hosts(), port(), path).prop_map(|(v, m, s, h, port, p)| format!("{v} http {m}{s}{h}{port}{p}")),
+            (verb, hosts(), port()).prop_map(|(v, h, port)| format!("{v} net {h}{port}")),
         ]
     }
 
     /// Requests that rules from [`rule_line`] decide in different ways.
-    fn probes() -> Vec<Capability> {
+    fn probes() -> &'static [Capability] {
+        static PROBES: std::sync::LazyLock<Vec<Capability>> = std::sync::LazyLock::new(make_probes);
+        &PROBES
+    }
+
+    fn make_probes() -> Vec<Capability> {
         let mut probes = Vec::new();
-        let names = ["a", "A", "x.txt", "k1"];
+        let names = ["a", "A", "b", "é", "É", "x.txt", "k1"];
         let mut paths = vec![String::new()];
-        for _ in 0..3 {
+        for _ in 0..4 {
             let next: Vec<String> = paths.iter().flat_map(|p| names.iter().map(move |n| format!("{p}/{n}"))).collect();
-            paths.extend(next.into_iter().filter(|p| p.matches('/').count() <= 3));
+            paths.extend(next.into_iter().filter(|p| p.matches('/').count() <= 4));
+            paths.sort();
             paths.dedup();
         }
-        paths.sort();
-        paths.dedup();
         for p in &paths {
             let p = std::path::PathBuf::from(format!("/r{p}"));
             probes.extend([Capability::FsRead(p.clone()), Capability::FsWrite(p.clone()), Capability::Import(p)]);
         }
         let hosts = [
-            "api.example.com",
             "example.com",
+            "api.example.com",
             "b.api.example.com",
+            "c.b.api.example.com",
             "other.com",
             "localhost",
-            "127.0.0.1",
+            "a.localhost",
             "0.0.0.0",
-            "8.8.8.8",
-            "64:ff9b::808:808",
+            "127.0.0.1",
             "10.0.0.1",
+            "10.2.3.4",
+            "8.8.8.8",
+            "8.1.1.1",
+            "::",
+            "::1",
+            "::ffff:10.0.0.1",
+            "64:ff9b::808:808",
         ];
         for host in hosts {
-            for (scheme, port) in [("https", 443), ("http", 80), ("http", 443), ("https", 8080)] {
+            for (scheme, port) in [("https", 443), ("http", 80), ("http", 443), ("https", 80), ("https", 8080)] {
+                probes.push(Capability::Net { host: host.into(), port });
                 for method in ["GET", "POST", "PUT"] {
-                    for path in ["/", "/a", "/A/a", "/x.txt/k1", "/k1/A/a", "/a%2Fk1"] {
-                        probes.push(Capability::Http {
-                            method: method.into(),
-                            scheme: scheme.into(),
-                            host: host.into(),
-                            port,
-                            path: path.into(),
-                        });
+                    for path in ["/", "/a", "/A/a", "/x.txt/k1", "/k1/A/a", "/a%2Fk1", "/a/b/x.txt", "/b/a/a"] {
+                        let (method, scheme, host, path) = (method.into(), scheme.into(), host.into(), path.into());
+                        probes.push(Capability::Http { method, scheme, host, port, path });
                     }
                 }
             }
@@ -709,21 +776,46 @@ mod tests {
 
         /// Removing a rule the linter reports does not change any decision.
         #[test]
-        fn reported_rules_are_not_needed(lines in prop::collection::vec(rule_line(), 1..7), private in any::<bool>()) {
+        fn reported_rules_are_not_needed(lines in prop::collection::vec(rule_line(), 1..9), private in any::<bool>()) {
             let text = lines.join("\n") + if private { "\nallow private-net" } else { "" };
             let (base, home) = (Path::new("/base"), Some(Path::new("/home/me")));
             let warnings = lint_policy(&text, base, home).unwrap();
             let file = PolicyFile::parse(&text, base, home).unwrap();
             let policy = if private { file.rules.clone() } else { file.rules.clone().deny_private_networks() };
             let rules = policy.rules();
-            let probes = probes();
             for w in warnings.iter().filter(|w| w.code != "unused-set" && w.code != "bypassable-http-deny") {
                 let i = rules.iter().position(|r| r.origin.as_ref().is_some_and(|o| (o.line, o.column) == (w.line, w.column))).unwrap();
-                for cap in &probes {
+                for cap in probes() {
                     let with = policy.verdict(cap, PathSpace::Memory, &[]).map(|v| v.0);
                     let without = policy.verdict(cap, PathSpace::Memory, &[i]).map(|v| v.0);
                     prop_assert_eq!(with, without, "{}\n{}: {}", text, w, cap);
                 }
+            }
+        }
+
+        /// A `deny http` rule is reported if net rules let scripts connect
+        /// to a destination it names.
+        #[test]
+        fn bypassable_http_denies_are_reported(lines in prop::collection::vec(rule_line(), 1..9), private in any::<bool>()) {
+            let text = lines.join("\n") + if private { "\nallow private-net" } else { "" };
+            let warnings = lint_policy(&text, Path::new("/base"), None).unwrap();
+            let file = PolicyFile::parse(&text, Path::new("/base"), None).unwrap();
+            let policy = if private { file.rules.clone() } else { file.rules.clone().deny_private_networks() };
+            let dests: Vec<(&String, u16)> =
+                probes().iter().filter_map(|cap| if let Capability::Net { host, port } = cap { Some((host, *port)) } else { None }).collect();
+            for rule in policy.rules() {
+                let (false, RuleKind::Http(_, url), Some(o)) = (rule.allow, &rule.kind, &rule.origin) else { continue };
+                // The linter reports only that a repeat is a repeat.
+                if warnings.iter().any(|w| w.line == o.line && w.message.starts_with("the same as")) {
+                    continue;
+                }
+                let reached = dests.iter().find(|(host, port)| {
+                    let named = NetPattern::parse(&crate::policy::net::format_host_port(host, *port)).unwrap();
+                    let cap = Capability::Net { host: (*host).clone(), port: *port };
+                    url.host.covers(&named) && matches!(policy.verdict(&cap, PathSpace::Memory, &[]), Some((true, _)))
+                });
+                let reported = warnings.iter().any(|w| w.code == "bypassable-http-deny" && w.line == o.line);
+                prop_assert!(reported || reached.is_none(), "{}\n{:?}: {:?}", text, o.text, reached);
             }
         }
 
