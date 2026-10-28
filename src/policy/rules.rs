@@ -7,7 +7,7 @@
 //! whatever the number of rules.
 
 use super::net::{
-    Dest, HostIndex, ListenPattern, NetPattern, UrlPattern, is_internal, is_localhost, is_private_address, parse_ip, url_segments,
+    Dest, HostIndex, HostKind, ListenPattern, NetPattern, UrlPattern, is_internal, is_localhost, is_private_address, parse_ip, url_segments,
 };
 use super::path::{Glob, Seg, Trie, path_segments};
 use super::{Capability, Decision, PathSpace, fold_name, lexical, normalize_path};
@@ -88,6 +88,50 @@ pub(crate) enum RuleKind {
     Stderr,
     TimeZone,
     Custom(String, Option<String>),
+}
+
+impl RuleKind {
+    /// What the rule matches in http requests. A net rule matches them as
+    /// an http rule for its host with any method, scheme and path.
+    pub(crate) fn http_match(&self) -> Option<HttpMatch<'_>> {
+        match self {
+            RuleKind::Http(methods, url) => {
+                Some(HttpMatch { methods: methods.as_deref(), scheme: url.scheme, host: &url.host, path: &url.path })
+            }
+            RuleKind::Net(host) => Some(HttpMatch { methods: None, scheme: None, host, path: &[] }),
+            _ => None,
+        }
+    }
+
+    /// The connections the rule decides: a net rule decides connections to
+    /// the hosts it names, and an address pattern also connections to the
+    /// addresses that host names resolve to.
+    pub(crate) fn connections(&self) -> &'static [Connection] {
+        match self {
+            RuleKind::Net(NetPattern { kind: HostKind::Ip(..), .. }) => &[Connection::Named, Connection::Resolved],
+            RuleKind::Net(_) => &[Connection::Named],
+            _ => &[],
+        }
+    }
+}
+
+/// What an http or net rule matches in http requests.
+#[derive(Clone, Copy)]
+pub(crate) struct HttpMatch<'a> {
+    /// Upper case; `None`: any.
+    pub methods: Option<&'a [String]>,
+    pub scheme: Option<&'static str>,
+    pub host: &'a NetPattern,
+    pub path: &'a [Seg],
+}
+
+/// A connection that net rules decide.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Connection {
+    /// To a host or address as a script names it ([`Capability::Net`]).
+    Named,
+    /// To an address that a host name resolves to ([`Capability::NetAddr`]).
+    Resolved,
 }
 
 #[derive(Clone, Debug)]
@@ -512,17 +556,16 @@ impl RulePolicy {
     /// internal destinations named directly need an explicit allow rule.
     fn net_verdict(&self, dest: &Dest, best: &mut Best<'_>) {
         let internal = self.deny_private && is_internal(dest);
-        self.others().net.find(dest, |explicit, spelled, e| {
+        self.others().named.find(dest, |explicit, spelled, e| {
             if !e.allow || allow_applies(explicit, spelled, internal) {
                 best.offer(e.rank.spec(0), e.allow, e.rule);
             }
         });
     }
 
-    /// Offers the net and http rules matching a request; net rules match
-    /// any method and path.
+    /// Offers the http and net rules matching a request (see
+    /// [`RuleKind::http_match`]).
     fn http_verdict(&self, dest: &Dest, method: &str, scheme: &str, names: &[String], best: &mut Best<'_>) {
-        self.net_verdict(dest, best);
         let index = self.others();
         if index.groups.is_empty() {
             return;
@@ -556,8 +599,8 @@ impl RulePolicy {
             return if literal == ip { Decision::Allow } else { Decision::Deny };
         }
         let mut best = Best::new(&[]);
-        self.others().net.find_ip(ip, addr.port(), |spelled, e| {
-            if !(e.allow && spelled) {
+        self.others().resolved.find_ip(ip, addr.port(), |spelled, e| {
+            if !e.allow || allow_applies(true, spelled, false) {
                 best.offer(e.rank.spec(0), e.allow, e.rule);
             }
         });
@@ -605,7 +648,7 @@ fn refs<S: AsRef<str>>(names: &[S]) -> Vec<&str> {
 /// Whether an allow rule whose host pattern matches a destination decides
 /// requests to it: not where it matches another spelling of the address,
 /// and, for an `internal` destination, only if the pattern is `explicit`.
-fn allow_applies(explicit: bool, spelled: bool, internal: bool) -> bool {
+pub(crate) fn allow_applies(explicit: bool, spelled: bool, internal: bool) -> bool {
     !spelled && (explicit || !internal)
 }
 
@@ -653,15 +696,9 @@ impl Rank {
         Rank { tier: 0, weight: segs.iter().map(Seg::weight).sum(), methods: false }
     }
 
-    pub(crate) fn http(methods: Option<&[String]>, url: &UrlPattern) -> Rank {
-        let tier = url.host.rank() * 2 + url.scheme.is_some() as u32;
-        Rank { tier, weight: url.path.iter().map(Seg::weight).sum(), methods: methods.is_some() }
-    }
-
-    /// The rank of a net rule, which matches http requests as an http rule
-    /// for any method, scheme and path.
-    pub(crate) fn net(host: &NetPattern) -> Rank {
-        Rank { tier: host.rank() * 2, weight: 0, methods: false }
+    pub(crate) fn http(http: &HttpMatch) -> Rank {
+        let tier = http.host.rank() * 2 + http.scheme.is_some() as u32;
+        Rank { tier, weight: http.path.iter().map(Seg::weight).sum(), methods: http.methods.is_some() }
     }
 
     pub(crate) fn spec(self, depth: usize) -> Spec {
@@ -826,8 +863,11 @@ impl Resolver {
 /// The rules of a policy other than file rules.
 #[derive(Debug, Default)]
 struct Index {
-    net: HostIndex<NetEntry>,
-    /// Groups of http rules by host pattern.
+    /// The rules for each kind of connection (see [`RuleKind::connections`]).
+    named: HostIndex<NetEntry>,
+    resolved: HostIndex<NetEntry>,
+    /// Groups of http and net rules by host pattern (see
+    /// [`RuleKind::http_match`]).
     http: HostIndex<u32>,
     groups: Vec<HttpGroup>,
     listen: Vec<(ListenPattern, bool, u32)>,
@@ -868,26 +908,31 @@ impl Index {
         let mut groups: FxHashMap<String, u32> = FxHashMap::default();
         for (i, rule) in rules.iter().enumerate() {
             let (rule_id, allow) = (i as u32, rule.allow);
-            match &rule.kind {
-                RuleKind::Files(Access::Import, _) => index.imports_restricted |= allow,
-                RuleKind::Files(..) => {}
-                RuleKind::Net(p) => index.net.insert(p, NetEntry { rule: rule_id, allow, rank: Rank::net(p) }),
-                RuleKind::Http(methods, url) => {
-                    let key = url.host.to_string();
-                    let group = *groups.entry(key).or_insert_with(|| {
-                        index.http.insert(&url.host, index.groups.len() as u32);
-                        index.groups.push(HttpGroup::default());
-                        index.groups.len() as u32 - 1
-                    });
-                    let rank = Rank::http(methods.as_deref(), url);
-                    let entry = HttpEntry { rule: rule_id, methods: methods.clone(), scheme: url.scheme, rank };
-                    let group = &mut index.groups[group as usize];
-                    if allow {
-                        group.allow.insert(&url.path, entry, 1);
-                    } else {
-                        group.deny.insert(&fold_segments(&url.path), entry, 1);
+            if let Some(http) = rule.kind.http_match() {
+                let rank = Rank::http(&http);
+                for &connection in rule.kind.connections() {
+                    let entry = NetEntry { rule: rule_id, allow, rank };
+                    match connection {
+                        Connection::Named => index.named.insert(http.host, entry),
+                        Connection::Resolved => index.resolved.insert(http.host, entry),
                     }
                 }
+                let group = *groups.entry(http.host.to_string()).or_insert_with(|| {
+                    index.http.insert(http.host, index.groups.len() as u32);
+                    index.groups.push(HttpGroup::default());
+                    index.groups.len() as u32 - 1
+                });
+                let entry = HttpEntry { rule: rule_id, methods: http.methods.map(<[String]>::to_vec), scheme: http.scheme, rank };
+                let group = &mut index.groups[group as usize];
+                if allow {
+                    group.allow.insert(http.path, entry, 1);
+                } else {
+                    group.deny.insert(&fold_segments(http.path), entry, 1);
+                }
+            }
+            match &rule.kind {
+                RuleKind::Files(Access::Import, _) => index.imports_restricted |= allow,
+                RuleKind::Files(..) | RuleKind::Net(_) | RuleKind::Http(..) => {}
                 RuleKind::Listen(p) => index.listen.push((p.clone(), allow, rule_id)),
                 RuleKind::Env(NamePattern::Exact(n)) => index.env_names.entry(n.clone()).or_default().push((allow, rule_id)),
                 RuleKind::Env(p) => index.env.push((p.clone(), allow, rule_id)),

@@ -206,13 +206,14 @@ impl NetPattern {
         std::iter::once(ip).chain(ip_spellings(ip)).any(|ip| self.kind.matches_ip(ip))
     }
 
-    /// Whether an explicit pattern may name an internal destination (see
+    /// Whether the pattern may match an internal destination (see
     /// [`is_internal`]).
-    pub(crate) fn may_name_internal(&self) -> bool {
+    pub(crate) fn may_match_internal(&self) -> bool {
         match &self.kind {
+            HostKind::Any => true,
             HostKind::Host(h) => is_localhost(h),
             HostKind::Ip(ip, len) => *len < full_len(*ip) || is_private_address(*ip),
-            HostKind::Any | HostKind::Suffix(_) => false,
+            HostKind::Suffix(_) => false,
         }
     }
 }

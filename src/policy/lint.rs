@@ -4,7 +4,8 @@ use super::file::parse;
 use super::net::{HostKind, NetPattern, Unnamed, domains_above, enclosing_ranges};
 use super::path::{self, Pattern, Seg, name_counts};
 use super::rules::{
-    Access, IMPORT, READ, Rank, Rule, RuleKind, WRITE, file_segments, fold_segments, method_matches, precedence, scheme_matches,
+    Access, Connection, IMPORT, READ, Rank, Rule, RuleKind, WRITE, allow_applies, file_segments, fold_segments, method_matches, precedence,
+    scheme_matches,
 };
 use super::{Capability, PathSpace, PolicyError};
 use crate::lint::LintWarning;
@@ -100,7 +101,9 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
             let found = bypass(url.host.clone(), &url.host).or_else(|| {
                 let denied = std::iter::once(url.host.clone()).chain(url.host.reaching_ranges()).collect::<Vec<_>>();
                 let mut reach = paths.opposed(r, copies, 0).flat_map(|k| match k.scope {
-                    Scope::Http { host, net: true, .. } => denied.iter().filter_map(|d| host.intersection(d)).collect(),
+                    Scope::Http { host, connections, .. } if connections.contains(&Connection::Named) => {
+                        denied.iter().filter_map(|d| host.intersection(d)).collect()
+                    }
                     _ => Vec::new(),
                 });
                 reach.find_map(|reach| bypass(reach, &url.host))
@@ -123,20 +126,18 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
 enum Scope<'a> {
     /// File requests (`READ`, `WRITE`, `IMPORT`).
     Files(u8),
-    /// Http requests, and for a `net` rule (which matches http requests
-    /// for any method, scheme and path) connections.
-    Http { host: &'a NetPattern, scheme: Option<&'static str>, methods: Option<&'a [String]>, net: bool },
+    /// Http requests (see [`RuleKind::http_match`]), and connections (see
+    /// [`RuleKind::connections`]).
+    Http { host: &'a NetPattern, scheme: Option<&'static str>, methods: Option<&'a [String]>, connections: &'static [Connection] },
 }
 
 /// One kind of request: a file access, an http method (`None`: every
-/// method), a connection, or a connection to an address that a host name
-/// resolves to (which only address patterns decide).
+/// method), or a connection.
 #[derive(Clone, Copy)]
 enum Op<'a> {
     File(u8),
     Method(Option<&'a str>),
-    Connect,
-    Resolved,
+    Connect(Connection),
 }
 
 /// A file rule (as the policy matches it in a memory file system), an http
@@ -145,9 +146,10 @@ struct PathRule<'a> {
     index: usize,
     allow: bool,
     scope: Scope<'a>,
-    /// Whether it may decide a request to an internal destination, which an
-    /// allow rule may do only if it names the destination (see
-    /// [`super::RulePolicy::deny_private_networks`]).
+    /// Whether it decides the requests to internal destinations that its
+    /// host pattern matches (see [`allow_applies`]).
+    reaches_internal: bool,
+    /// Whether it decides a request to an internal destination.
     internal: bool,
     /// The pattern, root first (a deny rule's names folded, as the policy
     /// compares them).
@@ -172,16 +174,18 @@ impl<'a> PathRule<'a> {
                 let rank = Rank::file(&raw);
                 (Scope::Files(access.mask(rule.allow)), raw, rank)
             }
-            RuleKind::Http(methods, url) => {
-                let scope = Scope::Http { host: &url.host, scheme: url.scheme, methods: methods.as_deref(), net: false };
-                (scope, url.path.clone(), Rank::http(methods.as_deref(), url))
+            kind => {
+                let http = kind.http_match()?;
+                let scope = Scope::Http { host: http.host, scheme: http.scheme, methods: http.methods, connections: kind.connections() };
+                (scope, http.path.to_vec(), Rank::http(&http))
             }
-            RuleKind::Net(host) => (Scope::Http { host, scheme: None, methods: None, net: true }, Vec::new(), Rank::net(host)),
-            _ => return None,
         };
-        let internal = match scope {
-            Scope::Http { host, .. } => !rule.allow || !deny_private || host.may_name_internal(),
-            Scope::Files(_) => true,
+        let (reaches_internal, internal) = match scope {
+            Scope::Http { host, .. } => {
+                let reaches = !rule.allow || allow_applies(host.is_explicit(), false, deny_private);
+                (reaches, reaches && host.may_match_internal())
+            }
+            Scope::Files(_) => (true, true),
         };
         let folded = fold_segments(&raw);
         let exact_fold = |s: &Seg| !matches!(s, Seg::Glob(g) if g.pieces().iter().any(|p| !p.is_ascii()));
@@ -197,6 +201,7 @@ impl<'a> PathRule<'a> {
             index,
             allow: rule.allow,
             scope,
+            reaches_internal,
             internal,
             prefixes,
             rank,
@@ -210,11 +215,12 @@ impl<'a> PathRule<'a> {
     fn ops(&self) -> Vec<Op<'a>> {
         match self.scope {
             Scope::Files(mask) => [READ, WRITE, IMPORT].into_iter().filter(|&op| mask & op != 0).map(Op::File).collect(),
-            Scope::Http { methods: Some(methods), .. } => methods.iter().map(|m| Op::Method(Some(m))).collect(),
-            Scope::Http { net: false, .. } => vec![Op::Method(None)],
-            Scope::Http { host, net: true, .. } => {
-                let resolved = matches!(host.kind, HostKind::Ip(..)).then_some(Op::Resolved);
-                [Op::Method(None), Op::Connect].into_iter().chain(resolved).collect()
+            Scope::Http { methods, connections, .. } => {
+                let methods: Vec<Op> = match methods {
+                    Some(methods) => methods.iter().map(|m| Op::Method(Some(m))).collect(),
+                    None => vec![Op::Method(None)],
+                };
+                methods.into_iter().chain(connections.iter().map(|&c| Op::Connect(c))).collect()
             }
         }
     }
@@ -225,7 +231,7 @@ impl<'a> PathRule<'a> {
             (Scope::Files(mask), Op::File(op)) => mask & op != 0,
             (Scope::Http { methods, .. }, Op::Method(Some(m))) => method_matches(*methods, m),
             (Scope::Http { methods, .. }, Op::Method(None)) => methods.is_none(),
-            (_, Op::Connect | Op::Resolved) => self.may_decide(op),
+            (_, Op::Connect(_)) => self.may_decide(op),
             _ => false,
         }
     }
@@ -235,8 +241,7 @@ impl<'a> PathRule<'a> {
         match (&self.scope, op) {
             (Scope::Files(mask), Op::File(op)) => mask & op != 0,
             (Scope::Http { methods, .. }, Op::Method(m)) => m.is_none_or(|m| method_matches(*methods, m)),
-            (Scope::Http { net, .. }, Op::Connect) => *net,
-            (Scope::Http { host, net, .. }, Op::Resolved) => *net && matches!(host.kind, HostKind::Ip(..)),
+            (Scope::Http { connections, .. }, Op::Connect(c)) => connections.contains(&c),
             _ => false,
         }
     }
@@ -276,7 +281,7 @@ impl<'a> PathRule<'a> {
             (Scope::Files(_), Scope::Files(_)) => true,
             (Scope::Http { host: a, scheme: s, .. }, Scope::Http { host: b, scheme: t, .. }) => {
                 let schemes = t.map_or(s.is_none(), |t| scheme_matches(*s, t));
-                a.covers(b) && schemes && (a.is_explicit() || self.internal || !other.internal)
+                a.covers(b) && schemes && (self.reaches_internal || !other.internal)
             }
             _ => false,
         }
