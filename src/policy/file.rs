@@ -12,7 +12,7 @@
 //! limit memory 64M
 //! ```
 
-use super::net::{ListenPattern, NetPattern, UrlPattern, format_host_port, format_url_origin, url_segments};
+use super::net::{ListenPattern, NetPattern, UrlPattern, format_host_port, format_url_origin, parse_ip, url_segments};
 use super::path::{Seg, Tok};
 use super::rules::{Access, NamePattern, Origin, PathPattern, Rule, RuleKind};
 use super::{Capability, Decision, Policy, RulePolicy};
@@ -583,7 +583,12 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
             if alt.is_some() || !is_method(&method.to_ascii_uppercase()) || !matches!(scheme.as_str(), "http" | "https") {
                 return None;
             }
-            let mut url = format_url_origin(scheme, host, *port);
+            // After an address without a port, a path that starts with a
+            // number would make a range (`https://10.0.0.0/8`).
+            let mut url = match parse_ip(host) {
+                Some(_) => format!("{scheme}://{}", format_host_port(host, *port)),
+                None => format_url_origin(scheme, host, *port),
+            };
             for name in &names {
                 url.push('/');
                 url.push_str(&crate::stdlib::uri_encode(name, b"!$&'()+;=:@-._~"));
@@ -957,6 +962,46 @@ mod tests {
         assert_eq!(rule_for(&Capability::Stdout, false).as_deref(), Some("deny stdout"));
         let p = parse(&format!("default prompt\n{}", rule_for(caps.last().unwrap(), true).unwrap()));
         assert_eq!(decide(&p, Capability::NetListen("[::1]:22".parse().unwrap())), Prompt);
+    }
+
+    proptest::proptest! {
+        /// The rule for an http request to an address decides that request,
+        /// and does not decide requests to other addresses (a path that
+        /// starts with a number does not make a range).
+        #[test]
+        fn rules_for_http_requests_to_addresses_name_one_address(
+            bits in proptest::prelude::any::<u128>(),
+            zeros in 0..128u32,
+            v6 in proptest::prelude::any::<bool>(),
+            https in proptest::prelude::any::<bool>(),
+            port in proptest::sample::select(vec![80u16, 443, 8080]),
+            names in proptest::collection::vec(0..=130u32, 1..3),
+        ) {
+            // An address whose last bits are zero, so that the first name
+            // could be a prefix length.
+            let ip: std::net::IpAddr = if v6 {
+                std::net::Ipv6Addr::from(bits.checked_shr(zeros).unwrap_or(0).checked_shl(zeros).unwrap_or(0)).into()
+            } else {
+                let zeros = zeros % 32;
+                std::net::Ipv4Addr::from((bits as u32) >> zeros << zeros).into()
+            };
+            let other = match ip {
+                std::net::IpAddr::V4(v4) => std::net::IpAddr::V4((u32::from(v4) ^ 1).into()),
+                std::net::IpAddr::V6(v6) => std::net::IpAddr::V6((u128::from(v6) ^ 1).into()),
+            };
+            let path: String = names.iter().map(|n| format!("/{n}")).collect();
+            let scheme = if https { "https" } else { "http" };
+            let cap = |ip: std::net::IpAddr| Capability::Http {
+                method: "GET".into(), scheme: scheme.into(), host: ip.to_string(), port, path: path.clone(),
+            };
+            for allow in [true, false] {
+                let rule = rule_for(&cap(ip), allow);
+                proptest::prop_assert!(rule.is_some(), "no rule for {}", cap(ip));
+                let p = parse(&format!("default prompt\nallow private-net\n{}", rule.unwrap()));
+                proptest::prop_assert_eq!(decide(&p, cap(ip)), if allow { Allow } else { Deny }, "{}", cap(ip));
+                proptest::prop_assert_eq!(decide(&p, cap(other)), Prompt, "{}: {}", rule_for(&cap(ip), allow).unwrap(), cap(other));
+            }
+        }
     }
 
     #[test]
