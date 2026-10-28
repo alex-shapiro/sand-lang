@@ -2432,6 +2432,7 @@ If two opposing rules have equal specificity, deny wins. Rules:
   - a host pattern may match any domain `*`, a specific domain `example.com` or strict subdomains `*.example.com`
   - a host pattern may also match an IP address (`127.0.0.1`, `::1`) or a CIDR range (`10.0.0.0/8`, `fc00::/7`),
     optionally with a port (`host:443`, `[::1]:8080`, `10.0.0.0/8:443`, `[fc00::/7]:443`).
+    A range names its first address: `10.0.0.1/8` is an error.
   - Exact hosts and addresses are most specific, then ranges and domains (longer ones more), then `*`
   - A port increases rule specificity.
   - Host names must be ASCII and are compared case-insensitively, ignoring a trailing dot
@@ -2556,8 +2557,11 @@ All paths must be anchored, but they may be prefixed with a shortcut:
 - `../...` begins at the file's parent directory
 - `~/...` begins at the user's home directory
 
-URL patterns are `[scheme://]host[:port][/path]`: a host pattern (§14.5,
-without ranges), then path segments as for files, percent-decoded. A pattern
+URL patterns are `[scheme://]host[/path]`: a host pattern as in a net rule
+(§14.5), then path segments as for files, percent-decoded. As in a net rule, a
+prefix length after an address makes a range: `10.0.0.0/8/admin` is the path
+`/admin` on the range `10.0.0.0/8`. For a path that starts with a number on
+one address, write the port or `/32` first (`10.0.0.1:80/8`). A pattern
 without a port but with a scheme matches the scheme's default port. A pattern
 without a port or a scheme matches any port.
 

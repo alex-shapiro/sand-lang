@@ -136,7 +136,7 @@ impl Default for RulePolicy {
 }
 
 fn net_pattern(pattern: &str) -> NetPattern {
-    NetPattern::parse(pattern).unwrap_or_else(|| panic!("invalid network pattern {pattern:?}"))
+    NetPattern::parse(pattern).unwrap_or_else(|e| panic!("{e}"))
 }
 
 fn listen_pattern(pattern: &str) -> ListenPattern {

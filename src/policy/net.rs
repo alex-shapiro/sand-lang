@@ -30,7 +30,7 @@ pub(crate) enum HostKind {
 
 /// Returns true if `pattern` is a valid network pattern (see [`super::RulePolicy::allow_net`]).
 pub fn is_valid_net_pattern(pattern: &str) -> bool {
-    NetPattern::parse(pattern).is_some()
+    NetPattern::parse(pattern).is_ok()
 }
 
 /// Returns true if `pattern` is a valid listen pattern (see [`super::RulePolicy::allow_listen`]).
@@ -54,7 +54,22 @@ fn canonical_hostname(name: &str) -> Option<String> {
 }
 
 impl NetPattern {
-    pub(crate) fn parse(pattern: &str) -> Option<NetPattern> {
+    /// Parses a host pattern of a `net` or `http` rule. A range must name
+    /// its first address (`10.0.0.0/8`, not `10.0.0.1/8`).
+    pub(crate) fn parse(pattern: &str) -> Result<NetPattern, String> {
+        let invalid =
+            || format!("invalid host pattern `{pattern}` (expected a host, host:port, *.domain, *, an IP address or a CIDR range)");
+        let parsed = NetPattern::parse_unmasked(pattern).ok_or_else(invalid)?;
+        if let HostKind::Ip(ip, len) = parsed.kind
+            && mask(ip, len) != ip
+        {
+            let range = NetPattern { kind: HostKind::Ip(mask(ip, len), len), ..parsed };
+            return Err(format!("`{pattern}` has bits set after its prefix length: write `{range}`"));
+        }
+        Ok(parsed)
+    }
+
+    fn parse_unmasked(pattern: &str) -> Option<NetPattern> {
         // `[v6]`, `[v6/len]` or `[v6]/len`, each optionally with `:port`;
         // otherwise a port may follow a single colon.
         let (body, port): (String, Option<&str>) = if let Some(rest) = pattern.strip_prefix('[') {
@@ -90,9 +105,8 @@ impl NetPattern {
             let len: u8 = len.parse().ok()?;
             match ip {
                 // Ranges of IPv4-mapped addresses are IPv4 ranges.
-                IpAddr::V6(v6) if v6.to_ipv4_mapped().is_some() && len >= 96 => HostKind::Ip(mask(ip.to_canonical(), len - 96), len - 96),
-                IpAddr::V4(_) if len <= 32 => HostKind::Ip(mask(ip, len), len),
-                IpAddr::V6(_) if len <= 128 => HostKind::Ip(mask(ip, len), len),
+                IpAddr::V6(v6) if v6.to_ipv4_mapped().is_some() && len >= 96 => HostKind::Ip(ip.to_canonical(), len - 96),
+                _ if len <= full_len(ip) => HostKind::Ip(ip, len),
                 _ => return None,
             }
         } else if let Some(ip) = body_ip(&body) {
@@ -661,11 +675,28 @@ impl UrlPattern {
             },
             None => (None, text),
         };
-        let end = rest.iter().position(|t| t.0 == '/').unwrap_or(rest.len());
-        let authority: String = rest[..end].iter().map(|t| t.0).collect();
-        let mut host = NetPattern::parse(&authority)
-            .filter(|p| !matches!(p.kind, HostKind::Ip(ip, len) if len != full_len(ip)))
-            .ok_or_else(|| format!("invalid host `{authority}` (expected a host, host:port, *.domain, * or an IP address)"))?;
+        let text = |toks: &[Tok]| toks.iter().map(|t| t.0).collect::<String>();
+        let slash_from = |from: usize| rest[from..].iter().position(|t| t.0 == '/').map_or(rest.len(), |i| from + i);
+        // A `/` in brackets belongs to an IPv6 range (`[fc00::/7]`).
+        let mut end =
+            slash_from(if rest.first().is_some_and(|t| t.0 == '[') { rest.iter().position(|t| t.0 == ']').unwrap_or(0) } else { 0 });
+        // As in a net rule, a prefix length after an address makes a range
+        // (`10.0.0.0/8/admin`).
+        let head = text(&rest[..end]);
+        if let Ok(NetPattern { kind: HostKind::Ip(ip, len), port: None }) = NetPattern::parse(&head)
+            && len == full_len(ip)
+            && end < rest.len()
+        {
+            let next = slash_from(end + 1);
+            let after = text(&rest[end + 1..next]);
+            let prefix = after.split_once(':').map_or(after.as_str(), |(prefix, _)| prefix);
+            // The length of the address as written (IPv4-mapped addresses are IPv6).
+            let max = if head.contains(':') { 128 } else { 32 };
+            if prefix.bytes().all(|b| b.is_ascii_digit()) && prefix.parse::<u8>().is_ok_and(|p| p <= max) {
+                end = next;
+            }
+        }
+        let mut host = NetPattern::parse(&text(&rest[..end]))?;
         if host.port.is_none() {
             host.port = scheme.map(|s| if s == "http" { 80 } else { 443 });
         }
@@ -734,4 +765,54 @@ fn resolve_dots<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn url(text: &str) -> Result<UrlPattern, String> {
+        UrlPattern::parse(&text.chars().map(|c| (c, false)).collect::<Vec<_>>())
+    }
+
+    proptest! {
+        /// An http rule reads its host as a net rule does, and the path
+        /// after it as after any host. A prefix length after an address
+        /// makes a range.
+        #[test]
+        fn url_hosts_are_net_patterns(
+            host in prop::sample::select(vec![
+                "*", "*:443", "*.example.com", "a.com:8080", "8.8.8.8", "8.8.8.8:80", "10.0.0.1", "::1", "[::1]", "[::1]:80",
+                "10.0.0.0/8", "10.0.0.0/8:443", "[fc00::/7]", "[fc00::]/7", "[fc00::]/7:443", "[fc00::/7]:443", "fc00::/7",
+                "::ffff:10.0.0.0/104", "10.0.0.1/8", "[fc00::1/7]", "[::1]:x", "a..b",
+            ]),
+            scheme in prop::sample::select(vec!["", "https://"]),
+            path in prop::collection::vec(prop::sample::select(vec!["a", "8", "24", "128", "2024", "8:1", "*", "**"]), 0..3),
+        ) {
+            let path: String = path.iter().map(|n| format!("/{n}")).collect();
+            let parsed = url(&format!("{scheme}{host}{path}"));
+            let bare_address = matches!(NetPattern::parse(host), Ok(NetPattern { kind: HostKind::Ip(ip, len), port: None }) if len == full_len(ip));
+            let first = path.split('/').nth(1).map(|n| n.split(':').next().unwrap_or(n));
+            let max = if host.contains(':') { 128 } else { 32 };
+            let (host, path) = match first.and_then(|n| n.parse::<u8>().ok()) {
+                Some(len) if bare_address && len <= max => {
+                    let (len, rest) = path[1..].split_once('/').map_or((&path[1..], ""), |(len, rest)| (len, rest));
+                    (format!("{host}/{len}"), format!("/{}", rest.trim_start_matches('/')))
+                }
+                _ => (host.to_string(), path),
+            };
+            match NetPattern::parse(&host) {
+                Ok(mut expected) => {
+                    if expected.port.is_none() && !scheme.is_empty() {
+                        expected.port = Some(443);
+                    }
+                    let parsed = parsed.unwrap();
+                    prop_assert_eq!(&parsed.host, &expected);
+                    prop_assert_eq!(parsed.path, url(&format!("example.com{path}")).unwrap().path);
+                }
+                Err(e) => prop_assert_eq!(parsed.unwrap_err(), e),
+            }
+        }
+    }
 }

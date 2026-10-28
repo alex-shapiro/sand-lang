@@ -464,12 +464,7 @@ impl Context<'_> {
                         };
                         RuleKind::Files(access, self.path(&word.tokens()).map_err(|m| (item.column, m))?)
                     }
-                    "net" => {
-                        let text = word.text();
-                        RuleKind::Net(NetPattern::parse(&text).ok_or_else(|| {
-                            (item.column, format!("invalid network pattern `{text}` (expected a host, host:port, *.domain, *, an IP address or a CIDR range)"))
-                        })?)
-                    }
+                    "net" => RuleKind::Net(NetPattern::parse(&word.text()).map_err(|m| (item.column, m))?),
                     "http" if is_method(&word.text()) => {
                         if urls > 0 {
                             return Err((item.column, "methods come before the URL patterns".into()));
@@ -580,7 +575,7 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
         Capability::Import(p) => format!("import {}", path(p)?),
         Capability::Net { host, port } => {
             let pattern = format_host_port(host, *port);
-            NetPattern::parse(&pattern)?;
+            NetPattern::parse(&pattern).ok()?;
             format!("net {pattern}")
         }
         Capability::Http { method, scheme, host, port, path } => {
@@ -855,6 +850,33 @@ mod tests {
     }
 
     #[test]
+    fn http_rules_take_the_host_patterns_of_net_rules() {
+        let p =
+            parse("allow http *\nallow private-net\ndeny http 10.0.0.0/8\ndeny http GET fc00::/7/admin\ndeny http [2001:db8::/32]:8080/x");
+        assert_eq!(http(&p, "GET", "http://10.1.2.3/x"), Deny);
+        assert_eq!(http(&p, "GET", "http://[::ffff:10.1.2.3]/"), Deny);
+        assert_eq!(http(&p, "GET", "http://11.0.0.1/x"), Allow);
+        assert_eq!(http(&p, "GET", "http://[fd00::1]/admin/x"), Deny);
+        assert_eq!(http(&p, "GET", "http://[fd00::1]/x"), Allow);
+        assert_eq!(http(&p, "GET", "http://[2001:db8::5]:8080/x"), Deny);
+        assert_eq!(http(&p, "GET", "http://[2001:db8::5]/x"), Allow);
+        // A path begins after an address that no length follows.
+        let p = parse("allow http *\nallow private-net\ndeny http [::1]/admin\ndeny http 10.0.0.1:80/8");
+        assert_eq!(http(&p, "GET", "http://[::1]/admin"), Deny);
+        assert_eq!(http(&p, "GET", "http://[::1]/x"), Allow);
+        assert_eq!(http(&p, "GET", "http://10.0.0.1/8"), Deny);
+        assert_eq!(http(&p, "GET", "http://10.0.0.1/x"), Allow);
+        // A range names its first address.
+        assert_eq!(
+            errors("allow net 10.0.0.1/8\ndeny http 192.168.1.1/24/x"),
+            [
+                "1:11: `10.0.0.1/8` has bits set after its prefix length: write `10.0.0.0/8`",
+                "2:11: `192.168.1.1/24` has bits set after its prefix length: write `192.168.1.0/24`",
+            ]
+        );
+    }
+
+    #[test]
     fn hashes_start_comments_only_at_the_start_of_a_word() {
         let p = parse("deny read ./data/x#1   # the comment\nallow read ./data");
         assert_eq!(read(&p, "/base/data/x#1"), Deny);
@@ -957,7 +979,7 @@ mod tests {
             [
                 "1:1: unknown rule `alow` (rules start with `allow`, `deny`, `default`, `limit` or `let`)",
                 "2:1: expected what to allow: a path, or read, write, import, net, http, private-net, listen, env, stdin, stdout, stderr, timezone or custom",
-                "3:17: invalid network pattern `pattern!` (expected a host, host:port, *.domain, *, an IP address or a CIDR range)",
+                "3:17: invalid host pattern `pattern!` (expected a host, host:port, *.domain, *, an IP address or a CIDR range)",
                 "4:7: invalid size `lots` (use e.g. 4096, 64K, 256M, 1G)",
                 "5:1: expected `limit NAME VALUE`, e.g. `limit memory 64M`",
                 "6:9: unknown default `maybe` (expected `deny`, `prompt` or `allow`)",

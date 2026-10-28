@@ -858,7 +858,6 @@ mod tests {
         let methods = prop::sample::select(vec!["", "", "GET ", "POST ", "GET POST ", "PUT GET "]);
         let access = prop::sample::select(vec!["", "read ", "write ", "import "]);
         let verb = prop::sample::select(vec!["allow", "deny"]);
-        // In an http rule, `/len` after an address begins the path.
         prop_oneof![
             (verb.clone(), access, path.clone()).prop_map(|(v, a, p)| format!("{v} {a}/r{p}")),
             (verb.clone(), methods, scheme, hosts(), port(), path).prop_map(|(v, m, s, h, port, p)| format!("{v} http {m}{s}{h}{port}{p}")),
