@@ -94,19 +94,57 @@ Follow-up work, roughly in priority order.
 
 ### Policy
 
+- [ ] **Make the built-in policy a set of standard rules.** Code outside the
+      rules decides some requests, so users, prompts and the linter cannot
+      see every rule that decides:
+      - `check_normalized_in` (`src/policy/rules.rs`) allows standard output
+        and standard error, and allows imports if no `allow import` rule
+        exists.
+      - `deny_private_networks()` keeps wildcard allow rules from internal
+        destinations (`is_internal`, `allow_applies`), denies internal
+        destinations that only `default allow` allows, and lets `localhost`
+        reach loopback addresses (`check_addr`).
+
+      At startup, turn these into standard rules that the standard check
+      evaluates, with no other path. Remove the host settings that make
+      such rules in code (`deny_private_networks()`, the private-network
+      flag of `PolicyFile`, the CLI's `--allow-private-net`), and make sure
+      that the host API can add the equivalent standard rules. Then the
+      linter compares only rules, and its `reaches_internal` and `internal`
+      flags go away. Two design points:
+      - At equal specificity, a user rule must take precedence over a
+        built-in rule: `allow net localhost` must beat a built-in `deny net
+        localhost`, but a deny wins at a tie between user rules.
+      - An explicit hostname rule must also decide the addresses that the
+        name resolves to where that is safe: `allow net localhost` must
+        reach `127.0.0.1` without an address rule.
+
+      Treat names under `localhost` as `localhost` (RFC 6761): macOS and
+      systemd-resolved resolve them to loopback addresses. `is_localhost`
+      (`src/policy/net.rs`) matches only `localhost`. So `allow net *`
+      allows `Net(x.localhost)` and then denies its loopback addresses, and
+      an explicit `allow net app.localhost` cannot reach a local server
+      without `allow private-net`. Decide whether `allow net *.localhost`
+      counts as an explicit rule.
+- [ ] Do not resolve IP literals. For an IP literal, `check_addr` ignores
+      every rule and allows only the literal's own address, which carries
+      the decision of the hostname check (a prompt answer included) to the
+      address check. Instead, make `resolve_allowed` (`src/stdlib/net.rs`)
+      connect to the literal with no resolver call and no `NetAddr` check,
+      and remove the shortcut from `check_addr`.
 - [ ] Apply the address patterns of http rules to the addresses that host
       names resolve to. With `allow http *`, `allow private-net` and `deny
       http 10.0.0.0/8/admin`, `GET http://intranet/admin` is allowed if
       `intranet` resolves to `10.0.0.5`. `Capability::NetAddr` has no
       method or path, so only net rules decide resolved addresses.
-- [ ] Treat names under `localhost` as `localhost` (RFC 6761): macOS and
-      systemd-resolved resolve them to loopback addresses. `is_localhost`
-      (`src/policy/net.rs`) matches only `localhost`, so `allow net *`
-      allows `Net(x.localhost)` and then denies its loopback addresses, and
-      an explicit `allow net app.localhost` cannot reach a local server
-      without `allow private-net`. The linter then reports `deny http
-      *.localhost/admin` as bypassable under `allow net *`. Decide also
-      whether `allow net *.localhost` counts as an explicit rule.
+- [ ] Give prompts a rule for http requests whose path has an encoded
+      separator (`%2F`, `%5C`). The policy checks both readings of such a
+      path, but `rule_for` (`src/policy/file.rs`) returns `None`, so a
+      prompt cannot offer "allow always" and asks again each time.
+- [ ] Document in §14.5 that a deny rule for an IPv4 address also matches
+      the IPv6 forms that embed it (`::a00:1`, `::ffff:0:a00:1`,
+      `64:ff9b::a00:1`, `2002:a00:1::`), and that a deny rule for
+      `127.0.0.1` or `::1` also matches `0.0.0.0` and `::`.
 
 ### Tooling
 
