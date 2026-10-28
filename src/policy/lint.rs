@@ -918,10 +918,22 @@ mod tests {
             "127.0.0.2",
         ];
         for host in hosts {
-            for (scheme, port) in [("https", 443), ("http", 80), ("http", 443), ("https", 80), ("https", 8080)] {
+            for (scheme, port) in [("https", 443), ("http", 80), ("http", 443), ("https", 80), ("https", 8080), ("https", 22)] {
                 probes.push(Capability::Net { host: host.into(), port });
                 for method in ["GET", "POST", "PUT"] {
-                    for path in ["/", "/a", "/A/a", "/x.txt/k1", "/k1/A/a", "/a%2Fk1", "/a/b/x.txt", "/b/a/a"] {
+                    for path in [
+                        "/",
+                        "/a",
+                        "/A/a",
+                        "/x.txt/k1",
+                        "/k1/A/a",
+                        "/a%2Fk1",
+                        "/a/b/x.txt",
+                        "/b/a/a",
+                        "/%C3%A9",
+                        "/%C3%89/a/b",
+                        "/a/%C3%A9/k1",
+                    ] {
                         let (method, scheme, host, path) = (method.into(), scheme.into(), host.into(), path.into());
                         probes.push(Capability::Http { method, scheme, host, port, path });
                     }
