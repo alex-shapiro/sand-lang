@@ -3,7 +3,9 @@
 use super::file::parse;
 use super::net::{HostKind, NetPattern, Unnamed, domains_above};
 use super::path::{self, Pattern, Seg, name_counts};
-use super::rules::{IMPORT, READ, Rank, Rule, RuleKind, WRITE, file_segments, fold_segments, method_matches, precedence, scheme_matches};
+use super::rules::{
+    Access, IMPORT, READ, Rank, Rule, RuleKind, WRITE, file_segments, fold_segments, method_matches, precedence, scheme_matches,
+};
 use super::{Capability, PathSpace, PolicyError};
 use crate::lint::LintWarning;
 use crate::vm::value::{FxBuild, FxHashMap};
@@ -64,6 +66,7 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
         });
         found.clone()
     };
+    let allow_imports = rules.iter().filter(|r| r.allow && matches!(r.kind, RuleKind::Files(Access::Import, _))).count();
     let mut same: FxHashMap<(bool, &RuleKind), Vec<usize>> = FxHashMap::default();
     for (i, r) in rules.iter().enumerate() {
         same.entry((r.allow, &r.kind)).or_default().push(i);
@@ -76,7 +79,9 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
             continue;
         }
         let Some(r) = paths.get(i) else { continue };
-        if !matches!(rule.kind, RuleKind::Net(_)) {
+        // The only `allow import` rule also denies the imports that no rule matches.
+        let restricts_imports = rule.allow && matches!(rule.kind, RuleKind::Files(Access::Import, _)) && allow_imports == 1;
+        if !matches!(rule.kind, RuleKind::Net(_)) && !restricts_imports {
             let (mut agree, mut oppose, mut needed) = (Vec::new(), Vec::new(), false);
             let broader = paths.broader(r, copies);
             for op in r.ops() {
@@ -506,6 +511,12 @@ mod tests {
         assert_eq!(lint("allow read ./a\nallow write ./a"), ["1:12: warning[redundant-rule]: line 2 (`./a`) already allows this"]);
         assert_eq!(lint("allow read ./a\nallow write ./a/b"), Vec::<String>::new());
         assert_eq!(lint("allow write ./a\nallow read ./a"), ["2:12: warning[redundant-rule]: line 1 (`./a`) already allows this"]);
+        // The only `allow import` rule restricts imports to its paths.
+        assert_eq!(lint("allow import ./lib/a\ndeny ./lib/a"), Vec::<String>::new());
+        assert_eq!(
+            lint("allow import ./lib/a\ndeny ./lib/a\nallow import ./src"),
+            ["1:14: warning[overridden-rule]: line 2 (`./lib/a`) takes precedence everywhere this rule applies"]
+        );
     }
 
     #[test]
@@ -768,6 +779,14 @@ mod tests {
                 }
             }
         }
+        for host in ["example.com", "api.example.com", "localhost", "other.com"] {
+            for ip in ["0.0.0.0", "10.0.0.1", "10.2.3.4", "8.8.8.8", "127.0.0.1", "::1", "64:ff9b::808:808"] {
+                for port in [443, 80] {
+                    let addr = std::net::SocketAddr::new(ip.parse().unwrap(), port);
+                    probes.push(Capability::NetAddr { host: host.into(), addr });
+                }
+            }
+        }
         probes
     }
 
@@ -777,18 +796,23 @@ mod tests {
         /// Removing a rule the linter reports does not change any decision.
         #[test]
         fn reported_rules_are_not_needed(lines in prop::collection::vec(rule_line(), 1..9), private in any::<bool>()) {
-            let text = lines.join("\n") + if private { "\nallow private-net" } else { "" };
             let (base, home) = (Path::new("/base"), Some(Path::new("/home/me")));
-            let warnings = lint_policy(&text, base, home).unwrap();
-            let file = PolicyFile::parse(&text, base, home).unwrap();
-            let policy = if private { file.rules.clone() } else { file.rules.clone().deny_private_networks() };
-            let rules = policy.rules();
-            for w in warnings.iter().filter(|w| w.code != "unused-set" && w.code != "bypassable-http-deny") {
-                let i = rules.iter().position(|r| r.origin.as_ref().is_some_and(|o| (o.line, o.column) == (w.line, w.column))).unwrap();
+            let text = |lines: &[String]| lines.join("\n") + if private { "\nallow private-net" } else { "" };
+            let policy = |lines: &[String]| {
+                let rules = PolicyFile::parse(&text(lines), base, home).unwrap().rules;
+                if private { rules } else { rules.deny_private_networks() }
+            };
+            let with = policy(&lines);
+            for w in lint_policy(&text(&lines), base, home).unwrap() {
+                if w.code == "unused-set" || w.code == "bypassable-http-deny" {
+                    continue;
+                }
+                let mut rest = lines.clone();
+                rest.remove(w.line - 1);
+                let without = policy(&rest);
                 for cap in probes() {
-                    let with = policy.verdict(cap, PathSpace::Memory, &[]).map(|v| v.0);
-                    let without = policy.verdict(cap, PathSpace::Memory, &[i]).map(|v| v.0);
-                    prop_assert_eq!(with, without, "{}\n{}: {}", text, w, cap);
+                    let (a, b) = (with.check_normalized_in(cap, PathSpace::Memory), without.check_normalized_in(cap, PathSpace::Memory));
+                    prop_assert_eq!(a, b, "{}\n{}: {}", text(&lines), w, cap);
                 }
             }
         }
