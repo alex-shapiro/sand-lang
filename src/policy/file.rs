@@ -73,11 +73,12 @@ impl PolicyFile {
     /// decides when the file has no `default` line (e.g. `Prompt` where a
     /// person is at hand to answer).
     pub fn policy_or(&self, fallback: Decision) -> Policy {
-        let mut rules = self.rules.clone().fallback(self.default.unwrap_or(fallback));
-        if !self.private_net {
-            rules = rules.deny_private_networks();
-        }
-        Policy::rules(rules)
+        Policy::rules(self.rule_policy(fallback))
+    }
+
+    pub(crate) fn rule_policy(&self, fallback: Decision) -> RulePolicy {
+        let rules = self.rules.clone().fallback(self.default.unwrap_or(fallback));
+        if self.private_net { rules } else { rules.deny_private_networks() }
     }
 }
 
@@ -86,6 +87,8 @@ pub(crate) struct Parsed {
     pub file: PolicyFile,
     /// The sets: name, line, column, whether used.
     pub sets: Vec<(String, usize, usize, bool)>,
+    /// The line of the `default` rule.
+    pub default_line: Option<usize>,
 }
 
 /// A line of a policy file: words, and the comment (from its `#`).
@@ -375,7 +378,7 @@ pub(crate) fn parse(text: &str, base: &Path, home: Option<&Path>) -> Result<Pars
     }
     file.rules = RulePolicy::new().extend(rules);
     let sets = sets.into_iter().map(|(name, line, column)| (name.clone(), line, column, cx.used.contains_key(&name))).collect();
-    Ok(Parsed { file, sets })
+    Ok(Parsed { file, sets, default_line })
 }
 
 impl Context<'_> {

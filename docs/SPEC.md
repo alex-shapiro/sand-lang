@@ -2598,12 +2598,12 @@ writes methods in upper case, aligns the trailing comments of consecutive
 lines and removes runs of blank lines. `sandlang::policy::lint_policy`
 reports:
 
-| Lint                   | Description                                                                         |
-| ---------------------- | ----------------------------------------------------------------------------------- |
-| `redundant-rule`       | a rule repeats another, or broader rules already decide what it covers the same way |
-| `overridden-rule`      | rules taking precedence decide everything a rule covers the other way               |
-| `bypassable-http-deny` | a `deny http` rule names a destination that a net rule lets scripts connect to      |
-| `unused-set`           | a `let` set that is never referenced in a rule                                      |
+| Lint                   | Description                                                                                         |
+| ---------------------- | --------------------------------------------------------------------------------------------------- |
+| `redundant-rule`       | a rule repeats another, or broader rules already decide what it covers the same way                 |
+| `overridden-rule`      | rules taking precedence decide everything a rule covers the other way                               |
+| `bypassable-http-deny` | a `deny http` rule names a destination that a net rule, or `default allow`, lets scripts connect to |
+| `unused-set`           | a `let` set that is never referenced in a rule                                                      |
 
 The linter compares file, http and net rules by what their patterns match,
 wildcards included. It compares paths as written, without resolving
