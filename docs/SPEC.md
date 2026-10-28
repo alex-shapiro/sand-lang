@@ -2558,15 +2558,15 @@ All paths must be anchored, but they may be prefixed with a shortcut:
 - `~/...` begins at the user's home directory
 
 URL patterns are `[scheme://]host[/path]`: a host pattern as in a net rule
-(§14.5), then path segments as for files, percent-decoded. As in a net rule, a
-prefix length after an address makes a range: `10.0.0.0/8/admin` is the path
-`/admin` on the range `10.0.0.0/8`. For a path that starts with a number on
-one address, write the full length first (`10.0.0.1/32/8`, `[::1]/128/8`). A
-pattern without a port but with a scheme matches the scheme's default port. A
-pattern without a port or a scheme matches any port. An address pattern
-matches the address that a URL names, not the addresses that its host name
-resolves to (§14.6): to deny an address for every host name, use a `deny net`
-rule.
+(§14.5) but without ranges, then path segments as for files,
+percent-decoded. A range is a net rule: `deny http 10.0.0.0/8` is an error,
+and `deny net 10.0.0.0/8` denies connections and http requests to the range.
+For a path that starts with a number on an address, write the full length
+first (`10.0.0.1/32/8`, `[::1]/128/8`). A pattern without a port but with a
+scheme matches the scheme's default port. A pattern without a port or a
+scheme matches any port. An address pattern matches the address that a URL
+names, not the addresses that its host name resolves to (§14.6): to deny an
+address for every host name, use a `deny net` rule.
 
 HTTP Methods (`GET`, any case, or any upper-case word) precede URLs.
 If no method is present, an http rule matches every method.

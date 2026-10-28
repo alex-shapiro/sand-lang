@@ -935,36 +935,31 @@ mod tests {
     fn rule_line() -> impl Strategy<Value = String> {
         let names = || prop::sample::select(vec!["a", "A", "b", "é", "*", "**", "x.*", "k*", "*.txt", "{n}"]);
         let path = prop::collection::vec(names(), 0..4).prop_map(|n| n.iter().map(|n| format!("/{n}")).collect::<String>());
-        let hosts = || {
-            prop::sample::select(vec![
-                "*",
-                "*.com",
-                "*.example.com",
-                "*.api.example.com",
-                "example.com",
-                "api.example.com",
-                "b.api.example.com",
-                "localhost",
-                "*.localhost",
-                "0.0.0.0",
-                "127.0.0.1",
-                "10.0.0.1",
-                "8.8.8.8",
-                "[::1]",
-                "[64:ff9b::808:808]",
-                "10.0.0.0/8",
-                "8.0.0.0/8",
-                "0.0.0.0/0",
-                "[::]/0",
-                "x0.example.com",
-                "127.0.0.0/8",
-                "[::ffff:0:a00:1]",
-                "[64:ff9b::]/96",
-                "[2002::]/16",
-                "[::]",
-                "{h}",
-            ])
-        };
+        let hosts = vec![
+            "*",
+            "*.com",
+            "*.example.com",
+            "*.api.example.com",
+            "example.com",
+            "api.example.com",
+            "b.api.example.com",
+            "localhost",
+            "*.localhost",
+            "0.0.0.0",
+            "127.0.0.1",
+            "10.0.0.1",
+            "8.8.8.8",
+            "[::1]",
+            "[64:ff9b::808:808]",
+            "x0.example.com",
+            "[::ffff:0:a00:1]",
+            "[::]",
+            "{h}",
+        ];
+        // Only net rules take ranges.
+        let ranges = ["10.0.0.0/8", "8.0.0.0/8", "0.0.0.0/0", "[::]/0", "127.0.0.0/8", "[64:ff9b::]/96", "[2002::]/16"];
+        let net_hosts = prop::sample::select(hosts.iter().chain(&ranges).copied().collect::<Vec<_>>());
+        let hosts = prop::sample::select(hosts);
         let port = || prop::sample::select(vec!["", "", ":443", ":80", ":8080"]);
         let scheme = prop::sample::select(vec!["", "", "https://", "http://"]);
         let methods = prop::sample::select(vec!["", "", "GET ", "POST ", "GET POST ", "PUT GET "]);
@@ -972,8 +967,8 @@ mod tests {
         let verb = prop::sample::select(vec!["allow", "deny"]);
         prop_oneof![
             (verb.clone(), access, path.clone()).prop_map(|(v, a, p)| format!("{v} {a}/r{p}")),
-            (verb.clone(), methods, scheme, hosts(), port(), path).prop_map(|(v, m, s, h, port, p)| format!("{v} http {m}{s}{h}{port}{p}")),
-            (verb, hosts(), port()).prop_map(|(v, h, port)| format!("{v} net {h}{port}")),
+            (verb.clone(), methods, scheme, hosts, port(), path).prop_map(|(v, m, s, h, port, p)| format!("{v} http {m}{s}{h}{port}{p}")),
+            (verb, net_hosts, port()).prop_map(|(v, h, port)| format!("{v} net {h}{port}")),
         ]
     }
 

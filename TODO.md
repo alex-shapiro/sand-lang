@@ -134,7 +134,7 @@ Follow-up work, roughly in priority order.
       and remove the shortcut from `check_addr`.
 - [ ] Apply the address patterns of http rules to the addresses that host
       names resolve to. With `allow http *`, `allow private-net` and `deny
-      http 10.0.0.0/8/admin`, `GET http://intranet/admin` is allowed if
+      http 10.0.0.5/admin`, `GET http://intranet/admin` is allowed if
       `intranet` resolves to `10.0.0.5`. `Capability::NetAddr` has no
       method or path, so only net rules decide resolved addresses.
 - [ ] Give prompts a rule for http requests whose path has an encoded

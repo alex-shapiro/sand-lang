@@ -858,12 +858,12 @@ mod tests {
     }
 
     #[test]
-    fn http_rules_take_the_host_patterns_of_net_rules() {
+    fn http_rules_take_single_addresses() {
         let p =
-            parse("allow http *\nallow private-net\ndeny http 10.0.0.0/8\ndeny http GET fc00::/7/admin\ndeny http [2001:db8::/32]:8080/x");
-        assert_eq!(http(&p, "GET", "http://10.1.2.3/x"), Deny);
-        assert_eq!(http(&p, "GET", "http://[::ffff:10.1.2.3]/"), Deny);
-        assert_eq!(http(&p, "GET", "http://11.0.0.1/x"), Allow);
+            parse("allow http *\nallow private-net\ndeny http 10.0.0.1/x\ndeny http GET [fd00::1]/admin\ndeny http [2001:db8::5]:8080/x");
+        assert_eq!(http(&p, "GET", "http://10.0.0.1/x"), Deny);
+        assert_eq!(http(&p, "GET", "http://[::ffff:10.0.0.1]/x"), Deny);
+        assert_eq!(http(&p, "GET", "http://10.0.0.2/x"), Allow);
         assert_eq!(http(&p, "GET", "http://[fd00::1]/admin/x"), Deny);
         assert_eq!(http(&p, "GET", "http://[fd00::1]/x"), Allow);
         assert_eq!(http(&p, "GET", "http://[2001:db8::5]:8080/x"), Deny);
@@ -880,18 +880,18 @@ mod tests {
         assert_eq!(http(&p, "GET", "http://10.0.0.2/8"), Allow);
         assert_eq!(http(&p, "GET", "http://[::]/8"), Deny);
         assert_eq!(http(&p, "GET", "http://[::1]/8"), Allow);
-        // A range names its first address. After an address in a URL
-        // pattern, the number may also be the start of a path.
+        // A range is a net rule, and a net rule's range names its first address.
         assert_eq!(
             errors(
-                "allow net 10.0.0.1/8\ndeny http 192.168.1.1/24/x\ndeny http [::1]/64/x\nallow http ::ffff:10.0.0.1/8\nallow net 10.0.0.0/+8"
+                "deny http 10.0.0.0/8\ndeny http [fc00::/7]:443/x\ndeny http 192.168.1.1/24/x\ndeny http [::1]/64/x\nallow net 10.0.0.1/8\nallow net 10.0.0.0/+8"
             ),
             [
-                "1:11: `10.0.0.1/8` has bits set after its prefix length: write `10.0.0.0/8`",
-                "2:11: `192.168.1.1/24` has bits set after its prefix length: write `192.168.1.0/24` for the range, or `192.168.1.1/32/24` for the path `/24` on `192.168.1.1`",
-                "3:11: `[::1]/64` has bits set after its prefix length: write `::/64` for the range, or `[::1]/128/64` for the path `/64` on `::1`",
-                "4:12: `::ffff:10.0.0.1/8` has bits set after its prefix length: write `::/8` for the range, or `10.0.0.1/32/8` for the path `/8` on `10.0.0.1`",
-                "5:11: invalid host pattern `10.0.0.0/+8` (expected a host, host:port, *.domain, *, an IP address or a CIDR range)",
+                "1:11: `10.0.0.0/8` is a range, and http rules match single addresses: write a net rule for the range (`net 10.0.0.0/8`), or `10.0.0.0/32/8` for the path `/8` on `10.0.0.0`",
+                "2:11: `[fc00::/7]:443` is a range, and http rules match single addresses: write a net rule for the range (`net [fc00::/7]:443`)",
+                "3:11: `192.168.1.1/24` is a range, and http rules match single addresses: write a net rule for the range (`net 192.168.1.0/24`), or `192.168.1.1/32/24` for the path `/24` on `192.168.1.1`",
+                "4:11: `[::1]/64` is a range, and http rules match single addresses: write a net rule for the range (`net ::/64`), or `[::1]/128/64` for the path `/64` on `::1`",
+                "5:11: `10.0.0.1/8` has bits set after its prefix length: write `10.0.0.0/8`",
+                "6:11: invalid host pattern `10.0.0.0/+8` (expected a host, host:port, *.domain, *, an IP address or a CIDR range)",
             ]
         );
     }
