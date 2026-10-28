@@ -99,6 +99,14 @@ Follow-up work, roughly in priority order.
       http 10.0.0.0/8/admin`, `GET http://intranet/admin` is allowed if
       `intranet` resolves to `10.0.0.5`. `Capability::NetAddr` has no
       method or path, so only net rules decide resolved addresses.
+- [ ] Treat names under `localhost` as `localhost` (RFC 6761): macOS and
+      systemd-resolved resolve them to loopback addresses. `is_localhost`
+      (`src/policy/net.rs`) matches only `localhost`, so `allow net *`
+      allows `Net(x.localhost)` and then denies its loopback addresses, and
+      an explicit `allow net app.localhost` cannot reach a local server
+      without `allow private-net`. The linter then reports `deny http
+      *.localhost/admin` as bypassable under `allow net *`. Decide also
+      whether `allow net *.localhost` counts as an explicit rule.
 
 ### Tooling
 

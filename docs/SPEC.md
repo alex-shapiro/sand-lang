@@ -2610,7 +2610,9 @@ wildcards included. It compares paths as written, without resolving
 symlinks. A `net` rule decides connections, and http requests for every
 method and path. The linter reports a rule only when, for each kind of
 request that the rule decides, one other rule shows that the rule is not
-needed.
+needed. A word that uses sets gives a rule for each value, and the linter
+reports the word only if no rule of the word is needed. Removing every
+reported rule together does not change a decision.
 
 `sandlang::policy::rule_for(capability, allow)` gives, as a policy file
 line, the rule that decides a promptable request for good (e.g. `allow read
