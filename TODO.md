@@ -93,9 +93,16 @@ Follow-up work, roughly in priority order.
 
 - [ ] Fix broken intra-doc links to private items and run `cargo doc` with
       `-D warnings` in CI.
-- [ ] Compare `http` policy rules with wildcards in hosts or paths using the
-      same subsumption check as file rules, instead of comparing only exact rule
-      text.
+- [ ] Report `net` policy rules that broader `net` rules already decide (a
+      `net` rule decides both connections and http requests), and `env` and
+      `listen` rules that broader rules already decide. The linter now reports
+      only exact repeats of these rules.
+- [ ] Make the policy linter near-linear when many rules of the other verb lie
+      below a broad rule: with 20,000 `allow read /r/hN`, 5,000 `deny
+      /r/*/aN` and `allow read /r`, `sand lint` takes 12 s, because it compares
+      each narrow rule with each deny rule.
+- [ ] Stop `sand lint` (and other commands that print) from panicking when
+      stdout closes early (`sand lint a.policy | head`).
 
 ### Diagnostics
 

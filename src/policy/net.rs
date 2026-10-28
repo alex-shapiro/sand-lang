@@ -108,7 +108,7 @@ impl NetPattern {
     }
 
     /// Specificity score for pattern matching.
-    fn score(&self) -> u32 {
+    pub(crate) fn score(&self) -> u32 {
         match &self.kind {
             HostKind::Host(_) => 3000,
             HostKind::Ip(ip, len) if *len == full_len(*ip) => 3000,
@@ -142,12 +142,12 @@ impl std::fmt::Display for NetPattern {
     }
 }
 
-fn full_len(ip: IpAddr) -> u8 {
+pub(crate) fn full_len(ip: IpAddr) -> u8 {
     if ip.is_ipv4() { 32 } else { 128 }
 }
 
 /// `ip` with all but its first `len` bits cleared.
-fn mask(ip: IpAddr, len: u8) -> IpAddr {
+pub(crate) fn mask(ip: IpAddr, len: u8) -> IpAddr {
     match ip {
         IpAddr::V4(v4) => IpAddr::V4(Ipv4Addr::from(u32::from(v4) & u32::MAX.checked_shl(32 - len as u32).unwrap_or(0))),
         IpAddr::V6(v6) => IpAddr::V6(Ipv6Addr::from(u128::from(v6) & u128::MAX.checked_shl(128 - len as u32).unwrap_or(0))),
