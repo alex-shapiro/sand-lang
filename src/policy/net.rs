@@ -176,8 +176,8 @@ impl NetPattern {
     /// The address ranges, with this pattern's port, whose addresses reach
     /// an address that this pattern matches as written (see
     /// [`ip_spellings`]). Deny rules for this pattern also match them. The
-    /// IPv4-compatible ranges also contain `::` and `::1`, which do not
-    /// embed an address (see [`NetPattern::denies_ip`]).
+    /// IPv4-compatible ranges also contain `::` and `::1`, which embed no
+    /// address (see [`EMBEDDINGS`] and [`NetPattern::denies_ip`]).
     pub(crate) fn reaching_ranges(&self) -> Vec<NetPattern> {
         let HostKind::Ip(net, len) = self.kind else { return Vec::new() };
         let range = |ip: IpAddr, len: u8| NetPattern { kind: HostKind::Ip(ip, len), port: self.port };
@@ -194,12 +194,7 @@ impl NetPattern {
         }
         for (net, len) in v4 {
             let bits = u32::from(net) as u128;
-            ranges.extend([
-                range(v6(0x64_ff9b << 96 | bits), 96 + len),
-                range(v6(0x2002 << 112 | bits << 80), 16 + len),
-                range(v6(0xffff << 48 | bits), 96 + len),
-                range(v6(bits), 96 + len),
-            ]);
+            ranges.extend(EMBEDDINGS.map(|(prefix, prefix_len, shift)| range(v6(prefix | bits << shift), prefix_len + len)));
         }
         ranges
     }
@@ -488,17 +483,18 @@ fn ip_spellings(ip: IpAddr) -> Vec<IpAddr> {
     }
 }
 
-/// The IPv4 address embedded in an IPv6 address of a form that reaches it:
-/// IPv4-compatible (`::a.b.c.d`, not `::` or `::1`), IPv4-translated
-/// (`::ffff:0:a.b.c.d`), NAT64 (`64:ff9b::a.b.c.d`) or 6to4 (`2002:aabb:ccdd::`).
+/// The IPv6 forms that embed an IPv4 address and reach it, as the prefix,
+/// its length, and the shift of the IPv4 address in the IPv6 address:
+/// NAT64 (`64:ff9b::a.b.c.d`), 6to4 (`2002:aabb:ccdd::`), IPv4-translated
+/// (`::ffff:0:a.b.c.d`) and IPv4-compatible (`::a.b.c.d`, but `::` and
+/// `::1` embed no address).
+const EMBEDDINGS: [(u128, u8, u32); 4] = [(0x64_ff9b << 96, 96, 0), (0x2002 << 112, 16, 80), (0xffff << 48, 96, 0), (0, 96, 0)];
+
+/// The IPv4 address embedded in an IPv6 address (see [`EMBEDDINGS`]).
 fn embedded_ipv4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
-    let v4 = |hi: u16, lo: u16| Some(Ipv4Addr::from(((hi as u32) << 16) | lo as u32));
-    match ip.segments() {
-        [0, 0, 0, 0, 0, 0, 0, 0 | 1] => None,
-        [0, 0, 0, 0, 0, 0, hi, lo] | [0, 0, 0, 0, 0xffff, 0, hi, lo] | [0x64, 0xff9b, 0, 0, 0, 0, hi, lo] => v4(hi, lo),
-        [0x2002, hi, lo, ..] => v4(hi, lo),
-        _ => None,
-    }
+    let bits = u128::from(ip);
+    let (_, _, shift) = EMBEDDINGS.iter().find(|&&(prefix, len, _)| bits > 1 && mask(ip.into(), len) == Ipv6Addr::from(prefix))?;
+    Some(Ipv4Addr::from((bits >> shift) as u32))
 }
 
 /// Parses an IP literal (IPv6 optionally in brackets); IPv4-mapped IPv6
@@ -777,6 +773,20 @@ mod tests {
     }
 
     proptest! {
+        /// The IPv4 address that an IPv6 address embeds is one whose
+        /// reaching ranges contain the IPv6 address.
+        #[test]
+        fn embedded_addresses_are_in_reaching_ranges(form in 0..EMBEDDINGS.len(), v4 in any::<u32>(), noise in any::<u128>()) {
+            let (prefix, len, shift) = EMBEDDINGS[form];
+            let free = u128::MAX.checked_shr(len as u32 + 32).unwrap_or(0);
+            let ip = Ipv6Addr::from(prefix | (v4 as u128) << shift | noise & free);
+            let embedded = embedded_ipv4(ip);
+            prop_assert_eq!(embedded, (u128::from(ip) > 1).then(|| Ipv4Addr::from(v4)));
+            let ranges = NetPattern { kind: HostKind::Ip(Ipv4Addr::from(v4).into(), 32), port: None }.reaching_ranges();
+            let reached = ranges.iter().any(|r| r.kind.matches_ip(ip.into()));
+            prop_assert!(reached, "{} in none of {:?}", ip, ranges);
+        }
+
         /// An http rule reads its host as a net rule does, and the path
         /// after it as after any host. A prefix length after an address
         /// makes a range.
