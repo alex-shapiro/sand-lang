@@ -871,12 +871,24 @@ mod tests {
         assert_eq!(http(&p, "GET", "http://[::1]/x"), Allow);
         assert_eq!(http(&p, "GET", "http://10.0.0.1/8"), Deny);
         assert_eq!(http(&p, "GET", "http://10.0.0.1/x"), Allow);
-        // A range names its first address.
+        // The full length of an address keeps the number after it a path.
+        let p = parse("allow http *\nallow private-net\ndeny http 10.0.0.1/32/8\ndeny http [::]/128/8");
+        assert_eq!(http(&p, "GET", "http://10.0.0.1/8"), Deny);
+        assert_eq!(http(&p, "GET", "http://10.0.0.2/8"), Allow);
+        assert_eq!(http(&p, "GET", "http://[::]/8"), Deny);
+        assert_eq!(http(&p, "GET", "http://[::1]/8"), Allow);
+        // A range names its first address. After an address in a URL
+        // pattern, the number may also be the start of a path.
         assert_eq!(
-            errors("allow net 10.0.0.1/8\ndeny http 192.168.1.1/24/x"),
+            errors(
+                "allow net 10.0.0.1/8\ndeny http 192.168.1.1/24/x\ndeny http [::1]/64/x\nallow http ::ffff:10.0.0.1/8\nallow net 10.0.0.0/+8"
+            ),
             [
                 "1:11: `10.0.0.1/8` has bits set after its prefix length: write `10.0.0.0/8`",
-                "2:11: `192.168.1.1/24` has bits set after its prefix length: write `192.168.1.0/24`",
+                "2:11: `192.168.1.1/24` has bits set after its prefix length: write `192.168.1.0/24` for the range, or `192.168.1.1/32/24` for the path `/24` on `192.168.1.1`",
+                "3:11: `[::1]/64` has bits set after its prefix length: write `::/64` for the range, or `[::1]/128/64` for the path `/64` on `::1`",
+                "4:12: `::ffff:10.0.0.1/8` has bits set after its prefix length: write `::/8` for the range, or `10.0.0.1/32/8` for the path `/8` on `10.0.0.1`",
+                "5:11: invalid host pattern `10.0.0.0/+8` (expected a host, host:port, *.domain, *, an IP address or a CIDR range)",
             ]
         );
     }

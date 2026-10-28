@@ -103,7 +103,7 @@ impl NetPattern {
             HostKind::Suffix(canonical_hostname(suffix)?)
         } else if let Some((ip, len)) = body.split_once('/') {
             let ip: IpAddr = ip.parse().ok()?;
-            let len: u8 = len.parse().ok()?;
+            let len: u8 = len.parse().ok().filter(|_| len.bytes().all(|b| b.is_ascii_digit()))?;
             match ip {
                 // Ranges of IPv4-mapped addresses are IPv4 ranges.
                 IpAddr::V6(v6) if v6.to_ipv4_mapped().is_some() && len >= 96 => HostKind::Ip(ip.to_canonical(), len - 96),
@@ -681,6 +681,7 @@ impl UrlPattern {
         // As in a net rule, a prefix length after an address makes a range
         // (`10.0.0.0/8/admin`).
         let head = text(&rest[..end]);
+        let mut address = None;
         if let Ok(NetPattern { kind: HostKind::Ip(ip, len), port: None }) = NetPattern::parse(&head)
             && len == full_len(ip)
             && end < rest.len()
@@ -692,9 +693,18 @@ impl UrlPattern {
             let max = if head.contains(':') { 128 } else { 32 };
             if prefix.bytes().all(|b| b.is_ascii_digit()) && prefix.parse::<u8>().is_ok_and(|p| p <= max) {
                 end = next;
+                address = Some((ip, after));
             }
         }
-        let mut host = NetPattern::parse(&text(&rest[..end]))?;
+        let authority = text(&rest[..end]);
+        let mut host = NetPattern::parse(&authority).map_err(|e| match address {
+            // The number after the address may be the start of a path.
+            Some((ip, name)) if NetPattern::parse_unmasked(&authority).is_some() => {
+                let full = if ip.is_ipv6() { format!("[{ip}]/128") } else { format!("{ip}/32") };
+                format!("{e} for the range, or `{full}/{name}` for the path `/{name}` on `{ip}`")
+            }
+            _ => e,
+        })?;
         if host.port.is_none() {
             host.port = scheme.map(|s| if s == "http" { 80 } else { 443 });
         }
@@ -823,7 +833,11 @@ mod tests {
                     prop_assert_eq!(&parsed.host, &expected);
                     prop_assert_eq!(parsed.path, url(&format!("example.com{path}")).unwrap().path);
                 }
-                Err(e) => prop_assert_eq!(parsed.unwrap_err(), e),
+                // After an address, the error may also offer a path.
+                Err(e) => {
+                    let error = parsed.unwrap_err();
+                    prop_assert!(error.starts_with(&e), "{} does not start with {}", error, e);
+                }
             }
         }
     }
