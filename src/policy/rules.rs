@@ -6,7 +6,9 @@
 //! names in a trie, hosts in hash tables), so a check costs about the same
 //! whatever the number of rules.
 
-use super::net::{Dest, HostIndex, ListenPattern, NetPattern, UrlPattern, is_localhost, is_private_address, parse_ip, url_segments};
+use super::net::{
+    Dest, HostIndex, ListenPattern, NetPattern, UrlPattern, is_internal, is_localhost, is_private_address, parse_ip, url_segments,
+};
 use super::path::{Glob, Seg, Trie, path_segments};
 use super::{Capability, Decision, PathSpace, fold_name, lexical, normalize_path};
 use crate::files::Mode;
@@ -442,7 +444,7 @@ impl RulePolicy {
             Capability::NetListen(addr) => {
                 for &(ref pattern, allow, rule) in &index.listen {
                     if let Some(score) = pattern.matches(*addr) {
-                        best.offer([score, 0, 0, 0, 0], allow, rule);
+                        best.offer([score, 0, 0, 0], allow, rule);
                     }
                 }
             }
@@ -455,18 +457,18 @@ impl RulePolicy {
                 }
                 for &(ref pattern, allow, rule) in &index.env {
                     if *pattern == NamePattern::Any {
-                        best.offer([0; 5], allow, rule);
+                        best.offer([0; 4], allow, rule);
                     }
                 }
             }
             Capability::Env(name) => {
                 for &(allow, rule) in index.env_names.get(name.as_str()).into_iter().flatten() {
-                    best.offer([2, 0, 0, 0, 0], allow, rule);
+                    best.offer([2, 0, 0, 0], allow, rule);
                 }
                 for (pattern, allow, rule) in &index.env {
                     let spec = match pattern {
-                        NamePattern::Glob(g) if g.matches(name) => [1, g.pieces().iter().map(|p| p.len() as u32).sum(), 0, 0, 0],
-                        NamePattern::Any => [0; 5],
+                        NamePattern::Glob(g) if g.matches(name) => [1, g.pieces().iter().map(|p| p.len() as u32).sum(), 0, 0],
+                        NamePattern::Any => [0; 4],
                         _ => continue,
                     };
                     best.offer(spec, *allow, *rule);
@@ -475,14 +477,14 @@ impl RulePolicy {
             Capability::Stdin | Capability::Stdout | Capability::Stderr | Capability::TimeZone => {
                 for &(ref kind, allow, rule) in &index.unit {
                     if std::mem::discriminant(kind) == std::mem::discriminant(cap) {
-                        best.offer([0; 5], allow, rule);
+                        best.offer([0; 4], allow, rule);
                     }
                 }
             }
             Capability::Custom { name, detail } => {
                 for &(ref d, allow, rule) in index.custom.get(name.as_str()).into_iter().flatten() {
                     if d.as_ref().is_none_or(|d| d == detail) {
-                        best.offer([d.is_some() as u32, 0, 0, 0, 0], allow, rule);
+                        best.offer([d.is_some() as u32, 0, 0, 0], allow, rule);
                     }
                 }
             }
@@ -494,7 +496,7 @@ impl RulePolicy {
         let index = self.files(space);
         let mut offer = |e: &FileEntry, depth: usize, allow: bool| {
             if e.mask & op != 0 {
-                best.offer([depth as u32, e.weight, 0, 0, 0], allow, e.rule);
+                best.offer(e.rank.spec(depth), allow, e.rule);
             }
         };
         let names = path_segments(p);
@@ -509,16 +511,12 @@ impl RulePolicy {
     /// Offers the net rules matching `dest`. Unless `allow private-net`,
     /// internal destinations named directly need an explicit allow rule.
     fn net_verdict(&self, dest: &Dest, best: &mut Best<'_>) {
-        let internal = self.internal(dest);
-        self.others().net.find(dest, |score, explicit, spelled, e| {
-            if !e.allow || (!spelled && (explicit || !internal)) {
-                best.offer([score, 0, 0, 0, 0], e.allow, e.rule);
+        let internal = self.deny_private && is_internal(dest);
+        self.others().net.find(dest, |explicit, spelled, e| {
+            if !e.allow || allow_applies(explicit, spelled, internal) {
+                best.offer(e.rank.spec(0), e.allow, e.rule);
             }
         });
-    }
-
-    fn internal(&self, dest: &Dest) -> bool {
-        self.deny_private && (dest.ip.is_some_and(is_private_address) || is_localhost(dest.name))
     }
 
     /// Offers the net and http rules matching a request; net rules match
@@ -529,18 +527,18 @@ impl RulePolicy {
         if index.groups.is_empty() {
             return;
         }
-        let internal = self.internal(dest);
+        let internal = self.deny_private && is_internal(dest);
         let method = method.to_ascii_uppercase();
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
         let mut folded_names = None;
-        index.http.find(dest, |score, explicit, spelled, &group| {
+        index.http.find(dest, |explicit, spelled, &group| {
             let group = &index.groups[group as usize];
             let mut offer = |e: &HttpEntry, depth: usize, allow: bool| {
-                if e.methods.as_ref().is_none_or(|m| m.contains(&method)) && e.scheme.is_none_or(|s| s.eq_ignore_ascii_case(scheme)) {
-                    best.offer([score, e.scheme.is_some() as u32, depth as u32, e.weight, e.methods.is_some() as u32], allow, e.rule);
+                if method_matches(e.methods.as_deref(), &method) && scheme_matches(e.scheme, scheme) {
+                    best.offer(e.rank.spec(depth), allow, e.rule);
                 }
             };
-            if !group.allow.is_empty() && !spelled && (explicit || !internal) {
+            if !group.allow.is_empty() && allow_applies(explicit, spelled, internal) {
                 group.allow.matches(&names, |e, depth| offer(e, depth, true));
             }
             if !group.deny.is_empty() {
@@ -558,9 +556,9 @@ impl RulePolicy {
             return if literal == ip { Decision::Allow } else { Decision::Deny };
         }
         let mut best = Best::new(&[]);
-        self.others().net.find_ip(ip, addr.port(), |score, spelled, e| {
+        self.others().net.find_ip(ip, addr.port(), |spelled, e| {
             if !(e.allow && spelled) {
-                best.offer([score, 0, 0, 0, 0], e.allow, e.rule);
+                best.offer(e.rank.spec(0), e.allow, e.rule);
             }
         });
         let allowed = match best.verdict() {
@@ -604,8 +602,78 @@ fn refs<S: AsRef<str>>(names: &[S]) -> Vec<&str> {
     names.iter().map(AsRef::as_ref).collect()
 }
 
+/// Whether an allow rule whose host pattern matches a destination decides
+/// requests to it: not where it matches another spelling of the address,
+/// and, for an `internal` destination, only if the pattern is `explicit`.
+fn allow_applies(explicit: bool, spelled: bool, internal: bool) -> bool {
+    !spelled && (explicit || !internal)
+}
+
+/// Whether an http rule's methods (upper case; `None`: any) include
+/// `method` (upper case).
+pub(crate) fn method_matches(methods: Option<&[String]>, method: &str) -> bool {
+    methods.is_none_or(|m| m.iter().any(|m| m == method))
+}
+
+/// Whether an http rule's scheme (`None`: any) matches `scheme`.
+pub(crate) fn scheme_matches(rule: Option<&str>, scheme: &str) -> bool {
+    rule.is_none_or(|s| s.eq_ignore_ascii_case(scheme))
+}
+
+/// The pattern of a file rule whose prefix normalizes to `prefix`, root
+/// first.
+pub(crate) fn file_segments(prefix: &Path, rest: &[Seg]) -> Vec<Seg> {
+    path_segments(prefix).iter().map(|s| Seg::Lit((**s).into())).chain(rest.iter().cloned()).collect()
+}
+
+/// A pattern with its names folded as deny rules compare them (see
+/// [`fold_name`]).
+pub(crate) fn fold_segments(segs: &[Seg]) -> Vec<Seg> {
+    segs.iter().map(|s| s.map(|n| fold_name(n).into_owned())).collect()
+}
+
 /// How specific a rule's match is, compared in order.
-type Spec = [u32; 5];
+pub(crate) type Spec = [u32; 4];
+
+/// How a file, http or net rule ranks where it matches, apart from the
+/// depth of the deepest path it matches there: by its tier, then by that
+/// depth, then by its weight, then by whether it names methods.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Rank {
+    /// For http and net rules, the rank of the host pattern, then whether
+    /// the rule names a scheme. 0 for file rules.
+    pub tier: u32,
+    /// How much the path pattern narrows the paths it matches.
+    pub weight: u32,
+    pub methods: bool,
+}
+
+impl Rank {
+    pub(crate) fn file(segs: &[Seg]) -> Rank {
+        Rank { tier: 0, weight: segs.iter().map(Seg::weight).sum(), methods: false }
+    }
+
+    pub(crate) fn http(methods: Option<&[String]>, url: &UrlPattern) -> Rank {
+        let tier = url.host.rank() * 2 + url.scheme.is_some() as u32;
+        Rank { tier, weight: url.path.iter().map(Seg::weight).sum(), methods: methods.is_some() }
+    }
+
+    /// The rank of a net rule, which matches http requests as an http rule
+    /// for any method, scheme and path.
+    pub(crate) fn net(host: &NetPattern) -> Rank {
+        Rank { tier: host.rank() * 2, weight: 0, methods: false }
+    }
+
+    pub(crate) fn spec(self, depth: usize) -> Spec {
+        [self.tier, depth as u32, self.weight, self.methods as u32]
+    }
+}
+
+/// How a rule ranks where it matches with `spec`: the more specific, then
+/// a deny, then the first.
+pub(crate) fn precedence(spec: Spec, allow: bool, rule: usize) -> (Spec, bool, std::cmp::Reverse<usize>) {
+    (spec, !allow, std::cmp::Reverse(rule))
+}
 
 /// The deciding rule among those offered: the most specific, deny at a
 /// tie, then the first.
@@ -621,7 +689,7 @@ impl<'a> Best<'a> {
 
     fn offer(&mut self, spec: Spec, allow: bool, rule: u32) {
         let rule = rule as usize;
-        let candidate = (spec, !allow, std::cmp::Reverse(rule));
+        let candidate = precedence(spec, allow, rule);
         if !self.exclude.contains(&rule) && self.best.is_none_or(|b| candidate > b) {
             self.best = Some(candidate);
         }
@@ -647,7 +715,7 @@ struct FileIndex {
 struct FileEntry {
     rule: u32,
     mask: u8,
-    weight: u32,
+    rank: Rank,
 }
 
 impl FileIndex {
@@ -661,16 +729,14 @@ impl FileIndex {
                 PathSpace::Host => resolver.normalize(&pattern.prefix),
                 PathSpace::Memory => crate::files::memory_path(&pattern.prefix),
             };
-            let segs: Vec<Seg> =
-                path_segments(&prefix).iter().map(|s| Seg::Lit((**s).into())).chain(pattern.rest.iter().cloned()).collect();
+            let segs = file_segments(&prefix, &pattern.rest);
             let mask = access.mask(rule.allow);
-            let entry = FileEntry { rule: i as u32, mask, weight: segs.iter().map(Seg::weight).sum() };
+            let entry = FileEntry { rule: i as u32, mask, rank: Rank::file(&segs) };
             if rule.allow {
                 let segs: Vec<Seg> = if caseless { segs.iter().map(|s| s.map(str::to_lowercase)).collect() } else { segs };
                 index.allow.insert(&segs, entry, mask);
             } else {
-                let segs: Vec<Seg> = segs.iter().map(|s| s.map(|n| fold_name(n).into_owned())).collect();
-                index.deny.insert(&segs, entry, mask);
+                index.deny.insert(&fold_segments(&segs), entry, mask);
             }
         }
         index
@@ -778,6 +844,7 @@ struct Index {
 struct NetEntry {
     rule: u32,
     allow: bool,
+    rank: Rank,
 }
 
 #[derive(Debug, Default)]
@@ -792,7 +859,7 @@ struct HttpEntry {
     rule: u32,
     methods: Option<Vec<String>>,
     scheme: Option<&'static str>,
-    weight: u32,
+    rank: Rank,
 }
 
 impl Index {
@@ -804,7 +871,7 @@ impl Index {
             match &rule.kind {
                 RuleKind::Files(Access::Import, _) => index.imports_restricted |= allow,
                 RuleKind::Files(..) => {}
-                RuleKind::Net(p) => index.net.insert(p, NetEntry { rule: rule_id, allow }),
+                RuleKind::Net(p) => index.net.insert(p, NetEntry { rule: rule_id, allow, rank: Rank::net(p) }),
                 RuleKind::Http(methods, url) => {
                     let key = url.host.to_string();
                     let group = *groups.entry(key).or_insert_with(|| {
@@ -812,18 +879,13 @@ impl Index {
                         index.groups.push(HttpGroup::default());
                         index.groups.len() as u32 - 1
                     });
-                    let entry = HttpEntry {
-                        rule: rule_id,
-                        methods: methods.clone(),
-                        scheme: url.scheme,
-                        weight: url.path.iter().map(Seg::weight).sum(),
-                    };
+                    let rank = Rank::http(methods.as_deref(), url);
+                    let entry = HttpEntry { rule: rule_id, methods: methods.clone(), scheme: url.scheme, rank };
                     let group = &mut index.groups[group as usize];
                     if allow {
                         group.allow.insert(&url.path, entry, 1);
                     } else {
-                        let segs: Vec<Seg> = url.path.iter().map(|s| s.map(|n| fold_name(n).into_owned())).collect();
-                        group.deny.insert(&segs, entry, 1);
+                        group.deny.insert(&fold_segments(&url.path), entry, 1);
                     }
                 }
                 RuleKind::Listen(p) => index.listen.push((p.clone(), allow, rule_id)),

@@ -1,10 +1,10 @@
 //! The policy file linter.
 
 use super::file::parse;
-use super::net::{HostKind, NetPattern, format_host_port, is_localhost, is_private_address};
-use super::path::{self, Pattern, Seg, name_counts, path_segments};
-use super::rules::{IMPORT, READ, Rule, RuleKind, WRITE};
-use super::{Capability, PathSpace, PolicyError, fold_name};
+use super::net::{HostKind, NetPattern, domains_above, format_host_port};
+use super::path::{self, Pattern, Seg, name_counts};
+use super::rules::{IMPORT, READ, Rank, Rule, RuleKind, WRITE, file_segments, fold_segments, method_matches, precedence, scheme_matches};
+use super::{Capability, PathSpace, PolicyError};
 use crate::lint::LintWarning;
 use crate::vm::value::{FxBuild, FxHashMap};
 use std::hash::BuildHasher;
@@ -139,44 +139,38 @@ struct PathRule<'a> {
     /// The pattern, root first (a deny rule's names folded, as the policy
     /// compares them).
     segs: Vec<Seg>,
-    folded: Folded,
+    /// The pattern with its names folded, if every path it matches folds to
+    /// a path the folded pattern matches: `None` for an allow rule with
+    /// non-ASCII text around a wildcard.
+    folded: Option<Vec<Seg>>,
     /// Hashes of the leading parts of its folded names before the first
     /// wildcard: `prefixes[n]` of the first `n` names.
     prefixes: Vec<u64>,
-    /// How it ranks before the depth of its match: for http rules, by the
-    /// host pattern (as for net rules), then by whether it names a scheme.
-    tier: u32,
-    weight: u32,
-    /// Whether it names http methods, which ranks it after its weight.
-    methods: bool,
+    rank: Rank,
     /// The fewest and most names of the paths it matches.
     counts: (usize, Option<usize>),
 }
 
 impl<'a> PathRule<'a> {
     fn new(index: usize, rule: &'a Rule, deny_private: bool) -> Option<PathRule<'a>> {
-        let (scope, raw, tier) = match &rule.kind {
+        let (scope, raw, rank) = match &rule.kind {
             RuleKind::Files(access, pattern) => {
-                let prefix = crate::files::memory_path(&pattern.prefix);
-                let raw = path_segments(&prefix).iter().map(|s| Seg::Lit((**s).into())).chain(pattern.rest.iter().cloned()).collect();
-                (Scope::Files(access.mask(rule.allow)), raw, 0)
+                let raw = file_segments(&crate::files::memory_path(&pattern.prefix), &pattern.rest);
+                let rank = Rank::file(&raw);
+                (Scope::Files(access.mask(rule.allow)), raw, rank)
             }
             RuleKind::Http(methods, url) => {
                 let scope = Scope::Http { host: &url.host, scheme: url.scheme, methods: methods.as_deref() };
-                (scope, url.path.clone(), host_tier(&url.host) * 2 + url.scheme.is_some() as u32)
+                (scope, url.path.clone(), Rank::http(methods.as_deref(), url))
             }
-            RuleKind::Net(host) => (Scope::Http { host, scheme: None, methods: None }, Vec::new(), host_tier(host) * 2),
+            RuleKind::Net(host) => (Scope::Http { host, scheme: None, methods: None }, Vec::new(), Rank::net(host)),
             _ => return None,
         };
         let internal = match scope {
-            Scope::Http { host, .. } if rule.allow && deny_private => match &host.kind {
-                HostKind::Host(h) => is_localhost(h),
-                HostKind::Ip(ip, len) => *len < super::net::full_len(*ip) || is_private_address(*ip),
-                HostKind::Any | HostKind::Suffix(_) => false,
-            },
-            _ => true,
+            Scope::Http { host, .. } => !rule.allow || !deny_private || host.may_name_internal(),
+            Scope::Files(_) => true,
         };
-        let folded: Vec<Seg> = raw.iter().map(|s| s.map(|n| fold_name(n).into_owned())).collect();
+        let folded = fold_segments(&raw);
         let exact_fold = |s: &Seg| !matches!(s, Seg::Glob(g) if g.pieces().iter().any(|p| !p.is_ascii()));
         let hasher = FxBuild::default();
         let names = folded.iter().map_while(|s| if let Seg::Lit(n) = s { Some(n) } else { None });
@@ -186,29 +180,16 @@ impl<'a> PathRule<'a> {
                 Some(*h)
             }))
             .collect();
-        let weight = raw.iter().map(Seg::weight).sum();
-        let counts = name_counts(&raw);
-        let (segs, folded) = if !rule.allow {
-            (folded, Folded::Segs)
-        } else if raw == folded {
-            (raw, Folded::Segs)
-        } else if raw.iter().all(exact_fold) {
-            (raw, Folded::Other(folded))
-        } else {
-            (raw, Folded::Unknown)
-        };
         Some(PathRule {
             index,
             allow: rule.allow,
             scope,
             internal,
             prefixes,
-            tier,
-            weight,
-            methods: matches!(rule.kind, RuleKind::Http(Some(_), _)),
-            counts,
-            folded,
-            segs,
+            rank,
+            counts: name_counts(&raw),
+            folded: (!rule.allow || raw.iter().all(exact_fold)).then(|| folded.clone()),
+            segs: if rule.allow { raw } else { folded },
         })
     }
 
@@ -225,7 +206,8 @@ impl<'a> PathRule<'a> {
     fn decides_all(&self, op: Op) -> bool {
         match (&self.scope, op) {
             (Scope::Files(mask), Op::File(op)) => mask & op != 0,
-            (Scope::Http { methods, .. }, Op::Method(m)) => methods.is_none_or(|ms| m.is_some_and(|m| ms.iter().any(|x| x == m))),
+            (Scope::Http { methods, .. }, Op::Method(Some(m))) => method_matches(*methods, m),
+            (Scope::Http { methods, .. }, Op::Method(None)) => methods.is_none(),
             _ => false,
         }
     }
@@ -234,16 +216,15 @@ impl<'a> PathRule<'a> {
     fn may_decide(&self, op: Op) -> bool {
         match (&self.scope, op) {
             (Scope::Files(mask), Op::File(op)) => mask & op != 0,
-            (Scope::Http { methods, .. }, Op::Method(m)) => methods.is_none_or(|ms| m.is_none_or(|m| ms.iter().any(|x| x == m))),
+            (Scope::Http { methods, .. }, Op::Method(m)) => m.is_none_or(|m| method_matches(*methods, m)),
             _ => false,
         }
     }
 
-    /// How rules matching a request to the same depth rank: the higher
-    /// tier, the heavier, the one that names methods, then a deny, then the
-    /// first.
-    fn rank(&self) -> (u32, u32, bool, bool, std::cmp::Reverse<usize>) {
-        (self.tier, self.weight, self.methods, !self.allow, std::cmp::Reverse(self.index))
+    /// How it ranks where it matches a path as deep as other rules do
+    /// (see [`Rank`]).
+    fn rank(&self) -> impl Ord {
+        precedence(self.rank.spec(0), self.allow, self.index)
     }
 
     fn outranks(&self, other: &PathRule) -> bool {
@@ -256,17 +237,7 @@ impl<'a> PathRule<'a> {
         if self.allow && other.allow {
             return Some((&self.segs, &other.segs));
         }
-        Some((self.folded()?, other.folded()?))
-    }
-
-    /// The pattern with its names folded, if every path it matches folds to
-    /// a path the folded pattern matches.
-    fn folded(&self) -> Option<&[Seg]> {
-        match &self.folded {
-            Folded::Segs => Some(&self.segs),
-            Folded::Other(segs) => Some(segs),
-            Folded::Unknown => None,
-        }
+        Some((self.folded.as_deref()?, other.folded.as_deref()?))
     }
 
     /// Whether this rule matches every request `other` matches (`below`: or
@@ -284,7 +255,8 @@ impl<'a> PathRule<'a> {
         match (&self.scope, &other.scope) {
             (Scope::Files(_), Scope::Files(_)) => true,
             (Scope::Http { host: a, scheme: s, .. }, Scope::Http { host: b, scheme: t, .. }) => {
-                host_covers(a, b) && s.is_none_or(|s| *t == Some(s)) && (a.is_explicit() || self.internal || !other.internal)
+                let schemes = t.map_or(s.is_none(), |t| scheme_matches(*s, t));
+                a.covers(b) && schemes && (a.is_explicit() || self.internal || !other.internal)
             }
             _ => false,
         }
@@ -297,7 +269,7 @@ impl<'a> PathRule<'a> {
         let scopes = match (&self.scope, &other.scope) {
             (Scope::Files(_), Scope::Files(_)) => true,
             (Scope::Http { host: a, scheme: s, .. }, Scope::Http { host: b, scheme: t, .. }) => {
-                hosts_meet(a, b) && (s.is_none() || t.is_none() || s == t)
+                a.may_meet(b) && t.is_none_or(|t| scheme_matches(*s, t))
             }
             _ => false,
         };
@@ -312,8 +284,8 @@ impl<'a> PathRule<'a> {
         let Scope::Http { host, .. } = self.scope else { return vec![Key::Files] };
         match &host.kind {
             HostKind::Any => vec![Key::Any],
-            HostKind::Suffix(s) => [Key::Any, Key::Suffix(s)].into_iter().chain(parents(s).map(Key::Suffix)).collect(),
-            HostKind::Host(h) => [Key::Any, Key::Name(h)].into_iter().chain(parents(h).map(Key::Suffix)).collect(),
+            HostKind::Suffix(s) => [Key::Any, Key::Suffix(s)].into_iter().chain(domains_above(s).map(Key::Suffix)).collect(),
+            HostKind::Host(h) => [Key::Any, Key::Name(h)].into_iter().chain(domains_above(h).map(Key::Suffix)).collect(),
             HostKind::Ip(..) => vec![Key::Any, Key::Ips],
         }
     }
@@ -340,63 +312,8 @@ impl<'a> PathRule<'a> {
             HostKind::Host(h) => (Key::Name(h), Some(h)),
             HostKind::Ip(..) => (Key::Ips, None),
         };
-        [Key::Http, own].into_iter().chain(name.into_iter().flat_map(|n| parents(n)).map(Key::Under)).collect()
+        [Key::Http, own].into_iter().chain(name.into_iter().flat_map(|n| domains_above(n)).map(Key::Under)).collect()
     }
-}
-
-/// A rule's pattern with its names folded.
-enum Folded {
-    /// The same as the pattern the rule matches by.
-    Segs,
-    Other(Vec<Seg>),
-    /// Not known: the rule allows paths with non-ASCII text around a
-    /// wildcard, so some paths it matches may fold to paths the folded
-    /// pattern does not match.
-    Unknown,
-}
-
-/// How a host pattern ranks (see `HostIndex::find`).
-fn host_tier(host: &NetPattern) -> u32 {
-    host.score() * 2 + host.port.is_some() as u32
-}
-
-/// The domains strictly above a host name: `com` and `example.com` for
-/// `api.example.com`.
-fn parents(name: &str) -> impl Iterator<Item = &str> {
-    name.match_indices('.').map(|(i, _)| &name[i + 1..])
-}
-
-/// Whether `name` is a strict subdomain of `domain`.
-fn is_under(name: &str, domain: &str) -> bool {
-    name.len() > domain.len() && name.ends_with(domain) && name.as_bytes()[name.len() - domain.len() - 1] == b'.'
-}
-
-/// Whether host pattern `a` matches every destination `b` matches.
-fn host_covers(a: &NetPattern, b: &NetPattern) -> bool {
-    let hosts = match (&a.kind, &b.kind) {
-        (HostKind::Any, _) => true,
-        (HostKind::Suffix(s), HostKind::Suffix(t) | HostKind::Host(t)) => {
-            is_under(t, s) || (matches!(b.kind, HostKind::Suffix(_)) && s == t)
-        }
-        (HostKind::Host(h), HostKind::Host(g)) => h == g,
-        (HostKind::Ip(net, len), HostKind::Ip(ip, l)) => len <= l && super::net::mask(*ip, *len) == *net,
-        _ => false,
-    };
-    hosts && a.port.is_none_or(|p| b.port == Some(p))
-}
-
-/// Whether some destination may match both host patterns. Deny rules also
-/// match other spellings of an address, so any two address patterns may
-/// meet.
-fn hosts_meet(a: &NetPattern, b: &NetPattern) -> bool {
-    let hosts = match (&a.kind, &b.kind) {
-        (HostKind::Any, _) | (_, HostKind::Any) | (HostKind::Ip(..), HostKind::Ip(..)) => true,
-        (HostKind::Host(h), HostKind::Host(g)) => h == g,
-        (HostKind::Suffix(s), HostKind::Host(h)) | (HostKind::Host(h), HostKind::Suffix(s)) => is_under(h, s),
-        (HostKind::Suffix(s), HostKind::Suffix(t)) => s == t || is_under(s, t) || is_under(t, s),
-        _ => false,
-    };
-    hosts && (a.port.is_none() || b.port.is_none() || a.port == b.port)
 }
 
 /// What [`PathRules`] indexes rules by, besides their names: their kind
@@ -493,7 +410,7 @@ impl<'a> PathRules<'a> {
             let above = above.iter().flat_map(move |&h| self.lookup(&self.exact, key, h));
             above.chain(self.lookup(&self.within, key, last))
         });
-        found.filter(|k| k.allow != i.allow && !copies.contains(&k.index) && i.may_meet(k, k.tier < i.tier))
+        found.filter(|k| k.allow != i.allow && !copies.contains(&k.index) && i.may_meet(k, k.rank.tier < i.rank.tier))
     }
 
     /// A rule that shows that `i` is not needed for requests of kind `op`:
@@ -528,16 +445,16 @@ impl<'a> PathRules<'a> {
 /// path `i` matches is deeper than the shallowest path `k` matches, then
 /// `k` matches only paths that `i` matches exactly, at the same depth.
 fn never_between(i: &PathRule, j: &PathRule, k: &PathRule) -> bool {
-    let k_deepest = match (k.counts.1, i.counts.1.filter(|_| k.tier >= i.tier)) {
+    let k_deepest = match (k.counts.1, i.counts.1.filter(|_| k.rank.tier >= i.rank.tier)) {
         (Some(a), Some(b)) => Some(a.min(b)),
         (a, b) => a.or(b),
     };
-    let below_j = match k.tier.cmp(&j.tier) {
+    let below_j = match k.rank.tier.cmp(&j.rank.tier) {
         std::cmp::Ordering::Less => true,
         std::cmp::Ordering::Greater => false,
         std::cmp::Ordering::Equal => k_deepest.is_some_and(|d| j.counts.0 > d || (j.counts.0 == d && j.outranks(k))),
     };
-    let above_i = match k.tier.cmp(&i.tier) {
+    let above_i = match k.rank.tier.cmp(&i.rank.tier) {
         std::cmp::Ordering::Greater => true,
         std::cmp::Ordering::Less => false,
         std::cmp::Ordering::Equal => i.counts.1.is_some_and(|d| d <= k.counts.0) && k.outranks(i),

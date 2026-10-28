@@ -107,16 +107,68 @@ impl NetPattern {
         matches!(self.kind, HostKind::Host(_) | HostKind::Ip(..))
     }
 
-    /// Specificity score for pattern matching.
-    pub(crate) fn score(&self) -> u32 {
-        match &self.kind {
+    /// How specifically the pattern names a destination: exact hosts and
+    /// addresses most, then ranges and domains (longer ones more), then
+    /// `*`; with a port more than without.
+    pub(crate) fn rank(&self) -> u32 {
+        let score = match &self.kind {
             HostKind::Host(_) => 3000,
             HostKind::Ip(ip, len) if *len == full_len(*ip) => 3000,
             HostKind::Ip(_, len) => 2000 + *len as u32,
             HostKind::Suffix(s) => 2000 + s.split('.').count() as u32,
             HostKind::Any => 0,
+        };
+        score * 2 + self.port.is_some() as u32
+    }
+
+    /// Whether the pattern matches every destination `other` matches.
+    /// False when unsure.
+    pub(crate) fn covers(&self, other: &NetPattern) -> bool {
+        let hosts = match (&self.kind, &other.kind) {
+            (HostKind::Any, _) => true,
+            (HostKind::Suffix(s), HostKind::Suffix(t)) => s == t || is_under(t, s),
+            (HostKind::Suffix(s), HostKind::Host(h)) => is_under(h, s),
+            (HostKind::Host(h), HostKind::Host(g)) => h == g,
+            (HostKind::Ip(net, len), HostKind::Ip(ip, l)) => len <= l && mask(*ip, *len) == *net,
+            _ => false,
+        };
+        hosts && self.port.is_none_or(|p| other.port == Some(p))
+    }
+
+    /// Whether some destination may match both patterns. Deny rules also
+    /// match other spellings of an address (see [`ip_spellings`]), so any
+    /// two address patterns may meet. True when unsure.
+    pub(crate) fn may_meet(&self, other: &NetPattern) -> bool {
+        let hosts = match (&self.kind, &other.kind) {
+            (HostKind::Any, _) | (_, HostKind::Any) | (HostKind::Ip(..), HostKind::Ip(..)) => true,
+            (HostKind::Host(h), HostKind::Host(g)) => h == g,
+            (HostKind::Suffix(s), HostKind::Host(h)) | (HostKind::Host(h), HostKind::Suffix(s)) => is_under(h, s),
+            (HostKind::Suffix(s), HostKind::Suffix(t)) => s == t || is_under(s, t) || is_under(t, s),
+            _ => false,
+        };
+        hosts && (self.port.is_none() || other.port.is_none() || self.port == other.port)
+    }
+
+    /// Whether an explicit pattern may name an internal destination (see
+    /// [`is_internal`]).
+    pub(crate) fn may_name_internal(&self) -> bool {
+        match &self.kind {
+            HostKind::Host(h) => is_localhost(h),
+            HostKind::Ip(ip, len) => *len < full_len(*ip) || is_private_address(*ip),
+            HostKind::Any | HostKind::Suffix(_) => false,
         }
     }
+}
+
+/// The domains strictly above a host name: `example.com` and `com` for
+/// `api.example.com`.
+pub(crate) fn domains_above(name: &str) -> impl Iterator<Item = &str> {
+    name.match_indices('.').map(|(i, _)| &name[i + 1..])
+}
+
+/// Whether `name` is a strict subdomain of `domain`.
+fn is_under(name: &str, domain: &str) -> bool {
+    name.len() > domain.len() && name.ends_with(domain) && name.as_bytes()[name.len() - domain.len() - 1] == b'.'
 }
 
 impl std::fmt::Display for NetPattern {
@@ -142,12 +194,12 @@ impl std::fmt::Display for NetPattern {
     }
 }
 
-pub(crate) fn full_len(ip: IpAddr) -> u8 {
+fn full_len(ip: IpAddr) -> u8 {
     if ip.is_ipv4() { 32 } else { 128 }
 }
 
 /// `ip` with all but its first `len` bits cleared.
-pub(crate) fn mask(ip: IpAddr, len: u8) -> IpAddr {
+fn mask(ip: IpAddr, len: u8) -> IpAddr {
     match ip {
         IpAddr::V4(v4) => IpAddr::V4(Ipv4Addr::from(u32::from(v4) & u32::MAX.checked_shl(32 - len as u32).unwrap_or(0))),
         IpAddr::V6(v6) => IpAddr::V6(Ipv6Addr::from(u128::from(v6) & u128::MAX.checked_shl(128 - len as u32).unwrap_or(0))),
@@ -213,22 +265,22 @@ impl<T> HostIndex<T> {
         }
     }
 
-    /// Calls `f(score, explicit, spelled, t)` for each pattern matching
-    /// `dest`: higher scores name it more narrowly; `explicit` patterns
-    /// name hosts or addresses without wildcards. A name matches name
-    /// patterns, an IP literal address patterns, also by another spelling
-    /// of its address (see [`ip_spellings`]) where `spelled`.
-    pub(crate) fn find(&self, dest: &Dest, mut f: impl FnMut(u32, bool, bool, &T)) {
-        let mut each = |list: Option<&Ported<T>>, score: u32, explicit: bool| {
+    /// Calls `f(explicit, spelled, t)` for each pattern matching `dest`:
+    /// `explicit` patterns name hosts or addresses without wildcards. A
+    /// name matches name patterns, an IP literal address patterns, also by
+    /// another spelling of its address (see [`ip_spellings`]) where
+    /// `spelled`.
+    pub(crate) fn find(&self, dest: &Dest, mut f: impl FnMut(bool, bool, &T)) {
+        let mut each = |list: Option<&Ported<T>>, explicit: bool| {
             for (port, t) in list.into_iter().flatten() {
                 if port.is_none_or(|p| p == dest.port) {
-                    f(score * 2 + port.is_some() as u32, explicit, false, t);
+                    f(explicit, false, t);
                 }
             }
         };
-        each(Some(&self.any), 0, false);
+        each(Some(&self.any), false);
         if let Some(ip) = dest.ip {
-            self.find_ip(ip, dest.port, |score, spelled, t| f(score, true, spelled, t));
+            self.find_ip(ip, dest.port, |spelled, t| f(true, spelled, t));
             return;
         }
         let lower;
@@ -239,18 +291,17 @@ impl<T> HostIndex<T> {
             dest.name
         };
         if !self.names.is_empty() {
-            each(self.names.get(name), 3000, true);
+            each(self.names.get(name), true);
         }
         if !self.suffixes.is_empty() {
-            for (i, _) in name.match_indices('.') {
-                let suffix = &name[i + 1..];
-                each(self.suffixes.get(suffix), 2000 + suffix.split('.').count() as u32, false);
+            for domain in domains_above(name) {
+                each(self.suffixes.get(domain), false);
             }
         }
     }
 
     /// Like [`HostIndex::find`] for an address, with address patterns only.
-    pub(crate) fn find_ip(&self, ip: IpAddr, port: u16, mut f: impl FnMut(u32, bool, &T)) {
+    pub(crate) fn find_ip(&self, ip: IpAddr, port: u16, mut f: impl FnMut(bool, &T)) {
         if self.ips.is_empty() {
             return;
         }
@@ -260,8 +311,7 @@ impl<T> HostIndex<T> {
             for &len in &self.lens[ip.is_ipv6() as usize] {
                 for (p, t) in self.ips.get(&(mask(ip, len), len)).into_iter().flatten() {
                     if p.is_none_or(|p| p == port) {
-                        let pattern = NetPattern { kind: HostKind::Ip(ip, len), port: *p };
-                        f(pattern.score() * 2 + p.is_some() as u32, i > 0, t);
+                        f(i > 0, t);
                     }
                 }
             }
@@ -308,6 +358,12 @@ pub(crate) fn parse_ip(s: &str) -> Option<IpAddr> {
 
 fn body_ip(s: &str) -> Option<IpAddr> {
     s.parse::<IpAddr>().ok().map(|ip| ip.to_canonical())
+}
+
+/// Whether a destination is internal as named: `localhost`, or an IP
+/// literal that is not a public address (see [`is_private_address`]).
+pub(crate) fn is_internal(dest: &Dest) -> bool {
+    dest.ip.is_some_and(is_private_address) || is_localhost(dest.name)
 }
 
 pub(crate) fn is_localhost(host: &str) -> bool {
