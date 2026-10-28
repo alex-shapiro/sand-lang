@@ -36,7 +36,7 @@ Follow-up work, roughly in priority order.
       (`tests/compile_limits.rs`). Bound the work instead (fuel, instructions,
       the ratio between two input sizes in the same run).
 - [ ] `peak_rss_stays_near_the_memory_limit` (`tests/peak_rss.rs`) failed in
-      5 of 7 runs on macOS: "decoded computed defaults" peaks at 1.32 times
+      7 of 9 runs on macOS: "decoded computed defaults" peaks at 1.32 times
       the limit, above the 1.25 bound.
 - [ ] Run the playground page tests in CI across Chrome, Firefox, and Safari.
 - [ ] `Config::retry_stress` fails only the first check in a `vm_function`
