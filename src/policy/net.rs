@@ -28,9 +28,10 @@ pub(crate) enum HostKind {
     Ip(IpAddr, u8),
 }
 
-/// Returns true if `pattern` is a valid network pattern (see [`super::RulePolicy::allow_net`]).
-pub fn is_valid_net_pattern(pattern: &str) -> bool {
-    NetPattern::parse(pattern).is_ok()
+/// Checks a network pattern (see [`super::RulePolicy::allow_net`]). The
+/// error tells what is wrong, and how to correct it where it can.
+pub fn check_net_pattern(pattern: &str) -> Result<(), String> {
+    NetPattern::parse(pattern).map(drop)
 }
 
 /// Returns true if `pattern` is a valid listen pattern (see [`super::RulePolicy::allow_listen`]).

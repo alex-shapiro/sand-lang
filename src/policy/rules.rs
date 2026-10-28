@@ -261,7 +261,7 @@ impl RulePolicy {
     ///
     /// # Panics
     ///
-    /// If the pattern is invalid (see [`super::is_valid_net_pattern`]).
+    /// If the pattern is invalid (see [`super::check_net_pattern`]).
     pub fn allow_net(self, pattern: &str) -> Self {
         self.push(true, RuleKind::Net(net_pattern(pattern)))
     }

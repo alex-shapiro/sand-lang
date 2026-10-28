@@ -110,7 +110,7 @@ fn net_pattern_edge_cases() {
     assert_eq!(p.check(&net("2001:db8::5", 80)), Decision::Deny);
     assert_eq!(p.check(&net("10.2.3.4", 80)), Decision::Allow);
     // Validation.
-    use sandlang::policy::is_valid_net_pattern;
+    use sandlang::policy::check_net_pattern;
     for ok in [
         "*",
         "*:443",
@@ -126,7 +126,7 @@ fn net_pattern_edge_cases() {
         "[fc00::/7]:443",
         "fc00::/7",
     ] {
-        assert!(is_valid_net_pattern(ok), "{ok}");
+        assert_eq!(check_net_pattern(ok), Ok(()), "{ok}");
     }
     for bad in [
         "",
@@ -144,8 +144,10 @@ fn net_pattern_edge_cases() {
         "*.",
         "[example.com]",
         "a/b",
+        "10.0.0.1/8",
+        "[fc00::1]/7",
     ] {
-        assert!(!is_valid_net_pattern(bad), "{bad}");
+        assert!(check_net_pattern(bad).is_err(), "{bad}");
     }
 }
 

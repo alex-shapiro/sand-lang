@@ -839,6 +839,17 @@ fn private_networks_are_denied_by_default() {
     );
 }
 
+/// An invalid network pattern stops the run, and the error tells how to fix it.
+#[test]
+fn invalid_network_patterns_are_explained() {
+    let out = run("print(1)", &["--allow-net=10.0.0.1/8"]);
+    assert_eq!(out.code, 2, "{}", out.stderr);
+    assert!(out.stderr.contains("`10.0.0.1/8` has bits set after its prefix length: write `10.0.0.0/8`"), "{}", out.stderr);
+    let out = run("print(1)", &["--deny-net=a..b"]);
+    assert_eq!(out.code, 2, "{}", out.stderr);
+    assert!(out.stderr.contains("invalid host pattern `a..b`"), "{}", out.stderr);
+}
+
 /// If a script's standard output is a full pipe, then the script stops at its
 /// time limit.
 #[test]

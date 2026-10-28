@@ -280,7 +280,7 @@ fn report_policy_errors(file: &str, errors: &[sandlang::policy::PolicyError]) ->
 
 /// Rejects malformed network patterns (which would silently match nothing).
 fn net_pattern(p: &str) -> Result<String, String> {
-    if sandlang::policy::is_valid_net_pattern(p) { Ok(p.to_string()) } else { Err(format!("invalid network pattern `{p}`")) }
+    sandlang::policy::check_net_pattern(p).map(|()| p.to_string())
 }
 
 fn listen_pattern(p: &str) -> Result<String, String> {
