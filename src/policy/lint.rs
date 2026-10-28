@@ -1023,13 +1023,14 @@ mod tests {
 
         /// Removing a rule the linter reports does not change any decision.
         #[test]
-        fn reported_rules_are_not_needed(lines in prop::collection::vec(rule_line(), 1..9), private in any::<bool>()) {
+        fn reported_rules_are_not_needed(
+            lines in prop::collection::vec(rule_line(), 1..9),
+            private in any::<bool>(),
+            default in prop::sample::select(vec!["", "default allow", "default prompt"]),
+        ) {
             let (base, home) = (Path::new("/base"), Some(Path::new("/home/me")));
-            let text = |lines: &[String]| lines.join("\n") + if private { "\nallow private-net" } else { "" };
-            let policy = |lines: &[String]| {
-                let rules = PolicyFile::parse(&text(lines), base, home).unwrap().rules;
-                if private { rules } else { rules.deny_private_networks() }
-            };
+            let text = |lines: &[String]| lines.join("\n") + if private { "\nallow private-net\n" } else { "\n" } + default;
+            let policy = |lines: &[String]| PolicyFile::parse(&text(lines), base, home).unwrap().rule_policy(crate::policy::Decision::Deny);
             let with = policy(&lines);
             for w in lint_policy(&text(&lines), base, home).unwrap() {
                 if w.code == "unused-set" || w.code == "bypassable-http-deny" {
