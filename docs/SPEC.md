@@ -2474,6 +2474,7 @@ If two opposing rules have equal specificity, deny wins. Rules:
   - a host pattern may match any domain `*`, a specific domain `example.com` or strict subdomains `*.example.com`
   - a host pattern may also match an IP address (`127.0.0.1`, `::1`) or a CIDR range (`10.0.0.0/8`, `fc00::/7`),
     optionally with a port (`host:443`, `[::1]:8080`, `10.0.0.0/8:443`, `[fc00::/7]:443`).
+    The host bits after the prefix length of a CIDR range must be zero.
   - Exact hosts and addresses are most specific, then ranges and domains (longer ones more), then `*`
   - A port increases rule specificity.
   - Host names must be ASCII and are compared case-insensitively, ignoring a trailing dot
@@ -2598,10 +2599,12 @@ All paths must be anchored, but they may be prefixed with a shortcut:
 - `../...` begins at the file's parent directory
 - `~/...` begins at the user's home directory
 
-URL patterns are `[scheme://]host[:port][/path]`: a host pattern (§14.5,
-without ranges), then path segments as for files, percent-decoded. A pattern
-without a port but with a scheme matches the scheme's default port. A pattern
-without a port or a scheme matches any port.
+URL patterns have the form `[scheme://]host[:port][/path]`, where `host` is a
+hostname, domain wildcard, or single IP address and `path` is a
+percent-decoded file path pattern. A pattern with a scheme and without a port
+matches the default port of that scheme; a pattern without a scheme or a port
+matches all ports. An IP address in an `http` rule matches only URLs with that
+IP literal, not hostnames that are resolved to it.
 
 HTTP Methods (`GET`, any case, or any upper-case word) precede URLs.
 If no method is present, an http rule matches every method.
@@ -2633,15 +2636,14 @@ writes methods in upper case, aligns the trailing comments of consecutive
 lines and removes runs of blank lines. `sandlang::policy::lint_policy`
 reports:
 
-| Lint                   | Description                                                                           |
-| ---------------------- | ------------------------------------------------------------------------------------- |
-| `redundant-rule`       | a rule repeats another, or a broader rule already decides what it covers the same way |
-| `overridden-rule`      | a rule taking precedence decides everything a rule covers the other way               |
-| `bypassable-http-deny` | a `deny http` rule for a host that a net rule lets scripts connect to                 |
-| `unused-set`           | a `let` set that is never referenced in a rule                                        |
+| Lint                   | Description                                                                                                          |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `redundant-rule`       | broader rules or an earlier identical rule already make the same decision                                            |
+| `overridden-rule`      | higher-precedence rules make the opposite decision for all matching requests                                         |
+| `bypassable-http-deny` | a `net` rule or `default allow` permits raw TCP connections to a destination that is denied by a `deny http` rule    |
+| `unused-set`           | a `let` set is not used in any rule                                                                                  |
 
-The first two compare paths as written, without resolving symlinks, and report
-a rule only when a single other rule shows that it is not needed.
+File paths are compared lexically without resolving symlinks.
 
 `sandlang::policy::rule_for(capability, allow)` gives, as a policy file
 line, the rule that decides a promptable request for good (e.g. `allow read

@@ -35,6 +35,9 @@ Follow-up work, roughly in priority order.
       (`tests/metering.rs`), `many_locals_resolve_in_linear_time`
       (`tests/compile_limits.rs`). Bound the work instead (fuel, instructions,
       the ratio between two input sizes in the same run).
+- [ ] `peak_rss_stays_near_the_memory_limit` in `tests/peak_rss.rs` failed in
+      7 of 9 runs on macOS because the "decoded computed defaults" case
+      exceeds the 1.25 limit ratio at 1.32.
 - [ ] Run the playground page tests in CI across Chrome, Firefox, and Safari.
 - [ ] `Config::retry_stress` fails only the first check in a `vm_function`
       body, so it does not detect a side effect between the first and second
@@ -89,6 +92,38 @@ Follow-up work, roughly in priority order.
       `std::ops::Range<i64>` and `RangeInclusive<i64>` so that `SandStruct`
       fields can use Rust range types and `#[sand(default)]`.
 
+### Policy
+
+- [ ] **Represent built-in policy decisions as standard rules.** Built-in
+      decisions currently live outside the rule list, which hides them from
+      users, prompts, and the linter: `check_normalized_in` allows `Stdout`,
+      `Stderr`, and unrestricted imports when no `allow import` rule is
+      present, and `deny_private_networks()` blocks internal destinations on
+      wildcard allow rules and `default allow` while permitting loopback
+      addresses for `localhost`.
+      - Add these built-in decisions as standard rules at startup so that
+        the standard rule evaluator and linter handle all decisions uniformly.
+      - Remove `deny_private_networks()`, `PolicyFile::private_net`,
+        `--allow-private-net`, and the linter's `reaches_internal` and
+        `internal` flags, and expose host API helpers that add the equivalent
+        standard rules.
+      - Give user rules precedence over built-in rules of equal specificity,
+        while `deny` rules continue to win ties between user rules.
+      - Allow an explicit hostname rule such as `allow net localhost` to permit
+        the resolved addresses of that hostname without a separate address rule.
+      - Treat `*.localhost` as `localhost` per RFC 6761, and decide whether
+        `allow net *.localhost` counts as an explicit rule.
+- [ ] Connect directly to parsed IP literals in `resolve_allowed` without
+      calling the DNS resolver or checking `Capability::NetAddr`, and remove
+      the IP-literal shortcut from `check_addr`.
+- [ ] Check resolved addresses against `http` IP rules so that a hostname that
+      is resolved to a denied IP address is blocked on matching HTTP paths and
+      methods.
+- [ ] Support HTTP paths with encoded separators `%2F` and `%5C` in `rule_for`
+      so that "always" prompt answers can save rules for those requests.
+- [ ] Document in §14.5 that IPv4 deny rules also match IPv6-embedded IPv4
+      addresses and that loopback deny rules also match `0.0.0.0` and `::`.
+
 ### Tooling
 
 - [ ] Make `sand fmt` idempotent when a multi-line expression contains line
@@ -97,9 +132,9 @@ Follow-up work, roughly in priority order.
 
 - [ ] Fix broken intra-doc links to private items and run `cargo doc` with
       `-D warnings` in CI.
-- [ ] Compare `http` policy rules with wildcards in hosts or paths using the
-      same subsumption check as file rules, instead of comparing only exact rule
-      text.
+- [ ] Report `env` and `listen` policy rules that are subsumed by broader rules.
+- [ ] Index opposing rules in the policy linter to avoid quadratic comparisons
+      between narrow rules and opposing rules.
 
 ### Diagnostics
 

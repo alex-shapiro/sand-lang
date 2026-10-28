@@ -1,5 +1,4 @@
-//! Policy files: a policy (rules and limits) as text, for `sand run
-//! --policy=FILE` and hosts that let users write policies (SPEC §14.7).
+//! Policy file parser and formatter.
 //!
 //! ```text
 //! let owners = alice bob            # a set, used as {owners}
@@ -12,7 +11,7 @@
 //! limit memory 64M
 //! ```
 
-use super::net::{ListenPattern, NetPattern, UrlPattern, format_host_port, format_url_origin, url_segments};
+use super::net::{ListenPattern, NetPattern, UrlPattern, format_host_port, format_url_origin, parse_ip, url_segments};
 use super::path::{Seg, Tok};
 use super::rules::{Access, NamePattern, Origin, PathPattern, Rule, RuleKind};
 use super::{Capability, Decision, Policy, RulePolicy};
@@ -36,7 +35,7 @@ pub struct PolicyFile {
     pub limits: Limits,
 }
 
-/// An error in a policy file, at a line and column (counted from 1).
+/// An error in a policy file, with 1-based line and column numbers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PolicyError {
     pub line: usize,
@@ -52,43 +51,39 @@ impl fmt::Display for PolicyError {
 
 impl std::error::Error for PolicyError {}
 
-/// Expansions of a word with set references above this many are errors.
 const MAX_EXPANSION: usize = 100_000;
 
 impl PolicyFile {
-    /// Parses a policy file. Relative paths (`./data`) are taken from
-    /// `base` (usually the file's directory), `~` is `home` (an error if
-    /// `None`). Reports every error.
+    /// Parses a policy file. Relative paths are resolved from `base`, and `~`
+    /// is resolved from `home` or rejected if `home` is `None`.
     pub fn parse(text: &str, base: &Path, home: Option<&Path>) -> Result<PolicyFile, Vec<PolicyError>> {
         parse(text, base, home).map(|p| p.file)
     }
 
-    /// The policy: the rules with the `default` decision (deny if none was
-    /// given), denying private networks unless `allow private-net` was given.
+    /// Builds a [`Policy`] using `default`, or `Deny` if omitted, and denying
+    /// private networks unless `allow private-net` is present.
     pub fn policy(&self) -> Policy {
         self.policy_or(Decision::Deny)
     }
 
-    /// Like [`PolicyFile::policy`], with `fallback` for requests no rule
-    /// decides when the file has no `default` line (e.g. `Prompt` where a
-    /// person is at hand to answer).
+    /// Builds a [`Policy`] like [`PolicyFile::policy`], using `fallback` if the
+    /// file has no `default` rule.
     pub fn policy_or(&self, fallback: Decision) -> Policy {
-        let mut rules = self.rules.clone().fallback(self.default.unwrap_or(fallback));
-        if !self.private_net {
-            rules = rules.deny_private_networks();
-        }
-        Policy::rules(rules)
+        Policy::rules(self.rule_policy(fallback))
+    }
+
+    pub(crate) fn rule_policy(&self, fallback: Decision) -> RulePolicy {
+        let rules = self.rules.clone().fallback(self.default.unwrap_or(fallback));
+        if self.private_net { rules } else { rules.deny_private_networks() }
     }
 }
 
-/// A policy file as parsed, with what its linter needs.
 pub(crate) struct Parsed {
     pub file: PolicyFile,
-    /// The sets: name, line, column, whether used.
     pub sets: Vec<(String, usize, usize, bool)>,
+    pub default_line: Option<usize>,
 }
 
-/// A line of a policy file: words, and the comment (from its `#`).
 pub(crate) struct Line {
     pub words: Vec<Word>,
     pub comment: Option<String>,
@@ -97,24 +92,17 @@ pub(crate) struct Line {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Word {
     pub parts: Vec<Part>,
-    /// Column (from 1) of the word's first character.
     pub column: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Part {
-    /// Unquoted text, where `*` is a wildcard.
     Raw(String),
-    /// Quoted text, taken literally.
     Quoted(String),
-    /// `{name}`: each value of the set `name`.
     Ref(String),
 }
 
 impl Word {
-    /// The word's text if it uses no sets (a keyword, a name: quoting
-    /// does not change what a word says, only whether its `*`s are
-    /// wildcards).
     pub(crate) fn plain(&self) -> Option<Cow<'_, str>> {
         match self.parts.as_slice() {
             [Part::Raw(s) | Part::Quoted(s)] => Some(Cow::Borrowed(s)),
@@ -123,7 +111,6 @@ impl Word {
         }
     }
 
-    /// The word's text, quotes and wildcards aside.
     pub(crate) fn text(&self) -> String {
         self.parts
             .iter()
@@ -134,7 +121,6 @@ impl Word {
             .collect()
     }
 
-    /// The word's characters, marking unquoted `*`s as wildcards.
     pub(crate) fn tokens(&self) -> Vec<Tok> {
         let mut out = Vec::new();
         for p in &self.parts {
@@ -147,7 +133,6 @@ impl Word {
         out
     }
 
-    /// The word as a policy file writes it: quoting only what needs it.
     pub(crate) fn render(&self) -> String {
         let mut out = String::new();
         for p in &self.parts {
@@ -164,7 +149,6 @@ impl Word {
         out
     }
 
-    /// The word with its set references replaced by each of their values.
     fn expand(&self, sets: &FxHashMap<String, (Vec<Word>, usize)>, used: &mut FxHashMap<String, bool>) -> Result<Vec<Word>, String> {
         let mut out = vec![Word { parts: vec![], column: self.column }];
         for p in &self.parts {
@@ -187,8 +171,6 @@ impl Word {
     }
 }
 
-/// Text as a quoted part of a word, if it needs quoting to be read back
-/// literally.
 fn quote_part(s: &str, first: bool) -> String {
     let special = |c: char| c.is_whitespace() || matches!(c, ',' | '"' | '*' | '{' | '}');
     if !s.is_empty() && !s.contains(special) && !(first && s.starts_with('#')) {
@@ -197,10 +179,6 @@ fn quote_part(s: &str, first: bool) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-/// Splits a policy file into lines of words. Words are separated by spaces
-/// or commas; `"..."` quotes text (with `\"` and `\\` escapes), and a word
-/// may join quoted and unquoted text; `#` at the start of a word starts a
-/// comment.
 pub(crate) fn lex(text: &str) -> (Vec<Line>, Vec<PolicyError>) {
     let mut lines = Vec::new();
     let mut errors = Vec::new();
@@ -282,8 +260,6 @@ fn is_name(s: &str) -> bool {
 
 const KNOWN_METHODS: [&str; 9] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE", "CONNECT"];
 
-/// Whether a word of an `http` rule is a method: a standard method in any
-/// case, or any upper-case token (`PROPFIND`).
 pub(crate) fn is_method(word: &str) -> bool {
     KNOWN_METHODS.iter().any(|m| m.eq_ignore_ascii_case(word))
         || (word.bytes().any(|b| b.is_ascii_uppercase())
@@ -292,7 +268,6 @@ pub(crate) fn is_method(word: &str) -> bool {
 
 const CAPABILITIES: &str = "read, write, import, net, http, private-net, listen, env, stdin, stdout, stderr, timezone or custom";
 
-/// The context rules are parsed in.
 struct Context<'a> {
     base: &'a Path,
     home: Option<&'a Path>,
@@ -375,11 +350,10 @@ pub(crate) fn parse(text: &str, base: &Path, home: Option<&Path>) -> Result<Pars
     }
     file.rules = RulePolicy::new().extend(rules);
     let sets = sets.into_iter().map(|(name, line, column)| (name.clone(), line, column, cx.used.contains_key(&name))).collect();
-    Ok(Parsed { file, sets })
+    Ok(Parsed { file, sets, default_line })
 }
 
 impl Context<'_> {
-    /// Parses an `allow` or `deny` rule into `rules`.
     fn rule(
         &mut self,
         allow: bool,
@@ -464,12 +438,7 @@ impl Context<'_> {
                         };
                         RuleKind::Files(access, self.path(&word.tokens()).map_err(|m| (item.column, m))?)
                     }
-                    "net" => {
-                        let text = word.text();
-                        RuleKind::Net(NetPattern::parse(&text).ok_or_else(|| {
-                            (item.column, format!("invalid network pattern `{text}` (expected a host, host:port, *.domain, *, an IP address or a CIDR range)"))
-                        })?)
-                    }
+                    "net" => RuleKind::Net(NetPattern::parse(&word.text()).map_err(|m| (item.column, m))?),
                     "http" if is_method(&word.text()) => {
                         if urls > 0 {
                             return Err((item.column, "methods come before the URL patterns".into()));
@@ -496,8 +465,6 @@ impl Context<'_> {
         Ok(())
     }
 
-    /// Parses a path pattern: `/...`, `./...`, `../...` (from the base) or
-    /// `~/...` (from home), names separated by `/` (also `\` on Windows).
     fn path(&self, text: &[Tok]) -> Result<PathPattern, String> {
         let flat: String = text.iter().map(|t| t.0).collect();
         let sep = |c: char| c == '/' || (cfg!(windows) && c == '\\');
@@ -580,7 +547,7 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
         Capability::Import(p) => format!("import {}", path(p)?),
         Capability::Net { host, port } => {
             let pattern = format_host_port(host, *port);
-            NetPattern::parse(&pattern)?;
+            NetPattern::parse(&pattern).ok()?;
             format!("net {pattern}")
         }
         Capability::Http { method, scheme, host, port, path } => {
@@ -588,7 +555,12 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
             if alt.is_some() || !is_method(&method.to_ascii_uppercase()) || !matches!(scheme.as_str(), "http" | "https") {
                 return None;
             }
-            let mut url = format_url_origin(scheme, host, *port);
+            // Include the port for IP addresses so the parser does not treat a
+            // numeric first path segment as a CIDR prefix length.
+            let mut url = match parse_ip(host) {
+                Some(_) => format!("{scheme}://{}", format_host_port(host, *port)),
+                None => format_url_origin(scheme, host, *port),
+            };
             for name in &names {
                 url.push('/');
                 url.push_str(&crate::stdlib::uri_encode(name, b"!$&'()+;=:@-._~"));
@@ -609,14 +581,12 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
     Some(format!("{verb} {rule}"))
 }
 
-/// Parses a size: a number of bytes with an optional `K`, `M` or `G` suffix
-/// (powers of 1024), e.g. `512`, `64K`, `256M`, `1G`. Sizes too large for
-/// `usize` saturate, as do suffixed ones too large for `u64`.
+/// Parses a byte count with an optional `K`, `M`, or `G` binary suffix. Values
+/// that overflow saturate.
 pub fn parse_size(s: &str) -> Result<usize, String> {
     parse_size_u64(s).map(crate::vm::value::u64_to_usize_saturating)
 }
 
-/// [`parse_size`] for byte counts kept as `u64` on every target.
 fn parse_size_u64(s: &str) -> Result<u64, String> {
     let s = s.trim();
     let (num, mult) = match s.chars().last() {
@@ -855,6 +825,42 @@ mod tests {
     }
 
     #[test]
+    fn http_rules_take_single_addresses() {
+        let p =
+            parse("allow http *\nallow private-net\ndeny http 10.0.0.1/x\ndeny http GET [fd00::1]/admin\ndeny http [2001:db8::5]:8080/x");
+        assert_eq!(http(&p, "GET", "http://10.0.0.1/x"), Deny);
+        assert_eq!(http(&p, "GET", "http://[::ffff:10.0.0.1]/x"), Deny);
+        assert_eq!(http(&p, "GET", "http://10.0.0.2/x"), Allow);
+        assert_eq!(http(&p, "GET", "http://[fd00::1]/admin/x"), Deny);
+        assert_eq!(http(&p, "GET", "http://[fd00::1]/x"), Allow);
+        assert_eq!(http(&p, "GET", "http://[2001:db8::5]:8080/x"), Deny);
+        assert_eq!(http(&p, "GET", "http://[2001:db8::5]/x"), Allow);
+        let p = parse("allow http *\nallow private-net\ndeny http [::1]/admin\ndeny http 10.0.0.1:80/8");
+        assert_eq!(http(&p, "GET", "http://[::1]/admin"), Deny);
+        assert_eq!(http(&p, "GET", "http://[::1]/x"), Allow);
+        assert_eq!(http(&p, "GET", "http://10.0.0.1/8"), Deny);
+        assert_eq!(http(&p, "GET", "http://10.0.0.1/x"), Allow);
+        let p = parse("allow http *\nallow private-net\ndeny http 10.0.0.1/32/8\ndeny http [::]/128/8");
+        assert_eq!(http(&p, "GET", "http://10.0.0.1/8"), Deny);
+        assert_eq!(http(&p, "GET", "http://10.0.0.2/8"), Allow);
+        assert_eq!(http(&p, "GET", "http://[::]/8"), Deny);
+        assert_eq!(http(&p, "GET", "http://[::1]/8"), Allow);
+        assert_eq!(
+            errors(
+                "deny http 10.0.0.0/8\ndeny http [fc00::/7]:443/x\ndeny http 192.168.1.1/24/x\ndeny http [::1]/64/x\nallow net 10.0.0.1/8\nallow net 10.0.0.0/+8"
+            ),
+            [
+                "1:11: `10.0.0.0/8` is a range, and http rules match single addresses: write a net rule for the range (`net 10.0.0.0/8`), or `10.0.0.0/32/8` for the path `/8` on `10.0.0.0`",
+                "2:11: `[fc00::/7]:443` is a range, and http rules match single addresses: write a net rule for the range (`net [fc00::/7]:443`)",
+                "3:11: `192.168.1.1/24` is a range, and http rules match single addresses: write a net rule for the range (`net 192.168.1.0/24`), or `192.168.1.1/32/24` for the path `/24` on `192.168.1.1`",
+                "4:11: `[::1]/64` is a range, and http rules match single addresses: write a net rule for the range (`net ::/64`), or `[::1]/128/64` for the path `/64` on `::1`",
+                "5:11: `10.0.0.1/8` has bits set after its prefix length: write `10.0.0.0/8`",
+                "6:11: invalid host pattern `10.0.0.0/+8` (expected a host, host:port, *.domain, *, an IP address or a CIDR range)",
+            ]
+        );
+    }
+
+    #[test]
     fn hashes_start_comments_only_at_the_start_of_a_word() {
         let p = parse("deny read ./data/x#1   # the comment\nallow read ./data");
         assert_eq!(read(&p, "/base/data/x#1"), Deny);
@@ -937,13 +943,56 @@ mod tests {
         assert_eq!(decide(&p, Capability::NetListen("[::1]:22".parse().unwrap())), Prompt);
     }
 
+    proptest::proptest! {
+        #[test]
+        fn rules_for_http_requests_to_addresses_match_single_address(
+            bits in proptest::prelude::any::<u128>(),
+            zeros in 0..128u32,
+            v6 in proptest::prelude::any::<bool>(),
+            https in proptest::prelude::any::<bool>(),
+            port in proptest::sample::select(vec![80u16, 443, 8080]),
+            names in proptest::collection::vec(0..=130u32, 1..3),
+        ) {
+            let ip: std::net::IpAddr = if v6 {
+                std::net::Ipv6Addr::from(bits.checked_shr(zeros).unwrap_or(0).checked_shl(zeros).unwrap_or(0)).into()
+            } else {
+                let zeros = zeros % 32;
+                std::net::Ipv4Addr::from((bits as u32) >> zeros << zeros).into()
+            };
+            let other = match ip {
+                std::net::IpAddr::V4(v4) => std::net::IpAddr::V4((u32::from(v4) ^ 1).into()),
+                std::net::IpAddr::V6(v6) => std::net::IpAddr::V6((u128::from(v6) ^ 1).into()),
+            };
+            let path: String = names.iter().map(|n| format!("/{n}")).collect();
+            let scheme = if https { "https" } else { "http" };
+            let cap = |ip: std::net::IpAddr| Capability::Http {
+                method: "GET".into(), scheme: scheme.into(), host: ip.to_string(), port, path: path.clone(),
+            };
+            for allow in [true, false] {
+                let rule = rule_for(&cap(ip), allow);
+                proptest::prop_assert!(rule.is_some(), "no rule for {}", cap(ip));
+                let p = parse(&format!("default prompt\nallow private-net\n{}", rule.unwrap()));
+                proptest::prop_assert_eq!(decide(&p, cap(ip)), if allow { Allow } else { Deny }, "{}", cap(ip));
+                proptest::prop_assert_eq!(decide(&p, cap(other)), Prompt, "{}: {}", rule_for(&cap(ip), allow).unwrap(), cap(other));
+            }
+        }
+    }
+
     #[test]
     fn private_networks_are_denied_unless_allowed() {
         let net = Capability::Net { host: "10.1.2.3".into(), port: 80 };
         let p = parse("allow net *");
         assert_eq!(decide(&p, net.clone()), Deny);
         let p = parse("allow net *\nallow private-net");
-        assert_eq!(decide(&p, net), Allow);
+        assert_eq!(decide(&p, net.clone()), Allow);
+        let p = parse("default allow");
+        for host in ["10.1.2.3", "169.254.169.254", "localhost", "127.0.0.1", "::1"] {
+            assert_eq!(decide(&p, Capability::Net { host: host.into(), port: 80 }), Deny, "{host}");
+            assert_eq!(http(&p, "GET", &format!("http://{}/", super::format_host_port(host, 80))), Deny, "{host}");
+        }
+        assert_eq!(decide(&p, Capability::Net { host: "example.com".into(), port: 80 }), Allow);
+        assert_eq!(decide(&parse("default allow\nallow private-net"), net.clone()), Allow);
+        assert_eq!(decide(&parse("default prompt"), net), Prompt);
     }
 
     #[test]
@@ -957,7 +1006,7 @@ mod tests {
             [
                 "1:1: unknown rule `alow` (rules start with `allow`, `deny`, `default`, `limit` or `let`)",
                 "2:1: expected what to allow: a path, or read, write, import, net, http, private-net, listen, env, stdin, stdout, stderr, timezone or custom",
-                "3:17: invalid network pattern `pattern!` (expected a host, host:port, *.domain, *, an IP address or a CIDR range)",
+                "3:17: invalid host pattern `pattern!` (expected a host, host:port, *.domain, *, an IP address or a CIDR range)",
                 "4:7: invalid size `lots` (use e.g. 4096, 64K, 256M, 1G)",
                 "5:1: expected `limit NAME VALUE`, e.g. `limit memory 64M`",
                 "6:9: unknown default `maybe` (expected `deny`, `prompt` or `allow`)",

@@ -18,7 +18,7 @@ pub use file::{PolicyError, PolicyFile, parse_duration, parse_size, rule_for};
 pub use format::format_policy;
 pub use lint::lint_policy;
 use net::format_url_origin;
-pub use net::{format_host_port, is_private_address, is_valid_listen_pattern, is_valid_net_pattern};
+pub use net::{check_net_pattern, format_host_port, is_private_address, is_valid_listen_pattern};
 #[cfg(feature = "os")]
 pub(crate) use net::{is_valid_host, parse_port, split_port};
 pub use rules::RulePolicy;

@@ -1,6 +1,15 @@
 //! The `sand` command-line tool.
 #![forbid(unsafe_code)]
 
+macro_rules! out {
+    ($($arg:tt)*) => { crate::write_out(format_args!($($arg)*)) };
+}
+
+macro_rules! outln {
+    () => { crate::write_out(format_args!("\n")) };
+    ($($arg:tt)*) => { crate::write_out(format_args!("{}\n", format_args!($($arg)*))) };
+}
+
 mod repl;
 
 use sandlang::policy::{PolicyFile, parse_duration, parse_size};
@@ -9,6 +18,31 @@ use sandlang::{Capability, Config, Decision, Engine, Error, Policy, PromptAnswer
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicU8, Ordering};
+
+static STDOUT: AtomicU8 = AtomicU8::new(OPEN);
+const OPEN: u8 = 0;
+const CLOSED: u8 = 1;
+const FAILED: u8 = 2;
+
+/// Writes to standard output, ignoring broken pipes and recording other I/O errors.
+fn write_out(args: std::fmt::Arguments) {
+    write_to(&mut std::io::stdout(), &STDOUT, args);
+}
+
+fn write_to(out: &mut impl Write, state: &AtomicU8, args: std::fmt::Arguments) {
+    if state.load(Ordering::Relaxed) != OPEN {
+        return;
+    }
+    if let Err(e) = out.write_fmt(args) {
+        if e.kind() == std::io::ErrorKind::BrokenPipe {
+            state.store(CLOSED, Ordering::Relaxed);
+        } else {
+            eprintln!("sand: cannot write to standard output: {e}");
+            state.store(FAILED, Ordering::Relaxed);
+        }
+    }
+}
 
 const USAGE: &str = "\
 sand — the Sand language
@@ -60,7 +94,7 @@ fn main() -> ExitCode {
     // Options end at `--` (what follows goes to the script).
     let options = rest.iter().position(|a| a == "--").map_or(rest, |end| &rest[..end]);
     if options.iter().any(|a| a == "--help" || a == "-h") {
-        print!("{USAGE}");
+        out!("{USAGE}");
         return ExitCode::SUCCESS;
     }
     let result = match cmd.as_str() {
@@ -71,11 +105,11 @@ fn main() -> ExitCode {
         "test" => cmd_test(rest),
         "repl" => repl::cmd_repl(rest),
         "--version" | "-V" | "version" => {
-            println!("sand {}", env!("CARGO_PKG_VERSION"));
+            outln!("sand {}", env!("CARGO_PKG_VERSION"));
             Ok(0)
         }
         "help" | "--help" | "-h" => {
-            print!("{USAGE}");
+            out!("{USAGE}");
             Ok(0)
         }
         other => Err(format!("unknown command `{other}`\n\n{USAGE}")),
@@ -83,6 +117,7 @@ fn main() -> ExitCode {
     // A run that hit a limit may have left unflushed output. Write it before exiting.
     sandlang::flush_stdio();
     match result {
+        Ok(_) if STDOUT.load(Ordering::Relaxed) == FAILED => ExitCode::from(2),
         Ok(code) => ExitCode::from(code.clamp(0, 255)),
         Err(msg) => {
             eprintln!("sand: {msg}");
@@ -280,7 +315,7 @@ fn report_policy_errors(file: &str, errors: &[sandlang::policy::PolicyError]) ->
 
 /// Rejects malformed network patterns (which would silently match nothing).
 fn net_pattern(p: &str) -> Result<String, String> {
-    if sandlang::policy::is_valid_net_pattern(p) { Ok(p.to_string()) } else { Err(format!("invalid network pattern `{p}`")) }
+    sandlang::policy::check_net_pattern(p).map(|()| p.to_string())
 }
 
 fn listen_pattern(p: &str) -> Result<String, String> {
@@ -467,7 +502,7 @@ fn cmd_check(args: &[String]) -> Result<u8, String> {
         let path = Path::new(f);
         if is_policy(f) {
             match read_policy(path) {
-                Ok(_) => println!("{f}: ok"),
+                Ok(_) => outln!("{f}: ok"),
                 Err(e) => {
                     eprintln!("sand: {e}");
                     code = code.max(2);
@@ -478,7 +513,7 @@ fn cmd_check(args: &[String]) -> Result<u8, String> {
         // Checking runs no script code; imports are confined to the module root.
         let engine = Engine::new(Config::new().policy(Policy::deny_all())).map_err(|e| e.render())?;
         match engine.check_file(path) {
-            Ok(()) => println!("{f}: ok"),
+            Ok(()) => outln!("{f}: ok"),
             Err(e) => code = code.max(report_error(&e)),
         }
     }
@@ -502,7 +537,7 @@ fn cmd_lint(args: &[String]) -> Result<u8, String> {
         match warnings {
             Ok(ws) => {
                 for w in ws {
-                    println!("{f}:{w}");
+                    outln!("{f}:{w}");
                     count += 1;
                 }
             }
@@ -542,11 +577,11 @@ fn cmd_fmt(args: &[String]) -> Result<u8, String> {
             Ok(out) => {
                 if out != src {
                     if check {
-                        println!("{f}: not formatted");
+                        outln!("{f}: not formatted");
                         code = 1;
                     } else {
                         std::fs::write(f, out).map_err(|e| format!("cannot write {f}: {e}"))?;
-                        println!("{f}: formatted");
+                        outln!("{f}: formatted");
                     }
                 }
             }
@@ -567,7 +602,7 @@ fn fmt_stdin(check: bool) -> Result<u8, String> {
     match sandlang::fmt::format_source(&src) {
         Ok(out) if check => Ok(if out == src { 0 } else { 1 }),
         Ok(out) => {
-            print!("{out}");
+            out!("{out}");
             Ok(0)
         }
         Err(e) => {
@@ -591,7 +626,7 @@ fn cmd_test(args: &[String]) -> Result<u8, String> {
         let mut engine = Engine::new(opts.config.clone()).map_err(|e| e.render())?;
         match rt.block_on(engine.run_tests(f)) {
             Ok(report) => {
-                print!("{}", report.render());
+                out!("{}", report.render());
                 failed += report.failed();
             }
             Err(e) => return Ok(report_error(&e)),
@@ -609,6 +644,28 @@ mod tests {
         let mut out = Vec::new();
         let answer = prompt_dialogue(cap, &mut input.as_bytes(), &mut out);
         (answer, String::from_utf8(out).unwrap())
+    }
+
+    struct FailingWriter(std::io::ErrorKind, usize);
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            self.1 += 1;
+            Err(self.0.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn output_stops_after_an_error() {
+        for (kind, after) in [(std::io::ErrorKind::BrokenPipe, CLOSED), (std::io::ErrorKind::StorageFull, FAILED)] {
+            let (mut out, state) = (FailingWriter(kind, 0), AtomicU8::new(OPEN));
+            write_to(&mut out, &state, format_args!("a"));
+            write_to(&mut out, &state, format_args!("b"));
+            assert_eq!((out.1, state.load(Ordering::Relaxed)), (1, after), "{kind:?}");
+        }
     }
 
     fn read_cap() -> Capability {

@@ -1,0 +1,17 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 82ed77e28d3513fbdfc40f081eb9421ac9a6f2bfc22b22be9c37da256f19c260 # shrinks to allow = false, broad_host = 0, narrow_host = 0, broad_port = false, scheme = false, method = false, path = [], extra = [], narrow_first = true
+cc dd6af04bc000dba39c6e40fa9bc308bc344bb498602c137a4b7b83a8e71b824b # shrinks to lines = ["allow net 10.0.0.0/8", "deny http 10.0.0.1", "deny http 10.0.0.1"], private = false
+cc 7cc4b860de89c3b4e48c7e8715ab282c0700b8e818cca735718bc016db3b6cf5 # shrinks to lines = ["deny http 10.0.0.0/8", "allow net 10.0.0.0/8"], private = false
+cc 210a87bac1bedf5219187c4e5f56e1d1ca73ff60c51bd29420ef12bef3ab15cd # shrinks to lines = ["deny net 0.0.0.0", "allow net 0.0.0.0/0", "deny http *"], private = false
+cc 41b713389b692092c00bf9c17332b13396eb3a523c6ed5706020186c8606ad6d # shrinks to lines = ["deny net [::1]", "allow net [::]/0", "deny http *"], private = false
+cc 5c403b018621b02389ff289c4ac0caa966e535441e32dbe94d5f47ca30488486 # shrinks to lines = ["allow import /r/k*", "deny /r/k*"], private = false
+cc 8bd0dff25a89f3cee5368570250452e496efe8f4ca2d630ee80eb963d0351ccb # shrinks to lines = ["deny net 8.8.8.8", "deny net *"], private = false
+cc 8c3cac589ed65a6a206cccd4eb5e39972966315792990a794b158a272a803136 # shrinks to lines = ["allow http localhost", "allow net localhost"], private = false
+cc 67c0ac3d2b2282dbc94d64952a8b62f738e6d0122c168760301a06c127f4438d # shrinks to lines = ["allow net [2002::]/16", "deny http [2002::]/16"], private = false
+cc a40d337149928d67a7524edb186b803d0de4784e2f76d82ec1f4c70e2c9a433c # shrinks to lines = ["deny http 0.0.0.0", "allow net [64:ff9b::]/96"], private = false
+cc 1397cbb0e335f494598c2af47710a60afd0088ca18a4e9c5c4224e87742a06f1 # shrinks to lines = ["deny http [::]/0", "allow net 0.0.0.0/0"], private = false
