@@ -91,8 +91,8 @@ pub(crate) enum RuleKind {
 }
 
 impl RuleKind {
-    /// What the rule matches in http requests. A net rule matches them as
-    /// an http rule for its host with any method, scheme and path.
+    /// Returns the HTTP matching parameters for `http` and `net` rules (`net`
+    /// rules match HTTP requests for all methods, schemes, and paths).
     pub(crate) fn http_match(&self) -> Option<HttpMatch<'_>> {
         match self {
             RuleKind::Http(methods, url) => {
@@ -103,9 +103,9 @@ impl RuleKind {
         }
     }
 
-    /// The connections the rule decides: a net rule decides connections to
-    /// the hosts it names, and an address pattern also connections to the
-    /// addresses that host names resolve to.
+    /// Returns the connection stages that the rule evaluates. A `net` rule
+    /// checks named connections ([`Capability::Net`]), and an IP or CIDR `net`
+    /// rule also checks resolved addresses ([`Capability::NetAddr`]).
     pub(crate) fn connections(&self) -> &'static [Connection] {
         match self {
             RuleKind::Net(NetPattern { kind: HostKind::Ip(..), .. }) => &[Connection::Named, Connection::Resolved],
@@ -115,22 +115,22 @@ impl RuleKind {
     }
 }
 
-/// What an http or net rule matches in http requests.
+/// HTTP request matching parameters for an `http` or `net` rule.
 #[derive(Clone, Copy)]
 pub(crate) struct HttpMatch<'a> {
-    /// Upper case; `None`: any.
+    /// Uppercase method names, or `None` to match all methods.
     pub methods: Option<&'a [String]>,
     pub scheme: Option<&'static str>,
     pub host: &'a NetPattern,
     pub path: &'a [Seg],
 }
 
-/// A connection that net rules decide.
+/// Connection stage checked by a `net` rule.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Connection {
-    /// To a host or address as a script names it ([`Capability::Net`]).
+    /// Outgoing connection by hostname or IP literal ([`Capability::Net`]).
     Named,
-    /// To an address that a host name resolves to ([`Capability::NetAddr`]).
+    /// Outgoing connection to a resolved IP address ([`Capability::NetAddr`]).
     Resolved,
 }
 
@@ -558,19 +558,15 @@ impl RulePolicy {
         }
     }
 
-    /// Offers the net rules that match `dest`. Unless `allow private-net`,
-    /// internal destinations named directly need an explicit allow rule.
     fn net_verdict(&self, dest: &Dest, best: &mut Best<'_>) {
         let internal = self.deny_private && is_internal(dest);
-        self.others().named.find(dest, |explicit, spelled, e| {
-            if !e.allow || allow_applies(explicit, spelled, internal) {
+        self.others().named.find(dest, |explicit, is_alt, e| {
+            if !e.allow || allow_applies(explicit, is_alt, internal) {
                 best.offer(e.rank.spec(0), e.allow, e.rule);
             }
         });
     }
 
-    /// Offers the http and net rules that match a request (see
-    /// [`RuleKind::http_match`]).
     fn http_verdict(&self, dest: &Dest, method: &str, scheme: &str, names: &[String], best: &mut Best<'_>) {
         let index = self.others();
         if index.groups.is_empty() {
@@ -580,14 +576,14 @@ impl RulePolicy {
         let method = method.to_ascii_uppercase();
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
         let mut folded_names = None;
-        index.http.find(dest, |explicit, spelled, &group| {
+        index.http.find(dest, |explicit, is_alt, &group| {
             let group = &index.groups[group as usize];
             let mut offer = |e: &HttpEntry, depth: usize, allow: bool| {
                 if method_matches(e.methods.as_deref(), &method) && scheme_matches(e.scheme, scheme) {
                     best.offer(e.rank.spec(depth), allow, e.rule);
                 }
             };
-            if !group.allow.is_empty() && allow_applies(explicit, spelled, internal) {
+            if !group.allow.is_empty() && allow_applies(explicit, is_alt, internal) {
                 group.allow.matches(&names, |e, depth| offer(e, depth, true));
             }
             if !group.deny.is_empty() {
@@ -605,8 +601,8 @@ impl RulePolicy {
             return if literal == ip { Decision::Allow } else { Decision::Deny };
         }
         let mut best = Best::new(&[]);
-        self.others().resolved.find_ip(ip, addr.port(), |spelled, e| {
-            if !e.allow || allow_applies(true, spelled, false) {
+        self.others().resolved.find_ip(ip, addr.port(), |is_alt, e| {
+            if !e.allow || allow_applies(true, is_alt, false) {
                 best.offer(e.rank.spec(0), e.allow, e.rule);
             }
         });
@@ -651,48 +647,39 @@ fn refs<S: AsRef<str>>(names: &[S]) -> Vec<&str> {
     names.iter().map(AsRef::as_ref).collect()
 }
 
-/// Whether an allow rule whose host pattern matches a destination decides
-/// requests to it: not where it matches another spelling of the address,
-/// and, for an `internal` destination, only if the pattern is `explicit`.
-pub(crate) fn allow_applies(explicit: bool, spelled: bool, internal: bool) -> bool {
-    !spelled && (explicit || !internal)
+/// Returns true if an allow rule that matches a destination applies to the
+/// request. Allow rules do not match alternate IP representations, and do not
+/// match internal destinations unless the host pattern is explicit.
+pub(crate) fn allow_applies(explicit: bool, is_alternate_ip: bool, internal: bool) -> bool {
+    !is_alternate_ip && (explicit || !internal)
 }
 
-/// Whether an http rule's methods (upper case; `None`: any) include
-/// `method` (upper case).
 pub(crate) fn method_matches(methods: Option<&[String]>, method: &str) -> bool {
     methods.is_none_or(|m| m.iter().any(|m| m == method))
 }
 
-/// Whether an http rule's scheme (`None`: any) matches `scheme`.
 pub(crate) fn scheme_matches(rule: Option<&str>, scheme: &str) -> bool {
     rule.is_none_or(|s| s.eq_ignore_ascii_case(scheme))
 }
 
-/// The pattern of a file rule whose prefix normalizes to `prefix`, root
-/// first.
 pub(crate) fn file_segments(prefix: &Path, rest: &[Seg]) -> Vec<Seg> {
     path_segments(prefix).iter().map(|s| Seg::Lit((**s).into())).chain(rest.iter().cloned()).collect()
 }
 
-/// A pattern with its names folded as deny rules compare them (see
-/// [`fold_name`]).
 pub(crate) fn fold_segments(segs: &[Seg]) -> Vec<Seg> {
     segs.iter().map(|s| s.map(|n| fold_name(n).into_owned())).collect()
 }
 
-/// How specific a rule's match is, compared in order.
+/// Rule specificity tuple: `[tier, path_depth, path_weight, has_methods]`.
 pub(crate) type Spec = [u32; 4];
 
-/// How a file, http or net rule ranks where it matches, apart from the
-/// depth of the deepest path it matches there: by its tier, then by that
-/// depth, then by its weight, then by whether it names methods.
+/// Specificity components of a file, `http`, or `net` rule excluding the
+/// matched path depth.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Rank {
-    /// For http and net rules, the rank of the host pattern, then whether
-    /// the rule names a scheme. 0 for file rules.
+    /// Host pattern rank and scheme flag for `http` and `net` rules, or `0`
+    /// for file rules.
     pub tier: u32,
-    /// How much the path pattern narrows the paths it matches.
     pub weight: u32,
     pub methods: bool,
 }
@@ -712,8 +699,8 @@ impl Rank {
     }
 }
 
-/// How a rule ranks where it matches with `spec`: the more specific, then
-/// a deny, then the first.
+/// Returns the comparison key that orders matching rules by specificity, then
+/// deny before allow, and then earlier rules before later rules.
 pub(crate) fn precedence(spec: Spec, allow: bool, rule: usize) -> (Spec, bool, std::cmp::Reverse<usize>) {
     (spec, !allow, std::cmp::Reverse(rule))
 }
@@ -866,14 +853,10 @@ impl Resolver {
     }
 }
 
-/// The rules of a policy other than file rules.
 #[derive(Debug, Default)]
 struct Index {
-    /// The rules for each kind of connection (see [`RuleKind::connections`]).
     named: HostIndex<NetEntry>,
     resolved: HostIndex<NetEntry>,
-    /// Groups of http and net rules by host pattern (see
-    /// [`RuleKind::http_match`]).
     http: HostIndex<u32>,
     groups: Vec<HttpGroup>,
     listen: Vec<(ListenPattern, bool, u32)>,

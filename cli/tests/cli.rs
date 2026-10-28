@@ -432,10 +432,8 @@ fn lint_command() {
     assert!(o.stderr.contains("unknown option `--allow-warning`"), "{o:?}");
 }
 
-/// A reader that stops early (`sand lint x.policy | head -1`) ends the
-/// output without a panic.
 #[test]
-fn output_stops_quietly_when_stdout_closes() {
+fn output_stops_quietly_if_stdout_is_closed() {
     let dir = TempDir::new("lint-pipe");
     let rules: String = (0..20_000).map(|i| format!("allow net h{i}.example.com\n")).collect();
     dir.write("big.policy", &format!("allow net *\n{rules}"));
@@ -451,7 +449,6 @@ fn output_stops_quietly_when_stdout_closes() {
     let out = child.wait_with_output().unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!((out.status.code(), stderr.as_ref()), (Some(1), ""));
-    // The REPL, with input from a pipe.
     let mut child = Command::new(env!("CARGO_BIN_EXE_sand"))
         .arg("repl")
         .current_dir(dir.path())
@@ -472,8 +469,7 @@ fn output_stops_quietly_when_stdout_closes() {
     assert_eq!((out.status.code(), stderr.as_ref()), (Some(0), ""));
 }
 
-/// An error other than a closed pipe is reported, and the status is 2.
-/// (Rust ignores `EBADF` on standard output, and macOS has no `/dev/full`.)
+// Rust ignores `EBADF` on standard output, and macOS does not provide `/dev/full`.
 #[cfg(target_os = "linux")]
 #[test]
 fn output_errors_are_reported() {
@@ -891,7 +887,6 @@ fn private_networks_are_denied_by_default() {
     );
 }
 
-/// An invalid network pattern stops the run, and the error tells how to fix it.
 #[test]
 fn invalid_network_patterns_are_explained() {
     let out = run("print(1)", &["--allow-net=10.0.0.1/8"]);

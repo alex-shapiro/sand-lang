@@ -1,12 +1,10 @@
 //! The `sand` command-line tool.
 #![forbid(unsafe_code)]
 
-/// Writes to standard output like `print!` (see [`write_out`]).
 macro_rules! out {
     ($($arg:tt)*) => { crate::write_out(format_args!($($arg)*)) };
 }
 
-/// Writes a line to standard output like `println!` (see [`write_out`]).
 macro_rules! outln {
     () => { crate::write_out(format_args!("\n")) };
     ($($arg:tt)*) => { crate::write_out(format_args!("{}\n", format_args!($($arg)*))) };
@@ -22,20 +20,18 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicU8, Ordering};
 
-/// The state of standard output: open, closed by its reader, or failed.
 static STDOUT: AtomicU8 = AtomicU8::new(OPEN);
 const OPEN: u8 = 0;
 const CLOSED: u8 = 1;
 const FAILED: u8 = 2;
 
-/// Writes to standard output. After the reader closes it (`sand lint
-/// x.policy | head`), drops the rest of the output. After another error,
-/// reports it once, and `main` exits with status 2.
+/// Writes to standard output, ignoring broken-pipe errors after the reader
+/// closes the stream (`sand lint x.policy | head`). If another I/O error
+/// occurs, reports it once and causes `main` to exit with status 2.
 fn write_out(args: std::fmt::Arguments) {
     write_to(&mut std::io::stdout(), &STDOUT, args);
 }
 
-/// Writes to `out` unless `state` is not `OPEN`, and sets `state` on an error.
 fn write_to(out: &mut impl Write, state: &AtomicU8, args: std::fmt::Arguments) {
     if state.load(Ordering::Relaxed) != OPEN {
         return;
@@ -652,10 +648,9 @@ mod tests {
         (answer, String::from_utf8(out).unwrap())
     }
 
-    /// A writer that fails with `kind` and counts its writes.
-    struct Failing(std::io::ErrorKind, usize);
+    struct FailingWriter(std::io::ErrorKind, usize);
 
-    impl Write for Failing {
+    impl Write for FailingWriter {
         fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
             self.1 += 1;
             Err(self.0.into())
@@ -668,7 +663,7 @@ mod tests {
     #[test]
     fn output_stops_after_an_error() {
         for (kind, after) in [(std::io::ErrorKind::BrokenPipe, CLOSED), (std::io::ErrorKind::StorageFull, FAILED)] {
-            let (mut out, state) = (Failing(kind, 0), AtomicU8::new(OPEN));
+            let (mut out, state) = (FailingWriter(kind, 0), AtomicU8::new(OPEN));
             write_to(&mut out, &state, format_args!("a"));
             write_to(&mut out, &state, format_args!("b"));
             assert_eq!((out.1, state.load(Ordering::Relaxed)), (1, after), "{kind:?}");

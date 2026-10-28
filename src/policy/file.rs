@@ -82,12 +82,11 @@ impl PolicyFile {
     }
 }
 
-/// A policy file as parsed, with what its linter needs.
+/// A parsed policy file and its set metadata.
 pub(crate) struct Parsed {
     pub file: PolicyFile,
-    /// The sets: name, line, column, whether used.
+    /// Declared sets: `(name, line, column, is_used)`.
     pub sets: Vec<(String, usize, usize, bool)>,
-    /// The line of the `default` rule.
     pub default_line: Option<usize>,
 }
 
@@ -586,8 +585,8 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
             if alt.is_some() || !is_method(&method.to_ascii_uppercase()) || !matches!(scheme.as_str(), "http" | "https") {
                 return None;
             }
-            // After an address without a port, the parser reads a number at
-            // the start of the path as a prefix length (`https://10.0.0.0/8`).
+            // Include the port for IP addresses so the parser does not treat a
+            // numeric first path segment as a CIDR prefix length.
             let mut url = match parse_ip(host) {
                 Some(_) => format!("{scheme}://{}", format_host_port(host, *port)),
                 None => format_url_origin(scheme, host, *port),
@@ -868,20 +867,16 @@ mod tests {
         assert_eq!(http(&p, "GET", "http://[fd00::1]/x"), Allow);
         assert_eq!(http(&p, "GET", "http://[2001:db8::5]:8080/x"), Deny);
         assert_eq!(http(&p, "GET", "http://[2001:db8::5]/x"), Allow);
-        // If no prefix length follows an address, the path starts after it.
         let p = parse("allow http *\nallow private-net\ndeny http [::1]/admin\ndeny http 10.0.0.1:80/8");
         assert_eq!(http(&p, "GET", "http://[::1]/admin"), Deny);
         assert_eq!(http(&p, "GET", "http://[::1]/x"), Allow);
         assert_eq!(http(&p, "GET", "http://10.0.0.1/8"), Deny);
         assert_eq!(http(&p, "GET", "http://10.0.0.1/x"), Allow);
-        // After the full prefix length of an address, a number is a path.
         let p = parse("allow http *\nallow private-net\ndeny http 10.0.0.1/32/8\ndeny http [::]/128/8");
         assert_eq!(http(&p, "GET", "http://10.0.0.1/8"), Deny);
         assert_eq!(http(&p, "GET", "http://10.0.0.2/8"), Allow);
         assert_eq!(http(&p, "GET", "http://[::]/8"), Deny);
         assert_eq!(http(&p, "GET", "http://[::1]/8"), Allow);
-        // Only a net rule can name a range, and a range must start at its
-        // first address.
         assert_eq!(
             errors(
                 "deny http 10.0.0.0/8\ndeny http [fc00::/7]:443/x\ndeny http 192.168.1.1/24/x\ndeny http [::1]/64/x\nallow net 10.0.0.1/8\nallow net 10.0.0.0/+8"
@@ -981,11 +976,8 @@ mod tests {
     }
 
     proptest::proptest! {
-        /// The rule for an http request to an address decides that request,
-        /// and does not decide requests to other addresses. A number at the
-        /// start of the path is not a prefix length.
         #[test]
-        fn rules_for_http_requests_to_addresses_name_one_address(
+        fn rules_for_http_requests_to_addresses_match_single_address(
             bits in proptest::prelude::any::<u128>(),
             zeros in 0..128u32,
             v6 in proptest::prelude::any::<bool>(),
@@ -993,8 +985,6 @@ mod tests {
             port in proptest::sample::select(vec![80u16, 443, 8080]),
             names in proptest::collection::vec(0..=130u32, 1..3),
         ) {
-            // An address whose last bits are zero, so that the first name
-            // could be a prefix length.
             let ip: std::net::IpAddr = if v6 {
                 std::net::Ipv6Addr::from(bits.checked_shr(zeros).unwrap_or(0).checked_shl(zeros).unwrap_or(0)).into()
             } else {
@@ -1027,8 +1017,6 @@ mod tests {
         assert_eq!(decide(&p, net.clone()), Deny);
         let p = parse("allow net *\nallow private-net");
         assert_eq!(decide(&p, net.clone()), Allow);
-        // `default allow` is not an explicit rule for internal destinations,
-        // but a prompt answer is.
         let p = parse("default allow");
         for host in ["10.1.2.3", "169.254.169.254", "localhost", "127.0.0.1", "::1"] {
             assert_eq!(decide(&p, Capability::Net { host: host.into(), port: 80 }), Deny, "{host}");

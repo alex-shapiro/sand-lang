@@ -53,8 +53,7 @@ fn net_patterns_match_ip_literals_and_ranges() {
 }
 
 #[test]
-fn deny_ranges_catch_other_spellings_of_their_addresses() {
-    // `0.0.0.0` and `::` connect to the local host.
+fn deny_ranges_match_alternate_ip_representations() {
     let p = RulePolicy::new().allow_net("*").deny_net("127.0.0.0/8").deny_net("10.0.0.0/8").deny_net("[::1]");
     for host in [
         "0.0.0.0",
@@ -75,7 +74,6 @@ fn deny_ranges_catch_other_spellings_of_their_addresses() {
     for host in ["8.8.8.8", "2001:4860::8888", "64:ff9b::808:808", "2002:808:808::"] {
         assert_eq!(p.check(&net(host, 8080)), Decision::Allow, "{host}");
     }
-    // `0.0.0.0` and `::` are the same to deny rules.
     for (deny, hosts) in [("0.0.0.0", ["::", "[::]", "64:ff9b::"]), ("[::]", ["0.0.0.0", "::ffff:0.0.0.0", "64:ff9b::"])] {
         let p = RulePolicy::new().allow_net("*").deny_net(deny).deny_private_networks();
         let p = p.allow_net("0.0.0.0").allow_net("[::]").allow_net("[64:ff9b::]");
@@ -83,7 +81,6 @@ fn deny_ranges_catch_other_spellings_of_their_addresses() {
             assert_eq!(p.check(&net(host, 80)), Decision::Deny, "deny {deny}: {host}");
         }
     }
-    // Only deny rules are widened.
     let p = RulePolicy::new().allow_net("127.0.0.1");
     assert_eq!(p.check(&net("0.0.0.0", 80)), Decision::Deny);
 }
@@ -97,19 +94,15 @@ fn net_pattern_edge_cases() {
         .allow_net("::ffff:10.0.0.0/104")
         .deny_net("evil.com")
         .deny_net("*.bad.org");
-    // Non-ASCII hosts never panic and never match ASCII patterns.
     assert_eq!(p.check(&net("ab\u{e9}xample.com", 80)), Decision::Deny);
     assert_eq!(p.check(&net("\u{e9}.example.com", 80)), Decision::Allow);
-    // A trailing dot is ignored during host pattern matching.
     assert_eq!(p.check(&net("api.example.com.", 80)), Decision::Allow);
     assert_eq!(RulePolicy::new().allow_net("*").deny_net("evil.com").check(&net("EVIL.com.", 80)), Decision::Deny);
     assert_eq!(RulePolicy::new().allow_net("*").deny_net("*.bad.org").check(&net("x.bad.org.", 80)), Decision::Deny);
-    // Bracketed IPv6 ranges, with and without a port, and IPv4-mapped ranges.
     assert_eq!(p.check(&net("fd00::1", 1)), Decision::Allow);
     assert_eq!(p.check(&net("2001:db8::5", 443)), Decision::Allow);
     assert_eq!(p.check(&net("2001:db8::5", 80)), Decision::Deny);
     assert_eq!(p.check(&net("10.2.3.4", 80)), Decision::Allow);
-    // Validation.
     use sandlang::policy::check_net_pattern;
     for ok in [
         "*",

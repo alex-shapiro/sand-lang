@@ -1,7 +1,7 @@
-//! The policy file linter.
+//! Linter for policy files.
 
 use super::file::parse;
-use super::net::{HostKind, NetPattern, Unnamed, domains_above, enclosing_ranges};
+use super::net::{HostKind, NetPattern, ProbeTargets, domains_above, enclosing_ranges};
 use super::path::{self, Pattern, Seg, name_counts};
 use super::rules::{
     Access, Connection, IMPORT, READ, Rank, Rule, RuleKind, WRITE, allow_applies, file_segments, fold_segments, method_matches, precedence,
@@ -14,25 +14,20 @@ use std::hash::BuildHasher;
 use std::net::IpAddr;
 use std::path::Path;
 
-/// Lints a policy file (parsed as by [`super::PolicyFile::parse`]):
+/// Lints a policy file and returns any warnings found:
 ///
-/// - `redundant-rule`: a rule repeats another, or broader rules already
-///   decide everything it covers the same way;
-/// - `overridden-rule`: rules that take precedence (more specific, or a
-///   deny as specific) decide everything it covers the other way;
-/// - `bypassable-http-deny`: a `deny http` rule names a destination that
-///   a `net` rule, or `default allow`, lets scripts connect to (and send
-///   anything);
-/// - `unused-set`: a `let` set that is never referenced in a rule.
+/// - `redundant-rule`: a rule duplicates another rule, or broader rules already
+///   produce the same decision for all requests that it matches.
+/// - `overridden-rule`: higher-precedence rules produce the opposite decision
+///   for all requests that the rule matches.
+/// - `bypassable-http-deny`: a `deny http` rule matches a destination to which
+///   a `net` rule or `default allow` permits raw TCP connections.
+/// - `unused-set`: a `let` set is not referenced by any rule.
 ///
-/// The linter compares file, http and net rules by what their patterns
-/// match, wildcards included. It compares paths as written, without
-/// resolving symlinks. A `net` rule decides connections, and http requests
-/// for any method and path. The linter reports a rule only when, for each
-/// kind of request that the rule decides, one other rule shows that the
-/// rule is not needed. It reports a word that uses sets only if no rule of
-/// the word is needed. If you remove all reported rules together, no
-/// decision changes.
+/// The linter compares file, HTTP, and network rules by pattern subsumption,
+/// including wildcards. File paths are compared lexically without symlink
+/// resolution. If all reported rules are removed at the same time, policy
+/// decisions do not change.
 pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<LintWarning>, Vec<PolicyError>> {
     let parsed = parse(text, base, home)?;
     let deny_private = !parsed.file.private_net;
@@ -50,18 +45,15 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
     };
     let describe_all = |rules: &[usize]| match rules {
         [] => String::new(),
-        [one] => describe(*one),
+        [single] => describe(*single),
         [init @ .., last] => format!("{} and {}", init.iter().map(|&i| describe(i)).collect::<Vec<_>>().join(", "), describe(*last)),
     };
     let paths = PathRules::new(rules, deny_private);
-    let unnamed = Unnamed::new(rules.iter().filter_map(|r| r.kind.http_match().map(|http| http.host)));
-    // For each host pattern and the pattern of a deny rule: the net rule
-    // (or the `default allow`) that lets scripts connect to a destination
-    // that both match, and the pattern of such destinations.
+    let probe_targets = ProbeTargets::new(rules.iter().filter_map(|r| r.kind.http_match().map(|http| http.host)));
     let mut bypasses: FxHashMap<(NetPattern, NetPattern), Option<(String, NetPattern)>> = FxHashMap::default();
     let mut bypass = |reach: NetPattern, denied: &NetPattern| {
         let found = bypasses.entry((reach, denied.clone())).or_insert_with_key(|(reach, denied)| {
-            let (host, port) = unnamed.dest(reach, denied)?;
+            let (host, port) = probe_targets.dest(reach, denied)?;
             let cap = Capability::Net { host, port };
             let by = match policy.verdict(&cap, PathSpace::Memory, &[]) {
                 Some((allow, j)) => allow.then(|| describe(j))?,
@@ -76,10 +68,9 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
     for (i, r) in rules.iter().enumerate() {
         same.entry((r.allow, &r.kind)).or_default().push(i);
     }
-    // The rules of each word of the file: a word that uses sets gives a rule
-    // for each value. If a user removes all reported words, no decision may
-    // change. Thus a report uses only the rules that stay. Of two words that
-    // make each other not needed, the linter reports the later word.
+    // A pattern token that expands a set produces multiple rules at the same span.
+    // Evaluate tokens in reverse order and ignore rules from tokens already marked
+    // as redundant so that removing all reported tokens preserves every decision.
     let mut words: Vec<std::ops::Range<usize>> = Vec::new();
     for (i, r) in rules.iter().enumerate() {
         let Some(o) = &r.origin else { continue };
@@ -92,52 +83,47 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
     let mut allow_imports = (0..rules.len()).filter(|&i| is_allow_import(i)).count();
     let mut removed = vec![false; rules.len()];
     for word in words.iter().rev() {
-        // The last `allow import` rules also deny the imports that no rule matches.
+        // The last remaining `allow import` token also implicitly denies all unmatched imports.
         let imports = word.clone().filter(|&i| is_allow_import(i)).count();
         if imports > 0 && imports == allow_imports {
             continue;
         }
-        let stays = |j: usize| !word.contains(&j) && !removed[j];
-        // Whether the rules that stay decide everything the word's rules
-        // decide the same way (or the other way), which of them do, and
-        // whether each rule of the word repeats one of them.
-        let not_needed = || {
-            let (mut same_way, mut deciders, mut repeats) = (None, Vec::new(), true);
+        let is_kept = |j: usize| !word.contains(&j) && !removed[j];
+        let find_subsuming = || {
+            let (mut same_decision, mut deciders, mut repeats) = (None, Vec::new(), true);
             for i in word.clone() {
                 let rule = &rules[i];
-                let (way, by, repeat) = match same[&(rule.allow, &rule.kind)].iter().copied().find(|&c| stays(c)) {
+                let (decision, by, repeat) = match same[&(rule.allow, &rule.kind)].iter().copied().find(|&c| is_kept(c)) {
                     Some(c) => (true, vec![c], true),
                     None => {
-                        let (way, by) = paths.deciders(paths.get(i)?, &|j| !stays(j))?;
-                        (way, by, false)
+                        let (decision, by) = paths.deciders(paths.get(i)?, &|j| !is_kept(j))?;
+                        (decision, by, false)
                     }
                 };
-                if *same_way.get_or_insert(way) != way {
+                if *same_decision.get_or_insert(decision) != decision {
                     return None;
                 }
                 deciders.extend(by);
                 repeats &= repeat;
             }
-            Some((same_way?, deciders, repeats))
+            Some((same_decision?, deciders, repeats))
         };
-        let Some((same_way, mut deciders, repeat)) = not_needed() else { continue };
+        let Some((same_decision, mut deciders, repeat)) = find_subsuming() else { continue };
         deciders.sort_unstable();
         deciders.dedup();
-        let one = |singular: &'static str, plural: &'static str| if deciders.len() == 1 { singular } else { plural };
-        let message = match (same_way, rules[word.start].allow) {
+        let is_single = deciders.len() == 1;
+        let message = match (same_decision, rules[word.start].allow) {
             _ if repeat && word.len() == 1 => format!("the same as {}", describe(deciders[0])),
-            (true, true) => format!("{} already {} this", describe_all(&deciders), one("allows", "allow")),
-            (true, false) => format!("{} already {} this", describe_all(&deciders), one("denies", "deny")),
-            (false, _) => format!("{} {} precedence everywhere this rule applies", describe_all(&deciders), one("takes", "take")),
+            (true, true) => format!("{} already {} this", describe_all(&deciders), if is_single { "allows" } else { "allow" }),
+            (true, false) => format!("{} already {} this", describe_all(&deciders), if is_single { "denies" } else { "deny" }),
+            (false, _) => {
+                format!("{} {} precedence everywhere this rule applies", describe_all(&deciders), if is_single { "takes" } else { "take" })
+            }
         };
-        warn(word.start, if same_way { "redundant-rule" } else { "overridden-rule" }, message);
+        warn(word.start, if same_decision { "redundant-rule" } else { "overridden-rule" }, message);
         removed[word.clone()].fill(true);
         allow_imports -= imports;
     }
-    // A destination that a `deny http` rule names and that scripts may
-    // connect to: first those that only rules for all of the rule's hosts
-    // match, then those that net rules that allow name, as written or as
-    // addresses that reach the rule's addresses.
     let mut bypass_of = |i: usize| {
         let (RuleKind::Http(_, url), false, Some(r)) = (&rules[i].kind, rules[i].allow, paths.get(i)) else { return None };
         bypass(url.host.clone(), &url.host).or_else(|| {
@@ -152,8 +138,6 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
         })
     };
     for word in &words {
-        // The first of equal rules gets the warnings of all of them. A word
-        // gets the warning of its first rule that has one.
         let mut firsts = word.clone().filter(|&i| same[&(rules[i].allow, &rules[i].kind)][0] == i);
         if let Some((by, reach)) = firsts.find_map(&mut bypass_of) {
             warn(word.start, "bypassable-http-deny", format!("{by} lets scripts connect to {reach} and send any request"));
@@ -168,17 +152,11 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
     Ok(warnings)
 }
 
-/// The requests other than paths that a rule matches.
 enum Scope<'a> {
-    /// File requests (`READ`, `WRITE`, `IMPORT`).
     Files(u8),
-    /// Http requests (see [`RuleKind::http_match`]), and connections (see
-    /// [`RuleKind::connections`]).
     Http { host: &'a NetPattern, scheme: Option<&'static str>, methods: Option<&'a [String]>, connections: &'static [Connection] },
 }
 
-/// One kind of request: a file access, an http method (`None`: every
-/// method), or a connection.
 #[derive(Clone, Copy)]
 enum Op<'a> {
     File(u8),
@@ -186,29 +164,23 @@ enum Op<'a> {
     Connect(Connection),
 }
 
-/// A file rule (as the policy matches it in a memory file system), an http
-/// rule, or a net rule.
 struct PathRule<'a> {
     index: usize,
     allow: bool,
     scope: Scope<'a>,
-    /// Whether it decides the requests to internal destinations that its
-    /// host pattern matches (see [`allow_applies`]).
+    /// True if this rule can apply to internal network destinations.
     reaches_internal: bool,
-    /// Whether it decides a request to an internal destination.
+    /// True if the host pattern can match an internal network destination.
     internal: bool,
-    /// The pattern, root first (a deny rule's names folded, as the policy
-    /// compares them).
+    /// Path segments from the root (case-folded for `deny` rules).
     segs: Vec<Seg>,
-    /// The pattern with its names folded, if every path it matches folds to
-    /// a path the folded pattern matches: `None` for an allow rule with
-    /// non-ASCII text around a wildcard.
+    /// Case-folded path segments, or `None` for an `allow` rule with
+    /// non-ASCII text adjacent to a wildcard.
     folded: Option<Vec<Seg>>,
-    /// Hashes of the leading parts of its folded names before the first
-    /// wildcard: `prefixes[n]` of the first `n` names.
+    /// Cumulative hashes of literal segments before the first wildcard.
     prefixes: Vec<u64>,
     rank: Rank,
-    /// The fewest and most names of the paths it matches.
+    /// Minimum and maximum segment counts matched by this pattern.
     counts: (usize, Option<usize>),
 }
 
@@ -257,7 +229,6 @@ impl<'a> PathRule<'a> {
         })
     }
 
-    /// The kinds of request it decides.
     fn ops(&self) -> Vec<Op<'a>> {
         match self.scope {
             Scope::Files(mask) => [READ, WRITE, IMPORT].into_iter().filter(|&op| mask & op != 0).map(Op::File).collect(),
@@ -271,7 +242,6 @@ impl<'a> PathRule<'a> {
         }
     }
 
-    /// Whether it decides every request of kind `op` that its patterns match.
     fn decides_all(&self, op: Op) -> bool {
         match (&self.scope, op) {
             (Scope::Files(mask), Op::File(op)) => mask & op != 0,
@@ -282,7 +252,6 @@ impl<'a> PathRule<'a> {
         }
     }
 
-    /// Whether it may decide a request of kind `op`.
     fn may_decide(&self, op: Op) -> bool {
         match (&self.scope, op) {
             (Scope::Files(mask), Op::File(op)) => mask & op != 0,
@@ -292,8 +261,6 @@ impl<'a> PathRule<'a> {
         }
     }
 
-    /// How it ranks where it matches a path as deep as other rules do
-    /// (see [`Rank`]).
     fn rank(&self) -> impl Ord {
         precedence(self.rank.spec(0), self.allow, self.index)
     }
@@ -302,8 +269,7 @@ impl<'a> PathRule<'a> {
         self.rank() > other.rank()
     }
 
-    /// The patterns of both rules, compared as the policy matches them:
-    /// folded unless both rules allow.
+    /// Returns the segment slices to compare between two rules (case-folded unless both are `allow` rules).
     fn comparable<'b>(&'b self, other: &'b PathRule) -> Option<(&'b [Seg], &'b [Seg])> {
         if self.allow && other.allow {
             return Some((&self.segs, &other.segs));
@@ -311,10 +277,7 @@ impl<'a> PathRule<'a> {
         Some((self.folded.as_deref()?, other.folded.as_deref()?))
     }
 
-    /// Whether this rule matches every request `other` matches (`below`: or
-    /// one for an ancestor of its path), apart from the kind of request. An
-    /// allow rule never covers a deny rule, which also matches other
-    /// spellings of names and addresses.
+    /// Returns true if this rule matches every request matched by `other` (or an ancestor path if `below` is true).
     fn covers(&self, other: &PathRule, below: bool) -> bool {
         if (self.allow && !other.allow) || !self.scope_covers(other) {
             return false;
@@ -333,9 +296,8 @@ impl<'a> PathRule<'a> {
         }
     }
 
-    /// Whether a request this rule matches (`self_below`: or one for a path
-    /// below it) may also match `other`, or be for a path below one `other`
-    /// matches.
+    /// Returns true if a request matched by this rule (or a descendant path if `self_below` is true)
+    /// can also match `other` or a descendant of `other`.
     fn may_meet(&self, other: &PathRule, self_below: bool) -> bool {
         let scopes = match (&self.scope, &other.scope) {
             (Scope::Files(_), Scope::Files(_)) => true,
@@ -350,7 +312,6 @@ impl<'a> PathRule<'a> {
                 .is_none_or(|(a, b)| path::may_meet(Pattern { segs: a, below: self_below }, Pattern { segs: b, below: true }))
     }
 
-    /// The keys of the rules that may cover this one.
     fn broader_keys(&self) -> Vec<Key<'a>> {
         let Scope::Http { host, .. } = self.scope else { return vec![Key::Files] };
         match &host.kind {
@@ -361,19 +322,17 @@ impl<'a> PathRule<'a> {
         }
     }
 
-    /// The keys of the rules that may match a request this one matches.
     fn related_keys(&self) -> Vec<Key<'a>> {
         let Scope::Http { host, .. } = self.scope else { return vec![Key::Files] };
         match &host.kind {
             HostKind::Any => vec![Key::Http],
             HostKind::Suffix(s) => [Key::Under(s)].into_iter().chain(self.broader_keys()).collect(),
             HostKind::Host(_) => self.broader_keys(),
-            // Deny rules also match other spellings of an address.
+            // Deny rules also match alternate IP representations.
             HostKind::Ip(..) => vec![Key::Any, Key::Ips],
         }
     }
 
-    /// The keys to find this rule by.
     fn keys(&self) -> Vec<Key<'a>> {
         let Scope::Http { host, .. } = self.scope else { return vec![Key::Files] };
         let (own, name) = match &host.kind {
@@ -387,44 +346,25 @@ impl<'a> PathRule<'a> {
     }
 }
 
-/// What [`PathRules`] indexes rules by, besides their names: their kind
-/// and host pattern.
 #[derive(Hash)]
 enum Key<'a> {
     Files,
-    /// Every http or net rule.
     Http,
-    /// Rules for any host.
     Any,
-    /// Rules for a host name.
     Name(&'a str),
-    /// Rules for the strict subdomains of a domain.
     Suffix(&'a str),
-    /// Rules for a host name or domain strictly below a domain.
     Under(&'a str),
-    /// Rules for an address or range.
     Range((IpAddr, u8)),
-    /// Every rule for an address or range.
     Ips,
 }
 
-/// The file, http and net rules of a policy, indexed by their keys and the
-/// folded names before their first wildcard: two rules can match the same
-/// request only if the names of one begin with those of the other. The
-/// indices hash their keys, so they may also give unrelated rules.
+/// Index of file, HTTP, and network rules keyed by host category and literal path prefixes.
 struct PathRules<'a> {
     rules: Vec<PathRule<'a>>,
-    /// The position in `rules` of each policy rule (`usize::MAX` if not a
-    /// file, http or net rule).
     at: Vec<usize>,
-    /// The rules by key and names before the first wildcard, highest tier
-    /// first.
     exact: FxHashMap<u64, Vec<usize>>,
-    /// The rules by key and each leading part of their names before the
-    /// first wildcard, highest tier first.
     within: FxHashMap<u64, Vec<usize>>,
     hasher: FxBuild,
-    /// The number of rules the indices have given.
     #[cfg(test)]
     visits: std::cell::Cell<usize>,
 }
@@ -464,8 +404,6 @@ impl<'a> PathRules<'a> {
         self.rules.get(self.at[index])
     }
 
-    /// The rules of at least tier `min_tier` indexed in `map` by `key` and
-    /// the names hashed as `h`.
     fn lookup<'b>(
         &'b self,
         map: &'b FxHashMap<u64, Vec<usize>>,
@@ -483,23 +421,15 @@ impl<'a> PathRules<'a> {
         keys.into_iter().map(|k| self.hasher.hash_one(k)).collect()
     }
 
-    /// The rules, other than those `excluded`, that match every request `i`
-    /// matches, or one for an ancestor of its path. Only the rules whose
-    /// names before the first wildcard begin those of `i` may do so.
     fn broader<'b>(&'b self, i: &'b PathRule<'a>, excluded: &dyn Fn(usize) -> bool) -> Vec<&'b PathRule<'a>> {
         self.maybe_broader(i).filter(|j| !excluded(j.index) && j.covers(i, true)).collect()
     }
 
-    /// The rules that the index gives as candidates for [`PathRules::broader`].
     fn maybe_broader<'b>(&'b self, i: &'b PathRule<'a>) -> impl Iterator<Item = &'b PathRule<'a>> {
         let keys = self.hash_keys(i.broader_keys());
         keys.into_iter().flat_map(move |key| i.prefixes.iter().flat_map(move |&h| self.lookup(&self.exact, key, h, 0)))
     }
 
-    /// The rules of at least tier `min_tier` that decide the other way and may match a request `i` matches (or one for
-    /// a path below it, if they rank below `i`). Only the rules whose names
-    /// before the first wildcard begin those of `i`, or are the start of
-    /// them, may do so.
     fn opposed<'b>(&'b self, i: &'b PathRule<'a>, min_tier: u32) -> impl Iterator<Item = &'b PathRule<'a>> {
         let (&last, above) = i.prefixes.split_last().expect("the empty prefix");
         let found = self.hash_keys(i.related_keys()).into_iter().flat_map(move |key| {
@@ -509,38 +439,26 @@ impl<'a> PathRules<'a> {
         found.filter(|k| k.allow != i.allow && i.may_meet(k, k.rank.tier < i.rank.tier))
     }
 
-    /// The rules, other than those `excluded` (which include `i`), that show
-    /// that `i` is not needed, one for each kind of request it decides, and
-    /// whether they decide the same way as `i`. `None` if no single rule
-    /// shows this for some kind of request, or if some of these rules decide
-    /// the same way and others the other way.
+    /// Returns the rules outside `excluded` that subsume or override `i` across all of its operations,
+    /// together with whether they have the same decision as `i`.
     fn deciders(&self, i: &PathRule<'a>, excluded: &dyn Fn(usize) -> bool) -> Option<(bool, Vec<usize>)> {
         let broader = self.broader(i, excluded);
-        let mut same_way = None;
+        let mut same_decision = None;
         let mut deciders = Vec::new();
         for op in i.ops() {
             let j = self.decider(i, op, &broader)?;
-            if *same_way.get_or_insert(j.allow == i.allow) != (j.allow == i.allow) {
+            if *same_decision.get_or_insert(j.allow == i.allow) != (j.allow == i.allow) {
                 return None;
             }
             deciders.push(j.index);
         }
         deciders.sort_unstable();
         deciders.dedup();
-        Some((same_way?, deciders))
+        Some((same_decision?, deciders))
     }
 
-    /// A rule that shows that `i` is not needed for requests of kind `op`:
-    /// one that decides every request `i` matches instead of `i`, or one
-    /// that would decide them the same way without `i`. `None` if no
-    /// single rule shows this. `broader` are the rules [`PathRules::broader`]
-    /// gives.
-    ///
-    /// Where `i` decides a request for a path below a path `y` that `i`
-    /// matches, `i` also decides the request for `y`, and every rule of the
-    /// same tier as `i` ranks the same for both paths. So for such rules
-    /// only the paths `i` matches need to be considered. Rules of a lower
-    /// tier than a broader rule rank below it everywhere.
+    /// Returns a rule from `broader` that either overrides `i` for operation `op`
+    /// or produces the same decision without an intervening opposing rule.
     fn decider<'b>(&'b self, i: &'b PathRule<'a>, op: Op, broader: &[&'b PathRule<'a>]) -> Option<&'b PathRule<'a>> {
         let broader = broader.iter().copied().filter(|j| j.decides_all(op));
         let instead = broader.clone().filter(|j| j.covers(i, false) && j.outranks(i)).max_by_key(|j| j.rank());
@@ -554,14 +472,8 @@ impl<'a> PathRules<'a> {
     }
 }
 
-/// Whether rule `k`, which decides the other way, never ranks below `i`
-/// and above `j` for a request `i` decides (where `j` matches the path or
-/// an ancestor). Rank depends first on the tier, then on the depth of the
-/// deepest path a rule matches (the path or an ancestor). There, `j`
-/// matches at least `j.counts.0` names deep, and `k` at most `k.counts.1`
-/// names deep (and, of the same tier as `i`, at most `i.counts.1`). If no
-/// path `i` matches is deeper than the shallowest path `k` matches, then
-/// `k` matches only paths that `i` matches exactly, at the same depth.
+/// Returns true if opposing rule `k` cannot rank between rule `i` and broader rule `j`
+/// on any request decided by `i`.
 fn never_between(i: &PathRule, j: &PathRule, k: &PathRule) -> bool {
     let k_deepest = match (k.counts.1, i.counts.1.filter(|_| k.rank.tier >= i.rank.tier)) {
         (Some(a), Some(b)) => Some(a.min(b)),
@@ -601,12 +513,10 @@ mod tests {
                 "6:13: warning[overridden-rule]: line 7 (`./out`) takes precedence everywhere this rule applies",
             ]
         );
-        // A rule overriding a broader one of the other kind is needed.
         assert_eq!(lint("deny ~/\nallow ./project\ndeny ./project/.env\nallow read ./project/.env/public"), Vec::<String>::new());
         assert_eq!(lint("allow read ./a\nallow write ./a"), ["1:12: warning[redundant-rule]: line 2 (`./a`) already allows this"]);
         assert_eq!(lint("allow read ./a\nallow write ./a/b"), Vec::<String>::new());
         assert_eq!(lint("allow write ./a\nallow read ./a"), ["2:12: warning[redundant-rule]: line 1 (`./a`) already allows this"]);
-        // The only `allow import` rule restricts imports to its paths.
         assert_eq!(lint("allow import ./lib/a\ndeny ./lib/a"), Vec::<String>::new());
         assert_eq!(
             lint("allow import ./lib/a\ndeny ./lib/a\nallow import ./src"),
@@ -614,8 +524,6 @@ mod tests {
         );
     }
 
-    /// The values of a set are rules at the place of the word that uses it:
-    /// the word is reported only if no rule from it is needed.
     #[test]
     fn words_with_sets() {
         let none = Vec::<String>::new();
@@ -635,15 +543,12 @@ mod tests {
             lint("allow net a.com b.com\nlet h = a.com b.com\nallow net {h}"),
             ["3:11: warning[redundant-rule]: line 1 (`a.com`) and line 1 (`b.com`) already allow this"]
         );
-        // One warning for a word.
         assert_eq!(
             lint("let h = a.com b.com\nallow net *\ndeny http {h}/admin"),
             ["3:11: warning[bypassable-http-deny]: line 2 (`*`) lets scripts connect to a.com:443 and send any request"]
         );
     }
 
-    /// If you remove all reported rules together, no decision changes: a
-    /// reported rule does not show that another rule is not needed.
     #[test]
     fn reported_rules_do_not_justify_others() {
         assert_eq!(lint("allow /r\ndeny /r/a\ndeny read /r/a"), ["3:11: warning[redundant-rule]: line 2 (`/r/a`) already denies this"]);
@@ -655,7 +560,6 @@ mod tests {
             lint("allow http GET POST a.com\nallow http POST GET a.com"),
             ["2:21: warning[redundant-rule]: line 1 (`a.com`) already allows this"]
         );
-        // The last `allow import` rules restrict imports.
         assert_eq!(
             lint("allow import /r/a\nallow import /r/b\ndeny /r/a\ndeny /r/b"),
             ["2:14: warning[overridden-rule]: line 4 (`/r/b`) takes precedence everywhere this rule applies"]
@@ -673,15 +577,11 @@ mod tests {
                 "5:7: warning[overridden-rule]: line 6 (`./out/*`) takes precedence everywhere this rule applies",
             ]
         );
-        // Without line 2, `./src/.env/x.rs` would be denied.
         assert_eq!(lint("allow read ./src\nallow read ./src/**/*.rs\ndeny ./**/.env"), none);
-        // The more specific of two overlapping patterns decides where both match.
         assert_eq!(lint("allow ./a/*.txt\ndeny ./a/*"), none);
         assert_eq!(lint("deny ./a/*.pem\nallow ./a/key*"), none);
-        // A deny between the broader rule and a rule decides some paths.
         assert_eq!(lint("allow ./data\ndeny ./data/secret\nallow read ./data/**/x"), none);
         assert_eq!(lint("deny ~/\nallow ./project\ndeny ./project/.env\nallow read ./project/.env/*"), none);
-        // A deny that only ranks above the rule, or below the broader rule.
         assert_eq!(
             lint("allow ./data\ndeny ./data/secret\nallow read ./data/*"),
             ["3:12: warning[redundant-rule]: line 1 (`./data`) already allows this"]
@@ -690,7 +590,6 @@ mod tests {
             lint("deny ~/\nallow ~/proj\nallow read ~/proj/src/*.rs"),
             ["3:12: warning[redundant-rule]: line 2 (`~/proj`) already allows this"]
         );
-        // Deny rules match other spellings of a name; allow rules do not.
         assert_eq!(
             lint("allow ./A/*\ndeny ./a/*"),
             ["1:7: warning[overridden-rule]: line 2 (`./a/*`) takes precedence everywhere this rule applies"]
@@ -711,13 +610,11 @@ mod tests {
                 "4:18: warning[bypassable-http-deny]: line 3 (`api.example.com`) lets scripts connect to api.example.com:443 and send any request",
             ]
         );
-        // Only an explicit rule lets scripts connect to an internal destination.
         assert_eq!(lint("allow net *\ndeny http localhost/x"), Vec::<String>::new());
         assert_eq!(
             lint("allow private-net\nallow net *\ndeny http localhost/x"),
             ["3:11: warning[bypassable-http-deny]: line 2 (`*`) lets scripts connect to localhost:443 and send any request"]
         );
-        // Wildcard denies, and net rules for some of the hosts or ports they name.
         assert_eq!(
             lint("allow net *.example.com\ndeny http *.example.com/admin\nallow net *\ndeny http POST *"),
             [
@@ -742,13 +639,11 @@ mod tests {
             lint("allow net *\ndeny net *:443\ndeny http api.example.com/x"),
             ["3:11: warning[bypassable-http-deny]: line 1 (`*`) lets scripts connect to api.example.com:80 and send any request"]
         );
-        // Narrower ranges deny some or all of a range that a net rule allows.
         assert_eq!(
             lint("allow net 10.0.0.0/8\ndeny net 10.0.0.1\ndeny net 10.128.0.0/9\ndeny http *"),
             ["4:11: warning[bypassable-http-deny]: line 1 (`10.0.0.0/8`) lets scripts connect to 10.0.0.0/8:443 and send any request"]
         );
         assert_eq!(lint("allow net 10.0.0.0/8\ndeny net 10.0.0.0/9\ndeny net 10.128.0.0/9\ndeny http *"), Vec::<String>::new());
-        // Addresses that reach an address the deny names.
         assert_eq!(
             lint("allow net [::]/0\ndeny http 8.8.8.8/admin"),
             ["2:11: warning[bypassable-http-deny]: line 1 (`[::]/0`) lets scripts connect to [64:ff9b::808:808]:443 and send any request"]
@@ -764,7 +659,6 @@ mod tests {
             lint("allow net [64:ff9b::]/96\ndeny http 0.0.0.0/x"),
             ["2:11: warning[bypassable-http-deny]: line 1 (`[64:ff9b::]/96`) lets scripts connect to [64:ff9b::]:443 and send any request"]
         );
-        // `default allow` lets scripts connect where no rule decides.
         assert_eq!(
             lint("default allow\ndeny http api.example.com/admin\ndeny http localhost/admin"),
             [
@@ -776,7 +670,6 @@ mod tests {
             ["3:11: warning[redundant-rule]: line 2 (`api.example.com`) already denies this"]
         );
         assert_eq!(lint("default prompt\ndeny http api.example.com/admin"), Vec::<String>::new());
-        // A more specific net rule denies the hosts the wildcard names.
         assert_eq!(
             lint("allow net *\ndeny net *.example.com\ndeny http *.example.com/a"),
             ["3:11: warning[redundant-rule]: line 2 (`*.example.com`) already denies this"]
@@ -794,12 +687,9 @@ mod tests {
             lint("allow http *.example.com:443/v1\nallow http GET https://api.example.com/v1/*.json"),
             ["2:16: warning[redundant-rule]: line 1 (`*.example.com:443/v1`) already allows this"]
         );
-        // A rule with a scheme does not match the other scheme on its port.
         assert_eq!(lint("allow http https://api.example.com\nallow http api.example.com:443/x"), none);
         assert_eq!(lint("allow http api.example.com:8080\nallow http https://api.example.com/x"), none);
-        // Allow rules compare names exactly; deny rules fold them.
         assert_eq!(lint("allow http a.com/Admin\nallow http a.com/admin/x"), none);
-        // A net rule decides http requests for any method and path.
         assert_eq!(
             lint("allow net *.example.com\nallow http GET api.example.com/v1\ndeny net x.com\ndeny http POST x.com/a"),
             [
@@ -811,7 +701,6 @@ mod tests {
             lint("allow http api.example.com\ndeny net api.example.com"),
             ["1:12: warning[overridden-rule]: line 2 (`api.example.com`) takes precedence everywhere this rule applies"]
         );
-        // Each method may be decided by another rule.
         assert_eq!(
             lint("allow http GET a.com\nallow http POST a.com\nallow http GET POST a.com/v1"),
             ["3:21: warning[redundant-rule]: line 1 (`a.com`) and line 2 (`a.com`) already allow this"]
@@ -841,14 +730,10 @@ mod tests {
             lint("allow net api.example.com\ndeny net api.example.com"),
             ["1:11: warning[overridden-rule]: line 2 (`api.example.com`) takes precedence everywhere this rule applies"]
         );
-        // An http rule decides http requests, not connections.
         assert_eq!(lint("allow http *.example.com\nallow net api.example.com"), none);
-        // A deny between the rules decides some destinations.
         assert_eq!(lint("allow net *\ndeny net *.example.com\nallow net api.example.com"), none);
-        // `*` does not decide the addresses that host names resolve to.
         assert_eq!(lint("deny net *\ndeny net 10.0.0.0/8"), none);
         assert_eq!(lint("allow net *\nallow net 8.8.8.8"), none);
-        // A wildcard allow does not cover internal destinations.
         assert_eq!(lint("allow net *\nallow net localhost"), none);
         assert_eq!(
             lint("allow private-net\nallow net *\nallow net localhost"),
@@ -856,7 +741,6 @@ mod tests {
         );
     }
 
-    /// The index gives as candidates only the ranges that contain an address.
     #[test]
     fn address_rules_are_indexed_by_range() {
         let text: String =
@@ -870,21 +754,17 @@ mod tests {
     #[test]
     fn http_rules_between_others() {
         let none = Vec::<String>::new();
-        // A deny for the same host ranks between the rules.
         assert_eq!(lint("allow http *.example.com\ndeny http api.example.com/admin\nallow http GET api.example.com/admin/x"), none);
-        // A deny for a broader host ranks below both.
         assert_eq!(
             lint("allow http api.example.com\ndeny http *.example.com/a/b\nallow http api.example.com/a"),
             ["3:12: warning[redundant-rule]: line 1 (`api.example.com`) already allows this"]
         );
-        // The deny ranks between the rules below `/a`, where the host decides first.
         assert_eq!(lint("allow http *\ndeny http *.example.com/a/b\nallow http api.example.com/a"), none);
     }
 
     #[test]
     fn http_rules_for_internal_destinations() {
         let none = Vec::<String>::new();
-        // A wildcard allow rule does not allow internal destinations.
         assert_eq!(lint("allow http *\nallow http localhost/x\nallow http 10.0.0.1/x"), none);
         assert_eq!(
             lint("allow http *\nallow http 8.8.8.8/x\nallow http *.localhost/x"),
@@ -903,8 +783,6 @@ mod tests {
         );
     }
 
-    /// The rules the indices give to find which rules are not needed, for
-    /// each rule of a policy.
     fn visits(text: &str) -> usize {
         let rules = PolicyFile::parse(text, Path::new("/base"), None).unwrap().rules;
         let paths = PathRules::new(rules.rules(), true);
@@ -914,12 +792,8 @@ mod tests {
         paths.visits.get()
     }
 
-    /// The work to find the net rules that are not needed is in proportion
-    /// to the number of rules, also where http denies rank between a broad and a
-    /// narrow net rule (`*`, `*.example.com/aN`, `hN.example.com`), or below
-    /// both (`*.com/aN` under `*.example.com`).
     #[test]
-    fn net_rules_are_compared_with_few_others() {
+    fn net_rule_comparison_scales_linearly() {
         let net = |n: usize, broad: &str, deny: &str| {
             let allow: String = (0..n).map(|i| format!("allow net h{i}.example.com\n")).collect();
             let deny: String = (0..n).map(|i| format!("deny http {deny}/a{i}\n")).collect();
@@ -931,8 +805,6 @@ mod tests {
         }
     }
 
-    /// A policy line for paths under `/r` or for hosts that [`probes`] name,
-    /// which may use the sets of [`SETS`].
     fn rule_line() -> impl Strategy<Value = String> {
         let names = || prop::sample::select(vec!["a", "A", "b", "é", "*", "**", "x.*", "k*", "*.txt", "{n}"]);
         let path = prop::collection::vec(names(), 0..4).prop_map(|n| n.iter().map(|n| format!("/{n}")).collect::<String>());
@@ -957,7 +829,6 @@ mod tests {
             "[::]",
             "{h}",
         ];
-        // Only net rules take ranges.
         let ranges = ["10.0.0.0/8", "8.0.0.0/8", "0.0.0.0/0", "[::]/0", "127.0.0.0/8", "[64:ff9b::]/96", "[2002::]/16"];
         let net_hosts = prop::sample::select(hosts.iter().chain(&ranges).copied().collect::<Vec<_>>());
         let hosts = prop::sample::select(hosts);
@@ -973,10 +844,8 @@ mod tests {
         ]
     }
 
-    /// The sets that rules from [`rule_line`] may use, as policy lines.
     const SETS: &str = "\nlet n = a b\nlet h = api.example.com 10.0.0.1 *.com";
 
-    /// Requests that rules from [`rule_line`] decide in different ways.
     fn probes() -> &'static [Capability] {
         static PROBES: std::sync::LazyLock<Vec<Capability>> = std::sync::LazyLock::new(make_probes);
         &PROBES
@@ -1057,9 +926,6 @@ mod tests {
         probes
     }
 
-    /// Destinations that net and http rules decide in different ways:
-    /// those of [`probes`], and for each host pattern of `rules`, a few
-    /// that it matches, on each port that rules name and on others.
     fn destinations(rules: &[Rule]) -> Vec<(String, u16)> {
         let probed = probes().iter().filter_map(|cap| if let Capability::Net { host, .. } = cap { Some(host.clone()) } else { None });
         let patterns: Vec<&NetPattern> = rules
@@ -1088,7 +954,6 @@ mod tests {
                             IpAddr::V6(v6) => IpAddr::V6((u128::from(*v6) + offset).into()),
                         };
                         hosts.push(at.to_string());
-                        // Addresses that reach this one.
                         if let IpAddr::V4(v4) = at {
                             let [a, b, c, d] = v4.octets();
                             let (hi, lo) = (u16::from_be_bytes([a, b]), u16::from_be_bytes([c, d]));
@@ -1113,7 +978,6 @@ mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(512))]
 
-        /// If you remove a rule that the linter reports, no decision changes.
         #[test]
         fn reported_rules_are_not_needed(
             lines in prop::collection::vec(rule_line(), 1..9),
@@ -1130,7 +994,6 @@ mod tests {
                 .filter(|w| w.code == "redundant-rule" || w.code == "overridden-rule")
                 .map(|w| w.line - 1)
                 .collect();
-            // Each reported line alone, then all of them.
             let removals = reported.iter().map(|&line| vec![line]).chain(std::iter::once(reported.clone()));
             for removed in removals {
                 let rest: Vec<String> = lines.iter().enumerate().filter(|(i, _)| !removed.contains(i)).map(|(_, l)| l.clone()).collect();
@@ -1142,8 +1005,6 @@ mod tests {
             }
         }
 
-        /// A `deny http` rule is reported if net rules let scripts connect
-        /// to a destination it names.
         #[test]
         fn bypassable_http_denies_are_reported(
             lines in prop::collection::vec(rule_line(), 1..9),
@@ -1155,16 +1016,12 @@ mod tests {
             let policy = PolicyFile::parse(&text, Path::new("/base"), None).unwrap().rule_policy(crate::policy::Decision::Deny);
             let rules = policy.rules();
             let dests = destinations(rules);
-            // For each line, a destination that a deny http rule of it names
-            // and that scripts may connect to. The linter reports a repeat
-            // at the first rule of its kind.
             let mut reached: FxHashMap<usize, Option<(String, u16)>> = FxHashMap::default();
             for (i, rule) in rules.iter().enumerate() {
                 let (false, RuleKind::Http(_, url), Some(o)) = (rule.allow, &rule.kind, &rule.origin) else { continue };
                 if rules[..i].iter().any(|r| !r.allow && r.kind == rule.kind) {
                     continue;
                 }
-                // The rule's host pattern matches what a `deny net` rule for it matches.
                 let deny = crate::policy::RulePolicy::new().deny_net(&url.host.to_string());
                 let found = dests.iter().find(|(host, port)| {
                     let cap = Capability::Net { host: host.clone(), port: *port };
@@ -1180,8 +1037,6 @@ mod tests {
             }
         }
 
-        /// A rule for less than a broader rule that decides the same way is
-        /// reported.
         #[test]
         fn narrower_http_rules_are_reported(
             allow in any::<bool>(),
