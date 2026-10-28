@@ -2598,13 +2598,12 @@ reports:
 | `bypassable-http-deny` | a `deny http` rule names a destination that a net rule lets scripts connect to      |
 | `unused-set`           | a `let` set that is never referenced in a rule                                      |
 
-The first two compare file and http rules by what their patterns match,
-wildcards included. A `net` rule counts as an http rule for every method and
-path. The linter compares paths as written, without resolving symlinks. It
-reports a rule only when, for each access or method that the rule names, one
-other rule shows that the rule is not needed. `bypassable-http-deny` also
-compares host and port patterns by what they match, wildcards and address
-ranges included.
+The linter compares file, http and net rules by what their patterns match,
+wildcards included. It compares paths as written, without resolving
+symlinks. A `net` rule decides connections, and http requests for every
+method and path. The linter reports a rule only when, for each kind of
+request that the rule decides, one other rule shows that the rule is not
+needed.
 
 `sandlang::policy::rule_for(capability, allow)` gives, as a policy file
 line, the rule that decides a promptable request for good (e.g. `allow read

@@ -252,6 +252,12 @@ pub(crate) fn domains_above(name: &str) -> impl Iterator<Item = &str> {
     name.match_indices('.').map(|(i, _)| &name[i + 1..])
 }
 
+/// The ranges that contain the range of `len` bits at `ip`, itself
+/// included, as (masked address, length).
+pub(crate) fn enclosing_ranges(ip: IpAddr, len: u8) -> impl Iterator<Item = (IpAddr, u8)> {
+    (0..=len).map(move |l| (mask(ip, l), l))
+}
+
 /// Whether `name` is a strict subdomain of `domain`.
 fn is_under(name: &str, domain: &str) -> bool {
     name.len() > domain.len() && name.ends_with(domain) && name.as_bytes()[name.len() - domain.len() - 1] == b'.'

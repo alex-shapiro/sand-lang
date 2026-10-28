@@ -1,7 +1,7 @@
 //! The policy file linter.
 
 use super::file::parse;
-use super::net::{HostKind, NetPattern, Unnamed, domains_above};
+use super::net::{HostKind, NetPattern, Unnamed, domains_above, enclosing_ranges};
 use super::path::{self, Pattern, Seg, name_counts};
 use super::rules::{
     Access, IMPORT, READ, Rank, Rule, RuleKind, WRITE, file_segments, fold_segments, method_matches, precedence, scheme_matches,
@@ -10,6 +10,7 @@ use super::{Capability, PathSpace, PolicyError};
 use crate::lint::LintWarning;
 use crate::vm::value::{FxBuild, FxHashMap};
 use std::hash::BuildHasher;
+use std::net::IpAddr;
 use std::path::Path;
 
 /// Lints a policy file (parsed as by [`super::PolicyFile::parse`]):
@@ -22,13 +23,12 @@ use std::path::Path;
 ///   a `net` rule lets scripts connect to (and send anything);
 /// - `unused-set`: a `let` set that is never referenced in a rule.
 ///
-/// The linter compares file and http rules by what their patterns match,
-/// wildcards included, and compares paths as written, without resolving
-/// symlinks. A `net` rule counts as an http rule for any method and path.
-/// The linter reports a rule only when, for each file access or http method
-/// the rule names, one other rule shows that the rule is not needed. It
-/// compares the hosts and ports of `deny http` and `net` rules by what
-/// their patterns match.
+/// The linter compares file, http and net rules by what their patterns
+/// match, wildcards included. It compares paths as written, without
+/// resolving symlinks. A `net` rule decides connections, and http requests
+/// for any method and path. The linter reports a rule only when, for each
+/// kind of request that the rule decides, one other rule shows that the
+/// rule is not needed.
 pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<LintWarning>, Vec<PolicyError>> {
     let parsed = parse(text, base, home)?;
     let deny_private = !parsed.file.private_net;
@@ -81,7 +81,7 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
         let Some(r) = paths.get(i) else { continue };
         // The only `allow import` rule also denies the imports that no rule matches.
         let restricts_imports = rule.allow && matches!(rule.kind, RuleKind::Files(Access::Import, _)) && allow_imports == 1;
-        if !matches!(rule.kind, RuleKind::Net(_)) && !restricts_imports {
+        if !restricts_imports {
             let (mut agree, mut oppose, mut needed) = (Vec::new(), Vec::new(), false);
             let broader = paths.broader(r, copies);
             for op in r.ops() {
@@ -113,8 +113,8 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
             // First the destinations that only rules for all of the rule's
             // hosts match, then those that net rules that allow name.
             let found = bypass(url.host.clone()).or_else(|| {
-                let reach = paths.opposed(r, copies).filter_map(|k| match (&rules[k.index].kind, &k.scope) {
-                    (RuleKind::Net(_), Scope::Http { host, .. }) => url.host.intersection(host),
+                let reach = paths.opposed(r, copies).filter_map(|k| match k.scope {
+                    Scope::Http { host, net: true, .. } => url.host.intersection(host),
                     _ => None,
                 });
                 reach.into_iter().find_map(&mut bypass)
@@ -137,20 +137,24 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
 enum Scope<'a> {
     /// File requests (`READ`, `WRITE`, `IMPORT`).
     Files(u8),
-    /// Http requests. A net rule matches them for any method and scheme.
-    Http { host: &'a NetPattern, scheme: Option<&'static str>, methods: Option<&'a [String]> },
+    /// Http requests, and for a `net` rule (which matches http requests
+    /// for any method, scheme and path) connections.
+    Http { host: &'a NetPattern, scheme: Option<&'static str>, methods: Option<&'a [String]>, net: bool },
 }
 
-/// One kind of request: a file access, or an http method (`None`: every
-/// method).
+/// One kind of request: a file access, an http method (`None`: every
+/// method), a connection, or a connection to an address that a host name
+/// resolves to (which only address patterns decide).
 #[derive(Clone, Copy)]
 enum Op<'a> {
     File(u8),
     Method(Option<&'a str>),
+    Connect,
+    Resolved,
 }
 
 /// A file rule (as the policy matches it in a memory file system), an http
-/// rule, or a net rule as the policy matches http requests with it.
+/// rule, or a net rule.
 struct PathRule<'a> {
     index: usize,
     allow: bool,
@@ -183,10 +187,10 @@ impl<'a> PathRule<'a> {
                 (Scope::Files(access.mask(rule.allow)), raw, rank)
             }
             RuleKind::Http(methods, url) => {
-                let scope = Scope::Http { host: &url.host, scheme: url.scheme, methods: methods.as_deref() };
+                let scope = Scope::Http { host: &url.host, scheme: url.scheme, methods: methods.as_deref(), net: false };
                 (scope, url.path.clone(), Rank::http(methods.as_deref(), url))
             }
-            RuleKind::Net(host) => (Scope::Http { host, scheme: None, methods: None }, Vec::new(), Rank::net(host)),
+            RuleKind::Net(host) => (Scope::Http { host, scheme: None, methods: None, net: true }, Vec::new(), Rank::net(host)),
             _ => return None,
         };
         let internal = match scope {
@@ -221,7 +225,11 @@ impl<'a> PathRule<'a> {
         match self.scope {
             Scope::Files(mask) => [READ, WRITE, IMPORT].into_iter().filter(|&op| mask & op != 0).map(Op::File).collect(),
             Scope::Http { methods: Some(methods), .. } => methods.iter().map(|m| Op::Method(Some(m))).collect(),
-            Scope::Http { methods: None, .. } => vec![Op::Method(None)],
+            Scope::Http { net: false, .. } => vec![Op::Method(None)],
+            Scope::Http { host, net: true, .. } => {
+                let resolved = matches!(host.kind, HostKind::Ip(..)).then_some(Op::Resolved);
+                [Op::Method(None), Op::Connect].into_iter().chain(resolved).collect()
+            }
         }
     }
 
@@ -231,6 +239,7 @@ impl<'a> PathRule<'a> {
             (Scope::Files(mask), Op::File(op)) => mask & op != 0,
             (Scope::Http { methods, .. }, Op::Method(Some(m))) => method_matches(*methods, m),
             (Scope::Http { methods, .. }, Op::Method(None)) => methods.is_none(),
+            (_, Op::Connect | Op::Resolved) => self.may_decide(op),
             _ => false,
         }
     }
@@ -240,6 +249,8 @@ impl<'a> PathRule<'a> {
         match (&self.scope, op) {
             (Scope::Files(mask), Op::File(op)) => mask & op != 0,
             (Scope::Http { methods, .. }, Op::Method(m)) => m.is_none_or(|m| method_matches(*methods, m)),
+            (Scope::Http { net, .. }, Op::Connect) => *net,
+            (Scope::Http { host, net, .. }, Op::Resolved) => *net && matches!(host.kind, HostKind::Ip(..)),
             _ => false,
         }
     }
@@ -309,21 +320,20 @@ impl<'a> PathRule<'a> {
             HostKind::Any => vec![Key::Any],
             HostKind::Suffix(s) => [Key::Any, Key::Suffix(s)].into_iter().chain(domains_above(s).map(Key::Suffix)).collect(),
             HostKind::Host(h) => [Key::Any, Key::Name(h)].into_iter().chain(domains_above(h).map(Key::Suffix)).collect(),
-            HostKind::Ip(..) => vec![Key::Any, Key::Ips],
+            HostKind::Ip(ip, len) => std::iter::once(Key::Any).chain(enclosing_ranges(*ip, *len).map(Key::Range)).collect(),
         }
     }
 
     /// The keys of the rules that may match a request this one matches.
     fn related_keys(&self) -> Vec<Key<'a>> {
-        let mut keys = self.broader_keys();
-        if let Scope::Http { host, .. } = self.scope {
-            match &host.kind {
-                HostKind::Any => keys = vec![Key::Http],
-                HostKind::Suffix(s) => keys.push(Key::Under(s)),
-                _ => {}
-            }
+        let Scope::Http { host, .. } = self.scope else { return vec![Key::Files] };
+        match &host.kind {
+            HostKind::Any => vec![Key::Http],
+            HostKind::Suffix(s) => [Key::Under(s)].into_iter().chain(self.broader_keys()).collect(),
+            HostKind::Host(_) => self.broader_keys(),
+            // Deny rules also match other spellings of an address.
+            HostKind::Ip(..) => vec![Key::Any, Key::Ips],
         }
-        keys
     }
 
     /// The keys to find this rule by.
@@ -333,9 +343,10 @@ impl<'a> PathRule<'a> {
             HostKind::Any => (Key::Any, None),
             HostKind::Suffix(s) => (Key::Suffix(s), Some(s)),
             HostKind::Host(h) => (Key::Name(h), Some(h)),
-            HostKind::Ip(..) => (Key::Ips, None),
+            HostKind::Ip(ip, len) => (Key::Range((*ip, *len)), None),
         };
-        [Key::Http, own].into_iter().chain(name.into_iter().flat_map(|n| domains_above(n)).map(Key::Under)).collect()
+        let ips = matches!(host.kind, HostKind::Ip(..)).then_some(Key::Ips);
+        [Key::Http, own].into_iter().chain(ips).chain(name.into_iter().flat_map(|n| domains_above(n)).map(Key::Under)).collect()
     }
 }
 
@@ -354,7 +365,9 @@ enum Key<'a> {
     Suffix(&'a str),
     /// Rules for a host name or domain strictly below a domain.
     Under(&'a str),
-    /// Rules for addresses.
+    /// Rules for an address or range.
+    Range((IpAddr, u8)),
+    /// Every rule for an address or range.
     Ips,
 }
 
@@ -418,9 +431,13 @@ impl<'a> PathRules<'a> {
     /// or one for an ancestor of its path. Only the rules whose names before
     /// the first wildcard begin those of `i` may do so.
     fn broader<'b>(&'b self, i: &'b PathRule<'a>, copies: &[usize]) -> Vec<&'b PathRule<'a>> {
+        self.maybe_broader(i).filter(|j| !copies.contains(&j.index) && j.covers(i, true)).collect()
+    }
+
+    /// The rules that the index gives as candidates for [`PathRules::broader`].
+    fn maybe_broader<'b>(&'b self, i: &'b PathRule<'a>) -> impl Iterator<Item = &'b PathRule<'a>> {
         let keys = self.hash_keys(i.broader_keys());
-        let found = keys.iter().flat_map(|&key| i.prefixes.iter().flat_map(move |&h| self.lookup(&self.exact, key, h)));
-        found.filter(|j| !copies.contains(&j.index) && j.covers(i, true)).collect()
+        keys.into_iter().flat_map(move |key| i.prefixes.iter().flat_map(move |&h| self.lookup(&self.exact, key, h)))
     }
 
     /// The rules other than `copies` that decide the other way and may
@@ -601,7 +618,7 @@ mod tests {
         );
         // Narrower ranges deny some or all of a range that a net rule allows.
         assert_eq!(
-            lint("allow net 10.0.0.0/8\ndeny net 10.0.0.1\ndeny net 10.0.0.0/9\ndeny http *"),
+            lint("allow net 10.0.0.0/8\ndeny net 10.0.0.1\ndeny net 10.128.0.0/9\ndeny http *"),
             ["4:11: warning[bypassable-http-deny]: line 1 (`10.0.0.0/8`) lets scripts connect to 10.0.0.0/8:443 and send any request"]
         );
         assert_eq!(lint("allow net 10.0.0.0/8\ndeny net 10.0.0.0/9\ndeny net 10.128.0.0/9\ndeny http *"), Vec::<String>::new());
@@ -651,6 +668,49 @@ mod tests {
             lint("allow http GET a.com/x\ndeny http GET POST a.com/x"),
             ["1:16: warning[overridden-rule]: line 2 (`a.com/x`) takes precedence everywhere this rule applies"]
         );
+    }
+
+    #[test]
+    fn net_rules() {
+        let none = Vec::<String>::new();
+        assert_eq!(
+            lint(
+                "allow net *.example.com\nallow net api.example.com\ndeny net *\ndeny net x.com:443\nallow net 10.0.0.0/8\nallow net 10.1.2.3"
+            ),
+            [
+                "2:11: warning[redundant-rule]: line 1 (`*.example.com`) already allows this",
+                "4:10: warning[redundant-rule]: line 3 (`*`) already denies this",
+                "6:11: warning[redundant-rule]: line 5 (`10.0.0.0/8`) already allows this",
+            ]
+        );
+        assert_eq!(
+            lint("allow net api.example.com\ndeny net api.example.com"),
+            ["1:11: warning[overridden-rule]: line 2 (`api.example.com`) takes precedence everywhere this rule applies"]
+        );
+        // An http rule decides http requests, not connections.
+        assert_eq!(lint("allow http *.example.com\nallow net api.example.com"), none);
+        // A deny between the rules decides some destinations.
+        assert_eq!(lint("allow net *\ndeny net *.example.com\nallow net api.example.com"), none);
+        // `*` does not decide the addresses that host names resolve to.
+        assert_eq!(lint("deny net *\ndeny net 10.0.0.0/8"), none);
+        assert_eq!(lint("allow net *\nallow net 8.8.8.8"), none);
+        // A wildcard allow does not cover internal destinations.
+        assert_eq!(lint("allow net *\nallow net localhost"), none);
+        assert_eq!(
+            lint("allow private-net\nallow net *\nallow net localhost"),
+            ["3:11: warning[redundant-rule]: line 2 (`*`) already allows this"]
+        );
+    }
+
+    /// The index gives as candidates only the ranges that contain an address.
+    #[test]
+    fn address_rules_are_indexed_by_range() {
+        let text: String =
+            (0..1000).map(|i| format!("deny net 10.0.{}.{}\n", i / 256, i % 256)).collect::<String>() + "allow net 10.0.0.0/8";
+        let rules = PolicyFile::parse(&text, Path::new("/base"), None).unwrap().rules;
+        let paths = PathRules::new(rules.rules(), true);
+        let candidates = paths.maybe_broader(paths.get(0).unwrap()).count();
+        assert!(candidates <= 3, "{candidates} candidates");
     }
 
     #[test]

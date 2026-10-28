@@ -10,3 +10,5 @@ cc 7cc4b860de89c3b4e48c7e8715ab282c0700b8e818cca735718bc016db3b6cf5 # shrinks to
 cc 210a87bac1bedf5219187c4e5f56e1d1ca73ff60c51bd29420ef12bef3ab15cd # shrinks to lines = ["deny net 0.0.0.0", "allow net 0.0.0.0/0", "deny http *"], private = false
 cc 41b713389b692092c00bf9c17332b13396eb3a523c6ed5706020186c8606ad6d # shrinks to lines = ["deny net [::1]", "allow net [::]/0", "deny http *"], private = false
 cc 5c403b018621b02389ff289c4ac0caa966e535441e32dbe94d5f47ca30488486 # shrinks to lines = ["allow import /r/k*", "deny /r/k*"], private = false
+cc 8bd0dff25a89f3cee5368570250452e496efe8f4ca2d630ee80eb963d0351ccb # shrinks to lines = ["deny net 8.8.8.8", "deny net *"], private = false
+cc 8c3cac589ed65a6a206cccd4eb5e39972966315792990a794b158a272a803136 # shrinks to lines = ["allow http localhost", "allow net localhost"], private = false
